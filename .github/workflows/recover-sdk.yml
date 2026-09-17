@@ -1,0 +1,23 @@
+name: Inspect staged SDK snapshot
+on:
+  push:
+    branches: [implementation/core-fixed-250]
+    paths: [.github/workflows/recover-sdk.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Archive tracked snapshot without execution
+        run: git archive --format=zip HEAD -o staged-sdk.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: staged-sdk-source
+          path: staged-sdk.zip
+          retention-days: 7
