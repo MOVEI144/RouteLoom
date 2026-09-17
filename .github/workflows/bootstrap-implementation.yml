@@ -1,49 +1,47 @@
-name: Bootstrap CORE_FIXED_250 implementation
-
+name: Recover verified SDK sources
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - implementation/core-fixed-250
-    paths:
-      - '.bootstrap/**'
-      - '.github/workflows/bootstrap-implementation.yml'
-
+    branches: [implementation/core-fixed-250]
+    paths: [.github/workflows/bootstrap-implementation.yml]
 permissions:
   contents: write
-
-concurrency:
-  group: routeloom-bootstrap-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
-  apply:
+  recover:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Checkout implementation branch
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          fetch-depth: 0
-          ref: implementation/core-fixed-250
-
-      - name: Verify and apply implementation payload
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Restore exact original archive, verify before extraction
         shell: bash
         run: |
           set -euo pipefail
-          cat .bootstrap/part*.b64 | base64 --decode > /tmp/routeloom_impl.tar.gz
-          echo '4897355f910f94a548df39907936cb9f0666f4e351594a68a7ff7a10d85e3fe9  /tmp/routeloom_impl.tar.gz' | sha256sum --check --strict
-          tar -xzf /tmp/routeloom_impl.tar.gz
-          rm -rf .bootstrap
-          rm -f .github/workflows/bootstrap-implementation.yml
-
-      - name: Commit generated implementation
-        shell: bash
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, io, shutil, tarfile
+          parts = {p.stem:p.read_text().strip() for p in Path('.bootstrap').glob('*.b64')}
+          parts['part05'] = parts['part05a'] + parts['part05b'] + parts['part05'][6000:]
+          order = ['part00','part01a','part01b','part01c','part02','part03','part04','part05','part06','part07a','part07b','part07c','part08']
+          text = ''.join(parts[k] for k in order)
+          text = text[:53732] + text[53733:]
+          text = text[:66673] + text[66674:]
+          raw = base64.b64decode(text, validate=True)
+          expected = '4897355f910f94a548df39907936cb9f0666f4e351594a68a7ff7a10d85e3fe9'
+          assert hashlib.sha256(raw).hexdigest() == expected, 'archive identity mismatch'
+          with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
+              members = archive.getmembers()
+              assert len(members) == 54
+              assert all(m.isfile() and not Path(m.name).is_absolute() and '..' not in Path(m.name).parts and m.size < 1000000 for m in members)
+              archive.extractall('.', filter='data')
+          shutil.rmtree('.bootstrap')
+          Path('.github/workflows/bootstrap-implementation.yml').unlink()
+          Path('.github/workflows/recover-sdk.yml').unlink(missing_ok=True)
+          PY
+      - name: Commit readable sources
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git diff --cached --check
-          git commit -m 'feat: implement CORE_FIXED_250 prototype'
+          git commit -m 'feat: restore readable CORE_FIXED_250 SDK sources and build workflows'
           git push origin HEAD:implementation/core-fixed-250
