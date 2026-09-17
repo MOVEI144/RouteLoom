@@ -85,3 +85,14 @@ Clock（単調時刻と不確かさ）、Entropy、Storage、Security、ControlA
 基本理由：NO_ROUTE、AUTH_PENDING、AUTH_REJECTED、REVOKED、PEER_CAPACITY、REMOTE_BUSY、LOCAL_NO_MEM、RX_WINDOW_CLOSED、CLOCK_UNCERTAIN、NO_QUORUM、PLAN_NOT_COMMITTED、PLAN_STALE、PLAN_CONFLICT、RF_PROFILE_UNAPPROVED、DRIVER_RESULT_UNKNOWN、DEADLINE_EXPIRED、UNSUPPORTED。
 
 API正常戻りとイベント意味、memory lifetime、取消race、再起動後照会を受入試験に含める。
+
+
+## 9. 改訂1.1の必須オプションと拒否
+
+Send optionsにdeadline_policy、max_message_lifetime、保存class、provider_failover（既定false）、必要なidempotency domainを明記する。元のmessage寿命を再送roundや再起動で再付与しない。30秒を超える通常messageは別profileなしでは拒否する。
+
+APPLIEDのprovider変更は、shared idempotency domainまたは明示duplicate-effect許容がない限り拒否。既送信timeoutは未適用の証拠ではなくINDETERMINATEになり得る。[配送と電源断](crash-time-resources.md)。
+
+Entropy Providerにはinitialize、ready、fill、reseed、failureを要求し、READY以外で鍵生成を拒否する。SDKの初期化で秘密を乱数不足のまま仮作成しない。
+
+capabilityは設計予定／実装／認定／有効を別に返す。[feature manifest](../reference/feature-profiles.json)。公開ABIの数値・struct layoutは未凍結。今回のJSONとPython小モデルはC ABIの代替ではない。

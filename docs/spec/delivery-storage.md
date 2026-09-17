@@ -57,3 +57,12 @@ PC側SQLite等の具体媒体はadapterとし、永続化完了の意味をfsync
 recordには版、長さ、CRCまたは整合性情報、世代、所有者を持たせる。payload保護はSecurity契約に従う。途中recordを無視できるjournal、容量制限、回収手順、書込み失敗時の通知を設ける。
 
 secret storeと通常payload queueは分離する。flash耐久性とCPU停止時間は基板・partition・負荷別に計測する。再起動後にメッセージIDを変えて古いデータを新しいイベントとして復活させない。
+
+
+## 9. 期限・結果・予約の規範補完
+
+[電源断・期限・資源契約](crash-time-resources.md)をこの文書の詳細契約とする。既定はWALL_ELAPSED_VALIDITY、再起動で経過時間不明ならTIME_UNCERTAINとして自動再送を保留する。RUNNING_TIME_ONLYは明示的に別意味を選ぶ実験profileのみで、既定にしない。
+
+max_message_lifetime=30000ms、late_result_ttl=30000ms。保護中dedupをLRUで追い出さず、資源profileに応じて新規受理を断る。時間不明の記録は自動expiryせず容量へ計上し、必要ならadmissionを停止する。
+
+APPLIEDはprovider_failover=falseが既定。別providerへ切り替えることと同じ宛先へのroute切替は別。共有冪等状態がない複数PCへの同一副作用の再適用をSDKだけで防げると扱わない。

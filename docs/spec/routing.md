@@ -57,3 +57,26 @@ v1の即時下り対象はawake状態。sleep時の下りはSTORE_UNTIL_WAKEを�
 ## 9. 実装の完了条件
 
 隣接のprimary/backupポインターを書き換えるだけを完成としない。全仕様の更新・撤回・再起動を状態遷移で示し、シミュレーション、property test、実10hopで検証する。製品用途名、階数、固定parentはCoreに入れない。
+
+
+## 10. 更新と要求の意味を固定する
+
+source keyはNetwork、destination、origin Identity、認証済みorigin generation。candidateとFDは別。FDは同sourceの候補全体で共有し、有限な広告を外へ出す**前**に更新する。新sequenceならその広告metric、同sequenceなら過去と新metricの小さい方。withdraw(infinity)ではFDをinfinityへ戻さない。
+
+初期Babel由来profileの比較はRFC 8966 §3.2.1のuint16 serial arithmeticを使用する。差が32768なら順序不明で採用せず再同期。比較は隣接が広告したmetricとFDで行い、link costを足した値へ取り違えない。link costは有限時正、加算はinfinityへ飽和。infinityは撤回として受理できるがDATA経路として選択できない。
+
+未失効のinfeasible candidateを保持し、全feasible喪失時にSeqNoRequestを出す。これは通常DATAのnext-hop選択とは別。認証・origin権限・TTL・request ID・重複抑止を確認し、必要時にinfeasible candidate経由で要求を運べる。転送者が一つの受信requestを複数相手へ分岐しない。要求元の再試行は別attemptとして候補を変えられる。hop/回数/期限を有限にし、DATA floodへ一般化しない。
+
+三角形S–A=1、S–B=2、A–B=1で、AのFD=(137,1)のままS–Aが切れた場合、Bの(137,2)をDATA用に採用しない。要求はB経由でSへ進め、Sの正規(138,2)広告を得て復旧する。小モデルでこの採用判定を検査するが、全転送graphの証明ではない。
+
+根拠：[RFC 8966 §3.5–3.8](https://www.rfc-editor.org/rfc/rfc8966.html)。
+
+## 11. 再起動・GC・広告量の残るゲート
+
+source/frontierを失った直後にFDをinfinityで新規化して古い広告を採用しない。当該sourceをROUTE_RECOVERY_REQUIREDにして有限広告とDATA選択を止める。再開方式（安全な永続frontier、またはRFCの寿命条件を満たす回復）、origin generation変更、sequence周回、GC timerをG-ROUTEで一貫して凍結する。この停止規則は安全側であり迅速な復旧が完成した証拠ではない。
+
+管理者不在での通常DATAを成立させるため、正常再起動の度に任意の新originをAuthorityへ発行させる方式を無条件に追加しない。origin sequenceを中継が勝手に増加させない。source keyを増やして古いsourceの安全履歴を逃れる実装は禁止。
+
+pairwise controlのfan-out、active origins、entry長、周期、lease、request最大待ちを同時にcapacity manifestへ決める。token待ちでleaseを破る設定はprofile不成立。small実機での成立を100台へ外挿しない。route restart/GC・量子化単位・timerを未確定のままproduction routing capabilityを有効にしない。
+
+sleep proxy／service originは別権限・lease・移管の規約が必要。初期は明示endpoint中心、未対応のsleep downlinkはNOT_CURRENTLY_REACHABLE。API境界は維持し、未設計のproxyを通常routeとして広告しない。

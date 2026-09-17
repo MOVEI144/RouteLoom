@@ -24,7 +24,7 @@ RISC-V 32bit単核、最大160MHz。SoC SRAM400KB、標準board flash4MB。PSRAM
 | D0 | 2 | ADC1、boot strap条件に注意 |
 | D1 | 3 | ADC1 |
 | D2 | 4 | ADC1 |
-| D3 | 5 | ADC2。Wi-Fi利用時の制約を確認 |
+| D3 | 5 | ADC2はC3のhardware不安定性により標準非対応。GPIO利用は別 |
 | D4 | 6 | I2C SDA |
 | D5 | 7 | I2C SCL |
 | D6 | 21 | UART TX |
@@ -50,3 +50,10 @@ WikiのDeep Sleep約44µA、Wi-Fi active約75mAはboard条件付きの参考値�
 4MBにbootloader、partition、NVS、安全な鍵保存、firmware、必要なら二OTA slotとspoolが収まること。通常DATAのためにPSRAMを要求しないこと。認証・100node table・64frame queueでheapが枯渇しないこと。
 
 board-specificな電池測定回路は標準の前提にしない。外付け分圧を追加する場合はADC範囲、入力抵抗、settling、常時消費を計算する。付属アンテナと異なるものを使うなら適合条件を再確認する。
+
+
+## 6. ADC2の固定版注意
+
+ESP-IDF v6.0.3ではC3のADC2 oneshotはhardware制約のため標準非対応。Wi-Fiを止めれば通常利用できるADCとはしない。D3/GPIO5は通常GPIOとして利用可能だが、標準analog例はADC1のD0〜D2へ限定しD0のstrap条件も守る。force-useは実験専用でboard資格へ含めない。
+
+根拠：[固定版ADC Hardware Limitations](https://github.com/espressif/esp-idf/blob/v6.0.3/docs/en/api-reference/peripherals/adc/adc_oneshot.rst)。

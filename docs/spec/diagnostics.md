@@ -44,7 +44,7 @@ snapshotには観測時刻とstale判定が必要。位置・階のラベルは�
 所属: MEMBER（認証・承認済み）
 到達: ISOLATED（指定Gatewayへの経路なし）
 無線: LR250 / home CH6
-直近事象: PEER_REMOVED（旧中継器から応答なし）
+直近事象: LINK_NO_RESPONSE（保存した相手から応答なし）
 復旧: 候補を検証中。探索残予算あり
 最終成功: 時刻・Message ID
 ```
@@ -60,3 +60,8 @@ snapshotには観測時刻とstale判定が必要。位置・階のラベルは�
 ## 7. 受入
 
 traceの期限、未確定probe、cancel、再接続、古いevent混入、subscriber遅延を試験する。成功したpacketのP95だけを出さず未達率と分母を同時表示する。
+
+
+## 8. 成熟度と原因の表示
+
+設計目標、未実装、未認定、実験有効、認定有効を区別する。LINK_NO_RESPONSEは物理撤去の確定ではない。実際にdriver Peerを削除した場合だけPEER_REMOVEDを使う。TIME_UNCERTAIN、ADMISSION_REJECTED、REPLY_CAPACITY_DROP、QUARANTINED_NON_VOTER、CONTROL_BUDGET_UNSATISFIABLEを理由付きで表示する。

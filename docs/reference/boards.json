@@ -1,11 +1,147 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "verified_date": "2026-09-17",
   "qualification": "documentation-only",
   "boards": [
-    {"id": "seeed_xiao_esp32c3", "chip": "esp32c3", "cpu_max_mhz": 160, "flash_mb_published": 4, "psram_mb_published": 0, "gpio_d0_to_d10": [2,3,4,5,6,7,21,20,8,9,10], "usb_dm": 18, "usb_dp": 19, "boot_gpio": 9, "user_led_gpio": null, "wiki": "https://wiki.seeedstudio.com/XIAO_ESP32C3_Getting_Started/", "doc": "docs/hardware/xiao-esp32c3.md", "rf_qualified": false},
-    {"id": "seeed_xiao_esp32s3", "chip": "esp32s3", "cpu_max_mhz": 240, "flash_mb_published": 8, "psram_mb_published": 8, "gpio_d0_to_d10": [1,2,3,4,5,6,43,44,7,8,9], "usb_dm": 19, "usb_dp": 20, "boot_gpio": 0, "user_led_gpio": 21, "wiki": "https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/", "doc": "docs/hardware/xiao-esp32s3.md", "rf_qualified": false},
-    {"id": "seeed_xiao_esp32c5", "chip": "esp32c5", "cpu_max_mhz": 240, "flash_mb_published": 8, "psram_mb_published": 8, "psram_requires_bom_and_runtime_verification": true, "gpio_d0_to_d10": [1,0,25,7,23,24,11,12,8,9,10], "usb_dm": 13, "usb_dp": 14, "boot_gpio": 28, "user_led_gpio": 27, "battery_adc_gpio": 6, "battery_adc_enable_gpio": 26, "wiki": "https://wiki.seeedstudio.com/xiao_esp32c5_getting_started/", "doc": "docs/hardware/xiao-esp32c5.md", "rf_qualified": false},
-    {"id": "seeed_xiao_esp32s3_wio_sx1262_b2b", "chip": "esp32s3", "base_board": "seeed_xiao_esp32s3", "extra_radio": "sx1262", "lora_tx_v1": false, "published_kit_lora_band_mhz": [862,930], "provisional_b2b_gpio": {"sck": 7, "miso": 8, "mosi": 9, "nss": 41, "reset": 42, "busy": 40, "dio1": 39, "rf_sw1": 38, "led": 48, "button": 21}, "requires_revision_and_continuity_test": true, "wiki": "https://wiki.seeedstudio.com/wio_sx1262_with_xiao_esp32s3_kit/", "doc": "docs/hardware/xiao-esp32s3-wio-sx1262.md", "rf_qualified": false}
-  ]
+    {
+      "id": "seeed_xiao_esp32c3",
+      "chip": "esp32c3",
+      "cpu_max_mhz": 160,
+      "flash_mb_published": 4,
+      "psram_mb_published": 0,
+      "gpio_d0_to_d10": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        21,
+        20,
+        8,
+        9,
+        10
+      ],
+      "usb_dm": 18,
+      "usb_dp": 19,
+      "boot_gpio": 9,
+      "user_led_gpio": null,
+      "wiki": "https://wiki.seeedstudio.com/XIAO_ESP32C3_Getting_Started/",
+      "doc": "docs/hardware/xiao-esp32c3.md",
+      "rf_qualified": false,
+      "published_facts_only": true,
+      "qualified_runtime_profile": null,
+      "runtime_generation_allowed": false,
+      "standard_analog_gpio": [
+        2,
+        3,
+        4
+      ],
+      "standard_analog_excluded_gpio": [
+        5
+      ]
+    },
+    {
+      "id": "seeed_xiao_esp32s3",
+      "chip": "esp32s3",
+      "cpu_max_mhz": 240,
+      "flash_mb_published": 8,
+      "psram_mb_published": 8,
+      "gpio_d0_to_d10": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        43,
+        44,
+        7,
+        8,
+        9
+      ],
+      "usb_dm": 19,
+      "usb_dp": 20,
+      "boot_gpio": 0,
+      "user_led_gpio": 21,
+      "wiki": "https://wiki.seeedstudio.com/xiao_esp32s3_getting_started/",
+      "doc": "docs/hardware/xiao-esp32s3.md",
+      "rf_qualified": false,
+      "published_facts_only": true,
+      "qualified_runtime_profile": null,
+      "runtime_generation_allowed": false
+    },
+    {
+      "id": "seeed_xiao_esp32c5",
+      "chip": "esp32c5",
+      "cpu_max_mhz": 240,
+      "flash_mb_published": 8,
+      "psram_mb_published": 8,
+      "psram_requires_bom_and_runtime_verification": true,
+      "gpio_d0_to_d10": [
+        1,
+        0,
+        25,
+        7,
+        23,
+        24,
+        11,
+        12,
+        8,
+        9,
+        10
+      ],
+      "usb_dm": 13,
+      "usb_dp": 14,
+      "boot_gpio": 28,
+      "user_led_gpio": 27,
+      "battery_adc_gpio": 6,
+      "battery_adc_enable_gpio": 26,
+      "wiki": "https://wiki.seeedstudio.com/xiao_esp32c5_getting_started/",
+      "doc": "docs/hardware/xiao-esp32c5.md",
+      "rf_qualified": false,
+      "published_facts_only": true,
+      "qualified_runtime_profile": null,
+      "runtime_generation_allowed": false
+    },
+    {
+      "id": "seeed_xiao_esp32s3_wio_sx1262_b2b",
+      "chip": "esp32s3",
+      "base_board": "seeed_xiao_esp32s3",
+      "extra_radio": "sx1262",
+      "lora_tx_v1": false,
+      "published_kit_lora_band_mhz": [
+        862,
+        930
+      ],
+      "provisional_b2b_gpio": {
+        "sck": 7,
+        "miso": 8,
+        "mosi": 9,
+        "nss": 41,
+        "reset": 42,
+        "busy": 40,
+        "dio1": 39,
+        "rf_sw1": 38,
+        "led": 48,
+        "button": 21
+      },
+      "requires_revision_and_continuity_test": true,
+      "wiki": "https://wiki.seeedstudio.com/wio_sx1262_with_xiao_esp32s3_kit/",
+      "doc": "docs/hardware/xiao-esp32s3-wio-sx1262.md",
+      "rf_qualified": false,
+      "published_facts_only": true,
+      "qualified_runtime_profile": null,
+      "runtime_generation_allowed": false,
+      "exclusive_functions": [
+        [
+          "base_user_led_gpio21",
+          "wio_button_gpio21"
+        ]
+      ],
+      "tcxo_voltage_v": null,
+      "rf_switch_polarity": null
+    }
+  ],
+  "consumer_contract": "published_facts_are_not_runtime_capabilities"
 }

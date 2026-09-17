@@ -1,43 +1,47 @@
 # USB／Serial transport契約
 
-## 1. 原則
+改訂1.1。フレーミング・認可・creditの意味を定義する。最終field offset／暗号Profile／IDLは未凍結。実装済みtransportではない。
 
-USBはradioではなく、hostとGateway間の独立Transport。USBへ接続したという理由でNodeを管理者や同じ業務受信先にしない。CDC/JTAGやUART bridge等の差をByteStream adapterで吸収する。
+## 1. フレームと境界
 
-通信専用streamに人間向けprintf、boot message、JSONログを無条件混在させない。専用portがない場合はフレーマーがboot garbageから再同期できる設計にする。
+COBS＋0 delimiterを基準。decoded最大4096B、body最大はheader・保護・CRCを差し引く。CRCはCRC-32/ISO-HDLC（reflected polynomial 0xEDB88320、init/xorout 0xFFFFFFFF、check("123456789")=0xCBF43926）、little-endian32bitで末尾へ置く。CRC対象はdecoded CRC直前のbytes、CRC自体とCOBSは除く。CRCは認証ではない。
 
-## 2. フレーミング案
+最大符号化長は保守的にn+floor(n/254)+2（delimiter込み）。decoded overlengthを検出しても次delimiterまで有界に捨て、再同期する。部分frameは最後のbyteから1000msで破棄する。実USB伝送速度と相互待ちで達成可能かを認定する。
 
-基準案はCOBS符号化＋0 delimiter、内部にversion、kind、session ID、request ID、body length、body、CRC32を持つ。decoded frameは最大4096B、body上限はheader分を差し引く。CRCは偶発破損検出であり認証ではない。認証は別session契約。
+bootログ混入へ同期復旧は必要だが、通常binary streamへprintfを流さない。4096B USB frameをそのまま250B RFへ送れるとはしない。
 
-このbyte layout/CRC variantはUSB golden vectorとIDLを同時に固定する。文字列改行区切りだけでバイナリDATAを運ばない。4096B USB frameをそのまま250B無線に送れるとみなさない。
+## 2. 認証とsession
 
-## 3. HELLOとsession
+HELLOは未認証。device/host credential、nonces、protocol範囲、選択版、期待Node、Network scope、host principal/roles、boot、capability digestを認証transcriptへ結び付ける。AUTH後の全COMMAND・DATA・CREDITもそのsessionの完全性とreplay保護を必要とする。
 
-host nonce、device nonce、protocol range、Node ID、boot ID、firmware/hash、device capabilities、Network state、最大frame、creditを交換する。ネットワーク認証とは別に、接続先deviceが期待した機器であることを必要なcredentialで確認する。
+firmware hashの自己申告はattestationではない。COM番号やUSB serial文字列を機器本人証明にしない。Networkを切り替える場合も認証scopeと再認可を確認する。未認証のCREDITを送信許可として処理しない。
 
-sessionは再接続ごとに変える。request IDはsession内一意、Message IDはより長い寿命を持つ。古いACKや部分frameを新sessionへ流さない。
+再接続は新sessionで、partial frame、grant、consumed、request tokenを再使用しない。stable Message IDやhost idempotency identityだけを明示的に再照会する。認証方式と最終byte vectorはG-SEC/G-USBに残す。
 
-## 4. メッセージ種別
+## 3. credit：方向・session別の累積許可
 
-HELLO、AUTH、COMMAND、COMMAND_ACCEPTED、COMMAND_RESULT、DATA_TO_MESH、DATA_FROM_MESH、DELIVERY_EVENT、CREDIT、DIAGNOSTIC、KEEPALIVE、ERROR、CLOSEを設ける。
+各方向はuint64の `grant_frames, grant_bytes, consumed_frames, consumed_bytes` を持つ。受信側grantは**累積送信許可の上限**であり「今の空き」「差分＋4」ではない。初期grantは専用buffer容量以内。
 
-COMMAND_ACCEPTEDは機器内受付であり管理commitや最終配送ではない。DATA送信は無線APIと同じdeadline/保存/宛先/receipt意味を持つ。
+認証済み同session通知は各grantのmaxを採用。duplicateや古い小grantは追加許可にならない。送信条件は両軸で `consumed + next_cost <= grant`。新frameの最初のbyteをwriteする前にframe1件と完全なdecoded保護frame長（CRC含む、COBS/delimiter除外）を一度だけ課金する。partial write継続で再課金しない。
 
-## 5. フロー制御
+受信側は予約bufferを解放した分だけgrantを進める。累積grant値が大きいことと同時buffer容量が大きいことは別。grantを取り消して縮小せず、止めたいときは増額を止める。wrap前にsessionをdrainして作り直す。
 
-RX可能frame数とbytesをcreditで通知する。0creditなら新規bulkを送らず、CONTROL/必要ACK用の小さい予約容量を持つ。credit更新を失っても無限停止にならない有限照会・timeoutを設ける。
+破損frameでgrantの正確な会計が復元できない場合、無制限credit返却は行わず認証された同期手順または新sessionに戻す。新sessionで旧の未完送信の結果を成功としない。
 
-短い制御とDATAを、大量ログ・OTAの後ろへ無制限に並べない。partial writeは残り位置から継続し、失敗後に途中bytesを二重に送り込まない。接続が曖昧ならsessionを閉じ、Message IDで再照会する。
+## 4. zero-creditの回復
 
-## 6. エラー回復
+通常DATA/BULKとは別にCONTROL予約を最大4frame×256B設ける。AUTH後のcredit query、grant、keepalive、close等だけ、全相手合算10frame/s burst4以下。CONTROLにCONTROL ACKを無限要求しない。初期AUTHにもさらに有界なpreauth quotaが必要。
 
-不正COBS、CRC不一致、長さ超過、frame途中disconnect、duplicate request、未知version、session不一致を明確に記録する。無制限buffer拡張やsecretのdumpは禁止。
+zero-credit時のqueryは500ms以上の間隔で最大3回、応答が無ければCONNECTION_STALLED。CONTROL予約で通常DATAを迂回しない。
 
-USB切断を無線故障としてrate/channel学習へ混ぜない。PCがログを読まなくてもESP32のradio loopを止めない。
+## 5. 操作identityと結果
 
-## 7. 試験
+USB request IDはsession内一意、Message IDは論理配送の寿命、host idempotency identityは `(principal, network, operation_class, key)`。同identity・同canonical payload hashは既存結果、同identity・異hashはCONFLICT。
 
-1byte刻み分割、複数frame一括、0byte/破損挿入、最大長、古いsession、PC再起動、device再起動、遅いreader、credit欠落を必須にする。host C/Rust双方のgolden vectorを一致させる。
+COMMAND_ACCEPTEDは機器受付だけ。管理確定、PC永続保存、アプリ適用は別event。再接続で信用先が変わったら旧認可を引き継がない。
 
-[Host service](host.md)／[Wireの境界](wire-protocol.md)
+## 6. 検査
+
+CRC既知vector、1byte分割、COBS境界、overlength、部分timeout、grant duplicate／stale／別session、2軸不足、partial write一度課金、zero-credit相互待ちを検査する。小モデルで累積creditが通ってもUSB暗号・実driver相互運用が認定されたことにはならない。
+
+[Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

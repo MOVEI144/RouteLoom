@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+/doc-check-results.json
+/review-contract-results.json
+/contract-test-results.txt
+/routeloom-docs.zip

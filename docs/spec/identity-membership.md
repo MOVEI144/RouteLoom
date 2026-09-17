@@ -51,3 +51,27 @@ Deep Sleep復帰ではvalidな所属・暗号counterを復元できれば、保�
 別Networkへの転用は旧所属終了と新規所属を別操作にする。旧ネットワークのpendingデータを新ネットワークへ書き換えない。機器秘密鍵の継続方針とネットワーク鍵の削除は別。
 
 [管理合意](control-plane.md)／[配送](delivery-storage.md)
+
+
+## 8. 状態別のbootstrap許可（規範）
+
+表はローカル状態で送受信し得る意味型の上限（実装済み機能の一覧ではない）。型が許可されても相手の資格・方向・宛先・transaction・資源条件の検証は省けない。正本は[semantics.json](../../protocol/semantics.json)。
+
+<!-- generated:join:start -->
+| ローカル状態 | 型の上限（条件付き） |
+|---|---|
+| UNPROVISIONED | DISCOVER, OFFER |
+| DISCOVERING | DISCOVER, OFFER |
+| AUTHENTICATING | DISCOVER, OFFER, BOOTSTRAP_AUTH, BOOTSTRAP_CHUNK, BOOTSTRAP_REPLY |
+| AUTHORIZED_PENDING_COMMIT | MEMBERSHIP_QUERY, MEMBERSHIP_RESULT, BOOTSTRAP_REPLY, BOOTSTRAP_CHUNK |
+| MEMBER | DISCOVER, OFFER, BOOTSTRAP_AUTH, BOOTSTRAP_CHUNK, BOOTSTRAP_REPLY, MEMBERSHIP_QUERY, MEMBERSHIP_RESULT, DATA, HOP_ACCEPT, BUSY, END_RECEIPT, APP_RESULT, ROUTE_UPDATE, ROUTE_REQUEST, SEQNO_REQUEST, SERVICE, CONTROL, TIME_SYNC, NEIGHBOR_PROBE, NEIGHBOR_RESULT, ROUTE_WITHDRAW, CONTROL_OBJECT, OBJECT_CHUNK, OBJECT_ACK, CHANNEL_NOTICE, DIAGNOSTIC |
+| REVOKED | 通常通信禁止。明示再provisioningは別経路 |
+<!-- generated:join:end -->
+
+DISCOVER/OFFERは未認証・局所1hop・全body96B以下。UNPROVISIONEDはtrustが未導入なら発見までで止める。AUTHENTICATINGに入る最初のBOOTSTRAP_AUTHはcookieとNetwork制約を先に確認して新規transactionへ結び、以後のCHUNK/REPLYはそのID・相手・宛先・期限内だけ許す。
+
+AUTHENTICATINGのpeer本人性はまだ未確定。ROLE承認を先取りしない。MEMBERSHIP_RESULTは認証済みtranscriptと正当なAuthority決定へ結び付け、保存成功後にのみMEMBERへ移る。単なるOFFERにはその権限がない。
+
+MEMBERのproxyは非memberから通常DATA/ROUTE/SERVICEを受けず、許可されたbootstrap型だけを正規認証先へ転送する。一般MEMBER間のallowlistをpreauth ingressへ適用してはいけない。preauth最大object1024B、同時1、総pool1536B、期限3秒等は[資源profile](resource-profiles.md)に従う。大きいcredentialは別profileの認定まで拒否する。
+
+REVOKEDは通常resume禁止。情報の再取得や再provisionは物理管理または別の承認済み手順とし、未知frameを口実にmembershipを消去しない。

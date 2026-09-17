@@ -57,3 +57,14 @@ RAM／任意の永続spoolを有界にする。message単位で保存方針、�
 ここにあるコマンドやservice名は仕様案であり、cargo installで取得できる配布物ではない。package、RPC IDL、OSごとのinstaller、再起動試験をG-SYSTEMで認定する。
 
 [USB](usb-protocol.md)／[CLI・診断](diagnostics.md)／[配送](delivery-storage.md)
+
+
+## 8. idempotency・受理・client上限
+
+operation identityは `(authenticated principal, Network, operation class, idempotency key)`。同identity異payload hashはCONFLICT。同じ操作の再送は保存済み状態を返し、別Networkや別principalを同じkey文字列で混同しない。hashは意味をcanonical化した要求（宛先・期限方針・保存・権限scope含む）から作る。
+
+初期host保持契約は完了結果24時間（最大4096件／32MiB）、未確定操作は自動再実行せずINDETERMINATEとして保持する。容量不足なら新操作を拒否し、保護中entryを追い出さない。保持を終えた古いkeyの再送を新操作と誤認しないよう、principal単位の受付epochを用いる。expiry前に照会し、epoch終了後の旧keyはIDEMPOTENCY_WINDOW_EXPIRED。新epochでの新操作は明示的な再発行であり自動retryではない。
+
+client初期上限：同時operation8、subscription4、各subscriber queue128eventsかつ256KiB、1event8KiB以下。遅いreaderへcursor gapを通知し、別clientや無線を停止しない。quotaはprincipalとglobal（32clients、8MiB subscriber総量）の両方を検査する。
+
+HostAuthのtranscript／COMMAND保護は[USB](usb-protocol.md)に従う。DATA受領の意味と永続spool commitを分け、requestを記録せず副作用を先に実行しない。

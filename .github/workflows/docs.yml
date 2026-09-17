@@ -17,6 +17,15 @@ jobs:
           persist-credentials: false
       - name: Check documentation and parameters
         run: python3 tools/check_docs.py --report doc-check-results.json
+      - name: Check generated reference tables
+        run: python3 tools/sync_reference_tables.py --check
+      - name: Check selected design contracts
+        run: python3 tools/check_review_contracts.py --report review-contract-results.json
+      - name: Test small contract models and negative documentation mutations
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -v 2>&1 | tee contract-test-results.txt
       - name: Create documentation snapshot
         run: |
           python3 - <<'PY'
@@ -28,13 +37,17 @@ jobs:
               for name in paths:
                   if name and Path(name).is_file():
                       archive.write(name, name)
-              archive.write('doc-check-results.json', 'doc-check-results.json')
+              for name in ('doc-check-results.json', 'review-contract-results.json', 'contract-test-results.txt'):
+                  archive.write(name, name)
           PY
       - name: Upload validation and snapshot
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: routeloom-documentation
           path: |
             doc-check-results.json
+            review-contract-results.json
+            contract-test-results.txt
             routeloom-docs.zip
-          retention-days: 7
+          retention-days: 30

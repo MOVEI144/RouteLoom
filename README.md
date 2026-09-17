@@ -17,9 +17,11 @@
 
 ## 初期対象
 
-ESP32-C3 / ESP32-S3 / ESP32-C5、2.4 GHz ESP-NOW、Wi-Fi LR 250/500 kbps。初期通信・発見・復旧はLR250、確認済みリンクのみLR500を使用します。全LR250固定も正式な比較・運用プロファイルです。LoRaは将来拡張であり、現時点の送受信実装には含めません。
+ESP32-C3 / ESP32-S3 / ESP32-C5、2.4 GHz ESP-NOW、Wi-Fi LR 250/500 kbps。最初の実装基準は固定channel／LR250です。LR500適応、管理HA、自動channel移行等は設計を維持し、別の機能認定を経て有効化します。LoRaは将来拡張であり、現時点の送受信実装には含めません。
 
 組み込み側はESP-IDF / C++とC API、PC側はRustサービスとCLI/TUIを設計対象にします。仕様バージョンとソフトウェアのリリースバージョンは別に管理します。
+
+[レビュー反映と残るゲート](docs/reviews/2026-09-17-response.md)／[実装プロファイル](docs/spec/release-profiles.md)。
 
 ## ライセンス
 

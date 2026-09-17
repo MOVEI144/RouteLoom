@@ -29,9 +29,9 @@ remaining deadline、hop、前回送信者などは中継で変わり得る。en
 
 ## 4. フレーム種類
 
-DISCOVER/OFFER、BOOTSTRAP_AUTH、MEMBERSHIP_RESULT、NEIGHBOR_PROBE/RESULT、ROUTE_UPDATE/WITHDRAW/REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、CONTROL_OBJECT、OBJECT_CHUNK/ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICを別typeにする。
+DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子はsemantics.jsonを参照。numeric type IDは未凍結。
 
-発見frameだけが未所属時に許される。未認証frameの権限と長さは限定する。HOP_ACCEPTはそれ自体を再帰ACKしない。END_RECEIPTは新アプリmessageとしてreceiptを要求しない。
+未所属ではDISCOVER/OFFERと、[参加状態別allowlist](identity-membership.md)に記載した当該transactionのbootstrapだけを許す。認証や承認を終える前のDATA／route／serviceは拒否する。bootstrapを発見と同義にしない。HOP_ACCEPTはそれ自体を再帰ACKしない。END_RECEIPTは新アプリmessageとしてreceiptを要求しない。
 
 ## 5. エンコーディング
 
@@ -41,7 +41,7 @@ C/C++ packed structのmemcpyをwire ABIにしない。固定幅、network byte o
 
 ## 6. 管理object
 
-通常DATAは自動fragmentしない。長いJoin/credential/control/configのみ最大2048B、同時4object、10秒組立timeout。preauth枠はさらに制限する。token、owner、total length、offset、chunk length、object digest、期限を検証する。
+通常DATAは自動fragmentしない。認証済みcredential/control/configの上限は最大2048B、同時4object、10秒組立timeout。役割別profileはその下位の同時枠を選ぶ。未所属Joinのbootstrapは別枠で最大1024B、同時1、3秒まで。token、owner、total length、offset、chunk length、object digest、期限を検証する。
 
 範囲外、重複、順不同、異なるpayloadの同offset、古いsessionを拒否または規定通り扱う。2048Bより大きいcertificate/log/OTAは、一つの無制限objectへ拡大せず、認証したmanifest＋bounded chunk streamへ分ける。snapshot/commit証拠もサイズ設計を行う。
 
@@ -52,3 +52,12 @@ protocol majorが合わなければ参加拒否。minor featureは双方capabili
 完全なgolden vectorには正常DATA128B、最短ACK、最大管理object、未知version、改ざん、再送round、別hopでの外側暗号、再起動を含める。
 
 根拠：[ESP-NOW frame形式](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/network/esp_now.html)。暗号契約は[Security](security.md)、USBは[別文書](usb-protocol.md)。
+
+
+## 8. 凍結しなくても守る接続契約
+
+[semantics.json](../../protocol/semantics.json)が状態許可と保護範囲を定義する。numeric type IDやfield幅はnullのままにし、意味の規約と公開互換Wireを混同しない。
+
+end不変部はNetwork、origin、Message ID、固定終端、配送契約、元の最大寿命、payload。hop可変部は前後hop、残hop、残forwarding予算、round、hop crypto counter。可変fieldをend AADへ入れて中継で破壊しない。remaining予算をhop側だけで保護する場合、侵害Relayによる虚偽の延長は終端の独立した時刻／認可検査がない限り完全には防げない。
+
+Provider変更時は終端contextとdestination bindingを再検証する。Message ID不変でも新しいAADを同じnonceで再暗号化しない。暗号化済みの全bodyが250B以下である実encoder試験はG-WIRE/G-SECとして残す。122Bは実証済み長ではなく予算。

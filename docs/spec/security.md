@@ -2,7 +2,7 @@
 
 ## 1. 脅威モデル
 
-対象：部外者の盗聴・改ざん・偽装・replay・偽Join・無制限資源消費、通信分断、通常機器の再起動／保存中断。管理多数全員の悪意やRF妨害の完全排除までは保証しない。
+対象：部外者の盗聴・改ざん・偽装・replay・偽Join・無制限資源消費、通信分断、通常機器の再起動／保存中断。合意のvoterは非悪意のcrash-recoveryを前提とし、任意のByzantine voterに対する合意安全性やRF妨害の排除は保証しない。
 
 中継器の侵害を考慮し、近隣認証だけで最終送信元の本人性を代用しない。承認済みRelayがpacketを破棄することまで暗号で防げない。防げるもの、検出するもの、運用で扱うものを分ける。
 
@@ -50,3 +50,20 @@ trust anchor、device private key、membership証拠、session secretを異な�
 ## 8. 必須試験
 
 golden vector、相互認証失敗、他Network、署名変更、bitflip、重複、counter予約中電源断、鍵更新中Sleep、失効端末、偽高term、preauth flood、旧USBsession、暗号context容量境界を試験する。結果が出るまでsecure-readyを広告しない。
+
+
+## 9. Entropyの起動契約
+
+状態はUNINITIALIZED／SEEDING／READY／FAILED。鍵生成、session作成、cookie秘密の更新はREADY前に拒否する。READYは「hardware RNGが常時true random」の意味ではなく、認定したEntropy/DRBG条件が今有効であること。
+
+RFを開始していないprovisioningでは、chip別手順で内部entropy源とADC/RF利用を排他し、十分なentropyを認定DRBGへseedする。内部源を停止してからADC/RFへ所有権を戻す。ADC計測でentropy条件が崩れる処理を同時実行しない。seed/reseed条件は選ぶProviderに従い、古いDRBG RAM像をboot越しに再利用しない。
+
+固定版根拠：[IDF v6.0.3 RNG](https://github.com/espressif/esp-idf/blob/v6.0.3/docs/en/api-reference/system/random.rst)。この条件確認は実chipの乱数品質認定ではない。RF未承認を乱数取得のために無断TXで回避しない。
+
+## 10. 発行者の認可と暗号の対象
+
+hop AEADは直近の相手を認証するだけ。route origin／proxy／service provider／authorityは別の役割許可を必要とする。originのIdentity・世代・sequenceはoriginまたは正規Authorityの検証可能な証拠に結び、転送者が勝手に更新できない。可変metricはhop保護と分け、侵害Relayの虚偽metricやdropの完全防止は保証外とする。
+
+基準線の認証済み制御配布はpairwise unicast。group共通MACを個々のorigin本人確認にしない。各fan-out送信も予算へ計上する。署名形式・証拠のキャッシュ・最終長はG-SEC/G-ROUTEに残し、未認定のorigin証拠から新sourceを作らない。
+
+nonce予約、replay損失、store破損時の状態は[電源断契約](crash-time-resources.md)に従う。CRCやNVS世代は過去の完全なsnapshotの悪意ある復元を単独で検出できない。物理rollback耐性を要求するprofileは別の信頼できる単調状態／外部再認証が必要。

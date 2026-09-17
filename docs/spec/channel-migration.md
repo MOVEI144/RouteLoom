@@ -1,5 +1,7 @@
 # 干渉調査と協調チャンネル移行
 
+基準線ではauto migration=false。以下は設計を維持する拡張の必須契約で、利用可能な実装の宣言ではない。
+
 ## 1. 基本契約
 
 一つの論理ネットワークは定常時一つのhome channelを持つ。v1は頻繁なホッピングや常用multi-channel meshではない。
@@ -83,3 +85,12 @@ COMMITを失った端末は旧channelに残り得る。保存候補とLR250発�
 覆域、独立RF、PC間の明示的な安全経路、宛先条件を満たす場合だけ旧新channel救済の拡張に使える。v1成立条件ではない。二つのGatewayがあるだけで上階孤立群を救えるとはしない。恒常multi-domain forwardingはv1対象外。
 
 [無線規約](radio.md)／[管理合意](control-plane.md)／[試験](acceptance.md)
+
+
+## 11. 自動有効化を阻止する条件
+
+管理到達を支えるcutsetとrequired participantsを別に検証する。COMMITの配送欠落でvoter間を結ぶRelayだけが旧CHへ残る反例を必須にする。quorumの安全性は、そのquorumが再び通信できることの証明ではない。
+
+自動移行の認定には、事前planにrecovery担当・訪問CH・時刻/期間・反復上限・home待機役・中止条件を含め、clock誤差、有限loss、覆域の仮定を明示する。仮定外はRECOVERY_REQUIREDと物理保守へ移り、独断rollbackや「必ず再結合」を約束しない。
+
+手動操作でも同じ安全契約が要る。operator確認ボタンが未設計のrendezvousを補うとはしない。基準線の固定CH変更は、管理された停止と配備設定更新として扱う。

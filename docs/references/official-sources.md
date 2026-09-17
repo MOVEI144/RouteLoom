@@ -60,3 +60,10 @@ stable/latestは資料確認の入口で、再現buildのpinではない。リ�
 [Seeed one_channel_hub](https://github.com/Seeed-Studio/one_channel_hub)はSemtech LoRaWAN one-channel hubのESP-IDF実装例。確認時masterで、READMEはESP-IDF5.2.1を試験基盤として記載。RouteLoomのv6.0.3をその例に合わせて変更しない。
 
 [Semtech SX1262比較](https://www.semtech.com/products/wireless-rf/end-nodes-ics)と[Semtech driver](https://github.com/Lora-net/sx126x_driver)は将来LoRa追加時の入口。現時点でそのRF試験を行ったという意味ではない。
+
+
+## 改訂1.1で確認する固定版差異
+
+[Entropy起動条件](https://github.com/espressif/esp-idf/blob/v6.0.3/docs/en/api-reference/system/random.rst)、[C3 ADC2 oneshot](https://github.com/espressif/esp-idf/blob/v6.0.3/docs/en/api-reference/peripherals/adc/adc_oneshot.rst)、[NVS保存・初期化](https://github.com/espressif/esp-idf/blob/v6.0.3/docs/en/api-reference/storage/nvs_flash.rst)を参照する。
+
+ESP-NOW native encrypted Peerについて、固定headerの定数6とKconfig/本文の0〜17・default7には表記差がある。headerだけから実driver上限を宣言しない。sdkconfig＋実add_peer境界をnative暗号profileの認定対象にする。基準線encrypt=false＋SDK AEADを、この差だけで不成立と扱わない。

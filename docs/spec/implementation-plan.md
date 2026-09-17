@@ -11,7 +11,7 @@ Join・暗号・Sleep・複数Gatewayを後付け不能な構造にしない。�
 | P0 契約とfixture | 型・C API・wire/USB vector・fake providers | 長さ・所有権・失敗意味・暗号review |
 | P1 Radio基礎 | Owner、LR250、TX/RX、Peer、diagnostics | 実機T01〜04 |
 | P2 安全な参加 | membership、鍵、proxy Join、resume | T05/06、電源断、preauth負荷 |
-| P3 配送とMesh | feasible routing、hop/end receipt、複数出口 | T07〜10、T19 |
+| P3 配送とMesh | SingleAuthority、feasible routing、hop/end receipt、明示出口 | T07〜10。HA用T19を基準線の依存にしない |
 | P4 Host API | USBdaemon、CLI、TUI、spool | T16/20 |
 | P5 適応・干渉 | LR500試験、fair queue、scout、migration | T11〜15 |
 | P6 電力・管理 | sleep tickets、remote config、bulk/OTA | T17/18、全既存gate再試験 |
@@ -47,3 +47,8 @@ maintainerが選択するまでLICENSEを推測して追加しない。既存試
 ## 6. 変更管理
 
 protocol major、C ABI、Host API、board profile、radio defaults、security profileの版を別にする。互換性を変えるPRでは[判断記録](decisions.md)・[STATUS](../STATUS.md)・test matrixを同時更新する。
+
+
+## 7. 改訂1.1の進め方
+
+[実装プロファイル](release-profiles.md)が公開段階の正本。P5適応／移行、P6 mesh OTA、HA専用T19は別機能ゲートで、基準線の実装開始を阻止しない。P0にはSingleAuthorityの認可境界とcrash契約を含める。Wireの完全凍結待ちでradio隔離試作を止めないが、未凍結のままinterop-readyとも呼ばない。

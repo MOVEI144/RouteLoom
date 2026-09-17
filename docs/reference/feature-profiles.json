@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "spec_revision": "1.1",
+  "wire_frozen": false,
+  "initial_profile": "CORE_FIXED_250",
+  "implementation_status": "not-implemented",
+  "initial_control": "SINGLE_AUTHORITY",
+  "first_hil_targets": [
+    "esp32c3",
+    "esp32s3"
+  ],
+  "continuing_targets": [
+    "esp32c3",
+    "esp32s3",
+    "esp32c5"
+  ],
+  "features": {
+    "secure_unicast": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "multi_hop_repair": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "deep_sleep_resume": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "host_cli": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "explicit_gateway": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "small_remote_config": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "adaptive_lr500": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "automatic_channel_migration": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "quorum_authority": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "mesh_ota": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "service_provider_failover": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "tui": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    },
+    "lora_tx": {
+      "design_target": true,
+      "initial_target": false,
+      "implemented": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": null
+    }
+  }
+}

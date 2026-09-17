@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "status": "semantic-contract-not-wire-abi",
+  "wire_frozen": false,
+  "frame_numeric_ids": null,
+  "crypto_suite": null,
+  "membership_allowlist": {
+    "UNPROVISIONED": [
+      "DISCOVER",
+      "OFFER"
+    ],
+    "DISCOVERING": [
+      "DISCOVER",
+      "OFFER"
+    ],
+    "AUTHENTICATING": [
+      "DISCOVER",
+      "OFFER",
+      "BOOTSTRAP_AUTH",
+      "BOOTSTRAP_CHUNK",
+      "BOOTSTRAP_REPLY"
+    ],
+    "AUTHORIZED_PENDING_COMMIT": [
+      "MEMBERSHIP_QUERY",
+      "MEMBERSHIP_RESULT",
+      "BOOTSTRAP_REPLY",
+      "BOOTSTRAP_CHUNK"
+    ],
+    "MEMBER": [
+      "DISCOVER",
+      "OFFER",
+      "BOOTSTRAP_AUTH",
+      "BOOTSTRAP_CHUNK",
+      "BOOTSTRAP_REPLY",
+      "MEMBERSHIP_QUERY",
+      "MEMBERSHIP_RESULT",
+      "DATA",
+      "HOP_ACCEPT",
+      "BUSY",
+      "END_RECEIPT",
+      "APP_RESULT",
+      "ROUTE_UPDATE",
+      "ROUTE_REQUEST",
+      "SEQNO_REQUEST",
+      "SERVICE",
+      "CONTROL",
+      "TIME_SYNC",
+      "NEIGHBOR_PROBE",
+      "NEIGHBOR_RESULT",
+      "ROUTE_WITHDRAW",
+      "CONTROL_OBJECT",
+      "OBJECT_CHUNK",
+      "OBJECT_ACK",
+      "CHANNEL_NOTICE",
+      "DIAGNOSTIC"
+    ],
+    "REVOKED": []
+  },
+  "bootstrap_requires_transaction": [
+    "BOOTSTRAP_AUTH",
+    "BOOTSTRAP_CHUNK",
+    "BOOTSTRAP_REPLY",
+    "MEMBERSHIP_QUERY",
+    "MEMBERSHIP_RESULT"
+  ],
+  "member_only": [
+    "DATA",
+    "ROUTE_UPDATE",
+    "ROUTE_REQUEST",
+    "SEQNO_REQUEST",
+    "SERVICE",
+    "CONTROL",
+    "TIME_SYNC",
+    "HOP_ACCEPT",
+    "END_RECEIPT",
+    "APP_RESULT",
+    "BUSY",
+    "NEIGHBOR_PROBE",
+    "NEIGHBOR_RESULT",
+    "ROUTE_WITHDRAW",
+    "CONTROL_OBJECT",
+    "OBJECT_CHUNK",
+    "OBJECT_ACK",
+    "CHANNEL_NOTICE",
+    "DIAGNOSTIC"
+  ],
+  "member_traffic_requires_roles_and_crypto": true,
+  "end_immutable": [
+    "network",
+    "origin_identity",
+    "origin_message_session",
+    "message_sequence",
+    "bound_destination",
+    "delivery_contract",
+    "original_lifetime",
+    "payload"
+  ],
+  "hop_mutable": [
+    "previous_hop",
+    "next_hop",
+    "hop_remaining",
+    "remaining_forwarding_budget",
+    "delivery_round",
+    "hop_crypto_counter"
+  ],
+  "max_espnow_body_bytes": 250,
+  "max_normal_payload_bytes": 128,
+  "counter_independent_of_message_id": true,
+  "deadline_restart_default": "TIME_UNCERTAIN_HOLD",
+  "applied_provider_failover_default": false,
+  "usb_credit": "session-direction-cumulative-grants",
+  "usb_crc": "CRC-32/ISO-HDLC",
+  "usb_crc_check_hex": "CBF43926",
+  "host_idempotency_key": [
+    "principal",
+    "network",
+    "operation_class",
+    "key"
+  ],
+  "open_gates": [
+    "wire_byte_layout",
+    "mandatory_security_profile_and_vectors",
+    "routing_restart_gc_profile",
+    "quorum_proof_and_snapshot",
+    "migration_rendezvous_liveness"
+  ]
+}

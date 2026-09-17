@@ -1,0 +1,307 @@
+{
+  "spec_revision": "1.1",
+  "reviewed_commit": "6ecee1bf74b49696701716433d77b7521c580fcb",
+  "review_sha256": "3f0f6a48d8e0b2ba5027ca1c03f447081f9f15a10e86aa80ba20a1bec9c8e56e",
+  "findings": [
+    {
+      "id": 1,
+      "disposition": "採用・完全凍結は保留",
+      "action": "意味・保護境界・状態を明文化。仮の暗号byte列で完成扱いしない",
+      "docs": [
+        "docs/spec/wire-protocol.md"
+      ],
+      "remaining_gate": "G-WIRE/G-SEC：encoderと暗号vector",
+      "implementation_verified": false
+    },
+    {
+      "id": 2,
+      "disposition": "採用",
+      "action": "Join状態別allowlist、pending結果fragment、proxyのpreauth入口を規定",
+      "docs": [
+        "docs/spec/identity-membership.md"
+      ],
+      "remaining_gate": "実Join・fragment・認可の相互運用",
+      "implementation_verified": false
+    },
+    {
+      "id": 3,
+      "disposition": "採用・範囲を限定",
+      "action": "FD更新、serial比較、専用SeqNoRequest、再起動時の安全停止を追加",
+      "docs": [
+        "docs/spec/routing.md"
+      ],
+      "remaining_gate": "G-ROUTE：GC/restart/timerと全graph検証",
+      "implementation_verified": false
+    },
+    {
+      "id": 4,
+      "disposition": "採用・機能を分離",
+      "action": "SingleAuthority基準線とquorum proof/snapshotの未完了を分離",
+      "docs": [
+        "docs/spec/control-plane.md"
+      ],
+      "remaining_gate": "G-CONTROL：証拠形式と信頼連続性",
+      "implementation_verified": false
+    },
+    {
+      "id": 5,
+      "disposition": "採用",
+      "action": "予約commit前使用禁止、cold boot時の区間破棄、AAD変更とcounter分離",
+      "docs": [
+        "docs/spec/crash-time-resources.md"
+      ],
+      "remaining_gate": "実Storage/暗号のwrite-cut試験",
+      "implementation_verified": false
+    },
+    {
+      "id": 6,
+      "disposition": "採用",
+      "action": "Entropy READY、ADC/RF排他とDRBG起動契約",
+      "docs": [
+        "docs/spec/security.md"
+      ],
+      "remaining_gate": "chip別entropyとProvider認定",
+      "implementation_verified": false
+    },
+    {
+      "id": 7,
+      "disposition": "採用",
+      "action": "hop認証とorigin/service発行権を分離。pairwise制御基準",
+      "docs": [
+        "docs/spec/security.md"
+      ],
+      "remaining_gate": "証拠形式・失効・制御fan-out予算",
+      "implementation_verified": false
+    },
+    {
+      "id": 8,
+      "disposition": "採用",
+      "action": "破損voterは非投票隔離、自動erase再投票禁止",
+      "docs": [
+        "docs/spec/control-plane.md"
+      ],
+      "remaining_gate": "HA store破損・snapshot回復",
+      "implementation_verified": false
+    },
+    {
+      "id": 9,
+      "disposition": "採用",
+      "action": "停電経過不明はTIME_UNCERTAIN、残時間を再付与しない",
+      "docs": [
+        "docs/spec/crash-time-resources.md"
+      ],
+      "remaining_gate": "trusted clock/Storage実装",
+      "implementation_verified": false
+    },
+    {
+      "id": 10,
+      "disposition": "採用",
+      "action": "最大寿命・receipt TTL・dedup予算、dispatch前保存と結果不明",
+      "docs": [
+        "docs/spec/crash-time-resources.md"
+      ],
+      "remaining_gate": "終端と実アプリのcrash試験",
+      "implementation_verified": false
+    },
+    {
+      "id": 11,
+      "disposition": "採用",
+      "action": "APPLIED provider failover既定OFF、effect冪等scope要求",
+      "docs": [
+        "docs/spec/sdk-api.md"
+      ],
+      "remaining_gate": "複数PCの実idempotency契約",
+      "implementation_verified": false
+    },
+    {
+      "id": 12,
+      "disposition": "採用・目標を維持",
+      "action": "自動移行OFFを基準線にし、管理cutset/rendezvous認定を要求",
+      "docs": [
+        "docs/spec/channel-migration.md"
+      ],
+      "remaining_gate": "単一radioの条件付きliveness",
+      "implementation_verified": false
+    },
+    {
+      "id": 13,
+      "disposition": "採用・計測待ちを明示",
+      "action": "全網予算を未実証包絡へ整理、class課金とtimer共設計を要求",
+      "docs": [
+        "docs/spec/radio.md"
+      ],
+      "remaining_gate": "実entry長・周期・airtime capacity manifest",
+      "implementation_verified": false
+    },
+    {
+      "id": 14,
+      "disposition": "採用・適応は別認定",
+      "action": "OFFER上限、requester/global制限、非予約slot、単独/一斉SLOを分離",
+      "docs": [
+        "docs/spec/radio.md"
+      ],
+      "remaining_gate": "hidden-terminal/密度別RF試験",
+      "implementation_verified": false
+    },
+    {
+      "id": 15,
+      "disposition": "採用",
+      "action": "役割別予算と統計pool、未実測null、C3 voter無効",
+      "docs": [
+        "docs/spec/resource-profiles.md"
+      ],
+      "remaining_gate": "link-map・heap/stack peak",
+      "implementation_verified": false
+    },
+    {
+      "id": 16,
+      "disposition": "採用",
+      "action": "frame/dedup/transaction/reply Peer/ACKの一括予約",
+      "docs": [
+        "docs/spec/crash-time-resources.md"
+      ],
+      "remaining_gate": "driver Peer churn実機試験",
+      "implementation_verified": false
+    },
+    {
+      "id": 17,
+      "disposition": "採用",
+      "action": "preauth global枠・bytes・CPU・演算rate・期限を具体化",
+      "docs": [
+        "docs/spec/resource-profiles.md"
+      ],
+      "remaining_gate": "実crypto最大時間とRF飽和",
+      "implementation_verified": false
+    },
+    {
+      "id": 18,
+      "disposition": "採用",
+      "action": "USB transcript要件、principal/Network/class/key、client上限",
+      "docs": [
+        "docs/spec/host.md"
+      ],
+      "remaining_gate": "HostAuth暗号・RPC IDL・実相互運用",
+      "implementation_verified": false
+    },
+    {
+      "id": 19,
+      "disposition": "採用",
+      "action": "session方向別累積credit、二軸課金、partial write/重複規約",
+      "docs": [
+        "docs/spec/usb-protocol.md"
+      ],
+      "remaining_gate": "実COBS/認証/USB分割trace",
+      "implementation_verified": false
+    },
+    {
+      "id": 20,
+      "disposition": "採用",
+      "action": "imageとstorage schema互換、pending不可逆変更禁止",
+      "docs": [
+        "docs/spec/remote-management.md"
+      ],
+      "remaining_gate": "実OTAとcounter/epoch rollback試験",
+      "implementation_verified": false
+    },
+    {
+      "id": 21,
+      "disposition": "採用・OTA有効化ゲート",
+      "action": "保存maintenance計画、停止排他と後継への引継ぎ",
+      "docs": [
+        "docs/spec/remote-management.md"
+      ],
+      "remaining_gate": "動的topology下の停止計画実装",
+      "implementation_verified": false
+    },
+    {
+      "id": 22,
+      "disposition": "採用・対象削除ではない",
+      "action": "基準線と将来機能を分け、C5/複数出口/10hop目標維持",
+      "docs": [
+        "docs/spec/release-profiles.md"
+      ],
+      "remaining_gate": "段階別実装・認定",
+      "implementation_verified": false
+    },
+    {
+      "id": 23,
+      "disposition": "採用・無根拠な目標変更なし",
+      "action": "初回jitterとretryを分離。仕事量とcritical pathを区別",
+      "docs": [
+        "docs/spec/acceptance.md"
+      ],
+      "remaining_gate": "size/rate別実P95/P99",
+      "implementation_verified": false
+    },
+    {
+      "id": 24,
+      "disposition": "採用",
+      "action": "近い時間の対照試験、標本期限、固定250比較",
+      "docs": [
+        "docs/spec/radio.md"
+      ],
+      "remaining_gate": "適応のenergy/配送改善実測",
+      "implementation_verified": false
+    },
+    {
+      "id": 25,
+      "disposition": "採用",
+      "action": "warm/cold/new-peer/channel/key復帰、NVS履歴fixtureを分離",
+      "docs": [
+        "docs/spec/power.md"
+      ],
+      "remaining_gate": "起動区間・battery-side測定",
+      "implementation_verified": false
+    },
+    {
+      "id": 26,
+      "disposition": "採用",
+      "action": "C3 GPIO5は通常GPIOとADC2標準非対応を区別",
+      "docs": [
+        "docs/hardware/xiao-esp32c3.md"
+      ],
+      "remaining_gate": "ADC1標準例と実board検証",
+      "implementation_verified": false
+    },
+    {
+      "id": 27,
+      "disposition": "採用",
+      "action": "publishedとruntime資格を分離、GPIO21排他と不明radio設定無効",
+      "docs": [
+        "docs/spec/resource-profiles.md"
+      ],
+      "remaining_gate": "購入品BOM/導通/認定artifact",
+      "implementation_verified": false
+    },
+    {
+      "id": 28,
+      "disposition": "採用・基準線の阻止条件ではない",
+      "action": "header6とKconfig等の差を記録、native追加時の境界試験",
+      "docs": [
+        "docs/references/official-sources.md"
+      ],
+      "remaining_gate": "optional native CCMP実境界",
+      "implementation_verified": false
+    },
+    {
+      "id": 29,
+      "disposition": "採用",
+      "action": "生成表照合、固定SHA、元の3mutationを含む負例CI",
+      "docs": [
+        "docs/reviews/2026-09-17-response.md"
+      ],
+      "remaining_gate": "実装/HILの資格は別",
+      "implementation_verified": false
+    },
+    {
+      "id": 30,
+      "disposition": "maintainer判断を維持",
+      "action": "ライセンスを勝手に選ばず、依存と再配布の確認を維持",
+      "docs": [
+        "docs/spec/implementation-plan.md"
+      ],
+      "remaining_gate": "G-LICENSE：利用条件の選定",
+      "implementation_verified": false
+    }
+  ]
+}

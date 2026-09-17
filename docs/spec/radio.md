@@ -1,6 +1,6 @@
 # 無線サブシステム：ESP-NOW / Wi-Fi LR
 
-基準仕様1.0、2026-09-17。実装契約であり実機認定ではない。[初期値JSON](../reference/radio-defaults.json)と同時に版管理する。
+基準仕様1.1、2026-09-17。実装契約であり実機認定ではない。[初期値JSON](../reference/radio-defaults.json)と同時に版管理する。
 
 ## 1. 固定する範囲
 
@@ -11,9 +11,9 @@
 | 通信 | STA未接続のESP-NOW、2.4GHz、Wi-Fi LRのみ |
 | 共通制御 | LR250。発見、Join、復旧、経路広告、HOP_ACCEPT、管理計画 |
 | データ | 初期LR250。検証済み方向・長さ区分に限りLR500 |
-| プロファイル | LR_ONLY_ADAPTIVE既定、LR250_FIXEDも正式対応 |
+| プロファイル | 基準線LR250_FIXED。LR_ONLY_ADAPTIVEは別認定対象 |
 | 送信しないもの | 通常1Mbps/OFDMへのfallback、BLE、5GHz、AP接続、SoftAP |
-| channel | 定常時一つ。自動移行は合意・準備・実機認定の条件付きでON |
+| channel | 定常時一つ。基準線は自動移行OFF。将来profileは合意・復旧・実機認定後に有効化 |
 | 電力 | 承認済み固定上限。自動出力削減はv1でOFF |
 | LoRa | 未実装。Wi-Fi LRと別方式 |
 
@@ -108,7 +108,7 @@ Deep Sleep型の既定活動予算は2000ms、探索最大2周。ただし停止
 
 同一近隣のSDK試行は初回込み2回、送信元のE2E roundは初回込み3回。deadlineと活動予算が先に尽きれば打ち切る。別親・別rateへ変えても同じ仕事の予算を初期化しない。
 
-RTO初期60ms、適応20〜250ms。SDK jitterは通常0〜20ms、混雑20〜100ms、次E2E round50〜200ms。E2E RTOは経路・往復・下位試行とqueue予算を含める。下位が正常に再試行中なのに上位が同じ仕事を大量投入しない。
+RTO初期60ms、適応20〜250ms。SDKのlink再試行jitterは通常0〜20ms、混雑20〜100ms、次E2E round50〜200ms。初回DATAの無条件jitterは0ms。E2E RTOは経路・往復・下位試行とqueue予算を含める。下位が正常に再試行中なのに上位が同じ仕事を大量投入しない。
 
 HOP_ACCEPTにはHOP_ACCEPTを要求しない。END_RECEIPTは各区間で受理確認を得られるが、終端でreceiptのreceiptを生成しない。単純なDATA＋hop確認＋終端receipt＋hop確認の会計では再送前で約4H SDK frames。これを無視してアプリ32B×hopだけを占有と呼ばない。
 
@@ -122,19 +122,19 @@ callback watchdogは1000ms。通常送信の待ち時間を1000ms固定にする
 
 管理・緊急・通常・bulkのDRR重みは4:8:4:1。送信時間で持ち分を課金し、空きは貸せる。ACKは短い予約queueに置くが、正当な要求に対応するものだけ。DATAとACKを同じ仕事の予算に含める。queue50%で背景を縮小、80%でbulkと改善試験を止める。上限を超える高優先要求も無制限には受け付けない。
 
-管理送信予算はネットワーク延べ100000us/s、追加最適化10000us/sを初期値とする。これは推定モデルでの投入制限であり、法的duty cycleでも実測busy率でもない。人数込みの配賦を行い、各ノードにその全量を与えない。
+将来の大規模profileの管理送信予算目標はネットワーク延べ100000us/s、追加最適化10000us/sとする。初期基準線へ一律適用する実証済みtimerではなく、第14節のcapacity gateが優先する。これは推定モデルでの投入制限であり、法的duty cycleでも実測busy率でもない。人数込みの配賦を行い、各ノードにその全量を与えない。
 
 未配賦の通常枠は設計100台で割った値を基準にtokenを貯める。配賦の再発行は正規管理を必要とし、分断時に不在ノードの枠を勝手に二重発行しない。緊急復旧・Joinの小burstは別に上限と期限を持つ。実測モデルがない初期buildはcapabilityを未校正とし、推定値の保証をしない。
 
 Heartbeatは許された範囲で位相を分散する。既定jitterは周期±5%。イベント初回送信を同じjitterで何十秒も遅らせない。意味のないpayloadをSDKが勝手に最新値へ集約しない。
 
-隠れ端末では受信側creditと短いsoft pacingを使用可能にする。対応する自網だけの調整で、外部Wi-Fiを予約排除する機構ではない。正常時はOFF、集中が持続した場合のみ使う。
+隠れ端末への拡張では受信側creditと短いsoft pacingを使用可能にする。高度なsoft pacingの実装・RF認定前はcapabilityを無効とする。対応する自網だけの調整で、外部Wi-Fiを予約排除する機構ではない。正常時はOFF、集中が持続した場合のみ使う。
 
 ## 10. Peerとメモリ
 
 Peer20枠をbroadcast1＋通常16＋transient3に割り、通常pinは最大12。進行中TX、重要経路、受領待ちPeerは追い出さない。Peer登録・再作成後はLRを再適用する。Peer不足でDATA broadcastへ逃げない。
 
-論理台帳128、近隣32、RX64、TX64（制御予約8）、logical in-flight8を基準。driver Peerとsecurity session数と台帳数は別。未登録Peerからのdriver非暗号frameもSDKで認証してから必要な返信枠を確保する。認証前にPeer登録だけで信用しない。
+論理台帳128、近隣32、RX64、TX64（制御予約8）、logical in-flight8は大容量設計の上限例。実装基準は[資源profile](resource-profiles.md)のleaf／relay／gateway別の値を使う。driver Peerとsecurity session数と台帳数は別。未登録Peerからのdriver非暗号frameもSDKで認証してから必要な返信枠を確保する。認証前にPeer登録だけで信用しない。
 
 内部RAM不足なら明示的に小容量profileへ変更し、同じ性能認定を維持しない。printf/USB待ちでradioを止めない。drop、低水位、結果不明、reset理由を記録する。
 
@@ -151,3 +151,24 @@ driver処理時間に内部再送が含まれるならETXを再度掛けない�
 ESP-IDFの素のesp_now APIを使う。上位のespressif/esp-now componentには独自のACK・forward・送信lock・channel巡回があるため、新SDKへ丸ごと重ねない。既存試験コードのblocking waitやdata floodも踏襲しない。
 
 公開sourceを参照したことはbinary Wi-Fi driver内部を監査した意味ではない。C3/S3/C5混在、弱電界時のMAC結果と認証受理、broadcast250、peer別500、callback欠落、wake、channel移行を[受入ゲート](acceptance.md)で確認する。
+
+
+## 13. 受理・混雑・探索の追加規範
+
+HOP_ACCEPT前にframe、dedup、transaction、reply Peer lease、ACK slotを一括予約する。失敗は全部解放し、副作用も受理成功も発生させない。返信枠自体が無ければBUSYの送信まで保証せず、ローカルREPLY_CAPACITY_DROPを記録する。retryで空く枠を待ちながら他の資源を保持しない。[電源断・資源契約](crash-time-resources.md)参照。
+
+初回DATAにはSDKの無条件random jitterを加えない。0〜20msはlink retryのみ。driver CCA/backoffは残る。認証・受理後のHOP_ACCEPTを、当該DATAのforwardより先に予約queueへ投入するが、外部無線による送信時刻までは保証しない。END_RECEIPT受領時点のAPI完了と最後のlink ACK送信時間は別計測。
+
+16slotsは予約TDMAではなく応答時刻の分散。DISCOVER/OFFERは全body96B以下。requesterは一度に1transaction、cold-startに0〜1000msのばらつき、失敗後500〜2000msから最大60秒へbackoffする（sleep予算が優先）。responderはglobal応答上限を守り、要求が混んだときの候補選択をrotateして一つの要求に固定しない。
+
+高密度ではrequest nonce由来の応答抽選率を1、1/2、1/4、1/8へ抑えられるが、未認証の密度値だけで変更しない。窓を延長する場合はrequesterのdwellと明示交渉し、200msの既定滞在を黙って越えない。この適応は実RF認定までexperimental。単独cold Joinと100台同時JoinのSLOは別。
+
+## 14. 制御予算と資格
+
+100000us/s・10000us/sは将来の設計包絡であり、現在の全起源・pairwise広告を賄える証明ではない。基準線で動的な網全体再配賦はしない。message class毎のentry最大長・fan-out・周期・burst・最大待ちをG-ROUTEのcapacity manifestへ出すまで100台資格を付けない。
+
+受理済みDATAに対応するACKは当該仕事へ課金、近隣probe／経路更新／Join／管理logはcontrol、rate試験はoptimization。ACK枠・経路安全更新・新Join・bulkを区別する。leaseより長いtoken待ちで広告を送る場合は正常とせずCONTROL_BUDGET_UNSATISFIABLEを返す。
+
+起源数O、相手数F、entry長E、frame有効領域P、周期Iに対し、少なくとも `ceil(O*E/P)*F/I` frame/sを見積もり、ヘッダ・保護・ACK・再送・clock等を別加算する。nodeごと1ms/sを即送信可能な予約と呼ばない。token bucket burstは最大frame一件以上を許すこと。
+
+LR500の比較標本は同方向・同長・同channel epochで250/500を時間的に近く対照取得する。16対は180秒以内、対の開始は10秒以上離し、予算不足／channel/boot変更で無効化する。旧時間帯の250と別時間帯の500を比較しない。queue waitを除いたservice costと期限内配送・総energyを別々に比較する。資格前は固定250を既定とする。

@@ -35,17 +35,19 @@
 
 暗号化済み32/64/128B、確立経路、低い外部占有、必要な中継がawakeの条件を基準とする。固定250と適応を分ける。
 
+<!-- generated:performance:start -->
 | 指標 | 目標 |
 |---|---|
 | 1hop RELIABLE | P95 20ms以内、send→END_RECEIPT |
 | 5hop RELIABLE | P95 100ms以内 |
 | 10hop RELIABLE | P95 250ms以内 |
-| Deep Sleepから報告 | P95 500ms以内、reset解除→要求receipt |
+| Deep Sleepから報告 | P95 500ms以内、warm条件。cold/auth/recoveryは別系列 |
 | 既知代替への復旧 | P95 500ms以内、最初の故障観測→最終receipt |
-| 同channel探索修復 | P95 2秒以内を目標、物理経路が存在 |
-| 自動承認済み同channel Join | P95 1秒以内を目標 |
-| cold Join | P95 5秒以内を目標、常時受信入口・管理多数あり |
-| 切替そのものの空白 | P95 500ms以内を目標、準備済み群 |
+| 同channel探索修復 | P95 2000ms以内を目標、物理経路が存在 |
+| 自動承認済み同channel Join | P95 1000ms以内を目標、単独入場 |
+| cold Join | P95 5000ms以内を目標、単独入場・常時受信入口あり |
+| 切替そのものの空白 | P95 500ms以内を目標、認定された移行拡張・準備済み群 |
+<!-- generated:performance:end -->
 
 調査・準備・管理log配布には数分かかり得る。切替空白と総移行時間を混同しない。眠る全端末がVERIFY30秒内に起きることを期待しない。
 
@@ -66,3 +68,14 @@ P50/P95/P99、期限内成功、未達、expired、cancel、indeterminate、標�
 初期値を緩めて結果だけ合格にしない。未達原因、旧新設定、互換性、比較結果を記録する。セキュリティ・結果意味・規制境界は性能改善のため省略しない。認定はboard×機能×profileで行う。
 
 [要求対応表](../reference/requirements.json)／[状態](../STATUS.md)
+
+
+## 7. 改訂1.1の測定条件と負例
+
+性能表は目標条件の正本JSONから生成して照合する。1hop20msなどを仮定の4H総仕事量だけから保証・不可能と断定しない。4Hは総送信会計、send→END_RECEIPTはcritical path。最大payload/全LR250と昇速済み短payloadは別系列。
+
+初回DATA jitterはSDKで0、retry jitterとdriver待ちは別。wakeはwarm/cold/new-peer/channel-recovery/key-recovery別、NVS fresh/populated・履歴を分ける。単独Joinと同時100Join、100台管理と100件5秒以内burstを別資格にする。
+
+追加負例：nonce予約commit前/後/消費後のcut、rx window喪失、期限不明、期限前dedup eviction、APPLIED provider二重作用、予約各段失敗、credit重複・旧session・部分write、store非互換OTA、voter破損、初期entropy未準備、preauth global quota、GPIO21排他。
+
+`tests/test_contracts.py`はこれらのうち意味を小モデルで検査する。`tests/test_document_mutations.py`はP95/pin/SHA等の文書改変を検出する。どちらもファームウェア・暗号実装・Babel全体・合意・HIL・RF試験ではない。実装の完了条件はT01〜T20と追加ゲートのまま。

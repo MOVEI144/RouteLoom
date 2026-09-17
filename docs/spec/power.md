@@ -54,3 +54,10 @@ SDKは公称寿命を保証しない。battery-sideのE_report=積分V(t)I(t)を
 単一電池2本を直列にしたAhと3.3V側の電流をそのまま割らない。使用可能エネルギー、終止電圧、pulse電流、温度、自己放電、変換効率で評価する。Li-ion充電対応BAT端子へ一次電池を接続しない。
 
 C3/S3/C5のwake GPIOは異なり、XIAOのD番号も異なる。USB保持、LED、拡張無線、抵抗分圧を含めて[ボード資料](../hardware/README.md)と照合する。
+
+
+## 8. 破損と再起動クラス
+
+[電源断契約](crash-time-resources.md)のstore別処置を使う。nonce/replay／voter／Authority／membershipの破損を汎用erase-and-initで処理しない。spoolの時計が失われたら未使用の残時間を再付与しない。
+
+wake性能はwarm RTC/context resume、cold同相手、new peer auth、channel recovery、key rotation recoveryに分ける。500ms目標はwarm条件から開始し、NVS populated／更新履歴fixtureとRF calibrationを含める。sensor処理時間は別計測だが電池energyには含める。

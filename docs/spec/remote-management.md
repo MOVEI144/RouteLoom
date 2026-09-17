@@ -46,3 +46,18 @@ C3の4MB Flashでは2image、metadata、NVS、spoolを合わせた実partition�
 ## 7. 未実装時
 
 機能未認定ならcapability=falseとUNSUPPORTED。署名検証が未完成だから暫定で平文OTAを正式機能として出すことはしない。USB recoveryは別の物理保守経路として残す。
+
+
+## 8. imageと永続stateの互換性
+
+manifestへreadable_storage_schema_range、writable_schema_version、security_profile、最低bootloader、wire互換、firmware hashを含める。pending imageのself-test中に、旧imageが読めなくなる唯一のstoreを不可逆変更しない。互換書込みか別領域へのコピーで戻れる状態を保ち、確認後に明示migrationする。
+
+binary rollbackでもnonce high-water、key/channel/membership世代を戻さない。旧binaryが安全に扱えないならrollback可能と表示せず、互換recovery image／物理回復を事前に用意する。Secure Version等の不可逆更新は回復方針・self-test確定前に行わない。
+
+## 9. 同時保守の排他
+
+maintenance operationにはID、Authority世代、対象、保護到達集合、voter構成、観測世代、開始前再確認、同時停止制約、進行phase、期限と再起動証拠を耐電断保存する。一Networkに一つの停止を伴う計画を基準とする。
+
+複数daemonからのOTA／relay-off／survey／全体切替を同じ排他へ接続する。期限切れlockを理由に対象が復帰したと推定して別中継を止めない。到達/再起動を確認できなければOUTAGE_UNRESOLVED。後継Authorityも記録を引き継ぐ。古いtopologyなら開始を保留する。
+
+mesh OTAは初期基準線に含めず、まずUSBによるimage更新とstore互換・電断を検査する。仕様は将来機能の実装条件として維持する。

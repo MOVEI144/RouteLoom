@@ -13,6 +13,7 @@
 
 ## 端子比較
 
+<!-- generated:pins:start -->
 | XIAO端子 | C3 GPIO | S3 GPIO | C5 GPIO |
 |---|---:|---:|---:|
 | D0 | 2 | 1 | 1 |
@@ -26,6 +27,7 @@
 | D8 / SCK | 8 | 7 | 8 |
 | D9 / MISO | 9 | 8 | 9 |
 | D10 / MOSI | 10 | 9 | 10 |
+<!-- generated:pins:end -->
 
 同じD番号でも数値GPIOは違う。GPIO電圧は3.3V系で、5V tolerantとして配線しない。USBデータ、flash/PSRAM、boot strap、B2Bが使うGPIOは自由な端子とは扱わない。
 
@@ -36,3 +38,10 @@
 Wikiの値と回路図・現物が違うときは大きい値を選ばない。board profileを未認定にし、BOM・現物・メーカー確認で閉じる。特にC3出力電流、S3の回路図ファイル名と内部revision、C5のPSRAM表記を個別に記録した。
 
 [電源とRFの共通注意](power-rf-compliance.md)／[機械可読な端子資料](../reference/boards.json)／[公式リンク一覧](../references/official-sources.md)
+
+
+## published情報から実機設定を生成しない
+
+[boards.json](../reference/boards.json)の数値はpublished facts。qualified_runtime_profileは現在null、runtime_generation_allowed=false。実部品型式、revision、Flash/PSRAM検出、pin初期状態・排他、antenna、RFprofile、測定artifactを揃えるまでruntime capabilityを生成しない。
+
+S3＋WioでGPIO21のLED outputとbutton inputの同時有効化を拒否する。TCXO/RF switchの不明値は無効であり、推測値でTXしない。既存pin表とpublished比較表は生成／照合するが、CI一致を現物照合に読み替えない。

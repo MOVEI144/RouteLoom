@@ -34,3 +34,10 @@
 ## 参照実装の扱い
 
 ESP-IDF low-level API、espressif/esp-now、babeld等の読んだコードは一次資料として参照する。別のライセンスのコードを新SDKのlicenseへ無断変更しない。既存ソフトの全監査・RF試験を完了したとはしない。
+
+
+## 改訂1.1：外部レビューの反映
+
+[採否台帳](../reviews/2026-09-17-response.md)と[実装プロファイル](release-profiles.md)を追加。固定250基準線、SingleAuthority、auto migration OFFは開発と認定の順序の変更であり、C5／複数Gateway／10hop／将来HAや移行の設計目標を撤回しない。
+
+Join allowlist、nonce保存順序、経過時間不明、受理前予約、USB累積credit、OTA state互換は今守る規約。Wire layout／暗号suite／全routing再起動規則はゲートとして残す。検査が通っても暗号・RF・合意の実装済みを意味しない。

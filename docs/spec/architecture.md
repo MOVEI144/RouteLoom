@@ -54,7 +54,7 @@ NodeID、NetworkID、RadioID、LinkID、GatewayID、ServiceIDは違うもの。W
 
 ## 6. CPU・RAM・Flash
 
-C3のPSRAMなし構成を基準にbounded containerを選ぶ。RX64/TX64×250Bだけで32KBに達し、それ以外のmetadata、crypto、route、driver、stackも計上する。起動時・定常・Join集中・OTA時の内部heap低水位を測る。実際に収まらないprofileを100台対応と名乗らない。
+C3のPSRAMなし構成を基準にbounded containerを選ぶ。[役割別資源profile](resource-profiles.md)の概算・上限・未実測値を分け、以下の最大構成例を全ボードへ一律確保しない。RX64/TX64×250Bだけで32KBに達し、それ以外のmetadata、crypto、route、driver、stackも計上する。起動時・定常・Join集中・OTA時の内部heap低水位を測る。実際に収まらないprofileを100台対応と名乗らない。
 
 大きいobject用bufferは同時枠を確保してから受理する。ログの整形はPC側、deviceは固定長event ring。一般DATAごとにNVS全体を書かない。
 
