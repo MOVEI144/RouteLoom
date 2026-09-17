@@ -1,0 +1,49 @@
+name: Bootstrap CORE_FIXED_250 implementation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - implementation/core-fixed-250
+    paths:
+      - '.bootstrap/**'
+      - '.github/workflows/bootstrap-implementation.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: routeloom-bootstrap-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout implementation branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          ref: implementation/core-fixed-250
+
+      - name: Verify and apply implementation payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .bootstrap/part*.b64 | base64 --decode > /tmp/routeloom_impl.tar.gz
+          echo '4897355f910f94a548df39907936cb9f0666f4e351594a68a7ff7a10d85e3fe9  /tmp/routeloom_impl.tar.gz' | sha256sum --check --strict
+          tar -xzf /tmp/routeloom_impl.tar.gz
+          rm -rf .bootstrap
+          rm -f .github/workflows/bootstrap-implementation.yml
+
+      - name: Commit generated implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat: implement CORE_FIXED_250 prototype'
+          git push origin HEAD:implementation/core-fixed-250
