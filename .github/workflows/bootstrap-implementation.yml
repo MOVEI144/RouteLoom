@@ -11,7 +11,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Restore exact original archive, verify before extraction
+      - name: Restore verified non-workflow sources
         shell: bash
         run: |
           set -euo pipefail
@@ -25,23 +25,21 @@ jobs:
           text = text[:53732] + text[53733:]
           text = text[:66673] + text[66674:]
           raw = base64.b64decode(text, validate=True)
-          expected = '4897355f910f94a548df39907936cb9f0666f4e351594a68a7ff7a10d85e3fe9'
-          assert hashlib.sha256(raw).hexdigest() == expected, 'archive identity mismatch'
+          assert hashlib.sha256(raw).hexdigest() == '4897355f910f94a548df39907936cb9f0666f4e351594a68a7ff7a10d85e3fe9'
           with tarfile.open(fileobj=io.BytesIO(raw), mode='r:gz') as archive:
               members = archive.getmembers()
               assert len(members) == 54
               assert all(m.isfile() and not Path(m.name).is_absolute() and '..' not in Path(m.name).parts and m.size < 1000000 for m in members)
-              archive.extractall('.', filter='data')
+              source_members = [m for m in members if not m.name.startswith('.github/')]
+              archive.extractall('.', members=source_members, filter='data')
           shutil.rmtree('.bootstrap')
-          Path('.github/workflows/bootstrap-implementation.yml').unlink()
-          Path('.github/workflows/recover-sdk.yml').unlink(missing_ok=True)
           PY
-      - name: Commit readable sources
+      - name: Commit sources only
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           git diff --cached --check
-          git commit -m 'feat: restore readable CORE_FIXED_250 SDK sources and build workflows'
+          git commit -m 'feat: restore readable CORE_FIXED_250 SDK source snapshot'
           git push origin HEAD:implementation/core-fixed-250
