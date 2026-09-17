@@ -1,0 +1,40 @@
+name: Documentation checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  documentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check documentation and parameters
+        run: python3 tools/check_docs.py --report doc-check-results.json
+      - name: Create documentation snapshot
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          import zipfile
+          paths = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          with zipfile.ZipFile('routeloom-docs.zip', 'w', zipfile.ZIP_DEFLATED) as archive:
+              for name in paths:
+                  if name and Path(name).is_file():
+                      archive.write(name, name)
+              archive.write('doc-check-results.json', 'doc-check-results.json')
+          PY
+      - name: Upload validation and snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: routeloom-documentation
+          path: |
+            doc-check-results.json
+            routeloom-docs.zip
+          retention-days: 7

@@ -1,0 +1,19 @@
+{
+  "version": "1.0",
+  "requirements": [
+    {"id": "R01", "title": "用途非依存の責任境界", "docs": ["docs/spec/overview.md", "docs/spec/sdk-api.md"], "tests": ["T20"]},
+    {"id": "R02", "title": "全LRと方向別適応", "docs": ["docs/spec/radio.md"], "tests": ["T01", "T12"]},
+    {"id": "R03", "title": "参加・認証・失効", "docs": ["docs/spec/identity-membership.md", "docs/spec/security.md"], "tests": ["T05", "T06"]},
+    {"id": "R04", "title": "複数出口とサービス", "docs": ["docs/spec/routing.md", "docs/spec/host.md"], "tests": ["T10"]},
+    {"id": "R05", "title": "10hop撤去分断復旧", "docs": ["docs/spec/routing.md"], "tests": ["T07", "T08", "T09"]},
+    {"id": "R06", "title": "管理者自動交代と合意", "docs": ["docs/spec/control-plane.md"], "tests": ["T19"]},
+    {"id": "R07", "title": "配送証拠と永続保存", "docs": ["docs/spec/delivery-storage.md"], "tests": ["T06", "T07", "T20"]},
+    {"id": "R08", "title": "安全なchannel変更", "docs": ["docs/spec/channel-migration.md"], "tests": ["T13", "T14", "T15"]},
+    {"id": "R09", "title": "Sleepとアプリ協調", "docs": ["docs/spec/power.md"], "tests": ["T15", "T18"]},
+    {"id": "R10", "title": "USBとPC独立性", "docs": ["docs/spec/host.md", "docs/spec/usb-protocol.md"], "tests": ["T10", "T16"]},
+    {"id": "R11", "title": "遠隔設定とOTA分離", "docs": ["docs/spec/remote-management.md"], "tests": ["T17"]},
+    {"id": "R12", "title": "有界資源・診断", "docs": ["docs/spec/diagnostics.md", "docs/spec/radio.md"], "tests": ["T03", "T04", "T11", "T18"]},
+    {"id": "R13", "title": "無線追加境界", "docs": ["docs/spec/transport-extension.md", "docs/spec/wire-protocol.md"], "tests": ["T02", "T20"]},
+    {"id": "R14", "title": "board仕様と適合条件", "docs": ["docs/hardware/README.md", "docs/hardware/power-rf-compliance.md"], "tests": ["T01", "T02", "T18"]}
+  ]
+}

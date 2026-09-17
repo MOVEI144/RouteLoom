@@ -1,0 +1,20 @@
+{
+  "spec_version": "1.0",
+  "status": "design-baseline-not-rf-qualified",
+  "esp_idf": {"tag": "v6.0.3", "commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802"},
+  "targets": ["esp32c3", "esp32s3", "esp32c5"],
+  "radio": {"band": "2.4GHz", "mode": "LR_ONLY_ADAPTIVE", "supported_profiles": ["LR_ONLY_ADAPTIVE", "LR250_FIXED"], "tx_rates_kbps": [250, 500], "bootstrap_rate_kbps": 250, "control_rate_kbps": 250, "driver_bandwidth_mhz": 20, "ap_connection": false, "ble": false, "lora_tx": false, "auto_tx_power": false, "tx_power_qdbm": null, "tx_requires_approved_profile": true},
+  "network": {"typical_nodes_min": 30, "typical_nodes_max": 50, "qualification_nodes": 100, "node_records": 128, "gateway_max": 4, "hop_max": 10, "membership_per_node": 1, "steady_channels_per_network": 1, "default_candidates": [1, 6, 11]},
+  "buffers": {"espnow_body_max": 250, "normal_payload_max": 128, "envelope_budget": 122, "rx_frames": 64, "tx_frames": 64, "reserved_control_frames": 8, "logical_inflight": 8, "per_neighbor_transactions": 2, "control_object_max": 2048, "control_reassembly_slots": 4, "control_reassembly_timeout_ms": 10000},
+  "peers": {"total": 20, "broadcast": 1, "regular": 16, "transient": 3, "pinned_regular_max": 12, "neighbor_records": 32, "driver_encrypt_default": false, "sdk_aead_required": true},
+  "retry": {"link_attempts_including_initial": 2, "origin_rounds_including_initial": 3, "link_rto_initial_ms": 60, "link_rto_min_ms": 20, "link_rto_max_ms": 250, "normal_jitter_ms": [0, 20], "congested_jitter_ms": [20, 100], "origin_round_jitter_ms": [50, 200], "callback_watchdog_ms": 1000, "reference_deadline_ms": 5000},
+  "discovery": {"offer_slots": 16, "offer_slot_ms": 10, "channel_dwell_max_ms": 200, "candidate_target": 3, "response_rate_per_second": 1, "response_burst": 2, "sleepy_awake_budget_ms": 2000, "sleepy_scan_cycles_max": 2, "stop_reserve_ms": 100, "powered_retry_initial_ms": [500, 2000], "powered_retry_cap_ms": 60000},
+  "rate": {"probe_samples": 16, "success_required": 15, "cost_improvement_fraction": 0.20, "probe_gap_min_ms": 10000, "stale_after_ms": 600000, "consecutive_failure_suspect": 2, "window_failure_suspect": 3, "failure_window": 8, "sleepy_extra_probe": false},
+  "routing": {"candidates_per_destination": 3, "improvement_fraction": 0.20, "improvement_hold_ms": 10000, "data_flood": false},
+  "scheduling": {"drr_weights": {"management": 4, "urgent": 8, "normal": 4, "bulk": 1}, "background_reduce_queue_fraction": 0.50, "bulk_stop_queue_fraction": 0.80, "management_network_estimated_us_per_second": 100000, "optimization_network_estimated_us_per_second": 10000, "heartbeat_jitter_fraction": 0.05},
+  "survey": {"periodic_all_channel_scan": false, "promiscuous_always_on": false, "bad_window_ms": 30000, "bad_windows_required": 2, "visit_max_ms": 200, "exchanges_per_direction_per_visit": 4, "visit_gap_min_ms": 30000, "minimum_visits": 5, "success_required": 19, "samples_per_direction": 20, "path_improvement_fraction": 0.25},
+  "migration": {"auto_policy": true, "requires_qualification": true, "prepare_timeout_ms": 30000, "commit_lead_min_ms": 5000, "commit_lead_management_rtt_p99_multiplier": 4, "clock_uncertainty_max_ms": 20, "cutover_guard_min_ms": 100, "guard_uncertainty_multiplier": 4, "verify_window_ms": 30000, "cooldown_ms": 600000, "committed_and_active_separate": true, "unilateral_rollback": false},
+  "power": {"qualified_modes_target": ["ALWAYS_RX", "DEEP_SLEEP_REPORT"], "synchronized_sleep_relay": false},
+  "performance_targets_ms": {"reliable_1hop_p95": 20, "reliable_5hop_p95": 100, "reliable_10hop_p95": 250, "wake_report_p95": 500, "known_backup_repair_p95_from_observation": 500, "same_channel_repair_p95": 2000, "preapproved_join_p95": 1000, "cold_join_p95": 5000, "cutover_gap_p95": 500},
+  "reference_load": {"nodes": 50, "data_per_node_per_hour": 40, "heartbeat_period_seconds": 1800, "mean_hops": 3, "payload_bytes": 64, "delivery": "RELIABLE"}
+}
