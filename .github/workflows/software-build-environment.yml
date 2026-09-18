@@ -32,7 +32,7 @@ jobs:
           zeroize = "=1.8.1"
           getrandom = "=0.2.16"
           crossterm = "=0.28.1"
-          serialport = { version = "=4.7.2", default-features = false }
+          serialport = { version = "=4.8.1", default-features = false }
           EOF
           echo 'fn main() {}' > /tmp/rl-env/src/main.rs
           cd /tmp/rl-env
