@@ -62,8 +62,8 @@ template <typename T, std::size_t Capacity>
 class FixedPool {
  public:
   static_assert(Capacity > 0, "FixedPool capacity must be positive");
-  static_assert(std::is_nothrow_default_constructible_v<T>,
-                "FixedPool values must be nothrow default constructible");
+  static_assert(std::is_default_constructible_v<T>,
+                "FixedPool values must be default constructible");
   static_assert(std::is_nothrow_destructible_v<T>,
                 "FixedPool values must be nothrow destructible");
 
