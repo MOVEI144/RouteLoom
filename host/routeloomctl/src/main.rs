@@ -39,7 +39,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut response = String::new();
     BufReader::new(stream).read_line(&mut response)?;
     if response.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into());
+        return Err(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into(),
+        );
     }
     print!("{response}");
     Ok(())
