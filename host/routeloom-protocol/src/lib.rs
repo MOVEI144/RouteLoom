@@ -135,8 +135,8 @@ pub fn cobs_decode(input: &[u8]) -> Result<Vec<u8>, ProtocolError> {
 }
 
 pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>, ProtocolError> {
-    if frame.body.len() > u16::MAX as usize ||
-        HEADER_LEN + frame.body.len() + CRC_LEN > MAX_DECODED_FRAME
+    if frame.body.len() > u16::MAX as usize
+        || HEADER_LEN + frame.body.len() + CRC_LEN > MAX_DECODED_FRAME
     {
         return Err(ProtocolError::FrameTooLarge);
     }
@@ -235,7 +235,10 @@ pub struct CumulativeCredit {
 
 impl CumulativeCredit {
     pub fn new(session: u64) -> Self {
-        Self { session, ..Self::default() }
+        Self {
+            session,
+            ..Self::default()
+        }
     }
 
     pub fn update(
@@ -257,8 +260,8 @@ impl CumulativeCredit {
 
     pub fn consume(&mut self, bytes: usize) -> Result<(), ProtocolError> {
         let bytes = u64::try_from(bytes).map_err(|_| ProtocolError::FrameTooLarge)?;
-        if self.consumed_frames + 1 > self.granted_frames ||
-            self.consumed_bytes + bytes > self.granted_bytes
+        if self.consumed_frames + 1 > self.granted_frames
+            || self.consumed_bytes + bytes > self.granted_bytes
         {
             return Err(ProtocolError::CreditExhausted);
         }
