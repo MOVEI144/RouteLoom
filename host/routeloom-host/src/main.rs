@@ -28,7 +28,11 @@ fn json_escape(input: &str) -> String {
 }
 
 fn status_json(state: &State) -> String {
-    let error = state.last_error.lock().expect("last_error poisoned").clone();
+    let error = state
+        .last_error
+        .lock()
+        .expect("last_error poisoned")
+        .clone();
     format!(
         "{{\"connected\":{},\"device\":{},\"rx_frames\":{},\"tx_frames\":{},\"protocol_errors\":{},\"last_error\":{}}}",
         state.connected.load(Ordering::Relaxed),
@@ -75,8 +79,10 @@ fn adapter_thread(
                 }
                 Err(error) => {
                     writer_state.connected.store(false, Ordering::Relaxed);
-                    *writer_state.last_error.lock().expect("last_error poisoned") =
-                        Some(error.to_string());
+                    *writer_state
+                        .last_error
+                        .lock()
+                        .expect("last_error poisoned") = Some(error.to_string());
                     break;
                 }
             }
@@ -87,7 +93,12 @@ fn adapter_thread(
     let mut buffer = [0_u8; 512];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "adapter disconnected")),
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "adapter disconnected",
+                ))
+            }
             Ok(count) => {
                 for result in decoder.push(&buffer[..count]) {
                     match result {
@@ -146,10 +157,14 @@ fn serve_client(
                             body,
                         }) {
                             Ok(()) => format!("{{\"accepted\":true,\"request\":{request}}}"),
-                            Err(_) => "{\"accepted\":false,\"error\":\"adapter unavailable\"}".into(),
+                            Err(_) => {
+                                "{\"accepted\":false,\"error\":\"adapter unavailable\"}".into()
+                            }
                         }
                     }
-                    (Ok(_), Ok(_)) => "{\"accepted\":false,\"error\":\"payload exceeds 128 bytes\"}".into(),
+                    (Ok(_), Ok(_)) => {
+                        "{\"accepted\":false,\"error\":\"payload exceeds 128 bytes\"}".into()
+                    }
                     _ => "{\"accepted\":false,\"error\":\"invalid SEND syntax\"}".into(),
                 }
             }
@@ -169,7 +184,11 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>), String> {
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--socket" => socket = PathBuf::from(args.next().ok_or("--socket requires a path")?),
-            "--device" => device = Some(PathBuf::from(args.next().ok_or("--device requires a path")?)),
+            "--device" => {
+                device = Some(PathBuf::from(
+                    args.next().ok_or("--device requires a path")?,
+                ))
+            }
             "--help" | "-h" => {
                 println!("routeloom-host [--socket PATH] [--device TTY]");
                 process::exit(0);
@@ -185,19 +204,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if Path::new(&socket_path).exists() {
         std::fs::remove_file(&socket_path)?;
     }
-    let state = Arc::new(State { device: device.clone(), ..State::default() });
+    let state = Arc::new(State {
+        device: device.clone(),
+        ..State::default()
+    });
     let (outbound_tx, outbound_rx) = mpsc::channel();
     if let Some(device_path) = device {
         let adapter_state = Arc::clone(&state);
         thread::spawn(move || {
-            if let Err(error) = adapter_thread(device_path, Arc::clone(&adapter_state), outbound_rx) {
+            if let Err(error) = adapter_thread(device_path, Arc::clone(&adapter_state), outbound_rx)
+            {
                 adapter_state.connected.store(false, Ordering::Relaxed);
-                *adapter_state.last_error.lock().expect("last_error poisoned") = Some(error.to_string());
+                *adapter_state
+                    .last_error
+                    .lock()
+                    .expect("last_error poisoned") = Some(error.to_string());
             }
         });
     }
     let listener = UnixListener::bind(&socket_path)?;
-    let session = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64 ^ u64::from(process::id());
+    let session =
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64 ^ u64::from(process::id());
     let next_request = Arc::new(AtomicU64::new(1));
     println!("RouteLoom host listening on {}", socket_path.display());
     for incoming in listener.incoming() {
@@ -207,7 +234,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let client_outbound = outbound_tx.clone();
                 let client_requests = Arc::clone(&next_request);
                 thread::spawn(move || {
-                    let _ = serve_client(stream, client_state, client_outbound, session, client_requests);
+                    let _ = serve_client(
+                        stream,
+                        client_state,
+                        client_outbound,
+                        session,
+                        client_requests,
+                    );
                 });
             }
             Err(error) => eprintln!("accept failed: {error}"),
