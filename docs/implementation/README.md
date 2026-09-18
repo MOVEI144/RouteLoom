@@ -1,14 +1,23 @@
 # v0.1実装の案内
 
-基準プロファイルは`CORE_FIXED_250`。このコードは実装開始点であり、RF・暗号Identity・製品適合の認定ではない。
+基準プロファイルは`CORE_FIXED_250`。このコードは実装プロトタイプであり、RF・本番Identity・製品適合の認定ではない。
 
 ## 実装済みの縦切り
 
 - `components/routeloom`：C++17 portable core、C ABI、provisional Wire codec、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、SeqNoRequest、SingleAuthorityの単調操作台帳、deadline再開規則。
-- `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、AES-GCM開発用PSK Provider。
-- `firmware/reference_node`：C3/S3/C5のcompile対象となる実験firmware。静的Peer構成。
+- `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、PSA AES-GCM開発用PSK Provider。
+- `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。NVS異常時はIdentity／counterを守るため自動eraseしない。
 - `host/`：COBS＋CRC32のUSB/Serial framing library、Unix daemon、CLIの初期実装。
 - `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、C ABI。
+
+## 継続CI
+
+- Portable core：GCC／Clang、ASan/UBSanのON/OFF。
+- Rust：fmt、Clippy `-D warnings`、unit test、release build。
+- ESP-IDF：固定`v6.0.3`のC3／S3／C5 reference firmware buildとsize artifact。
+- 文書・意味契約：生成表、negative mutation、小状態モデル。
+
+CI成功はhost/build evidence。実機起動、空中通信、到達距離、電池、都市部干渉を証明しない。
 
 ## 明示的な非保証
 

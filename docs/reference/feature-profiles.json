@@ -1,9 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "spec_revision": "1.1",
   "wire_frozen": false,
   "initial_profile": "CORE_FIXED_250",
-  "implementation_status": "not-implemented",
+  "implementation_status": "core-fixed-250-prototype",
   "initial_control": "SINGLE_AUTHORITY",
   "first_hil_targets": [
     "esp32c3",
@@ -15,6 +15,90 @@
     "esp32c5"
   ],
   "features": {
+    "portable_core": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom",
+        "tests/cpp",
+        ".github/workflows/sdk.yml"
+      ]
+    },
+    "c_api": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/c_api.h",
+        "components/routeloom/src/c_api.cpp",
+        "tests/cpp/test_main.cpp"
+      ]
+    },
+    "espnow_lr250_adapter": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom_espnow",
+        "firmware/reference_node",
+        ".github/workflows/sdk.yml"
+      ]
+    },
+    "reference_firmware_builds": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "firmware/reference_node",
+        "esp32c3",
+        "esp32s3",
+        "esp32c5"
+      ]
+    },
+    "development_psk_aead": {
+      "design_target": false,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom_espnow/src/psk_security.cpp",
+        "docs/implementation/README.md"
+      ]
+    },
+    "multi_hop_repair": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/src/routing.cpp",
+        "components/routeloom/src/node.cpp",
+        "tests/cpp/test_main.cpp"
+      ]
+    },
+    "host_cli": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "host/routeloom-host",
+        "host/routeloomctl",
+        ".github/workflows/sdk.yml"
+      ]
+    },
     "secure_unicast": {
       "design_target": true,
       "initial_target": true,
@@ -23,23 +107,7 @@
       "default_enabled": false,
       "evidence": null
     },
-    "multi_hop_repair": {
-      "design_target": true,
-      "initial_target": true,
-      "implemented": false,
-      "qualified": false,
-      "default_enabled": false,
-      "evidence": null
-    },
     "deep_sleep_resume": {
-      "design_target": true,
-      "initial_target": true,
-      "implemented": false,
-      "qualified": false,
-      "default_enabled": false,
-      "evidence": null
-    },
-    "host_cli": {
       "design_target": true,
       "initial_target": true,
       "implemented": false,

@@ -51,19 +51,22 @@ class LogObserver final : public NodeObserver {
   void on_diagnostic(const char* reason, const NodeId peer,
                      const MessageId* message) noexcept override {
     ESP_LOGW(kTag, "diagnostic reason=%s peer=%llu message=%s", reason,
-             static_cast<unsigned long long>(peer), message == nullptr ? "none" : "present");
+             static_cast<unsigned long long>(peer),
+             message == nullptr ? "none" : "present");
   }
 };
 
 int hex_value(const char value) noexcept {
   if (value >= '0' && value <= '9') return value - '0';
-  const char lower = static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
+  const char lower =
+      static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
   if (lower >= 'a' && lower <= 'f') return lower - 'a' + 10;
   return -1;
 }
 
 template <std::size_t Size>
-bool parse_hex(const char* text, std::array<std::uint8_t, Size>& output) noexcept {
+bool parse_hex(const char* text,
+               std::array<std::uint8_t, Size>& output) noexcept {
   if (text == nullptr || std::strlen(text) != Size * 2U) return false;
   for (std::size_t i = 0; i < Size; ++i) {
     const int high = hex_value(text[i * 2]);
@@ -77,8 +80,11 @@ bool parse_hex(const char* text, std::array<std::uint8_t, Size>& output) noexcep
 bool parse_mac(const char* text, MacAddress& mac) noexcept {
   if (text == nullptr) return false;
   unsigned values[6]{};
-  if (std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x", &values[0], &values[1],
-                  &values[2], &values[3], &values[4], &values[5]) != 6) return false;
+  if (std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x", &values[0],
+                  &values[1], &values[2], &values[3], &values[4],
+                  &values[5]) != 6) {
+    return false;
+  }
   for (std::size_t i = 0; i < mac.bytes.size(); ++i) {
     if (values[i] > 0xffU) return false;
     mac.bytes[i] = static_cast<std::uint8_t>(values[i]);
@@ -89,23 +95,30 @@ bool parse_mac(const char* text, MacAddress& mac) noexcept {
 Status next_boot_session(std::uint32_t& session) noexcept {
   nvs_handle_t handle = 0;
   esp_err_t error = nvs_open("rlboot", NVS_READWRITE, &handle);
-  if (error != ESP_OK) return Status::error(StatusCode::StorageFailure, "boot nvs_open failed");
+  if (error != ESP_OK) {
+    return Status::error(StatusCode::StorageFailure,
+                         "boot nvs_open failed");
+  }
   std::uint32_t stored = 0;
   error = nvs_get_u32(handle, "session", &stored);
   if (error != ESP_OK && error != ESP_ERR_NVS_NOT_FOUND) {
     nvs_close(handle);
-    return Status::error(StatusCode::StorageFailure, "boot session read failed");
+    return Status::error(StatusCode::StorageFailure,
+                         "boot session read failed");
   }
   session = stored + 1U;
   if (session == 0) {
     nvs_close(handle);
-    return Status::error(StatusCode::CounterExhausted, "boot session exhausted");
+    return Status::error(StatusCode::CounterExhausted,
+                         "boot session exhausted");
   }
   error = nvs_set_u32(handle, "session", session);
   if (error == ESP_OK) error = nvs_commit(handle);
   nvs_close(handle);
-  return error == ESP_OK ? Status::success()
-                         : Status::error(StatusCode::StorageFailure, "boot session commit failed");
+  return error == ESP_OK
+             ? Status::success()
+             : Status::error(StatusCode::StorageFailure,
+                             "boot session commit failed");
 }
 
 [[noreturn]] void fail(const char* detail) {
@@ -116,19 +129,28 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 }  // namespace
 
 extern "C" void app_main(void) {
-  esp_err_t error = nvs_flash_init();
-  if (error == ESP_ERR_NVS_NO_FREE_PAGES || error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    ESP_ERROR_CHECK(nvs_flash_erase());
-    error = nvs_flash_init();
+  // Identity, nonce reservations, replay state and message sessions share NVS.
+  // Never erase it automatically after a version/capacity error: that would
+  // silently turn a recoverable storage problem into key/counter rollback.
+  const esp_err_t nvs_error = nvs_flash_init();
+  if (nvs_error != ESP_OK) {
+    ESP_LOGE(kTag,
+             "NVS init failed (%s); automatic erase is disabled, explicit "
+             "recovery is required",
+             esp_err_to_name(nvs_error));
+    fail("NVS initialization failed");
   }
-  ESP_ERROR_CHECK(error);
 
   static NvsCounterStore counter_store;
   auto status = counter_store.open("rlcounter");
   if (!status) fail(status.detail);
 
-  std::array<std::uint8_t, DevelopmentPskSecurityProvider::kMasterKeySize> key{};
-  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, key)) fail("invalid development key");
+  std::array<std::uint8_t,
+             DevelopmentPskSecurityProvider::kMasterKeySize>
+      key{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DEVELOPMENT_KEY_HEX, key)) {
+    fail("invalid development key");
+  }
   static DevelopmentPskSecurityProvider security;
   status = security.initialize(key, counter_store, "rlreplay");
   std::fill(key.begin(), key.end(), 0);
@@ -152,13 +174,18 @@ extern "C" void app_main(void) {
 
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
-    if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) fail("invalid peer MAC");
-    status = runtime.register_neighbor(CONFIG_ROUTELOOM_PEER_NODE_ID, mac, 1);
+    if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {
+      fail("invalid peer MAC");
+    }
+    status =
+        runtime.register_neighbor(CONFIG_ROUTELOOM_PEER_NODE_ID, mac, 1);
     if (!status) fail(status.detail);
   }
 
   status = runtime.start_task();
   if (!status) fail(status.detail);
-  ESP_LOGW(kTag,
-           "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a production identity profile");
+  ESP_LOGW(
+      kTag,
+      "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
+      "production identity profile");
 }
