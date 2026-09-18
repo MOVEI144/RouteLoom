@@ -53,6 +53,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           . "$IDF_PATH/export.sh"
           git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
           test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
