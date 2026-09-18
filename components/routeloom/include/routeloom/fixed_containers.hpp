@@ -2,6 +2,9 @@
 
 #include <array>
 #include <cstddef>
+#include <memory>
+#include <new>
+#include <type_traits>
 #include <utility>
 
 namespace routeloom {
@@ -58,6 +61,12 @@ class FixedQueue {
 template <typename T, std::size_t Capacity>
 class FixedPool {
  public:
+  static_assert(Capacity > 0, "FixedPool capacity must be positive");
+  static_assert(std::is_nothrow_default_constructible_v<T>,
+                "FixedPool values must be nothrow default constructible");
+  static_assert(std::is_nothrow_destructible_v<T>,
+                "FixedPool values must be nothrow destructible");
+
   template <typename Predicate>
   T* find(Predicate predicate) noexcept {
     for (std::size_t i = 0; i < Capacity; ++i) {
@@ -77,8 +86,8 @@ class FixedPool {
   T* allocate() noexcept {
     for (std::size_t i = 0; i < Capacity; ++i) {
       if (!used_[i]) {
+        reset(items_[i]);
         used_[i] = true;
-        items_[i] = T{};
         return &items_[i];
       }
     }
@@ -93,7 +102,7 @@ class FixedPool {
     const auto index = static_cast<std::size_t>(item - begin);
     if (!used_[index]) return false;
     used_[index] = false;
-    items_[index] = T{};
+    reset(items_[index]);
     return true;
   }
 
@@ -120,6 +129,11 @@ class FixedPool {
   constexpr std::size_t capacity() const noexcept { return Capacity; }
 
  private:
+  static void reset(T& item) noexcept {
+    item.~T();
+    ::new (static_cast<void*>(std::addressof(item))) T();
+  }
+
   std::array<T, Capacity> items_{};
   std::array<bool, Capacity> used_{};
 };
