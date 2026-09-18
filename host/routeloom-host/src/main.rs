@@ -79,10 +79,8 @@ fn adapter_thread(
                 }
                 Err(error) => {
                     writer_state.connected.store(false, Ordering::Relaxed);
-                    *writer_state
-                        .last_error
-                        .lock()
-                        .expect("last_error poisoned") = Some(error.to_string());
+                    *writer_state.last_error.lock().expect("last_error poisoned") =
+                        Some(error.to_string());
                     break;
                 }
             }
