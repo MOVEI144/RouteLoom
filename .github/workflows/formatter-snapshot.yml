@@ -11,9 +11,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - run: sudo apt-get update && sudo apt-get install -y clang-format-19
-      - run: cp /usr/lib/llvm-19/bin/clang-format ./clang-format
+      - run: cp /usr/lib/llvm-19/bin/clang-format ./clang-format; cp -L /usr/lib/llvm-19/lib/libclang-cpp.so.19.1 ./libclang-cpp.so.19.1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: clang-format-19
-          path: clang-format
+          name: clang-format-19-complete
+          path: |
+            clang-format
+            libclang-cpp.so.19.1
           retention-days: 1
