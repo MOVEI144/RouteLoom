@@ -26,7 +26,7 @@ pub enum FrameKind {
 impl TryFrom<u8> for FrameKind {
     type Error = ProtocolError;
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
+    fn try_from(value: u8) -> Result<Self, ProtocolError> {
         Ok(match value {
             1 => Self::Hello,
             2 => Self::HelloAck,
