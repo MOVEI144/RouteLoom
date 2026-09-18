@@ -1,0 +1,45 @@
+name: Software build environment
+on:
+  push:
+    branches: [implementation/software-readiness]
+    paths: [.github/workflows/software-build-environment.yml]
+permissions:
+  contents: read
+jobs:
+  toolchain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Install pinned Rust and fetch development dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.1 --profile minimal --component rustfmt,clippy
+          mkdir -p /tmp/rl-env/src
+          cat > /tmp/rl-env/Cargo.toml <<'EOF'
+          [package]
+          name = "routeloom-build-environment"
+          version = "0.1.0"
+          edition = "2021"
+          rust-version = "1.85"
+          [dependencies]
+          aes-gcm = "=0.10.3"
+          hmac = "=0.12.1"
+          sha2 = "=0.10.8"
+          hkdf = "=0.12.4"
+          serde = { version = "=1.0.219", features = ["derive"] }
+          serde_json = "=1.0.140"
+          zeroize = "=1.8.1"
+          getrandom = "=0.2.16"
+          crossterm = "=0.28.1"
+          serialport = { version = "=4.7.2", default-features = false }
+          EOF
+          echo 'fn main() {}' > /tmp/rl-env/src/main.rs
+          cd /tmp/rl-env
+          cargo +1.85.1 vendor /tmp/rl-vendor > /tmp/vendor-config.txt
+          tar -czf /tmp/routeloom-rust-environment.tar.gz -C "$HOME/.rustup/toolchains" 1.85.1-x86_64-unknown-linux-gnu -C /tmp rl-vendor vendor-config.txt -C /tmp/rl-env Cargo.lock
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: routeloom-rust-build-environment
+          path: /tmp/routeloom-rust-environment.tar.gz
+          retention-days: 2
