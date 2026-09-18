@@ -7,4 +7,7 @@ idf_component_register(
   REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+# ESP-IDF public headers intentionally use GNU C/C++ extensions. Keep strict
+# warnings for RouteLoom itself without promoting those system-header
+# extensions to errors through -Wpedantic.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
