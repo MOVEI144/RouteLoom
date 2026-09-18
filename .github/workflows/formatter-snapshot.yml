@@ -1,0 +1,19 @@
+name: Formatter snapshot
+on:
+  push:
+    branches: [implementation/core-fixed-250]
+    paths: [.github/workflows/formatter-snapshot.yml]
+permissions:
+  contents: read
+jobs:
+  formatter:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y clang-format-19
+      - run: cp /usr/lib/llvm-19/bin/clang-format ./clang-format
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: clang-format-19
+          path: clang-format
+          retention-days: 1
