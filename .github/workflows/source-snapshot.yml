@@ -1,0 +1,28 @@
+name: Source snapshot
+
+on:
+  push:
+    branches:
+      - implementation/pre-hil-complete
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Archive source
+        run: git archive --format=zip --output=routeloom-source.zip HEAD
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: routeloom-source
+          path: routeloom-source.zip
+          retention-days: 1
