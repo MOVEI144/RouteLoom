@@ -4,7 +4,6 @@
 #include <cstddef>
 #include <memory>
 #include <new>
-#include <type_traits>
 #include <utility>
 
 namespace routeloom {
@@ -62,10 +61,6 @@ template <typename T, std::size_t Capacity>
 class FixedPool {
  public:
   static_assert(Capacity > 0, "FixedPool capacity must be positive");
-  static_assert(std::is_default_constructible_v<T>,
-                "FixedPool values must be default constructible");
-  static_assert(std::is_nothrow_destructible_v<T>,
-                "FixedPool values must be nothrow destructible");
 
   template <typename Predicate>
   T* find(Predicate predicate) noexcept {
@@ -129,6 +124,8 @@ class FixedPool {
   constexpr std::size_t capacity() const noexcept { return Capacity; }
 
  private:
+  // Reconstruct instead of assigning T{} so the pool also supports entries
+  // containing non-assignable RAII members (for example CounterLease).
   static void reset(T& item) noexcept {
     item.~T();
     ::new (static_cast<void*>(std::addressof(item))) T();
