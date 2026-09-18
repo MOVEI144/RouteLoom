@@ -1,55 +1,52 @@
 # 実装状況とリリース条件
 
-更新：2026-09-17。
+更新：2026-09-18。
 
 ## 現在の証拠
 
 | 項目 | 状態 |
 |---|---|
-| 統合アーキテクチャ・無線・SDK契約 | 本リポジトリで文書化 |
-| ボード資料 | 公式Wiki・回路図・SoC資料を参照。現物照合は未実施 |
-| 文書・JSON検査 | tools/check_docs.pyで再実行可能。結果は実行記録を参照 |
-| 動作するESP32ファームウェア | 未実装 |
-| Rustホストサービス／CLI／TUI | 未実装 |
-| 暗号Provider・相互運用テスト | 未実装・未認定 |
-| 管理合意・経路制御の実装 | 未実装・未検証 |
-| C3/S3/C5のRF実機試験 | 未実施 |
-| 電池寿命・距離・100台性能 | 未認定 |
-| ライセンス | 未選定。OSSリリースの阻止条件 |
+| 統合アーキテクチャ・無線・SDK契約 | 文書化済み。最終Wire ABIと本番Security Profileは未凍結 |
+| Portable C++ SDK core | **実装済み・host-tested**。GCC/Clang、ASan/UBSan、有限Queue、配送、dedup、receipt、Babel由来routing、C ABI |
+| ESP-NOW / LR250 adapter | **実装済み・build-tested**。単一Radio Owner、固定channel、Peer、短いcallback queue、NVS counter/replay |
+| ESP32 reference firmware | **C3/S3/C5でESP-IDF v6.0.3 build成功**。実機起動・RF通信は未試験 |
+| Rust host service／CLI | **実装済み・host-tested**。fmt、Clippy `-D warnings`、unit test、release build成功。TUIは未実装 |
+| 暗号Provider | PSA AES-GCM、HMAC導出、counter予約、replay windowを持つ開発PSK Providerを実装。本番Identity／EDHOC／RPKではなく未認定 |
+| 経路制御 | feasibility、withdraw、SeqNoRequest、3hop／diamond repairをportable testで実装・確認。実RF、分断再結合、10hopは未認定 |
+| 管理 | SingleAuthorityのportable基礎のみ。quorum／自動選挙／snapshotは未実装 |
+| 電源管理 | 契約とcounter再開の基礎あり。Deep Sleep実機resumeは未実装・未試験 |
+| Board/RF | 公式資料を整理。C3/S3/C5現物照合、HIL、到達距離、都市部干渉、電池寿命は未実施 |
+| 高度機能 | LR500適応、自動channel移行、Mesh OTA、LoRa TX、service failoverは未実装 |
+| ライセンス | 未選定。安定OSSリリースの阻止条件 |
 
-過去の試作用モデルの成功件数を、本SDKの試験結果へ転記しない。文書検査はファームウェアの安全性・無線到達性を証明しない。
+現在の位置付けは**CORE_FIXED_250実装プロトタイプ**。コンパイル・host test成功を、実機通信・RF資格・production-readyの証拠にはしない。
+
+## CIで継続確認するもの
+
+- Portable core：GCC／Clang、Sanitizer ON/OFF、CTest。
+- 文書・生成表・契約・negative mutation：Python検査群。
+- Host：固定Rust toolchainでfmt、Clippy、test、release build。
+- Firmware：固定ESP-IDF `v6.0.3`／commit `76f5dedd9950a3012fee8fb7d5586df21fc67802`でC3/S3/C5をbuildし、sizeとbinary artifactを保存。
+
+これらはhost/build evidenceであり、HIL／RF evidenceではない。
 
 ## 該当機能の公開前に閉じる項目
 
-- **G-WIRE**：通常128Bが全ヘッダ・保護情報込み250Bに収まる最終encoder、型番号、テストベクトルを確定する。
-- **G-SEC**：EDHOCを中心とするProvider、credential形式、暗号suite、nonce/replay保存、失効・再起動を独立レビューする。
-- **G-ROUTE**：Babel由来の採用可能条件・更新・撤回・再起動を一貫して実装し、分断・再結合と10hopを試験する。
-- **G-CONTROL**：SingleAuthorityでは署名操作台帳の保存・復旧を検査する。HAでは追加で選挙、管理log、snapshot、構成員変更、過半数・非voter向け証拠を認定する。HA未完了を基礎Mesh試作の禁止理由にはしない。
-- **G-USB**：認証transcript、後続frame保護、最終byte layout、累積creditとC/Rust共通vectorを実装・相互検証する。
-- **G-BOARD**：現物の基板revision、電源、アンテナ、Pin、実Flash/PSRAM容量を照合する。
-- **G-RF**：全対象のLR250、方向別LR500、broadcast/unicast、callback、切替、Sleep復帰を認定する。
-- **G-SYSTEM**：USB再接続、キュー不足、PC停止、遠隔設定、更新中断を試験する。
-- **G-LICENSE**：プロジェクトライセンスと依存物の利用条件をmaintainerが決める。
+- **G-WIRE**：通常128Bが全ヘッダ・保護情報込み250Bに収まる最終encoder、型番号、C++／Rust共通golden vectorを確定する。
+- **G-SEC**：機器Identity、Join、credential、必須suite、Entropy、鍵更新、失効、再起動を本番Profileとして独立レビューする。開発PSKを代用しない。
+- **G-ROUTE**：portable実装を基準に、restart／GC／timer、分断再結合、複数origin、10hopをmodel testと実機で認定する。
+- **G-CONTROL**：SingleAuthority台帳の永続化を実装し、HAでは選挙、log、snapshot、構成員変更、proofを別途認定する。
+- **G-USB**：device側bridge、認証transcript、frame保護、累積credit、C++／Rust相互運用をHILで確認する。
+- **G-POWER**：Deep Sleep前のdrain、RTC/NVS、wake原因、再初期化、counter安全性、battery-side energyを実機で確認する。
+- **G-BOARD**：現物revision、電源、アンテナ、Pin、Flash/PSRAMを照合する。
+- **G-RF**：C3/S3/C5の有向組合せでLR250、broadcast/unicast、callback欠落、Peer churn、干渉、Sleep復帰を認定する。
+- **G-SYSTEM**：USB再接続、キュー不足、PC停止、長期運転、設定更新を試験する。
+- **G-LICENSE**：本体ライセンス、依存物、NOTICE、コード流用方針を決める。
 
 ## 完成の表示方法
 
-ボードごと・機能ごとに `documented / implemented / host-tested / hardware-tested / qualified` を区別する。C3の合格をC5へ自動継承しない。設定APIのESP_OKはPHY実測ではない。
+機能×board×profileごとに `documented / implemented / host-tested / build-tested / hardware-tested / qualified` を区別する。C3 build成功をC5のRF合格へ継承しない。`ESP_OK`やCI greenは空中のPHY実測ではない。
 
-公開バージョン0.xでもセキュリティを暗黙に無効化しない。RF未認定の実験buildはラベルと診断にEXPERIMENTALを出し、配備承認とは分離する。
+公開0.xでも認証・暗号を暗黙に無効化しない。現在の開発PSK firmwareは必ず`EXPERIMENTAL`として表示し、配備用credentialを持つ本番Profileとは分離する。
 
-[受入試験](spec/acceptance.md)と[実装計画](spec/implementation-plan.md)を参照。
-
-
-## 改訂1.1の範囲
-
-[採否台帳](reviews/2026-09-17-response.md)に30件を対応付け、文面の衝突と安全側の次状態を修正した。Wireの完全凍結は今回の完了条件にしない。G-WIRE/G-SEC/G-ROUTE/G-CONTROL/G-USBは依然として実装・ベクトル・レビュー待ち。
-
-文書構造検査、生成表照合、negative mutation、小さな意味モデルを別々に実行する。全通信機能のimplemented/qualifiedはfalse。過去の254件という数を新specの意味の完全検証と扱わない。
-
-基準線／将来機能は[実装プロファイル](spec/release-profiles.md)、RAM数値は[未実測の資源予算](spec/resource-profiles.md)。ライセンスはmaintainer判断として未選定を維持する。
-
-## 検査の区分
-
-CIは従来の文書構造検査、正本から生成する表の一致、選択した設計契約、純Pythonの小状態モデル／改変検出を別stepとartifactにする。小モデルのauth/commitは入力条件であり、暗号・Raft・NVSや無線driverの実装をテストしていない。
-
-artifact保持30日は便宜的な実行記録であり、長期RF認定証拠の保管ではない。実機認定時はcommit、board、profile、環境、分母、測定器、原traceのdigestを長期保管先へ結び付ける。
+[実装案内](implementation/README.md)／[受入試験](spec/acceptance.md)／[実装プロファイル](spec/release-profiles.md)を参照。

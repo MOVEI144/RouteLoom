@@ -5,3 +5,9 @@ __pycache__/
 /review-contract-results.json
 /contract-test-results.txt
 /routeloom-docs.zip
+/build/
+/build-*/
+/host/target/
+/firmware/**/build/
+*.gcda
+*.gcno

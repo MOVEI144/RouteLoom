@@ -23,6 +23,13 @@ ESP32-C3 / ESP32-S3 / ESP32-C5、2.4 GHz ESP-NOW、Wi-Fi LR 250/500 kbps。最�
 
 [レビュー反映と残るゲート](docs/reviews/2026-09-17-response.md)／[実装プロファイル](docs/spec/release-profiles.md)。
 
+## 実装状況
+
+`CORE_FIXED_250`の実装を開始しています。portable C++ core、C ABI、ESP-IDF向けLR250 adapter、実験用AES-GCM Provider、reference firmware、Rust host framing/daemon/CLI、CIを含みます。これは**prototype**であり、Wire互換性・本番Identity Security・RF/HILは未認定です。
+
+- [v0.1実装の内容と非保証](docs/implementation/README.md)
+- [現在の成熟度と残るGate](docs/STATUS.md)
+
 ## ライセンス
 
 公開時点でライセンスは未選定です。正式なオープンソースリリース前にライセンスと第三者素材の扱いを確定します。文書中の公式資料へのリンクは、その資料の再配布許諾を意味しません。

@@ -6,7 +6,7 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 
 ## 読み順
 
-1. [全体仕様](spec/overview.md) → [アーキテクチャ](spec/architecture.md) → [状態とリリース条件](STATUS.md)
+1. [実装案内](implementation/README.md) → [全体仕様](spec/overview.md) → [アーキテクチャ](spec/architecture.md) → [状態とリリース条件](STATUS.md)
 2. [SDK API](spec/sdk-api.md) → [配送と保存](spec/delivery-storage.md) → [PCサービス](spec/host.md)
 3. [参加とIdentity](spec/identity-membership.md) → [セキュリティ](spec/security.md) → [管理合意](spec/control-plane.md)
 4. [無線](spec/radio.md) → [チャンネル移行](spec/channel-migration.md) → [経路](spec/routing.md) → [省電力](spec/power.md)
