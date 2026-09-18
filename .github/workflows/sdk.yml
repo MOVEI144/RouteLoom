@@ -1,0 +1,102 @@
+name: SDK build and tests
+on:
+  push:
+    branches: [main, implementation/core-fixed-250]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sdk-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        sanitizer: [OFF, ON]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build and test portable C/C++ SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ '${{ matrix.compiler }}' = clang ]; then export CC=clang CXX=clang++; else export CC=gcc CXX=g++; fi
+          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=${{ matrix.sanitizer }} -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel 2
+          ctest --test-dir build --output-on-failure
+      - name: Documentation and contract tests
+        run: |
+          python3 tools/check_docs.py
+          python3 tools/sync_reference_tables.py --check
+          python3 tools/check_review_contracts.py
+          python3 -m unittest discover -s tests -v
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32c3, esp32s3, esp32c5]
+    container:
+      image: espressif/idf:v6.0.3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build fixed-IDF reference firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
+          test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
+          cd firmware/reference_node
+          idf.py set-target '${{ matrix.target }}'
+          idf.py build
+          idf.py size > build/size-report.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: firmware-${{ matrix.target }}
+          path: |
+            idf-commit.txt
+            firmware/reference_node/build/*.bin
+            firmware/reference_node/build/*.elf
+            firmware/reference_node/build/*.map
+            firmware/reference_node/build/size-report.txt
+            firmware/reference_node/build/log/*
+            firmware/reference_node/sdkconfig
+          retention-days: 30
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal --component rustfmt,clippy
+          rustup override set 1.85.1
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-targets
+      - run: cargo build --workspace --release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: host-tools-linux
+          path: |
+            host/target/release/routeloom-host
+            host/target/release/routeloomctl
+            host/Cargo.lock
+          retention-days: 30
