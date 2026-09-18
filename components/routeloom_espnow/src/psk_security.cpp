@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <cstring>
 
-#include "mbedtls/md.h"
 #include "nvs.h"
 #include "psa/crypto.h"
 
@@ -13,6 +12,8 @@ namespace routeloom::espnow {
 namespace {
 constexpr psa_algorithm_t kAeadAlgorithm =
     PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_GCM, kAeadTagSize);
+constexpr psa_algorithm_t kDerivationAlgorithm =
+    PSA_ALG_HMAC(PSA_ALG_SHA_256);
 
 void append_u16(std::uint8_t*& out, const std::uint16_t value) noexcept {
   *out++ = static_cast<std::uint8_t>(value >> 8U);
@@ -41,6 +42,37 @@ Status import_aes_key(const std::array<std::uint8_t, 32>& key,
              ? Status::success()
              : Status::error(StatusCode::InternalError,
                              "PSA AES-GCM key import failed");
+}
+
+Status compute_hmac_sha256(
+    const std::array<std::uint8_t,
+                     DevelopmentPskSecurityProvider::kMasterKeySize>& key,
+    const ByteView input, std::array<std::uint8_t, 32>& output) noexcept {
+  psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+  psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_SIGN_MESSAGE);
+  psa_set_key_algorithm(&attributes, kDerivationAlgorithm);
+  psa_set_key_type(&attributes, PSA_KEY_TYPE_HMAC);
+  psa_set_key_bits(&attributes, key.size() * 8U);
+
+  psa_key_id_t key_id = 0;
+  psa_status_t result =
+      psa_import_key(&attributes, key.data(), key.size(), &key_id);
+  psa_reset_key_attributes(&attributes);
+  if (result != PSA_SUCCESS) {
+    return Status::error(StatusCode::InternalError,
+                         "PSA HMAC key import failed");
+  }
+
+  std::size_t output_length = 0;
+  result = psa_mac_compute(key_id, kDerivationAlgorithm, input.data, input.size,
+                           output.data(), output.size(), &output_length);
+  (void)psa_destroy_key(key_id);
+  if (result != PSA_SUCCESS || output_length != output.size()) {
+    std::fill(output.begin(), output.end(), 0);
+    return Status::error(StatusCode::InternalError,
+                         "PSA HMAC key derivation failed");
+  }
+  return Status::success();
 }
 
 void destroy_key(psa_key_id_t& key_id) noexcept {
@@ -133,19 +165,8 @@ Status DevelopmentPskSecurityProvider::derive_key(
   append_u64(cursor, context.sender);
   append_u64(cursor, context.receiver);
   append_u16(cursor, context.epoch);
-  const mbedtls_md_info_t* md =
-      mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-  if (md == nullptr) {
-    return Status::error(StatusCode::InternalError,
-                         "SHA-256 unavailable");
-  }
-  const int result =
-      mbedtls_md_hmac(md, master_key_.data(), master_key_.size(), info.data(),
-                      info.size(), key.data());
-  return result == 0
-             ? Status::success()
-             : Status::error(StatusCode::InternalError,
-                             "HMAC key derivation failed");
+  return compute_hmac_sha256(master_key_, ByteView{info.data(), info.size()},
+                             key);
 }
 
 void DevelopmentPskSecurityProvider::make_nonce(
