@@ -81,7 +81,7 @@ def validate(root: Path) -> dict:
         test(
             "prototype_status",
             features["implementation_status"] == "core-fixed-250-prototype"
-            and features["schema_version"] == 2,
+            and features["schema_version"] == 3,
         )
         test(
             "prototype_features_implemented",
@@ -94,9 +94,60 @@ def validate(root: Path) -> dict:
             ),
         )
         test(
+            "maturity_fields_honest",
+            all(
+                type(item["host_tested"]) is bool
+                and type(item["build_tested"]) is bool
+                and item["hardware_tested"] is False
+                and (item["implemented"] or not (
+                    item["host_tested"] or item["build_tested"]))
+                and (not item["implemented"] or bool(item["evidence"]))
+                for item in feature_map.values()
+            ),
+        )
+        host_tested_features = {
+            "portable_core",
+            "wire_v1_codec",
+            "c_api",
+            "security_hardening",
+            "multi_hop_repair",
+            "authority_ledger",
+            "usb_device_bridge",
+            "power_coordinator",
+            "host_cli",
+            "tui",
+            "deep_sleep_resume",
+        }
+        build_only_features = {
+            "espnow_lr250_adapter",
+            "reference_firmware_builds",
+            "development_psk_aead",
+            "nvs_replay_store",
+            "nvs_ledger_store",
+            "espnow_power_port",
+        }
+        test(
+            "host_tested_features",
+            all(
+                feature_map[name]["implemented"] is True
+                and feature_map[name]["host_tested"] is True
+                for name in host_tested_features
+            ),
+        )
+        test(
+            "build_only_adapters_not_host_tested",
+            all(
+                feature_map[name]["implemented"] is True
+                and feature_map[name]["build_tested"] is True
+                and feature_map[name]["host_tested"] is False
+                for name in build_only_features
+            ),
+        )
+        test(
             "nothing_falsely_qualified",
             all(
                 item["qualified"] is False
+                and item["hardware_tested"] is False
                 and item["default_enabled"] is False
                 for item in feature_map.values()
             ),
@@ -117,9 +168,10 @@ def validate(root: Path) -> dict:
                     "quorum_authority",
                     "mesh_ota",
                     "service_provider_failover",
-                    "tui",
                     "lora_tx",
-                    "deep_sleep_resume",
+                    "explicit_gateway",
+                    "small_remote_config",
+                    "secure_unicast",
                 }
             ),
         )

@@ -1,7 +1,7 @@
 name: SDK build and tests
 on:
   push:
-    branches: [main, implementation/core-fixed-250]
+    branches: [main, implementation/core-fixed-250, implementation/pre-hil-software]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -29,13 +29,63 @@ jobs:
           if [ '${{ matrix.compiler }}' = clang ]; then export CC=clang CXX=clang++; else export CC=gcc CXX=g++; fi
           cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=${{ matrix.sanitizer }} -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel 2
-          ctest --test-dir build --output-on-failure
+          ctest --test-dir build --output-on-failure | tee ctest-report-${{ matrix.compiler }}-san${{ matrix.sanitizer }}.txt
+      - name: C++ test inventory
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Portable C++ test targets'
+            echo ''
+            echo 'Covers: wire codec, wire golden vectors (valid + invalid), routing'
+            echo '(3hop/diamond/10hop/partition-merge/loop-freedom), authority ledger'
+            echo 'power-cut, USB codec/session/credit, power coordinator model,'
+            echo 'replay/end-protection hardening, C ABI.'
+            echo ''
+            echo '```'
+            ctest --test-dir build -N || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Documentation and contract tests
         run: |
           python3 tools/check_docs.py
           python3 tools/sync_reference_tables.py --check
           python3 tools/check_review_contracts.py
           python3 -m unittest discover -s tests -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: test-report-${{ matrix.compiler }}-san${{ matrix.sanitizer }}
+          path: ctest-report-*.txt
+          retention-days: 30
+  wire-golden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: C++ wire and USB golden-vector tests (valid + invalid)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel 2 --target routeloom_golden_tests routeloom_usb_tests
+          ctest --test-dir build --output-on-failure -R 'routeloom_(golden|usb)_tests'
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal
+          rustup override set 1.85.1
+      - name: Rust wire and USB golden-vector tests
+        working-directory: host
+        run: cargo test -p routeloom-wire -p routeloom-protocol
+      - name: Regenerate shared vectors and require byte-identical files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --manifest-path host/Cargo.toml -p routeloom-wire --example gen_golden
+          cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
+          git diff --exit-code -- protocol/golden protocol/usb-golden
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -91,7 +141,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
-      - run: cargo build --workspace --release
+      - run: cargo build --workspace --release --all-targets
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -100,5 +150,7 @@ jobs:
             host/target/release/routeloom-host
             host/target/release/routeloomctl
             host/target/release/routeloom-tui
+            host/target/release/examples/gen_golden
+            host/target/release/examples/gen_usb_golden
             host/Cargo.lock
           retention-days: 30

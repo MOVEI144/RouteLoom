@@ -13,7 +13,7 @@
 | Rust host service／CLI／TUI | **実装済み・host-tested**。fmt、Clippy `-D warnings`、unit test、release build成功。daemonはUnix socket経由でSTATUS/SENDに加えADAPTER/NODES/DELIVERIES/EVENTS/AUTHORITYを返し、routeloom-tuiは同一JSONをpollする観測者（daemon切断時はbackoff再接続、有界event ring）。情報源の無いfieldは`unknown`表示。実adapter・RF経由の観測は未試験 |
 | USB／Serial transport | **Portable実装・host-tested**。COBS＋CRC-32/ISO-HDLC codec、streaming resync、HELLO→AUTH→ACTIVE→DRAINING session、EXPERIMENTALな開発profile認証（共有secret＋transcript結合MAC、方向別counter・replay拒否）、累積credit、MeshNode統合をC++ device bridgeとRust hostで実装。`protocol/usb-golden`共有vectorでbyte相互検証。実USB driver・HIL・本番Profileは未認定 |
 | 暗号Provider | PSA AES-GCM、context（scope＋network＋sender＋receiver＋epoch）結合HMAC導出、耐電断counter予約、永続replay window＋peer epoch floor（同epochのwindow消失は拒否・新epochで再開、破損recordはIntegrityError、commit失敗は受理巻戻し）を持つ開発PSK Providerを実装。replay規則はportable ReplayGuardとしてhost試験済み（ESP側NVS adapterはbuild check、実機未試験）。`SecurityProvider::security_profile()`で開発ProfileをEXPERIMENTALと表示し、Node起動診断とfirmware logで強制。アプリDATA/END_RECEIPTは常にend保護必須で、未保護frameは診断付き拒否（通常経路に平文DATAなし）。本番Identity／EDHOC／RPKではなく未認定 |
-| 経路制御 | feasibility、withdraw、SeqNoRequest、3hop／diamond repairをportable testで実装・確認。実RF、分断再結合、10hopは未認定 |
+| 経路制御 | feasibility、withdraw、SeqNoRequest、generation／tombstone／hold-down、bounded seqno、3hop／diamond repairに加え、10hop配送、分断再結合、loop-freedomをportable model testで実装・確認。実RFでの認定は未実施 |
 | 管理 | SingleAuthorityの2スロット耐電断台帳（magic/length/schema/seal、hash chain、CRC-32/ISO-HDLC、readback検証、全損時QUARANTINED＋明示recover）をportable実装・host power-cut試験済み。NVS LedgerStorage adapterはbuild-tested。quorum／自動選挙／snapshot／remote config本体は未実装 |
 | 電源管理 | Portable PowerCoordinator（RUNNING→DRAINING→PERSISTING→READY_TO_SLEEP→SLEEPING→RESUMINGの明示state machine、SleepTicket無効化、2スロットCRC電源image、durable pending復元、TIME_UNCERTAIN規則、bounded resume＋discovery fallback）を実装・host model試験済み。ESP-NOW PowerPort／NVS image／reference firmwareのdeep-sleep経路は`ROUTELOOM_DEEP_SLEEP`選択時のみ配線・build-tested。ESP-NOW bounded discoveryは現状UNSUPPORTED。実機resume、消費電流、wake timing、RTC経過計測は未試験 |
 | Board/RF | 公式資料を整理。C3/S3/C5現物照合、HIL、到達距離、都市部干渉、電池寿命は未実施 |
@@ -24,9 +24,10 @@
 
 ## CIで継続確認するもの
 
-- Portable core：GCC／Clang、Sanitizer ON/OFF、CTest。
+- Portable core：GCC／Clang、Sanitizer ON/OFF、CTest。routing 10hop／分断再結合、ledger電断、power model、hardening、USB codec/sessionを含む8 test targetを実行し、ctest reportをartifact保存。
+- Wire golden vector：C++ `routeloom_golden_tests`とRust `routeloom-wire` testが同一`protocol/golden`（valid＋invalid）を共有し、generator再生成後の`git diff --exit-code`でbyte一致を確認。USBは`routeloom_usb_tests`と`routeloom-protocol`の`usb_golden`が`protocol/usb-golden`を共有。
 - 文書・生成表・契約・negative mutation：Python検査群。
-- Host：固定Rust toolchainでfmt、Clippy、test、release build。
+- Host：固定Rust toolchainでfmt、Clippy、test、release build。host binary（daemon／CLI／TUI）をartifact保存。
 - Firmware：固定ESP-IDF `v6.0.3`／commit `76f5dedd9950a3012fee8fb7d5586df21fc67802`でC3/S3/C5をbuildし、sizeとbinary artifactを保存。
 
 これらはhost/build evidenceであり、HIL／RF evidenceではない。
