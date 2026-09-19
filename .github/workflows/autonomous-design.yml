@@ -1,0 +1,35 @@
+name: Autonomous mesh design checks
+on:
+  push:
+    branches: [main, design/autonomous-mesh-issues-3-4-5]
+    paths:
+      - docs/design/autonomous-mesh/**
+      - tools/check_autonomous_design.py
+      - .github/workflows/autonomous-design.yml
+  pull_request:
+    paths:
+      - docs/design/autonomous-mesh/**
+      - tools/check_autonomous_design.py
+      - .github/workflows/autonomous-design.yml
+permissions:
+  contents: read
+jobs:
+  design-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate draft design and planned scenario inventory
+        run: python3 tools/check_autonomous_design.py --report autonomy-design-check.json
+      - name: Archive design-lint evidence (not runtime or RF tests)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: autonomy-design-evidence
+          path: |
+            autonomy-design-check.json
+            docs/design/autonomous-mesh/
+          retention-days: 30
