@@ -2,7 +2,7 @@
 
 ## 1. 契約の段階
 
-本書はframeの意味・上限・保護境界を定義する。**最終のbyte offset、暗号suite、CBOR/固定fieldの割当とgolden vectorはG-WIRE/G-SECで同時凍結する。** 未確定のバイト列を公開互換プロトコルとして実装者に配布しない。
+本書はframeの意味・上限・保護境界を定義する。CORE_FIXED_250 profileのbyte offset・固定field割当・frame type番号は**Wire v1として凍結済み**で、`components/routeloom/include/routeloom/wire.hpp`のoffset表と`protocol/semantics.json`の`frame_numeric_ids`が正本である。C++・Rust共通golden vectorは[protocol/golden](../../protocol/golden/README.md)に置く。暗号suiteと本番credentialは引き続きG-SECで凍結する。未確定のバイト列を公開互換プロトコルとして実装者に配布しない。
 
 一方、以下の長さ、再送ID、mutable/immutable分離、未知版の拒否、通常DATA非分割は変更管理された必須契約である。
 
@@ -29,7 +29,7 @@ remaining deadline、hop、前回送信者などは中継で変わり得る。en
 
 ## 4. フレーム種類
 
-DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子はsemantics.jsonを参照。numeric type IDは未凍結。
+DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v1）。未知typeは復号を拒否する。
 
 未所属ではDISCOVER/OFFERと、[参加状態別allowlist](identity-membership.md)に記載した当該transactionのbootstrapだけを許す。認証や承認を終える前のDATA／route／serviceは拒否する。bootstrapを発見と同義にしない。HOP_ACCEPTはそれ自体を再帰ACKしない。END_RECEIPTは新アプリmessageとしてreceiptを要求しない。
 
@@ -56,8 +56,8 @@ protocol majorが合わなければ参加拒否。minor featureは双方capabili
 
 ## 8. 凍結しなくても守る接続契約
 
-[semantics.json](../../protocol/semantics.json)が状態許可と保護範囲を定義する。numeric type IDやfield幅はnullのままにし、意味の規約と公開互換Wireを混同しない。
+[semantics.json](../../protocol/semantics.json)が状態許可と保護範囲を定義する。numeric type IDとfield幅はWire v1として`frame_numeric_ids`に凍結済みだが、crypto suiteは未凍結のまま残し、意味の規約と本番Profileを混同しない。
 
 end不変部はNetwork、origin、Message ID、固定終端、配送契約、元の最大寿命、payload。hop可変部は前後hop、残hop、残forwarding予算、round、hop crypto counter。可変fieldをend AADへ入れて中継で破壊しない。remaining予算をhop側だけで保護する場合、侵害Relayによる虚偽の延長は終端の独立した時刻／認可検査がない限り完全には防げない。
 
-Provider変更時は終端contextとdestination bindingを再検証する。Message ID不変でも新しいAADを同じnonceで再暗号化しない。暗号化済みの全bodyが250B以下である実encoder試験はG-WIRE/G-SECとして残す。122Bは実証済み長ではなく予算。
+Provider変更時は終端contextとdestination bindingを再検証する。Message ID不変でも新しいAADを同じnonceで再暗号化しない。実encoderは88B header＋128B payload＋2×16B tag＝248Bが250Bに収まることをstatic_assertとgolden vectorで確認済み（test cipher使用）。本番crypto Profileでの再検証はG-SECに残す。122Bは実証済み長ではなく予算。

@@ -2,10 +2,8 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <cstring>
 
-#include "nvs.h"
 #include "psa/crypto.h"
 
 namespace routeloom::espnow {
@@ -101,25 +99,24 @@ Status DevelopmentPskSecurityProvider::initialize(
 
   master_key_ = master_key;
   counter_store_ = &counter_store;
-  const esp_err_t error =
-      nvs_open(replay_namespace, NVS_READWRITE, &replay_handle_);
-  if (error != ESP_OK) {
+  const auto store_status = replay_store_.open(replay_namespace);
+  if (!store_status) {
     counter_store_ = nullptr;
     std::fill(master_key_.begin(), master_key_.end(), 0);
     return Status::error(StatusCode::StorageFailure,
                          "replay nvs_open failed");
   }
-  replay_open_ = true;
   ready_ = true;
   return Status::success();
 }
 
 void DevelopmentPskSecurityProvider::close() noexcept {
-  if (replay_open_) {
-    nvs_close(replay_handle_);
-  }
-  replay_handle_ = 0;
-  replay_open_ = false;
+  // Cached contexts hold leases bound to the old counter store and replay
+  // windows tied to the old store handle: they must not survive a close or a
+  // later re-initialize would reuse stale state.
+  tx_contexts_.clear();
+  rx_contexts_.clear();
+  replay_store_.close();
   ready_ = false;
   counter_store_ = nullptr;
   std::fill(master_key_.begin(), master_key_.end(), 0);
@@ -130,29 +127,6 @@ bool DevelopmentPskSecurityProvider::same_context(
   return left.scope == right.scope && left.network == right.network &&
          left.sender == right.sender && left.receiver == right.receiver &&
          left.epoch == right.epoch;
-}
-
-std::uint64_t DevelopmentPskSecurityProvider::fingerprint(
-    const SecurityContext& context) noexcept {
-  std::uint64_t hash = 1469598103934665603ULL;
-  auto add = [&](const std::uint64_t value) {
-    for (unsigned shift = 0; shift < 64; shift += 8) {
-      hash ^= static_cast<std::uint8_t>(value >> shift);
-      hash *= 1099511628211ULL;
-    }
-  };
-  add(static_cast<std::uint64_t>(context.scope));
-  add(context.network);
-  add(context.sender);
-  add(context.receiver);
-  add(context.epoch);
-  return hash;
-}
-
-std::uint32_t DevelopmentPskSecurityProvider::slot(
-    const SecurityContext& context) noexcept {
-  const std::uint64_t value = fingerprint(context);
-  return static_cast<std::uint32_t>(value ^ (value >> 32U));
 }
 
 Status DevelopmentPskSecurityProvider::derive_key(
@@ -189,19 +163,39 @@ DevelopmentPskSecurityProvider::tx_context(
   if (auto* existing = tx_contexts_.find([&](const TxContext& value) {
         return same_context(value.context, context);
       })) {
+    existing->use_stamp = ++context_stamp_;
     return existing;
   }
-  auto* created = tx_contexts_.allocate();
-  if (created == nullptr || counter_store_ == nullptr) {
+  if (counter_store_ == nullptr) {
     return nullptr;
   }
+  auto* created = tx_contexts_.allocate();
+  if (created == nullptr) {
+    // Bounded pool: evict the least-recently-used context. A dropped lease
+    // forfeits only the uncommitted remainder of its reserved block, which is
+    // the designed crash-recovery behavior — counters never rewind.
+    TxContext* oldest = nullptr;
+    tx_contexts_.for_each([&](TxContext& value) {
+      if (oldest == nullptr || value.use_stamp < oldest->use_stamp) {
+        oldest = &value;
+      }
+    });
+    if (oldest == nullptr || !tx_contexts_.release(oldest)) {
+      return nullptr;
+    }
+    created = tx_contexts_.allocate();
+    if (created == nullptr) {
+      return nullptr;
+    }
+  }
+  created->use_stamp = ++context_stamp_;
   created->context = context;
-  created->fingerprint = fingerprint(context);
+  created->fingerprint = replay_context_fingerprint(context);
   const std::uint8_t direction = static_cast<std::uint8_t>(
       (context.scope == SecurityScope::EndToEnd ? 2U : 0U) |
       (context.sender < context.receiver ? 0U : 1U));
   created->lease.emplace(
-      *counter_store_, slot(context),
+      *counter_store_, ReplayGuard::window_slot(context),
       static_cast<std::uint32_t>(created->fingerprint ^
                                  (created->fingerprint >> 32U)),
       context.epoch, direction, 256);
@@ -231,84 +225,47 @@ Status DevelopmentPskSecurityProvider::rx_context(
   if (auto* existing = rx_contexts_.find([&](const RxContext& value) {
         return same_context(value.context, context);
       })) {
+    // The peer epoch floor must hold on every frame, not only at context
+    // creation: the floor may have advanced since this context was cached
+    // (peer re-handshake), which makes the cached epoch stale.
+    const auto floor_status = replay_guard_.check_floor(context);
+    if (!floor_status) return floor_status;
+    existing->use_stamp = ++context_stamp_;
     result = existing;
     return Status::success();
   }
   auto* created = rx_contexts_.allocate();
   if (created == nullptr) {
-    return Status::error(StatusCode::NoCapacity,
-                         "security rx context table full");
+    // Bounded pool: evict the least-recently-used cached window. Windows are
+    // persisted on accept, so eviction only forces a reload from the store.
+    RxContext* oldest = nullptr;
+    rx_contexts_.for_each([&](RxContext& value) {
+      if (oldest == nullptr || value.use_stamp < oldest->use_stamp) {
+        oldest = &value;
+      }
+    });
+    if (oldest == nullptr || !rx_contexts_.release(oldest)) {
+      return Status::error(StatusCode::NoCapacity,
+                           "security rx context table full");
+    }
+    created = rx_contexts_.allocate();
+    if (created == nullptr) {
+      return Status::error(StatusCode::NoCapacity,
+                           "security rx context table full");
+    }
   }
+  created->use_stamp = ++context_stamp_;
   created->context = context;
-  created->record.fingerprint = fingerprint(context);
-  char key[12]{};
-  std::snprintf(key, sizeof(key), "r%08lx",
-                static_cast<unsigned long>(slot(context)));
-  std::size_t size = sizeof(created->record);
-  const esp_err_t error =
-      nvs_get_blob(replay_handle_, key, &created->record, &size);
-  if (error == ESP_ERR_NVS_NOT_FOUND) {
-    created->record = ReplayRecord{};
-    created->record.fingerprint = fingerprint(context);
-  } else if (error != ESP_OK || size != sizeof(created->record) ||
-             created->record.fingerprint != fingerprint(context)) {
+  // Loads the persisted window and enforces the peer epoch floor. Stale
+  // epochs, corrupt records and windows lost mid-epoch are all rejected
+  // rather than silently re-initialized (see replay.hpp).
+  const auto status = replay_guard_.open_context(context, created->window);
+  if (!status) {
     rx_contexts_.release(created);
-    return error == ESP_OK
-               ? Status::error(
-                     StatusCode::Conflict,
-                     "replay record hash collision or size mismatch")
-               : Status::error(StatusCode::StorageFailure,
-                               "replay state load failed");
+    return status;
   }
   result = created;
   return Status::success();
-}
-
-Status DevelopmentPskSecurityProvider::persist_replay(
-    RxContext& context) noexcept {
-  char key[12]{};
-  std::snprintf(key, sizeof(key), "r%08lx",
-                static_cast<unsigned long>(slot(context.context)));
-  esp_err_t error =
-      nvs_set_blob(replay_handle_, key, &context.record,
-                   sizeof(context.record));
-  if (error == ESP_OK) {
-    error = nvs_commit(replay_handle_);
-  }
-  return error == ESP_OK
-             ? Status::success()
-             : Status::error(StatusCode::StorageFailure,
-                             "replay state commit failed");
-}
-
-Status DevelopmentPskSecurityProvider::accept_counter(
-    RxContext& context, const std::uint64_t counter) noexcept {
-  ReplayRecord next = context.record;
-  if (next.initialized == 0) {
-    next.maximum_counter = counter;
-    next.bitmap = 1;
-    next.initialized = 1;
-  } else if (counter > next.maximum_counter) {
-    const std::uint64_t delta = counter - next.maximum_counter;
-    next.bitmap =
-        delta >= 64 ? 1ULL : ((next.bitmap << delta) | 1ULL);
-    next.maximum_counter = counter;
-  } else {
-    const std::uint64_t delta = next.maximum_counter - counter;
-    if (delta >= 64 || (next.bitmap & (1ULL << delta)) != 0) {
-      return Status::error(StatusCode::ReplayRejected,
-                           "replayed security counter");
-    }
-    next.bitmap |= 1ULL << delta;
-  }
-  ++next.generation;
-  const ReplayRecord previous = context.record;
-  context.record = next;
-  const auto status = persist_replay(context);
-  if (!status) {
-    context.record = previous;
-  }
-  return status;
 }
 
 Status DevelopmentPskSecurityProvider::seal(
@@ -431,7 +388,7 @@ Status DevelopmentPskSecurityProvider::open(
   RxContext* replay = nullptr;
   status = rx_context(context, replay);
   if (status) {
-    status = accept_counter(*replay, counter);
+    status = replay_guard_.accept(replay->window, counter);
   }
   if (!status && plaintext.data != nullptr && plaintext.size != 0) {
     std::memset(plaintext.data, 0, plaintext.size);

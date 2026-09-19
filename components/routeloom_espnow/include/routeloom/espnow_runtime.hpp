@@ -53,6 +53,19 @@ class EspNowRuntime final : public RadioPort {
   void stop() noexcept;
   void poll_once() noexcept;
 
+  std::uint8_t channel() const noexcept { return config_.channel; }
+  // Iterate registered peer mappings (NodeId, MAC, link metric) for the
+  // power coordinator's peer-cache capture.
+  template <typename Fn>
+  void for_each_peer(Fn fn) const noexcept {
+    for (const auto& peer : peers_) {
+      if (peer.used) fn(peer.node, peer.mac, peer.metric);
+    }
+  }
+  // Marks the runtime as started when node bring-up was driven by a
+  // PowerCoordinator resume path instead of start().
+  void mark_started() noexcept { started_ = true; }
+
   Status send_application(NodeId destination, ByteView payload,
                           const SendOptions& options, MessageId& id) noexcept;
   DeliveryResult delivery(const MessageId& id) const noexcept { return node_.delivery(id); }

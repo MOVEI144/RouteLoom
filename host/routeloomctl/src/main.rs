@@ -14,13 +14,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut socket = PathBuf::from("/tmp/routeloom.sock");
     let mut remaining = Vec::new();
+    // --socket is accepted in any position, not only before the command.
     while let Some(argument) = args.next() {
         if argument == "--socket" {
             socket = PathBuf::from(args.next().ok_or("--socket requires a path")?);
         } else {
             remaining.push(argument);
-            remaining.extend(args);
-            break;
         }
     }
     let command = match remaining.as_slice() {

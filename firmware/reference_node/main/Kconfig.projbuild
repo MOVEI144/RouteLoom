@@ -1,7 +1,7 @@
 menu "RouteLoom reference node"
 
 config ROUTELOOM_NETWORK_ID
-    hex "Network ID (low 32 bits for provisional wire)"
+    hex "Network ID (low 32 bits on Wire v1)"
     default 0x524c0001
 
 config ROUTELOOM_NODE_ID
@@ -34,5 +34,26 @@ config ROUTELOOM_DEVELOPMENT_KEY_HEX
     help
         Shared development key. Never use this default in a deployment. This provider does not
         replace the planned device-identity/EDHOC security profile.
+
+config ROUTELOOM_DEEP_SLEEP
+    bool "Drive a deep-sleep prepare/enter cycle through the power coordinator"
+    default n
+    help
+        Experimental reference path. When enabled, app_main pumps the runtime
+        and PowerCoordinator single-threaded, prepares sleep after
+        ROUTELOOM_SLEEP_AFTER_MS of uptime and enters deep sleep with a
+        timer wake. Real wake timing and current draw remain HIL work.
+
+config ROUTELOOM_SLEEP_AFTER_MS
+    int "Uptime before sleep_prepare is requested"
+    range 1000 3600000
+    default 10000
+    depends on ROUTELOOM_DEEP_SLEEP
+
+config ROUTELOOM_SLEEP_DURATION_MS
+    int "Timer wake duration for the deep-sleep reference cycle"
+    range 100 86400000
+    default 30000
+    depends on ROUTELOOM_DEEP_SLEEP
 
 endmenu

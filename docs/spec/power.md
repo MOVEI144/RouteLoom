@@ -61,3 +61,11 @@ C3/S3/C5のwake GPIOは異なり、XIAOのD番号も異なる。USB保持、LED�
 [電源断契約](crash-time-resources.md)のstore別処置を使う。nonce/replay／voter／Authority／membershipの破損を汎用erase-and-initで処理しない。spoolの時計が失われたら未使用の残時間を再付与しない。
 
 wake性能はwarm RTC/context resume、cold同相手、new peer auth、channel recovery、key rotation recoveryに分ける。500ms目標はwarm条件から開始し、NVS populated／更新履歴fixtureとRF calibrationを含める。sensor処理時間は別計測だが電池energyには含める。
+
+## 9. 実装状況
+
+Portable `PowerCoordinator`（`components/routeloom/include/routeloom/power.hpp`）が§2の二段階手順を実装する。状態はRUNNING→DRAINING→PERSISTING→READY_TO_SLEEP→SLEEPING→RESUMING→RUNNINGに限定し、遷移は全て明示でbounded。`SleepTicket`はradio世代・config revision・pending仕事世代・アプリイベント世代に結び付き、新規TX・RX・アプリイベント・config変更・radio resetで無効化される。SLEEPINGへはREADY_TO_SLEEPかつ有効ticketからのみ入る。
+
+§3の未完了メッセージはFail／Save／Deferの契約へ移し、保存はCRC付き2スロットの電源imageへ入る。§5の復帰はcold bootとdeep-sleep wakeを別入力として起動処理を通り、保存peer→bounded確認窓→失敗時のみ限定discoveryの順で進む。経過時間が不明なdurable pendingは`TIME_UNCERTAIN`で止め、自動再送しない。host model試験で全遷移、ticket無効化、各policy、電源断を跨ぐcounter非後退、cold/resume分離を確認した。
+
+ESP-NOW側は`EspNowPowerPort`とNVS image adapterを実装し、reference firmwareは`ROUTELOOM_DEEP_SLEEP`選択時のみ`esp_deep_sleep_start`経路・RTC marker・wake原因分類を配線する（build-tested）。bounded discoveryはESP-NOW adapterが現状UNSUPPORTEDを返す。実機の消費電流、wake timing、RTC経過時間、RF挙動は未試験であり、本節をHIL証拠として扱わない。

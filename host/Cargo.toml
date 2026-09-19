@@ -1,5 +1,11 @@
 [workspace]
-members = ["routeloom-protocol", "routeloom-host", "routeloomctl"]
+members = [
+    "routeloom-protocol",
+    "routeloom-wire",
+    "routeloom-host",
+    "routeloomctl",
+    "routeloom-tui",
+]
 resolver = "2"
 
 [workspace.package]

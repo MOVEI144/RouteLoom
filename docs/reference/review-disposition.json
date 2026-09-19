@@ -28,7 +28,9 @@
       "disposition": "採用・範囲を限定",
       "action": "FD更新、serial比較、専用SeqNoRequest、再起動時の安全停止を追加",
       "docs": [
-        "docs/spec/routing.md"
+        "docs/spec/routing.md",
+        "tests/cpp/test_routing_sims.cpp",
+        "components/routeloom/include/routeloom/routing.hpp"
       ],
       "remaining_gate": "G-ROUTE：GC/restart/timerと全graph検証",
       "implementation_verified": false
