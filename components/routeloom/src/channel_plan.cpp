@@ -1,5 +1,7 @@
 #include "routeloom/channel_plan.hpp"
 
+#include "routeloom/migration.hpp"  // migration_const::kHelperDwellMs cap
+
 namespace routeloom {
 namespace {
 
@@ -692,6 +694,20 @@ Status ChannelOperationRunner::set_home_channel(
   }
   home_channel_ = channel;
   committed_channel_ = channel;
+  return Status::success();
+}
+
+Status ChannelOperationRunner::set_visit_hard_cap(
+    const std::uint32_t cap_ms) noexcept {
+  // Never below the survey bound and never above the helper-visit dwell the
+  // migration contract commits to (800ms): the runner's visit check is a
+  // failsafe, not the policy — coordinator leases still cap surveys at
+  // kSurveyVisitMaxMs.
+  if (cap_ms < migration_const::kSurveyVisitMaxMs ||
+      cap_ms > migration_const::kHelperDwellMs || busy()) {
+    return reject(StatusCode::InvalidArgument, "visit cap out of bounds");
+  }
+  config_.visit_hard_cap_ms = cap_ms;
   return Status::success();
 }
 

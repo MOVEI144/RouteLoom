@@ -1921,10 +1921,17 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
       break;
     case FrameType::NeighborProbe:
     case FrameType::NeighborResult:
-      // Link-scoped autonomy control (02-discovery.md §3): strictly 1-hop,
-      // bound to the immediate peer, never end-protected. The sink
-      // re-validates against the verified binding/phase — open_link alone is
-      // not evidence (06 §3.1).
+    case FrameType::TimeSync:
+    case FrameType::ChannelNotice:
+    case FrameType::ControlObject:
+    case FrameType::ObjectChunk:
+    case FrameType::ObjectAck:
+      // Link-scoped autonomy control (02-discovery.md §3, migration
+      // transport 04-channel-migration.md §5-§9): strictly 1-hop, bound to
+      // the immediate peer, never end-protected. The sink re-validates
+      // against the verified binding/phase — open_link alone is not
+      // evidence (06 §3.1), and migration objects still face the real
+      // signature verifier before they can move any state.
       if (autonomy_sink_ != nullptr && frame.header.destination == config_.node &&
           (frame.header.flags & wire::kFlagEndProtected) == 0) {
         autonomy_sink_->on_autonomy_frame(

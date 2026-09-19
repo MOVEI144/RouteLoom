@@ -16,6 +16,10 @@
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_autonomy.hpp"
 #endif
+#if CONFIG_ROUTELOOM_MIGRATION
+#include "routeloom/espnow_migration.hpp"
+#include "routeloom/nvs_ledger_store.hpp"
+#endif
 #include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
@@ -219,8 +223,20 @@ extern "C" void app_main(void) {
   }
   static DevelopmentPskSecurityProvider security;
   status = security.initialize(key, counter_store, "rlreplay");
-  std::fill(key.begin(), key.end(), 0);
   if (!status) fail(status.detail);
+
+#if CONFIG_ROUTELOOM_MIGRATION
+  // Channel migration (issue #5): durable plan/commit/active state plus the
+  // dev-PSK commit verifier. The plan store opens BEFORE the runtime so the
+  // committed channel can reconcile the boot channel — a committed plan
+  // never restores a channel by itself, it only picks the channel the radio
+  // starts on, and restart() still runs the participant's resume checks.
+  static routeloom::espnow::NvsPlanStore plan_store;
+  status = plan_store.open("rlplan");
+  if (!status) fail(status.detail);
+  std::uint8_t boot_channel = 0;
+  const bool have_boot_channel = plan_store.boot_channel(boot_channel);
+#endif
 
   std::uint32_t message_session = 0;
   status = next_boot_session(message_session);
@@ -237,7 +253,54 @@ extern "C" void app_main(void) {
   config.node.route_generation = static_cast<std::uint16_t>(
       ((message_session - 1U) % 0xFFFFU) + 1U);
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
+#if CONFIG_ROUTELOOM_MIGRATION
+  if (have_boot_channel) {
+    ESP_LOGW(kTag, "migration boot channel %u overrides static %u",
+             static_cast<unsigned>(boot_channel),
+             static_cast<unsigned>(config.channel));
+    config.channel = boot_channel;
+  }
+#endif
   config.max_tx_power_qdbm = CONFIG_ROUTELOOM_TX_POWER_QDBM;
+
+#if CONFIG_ROUTELOOM_MIGRATION
+  routeloom::espnow::EspNowMigrationConfig migration_config{};
+  const bool self_authority =
+#if CONFIG_ROUTELOOM_MIGRATION_SELF_AUTHORITY
+      true;
+#else
+      false;
+#endif
+  migration_config.mode = CONFIG_ROUTELOOM_MIGRATION == 1
+                              ? routeloom::MigrationMode::Observe
+                              : routeloom::MigrationMode::Manual;
+  migration_config.authority_role = self_authority;
+  migration_config.agent.authority_role = self_authority;
+  migration_config.agent.participant.node = config.node.node;
+  migration_config.agent.participant.network = config.node.network;
+  migration_config.agent.participant.authority =
+      self_authority ? config.node.node
+                     : static_cast<NodeId>(CONFIG_ROUTELOOM_MIGRATION_AUTHORITY);
+  migration_config.agent.participant.home_channel = config.channel;
+  migration_config.agent.self_rediscovery_capable = true;
+  // Measurement inputs are deployment parameters, not firmware guesses.
+  migration_config.agent.measurements.management_rtt_p99_ms =
+      CONFIG_ROUTELOOM_MIGRATION_RTT_P99_MS;
+  migration_config.agent.measurements.control_delivery_bound_ms =
+      CONFIG_ROUTELOOM_MIGRATION_DELIVERY_BOUND_MS;
+  migration_config.agent.measurements.required_transfer_ms =
+      CONFIG_ROUTELOOM_MIGRATION_TRANSFER_BOUND_MS;
+  migration_config.agent.measurements.measured_switch_bound_ms =
+      CONFIG_ROUTELOOM_MIGRATION_SWITCH_BOUND_MS;
+  migration_config.coordinator.node = config.node.node;
+  migration_config.coordinator.home_channel = config.channel;
+  // Commit evidence derives from the same dev-PSK master key, domain
+  // separated inside the verifier — Development profile only.
+  static routeloom::espnow::DevPskCommitVerifier commit_verifier;
+  status = commit_verifier.initialize(key);
+  if (!status) fail(status.detail);
+#endif
+  std::fill(key.begin(), key.end(), 0);
 
   static EspNowRuntime runtime(config, security, observer);
   status = runtime.initialize();
@@ -291,6 +354,27 @@ extern "C" void app_main(void) {
   ESP_LOGW(kTag,
            "EXPERIMENTAL discovery active: dev-PSK possession proof is not "
            "a production identity");
+#endif
+
+#if CONFIG_ROUTELOOM_MIGRATION
+  // Channel migration (issue #5): participant + coordinator over the
+  // authenticated control-object lane, with durable plan/commit/active
+  // records in "rlplan". The authority role needs a durable authority ledger
+  // (operation ids + audit anchor) before it may issue.
+  static routeloom::espnow::NvsLedgerStore authority_ledger;
+  if (self_authority) {
+    status = authority_ledger.open("rlmauth");
+    if (!status) fail(status.detail);
+  }
+  static routeloom::espnow::EspNowMigration migration(
+      migration_config, runtime, plan_store, commit_verifier,
+      self_authority ? &authority_ledger : nullptr);
+  status = migration.start();
+  if (!status) fail(status.detail);
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL migration lane active (mode=%d): dev-PSK commit "
+           "evidence is not a production identity",
+           CONFIG_ROUTELOOM_MIGRATION);
 #endif
 
 #if CONFIG_ROUTELOOM_DEEP_SLEEP

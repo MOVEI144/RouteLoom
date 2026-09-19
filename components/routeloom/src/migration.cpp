@@ -15,6 +15,12 @@ constexpr Status reject(const StatusCode code, const char* detail) noexcept {
 constexpr std::uint32_t kCommitMagic = 0x524C4331U;   // "RLC1"
 constexpr std::uint32_t kActiveMagic = 0x524C5031U;   // "RLP1"
 constexpr std::uint8_t kRecordVersion = 1;
+// Commit records gained the persisted authority-signature tail in v2 so a
+// helper can re-emit verified commit evidence after a restart. Decode
+// accepts v1 (signature absent) for records written by earlier firmware;
+// encode always writes v2.
+constexpr std::uint8_t kCommitRecordVersion = 2;
+constexpr std::uint8_t kCommitRecordVersionLegacy = 1;
 
 // Signed authority->local conversion shared by validation (before the plan
 // is adopted) and runtime paths. peer_offset = authority - local, so
@@ -394,7 +400,7 @@ Status commit_record_encode(const CommitRecord& record,
   out_size = 0;
   ByteWriter writer(target);
   Status status = writer.write_u32(kCommitMagic);
-  if (status) status = writer.write_u8(kRecordVersion);
+  if (status) status = writer.write_u8(kCommitRecordVersion);
   if (status) status = writer.write_u8(record.present ? 1U : 0U);
   if (status) status = writer.write_u16(0);
   if (status) status = write_operation(writer, record.operation);
@@ -402,6 +408,11 @@ Status commit_record_encode(const CommitRecord& record,
     status = writer.write_bytes(ByteView{record.plan_hash.data(), 32});
   }
   if (status) status = writer.write_u32(record.new_epoch.value);
+  if (status) status = writer.write_u16(record.signature_size);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{record.signature.data(), record.signature.size()});
+  }
   if (!status) return status;
   const std::size_t body = writer.size();
   status = writer.write_u32(
@@ -421,8 +432,9 @@ Status commit_record_decode(const ByteView encoded, CommitRecord& out) noexcept 
   if (status) status = reader.read_u8(version);
   if (status) status = reader.read_u8(present);
   if (status) status = reader.read_u16(reserved);
-  if (!status || magic != kCommitMagic || version != kRecordVersion ||
-      reserved != 0) {
+  if (!status || magic != kCommitMagic || reserved != 0 ||
+      (version != kCommitRecordVersion &&
+       version != kCommitRecordVersionLegacy)) {
     return reject(StatusCode::IntegrityError, "COMMIT_RECORD_DECODE");
   }
   if (status) status = read_operation(reader, out.operation);
@@ -430,6 +442,20 @@ Status commit_record_decode(const ByteView encoded, CommitRecord& out) noexcept 
     status = reader.read_bytes(MutableByteView{out.plan_hash.data(), 32});
   }
   if (status) status = reader.read_u32(out.new_epoch.value);
+  if (status && version >= kCommitRecordVersion) {
+    std::uint16_t signature_size = 0;
+    status = reader.read_u16(signature_size);
+    if (status && signature_size > out.signature.size()) {
+      status = reject(StatusCode::IntegrityError, "COMMIT_RECORD_SIG");
+    }
+    if (status) {
+      status = reader.read_bytes(
+          MutableByteView{out.signature.data(), out.signature.size()});
+    }
+    if (status) {
+      out.signature_size = static_cast<std::uint8_t>(signature_size);
+    }
+  }
   if (!status) return reject(StatusCode::IntegrityError, "COMMIT_RECORD_DECODE");
   const std::size_t body = reader.consumed();
   status = reader.read_u32(crc);
@@ -833,7 +859,18 @@ Status MigrationParticipant::prepare(const ByteView plan_blob,
 Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
                                     const AuthorityOperation& operation,
                                     const MonotonicMs now_ms) noexcept {
+  return commit(verified, operation, ByteView{}, now_ms);
+}
+
+Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
+                                    const AuthorityOperation& operation,
+                                    const ByteView signature,
+                                    const MonotonicMs now_ms) noexcept {
   (void)now_ms;
+  if (signature.size > migration_const::kMaxCommitSignature) {
+    ++stats_.commit_rejects;
+    return reject(StatusCode::InvalidArgument, "COMMIT_SIGNATURE_BOUND");
+  }
   if (!verified.valid()) {
     // Commit evidence that did not pass real verification is never accepted
     // (D5-01): a blob alone — or a bare claim — never switches.
@@ -861,6 +898,10 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
   record.operation = operation;
   record.plan_hash = verified.plan_hash();
   record.new_epoch = verified.new_epoch();
+  if (signature.size > 0) {
+    std::memcpy(record.signature.data(), signature.data, signature.size);
+    record.signature_size = static_cast<std::uint8_t>(signature.size);
+  }
   switch (phase_) {
     case ParticipantPhase::Preparing:
       if (verified.plan_hash() != pending_hash_ ||
@@ -930,7 +971,7 @@ Status MigrationParticipant::note_commit_evidence(
     ++stats_.commit_rejects;
     return checked;
   }
-  return commit(verified, operation, now_ms);
+  return commit(verified, operation, signature, now_ms);
 }
 
 Status MigrationParticipant::note_clock(const ClockMapping& mapping,

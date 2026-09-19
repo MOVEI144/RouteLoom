@@ -55,7 +55,7 @@ constexpr std::uint8_t kAutomaticRollbacksMax = 1;       // automatic_rollbacks_
 constexpr std::size_t kMaxHelpers = 8;                   // helper set bound
 constexpr std::size_t kPlanBlobMax = 384;                // encoded plan bound
 constexpr std::size_t kSnapshotMax = 544;                // encoded snapshot bound
-constexpr std::size_t kCommitRecordSize = 160;           // durable commit record
+constexpr std::size_t kCommitRecordSize = 224;           // durable commit record (v2)
 constexpr std::size_t kActiveRecordSize = 56;            // durable active record
 constexpr std::size_t kMaxCommitSignature = 64;          // signature evidence bound
 }  // namespace migration_const
@@ -370,11 +370,19 @@ class PlanStorage {
 };
 
 // What a participant durably commits: the verified operation, the blob hash
-// it references and the new channel epoch. Distinct from the active record.
+// it references, the new channel epoch and — when the commit arrived through
+// signed commit evidence — the authority signature that minted it. Keeping
+// the signature lets a helper re-emit verified commit evidence to stranded
+// nodes after a restart instead of silently losing that serving capability
+// (04 §9.2). A record adopted from a recovery snapshot carries no commit
+// signature: the snapshot signature signs different bytes and is never
+// relabelled as commit evidence.
 struct CommitRecord {
   AuthorityOperation operation{};
   Digest256 plan_hash{};
   ChannelEpoch new_epoch{};
+  std::array<std::uint8_t, migration_const::kMaxCommitSignature> signature{};
+  std::uint8_t signature_size{0};
   bool present{false};
 };
 
@@ -509,6 +517,15 @@ class MigrationParticipant {
   const MigrationPlan* pending_plan() const noexcept {
     return plan_known_ ? &pending_plan_ : nullptr;
   }
+  // Digest of the currently held plan blob (valid while plan_known_). The
+  // Owner uses it to label READY/result reports without re-digesting.
+  const Digest256& pending_hash() const noexcept { return pending_hash_; }
+  // Local-time switch instant of the held plan (0 when no clock is armed).
+  // Report/notice emission only — the engine's own timing is unchanged.
+  MonotonicMs pending_switch_local() const noexcept {
+    if (!plan_known_ || !clock_valid_) return 0;
+    return to_local(pending_plan_.switch_reference_ms);
+  }
 
   // --- §7 prefix bookkeeping --------------------------------------------------
   Status note_assess() noexcept;       // Stable -> Assess
@@ -533,9 +550,17 @@ class MigrationParticipant {
   Status commit(const VerifiedAuthorityPlan& verified,
                 const AuthorityOperation& operation,
                 MonotonicMs now_ms) noexcept;
+  // Same as commit() but also persists the authority signature on the
+  // durable commit record so this node can re-emit verified commit evidence
+  // to stranded peers after a restart (04 §9.2 helper duty). A signature
+  // over the bound limit is refused outright.
+  Status commit(const VerifiedAuthorityPlan& verified,
+                const AuthorityOperation& operation, ByteView signature,
+                MonotonicMs now_ms) noexcept;
   // Convenience: run the real verifier on received commit evidence
   // (operation + the plan hash and new epoch it references), then commit()
-  // only when it mints a valid VerifiedAuthorityPlan.
+  // only when it mints a valid VerifiedAuthorityPlan. The accepted
+  // signature is persisted with the commit record.
   Status note_commit_evidence(const AuthorityOperation& operation,
                               const Digest256& plan_hash, ChannelEpoch new_epoch,
                               ByteView signature, MonotonicMs now_ms) noexcept;

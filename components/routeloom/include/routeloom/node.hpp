@@ -59,11 +59,13 @@ class NullObserver final : public NodeObserver {
 };
 
 // Narrow sink for link-scoped autonomy control payloads (NeighborProbe /
-// NeighborResult, docs/design/autonomous-mesh/02-discovery.md §3). The radio
-// Owner installs one; a frame reaches it only after wire::open_link and the
-// network/peer identity checks pass, so payload bytes are link-authenticated
-// but NOT end-verified — the sink must still re-validate them (binding
-// generation, neighbor phase) before acting.
+// NeighborResult, docs/design/autonomous-mesh/02-discovery.md §3, plus the
+// migration-control set TimeSync/ChannelNotice/ControlObject/ObjectChunk/
+// ObjectAck, 04-channel-migration.md §5-§9). The radio Owner installs one; a
+// frame reaches it only after wire::open_link and the network/peer identity
+// checks pass, so payload bytes are link-authenticated but NOT end-verified
+// — the sink must still re-validate them (binding generation, neighbor
+// phase, authority signature verification) before acting.
 class AutonomyFrameSink {
  public:
   virtual ~AutonomyFrameSink() = default;

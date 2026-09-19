@@ -549,6 +549,9 @@ void EspNowRuntime::poll_once() noexcept {
   // Serialized channel operations advance here: drain fence -> verified
   // apply -> bounded visit dwell -> verified return home (04 §3/§8).
   channel_runner_.poll(now);
+  if (migration_ != nullptr) {
+    migration_->poll(now);
+  }
   node_.poll(now);
 }
 
@@ -762,6 +765,22 @@ Status EspNowRuntime::send_wire(const BindingId binding,
 void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
                                       const ByteView payload,
                                       const MonotonicMs now_ms) noexcept {
+  // Migration control payloads route to the attached migration sink; the
+  // MeshNode admission gate (open_link + identity checks) already ran, and
+  // the sink re-validates semantics (authority signature, phase) itself.
+  switch (type) {
+    case FrameType::TimeSync:
+    case FrameType::ChannelNotice:
+    case FrameType::ControlObject:
+    case FrameType::ObjectChunk:
+    case FrameType::ObjectAck:
+      if (migration_ != nullptr) {
+        migration_->on_migration_frame(peer, type, payload, now_ms);
+      }
+      return;
+    default:
+      break;
+  }
   if (discovery_ == nullptr) {
     return;
   }
@@ -770,6 +789,114 @@ void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
     return;
   }
   discovery_->on_wire_rx(record->mac.bytes, type, payload, now_ms);
+}
+
+// --- Migration transport (04 §5-§9) ------------------------------------------------
+
+Status EspNowRuntime::attach_migration(MigrationFrameSink& sink) noexcept {
+  if (migration_ != nullptr) {
+    return Status::error(StatusCode::InvalidState,
+                         "migration already attached");
+  }
+  // Helper old-channel visits dwell up to the committed 800ms (04 §9.2) —
+  // beyond the 200ms survey cap. The runner's hard cap is the failsafe;
+  // survey leases still enforce their own bound at the coordinator.
+  const Status status =
+      channel_runner_.set_visit_hard_cap(migration_const::kHelperDwellMs);
+  if (!status) return status;
+  migration_ = &sink;
+  return Status::success();
+}
+
+Status EspNowRuntime::migration_send(const NodeId peer, const FrameType type,
+                                     const ByteView payload) noexcept {
+  if (migration_ == nullptr) {
+    return Status::error(StatusCode::InvalidState,
+                         "migration not attached");
+  }
+  // The serialized channel operation owns the radio — except inside the
+  // off-channel dwell, where migration control is the visit's purpose.
+  if (channel_runner_.busy() && !channel_runner_.visiting()) {
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
+  }
+  switch (type) {
+    case FrameType::TimeSync:
+    case FrameType::ChannelNotice:
+    case FrameType::ControlObject:
+    case FrameType::ObjectChunk:
+    case FrameType::ObjectAck:
+      break;  // explicit allowlist — no other type rides this lane
+    default:
+      return Status::error(StatusCode::InvalidArgument,
+                           "type not allowed on the migration lane");
+  }
+  const Peer* record = find_peer(peer);
+  if (record == nullptr || !record->driver_registered) {
+    return Status::error(StatusCode::NotFound,
+                         "peer is not driver-registered");
+  }
+  if (record->autonomy) {
+    // Discovery-managed peers additionally need a verified Bound/Reachable
+    // record — a stale driver peer never silently carries plan material.
+    NeighborPhase phase{};
+    if (discovery_ == nullptr ||
+        !discovery_->phase_of(peer, phase) ||
+        (phase != NeighborPhase::Bound &&
+         phase != NeighborPhase::Reachable)) {
+      return Status::error(StatusCode::AuthorizationFailed,
+                           "peer binding not current");
+    }
+  }
+  wire::PlainFrame frame{};
+  frame.header.type = type;
+  frame.header.delivery = DeliveryClass::BestEffort;
+  frame.header.hop_remaining = 1;
+  frame.header.network = config_.node.network;
+  frame.header.origin = config_.node.node;
+  frame.header.destination = peer;
+  frame.header.previous_hop = config_.node.node;
+  frame.header.next_hop = peer;
+  frame.header.message =
+      MessageId{config_.node.message_session, ++autonomy_sequence_};
+  frame.header.remaining_deadline_ms = kAutonomyWireLifetimeMs;
+  frame.header.original_lifetime_ms = kAutonomyWireLifetimeMs;
+  frame.header.link_epoch = config_.node.link_epoch;
+  frame.header.end_epoch = config_.node.end_epoch;
+  if (payload.size > frame.payload.size()) {
+    return Status::error(StatusCode::NoCapacity,
+                         "migration payload exceeds wire budget");
+  }
+  if (payload.size > 0) {
+    std::memcpy(frame.payload.data(), payload.data, payload.size);
+  }
+  frame.payload_size = payload.size;
+  wire::EncodedFrame encoded{};
+  const Status status = wire::encode_new(frame, security_, encoded);
+  if (!status) {
+    return status;
+  }
+  return send_raw(record->mac, encoded.view());
+}
+
+std::size_t EspNowRuntime::migration_peers(NodeId* out,
+                                           const std::size_t capacity)
+    const noexcept {
+  std::size_t count = 0;
+  for (const auto& peer : peers_) {
+    if (count >= capacity) break;
+    if (!peer.used || !peer.driver_registered) continue;
+    if (peer.autonomy) {
+      NeighborPhase phase{};
+      if (discovery_ == nullptr ||
+          !discovery_->phase_of(peer.node, phase) ||
+          (phase != NeighborPhase::Bound &&
+           phase != NeighborPhase::Reachable)) {
+        continue;
+      }
+    }
+    out[count++] = peer.node;
+  }
+  return count;
 }
 
 // --- Peer lease sync (02 §7, contracts peer_partition) ---------------------------

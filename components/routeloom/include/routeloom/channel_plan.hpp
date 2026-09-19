@@ -490,6 +490,12 @@ class ChannelOperationRunner {
   // configuration are detectable against it (X-02).
   RadioGeneration radio_generation() const noexcept { return generation_; }
   Status set_home_channel(std::uint8_t channel) noexcept;
+  // Raise/lower the per-visit dwell hard cap. Needed by the migration agent:
+  // helper old-channel visits dwell up to helper_dwell_ms=800 (04 §9.2),
+  // beyond the 200ms survey cap. The cap may never exceed kHelperDwellMs —
+  // survey leases still enforce kSurveyVisitMaxMs at the coordinator level,
+  // so only engine-scheduled helper visits can use the larger bound.
+  Status set_visit_hard_cap(std::uint32_t cap_ms) noexcept;
 
  private:
   enum class Phase : std::uint8_t { Idle = 0, WaitDrain = 1, VisitDwell = 2 };

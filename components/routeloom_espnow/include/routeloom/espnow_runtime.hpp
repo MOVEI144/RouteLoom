@@ -11,6 +11,7 @@
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/channel_plan.hpp"
 #include "routeloom/discovery.hpp"
+#include "routeloom/migration_wire.hpp"
 #include "routeloom/node.hpp"
 
 namespace routeloom::espnow {
@@ -46,7 +47,8 @@ struct EspNowRuntimeConfig {
 // separately (01 §3.1).
 class EspNowRuntime final : public RadioPort,
                             public DiscoveryPort,
-                            public AutonomyFrameSink {
+                            public AutonomyFrameSink,
+                            public MigrationWirePort {
  public:
   static constexpr std::size_t kPeerCapacity = 19;
   static constexpr std::size_t kEventQueueCapacity = 48;
@@ -127,6 +129,33 @@ class EspNowRuntime final : public RadioPort,
   // Wire-lane autonomy RX after MeshNode's open_link + identity checks.
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
                          MonotonicMs now_ms) noexcept override;
+
+  // --- Migration transport (04 §5-§9, P5b) ---------------------------------------
+  // Attach the migration sink (the EspNowMigration bundle's agent). While
+  // attached, link-authenticated TimeSync/ChannelNotice/ControlObject/
+  // ObjectChunk/ObjectAck payloads are routed to it, its poll() runs inside
+  // poll_once(), and the runner's visit hard cap is raised to the committed
+  // helper dwell (800ms) so old-channel serve visits fit — coordinator
+  // survey leases keep enforcing the 200ms bound themselves.
+  Status attach_migration(MigrationFrameSink& sink) noexcept;
+  MigrationFrameSink* migration() const noexcept { return migration_; }
+
+  // --- MigrationWirePort ---------------------------------------------------------
+  // Sealed Wire v1 autonomy-payload TX to a verified peer (any registered
+  // driver peer; autonomy-managed peers additionally require a Bound/
+  // Reachable record). Blocked while a serialized channel operation owns
+  // the radio EXCEPT during the off-channel dwell, where the helper-serve
+  // traffic is the visit's whole purpose.
+  Status migration_send(NodeId peer, FrameType type,
+                        ByteView payload) noexcept override;
+  std::size_t migration_peers(NodeId* out,
+                              std::size_t capacity) const noexcept override;
+
+  // The serialized channel-operation runner — the migration engine's only
+  // path to the radio (04 §8).
+  ChannelOperationRunner& channel_operations() noexcept {
+    return channel_runner_;
+  }
 
   // --- Radio operation arbiter (01 §3.3, 04 §3/§8) ------------------------------
   // The ONLY path that may switch the radio channel: applications and
@@ -270,6 +299,7 @@ class EspNowRuntime final : public RadioPort,
   std::uint32_t stale_tx_results_{0};
   OwnerChannelPort channel_port_;
   ChannelOperationRunner channel_runner_;
+  MigrationFrameSink* migration_{nullptr};
   routeloom::MacAddress self_mac_{};
   std::uint64_t autonomy_sequence_{0};
   std::uint32_t bootstrap_rx_dropped_{0};
