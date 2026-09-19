@@ -4,7 +4,7 @@
 
 ## 1. コードを読んで確認した出発点
 
-PR #2の参照SHAでは `EspNowRuntime::enqueue_rx()` が未登録MACを返却し、受信metadataはRSSI中心である。`register_neighbor()` はNodeIdとMACを登録し、Coreの近隣へ追加する。`initialize_wifi()` は起動時channelを設定し、実行中の切替APIはない。
+PR #2の参照SHAでは `EspNowRuntime::enqueue_rx()` が未登録MACからのframeを破棄（早期return）し、受信metadataはRSSI中心である。`register_neighbor()` はNodeIdとMACを登録し、Coreの近隣へ追加する。`initialize_wifi()` は起動時channelを設定し、実行中の切替APIはない。
 
 `MeshNode` はFIFO `FixedQueue<TxJob,32>`、awaiting-hop 8件、delivery 8件を持つ。`FrameType::Busy` の番号はあるが受信dispatchでは未処理。Issue #4のcreditという表現と、実装済みUSB creditを区別する。**USB累積creditがあることを無線hopの輻輳制御実装済みとは扱わない。**
 
@@ -28,6 +28,8 @@ PR #2の参照SHAでは `EspNowRuntime::enqueue_rx()` が未登録MACを返却�
 ```
 
 三機能のために三つの無線taskや三つの再送engineを作らない。純粋な状態遷移／判断はportable、driver呼出しは既存runtimeのOwner taskへ集約する。承認はMembership Provider、本人確認はSecurity Provider、管理確定はControlAuthorityの責任。
+
+既存の `MembershipState`（Node×Network）を所属状態の正本として維持する。新しい `NeighborPhase` は相手radioごとの一時的な接続状態で、所属状態を置き換えない。既存 `frame_allowed()` と `protocol/semantics.json` の不一致、型番号1〜7の再利用、追加の文脈付きgateは [所属・admission対応契約](06-membership-admission.md)で規定する。認証・承認が済んでいない新しい相手のために、既存Member自身をDiscoveringへ戻してはならない。
 
 `RadioOwner` は責任名であり、別クラスを増やすこと自体を要件にしない。現在のEspNowRuntimeを明確なowner event loopへ整える方針でよい。
 
@@ -90,7 +92,9 @@ C structの追記はsize/version方式、既存呼出しの既定値は固定250
 
 PR #2のWire v1はheader88B、アプリpayload128B、二tag32Bで最大248B。新機能のために通常DATA headerや既存type番号を再解釈しない。
 
-- 未所属/未知MACのrendezvousだけ、異なるmagic `RLD1` の小さいpublic discovery envelopeを使用する。通常Wireのopen_link失敗からこのparserへfallbackしない。
+- 未所属/未知MACへの局所rendezvousと初期認証は `RLD1` carrierを使う。kindは別の番号体系を作らず、既存 `FrameType` の1/2/3/5/6を再利用する。PROVE/CONFIRM/FINISHは `BootstrapAuth=3` 内の論理phaseである。
+- 所属照会/確定は `MembershipQuery=7 / MembershipResult=4` を認証済みのWire v1 bootstrap経路で運び、RLD1で確定させない。全1〜7の役割・carrier・fragment制約は [対応表](06-membership-admission.md)を正本とする。
+- `RLD1` は先頭2byteが `RL` と共通。完全なmagic/版でcarrierを一度だけ分類し、通常Wireのopen_link失敗からpublic parserへfallbackしない。
 - 認証後は既存type `NeighborProbe=40 / NeighborResult=41 / Busy=20 / TimeSync=23 / ChannelNotice=24 / ControlObject=49 / ObjectChunk=50 / ObjectAck=51` の型番号を維持し、payloadに拡張version/subtypeを置く。
 - capability交渉前には新payloadを送り付けない。旧nodeは固定channelの既存Wire動作を維持できるが、移行参加capabilityがなければ自動移行を阻止する。
 - 新controlの終端は明示する。link負荷は1hop認証、全体planはAuthorityの暗号学的証拠が必要。

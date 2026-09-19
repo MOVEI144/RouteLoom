@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "design_version": "0.1-draft",
+  "design_version": "0.2-draft",
   "status": "design-only",
   "issues": [3, 4, 5],
   "repository": "MOVEI144/RouteLoom",
@@ -58,6 +58,90 @@
     "regular_pins_max": 12,
     "logical_neighbors_max": 32,
     "candidate_records_max": 16
+  },
+  "admission": {
+    "membership_enum": {
+      "Unprovisioned": 0,
+      "Discovering": 1,
+      "Authenticating": 2,
+      "AuthorizedPendingCommit": 3,
+      "Member": 4,
+      "Revoked": 5
+    },
+    "membership_scope": "node-network",
+    "membership_writer": "MembershipController",
+    "neighbor_state_type": "NeighborPhase",
+    "neighbor_scope": "peer-radio-exchange",
+    "coarse_policy_source": "protocol/semantics.json#membership_allowlist",
+    "frame_allowed_role": "refactor-coarse-whitelist-and-context-gate",
+    "frame_type_ids": {
+      "Discover": 1,
+      "Offer": 2,
+      "BootstrapAuth": 3,
+      "MembershipResult": 4,
+      "BootstrapChunk": 5,
+      "BootstrapReply": 6,
+      "MembershipQuery": 7
+    },
+    "rld1_type_ids": [
+      1,
+      2,
+      3,
+      5,
+      6
+    ],
+    "rl_bootstrap_type_ids": [
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "logical_auth_phases": {
+      "PROVE": 3,
+      "CONFIRM": 3,
+      "FINISH": 3
+    },
+    "cookie_type_id": 2,
+    "rld1_fragment_inner_types": [
+      3
+    ],
+    "rl_fragment_inner_types": [
+      3,
+      4
+    ],
+    "authenticator_output": "AuthenticatedPeerProof",
+    "membership_result_carrier": "RL",
+    "local_member_preserved_during_discovery": true,
+    "verified_binding_requires_membership": true,
+    "restricted_bootstrap_context_is_normal_binding": false,
+    "member_state_alone_allows_candidate_data": false,
+    "unknown_types_rejected": true,
+    "revoked_wire_join_allowed": false,
+    "context_required_on_tx_rx_proxy_reassembly": true,
+    "recheck_before_state_promotion": true,
+    "rld1_multihop_forwarding": false,
+    "parser_failure_fallback": false,
+    "recursive_bootstrap_fragments": false,
+    "ci_adoption_gate": {
+      "status": "pending_pr2_adoption",
+      "targets": [
+        "esp32c3",
+        "esp32s3",
+        "esp32c5"
+      ],
+      "app_profiles": {
+        "reference_node": [
+          "normal",
+          "deep_sleep"
+        ],
+        "bridge_node": [
+          "normal"
+        ]
+      },
+      "expected_jobs": 9,
+      "executed_by_this_design_pr": false
+    }
   },
   "congestion": {
     "observation_window_ms": 2000,
@@ -136,7 +220,7 @@
   },
   "documents": [
     "README.md", "01-integration.md", "02-discovery.md", "03-congestion.md",
-    "04-channel-migration.md", "05-implementation.md", "sources.md"
+    "04-channel-migration.md", "05-implementation.md", "06-membership-admission.md", "sources.md"
   ],
-  "expected_scenarios": {"D3": 10, "D4": 10, "D5": 10, "X": 10}
+  "expected_scenarios": {"D3": 16, "D4": 10, "D5": 10, "X": 11}
 }

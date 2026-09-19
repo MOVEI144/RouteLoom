@@ -5,11 +5,13 @@ on:
     paths:
       - docs/design/autonomous-mesh/**
       - tools/check_autonomous_design.py
+      - protocol/semantics.json
       - .github/workflows/autonomous-design.yml
   pull_request:
     paths:
       - docs/design/autonomous-mesh/**
       - tools/check_autonomous_design.py
+      - protocol/semantics.json
       - .github/workflows/autonomous-design.yml
 permissions:
   contents: read

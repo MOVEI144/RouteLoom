@@ -14,6 +14,63 @@ DESIGN = Path("docs/design/autonomous-mesh")
 PREFIXES = {"D3": {3}, "D4": {4}, "D5": {5}, "X": {3, 4, 5}}
 
 
+def validate_admission(a: dict) -> list[str]:
+    """Check the draft integration contract; this does not execute SDK admission."""
+    errors: list[str] = []
+
+    def require(condition: bool, name: str) -> None:
+        if not condition:
+            errors.append(f"admission:{name}")
+
+    try:
+        require(a["membership_enum"] == {
+            "Unprovisioned": 0, "Discovering": 1, "Authenticating": 2,
+            "AuthorizedPendingCommit": 3, "Member": 4, "Revoked": 5,
+        }, "preserve six membership values")
+        require(a["membership_scope"] == "node-network" and
+                a["membership_writer"] == "MembershipController", "membership owner")
+        require(a["neighbor_state_type"] == "NeighborPhase" and
+                a["neighbor_scope"] == "peer-radio-exchange", "independent neighbor state")
+        require(a["coarse_policy_source"] == "protocol/semantics.json#membership_allowlist",
+                "one coarse semantic source")
+        require(a["frame_allowed_role"] == "refactor-coarse-whitelist-and-context-gate",
+                "legacy helper is not final authorization")
+        require(a["frame_type_ids"] == {
+            "Discover": 1, "Offer": 2, "BootstrapAuth": 3, "MembershipResult": 4,
+            "BootstrapChunk": 5, "BootstrapReply": 6, "MembershipQuery": 7,
+        }, "reuse reserved type IDs")
+        require(a["rld1_type_ids"] == [1, 2, 3, 5, 6], "RLD1 type allowlist")
+        require(a["rl_bootstrap_type_ids"] == [3, 4, 5, 6, 7], "Wire bootstrap types")
+        require(a["logical_auth_phases"] == {"PROVE": 3, "CONFIRM": 3, "FINISH": 3},
+                "auth phases are not new top-level types")
+        require(a["cookie_type_id"] == 2, "cookie belongs to OFFER")
+        require(a["rld1_fragment_inner_types"] == [3] and
+                a["rl_fragment_inner_types"] == [3, 4], "bounded fragment types")
+        require(a["authenticator_output"] == "AuthenticatedPeerProof" and
+                a["membership_result_carrier"] == "RL", "proof is not membership")
+        for name in ("local_member_preserved_during_discovery",
+                     "verified_binding_requires_membership", "unknown_types_rejected",
+                     "context_required_on_tx_rx_proxy_reassembly", "recheck_before_state_promotion"):
+            require(a[name] is True, name)
+        for name in ("restricted_bootstrap_context_is_normal_binding",
+                     "member_state_alone_allows_candidate_data", "revoked_wire_join_allowed",
+                     "rld1_multihop_forwarding", "parser_failure_fallback",
+                     "recursive_bootstrap_fragments"):
+            require(a[name] is False, name)
+        gate = a["ci_adoption_gate"]
+        require(gate["status"] == "pending_pr2_adoption" and
+                gate["executed_by_this_design_pr"] is False, "CI adoption is not execution evidence")
+        require(gate["targets"] == ["esp32c3", "esp32s3", "esp32c5"] and
+                gate["app_profiles"] == {
+                    "reference_node": ["normal", "deep_sleep"], "bridge_node": ["normal"],
+                }, "preserve PR2 firmware profiles")
+        require(gate["expected_jobs"] == len(gate["targets"]) *
+                sum(len(v) for v in gate["app_profiles"].values()) == 9, "nine firmware builds")
+    except (KeyError, TypeError, ValueError, AttributeError) as error:
+        errors.append(f"admission:invalid manifest shape: {type(error).__name__}: {error}")
+    return errors
+
+
 def validate_contract(c: dict, scenarios: dict) -> list[str]:
     errors: list[str] = []
 
@@ -68,6 +125,7 @@ def validate_contract(c: dict, scenarios: dict) -> list[str]:
         for name in ("unauthenticated_data_allowed", "unapproved_member_data_allowed",
                      "automatic_identity_reassignment"):
             require(d[name] is False, name)
+        errors.extend(validate_admission(c["admission"]))
         q = c["congestion"]
         require(0 < q["background_reduce_fraction"] < q["bulk_stop_fraction"] < 1,
                 "queue thresholds")
@@ -142,6 +200,43 @@ def run(root: Path) -> dict:
     except (OSError, ValueError) as error:
         return {"scope": "design-lint-only", "passed": False, "errors": [str(error)]}
     errors.extend(validate_contract(c, s))
+    # This is a comparison with the checked-in semantic contract, not with
+    # runtime frame_allowed(), which the implementation backlog must reconcile.
+    try:
+        semantics = json.loads((root / "protocol/semantics.json").read_text(encoding="utf-8"))
+        bootstrap = {"DISCOVER", "OFFER", "BOOTSTRAP_AUTH", "MEMBERSHIP_RESULT",
+                     "BOOTSTRAP_CHUNK", "BOOTSTRAP_REPLY", "MEMBERSHIP_QUERY"}
+        expected = {
+            "UNPROVISIONED": {"DISCOVER", "OFFER"},
+            "DISCOVERING": {"DISCOVER", "OFFER"},
+            "AUTHENTICATING": {"DISCOVER", "OFFER", "BOOTSTRAP_AUTH", "BOOTSTRAP_CHUNK", "BOOTSTRAP_REPLY"},
+            "AUTHORIZED_PENDING_COMMIT": {"MEMBERSHIP_QUERY", "MEMBERSHIP_RESULT", "BOOTSTRAP_CHUNK", "BOOTSTRAP_REPLY"},
+            "MEMBER": bootstrap,
+            "REVOKED": set(),
+        }
+        allowed = semantics["membership_allowlist"]
+        if set(allowed) != set(expected):
+            errors.append("admission:semantic membership state drift")
+        for state, wanted in expected.items():
+            actual = set(allowed[state])
+            if actual & bootstrap != wanted:
+                errors.append(f"admission:semantic bootstrap allowlist drift:{state}")
+            if state != "MEMBER" and actual - bootstrap:
+                errors.append(f"admission:member traffic admitted before membership:{state}")
+        if allowed["REVOKED"]:
+            errors.append("admission:revoked semantic allowlist must be empty")
+        registry = semantics.get("frame_numeric_ids")
+        # The design branch still predates PR2. Missing frozen type IDs are
+        # explicitly a dependency, never silently reported as source-verified.
+        type_source_status = "pending_pr2_adoption" if registry is None else "checked_against_semantics"
+        if registry is not None:
+            for name, value in zip(("DISCOVER", "OFFER", "BOOTSTRAP_AUTH", "MEMBERSHIP_RESULT",
+                                    "BOOTSTRAP_CHUNK", "BOOTSTRAP_REPLY", "MEMBERSHIP_QUERY"), range(1, 8)):
+                if registry.get(name) != value:
+                    errors.append(f"admission:semantic type ID drift:{name}")
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        errors.append(f"admission:semantic source invalid: {type(error).__name__}: {error}")
+        type_source_status = "invalid"
     links = 0
     for name in c.get("documents", []):
         file = (folder / name).resolve()
@@ -170,6 +265,20 @@ def run(root: Path) -> dict:
         ("migration", "unilateral_rollback", True),
         ("migration", "atomic_all_node_cutover_claimed", True),
         ("resources", "values_are_design_budgets_not_measurements", False),
+        ("admission", "membership_enum", {"Member": 0}),
+        ("admission", "membership_scope", "peer-radio-exchange"),
+        ("admission", "rld1_type_ids", [1, 2, 3, 4, 5, 6, 7]),
+        ("admission", "logical_auth_phases", {"PROVE": 3, "CONFIRM": 4, "FINISH": 7}),
+        ("admission", "rld1_fragment_inner_types", [3, 16]),
+        ("admission", "restricted_bootstrap_context_is_normal_binding", True),
+        ("admission", "member_state_alone_allows_candidate_data", True),
+        ("admission", "local_member_preserved_during_discovery", False),
+        ("admission", "unknown_types_rejected", False),
+        ("admission", "revoked_wire_join_allowed", True),
+        ("admission", "context_required_on_tx_rx_proxy_reassembly", False),
+        ("admission", "parser_failure_fallback", True),
+        ("admission", "recheck_before_state_promotion", False),
+        ("admission", "ci_adoption_gate", {"status": "completed"}),
     ]
     for section, key, value in mutations:
         mutated = copy.deepcopy(c)
@@ -180,6 +289,8 @@ def run(root: Path) -> dict:
             "documents": len(c.get("documents", [])), "local_links_checked": links,
             "planned_scenarios": len(s.get("scenarios", [])),
             "negative_manifest_checks": len(mutations),
+            "semantic_type_source": type_source_status,
+            "runtime_admission_tested": False,
             "scenario_executions": 0, "firmware_tested": False, "rf_tested": False}
 
 

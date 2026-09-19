@@ -1,6 +1,6 @@
 # 自律Mesh拡張の設計 — Issues #3 / #4 / #5
 
-設計版：0.1-draft／2026-09-19。**実装を進めるための設計PRであり、機能の実装完了・RF認定を宣言しない。**
+設計版：0.2-draft／2026-09-19。**実装を進めるための設計PRであり、機能の実装完了・RF認定を宣言しない。**
 
 ## 目的
 
@@ -17,7 +17,7 @@
 ## 読み順
 
 1. [共通アーキテクチャ・API・資源](01-integration.md)
-2. [#3 近隣発見と安全なPeer管理](02-discovery.md)
+2. [#3 近隣発見と安全なPeer管理](02-discovery.md) → [既存所属状態・FrameType・admissionとの対応](06-membership-admission.md)
 3. [#4 輻輳制御と安定した経路回避](03-congestion.md)
 4. [#5 チャンネル調査・移行・復旧](04-channel-migration.md)
 5. [実装順序・受入条件・引継ぎ](05-implementation.md)
@@ -56,6 +56,10 @@
 同じ場所でも送信・受信の条件は違う。混雑の原因をRSSI一つから断定しない。単一radioで複数channelを常時同時受信できない。無線での全ノード同時切替を原子的transactionとして保証しない。
 
 「置くだけ」は、有効なIdentity・所属許可・RF配備条件を持つ端末に対してMAC設定不要という意味。無設定の第三者端末を近くのネットワークへ無認証加入させる意味ではない。
+
+## PR #6レビュー反映（0.2-draft）
+
+[レビューコメント](https://github.com/MOVEI144/RouteLoom/pull/6#issuecomment-5741118628)に対応し、既存の6状態・型番号1〜7を採用したまま近隣phaseとcarrierを併用する規約を追加した。`frame_allowed()`と意味allowlistの不一致も明示し、実装時に一つの文脈付きgateへ揃える。Memberを再参加状態へ戻す回避策や、RLD1で通常DATAを通す例外は認めない。firmware matrix追随を実装前の必須作業にした。
 
 ## 検証表示
 

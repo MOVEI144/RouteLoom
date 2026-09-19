@@ -6,6 +6,7 @@
 
 - [ ] PR #2の修正を採用したmainをこのbranchへ取り込む。未マージPRを暗黙に本番基点としない。
 - [ ] 読み取り基準 `cdcf0fe33b51854d4b62478e7fbc193cc8c386d8` と差分を確認し、今回のcode mapを更新する。
+- [ ] PR #2のfirmware matrixを取り込む。C3/S3/C5それぞれで `reference_node × normal/deep_sleep` と `bridge_node × normal` の計9構成を維持する。独立build dir/sdkconfigでON/OFFを検査し、各artifactへ設定を保存する。この設計branchの現行SDK CIは旧matrixであり、9構成の検証済みとは表示しない。
 - [ ] 既存Wire/USB golden vectorと、Sleep保存・Message ID・期限・FD・ledger復旧・USB順序の回帰を再実行する。
 - [ ] C3/S3/C5の実装能力とHIL資格を分離し、本番G-SECやライセンスが完了したように表示しない。
 
@@ -18,6 +19,7 @@
 | `espnow_runtime.hpp/.cpp` | raw RX metadata、callback用read-only分類、broadcast Peer、Peer lease、単一Owner request queue、runtime channel操作 |
 | `node.hpp/.cpp` | Neighbor lifecycle入力、typed telemetry、scheduler、BUSY/feedback dispatch、link cost更新、用途別pause |
 | `routing.hpp/.cpp` | advertised costを保持したまま再計算、選択時の最新feasibility、selected metricとFD/広告の整合 |
+| `admission.hpp`、`types.hpp`、`protocol/semantics.json` | 所属6状態とtype 1〜7を再利用し、coarse allowlistを同期。文脈付きadmissionをRX/TX/proxy/組立完了で共用。Unknown/revokedは既定拒否 |
 | `security.hpp`とProvider | NeighborAuthenticator、VerifiedBinding、capability transcript、AuthorityPlan verifier。Production/Developmentを分離 |
 | `authority.hpp/.cpp`とNVS adapter | channel operation種別、plan blob hashとの結合、restart時の確定/適用の区別 |
 | `power.hpp/.cpp`、`espnow_power.cpp` | bounded discoveryへ接続、authoritative channel復元、活動予算とticket失効、保存ID/期限保持 |
@@ -34,13 +36,15 @@ pathは既存 `components/routeloom*` と `host/` の構造を使う。純粋pol
 
 - [ ] 有界RawRx、Binding/PeerLease、Observation、有効期限付きoperation結果の型。
 - [ ] OwnerのRX/TX/control event順序と、callback overflow/世代の契約。
-- [ ] 新payloadのregistryとC++/Rust共有vector。既存DATA vector不変を確認。
+- [ ] [所属・admission契約](06-membership-admission.md)に従い、MembershipState/NeighborPhaseを別型で所有し、既存helperと意味allowlistの差を解消する。
+- [ ] 新payloadのregistryとC++/Rust共有vector。RLD1のkindは既存FrameTypeを再利用し、Member応答、pending確定、fragment再判定、carrier取り違えの負例を含める。既存DATA vector不変を確認。
 - [ ] fake clock/storage/entropy/radioを既存testsへ接続。未対応機能はUNSUPPORTED。
 
 ### P1 — #3 固定channel上の安全な発見
 
 - [ ] MAC未登録RXのbootstrap lane、LR250 broadcast再登録。
-- [ ] CANDIDATE→AUTH→BIND→双方向確認。承認前DATA不可。
+- [ ] 相手別CANDIDATE→AUTH→BIND→双方向確認。自NodeのMember状態は再bindingで変えない。制限付きbootstrap contextでは承認前DATA不可。
+- [ ] 認証・承認・commitを別の証拠として扱い、取り消されたtransactionや失効後に遅着したFINISH/ResultでMember/REACHABLEへ昇格しない。
 - [ ] dev opt-inの実暗号challengeとProduction Provider境界。
 - [ ] static登録互換、binding切替、Peer枠保護、失効、密度backoff。
 - [ ] PowerPortのbounded discoveryを本体へ接続。単なるsuccess stubは禁止。
@@ -83,7 +87,7 @@ pathは既存 `components/routeloom*` と `host/` の構造を使う。純粋pol
 
 ## 4. required tests
 
-[scenarios.json](scenarios.json)はD3/D4/D5/Xの40シナリオ。全項目は `planned_not_run`。実装テストはこのIDを結果へ含める。
+[scenarios.json](scenarios.json)はD3/D4/D5/Xの47シナリオ。全項目は `planned_not_run`。実装テストはこのIDを結果へ含める。
 
 portable testsでは「mockしたsuccess callbackを受けた」だけでなく、実装codec、実装RouteTable、実装Owner制御、実装storeを結んだ検証を行う。property testのseed、失敗trace、モデルが仮定したloss/clock/容量を保存する。
 

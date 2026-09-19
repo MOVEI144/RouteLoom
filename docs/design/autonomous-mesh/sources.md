@@ -78,3 +78,15 @@ flow分離、DRR、queue sojourn観測、低速linkでのtarget調整の考え�
 | 20ms等の性能目標 | 実測条件は保持し、設計checkerの成功で達成扱いしない |
 
 この設計案が既存specの解釈を変更する場合、実装PRで対応specとfeature manifestを同時更新する。今回のDraftだけで現在のruntime契約を無言変更しない。
+
+
+## 5. PR #6レビューで追加照合した既存契約
+
+[レビューコメント](https://github.com/MOVEI144/RouteLoom/pull/6#issuecomment-5741118628)の指摘を、上記PR #2固定SHAで照合した。
+
+- [admission.hpp](https://github.com/MOVEI144/RouteLoom/blob/cdcf0fe33b51854d4b62478e7fbc193cc8c386d8/components/routeloom/include/routeloom/admission.hpp)：MembershipStateは0〜5の6状態。helperはMemberのDiscover/Offerを拒否し、RevokedのDiscoverを許可する。認証中のChunk/Reply、pending Queryも十分には許可していない。
+- [protocol/semantics.json](https://github.com/MOVEI144/RouteLoom/blob/cdcf0fe33b51854d4b62478e7fbc193cc8c386d8/protocol/semantics.json)：既存の意味allowlistはMemberの発見とbootstrapを許可し、Revokedは空集合。helperと不一致。新設計の粗い許可集合はこちらに揃え、認可条件はさらに制限する。
+- [types.hpp](https://github.com/MOVEI144/RouteLoom/blob/cdcf0fe33b51854d4b62478e7fbc193cc8c386d8/components/routeloom/include/routeloom/types.hpp)：1〜7は既存予約。RLD1で別の意味へ振り直さない。
+- [.github/workflows/sdk.yml](https://github.com/MOVEI144/RouteLoom/blob/cdcf0fe33b51854d4b62478e7fbc193cc8c386d8/.github/workflows/sdk.yml)：PR #2は3target×reference normal/deep_sleep＋bridge normalの9構成。PR #6は旧main基点であるため、採用後の取り込みを待つ。
+
+[06-membership-admission.md](06-membership-admission.md)はこれらをどう統合するかの新しい設計判断。現runtimeのadmission実装を修正済みとはしていない。

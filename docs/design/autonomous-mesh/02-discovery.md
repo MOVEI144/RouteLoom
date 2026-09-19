@@ -12,7 +12,9 @@
 
 **D3-04:** NodeIdは安定したprovisioned Identityに結び付ける。認証前の電波ネゴシエーションでNodeIdを奪い合わない。legacyの静的IDは残し、動的生成はprovisioning時の安全な乱数/公開鍵由来と永続保存で行う。
 
-## 2. 状態と遷移
+## 2. 近隣の状態と遷移（所属状態とは別）
+
+以下は相手radioごとの **NeighborPhase**。既存 `MembershipState` の6状態を採用したまま併用し、その値・保存形式を置換しない。所属を進めるのはMembership controllerだけで、Discovery/Authenticatorは証拠とeventを渡す。対応表、許可gate、保存時点の正本は [06-membership-admission.md](06-membership-admission.md)。同じAUTHENTICATINGという表示でも異なるenum型として扱う。
 
 | 状態 | 行ってよい処理 | 通常DATA/route利用 |
 |---|---|---|
@@ -25,6 +27,8 @@
 | SUSPENDED | Sleep/予定不在/失効確認待ち | 今は不可 |
 | STALE | lease切れ・応答なし | 再確認だけ |
 | CONFLICT/REVOKED | 衝突または失効 | 不可 |
+
+CONFLICT/REVOKEDの行は二つの拒否理由をまとめた表示であり、別の所属状態enumではない。近隣phaseの失効は、その相手のbindingを使えなくするだけで自NodeのMembershipStateをRevokedにしない。
 
 driver Peer登録はこの表の認証状態ではない。AUTHENTICATING中にも返信のため一時Peerが要るが、それで通常通信を許可しない。起床した同じ所属端末はResumeであり、初回Joinではない。
 
@@ -43,6 +47,8 @@ driver Peer登録はこの表の認証状態ではない。AUTHENTICATING中に�
            REACHABLE → Coreへnear-neighbor追加
 ```
 
+この図のPROVE/CONFIRM/FINISHは新しいtop-level typeではなく、既存 `BootstrapAuth=3` のprofile固有phase。RLD1の `kind` も既存FrameType番号を使う。認証が終わっても新規所属は未確定で、制限付きbootstrap contextによる `MembershipQuery=7 / MembershipResult=4` と永続commit確認が別に必要。既所属同士の再bindingでは所属を変更せず、この中央承認を省略できる。
+
 応答している相手と、相手が自分を受信できることの両方を確認する。片方向のDISCOVER受信やMAC送信成功だけでREACHABLEにしない。両端が同時に開始した場合は、認証で確認したNodeId順とnonceで一つのexchangeへ統合し、片側を無限に待たせない。
 
 ## 4. public discovery envelope
@@ -51,13 +57,17 @@ driver Peer登録はこの表の認証状態ではない。AUTHENTICATING中に�
 
 44B案：magic4 / version1 / kind1 / header_len2 / total_len2 / flags2 / network4 / claimed_node8 / transaction_nonce16 / capability_bits4。全整数big-endian、reservedは0、未知必須bitと長さ矛盾を拒否する。これは案を実装vectorで固定するための配置で、既存Wire v1を変更しない。
 
-DISCOVER/OFFERの内容は原則hint。通常DATA、任意宛先への転送、管理設定をこのenvelopeへ入れない。payloadの大きいcredential交換は独立した最大1024Bのbootstrap組立へ渡し、callbackで組み立てない。
+DISCOVER/OFFERの内容は原則hint。4byteのnetwork欄は探索フィルターだけで、正式な64bit NetworkIdは認証transcriptへ全幅で含める。hint衝突を同じ所属とみなさない。通常DATA、任意宛先への転送、所属確定、管理設定をこのenvelopeへ入れない。
+
+credential交換のfragmentは既存 `BootstrapChunk=5 / BootstrapReply=6` を使い、最大1024Bのbootstrap組立へ渡す。RLD1ではinner typeをBootstrapAuthだけに制限し、通常DATAや再帰fragmentを包んで入場制限を回避できないようにする。認証済みWire上の所属result fragmentは別のtransaction/role検査を必要とする。callbackで組み立てず、完成後にinner typeを再度admission判定する。
 
 証明対象transcriptにはprotocol/profile、両NodeId、両MAC、Network、両nonce、双方boot/session、capability、channel/epochの申告、役割を含める。RX metadataの実source MACとtranscriptを照合する。鍵/credentialはSecurity Providerへ渡し、独自の暗号primitiveを作らない。
 
 ## 5. Security/Admission Provider
 
-追加の `NeighborAuthenticator` は `begin / consume / poll / cancel` でopaqueな `VerifiedBinding` を返す。構築子を非公開にし、plainなboolだけで通常アプリがverifiedを作れないAPIを目指す。
+追加の `NeighborAuthenticator` は `begin / consume / poll / cancel` でopaqueな `AuthenticatedPeerProof`（本人確認の証拠）を返す。これは所属許可ではない。Membershipの有効性とtransaction/binding世代をOwnerで再検査した後にだけ `VerifiedBinding` を作る。構築子を非公開にし、plainなboolだけで通常アプリがverifiedを作れないAPIを目指す。
+
+Memberは新しい相手への発見応答者になれるが、候補からのDATAまでMember扱いしない。既存 `frame_allowed(state,type)` は文脈を持たず、現コードはMemberのDiscover/Offerを拒否するため、単独の最終gateとしてそのまま流用しない。既存の意味allowlistと整合させた上で、direction/carrier/transaction/role/証拠/予算を加えた共通gateへ接続する（[詳細](06-membership-admission.md)）。
 
 - **Production:** credential保有と役割/Network membershipを検証する。未選定のEDHOC等を「もう提供した」と宣言しない。G-SECのProviderがない構成ではproduction動的bindingは `AUTH_PROFILE_UNAVAILABLE`。
 - **Development:** 明示opt-inした共有PSK profileで同じネットワーク鍵保有を相互確認できる。`EXPERIMENTAL / GROUP_SECRET_POSSESSION`と表示。共有鍵保有者による別NodeId詐称・鍵cloneを区別できるとはしない。
