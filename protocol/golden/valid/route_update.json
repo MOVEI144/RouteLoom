@@ -1,0 +1,23 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "route_update",
+  "comment": "ROUTE_UPDATE with two route records, link protection only",
+  "type": 32,
+  "flags": 0,
+  "delivery": 0,
+  "delivery_round": 0,
+  "hop_remaining": 1,
+  "network": 1,
+  "origin": 2,
+  "destination": 1,
+  "previous_hop": 2,
+  "next_hop": 1,
+  "session": 102,
+  "sequence": 5,
+  "remaining_deadline_ms": 1000,
+  "original_lifetime_ms": 1000,
+  "link_epoch": 1,
+  "end_epoch": 1,
+  "payload_hex": "0200000000000000020000000000000000000000030065000a",
+  "encoded_hex": "524c01002000000001000019000000010000000000000002000000000000000100000000000000020000000000000001000000660000000000000005000003e8000003e80001000100000000000000000000000000000000844c4f96df3b36ecf2a17e3e7dfdde51d6006628f0ac6d92316afcdcffd79beb0212a2b52a01d66994"
+}

@@ -6,7 +6,7 @@
 
 | 項目 | 状態 |
 |---|---|
-| 統合アーキテクチャ・無線・SDK契約 | 文書化済み。最終Wire ABIと本番Security Profileは未凍結 |
+| 統合アーキテクチャ・無線・SDK契約 | 文書化済み。Wire v1 byte layout・type IDはCORE_FIXED_250向けに凍結（test cipher vector付き）。本番Security Profileは未凍結 |
 | Portable C++ SDK core | **実装済み・host-tested**。GCC/Clang、ASan/UBSan、有限Queue、配送、dedup、receipt、Babel由来routing、C ABI |
 | ESP-NOW / LR250 adapter | **実装済み・build-tested**。単一Radio Owner、固定channel、Peer、短いcallback queue、NVS counter/replay |
 | ESP32 reference firmware | **C3/S3/C5でESP-IDF v6.0.3 build成功**。実機起動・RF通信は未試験 |
@@ -32,7 +32,7 @@
 
 ## 該当機能の公開前に閉じる項目
 
-- **G-WIRE**：通常128Bが全ヘッダ・保護情報込み250Bに収まる最終encoder、型番号、C++／Rust共通golden vectorを確定する。
+- **G-WIRE**：Wire v1 byte layout・型番号・C++／Rust共通golden vector（test cipher）は凍結済み。本番crypto suite適用後のvector更新と残りの管理object・再送round・再起動caseはG-SECと併せて行う。
 - **G-SEC**：機器Identity、Join、credential、必須suite、Entropy、鍵更新、失効、再起動を本番Profileとして独立レビューする。開発PSKを代用しない。
 - **G-ROUTE**：portable実装を基準に、restart／GC／timer、分断再結合、複数origin、10hopをmodel testと実機で認定する。
 - **G-CONTROL**：SingleAuthority台帳の永続化を実装し、HAでは選挙、log、snapshot、構成員変更、proofを別途認定する。

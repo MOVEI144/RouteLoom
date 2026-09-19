@@ -17,17 +17,28 @@ bool known_frame_type(const std::uint8_t value) noexcept {
     case FrameType::Offer:
     case FrameType::BootstrapAuth:
     case FrameType::MembershipResult:
+    case FrameType::BootstrapChunk:
+    case FrameType::BootstrapReply:
+    case FrameType::MembershipQuery:
     case FrameType::Data:
     case FrameType::HopAccept:
     case FrameType::EndReceipt:
     case FrameType::AppResult:
     case FrameType::Busy:
+    case FrameType::Service:
+    case FrameType::Control:
+    case FrameType::TimeSync:
+    case FrameType::ChannelNotice:
     case FrameType::RouteUpdate:
     case FrameType::RouteWithdraw:
     case FrameType::SeqnoRequest:
+    case FrameType::RouteRequest:
     case FrameType::NeighborProbe:
     case FrameType::NeighborResult:
     case FrameType::Diagnostic:
+    case FrameType::ControlObject:
+    case FrameType::ObjectChunk:
+    case FrameType::ObjectAck:
       return true;
   }
   return false;
@@ -38,7 +49,7 @@ Status write_header(const Header& header, MutableByteView output) noexcept {
     return Status::error(StatusCode::NoCapacity, "wire header output too small");
   }
   if (header.network > UINT32_MAX) {
-    return Status::error(StatusCode::InvalidArgument, "v0 network id exceeds 32 bits");
+    return Status::error(StatusCode::InvalidArgument, "v1 network id exceeds 32 bits");
   }
   ByteWriter writer(output);
   Status status;
@@ -126,6 +137,12 @@ Status read_header(ByteView encoded, Header& header) noexcept {
   return validate_header(header);
 }
 
+// End-to-end AAD covers only the end-immutable fields of semantics.json
+// (network, origin, message session+sequence, bound destination, delivery
+// contract, original lifetime, payload length) plus version, end epoch and
+// end counter. Hop-mutable fields (previous/next hop, hop remaining, delivery
+// round, remaining deadline, link epoch/counter) must never be added here:
+// relays rewrite them and would break the end tag.
 Status make_end_aad(const Header& header,
                     std::array<std::uint8_t, kEndAadMax>& bytes,
                     std::size_t& length) noexcept {
@@ -191,7 +208,7 @@ Status validate_header(const Header& header) noexcept {
     return Status::error(StatusCode::InvalidArgument, "wire identity field is invalid");
   }
   if (header.payload_length > kMaxApplicationPayload) {
-    return Status::error(StatusCode::InvalidArgument, "payload exceeds v0 limit");
+    return Status::error(StatusCode::InvalidArgument, "payload exceeds v1 limit");
   }
   if (header.hop_remaining == 0 && header.destination != header.next_hop) {
     return Status::error(StatusCode::InvalidArgument, "hop budget exhausted before destination");

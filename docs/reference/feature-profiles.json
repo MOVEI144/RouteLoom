@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "spec_revision": "1.1",
-  "wire_frozen": false,
+  "wire_frozen": true,
   "initial_profile": "CORE_FIXED_250",
   "implementation_status": "core-fixed-250-prototype",
   "initial_control": "SINGLE_AUTHORITY",

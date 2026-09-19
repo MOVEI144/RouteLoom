@@ -11,6 +11,37 @@ import sync_reference_tables
 
 EXPECTED_IDF_COMMIT = "76f5dedd9950a3012fee8fb7d5586df21fc67802"
 
+# Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
+# FrameType in components/routeloom/include/routeloom/types.hpp.
+EXPECTED_FRAME_IDS = {
+    "DISCOVER": 1,
+    "OFFER": 2,
+    "BOOTSTRAP_AUTH": 3,
+    "MEMBERSHIP_RESULT": 4,
+    "BOOTSTRAP_CHUNK": 5,
+    "BOOTSTRAP_REPLY": 6,
+    "MEMBERSHIP_QUERY": 7,
+    "DATA": 16,
+    "HOP_ACCEPT": 17,
+    "END_RECEIPT": 18,
+    "APP_RESULT": 19,
+    "BUSY": 20,
+    "SERVICE": 21,
+    "CONTROL": 22,
+    "TIME_SYNC": 23,
+    "CHANNEL_NOTICE": 24,
+    "ROUTE_UPDATE": 32,
+    "ROUTE_WITHDRAW": 33,
+    "SEQNO_REQUEST": 34,
+    "ROUTE_REQUEST": 35,
+    "NEIGHBOR_PROBE": 40,
+    "NEIGHBOR_RESULT": 41,
+    "DIAGNOSTIC": 48,
+    "CONTROL_OBJECT": 49,
+    "OBJECT_CHUNK": 50,
+    "OBJECT_ACK": 51,
+}
+
 
 def validate(root: Path) -> dict:
     checks = []
@@ -93,11 +124,24 @@ def validate(root: Path) -> dict:
             ),
         )
         test(
-            "wire_not_falsely_frozen",
-            features["wire_frozen"] is False
-            and semantic["wire_frozen"] is False
+            "wire_v1_frozen_crypto_pending",
+            features["wire_frozen"] is True
+            and semantic["wire_frozen"] is True
             and semantic["crypto_suite"] is None
-            and semantic["frame_numeric_ids"] is None,
+            and semantic["frame_numeric_ids"] == EXPECTED_FRAME_IDS
+            and "wire_byte_layout" not in semantic["open_gates"]
+            and "mandatory_security_profile_and_vectors" in semantic["open_gates"],
+        )
+        all_semantic_names = {
+            name
+            for names in semantic["membership_allowlist"].values()
+            for name in names
+        } | set(semantic["member_only"]) | set(
+            semantic["bootstrap_requires_transaction"]
+        )
+        test(
+            "wire_ids_cover_all_semantic_names",
+            set(semantic["frame_numeric_ids"]) == all_semantic_names,
         )
         test(
             "initial_jitter_separate",

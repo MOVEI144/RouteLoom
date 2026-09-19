@@ -69,22 +69,35 @@ enum class Priority : std::uint8_t {
   Urgent = 3,
 };
 
+// Frozen Wire v1 frame type IDs (see protocol/semantics.json frame_numeric_ids).
+// Gaps between groups are reserved for future types in the same class.
 enum class FrameType : std::uint8_t {
   Discover = 1,
   Offer = 2,
   BootstrapAuth = 3,
   MembershipResult = 4,
+  BootstrapChunk = 5,
+  BootstrapReply = 6,
+  MembershipQuery = 7,
   Data = 16,
   HopAccept = 17,
   EndReceipt = 18,
   AppResult = 19,
   Busy = 20,
+  Service = 21,
+  Control = 22,
+  TimeSync = 23,
+  ChannelNotice = 24,
   RouteUpdate = 32,
   RouteWithdraw = 33,
   SeqnoRequest = 34,
+  RouteRequest = 35,
   NeighborProbe = 40,
   NeighborResult = 41,
   Diagnostic = 48,
+  ControlObject = 49,
+  ObjectChunk = 50,
+  ObjectAck = 51,
 };
 
 enum class SecurityScope : std::uint8_t {

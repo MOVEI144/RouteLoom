@@ -1,7 +1,7 @@
 menu "RouteLoom reference node"
 
 config ROUTELOOM_NETWORK_ID
-    hex "Network ID (low 32 bits for provisional wire)"
+    hex "Network ID (low 32 bits on Wire v1)"
     default 0x524c0001
 
 config ROUTELOOM_NODE_ID

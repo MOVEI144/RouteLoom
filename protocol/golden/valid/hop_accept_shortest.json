@@ -1,0 +1,23 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "hop_accept_shortest",
+  "comment": "shortest HOP_ACCEPT emitted by the reference node (22-byte ack payload)",
+  "type": 17,
+  "flags": 0,
+  "delivery": 0,
+  "delivery_round": 0,
+  "hop_remaining": 1,
+  "network": 1,
+  "origin": 2,
+  "destination": 1,
+  "previous_hop": 2,
+  "next_hop": 1,
+  "session": 7,
+  "sequence": 9,
+  "remaining_deadline_ms": 1000,
+  "original_lifetime_ms": 1000,
+  "link_epoch": 1,
+  "end_epoch": 1,
+  "payload_hex": "10000000000000000100000007000000000000000900",
+  "encoded_hex": "524c01001100000001000016000000010000000000000002000000000000000100000000000000020000000000000001000000070000000000000009000003e8000003e80001000100000000000000000000000000000000964c4f96df3b36ecf1a17e3e7afdde51d6006628faac6d7285b3ec64479bfcdc015b13586b8c"
+}
