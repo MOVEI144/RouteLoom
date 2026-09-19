@@ -7,6 +7,9 @@ set(ROUTELOOM_CORE_SOURCES
   src/node.cpp
   src/routing.cpp
   src/status.cpp
+  src/usb_bridge.cpp
+  src/usb_codec.cpp
+  src/usb_session.cpp
   src/wire.cpp
 )
 

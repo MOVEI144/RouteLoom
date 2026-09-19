@@ -4,11 +4,11 @@
 
 ## 実装済みの縦切り
 
-- `components/routeloom`：C++17 portable core、C ABI、provisional Wire codec、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、SeqNoRequest、SingleAuthorityの2スロット耐電断操作台帳（CRC-32/ISO-HDLC、hash chain、QUARANTINED回復）、deadline再開規則。
+- `components/routeloom`：C++17 portable core、C ABI、provisional Wire codec、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、SeqNoRequest、SingleAuthorityの2スロット耐電断操作台帳（CRC-32/ISO-HDLC、hash chain、QUARANTINED回復）、deadline再開規則、USB/Serial device bridge（streaming codec、開発session、累積credit、MeshNode統合）。
 - `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、NVS authority ledger store、PSA AES-GCM開発用PSK Provider。
 - `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。NVS異常時はIdentity／counterを守るため自動eraseしない。
-- `host/`：COBS＋CRC32のUSB/Serial framing library、Unix daemon、CLIの初期実装。
-- `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、authority ledger電断simulation、C ABI。
+- `host/`：COBS＋CRC32のUSB/Serial framing library、開発session helper、golden vector generator、Unix daemon、CLIの初期実装。
+- `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、authority ledger電断simulation、USB session/credit/golden vector、C ABI。
 
 ## 継続CI
 
@@ -27,7 +27,7 @@ Wire v0.1は内部プロトタイプ。数値ID・byte layout・Security Profile
 
 ESP-IDF build成功は実RF通信、到達距離、技適・認証、電池寿命、100node/10hopを証明しない。C3/S3/C5の実機HILを別に行う。
 
-Host daemonのTTY backendは初期のByteStream実装で、認証済みUSB sessionとdevice側bridgeのHILは`G-USB`として残る。
+Host daemonのTTY backendは初期のByteStream実装。認証済みUSB session（開発profile）とdevice側bridgeはportable実装済みで`protocol/usb-golden`の共有vectorでC++／Rust相互検証済み。実USB driver・HILは`G-USB`として残る。
 
 ## ローカルportable test
 

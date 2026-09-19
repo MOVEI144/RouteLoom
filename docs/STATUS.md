@@ -11,6 +11,7 @@
 | ESP-NOW / LR250 adapter | **実装済み・build-tested**。単一Radio Owner、固定channel、Peer、短いcallback queue、NVS counter/replay |
 | ESP32 reference firmware | **C3/S3/C5でESP-IDF v6.0.3 build成功**。実機起動・RF通信は未試験 |
 | Rust host service／CLI | **実装済み・host-tested**。fmt、Clippy `-D warnings`、unit test、release build成功。TUIは未実装 |
+| USB／Serial transport | **Portable実装・host-tested**。COBS＋CRC-32/ISO-HDLC codec、streaming resync、HELLO→AUTH→ACTIVE→DRAINING session、EXPERIMENTALな開発profile認証（共有secret＋transcript結合MAC、方向別counter・replay拒否）、累積credit、MeshNode統合をC++ device bridgeとRust hostで実装。`protocol/usb-golden`共有vectorでbyte相互検証。実USB driver・HIL・本番Profileは未認定 |
 | 暗号Provider | PSA AES-GCM、HMAC導出、counter予約、replay windowを持つ開発PSK Providerを実装。本番Identity／EDHOC／RPKではなく未認定 |
 | 経路制御 | feasibility、withdraw、SeqNoRequest、3hop／diamond repairをportable testで実装・確認。実RF、分断再結合、10hopは未認定 |
 | 管理 | SingleAuthorityの2スロット耐電断台帳（magic/length/schema/seal、hash chain、CRC-32/ISO-HDLC、readback検証、全損時QUARANTINED＋明示recover）をportable実装・host power-cut試験済み。NVS LedgerStorage adapterはbuild-tested。quorum／自動選挙／snapshot／remote config本体は未実装 |
@@ -36,7 +37,7 @@
 - **G-SEC**：機器Identity、Join、credential、必須suite、Entropy、鍵更新、失効、再起動を本番Profileとして独立レビューする。開発PSKを代用しない。
 - **G-ROUTE**：portable実装を基準に、restart／GC／timer、分断再結合、複数origin、10hopをmodel testと実機で認定する。
 - **G-CONTROL**：SingleAuthorityの耐電断台帳は実装・host試験済みで、membership承認／失効／remote config向けの操作型integration pointを持つ。NVS実機・HIL、およびHAの選挙、log、snapshot、構成員変更、proofは別途認定する。
-- **G-USB**：device側bridge、認証transcript、frame保護、累積credit、C++／Rust相互運用をHILで確認する。
+- **G-USB**：device側bridge、認証transcript、frame保護、累積creditはportable実装済みで、C++／Rust共有golden vectorでhost相互検証済み。実USB driver・HILでの確認、および本番Profile認証（G-SEC）が残る。
 - **G-POWER**：Deep Sleep前のdrain、RTC/NVS、wake原因、再初期化、counter安全性、battery-side energyを実機で確認する。
 - **G-BOARD**：現物revision、電源、アンテナ、Pin、Flash/PSRAMを照合する。
 - **G-RF**：C3/S3/C5の有向組合せでLR250、broadcast/unicast、callback欠落、Peer churn、干渉、Sleep復帰を認定する。

@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+pub mod dev_session;
+
 pub const MAX_DECODED_FRAME: usize = 4096;
 pub const MAGIC: [u8; 4] = *b"RLU1";
 pub const VERSION: u8 = 1;
