@@ -1,0 +1,11 @@
+{
+  "codec": "object_ack",
+  "encoded_hex": "0101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f020000",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "object_ack_complete",
+  "object_hash_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "received_len": 512,
+  "status": 0,
+  "subtype": 1
+}

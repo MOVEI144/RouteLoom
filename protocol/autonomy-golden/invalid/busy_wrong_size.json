@@ -1,0 +1,8 @@
+{
+  "codec": "busy",
+  "encoded_hex": "01010110000000000000000500000007000000000000000900000000010000000200000014",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "busy_wrong_size",
+  "note": "37-byte Busy payload is a length mismatch"
+}

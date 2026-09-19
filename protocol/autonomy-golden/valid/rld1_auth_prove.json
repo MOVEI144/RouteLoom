@@ -1,0 +1,14 @@
+{
+  "body_hex": "0101000070726f76652d626f6479",
+  "capability_bits": 3,
+  "claimed_node": 72623859790382856,
+  "codec": "rld1",
+  "encoded_hex": "524c44310103002c003a0000c0ffee010102030405060708000102030405060708090a0b0c0d0e0f000000030101000070726f76652d626f6479",
+  "expect": "ok",
+  "flags": 0,
+  "format": "routeloom-autonomy-v1-golden",
+  "kind": 3,
+  "name": "rld1_auth_prove",
+  "network_hint": 3237998081,
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f"
+}

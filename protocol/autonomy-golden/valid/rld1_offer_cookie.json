@@ -1,0 +1,14 @@
+{
+  "body_hex": "636f6f6b696533322d62797465732d70616464696e672d746f2d333262797465732121",
+  "capability_bits": 3,
+  "claimed_node": 1230066625199609624,
+  "codec": "rld1",
+  "encoded_hex": "524c44310102002c004f0000c0ffee011112131415161718000102030405060708090a0b0c0d0e0f00000003636f6f6b696533322d62797465732d70616464696e672d746f2d333262797465732121",
+  "expect": "ok",
+  "flags": 0,
+  "format": "routeloom-autonomy-v1-golden",
+  "kind": 2,
+  "name": "rld1_offer_cookie",
+  "network_hint": 3237998081,
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f"
+}

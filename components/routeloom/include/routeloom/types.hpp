@@ -10,6 +10,11 @@ using NodeId = std::uint64_t;
 using NetworkId = std::uint64_t;
 using MonotonicMs = std::uint64_t;
 
+// A link-layer radio address (ESP-NOW/Wi-Fi MAC). Distinct from NodeId: a
+// NodeId is a provisioned identity, a MacAddress is a transport address that
+// can change across hardware swaps and must never be used as an identity.
+using MacAddress = std::array<std::uint8_t, 6>;
+
 constexpr NodeId kInvalidNodeId = 0;
 constexpr NodeId kBroadcastNodeId = UINT64_MAX;
 constexpr std::size_t kMaxApplicationPayload = 128;

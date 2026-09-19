@@ -1,0 +1,9 @@
+{
+  "codec": "rld1",
+  "encoded_hex": "524c010010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "rld1_wire_frame_not_rld1",
+  "note": "Wire v1 magic must not classify or decode as RLD1",
+  "probe": "false"
+}
