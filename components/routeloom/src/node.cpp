@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #include "routeloom/byte_io.hpp"
 
