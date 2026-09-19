@@ -84,7 +84,9 @@
       "evidence": [
         "components/routeloom/src/routing.cpp",
         "components/routeloom/src/node.cpp",
-        "tests/cpp/test_main.cpp"
+        "tests/cpp/test_main.cpp",
+        "tests/cpp/test_sim.hpp",
+        "tests/cpp/test_routing_sims.cpp"
       ]
     },
     "host_cli": {

@@ -19,6 +19,10 @@ struct NodeConfig {
   std::uint32_t message_session{0};
   std::uint16_t link_epoch{1};
   std::uint16_t end_epoch{1};
+  // Origin generation for this node's own route source. Must be persisted
+  // monotonic and incremented on every boot; a restarted node advertises a
+  // higher generation so peers discard its previous-incarnation route state.
+  std::uint16_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
   std::uint32_t hop_accept_timeout_ms{60};
@@ -61,7 +65,7 @@ class MeshNode {
   Status start(MonotonicMs now_ms) noexcept;
   Status add_neighbor(NodeId neighbor, RouteMetric link_metric,
                       MonotonicMs now_ms) noexcept;
-  Status remove_neighbor(NodeId neighbor) noexcept;
+  Status remove_neighbor(NodeId neighbor, MonotonicMs now_ms) noexcept;
 
   Status send(NodeId destination, ByteView payload, const SendOptions& options,
               MonotonicMs now_ms, MessageId& id) noexcept;
@@ -89,7 +93,9 @@ class MeshNode {
   struct Neighbor {
     NodeId node{kInvalidNodeId};
     RouteMetric metric{1};
+    RouteGeneration generation{0};  // last origin generation the peer self-advertised
     std::uint8_t consecutive_failures{0};
+    std::uint8_t route_cursor{0};  // rotation cursor for periodic route dumps
     bool active{false};
   };
 
@@ -100,10 +106,15 @@ class MeshNode {
     MonotonicMs expires_at_ms{0};
   };
 
+  // Per-destination request state. Survives dedup (seqno_seen_) expiry so the
+  // retry cap and cooldown still apply after the seen-record is gone.
   struct SeqnoState {
     NodeId destination{kInvalidNodeId};
     RouteSequence requested_sequence{0};
     MonotonicMs next_request_ms{0};
+    MonotonicMs last_sent_ms{0};
+    MonotonicMs expires_at_ms{0};
+    std::uint8_t attempts{0};
   };
 
   struct DedupEntry {
@@ -210,6 +221,11 @@ class MeshNode {
   void schedule_route_advertisements(MonotonicMs now_ms) noexcept;
   void schedule_sequence_requests(MonotonicMs now_ms) noexcept;
   void expire_sequence_requests(MonotonicMs now_ms) noexcept;
+  // Triggered update: schedule a full-neighbor advertisement burst after a
+  // deterministic jitter, bounded by a minimum interval between bursts so a
+  // flap storm cannot flood the TX queue.
+  void trigger_route_advertisement(MonotonicMs now_ms) noexcept;
+  void run_triggered_advertisement(MonotonicMs now_ms) noexcept;
 
   static Status encode_ack_payload(const AckKey& key,
                                    std::array<std::uint8_t, kMaxApplicationPayload>& payload,
@@ -241,6 +257,10 @@ class MeshNode {
   RouteSequence self_route_sequence_{1};
   MonotonicMs next_route_advertisement_ms_{0};
   std::size_t route_neighbor_cursor_{0};
+  bool triggered_advertisement_{false};
+  MonotonicMs triggered_at_ms_{0};
+  MonotonicMs next_triggered_ms_{0};
+  std::uint32_t trigger_counter_{0};
   bool started_{false};
 };
 

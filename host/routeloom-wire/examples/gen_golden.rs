@@ -177,13 +177,17 @@ fn receipt_payload(
     payload
 }
 
+// Wire v1 route record: destination(8) + origin generation(2) +
+// sequence(2) + metric(2) = 14 bytes.
 fn route_update_payload() -> Vec<u8> {
-    let mut payload = Vec::with_capacity(25);
+    let mut payload = Vec::with_capacity(29);
     payload.push(2_u8); // record count
     payload.extend_from_slice(&2_u64.to_be_bytes()); // self: destination 2
+    payload.extend_from_slice(&1_u16.to_be_bytes()); // generation
     payload.extend_from_slice(&0_u16.to_be_bytes()); // sequence
     payload.extend_from_slice(&0_u16.to_be_bytes()); // metric
     payload.extend_from_slice(&3_u64.to_be_bytes()); // destination 3
+    payload.extend_from_slice(&1_u16.to_be_bytes()); // generation
     payload.extend_from_slice(&101_u16.to_be_bytes());
     payload.extend_from_slice(&10_u16.to_be_bytes());
     payload

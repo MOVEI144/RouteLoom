@@ -20,6 +20,7 @@
 #include "routeloom/wire.hpp"
 
 #include "test_security.hpp"
+#include "test_sim.hpp"
 
 namespace {
 
@@ -29,6 +30,9 @@ int failures = 0;
 
 using namespace routeloom;
 using routeloom_test::TestSecurity;
+using routeloom_test::CapturingObserver;
+using routeloom_test::SimNetwork;
+using routeloom_test::SimRadio;
 
 class MemoryCounterStore final : public CounterStore {
  public:
@@ -44,78 +48,6 @@ class MemoryCounterStore final : public CounterStore {
   }
   std::map<std::uint32_t, CounterRecord> records;
 };
-
-struct CapturingObserver final : NodeObserver {
-  std::vector<std::vector<std::uint8_t>> messages;
-  std::vector<DeliveryResult> delivery_events;
-  std::vector<std::string> diagnostics;
-
-  void on_message(const MessageKey&, NodeId, ByteView payload) noexcept override {
-    messages.emplace_back(payload.data, payload.data + payload.size);
-  }
-  void on_delivery(const DeliveryResult& result) noexcept override { delivery_events.push_back(result); }
-  void on_diagnostic(const char* reason, NodeId, const MessageId*) noexcept override {
-    diagnostics.emplace_back(reason);
-  }
-};
-
-class SimNetwork;
-class SimRadio final : public RadioPort {
- public:
-  SimRadio(SimNetwork& network, NodeId owner) : network_(network), owner_(owner) {}
-  Status send(NodeId peer, std::uint64_t token, ByteView frame) noexcept override;
-  Status recover() noexcept override { return Status::success(); }
- private:
-  SimNetwork& network_;
-  NodeId owner_;
-};
-
-class SimNetwork {
- public:
-  struct Pending {
-    NodeId from;
-    NodeId to;
-    std::uint64_t token;
-    std::vector<std::uint8_t> frame;
-  };
-
-  void register_node(NodeId id, MeshNode* node) { nodes[id] = node; }
-  void connect(NodeId a, NodeId b) { links.insert(normalize(a, b)); }
-  void disconnect(NodeId a, NodeId b) { links.erase(normalize(a, b)); }
-  bool connected(NodeId a, NodeId b) const { return links.count(normalize(a, b)) != 0; }
-
-  Status enqueue(NodeId from, NodeId to, std::uint64_t token, ByteView frame) {
-    queue.push_back(Pending{from, to, token, std::vector<std::uint8_t>(frame.data, frame.data + frame.size)});
-    return Status::success();
-  }
-
-  void flush(MonotonicMs now) {
-    std::size_t safety = 0;
-    while (!queue.empty() && safety++ < 10000) {
-      Pending pending = std::move(queue.front());
-      queue.pop_front();
-      const bool success = connected(pending.from, pending.to) && nodes.count(pending.to) != 0;
-      nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
-      if (success) {
-        nodes.at(pending.to)->on_radio_receive(
-            pending.from, ByteView{pending.frame.data(), pending.frame.size()}, RadioRxMetadata{-60}, now);
-      }
-    }
-    CHECK(safety < 10000);
-  }
-
- private:
-  static std::pair<NodeId, NodeId> normalize(NodeId a, NodeId b) {
-    return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
-  }
-  std::map<NodeId, MeshNode*> nodes;
-  std::set<std::pair<NodeId, NodeId>> links;
-  std::deque<Pending> queue;
-};
-
-Status SimRadio::send(NodeId peer, std::uint64_t token, ByteView frame) noexcept {
-  return network_.enqueue(owner_, peer, token, frame);
-}
 
 void run_network(std::vector<MeshNode*>& nodes, SimNetwork& network,
                  MonotonicMs begin, MonotonicMs end, MonotonicMs step = 5) {
@@ -324,16 +256,18 @@ void test_wire_forwarding() {
 
 void test_routing() {
   RouteTable table;
-  CHECK(table.consider(RouteAdvertisement{9, 100, 0}, 2, 10, 0, 1000) == RouteUpdateResult::Accepted);
+  CHECK(table.consider(RouteAdvertisement{9, 1, 100, 0}, 2, 10, 0, 1000) == RouteUpdateResult::Accepted);
   CHECK(table.best(9).next_hop == 2);
   CHECK(table.mark_advertised(9));
-  CHECK(table.consider(RouteAdvertisement{9, 100, 20}, 3, 10, 1, 1000) == RouteUpdateResult::Infeasible);
+  CHECK(table.consider(RouteAdvertisement{9, 1, 100, 20}, 3, 10, 1, 1000) == RouteUpdateResult::Infeasible);
   CHECK(!table.needs_sequence_request(9));  // the feasible route via 2 still exists
-  table.invalidate_next_hop(2);
+  table.invalidate_next_hop(2, 2);
   CHECK(table.needs_sequence_request(9));
-  CHECK(table.consider(RouteAdvertisement{9, 101, 20}, 3, 10, 2, 1000) == RouteUpdateResult::Accepted);
+  // The infeasible via-3 candidate is retained (it can carry a SeqNoRequest),
+  // so accepting a newer sequence through it reports Updated, not Accepted.
+  CHECK(table.consider(RouteAdvertisement{9, 1, 101, 20}, 3, 10, 3, 1000) == RouteUpdateResult::Updated);
   CHECK(table.best(9).next_hop == 3);
-  table.invalidate_next_hop(3);
+  table.invalidate_next_hop(3, 4);
   CHECK(!table.best(9).valid);
 }
 
@@ -385,12 +319,12 @@ void test_diamond_repair() {
   run_network(nodes,network,0,800);
   CHECK(n1.routes().best(4).valid);
   network.disconnect(2,4);
-  n2.remove_neighbor(4); n4.remove_neighbor(2);
-  run_network(nodes,network,805,1500);
+  n2.remove_neighbor(4, 805); n4.remove_neighbor(2, 805);
+  run_network(nodes,network,805,4000);
   const std::array<std::uint8_t,3> payload{{9,8,7}};
   MessageId id{};
-  CHECK_OK(n1.send(4,ByteView{payload.data(),payload.size()},SendOptions{},1505,id));
-  run_network(nodes,network,1505,3000);
+  CHECK_OK(n1.send(4,ByteView{payload.data(),payload.size()},SendOptions{},4005,id));
+  run_network(nodes,network,4005,14000);
   CHECK(o4.messages.size() == 1);
   CHECK(n1.delivery(id).state == DeliveryState::Delivered);
 }

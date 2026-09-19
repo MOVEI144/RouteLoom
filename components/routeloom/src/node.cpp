@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -11,11 +12,24 @@ namespace {
 
 constexpr std::uint32_t kControlLifetimeMs = 1000;
 constexpr std::uint32_t kMinimumEndToEndRetryMs = 250;
-constexpr std::size_t kRouteRecordBytes = 12;
-constexpr std::size_t kMaxRouteRecordsPerFrame = 10;
+// ROUTE_UPDATE record: destination(8) + origin generation(2) + sequence(2) + metric(2)
+constexpr std::size_t kRouteRecordBytes = 14;
+// ROUTE_UPDATE payload = 1-byte count + N records; the 128-byte payload caps
+// N at floor((128 - 1) / kRouteRecordBytes) = 9.
+constexpr std::size_t kMaxRouteRecordsPerFrame =
+    (kMaxApplicationPayload - 1) / kRouteRecordBytes;
 constexpr std::uint32_t kSeqnoRequestLifetimeMs = 2000;
-constexpr std::uint32_t kSeqnoRequestCooldownMs = 250;
+constexpr std::uint32_t kSeqnoRequestCooldownMs = 2000;
+constexpr std::uint32_t kSeqnoRequestMaxCooldownMs = 30000;
+constexpr std::uint8_t kSeqnoRequestMaxAttempts = 8;
+constexpr std::size_t kSeqnoMaxInflight = 4;
+constexpr std::uint32_t kSeqnoStateDwellMs = 30000;
+constexpr std::uint8_t kSeqnoRequestMaxTtl = kDefaultHopLimit;
 constexpr std::size_t kSeqnoRequestPayloadBytes = 8 + 8 + 2 + 4 + 1;
+// Triggered updates: at most one full-neighbor burst per min-interval, each
+// burst delayed by a small deterministic jitter.
+constexpr std::uint32_t kTriggeredUpdateMinIntervalMs = 1000;
+constexpr std::uint32_t kTriggeredJitterMs = 64;
 
 }  // namespace
 
@@ -26,7 +40,8 @@ MeshNode::MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider&
 Status MeshNode::validate_config() const noexcept {
   if (config_.network == 0 || config_.network > UINT32_MAX ||
       config_.node == kInvalidNodeId || config_.node == kBroadcastNodeId ||
-      config_.message_session == 0 || config_.route_advertisement_period_ms == 0 ||
+      config_.message_session == 0 || config_.route_generation == 0 ||
+      config_.route_advertisement_period_ms == 0 ||
       config_.route_lifetime_ms <= config_.route_advertisement_period_ms ||
       config_.hop_accept_timeout_ms == 0 || config_.callback_watchdog_ms == 0 ||
       config_.max_link_attempts == 0 || config_.max_end_to_end_rounds == 0) {
@@ -65,12 +80,15 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   if (record == nullptr) {
     record = neighbors_.allocate();
     if (record == nullptr) return Status::error(StatusCode::NoCapacity, "neighbor table full");
+    record->generation = 0;  // last-seen origin generation; survives re-adds
   }
   record->node = neighbor;
   record->metric = link_metric;
   record->consecutive_failures = 0;
   record->active = true;
-  const RouteAdvertisement direct{neighbor, 0, 0};
+  // Direct route to the neighbor itself, seeded at the last-seen generation
+  // (0 for a brand-new peer); it upgrades as soon as its self record arrives.
+  const RouteAdvertisement direct{neighbor, record->generation, 0, 0};
   const auto result = routes_.consider(direct, neighbor, link_metric, now_ms,
                                        config_.route_lifetime_ms);
   if (result == RouteUpdateResult::NoCapacity) {
@@ -81,13 +99,13 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   return Status::success();
 }
 
-Status MeshNode::remove_neighbor(const NodeId neighbor) noexcept {
+Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
   auto* record = find_neighbor(neighbor);
   if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
   record->active = false;
-  routes_.invalidate_next_hop(neighbor);
+  routes_.invalidate_next_hop(neighbor, now_ms);
   ++self_route_sequence_;
-  next_route_advertisement_ms_ = 0;
+  trigger_route_advertisement(now_ms);
   return Status::success();
 }
 
@@ -371,7 +389,9 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
   job.plain.header.flags = wire::kFlagEndProtected;
   job.plain.header.delivery = DeliveryClass::Reliable;
   job.plain.header.delivery_round = data.delivery_round;
-  job.plain.header.hop_remaining = data.hop_remaining;
+  // The receipt gets its own full hop budget — the DATA's remainder is often
+  // 1 at the end of a long path, which would strand the return trip.
+  job.plain.header.hop_remaining = kDefaultHopLimit;
   job.plain.header.network = config_.network;
   job.plain.header.origin = config_.node;
   job.plain.header.destination = data.origin;
@@ -415,20 +435,46 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
   auto status = writer.write_u8(0);  // patched after records are appended
   if (!status) return status;
   std::uint8_t count = 0;
-  auto append = [&](const NodeId destination, const RouteSequence sequence,
-                    const RouteMetric metric) {
-    if (count >= kMaxRouteRecordsPerFrame) return;
-    if (writer.write_u64(destination) && writer.write_u16(sequence) && writer.write_u16(metric)) {
+  auto append = [&](const NodeId destination, const RouteGeneration generation,
+                    const RouteSequence sequence, const RouteMetric metric) -> bool {
+    if (count >= kMaxRouteRecordsPerFrame) return false;
+    if (writer.write_u64(destination) && writer.write_u16(generation) &&
+        writer.write_u16(sequence) && writer.write_u16(metric)) {
       ++count;
+      return true;
     }
+    return false;
   };
-  append(config_.node, self_route_sequence_, 0);
+  append(config_.node, config_.route_generation, self_route_sequence_, 0);
+  // A frame holds at most kMaxRouteRecordsPerFrame records. Rotate a
+  // per-neighbor cursor through the selected routes so a full dump spans
+  // successive updates instead of permanently starving the tail entries.
+  auto* neighbor_record = find_neighbor(neighbor);
+  const std::size_t skip =
+      neighbor_record != nullptr ? neighbor_record->route_cursor : 0;
+  std::size_t index = 0;
+  std::size_t advertised_count = 0;
+  bool writer_full = false;
   routes_.for_each_selected([&](const RouteSelection& selection) {
-    if (selection.destination == config_.node || count >= kMaxRouteRecordsPerFrame) return;
-    append(selection.destination, selection.sequence,
-           selection.next_hop == neighbor ? kInfiniteRouteMetric : selection.metric);
-    routes_.mark_advertised(selection.destination);
+    if (selection.destination == config_.node) return;
+    if (index++ < skip || writer_full) return;
+    const RouteMetric advertised =
+        selection.next_hop == neighbor ? kInfiniteRouteMetric : selection.metric;
+    if (!append(selection.destination, selection.generation, selection.sequence,
+                advertised)) {
+      writer_full = true;
+      return;
+    }
+    ++advertised_count;
+    // FD is refreshed only when a finite advertisement actually leaves; a
+    // split-horizon retraction (infinity) must not touch feasibility state.
+    if (advertised != kInfiniteRouteMetric) routes_.mark_advertised(selection.destination);
   });
+  if (neighbor_record != nullptr) {
+    const std::size_t next = skip + advertised_count;
+    neighbor_record->route_cursor =
+        static_cast<std::uint8_t>(next >= index ? 0 : next);
+  }
   job.plain.payload[0] = count;
   job.plain.payload_size = writer.size();
   return tx_queue_.push(std::move(job)) ? Status::success()
@@ -560,7 +606,10 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   if (!success) {
     if (neighbor != nullptr && neighbor->consecutive_failures < UINT8_MAX) {
       ++neighbor->consecutive_failures;
-      if (neighbor->consecutive_failures >= 2) routes_.invalidate_next_hop(job.peer);
+      if (neighbor->consecutive_failures >= 2) {
+        routes_.invalidate_next_hop(job.peer, now_ms);
+        trigger_route_advertisement(now_ms);
+      }
     }
     retry_or_fail(job, "MAC_SEND_FAILED", now_ms);
     return;
@@ -796,7 +845,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
 
 void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId peer,
                                    const MonotonicMs now_ms) noexcept {
-  const auto* neighbor = find_neighbor(peer);
+  auto* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || !neighbor->active) return;
   ByteReader reader(ByteView{frame.payload.data(), frame.payload_size});
   std::uint8_t count = 0;
@@ -805,18 +854,49 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
     observer_.on_diagnostic("INVALID_ROUTE_UPDATE", peer, &frame.header.message);
     return;
   }
+  std::array<RouteAdvertisement, kMaxRouteRecordsPerFrame> records{};
   for (std::uint8_t i = 0; i < count; ++i) {
-    RouteAdvertisement advertisement{};
-    if (!reader.read_u64(advertisement.destination) ||
-        !reader.read_u16(advertisement.sequence) ||
-        !reader.read_u16(advertisement.metric)) {
+    if (!reader.read_u64(records[i].destination) ||
+        !reader.read_u16(records[i].generation) ||
+        !reader.read_u16(records[i].sequence) ||
+        !reader.read_u16(records[i].metric)) {
       return;
     }
+  }
+
+  // Relay restart: the peer's self record (destination == peer) carries a
+  // higher origin generation than we last saw. The restarted relay lost its
+  // routing state, so every route learned from its previous incarnation is
+  // stale. Drop via-peer candidates without hold-down — post-restart
+  // advertisements are legitimate fresh state.
+  bool restarted = false;
+  for (std::uint8_t i = 0; i < count; ++i) {
+    if (records[i].destination == peer && records[i].generation > neighbor->generation) {
+      restarted = neighbor->generation != 0;
+      neighbor->generation = records[i].generation;
+    }
+  }
+  if (restarted) {
+    routes_.invalidate_next_hop(peer, now_ms, false);
+    trigger_route_advertisement(now_ms);
+    observer_.on_diagnostic("PEER_RESTARTED_ROUTES_FLUSHED", peer, nullptr);
+  }
+
+  for (std::uint8_t i = 0; i < count; ++i) {
+    const auto& advertisement = records[i];
     if (advertisement.destination == config_.node) continue;
     const auto result = routes_.consider(advertisement, peer, neighbor->metric, now_ms,
                                          config_.route_lifetime_ms);
     if (result == RouteUpdateResult::Infeasible) {
       observer_.on_diagnostic("ROUTE_INFEASIBLE_SEQNO_NEEDED", peer, nullptr);
+    } else if (result == RouteUpdateResult::StaleGeneration) {
+      observer_.on_diagnostic("ROUTE_STALE_GENERATION", peer, nullptr);
+    } else if (result == RouteUpdateResult::HeldDown) {
+      observer_.on_diagnostic("ROUTE_HELD_DOWN", peer, nullptr);
+    } else if (result != RouteUpdateResult::Accepted &&
+               result != RouteUpdateResult::Updated &&
+               result != RouteUpdateResult::Ignored) {
+      observer_.on_diagnostic("ROUTE_UPDATE_REJECTED", peer, nullptr);
     }
   }
 }
@@ -836,6 +916,7 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
   if (!reader.read_u64(requester) || !reader.read_u64(destination) ||
       !reader.read_u16(requested_sequence) || !reader.read_u32(request_id) ||
       !reader.read_u8(ttl) || reader.remaining() != 0 || ttl == 0 ||
+      ttl > kSeqnoRequestMaxTtl ||
       requester == kInvalidNodeId || destination == kInvalidNodeId) {
     observer_.on_diagnostic("INVALID_SEQNO_REQUEST", peer, &frame.header.message);
     return;
@@ -855,23 +936,30 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
 
   if (destination == config_.node) {
     bool ambiguous = false;
-    if (requested_sequence == self_route_sequence_ ||
-        route_sequence_newer(requested_sequence, self_route_sequence_, ambiguous)) {
-      self_route_sequence_ = static_cast<RouteSequence>(requested_sequence + 1U);
+    if (route_sequence_newer(requested_sequence, self_route_sequence_, ambiguous)) {
+      // Requester wants a sequence newer than its stored one; jumping to the
+      // requested value satisfies it. A request at or behind our current
+      // sequence is already satisfied — bumping again would only inflate it.
+      self_route_sequence_ = requested_sequence;
     } else if (ambiguous) {
       self_route_sequence_ = static_cast<RouteSequence>(self_route_sequence_ + 1U);
     }
-    next_route_advertisement_ms_ = now_ms;
+    trigger_route_advertisement(now_ms);
     observer_.on_diagnostic("SEQNO_REQUEST_SATISFIED", peer, &frame.header.message);
     return;
   }
 
   if (ttl <= 1) return;
-  neighbors_.for_each([&](const Neighbor& neighbor) {
-    if (!neighbor.active || neighbor.node == peer || tx_queue_.full()) return;
-    (void)queue_seqno_request(neighbor.node, requester, destination, requested_sequence,
-                              request_id, static_cast<std::uint8_t>(ttl - 1U), now_ms);
-  });
+  // One received request forwards along exactly one path (spec: a forwarder
+  // must not branch). The selected route is preferred; an infeasible-but-live
+  // candidate may carry it when feasibility blocks all forwarding.
+  const NodeId next = routes_.request_next_hop(destination, 0, peer, requester);
+  if (next == kInvalidNodeId || next == config_.node) {
+    observer_.on_diagnostic("SEQNO_REQUEST_NO_PATH", peer, &frame.header.message);
+    return;
+  }
+  (void)queue_seqno_request(next, requester, destination, requested_sequence,
+                            request_id, static_cast<std::uint8_t>(ttl - 1U), now_ms);
 }
 
 void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
@@ -1000,9 +1088,25 @@ void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
     if (expired == nullptr) break;
     seqno_seen_.release(expired);
   }
+  while (true) {
+    auto* expired = seqno_state_.find(
+        [&](const SeqnoState& value) { return value.expires_at_ms <= now_ms; });
+    if (expired == nullptr) break;
+    seqno_state_.release(expired);
+  }
 }
 
 void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
+  // Outstanding = requests sent inside the dedup window, still waiting for a
+  // fresh advertisement. Bounded so a dead origin cannot pile up requests.
+  std::size_t inflight = 0;
+  seqno_state_.for_each([&](const SeqnoState& value) {
+    if (value.last_sent_ms != 0 &&
+        value.last_sent_ms + kSeqnoRequestLifetimeMs > now_ms) {
+      ++inflight;
+    }
+  });
+
   routes_.for_each_sequence_request([&](const NodeId destination,
                                         const RouteSequence requested_sequence) {
     auto* state = seqno_state_.find(
@@ -1014,25 +1118,64 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
       state->requested_sequence = requested_sequence;
       state->next_request_ms = now_ms;
     }
+    state->expires_at_ms = now_ms + kSeqnoStateDwellMs;
     bool ambiguous = false;
     if (route_sequence_newer(requested_sequence, state->requested_sequence, ambiguous) ||
         ambiguous) {
-      state->next_request_ms = now_ms;
+      state->next_request_ms = now_ms;  // newer need: fresh retry window
+      state->attempts = 0;
     }
     state->requested_sequence = requested_sequence;
     if (now_ms < state->next_request_ms || tx_queue_.full()) return;
+    // Retry cap survives dedup expiry in seqno_state_: after the cap the
+    // destination simply waits for organic fresh advertisements.
+    if (state->attempts >= kSeqnoRequestMaxAttempts || inflight >= kSeqnoMaxInflight) {
+      return;
+    }
 
+    const NodeId next = routes_.request_next_hop(destination, state->attempts);
+    if (next == kInvalidNodeId || next == config_.node) return;
     const std::uint32_t request_id = next_seqno_request_id_++;
     auto* seen = seqno_seen_.allocate();
     if (seen == nullptr) return;
     *seen = SeqnoSeen{config_.node, destination, request_id, now_ms + kSeqnoRequestLifetimeMs};
-    neighbors_.for_each([&](const Neighbor& neighbor) {
-      if (!neighbor.active || tx_queue_.full()) return;
-      (void)queue_seqno_request(neighbor.node, config_.node, destination,
-                                requested_sequence, request_id, kDefaultHopLimit, now_ms);
-    });
-    state->next_request_ms = now_ms + kSeqnoRequestCooldownMs;
-    observer_.on_diagnostic("SEQNO_REQUEST_SENT", kInvalidNodeId, nullptr);
+    if (queue_seqno_request(next, config_.node, destination, requested_sequence,
+                            request_id, kDefaultHopLimit, now_ms)) {
+      ++state->attempts;
+      ++inflight;
+      state->last_sent_ms = now_ms;
+      // Linear backoff keeps retries bounded without a growing flood.
+      state->next_request_ms = now_ms + std::min<std::uint32_t>(
+          kSeqnoRequestMaxCooldownMs, kSeqnoRequestCooldownMs * state->attempts);
+      char detail[64];
+      std::snprintf(detail, sizeof detail, "SEQNO_REQUEST_SENT dest=%llu seq=%u att=%u",
+                    static_cast<unsigned long long>(destination), requested_sequence,
+                    state->attempts);
+      observer_.on_diagnostic(detail, next, nullptr);
+    } else {
+      seqno_seen_.release(seen);
+    }
+  });
+}
+
+void MeshNode::trigger_route_advertisement(const MonotonicMs now_ms) noexcept {
+  // Deterministic jitter decorrelates bursts across nodes without a RNG.
+  const MonotonicMs jitter = (config_.node * 31ULL + ++trigger_counter_ * 7ULL) %
+                             (kTriggeredJitterMs + 1ULL);
+  const MonotonicMs earliest = std::max(now_ms, next_triggered_ms_) + jitter;
+  if (!triggered_advertisement_ || earliest < triggered_at_ms_) {
+    triggered_advertisement_ = true;
+    triggered_at_ms_ = earliest;
+  }
+}
+
+void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
+  if (!triggered_advertisement_ || now_ms < triggered_at_ms_) return;
+  triggered_advertisement_ = false;
+  next_triggered_ms_ = now_ms + kTriggeredUpdateMinIntervalMs;
+  neighbors_.for_each([&](const Neighbor& neighbor) {
+    if (!neighbor.active || tx_queue_.full()) return;
+    (void)queue_route_update(neighbor.node, now_ms);
   });
 }
 
@@ -1043,6 +1186,9 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   expire_sequence_requests(now_ms);
   process_awaiting_hop(now_ms);
   process_delivery_timeouts(now_ms);
+  routes_.for_each_selected_change(
+      [&](const RouteSelection&) { trigger_route_advertisement(now_ms); });
+  run_triggered_advertisement(now_ms);
   schedule_sequence_requests(now_ms);
   schedule_route_advertisements(now_ms);
   dispatch_next(now_ms);
