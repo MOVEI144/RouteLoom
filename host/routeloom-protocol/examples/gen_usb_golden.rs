@@ -83,7 +83,7 @@ fn main() -> std::io::Result<()> {
         capability: CAPABILITY,
         principal: PRINCIPAL.to_vec(),
     };
-    let proof = derive_session_proof(SECRET, &transcript.encode());
+    let proof = derive_session_proof(SECRET, &transcript.encode().unwrap());
     let session = proof.session_id;
 
     let mut d2h_counter = 0_u64;
@@ -239,9 +239,11 @@ fn main() -> std::io::Result<()> {
         tx_grant_inner,
     ));
 
-    // 7: host command into the mesh. inner = destination || payload.
+    // 7: host command into the mesh.
+    // inner = idempotency_key || destination || payload.
     let payload = b"mesh-down";
     let mut data_inner = Vec::new();
+    data_inner.extend_from_slice(&0x00A1_1CE7_u64.to_be_bytes());
     data_inner.extend_from_slice(&PEER_NODE.to_be_bytes());
     data_inner.extend_from_slice(payload);
     steps.push(h2d(
@@ -255,8 +257,8 @@ fn main() -> std::io::Result<()> {
 
     // 8: device advances the cumulative rx grant after releasing the buffer.
     // Consumed = 1 frame, decoded_len = 30 + protected_body_len. The
-    // protected body was counter||tag||inner = 24 + (8 + payload).
-    let consumed_bytes = (30 + 24 + 8 + payload.len()) as u64;
+    // protected body was counter||tag||inner = 24 + (16 + payload).
+    let consumed_bytes = (30 + 24 + 16 + payload.len()) as u64;
     let mut topup_inner = vec![CREDIT_GRANT];
     topup_inner.extend_from_slice(&(1 + RX_GRANT_FRAMES).to_be_bytes());
     topup_inner.extend_from_slice(&(consumed_bytes + RX_GRANT_BYTES).to_be_bytes());

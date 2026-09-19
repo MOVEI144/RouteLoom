@@ -213,7 +213,7 @@ class PowerCoordinator {
   void resume_flow(ResetCause cause, ElapsedInterval elapsed,
                    MonotonicMs now_ms) noexcept;
   void restore_pending(const PowerImage& image, ElapsedInterval elapsed,
-                       MonotonicMs now_ms) noexcept;
+                       MonotonicMs now_ms, PowerImage& retained) noexcept;
   Status load_image(PowerImage& image, bool& found) noexcept;
   Status commit_image(const PowerImage& image) noexcept;
   void abort_to_running(const char* reason) noexcept;

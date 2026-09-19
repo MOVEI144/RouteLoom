@@ -65,7 +65,7 @@
       "qualified": false,
       "default_enabled": false,
       "evidence": [
-        "components/routeloom/include/routeloom/c_api.h",
+        "components/routeloom/include/routeloom/routeloom.h",
         "components/routeloom/src/c_api.cpp",
         "tests/cpp/test_main.cpp",
         "tests/cpp/c_api_smoke.c"

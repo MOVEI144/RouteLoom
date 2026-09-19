@@ -65,7 +65,9 @@ enum class RouteUpdateResult : std::uint8_t {
 
 bool route_sequence_newer(RouteSequence candidate, RouteSequence reference,
                           bool& ambiguous) noexcept;
-RouteMetric route_metric_add(RouteMetric left, RouteMetric right) noexcept;
+// advertised + link cost, saturating to infinity. Callers must reject a zero
+// link cost before calling (consider() ignores those advertisements).
+RouteMetric route_metric_add(RouteMetric advertised, RouteMetric link_cost) noexcept;
 
 // Babel-derived distance-vector table. Source key = (network implicit in the
 // owning node, destination/origin NodeId, origin generation): an origin
@@ -114,6 +116,27 @@ class RouteTable {
     entries_.for_each([&](const Entry& entry) {
       const auto selection = select(entry);
       if (selection.valid) fn(selection);
+    });
+  }
+
+  struct LostRoute {
+    NodeId destination{kInvalidNodeId};
+    RouteGeneration generation{0};
+    RouteSequence sequence{0};
+  };
+
+  // Fires for each remembered destination that currently has no feasible
+  // selection (lost candidates and/or an armed tombstone). Used to emit
+  // retractions so neighbors withdraw promptly instead of waiting for the
+  // full lease expiry.
+  template <typename Fn>
+  void for_each_lost(Fn fn) const noexcept {
+    entries_.for_each([&](const Entry& entry) {
+      if (select(entry).valid) return;
+      if (!has_candidates(entry) && entry.tombstone_expires_at_ms == 0) return;
+      fn(LostRoute{entry.destination, entry.generation,
+                   entry.feasible.valid ? entry.feasible.sequence
+                                        : static_cast<RouteSequence>(0)});
     });
   }
 

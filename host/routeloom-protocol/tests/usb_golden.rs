@@ -110,8 +110,8 @@ fn usb_session_vectors_are_byte_exact() {
         capability: u64_field(&session, "capability") as u32,
         principal: field(&session, "principal").as_bytes().to_vec(),
     };
-    assert_eq!(transcript.encode().len(), TRANSCRIPT_SIZE);
-    let proof = derive_session_proof(&secret, &transcript.encode());
+    assert_eq!(transcript.encode().unwrap().len(), TRANSCRIPT_SIZE);
+    let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
     assert_eq!(proof.session_id, u64_field(&session, "session_id"));
     assert_eq!(
         proof.hello_tag.to_vec(),
@@ -236,7 +236,7 @@ fn tampered_session_frames_are_rejected() {
         capability: u64_field(&session, "capability") as u32,
         principal: field(&session, "principal").as_bytes().to_vec(),
     };
-    let proof = derive_session_proof(&secret, &transcript.encode());
+    let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
     let keepalive = load(&root.join("frames/12_keepalive.json"));
     let frame = decode_wire(&unhex(field(&keepalive, "wire_hex")));
 

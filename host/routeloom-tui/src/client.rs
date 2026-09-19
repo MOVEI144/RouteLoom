@@ -120,11 +120,13 @@ impl DaemonClient {
             None => state.last_refresh_ms = Some(now_ms),
             Some(error) => {
                 self.pipe = None;
-                self.attempts = 1;
-                self.next_retry_ms = now_ms + Self::backoff_ms(1);
+                // A mid-poll drop is still a failed attempt: keep backing off
+                // instead of resetting to the minimum delay every cycle.
+                self.attempts = self.attempts.saturating_add(1);
+                self.next_retry_ms = now_ms + Self::backoff_ms(self.attempts);
                 state.conn = Conn::Disconnected {
                     since_ms: now_ms,
-                    attempts: 1,
+                    attempts: self.attempts,
                     next_retry_ms: self.next_retry_ms,
                     error: Some(error),
                 };

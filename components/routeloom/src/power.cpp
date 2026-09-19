@@ -122,6 +122,10 @@ Status decode_image(const ByteView record, PowerImage& image) noexcept {
     RL_READ(reader.read_u8(used));
     RL_READ(reader.read_bytes(
         MutableByteView{pending.payload.data(), pending.payload.size()}));
+    if (delivery > static_cast<std::uint8_t>(DeliveryClass::Applied) ||
+        priority > static_cast<std::uint8_t>(Priority::Urgent)) {
+      return Status::error(StatusCode::IntegrityError, "sleep image enum range");
+    }
     pending.delivery = static_cast<DeliveryClass>(delivery);
     pending.priority = static_cast<Priority>(priority);
     pending.used = used != 0;
@@ -245,6 +249,12 @@ Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
   if (state_ != PowerState::ReadyToSleep) {
     return Status::error(StatusCode::InvalidState, "not ready to sleep");
   }
+  if (!image_valid_) {
+    // READY_TO_SLEEP is only reachable after commit_image() succeeded, but
+    // re-check the durable flag: entering deep sleep without a committed
+    // image would silently lose the resume context.
+    return Status::error(StatusCode::InvalidState, "SLEEP_IMAGE_MISSING");
+  }
   if (!ticket_valid(ticket)) {
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
@@ -291,14 +301,17 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
       break;
     case PowerState::Resuming:
       node_.poll(now_ms);
-      if (node_.work_generation() != confirm_baseline_) {
+      // Only inbound peer traffic confirms a fast resume: a failed TX
+      // callback or an app send must not count as peers answering.
+      if (node_.rx_generation() != confirm_baseline_) {
         outcome_ = ResumeOutcome::FastResume;
         transition(PowerState::Running, "RESUME_CONFIRMED");
       } else if (now_ms >= resume_deadline_ms_) {
         if (!discovery_started_) {
           discovery_started_ = true;
-          events_.on_diagnostic("RESUME_DISCOVERY_STARTED");
-          (void)port_.start_discovery(image_);
+          const auto discovery = port_.start_discovery(image_);
+          events_.on_diagnostic(discovery ? "RESUME_DISCOVERY_STARTED"
+                                        : discovery.detail);
         }
         outcome_ = ResumeOutcome::DiscoveryRequired;
         transition(PowerState::Running, "RESUME_UNCONFIRMED");
@@ -402,6 +415,10 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
 }
 
 bool PowerCoordinator::image_usable(const PowerImage& image) const noexcept {
+  // Identity binding only. config_revision is persisted in the image for
+  // diagnostics but deliberately not compared here: MeshNode::config_revision
+  // also bumps on runtime peer add/remove, so a freshly-booted node would
+  // never match a stored image and every resume would degrade to cold start.
   return image.network == node_.config().network &&
          image.node == node_.config().node;
 }
@@ -463,11 +480,12 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
   }
 
   if (usable) {
-    restore_pending(stored, elapsed, now_ms);
+    restore_pending(stored, elapsed, now_ms, merged);
     if (has_pending(stored)) {
-      // Consume pendings so a later torn write cannot replay them.
+      // Consume only the pendings that were re-injected; records whose send
+      // failed stay in `merged.pending` so the next sleep image retains them
+      // instead of silently dropping durable work.
       merged.sequence = image_sequence_ + 1;
-      for (auto& record : merged.pending) record.used = false;
       (void)commit_image(merged);
     }
   }
@@ -481,7 +499,7 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
     transition(PowerState::Running, "COLD_START");
     return;
   }
-  confirm_baseline_ = node_.work_generation();
+  confirm_baseline_ = node_.rx_generation();
   resume_deadline_ms_ = now_ms + config_.resume_confirm_ms;
   // Stay RESUMING: poll() confirms saved peers inside the window or starts
   // bounded discovery on expiry.
@@ -489,9 +507,17 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
 
 void PowerCoordinator::restore_pending(const PowerImage& image,
                                        const ElapsedInterval elapsed,
-                                       const MonotonicMs now_ms) noexcept {
-  for (const auto& record : image.pending) {
+                                       const MonotonicMs now_ms,
+                                       PowerImage& retained) noexcept {
+  for (std::size_t i = 0; i < image.pending.size(); ++i) {
+    const PendingDeliveryRecord& record = image.pending[i];
     if (!record.used) continue;
+    // Same-index slot in `retained` tracks what survives this resume. The
+    // default below is "consumed": mark the retained copy unused unless the
+    // re-inject fails and the record must outlive this boot.
+    PendingDeliveryRecord* keep =
+        i < retained.pending.size() ? &retained.pending[i] : nullptr;
+    if (keep != nullptr) keep->used = false;
     std::uint32_t remaining = 0;
     const auto resumed = resume_remaining_lifetime(
         config_.deadline_policy, record.stored_remaining_ms, elapsed, remaining);
@@ -507,6 +533,14 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
         record.destination, ByteView{record.payload.data(), record.payload_size},
         options, now_ms, new_id);
     events_.on_pending_result(record, sent.ok() ? StatusCode::Ok : sent.code);
+    if (!sent.ok() && keep != nullptr) {
+      // Re-injection failed (queue full, draining, ...): keep the durable
+      // record — with the decayed lifetime — so a later sleep image retries
+      // it instead of dropping it at the storage layer.
+      *keep = record;
+      keep->used = true;
+      keep->stored_remaining_ms = remaining;
+    }
   }
 }
 

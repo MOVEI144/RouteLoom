@@ -110,6 +110,10 @@ class SingleAuthority {
   AuthorityRecord state_{};
   std::uint64_t revision_{0};
   std::uint64_t recovery_floor_{0};
+  // Highest authority generation proven by a CRC-intact record this boot.
+  // Recovery starts a new generation above it so pre-loss operations cannot
+  // re-validate against the recovered ledger.
+  std::uint32_t max_generation_seen_{1};
   std::array<StatusCode, kAuthorityLedgerSlots> slot_reserved_{};
   std::uint8_t active_slot_{0};
   bool has_active_{false};

@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "routeloom/byte_io.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/types.hpp"
@@ -319,6 +320,81 @@ void test_partition_merge() {
   check_no_forward_loops(w.net.sights);
 }
 
+void test_retraction_propagates() {
+  SimWorld w;
+  // Line 1-2-3 with no alternate path. When 2-3 drops, 2 must promptly
+  // advertise an infinity record for 3 so 1 withdraws — not wait out the
+  // 1000ms route lifetime.
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.run(4000);
+  CHECK(w.at(1)->routes().best(3).valid);
+
+  w.unlink(2, 3);
+  // One triggered-update cycle (≤ ~200ms of run time) must already withdraw
+  // the route at 1; lease expiry alone would keep it valid for ~1000ms.
+  w.run(400);
+  CHECK(!w.at(1)->routes().best(3).valid);
+}
+
+void test_seqno_intermediate_answers() {
+  SimWorld w;
+  // Line 1-2-3. A seqno request reaching node 2 for destination 3 — which 2
+  // already has a fresh route to — is answered from 2's own table instead of
+  // being forwarded onward to the origin (RFC 8966 §3.8.1.2).
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.run(4000);
+  CHECK(w.at(2)->routes().best(3).valid);
+
+  // Craft a SeqNoRequest as node 1 would send it: requester=1, destination=3,
+  // requested seq 0 (already satisfied by 2's route), ttl=2.
+  std::array<std::uint8_t, 23> payload{};
+  {
+    ByteWriter writer(MutableByteView{payload.data(), payload.size()});
+    CHECK_OK(writer.write_u64(1));   // requester
+    CHECK_OK(writer.write_u64(3));   // destination
+    CHECK_OK(writer.write_u16(0));   // requested sequence
+    CHECK_OK(writer.write_u32(9));   // request id
+    CHECK_OK(writer.write_u8(2));    // ttl
+  }
+  wire::PlainFrame plain{};
+  plain.header.type = FrameType::SeqnoRequest;
+  plain.header.delivery = DeliveryClass::BestEffort;
+  plain.header.hop_remaining = 1;
+  plain.header.network = 1;
+  plain.header.origin = 1;
+  plain.header.destination = 2;
+  plain.header.previous_hop = 1;
+  plain.header.next_hop = 2;
+  plain.header.message = MessageId{101, 77};
+  plain.header.remaining_deadline_ms = 60000;
+  plain.header.original_lifetime_ms = 60000;
+  plain.payload_size = payload.size();
+  std::memcpy(plain.payload.data(), payload.data(), payload.size());
+  wire::EncodedFrame encoded{};
+  CHECK_OK(wire::encode_new(plain, *w.security[1], encoded));
+
+  const std::size_t sights_before = w.net.sights.size();
+  w.at(2)->on_radio_receive(1, encoded.view(), RadioRxMetadata{-60}, w.now);
+  w.run(3000);
+  // 2 answered with a route update toward its neighbors — and never relayed
+  // a seqno request onward to 3.
+  bool saw_update_to_1 = false;
+  for (std::size_t i = sights_before; i < w.net.sights.size(); ++i) {
+    const FrameSight& sight = w.net.sights[i];
+    CHECK(sight.type != FrameType::SeqnoRequest);
+    if (sight.type == FrameType::RouteUpdate && sight.to == 1) {
+      saw_update_to_1 = true;
+    }
+  }
+  CHECK(saw_update_to_1);
+}
+
 void test_multiple_origins_pinning() {
   SimWorld w;
   // Two gateways behind different arms: an explicit destination must never be
@@ -365,6 +441,8 @@ int main() {
   test_origin_restart();
   test_relay_restart();
   test_partition_merge();
+  test_retraction_propagates();
+  test_seqno_intermediate_answers();
   test_multiple_origins_pinning();
   if (failures != 0) {
     std::fprintf(stderr, "%d routing-sim checks failed\n", failures);

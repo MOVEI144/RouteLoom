@@ -66,6 +66,7 @@ pub enum ProtocolError {
     CreditSessionMismatch,
     CreditRegression,
     CreditExhausted,
+    PrincipalTooLong,
 }
 
 impl fmt::Display for ProtocolError {
@@ -115,6 +116,11 @@ pub fn cobs_encode(input: &[u8]) -> Vec<u8> {
 }
 
 pub fn cobs_decode(input: &[u8]) -> Result<Vec<u8>, ProtocolError> {
+    // Encoded COBS data never contains a 0x00 byte anywhere (the delimiter is
+    // stripped by the caller), so a zero inside the segment is malformed.
+    if input.contains(&0) {
+        return Err(ProtocolError::InvalidCobs);
+    }
     let mut output = Vec::with_capacity(input.len());
     let mut index = 0;
     while index < input.len() {
@@ -200,6 +206,7 @@ pub fn decode_frame(encoded_without_delimiter: &[u8]) -> Result<Frame, ProtocolE
 #[derive(Default)]
 pub struct StreamDecoder {
     pending: Vec<u8>,
+    discarding: bool,
 }
 
 impl StreamDecoder {
@@ -207,12 +214,18 @@ impl StreamDecoder {
         let mut results = Vec::new();
         for byte in input {
             if *byte == 0 {
-                if !self.pending.is_empty() {
+                if self.discarding {
+                    // Bounded discard ends at the delimiter; resync.
+                    self.discarding = false;
+                } else if !self.pending.is_empty() {
                     results.push(decode_frame(&self.pending));
                     self.pending.clear();
                 }
-            } else if self.pending.len() >= MAX_DECODED_FRAME + 32 {
+            } else if self.discarding {
+                continue;
+            } else if self.pending.len() >= MAX_DECODED_FRAME + 64 {
                 self.pending.clear();
+                self.discarding = true;
                 results.push(Err(ProtocolError::FrameTooLarge));
             } else {
                 self.pending.push(*byte);
@@ -223,6 +236,7 @@ impl StreamDecoder {
 
     pub fn reset(&mut self) {
         self.pending.clear();
+        self.discarding = false;
     }
 }
 
@@ -262,8 +276,11 @@ impl CumulativeCredit {
 
     pub fn consume(&mut self, bytes: usize) -> Result<(), ProtocolError> {
         let bytes = u64::try_from(bytes).map_err(|_| ProtocolError::FrameTooLarge)?;
-        if self.consumed_frames + 1 > self.granted_frames
-            || self.consumed_bytes + bytes > self.granted_bytes
+        // Saturating comparisons: raw addition could wrap past u64::MAX and
+        // pass the check, so never let consumed exceed grant by wrap-around.
+        if self.consumed_frames >= self.granted_frames
+            || self.consumed_bytes > self.granted_bytes
+            || bytes > self.granted_bytes - self.consumed_bytes
         {
             return Err(ProtocolError::CreditExhausted);
         }

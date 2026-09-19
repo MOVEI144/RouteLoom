@@ -49,11 +49,14 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
     SecurityContext context{};
     std::uint64_t fingerprint{0};
     std::optional<CounterLease> lease{};
+    // LRU stamp: evicted first when the bounded context pool fills.
+    std::uint64_t use_stamp{0};
   };
 
   struct RxContext {
     SecurityContext context{};
     ReplayGuard::Window window{};
+    std::uint64_t use_stamp{0};
   };
 
   static bool same_context(const SecurityContext& left,
@@ -72,6 +75,7 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
   bool ready_{false};
   FixedPool<TxContext, kContextCapacity> tx_contexts_{};
   FixedPool<RxContext, kContextCapacity> rx_contexts_{};
+  std::uint64_t context_stamp_{0};
 };
 
 }  // namespace routeloom::espnow

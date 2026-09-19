@@ -423,25 +423,26 @@ fn read_header(encoded: &[u8], header: &mut Header) -> Result<()> {
 
 /// End-to-end AAD covers only the end-immutable fields of semantics.json
 /// (network, origin, message session+sequence, bound destination, delivery
-/// contract, original lifetime, payload length) plus version, end epoch and
-/// end counter — 52 bytes in the same order as the C++ `make_end_aad`.
+/// contract, flags, original lifetime, payload length) plus version, end epoch and
+/// end counter — 53 bytes in the same order as the C++ `make_end_aad`.
 /// Hop-mutable fields (previous/next hop, hop remaining, delivery round,
 /// remaining deadline, link epoch/counter) must never be added here.
-fn end_aad(header: &Header) -> [u8; 52] {
-    let mut aad = [0_u8; 52];
+fn end_aad(header: &Header) -> [u8; 53] {
+    let mut aad = [0_u8; 53];
     aad[0] = MAJOR;
     aad[1] = MINOR;
     aad[2] = header.frame_type as u8;
-    aad[3] = header.delivery as u8;
-    aad[4..8].copy_from_slice(&(header.network as u32).to_be_bytes());
-    aad[8..16].copy_from_slice(&header.origin.to_be_bytes());
-    aad[16..24].copy_from_slice(&header.destination.to_be_bytes());
-    aad[24..28].copy_from_slice(&header.message.session.to_be_bytes());
-    aad[28..36].copy_from_slice(&header.message.sequence.to_be_bytes());
-    aad[36..40].copy_from_slice(&header.original_lifetime_ms.to_be_bytes());
-    aad[40..42].copy_from_slice(&header.end_epoch.to_be_bytes());
-    aad[42..50].copy_from_slice(&header.end_counter.to_be_bytes());
-    aad[50..52].copy_from_slice(&header.payload_length.to_be_bytes());
+    aad[3] = header.flags;
+    aad[4] = header.delivery as u8;
+    aad[5..9].copy_from_slice(&(header.network as u32).to_be_bytes());
+    aad[9..17].copy_from_slice(&header.origin.to_be_bytes());
+    aad[17..25].copy_from_slice(&header.destination.to_be_bytes());
+    aad[25..29].copy_from_slice(&header.message.session.to_be_bytes());
+    aad[29..37].copy_from_slice(&header.message.sequence.to_be_bytes());
+    aad[37..41].copy_from_slice(&header.original_lifetime_ms.to_be_bytes());
+    aad[41..43].copy_from_slice(&header.end_epoch.to_be_bytes());
+    aad[43..51].copy_from_slice(&header.end_counter.to_be_bytes());
+    aad[51..53].copy_from_slice(&header.payload_length.to_be_bytes());
     aad
 }
 
@@ -494,6 +495,9 @@ fn wrap_link<S: SecurityProvider>(
 }
 
 pub fn validate_header(header: &Header) -> Result<()> {
+    // frame_type/delivery are enums, so the decoder's unknown-type and
+    // delivery-class rejections cannot be bypassed at the API boundary: an
+    // invalid value is unconstructable here (unlike the C++ u8 fields).
     if header.network == 0
         || header.network > u64::from(u32::MAX)
         || header.origin == INVALID_NODE_ID
@@ -620,11 +624,22 @@ pub fn open_end<S: SecurityProvider>(
             "end payload is not addressed to this node",
         );
     }
+    // Callers may build LinkOpenedFrame directly (open_link validates these,
+    // but the fields are public): reject sizes that cannot fit the fixed
+    // buffers before any length arithmetic or slicing.
+    if input.header.payload_length > MAX_APPLICATION_PAYLOAD as u16
+        || input.protected_payload_size > input.protected_payload.len()
+    {
+        return err(ErrorCode::ProtocolError, "frame field out of range");
+    }
     *output = PlainFrame::default();
     output.header = input.header.clone();
     output.payload_size = usize::from(input.header.payload_length);
 
     if input.header.flags & FLAG_END_PROTECTED == 0 {
+        // Link-only frame: the wire layer accepts the plain payload —
+        // whether unprotected DATA is admissible is a delivery-layer
+        // policy, not a wire-codec invariant (see the C++ open_end).
         if input.protected_payload_size != usize::from(input.header.payload_length) {
             return err(
                 ErrorCode::ProtocolError,
@@ -666,11 +681,30 @@ pub fn forward<S: SecurityProvider>(
     security: &mut S,
     output: &mut EncodedFrame,
 ) -> Result<()> {
-    if input.header.next_hop != local_node || input.header.destination == local_node {
+    // next_hop == destination is the normal final hop — only the invalid
+    // sentinel and self-forwarding are rejected here.
+    if input.header.next_hop != local_node
+        || input.header.destination == local_node
+        || next_hop == INVALID_NODE_ID
+        || next_hop == local_node
+    {
         return err(
             ErrorCode::InvalidState,
             "frame is not forwardable by this node",
         );
+    }
+    // Same defensive bounds as open_end: the fields are public and must be
+    // consistent before the protected bytes are re-wrapped.
+    let expected_plain = usize::from(input.header.payload_length)
+        + if input.header.flags & FLAG_END_PROTECTED != 0 {
+            AEAD_TAG_SIZE
+        } else {
+            0
+        };
+    if input.header.payload_length > MAX_APPLICATION_PAYLOAD as u16
+        || input.protected_payload_size != expected_plain
+    {
+        return err(ErrorCode::ProtocolError, "frame field out of range");
     }
     if input.header.hop_remaining <= 1 || remaining_deadline_ms == 0 {
         return err(ErrorCode::Expired, "forwarding budget exhausted");

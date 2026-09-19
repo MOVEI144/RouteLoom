@@ -50,6 +50,20 @@ void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcep
 void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.poll(now_ms);
+  // The pre-auth budget is a device-level rate limit across session attempts
+  // (a new HELLO must not reset it): refill one reply per kPreAuthRefillMs.
+  if (preauth_budget_ < kPreAuthBudget) {
+    const std::uint64_t elapsed = now_ms - preauth_refill_ms_;
+    const std::uint64_t steps = elapsed / kPreAuthRefillMs;
+    if (steps > 0) {
+      const std::uint64_t room = kPreAuthBudget - preauth_budget_;
+      preauth_budget_ = static_cast<std::uint8_t>(
+          preauth_budget_ + (steps < room ? steps : room));
+      preauth_refill_ms_ += steps * kPreAuthRefillMs;
+    }
+  } else {
+    preauth_refill_ms_ = now_ms;
+  }
   if ((state_ == SessionState::Hello || state_ == SessionState::Authenticating) &&
       now_ms - state_entered_ms_ > kHandshakeTimeoutMs) {
     reset_session_state();
@@ -135,7 +149,13 @@ void UsbBridge::handle_hello(const UsbFrame& frame, const MonotonicMs now_ms) no
   // consumed values and partial TX are never carried over.
   reset_session_state();
   if (min_version > kProtocolVersion || max_version < kProtocolVersion) {
-    send_error(UsbErrorCode::Unsupported, frame.request, "VERSION_UNSUPPORTED", now_ms);
+    // Same bounded pre-auth budget as the other HELLO failure paths: a flood
+    // of parseable-but-unsupported HELLOs must not get free error replies.
+    if (preauth_budget_ > 0) {
+      --preauth_budget_;
+      send_error(UsbErrorCode::Unsupported, frame.request, "VERSION_UNSUPPORTED",
+                 now_ms);
+    }
     return;
   }
 
@@ -231,13 +251,6 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
     ++stats_.stale_session;  // stale-session traffic is dropped, not answered
     return;
   }
-  // Incoming CONTROL traffic is rate-limited by the reservation bucket;
-  // everything else consumes the granted data credit.
-  if (is_control_kind(frame.kind) &&
-      !take_control_token(rx_tokens_, rx_bucket_ms_, now_ms)) {
-    ++stats_.control_denied;
-    return;
-  }
   std::uint64_t counter = 0;
   ByteView inner{};
   Status status = open_body(proof_.key, kDirHostToDevice, frame, counter, inner);
@@ -252,6 +265,15 @@ void UsbBridge::handle_authenticated(const UsbFrame& frame,
     return;
   }
   ++rx_counter_;
+  // Incoming CONTROL traffic is rate-limited by the reservation bucket;
+  // everything else consumes the granted data credit. The check runs AFTER
+  // tag/counter verification so unauthenticated bytes cannot burn tokens and
+  // a dropped-but-valid frame does not desynchronize the counter stream.
+  if (is_control_kind(frame.kind) &&
+      !take_control_token(rx_tokens_, rx_bucket_ms_, now_ms)) {
+    ++stats_.control_denied;
+    return;
+  }
   if (state_ == SessionState::Draining && !is_control_kind(frame.kind)) {
     send_error(UsbErrorCode::Draining, frame.request, "SESSION_DRAINING", now_ms);
     return;
@@ -343,15 +365,18 @@ void UsbBridge::handle_credit(const std::uint64_t request, const ByteView inner,
 void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
                                     const ByteView inner,
                                     const MonotonicMs now_ms) noexcept {
-  if (inner.size < 8) {
+  if (inner.size < 16) {
     send_error(UsbErrorCode::ProtocolError, request, "DATA_MALFORMED", now_ms);
     return;
   }
-  const NodeId destination = read_u64(inner.data);
-  const ByteView payload{inner.data + 8, inner.size - 8};
+  const std::uint64_t idempotency_key = read_u64(inner.data);
+  const NodeId destination = read_u64(inner.data + 8);
+  const ByteView payload{inner.data + 16, inner.size - 16};
 
-  // Idempotency scope (principal, network, operation_class, key); the key is
-  // the session-unique USB request ID. The canonical hash binds kind+body.
+  // Idempotency scope (principal, network, operation_class, key): the key is
+  // the host-chosen identity in the inner body — stable across sessions, so
+  // records may legitimately persist past a reconnect. The canonical hash
+  // binds kind+body (key, destination and payload together).
   std::array<std::uint8_t, kMaxTxInner + 1> canonical{};
   canonical[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
   if (inner.size > kMaxTxInner) {
@@ -365,7 +390,7 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   const IdempotencyResult result = idempotency_.submit(
       ByteView{transcript_.principal.data(), transcript_.principal_len},
       transcript_.network, static_cast<std::uint8_t>(FrameKind::DataToMesh),
-      request, hash, record);
+      idempotency_key, hash, now_ms, record);
   if (result == IdempotencyResult::Conflict) {
     send_error(UsbErrorCode::Conflict, request, "IDEMPOTENCY_CONFLICT", now_ms);
     return;
@@ -421,7 +446,21 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   record->accepted = true;
   record->message_session = id.session;
   record->message_sequence = id.sequence;
-  if (RequestMap* map = request_map_.allocate()) {
+  RequestMap* map = request_map_.allocate();
+  if (map == nullptr) {
+    // Bounded correlation table: reuse the oldest entry so delivery reports
+    // still resolve for recent sends instead of silently degrading.
+    RequestMap* oldest = nullptr;
+    request_map_.for_each([&](RequestMap& value) {
+      if (oldest == nullptr || value.id.sequence < oldest->id.sequence) {
+        oldest = &value;
+      }
+    });
+    if (oldest != nullptr && request_map_.release(oldest)) {
+      map = request_map_.allocate();
+    }
+  }
+  if (map != nullptr) {
     map->id = id;
     map->request = request;
   }
@@ -591,9 +630,12 @@ void UsbBridge::note_credit_stall(const MonotonicMs now_ms) noexcept {
     if (credit_queries_ == 0 ||
         now_ms - last_credit_query_ms_ >= kCreditQueryIntervalMs) {
       static const std::uint8_t query_body = kCreditQuery;
-      enqueue(FrameKind::Credit, 0, 0, ByteView{&query_body, 1}, now_ms);
-      ++credit_queries_;
-      last_credit_query_ms_ = now_ms;
+      // Only count a query that actually made it onto the wire queue; a full
+      // CONTROL queue must not burn retries toward CONNECTION_STALLED.
+      if (enqueue(FrameKind::Credit, 0, 0, ByteView{&query_body, 1}, now_ms)) {
+        ++credit_queries_;
+        last_credit_query_ms_ = now_ms;
+      }
     }
     return;
   }
@@ -615,7 +657,8 @@ void UsbBridge::reset_session_state() noexcept {
   rx_counter_ = 0;
   tx_counter_ = 0;
   auth_attempts_ = 0;
-  preauth_budget_ = kPreAuthBudget;
+  // preauth_budget_ intentionally survives: it is a device-level rate limit
+  // across session attempts, not per-session state.
   tx_credit_.reset(0);
   rx_credit_.reset(0);
   connection_stalled_ = false;

@@ -163,9 +163,13 @@ class LogPowerEvents final : public routeloom::PowerEvents {
 };
 
 routeloom::ResetCause classify_boot() noexcept {
-  // esp_sleep_get_wakeup_causes returns the bitmask of wakeup sources; zero
-  // means the reset was not a sleep wakeup (ESP_SLEEP_WAKEUP_UNDEFINED).
-  const std::uint32_t wakeup = esp_sleep_get_wakeup_causes();
+  // esp_sleep_get_wakeup_causes() returns a *bitmap* of esp_sleep_source_t
+  // values — on a non-sleep reset it reports BIT(ESP_SLEEP_WAKEUP_UNDEFINED),
+  // which is nonzero. Mask the UNDEFINED bit before treating the bitmap as
+  // evidence of a real sleep wakeup so brownout/watchdog resets are not
+  // misclassified as deep-sleep resumes.
+  const std::uint32_t wakeup =
+      esp_sleep_get_wakeup_causes() & ~(1U << ESP_SLEEP_WAKEUP_UNDEFINED);
   const esp_reset_reason_t reason = esp_reset_reason();
   const bool marked = s_sleep_marker == kSleepMarkerValue;
   s_sleep_marker = 0;
@@ -224,6 +228,11 @@ extern "C" void app_main(void) {
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  // Origin generation must rise every boot so peers discard the previous
+  // incarnation's route state. It is derived from the persisted monotonic
+  // boot session, mapped into 1..0xFFFF (0 is the "unset" sentinel).
+  config.node.route_generation = static_cast<std::uint16_t>(
+      ((message_session - 1U) % 0xFFFFU) + 1U);
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
   config.max_tx_power_qdbm = CONFIG_ROUTELOOM_TX_POWER_QDBM;
 

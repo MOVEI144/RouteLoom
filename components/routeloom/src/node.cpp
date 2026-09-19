@@ -171,7 +171,34 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
     return Status::error(StatusCode::Unsupported, "APPLIED is not implemented in CORE_FIXED_250");
   }
   auto* record = deliveries_.allocate();
-  if (record == nullptr) return Status::error(StatusCode::NoCapacity, "delivery table full");
+  if (record == nullptr) {
+    // Terminal entries are history, not live work: evict the oldest one
+    // before reporting the table full so sends are not wedged forever.
+    Delivery* oldest_terminal = nullptr;
+    deliveries_.for_each([&](Delivery& delivery) {
+      switch (delivery.state) {
+        case DeliveryState::Delivered:
+        case DeliveryState::Failed:
+        case DeliveryState::Expired:
+        case DeliveryState::CancelledBeforeTx:
+        case DeliveryState::Indeterminate:
+          if (oldest_terminal == nullptr ||
+              delivery.created_at_ms < oldest_terminal->created_at_ms) {
+            oldest_terminal = &delivery;
+          }
+          break;
+        default:
+          break;
+      }
+    });
+    if (oldest_terminal != nullptr) {
+      deliveries_.release(oldest_terminal);
+      record = deliveries_.allocate();
+    }
+    if (record == nullptr) {
+      return Status::error(StatusCode::NoCapacity, "delivery table full");
+    }
+  }
   record->id = MessageId{config_.message_session, next_message_sequence_++};
   record->destination = destination;
   record->options = options;
@@ -490,6 +517,16 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
     neighbor_record->route_cursor =
         static_cast<std::uint8_t>(next >= index ? 0 : next);
   }
+  // Retractions: destinations that lost their last feasible route are
+  // advertised as infinity so neighbors withdraw promptly instead of waiting
+  // out the lease (RFC 8966 §3.7.2). The record budget bounds the burst.
+  routes_.for_each_lost([&](const RouteTable::LostRoute& lost) {
+    if (writer_full || lost.destination == config_.node) return;
+    if (!append(lost.destination, lost.generation, lost.sequence,
+                kInfiniteRouteMetric)) {
+      writer_full = true;
+    }
+  });
   job.plain.payload[0] = count;
   job.plain.payload_size = writer.size();
   return tx_queue_.push(std::move(job)) ? Status::success()
@@ -660,10 +697,12 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     set_delivery_state(*delivery, DeliveryState::Delivered, "TX_MAC_DONE");
     return;
   }
-  const auto retry_window = std::max<std::uint32_t>(
+  const auto retry_window = static_cast<std::uint32_t>(std::max<std::uint64_t>(
       kMinimumEndToEndRetryMs,
-      static_cast<std::uint32_t>(delivery->options.hop_limit) *
-          config_.hop_accept_timeout_ms * 2U);
+      std::min<std::uint64_t>(
+          std::numeric_limits<std::uint32_t>::max(),
+          static_cast<std::uint64_t>(delivery->options.hop_limit) *
+              config_.hop_accept_timeout_ms * 2U)));
   delivery->next_round_at_ms = std::min(delivery->expires_at_ms, now_ms + retry_window);
   set_delivery_state(*delivery, DeliveryState::WaitingForEndReceipt, "END_RECEIPT_PENDING");
 }
@@ -695,7 +734,10 @@ void MeshNode::retry_or_fail(TxJob& job, const char* reason,
     // Each SDK retry receives a fresh link counter. Reusing a captured frame would
     // make strict anti-replay incompatible with reliable delivery.
     job.encoded_valid = false;
-    if (!tx_queue_.push(std::move(job))) fail_job(job, "TX_QUEUE_FULL", now_ms);
+    TxJob pending = std::move(job);
+    if (!tx_queue_.push(std::move(pending))) {
+      fail_job(pending, "TX_QUEUE_FULL", now_ms);
+    }
     return;
   }
   fail_job(job, reason, now_ms);
@@ -952,12 +994,11 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
 
   if (destination == config_.node) {
     bool ambiguous = false;
-    if (route_sequence_newer(requested_sequence, self_route_sequence_, ambiguous)) {
-      // Requester wants a sequence newer than its stored one; jumping to the
-      // requested value satisfies it. A request at or behind our current
-      // sequence is already satisfied — bumping again would only inflate it.
-      self_route_sequence_ = requested_sequence;
-    } else if (ambiguous) {
+    if (route_sequence_newer(requested_sequence, self_route_sequence_, ambiguous) ||
+        ambiguous) {
+      // RFC 8966 §3.8.1.2: an origin MUST NOT increase its sequence number by
+      // more than 1 in reaction to a single seqno request. If one bump is not
+      // enough, the requester's bounded retries converge instead.
       self_route_sequence_ = static_cast<RouteSequence>(self_route_sequence_ + 1U);
     }
     trigger_route_advertisement(now_ms);
@@ -966,6 +1007,20 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
   }
 
   if (ttl <= 1) return;
+  // RFC 8966 §3.8.1.2: a node holding a route with a sequence at least as new
+  // as the requested one answers from its own table instead of forwarding the
+  // request toward the origin. Broadcast reaches the requester's path and
+  // every other neighbor that may share the gap.
+  const RouteSelection selected = routes_.best(destination);
+  if (selected.valid) {
+    bool ambiguous = false;
+    const bool requested_newer =
+        route_sequence_newer(requested_sequence, selected.sequence, ambiguous);
+    if (!requested_newer && !ambiguous) {
+      trigger_route_advertisement(now_ms);
+      return;
+    }
+  }
   // One received request forwards along exactly one path (spec: a forwarder
   // must not branch). The selected route is preferred; an infeasible-but-live
   // candidate may carry it when feasibility blocks all forwarding.
@@ -986,6 +1041,7 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
   // Any received frame — even one that fails decode — is radio activity and
   // must invalidate outstanding sleep tickets.
   ++work_generation_;
+  ++rx_generation_;
   wire::LinkOpenedFrame frame{};
   auto status = wire::open_link(encoded, config_.node, security_, frame);
   if (!status) {

@@ -219,3 +219,45 @@ fn disconnected_state_renders() {
     let frame = render(&state, Tab::Overview, WIDTH, HEIGHT, NOW);
     assert!(frame.contains("disconnected · attempt 2 · retry in 1000ms · connection refused"));
 }
+
+/// While the daemon is disconnected, observed values must render with the
+/// estimated `~` marker — never presented as current data.
+#[test]
+fn disconnected_renders_observed_values_estimated() {
+    let mut state = loaded_state();
+    state
+        .apply(
+            "NODES",
+            "{\"nodes\":[{\"id\":77,\"role\":\"peer\",\"seen_ms\":1998000,\"membership\":\"member\",\"reachability\":\"reachable\",\"rssi_dbm\":-55,\"lr250\":true,\"hop_count\":2}]}",
+        )
+        .expect("fixture parses");
+    state.conn = Conn::Disconnected {
+        since_ms: 1_999_000,
+        attempts: 1,
+        next_retry_ms: 2_000_500,
+        error: Some("connection refused".into()),
+    };
+    let out = render(&state, Tab::Nodes, WIDTH, HEIGHT, NOW);
+    assert!(
+        out.contains("~member") && out.contains("~-55"),
+        "stale observed values must carry the ~ marker:\n{out}"
+    );
+    // Connected again: the same values render plainly.
+    state.conn = Conn::Connected;
+    let out = render(&state, Tab::Nodes, WIDTH, HEIGHT, NOW);
+    assert!(out.contains("member") && !out.contains("~member"));
+}
+
+/// A null last_error from the daemon must clear a previously latched error.
+#[test]
+fn null_last_error_clears_stale_error() {
+    let mut state = loaded_state();
+    assert_eq!(state.adapter.last_error.as_deref(), Some("CREDIT_EXCEEDED"));
+    state
+        .apply(
+            "STATUS",
+            "{\"connected\":true,\"device\":\"/dev/ttyUSB0\",\"rx_frames\":129,\"tx_frames\":12,\"protocol_errors\":1,\"last_error\":null}",
+        )
+        .expect("fixture parses");
+    assert_eq!(state.adapter.last_error, None);
+}

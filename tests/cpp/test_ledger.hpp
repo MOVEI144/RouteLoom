@@ -24,7 +24,7 @@ class FaultyLedgerStorage final : public routeloom::LedgerStorage {
         target.size != routeloom::kAuthorityLedgerRecordSize) {
       return routeloom::Status::error(routeloom::StatusCode::InvalidArgument, "bad ledger read");
     }
-    if (read_error) {
+    if (read_error || slot == read_error_slot) {
       return routeloom::Status::error(routeloom::StatusCode::StorageFailure, "injected read error");
     }
     std::memcpy(target.data, slots_[slot].data(), target.size);
@@ -66,6 +66,7 @@ class FaultyLedgerStorage final : public routeloom::LedgerStorage {
   std::size_t cut_bytes{0};
   std::size_t drop_call{std::numeric_limits<std::size_t>::max()};
   bool read_error{false};
+  std::uint8_t read_error_slot{0xFF};
 
  private:
   std::array<std::array<std::uint8_t, routeloom::kAuthorityLedgerRecordSize>,

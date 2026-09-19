@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <utility>
@@ -91,14 +92,17 @@ class FixedPool {
 
   bool release(T* item) noexcept {
     if (item == nullptr) return false;
-    const auto begin = items_.data();
-    const auto end = begin + Capacity;
-    if (item < begin || item >= end) return false;
-    const auto index = static_cast<std::size_t>(item - begin);
-    if (!used_[index]) return false;
-    used_[index] = false;
-    reset(items_[index]);
-    return true;
+    // Pointer equality against each element is defined for arbitrary
+    // pointers; relational compares or subtraction on a foreign pointer are
+    // not, so the pool membership test is a plain equality scan.
+    for (std::size_t i = 0; i < Capacity; ++i) {
+      if (&items_[i] != item) continue;
+      if (!used_[i]) return false;
+      used_[i] = false;
+      reset(items_[i]);
+      return true;
+    }
+    return false;
   }
 
   template <typename Fn>

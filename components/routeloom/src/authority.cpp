@@ -170,6 +170,9 @@ Status SingleAuthority::initialize() noexcept {
         if (parsed[slot].revision > recovery_floor_) {
           recovery_floor_ = parsed[slot].revision;
         }
+        if (parsed[slot].state.generation > max_generation_seen_) {
+          max_generation_seen_ = parsed[slot].state.generation;
+        }
         break;
       case SlotContent::Foreign:
         ++foreign;
@@ -178,6 +181,14 @@ Status SingleAuthority::initialize() noexcept {
       case SlotContent::Unsupported:
         ++unsupported;
         slot_reserved_[slot] = StatusCode::Unsupported;
+        // The record is CRC-intact, so its revision and generation are still
+        // trustworthy bounds even though the schema itself is unreadable.
+        if (parsed[slot].revision > recovery_floor_) {
+          recovery_floor_ = parsed[slot].revision;
+        }
+        if (parsed[slot].state.generation > max_generation_seen_) {
+          max_generation_seen_ = parsed[slot].state.generation;
+        }
         break;
       case SlotContent::Corrupt:
         ++corrupt;
@@ -206,7 +217,9 @@ Status SingleAuthority::initialize() noexcept {
       consistent =
           parsed[newer].state.applied_sequence == parsed[older].state.applied_sequence &&
           parsed[newer].state.state_hash == parsed[older].state.state_hash &&
-          parsed[newer].previous_state_hash == parsed[older].previous_state_hash;
+          parsed[newer].state.generation == parsed[older].state.generation &&
+          parsed[newer].previous_state_hash == parsed[older].previous_state_hash &&
+          parsed[newer].operation_hash == parsed[older].operation_hash;
     }
     if (!consistent) {
       return quarantine(StatusCode::IntegrityError, "authority ledger chain inconsistent");
@@ -215,17 +228,18 @@ Status SingleAuthority::initialize() noexcept {
     revision_ = parsed[newer].revision;
     active_slot_ = newer;
     has_active_ = true;
+  } else if (unreadable[0] || unreadable[1]) {
+    // A slot that cannot be read might still hold a committed record newer
+    // than a readable sibling, so booting the stale record is unsafe — and a
+    // later commit could clobber the unreadable slot's possibly-newer data.
+    return read_error.ok() ? Status::error(StatusCode::StorageFailure, "authority ledger unreadable")
+                           : read_error;
   } else if (valid == 1) {
     const std::uint8_t slot = content[0] == SlotContent::Valid ? 0 : 1;
     state_ = parsed[slot].state;
     revision_ = parsed[slot].revision;
     active_slot_ = slot;
     has_active_ = true;
-  } else if (unreadable[0] || unreadable[1]) {
-    // A slot that cannot be read might still hold a committed record, so this
-    // is a storage fault rather than proven ledger corruption.
-    return read_error.ok() ? Status::error(StatusCode::StorageFailure, "authority ledger unreadable")
-                           : read_error;
   } else if (foreign > 0) {
     return Status::error(StatusCode::Conflict, "authority ledger identity mismatch");
   } else if (unsupported > 0) {
@@ -348,7 +362,11 @@ Status SingleAuthority::apply_membership_revocation(
 Status SingleAuthority::recover() noexcept {
   if (!initialized_) return Status::error(StatusCode::InvalidState, "authority not initialized");
   if (!quarantined_) return Status::error(StatusCode::InvalidState, "authority not quarantined");
-  const AuthorityRecord genesis{network_, authority_, 1, 0, Digest256{}};
+  // Disaster recovery establishes a NEW authority generation (control-plane
+  // spec): pre-loss operations signed for an older generation can never
+  // re-validate and re-apply against the recovered ledger.
+  const AuthorityRecord genesis{network_, authority_, max_generation_seen_ + 1U, 0,
+                                Digest256{}};
   const std::uint64_t revision = recovery_floor_ + 1U;
   // The identical genesis record goes to both slots so a stale valid record
   // cannot break the hash-chain check on the next boot.
@@ -356,6 +374,10 @@ Status SingleAuthority::recover() noexcept {
   if (!status) return status;
   status = store_record(1, genesis, revision, Digest256{}, Digest256{});
   if (!status) return status;
+  // Both slots now provably hold fresh records written by us; any reservation
+  // markers from other-schema or foreign data are obsolete.
+  slot_reserved_[0] = StatusCode::Ok;
+  slot_reserved_[1] = StatusCode::Ok;
   state_ = genesis;
   revision_ = revision;
   active_slot_ = 0;

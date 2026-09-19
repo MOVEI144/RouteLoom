@@ -114,6 +114,10 @@ class MeshNode {
   // Bumped on every send() call, received frame and TX-result callback: any
   // radio-visible activity. Used to invalidate outstanding sleep tickets.
   std::uint32_t work_generation() const noexcept { return work_generation_; }
+  // Bumps only on inbound radio frames — the signal the power coordinator
+  // uses to confirm saved peers actually answered after a resume. TX
+  // callbacks and app sends do not count as peer confirmation.
+  std::uint32_t rx_generation() const noexcept { return rx_generation_; }
   // Bumped on peer/config changes (neighbor add/remove).
   std::uint32_t config_revision() const noexcept { return config_revision_; }
   static constexpr std::size_t delivery_capacity() noexcept {
@@ -364,6 +368,7 @@ class MeshNode {
   MonotonicMs next_triggered_ms_{0};
   std::uint32_t trigger_counter_{0};
   std::uint32_t work_generation_{0};
+  std::uint32_t rx_generation_{0};
   std::uint32_t config_revision_{0};
   bool started_{false};
   bool draining_{false};

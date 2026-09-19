@@ -193,6 +193,10 @@ pub struct State {
     pub last_refresh_ms: Option<u64>,
     /// Poll cycles that failed mid-way (daemon vanished between commands).
     pub poll_failures: u64,
+    /// Latched when a diagnostic event reports the development security
+    /// profile: the warning must stay visible, not scroll out of the event
+    /// ring.
+    pub security_experimental: bool,
 }
 
 fn obs_str(json: Option<&Json>) -> Obs<String> {
@@ -271,9 +275,8 @@ impl State {
         self.adapter.rx_frames = opt_u64(root.get("rx_frames"));
         self.adapter.tx_frames = opt_u64(root.get("tx_frames"));
         self.adapter.protocol_errors = opt_u64(root.get("protocol_errors"));
-        if let Some(error) = opt_str(root.get("last_error")) {
-            self.adapter.last_error = Some(error);
-        }
+        // Assign unconditionally: a null last_error must clear a stale one.
+        self.adapter.last_error = opt_str(root.get("last_error"));
     }
 
     fn apply_adapter(&mut self, root: &Json) {
@@ -297,9 +300,8 @@ impl State {
         self.adapter.tx_frames = opt_u64(root.get("tx_frames"));
         self.adapter.tx_bytes = opt_u64(root.get("tx_bytes"));
         self.adapter.protocol_errors = opt_u64(root.get("protocol_errors"));
-        if let Some(error) = opt_str(root.get("last_error")) {
-            self.adapter.last_error = Some(error);
-        }
+        // Assign unconditionally: a null last_error must clear a stale one.
+        self.adapter.last_error = opt_str(root.get("last_error"));
     }
 
     fn apply_nodes(&mut self, root: &Json) {
@@ -375,11 +377,16 @@ impl State {
             if seq < self.events.last_seq || self.events.contains_seq(seq) {
                 continue; // replayed tail of the daemon ring
             }
+            let kind = opt_str(item.get("kind")).unwrap_or_else(|| "event".into());
+            let detail = event_detail(item);
+            if kind == "diagnostic" && detail.contains("SECURITY_PROFILE") {
+                self.security_experimental = true;
+            }
             self.events.push(EventInfo {
                 seq,
                 ms: opt_u64(item.get("ms")).unwrap_or(0),
-                kind: opt_str(item.get("kind")).unwrap_or_else(|| "event".into()),
-                detail: event_detail(item),
+                kind,
+                detail,
             });
         }
     }

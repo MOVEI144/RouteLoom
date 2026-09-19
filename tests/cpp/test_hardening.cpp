@@ -486,6 +486,29 @@ void test_counter_lease_context_mismatch_rejected() {
   CHECK(mismatched.initialize().code == StatusCode::Conflict);
 }
 
+void test_counter_record_rewound_rejected() {
+  MemoryCounterStore store;
+  {
+    CounterLease lease(store, 7, 99, 1, 0, 4);
+    CHECK_OK(lease.initialize());
+    std::uint64_t value = 0;
+    CHECK_OK(lease.next(value));
+  }
+  // A tampered or rolled-back high-water must never be adopted silently:
+  // rewinding the counter would reuse AES-GCM nonces under the same key.
+  store.records[7].high_water_exclusive = 0;
+  store.records[7].crc = 0;
+  CounterLease lease(store, 7, 99, 1, 0, 4);
+  CHECK(lease.initialize().code == StatusCode::IntegrityError);
+  // Any field touched without recomputing the CRC is rejected the same way.
+  store.records[7].high_water_exclusive = 0;
+  CounterRecord forged = store.records[7];
+  forged.generation += 1;
+  store.records[7] = forged;
+  CounterLease second(store, 7, 99, 1, 0, 4);
+  CHECK(second.initialize().code == StatusCode::IntegrityError);
+}
+
 // --- Task 5: EXPERIMENTAL enforcement / no plaintext DATA -------------------
 
 void test_security_profile_marker() {
@@ -578,6 +601,7 @@ int main() {
   test_counter_lease_commit_failure_issues_nothing();
   test_counter_lease_never_reissues_across_restarts();
   test_counter_lease_context_mismatch_rejected();
+  test_counter_record_rewound_rejected();
   test_security_profile_marker();
   test_plaintext_data_rejected();
   if (failures != 0) {

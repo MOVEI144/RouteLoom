@@ -53,6 +53,12 @@ Status cobs_decode(const ByteView input, const MutableByteView out,
   if (input.size > 0 && input.data == nullptr) {
     return Status::error(StatusCode::InvalidArgument, "null cobs input");
   }
+  // Encoded COBS data never contains a 0x00 byte anywhere (the delimiter is
+  // stripped by the caller), so a zero inside the segment is malformed input.
+  if (input.size > 0 &&
+      std::memchr(input.data, 0, input.size) != nullptr) {
+    return Status::error(StatusCode::ProtocolError, "INVALID_COBS");
+  }
   std::size_t index = 0;
   while (index < input.size) {
     const std::uint8_t code = input.data[index];
@@ -65,13 +71,17 @@ Status cobs_decode(const ByteView input, const MutableByteView out,
       return Status::error(StatusCode::ProtocolError, "INVALID_COBS");
     }
     const std::size_t chunk = next - index;
-    if (written + chunk + 1 > out.size) {
+    // The implicit zero is only emitted when this block is non-final, so it
+    // must only be charged against the output when it will actually be
+    // written — otherwise an exactly-full decode is falsely rejected.
+    const bool implicit_zero = (code != 0xFF && next < input.size);
+    if (written + chunk + (implicit_zero ? 1U : 0U) > out.size) {
       return Status::error(StatusCode::NoCapacity, "cobs decode overflow");
     }
     if (chunk > 0) std::memcpy(out.data + written, input.data + index, chunk);
     written += chunk;
     index = next;
-    if (code != 0xFF && index < input.size) {
+    if (implicit_zero) {
       out.data[written++] = 0;
     }
   }
@@ -175,6 +185,11 @@ Status decode_frame(const ByteView decoded, UsbFrame& out) noexcept {
 }
 
 void StreamDecoder::push(const ByteView input, const MonotonicMs now_ms) noexcept {
+  if (input.size > 0 && input.data == nullptr) {
+    sink_.on_stream_error(
+        Status::error(StatusCode::InvalidArgument, "null stream input"));
+    return;
+  }
   for (std::size_t i = 0; i < input.size; ++i) {
     const std::uint8_t byte = input.data[i];
     last_byte_ms_ = now_ms;

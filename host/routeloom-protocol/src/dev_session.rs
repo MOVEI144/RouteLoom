@@ -115,8 +115,13 @@ pub struct Transcript {
 impl Transcript {
     /// Canonical encoding: "RLU1TRN1" || host_nonce || device_nonce ||
     /// version || node || boot || network || capability || plen ||
-    /// principal (zero-padded to TRANSCRIPT_SIZE).
-    pub fn encode(&self) -> Vec<u8> {
+    /// principal (zero-padded to TRANSCRIPT_SIZE). Principals longer than
+    /// MAX_PRINCIPAL_SIZE are rejected rather than silently truncated —
+    /// truncation would make two distinct principals collide.
+    pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
+        if self.principal.len() > MAX_PRINCIPAL_SIZE || self.principal.len() > u8::MAX as usize {
+            return Err(ProtocolError::PrincipalTooLong);
+        }
         let mut out = Vec::with_capacity(TRANSCRIPT_SIZE);
         out.extend_from_slice(&TRANSCRIPT_MAGIC.to_be_bytes());
         out.extend_from_slice(&self.host_nonce.to_be_bytes());
@@ -129,7 +134,7 @@ impl Transcript {
         out.push(self.principal.len() as u8);
         out.extend_from_slice(&self.principal);
         out.resize(TRANSCRIPT_SIZE, 0);
-        out
+        Ok(out)
     }
 }
 

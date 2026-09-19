@@ -111,6 +111,11 @@ Status DevelopmentPskSecurityProvider::initialize(
 }
 
 void DevelopmentPskSecurityProvider::close() noexcept {
+  // Cached contexts hold leases bound to the old counter store and replay
+  // windows tied to the old store handle: they must not survive a close or a
+  // later re-initialize would reuse stale state.
+  tx_contexts_.clear();
+  rx_contexts_.clear();
   replay_store_.close();
   ready_ = false;
   counter_store_ = nullptr;
@@ -158,12 +163,32 @@ DevelopmentPskSecurityProvider::tx_context(
   if (auto* existing = tx_contexts_.find([&](const TxContext& value) {
         return same_context(value.context, context);
       })) {
+    existing->use_stamp = ++context_stamp_;
     return existing;
   }
-  auto* created = tx_contexts_.allocate();
-  if (created == nullptr || counter_store_ == nullptr) {
+  if (counter_store_ == nullptr) {
     return nullptr;
   }
+  auto* created = tx_contexts_.allocate();
+  if (created == nullptr) {
+    // Bounded pool: evict the least-recently-used context. A dropped lease
+    // forfeits only the uncommitted remainder of its reserved block, which is
+    // the designed crash-recovery behavior — counters never rewind.
+    TxContext* oldest = nullptr;
+    tx_contexts_.for_each([&](TxContext& value) {
+      if (oldest == nullptr || value.use_stamp < oldest->use_stamp) {
+        oldest = &value;
+      }
+    });
+    if (oldest == nullptr || !tx_contexts_.release(oldest)) {
+      return nullptr;
+    }
+    created = tx_contexts_.allocate();
+    if (created == nullptr) {
+      return nullptr;
+    }
+  }
+  created->use_stamp = ++context_stamp_;
   created->context = context;
   created->fingerprint = replay_context_fingerprint(context);
   const std::uint8_t direction = static_cast<std::uint8_t>(
@@ -205,14 +230,31 @@ Status DevelopmentPskSecurityProvider::rx_context(
     // (peer re-handshake), which makes the cached epoch stale.
     const auto floor_status = replay_guard_.check_floor(context);
     if (!floor_status) return floor_status;
+    existing->use_stamp = ++context_stamp_;
     result = existing;
     return Status::success();
   }
   auto* created = rx_contexts_.allocate();
   if (created == nullptr) {
-    return Status::error(StatusCode::NoCapacity,
-                         "security rx context table full");
+    // Bounded pool: evict the least-recently-used cached window. Windows are
+    // persisted on accept, so eviction only forces a reload from the store.
+    RxContext* oldest = nullptr;
+    rx_contexts_.for_each([&](RxContext& value) {
+      if (oldest == nullptr || value.use_stamp < oldest->use_stamp) {
+        oldest = &value;
+      }
+    });
+    if (oldest == nullptr || !rx_contexts_.release(oldest)) {
+      return Status::error(StatusCode::NoCapacity,
+                           "security rx context table full");
+    }
+    created = rx_contexts_.allocate();
+    if (created == nullptr) {
+      return Status::error(StatusCode::NoCapacity,
+                           "security rx context table full");
+    }
   }
+  created->use_stamp = ++context_stamp_;
   created->context = context;
   // Loads the persisted window and enforces the peer epoch floor. Stale
   // epochs, corrupt records and windows lost mid-epoch are all rejected

@@ -78,20 +78,29 @@ fn opt_bool(value: Option<bool>) -> String {
     value.map_or_else(|| "unknown".into(), |v| if v { "yes" } else { "no" }.into())
 }
 
-fn obs<T: Display>(value: &Obs<T>) -> String {
+/// While the daemon is disconnected every observed value is stale — render
+/// it with the estimated marker rather than silently presenting old data as
+/// current.
+fn obs<T: Display>(value: &Obs<T>, stale: bool) -> String {
     match value {
+        Obs::Observed(v) if stale => format!("~{v}"),
         Obs::Observed(v) => format!("{v}"),
         Obs::Estimated(v) => format!("~{v}"),
         Obs::Unknown => "unknown".into(),
     }
 }
 
-fn obs_bool(value: &Obs<bool>) -> String {
+fn obs_bool(value: &Obs<bool>, stale: bool) -> String {
     match value {
+        Obs::Observed(v) if stale => format!("~{}", if *v { "yes" } else { "no" }),
         Obs::Observed(v) => if *v { "yes" } else { "no" }.to_string(),
         Obs::Estimated(v) => format!("~{}", if *v { "yes" } else { "no" }),
         Obs::Unknown => "unknown".into(),
     }
+}
+
+fn stale(state: &State) -> bool {
+    !matches!(state.conn, Conn::Connected)
 }
 
 /// Relative age of a daemon millisecond timestamp.
@@ -239,6 +248,11 @@ fn overview(state: &State, now_ms: u64) -> Vec<String> {
         ),
         format!("authority         : {}", state.authority.state),
     ];
+    if state.security_experimental {
+        out.push(
+            "security          : EXPERIMENTAL — development PSK profile, not production".into(),
+        );
+    }
     if let Some(ms) = state.last_refresh_ms {
         out.push(format!("last refresh      : {} ago", age(now_ms, ms)));
     }
@@ -259,11 +273,11 @@ fn nodes(state: &State, now_ms: u64) -> Vec<String> {
             node.id,
             node.role,
             age(now_ms, node.seen_ms),
-            obs(&node.membership),
-            obs(&node.reachability),
-            obs_bool(&node.sleeping),
-            obs(&node.rssi_dbm),
-            obs_bool(&node.lr250),
+            obs(&node.membership, stale(state)),
+            obs(&node.reachability, stale(state)),
+            obs_bool(&node.sleeping, stale(state)),
+            obs(&node.rssi_dbm, stale(state)),
+            obs_bool(&node.lr250, stale(state)),
         ));
     }
     out.push(String::new());
@@ -283,9 +297,9 @@ fn routes(state: &State, now_ms: u64) -> Vec<String> {
         out.push(format!(
             "{:<20} {:<24} {:<24} {}",
             node.id,
-            obs(&node.primary_route),
-            obs(&node.backup_route),
-            obs(&node.hop_count),
+            obs(&node.primary_route, stale(state)),
+            obs(&node.backup_route, stale(state)),
+            obs(&node.hop_count, stale(state)),
         ));
     }
     out.push(String::new());
@@ -319,9 +333,9 @@ fn links(state: &State) -> Vec<String> {
         out.push(format!(
             "{:<20} {:<10} {:<10} {}",
             node.id,
-            obs(&node.rssi_dbm),
-            obs(&node.peer_slots),
-            obs(&node.queue_depth),
+            obs(&node.rssi_dbm, stale(state)),
+            obs(&node.peer_slots, stale(state)),
+            obs(&node.queue_depth, stale(state)),
         ));
     }
     out.push(String::new());

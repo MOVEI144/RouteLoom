@@ -273,6 +273,39 @@ void test_ledger_foreign_identity() {
   CHECK(wrong_authority.initialize().code == StatusCode::Conflict);
 }
 
+void test_ledger_recovery_new_generation() {
+  // Both records stay CRC-intact but the chain breaks: boot sees proven
+  // generation 1, quarantines, and recovery must start a NEW generation so
+  // operations signed for the pre-loss generation can never be applied.
+  FaultyLedgerStorage storage;
+  commit_two(storage);
+  patch_slot(storage, 0, kStateHashOffset, 0xEE);
+  SingleAuthority reboot(1, 99, storage);
+  CHECK(reboot.initialize().code == StatusCode::IntegrityError);
+  CHECK(reboot.quarantined());
+  CHECK_OK(reboot.recover());
+  CHECK(reboot.state().generation == 2);
+  // An operation carrying the pre-recovery generation is rejected even when
+  // its sequence/hash would otherwise be valid.
+  AuthorityOperation stale = make_op(reboot, 1);
+  stale.generation = 1;
+  CHECK(reboot.commit(stale, hash_with(0x55), true).code ==
+        StatusCode::AuthorizationFailed);
+  CHECK_OK(reboot.commit(make_op(reboot, 1), hash_with(0x66), true));
+}
+
+void test_ledger_unreadable_sibling_blocks_boot() {
+  // One slot reads fine but its sibling faults: the unreadable slot might
+  // hold a NEWER committed record, so booting the stale readable one — or
+  // clobbering the unreadable slot with a commit — is unsafe.
+  FaultyLedgerStorage storage;
+  commit_two(storage);
+  storage.read_error_slot = 1;  // slot 1 holds the newer record
+  SingleAuthority reboot(1, 99, storage);
+  CHECK(reboot.initialize().code == StatusCode::StorageFailure);
+  CHECK(!reboot.quarantined());
+}
+
 void test_ledger_read_error_not_quarantine() {
   FaultyLedgerStorage storage;
   commit_two(storage);
@@ -367,6 +400,8 @@ int main() {
   test_ledger_broken_chain_quarantine();
   test_ledger_schema_mismatch();
   test_ledger_foreign_identity();
+  test_ledger_recovery_new_generation();
+  test_ledger_unreadable_sibling_blocks_boot();
   test_ledger_read_error_not_quarantine();
   test_ledger_operation_kinds();
   test_ledger_storage_contract();

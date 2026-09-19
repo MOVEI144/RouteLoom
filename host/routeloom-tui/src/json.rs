@@ -84,10 +84,15 @@ impl fmt::Display for JsonError {
 
 impl std::error::Error for JsonError {}
 
+/// Daemon JSON is flat (objects of scalars/arrays); 32 levels is generous.
+/// Without a bound, `[[[[...` input recurses to stack depth = input length.
+const MAX_DEPTH: usize = 32;
+
 pub fn parse(input: &str) -> Result<Json, JsonError> {
     let mut parser = Parser {
         bytes: input.as_bytes(),
         pos: 0,
+        depth: 0,
     };
     parser.skip_ws();
     let value = parser.value()?;
@@ -101,6 +106,7 @@ pub fn parse(input: &str) -> Result<Json, JsonError> {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -141,6 +147,19 @@ impl Parser<'_> {
 
     fn value(&mut self) -> Result<Json, JsonError> {
         self.skip_ws();
+        if matches!(self.peek(), Some(b'[' | b'{')) {
+            self.depth += 1;
+            if self.depth > MAX_DEPTH {
+                self.depth -= 1;
+                return Err(self.error("nesting too deep"));
+            }
+            let result = match self.peek() {
+                Some(b'[') => self.array(),
+                _ => self.object(),
+            };
+            self.depth -= 1;
+            return result;
+        }
         match self.peek() {
             Some(b'n') => self.literal("null", Json::Null),
             Some(b't') => self.literal("true", Json::Bool(true)),
@@ -154,26 +173,48 @@ impl Parser<'_> {
         }
     }
 
+    fn digits(&mut self) -> Result<(), JsonError> {
+        let start = self.pos;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return Err(self.error("invalid number"));
+        }
+        Ok(())
+    }
+
     fn number(&mut self) -> Result<Json, JsonError> {
+        // Strict RFC 8259 grammar: -?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?
+        // The previous loose scan accepted ".5", "5." and "01", which are not
+        // JSON numbers even though f64::parse tolerates them.
         let start = self.pos;
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
-        while matches!(
-            self.peek(),
-            Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
-        ) {
-            self.pos += 1;
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                self.pos += 1;
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.pos += 1;
+                }
+            }
+            _ => return Err(self.error("invalid number")),
         }
-        if start == self.pos {
-            return Err(self.error("invalid number"));
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            self.digits()?;
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            self.digits()?;
         }
         let raw = std::str::from_utf8(&self.bytes[start..self.pos])
             .map_err(|_| self.error("invalid number"))?;
-        // Reject tokens that are not numbers at all (e.g. a bare "-").
-        if raw.parse::<f64>().is_err() {
-            return Err(self.error("invalid number"));
-        }
         Ok(Json::Number(raw.to_string()))
     }
 

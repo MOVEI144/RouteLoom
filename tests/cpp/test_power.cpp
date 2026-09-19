@@ -854,6 +854,48 @@ void test_power_cut_during_consume_commit() {
   CHECK(w2.events.pending_with(StatusCode::TimeUncertain) == 1);
 }
 
+void test_pending_reinject_failure_retained() {
+  MemoryPowerStorage storage;
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    w.pump(60);
+    (void)queue_pending(w, 99, true);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK(w.storage.write_calls == 1);
+  }
+  // Incarnation 2: the delivery table is already full of live work, so the
+  // durable re-inject fails. The failure is reported AND the record stays in
+  // the committed sleep image for a later retry — never silently dropped.
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.node.start(w.now));
+    for (std::size_t i = 0; i < MeshNode::delivery_capacity(); ++i) {
+      // WaitingForRoute entries are live (non-terminal), so the pool cannot
+      // evict them to make room for the restored pending.
+      (void)queue_pending(w, static_cast<NodeId>(90 + i), false);
+    }
+    CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
+                                 ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::NoCapacity) == 1);
+    CHECK(w.storage.write_calls == 2);  // consume-commit retained the record
+  }
+  // Incarnation 3: with a free table the same durable pending is retried —
+  // a durable record survives failed re-injection, not just torn writes.
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
+                                 ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::Ok) == 1);
+  }
+}
+
 void test_resume_confirm_fast_and_discovery() {
   // Fast path: an RX inside the confirm window marks FastResume.
   {
@@ -945,6 +987,7 @@ int main() {
   test_counter_lease_continuity_across_power_cuts();
   test_power_cut_during_persist_write();
   test_power_cut_during_consume_commit();
+  test_pending_reinject_failure_retained();
   test_resume_confirm_fast_and_discovery();
   test_image_slots_alternate();
   test_persist_failure_aborts();

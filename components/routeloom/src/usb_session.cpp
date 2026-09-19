@@ -202,7 +202,8 @@ DevTag payload_hash(const ByteView canonical_request) noexcept {
 IdempotencyResult IdempotencyTable::submit(
     const ByteView principal, const NetworkId network,
     const std::uint8_t operation_class, const std::uint64_t key,
-    const DevTag& hash, IdempotencyRecord*& record) noexcept {
+    const DevTag& hash, const MonotonicMs now_ms,
+    IdempotencyRecord*& record) noexcept {
   record = nullptr;
   if (principal.size > kMaxPrincipalSize) {
     return IdempotencyResult::Conflict;  // unreachable via bridge (bounded)
@@ -218,27 +219,42 @@ IdempotencyResult IdempotencyTable::submit(
         std::memcmp(entry.principal.data(), principal.data, principal.size) != 0) {
       continue;
     }
+    entry.last_use_ms = now_ms;
     record = &entry;
     return entry.hash == hash ? IdempotencyResult::Existing
                               : IdempotencyResult::Conflict;
   }
+  std::size_t slot = kCapacity;
+  MonotonicMs oldest_use = ~MonotonicMs{0};
   for (std::size_t i = 0; i < kCapacity; ++i) {
-    if (used_[i]) continue;
-    used_[i] = true;
-    IdempotencyRecord& entry = records_[i];
-    entry = IdempotencyRecord{};
-    if (principal.size > 0) {
-      std::memcpy(entry.principal.data(), principal.data, principal.size);
+    if (!used_[i]) {
+      slot = i;
+      break;
     }
-    entry.principal_len = static_cast<std::uint8_t>(principal.size);
-    entry.network = network;
-    entry.operation_class = operation_class;
-    entry.key = key;
-    entry.hash = hash;
-    record = &entry;
-    return IdempotencyResult::Accepted;
+    // Only retention-expired records are evictable: evicting a live record
+    // would silently re-execute a resubmitted key. Reject instead — the
+    // caller reports IDEMPOTENCY_FULL and the host backs off.
+    if (now_ms - records_[i].last_use_ms >= kRetentionMs &&
+        records_[i].last_use_ms < oldest_use) {
+      oldest_use = records_[i].last_use_ms;
+      slot = i;
+    }
   }
-  return IdempotencyResult::NoCapacity;
+  if (slot == kCapacity) return IdempotencyResult::NoCapacity;
+  used_[slot] = true;
+  IdempotencyRecord& entry = records_[slot];
+  entry = IdempotencyRecord{};
+  if (principal.size > 0) {
+    std::memcpy(entry.principal.data(), principal.data, principal.size);
+  }
+  entry.principal_len = static_cast<std::uint8_t>(principal.size);
+  entry.network = network;
+  entry.operation_class = operation_class;
+  entry.key = key;
+  entry.hash = hash;
+  entry.last_use_ms = now_ms;
+  record = &entry;
+  return IdempotencyResult::Accepted;
 }
 
 std::size_t IdempotencyTable::size() const noexcept {

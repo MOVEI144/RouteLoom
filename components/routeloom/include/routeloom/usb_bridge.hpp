@@ -136,6 +136,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver {
   static constexpr std::uint64_t kRxGrantBytes = 16384;
   static constexpr MonotonicMs kHandshakeTimeoutMs = 5000;
   static constexpr std::uint8_t kPreAuthBudget = 8;
+  static constexpr std::uint32_t kPreAuthRefillMs = 2000;
   static constexpr std::uint8_t kAuthAttemptsMax = 3;
   static constexpr MonotonicMs kCreditQueryIntervalMs = 500;
   static constexpr std::uint8_t kCreditQueryMax = 3;
@@ -190,6 +191,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver {
   std::uint64_t session_attempt_{0};
   std::uint8_t auth_attempts_{0};
   std::uint8_t preauth_budget_{kPreAuthBudget};
+  MonotonicMs preauth_refill_ms_{0};
   std::uint64_t rx_counter_{0};  // next expected host→device counter
   std::uint64_t tx_counter_{0};  // next device→host counter
 

@@ -146,6 +146,64 @@ void test_cobs() {
   CHECK(dec == 10 && std::memcmp(input.data(), decoded.data(), 10) == 0);
 }
 
+void test_cobs_exact_capacity() {
+  // An output buffer filled to the last byte by a final non-0xFF block must
+  // decode: the implicit zero is only emitted between blocks, so reserving
+  // space for it at end-of-input falsely rejected exactly-full frames.
+  std::vector<std::uint8_t> input(kMaxDecodedFrame);
+  for (std::size_t i = 0; i < input.size(); ++i) {
+    input[i] = static_cast<std::uint8_t>((i * 31U) ^ 0x5AU);
+  }
+  std::vector<std::uint8_t> encoded(kMaxEncodedFrame);
+  std::size_t enc = 0;
+  CHECK_OK(cobs_encode(ByteView{input.data(), input.size()},
+                       MutableByteView{encoded.data(), encoded.size()}, enc));
+  std::vector<std::uint8_t> decoded(kMaxDecodedFrame);
+  std::size_t dec = 0;
+  CHECK_OK(cobs_decode(ByteView{encoded.data(), enc},
+                       MutableByteView{decoded.data(), decoded.size()}, dec));
+  CHECK(dec == input.size());
+  CHECK(std::memcmp(input.data(), decoded.data(), dec) == 0);
+
+  // A zero byte inside a COBS segment is malformed (the delimiter is
+  // stripped by the stream layer before decode).
+  const std::array<std::uint8_t, 4> with_zero{{0x03, 0xAA, 0x00, 0x01}};
+  CHECK(cobs_decode(ByteView{with_zero.data(), with_zero.size()},
+                    MutableByteView{decoded.data(), decoded.size()}, dec)
+            .code == StatusCode::ProtocolError);
+
+  // Null non-empty input is rejected, not dereferenced.
+  CHECK(cobs_decode(ByteView{nullptr, 4},
+                    MutableByteView{decoded.data(), decoded.size()}, dec)
+            .code == StatusCode::InvalidArgument);
+}
+
+void test_frame_max_body_boundary() {
+  // kMaxBodySize = 4066 → decoded frame exactly kMaxDecodedFrame (4096):
+  // the stream decoder must accept it (the phantom-zero bug rejected it).
+  CollectSink sink;
+  StreamDecoder decoder(sink);
+  std::vector<std::uint8_t> body(kMaxBodySize);
+  for (std::size_t i = 0; i < body.size(); ++i) {
+    body[i] = static_cast<std::uint8_t>(i * 17U);
+  }
+  const auto wire = encode(FrameKind::DataToMesh, 0, 1, 2,
+                           ByteView{body.data(), body.size()});
+  CHECK(!wire.empty());
+  decoder.push(ByteView{wire.data(), wire.size()}, 0);
+  CHECK(sink.frames.size() == 1);
+  CHECK(sink.frames[0].frame.body.size == kMaxBodySize);
+  CHECK(sink.errors.empty());
+
+  // One byte over the limit is rejected by encode, not truncated.
+  std::array<std::uint8_t, kMaxEncodedFrame> out{};
+  std::size_t written = 0;
+  CHECK(encode_frame(FrameKind::DataToMesh, 0, 1, 2,
+                     ByteView{body.data(), kMaxBodySize + 1},
+                     MutableByteView{out.data(), out.size()}, written)
+            .code == StatusCode::InvalidArgument);
+}
+
 void test_frame_codec() {
   CollectSink sink;
   StreamDecoder decoder(sink);
@@ -224,6 +282,13 @@ void test_credit() {
   CHECK_OK(small.update(1, 3, 100));
   CHECK(small.consume(101).code == StatusCode::WouldBlock);
   CHECK(small.consumed_frames() == 0);
+  // Saturating accounting: a consume that would wrap `consumed + len` past
+  // UINT64_MAX must still compare against the grant, not pass by wrap-around.
+  CumulativeCredit wrap(1);
+  CHECK_OK(wrap.update(1, 10, UINT64_MAX));
+  CHECK_OK(wrap.consume(UINT64_MAX - 5));
+  CHECK(wrap.consume(10).code == StatusCode::WouldBlock);
+  CHECK(wrap.consumed_bytes() == UINT64_MAX - 5);
   // Session change resets accounting.
   credit.reset(10);
   CHECK(credit.grant_frames() == 0 && credit.consumed_frames() == 0);
@@ -296,19 +361,51 @@ void test_idempotency() {
   const std::array<std::uint8_t, 2> a{{1, 2}}, b{{1, 3}};
   IdempotencyRecord* record = nullptr;
   CHECK(table.submit(ByteView{principal.data(), principal.size()}, 7, 16, 42,
-                     payload_hash(ByteView{a.data(), a.size()}),
+                     payload_hash(ByteView{a.data(), a.size()}), 1000,
                      record) == IdempotencyResult::Accepted);
   CHECK(record != nullptr);
   CHECK(table.submit(ByteView{principal.data(), principal.size()}, 7, 16, 42,
-                     payload_hash(ByteView{a.data(), a.size()}),
+                     payload_hash(ByteView{a.data(), a.size()}), 2000,
                      record) == IdempotencyResult::Existing);
   CHECK(table.submit(ByteView{principal.data(), principal.size()}, 7, 16, 42,
-                     payload_hash(ByteView{b.data(), b.size()}),
+                     payload_hash(ByteView{b.data(), b.size()}), 2000,
                      record) == IdempotencyResult::Conflict);
   // Different scope members are different identities.
   CHECK(table.submit(ByteView{principal.data(), principal.size()}, 8, 16, 42,
-                     payload_hash(ByteView{a.data(), a.size()}),
+                     payload_hash(ByteView{a.data(), a.size()}), 2000,
                      record) == IdempotencyResult::Accepted);
+
+  // Capacity behaviour on a fresh table: a full table of UNEXPIRED records
+  // rejects new operations (spec backpressure) — it never evicts a live
+  // result, which would silently re-execute a resubmitted key.
+  IdempotencyTable full;
+  const MonotonicMs t0 = 5000;
+  for (std::uint64_t key = 0; key < IdempotencyTable::kCapacity; ++key) {
+    const std::array<std::uint8_t, 1> tag{{static_cast<std::uint8_t>(key)}};
+    CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16,
+                      key, payload_hash(ByteView{tag.data(), tag.size()}), t0,
+                      record) == IdempotencyResult::Accepted);
+  }
+  const std::array<std::uint8_t, 1> tag0{{0}}, tag1{{1}}, tag16{{16}};
+  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 16,
+                    payload_hash(ByteView{tag16.data(), tag16.size()}), t0 + 1,
+                    record) == IdempotencyResult::NoCapacity);
+  // Replay still works when the table is full, and refreshes retention.
+  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 0,
+                    payload_hash(ByteView{tag0.data(), tag0.size()}), t0 + 1,
+                    record) == IdempotencyResult::Existing);
+  // Past the retention window expired entries become evictable — the table
+  // un-wedges without breaking at-most-once inside the window.
+  const MonotonicMs t1 = t0 + IdempotencyTable::kRetentionMs + 1;
+  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 16,
+                    payload_hash(ByteView{tag16.data(), tag16.size()}), t1,
+                    record) == IdempotencyResult::Accepted);
+  // The evicted key is forgotten: resubmission is a fresh operation rather
+  // than a replay (per-principal epoch / IDEMPOTENCY_WINDOW_EXPIRED remains
+  // host-side future work per docs/spec/host.md).
+  CHECK(full.submit(ByteView{principal.data(), principal.size()}, 7, 16, 1,
+                    payload_hash(ByteView{tag1.data(), tag1.size()}), t1,
+                    record) == IdempotencyResult::Accepted);
 }
 
 // -------------------------------------------------------- loopback bridge
@@ -605,11 +702,12 @@ void test_bridge_idempotent_send() {
   world.drain(now);
 
   const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
-  std::array<std::uint8_t, 32> inner{};
-  write_u64(inner.data(), 2);
-  std::memcpy(inner.data() + 8, payload.data(), payload.size());
+  std::array<std::uint8_t, 40> inner{};
+  write_u64(inner.data(), 7);  // host-chosen idempotency key
+  write_u64(inner.data() + 8, 2);
+  std::memcpy(inner.data() + 16, payload.data(), payload.size());
   const auto send = host.sealed(FrameKind::DataToMesh, 42,
-                                ByteView{inner.data(), 8 + payload.size()});
+                                ByteView{inner.data(), 16 + payload.size()});
   world.feed(send, now);
   world.drain(now);
   std::size_t accepted = 0;
@@ -619,10 +717,10 @@ void test_bridge_idempotent_send() {
   CHECK(accepted >= 1);  // Accepted (+Queued) command receipts
   world.device_sink.frames.clear();
 
-  // Same identity + same payload: cached result replayed, no second send.
+  // Same key + same payload (fresh request id): cached result replayed.
   const std::uint64_t counter_before = host.h2d_counter;
-  const auto replay = host.sealed(FrameKind::DataToMesh, 42,
-                                  ByteView{inner.data(), 8 + payload.size()});
+  const auto replay = host.sealed(FrameKind::DataToMesh, 43,
+                                  ByteView{inner.data(), 16 + payload.size()});
   CHECK(host.h2d_counter == counter_before + 1);
   world.feed(replay, now);
   world.drain(now);
@@ -641,12 +739,13 @@ void test_bridge_idempotent_send() {
   world.device_sink.frames.clear();
 
   // Same key, different payload -> CONFLICT.
-  std::array<std::uint8_t, 32> changed{};
-  write_u64(changed.data(), 2);
+  std::array<std::uint8_t, 40> changed{};
+  write_u64(changed.data(), 7);  // same idempotency key
+  write_u64(changed.data() + 8, 2);
   const std::array<std::uint8_t, 4> other{{9, 9, 9, 9}};
-  std::memcpy(changed.data() + 8, other.data(), other.size());
-  world.feed(host.sealed(FrameKind::DataToMesh, 42,
-                         ByteView{changed.data(), 8 + other.size()}), now);
+  std::memcpy(changed.data() + 16, other.data(), other.size());
+  world.feed(host.sealed(FrameKind::DataToMesh, 44,
+                         ByteView{changed.data(), 16 + other.size()}), now);
   world.drain(now);
   bool conflict = false;
   for (const auto& record : world.device_sink.frames) {
@@ -831,6 +930,8 @@ void test_golden_session() {
 
 int main() {
   test_cobs();
+  test_cobs_exact_capacity();
+  test_frame_max_body_boundary();
   test_frame_codec();
   test_credit();
   test_session_mac();

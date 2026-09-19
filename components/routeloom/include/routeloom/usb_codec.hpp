@@ -145,8 +145,10 @@ class CumulativeCredit {
   // including CRC, excluding COBS and delimiter). WouldBlock when either axis
   // is exhausted; nothing is consumed on failure.
   Status consume(std::uint64_t decoded_len) noexcept {
-    if (consumed_frames_ + 1 > grant_frames_ ||
-        consumed_bytes_ + decoded_len > grant_bytes_) {
+    // Saturating comparisons: raw addition could wrap past UINT64_MAX and
+    // pass the check, so never let consumed exceed grant by wrap-around.
+    if (consumed_frames_ >= grant_frames_ || consumed_bytes_ > grant_bytes_ ||
+        decoded_len > grant_bytes_ - consumed_bytes_) {
       return Status::error(StatusCode::WouldBlock, "CREDIT_EXHAUSTED");
     }
     ++consumed_frames_;

@@ -314,6 +314,51 @@ void test_diamond_repair() {
   CHECK(n1.delivery(id).state == DeliveryState::Delivered);
 }
 
+void test_delivery_terminal_eviction() {
+  // kDeliveryCapacity is 8. Terminal records are history, not live work:
+  // without eviction the table wedges after eight sends and every later
+  // send() fails with NoCapacity forever.
+  SimNetwork network;
+  TestSecurity sec;
+  CapturingObserver obs;
+  SimRadio radio(network, 1);
+  NodeConfig cfg{1, 1, 301};
+  MeshNode node(cfg, radio, sec, obs);
+  network.register_node(1, &node);
+  CHECK_OK(node.start(0));
+  const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
+
+  // Eight live (non-terminal) sends fill the table; the ninth must fail —
+  // live records are never evicted.
+  std::array<MessageId, 8> ids{};
+  for (int i = 0; i < 8; ++i) {
+    CHECK_OK(node.send(2, ByteView{payload.data(), payload.size()},
+                       SendOptions{}, static_cast<MonotonicMs>(i), ids[i]));
+  }
+  {
+    MessageId id{};
+    CHECK(node.send(2, ByteView{payload.data(), payload.size()}, SendOptions{},
+                    100, id)
+              .code == StatusCode::NoCapacity);
+  }
+  // Cancelling an entry turns it into terminal history. The next send must
+  // evict that record and succeed instead of staying wedged — forever.
+  for (int round = 0; round < 8; ++round) {
+    CHECK_OK(node.cancel(ids[round]));  // → CancelledBeforeTx (terminal)
+    CHECK_OK(node.send(2, ByteView{payload.data(), payload.size()},
+                       SendOptions{}, static_cast<MonotonicMs>(200 + round),
+                       ids[round]));
+  }
+  // Steady state: cancel+send cycles keep recovering, evicting one terminal
+  // record per send.
+  for (int round = 0; round < 8; ++round) {
+    CHECK_OK(node.cancel(ids[round]));
+    MessageId id{};
+    CHECK_OK(node.send(2, ByteView{payload.data(), payload.size()},
+                       SendOptions{}, static_cast<MonotonicMs>(400 + round), id));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -327,6 +372,7 @@ int main() {
   test_routing();
   test_three_hop_delivery();
   test_diamond_repair();
+  test_delivery_terminal_eviction();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

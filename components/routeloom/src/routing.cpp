@@ -11,11 +11,12 @@ bool route_sequence_newer(const RouteSequence candidate, const RouteSequence ref
   return delta != 0 && delta < 0x8000U;
 }
 
-RouteMetric route_metric_add(const RouteMetric left, const RouteMetric right) noexcept {
-  if (right == 0 || left == kInfiniteRouteMetric || right == kInfiniteRouteMetric) {
+RouteMetric route_metric_add(const RouteMetric advertised,
+                             const RouteMetric link_cost) noexcept {
+  if (advertised == kInfiniteRouteMetric || link_cost == kInfiniteRouteMetric) {
     return kInfiniteRouteMetric;
   }
-  const std::uint32_t sum = static_cast<std::uint32_t>(left) + right;
+  const std::uint32_t sum = static_cast<std::uint32_t>(advertised) + link_cost;
   return sum >= kInfiniteRouteMetric ? kInfiniteRouteMetric
                                      : static_cast<RouteMetric>(sum);
 }
@@ -112,8 +113,16 @@ RouteUpdateResult RouteTable::consider(const RouteAdvertisement& advertisement,
       link_metric == 0 || lifetime_ms == 0) {
     return RouteUpdateResult::Ignored;
   }
-  auto* entry = find_or_allocate(advertisement.destination);
-  if (entry == nullptr) return RouteUpdateResult::NoCapacity;
+  // A retraction for a destination we never heard of must not allocate a
+  // table slot that GC would never collect.
+  Entry* entry = advertisement.metric == kInfiniteRouteMetric
+                     ? const_cast<Entry*>(find(advertisement.destination))
+                     : find_or_allocate(advertisement.destination);
+  if (entry == nullptr) {
+    return advertisement.metric == kInfiniteRouteMetric
+               ? RouteUpdateResult::Ignored
+               : RouteUpdateResult::NoCapacity;
+  }
 
   // Generation ordering is a plain comparison (no serial wrap): an origin
   // generation must be persisted monotonic per boot; a wrap is a profile
@@ -133,6 +142,9 @@ RouteUpdateResult RouteTable::consider(const RouteAdvertisement& advertisement,
     entry->sequence_request_needed = false;
   }
 
+  // Retractions pass the generation check above (a stale-generation withdraw
+  // must not kill a fresh route), then withdraw marks the candidate infeasible,
+  // holds the failed hop down and arms the tombstone for GC.
   if (advertisement.metric == kInfiniteRouteMetric) {
     return withdraw(advertisement.destination, next_hop, now_ms)
                ? RouteUpdateResult::Withdrawn
@@ -210,6 +222,11 @@ void RouteTable::invalidate_next_hop(const NodeId next_hop,
       if (hold) {
         entry.hold_next_hop = next_hop;
         entry.hold_until_ms = now_ms + kRouteHoldDownMs;
+      } else if (entry.hold_next_hop == next_hop) {
+        // A restarted relay's previous-incarnation state is stale but fresh
+        // advertisements must not be held down by the earlier failure.
+        entry.hold_next_hop = kInvalidNodeId;
+        entry.hold_until_ms = 0;
       }
       if (!select(entry).valid) entry.sequence_request_needed = true;
       arm_tombstone(entry, now_ms);
