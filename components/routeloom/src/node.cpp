@@ -348,6 +348,22 @@ void MeshNode::TxScheduler::requeue_selected() noexcept {
   selected_control_ = false;
 }
 
+void MeshNode::TxScheduler::defer_selected() noexcept {
+  if (selected_ == nullptr) return;
+  if (selected_control_) {
+    control_.push_back(selected_);
+  } else {
+    selected_flow_->jobs.push_back(selected_);
+    if (!selected_flow_->in_rr) {
+      (void)rr_[class_index(selected_flow_->sched_class)].push(selected_flow_);
+      selected_flow_->in_rr = true;
+    }
+  }
+  selected_ = nullptr;
+  selected_flow_ = nullptr;
+  selected_control_ = false;
+}
+
 void MeshNode::TxScheduler::clear() noexcept {
   pool_.clear();
   flows_.clear();
@@ -364,7 +380,9 @@ void MeshNode::TxScheduler::clear() noexcept {
 
 MeshNode::MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
                    NodeObserver& observer) noexcept
-    : config_(config), radio_(radio), security_(security), observer_(observer) {}
+    : config_(config), radio_(radio), security_(security), observer_(observer) {
+  routes_.set_self(config.node);  // improvement-hold jitter identity (03 §7)
+}
 
 Status MeshNode::validate_config() const noexcept {
   if (config_.network == 0 || config_.network > UINT32_MAX ||
@@ -417,8 +435,21 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
     record->generation = 0;  // last-seen origin generation; survives re-adds
   }
   record->node = neighbor;
-  record->metric = link_metric;
+  record->metric = link_metric;      // nominal — measurements adjust around it
+  record->link_cost = link_metric;   // effective cost starts at nominal
   record->consecutive_failures = 0;
+  // Re-adding a peer is a new observation epoch: drop the load aggregates
+  // (keep the feedback ordering state — anti-replay must not reset).
+  record->exchange_work = 0;
+  record->exchange_accepts = 0;
+  record->exchange_window_ms = 0;
+  record->queue_sojourn_ewma_ms = 0;
+  record->sojourn_samples = 0;
+  record->last_sojourn_ms = 0;
+  record->busy_active = false;
+  record->busy_since_ms = 0;
+  record->last_busy_feedback_ms = 0;
+  record->last_pressure = 0;
   record->active = true;
   // Direct route to the neighbor itself, seeded at the last-seen generation
   // (0 for a brand-new peer); it upgrades as soon as its self record arrives.
@@ -439,6 +470,7 @@ Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms
   if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
   record->active = false;
   routes_.invalidate_next_hop(neighbor, now_ms);
+  routes_.clear_next_hop_busy(neighbor);  // drop stale busy state too
   ++self_route_sequence_;
   ++config_revision_;
   trigger_route_advertisement(now_ms);
@@ -1079,6 +1111,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
     return;
   }
 
+  std::size_t route_defers = 0;
   while (TxJob* queued = scheduler_.select(now_ms, *this)) {
     if (queued->owner == JobOwner::OriginDelivery) {
       auto* delivery = find_delivery(queued->ack.key.id);
@@ -1096,6 +1129,40 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       scheduler_.take_selected(exhausted);
       fail_job(exhausted, "ATTEMPT_BUDGET_EXHAUSTED", now_ms);
       continue;
+    }
+    // Route re-verification (03 §7): the route reserved at enqueue is
+    // re-checked against the LIVE selected snapshot before the driver sees
+    // the frame. A switched route retargets the job under the SAME
+    // MessageId, original deadline and consumed round; a destination with
+    // no feasible route holds the job (deadline-bounded) instead of
+    // launching it on a next hop the table no longer selects — a frame
+    // sent down an infeasible route can close a forwarding loop (D4-02).
+    NodeId routed = kInvalidNodeId;
+    if (queued->form == JobForm::Forwarded) {
+      routed = queued->forwarded.header.destination;
+    } else if (queued->plain.header.type == FrameType::Data ||
+               queued->plain.header.type == FrameType::EndReceipt) {
+      routed = queued->plain.header.destination;
+    }
+    if (routed != kInvalidNodeId) {
+      const auto live = routes_.best(routed);
+      if (!live.valid || find_neighbor(live.next_hop) == nullptr) {
+        if (now_ms >= queued->deadline_ms) {
+          TxJob stale{};
+          scheduler_.take_selected(stale);
+          fail_job(stale, "NO_ROUTE", now_ms);
+          continue;
+        }
+        scheduler_.defer_selected();
+        // A queue of only route-blocked jobs must not spin this pass; the
+        // bound lets each job be re-checked on a later poll.
+        if (++route_defers >= kTxQueueCapacity) return;
+        continue;
+      }
+      if (live.next_hop != queued->peer) {
+        queued->peer = live.next_hop;
+        queued->encoded_valid = false;  // re-stamp next_hop at encode
+      }
     }
     auto status = encode_job(*queued, now_ms);
     if (!status) {
@@ -1317,6 +1384,11 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
     // A BUSY-deferred exchange that still completes does not break the
     // authenticated-accept streak — the accept is authoritative.
     (void)was_deferred;
+    // An authenticated accept proves work gets through: it releases the
+    // sustained-busy state that feeds the severe-busy repair path (03 §7).
+    neighbor->busy_active = false;
+    neighbor->busy_since_ms = 0;
+    neighbor->last_busy_feedback_ms = 0;
     if (neighbor->window_accepts < kWindowGrowAccepts) {
       ++neighbor->window_accepts;
     }
@@ -1492,6 +1564,17 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
     if (neighbor != nullptr) {
       if (neighbor->tx_window > kPeerWindowMin) --neighbor->tx_window;
       neighbor->window_accepts = 0;
+      // Authenticated, ordered pressure sustains the busy picture only —
+      // it never adds a foreign unit to a route metric (03 §6.2, §7). A
+      // zero-pressure hint carries no busy claim.
+      if (payload.pressure != 0) {
+        if (!neighbor->busy_active) {
+          neighbor->busy_active = true;
+          neighbor->busy_since_ms = now_ms;
+        }
+        neighbor->last_busy_feedback_ms = now_ms;
+      }
+      neighbor->last_pressure = payload.pressure;
     }
     return;
   }
@@ -1532,6 +1615,15 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
   if (neighbor != nullptr) {
     neighbor->tx_window = kPeerWindowMin;
     neighbor->window_accepts = 0;
+    // A matched deferral is evidence we cannot inject toward this peer:
+    // it sustains the severe-busy clock while fresh feedback keeps
+    // arriving (03 §7) — still only a hint, never a metric input.
+    if (!neighbor->busy_active) {
+      neighbor->busy_active = true;
+      neighbor->busy_since_ms = now_ms;
+    }
+    neighbor->last_busy_feedback_ms = now_ms;
+    neighbor->last_pressure = payload.pressure;
   }
 }
 
@@ -1637,7 +1729,10 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
   for (std::uint8_t i = 0; i < count; ++i) {
     const auto& advertisement = records[i];
     if (advertisement.destination == config_.node) continue;
-    const auto result = routes_.consider(advertisement, peer, neighbor->metric, now_ms,
+    // Advertisements are considered against the CURRENT effective link
+    // cost — the same cost update_link_cost applies to stored candidates,
+    // so new and existing routes are built from one consistent state.
+    const auto result = routes_.consider(advertisement, peer, neighbor->link_cost, now_ms,
                                          config_.route_lifetime_ms);
     if (result == RouteUpdateResult::Infeasible) {
       observer_.on_diagnostic("ROUTE_INFEASIBLE_SEQNO_NEEDED", peer, nullptr);
@@ -2009,12 +2104,17 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   if (!started_) return;
   last_clock_ms_ = now_ms;
   routes_.expire(now_ms);
+  // P3 (03 §6/§7): decay the per-peer observation windows, release stale
+  // busy feedback at its TTL, refresh effective link costs and advance the
+  // route-switch hysteresis before any selection change is advertised.
+  refresh_neighbor_load(now_ms);
   expire_dedup(now_ms);
   expire_sequence_requests(now_ms);
   process_awaiting_hop(now_ms);
   process_delivery_timeouts(now_ms);
   routes_.for_each_selected_change(
-      [&](const RouteSelection&) { trigger_route_advertisement(now_ms); });
+      [&](const RouteSelection&) { trigger_route_advertisement(now_ms); },
+      now_ms);
   if (!draining_) {
     // Background work stops while draining; in-flight queue entries still
     // dispatch below so the TX path can settle.
@@ -2054,12 +2154,28 @@ ObservationBucket* MeshNode::observation_bucket(
 
 void MeshNode::obs_tx_submitted(const TxJob& job, const MonotonicMs now_ms) noexcept {
   auto* bucket = observation_bucket(frame_length_class(job.tx_cost), now_ms);
-  if (bucket == nullptr) return;
-  ++bucket->tx_submitted;
-  ++bucket->sojourn_samples;
-  // Queue sojourn: enqueue -> handed to radio (03 §3).
-  ewma_add(bucket->queue_sojourn_ms_ewma, now_ms - job.enqueued_at_ms,
-           bucket->sojourn_samples);
+  if (bucket != nullptr) {
+    ++bucket->tx_submitted;
+    ++bucket->sojourn_samples;
+    // Queue sojourn: enqueue -> handed to radio (03 §3).
+    ewma_add(bucket->queue_sojourn_ms_ewma, now_ms - job.enqueued_at_ms,
+             bucket->sojourn_samples);
+  }
+  // Per-peer mirror (03 §6): the A->B queue picture and the exchange ratio
+  // are per-next-hop, so the global bucket is mirrored into the neighbor
+  // record even when the bounded bucket pool overflows.
+  if (auto* neighbor = find_neighbor(job.peer)) {
+    ++neighbor->sojourn_samples;
+    ewma_add(neighbor->queue_sojourn_ewma_ms, now_ms - job.enqueued_at_ms,
+             neighbor->sojourn_samples);
+    neighbor->last_sojourn_ms = now_ms;
+    if (job.requires_hop_accept) {
+      // Eligible attempt work for the exchange-cost ratio: every physical
+      // submission counts, including submissions that later fail (§6.1).
+      if (neighbor->exchange_window_ms == 0) neighbor->exchange_window_ms = now_ms;
+      ++neighbor->exchange_work;
+    }
+  }
 }
 
 void MeshNode::obs_driver_service(const TxJob& job, const std::uint32_t service_us,
@@ -2075,19 +2191,25 @@ void MeshNode::obs_driver_service(const TxJob& job, const std::uint32_t service_
 void MeshNode::obs_hop_result(const TxJob& job, const bool accepted,
                               const MonotonicMs now_ms) noexcept {
   auto* bucket = observation_bucket(frame_length_class(job.tx_cost), now_ms);
-  if (bucket == nullptr) return;
+  if (bucket != nullptr) {
+    if (accepted) {
+      ++bucket->hop_accepted;
+      // Hop exchange attempts until authenticated HOP_ACCEPT (03 §3), counted
+      // by the physical attempt index that finally got through.
+      const std::uint8_t index =
+          job.physical_attempts == 0
+              ? 0
+              : static_cast<std::uint8_t>(job.physical_attempts - 1);
+      ++bucket->accepted_at_attempt[std::min<std::uint8_t>(
+          index, kCombinedPhysicalAttemptsMax - 1)];
+    } else {
+      ++bucket->rf_failures;  // HOP_ACCEPT timeout folds into RF-loss accounting
+    }
+  }
   if (accepted) {
-    ++bucket->hop_accepted;
-    // Hop exchange attempts until authenticated HOP_ACCEPT (03 §3), counted
-    // by the physical attempt index that finally got through.
-    const std::uint8_t index =
-        job.physical_attempts == 0
-            ? 0
-            : static_cast<std::uint8_t>(job.physical_attempts - 1);
-    ++bucket->accepted_at_attempt[std::min<std::uint8_t>(
-        index, kCombinedPhysicalAttemptsMax - 1)];
-  } else {
-    ++bucket->rf_failures;  // HOP_ACCEPT timeout folds into RF-loss accounting
+    if (auto* neighbor = find_neighbor(job.peer)) {
+      ++neighbor->exchange_accepts;  // authenticated-accept success (03 §6.1)
+    }
   }
 }
 
@@ -2123,6 +2245,112 @@ void MeshNode::obs_final(const Delivery& delivery, const DeliveryState state,
   // no single on-air frame size.
   auto* bucket = observation_bucket(0, now_ms);
   if (bucket != nullptr) ++(bucket->*counter);
+}
+
+// ---------------------------------------------------------------------------
+// P3 load coupling (03-congestion.md §6, §7)
+// ---------------------------------------------------------------------------
+
+void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) noexcept {
+  // §6.1 base cost: the measured exchange ratio against the nominal. The
+  // measured cost is in units of exchanges (attempt count per authenticated
+  // accept), never driver microseconds — driver service time may already
+  // contain MAC retries, so using it would double-count ETX. Below the
+  // minimum sample count the nominal stands (no measured reference is ever
+  // invented).
+  RouteMetric base = neighbor.metric;
+  if (neighbor.exchange_accepts >= kExchangeMinAccepts) {
+    base = measured_link_base(neighbor.metric, neighbor.exchange_work,
+                              neighbor.exchange_accepts);
+  }
+  // §6.2 queue penalty: ONLY our egress sojourn toward this peer, smoothed
+  // over the observation window. A stale or absent sample reads as 0 — a
+  // quiet queue is not congestion. The peer's own queue delay lives inside
+  // its advertised metric and is never re-added here.
+  const std::uint32_t queue_ms =
+      neighbor.last_sojourn_ms != 0 &&
+              now_ms - neighbor.last_sojourn_ms <= kObservationWindowMs
+          ? neighbor.queue_sojourn_ewma_ms
+          : 0;
+  const RouteMetric cost = queue_penalized_cost(base, queue_ms);
+  if (cost != neighbor.link_cost) {
+    neighbor.link_cost = cost;
+    // Recompute stored candidates from their advertised metrics; never
+    // extends a lease, never deletes FD (03 §6.3).
+    routes_.update_link_cost(neighbor.node, cost, now_ms);
+  }
+}
+
+void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
+  neighbors_.for_each([&](Neighbor& neighbor) {
+    if (!neighbor.active) return;
+    // Decaying observation window (03 §3): halve the exchange counters per
+    // elapsed window — a bounded aggregate, never raw samples.
+    while (neighbor.exchange_window_ms != 0 &&
+           now_ms - neighbor.exchange_window_ms >= kObservationWindowMs) {
+      neighbor.exchange_work >>= 1;
+      neighbor.exchange_accepts >>= 1;
+      neighbor.exchange_window_ms += kObservationWindowMs;
+    }
+    // Feedback TTL (03 §3/§5): sustained-busy survives only on fresh
+    // authenticated feedback; silence past the TTL releases it so an old
+    // self-report cannot hold a route away.
+    if (neighbor.busy_active &&
+        now_ms - neighbor.last_busy_feedback_ms > kFeedbackTtlMs) {
+      neighbor.busy_active = false;
+      neighbor.busy_since_ms = 0;
+    }
+    if (neighbor.busy_active) {
+      routes_.note_next_hop_busy(neighbor.node, neighbor.busy_since_ms);
+    } else {
+      routes_.clear_next_hop_busy(neighbor.node);
+    }
+    refresh_link_cost(neighbor, now_ms);
+  });
+  // Route-switch hysteresis (03 §7): pending improvements commit here once
+  // their hold elapsed, and committed selections that lost validity repair
+  // immediately — load never admits an infeasible route.
+  routes_.evaluate(now_ms);
+}
+
+RouteMetric MeshNode::peer_link_cost(const NodeId peer) const noexcept {
+  const auto* neighbor = find_neighbor(peer);
+  return neighbor == nullptr ? kInfiniteRouteMetric : neighbor->link_cost;
+}
+
+MonotonicMs MeshNode::peer_busy_since(const NodeId peer) const noexcept {
+  const auto* neighbor = find_neighbor(peer);
+  // A peer busy since t=0 reports its sustain start as 1 so the accessor's
+  // "0 = not busy" contract stays unambiguous for diagnostics/tests.
+  return neighbor == nullptr || !neighbor->busy_active
+             ? MonotonicMs{0}
+             : std::max<MonotonicMs>(1, neighbor->busy_since_ms);
+}
+
+void MeshNode::note_peer_pressure(const NodeId peer, const std::uint8_t pressure,
+                                  const std::uint32_t feedback_sequence,
+                                  const MonotonicMs now_ms) noexcept {
+  auto* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || !neighbor->active) return;
+  // Same ordering rule as BUSY (03 §5): a stale or replayed feedback
+  // sequence must never re-arm pressure.
+  if (neighbor->feedback_seen &&
+      feedback_sequence <= neighbor->last_feedback_seq) {
+    ++busy_stats_.busy_stale;
+    return;
+  }
+  neighbor->feedback_seen = true;
+  neighbor->last_feedback_seq = feedback_sequence;
+  neighbor->last_pressure = pressure;
+  if (pressure != 0) {
+    // Pressure only sustains the busy/queue picture (severe-busy repair);
+    // it is a hint from a single peer — never a metric term (03 §6.2).
+    if (!neighbor->busy_active) {
+      neighbor->busy_active = true;
+      neighbor->busy_since_ms = now_ms;
+    }
+    neighbor->last_busy_feedback_ms = now_ms;
+  }
 }
 
 CongestionStats MeshNode::congestion_stats() const noexcept {

@@ -137,9 +137,25 @@ class MeshNode {
   // capability negotiation lands, BUSY replies are emitted only to peers
   // marked here or proven by a valid received BUSY (03 §5, scenario D4-09).
   void set_peer_busy_capable(NodeId peer, bool capable) noexcept;
+  // Effective link cost currently fed to routing for `peer` (nominal base
+  // adjusted by the measured exchange ratio and our egress queue penalty,
+  // 03 §6). kInfiniteRouteMetric when the peer is unknown.
+  RouteMetric peer_link_cost(NodeId peer) const noexcept;
+  // Sustained-busy start time for `peer` (0 = not busy) — diagnostic/test
+  // surface for the severe-busy fast-repair path (03 §7).
+  MonotonicMs peer_busy_since(NodeId peer) const noexcept;
+  // Authenticated neighbor pressure feedback (Busy.pressure field or
+  // NeighborResult-derived, delivered by the link-authenticated ingress
+  // path). Ordered per peer by the feedback sequence and honored only
+  // inside its TTL; feeds ONLY the local busy/queue picture — a peer
+  // self-report is a hint, never added to a route metric and never able
+  // to admit an infeasible route (03 §6.2, D4-02).
+  void note_peer_pressure(NodeId peer, std::uint8_t pressure,
+                          std::uint32_t feedback_sequence,
+                          MonotonicMs now_ms) noexcept;
   // Bounded observation aggregates (03 §3): EWMA + counters per key, never
-  // raw samples. Groundwork for the P3 route-metric coupling — this phase
-  // records but does not feed the data back into routing.
+  // raw samples. The global buckets feed diagnostics; the per-neighbor
+  // mirrors drive the P3 route-metric coupling (03 §6).
   template <typename Fn>
   void for_each_observation(Fn fn) const noexcept {
     observations_.for_each(fn);
@@ -242,7 +258,8 @@ class MeshNode {
 
   struct Neighbor {
     NodeId node{kInvalidNodeId};
-    RouteMetric metric{1};
+    RouteMetric metric{1};      // nominal link cost (add_neighbor input)
+    RouteMetric link_cost{1};   // effective cost fed to RouteTable (03 §6)
     RouteGeneration generation{0};  // last origin generation the peer self-advertised
     std::uint8_t consecutive_failures{0};
     std::uint8_t route_cursor{0};  // rotation cursor for periodic route dumps
@@ -258,6 +275,29 @@ class MeshNode {
     // cannot disable ordering checks forever.
     std::uint32_t last_feedback_seq{kNoFeedbackSeq};
     bool feedback_seen{false};
+    // Per-peer exchange measurement (03 §6.1): decaying-window counters of
+    // eligible attempt work (every physical submission of a hop-accept
+    // exchange — failures included) and authenticated accepts. Below
+    // kExchangeMinAccepts the measured ratio is unused and cost stays
+    // nominal.
+    std::uint32_t exchange_work{0};
+    std::uint32_t exchange_accepts{0};
+    MonotonicMs exchange_window_ms{0};
+    // Per-peer egress queue sojourn EWMA (03 §6.2): only OUR delay toward
+    // this peer may penalize the link cost. Stale samples read as 0.
+    std::uint32_t queue_sojourn_ewma_ms{0};
+    std::uint32_t sojourn_samples{0};
+    MonotonicMs last_sojourn_ms{0};
+    // Sustained authenticated-busy feedback (03 §7 severe-busy): set while
+    // matched BUSY deferrals or pressure hints keep arriving; cleared by an
+    // authenticated accept or when feedback goes stale past its TTL. It is
+    // a hint for the switch discipline, never a metric input. `busy_active`
+    // is the state — busy_since_ms==0 is a legitimate timestamp (t=0), not
+    // a "clear" sentinel.
+    bool busy_active{false};
+    MonotonicMs busy_since_ms{0};
+    MonotonicMs last_busy_feedback_ms{0};
+    std::uint8_t last_pressure{0};
     bool active{false};
   };
 
@@ -359,6 +399,10 @@ class MeshNode {
     // Put the selected job back at the head of its lane (driver rejected
     // the submission before any transmit attempt).
     void requeue_selected() noexcept;
+    // Move the selected job to the TAIL of its lane: the dispatch-time
+    // route re-check holds it (bounded by its original deadline) without
+    // head-of-line blocking the rest of its flow (03 §7).
+    void defer_selected() noexcept;
     void clear() noexcept;
 
     bool empty() const noexcept { return used_ == 0; }
@@ -539,6 +583,11 @@ class MeshNode {
   std::size_t peer_inflight(NodeId peer) const noexcept;
   std::uint8_t peer_window(NodeId peer) const noexcept;
   std::uint32_t busy_retry_hint() const noexcept;
+
+  // P3 load coupling (03 §6/§7): per-neighbor observation decay, busy-TTL,
+  // effective link-cost refresh and the route-switch hysteresis tick.
+  void refresh_neighbor_load(MonotonicMs now_ms) noexcept;
+  void refresh_link_cost(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
 
   // Observation aggregation (03 §3): bounded buckets keyed by the contract
   // tuple. find-or-allocate returns nullptr only when the pool is exhausted.

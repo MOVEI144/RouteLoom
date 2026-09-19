@@ -24,6 +24,27 @@ constexpr std::uint32_t kRouteTombstoneDwellMs = 60000;
 // A just-failed next hop cannot be re-selected until this hold-down passes.
 constexpr std::uint32_t kRouteHoldDownMs = 500;
 
+// --- Load-aware switching discipline (03-congestion.md §7, D4-04) -------------
+// Queue effects react immediately; route IMPROVEMENT works on a seconds
+// timescale so a single load sample never flaps the mesh. All values are the
+// contract pins from contracts.json congestion.*.
+// An alternative must be >=20% and >=1 cost better than the committed route,
+// sustained for the whole improvement hold, before a switch commits.
+constexpr std::uint32_t kImprovementHoldMs = 10000;     // improvement_hold_ms
+constexpr std::uint32_t kSwitchHoldMs = 5000;           // switch_hold_ms
+// Sustained authenticated BUSY on the committed next hop for at least this
+// long permits a faster local repair to a fresh feasible alternative — still
+// damped by the post-switch hold.
+constexpr std::uint32_t kSevereBusyMs = 2000;           // severe_busy_ms
+// Pure metric-improvement advertisements are spaced at least this far apart
+// per destination; withdrawals/expiry are never delayed by this gap.
+constexpr std::uint32_t kImprovementAdGapMs = 2000;     // improvement_advertisement_gap_ms
+// Node-id derived dispersion added to the improvement hold so a fleet does
+// not evaluate the same switch at the same instant (03 §7).
+constexpr std::uint32_t kImprovementJitterMs = 2000;
+// Bound on remembered per-next-hop busy state (one per neighbor).
+constexpr std::size_t kBusyLinkCapacity = 32;
+
 struct RouteAdvertisement {
   NodeId destination{kInvalidNodeId};
   RouteGeneration generation{0};
@@ -92,6 +113,31 @@ class RouteTable {
   void invalidate_next_hop(NodeId next_hop, MonotonicMs now_ms, bool hold = true) noexcept;
   void expire(MonotonicMs now_ms) noexcept;
 
+  // --- Load coupling (03-congestion.md §6.3, §7) ------------------------------
+  // Identity used for the improvement-hold jitter; set once at boot.
+  void set_self(NodeId self) noexcept { self_id_ = self; }
+  // Recomputes every candidate learned via `next_hop` from its STORED
+  // advertised metric plus the new link cost (saturating). Leases are never
+  // touched (metric_changes_refresh_advertisement_lease = false), FD is
+  // never deleted, and a withdrawn/infeasible candidate is never revived —
+  // load can only raise or lower the metric of routes feasibility already
+  // permits. `now_ms` is the observation epoch; returns true when any
+  // candidate was touched. cost == 0 is refused: only self-origin distance
+  // is zero (03 §6.2).
+  bool update_link_cost(NodeId next_hop, RouteMetric cost, MonotonicMs now_ms) noexcept;
+  // Reports sustained authenticated-busy pressure observed on `next_hop`
+  // (since_ms = when the sustain began — 0 is a legitimate timestamp, the
+  // BusyLink's existence is the busy state). Feeds ONLY the severe-busy
+  // fast-repair path — a peer's self-report is a hint and never changes a
+  // metric by itself (03 §6.2, §7).
+  void note_next_hop_busy(NodeId next_hop, MonotonicMs since_ms) noexcept;
+  void clear_next_hop_busy(NodeId next_hop) noexcept;
+  // Advances the switching discipline: commits pending improvements whose
+  // hold elapsed, repairs committed selections that lost validity, and
+  // tracks newly qualifying alternatives. Driven by the owner's poll plus
+  // every mutating table operation.
+  void evaluate(MonotonicMs now_ms) noexcept;
+
   RouteSelection best(NodeId destination) const noexcept;
   bool mark_advertised(NodeId destination) noexcept;
   bool needs_sequence_request(NodeId destination) const noexcept;
@@ -147,8 +193,13 @@ class RouteTable {
 
   // Fires for each entry whose selected route changed since the last call
   // (including selection becoming invalid). Used for triggered updates.
+  // A pure metric improvement (same next hop and sequence, lower metric) is
+  // rate-limited to one triggered advertisement per improvement_advertisement_gap_ms
+  // (03 §8): a suppressed improvement keeps last_selected stale so it fires
+  // once the gap has passed — or is silently covered when a periodic
+  // advertisement carries it first (mark_advertised syncs last_selected).
   template <typename Fn>
-  void for_each_selected_change(Fn fn) noexcept {
+  void for_each_selected_change(Fn fn, MonotonicMs now_ms) noexcept {
     entries_.for_each([&](Entry& entry) {
       const auto selection = select(entry);
       const bool changed = selection.valid != entry.last_selected.valid ||
@@ -156,10 +207,19 @@ class RouteTable {
            (selection.next_hop != entry.last_selected.next_hop ||
             selection.sequence != entry.last_selected.sequence ||
             selection.metric != entry.last_selected.metric));
-      if (changed) {
-        entry.last_selected = selection;
-        fn(selection);
+      if (!changed) return;
+      const bool pure_improvement =
+          selection.valid && entry.last_selected.valid &&
+          selection.next_hop == entry.last_selected.next_hop &&
+          selection.sequence == entry.last_selected.sequence &&
+          selection.metric < entry.last_selected.metric;
+      if (pure_improvement && entry.improvement_ad_ms != 0 &&
+          now_ms - entry.improvement_ad_ms < kImprovementAdGapMs) {
+        return;
       }
+      if (pure_improvement) entry.improvement_ad_ms = now_ms;
+      entry.last_selected = selection;
+      fn(selection);
     });
   }
 
@@ -180,6 +240,25 @@ class RouteTable {
     MonotonicMs hold_until_ms{0};
     MonotonicMs tombstone_expires_at_ms{0};
     bool sequence_request_needed{false};
+    // Committed next hop (03 §7): the selection DATA forwarding, the
+    // advertised metric and FD updates are all generated from. It moves only
+    // through the hysteresis rules in evaluate_entry — never on a bare
+    // metric comparison — and load can never commit an infeasible route.
+    NodeId committed_next_hop{kInvalidNodeId};
+    // Pending improvement: the qualifying alternative and when its
+    // continuous-better streak began.
+    NodeId improvement_next_hop{kInvalidNodeId};
+    MonotonicMs improvement_since_ms{0};
+    // Post-switch damping: no further voluntary switch commits before this.
+    MonotonicMs switch_hold_until_ms{0};
+    // Last triggered pure-improvement advertisement for this destination.
+    MonotonicMs improvement_ad_ms{0};
+  };
+
+  // Per-next-hop sustained-busy input (03 §7 severe-busy path).
+  struct BusyLink {
+    NodeId next_hop{kInvalidNodeId};
+    MonotonicMs since_ms{0};
   };
 
   Entry* find_or_allocate(NodeId destination) noexcept;
@@ -190,8 +269,21 @@ class RouteTable {
   static RouteCandidate* candidate_slot(Entry& entry, NodeId next_hop) noexcept;
   static bool has_candidates(const Entry& entry) noexcept;
   static void arm_tombstone(Entry& entry, MonotonicMs now_ms) noexcept;
+  // The candidate via `hop` when it is still selectable (valid, flagged
+  // feasible, finite metric and — re-checked — feasible against the CURRENT
+  // feasible distance). kInvalidNodeId always yields nullptr.
+  static const RouteCandidate* selectable(const Entry& entry, NodeId hop) noexcept;
+  // Best selectable candidate; `exclude` skips one next hop (severe-busy
+  // repair looks for a fresh alternative beside the busy committed hop).
+  static const RouteCandidate* best_candidate(const Entry& entry,
+                                              NodeId exclude) noexcept;
+  void evaluate_entry(Entry& entry, MonotonicMs now_ms) noexcept;
+  const BusyLink* busy_link(NodeId next_hop) const noexcept;
+  std::uint32_t improvement_jitter(NodeId destination) const noexcept;
 
   FixedPool<Entry, kMaxRouteEntries> entries_{};
+  FixedPool<BusyLink, kBusyLinkCapacity> busy_links_{};
+  NodeId self_id_{kInvalidNodeId};
 };
 
 }  // namespace routeloom

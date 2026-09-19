@@ -18,6 +18,7 @@
 
 #include "routeloom/autonomy.hpp"
 #include "routeloom/peer_directory.hpp"
+#include "routeloom/routing.hpp"
 #include "routeloom/types.hpp"
 
 namespace routeloom {
@@ -55,6 +56,14 @@ constexpr std::size_t kFlowDescriptorsMax = 32;
 constexpr std::uint32_t kQueueWatermarkBackgroundPercent = 50;  // shrink probe/log work
 constexpr std::uint32_t kQueueWatermarkStopPercent = 80;        // stop bulk + improvement probes
 constexpr std::uint32_t kQueueTargetMs = 50;
+// Route-metric queue penalty (03 §6.2, contracts congestion.*): the multiple
+// of the measured base cost added per queue_penalty_step_ms of sustained
+// egress delay above queue_target_ms, capped at queue_penalty_max_multiple.
+constexpr std::uint32_t kQueuePenaltyStepMs = 50;
+constexpr std::uint32_t kQueuePenaltyMaxMultiple = 4;
+// Minimum authenticated accepts before a measured exchange ratio may move a
+// link cost off its nominal value (03 §6.1 — sample-poor links keep nominal).
+constexpr std::uint32_t kExchangeMinAccepts = 4;
 // Received BUSY retry_after is clamped into this interval.
 constexpr std::uint32_t kBusyRetryAfterMinMs = 20;
 constexpr std::uint32_t kBusyRetryAfterMaxMs = 1000;
@@ -122,13 +131,17 @@ struct ObservationKey {
 };
 
 // EWMA update, alpha = 1/8. `samples` is the count including this sample;
-// the first sample seeds the average directly.
+// the first sample seeds the average directly. The delta is applied with
+// sign awareness — unsigned `sample - ewma` would wrap whenever a sample
+// lands below the average.
 constexpr void ewma_add(std::uint32_t& ewma, const std::uint32_t sample,
                         const std::uint64_t samples) noexcept {
   if (samples <= 1) {
     ewma = sample;
-  } else {
+  } else if (sample >= ewma) {
     ewma += (sample - ewma) / 8;
+  } else {
+    ewma -= (ewma - sample) / 8;
   }
 }
 
@@ -194,5 +207,56 @@ struct CongestionStats {
     return *this;
   }
 };
+
+// --- P3 route-metric coupling (03-congestion.md §6) -----------------------------
+// Pure cost functions so the update math is testable without a mesh. The
+// abstract RouteMetric unit is preserved end to end — nothing here returns
+// milliseconds or reinterprets cost as time.
+
+// §6.1 base cost: b = clamp_positive(ceil(nominal * measured / reference)).
+// `work` is eligible attempt work (every physical transmission toward the
+// peer — failures included, so success-only sampling cannot flatter the
+// link); `accepts` is authenticated-accept successes. The reference exchange
+// cost for this profile is one attempt per accept, so the ratio is ETX-like
+// and dimensionless — driver service time, which may already contain
+// CCA/MAC retries, is NEVER used here (no ETX double-count). Callers pass
+// accepts only once the minimum sample count is met; accepts == 0 or a
+// ratio at/below ideal keeps the nominal. Results saturate to 65535 =
+// infinity; a zero cost is never produced (only self-origin distance is 0).
+constexpr RouteMetric measured_link_base(const RouteMetric nominal,
+                                         const std::uint64_t work,
+                                         const std::uint64_t accepts) noexcept {
+  if (nominal == kInfiniteRouteMetric) return nominal;
+  if (nominal == 0) return 1;  // never emit a 0-cost link (only self is 0)
+  if (accepts == 0 || work <= accepts) return nominal;
+  // Wide intermediate: nominal <= 65535 and `work` is a bounded counter, so
+  // the product cannot wrap u64.
+  const std::uint64_t scaled = static_cast<std::uint64_t>(nominal) * work;
+  const std::uint64_t value = (scaled + accepts - 1U) / accepts;  // ceil
+  if (value >= kInfiniteRouteMetric) return kInfiniteRouteMetric;
+  return value == 0 ? static_cast<RouteMetric>(1)
+                    : static_cast<RouteMetric>(value);
+}
+
+// §6.2 queue penalty: only the LOCAL egress-queue delay toward the peer is
+// added — the peer's own queue lives inside its advertised metric and is
+// never re-added (no double count).
+//   p = b * min(4, ceil(max(0, Q_ms - 50) / 50));  link = sat_add(b, p)
+constexpr RouteMetric queue_penalized_cost(const RouteMetric base,
+                                           const std::uint32_t queue_ms) noexcept {
+  if (base == kInfiniteRouteMetric) return base;
+  if (base == 0) return 1;  // never emit a 0-cost link (only self is 0)
+  const std::uint32_t excess =
+      queue_ms > kQueueTargetMs ? queue_ms - kQueueTargetMs : 0;
+  const std::uint64_t steps =
+      (static_cast<std::uint64_t>(excess) + kQueuePenaltyStepMs - 1U) /
+      kQueuePenaltyStepMs;
+  const std::uint64_t multiple =
+      steps > kQueuePenaltyMaxMultiple ? kQueuePenaltyMaxMultiple : steps;
+  const std::uint64_t total =
+      static_cast<std::uint64_t>(base) * (1U + multiple);
+  return total >= kInfiniteRouteMetric ? kInfiniteRouteMetric
+                                       : static_cast<RouteMetric>(total);
+}
 
 }  // namespace routeloom
