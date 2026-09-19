@@ -71,6 +71,40 @@ class AutonomyFrameSink {
                                  MonotonicMs now_ms) noexcept = 0;
 };
 
+// Pause contract (01-integration.md §3.3): narrower than blanket draining.
+// A PauseReason names WHY traffic is held; the mask selects WHICH traffic is
+// held so the control needed to coordinate a survey/cutover keeps flowing —
+// plain set_draining(true) stops route/control work and would deadlock a
+// migration that still needs its control lane.
+enum class PauseReason : std::uint8_t {
+  None = 0,
+  SleepDrain = 1,       // reserved for the legacy set_draining path
+  SurveyVisit = 2,      // bounded single-radio off-channel visit (04 §3)
+  MigrationPrepare = 3, // plan distribution/coordination in flight (04 §7)
+  Cutover = 4,          // committed switch executing (04 §8)
+};
+
+namespace pause {
+// Mask bits over traffic categories. The reserved scheduler control lane
+// (HOP_ACCEPT replies, pre-admission BUSY) is NEVER masked — it is exactly
+// the control a pause must keep alive.
+constexpr std::uint8_t kAppAdmission = 1u << 0;   // send()/resume_delivery()
+constexpr std::uint8_t kDataDispatch = 1u << 1;   // non-control scheduler dispatch
+constexpr std::uint8_t kBackgroundWork = 1u << 2; // route ads + seqno probing
+constexpr std::uint8_t kRetryRounds = 1u << 3;    // origin end-to-end retries
+constexpr std::uint8_t kAll =
+    kAppAdmission | kDataDispatch | kBackgroundWork | kRetryRounds;
+// What set_draining(true) has always meant: in-flight queue entries still
+// dispatch, only new admission/background/retry work stops.
+constexpr std::uint8_t kSleepDrainMask =
+    kAppAdmission | kBackgroundWork | kRetryRounds;
+// Off-channel visit: the home channel is physically unreceivable — nothing
+// home-bound may run.
+constexpr std::uint8_t kSurveyVisitMask = kAll;
+// Migration/cutover: bulk DATA pauses while reserved control keeps flowing.
+constexpr std::uint8_t kMigrationMask = kAll;
+}  // namespace pause
+
 // Policy applied by MeshNode::settle_for_sleep to deliveries that are not in a
 // terminal state when the node drains for sleep.
 enum class SleepWorkPolicy : std::uint8_t {
@@ -119,9 +153,24 @@ class MeshNode {
 
   // Sleep support. While draining, send() is rejected and background work
   // (route advertisements, sequence requests, retry rounds) stops; in-flight
-  // queue entries still dispatch so the TX path can settle.
-  void set_draining(bool draining) noexcept { draining_ = draining; }
-  bool draining() const noexcept { return draining_; }
+  // queue entries still dispatch so the TX path can settle. Equivalent to a
+  // pause with pause::kSleepDrainMask; composable with a set_pause mask.
+  void set_draining(bool draining) noexcept { sleep_draining_ = draining; }
+  bool draining() const noexcept { return sleep_draining_; }
+  // Pause contract (01 §3.3): hold only the masked traffic categories so
+  // migration/survey-critical control is not deadlocked by a blanket drain.
+  // One operational reason is active at a time (SleepDrain is orthogonal and
+  // owned by set_draining); the reserved control lane is never masked.
+  Status set_pause(PauseReason reason, std::uint8_t mask) noexcept;
+  Status clear_pause(PauseReason reason) noexcept;
+  PauseReason pause_reason() const noexcept { return pause_reason_; }
+  // Effective mask = active reason mask ∪ the sleep-drain bits.
+  std::uint8_t pause_mask() const noexcept {
+    return pause_mask_ | (sleep_draining_ ? pause::kSleepDrainMask : 0);
+  }
+  bool paused(std::uint8_t bits) const noexcept {
+    return (pause_mask() & bits) != 0;
+  }
   // True when no radio-bound work remains: empty TX queue, no physical
   // in-flight frame and no job waiting for a hop accept.
   bool quiesced() const noexcept {
@@ -678,7 +727,9 @@ class MeshNode {
   std::uint32_t rx_generation_{0};
   std::uint32_t config_revision_{0};
   bool started_{false};
-  bool draining_{false};
+  bool sleep_draining_{false};
+  PauseReason pause_reason_{PauseReason::None};
+  std::uint8_t pause_mask_{0};
 };
 
 }  // namespace routeloom

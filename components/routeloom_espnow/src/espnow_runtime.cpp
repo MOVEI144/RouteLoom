@@ -44,11 +44,27 @@ Status esp_send_status(const esp_err_t error) noexcept {
 EspNowRuntime* EspNowRuntime::instance_ = nullptr;
 portMUX_TYPE EspNowRuntime::callback_lock_ = portMUX_INITIALIZER_UNLOCKED;
 
+ChannelOpsConfig EspNowRuntime::ops_config_for(
+    const EspNowRuntimeConfig& config) noexcept {
+  ChannelOpsConfig ops{};
+  ops.home_channel = config.channel;
+  ops.channel_min = config.country_first_channel;
+  const std::uint32_t last =
+      static_cast<std::uint32_t>(config.country_first_channel) +
+      config.country_channel_count;
+  ops.channel_max =
+      static_cast<std::uint8_t>(last > 0 ? last - 1 : 13);
+  ops.visit_hard_cap_ms = migration_const::kSurveyVisitMaxMs;
+  ops.drain_budget_ms = config.node.callback_watchdog_ms;
+  return ops;
+}
+
 EspNowRuntime::EspNowRuntime(const EspNowRuntimeConfig& config,
                              SecurityProvider& security,
                              NodeObserver& observer) noexcept
     : config_(config), security_(security), observer_(observer),
-      node_(config.node, *this, security, observer) {}
+      node_(config.node, *this, security, observer),
+      channel_port_(*this), channel_runner_(channel_port_, ops_config_for(config)) {}
 
 EspNowRuntime::~EspNowRuntime() { stop(); }
 
@@ -202,7 +218,11 @@ Status EspNowRuntime::apply_lr250(const MacAddress& mac) noexcept {
 Status EspNowRuntime::add_driver_peer(const MacAddress& mac) noexcept {
   esp_now_peer_info_t info{};
   std::memcpy(info.peer_addr, mac.bytes.data(), mac.bytes.size());
-  info.channel = config_.channel;
+  // driver_peer_channel_policy "current-channel-zero" (contracts.json,
+  // 04 §8): peers follow the interface channel so a verified channel switch
+  // does not rewrite per-peer channel fields — LR250 is still re-applied to
+  // every peer by channel_reapply_peers().
+  info.channel = 0;
   info.ifidx = WIFI_IF_STA;
   info.encrypt = false;
   const esp_err_t error = esp_now_add_peer(&info);
@@ -471,6 +491,8 @@ void EspNowRuntime::stop() noexcept {
   }
   pending_tx_ = false;
   pending_token_ = 0;
+  pending_generation_ = 0;
+  fenced_outstanding_ = false;
   portEXIT_CRITICAL(&callback_lock_);
   if (espnow_initialized_) {
     (void)esp_now_unregister_recv_cb();
@@ -524,6 +546,9 @@ void EspNowRuntime::poll_once() noexcept {
     discovery_->poll(now);
     reconcile_autonomy(now);
   }
+  // Serialized channel operations advance here: drain fence -> verified
+  // apply -> bounded visit dwell -> verified return home (04 §3/§8).
+  channel_runner_.poll(now);
   node_.poll(now);
 }
 
@@ -554,6 +579,11 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
 
 Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                            const ByteView frame) noexcept {
+  if (channel_runner_.busy()) {
+    // A serialized channel operation owns the radio: DATA submissions wait
+    // rather than transmit against a stale configuration (04 §8).
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
+  }
   const Peer* record = find_peer(peer);
   if (record == nullptr || !record->driver_registered) {
     return Status::error(StatusCode::NotFound,
@@ -570,9 +600,20 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
     return Status::error(StatusCode::WouldBlock,
                          "physical TX already in flight");
   }
+  if (fenced_outstanding_) {
+    if (now_ms() >= fenced_until_ms_) {
+      fenced_outstanding_ = false;
+    } else if (fenced_mac_ == record->mac) {
+      // A fenced callback for this MAC may still be in flight: refuse the
+      // new send so the old completion can never be attributed to it (X-02).
+      portEXIT_CRITICAL(&callback_lock_);
+      return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
+    }
+  }
   pending_tx_ = true;
   pending_token_ = token;
   pending_mac_ = record->mac;
+  pending_generation_ = channel_runner_.radio_generation().value;
   portEXIT_CRITICAL(&callback_lock_);
   const esp_err_t error =
       esp_now_send(record->mac.bytes.data(), frame.data, frame.size);
@@ -649,6 +690,11 @@ Status EspNowRuntime::send_wire(const BindingId binding,
   if (discovery_ == nullptr) {
     return Status::error(StatusCode::InvalidState,
                          "autonomy engine not attached");
+  }
+  if (channel_runner_.busy()) {
+    // The authenticated home lane holds while the Owner runs a serialized
+    // channel operation (04 §3/§8).
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
   // Only post-BIND availability probes ride this path; the allowlist is
   // explicit so a future type cannot slip onto the wire lane unreviewed.
@@ -999,9 +1045,30 @@ void EspNowRuntime::enqueue_tx(
   Event event{};
   event.kind = EventKind::Tx;
   portENTER_CRITICAL(&callback_lock_);
-  if (!pending_tx_ ||
-      std::memcmp(pending_mac_.bytes.data(), info->des_addr,
-                  pending_mac_.bytes.size()) != 0) {
+  const bool pending_match =
+      pending_tx_ && std::memcmp(pending_mac_.bytes.data(), info->des_addr,
+                                 pending_mac_.bytes.size()) == 0;
+  if (pending_match &&
+      pending_generation_ != channel_runner_.radio_generation().value) {
+    // Completion for a pre-switch configuration: it cannot resolve the
+    // newer send — account separately, never as success or failure (X-02).
+    ++stale_tx_results_;
+    pending_tx_ = false;
+    pending_token_ = 0;
+    portEXIT_CRITICAL(&callback_lock_);
+    return;
+  }
+  if (!pending_match) {
+    if (fenced_outstanding_ &&
+        std::memcmp(fenced_mac_.bytes.data(), info->des_addr,
+                    fenced_mac_.bytes.size()) == 0) {
+      // The fenced straggler arrived late: accounted separately and never
+      // merged with a send that ran under the newer configuration (X-02).
+      ++stale_tx_results_;
+      fenced_outstanding_ = false;
+      portEXIT_CRITICAL(&callback_lock_);
+      return;
+    }
     // Not the reserved node-TX completion: bootstrap/autonomy sends are
     // accounted here but never consume the reservation slot (01 §3.1).
     if (status == ESP_NOW_SEND_SUCCESS) {
@@ -1018,6 +1085,143 @@ void EspNowRuntime::enqueue_tx(
   pending_token_ = 0;
   portEXIT_CRITICAL(&callback_lock_);
   (void)xQueueSend(event_queue_, &event, 0);
+}
+
+// --- Radio operation arbiter + ChannelPort (04 §3/§8) ---------------------------
+
+OperationToken EspNowRuntime::request_radio_operation(
+    const RadioOperation& op) noexcept {
+  // Policy rejections (unsupported kind, channel bounds, missing outage
+  // permission) are recorded by the runner as REJECTED results; a driver
+  // that is not up fails the apply as InvalidState -> FAILED. Either way
+  // the token always resolves to evidence.
+  return channel_runner_.request(op, now_ms());
+}
+
+bool EspNowRuntime::radio_operation_result(
+    const OperationToken token, OperationResult& out) const noexcept {
+  if (token == kInvalidOperationToken) {
+    return false;
+  }
+  return channel_runner_.result(token, out);
+}
+
+bool EspNowRuntime::radio_operation_busy() const noexcept {
+  return channel_runner_.busy();
+}
+
+RadioGeneration EspNowRuntime::radio_generation() const noexcept {
+  return channel_runner_.radio_generation();
+}
+
+bool EspNowRuntime::channel_tx_quiesced() const noexcept {
+  portENTER_CRITICAL(&callback_lock_);
+  const bool quiesced = !pending_tx_;
+  portEXIT_CRITICAL(&callback_lock_);
+  return quiesced;
+}
+
+Status EspNowRuntime::channel_set(const std::uint8_t channel) noexcept {
+  if (!wifi_initialized_) {
+    return Status::error(StatusCode::InvalidState, "wifi not initialized");
+  }
+  return esp_status(
+      esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE),
+      StatusCode::RadioFailure, "esp_wifi_set_channel failed");
+}
+
+Status EspNowRuntime::channel_readback(std::uint8_t& channel) noexcept {
+  if (!wifi_initialized_) {
+    return Status::error(StatusCode::InvalidState, "wifi not initialized");
+  }
+  std::uint8_t primary = 0;
+  wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+  const esp_err_t error = esp_wifi_get_channel(&primary, &second);
+  if (error != ESP_OK) {
+    return esp_status(error, StatusCode::RadioFailure,
+                      "esp_wifi_get_channel failed");
+  }
+  channel = primary;
+  return Status::success();
+}
+
+Status EspNowRuntime::channel_reapply_peers() noexcept {
+  if (!espnow_initialized_) {
+    return Status::error(StatusCode::InvalidState,
+                         "ESP-NOW not initialized");
+  }
+  // 04 §8 cutover list: after a verified channel switch every registered
+  // peer gets its rate re-applied — broadcast and transient peers included.
+  // Peer channel needs no rewrite under the current-channel-zero policy.
+  for (const auto& peer : peers_) {
+    if (!peer.used || !peer.driver_registered) continue;
+    const Status status = apply_lr250(peer.mac);
+    if (!status) return status;
+  }
+  for (const auto& slot : transient_peers_) {
+    if (!slot.used) continue;
+    const Status status = apply_lr250(slot.mac);
+    if (!status) return status;
+  }
+  if (broadcast_peer_) {
+    MacAddress mac{};
+    mac.bytes = discovery_const::kBroadcastMac;
+    const Status status = apply_lr250(mac);
+    if (!status) return status;
+  }
+  return Status::success();
+}
+
+void EspNowRuntime::channel_fence_tx() noexcept {
+  bool fenced = false;
+  portENTER_CRITICAL(&callback_lock_);
+  if (pending_tx_) {
+    // The straggler keeps its own record: its late callback resolves as
+    // unknown/stale — never as a fabricated success or failure (X-02).
+    fenced_mac_ = pending_mac_;
+    fenced_until_ms_ = now_ms() + config_.node.callback_watchdog_ms;
+    fenced_outstanding_ = true;
+    pending_tx_ = false;
+    pending_token_ = 0;
+    fenced = true;
+  }
+  portEXIT_CRITICAL(&callback_lock_);
+  if (fenced) {
+    observer_.on_diagnostic("OP_TX_FENCED", kInvalidNodeId, nullptr);
+  }
+}
+
+void EspNowRuntime::channel_committed(const std::uint8_t channel) noexcept {
+  // Only after readback-verified apply + peer re-apply: config_.channel is
+  // never assigned alone (04 §8 forbids the bare assignment cutover).
+  config_.channel = channel;
+}
+
+bool EspNowRuntime::OwnerChannelPort::tx_quiesced() const noexcept {
+  return owner_.channel_tx_quiesced();
+}
+
+Status EspNowRuntime::OwnerChannelPort::set_channel(
+    const std::uint8_t channel) noexcept {
+  return owner_.channel_set(channel);
+}
+
+Status EspNowRuntime::OwnerChannelPort::readback_channel(
+    std::uint8_t& channel) noexcept {
+  return owner_.channel_readback(channel);
+}
+
+Status EspNowRuntime::OwnerChannelPort::reapply_peer_radio() noexcept {
+  return owner_.channel_reapply_peers();
+}
+
+void EspNowRuntime::OwnerChannelPort::fence_pending_tx() noexcept {
+  owner_.channel_fence_tx();
+}
+
+void EspNowRuntime::OwnerChannelPort::committed_channel(
+    const std::uint8_t channel) noexcept {
+  owner_.channel_committed(channel);
 }
 
 }  // namespace routeloom::espnow

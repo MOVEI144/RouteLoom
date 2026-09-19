@@ -249,13 +249,17 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
   (void)now_ms;
   if (selected_ != nullptr) return nullptr;
   // Reserved control lane first: a required ACK/BUSY response never waits
-  // behind bulk DATA (03 §4).
+  // behind bulk DATA (03 §4) and is never held by the pause mask — it is
+  // exactly the control a pause must keep alive (01 §3.3).
   if (TxJob* job = control_.pop_front()) {
     selected_ = job;
     selected_control_ = true;
     selected_flow_ = nullptr;
     return job;
   }
+  // DataDispatch paused (survey visit, migration/cutover): all remaining
+  // candidates are data-class flows — nothing else may transmit.
+  if (node.paused(pause::kDataDispatch)) return nullptr;
   // DRR across the four classes, charged by estimated TX cost. Inside a
   // class the per-flow round-robin keeps a light sender from being pinned
   // behind one big continuous flow.
@@ -525,6 +529,33 @@ void MeshNode::set_delivery_state(Delivery& delivery, const DeliveryState state,
   observer_.on_delivery(DeliveryResult{delivery.id, state, reason});
 }
 
+Status MeshNode::set_pause(const PauseReason reason,
+                           const std::uint8_t mask) noexcept {
+  if (reason == PauseReason::None || reason == PauseReason::SleepDrain) {
+    return Status::error(StatusCode::InvalidArgument, "invalid pause reason");
+  }
+  if (pause_reason_ != PauseReason::None && pause_reason_ != reason) {
+    // A second operational pause would need priority/stacking rules the
+    // contract does not define: refuse it explicitly instead.
+    return Status::error(StatusCode::Conflict, "PAUSE_REASON_ACTIVE");
+  }
+  pause_reason_ = reason;
+  pause_mask_ |= mask;
+  return Status::success();
+}
+
+Status MeshNode::clear_pause(const PauseReason reason) noexcept {
+  if (reason == PauseReason::None || reason == PauseReason::SleepDrain) {
+    return Status::error(StatusCode::InvalidArgument, "invalid pause reason");
+  }
+  if (pause_reason_ != reason) {
+    return Status::error(StatusCode::InvalidState, "pause reason not active");
+  }
+  pause_reason_ = PauseReason::None;
+  pause_mask_ = 0;
+  return Status::success();
+}
+
 Status MeshNode::send(const NodeId destination, const ByteView payload,
                       const SendOptions& options, const MonotonicMs now_ms,
                       MessageId& id) noexcept {
@@ -533,8 +564,9 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
   // Any application TX intent is activity: it must invalidate an outstanding
   // sleep ticket even when the request itself is rejected below.
   ++work_generation_;
-  if (draining_) {
-    return Status::error(StatusCode::InvalidState, "NODE_DRAINING");
+  if (paused(pause::kAppAdmission)) {
+    return Status::error(StatusCode::InvalidState,
+                         sleep_draining_ ? "NODE_DRAINING" : "NODE_PAUSED");
   }
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
@@ -554,8 +586,9 @@ Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
                                  const MonotonicMs now_ms) noexcept {
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
   ++work_generation_;
-  if (draining_) {
-    return Status::error(StatusCode::InvalidState, "NODE_DRAINING");
+  if (paused(pause::kAppAdmission)) {
+    return Status::error(StatusCode::InvalidState,
+                         sleep_draining_ ? "NODE_DRAINING" : "NODE_PAUSED");
   }
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
@@ -1941,9 +1974,9 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
       set_delivery_state(delivery, DeliveryState::Expired, "DEADLINE_EXPIRED");
       return;
     }
-    // While draining, retry rounds do not re-enqueue: the deliveries wait for
-    // their sleep disposition (fail/save/defer) instead of making new work.
-    if (!draining_ &&
+    // While retry rounds are paused (sleep drain or an operational pause),
+    // the deliveries wait for their disposition instead of making new work.
+    if (!paused(pause::kRetryRounds) &&
         (delivery.state == DeliveryState::WaitingForRoute ||
          delivery.state == DeliveryState::WaitingForEndReceipt) &&
         now_ms >= delivery.next_round_at_ms) {
@@ -2115,9 +2148,9 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   routes_.for_each_selected_change(
       [&](const RouteSelection&) { trigger_route_advertisement(now_ms); },
       now_ms);
-  if (!draining_) {
-    // Background work stops while draining; in-flight queue entries still
-    // dispatch below so the TX path can settle.
+  if (!paused(pause::kBackgroundWork)) {
+    // Background work stops while paused/draining; in-flight queue entries
+    // still dispatch below so the TX path can settle.
     run_triggered_advertisement(now_ms);
     schedule_sequence_requests(now_ms);
     schedule_route_advertisements(now_ms);

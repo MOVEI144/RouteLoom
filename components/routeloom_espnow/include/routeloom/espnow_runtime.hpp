@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "routeloom/autonomy_wire.hpp"
+#include "routeloom/channel_plan.hpp"
 #include "routeloom/discovery.hpp"
 #include "routeloom/node.hpp"
 
@@ -127,6 +128,22 @@ class EspNowRuntime final : public RadioPort,
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
                          MonotonicMs now_ms) noexcept override;
 
+  // --- Radio operation arbiter (01 §3.3, 04 §3/§8) ------------------------------
+  // The ONLY path that may switch the radio channel: applications and
+  // feature code must never call esp_wifi_set_channel directly. One
+  // operation is serialized at a time by the portable runner; the result
+  // follows the P0 contract (APPLIED/REJECTED/FAILED/INDETERMINATE).
+  OperationToken request_radio_operation(const RadioOperation& op) noexcept;
+  bool radio_operation_result(OperationToken token,
+                              OperationResult& out) const noexcept;
+  bool radio_operation_busy() const noexcept;
+  // Radio configuration generation: bumped on every verified switch so
+  // stale TX completions cannot be attributed to a newer configuration.
+  RadioGeneration radio_generation() const noexcept;
+  // Completions that arrived after a config fence: accounted separately,
+  // never merged with success or failure (X-02).
+  std::uint32_t stale_tx_results() const noexcept { return stale_tx_results_; }
+
  private:
   enum class EventKind : std::uint8_t { Rx, Tx };
   struct Event {
@@ -200,6 +217,30 @@ class EspNowRuntime final : public RadioPort,
   Status send_raw(const MacAddress& mac, ByteView frame) noexcept;
   Status apply_lr250(const MacAddress& mac) noexcept;
   Status rebuild_driver() noexcept;
+
+  // --- ChannelPort implementation (nested: the Owner's driver surface) ----------
+  class OwnerChannelPort final : public routeloom::ChannelPort {
+   public:
+    explicit OwnerChannelPort(EspNowRuntime& owner) noexcept : owner_(owner) {}
+    bool tx_quiesced() const noexcept override;
+    Status set_channel(std::uint8_t channel) noexcept override;
+    Status readback_channel(std::uint8_t& channel) noexcept override;
+    Status reapply_peer_radio() noexcept override;
+    void fence_pending_tx() noexcept override;
+    void committed_channel(std::uint8_t channel) noexcept override;
+
+   private:
+    EspNowRuntime& owner_;
+  };
+  static ChannelOpsConfig ops_config_for(
+      const EspNowRuntimeConfig& config) noexcept;
+  bool channel_tx_quiesced() const noexcept;
+  Status channel_set(std::uint8_t channel) noexcept;
+  Status channel_readback(std::uint8_t& channel) noexcept;
+  Status channel_reapply_peers() noexcept;
+  void channel_fence_tx() noexcept;
+  void channel_committed(std::uint8_t channel) noexcept;
+
   void enqueue_rx(const esp_now_recv_info_t* info,
                   const std::uint8_t* data, int length) noexcept;
   void enqueue_tx(const esp_now_send_info_t* info,
@@ -219,6 +260,16 @@ class EspNowRuntime final : public RadioPort,
   TaskHandle_t task_{nullptr};
   std::uint64_t pending_token_{0};
   MacAddress pending_mac_{};
+  std::uint32_t pending_generation_{0};
+  // A fenced TX whose completion may still arrive: new sends to the same MAC
+  // are guarded until the stale callback lands or the guard window passes,
+  // so an old callback can never satisfy a new send (X-02).
+  MacAddress fenced_mac_{};
+  MonotonicMs fenced_until_ms_{0};
+  bool fenced_outstanding_{false};
+  std::uint32_t stale_tx_results_{0};
+  OwnerChannelPort channel_port_;
+  ChannelOperationRunner channel_runner_;
   routeloom::MacAddress self_mac_{};
   std::uint64_t autonomy_sequence_{0};
   std::uint32_t bootstrap_rx_dropped_{0};
