@@ -40,6 +40,7 @@ const char* status_code_name(const StatusCode code) noexcept {
     case StatusCode::ClockUncertain: return "CLOCK_UNCERTAIN";
     case StatusCode::PlanNotCommitted: return "PLAN_NOT_COMMITTED";
     case StatusCode::RecoveryRequired: return "RECOVERY_REQUIRED";
+    case StatusCode::AuthProfileUnavailable: return "AUTH_PROFILE_UNAVAILABLE";
   }
   return "UNKNOWN";
 }

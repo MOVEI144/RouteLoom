@@ -1,0 +1,1628 @@
+#include "routeloom/discovery.hpp"
+
+#include <cstring>
+
+#include "routeloom/byte_io.hpp"
+
+// Portable neighbor-discovery core (docs/design/autonomous-mesh/02-discovery.md,
+// 06-membership-admission.md). See discovery.hpp for the contract overview.
+
+namespace routeloom {
+namespace {
+
+// --- Internal body layouts (RLD1 body space; the 44B envelope is pinned by
+// autonomy_wire + shared vectors, these payloads are the P1a exchange) --------
+//
+// OFFER body (36B): version u8=1 | density hint u8 | reserved u16=0 |
+//                   cookie 16B | responder nonce 16B.
+constexpr std::size_t kOfferBodySize = 36;
+// BootstrapAuth PROVE body: cookie echo 16B | prove tag 16B.
+constexpr std::size_t kProveBodySize = 32;
+// CONFIRM / FINISH body: tag 16B.
+constexpr std::size_t kAuthTagBodySize = 16;
+// RLD1 BootstrapChunk body header: version u8=1 | subtype u8=1 |
+// transaction u32 | offset u16 | total u16 | data[n].
+constexpr std::size_t kChunkHeaderSize = 10;
+constexpr std::size_t kChunkDataMax = autonomy::kRld1MaxBody - kChunkHeaderSize;
+// RLD1 BootstrapReply body: version u8=1 | subtype u8=1 | transaction u32 |
+// received u16 | status u8.
+constexpr std::size_t kReplyBodySize = 10;
+constexpr std::uint8_t kChunkStatusOk = 0;
+constexpr std::uint8_t kChunkStatusIncomplete = 1;
+
+constexpr std::uint64_t kWindowMs = 400;  // density observation = offer window
+// Empty-slot sentinel for the discover ring: 0 is a valid timestamp.
+constexpr MonotonicMs kNoDiscover = ~MonotonicMs{0};
+
+bool mac_equal(const MacAddress& a, const MacAddress& b) noexcept {
+  return a == b;
+}
+
+bool nonce_equal(const std::array<std::uint8_t, 16>& a,
+                 const std::array<std::uint8_t, 16>& b) noexcept {
+  return a == b;
+}
+
+}  // namespace
+
+// --- DevPskAuthenticator ------------------------------------------------------
+//
+// EXPERIMENTAL / GROUP_SECRET_POSSESSION. Uses the provider's AEAD tag as a
+// keyed MAC over a domain-separated AAD; counter 0 is fixed because this is a
+// transcript commitment, not Wire traffic (no replay surface — freshness comes
+// from the transaction nonces inside the AAD).
+
+Status DevPskAuthenticator::tag_for(const SecurityContext& context, const ByteView aad,
+                                    AuthTag& out) noexcept {
+  std::uint8_t dummy = 0;
+  return provider_.seal(context, 0, aad, ByteView{&dummy, 0},
+                        MutableByteView{&dummy, 1}, out);
+}
+
+bool DevPskAuthenticator::tag_equal(const AuthTag& a, const AuthTag& b) noexcept {
+  std::uint8_t diff = 0;
+  for (std::size_t i = 0; i < a.size(); ++i) diff |= a[i] ^ b[i];
+  return diff == 0;
+}
+
+Status DevPskAuthenticator::cookie_seal(const CookieMaterial& material,
+                                        AuthTag& out) noexcept {
+  // "RLC1" | requester mac | pad | requester nonce | network | bucket |
+  // responder node | requester node.
+  std::array<std::uint8_t, 60> aad{};
+  ByteWriter writer(MutableByteView{aad.data(), aad.size()});
+  Status status;
+#define RL_WRITE(expr)             \
+  do {                             \
+    status = (expr);               \
+    if (!status) return status;    \
+  } while (false)
+  RL_WRITE(writer.write_u32(0x524c4331));  // "RLC1"
+  RL_WRITE(writer.write_bytes(ByteView{material.requester_mac.data(), 6}));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_bytes(
+      ByteView{material.requester_nonce.data(), material.requester_nonce.size()}));
+  RL_WRITE(writer.write_u64(material.network));
+  RL_WRITE(writer.write_u64(material.time_bucket));
+  RL_WRITE(writer.write_u64(material.responder_node));
+  RL_WRITE(writer.write_u64(material.requester_node));
+#undef RL_WRITE
+  const SecurityContext context{SecurityScope::Link, material.network,
+                                material.responder_node, material.requester_node,
+                                domain_tag_};
+  return tag_for(context, ByteView{aad.data(), writer.size()}, out);
+}
+
+Status DevPskAuthenticator::cookie_verify(const CookieMaterial& material,
+                                          const AuthTag& cookie) noexcept {
+  AuthTag expected{};
+  const Status status = cookie_seal(material, expected);
+  if (!status) return status;
+  return tag_equal(expected, cookie)
+             ? Status::success()
+             : Status::error(StatusCode::AuthenticationFailed, "cookie mismatch");
+}
+
+Status DevPskAuthenticator::attest(const autonomy::AuthPhase phase,
+                                   const AuthTranscript& transcript,
+                                   AuthTag& out) noexcept {
+  // "RLA1" | phase u8 | reserved 3B | requester node | responder node |
+  // requester mac | responder mac | pad | network | requester nonce |
+  // responder nonce | requester capability | responder capability.
+  std::array<std::uint8_t, 88> aad{};
+  ByteWriter writer(MutableByteView{aad.data(), aad.size()});
+  const bool requester_side =
+      phase == autonomy::AuthPhase::Prove || phase == autonomy::AuthPhase::Finish;
+  const NodeId sender =
+      requester_side ? transcript.requester_node : transcript.responder_node;
+  const NodeId receiver =
+      requester_side ? transcript.responder_node : transcript.requester_node;
+  Status status;
+#define RL_WRITE(expr)             \
+  do {                             \
+    status = (expr);               \
+    if (!status) return status;    \
+  } while (false)
+  RL_WRITE(writer.write_u32(0x524c4131));  // "RLA1"
+  RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(phase)));
+  RL_WRITE(writer.write_u8(0));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_u64(transcript.requester_node));
+  RL_WRITE(writer.write_u64(transcript.responder_node));
+  RL_WRITE(writer.write_bytes(ByteView{transcript.requester_mac.data(), 6}));
+  RL_WRITE(writer.write_bytes(ByteView{transcript.responder_mac.data(), 6}));
+  RL_WRITE(writer.write_u32(0));
+  RL_WRITE(writer.write_u64(transcript.network));
+  RL_WRITE(writer.write_bytes(ByteView{transcript.requester_nonce.data(), 16}));
+  RL_WRITE(writer.write_bytes(ByteView{transcript.responder_nonce.data(), 16}));
+  RL_WRITE(writer.write_u32(transcript.requester_capability));
+  RL_WRITE(writer.write_u32(transcript.responder_capability));
+#undef RL_WRITE
+  const SecurityContext context{SecurityScope::Link, transcript.network, sender,
+                                receiver, domain_tag_};
+  return tag_for(context, ByteView{aad.data(), writer.size()}, out);
+}
+
+Status DevPskAuthenticator::verify(const autonomy::AuthPhase phase,
+                                   const AuthTranscript& transcript,
+                                   const AuthTag& tag) noexcept {
+  AuthTag expected{};
+  const Status status = attest(phase, transcript, expected);
+  if (!status) return status;
+  return tag_equal(expected, tag)
+             ? Status::success()
+             : Status::error(StatusCode::AuthenticationFailed, "transcript tag mismatch");
+}
+
+Status DevPskAuthenticator::issue_proof(const AuthTranscript& transcript,
+                                        const NodeId self, const AuthTag& closing_tag,
+                                        AuthenticatedPeerProof& out) noexcept {
+  NodeId peer = kInvalidNodeId;
+  MacAddress peer_mac{};
+  if (self == transcript.requester_node &&
+      transcript.responder_node != kInvalidNodeId) {
+    peer = transcript.responder_node;
+    peer_mac = transcript.responder_mac;
+  } else if (self == transcript.responder_node &&
+             transcript.requester_node != kInvalidNodeId) {
+    peer = transcript.requester_node;
+    peer_mac = transcript.requester_mac;
+  } else {
+    return Status::error(StatusCode::InvalidArgument, "transcript identity invalid");
+  }
+  out = make_proof(peer, peer_mac, transcript.network, closing_tag);
+  return Status::success();
+}
+
+// --- MembershipController -------------------------------------------------------
+
+Status MembershipController::initialize(const MembershipHooks& hooks,
+                                        const NetworkId network) noexcept {
+  state_ = hooks.local_member(network) ? MembershipState::Member
+                                       : MembershipState::Unprovisioned;
+  return Status::success();
+}
+
+Status MembershipController::begin_discovery() noexcept {
+  switch (state_) {
+    case MembershipState::Unprovisioned:
+      state_ = MembershipState::Discovering;
+      return Status::success();
+    case MembershipState::Discovering:
+    case MembershipState::Authenticating:
+    case MembershipState::AuthorizedPendingCommit:
+    case MembershipState::Member:
+      // Member stays Member: local re-binding never re-joins (D3-03, 06 §5).
+      return Status::success();
+    case MembershipState::Revoked:
+      return Status::error(StatusCode::AuthorizationFailed,
+                           "revoked membership cannot self-rejoin");
+  }
+  return Status::error(StatusCode::InvalidState, "unknown membership state");
+}
+
+Status MembershipController::begin_authentication() noexcept {
+  switch (state_) {
+    case MembershipState::Unprovisioned:
+    case MembershipState::Discovering:
+      state_ = MembershipState::Authenticating;
+      return Status::success();
+    case MembershipState::Authenticating:
+    case MembershipState::AuthorizedPendingCommit:
+    case MembershipState::Member:
+      return Status::success();
+    case MembershipState::Revoked:
+      return Status::error(StatusCode::AuthorizationFailed,
+                           "revoked membership cannot authenticate");
+  }
+  return Status::error(StatusCode::InvalidState, "unknown membership state");
+}
+
+MembershipState MembershipController::complete_authentication(
+    MembershipHooks& hooks, const NodeId self, const NetworkId network) noexcept {
+  switch (state_) {
+    case MembershipState::Authenticating:
+      state_ = MembershipState::AuthorizedPendingCommit;
+      [[fallthrough]];
+    case MembershipState::AuthorizedPendingCommit:
+      if (hooks.approve_join(self, network)) {
+        state_ = MembershipState::Member;
+      }
+      return state_;
+    default:
+      return state_;
+  }
+}
+
+Status MembershipController::abort_authentication() noexcept {
+  if (state_ == MembershipState::Authenticating) {
+    state_ = MembershipState::Discovering;
+  }
+  return Status::success();
+}
+
+MembershipState MembershipController::retry_commit(MembershipHooks& hooks,
+                                                   const NodeId self,
+                                                   const NetworkId network) noexcept {
+  if (state_ == MembershipState::AuthorizedPendingCommit &&
+      hooks.approve_join(self, network)) {
+    state_ = MembershipState::Member;
+  }
+  return state_;
+}
+
+// --- NeighborDiscovery ----------------------------------------------------------
+
+NeighborDiscovery::NeighborDiscovery(const DiscoveryConfig& config, DiscoveryPort& port,
+                                     NeighborAuthenticator& authenticator,
+                                     MembershipHooks& hooks, EntropySource& entropy,
+                                     DiscoveryObserver& observer) noexcept
+    : config_(config),
+      port_(port),
+      authenticator_(authenticator),
+      hooks_(hooks),
+      entropy_(entropy),
+      observer_(observer) {
+  discover_times_.fill(kNoDiscover);
+}
+
+Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
+  (void)now_ms;
+  if (started_) {
+    return Status::error(StatusCode::InvalidState, "discovery already started");
+  }
+  if (config_.node == kInvalidNodeId || config_.network == 0 ||
+      mac_equal(config_.mac, discovery_const::kBroadcastMac)) {
+    return Status::error(StatusCode::InvalidArgument, "discovery config invalid");
+  }
+  membership_.initialize(hooks_, config_.network);
+  started_ = true;
+  return Status::success();
+}
+
+Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
+  if (!started_) {
+    return Status::error(StatusCode::InvalidState, "discovery not started");
+  }
+  const Status status = membership_.begin_discovery();
+  if (!status) return status;
+  if (outbound_.active) {
+    return Status::error(StatusCode::WouldBlock, "discovery exchange in flight");
+  }
+  if (!reserve_transient()) {
+    ++stats_.peer_capacity;
+    event("PEER_CAPACITY", kInvalidNodeId);
+    return Status::error(StatusCode::PeerCapacity, "no transient peer slot");
+  }
+  outbound_ = Outbound{};
+  outbound_.active = true;
+  outbound_.transient_held = true;
+  outbound_.stage = OutboundStage::AwaitingOffers;
+  const Status nonce = entropy_.fill(
+      MutableByteView{outbound_.our_nonce.data(), outbound_.our_nonce.size()});
+  if (!nonce) {
+    outbound_ = Outbound{};
+    release_transient();
+    return nonce;
+  }
+  outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
+  return send_discover(now_ms);
+}
+
+// --- RX: RLD1 carrier -----------------------------------------------------------
+
+void NeighborDiscovery::on_rld1_rx(const MacAddress& source, const ByteView frame,
+                                   const MonotonicMs now_ms) noexcept {
+  if (!started_) return;
+  autonomy::Rld1Envelope env{};
+  // Carrier is already selected by the caller's rld1_probe; a decode failure
+  // here is a REJECT — never a fallback into the Wire parser (06 §3.1).
+  if (!autonomy::rld1_decode(frame, env)) {
+    ++stats_.kind_rejects;
+    event("KIND_REJECT", kInvalidNodeId);
+    return;
+  }
+  if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Rx, env.kind,
+            /*transaction_alive=*/true, now_ms)) {
+    ++stats_.kind_rejects;
+    event("KIND_REJECT", env.claimed_node);
+    return;
+  }
+  switch (env.kind) {
+    case FrameType::Discover:
+      handle_discover(source, env, now_ms);
+      break;
+    case FrameType::Offer:
+      handle_offer(source, env, now_ms);
+      break;
+    case FrameType::BootstrapAuth:
+      handle_auth(source, env, now_ms);
+      break;
+    case FrameType::BootstrapChunk:
+      handle_chunk(source, env, now_ms);
+      break;
+    case FrameType::BootstrapReply:
+      // Fragment control replies are informational only; v1 sends chunks
+      // in order and does not retransmit on Incomplete beyond the exchange
+      // deadline.
+      break;
+    default:
+      ++stats_.kind_rejects;
+      break;
+  }
+}
+
+void NeighborDiscovery::handle_discover(const MacAddress& source,
+                                        const autonomy::Rld1Envelope& env,
+                                        const MonotonicMs now_ms) noexcept {
+  ++stats_.discovers_rx;
+  // Density is measured BEFORE recording this event so a lone DISCOVER is
+  // always answered (02 §6: suppression must never pin the probability to 0).
+  const std::uint32_t density = recent_discovers(now_ms);
+  discover_times_[discover_cursor_ % discover_times_.size()] = now_ms;
+  ++discover_cursor_;
+
+  // The 4-byte hint is only an exploration filter: mismatches never reach a
+  // candidate record and never imply membership either way (02 §4).
+  if (env.network_hint != config_.network_hint) return;
+  if (env.claimed_node == config_.node || env.claimed_node == kInvalidNodeId) return;
+  // Local Revoked is already screened by the RX gate (frame_allowed=false).
+
+  // A duplicate DISCOVER for a live candidate refreshes it in place — MAC
+  // churn cannot multiply candidate records (D3-04: quota is global).
+  Candidate* candidate = find_candidate(source, env.transaction_nonce);
+  if (candidate == nullptr) {
+    candidate = candidates_.find([&](const Candidate& c) {
+      return mac_equal(c.mac, source);
+    });
+    if (candidate != nullptr) {
+      // Same radio, new attempt nonce: re-issue under the newest nonce.
+      candidate->txn_nonce = env.transaction_nonce;
+      candidate->claimed_node = env.claimed_node;
+      candidate->expires_at_ms = now_ms + config_.candidate_ttl_ms;
+    }
+  }
+  if (candidate == nullptr) {
+    // Density-aware suppression (02 §6): respond with probability
+    // 1/(1+recent_discovers). Never permanently zero — the divisor only grows
+    // with observed density inside the offer window.
+    if (density > 0 && (next_u64() % (density + 1)) != 0) {
+      ++stats_.suppressed_offers;
+      return;
+    }
+    candidate = candidates_.allocate();
+    if (candidate == nullptr) {
+      ++stats_.peer_capacity;
+      event("PEER_CAPACITY", env.claimed_node);
+      return;
+    }
+    candidate->id = CandidateId{next_candidate_id_++};
+    candidate->mac = source;
+    candidate->claimed_node = env.claimed_node;
+    candidate->txn_nonce = env.transaction_nonce;
+    candidate->peer_capability = env.capability_bits;
+    candidate->phase = NeighborPhase::Candidate;
+    candidate->expires_at_ms = now_ms + config_.candidate_ttl_ms;
+  }
+
+  // A transient peer slot is required to answer — without one the candidate
+  // is parked (bounded by TTL), never answered via DATA-broadcast escape.
+  if (!candidate->transient_held) {
+    if (!reserve_transient()) {
+      ++stats_.peer_capacity;
+      event("PEER_CAPACITY", env.claimed_node);
+      return;  // parked; poll() retries while the TTL lasts
+    }
+    candidate->transient_held = true;
+  }
+  if (entropy_.fill(MutableByteView{candidate->our_nonce.data(), 16}).ok() &&
+      authenticator_
+          .cookie_seal(CookieMaterial{source, candidate->txn_nonce, config_.network,
+                                      now_ms / config_.cookie_bucket_ms, config_.node,
+                                      candidate->claimed_node},
+                       candidate->cookie)
+          .ok()) {
+    candidate->offer_due_ms =
+        now_ms + (next_u64() % discovery_const::kOfferSlots) *
+                     discovery_const::kOfferSlotMs;
+    candidate->offer_pending = true;
+  } else {
+    release_candidate(*candidate);
+  }
+}
+
+void NeighborDiscovery::handle_offer(const MacAddress& source,
+                                     const autonomy::Rld1Envelope& env,
+                                     const MonotonicMs now_ms) noexcept {
+  ++stats_.offers_rx;
+  if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
+      outbound_.have_offer || now_ms > outbound_.stage_deadline_ms) {
+    return;
+  }
+  // The OFFER echoes our transaction nonce; anything else is not ours.
+  if (!nonce_equal(env.transaction_nonce, outbound_.our_nonce)) return;
+  if (env.network_hint != config_.network_hint) return;
+  if (env.body_size != kOfferBodySize || env.body[0] != 1 || env.body[2] != 0 ||
+      env.body[3] != 0) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  // First valid OFFER wins; the exchange stays single (global handshakes=1).
+  outbound_.have_offer = true;
+  outbound_.peer_mac = source;
+  outbound_.peer_node = env.claimed_node;
+  outbound_.peer_capability = env.capability_bits;
+  std::memcpy(outbound_.cookie_echo.data(), env.body.data() + 4, 16);
+  std::memcpy(outbound_.peer_nonce.data(), env.body.data() + 20, 16);
+  outbound_.stage = OutboundStage::ProvePending;
+  outbound_.stage_deadline_ms = now_ms + config_.auth_timeout_ms;
+  // Starting a bounded mutual exchange transitions a joining node
+  // Discovering -> Authenticating; a Member stays Member (D3-11).
+  membership_.begin_authentication();
+}
+
+void NeighborDiscovery::handle_auth(const MacAddress& source,
+                                    const autonomy::Rld1Envelope& env,
+                                    const MonotonicMs now_ms) noexcept {
+  autonomy::BootstrapAuthBody auth{};
+  if (!autonomy::bootstrap_auth_decode(
+          ByteView{env.body.data(), env.body_size}, auth)) {
+    ++stats_.kind_rejects;
+    event("KIND_REJECT", env.claimed_node);
+    return;
+  }
+  switch (auth.phase) {
+    case autonomy::AuthPhase::Prove:
+      handle_prove(source, env, auth, now_ms);
+      break;
+    case autonomy::AuthPhase::Confirm:
+      handle_confirm(source, env, auth, now_ms);
+      break;
+    case autonomy::AuthPhase::Finish:
+      handle_finish(source, env, auth, now_ms);
+      break;
+    default:
+      ++stats_.kind_rejects;
+      break;
+  }
+}
+
+void NeighborDiscovery::handle_prove(const MacAddress& source,
+                                     const autonomy::Rld1Envelope& env,
+                                     const autonomy::BootstrapAuthBody& auth,
+                                     const MonotonicMs now_ms) noexcept {
+  ++stats_.proves_rx;
+  Candidate* candidate = find_candidate(source, env.transaction_nonce);
+  if (candidate == nullptr || candidate->phase != NeighborPhase::Candidate ||
+      candidate->offer_pending || auth.body_size != kProveBodySize ||
+      env.claimed_node != candidate->claimed_node) {
+    return;  // no live transaction expecting a PROVE for this nonce
+  }
+
+  AuthTag cookie_echo{};
+  AuthTag prove_tag{};
+  std::memcpy(cookie_echo.data(), auth.body.data(), 16);
+  std::memcpy(prove_tag.data(), auth.body.data() + 16, 16);
+
+  // Cookie check: bound to (MAC, nonce, network, time bucket). Accept the
+  // current and previous bucket only; a foreign or replayed cookie ends the
+  // transaction before any heavy verification runs.
+  const std::uint64_t bucket = now_ms / config_.cookie_bucket_ms;
+  CookieMaterial material{source, candidate->txn_nonce, config_.network, bucket,
+                          config_.node, candidate->claimed_node};
+  Status cookie = authenticator_.cookie_verify(material, cookie_echo);
+  if (!cookie && bucket > 0) {
+    material.time_bucket = bucket - 1;
+    cookie = authenticator_.cookie_verify(material, cookie_echo);
+  }
+  if (!cookie || cookie_echo != candidate->cookie) {
+    ++stats_.cookie_rejects;
+    event("COOKIE_REJECT", candidate->claimed_node);
+    release_candidate(*candidate);
+    relax_membership();
+    return;
+  }
+
+  const AuthTranscript transcript{env.claimed_node, config_.node, source, config_.mac,
+                                  config_.network, candidate->txn_nonce,
+                                  candidate->our_nonce, candidate->peer_capability,
+                                  config_.capability_bits};
+  if (!authenticator_.verify(autonomy::AuthPhase::Prove, transcript, prove_tag)) {
+    ++stats_.auth_tag_rejects;
+    event("AUTH_FAILED", env.claimed_node);
+    release_candidate(*candidate);
+    relax_membership();
+    return;
+  }
+
+  // Global handshake budget = 1. A PROVE arriving while our own outbound
+  // exchange is live and could still target this peer (AwaitingOffers: the
+  // winner is not picked yet, or the same MAC is selected) is a simultaneous
+  // open (02 §3): the verified lower NodeId stays requester, the other side
+  // cancels its outbound and answers — exactly one exchange survives.
+  if (outbound_.active) {
+    const bool same_peer =
+        outbound_.stage == OutboundStage::AwaitingOffers ||
+        mac_equal(outbound_.peer_mac, source);
+    if (same_peer) {
+      if (env.claimed_node < config_.node) {
+        // Peer is the lower NodeId: cancel our requester exchange, respond.
+        outbound_ = Outbound{};
+        release_transient();
+      } else {
+        ++stats_.simultaneous_resolved;
+        return;  // our exchange wins; peer will mirror this rule
+      }
+    } else {
+      return;  // single global handshake: defer, requester retries
+    }
+  }
+  const bool other_auth =
+      candidates_.find([](const Candidate& c) {
+        return c.phase == NeighborPhase::Authenticating;
+      }) != nullptr;
+  if (other_auth) return;  // responder-side budget also 1
+
+  candidate->phase = NeighborPhase::Authenticating;
+  candidate->expires_at_ms = now_ms + config_.auth_timeout_ms;
+  membership_.begin_authentication();
+  send_confirm(*candidate, now_ms);
+}
+
+void NeighborDiscovery::handle_confirm(const MacAddress& source,
+                                       const autonomy::Rld1Envelope& env,
+                                       const autonomy::BootstrapAuthBody& auth,
+                                       const MonotonicMs now_ms) noexcept {
+  if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingConfirm ||
+      !mac_equal(source, outbound_.peer_mac) ||
+      !nonce_equal(env.transaction_nonce, outbound_.our_nonce) ||
+      env.claimed_node != outbound_.peer_node ||
+      auth.body_size != kAuthTagBodySize) {
+    return;  // stale/foreign CONFIRM must not resurrect a dead exchange
+  }
+  AuthTag confirm_tag{};
+  std::memcpy(confirm_tag.data(), auth.body.data(), 16);
+  const AuthTranscript transcript{config_.node, outbound_.peer_node, config_.mac,
+                                  outbound_.peer_mac, config_.network,
+                                  outbound_.our_nonce, outbound_.peer_nonce,
+                                  config_.capability_bits,
+                                  outbound_.peer_capability};
+  if (!authenticator_.verify(autonomy::AuthPhase::Confirm, transcript,
+                             confirm_tag)) {
+    ++stats_.auth_tag_rejects;
+    event("AUTH_FAILED", outbound_.peer_node);
+    fail_outbound(now_ms, "AUTH_FAILED");
+    return;
+  }
+  if (!send_finish(now_ms).ok()) return;
+  const MacAddress peer_mac = outbound_.peer_mac;
+  const NodeId peer_node = outbound_.peer_node;
+  const std::uint32_t peer_cap = outbound_.peer_capability;
+  const auto req_nonce = outbound_.our_nonce;
+  const auto resp_nonce = outbound_.peer_nonce;
+  outbound_ = Outbound{};
+  release_transient();
+  complete_exchange(peer_mac, peer_node, peer_cap, req_nonce, resp_nonce,
+                    confirm_tag, /*we_are_requester=*/true, now_ms);
+}
+
+void NeighborDiscovery::handle_finish(const MacAddress& source,
+                                      const autonomy::Rld1Envelope& env,
+                                      const autonomy::BootstrapAuthBody& auth,
+                                      const MonotonicMs now_ms) noexcept {
+  Candidate* candidate = find_candidate(source, env.transaction_nonce);
+  if (candidate == nullptr || candidate->phase != NeighborPhase::Authenticating ||
+      auth.body_size != kAuthTagBodySize ||
+      env.claimed_node != candidate->claimed_node) {
+    return;  // late FINISH for a cancelled transaction is ignored (06 §2.2)
+  }
+  AuthTag finish_tag{};
+  std::memcpy(finish_tag.data(), auth.body.data(), 16);
+  const AuthTranscript transcript{env.claimed_node, config_.node, source, config_.mac,
+                                  config_.network, candidate->txn_nonce,
+                                  candidate->our_nonce, candidate->peer_capability,
+                                  config_.capability_bits};
+  if (!authenticator_.verify(autonomy::AuthPhase::Finish, transcript, finish_tag)) {
+    ++stats_.auth_tag_rejects;
+    event("AUTH_FAILED", env.claimed_node);
+    release_candidate(*candidate);
+    relax_membership();
+    return;
+  }
+  const NodeId peer_node = candidate->claimed_node;
+  const std::uint32_t peer_cap = candidate->peer_capability;
+  const auto req_nonce = candidate->txn_nonce;
+  const auto resp_nonce = candidate->our_nonce;
+  release_candidate(*candidate);
+  complete_exchange(source, peer_node, peer_cap, req_nonce, resp_nonce, finish_tag,
+                    /*we_are_requester=*/false, now_ms);
+}
+
+// --- RX: RLD1 fragmentation ------------------------------------------------------
+
+void NeighborDiscovery::handle_chunk(const MacAddress& source,
+                                     const autonomy::Rld1Envelope& env,
+                                     const MonotonicMs now_ms) noexcept {
+  if (env.body_size < kChunkHeaderSize || env.body[0] != 1 || env.body[1] != 1) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  ByteReader reader(ByteView{env.body.data() + 2, env.body_size - 2});
+  std::uint32_t transaction = 0;
+  std::uint16_t offset = 0;
+  std::uint16_t total = 0;
+  if (!reader.read_u32(transaction) || !reader.read_u16(offset) ||
+      !reader.read_u16(total)) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  const std::size_t data_size = reader.remaining();
+  // Assembly slots are granted only after the cheap cookie/transaction check:
+  // a live candidate or our outbound exchange must own this nonce (06 §3.2).
+  const bool known_txn =
+      find_candidate(source, env.transaction_nonce) != nullptr ||
+      (outbound_.active && mac_equal(outbound_.peer_mac, source) &&
+       nonce_equal(outbound_.our_nonce, env.transaction_nonce));
+  if (!known_txn || total == 0 ||
+      total > discovery_const::kBootstrapObjectMax ||
+      static_cast<std::uint32_t>(offset) + data_size > total ||
+      data_size > kChunkDataMax) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  RxAssembly* slot =
+      assemblies_.find([&](const RxAssembly& a) {
+        return a.active && mac_equal(a.mac, source) &&
+               a.transaction == transaction;
+      });
+  if (slot == nullptr) {
+    slot = assemblies_.allocate();
+    if (slot == nullptr) {
+      ++stats_.peer_capacity;
+      event("PEER_CAPACITY", kInvalidNodeId);
+      return;
+    }
+    slot->active = true;
+    slot->mac = source;
+    slot->transaction = transaction;
+    slot->total = total;
+    slot->received = 0;
+    slot->expires_at_ms = now_ms + config_.candidate_ttl_ms;
+  }
+  if (slot->total != total || offset != slot->received) {
+    // In-order reassembly only; report progress via the control reply.
+    send_chunk_reply(source, env.transaction_nonce, env.claimed_node, transaction,
+                     slot->received, kChunkStatusIncomplete, now_ms);
+    return;
+  }
+  std::memcpy(slot->data.data() + offset, env.body.data() + kChunkHeaderSize,
+              data_size);
+  slot->received += static_cast<std::uint16_t>(data_size);
+  send_chunk_reply(source, env.transaction_nonce, env.claimed_node, transaction,
+                   slot->received, kChunkStatusOk, now_ms);
+  if (slot->received < slot->total) return;
+
+  // Re-check the completed object's inner type on the freshest context:
+  // RLD1 fragments may carry BootstrapAuth only (06 §3.2).
+  autonomy::BootstrapAuthBody inner{};
+  const bool ok = autonomy::bootstrap_auth_decode(
+                      ByteView{slot->data.data(), slot->total}, inner)
+                      .ok();
+  assemblies_.release(slot);
+  if (!ok) {
+    ++stats_.kind_rejects;
+    event("KIND_REJECT", kInvalidNodeId);
+    return;
+  }
+  // Completed-inner dispatch re-checks admission on the freshest context —
+  // the outer chunk's CoarseAllow was not authorization for the inner frame.
+  if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Rx,
+            FrameType::BootstrapAuth, /*transaction_alive=*/true, now_ms)) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  switch (inner.phase) {
+    case autonomy::AuthPhase::Prove:
+      handle_prove(source, env, inner, now_ms);
+      break;
+    case autonomy::AuthPhase::Confirm:
+      handle_confirm(source, env, inner, now_ms);
+      break;
+    case autonomy::AuthPhase::Finish:
+      handle_finish(source, env, inner, now_ms);
+      break;
+    default:
+      ++stats_.kind_rejects;
+      break;
+  }
+}
+
+// --- RX: authenticated Wire lane --------------------------------------------------
+
+void NeighborDiscovery::on_wire_rx(const MacAddress& source, const FrameType type,
+                                   const ByteView payload,
+                                   const MonotonicMs now_ms) noexcept {
+  if (!started_) return;
+  // Unknown MAC on the Wire carrier is rejected outright — lane membership is
+  // not evidence; the record lookup below is the gate (06 §3.1).
+  Neighbor* neighbor = find_neighbor(source);
+  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId ||
+      neighbor->phase == NeighborPhase::Conflict ||
+      neighbor->phase == NeighborPhase::Revoked) {
+    ++stats_.kind_rejects;
+    event("KIND_REJECT", kInvalidNodeId);
+    return;
+  }
+  if (!gate(AdmissionCarrier::WireV1, AdmissionDirection::Rx, type,
+            /*transaction_alive=*/true, now_ms)) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  switch (type) {
+    case FrameType::NeighborProbe:
+      handle_probe(*neighbor, payload, now_ms);
+      break;
+    case FrameType::NeighborResult:
+      handle_probe_result(*neighbor, payload, now_ms);
+      break;
+    default:
+      // DATA and every other member type additionally require REACHABLE —
+      // a BOUND or pending record never admits them (06 §4.3).
+      if (neighbor->phase != NeighborPhase::Reachable ||
+          !neighbor->peer_member_verified ||
+          membership_.state() != MembershipState::Member) {
+        ++stats_.kind_rejects;
+        event("DATA_REJECT", neighbor->node);
+      }
+      break;
+  }
+}
+
+void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
+                                     const MonotonicMs now_ms) noexcept {
+  autonomy::NeighborProbePayload probe{};
+  if (!autonomy::neighbor_probe_decode(payload, probe) ||
+      probe.binding_generation != neighbor.generation) {
+    ++stats_.kind_rejects;
+    return;
+  }
+  // An authenticated probe is liveness evidence: refresh the lease and reply.
+  neighbor.last_confirmed_ms = now_ms;
+  neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+
+  autonomy::NeighborResultPayload result{};
+  result.binding_generation = neighbor.generation;
+  result.probe_sequence = probe.probe_sequence;
+  result.result = autonomy::NeighborResultCode::Reachable;
+  result.lease_granted_ms = config_.awake_lease_ms;
+  autonomy::EncodedPayload encoded{};
+  if (autonomy::neighbor_result_encode(result, encoded).ok()) {
+    port_.send_wire(neighbor.binding, neighbor.mac, FrameType::NeighborResult,
+                    encoded.view());
+  }
+  // If we were stale/bound and have no outstanding probe of our own, start
+  // one — bidirectional confirmation still requires our own Result.
+  if (neighbor.probe_outstanding == 0 &&
+      (neighbor.phase == NeighborPhase::Bound ||
+       neighbor.phase == NeighborPhase::Stale)) {
+    send_probe(neighbor, now_ms);
+  }
+}
+
+void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
+                                            const ByteView payload,
+                                            const MonotonicMs now_ms) noexcept {
+  autonomy::NeighborResultPayload result{};
+  if (!autonomy::neighbor_result_decode(payload, result) ||
+      result.probe_sequence == 0 ||
+      result.probe_sequence != neighbor.probe_outstanding ||
+      result.binding_generation != neighbor.generation) {
+    ++stats_.kind_rejects;
+    return;  // late/foreign results never promote a dead exchange
+  }
+  neighbor.probe_outstanding = 0;
+  if (result.result != autonomy::NeighborResultCode::Reachable) {
+    return;  // NotListening/Leaving: keep current phase, lease still runs
+  }
+  // Receiving the Result to OUR probe confirms both directions (02 §3).
+  const NeighborPhase before = neighbor.phase;
+  if (before == NeighborPhase::Bound || before == NeighborPhase::Stale ||
+      before == NeighborPhase::Reachable) {
+    neighbor.phase = NeighborPhase::Reachable;
+    neighbor.last_confirmed_ms = now_ms;
+    const std::uint32_t granted = result.lease_granted_ms == 0
+                                      ? config_.awake_lease_ms
+                                      : result.lease_granted_ms;
+    neighbor.lease_expires_at_ms =
+        now_ms + (granted < config_.awake_lease_ms ? granted
+                                                  : config_.awake_lease_ms);
+    if (before != NeighborPhase::Reachable) {
+      event("REACHABLE", neighbor.node);
+    }
+  }
+}
+
+// --- Exchange completion: membership + binding ------------------------------------
+
+void NeighborDiscovery::complete_exchange(
+    const MacAddress& peer_mac, const NodeId peer_node,
+    const std::uint32_t peer_capability,
+    const std::array<std::uint8_t, 16>& requester_nonce,
+    const std::array<std::uint8_t, 16>& responder_nonce, const AuthTag& closing_tag,
+    const bool we_are_requester, const MonotonicMs now_ms) noexcept {
+  AuthTranscript transcript{};
+  transcript.requester_node = we_are_requester ? config_.node : peer_node;
+  transcript.responder_node = we_are_requester ? peer_node : config_.node;
+  transcript.requester_mac = we_are_requester ? config_.mac : peer_mac;
+  transcript.responder_mac = we_are_requester ? peer_mac : config_.mac;
+  transcript.network = config_.network;
+  transcript.requester_nonce = requester_nonce;
+  transcript.responder_nonce = responder_nonce;
+  transcript.requester_capability =
+      we_are_requester ? config_.capability_bits : peer_capability;
+  transcript.responder_capability =
+      we_are_requester ? peer_capability : config_.capability_bits;
+
+  AuthenticatedPeerProof proof;
+  if (!authenticator_.issue_proof(transcript, config_.node, closing_tag, proof) ||
+      !proof.valid() || proof.peer() != peer_node ||
+      !mac_equal(proof.mac(), peer_mac)) {
+    event("AUTH_FAILED", peer_node);
+    return;
+  }
+  ++stats_.auths_completed;
+
+  // Device auth is not membership: advance local membership and verify the
+  // peer's member evidence before any binding exists (06 §2.2).
+  membership_.complete_authentication(hooks_, config_.node, config_.network);
+  const bool peer_member =
+      hooks_.known_member(peer_node, config_.network);
+
+  // MAC change / device swap (02 §8): never overwrite a live binding for the
+  // same NodeId with a new address. A still-alive old binding means the two
+  // radios cannot be distinguished -> CONFLICT quarantine.
+  if (Neighbor* existing = find_neighbor(peer_node)) {
+    if (!mac_equal(existing->mac, peer_mac)) {
+      if (existing->phase != NeighborPhase::Revoked &&
+          existing->phase != NeighborPhase::Conflict &&
+          now_ms < existing->lease_expires_at_ms) {
+        Neighbor* conflict = neighbors_.allocate();
+        if (conflict != nullptr) {
+          conflict->node = peer_node;
+          conflict->mac = peer_mac;
+          conflict->phase = NeighborPhase::Conflict;
+          conflict->lease_expires_at_ms = now_ms + config_.candidate_ttl_ms;
+        }
+        ++stats_.conflicts;
+        event("BINDING_CONFLICT", peer_node);
+        return;
+      }
+      // Old binding is dead: revoke it and re-bind at a new generation so
+      // stale TX/ACK/feedback can never attach to the new binding (02 §8).
+      existing->phase = NeighborPhase::Revoked;
+      if (existing->regular_held) {
+        existing->regular_held = false;
+        --regular_used_;
+      }
+      if (existing->pinned) {
+        existing->pinned = false;
+        --pins_used_;
+      }
+    }
+  }
+
+  if (Neighbor* same = find_neighbor(peer_mac); same != nullptr) {
+    if (same->phase == NeighborPhase::Conflict ||
+        same->phase == NeighborPhase::Revoked) {
+      return;  // quarantined/revoked records are not re-authenticated implicitly
+    }
+    if (same->node != peer_node) {
+      // A different identity on an address we already bound: reject rather
+      // than hand the address to a second NodeId.
+      ++stats_.conflicts;
+      event("BINDING_CONFLICT", peer_node);
+      return;
+    }
+    // Re-authentication of the same (node, MAC): bump the binding generation
+    // and refresh the lease instead of creating a duplicate.
+    same->generation = BindingGeneration{same->generation.value + 1};
+    same->probe_outstanding = 0;
+    if (membership_.state() == MembershipState::Member && peer_member) {
+      same->peer_member_verified = true;
+      same->phase = NeighborPhase::Bound;
+      same->last_confirmed_ms = now_ms;
+      same->lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+      send_probe(*same, now_ms);
+    } else {
+      same->phase = NeighborPhase::ApprovalPending;
+      same->lease_expires_at_ms = now_ms + config_.candidate_ttl_ms;
+      event("MEMBERSHIP_PENDING", peer_node);
+    }
+    return;
+  }
+
+  Neighbor* neighbor = neighbors_.allocate();
+  if (neighbor == nullptr) {
+    // Bounded logical table: try to retire a stale unpinned record first.
+    Neighbor* victim = neighbors_.find([&](const Neighbor& n) {
+      return !n.pinned && (n.phase == NeighborPhase::Stale ||
+                           n.phase == NeighborPhase::Conflict ||
+                           n.phase == NeighborPhase::Revoked);
+    });
+    if (victim != nullptr) {
+      if (victim->regular_held) --regular_used_;
+      neighbors_.release(victim);
+      neighbor = neighbors_.allocate();
+    }
+    if (neighbor == nullptr) {
+      ++stats_.peer_capacity;
+      event("PEER_CAPACITY", peer_node);
+      return;
+    }
+  }
+  neighbor->binding = kInvalidBindingId;
+  neighbor->generation = BindingGeneration{1};
+  neighbor->node = peer_node;
+  neighbor->mac = peer_mac;
+  neighbor->peer_member_verified = peer_member;
+  neighbor->pinned = false;
+  neighbor->regular_held = false;
+  neighbor->last_confirmed_ms = now_ms;
+  neighbor->probe_outstanding = 0;
+
+  if (membership_.state() == MembershipState::Member && peer_member) {
+    // Both memberships verified -> mint the binding and start the
+    // bidirectional probe that gates REACHABLE (02 §3).
+    neighbor->binding = BindingId{next_binding_id_++};
+    neighbor->phase = NeighborPhase::Bound;
+    neighbor->lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+    if (!reserve_regular(*neighbor)) {
+      // Logical binding exists; the driver-slot shortage is reported, never
+      // silently absorbed (02 §7).
+      ++stats_.peer_capacity;
+      event("PEER_CAPACITY", peer_node);
+    }
+    event("BOUND", peer_node);
+    send_probe(*neighbor, now_ms);
+  } else {
+    // Bounded hold pending local commit or peer member evidence; an absent
+    // authority never auto-approves (02 §5, 06 §5).
+    neighbor->phase = NeighborPhase::ApprovalPending;
+    neighbor->lease_expires_at_ms = now_ms + config_.candidate_ttl_ms;
+    event("MEMBERSHIP_PENDING", peer_node);
+  }
+  cancel_competing(peer_mac, peer_node);
+}
+
+void NeighborDiscovery::cancel_competing(const MacAddress& mac,
+                                         const NodeId node) noexcept {
+  // One exchange converged: expire leftover candidates/exchanges for the
+  // same peer so a stale response can never attach to the new binding.
+  Candidate* leftover = candidates_.find(
+      [&](const Candidate& c) { return mac_equal(c.mac, mac); });
+  if (leftover != nullptr) release_candidate(*leftover);
+  if (outbound_.active && mac_equal(outbound_.peer_mac, mac)) {
+    outbound_ = Outbound{};
+    release_transient();
+  }
+  (void)node;
+}
+
+void NeighborDiscovery::fail_outbound(const MonotonicMs now_ms,
+                                      const char* reason) noexcept {
+  (void)now_ms;
+  event(reason, outbound_.peer_node);
+  outbound_ = Outbound{};
+  release_transient();
+  relax_membership();
+}
+
+void NeighborDiscovery::relax_membership() noexcept {
+  if (membership_.state() != MembershipState::Authenticating) return;
+  if (outbound_.active &&
+      outbound_.stage != OutboundStage::AwaitingOffers) {
+    return;  // our own exchange is still live
+  }
+  const bool responder_auth = candidates_.find([](const Candidate& c) {
+    return c.phase == NeighborPhase::Authenticating;
+  }) != nullptr;
+  if (!responder_auth) membership_.abort_authentication();
+}
+
+// --- TX helpers -------------------------------------------------------------------
+
+bool NeighborDiscovery::gate(const AdmissionCarrier carrier,
+                             const AdmissionDirection direction,
+                             const FrameType type, const bool transaction_alive,
+                             const MonotonicMs now_ms) noexcept {
+  AdmissionContext context{};
+  context.local_membership = membership_.state();
+  context.direction = direction;
+  context.carrier = carrier;
+  context.role = local_role();
+  context.transaction_alive = transaction_alive;
+  context.deadline_ms = now_ms;
+  context.feature_capable = true;
+  context.budget_remaining = 1;
+  const AdmissionDecision decision = admission_decision(context, type);
+  if (decision.verdict != AdmissionVerdict::CoarseAllow) return false;
+  // Bootstrap kinds beyond Discover/Offer require a live transaction — the
+  // coarse screen alone is never the permit (06 §4.3).
+  if (type == FrameType::BootstrapAuth || type == FrameType::BootstrapChunk ||
+      type == FrameType::BootstrapReply || type == FrameType::MembershipQuery ||
+      type == FrameType::MembershipResult) {
+    return transaction_alive;
+  }
+  return true;
+}
+
+AdmissionRole NeighborDiscovery::local_role() const noexcept {
+  switch (membership_.state()) {
+    case MembershipState::Member:
+      return AdmissionRole::EstablishedPeer;
+    case MembershipState::AuthorizedPendingCommit:
+    case MembershipState::Authenticating:
+    case MembershipState::Discovering:
+    case MembershipState::Unprovisioned:
+      return AdmissionRole::JoiningNode;
+    case MembershipState::Revoked:
+      return AdmissionRole::JoiningNode;
+  }
+  return AdmissionRole::JoiningNode;
+}
+
+Status NeighborDiscovery::emit_rld1(const MacAddress& dest, const FrameType kind,
+                                    const std::array<std::uint8_t, 16>& nonce,
+                                    const NodeId claimed, const ByteView body,
+                                    const MonotonicMs now_ms) noexcept {
+  if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Tx, kind,
+            /*transaction_alive=*/true, now_ms)) {
+    ++stats_.rate_limited;
+    return Status::error(StatusCode::AuthorizationFailed, "TX gated");
+  }
+  autonomy::Rld1Envelope env{};
+  env.kind = kind;
+  env.network_hint = config_.network_hint;
+  env.claimed_node = claimed;
+  env.transaction_nonce = nonce;
+  env.capability_bits = config_.capability_bits;
+  if (body.size > env.body.size()) {
+    return Status::error(StatusCode::NoCapacity, "RLD1 body");
+  }
+  std::memcpy(env.body.data(), body.data, body.size);
+  env.body_size = body.size;
+  autonomy::Rld1Encoded encoded{};
+  const Status status = autonomy::rld1_encode(env, encoded);
+  if (!status) return status;
+  return port_.send_rld1(dest, encoded.view());
+}
+
+Status NeighborDiscovery::emit_auth_body(
+    const MacAddress& dest, const std::array<std::uint8_t, 16>& nonce,
+    const NodeId claimed, const autonomy::BootstrapAuthBody& body,
+    const MonotonicMs now_ms) noexcept {
+  autonomy::EncodedPayload encoded{};
+  Status status = autonomy::bootstrap_auth_encode(body, encoded);
+  if (!status) return status;
+  if (encoded.size <= autonomy::kRld1MaxBody) {
+    return emit_rld1(dest, FrameType::BootstrapAuth, nonce, claimed,
+                     encoded.view(), now_ms);
+  }
+  // Bounded fragmentation (02 §4): RLD1 chunks carry BootstrapAuth only.
+  if (encoded.size > discovery_const::kBootstrapObjectMax) {
+    return Status::error(StatusCode::NoCapacity, "auth body exceeds object limit");
+  }
+  std::uint32_t transaction = 0;
+  for (int i = 0; i < 4; ++i) {
+    transaction = (transaction << 8U) | nonce[i];
+  }
+  const std::uint16_t total = static_cast<std::uint16_t>(encoded.size);
+  std::uint16_t offset = 0;
+  while (offset < total) {
+    const std::size_t piece =
+        (total - offset) > kChunkDataMax ? kChunkDataMax : (total - offset);
+    std::array<std::uint8_t, kChunkHeaderSize + kChunkDataMax> chunk{};
+    ByteWriter writer(MutableByteView{chunk.data(), chunk.size()});
+    if (!writer.write_u8(1) || !writer.write_u8(1) ||
+        !writer.write_u32(transaction) || !writer.write_u16(offset) ||
+        !writer.write_u16(total) ||
+        !writer.write_bytes(ByteView{encoded.bytes.data() + offset, piece})) {
+      return Status::error(StatusCode::InternalError, "chunk encode");
+    }
+    status = emit_rld1(dest, FrameType::BootstrapChunk, nonce, claimed,
+                       ByteView{chunk.data(), writer.size()}, now_ms);
+    if (!status) return status;
+    offset += static_cast<std::uint16_t>(piece);
+  }
+  return Status::success();
+}
+
+Status NeighborDiscovery::send_chunk_reply(
+    const MacAddress& dest, const std::array<std::uint8_t, 16>& nonce,
+    const NodeId claimed, const std::uint32_t transaction,
+    const std::uint16_t received, const std::uint8_t status,
+    const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kReplyBodySize> body{};
+  ByteWriter writer(MutableByteView{body.data(), body.size()});
+  if (!writer.write_u8(1) || !writer.write_u8(1) ||
+      !writer.write_u32(transaction) || !writer.write_u16(received) ||
+      !writer.write_u8(status)) {
+    return Status::error(StatusCode::InternalError, "reply encode");
+  }
+  return emit_rld1(dest, FrameType::BootstrapReply, nonce, claimed,
+                   ByteView{body.data(), writer.size()}, now_ms);
+}
+
+Status NeighborDiscovery::send_discover(const MonotonicMs now_ms) noexcept {
+  return emit_rld1(discovery_const::kBroadcastMac, FrameType::Discover,
+                   outbound_.our_nonce, config_.node, ByteView{nullptr, 0},
+                   now_ms);
+}
+
+Status NeighborDiscovery::send_offer(Candidate& candidate,
+                                     const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kOfferBodySize> body{};
+  ByteWriter writer(MutableByteView{body.data(), body.size()});
+  const std::uint32_t density = recent_discovers(now_ms);
+  const std::uint8_t hint = density > 255 ? 255 : static_cast<std::uint8_t>(density);
+  if (!writer.write_u8(1) || !writer.write_u8(hint) || !writer.write_u16(0) ||
+      !writer.write_bytes(ByteView{candidate.cookie.data(), 16}) ||
+      !writer.write_bytes(ByteView{candidate.our_nonce.data(), 16})) {
+    return Status::error(StatusCode::InternalError, "offer encode");
+  }
+  const Status status =
+      emit_rld1(candidate.mac, FrameType::Offer, candidate.txn_nonce,
+                config_.node, ByteView{body.data(), writer.size()}, now_ms);
+  if (status.ok()) {
+    candidate.offer_pending = false;
+    ++stats_.offers_tx;
+    // The OFFER commits us to a bounded mutual exchange: a non-member
+    // responder becomes Authenticating so the incoming PROVE passes the
+    // coarse allowlist; a Member stays Member (06 §4.2).
+    membership_.begin_authentication();
+  }
+  return status;
+}
+
+Status NeighborDiscovery::send_prove(const MonotonicMs now_ms) noexcept {
+  autonomy::BootstrapAuthBody auth{};
+  auth.phase = autonomy::AuthPhase::Prove;
+  auth.step_index = 0;
+  const AuthTranscript transcript{config_.node, outbound_.peer_node, config_.mac,
+                                  outbound_.peer_mac, config_.network,
+                                  outbound_.our_nonce, outbound_.peer_nonce,
+                                  config_.capability_bits,
+                                  outbound_.peer_capability};
+  AuthTag tag{};
+  Status status = authenticator_.attest(autonomy::AuthPhase::Prove, transcript, tag);
+  if (!status) return status;
+  std::memcpy(auth.body.data(), outbound_.cookie_echo.data(), 16);
+  std::memcpy(auth.body.data() + 16, tag.data(), 16);
+  auth.body_size = kProveBodySize;
+  // Transition BEFORE emitting: a synchronous transport can deliver the
+  // peer's CONFIRM inside send_rld1, and it must find AwaitingConfirm.
+  outbound_.stage = OutboundStage::AwaitingConfirm;
+  outbound_.stage_deadline_ms = now_ms + config_.auth_timeout_ms;
+  status = emit_auth_body(outbound_.peer_mac, outbound_.our_nonce, config_.node,
+                          auth, now_ms);
+  if (!status) {
+    outbound_.stage = OutboundStage::ProvePending;
+    return status;
+  }
+  next_handshake_ms_ = now_ms + config_.handshake_start_interval_ms;
+  return status;
+}
+
+Status NeighborDiscovery::send_confirm(Candidate& candidate,
+                                       const MonotonicMs now_ms) noexcept {
+  autonomy::BootstrapAuthBody auth{};
+  auth.phase = autonomy::AuthPhase::Confirm;
+  auth.step_index = 0;
+  const AuthTranscript transcript{candidate.claimed_node, config_.node,
+                                  candidate.mac, config_.mac, config_.network,
+                                  candidate.txn_nonce, candidate.our_nonce,
+                                  candidate.peer_capability,
+                                  config_.capability_bits};
+  AuthTag tag{};
+  Status status =
+      authenticator_.attest(autonomy::AuthPhase::Confirm, transcript, tag);
+  if (!status) return status;
+  std::memcpy(auth.body.data(), tag.data(), 16);
+  auth.body_size = kAuthTagBodySize;
+  return emit_auth_body(candidate.mac, candidate.txn_nonce, config_.node, auth,
+                        now_ms);
+}
+
+Status NeighborDiscovery::send_finish(const MonotonicMs now_ms) noexcept {
+  autonomy::BootstrapAuthBody auth{};
+  auth.phase = autonomy::AuthPhase::Finish;
+  auth.step_index = 0;
+  const AuthTranscript transcript{config_.node, outbound_.peer_node, config_.mac,
+                                  outbound_.peer_mac, config_.network,
+                                  outbound_.our_nonce, outbound_.peer_nonce,
+                                  config_.capability_bits,
+                                  outbound_.peer_capability};
+  AuthTag tag{};
+  Status status =
+      authenticator_.attest(autonomy::AuthPhase::Finish, transcript, tag);
+  if (!status) return status;
+  std::memcpy(auth.body.data(), tag.data(), 16);
+  auth.body_size = kAuthTagBodySize;
+  return emit_auth_body(outbound_.peer_mac, outbound_.our_nonce, config_.node,
+                        auth, now_ms);
+}
+
+Status NeighborDiscovery::send_probe(Neighbor& neighbor,
+                                     const MonotonicMs now_ms) noexcept {
+  if (neighbor.binding == kInvalidBindingId) {
+    return Status::error(StatusCode::InvalidState, "no binding");
+  }
+  autonomy::NeighborProbePayload probe{};
+  probe.binding_generation = neighbor.generation;
+  probe.probe_sequence = next_probe_sequence_++;
+  probe.sent_ms = now_ms;
+  probe.requested_lease_ms = config_.awake_lease_ms;
+  autonomy::EncodedPayload encoded{};
+  Status status = autonomy::neighbor_probe_encode(probe, encoded);
+  if (!status) return status;
+  // Record the outstanding probe BEFORE emitting: a synchronous transport can
+  // deliver the peer's Result inside send_wire, and it must match.
+  neighbor.probe_outstanding = probe.probe_sequence;
+  neighbor.probe_deadline_ms = now_ms + config_.probe_timeout_ms;
+  status = port_.send_wire(neighbor.binding, neighbor.mac,
+                           FrameType::NeighborProbe, encoded.view());
+  if (status.ok()) {
+    ++stats_.probes_tx;
+  } else {
+    neighbor.probe_outstanding = 0;
+  }
+  return status;
+}
+
+// --- poll -------------------------------------------------------------------------
+
+void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
+  if (!started_) return;
+
+  // Due OFFERs and parked candidates retrying for a transient slot.
+  std::array<Candidate*, discovery_const::kCandidateCapacity> due{};
+  std::size_t due_count = 0;
+  candidates_.for_each([&](Candidate& c) {
+    if (now_ms >= c.expires_at_ms || (c.offer_pending && now_ms >= c.offer_due_ms) ||
+        (c.phase == NeighborPhase::Candidate && !c.transient_held &&
+         !c.offer_pending)) {
+      due[due_count++] = &c;
+    }
+  });
+  for (std::size_t i = 0; i < due_count; ++i) {
+    Candidate& c = *due[i];
+    if (now_ms >= c.expires_at_ms) {
+      release_candidate(c);
+      continue;
+    }
+    if (!c.transient_held) {
+      if (!reserve_transient()) continue;  // still parked
+      c.transient_held = true;
+      if (!entropy_.fill(MutableByteView{c.our_nonce.data(), 16}).ok() ||
+          !authenticator_
+               .cookie_seal(CookieMaterial{c.mac, c.txn_nonce, config_.network,
+                                           now_ms / config_.cookie_bucket_ms,
+                                           config_.node, c.claimed_node},
+                                c.cookie)
+               .ok()) {
+        release_candidate(c);
+        continue;
+      }
+      c.offer_due_ms =
+          now_ms + (next_u64() % discovery_const::kOfferSlots) *
+                       discovery_const::kOfferSlotMs;
+      c.offer_pending = true;
+    }
+    if (c.offer_pending && now_ms >= c.offer_due_ms) {
+      send_offer(c, now_ms);
+    }
+  }
+  relax_membership();
+
+  // Outbound exchange driver.
+  if (outbound_.active) {
+    if (outbound_.stage == OutboundStage::ProvePending &&
+        outbound_.have_offer && now_ms >= next_handshake_ms_) {
+      send_prove(now_ms);
+    }
+    if (outbound_.stage != OutboundStage::Idle &&
+        now_ms > outbound_.stage_deadline_ms) {
+      // Exchange attempt failed: exponential backoff, fresh attempt nonce.
+      ++outbound_.attempts;
+      if (outbound_.attempts >= config_.max_attempts) {
+        fail_outbound(now_ms, "DISCOVERY_FAILED");
+      } else {
+        const std::uint32_t shift =
+            outbound_.attempts > 5 ? 5 : outbound_.attempts;
+        std::uint32_t backoff = config_.backoff_base_ms << shift;
+        if (backoff > config_.backoff_max_ms) backoff = config_.backoff_max_ms;
+        outbound_.have_offer = false;
+        outbound_.stage = OutboundStage::AwaitingOffers;
+        // Deadline covers the backoff wait PLUS the new offer window, so the
+        // retry has room to run before the next timeout check.
+        outbound_.discover_due_ms = now_ms + backoff;
+        outbound_.stage_deadline_ms =
+            outbound_.discover_due_ms + config_.offer_window_ms +
+            config_.auth_timeout_ms;
+      }
+    }
+    if (outbound_.stage == OutboundStage::AwaitingOffers &&
+        !outbound_.have_offer && outbound_.discover_due_ms != 0 &&
+        now_ms >= outbound_.discover_due_ms) {
+      // Retry round: fresh nonce per attempt (02 §6).
+      if (entropy_.fill(
+              MutableByteView{outbound_.our_nonce.data(), 16})
+              .ok()) {
+        outbound_.discover_due_ms = 0;
+        outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
+        send_discover(now_ms);
+      } else {
+        fail_outbound(now_ms, "DISCOVERY_FAILED");
+      }
+    }
+  }
+
+  // Neighbor lease lifecycle: expiry demotes to Stale (the record survives —
+  // binding/security state is never silently deleted, 02 §9).
+  std::array<Neighbor*, discovery_const::kNeighborCapacity> pending{};
+  std::size_t pending_count = 0;
+  neighbors_.for_each([&](Neighbor& n) { pending[pending_count++] = &n; });
+  for (std::size_t i = 0; i < pending_count; ++i) {
+    Neighbor& n = *pending[i];
+    switch (n.phase) {
+      case NeighborPhase::ApprovalPending:
+        if (now_ms >= n.lease_expires_at_ms) {
+          if (n.regular_held) --regular_used_;
+          neighbors_.release(&n);
+          break;
+        }
+        // Re-check on the freshest context before promotion (06 §2.2).
+        if (membership_.state() == MembershipState::Member &&
+            hooks_.known_member(n.node, config_.network)) {
+          n.peer_member_verified = true;
+          n.binding = BindingId{next_binding_id_++};
+          n.phase = NeighborPhase::Bound;
+          n.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
+          n.last_confirmed_ms = now_ms;
+          if (!reserve_regular(n)) {
+            ++stats_.peer_capacity;
+            event("PEER_CAPACITY", n.node);
+          }
+          event("BOUND", n.node);
+          send_probe(n, now_ms);
+        }
+        break;
+      case NeighborPhase::Suspended:
+        if (now_ms >= n.suspended_until_ms) {
+          n.phase = NeighborPhase::Stale;
+          ++stats_.stale_expirations;
+          event("STALE", n.node);
+        }
+        break;
+      case NeighborPhase::Bound:
+      case NeighborPhase::Reachable:
+        if (n.probe_outstanding != 0 && now_ms > n.probe_deadline_ms) {
+          n.probe_outstanding = 0;
+        }
+        if (now_ms >= n.lease_expires_at_ms) {
+          n.phase = NeighborPhase::Stale;
+          ++stats_.stale_expirations;
+          event("STALE", n.node);
+          break;
+        }
+        // A BOUND peer retries its probe until a Result confirms both
+        // directions; REACHABLE refreshes at the idle target (02 §9).
+        if (n.probe_outstanding == 0 &&
+            (n.phase == NeighborPhase::Bound ||
+             now_ms - n.last_confirmed_ms >= config_.idle_refresh_ms)) {
+          send_probe(n, now_ms);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Retry a pending local commit (e.g. a dev approval hook that became
+  // available); the bounded ApprovalPending records above then promote.
+  membership_.retry_commit(hooks_, config_.node, config_.network);
+
+  // Expire reassembly slots.
+  std::array<RxAssembly*, discovery_const::kReassemblySlots> expired{};
+  std::size_t expired_count = 0;
+  assemblies_.for_each(
+      [&](RxAssembly& a) { expired[expired_count++] = &a; });
+  for (std::size_t i = 0; i < expired_count; ++i) {
+    if (now_ms >= expired[i]->expires_at_ms) assemblies_.release(expired[i]);
+  }
+}
+
+// --- Inspection / owner controls -----------------------------------------------------
+
+bool NeighborDiscovery::phase_of(const MacAddress& mac,
+                                 NeighborPhase& out) const noexcept {
+  const Neighbor* neighbor = find_neighbor(mac);
+  if (neighbor != nullptr) {
+    out = neighbor->phase;
+    return true;
+  }
+  const Candidate* candidate = candidates_.find(
+      [&](const Candidate& c) { return mac_equal(c.mac, mac); });
+  if (candidate != nullptr) {
+    out = candidate->phase;
+    return true;
+  }
+  return false;
+}
+
+bool NeighborDiscovery::phase_of(const NodeId peer, NeighborPhase& out) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor != nullptr) {
+    out = neighbor->phase;
+    return true;
+  }
+  const Candidate* candidate = candidates_.find(
+      [&](const Candidate& c) { return c.claimed_node == peer; });
+  if (candidate != nullptr) {
+    out = candidate->phase;
+    return true;
+  }
+  return false;
+}
+
+bool NeighborDiscovery::data_permitted(const MacAddress& mac) const noexcept {
+  const Neighbor* neighbor = find_neighbor(mac);
+  return neighbor != nullptr && neighbor->phase == NeighborPhase::Reachable &&
+         neighbor->peer_member_verified &&
+         membership_.state() == MembershipState::Member;
+}
+
+bool NeighborDiscovery::data_permitted(const NodeId peer) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  return neighbor != nullptr && neighbor->phase == NeighborPhase::Reachable &&
+         neighbor->peer_member_verified &&
+         membership_.state() == MembershipState::Member;
+}
+
+bool NeighborDiscovery::binding_of(const NodeId peer, BindingId& out) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId) {
+    return false;
+  }
+  out = neighbor->binding;
+  return true;
+}
+
+Status NeighborDiscovery::revoke_peer(const NodeId peer) noexcept {
+  Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr) {
+    return Status::error(StatusCode::NotFound, "peer not bound");
+  }
+  neighbor->phase = NeighborPhase::Revoked;
+  neighbor->probe_outstanding = 0;
+  if (neighbor->regular_held) {
+    neighbor->regular_held = false;
+    --regular_used_;
+  }
+  if (neighbor->pinned) {
+    neighbor->pinned = false;
+    --pins_used_;
+  }
+  event("REVOKED", peer);
+  return Status::success();
+}
+
+Status NeighborDiscovery::suspend_peer(const NodeId peer,
+                                       const MonotonicMs until_ms) noexcept {
+  Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr) {
+    return Status::error(StatusCode::NotFound, "peer not bound");
+  }
+  if (neighbor->phase == NeighborPhase::Bound ||
+      neighbor->phase == NeighborPhase::Reachable) {
+    neighbor->phase = NeighborPhase::Suspended;
+    neighbor->suspended_until_ms = until_ms;
+  }
+  return Status::success();
+}
+
+Status NeighborDiscovery::pin_peer(const NodeId peer) noexcept {
+  Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId) {
+    return Status::error(StatusCode::NotFound, "peer not bound");
+  }
+  if (neighbor->pinned) return Status::success();
+  if (pins_used_ >= discovery_const::kRegularPinsMax) {
+    ++stats_.peer_capacity;
+    event("PEER_CAPACITY", peer);
+    return Status::error(StatusCode::PeerCapacity, "regular pin budget");
+  }
+  neighbor->pinned = true;
+  ++pins_used_;
+  return Status::success();
+}
+
+void NeighborDiscovery::reevaluate(const MonotonicMs now_ms) noexcept {
+  // Fresh context re-check only — poll() performs the actual promotion so a
+  // late caller can never resurrect a cancelled transaction inline.
+  poll(now_ms);
+}
+
+// --- internals -------------------------------------------------------------------
+
+NeighborDiscovery::Candidate* NeighborDiscovery::find_candidate(
+    const MacAddress& mac, const std::array<std::uint8_t, 16>& nonce) noexcept {
+  return candidates_.find([&](const Candidate& c) {
+    return mac_equal(c.mac, mac) && nonce_equal(c.txn_nonce, nonce);
+  });
+}
+
+NeighborDiscovery::Neighbor* NeighborDiscovery::find_neighbor(
+    const MacAddress& mac) noexcept {
+  return neighbors_.find(
+      [&](const Neighbor& n) { return mac_equal(n.mac, mac); });
+}
+
+NeighborDiscovery::Neighbor* NeighborDiscovery::find_neighbor(
+    const NodeId node) noexcept {
+  return neighbors_.find([&](const Neighbor& n) { return n.node == node; });
+}
+
+const NeighborDiscovery::Neighbor* NeighborDiscovery::find_neighbor(
+    const MacAddress& mac) const noexcept {
+  return neighbors_.find(
+      [&](const Neighbor& n) { return mac_equal(n.mac, mac); });
+}
+
+const NeighborDiscovery::Neighbor* NeighborDiscovery::find_neighbor(
+    const NodeId node) const noexcept {
+  return neighbors_.find([&](const Neighbor& n) { return n.node == node; });
+}
+
+bool NeighborDiscovery::reserve_transient() noexcept {
+  if (transient_used_ >= discovery_const::kTransientPeerSlots) return false;
+  ++transient_used_;
+  return true;
+}
+
+void NeighborDiscovery::release_transient() noexcept {
+  if (transient_used_ > 0) --transient_used_;
+}
+
+bool NeighborDiscovery::reserve_regular(Neighbor& neighbor) noexcept {
+  if (neighbor.regular_held) return true;
+  if (regular_used_ >= discovery_const::kRegularPeerSlots) return false;
+  neighbor.regular_held = true;
+  ++regular_used_;
+  return true;
+}
+
+void NeighborDiscovery::release_candidate(Candidate& candidate) noexcept {
+  if (candidate.transient_held) release_transient();
+  candidates_.release(&candidate);
+}
+
+std::uint64_t NeighborDiscovery::next_u64() noexcept {
+  std::uint64_t value = 0;
+  if (!entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&value), 8})
+           .ok()) {
+    return 0;  // no entropy: deterministic pick, still bounded
+  }
+  return value;
+}
+
+std::uint32_t NeighborDiscovery::recent_discovers(
+    const MonotonicMs now_ms) const noexcept {
+  std::uint32_t count = 0;
+  for (const MonotonicMs t : discover_times_) {
+    if (t != kNoDiscover && now_ms >= t && now_ms - t <= kWindowMs) ++count;
+  }
+  return count;
+}
+
+}  // namespace routeloom
