@@ -9,5 +9,6 @@ __pycache__/
 /build-*/
 /host/target/
 /firmware/**/build/
+/firmware/**/sdkconfig
 *.gcda
 *.gcno

@@ -97,6 +97,12 @@ jobs:
         # (espnow_power hooks + gated code in main.cpp) — compile-time
         # validation only, not a hardware power claim.
         profile: [normal, deep_sleep]
+        # bridge_node exposes the portable UsbBridge on USB Serial/JTAG.
+        # It has no deep-sleep variant, so that combination is excluded.
+        app: [reference_node, bridge_node]
+        exclude:
+          - app: bridge_node
+            profile: deep_sleep
     container:
       image: espressif/idf:v6.0.3
     steps:
@@ -111,7 +117,7 @@ jobs:
           . "$IDF_PATH/export.sh"
           git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
           test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
-          cd firmware/reference_node
+          cd firmware/${{ matrix.app }}
           idf.py set-target '${{ matrix.target }}'
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
@@ -128,15 +134,15 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.target }}-${{ matrix.profile }}
+          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}
           path: |
             idf-commit.txt
-            firmware/reference_node/build/*.bin
-            firmware/reference_node/build/*.elf
-            firmware/reference_node/build/*.map
-            firmware/reference_node/build/size-report.txt
-            firmware/reference_node/build/log/*
-            firmware/reference_node/sdkconfig
+            firmware/${{ matrix.app }}/build/*.bin
+            firmware/${{ matrix.app }}/build/*.elf
+            firmware/${{ matrix.app }}/build/*.map
+            firmware/${{ matrix.app }}/build/size-report.txt
+            firmware/${{ matrix.app }}/build/log/*
+            firmware/${{ matrix.app }}/sdkconfig
           retention-days: 30
   rust:
     runs-on: ubuntu-24.04

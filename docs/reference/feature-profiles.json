@@ -213,7 +213,8 @@
         "host/routeloom-protocol",
         "protocol/usb-golden",
         "tests/cpp/test_usb.cpp",
-        "host/routeloom-protocol/tests/usb_golden.rs"
+        "host/routeloom-protocol/tests/usb_golden.rs",
+        "firmware/bridge_node"
       ]
     },
     "power_coordinator": {
