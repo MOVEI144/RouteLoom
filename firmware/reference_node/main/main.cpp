@@ -289,8 +289,12 @@ extern "C" void app_main(void) {
   status = runtime.start_task();
   if (!status) fail(status.detail);
 #endif
-  ESP_LOGW(
-      kTag,
-      "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
-      "production identity profile");
+  // The development PSK profile is pinned to SecurityProfile::Development;
+  // this firmware can never report itself as production-secure.
+  if (security.security_profile() != routeloom::SecurityProfile::Production) {
+    ESP_LOGW(
+        kTag,
+        "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
+        "production identity profile");
+  }
 }

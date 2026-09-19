@@ -59,6 +59,11 @@ Status MeshNode::start(const MonotonicMs now_ms) noexcept {
   }
   started_ = true;
   next_route_advertisement_ms_ = now_ms;
+  // A development-profile provider is allowed to run but is always surfaced
+  // as EXPERIMENTAL; nothing in this node claims production security status.
+  if (security_.security_profile() != SecurityProfile::Production) {
+    observer_.on_diagnostic("SECURITY_PROFILE_EXPERIMENTAL", kInvalidNodeId, nullptr);
+  }
   return Status::success();
 }
 
@@ -233,6 +238,8 @@ Status MeshNode::queue_origin_data(Delivery& delivery, const MonotonicMs now_ms)
   job.deadline_ms = delivery.expires_at_ms;
   job.ack = AckKey{FrameType::Data, MessageKey{config_.node, delivery.id}, delivery.round};
   job.plain.header.type = FrameType::Data;
+  // Application DATA is always end-to-end protected: no code path may queue a
+  // plaintext DATA frame (receivers reject it with END_PROTECTION_REQUIRED).
   job.plain.header.flags = wire::kFlagEndProtected;
   job.plain.header.delivery = delivery.options.delivery;
   job.plain.header.delivery_round = delivery.round;
@@ -987,6 +994,16 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
   }
   if (frame.header.network != config_.network || frame.header.previous_hop != peer) {
     observer_.on_diagnostic("LINK_IDENTITY_MISMATCH", peer, &frame.header.message);
+    return;
+  }
+  // A link-authenticated DATA or END_RECEIPT without end-to-end protection is
+  // never valid in normal operation: the link open only proves the immediate
+  // peer, so an unprotected payload could be injected or altered by any relay
+  // on the path. Drop it before any deliver-or-forward decision; the wire
+  // codec itself still accepts such frames for link-only control types.
+  if ((frame.header.type == FrameType::Data || frame.header.type == FrameType::EndReceipt) &&
+      (frame.header.flags & wire::kFlagEndProtected) == 0) {
+    observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer, &frame.header.message);
     return;
   }
 

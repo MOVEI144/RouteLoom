@@ -23,6 +23,8 @@ EDHOCは相互認証を行うが、アプリの参加許可を代わりに決め
 
 ESP-NOW driverのencryptは既定falseだが、**通常アプリ／管理payloadのSDK認証暗号は必須**。これは平文運用モードではない。Peerを登録していない受信にもSDKで検証できる境界を作り、driverのLMK登録数と長期メンバー数を切り離す。driver CCMPを追加する拡張も、SDK認証の代用にはしない。
 
+CORE_FIXED_250実装はこの契約を強制する。アプリDATAとEND_RECEIPTは常に`kFlagEndProtected`を要求し、未設定の受信frameは配達・転送の判断より前に診断付きで破棄する。通常送信経路（`MeshNode::send`）は常にflagを設定するため、平文DATAの運用経路は存在しない。Wire codec自体はlink-only制御frameのためにflag無し形式を受理し得るが、それはノードの受理規則とは別層である。
+
 ## 4. nonce・番号・再起動
 
 同じ鍵で同じnonceを別平文に使用しない。保存済みcounterの範囲を事前に耐電断予約する方式、または新しい安全なsessionへ再確立する方式をProviderが保証する。RTC保持だけを電源断耐性として扱わない。
@@ -30,6 +32,8 @@ ESP-NOW driverのencryptは既定falseだが、**通常アプリ／管理payload
 同一暗号frameを再送することと、hop/roundを変えて再暗号化することを区別する。変更された外側headerには新しいhop nonceを使う。E2E payloadの同一性と転送ラウンドは別。
 
 再送キャッシュとreplay windowは別物。replay済みpacketへ既存receiptを再送してよい場合があっても、payloadを再適用してはいけない。受信側のreplay状態消失後に古いepochを受理する実装は禁止。
+
+開発Providerはこの規則を次の構造で実装する。context毎（scope+network+sender+receiver+epoch）の永続window recordと、peer pair毎（同tupleからepochを除いたもの）の永続epoch floorを持つ。同epochのwindow recordが消失していれば新規受付せず拒否し（reject-or-rehandshake）、floorを下回るepochは常に拒否する。window・floorのcommit失敗は受理を巻き戻し、破損recordはIntegrityErrorとして扱いfresh contextへ落とさない。floor自体の消失は初期bootと区別できないため、信頼できる単調状態または外部再認証なしの完全なrollback防止は保証外のままとする。TX側counterはMessage IDやsequenceから導出せず、Provider所有の耐電断予約から採番する。
 
 ## 5. credential・鍵更新・削除
 
@@ -63,6 +67,8 @@ RFを開始していないprovisioningでは、chip別手順で内部entropy源�
 ## 10. 発行者の認可と暗号の対象
 
 hop AEADは直近の相手を認証するだけ。route origin／proxy／service provider／authorityは別の役割許可を必要とする。originのIdentity・世代・sequenceはoriginまたは正規Authorityの検証可能な証拠に結び、転送者が勝手に更新できない。可変metricはhop保護と分け、侵害Relayの虚偽metricやdropの完全防止は保証外とする。
+
+Wire APIもこの分離を構造で表す。`open_link`成功は直近hopの認証のみで、originの終端検証は束縛された宛先での`open_end`成功に限られる。relayはlink受理済みframeをend検証済みとして扱わない。
 
 基準線の認証済み制御配布はpairwise unicast。group共通MACを個々のorigin本人確認にしない。各fan-out送信も予算へ計上する。署名形式・証拠のキャッシュ・最終長はG-SEC/G-ROUTEに残し、未認定のorigin証拠から新sourceを作らない。
 

@@ -6,6 +6,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/counter_store.cpp
   src/node.cpp
   src/power.cpp
+  src/replay.cpp
   src/routing.cpp
   src/status.cpp
   src/usb_bridge.cpp

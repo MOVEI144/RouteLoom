@@ -100,10 +100,20 @@ Status validate_header(const Header& header) noexcept;
 Status encode_new(const PlainFrame& frame,
                   SecurityProvider& security,
                   EncodedFrame& output) noexcept;
+// open_link authenticates ONLY the immediate previous-hop peer under the
+// SecurityScope::Link context. Success here does NOT verify the claimed
+// origin, the origin-to-destination binding or the payload end-to-end: a
+// relay must never treat a link-opened frame as origin-verified. End-to-end
+// origin verification exists only through open_end success at the bound
+// destination.
 Status open_link(ByteView encoded,
                  NodeId local_node,
                  SecurityProvider& security,
                  LinkOpenedFrame& output) noexcept;
+// open_end verifies the end-immutable header fields and payload under the
+// SecurityScope::EndToEnd context bound to (origin, destination). It must be
+// called only by the bound destination — it returns AuthorizationFailed for
+// any other node, including relays that already opened the link layer.
 Status open_end(const LinkOpenedFrame& frame,
                 NodeId local_node,
                 SecurityProvider& security,

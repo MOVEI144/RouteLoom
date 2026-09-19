@@ -32,6 +32,12 @@ target_link_libraries(routeloom_power_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_power_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_power_tests COMMAND routeloom_power_tests)
 
+add_executable(routeloom_hardening_tests test_hardening.cpp)
+target_link_libraries(routeloom_hardening_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_hardening_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_hardening_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_hardening_tests COMMAND routeloom_hardening_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)
