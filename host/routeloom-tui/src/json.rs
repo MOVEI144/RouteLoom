@@ -103,7 +103,7 @@ struct Parser<'a> {
     pos: usize,
 }
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     fn error(&self, message: &str) -> JsonError {
         JsonError {
             offset: self.pos,
