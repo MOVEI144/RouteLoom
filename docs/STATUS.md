@@ -10,7 +10,7 @@
 | Portable C++ SDK core | **実装済み・host-tested**。GCC/Clang、ASan/UBSan、有限Queue、配送、dedup、receipt、Babel由来routing、C ABI |
 | ESP-NOW / LR250 adapter | **実装済み・build-tested**。単一Radio Owner、固定channel、Peer、短いcallback queue、NVS counter/replay |
 | ESP32 reference firmware | **C3/S3/C5でESP-IDF v6.0.3 build成功**。実機起動・RF通信は未試験 |
-| Rust host service／CLI | **実装済み・host-tested**。fmt、Clippy `-D warnings`、unit test、release build成功。TUIは未実装 |
+| Rust host service／CLI／TUI | **実装済み・host-tested**。fmt、Clippy `-D warnings`、unit test、release build成功。daemonはUnix socket経由でSTATUS/SENDに加えADAPTER/NODES/DELIVERIES/EVENTS/AUTHORITYを返し、routeloom-tuiは同一JSONをpollする観測者（daemon切断時はbackoff再接続、有界event ring）。情報源の無いfieldは`unknown`表示。実adapter・RF経由の観測は未試験 |
 | USB／Serial transport | **Portable実装・host-tested**。COBS＋CRC-32/ISO-HDLC codec、streaming resync、HELLO→AUTH→ACTIVE→DRAINING session、EXPERIMENTALな開発profile認証（共有secret＋transcript結合MAC、方向別counter・replay拒否）、累積credit、MeshNode統合をC++ device bridgeとRust hostで実装。`protocol/usb-golden`共有vectorでbyte相互検証。実USB driver・HIL・本番Profileは未認定 |
 | 暗号Provider | PSA AES-GCM、HMAC導出、counter予約、replay windowを持つ開発PSK Providerを実装。本番Identity／EDHOC／RPKではなく未認定 |
 | 経路制御 | feasibility、withdraw、SeqNoRequest、3hop／diamond repairをportable testで実装・確認。実RF、分断再結合、10hopは未認定 |

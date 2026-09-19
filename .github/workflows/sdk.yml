@@ -99,5 +99,6 @@ jobs:
           path: |
             host/target/release/routeloom-host
             host/target/release/routeloomctl
+            host/target/release/routeloom-tui
             host/Cargo.lock
           retention-days: 30
