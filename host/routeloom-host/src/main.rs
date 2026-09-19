@@ -42,6 +42,11 @@ const DEV_SECRET: &[u8] = b"routeloom-dev-secret";
 const DEV_PRINCIPAL: &[u8] = b"routeloom-host";
 /// Idle interval between session keepalives.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+/// Re-Hello cadence while the handshake is unfinished: a Hello sent while
+/// the device is still booting is lost forever, so without a retry the
+/// session would sit in AwaitHelloAck until the next cable reconnect
+/// (observed on real hardware after a device reset).
+const HELLO_RETRY_MS: u64 = 1_000;
 
 /// After AUTH every session frame body is `counter || tag || inner`
 /// (dev_session.rs). The daemon owns the host role of the dev-session
@@ -124,6 +129,8 @@ struct DeviceSession {
     /// Cumulative grant we extend to the device for its sends.
     tx_grant_frames: u64,
     tx_grant_bytes: u64,
+    /// Timestamp of the last begin() so the writer can pace handshake retries.
+    last_begin_ms: u64,
 }
 
 /// Control kinds ride the zero-credit reservation on the device side: they
@@ -155,6 +162,7 @@ impl DeviceSession {
             send_credit: CumulativeCredit::default(),
             tx_grant_frames: 0,
             tx_grant_bytes: 0,
+            last_begin_ms: 0,
         }
     }
 
@@ -171,6 +179,15 @@ impl DeviceSession {
         self.proof = None;
     }
 
+    /// The writer paces handshake retries with this: a Hello lost while the
+    /// device booted would otherwise stall the session until a reconnect.
+    fn handshake_retry_due(&self, now: u64) -> bool {
+        matches!(
+            self.phase,
+            SessionPhase::AwaitHelloAck | SessionPhase::AwaitAuthOk
+        ) && now.saturating_sub(self.last_begin_ms) >= HELLO_RETRY_MS
+    }
+
     /// Adapter (re)connected: reset all session state and produce the Hello.
     /// Nothing from the old session (counters, grants, requests) is reused.
     fn begin(&mut self) -> Frame {
@@ -180,6 +197,7 @@ impl DeviceSession {
         self.secret = secret;
         self.principal = principal;
         self.phase = SessionPhase::AwaitHelloAck;
+        self.last_begin_ms = now_ms();
         // Session nonce: uniqueness is what the transcript needs (replay
         // isolation), not secrecy — mix the monotonic clock with pid.
         self.host_nonce = now_ms() ^ (u64::from(std::process::id()) << 32);
@@ -1128,26 +1146,52 @@ fn adapter_writer_loop(
     state: Arc<State>,
     session: Arc<Mutex<DeviceSession>>,
 ) {
+    let mut last_tx_ms = 0_u64;
     loop {
-        // recv_timeout doubles as the keepalive tick: an idle active session
-        // gets a sealed KeepAlive so the device sees liveness (and a dead
-        // session is noticed at the next failed authentication).
-        let item = match outbound.recv_timeout(KEEPALIVE_INTERVAL) {
+        // The tick serves two timers: a lost handshake frame is re-sent every
+        // HELLO_RETRY_MS until the session reaches Active, and an idle active
+        // session gets a sealed KeepAlive so the device sees liveness (and a
+        // dead session is noticed at the next failed authentication).
+        let item = match outbound.recv_timeout(std::time::Duration::from_millis(HELLO_RETRY_MS)) {
             Ok(item) => item,
-            Err(mpsc::RecvTimeoutError::Timeout) => Outbound::Seal(Frame {
-                kind: FrameKind::KeepAlive,
-                flags: 0,
-                session: 0,
-                request: 0,
-                body: Vec::new(),
-            }),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let now = now_ms();
+                let mut guard = session.lock().expect("device session poisoned");
+                if guard.handshake_retry_due(now) {
+                    // The writer is the only place allowed to emit frames,
+                    // so the re-Hello is written here directly rather than
+                    // re-enqueued into our own queue.
+                    let hello = guard.begin();
+                    drop(guard);
+                    if let Err(error) = transmit(&writer_slot, &state, &hello) {
+                        set_error(&state, error.to_string());
+                    } else {
+                        last_tx_ms = now;
+                    }
+                    continue;
+                }
+                let keepalive_due = guard.phase == SessionPhase::Active
+                    && now.saturating_sub(last_tx_ms) >= KEEPALIVE_INTERVAL.as_millis() as u64;
+                drop(guard);
+                if !keepalive_due {
+                    continue;
+                }
+                Outbound::Seal(Frame {
+                    kind: FrameKind::KeepAlive,
+                    flags: 0,
+                    session: 0,
+                    request: 0,
+                    body: Vec::new(),
+                })
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
         let mut frame = match item {
             // Handshake frames are unprotected by design — write as-is.
             Outbound::Raw(frame) => {
-                if let Err(error) = transmit(&writer_slot, &state, &frame) {
-                    set_error(&state, error.to_string());
+                match transmit(&writer_slot, &state, &frame) {
+                    Ok(_) => last_tx_ms = now_ms(),
+                    Err(error) => set_error(&state, error.to_string()),
                 }
                 continue;
             }
@@ -1166,6 +1210,7 @@ fn adapter_writer_loop(
             .and_then(|()| transmit(&writer_slot, &state, &frame).map_err(|e| e.to_string()));
         match sent {
             Ok(_) => {
+                last_tx_ms = now_ms();
                 if frame.kind == FrameKind::DataToMesh {
                     delivery_update(
                         &state,
@@ -1743,6 +1788,20 @@ mod tests {
             }
             Outbound::Raw(_) => panic!("credit response must be sealed"),
         }
+    }
+
+    #[test]
+    fn session_retries_lost_handshake() {
+        // A Hello lost while the device boots must be retried by the writer
+        // until the session reaches Active — observed on real hardware: a
+        // reconnect that lands during device startup otherwise stalls in
+        // AwaitHelloAck forever.
+        let mut session = DeviceSession::new();
+        session.begin();
+        assert!(!session.handshake_retry_due(session.last_begin_ms));
+        assert!(session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
+        complete_handshake(&mut session);
+        assert!(!session.handshake_retry_due(session.last_begin_ms + HELLO_RETRY_MS));
     }
 
     #[test]

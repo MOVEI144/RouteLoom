@@ -12,3 +12,4 @@ __pycache__/
 /firmware/**/sdkconfig
 *.gcda
 *.gcno
+/firmware/**/sdkconfig.local
