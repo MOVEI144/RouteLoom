@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/congestion.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
@@ -124,7 +125,24 @@ class MeshNode {
   // True when no radio-bound work remains: empty TX queue, no physical
   // in-flight frame and no job waiting for a hop accept.
   bool quiesced() const noexcept {
-    return !physical_.active && tx_queue_.empty() && awaiting_hop_.size() == 0;
+    return !physical_.active && scheduler_.empty() && awaiting_hop_.size() == 0;
+  }
+
+  // --- Congestion control (03-congestion.md §4, §5) ----------------------------
+  // Live scheduler/BUSY counters for tests, diagnostics and the P3 observer.
+  CongestionStats congestion_stats() const noexcept;
+  // Current per-peer in-flight window (1..4) used by the dispatch gate.
+  std::uint8_t peer_tx_window(NodeId peer) const noexcept;
+  // Marks a peer as implementing the Busy(20) feedback payload. Until
+  // capability negotiation lands, BUSY replies are emitted only to peers
+  // marked here or proven by a valid received BUSY (03 §5, scenario D4-09).
+  void set_peer_busy_capable(NodeId peer, bool capable) noexcept;
+  // Bounded observation aggregates (03 §3): EWMA + counters per key, never
+  // raw samples. Groundwork for the P3 route-metric coupling — this phase
+  // records but does not feed the data back into routing.
+  template <typename Fn>
+  void for_each_observation(Fn fn) const noexcept {
+    observations_.for_each(fn);
   }
   // Bumped on every send() call, received frame and TX-result callback: any
   // radio-visible activity. Used to invalidate outstanding sleep tickets.
@@ -208,7 +226,7 @@ class MeshNode {
                               &physical_.job.ack.key.id);
       physical_ = PhysicalInflight{};
     }
-    tx_queue_.clear();
+    scheduler_.clear();
     awaiting_hop_.clear();
   }
 
@@ -220,6 +238,7 @@ class MeshNode {
   static constexpr std::size_t kAwaitingHopCapacity = 8;
   static constexpr std::size_t kSeqnoSeenCapacity = 32;
   static constexpr std::size_t kSeqnoStateCapacity = 32;
+  static constexpr std::uint32_t kNoFeedbackSeq = 0xFFFFFFFFu;
 
   struct Neighbor {
     NodeId node{kInvalidNodeId};
@@ -227,6 +246,18 @@ class MeshNode {
     RouteGeneration generation{0};  // last origin generation the peer self-advertised
     std::uint8_t consecutive_failures{0};
     std::uint8_t route_cursor{0};  // rotation cursor for periodic route dumps
+    // Congestion state (03-congestion.md §5): per-peer in-flight window and
+    // the consecutive-authenticated-accept streak that grows it. A window is
+    // NOT a memory-slot counter — freeing an awaiting slot never grows it.
+    std::uint8_t tx_window{kPeerWindowInitial};
+    std::uint8_t window_accepts{0};
+    bool busy_capable{false};  // peer proved/configured for Busy(20) feedback
+    // Highest feedback sequence accepted from this peer; stale/replayed
+    // BUSY payloads are detected against it (FeedbackSequence ordering tag).
+    // feedback_seen is separate so a first seq equal to the sentinel value
+    // cannot disable ordering checks forever.
+    std::uint32_t last_feedback_seq{kNoFeedbackSeq};
+    bool feedback_seen{false};
     bool active{false};
   };
 
@@ -288,11 +319,156 @@ class MeshNode {
     NodeId peer{kInvalidNodeId};
     AckKey ack{};
     bool requires_hop_accept{false};
+    // RF-loss retry counter (03 §5 rf_attempts_max, per-job, never reset by
+    // peer/rate changes) and the bound for it.
     std::uint8_t attempts{0};
     std::uint8_t max_attempts{1};
     MonotonicMs deadline_ms{0};
     wire::EncodedFrame encoded{};
     bool encoded_valid{false};
+    // Scheduler metadata — assigned at admission, preserved across requeues.
+    Priority priority{Priority::Normal};       // origin DATA class input
+    std::uint32_t tx_cost{0};                  // estimated on-air bytes
+    MonotonicMs enqueued_at_ms{0};             // queue-sojourn measurement base
+    TxJob* flow_next{nullptr};                 // intrusive per-flow list link
+    // Attempt budget accounting (contracts.json congestion.*).
+    std::uint8_t busy_readmissions{0};
+    std::uint8_t physical_attempts{0};
+  };
+
+  // Bounded TX scheduler (03-congestion.md §4): a single fixed pool of TxJob
+  // slots shared by a small reserved control lane (ACK/required responses)
+  // and four DRR classes charged by estimated TX cost, with per-flow
+  // round-robin inside each class. No queue duplication — flows link pool
+  // jobs intrusively and classes hold only descriptor pointers.
+  class TxScheduler {
+   public:
+    TxScheduler() noexcept = default;
+
+    // Admission decision for `slots_needed` additional non-control jobs from
+    // (scope, origin). Pure check: reserves nothing, so the caller must
+    // enqueue immediately after (single-threaded owner).
+    AdmitVerdict check(NodeId self, NodeId scope, NodeId origin,
+                       std::size_t slots_needed) const noexcept;
+    Status enqueue(TxJob&& job, NodeId self, MonotonicMs now_ms) noexcept;
+    // DRR pick of the next transmittable job (control lane first). A job
+    // whose peer window is full is skipped for this pass, not dropped.
+    // Returns nullptr when nothing is eligible.
+    TxJob* select(MonotonicMs now_ms, const MeshNode& node) noexcept;
+    void take_selected(TxJob& out) noexcept;
+    // Put the selected job back at the head of its lane (driver rejected
+    // the submission before any transmit attempt).
+    void requeue_selected() noexcept;
+    void clear() noexcept;
+
+    bool empty() const noexcept { return used_ == 0; }
+    bool full() const noexcept { return used_ >= capacity(); }
+    std::size_t size() const noexcept { return used_; }
+    static constexpr std::size_t capacity() noexcept { return kTxQueueCapacity; }
+    std::size_t free_slots() const noexcept { return capacity() - used_; }
+    std::size_t control_depth() const noexcept { return control_.count; }
+    std::size_t flows_active() const noexcept { return flows_.size(); }
+    std::uint32_t occupancy_percent() const noexcept {
+      return static_cast<std::uint32_t>(used_ * 100 / capacity());
+    }
+    // Queue watermarks (03 §4): >=50% shrink background probe/log work,
+    // >=80% suspend bulk and improvement probes.
+    bool background_reduced() const noexcept {
+      return occupancy_percent() >= kQueueWatermarkBackgroundPercent;
+    }
+    bool bulk_suspended() const noexcept {
+      return occupancy_percent() >= kQueueWatermarkStopPercent;
+    }
+
+    CongestionStats stats_{};
+
+   private:
+    // Intrusive FIFO of pool jobs; only pointers, never job copies.
+    struct JobList {
+      TxJob* head{nullptr};
+      TxJob* tail{nullptr};
+      std::size_t count{0};
+
+      bool empty() const noexcept { return head == nullptr; }
+      void push_back(TxJob* job) noexcept {
+        job->flow_next = nullptr;
+        if (tail != nullptr) tail->flow_next = job;
+        tail = job;
+        if (head == nullptr) head = job;
+        ++count;
+      }
+      void push_front(TxJob* job) noexcept {
+        job->flow_next = head;
+        head = job;
+        if (tail == nullptr) tail = job;
+        ++count;
+      }
+      TxJob* pop_front() noexcept {
+        TxJob* job = head;
+        if (job != nullptr) {
+          head = job->flow_next;
+          if (head == nullptr) tail = nullptr;
+          job->flow_next = nullptr;
+          --count;
+        }
+        return job;
+      }
+    };
+
+    // Flow key = (verified sender scope, origin, concrete destination) per
+    // class. `overflow` marks the shared bounded bucket used when the 32
+    // descriptor table is full — new admissions merge instead of failing.
+    struct FlowDesc {
+      JobList jobs{};
+      NodeId scope{kInvalidNodeId};
+      NodeId origin{kInvalidNodeId};
+      NodeId destination{kInvalidNodeId};
+      SchedClass sched_class{SchedClass::Normal};
+      bool in_rr{false};
+      bool overflow{false};
+    };
+
+    static bool control_job(const TxJob& job) noexcept;
+    static SchedClass classify(const TxJob& job) noexcept;
+    static void flow_key(const TxJob& job, NodeId self, NodeId& scope,
+                         NodeId& origin, NodeId& destination) noexcept;
+    static void charge_cost(TxJob& job) noexcept;
+    static std::size_t class_index(SchedClass value) noexcept {
+      return sched_class_index(value);
+    }
+    FlowDesc* overflow_flow(SchedClass value) noexcept {
+      FlowDesc& flow = overflow_[class_index(value)];
+      flow.sched_class = value;
+      flow.overflow = true;
+      return &flow;
+    }
+    std::size_t origin_count(NodeId origin) const noexcept;
+    std::size_t scope_count(NodeId scope) const noexcept;
+    static bool data_class(SchedClass value) noexcept {
+      return value != SchedClass::Management;
+    }
+
+    static constexpr std::size_t kControlLaneCapacity = 8;
+    static constexpr std::size_t kMaxJobsPerOrigin = 12;
+    static constexpr std::size_t kMaxJobsPerScope = 12;
+    // DRR: quantum per round per class = weight * 64 bytes of estimated
+    // cost; a 250-byte bulk frame becomes affordable within a few rounds.
+    static constexpr std::int32_t kQuantumUnit = 64;
+    static constexpr std::int32_t kDeficitCap = 1024;
+    static constexpr std::size_t kMaxSelectRounds = 8;
+    static constexpr std::size_t kRrCapacity = kFlowDescriptorsMax + kSchedClassCount;
+
+    FixedPool<TxJob, kTxQueueCapacity> pool_{};
+    FixedPool<FlowDesc, kFlowDescriptorsMax> flows_{};
+    std::array<FlowDesc, kSchedClassCount> overflow_{};
+    JobList control_{};
+    std::array<FixedQueue<FlowDesc*, kRrCapacity>, kSchedClassCount> rr_{};
+    std::array<std::int32_t, kSchedClassCount> deficit_{};
+    std::size_t used_{0};
+    std::size_t cursor_{0};
+    TxJob* selected_{nullptr};
+    FlowDesc* selected_flow_{nullptr};
+    bool selected_control_{false};
   };
 
   struct PhysicalInflight {
@@ -300,11 +476,19 @@ class MeshNode {
     std::uint64_t token{0};
     MonotonicMs submitted_at_ms{0};
     bool active{false};
+    // An authenticated BUSY arrived while the frame was with the driver:
+    // the deferral is applied when the TX result lands (03 §5).
+    bool busy_deferred{false};
+    std::uint32_t busy_retry_ms{0};
   };
 
   struct AwaitingHop {
     TxJob job{};
     MonotonicMs expires_at_ms{0};
+    // An authenticated BUSY deferred this exchange: on expiry the job is
+    // re-admitted against its BUSY readmission budget instead of consuming
+    // an RF-loss attempt (03 §5).
+    bool busy_deferred{false};
   };
 
   Status validate_config() const noexcept;
@@ -328,6 +512,14 @@ class MeshNode {
                        MonotonicMs now_ms) noexcept;
   Status queue_hop_accept(const wire::Header& accepted, MonotonicMs now_ms) noexcept;
   Status queue_end_receipt(const wire::Header& data, MonotonicMs now_ms) noexcept;
+  // BUSY emission (03 §5): pre-admission refusal for a NEW authenticated
+  // inbound DATA — never for already HOP_ACCEPT-ed work. Emits only when the
+  // peer is busy-capable and a reply slot is affordable; otherwise drops and
+  // counts busy_send_failed so the sender's timeout path stays honest.
+  Status queue_busy(NodeId peer, const wire::Header& rejected,
+                    std::uint8_t reason, MonotonicMs now_ms) noexcept;
+  void emit_busy_or_drop(NodeId peer, const wire::Header& rejected,
+                         std::uint8_t reason, MonotonicMs now_ms) noexcept;
   Status queue_route_update(NodeId neighbor, MonotonicMs now_ms) noexcept;
   Status queue_seqno_request(NodeId peer, NodeId requester, NodeId destination,
                              RouteSequence requested_sequence, std::uint32_t request_id,
@@ -338,10 +530,34 @@ class MeshNode {
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
   void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
+  // Re-admit a BUSY-deferred job after its clamped retry_after wait, bounded
+  // by busy_readmissions_max and the combined physical-attempt budget (03 §5).
+  void readmit_after_busy(TxJob& job, MonotonicMs now_ms) noexcept;
+  // Dispatch gate for the scheduler: a job that requires HOP_ACCEPT is
+  // eligible only while the peer's in-flight count is below its window.
+  bool tx_admitted_now(const TxJob& job) const noexcept;
+  std::size_t peer_inflight(NodeId peer) const noexcept;
+  std::uint8_t peer_window(NodeId peer) const noexcept;
+  std::uint32_t busy_retry_hint() const noexcept;
+
+  // Observation aggregation (03 §3): bounded buckets keyed by the contract
+  // tuple. find-or-allocate returns nullptr only when the pool is exhausted.
+  ObservationBucket* observation_bucket(std::uint8_t length_class,
+                                        MonotonicMs now_ms) noexcept;
+  void obs_tx_submitted(const TxJob& job, MonotonicMs now_ms) noexcept;
+  void obs_driver_service(const TxJob& job, std::uint32_t service_us,
+                          MonotonicMs now_ms) noexcept;
+  void obs_hop_result(const TxJob& job, bool accepted, MonotonicMs now_ms) noexcept;
+  void obs_count(const TxJob& job, std::uint64_t ObservationBucket::*counter,
+                 MonotonicMs now_ms) noexcept;
+  void obs_final(const Delivery& delivery, DeliveryState state,
+                 MonotonicMs now_ms) noexcept;
 
   void handle_hop_accept(const wire::PlainFrame& frame, NodeId peer,
                          MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
+                   MonotonicMs now_ms) noexcept;
+  void handle_busy(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
                           MonotonicMs now_ms) noexcept;
@@ -383,7 +599,7 @@ class MeshNode {
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};
   FixedPool<SeqnoSeen, kSeqnoSeenCapacity> seqno_seen_{};
   FixedPool<SeqnoState, kSeqnoStateCapacity> seqno_state_{};
-  FixedQueue<TxJob, kTxQueueCapacity> tx_queue_{};
+  TxScheduler scheduler_{};
   FixedPool<AwaitingHop, kAwaitingHopCapacity> awaiting_hop_{};
   PhysicalInflight physical_{};
   std::uint64_t next_physical_token_{1};
@@ -397,6 +613,18 @@ class MeshNode {
   MonotonicMs triggered_at_ms_{0};
   MonotonicMs next_triggered_ms_{0};
   std::uint32_t trigger_counter_{0};
+  // Node-global ordering tag stamped on emitted BUSY payloads; receivers
+  // compare it per-peer to reject stale/replayed feedback (03 §5).
+  std::uint32_t next_feedback_sequence_{1};
+  // BUSY-side statistics; merged into congestion_stats() with the
+  // scheduler's own counters.
+  CongestionStats busy_stats_{};
+  // Bounded observation buckets (03 §3 groundwork for P3).
+  static constexpr std::size_t kObservationCapacity = 8;
+  FixedPool<ObservationBucket, kObservationCapacity> observations_{};
+  // Latest wall time seen on the event path; observation timestamps use it
+  // where the call site (e.g. delivery-state transitions) has no clock.
+  MonotonicMs last_clock_ms_{0};
   std::uint32_t work_generation_{0};
   std::uint32_t rx_generation_{0};
   std::uint32_t config_revision_{0};
