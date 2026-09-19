@@ -13,7 +13,7 @@
 | Rust host service／CLI | **実装済み・host-tested**。fmt、Clippy `-D warnings`、unit test、release build成功。TUIは未実装 |
 | 暗号Provider | PSA AES-GCM、HMAC導出、counter予約、replay windowを持つ開発PSK Providerを実装。本番Identity／EDHOC／RPKではなく未認定 |
 | 経路制御 | feasibility、withdraw、SeqNoRequest、3hop／diamond repairをportable testで実装・確認。実RF、分断再結合、10hopは未認定 |
-| 管理 | SingleAuthorityのportable基礎のみ。quorum／自動選挙／snapshotは未実装 |
+| 管理 | SingleAuthorityの2スロット耐電断台帳（magic/length/schema/seal、hash chain、CRC-32/ISO-HDLC、readback検証、全損時QUARANTINED＋明示recover）をportable実装・host power-cut試験済み。NVS LedgerStorage adapterはbuild-tested。quorum／自動選挙／snapshot／remote config本体は未実装 |
 | 電源管理 | 契約とcounter再開の基礎あり。Deep Sleep実機resumeは未実装・未試験 |
 | Board/RF | 公式資料を整理。C3/S3/C5現物照合、HIL、到達距離、都市部干渉、電池寿命は未実施 |
 | 高度機能 | LR500適応、自動channel移行、Mesh OTA、LoRa TX、service failoverは未実装 |
@@ -35,7 +35,7 @@
 - **G-WIRE**：Wire v1 byte layout・型番号・C++／Rust共通golden vector（test cipher）は凍結済み。本番crypto suite適用後のvector更新と残りの管理object・再送round・再起動caseはG-SECと併せて行う。
 - **G-SEC**：機器Identity、Join、credential、必須suite、Entropy、鍵更新、失効、再起動を本番Profileとして独立レビューする。開発PSKを代用しない。
 - **G-ROUTE**：portable実装を基準に、restart／GC／timer、分断再結合、複数origin、10hopをmodel testと実機で認定する。
-- **G-CONTROL**：SingleAuthority台帳の永続化を実装し、HAでは選挙、log、snapshot、構成員変更、proofを別途認定する。
+- **G-CONTROL**：SingleAuthorityの耐電断台帳は実装・host試験済みで、membership承認／失効／remote config向けの操作型integration pointを持つ。NVS実機・HIL、およびHAの選挙、log、snapshot、構成員変更、proofは別途認定する。
 - **G-USB**：device側bridge、認証transcript、frame保護、累積credit、C++／Rust相互運用をHILで確認する。
 - **G-POWER**：Deep Sleep前のdrain、RTC/NVS、wake原因、再初期化、counter安全性、battery-side energyを実機で確認する。
 - **G-BOARD**：現物revision、電源、アンテナ、Pin、Flash/PSRAMを照合する。

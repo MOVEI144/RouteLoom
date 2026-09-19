@@ -1,6 +1,7 @@
 set(ROUTELOOM_CORE_SOURCES
   src/authority.cpp
   src/byte_io.cpp
+  src/crc32.cpp
   src/c_api.cpp
   src/counter_store.cpp
   src/node.cpp

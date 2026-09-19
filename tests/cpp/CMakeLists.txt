@@ -8,6 +8,11 @@ target_link_libraries(routeloom_routing_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_routing_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_routing_tests COMMAND routeloom_routing_tests)
 
+add_executable(routeloom_ledger_tests test_ledger.cpp)
+target_link_libraries(routeloom_ledger_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_ledger_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_ledger_tests COMMAND routeloom_ledger_tests)
+
 add_executable(routeloom_golden_tests test_golden.cpp)
 target_link_libraries(routeloom_golden_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_golden_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

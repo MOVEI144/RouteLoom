@@ -4,11 +4,11 @@
 
 ## 実装済みの縦切り
 
-- `components/routeloom`：C++17 portable core、C ABI、provisional Wire codec、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、SeqNoRequest、SingleAuthorityの単調操作台帳、deadline再開規則。
-- `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、PSA AES-GCM開発用PSK Provider。
+- `components/routeloom`：C++17 portable core、C ABI、provisional Wire codec、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、SeqNoRequest、SingleAuthorityの2スロット耐電断操作台帳（CRC-32/ISO-HDLC、hash chain、QUARANTINED回復）、deadline再開規則。
+- `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、NVS authority ledger store、PSA AES-GCM開発用PSK Provider。
 - `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。NVS異常時はIdentity／counterを守るため自動eraseしない。
 - `host/`：COBS＋CRC32のUSB/Serial framing library、Unix daemon、CLIの初期実装。
-- `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、C ABI。
+- `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、authority ledger電断simulation、C ABI。
 
 ## 継続CI
 

@@ -19,6 +19,7 @@
 #include "routeloom/routing.hpp"
 #include "routeloom/wire.hpp"
 
+#include "test_ledger.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
 
@@ -58,22 +59,6 @@ void run_network(std::vector<MeshNode*>& nodes, SimNetwork& network,
 }
 
 
-class MemoryAuthorityStore final : public AuthorityStore {
- public:
-  Status load(AuthorityRecord& record, bool& found) noexcept override {
-    found = has_record;
-    if (found) record = stored;
-    return Status::success();
-  }
-  Status commit(const AuthorityRecord& record) noexcept override {
-    stored = record;
-    has_record = true;
-    return Status::success();
-  }
-  AuthorityRecord stored{};
-  bool has_record{false};
-};
-
 void test_admission_contract() {
   CHECK(frame_allowed(MembershipState::Unprovisioned, FrameType::Discover));
   CHECK(!frame_allowed(MembershipState::Unprovisioned, FrameType::Data));
@@ -100,7 +85,7 @@ void test_deadline_resume() {
 }
 
 void test_single_authority() {
-  MemoryAuthorityStore store;
+  routeloom_test::FaultyLedgerStorage store;
   SingleAuthority authority(1, 99, store);
   CHECK_OK(authority.initialize());
   AuthorityOperation op{};

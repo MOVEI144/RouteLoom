@@ -18,41 +18,103 @@ struct AuthorityRecord {
   Digest256 state_hash{};
 };
 
+enum class AuthorityOperationKind : std::uint8_t {
+  Generic = 0,
+  RemoteConfig = 1,
+  MembershipApproval = 2,
+  MembershipRevocation = 3,
+};
+
 struct AuthorityOperation {
   NetworkId network{0};
   NodeId authority{kInvalidNodeId};
   std::uint32_t generation{0};
   std::uint64_t sequence{0};
+  AuthorityOperationKind kind{AuthorityOperationKind::Generic};
   Digest256 previous_state_hash{};
   Digest256 operation_hash{};
 };
 
-class AuthorityStore {
+// Deterministically binds an operation kind and payload into
+// AuthorityOperation::operation_hash for ledger wiring and tests. NOT a
+// cryptographic digest: a production security profile replaces it with the
+// negotiated suite hash over the canonical operation encoding.
+Digest256 bind_operation_payload(AuthorityOperationKind kind, ByteView payload) noexcept;
+
+// Raw two-slot persistence for the authority ledger. Each slot holds exactly
+// kAuthorityLedgerRecordSize bytes. Implementations must tolerate power loss
+// at any byte boundary and must never erase or reformat storage on error.
+class LedgerStorage {
  public:
-  virtual ~AuthorityStore() = default;
-  virtual Status load(AuthorityRecord& record, bool& found) noexcept = 0;
-  virtual Status commit(const AuthorityRecord& record) noexcept = 0;
+  virtual ~LedgerStorage() = default;
+  virtual Status read(std::uint8_t slot, MutableByteView target) noexcept = 0;
+  virtual Status write(std::uint8_t slot, ByteView data) noexcept = 0;
 };
+
+constexpr std::uint8_t kAuthorityLedgerSlots = 2;
+constexpr std::uint32_t kAuthorityLedgerSchemaVersion = 1;
+constexpr std::size_t kAuthorityLedgerRecordSize = 156;
 
 class SingleAuthority {
  public:
-  SingleAuthority(NetworkId network, NodeId authority, AuthorityStore& store) noexcept;
+  SingleAuthority(NetworkId network, NodeId authority, LedgerStorage& storage) noexcept;
 
+  // Verifies both ledger slots and restores the highest committed revision.
+  // A half-written or unparseable slot is ignored while the other slot is
+  // usable; if no committed record survives, the authority enters quarantine
+  // (IntegrityError) instead of silently resetting to revision 0.
   Status initialize() noexcept;
+
   Status validate(const AuthorityOperation& operation,
                   bool cryptographic_signature_verified) const noexcept;
   Status commit(const AuthorityOperation& operation,
                 const Digest256& resulting_state_hash,
                 bool cryptographic_signature_verified) noexcept;
 
+  // Narrow ledger integration points for control-plane consumers. Each
+  // requires the matching AuthorityOperation::kind; payloads bind through
+  // operation_hash (see bind_operation_payload).
+  Status apply_remote_config(const AuthorityOperation& operation,
+                             const Digest256& resulting_state_hash,
+                             bool cryptographic_signature_verified) noexcept;
+  Status apply_membership_approval(const AuthorityOperation& operation,
+                                   const Digest256& resulting_state_hash,
+                                   bool cryptographic_signature_verified) noexcept;
+  Status apply_membership_revocation(const AuthorityOperation& operation,
+                                     const Digest256& resulting_state_hash,
+                                     bool cryptographic_signature_verified) noexcept;
+
+  // Explicit operator recovery from quarantine: writes a fresh genesis record
+  // with a revision above any structurally valid record seen. Never invoked
+  // implicitly; storage errors never trigger erase or reformat.
+  Status recover() noexcept;
+
   const AuthorityRecord& state() const noexcept { return state_; }
+  bool quarantined() const noexcept { return quarantined_; }
+  // Committed ledger revision; while quarantined, the highest structurally
+  // valid revision seen so operators can tell state was lost, not absent.
+  std::uint64_t revision() const noexcept { return revision_; }
 
  private:
+  Status commit_typed(AuthorityOperationKind expected,
+                      const AuthorityOperation& operation,
+                      const Digest256& resulting_state_hash,
+                      bool cryptographic_signature_verified) noexcept;
+  Status store_record(std::uint8_t slot, const AuthorityRecord& record,
+                      std::uint64_t revision, const Digest256& previous_state_hash,
+                      const Digest256& operation_hash) noexcept;
+
   NetworkId network_{0};
   NodeId authority_{kInvalidNodeId};
-  AuthorityStore& store_;
+  LedgerStorage& storage_;
   AuthorityRecord state_{};
+  std::uint64_t revision_{0};
+  std::uint64_t recovery_floor_{0};
+  std::array<StatusCode, kAuthorityLedgerSlots> slot_reserved_{};
+  std::uint8_t active_slot_{0};
+  bool has_active_{false};
   bool initialized_{false};
+  bool quarantined_{false};
 };
 
 }  // namespace routeloom
