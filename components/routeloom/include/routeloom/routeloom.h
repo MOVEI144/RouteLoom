@@ -104,7 +104,9 @@ typedef struct rl_node_config {
   uint32_t callback_watchdog_ms;
   uint8_t max_link_attempts;
   uint8_t max_end_to_end_rounds;
-  uint8_t reserved[6];
+  /* Origin generation of this node's route source; persisted monotonic, +1 per boot. */
+  uint16_t route_generation;
+  uint8_t reserved[4];
 } rl_node_config_t;
 
 typedef struct rl_send_options {
@@ -173,7 +175,8 @@ void rl_deinit(rl_context_t* context);
 rl_status_code_t rl_start(rl_context_t* context, rl_monotonic_ms_t now_ms);
 rl_status_code_t rl_add_neighbor(rl_context_t* context, rl_node_id_t neighbor,
                                  uint16_t link_metric, rl_monotonic_ms_t now_ms);
-rl_status_code_t rl_remove_neighbor(rl_context_t* context, rl_node_id_t neighbor);
+rl_status_code_t rl_remove_neighbor(rl_context_t* context, rl_node_id_t neighbor,
+                                    rl_monotonic_ms_t now_ms);
 rl_status_code_t rl_send(rl_context_t* context, rl_node_id_t destination,
                          const uint8_t* payload, size_t payload_size,
                          const rl_send_options_t* options,

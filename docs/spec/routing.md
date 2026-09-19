@@ -75,6 +75,12 @@ source keyはNetwork、destination、origin Identity、認証済みorigin genera
 
 source/frontierを失った直後にFDをinfinityで新規化して古い広告を採用しない。当該sourceをROUTE_RECOVERY_REQUIREDにして有限広告とDATA選択を止める。再開方式（安全な永続frontier、またはRFCの寿命条件を満たす回復）、origin generation変更、sequence周回、GC timerをG-ROUTEで一貫して凍結する。この停止規則は安全側であり迅速な復旧が完成した証拠ではない。
 
+portable profileでは以下を凍結した（`routing.hpp`/`node.cpp`の定数）。source keyは `(network, destination, origin generation)` で、ROUTE_UPDATEの各recordは destination(8)+generation(2)+sequence(2)+metric(2)の14byteを持つ。origin generationはnodeの永続化単調値で、bootごとに増加させる。自nodeより低いgenerationの広告は常に棄却し、高いgenerationはそのsourceのFD・候補・tombstoneを全て再初期化する。隣接nodeの自己recordでgenerationが上がった時、そのpeer経由の全候補をhold-down無しで破棄する（再起動relayの前世代stateを残さない）。
+
+FDは最後の候補が消えてもtombstoneとして60秒（`kRouteTombstoneDwellMs`）保持し、GCはdwell経過後のみ行う。撤回・隣接喪失したnext hopは500ms（`kRouteHoldDownMs`）hold-downする。triggered広告はneighbor喪失・selected route変更・sequence bumpで起動し、最小間隔1秒・最大64msの決定的jitterでburstを束ねる。1 frameのrecord上限は9で、selected routeの全dumpはper-neighborの回転cursorで複数更新へ分割する。
+
+SeqNoRequestは宛先ごとにcooldown 2秒から線形に最大30秒までbackoffし、attemptは8回・同時in-flightは4件・state dwellは30秒・TTL上限10で打ち切る。これらはportable modelで検証済みの値であり、実機・RF上の成立証明ではない。
+
 管理者不在での通常DATAを成立させるため、正常再起動の度に任意の新originをAuthorityへ発行させる方式を無条件に追加しない。origin sequenceを中継が勝手に増加させない。source keyを増やして古いsourceの安全履歴を逃れる実装は禁止。
 
 pairwise controlのfan-out、active origins、entry長、周期、lease、request最大待ちを同時にcapacity manifestへ決める。token待ちでleaseを破る設定はprofile不成立。small実機での成立を100台へ外挿しない。route restart/GC・量子化単位・timerを未確定のままproduction routing capabilityを有効にしない。

@@ -13,6 +13,10 @@ struct CounterRecord {
   std::uint8_t reserved{0};
   std::uint64_t high_water_exclusive{0};
   std::uint32_t generation{0};
+  // crc32_iso_hdlc over the preceding bytes. A corrupted high-water must
+  // never be adopted silently: rewinding the counter would reuse AES-GCM
+  // nonces under the same key.
+  std::uint32_t crc{0};
 };
 
 class CounterStore {

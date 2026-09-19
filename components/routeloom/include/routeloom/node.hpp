@@ -19,6 +19,10 @@ struct NodeConfig {
   std::uint32_t message_session{0};
   std::uint16_t link_epoch{1};
   std::uint16_t end_epoch{1};
+  // Origin generation for this node's own route source. Must be persisted
+  // monotonic and incremented on every boot; a restarted node advertises a
+  // higher generation so peers discard its previous-incarnation route state.
+  std::uint16_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
   std::uint32_t hop_accept_timeout_ms{60};
@@ -53,6 +57,24 @@ class NullObserver final : public NodeObserver {
   void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
 };
 
+// Policy applied by MeshNode::settle_for_sleep to deliveries that are not in a
+// terminal state when the node drains for sleep.
+enum class SleepWorkPolicy : std::uint8_t {
+  Fail = 0,   // fail with an explicit reason
+  Save = 1,   // persist unfinished deliveries into the sleep image
+  Defer = 2,  // leave them; the result is unknown after real sleep
+};
+
+// Read-only view of a Delivery slot for the power coordinator.
+struct DeliverySnapshot {
+  MessageId id{};
+  NodeId destination{kInvalidNodeId};
+  SendOptions options{};
+  DeliveryState state{DeliveryState::Empty};
+  MonotonicMs expires_at_ms{0};
+  ByteView payload{};
+};
+
 class MeshNode {
  public:
   MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
@@ -61,7 +83,7 @@ class MeshNode {
   Status start(MonotonicMs now_ms) noexcept;
   Status add_neighbor(NodeId neighbor, RouteMetric link_metric,
                       MonotonicMs now_ms) noexcept;
-  Status remove_neighbor(NodeId neighbor) noexcept;
+  Status remove_neighbor(NodeId neighbor, MonotonicMs now_ms) noexcept;
 
   Status send(NodeId destination, ByteView payload, const SendOptions& options,
               MonotonicMs now_ms, MessageId& id) noexcept;
@@ -75,7 +97,105 @@ class MeshNode {
                           MonotonicMs now_ms) noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
+  const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
+  bool started() const noexcept { return started_; }
+
+  // Sleep support. While draining, send() is rejected and background work
+  // (route advertisements, sequence requests, retry rounds) stops; in-flight
+  // queue entries still dispatch so the TX path can settle.
+  void set_draining(bool draining) noexcept { draining_ = draining; }
+  bool draining() const noexcept { return draining_; }
+  // True when no radio-bound work remains: empty TX queue, no physical
+  // in-flight frame and no job waiting for a hop accept.
+  bool quiesced() const noexcept {
+    return !physical_.active && tx_queue_.empty() && awaiting_hop_.size() == 0;
+  }
+  // Bumped on every send() call, received frame and TX-result callback: any
+  // radio-visible activity. Used to invalidate outstanding sleep tickets.
+  std::uint32_t work_generation() const noexcept { return work_generation_; }
+  // Bumps only on inbound radio frames that pass link authentication and the
+  // network/peer identity check — the signal the power coordinator uses to
+  // confirm saved peers actually answered after a resume. Invalid frames, TX
+  // callbacks and app sends do not count as peer confirmation.
+  std::uint32_t rx_generation() const noexcept { return rx_generation_; }
+  // Bumped on peer/config changes (neighbor add/remove).
+  std::uint32_t config_revision() const noexcept { return config_revision_; }
+  static constexpr std::size_t delivery_capacity() noexcept {
+    return kDeliveryCapacity;
+  }
+
+  template <typename Fn>
+  void for_each_delivery(Fn fn) const noexcept {
+    deliveries_.for_each([&](const Delivery& delivery) {
+      fn(DeliverySnapshot{delivery.id, delivery.destination, delivery.options,
+                          delivery.state, delivery.expires_at_ms,
+                          ByteView{delivery.payload.data(), delivery.payload_size}});
+    });
+  }
+
+  // Phase 1 of the sleep settlement — read-only. Offers every non-terminal
+  // durable delivery (or all non-terminal deliveries under SleepWorkPolicy::
+  // Save) to `save` WITHOUT changing delivery state: until the durable image
+  // is committed, live work must stay live so a persistence failure can abort
+  // back to running with nothing lost.
+  template <typename SaveFn>
+  void snapshot_for_sleep(SleepWorkPolicy fallback, SaveFn&& save) noexcept {
+    deliveries_.for_each([&](const Delivery& delivery) {
+      if (sleep_terminal(delivery.state)) return;
+      if (delivery.options.persist_across_sleep ||
+          fallback == SleepWorkPolicy::Save) {
+        save(DeliverySnapshot{delivery.id, delivery.destination, delivery.options,
+                              delivery.state, delivery.expires_at_ms,
+                              ByteView{delivery.payload.data(),
+                                       delivery.payload_size}});
+      }
+    });
+  }
+
+  // Phase 2 — only after the durable image commit succeeded. `was_saved`
+  // reports whether a delivery id landed in the committed image; those
+  // deliveries become Indeterminate (outcome decided after resume). Everything
+  // else follows `fallback`: a delivery that was eligible but not saved fails
+  // explicitly — durable work is never dropped silently.
+  template <typename WasSavedFn>
+  void apply_sleep_dispositions(SleepWorkPolicy fallback,
+                                WasSavedFn&& was_saved) noexcept {
+    deliveries_.for_each([&](Delivery& delivery) {
+      if (sleep_terminal(delivery.state)) return;
+      const bool durable = delivery.options.persist_across_sleep;
+      const bool eligible = durable || fallback == SleepWorkPolicy::Save;
+      if (eligible && was_saved(delivery.id)) {
+        set_delivery_state(delivery, DeliveryState::Indeterminate, "SLEEP_SAVED");
+      } else if (fallback == SleepWorkPolicy::Defer && !durable) {
+        set_delivery_state(delivery, DeliveryState::Indeterminate, "SLEEP_DEFERRED");
+      } else {
+        set_delivery_state(delivery, DeliveryState::Failed,
+                           eligible ? "SLEEP_PERSIST_FULL" : "SLEEP_DRAIN");
+      }
+    });
+  }
+
+  // Re-injects a persisted delivery under its ORIGINAL logical message id so
+  // the destination's terminal dedup still suppresses a payload it already
+  // delivered when the end receipt was lost in sleep. Only the power
+  // coordinator calls this; ordinary send() always allocates a fresh id.
+  // Rejected when the id is already live or collides with argument checks.
+  Status resume_delivery(const MessageId& id, NodeId destination, ByteView payload,
+                         const SendOptions& options, MonotonicMs now_ms) noexcept;
+
+  // Drops all queued/in-flight radio work after apply_sleep_dispositions ran.
+  // A frame
+  // already handed to the driver is reported unknown, never as sent.
+  void quiesce_for_sleep() noexcept {
+    if (physical_.active) {
+      observer_.on_diagnostic("SLEEP_TX_INFLIGHT", physical_.job.peer,
+                              &physical_.job.ack.key.id);
+      physical_ = PhysicalInflight{};
+    }
+    tx_queue_.clear();
+    awaiting_hop_.clear();
+  }
 
  private:
   static constexpr std::size_t kNeighborCapacity = 32;
@@ -89,7 +209,9 @@ class MeshNode {
   struct Neighbor {
     NodeId node{kInvalidNodeId};
     RouteMetric metric{1};
+    RouteGeneration generation{0};  // last origin generation the peer self-advertised
     std::uint8_t consecutive_failures{0};
+    std::uint8_t route_cursor{0};  // rotation cursor for periodic route dumps
     bool active{false};
   };
 
@@ -100,10 +222,15 @@ class MeshNode {
     MonotonicMs expires_at_ms{0};
   };
 
+  // Per-destination request state. Survives dedup (seqno_seen_) expiry so the
+  // retry cap and cooldown still apply after the seen-record is gone.
   struct SeqnoState {
     NodeId destination{kInvalidNodeId};
     RouteSequence requested_sequence{0};
     MonotonicMs next_request_ms{0};
+    MonotonicMs last_sent_ms{0};
+    MonotonicMs expires_at_ms{0};
+    std::uint8_t attempts{0};
   };
 
   struct DedupEntry {
@@ -177,6 +304,10 @@ class MeshNode {
 
   void set_delivery_state(Delivery& delivery, DeliveryState state,
                           const char* reason) noexcept;
+  static bool sleep_terminal(DeliveryState state) noexcept;
+  Status enqueue_delivery(const MessageId& id, NodeId destination, ByteView payload,
+                          const SendOptions& options, MonotonicMs now_ms,
+                          MessageId& out) noexcept;
   Status queue_origin_data(Delivery& delivery, MonotonicMs now_ms) noexcept;
   Status queue_forward(const wire::LinkOpenedFrame& frame, NodeId next_hop,
                        MonotonicMs now_ms) noexcept;
@@ -210,6 +341,11 @@ class MeshNode {
   void schedule_route_advertisements(MonotonicMs now_ms) noexcept;
   void schedule_sequence_requests(MonotonicMs now_ms) noexcept;
   void expire_sequence_requests(MonotonicMs now_ms) noexcept;
+  // Triggered update: schedule a full-neighbor advertisement burst after a
+  // deterministic jitter, bounded by a minimum interval between bursts so a
+  // flap storm cannot flood the TX queue.
+  void trigger_route_advertisement(MonotonicMs now_ms) noexcept;
+  void run_triggered_advertisement(MonotonicMs now_ms) noexcept;
 
   static Status encode_ack_payload(const AckKey& key,
                                    std::array<std::uint8_t, kMaxApplicationPayload>& payload,
@@ -241,7 +377,15 @@ class MeshNode {
   RouteSequence self_route_sequence_{1};
   MonotonicMs next_route_advertisement_ms_{0};
   std::size_t route_neighbor_cursor_{0};
+  bool triggered_advertisement_{false};
+  MonotonicMs triggered_at_ms_{0};
+  MonotonicMs next_triggered_ms_{0};
+  std::uint32_t trigger_counter_{0};
+  std::uint32_t work_generation_{0};
+  std::uint32_t rx_generation_{0};
+  std::uint32_t config_revision_{0};
   bool started_{false};
+  bool draining_{false};
 };
 
 }  // namespace routeloom

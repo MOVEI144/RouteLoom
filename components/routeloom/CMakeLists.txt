@@ -1,11 +1,17 @@
 set(ROUTELOOM_CORE_SOURCES
   src/authority.cpp
   src/byte_io.cpp
+  src/crc32.cpp
   src/c_api.cpp
   src/counter_store.cpp
   src/node.cpp
+  src/power.cpp
+  src/replay.cpp
   src/routing.cpp
   src/status.cpp
+  src/usb_bridge.cpp
+  src/usb_codec.cpp
+  src/usb_session.cpp
   src/wire.cpp
 )
 
