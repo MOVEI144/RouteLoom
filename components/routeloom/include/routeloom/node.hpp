@@ -57,6 +57,24 @@ class NullObserver final : public NodeObserver {
   void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
 };
 
+// Policy applied by MeshNode::settle_for_sleep to deliveries that are not in a
+// terminal state when the node drains for sleep.
+enum class SleepWorkPolicy : std::uint8_t {
+  Fail = 0,   // fail with an explicit reason
+  Save = 1,   // persist unfinished deliveries into the sleep image
+  Defer = 2,  // leave them; the result is unknown after real sleep
+};
+
+// Read-only view of a Delivery slot for the power coordinator.
+struct DeliverySnapshot {
+  MessageId id{};
+  NodeId destination{kInvalidNodeId};
+  SendOptions options{};
+  DeliveryState state{DeliveryState::Empty};
+  MonotonicMs expires_at_ms{0};
+  ByteView payload{};
+};
+
 class MeshNode {
  public:
   MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
@@ -79,7 +97,91 @@ class MeshNode {
                           MonotonicMs now_ms) noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
+  const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
+  bool started() const noexcept { return started_; }
+
+  // Sleep support. While draining, send() is rejected and background work
+  // (route advertisements, sequence requests, retry rounds) stops; in-flight
+  // queue entries still dispatch so the TX path can settle.
+  void set_draining(bool draining) noexcept { draining_ = draining; }
+  bool draining() const noexcept { return draining_; }
+  // True when no radio-bound work remains: empty TX queue, no physical
+  // in-flight frame and no job waiting for a hop accept.
+  bool quiesced() const noexcept {
+    return !physical_.active && tx_queue_.empty() && awaiting_hop_.size() == 0;
+  }
+  // Bumped on every send() call, received frame and TX-result callback: any
+  // radio-visible activity. Used to invalidate outstanding sleep tickets.
+  std::uint32_t work_generation() const noexcept { return work_generation_; }
+  // Bumped on peer/config changes (neighbor add/remove).
+  std::uint32_t config_revision() const noexcept { return config_revision_; }
+  static constexpr std::size_t delivery_capacity() noexcept {
+    return kDeliveryCapacity;
+  }
+
+  template <typename Fn>
+  void for_each_delivery(Fn fn) const noexcept {
+    deliveries_.for_each([&](const Delivery& delivery) {
+      fn(DeliverySnapshot{delivery.id, delivery.destination, delivery.options,
+                          delivery.state, delivery.expires_at_ms,
+                          ByteView{delivery.payload.data(), delivery.payload_size}});
+    });
+  }
+
+  // Moves every non-terminal delivery to its sleep disposition. A delivery
+  // with options.persist_across_sleep is always offered to `save` (which
+  // returns true when it persisted the snapshot); other deliveries follow
+  // `fallback`. A failed save attempt fails the delivery explicitly — durable
+  // work is never dropped silently.
+  template <typename SaveFn>
+  std::size_t settle_for_sleep(SleepWorkPolicy fallback, SaveFn&& save) noexcept {
+    std::size_t settled = 0;
+    deliveries_.for_each([&](Delivery& delivery) {
+      switch (delivery.state) {
+        case DeliveryState::Empty:
+        case DeliveryState::Delivered:
+        case DeliveryState::Failed:
+        case DeliveryState::Expired:
+        case DeliveryState::CancelledBeforeTx:
+        case DeliveryState::Indeterminate:
+          return;
+        default:
+          break;
+      }
+      ++settled;
+      const bool durable = delivery.options.persist_across_sleep;
+      if ((durable || fallback == SleepWorkPolicy::Save) &&
+          save(DeliverySnapshot{delivery.id, delivery.destination, delivery.options,
+                                delivery.state, delivery.expires_at_ms,
+                                ByteView{delivery.payload.data(),
+                                         delivery.payload_size}})) {
+        // Re-sent under a fresh message id after resume; from this
+        // incarnation's point of view the outcome is unknown.
+        set_delivery_state(delivery, DeliveryState::Indeterminate, "SLEEP_SAVED");
+      } else if (fallback == SleepWorkPolicy::Defer && !durable) {
+        set_delivery_state(delivery, DeliveryState::Indeterminate, "SLEEP_DEFERRED");
+      } else {
+        set_delivery_state(delivery, DeliveryState::Failed,
+                           durable || fallback == SleepWorkPolicy::Save
+                               ? "SLEEP_PERSIST_FULL"
+                               : "SLEEP_DRAIN");
+      }
+    });
+    return settled;
+  }
+
+  // Drops all queued/in-flight radio work after settle_for_sleep ran. A frame
+  // already handed to the driver is reported unknown, never as sent.
+  void quiesce_for_sleep() noexcept {
+    if (physical_.active) {
+      observer_.on_diagnostic("SLEEP_TX_INFLIGHT", physical_.job.peer,
+                              &physical_.job.ack.key.id);
+      physical_ = PhysicalInflight{};
+    }
+    tx_queue_.clear();
+    awaiting_hop_.clear();
+  }
 
  private:
   static constexpr std::size_t kNeighborCapacity = 32;
@@ -261,7 +363,10 @@ class MeshNode {
   MonotonicMs triggered_at_ms_{0};
   MonotonicMs next_triggered_ms_{0};
   std::uint32_t trigger_counter_{0};
+  std::uint32_t work_generation_{0};
+  std::uint32_t config_revision_{0};
   bool started_{false};
+  bool draining_{false};
 };
 
 }  // namespace routeloom

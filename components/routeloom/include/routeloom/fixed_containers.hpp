@@ -121,6 +121,15 @@ class FixedPool {
     return count;
   }
 
+  void clear() noexcept {
+    for (std::size_t i = 0; i < Capacity; ++i) {
+      if (used_[i]) {
+        used_[i] = false;
+        reset(items_[i]);
+      }
+    }
+  }
+
   constexpr std::size_t capacity() const noexcept { return Capacity; }
 
  private:

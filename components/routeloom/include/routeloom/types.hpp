@@ -130,6 +130,9 @@ struct SendOptions {
   Priority priority{Priority::Normal};
   std::uint32_t lifetime_ms{5000};
   std::uint8_t hop_limit{kDefaultHopLimit};
+  // Request durability across deep sleep: the power coordinator persists the
+  // delivery into the sleep image instead of failing it at drain.
+  bool persist_across_sleep{false};
 };
 
 struct DeliveryResult {

@@ -95,6 +95,7 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
     record->active = false;
     return Status::error(StatusCode::NoCapacity, "route table full");
   }
+  ++config_revision_;
   next_route_advertisement_ms_ = now_ms;
   return Status::success();
 }
@@ -105,6 +106,7 @@ Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms
   record->active = false;
   routes_.invalidate_next_hop(neighbor, now_ms);
   ++self_route_sequence_;
+  ++config_revision_;
   trigger_route_advertisement(now_ms);
   return Status::success();
 }
@@ -149,6 +151,12 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
                       const SendOptions& options, const MonotonicMs now_ms,
                       MessageId& id) noexcept {
   if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
+  // Any application TX intent is activity: it must invalidate an outstanding
+  // sleep ticket even when the request itself is rejected below.
+  ++work_generation_;
+  if (draining_) {
+    return Status::error(StatusCode::InvalidState, "NODE_DRAINING");
+  }
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
       options.lifetime_ms == 0 || options.hop_limit == 0) {
@@ -596,6 +604,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
                                   const MonotonicMs now_ms) noexcept {
+  ++work_generation_;
   if (!physical_.active || physical_.token != token) {
     observer_.on_diagnostic("STALE_TX_CALLBACK", kInvalidNodeId, nullptr);
     return;
@@ -967,6 +976,9 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
                                 const MonotonicMs now_ms) noexcept {
   (void)metadata;
   if (!started_) return;
+  // Any received frame — even one that fails decode — is radio activity and
+  // must invalidate outstanding sleep tickets.
+  ++work_generation_;
   wire::LinkOpenedFrame frame{};
   auto status = wire::open_link(encoded, config_.node, security_, frame);
   if (!status) {
@@ -1033,7 +1045,10 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
       set_delivery_state(delivery, DeliveryState::Expired, "DEADLINE_EXPIRED");
       return;
     }
-    if ((delivery.state == DeliveryState::WaitingForRoute ||
+    // While draining, retry rounds do not re-enqueue: the deliveries wait for
+    // their sleep disposition (fail/save/defer) instead of making new work.
+    if (!draining_ &&
+        (delivery.state == DeliveryState::WaitingForRoute ||
          delivery.state == DeliveryState::WaitingForEndReceipt) &&
         now_ms >= delivery.next_round_at_ms) {
       if (delivery.state == DeliveryState::WaitingForEndReceipt) {
@@ -1188,9 +1203,13 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   process_delivery_timeouts(now_ms);
   routes_.for_each_selected_change(
       [&](const RouteSelection&) { trigger_route_advertisement(now_ms); });
-  run_triggered_advertisement(now_ms);
-  schedule_sequence_requests(now_ms);
-  schedule_route_advertisements(now_ms);
+  if (!draining_) {
+    // Background work stops while draining; in-flight queue entries still
+    // dispatch below so the TX path can settle.
+    run_triggered_advertisement(now_ms);
+    schedule_sequence_requests(now_ms);
+    schedule_route_advertisements(now_ms);
+  }
   dispatch_next(now_ms);
 }
 

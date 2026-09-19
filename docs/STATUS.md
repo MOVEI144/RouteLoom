@@ -1,6 +1,6 @@
 # 実装状況とリリース条件
 
-更新：2026-09-18。
+更新：2026-09-19。
 
 ## 現在の証拠
 
@@ -15,7 +15,7 @@
 | 暗号Provider | PSA AES-GCM、HMAC導出、counter予約、replay windowを持つ開発PSK Providerを実装。本番Identity／EDHOC／RPKではなく未認定 |
 | 経路制御 | feasibility、withdraw、SeqNoRequest、3hop／diamond repairをportable testで実装・確認。実RF、分断再結合、10hopは未認定 |
 | 管理 | SingleAuthorityの2スロット耐電断台帳（magic/length/schema/seal、hash chain、CRC-32/ISO-HDLC、readback検証、全損時QUARANTINED＋明示recover）をportable実装・host power-cut試験済み。NVS LedgerStorage adapterはbuild-tested。quorum／自動選挙／snapshot／remote config本体は未実装 |
-| 電源管理 | 契約とcounter再開の基礎あり。Deep Sleep実機resumeは未実装・未試験 |
+| 電源管理 | Portable PowerCoordinator（RUNNING→DRAINING→PERSISTING→READY_TO_SLEEP→SLEEPING→RESUMINGの明示state machine、SleepTicket無効化、2スロットCRC電源image、durable pending復元、TIME_UNCERTAIN規則、bounded resume＋discovery fallback）を実装・host model試験済み。ESP-NOW PowerPort／NVS image／reference firmwareのdeep-sleep経路は`ROUTELOOM_DEEP_SLEEP`選択時のみ配線・build-tested。ESP-NOW bounded discoveryは現状UNSUPPORTED。実機resume、消費電流、wake timing、RTC経過計測は未試験 |
 | Board/RF | 公式資料を整理。C3/S3/C5現物照合、HIL、到達距離、都市部干渉、電池寿命は未実施 |
 | 高度機能 | LR500適応、自動channel移行、Mesh OTA、LoRa TX、service failoverは未実装 |
 | ライセンス | 未選定。安定OSSリリースの阻止条件 |
@@ -38,7 +38,7 @@
 - **G-ROUTE**：portable実装を基準に、restart／GC／timer、分断再結合、複数origin、10hopをmodel testと実機で認定する。
 - **G-CONTROL**：SingleAuthorityの耐電断台帳は実装・host試験済みで、membership承認／失効／remote config向けの操作型integration pointを持つ。NVS実機・HIL、およびHAの選挙、log、snapshot、構成員変更、proofは別途認定する。
 - **G-USB**：device側bridge、認証transcript、frame保護、累積creditはportable実装済みで、C++／Rust共有golden vectorでhost相互検証済み。実USB driver・HILでの確認、および本番Profile認証（G-SEC）が残る。
-- **G-POWER**：Deep Sleep前のdrain、RTC/NVS、wake原因、再初期化、counter安全性、battery-side energyを実機で確認する。
+- **G-POWER**：coordinator state machine、SleepTicket、電源image永続化、counter非後退、TIME_UNCERTAIN規則はportable実装・host model試験済み。ESP-NOW bounded discovery、実機でのdrain、RTC/NVS、wake原因、再初期化、counter安全性、battery-side energy確認が残る。
 - **G-BOARD**：現物revision、電源、アンテナ、Pin、Flash/PSRAMを照合する。
 - **G-RF**：C3/S3/C5の有向組合せでLR250、broadcast/unicast、callback欠落、Peer churn、干渉、Sleep復帰を認定する。
 - **G-SYSTEM**：USB再接続、キュー不足、PC停止、長期運転、設定更新を試験する。

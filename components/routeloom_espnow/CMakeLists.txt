@@ -1,5 +1,6 @@
 idf_component_register(
   SRCS
+    src/espnow_power.cpp
     src/espnow_runtime.cpp
     src/nvs_counter_store.cpp
     src/nvs_ledger_store.cpp
