@@ -26,11 +26,12 @@ const TX_GRANT_FRAMES: u64 = 16; // host grant to device
 const TX_GRANT_BYTES: u64 = 65536;
 
 fn hex(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len() * 2);
-    for byte in data {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
+    use std::fmt::Write;
+    data.iter()
+        .fold(String::with_capacity(data.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 struct Step {

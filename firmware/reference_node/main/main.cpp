@@ -31,10 +31,12 @@ using routeloom::NodeObserver;
 using routeloom::Status;
 using routeloom::StatusCode;
 using routeloom::espnow::DevelopmentPskSecurityProvider;
+using routeloom::espnow::EspNowPowerPort;
 using routeloom::espnow::EspNowRuntime;
 using routeloom::espnow::EspNowRuntimeConfig;
 using routeloom::espnow::MacAddress;
 using routeloom::espnow::NvsCounterStore;
+using routeloom::espnow::NvsSleepStorage;
 
 class LogObserver final : public NodeObserver {
  public:
@@ -161,12 +163,13 @@ class LogPowerEvents final : public routeloom::PowerEvents {
 };
 
 routeloom::ResetCause classify_boot() noexcept {
-  const esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
+  // esp_sleep_get_wakeup_causes returns the bitmask of wakeup sources; zero
+  // means the reset was not a sleep wakeup (ESP_SLEEP_WAKEUP_UNDEFINED).
+  const std::uint32_t wakeup = esp_sleep_get_wakeup_causes();
   const esp_reset_reason_t reason = esp_reset_reason();
   const bool marked = s_sleep_marker == kSleepMarkerValue;
   s_sleep_marker = 0;
-  if (marked && (reason == ESP_RST_DEEPSLEEP ||
-                 wakeup != ESP_SLEEP_WAKEUP_UNDEFINED)) {
+  if (marked && (reason == ESP_RST_DEEPSLEEP || wakeup != 0U)) {
     return routeloom::ResetCause::DeepSleepWake;
   }
   if (reason == ESP_RST_POWERON || reason == ESP_RST_BROWNOUT ||

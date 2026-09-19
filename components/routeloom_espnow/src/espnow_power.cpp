@@ -84,8 +84,11 @@ Status EspNowPowerPort::configure_wake(const WakePlan& plan) noexcept {
     }
   }
   if (plan.gpio_mask != 0) {
-#if SOC_GPIO_SUPPORT_DEEPSLEEP_WAKEUP
-    const esp_err_t error = esp_deep_sleep_enable_gpio_wakeup(
+#if SOC_GPIO_SUPPORT_HP_PERIPH_PD_SLEEP_WAKEUP
+    // C3/C5 wake deep sleep through the HP-peripheral powerdown GPIO path.
+    // Targets without it (for example S3, which uses EXT1) are reported
+    // unsupported rather than guessed.
+    const esp_err_t error = esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(
         plan.gpio_mask, ESP_GPIO_WAKEUP_GPIO_HIGH);
     if (error != ESP_OK) {
       return Status::error(StatusCode::InvalidArgument,
