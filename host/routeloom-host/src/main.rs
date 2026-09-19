@@ -80,14 +80,24 @@ enum SessionPhase {
     Active,
 }
 
+/// One frame the adapter writer must emit. Everything flows through the
+/// single writer thread so session-counter assignment and wire order can
+/// never diverge: `Seal` items are protected (counter || tag || inner) at
+/// write time, `Raw` items go out unprotected by design (Hello/AUTH).
+enum Outbound {
+    Raw(Frame),
+    Seal(Frame),
+}
+
 /// Result of feeding one inbound wire frame to the session layer.
 #[derive(Default)]
 struct SessionInbound {
     /// Verified inner body for record_frame (None when the session layer
     /// consumed the frame: handshake step, replay, or malformed).
     inner: Option<Vec<u8>>,
-    /// Wire-ready frames to emit immediately (AUTH, grants, keepalive acks).
-    outbound: Vec<Frame>,
+    /// Frames to emit through the writer queue (AUTH, grants, re-hellos).
+    /// Produced unsealed: the writer assigns the session counter.
+    outbound: Vec<Outbound>,
     /// `"kind":...` JSON field fragments for the event log.
     notes: Vec<String>,
     /// Device identity learned from HelloAck (version,node,boot,network,capability).
@@ -221,20 +231,21 @@ impl DeviceSession {
         Ok(())
     }
 
-    /// Credit grant for the device→host direction (sealed Credit frame).
-    fn grant_frame(&mut self) -> Option<Frame> {
+    /// Credit grant for the device→host direction. Returned UNSEALED: the
+    /// single writer thread seals it at write time so session counters are
+    /// assigned in wire order.
+    fn grant_frame(&mut self) -> Frame {
         let mut inner = Vec::with_capacity(17);
         inner.push(CREDIT_GRANT);
         inner.extend_from_slice(&self.tx_grant_frames.to_be_bytes());
         inner.extend_from_slice(&self.tx_grant_bytes.to_be_bytes());
-        let mut frame = Frame {
+        Frame {
             kind: FrameKind::Credit,
             flags: 0,
             session: 0,
             request: self.next_request(),
             body: inner,
-        };
-        self.protect(&mut frame).ok().map(|()| frame)
+        }
     }
 
     /// Process one inbound wire frame. Handshake frames are unprotected by
@@ -289,7 +300,7 @@ impl DeviceSession {
                     );
                     // Restart the handshake: the device holding a dead
                     // half-session would otherwise never recover.
-                    result.outbound.push(self.begin());
+                    result.outbound.push(Outbound::Raw(self.begin()));
                     return result;
                 }
                 result.hello_info = Some((
@@ -316,7 +327,7 @@ impl DeviceSession {
                 };
                 self.proof = Some(proof);
                 self.phase = SessionPhase::AwaitAuthOk;
-                result.outbound.push(auth);
+                result.outbound.push(Outbound::Raw(auth));
             }
             SessionPhase::AwaitAuthOk => {
                 if frame.kind != FrameKind::HelloAck || frame.flags & FLAG_AUTH == 0 {
@@ -341,9 +352,7 @@ impl DeviceSession {
                 self.send_credit = CumulativeCredit::new(self.session_id);
                 self.tx_grant_frames = DEVICE_TX_GRANT_FRAMES;
                 self.tx_grant_bytes = DEVICE_TX_GRANT_BYTES;
-                if let Some(grant) = self.grant_frame() {
-                    result.outbound.push(grant);
-                }
+                result.outbound.push(Outbound::Seal(self.grant_frame()));
                 result.auth_session = Some(self.session_id);
                 result.notes.push(format!(
                     "\"kind\":\"auth_ok\",\"session\":{}",
@@ -377,23 +386,22 @@ impl DeviceSession {
                         }
                         self.d2h_counter = counter + 1;
                         let inner = inner.to_vec();
-                        if frame.kind == FrameKind::Credit && inner.len() >= 17 {
-                            match inner[0] {
-                                CREDIT_GRANT => {
+                        if frame.kind == FrameKind::Credit {
+                            match inner.first() {
+                                Some(&CREDIT_GRANT) if inner.len() >= 17 => {
                                     let frames =
                                         u64::from_be_bytes(inner[1..9].try_into().expect("frames"));
                                     let bytes =
                                         u64::from_be_bytes(inner[9..17].try_into().expect("bytes"));
                                     let _ = self.send_credit.update(self.session_id, frames, bytes);
                                 }
-                                CREDIT_QUERY => {
-                                    // Device asks for more headroom: extend
-                                    // the cumulative grant we advertised.
+                                Some(&CREDIT_QUERY) => {
+                                    // The query body is a single opcode byte:
+                                    // device asks for more headroom, so
+                                    // extend the cumulative grant.
                                     self.tx_grant_frames += DEVICE_TX_GRANT_FRAMES;
                                     self.tx_grant_bytes += DEVICE_TX_GRANT_BYTES;
-                                    if let Some(grant) = self.grant_frame() {
-                                        result.outbound.push(grant);
-                                    }
+                                    result.outbound.push(Outbound::Seal(self.grant_frame()));
                                 }
                                 _ => {}
                             }
@@ -415,7 +423,7 @@ impl DeviceSession {
                             let code = u16::from_be_bytes([inner[0], inner[1]]);
                             if matches!(code, 2 | 3 | 4 | 11) {
                                 result.inner = Some(inner);
-                                result.outbound.push(self.begin());
+                                result.outbound.push(Outbound::Raw(self.begin()));
                                 return result;
                             }
                         }
@@ -429,7 +437,7 @@ impl DeviceSession {
                             "\"kind\":\"session_drop\",\"reason\":\"SESSION_TAG_INVALID\""
                                 .to_string(),
                         );
-                        result.outbound.push(self.begin());
+                        result.outbound.push(Outbound::Raw(self.begin()));
                     }
                 }
             }
@@ -1018,7 +1026,7 @@ fn adapter_read_loop(
     mut reader: File,
     state: &State,
     session: &Arc<Mutex<DeviceSession>>,
-    writer_slot: &Arc<Mutex<Option<File>>>,
+    outbound: &mpsc::SyncSender<Outbound>,
 ) -> io::Result<()> {
     let mut decoder = StreamDecoder::default();
     let mut buffer = [0_u8; 512];
@@ -1035,13 +1043,32 @@ fn adapter_read_loop(
                     match result {
                         Ok(frame) => {
                             state.rx_frames.fetch_add(1, Ordering::Relaxed);
-                            let inbound = {
+                            let mut inbound = {
                                 let mut guard = session.lock().expect("device session poisoned");
                                 guard.handle(&frame)
                             };
-                            for outbound in &inbound.outbound {
-                                if let Err(error) = transmit(writer_slot, state, outbound) {
-                                    set_error(state, error.to_string());
+                            // Session responses go through the SAME bounded
+                            // writer queue as client data: only the writer
+                            // thread seals (assigns the session counter) and
+                            // writes, so counter order is always wire order.
+                            for item in std::mem::take(&mut inbound.outbound) {
+                                match outbound.try_send(item) {
+                                    Ok(()) => {}
+                                    Err(mpsc::TrySendError::Full(_)) => {
+                                        set_error(state, "outbound queue full".to_string());
+                                        push_event(
+                                            state,
+                                            now_ms(),
+                                            "\"kind\":\"session_drop\",\"reason\":\"outbound queue full\""
+                                                .to_string(),
+                                        );
+                                    }
+                                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                                        return Err(io::Error::new(
+                                            io::ErrorKind::BrokenPipe,
+                                            "adapter writer gone",
+                                        ));
+                                    }
                                 }
                             }
                             merge_session_inbound(state, &inbound, &frame, now_ms());
@@ -1096,7 +1123,7 @@ fn merge_session_inbound(state: &State, inbound: &SessionInbound, frame: &Frame,
 }
 
 fn adapter_writer_loop(
-    outbound: mpsc::Receiver<Frame>,
+    outbound: mpsc::Receiver<Outbound>,
     writer_slot: Arc<Mutex<Option<File>>>,
     state: Arc<State>,
     session: Arc<Mutex<DeviceSession>>,
@@ -1105,34 +1132,31 @@ fn adapter_writer_loop(
         // recv_timeout doubles as the keepalive tick: an idle active session
         // gets a sealed KeepAlive so the device sees liveness (and a dead
         // session is noticed at the next failed authentication).
-        let frame = match outbound.recv_timeout(KEEPALIVE_INTERVAL) {
-            Ok(frame) => frame,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let mut frame = Frame {
-                    kind: FrameKind::KeepAlive,
-                    flags: 0,
-                    session: 0,
-                    request: 0,
-                    body: Vec::new(),
-                };
-                {
-                    let mut guard = session.lock().expect("device session poisoned");
-                    if guard.protect(&mut frame).is_err() {
-                        continue;
-                    }
-                }
+        let item = match outbound.recv_timeout(KEEPALIVE_INTERVAL) {
+            Ok(item) => item,
+            Err(mpsc::RecvTimeoutError::Timeout) => Outbound::Seal(Frame {
+                kind: FrameKind::KeepAlive,
+                flags: 0,
+                session: 0,
+                request: 0,
+                body: Vec::new(),
+            }),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        let mut frame = match item {
+            // Handshake frames are unprotected by design — write as-is.
+            Outbound::Raw(frame) => {
                 if let Err(error) = transmit(&writer_slot, &state, &frame) {
                     set_error(&state, error.to_string());
                 }
                 continue;
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Outbound::Seal(frame) => frame,
         };
         // Seal the queued inner body under the session key. Sealing happens
-        // here — not in serve_client — so the single writer thread keeps
-        // direction counters strictly sequential even when a send is
-        // rejected or the queue drops frames.
-        let mut frame = frame;
+        // here — on the ONLY thread that writes — so direction counters are
+        // strictly sequential with wire order even when a send is rejected
+        // or the queue drops frames.
         let protected = {
             let mut guard = session.lock().expect("device session poisoned");
             guard.protect(&mut frame)
@@ -1194,6 +1218,7 @@ fn adapter_supervisor(
     state: Arc<State>,
     writer_slot: Arc<Mutex<Option<File>>>,
     session: Arc<Mutex<DeviceSession>>,
+    outbound: mpsc::SyncSender<Outbound>,
 ) {
     let mut backoff_ms = 500_u64;
     loop {
@@ -1223,10 +1248,13 @@ fn adapter_supervisor(
                     let mut guard = session.lock().expect("device session poisoned");
                     guard.begin()
                 };
-                if let Err(error) = transmit(&writer_slot, &state, &hello) {
-                    set_error(&state, format!("hello write failed: {error}"));
+                // Even Hello goes through the writer queue: a stale-session
+                // frame left over from the previous link must not overtake
+                // it on the wire.
+                if outbound.send(Outbound::Raw(hello)).is_err() {
+                    set_error(&state, "hello queue failed: writer gone".to_string());
                 }
-                let result = adapter_read_loop(reader, &state, &session, &writer_slot);
+                let result = adapter_read_loop(reader, &state, &session, &outbound);
                 state.connected.store(false, Ordering::Relaxed);
                 *writer_slot.lock().expect("writer slot poisoned") = None;
                 session
@@ -1260,7 +1288,7 @@ fn adapter_supervisor(
 fn serve_client(
     stream: UnixStream,
     state: Arc<State>,
-    outbound: mpsc::SyncSender<Frame>,
+    outbound: mpsc::SyncSender<Outbound>,
     session: u64,
     next_request: Arc<AtomicU64>,
     next_idem_key: Arc<AtomicU64>,
@@ -1317,13 +1345,13 @@ fn serve_client(
                         // instead of blocking this client thread while the
                         // adapter is disconnected. The writer seals the body
                         // under the session key before writing.
-                        match outbound.try_send(Frame {
+                        match outbound.try_send(Outbound::Seal(Frame {
                             kind: FrameKind::DataToMesh,
                             flags: 0,
                             session,
                             request,
                             body,
-                        }) {
+                        })) {
                             Ok(()) => {
                                 delivery_update(
                                     &state,
@@ -1429,8 +1457,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let adapter_state = Arc::clone(&state);
         let supervisor_session = Arc::clone(&device_session);
+        let supervisor_outbound = outbound_tx.clone();
         thread::spawn(move || {
-            adapter_supervisor(device_path, adapter_state, writer_slot, supervisor_session)
+            adapter_supervisor(
+                device_path,
+                adapter_state,
+                writer_slot,
+                supervisor_session,
+                supervisor_outbound,
+            )
         });
     }
     let listener = UnixListener::bind(&socket_path)?;
@@ -1522,7 +1557,10 @@ mod tests {
         let (ack_body, proof) = device_hello_ack(host_nonce);
         let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 100, ack_body));
         assert_eq!(inbound.outbound.len(), 1);
-        let auth = &inbound.outbound[0];
+        let auth = match &inbound.outbound[0] {
+            Outbound::Raw(frame) => frame,
+            Outbound::Seal(_) => panic!("AUTH must be a raw handshake frame"),
+        };
         assert_eq!(auth.kind, FrameKind::Hello);
         assert_eq!(auth.flags & FLAG_AUTH, FLAG_AUTH);
         assert_eq!(auth.body, proof.auth_tag.to_vec());
@@ -1534,7 +1572,10 @@ mod tests {
         // The host must answer AUTH_OK with its TX grant immediately — the
         // device cannot send protected traffic without it.
         assert_eq!(inbound.outbound.len(), 1);
-        assert_eq!(inbound.outbound[0].kind, FrameKind::Credit);
+        match &inbound.outbound[0] {
+            Outbound::Seal(frame) => assert_eq!(frame.kind, FrameKind::Credit),
+            Outbound::Raw(_) => panic!("TX grant must be sealed at write time"),
+        }
         proof
     }
 
@@ -1611,8 +1652,11 @@ mod tests {
         let inbound = session.handle(&frame(FrameKind::HelloAck, 0, 0, ack_body));
         assert_eq!(session.phase, SessionPhase::AwaitHelloAck);
         assert_eq!(inbound.outbound.len(), 1);
-        assert_eq!(inbound.outbound[0].kind, FrameKind::Hello); // re-hello
-                                                                // Active-session traffic before AUTH_OK cannot be opened.
+        match &inbound.outbound[0] {
+            Outbound::Raw(frame) => assert_eq!(frame.kind, FrameKind::Hello), // re-hello
+            Outbound::Seal(_) => panic!("re-hello must be a raw frame"),
+        }
+        // Active-session traffic before AUTH_OK cannot be opened.
         let mut session2 = DeviceSession::new();
         session2.begin();
         let inbound = session2.handle(&frame(FrameKind::DataFromMesh, 0, 0, vec![0; 40]));
@@ -1662,9 +1706,43 @@ mod tests {
         assert!(session.protect(&mut third).is_err());
         // Outbound bodies verify under the host→device direction key.
         let (counter, inner) = open_body(&proof.key, DIRECTION_HOST_TO_DEVICE, &data).unwrap();
-        // h2d counter 0 → TX grant after AUTH_OK, 1 → KeepAlive, 2 → data.
-        assert_eq!(counter, 2);
+        // Counters are assigned by the writer thread: the TX grant produced
+        // by AUTH_OK is emitted unsealed, so this session sees 0 → KeepAlive,
+        // 1 → data. On the wire the grant seals first since it queued first.
+        assert_eq!(counter, 1);
         assert_eq!(inner, &[0; 16]);
+    }
+
+    #[test]
+    fn session_answers_one_byte_credit_query() {
+        // The device's CREDIT_QUERY body is a single opcode byte — it must
+        // not be discarded by a grant-sized length check.
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        let query_body = seal_body(
+            &proof.key,
+            DIRECTION_DEVICE_TO_HOST,
+            0,
+            FrameKind::Credit,
+            0,
+            0,
+            &[CREDIT_QUERY],
+        );
+        let mut query = frame(FrameKind::Credit, 0, 0, query_body);
+        query.session = proof.session_id;
+        let inbound = session.handle(&query);
+        assert_eq!(inbound.outbound.len(), 1);
+        match &inbound.outbound[0] {
+            Outbound::Seal(frame) => {
+                assert_eq!(frame.kind, FrameKind::Credit);
+                // Still unsealed here: the writer assigns the session
+                // counter at write time, so the body is the raw 17-byte
+                // grant (opcode || frames || bytes).
+                assert_eq!(frame.body.len(), 17);
+                assert_eq!(frame.body[0], CREDIT_GRANT);
+            }
+            Outbound::Raw(_) => panic!("credit response must be sealed"),
+        }
     }
 
     #[test]

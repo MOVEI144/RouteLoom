@@ -304,6 +304,33 @@ struct PowerWorld {
   }
 
   void inject_rx() {
+    // A well-formed, link-authenticated frame from peer 2 addressed to us —
+    // the only kind of inbound traffic that may confirm a fast resume.
+    wire::PlainFrame plain{};
+    plain.header.type = FrameType::Data;
+    plain.header.flags = wire::kFlagEndProtected;
+    plain.header.delivery = DeliveryClass::Reliable;
+    plain.header.hop_remaining = 1;
+    plain.header.network = 1;
+    plain.header.origin = 2;
+    plain.header.destination = kSelf;
+    plain.header.previous_hop = 2;
+    plain.header.next_hop = kSelf;
+    plain.header.message = MessageId{9, 1};
+    plain.header.remaining_deadline_ms = 5000;
+    plain.header.original_lifetime_ms = 5000;
+    plain.header.link_epoch = 1;
+    plain.header.end_epoch = 1;
+    const std::array<std::uint8_t, 4> payload{{9, 9, 9, 9}};
+    std::memcpy(plain.payload.data(), payload.data(), payload.size());
+    plain.payload_size = payload.size();
+    wire::EncodedFrame encoded{};
+    if (wire::encode_new(plain, security, encoded).ok()) {
+      node.on_radio_receive(2, encoded.view(), RadioRxMetadata{-60}, now);
+    }
+  }
+
+  void inject_junk_rx() {
     const std::array<std::uint8_t, 8> junk{{0xde, 0xad, 0xbe, 0xef, 1, 2, 3, 4}};
     node.on_radio_receive(2, ByteView{junk.data(), junk.size()},
                           RadioRxMetadata{-60}, now);
@@ -840,12 +867,14 @@ void test_power_cut_during_consume_commit() {
     CHECK(w.pump_until(PowerState::ReadyToSleep));
     CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
   }
-  storage.drop_call = 1;  // consume commit is lost
+  // Writes so far: the persist commit plus two sleep_enter refresh commits
+  // (both slots, READY_TO_SLEEP wait deducted). The consume commit is next.
+  storage.drop_call = 3;  // consume commit is lost
   PowerWorld w(storage);
   CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
                                ElapsedInterval{0, 0, false}, w.now));
   CHECK(w.events.pending_with(StatusCode::TimeUncertain) == 1);
-  CHECK(w.storage.write_calls == 2);
+  CHECK(w.storage.write_calls == 4);
   // Next boot may replay the pending once (bounded duplicate REPORT, still
   // TIME_UNCERTAIN — never a resend on an unknown clock).
   PowerWorld w2(storage);
@@ -882,7 +911,10 @@ void test_pending_reinject_failure_retained() {
     }
     CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
                                  ElapsedInterval{0, 0, true}, w.now));
-    CHECK(w.events.pending_with(StatusCode::NoCapacity) == 1);
+    // The re-inject fails before allocation: this incarnation already owns a
+    // live delivery under the same sequence (counters restart on boot), so
+    // resume_delivery refuses the collision instead of conflating messages.
+    CHECK(w.events.pending_with(StatusCode::AlreadyExists) == 1);
     CHECK(w.storage.write_calls == 2);  // consume-commit retained the record
   }
   // Incarnation 3: with a free table the same durable pending is retried —
@@ -926,6 +958,22 @@ void test_resume_confirm_fast_and_discovery() {
     w.pump(60);
     CHECK(w.port.discovery_calls == 1);  // bounded: fired exactly once
   }
+  // Junk RX still counts as activity but must NOT confirm a fast resume —
+  // only authenticated, well-formed peer traffic may. The window expires and
+  // bounded discovery starts exactly like silence.
+  {
+    MemoryPowerStorage storage;
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    CHECK(w.coordinator.state() == PowerState::Resuming);
+    w.inject_junk_rx();
+    w.pump(60);
+    CHECK(w.coordinator.state() == PowerState::Running);
+    CHECK(w.coordinator.resume_outcome() == ResumeOutcome::DiscoveryRequired);
+    CHECK(w.port.discovery_calls == 1);
+  }
 }
 
 void test_image_slots_alternate() {
@@ -960,6 +1008,125 @@ void test_persist_failure_aborts() {
   CHECK(w.events.has_diag("radio stop failed"));
 }
 
+void test_persist_failure_keeps_pending_live() {
+  // The durable commit must succeed BEFORE any delivery is marked
+  // SLEEP_SAVED: when the image write fails, the abort has to leave the
+  // original live delivery untouched so the work can retry — not report
+  // SLEEP_SAVED with both slots blank (review reproduction).
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  w.platform_peer(2, 0xaa);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  const MessageId id = queue_pending(w, 99, true);
+  SleepRequest request{};
+  w.storage.drop_call = 0;  // the image commit itself fails
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  w.pump(600);  // in-flight route work drains until the deadline, then aborts
+  CHECK(w.coordinator.state() == PowerState::Running);
+  CHECK(!w.node.draining());
+  const auto result = w.node.delivery(id);
+  CHECK(result.state == DeliveryState::WaitingForRoute);
+  CHECK(std::strcmp(result.reason, "SLEEP_SAVED") != 0);
+}
+
+void test_ready_wait_deducts_pending_lifetime() {
+  // READY_TO_SLEEP wait is real elapsed lifetime: a pending that expires
+  // while the ticket waits must never be resurrected after the wake.
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  w.platform_peer(2, 0xaa);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  (void)queue_pending(w, 2, true, 5000);
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  w.now += 10010;  // hold the ticket past the pending's 5000 ms lifetime
+  CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  CHECK(w.coordinator.state() == PowerState::Sleeping);
+  CHECK(w.events.pending_with(StatusCode::Expired) == 1);
+  CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
+                              ElapsedInterval{0, 0, true}, w.now));
+  CHECK(w.events.pending_with(StatusCode::Ok) == 0);  // nothing re-injected
+}
+
+// Drops every frame of a chosen type so a test can lose END_RECEIPTs while
+// still letting DATA through — a receipt loss must not be simulated by
+// tearing the whole link down.
+class DropTypeRadio final : public RadioPort {
+ public:
+  DropTypeRadio(RadioPort& inner, FrameType drop) : inner_(inner), drop_(drop) {}
+  Status send(NodeId peer, std::uint64_t token, ByteView frame) noexcept override {
+    routeloom_test::FrameSight sight{};
+    if (routeloom_test::sight_frame(frame, sight) && sight.type == drop_) {
+      return Status::success();  // swallowed: sender sees TX ok, peer never does
+    }
+    return inner_.send(peer, token, frame);
+  }
+  Status recover() noexcept override { return inner_.recover(); }
+
+ private:
+  RadioPort& inner_;
+  FrameType drop_;
+};
+
+void test_resume_reuses_original_id_dedup_once() {
+  // End-to-end identity check: B accepts the DATA, the end receipt is lost,
+  // A sleeps and resumes — the retransmission must carry the ORIGINAL
+  // message id so B's terminal dedup suppresses it (payload delivered once).
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);  // node 7 + coordinator
+  w.platform_peer(2, 0xaa);
+
+  TestSecurity security_b;
+  CapturingObserver observer_b;
+  SimRadio radio_b_inner(w.net, 2);
+  DropTypeRadio radio_b(radio_b_inner, FrameType::EndReceipt);
+  NodeConfig config_b = PowerWorld::make_config();
+  config_b.node = 2;
+  MeshNode b(config_b, radio_b, security_b, observer_b);
+  w.net.register_node(7, &w.node);
+  w.net.register_node(2, &b);
+  w.net.connect(7, 2);
+
+  CHECK_OK(b.start(0));
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, 0));
+  w.pump(60);
+  CHECK_OK(w.node.add_neighbor(2, 1, w.now));
+  CHECK_OK(b.add_neighbor(7, 1, w.now));
+
+  const MessageId id = queue_pending(w, 2, true, 60000);
+  w.pump(100);  // DATA -> B delivers once; END_RECEIPT swallowed -> non-terminal
+  CHECK(observer_b.messages.size() == 1);
+  const auto before_sleep = w.node.delivery(id);
+  CHECK(before_sleep.state == DeliveryState::WaitingForEndReceipt ||
+        before_sleep.state == DeliveryState::WaitingForMac ||
+        before_sleep.state == DeliveryState::WaitingForHopAccept ||
+        before_sleep.state == DeliveryState::Queued ||
+        before_sleep.state == DeliveryState::Accepted);
+
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
+                              ElapsedInterval{100, 200, true}, w.now));
+
+  // The re-injected delivery keeps the ORIGINAL id and is live again.
+  CHECK(w.events.pending_with(StatusCode::Ok) == 1);
+  const auto resumed = w.node.delivery(id);
+  CHECK(resumed.state != DeliveryState::Empty);
+  CHECK(resumed.state != DeliveryState::Indeterminate);
+  // Resume re-adds the saved peer as a neighbor, so the route is back and
+  // the retransmission flows; B's dedup suppresses the duplicate payload.
+  w.pump(100);
+  CHECK(observer_b.messages.size() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -991,6 +1158,9 @@ int main() {
   test_resume_confirm_fast_and_discovery();
   test_image_slots_alternate();
   test_persist_failure_aborts();
+  test_persist_failure_keeps_pending_live();
+  test_ready_wait_deducts_pending_lifetime();
+  test_resume_reuses_original_id_dedup_once();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;

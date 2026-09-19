@@ -77,7 +77,9 @@ Status encode_record(const ParsedRecord& record, const std::uint32_t seal,
 }
 
 SlotContent decode_record(const ByteView raw, const NetworkId network,
-                          const NodeId authority, ParsedRecord& parsed) noexcept {
+                          const NodeId authority, ParsedRecord& parsed,
+                          bool& committed_fields) noexcept {
+  committed_fields = false;
   if (raw.data == nullptr || raw.size != kAuthorityLedgerRecordSize) {
     return SlotContent::Corrupt;
   }
@@ -108,6 +110,11 @@ SlotContent decode_record(const ByteView raw, const NetworkId network,
   if (status) status = reader.read_bytes(MutableByteView{parsed.previous_state_hash.data(), 32});
   if (status) status = reader.read_bytes(MutableByteView{parsed.operation_hash.data(), 32});
   if (status) status = reader.read_u32(crc);
+  // A well-formed record under a committed seal keeps its fields readable even
+  // when the CRC fails: revision and generation are still trustworthy LOWER
+  // bounds for recovery (accidental corruption elsewhere cannot make a real
+  // past generation smaller than what was once committed).
+  committed_fields = status.ok();
   if (!status || crc32_iso_hdlc(ByteView{raw.data, kCrcOffset}) != crc) {
     return SlotContent::Corrupt;
   }
@@ -151,6 +158,7 @@ Status SingleAuthority::initialize() noexcept {
   std::array<ParsedRecord, kAuthorityLedgerSlots> parsed{};
   std::array<SlotContent, kAuthorityLedgerSlots> content{};
   std::array<bool, kAuthorityLedgerSlots> unreadable{};
+  std::array<bool, kAuthorityLedgerSlots> committed_fields{};
   Status read_error = Status::success();
   int valid = 0, foreign = 0, unsupported = 0, corrupt = 0;
   for (std::uint8_t slot = 0; slot < kAuthorityLedgerSlots; ++slot) {
@@ -162,8 +170,8 @@ Status SingleAuthority::initialize() noexcept {
       if (read_error.ok()) read_error = status;
       continue;
     }
-    content[slot] =
-        decode_record(ByteView{raw.data(), raw.size()}, network_, authority_, parsed[slot]);
+    content[slot] = decode_record(ByteView{raw.data(), raw.size()}, network_, authority_,
+                                  parsed[slot], committed_fields[slot]);
     switch (content[slot]) {
       case SlotContent::Valid:
         ++valid;
@@ -192,6 +200,17 @@ Status SingleAuthority::initialize() noexcept {
         break;
       case SlotContent::Corrupt:
         ++corrupt;
+        if (committed_fields[slot]) {
+          // CRC failed but the committed record still bounds how far the
+          // ledger advanced: recovery must never restart at a lower
+          // generation/revision or a pre-loss generation could be reused.
+          if (parsed[slot].revision > recovery_floor_) {
+            recovery_floor_ = parsed[slot].revision;
+          }
+          if (parsed[slot].state.generation > max_generation_seen_) {
+            max_generation_seen_ = parsed[slot].state.generation;
+          }
+        }
         break;
       default:
         break;
@@ -359,14 +378,20 @@ Status SingleAuthority::apply_membership_revocation(
                       resulting_state_hash, cryptographic_signature_verified);
 }
 
-Status SingleAuthority::recover() noexcept {
+Status SingleAuthority::recover(const std::uint32_t new_generation) noexcept {
   if (!initialized_) return Status::error(StatusCode::InvalidState, "authority not initialized");
   if (!quarantined_) return Status::error(StatusCode::InvalidState, "authority not quarantined");
   // Disaster recovery establishes a NEW authority generation (control-plane
   // spec): pre-loss operations signed for an older generation can never
-  // re-validate and re-apply against the recovered ledger.
-  const AuthorityRecord genesis{network_, authority_, max_generation_seen_ + 1U, 0,
-                                Digest256{}};
+  // re-validate and re-apply against the recovered ledger. The supplied
+  // generation must clear every generation a committed record proved —
+  // including ones whose CRC failed — or the operator attestation is wrong
+  // and the recovery is refused rather than risking generation reuse.
+  if (new_generation <= max_generation_seen_) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "recovery generation must exceed the proven floor");
+  }
+  const AuthorityRecord genesis{network_, authority_, new_generation, 0, Digest256{}};
   const std::uint64_t revision = recovery_floor_ + 1U;
   // The identical genesis record goes to both slots so a stale valid record
   // cannot break the hash-chain check on the next boot.

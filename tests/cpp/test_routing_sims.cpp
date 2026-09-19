@@ -221,6 +221,34 @@ void test_stale_advertisement_rejected() {
         RouteUpdateResult::Accepted);  // FD gone with the tombstone
 }
 
+void test_stale_feasible_candidate_not_selected() {
+  // FD tightening after a candidate latched feasible (A->B->A loop review):
+  // A hears B->G metric 3 (via B, total 4), then learns a direct G link at
+  // cost 1 and advertises it, shrinking FD to (seq 7, metric 1). B's stored
+  // candidate stays flagged feasible even though its advertised metric 3 is
+  // now above FD. When A's direct link fails before B's update arrives, the
+  // stale candidate must NOT be selected — selecting it closes the loop.
+  RouteTable a;
+  constexpr MonotonicMs T0 = 1000;
+  constexpr MonotonicMs LIFE = 60000;
+  CHECK(a.consider(RouteAdvertisement{7, 1, 7, 3}, 2, 1, T0, LIFE) ==
+        RouteUpdateResult::Accepted);
+  CHECK(a.consider(RouteAdvertisement{7, 1, 7, 0}, 7, 1, T0, LIFE) ==
+        RouteUpdateResult::Accepted);
+  CHECK(a.mark_advertised(7));  // FD(G) = (seq 7, metric 1)
+  // The loop partner exists on B's side: B selects A for G.
+  RouteTable b;
+  CHECK(b.consider(RouteAdvertisement{7, 1, 7, 1}, 1, 1, T0, LIFE) ==
+        RouteUpdateResult::Accepted);
+  CHECK(b.best(7).valid && b.best(7).next_hop == 1);
+  // A->G fails before B's updated advertisement reaches A.
+  a.invalidate_next_hop(7, T0 + 1);
+  const auto best = a.best(7);
+  CHECK(!(best.valid && best.next_hop == 2));
+  CHECK(!best.valid);
+  CHECK(a.needs_sequence_request(7));
+}
+
 void test_sequence_wrap() {
   RouteTable table;
   CHECK(table.consider(RouteAdvertisement{9, 1, 0xFFFE, 0}, 2, 1, 0, 5000) ==
@@ -437,6 +465,7 @@ int main() {
   test_relay_removal();
   test_multi_link_loss();
   test_stale_advertisement_rejected();
+  test_stale_feasible_candidate_not_selected();
   test_sequence_wrap();
   test_origin_restart();
   test_relay_restart();

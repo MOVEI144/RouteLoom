@@ -64,8 +64,9 @@ struct PowerPeerRecord {
 };
 
 // A delivery persisted across sleep. `stored_remaining_ms` is the lifetime
-// left at persist time; on resume it goes through resume_remaining_lifetime
-// so unknown elapsed time marks TIME_UNCERTAIN instead of a fabricated zero.
+// left when the durable record was (last) committed; on resume it goes
+// through resume_remaining_lifetime so unknown elapsed time marks
+// TIME_UNCERTAIN instead of a fabricated zero.
 struct PendingDeliveryRecord {
   MessageId original_id{};
   NodeId destination{kInvalidNodeId};
@@ -73,6 +74,10 @@ struct PendingDeliveryRecord {
   Priority priority{Priority::Normal};
   std::uint8_t hop_limit{kDefaultHopLimit};
   std::uint32_t stored_remaining_ms{0};
+  // Absolute deadline on this boot's monotonic clock — RAM only, never
+  // serialized. Lets sleep_enter() re-derive stored_remaining_ms so time
+  // spent waiting in READY_TO_SLEEP is still deducted from the lifetime.
+  MonotonicMs expires_at_ms{0};
   std::array<std::uint8_t, kMaxApplicationPayload> payload{};
   std::uint8_t payload_size{0};
   bool used{false};

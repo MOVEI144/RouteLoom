@@ -114,8 +114,9 @@ class MeshNode {
   // Bumped on every send() call, received frame and TX-result callback: any
   // radio-visible activity. Used to invalidate outstanding sleep tickets.
   std::uint32_t work_generation() const noexcept { return work_generation_; }
-  // Bumps only on inbound radio frames — the signal the power coordinator
-  // uses to confirm saved peers actually answered after a resume. TX
+  // Bumps only on inbound radio frames that pass link authentication and the
+  // network/peer identity check — the signal the power coordinator uses to
+  // confirm saved peers actually answered after a resume. Invalid frames, TX
   // callbacks and app sends do not count as peer confirmation.
   std::uint32_t rx_generation() const noexcept { return rx_generation_; }
   // Bumped on peer/config changes (neighbor add/remove).
@@ -133,49 +134,58 @@ class MeshNode {
     });
   }
 
-  // Moves every non-terminal delivery to its sleep disposition. A delivery
-  // with options.persist_across_sleep is always offered to `save` (which
-  // returns true when it persisted the snapshot); other deliveries follow
-  // `fallback`. A failed save attempt fails the delivery explicitly — durable
-  // work is never dropped silently.
+  // Phase 1 of the sleep settlement — read-only. Offers every non-terminal
+  // durable delivery (or all non-terminal deliveries under SleepWorkPolicy::
+  // Save) to `save` WITHOUT changing delivery state: until the durable image
+  // is committed, live work must stay live so a persistence failure can abort
+  // back to running with nothing lost.
   template <typename SaveFn>
-  std::size_t settle_for_sleep(SleepWorkPolicy fallback, SaveFn&& save) noexcept {
-    std::size_t settled = 0;
-    deliveries_.for_each([&](Delivery& delivery) {
-      switch (delivery.state) {
-        case DeliveryState::Empty:
-        case DeliveryState::Delivered:
-        case DeliveryState::Failed:
-        case DeliveryState::Expired:
-        case DeliveryState::CancelledBeforeTx:
-        case DeliveryState::Indeterminate:
-          return;
-        default:
-          break;
+  void snapshot_for_sleep(SleepWorkPolicy fallback, SaveFn&& save) noexcept {
+    deliveries_.for_each([&](const Delivery& delivery) {
+      if (sleep_terminal(delivery.state)) return;
+      if (delivery.options.persist_across_sleep ||
+          fallback == SleepWorkPolicy::Save) {
+        save(DeliverySnapshot{delivery.id, delivery.destination, delivery.options,
+                              delivery.state, delivery.expires_at_ms,
+                              ByteView{delivery.payload.data(),
+                                       delivery.payload_size}});
       }
-      ++settled;
+    });
+  }
+
+  // Phase 2 — only after the durable image commit succeeded. `was_saved`
+  // reports whether a delivery id landed in the committed image; those
+  // deliveries become Indeterminate (outcome decided after resume). Everything
+  // else follows `fallback`: a delivery that was eligible but not saved fails
+  // explicitly — durable work is never dropped silently.
+  template <typename WasSavedFn>
+  void apply_sleep_dispositions(SleepWorkPolicy fallback,
+                                WasSavedFn&& was_saved) noexcept {
+    deliveries_.for_each([&](Delivery& delivery) {
+      if (sleep_terminal(delivery.state)) return;
       const bool durable = delivery.options.persist_across_sleep;
-      if ((durable || fallback == SleepWorkPolicy::Save) &&
-          save(DeliverySnapshot{delivery.id, delivery.destination, delivery.options,
-                                delivery.state, delivery.expires_at_ms,
-                                ByteView{delivery.payload.data(),
-                                         delivery.payload_size}})) {
-        // Re-sent under a fresh message id after resume; from this
-        // incarnation's point of view the outcome is unknown.
+      const bool eligible = durable || fallback == SleepWorkPolicy::Save;
+      if (eligible && was_saved(delivery.id)) {
         set_delivery_state(delivery, DeliveryState::Indeterminate, "SLEEP_SAVED");
       } else if (fallback == SleepWorkPolicy::Defer && !durable) {
         set_delivery_state(delivery, DeliveryState::Indeterminate, "SLEEP_DEFERRED");
       } else {
         set_delivery_state(delivery, DeliveryState::Failed,
-                           durable || fallback == SleepWorkPolicy::Save
-                               ? "SLEEP_PERSIST_FULL"
-                               : "SLEEP_DRAIN");
+                           eligible ? "SLEEP_PERSIST_FULL" : "SLEEP_DRAIN");
       }
     });
-    return settled;
   }
 
-  // Drops all queued/in-flight radio work after settle_for_sleep ran. A frame
+  // Re-injects a persisted delivery under its ORIGINAL logical message id so
+  // the destination's terminal dedup still suppresses a payload it already
+  // delivered when the end receipt was lost in sleep. Only the power
+  // coordinator calls this; ordinary send() always allocates a fresh id.
+  // Rejected when the id is already live or collides with argument checks.
+  Status resume_delivery(const MessageId& id, NodeId destination, ByteView payload,
+                         const SendOptions& options, MonotonicMs now_ms) noexcept;
+
+  // Drops all queued/in-flight radio work after apply_sleep_dispositions ran.
+  // A frame
   // already handed to the driver is reported unknown, never as sent.
   void quiesce_for_sleep() noexcept {
     if (physical_.active) {
@@ -294,6 +304,10 @@ class MeshNode {
 
   void set_delivery_state(Delivery& delivery, DeliveryState state,
                           const char* reason) noexcept;
+  static bool sleep_terminal(DeliveryState state) noexcept;
+  Status enqueue_delivery(const MessageId& id, NodeId destination, ByteView payload,
+                          const SendOptions& options, MonotonicMs now_ms,
+                          MessageId& out) noexcept;
   Status queue_origin_data(Delivery& delivery, MonotonicMs now_ms) noexcept;
   Status queue_forward(const wire::LinkOpenedFrame& frame, NodeId next_hop,
                        MonotonicMs now_ms) noexcept;

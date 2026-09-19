@@ -171,6 +171,57 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
   if (options.delivery == DeliveryClass::Applied) {
     return Status::error(StatusCode::Unsupported, "APPLIED is not implemented in CORE_FIXED_250");
   }
+  return enqueue_delivery(
+      MessageId{config_.message_session, next_message_sequence_}, destination,
+      payload, options, now_ms, id);
+}
+
+Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
+                                 const ByteView payload, const SendOptions& options,
+                                 const MonotonicMs now_ms) noexcept {
+  if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
+  ++work_generation_;
+  if (draining_) {
+    return Status::error(StatusCode::InvalidState, "NODE_DRAINING");
+  }
+  if (destination == kInvalidNodeId || destination == config_.node ||
+      payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
+      options.lifetime_ms == 0 || options.hop_limit == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid send request");
+  }
+  if (options.delivery == DeliveryClass::Applied) {
+    return Status::error(StatusCode::Unsupported, "APPLIED is not implemented in CORE_FIXED_250");
+  }
+  if (auto* existing = find_delivery(id)) {
+    if (!sleep_terminal(existing->state)) {
+      return Status::error(StatusCode::AlreadyExists, "delivery id already live");
+    }
+    // The terminal record is this delivery's previous incarnation
+    // (SLEEP_SAVED in the in-process model): replace it so resume keeps the
+    // same logical id instead of failing on the stale slot.
+    deliveries_.release(existing);
+  }
+  MessageId out{};
+  return enqueue_delivery(id, destination, payload, options, now_ms, out);
+}
+
+bool MeshNode::sleep_terminal(const DeliveryState state) noexcept {
+  switch (state) {
+    case DeliveryState::Empty:
+    case DeliveryState::Delivered:
+    case DeliveryState::Failed:
+    case DeliveryState::Expired:
+    case DeliveryState::CancelledBeforeTx:
+    case DeliveryState::Indeterminate:
+      return true;
+    default:
+      return false;
+  }
+}
+
+Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
+                                  const ByteView payload, const SendOptions& options,
+                                  const MonotonicMs now_ms, MessageId& out) noexcept {
   auto* record = deliveries_.allocate();
   if (record == nullptr) {
     // Terminal entries are history, not live work: evict the oldest one
@@ -200,7 +251,13 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
       return Status::error(StatusCode::NoCapacity, "delivery table full");
     }
   }
-  record->id = MessageId{config_.message_session, next_message_sequence_++};
+  record->id = id;
+  // Keep the sequence space disjoint: a later send() must never reissue a
+  // logical id that a resumed delivery still owns.
+  if (id.session == config_.message_session && id.sequence >= next_message_sequence_ &&
+      id.sequence != UINT64_MAX) {
+    next_message_sequence_ = id.sequence + 1;
+  }
   record->destination = destination;
   record->options = options;
   record->payload_size = payload.size;
@@ -209,7 +266,7 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
   record->expires_at_ms = now_ms + options.lifetime_ms;
   record->round = 0;
   set_delivery_state(*record, DeliveryState::Accepted, "TX_ACCEPTED");
-  id = record->id;
+  out = record->id;
 
   const auto status = queue_origin_data(*record, now_ms);
   if (!status) {
@@ -1042,7 +1099,6 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
   // Any received frame — even one that fails decode — is radio activity and
   // must invalidate outstanding sleep tickets.
   ++work_generation_;
-  ++rx_generation_;
   wire::LinkOpenedFrame frame{};
   auto status = wire::open_link(encoded, config_.node, security_, frame);
   if (!status) {
@@ -1053,6 +1109,10 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
     observer_.on_diagnostic("LINK_IDENTITY_MISMATCH", peer, &frame.header.message);
     return;
   }
+  // Only authenticated, well-formed traffic from our network confirms a
+  // resume: junk or foreign frames still count as work (ticket invalidation
+  // above) but must never satisfy the saved-peer confirmation window.
+  ++rx_generation_;
   // A link-authenticated DATA or END_RECEIPT without end-to-end protection is
   // never valid in normal operation: the link open only proves the immediate
   // peer, so an unprotected payload could be injected or altered by any relay

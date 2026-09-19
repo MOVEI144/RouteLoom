@@ -35,6 +35,11 @@ struct RouteCandidate {
   NodeId next_hop{kInvalidNodeId};
   RouteSequence sequence{0};
   RouteMetric metric{kInfiniteRouteMetric};
+  // The metric the next hop advertised (without our link cost). Feasibility
+  // must be re-evaluated against the CURRENT feasible distance at select
+  // time — FD only tightens, so a feasible flag snapshotted at consider()
+  // can silently go stale and select a route that loops.
+  RouteMetric advertised{kInfiniteRouteMetric};
   MonotonicMs learned_at_ms{0};
   MonotonicMs expires_at_ms{0};
   // Unexpired infeasible candidates are kept (lease-renewed) so a SeqNoRequest

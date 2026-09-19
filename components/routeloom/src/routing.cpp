@@ -68,8 +68,13 @@ RouteCandidate* RouteTable::candidate_slot(Entry& entry, const NodeId next_hop) 
   }
   // All slots taken: evict an infeasible candidate first, then the worst
   // sequence/metric — never a feasible route while an infeasible one remains.
+  // Re-evaluate against the current FD: the stored flag may be stale-true
+  // after mark_advertised tightened it.
   for (auto& candidate : entry.candidates) {
-    if (!candidate.feasible) return &candidate;
+    if (!candidate.feasible ||
+        !feasible(entry, candidate.sequence, candidate.advertised)) {
+      return &candidate;
+    }
   }
   auto* worst = &entry.candidates[0];
   for (auto& candidate : entry.candidates) {
@@ -85,8 +90,14 @@ RouteCandidate* RouteTable::candidate_slot(Entry& entry, const NodeId next_hop) 
 RouteSelection RouteTable::select(const Entry& entry) noexcept {
   const RouteCandidate* selected = nullptr;
   for (const auto& candidate : entry.candidates) {
+    // Feasibility is re-evaluated against the CURRENT feasible distance, not
+    // just the flag latched at consider(): mark_advertised only tightens FD,
+    // so a stale-true flag would otherwise pick a route that loops back.
     if (!candidate.valid || !candidate.feasible ||
-        candidate.metric == kInfiniteRouteMetric) continue;
+        candidate.metric == kInfiniteRouteMetric ||
+        !feasible(entry, candidate.sequence, candidate.advertised)) {
+      continue;
+    }
     if (selected == nullptr) {
       selected = &candidate;
       continue;
@@ -169,7 +180,8 @@ RouteUpdateResult RouteTable::consider(const RouteAdvertisement& advertisement,
   const bool existed = candidate->valid && candidate->next_hop == next_hop;
   // Infeasible candidates are recorded too (lease renewed): they carry
   // SeqNoRequests and become selectable again on a newer sequence.
-  *candidate = RouteCandidate{next_hop, advertisement.sequence, total, now_ms,
+  *candidate = RouteCandidate{next_hop, advertisement.sequence, total,
+                              advertisement.metric, now_ms,
                               now_ms + lifetime_ms, is_feasible, true};
   entry->tombstone_expires_at_ms = 0;
   if (is_feasible) {

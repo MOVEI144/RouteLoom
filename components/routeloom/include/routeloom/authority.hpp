@@ -85,9 +85,13 @@ class SingleAuthority {
                                      bool cryptographic_signature_verified) noexcept;
 
   // Explicit operator recovery from quarantine: writes a fresh genesis record
-  // with a revision above any structurally valid record seen. Never invoked
-  // implicitly; storage errors never trigger erase or reformat.
-  Status recover() noexcept;
+  // under `new_generation`, which must exceed every generation any committed
+  // (or committed-but-CRC-damaged) record proved this boot — so pre-loss
+  // operations can never re-validate. The operator attests the generation is
+  // fresh for (network, authority); after total media loss no ledger data
+  // survives to bound it, so the attestation is the safety mechanism.
+  // Never invoked implicitly; storage errors never trigger erase or reformat.
+  Status recover(std::uint32_t new_generation) noexcept;
 
   const AuthorityRecord& state() const noexcept { return state_; }
   bool quarantined() const noexcept { return quarantined_; }
@@ -110,9 +114,9 @@ class SingleAuthority {
   AuthorityRecord state_{};
   std::uint64_t revision_{0};
   std::uint64_t recovery_floor_{0};
-  // Highest authority generation proven by a CRC-intact record this boot.
-  // Recovery starts a new generation above it so pre-loss operations cannot
-  // re-validate against the recovered ledger.
+  // Highest authority generation proven by any committed record this boot —
+  // including committed-seal records whose CRC failed (their fields still
+  // bound how far the ledger advanced). Recovery must start above it.
   std::uint32_t max_generation_seen_{1};
   std::array<StatusCode, kAuthorityLedgerSlots> slot_reserved_{};
   std::uint8_t active_slot_{0};

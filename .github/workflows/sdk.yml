@@ -93,6 +93,10 @@ jobs:
       fail-fast: false
       matrix:
         target: [esp32c3, esp32s3, esp32c5]
+        # deep_sleep compiles the CONFIG_ROUTELOOM_DEEP_SLEEP=y path
+        # (espnow_power hooks + gated code in main.cpp) — compile-time
+        # validation only, not a hardware power claim.
+        profile: [normal, deep_sleep]
     container:
       image: espressif/idf:v6.0.3
     steps:
@@ -109,12 +113,22 @@ jobs:
           test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
           cd firmware/reference_node
           idf.py set-target '${{ matrix.target }}'
+          if [ '${{ matrix.profile }}' = deep_sleep ]; then
+            printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
+          fi
           idf.py build
+          if [ '${{ matrix.profile }}' = deep_sleep ]; then
+            # Prove the kconfig symbol survived re-resolution and the
+            # deep-sleep code path was actually compiled in.
+            grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+          else
+            ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+          fi
           idf.py size > build/size-report.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.target }}
+          name: firmware-${{ matrix.target }}-${{ matrix.profile }}
           path: |
             idf-commit.txt
             firmware/reference_node/build/*.bin

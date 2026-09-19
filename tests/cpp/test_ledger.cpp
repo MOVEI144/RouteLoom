@@ -207,7 +207,7 @@ void test_ledger_corrupt_both_quarantine() {
   CHECK(reboot.validate(make_op(reboot, 3), true).code == StatusCode::IntegrityError);
   CHECK(reboot.commit(make_op(reboot, 3), hash_with(0x33), true).code == StatusCode::IntegrityError);
   // Only an explicit operator recovery rewrites the ledger.
-  CHECK_OK(reboot.recover());
+  CHECK_OK(reboot.recover(2));
   CHECK(!reboot.quarantined());
   CHECK(reboot.state().applied_sequence == 0);
   CHECK_OK(reboot.commit(make_op(reboot, 1), hash_with(0x44), true));
@@ -227,7 +227,7 @@ void test_ledger_broken_chain_quarantine() {
   CHECK(reboot.initialize().code == StatusCode::IntegrityError);
   CHECK(reboot.quarantined());
   CHECK(reboot.revision() == 2);  // provenance of the lost state stays visible
-  CHECK_OK(reboot.recover());
+  CHECK_OK(reboot.recover(2));
   CHECK(reboot.revision() == 3);  // recovery never regresses the ledger index
   SingleAuthority again(1, 99, storage);
   CHECK_OK(again.initialize());
@@ -283,7 +283,7 @@ void test_ledger_recovery_new_generation() {
   SingleAuthority reboot(1, 99, storage);
   CHECK(reboot.initialize().code == StatusCode::IntegrityError);
   CHECK(reboot.quarantined());
-  CHECK_OK(reboot.recover());
+  CHECK_OK(reboot.recover(2));
   CHECK(reboot.state().generation == 2);
   // An operation carrying the pre-recovery generation is rejected even when
   // its sequence/hash would otherwise be valid.
@@ -292,6 +292,38 @@ void test_ledger_recovery_new_generation() {
   CHECK(reboot.commit(stale, hash_with(0x55), true).code ==
         StatusCode::AuthorizationFailed);
   CHECK_OK(reboot.commit(make_op(reboot, 1), hash_with(0x66), true));
+}
+
+void test_ledger_recovery_never_reuses_generation() {
+  // gen 1 -> recover to gen 2 -> BOTH slots corrupt -> reinit must refuse to
+  // recover into generation 2 again. The corrupt records still carry a
+  // committed seal so their generation fields bound the recovery floor; an
+  // old gen-2 operation must stay rejected after recovery to generation 3.
+  FaultyLedgerStorage storage;
+  commit_two(storage);  // generation 1
+  storage.corrupt(0, 100);
+  storage.corrupt(1, 100);
+  {
+    SingleAuthority reboot(1, 99, storage);
+    CHECK(reboot.initialize().code == StatusCode::IntegrityError);
+    CHECK_OK(reboot.recover(2));
+    CHECK_OK(reboot.commit(make_op(reboot, 1), hash_with(0x77), true));
+  }
+  // Second total loss: one byte inside the hash region of each slot. CRC
+  // fails but the committed generation fields survive and bound recovery.
+  storage.corrupt(0, 100);
+  storage.corrupt(1, 100);
+  SingleAuthority lost(1, 99, storage);
+  CHECK(lost.initialize().code == StatusCode::IntegrityError);
+  CHECK(lost.quarantined());
+  CHECK(lost.recover(2).code == StatusCode::InvalidArgument);
+  CHECK(lost.recover(1).code == StatusCode::InvalidArgument);
+  CHECK_OK(lost.recover(3));
+  CHECK(lost.state().generation == 3);
+  AuthorityOperation stale = make_op(lost, 1);
+  stale.generation = 2;
+  CHECK(lost.commit(stale, hash_with(0x55), true).code ==
+        StatusCode::AuthorizationFailed);
 }
 
 void test_ledger_unreadable_sibling_blocks_boot() {
@@ -401,6 +433,7 @@ int main() {
   test_ledger_schema_mismatch();
   test_ledger_foreign_identity();
   test_ledger_recovery_new_generation();
+  test_ledger_recovery_never_reuses_generation();
   test_ledger_unreadable_sibling_blocks_boot();
   test_ledger_read_error_not_quarantine();
   test_ledger_operation_kinds();

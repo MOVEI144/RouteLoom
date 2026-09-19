@@ -245,7 +245,6 @@ Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
 
 Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
                                      const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   if (state_ != PowerState::ReadyToSleep) {
     return Status::error(StatusCode::InvalidState, "not ready to sleep");
   }
@@ -257,6 +256,41 @@ Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
   }
   if (!ticket_valid(ticket)) {
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
+  }
+  // Time spent waiting in READY_TO_SLEEP is real elapsed lifetime: re-derive
+  // every pending's remaining budget against its absolute deadline and
+  // re-commit the image so work that expired while waiting is not
+  // resurrected after the wake.
+  bool pending_changed = false;
+  for (auto& record : image_.pending) {
+    if (!record.used) continue;
+    if (record.expires_at_ms <= now_ms) {
+      events_.on_pending_result(record, StatusCode::Expired);
+      record.used = false;
+      pending_changed = true;
+      continue;
+    }
+    const auto remaining =
+        static_cast<std::uint32_t>(record.expires_at_ms - now_ms);
+    if (remaining != record.stored_remaining_ms) {
+      record.stored_remaining_ms = remaining;
+      pending_changed = true;
+    }
+  }
+  if (pending_changed) {
+    // Write the refreshed image to BOTH slots: if a power cut tears one
+    // commit, the other still carries the corrected lifetimes rather than an
+    // older image whose longer budgets would resurrect expired work.
+    for (std::uint8_t copy = 0; copy < kPowerImageSlots; ++copy) {
+      image_.sequence = image_sequence_ + 1;
+      const auto refresh = commit_image(image_);
+      if (!refresh) {
+        // Abort instead of sleeping on a stale image. The durable records
+        // are not lost; they survive for a later resume.
+        abort_to_running(refresh.detail);
+        return refresh;
+      }
+    }
   }
   ticket_ = SleepTicket{};  // consume: no other ticket can re-enter
   transition(PowerState::Sleeping, "SLEEP_ENTER");
@@ -329,32 +363,48 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   image_ = PowerImage{};
   image_.network = node_.config().network;
   image_.node = node_.config().node;
-  node_.settle_for_sleep(request_.pending_policy,
-                         [&](const DeliverySnapshot& snapshot) {
-                           if (snapshot.expires_at_ms <= now_ms) return false;
-                           for (auto& record : image_.pending) {
-                             if (record.used) continue;
-                             record.used = true;
-                             record.original_id = snapshot.id;
-                             record.destination = snapshot.destination;
-                             record.delivery = snapshot.options.delivery;
-                             record.priority = snapshot.options.priority;
-                             record.hop_limit = snapshot.options.hop_limit;
-                             record.stored_remaining_ms = static_cast<std::uint32_t>(
-                                 snapshot.expires_at_ms - now_ms);
-                             record.payload_size = static_cast<std::uint8_t>(
-                                 snapshot.payload.size);
-                             if (snapshot.payload.size != 0) {
-                               std::memcpy(record.payload.data(), snapshot.payload.data,
-                                           snapshot.payload.size);
+  // Phase 1: snapshot durable work into the image WITHOUT changing delivery
+  // state. If the commit below fails, abort_to_running leaves every delivery
+  // live so the work can retry instead of being marked SLEEP_SAVED and lost.
+  node_.snapshot_for_sleep(request_.pending_policy,
+                           [&](const DeliverySnapshot& snapshot) {
+                             if (snapshot.expires_at_ms <= now_ms) return false;
+                             for (auto& record : image_.pending) {
+                               if (record.used) continue;
+                               record.used = true;
+                               record.original_id = snapshot.id;
+                               record.destination = snapshot.destination;
+                               record.delivery = snapshot.options.delivery;
+                               record.priority = snapshot.options.priority;
+                               record.hop_limit = snapshot.options.hop_limit;
+                               record.expires_at_ms = snapshot.expires_at_ms;
+                               record.stored_remaining_ms = static_cast<std::uint32_t>(
+                                   snapshot.expires_at_ms - now_ms);
+                               record.payload_size = static_cast<std::uint8_t>(
+                                   snapshot.payload.size);
+                               if (snapshot.payload.size != 0) {
+                                 std::memcpy(record.payload.data(), snapshot.payload.data,
+                                             snapshot.payload.size);
+                               }
+                               return true;
                              }
-                             return true;
-                           }
-                           return false;
-                         });
-  node_.quiesce_for_sleep();
+                             return false;
+                           });
   const auto status = persist_image();
-  if (!status) abort_to_running(status.detail);
+  if (!status) {
+    abort_to_running(status.detail);
+    return;
+  }
+  // Phase 2: the image is durable — only now apply dispositions and drop the
+  // radio-bound queues.
+  node_.apply_sleep_dispositions(
+      request_.pending_policy, [&](const MessageId& id) {
+        for (const auto& record : image_.pending) {
+          if (record.used && record.original_id == id) return true;
+        }
+        return false;
+      });
+  node_.quiesce_for_sleep();
 }
 
 Status PowerCoordinator::persist_image() noexcept {
@@ -528,10 +578,14 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
     }
     const SendOptions options{record.delivery, record.priority, remaining,
                               record.hop_limit, true};
-    MessageId new_id{};
-    const auto sent = node_.send(
-        record.destination, ByteView{record.payload.data(), record.payload_size},
-        options, now_ms, new_id);
+    // Resume under the ORIGINAL logical id, not a fresh send() allocation:
+    // the destination may already have delivered the payload and lost only
+    // the end receipt — terminal dedup keyed on this id must still suppress
+    // the retransmission so the application never sees it twice. Fresh link
+    // counters are fine; logical identity is what dedup tracks.
+    const auto sent = node_.resume_delivery(
+        record.original_id, record.destination,
+        ByteView{record.payload.data(), record.payload_size}, options, now_ms);
     events_.on_pending_result(record, sent.ok() ? StatusCode::Ok : sent.code);
     if (!sent.ok() && keep != nullptr) {
       // Re-injection failed (queue full, draining, ...): keep the durable
