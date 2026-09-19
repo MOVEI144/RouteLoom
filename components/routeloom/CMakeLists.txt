@@ -7,6 +7,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/c_api.cpp
   src/counter_store.cpp
   src/discovery.cpp
+  src/migration.cpp
   src/node.cpp
   src/power.cpp
   src/replay.cpp
