@@ -56,7 +56,8 @@ constexpr NodeId kSelf = 2;
 // deterministic MAC over (operation fields, plan hash) / snapshot bytes.
 // Forging bytes fails verification — this is NOT a pass-through.
 
-Digest256 sign_commit(const AuthorityOperation& op, const Digest256& plan_hash) {
+Digest256 sign_commit(const AuthorityOperation& op, const Digest256& plan_hash,
+                      const ChannelEpoch new_epoch) {
   std::uint64_t lanes[4] = {0xA17B9C4D2E3F0112ULL, 0x5A5A5A5A5A5A5A5AULL,
                             0x123456789ABCDEF0ULL, 0x0FEDCBA987654321ULL};
   lanes[0] = mix(lanes[0], op.network);
@@ -64,6 +65,7 @@ Digest256 sign_commit(const AuthorityOperation& op, const Digest256& plan_hash) 
   lanes[0] = mix(lanes[0], op.generation);
   lanes[0] = mix(lanes[0], op.sequence);
   lanes[0] = mix(lanes[0], static_cast<std::uint8_t>(op.kind));
+  lanes[0] = mix(lanes[0], new_epoch.value);
   for (const std::uint8_t b : op.previous_state_hash) lanes[1] = mix(lanes[1], b);
   for (const std::uint8_t b : op.operation_hash) lanes[2] = mix(lanes[2], b);
   for (const std::uint8_t b : plan_hash) lanes[3] = mix(lanes[3], b);
@@ -100,14 +102,14 @@ class TestCommitVerifier final : public CommitSignatureVerifier {
     return profile_;  // Development by default: EXPERIMENTAL, never production
   }
   Status verify_commit(const AuthorityOperation& operation,
-                       const Digest256& plan_hash,
+                       const Digest256& plan_hash, const ChannelEpoch new_epoch,
                        ByteView signature) noexcept override {
     ++commit_checks;
     if (fail_next_) {
       fail_next_ = false;
       return Status::error(StatusCode::AuthenticationFailed, "scripted reject");
     }
-    const Digest256 expected = sign_commit(operation, plan_hash);
+    const Digest256 expected = sign_commit(operation, plan_hash, new_epoch);
     if (signature.size != expected.size() ||
         std::memcmp(signature.data, expected.data(), expected.size()) != 0) {
       return Status::error(StatusCode::AuthenticationFailed, "bad signature");
@@ -446,7 +448,7 @@ void drive_full_migration(MigrationParticipant& participant,
   CHECK_OK(participant.prepare(blob, rig.measurements(), now));
   CHECK(participant.phase() == ParticipantPhase::Preparing);
   VerifiedAuthorityPlan token{};
-  const Digest256 sig = sign_commit(op, plan_hash);
+  const Digest256 sig = sign_commit(op, plan_hash, plan.new_epoch);
   CHECK_OK(rig.verifier_only().verify_commit(
       op, plan_hash, plan.new_epoch,
       ByteView{sig.data(), sig.size()}, token));
@@ -458,7 +460,9 @@ void drive_full_migration(MigrationParticipant& participant,
   runner.poll(plan.switch_reference_ms + 1);
   participant.poll(plan.switch_reference_ms + 2);
   CHECK(participant.phase() == ParticipantPhase::Verifying);
-  participant.poll(plan.switch_reference_ms + 2 + 30000);
+  // VERIFY closes on authenticated link activity on the new channel,
+  // not on the timer alone.
+  participant.note_link_activity(plan.switch_reference_ms + 3);
   CHECK(participant.phase() == ParticipantPhase::Stable);
 }
 
@@ -505,7 +509,7 @@ void test_commit_without_blob_refetches() {
   const ByteView blob = rig.encode(plan, buf, size);
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   // Verified commit arrives before any blob: the record is stored and the
   // node enters recovery to REFETCH — never fabricating config (04 §6).
   CHECK_OK(participant.note_commit_evidence(
@@ -568,7 +572,7 @@ void test_verified_plan_only() {
   Digest256 wrong_hash{};
   wrong_hash[0] = 0xAA;
   AuthorityOperation bound_wrong = rig.operation(plan, wrong_hash, Digest256{});
-  const Digest256 sig_wrong = sign_commit(bound_wrong, wrong_hash);
+  const Digest256 sig_wrong = sign_commit(bound_wrong, wrong_hash, plan.new_epoch);
   CHECK(participant.note_commit_evidence(
             bound_wrong, wrong_hash, plan.new_epoch,
             ByteView{sig_wrong.data(), sig_wrong.size()}, kNow + 10)
@@ -577,7 +581,7 @@ void test_verified_plan_only() {
 
   // The real commit evidence is accepted — and the verifier ran (no fixed
   // boolean pass: verify_commit actually checked the MAC).
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
   CHECK(rig.verifier.commit_checks >= 3);
@@ -759,7 +763,7 @@ void test_cutover_fence_and_late_callback() {
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
   rig.port.quiesced = false;  // a TX completion is still in flight
@@ -796,7 +800,7 @@ void test_cutover_indeterminate_and_failed() {
     const Digest256 hash = plan_digest(blob);
     const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
     CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
-    const Digest256 sig = sign_commit(op, hash);
+    const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
     CHECK_OK(participant.note_commit_evidence(
         op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
     rig.port.always_wrong_readback = true;
@@ -822,7 +826,7 @@ void test_cutover_indeterminate_and_failed() {
     const Digest256 hash = plan_digest(blob);
     const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
     CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
-    const Digest256 sig = sign_commit(op, hash);
+    const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
     CHECK_OK(participant.note_commit_evidence(
         op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
     rig.port.set_fail_from = 1;
@@ -889,6 +893,86 @@ void test_helper_visit_schedule_and_budget() {
   }
   CHECK(!participant.next_helper_window(budget_end + 1, begin, end));
   CHECK(rig.port.channel == 6);  // home = new channel; nothing parks on 1
+  CHECK(participant.phase() == ParticipantPhase::Stable);
+}
+
+void test_verify_deadline_without_activity_recovers() {
+  // 04 §10: VERIFY closes on authenticated link activity. A window that
+  // expires with zero evidence is a verify FAILURE -> stranded-side
+  // recovery, and crucially NOT a unilateral rollback to the old channel.
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+  participant.poll(plan.switch_reference_ms + 1);
+  runner.poll(plan.switch_reference_ms + 1);
+  participant.poll(plan.switch_reference_ms + 2);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+
+  // Activity BEFORE Verifying is not evidence: the oracle only counts
+  // frames observed while the verify window is open.
+  // (note_link_activity is a no-op outside Verifying — asserted below by
+  // the stats staying zero until the real call.)
+  const MonotonicMs deadline = plan.switch_reference_ms + 2 +
+                               rig.participant_config.verify_ms;
+  participant.poll(deadline);
+  CHECK(participant.phase() == ParticipantPhase::Recovering);
+  CHECK(participant.stats().verify_failed == 1);
+  CHECK(participant.stats().verify_passed == 0);
+  // No unilateral rollback: the radio stays on the committed channel and
+  // no second set_channel ran — only a new signed plan or helper rescue
+  // may move the node.
+  CHECK(rig.port.committed == 6);
+  CHECK(rig.port.set_calls == 1);
+
+  // Recovery is not a re-follow of the same commit (already applied):
+  // polling onward keeps Recovering until the helper budget lapses.
+  participant.poll(deadline + 5000);
+  runner.poll(deadline + 5000);
+  CHECK(participant.phase() == ParticipantPhase::Recovering);
+}
+
+void test_verify_activity_after_stable_is_ignored() {
+  // A stale activity notification once the phase already closed must not
+  // bump verify stats or reopen anything.
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+  participant.poll(plan.switch_reference_ms + 1);
+  runner.poll(plan.switch_reference_ms + 1);
+  participant.poll(plan.switch_reference_ms + 2);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  participant.note_link_activity(plan.switch_reference_ms + 3);
+  CHECK(participant.phase() == ParticipantPhase::Stable);
+  CHECK(participant.stats().verify_passed == 1);
+  // Duplicate/late evidence after Stable is absorbed, not double-counted.
+  participant.note_link_activity(plan.switch_reference_ms + 10);
+  CHECK(participant.stats().verify_passed == 1);
   CHECK(participant.phase() == ParticipantPhase::Stable);
 }
 
@@ -993,7 +1077,7 @@ void test_recovery_budget_exhaustion_required() {
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
   // The cutover fails verifiably (driver always refuses): stranded on the
@@ -1039,7 +1123,7 @@ void test_resume_committed_apply_on_resume() {
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
 
@@ -1104,7 +1188,7 @@ void test_resume_missing_blob_and_active_loss() {
     MigrationParticipant p2(rig2.participant_config, rig2.storage,
                             v2, r2, &rig2.hooks);
     CHECK_OK(p2.prepare(blob, rig2.measurements(), kNow));
-    const Digest256 sig2 = sign_commit(op, hash);
+    const Digest256 sig2 = sign_commit(op, hash, plan.new_epoch);
     CHECK_OK(p2.note_commit_evidence(
         op, hash, plan.new_epoch, ByteView{sig2.data(), sig2.size()}, kNow));
     rig2.storage.erase_blob(hash);
@@ -1157,8 +1241,39 @@ void test_issuer_commit_and_cooldown() {
   const ByteView blob = rig.encode(plan, buf, size);
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   VerifiedAuthorityPlan token{};
+
+  // A VALIDLY-SIGNED but degenerate plan is refused at the issuer: the
+  // same structural bar as every adoption path (D5-02 — no bypass for
+  // the authority itself). old==new channel and an expiry that precedes
+  // the guarded switch both fail before the ledger is touched.
+  MigrationPlan degenerate = rig.plan(9, 1, 1, 7500, 1);
+  std::array<std::uint8_t, 512> bufd{};
+  std::size_t dsize = 0;
+  const ByteView dblob = rig.encode(degenerate, bufd, dsize);
+  const Digest256 dhash = plan_digest(dblob);
+  const AuthorityOperation dop = rig.operation(degenerate, dhash, Digest256{});
+  const Digest256 dsig = sign_commit(dop, dhash, degenerate.new_epoch);
+  CHECK(issuer.commit_plan(degenerate, dblob, dop,
+                           ByteView{dsig.data(), dsig.size()}, dhash, false,
+                           kNow, token)
+            .code == StatusCode::InvalidArgument);
+  CHECK(!token.valid());
+  MigrationPlan expired = rig.plan(9, 1, 6, 7500, 1);
+  expired.expiry_ms = expired.switch_reference_ms;  // no room for guard
+  std::array<std::uint8_t, 512> bufe{};
+  std::size_t esize = 0;
+  const ByteView eblob = rig.encode(expired, bufe, esize);
+  const Digest256 ehash = plan_digest(eblob);
+  const AuthorityOperation eop = rig.operation(expired, ehash, Digest256{});
+  const Digest256 esig = sign_commit(eop, ehash, expired.new_epoch);
+  CHECK(issuer.commit_plan(expired, eblob, eop,
+                           ByteView{esig.data(), esig.size()}, ehash, false,
+                           kNow, token)
+            .code == StatusCode::InvalidArgument);
+  CHECK(rig.ledger.state().applied_sequence == 0);  // nothing committed
+
   CHECK_OK(issuer.commit_plan(plan, blob, op,
                               ByteView{sig.data(), sig.size()}, hash, false,
                               kNow, token));
@@ -1176,7 +1291,7 @@ void test_issuer_commit_and_cooldown() {
   const ByteView blob2 = rig.encode(plan2, buf2, size2);
   const Digest256 hash2 = plan_digest(blob2);
   AuthorityOperation op2 = rig.operation(plan2, hash2, hash);
-  const Digest256 sig2 = sign_commit(op2, hash2);
+  const Digest256 sig2 = sign_commit(op2, hash2, plan2.new_epoch);
   CHECK(issuer.commit_plan(plan2, blob2, op2,
                            ByteView{sig2.data(), sig2.size()}, hash2, false,
                            kNow + 41000, token)
@@ -1196,7 +1311,7 @@ void test_rollback_requires_new_epoch_and_credit() {
   const ByteView blob = rig.encode(plan, buf, size);
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   VerifiedAuthorityPlan token{};
   CHECK_OK(issuer.commit_plan(plan, blob, op,
                               ByteView{sig.data(), sig.size()}, hash, false,
@@ -1210,7 +1325,7 @@ void test_rollback_requires_new_epoch_and_credit() {
   const ByteView blob2 = rig.encode(back, buf2, size2);
   const Digest256 hash2 = plan_digest(blob2);
   AuthorityOperation op2 = rig.operation(back, hash2, hash);
-  const Digest256 sig2 = sign_commit(op2, hash2);
+  const Digest256 sig2 = sign_commit(op2, hash2, back.new_epoch);
   CHECK(issuer.commit_plan(back, blob2, op2,
                            ByteView{sig2.data(), sig2.size()}, hash2, true,
                            kNow + 1000, token)
@@ -1230,7 +1345,7 @@ void test_rollback_requires_new_epoch_and_credit() {
   const ByteView blob3 = rig.encode(back2, buf3, size3);
   const Digest256 hash3 = plan_digest(blob3);
   AuthorityOperation op3 = rig.operation(back2, hash3, hash2);
-  const Digest256 sig3 = sign_commit(op3, hash3);
+  const Digest256 sig3 = sign_commit(op3, hash3, back2.new_epoch);
   CHECK(issuer.commit_plan(back2, blob3, op3,
                            ByteView{sig3.data(), sig3.size()}, hash3, true,
                            kNow + 42000, token)
@@ -1249,7 +1364,7 @@ void test_rollback_requires_new_epoch_and_credit() {
   const ByteView blob4 = rig4.encode(same_epoch, buf4, size4);
   const Digest256 hash4 = plan_digest(blob4);
   AuthorityOperation op4 = rig4.operation(same_epoch, hash4, hash);
-  const Digest256 sig4 = sign_commit(op4, hash4);
+  const Digest256 sig4 = sign_commit(op4, hash4, same_epoch.new_epoch);
   CHECK(issuer4.commit_plan(same_epoch, blob4, op4,
                             ByteView{sig4.data(), sig4.size()}, hash4, true,
                             kNow + 41000, token)
@@ -1265,7 +1380,7 @@ void test_authority_stopped() {
   const ByteView blob = rig.encode(plan, buf, size);
   const Digest256 hash = plan_digest(blob);
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   VerifiedAuthorityPlan token{};
   CHECK_OK(issuer.commit_plan(plan, blob, op,
                               ByteView{sig.data(), sig.size()}, hash, false,
@@ -1280,7 +1395,7 @@ void test_authority_stopped() {
   const ByteView blob2 = rig.encode(plan2, buf2, size2);
   const Digest256 hash2 = plan_digest(blob2);
   AuthorityOperation op2 = rig.operation(plan2, hash2, hash);
-  const Digest256 sig2 = sign_commit(op2, hash2);
+  const Digest256 sig2 = sign_commit(op2, hash2, plan2.new_epoch);
   VerifiedAuthorityPlan scratch{};
   CHECK(issuer.commit_plan(plan2, blob2, op2,
                            ByteView{sig2.data(), sig2.size()}, hash2, false,
@@ -1368,7 +1483,7 @@ void test_in_progress_excludes_concurrent_ops() {
   const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
   CHECK(participant.in_progress());  // key rotation / OTA / authority change excluded
-  const Digest256 sig = sign_commit(op, hash);
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
   CHECK(participant.in_progress());
@@ -1387,6 +1502,8 @@ int main() {
   test_cutover_fence_and_late_callback();
   test_cutover_indeterminate_and_failed();
   test_helper_visit_schedule_and_budget();
+  test_verify_deadline_without_activity_recovers();
+  test_verify_activity_after_stable_is_ignored();
   test_stranded_node_recovery_via_snapshot();
   test_recovery_bound_gate();
   test_recovery_budget_exhaustion_required();

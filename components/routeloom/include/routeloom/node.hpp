@@ -71,6 +71,15 @@ class AutonomyFrameSink {
   virtual ~AutonomyFrameSink() = default;
   virtual void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
                                  MonotonicMs now_ms) noexcept = 0;
+  // Verify oracle (04 §10): fires for EVERY frame that cleared link
+  // authentication + network/peer identity — not just autonomy types. The
+  // migration agent uses it to close VERIFY on real connectivity evidence.
+  // Implementations must exclude frames observed while the radio is parked
+  // off-channel (survey/helper visits) — those are not new-channel proof.
+  virtual void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept {
+    (void)peer;
+    (void)now_ms;
+  }
 };
 
 // Pause contract (01-integration.md §3.3): narrower than blanket draining.
@@ -425,6 +434,10 @@ class MeshNode {
     // Attempt budget accounting (contracts.json congestion.*).
     std::uint8_t busy_readmissions{0};
     std::uint8_t physical_attempts{0};
+    // window_limited is counted once per job per block episode — the DRR
+    // select loop may revisit the same blocked flow up to kMaxSelectRounds
+    // times in one pass.
+    bool window_block_counted{false};
   };
 
   // Bounded TX scheduler (03-congestion.md §4): a single fixed pool of TxJob

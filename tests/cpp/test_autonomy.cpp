@@ -283,10 +283,12 @@ void test_payload_roundtrip() {
   notice.starts_in_ms = 50;
   notice.duration_ms = 200;
   notice.reason = autonomy::AbsenceReason::SurveyVisit;
+  notice.protected_cut_id = 7;
   CHECK_OK(autonomy::channel_notice_encode(notice, enc));
   autonomy::ChannelNoticePayload notice_back{};
   CHECK_OK(autonomy::channel_notice_decode(enc.view(), notice_back));
   CHECK(notice_back.channel_epoch == ChannelEpoch{2});
+  CHECK(notice_back.protected_cut_id == 7);
 
   autonomy::NeighborProbePayload probe{};
   probe.binding_generation = BindingGeneration{4};
@@ -526,6 +528,8 @@ bool encode_vector(const std::string& codec, const Fields& fields,
     p.starts_in_ms = static_cast<std::uint32_t>(at("starts_in_ms"));
     p.duration_ms = static_cast<std::uint32_t>(at("duration_ms"));
     p.reason = static_cast<autonomy::AbsenceReason>(at("reason"));
+    p.protected_cut_id =
+        static_cast<std::uint16_t>(at("protected_cut_id"));
     status = autonomy::channel_notice_encode(p, payload);
   } else if (codec == "neighbor_probe") {
     autonomy::NeighborProbePayload p{};

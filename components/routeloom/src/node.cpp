@@ -84,10 +84,11 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
       return SchedClass::Management;
     case FrameType::RouteUpdate:
     case FrameType::SeqnoRequest:
-      // Background maintenance/probe work shares the lowest class: it is
-      // exactly what the >=50%/>=80% watermarks reduce and suspend, and it
-      // must never preempt queued DATA merely by being scheduled later.
-      return SchedClass::Bulk;
+      // Route maintenance (advertise/withdraw/repair probes) rides the
+      // management class: it must keep flowing under a data flood or the
+      // congestion itself can never be repaired (03 §8). It stays out of
+      // the reserved control lane and never preempts DATA in the DRR.
+      return SchedClass::Management;
     default:
       return SchedClass::Normal;
   }
@@ -288,12 +289,18 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
           continue;
         }
         if (!node.tx_admitted_now(*head)) {
-          // Peer window full: the job waits, it is not dropped.
-          ++stats_.window_limited;
+          // Peer window full: the job waits, it is not dropped. Count the
+          // block once per episode — the select loop may revisit this same
+          // flow up to kMaxSelectRounds times in a single pass.
+          if (!head->window_block_counted) {
+            ++stats_.window_limited;
+            head->window_block_counted = true;
+          }
           flow->in_rr = true;
           (void)ring.push(flow);
           continue;
         }
+        head->window_block_counted = false;
         if (static_cast<std::int32_t>(head->tx_cost) > deficit_[ci]) {
           flow->in_rr = true;
           (void)ring.push(flow);
@@ -357,6 +364,13 @@ void MeshNode::TxScheduler::defer_selected() noexcept {
   if (selected_control_) {
     control_.push_back(selected_);
   } else {
+    // Refund the deficit charged at selection: a route-deferred job never
+    // transmitted, so its class must not carry the spent quantum into the
+    // next round (Bulk with quantum 64 would otherwise stay penalised).
+    const std::size_t ci = class_index(selected_flow_->sched_class);
+    deficit_[ci] = std::min(
+        deficit_[ci] + static_cast<std::int32_t>(selected_->tx_cost),
+        kDeficitCap);
     selected_flow_->jobs.push_back(selected_);
     if (!selected_flow_->in_rr) {
       (void)rr_[class_index(selected_flow_->sched_class)].push(selected_flow_);
@@ -395,7 +409,10 @@ Status MeshNode::validate_config() const noexcept {
       config_.route_advertisement_period_ms == 0 ||
       config_.route_lifetime_ms <= config_.route_advertisement_period_ms ||
       config_.hop_accept_timeout_ms == 0 || config_.callback_watchdog_ms == 0 ||
-      config_.max_link_attempts == 0 || config_.max_end_to_end_rounds == 0) {
+      config_.max_link_attempts == 0 || config_.max_end_to_end_rounds == 0 ||
+      // rf_attempts_max is a pinned contract value (03 §5), not a tunable:
+      // a config above it would silently exceed the RF-loss retry budget.
+      config_.max_link_attempts > kRfAttemptsMax) {
     return Status::error(StatusCode::InvalidArgument, "invalid node configuration");
   }
   return Status::success();
@@ -454,6 +471,11 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->busy_since_ms = 0;
   record->last_busy_feedback_ms = 0;
   record->last_pressure = 0;
+  // The congestion window is load state, not identity: a re-added peer
+  // restarts at the initial window rather than inheriting a collapsed one.
+  record->tx_window = kPeerWindowInitial;
+  record->window_accepts = 0;
+  record->busy_capable = false;
   record->active = true;
   // Direct route to the neighbor itself, seeded at the last-seen generation
   // (0 for a brand-new peer); it upgrades as soon as its self record arrives.
@@ -1387,9 +1409,12 @@ std::uint8_t MeshNode::peer_window(const NodeId peer) const noexcept {
 }
 
 bool MeshNode::tx_admitted_now(const TxJob& job) const noexcept {
-  // Only jobs that enter the HOP_ACCEPT exchange consume window slots; the
-  // global awaiting-hop bound applies on top at TX-result time.
+  // Only jobs that enter the HOP_ACCEPT exchange consume window slots.
+  // Both bounds apply BEFORE the send: the peer window and the global
+  // awaiting table — discovering the global cap after the frame is already
+  // on the air would waste a transmission and duplicate a delivery.
   if (!job.requires_hop_accept) return true;
+  if (awaiting_hop_.size() >= kAwaitingHopCapacity) return false;
   return peer_inflight(job.peer) < peer_window(job.peer);
 }
 
@@ -1555,9 +1580,11 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
 void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer,
                            const MonotonicMs now_ms) noexcept {
   // BUSY is link-scoped feedback to the previous hop only: it must be
-  // addressed to us and must NOT be end-protected — a relay cannot end-sign
-  // toward the origin (same scope as NeighborProbe/NeighborResult).
+  // addressed to us, must NOT be end-protected — a relay cannot end-sign
+  // toward the origin — and must originate AT the peer: a forwarded BUSY
+  // carrying a third party's origin is not our link's feedback.
   if (frame.header.destination != config_.node ||
+      frame.header.origin != peer ||
       (frame.header.flags & wire::kFlagEndProtected) != 0) {
     observer_.on_diagnostic("BUSY_SCOPE_REJECTED", peer, &frame.header.message);
     return;
@@ -1575,9 +1602,12 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
     // payload — mark it capable for our emit path.
     neighbor->busy_capable = true;
     // The feedback sequence orders load feedback per peer: a stale or
-    // replayed BUSY must never re-arm a deferral (03 §5).
+    // replayed BUSY must never re-arm a deferral (03 §5). RFC 1982 serial
+    // arithmetic — a plain <= would wedge the sequence forever after the
+    // u32 wraps.
     if (neighbor->feedback_seen &&
-        payload.feedback_sequence.value <= neighbor->last_feedback_seq) {
+        static_cast<std::int32_t>(payload.feedback_sequence.value -
+                                  neighbor->last_feedback_seq) <= 0) {
       ++busy_stats_.busy_stale;
       observer_.on_diagnostic("BUSY_STALE_FEEDBACK", peer, &frame.header.message);
       return;
@@ -1595,12 +1625,12 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
     // Post-acceptance pressure: accepted work is never cancelled; the
     // window steps down one notch as the slow-down response (03 §5).
     if (neighbor != nullptr) {
-      if (neighbor->tx_window > kPeerWindowMin) --neighbor->tx_window;
-      neighbor->window_accepts = 0;
-      // Authenticated, ordered pressure sustains the busy picture only —
-      // it never adds a foreign unit to a route metric (03 §6.2, §7). A
-      // zero-pressure hint carries no busy claim.
+      // A zero-pressure hint carries no busy claim — it must not throttle
+      // either. Only real pressure steps the window down and re-arms the
+      // busy picture (03 §5, §6.2, §7).
       if (payload.pressure != 0) {
+        if (neighbor->tx_window > kPeerWindowMin) --neighbor->tx_window;
+        neighbor->window_accepts = 0;
         if (!neighbor->busy_active) {
           neighbor->busy_active = true;
           neighbor->busy_since_ms = now_ms;
@@ -1624,9 +1654,19 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
            value.job.ack.round == payload.referenced_round;
   });
   if (awaiting != nullptr) {
-    awaiting->busy_deferred = true;
-    awaiting->expires_at_ms = now_ms + retry_ms;
-    obs_count(awaiting->job, &ObservationBucket::busy_deferrals, now_ms);
+    // A repeat BUSY for an already-deferred exchange spends one unit of the
+    // bounded readmission budget — fresh feedback sequences alone must not
+    // be able to pin a job indefinitely (03 §5).
+    if (awaiting->busy_deferred &&
+        ++awaiting->job.busy_readmissions >= kBusyReadmissionsMax) {
+      TxJob job = awaiting->job;
+      awaiting_hop_.release(awaiting);
+      fail_job(job, "BUSY_BUDGET_EXHAUSTED", now_ms);
+    } else {
+      awaiting->busy_deferred = true;
+      awaiting->expires_at_ms = now_ms + retry_ms;
+      obs_count(awaiting->job, &ObservationBucket::busy_deferrals, now_ms);
+    }
   } else if (physical_.active && physical_.job.peer == peer &&
              physical_.job.ack.accepted_type == payload.referenced_type &&
              physical_.job.ack.key.origin == payload.referenced_origin &&
@@ -1878,6 +1918,11 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
   // resume: junk or foreign frames still count as work (ticket invalidation
   // above) but must never satisfy the saved-peer confirmation window.
   ++rx_generation_;
+  // Same bar feeds the migration verify oracle: any link-authenticated,
+  // identity-matched frame is connectivity evidence on the current channel.
+  if (autonomy_sink_ != nullptr) {
+    autonomy_sink_->note_link_activity(peer, now_ms);
+  }
   // A link-authenticated DATA or END_RECEIPT without end-to-end protection is
   // never valid in normal operation: the link open only proves the immediate
   // peer, so an unprotected payload could be injected or altered by any relay
@@ -2050,9 +2095,10 @@ void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
-  // >=80% queue watermark: improvement probing stops entirely until the
-  // queue drains (03 §4 — bulk and improvement experiments are suspended).
-  if (scheduler_.bulk_suspended()) return;
+  // Sequence requests are the repair path for infeasible destinations —
+  // they must keep flowing under a data flood (03 §8). Bounded by the
+  // per-destination attempt cap, the global in-flight cap, linear backoff
+  // and the queue admission check below; no watermark early-out.
   // Outstanding = requests sent inside the dedup window, still waiting for a
   // fresh advertisement. Bounded so a dead origin cannot pile up requests.
   std::size_t inflight = 0;
@@ -2373,9 +2419,11 @@ void MeshNode::note_peer_pressure(const NodeId peer, const std::uint8_t pressure
   auto* neighbor = find_neighbor(peer);
   if (neighbor == nullptr || !neighbor->active) return;
   // Same ordering rule as BUSY (03 §5): a stale or replayed feedback
-  // sequence must never re-arm pressure.
+  // sequence must never re-arm pressure. Serial arithmetic matches
+  // handle_busy so the shared sequence space wraps identically.
   if (neighbor->feedback_seen &&
-      feedback_sequence <= neighbor->last_feedback_seq) {
+      static_cast<std::int32_t>(feedback_sequence -
+                                neighbor->last_feedback_seq) <= 0) {
     ++busy_stats_.busy_stale;
     return;
   }

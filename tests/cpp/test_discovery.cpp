@@ -644,6 +644,10 @@ void test_lease_expiry() {
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
   CHECK(a.engine.neighbor_count() == 1);  // demoted, not deleted
   CHECK(!a.engine.data_permitted(b.mac));
+  // The verified mapping still resolves so re-confirmation probes can find
+  // the peer; only data traffic is gated off.
+  NodeId resolved = kInvalidNodeId;
+  CHECK(a.engine.node_of(b.mac, resolved) && resolved == 2);
   CHECK(a.engine.stats().stale_expirations >= 1);
 }
 
@@ -674,9 +678,16 @@ void test_mac_change_conflict() {
         phase == NeighborPhase::Conflict);
   CHECK(a.observer.has("BINDING_CONFLICT"));
   CHECK(a.engine.stats().conflicts >= 1);
+  // A quarantined record never resolves: neither MAC->node nor node->binding
+  // may attribute the conflicted radio.
+  NodeId resolved = kInvalidNodeId;
+  BindingId binding = kInvalidBindingId;
+  CHECK(!a.engine.node_of(clone.mac, resolved));
   // The original binding is untouched and still usable.
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
   CHECK(a.engine.data_permitted(b.mac));
+  CHECK(a.engine.node_of(b.mac, resolved) && resolved == 2);
+  CHECK(a.engine.binding_of(2, binding) && binding != kInvalidBindingId);
 }
 
 // Simultaneous open: both nodes discover at once; the verified lower NodeId
@@ -970,10 +981,15 @@ void test_suspend_revoke() {
   world.run(11000);
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
 
-  // Revocation: record survives, binding unusable, RX rejected.
+  // Revocation: record survives, binding unusable, RX rejected, and the
+  // dead mapping no longer resolves for sends or lease attribution.
   CHECK_OK(a.engine.revoke_peer(2));
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Revoked);
   CHECK(a.engine.neighbor_count() == 1);
+  NodeId resolved = kInvalidNodeId;
+  BindingId binding = kInvalidBindingId;
+  CHECK(!a.engine.node_of(b.mac, resolved));
+  CHECK(!a.engine.binding_of(2, binding));
   const std::uint32_t rejects = a.engine.stats().kind_rejects;
   const std::uint8_t junk[8] = {0};
   a.engine.on_wire_rx(b.mac, FrameType::NeighborProbe,

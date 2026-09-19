@@ -9,13 +9,16 @@ constexpr Status reject(const StatusCode code, const char* detail) noexcept {
   return Status::error(code, detail);
 }
 
-// Integer "candidate improves worst cost by >=25%": cand*4 <= cur*3.
-// kInfiniteRouteMetric participates naturally: an infinite current cost is
-// improved by any finite candidate; an infinite candidate never improves.
+// Integer "candidate improves worst cost by >=25%": cand*4 <= cur*3 with a
+// strict-improvement guard — equal costs (including 0/0 from zero-filled
+// reports) are never an improvement. kInfiniteRouteMetric participates
+// naturally: an infinite current cost is improved by any finite candidate;
+// an infinite candidate never improves.
 constexpr bool improved_quarter(const RouteMetric candidate,
                                 const RouteMetric current) noexcept {
-  return static_cast<std::uint64_t>(candidate) * 4U <=
-         static_cast<std::uint64_t>(current) * 3U;
+  return candidate < current &&
+         static_cast<std::uint64_t>(candidate) * 4U <=
+             static_cast<std::uint64_t>(current) * 3U;
 }
 
 }  // namespace
@@ -209,6 +212,18 @@ Status ChannelCoordinator::set_home_channel(const std::uint8_t channel) noexcept
 void ChannelCoordinator::advance_windows(const MonotonicMs now_ms) noexcept {
   const std::uint64_t index = now_ms / config_.bad_window_ms;
   if (window_index_ == kWindowUninitialized) {
+    window_index_ = index;
+    window_.reset();
+    return;
+  }
+  if (index > window_index_ + migration_const::kAdvanceWindowsMax) {
+    // A clock jump spanning more than the cap would spin here finalizing
+    // thousands of empty windows. Collapse the skipped span into a single
+    // unobserved window instead — a silent gap is not evidence of badness.
+    finalize_window(window_);
+    stats_.unobserved_windows +=
+        static_cast<std::uint32_t>(index - window_index_);
+    last_window_unobserved_ = true;
     window_index_ = index;
     window_.reset();
     return;
@@ -616,9 +631,16 @@ Status ChannelCoordinator::request_survey_lease(const SurveyRequest& request,
   // Both ends are absent for the lease window; the protected cut records
   // the absence so a second simultaneous cut is refused above.
   const NodeId ends[2] = {config_.node, request.peer};
+  Absence* allocated[2] = {nullptr, nullptr};
+  std::size_t allocated_count = 0;
   for (const NodeId end : ends) {
     Absence* absence = absences_.allocate();
     if (absence == nullptr) {
+      // Roll back any earlier entry — a leaked absence for a dead lease id
+      // would keep the node "absent" until the phantom window expires.
+      for (std::size_t i = 0; i < allocated_count; ++i) {
+        absences_.release(allocated[i]);
+      }
       leases_.release(lease);
       ++stats_.lease_rejects;
       return reject(StatusCode::NoCapacity, "absence table full");
@@ -627,6 +649,7 @@ Status ChannelCoordinator::request_survey_lease(const SurveyRequest& request,
     absence->protected_cut_id = request.protected_cut_id;
     absence->until_ms = lease->end_ms;
     absence->lease_id = lease->lease_id;
+    allocated[allocated_count++] = absence;
   }
   last_visit_end_ = lease->end_ms;
   pair->last_end_ms = lease->end_ms;

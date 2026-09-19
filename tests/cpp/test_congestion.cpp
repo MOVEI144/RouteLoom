@@ -307,7 +307,9 @@ void test_control_lane() {
   // A sends RELIABLE DATA; B accepts it, queueing a HOP_ACCEPT reply.
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);  // DATA on air + delivered into B's receive path
+  // DATA on air + delivered into B's receive path; the boot route
+  // advertisement (management class) may legitimately take a turn first.
+  drive_tx(h, 1, data.sequence, 1);
   CHECK(b->congestion_stats().control_queued == 1);  // the HOP_ACCEPT
 
   const std::size_t before = h.net.sights.size();
@@ -427,7 +429,8 @@ void test_busy_deferral_readmission() {
 
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);  // TX1 on air; job parks in awaiting-hop (B never answers)
+  // TX1 on air; job parks in awaiting-hop (B never answers)
+  drive_tx(h, 1, data.sequence, 1);
   CHECK(h.data_sights(data.sequence) == 1);
   CHECK(a->peer_tx_window(2) == kPeerWindowInitial);
 
@@ -451,7 +454,7 @@ void test_busy_retry_clamp() {
 
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
 
   // retry_after=1ms must clamp UP to 20ms: no early readmission.
   auto low = busy_for(data, 1, 0, 1, 1);
@@ -484,7 +487,7 @@ void test_busy_stale_sequence() {
   h.link(1, 2);
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
 
   auto fresh = busy_for(data, 1, 0, 50, 7);
   inject(h, 1, 2, craft_busy(h.cipher, 2, 1, fresh, 1));
@@ -509,7 +512,7 @@ void test_busy_wrong_round_and_peer() {
   h.link(1, 3);
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
 
   auto wrong_round = busy_for(data, 1, /*round=*/1, 50, 1);
   inject(h, 1, 2, craft_busy(h.cipher, 2, 1, wrong_round, 1));
@@ -536,7 +539,7 @@ void test_busy_unauthenticated() {
   h.link(1, 3);
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
 
   auto payload = busy_for(data, 1, 0, 50, 1);
   auto forged = craft_busy(h.cipher, 2, 1, payload, 1);
@@ -575,7 +578,7 @@ void test_peer_window_shrink_grow() {
 
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
   auto busy = busy_for(data, 1, 0, 50, 1);
   inject(h, 1, 2, craft_busy(h.cipher, 2, 1, busy, 1));
   CHECK(a->peer_tx_window(2) == kPeerWindowMin);  // 1
@@ -609,7 +612,7 @@ void test_attempt_budgets() {
   h.link(1, 2);
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);                                 // TX1
+  drive_tx(h, 1, data.sequence, 1);                                 // TX1
   h.now += 70;
   drive_tx(h, 1, data.sequence, 2);          // timeout -> retry -> TX2
   CHECK(h.data_sights(data.sequence) == 2);
@@ -626,7 +629,7 @@ void test_attempt_budgets() {
   h2.link(1, 2);
   MessageId d2{};
   CHECK_OK(a2->send(2, payload_view(), SendOptions{}, h2.now, d2));
-  h2.step(1);                                // TX1
+  drive_tx(h2, 1, d2.sequence, 1);           // TX1
   for (std::uint32_t i = 1; i <= 4; ++i) {
     auto busy = busy_for(d2, 1, 0, 50, i);
     inject(h2, 1, 2, craft_busy(h2.cipher, 2, 1, busy, i));
@@ -695,7 +698,7 @@ void test_busy_never_cancels() {
 
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
 
   auto busy = busy_for(data, 1, 0, 50, 1);
   inject(h, 1, 2, craft_busy(h.cipher, 2, 1, busy, 1));
@@ -728,11 +731,11 @@ void test_observation_buckets() {
   h.link(1, 2);
   MessageId data{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
-  h.step(1);
+  drive_tx(h, 1, data.sequence, 1);
   auto busy = busy_for(data, 1, 0, 50, 1);
   inject(h, 1, 2, craft_busy(h.cipher, 2, 1, busy, 1));
   h.now += 60;
-  h.step(1);  // readmission TX
+  drive_tx(h, 1, data.sequence, 2);  // readmission TX
 
   std::size_t buckets = 0;
   std::uint64_t submitted = 0, deferrals = 0, service = 0;
@@ -748,6 +751,97 @@ void test_observation_buckets() {
   CHECK(service >= 2);         // driver accept -> TX callback samples
 }
 
+// D4-03: BUSY is link-scoped feedback — the claimed origin must BE the
+// immediate peer, and an end-protected BUSY is out of scope entirely (a
+// relay cannot end-sign toward the origin).
+void test_busy_origin_mismatch() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  (void)h.add(3);
+  h.link(1, 2);
+  h.link(1, 3);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);
+
+  auto busy = busy_for(data, 1, 0, 50, 1);
+  autonomy::EncodedPayload body{};
+  CHECK_OK(autonomy::busy_encode(busy, body));
+
+  // origin=3 arriving over the link from peer 2: not this link's feedback.
+  wire::EncodedFrame relayed = craft_frame(
+      h.cipher,
+      mk_header(FrameType::Busy, 3, 1, 2, 1, MessageId{777, 5}),
+      body.view());
+  inject(h, 1, 2, relayed);
+  CHECK(a->congestion_stats().busy_received == 0);
+  CHECK(h.observer(1)->has_diag("BUSY_SCOPE_REJECTED"));
+
+  // End-protected BUSY from the peer itself: still out of scope.
+  wire::EncodedFrame protected_busy = craft_frame(
+      h.cipher,
+      mk_header(FrameType::Busy, 2, 1, 2, 1, MessageId{777, 6},
+                wire::kFlagEndProtected),
+      body.view());
+  inject(h, 1, 2, protected_busy);
+  CHECK(a->congestion_stats().busy_received == 0);
+  CHECK(a->peer_tx_window(2) == kPeerWindowInitial);  // never throttled
+}
+
+// D4-03/§6.2: a zero-pressure hint carries no busy claim — it must not
+// throttle the window or establish a busy condition.
+void test_busy_zero_pressure_hint() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);
+  CHECK(a->peer_tx_window(2) == kPeerWindowInitial);
+
+  autonomy::BusyPayload hint{};
+  hint.subtype = autonomy::BusySubtype::PressureHint;
+  hint.reason = autonomy::BusyReason::QueueFull;
+  hint.pressure = 0;
+  hint.feedback_sequence = FeedbackSequence{1};
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, hint, 1));
+  CHECK(a->congestion_stats().busy_received == 1);
+  CHECK(a->peer_tx_window(2) == kPeerWindowInitial);  // no throttle
+  CHECK(a->peer_busy_since(2) == 0);                // no busy condition
+}
+
+// D4-03: feedback sequence ordering uses RFC 1982 serial arithmetic — a
+// sequence that wraps past u32 max must still be accepted as fresher, and a
+// genuinely older one rejected.
+void test_busy_feedback_wrap() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);
+
+  // Establish a sequence near the u32 wrap boundary.
+  auto near_max = busy_for(data, 1, 0, 50, 0xFFFFFFFEu);
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, near_max, 1));
+  CHECK(a->congestion_stats().busy_received == 1);
+
+  // Wrapped successor (diff = +3 mod 2^32): fresh, must be accepted.
+  auto wrapped = busy_for(data, 1, 0, 50, 1);
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, wrapped, 2));
+  CHECK(a->congestion_stats().busy_received == 2);
+  CHECK(a->congestion_stats().busy_stale == 0);
+
+  // A sequence behind the boundary (diff negative): stale, rejected.
+  auto older = busy_for(data, 1, 0, 50, 0xFFFFFFFDu);
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, older, 3));
+  CHECK(a->congestion_stats().busy_received == 2);
+  CHECK(a->congestion_stats().busy_stale == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -761,6 +855,9 @@ int main() {
   test_busy_stale_sequence();
   test_busy_wrong_round_and_peer();
   test_busy_unauthenticated();
+  test_busy_origin_mismatch();
+  test_busy_zero_pressure_hint();
+  test_busy_feedback_wrap();
   test_peer_window_shrink_grow();
   test_attempt_budgets();
   test_watermarks();

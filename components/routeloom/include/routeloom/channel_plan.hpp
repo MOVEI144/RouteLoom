@@ -59,6 +59,9 @@ constexpr std::size_t kOperationEvidence = 8;          // retained op results
 constexpr std::uint32_t kCandidateMaskDefault =
     (1u << 0) | (1u << 5) | (1u << 10);                // channels {1,6,11}
 constexpr std::uint32_t kChannelMaskAll24 = 0x3fffu;   // channels 1..13
+// Bound on per-poll window finalization: a clock jump larger than this
+// collapses into one unobserved gap rather than spinning per-window.
+constexpr std::uint64_t kAdvanceWindowsMax = 32;
 }  // namespace migration_const
 
 // --- Modes (04 §1 D5-01) ---------------------------------------------------------

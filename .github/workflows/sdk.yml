@@ -1,7 +1,11 @@
 name: SDK build and tests
 on:
   push:
-    branches: [main, implementation/core-fixed-250, implementation/pre-hil-software]
+    branches:
+      - main
+      - implementation/core-fixed-250
+      - implementation/pre-hil-software
+      - design/autonomous-mesh-issues-3-4-5
   pull_request:
   workflow_dispatch:
 permissions:
@@ -40,7 +44,9 @@ jobs:
             echo 'Covers: wire codec, wire golden vectors (valid + invalid), routing'
             echo '(3hop/diamond/10hop/partition-merge/loop-freedom), authority ledger'
             echo 'power-cut, USB codec/session/credit, power coordinator model,'
-            echo 'replay/end-protection hardening, C ABI.'
+            echo 'replay/end-protection hardening, C ABI, autonomy codecs + golden'
+            echo 'vectors, neighbor discovery, congestion scheduler/BUSY, channel-plan'
+            echo 'coordinator, migration engine + wire transport, load-aware routing.'
             echo ''
             echo '```'
             ctest --test-dir build -N || true
@@ -85,7 +91,8 @@ jobs:
           set -euo pipefail
           cargo run --manifest-path host/Cargo.toml -p routeloom-wire --example gen_golden
           cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
-          git diff --exit-code -- protocol/golden protocol/usb-golden
+          python3 tools/gen_autonomy_vectors.py
+          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

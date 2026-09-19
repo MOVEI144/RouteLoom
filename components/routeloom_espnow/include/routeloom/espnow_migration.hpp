@@ -52,7 +52,7 @@ class DevPskCommitVerifier final : public CommitSignatureVerifier {
     return SecurityProfile::Development;
   }
   Status verify_commit(const AuthorityOperation& operation,
-                       const Digest256& plan_hash,
+                       const Digest256& plan_hash, ChannelEpoch new_epoch,
                        ByteView signature) noexcept override;
   Status verify_snapshot(ByteView snapshot,
                          ByteView signature) noexcept override;
@@ -76,7 +76,7 @@ class DevPskCommitVerifier final : public CommitSignatureVerifier {
 //   "commit"  — the single durable commit record (kCommitRecordSize bound),
 //   "active"  — the durable active record (kActiveRecordSize bound),
 //   "pb0"/"pb1" — two hash-addressed plan-blob slots
-//                 (magic | sequence | hash | len | blob).
+//                 (magic | sequence | hash | len | blob | crc32).
 // A torn or wrong-size blob read reports failure — the engine refetches
 // rather than trusting truncated bytes. No path erases or reformats flash;
 // a failed write is reported, never repaired silently.
@@ -111,9 +111,10 @@ class NvsPlanStore final : public PlanStorage {
  private:
   static constexpr std::uint32_t kBlobMagic = 0x524C4231U;  // "RLB1"
   static constexpr std::size_t kBlobSlots = 2;
-  // magic u32 | sequence u32 | hash 32 | len u16 | blob
+  // magic u32 | sequence u32 | hash 32 | len u16 | blob | crc32 u32 over all
+  // preceding bytes — a bit-flipped blob can never surface as success.
   static constexpr std::size_t kBlobRecordSize =
-      4 + 4 + 32 + 2 + migration_const::kPlanBlobMax;
+      4 + 4 + 32 + 2 + migration_const::kPlanBlobMax + 4;
 
   Status read_blob_slot(std::uint8_t slot, Digest256& hash, std::uint32_t& seq,
                         MutableByteView blob, std::size_t& blob_size) noexcept;

@@ -183,9 +183,12 @@ class CommitSignatureVerifier {
   virtual SecurityProfile security_profile() const noexcept {
     return SecurityProfile::Development;
   }
-  // Verify the authority signature over (operation fields, plan_hash).
+  // Verify the authority signature over (operation fields, plan_hash,
+  // new_epoch) — the committed epoch is part of the signed input so the
+  // evidence's epoch field cannot be rewritten without breaking the MAC.
   virtual Status verify_commit(const AuthorityOperation& operation,
                                const Digest256& plan_hash,
+                               ChannelEpoch new_epoch,
                                ByteView signature) noexcept = 0;
   // Verify the authority signature over a recovery snapshot body. Signed
   // recovery material keeps verifying while the authority is stopped —
@@ -320,6 +323,7 @@ class MigrationAuthority {
 // + a recovery procedure — never a bare "it answered once".
 struct ParticipantReadiness {
   NodeId node{kInvalidNodeId};
+  Digest256 plan_hash{};             // plan the READY report was bound to
   bool required{false};
   bool answered{false};              // responded inside the prepare window
   bool ready{false};                 // full READY evidence accepted
@@ -496,6 +500,8 @@ struct MigrationStats {
   std::uint32_t helper_visits{0};
   std::uint32_t recovery_required{0};
   std::uint32_t blob_refetches{0};
+  std::uint32_t verify_passed{0};   // VERIFY closed on real link evidence
+  std::uint32_t verify_failed{0};   // VERIFY window expired with no traffic
 };
 
 // One participant's plan state machine. Not thread-safe: the radio Owner
@@ -615,6 +621,11 @@ class MigrationParticipant {
   // channel inside the window -> stranded recovery (never unilateral
   // rollback).
   void note_verify_failure() noexcept;
+  // Connectivity evidence during VERIFY (04 §10): any link-authenticated
+  // frame received on the new channel proves the cutover landed on a live
+  // channel and closes VERIFY early. The window is NOT a blind timer —
+  // reaching the deadline with zero evidence is a verify failure.
+  void note_link_activity(MonotonicMs now_ms) noexcept;
   // Whether the explicit assumptions (04 §9.3) could even hold for this
   // plan: the recovery bound must fit inside the committed helper budget.
   bool recovery_assumptions_satisfiable(std::uint32_t hops,
@@ -652,6 +663,16 @@ class MigrationParticipant {
   Status store_active_record(const ActiveRecord& record) noexcept;
   Status validate_plan(const MigrationPlan& plan, const PlanMeasurements& m,
                        MonotonicMs now_ms) const noexcept;
+  // Structural legality only — no epoch/base identity, no now-relative
+  // feasibility. Applied on every adoption path, including committed-blob
+  // refetch and signed-snapshot catch-up.
+  Status check_plan_structure(const MigrationPlan& plan) const noexcept;
+  // Measurement- and now-relative feasibility (guard bound, transfer
+  // budget, commit lead). Skipped only where a post-commit path cannot
+  // evaluate it — never skipped on the initial PREPARE.
+  Status validate_plan_feasibility(const MigrationPlan& plan,
+                                   const PlanMeasurements& m,
+                                   MonotonicMs now_ms) const noexcept;
   // stranded_on_old: the verified commit is held but unapplied and the node
   // is known to still be on the old channel — one bounded re-follow is
   // allowed; otherwise recovery waits for signed material.

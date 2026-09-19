@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "psa/crypto.h"
 #include "routeloom/byte_io.hpp"
+#include "routeloom/crc32.hpp"
 
 namespace routeloom::espnow {
 namespace {
@@ -113,11 +114,11 @@ Status DevPskCommitVerifier::check(const ByteView input,
 
 Status DevPskCommitVerifier::verify_commit(
     const AuthorityOperation& operation, const Digest256& plan_hash,
-    const ByteView signature) noexcept {
+    const ChannelEpoch new_epoch, const ByteView signature) noexcept {
   std::array<std::uint8_t, kCommitSigningInputSize> input{};
   std::size_t size = 0;
   const Status status =
-      commit_signing_input(operation, plan_hash,
+      commit_signing_input(operation, plan_hash, new_epoch,
                            MutableByteView{input.data(), input.size()}, size);
   if (!status) return status;
   return check(ByteView{input.data(), size}, signature);
@@ -132,11 +133,10 @@ Status DevPskCommitVerifier::sign_commit(
     const AuthorityOperation& operation, const Digest256& plan_hash,
     const ChannelEpoch new_epoch,
     std::array<std::uint8_t, 32>& out) noexcept {
-  (void)new_epoch;  // bound above the crypto layer (operation_hash -> blob)
   std::array<std::uint8_t, kCommitSigningInputSize> input{};
   std::size_t size = 0;
   Status status =
-      commit_signing_input(operation, plan_hash,
+      commit_signing_input(operation, plan_hash, new_epoch,
                            MutableByteView{input.data(), input.size()}, size);
   if (!status) return status;
   return mac(ByteView{input.data(), size}, out);
@@ -224,11 +224,16 @@ Status NvsPlanStore::read_blob_slot(const std::uint8_t slot, Digest256& hash,
   if (status) status = reader.read_bytes(MutableByteView{hash.data(), 32});
   if (status) status = reader.read_u16(length);
   if (!status || magic != kBlobMagic || length > blob.size ||
-      length > reader.remaining()) {
+      reader.remaining() != static_cast<std::size_t>(length) + 4) {
     return Status::error(StatusCode::IntegrityError, "blob slot corrupt");
   }
   status = reader.read_bytes(MutableByteView{blob.data, length});
-  if (!status) return status;
+  std::uint32_t crc = 0;
+  if (status) status = reader.read_u32(crc);
+  if (!status ||
+      crc32_iso_hdlc(ByteView{raw.data(), reader.size() - 4}) != crc) {
+    return Status::error(StatusCode::IntegrityError, "blob slot corrupt");
+  }
   blob_size = length;
   return Status::success();
 }
@@ -248,6 +253,10 @@ Status NvsPlanStore::write_blob_slot(const std::uint8_t slot,
     status = writer.write_u16(static_cast<std::uint16_t>(blob.size));
   }
   if (status) status = writer.write_bytes(blob);
+  if (status) {
+    status = writer.write_u32(
+        crc32_iso_hdlc(ByteView{raw.data(), writer.size()}));
+  }
   if (!status) return status;
   return write_key(key, ByteView{raw.data(), writer.size()});
 }

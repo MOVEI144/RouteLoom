@@ -542,7 +542,7 @@ class NeighborDiscovery {
   void release_transient() noexcept;
   bool reserve_regular(Neighbor& neighbor) noexcept;
 
-  std::uint64_t next_u64() noexcept;
+  bool next_u64(std::uint64_t& out) noexcept;  // false = entropy unavailable
   std::uint32_t recent_discovers(MonotonicMs now_ms) const noexcept;
   void event(const char* reason, NodeId peer) noexcept {
     observer_.on_discovery_event(reason, peer);

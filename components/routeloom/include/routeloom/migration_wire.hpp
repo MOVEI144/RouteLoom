@@ -152,13 +152,14 @@ Status signed_snapshot_unwrap(ByteView object, ByteView& snapshot_body,
                               ByteView& signature) noexcept;
 
 // Canonical commit-signing input shared by portable tests and the ESP
-// development verifier: "RLCMT1" | operation fields | plan_hash. This is
-// exactly what CommitSignatureVerifier::verify_commit checks — the epoch is
-// bound one layer up (the verified blob + VerifiedAuthorityPlan carry it,
-// and operation_hash transitively binds every plan field).
-constexpr std::size_t kCommitSigningInputSize = 6 + 93 + 32;
+// development verifier: "RLCMT1" | operation fields | plan_hash | new_epoch.
+// The epoch is part of the signed input so an evidence's epoch field can
+// never be rewritten without invalidating the MAC — a forged epoch would
+// otherwise wedge a participant's committed_epoch ahead of any real plan.
+constexpr std::size_t kCommitSigningInputSize = 6 + 93 + 32 + 4;
 Status commit_signing_input(const AuthorityOperation& operation,
-                            const Digest256& plan_hash, MutableByteView target,
+                            const Digest256& plan_hash, ChannelEpoch new_epoch,
+                            MutableByteView target,
                             std::size_t& out_size) noexcept;
 
 // --- Owner surfaces ------------------------------------------------------------
@@ -291,6 +292,13 @@ class MigrationFrameSink {
                                   ByteView payload,
                                   MonotonicMs now_ms) noexcept = 0;
   virtual void poll(MonotonicMs now_ms) noexcept = 0;
+  // Any link-authenticated frame receipt is connectivity evidence. The
+  // Owner reports it so VERIFY closes on real traffic instead of a blind
+  // timer (04 §10). Default no-op keeps non-migration sinks unaffected.
+  virtual void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept {
+    (void)peer;
+    (void)now_ms;
+  }
 };
 
 // What the agent needs from its Owner beyond the wire port: the DATA pause
@@ -344,6 +352,7 @@ class MigrationAgent final : public MigrationFrameSink,
   void on_migration_frame(NodeId peer, FrameType type, ByteView payload,
                           MonotonicMs now_ms) noexcept override;
   void poll(MonotonicMs now_ms) noexcept override;
+  void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept override;
 
   // Cold/resume entry: load durable records via the engine and flag a
   // physical-channel reconcile when the durable active record disagrees
@@ -451,10 +460,11 @@ class MigrationAgent final : public MigrationFrameSink,
                     bool visit_channel) noexcept;
   void emit_notice(NodeId dest, autonomy::AbsenceReason reason,
                    ChannelEpoch epoch, std::uint32_t starts_in_ms,
-                   std::uint32_t duration_ms) noexcept;
+                   std::uint32_t duration_ms,
+                   std::uint16_t protected_cut_id) noexcept;
   void emit_notice_all(autonomy::AbsenceReason reason, ChannelEpoch epoch,
-                       std::uint32_t starts_in_ms,
-                       std::uint32_t duration_ms) noexcept;
+                       std::uint32_t starts_in_ms, std::uint32_t duration_ms,
+                       std::uint16_t protected_cut_id) noexcept;
   void emit_ready_report(const Digest256& plan_hash, ChannelEpoch epoch,
                          ReadyStatus status,
                          MonotonicMs now_ms) noexcept;

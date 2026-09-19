@@ -18,7 +18,7 @@ pub const BOOTSTRAP_OBJECT_MAX: usize = 1024;
 
 pub const BUSY_PAYLOAD_SIZE: usize = 38;
 pub const TIME_SYNC_PAYLOAD_SIZE: usize = 26;
-pub const CHANNEL_NOTICE_PAYLOAD_SIZE: usize = 24;
+pub const CHANNEL_NOTICE_PAYLOAD_SIZE: usize = 25;
 pub const NEIGHBOR_PROBE_PAYLOAD_SIZE: usize = 22;
 pub const NEIGHBOR_RESULT_PAYLOAD_SIZE: usize = 24;
 pub const CONTROL_OBJECT_PAYLOAD_SIZE: usize = 38;
@@ -252,6 +252,7 @@ pub struct ChannelNoticePayload {
     pub starts_in_ms: u32,
     pub duration_ms: u32,
     pub reason: AbsenceReason,
+    pub protected_cut_id: u16,
 }
 
 pub fn channel_notice_encode(
@@ -266,7 +267,7 @@ pub fn channel_notice_encode(
     raw.extend_from_slice(&payload.starts_in_ms.to_be_bytes());
     raw.extend_from_slice(&payload.duration_ms.to_be_bytes());
     raw.push(payload.reason as u8);
-    raw.push(0);
+    raw.extend_from_slice(&payload.protected_cut_id.to_be_bytes());
     debug_assert_eq!(raw.len(), CHANNEL_NOTICE_PAYLOAD_SIZE);
     *out = EncodedPayload::wrap(&raw)?;
     Ok(())
@@ -284,9 +285,6 @@ pub fn channel_notice_decode(encoded: &[u8]) -> Result<ChannelNoticePayload> {
         3 => AbsenceReason::Cutover,
         _ => return reject(),
     };
-    if encoded[23] != 0 {
-        return reject();
-    }
     Ok(ChannelNoticePayload {
         subtype: ChannelNoticeSubtype::PlannedAbsence,
         subject: u64::from_be_bytes(encoded[2..10].try_into().expect("fixed")),
@@ -294,6 +292,7 @@ pub fn channel_notice_decode(encoded: &[u8]) -> Result<ChannelNoticePayload> {
         starts_in_ms: u32::from_be_bytes(encoded[14..18].try_into().expect("fixed")),
         duration_ms: u32::from_be_bytes(encoded[18..22].try_into().expect("fixed")),
         reason,
+        protected_cut_id: u16::from_be_bytes(encoded[23..25].try_into().expect("fixed")),
     })
 }
 

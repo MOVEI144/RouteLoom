@@ -243,14 +243,19 @@ Status EspNowRuntime::add_driver_peer(const MacAddress& mac) noexcept {
 }
 
 Status EspNowRuntime::register_driver_peer(Peer& peer) noexcept {
-  if (peer.driver_registered) {
+  portENTER_CRITICAL(&callback_lock_);
+  const bool registered = peer.driver_registered;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (registered) {
     return Status::success();
   }
   const Status status = add_driver_peer(peer.mac);
   if (!status) {
     return status;
   }
+  portENTER_CRITICAL(&callback_lock_);
   peer.driver_registered = true;
+  portEXIT_CRITICAL(&callback_lock_);
   return Status::success();
 }
 
@@ -349,9 +354,13 @@ Status EspNowRuntime::register_neighbor(
     return Status::error(StatusCode::InvalidArgument,
                          "invalid neighbor registration");
   }
+  // Peer-table mutation runs under callback_lock_ so the WiFi-task RX
+  // callback never observes a torn (used, node, mac) triple.
+  portENTER_CRITICAL(&callback_lock_);
   Peer* record = find_peer(node);
   if (record == nullptr) {
     if (regular_used() >= regular_budget()) {
+      portEXIT_CRITICAL(&callback_lock_);
       return Status::error(StatusCode::PeerCapacity,
                            "regular peer partition full");
     }
@@ -363,9 +372,11 @@ Status EspNowRuntime::register_neighbor(
     }
   }
   if (record == nullptr) {
+    portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::NoCapacity, "peer mapping full");
   }
   if (record->used && !(record->mac == mac)) {
+    portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::Conflict,
                          "node already mapped to another MAC");
   }
@@ -373,6 +384,7 @@ Status EspNowRuntime::register_neighbor(
   record->node = node;
   record->mac = mac;
   record->metric = link_metric;
+  portEXIT_CRITICAL(&callback_lock_);
   if (espnow_initialized_) {
     const auto status = register_driver_peer(*record);
     if (!status) {
@@ -433,6 +445,17 @@ Status EspNowRuntime::start() noexcept {
     if (!peer.used) {
       continue;
     }
+    if (peer.autonomy) {
+      // Autonomy-managed peers enter routing only at REACHABLE; anything
+      // else is picked up (or released) by the next lease sync instead of
+      // leaking a stale link into the neighbor table.
+      NeighborPhase phase{};
+      if (discovery_ == nullptr ||
+          !discovery_->phase_of(peer.node, phase) ||
+          phase != NeighborPhase::Reachable) {
+        continue;
+      }
+    }
     status = node_.add_neighbor(peer.node, peer.metric, now_ms());
     if (!status) {
       return status;
@@ -440,7 +463,9 @@ Status EspNowRuntime::start() noexcept {
     if (peer.autonomy) {
       // Restart path: the neighbor add here must be undoable by a later
       // autonomy release, so mirror the REACHABLE bookkeeping.
+      portENTER_CRITICAL(&callback_lock_);
       peer.neighbor_added = true;
+      portEXIT_CRITICAL(&callback_lock_);
     }
   }
   started_ = true;
@@ -493,6 +518,7 @@ void EspNowRuntime::stop() noexcept {
   pending_token_ = 0;
   pending_generation_ = 0;
   fenced_outstanding_ = false;
+  raw_tx_count_ = 0;
   portEXIT_CRITICAL(&callback_lock_);
   if (espnow_initialized_) {
     (void)esp_now_unregister_recv_cb();
@@ -500,12 +526,14 @@ void EspNowRuntime::stop() noexcept {
     (void)esp_now_deinit();
     espnow_initialized_ = false;
   }
+  portENTER_CRITICAL(&callback_lock_);
   for (auto& peer : peers_) {
     peer.driver_registered = false;
   }
   for (auto& slot : transient_peers_) {
     slot.used = false;
   }
+  portEXIT_CRITICAL(&callback_lock_);
   broadcast_peer_ = false;
   if (wifi_initialized_) {
     (void)esp_wifi_stop();
@@ -532,9 +560,11 @@ void EspNowRuntime::poll_once() noexcept {
     if (event.kind == EventKind::Tx) {
       node_.on_radio_tx_result(event.token, event.success, now);
     } else {
+      rx_source_ = event.source;
       node_.on_radio_receive(
           event.peer, ByteView{event.data.data(), event.length},
           RadioRxMetadata{event.rssi_dbm}, now);
+      rx_source_ = {};
     }
   }
   if (discovery_ != nullptr && bootstrap_queue_ != nullptr) {
@@ -576,8 +606,52 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     return Status::error(StatusCode::InvalidArgument,
                          "invalid ESP-NOW frame");
   }
-  return esp_send_status(
-      esp_now_send(mac.bytes.data(), frame.data, frame.size));
+  // Completion callbacks identify a send only by des_addr: never let two
+  // sends share a destination MAC while a completion is outstanding.
+  const MonotonicMs now = now_ms();
+  portENTER_CRITICAL(&callback_lock_);
+  if (pending_tx_ && pending_mac_ == mac) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock,
+                         "reserved DATA TX in flight to peer");
+  }
+  // Retire entries whose completion never arrived (callback watchdog).
+  std::size_t kept = 0;
+  for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+    if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
+      raw_tx_[kept++] = raw_tx_[i];
+    }
+  }
+  raw_tx_count_ = kept;
+  for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+    if (raw_tx_[i].mac == mac) {
+      portEXIT_CRITICAL(&callback_lock_);
+      return Status::error(StatusCode::WouldBlock,
+                           "autonomy TX already in flight to peer");
+    }
+  }
+  if (raw_tx_count_ == raw_tx_.size()) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "autonomy TX window full");
+  }
+  raw_tx_[raw_tx_count_].mac = mac;
+  raw_tx_[raw_tx_count_].sent_ms = now;
+  ++raw_tx_count_;
+  portEXIT_CRITICAL(&callback_lock_);
+  const esp_err_t error =
+      esp_now_send(mac.bytes.data(), frame.data, frame.size);
+  if (error != ESP_OK) {
+    portENTER_CRITICAL(&callback_lock_);
+    for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+      if (raw_tx_[i].mac == mac) {
+        raw_tx_[i] = raw_tx_[--raw_tx_count_];
+        break;
+      }
+    }
+    portEXIT_CRITICAL(&callback_lock_);
+    return esp_send_status(error);
+  }
+  return Status::success();
 }
 
 Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
@@ -587,8 +661,17 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
     // rather than transmit against a stale configuration (04 §8).
     return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
-  const Peer* record = find_peer(peer);
-  if (record == nullptr || !record->driver_registered) {
+  // Resolve under callback_lock_: peer-table fields can be rewritten by the
+  // poll task's lease sync while this call runs on the bridge task.
+  MacAddress peer_mac{};
+  bool driver_registered = false;
+  portENTER_CRITICAL(&callback_lock_);
+  if (const Peer* record = find_peer(peer)) {
+    peer_mac = record->mac;
+    driver_registered = record->driver_registered;
+  }
+  portEXIT_CRITICAL(&callback_lock_);
+  if (!driver_registered) {
     return Status::error(StatusCode::NotFound,
                          "peer is not registered");
   }
@@ -597,16 +680,35 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
     return Status::error(StatusCode::InvalidArgument,
                          "invalid ESP-NOW frame");
   }
+  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
                          "physical TX already in flight");
   }
+  {
+    // A raw autonomy send to this MAC may still owe a callback that would
+    // otherwise satisfy this reservation — refuse until it retires.
+    bool raw_outstanding = false;
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+      if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
+        raw_outstanding |= raw_tx_[i].mac == peer_mac;
+        raw_tx_[kept++] = raw_tx_[i];
+      }
+    }
+    raw_tx_count_ = kept;
+    if (raw_outstanding) {
+      portEXIT_CRITICAL(&callback_lock_);
+      return Status::error(StatusCode::WouldBlock,
+                           "autonomy TX in flight to peer");
+    }
+  }
   if (fenced_outstanding_) {
-    if (now_ms() >= fenced_until_ms_) {
+    if (now >= fenced_until_ms_) {
       fenced_outstanding_ = false;
-    } else if (fenced_mac_ == record->mac) {
+    } else if (fenced_mac_ == peer_mac) {
       // A fenced callback for this MAC may still be in flight: refuse the
       // new send so the old completion can never be attributed to it (X-02).
       portEXIT_CRITICAL(&callback_lock_);
@@ -615,11 +717,11 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   }
   pending_tx_ = true;
   pending_token_ = token;
-  pending_mac_ = record->mac;
+  pending_mac_ = peer_mac;
   pending_generation_ = channel_runner_.radio_generation().value;
   portEXIT_CRITICAL(&callback_lock_);
   const esp_err_t error =
-      esp_now_send(record->mac.bytes.data(), frame.data, frame.size);
+      esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
   if (error != ESP_OK) {
     portENTER_CRITICAL(&callback_lock_);
     pending_tx_ = false;
@@ -784,11 +886,22 @@ void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
   if (discovery_ == nullptr) {
     return;
   }
-  const Peer* record = find_peer(peer);
-  if (record == nullptr) {
+  // Feed the engine the MAC the frame was observed from (captured at enqueue)
+  // — never a peer-table re-resolution that could lag a lease remap.
+  discovery_->on_wire_rx(rx_source_, type, payload, now_ms);
+}
+
+void EspNowRuntime::note_link_activity(const NodeId peer,
+                                       const MonotonicMs now_ms) noexcept {
+  // VERIFY closes on new-channel evidence only. While the runner owns ANY
+  // radio operation the channel context is not the settled home channel —
+  // a visit parks on a foreign channel, and a queued frame observed
+  // mid-cutover drain/fence is stale old-channel traffic. Neither may
+  // satisfy the oracle.
+  if (migration_ == nullptr || channel_runner_.busy()) {
     return;
   }
-  discovery_->on_wire_rx(record->mac.bytes, type, payload, now_ms);
+  migration_->note_link_activity(peer, now_ms);
 }
 
 // --- Migration transport (04 §5-§9) ------------------------------------------------
@@ -903,23 +1016,28 @@ std::size_t EspNowRuntime::migration_peers(NodeId* out,
 
 Status EspNowRuntime::promote_to_regular(const NodeId node,
                                          const MacAddress& mac) noexcept {
+  portENTER_CRITICAL(&callback_lock_);
   Peer* record = find_peer(node);
   if (record == nullptr) {
     record = find_peer(mac.bytes.data());
   }
   if (record != nullptr) {
-    if (record->node != node || !(record->mac == mac)) {
+    const bool mismatch = record->node != node || !(record->mac == mac);
+    const bool registered = record->driver_registered;
+    portEXIT_CRITICAL(&callback_lock_);
+    if (mismatch) {
       return Status::error(StatusCode::Conflict,
                            "peer identity mismatch");
     }
     // An existing (e.g. statically configured) mapping stays owner-managed;
     // it satisfies the lease but is never auto-released.
-    if (!record->driver_registered) {
+    if (!registered) {
       return register_driver_peer(*record);
     }
     return Status::success();
   }
   if (regular_used() >= regular_budget()) {
+    portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::PeerCapacity,
                          "regular peer partition full");
   }
@@ -930,6 +1048,7 @@ Status EspNowRuntime::promote_to_regular(const NodeId node,
     }
   }
   if (record == nullptr) {
+    portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::PeerCapacity, "peer mapping full");
   }
   record->used = true;
@@ -944,12 +1063,16 @@ Status EspNowRuntime::promote_to_regular(const NodeId node,
     // only the bookkeeping is released.
     slot->used = false;
     record->driver_registered = true;
+    portEXIT_CRITICAL(&callback_lock_);
     return Status::success();
   }
+  portEXIT_CRITICAL(&callback_lock_);
   const Status status = register_driver_peer(*record);
   if (!status) {
+    portENTER_CRITICAL(&callback_lock_);
     record->used = false;
     record->autonomy = false;
+    portEXIT_CRITICAL(&callback_lock_);
     return status;
   }
   return Status::success();
@@ -974,15 +1097,20 @@ void EspNowRuntime::release_autonomy_peer(Peer& peer,
     // Stale/suspended/evicted peers leave the routing neighbor table;
     // re-confirmation requires a fresh exchange (02 §9).
     (void)node_.remove_neighbor(peer.node, now);
-    peer.neighbor_added = false;
   }
-  if (peer.driver_registered) {
-    release_driver_peer(peer.mac, peer.node);
-    peer.driver_registered = false;
-  }
+  const bool had_driver = peer.driver_registered;
+  const MacAddress mac = peer.mac;
+  const NodeId node = peer.node;
+  portENTER_CRITICAL(&callback_lock_);
+  peer.neighbor_added = false;
+  peer.driver_registered = false;
   peer.used = false;
   peer.autonomy = false;
   peer.node = kInvalidNodeId;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (had_driver) {
+    release_driver_peer(mac, node);
+  }
 }
 
 void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
@@ -1036,12 +1164,24 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
     if (known && (phase == NeighborPhase::ApprovalPending ||
                   phase == NeighborPhase::Bound ||
                   phase == NeighborPhase::Reachable)) {
+      // Cross-check the MAC: when the engine's binding for this node moved
+      // to a different MAC, this stale (node, MAC) slot must be released —
+      // keeping it would pin sends to the wrong address and block the new
+      // mapping's promotion forever.
+      NodeId bound = kInvalidNodeId;
+      if (!discovery_->node_of(peer.mac.bytes, bound) ||
+          bound != peer.node) {
+        release_autonomy_peer(peer, now);
+        continue;
+      }
       if (phase == NeighborPhase::Reachable && !peer.neighbor_added &&
           started_) {
         // REACHABLE is the only phase where policy-limited DATA may flow;
         // routing learns the link here (register_neighbor-equivalent).
         if (node_.add_neighbor(peer.node, peer.metric, now).ok()) {
+          portENTER_CRITICAL(&callback_lock_);
           peer.neighbor_added = true;
+          portEXIT_CRITICAL(&callback_lock_);
         }
       }
       continue;
@@ -1057,17 +1197,29 @@ Status EspNowRuntime::rebuild_driver() noexcept {
     (void)esp_now_deinit();
     espnow_initialized_ = false;
   }
+  portENTER_CRITICAL(&callback_lock_);
   for (auto& peer : peers_) {
     peer.driver_registered = false;
   }
+  portEXIT_CRITICAL(&callback_lock_);
   broadcast_peer_ = false;
   return initialize_espnow();
 }
 
 Status EspNowRuntime::recover() noexcept {
+  // Fence the dropped reservation: a late completion from the pre-recover
+  // send may still arrive and must never satisfy a post-recover send to
+  // the same MAC (X-02). The driver rebuild below re-registers peers but
+  // cannot cancel an already-queued driver completion.
+  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
-  pending_tx_ = false;
-  pending_token_ = 0;
+  if (pending_tx_) {
+    fenced_mac_ = pending_mac_;
+    fenced_until_ms_ = now + config_.node.callback_watchdog_ms;
+    fenced_outstanding_ = true;
+    pending_tx_ = false;
+    pending_token_ = 0;
+  }
   portEXIT_CRITICAL(&callback_lock_);
   return rebuild_driver();
 }
@@ -1148,18 +1300,32 @@ void EspNowRuntime::enqueue_rx(
     portEXIT_CRITICAL(&callback_lock_);
     return;
   }
-  Peer* peer = find_peer(info->src_addr);
-  if (peer == nullptr) {
+  // The peer table can be rewritten by the poll task's lease sync — resolve
+  // and copy the (node, mac) pair under the lock so the queued event keeps
+  // the MAC the frame actually arrived from.
+  NodeId peer_node = kInvalidNodeId;
+  portENTER_CRITICAL(&callback_lock_);
+  if (const Peer* peer = find_peer(info->src_addr)) {
+    peer_node = peer->node;
+  }
+  portEXIT_CRITICAL(&callback_lock_);
+  if (peer_node == kInvalidNodeId) {
     return;
   }
   Event event{};
   event.kind = EventKind::Rx;
-  event.peer = peer->node;
+  event.peer = peer_node;
+  std::memcpy(event.source.data(), info->src_addr, event.source.size());
   event.length = static_cast<std::uint16_t>(length);
   event.rssi_dbm =
       info->rx_ctrl != nullptr ? info->rx_ctrl->rssi : 0;
   std::memcpy(event.data.data(), data, event.length);
-  (void)xQueueSend(event_queue_, &event, 0);
+  if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
+    // Queue-full drops are load evidence (05 §5), not silent loss.
+    portENTER_CRITICAL(&callback_lock_);
+    ++rx_dropped_;
+    portEXIT_CRITICAL(&callback_lock_);
+  }
 }
 
 void EspNowRuntime::enqueue_tx(
@@ -1196,8 +1362,15 @@ void EspNowRuntime::enqueue_tx(
       portEXIT_CRITICAL(&callback_lock_);
       return;
     }
-    // Not the reserved node-TX completion: bootstrap/autonomy sends are
-    // accounted here but never consume the reservation slot (01 §3.1).
+    // Not the reserved node-TX completion: retire the tracked raw send for
+    // this MAC (if any) and account it — never as the reserved slot.
+    for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+      if (std::memcmp(raw_tx_[i].mac.bytes.data(), info->des_addr,
+                      raw_tx_[i].mac.bytes.size()) == 0) {
+        raw_tx_[i] = raw_tx_[--raw_tx_count_];
+        break;
+      }
+    }
     if (status == ESP_NOW_SEND_SUCCESS) {
       ++autonomy_tx_ok_;
     } else {
@@ -1301,12 +1474,15 @@ Status EspNowRuntime::channel_reapply_peers() noexcept {
 
 void EspNowRuntime::channel_fence_tx() noexcept {
   bool fenced = false;
+  // now_ms() outside the critical section — the clock read may take its own
+  // lock on some ports and must never nest inside callback_lock_.
+  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     // The straggler keeps its own record: its late callback resolves as
     // unknown/stale — never as a fabricated success or failure (X-02).
     fenced_mac_ = pending_mac_;
-    fenced_until_ms_ = now_ms() + config_.node.callback_watchdog_ms;
+    fenced_until_ms_ = now + config_.node.callback_watchdog_ms;
     fenced_outstanding_ = true;
     pending_tx_ = false;
     pending_token_ = 0;

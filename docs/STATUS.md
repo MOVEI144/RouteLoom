@@ -24,7 +24,7 @@
 
 ## CIで継続確認するもの
 
-- Portable core：GCC／Clang、Sanitizer ON/OFF、CTest。routing 10hop／分断再結合、ledger電断、power model、hardening、USB codec/sessionを含む8 test targetを実行し、ctest reportをartifact保存。
+- Portable core：GCC／Clang、Sanitizer ON/OFF、CTest。routing 10hop／分断再結合、ledger電断、power model、hardening、USB codec/sessionに加え、autonomy codec+golden vector、neighbor discovery、congestion scheduler/BUSY、channel-plan coordinator、migration engine+wire、load-aware routingを含む16 test targetを実行し、ctest reportをartifact保存。
 - Wire golden vector：C++ `routeloom_golden_tests`とRust `routeloom-wire` testが同一`protocol/golden`（valid＋invalid）を共有し、generator再生成後の`git diff --exit-code`でbyte一致を確認。USBは`routeloom_usb_tests`と`routeloom-protocol`の`usb_golden`が`protocol/usb-golden`を共有。
 - 文書・生成表・契約・negative mutation：Python検査群。
 - Host：固定Rust toolchainでfmt、Clippy、test、release build。host binary（daemon／CLI／TUI）をartifact保存。

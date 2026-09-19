@@ -122,8 +122,10 @@ enum class AbsenceReason : std::uint8_t {
   HelperVisit = 2,
   Cutover = 3,
 };
-// Layout (24B): version u8 | subtype u8 | subject u64 | channel epoch u32 |
-// starts_in_ms u32 | duration_ms u32 | reason u8 | reserved u8.
+// Layout (25B): version u8 | subtype u8 | subject u64 | channel epoch u32 |
+// starts_in_ms u32 | duration_ms u32 | reason u8 | protected cut id u16.
+// The cut id lets remote coordinators apply cut-level absence protection
+// (note_absence -> cut_absent); 0 = the absence protects no cut.
 struct ChannelNoticePayload {
   ChannelNoticeSubtype subtype{ChannelNoticeSubtype::PlannedAbsence};
   NodeId subject{kInvalidNodeId};
@@ -131,8 +133,9 @@ struct ChannelNoticePayload {
   std::uint32_t starts_in_ms{0};
   std::uint32_t duration_ms{0};
   AbsenceReason reason{AbsenceReason::None};
+  std::uint16_t protected_cut_id{0};
 };
-constexpr std::size_t kChannelNoticePayloadSize = 24;
+constexpr std::size_t kChannelNoticePayloadSize = 25;
 Status channel_notice_encode(const ChannelNoticePayload& payload,
                              EncodedPayload& out) noexcept;
 Status channel_notice_decode(ByteView encoded, ChannelNoticePayload& out) noexcept;

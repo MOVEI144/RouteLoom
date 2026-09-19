@@ -545,7 +545,10 @@ fn note_autonomy(state: &State, ms: u64, reason: &str) {
         || reason.starts_with("PENDING_SEND")
         || reason.starts_with("READINESS_")
         || reason.starts_with("RESULT_")
-        || reason.starts_with("RESUME_")
+        // Only the migration agent's divergence diagnostic is a migration
+        // event — the power coordinator's RESUME_* reasons (RESUME_CONFIRMED,
+        // RESUME_DISCOVERY_STARTED, RESUME_UNCONFIRMED) are unrelated.
+        || reason == "RESUME_CHANNEL_DIVERGED"
         || reason.starts_with("TIME_SYNC")
         || reason.starts_with("CONTROL_OBJECT")
         || reason.starts_with("OBJECT_")

@@ -62,6 +62,11 @@ class EspNowRuntime final : public RadioPort,
   static constexpr std::size_t kTransientPeerCapacity =
       discovery_const::kTransientPeerSlots;
   static constexpr std::int8_t kTxPowerUnset = -128;
+  // The ESP-NOW send callback identifies a completion only by
+  // (des_addr, status). To keep completions attributable, at most one
+  // non-reserved autonomy send per MAC may be in flight, and the reserved
+  // DATA slot is refused while a raw send targets the same MAC.
+  static constexpr std::size_t kRawTxCapacity = 4;
 
   EspNowRuntime(const EspNowRuntimeConfig& config, SecurityProvider& security,
                 NodeObserver& observer) noexcept;
@@ -135,6 +140,11 @@ class EspNowRuntime final : public RadioPort,
   // Wire-lane autonomy RX after MeshNode's open_link + identity checks.
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
                          MonotonicMs now_ms) noexcept override;
+  // Verify oracle (04 §10): forwards authenticated traffic to the migration
+  // sink — but ONLY while no radio operation owns the channel. Frames
+  // observed during a survey/helper visit or mid-cutover drain are
+  // old-channel/stale traffic and can never prove new-channel connectivity.
+  void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept override;
 
   // --- Migration transport (04 §5-§9, P5b) ---------------------------------------
   // Attach the migration sink (the EspNowMigration bundle's agent). While
@@ -178,12 +188,21 @@ class EspNowRuntime final : public RadioPort,
   // Completions that arrived after a config fence: accounted separately,
   // never merged with success or failure (X-02).
   std::uint32_t stale_tx_results() const noexcept { return stale_tx_results_; }
+  // RX events dropped because a queue was full — load evidence (05 §5),
+  // counted separately for the bootstrap lane and the normal lane.
+  std::uint32_t bootstrap_rx_dropped() const noexcept {
+    return bootstrap_rx_dropped_;
+  }
+  std::uint32_t rx_dropped() const noexcept { return rx_dropped_; }
 
  private:
   enum class EventKind : std::uint8_t { Rx, Tx };
   struct Event {
     EventKind kind{EventKind::Rx};
     NodeId peer{kInvalidNodeId};
+    // The MAC the frame actually arrived from — resolved once at enqueue so
+    // a later peer-table remap cannot reattribute the frame (TOCTOU).
+    routeloom::MacAddress source{};
     std::uint64_t token{0};
     std::uint16_t length{0};
     std::int8_t rssi_dbm{0};
@@ -296,6 +315,16 @@ class EspNowRuntime final : public RadioPort,
   std::uint64_t pending_token_{0};
   MacAddress pending_mac_{};
   std::uint32_t pending_generation_{0};
+  // In-flight non-reserved (bootstrap/probe/migration) sends, one entry per
+  // destination MAC. Entries retire on their completion callback or after
+  // callback_watchdog_ms; while an entry exists both send_raw() to that MAC
+  // and a reserved DATA send() to that MAC are refused.
+  struct RawTx {
+    MacAddress mac{};
+    MonotonicMs sent_ms{0};
+  };
+  std::array<RawTx, kRawTxCapacity> raw_tx_{};
+  std::size_t raw_tx_count_{0};
   // A fenced TX whose completion may still arrive: new sends to the same MAC
   // are guarded until the stale callback lands or the guard window passes,
   // so an old callback can never satisfy a new send (X-02).
@@ -308,7 +337,12 @@ class EspNowRuntime final : public RadioPort,
   MigrationFrameSink* migration_{nullptr};
   routeloom::MacAddress self_mac_{};
   std::uint64_t autonomy_sequence_{0};
+  // Source MAC of the RX event currently being drained in poll_once — used
+  // by on_autonomy_frame so the engine sees the observed MAC, not a
+  // re-resolved peer-table value.
+  routeloom::MacAddress rx_source_{};
   std::uint32_t bootstrap_rx_dropped_{0};
+  std::uint32_t rx_dropped_{0};
   std::uint32_t autonomy_tx_ok_{0};
   std::uint32_t autonomy_tx_failed_{0};
   bool pending_tx_{false};

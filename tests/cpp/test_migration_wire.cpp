@@ -59,7 +59,8 @@ constexpr MonotonicMs kNow = 1000;
 
 // --- deterministic test "crypto" (same model as test_migration.cpp) ---------
 
-Digest256 sign_commit(const AuthorityOperation& op, const Digest256& plan_hash) {
+Digest256 sign_commit(const AuthorityOperation& op, const Digest256& plan_hash,
+                      const ChannelEpoch new_epoch) {
   std::uint64_t lanes[4] = {0xA17B9C4D2E3F0112ULL, 0x5A5A5A5A5A5A5A5AULL,
                             0x123456789ABCDEF0ULL, 0x0FEDCBA987654321ULL};
   lanes[0] = mix(lanes[0], op.network);
@@ -67,6 +68,7 @@ Digest256 sign_commit(const AuthorityOperation& op, const Digest256& plan_hash) 
   lanes[0] = mix(lanes[0], op.generation);
   lanes[0] = mix(lanes[0], op.sequence);
   lanes[0] = mix(lanes[0], static_cast<std::uint8_t>(op.kind));
+  lanes[0] = mix(lanes[0], new_epoch.value);
   for (const std::uint8_t b : op.previous_state_hash) lanes[1] = mix(lanes[1], b);
   for (const std::uint8_t b : op.operation_hash) lanes[2] = mix(lanes[2], b);
   for (const std::uint8_t b : plan_hash) lanes[3] = mix(lanes[3], b);
@@ -103,9 +105,9 @@ class TestCommitVerifier final : public CommitSignatureVerifier {
     return SecurityProfile::Development;
   }
   Status verify_commit(const AuthorityOperation& operation,
-                       const Digest256& plan_hash,
+                       const Digest256& plan_hash, const ChannelEpoch new_epoch,
                        ByteView signature) noexcept override {
-    const Digest256 expected = sign_commit(operation, plan_hash);
+    const Digest256 expected = sign_commit(operation, plan_hash, new_epoch);
     if (signature.size != expected.size() ||
         std::memcmp(signature.data, expected.data(), expected.size()) != 0) {
       return Status::error(StatusCode::AuthenticationFailed, "bad signature");
@@ -548,7 +550,7 @@ IssuedPlan issue_plan(std::uint32_t epoch, MonotonicMs switch_ref,
   issued.plan_hash =
       plan_digest(ByteView{issued.blob.data(), issued.blob_size});
   issued.operation = make_operation(issued.plan, issued.plan_hash);
-  issued.signature = sign_commit(issued.operation, issued.plan_hash);
+  issued.signature = sign_commit(issued.operation, issued.plan_hash, issued.plan.new_epoch);
   RecoverySnapshot snapshot{};
   snapshot.operation = issued.operation;
   snapshot.plan_hash = issued.plan_hash;
@@ -624,11 +626,15 @@ void test_agent_full_migration() {
   CHECK(world.part.owner.holds >= 1 && world.part.owner.releases >= 1);
   CHECK(!world.part.owner.generations.empty());
 
-  // Verify window closes -> Stable -> Applied result -> terminal latch.
+  // Verify closes on authenticated link activity on the new channel
+  // (any authenticated frame from a peer), not on the timer alone.
   world.pump_n(now, 10);
+  world.part.agent.note_link_activity(kAuthority, now + 2);
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Stable);
+  CHECK(world.part.agent.participant().stats().verify_passed == 1);
+  CHECK(world.part.owner.has_event("VERIFY_PASSED"));
   now += 30000 + 5000;
   world.pump_n(now, 10);
-  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Stable);
   CHECK(world.part.agent.participant().active_epoch().value == 1);
   CHECK(world.auth.authority.cooldown_until() > now);
 }
@@ -750,6 +756,7 @@ void test_agent_stale_epoch_evidence() {
   now = issued.plan.switch_reference_ms + 1;
   world.pump(now);
   world.pump(now + 1);
+  world.part.agent.note_link_activity(kAuthority, now + 3);
   now += 30000 + 5000;
   world.pump_n(now, 10);
   CHECK(world.part.agent.participant().phase() == ParticipantPhase::Stable);
@@ -1053,7 +1060,7 @@ void test_codecs_roundtrip() {
   evidence.operation = op;
   evidence.plan_hash = plan_hash;
   evidence.new_epoch = plan.new_epoch;
-  const Digest256 sig = sign_commit(op, plan_hash);
+  const Digest256 sig = sign_commit(op, plan_hash, plan.new_epoch);
   std::memcpy(evidence.signature.data(), sig.data(), sig.size());
   evidence.signature_size = static_cast<std::uint8_t>(sig.size());
   CHECK_OK(commit_evidence_encode(
@@ -1148,7 +1155,7 @@ void test_codecs_reject_malformed() {
   evidence.operation = op;
   evidence.plan_hash = plan_hash;
   evidence.new_epoch = plan.new_epoch;
-  const Digest256 sig = sign_commit(op, plan_hash);
+  const Digest256 sig = sign_commit(op, plan_hash, plan.new_epoch);
   std::memcpy(evidence.signature.data(), sig.data(), sig.size());
   evidence.signature_size = static_cast<std::uint8_t>(sig.size());
   CHECK_OK(commit_evidence_encode(
@@ -1228,23 +1235,25 @@ void test_signing_input_layout() {
   std::array<std::uint8_t, kCommitSigningInputSize> input{};
   std::size_t size = 0;
   CHECK_OK(commit_signing_input(
-      op, plan_hash, MutableByteView{input.data(), input.size()}, size));
+      op, plan_hash, plan.new_epoch,
+      MutableByteView{input.data(), input.size()}, size));
   CHECK(size == kCommitSigningInputSize);
   CHECK(std::memcmp(input.data(), "RLCMT1", 6) == 0);
-  // The input binds operation fields + plan hash; any field change must
-  // change the signed bytes (the epoch is bound one layer up through the
-  // verified plan, not inside this input).
+  // The input binds operation fields + plan hash + epoch; any field
+  // change must change the signed bytes.
   AuthorityOperation other = op;
   other.sequence = op.sequence + 1;
   std::array<std::uint8_t, kCommitSigningInputSize> input2{};
   std::size_t size2 = 0;
   CHECK_OK(commit_signing_input(
-      other, plan_hash, MutableByteView{input2.data(), input2.size()}, size2));
+      other, plan_hash, plan.new_epoch,
+      MutableByteView{input2.data(), input2.size()}, size2));
   CHECK(std::memcmp(input.data(), input2.data(), size) != 0);
   Digest256 other_hash = plan_hash;
   other_hash[0] ^= 0xFFU;
   CHECK_OK(commit_signing_input(
-      op, other_hash, MutableByteView{input2.data(), input2.size()}, size2));
+      op, other_hash, plan.new_epoch,
+      MutableByteView{input2.data(), input2.size()}, size2));
   CHECK(std::memcmp(input.data(), input2.data(), size) != 0);
 }
 

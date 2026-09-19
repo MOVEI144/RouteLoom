@@ -48,14 +48,29 @@ bool nonce_equal(const std::array<std::uint8_t, 16>& a,
 // --- DevPskAuthenticator ------------------------------------------------------
 //
 // EXPERIMENTAL / GROUP_SECRET_POSSESSION. Uses the provider's AEAD tag as a
-// keyed MAC over a domain-separated AAD; counter 0 is fixed because this is a
-// transcript commitment, not Wire traffic (no replay surface — freshness comes
-// from the transaction nonces inside the AAD).
+// keyed MAC over a domain-separated AAD. Nonce-based AEAD (GCM/GMAC) must
+// never reuse a (key, nonce) pair across different AADs — the observed tags
+// are linear in the AAD and become forgeable. Verification here is
+// recompute-and-compare, so the counter must be deterministic; a plain
+// AAD hash would let an attacker who controls nonce-bearing fields craft
+// colliding inputs offline. Instead the counter is derived SIV-style: an
+// inner seal produces a keyed, attacker-unpredictable value and the emitted
+// tag seals under a counter taken from it. The inner tag is never emitted,
+// so its fixed-nonce construction is unobservable; two distinct AADs can
+// collide only by accident (~2^-64 per pair).
 
 Status DevPskAuthenticator::tag_for(const SecurityContext& context, const ByteView aad,
                                     AuthTag& out) noexcept {
+  AuthTag inner{};
   std::uint8_t dummy = 0;
-  return provider_.seal(context, 0, aad, ByteView{&dummy, 0},
+  const Status status = provider_.seal(context, 0, aad, ByteView{&dummy, 0},
+                                       MutableByteView{&dummy, 1}, inner);
+  if (!status) return status;
+  std::uint64_t counter = 0;
+  for (std::size_t i = 0; i < 8; ++i) {
+    counter = (counter << 8U) | inner[i];
+  }
+  return provider_.seal(context, counter, aad, ByteView{&dummy, 0},
                         MutableByteView{&dummy, 1}, out);
 }
 
@@ -272,7 +287,9 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
     return Status::error(StatusCode::InvalidState, "discovery already started");
   }
   if (config_.node == kInvalidNodeId || config_.network == 0 ||
-      mac_equal(config_.mac, discovery_const::kBroadcastMac)) {
+      mac_equal(config_.mac, discovery_const::kBroadcastMac) ||
+      config_.cookie_bucket_ms == 0 || config_.candidate_ttl_ms == 0 ||
+      config_.awake_lease_ms == 0) {
     return Status::error(StatusCode::InvalidArgument, "discovery config invalid");
   }
   membership_.initialize(hooks_, config_.network);
@@ -288,6 +305,16 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
   if (!status) return status;
   if (outbound_.active) {
     return Status::error(StatusCode::WouldBlock, "discovery exchange in flight");
+  }
+  // Global handshake budget is 1: a responder-side authentication already
+  // in flight counts, so an outbound request while we are mid-PROVE as the
+  // responder is refused instead of silently doubling the budget.
+  const bool responder_auth = candidates_.find([](const Candidate& c) {
+    return c.phase == NeighborPhase::Authenticating;
+  }) != nullptr;
+  if (responder_auth) {
+    return Status::error(StatusCode::WouldBlock,
+                         "responder authentication in flight");
   }
   if (!reserve_transient()) {
     ++stats_.peer_capacity;
@@ -376,6 +403,12 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
       return mac_equal(c.mac, source);
     });
     if (candidate != nullptr) {
+      // An in-flight authentication must not be re-keyed by a fresh
+      // unauthenticated DISCOVER: overwriting the nonce/claim would both
+      // strand the honest requester's PROVE and pin the transient slot.
+      if (candidate->phase != NeighborPhase::Candidate) {
+        return;
+      }
       // Same radio, new attempt nonce: re-issue under the newest nonce.
       candidate->txn_nonce = env.transaction_nonce;
       candidate->claimed_node = env.claimed_node;
@@ -385,10 +418,15 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
   if (candidate == nullptr) {
     // Density-aware suppression (02 §6): respond with probability
     // 1/(1+recent_discovers). Never permanently zero — the divisor only grows
-    // with observed density inside the offer window.
-    if (density > 0 && (next_u64() % (density + 1)) != 0) {
-      ++stats_.suppressed_offers;
-      return;
+    // with observed density inside the offer window. An entropy failure
+    // suppresses (fail-closed): a broken RNG is exactly the storm condition
+    // this lottery exists for, never a reason to answer everyone.
+    if (density > 0) {
+      std::uint64_t draw = 0;
+      if (!next_u64(draw) || (draw % (density + 1)) != 0) {
+        ++stats_.suppressed_offers;
+        return;
+      }
     }
     candidate = candidates_.allocate();
     if (candidate == nullptr) {
@@ -415,15 +453,17 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
     }
     candidate->transient_held = true;
   }
+  std::uint64_t slot = 0;
   if (entropy_.fill(MutableByteView{candidate->our_nonce.data(), 16}).ok() &&
       authenticator_
           .cookie_seal(CookieMaterial{source, candidate->txn_nonce, config_.network,
                                       now_ms / config_.cookie_bucket_ms, config_.node,
                                       candidate->claimed_node},
                        candidate->cookie)
-          .ok()) {
+          .ok() &&
+      next_u64(slot)) {
     candidate->offer_due_ms =
-        now_ms + (next_u64() % discovery_const::kOfferSlots) *
+        now_ms + (slot % discovery_const::kOfferSlots) *
                      discovery_const::kOfferSlotMs;
     candidate->offer_pending = true;
   } else {
@@ -886,11 +926,22 @@ void NeighborDiscovery::complete_exchange(
       if (existing->phase != NeighborPhase::Revoked &&
           existing->phase != NeighborPhase::Conflict &&
           now_ms < existing->lease_expires_at_ms) {
-        Neighbor* conflict = neighbors_.allocate();
+        // Reuse an existing quarantine record for the same (node, MAC):
+        // rotating source MACs must not be able to fill the table with
+        // duplicate conflicts.
+        Neighbor* conflict = neighbors_.find([&](const Neighbor& n) {
+          return n.phase == NeighborPhase::Conflict && n.node == peer_node &&
+                 mac_equal(n.mac, peer_mac);
+        });
+        if (conflict == nullptr) {
+          conflict = neighbors_.allocate();
+          if (conflict != nullptr) {
+            conflict->node = peer_node;
+            conflict->mac = peer_mac;
+            conflict->phase = NeighborPhase::Conflict;
+          }
+        }
         if (conflict != nullptr) {
-          conflict->node = peer_node;
-          conflict->mac = peer_mac;
-          conflict->phase = NeighborPhase::Conflict;
           conflict->lease_expires_at_ms = now_ms + config_.candidate_ttl_ms;
         }
         ++stats_.conflicts;
@@ -1303,18 +1354,20 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
     if (!c.transient_held) {
       if (!reserve_transient()) continue;  // still parked
       c.transient_held = true;
+      std::uint64_t slot = 0;
       if (!entropy_.fill(MutableByteView{c.our_nonce.data(), 16}).ok() ||
           !authenticator_
                .cookie_seal(CookieMaterial{c.mac, c.txn_nonce, config_.network,
                                            now_ms / config_.cookie_bucket_ms,
                                            config_.node, c.claimed_node},
                                 c.cookie)
-               .ok()) {
+               .ok() ||
+          !next_u64(slot)) {
         release_candidate(c);
         continue;
       }
       c.offer_due_ms =
-          now_ms + (next_u64() % discovery_const::kOfferSlots) *
+          now_ms + (slot % discovery_const::kOfferSlots) *
                        discovery_const::kOfferSlotMs;
       c.offer_pending = true;
     }
@@ -1404,6 +1457,15 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
           event("STALE", n.node);
         }
         break;
+      case NeighborPhase::Conflict:
+        // The quarantine is a bounded hold, not a permanent tombstone: once
+        // its lease lapses the record is released so a genuine device swap
+        // can re-bind, and the slot cannot be pinned forever by replayed
+        // conflicts.
+        if (now_ms >= n.lease_expires_at_ms) {
+          neighbors_.release(&n);
+        }
+        break;
       case NeighborPhase::Bound:
       case NeighborPhase::Reachable:
         if (n.probe_outstanding != 0 && now_ms > n.probe_deadline_ms) {
@@ -1489,9 +1551,19 @@ bool NeighborDiscovery::data_permitted(const NodeId peer) const noexcept {
          membership_.state() == MembershipState::Member;
 }
 
+// Phases where the verified MAC↔NodeId mapping may still resolve. Conflict
+// records are quarantined (the mapping is disputed) and Revoked bindings
+// are dead — neither may attribute traffic or sends. Stale keeps resolving
+// precisely so re-confirmation probes can find the peer; Suspended is a
+// planned absence, not a broken binding.
+bool resolvable_phase(const NeighborPhase phase) noexcept {
+  return phase != NeighborPhase::Conflict && phase != NeighborPhase::Revoked;
+}
+
 bool NeighborDiscovery::binding_of(const NodeId peer, BindingId& out) const noexcept {
   const Neighbor* neighbor = find_neighbor(peer);
-  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId) {
+  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId ||
+      !resolvable_phase(neighbor->phase)) {
     return false;
   }
   out = neighbor->binding;
@@ -1500,7 +1572,8 @@ bool NeighborDiscovery::binding_of(const NodeId peer, BindingId& out) const noex
 
 bool NeighborDiscovery::node_of(const MacAddress& mac, NodeId& out) const noexcept {
   const Neighbor* neighbor = find_neighbor(mac);
-  if (neighbor == nullptr || neighbor->node == kInvalidNodeId) {
+  if (neighbor == nullptr || neighbor->node == kInvalidNodeId ||
+      !resolvable_phase(neighbor->phase)) {
     return false;
   }
   out = neighbor->node;
@@ -1616,13 +1689,14 @@ void NeighborDiscovery::release_candidate(Candidate& candidate) noexcept {
   candidates_.release(&candidate);
 }
 
-std::uint64_t NeighborDiscovery::next_u64() noexcept {
-  std::uint64_t value = 0;
-  if (!entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&value), 8})
-           .ok()) {
-    return 0;  // no entropy: deterministic pick, still bounded
-  }
-  return value;
+bool NeighborDiscovery::next_u64(std::uint64_t& out) noexcept {
+  out = 0;
+  // A failed draw reports failure — callers fail CLOSED (suppress the
+  // offer/lottery) rather than collapsing every draw onto value 0, which
+  // would silently disable density suppression and slot spreading exactly
+  // when a broken RNG is most likely (mass simultaneous boot).
+  return entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&out), 8})
+      .ok();
 }
 
 std::uint32_t NeighborDiscovery::recent_discovers(

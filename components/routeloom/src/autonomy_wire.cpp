@@ -92,6 +92,12 @@ Status busy_decode(const ByteView encoded, BusyPayload& out) noexcept {
       !member_frame_type(static_cast<FrameType>(ref_type))) {
     return prelude_error();
   }
+  // A Reject with no reason is meaningless — it would still trigger window
+  // collapse and deferral on the receiver. PressureHint never reads reason.
+  if (subtype == static_cast<std::uint8_t>(BusySubtype::Reject) &&
+      reason == static_cast<std::uint8_t>(BusyReason::None)) {
+    return prelude_error();
+  }
   out.subtype = static_cast<BusySubtype>(subtype);
   out.reason = static_cast<BusyReason>(reason);
   out.referenced_type = static_cast<FrameType>(ref_type);
@@ -148,7 +154,7 @@ Status channel_notice_encode(const ChannelNoticePayload& payload,
   RL_WRITE(writer.write_u32(payload.starts_in_ms));
   RL_WRITE(writer.write_u32(payload.duration_ms));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(payload.reason)));
-  RL_WRITE(writer.write_u8(0));
+  RL_WRITE(writer.write_u16(payload.protected_cut_id));
 #undef RL_WRITE
   if (writer.size() != kChannelNoticePayloadSize) {
     return Status::error(StatusCode::InternalError, "channel notice size mismatch");
@@ -163,7 +169,6 @@ Status channel_notice_decode(const ByteView encoded, ChannelNoticePayload& out) 
   Status status;
   std::uint32_t epoch = 0;
   std::uint8_t reason = 0;
-  std::uint8_t reserved = 0;
 #define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
   RL_READ(read_prelude(reader, static_cast<std::uint8_t>(ChannelNoticeSubtype::PlannedAbsence)));
   RL_READ(reader.read_u64(out.subject));
@@ -171,9 +176,9 @@ Status channel_notice_decode(const ByteView encoded, ChannelNoticePayload& out) 
   RL_READ(reader.read_u32(out.starts_in_ms));
   RL_READ(reader.read_u32(out.duration_ms));
   RL_READ(reader.read_u8(reason));
-  RL_READ(reader.read_u8(reserved));
+  RL_READ(reader.read_u16(out.protected_cut_id));
 #undef RL_READ
-  if (reserved != 0 || reason > static_cast<std::uint8_t>(AbsenceReason::Cutover)) {
+  if (reason > static_cast<std::uint8_t>(AbsenceReason::Cutover)) {
     return prelude_error();
   }
   out.channel_epoch = ChannelEpoch{epoch};

@@ -169,9 +169,14 @@ void RouteTable::evaluate_entry(Entry& entry, const MonotonicMs now_ms) noexcept
   if (committed == nullptr) {
     // No committed route, or the committed hop just lost validity (expired,
     // withdrawn, FD-tightened): repair commits the raw best immediately —
-    // the improvement hold never applies to failure recovery (03 §7).
+    // the improvement hold never applies to failure recovery (03 §7). The
+    // post-switch hold DOES apply: without it the just-abandoned hop or a
+    // third candidate could win the route back on the next evaluation.
     const RouteCandidate* raw = best_candidate(entry, kInvalidNodeId);
     entry.committed_next_hop = raw != nullptr ? raw->next_hop : kInvalidNodeId;
+    if (raw != nullptr) {
+      entry.switch_hold_until_ms = now_ms + kSwitchHoldMs;
+    }
     entry.improvement_next_hop = kInvalidNodeId;
     return;
   }
@@ -401,9 +406,12 @@ bool RouteTable::withdraw(const NodeId destination, const NodeId next_hop,
   for (auto& candidate : entry->candidates) {
     if (candidate.valid && candidate.next_hop == next_hop) {
       // A retraction keeps the (now infeasible) candidate until its lease
-      // expires — it may still carry a SeqNoRequest toward the origin.
+      // expires — it may still carry a SeqNoRequest toward the origin. The
+      // advertised metric is cleared too so a later load-cost refresh can
+      // never resurrect the withdrawal (03 §6.3).
       candidate.feasible = false;
       candidate.metric = kInfiniteRouteMetric;
+      candidate.advertised = kInfiniteRouteMetric;
       removed = true;
     }
   }

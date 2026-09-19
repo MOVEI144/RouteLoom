@@ -40,6 +40,9 @@ MonotonicMs map_to_authority(const ClockMapping& mapping,
   return value <= 0 ? 0 : static_cast<MonotonicMs>(value);
 }
 
+// Defined in the plan-validation section; the issuer path needs it too.
+Status plan_structure_status(const MigrationPlan& plan) noexcept;
+
 Status write_operation(ByteWriter& writer,
                        const AuthorityOperation& operation) noexcept {
   Status status = writer.write_u64(operation.network);
@@ -277,7 +280,13 @@ Status MigrationAuthority::commit_plan(
       operation.generation != plan.authority_generation) {
     return reject(StatusCode::Conflict, "PLAN_OPERATION_MISMATCH");
   }
-  Status status = check_scope(operation, hash);
+  // The issuer runs the same structural legality bar as every adoption
+  // path: a degenerate plan (out-of-range channel, expiry before the
+  // guard, missing outage budget, unsatisfiable helper schedule) must not
+  // reach the ledger merely because its signature verifies (04 §5, D5-02).
+  Status status = plan_structure_status(plan);
+  if (!status) return status;
+  status = check_scope(operation, hash);
   if (!status) return status;
   if (plan.new_epoch.value <= last_epoch_.value) {
     return reject(StatusCode::Conflict, "EPOCH_NOT_MONOTONIC");
@@ -294,7 +303,7 @@ Status MigrationAuthority::commit_plan(
   }
   // Real verification is the ONLY source of the ledger's cryptographic flag.
   const Status verified =
-      verifier_.verify_commit(operation, hash, signature);
+      verifier_.verify_commit(operation, hash, plan.new_epoch, signature);
   if (!verified) return verified;
   status = ledger_->commit(operation, resulting_state_hash, verified.ok());
   if (!status) return status;
@@ -317,7 +326,7 @@ Status MigrationAuthority::verify_commit(
   const Status scoped = check_scope(operation, plan_hash);
   if (!scoped) return scoped;
   const Status verified =
-      verifier_.verify_commit(operation, plan_hash, signature);
+      verifier_.verify_commit(operation, plan_hash, new_epoch, signature);
   if (!verified) return verified;
   // Signed material keeps verifying while the authority is stopped:
   // verification is local cryptography, not an authority round-trip (D5-04).
@@ -703,34 +712,52 @@ Status MigrationParticipant::store_active_record(
 
 // --- plan validation -------------------------------------------------------------------
 
-Status MigrationParticipant::validate_plan(
-    const MigrationPlan& plan, const PlanMeasurements& m,
-    const MonotonicMs now_ms) const noexcept {
-  if (plan.network != config_.network) {
-    return reject(StatusCode::InvalidArgument, "PLAN_NETWORK_MISMATCH");
-  }
-  if (plan.authority != config_.authority) {
-    // A gateway's signature on another identity earns no approval right.
-    return reject(StatusCode::AuthorizationFailed, "PLAN_AUTHORITY_MISMATCH");
-  }
+// Domain-independent structural legality of a signed plan — shared by the
+// issuer (MigrationAuthority::commit_plan) and every participant adoption
+// path. Clock mapping is a pure shift, so expiry/switch ordering holds in
+// either domain; clock-tolerance and now-relative checks stay on the
+// participant (they are what a node CAN schedule, not what a plan IS).
+Status plan_structure_status(const MigrationPlan& plan) noexcept {
   if (plan.old_channel == 0 || plan.old_channel > 13 ||
       plan.new_channel == 0 || plan.new_channel > 13 ||
       plan.old_channel == plan.new_channel) {
     return reject(StatusCode::InvalidArgument, "PLAN_CHANNEL_INVALID");
   }
-  // Epochs are strictly monotone: a replayed or regressed plan is refused
-  // and never rewinds committed/active state.
-  if (plan.new_epoch.value <= committed_epoch_.value ||
-      plan.new_epoch.value <= active_epoch_.value) {
-    return reject(StatusCode::Conflict, "EPOCH_NOT_MONOTONIC");
+  if (plan.expiry_ms <= plan.switch_reference_ms + plan.guard_ms) {
+    return reject(StatusCode::InvalidArgument, "PLAN_EXPIRY_BEFORE_GUARD");
   }
-  if (plan.old_epoch != committed_epoch_ ||
-      plan.old_channel != active_channel_) {
-    return reject(StatusCode::Conflict, "PLAN_BASE_MISMATCH");
+  if (plan.max_outage_ms == 0) {
+    return reject(StatusCode::InvalidArgument, "PLAN_OUTAGE_BUDGET_MISSING");
   }
+  if (plan.recovery.present) {
+    const HelperSchedule& s = plan.recovery;
+    if (s.visit_period_ms == 0 || s.dwell_ms == 0 ||
+        s.dwell_ms > s.visit_period_ms ||
+        s.window_end_ms <= s.window_begin_ms) {
+      return reject(StatusCode::InvalidArgument, "RECOVERY_SCHEDULE_INVALID");
+    }
+  }
+  return Status::success();
+}
+
+Status MigrationParticipant::check_plan_structure(
+    const MigrationPlan& plan) const noexcept {
+  // Structural legality of a signed plan — valid on every adoption path,
+  // including snapshot catch-up where the switch may legitimately lie in
+  // the past and now-relative feasibility no longer applies.
+  Status status = plan_structure_status(plan);
+  if (!status) return status;
   if (plan.mapping.uncertainty_ms > config_.clock_uncertainty_max_ms) {
     return reject(StatusCode::ClockUncertain, "CLOCK_UNCERTAIN");
   }
+  return Status::success();
+}
+
+Status MigrationParticipant::validate_plan_feasibility(
+    const MigrationPlan& plan, const PlanMeasurements& m,
+    const MonotonicMs now_ms) const noexcept {
+  // Measurement- and now-dependent feasibility: the node must be able to
+  // actually schedule the switch it is being asked to commit.
   if (plan.guard_ms <
       required_guard_ms(plan.mapping.uncertainty_ms,
                         m.measured_switch_bound_ms)) {
@@ -752,23 +779,32 @@ Status MigrationParticipant::validate_plan(
   if (switch_local < now_ms + need) {
     return reject(StatusCode::InvalidArgument, "COMMIT_LEAD_INSUFFICIENT");
   }
-  const MonotonicMs expiry_local =
-      map_to_local(plan.mapping, plan.expiry_ms);
-  if (expiry_local <= switch_local + plan.guard_ms) {
-    return reject(StatusCode::InvalidArgument, "PLAN_EXPIRY_BEFORE_GUARD");
-  }
-  if (plan.max_outage_ms == 0) {
-    return reject(StatusCode::InvalidArgument, "PLAN_OUTAGE_BUDGET_MISSING");
-  }
-  if (plan.recovery.present) {
-    const HelperSchedule& s = plan.recovery;
-    if (s.visit_period_ms == 0 || s.dwell_ms == 0 ||
-        s.dwell_ms > s.visit_period_ms ||
-        s.window_end_ms <= s.window_begin_ms) {
-      return reject(StatusCode::InvalidArgument, "RECOVERY_SCHEDULE_INVALID");
-    }
-  }
   return Status::success();
+}
+
+Status MigrationParticipant::validate_plan(
+    const MigrationPlan& plan, const PlanMeasurements& m,
+    const MonotonicMs now_ms) const noexcept {
+  if (plan.network != config_.network) {
+    return reject(StatusCode::InvalidArgument, "PLAN_NETWORK_MISMATCH");
+  }
+  if (plan.authority != config_.authority) {
+    // A gateway's signature on another identity earns no approval right.
+    return reject(StatusCode::AuthorizationFailed, "PLAN_AUTHORITY_MISMATCH");
+  }
+  // Epochs are strictly monotone: a replayed or regressed plan is refused
+  // and never rewinds committed/active state.
+  if (plan.new_epoch.value <= committed_epoch_.value ||
+      plan.new_epoch.value <= active_epoch_.value) {
+    return reject(StatusCode::Conflict, "EPOCH_NOT_MONOTONIC");
+  }
+  if (plan.old_epoch != committed_epoch_ ||
+      plan.old_channel != active_channel_) {
+    return reject(StatusCode::Conflict, "PLAN_BASE_MISMATCH");
+  }
+  Status status = check_plan_structure(plan);
+  if (!status) return status;
+  return validate_plan_feasibility(plan, m, now_ms);
 }
 
 // --- prepare / commit --------------------------------------------------------------------
@@ -800,9 +836,19 @@ Status MigrationParticipant::prepare(const ByteView plan_blob,
       ++stats_.plans_rejected;
       return reject(StatusCode::AuthorizationFailed, "PLAN_SCOPE_MISMATCH");
     }
-    if (plan.mapping.uncertainty_ms > config_.clock_uncertainty_max_ms) {
+    // The hash already binds this blob to the committed plan — identity
+    // and epoch/base checks are settled. Structure and now-relative
+    // feasibility still apply: the node must refuse a blob it could never
+    // schedule, staying in Recovering for the recovery machinery.
+    status = check_plan_structure(plan);
+    if (!status) {
       ++stats_.plans_rejected;
-      return reject(StatusCode::ClockUncertain, "CLOCK_UNCERTAIN");
+      return status;
+    }
+    status = validate_plan_feasibility(plan, measurements, now_ms);
+    if (!status) {
+      ++stats_.plans_rejected;
+      return status;
     }
     status = store_blob_verified(hash, plan_blob);
     if (!status) return status;
@@ -1037,9 +1083,13 @@ Status MigrationParticipant::adopt_snapshot(const ByteView snapshot,
     ++stats_.snapshots_rejected;
     return reject(StatusCode::AuthorizationFailed, "SNAPSHOT_PLAN_MISMATCH");
   }
-  if (plan.mapping.uncertainty_ms > config_.clock_uncertainty_max_ms) {
+  // Catch-up may legitimately adopt a plan whose switch already passed —
+  // so only structural legality is checked here; measurement- and
+  // now-relative feasibility belonged to the pre-commit PREPARE round.
+  status = check_plan_structure(plan);
+  if (!status) {
     ++stats_.snapshots_rejected;
-    return reject(StatusCode::ClockUncertain, "CLOCK_UNCERTAIN");
+    return status;
   }
   if (plan.new_epoch.value <= committed_epoch_.value) {
     // Stale or replayed snapshot: epochs never rewind. The newest signed
@@ -1125,6 +1175,10 @@ bool MigrationParticipant::recovery_assumptions_satisfiable(
     const std::uint32_t margin_ms) const noexcept {
   if (!plan_known_ || !pending_plan_.recovery.present) return false;
   const HelperSchedule& s = pending_plan_.recovery;
+  // Structural validation normally guarantees end > begin, but this bound
+  // is read on the recovery path where defence-in-depth is cheap: never
+  // let a reversed window underflow into a satisfiable verdict.
+  if (s.window_end_ms <= s.window_begin_ms) return false;
   const std::uint64_t bound =
       recovery_bound_ms(hops, loss_windows, s.visit_period_ms,
                         transfer_bound_ms, margin_ms);
@@ -1156,7 +1210,19 @@ void MigrationParticipant::note_verify_failure() noexcept {
   if (phase_ != ParticipantPhase::Verifying) return;
   // The switch applied but the new channel did not verify: stranded-side
   // recovery. No unilateral rollback — only a new signed plan may move us.
+  ++stats_.verify_failed;
   enter_recovering(false);
+}
+
+void MigrationParticipant::note_link_activity(
+    const MonotonicMs now_ms) noexcept {
+  if (phase_ != ParticipantPhase::Verifying) return;
+  // An authenticated frame on the new channel is the verify oracle (04
+  // §10): the cutover produced real connectivity, so VERIFY closes early
+  // rather than running its full window on no evidence.
+  ++stats_.verify_passed;
+  phase_ = ParticipantPhase::Stable;
+  latch_cooldown(now_ms);
 }
 
 void MigrationParticipant::latch_cooldown(const MonotonicMs now_ms) noexcept {
@@ -1220,8 +1286,11 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
   }
   if (helper_visit_active_) {
     OperationResult result{};
-    if (runner_.result(helper_token_, result) &&
-        result.outcome != OperationOutcome::Pending) {
+    const bool known = runner_.result(helper_token_, result);
+    // `result` is false only when the evidence queue evicted our record —
+    // the visit is over either way, and helper_visit_active_ must not
+    // wedge every future visit behind a result that will never arrive.
+    if (!known || result.outcome != OperationOutcome::Pending) {
       // Visit consumed (any outcome): the schedule moves on. A helper never
       // lingers on the old channel past the committed dwell.
       helper_visit_active_ = false;
@@ -1244,6 +1313,12 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
   const MonotonicMs end_auth = begin_auth + s.dwell_ms;
   if (begin_auth >= s.window_end_ms || end_auth > s.window_end_ms) return;
   if (now_auth < begin_auth || index == helper_index_) return;
+  // Notify BEFORE queueing the visit: the absence notice goes to
+  // home-channel peers, and once the runner owns the radio the home
+  // context is gone (the wire notice would be suppressed as off-channel).
+  if (hooks_ != nullptr) {
+    hooks_->helper_visit(true, pending_plan_.old_channel);
+  }
   // A bounded visit on the OLD channel; the runner serializes it like any
   // other radio operation. This is a migration-time outage budget, not a
   // permanent second channel (04 §9.2).
@@ -1257,9 +1332,6 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
   helper_index_ = index;
   helper_visit_active_ = true;
   ++stats_.helper_visits;
-  if (hooks_ != nullptr) {
-    hooks_->helper_visit(true, pending_plan_.old_channel);
-  }
 }
 
 // --- poll / resume -----------------------------------------------------------------------------
@@ -1317,8 +1389,10 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
     }
     case ParticipantPhase::Verifying:
       if (now_ms >= verify_deadline_ms_) {
-        phase_ = ParticipantPhase::Stable;
-        latch_cooldown(now_ms);
+        // VERIFY is not a blind timer: the window closing with zero
+        // authenticated traffic on the new channel is a verify failure
+        // (04 §10) -> stranded-side recovery, still no unilateral rollback.
+        note_verify_failure();
       }
       break;
     case ParticipantPhase::Recovering:
@@ -1427,6 +1501,10 @@ Status MigrationParticipant::resume(const MonotonicMs now_ms) noexcept {
   clock_mapping_ = plan.mapping;  // held for later re-arm, NOT trusted yet
   if (active.present && active.epoch.value >= commit.new_epoch.value) {
     // Already applied before the restart: restore the durable record only.
+    // The committed watermark takes the NEWER of the two records — a torn
+    // write pair (commit older than the applied record) must not lower the
+    // staleness bar or a same-generation snapshot could re-apply.
+    committed_epoch_ = active.epoch;
     active_epoch_ = active.epoch;
     active_channel_ = active.channel;
     phase_ = ParticipantPhase::Stable;

@@ -46,9 +46,10 @@ def time_sync(subtype, source, sequence, reference_ms, uncertainty_ms):
             u64(reference_ms) + u32(uncertainty_ms))
 
 
-def channel_notice(subtype, subject, epoch, starts_in, duration, reason, reserved=0):
+def channel_notice(subtype, subject, epoch, starts_in, duration, reason,
+                   cut_id=0):
     return (u8(PAYLOAD_VERSION) + u8(subtype) + u64(subject) + u32(epoch) +
-            u32(starts_in) + u32(duration) + u8(reason) + u8(reserved))
+            u32(starts_in) + u32(duration) + u8(reason) + u16(cut_id))
 
 
 def neighbor_probe(subtype, binding, probe_seq, sent_ms, lease_ms):
@@ -98,9 +99,11 @@ def emit(folder, name, record):
 
 
 def main():
-    shutil.rmtree(OUT, ignore_errors=True)
-    (OUT / "valid").mkdir(parents=True)
-    (OUT / "invalid").mkdir(parents=True)
+    # Only the generated folders are wiped: top-level files such as
+    # README.md are checked-in documentation, not generator output.
+    for sub in ("valid", "invalid"):
+        shutil.rmtree(OUT / sub, ignore_errors=True)
+        (OUT / sub).mkdir(parents=True)
 
     fmt = "routeloom-autonomy-v1-golden"
     obj_hash = bytes(range(32))          # 00..1f deterministic
@@ -126,8 +129,9 @@ def main():
          time_sync(1, 0xA1A2A3A4A5A6A7A8, 42, 3600000, 12)),
         ("channel_notice_absence", "channel_notice", dict(
             subtype=1, subject=0x0B0C0D0E0F101112, channel_epoch=3,
-            starts_in_ms=150, duration_ms=200, reason=1),
-         channel_notice(1, 0x0B0C0D0E0F101112, 3, 150, 200, 1)),
+            starts_in_ms=150, duration_ms=200, reason=1,
+            protected_cut_id=7),
+         channel_notice(1, 0x0B0C0D0E0F101112, 3, 150, 200, 1, 7)),
         ("neighbor_probe", "neighbor_probe", dict(
             subtype=1, binding_generation=2, probe_sequence=1001,
             sent_ms=123456789, requested_lease_ms=30000),
@@ -253,9 +257,9 @@ def main():
     bad("object_chunk_past_object_limit", "object_chunk",
         u8(PAYLOAD_VERSION) + u8(1) + obj_hash + u16(2040) + u16(9) + b"\x00" * 9,
         "offset+length exceeds the 2048-byte object limit")
-    bad("channel_notice_reserved_set", "channel_notice",
-        channel_notice(1, 5, 3, 150, 200, 1, reserved=0x01),
-        "reserved byte must be zero")
+    bad("channel_notice_reason_invalid", "channel_notice",
+        channel_notice(1, 5, 3, 150, 200, 0x09),
+        "absence reason above the valid enum range")
     bad("bootstrap_auth_bad_phase", "bootstrap_auth",
         bootstrap_auth(PAYLOAD_VERSION, 7, 0, 0, b"x"),
         "auth phase 7 is not a logical phase")

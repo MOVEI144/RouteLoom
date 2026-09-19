@@ -58,14 +58,15 @@ def validate_admission(a: dict) -> list[str]:
                      "recursive_bootstrap_fragments"):
             require(a[name] is False, name)
         gate = a["ci_adoption_gate"]
-        require(gate["status"] == "pending_pr2_adoption" and
-                gate["executed_by_this_design_pr"] is False, "CI adoption is not execution evidence")
+        require(gate["status"] == "completed" and
+                gate["executed_by_this_design_pr"] is True, "observe profile adopted in firmware CI")
         require(gate["targets"] == ["esp32c3", "esp32s3", "esp32c5"] and
                 gate["app_profiles"] == {
                     "reference_node": ["normal", "deep_sleep"], "bridge_node": ["normal"],
                 }, "preserve PR2 firmware profiles")
         require(gate["expected_jobs"] == len(gate["targets"]) *
-                sum(len(v) for v in gate["app_profiles"].values()) == 9, "nine firmware builds")
+                sum(len(v) for v in gate["app_profiles"].values()) + 1 == 10,
+                "nine base firmware builds + one autonomy=observe build")
     except (KeyError, TypeError, ValueError, AttributeError) as error:
         errors.append(f"admission:invalid manifest shape: {type(error).__name__}: {error}")
     return errors
@@ -80,15 +81,17 @@ def validate_contract(c: dict, scenarios: dict) -> list[str]:
 
     try:
         require(c["schema_version"] == 1, "schema version")
-        require(c["status"] == "design-only", "design-only status")
+        require(c["status"] == "implementation-host-tested",
+                "implementation status is host-tested, not qualified")
         require(c["issues"] == [3, 4, 5], "issue scope")
-        require(c["runtime_changes_in_this_pr"] is False, "no runtime claim")
-        require(c["existing_core_default_changes"] is False, "CORE defaults unchanged")
+        require(c["runtime_changes_in_this_pr"] is True, "runtime implementation present")
+        require(c["existing_core_default_changes"] is True,
+                "routing select() committed-hop preference is an unconditional default change")
         require(len(c["features"]) == 3, "three feature records")
         require({v["issue"] for v in c["features"].values()} == {3, 4, 5}, "feature coverage")
         for feature in c["features"].values():
-            require(feature["implemented_by_this_pr"] is False and feature["qualified"] is False,
-                    "feature remains unimplemented/unqualified")
+            require(feature["implemented_by_this_pr"] is True and feature["qualified"] is False,
+                    "implemented but never qualified")
         for name in ("main", "pr2", "esp_idf_commit"):
             value = c["snapshots"][name]
             require(bool(re.fullmatch(r"[0-9a-f]{40}", value)) and value != "0" * 40,

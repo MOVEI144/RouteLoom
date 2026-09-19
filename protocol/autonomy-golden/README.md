@@ -24,7 +24,7 @@ authenticated object ≤ 2048B, RLD1 header 44B / body ≤ 116B / total ≤ 160B
 |---|---|---|
 | `busy` | Busy=20 payload | 38B fixed |
 | `time_sync` | TimeSync=23 payload | 26B fixed |
-| `channel_notice` | ChannelNotice=24 payload | 24B fixed |
+| `channel_notice` | ChannelNotice=24 payload | 25B fixed |
 | `neighbor_probe` | NeighborProbe=40 payload | 22B fixed |
 | `neighbor_result` | NeighborResult=41 payload | 24B fixed |
 | `control_object` | ControlObject=49 payload | 38B fixed |

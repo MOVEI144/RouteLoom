@@ -1,8 +1,0 @@
-{
-  "codec": "channel_notice",
-  "encoded_hex": "010100000000000000050000000300000096000000c80101",
-  "expect": "error",
-  "format": "routeloom-autonomy-v1-golden",
-  "name": "channel_notice_reserved_set",
-  "note": "reserved byte must be zero"
-}

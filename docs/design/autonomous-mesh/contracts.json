@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "design_version": "0.2-draft",
-  "status": "design-only",
+  "status": "implementation-host-tested",
   "issues": [3, 4, 5],
   "repository": "MOVEI144/RouteLoom",
   "snapshots": {
@@ -12,12 +12,12 @@
     "esp_idf_tag": "v6.0.3",
     "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802"
   },
-  "runtime_changes_in_this_pr": false,
-  "existing_core_default_changes": false,
+  "runtime_changes_in_this_pr": true,
+  "existing_core_default_changes": true,
   "features": {
-    "neighbor_discovery": {"issue": 3, "implemented_by_this_pr": false, "qualified": false},
-    "congestion_aware_routing": {"issue": 4, "implemented_by_this_pr": false, "qualified": false},
-    "guarded_channel_migration": {"issue": 5, "implemented_by_this_pr": false, "qualified": false}
+    "neighbor_discovery": {"issue": 3, "implemented_by_this_pr": true, "qualified": false},
+    "congestion_aware_routing": {"issue": 4, "implemented_by_this_pr": true, "qualified": false},
+    "guarded_channel_migration": {"issue": 5, "implemented_by_this_pr": true, "qualified": false}
   },
   "wire": {
     "preserve_major": 1,
@@ -124,7 +124,7 @@
     "parser_failure_fallback": false,
     "recursive_bootstrap_fragments": false,
     "ci_adoption_gate": {
-      "status": "pending_pr2_adoption",
+      "status": "completed",
       "targets": [
         "esp32c3",
         "esp32s3",
@@ -139,8 +139,8 @@
           "normal"
         ]
       },
-      "expected_jobs": 9,
-      "executed_by_this_design_pr": false
+      "expected_jobs": 10,
+      "executed_by_this_design_pr": true
     }
   },
   "congestion": {

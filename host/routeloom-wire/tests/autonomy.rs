@@ -168,6 +168,7 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
                     3 => AbsenceReason::Cutover,
                     other => panic!("bad absence reason {other}"),
                 },
+                protected_cut_id: u64_field(fields, "protected_cut_id") as u16,
             };
             channel_notice_encode(&payload, &mut out).expect("channel_notice encode");
             out.view().to_vec()

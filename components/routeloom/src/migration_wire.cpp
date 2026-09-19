@@ -55,6 +55,7 @@ Status read_operation_fields(ByteReader& reader,
 
 Status commit_signing_input(const AuthorityOperation& operation,
                             const Digest256& plan_hash,
+                            const ChannelEpoch new_epoch,
                             const MutableByteView target,
                             std::size_t& out_size) noexcept {
   out_size = 0;
@@ -63,6 +64,7 @@ Status commit_signing_input(const AuthorityOperation& operation,
       ByteView{reinterpret_cast<const std::uint8_t*>("RLCMT1"), 6});
   if (status) status = write_operation_fields(writer, operation);
   if (status) status = writer.write_bytes(ByteView{plan_hash.data(), 32});
+  if (status) status = writer.write_u32(new_epoch.value);
   if (!status) return status;
   out_size = writer.size();
   return Status::success();
@@ -626,7 +628,7 @@ void MigrationAgent::helper_visit(const bool active,
       dwell = plan->recovery.dwell_ms;
     }
     emit_notice_all(autonomy::AbsenceReason::HelperVisit,
-                    participant_.active_epoch(), 0, dwell);
+                    participant_.active_epoch(), 0, dwell, 0);
   }
   (void)old_channel;
 }
@@ -641,13 +643,15 @@ void MigrationAgent::emit_notice(const NodeId dest,
                                  const autonomy::AbsenceReason reason,
                                  const ChannelEpoch epoch,
                                  const std::uint32_t starts_in_ms,
-                                 const std::uint32_t duration_ms) noexcept {
+                                 const std::uint32_t duration_ms,
+                                 const std::uint16_t protected_cut_id) noexcept {
   autonomy::ChannelNoticePayload notice{};
   notice.subject = config_.participant.node;
   notice.channel_epoch = epoch;
   notice.starts_in_ms = starts_in_ms;
   notice.duration_ms = duration_ms;
   notice.reason = reason;
+  notice.protected_cut_id = protected_cut_id;
   autonomy::EncodedPayload payload{};
   if (!channel_notice_encode(notice, payload).ok()) return;
   (void)wire_.migration_send(dest, FrameType::ChannelNotice, payload.view());
@@ -656,12 +660,14 @@ void MigrationAgent::emit_notice(const NodeId dest,
 void MigrationAgent::emit_notice_all(const autonomy::AbsenceReason reason,
                                      const ChannelEpoch epoch,
                                      const std::uint32_t starts_in_ms,
-                                     const std::uint32_t duration_ms) noexcept {
+                                     const std::uint32_t duration_ms,
+                                     const std::uint16_t protected_cut_id) noexcept {
   if (channel_context() != ExchangeChannel::Home) return;
   std::array<NodeId, 24> peers{};
   const std::size_t count = wire_.migration_peers(peers.data(), peers.size());
   for (std::size_t i = 0; i < count; ++i) {
-    emit_notice(peers[i], reason, epoch, starts_in_ms, duration_ms);
+    emit_notice(peers[i], reason, epoch, starts_in_ms, duration_ms,
+                protected_cut_id);
   }
 }
 
@@ -775,7 +781,7 @@ void MigrationAgent::on_phase_transition(const ParticipantPhase from,
       const MigrationPlan* plan = participant_.pending_plan();
       emit_notice_all(autonomy::AbsenceReason::Cutover,
                       participant_.committed_epoch(), starts_in,
-                      plan != nullptr ? plan->guard_ms : 0);
+                      plan != nullptr ? plan->guard_ms : 0, 0);
       break;
     }
     case ParticipantPhase::Stable:
@@ -816,6 +822,9 @@ void MigrationAgent::record_readiness(const NodeId peer,
   for (std::size_t i = 0; i < config_.required_count; ++i) {
     if (config_.required[i] == peer) entry->required = true;
   }
+  // The report is bound to the plan it answered — a delayed READY for an
+  // older offer must not count toward the next plan's gate (04 §7).
+  entry->plan_hash = report.plan_hash;
   entry->answered = true;
   entry->ready = report.status == ReadyStatus::Ready;
   entry->migration_capable = report.migration_capable;
@@ -886,7 +895,10 @@ RequiredSetVerdict MigrationAgent::readiness_verdict() const noexcept {
   std::size_t count = 0;
   readiness_.for_each([&](const ParticipantReadiness& value) {
     for (std::size_t i = 0; i < config_.required_count; ++i) {
-      if (value.node == config_.required[i] && count < set.size()) {
+      // Only reports bound to the currently issued plan count — a stale
+      // READY from an earlier offer is not evidence for this gate.
+      if (value.node == config_.required[i] &&
+          value.plan_hash == issued_plan_hash_ && count < set.size()) {
         set[count] = value;
         set[count].required = true;
         ++count;
@@ -1246,7 +1258,11 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
         // absence must not collide with a protected cut we plan.
         const MonotonicMs until =
             now_ms + notice.starts_in_ms + notice.duration_ms;
-        (void)coordinator_->note_absence(notice.subject, 0, until, now_ms);
+        // The cut id is authenticated wire content: remote cut-level
+        // absence protection only works when it survives the hop.
+        (void)coordinator_->note_absence(notice.subject,
+                                         notice.protected_cut_id, until,
+                                         now_ms);
       }
       owner_.on_migration_event("CHANNEL_NOTICE", peer);
       break;
@@ -1273,6 +1289,16 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
     }
     default:
       break;
+  }
+}
+
+void MigrationAgent::note_link_activity(const NodeId peer,
+                                        const MonotonicMs now_ms) noexcept {
+  const ParticipantPhase before = participant_.phase();
+  participant_.note_link_activity(now_ms);
+  if (before == ParticipantPhase::Verifying &&
+      participant_.phase() == ParticipantPhase::Stable) {
+    owner_.on_migration_event("VERIFY_PASSED", peer);
   }
 }
 
@@ -1471,6 +1497,15 @@ Status MigrationAgent::release_commit(const MonotonicMs now_ms) noexcept {
   if (!config_.authority_role || !issued_ || commit_released_) {
     return reject(StatusCode::InvalidState, "NO_ISSUED_PLAN");
   }
+  // The READY gate is enforced AT release, not only at issue (04 §7): a
+  // required participant that never produced accepted READY evidence —
+  // and cannot be legitimately sleep-deferred — must not have commit
+  // evidence distributed to it or anyone else.
+  const RequiredSetVerdict verdict = readiness_verdict();
+  if (!verdict.commit_permitted) {
+    owner_.on_migration_event("COMMIT_RELEASE_DENIED", verdict.blocker);
+    return reject(verdict.reason, "REQUIRED_SET_NOT_READY");
+  }
   commit_released_ = true;
   const MonotonicMs deadline =
       now_ms + migration_wire_const::kPendingTtlMs;
@@ -1523,7 +1558,7 @@ Status MigrationAgent::request_survey(const SurveyRequest& request,
   for (std::size_t i = 0; i < lease.absence_notify_count; ++i) {
     emit_notice(lease.absence_notify[i], autonomy::AbsenceReason::SurveyVisit,
                 participant_.active_epoch(), starts_in,
-                lease.end_ms - lease.begin_ms);
+                lease.end_ms - lease.begin_ms, lease.protected_cut_id);
   }
   RadioOperation op{};
   op.kind = RadioOperationKind::SurveyVisit;
