@@ -1,0 +1,226 @@
+{
+  "schema_version": 1,
+  "design_version": "0.2-draft",
+  "status": "design-only",
+  "issues": [3, 4, 5],
+  "repository": "MOVEI144/RouteLoom",
+  "snapshots": {
+    "main": "31b3eb0ae7080d713e7acd7ee3b7f31b43423465",
+    "pr2": "cdcf0fe33b51854d4b62478e7fbc193cc8c386d8",
+    "pr2_state_at_read": "open",
+    "pr2_artifact_sha256": "11493a5f86438b9801f1527db65778561cd8175ffaff31971a48495d906d5e23",
+    "esp_idf_tag": "v6.0.3",
+    "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802"
+  },
+  "runtime_changes_in_this_pr": false,
+  "existing_core_default_changes": false,
+  "features": {
+    "neighbor_discovery": {"issue": 3, "implemented_by_this_pr": false, "qualified": false},
+    "congestion_aware_routing": {"issue": 4, "implemented_by_this_pr": false, "qualified": false},
+    "guarded_channel_migration": {"issue": 5, "implemented_by_this_pr": false, "qualified": false}
+  },
+  "wire": {
+    "preserve_major": 1,
+    "preserve_minor": 0,
+    "header_bytes": 88,
+    "normal_payload_bytes": 128,
+    "aead_tag_bytes": 16,
+    "end_and_link_tags": 2,
+    "espnow_body_limit": 250,
+    "discovery_magic": "RLD1",
+    "discovery_header_budget": 44,
+    "discovery_body_budget": 116,
+    "discovery_total_limit": 160,
+    "busy_payload_limit": 64,
+    "authenticated_object_limit": 2048,
+    "new_control_payloads_require_vectors": true
+  },
+  "discovery": {
+    "rate_kbps": 250,
+    "offer_slots": 32,
+    "offer_slot_ms": 10,
+    "channel_visit_max_ms": 400,
+    "candidate_ttl_ms": 5000,
+    "awake_neighbor_lease_ms": 30000,
+    "idle_refresh_ms": 10000,
+    "global_handshakes": 1,
+    "handshake_starts_per_second": 1,
+    "handshake_start_burst": 1,
+    "bootstrap_object_limit": 1024,
+    "bootstrap_rx_slots": 4,
+    "sleep_awake_budget_ms": 2000,
+    "stop_reserve_ms": 100,
+    "callback_watchdog_ms": 1000,
+    "unauthenticated_data_allowed": false,
+    "unapproved_member_data_allowed": false,
+    "automatic_identity_reassignment": false,
+    "peer_partition": {"broadcast": 1, "regular": 16, "transient": 3, "total": 20},
+    "regular_pins_max": 12,
+    "logical_neighbors_max": 32,
+    "candidate_records_max": 16
+  },
+  "admission": {
+    "membership_enum": {
+      "Unprovisioned": 0,
+      "Discovering": 1,
+      "Authenticating": 2,
+      "AuthorizedPendingCommit": 3,
+      "Member": 4,
+      "Revoked": 5
+    },
+    "membership_scope": "node-network",
+    "membership_writer": "MembershipController",
+    "neighbor_state_type": "NeighborPhase",
+    "neighbor_scope": "peer-radio-exchange",
+    "coarse_policy_source": "protocol/semantics.json#membership_allowlist",
+    "frame_allowed_role": "refactor-coarse-whitelist-and-context-gate",
+    "frame_type_ids": {
+      "Discover": 1,
+      "Offer": 2,
+      "BootstrapAuth": 3,
+      "MembershipResult": 4,
+      "BootstrapChunk": 5,
+      "BootstrapReply": 6,
+      "MembershipQuery": 7
+    },
+    "rld1_type_ids": [
+      1,
+      2,
+      3,
+      5,
+      6
+    ],
+    "rl_bootstrap_type_ids": [
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "logical_auth_phases": {
+      "PROVE": 3,
+      "CONFIRM": 3,
+      "FINISH": 3
+    },
+    "cookie_type_id": 2,
+    "rld1_fragment_inner_types": [
+      3
+    ],
+    "rl_fragment_inner_types": [
+      3,
+      4
+    ],
+    "authenticator_output": "AuthenticatedPeerProof",
+    "membership_result_carrier": "RL",
+    "local_member_preserved_during_discovery": true,
+    "verified_binding_requires_membership": true,
+    "restricted_bootstrap_context_is_normal_binding": false,
+    "member_state_alone_allows_candidate_data": false,
+    "unknown_types_rejected": true,
+    "revoked_wire_join_allowed": false,
+    "context_required_on_tx_rx_proxy_reassembly": true,
+    "recheck_before_state_promotion": true,
+    "rld1_multihop_forwarding": false,
+    "parser_failure_fallback": false,
+    "recursive_bootstrap_fragments": false,
+    "ci_adoption_gate": {
+      "status": "pending_pr2_adoption",
+      "targets": [
+        "esp32c3",
+        "esp32s3",
+        "esp32c5"
+      ],
+      "app_profiles": {
+        "reference_node": [
+          "normal",
+          "deep_sleep"
+        ],
+        "bridge_node": [
+          "normal"
+        ]
+      },
+      "expected_jobs": 9,
+      "executed_by_this_design_pr": false
+    }
+  },
+  "congestion": {
+    "observation_window_ms": 2000,
+    "feedback_ttl_ms": 3000,
+    "drr_weights": {"management": 4, "urgent": 8, "normal": 4, "bulk": 1},
+    "flow_descriptors_max": 32,
+    "background_reduce_fraction": 0.5,
+    "bulk_stop_fraction": 0.8,
+    "queue_target_ms": 50,
+    "queue_penalty_step_ms": 50,
+    "queue_penalty_max_multiple": 4,
+    "busy_retry_after_ms": [20, 1000],
+    "window_min": 1,
+    "window_initial": 2,
+    "window_max": 4,
+    "global_hop_wait_slots": 8,
+    "successes_to_increase_window": 8,
+    "rf_attempts_max": 2,
+    "busy_readmissions_max": 4,
+    "combined_physical_attempts_max": 6,
+    "origin_rounds_max": 3,
+    "improvement_fraction": 0.2,
+    "improvement_hold_ms": 10000,
+    "switch_hold_ms": 5000,
+    "severe_busy_ms": 2000,
+    "improvement_advertisement_gap_ms": 2000,
+    "recheck_current_feasibility": true,
+    "metric_changes_refresh_advertisement_lease": false,
+    "data_replication_multipath": false,
+    "data_flood": false
+  },
+  "migration": {
+    "modes": ["Disabled", "Observe", "Manual", "AutoGuarded"],
+    "design_initial_mode": "Observe",
+    "single_authority_supported": true,
+    "raft_required_for_initial_implementation": false,
+    "normal_rates_kbps": [250],
+    "candidate_channels": [1, 6, 11],
+    "bad_window_ms": 30000,
+    "bad_windows_required": 2,
+    "survey_visit_max_ms": 200,
+    "survey_gap_min_ms": 30000,
+    "survey_exchange_max_per_direction_per_visit": 4,
+    "survey_samples_per_direction": 20,
+    "screening_successes": 19,
+    "path_improvement_fraction": 0.25,
+    "prepare_timeout_ms": 30000,
+    "commit_lead_floor_ms": 5000,
+    "commit_lead_rtt_multiplier": 4,
+    "clock_uncertainty_max_ms": 20,
+    "guard_floor_ms": 100,
+    "guard_uncertainty_multiplier": 4,
+    "verify_ms": 30000,
+    "helper_visit_period_ms": 5000,
+    "helper_old_channel_dwell_ms": 800,
+    "helper_total_budget_ms": 180000,
+    "cooldown_ms": 600000,
+    "automatic_rollbacks_per_plan_max": 1,
+    "requires_verified_commit": true,
+    "requires_recovery_plan": true,
+    "unilateral_rollback": false,
+    "atomic_all_node_cutover_claimed": false,
+    "legacy_required_node_blocks_auto": true,
+    "unknown_time_is_zero": false,
+    "driver_peer_channel_policy": "current-channel-zero",
+    "liveness_requires_explicit_loss_clock_coverage_transfer_bounds": true
+  },
+  "resources": {
+    "values_are_design_budgets_not_measurements": true,
+    "relay_incremental_resident_budget_bytes": 12288,
+    "planner_incremental_budget_bytes": 24576,
+    "planner_sparse_edges_max": 300,
+    "unbounded_raw_statistics": false,
+    "per_radio_owner_count": 1,
+    "global_graph_required_on_every_c3": false
+  },
+  "documents": [
+    "README.md", "01-integration.md", "02-discovery.md", "03-congestion.md",
+    "04-channel-migration.md", "05-implementation.md", "06-membership-admission.md", "sources.md"
+  ],
+  "expected_scenarios": {"D3": 16, "D4": 10, "D5": 10, "X": 11}
+}
