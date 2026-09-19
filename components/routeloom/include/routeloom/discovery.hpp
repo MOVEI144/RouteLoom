@@ -386,6 +386,10 @@ class NeighborDiscovery {
   bool data_permitted(const MacAddress& mac) const noexcept;
   bool data_permitted(NodeId peer) const noexcept;
   bool binding_of(NodeId peer, BindingId& out) const noexcept;
+  // Owner-side lease sync: resolve the verified NodeId recorded for a radio
+  // MAC (bound neighbor records only — candidates are unverified and never
+  // resolve). False when the MAC has no neighbor record.
+  bool node_of(const MacAddress& mac, NodeId& out) const noexcept;
 
   // Owner-driven controls.
   Status revoke_peer(NodeId peer) noexcept;                 // -> Revoked (binding unusable)

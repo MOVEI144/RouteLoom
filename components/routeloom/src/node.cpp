@@ -1149,6 +1149,23 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
       }
       break;
     }
+    case FrameType::NeighborProbe:
+    case FrameType::NeighborResult:
+      // Link-scoped autonomy control (02-discovery.md §3): strictly 1-hop,
+      // bound to the immediate peer, never end-protected. The sink
+      // re-validates against the verified binding/phase — open_link alone is
+      // not evidence (06 §3.1).
+      if (autonomy_sink_ != nullptr && frame.header.destination == config_.node &&
+          (frame.header.flags & wire::kFlagEndProtected) == 0) {
+        autonomy_sink_->on_autonomy_frame(
+            peer, frame.header.type,
+            ByteView{frame.protected_payload.data(), frame.header.payload_length},
+            now_ms);
+      } else {
+        observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
+                                &frame.header.message);
+      }
+      break;
     default:
       observer_.on_diagnostic("FRAME_TYPE_UNSUPPORTED_IN_CORE_FIXED_250", peer,
                               &frame.header.message);

@@ -13,7 +13,12 @@ namespace routeloom::espnow {
 Status EspNowPowerPort::capture_cache(PowerImage& image) noexcept {
   image.channel = runtime_.channel();
   runtime_.for_each_peer(
-      [&](const NodeId node, const MacAddress& mac, const RouteMetric metric) {
+      [&](const NodeId node, const MacAddress& mac, const RouteMetric metric,
+          const bool autonomy_managed) {
+        // Discovery-managed leases are never persisted: bindings and driver
+        // peers are re-established by the engine after resume. Persisting
+        // them would smuggle un-reauthenticated peers back in as static.
+        if (autonomy_managed) return;
         PowerPeerRecord* slot = nullptr;
         for (auto& candidate : image.peers) {
           if (candidate.used && candidate.node == node) {

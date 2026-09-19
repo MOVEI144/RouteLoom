@@ -57,6 +57,19 @@ class NullObserver final : public NodeObserver {
   void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
 };
 
+// Narrow sink for link-scoped autonomy control payloads (NeighborProbe /
+// NeighborResult, docs/design/autonomous-mesh/02-discovery.md §3). The radio
+// Owner installs one; a frame reaches it only after wire::open_link and the
+// network/peer identity checks pass, so payload bytes are link-authenticated
+// but NOT end-verified — the sink must still re-validate them (binding
+// generation, neighbor phase) before acting.
+class AutonomyFrameSink {
+ public:
+  virtual ~AutonomyFrameSink() = default;
+  virtual void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
+                                 MonotonicMs now_ms) noexcept = 0;
+};
+
 // Policy applied by MeshNode::settle_for_sleep to deliveries that are not in a
 // terminal state when the node drains for sleep.
 enum class SleepWorkPolicy : std::uint8_t {
@@ -93,6 +106,8 @@ class MeshNode {
   void poll(MonotonicMs now_ms) noexcept;
   void on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
                         MonotonicMs now_ms) noexcept;
+  // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
+  void set_autonomy_sink(AutonomyFrameSink* sink) noexcept { autonomy_sink_ = sink; }
   void on_radio_tx_result(std::uint64_t token, bool success,
                           MonotonicMs now_ms) noexcept;
 
@@ -362,6 +377,7 @@ class MeshNode {
   SecurityProvider& security_;
   NodeObserver& observer_;
   RouteTable routes_{};
+  AutonomyFrameSink* autonomy_sink_{nullptr};
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};
   FixedPool<Delivery, kDeliveryCapacity> deliveries_{};
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};

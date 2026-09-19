@@ -28,6 +28,32 @@ config ROUTELOOM_PEER_MAC
     string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
     default "00:00:00:00:00:00"
 
+config ROUTELOOM_DISCOVERY
+    bool "Enable autonomous neighbor discovery (RLD1 bootstrap lane)"
+    default n
+    help
+        EXPERIMENTAL: enables the RLD1 bootstrap lane, the portable
+        NeighborDiscovery engine and dev-PSK possession authentication.
+        Static ROUTELOOM_PEER_* registration keeps working alongside.
+
+config ROUTELOOM_DISCOVERY_MEMBER
+    bool "DEV: treat this node as a provisioned network member"
+    default y
+    depends on ROUTELOOM_DISCOVERY
+    help
+        Development stand-in for durable membership evidence. A production
+        build must source this from real provisioning state.
+
+config ROUTELOOM_DISCOVERY_AUTO_APPROVE
+    bool "DEV: auto-approve the membership commit (no authority round trip)"
+    default y
+    depends on ROUTELOOM_DISCOVERY
+
+config ROUTELOOM_DISCOVERY_INITIATE
+    bool "Broadcast DISCOVER at startup instead of only responding"
+    default y
+    depends on ROUTELOOM_DISCOVERY
+
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"

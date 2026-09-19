@@ -1498,6 +1498,15 @@ bool NeighborDiscovery::binding_of(const NodeId peer, BindingId& out) const noex
   return true;
 }
 
+bool NeighborDiscovery::node_of(const MacAddress& mac, NodeId& out) const noexcept {
+  const Neighbor* neighbor = find_neighbor(mac);
+  if (neighbor == nullptr || neighbor->node == kInvalidNodeId) {
+    return false;
+  }
+  out = neighbor->node;
+  return true;
+}
+
 Status NeighborDiscovery::revoke_peer(const NodeId peer) noexcept {
   Neighbor* neighbor = find_neighbor(peer);
   if (neighbor == nullptr) {

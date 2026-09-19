@@ -16,11 +16,14 @@
 #include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
+#if CONFIG_ROUTELOOM_DISCOVERY
+#include "routeloom/espnow_autonomy.hpp"
+#endif
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/psk_security.hpp"
 #include "routeloom/usb_bridge.hpp"
-#include "sdkconfig.h"
 
 namespace {
 constexpr char kTag[] = "RouteLoomBr";
@@ -217,6 +220,48 @@ extern "C" void app_main(void) {
         runtime.register_neighbor(CONFIG_ROUTELOOM_PEER_NODE_ID, mac, 1);
     if (!status) fail(status.detail);
   }
+
+#if CONFIG_ROUTELOOM_DISCOVERY
+  // Autonomous discovery (issue #3): the RLD1 bootstrap lane plus the
+  // portable NeighborDiscovery engine, attached to the runtime's
+  // DiscoveryPort. Dev-PSK possession authentication only — EXPERIMENTAL.
+  // The USB bridge path is unaffected: bridge stays the NodeObserver and the
+  // single-threaded pump loop drives the engine via runtime.poll_once().
+  routeloom::MacAddress self_mac{};
+  status = runtime.local_mac(self_mac);
+  if (!status) fail(status.detail);
+  routeloom::DiscoveryConfig discovery_config{};
+  discovery_config.node = config.node.node;
+  discovery_config.mac = self_mac;
+  discovery_config.network = config.node.network;
+  // The 4-byte hint is a discovery filter only, never membership evidence.
+  discovery_config.network_hint =
+      static_cast<std::uint32_t>(config.node.network);
+  discovery_config.capability_bits = CONFIG_ROUTELOOM_CAPABILITY;
+  routeloom::espnow::EspNowAutonomyPolicy autonomy_policy{};
+#if CONFIG_ROUTELOOM_DISCOVERY_MEMBER
+  autonomy_policy.self_member = true;
+#else
+  autonomy_policy.self_member = false;
+#endif
+#if CONFIG_ROUTELOOM_DISCOVERY_AUTO_APPROVE
+  autonomy_policy.auto_approve = true;
+#else
+  autonomy_policy.auto_approve = false;
+#endif
+#if CONFIG_ROUTELOOM_DISCOVERY_INITIATE
+  autonomy_policy.initiate = true;
+#else
+  autonomy_policy.initiate = false;
+#endif
+  static routeloom::espnow::EspNowAutonomy autonomy(
+      discovery_config, autonomy_policy, runtime, security, kTag);
+  status = autonomy.start();
+  if (!status) fail(status.detail);
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL discovery active: dev-PSK possession proof is not "
+           "a production identity");
+#endif
 
   status = runtime.start();
   if (!status) fail(status.detail);
