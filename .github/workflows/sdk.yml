@@ -100,9 +100,20 @@ jobs:
         # bridge_node exposes the portable UsbBridge on USB Serial/JTAG.
         # It has no deep-sleep variant, so that combination is excluded.
         app: [reference_node, bridge_node]
+        # autonomy=observe compiles the EXPERIMENTAL autonomy lane:
+        # RLD1 discovery + the migration participant in Observe mode
+        # (CONFIG_ROUTELOOM_DISCOVERY=y, CONFIG_ROUTELOOM_MIGRATION=1).
+        # Compile-time coverage only — not RF validation, and Observe never
+        # moves the radio. AutoGuarded stays opt-in (no kconfig exposes it).
+        autonomy: [off]
         exclude:
           - app: bridge_node
             profile: deep_sleep
+        include:
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: observe
     container:
       image: espressif/idf:v6.0.3
     steps:
@@ -122,6 +133,9 @@ jobs:
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.autonomy }}' = observe ]; then
+            printf 'CONFIG_ROUTELOOM_DISCOVERY=y\nCONFIG_ROUTELOOM_MIGRATION=1\n' >> sdkconfig
+          fi
           idf.py build
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             # Prove the kconfig symbol survived re-resolution and the
@@ -130,11 +144,20 @@ jobs:
           else
             ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
           fi
+          if [ '${{ matrix.autonomy }}' = observe ]; then
+            # Prove the autonomy symbols survived re-resolution and the
+            # Observe-mode lane was actually compiled in.
+            grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
+            grep -q '^CONFIG_ROUTELOOM_MIGRATION=1' sdkconfig
+          else
+            ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
+            ! grep -q '^CONFIG_ROUTELOOM_MIGRATION=[12]' sdkconfig
+          fi
           idf.py size > build/size-report.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}
+          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}
           path: |
             idf-commit.txt
             firmware/${{ matrix.app }}/build/*.bin

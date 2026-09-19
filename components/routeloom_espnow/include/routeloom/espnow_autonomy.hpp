@@ -53,14 +53,19 @@ class DevMembershipHooks final : public MembershipHooks {
 };
 
 // ESP_LOG-backed discovery observer: every engine reason string
-// (PEER_CAPACITY, BOUND, REACHABLE, STALE, ...) lands in the app log.
+// (PEER_CAPACITY, BOUND, REACHABLE, STALE, ...) lands in the app log. When
+// a runtime is supplied the same reason is forwarded through the node's
+// diagnostic tap, so discovery events ride the existing USB bridge
+// diagnostic frames — real engine events only, never synthesized.
 class EspNowDiscoveryObserver final : public DiscoveryObserver {
  public:
-  explicit EspNowDiscoveryObserver(const char* tag) noexcept : tag_(tag) {}
+  EspNowDiscoveryObserver(const char* tag, EspNowRuntime* runtime) noexcept
+      : tag_(tag), runtime_(runtime) {}
   void on_discovery_event(const char* reason, NodeId peer) noexcept override;
 
  private:
   const char* tag_;
+  EspNowRuntime* runtime_;
 };
 
 struct EspNowAutonomyPolicy {
@@ -81,7 +86,7 @@ class EspNowAutonomy final {
       : runtime_(runtime),
         hooks_(discovery.network, policy.self_member, policy.auto_approve),
         authenticator_(security, policy.auth_domain),
-        observer_(log_tag),
+        observer_(log_tag, &runtime),
         engine_(discovery, runtime, authenticator_, hooks_, entropy_,
                 observer_),
         initiate_(policy.initiate) {}

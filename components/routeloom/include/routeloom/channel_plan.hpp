@@ -3,8 +3,10 @@
 // Portable channel observe + bounded-survey core for the autonomous-mesh
 // profile (docs/design/autonomous-mesh/04-channel-migration.md §2-§4,
 // contracts.json migration.*). This phase implements ONLY:
-//   - the Disabled/Observe/Manual mode state machine (AutoGuarded is a stub
-//     gate returning Unsupported — P6),
+//   - the Disabled/Observe/Manual/AutoGuarded mode state machine — AutoGuarded
+//     is the P6 explainable precondition gate (evaluate_autoguarded): opt-in
+//     only, every unmet condition is named, and automatic operations keep
+//     being refused while any precondition is unmet,
 //   - observation-window judgment: 30s windows, 2 consecutive bad windows
 //     plus >=2 independent observation points or an impaired protected
 //     critical link before a survey is proposed,
@@ -61,8 +63,9 @@ constexpr std::uint32_t kChannelMaskAll24 = 0x3fffu;   // channels 1..13
 
 // --- Modes (04 §1 D5-01) ---------------------------------------------------------
 
-// The four contract modes. AutoGuarded exists in the enum but is a P6 stub:
-// selecting it returns Unsupported and never changes behavior.
+// The four contract modes. AutoGuarded is reachable only through the P6
+// precondition gate (request_autoguarded/set_mode): an explainable verdict,
+// opt-in only, never a default.
 enum class MigrationMode : std::uint8_t {
   Disabled = 0,
   Observe = 1,
@@ -239,6 +242,127 @@ struct AdoptionDecision {
   bool placement_review_advised{false};  // load-limit/placement review (04 §4)
 };
 
+// --- AutoGuarded precondition gate (04 §1/§10, D5-01; P6) ---------------------------
+
+// Every precondition for enabling AutoGuarded, in fixed evaluation order.
+// A verdict reports ALL unmet conditions (bitmask indexed by these values)
+// plus the first one in this order — a refusal is always explainable, never
+// a bare Unsupported.
+enum class AutoGuardedCondition : std::uint8_t {
+  // An explicit single Authority is configured, not stopped (D5-04), a real
+  // CommitSignatureVerifier is installed and a verified path to it exists
+  // (caller-asserted routing evidence — the coordinator cannot see routes).
+  VerifiedAuthorityPath = 0,
+  // Every required endpoint has been accounted for: answered readiness or a
+  // legitimate sleep deferral (valid lease + rediscovery). An UNANSWERED
+  // endpoint is unobserved — silence is never reclassed as asleep (04 §7).
+  RequiredSetObserved = 1,
+  // Every observed required endpoint is READY (or legitimately deferred).
+  RequiredSetReady = 2,
+  // No required participant lacks migration capability (D5-09).
+  NoLegacyRequired = 3,
+  // An armed (fresh) authority clock mapping within the uncertainty bound.
+  ClockBounded = 4,
+  // No inter-plan cooldown latched by the authority/participant (04 §10).
+  CooldownClear = 5,
+  // requires_recovery_plan: issued plans carry a committed helper/scout
+  // recovery schedule (04 §9.2). Caller-asserted deployment evidence.
+  RecoveryPlanPresent = 6,
+  // At least one candidate channel has screening evidence inside the
+  // freshness bound — stale surveys never justify automatic movement.
+  SurveyEvidenceFresh = 7,
+};
+constexpr std::size_t kAutoGuardedConditionCount = 8;
+constexpr std::uint32_t autoguarded_condition_bit(
+    const AutoGuardedCondition condition) noexcept {
+  return 1U << static_cast<std::uint32_t>(condition);
+}
+constexpr std::uint32_t kAutoGuardedAllMask =
+    (1U << kAutoGuardedConditionCount) - 1U;
+const char* autoguarded_condition_name(AutoGuardedCondition condition) noexcept;
+
+// Freshness bound for an asserted evidence snapshot AND for the
+// coordinator's survey-evidence records (04 §4). A design bound like the
+// other migration_const values — deployments tighten it via config.
+constexpr std::uint32_t kAutoguardedEvidenceMaxAgeMs =
+    4 * migration_const::kBadWindowMs;  // 120000
+
+// Inputs to the AutoGuarded gate. Every field defaults to the UNSATISFIED
+// value: unknown input never passes the gate (unknown_time_is_zero = false;
+// an unmeasured endpoint, an unstopped authority nobody verified, a missing
+// clock — none of them assert themselves).
+struct AutoGuardedEvidence {
+  // When the snapshot was taken (caller clock domain = the coordinator's
+  // injected monotonic now_ms). evaluate_autoguarded refuses stale
+  // snapshots outright — evidence that cannot be re-checked does not run
+  // a radio.
+  MonotonicMs asserted_at_ms{0};
+  // Authority path (condition 0). All four must hold.
+  bool authority_configured{false};
+  bool authority_available{false};
+  bool verifier_ready{false};
+  bool authority_path_verified{false};
+  // Required-set accounting (conditions 1-3), caller-computed e.g. by
+  // MigrationAgent over its READY/lease state.
+  std::size_t required_count{0};
+  std::size_t required_unobserved{0};   // no answer AND no lease+rediscovery
+  std::size_t required_not_ready{0};   // answered but READY was refused
+  bool required_legacy_present{false};
+  // Clock (condition 4).
+  bool clock_valid{false};
+  std::uint32_t clock_uncertainty_ms{0};
+  std::uint32_t clock_uncertainty_max_ms{
+      migration_const::kClockUncertaintyMaxMs};
+  // Inter-plan cooldown (condition 5).
+  bool cooldown_active{false};
+  // Recovery plan commitment (condition 6): caller asserts every auto-issued
+  // plan carries a committed recovery schedule. Never inferred.
+  bool recovery_plan_present{false};
+  // Candidate screening freshness (condition 7). The coordinator always
+  // recomputes both fields from its own ChannelEvidence records — caller
+  // values are ignored for its own check. `survey_evidence_known` selects
+  // the honest detail string: no screening at all vs screening whose fresh
+  // window has lapsed.
+  bool survey_evidence_known{false};
+  bool survey_evidence_fresh{false};
+};
+
+// Explainable gate result: which conditions hold, which fail, and the first
+// failure in evaluation order with a stable reason + detail string.
+struct AutoGuardedVerdict {
+  bool permitted{false};
+  std::uint32_t satisfied_mask{0};
+  AutoGuardedCondition first_unmet{AutoGuardedCondition::VerifiedAuthorityPath};
+  StatusCode reason{StatusCode::Ok};
+  const char* detail{"ok"};
+  bool satisfied(const AutoGuardedCondition condition) const noexcept {
+    return (satisfied_mask & autoguarded_condition_bit(condition)) != 0;
+  }
+  std::uint32_t unmet_mask() const noexcept {
+    return (~satisfied_mask) & kAutoGuardedAllMask;
+  }
+};
+
+// The single AutoGuarded precondition validator (04 §1 D5-01, §10). Pure:
+// no hidden state, fixed-size input, noexcept. Reused by ChannelCoordinator
+// (mode gate + live re-check on auto operations) and by MigrationAgent
+// (composes authority/participant evidence). permitted is true only when
+// every REQUIRED condition is satisfied — an incomplete verdict never
+// auto-executes. `required_mask` selects which conditions gate permitted;
+// unrequired conditions are still evaluated and reported in satisfied_mask.
+AutoGuardedVerdict evaluate_autoguarded(
+    const AutoGuardedEvidence& evidence,
+    std::uint32_t required_mask = kAutoGuardedAllMask) noexcept;
+
+// Automatic survey work re-gates on every condition EXCEPT
+// SurveyEvidenceFresh — that evidence is what the survey visit exists to
+// produce, so requiring it would deadlock the refresh path (04 §10).
+// Everything else still gates: verified authority path, required set,
+// bounded clock, cooldown, recovery plan.
+constexpr std::uint32_t kAutoguardedSurveyGateMask =
+    kAutoGuardedAllMask &
+    ~autoguarded_condition_bit(AutoGuardedCondition::SurveyEvidenceFresh);
+
 // --- The coordinator ---------------------------------------------------------------
 
 struct ChannelCoordinatorConfig {
@@ -253,6 +377,9 @@ struct ChannelCoordinatorConfig {
   std::uint8_t exchange_max_per_direction{migration_const::kSurveyExchangeMaxPerDirection};
   std::uint8_t samples_per_direction{migration_const::kSurveySamplesPerDirection};
   std::uint8_t screening_successes{migration_const::kScreeningSuccesses};
+  // AutoGuarded gate (P6): how old an asserted evidence snapshot or a survey
+  // screening record may be before the gate treats it as stale.
+  std::uint32_t autoguarded_evidence_max_age_ms{kAutoguardedEvidenceMaxAgeMs};
 };
 
 struct ChannelCoordinatorStats {
@@ -273,11 +400,31 @@ class ChannelCoordinator {
  public:
   explicit ChannelCoordinator(const ChannelCoordinatorConfig& config) noexcept;
 
-  // Mode transitions (04 §1). Disabled/Observe/Manual are selectable;
-  // AutoGuarded is the P6 stub gate and always returns Unsupported.
+  // Mode transitions (04 §1). Disabled/Observe/Manual are always selectable.
+  // AutoGuarded goes through the P6 precondition gate: the stored evidence
+  // snapshot (or an empty one) is evaluated and the returned Status carries
+  // the verdict's first-unmet reason/detail — never a bare Unsupported.
+  // AutoGuarded is opt-in only; nothing selects it by default.
   Status set_mode(MigrationMode mode) noexcept;
   MigrationMode mode() const noexcept { return mode_; }
   Status set_home_channel(std::uint8_t channel) noexcept;
+
+  // --- AutoGuarded gate (P6) -------------------------------------------------
+  // Evaluate every precondition. The coordinator stamps the conditions only
+  // it can see — a required legacy participant (its own participant table)
+  // and fresh candidate screening evidence (its ChannelEvidence records) —
+  // then runs the single shared validator. `evidence.asserted_at_ms` older
+  // than autoguarded_evidence_max_age_ms is stale and refuses outright.
+  AutoGuardedVerdict evaluate_autoguarded(
+      AutoGuardedEvidence evidence, MonotonicMs now_ms,
+      std::uint32_t required_mask = kAutoGuardedAllMask) const noexcept;
+  // Explicit opt-in request. On a full pass the mode becomes AutoGuarded and
+  // the evidence snapshot is stored so every later automatic operation is
+  // re-gated against it (04 §10: refusal, never silent execution). On any
+  // failure the mode is unchanged and the verdict explains each unmet
+  // condition. The snapshot's asserted_at_ms is taken as now_ms.
+  AutoGuardedVerdict request_autoguarded(const AutoGuardedEvidence& evidence,
+                                         MonotonicMs now_ms) noexcept;
 
   // --- observation input -----------------------------------------------------
   // Feed classified per-window evidence; unauthenticated input is counted
@@ -298,8 +445,10 @@ class ChannelCoordinator {
   bool legacy_participant_block() const noexcept { return legacy_block_; }
 
   // --- SurveyLease ------------------------------------------------------------
-  // Issue a bounded visit lease. Manual mode only — Observe may propose but
-  // never moves the radio; Disabled refuses everything. All §3 bounds are
+  // Issue a bounded visit lease. Manual, or AutoGuarded after the stored
+  // evidence snapshot re-passes the live gate (kAutoguardedSurveyGateMask —
+  // a lost precondition refuses the visit). Observe may propose but never
+  // moves the radio; Disabled refuses everything. All §3 bounds are
   // enforced here: duration cap, uncertainty cap, exchange budget, the 30s
   // revisit gap, protected-cut exclusivity and outage permission.
   Status request_survey_lease(const SurveyRequest& request, MonotonicMs now_ms,
@@ -423,6 +572,14 @@ class ChannelCoordinator {
   bool all_bad_reported_{false};
   std::uint32_t evidence_epoch_{0};
   std::uint32_t suppressed_epoch_{0};
+  // AutoGuarded gate state (P6): the evidence snapshot that latched the mode
+  // and the time it was asserted. Automatic operations re-evaluate it, so a
+  // precondition lost mid-operation stops further auto work — refusal, never
+  // silent execution. The empty snapshot never satisfies the gate.
+  AutoGuardedEvidence autoguarded_evidence_{};
+  // Last injected time seen on any entry point; lets set_mode() evaluate the
+  // gate without a now_ms parameter.
+  MonotonicMs last_now_ms_{0};
 };
 
 // --- Channel operation runner (04 §3, §8; P0 arbiter contract) ----------------------

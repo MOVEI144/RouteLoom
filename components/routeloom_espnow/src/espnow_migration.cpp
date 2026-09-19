@@ -418,6 +418,11 @@ Status EspNowMigration::start() noexcept {
   }
   Status status = coordinator_.set_mode(mode);
   if (!status) return status;
+  // The selected mode is observable state — the host sees exactly what was
+  // configured (AutoGuarded can only ever arrive via a later gated request).
+  on_migration_event(mode == MigrationMode::Observe ? "MIGRATION_MODE_OBSERVE"
+                                                    : "MIGRATION_MODE_MANUAL",
+                     kInvalidNodeId);
   status = runtime_.attach_migration(agent_);
   if (!status) return status;
   status = agent_.resume(runtime_.now_ms());
@@ -456,6 +461,10 @@ void EspNowMigration::on_migration_event(const char* reason,
                                          const NodeId peer) noexcept {
   ESP_LOGW(kTag, "migration event %s peer=%llu", reason,
            static_cast<unsigned long long>(peer));
+  // Bounded reason strings (<=64B) ride the existing device→host diagnostic
+  // frames: operation phases, assess verdicts, gate refusals, terminal
+  // outcomes — real events only, nothing fabricated.
+  runtime_.note_diagnostic(reason, peer);
 }
 
 }  // namespace routeloom::espnow

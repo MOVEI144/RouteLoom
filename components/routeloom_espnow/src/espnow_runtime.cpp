@@ -1324,6 +1324,11 @@ void EspNowRuntime::channel_committed(const std::uint8_t channel) noexcept {
   config_.channel = channel;
 }
 
+void EspNowRuntime::note_diagnostic(const char* reason,
+                                    const NodeId peer) noexcept {
+  observer_.on_diagnostic(reason, peer, nullptr);
+}
+
 bool EspNowRuntime::OwnerChannelPort::tx_quiesced() const noexcept {
   return owner_.channel_tx_quiesced();
 }

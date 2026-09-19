@@ -374,6 +374,24 @@ class MigrationAgent final : public MigrationFrameSink,
   RequiredSetVerdict readiness_verdict() const noexcept;
   bool readiness_of(NodeId node, ParticipantReadiness& out) const noexcept;
 
+  // --- AutoGuarded gate (P6) ---------------------------------------------------
+  // Compose the evidence this agent can prove — authority configured/
+  // available/verifier-ready, authority reachability via the readiness set
+  // or a held verified commit, required-set accounting (unanswered is never
+  // silently "asleep", 04 §7), participant clock/cooldown — over the
+  // caller-asserted deployment fields (recovery-plan commitment, extra
+  // path evidence) and run the single shared gate. `evidence` fields the
+  // agent measures are overwritten; caller-asserted fields can only widen
+  // (they are trusted deployment inputs, same discipline as
+  // PlanMeasurements).
+  AutoGuardedVerdict evaluate_autoguarded(AutoGuardedEvidence evidence,
+                                          MonotonicMs now_ms) const noexcept;
+  // Opt-in AutoGuarded request: forwards the composed evidence to the
+  // coordinator's gate. The verdict is always returned — a refusal names
+  // every unmet condition instead of reporting Unsupported.
+  AutoGuardedVerdict request_autoguarded(const AutoGuardedEvidence& evidence,
+                                         MonotonicMs now_ms) noexcept;
+
   // --- Manual survey -----------------------------------------------------------
   // Bounded survey visit through the coordinator lease + serialized runner:
   // emits authenticated scheduled-absence notices to the lease's notify set
@@ -449,6 +467,16 @@ class MigrationAgent final : public MigrationFrameSink,
   void record_readiness(NodeId peer, const ReadyReport& report) noexcept;
   void record_result(NodeId peer, const ResultReport& report) noexcept;
   void check_terminal(MonotonicMs now_ms) noexcept;
+  // Fill the AutoGuardedEvidence fields this agent can measure/verify;
+  // caller-asserted fields are only ever widened (never cleared).
+  void compose_autoguarded(AutoGuardedEvidence& evidence,
+                           MonotonicMs now_ms) const noexcept;
+  // AutoGuarded-mode survey: on a SurveyProposed assessment, build the
+  // bounded request (authority as survey peer — the only end we hold an
+  // armed clock mapping for) and submit it. The coordinator re-gates the
+  // stored evidence snapshot itself; a refusal just skips this tick.
+  void auto_survey(const ChannelAssessment& assessment,
+                   MonotonicMs now_ms) noexcept;
 
   MigrationAgentConfig config_{};
   MigrationWirePort& wire_;
@@ -461,6 +489,9 @@ class MigrationAgent final : public MigrationFrameSink,
   PlanExchange exchange_;
 
   ParticipantPhase last_phase_{ParticipantPhase::Stable};
+  // Last emitted coordinator assessment verdict — ASSESS_* owner events fire
+  // on change only, never per-poll spam.
+  AssessVerdict last_assess_verdict_{AssessVerdict::Stable};
   bool serving_{false};
   bool reconcile_needed_{false};
   OperationToken reconcile_token_{kInvalidOperationToken};
@@ -468,6 +499,9 @@ class MigrationAgent final : public MigrationFrameSink,
   bool survey_pending_{false};
   OperationToken survey_token_{kInvalidOperationToken};
   std::uint32_t survey_lease_id_{0};
+  // AutoGuarded survey notes are latched per proposal streak — one owner
+  // event per skip/refuse reason, cleared on issue or verdict change.
+  bool autosurvey_noted_{false};
   MonotonicMs next_snapshot_request_ms_{0};
   MonotonicMs next_timesync_ms_{0};
   std::uint32_t timesync_sequence_{0};

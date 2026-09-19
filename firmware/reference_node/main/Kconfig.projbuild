@@ -80,7 +80,7 @@ config ROUTELOOM_MIGRATION
 config ROUTELOOM_MIGRATION_AUTHORITY
     hex "Migration authority Node ID"
     default 0x1
-    depends on ROUTELOOM_MIGRATION
+    depends on ROUTELOOM_MIGRATION != 0
 
 config ROUTELOOM_MIGRATION_SELF_AUTHORITY
     bool "DEV: this node is the migration authority (issuer)"
@@ -94,25 +94,25 @@ config ROUTELOOM_MIGRATION_RTT_P99_MS
     int "Measured management RTT P99 bound (ms) — deployment input"
     range 1 60000
     default 250
-    depends on ROUTELOOM_MIGRATION
+    depends on ROUTELOOM_MIGRATION != 0
 
 config ROUTELOOM_MIGRATION_DELIVERY_BOUND_MS
     int "Measured control delivery bound (ms) — deployment input"
     range 1 60000
     default 2000
-    depends on ROUTELOOM_MIGRATION
+    depends on ROUTELOOM_MIGRATION != 0
 
 config ROUTELOOM_MIGRATION_TRANSFER_BOUND_MS
     int "Measured prepare-phase transfer bound (ms) — deployment input"
     range 1 30000
     default 2000
-    depends on ROUTELOOM_MIGRATION
+    depends on ROUTELOOM_MIGRATION != 0
 
 config ROUTELOOM_MIGRATION_SWITCH_BOUND_MS
     int "Measured local channel-switch bound (ms) — deployment input"
     range 1 5000
     default 50
-    depends on ROUTELOOM_MIGRATION
+    depends on ROUTELOOM_MIGRATION != 0
 
 config ROUTELOOM_DEEP_SLEEP
     bool "Drive a deep-sleep prepare/enter cycle through the power coordinator"

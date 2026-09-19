@@ -751,6 +751,20 @@ void MigrationAgent::emit_result_report(const ResultOutcome outcome,
 void MigrationAgent::on_phase_transition(const ParticipantPhase from,
                                          const ParticipantPhase to,
                                          const MonotonicMs now_ms) noexcept {
+  // Operation state is observable: every transition emits a bounded
+  // PHASE_* event the owner can surface (USB diagnostics, host UX).
+  owner_.on_migration_event(
+      to == ParticipantPhase::Stable        ? "PHASE_STABLE"
+      : to == ParticipantPhase::Assess      ? "PHASE_ASSESS"
+      : to == ParticipantPhase::Survey      ? "PHASE_SURVEY"
+      : to == ParticipantPhase::Preparing   ? "PHASE_PREPARING"
+      : to == ParticipantPhase::Committed   ? "PHASE_COMMITTED"
+      : to == ParticipantPhase::Switching   ? "PHASE_SWITCHING"
+      : to == ParticipantPhase::Verifying   ? "PHASE_VERIFYING"
+      : to == ParticipantPhase::Recovering  ? "PHASE_RECOVERING"
+      : to == ParticipantPhase::Aborted     ? "PHASE_ABORTED"
+                                            : "PHASE_RECOVERY_REQUIRED",
+      kInvalidNodeId);
   switch (to) {
     case ParticipantPhase::Committed: {
       // Scheduled-switch notice (04 §8): warn bound peers ahead of the
@@ -906,6 +920,171 @@ bool MigrationAgent::readiness_of(const NodeId node,
     }
   });
   return found;
+}
+
+// --- AutoGuarded gate (P6) --------------------------------------------------------
+
+void MigrationAgent::compose_autoguarded(
+    AutoGuardedEvidence& evidence, const MonotonicMs now_ms) const noexcept {
+  const NodeId authority_id = config_.participant.authority;
+  const bool self_authority = authority_id == config_.participant.node;
+  // Explicit configured Authority: unset/broadcast ids are not authorities.
+  evidence.authority_configured =
+      authority_id != kInvalidNodeId && authority_id != kBroadcastNodeId;
+  ParticipantReadiness authority_ready{};
+  const bool authority_answered =
+      !self_authority && readiness_of(authority_id, authority_ready);
+  // A remote authority is available only when it answered READY this
+  // session — silence is not availability. For a self-authority node the
+  // local availability flag rules (D5-04).
+  evidence.authority_available =
+      self_authority ? authority_.available()
+                     : authority_answered && authority_ready.ready;
+  // Real verifier readiness — a placeholder object is not verification.
+  evidence.verifier_ready = authority_.verifier_ready();
+  // Verified path: the authority answered readiness this session, it IS
+  // this node, or it already reached us through a verified signed commit
+  // (committed epoch or a pending verified plan prove the interaction).
+  evidence.authority_path_verified =
+      self_authority || authority_answered ||
+      participant_.committed_epoch().value != 0 ||
+      participant_.pending_plan() != nullptr;
+  // Required-set accounting over the READY/lease ledger (04 §7): an
+  // unanswered endpoint has no report and therefore no lease/rediscovery
+  // deferral — it is unobserved, never reclassed as "asleep" or "ready".
+  // A reported not-migration-capable required node is the legacy block.
+  std::size_t unobserved = 0;
+  std::size_t not_ready = 0;
+  bool legacy = false;
+  for (std::size_t i = 0; i < config_.required_count; ++i) {
+    ParticipantReadiness entry{};
+    if (!readiness_of(config_.required[i], entry)) {
+      ++unobserved;
+      continue;
+    }
+    if (!entry.migration_capable) {
+      legacy = true;
+      continue;
+    }
+    if (!entry.ready) ++not_ready;
+  }
+  evidence.required_count = config_.required_count;
+  evidence.required_unobserved = unobserved;
+  evidence.required_not_ready = not_ready;
+  evidence.required_legacy_present =
+      evidence.required_legacy_present || legacy;
+  // Participant measurables: armed clock (never zero-uncertainty when
+  // unarmed) and the plan-terminal cooldown latch.
+  evidence.clock_valid = participant_.clock_valid();
+  evidence.clock_uncertainty_ms = participant_.clock_uncertainty_ms();
+  evidence.clock_uncertainty_max_ms =
+      config_.participant.clock_uncertainty_max_ms;
+  evidence.cooldown_active = participant_.cooldown_active(now_ms);
+  // A pending verified plan or an issued plan's recovery flag proves the
+  // committed recovery schedule on this node; the caller-asserted field
+  // covers deployment-wide issuance policy.
+  const MigrationPlan* pending = participant_.pending_plan();
+  if ((pending != nullptr && pending->recovery.present) ||
+      issued_recovery_present_) {
+    evidence.recovery_plan_present = true;
+  }
+}
+
+AutoGuardedVerdict MigrationAgent::evaluate_autoguarded(
+    AutoGuardedEvidence evidence, const MonotonicMs now_ms) const noexcept {
+  compose_autoguarded(evidence, now_ms);
+  if (coordinator_ != nullptr) {
+    // The coordinator stamps its own conditions (required-legacy, survey
+    // freshness) and applies snapshot staleness, then runs the same gate.
+    return coordinator_->evaluate_autoguarded(evidence, now_ms);
+  }
+  // No coordinator: this node cannot vouch for survey screening at all —
+  // the evidence stays unknown and the gate fails it honestly.
+  evidence.survey_evidence_known = false;
+  evidence.survey_evidence_fresh = false;
+  return routeloom::evaluate_autoguarded(evidence);
+}
+
+AutoGuardedVerdict MigrationAgent::request_autoguarded(
+    const AutoGuardedEvidence& evidence, const MonotonicMs now_ms) noexcept {
+  AutoGuardedEvidence composed = evidence;
+  compose_autoguarded(composed, now_ms);
+  if (coordinator_ == nullptr) {
+    // No gate keeper: nothing can latch AutoGuarded. The composed evidence
+    // is still evaluated so the caller sees every unmet condition — survey
+    // evidence included, which cannot be vouched without a coordinator.
+    composed.survey_evidence_known = false;
+    composed.survey_evidence_fresh = false;
+    return routeloom::evaluate_autoguarded(composed);
+  }
+  AutoGuardedVerdict verdict =
+      coordinator_->request_autoguarded(composed, now_ms);
+  // The gate outcome is observable: the latch announces the new mode, a
+  // refusal carries its bounded detail string to the owner.
+  owner_.on_migration_event(
+      verdict.permitted ? "MIGRATION_MODE_AUTOGUARDED" : verdict.detail,
+      kInvalidNodeId);
+  return verdict;
+}
+
+void MigrationAgent::auto_survey(const ChannelAssessment& assessment,
+                                 const MonotonicMs now_ms) noexcept {
+  if (survey_pending_ || runner_.busy()) return;
+  if (assessment.candidate_count == 0) return;
+  const auto note = [&](const char* reason, const NodeId peer) noexcept {
+    // Skip/refuse notes are latched per streak: one owner event, not one
+    // per poll while the proposal persists.
+    if (autosurvey_noted_) return;
+    autosurvey_noted_ = true;
+    owner_.on_migration_event(reason, peer);
+  };
+  // The survey peer is the configured Authority: it is the one remote end
+  // this participant holds an armed bounded clock mapping for. Without an
+  // armed mapping there is no common time base — the visit is skipped, not
+  // faked.
+  if (!participant_.clock_valid()) {
+    note("AUTOSURVEY_CLOCK_UNARMED", kInvalidNodeId);
+    return;
+  }
+  const NodeId peer = config_.participant.authority;
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId ||
+      peer == config_.participant.node) {
+    note("AUTOSURVEY_NO_PEER", kInvalidNodeId);
+    return;
+  }
+  SurveyRequest request{};
+  request.peer = peer;
+  request.channel = assessment.candidates[0];
+  request.begin_ms = now_ms;
+  request.duration_ms = migration_const::kSurveyVisitMaxMs;
+  request.mapping = participant_.clock_mapping();
+  request.exchanges_per_direction =
+      migration_const::kSurveyExchangeMaxPerDirection;
+  // The visit IS a bounded home-channel outage (single radio) — the lease
+  // records it as such; outage permission is inherent to the mode's opt-in.
+  request.outage_permitted = true;
+  request.cut_without_alternative = false;
+  std::array<NodeId, 24> peers{};
+  const std::size_t count = wire_.migration_peers(peers.data(), peers.size());
+  for (std::size_t i = 0; i < count &&
+                         request.absence_notify_count <
+                             request.absence_notify.size();
+       ++i) {
+    request.absence_notify[request.absence_notify_count++] = peers[i];
+  }
+  OperationToken token{kInvalidOperationToken};
+  const Status status = request_survey(request, now_ms, token);
+  // A refusal is not retried here — the next assessment proposal retries on
+  // its own cadence (the revisit gap bounds the rate regardless).
+  if (status) {
+    autosurvey_noted_ = false;
+    owner_.on_migration_event("AUTOSURVEY_ISSUED", peer);
+  } else {
+    // The refusal detail is the bounded reason string — gate verdicts like
+    // AUTOGUARDED_EVIDENCE_STALE or SURVEY_REVISIT_GAP reach the owner
+    // verbatim instead of a generic "refused".
+    note(status.detail, peer);
+  }
 }
 
 void MigrationAgent::materialize_serve(const NodeId dest,
@@ -1329,7 +1508,8 @@ Status MigrationAgent::request_survey(const SurveyRequest& request,
                                       OperationToken& out) noexcept {
   out = kInvalidOperationToken;
   if (coordinator_ == nullptr ||
-      coordinator_->mode() != MigrationMode::Manual) {
+      (coordinator_->mode() != MigrationMode::Manual &&
+       coordinator_->mode() != MigrationMode::AutoGuarded)) {
     return reject(StatusCode::InvalidState, "SURVEY_MANUAL_ONLY");
   }
   SurveyLease lease{};
@@ -1377,11 +1557,38 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
   participant_.poll(now_ms);
   if (coordinator_ != nullptr) {
     coordinator_->poll(now_ms);
-    if (coordinator_->mode() == MigrationMode::Manual &&
-        participant_.phase() == ParticipantPhase::Stable) {
-      const ChannelAssessment assessment = coordinator_->assess(now_ms);
-      if (assessment.verdict == AssessVerdict::SurveyProposed) {
-        (void)participant_.note_assess();  // §7 bookkeeping
+    const MigrationMode mode = coordinator_->mode();
+    // The judgment runs in every mode — Observe exists to produce it.
+    // Verdict changes surface as owner events, never per-poll spam.
+    const ChannelAssessment assessment = coordinator_->assess(now_ms);
+    if (assessment.verdict != last_assess_verdict_) {
+      last_assess_verdict_ = assessment.verdict;
+      autosurvey_noted_ = false;
+      owner_.on_migration_event(
+          assessment.verdict == AssessVerdict::SurveyProposed
+              ? "ASSESS_SURVEY_PROPOSED"
+              : assessment.verdict == AssessVerdict::InsufficientEvidence
+                    ? "ASSESS_INSUFFICIENT_EVIDENCE"
+                    : assessment.verdict == AssessVerdict::Disabled
+                          ? "ASSESS_DISABLED"
+                          : "ASSESS_STABLE",
+          kInvalidNodeId);
+    }
+    if (assessment.verdict == AssessVerdict::SurveyProposed) {
+      // §7 bookkeeping only where a survey may actually follow — Observe
+      // must never move the participant off Stable (Assess is sticky and
+      // would otherwise freeze the pure-observation state).
+      if (participant_.phase() == ParticipantPhase::Stable &&
+          mode != MigrationMode::Disabled &&
+          mode != MigrationMode::Observe) {
+        (void)participant_.note_assess();
+      }
+      // AutoGuarded acts on the proposal through the gated lease path —
+      // the coordinator re-checks the stored evidence snapshot, so a lost
+      // precondition refuses the visit with the explainable verdict.
+      if (mode == MigrationMode::AutoGuarded &&
+          participant_.phase() == ParticipantPhase::Assess) {
+        auto_survey(assessment, now_ms);
       }
     }
   }

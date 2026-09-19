@@ -235,7 +235,7 @@ extern "C" void app_main(void) {
   status = plan_store.open("rlplan");
   if (!status) fail(status.detail);
   std::uint8_t boot_channel = 0;
-  const bool have_boot_channel = plan_store.boot_channel(boot_channel);
+  const bool have_boot_channel = plan_store.boot_channel(boot_channel).ok();
 #endif
 
   std::uint32_t message_session = 0;

@@ -118,6 +118,27 @@ pub struct AuthorityInfo {
     pub detail: Option<String>,
 }
 
+/// Experimental autonomy view. Every field is `None` until the daemon has
+/// observed a real device diagnostic carrying it — the TUI renders nulls as
+/// unknown rather than inventing mesh state.
+#[derive(Clone, Debug, Default)]
+pub struct AutonomyInfo {
+    /// Coordinator mode from MIGRATION_MODE_* device events.
+    pub migration_mode: Option<String>,
+    /// Participant phase from PHASE_* events.
+    pub participant_phase: Option<String>,
+    /// Latest coordinator judgment from ASSESS_* events.
+    pub assess_verdict: Option<String>,
+    /// Latest gated-operation detail (AUTOGUARDED_*/AUTOSURVEY_*/SURVEY_*).
+    pub gate_detail: Option<String>,
+    pub last_discovery: Option<String>,
+    pub last_discovery_ms: Option<u64>,
+    pub last_migration: Option<String>,
+    pub last_migration_ms: Option<u64>,
+    pub discovery_events: u64,
+    pub migration_events: u64,
+}
+
 /// Bounded drop-oldest event ring. `local_dropped` counts events discarded
 /// here; `daemon_dropped` is the daemon's own overflow counter.
 #[derive(Clone, Debug)]
@@ -190,6 +211,7 @@ pub struct State {
     pub deliveries: Vec<DeliveryInfo>,
     pub events: EventLog,
     pub authority: AuthorityInfo,
+    pub autonomy: AutonomyInfo,
     pub last_refresh_ms: Option<u64>,
     /// Poll cycles that failed mid-way (daemon vanished between commands).
     pub poll_failures: u64,
@@ -254,7 +276,7 @@ impl State {
     }
 
     /// Apply one daemon response line. `command` is the verb that produced it
-    /// (STATUS, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY).
+    /// (STATUS, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, AUTONOMY).
     pub fn apply(&mut self, command: &str, line: &str) -> Result<(), JsonError> {
         let root = json::parse(line)?;
         match command {
@@ -264,6 +286,7 @@ impl State {
             "DELIVERIES" => self.apply_deliveries(&root),
             "EVENTS" => self.apply_events(&root),
             "AUTHORITY" => self.apply_authority(&root),
+            "AUTONOMY" => self.apply_autonomy(&root),
             _ => {}
         }
         Ok(())
@@ -396,6 +419,23 @@ impl State {
         self.authority.source = opt_str(root.get("source"));
         self.authority.network = opt_u64(root.get("network"));
         self.authority.detail = opt_str(root.get("detail"));
+    }
+
+    fn apply_autonomy(&mut self, root: &Json) {
+        self.autonomy.migration_mode = opt_str(root.get("migration_mode"));
+        self.autonomy.participant_phase = opt_str(root.get("participant_phase"));
+        self.autonomy.assess_verdict = opt_str(root.get("assess_verdict"));
+        self.autonomy.gate_detail = opt_str(root.get("gate_detail"));
+        if let Some(last) = root.get("last_discovery") {
+            self.autonomy.last_discovery = opt_str(last.get("reason"));
+            self.autonomy.last_discovery_ms = opt_u64(last.get("ms"));
+        }
+        if let Some(last) = root.get("last_migration") {
+            self.autonomy.last_migration = opt_str(last.get("reason"));
+            self.autonomy.last_migration_ms = opt_u64(last.get("ms"));
+        }
+        self.autonomy.discovery_events = opt_u64(root.get("discovery_events")).unwrap_or(0);
+        self.autonomy.migration_events = opt_u64(root.get("migration_events")).unwrap_or(0);
     }
 
     pub fn deliveries_by_state(&self, state: &str) -> usize {

@@ -16,6 +16,8 @@ const EVENTS: &str = "{\"events\":[{\"seq\":0,\"ms\":1990000,\"kind\":\"hello_ac
 
 const AUTHORITY: &str = "{\"state\":\"unknown\",\"source\":null,\"network\":9,\"detail\":\"no control-plane ledger is attached to this daemon\"}";
 
+const AUTONOMY: &str = "{\"migration_mode\":\"observe\",\"participant_phase\":\"stable\",\"assess_verdict\":\"stable\",\"gate_detail\":null,\"last_discovery\":{\"ms\":1998000,\"reason\":\"REACHABLE\"},\"last_migration\":{\"ms\":1999000,\"reason\":\"PHASE_STABLE\"},\"discovery_events\":4,\"migration_events\":2,\"experimental\":true}";
+
 const NOW: u64 = 2_000_000;
 const WIDTH: usize = 100;
 const HEIGHT: usize = 30;
@@ -30,6 +32,7 @@ fn loaded_state() -> State {
         ("DELIVERIES", DELIVERIES),
         ("EVENTS", EVENTS),
         ("AUTHORITY", AUTHORITY),
+        ("AUTONOMY", AUTONOMY),
     ] {
         state.apply(command, line).expect("fixture parses");
     }
@@ -63,7 +66,7 @@ events            : 3 buffered (daemon dropped=0, local dropped=0)
 authority         : unknown
 last refresh      : 500ms ago
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -81,7 +84,7 @@ node id              role     seen     membership   reachable    sleeping rssi  
 
 membership/reachability/rssi are not visible to the host daemon → unknown
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -99,7 +102,7 @@ destination          primary route            backup route             hops
 
 the USB adapter owns the routing table; the daemon does not decode it → unknown
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -119,7 +122,7 @@ peer                 rssi       peer slot  queue
 
 mesh link metrics are radio-local; not forwarded over USB → unknown
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -135,7 +138,7 @@ request    destination          state                  msg id         updated  r
 10         8                    queued                 unknown        100ms
 9          5                    delivered              5:900          5s
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -153,7 +156,7 @@ buffered=3 dropped: daemon=0 local=0
 1        5s       delivery_event     request=9 state=delivered msg_session=5 msg_seq=900
 0        10s      hello_ack          version=1 node=42 boot=7 network=9 capability=3
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -183,7 +186,7 @@ tx bytes          : 612
 protocol errors   : 1
 last error        : CREDIT_EXCEEDED
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
 }
 
@@ -203,8 +206,55 @@ detail            : no control-plane ledger is attached to this daemon
 the control-plane ledger is not attached to the host daemon;
 membership authority, config revision and quorum are unknown here.
 ------------------------------------------------------------------------------
-tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
     );
+}
+
+#[test]
+fn autonomy_snapshot() {
+    check(
+        Tab::Autonomy,
+        "\
+RouteLoom TUI  ·  daemon /tmp/routeloom.sock  ·  connected
+ 1  Overview    2  Nodes    3  Routes    4  Links    5  Deliveries    6  Events    7  Adapter/USB
+------------------------------------------------------------------------------
+EXPERIMENTAL lane — simulated/host events only; not RF validation,
+not production-qualified, no atomic-cutover or zero-outage claim.
+
+migration mode    : observe
+participant phase : stable
+assessment        : stable
+last gate detail  : unknown
+
+discovery events  : 4
+last discovery    : REACHABLE (2s ago)
+migration events  : 2
+last migration    : PHASE_STABLE (1s ago)
+
+fields stay unknown until the device emits a diagnostic for them;
+AutoGuarded remains opt-in — see Events for the raw event stream.
+------------------------------------------------------------------------------
+tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source",
+    );
+}
+
+/// Fields the device has not reported must render as unknown, never as a
+/// fabricated default (e.g. mode must not default to "disabled").
+#[test]
+fn autonomy_absent_fields_render_unknown() {
+    let mut state = State::new("/tmp/routeloom.sock");
+    state.conn = Conn::Connected;
+    state
+        .apply(
+            "AUTONOMY",
+            "{\"migration_mode\":null,\"participant_phase\":null,\"assess_verdict\":null,\"gate_detail\":null,\"last_discovery\":null,\"last_migration\":null,\"discovery_events\":0,\"migration_events\":0,\"experimental\":true}",
+        )
+        .expect("fixture parses");
+    let out = render(&state, Tab::Autonomy, WIDTH, HEIGHT, NOW);
+    assert!(out.contains("migration mode    : unknown"));
+    assert!(out.contains("participant phase : unknown"));
+    assert!(out.contains("assessment        : unknown"));
+    assert!(out.contains("last gate detail  : unknown"));
 }
 
 #[test]

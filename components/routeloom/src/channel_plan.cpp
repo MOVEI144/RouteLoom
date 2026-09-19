@@ -26,6 +26,152 @@ ChannelCoordinator::ChannelCoordinator(
     const ChannelCoordinatorConfig& config) noexcept
     : config_(config) {}
 
+// --- AutoGuarded gate (04 §1/§10, D5-01; P6) --------------------------------------
+
+const char* autoguarded_condition_name(
+    const AutoGuardedCondition condition) noexcept {
+  switch (condition) {
+    case AutoGuardedCondition::VerifiedAuthorityPath:
+      return "verified_authority_path";
+    case AutoGuardedCondition::RequiredSetObserved:
+      return "required_set_observed";
+    case AutoGuardedCondition::RequiredSetReady:
+      return "required_set_ready";
+    case AutoGuardedCondition::NoLegacyRequired:
+      return "no_legacy_required";
+    case AutoGuardedCondition::ClockBounded:
+      return "clock_bounded";
+    case AutoGuardedCondition::CooldownClear:
+      return "cooldown_clear";
+    case AutoGuardedCondition::RecoveryPlanPresent:
+      return "recovery_plan_present";
+    case AutoGuardedCondition::SurveyEvidenceFresh:
+      return "survey_evidence_fresh";
+  }
+  return "unknown";
+}
+
+AutoGuardedVerdict evaluate_autoguarded(
+    const AutoGuardedEvidence& evidence,
+    const std::uint32_t required_mask) noexcept {
+  AutoGuardedVerdict verdict{};
+  bool blocked = false;
+  const auto check =
+      [&](const AutoGuardedCondition condition, const bool holds,
+          const StatusCode reason, const char* detail) noexcept {
+        if (holds) {
+          verdict.satisfied_mask |= autoguarded_condition_bit(condition);
+          return;
+        }
+        // Only required conditions block; the first REQUIRED failure in
+        // evaluation order owns the refusal reason/detail.
+        if (!blocked &&
+            (required_mask & autoguarded_condition_bit(condition)) != 0) {
+          blocked = true;
+          verdict.first_unmet = condition;
+          verdict.reason = reason;
+          verdict.detail = detail;
+        }
+      };
+  check(AutoGuardedCondition::VerifiedAuthorityPath,
+        evidence.authority_configured && evidence.authority_available &&
+            evidence.verifier_ready && evidence.authority_path_verified,
+        StatusCode::NoRoute, "AUTOGUARDED_NO_VERIFIED_AUTHORITY_PATH");
+  check(AutoGuardedCondition::RequiredSetObserved,
+        evidence.required_unobserved == 0, StatusCode::WouldBlock,
+        "AUTOGUARDED_UNOBSERVED_ENDPOINTS");
+  check(AutoGuardedCondition::RequiredSetReady,
+        evidence.required_not_ready == 0, StatusCode::WouldBlock,
+        "AUTOGUARDED_REQUIRED_NOT_READY");
+  check(AutoGuardedCondition::NoLegacyRequired,
+        !evidence.required_legacy_present, StatusCode::LegacyParticipant,
+        "AUTOGUARDED_LEGACY_REQUIRED");
+  check(AutoGuardedCondition::ClockBounded,
+        evidence.clock_valid &&
+            evidence.clock_uncertainty_ms <= evidence.clock_uncertainty_max_ms,
+        StatusCode::ClockUncertain,
+        evidence.clock_valid ? "AUTOGUARDED_CLOCK_UNCERTAIN"
+                             : "AUTOGUARDED_CLOCK_UNARMED");
+  check(AutoGuardedCondition::CooldownClear, !evidence.cooldown_active,
+        StatusCode::Busy, "AUTOGUARDED_COOLDOWN_ACTIVE");
+  check(AutoGuardedCondition::RecoveryPlanPresent,
+        evidence.recovery_plan_present, StatusCode::PlanNotCommitted,
+        "AUTOGUARDED_NO_RECOVERY_PLAN");
+  check(AutoGuardedCondition::SurveyEvidenceFresh,
+        evidence.survey_evidence_fresh, StatusCode::Expired,
+        evidence.survey_evidence_known ? "AUTOGUARDED_SURVEY_STALE"
+                                       : "AUTOGUARDED_NO_SURVEY_EVIDENCE");
+  verdict.permitted = !blocked;
+  if (verdict.permitted) verdict.detail = "AUTOGUARDED_PRECONDITIONS_MET";
+  return verdict;
+}
+
+AutoGuardedVerdict ChannelCoordinator::evaluate_autoguarded(
+    AutoGuardedEvidence evidence, const MonotonicMs now_ms,
+    const std::uint32_t required_mask) const noexcept {
+  // Coordinator-owned truth is always recomputed: a caller cannot clear a
+  // required legacy participant or invent screening evidence.
+  evidence.required_legacy_present =
+      evidence.required_legacy_present || legacy_block_;
+  bool any_evidence = false;
+  bool fresh_evidence = false;
+  for (const auto& record : evidence_) {
+    if (!record.used) continue;
+    any_evidence = true;
+    // Screening evidence must be a PASS within the freshness bound on a
+    // channel that is still an approved candidate.
+    if (now_ms >= record.last_update_ms &&
+        now_ms - record.last_update_ms <=
+            config_.autoguarded_evidence_max_age_ms &&
+        candidate_permitted(record.channel) &&
+        screening_passed(record.channel)) {
+      fresh_evidence = true;
+    }
+  }
+  evidence.survey_evidence_known = any_evidence;
+  evidence.survey_evidence_fresh = fresh_evidence;
+  // Snapshot staleness (04 §10): evidence asserted too long ago — or stamped
+  // in the future — vouches for nothing; every caller-supplied condition is
+  // treated as unmet. Coordinator-owned conditions stay live-truthful.
+  const bool stale = evidence.asserted_at_ms > now_ms ||
+                     now_ms - evidence.asserted_at_ms >
+                         config_.autoguarded_evidence_max_age_ms;
+  if (stale) {
+    evidence.authority_configured = false;
+    evidence.authority_available = false;
+    evidence.verifier_ready = false;
+    evidence.authority_path_verified = false;
+    evidence.required_unobserved = evidence.required_count;
+    evidence.required_not_ready = evidence.required_count;
+    evidence.clock_valid = false;
+    evidence.clock_uncertainty_ms = evidence.clock_uncertainty_max_ms + 1;
+    evidence.cooldown_active = true;
+    evidence.recovery_plan_present = false;
+  }
+  AutoGuardedVerdict verdict =
+      routeloom::evaluate_autoguarded(evidence, required_mask);
+  if (stale) {
+    verdict.reason = StatusCode::Expired;
+    verdict.detail = "AUTOGUARDED_EVIDENCE_STALE";
+  }
+  return verdict;
+}
+
+AutoGuardedVerdict ChannelCoordinator::request_autoguarded(
+    const AutoGuardedEvidence& evidence, const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
+  AutoGuardedEvidence snapshot = evidence;
+  snapshot.asserted_at_ms = now_ms;
+  const AutoGuardedVerdict verdict =
+      evaluate_autoguarded(snapshot, now_ms);
+  if (verdict.permitted) {
+    // Opt-in only: the caller asked for AutoGuarded with a full pass.
+    mode_ = MigrationMode::AutoGuarded;
+    autoguarded_evidence_ = snapshot;
+  }
+  return verdict;
+}
+
 Status ChannelCoordinator::set_mode(const MigrationMode mode) noexcept {
   switch (mode) {
     case MigrationMode::Disabled:
@@ -33,10 +179,19 @@ Status ChannelCoordinator::set_mode(const MigrationMode mode) noexcept {
     case MigrationMode::Manual:
       mode_ = mode;
       return Status::success();
-    case MigrationMode::AutoGuarded:
-      // P6 stub gate (D5-01, 04 §10): automatic guarded migration is an
-      // opt-in feature after qualification, never enabled by this design.
-      return reject(StatusCode::Unsupported, "AUTOGUARDED_UNIMPLEMENTED");
+    case MigrationMode::AutoGuarded: {
+      // The gate decides — a bare set_mode carries no new evidence, so it
+      // evaluates the stored snapshot (empty before the first
+      // request_autoguarded). The verdict's first unmet condition becomes
+      // the refusal: explainable, never a blanket Unsupported (D5-01, §10).
+      const AutoGuardedVerdict verdict =
+          evaluate_autoguarded(autoguarded_evidence_, last_now_ms_);
+      if (!verdict.permitted) {
+        return reject(verdict.reason, verdict.detail);
+      }
+      mode_ = MigrationMode::AutoGuarded;
+      return Status::success();
+    }
   }
   return reject(StatusCode::InvalidArgument, "unknown migration mode");
 }
@@ -209,6 +364,7 @@ bool ChannelCoordinator::candidate_permitted(const std::uint8_t channel) const n
 // --- assess -------------------------------------------------------------------------
 
 ChannelAssessment ChannelCoordinator::assess(const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
   advance_windows(now_ms);
   ChannelAssessment out{};
   out.consecutive_bad_windows = consecutive_bad_;
@@ -333,8 +489,9 @@ bool ChannelCoordinator::lease_of(const std::uint32_t lease_id,
 Status ChannelCoordinator::request_survey_lease(const SurveyRequest& request,
                                                 const MonotonicMs now_ms,
                                                 SurveyLease& out) noexcept {
+  last_now_ms_ = now_ms;
   // Mode gate (04 §1/§3): Observe never moves the radio — a proposal is a
-  // judgment, not an executable lease. AutoGuarded never reaches here.
+  // judgment, not an executable lease.
   if (mode_ == MigrationMode::Disabled) {
     ++stats_.lease_rejects;
     return reject(StatusCode::InvalidState, "MIGRATION_DISABLED");
@@ -342,6 +499,19 @@ Status ChannelCoordinator::request_survey_lease(const SurveyRequest& request,
   if (mode_ == MigrationMode::Observe) {
     ++stats_.lease_rejects;
     return reject(StatusCode::Unsupported, "OBSERVE_MODE_NO_RADIO_CHANGE");
+  }
+  if (mode_ == MigrationMode::AutoGuarded) {
+    // Live re-gate (04 §10): the stored evidence snapshot is re-evaluated at
+    // operation time — a precondition lost after enablement refuses the
+    // operation with the same explainable verdict; it is never skipped.
+    // SurveyEvidenceFresh is exempt here: the visit IS the refresh.
+    const AutoGuardedVerdict gate =
+        evaluate_autoguarded(autoguarded_evidence_, now_ms,
+                             kAutoguardedSurveyGateMask);
+    if (!gate.permitted) {
+      ++stats_.lease_rejects;
+      return reject(gate.reason, gate.detail);
+    }
   }
   if (legacy_block_) {
     // A required participant without migration capability blocks the survey
@@ -672,6 +842,7 @@ void ChannelCoordinator::expire_absences(const MonotonicMs now_ms) noexcept {
 }
 
 void ChannelCoordinator::poll(const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
   advance_windows(now_ms);
   expire_leases(now_ms);
   expire_absences(now_ms);

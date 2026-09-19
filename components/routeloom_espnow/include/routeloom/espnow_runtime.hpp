@@ -109,6 +109,12 @@ class EspNowRuntime final : public RadioPort,
   DeliveryResult delivery(const MessageId& id) const noexcept { return node_.delivery(id); }
   MeshNode& node() noexcept { return node_; }
 
+  // Autonomy-side diagnostic tap: discovery/migration engines surface
+  // bounded reason strings through the SAME NodeObserver the mesh uses, so
+  // they ride the existing device→host diagnostic frames (USB bridge).
+  // Rate-limited downstream — event producers stay infrequent.
+  void note_diagnostic(const char* reason, NodeId peer) noexcept;
+
   Status send(NodeId peer, std::uint64_t token, ByteView frame) noexcept override;
   Status recover() noexcept override;
 

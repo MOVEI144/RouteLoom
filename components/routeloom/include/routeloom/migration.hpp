@@ -283,6 +283,10 @@ class MigrationAuthority {
   // already-committed plans and signed recovery material keep executing.
   void set_available(bool available) noexcept { available_ = available; }
   bool available() const noexcept { return available_; }
+  // True only when the installed verifier is a real ready implementation —
+  // the AutoGuarded gate's "verified authority path" needs actual signature
+  // verification, not just an object that exists.
+  bool verifier_ready() const noexcept { return verifier_.ready(); }
 
   // Terminal outcome feed: latches the inter-plan cooldown and grants the
   // failed plan its single automatic-rollback credit (04 §10).
@@ -509,6 +513,22 @@ class MigrationParticipant {
   ChannelEpoch active_epoch() const noexcept { return active_epoch_; }
   std::uint8_t active_channel() const noexcept { return active_channel_; }
   bool clock_valid() const noexcept { return clock_valid_; }
+  // The armed mapping's uncertainty. An unarmed clock reports ABOVE the
+  // configured bound, never zero — unknown time is not "zero error"
+  // (unknown_time_is_zero=false), so the AutoGuarded clock gate fails on it.
+  std::uint32_t clock_uncertainty_ms() const noexcept {
+    return clock_valid_ ? clock_mapping_.uncertainty_ms
+                        : config_.clock_uncertainty_max_ms + 1;
+  }
+  // The plan-terminal cooldown latch (04 §10) this participant holds.
+  bool cooldown_active(MonotonicMs now_ms) const noexcept {
+    return now_ms < cooldown_until_ms_;
+  }
+  // The armed authority mapping — meaningful only while clock_valid().
+  // Used to form a survey lease with the authority as the survey peer.
+  const ClockMapping& clock_mapping() const noexcept {
+    return clock_mapping_;
+  }
   // True while a plan is between PREPARING and VERIFYING: concurrent key
   // rotation, firmware update and authority identity change are excluded
   // (04 §6/D5-05). Advisory — the Owner enforces the exclusion.

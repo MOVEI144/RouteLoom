@@ -1,10 +1,11 @@
 // P4 channel Observe + bounded-survey tests (docs/design/autonomous-mesh/
-// 04-channel-migration.md §2-§4, contracts.json migration.*). Covers the
+// 04-channel-migration.md §2-§4, contracts.json migration.*) plus the P6
+// explainable AutoGuarded precondition gate (§1/§10, D5-01). Covers the
 // observe->survey judgment, candidate intersection, SurveyLease bounds, the
 // serialized channel-operation runner against a scripted ChannelPort, the
 // single-radio visit model and the PauseMask. Scenario ids from
 // scenarios.json are noted where they map (D5-08/D5-09/D5-10, X-02).
-// Plan/commit/cutover/recovery (P5) and AutoGuarded (P6) are out of scope.
+// Plan/commit/cutover/recovery (P5) is out of scope here.
 
 #include <array>
 #include <cstdint>
@@ -151,8 +152,12 @@ void test_unauthenticated_ignored() {
 
 void test_mode_gates() {
   ChannelCoordinator c(coord_config());
-  // AutoGuarded is a P6 stub gate: it must refuse, never silently enable.
-  CHECK(c.set_mode(MigrationMode::AutoGuarded).code == StatusCode::Unsupported);
+  // AutoGuarded goes through the explainable gate: a bare request carries
+  // no evidence, so the refusal names the first unmet precondition —
+  // the verified authority path — never a blanket Unsupported.
+  const Status blocked = c.set_mode(MigrationMode::AutoGuarded);
+  CHECK(!blocked.ok());
+  CHECK(blocked.code == StatusCode::NoRoute);
   CHECK(c.mode() == MigrationMode::Observe);
   // Disabled produces no judgment at all.
   CHECK_OK(c.set_mode(MigrationMode::Disabled));
@@ -338,6 +343,214 @@ void test_sample_accounting() {
   CHECK(ev.visits == 5);
   CHECK(c.screening_passed(6));
   CHECK(!c.screening_passed(11));
+}
+
+// --- AutoGuarded gate (04 §1/§10, D5-01; P6) ----------------------------------------
+
+AutoGuardedEvidence full_evidence(const MonotonicMs at) {
+  AutoGuardedEvidence e{};
+  e.asserted_at_ms = at;
+  e.authority_configured = true;
+  e.authority_available = true;
+  e.verifier_ready = true;
+  e.authority_path_verified = true;
+  e.required_count = 2;
+  e.clock_valid = true;
+  e.clock_uncertainty_ms = 10;
+  e.clock_uncertainty_max_ms = migration_const::kClockUncertaintyMaxMs;
+  e.recovery_plan_present = true;
+  e.survey_evidence_known = true;
+  e.survey_evidence_fresh = true;
+  return e;
+}
+
+void test_autoguarded_gate_evaluator() {
+  // A full pass is explicit: every condition satisfied, nothing inferred.
+  AutoGuardedVerdict v = evaluate_autoguarded(full_evidence(kW0));
+  CHECK(v.permitted);
+  CHECK(v.satisfied_mask == kAutoGuardedAllMask);
+  CHECK(v.unmet_mask() == 0);
+
+  // Empty evidence: nothing asserts itself; every condition is unmet and
+  // the refusal is explainable — first in evaluation order, stable detail.
+  const AutoGuardedVerdict none =
+      evaluate_autoguarded(AutoGuardedEvidence{});
+  CHECK(!none.permitted);
+  CHECK(none.first_unmet == AutoGuardedCondition::VerifiedAuthorityPath);
+  CHECK(none.reason == StatusCode::NoRoute);
+  // An empty required set and no latched cooldown genuinely satisfy those
+  // conditions — the gate still blocks on authority path, clock, recovery
+  // plan and survey evidence.
+  CHECK(none.unmet_mask() ==
+        (autoguarded_condition_bit(AutoGuardedCondition::VerifiedAuthorityPath) |
+         autoguarded_condition_bit(AutoGuardedCondition::ClockBounded) |
+         autoguarded_condition_bit(AutoGuardedCondition::RecoveryPlanPresent) |
+         autoguarded_condition_bit(
+             AutoGuardedCondition::SurveyEvidenceFresh)));
+
+  AutoGuardedEvidence e{};
+  e = full_evidence(kW0);
+  e.authority_available = false;
+  v = evaluate_autoguarded(e);
+  CHECK(!v.permitted);
+  CHECK(v.first_unmet == AutoGuardedCondition::VerifiedAuthorityPath);
+  CHECK(v.reason == StatusCode::NoRoute);
+
+  e = full_evidence(kW0);
+  e.required_unobserved = 1;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::RequiredSetObserved);
+  CHECK(v.reason == StatusCode::WouldBlock);
+
+  e = full_evidence(kW0);
+  e.required_not_ready = 1;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::RequiredSetReady);
+  CHECK(v.reason == StatusCode::WouldBlock);
+
+  e = full_evidence(kW0);
+  e.required_legacy_present = true;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::NoLegacyRequired);
+  CHECK(v.reason == StatusCode::LegacyParticipant);
+
+  // Unknown time is never zero-uncertainty: an unarmed clock fails the
+  // bound check, and an armed-but-wide clock fails it too.
+  e = full_evidence(kW0);
+  e.clock_valid = false;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::ClockBounded);
+  CHECK(v.reason == StatusCode::ClockUncertain);
+  e = full_evidence(kW0);
+  e.clock_uncertainty_ms = e.clock_uncertainty_max_ms + 1;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::ClockBounded);
+  CHECK(v.reason == StatusCode::ClockUncertain);
+
+  e = full_evidence(kW0);
+  e.cooldown_active = true;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::CooldownClear);
+  CHECK(v.reason == StatusCode::Busy);
+
+  e = full_evidence(kW0);
+  e.recovery_plan_present = false;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::RecoveryPlanPresent);
+  CHECK(v.reason == StatusCode::PlanNotCommitted);
+
+  e = full_evidence(kW0);
+  e.survey_evidence_known = false;
+  e.survey_evidence_fresh = false;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::SurveyEvidenceFresh);
+  CHECK(v.reason == StatusCode::Expired);
+
+  // All unmet conditions are reported, not just the first.
+  e = full_evidence(kW0);
+  e.clock_valid = false;
+  e.cooldown_active = true;
+  v = evaluate_autoguarded(e);
+  CHECK(v.first_unmet == AutoGuardedCondition::ClockBounded);
+  CHECK(!v.satisfied(AutoGuardedCondition::ClockBounded));
+  CHECK(!v.satisfied(AutoGuardedCondition::CooldownClear));
+  CHECK(v.satisfied(AutoGuardedCondition::VerifiedAuthorityPath));
+  CHECK(v.satisfied(AutoGuardedCondition::SurveyEvidenceFresh));
+
+  // The survey-refresh mask exempts only survey freshness — reported but
+  // not gating — while every other condition still blocks.
+  e = full_evidence(kW0);
+  e.survey_evidence_fresh = false;
+  v = evaluate_autoguarded(e, kAutoguardedSurveyGateMask);
+  CHECK(v.permitted);
+  CHECK(!v.satisfied(AutoGuardedCondition::SurveyEvidenceFresh));
+  e.cooldown_active = true;
+  v = evaluate_autoguarded(e, kAutoguardedSurveyGateMask);
+  CHECK(!v.permitted);
+  CHECK(v.first_unmet == AutoGuardedCondition::CooldownClear);
+}
+
+// Feed the five bounded visits that accumulate passing 19/20 screening on
+// `channel`; returns the timestamp of the last recorded sample.
+MonotonicMs survey_pass_five(ChannelCoordinator& c, const MonotonicMs begin0,
+                             const std::uint8_t channel) {
+  MonotonicMs begin = begin0;
+  MonotonicMs last = begin0;
+  for (int visit = 0; visit < 5; ++visit) {
+    SurveyLease lease{};
+    CHECK_OK(c.request_survey_lease(survey_req(2, channel, begin),
+                                    begin - 100, lease));
+    for (int i = 0; i < 4; ++i) {
+      const bool success = !(visit == 0 && i == 0);  // exactly one failure
+      CHECK_OK(c.note_survey_sample(lease.lease_id,
+                                    SurveyDirection::InitiatorToPeer, success,
+                                    begin + 10));
+      CHECK_OK(c.note_survey_sample(lease.lease_id,
+                                    SurveyDirection::PeerToInitiator, success,
+                                    begin + 10));
+    }
+    CHECK_OK(c.complete_survey(lease.lease_id, begin + 200));
+    last = begin + 10;
+    begin += 31000;
+  }
+  return last;
+}
+
+void test_autoguarded_gate_coordinator() {
+  // No screening records: the coordinator recomputes its own condition —
+  // a caller-asserted "fresh" never substitutes for real survey evidence.
+  ChannelCoordinator c(coord_config());
+  AutoGuardedVerdict v = c.request_autoguarded(full_evidence(kW0), kW0);
+  CHECK(!v.permitted);
+  CHECK(v.first_unmet == AutoGuardedCondition::SurveyEvidenceFresh);
+  CHECK(v.reason == StatusCode::Expired);
+  CHECK(c.mode() == MigrationMode::Observe);  // failure changes nothing
+
+  // A required legacy participant blocks via coordinator-owned truth even
+  // when the caller does not claim one (D5-09).
+  ChannelCoordinator c2(coord_config());
+  ParticipantCapability legacy{};
+  legacy.node = 4;
+  legacy.migration_capable = false;
+  legacy.required = true;
+  legacy.channel_mask = migration_const::kChannelMaskAll24;
+  CHECK_OK(c2.note_participant(legacy));
+  v = c2.request_autoguarded(full_evidence(kW0), kW0);
+  CHECK(!v.permitted);
+  CHECK(v.first_unmet == AutoGuardedCondition::NoLegacyRequired);
+  CHECK(v.reason == StatusCode::LegacyParticipant);
+
+  // A future-stamped snapshot is as stale as an aged one.
+  v = c2.evaluate_autoguarded(full_evidence(kW0 + 1000), kW0);
+  CHECK(!v.permitted);
+  CHECK(v.reason == StatusCode::Expired);
+
+  // Real passing screening, then an explicit opt-in request: the full
+  // pass latches the mode and stores the evidence snapshot.
+  CHECK_OK(c.set_mode(MigrationMode::Manual));
+  const MonotonicMs last_sample = survey_pass_five(c, kW0 + 100, 6);
+  const MonotonicMs gate_now = last_sample + 1000;
+  v = c.request_autoguarded(full_evidence(gate_now), gate_now);
+  CHECK(v.permitted);
+  CHECK(v.satisfied_mask == kAutoGuardedAllMask);
+  CHECK(c.mode() == MigrationMode::AutoGuarded);
+
+  // In AutoGuarded a bounded visit issues — the live re-gate (survey
+  // freshness exempt, everything else enforced) passes on fresh evidence.
+  SurveyLease lease{};
+  const MonotonicMs op_now = gate_now + 60000;
+  CHECK_OK(c.request_survey_lease(survey_req(2, 6, op_now + 100), op_now,
+                                  lease));
+
+  // Past the evidence bound the stored snapshot vouches for nothing: the
+  // automatic operation refuses with the explainable Expired verdict while
+  // the mode itself is unchanged — refusal, never silent execution.
+  const MonotonicMs stale_now =
+      gate_now + kAutoguardedEvidenceMaxAgeMs + 1;
+  CHECK(c.request_survey_lease(survey_req(2, 6, stale_now + 100), stale_now,
+                               lease)
+            .code == StatusCode::Expired);
+  CHECK(c.mode() == MigrationMode::AutoGuarded);
 }
 
 // --- candidate adoption (04 §4, D5-08) ----------------------------------------------
@@ -752,6 +965,8 @@ int main() {
   test_revisit_gap();
   test_scheduled_absence();
   test_sample_accounting();
+  test_autoguarded_gate_evaluator();
+  test_autoguarded_gate_coordinator();
   test_candidate_adoption();
   test_all_candidates_bad_suppression();
   test_single_radio_visit_model();

@@ -12,13 +12,14 @@ use std::time::Duration;
 
 /// Commands polled every refresh, in order. Same verbs routeloomctl uses
 /// plus the observation surface added for the TUI.
-pub const POLL_COMMANDS: [&str; 6] = [
+pub const POLL_COMMANDS: [&str; 7] = [
     "STATUS",
     "ADAPTER",
     "NODES",
     "DELIVERIES",
     "EVENTS",
     "AUTHORITY",
+    "AUTONOMY",
 ];
 
 const BACKOFF_MIN_MS: u64 = 250;

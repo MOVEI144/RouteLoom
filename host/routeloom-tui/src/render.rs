@@ -16,9 +16,10 @@ pub enum Tab {
     Events,
     Adapter,
     Authority,
+    Autonomy,
 }
 
-pub const TABS: [Tab; 8] = [
+pub const TABS: [Tab; 9] = [
     Tab::Overview,
     Tab::Nodes,
     Tab::Routes,
@@ -27,6 +28,7 @@ pub const TABS: [Tab; 8] = [
     Tab::Events,
     Tab::Adapter,
     Tab::Authority,
+    Tab::Autonomy,
 ];
 
 impl Tab {
@@ -40,6 +42,7 @@ impl Tab {
             Tab::Events => "Events",
             Tab::Adapter => "Adapter/USB",
             Tab::Authority => "Authority",
+            Tab::Autonomy => "Autonomy",
         }
     }
 
@@ -173,12 +176,13 @@ pub fn render(state: &State, tab: Tab, width: usize, height: usize, now_ms: u64)
         Tab::Events => events(state, now_ms),
         Tab::Adapter => adapter(state),
         Tab::Authority => authority(state),
+        Tab::Autonomy => autonomy(state, now_ms),
     };
     lines.extend(body);
 
     lines.push("-".repeat(width.min(78)));
     lines.push(
-        "tab/arrows/1-8 switch · q quit · values: observed plain, ~estimated, unknown = no source"
+        "tab/arrows/1-9 switch · q quit · values: observed plain, ~estimated, unknown = no source"
             .to_string(),
     );
 
@@ -438,5 +442,38 @@ fn authority(state: &State) -> Vec<String> {
         String::new(),
         "the control-plane ledger is not attached to the host daemon;".to_string(),
         "membership authority, config revision and quorum are unknown here.".to_string(),
+    ]
+}
+
+fn autonomy(state: &State, now_ms: u64) -> Vec<String> {
+    let a = &state.autonomy;
+    let last = |ms: Option<u64>, reason: &Option<String>| -> String {
+        match (ms, reason) {
+            (Some(ms), Some(reason)) => format!("{} ({} ago)", reason, age(now_ms, ms)),
+            _ => "unknown".into(),
+        }
+    };
+    vec![
+        "EXPERIMENTAL lane — simulated/host events only; not RF validation,".to_string(),
+        "not production-qualified, no atomic-cutover or zero-outage claim.".to_string(),
+        String::new(),
+        format!("migration mode    : {}", opt(&a.migration_mode)),
+        format!("participant phase : {}", opt(&a.participant_phase)),
+        format!("assessment        : {}", opt(&a.assess_verdict)),
+        format!("last gate detail  : {}", opt(&a.gate_detail)),
+        String::new(),
+        format!("discovery events  : {}", a.discovery_events),
+        format!(
+            "last discovery    : {}",
+            last(a.last_discovery_ms, &a.last_discovery)
+        ),
+        format!("migration events  : {}", a.migration_events),
+        format!(
+            "last migration    : {}",
+            last(a.last_migration_ms, &a.last_migration)
+        ),
+        String::new(),
+        "fields stay unknown until the device emits a diagnostic for them;".to_string(),
+        "AutoGuarded remains opt-in — see Events for the raw event stream.".to_string(),
     ]
 }

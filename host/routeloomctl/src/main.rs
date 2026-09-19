@@ -7,7 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 fn usage() {
-    eprintln!("routeloomctl [--socket PATH] status|diagnostics|send <node> <hex>");
+    eprintln!("routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let command = match remaining.as_slice() {
         [name] if name == "status" => "STATUS".to_string(),
         [name] if name == "diagnostics" => "DIAGNOSTICS".to_string(),
+        [name] if name == "autonomy" => "AUTONOMY".to_string(),
         [name, node, payload] if name == "send" => format!("SEND {node} {payload}"),
         _ => {
             usage();
