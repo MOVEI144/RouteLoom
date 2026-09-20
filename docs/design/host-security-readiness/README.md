@@ -14,6 +14,7 @@
 | [06 実機試験計画](06-hil-plan.md) | #11：機器行列、配置、負荷、失敗注入、合否と証跡 |
 | [07 APPLIED](07-applied-delivery.md) | #12：SDK受領とアプリ結果、非同期API、再送・結果不明 |
 | [08 実装・移行・残ゲート](08-implementation.md) | 作業単位、順序、互換性、完了条件 |
+| [レビュー補足](review-addendum/README.md) | 期限境界、Authority/Host鍵の復旧、休眠profile、台帳モデル、追加vector |
 | [根拠・判断記録](sources.md) | 固定SHA、一次資料、採用案と見送った案 |
 | [機械可読な契約](contracts.json) / [試験台帳](scenarios.json) | 数値・成熟度・Issue対応。runtime設定ではない |
 
@@ -42,3 +43,7 @@ PR #2のSTATUSには、C3二台の実無線・受領確認、6連続送信、USB
 本書中のAPI、profile、数値、バイト形式はレビュー対象の採用案であり、実装済み機能の広告ではない。既存のWire型番号、enum、正常RELIABLE/BEST_EFFORTの意味を変更しない。新しい操作は能力交渉が成功した組合せだけで使用し、未対応ならUnsupported。
 
 runtimeのfeature-profiles、qualified、hardware_testedは更新しない。試験台帳の新規ケースはすべてplanned_not_run。設計checkerは文書・数値・fixtureの整合性検査であって、C++/Rust相互運用・暗号監査・HILではない。Issueも設計だけではcloseしない。
+
+## 2026-09-20 レビュー補足
+
+`review-addendum/`に汎用SDK向けの補足設計とdeadline算術の参照例を追加した。上記10本文書は維持し、補足1本を入口から参照する。既存62件のruntime/HIL受入ケースはplanned_not_runのまま。追加したPython算術モデルの検査と、後続の台帳モデル・C++/Rust共通vector・本番認証・実機試験を区別する。
