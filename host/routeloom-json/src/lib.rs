@@ -1,0 +1,474 @@
+//! Minimal JSON parser (std-only), shared by the host workspace. The daemon
+//! emits hand-rolled JSON; clients parse exactly what `routeloomctl` prints —
+//! there is no second protocol. Numbers keep their raw token so u64
+//! request/node IDs do not lose precision through `f64`.
+//!
+//! Strictness (applied to every parse, daemon input included):
+//! - RFC 8259 number grammar only — bare `NaN`/`Infinity` tokens never parse.
+//! - Duplicate object keys are rejected: silently keeping the first or last
+//!   value would let two readers disagree about the same document.
+//! - Nesting depth is bounded by the caller (`parse` uses 32, generous for
+//!   flat daemon shapes; the API1 IPC path passes the IPC contract's 8).
+
+use std::fmt;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(Vec<(String, Json)>),
+}
+
+impl Json {
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        match self {
+            Json::Object(entries) => entries
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
+    }
+
+    /// Iterate object entries (empty for non-objects).
+    pub fn object_entries(&self) -> &[(String, Json)] {
+        match self {
+            Json::Object(entries) => entries,
+            _ => &[],
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Json::Number(raw) => raw.parse().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Number(raw) => raw.parse().ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Json::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Json::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&[Json]> {
+        match self {
+            Json::Array(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Json::Null)
+    }
+}
+
+/// Escapes a string for a JSON string context: quotes, backslashes and every
+/// C0 control character (which would otherwise produce invalid JSON — e.g. a
+/// raw newline in a device-supplied reason string).
+pub fn escape_string(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < ' ' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonError {
+    pub offset: usize,
+    pub message: String,
+}
+
+impl fmt::Display for JsonError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "JSON error at byte {}: {}",
+            self.offset, self.message
+        )
+    }
+}
+
+impl std::error::Error for JsonError {}
+
+/// Daemon JSON is flat (objects of scalars/arrays); 32 levels is generous.
+/// Without a bound, `[[[[...` input recurses to stack depth = input length.
+const DEFAULT_MAX_DEPTH: usize = 32;
+
+pub fn parse(input: &str) -> Result<Json, JsonError> {
+    parse_bounded(input, DEFAULT_MAX_DEPTH)
+}
+
+/// Parse with a caller-chosen nesting bound (API1 uses the IPC contract's 8).
+pub fn parse_bounded(input: &str, max_depth: usize) -> Result<Json, JsonError> {
+    let mut parser = Parser {
+        bytes: input.as_bytes(),
+        pos: 0,
+        depth: 0,
+        max_depth,
+    };
+    parser.skip_ws();
+    let value = parser.value()?;
+    parser.skip_ws();
+    if parser.pos != parser.bytes.len() {
+        return Err(parser.error("trailing characters"));
+    }
+    Ok(value)
+}
+
+struct Parser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    depth: usize,
+    max_depth: usize,
+}
+
+impl Parser<'_> {
+    fn error(&self, message: &str) -> JsonError {
+        JsonError {
+            offset: self.pos,
+            message: message.to_string(),
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+
+    fn expect(&mut self, byte: u8) -> Result<(), JsonError> {
+        if self.peek() == Some(byte) {
+            self.pos += 1;
+            Ok(())
+        } else {
+            Err(self.error(&format!("expected '{}'", byte as char)))
+        }
+    }
+
+    fn literal(&mut self, text: &str, value: Json) -> Result<Json, JsonError> {
+        if self.bytes[self.pos..].starts_with(text.as_bytes()) {
+            self.pos += text.len();
+            Ok(value)
+        } else {
+            Err(self.error("invalid literal"))
+        }
+    }
+
+    fn value(&mut self) -> Result<Json, JsonError> {
+        self.skip_ws();
+        if matches!(self.peek(), Some(b'[' | b'{')) {
+            self.depth += 1;
+            if self.depth > self.max_depth {
+                self.depth -= 1;
+                return Err(self.error("nesting too deep"));
+            }
+            let result = match self.peek() {
+                Some(b'[') => self.array(),
+                _ => self.object(),
+            };
+            self.depth -= 1;
+            return result;
+        }
+        match self.peek() {
+            Some(b'n') => self.literal("null", Json::Null),
+            Some(b't') => self.literal("true", Json::Bool(true)),
+            Some(b'f') => self.literal("false", Json::Bool(false)),
+            Some(b'"') => Ok(Json::String(self.string()?)),
+            Some(b'-' | b'0'..=b'9') => self.number(),
+            Some(_) => Err(self.error("unexpected character")),
+            None => Err(self.error("unexpected end of input")),
+        }
+    }
+
+    fn digits(&mut self) -> Result<(), JsonError> {
+        let start = self.pos;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return Err(self.error("invalid number"));
+        }
+        Ok(())
+    }
+
+    fn number(&mut self) -> Result<Json, JsonError> {
+        // Strict RFC 8259 grammar: -?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?
+        // A loose scan would accept ".5", "5." and "01", which are not JSON
+        // numbers even though f64::parse tolerates them. `NaN`/`Infinity`
+        // can never appear: they do not match the grammar or any literal.
+        let start = self.pos;
+        if self.peek() == Some(b'-') {
+            self.pos += 1;
+        }
+        match self.peek() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                self.pos += 1;
+                while matches!(self.peek(), Some(b'0'..=b'9')) {
+                    self.pos += 1;
+                }
+            }
+            _ => return Err(self.error("invalid number")),
+        }
+        if self.peek() == Some(b'.') {
+            self.pos += 1;
+            self.digits()?;
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            self.digits()?;
+        }
+        let raw = std::str::from_utf8(&self.bytes[start..self.pos])
+            .map_err(|_| self.error("invalid number"))?;
+        Ok(Json::Number(raw.to_string()))
+    }
+
+    fn string(&mut self) -> Result<String, JsonError> {
+        self.expect(b'"')?;
+        let mut out = String::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.error("unterminated string")),
+                Some(b'"') => {
+                    self.pos += 1;
+                    return Ok(out);
+                }
+                Some(b'\\') => {
+                    self.pos += 1;
+                    out.push(self.escape()?);
+                }
+                Some(byte) => {
+                    // Input is valid UTF-8 (it arrived as &str); copy the full
+                    // multi-byte sequence verbatim.
+                    let len = utf8_len(byte);
+                    let end = self.pos + len;
+                    if end > self.bytes.len() {
+                        return Err(self.error("truncated UTF-8"));
+                    }
+                    out.push_str(
+                        std::str::from_utf8(&self.bytes[self.pos..end])
+                            .map_err(|_| self.error("invalid UTF-8"))?,
+                    );
+                    self.pos = end;
+                }
+            }
+        }
+    }
+
+    fn escape(&mut self) -> Result<char, JsonError> {
+        let byte = self.peek().ok_or_else(|| self.error("dangling escape"))?;
+        self.pos += 1;
+        Ok(match byte {
+            b'"' => '"',
+            b'\\' => '\\',
+            b'/' => '/',
+            b'b' => '\u{0008}',
+            b'f' => '\u{000c}',
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            b'u' => {
+                let first = self.hex4()?;
+                if (0xd800..0xdc00).contains(&first) {
+                    // Surrogate pair: expect \uXXXX low surrogate.
+                    if self.peek() == Some(b'\\') {
+                        self.pos += 1;
+                        self.expect(b'u')?;
+                        let second = self.hex4()?;
+                        if !(0xdc00..0xe000).contains(&second) {
+                            return Err(self.error("invalid low surrogate"));
+                        }
+                        let scalar = 0x1_0000 + ((first - 0xd800) << 10) + (second - 0xdc00);
+                        char::from_u32(scalar).ok_or_else(|| self.error("invalid surrogate"))?
+                    } else {
+                        return Err(self.error("lone high surrogate"));
+                    }
+                } else {
+                    char::from_u32(first).ok_or_else(|| self.error("invalid \\u scalar"))?
+                }
+            }
+            _ => return Err(self.error("invalid escape")),
+        })
+    }
+
+    fn hex4(&mut self) -> Result<u32, JsonError> {
+        let mut value = 0_u32;
+        for _ in 0..4 {
+            let byte = self.peek().ok_or_else(|| self.error("short \\u escape"))?;
+            let digit = (byte as char)
+                .to_digit(16)
+                .ok_or_else(|| self.error("invalid \\u escape"))?;
+            value = value * 16 + digit;
+            self.pos += 1;
+        }
+        Ok(value)
+    }
+
+    fn array(&mut self) -> Result<Json, JsonError> {
+        self.expect(b'[')?;
+        let mut items = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            return Ok(Json::Array(items));
+        }
+        loop {
+            items.push(self.value()?);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(Json::Array(items));
+                }
+                _ => return Err(self.error("expected ',' or ']'")),
+            }
+        }
+    }
+
+    fn object(&mut self) -> Result<Json, JsonError> {
+        self.expect(b'{')?;
+        let mut entries: Vec<(String, Json)> = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(b'}') {
+            self.pos += 1;
+            return Ok(Json::Object(entries));
+        }
+        loop {
+            self.skip_ws();
+            let key = self.string()?;
+            // Duplicate keys are rejected outright: two consumers picking a
+            // different occurrence would read different documents.
+            if entries.iter().any(|(name, _)| *name == key) {
+                return Err(self.error("duplicate object key"));
+            }
+            self.skip_ws();
+            self.expect(b':')?;
+            let value = self.value()?;
+            entries.push((key, value));
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(Json::Object(entries));
+                }
+                _ => return Err(self.error("expected ',' or '}'")),
+            }
+        }
+    }
+}
+
+fn utf8_len(first: u8) -> usize {
+    if first < 0x80 {
+        1
+    } else if first < 0xe0 {
+        2
+    } else if first < 0xf0 {
+        3
+    } else {
+        4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_daemon_shapes() {
+        let value =
+            parse(r#"{"connected":true,"device":null,"rx_frames":12,"last_error":"x\"y\\z"}"#)
+                .unwrap();
+        assert_eq!(value.get("connected").unwrap().as_bool(), Some(true));
+        assert!(value.get("device").unwrap().is_null());
+        assert_eq!(value.get("rx_frames").unwrap().as_u64(), Some(12));
+        assert_eq!(value.get("last_error").unwrap().as_str(), Some("x\"y\\z"));
+    }
+
+    #[test]
+    fn big_numbers_keep_precision() {
+        let value = parse("{\"id\":18446744073709551615}").unwrap();
+        assert_eq!(
+            value.get("id").unwrap().as_u64(),
+            Some(18_446_744_073_709_551_615)
+        );
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse("{").is_err());
+        assert!(parse("{\"a\":}").is_err());
+        assert!(parse("[1,]").is_err());
+        assert!(parse("-").is_err());
+        assert!(parse("{\"a\":1} extra").is_err());
+        assert!(parse("NaN").is_err());
+        assert!(parse("{\"x\":NaN}").is_err());
+        assert!(parse("Infinity").is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_object_keys() {
+        assert!(parse(r#"{"a":1,"a":2}"#).is_err());
+        assert!(parse(r#"{"a":{"b":1,"b":2}}"#).is_err());
+        assert!(parse(r#"{"a":1,"b":2}"#).is_ok());
+    }
+
+    #[test]
+    fn bounded_depth_is_enforced() {
+        let shallow = "{\"a\":{\"b\":{\"c\":1}}}";
+        assert!(parse_bounded(shallow, 3).is_ok());
+        assert!(parse_bounded(shallow, 2).is_err());
+        // IPC v1's bound is 8: nine nested arrays must fail.
+        let deep = "[[[[[[[[[1]]]]]]]]]";
+        assert!(parse_bounded(deep, 8).is_err());
+        assert!(parse_bounded("[[[[[[[[1]]]]]]]]", 8).is_ok());
+    }
+
+    #[test]
+    fn unicode_escapes() {
+        let value = parse(r#""aéb""#).unwrap();
+        assert_eq!(value.as_str(), Some("a\u{e9}b"));
+    }
+
+    #[test]
+    fn escape_string_covers_controls() {
+        assert_eq!(escape_string("a\"b\\c\nd"), "a\\\"b\\\\c\\nd");
+        assert_eq!(escape_string("\u{0001}"), "\\u0001");
+    }
+}

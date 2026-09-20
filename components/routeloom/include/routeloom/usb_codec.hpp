@@ -40,6 +40,11 @@ enum class FrameKind : std::uint8_t {
   DataToMesh = 16,
   DataFromMesh = 17,
   DeliveryEvent = 18,
+  // Host-operations carrier (host_ops_v1): the inner body starts with
+  // schema:u8 + subcommand:u8 (see usb_host_ops.hpp). Registered once here;
+  // the design's "existing Command kind" does not exist in this tree. Data
+  // traffic, not CONTROL: SUBMIT payloads consume granted credit.
+  HostOps = 19,
   Credit = 32,
   Diagnostic = 33,
   Error = 34,

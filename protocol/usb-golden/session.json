@@ -7,9 +7,9 @@
   "node": 1,
   "boot": 756033585153,
   "network": 7,
-  "capability": 3,
+  "capability": 7,
   "principal": "host-operator",
-  "session_id": 9570924496059420596,
+  "session_id": 9127407181405469784,
   "mesh_session": 7001,
   "peer_node": 2,
   "peer_session": 2002,
@@ -17,8 +17,8 @@
   "rx_grant_bytes": 16384,
   "tx_grant_frames": 16,
   "tx_grant_bytes": 65536,
-  "hello_tag_hex": "27d4b5f9478dacd3417793c84ecb1ed3",
-  "auth_tag_hex": "571e0b7564d584ba0cb6e511a80c12ba",
-  "auth_ok_tag_hex": "0be7cfeddfd10e21a16d94bd8396f021",
-  "session_key_hex": "1c8e3fde2672d28c64091682b2cc448c"
+  "hello_tag_hex": "9b9e2f334d950fe4165ec175e86965e4",
+  "auth_tag_hex": "3ae2cf31e5a67a75922772497553ec75",
+  "auth_ok_tag_hex": "739bcf7aa5b137647d1b2807beb6a964",
+  "session_key_hex": "f88c788de5cc165365deee4f2856a453"
 }

@@ -5,6 +5,7 @@
 //! construction both languages implement.
 
 use routeloom_protocol::dev_session::*;
+use routeloom_protocol::host_ops::*;
 use routeloom_protocol::{encode_frame, Frame, StreamDecoder, MAX_DECODED_FRAME};
 use std::collections::BTreeMap;
 use std::fs;
@@ -212,13 +213,50 @@ fn usb_session_vectors_are_byte_exact() {
                 assert_eq!(counter, *expected, "{name} counter must be sequential");
                 *expected += 1;
                 assert_eq!(inner, unhex(field(&vector, "inner_hex")), "{name}");
+                // Host-ops inners must parse under the shared codec with the
+                // scenario's expected outcomes.
+                match name.as_str() {
+                    "submit_seq3" => {
+                        let request = decode_submit(inner).expect("submit parses");
+                        assert_eq!(request.dispatch_seq, 3);
+                        assert_eq!(request.canonical.len(), 35);
+                    }
+                    "submit_seq3_receipt" => {
+                        let receipt = decode_receipt(inner, SUB_SUBMIT).expect("receipt parses");
+                        assert_eq!(receipt.result, HostOpsResult::Ok);
+                        assert_eq!(receipt.state, SlotState::Sent);
+                        assert_eq!((receipt.msg_session, receipt.msg_seq), (7001, 2));
+                        assert!(receipt.msg_valid);
+                        assert_eq!(receipt.evidence, Evidence::GatewayAccepted);
+                    }
+                    "query_seq3_resp" => {
+                        let response = decode_query_response(inner).expect("query response parses");
+                        assert_eq!(response.result, HostOpsResult::Ok);
+                        assert_eq!(response.state, SlotState::Sent);
+                        assert_eq!(response.operation_id[23], 1);
+                    }
+                    "retire_prefix_resp" => {
+                        let response =
+                            decode_retire_response(inner).expect("retire response parses");
+                        assert_eq!(response.result, HostOpsResult::Ok);
+                        assert_eq!(response.retired_through, 2);
+                    }
+                    "time_sample_resp" => {
+                        let response =
+                            decode_time_sample_response(inner).expect("time sample parses");
+                        assert_eq!(response.result, HostOpsResult::Ok);
+                        assert_eq!(response.nonce, 0x5A5A);
+                    }
+                    _ => {}
+                }
             }
         }
     }
     assert!(saw_auth_ok);
-    // The scenario exercises both directions of the protected channel.
+    // The scenario exercises both directions of the protected channel:
+    // tx_grant, data_to_mesh, 7 host_ops requests, keepalive, close.
     assert!(d2h_counter >= 5);
-    assert_eq!(h2d_counter, 4);
+    assert_eq!(h2d_counter, 11);
 }
 
 #[test]
@@ -237,7 +275,20 @@ fn tampered_session_frames_are_rejected() {
         principal: field(&session, "principal").as_bytes().to_vec(),
     };
     let proof = derive_session_proof(&secret, &transcript.encode().unwrap());
-    let keepalive = load(&root.join("frames/12_keepalive.json"));
+    // Found by step name, not file number, so scenario insertions cannot
+    // silently point this tamper check at the wrong frame.
+    let mut keepalive_path: Option<PathBuf> = None;
+    for entry in fs::read_dir(root.join("frames")).expect("frames dir") {
+        let path = entry.expect("dir entry").path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with("_keepalive.json"))
+        {
+            keepalive_path = Some(path);
+        }
+    }
+    let keepalive = load(&keepalive_path.expect("keepalive vector"));
     let frame = decode_wire(&unhex(field(&keepalive, "wire_hex")));
 
     // A flipped tag bit must fail verification.

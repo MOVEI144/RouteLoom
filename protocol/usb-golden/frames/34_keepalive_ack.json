@@ -1,0 +1,12 @@
+{
+  "name": "keepalive_ack",
+  "direction": "d2h",
+  "kind": 35,
+  "flags": 0,
+  "session": 9127407181405469784,
+  "request": 104,
+  "inner_hex": "",
+  "body_hex": "0000000000000013fc58af573a22524b1b8c21bf1b20e04b",
+  "wire_hex": "07524c5531012301097eab1078f005bc58010101010101026802180101010101011613fc58af573a22524b1b8c21bf1b20e04bbe7b954a00",
+  "note": "device keepalive answer"
+}

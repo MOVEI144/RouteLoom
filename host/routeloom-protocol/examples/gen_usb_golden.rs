@@ -5,6 +5,7 @@
 //! Run: cargo run -p routeloom-protocol --example gen_usb_golden
 
 use routeloom_protocol::dev_session::*;
+use routeloom_protocol::host_ops::*;
 use routeloom_protocol::{encode_frame, Frame, FrameKind};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,7 +16,9 @@ const DEVICE_NONCE: u64 = 0xa0b0_c0d0_e0f0_0102;
 const NODE: u64 = 1;
 const BOOT: u64 = 0x0000_00b0_071d_0001;
 const NETWORK: u64 = 7;
-const CAPABILITY: u32 = 3;
+// Legacy 0x3 plus the host_ops_v1 bit: this golden device speaks HostOps.
+const CAPABILITY: u32 = 0x3 | CAP_HOST_OPS_V1;
+const DISPATCHER: &[u8; DISPATCHER_ID_SIZE] = b"host-dispatcher1";
 const PRINCIPAL: &[u8] = b"host-operator";
 const MESH_SESSION: u32 = 7001; // gateway message_session
 const PEER_SESSION: u32 = 2002; // node-2 message_session
@@ -252,16 +255,26 @@ fn main() -> std::io::Result<()> {
         FrameKind::DataToMesh,
         0,
         103,
-        data_inner,
+        data_inner.clone(),
     ));
 
+    // Tracks host->device data consumption for grant topups: each data
+    // frame consumes 1 frame + its full decoded protected length
+    // (30 header/CRC + 24 counter/tag + inner), and the device re-grants
+    // consumed + headroom.
+    let mut consumed_frames = 0_u64;
+    let mut consumed_bytes = 0_u64;
+    let mut note_consumed = |inner_len: usize| {
+        consumed_frames += 1;
+        consumed_bytes += (30 + 24 + inner_len) as u64;
+        let mut topup_inner = vec![CREDIT_GRANT];
+        topup_inner.extend_from_slice(&(consumed_frames + RX_GRANT_FRAMES).to_be_bytes());
+        topup_inner.extend_from_slice(&(consumed_bytes + RX_GRANT_BYTES).to_be_bytes());
+        topup_inner
+    };
+
     // 8: device advances the cumulative rx grant after releasing the buffer.
-    // Consumed = 1 frame, decoded_len = 30 + protected_body_len. The
-    // protected body was counter||tag||inner = 24 + (16 + payload).
-    let consumed_bytes = (30 + 24 + 16 + payload.len()) as u64;
-    let mut topup_inner = vec![CREDIT_GRANT];
-    topup_inner.extend_from_slice(&(1 + RX_GRANT_FRAMES).to_be_bytes());
-    topup_inner.extend_from_slice(&(consumed_bytes + RX_GRANT_BYTES).to_be_bytes());
+    let topup_inner = note_consumed(data_inner.len());
     steps.push(d2h(
         "rx_grant_topup",
         "grant advances as the reserved buffer is released",
@@ -297,6 +310,316 @@ fn main() -> std::io::Result<()> {
         0,
         103,
         delivery(3, b"QUEUED"),
+    ));
+
+    // Host-ops scenario (CAP-I2): SKIP two holes, retire the terminal
+    // prefix, SUBMIT into the window, QUERY the live and retired positions,
+    // and take a time sample. Each host->device data frame is followed by
+    // the device's rx-grant topup (CONTROL drains first) and then the
+    // typed response. Request ids 200+ keep clear of the session scenario.
+    //
+    // The C++ replay feeds host frames at now = file_index * 200ms, so the
+    // SUBMIT deadline and the expected TIME_SAMPLE device_time derive from
+    // the step position: `steps.len()` is the 0-based index of the frame
+    // being appended.
+    let lease = BootLease::derive(BOOT, NODE);
+    let mut canonical = vec![0_u8; 26];
+    canonical[0] = 1; // schema
+    canonical[4] = NETWORK as u8;
+    canonical[5] = 0; // node destination
+    canonical[13] = PEER_NODE as u8;
+    canonical[14] = 1; // RELIABLE
+    canonical[15] = 1; // NORMAL
+    canonical[17] = 1; // HOST_DURABLE
+    canonical[20] = 0x13; // ttl 5000
+    canonical[21] = 0x88;
+    canonical[22] = 10; // hop limit
+    canonical.extend_from_slice(b"gw-submit");
+    canonical[25] = 9; // payload length
+    let mut submit_hash = [0_u8; CANONICAL_HASH_SIZE];
+    for (i, byte) in submit_hash.iter_mut().enumerate() {
+        *byte = 0x10 + i as u8; // opaque to the device; host SHA-256 in production
+    }
+    let mut operation_id = [0_u8; OPERATION_ID_SIZE];
+    for (i, byte) in operation_id[..16].iter_mut().enumerate() {
+        *byte = 0xA0 + i as u8; // store lineage
+    }
+    operation_id[23] = 1; // operation seq
+    let mut next_request = 200_u64;
+
+    for seq in [1_u64, 2] {
+        let inner = encode_lane_request(
+            SUB_SKIP,
+            &LaneRequest {
+                lease,
+                dispatcher: *DISPATCHER,
+                seq,
+            },
+        );
+        steps.push(h2d(
+            if seq == 1 { "skip_hole1" } else { "skip_hole2" },
+            "host certifies a never-submitted hole as skipped",
+            FrameKind::HostOps,
+            0,
+            next_request,
+            inner.clone(),
+        ));
+        let topup = note_consumed(inner.len());
+        steps.push(d2h(
+            if seq == 1 {
+                "skip_hole1_grant"
+            } else {
+                "skip_hole2_grant"
+            },
+            "rx grant advances past the host_ops request",
+            FrameKind::Credit,
+            0,
+            0,
+            topup,
+        ));
+        steps.push(d2h(
+            if seq == 1 {
+                "skip_hole1_receipt"
+            } else {
+                "skip_hole2_receipt"
+            },
+            "hole filled with a terminal Skipped record",
+            FrameKind::HostOps,
+            0,
+            next_request,
+            encode_receipt(&Receipt {
+                sub: SUB_SKIP,
+                result: HostOpsResult::Ok,
+                state: SlotState::Skipped,
+                lease,
+                dispatch_seq: seq,
+                hash: [0; CANONICAL_HASH_SIZE],
+                msg_session: 0,
+                msg_seq: 0,
+                msg_valid: false,
+                evidence: Evidence::None,
+            }),
+        ));
+        next_request += 1;
+    }
+
+    let retire_inner = encode_lane_request(
+        SUB_RETIRE_THROUGH,
+        &LaneRequest {
+            lease,
+            dispatcher: *DISPATCHER,
+            seq: 2,
+        },
+    );
+    steps.push(h2d(
+        "retire_prefix",
+        "host retires the terminal 1..2 prefix",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        retire_inner.clone(),
+    ));
+    let topup = note_consumed(retire_inner.len());
+    steps.push(d2h(
+        "retire_prefix_grant",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        0,
+        topup,
+    ));
+    steps.push(d2h(
+        "retire_prefix_resp",
+        "floor advanced to 2",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        encode_retire_response(&RetireResponse {
+            result: HostOpsResult::Ok,
+            lease,
+            retired_through: 2,
+        }),
+    ));
+    next_request += 1;
+
+    // SUBMIT fed at now = index*200; the deadline leaves 5000ms of life.
+    let submit_now = steps.len() as u64 * 200;
+    let submit_inner = encode_submit(&SubmitRequest {
+        lease,
+        dispatcher: *DISPATCHER,
+        dispatch_seq: 3,
+        operation_id,
+        canonical_hash: submit_hash,
+        device_deadline: submit_now + 5000,
+        canonical: canonical.clone(),
+    })
+    .expect("encodable submit vector");
+    steps.push(h2d(
+        "submit_seq3",
+        "host submits dispatch seq 3 (9-byte mesh payload)",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        submit_inner.clone(),
+    ));
+    let topup = note_consumed(submit_inner.len());
+    steps.push(d2h(
+        "submit_seq3_grant",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        0,
+        topup,
+    ));
+    // The legacy data_to_mesh send took message seq 1, so this SUBMIT lands
+    // on message seq 2; the C++ bridge mesh-sends synchronously at admission.
+    steps.push(d2h(
+        "submit_seq3_receipt",
+        "admitted and mesh-sent; stable MessageKey returned",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        encode_receipt(&Receipt {
+            sub: SUB_SUBMIT,
+            result: HostOpsResult::Ok,
+            state: SlotState::Sent,
+            lease,
+            dispatch_seq: 3,
+            hash: submit_hash,
+            msg_session: MESH_SESSION,
+            msg_seq: 2,
+            msg_valid: true,
+            evidence: Evidence::GatewayAccepted,
+        }),
+    ));
+    next_request += 1;
+
+    let query_inner = encode_lane_request(
+        SUB_QUERY_DISPATCH,
+        &LaneRequest {
+            lease,
+            dispatcher: *DISPATCHER,
+            seq: 3,
+        },
+    );
+    steps.push(h2d(
+        "query_seq3",
+        "host reads back the live record",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        query_inner.clone(),
+    ));
+    let topup = note_consumed(query_inner.len());
+    steps.push(d2h(
+        "query_seq3_grant",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        0,
+        topup,
+    ));
+    steps.push(d2h(
+        "query_seq3_resp",
+        "record still Sent (no mesh poll ran in between)",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        encode_query_response(&QueryResponse {
+            result: HostOpsResult::Ok,
+            state: SlotState::Sent,
+            lease,
+            dispatch_seq: 3,
+            hash: submit_hash,
+            operation_id,
+            msg_session: MESH_SESSION,
+            msg_seq: 2,
+            msg_valid: true,
+            evidence: Evidence::GatewayAccepted,
+        }),
+    ));
+    next_request += 1;
+
+    let query_old_inner = encode_lane_request(
+        SUB_QUERY_DISPATCH,
+        &LaneRequest {
+            lease,
+            dispatcher: *DISPATCHER,
+            seq: 1,
+        },
+    );
+    steps.push(h2d(
+        "query_retired",
+        "host queries the retired seq 1",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        query_old_inner.clone(),
+    ));
+    let topup = note_consumed(query_old_inner.len());
+    steps.push(d2h(
+        "query_retired_grant",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        0,
+        topup,
+    ));
+    steps.push(d2h(
+        "query_retired_resp",
+        "retired positions answer Retired with zeroed record fields",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        encode_query_response(&QueryResponse {
+            result: HostOpsResult::Retired,
+            state: SlotState::Empty,
+            lease,
+            dispatch_seq: 1,
+            hash: [0; CANONICAL_HASH_SIZE],
+            operation_id: [0; OPERATION_ID_SIZE],
+            msg_session: 0,
+            msg_seq: 0,
+            msg_valid: false,
+            evidence: Evidence::None,
+        }),
+    ));
+    next_request += 1;
+
+    let sample_now = steps.len() as u64 * 200;
+    let sample_inner = encode_time_sample_request(&TimeSampleRequest {
+        lease,
+        nonce: 0x5A5A,
+    });
+    steps.push(h2d(
+        "time_sample",
+        "host requests a bound device clock sample",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        sample_inner.clone(),
+    ));
+    let topup = note_consumed(sample_inner.len());
+    steps.push(d2h(
+        "time_sample_grant",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        0,
+        topup,
+    ));
+    steps.push(d2h(
+        "time_sample_resp",
+        "device time sampled at the fed instant",
+        FrameKind::HostOps,
+        0,
+        next_request,
+        encode_time_sample_response(&TimeSampleResponse {
+            result: HostOpsResult::Ok,
+            lease,
+            nonce: 0x5A5A,
+            device_time: sample_now,
+        }),
     ));
 
     // 11: a mesh message arriving at the gateway becomes DataFromMesh.
