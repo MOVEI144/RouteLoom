@@ -3,6 +3,7 @@
 // vectors in protocol/autonomy-golden/, and self-tests for the fake radio /
 // entropy fixtures.
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>

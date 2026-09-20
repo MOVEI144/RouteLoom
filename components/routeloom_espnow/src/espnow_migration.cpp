@@ -231,7 +231,7 @@ Status NvsPlanStore::read_blob_slot(const std::uint8_t slot, Digest256& hash,
   std::uint32_t crc = 0;
   if (status) status = reader.read_u32(crc);
   if (!status ||
-      crc32_iso_hdlc(ByteView{raw.data(), reader.size() - 4}) != crc) {
+      crc32_iso_hdlc(ByteView{raw.data(), reader.consumed() - 4}) != crc) {
     return Status::error(StatusCode::IntegrityError, "blob slot corrupt");
   }
   blob_size = length;

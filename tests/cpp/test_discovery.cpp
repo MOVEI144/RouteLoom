@@ -3,6 +3,7 @@
 // lifecycle, capacity, conflict and storm control. Scenario ids from
 // docs/design/autonomous-mesh/scenarios.json are noted where they map.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
