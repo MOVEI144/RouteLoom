@@ -642,6 +642,19 @@ struct State {
     /// thread drains — never the other way, so the USB read path can
     /// never be blocked by store work.
     dispatch_inbox: dispatch::DispatchInbox,
+    /// Device-issued GATEWAY_INGRESS (0x11) bodies waiting for the
+    /// dispatch thread's storage pass. Separate from `dispatch_inbox`:
+    /// these are requests to US (their request id is the device's), and
+    /// the ACK must follow storage, never precede it.
+    ingress_inbox: dispatch::DispatchInbox,
+    /// The host's live registration mirror at the attached gateway —
+    /// published once per dispatch pass by the registration lane. api1
+    /// reads it for `gateway.resolve` and the schema-2 submit binding.
+    gateway_lane: dispatch::GatewayLane,
+    /// This daemon run's incarnation id, minted at startup — bound into
+    /// every HOST_REGISTER so a restarted daemon is provably a different
+    /// host boot to the device (05 §5.6).
+    host_boot: u64,
 }
 
 fn now_ms() -> u64 {
@@ -1023,11 +1036,21 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         FrameKind::KeepAlive => {
             push_event(state, ms, "\"kind\":\"keepalive\"".to_string());
         }
-        // HostOps receipts/answers go to the TX-I2 dispatch thread, keyed
-        // by the request id we issued. Posting never blocks: a full inbox
-        // drops the body and the dispatcher re-queries on timeout.
+        // HostOps splits two ways by subcommand: device-issued
+        // GATEWAY_INGRESS (0x11) goes to the ingress lane — its ACK must
+        // follow storage, and its request id is the device's own — while
+        // every other body is a reply to a request WE issued and lands in
+        // the dispatcher inbox keyed by our request id. Posting never
+        // blocks: a full inbox drops the body and the lane re-queries or
+        // the device resends inside its own ack window.
         FrameKind::HostOps => {
-            state.dispatch_inbox.post(frame.request, body.to_vec());
+            if routeloom_protocol::host_ops::gateway_sub(body)
+                == Some(routeloom_protocol::host_ops::SUB_GATEWAY_INGRESS)
+            {
+                state.ingress_inbox.post(frame.request, body.to_vec());
+            } else {
+                state.dispatch_inbox.post(frame.request, body.to_vec());
+            }
             push_event(
                 state,
                 ms,
@@ -1389,6 +1412,13 @@ fn merge_session_inbound(state: &State, inbound: &SessionInbound, frame: &Frame,
     }
     if let Some(session_id) = inbound.auth_session {
         let mut info = state.session.lock().expect("session poisoned");
+        if info.id != Some(session_id) {
+            // A new authenticated session can never inherit the previous
+            // session's gateway registration — clear the mirror
+            // immediately; the dispatch lane re-registers under the new
+            // binding on its next pass.
+            state.gateway_lane.clear();
+        }
         info.authenticated = true;
         info.id = Some(session_id);
     }
@@ -1542,6 +1572,10 @@ fn adapter_supervisor(
                     let mut info = state.session.lock().expect("session poisoned");
                     *info = SessionInfo::default();
                 }
+                // A reconnect is a brand-new USB session: the gateway
+                // registration bound to the dead session can never be
+                // inherited — the lane re-registers on its next pass.
+                state.gateway_lane.clear();
                 push_event(
                     &state,
                     now_ms(),
@@ -1570,6 +1604,10 @@ fn adapter_supervisor(
                     let mut info = state.session.lock().expect("session poisoned");
                     *info = SessionInfo::default();
                 }
+                // Link lost: the registration bound to the dead session is
+                // stale — clear it so no schema-2 canonical can still cite
+                // the token (a reconnect re-registers under a fresh one).
+                state.gateway_lane.clear();
                 if let Err(error) = result {
                     set_error(&state, error.to_string());
                 }
@@ -1659,7 +1697,10 @@ fn serve_client(
                 receive_log: &state.receive_log,
                 operation_store: &state.operation_store,
                 rate_limiter: &state.rate_limiter,
+                session: &state.session,
+                gateway_lane: &state.gateway_lane,
                 now_ms: now_ms(),
+                now_mono: mono_ms(),
             };
             api1::handle(&raw[b"API1 ".len()..], &ctx)
         } else {
@@ -1984,11 +2025,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+    // The daemon's incarnation id for HOST_REGISTER: fresh per run,
+    // nonzero and non-reserved so a restarted daemon can never alias the
+    // previous run's registration (05 §5.6 host_boot).
+    let mut host_boot = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64
+        ^ u64::from(process::id()).rotate_left(32);
+    if host_boot == 0 || host_boot == u64::MAX {
+        host_boot ^= 0x5A;
+    }
     let state = Arc::new(State {
         device: device.clone(),
         receive_log: Mutex::new(ReceiveLog::new(mint_id128())),
         operation_store: Mutex::new(operation_store),
         acl,
+        host_boot,
         ..State::default()
     });
     // Bounded outbound queue: SEND is back-pressured at MAX_OUTBOUND pending
@@ -2348,6 +2398,7 @@ mod tests {
                 ttl_ms: 30_000,
                 storage: canonical::STORAGE_RAM,
                 hop_limit: canonical::HOP_DEFAULT,
+                gateway: None,
                 payload,
                 hash,
                 canonical,

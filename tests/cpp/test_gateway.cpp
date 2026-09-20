@@ -103,7 +103,7 @@ struct TestHostSink final : GatewayHostSink {
     return ready;
   }
   Status host_ingress(const MessageKey& key, const RequestDigest&, ByteView,
-                      MonotonicMs now) noexcept override {
+                      ByteView, MonotonicMs now) noexcept override {
     if (ingress_status.ok()) {
       ingresses.push_back(key);
       if (sync_ack_target != nullptr) {

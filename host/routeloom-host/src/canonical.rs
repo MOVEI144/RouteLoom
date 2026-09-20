@@ -28,6 +28,10 @@ pub const HOP_DEFAULT: u8 = 10;
 pub const HOP_MIN: u8 = 1;
 pub const HOP_MAX: u8 = 10;
 pub const SCHEMA_VERSION: u8 = 1;
+/// Schema 2 (scope-gateway-config/05-wire-api.md §5.4): REQUIRED whenever
+/// destination_kind is "gateway" — the 26B head carries a 34B endpoint
+/// extension before payload_len. Never auto-selected for node destinations.
+pub const SCHEMA_VERSION_GATEWAY: u8 = 2;
 
 // Canonical byte values.
 pub const DEST_NODE: u8 = 0;
@@ -42,6 +46,37 @@ pub const PRIORITY_URGENT: u8 = 3;
 pub const POLICY_WALL_ELAPSED: u8 = 0;
 pub const STORAGE_RAM: u8 = 0;
 pub const STORAGE_DURABLE: u8 = 1;
+
+/// Gateway scope classes (endpoint_wire Service payloads, 05 §5.3).
+pub const GATEWAY_SCOPE_SDK_RAM: u8 = 1;
+pub const GATEWAY_SCOPE_HOST_RAM: u8 = 2;
+/// Schema-2 gateway payloads are capped at 96B (endpoint_wire
+/// kGatewayPayloadMax); node destinations keep the 128B wire-v1 ceiling.
+pub const GATEWAY_PAYLOAD_MAX: usize = 96;
+
+/// The live HOST_REGISTER binding a schema-2 canonical embeds (05 §5.4):
+/// the session token the attached gateway minted, its boot id and the
+/// egress node (the USB-attached gateway itself). None of these are caller
+/// inputs — the daemon mirrors them from the authenticated 0x10 exchange,
+/// so a client can never mint or rebind an endpoint it did not receive.
+/// `dispatch::GatewayRegistration` converts into this at the API edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatewayEndpointBinding {
+    pub token: [u8; 16],
+    pub gateway_boot: u64,
+    pub egress: u64,
+}
+
+/// The resolved schema-2 destination extension stored on a SendRequest:
+/// the requested scope class plus the registration binding bytes that went
+/// into the canonical hash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatewayExtension {
+    pub scope: u8,
+    pub token: [u8; 16],
+    pub gateway_boot: u64,
+    pub egress: u64,
+}
 
 /// One validated submit: normalized fields plus the canonical bytes and
 /// their SHA-256. `storage`/`delivery`/etc. keep the requested values even
@@ -58,6 +93,11 @@ pub struct SendRequest {
     pub ttl_ms: u32,
     pub storage: u8,
     pub hop_limit: u8,
+    /// Schema-2 endpoint binding — Some iff dest_kind == DEST_GATEWAY.
+    /// Runtime consumers read the bytes already folded into `canonical`;
+    /// the parsed extension stays available for verification/tests.
+    #[allow(dead_code)]
+    pub gateway: Option<GatewayExtension>,
     pub payload: Vec<u8>,
     pub canonical: Vec<u8>,
     pub hash: [u8; 32],
@@ -67,6 +107,9 @@ pub struct SendRequest {
 pub struct SubmitReject {
     pub code: &'static str,
     pub message: String,
+    /// True when the caller may retry the same request after the named
+    /// precondition resolves (e.g. the registration lane comes up).
+    pub retryable: bool,
 }
 
 impl SubmitReject {
@@ -74,12 +117,24 @@ impl SubmitReject {
         Self {
             code: "INVALID_ARGUMENT",
             message: message.into(),
+            retryable: false,
         }
     }
     fn unsupported(message: impl Into<String>) -> Self {
         Self {
             code: "UNSUPPORTED",
             message: message.into(),
+            retryable: false,
+        }
+    }
+    /// The request is structurally sound but the host endpoint is not
+    /// registered at the attached gateway right now — a `gateway.resolve`
+    /// (or the lane's next renewal) fixes it, so the reject is retryable.
+    fn gateway_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            code: "GATEWAY_UNAVAILABLE",
+            message: message.into(),
+            retryable: true,
         }
     }
 }
@@ -171,7 +226,13 @@ pub fn parse_epoch_hex(text: &str) -> Result<u64, String> {
 
 /// Schema + type + range validation. Defaults are filled before the
 /// canonical bytes are built, so omitted-vs-explicit defaults hash alike.
-pub fn parse_submit(params: &Json) -> Result<SendRequest, SubmitReject> {
+/// `binding` is the daemon's live HOST_REGISTER mirror — required iff the
+/// destination kind is "gateway" (the schema-2 canonical embeds its
+/// token/boot/egress); ignored for node destinations.
+pub fn parse_submit(
+    params: &Json,
+    binding: Option<&GatewayEndpointBinding>,
+) -> Result<SendRequest, SubmitReject> {
     for (key, _) in params.object_entries() {
         if !matches!(
             key.as_str(),
@@ -202,20 +263,61 @@ pub fn parse_submit(params: &Json) -> Result<SendRequest, SubmitReject> {
         Some(text) => parse_key_hex(text).map_err(SubmitReject::invalid)?,
         None => return Err(SubmitReject::invalid("key must be a 32-hex string")),
     };
-    let (dest_kind, dest) = parse_destination(params.get("destination"))?;
+    let (dest_kind, dest, scope) = parse_destination(params.get("destination"))?;
     let payload = parse_payload(params.get("payload_hex"), params.get("payload_len"))?;
+    if dest_kind == DEST_GATEWAY && payload.len() > GATEWAY_PAYLOAD_MAX {
+        return Err(SubmitReject {
+            code: "PAYLOAD_TOO_LARGE",
+            message: format!("gateway payload exceeds {GATEWAY_PAYLOAD_MAX} bytes"),
+            retryable: false,
+        });
+    }
     let (delivery, priority, ttl_ms, storage, hop_limit) = parse_options(params.get("options"))?;
-    let canonical = canonical_bytes(
-        network as u32,
-        dest_kind,
-        dest,
-        delivery,
-        priority,
-        storage,
-        ttl_ms,
-        hop_limit,
-        &payload,
-    );
+    let (canonical, gateway) = if dest_kind == DEST_GATEWAY {
+        let scope = scope.expect("gateway destination carries a scope");
+        let Some(binding) = binding else {
+            // No live registration: the canonical cannot be bound — the
+            // reject names the precondition instead of minting anything.
+            return Err(SubmitReject::gateway_unavailable(
+                "no live host registration at the attached gateway; call gateway.resolve first",
+            ));
+        };
+        let gateway = GatewayExtension {
+            scope,
+            token: binding.token,
+            gateway_boot: binding.gateway_boot,
+            egress: binding.egress,
+        };
+        (
+            canonical_gateway_bytes(
+                network as u32,
+                dest,
+                delivery,
+                priority,
+                storage,
+                ttl_ms,
+                hop_limit,
+                &gateway,
+                &payload,
+            ),
+            Some(gateway),
+        )
+    } else {
+        (
+            canonical_bytes(
+                network as u32,
+                dest_kind,
+                dest,
+                delivery,
+                priority,
+                storage,
+                ttl_ms,
+                hop_limit,
+                &payload,
+            ),
+            None,
+        )
+    };
     let hash = sha256(&canonical);
     Ok(SendRequest {
         network,
@@ -228,13 +330,16 @@ pub fn parse_submit(params: &Json) -> Result<SendRequest, SubmitReject> {
         ttl_ms,
         storage,
         hop_limit,
+        gateway,
         payload,
         canonical,
         hash,
     })
 }
 
-fn parse_destination(value: Option<&Json>) -> Result<(u8, u64), SubmitReject> {
+/// Returns (dest_kind, dest, scope): `scope` is Some only for gateway
+/// destinations — the endpoint class the schema-2 extension binds.
+fn parse_destination(value: Option<&Json>) -> Result<(u8, u64, Option<u8>), SubmitReject> {
     let Some(value) = value else {
         return Err(SubmitReject::invalid("destination is required"));
     };
@@ -242,7 +347,7 @@ fn parse_destination(value: Option<&Json>) -> Result<(u8, u64), SubmitReject> {
         return Err(SubmitReject::invalid("destination must be an object"));
     }
     for (key, _) in value.object_entries() {
-        if !matches!(key.as_str(), "kind" | "id") {
+        if !matches!(key.as_str(), "kind" | "id" | "scope") {
             return Err(SubmitReject::invalid(format!(
                 "unknown destination field \"{key}\""
             )));
@@ -258,11 +363,34 @@ fn parse_destination(value: Option<&Json>) -> Result<(u8, u64), SubmitReject> {
         }
         None => return Err(SubmitReject::invalid("destination.kind is required")),
     };
+    let scope = match value.get("scope") {
+        None if kind == DEST_GATEWAY => {
+            return Err(SubmitReject::invalid(
+                "destination.scope is required for a gateway destination",
+            ))
+        }
+        None => None,
+        Some(Json::String(name)) => match name.as_str() {
+            "GATEWAY_SDK_RAM" => Some(GATEWAY_SCOPE_SDK_RAM),
+            "HOST_RECEIVE_RAM" => Some(GATEWAY_SCOPE_HOST_RAM),
+            _ => {
+                return Err(SubmitReject::invalid(
+                    "destination.scope must be GATEWAY_SDK_RAM or HOST_RECEIVE_RAM",
+                ))
+            }
+        },
+        Some(_) => return Err(SubmitReject::invalid("destination.scope must be a string")),
+    };
+    if kind != DEST_GATEWAY && scope.is_some() {
+        return Err(SubmitReject::invalid(
+            "destination.scope is only meaningful for a gateway destination",
+        ));
+    }
     let dest = match value.get("id").and_then(Json::as_str) {
         Some(text) => parse_node_hex(text).map_err(SubmitReject::invalid)?,
         None => return Err(SubmitReject::invalid("destination.id is required")),
     };
-    Ok((kind, dest))
+    Ok((kind, dest, scope))
 }
 
 fn parse_payload(hex: Option<&Json>, len: Option<&Json>) -> Result<Vec<u8>, SubmitReject> {
@@ -287,6 +415,7 @@ fn parse_payload(hex: Option<&Json>, len: Option<&Json>) -> Result<Vec<u8>, Subm
                 "payload exceeds {} bytes",
                 crate::receive_log::NORMAL_PAYLOAD_MAX
             ),
+            retryable: false,
         });
     }
     Ok(bytes)
@@ -472,6 +601,47 @@ pub fn canonical_bytes(
     out
 }
 
+/// Schema-2 canonical for gateway destinations (05-wire-api.md §5.4): the
+/// same 26B head, then the 34B endpoint extension
+/// scope:u8 || reserved:u8=0 || token:16 || gateway_boot:u64 ||
+/// egress_gateway:u64 ahead of payload_len — total 60B head + payload.
+/// The destination node id stays the *final* destination; the egress the
+/// message actually exits on is bound separately so a key reuse across
+/// egresses is a CONFLICT, never a silent rebind.
+#[allow(clippy::too_many_arguments)]
+pub fn canonical_gateway_bytes(
+    network: u32,
+    dest: u64,
+    delivery: u8,
+    priority: u8,
+    storage: u8,
+    ttl_ms: u32,
+    hop_limit: u8,
+    gateway: &GatewayExtension,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(60 + payload.len());
+    out.push(SCHEMA_VERSION_GATEWAY);
+    out.extend_from_slice(&network.to_be_bytes());
+    out.push(DEST_GATEWAY);
+    out.extend_from_slice(&dest.to_be_bytes());
+    out.push(delivery);
+    out.push(priority);
+    out.push(POLICY_WALL_ELAPSED);
+    out.push(storage);
+    out.extend_from_slice(&ttl_ms.to_be_bytes());
+    out.push(hop_limit);
+    out.push(0); // persist_sleep
+    out.push(gateway.scope);
+    out.push(0); // reserved
+    out.extend_from_slice(&gateway.token);
+    out.extend_from_slice(&gateway.gateway_boot.to_be_bytes());
+    out.extend_from_slice(&gateway.egress.to_be_bytes());
+    out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
 /// `OperationId` wire form: `<32-hex store lineage>:<16-hex sequence>`.
 pub fn format_operation_id(lineage: &[u8; 16], seq: u64) -> String {
     format!("{}:{seq:016x}", crate::receive_log::hex_lower(lineage))
@@ -600,7 +770,7 @@ mod tests {
             ),
         ];
         for (json, canonical_hex, hash_hex) in cases {
-            let req = parse_submit(&submit_params(json)).expect(json);
+            let req = parse_submit(&submit_params(json), None).expect(json);
             assert_eq!(hex_lower(&req.canonical), canonical_hex, "{json}");
             assert_eq!(hex_lower(&req.hash), hash_hex, "{json}");
             assert_eq!(req.canonical.len(), 26 + req.payload.len());
@@ -611,7 +781,7 @@ mod tests {
             "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"{}\",\"payload_len\":128}}",
             hex_lower(&payload)
         );
-        let req = parse_submit(&submit_params(&json)).unwrap();
+        let req = parse_submit(&submit_params(&json), None).unwrap();
         let mut expected = String::from("010000000100000000000000000301010001000013880a000080");
         expected.push_str(&hex_lower(&payload));
         assert_eq!(hex_lower(&req.canonical), expected);
@@ -626,8 +796,8 @@ mod tests {
     fn canonical_is_order_and_case_independent() {
         let a = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00FF80\",\"payload_len\":3}";
         let b = "{\"payload_len\":3,\"payload_hex\":\"00ff80\",\"key\":\"00112233445566778899AABBCCDDEEFF\",\"destination\":{\"id\":\"0000000000000003\",\"kind\":\"node\"},\"admission_epoch\":\"0000000000000012\",\"network\":\"0000000000000001\",\"options\":{\"hop_limit\":10,\"ttl_ms\":5000,\"storage\":\"HOST_DURABLE\",\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"priority\":\"NORMAL\",\"delivery\":\"RELIABLE\"}}";
-        let ra = parse_submit(&submit_params(a)).unwrap();
-        let rb = parse_submit(&submit_params(b)).unwrap();
+        let ra = parse_submit(&submit_params(a), None).unwrap();
+        let rb = parse_submit(&submit_params(b), None).unwrap();
         assert_eq!(ra.canonical, rb.canonical);
         assert_eq!(ra.hash, rb.hash);
     }
@@ -637,14 +807,14 @@ mod tests {
         let base = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00\",\"payload_len\":1}";
         let other = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"01\",\"payload_len\":1}";
         let (a, b) = (
-            parse_submit(&submit_params(base)).unwrap(),
-            parse_submit(&submit_params(other)).unwrap(),
+            parse_submit(&submit_params(base), None).unwrap(),
+            parse_submit(&submit_params(other), None).unwrap(),
         );
         assert_ne!(a.hash, b.hash);
         // The caller key and epoch are identity, not hash input: same body
         // under another key hashes the same and conflicts by comparison.
         let rekeyed = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000013\",\"key\":\"ffffffffffffffffffffffffffffffff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00\",\"payload_len\":1}";
-        let c = parse_submit(&submit_params(rekeyed)).unwrap();
+        let c = parse_submit(&submit_params(rekeyed), None).unwrap();
         assert_eq!(a.canonical, c.canonical);
     }
 
@@ -685,7 +855,7 @@ mod tests {
             "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"payload_hex\":\"\",\"payload_len\":0}".to_string(),
         ];
         for json in invalid_params {
-            let err = parse_submit(&submit_params(&json)).expect_err(&json);
+            let err = parse_submit(&submit_params(&json), None).expect_err(&json);
             assert_eq!(err.code, "INVALID_ARGUMENT", "{json}: {}", err.message);
         }
         // Oversize (129B, consistent length) is its own class.
@@ -693,7 +863,7 @@ mod tests {
         let json = format!(
             "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"{big}\",\"payload_len\":129}}"
         );
-        let err = parse_submit(&submit_params(&json)).unwrap_err();
+        let err = parse_submit(&submit_params(&json), None).unwrap_err();
         assert_eq!(err.code, "PAYLOAD_TOO_LARGE");
     }
 
@@ -706,7 +876,7 @@ mod tests {
             )
         };
         // The HOST_DURABLE default is admittable only with a durable store.
-        let defaulted = parse_submit(&submit_params(&base("{}"))).unwrap();
+        let defaulted = parse_submit(&submit_params(&base("{}")), None).unwrap();
         assert_eq!(defaulted.storage, STORAGE_DURABLE);
         let err = admission_check(&defaulted, false, false).unwrap_err();
         assert_eq!(err.code, "UNSUPPORTED");
@@ -719,21 +889,43 @@ mod tests {
             "{\"storage\":\"HOST_DURABLE\"}",
         ] {
             let json = base(options);
-            let req = parse_submit(&submit_params(&json)).expect(&json);
+            let req = parse_submit(&submit_params(&json), None).expect(&json);
             let persist = wants_persist_sleep(&submit_params(&json));
             let err = admission_check(&req, persist, false).expect_err(&json);
             assert_eq!(err.code, "UNSUPPORTED", "{json}");
         }
         // BEST_EFFORT + RAM_ONLY is the admittable non-default mix.
         let json = base("{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}");
-        let req = parse_submit(&submit_params(&json)).unwrap();
+        let req = parse_submit(&submit_params(&json), None).unwrap();
         assert!(admission_check(&req, false, false).is_ok());
-        // Gateway destination parses and encodes distinctly from node.
-        let gw = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"gateway\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\"}}";
-        let req = parse_submit(&submit_params(gw)).unwrap();
+        // Gateway destination parses and encodes distinctly from node —
+        // schema-2 with the live binding, never schema-1.
+        let binding = GatewayEndpointBinding {
+            token: [0xa5; 16],
+            gateway_boot: 0x1122_3344_5566_7788,
+            egress: 0x99,
+        };
+        let gw = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"gateway\",\"id\":\"0000000000000003\",\"scope\":\"HOST_RECEIVE_RAM\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\"}}";
+        let req = parse_submit(&submit_params(gw), Some(&binding)).unwrap();
         assert_eq!(req.dest_kind, DEST_GATEWAY);
         assert_eq!(req.canonical[5], DEST_GATEWAY);
+        assert_eq!(req.canonical[0], SCHEMA_VERSION_GATEWAY);
+        let ext = req.gateway.expect("gateway extension bound");
+        assert_eq!(ext.scope, GATEWAY_SCOPE_HOST_RAM);
+        assert_eq!(ext.token, [0xa5; 16]);
+        assert_eq!(ext.gateway_boot, 0x1122_3344_5566_7788);
+        assert_eq!(ext.egress, 0x99);
+        assert_eq!(req.canonical.len(), 60);
         assert!(admission_check(&req, false, false).is_ok());
+        // Without a live registration the same request names the
+        // precondition instead of minting a binding.
+        let err = parse_submit(&submit_params(gw), None).unwrap_err();
+        assert_eq!(err.code, "GATEWAY_UNAVAILABLE");
+        assert!(err.retryable);
+        // And without a scope the request is malformed, not defaulted.
+        let no_scope = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"gateway\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0}";
+        let err = parse_submit(&submit_params(no_scope), Some(&binding)).unwrap_err();
+        assert_eq!(err.code, "INVALID_ARGUMENT");
     }
 
     #[test]

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <set>
 #include <vector>
 
 #include "routeloom/byte_io.hpp"
@@ -114,6 +115,60 @@ std::vector<std::uint8_t> build_canonical(std::uint32_t network = 7,
   return out;
 }
 
+// Canonical gateway send request (schema 2, 05-wire-api.md §5.4): the same
+// 24B head with dest_kind=1, then the 34B destination extension —
+// scope:u8, reserved:u8, token:16, gateway_boot:u64, egress_gateway:u64 —
+// before payload_len/payload. Fixed part is 60B, payload is ≤96B.
+std::vector<std::uint8_t> build_canonical_v2(
+    std::uint32_t network = 7, NodeId dest = 2, std::uint8_t scope = 2,
+    const std::array<std::uint8_t, 16>& token = {},
+    std::uint64_t gateway_boot = 0xB0071D0001ULL, NodeId egress = 1,
+    std::uint8_t delivery = 1, std::uint32_t ttl = 5000,
+    ByteView payload = ByteView{}) {
+  std::vector<std::uint8_t> out(60 + payload.size, 0);
+  out[0] = 2;
+  out[1] = static_cast<std::uint8_t>(network >> 24);
+  out[2] = static_cast<std::uint8_t>(network >> 16);
+  out[3] = static_cast<std::uint8_t>(network >> 8);
+  out[4] = static_cast<std::uint8_t>(network);
+  out[5] = 1;
+  for (int i = 0; i < 8; ++i) {
+    out[static_cast<std::size_t>(6 + i)] =
+        static_cast<std::uint8_t>(dest >> (56 - i * 8));
+  }
+  out[14] = delivery;
+  out[15] = 1;
+  out[16] = 0;
+  out[17] = 1;
+  out[18] = static_cast<std::uint8_t>(ttl >> 24);
+  out[19] = static_cast<std::uint8_t>(ttl >> 16);
+  out[20] = static_cast<std::uint8_t>(ttl >> 8);
+  out[21] = static_cast<std::uint8_t>(ttl);
+  out[22] = 10;
+  out[23] = 0;
+  out[24] = scope;
+  out[25] = 0;
+  std::array<std::uint8_t, 16> real_token = token;
+  if (real_token == std::array<std::uint8_t, 16>{}) {
+    for (std::size_t i = 0; i < real_token.size(); ++i) {
+      real_token[i] = static_cast<std::uint8_t>(0x7A + i);
+    }
+  }
+  std::memcpy(out.data() + 26, real_token.data(), 16);
+  for (int i = 0; i < 8; ++i) {
+    out[static_cast<std::size_t>(42 + i)] =
+        static_cast<std::uint8_t>(gateway_boot >> (56 - i * 8));
+    out[static_cast<std::size_t>(50 + i)] =
+        static_cast<std::uint8_t>(egress >> (56 - i * 8));
+  }
+  out[58] = static_cast<std::uint8_t>(payload.size >> 8);
+  out[59] = static_cast<std::uint8_t>(payload.size & 0xFF);
+  if (payload.size > 0) {
+    std::memcpy(out.data() + 60, payload.data, payload.size);
+  }
+  return out;
+}
+
 SubmitRequest make_submit(std::uint64_t seq, ByteView canonical,
                           std::uint64_t deadline = 60000) {
   SubmitRequest req{};
@@ -194,7 +249,9 @@ void test_submit_codec() {
                                     ByteView{big.data(), big.size()});
   const SubmitRequest req_full = make_submit(2, ByteView{full.data(), full.size()});
   const auto bytes_full = encode_submit_bytes(req_full);
-  CHECK(bytes_full.size() == kSubmitMaxSize);
+  // Schema-1 maximum (26+128=154B canonical → 262B submit); the 264B bound
+  // covers the schema-2 form (60+96=156B canonical) as well.
+  CHECK(bytes_full.size() == kSubmitFixedSize + full.size());
   SubmitRequest decoded_full{};
   CHECK(decode_submit(ByteView{bytes_full.data(), bytes_full.size()}, decoded_full));
 
@@ -351,7 +408,7 @@ void test_response_codecs() {
   CHECK(!decode_receipt(ByteView{mutated.data(), mutated.size()},
                         HostOpsSub::Submit, bad));
   mutated = out;
-  mutated[73] = 4;  // unknown evidence
+  mutated[73] = 5;  // unknown evidence (4 is HostRamReceived)
   CHECK(!decode_receipt(ByteView{mutated.data(), mutated.size()},
                         HostOpsSub::Submit, bad));
 
@@ -473,10 +530,45 @@ void test_canonical_parser() {
   mutated[23] = 1;
   CHECK(parse_canonical_request(ByteView{mutated.data(), mutated.size()}, fields));
   CHECK(fields.persist_sleep);
-  // Gateway-kind destinations parse with any id (bridge rejects wholesale).
-  const auto gw = build_canonical(7, 1, 1);
+  // Gateway-kind destinations are schema-2 only: a schema-1 body carrying
+  // dest_kind=1 is malformed (the schema-1 shape has nowhere to bind an
+  // endpoint token), and schema 2 with a node destination is malformed too.
+  mutated = bytes;
+  mutated[5] = 1;
+  CHECK(!parse_canonical_request(ByteView{mutated.data(), mutated.size()}, bad));
+  const auto gw = build_canonical_v2(7, 2, 2, {}, 0xB0071D0001ULL, 1);
   CHECK(parse_canonical_request(ByteView{gw.data(), gw.size()}, fields));
-  CHECK(fields.dest_kind == 1);
+  CHECK(fields.schema == 2 && fields.dest_kind == 1 && fields.destination == 2);
+  CHECK(fields.gateway_scope == 2);
+  CHECK(fields.gateway_boot == 0xB0071D0001ULL && fields.egress_gateway == 1);
+  const std::array<std::uint8_t, 16> zero_token{};
+  CHECK(fields.gateway_token != zero_token);
+  // A schema-2 body bound to a node destination is never reinterpreted.
+  auto gw_bad = gw;
+  gw_bad[5] = 0;
+  CHECK(!parse_canonical_request(ByteView{gw_bad.data(), gw_bad.size()}, bad));
+  // Reserved extension fields fail structurally: bad scope, nonzero
+  // reserved byte, all-zero token, reserved boot/egress ids.
+  gw_bad = gw;
+  gw_bad[24] = 3;
+  CHECK(!parse_canonical_request(ByteView{gw_bad.data(), gw_bad.size()}, bad));
+  gw_bad = gw;
+  gw_bad[25] = 1;
+  CHECK(!parse_canonical_request(ByteView{gw_bad.data(), gw_bad.size()}, bad));
+  gw_bad = gw;
+  std::memset(gw_bad.data() + 26, 0, 16);
+  CHECK(!parse_canonical_request(ByteView{gw_bad.data(), gw_bad.size()}, bad));
+  gw_bad = gw;
+  std::memset(gw_bad.data() + 42, 0, 8);
+  CHECK(!parse_canonical_request(ByteView{gw_bad.data(), gw_bad.size()}, bad));
+  gw_bad = gw;
+  std::memset(gw_bad.data() + 50, 0xFF, 8);
+  CHECK(!parse_canonical_request(ByteView{gw_bad.data(), gw_bad.size()}, bad));
+  // Schema-2 payload bound is 96B — 97B is malformed, never truncated.
+  std::array<std::uint8_t, 97> over{};
+  const auto gw_over = build_canonical_v2(7, 2, 2, {}, 0xB0071D0001ULL, 1, 1,
+                                          5000, ByteView{over.data(), 97});
+  CHECK(!parse_canonical_request(ByteView{gw_over.data(), gw_over.size()}, bad));
 }
 
 // ------------------------------------------------------------------ window
@@ -1527,7 +1619,9 @@ void test_bridge_lease_lane_and_validation() {
                        HostOpsSub::Submit, applied_resp));
   CHECK(applied_resp.result == HostOpsResult::Unsupported);
 
-  const auto gateway = build_canonical(7, 1, 1);
+  // A well-formed schema-2 gateway destination on a bridge without the
+  // gateway endpoint capability is Unsupported — never silently accepted.
+  const auto gateway = build_canonical_v2(7, 2);
   const auto gateway_submit =
       submit_bytes(6, ByteView{gateway.data(), gateway.size()});
   const auto gateway_answer = transact(world, host, now, 118,
@@ -1905,6 +1999,953 @@ void test_bridge_stale_delivery_event_after_retire() {
   world.device_sink.frames.clear();
 }
 
+// ------------------------------------------------------------------ Gateway lane (P3)
+//
+// USB HostOps subcommands 0x10–0x13 (05-wire-api.md §5.6): host
+// registration, scope-2 ingress + ACK-after-storage, and unregister —
+// plus the schema-2 SUBMIT paths (loopback to this node's ReceiveLog and
+// remote sends through the gateway component's origin path).
+
+std::vector<std::uint8_t> register_bytes(std::uint64_t network,
+                                         std::uint64_t host_boot,
+                                         std::uint32_t lease_ms) {
+  const HostRegisterRequest req{network, host_boot, lease_ms};
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kHostRegisterRequestPayload>
+      out{};
+  std::size_t written = 0;
+  if (!encode_host_register(req, MutableByteView{out.data(), out.size()},
+                            written)) {
+    return {};
+  }
+  return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+std::vector<std::uint8_t> unregister_bytes(
+    const std::array<std::uint8_t, 16>& token) {
+  const HostUnregisterRequest req{token};
+  std::array<std::uint8_t,
+             kGatewayInnerHeadSize + kHostUnregisterRequestPayload>
+      out{};
+  std::size_t written = 0;
+  if (!encode_host_unregister(req, MutableByteView{out.data(), out.size()},
+                              written)) {
+    return {};
+  }
+  return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+std::vector<std::uint8_t> ingress_ack_bytes(
+    const GatewayIngress& ingress, const std::array<std::uint8_t, 16>& token,
+    const GatewayOpsResult outcome) {
+  const GatewayIngressAck ack{token,
+                              ingress.ref_origin,
+                              ingress.ref_session,
+                              ingress.ref_sequence,
+                              ingress.request_digest,
+                              static_cast<std::uint16_t>(outcome)};
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGatewayIngressAckPayload>
+      out{};
+  std::size_t written = 0;
+  if (!encode_gateway_ingress_ack(
+          ack, MutableByteView{out.data(), out.size()}, written)) {
+    return {};
+  }
+  return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+using Token16 = std::array<std::uint8_t, 16>;
+
+// Every sealed HostOps frame the device emitted since the last clear,
+// opened and paired with its wire request id — device-issued 0x11s arrive
+// on THEIR OWN request ids, which the host echoes in its 0x12/0x13.
+struct DeviceFrame {
+  std::uint64_t request;
+  std::vector<std::uint8_t> body;
+};
+
+std::vector<DeviceFrame> collect_host_ops(World& world, HostDriver& host) {
+  std::vector<DeviceFrame> out;
+  for (const auto& record : world.device_sink.frames) {
+    if (record.frame.kind != FrameKind::HostOps) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                   opened)) {
+      continue;
+    }
+    out.push_back(DeviceFrame{
+        record.frame.request,
+        std::vector<std::uint8_t>(opened.data, opened.data + opened.size)});
+  }
+  world.device_sink.frames.clear();
+  return out;
+}
+
+// The frame carrying sub `sub` (inner[1]), or nullptr — a submit
+// transaction emits BOTH the receipt and any device-issued 0x11, so the
+// sub byte is the only honest discriminator.
+const DeviceFrame* find_sub(const std::vector<DeviceFrame>& frames,
+                            const std::uint8_t sub) {
+  for (const auto& frame : frames) {
+    if (frame.body.size() > 1 && frame.body[1] == sub) return &frame;
+  }
+  return nullptr;
+}
+
+// feed + drain + collect: the exchange primitive for lanes that emit
+// more than one HostOps frame per request.
+std::vector<DeviceFrame> exchange(World& world, HostDriver& host,
+                                  MonotonicMs& now, std::uint64_t request,
+                                  ByteView inner) {
+  world.feed(host.sealed(FrameKind::HostOps, request, inner), now);
+  world.drain(now);
+  now += 200;
+  return collect_host_ops(world, host);
+}
+
+// The bridge wired as the gateway endpoint: cap bit 3 advertised, the
+// component attached (registration + loopback sink + origin path), and a
+// second gateway on n2 for remote-send coverage.
+struct GatewayWorld : World {
+  GatewayDelivery gateway1;
+  GatewayDelivery gateway2;
+  struct Sink2 final : GatewayHostSink {
+    bool ready{false};
+    HostBinding binding{};
+    std::vector<MessageKey> ingresses;
+    bool host_ready(HostBinding& out) noexcept override {
+      out = binding;
+      return ready;
+    }
+    Status host_ingress(const MessageKey& key, const RequestDigest&, ByteView,
+                        ByteView, MonotonicMs) noexcept override {
+      ingresses.push_back(key);
+      return Status::success();
+    }
+  } sink2;
+
+  GatewayWorld()
+      : World(0x3 | kCapHostOpsV1 | kCapGatewayEndpointV1),
+        gateway1(n1),
+        gateway2(n2) {
+    if (!bridge.attach_gateway(gateway1).ok()) {
+      std::fprintf(stderr, "attach_gateway failed\n");
+      ++failures;
+    }
+    gateway2.attach();  // n2's node needs its gateway sink for wire frames
+    GatewayRoleConfig role{};
+    role.gateway_boot = 0x2222;
+    role.capabilities = kGatewayCapHostReceive;
+    role.host_sink = &sink2;
+    if (!gateway2.enable_gateway(role).ok()) {
+      std::fprintf(stderr, "enable_gateway(n2) failed\n");
+      ++failures;
+    }
+    sink2.ready = true;
+  }
+
+  // Pump both mesh nodes and the radio queue alongside the USB pump —
+  // resolves, service frames and receipts all ride the sim.
+  void run_mesh(MonotonicMs& now, MonotonicMs ms) {
+    const MonotonicMs end = now + ms;
+    for (; now <= end; now += 5) {
+      n1.poll(now);
+      n2.poll(now);
+      net.flush(now);
+      bridge.poll(now);
+      const auto bytes = stream.take();
+      if (!bytes.empty()) {
+        device_decoder.push(ByteView{bytes.data(), bytes.size()}, now);
+      }
+    }
+  }
+};
+
+void test_gateway_inner_codecs() {
+  // 0x10 roundtrip: exact wire shape, strict payload_len.
+  const HostRegisterRequest reg{7, 0x11223344, 15000};
+  std::array<std::uint8_t, 256> buf{};
+  std::size_t written = 0;
+  CHECK(encode_host_register(reg, MutableByteView{buf.data(), buf.size()},
+                             written));
+  CHECK(written == kGatewayInnerHeadSize + kHostRegisterRequestPayload);
+  CHECK(buf[0] == 1 && buf[1] == static_cast<std::uint8_t>(HostOpsSub::HostRegister));
+  HostRegisterRequest reg_dec{};
+  CHECK(decode_host_register(ByteView{buf.data(), written}, reg_dec));
+  CHECK(reg_dec.network == 7 && reg_dec.host_boot == 0x11223344 &&
+        reg_dec.lease_ms == 15000);
+  HostRegisterRequest bad{};
+  CHECK(!decode_host_register(ByteView{buf.data(), written - 1}, bad));
+  std::array<std::uint8_t, 256> wrong_sub = buf;
+  wrong_sub[1] = static_cast<std::uint8_t>(HostOpsSub::HostUnregister);
+  CHECK(!decode_host_register(ByteView{wrong_sub.data(), written}, bad));
+
+  const HostRegisterResponse reg_resp{
+      static_cast<std::uint16_t>(GatewayOpsResult::Ok),
+      std::array<std::uint8_t, 16>{0xAA},
+      0xB0071D0001ULL,
+      std::array<std::uint8_t, 32>{0x55},
+      15000};
+  CHECK(encode_host_register_response(
+      reg_resp, MutableByteView{buf.data(), buf.size()}, written));
+  CHECK(written == kGatewayInnerHeadSize + kHostRegisterResponsePayload);
+  HostRegisterResponse reg_resp_dec{};
+  CHECK(decode_host_register_response(ByteView{buf.data(), written},
+                                      reg_resp_dec));
+  CHECK(reg_resp_dec.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  CHECK(reg_resp_dec.gateway_boot == 0xB0071D0001ULL &&
+        reg_resp_dec.lease_ms == 15000);
+
+  // 0x11 roundtrip at both payload bounds (0 and 96).
+  for (const std::size_t plen : {std::size_t{0}, std::size_t{96}}) {
+    GatewayIngress ingress{};
+    ingress.submit_prefix[0] = 1;
+    ingress.submit_prefix[1] = 3;
+    ingress.submit_prefix[2] = 2;
+    ingress.ref_origin = 0x0abc;
+    ingress.ref_session = 77;
+    ingress.ref_sequence = 0x0102;
+    ingress.request_digest = test_hash(0x40);
+    std::vector<std::uint8_t> payload(plen, 0x5A);
+    ingress.payload = ByteView{payload.data(), payload.size()};
+    CHECK(encode_gateway_ingress(
+        ingress, MutableByteView{buf.data(), buf.size()}, written));
+    CHECK(written == kGatewayInnerHeadSize + kGatewayIngressFixedPayload + plen);
+    GatewayIngress dec{};
+    CHECK(decode_gateway_ingress(ByteView{buf.data(), written}, dec));
+    CHECK(dec.ref_origin == 0x0abc && dec.ref_session == 77 &&
+          dec.ref_sequence == 0x0102);
+    CHECK(dec.payload.size == plen);
+    // 97 bytes never encodes — the cap is enforced before the wire.
+    std::vector<std::uint8_t> over(97, 1);
+    ingress.payload = ByteView{over.data(), over.size()};
+    CHECK(!encode_gateway_ingress(
+        ingress, MutableByteView{buf.data(), buf.size()}, written));
+  }
+
+  // 0x12 / 0x13 roundtrips.
+  const GatewayIngressAck ack{std::array<std::uint8_t, 16>{0x11},
+                              0x0abc,
+                              77,
+                              0x0102,
+                              test_hash(0x40),
+                              static_cast<std::uint16_t>(GatewayOpsResult::Ok)};
+  CHECK(encode_gateway_ingress_ack(
+      ack, MutableByteView{buf.data(), buf.size()}, written));
+  CHECK(written == kGatewayInnerHeadSize + kGatewayIngressAckPayload);
+  GatewayIngressAck ack_dec{};
+  CHECK(decode_gateway_ingress_ack(ByteView{buf.data(), written}, ack_dec));
+  CHECK(ack_dec.outcome == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  CHECK(ack_dec.ref_origin == 0x0abc && ack_dec.ref_sequence == 0x0102);
+  // An outcome value outside the enum never decodes as a named result.
+  buf[written - 1] = 0x7F;
+  buf[written - 2] = 0x7F;
+  CHECK(!decode_gateway_ingress_ack(ByteView{buf.data(), written}, ack_dec));
+
+  const HostUnregisterRequest unreg{std::array<std::uint8_t, 16>{0x33}};
+  CHECK(encode_host_unregister(unreg,
+                               MutableByteView{buf.data(), buf.size()}, written));
+  CHECK(written == kGatewayInnerHeadSize + kHostUnregisterRequestPayload);
+  HostUnregisterRequest unreg_dec{};
+  CHECK(decode_host_unregister(ByteView{buf.data(), written}, unreg_dec));
+  CHECK(unreg_dec.token == Token16{0x33});
+
+  const HostUnregisterResponse unreg_resp{
+      static_cast<std::uint16_t>(GatewayOpsResult::Stale)};
+  CHECK(encode_host_unregister_response(
+      unreg_resp, MutableByteView{buf.data(), buf.size()}, written));
+  CHECK(written == kGatewayInnerHeadSize + kHostUnregisterResponsePayload);
+  HostUnregisterResponse unreg_resp_dec{};
+  CHECK(decode_host_unregister_response(ByteView{buf.data(), written},
+                                        unreg_resp_dec));
+  CHECK(unreg_resp_dec.result ==
+        static_cast<std::uint16_t>(GatewayOpsResult::Stale));
+}
+
+// 0x10 happy path + every honest refusal shape.
+void test_bridge_gateway_register() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+
+  const auto answer =
+      transact(world, host, now, 60,
+               ByteView{register_bytes(7, 0x99, 15000).data(),
+                        kGatewayInnerHeadSize + kHostRegisterRequestPayload},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(ByteView{answer.data(), answer.size()},
+                                      reg));
+  CHECK(reg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  CHECK(reg.gateway_boot == 0xB0071D0001ULL);
+  CHECK(reg.lease_ms == 15000);
+  CHECK(reg.token != Token16{});
+  // host_digest = SHA-256("host-operator") — the principal the transcript
+  // bound, never a client-declared value.
+  HostDigest expected_digest{};
+  sha256(ByteView{reinterpret_cast<const std::uint8_t*>("host-operator"), 13},
+         expected_digest);
+  CHECK(reg.host_digest == expected_digest);
+
+  // Renewal on the same session + host boot keeps the token.
+  const auto renew =
+      transact(world, host, now, 61,
+               ByteView{register_bytes(7, 0x99, 15000).data(),
+                        kGatewayInnerHeadSize + kHostRegisterRequestPayload},
+               got_error, error_code);
+  HostRegisterResponse reg2{};
+  CHECK(decode_host_register_response(ByteView{renew.data(), renew.size()},
+                                      reg2));
+  CHECK(reg2.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  CHECK(reg2.token == reg.token);
+
+  // Wrong network is DENIED — the registration binds the authenticated
+  // session's network, not a requested one.
+  const auto foreign =
+      transact(world, host, now, 62,
+               ByteView{register_bytes(9, 0x99, 15000).data(),
+                        kGatewayInnerHeadSize + kHostRegisterRequestPayload},
+               got_error, error_code);
+  HostRegisterResponse denied{};
+  CHECK(decode_host_register_response(ByteView{foreign.data(), foreign.size()},
+                                      denied));
+  CHECK(denied.result == static_cast<std::uint16_t>(GatewayOpsResult::Denied));
+
+  // Reserved host_boot and insane leases are INVALID.
+  for (const auto& body : {register_bytes(7, 0, 15000),
+                           register_bytes(7, UINT64_MAX, 15000),
+                           register_bytes(7, 0x99, 0),
+                           register_bytes(7, 0x99, 60001)}) {
+    const auto refused =
+        transact(world, host, now, 63, ByteView{body.data(), body.size()},
+                 got_error, error_code);
+    HostRegisterResponse invalid{};
+    CHECK(decode_host_register_response(
+        ByteView{refused.data(), refused.size()}, invalid));
+    CHECK(invalid.result == static_cast<std::uint16_t>(GatewayOpsResult::Invalid));
+  }
+
+  // A malformed inner gets a protocol error, never a response payload.
+  const std::array<std::uint8_t, 4> malformed{{1, 0x10, 0, 1}};
+  const auto error_answer =
+      transact(world, host, now, 64,
+               ByteView{malformed.data(), malformed.size()}, got_error,
+               error_code);
+  CHECK(got_error);
+}
+
+// 0x10/0x11 without the endpoint capability or a live session is refused,
+// never silently served.
+void test_bridge_gateway_unsupported() {
+  World world(0x3 | kCapHostOpsV1);  // no cap bit 3, no component
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto body = register_bytes(7, 0x99, 15000);
+  const auto answer =
+      transact(world, host, now, 60, ByteView{body.data(), body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(ByteView{answer.data(), answer.size()},
+                                      reg));
+  CHECK(reg.result ==
+        static_cast<std::uint16_t>(GatewayOpsResult::Unsupported));
+  const auto unreg_body = unregister_bytes(Token16{0x11});
+  const auto unreg_answer =
+      transact(world, host, now, 61,
+               ByteView{unreg_body.data(), unreg_body.size()}, got_error,
+               error_code);
+  HostUnregisterResponse unreg{};
+  CHECK(decode_host_unregister_response(
+      ByteView{unreg_answer.data(), unreg_answer.size()}, unreg));
+  CHECK(unreg.result ==
+        static_cast<std::uint16_t>(GatewayOpsResult::Unsupported));
+}
+
+// Loopback: schema-2 SUBMIT to this node — the payload goes straight into
+// the session's ingress lane; the host's 0x12 completes the record with
+// HOST_RAM_RECEIVED evidence, and only after the ACK.
+void test_bridge_gateway_loopback() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+
+  // Register the host endpoint first — the token binds this session.
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+  CHECK(reg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+
+  const std::array<std::uint8_t, 4> payload{{0xDE, 0xAD, 0xBE, 0xEF}};
+  const auto canonical =
+      build_canonical_v2(7, 1, 2, reg.token, 0xB0071D0001ULL, 1, 1, 5000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit =
+      submit_bytes(1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  // One SUBMIT emits TWO device frames: the 0x11 ingress (its own request
+  // id) and the 0x01 receipt — pick each by its sub byte.
+  const auto frames = exchange(world, host, now, 61,
+                               ByteView{submit.data(), submit.size()});
+  const DeviceFrame* receipt_frame =
+      find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::Submit));
+  const DeviceFrame* ingress_frame =
+      find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::GatewayIngress));
+  CHECK(receipt_frame != nullptr);
+  CHECK(ingress_frame != nullptr);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(
+      ByteView{receipt_frame->body.data(), receipt_frame->body.size()},
+      HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::Ok);
+  CHECK(receipt.state == WindowState::Sent);
+  CHECK(receipt.msg_valid);
+  CHECK(receipt.evidence == DispatchWindow::Evidence::GatewayAccepted);
+
+  // The device-issued 0x11 rides its own request id; the host answers on it.
+  CHECK(ingress_frame->body.size() ==
+        kGatewayInnerHeadSize + kGatewayIngressFixedPayload + payload.size());
+  GatewayIngress ingress{};
+  CHECK(decode_gateway_ingress(
+      ByteView{ingress_frame->body.data(), ingress_frame->body.size()},
+      ingress));
+  // Prefix shape: ver1 / ServiceSubmit3 / scope2 / token16 / boot8 /
+  // plen2 / reserved2 — the digest commits to exactly these bytes.
+  CHECK(ingress.submit_prefix[0] == 1 && ingress.submit_prefix[1] == 3);
+  CHECK(ingress.submit_prefix[2] == 2);
+  CHECK(std::memcmp(ingress.submit_prefix.data() + 4, reg.token.data(), 16) ==
+        0);
+  std::uint64_t prefix_boot = 0;
+  for (int i = 0; i < 8; ++i) {
+    prefix_boot = (prefix_boot << 8U) | ingress.submit_prefix[20 + i];
+  }
+  CHECK(prefix_boot == 0xB0071D0001ULL);
+  const std::uint16_t prefix_len =
+      static_cast<std::uint16_t>((ingress.submit_prefix[28] << 8U) |
+                               ingress.submit_prefix[29]);
+  CHECK(prefix_len == payload.size());
+  CHECK(ingress.ref_origin == 1);          // this node mints the loopback key
+  CHECK(ingress.ref_session == receipt.msg_session);
+  CHECK(ingress.ref_sequence == receipt.msg_seq);
+  CHECK(ingress.payload.size == payload.size());
+  // request_digest = SHA-256(prefix || payload) — recomputed, not trusted.
+  std::array<std::uint8_t, 36> digest_input{};
+  std::memcpy(digest_input.data(), ingress.submit_prefix.data(), 32);
+  std::memcpy(digest_input.data() + 32, payload.data(), payload.size());
+  RequestDigest expected_digest{};
+  sha256(ByteView{digest_input.data(), digest_input.size()}, expected_digest);
+  CHECK(ingress.request_digest == expected_digest);
+
+  // No ACK yet: the position stays Sent (the host never claimed storage).
+  const auto pending_query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto pending_answer =
+      transact(world, host, now, 62,
+               ByteView{pending_query.data(), pending_query.size()},
+               got_error, error_code);
+  QueryResponse pending{};
+  CHECK(decode_query_response(
+      ByteView{pending_answer.data(), pending_answer.size()}, pending));
+  CHECK(pending.state == WindowState::Sent);
+
+  // A wrong-digest ACK is not evidence: errors counted, slot stays armed.
+  GatewayIngressAck forged{reg.token,
+                           ingress.ref_origin,
+                           ingress.ref_session,
+                           ingress.ref_sequence,
+                           test_hash(0x66),
+                           static_cast<std::uint16_t>(GatewayOpsResult::Ok)};
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGatewayIngressAckPayload>
+      forged_body{};
+  std::size_t forged_size = 0;
+  CHECK(encode_gateway_ingress_ack(
+      forged, MutableByteView{forged_body.data(), forged_body.size()},
+      forged_size));
+  const auto rx_errors_before = world.bridge.stats().rx_errors;
+  world.feed(host.sealed(FrameKind::HostOps, ingress_frame->request,
+                         ByteView{forged_body.data(), forged_size}),
+             now);
+  world.drain(now);
+  CHECK(world.bridge.stats().rx_errors > rx_errors_before);
+  collect_host_ops(world, host);
+
+  // The honest 0x12 completes the record: Delivered + HostRamReceived.
+  const auto ack_body =
+      ingress_ack_bytes(ingress, reg.token, GatewayOpsResult::Ok);
+  world.feed(host.sealed(FrameKind::HostOps, ingress_frame->request,
+                         ByteView{ack_body.data(), ack_body.size()}),
+             now);
+  world.drain(now);
+  collect_host_ops(world, host);
+  const auto done_query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto done_answer =
+      transact(world, host, now, 63,
+               ByteView{done_query.data(), done_query.size()}, got_error,
+               error_code);
+  QueryResponse done{};
+  CHECK(decode_query_response(ByteView{done_answer.data(), done_answer.size()},
+                              done));
+  CHECK(done.result == HostOpsResult::Ok);
+  CHECK(done.state == WindowState::Delivered);
+  CHECK(done.evidence == DispatchWindow::Evidence::HostRamReceived);
+
+  // A stale-token SUBMIT is refused as InvalidRequest — never rebound.
+  const auto stale_canonical = build_canonical_v2(
+      7, 1, 2, std::array<std::uint8_t, 16>{0x77}, 0xB0071D0001ULL, 1, 1,
+      5000, ByteView{payload.data(), payload.size()});
+  const auto stale_submit = submit_bytes(
+      2, ByteView{stale_canonical.data(), stale_canonical.size()}, now + 8000);
+  const auto stale_answer =
+      transact(world, host, now, 64,
+               ByteView{stale_submit.data(), stale_submit.size()}, got_error,
+               error_code);
+  DispatchReceipt stale_receipt{};
+  CHECK(decode_receipt(ByteView{stale_answer.data(), stale_answer.size()},
+                       HostOpsSub::Submit, stale_receipt));
+  CHECK(stale_receipt.result == HostOpsResult::InvalidRequest);
+}
+
+// ACK loss: the pending ingress is resent ONCE inside the 5s window —
+// the host dedups on the bound MessageKey (G03) — never a third emit.
+// Past the registration lease a schema-2 submit is refused (G05).
+void test_bridge_gateway_ingress_resend_and_lease() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+
+  const std::array<std::uint8_t, 3> payload{{5, 6, 7}};
+  const auto canonical =
+      build_canonical_v2(7, 1, 2, reg.token, 0xB0071D0001ULL, 1, 1, 5000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit =
+      submit_bytes(1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  const auto frames = exchange(world, host, now, 61,
+                               ByteView{submit.data(), submit.size()});
+  const DeviceFrame* ingress_frame =
+      find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::GatewayIngress));
+  CHECK(ingress_frame != nullptr);
+  if (ingress_frame == nullptr) return;
+  const std::uint64_t ingress_request = ingress_frame->request;
+  GatewayIngress ingress{};
+  CHECK(decode_gateway_ingress(
+      ByteView{ingress_frame->body.data(), ingress_frame->body.size()},
+      ingress));
+
+  // Inside the window with no 0x12: exactly one resend on the same id.
+  now += 1300;  // past the 1200ms resend mark
+  world.drain(now);
+  const auto resends = collect_host_ops(world, host);
+  const DeviceFrame* resent =
+      find_sub(resends, static_cast<std::uint8_t>(HostOpsSub::GatewayIngress));
+  CHECK(resent != nullptr);
+  if (resent != nullptr) {
+    CHECK(resent->request == ingress_request);
+    CHECK(resent->body == ingress_frame->body);
+  }
+  // A second wait inside the window emits nothing — the retry is bounded.
+  now += 1300;
+  world.drain(now);
+  const auto none = collect_host_ops(world, host);
+  CHECK(find_sub(none, static_cast<std::uint8_t>(HostOpsSub::GatewayIngress)) ==
+        nullptr);
+
+  // The real ACK still lands inside the window: Delivered stands.
+  const auto ack_body =
+      ingress_ack_bytes(ingress, reg.token, GatewayOpsResult::Ok);
+  world.feed(host.sealed(FrameKind::HostOps, ingress_request,
+                         ByteView{ack_body.data(), ack_body.size()}),
+             now);
+  world.drain(now);
+  collect_host_ops(world, host);
+  const auto done_query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto done_answer =
+      transact(world, host, now, 62,
+               ByteView{done_query.data(), done_query.size()}, got_error,
+               error_code);
+  QueryResponse done{};
+  CHECK(decode_query_response(ByteView{done_answer.data(), done_answer.size()},
+                              done));
+  CHECK(done.state == WindowState::Delivered);
+  CHECK(done.evidence == DispatchWindow::Evidence::HostRamReceived);
+
+  // Lease expiry: the registration granted 15s — a submit after it is
+  // refused InvalidRequest even though the token string still matches.
+  now += 16000;
+  const auto expired_submit = submit_bytes(
+      2, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  const auto expired_answer =
+      transact(world, host, now, 63,
+               ByteView{expired_submit.data(), expired_submit.size()},
+               got_error, error_code);
+  DispatchReceipt expired{};
+  CHECK(decode_receipt(ByteView{expired_answer.data(), expired_answer.size()},
+                       HostOpsSub::Submit, expired));
+  CHECK(expired.result == HostOpsResult::InvalidRequest);
+}
+
+// Scope-2 remote send while the destination's host is down (G02): the
+// resolve can never name a live endpoint, the send ends Failed — never a
+// Delivered claim on gateway reachability alone.
+void test_bridge_gateway_host_down() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  world.sink2.ready = false;  // host stopped before the send
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+  world.sink2.binding.principal_digest = reg.host_digest;
+  world.sink2.binding.host_boot = 0x99;
+
+  const std::array<std::uint8_t, 2> payload{{1, 2}};
+  const auto canonical =
+      build_canonical_v2(7, 2, 2, reg.token, 0xB0071D0001ULL, 1, 1, 8000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit =
+      submit_bytes(1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  const auto submit_answer =
+      transact(world, host, now, 61,
+               ByteView{submit.data(), submit.size()}, got_error, error_code);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(ByteView{submit_answer.data(), submit_answer.size()},
+                       HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::Ok);
+  CHECK(receipt.state == WindowState::Sent);
+
+  // Drive past the resolve budget: the endpoint never becomes Ready.
+  for (int i = 0; i < 60; ++i) world.run_mesh(now, 100);
+  CHECK(world.sink2.ingresses.empty());
+  const auto done_query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto done_answer =
+      transact(world, host, now, 62,
+               ByteView{done_query.data(), done_query.size()}, got_error,
+               error_code);
+  QueryResponse done{};
+  CHECK(decode_query_response(ByteView{done_answer.data(), done_answer.size()},
+                              done));
+  CHECK(done.result == HostOpsResult::Ok);
+  CHECK(done.state == WindowState::Failed);
+}
+
+// Pending-ingress capacity is honest: the 9th loopback send inside the
+// ack window is refused MeshRejected, never silently queued.
+void test_bridge_gateway_ingress_busy() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+
+  const std::array<std::uint8_t, 2> payload{{1, 2}};
+  std::set<std::uint64_t> ingress_requests;
+  std::uint64_t seq = 0;
+  for (; seq < 8; ++seq) {
+    const auto canonical =
+        build_canonical_v2(7, 1, 2, reg.token, 0xB0071D0001ULL, 1, 1, 5000,
+                           ByteView{payload.data(), payload.size()});
+    const auto submit = submit_bytes(
+        seq + 1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+    const auto frames =
+        exchange(world, host, now, 70 + seq,
+                 ByteView{submit.data(), submit.size()});
+    const DeviceFrame* receipt_frame =
+        find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::Submit));
+    CHECK(receipt_frame != nullptr);
+    DispatchReceipt receipt{};
+    CHECK(decode_receipt(
+        ByteView{receipt_frame->body.data(), receipt_frame->body.size()},
+        HostOpsSub::Submit, receipt));
+    CHECK(receipt.result == HostOpsResult::Ok);
+    // Each accepted loopback occupies a pending-ingress slot (the 0x11 is
+    // out but no 0x12 ever arrives) — 8 fills the lane. Its resend inside
+    // the ack window reuses the same request id.
+    const DeviceFrame* ingress_frame = find_sub(
+        frames, static_cast<std::uint8_t>(HostOpsSub::GatewayIngress));
+    CHECK(ingress_frame != nullptr);
+    if (ingress_frame != nullptr) {
+      ingress_requests.insert(ingress_frame->request);
+    }
+  }
+  const auto canonical =
+      build_canonical_v2(7, 1, 2, reg.token, 0xB0071D0001ULL, 1, 1, 5000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit = submit_bytes(
+      seq + 1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  const auto frames = exchange(world, host, now, 90,
+                               ByteView{submit.data(), submit.size()});
+  const DeviceFrame* busy_frame =
+      find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::Submit));
+  CHECK(busy_frame != nullptr);
+  DispatchReceipt busy{};
+  CHECK(decode_receipt(
+      ByteView{busy_frame->body.data(), busy_frame->body.size()},
+      HostOpsSub::Submit, busy));
+  CHECK(busy.result == HostOpsResult::MeshRejected);
+  // Capacity refusal is honest: any 0x11 on the wire now is a resend of an
+  // already-occupied slot, never a ninth queued ingress.
+  for (const DeviceFrame& frame : frames) {
+    if (frame.body.size() > 1 &&
+        frame.body[1] ==
+            static_cast<std::uint8_t>(HostOpsSub::GatewayIngress)) {
+      CHECK(ingress_requests.count(frame.request) == 1);
+    }
+  }
+}
+
+// Remote scope-2 send: schema-2 SUBMIT to n2's gateway — the bridge
+// resolves through its own component, the sim delivers the service frame,
+// n2's host sink stores, and the wire receipt completes the window record
+// as Delivered with HOST_RAM_RECEIVED evidence.
+void test_bridge_gateway_remote_send() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+  CHECK(reg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  // Same-principal delivery: the remote sink must report OUR principal
+  // digest for the scope-2 endpoint to resolve.
+  world.sink2.binding.principal_digest = reg.host_digest;
+  world.sink2.binding.host_boot = 0x99;
+  world.sink2.binding.usb_session = host.session;
+
+  const std::array<std::uint8_t, 4> payload{{9, 8, 7, 6}};
+  const auto canonical =
+      build_canonical_v2(7, 2, 2, reg.token, 0xB0071D0001ULL, 1, 1, 8000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit =
+      submit_bytes(1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  const auto submit_answer =
+      transact(world, host, now, 61,
+               ByteView{submit.data(), submit.size()}, got_error, error_code);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(ByteView{submit_answer.data(), submit_answer.size()},
+                       HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::Ok);
+  CHECK(receipt.state == WindowState::Sent);
+  CHECK(receipt.evidence == DispatchWindow::Evidence::GatewayAccepted);
+
+  // Drive the mesh until n2's sink receives the scope-2 submit.
+  for (int i = 0; i < 40 && world.sink2.ingresses.empty(); ++i) {
+    world.run_mesh(now, 100);
+  }
+  CHECK(world.sink2.ingresses.size() == 1);
+  // The wire MessageKey is bound into the window record by the send pump.
+  const auto bound_query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto bound_answer =
+      transact(world, host, now, 62,
+               ByteView{bound_query.data(), bound_query.size()}, got_error,
+               error_code);
+  QueryResponse bound{};
+  CHECK(decode_query_response(
+      ByteView{bound_answer.data(), bound_answer.size()}, bound));
+  CHECK(bound.state == WindowState::Sent);
+  CHECK(bound.msg_valid);
+
+  // The remote host's storage ACK is what completes the record — the
+  // Service Receipt flows back over the mesh, not over USB.
+  world.gateway2.on_host_ingress_ack(world.sink2.ingresses.back(),
+                                     /*stored=*/true, now);
+  for (int i = 0; i < 40; ++i) world.run_mesh(now, 100);
+  const auto done_query = lane_bytes(HostOpsSub::QueryDispatch, 1);
+  const auto done_answer =
+      transact(world, host, now, 63,
+               ByteView{done_query.data(), done_query.size()}, got_error,
+               error_code);
+  QueryResponse done{};
+  CHECK(decode_query_response(ByteView{done_answer.data(), done_answer.size()},
+                              done));
+  CHECK(done.result == HostOpsResult::Ok);
+  CHECK(done.state == WindowState::Delivered);
+  CHECK(done.evidence == DispatchWindow::Evidence::HostRamReceived);
+}
+
+// 0x13: only the live token releases the registration — a stale token is
+// refused and the binding survives.
+void test_bridge_gateway_unregister() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+
+  // Foreign token → Stale, registration untouched.
+  const auto stale_body = unregister_bytes(Token16{0x77});
+  const auto stale_answer =
+      transact(world, host, now, 61,
+               ByteView{stale_body.data(), stale_body.size()}, got_error,
+               error_code);
+  HostUnregisterResponse stale{};
+  CHECK(decode_host_unregister_response(
+      ByteView{stale_answer.data(), stale_answer.size()}, stale));
+  CHECK(stale.result == static_cast<std::uint16_t>(GatewayOpsResult::Stale));
+  HostBinding bound{};
+  CHECK(world.bridge.host_ready(bound));
+
+  // Live token → Ok, the endpoint is gone: the component's readiness
+  // check now fails, and new schema-2 submits are refused.
+  const auto unreg_body = unregister_bytes(reg.token);
+  const auto unreg_answer =
+      transact(world, host, now, 62,
+               ByteView{unreg_body.data(), unreg_body.size()}, got_error,
+               error_code);
+  HostUnregisterResponse unreg{};
+  CHECK(decode_host_unregister_response(
+      ByteView{unreg_answer.data(), unreg_answer.size()}, unreg));
+  CHECK(unreg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  CHECK(!world.bridge.host_ready(bound));
+
+  const std::array<std::uint8_t, 2> payload{{1, 2}};
+  const auto canonical =
+      build_canonical_v2(7, 1, 2, reg.token, 0xB0071D0001ULL, 1, 1, 5000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit =
+      submit_bytes(1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+  const auto submit_answer =
+      transact(world, host, now, 63,
+               ByteView{submit.data(), submit.size()}, got_error, error_code);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(ByteView{submit_answer.data(), submit_answer.size()},
+                       HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::InvalidRequest);
+
+  // Unregistering twice is Stale — there is nothing left to release.
+  const auto again = transact(world, host, now, 64,
+                              ByteView{unreg_body.data(), unreg_body.size()},
+                              got_error, error_code);
+  HostUnregisterResponse again_resp{};
+  CHECK(decode_host_unregister_response(
+      ByteView{again.data(), again.size()}, again_resp));
+  CHECK(again_resp.result == static_cast<std::uint16_t>(GatewayOpsResult::Stale));
+}
+
+// A new USB session kills the registration with it: a canonical still
+// bound to the old token is refused InvalidRequest — while the lane is
+// empty AND while a fresh session-2 token is live (never rebound).
+void test_bridge_gateway_stale_session() {
+  GatewayWorld world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto reg_body = register_bytes(7, 0x99, 15000);
+  const auto reg_answer =
+      transact(world, host, now, 60, ByteView{reg_body.data(), reg_body.size()},
+               got_error, error_code);
+  HostRegisterResponse reg{};
+  CHECK(decode_host_register_response(
+      ByteView{reg_answer.data(), reg_answer.size()}, reg));
+  CHECK(reg.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+
+  const std::array<std::uint8_t, 2> payload{{1, 2}};
+  const auto canonical =
+      build_canonical_v2(7, 1, 2, reg.token, 0xB0071D0001ULL, 1, 1, 5000,
+                         ByteView{payload.data(), payload.size()});
+  const auto submit =
+      submit_bytes(1, ByteView{canonical.data(), canonical.size()}, now + 8000);
+
+  // Session 2: a fresh handshake clears the session-1 registration.
+  HostDriver host2;
+  now += 500;
+  CHECK(host_handshake(world, host2, now, 0x2222, 70) != 0);
+  const auto dead_answer =
+      transact(world, host2, now, 71,
+               ByteView{submit.data(), submit.size()}, got_error, error_code);
+  DispatchReceipt dead{};
+  CHECK(decode_receipt(ByteView{dead_answer.data(), dead_answer.size()},
+                       HostOpsSub::Submit, dead));
+  CHECK(dead.result == HostOpsResult::InvalidRequest);
+
+  // Session 2 registers its own binding — a different token. The stale
+  // canonical stays refused: a live registration never resurrects it.
+  const auto reg2_answer =
+      transact(world, host2, now, 72,
+               ByteView{reg_body.data(), reg_body.size()}, got_error,
+               error_code);
+  HostRegisterResponse reg2{};
+  CHECK(decode_host_register_response(
+      ByteView{reg2_answer.data(), reg2_answer.size()}, reg2));
+  CHECK(reg2.result == static_cast<std::uint16_t>(GatewayOpsResult::Ok));
+  CHECK(reg2.token != reg.token);
+  const auto stale_answer =
+      transact(world, host2, now, 73,
+               ByteView{submit.data(), submit.size()}, got_error, error_code);
+  DispatchReceipt stale{};
+  CHECK(decode_receipt(ByteView{stale_answer.data(), stale_answer.size()},
+                       HostOpsSub::Submit, stale));
+  CHECK(stale.result == HostOpsResult::InvalidRequest);
+
+  // And the honest path still works: the same canonical re-bound to the
+  // session-2 token is admitted.
+  const auto fresh =
+      build_canonical_v2(7, 1, 2, reg2.token, 0xB0071D0001ULL, 1, 1, 5000,
+                         ByteView{payload.data(), payload.size()});
+  const auto fresh_submit =
+      submit_bytes(2, ByteView{fresh.data(), fresh.size()}, now + 8000);
+  const auto frames = exchange(world, host2, now, 74,
+                               ByteView{fresh_submit.data(), fresh_submit.size()});
+  const DeviceFrame* ok_frame =
+      find_sub(frames, static_cast<std::uint8_t>(HostOpsSub::Submit));
+  CHECK(ok_frame != nullptr);
+  DispatchReceipt ok{};
+  CHECK(decode_receipt(
+      ByteView{ok_frame->body.data(), ok_frame->body.size()},
+      HostOpsSub::Submit, ok));
+  CHECK(ok.result == HostOpsResult::Ok);
+}
+
 }  // namespace
 
 int main() {
@@ -1936,6 +2977,16 @@ int main() {
   test_bridge_lifetime_clamped_to_ttl();
   test_bridge_mesh_rejected();
   test_bridge_stale_delivery_event_after_retire();
+  test_gateway_inner_codecs();
+  test_bridge_gateway_register();
+  test_bridge_gateway_unsupported();
+  test_bridge_gateway_loopback();
+  test_bridge_gateway_ingress_resend_and_lease();
+  test_bridge_gateway_host_down();
+  test_bridge_gateway_ingress_busy();
+  test_bridge_gateway_remote_send();
+  test_bridge_gateway_unregister();
+  test_bridge_gateway_stale_session();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);
     return 1;

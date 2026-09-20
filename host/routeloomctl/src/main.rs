@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|cancel <opid>"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|cancel <opid>"
     );
 }
 
@@ -27,13 +27,16 @@ fn open_epoch_request(network: &str) -> String {
 }
 
 /// Parameters for one API1 `messages.submit` request line. All strings are
-/// validated (and hex lowercased) by `submit_command` before reaching here.
+/// validated (and hex lowercased) by `submit_command`/`gateway_send_command`
+/// before reaching here. `scope` is Some only for gateway destinations —
+/// schema-2 requires it and node destinations reject it.
 struct SubmitParams<'a> {
     network: &'a str,
     epoch: &'a str,
     key: &'a str,
     dest_kind: &'a str,
     dest: &'a str,
+    scope: Option<&'a str>,
     payload_hex: &'a str,
     payload_len: usize,
     delivery: &'a str,
@@ -42,10 +45,14 @@ struct SubmitParams<'a> {
     hop_limit: u64,
 }
 
-/// Build the API1 `messages.submit` request line for the `submit` command.
+/// Build the API1 `messages.submit` request line for the `submit` and
+/// `gateway-send` commands.
 fn submit_request(p: &SubmitParams<'_>) -> String {
+    let scope = p
+        .scope
+        .map_or_else(String::new, |s| format!(",\"scope\":\"{s}\""));
     format!(
-        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"{}\",\"admission_epoch\":\"{}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"options\":{{\"delivery\":\"{}\",\"ttl_ms\":{},\"storage\":\"{}\",\"hop_limit\":{}}}}}}}",
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"{}\",\"admission_epoch\":\"{}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{}\"{scope}}},\"payload_hex\":\"{}\",\"payload_len\":{},\"options\":{{\"delivery\":\"{}\",\"ttl_ms\":{},\"storage\":\"{}\",\"hop_limit\":{}}}}}}}",
         request_id(),
         p.network,
         p.epoch,
@@ -58,6 +65,30 @@ fn submit_request(p: &SubmitParams<'_>) -> String {
         p.ttl_ms,
         p.storage,
         p.hop_limit,
+    )
+}
+
+/// Build the API1 `gateway.resolve` request line for `gateway-resolve`.
+/// `expected_host` is required for HOST_RECEIVE_RAM and omitted for
+/// GATEWAY_SDK_RAM (the daemon rejects a nonzero digest there).
+fn gateway_resolve_request(
+    network: &str,
+    gateway: &str,
+    scope: &str,
+    expected_host: Option<&str>,
+) -> String {
+    let host = expected_host.map_or_else(String::new, |h| format!(",\"expected_host\":\"{h}\""));
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"gateway.resolve\",\"params\":{{\"network\":\"{network}\",\"gateway\":\"{gateway}\",\"scope\":\"{scope}\"{host}}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `gateway.get` request line for `gateway-get`.
+fn gateway_get_request(id: &str) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"gateway.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}",
+        request_id(),
     )
 }
 
@@ -122,6 +153,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "receive" => receive_command(rest)?,
         [name, rest @ ..] if name == "open-epoch" => open_epoch_command(rest)?,
         [name, rest @ ..] if name == "submit" => submit_command(rest)?,
+        [name, rest @ ..] if name == "gateway-resolve" => gateway_resolve_command(rest)?,
+        [name, rest @ ..] if name == "gateway-send" => gateway_send_command(rest)?,
+        [name, rest @ ..] if name == "gateway-get" => gateway_get_command(rest)?,
         [name, rest @ ..] if name == "operation-get" => operation_get_command(rest)?,
         [name, rest @ ..] if name == "operation-get-by-key" => operation_get_by_key_command(rest)?,
         [name, id] if name == "cancel" => cancel_command(id)?,
@@ -258,6 +292,7 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
     let mut key: Option<String> = None;
     let mut to: Option<String> = None;
     let mut gateway = false;
+    let mut scope: Option<String> = None;
     let mut payload: Option<String> = None;
     let mut ttl_ms: u64 = 5000;
     let mut delivery = "RELIABLE".to_string();
@@ -285,6 +320,13 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
             "--key" => key = Some(args.next().ok_or("--key requires a 32-hex id")?.to_string()),
             "--to" => to = Some(args.next().ok_or("--to requires a 16-hex id")?.to_string()),
             "--gateway" => gateway = true,
+            "--scope" => {
+                scope = Some(
+                    args.next()
+                        .ok_or("--scope requires HOST_RECEIVE_RAM|GATEWAY_SDK_RAM")?
+                        .to_string(),
+                )
+            }
             "--payload" => payload = Some(args.next().ok_or("--payload requires hex")?.to_string()),
             "--ttl-ms" => {
                 ttl_ms = args
@@ -359,6 +401,20 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
             generated
         }
     };
+    // Schema-2 requires an explicit scope on a gateway destination; a
+    // node destination must not carry one. `--gateway` without `--scope`
+    // names the host receive mailbox — the only endpoint this daemon is.
+    let scope = match (gateway, scope) {
+        (false, Some(_)) => return Err("--scope is only valid with --gateway".into()),
+        (false, None) => None,
+        (true, provided) => {
+            let scope = provided.unwrap_or_else(|| "HOST_RECEIVE_RAM".to_string());
+            if !matches!(scope.as_str(), "HOST_RECEIVE_RAM" | "GATEWAY_SDK_RAM") {
+                return Err("--scope must be HOST_RECEIVE_RAM|GATEWAY_SDK_RAM".into());
+            }
+            Some(scope)
+        }
+    };
     let payload_len = payload.len() / 2;
     let payload_hex = payload.to_ascii_lowercase();
     Ok(submit_request(&SubmitParams {
@@ -367,6 +423,7 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
         key: &key,
         dest_kind: if gateway { "gateway" } else { "node" },
         dest: &to.to_ascii_lowercase(),
+        scope: scope.as_deref(),
         payload_hex: &payload_hex,
         payload_len,
         delivery: &delivery,
@@ -374,6 +431,123 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
         storage: &storage,
         hop_limit,
     }))
+}
+
+/// `gateway-resolve --network <16hex> --gateway <16hex> --scope
+/// HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]`. Thin
+/// client over `gateway.resolve`: the daemon answers whether the attached
+/// gateway currently binds this host's receive endpoint — the result is
+/// printed verbatim.
+fn gateway_resolve_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut gateway: Option<String> = None;
+    let mut scope: Option<String> = None;
+    let mut expected_host: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => {
+                network = Some(
+                    args.next()
+                        .ok_or("--network requires a 16-hex id")?
+                        .to_string(),
+                )
+            }
+            "--gateway" => {
+                gateway = Some(
+                    args.next()
+                        .ok_or("--gateway requires a 16-hex id")?
+                        .to_string(),
+                )
+            }
+            "--scope" => {
+                scope = Some(
+                    args.next()
+                        .ok_or("--scope requires HOST_RECEIVE_RAM|GATEWAY_SDK_RAM")?
+                        .to_string(),
+                )
+            }
+            "--expected-host" => {
+                expected_host = Some(
+                    args.next()
+                        .ok_or("--expected-host requires a 64-hex digest")?
+                        .to_string(),
+                )
+            }
+            other => return Err(format!("unknown gateway-resolve option: {other}").into()),
+        }
+    }
+    let network = network.ok_or("gateway-resolve requires --network <16hex>")?;
+    let gateway = gateway.ok_or("gateway-resolve requires --gateway <16hex>")?;
+    let scope = scope.ok_or("gateway-resolve requires --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM")?;
+    if !is_hex(&network, 16) {
+        return Err("--network must be a 16-hex id".into());
+    }
+    if !is_hex(&gateway, 16) {
+        return Err("--gateway must be a 16-hex id".into());
+    }
+    if !matches!(scope.as_str(), "HOST_RECEIVE_RAM" | "GATEWAY_SDK_RAM") {
+        return Err("--scope must be HOST_RECEIVE_RAM|GATEWAY_SDK_RAM".into());
+    }
+    if let Some(host) = &expected_host {
+        if !is_hex(host, 64) {
+            return Err("--expected-host must be a 64-hex digest".into());
+        }
+    }
+    Ok(gateway_resolve_request(
+        &network.to_ascii_lowercase(),
+        &gateway.to_ascii_lowercase(),
+        &scope,
+        expected_host
+            .as_deref()
+            .map(|h| h.to_ascii_lowercase())
+            .as_deref(),
+    ))
+}
+
+/// `gateway-send`: a schema-2 `messages.submit` — same options as
+/// `submit` but the destination is a gateway and `--scope` is required
+/// (explicitness over convenience for a host-bound endpoint). The daemon
+/// mints the endpoint binding from its live registration; the caller
+/// names only the destination gateway and scope.
+fn gateway_send_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    if !args.iter().any(|a| a == "--scope") {
+        return Err("gateway-send requires --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM".into());
+    }
+    if args.iter().any(|a| a == "--gateway") {
+        return Err("gateway-send implies --gateway; do not pass it".into());
+    }
+    let mut with_scope = vec!["--gateway".to_string()];
+    with_scope.extend_from_slice(args);
+    submit_command(&with_scope)
+}
+
+/// `gateway-get --id <opid>`: thin client over `gateway.get` — the
+/// outcome query for a schema-2 submit. Prints the daemon's JSON result
+/// verbatim.
+fn gateway_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut id: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--id" => {
+                id = Some(
+                    args.next()
+                        .ok_or("--id requires an operation id")?
+                        .to_string(),
+                )
+            }
+            other => return Err(format!("unknown gateway-get option: {other}").into()),
+        }
+    }
+    let id = id.ok_or("gateway-get requires --id <operation-id>")?;
+    let well_formed = id
+        .split_once(':')
+        .is_some_and(|(lineage, seq)| is_hex(lineage, 32) && is_hex(seq, 16));
+    if !well_formed {
+        return Err("--id must be <32-hex lineage>:<16-hex sequence>".into());
+    }
+    Ok(gateway_get_request(&id.to_ascii_lowercase()))
 }
 
 /// Fresh 128-bit caller key from /dev/urandom (time^pid fallback).
@@ -572,6 +746,59 @@ mod tests {
         assert!(empty.contains("\"payload_hex\":\"\""), "{empty}");
         assert!(empty.contains("\"payload_len\":0"), "{empty}");
         assert!(empty.contains("\"kind\":\"gateway\""), "{empty}");
+        // Schema-2 carries the scope — `--gateway` alone names the host
+        // receive mailbox; `--scope` overrides it.
+        assert!(empty.contains("\"scope\":\"HOST_RECEIVE_RAM\""), "{empty}");
+        let sdk = submit_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--key",
+            "00112233445566778899aabbccddeeff",
+            "--to",
+            "0000000000000003",
+            "--payload",
+            "",
+            "--gateway",
+            "--scope",
+            "GATEWAY_SDK_RAM",
+        ]))
+        .unwrap();
+        assert!(sdk.contains("\"scope\":\"GATEWAY_SDK_RAM\""), "{sdk}");
+        // --scope without --gateway is a client-side error; a bad scope
+        // name is rejected before the wire too.
+        assert!(submit_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--key",
+            "00112233445566778899aabbccddeeff",
+            "--to",
+            "0000000000000003",
+            "--payload",
+            "",
+            "--scope",
+            "HOST_RECEIVE_RAM",
+        ]))
+        .is_err());
+        assert!(submit_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--key",
+            "00112233445566778899aabbccddeeff",
+            "--to",
+            "0000000000000003",
+            "--payload",
+            "",
+            "--gateway",
+            "--scope",
+            "OTHER",
+        ]))
+        .is_err());
         // Missing/invalid inputs fail client-side.
         assert!(submit_command(&args(&["--network", "0000000000000001"])).is_err());
         assert!(submit_command(&args(&[
@@ -686,5 +913,139 @@ mod tests {
         ] {
             assert!(cancel_command(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn gateway_resolve_builds_api1_line() {
+        let line = gateway_resolve_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--gateway",
+            "0000000000000020",
+            "--scope",
+            "HOST_RECEIVE_RAM",
+            "--expected-host",
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        ]))
+        .unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"gateway.resolve\""), "{line}");
+        assert!(line.contains("\"network\":\"0000000000000001\""), "{line}");
+        assert!(line.contains("\"gateway\":\"0000000000000020\""), "{line}");
+        assert!(line.contains("\"scope\":\"HOST_RECEIVE_RAM\""), "{line}");
+        assert!(
+            line.contains(
+                "\"expected_host\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\""
+            ),
+            "{line}"
+        );
+        // SDK-scope resolve omits expected_host entirely.
+        let sdk = gateway_resolve_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--gateway",
+            "0000000000000020",
+            "--scope",
+            "GATEWAY_SDK_RAM",
+        ]))
+        .unwrap();
+        assert!(sdk.contains("\"scope\":\"GATEWAY_SDK_RAM\""), "{sdk}");
+        assert!(!sdk.contains("expected_host"), "{sdk}");
+        // Missing/invalid inputs fail client-side.
+        assert!(gateway_resolve_command(&args(&["--network", "0000000000000001"])).is_err());
+        assert!(gateway_resolve_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--gateway",
+            "0000000000000020",
+            "--scope",
+            "OTHER",
+        ]))
+        .is_err());
+        assert!(gateway_resolve_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--gateway",
+            "zz",
+            "--scope",
+            "HOST_RECEIVE_RAM",
+        ]))
+        .is_err());
+        assert!(gateway_resolve_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--gateway",
+            "0000000000000020",
+            "--scope",
+            "HOST_RECEIVE_RAM",
+            "--expected-host",
+            "short",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn gateway_send_builds_schema2_submit() {
+        let line = gateway_send_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--key",
+            "00112233445566778899aabbccddeeff",
+            "--to",
+            "0000000000000020",
+            "--scope",
+            "HOST_RECEIVE_RAM",
+            "--payload",
+            "00FF80",
+        ]))
+        .unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"messages.submit\""), "{line}");
+        assert!(line.contains("\"kind\":\"gateway\""), "{line}");
+        assert!(line.contains("\"id\":\"0000000000000020\""), "{line}");
+        assert!(line.contains("\"scope\":\"HOST_RECEIVE_RAM\""), "{line}");
+        assert!(line.contains("\"payload_hex\":\"00ff80\""), "{line}");
+        // --scope is required; --gateway is implied and refused.
+        assert!(gateway_send_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--to",
+            "0000000000000020",
+            "--payload",
+            "",
+        ]))
+        .is_err());
+        assert!(gateway_send_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--to",
+            "0000000000000020",
+            "--scope",
+            "HOST_RECEIVE_RAM",
+            "--payload",
+            "",
+            "--gateway",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn gateway_get_builds_api1_line() {
+        let id = "abababababababababababababababab:0000000000000001";
+        let line = gateway_get_command(&args(&["--id", id])).unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"gateway.get\""), "{line}");
+        assert!(
+            line.contains(&format!("\"operation_id\":\"{id}\"")),
+            "{line}"
+        );
+        assert!(gateway_get_command(&args(&["--id", "bogus"])).is_err());
+        assert!(gateway_get_command(&args(&[])).is_err());
     }
 }

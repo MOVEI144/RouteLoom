@@ -232,20 +232,58 @@ Status parse_canonical_request(const ByteView canonical,
   if (status) status = reader.read_u32(out.ttl_ms);
   if (status) status = reader.read_u8(hop);
   if (status) status = reader.read_u8(persist);
+  if (!status) return status;
+  if (schema != 1 && schema != 2) {
+    return Status::error(StatusCode::InvalidArgument, "canonical schema");
+  }
+  // A gateway destination is only well-formed under schema 2 — the schema-1
+  // shape has nowhere to carry the endpoint binding, so schema 1 +
+  // dest_kind 1 is malformed, never reinterpreted (05 §5.4).
+  if (dest_kind == 1 && schema != 2) {
+    return Status::error(StatusCode::InvalidArgument, "gateway needs schema2");
+  }
+  if (schema == 2 && dest_kind != 1) {
+    return Status::error(StatusCode::InvalidArgument, "schema2 needs gateway");
+  }
+  const std::size_t fixed_size =
+      schema == 2 ? kCanonicalGatewayFixedSize : kCanonicalMinSize;
+  if (schema == 2) {
+    // 34B destination extension before payload_len: scope:u8, reserved:u8,
+    // token:16, gateway_boot:u64, egress_gateway:u64.
+    std::uint8_t reserved = 0;
+    if (status) status = reader.read_u8(out.gateway_scope);
+    if (status) status = reader.read_u8(reserved);
+    if (status) {
+      status = reader.read_bytes(
+          MutableByteView{out.gateway_token.data(), out.gateway_token.size()});
+    }
+    if (status) status = reader.read_u64(out.gateway_boot);
+    if (status) status = reader.read_u64(out.egress_gateway);
+    if (!status) return status;
+    if (reserved != 0 || (out.gateway_scope != 1 && out.gateway_scope != 2) ||
+        is_reserved_bytes(out.gateway_token) ||
+        is_reserved_id(out.gateway_boot) ||
+        is_reserved_id(out.egress_gateway)) {
+      return Status::error(StatusCode::InvalidArgument, "gateway ext range");
+    }
+  }
   if (status) status = reader.read_u16(payload_length);
   if (!status) return status;
-  if (schema != 1 || payload_length != reader.remaining() ||
-      reader.consumed() != kCanonicalMinSize) {
+  if (payload_length != reader.remaining() || reader.consumed() != fixed_size) {
     return Status::error(StatusCode::InvalidArgument, "canonical framing");
+  }
+  if (schema == 2 && payload_length > kCanonicalGatewayPayloadMax) {
+    return Status::error(StatusCode::InvalidArgument, "gateway payload");
   }
   if (out.network == 0 || dest_kind > 1 || delivery > 2 || priority > 3 ||
       policy != 0 || storage > 1 || out.ttl_ms < 1 || out.ttl_ms > 30000 ||
       hop < 1 || hop > 10 || persist > 1) {
     return Status::error(StatusCode::InvalidArgument, "canonical range");
   }
-  if (dest_kind == 0 && is_reserved_id(out.destination)) {
+  if (is_reserved_id(out.destination)) {
     return Status::error(StatusCode::InvalidArgument, "reserved destination");
   }
+  out.schema = schema;
   out.dest_kind = dest_kind;
   out.delivery = delivery;
   out.priority = priority;
@@ -510,6 +548,62 @@ bool DispatchWindow::note_mesh_outcome(const std::uint32_t msg_session,
   return false;
 }
 
+bool DispatchWindow::record_pending(
+    const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
+    const std::uint64_t dispatch_seq,
+    const std::array<std::uint8_t, kCanonicalHashSize>& hash,
+    const std::array<std::uint8_t, kOperationIdSize>& operation_id,
+    const std::uint8_t delivery) noexcept {
+  Slot* slot = position(dispatch_seq);
+  if (slot == nullptr || slot->occupied) return false;
+  // Committed to a gateway send: binds the lane exactly like record_sent —
+  // the position will hold this dispatcher's record for the boot.
+  if (!bind_lane(dispatcher)) return false;
+  *slot = Slot{};
+  slot->occupied = true;
+  slot->state = State::Sent;
+  slot->delivery = delivery;
+  slot->hash = hash;
+  slot->operation_id = operation_id;
+  slot->msg_valid = false;  // wire key arrives via bind_message post-resolve
+  slot->evidence = Evidence::GatewayAccepted;
+  return true;
+}
+
+bool DispatchWindow::bind_message(const std::uint64_t dispatch_seq,
+                                  const std::uint32_t msg_session,
+                                  const std::uint64_t msg_seq) noexcept {
+  Slot* slot = position(dispatch_seq);
+  if (slot == nullptr || !slot->occupied || slot->state != State::Sent ||
+      slot->msg_valid) {
+    return false;
+  }
+  slot->msg_session = msg_session;
+  slot->msg_seq = msg_seq;
+  slot->msg_valid = true;
+  return true;
+}
+
+bool DispatchWindow::note_gateway_outcome(const std::uint64_t dispatch_seq,
+                                          const bool received,
+                                          const bool host_receive_ram) noexcept {
+  Slot* slot = position(dispatch_seq);
+  if (slot == nullptr || !slot->occupied) return false;
+  if (slot->state == State::Sent) {
+    if (received) {
+      slot->state = State::Delivered;
+      // Scope-2 terminal evidence names the host ReceiveLog store; scope-1
+      // is the gateway's own SDK mailbox (EndSdkReceived). Neither is an
+      // APPLIED claim.
+      slot->evidence = host_receive_ram ? Evidence::HostRamReceived
+                                        : Evidence::EndSdkReceived;
+    } else {
+      slot->state = State::Failed;
+    }
+  }
+  return true;
+}
+
 namespace {
 
 Status encode_result_state(ByteWriter& writer, HostOpsResult result,
@@ -541,7 +635,8 @@ Status decode_evidence(ByteReader& reader, DispatchWindow::Evidence& evidence) n
   std::uint8_t evidence_byte = 0;
   const Status status = reader.read_u8(evidence_byte);
   if (!status) return status;
-  if (evidence_byte > static_cast<std::uint8_t>(DispatchWindow::Evidence::EndSdkReceived)) {
+  if (evidence_byte >
+      static_cast<std::uint8_t>(DispatchWindow::Evidence::HostRamReceived)) {
     return Status::error(StatusCode::ProtocolError, "HOST_OPS_ENUM");
   }
   evidence = static_cast<DispatchWindow::Evidence>(evidence_byte);
@@ -780,6 +875,298 @@ Status decode_time_sample_response(const ByteView inner,
     return Status::error(StatusCode::ProtocolError, "HOST_OPS_ENUM");
   }
   out.result = static_cast<HostOpsResult>(result_byte);
+  return Status::success();
+}
+
+// --- Gateway host endpoint subcommands (05-wire-api.md §5.6) --------------
+//
+// Inner common form for the 0x10-0x13 family: schema:u8=1, sub:u8,
+// payload_len:u16, payload. `gateway_head` writes the 4B head; the caller
+// appends the fixed-layout payload. `gateway_body` validates head + exact
+// payload_len and hands the payload span to the caller.
+namespace {
+
+Status write_gateway_head(ByteWriter& writer, const HostOpsSub sub,
+                          const std::uint16_t payload_len) noexcept {
+  Status status = writer.write_u8(kHostOpsSchema);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(sub));
+  if (status) status = writer.write_u16(payload_len);
+  return status;
+}
+
+// Validates schema/sub/payload_len and returns the payload span. Exact
+// length only — the 0x10-0x13 family never accepts a trailing byte.
+Status gateway_body(const ByteView inner, const HostOpsSub sub,
+                    const std::size_t min_payload, const std::size_t max_payload,
+                    ByteView& payload) noexcept {
+  payload = ByteView{};
+  if (inner.size < kGatewayInnerHeadSize ||
+      inner.size > kGatewayInnerHeadSize + max_payload) {
+    return Status::error(StatusCode::ProtocolError, "GATEWAY_OPS_LENGTH");
+  }
+  ByteReader reader(inner);
+  std::uint8_t schema = 0;
+  std::uint8_t sub_byte = 0;
+  std::uint16_t payload_len = 0;
+  Status status = reader.read_u8(schema);
+  if (status) status = reader.read_u8(sub_byte);
+  if (status) status = reader.read_u16(payload_len);
+  if (!status) return status;
+  if (schema != kHostOpsSchema) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_SCHEMA");
+  }
+  if (sub_byte != static_cast<std::uint8_t>(sub)) {
+    return Status::error(StatusCode::ProtocolError, "SUBCOMMAND_MISMATCH");
+  }
+  if (payload_len != reader.remaining() || payload_len < min_payload ||
+      payload_len > max_payload) {
+    return Status::error(StatusCode::ProtocolError, "GATEWAY_OPS_LENGTH");
+  }
+  payload = ByteView{inner.data + reader.consumed(), payload_len};
+  return Status::success();
+}
+
+bool gateway_result_valid(const std::uint16_t result) noexcept {
+  return result <= static_cast<std::uint16_t>(GatewayOpsResult::Indeterminate);
+}
+
+}  // namespace
+
+Status decode_host_register(const ByteView inner, HostRegisterRequest& out) noexcept {
+  out = HostRegisterRequest{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::HostRegister, kHostRegisterRequestPayload,
+                   kHostRegisterRequestPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.network);
+  if (read) read = reader.read_u64(out.host_boot);
+  if (read) read = reader.read_u32(out.lease_ms);
+  return read;
+}
+
+Status encode_host_register(const HostRegisterRequest& request,
+                            const MutableByteView out,
+                            std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status =
+      write_gateway_head(writer, HostOpsSub::HostRegister, kHostRegisterRequestPayload);
+  if (status) status = writer.write_u64(request.network);
+  if (status) status = writer.write_u64(request.host_boot);
+  if (status) status = writer.write_u32(request.lease_ms);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status encode_host_register_response(const HostRegisterResponse& response,
+                                     const MutableByteView out,
+                                     std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::HostRegister,
+                                     kHostRegisterResponsePayload);
+  if (status) status = writer.write_u16(response.result);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{response.token.data(), response.token.size()});
+  }
+  if (status) status = writer.write_u64(response.gateway_boot);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{response.host_digest.data(), response.host_digest.size()});
+  }
+  if (status) status = writer.write_u32(response.lease_ms);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_host_register_response(const ByteView inner,
+                                     HostRegisterResponse& out) noexcept {
+  out = HostRegisterResponse{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::HostRegister, kHostRegisterResponsePayload,
+                   kHostRegisterResponsePayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u16(out.result);
+  if (read) {
+    read = reader.read_bytes(MutableByteView{out.token.data(), out.token.size()});
+  }
+  if (read) read = reader.read_u64(out.gateway_boot);
+  if (read) {
+    read = reader.read_bytes(
+        MutableByteView{out.host_digest.data(), out.host_digest.size()});
+  }
+  if (read) read = reader.read_u32(out.lease_ms);
+  if (!read) return read;
+  if (!gateway_result_valid(out.result)) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_ENUM");
+  }
+  return Status::success();
+}
+
+Status encode_gateway_ingress(const GatewayIngress& request,
+                              const MutableByteView out,
+                              std::size_t& written) noexcept {
+  written = 0;
+  if (request.payload.size > kCanonicalGatewayPayloadMax) {
+    return Status::error(StatusCode::InvalidArgument, "gateway payload");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::GatewayIngress,
+      static_cast<std::uint16_t>(kGatewayIngressFixedPayload +
+                                 request.payload.size));
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{request.submit_prefix.data(), request.submit_prefix.size()});
+  }
+  if (status) status = writer.write_u64(request.ref_origin);
+  if (status) status = writer.write_u32(request.ref_session);
+  if (status) status = writer.write_u64(request.ref_sequence);
+  if (status) {
+    status = writer.write_bytes(ByteView{request.request_digest.data(),
+                                         request.request_digest.size()});
+  }
+  if (status) status = writer.write_bytes(request.payload);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_gateway_ingress(const ByteView inner, GatewayIngress& out) noexcept {
+  out = GatewayIngress{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::GatewayIngress, kGatewayIngressFixedPayload,
+                   kGatewayIngressMaxPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_bytes(
+      MutableByteView{out.submit_prefix.data(), out.submit_prefix.size()});
+  if (read) read = reader.read_u64(out.ref_origin);
+  if (read) read = reader.read_u32(out.ref_session);
+  if (read) read = reader.read_u64(out.ref_sequence);
+  if (read) {
+    read = reader.read_bytes(MutableByteView{out.request_digest.data(),
+                                             out.request_digest.size()});
+  }
+  if (!read) return read;
+  out.payload = ByteView{payload.data + reader.consumed(), reader.remaining()};
+  return Status::success();
+}
+
+Status encode_gateway_ingress_ack(const GatewayIngressAck& ack,
+                                  const MutableByteView out,
+                                  std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::GatewayIngressAck,
+                                     kGatewayIngressAckPayload);
+  if (status) {
+    status = writer.write_bytes(ByteView{ack.token.data(), ack.token.size()});
+  }
+  if (status) status = writer.write_u64(ack.ref_origin);
+  if (status) status = writer.write_u32(ack.ref_session);
+  if (status) status = writer.write_u64(ack.ref_sequence);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{ack.request_digest.data(), ack.request_digest.size()});
+  }
+  if (status) status = writer.write_u16(ack.outcome);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_gateway_ingress_ack(const ByteView inner,
+                                  GatewayIngressAck& out) noexcept {
+  out = GatewayIngressAck{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::GatewayIngressAck, kGatewayIngressAckPayload,
+                   kGatewayIngressAckPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read =
+      reader.read_bytes(MutableByteView{out.token.data(), out.token.size()});
+  if (read) read = reader.read_u64(out.ref_origin);
+  if (read) read = reader.read_u32(out.ref_session);
+  if (read) read = reader.read_u64(out.ref_sequence);
+  if (read) {
+    read = reader.read_bytes(MutableByteView{out.request_digest.data(),
+                                             out.request_digest.size()});
+  }
+  if (read) read = reader.read_u16(out.outcome);
+  if (!read) return read;
+  if (!gateway_result_valid(out.outcome)) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_ENUM");
+  }
+  return Status::success();
+}
+
+Status decode_host_unregister(const ByteView inner,
+                              HostUnregisterRequest& out) noexcept {
+  out = HostUnregisterRequest{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::HostUnregister,
+                   kHostUnregisterRequestPayload, kHostUnregisterRequestPayload,
+                   payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  return reader.read_bytes(MutableByteView{out.token.data(), out.token.size()});
+}
+
+Status encode_host_unregister(const HostUnregisterRequest& request,
+                              const MutableByteView out,
+                              std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::HostUnregister,
+                                     kHostUnregisterRequestPayload);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{request.token.data(), request.token.size()});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status encode_host_unregister_response(const HostUnregisterResponse& response,
+                                       const MutableByteView out,
+                                       std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::HostUnregister,
+                                     kHostUnregisterResponsePayload);
+  if (status) status = writer.write_u16(response.result);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_host_unregister_response(const ByteView inner,
+                                       HostUnregisterResponse& out) noexcept {
+  out = HostUnregisterResponse{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::HostUnregister,
+                   kHostUnregisterResponsePayload, kHostUnregisterResponsePayload,
+                   payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  const Status read = reader.read_u16(out.result);
+  if (!read) return read;
+  if (!gateway_result_valid(out.result)) {
+    return Status::error(StatusCode::ProtocolError, "HOST_OPS_ENUM");
+  }
   return Status::success();
 }
 

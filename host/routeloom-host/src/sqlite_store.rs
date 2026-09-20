@@ -1623,7 +1623,7 @@ mod tests {
         let json = format!(
             "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch:016x}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"{storage}\"}}}}"
         );
-        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
         req.epoch = epoch;
         req
     }

@@ -772,8 +772,10 @@ void GatewayDelivery::handle_submit(const NodeId peer,
                                      ? frame_remaining
                                      : kGatewayHostAckMs;
   pending->host_ack_deadline_ms = now_ms + ack_window;
+  // The 32B canonical head rides the ingress frame so the host recomputes
+  // the request digest over prefix+payload before storing (05 §5.6).
   const Status ingressed = role_.host_sink->host_ingress(
-      key, digest,
+      key, digest, ByteView{canonical.data, endpoint::kServiceSubmitHeaderSize},
       ByteView{pending->payload.data(), pending->payload_size}, now_ms);
   if (!ingressed) {
     if (record->state == DedupState::Pending) {

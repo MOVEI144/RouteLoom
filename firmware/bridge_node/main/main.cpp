@@ -274,6 +274,18 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   bridge.set_mesh(&runtime.node());
 
+  // Gateway endpoint (scope-gateway-config P3): one component owns the mesh
+  // responder role AND the host-originated send path. The USB capability
+  // bit gates both — a build that does not advertise it never answers a
+  // Query and never accepts a registration. The node's own poll drives the
+  // sink through the service-sink interface (attach() installs it).
+  static routeloom::GatewayDelivery gateway(runtime.node());
+  if ((bridge_config.capability & routeloom::usb::kCapGatewayEndpointV1) !=
+      0) {
+    status = bridge.attach_gateway(gateway);
+    if (!status) fail(status.detail);
+  }
+
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
     if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {

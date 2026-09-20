@@ -13,6 +13,11 @@
 use std::fmt;
 
 pub const CAP_HOST_OPS_V1: u32 = 1 << 2;
+/// scope-gateway-config P3 (05-wire-api.md §5.6): the device serves the
+/// Gateway HostOps subcommands 0x10-0x13 — host endpoint registration,
+/// scope-2 ReceiveLog ingress + ACK, and unregister. Advertised separately
+/// from host_ops_v1.
+pub const CAP_GATEWAY_ENDPOINT_V1: u32 = 1 << 3;
 pub const HOST_OPS_SCHEMA: u8 = 1;
 
 pub const SUB_SUBMIT: u8 = 0x01;
@@ -20,6 +25,10 @@ pub const SUB_QUERY_DISPATCH: u8 = 0x02;
 pub const SUB_RETIRE_THROUGH: u8 = 0x03;
 pub const SUB_SKIP: u8 = 0x04;
 pub const SUB_TIME_SAMPLE: u8 = 0x05;
+pub const SUB_HOST_REGISTER: u8 = 0x10;
+pub const SUB_GATEWAY_INGRESS: u8 = 0x11;
+pub const SUB_GATEWAY_INGRESS_ACK: u8 = 0x12;
+pub const SUB_HOST_UNREGISTER: u8 = 0x13;
 
 pub const BOOT_LEASE_SIZE: usize = 16;
 pub const DISPATCHER_ID_SIZE: usize = 16;
@@ -27,8 +36,15 @@ pub const OPERATION_ID_SIZE: usize = 24;
 pub const CANONICAL_HASH_SIZE: usize = 32;
 
 pub const SUBMIT_FIXED_SIZE: usize = 108;
-pub const SUBMIT_MAX_SIZE: usize = 262;
-pub const CANONICAL_MAX_SIZE: usize = 154;
+/// Schema-2 ceiling: 108 + 60 + 96 (the schema-1 form tops out at 262).
+pub const SUBMIT_MAX_SIZE: usize = 264;
+/// Schema-2 ceiling: 60 + 96 (schema-1 canonical tops out at 154).
+pub const CANONICAL_MAX_SIZE: usize = 156;
+pub const CANONICAL_MIN_SIZE: usize = 26;
+/// Schema-2 gateway destination extension: scope+reserved+token16+boot8+
+/// egress8 inserted before payload_len → 60B fixed, ≤96B payload.
+pub const CANONICAL_GATEWAY_FIXED_SIZE: usize = 60;
+pub const CANONICAL_GATEWAY_PAYLOAD_MAX: usize = 96;
 pub const LANE_REQUEST_SIZE: usize = 42;
 pub const TIME_SAMPLE_REQUEST_SIZE: usize = 26;
 pub const RECEIPT_SIZE: usize = 74;
@@ -130,7 +146,9 @@ impl SlotState {
     }
 }
 
-/// Evidence stage (mirrors `DispatchWindow::Evidence`).
+/// Evidence stage (mirrors `DispatchWindow::Evidence`). HostRamReceived is
+/// the scope-2 gateway terminal: the verified Service Receipt for
+/// HOST_RECEIVE_RAM — the registered host's ReceiveLog stored the payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Evidence {
@@ -138,6 +156,7 @@ pub enum Evidence {
     GatewayAccepted = 1,
     MacAttemptReported = 2,
     EndSdkReceived = 3,
+    HostRamReceived = 4,
 }
 
 impl Evidence {
@@ -147,7 +166,42 @@ impl Evidence {
             1 => Self::GatewayAccepted,
             2 => Self::MacAttemptReported,
             3 => Self::EndSdkReceived,
+            4 => Self::HostRamReceived,
             _ => return Err(HostOpsError::UnknownEnum("evidence", value)),
+        })
+    }
+}
+
+/// Typed result/outcome for the Gateway HostOps family (0x10-0x13 replies
+/// and the 0x12 ingress ACK outcome) — a u16 on the wire so the family can
+/// grow without colliding with `HostOpsResult`. STORAGE names "the host
+/// could not persist"; INDETERMINATE names "the host could not prove the
+/// outcome" — neither is a success.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum GatewayOpsResult {
+    Ok = 0,
+    Busy = 1,
+    Stale = 2,
+    Denied = 3,
+    Unsupported = 4,
+    Invalid = 5,
+    Storage = 6,
+    Indeterminate = 7,
+}
+
+impl GatewayOpsResult {
+    pub fn try_from_u16(value: u16) -> Result<Self, HostOpsError> {
+        Ok(match value {
+            0 => Self::Ok,
+            1 => Self::Busy,
+            2 => Self::Stale,
+            3 => Self::Denied,
+            4 => Self::Unsupported,
+            5 => Self::Invalid,
+            6 => Self::Storage,
+            7 => Self::Indeterminate,
+            _ => return Err(HostOpsError::UnknownEnum("gateway_result", 0xFF)),
         })
     }
 }
@@ -480,6 +534,319 @@ pub fn decode_time_sample_response(inner: &[u8]) -> Result<TimeSampleResponse, H
     })
 }
 
+// --- Gateway host endpoint subcommands (scope-gateway-config/05-wire-api.md
+// §5.6, P3) -------------------------------------------------------------
+//
+// These four subcommands share a different inner common form than the
+// 0x01-0x05 family: schema:u8=1, sub:u8, payload_len:u16, payload. Every
+// request gets a same-sub reply carrying a u16 GatewayOpsResult first —
+// except 0x12, which IS the reply to a device-issued 0x11 (the frame-level
+// request id correlates them). Exact length only: the family never accepts
+// a trailing byte.
+pub const GATEWAY_INNER_HEAD_SIZE: usize = 4;
+pub const HOST_REGISTER_REQUEST_PAYLOAD: usize = 20; // network8+boot8+lease4
+pub const HOST_REGISTER_RESPONSE_PAYLOAD: usize = 62; // result2+token16+boot8+digest32+lease4
+pub const GATEWAY_INGRESS_FIXED_PAYLOAD: usize = 84; // prefix32+ref20+digest32
+pub const GATEWAY_INGRESS_MAX_PAYLOAD: usize = 180; // +96 payload
+pub const GATEWAY_INGRESS_ACK_PAYLOAD: usize = 70; // token16+ref20+digest32+outcome2
+pub const HOST_UNREGISTER_REQUEST_PAYLOAD: usize = 16; // token16
+pub const HOST_UNREGISTER_RESPONSE_PAYLOAD: usize = 2; // result16
+
+fn gateway_head(out: &mut Vec<u8>, sub: u8, payload_len: usize) {
+    out.push(HOST_OPS_SCHEMA);
+    out.push(sub);
+    out.extend_from_slice(&(payload_len as u16).to_be_bytes());
+}
+
+/// Validates schema/sub/payload_len and returns the payload span.
+fn gateway_body(
+    inner: &[u8],
+    sub: u8,
+    min_payload: usize,
+    max_payload: usize,
+) -> Result<&[u8], HostOpsError> {
+    if inner.len() < GATEWAY_INNER_HEAD_SIZE || inner.len() > GATEWAY_INNER_HEAD_SIZE + max_payload
+    {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    check_head(inner, sub)?;
+    let payload_len = u16::from_be_bytes(fixed::<2>(inner, 2)?) as usize;
+    if payload_len != inner.len() - GATEWAY_INNER_HEAD_SIZE
+        || payload_len < min_payload
+        || payload_len > max_payload
+    {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    Ok(&inner[GATEWAY_INNER_HEAD_SIZE..])
+}
+
+fn u16_at(inner: &[u8], offset: usize) -> Result<u16, HostOpsError> {
+    Ok(u16::from_be_bytes(fixed(inner, offset)?))
+}
+
+fn u32_at(inner: &[u8], offset: usize) -> Result<u32, HostOpsError> {
+    Ok(u32::from_be_bytes(fixed(inner, offset)?))
+}
+
+pub const SERVICE_PREFIX_SIZE: usize = 32;
+/// scope byte position inside the Service Submit prefix.
+pub const SERVICE_PREFIX_SCOPE_OFFSET: usize = 2;
+/// token position inside the Service Submit prefix.
+pub const SERVICE_PREFIX_TOKEN_OFFSET: usize = 4;
+/// gateway_boot position inside the Service Submit prefix.
+pub const SERVICE_PREFIX_BOOT_OFFSET: usize = 20;
+/// payload_len position inside the Service Submit prefix.
+pub const SERVICE_PREFIX_LEN_OFFSET: usize = 28;
+
+/// The sub byte of a gateway-family inner body, if it is one (0x10-0x13).
+/// Used to peel device-issued 0x11 ingress out of the generic
+/// response-routing lane without decoding the whole family up front.
+pub fn gateway_sub(inner: &[u8]) -> Option<u8> {
+    if inner.len() < 2 || inner[0] != HOST_OPS_SCHEMA {
+        return None;
+    }
+    match inner[1] {
+        SUB_HOST_REGISTER | SUB_GATEWAY_INGRESS | SUB_GATEWAY_INGRESS_ACK | SUB_HOST_UNREGISTER => {
+            Some(inner[1])
+        }
+        _ => None,
+    }
+}
+
+/// 0x10 HOST_REGISTER (H→G): network:u64, host_boot:u64, lease_ms:u32.
+/// host_boot is the daemon's own per-run generation — a fresh boot is a
+/// fresh principal, so the gateway never conflates registrations across
+/// daemon restarts on the same machine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostRegisterRequest {
+    pub network: u64,
+    pub host_boot: u64,
+    pub lease_ms: u32,
+}
+
+pub fn encode_host_register(request: &HostRegisterRequest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + HOST_REGISTER_REQUEST_PAYLOAD);
+    gateway_head(&mut out, SUB_HOST_REGISTER, HOST_REGISTER_REQUEST_PAYLOAD);
+    out.extend_from_slice(&request.network.to_be_bytes());
+    out.extend_from_slice(&request.host_boot.to_be_bytes());
+    out.extend_from_slice(&request.lease_ms.to_be_bytes());
+    out
+}
+
+pub fn decode_host_register(inner: &[u8]) -> Result<HostRegisterRequest, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_HOST_REGISTER,
+        HOST_REGISTER_REQUEST_PAYLOAD,
+        HOST_REGISTER_REQUEST_PAYLOAD,
+    )?;
+    Ok(HostRegisterRequest {
+        network: u64_at(payload, 0)?,
+        host_boot: u64_at(payload, 8)?,
+        lease_ms: u32_at(payload, 16)?,
+    })
+}
+
+/// 0x10 reply: result:u16, token:16, gateway_boot:u64, host_digest:32,
+/// lease_ms:u32. The token binds principal + host boot + USB session and is
+/// the value the schema-2 canonical carries as gateway_token.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostRegisterResponse {
+    pub result: u16,
+    pub token: [u8; 16],
+    pub gateway_boot: u64,
+    pub host_digest: [u8; 32],
+    pub lease_ms: u32,
+}
+
+pub fn encode_host_register_response(response: &HostRegisterResponse) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + HOST_REGISTER_RESPONSE_PAYLOAD);
+    gateway_head(&mut out, SUB_HOST_REGISTER, HOST_REGISTER_RESPONSE_PAYLOAD);
+    out.extend_from_slice(&response.result.to_be_bytes());
+    out.extend_from_slice(&response.token);
+    out.extend_from_slice(&response.gateway_boot.to_be_bytes());
+    out.extend_from_slice(&response.host_digest);
+    out.extend_from_slice(&response.lease_ms.to_be_bytes());
+    out
+}
+
+pub fn decode_host_register_response(inner: &[u8]) -> Result<HostRegisterResponse, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_HOST_REGISTER,
+        HOST_REGISTER_RESPONSE_PAYLOAD,
+        HOST_REGISTER_RESPONSE_PAYLOAD,
+    )?;
+    let result = u16_at(payload, 0)?;
+    GatewayOpsResult::try_from_u16(result)?;
+    Ok(HostRegisterResponse {
+        result,
+        token: fixed(payload, 2)?,
+        gateway_boot: u64_at(payload, 18)?,
+        host_digest: fixed(payload, 26)?,
+        lease_ms: u32_at(payload, 58)?,
+    })
+}
+
+/// 0x11 GATEWAY_INGRESS (G→H, device-issued): the canonical Service Submit
+/// prefix:32, the referenced MessageKey:20 (origin:u64, session:u32,
+/// sequence:u64), the request digest:32 (SHA-256 over prefix+payload), and
+/// the payload itself (0..96B). The host recomputes the digest before
+/// storing — a mismatched digest can never produce a success ACK.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayIngress {
+    pub submit_prefix: [u8; 32],
+    pub ref_origin: u64,
+    pub ref_session: u32,
+    pub ref_sequence: u64,
+    pub request_digest: [u8; 32],
+    pub payload: Vec<u8>,
+}
+
+pub fn encode_gateway_ingress(request: &GatewayIngress) -> Result<Vec<u8>, HostOpsError> {
+    if request.payload.len() > CANONICAL_GATEWAY_PAYLOAD_MAX {
+        return Err(HostOpsError::CanonicalTooLarge);
+    }
+    let payload_len = GATEWAY_INGRESS_FIXED_PAYLOAD + request.payload.len();
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + payload_len);
+    gateway_head(&mut out, SUB_GATEWAY_INGRESS, payload_len);
+    out.extend_from_slice(&request.submit_prefix);
+    out.extend_from_slice(&request.ref_origin.to_be_bytes());
+    out.extend_from_slice(&request.ref_session.to_be_bytes());
+    out.extend_from_slice(&request.ref_sequence.to_be_bytes());
+    out.extend_from_slice(&request.request_digest);
+    out.extend_from_slice(&request.payload);
+    Ok(out)
+}
+
+pub fn decode_gateway_ingress(inner: &[u8]) -> Result<GatewayIngress, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_GATEWAY_INGRESS,
+        GATEWAY_INGRESS_FIXED_PAYLOAD,
+        GATEWAY_INGRESS_MAX_PAYLOAD,
+    )?;
+    Ok(GatewayIngress {
+        submit_prefix: fixed(payload, 0)?,
+        ref_origin: u64_at(payload, 32)?,
+        ref_session: u32_at(payload, 40)?,
+        ref_sequence: u64_at(payload, 44)?,
+        request_digest: fixed(payload, 52)?,
+        payload: payload[GATEWAY_INGRESS_FIXED_PAYLOAD..].to_vec(),
+    })
+}
+
+/// 0x12 GATEWAY_INGRESS_ACK (H→G): session token:16, ref MessageKey:20,
+/// request digest:32, outcome:u16 (GatewayOpsResult). The device verifies
+/// all bound fields before trusting the outcome — a wrong key/digest/token
+/// can never mark a record stored.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayIngressAck {
+    pub token: [u8; 16],
+    pub ref_origin: u64,
+    pub ref_session: u32,
+    pub ref_sequence: u64,
+    pub request_digest: [u8; 32],
+    pub outcome: u16,
+}
+
+pub fn encode_gateway_ingress_ack(ack: &GatewayIngressAck) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + GATEWAY_INGRESS_ACK_PAYLOAD);
+    gateway_head(
+        &mut out,
+        SUB_GATEWAY_INGRESS_ACK,
+        GATEWAY_INGRESS_ACK_PAYLOAD,
+    );
+    out.extend_from_slice(&ack.token);
+    out.extend_from_slice(&ack.ref_origin.to_be_bytes());
+    out.extend_from_slice(&ack.ref_session.to_be_bytes());
+    out.extend_from_slice(&ack.ref_sequence.to_be_bytes());
+    out.extend_from_slice(&ack.request_digest);
+    out.extend_from_slice(&ack.outcome.to_be_bytes());
+    out
+}
+
+pub fn decode_gateway_ingress_ack(inner: &[u8]) -> Result<GatewayIngressAck, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_GATEWAY_INGRESS_ACK,
+        GATEWAY_INGRESS_ACK_PAYLOAD,
+        GATEWAY_INGRESS_ACK_PAYLOAD,
+    )?;
+    let outcome = u16_at(payload, 68)?;
+    GatewayOpsResult::try_from_u16(outcome)?;
+    Ok(GatewayIngressAck {
+        token: fixed(payload, 0)?,
+        ref_origin: u64_at(payload, 16)?,
+        ref_session: u32_at(payload, 24)?,
+        ref_sequence: u64_at(payload, 28)?,
+        request_digest: fixed(payload, 36)?,
+        outcome,
+    })
+}
+
+/// 0x13 HOST_UNREGISTER (H→G): token:16. Only the registration bound to the
+/// CURRENT session may be released — a stale token can never revoke the
+/// replacement session's endpoint.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostUnregisterRequest {
+    pub token: [u8; 16],
+}
+
+pub fn encode_host_unregister(request: &HostUnregisterRequest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + HOST_UNREGISTER_REQUEST_PAYLOAD);
+    gateway_head(
+        &mut out,
+        SUB_HOST_UNREGISTER,
+        HOST_UNREGISTER_REQUEST_PAYLOAD,
+    );
+    out.extend_from_slice(&request.token);
+    out
+}
+
+pub fn decode_host_unregister(inner: &[u8]) -> Result<HostUnregisterRequest, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_HOST_UNREGISTER,
+        HOST_UNREGISTER_REQUEST_PAYLOAD,
+        HOST_UNREGISTER_REQUEST_PAYLOAD,
+    )?;
+    Ok(HostUnregisterRequest {
+        token: fixed(payload, 0)?,
+    })
+}
+
+/// 0x13 reply: result:u16.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostUnregisterResponse {
+    pub result: u16,
+}
+
+pub fn encode_host_unregister_response(response: &HostUnregisterResponse) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + HOST_UNREGISTER_RESPONSE_PAYLOAD);
+    gateway_head(
+        &mut out,
+        SUB_HOST_UNREGISTER,
+        HOST_UNREGISTER_RESPONSE_PAYLOAD,
+    );
+    out.extend_from_slice(&response.result.to_be_bytes());
+    out
+}
+
+pub fn decode_host_unregister_response(
+    inner: &[u8],
+) -> Result<HostUnregisterResponse, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_HOST_UNREGISTER,
+        HOST_UNREGISTER_RESPONSE_PAYLOAD,
+        HOST_UNREGISTER_RESPONSE_PAYLOAD,
+    )?;
+    let result = u16_at(payload, 0)?;
+    GatewayOpsResult::try_from_u16(result)?;
+    Ok(HostUnregisterResponse { result })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,7 +992,7 @@ mod tests {
             decode_receipt(&bytes, SUB_SKIP),
             Err(HostOpsError::SubcommandMismatch)
         );
-        for (offset, value) in [(2, 14), (3, 7), (72, 2), (73, 4)] {
+        for (offset, value) in [(2, 14), (3, 7), (72, 2), (73, 5)] {
             let mut bad = bytes.clone();
             bad[offset] = value;
             assert!(decode_receipt(&bad, SUB_SUBMIT).is_err(), "offset {offset}");

@@ -65,6 +65,18 @@ class GatewayEndpoint {
  public:
   constexpr GatewayEndpoint() noexcept = default;
 
+  // Handle identity (slot + generation): lets a caller correlate an
+  // observer callback to the exact record it resolved — never authority,
+  // every use still re-validates against the pool.
+  friend constexpr bool operator==(const GatewayEndpoint& left,
+                                   const GatewayEndpoint& right) noexcept {
+    return left.slot_ == right.slot_ && left.generation_ == right.generation_;
+  }
+  friend constexpr bool operator!=(const GatewayEndpoint& left,
+                                   const GatewayEndpoint& right) noexcept {
+    return !(left == right);
+  }
+
  private:
   friend class GatewayDelivery;
   explicit constexpr GatewayEndpoint(std::uint8_t slot, std::uint32_t generation) noexcept
@@ -154,8 +166,13 @@ class GatewayHostSink {
   // GatewayDelivery::on_host_ingress_ack. A failure (Busy/NoCapacity) is a
   // pre-acceptance refusal — the caller drops its reservation and answers
   // CAPACITY rather than partially accepting and losing the evidence.
+  // `submit_prefix` is the 32B canonical head of the Service Submit that
+  // produced the payload: the USB 0x11 ingress frame carries it verbatim
+  // so the host can recompute request_digest = SHA-256(prefix+payload)
+  // before storing — a tampered body can never earn a success ACK.
   virtual Status host_ingress(const MessageKey& key, const RequestDigest& request_digest,
-                              ByteView payload, MonotonicMs now_ms) noexcept = 0;
+                              ByteView submit_prefix, ByteView payload,
+                              MonotonicMs now_ms) noexcept = 0;
 };
 
 // GatewayServiceSink (the MeshNode integration seam) is declared in

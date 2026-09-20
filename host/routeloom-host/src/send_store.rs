@@ -258,9 +258,13 @@ pub struct DispatchAttachment {
     /// Evidence stages reached (01 §5: distinct proofs, never one bool).
     /// `ev_end_sdk` is only set for reliable delivery; a best-effort mesh
     /// completion sets `ev_mac_attempt` without promoting the evidence.
+    /// `ev_host_receive` is the scope-2 gateway terminal: a verified
+    /// Service Receipt proving the registered host's ReceiveLog stored
+    /// the payload — it is never promoted to an ordinary SDK receipt.
     pub ev_gateway_accepted: bool,
     pub ev_mac_attempt: bool,
     pub ev_end_sdk: bool,
+    pub ev_host_receive: bool,
     /// A cancel request was observed; retained even when it arrived too
     /// late so the record keeps the honest observation.
     pub cancel_requested: bool,
@@ -287,6 +291,7 @@ impl DispatchAttachment {
             ev_gateway_accepted: false,
             ev_mac_attempt: false,
             ev_end_sdk: false,
+            ev_host_receive: false,
             cancel_requested: false,
             time_uncertain: false,
         }
@@ -319,7 +324,12 @@ impl DispatchAttachment {
             flags |= 32;
         }
         out.push(flags);
-        let evidence = if self.ev_end_sdk {
+        // Highest stage reached; stages are cumulative proofs, and a
+        // reader that predates HOST_RAM (4) still sees >=1 — the honest
+        // subset of what the device proved.
+        let evidence = if self.ev_host_receive {
+            4u8
+        } else if self.ev_end_sdk {
             3u8
         } else if self.ev_mac_attempt {
             2
@@ -365,6 +375,7 @@ impl DispatchAttachment {
             ev_gateway_accepted: evidence >= 1,
             ev_mac_attempt: evidence == 2,
             ev_end_sdk: evidence == 3,
+            ev_host_receive: evidence == 4,
             cancel_requested: flags & 16 != 0,
             time_uncertain: flags & 32 != 0,
         })
@@ -1104,7 +1115,7 @@ mod tests {
         let json = format!(
             "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch:016x}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"{payload_hex}\",\"payload_len\":{payload_len},\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
         );
-        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
         assert_eq!(req.storage, STORAGE_RAM);
         req.epoch = epoch;
         req
@@ -1188,8 +1199,8 @@ mod tests {
                 "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\",\"ttl_ms\":{ttl}}}}}"
             )
         };
-        let a = parse_submit(&routeloom_json::parse(&json(5000)).unwrap()).unwrap();
-        let b = parse_submit(&routeloom_json::parse(&json(6000)).unwrap()).unwrap();
+        let a = parse_submit(&routeloom_json::parse(&json(5000)).unwrap(), None).unwrap();
+        let b = parse_submit(&routeloom_json::parse(&json(6000)).unwrap(), None).unwrap();
         submit(&mut store, &a);
         assert!(matches!(
             store.submit(501, &b, 2000),

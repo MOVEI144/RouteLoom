@@ -35,6 +35,8 @@ use crate::send_store::{
 use routeloom_json::{escape_string, Json};
 use std::sync::Mutex;
 
+use crate::SessionInfo;
+
 // contracts.json `ipc.*`
 pub const REQUEST_MAX_BYTES: usize = 8192;
 pub const RESPONSE_MAX_BYTES: usize = 65536;
@@ -46,14 +48,23 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// The store is generic over `OperationStore` so CAP-I1 can swap the memory
 /// table for SQLite without touching this dispatch layer. `rate_limiter`
 /// is daemon-wide (04 §4: per-principal and global budgets), so limits
-/// hold across connections.
+/// hold across connections. `session`/`gateway_lane` expose the live USB
+/// session and the dispatcher's host-registration mirror — read-only here:
+/// the schema-2 binding always comes from the daemon's own lane state,
+/// never from request JSON.
 pub struct ApiContext<'a, S: OperationStore> {
     pub uid: Option<u32>,
     pub acl: &'a Acl,
     pub receive_log: &'a Mutex<ReceiveLog>,
     pub operation_store: &'a Mutex<S>,
     pub rate_limiter: &'a Mutex<AdmissionLimiter>,
+    pub session: &'a Mutex<SessionInfo>,
+    pub gateway_lane: &'a crate::dispatch::GatewayLane,
     pub now_ms: u64,
+    /// Process-monotonic clock on the same axis as the registration
+    /// mirror's `lease_deadline_mono` — wall `now_ms` cannot judge a
+    /// mono-anchored deadline.
+    pub now_mono: u64,
 }
 
 struct ApiError {
@@ -164,6 +175,8 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
         "operations.get" => operations_get(&params, ctx).map(|r| (request_id, r)),
         "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (request_id, r)),
         "operations.cancel" => operations_cancel(&params, ctx).map(|r| (request_id, r)),
+        "gateway.resolve" => gateway_resolve(&params, ctx).map(|r| (request_id, r)),
+        "gateway.get" => gateway_get(&params, ctx).map(|r| (request_id, r)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -254,7 +267,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -538,8 +551,18 @@ fn messages_submit<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
-    let req = canonical::parse_submit(params)
-        .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
+    // The schema-2 binding comes from the daemon's own registration
+    // mirror — the client can never declare token/boot/egress itself.
+    // Node destinations ignore it; gateway destinations REQUIRE a live
+    // binding or the parse names GATEWAY_UNAVAILABLE instead of minting
+    // one (05 §5.7).
+    let binding = gateway_binding(ctx);
+    let req = canonical::parse_submit(params, binding.as_ref()).map_err(|reject| ApiError {
+        code: reject.code,
+        message: reject.message,
+        extra_fields: String::new(),
+        retryable: reject.retryable,
+    })?;
     // The durability flag is immutable per store, so a short lock here
     // cannot race the admission below.
     let store_durable = ctx
@@ -548,7 +571,12 @@ fn messages_submit<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     canonical::admission_check(&req, canonical::wants_persist_sleep(params), store_durable)
-        .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
+        .map_err(|reject| ApiError {
+            code: reject.code,
+            message: reject.message,
+            extra_fields: String::new(),
+            retryable: reject.retryable,
+        })?;
     let Some(uid) = ctx
         .uid
         .filter(|uid| ctx.acl.permit(*uid, req.network, acl::PERM_SEND))
@@ -660,6 +688,257 @@ fn submit_result(lineage: &[u8; 16], seq: u64, storage: u8) -> String {
         "{{\"operation_id\":\"{}\",\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"{evidence}\"],\"message_key\":null}}",
         canonical::format_operation_id(lineage, seq)
     )
+}
+
+/// The daemon's live schema-2 binding: the registration mirror pinned to
+/// the CURRENT authenticated session, dropped when the mirror names a
+/// dead session or an expired lease. `None` means "no usable binding" —
+/// never "mint one anyway".
+fn gateway_binding<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+) -> Option<canonical::GatewayEndpointBinding> {
+    let registration = ctx.gateway_lane.current()?;
+    let (authenticated, session_id) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (info.authenticated, info.id.unwrap_or(0))
+    };
+    if !authenticated || registration.usb_session != session_id {
+        return None;
+    }
+    if ctx.now_mono >= registration.lease_deadline_mono {
+        return None;
+    }
+    Some(canonical::GatewayEndpointBinding {
+        token: registration.token,
+        gateway_boot: registration.gateway_boot,
+        egress: registration.egress,
+    })
+}
+
+/// `gateway.resolve` params per 05-wire-api.md §5.7:
+/// `{network, gateway, scope, expected_host}`. The only endpoint this
+/// daemon can honestly resolve is its OWN host endpoint at the attached
+/// gateway — the registration lane's live state. A remote gateway's
+/// endpoint is a mesh-side question the USB session cannot answer, and a
+/// missing/mismatched registration is reported as `resolved:false` with
+/// the reason, never as a fabricated descriptor. The token itself is
+/// deliberately not in the result: callers bind schema-2 through
+/// `messages.submit`, which reads the mirror directly.
+fn gateway_resolve<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "gateway" | "scope" | "expected_host"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let network = match params.get("network").and_then(Json::as_str) {
+        Some(text) => {
+            acl::parse_network_hex(text).map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?
+        }
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "network must be a 16-hex string",
+            ))
+        }
+    };
+    let gateway = match params.get("gateway").and_then(Json::as_str) {
+        Some(text) => parse_hex_u64(text)
+            .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "gateway must be a 16-hex id"))?,
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "gateway must be a 16-hex id",
+            ))
+        }
+    };
+    if gateway == 0 || gateway == u64::MAX {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "gateway must not be a reserved id",
+        ));
+    }
+    let scope = match params.get("scope").and_then(Json::as_str) {
+        Some(name @ ("HOST_RECEIVE_RAM" | "GATEWAY_SDK_RAM")) => name,
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "scope must be HOST_RECEIVE_RAM or GATEWAY_SDK_RAM",
+            ))
+        }
+        None => return Err(ApiError::simple("INVALID_ARGUMENT", "scope is required")),
+    };
+    // Scope 2 names a specific host digest; scope 1's digest slot is the
+    // all-zero sentinel, so a nonzero expected_host there is malformed.
+    let expected_host = match params.get("expected_host") {
+        None if scope == "HOST_RECEIVE_RAM" => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "expected_host is required for HOST_RECEIVE_RAM",
+            ))
+        }
+        None => None,
+        Some(Json::String(text)) => {
+            let digest = parse_hex_32(text).ok_or_else(|| {
+                ApiError::simple("INVALID_ARGUMENT", "expected_host must be a 64-hex digest")
+            })?;
+            if scope == "GATEWAY_SDK_RAM" && digest != [0; 32] {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "expected_host must be all-zero for GATEWAY_SDK_RAM",
+                ));
+            }
+            Some(digest)
+        }
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "expected_host must be a 64-hex string",
+            ))
+        }
+    };
+    // The query reads daemon state only — still an operation read on the
+    // named network, so an unauthorized principal gets the same denial
+    // shape the other queries use.
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
+    {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks READ_OPERATION on this network",
+        ));
+    }
+    let unresolved = |reason: &str| Ok(format!("{{\"resolved\":false,\"reason\":\"{reason}\"}}"));
+    let (authenticated, session_network, session_node, session_id) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (
+            info.authenticated,
+            info.network.unwrap_or(0),
+            info.node.unwrap_or(0),
+            info.id.unwrap_or(0),
+        )
+    };
+    if !authenticated {
+        return unresolved("session_not_authenticated");
+    }
+    if session_network != network {
+        return unresolved("network_not_on_session");
+    }
+    if session_node != gateway {
+        // Only the ATTACHED gateway's host endpoint is resolvable here —
+        // a remote endpoint is a mesh-side resolve the daemon cannot see.
+        return unresolved("gateway_not_attached");
+    }
+    if scope == "GATEWAY_SDK_RAM" {
+        // The host daemon is a HOST endpoint only; the gateway's own SDK
+        // mailbox is not ours to describe.
+        return unresolved("scope_not_host_endpoint");
+    }
+    let Some(registration) = ctx.gateway_lane.current() else {
+        return unresolved("not_registered");
+    };
+    if registration.usb_session != session_id || ctx.now_mono >= registration.lease_deadline_mono {
+        return unresolved("not_registered");
+    }
+    if expected_host != Some(registration.host_digest) {
+        return unresolved("host_digest_mismatch");
+    }
+    Ok(format!(
+        "{{\"resolved\":true,\"scope\":\"HOST_RECEIVE_RAM\",\"host_digest\":\"{}\",\"gateway_boot\":\"{:016x}\",\"egress\":\"{:016x}\",\"lease_ms\":{}}}",
+        crate::receive_log::hex_lower(&registration.host_digest),
+        registration.gateway_boot,
+        registration.egress,
+        registration.lease_deadline_mono.saturating_sub(ctx.now_mono),
+    ))
+}
+
+/// `gateway.get` params: `{operation_id}` — the outcome query for a
+/// schema-2 submit (G11: consult the original outcome rather than
+/// re-issuing toward another egress). Same visibility rules as
+/// operations.get; a node-destination record is answered with the same
+/// NOT_FOUND shape so the method cannot be used as a destination-kind
+/// oracle.
+fn gateway_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "operation_id" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(text) = params.get("operation_id").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be a string",
+        ));
+    };
+    let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be <32-hex lineage>:<16-hex sequence>",
+        ));
+    };
+    let store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    let record = match store.get_by_seq(seq) {
+        Ok(Some(record)) if store.lineage() == lineage => record,
+        Ok(_) => {
+            return Err(ApiError::simple(
+                "NOT_FOUND",
+                "no gateway operation with that id in this store",
+            ))
+        }
+        Err(()) => return Err(store_fault()),
+    };
+    if !ctx.uid.is_some_and(|uid| {
+        ctx.acl
+            .permit(uid, record.network, acl::PERM_READ_OPERATION)
+    }) {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no gateway operation with that id in this store",
+        ));
+    }
+    if record.dest_kind != canonical::DEST_GATEWAY {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no gateway operation with that id in this store",
+        ));
+    }
+    Ok(op_status(&record, &store.lineage(), ctx.now_ms))
+}
+
+fn parse_hex_u64(text: &str) -> Option<u64> {
+    if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(text, 16).ok()
+}
+
+fn parse_hex_32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// `operations.get` params: `{operation_id}`. Any principal holding
@@ -911,6 +1190,11 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         if att.ev_end_sdk {
             evidence.push("END_SDK_RECEIVED");
         }
+        // Scope-2 terminal: the registered host's ReceiveLog stored the
+        // payload — a distinct proof, never promoted to END_SDK_RECEIVED.
+        if att.ev_host_receive {
+            evidence.push("HOST_RAM_RECEIVED");
+        }
         if let (Some(session), Some(seq)) = (att.msg_session, att.msg_seq) {
             message_key = format!("{{\"session\":\"{session:08x}\",\"sequence\":\"{seq:016x}\"}}");
         }
@@ -922,14 +1206,22 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         .map(|tag| format!("\"{tag}\""))
         .collect::<Vec<_>>()
         .join(",");
+    // A schema-2 record's destination reports the binding that was hashed
+    // in — read back out of the retained canonical bytes, so the answer
+    // always reflects what was committed rather than a parallel field.
+    let destination_json = gateway_destination_json(record).unwrap_or_else(|| {
+        format!(
+            "{{\"kind\":\"{}\",\"id\":\"{:016x}\"}}",
+            canonical::dest_kind_name(record.dest_kind),
+            record.dest,
+        )
+    });
     format!(
-        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{destination_json},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
         canonical::format_operation_id(lineage, record.seq),
         record.network,
         record.epoch,
         crate::receive_log::hex_lower(&record.key),
-        canonical::dest_kind_name(record.dest_kind),
-        record.dest,
         record.payload.len(),
         crate::receive_log::hex_lower(&record.hash),
         canonical::delivery_name(record.delivery),
@@ -939,6 +1231,31 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         record.hop_limit,
         record.dispatch_state.name(),
     )
+}
+
+/// The schema-2 destination object for a gateway operation: the extension
+/// is decoded out of the retained canonical bytes (version 2, dest_kind
+/// gateway, 60-byte head) — `None` for anything else, so a record can
+/// never report a binding it did not hash.
+fn gateway_destination_json(record: &StoredOperation) -> Option<String> {
+    let c = &record.canonical;
+    if record.dest_kind != canonical::DEST_GATEWAY || c.len() < 60 || c[0] != 2 || c[5] != 1 {
+        return None;
+    }
+    let scope = match c[24] {
+        canonical::GATEWAY_SCOPE_SDK_RAM => "GATEWAY_SDK_RAM",
+        canonical::GATEWAY_SCOPE_HOST_RAM => "HOST_RECEIVE_RAM",
+        _ => return None,
+    };
+    let mut token = [0u8; 16];
+    token.copy_from_slice(&c[26..42]);
+    let gateway_boot = u64::from_be_bytes(c[42..50].try_into().expect("8"));
+    let egress = u64::from_be_bytes(c[50..58].try_into().expect("8"));
+    Some(format!(
+        "{{\"kind\":\"gateway\",\"id\":\"{:016x}\",\"scope\":\"{scope}\",\"token\":\"{}\",\"gateway_boot\":\"{gateway_boot:016x}\",\"egress\":\"{egress:016x}\"}}",
+        record.dest,
+        crate::receive_log::hex_lower(&token),
+    ))
 }
 
 /// Result of pushing one DataFromMesh payload into the log — surfaced as a
@@ -990,13 +1307,49 @@ mod tests {
         limiter: &'a Mutex<AdmissionLimiter>,
         now: u64,
     ) -> ApiContext<'a, S> {
+        // Node-path tests never touch the session/lane — fresh, empty
+        // fixtures are leaked per call (test-local, no cross-test state).
+        ctx_lane(
+            uid,
+            acl,
+            log,
+            store,
+            limiter,
+            leaked_session(),
+            leaked_lane(),
+            now,
+        )
+    }
+
+    fn leaked_session() -> &'static Mutex<SessionInfo> {
+        Box::leak(Box::new(Mutex::new(SessionInfo::default())))
+    }
+
+    fn leaked_lane() -> &'static crate::dispatch::GatewayLane {
+        Box::leak(Box::new(crate::dispatch::GatewayLane::default()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ctx_lane<'a, S: OperationStore>(
+        uid: Option<u32>,
+        acl: &'a Acl,
+        log: &'a Mutex<ReceiveLog>,
+        store: &'a Mutex<S>,
+        limiter: &'a Mutex<AdmissionLimiter>,
+        session: &'a Mutex<SessionInfo>,
+        lane: &'a crate::dispatch::GatewayLane,
+        now: u64,
+    ) -> ApiContext<'a, S> {
         ApiContext {
             uid,
             acl,
             receive_log: log,
             operation_store: store,
             rate_limiter: limiter,
+            session,
+            gateway_lane: lane,
             now_ms: now,
+            now_mono: now,
         }
     }
 
@@ -1802,7 +2155,8 @@ mod tests {
                 let json = format!(
                     "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{i:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
                 );
-                let req = canonical::parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+                let req =
+                    canonical::parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
                 assert!(matches!(
                     guard.submit(501, &req, 0),
                     SubmitOutcome::Accepted { .. }
@@ -2296,7 +2650,8 @@ mod tests {
                 let json = format!(
                     "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{i:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
                 );
-                let req = canonical::parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+                let req =
+                    canonical::parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
                 let _ = guard.submit(501, &req, 0);
             }
         }
@@ -2508,5 +2863,380 @@ mod tests {
             Some("HOST_QUEUED"),
         );
         assert_eq!(Some(&replay), get(&id).get("result"));
+    }
+
+    // ---- Gateway API (05-wire-api.md §5.7) ----
+
+    /// An authenticated session on the attached gateway plus the
+    /// dispatcher's published registration mirror — the state a live
+    /// schema-2 binding needs.
+    fn gw_fixture() -> (Mutex<SessionInfo>, crate::dispatch::GatewayLane) {
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        let lane = crate::dispatch::GatewayLane::default();
+        lane.set(crate::dispatch::GatewayRegistration {
+            token: [0xa1; 16],
+            gateway_boot: 0x999,
+            host_digest: [0x44; 32],
+            egress: 0x0abc,
+            usb_session: 7,
+            lease_deadline_mono: u64::MAX,
+        });
+        (session, lane)
+    }
+
+    fn gw_submit_line(key: &str, epoch: &str, scope: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"gateway\",\"id\":\"0000000000000020\",\"scope\":\"{scope}\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
+        )
+    }
+
+    fn gw_resolve_line(scope: &str, expected_host: Option<&str>) -> String {
+        let host =
+            expected_host.map_or_else(String::new, |h| format!(",\"expected_host\":\"{h}\""));
+        format!(
+            "{{\"v\":1,\"request_id\":\"r\",\"method\":\"gateway.resolve\",\"params\":{{\"network\":\"0000000000000001\",\"gateway\":\"0000000000000abc\",\"scope\":\"{scope}\"{host}}}}}"
+        )
+    }
+
+    fn gw_get_line(id: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"g\",\"method\":\"gateway.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+        )
+    }
+
+    #[test]
+    fn gateway_submit_without_registration_is_retryable_unavailable() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        // Session authenticated but NO registration mirror: the daemon
+        // must refuse rather than mint a binding — GATEWAY_UNAVAILABLE,
+        // retryable (a later resolve+submit may succeed).
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        let lane = crate::dispatch::GatewayLane::default();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            100,
+        );
+        let key = "66666666666666666666666666666666";
+        let response = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        let parsed = assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("retryable")
+                .and_then(Json::as_bool),
+            Some(true),
+            "{response}"
+        );
+        // And the op never entered the store.
+        assert!(store.lock().unwrap().dispatch_view().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gateway_submit_binds_schema2_and_get_reports_it() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            100,
+        );
+        let key = "77777777777777777777777777777777";
+        let accepted = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        assert!(accepted.contains("\"ok\":true"), "{accepted}");
+        let id = result_field(&accepted, "operation_id");
+        // The admitted record is a real schema-2 canonical bound to the
+        // registration mirror — version 2, kind gateway, token/boot/egress
+        // embedded in the hashed bytes.
+        let seq = u64::from_str_radix(id.rsplit(':').next().unwrap(), 16).unwrap();
+        let record = store
+            .lock()
+            .unwrap()
+            .get_by_seq(seq)
+            .unwrap()
+            .expect("admitted above");
+        assert_eq!(record.dest_kind, 1);
+        assert_eq!(record.canonical[0], 2);
+        assert_eq!(record.canonical.len(), 60 + 2);
+        // gateway.get answers the same status document operations.get
+        // reports — with the schema-2 destination rendered.
+        let got = handle(gw_get_line(&id).as_bytes(), &c);
+        assert!(got.contains("\"ok\":true"), "{got}");
+        let parsed = routeloom_json::parse(&got).unwrap();
+        let result = parsed.get("result").unwrap();
+        assert_eq!(
+            result.get("operation_id").and_then(Json::as_str),
+            Some(id.as_str()),
+            "{got}"
+        );
+        let destination = result.get("destination").unwrap();
+        assert_eq!(
+            destination.get("kind").and_then(Json::as_str),
+            Some("gateway"),
+            "{got}"
+        );
+        assert_eq!(
+            destination.get("scope").and_then(Json::as_str),
+            Some("HOST_RECEIVE_RAM"),
+            "{got}"
+        );
+        // Replay of the same key answers the committed record, and
+        // gateway.get stays the honest outcome query for it.
+        let replay = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        assert!(replay.contains("\"ok\":true"), "{replay}");
+        assert_eq!(
+            routeloom_json::parse(&replay)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("operation_id")
+                .and_then(Json::as_str),
+            Some(id.as_str()),
+            "{replay}"
+        );
+    }
+
+    #[test]
+    fn gateway_get_hides_node_and_foreign_ops() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            100,
+        );
+        // A node-destination op is answered with the same NOT_FOUND an
+        // unknown id gets — the method is not a destination-kind oracle.
+        let key = "88888888888888888888888888888888";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &c);
+        let id = result_field(&accepted, "operation_id");
+        let response = handle(gw_get_line(&id).as_bytes(), &c);
+        assert_error_schema(&response, "NOT_FOUND");
+        let response = handle(
+            gw_get_line("0000000000000000000000000000abcd:00000000000000ff").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "NOT_FOUND");
+        // A principal without READ_OPERATION on the op's network gets the
+        // same NOT_FOUND (no existence oracle).
+        let uid7 = ctx_lane(Some(7), &acl, &log, &store, &limiter, &session, &lane, 100);
+        let response = handle(gw_get_line(&id).as_bytes(), &uid7);
+        assert_error_schema(&response, "NOT_FOUND");
+    }
+
+    #[test]
+    fn gateway_resolve_reports_the_live_binding() {
+        let (acl, log, store, limiter) = test_env();
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            100,
+        );
+        let digest = "44".repeat(32);
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        assert_eq!(
+            result.get("resolved").and_then(Json::as_bool),
+            Some(true),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("host_digest").and_then(Json::as_str),
+            Some(digest.as_str()),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("gateway_boot").and_then(Json::as_str),
+            Some("0000000000000999"),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("egress").and_then(Json::as_str),
+            Some("0000000000000abc"),
+            "{response}"
+        );
+        // The token itself is never disclosed through the API.
+        assert!(!response.contains("a1a1a1a1"), "{response}");
+        // Wrong expected_host → resolved:false with the reason.
+        let wrong = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&"55".repeat(32))).as_bytes(),
+            &c,
+        );
+        let parsed = routeloom_json::parse(&wrong).unwrap();
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("resolved")
+                .and_then(Json::as_bool),
+            Some(false),
+            "{wrong}"
+        );
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str),
+            Some("host_digest_mismatch"),
+            "{wrong}"
+        );
+        // SDK scope is the gateway's own mailbox — not ours to describe.
+        let sdk = handle(
+            gw_resolve_line("GATEWAY_SDK_RAM", Some(&"00".repeat(32))).as_bytes(),
+            &c,
+        );
+        assert!(
+            routeloom_json::parse(&sdk)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("scope_not_host_endpoint"),
+            "{sdk}"
+        );
+        // A different attached node id is "not attached", never resolved.
+        let other = handle(
+            "{\"v\":1,\"request_id\":\"r\",\"method\":\"gateway.resolve\",\"params\":{\"network\":\"0000000000000001\",\"gateway\":\"0000000000000020\",\"scope\":\"HOST_RECEIVE_RAM\",\"expected_host\":\"4444444444444444444444444444444444444444444444444444444444444444\"}}".as_bytes(),
+            &c,
+        );
+        assert!(
+            routeloom_json::parse(&other)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("gateway_not_attached"),
+            "{other}"
+        );
+        // No registration → not_registered (still ok:true, resolved:false).
+        let empty_lane = crate::dispatch::GatewayLane::default();
+        let c2 = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &empty_lane,
+            100,
+        );
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &c2,
+        );
+        assert!(
+            routeloom_json::parse(&response)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("not_registered"),
+            "{response}"
+        );
+        // Missing expected_host on HOST scope is an argument error, not
+        // an unresolved answer.
+        let response = handle(gw_resolve_line("HOST_RECEIVE_RAM", None).as_bytes(), &c);
+        assert_error_schema(&response, "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn gateway_acl_is_enforced() {
+        // READ_PAYLOAD only — no SEND, no READ_OPERATION.
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            100,
+        );
+        let digest = "44".repeat(32);
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+        store.lock().unwrap().open_epoch((501, 1), 0).unwrap();
+        let response = handle(
+            gw_submit_line(
+                "99999999999999999999999999999999",
+                "0000000000000001",
+                "HOST_RECEIVE_RAM",
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+        // Unauthenticated socket peer is denied outright.
+        let anon = ctx_lane(None, &acl, &log, &store, &limiter, &session, &lane, 100);
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &anon,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
     }
 }
