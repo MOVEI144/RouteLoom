@@ -1023,15 +1023,15 @@ impl OperationStore for MemoryOperationStore {
 /// durable SQLite provider once `--op-store` names a database file. One
 /// generic `OperationStore` so the API layer never branches on backend.
 pub enum StoreBackend {
-    Memory(MemoryOperationStore),
-    // Boxed: the durable provider is much larger than the memory one and
-    // this enum is matched on every store call.
+    // Both variants boxed: the providers are much larger than a pointer
+    // and this enum is matched on every store call.
+    Memory(Box<MemoryOperationStore>),
     Sqlite(Box<SqliteOperationStore>),
 }
 
 impl Default for StoreBackend {
     fn default() -> Self {
-        Self::Memory(MemoryOperationStore::default())
+        Self::Memory(Box::default())
     }
 }
 

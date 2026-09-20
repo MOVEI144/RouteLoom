@@ -148,6 +148,10 @@ Status next_boot_session(std::uint32_t& session) noexcept {
   for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
+routeloom::MonotonicMs monotonic_now_ms() noexcept {
+  return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
+}
+
 #if CONFIG_ROUTELOOM_DEEP_SLEEP
 
 // RTC slow-memory marker: written right before esp_deep_sleep_start and
@@ -195,10 +199,6 @@ routeloom::ResetCause classify_boot() noexcept {
     return routeloom::ResetCause::ColdBoot;
   }
   return routeloom::ResetCause::OtherReset;
-}
-
-routeloom::MonotonicMs monotonic_now_ms() noexcept {
-  return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
 }
 
 #endif  // CONFIG_ROUTELOOM_DEEP_SLEEP

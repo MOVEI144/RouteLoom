@@ -948,7 +948,7 @@ mod tests {
     const DEV_KEY: &[u8] = b"dev-config-key-0123456789abcdef";
 
     fn hex_lower(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        crate::receive_log::hex_lower(bytes)
     }
 
     fn field(id: u16, ty: ConfigFieldType, value: &[u8]) -> ConfigField {

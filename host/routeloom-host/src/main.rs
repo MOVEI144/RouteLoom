@@ -2050,7 +2050,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "warning: memory operation store — a daemon restart requires a gateway reboot for dispatch (the device rejects the new lane with LaneMismatch); pass --op-store for a durable lane"
             );
-            StoreBackend::Memory(MemoryOperationStore::new(mint_id128()))
+            StoreBackend::Memory(Box::new(MemoryOperationStore::new(mint_id128())))
         }
     };
     // Only remove a leftover unix socket — never unlink a regular file or a
