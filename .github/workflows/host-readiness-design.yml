@@ -5,11 +5,13 @@ on:
     paths:
       - docs/design/host-security-readiness/**
       - tools/check_host_readiness_design.py
+      - tests/test_host_readiness_addendum.py
       - .github/workflows/host-readiness-design.yml
   pull_request:
     paths:
       - docs/design/host-security-readiness/**
       - tools/check_host_readiness_design.py
+      - tests/test_host_readiness_addendum.py
       - .github/workflows/host-readiness-design.yml
 permissions:
   contents: read
@@ -24,6 +26,11 @@ jobs:
           persist-credentials: false
       - name: Validate draft contracts, examples and negative mutations
         run: python3 tools/check_host_readiness_design.py --report host-readiness-design-check.json
+      - name: Test review deadline arithmetic (design model only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p test_host_readiness_addendum.py -v 2>&1 | tee host-readiness-addendum-tests.txt
       - name: Record exact checkout
         if: always()
         run: git rev-parse HEAD > design-checkout-sha.txt
@@ -34,6 +41,7 @@ jobs:
           name: host-readiness-design-evidence
           path: |
             host-readiness-design-check.json
+            host-readiness-addendum-tests.txt
             design-checkout-sha.txt
             docs/design/host-security-readiness/
           retention-days: 30
