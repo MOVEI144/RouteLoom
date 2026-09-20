@@ -487,7 +487,8 @@ void test_window_admit_replay_conflict() {
   DispatchWindow window(test_lease());
   const auto dispatcher = test_dispatcher();
   const auto hash = test_hash();
-  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash,
+                            test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::Admit);
   CHECK(window.record_sent(dispatcher, 1, hash, test_operation_id(1), 1, 7001, 1));
   CHECK(window.used() == 1);
@@ -497,25 +498,31 @@ void test_window_admit_replay_conflict() {
   CHECK(slot->evidence == DispatchWindow::Evidence::GatewayAccepted);
 
   // Same seq + same hash replays; same seq + other hash conflicts.
-  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash,
+                            test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::Replay);
-  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash(0x50)) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash(0x50),
+                            test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::Conflict);
   // Recording twice is refused: admit is check-then-record, never overwrite.
   CHECK(!window.record_sent(dispatcher, 1, hash, test_operation_id(1), 1, 7001, 9));
   CHECK(window.find(1)->msg_seq == 1);
 
   // Reserved identities never admit.
-  CHECK(window.check_submit(test_lease(), dispatcher, 0, hash) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 0, hash,
+                            test_operation_id(2)) ==
         DispatchWindow::SubmitCheck::InvalidId);
-  CHECK(window.check_submit(test_lease(), dispatcher, UINT64_MAX, hash) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, UINT64_MAX, hash,
+                            test_operation_id(2)) ==
         DispatchWindow::SubmitCheck::InvalidId);
   const std::array<std::uint8_t, 16> zero{};
   std::array<std::uint8_t, 16> maxed{};
   maxed.fill(0xFF);
-  CHECK(window.check_submit(test_lease(), zero, 2, hash) ==
+  CHECK(window.check_submit(test_lease(), zero, 2, hash,
+                            test_operation_id(2)) ==
         DispatchWindow::SubmitCheck::InvalidId);
-  CHECK(window.check_submit(test_lease(), maxed, 2, hash) ==
+  CHECK(window.check_submit(test_lease(), maxed, 2, hash,
+                            test_operation_id(2)) ==
         DispatchWindow::SubmitCheck::InvalidId);
 }
 
@@ -524,13 +531,15 @@ void test_window_capacity_bound() {
   const auto dispatcher = test_dispatcher();
   // Positions 1..32 admit; the 33rd is backpressure, not an eviction.
   for (std::uint64_t seq = 1; seq <= DispatchWindow::kCapacity; ++seq) {
-    CHECK(window.check_submit(test_lease(), dispatcher, seq, test_hash()) ==
+    CHECK(window.check_submit(test_lease(), dispatcher, seq, test_hash(),
+                              test_operation_id(seq)) ==
           DispatchWindow::SubmitCheck::Admit);
     CHECK(window.record_sent(dispatcher, seq, test_hash(), test_operation_id(seq),
                              1, 7001, seq));
   }
   CHECK(window.used() == DispatchWindow::kCapacity);
-  CHECK(window.check_submit(test_lease(), dispatcher, 33, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 33, test_hash(),
+                            test_operation_id(33)) ==
         DispatchWindow::SubmitCheck::WindowFull);
   // Nothing was evicted to make room: every protected record is intact.
   CHECK(window.used() == DispatchWindow::kCapacity);
@@ -543,7 +552,8 @@ void test_window_retire_prefix() {
   DispatchWindow window(test_lease());
   const auto dispatcher = test_dispatcher();
   for (std::uint64_t seq = 1; seq <= 4; ++seq) {
-    CHECK(window.check_submit(test_lease(), dispatcher, seq, test_hash()) ==
+    CHECK(window.check_submit(test_lease(), dispatcher, seq, test_hash(),
+                              test_operation_id(seq)) ==
           DispatchWindow::SubmitCheck::Admit);
     CHECK(window.record_sent(dispatcher, seq, test_hash(), test_operation_id(seq),
                              1, 7001, seq));
@@ -568,24 +578,32 @@ void test_window_retire_prefix() {
   CHECK(window.find(1) == nullptr && window.find(2) == nullptr);
   CHECK(window.find(3) != nullptr);  // pinned survivor untouched
 
-  // Re-RETIRE at/below the floor is an idempotent no-op (CAP09).
+  // Re-RETIRE at/below the floor is an idempotent no-op (CAP09) — but
+  // reserved `through` values are InvalidId, never a blessed no-op.
   CHECK(window.retire_through(test_lease(), dispatcher, 2) ==
         DispatchWindow::RetireOutcome::NoopFloor);
   CHECK(window.retire_through(test_lease(), dispatcher, 0) ==
-        DispatchWindow::RetireOutcome::NoopFloor);
+        DispatchWindow::RetireOutcome::InvalidId);
+  CHECK(window.retire_through(test_lease(), dispatcher, UINT64_MAX) ==
+        DispatchWindow::RetireOutcome::InvalidId);
   CHECK(window.retired_through() == 2);
 
   // The window slides: 33..34 admit now, 35 is past the new edge.
-  CHECK(window.check_submit(test_lease(), dispatcher, 33, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 33, test_hash(),
+                            test_operation_id(33)) ==
         DispatchWindow::SubmitCheck::Admit);
-  CHECK(window.check_submit(test_lease(), dispatcher, 34, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 34, test_hash(),
+                            test_operation_id(34)) ==
         DispatchWindow::SubmitCheck::Admit);
-  CHECK(window.check_submit(test_lease(), dispatcher, 35, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 35, test_hash(),
+                            test_operation_id(35)) ==
         DispatchWindow::SubmitCheck::WindowFull);
   // Retired seqs stay retired: never re-admitted, never re-sent.
-  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash(),
+                            test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::Retired);
-  CHECK(window.check_submit(test_lease(), dispatcher, 2, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 2, test_hash(),
+                            test_operation_id(2)) ==
         DispatchWindow::SubmitCheck::Retired);
 
   // Empty holes block retirement exactly like Sent positions.
@@ -609,7 +627,8 @@ void test_window_retire_ring_wrap() {
   CHECK(window.used() == 0);
   // The ring aliases (seq+32 shares a slot): stale data must be gone.
   for (std::uint64_t seq = 33; seq <= 64; ++seq) {
-    CHECK(window.check_submit(test_lease(), dispatcher, seq, test_hash(0x77)) ==
+    CHECK(window.check_submit(test_lease(), dispatcher, seq, test_hash(0x77),
+                              test_operation_id(seq)) ==
           DispatchWindow::SubmitCheck::Admit);
     CHECK(window.record_sent(dispatcher, seq, test_hash(0x77),
                              test_operation_id(seq), 0, 7001, seq));
@@ -626,7 +645,8 @@ void test_window_skip() {
   // Re-SKIP is idempotent; SUBMIT onto a SKIP conflicts (hashes differ).
   CHECK(window.skip(test_lease(), dispatcher, 1) ==
         DispatchWindow::SkipOutcome::ReplaySkipped);
-  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash()) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash(),
+                            test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::Conflict);
 
   // SKIP never overwrites an accepted record.
@@ -682,7 +702,8 @@ void test_window_lease_and_lane() {
   // window's records are unreachable under the new lease (host marks them
   // indeterminate — it must never silently resubmit them).
   DispatchWindow rebooted(other);
-  CHECK(rebooted.check_submit(test_lease(), dispatcher, 1, hash) ==
+  CHECK(rebooted.check_submit(test_lease(), dispatcher, 1, hash,
+                              test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::LeaseMismatch);
   DispatchWindow::Slot slot{};
   CHECK(rebooted.query(test_lease(), dispatcher, 1, slot) ==
@@ -695,20 +716,23 @@ void test_window_lease_and_lane() {
   // An invalid local lease (boot persistence failed) mismatches everything,
   // including itself: sends are not enabled.
   DispatchWindow unbooted(BootLease::derive(0, 1));
-  CHECK(unbooted.check_submit(BootLease::derive(0, 1), dispatcher, 1, hash) ==
+  CHECK(unbooted.check_submit(BootLease::derive(0, 1), dispatcher, 1, hash,
+                              test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::LeaseMismatch);
 
-  // Lane binding: the first recorded mutation claims the lane for its
+  // Lane binding: the first actual send claims the lane for its
   // dispatcher; a second dispatcher is refused on all four lane operations.
   DispatchWindow window(test_lease());
   CHECK(!window.lane_bound());
-  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash) ==
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash,
+                            test_operation_id(1)) ==
         DispatchWindow::SubmitCheck::Admit);
-  CHECK(!window.lane_bound());  // checks don't bind; records do
+  CHECK(!window.lane_bound());  // checks don't bind; sends do
   CHECK(window.record_sent(dispatcher, 1, hash, test_operation_id(1), 1, 7001, 1));
   CHECK(window.lane_bound());
   const auto other_disp = other_dispatcher();
-  CHECK(window.check_submit(test_lease(), other_disp, 2, hash) ==
+  CHECK(window.check_submit(test_lease(), other_disp, 2, hash,
+                            test_operation_id(2)) ==
         DispatchWindow::SubmitCheck::LaneMismatch);
   CHECK(window.query(test_lease(), other_disp, 1, slot) ==
         DispatchWindow::QueryOutcome::LaneMismatch);
@@ -769,6 +793,116 @@ void test_window_mesh_outcomes() {
 
   // Every terminal mesh outcome retires.
   CHECK(window.retire_through(test_lease(), dispatcher, 6) ==
+        DispatchWindow::RetireOutcome::Advanced);
+}
+
+void test_window_reserved_submit_fields() {
+  DispatchWindow window(test_lease());
+  const auto dispatcher = test_dispatcher();
+  const auto hash = test_hash();
+  // Reserved canonical_hash space (all-zero / all-ones) is InvalidId —
+  // the same rule as reserved seqs and dispatcher ids (01 §3).
+  std::array<std::uint8_t, 32> zero_hash{};
+  std::array<std::uint8_t, 32> max_hash{};
+  max_hash.fill(0xFF);
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, zero_hash,
+                            test_operation_id(1)) ==
+        DispatchWindow::SubmitCheck::InvalidId);
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, max_hash,
+                            test_operation_id(1)) ==
+        DispatchWindow::SubmitCheck::InvalidId);
+  // Reserved operation_id (all-zero / all-0xFF 24B) is refused too: it is
+  // echoed back via QUERY, so reserved values must never be stored.
+  std::array<std::uint8_t, 24> zero_op{};
+  std::array<std::uint8_t, 24> max_op{};
+  max_op.fill(0xFF);
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash, zero_op) ==
+        DispatchWindow::SubmitCheck::InvalidId);
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, hash, max_op) ==
+        DispatchWindow::SubmitCheck::InvalidId);
+  // ...and nothing was admitted: the positions stay free.
+  CHECK(window.used() == 0);
+}
+
+void test_window_submit_onto_skip_is_conflict() {
+  DispatchWindow window(test_lease());
+  const auto dispatcher = test_dispatcher();
+  CHECK(window.skip(test_lease(), dispatcher, 1) ==
+        DispatchWindow::SkipOutcome::Skipped);
+  // SUBMIT onto a SKIP is Conflict per design — the skipped slot stores a
+  // zeroed hash, so this must NEVER classify as a Replay/Existing even
+  // when the submitted hash is itself all zeros (that one is caught
+  // earlier by the reserved-id gate as InvalidId).
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, test_hash(),
+                            test_operation_id(1)) ==
+        DispatchWindow::SubmitCheck::Conflict);
+  const std::array<std::uint8_t, 32> zero_hash{};
+  CHECK(window.check_submit(test_lease(), dispatcher, 1, zero_hash,
+                            test_operation_id(1)) ==
+        DispatchWindow::SubmitCheck::InvalidId);
+  // A same-content replay of the SKIP itself is still idempotent.
+  CHECK(window.skip(test_lease(), dispatcher, 1) ==
+        DispatchWindow::SkipOutcome::ReplaySkipped);
+}
+
+void test_window_lane_binds_on_first_send() {
+  DispatchWindow window(test_lease());
+  const auto first = test_dispatcher();
+  const auto second = other_dispatcher();
+  // A lone SKIP records the hole but must NOT claim the lane for the boot.
+  CHECK(window.skip(test_lease(), first, 1) == DispatchWindow::SkipOutcome::Skipped);
+  CHECK(!window.lane_bound());
+  // Neither does a terminal Expired record — nothing was ever sent.
+  CHECK(window.record_expired(first, 2, test_hash(), test_operation_id(2), 1));
+  CHECK(!window.lane_bound());
+  // The first actual SEND binds the lane — whichever dispatcher sends it.
+  CHECK(window.record_sent(second, 3, test_hash(), test_operation_id(3), 1,
+                           7001, 3));
+  CHECK(window.lane_bound());
+  // From now on the first dispatcher mismatches on every lane operation.
+  CHECK(window.skip(test_lease(), first, 4) == DispatchWindow::SkipOutcome::LaneMismatch);
+  CHECK(window.check_submit(test_lease(), first, 4, test_hash(),
+                            test_operation_id(4)) ==
+        DispatchWindow::SubmitCheck::LaneMismatch);
+  // The earlier terminal records still retire — under the bound owner.
+  CHECK(window.retire_through(test_lease(), second, 2) ==
+        DispatchWindow::RetireOutcome::Advanced);
+}
+
+void test_window_record_indeterminate() {
+  DispatchWindow window(test_lease());
+  const auto dispatcher = test_dispatcher();
+  // Degraded-path record: a live send with no Sent bookkeeping becomes a
+  // terminal Indeterminate slot that still correlates the MessageKey.
+  CHECK(window.record_indeterminate(dispatcher, 5, test_hash(),
+                                    test_operation_id(5), 1, 7001, 55));
+  const DispatchWindow::Slot* slot = window.find(5);
+  CHECK(slot != nullptr && slot->state == WindowState::Indeterminate);
+  CHECK(slot->msg_valid && slot->msg_session == 7001 && slot->msg_seq == 55);
+  // It never binds the lane and never re-admits: same hash replays as
+  // Existing, a different hash Conflicts — no clean re-send is possible.
+  CHECK(!window.lane_bound());
+  CHECK(window.check_submit(test_lease(), dispatcher, 5, test_hash(),
+                            test_operation_id(5)) ==
+        DispatchWindow::SubmitCheck::Replay);
+  CHECK(window.check_submit(test_lease(), dispatcher, 5, test_hash(0x50),
+                            test_operation_id(5)) ==
+        DispatchWindow::SubmitCheck::Conflict);
+  // Late outcomes still correlate (suppressed from the legacy event path)
+  // without changing the honest Indeterminate state.
+  CHECK(window.note_mesh_outcome(7001, 55, DeliveryState::Delivered));
+  CHECK(window.find(5)->state == WindowState::Indeterminate);
+  // Occupied positions refuse the fallback record — never overwritten.
+  CHECK(!window.record_indeterminate(dispatcher, 5, test_hash(),
+                                     test_operation_id(5), 1, 7001, 56));
+  // Empty holes still block the prefix; certify them, then the whole
+  // terminal span retires under the (still unbound) lane.
+  for (std::uint64_t seq = 1; seq <= 4; ++seq) {
+    CHECK(window.skip(test_lease(), dispatcher, seq) ==
+          DispatchWindow::SkipOutcome::Skipped);
+  }
+  CHECK(!window.lane_bound());
+  CHECK(window.retire_through(test_lease(), dispatcher, 5) ==
         DispatchWindow::RetireOutcome::Advanced);
 }
 
@@ -1491,6 +1625,286 @@ void test_bridge_malformed_and_gating() {
   CHECK(legacy_answer.empty());
 }
 
+void test_bridge_submit_rejections() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0x9999, 190) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto canonical = build_canonical();
+
+  // WindowFull at the bridge: seq 33 is past floor(0) + capacity(32).
+  const auto full = submit_bytes(33, ByteView{canonical.data(), canonical.size()});
+  const auto full_answer =
+      transact(world, host, now, 200, ByteView{full.data(), full.size()},
+               got_error, error_code);
+  DispatchReceipt full_resp{};
+  CHECK(decode_receipt(ByteView{full_answer.data(), full_answer.size()},
+                       HostOpsSub::Submit, full_resp));
+  CHECK(full_resp.result == HostOpsResult::WindowFull);
+
+  // Reserved canonical_hash (all-zero) is InvalidRequest — never stored,
+  // and never confused with a skipped slot's zeroed hash field.
+  SubmitRequest zeroed = make_submit(1, ByteView{canonical.data(), canonical.size()});
+  zeroed.canonical_hash = {};
+  const auto zeroed_bytes = encode_submit_bytes(zeroed);
+  const auto zeroed_answer =
+      transact(world, host, now, 201,
+               ByteView{zeroed_bytes.data(), zeroed_bytes.size()},
+               got_error, error_code);
+  DispatchReceipt zeroed_resp{};
+  CHECK(decode_receipt(ByteView{zeroed_answer.data(), zeroed_answer.size()},
+                       HostOpsSub::Submit, zeroed_resp));
+  CHECK(zeroed_resp.result == HostOpsResult::InvalidRequest);
+
+  // Reserved operation_id values (all-zero / all-0xFF) are InvalidRequest.
+  SubmitRequest zero_op = make_submit(1, ByteView{canonical.data(), canonical.size()});
+  zero_op.operation_id = {};
+  const auto zero_op_bytes = encode_submit_bytes(zero_op);
+  const auto zero_op_answer =
+      transact(world, host, now, 202,
+               ByteView{zero_op_bytes.data(), zero_op_bytes.size()},
+               got_error, error_code);
+  DispatchReceipt zero_op_resp{};
+  CHECK(decode_receipt(ByteView{zero_op_answer.data(), zero_op_answer.size()},
+                       HostOpsSub::Submit, zero_op_resp));
+  CHECK(zero_op_resp.result == HostOpsResult::InvalidRequest);
+
+  SubmitRequest max_op = make_submit(1, ByteView{canonical.data(), canonical.size()});
+  max_op.operation_id.fill(0xFF);
+  const auto max_op_bytes = encode_submit_bytes(max_op);
+  const auto max_op_answer =
+      transact(world, host, now, 203,
+               ByteView{max_op_bytes.data(), max_op_bytes.size()},
+               got_error, error_code);
+  DispatchReceipt max_op_resp{};
+  CHECK(decode_receipt(ByteView{max_op_answer.data(), max_op_answer.size()},
+                       HostOpsSub::Submit, max_op_resp));
+  CHECK(max_op_resp.result == HostOpsResult::InvalidRequest);
+
+  // SUBMIT onto a SKIP is Conflict at the bridge too — the receipt reports
+  // the authoritative Skipped state, not a replay.
+  const auto skip = lane_bytes(HostOpsSub::Skip, 1);
+  const auto skip_answer =
+      transact(world, host, now, 204, ByteView{skip.data(), skip.size()},
+               got_error, error_code);
+  DispatchReceipt skip_resp{};
+  CHECK(decode_receipt(ByteView{skip_answer.data(), skip_answer.size()},
+                       HostOpsSub::Skip, skip_resp));
+  CHECK(skip_resp.result == HostOpsResult::Ok);
+  const auto onto = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
+  const auto onto_answer =
+      transact(world, host, now, 205, ByteView{onto.data(), onto.size()},
+               got_error, error_code);
+  DispatchReceipt onto_resp{};
+  CHECK(decode_receipt(ByteView{onto_answer.data(), onto_answer.size()},
+                       HostOpsSub::Submit, onto_resp));
+  CHECK(onto_resp.result == HostOpsResult::Conflict);
+  CHECK(onto_resp.state == WindowState::Skipped);
+
+  // ...including the historical edge: an all-zero hash onto the skipped
+  // hole is InvalidRequest (reserved), not Existing.
+  const auto zeroed_onto =
+      transact(world, host, now, 206,
+               ByteView{zeroed_bytes.data(), zeroed_bytes.size()},
+               got_error, error_code);
+  DispatchReceipt zeroed_onto_resp{};
+  CHECK(decode_receipt(
+      ByteView{zeroed_onto.data(), zeroed_onto.size()}, HostOpsSub::Submit,
+      zeroed_onto_resp));
+  CHECK(zeroed_onto_resp.result == HostOpsResult::InvalidRequest);
+
+  // Reserved RETIRE `through` values are InvalidRequest, matching the
+  // reserved-seq rule on SUBMIT/QUERY/SKIP.
+  const auto retire0 = lane_bytes(HostOpsSub::RetireThrough, 0);
+  const auto retire0_answer =
+      transact(world, host, now, 207, ByteView{retire0.data(), retire0.size()},
+               got_error, error_code);
+  RetireResponse retire0_resp{};
+  CHECK(decode_retire_response(
+      ByteView{retire0_answer.data(), retire0_answer.size()}, retire0_resp));
+  CHECK(retire0_resp.result == HostOpsResult::InvalidRequest);
+
+  const auto retire_max = lane_bytes(HostOpsSub::RetireThrough, UINT64_MAX);
+  const auto retire_max_answer =
+      transact(world, host, now, 208,
+               ByteView{retire_max.data(), retire_max.size()},
+               got_error, error_code);
+  RetireResponse retire_max_resp{};
+  CHECK(decode_retire_response(
+      ByteView{retire_max_answer.data(), retire_max_answer.size()},
+      retire_max_resp));
+  CHECK(retire_max_resp.result == HostOpsResult::InvalidRequest);
+}
+
+void test_bridge_lifetime_clamped_to_ttl() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0xAAAA, 220) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto canonical = build_canonical();  // ttl 5000
+
+  // A far-future device_deadline (~11 days out) must NOT translate into an
+  // unbounded mesh lifetime: the send is capped by the canonical ttl.
+  const auto far = submit_bytes(1, ByteView{canonical.data(), canonical.size()},
+                                now + 1000000000ULL);
+  const auto far_answer =
+      transact(world, host, now, 230, ByteView{far.data(), far.size()},
+               got_error, error_code);
+  DispatchReceipt far_resp{};
+  CHECK(decode_receipt(ByteView{far_answer.data(), far_answer.size()},
+                       HostOpsSub::Submit, far_resp));
+  CHECK(far_resp.result == HostOpsResult::Ok && far_resp.msg_valid);
+  bool found = false;
+  world.n1.for_each_delivery([&](const DeliverySnapshot& delivery) {
+    if (delivery.id.session == far_resp.msg_session &&
+        delivery.id.sequence == far_resp.msg_seq) {
+      found = true;
+      CHECK(delivery.options.lifetime_ms == 5000);
+    }
+  });
+  CHECK(found);
+
+  // A deadline tighter than the ttl wins instead: lifetime = the actual
+  // remaining budget.
+  const auto near = submit_bytes(2, ByteView{canonical.data(), canonical.size()},
+                                 now + 2000);
+  const auto near_answer =
+      transact(world, host, now, 231, ByteView{near.data(), near.size()},
+               got_error, error_code);
+  DispatchReceipt near_resp{};
+  CHECK(decode_receipt(ByteView{near_answer.data(), near_answer.size()},
+                       HostOpsSub::Submit, near_resp));
+  CHECK(near_resp.result == HostOpsResult::Ok && near_resp.msg_valid);
+  found = false;
+  world.n1.for_each_delivery([&](const DeliverySnapshot& delivery) {
+    if (delivery.id.session == near_resp.msg_session &&
+        delivery.id.sequence == near_resp.msg_seq) {
+      found = true;
+      CHECK(delivery.options.lifetime_ms == 2000);
+    }
+  });
+  CHECK(found);
+}
+
+void test_bridge_mesh_rejected() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0xBBBB, 240) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto canonical = build_canonical();
+
+  // The mesh delivery table holds 8 live deliveries; fill it via SUBMITs.
+  for (std::uint64_t seq = 1; seq <= 8; ++seq) {
+    const auto submit =
+        submit_bytes(seq, ByteView{canonical.data(), canonical.size()});
+    const auto answer =
+        transact(world, host, now, 250 + seq,
+                 ByteView{submit.data(), submit.size()}, got_error,
+                 error_code);
+    DispatchReceipt resp{};
+    CHECK(decode_receipt(ByteView{answer.data(), answer.size()},
+                         HostOpsSub::Submit, resp));
+    CHECK(resp.result == HostOpsResult::Ok);
+  }
+
+  // The next send is refused by the mesh: honest MeshRejected, and no
+  // half-created record — QUERY proves the position stayed empty.
+  const auto ninth = submit_bytes(9, ByteView{canonical.data(), canonical.size()});
+  const auto ninth_answer =
+      transact(world, host, now, 260, ByteView{ninth.data(), ninth.size()},
+               got_error, error_code);
+  DispatchReceipt ninth_resp{};
+  CHECK(decode_receipt(ByteView{ninth_answer.data(), ninth_answer.size()},
+                       HostOpsSub::Submit, ninth_resp));
+  CHECK(ninth_resp.result == HostOpsResult::MeshRejected);
+  CHECK(!ninth_resp.msg_valid);
+
+  const auto query = lane_bytes(HostOpsSub::QueryDispatch, 9);
+  const auto query_answer =
+      transact(world, host, now, 261, ByteView{query.data(), query.size()},
+               got_error, error_code);
+  QueryResponse queried{};
+  CHECK(decode_query_response(
+      ByteView{query_answer.data(), query_answer.size()}, queried));
+  CHECK(queried.result == HostOpsResult::NotRetained);
+
+  // A retry of the same seq is still a clean Admit (here it lands expired
+  // because its deadline already passed): never a false Conflict.
+  const auto retry = submit_bytes(9, ByteView{canonical.data(), canonical.size()},
+                                  now);  // deadline == now → Expired
+  const auto retry_answer =
+      transact(world, host, now, 262, ByteView{retry.data(), retry.size()},
+               got_error, error_code);
+  DispatchReceipt retry_resp{};
+  CHECK(decode_receipt(ByteView{retry_answer.data(), retry_answer.size()},
+                       HostOpsSub::Submit, retry_resp));
+  CHECK(retry_resp.result == HostOpsResult::Expired);
+  CHECK(retry_resp.state == WindowState::Expired);
+}
+
+void test_bridge_stale_delivery_event_after_retire() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 1000;
+  CHECK(host_handshake(world, host, now, 0xCCCC, 270) != 0);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto canonical = build_canonical();
+
+  const auto submit = submit_bytes(1, ByteView{canonical.data(), canonical.size()});
+  const auto answer =
+      transact(world, host, now, 280, ByteView{submit.data(), submit.size()},
+               got_error, error_code);
+  DispatchReceipt receipt{};
+  CHECK(decode_receipt(ByteView{answer.data(), answer.size()},
+                       HostOpsSub::Submit, receipt));
+  CHECK(receipt.result == HostOpsResult::Ok && receipt.msg_valid);
+
+  // Terminate the record via the mesh outcome (suppressed from the legacy
+  // event path), then retire the terminal prefix.
+  world.bridge.on_delivery(
+      DeliveryResult{MessageId{receipt.msg_session, receipt.msg_seq},
+                     DeliveryState::Delivered, "END_RECEIVED"});
+  world.drain(now);
+  world.device_sink.frames.clear();
+  const auto retire = lane_bytes(HostOpsSub::RetireThrough, 1);
+  const auto retire_answer =
+      transact(world, host, now, 281, ByteView{retire.data(), retire.size()},
+               got_error, error_code);
+  RetireResponse retire_resp{};
+  CHECK(decode_retire_response(
+      ByteView{retire_answer.data(), retire_answer.size()}, retire_resp));
+  CHECK(retire_resp.result == HostOpsResult::Ok);
+  CHECK(retire_resp.retired_through == 1);
+
+  // A duplicate outcome arriving after the record is gone has nothing to
+  // correlate to: it surfaces as a STALE DeliveryEvent with request=0 so
+  // the host can read it as already-retired evidence.
+  world.bridge.on_delivery(
+      DeliveryResult{MessageId{receipt.msg_session, receipt.msg_seq},
+                     DeliveryState::Delivered, "LATE_DUPLICATE"});
+  world.drain(now);
+  bool stale_event = false;
+  for (const auto& record : world.device_sink.frames) {
+    if (record.frame.kind != FrameKind::DeliveryEvent) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    CHECK(open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                    opened));
+    CHECK(opened.size >= 21);
+    CHECK(read_u64(opened.data) == 0);  // retired records have no request id
+    stale_event = true;
+  }
+  CHECK(stale_event);
+  world.device_sink.frames.clear();
+}
+
 }  // namespace
 
 int main() {
@@ -1508,12 +1922,20 @@ int main() {
   test_window_query();
   test_window_lease_and_lane();
   test_window_mesh_outcomes();
+  test_window_reserved_submit_fields();
+  test_window_submit_onto_skip_is_conflict();
+  test_window_lane_binds_on_first_send();
+  test_window_record_indeterminate();
   test_bridge_submit_lifecycle();
   test_bridge_expiry_and_mesh_outcome();
   test_bridge_reconnect_keeps_window();
   test_bridge_lease_lane_and_validation();
   test_bridge_time_sample();
   test_bridge_malformed_and_gating();
+  test_bridge_submit_rejections();
+  test_bridge_lifetime_clamped_to_ttl();
+  test_bridge_mesh_rejected();
+  test_bridge_stale_delivery_event_after_retire();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);
     return 1;

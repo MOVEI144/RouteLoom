@@ -11,9 +11,11 @@ bool is_reserved_id(const std::uint64_t value) noexcept {
   return value == 0 || value == UINT64_MAX;
 }
 
+// Reserved identity space (01 §3: all IDs exclude 0 / all-ones). Applies to
+// every byte-string identity on the lane — dispatcher, canonical_hash and
+// operation_id — so a zeroed field can never collide with "unset".
 template <std::size_t Size>
-bool is_reserved_id128(const std::array<std::uint8_t, Size>& id) noexcept {
-  static_assert(Size == 16, "128-bit identity only");
+bool is_reserved_bytes(const std::array<std::uint8_t, Size>& id) noexcept {
   bool all_zero = true;
   bool all_max = true;
   for (const std::uint8_t byte : id) {
@@ -298,9 +300,11 @@ DispatchWindow::SubmitCheck DispatchWindow::check_submit(
     const BootLease& lease,
     const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
     const std::uint64_t dispatch_seq,
-    const std::array<std::uint8_t, kCanonicalHashSize>& hash) const noexcept {
+    const std::array<std::uint8_t, kCanonicalHashSize>& hash,
+    const std::array<std::uint8_t, kOperationIdSize>& operation_id) const noexcept {
   if (!lease_ok(lease)) return SubmitCheck::LeaseMismatch;
-  if (is_reserved_id(dispatch_seq) || is_reserved_id128(dispatcher)) {
+  if (is_reserved_id(dispatch_seq) || is_reserved_bytes(dispatcher) ||
+      is_reserved_bytes(hash) || is_reserved_bytes(operation_id)) {
     return SubmitCheck::InvalidId;
   }
   if (!lane_ok(dispatcher)) return SubmitCheck::LaneMismatch;
@@ -308,6 +312,10 @@ DispatchWindow::SubmitCheck DispatchWindow::check_submit(
   const Slot* slot = position(dispatch_seq);
   if (slot == nullptr) return SubmitCheck::WindowFull;
   if (!slot->occupied) return SubmitCheck::Admit;
+  // A Skipped position is certified never-submitted and stores no hash:
+  // ANY submit onto it is a Conflict — the zeroed slot hash must never
+  // read back as a "replay" of a submitted hash.
+  if (slot->state == State::Skipped) return SubmitCheck::Conflict;
   return slot->hash == hash ? SubmitCheck::Replay : SubmitCheck::Conflict;
 }
 
@@ -320,6 +328,8 @@ bool DispatchWindow::record_sent(
     const std::uint64_t msg_seq) noexcept {
   Slot* slot = position(dispatch_seq);
   if (slot == nullptr || slot->occupied) return false;
+  // The first actual send claims the lane for the boot (see the header:
+  // SKIP/expired records deliberately do not bind).
   if (!bind_lane(dispatcher)) return false;
   *slot = Slot{};
   slot->occupied = true;
@@ -340,9 +350,9 @@ bool DispatchWindow::record_expired(
     const std::array<std::uint8_t, kCanonicalHashSize>& hash,
     const std::array<std::uint8_t, kOperationIdSize>& operation_id,
     const std::uint8_t delivery) noexcept {
+  (void)dispatcher;  // lane-checked by the caller; only record_sent binds
   Slot* slot = position(dispatch_seq);
   if (slot == nullptr || slot->occupied) return false;
-  if (!bind_lane(dispatcher)) return false;
   *slot = Slot{};
   slot->occupied = true;
   slot->state = State::Expired;
@@ -353,13 +363,37 @@ bool DispatchWindow::record_expired(
   return true;
 }
 
+bool DispatchWindow::record_indeterminate(
+    const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
+    const std::uint64_t dispatch_seq,
+    const std::array<std::uint8_t, kCanonicalHashSize>& hash,
+    const std::array<std::uint8_t, kOperationIdSize>& operation_id,
+    const std::uint8_t delivery, const std::uint32_t msg_session,
+    const std::uint64_t msg_seq) noexcept {
+  (void)dispatcher;  // never binds: this is a degraded fallback record
+  Slot* slot = position(dispatch_seq);
+  if (slot == nullptr || slot->occupied) return false;
+  *slot = Slot{};
+  slot->occupied = true;
+  slot->state = State::Indeterminate;
+  slot->delivery = delivery;
+  slot->hash = hash;
+  slot->operation_id = operation_id;
+  slot->msg_session = msg_session;
+  slot->msg_seq = msg_seq;
+  slot->msg_valid = true;
+  // The mesh DID accept the send; only the bookkeeping was degraded.
+  slot->evidence = Evidence::GatewayAccepted;
+  return true;
+}
+
 DispatchWindow::QueryOutcome DispatchWindow::query(
     const BootLease& lease,
     const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
     const std::uint64_t dispatch_seq, Slot& slot) const noexcept {
   slot = Slot{};
   if (!lease_ok(lease)) return QueryOutcome::LeaseMismatch;
-  if (is_reserved_id(dispatch_seq) || is_reserved_id128(dispatcher)) {
+  if (is_reserved_id(dispatch_seq) || is_reserved_bytes(dispatcher)) {
     return QueryOutcome::InvalidId;
   }
   if (!lane_ok(dispatcher)) return QueryOutcome::LaneMismatch;
@@ -375,7 +409,11 @@ DispatchWindow::RetireOutcome DispatchWindow::retire_through(
     const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
     const std::uint64_t through) noexcept {
   if (!lease_ok(lease)) return RetireOutcome::LeaseMismatch;
-  if (is_reserved_id128(dispatcher)) {
+  // Reserved `through` values are refused like reserved seqs elsewhere:
+  // 0 must not pass as a blessed floor no-op and UINT64_MAX must not pass
+  // as a span refusal — both are InvalidRequest, not valid floor values.
+  if (is_reserved_id(through)) return RetireOutcome::InvalidId;
+  if (is_reserved_bytes(dispatcher)) {
     // Reserved dispatcher ids never bind a lane; without a lane the floor
     // cannot move, so even a no-op retire is refused rather than blessed.
     return RetireOutcome::LaneMismatch;
@@ -392,8 +430,14 @@ DispatchWindow::RetireOutcome DispatchWindow::retire_through(
     }
     if (seq == UINT64_MAX) break;  // loop-guard: through is bounded above
   }
-  // Records are deleted BEFORE the floor advances: a torn retire leaves
-  // surplus records, never a resurrected key.
+  // Ordering invariant (04 §4): a torn retire may only ever leave surplus
+  // records — never a missing record under the OLD floor, which would let
+  // the position re-admit and re-execute (a resurrected key). On a durable
+  // store that means persisting the floor BEFORE deleting records. This
+  // window is in-memory and single-threaded, so the delete loop and the
+  // floor advance below are one indivisible update — and the host store
+  // does the equivalent inside a single transaction — so no tear can ever
+  // expose the dangerous intermediate state.
   for (std::uint64_t seq = floor_ + 1; seq <= through; ++seq) {
     Slot* slot = position(seq);
     if (slot != nullptr) *slot = Slot{};
@@ -408,7 +452,7 @@ DispatchWindow::SkipOutcome DispatchWindow::skip(
     const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
     const std::uint64_t dispatch_seq) noexcept {
   if (!lease_ok(lease)) return SkipOutcome::LeaseMismatch;
-  if (is_reserved_id(dispatch_seq) || is_reserved_id128(dispatcher)) {
+  if (is_reserved_id(dispatch_seq) || is_reserved_bytes(dispatcher)) {
     return SkipOutcome::InvalidId;
   }
   if (!lane_ok(dispatcher)) return SkipOutcome::LaneMismatch;
@@ -419,7 +463,9 @@ DispatchWindow::SkipOutcome DispatchWindow::skip(
     return slot->state == State::Skipped ? SkipOutcome::ReplaySkipped
                                          : SkipOutcome::Occupied;
   }
-  if (!bind_lane(dispatcher)) return SkipOutcome::LaneMismatch;
+  // The hole fills without binding the lane: only record_sent (the first
+  // actual send) claims it, so a stray SKIP cannot lock the real
+  // dispatcher out of the lane for the rest of the boot.
   *slot = Slot{};
   slot->occupied = true;
   slot->state = State::Skipped;

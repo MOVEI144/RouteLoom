@@ -232,7 +232,9 @@ class DispatchWindow {
     WindowFull,
     LeaseMismatch,
     LaneMismatch,
-    InvalidId,  // reserved dispatch_seq or dispatcher id
+    // Reserved dispatch_seq, dispatcher id, canonical_hash or operation_id
+    // (all-zero / all-ones identity space, 01 §3).
+    InvalidId,
   };
 
   enum class QueryOutcome : std::uint8_t {
@@ -250,6 +252,7 @@ class DispatchWindow {
     RefusedSpan,  // span crosses an empty/unterminated or untracked position
     LeaseMismatch,
     LaneMismatch,
+    InvalidId,  // reserved `through` value (0 / UINT64_MAX)
   };
 
   enum class SkipOutcome : std::uint8_t {
@@ -278,11 +281,16 @@ class DispatchWindow {
   SubmitCheck check_submit(const BootLease& lease,
                            const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
                            std::uint64_t dispatch_seq,
-                           const std::array<std::uint8_t, kCanonicalHashSize>& hash) const noexcept;
+                           const std::array<std::uint8_t, kCanonicalHashSize>& hash,
+                           const std::array<std::uint8_t, kOperationIdSize>& operation_id) const noexcept;
 
-  // Stage 2a: mesh accepted the first send. Binds the lane on the first
-  // recorded mutation. False only if the position is no longer admittable
-  // (defensive: impossible for a single-threaded check-then-record caller).
+  // Stage 2a: mesh accepted the first send — and the first actual send is
+  // what binds the lane. A lone SKIP or an expired-at-admission SUBMIT only
+  // writes a terminal record: those mutations leave nothing to send or
+  // correlate, so letting them bind would lock the real dispatcher out of
+  // its own lane for the whole boot. False only if the position is no
+  // longer admittable (defensive: impossible for a single-threaded
+  // check-then-record caller).
   bool record_sent(const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
                    std::uint64_t dispatch_seq,
                    const std::array<std::uint8_t, kCanonicalHashSize>& hash,
@@ -291,12 +299,27 @@ class DispatchWindow {
                    std::uint64_t msg_seq) noexcept;
 
   // Stage 2b: device deadline already passed — terminal Expired record, no
-  // mesh send. Binds the lane like any other first mutation.
+  // mesh send. Does NOT bind the lane (only record_sent binds).
   bool record_expired(const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
                       std::uint64_t dispatch_seq,
                       const std::array<std::uint8_t, kCanonicalHashSize>& hash,
                       const std::array<std::uint8_t, kOperationIdSize>& operation_id,
                       std::uint8_t delivery) noexcept;
+
+  // Degraded-path record for a send the mesh already accepted when the
+  // primary record path refused (a post-Admit inconsistency that should be
+  // unreachable for the single-threaded caller). If the position is still
+  // free it becomes a terminal Indeterminate record carrying the send's
+  // MessageKey: the delivery outcome still correlates, the position can
+  // retire, and it can never look like a clean re-Admit — which would let
+  // a retry double-send. Does NOT bind the lane.
+  bool record_indeterminate(
+      const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
+      std::uint64_t dispatch_seq,
+      const std::array<std::uint8_t, kCanonicalHashSize>& hash,
+      const std::array<std::uint8_t, kOperationIdSize>& operation_id,
+      std::uint8_t delivery, std::uint32_t msg_session,
+      std::uint64_t msg_seq) noexcept;
 
   // Read-only lookup for QUERY_DISPATCH: fills `slot` on Found. Never
   // mutates, never extends anything, never re-executes.
@@ -311,6 +334,9 @@ class DispatchWindow {
                                const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
                                std::uint64_t through) noexcept;
 
+  // Fills a hole with a terminal Skipped record. Records the hole WITHOUT
+  // binding the lane: only record_sent (the first actual send) claims it,
+  // so a stray SKIP cannot lock the real dispatcher out for the boot.
   SkipOutcome skip(const BootLease& lease,
                    const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
                    std::uint64_t dispatch_seq) noexcept;

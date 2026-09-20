@@ -14,8 +14,8 @@
 //! newline, response ≤ 65536B, JSON depth ≤ 8. The shared parser already
 //! rejects duplicate object keys, non-RFC-8259 numbers (incl. bare NaN) and
 //! invalid UTF-8; this module adds the envelope schema: `v`, `request_id`
-//! (1–64 ASCII chars), `method`, optional `params` object — any other field
-//! is rejected, never ignored.
+//! (1–64 printable ASCII chars), `method`, optional `params` object — any
+//! other field is rejected, never ignored.
 //!
 //! Methods in this phase: `capabilities.get` (unauthenticated),
 //! `messages.read` (READ_PAYLOAD), `operations.open_epoch` + `messages.submit`
@@ -154,7 +154,7 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
         }
     };
     let response = match method {
-        "capabilities.get" => capabilities(ctx).map(|r| (request_id, r)),
+        "capabilities.get" => capabilities(&params, ctx).map(|r| (request_id, r)),
         "messages.read" => messages_read(&params, ctx).map(|r| (request_id, r)),
         "operations.open_epoch" => operations_open_epoch(&params, ctx).map(|r| (request_id, r)),
         "messages.submit" => messages_submit(&params, ctx).map(|r| (request_id, r)),
@@ -178,7 +178,10 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
 
 fn extract_request_id(root: &Json) -> Option<String> {
     let id = root.get("request_id")?.as_str()?;
-    if id.is_empty() || id.len() > REQUEST_ID_MAX || !id.is_ascii() {
+    // Printable ASCII only: is_ascii() would admit C0 controls smuggled
+    // through \uXXXX escapes, which then echo back inside response JSON.
+    if id.is_empty() || id.len() > REQUEST_ID_MAX || !id.bytes().all(|b| (0x20..=0x7e).contains(&b))
+    {
         return None;
     }
     Some(id.to_string())
@@ -224,7 +227,18 @@ fn bound_response(response: String) -> String {
 /// mechanism: the host_ops_v1 dispatch-window protocol over the USB session.
 /// A live session is not guaranteed — records still admit HOST_QUEUED while
 /// the link is down and the dispatcher picks them up on connect.
-fn capabilities<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<String, ApiError> {
+fn capabilities<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    // Every sibling method whitelists its param keys; this one takes none,
+    // so a non-empty params object is the same schema violation.
+    if !params.object_entries().is_empty() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "capabilities.get takes no params",
+        ));
+    }
     let epoch_known = ctx.uid.is_some();
     let durable = ctx
         .operation_store
@@ -259,39 +273,39 @@ fn messages_read<S: OperationStore>(
     for (key, _) in params.object_entries() {
         if !matches!(key.as_str(), "network" | "from" | "cursor" | "limit") {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
             ));
         }
     }
     let Some(network_text) = params.get("network").and_then(Json::as_str) else {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "network must be a 16-hex string",
         ));
     };
-    let network =
-        acl::parse_network_hex(network_text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?;
+    let network = acl::parse_network_hex(network_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let from = params.get("from").and_then(Json::as_str);
     let cursor_token = params.get("cursor").and_then(Json::as_str);
     if params.get("from").is_some() && from.is_none()
         || params.get("cursor").is_some() && cursor_token.is_none()
     {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "from/cursor must be strings",
         ));
     }
     if from.is_some() == cursor_token.is_some() {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "exactly one of from or cursor is required",
         ));
     }
     if let Some(from) = from {
         if from != "earliest" && from != "latest" {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 "from must be \"earliest\" or \"latest\"",
             ));
         }
@@ -302,7 +316,7 @@ fn messages_read<S: OperationStore>(
             Some(n) if (1..=PAGE_LIMIT as u64).contains(&n) => n as usize,
             _ => {
                 return Err(ApiError::simple(
-                    "INVALID_PARAMS",
+                    "INVALID_ARGUMENT",
                     &format!("limit must be an integer 1..={PAGE_LIMIT}"),
                 ))
             }
@@ -458,19 +472,19 @@ fn operations_open_epoch<S: OperationStore>(
     for (key, _) in params.object_entries() {
         if key != "network" {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
             ));
         }
     }
     let Some(network_text) = params.get("network").and_then(Json::as_str) else {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "network must be a 16-hex string",
         ));
     };
-    let network =
-        acl::parse_network_hex(network_text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?;
+    let network = acl::parse_network_hex(network_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     let Some(uid) = ctx
         .uid
         .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
@@ -559,7 +573,7 @@ fn messages_submit<S: OperationStore>(
             retryable: false,
         }),
         SubmitOutcome::UnknownEpoch => Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "admission_epoch is not open for this principal and network; call operations.open_epoch",
         )),
         SubmitOutcome::EpochClosed => Err(ApiError::simple(
@@ -621,7 +635,9 @@ fn submit_result(lineage: &[u8; 16], seq: u64, storage: u8) -> String {
 }
 
 /// `operations.get` params: `{operation_id}`. Any principal holding
-/// READ_OPERATION on the operation's network may query it.
+/// READ_OPERATION on the operation's network may query it. A record the
+/// caller may not read answers the same NOT_FOUND as a missing id —
+/// distinguishing the two would make the method an existence oracle.
 fn operations_get<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -629,20 +645,20 @@ fn operations_get<S: OperationStore>(
     for (key, _) in params.object_entries() {
         if key != "operation_id" {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
             ));
         }
     }
     let Some(text) = params.get("operation_id").and_then(Json::as_str) else {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "operation_id must be a string",
         ));
     };
     let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "operation_id must be <32-hex lineage>:<16-hex sequence>",
         ));
     };
@@ -665,8 +681,8 @@ fn operations_get<S: OperationStore>(
             .permit(uid, record.network, acl::PERM_READ_OPERATION)
     }) {
         return Err(ApiError::simple(
-            "AuthorizationFailed",
-            "principal lacks READ_OPERATION on this network",
+            "NOT_FOUND",
+            "no operation with that id in this store",
         ));
     }
     Ok(op_status(&record, &store.lineage(), ctx.now_ms))
@@ -682,40 +698,39 @@ fn operations_get_by_key<S: OperationStore>(
     for (key, _) in params.object_entries() {
         if !matches!(key.as_str(), "network" | "admission_epoch" | "key") {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
             ));
         }
     }
     let network = match params.get("network").and_then(Json::as_str) {
         Some(text) => {
-            acl::parse_network_hex(text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?
+            acl::parse_network_hex(text).map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?
         }
         None => {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 "network must be a 16-hex string",
             ))
         }
     };
     let epoch = match params.get("admission_epoch").and_then(Json::as_str) {
-        Some(text) => {
-            canonical::parse_epoch_hex(text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?
-        }
+        Some(text) => canonical::parse_epoch_hex(text)
+            .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?,
         None => {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 "admission_epoch must be a 16-hex string",
             ))
         }
     };
     let key = match params.get("key").and_then(Json::as_str) {
         Some(text) => {
-            canonical::parse_key_hex(text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?
+            canonical::parse_key_hex(text).map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?
         }
         None => {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 "key must be a 32-hex string",
             ))
         }
@@ -756,7 +771,9 @@ fn operations_get_by_key<S: OperationStore>(
 /// that lands before any USB write could have begun returns the record's
 /// new CANCELLED_BEFORE_DISPATCH status; a late one answers
 /// CANCEL_TOO_LATE with the current state (the `cancel_requested`
-/// observation is still recorded — never silently dropped).
+/// observation is still recorded — never silently dropped). Non-owners
+/// get the same NOT_FOUND as a missing id: naming foreign ownership
+/// would leak that the operation exists.
 fn operations_cancel<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -764,20 +781,20 @@ fn operations_cancel<S: OperationStore>(
     for (key, _) in params.object_entries() {
         if key != "operation_id" {
             return Err(ApiError::simple(
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
             ));
         }
     }
     let Some(text) = params.get("operation_id").and_then(Json::as_str) else {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "operation_id must be a string",
         ));
     };
     let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
         return Err(ApiError::simple(
-            "INVALID_PARAMS",
+            "INVALID_ARGUMENT",
             "operation_id must be <32-hex lineage>:<16-hex sequence>",
         ));
     };
@@ -806,8 +823,8 @@ fn operations_cancel<S: OperationStore>(
     });
     if !owns {
         return Err(ApiError::simple(
-            "AuthorizationFailed",
-            "cancel requires the owning principal with SEND on this network",
+            "NOT_FOUND",
+            "no operation with that id in this store",
         ));
     }
     match store.cancel_operation(seq, ctx.now_ms) {
@@ -1291,7 +1308,10 @@ mod tests {
                 "{{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{params}}}"
             );
             let response = handle(request.as_bytes(), &c);
-            assert!(response.contains("INVALID_PARAMS"), "{params} → {response}");
+            assert!(
+                response.contains("INVALID_ARGUMENT"),
+                "{params} → {response}"
+            );
         }
         // Uppercase hex normalizes.
         let ok = handle(
@@ -1375,14 +1395,14 @@ mod tests {
             (
                 Some(501),
                 "{\"network\":\"0000000100000000\"}",
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
             ),
             (
                 Some(501),
                 "{\"network\":\"0000000000000001\",\"extra\":1}",
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
             ),
-            (Some(501), "{}", "INVALID_PARAMS"),
+            (Some(501), "{}", "INVALID_ARGUMENT"),
         ] {
             let c = ctx(uid, &acl, &log, &store, &limiter, 0);
             let request = format!(
@@ -1440,7 +1460,7 @@ mod tests {
             submit_line("00112233445566778899aabbccddeeff", "0000000000000001").as_bytes(),
             &c,
         );
-        assert!(response.contains("INVALID_PARAMS"), "{response}");
+        assert!(response.contains("INVALID_ARGUMENT"), "{response}");
         assert!(response.contains("open_epoch"), "{response}");
         let epoch = open_test_epoch(&acl, &log, &store, &limiter);
         // SEND denied without a grant; principal is the peer uid, never a
@@ -1457,7 +1477,7 @@ mod tests {
         let spoofed = format!(
             "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"00112233445566778899aabbccddeeff\",\"principal\":7,\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
         );
-        assert!(handle(spoofed.as_bytes(), &c).contains("INVALID_PARAMS"));
+        assert!(handle(spoofed.as_bytes(), &c).contains("INVALID_ARGUMENT"));
     }
 
     #[test]
@@ -1494,17 +1514,17 @@ mod tests {
             ),
             (
                 params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\",\"ttl_ms\":0}"),
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
             ),
             (
                 params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\",\"future_flag\":true}"),
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
             ),
             (
                 params(&format!(
                     "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"0\",\"payload_len\":1,{valid_options}"
                 )),
-                "INVALID_PARAMS",
+                "INVALID_ARGUMENT",
             ),
         ] {
             let response = handle(base(&params).as_bytes(), &c);
@@ -1544,13 +1564,16 @@ mod tests {
         );
         let response = handle(request.as_bytes(), &late);
         assert!(response.contains("\"deadline_elapsed\":true"), "{response}");
-        // Another uid's grant is scoped to network 2: denied on network 1's
-        // record by id, and its own key namespace finds nothing by key.
+        // Another uid's grant is scoped to network 2: on network 1's
+        // record it sees the same NOT_FOUND as a missing id (never an
+        // existence leak), and its own key namespace finds nothing.
         let other = ctx(Some(7), &acl, &log, &store, &limiter, 1000);
         let by_id = format!(
             "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
         );
-        assert!(handle(by_id.as_bytes(), &other).contains("AuthorizationFailed"));
+        let denied = handle(by_id.as_bytes(), &other);
+        assert!(denied.contains("NOT_FOUND"), "{denied}");
+        assert!(!denied.contains("AuthorizationFailed"), "{denied}");
         let by_key = format!(
             "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get_by_key\",\"params\":{{\"network\":\"0000000000000002\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\"}}}}"
         );
@@ -1565,7 +1588,7 @@ mod tests {
         ] {
             let response = handle(request.as_bytes(), &submitter);
             assert!(
-                response.contains("NOT_FOUND") || response.contains("INVALID_PARAMS"),
+                response.contains("NOT_FOUND") || response.contains("INVALID_ARGUMENT"),
                 "{response}"
             );
         }
@@ -1817,16 +1840,18 @@ mod tests {
             again.contains("\"dispatch_state\":\"CANCELLED_BEFORE_DISPATCH\""),
             "{again}"
         );
-        // Non-owner and unidentified principals are denied; unknown and
-        // malformed ids get their own codes.
+        // Non-owner and unidentified principals see the same NOT_FOUND as
+        // a missing id — cancel is not an existence oracle. Malformed ids
+        // get their own codes.
         let key2 = "11111111111111111111111111111111";
         let accepted2 = handle(submit_line(key2, &epoch).as_bytes(), &owner);
         let id2 = result_field(&accepted2, "operation_id");
         for uid in [None, Some(7)] {
             let c = ctx(uid, &acl, &log, &store, &limiter, 1000);
             let response = handle(cancel_line(&id2).as_bytes(), &c);
+            assert!(response.contains("NOT_FOUND"), "{uid:?}: {response}");
             assert!(
-                response.contains("AuthorizationFailed"),
+                !response.contains("AuthorizationFailed"),
                 "{uid:?}: {response}"
             );
         }
@@ -1836,12 +1861,12 @@ mod tests {
         );
         assert!(response.contains("NOT_FOUND"), "{response}");
         let response = handle(cancel_line("not-an-id").as_bytes(), &owner);
-        assert!(response.contains("INVALID_PARAMS"), "{response}");
+        assert!(response.contains("INVALID_ARGUMENT"), "{response}");
         let response = handle(
             b"{\"v\":1,\"request_id\":\"x\",\"method\":\"operations.cancel\",\"params\":{}}",
             &owner,
         );
-        assert!(response.contains("INVALID_PARAMS"), "{response}");
+        assert!(response.contains("INVALID_ARGUMENT"), "{response}");
         // Once a USB write may have left, cancel is TOO_LATE — and the
         // observation lands on the record for later queries.
         {
@@ -1921,5 +1946,126 @@ mod tests {
         assert!(status.contains("\"application_outcome\":null"), "{status}");
         assert!(status.contains("\"cancel_requested\":false"), "{status}");
         assert!(status.contains("\"time_uncertain\":false"), "{status}");
+    }
+
+    /// capabilities.get takes no params: a non-empty object is the same
+    /// INVALID_ARGUMENT every sibling method returns for unknown keys.
+    #[test]
+    fn capabilities_get_rejects_params() {
+        let acl = Acl::empty();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\",\"params\":{\"anything\":1}}",
+            &c,
+        );
+        assert!(response.contains("INVALID_ARGUMENT"), "{response}");
+        assert!(response.contains("\"ok\":false"), "{response}");
+        // An empty params object stays accepted.
+        let ok = handle(
+            b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\",\"params\":{}}",
+            &c,
+        );
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+    }
+
+    /// request_id must be printable ASCII: C0 controls smuggled through
+    /// \uXXXX escapes (and DEL/non-ASCII) are rejected, while plain
+    /// printable ids — spaces included — still pass.
+    #[test]
+    fn request_id_must_be_printable_ascii() {
+        let acl = Acl::empty();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        for id in ["\\u0001", "a\\u001fb", "\\u007f", "\\u00e9"] {
+            let request =
+                format!("{{\"v\":1,\"request_id\":\"{id}\",\"method\":\"capabilities.get\"}}");
+            let response = handle(request.as_bytes(), &c);
+            assert!(response.contains("INVALID_REQUEST"), "{id} → {response}");
+        }
+        let ok = handle(
+            b"{\"v\":1,\"request_id\":\"req 42 ~!\",\"method\":\"capabilities.get\"}",
+            &c,
+        );
+        assert!(ok.contains("\"ok\":true"), "{ok}");
+    }
+
+    /// operations.get and operations.cancel answer an unauthorized caller
+    /// with exactly the NOT_FOUND a missing id gets — same code, same
+    /// message — so neither is an existence oracle.
+    #[test]
+    fn get_and_cancel_are_not_existence_oracles() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let owner = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
+        let accepted = handle(
+            submit_line("00112233445566778899aabbccddeeff", &epoch).as_bytes(),
+            &owner,
+        );
+        let id = result_field(&accepted, "operation_id");
+        // Same lineage, never-issued sequence: a truly missing id.
+        let missing_id = format!("{}:0000000000000009", id.split(':').next().unwrap());
+        // uid 7's grant is scoped to network 2; the record lives on 1.
+        // An unidentified principal is denied the same way.
+        for uid in [Some(7), None] {
+            let other = ctx(uid, &acl, &log, &store, &limiter, 1000);
+            for method in ["operations.get", "operations.cancel"] {
+                let real = format!(
+                    "{{\"v\":1,\"request_id\":\"q\",\"method\":\"{method}\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+                );
+                let missing = format!(
+                    "{{\"v\":1,\"request_id\":\"q\",\"method\":\"{method}\",\"params\":{{\"operation_id\":\"{missing_id}\"}}}}"
+                );
+                let real_response = handle(real.as_bytes(), &other);
+                let missing_response = handle(missing.as_bytes(), &other);
+                assert!(real_response.contains("NOT_FOUND"), "{real_response}");
+                assert!(
+                    !real_response.contains("AuthorizationFailed"),
+                    "{real_response}"
+                );
+                assert_eq!(
+                    real_response, missing_response,
+                    "{method} leaked existence to {uid:?}"
+                );
+            }
+        }
+    }
+
+    /// A cursor claiming last_scanned > 0 on a network that never
+    /// ingested a record is a future/forged position: INVALID_CURSOR,
+    /// not a successful empty page ratifying the claim.
+    #[test]
+    fn forged_cursor_on_absent_network_is_invalid() {
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
+        // from=earliest on the absent network is still a normal empty page.
+        let empty = handle(
+            b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000002\",\"from\":\"earliest\"}}",
+            &c,
+        );
+        assert!(empty.contains("\"ok\":true"), "{empty}");
+        assert!(empty.contains("\"records\":[]"), "{empty}");
+        let forged = Cursor {
+            network: 2,
+            acl_view: acl.revision(),
+            epoch: [9; 16],
+            last_scanned: 5,
+        }
+        .encode();
+        let response = handle(
+            format!(
+                "{{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{{\"network\":\"0000000000000002\",\"cursor\":\"{forged}\"}}}}"
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert!(response.contains("INVALID_CURSOR"), "{response}");
     }
 }

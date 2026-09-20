@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|cancel <opid>"
     );
 }
 
@@ -76,6 +76,15 @@ fn operation_get_by_key_request(network: &str, epoch: &str, key: &str) -> String
     )
 }
 
+/// Build the API1 `operations.cancel` request line for the `cancel`
+/// command. `id` is validated by `cancel_command` before reaching here.
+fn cancel_request(id: &str) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"operations.cancel\",\"params\":{{\"operation_id\":\"{id}\"}}}}",
+        request_id(),
+    )
+}
+
 /// Build the API1 `messages.read` request line for the `receive` command.
 /// `cursor` characters are validated against the base64url alphabet so the
 /// token cannot inject JSON — it arrives as an opaque string, never trusted.
@@ -115,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "submit" => submit_command(rest)?,
         [name, rest @ ..] if name == "operation-get" => operation_get_command(rest)?,
         [name, rest @ ..] if name == "operation-get-by-key" => operation_get_by_key_command(rest)?,
+        [name, id] if name == "cancel" => cancel_command(id)?,
         _ => {
             usage();
             return Err("invalid command".into());
@@ -251,8 +261,8 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
     let mut payload: Option<String> = None;
     let mut ttl_ms: u64 = 5000;
     let mut delivery = "RELIABLE".to_string();
-    // TX-I1 honesty: the daemon has no durable store yet, so the CLI
-    // defaults to RAM_ONLY (HOST_DURABLE is passed through and refused).
+    // The CLI defaults to RAM_ONLY; HOST_DURABLE is passed through and
+    // admitted only when the daemon runs with --op-store.
     let mut storage = "RAM_ONLY".to_string();
     let mut hop_limit: u64 = 10;
     let mut args = args.iter();
@@ -461,6 +471,18 @@ fn operation_get_by_key_command(args: &[String]) -> Result<String, Box<dyn std::
     ))
 }
 
+/// `cancel <operation_id>`: thin client over `operations.cancel` — prints
+/// the daemon's JSON result verbatim.
+fn cancel_command(id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let well_formed = id
+        .split_once(':')
+        .is_some_and(|(lineage, seq)| is_hex(lineage, 32) && is_hex(seq, 16));
+    if !well_formed {
+        return Err("cancel requires <32-hex lineage>:<16-hex sequence>".into());
+    }
+    Ok(cancel_request(&id.to_ascii_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,5 +668,23 @@ mod tests {
             "{line}"
         );
         assert!(operation_get_by_key_command(&args(&["--network", "0000000000000001"])).is_err());
+    }
+
+    #[test]
+    fn cancel_builds_api1_line() {
+        let line = cancel_command("ABABABABABABABABABABABABABABABAB:0000000000000001").unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"operations.cancel\""), "{line}");
+        assert!(
+            line.contains("\"operation_id\":\"abababababababababababababababab:0000000000000001\""),
+            "{line}"
+        );
+        for bad in [
+            "bogus",
+            "abab:0000000000000001",
+            "abababababababababababababababab:xyz",
+        ] {
+            assert!(cancel_command(bad).is_err(), "{bad}");
+        }
     }
 }

@@ -185,6 +185,15 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver {
   void send_time_sample_response(const TimeSampleResponse& response,
                                  std::uint64_t request,
                                  MonotonicMs now_ms) noexcept;
+  // Correlates a MessageId to a host request id so a later on_delivery
+  // resolves instead of surfacing as a request-0 orphan.
+  void track_request(const MessageId& id, std::uint64_t request) noexcept;
+  // Honest answer for a record-store refusal after Admit: reports the
+  // position's actual state, never a fabricated mesh outcome.
+  void send_record_refusal_receipt(DispatchReceipt& receipt,
+                                   const SubmitRequest& submit,
+                                   std::uint64_t request,
+                                   MonotonicMs now_ms) noexcept;
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;

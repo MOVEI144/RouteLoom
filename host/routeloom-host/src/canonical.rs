@@ -72,7 +72,7 @@ pub struct SubmitReject {
 impl SubmitReject {
     fn invalid(message: impl Into<String>) -> Self {
         Self {
-            code: "INVALID_PARAMS",
+            code: "INVALID_ARGUMENT",
             message: message.into(),
         }
     }
@@ -129,6 +129,13 @@ fn decode_hex(text: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+/// Reserved wire addresses excluded everywhere (01 §6): the API1
+/// destination parser and the legacy SEND verb share this predicate so
+/// both paths agree on the same rule.
+pub fn is_reserved_node_id(value: u64) -> bool {
+    value == 0 || value == u64::MAX
+}
+
 /// 16-hex node id; 0 and u64::MAX are excluded wire addresses (01 §6).
 pub fn parse_node_hex(text: &str) -> Result<u64, String> {
     let raw = decode_hex(text).filter(|b| b.len() == 8);
@@ -136,7 +143,7 @@ pub fn parse_node_hex(text: &str) -> Result<u64, String> {
         return Err(format!("\"{text}\" is not a 16-hex id"));
     };
     let value = u64::from_be_bytes(raw.try_into().expect("8 bytes"));
-    if value == 0 || value == u64::MAX {
+    if is_reserved_node_id(value) {
         return Err(format!("\"{text}\" is a reserved node id"));
     }
     Ok(value)
@@ -649,7 +656,7 @@ mod tests {
                 "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0{extra}}}"
             )
         };
-        // Parse-stage rejects (INVALID_PARAMS / PAYLOAD_TOO_LARGE).
+        // Parse-stage rejects (INVALID_ARGUMENT / PAYLOAD_TOO_LARGE).
         let invalid_params = [
             base(",\"options\":{\"ttl_ms\":0}"),
             base(",\"options\":{\"ttl_ms\":30001}"),
@@ -679,7 +686,7 @@ mod tests {
         ];
         for json in invalid_params {
             let err = parse_submit(&submit_params(&json)).expect_err(&json);
-            assert_eq!(err.code, "INVALID_PARAMS", "{json}: {}", err.message);
+            assert_eq!(err.code, "INVALID_ARGUMENT", "{json}: {}", err.message);
         }
         // Oversize (129B, consistent length) is its own class.
         let big = "00".repeat(129);

@@ -249,20 +249,37 @@ impl ReceiveLog {
         // 60s dedup window: identical re-observation folds into the existing
         // record; a differing body under the same key is a conflict and the
         // retained record is never overwritten.
-        if let Some(entry) = log.dedup.get(&key) {
-            if now_ms.saturating_sub(entry.ms) < DEDUP_MS {
-                if let Some(record) = log.records.iter().find(|r| r.seq == entry.seq) {
-                    return if record.payload == ingress.payload {
-                        IngestOutcome::Duplicate { seq: entry.seq }
-                    } else {
-                        IngestOutcome::Conflict {
-                            existing_seq: entry.seq,
-                        }
-                    };
-                }
-                // Referenced record was reclaimed: the original payload is
-                // unknowable, so treat this as a new observation.
+        let mut known_seq = match log.dedup.get(&key) {
+            Some(entry) if now_ms.saturating_sub(entry.ms) < DEDUP_MS => Some(entry.seq),
+            _ => None,
+        };
+        if known_seq.is_none() {
+            // The dedup index is capped — an entry dropped by the cap must
+            // not lose the conflict diagnosis. Scan the retained records
+            // (bounded per network) for the newest in-window record with
+            // this key before treating the frame as new.
+            known_seq = log
+                .records
+                .iter()
+                .rev()
+                .find(|r| {
+                    r.origin == ingress.origin
+                        && r.msg_session == ingress.msg_session
+                        && r.msg_seq == ingress.msg_seq
+                        && now_ms.saturating_sub(r.stored_ms) < DEDUP_MS
+                })
+                .map(|r| r.seq);
+        }
+        if let Some(existing_seq) = known_seq {
+            if let Some(record) = log.records.iter().find(|r| r.seq == existing_seq) {
+                return if record.payload == ingress.payload {
+                    IngestOutcome::Duplicate { seq: existing_seq }
+                } else {
+                    IngestOutcome::Conflict { existing_seq }
+                };
             }
+            // Referenced record was reclaimed: the original payload is
+            // unknowable, so treat this as a new observation.
         }
         let seq = log.next_seq;
         log.next_seq = log.next_seq.saturating_add(1);
@@ -278,8 +295,11 @@ impl ReceiveLog {
         });
         log.bytes += RECORD_CHARGE_BYTES;
         self.total_bytes += RECORD_CHARGE_BYTES;
-        log.dedup.insert(key, DedupEntry { seq, ms: now_ms });
+        // Trim BEFORE inserting: when the index is full and several
+        // entries share the oldest timestamp, an insert-then-trim order
+        // could evict the just-inserted entry itself.
         log.trim_dedup(now_ms);
+        log.dedup.insert(key, DedupEntry { seq, ms: now_ms });
         // First-hit limits reclaim from the front, keeping evicted_through.
         while log.records.len() > ENTRIES_PER_NETWORK || log.bytes > BYTES_PER_NETWORK {
             log.evict_oldest();
@@ -329,6 +349,13 @@ impl ReceiveLog {
     ) -> ReadOutcome {
         self.expire_all(now_ms);
         let Some(log) = self.networks.get(&network) else {
+            // A cursor is a claim about a position. On a never-ingested
+            // network the tail is 0, so any positive `after_seq` is a
+            // future (forged) position — never ratify it with a minted
+            // next_cursor by answering a successful empty batch.
+            if check_position && after_seq > 0 {
+                return ReadOutcome::Future;
+            }
             return ReadOutcome::Batch(ReadBatch {
                 records: Vec::new(),
                 more: false,
@@ -365,7 +392,12 @@ impl ReceiveLog {
         }
         let last = records.last().map_or(after_seq, |r| r.seq);
         ReadOutcome::Batch(ReadBatch {
-            more: last < tail,
+            // An empty page means nothing retained sits beyond the start
+            // position (e.g. a fully-evicted log): `more` on an empty page
+            // would mint a next_cursor at the caller's own position and
+            // send it polling forever. The reclaim itself still surfaces
+            // as Gap on the follow-up cursor read.
+            more: !records.is_empty() && last < tail,
             records,
             oldest_seq: oldest,
             tail_seq: tail,
@@ -686,5 +718,98 @@ mod tests {
     fn hex_lower_is_fixed_width_lowercase() {
         assert_eq!(hex_lower(&[]), "");
         assert_eq!(hex_lower(&[0x00, 0xff, 0x80]), "00ff80");
+    }
+
+    /// A dedup-index miss (entry reclaimed by the index cap while the
+    /// record is still retained) must not lose the conflict diagnosis:
+    /// same key + different payload is still a conflict, same payload
+    /// still folds to a duplicate — never a silent overwrite.
+    #[test]
+    fn dedup_index_miss_still_diagnoses_conflict() {
+        let mut log = ReceiveLog::new([7; 16]);
+        log.ingest(ingress(3, 9, b"orig"), 1000);
+        // Simulate the index-cap drop: the key's dedup entry is gone while
+        // its record is still retained and inside the window.
+        log.networks
+            .get_mut(&1)
+            .expect("network log")
+            .dedup
+            .remove(&(3, 5, 9));
+        match log.ingest(ingress(3, 9, b"diff"), 2000) {
+            IngestOutcome::Conflict { existing_seq } => assert_eq!(existing_seq, 1),
+            _ => panic!("expected conflict diagnosis on dedup-index miss"),
+        }
+        match log.ingest(ingress(3, 9, b"orig"), 3000) {
+            IngestOutcome::Duplicate { seq } => assert_eq!(seq, 1),
+            _ => panic!("expected duplicate fold on dedup-index miss"),
+        }
+        // The retained record was never rewritten.
+        let ReadOutcome::Batch(batch) = log.read(1, 0, 32, 3001, false) else {
+            panic!("expected batch")
+        };
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].payload, b"orig");
+    }
+
+    /// With DEDUP_MAX_KEYS reached, trim runs before the new entry lands:
+    /// the just-observed key can never evict itself even when every entry
+    /// shares the same timestamp.
+    #[test]
+    fn dedup_cap_never_evicts_the_new_entry() {
+        let mut log = ReceiveLog::new([7; 16]);
+        let total = DEDUP_MAX_KEYS as u64 + 4;
+        for i in 0..total {
+            log.ingest(ingress(3, i, b"p"), 1000);
+        }
+        match log.ingest(ingress(3, total - 1, b"diff"), 1000) {
+            IngestOutcome::Conflict { .. } => {}
+            _ => panic!("dedup overflow must not evict the newest entry"),
+        }
+    }
+
+    /// A cursor claiming last_scanned > 0 on a never-ingested network is
+    /// a future position (tail = 0): Future, not an empty batch that
+    /// would ratify the forged position with a minted next_cursor.
+    #[test]
+    fn forged_cursor_on_absent_network_is_future() {
+        let mut log = ReceiveLog::new([7; 16]);
+        assert!(matches!(
+            log.read(9, 5, 32, 1000, true),
+            ReadOutcome::Future
+        ));
+        // Position 0 still reads as a normal empty page, and explicit
+        // from=earliest (check_position=false) never position-checks.
+        assert!(matches!(
+            log.read(9, 0, 32, 1000, true),
+            ReadOutcome::Batch(_)
+        ));
+        assert!(matches!(
+            log.read(9, 5, 32, 1000, false),
+            ReadOutcome::Batch(_)
+        ));
+    }
+
+    /// from=earliest on a log whose records all expired returns an empty
+    /// page with more:false — claiming more would mint a next_cursor at
+    /// the caller's own position and poll forever.
+    #[test]
+    fn fully_evicted_log_reports_no_more() {
+        let mut log = ReceiveLog::new([7; 16]);
+        log.ingest(ingress(3, 1, b"old"), 0);
+        let ReadOutcome::Batch(batch) = log.read(1, 0, 32, RETENTION_MS + 1, false) else {
+            panic!("expected batch")
+        };
+        assert!(batch.records.is_empty());
+        assert!(!batch.more, "empty page must not claim more");
+        // A partial page still reports more truthfully.
+        let mut log = ReceiveLog::new([7; 16]);
+        for i in 0..3 {
+            log.ingest(ingress(3, i, b"p"), 0);
+        }
+        let ReadOutcome::Batch(batch) = log.read(1, 0, 2, 1, false) else {
+            panic!("expected batch")
+        };
+        assert_eq!(batch.records.len(), 2);
+        assert!(batch.more);
     }
 }

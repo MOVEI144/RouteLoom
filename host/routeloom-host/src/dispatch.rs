@@ -240,6 +240,10 @@ struct Pending {
     op_seq: Option<u64>,
     kind: PendingKind,
     sent_ms: u64,
+    /// The requested floor target for Retire pendings — the device's
+    /// `retired_through` reply is its CURRENT floor, not the refused
+    /// target, so the request must carry its own span. 0 for other kinds.
+    through: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -471,13 +475,15 @@ impl Dispatcher {
 
     /// Mark a provably-never-sent record EXPIRED_BEFORE_DISPATCH.
     /// Cancellable states only: HOST_QUEUED or DISPATCH_PREPARED with
-    /// `submitted == false`. A prepared expiry leaves a hole to SKIP.
+    /// `submitted == false`. TIME_UNCERTAIN is the clock-rewind wrapper —
+    /// the provable rule is the same as the state it parked. A prepared
+    /// expiry leaves a hole to SKIP.
     fn expire_unsubmitted<S: OperationStore>(&mut self, store: &mut S, op_seq: u64, now: u64) {
         let _ = store.update_operation(op_seq, &mut |o| {
             let provable = match o.dispatch_state {
                 DispatchState::HostQueued => true,
-                DispatchState::DispatchPrepared => {
-                    o.dispatch.as_ref().is_some_and(|d| !d.submitted)
+                DispatchState::DispatchPrepared | DispatchState::TimeUncertain => {
+                    !o.dispatch.as_ref().is_some_and(|d| d.submitted)
                 }
                 _ => false,
             };
@@ -529,6 +535,15 @@ impl Dispatcher {
             }
             if self.pending_for(op.seq) {
                 continue;
+            }
+            if resend {
+                // Re-drive no faster than the poll cadence: a
+                // NotRetained/emit-drop loop must not churn claim commits
+                // (two store writes per cycle) at round-trip rate.
+                let last = self.last_attempt.get(&op.seq).copied().unwrap_or(0);
+                if now.saturating_sub(last) < QUERY_INTERVAL_MS {
+                    continue;
+                }
             }
             // The device window holds DISPATCH_WINDOW positions above the
             // floor; never allocate ahead of it. Only records that will
@@ -641,6 +656,7 @@ impl Dispatcher {
                     op_seq: Some(op.seq),
                     kind: PendingKind::Submit,
                     sent_ms: now,
+                    through: 0,
                 },
             );
             self.last_attempt.insert(op.seq, now);
@@ -651,6 +667,9 @@ impl Dispatcher {
     /// Poll live attached positions: submitted SUBMITs awaiting a receipt
     /// (or its loss), GATEWAY_ACCEPTED slots awaiting a mesh outcome, and
     /// INDETERMINATE positions whose terminality still gates the floor.
+    /// Concluded records poll too whenever their confirmed-terminal
+    /// marker is absent — a retire refusal clears markers so the span is
+    /// re-verified, and lane tombstones resolve the same way.
     fn query_pass(
         &mut self,
         ops: &[StoredOperation],
@@ -665,16 +684,18 @@ impl Dispatcher {
             if att.lease != lease || att.device_terminal || att.skip_pending || !att.submitted {
                 continue;
             }
-            if op.concluded() {
-                continue;
-            }
-            if !matches!(
-                op.dispatch_state,
-                DispatchState::DispatchPrepared
-                    | DispatchState::GatewayAccepted
-                    | DispatchState::Indeterminate
-                    | DispatchState::TimeUncertain
-            ) {
+            // For a live record the vocabulary state must be one the lane
+            // can act on; for a concluded one only the position's
+            // terminality matters (marker re-verification above).
+            if !op.concluded()
+                && !matches!(
+                    op.dispatch_state,
+                    DispatchState::DispatchPrepared
+                        | DispatchState::GatewayAccepted
+                        | DispatchState::Indeterminate
+                        | DispatchState::TimeUncertain
+                )
+            {
                 continue;
             }
             if self.pending_for(op.seq) {
@@ -775,6 +796,28 @@ impl Dispatcher {
         self.pending.values().any(|p| p.op_seq == Some(op_seq))
     }
 
+    /// A lane response's echoed lease and dispatch_seq must match the
+    /// pending op's binding and the live lease — request-id correlation
+    /// alone is not enough to trust a response.
+    fn echo_matches(&self, op: &StoredOperation, lease: [u8; 16], dispatch_seq: u64) -> bool {
+        self.lease == Some(lease)
+            && op
+                .dispatch
+                .as_ref()
+                .is_some_and(|a| a.lease == lease && a.dispatch_seq == dispatch_seq)
+    }
+
+    /// Divergent device evidence for an op: land it INDETERMINATE (unless
+    /// a conclusion is already committed) — never a claimed outcome.
+    fn mark_diverged<S: OperationStore>(&mut self, store: &mut S, op_seq: u64) {
+        let _ = store.update_operation(op_seq, &mut |o| {
+            if !o.concluded() {
+                o.dispatch_state = DispatchState::Indeterminate;
+            }
+            true
+        });
+    }
+
     fn emit_lane(
         &mut self,
         sub: u8,
@@ -799,6 +842,7 @@ impl Dispatcher {
                 op_seq,
                 kind,
                 sent_ms: now,
+                through: 0,
             },
         );
         if let Some(op_seq) = op_seq {
@@ -823,6 +867,7 @@ impl Dispatcher {
                 op_seq: None,
                 kind: PendingKind::Retire,
                 sent_ms: now,
+                through,
             },
         );
         DispatchRequest { request, body }
@@ -901,7 +946,7 @@ impl Dispatcher {
                 Err(error) => self.note(format!("skip receipt undecodable: {error}")),
             },
             PendingKind::Retire => match host_ops::decode_retire_response(inner) {
-                Ok(response) => self.on_retire_response(store, &response),
+                Ok(response) => self.on_retire_response(store, &response, pending.through),
                 Err(error) => self.note(format!("retire response undecodable: {error}")),
             },
         }
@@ -917,17 +962,38 @@ impl Dispatcher {
         receipt: &Receipt,
         now: u64,
     ) {
+        let Ok(Some(op)) = store.get_by_seq(op_seq) else {
+            self.note(format!("submit receipt for unknown op {op_seq}"));
+            return;
+        };
+        if !self.echo_matches(&op, receipt.lease.0, receipt.dispatch_seq) {
+            self.note(format!(
+                "op {op_seq} submit receipt echoes a foreign binding"
+            ));
+            self.mark_diverged(store, op_seq);
+            return;
+        }
         match receipt.result {
-            HostOpsResult::Ok | HostOpsResult::Existing => self.adopt_slot(
-                store,
-                op_seq,
-                receipt.state,
-                receipt.msg_valid,
-                receipt.msg_session,
-                receipt.msg_seq,
-                receipt.evidence,
-                now,
-            ),
+            HostOpsResult::Ok | HostOpsResult::Existing => {
+                // The device echoes the bound canonical hash; a mismatch
+                // is a diverged position, not a state to adopt. (Lane
+                // tombstones carry no hash to compare.)
+                if !op.canonical.is_empty() && receipt.hash != op.hash {
+                    self.note(format!("op {op_seq} submit receipt hash diverged"));
+                    self.mark_diverged(store, op_seq);
+                    return;
+                }
+                self.adopt_slot(
+                    store,
+                    op_seq,
+                    receipt.state,
+                    receipt.msg_valid,
+                    receipt.msg_session,
+                    receipt.msg_seq,
+                    receipt.evidence,
+                    now,
+                )
+            }
             // Terminal Expired at admission: provable never-sent.
             HostOpsResult::Expired => {
                 let _ = store.update_operation(op_seq, &mut |o| {
@@ -1008,17 +1074,41 @@ impl Dispatcher {
         response: &QueryResponse,
         now: u64,
     ) {
+        let Ok(Some(op)) = store.get_by_seq(op_seq) else {
+            self.note(format!("query response for unknown op {op_seq}"));
+            return;
+        };
+        if !self.echo_matches(&op, response.lease.0, response.dispatch_seq) {
+            self.note(format!(
+                "op {op_seq} query response echoes a foreign binding"
+            ));
+            self.mark_diverged(store, op_seq);
+            return;
+        }
         match response.result {
-            HostOpsResult::Ok => self.adopt_slot(
-                store,
-                op_seq,
-                response.state,
-                response.msg_valid,
-                response.msg_session,
-                response.msg_seq,
-                response.evidence,
-                now,
-            ),
+            HostOpsResult::Ok => {
+                // Adopting a slot means trusting the echoed identity:
+                // hash and operation id must be the ones we bound. (Lane
+                // tombstones carry neither to compare.)
+                let bound = op.canonical.is_empty()
+                    || (response.hash == op.hash
+                        && response.operation_id == op_id_bytes(&self.dispatcher_id, op.seq));
+                if !bound {
+                    self.note(format!("op {op_seq} query response identity diverged"));
+                    self.mark_diverged(store, op_seq);
+                    return;
+                }
+                self.adopt_slot(
+                    store,
+                    op_seq,
+                    response.state,
+                    response.msg_valid,
+                    response.msg_session,
+                    response.msg_seq,
+                    response.evidence,
+                    now,
+                )
+            }
             HostOpsResult::NotRetained => {
                 // No record at the position under this lease: the SUBMIT
                 // provably never landed (a torn USB frame cannot decode,
@@ -1030,13 +1120,17 @@ impl Dispatcher {
                 // it is a re-emit of the still-bound seq after a proof of
                 // emptiness.
                 let _ = store.update_operation(op_seq, &mut |o| {
+                    let concluded = o.concluded();
                     let Some(d) = o.dispatch.as_mut() else {
                         return false;
                     };
                     d.submitted = false;
-                    if o.concluded() {
+                    if concluded {
                         // A late contradiction against a committed
-                        // conclusion is logged, not rewritten.
+                        // conclusion is logged, not rewritten — but the
+                        // proven-empty position still owes a SKIP or the
+                        // retire floor wedges behind the hole.
+                        d.skip_pending = true;
                         return true;
                     }
                     match o.dispatch_state {
@@ -1089,6 +1183,15 @@ impl Dispatcher {
         receipt: &Receipt,
         now: u64,
     ) {
+        let Ok(Some(op)) = store.get_by_seq(op_seq) else {
+            self.note(format!("skip receipt for unknown op {op_seq}"));
+            return;
+        };
+        if !self.echo_matches(&op, receipt.lease.0, receipt.dispatch_seq) {
+            self.note(format!("op {op_seq} skip receipt echoes a foreign binding"));
+            self.mark_diverged(store, op_seq);
+            return;
+        }
         match receipt.result {
             HostOpsResult::Ok | HostOpsResult::Existing | HostOpsResult::Retired => {
                 let _ = store.update_operation(op_seq, &mut |o| {
@@ -1109,6 +1212,12 @@ impl Dispatcher {
                     o.terminal_ms = None;
                     if let Some(d) = o.dispatch.as_mut() {
                         d.skip_pending = false;
+                        // A lane tombstone has no conclusion to protect —
+                        // re-arm `submitted` so the query pass resolves
+                        // the occupied position instead of sitting dead.
+                        if o.canonical.is_empty() {
+                            d.submitted = true;
+                        }
                     }
                     true
                 });
@@ -1132,29 +1241,45 @@ impl Dispatcher {
     }
 
     /// RETIRE response: the floor advances to the reported value. A refusal
-    /// means our terminality model disagreed with the device — re-verify
-    /// the span by clearing the confirmed-terminal markers so the query
-    /// pass re-learns them.
+    /// means our terminality model disagreed with the device somewhere in
+    /// the requested span — re-verify it by clearing the confirmed-terminal
+    /// markers so the query pass re-learns them (positions nothing may
+    /// have left re-prove via SKIP instead).
     fn on_retire_response<S: OperationStore>(
         &mut self,
         store: &mut S,
         response: &routeloom_protocol::host_ops::RetireResponse,
+        through: u64,
     ) {
+        if Some(response.lease.0) != self.lease {
+            self.note("retire response under foreign lease".to_string());
+            return;
+        }
         match response.result {
             HostOpsResult::Ok => {
                 self.floor = self.floor.max(response.retired_through);
             }
             HostOpsResult::RetireRefused => {
                 self.note(format!(
-                    "retire refused at through={}",
+                    "retire refused at through={} (requested {through})",
                     response.retired_through
                 ));
+                // The reported floor is authoritative here too — a lagging
+                // view must not wedge the lane.
+                self.floor = self.floor.max(response.retired_through);
+                // The refused span is (floor, through]: the response's
+                // retired_through is the device's CURRENT floor, not the
+                // refused target. Records above the adopted floor get
+                // their markers re-verified; ones the device retired get
+                // skipped over.
+                let lease = response.lease.0;
                 if let Ok(ops) = store.dispatch_view() {
                     for op in ops {
                         let stale = op.dispatch.as_ref().is_some_and(|a| {
-                            a.device_terminal
+                            a.lease == lease
+                                && a.device_terminal
                                 && a.dispatch_seq > self.floor
-                                && a.dispatch_seq <= response.retired_through
+                                && a.dispatch_seq <= through
                         });
                         if !stale {
                             continue;
@@ -1162,6 +1287,12 @@ impl Dispatcher {
                         let _ = store.update_operation(op.seq, &mut |o| {
                             if let Some(d) = o.dispatch.as_mut() {
                                 d.device_terminal = false;
+                                // The query pass only polls positions that
+                                // may have left; a provably-unsent marker
+                                // re-proves its hole via SKIP instead.
+                                if !d.submitted {
+                                    d.skip_pending = true;
+                                }
                             }
                             true
                         });
@@ -1241,7 +1372,31 @@ impl Dispatcher {
             let prepared = o.dispatch_state == DispatchState::DispatchPrepared;
             let d = o.dispatch.as_mut().expect("checked above");
             match state {
-                SlotState::Empty => {}
+                SlotState::Empty => {
+                    if concluded || o.canonical.is_empty() {
+                        // The position is a hole under a committed
+                        // conclusion (or a lane tombstone that can never
+                        // be re-driven): it still owes a SKIP before the
+                        // retire floor can pass.
+                        d.skip_pending = true;
+                    } else {
+                        // Provably empty, same as a NotRetained result:
+                        // reopen the not-sent proofs so the resend path
+                        // (or cancel/expiry) stays honest.
+                        d.submitted = false;
+                        match o.dispatch_state {
+                            DispatchState::Indeterminate => {
+                                o.dispatch_state = DispatchState::DispatchPrepared;
+                            }
+                            // A position we already advertised a stable
+                            // MessageKey for cannot legitimately be empty.
+                            DispatchState::GatewayAccepted => {
+                                o.dispatch_state = DispatchState::Indeterminate;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 SlotState::Sent => {
                     if !concluded && prepared {
                         o.dispatch_state = DispatchState::GatewayAccepted;
@@ -1297,14 +1452,12 @@ impl Dispatcher {
                 }
                 SlotState::Expired => {
                     if !concluded {
-                        if d.submitted {
-                            // The record was admitted and expired in the
-                            // window — transmission state unknowable.
-                            o.dispatch_state = DispatchState::Indeterminate;
-                        } else {
-                            o.dispatch_state = DispatchState::ExpiredBeforeDispatch;
-                            o.terminal_ms = Some(now);
-                        }
+                        // The device held the record past its deadline —
+                        // even when our marker says provably-unsent, an
+                        // expired slot is contradictory evidence:
+                        // INDETERMINATE, never a claimed
+                        // EXPIRED_BEFORE_DISPATCH.
+                        o.dispatch_state = DispatchState::Indeterminate;
                     }
                     d.device_terminal = true;
                     d.skip_pending = false;
@@ -1492,12 +1645,15 @@ mod tests {
         store.get_by_seq(seq).unwrap().expect("record")
     }
 
+    /// The echoed hash must be the record's canonical hash on adopt
+    /// (Ok/Existing) paths; results that never adopt may pass [0; 32].
     fn receipt(
         sub: u8,
         result: HostOpsResult,
         state: SlotState,
         dispatch_seq: u64,
         evidence: Evidence,
+        hash: [u8; 32],
     ) -> Vec<u8> {
         encode_receipt(&Receipt {
             sub,
@@ -1505,7 +1661,7 @@ mod tests {
             state,
             lease: BootLease(lease()),
             dispatch_seq,
-            hash: [0; 32],
+            hash,
             msg_session: 9,
             msg_seq: 77,
             msg_valid: true,
@@ -1513,19 +1669,22 @@ mod tests {
         })
     }
 
+    /// Same for QUERY responses: hash + operation id are verified on Ok.
     fn query_response(
         result: HostOpsResult,
         state: SlotState,
         dispatch_seq: u64,
         evidence: Evidence,
+        hash: [u8; 32],
+        operation_id: [u8; 24],
     ) -> Vec<u8> {
         encode_query_response(&QueryResponse {
             result,
             state,
             lease: BootLease(lease()),
             dispatch_seq,
-            hash: [0; 32],
-            operation_id: [0; 24],
+            hash,
+            operation_id,
             msg_session: 9,
             msg_seq: 77,
             msg_valid: true,
@@ -1796,6 +1955,7 @@ mod tests {
         assert!(record.dispatch.as_ref().unwrap().submitted);
 
         // Receipt: position recorded as Sent → GATEWAY_ACCEPTED + key.
+        let hash = op(&store, seq).hash;
         dispatcher.handle_reply(
             &mut store,
             submit.request,
@@ -1805,6 +1965,7 @@ mod tests {
                 SlotState::Sent,
                 1,
                 Evidence::GatewayAccepted,
+                hash,
             ),
             now + 20,
         );
@@ -1829,6 +1990,8 @@ mod tests {
                 SlotState::Delivered,
                 1,
                 Evidence::EndSdkReceived,
+                hash,
+                op_id_bytes(&[7; 16], seq),
             ),
             now + 20 + QUERY_INTERVAL_MS + 5,
         );
@@ -1867,6 +2030,7 @@ mod tests {
         let submit = drive_to_submit(&mut dispatcher, &mut store, 1_000);
         // Best-effort completion: Delivered + MAC_ATTEMPT_REPORTED keeps
         // GATEWAY_ACCEPTED and never promotes to END_SDK_RECEIVED.
+        let hash = op(&store, seq).hash;
         dispatcher.handle_reply(
             &mut store,
             submit.request,
@@ -1876,6 +2040,7 @@ mod tests {
                 SlotState::Delivered,
                 1,
                 Evidence::MacAttemptReported,
+                hash,
             ),
             1_050,
         );
@@ -1902,6 +2067,7 @@ mod tests {
             .iter()
             .find(|r| sub_of(r) == SUB_QUERY_DISPATCH)
             .expect("query after pending timeout");
+        let hash = op(&store, seq).hash;
         dispatcher.handle_reply(
             &mut store,
             query.request,
@@ -1910,6 +2076,8 @@ mod tests {
                 SlotState::Sent,
                 dispatch_seq,
                 Evidence::GatewayAccepted,
+                hash,
+                op_id_bytes(&[7; 16], seq),
             ),
             1_000 + RESPONSE_TIMEOUT_MS + 110,
         );
@@ -1937,13 +2105,21 @@ mod tests {
                 SlotState::Empty,
                 first_seq,
                 Evidence::None,
+                [0; 32],
             ),
             1_050,
         );
         let record = op(&store, seq);
         assert_eq!(record.dispatch_state, DispatchState::DispatchPrepared);
         assert!(!record.dispatch.as_ref().unwrap().submitted);
+        // The resend is throttled to the poll cadence — no churn at
+        // round-trip rate — but re-drives the SAME bound seq.
         let out = dispatcher.tick(&mut store, &link(), 1_060);
+        assert!(
+            !out.iter().any(|r| sub_of(r) == host_ops::SUB_SUBMIT),
+            "resubmit is paced, not instant"
+        );
+        let out = dispatcher.tick(&mut store, &link(), 1_020 + QUERY_INTERVAL_MS);
         let resubmit = out
             .iter()
             .find(|r| sub_of(r) == host_ops::SUB_SUBMIT)
@@ -2017,6 +2193,7 @@ mod tests {
                 SlotState::Skipped,
                 skip_seq,
                 Evidence::None,
+                [0; 32],
             ),
             1_120,
         );
@@ -2029,6 +2206,7 @@ mod tests {
                 SlotState::Skipped,
                 skip_seq,
                 Evidence::None,
+                [0; 32],
             ),
             1_120,
         );
@@ -2197,6 +2375,7 @@ mod tests {
         // Drive the first op to SUBMIT (seq 1); the second is admitted
         // only after, so it takes seq 2 on a later pass.
         let s1 = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        let hash1 = op(&store, first).hash;
         dispatcher.handle_reply(
             &mut store,
             s1.request,
@@ -2206,6 +2385,7 @@ mod tests {
                 SlotState::Sent,
                 1,
                 Evidence::GatewayAccepted,
+                hash1,
             ),
             1_050,
         );
@@ -2217,6 +2397,7 @@ mod tests {
             .expect("second submit");
         assert_eq!(decode_submit(&s2.body).unwrap().dispatch_seq, 2);
         // Complete seq 2 while seq 1 is still live: the floor must NOT pass 1.
+        let hash2 = op(&store, second).hash;
         dispatcher.handle_reply(
             &mut store,
             s2.request,
@@ -2226,6 +2407,7 @@ mod tests {
                 SlotState::Delivered,
                 2,
                 Evidence::EndSdkReceived,
+                hash2,
             ),
             1_070,
         );
@@ -2248,6 +2430,8 @@ mod tests {
                 SlotState::Delivered,
                 1,
                 Evidence::EndSdkReceived,
+                hash1,
+                op_id_bytes(&[7; 16], first),
             ),
             1_400,
         );
@@ -2355,6 +2539,7 @@ mod tests {
                 SlotState::Sent,
                 1,
                 Evidence::None,
+                [0; 32],
             ),
             1_050,
         );
@@ -2362,5 +2547,198 @@ mod tests {
         // landed, but the store keeps INDETERMINATE — an anomaly to
         // investigate, never a silent overwrite or a claimed rejection.
         assert_eq!(op(&store, seq).dispatch_state, DispatchState::Indeterminate);
+    }
+
+    /// A refused RETIRE must not deadlock the floor: the requested span's
+    /// confirmed-terminal markers are cleared and re-verified by QUERY,
+    /// so the next attempt makes progress instead of retrying the
+    /// identical request forever.
+    #[test]
+    fn retire_refused_recovers_floor() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let seq = admitted(&mut store, 0xe1, 30_000, 1_000);
+        let submit = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        let hash = op(&store, seq).hash;
+        dispatcher.handle_reply(
+            &mut store,
+            submit.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::Ok,
+                SlotState::Delivered,
+                1,
+                Evidence::EndSdkReceived,
+                hash,
+            ),
+            1_050,
+        );
+        assert!(op(&store, seq).dispatch.as_ref().unwrap().device_terminal);
+        let out = dispatcher.tick(&mut store, &link(), 1_060);
+        let retire = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("retire over the terminal prefix");
+        assert_eq!(
+            decode_lane_request(&retire.body, SUB_RETIRE_THROUGH)
+                .unwrap()
+                .seq,
+            1
+        );
+        // Refused: the requested target is what gets re-verified — not
+        // the device's current floor — and the reported floor is adopted.
+        dispatcher.handle_reply(
+            &mut store,
+            retire.request,
+            &retire_response(HostOpsResult::RetireRefused, 0),
+            1_070,
+        );
+        assert!(
+            !op(&store, seq).dispatch.as_ref().unwrap().device_terminal,
+            "the marker in the refused span is cleared for re-verification"
+        );
+        // The query pass re-verifies even the concluded record's position.
+        let out = dispatcher.tick(&mut store, &link(), 1_080);
+        let query = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_QUERY_DISPATCH)
+            .expect("concluded position re-polls after refusal");
+        dispatcher.handle_reply(
+            &mut store,
+            query.request,
+            &query_response(
+                HostOpsResult::Ok,
+                SlotState::Delivered,
+                1,
+                Evidence::EndSdkReceived,
+                hash,
+                op_id_bytes(&[7; 16], seq),
+            ),
+            1_090,
+        );
+        assert!(op(&store, seq).dispatch.as_ref().unwrap().device_terminal);
+        // Re-marked: the floor retires through the position next pass.
+        let out = dispatcher.tick(&mut store, &link(), 1_100);
+        let retire = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("retire retried after re-verification");
+        dispatcher.handle_reply(
+            &mut store,
+            retire.request,
+            &retire_response(HostOpsResult::Ok, 1),
+            1_110,
+        );
+        assert_eq!(dispatcher.floor, 1);
+    }
+
+    /// TIME_UNCERTAIN only wraps the pre-rewind state: provably-unsent
+    /// records still expire and cancel honestly through it.
+    #[test]
+    fn time_uncertain_expires_and_cancels() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        // A record parked by a clock rewind cancels like a queued one.
+        let a = admitted(&mut store, 0xe2, 30_000, 1_000);
+        dispatcher.tick(&mut store, &link(), 500);
+        assert_eq!(op(&store, a).dispatch_state, DispatchState::TimeUncertain);
+        assert_eq!(
+            store.cancel_operation(a, 600).unwrap(),
+            CancelOutcome::Cancelled,
+            "provably-unsent cancels through the TIME_UNCERTAIN wrapper"
+        );
+        // And one parked past its deadline expires provably-unsent too.
+        let b = admitted(&mut store, 0xe3, 1_000, 1_000);
+        dispatcher.tick(&mut store, &link(), 500);
+        assert_eq!(op(&store, b).dispatch_state, DispatchState::TimeUncertain);
+        dispatcher.tick(&mut store, &offline(), 2_500);
+        assert_eq!(
+            op(&store, b).dispatch_state,
+            DispatchState::ExpiredBeforeDispatch
+        );
+    }
+
+    /// Echoed lease/dispatch_seq/hash on a correlated response must match
+    /// the pending binding — a mismatch is divergence, not adoption.
+    #[test]
+    fn receipt_field_mismatch_is_indeterminate() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        // Wrong dispatch_seq echo.
+        let a = admitted(&mut store, 0xf1, 30_000, 1_000);
+        let s1 = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        let hash_a = op(&store, a).hash;
+        dispatcher.handle_reply(
+            &mut store,
+            s1.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::Ok,
+                SlotState::Sent,
+                2,
+                Evidence::GatewayAccepted,
+                hash_a,
+            ),
+            1_050,
+        );
+        assert_eq!(op(&store, a).dispatch_state, DispatchState::Indeterminate);
+        // Right seq, wrong canonical hash.
+        let b = admitted(&mut store, 0xf2, 30_000, 1_000);
+        store.prepare_dispatch(b, lease(), [7; 16]).unwrap();
+        let out = dispatcher.tick(&mut store, &link(), 1_100 + QUERY_INTERVAL_MS);
+        let s2 = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_SUBMIT)
+            .expect("second submit");
+        dispatcher.handle_reply(
+            &mut store,
+            s2.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::Ok,
+                SlotState::Sent,
+                2,
+                Evidence::GatewayAccepted,
+                [0xAA; 32],
+            ),
+            1_150 + QUERY_INTERVAL_MS,
+        );
+        assert_eq!(op(&store, b).dispatch_state, DispatchState::Indeterminate);
+    }
+
+    /// The device reporting an expired slot while our marker says
+    /// provably-unsent is contradictory evidence: INDETERMINATE, never a
+    /// claimed EXPIRED_BEFORE_DISPATCH.
+    #[test]
+    fn expired_slot_with_unsent_marker_is_indeterminate() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let seq = admitted(&mut store, 0xf5, 30_000, 1_000);
+        let submit = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        // Race the marker back to provably-unsent (e.g. a concurrent
+        // emit-drop), then deliver the receipt anyway.
+        let _ = store.update_operation(seq, &mut |o| {
+            if let Some(d) = o.dispatch.as_mut() {
+                d.submitted = false;
+            }
+            true
+        });
+        let hash = op(&store, seq).hash;
+        dispatcher.handle_reply(
+            &mut store,
+            submit.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::Ok,
+                SlotState::Expired,
+                1,
+                Evidence::None,
+                hash,
+            ),
+            1_050,
+        );
+        let record = op(&store, seq);
+        assert_eq!(record.dispatch_state, DispatchState::Indeterminate);
+        assert!(record.dispatch.as_ref().unwrap().device_terminal);
     }
 }

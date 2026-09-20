@@ -452,24 +452,7 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   record->accepted = true;
   record->message_session = id.session;
   record->message_sequence = id.sequence;
-  RequestMap* map = request_map_.allocate();
-  if (map == nullptr) {
-    // Bounded correlation table: reuse the oldest entry so delivery reports
-    // still resolve for recent sends instead of silently degrading.
-    RequestMap* oldest = nullptr;
-    request_map_.for_each([&](RequestMap& value) {
-      if (oldest == nullptr || value.id.sequence < oldest->id.sequence) {
-        oldest = &value;
-      }
-    });
-    if (oldest != nullptr && request_map_.release(oldest)) {
-      map = request_map_.allocate();
-    }
-  }
-  if (map != nullptr) {
-    map->id = id;
-    map->request = request;
-  }
+  track_request(id, request);
 }
 
 void UsbBridge::handle_host_ops(const std::uint64_t request,
@@ -569,6 +552,28 @@ void UsbBridge::send_time_sample_response(const TimeSampleResponse& response,
           now_ms);
 }
 
+void UsbBridge::track_request(const MessageId& id,
+                              const std::uint64_t request) noexcept {
+  RequestMap* map = request_map_.allocate();
+  if (map == nullptr) {
+    // Bounded correlation table: reuse the oldest entry so delivery reports
+    // still resolve for recent sends instead of silently degrading.
+    RequestMap* oldest = nullptr;
+    request_map_.for_each([&](RequestMap& value) {
+      if (oldest == nullptr || value.id.sequence < oldest->id.sequence) {
+        oldest = &value;
+      }
+    });
+    if (oldest != nullptr && request_map_.release(oldest)) {
+      map = request_map_.allocate();
+    }
+  }
+  if (map != nullptr) {
+    map->id = id;
+    map->request = request;
+  }
+}
+
 namespace {
 
 // Fills a receipt's record fields from a stored slot (replay/conflict/refusal
@@ -596,6 +601,51 @@ void fill_query_from_slot(QueryResponse& response,
 
 }  // namespace
 
+void UsbBridge::send_record_refusal_receipt(
+    DispatchReceipt& receipt, const SubmitRequest& submit,
+    const std::uint64_t request, const MonotonicMs now_ms) noexcept {
+  // A record-store refusal after a successful Admit check is explainable
+  // only by the position's CURRENT state — re-run the dry classification
+  // and answer with what the window actually holds rather than a
+  // synthetic rejection code. The caller keeps sub/lease/seq already
+  // filled on `receipt`.
+  const DispatchWindow::SubmitCheck recheck = window_.check_submit(
+      submit.lease, submit.dispatcher, submit.dispatch_seq,
+      submit.canonical_hash, submit.operation_id);
+  switch (recheck) {
+    case DispatchWindow::SubmitCheck::Replay:
+    case DispatchWindow::SubmitCheck::Conflict: {
+      const DispatchWindow::Slot* slot = window_.find(submit.dispatch_seq);
+      if (slot != nullptr) fill_receipt_from_slot(receipt, *slot);
+      receipt.result = recheck == DispatchWindow::SubmitCheck::Replay
+                           ? HostOpsResult::Existing
+                           : HostOpsResult::Conflict;
+      break;
+    }
+    case DispatchWindow::SubmitCheck::Retired:
+      receipt.result = HostOpsResult::Retired;
+      break;
+    case DispatchWindow::SubmitCheck::LeaseMismatch:
+      receipt.result = HostOpsResult::LeaseMismatch;
+      break;
+    case DispatchWindow::SubmitCheck::LaneMismatch:
+      receipt.result = HostOpsResult::LaneMismatch;
+      break;
+    case DispatchWindow::SubmitCheck::InvalidId:
+      receipt.result = HostOpsResult::InvalidRequest;
+      break;
+    case DispatchWindow::SubmitCheck::Admit:
+    case DispatchWindow::SubmitCheck::WindowFull:
+    default:
+      // The position looks free but the store refused anyway (or the seq
+      // slid past the window edge): answer as window pressure — never a
+      // mesh outcome, since a refusal here is a bookkeeping failure.
+      receipt.result = HostOpsResult::WindowFull;
+      break;
+  }
+  send_receipt(receipt, request, now_ms);
+}
+
 void UsbBridge::handle_ops_submit(const std::uint64_t request,
                                   const ByteView inner,
                                   const MonotonicMs now_ms) noexcept {
@@ -611,7 +661,8 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
   receipt.hash = submit.canonical_hash;
 
   const DispatchWindow::SubmitCheck check = window_.check_submit(
-      submit.lease, submit.dispatcher, submit.dispatch_seq, submit.canonical_hash);
+      submit.lease, submit.dispatcher, submit.dispatch_seq,
+      submit.canonical_hash, submit.operation_id);
   switch (check) {
     case DispatchWindow::SubmitCheck::LeaseMismatch:
       receipt.result = HostOpsResult::LeaseMismatch;
@@ -690,8 +741,10 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
     if (!window_.record_expired(submit.dispatcher, submit.dispatch_seq,
                                 submit.canonical_hash, submit.operation_id,
                                 fields.delivery)) {
-      receipt.result = HostOpsResult::MeshRejected;
-      send_receipt(receipt, request, now_ms);
+      // Defensive (check-then-record is atomic for this single-threaded
+      // caller): nothing was sent, so MeshRejected would be a lie — answer
+      // with the position's actual state.
+      send_record_refusal_receipt(receipt, submit, request, now_ms);
       return;
     }
     receipt.result = HostOpsResult::Expired;
@@ -709,10 +762,15 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
   options.delivery = fields.delivery == 0 ? DeliveryClass::BestEffort
                                           : DeliveryClass::Reliable;
   options.priority = Priority::Normal;
+  // Mesh lifetime = min(time left to the device deadline, canonical ttl).
+  // The canonical ttl is the contract's per-send budget
+  // (send.ttl_max_ms = 30000): a far-future device_deadline must not pin a
+  // window record and a delivery-table slot for weeks — the record retires
+  // only via a contiguous terminal prefix, so an unbounded send would
+  // wedge the lane.
   const std::uint64_t remaining = submit.device_deadline - now_ms;
-  options.lifetime_ms = remaining > UINT32_MAX
-                            ? UINT32_MAX
-                            : static_cast<std::uint32_t>(remaining);
+  options.lifetime_ms = static_cast<std::uint32_t>(
+      remaining < fields.ttl_ms ? remaining : fields.ttl_ms);
   options.hop_limit = fields.hop_limit;
   options.persist_across_sleep = false;
   MessageId id{};
@@ -730,9 +788,17 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
   if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
                            submit.canonical_hash, submit.operation_id,
                            fields.delivery, id.session, id.sequence)) {
-    // Defensive: check-then-record is atomic for our single-threaded caller.
-    receipt.result = HostOpsResult::MeshRejected;
-    send_receipt(receipt, request, now_ms);
+    // Defensive (unreachable for this single-threaded caller): the mesh
+    // send IS live, so MeshRejected would be a lie — it would orphan an
+    // in-flight delivery whose outcome later surfaces as a request-0
+    // DeliveryEvent. Correlate the send to this request, leave an
+    // Indeterminate record if the position is still free, and answer with
+    // the position's actual state.
+    track_request(id, request);
+    (void)window_.record_indeterminate(
+        submit.dispatcher, submit.dispatch_seq, submit.canonical_hash,
+        submit.operation_id, fields.delivery, id.session, id.sequence);
+    send_record_refusal_receipt(receipt, submit, request, now_ms);
     return;
   }
   receipt.result = HostOpsResult::Ok;
@@ -807,6 +873,9 @@ void UsbBridge::handle_ops_retire(const std::uint64_t request,
       break;
     case DispatchWindow::RetireOutcome::LaneMismatch:
       response.result = HostOpsResult::LaneMismatch;
+      break;
+    case DispatchWindow::RetireOutcome::InvalidId:
+      response.result = HostOpsResult::InvalidRequest;
       break;
   }
   response.retired_through = window_.retired_through();

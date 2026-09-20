@@ -196,10 +196,14 @@ pub enum CancelOutcome {
 /// Shared cancel transition used by both store providers. Cancellable iff
 /// HOST_QUEUED or DISPATCH_PREPARED with `submitted == false` — the only
 /// states where the host can still prove no external write began.
+/// TIME_UNCERTAIN is only a wrapper the clock-rewind sweep parks records
+/// in; the honesty rule is unchanged, so a provably-unsubmitted record
+/// cancels regardless of the wrapper.
 fn cancel_transition(op: &mut StoredOperation, now_ms: u64) -> CancelOutcome {
     let cancellable = match op.dispatch_state {
         DispatchState::HostQueued => true,
         DispatchState::DispatchPrepared => op.dispatch.as_ref().is_some_and(|d| !d.submitted),
+        DispatchState::TimeUncertain => !op.dispatch.as_ref().is_some_and(|d| d.submitted),
         _ => false,
     };
     if let Some(d) = op.dispatch.as_mut() {
@@ -426,9 +430,15 @@ pub trait OperationStore {
         dispatcher: [u8; 16],
     ) -> Result<PrepareOutcome, ()>;
     /// Linearized read-modify-write on one record. `mutate` returns false
-    /// to veto; Ok(false) means the record is missing or the veto held.
+    /// to veto; Ok(false) means the record is missing or the veto held —
+    /// and a veto leaves the record untouched (non-durable providers
+    /// snapshot and restore, the durable one rolls back).
     /// The dispatcher uses this for every post-prepare transition so a
     /// racing cancel or expiry is linearized at the same boundary.
+    /// Only `dispatch_state`, `terminal_ms` and `dispatch` are written
+    /// back by the durable provider: a mutate that touches any other
+    /// field is silently lost there, so mutates must confine themselves
+    /// to those fields.
     fn update_operation(
         &mut self,
         op_seq: u64,
@@ -934,7 +944,16 @@ impl OperationStore for MemoryOperationStore {
         let Some(op) = self.by_seq.get_mut(&op_seq) else {
             return Ok(false);
         };
-        Ok(mutate(op))
+        // No rollback log here: snapshot so a veto cannot leave a partial
+        // mutation committed (the durable provider gets this for free
+        // from its transaction).
+        let before = op.clone();
+        Ok(if mutate(op) {
+            true
+        } else {
+            *op = before;
+            false
+        })
     }
 }
 
@@ -1538,5 +1557,27 @@ mod tests {
         // forecast — back to unknown.
         let stale = store.capacity_status(1000 + RETENTION_MS);
         assert_eq!(stale.reclaimable_at_ms, None);
+    }
+
+    /// A vetoed update must leave the record untouched — same rule as the
+    /// durable provider's rollback, so a mutate-then-veto cannot leak a
+    /// partial mutation.
+    #[test]
+    fn update_veto_leaves_record_untouched() {
+        let mut store = MemoryOperationStore::test_store();
+        store.open_epoch((501, 1), 0).unwrap();
+        let req = request("00112233445566778899aabbccddeeff", 1, "", 0);
+        let seq = submit(&mut store, &req);
+        assert_eq!(
+            store.update_operation(seq, &mut |o| {
+                o.dispatch_state = DispatchState::Indeterminate;
+                o.terminal_ms = Some(9);
+                false
+            }),
+            Ok(false)
+        );
+        let op = store.get_by_seq(seq).unwrap().unwrap();
+        assert_eq!(op.dispatch_state, DispatchState::HostQueued);
+        assert_eq!(op.terminal_ms, None);
     }
 }

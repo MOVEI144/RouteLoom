@@ -28,7 +28,7 @@ use crate::send_store::{
     RECORD_RESERVATION_BYTES, RETENTION_MS, STORE_BYTES_CAP,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Schema v2 adds `operations.dispatch` — the TX-I2 dispatch attachment
@@ -36,6 +36,13 @@ use std::path::{Path, PathBuf};
 /// transaction (the column defaults to NULL, exactly what a never-dispatched
 /// record means); anything else is still refused rather than rewritten.
 const SCHEMA_VERSION: u32 = 2;
+
+/// Mirror of the device dispatch window (contracts `DISPATCH_WINDOW`,
+/// kept in `dispatch.rs`): lane positions further than this below the
+/// persisted allocator top were necessarily under the device floor at
+/// the last shutdown, so tombstone recovery only rebuilds the top of
+/// the consumed range.
+const LANE_HOLE_WINDOW: u64 = 32;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -109,13 +116,16 @@ fn blob_u64(raw: Vec<u8>) -> Option<u64> {
     Some(u64::from_be_bytes(bytes))
 }
 
-/// Footprint of the live store: main file plus WAL sidecars. None when the
-/// main file cannot be measured — the daemon then cannot vouch for
-/// durability and must stop admitting rather than guess.
+/// Footprint of the live store: main file plus journal/WAL sidecars.
+/// None when the main file cannot be measured — the daemon then cannot
+/// vouch for durability and must stop admitting rather than guess.
+/// Sidecar names are built as OsString suffixes so a non-UTF-8 store
+/// path still measures the real files (`path.display()` would not).
 fn store_file_bytes(path: &Path) -> Option<u64> {
     let mut total = std::fs::metadata(path).ok()?.len();
-    for suffix in ["-wal", "-shm"] {
-        let sidecar = format!("{}{suffix}", path.display());
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
         total += std::fs::metadata(sidecar).map(|m| m.len()).unwrap_or(0);
     }
     Some(total)
@@ -142,9 +152,19 @@ fn read_scope(
         )
         .optional()?;
     row.map(|(floor, next, open, open_ms)| {
-        let open = open.and_then(blob_u64).zip(open_ms.and_then(db_to_ms));
         let field = |name: &'static str| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, name.into())
+        };
+        // The open pair is all-or-nothing: a half-set or undecodable open
+        // field is corruption — absorbing it would leave an orphaned
+        // epoch that never closes and stalls the retire floor.
+        let open = match (open, open_ms) {
+            (None, None) => None,
+            (Some(epoch), Some(ms)) => Some((
+                blob_u64(epoch).ok_or_else(|| field("open_epoch"))?,
+                db_to_ms(ms).ok_or_else(|| field("open_ms"))?,
+            )),
+            _ => return Err(field("open_epoch")),
         };
         Ok(ScopeRow {
             floor: blob_u64(floor).ok_or_else(|| field("floor"))?,
@@ -210,19 +230,31 @@ fn read_operation_row(row: &rusqlite::Row<'_>) -> Result<StoredOperation, rusqli
         None => None,
         Some(raw) => Some(DispatchAttachment::decode(&raw).ok_or_else(|| corrupt("dispatch"))?),
     };
+    // Integer fields were `as`-cast once — silent truncation could
+    // re-attribute a record (e.g. a wrapped uid passing a cancel
+    // ownership check), so out-of-range values are corruption instead.
+    let int_u64 = |col: usize, name: &'static str| {
+        u64::try_from(row.get::<_, i64>(col)?).map_err(|_| corrupt(name))
+    };
+    let int_u32 = |col: usize, name: &'static str| {
+        u32::try_from(row.get::<_, i64>(col)?).map_err(|_| corrupt(name))
+    };
+    let int_u8 = |col: usize, name: &'static str| {
+        u8::try_from(row.get::<_, i64>(col)?).map_err(|_| corrupt(name))
+    };
     Ok(StoredOperation {
-        seq: row.get::<_, i64>(0)? as u64,
-        uid: row.get::<_, i64>(1)? as u32,
-        network: row.get::<_, i64>(2)? as u64,
+        seq: int_u64(0, "seq")?,
+        uid: int_u32(1, "uid")?,
+        network: int_u64(2, "network")?,
         epoch,
         key,
-        dest_kind: row.get::<_, i64>(5)? as u8,
+        dest_kind: int_u8(5, "dest_kind")?,
         dest,
-        delivery: row.get::<_, i64>(7)? as u8,
-        priority: row.get::<_, i64>(8)? as u8,
-        ttl_ms: row.get::<_, i64>(9)? as u32,
-        storage: row.get::<_, i64>(10)? as u8,
-        hop_limit: row.get::<_, i64>(11)? as u8,
+        delivery: int_u8(7, "delivery")?,
+        priority: int_u8(8, "priority")?,
+        ttl_ms: int_u32(9, "ttl_ms")?,
+        storage: int_u8(10, "storage")?,
+        hop_limit: int_u8(11, "hop_limit")?,
         payload: row.get(12)?,
         canonical: row.get(13)?,
         hash,
@@ -256,6 +288,16 @@ pub struct SqliteOperationStore {
     conn: Connection,
     ram_by_identity: HashMap<OpIdentity, StoredOperation>,
     ram_by_seq: HashMap<u64, OpIdentity>,
+    /// Payload-free stand-ins for lane positions a RAM_ONLY binding
+    /// consumed before the last shutdown: the volatile attachment is
+    /// gone but the durable allocator's `dispatch_next` bump is not,
+    /// leaving a seq no record could settle — the retire floor would
+    /// wedge behind it forever. Each tombstone is already concluded and
+    /// marked `submitted` (the lost claim is unknowable), so the query
+    /// pass resolves the position or a SKIP proves it empty. Rebuilt at
+    /// open, keyed by `u64::MAX - dispatch_seq` — outside every real
+    /// sequence space.
+    lane_tombstones: HashMap<u64, StoredOperation>,
 }
 
 impl std::fmt::Debug for SqliteOperationStore {
@@ -264,6 +306,7 @@ impl std::fmt::Debug for SqliteOperationStore {
             .field("path", &self.path)
             .field("lineage", &self.lineage)
             .field("ram_records", &self.ram_by_identity.len())
+            .field("lane_tombstones", &self.lane_tombstones.len())
             .finish_non_exhaustive()
     }
 }
@@ -290,44 +333,100 @@ impl SqliteOperationStore {
                 path.display()
             ),
         })?;
-        conn.pragma_update(None, "busy_timeout", 5_000)?;
+        // Single-writer: locks are taken once and never released, so a
+        // second daemon opening the same file fails fast instead of
+        // racing recovery, RAM overlays and the rate budget. The short
+        // initial timeout makes that second opener fail fast; the
+        // steady-state timeout is restored once ownership is proven.
+        conn.pragma_update(None, "busy_timeout", 100)?;
+        conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
+        // Prove ownership read-only BEFORE any write: journal_mode=WAL
+        // rewrites the file header, so a foreign file must be refused
+        // while it is still untouched.
+        let version: Option<u32> = if fresh {
+            None
+        } else {
+            let raw: Vec<u8> = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key='schema_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|e| OpenError {
+                    message: format!(
+                        "STORE_RECOVERY_REQUIRED: {} is not a RouteLoom operation store ({e})",
+                        path.display()
+                    ),
+                })?;
+            match <[u8; 4]>::try_from(raw.as_slice())
+                .ok()
+                .map(u32::from_be_bytes)
+            {
+                Some(v) if (1..=SCHEMA_VERSION).contains(&v) => Some(v),
+                _ => {
+                    return Err(OpenError {
+                        message: format!(
+                            "STORE_RECOVERY_REQUIRED: {} has an unknown store schema; refusing to erase or migrate it",
+                            path.display()
+                        ),
+                    });
+                }
+            }
+        };
         // WAL where the filesystem allows it, rollback journal otherwise —
-        // either is durable with FULL synchronous.
-        let _journal: String =
-            conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        if fresh {
-            conn.execute_batch(SCHEMA_SQL)?;
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
-                params![SCHEMA_VERSION.to_be_bytes().to_vec()],
-            )?;
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES ('lineage', ?1)",
-                params![mint_id128().to_vec()],
-            )?;
-            conn.execute(
-                "INSERT INTO meta(key, value) VALUES ('next_seq', ?1)",
-                params![u64_blob(1)],
-            )?;
-        }
-        let version: Vec<u8> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key='schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|_| OpenError {
+        // either is durable with FULL synchronous. Under EXCLUSIVE locking
+        // a second opener fails here (or on the probe above under WAL)
+        // with a lock error.
+        let _journal: String = conn
+            .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))
+            .map_err(|e| OpenError {
                 message: format!(
-                    "STORE_RECOVERY_REQUIRED: {} is not a RouteLoom operation store",
+                    "STORE_RECOVERY_REQUIRED: cannot take exclusive ownership of {}: {e}",
                     path.display()
                 ),
             })?;
-        let version: Option<u32> = <[u8; 4]>::try_from(version.as_slice())
-            .ok()
-            .map(u32::from_be_bytes);
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        conn.pragma_update(None, "busy_timeout", 5_000)?;
+        if fresh {
+            // One transaction: a crash mid-init rolls everything back, so
+            // the path is never wedged by a half-written store (version
+            // and lineage set, next_seq missing).
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(SCHEMA_SQL)?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION.to_be_bytes().to_vec()],
+            )?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES ('lineage', ?1)",
+                params![mint_id128().to_vec()],
+            )?;
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES ('next_seq', ?1)",
+                params![u64_blob(1)],
+            )?;
+            tx.commit()?;
+            // The records pay fsync for durability; the create itself
+            // must too — a power loss that orphans the file after it was
+            // fsync'd would mint a second lineage at the next open
+            // instead of refusing.
+            #[cfg(unix)]
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            // Payloads live in this file: owner-only from creation. The
+            // process umask still governs the -wal/-shm sidecars sqlite
+            // creates later.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
         match version {
-            Some(SCHEMA_VERSION) => {}
+            None | Some(SCHEMA_VERSION) => {}
             // v1 → v2: one additive nullable column for the TX-I2 dispatch
             // attachment, committed atomically with the version bump.
             Some(1) => {
@@ -346,14 +445,7 @@ impl SqliteOperationStore {
                 )?;
                 tx.commit()?;
             }
-            _ => {
-                return Err(OpenError {
-                    message: format!(
-                        "STORE_RECOVERY_REQUIRED: {} has an unknown store schema; refusing to erase or migrate it",
-                        path.display()
-                    ),
-                });
-            }
+            Some(_) => unreachable!("schema version bounded by the probe"),
         }
         let check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         if check != "ok" {
@@ -374,6 +466,27 @@ impl SqliteOperationStore {
                 path.display()
             ),
         })?;
+        // The sequence cursor is validated like the lineage: a file that
+        // lacks it (e.g. a torn pre-transaction init) faults every submit
+        // forever — refuse instead.
+        let next_seq: Vec<u8> = conn
+            .query_row("SELECT value FROM meta WHERE key='next_seq'", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| OpenError {
+                message: format!(
+                    "STORE_RECOVERY_REQUIRED: {} has no sequence cursor",
+                    path.display()
+                ),
+            })?;
+        if blob_u64(next_seq).is_none() {
+            return Err(OpenError {
+                message: format!(
+                    "STORE_RECOVERY_REQUIRED: {} has a corrupt sequence cursor",
+                    path.display()
+                ),
+            });
+        }
         // Crash recovery for DISPATCH_PREPARED records, split on the
         // persisted `submitted` claim flag: a record whose flag says the
         // SUBMIT may have left becomes INDETERMINATE (resolved by
@@ -410,12 +523,96 @@ impl SqliteOperationStore {
         if recovered > 0 {
             eprintln!("opstore: {recovered} prepared operation(s) recovered as INDETERMINATE");
         }
+        // Rebuild lane positions a RAM_ONLY binding consumed before the
+        // last shutdown (see `lane_tombstones` on the struct): every
+        // dispatch_seq below `dispatch_next` under the still-bound lease
+        // with no durable attachment is a hole. Positions further below
+        // the allocator top than the device window were retired before
+        // the crash — allocation never ran ahead of floor+window — so
+        // only the top of the consumed range needs stand-ins.
+        let mut lane_tombstones: HashMap<u64, StoredOperation> = HashMap::new();
+        {
+            let bound: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key='dispatch_lease'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let next: Option<Vec<u8>> = conn
+                .query_row(
+                    "SELECT value FROM meta WHERE key='dispatch_next'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let (Some(lease_raw), Some(next_raw)) = (bound, next) {
+                if let (Ok(lease), Some(next_seq)) = (
+                    <[u8; 16]>::try_from(lease_raw.as_slice()),
+                    blob_u64(next_raw),
+                ) {
+                    let mut taken: HashSet<u64> = HashSet::new();
+                    {
+                        let mut stmt = conn.prepare(
+                            "SELECT dispatch FROM operations WHERE dispatch IS NOT NULL",
+                        )?;
+                        let blobs = stmt
+                            .query_map([], |row| row.get::<_, Vec<u8>>(0))?
+                            .collect::<Result<Vec<_>, _>>()?;
+                        for blob in blobs {
+                            if let Some(att) = DispatchAttachment::decode(&blob) {
+                                if att.lease == lease {
+                                    taken.insert(att.dispatch_seq);
+                                }
+                            }
+                        }
+                    }
+                    let low = next_seq.saturating_sub(1 + LANE_HOLE_WINDOW).max(1);
+                    for dispatch_seq in low..next_seq {
+                        if taken.contains(&dispatch_seq) {
+                            continue;
+                        }
+                        let mut dispatch = DispatchAttachment::fresh(lease, lineage, dispatch_seq);
+                        // The volatile claim is unknowable — assume the
+                        // SUBMIT may have left and let QUERY resolve the
+                        // position (NotRetained proves it a hole to SKIP).
+                        dispatch.submitted = true;
+                        let op_seq = u64::MAX - dispatch_seq;
+                        lane_tombstones.insert(
+                            op_seq,
+                            StoredOperation {
+                                seq: op_seq,
+                                uid: 0,
+                                network: 0,
+                                epoch: 0,
+                                key: [0; 16],
+                                dest_kind: 0,
+                                dest: 0,
+                                delivery: 0,
+                                priority: 0,
+                                ttl_ms: 0,
+                                storage: crate::canonical::STORAGE_RAM,
+                                hop_limit: 0,
+                                payload: Vec::new(),
+                                canonical: Vec::new(),
+                                hash: [0; 32],
+                                accepted_ms: 0,
+                                dispatch_state: DispatchState::Indeterminate,
+                                terminal_ms: Some(0),
+                                dispatch: Some(dispatch),
+                            },
+                        );
+                    }
+                }
+            }
+        }
         Ok(Self {
             path: path.to_path_buf(),
             lineage,
             conn,
             ram_by_identity: HashMap::new(),
             ram_by_seq: HashMap::new(),
+            lane_tombstones,
         })
     }
 
@@ -586,6 +783,7 @@ impl SqliteOperationStore {
         ram_by_identity: &HashMap<OpIdentity, StoredOperation>,
         delta: &mut RamDelta,
         tx: &Transaction<'_>,
+        path: &Path,
         uid: u32,
         req: &SendRequest,
         now_ms: u64,
@@ -643,6 +841,22 @@ impl SqliteOperationStore {
                 return Ok(SubmitOutcome::EpochClosed)
             }
             _ => return Ok(SubmitOutcome::UnknownEpoch),
+        }
+        // Physical budget, checked here and not before the transaction:
+        // dedup (Replay/Conflict above) must resolve even under
+        // exhaustion — the contract orders identity before quota — and an
+        // unmeasurable store file means the daemon cannot vouch for
+        // durability at all.
+        match store_file_bytes(path) {
+            Some(used) if used < STORE_BYTES_CAP => {}
+            Some(_) => return Ok(SubmitOutcome::NoCapacity),
+            None => {
+                eprintln!(
+                    "opstore fault: store file {} is unmeasurable",
+                    path.display()
+                );
+                return Ok(SubmitOutcome::StoreFault);
+            }
         }
         let records: i64 = tx.query_row("SELECT COUNT(*) FROM operations", [], |row| row.get(0))?;
         let total_records = records as usize + ram_by_identity.len();
@@ -905,23 +1119,11 @@ impl OperationStore for SqliteOperationStore {
     }
 
     fn submit(&mut self, uid: u32, req: &SendRequest, now_ms: u64) -> SubmitOutcome {
-        // Physical budget first: without a measurable store file the daemon
-        // cannot vouch for durability at all.
-        match store_file_bytes(&self.path) {
-            Some(used) if used < STORE_BYTES_CAP => {}
-            Some(_) => return SubmitOutcome::NoCapacity,
-            None => {
-                eprintln!(
-                    "opstore fault: store file {} is unmeasurable",
-                    self.path.display()
-                );
-                return SubmitOutcome::StoreFault;
-            }
-        }
         let Self {
             conn,
             ram_by_identity,
             ram_by_seq,
+            path,
             ..
         } = self;
         let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
@@ -929,7 +1131,15 @@ impl OperationStore for SqliteOperationStore {
             Err(error) => return Self::fault(error),
         };
         let mut delta = RamDelta::default();
-        let outcome = match Self::submit_tx(ram_by_identity, &mut delta, &tx, uid, req, now_ms) {
+        let outcome = match Self::submit_tx(
+            ram_by_identity,
+            &mut delta,
+            &tx,
+            path.as_path(),
+            uid,
+            req,
+            now_ms,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => return Self::fault(error),
         };
@@ -945,6 +1155,9 @@ impl OperationStore for SqliteOperationStore {
     fn get_by_seq(&self, seq: u64) -> Result<Option<StoredOperation>, ()> {
         if let Some(identity) = self.ram_by_seq.get(&seq) {
             return Ok(self.ram_by_identity.get(identity).cloned());
+        }
+        if let Some(op) = self.lane_tombstones.get(&seq) {
+            return Ok(Some(op.clone()));
         }
         if seq > i64::MAX as u64 {
             return Ok(None);
@@ -1018,6 +1231,9 @@ impl OperationStore for SqliteOperationStore {
         for row in rows {
             out.push(row.map_err(failed)?);
         }
+        // Lane tombstones carry attachments too — the dispatcher resolves
+        // them through the same query/skip/retire passes.
+        out.extend(self.lane_tombstones.values().cloned());
         Ok(out)
     }
 
@@ -1101,10 +1317,27 @@ impl OperationStore for SqliteOperationStore {
         mutate: &mut dyn FnMut(&mut StoredOperation) -> bool,
     ) -> Result<bool, ()> {
         if let Some(identity) = self.ram_by_seq.get(&op_seq).copied() {
-            return Ok(self
-                .ram_by_identity
-                .get_mut(&identity)
-                .is_some_and(&mut *mutate));
+            // Same veto rule as the durable path: snapshot so a false
+            // return leaves no partial mutation committed.
+            let Some(op) = self.ram_by_identity.get_mut(&identity) else {
+                return Ok(false);
+            };
+            let before = op.clone();
+            return Ok(if mutate(op) {
+                true
+            } else {
+                *op = before;
+                false
+            });
+        }
+        if let Some(op) = self.lane_tombstones.get_mut(&op_seq) {
+            let before = op.clone();
+            return Ok(if mutate(op) {
+                true
+            } else {
+                *op = before;
+                false
+            });
         }
         if op_seq > i64::MAX as u64 {
             return Ok(false);
@@ -1227,7 +1460,9 @@ mod tests {
         fn remove(path: &Path) {
             let _ = std::fs::remove_file(path);
             for suffix in ["-wal", "-shm", "-journal"] {
-                let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+                let mut sidecar = path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                let _ = std::fs::remove_file(sidecar);
             }
         }
 
@@ -1680,6 +1915,9 @@ mod tests {
         std::fs::write(dir.join("store.db-wal"), vec![0u8; 25]).unwrap();
         std::fs::write(dir.join("store.db-shm"), vec![0u8; 7]).unwrap();
         assert_eq!(store_file_bytes(&main), Some(132));
+        // A stray rollback-journal sidecar counts too.
+        std::fs::write(dir.join("store.db-journal"), vec![0u8; 5]).unwrap();
+        assert_eq!(store_file_bytes(&main), Some(137));
         assert_eq!(store_file_bytes(&dir.join("missing.db")), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1856,5 +2094,179 @@ mod tests {
             store.retire_for_test((501, 1), EPOCH_WINDOW_MS + RETENTION_MS),
             2
         );
+    }
+
+    /// Reopen drives REAL attachments through the recovery split: a
+    /// claimed (submitted) record lands INDETERMINATE, a never-claimed
+    /// one stays re-drivable, a RAM binding leaves a payload-free lane
+    /// tombstone, and the per-lease allocator resumes its numbering.
+    #[test]
+    fn reopen_recovers_real_attachments() {
+        let db = TestDb::new("attachrecover");
+        let lease = [9u8; 16];
+        let dispatcher = [5u8; 16];
+        let (a, b, c);
+        {
+            let mut store = db.open();
+            store.open_epoch((501, 1), 0).unwrap();
+            a = submit(
+                &mut store,
+                501,
+                &durable("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1),
+                0,
+            );
+            b = submit(
+                &mut store,
+                501,
+                &durable("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
+                0,
+            );
+            c = submit(
+                &mut store,
+                501,
+                &ram("cccccccccccccccccccccccccccccccc", 1),
+                0,
+            );
+            for (seq, want) in [(a, 1), (b, 2), (c, 3)] {
+                match store.prepare_dispatch(seq, lease, dispatcher).unwrap() {
+                    PrepareOutcome::Prepared(att) => {
+                        assert_eq!(att.dispatch_seq, want)
+                    }
+                    other => panic!("expected prepared, got {other:?}"),
+                }
+            }
+            // Claim a toward the writer: its SUBMIT may have left.
+            assert_eq!(
+                store.update_operation(a, &mut |o| {
+                    if let Some(d) = o.dispatch.as_mut() {
+                        d.submitted = true;
+                    }
+                    true
+                }),
+                Ok(true)
+            );
+        }
+        {
+            let mut store = db.open();
+            // Claimed → INDETERMINATE (resolved by QUERY, never re-run);
+            // unclaimed → still DISPATCH_PREPARED, re-drivable.
+            assert_eq!(
+                store.get_by_seq(a).unwrap().unwrap().dispatch_state,
+                DispatchState::Indeterminate
+            );
+            let rec_b = store.get_by_seq(b).unwrap().unwrap();
+            assert_eq!(rec_b.dispatch_state, DispatchState::DispatchPrepared);
+            assert!(!rec_b.dispatch.as_ref().unwrap().submitted);
+            // The RAM record is gone but its consumed position is no hole:
+            // a tombstone stands in for it until QUERY or SKIP settles it.
+            assert!(store.get_by_seq(c).unwrap().is_none());
+            let view = store.dispatch_view().unwrap();
+            let tomb = view
+                .iter()
+                .find(|o| o.dispatch.as_ref().is_some_and(|d| d.dispatch_seq == 3))
+                .expect("lane tombstone for the consumed RAM position");
+            assert_eq!(tomb.dispatch_state, DispatchState::Indeterminate);
+            assert!(tomb.concluded());
+            assert!(tomb.canonical.is_empty(), "tombstone holds no payload");
+            assert!(tomb.payload.is_empty());
+            assert!(tomb.dispatch.as_ref().unwrap().submitted);
+            // The allocator resumes: the next binding is seq 4, never a
+            // re-issue of a seq the device may still hold.
+            let d = submit(
+                &mut store,
+                501,
+                &durable("dddddddddddddddddddddddddddddddd", 1),
+                0,
+            );
+            match store.prepare_dispatch(d, lease, dispatcher).unwrap() {
+                PrepareOutcome::Prepared(att) => assert_eq!(att.dispatch_seq, 4),
+                other => panic!("expected prepared, got {other:?}"),
+            }
+        }
+    }
+
+    /// A vetoed mutation must leave the record untouched on every
+    /// non-durable path too — same rule as the durable rollback.
+    #[test]
+    fn update_veto_leaves_record_untouched() {
+        let db = TestDb::new("veto");
+        let mut store = db.open();
+        store.open_epoch((501, 1), 0).unwrap();
+        let d = submit(
+            &mut store,
+            501,
+            &durable("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1),
+            0,
+        );
+        let r = submit(
+            &mut store,
+            501,
+            &ram("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
+            0,
+        );
+        for seq in [d, r] {
+            assert_eq!(
+                store.update_operation(seq, &mut |o| {
+                    o.dispatch_state = DispatchState::Indeterminate;
+                    o.terminal_ms = Some(7);
+                    false
+                }),
+                Ok(false)
+            );
+            let op = store.get_by_seq(seq).unwrap().unwrap();
+            assert_eq!(op.dispatch_state, DispatchState::HostQueued);
+            assert_eq!(op.terminal_ms, None);
+        }
+    }
+
+    /// Single-writer: a second daemon opening the same file fails fast
+    /// instead of racing recovery, overlays and the rate budget.
+    #[test]
+    fn second_opener_is_refused() {
+        let db = TestDb::new("singlewriter");
+        let store = db.open();
+        let err = SqliteOperationStore::open(&db.path).unwrap_err();
+        assert!(err.message.contains("STORE_RECOVERY_REQUIRED"), "{err}");
+        drop(store);
+        // Locks release with the holder's connection.
+        let _again = db.open();
+    }
+
+    /// The byte cap gates only new records: identity (Replay/Conflict)
+    /// resolves first, matching the memory provider's ordering.
+    #[test]
+    fn byte_cap_gates_new_records_not_dedup() {
+        let db = TestDb::new("byteorder");
+        let mut store = db.open();
+        store.open_epoch((501, 1), 0).unwrap();
+        let req = durable("00112233445566778899aabbccddeeff", 1);
+        assert_eq!(submit(&mut store, 501, &req, 0), 1);
+        // Push the measured footprint past the cap with a stray -journal
+        // sidecar: unused in WAL mode but counted like -wal/-shm.
+        let mut sidecar = db.path.as_os_str().to_os_string();
+        sidecar.push("-journal");
+        std::fs::write(&sidecar, vec![0u8; STORE_BYTES_CAP as usize + 1]).unwrap();
+        // Identity resolves before quota: the replay is still answered.
+        match store.submit(501, &req, 1) {
+            SubmitOutcome::Replay { seq } => assert_eq!(seq, 1),
+            other => panic!("expected replay, got {}", outcome_name(&other)),
+        }
+        // New keys refuse under exhaustion.
+        assert!(matches!(
+            store.submit(501, &durable("ffffffffffffffffffffffffffffffff", 1), 1),
+            SubmitOutcome::NoCapacity
+        ));
+        let _ = std::fs::remove_file(&sidecar);
+    }
+
+    /// Fresh stores are created owner-only — payloads live in the file.
+    #[cfg(unix)]
+    #[test]
+    fn fresh_store_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let db = TestDb::new("perms");
+        let _store = db.open();
+        let mode = std::fs::metadata(&db.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

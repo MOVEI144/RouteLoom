@@ -106,6 +106,15 @@ impl Acl {
                 let uid: u32 = uid_key.parse().map_err(|_| {
                     format!("ACL: principal key \"{uid_key}\" is not a decimal uid")
                 })?;
+                // Non-canonical spellings ("+501", "0501") parse to the
+                // same uid yet are distinct JSON keys — grants would merge
+                // silently. Only the canonical decimal form may name a
+                // principal.
+                if uid_key.as_str() != uid.to_string() {
+                    return Err(format!(
+                        "ACL: principal key \"{uid_key}\" is not canonical decimal"
+                    ));
+                }
                 let grants = acl.grants.entry(uid).or_default();
                 let Json::Object(fields) = principal else {
                     return Err(format!("ACL: principal \"{uid_key}\" must be an object"));
@@ -229,6 +238,20 @@ mod tests {
         ] {
             assert!(Acl::parse(doc).is_err(), "should reject: {doc}");
         }
+    }
+
+    #[test]
+    fn principal_keys_must_be_canonical_decimal() {
+        // "+501"/"0501" parse to 501 but are distinct JSON keys — merging
+        // them into the same principal would silently combine grants.
+        for key in ["+501", "0501", " 501", "501 "] {
+            let doc =
+                format!("{{\"principals\":{{\"{key}\":{{\"networks\":{{\"*\":[\"SEND\"]}}}}}}}}");
+            assert!(Acl::parse(&doc).is_err(), "should reject: {key}");
+        }
+        // The canonical spelling still loads.
+        let doc = "{\"principals\":{\"501\":{\"networks\":{\"*\":[\"SEND\"]}}}}";
+        assert!(Acl::parse(doc).unwrap().permit(501, 9, PERM_SEND));
     }
 
     #[test]

@@ -21,6 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -1078,6 +1079,16 @@ fn receive_ingest(
         );
         return;
     }
+    // Reserved node ids can never appear on the wire (01 §6): an adapter
+    // minting origin 0/u64::MAX is dropped + noted like the other guards.
+    if canonical::is_reserved_node_id(origin) {
+        push_event(
+            state,
+            ms,
+            "\"kind\":\"rx_drop\",\"reason\":\"origin_reserved\"".to_string(),
+        );
+        return;
+    }
     let outcome = state
         .receive_log
         .lock()
@@ -1656,11 +1667,46 @@ fn serve_client(
                     .expect("device session poisoned")
                     .phase
                     == SessionPhase::Active;
+                // Legacy mode is still gated by the same contract as
+                // messages.submit: the USB host authority is never granted
+                // unconditionally to every local client
+                // (05-production-security.md). The peer's OS uid must hold
+                // SEND on the session's own network — an unknown
+                // credential or an absent session network denies.
+                let session_network = state
+                    .session
+                    .lock()
+                    .expect("session poisoned")
+                    .network;
+                let send_uid = match (peer_uid, session_network) {
+                    (Some(uid), Some(network))
+                        if state.acl.permit(uid, network, acl::PERM_SEND) =>
+                    {
+                        Some(uid)
+                    }
+                    _ => None,
+                };
                 match (destination, payload) {
+                    _ if send_uid.is_none() => {
+                        "{\"accepted\":false,\"error\":\"authorization failed\"}".into()
+                    }
                     _ if !authenticated => {
                         "{\"accepted\":false,\"error\":\"session not authenticated\"}".into()
                     }
                     (Ok(destination), Ok(payload)) if payload.len() <= 128 => {
+                        if canonical::is_reserved_node_id(destination) {
+                            "{\"accepted\":false,\"error\":\"reserved destination node id\"}".into()
+                        } else if let Err(deny) = state
+                            .rate_limiter
+                            .lock()
+                            .expect("rate limiter poisoned")
+                            .admit(send_uid.expect("authorized above"), now_ms())
+                        {
+                            format!(
+                                "{{\"accepted\":false,\"error\":\"rate limited ({} scope, retry in {} ms)\"}}",
+                                deny.scope, deny.retry_after_ms
+                            )
+                        } else {
                         // Body: idempotency_key(8) || destination(8) ||
                         // payload. The key is a daemon-unique identity the
                         // device may persist across sessions; the CLI does
@@ -1712,6 +1758,7 @@ fn serve_client(
                                 );
                                 "{\"accepted\":false,\"error\":\"adapter unavailable or queue full\"}".into()
                             }
+                        }
                         }
                     }
                     (Ok(_), Ok(_)) => {
@@ -1788,6 +1835,75 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     })
 }
 
+/// Bind the control socket and tighten its file mode before any client
+/// can connect: 0600 restricts IPC to the owning uid on Linux (macOS
+/// ignores unix-socket file perms on connect() — the mode still
+/// documents intent). A world-writable parent outside the system temp
+/// dir warns but does not fail: dev environments bind there legitimately.
+fn bind_api_listener(socket_path: &Path) -> io::Result<UnixListener> {
+    let listener = UnixListener::bind(socket_path)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    if let Some(parent) = socket_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        let world_writable = std::fs::metadata(parent)
+            .map(|m| m.permissions().mode() & 0o002 != 0)
+            .unwrap_or(false);
+        if world_writable {
+            let canonical_parent = parent.canonicalize().ok();
+            let is_temp = [
+                env::temp_dir(),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/var/tmp"),
+            ]
+            .iter()
+            .any(|d| {
+                d == parent
+                    || (canonical_parent.is_some()
+                        && d.canonicalize().ok().as_ref() == canonical_parent.as_ref())
+            });
+            if !is_temp {
+                eprintln!(
+                    "warning: socket directory {} is world-writable; another local user could replace the socket file — prefer a private directory",
+                    parent.display()
+                );
+            }
+        }
+    }
+    Ok(listener)
+}
+
+/// Restores the global and per-principal connection counts when a client
+/// thread exits — normally or by panic (unwinding runs Drop). Without it
+/// a panicking handler would leak a slot forever: MAX_CLIENTS panics
+/// would permanently refuse every new client. Zeroed per-principal
+/// entries are removed so the map cannot accumulate dead principals.
+struct ClientGuard {
+    active: Arc<AtomicUsize>,
+    principals: Arc<Mutex<HashMap<Option<u32>, usize>>>,
+    uid: Option<u32>,
+}
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::Relaxed);
+        // Poison-tolerant: a panic elsewhere that poisoned this mutex must
+        // not turn the decrement into a second panic during unwind.
+        let mut counts = self
+            .principals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let emptied = match counts.get_mut(&self.uid) {
+            Some(entry) => {
+                *entry = entry.saturating_sub(1);
+                *entry == 0
+            }
+            None => false,
+        };
+        if emptied {
+            counts.remove(&self.uid);
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args().map_err(io::Error::other)?;
     let socket_path = args.socket;
@@ -1819,6 +1935,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             eprintln!("operation store: memory (RAM_ONLY only; pass --op-store for durability)");
+            // The store lineage IS the dispatcher identity on the wire.
+            // A memory store mints a fresh lineage at every start, so a
+            // daemon restart moves the dispatch lane and the device
+            // answers LaneMismatch until the gateway reboots. Dispatch
+            // is deliberately not blocked — RAM_ONLY operations are
+            // best-effort — but the restart semantics are documented
+            // loudly here and in capabilities (storage_durable:false).
+            eprintln!(
+                "warning: memory operation store — a daemon restart requires a gateway reboot for dispatch (the device rejects the new lane with LaneMismatch); pass --op-store for a durable lane"
+            );
             StoreBackend::Memory(MemoryOperationStore::new(mint_id128()))
         }
     };
@@ -1881,7 +2007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         });
     }
-    let listener = UnixListener::bind(&socket_path)?;
+    let listener = bind_api_listener(&socket_path)?;
     let session =
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64 ^ u64::from(process::id());
     let next_request = Arc::new(AtomicU64::new(1));
@@ -1925,6 +2051,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let clients = Arc::clone(&active_clients);
                 let client_counts = Arc::clone(&principal_clients);
                 thread::spawn(move || {
+                    // RAII: the counts are restored even when serve_client
+                    // unwinds — a panic must never leak a connection slot.
+                    let _guard = ClientGuard {
+                        active: clients,
+                        principals: client_counts,
+                        uid: peer_uid,
+                    };
                     let _ = serve_client(
                         stream,
                         client_state,
@@ -1935,11 +2068,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         client_session,
                         peer_uid,
                     );
-                    clients.fetch_sub(1, Ordering::Relaxed);
-                    let mut counts = client_counts.lock().expect("client counts poisoned");
-                    if let Some(entry) = counts.get_mut(&peer_uid) {
-                        *entry = entry.saturating_sub(1);
-                    }
                 });
             }
             Err(error) => eprintln!("accept failed: {error}"),
@@ -2173,7 +2301,7 @@ mod tests {
         }
         // Admit one RELIABLE operation on network 1 into the memory store.
         let now = now_ms();
-        let seq = {
+        let (seq, op_hash) = {
             let payload = vec![0x2a, 0x55];
             let canonical = canonical::canonical_bytes(
                 1,
@@ -2186,6 +2314,7 @@ mod tests {
                 canonical::HOP_DEFAULT,
                 &payload,
             );
+            let hash = canonical::sha256(&canonical);
             let request = canonical::SendRequest {
                 network: 1,
                 epoch: 1,
@@ -2198,13 +2327,13 @@ mod tests {
                 storage: canonical::STORAGE_RAM,
                 hop_limit: canonical::HOP_DEFAULT,
                 payload,
-                hash: canonical::sha256(&canonical),
+                hash,
                 canonical,
             };
             let mut store = state.operation_store.lock().unwrap();
             store.open_epoch((501, 1), now).unwrap();
             match store.submit(501, &request, now) {
-                send_store::SubmitOutcome::Accepted { seq } => seq,
+                send_store::SubmitOutcome::Accepted { seq } => (seq, hash),
                 _ => panic!("submit failed"),
             }
         };
@@ -2272,7 +2401,9 @@ mod tests {
         }
 
         // A Sent receipt posted by the read thread promotes the record to
-        // GATEWAY_ACCEPTED on the next pass.
+        // GATEWAY_ACCEPTED on the next pass. The device echoes the bound
+        // canonical hash — a divergent echo would park the record
+        // Indeterminate instead.
         state.dispatch_inbox.post(
             submit_request,
             encode_receipt(&Receipt {
@@ -2281,7 +2412,7 @@ mod tests {
                 state: SlotState::Sent,
                 lease: BootLease::derive(7, 0x0abc),
                 dispatch_seq: 1,
-                hash: [0; 32],
+                hash: op_hash,
                 msg_session: 5,
                 msg_seq: 1,
                 msg_valid: true,
@@ -2505,14 +2636,15 @@ mod tests {
 
     /// Spin `serve_client` on a socketpair and exchange request/response
     /// lines. `peer_uid` is injected the same way the accept loop injects
-    /// the OS credential.
-    fn spawn_client(
+    /// the OS credential. Returns the outbound receiver so tests can keep
+    /// the writer queue alive (dropping it makes try_send fail).
+    fn spawn_client_with(
         state: Arc<State>,
         peer_uid: Option<u32>,
-    ) -> (BufReader<UnixStream>, UnixStream) {
+        session: Arc<Mutex<DeviceSession>>,
+    ) -> (BufReader<UnixStream>, UnixStream, mpsc::Receiver<Outbound>) {
         let (client, server) = UnixStream::pair().expect("socketpair");
-        let (tx, _rx) = mpsc::sync_channel(1);
-        let session = Arc::new(Mutex::new(DeviceSession::new()));
+        let (tx, rx) = mpsc::sync_channel(4);
         thread::spawn(move || {
             let _ = serve_client(
                 server,
@@ -2526,6 +2658,15 @@ mod tests {
             );
         });
         let reader = BufReader::new(client.try_clone().expect("clone"));
+        (reader, client, rx)
+    }
+
+    fn spawn_client(
+        state: Arc<State>,
+        peer_uid: Option<u32>,
+    ) -> (BufReader<UnixStream>, UnixStream) {
+        let (reader, client, _rx) =
+            spawn_client_with(state, peer_uid, Arc::new(Mutex::new(DeviceSession::new())));
         (reader, client)
     }
 
@@ -2787,6 +2928,180 @@ mod tests {
         assert_eq!(client.events.len(), 3);
         assert_eq!(client.authority.state, "unknown");
         assert_eq!(client.adapter.node, Some(42));
+    }
+
+    /// P0: the legacy SEND verb is gated by the same contract as
+    /// messages.submit — the peer's OS uid must hold SEND on the
+    /// session's own network (05-production-security.md: USB host
+    /// authority is never granted to every local client). Denials keep
+    /// the {"accepted":false,...} shape legacy clients parse.
+    #[test]
+    fn legacy_send_requires_send_grant_and_session_network() {
+        let acl = Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\"]}},\"7\":{\"networks\":{\"0000000000000002\":[\"SEND\"]}}}}",
+        )
+        .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        // Session reports network 1: uid 501's grant scopes to it and the
+        // request reaches the session-state check.
+        state.session.lock().unwrap().network = Some(1);
+        let (mut reader, mut writer, _rx) = spawn_client_with(
+            Arc::clone(&state),
+            Some(501),
+            Arc::new(Mutex::new(DeviceSession::new())),
+        );
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("\"accepted\":false"), "{response}");
+        assert!(response.contains("session not authenticated"), "{response}");
+        drop(writer);
+        // A uid with no grant on this network and an unidentified peer
+        // are denied before any session state is consulted.
+        for uid in [Some(7), None] {
+            let (mut reader, mut writer, _rx) = spawn_client_with(
+                Arc::clone(&state),
+                uid,
+                Arc::new(Mutex::new(DeviceSession::new())),
+            );
+            let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+            assert!(response.contains("\"accepted\":false"), "{response}");
+            assert!(response.contains("authorization failed"), "{response}");
+            drop(writer);
+        }
+        // Network scope follows the session: on network 2 the grant map
+        // flips — uid 7 reaches the session check, uid 501 is denied.
+        state.session.lock().unwrap().network = Some(2);
+        let (mut reader, mut writer, _rx) = spawn_client_with(
+            Arc::clone(&state),
+            Some(7),
+            Arc::new(Mutex::new(DeviceSession::new())),
+        );
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("session not authenticated"), "{response}");
+        drop(writer);
+        let (mut reader, mut writer, _rx) = spawn_client_with(
+            Arc::clone(&state),
+            Some(501),
+            Arc::new(Mutex::new(DeviceSession::new())),
+        );
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("authorization failed"), "{response}");
+    }
+
+    /// With a grant and an authenticated device session the verb queues —
+    /// but reserved destinations (0/u64::MAX, the canonical.rs rule) and
+    /// an exhausted admission budget still refuse, in the same shape.
+    #[test]
+    fn legacy_send_accepts_granted_and_rejects_reserved_and_limits() {
+        let acl = Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\"]}}}}",
+        )
+        .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        state.session.lock().unwrap().network = Some(1);
+        let mut device = DeviceSession::new();
+        complete_handshake(&mut device);
+        let (mut reader, mut writer, rx) =
+            spawn_client_with(Arc::clone(&state), Some(501), Arc::new(Mutex::new(device)));
+        // Reserved node ids are refused with the same rule canonical.rs
+        // applies — never queued for the writer to discover.
+        for bad in ["SEND 0 00ff", "SEND 18446744073709551615 00ff"] {
+            let response = exchange(&mut reader, &mut writer, bad);
+            assert!(response.contains("\"accepted\":false"), "{response}");
+            assert!(response.contains("reserved"), "{response}");
+        }
+        // A normal send queues a sealed DataToMesh for the writer.
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("\"accepted\":true"), "{response}");
+        assert!(response.contains("\"request\":"), "{response}");
+        assert!(matches!(rx.try_recv(), Ok(Outbound::Seal(_))));
+        // The shared admission budget binds the legacy verb too.
+        {
+            let mut limiter = state.rate_limiter.lock().unwrap();
+            let now = now_ms();
+            while limiter.admit(501, now).is_ok() {}
+        }
+        let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(response.contains("\"accepted\":false"), "{response}");
+        assert!(response.contains("rate limited"), "{response}");
+    }
+
+    /// The control socket file mode is tightened to 0600 before any
+    /// accept — restricting IPC to the owning uid where the OS honors
+    /// socket perms (Linux), and documenting intent elsewhere.
+    #[test]
+    fn api_listener_mode_is_owner_only() {
+        let dir = env::temp_dir().join(format!("routeloom-sock-test-{}", process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let sock = dir.join("api.sock");
+        let listener = bind_api_listener(&sock).expect("bind");
+        let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "socket mode {mode:o}");
+        drop(listener);
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// The RAII connection guard restores the global and per-principal
+    /// counts even when the client handler panics — a panic must not
+    /// leak a slot toward MAX_CLIENTS. A zeroed per-principal entry is
+    /// removed rather than left in the map.
+    #[test]
+    fn client_guard_restores_counts_on_panic() {
+        let active = Arc::new(AtomicUsize::new(1));
+        let principals: Arc<Mutex<HashMap<Option<u32>, usize>>> =
+            Arc::new(Mutex::new(HashMap::from([(Some(501_u32), 1)])));
+        let outcome = std::panic::catch_unwind({
+            let active = Arc::clone(&active);
+            let principals = Arc::clone(&principals);
+            move || {
+                let _guard = ClientGuard {
+                    active,
+                    principals,
+                    uid: Some(501),
+                };
+                panic!("simulated client handler panic");
+            }
+        });
+        assert!(outcome.is_err());
+        assert_eq!(active.load(Ordering::Relaxed), 0);
+        assert!(!principals.lock().unwrap().contains_key(&Some(501)));
+    }
+
+    /// Reserved origins (0/u64::MAX) can never appear on the wire: the
+    /// adapter minting one is dropped with an rx_drop diagnostic, and
+    /// nothing reaches the receive log.
+    #[test]
+    fn receive_ingest_drops_reserved_origin() {
+        let state = State::default();
+        {
+            let mut session = state.session.lock().unwrap();
+            session.network = Some(1);
+            session.node = Some(2);
+        }
+        for origin in [0_u64, u64::MAX] {
+            let mut body = Vec::new();
+            body.extend_from_slice(&origin.to_be_bytes());
+            body.extend_from_slice(&5_u32.to_be_bytes());
+            body.extend_from_slice(&900_u64.to_be_bytes());
+            body.extend_from_slice(b"x");
+            record_frame(
+                &state,
+                &frame(FrameKind::DataFromMesh, 0, 0, body.clone()),
+                &body,
+                now_ms(),
+            );
+        }
+        let json = events_json(&state);
+        assert!(json.contains("\"kind\":\"rx_drop\""), "{json}");
+        assert!(json.contains("\"reason\":\"origin_reserved\""), "{json}");
+        let mut log = state.receive_log.lock().unwrap();
+        assert_eq!(log.bounds(1, now_ms()), (1, 0, 0, 0));
     }
 
     #[test]
