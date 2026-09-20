@@ -1,0 +1,10 @@
+{
+  "client_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+  "codec": "control_challenge_query",
+  "config_namespace": 32769,
+  "encoded_hex": "0101800100040000000102030405060708090a0b0c0d0e0f",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_challenge_query_appns",
+  "schema": 4
+}

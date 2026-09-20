@@ -1,0 +1,11 @@
+{
+  "codec": "service_submit",
+  "encoded_hex": "0103020031313131313131313131313131313131000000000000000900000000",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "gateway_boot": 9,
+  "name": "service_submit_empty",
+  "payload_hex": "",
+  "scope": 2,
+  "token_hex": "31313131313131313131313131313131"
+}

@@ -1,0 +1,12 @@
+{
+  "codec": "scope_binding",
+  "discover_digest_hex": "c5c79e799483a13a0bc85df11ae4e001b62170fed0262eadf94da9be9057ddd9",
+  "encoded_hex": "01000000070101c5c79e799483a13a0bc85df11ae4e001b62170fed0262eadf94da9be9057ddd9309e9be74284f0fff1911ad8d958b1c2f94bea7b833da5a3102844326d1695be",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "generation": 7,
+  "name": "scope_binding",
+  "offer_digest_hex": "309e9be74284f0fff1911ad8d958b1c2f94bea7b833da5a3102844326d1695be",
+  "scope_class": 1,
+  "scoped": 1
+}

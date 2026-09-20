@@ -1,0 +1,8 @@
+{
+  "codec": "scope_discover",
+  "encoded_hex": "02010100000000076c4a8a95e7617a2ae3792c9d617bc6",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "discover_v2_wrong_size",
+  "note": "23 bytes is not the v2 body"
+}

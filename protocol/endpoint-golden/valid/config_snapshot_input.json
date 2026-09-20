@@ -1,0 +1,10 @@
+{
+  "codec": "config_snapshot_input",
+  "config_namespace": 1,
+  "encoded_hex": "526f7574654c6f6f6d2f636f6e6669672d736e617073686f742f76310000010001000102000102000301000101",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "config_snapshot_input",
+  "schema": 1,
+  "snapshot_hex": "000102000102000301000101"
+}

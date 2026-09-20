@@ -139,7 +139,23 @@ def run(root: Path) -> dict:
         else:
             issues.append('accepted invalid gateway '+row['id'])
     check(rejected==4,'four invalid gateway examples')
+    # Shared codec vectors (protocol/endpoint-golden) must exist and pin the
+    # design example encodings — codec contract only, not runtime evidence.
+    gv=root/'protocol'/'endpoint-golden'
     cf=json.loads((d/'config-example.json').read_text())
+    try:
+        valid=[json.loads(p.read_text()) for p in (gv/'valid').glob('*.json')]
+        invalid=[json.loads(p.read_text()) for p in (gv/'invalid').glob('*.json')]
+        check(len(valid)>=15 and len(invalid)>=15, 'endpoint-golden vector coverage')
+        codecs={v.get('codec') for v in valid}
+        check({'scope_discover','scope_offer','service_query','service_descriptor','service_submit','service_outcome','control_challenge','control_status','config_command'}<=codecs, 'endpoint-golden codec coverage')
+        by_hex={v.get('encoded_hex'):v.get('codec') for v in valid}
+        check(all(row['encoded_hex'] in by_hex and by_hex[row['encoded_hex']]=='service_submit' for row in ex['gateway_submits']), 'design submit examples pinned')
+        check(cf['canonical_hex'] in by_hex and by_hex[cf['canonical_hex']]=='config_command', 'config example pinned')
+        check({v.get('encoded_hex') for v in invalid}.isdisjoint(by_hex), 'no vector is both valid and invalid')
+        check(dp[44:].hex() in by_hex and op[44:].hex() in by_hex, 'scope v2 bodies pinned')
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        issues.append('endpoint-golden: '+str(exc))
     raw=bytes.fromhex(cf['canonical_hex']);patch=bytes.fromhex(cf['patch_hex']);old=bytes.fromhex(cf['old_snapshot_hex'])
     check(raw[:4]==b'RCC1' and len(raw)==176+len(patch) and raw[176:]==patch and not cf['valid_signature'], 'config canonical example')
     check(struct.unpack_from('>QQ',raw,64)==(7,8) and struct.unpack_from('>IHH',raw,168)==(5000,len(patch),0), 'config revision/time/length')

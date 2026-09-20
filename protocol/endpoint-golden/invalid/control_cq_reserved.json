@@ -1,0 +1,8 @@
+{
+  "codec": "control_challenge_query",
+  "encoded_hex": "0101000100010001000102030405060708090a0b0c0d0e0f",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_cq_reserved",
+  "note": "reserved u16 must be zero"
+}

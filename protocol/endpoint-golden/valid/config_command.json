@@ -1,0 +1,23 @@
+{
+  "apply_within_ms": 5000,
+  "authority": 16,
+  "authority_generation": 2,
+  "authority_sequence": 13,
+  "base_snapshot_hash_hex": "8a8aa343e2d6426053178f5b49ee16418ab7abada3c52840c5d704c1eb4b0a28",
+  "challenge_nonce_hex": "66666666666666666666666666666666",
+  "codec": "config_command",
+  "config_namespace": 1,
+  "encoded_hex": "52434331010000010001000200000000000000010000000000000030000000000000001000000002000000000000000d55555555555555555555555555555555000000000000000700000000000000088a8aa343e2d6426053178f5b49ee16418ab7abada3c52840c5d704c1eb4b0a289d2894e3b936d737e48702fafc2d65686c64fd6d002d2d794cd51e09ec9fde3900000000000000096666666666666666666666666666666600001388000c0000000102000101000301000100",
+  "expect": "ok",
+  "expected_revision": 7,
+  "fields": "1:2:01,3:1:00",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "config_command",
+  "network": 1,
+  "next_revision": 8,
+  "next_snapshot_hash_hex": "9d2894e3b936d737e48702fafc2d65686c64fd6d002d2d794cd51e09ec9fde39",
+  "operation_id_hex": "55555555555555555555555555555555",
+  "schema": 1,
+  "target": 48,
+  "target_boot": 9
+}

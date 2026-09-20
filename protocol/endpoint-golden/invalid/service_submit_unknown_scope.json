@@ -1,0 +1,8 @@
+{
+  "codec": "service_submit",
+  "encoded_hex": "010303003131313131313131313131313131313100000000000000090001000061",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "service_submit_unknown_scope",
+  "note": "unknown scope"
+}

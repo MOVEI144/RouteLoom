@@ -1,0 +1,10 @@
+{
+  "codec": "service_query",
+  "encoded_hex": "01010100000102030405060708090a0b0c0d0e0f0000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "ok",
+  "expected_host_digest_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "service_query_sdk",
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f",
+  "scope": 1
+}

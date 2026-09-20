@@ -1,0 +1,8 @@
+{
+  "codec": "scope_offer",
+  "encoded_hex": "010000000000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "offer_v2_legacy_v1",
+  "note": "legacy 36B v1 offer body must not decode as v2"
+}

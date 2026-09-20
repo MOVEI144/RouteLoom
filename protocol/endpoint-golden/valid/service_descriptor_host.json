@@ -1,0 +1,15 @@
+{
+  "capabilities": 7,
+  "codec": "service_descriptor",
+  "echo_nonce_hex": "000102030405060708090a0b0c0d0e0f",
+  "encoded_hex": "01020200000102030405060708090a0b0c0d0e0f313131313131313131313131313131310000000000000009000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000007006000003a98",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "gateway_boot": 9,
+  "host_digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "lease_ms": 15000,
+  "max_payload": 96,
+  "name": "service_descriptor_host",
+  "scope": 2,
+  "token_hex": "31313131313131313131313131313131"
+}

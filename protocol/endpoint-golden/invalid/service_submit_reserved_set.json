@@ -1,0 +1,8 @@
+{
+  "codec": "service_submit",
+  "encoded_hex": "010302003131313131313131313131313131313100000000000000090001000178",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "service_submit_reserved_set",
+  "note": "reserved u16 must be zero"
+}

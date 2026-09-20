@@ -1,0 +1,8 @@
+{
+  "codec": "service_query",
+  "encoded_hex": "02010200000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "service_query_bad_version",
+  "note": "unsupported payload version"
+}

@@ -1,0 +1,9 @@
+{
+  "codec": "control_status_query",
+  "config_namespace": 1,
+  "encoded_hex": "0103000135353535353535353535353535353535",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_status_query",
+  "operation_id_hex": "35353535353535353535353535353535"
+}

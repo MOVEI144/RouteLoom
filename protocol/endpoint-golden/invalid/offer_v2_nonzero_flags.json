@@ -1,0 +1,8 @@
+{
+  "codec": "scope_offer",
+  "encoded_hex": "02010000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5101112131415161718191a1b1c1d1e1f0101000100000007685e20b006b97edba6015b3aac5ea207",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "offer_v2_nonzero_flags",
+  "note": "flags u16 must be zero"
+}

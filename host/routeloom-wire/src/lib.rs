@@ -45,6 +45,7 @@ use std::fmt;
 
 pub mod admission;
 pub mod autonomy;
+pub mod endpoint;
 pub mod test_security;
 
 pub const MAGIC: u16 = 0x524c;
