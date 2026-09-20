@@ -35,7 +35,7 @@
 | documented | 完了（本set） |
 | implemented（codec・portable core・Host配線・dev profile identity） | 完了・**EXPERIMENTAL** |
 | host/build tested | portable `ctest` 22件＋`cargo test --workspace`、firmware ON/OFF buildはCI |
-| hardware tested | **未実施**（#11/#18待ち） |
+| hardware tested | **単板USB/電源のみ実施**（2026-09-21、ESP32-C3 `94:a9:90:6a:ee:c4`、6.7節 — mesh/RF/HILは未実施で`hardware_tested`フラグはfalseのまま） |
 | qualified | **未実施** |
 
 `contracts.json`の`runtime_implemented=true`は「codec・portable実装・Host配線・dev profile identityが実コードとして存在しhostで試験済み」のみを意味する。`hardware_tested`・`qualified`・`signature_validation_tested`はfalseのまま。COSE/ES256の本番署名検証は未実装で、config permitは**dev HMAC profile**（domain分離された開発key、`config_dev.hpp`が「experimental・非production identity」と明示）。Discovery Scopeも**dev scope key**のまま。#10の正式Providerが来るまでproduction identityを名乗らない。Required-without-bindingは広告せず利用不可を返す実装（`AuthProfileUnavailable`）のまま。

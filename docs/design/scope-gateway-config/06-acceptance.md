@@ -53,6 +53,33 @@ Config：権限不足、global seqの他targetによる穴、同revisionの二�
 
 Scopeの異key100 responderは先にmodelで確認し、実機は保有台数で二scope近接試験を行う。100台の実RF資格は別。C3手動smokeの既存記録を消さず、追加試験は固定SHAとboard/antenna/power/configへ結び付ける。
 
-## 6.7 合否
+## 6.7 単板実機記録（2026-09-21、SHA `755ed53`系）
+
+保有1台のESP32-C3（MAC `94:a9:90:6a:ee:c4`、rev v0.4、USB-Serial/JTAG、4MB flash）に対し、CI artifact（`firmware-bridge_node-esp32c3-normal-off-endpoints_on`、`firmware-reference_node-esp32c3-normal-off-config_target_on`、同`deep_sleep-off-off`、いずれも`202ddf8`/`755ed53`ビルド）をesptoolでapp partition `0x10000`へ書込み実施。単板のためmesh/RF/2scope/3hop/遠隔Gateway配送は全て対象外であり、以下は**USB給電・single-hop USB経路のみ**の証拠であってRF/HIL証拠ではない。
+
+**実機で観測した挙動（pass）**
+
+- USB COBS session：hello_ack（node 1、network `0x524c0001`、capability `0x1f`）→auth_ok→credit_grant→`lease up`が実シリコンで完走。`endpoints_on`のcapability広告が実機で確認できた。
+- Gateway endpoint：`gateway.resolve`が実デバイス発行のregistration（`host_digest`=SHA256(session principal)、boot incarnation、`lease_ms`≈14s）を返した。`gateway-send`(HOST_RECEIVE_RAM)は`GATEWAY_ACCEPTED`→`HOST_RAM_RECEIVED`→`END_SDK_RECEIVED`のevidence連鎖で完走し、payloadはhost ReceiveLogへ`endpoint_kind=gateway_mirror`・`EXPERIMENTAL_DEV_PSK`表記で実格納された。
+- 正直な終端：peer不在のnode宛sendは実デバイスがmessage_keyを発行した上で`INDETERMINATE`（成功捏造なし）。事前cancelは`CANCELLED_BEFORE_DISPATCH`。同一key再提出は同一operation_idを返し`deadline_elapsed`を正直に報告。
+- Bounded資源：uid当たりactive上限8に到達した9件目がretryable `NO_CAPACITY`で拒否。8件のINDETERMINATE終端後に`device floor adopted`が4→9へ進み、PR #13のretire/floor採用が実機で退役を解放した。
+- Reset/boot lease：実リセットでboot incarnationが6→7へ進み旧sessionは破棄、再authと新leaseが張った。crash-loop firmware（deep_sleep版、stack bug中）でcounterが183まで進んだ事実は、boot incarnationがNVSに永続しfirmware跨ぎで単調であることの実証。
+- Config target起動：`config_target_on`が実NVS上で`NvsConfigStore` open→`ConfigJournal::initialize`→`ConfigTarget`登録を完走し`EXPERIMENTAL config target active`をlog出力（消去済みNVSでのclean init）。
+- Deep sleep cycle：`deep_sleep` profileがRTC marker書込み→実deep sleep（USB-Serial/JTAG detachをmacOS側で観測）→30s RTC wake→`power RUNNING -> RESUMING (WAKE_DEEP_SLEEP)`と分類→保存peer 0件のため正直に`ColdStart` outcome→次cycleへ推移。power imageのNVS往復が実睡眠を跨いで動いた。
+
+**実機で発見し修正した欠陥**
+
+- `reference_node`の全feature構成でboot-loopするstack protection faultを実機でのみ再現（CIはbuildのみで検出不能）。`config_target_on`は`ConfigJournal::initialize`→`decode_slot`が4KBスタック配列＋`parsed[2]`（≈4.4KB）＋`store_record`の8KBで>12KBを要求。`df32219`でmain stack 8KB化、`755ed53`でjournalの大物bufferをmember scratchへ.bss化して実機boot成功を確認。`deep_sleep`版も同根因（`PowerCoordinator`系のframe）で8KB bump後に治癒。
+
+**単板では未検証（引き続き`planned_not_run`）**
+
+S12（二scope近接RF）、G09（受理/receipt境界での電断）、G12の残部（PTY slow-consumer系）、I03の残部（複合枯渇）、I06（compile証拠のみ・実機起動とは別）、I07（4台3hop）、I08（docs配布物）— いずれも2台以上または別設置条件が必要。config challenge→permit→propose→applyのmesh配送もbridge+targetの2台構成待ち。
+
+**実機由来の観察（設計判断候補、レビューへ提出）**
+
+- `NO_CAPACITY`応答の`free_slots`はRECORD_CAP基準を報告するが、実際に枯渇したのはper-principal上限8 — `rate_limited`がscopeを名指しするのと同粒度で、どのboundが満杯か応答が名指しすべき。
+- 実リセット時にUSB-Serial/JTAG経路へ`InvalidMagic`を1件観測（再列挙中のgarbage）。`protocol_errors`に正直計上されsupervisorが自動復旧した — ノイズ混入を例外化せず数える挙動は正しい。
+
+## 6.8 合否
 
 安全性違反は一件でもfail。性能は既存のscope付き目標と投入負荷を測定前に固定し、成功標本だけで集計しない。未実施/失敗/対象外/blockedを区別。未知のRAM消費を0にせず、sizeofと内部heap低水位、Flash書込み回数・最大停止時間を測る。
