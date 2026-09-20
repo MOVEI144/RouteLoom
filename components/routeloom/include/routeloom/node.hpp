@@ -82,6 +82,28 @@ class AutonomyFrameSink {
   }
 };
 
+// Service=21 terminal endpoint (docs/design/scope-gateway-config/
+// 03-explicit-gateway.md): the GatewayDelivery component installs one to
+// receive end-verified Service payloads at this node and completion notices
+// for Service jobs it queued through send_service/resend_service. Service
+// traffic never enters the DATA path — no on_message, no END_RECEIPT, no
+// Delivery records; completion is the component's own evidence contract.
+class GatewayServiceSink {
+ public:
+  virtual ~GatewayServiceSink() = default;
+  // Terminal Service frame for this node: link + end verified, same-round
+  // duplicates already suppressed and the hop ACK already queued.
+  virtual void on_service_payload(NodeId peer, const wire::PlainFrame& frame,
+                                  MonotonicMs now_ms) noexcept = 0;
+  // First authenticated HOP_ACCEPT (hop_accepted=true) or terminal job
+  // failure (false + `reason`) for a send_service/resend_service job,
+  // correlated by the caller-supplied MessageId.
+  virtual void on_service_job_done(const MessageId& id, bool hop_accepted,
+                                   const char* reason, MonotonicMs now_ms) noexcept = 0;
+  // Monotonic tick from MeshNode::poll for the component's bounded retries.
+  virtual void poll(MonotonicMs now_ms) noexcept = 0;
+};
+
 // Pause contract (01-integration.md §3.3): narrower than blanket draining.
 // A PauseReason names WHY traffic is held; the mask selects WHICH traffic is
 // held so the control needed to coordinate a survey/cutover keeps flowing —
@@ -154,6 +176,31 @@ class MeshNode {
                         MonotonicMs now_ms) noexcept;
   // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
   void set_autonomy_sink(AutonomyFrameSink* sink) noexcept { autonomy_sink_ = sink; }
+  // Install/clear the Service=21 endpoint (GatewayDelivery wiring, nullptr
+  // disables). With no sink, inbound Service frames are still dedup'd/
+  // hop-ACKed/forwarded but terminate as SERVICE_NO_ENDPOINT — the origin's
+  // retries expire into an honest timeout, never a DATA-style success.
+  void set_gateway_sink(GatewayServiceSink* sink) noexcept { gateway_sink_ = sink; }
+  // Queue an end-protected Service=21 payload for `destination` with a
+  // bounded hop-accept exchange per hop. send_service allocates a fresh
+  // logical MessageId from the node's own sequence space (outcomes the
+  // gateway emits are likewise new MessageKeys); resend_service re-queues an
+  // existing id for the next E2E round. Completion is reported through the
+  // sink's on_service_job_done — never through DeliveryResult.
+  Status send_service(NodeId destination, ByteView payload, std::uint32_t lifetime_ms,
+                      MonotonicMs now_ms, MessageId& id) noexcept;
+  Status resend_service(const MessageId& id, NodeId destination, ByteView payload,
+                        std::uint8_t round, std::uint32_t lifetime_ms,
+                        MonotonicMs now_ms) noexcept;
+  // Priority-tagged variant for endpoint control traffic: the gateway
+  // component emits its outcomes (Descriptor/Receipt/Pending/Reject) as
+  // receipt-class Management traffic while Query/Submit stay Normal.
+  Status send_service(NodeId destination, ByteView payload, std::uint32_t lifetime_ms,
+                      Priority priority, MonotonicMs now_ms, MessageId& id) noexcept;
+  // Free TX-pool slots: the Service endpoint needs this to make the
+  // atomic admission reservation (pending + dedup + reply budget) the
+  // contract demands before accepting work (03 §3.4).
+  std::size_t tx_free_slots() const noexcept { return scheduler_.free_slots(); }
   void on_radio_tx_result(std::uint64_t token, bool success,
                           MonotonicMs now_ms) noexcept;
 
@@ -403,7 +450,8 @@ class MeshNode {
   };
 
   enum class JobForm : std::uint8_t { Plain, Forwarded };
-  enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit };
+  enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
+                                       GatewayService };
 
   struct AckKey {
     FrameType accepted_type{FrameType::Data};
@@ -632,6 +680,11 @@ class MeshNode {
   Status queue_seqno_request(NodeId peer, NodeId requester, NodeId destination,
                              RouteSequence requested_sequence, std::uint32_t request_id,
                              std::uint8_t ttl, MonotonicMs now_ms) noexcept;
+  // Shared enqueue for send_service/resend_service: a Plain Service job
+  // owned by the installed gateway sink, hop-accept required.
+  Status queue_service_job(const MessageId& id, NodeId destination, ByteView payload,
+                           std::uint8_t round, std::uint32_t lifetime_ms,
+                           Priority priority, MonotonicMs now_ms) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
@@ -670,6 +723,11 @@ class MeshNode {
                          MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
+  // Service=21: transit forwards untouched (dedup + forward + hop ACK),
+  // terminal hands the end-verified payload to the gateway sink. Never
+  // enters the DATA path and never emits END_RECEIPT.
+  void handle_service(const wire::LinkOpenedFrame& frame, NodeId peer,
+                      MonotonicMs now_ms) noexcept;
   void handle_busy(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
@@ -707,6 +765,7 @@ class MeshNode {
   NodeObserver& observer_;
   RouteTable routes_{};
   AutonomyFrameSink* autonomy_sink_{nullptr};
+  GatewayServiceSink* gateway_sink_{nullptr};
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};
   FixedPool<Delivery, kDeliveryCapacity> deliveries_{};
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};

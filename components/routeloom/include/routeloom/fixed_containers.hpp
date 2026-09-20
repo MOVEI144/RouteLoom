@@ -136,6 +136,26 @@ class FixedPool {
 
   constexpr std::size_t capacity() const noexcept { return Capacity; }
 
+  // Stable slot index for compact cross-record links (e.g. a dedup record
+  // pointing at its pending slot with a u8 instead of an 8-byte pointer).
+  // Returns Capacity when the pointer is not a member of this pool.
+  std::size_t index_of(const T* item) const noexcept {
+    for (std::size_t i = 0; i < Capacity; ++i) {
+      if (&items_[i] == item) return i;
+    }
+    return Capacity;
+  }
+
+  T* at(std::size_t index) noexcept {
+    if (index >= Capacity || !used_[index]) return nullptr;
+    return &items_[index];
+  }
+
+  const T* at(std::size_t index) const noexcept {
+    if (index >= Capacity || !used_[index]) return nullptr;
+    return &items_[index];
+  }
+
  private:
   // Reconstruct instead of assigning T{} so the pool also supports entries
   // containing non-assignable RAII members (for example CounterLease).

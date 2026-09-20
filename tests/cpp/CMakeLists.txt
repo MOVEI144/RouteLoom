@@ -58,6 +58,12 @@ target_compile_definitions(routeloom_endpoint_tests PRIVATE
     ROUTELOOM_ENDPOINT_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/endpoint-golden")
 add_test(NAME routeloom_endpoint_tests COMMAND routeloom_endpoint_tests)
 
+add_executable(routeloom_gateway_tests test_gateway.cpp)
+target_link_libraries(routeloom_gateway_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_gateway_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_gateway_tests COMMAND routeloom_gateway_tests)
+
 add_executable(routeloom_discovery_tests test_discovery.cpp)
 target_link_libraries(routeloom_discovery_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_discovery_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

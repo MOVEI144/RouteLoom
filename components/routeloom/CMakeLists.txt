@@ -9,6 +9,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/discovery.cpp
   src/discovery_scope.cpp
   src/endpoint_wire.cpp
+  src/gateway.cpp
   src/migration.cpp
   src/migration_wire.cpp
   src/node.cpp
