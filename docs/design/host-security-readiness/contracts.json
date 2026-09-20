@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "design_version": "0.1-draft",
+  "status": "design_only_pending_review",
+  "issues": [7, 8, 9, 10, 11, 12],
+  "repository": "MOVEI144/RouteLoom",
+  "snapshots": {
+    "main": "31b3eb0ae7080d713e7acd7ee3b7f31b43423465",
+    "pr2": "cdcf0fe33b51854d4b62478e7fbc193cc8c386d8",
+    "pr6": "be21fbb41e8bb7fbf4de76e1f946436915dea741",
+    "pr2_state_at_read": "open_unmerged",
+    "pr6_state_at_read": "draft_open_unmerged",
+    "pr6_source_artifact_sha256": "53663469226ef68c7955417ac14004fd6e2b1f006a7b94426c854347cfc55654",
+    "pr6_sdk_run": 35476900403,
+    "pr6_sdk_conclusion": "failure"
+  },
+  "runtime_changed": false,
+  "implemented_by_this_pr": false,
+  "hardware_tested_by_this_pr": false,
+  "qualified_by_this_pr": false,
+  "review_gates": {"api_storage": "pending_review", "workload": "pending_review", "production_crypto": "pending_independent_review", "hil_equipment_and_thresholds": "pending_review"},
+  "ipc": {"prefix": "API1 ", "request_max_bytes": 8192, "response_max_bytes": 65536, "max_depth": 8, "max_connections": 32, "connections_per_principal": 4, "write_timeout_ms": 2000, "binary_encoding": "lowercase_hex", "principal_from_client_input": false},
+  "wire": {"header_bytes": 88, "normal_payload_max": 128, "aead_tag_bytes": 16, "tag_count": 2, "espnow_body_max": 250, "network_bits": 32, "app_result_type": 19, "canonical_send_fixed_bytes": 26, "usb_submit_fixed_bytes": 108, "rx_event_fixed_bytes": 47, "applied_result_fixed_bytes": 74, "applied_result_max_bytes": 48, "applied_request_lease_bytes": 16, "applied_request_user_max_bytes": 112},
+  "receive": {"mode": "cursor_poll", "retention_seconds": 300, "entries_per_network": 4096, "bytes_per_network": 2097152, "record_charge_bytes": 512, "max_networks": 4, "global_log_bytes": 8388608, "page_limit": 32, "cursor_max_decoded_bytes": 96, "dedup_seconds": 60, "durable_receive": false, "pc_service_destination": false, "daemon_restart_changes_cursor_epoch": true, "gap_is_explicit": true},
+  "send": {"ttl_default_ms": 5000, "ttl_max_ms": 30000, "ttl_min_ms": 1, "deadline_policy": "WALL_ELAPSED_VALIDITY", "storage_default": "HOST_DURABLE", "initial_priority": "NORMAL", "time_unknown_auto_dispatch": false, "same_key_changes_deadline": false, "provider_failover": false, "time_sample_max_age_ms": 5000, "clock_bound_ppm_design": 1000, "clock_quantization_ms": 1},
+  "capacity": {"host_rate_per_minute": 2, "burst": 16, "host_active": 32, "host_active_per_principal": 8, "host_records": 4096, "host_storage_bytes": 33554432, "host_record_reservation_bytes": 4096, "host_journal_budget_bytes": 8388608, "host_metadata_budget_bytes": 2097152, "host_reserve_bytes": 6291456, "retention_seconds": 86400, "admission_epoch_seconds": 3600, "max_unretired_epochs_per_scope": 32, "late_seconds": 30, "message_lifetime_seconds": 30, "gateway_records_per_lane": 32, "gateway_active": 8, "gateway_record_budget_bytes": 128, "gateway_retire_assumption_seconds": 60, "gateway_default_lanes": 1, "gateway_max_lanes": 4, "retire_floor_before_delete": true, "retire_only_contiguous_prefix": true, "lookup_extends_retention": false, "evict_protected": false, "new_boot_auto_resubmit": false, "storage_adapter": "local_sqlite", "measured_ram_bytes": null, "measured_disk_bytes": null},
+  "security": {"profile": "RLPSEC1_EDHOC_M0_S2_GCM128", "edhoc_method": 0, "edhoc_suite": 2, "message_4_required": true, "context_confirmation_required": true, "credential": "CCS_RPK_P256", "kid_bytes": 32, "application_aead": "AES_GCM_128_TAG_16", "application_nonce_bytes": 12, "exporter_key_label": 32768, "exporter_iv_label": 32769, "libedhoc_version": "v2.3.2", "libedhoc_commit": "c8857b62d66be3664d1694bbe4eea37c56c05d9e", "libedhoc_license": "MIT", "esp_idf_version": "v6.0.3", "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802", "mbedtls_submodule_commit": "ce3f3485a121c100f58f36d700cb35b060f6e866", "credential_max_bytes": 256, "grant_max_bytes": 256, "bootstrap_object_max_bytes": 1024, "authenticated_object_max_bytes": 2048, "handshake_max_global": 1, "new_expensive_auth_min_gap_ms": 2000, "scratch_budget_bytes": 49152, "live_context_max": 32, "context_record_budget_bytes": 256, "grant_validity_seconds": 86400, "grant_renew_after_seconds": 43200, "key_overlap_seconds": 60, "max_context_seconds": 86400, "max_packets_per_key": 4294967296, "dev_fallback": false, "production_implemented_evidence": null, "hardware_qualified": false},
+  "applied": {"enabled_by_this_pr": false, "inflight": 4, "result_cache_records": 32, "record_budget_bytes": 256, "result_max_bytes": 48, "result_retention_min_seconds": 60, "late_result_seconds": 30, "result_attempts_including_initial": 3, "query_attempts_max": 2, "provider_failover_default": false, "auto_redispatch_after_unknown": false, "ack_of_result_ack": false, "ram_mode_requires_execution_boot_lease": true, "c_api_implemented_by_this_pr": false},
+  "hil": {"new_cases_executed": 0, "existing_c3_manual_smoke": "preserved_as_reported_not_reexecuted", "direct_samples_per_direction_size": 10000, "direct_messages_per_second": 1, "direct_deadline_ms": 5000, "multihop_samples_per_direction_size": 3000, "host_24h_operations": 2880, "host_72h_operations": 8640, "legacy_latency_target_ms": {"1hop_p95": 20, "5hop_p95": 100, "10hop_p95": 250, "warm_resume_p95": 500}, "deadline_success_target": 0.999, "new_measurements": null}
+}

@@ -1,0 +1,39 @@
+name: Host readiness design checks
+on:
+  push:
+    branches: [main, design/host-security-readiness-issues-7-12]
+    paths:
+      - docs/design/host-security-readiness/**
+      - tools/check_host_readiness_design.py
+      - .github/workflows/host-readiness-design.yml
+  pull_request:
+    paths:
+      - docs/design/host-security-readiness/**
+      - tools/check_host_readiness_design.py
+      - .github/workflows/host-readiness-design.yml
+permissions:
+  contents: read
+jobs:
+  design-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Validate draft contracts, examples and negative mutations
+        run: python3 tools/check_host_readiness_design.py --report host-readiness-design-check.json
+      - name: Record exact checkout
+        if: always()
+        run: git rev-parse HEAD > design-checkout-sha.txt
+      - name: Archive design evidence, not runtime or RF qualification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: host-readiness-design-evidence
+          path: |
+            host-readiness-design-check.json
+            design-checkout-sha.txt
+            docs/design/host-security-readiness/
+          retention-days: 30
