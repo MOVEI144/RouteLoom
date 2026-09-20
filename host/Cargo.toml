@@ -5,6 +5,8 @@ members = [
     "routeloom-host",
     "routeloomctl",
     "routeloom-tui",
+    "routeloom-json",
+    "routeloom-peercred",
 ]
 resolver = "2"
 

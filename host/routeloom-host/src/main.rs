@@ -1,12 +1,18 @@
 #[cfg(not(unix))]
 compile_error!("routeloom-host v0.1 currently requires a Unix platform");
 
+mod acl;
+mod api1;
+mod receive_log;
+
+use acl::Acl;
+use receive_log::{Ingress, ReceiveLog};
 use routeloom_protocol::dev_session::{
     derive_session_proof, open_body, seal_body, SessionProof, Transcript, DIRECTION_DEVICE_TO_HOST,
     DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, PROTECTED_BODY_OVERHEAD,
 };
 use routeloom_protocol::{encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -26,7 +32,13 @@ const MAX_NODES: usize = 256;
 const MAX_OUTBOUND: usize = 64;
 /// Concurrent control-socket clients. Each connection owns a thread and a
 /// BufReader — bound the count so a connection storm cannot exhaust fd/memory.
-const MAX_CLIENTS: usize = 16;
+/// contracts.json `ipc.max_connections` = 32; a per-principal cap of 4
+/// (`connections_per_principal`) is enforced separately at accept time.
+const MAX_CLIENTS: usize = 32;
+const MAX_CLIENTS_PER_PRINCIPAL: usize = 4;
+/// Bound on a single socket write: a slow client must not pin the shared
+/// receive log or hang a client thread forever (ipc.write_timeout_ms).
+const CLIENT_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2_000);
 
 /// Decoded (pre-COBS) frame overhead charged against cumulative credit:
 /// header + CRC, matching the device-side accounting.
@@ -602,6 +614,14 @@ struct State {
     event_seq: AtomicU64,
     events_dropped: AtomicU64,
     autonomy: Mutex<AutonomyState>,
+    /// Bounded receive log for the API1 `messages.read` surface (Issue #7):
+    /// retains actual DataFromMesh payloads as HOST_RAM_RETAINED evidence.
+    /// Separate from `events` — the diagnostic ring never carried bodies.
+    receive_log: Mutex<ReceiveLog>,
+    /// IPC principal→permission table loaded from --api-acl-file; empty ACL
+    /// = default deny for privileged API1 methods while diagnostics verbs
+    /// keep working.
+    acl: Acl,
 }
 
 fn now_ms() -> u64 {
@@ -801,6 +821,11 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 if let Some(origin) = origin {
                     touch_node(state, origin, "peer", ms);
                 }
+                // Feed the bounded receive log: the payload only reaches
+                // here after the session layer verified the body, and the
+                // network/gateway attribution comes from the authenticated
+                // session — never from the payload itself.
+                receive_ingest(state, origin, msg_session, msg_seq, &body[20..], ms);
                 push_event(
                     state,
                     ms,
@@ -979,6 +1004,63 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 format!("\"kind\":\"frame\",\"frame_kind\":{}", frame.kind as u8),
             );
         }
+    }
+}
+
+/// Copy one verified mesh payload into the bounded receive log. Network and
+/// gateway attribution come from the authenticated session, never from the
+/// payload. Non-stored outcomes (conflict, caps, oversize) surface as bounded
+/// diagnostic events — the log is never silently rewritten.
+fn receive_ingest(
+    state: &State,
+    origin: Option<u64>,
+    msg_session: Option<u32>,
+    msg_seq: Option<u64>,
+    payload: &[u8],
+    ms: u64,
+) {
+    let (Some(origin), Some(msg_session), Some(msg_seq)) = (origin, msg_session, msg_seq) else {
+        return;
+    };
+    let (network, gateway) = {
+        let session = state.session.lock().expect("session poisoned");
+        (session.network, session.node)
+    };
+    let Some(network) = network else {
+        push_event(
+            state,
+            ms,
+            "\"kind\":\"rx_drop\",\"reason\":\"network_unknown\"".to_string(),
+        );
+        return;
+    };
+    // Wire v1 networks are 1..=0xffffffff; anything else from the adapter
+    // cannot be attributed to a valid network, so it is dropped + noted.
+    if !(1..=0xffff_ffff).contains(&network) {
+        push_event(
+            state,
+            ms,
+            "\"kind\":\"rx_drop\",\"reason\":\"network_out_of_range\"".to_string(),
+        );
+        return;
+    }
+    let outcome = state
+        .receive_log
+        .lock()
+        .expect("receive log poisoned")
+        .ingest(
+            Ingress {
+                network,
+                gateway,
+                origin,
+                msg_session,
+                msg_seq,
+                payload: payload.to_vec(),
+            },
+            ms,
+        );
+    if let Some(fields) = api1::ingest_diagnostic(&outcome) {
+        push_event(state, ms, fields);
     }
 }
 
@@ -1455,6 +1537,9 @@ fn adapter_supervisor(
     }
 }
 
+// The argument list mirrors the accept loop's per-connection handoff;
+// boxing it into a struct would only rename the same state.
+#[allow(clippy::too_many_arguments)]
 fn serve_client(
     stream: UnixStream,
     state: Arc<State>,
@@ -1463,21 +1548,60 @@ fn serve_client(
     next_request: Arc<AtomicU64>,
     next_idem_key: Arc<AtomicU64>,
     device_session: Arc<Mutex<DeviceSession>>,
+    peer_uid: Option<u32>,
 ) -> io::Result<()> {
+    // A slow socket must never pin the shared log or hang this thread.
+    let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
     let reader_stream = stream.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
     let mut writer = stream;
-    let mut line = String::new();
+    // Raw byte line buffer: IPC requests are validated as UTF-8 *after*
+    // framing so an invalid API1 line gets an explicit error, not a dropped
+    // connection.
+    let mut raw: Vec<u8> = Vec::with_capacity(256);
     loop {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        raw.clear();
+        // Bounded line read — `take` caps consumption at the IPC request
+        // budget (8192B, newline included). A line that fills the cap
+        // without a terminating newline is oversize: it cannot be resynced
+        // safely, so it gets one error response and the connection closes.
+        let read = reader
+            .by_ref()
+            .take(api1::REQUEST_MAX_BYTES as u64)
+            .read_until(b'\n', &mut raw)?;
+        if read == 0 {
             return Ok(());
         }
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.is_empty() {
+        if raw.len() == api1::REQUEST_MAX_BYTES && !raw.ends_with(b"\n") {
+            let _ = writer.write_all(
+                b"{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"detail\":{\"message\":\"request exceeds 8192 bytes\"},\"retryable\":false}}\n",
+            );
+            let _ = writer.flush();
+            return Ok(());
+        }
+        while matches!(raw.last(), Some(b'\n' | b'\r')) {
+            raw.pop();
+        }
+        if raw.is_empty() {
             continue;
         }
-        let response = match fields[0].to_ascii_uppercase().as_str() {
+        let response = if raw.starts_with(b"API1 ") {
+            let ctx = api1::ApiContext {
+                uid: peer_uid,
+                acl: &state.acl,
+                receive_log: &state.receive_log,
+                now_ms: now_ms(),
+            };
+            api1::handle(&raw[b"API1 ".len()..], &ctx)
+        } else {
+            match std::str::from_utf8(&raw) {
+                Err(_) => "{\"error\":\"request line is not valid UTF-8\"}".to_string(),
+                Ok(line) => {
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    if fields.is_empty() {
+                        continue;
+                    }
+                    match fields[0].to_ascii_uppercase().as_str() {
             "STATUS" | "DIAGNOSTICS" => status_json(&state),
             "ADAPTER" => adapter_json(&state),
             "NODES" => nodes_json(&state),
@@ -1561,7 +1685,10 @@ fn serve_client(
                 }
             }
             "QUIT" => return Ok(()),
-            _ => "{\"error\":\"commands: STATUS, DIAGNOSTICS, SEND <node> <hex>, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, AUTONOMY, QUIT\"}".into(),
+            _ => "{\"error\":\"commands: STATUS, DIAGNOSTICS, SEND <node> <hex>, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, AUTONOMY, QUIT — or API1 <json>\"}".into(),
+                    }
+                }
+            }
         };
         writer.write_all(response.as_bytes())?;
         writer.write_all(b"\n")?;
@@ -1569,9 +1696,10 @@ fn serve_client(
     }
 }
 
-fn parse_args() -> Result<(PathBuf, Option<PathBuf>), String> {
+fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
     let mut socket = PathBuf::from("/tmp/routeloom.sock");
     let mut device = None;
+    let mut acl_file = None;
     let mut args = env::args().skip(1);
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1581,18 +1709,55 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>), String> {
                     args.next().ok_or("--device requires a path")?,
                 ))
             }
+            // uid → per-network permission map for privileged API1 methods;
+            // see acl.rs for the file format. Absent = default deny.
+            "--api-acl-file" => {
+                acl_file = Some(PathBuf::from(
+                    args.next().ok_or("--api-acl-file requires a path")?,
+                ))
+            }
             "--help" | "-h" => {
-                println!("routeloom-host [--socket PATH] [--device TTY]");
+                println!("routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH]");
                 process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    Ok((socket, device))
+    Ok((socket, device, acl_file))
+}
+
+/// Fresh 128-bit receive-log epoch minted once per daemon start
+/// (contracts.json: daemon_restart_changes_cursor_epoch). Falls back to
+/// time^pid if /dev/urandom is unavailable — still non-repeating.
+fn mint_epoch() -> [u8; 16] {
+    let mut epoch = [0_u8; 16];
+    if File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut epoch))
+        .is_err()
+    {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            ^ u128::from(process::id());
+        epoch = seed.to_be_bytes();
+    }
+    epoch
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (socket_path, device) = parse_args().map_err(io::Error::other)?;
+    let (socket_path, device, acl_path) = parse_args().map_err(io::Error::other)?;
+    // A malformed ACL file is a hard startup error — silently degrading to
+    // default-deny could surprise operators who believe grants are active.
+    let acl = match &acl_path {
+        Some(path) => {
+            Acl::load(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?
+        }
+        None => Acl::empty(),
+    };
+    if acl_path.is_some() {
+        eprintln!("api acl loaded: revision {}", acl.revision());
+    }
     // Only remove a leftover unix socket — never unlink a regular file or a
     // path a second instance happens to point at.
     if let Ok(meta) = std::fs::metadata(&socket_path) {
@@ -1609,6 +1774,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let state = Arc::new(State {
         device: device.clone(),
+        receive_log: Mutex::new(ReceiveLog::new(mint_epoch())),
+        acl,
         ..State::default()
     });
     // Bounded outbound queue: SEND is back-pressured at MAX_OUTBOUND pending
@@ -1646,6 +1813,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let next_idem_key = Arc::new(AtomicU64::new(session.rotate_left(32) | 1));
     println!("RouteLoom host listening on {}", socket_path.display());
     let active_clients = Arc::new(AtomicUsize::new(0));
+    // Per-principal connection cap (ipc.connections_per_principal = 4). The
+    // principal is the socket peer's OS uid — `None` (credential lookup
+    // unsupported/failed) shares one bucket, so unidentified principals are
+    // bounded rather than trusted.
+    let principal_clients: Arc<Mutex<HashMap<Option<u32>, usize>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     for incoming in listener.incoming() {
         match incoming {
             Ok(stream) => {
@@ -1657,12 +1830,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     drop(stream);
                     continue;
                 }
+                let peer_uid = routeloom_peercred::peer_uid(&stream).ok();
+                {
+                    let mut counts = principal_clients.lock().expect("client counts poisoned");
+                    let entry = counts.entry(peer_uid).or_insert(0);
+                    if *entry >= MAX_CLIENTS_PER_PRINCIPAL {
+                        drop(counts);
+                        active_clients.fetch_sub(1, Ordering::Relaxed);
+                        drop(stream);
+                        continue;
+                    }
+                    *entry += 1;
+                }
                 let client_state = Arc::clone(&state);
                 let client_outbound = outbound_tx.clone();
                 let client_requests = Arc::clone(&next_request);
                 let client_idem_keys = Arc::clone(&next_idem_key);
                 let client_session = Arc::clone(&device_session);
                 let clients = Arc::clone(&active_clients);
+                let client_counts = Arc::clone(&principal_clients);
                 thread::spawn(move || {
                     let _ = serve_client(
                         stream,
@@ -1672,8 +1858,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         client_requests,
                         client_idem_keys,
                         client_session,
+                        peer_uid,
                     );
                     clients.fetch_sub(1, Ordering::Relaxed);
+                    let mut counts = client_counts.lock().expect("client counts poisoned");
+                    if let Some(entry) = counts.get_mut(&peer_uid) {
+                        *entry = entry.saturating_sub(1);
+                    }
                 });
             }
             Err(error) => eprintln!("accept failed: {error}"),
@@ -2088,6 +2279,149 @@ mod tests {
         );
         let json = events_json(&state);
         assert!(json.contains("\"malformed\":true"));
+    }
+
+    /// Spin `serve_client` on a socketpair and exchange request/response
+    /// lines. `peer_uid` is injected the same way the accept loop injects
+    /// the OS credential.
+    fn spawn_client(
+        state: Arc<State>,
+        peer_uid: Option<u32>,
+    ) -> (BufReader<UnixStream>, UnixStream) {
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let session = Arc::new(Mutex::new(DeviceSession::new()));
+        thread::spawn(move || {
+            let _ = serve_client(
+                server,
+                state,
+                tx,
+                0,
+                Arc::new(AtomicU64::new(1)),
+                Arc::new(AtomicU64::new(1)),
+                session,
+                peer_uid,
+            );
+        });
+        let reader = BufReader::new(client.try_clone().expect("clone"));
+        (reader, client)
+    }
+
+    fn exchange(reader: &mut BufReader<UnixStream>, writer: &mut UnixStream, line: &str) -> String {
+        writer.write_all(line.as_bytes()).expect("write");
+        writer.write_all(b"\n").expect("write");
+        let mut response = String::new();
+        reader.read_line(&mut response).expect("read");
+        response
+    }
+
+    #[test]
+    fn api1_and_legacy_share_one_socket() {
+        let state = Arc::new(State::default());
+        let (mut reader, mut writer) = spawn_client(Arc::clone(&state), Some(501));
+        // Legacy verb works unchanged.
+        let status = exchange(&mut reader, &mut writer, "STATUS");
+        assert!(status.contains("\"connected\""), "{status}");
+        // API1 on the same connection.
+        let caps = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"t1\",\"method\":\"capabilities.get\"}",
+        );
+        assert!(caps.contains("\"ok\":true"), "{caps}");
+        assert!(caps.contains("\"messages.read\":true"), "{caps}");
+        // Default deny: no ACL → messages.read fails AuthorizationFailed,
+        // while the legacy diagnostic verbs above still worked.
+        let denied = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"t2\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+        );
+        assert!(denied.contains("AuthorizationFailed"), "{denied}");
+        // Bad framing is an explicit error, not a dropped connection.
+        let bad = exchange(&mut reader, &mut writer, "API1 {\"v\":1,,\"x\":2}");
+        assert!(bad.contains("INVALID_REQUEST"), "{bad}");
+        let still_alive = exchange(&mut reader, &mut writer, "STATUS");
+        assert!(still_alive.contains("\"connected\""));
+    }
+
+    #[test]
+    fn api1_oversize_line_gets_error_then_close() {
+        let state = Arc::new(State::default());
+        let (mut reader, mut writer) = spawn_client(Arc::clone(&state), None);
+        let huge = format!("API1 {{\"v\":1,\"pad\":\"{}\"}}", "x".repeat(9000));
+        // The server reads at most 8192 bytes, answers once, and closes —
+        // the tail of this oversized line can race the close (EPIPE).
+        match writer
+            .write_all(huge.as_bytes())
+            .and_then(|()| writer.write_all(b"\n"))
+        {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero
+                ) => {}
+            Err(error) => panic!("write: {error}"),
+        }
+        let mut response = String::new();
+        reader.read_line(&mut response).expect("read");
+        assert!(response.contains("INVALID_REQUEST"), "{response}");
+        // Connection closed after the unrecoverable framing error.
+        let mut eof = String::new();
+        assert_eq!(reader.read_line(&mut eof).expect("read"), 0);
+    }
+
+    #[test]
+    fn api1_reads_back_ingested_payloads() {
+        let acl = Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"READ_PAYLOAD\"]}}}}",
+        )
+        .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        {
+            let mut session = state.session.lock().expect("session");
+            session.network = Some(1);
+            session.node = Some(2);
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&77_u64.to_be_bytes());
+        body.extend_from_slice(&5_u32.to_be_bytes());
+        body.extend_from_slice(&900_u64.to_be_bytes());
+        body.extend_from_slice(&[0x00, 0xff]); // non-UTF-8, includes NUL
+        record_frame(
+            &state,
+            &frame(FrameKind::DataFromMesh, 0, 0, body.clone()),
+            &body,
+            // The API1 read path timestamps with the real clock, so the
+            // ingest must too — a synthetic ms would expire before the read.
+            now_ms(),
+        );
+        let (mut reader, mut writer) = spawn_client(Arc::clone(&state), Some(501));
+        let response = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"rx\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(response.contains("\"payload_hex\":\"00ff\""), "{response}");
+        assert!(response.contains("\"payload_len\":2"), "{response}");
+        assert!(
+            response.contains("\"origin\":\"000000000000004d\""),
+            "{response}"
+        );
+        // A different uid is denied even though the record exists (RX06).
+        drop(writer);
+        let (mut reader2, mut writer2) = spawn_client(Arc::clone(&state), Some(7));
+        let denied = exchange(
+            &mut reader2,
+            &mut writer2,
+            "API1 {\"v\":1,\"request_id\":\"rx2\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+        );
+        assert!(denied.contains("AuthorizationFailed"), "{denied}");
     }
 
     /// Schema drift guard: every JSON document this daemon emits must parse

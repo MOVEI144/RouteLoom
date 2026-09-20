@@ -124,9 +124,19 @@ dependencies = [
 name = "routeloom-host"
 version = "0.1.0"
 dependencies = [
+ "routeloom-json",
+ "routeloom-peercred",
  "routeloom-protocol",
  "routeloom-tui",
 ]
+
+[[package]]
+name = "routeloom-json"
+version = "0.1.0"
+
+[[package]]
+name = "routeloom-peercred"
+version = "0.1.0"
 
 [[package]]
 name = "routeloom-protocol"
@@ -137,6 +147,7 @@ name = "routeloom-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "routeloom-json",
 ]
 
 [[package]]

@@ -1,12 +1,8 @@
 [package]
-name = "routeloom-tui"
+name = "routeloom-json"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-
-[dependencies]
-crossterm = "=0.28.1"
-routeloom-json = { path = "../routeloom-json" }
 
 [lints]
 workspace = true

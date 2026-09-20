@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 routeloom-protocol = { path = "../routeloom-protocol" }
+routeloom-json = { path = "../routeloom-json" }
+routeloom-peercred = { path = "../routeloom-peercred" }
 
 [dev-dependencies]
 # The TUI's parser validates that the JSON this daemon emits stays compatible
