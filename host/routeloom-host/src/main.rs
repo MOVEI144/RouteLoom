@@ -3,7 +3,9 @@ compile_error!("routeloom-host v0.1 currently requires a Unix platform");
 
 mod acl;
 mod api1;
+mod canonical;
 mod receive_log;
+mod send_store;
 
 use acl::Acl;
 use receive_log::{Ingress, ReceiveLog};
@@ -12,6 +14,7 @@ use routeloom_protocol::dev_session::{
     DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, PROTECTED_BODY_OVERHEAD,
 };
 use routeloom_protocol::{encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder};
+use send_store::MemoryOperationStore;
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::{File, OpenOptions};
@@ -622,6 +625,10 @@ struct State {
     /// = default deny for privileged API1 methods while diagnostics verbs
     /// keep working.
     acl: Acl,
+    /// Bounded in-memory operation table for `messages.submit` and the
+    /// operation queries (TX-I1). RAM only: no durability, no epoch
+    /// rotation — CAP-I1 swaps this seam for the SQLite store.
+    operation_store: Mutex<MemoryOperationStore>,
 }
 
 fn now_ms() -> u64 {
@@ -1590,6 +1597,7 @@ fn serve_client(
                 uid: peer_uid,
                 acl: &state.acl,
                 receive_log: &state.receive_log,
+                operation_store: &state.operation_store,
                 now_ms: now_ms(),
             };
             api1::handle(&raw[b"API1 ".len()..], &ctx)
@@ -1726,10 +1734,11 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
     Ok((socket, device, acl_file))
 }
 
-/// Fresh 128-bit receive-log epoch minted once per daemon start
-/// (contracts.json: daemon_restart_changes_cursor_epoch). Falls back to
-/// time^pid if /dev/urandom is unavailable — still non-repeating.
-fn mint_epoch() -> [u8; 16] {
+/// Fresh 128-bit id minted once per daemon start: the receive-log epoch
+/// (contracts.json: daemon_restart_changes_cursor_epoch) and the operation
+/// store lineage each get one. Falls back to time^pid if /dev/urandom is
+/// unavailable — still non-repeating.
+fn mint_id128() -> [u8; 16] {
     let mut epoch = [0_u8; 16];
     if File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut epoch))
@@ -1774,7 +1783,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let state = Arc::new(State {
         device: device.clone(),
-        receive_log: Mutex::new(ReceiveLog::new(mint_epoch())),
+        receive_log: Mutex::new(ReceiveLog::new(mint_id128())),
+        operation_store: Mutex::new(MemoryOperationStore::new(mint_id128())),
         acl,
         ..State::default()
     });
@@ -2422,6 +2432,83 @@ mod tests {
             "API1 {\"v\":1,\"request_id\":\"rx2\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
         );
         assert!(denied.contains("AuthorizationFailed"), "{denied}");
+    }
+
+    #[test]
+    fn api1_submit_and_query_roundtrip() {
+        let acl = Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}}}}",
+        )
+        .unwrap();
+        let state = Arc::new(State {
+            acl,
+            ..State::default()
+        });
+        let (mut reader, mut writer) = spawn_client(Arc::clone(&state), Some(501));
+        let epoch = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+        );
+        assert!(epoch.contains("\"ok\":true"), "{epoch}");
+        assert!(
+            epoch.contains("\"admission_epoch\":\"0000000000000001\""),
+            "{epoch}"
+        );
+        let submit = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}}",
+        );
+        assert!(submit.contains("\"ok\":true"), "{submit}");
+        assert!(
+            submit.contains("\"dispatch_state\":\"HOST_QUEUED\""),
+            "{submit}"
+        );
+        let id = {
+            let parsed = routeloom_json::parse(&submit).unwrap();
+            parsed
+                .get("result")
+                .unwrap()
+                .get("operation_id")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        // Same key+payload replays the same id over the socket too.
+        let replay = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"s2\",\"method\":\"messages.submit\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{\"storage\":\"RAM_ONLY\"}}}",
+        );
+        assert!(
+            replay.contains(&format!("\"operation_id\":\"{id}\"")),
+            "{replay}"
+        );
+        let by_id = exchange(
+            &mut reader,
+            &mut writer,
+            &format!(
+                "API1 {{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+            ),
+        );
+        assert!(by_id.contains("\"ok\":true"), "{by_id}");
+        assert!(by_id.contains("\"payload_len\":2"), "{by_id}");
+        assert!(!by_id.contains("payload_hex"), "{by_id}");
+        let by_key = exchange(
+            &mut reader,
+            &mut writer,
+            "API1 {\"v\":1,\"request_id\":\"q2\",\"method\":\"operations.get_by_key\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\"}}",
+        );
+        assert!(
+            by_key.contains(&format!("\"operation_id\":\"{id}\"")),
+            "{by_key}"
+        );
+        // Legacy SEND still speaks its own verb on the same socket (explicit
+        // legacy mode — never auto-converted to the new API).
+        let legacy = exchange(&mut reader, &mut writer, "SEND 3 00ff");
+        assert!(legacy.contains("\"accepted\":false"), "{legacy}");
     }
 
     /// Schema drift guard: every JSON document this daemon emits must parse

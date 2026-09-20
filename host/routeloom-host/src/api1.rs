@@ -17,16 +17,19 @@
 //! (1–64 ASCII chars), `method`, optional `params` object — any other field
 //! is rejected, never ignored.
 //!
-//! Methods in this phase: `capabilities.get` (unauthenticated) and
-//! `messages.read` (requires the principal's READ_PAYLOAD grant on the
-//! network — the principal comes from the socket peer's OS credential, never
-//! from request JSON). The other methods named in 01-contracts.md are later
-//! phases and answer UNSUPPORTED_METHOD rather than silently degrading.
+//! Methods in this phase: `capabilities.get` (unauthenticated),
+//! `messages.read` (READ_PAYLOAD), `operations.open_epoch` + `messages.submit`
+//! (SEND) and `operations.get`/`operations.get_by_key` (READ_OPERATION). The
+//! principal always comes from the socket peer's OS credential, never from
+//! request JSON. `operations.cancel` is a later phase (TX-I2) and answers
+//! UNSUPPORTED_METHOD rather than silently degrading.
 
 use crate::acl::{self, Acl};
+use crate::canonical;
 use crate::receive_log::{
     Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
 };
+use crate::send_store::{OpIdentity, OperationStore, StoredOperation, SubmitOutcome};
 use routeloom_json::{escape_string, Json};
 use std::sync::Mutex;
 
@@ -38,10 +41,13 @@ pub const REQUEST_ID_MAX: usize = 64;
 
 /// Per-request inputs the dispatch layer needs. `uid` is the socket peer's
 /// OS credential (None when the platform cannot supply one — default deny).
-pub struct ApiContext<'a> {
+/// The store is generic over `OperationStore` so CAP-I1 can swap the memory
+/// table for SQLite without touching this dispatch layer.
+pub struct ApiContext<'a, S: OperationStore> {
     pub uid: Option<u32>,
     pub acl: &'a Acl,
     pub receive_log: &'a Mutex<ReceiveLog>,
+    pub operation_store: &'a Mutex<S>,
     pub now_ms: u64,
 }
 
@@ -65,17 +71,11 @@ impl ApiError {
 
 /// Methods named by 01-contracts.md but implemented in later phases — they
 /// must not fall through to UNKNOWN_METHOD and pretend they don't exist.
-const LATER_PHASE_METHODS: &[&str] = &[
-    "operations.open_epoch",
-    "messages.submit",
-    "operations.get",
-    "operations.get_by_key",
-    "operations.cancel",
-];
+const LATER_PHASE_METHODS: &[&str] = &["operations.cancel"];
 
 /// Handle one API1 request body (the bytes after `API1 `, newline stripped).
 /// Always returns a complete JSON response document (no trailing newline).
-pub fn handle(body: &[u8], ctx: &ApiContext<'_>) -> String {
+pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String {
     if body.len() >= REQUEST_MAX_BYTES {
         return error_response(
             None,
@@ -151,6 +151,10 @@ pub fn handle(body: &[u8], ctx: &ApiContext<'_>) -> String {
     let response = match method {
         "capabilities.get" => capabilities(ctx).map(|r| (request_id, r)),
         "messages.read" => messages_read(&params, ctx).map(|r| (request_id, r)),
+        "operations.open_epoch" => operations_open_epoch(&params, ctx).map(|r| (request_id, r)),
+        "messages.submit" => messages_submit(&params, ctx).map(|r| (request_id, r)),
+        "operations.get" => operations_get(&params, ctx).map(|r| (request_id, r)),
+        "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (request_id, r)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -209,23 +213,35 @@ fn bound_response(response: String) -> String {
 /// Honest capability advertisement: only what this phase implements.
 /// `rx_events_v1`/`ingress_loss_observable` are false on the old firmware —
 /// gateway-side drops before DataFromMesh cannot be proven or counted here.
-fn capabilities(ctx: &ApiContext<'_>) -> Result<String, ApiError> {
+/// The send side accepts RAM_ONLY storage only (`storage_durable:false`,
+/// CAP-I1) and queues without USB dispatch (`host_queued_only`, CAP-I2).
+fn capabilities<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<String, ApiError> {
     let epoch_known = ctx.uid.is_some();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":false,\"operations.open_epoch\":false,\"operations.get\":false,\"operations.get_by_key\":false,\"operations.cancel\":false}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":false}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":false,\"dispatch\":\"host_queued_only\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
         crate::receive_log::RECORD_CHARGE_BYTES,
         crate::receive_log::MAX_NETWORKS,
         crate::receive_log::GLOBAL_LOG_BYTES,
+        crate::canonical::TTL_MIN_MS,
+        crate::canonical::TTL_MAX_MS,
+        crate::canonical::TTL_DEFAULT_MS,
+        crate::canonical::HOP_MIN,
+        crate::canonical::HOP_MAX,
+        crate::canonical::HOP_DEFAULT,
+        crate::receive_log::NORMAL_PAYLOAD_MAX,
         ctx.acl.revision(),
     ))
 }
 
 /// `messages.read` params: `{network, from:"earliest"|"latest" XOR cursor,
 /// limit}`. Result per 02-receive-api.md §2.
-fn messages_read(params: &Json, ctx: &ApiContext<'_>) -> Result<String, ApiError> {
+fn messages_read<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
         if !matches!(key.as_str(), "network" | "from" | "cursor" | "limit") {
             return Err(ApiError::simple(
@@ -416,6 +432,265 @@ fn read_result(outcome: ReadOutcome, cursor_at: &dyn Fn(u64) -> String) -> Strin
     )
 }
 
+/// `operations.open_epoch` params: `{network}`. Binds the caller's
+/// admission epoch for that network (SEND grant required), opening epoch 1
+/// on first use. Epoch rotation/close is CAP-I1 — this phase never closes.
+fn operations_open_epoch<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "network" {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(network_text) = params.get("network").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_PARAMS",
+            "network must be a 16-hex string",
+        ));
+    };
+    let network =
+        acl::parse_network_hex(network_text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?;
+    let Some(uid) = ctx
+        .uid
+        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+    else {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks SEND on this network",
+        ));
+    };
+    let mut store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    match store.open_epoch((uid, network)) {
+        Ok((epoch, _)) => Ok(format!(
+            "\"network\":\"{network:016x}\",\"admission_epoch\":\"{epoch:016x}\""
+        )),
+        Err(()) => Err(no_capacity()),
+    }
+    .map(|fields| format!("{{{fields}}}"))
+}
+
+/// `messages.submit`: validate, gate capabilities, authorize SEND, then
+/// admit into the operation table. Replays return the same OperationId;
+/// same key with different bytes is a CONFLICT, never an overwrite.
+fn messages_submit<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    let req = canonical::parse_submit(params)
+        .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
+    canonical::admission_check(&req, canonical::wants_persist_sleep(params))
+        .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
+    let Some(uid) = ctx
+        .uid
+        .filter(|uid| ctx.acl.permit(*uid, req.network, acl::PERM_SEND))
+    else {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks SEND on this network",
+        ));
+    };
+    let mut store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    match store.submit(uid, &req, ctx.now_ms) {
+        SubmitOutcome::Accepted { seq } | SubmitOutcome::Replay { seq } => {
+            Ok(submit_result(&store.lineage(), seq))
+        }
+        SubmitOutcome::Conflict { existing_seq } => Err(ApiError {
+            code: "CONFLICT",
+            extra_fields: format!(
+                ",\"message\":\"same idempotency key with different request bytes\",\"existing_operation_id\":\"{}\"",
+                canonical::format_operation_id(&store.lineage(), existing_seq),
+            ),
+            retryable: false,
+        }),
+        SubmitOutcome::UnknownEpoch => Err(ApiError::simple(
+            "INVALID_PARAMS",
+            "admission_epoch is not open for this principal and network; call operations.open_epoch",
+        )),
+        SubmitOutcome::NoCapacity => Err(no_capacity()),
+    }
+}
+
+fn no_capacity() -> ApiError {
+    ApiError {
+        code: "NO_CAPACITY",
+        extra_fields:
+            ",\"message\":\"operation table is full\",\"free_slots\":0,\"reclaimable_at\":null"
+                .to_string(),
+        retryable: true,
+    }
+}
+
+/// Accept response per 03-send-api.md §1, with honest TX-I1 evidence: RAM
+/// retention only — durable retention arrives with CAP-I1.
+fn submit_result(lineage: &[u8; 16], seq: u64) -> String {
+    format!(
+        "{{\"operation_id\":\"{}\",\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"HOST_RAM_RETAINED\"],\"message_key\":null}}",
+        canonical::format_operation_id(lineage, seq)
+    )
+}
+
+/// `operations.get` params: `{operation_id}`. Any principal holding
+/// READ_OPERATION on the operation's network may query it.
+fn operations_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "operation_id" {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(text) = params.get("operation_id").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_PARAMS",
+            "operation_id must be a string",
+        ));
+    };
+    let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
+        return Err(ApiError::simple(
+            "INVALID_PARAMS",
+            "operation_id must be <32-hex lineage>:<16-hex sequence>",
+        ));
+    };
+    let store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    let record = match store.get_by_seq(seq) {
+        Some(record) if store.lineage() == lineage => record,
+        _ => {
+            return Err(ApiError::simple(
+                "NOT_FOUND",
+                "no operation with that id in this store",
+            ))
+        }
+    };
+    if !ctx.uid.is_some_and(|uid| {
+        ctx.acl
+            .permit(uid, record.network, acl::PERM_READ_OPERATION)
+    }) {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks READ_OPERATION on this network",
+        ));
+    }
+    Ok(op_status(&record, &store.lineage(), ctx.now_ms))
+}
+
+/// `operations.get_by_key` params: `{network, admission_epoch, key}`.
+/// Resolves under the caller's own identity — one principal's key never
+/// reads another's record.
+fn operations_get_by_key<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "network" | "admission_epoch" | "key") {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let network = match params.get("network").and_then(Json::as_str) {
+        Some(text) => {
+            acl::parse_network_hex(text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?
+        }
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                "network must be a 16-hex string",
+            ))
+        }
+    };
+    let epoch = match params.get("admission_epoch").and_then(Json::as_str) {
+        Some(text) => {
+            canonical::parse_epoch_hex(text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?
+        }
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                "admission_epoch must be a 16-hex string",
+            ))
+        }
+    };
+    let key = match params.get("key").and_then(Json::as_str) {
+        Some(text) => {
+            canonical::parse_key_hex(text).map_err(|e| ApiError::simple("INVALID_PARAMS", &e))?
+        }
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                "key must be a 32-hex string",
+            ))
+        }
+    };
+    let Some(uid) = ctx
+        .uid
+        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_READ_OPERATION))
+    else {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks READ_OPERATION on this network",
+        ));
+    };
+    let store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    let identity = OpIdentity {
+        uid,
+        network,
+        epoch,
+        key,
+    };
+    let Some(record) = store.get_by_key(&identity) else {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no operation with that key in this store",
+        ));
+    };
+    Ok(op_status(&record, &store.lineage(), ctx.now_ms))
+}
+
+/// Query response. Payload bytes are never included: READ_OPERATION must
+/// not leak what only READ_PAYLOAD may read — length and hash suffice.
+/// `deadline_elapsed` is a read-only wall-clock observation; enforcement
+/// and state transitions belong to TX-I2.
+fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> String {
+    let elapsed = now_ms.saturating_sub(record.accepted_ms) >= u64::from(record.ttl_ms);
+    format!(
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"HOST_RAM_RETAINED\"],\"message_key\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":false,\"time_uncertain\":false}}}}",
+        canonical::format_operation_id(lineage, record.seq),
+        record.network,
+        record.epoch,
+        crate::receive_log::hex_lower(&record.key),
+        canonical::dest_kind_name(record.dest_kind),
+        record.dest,
+        record.payload.len(),
+        crate::receive_log::hex_lower(&record.hash),
+        canonical::delivery_name(record.delivery),
+        canonical::priority_name(record.priority),
+        record.ttl_ms,
+        canonical::storage_name(record.storage),
+        record.hop_limit,
+    )
+}
+
 /// Result of pushing one DataFromMesh payload into the log — surfaced as a
 /// bounded diagnostic event when it is not a plain store/dedup.
 pub fn ingest_diagnostic(outcome: &IngestOutcome) -> Option<String> {
@@ -440,6 +715,7 @@ const _: () = assert!(CURSOR_MAX_DECODED_BYTES >= 41);
 mod tests {
     use super::*;
     use crate::receive_log::Ingress;
+    use crate::send_store::MemoryOperationStore;
     use std::sync::Mutex;
 
     fn acl_with(uid: u32) -> Acl {
@@ -449,18 +725,76 @@ mod tests {
         .unwrap()
     }
 
-    fn ctx<'a>(
+    fn send_acl() -> Acl {
+        Acl::parse(
+            "{\"principals\":{\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}},\"7\":{\"networks\":{\"0000000000000002\":[\"SEND\",\"READ_OPERATION\"]}}}}",
+        )
+        .unwrap()
+    }
+
+    fn ctx<'a, S: OperationStore>(
         uid: Option<u32>,
         acl: &'a Acl,
         log: &'a Mutex<ReceiveLog>,
+        store: &'a Mutex<S>,
         now: u64,
-    ) -> ApiContext<'a> {
+    ) -> ApiContext<'a, S> {
         ApiContext {
             uid,
             acl,
             receive_log: log,
+            operation_store: store,
             now_ms: now,
         }
+    }
+
+    fn test_env() -> (Acl, Mutex<ReceiveLog>, Mutex<MemoryOperationStore>) {
+        (
+            send_acl(),
+            Mutex::new(ReceiveLog::new([9; 16])),
+            Mutex::new(MemoryOperationStore::new([0xab; 16])),
+        )
+    }
+
+    /// Open the epoch for uid 501 on network 1; returns the epoch token.
+    fn open_test_epoch(
+        acl: &Acl,
+        log: &Mutex<ReceiveLog>,
+        store: &Mutex<MemoryOperationStore>,
+    ) -> String {
+        let c = ctx(Some(501), acl, log, store, 0);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let parsed = routeloom_json::parse(&response).unwrap();
+        parsed
+            .get("result")
+            .unwrap()
+            .get("admission_epoch")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn submit_line(key: &str, epoch: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
+        )
+    }
+
+    fn result_field(response: &str, field: &str) -> String {
+        let parsed = routeloom_json::parse(response).unwrap();
+        parsed
+            .get("result")
+            .unwrap()
+            .get(field)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 
     fn ingest(log: &Mutex<ReceiveLog>, network: u64, msg_seq: u64, payload: &[u8], ms: u64) {
@@ -481,7 +815,8 @@ mod tests {
     fn envelope_validation() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
-        let c = ctx(Some(501), &acl, &log, 0);
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let c = ctx(Some(501), &acl, &log, &store, 0);
         // Missing request_id / bad v / unknown field / dup key / non-object.
         for body in [
             "{\"v\":1,\"method\":\"capabilities.get\"}",
@@ -518,27 +853,35 @@ mod tests {
     fn capabilities_reports_honest_set() {
         let acl = Acl::empty();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
-        let c = ctx(None, &acl, &log, 0);
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let c = ctx(None, &acl, &log, &store, 0);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"c1\",\"method\":\"capabilities.get\"}",
             &c,
         );
         assert!(response.contains("\"ok\":true"));
         assert!(response.contains("\"messages.read\":true"));
-        assert!(response.contains("\"messages.submit\":false"));
+        assert!(response.contains("\"messages.submit\":true"));
+        assert!(response.contains("\"operations.open_epoch\":true"));
+        assert!(response.contains("\"operations.get\":true"));
+        assert!(response.contains("\"operations.get_by_key\":true"));
+        assert!(response.contains("\"operations.cancel\":false"));
         assert!(response.contains("\"rx_events_v1\":false"));
         assert!(response.contains("\"ingress_loss_observable\":false"));
         assert!(response.contains("\"durable_receive\":false"));
         assert!(response.contains("\"pc_service_destination\":false"));
+        assert!(response.contains("\"storage_durable\":false"));
+        assert!(response.contains("\"dispatch\":\"host_queued_only\""));
     }
 
     #[test]
     fn unsupported_and_unknown_methods() {
         let acl = Acl::empty();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
-        let c = ctx(None, &acl, &log, 0);
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let c = ctx(None, &acl, &log, &store, 0);
         let response = handle(
-            b"{\"v\":1,\"request_id\":\"u\",\"method\":\"messages.submit\",\"params\":{}}",
+            b"{\"v\":1,\"request_id\":\"u\",\"method\":\"operations.cancel\",\"params\":{}}",
             &c,
         );
         assert!(response.contains("UNSUPPORTED_METHOD"));
@@ -553,9 +896,10 @@ mod tests {
     fn messages_read_requires_acl_grant() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
         ingest(&log, 1, 1, b"hello", 100);
         // Authorized uid reads the payload.
-        let c = ctx(Some(501), &acl, &log, 200);
+        let c = ctx(Some(501), &acl, &log, &store, 200);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
             &c,
@@ -568,7 +912,7 @@ mod tests {
         // Unknown uid and ungranted uid are denied, even though legacy
         // diagnostic verbs keep working for them.
         for uid in [None, Some(7)] {
-            let c = ctx(uid, &acl, &log, 200);
+            let c = ctx(uid, &acl, &log, &store, 200);
             let response = handle(
                 b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
                 &c,
@@ -581,7 +925,8 @@ mod tests {
     fn messages_read_empty_is_normal() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
-        let c = ctx(Some(501), &acl, &log, 0);
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let c = ctx(Some(501), &acl, &log, &store, 0);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"latest\"}}",
             &c,
@@ -595,10 +940,11 @@ mod tests {
     fn cursor_flow_and_errors() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
         for i in 0..5_u64 {
             ingest(&log, 1, i, format!("m{i}").as_bytes(), 100);
         }
-        let c = ctx(Some(501), &acl, &log, 200);
+        let c = ctx(Some(501), &acl, &log, &store, 200);
         let first = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\",\"limit\":2}}",
             &c,
@@ -708,7 +1054,8 @@ mod tests {
     fn messages_read_param_validation() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
-        let c = ctx(Some(501), &acl, &log, 0);
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let c = ctx(Some(501), &acl, &log, &store, 0);
         for params in [
             "{\"from\":\"earliest\"}",            // no network
             "{\"network\":\"0000000000000001\"}", // neither
@@ -739,11 +1086,12 @@ mod tests {
     fn gap_error_reports_lost_range_and_cursors() {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
         // Fill past the per-network cap so the front is reclaimed.
         for i in 0..(crate::receive_log::ENTRIES_PER_NETWORK + 2) as u64 {
             ingest(&log, 1, i, b"p", 100);
         }
-        let c = ctx(Some(501), &acl, &log, 200);
+        let c = ctx(Some(501), &acl, &log, &store, 200);
         let stale = Cursor {
             network: 1,
             acl_view: acl.revision(),
@@ -763,5 +1111,273 @@ mod tests {
         assert!(response.contains("\"lost_to\":2"), "{response}");
         assert!(response.contains("oldest_cursor"), "{response}");
         assert!(response.contains("tail_cursor"), "{response}");
+    }
+
+    #[test]
+    fn open_epoch_binds_and_requires_send() {
+        let (acl, log, store) = test_env();
+        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let first = handle(
+            b"{\"v\":1,\"request_id\":\"e1\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+            &c,
+        );
+        assert!(first.contains("\"ok\":true"), "{first}");
+        assert!(
+            first.contains("\"admission_epoch\":\"0000000000000001\""),
+            "{first}"
+        );
+        // Re-open binds the same epoch.
+        let second = handle(
+            b"{\"v\":1,\"request_id\":\"e2\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+            &c,
+        );
+        assert!(
+            second.contains("\"admission_epoch\":\"0000000000000001\""),
+            "{second}"
+        );
+        // Unknown uid, ungranted network and bad params are denied/rejected.
+        for (uid, params, code) in [
+            (
+                None,
+                "{\"network\":\"0000000000000001\"}",
+                "AuthorizationFailed",
+            ),
+            (
+                Some(7),
+                "{\"network\":\"0000000000000001\"}",
+                "AuthorizationFailed",
+            ),
+            (
+                Some(501),
+                "{\"network\":\"0000000000000002\"}",
+                "AuthorizationFailed",
+            ),
+            (
+                Some(501),
+                "{\"network\":\"0000000100000000\"}",
+                "INVALID_PARAMS",
+            ),
+            (
+                Some(501),
+                "{\"network\":\"0000000000000001\",\"extra\":1}",
+                "INVALID_PARAMS",
+            ),
+            (Some(501), "{}", "INVALID_PARAMS"),
+        ] {
+            let c = ctx(uid, &acl, &log, &store, 0);
+            let request = format!(
+                "{{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{params}}}"
+            );
+            let response = handle(request.as_bytes(), &c);
+            assert!(response.contains(code), "{params} → {response}");
+        }
+    }
+
+    #[test]
+    fn submit_accepts_replays_and_conflicts() {
+        let (acl, log, store) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store);
+        let c = ctx(Some(501), &acl, &log, &store, 1000);
+        let key = "00112233445566778899aabbccddeeff";
+        let first = handle(submit_line(key, &epoch).as_bytes(), &c);
+        assert!(first.contains("\"ok\":true"), "{first}");
+        assert!(
+            first.contains("\"dispatch_state\":\"HOST_QUEUED\""),
+            "{first}"
+        );
+        assert!(
+            first.contains("\"evidence\":[\"HOST_RAM_RETAINED\"]"),
+            "{first}"
+        );
+        assert!(first.contains("\"message_key\":null"), "{first}");
+        assert!(!first.contains("HOST_DURABLE_RETAINED"), "{first}");
+        let id = result_field(&first, "operation_id");
+        assert!(id.ends_with(":0000000000000001"), "{id}");
+        // Replay: same key+payload returns the same OperationId.
+        let replay = handle(submit_line(key, &epoch).as_bytes(), &c);
+        assert_eq!(result_field(&replay, "operation_id"), id, "{replay}");
+        // Conflict: same key, different payload — original preserved.
+        let conflict = format!(
+            "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"ffff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
+        );
+        let response = handle(conflict.as_bytes(), &c);
+        assert!(response.contains("CONFLICT"), "{response}");
+        assert!(
+            response.contains(&format!("\"existing_operation_id\":\"{id}\"")),
+            "{response}"
+        );
+        // The original still replays.
+        let again = handle(submit_line(key, &epoch).as_bytes(), &c);
+        assert_eq!(result_field(&again, "operation_id"), id);
+    }
+
+    #[test]
+    fn submit_requires_open_epoch_and_send_grant() {
+        let (acl, log, store) = test_env();
+        // No epoch opened yet: well-formed submit is rejected.
+        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let response = handle(
+            submit_line("00112233445566778899aabbccddeeff", "0000000000000001").as_bytes(),
+            &c,
+        );
+        assert!(response.contains("INVALID_PARAMS"), "{response}");
+        assert!(response.contains("open_epoch"), "{response}");
+        let epoch = open_test_epoch(&acl, &log, &store);
+        // SEND denied without a grant; principal is the peer uid, never a
+        // request field (which is itself an unknown-param reject).
+        for uid in [None, Some(7)] {
+            let c = ctx(uid, &acl, &log, &store, 0);
+            let response = handle(
+                submit_line("00112233445566778899aabbccddeeff", &epoch).as_bytes(),
+                &c,
+            );
+            assert!(response.contains("AuthorizationFailed"), "{response}");
+        }
+        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let spoofed = format!(
+            "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"00112233445566778899aabbccddeeff\",\"principal\":7,\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
+        );
+        assert!(handle(spoofed.as_bytes(), &c).contains("INVALID_PARAMS"));
+    }
+
+    #[test]
+    fn submit_validation_rejects() {
+        let (acl, log, store) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store);
+        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let base = |params: &str| {
+            format!("{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{params}}}")
+        };
+        let valid_options = "\"options\":{\"storage\":\"RAM_ONLY\"}";
+        let params = |body: &str| {
+            format!("{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",{body}}}")
+        };
+        let big = "00".repeat(129);
+        for (params, code) in [
+            (
+                params(&format!(
+                    "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"{big}\",\"payload_len\":129,{valid_options}"
+                )),
+                "PAYLOAD_TOO_LARGE",
+            ),
+            (
+                params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\",\"delivery\":\"APPLIED\"}"),
+                "UNSUPPORTED",
+            ),
+            (
+                params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\",\"priority\":\"URGENT\"}"),
+                "UNSUPPORTED",
+            ),
+            (
+                params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0"),
+                "UNSUPPORTED", // HOST_DURABLE default, no durable store yet
+            ),
+            (
+                params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\",\"ttl_ms\":0}"),
+                "INVALID_PARAMS",
+            ),
+            (
+                params(                   "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\",\"future_flag\":true}"),
+                "INVALID_PARAMS",
+            ),
+            (
+                params(&format!(
+                    "\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"0\",\"payload_len\":1,{valid_options}"
+                )),
+                "INVALID_PARAMS",
+            ),
+        ] {
+            let response = handle(base(&params).as_bytes(), &c);
+            assert!(response.contains(code), "{params} → {response}");
+        }
+    }
+
+    #[test]
+    fn query_needs_read_operation_and_is_network_scoped() {
+        let (acl, log, store) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store);
+        let key = "00112233445566778899aabbccddeeff";
+        let submitter = ctx(Some(501), &acl, &log, &store, 1000);
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &submitter);
+        let id = result_field(&accepted, "operation_id");
+        // Owner queries by id and by key.
+        for request in [
+            format!(
+                "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+            ),
+            format!(
+                "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get_by_key\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\"}}}}"
+            ),
+        ] {
+            let response = handle(request.as_bytes(), &submitter);
+            assert!(response.contains("\"ok\":true"), "{response}");
+            assert!(response.contains(&format!("\"operation_id\":\"{id}\"")), "{response}");
+            assert!(response.contains("\"payload_len\":2"), "{response}");
+            assert!(response.contains("\"canonical_hash\":\""), "{response}");
+            assert!(response.contains("\"dispatch_state\":\"HOST_QUEUED\""), "{response}");
+            assert!(!response.contains("payload_hex"), "{response}");
+        }
+        // deadline_elapsed flips once ttl passes (read-only observation).
+        let late = ctx(Some(501), &acl, &log, &store, 1000 + 5000);
+        let request = format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+        );
+        let response = handle(request.as_bytes(), &late);
+        assert!(response.contains("\"deadline_elapsed\":true"), "{response}");
+        // Another uid's grant is scoped to network 2: denied on network 1's
+        // record by id, and its own key namespace finds nothing by key.
+        let other = ctx(Some(7), &acl, &log, &store, 1000);
+        let by_id = format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+        );
+        assert!(handle(by_id.as_bytes(), &other).contains("AuthorizationFailed"));
+        let by_key = format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get_by_key\",\"params\":{{\"network\":\"0000000000000002\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\"}}}}"
+        );
+        assert!(handle(by_key.as_bytes(), &other).contains("NOT_FOUND"));
+        // Unknown id/key and malformed ids.
+        for request in [
+            "{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{\"operation_id\":\"abababababababababababababababab:0000000000000009\"}}".to_string(),
+            "{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{\"operation_id\":\"not-an-id\"}}".to_string(),
+            format!(
+                "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get_by_key\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"ffffffffffffffffffffffffffffffff\"}}}}"
+            ),
+        ] {
+            let response = handle(request.as_bytes(), &submitter);
+            assert!(
+                response.contains("NOT_FOUND") || response.contains("INVALID_PARAMS"),
+                "{response}"
+            );
+        }
+        // Wrong-store lineage never resolves.
+        let foreign = "{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{\"operation_id\":\"00000000000000000000000000000000:0000000000000001\"}}";
+        assert!(handle(foreign.as_bytes(), &submitter).contains("NOT_FOUND"));
+    }
+
+    #[test]
+    fn full_table_reports_no_capacity() {
+        let (acl, log, store) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store);
+        {
+            let mut guard = store.lock().unwrap();
+            for i in 0..crate::send_store::RECORD_CAP {
+                let json = format!(
+                    "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{i:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
+                );
+                let req = canonical::parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+                assert!(matches!(
+                    guard.submit(501, &req, 0),
+                    SubmitOutcome::Accepted { .. }
+                ));
+            }
+        }
+        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let response = handle(
+            submit_line("ffffffffffffffffffffffffffffffff", &epoch).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("NO_CAPACITY"), "{response}");
+        assert!(response.contains("\"free_slots\":0"), "{response}");
+        assert!(response.contains("\"retryable\":true"), "{response}");
     }
 }
