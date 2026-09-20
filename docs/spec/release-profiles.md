@@ -8,11 +8,11 @@
 
 C3/S3を最初のHIL対象とするが、C5の対応目標・board資料・ビルド対象は削除しない。まず少数実機1/3hopで反例を再現し、100node/10hopは別の拡大受入へ進む。hop上限を3へ書き換えない。
 
-LR500適応、複数Gatewayの高度なservice failover、自動channel移行、分散Authority、mesh OTA、TUI、LoRaは独立した設計・資格対象として維持する。未実装だから仕様から消すのでも、設計済みだから標準ONにするのでもない。
+LR500適応、複数Gatewayの高度なservice failover、自動channel移行、分散Authority、mesh OTA、LoRaは独立した設計・資格対象として維持する。TUIは実装済みだが初期profile外で未認定のまま。未実装だから仕様から消すのでも、設計済み・実装済みだから標準ONにするのでもない。
 
 ## 有効化の条件
 
-[feature-profiles.json](../reference/feature-profiles.json)で `design_target / initial_target / implemented / qualified / default_enabled / evidence` を分ける。現在の通信機能は全て未実装・未認定。default policyは実行可能な機能の証明ではない。
+[feature-profiles.json](../reference/feature-profiles.json)で `design_target / initial_target / implemented / host_tested / build_tested / hardware_tested / qualified / default_enabled / evidence` を分ける。基線機能の多くは実装・host試験済みだが、hardware_tested・qualifiedは全てfalse。default policyは実行可能な機能の証明ではない。
 
 実効enable = 利用者要求 AND 実装capability AND 対象profileの認定 AND 配備条件。未実装はUNSUPPORTED、未認定はFEATURE_UNQUALIFIED。実験buildは明示opt-inと別ラベルを必要とし、必須の認証・規制条件を無効にしない。
 

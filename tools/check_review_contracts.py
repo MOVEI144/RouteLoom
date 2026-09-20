@@ -11,6 +11,37 @@ import sync_reference_tables
 
 EXPECTED_IDF_COMMIT = "76f5dedd9950a3012fee8fb7d5586df21fc67802"
 
+# Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
+# FrameType in components/routeloom/include/routeloom/types.hpp.
+EXPECTED_FRAME_IDS = {
+    "DISCOVER": 1,
+    "OFFER": 2,
+    "BOOTSTRAP_AUTH": 3,
+    "MEMBERSHIP_RESULT": 4,
+    "BOOTSTRAP_CHUNK": 5,
+    "BOOTSTRAP_REPLY": 6,
+    "MEMBERSHIP_QUERY": 7,
+    "DATA": 16,
+    "HOP_ACCEPT": 17,
+    "END_RECEIPT": 18,
+    "APP_RESULT": 19,
+    "BUSY": 20,
+    "SERVICE": 21,
+    "CONTROL": 22,
+    "TIME_SYNC": 23,
+    "CHANNEL_NOTICE": 24,
+    "ROUTE_UPDATE": 32,
+    "ROUTE_WITHDRAW": 33,
+    "SEQNO_REQUEST": 34,
+    "ROUTE_REQUEST": 35,
+    "NEIGHBOR_PROBE": 40,
+    "NEIGHBOR_RESULT": 41,
+    "DIAGNOSTIC": 48,
+    "CONTROL_OBJECT": 49,
+    "OBJECT_CHUNK": 50,
+    "OBJECT_ACK": 51,
+}
+
 
 def validate(root: Path) -> dict:
     checks = []
@@ -50,7 +81,7 @@ def validate(root: Path) -> dict:
         test(
             "prototype_status",
             features["implementation_status"] == "core-fixed-250-prototype"
-            and features["schema_version"] == 2,
+            and features["schema_version"] == 3,
         )
         test(
             "prototype_features_implemented",
@@ -63,9 +94,60 @@ def validate(root: Path) -> dict:
             ),
         )
         test(
+            "maturity_fields_honest",
+            all(
+                type(item["host_tested"]) is bool
+                and type(item["build_tested"]) is bool
+                and item["hardware_tested"] is False
+                and (item["implemented"] or not (
+                    item["host_tested"] or item["build_tested"]))
+                and (not item["implemented"] or bool(item["evidence"]))
+                for item in feature_map.values()
+            ),
+        )
+        host_tested_features = {
+            "portable_core",
+            "wire_v1_codec",
+            "c_api",
+            "security_hardening",
+            "multi_hop_repair",
+            "authority_ledger",
+            "usb_device_bridge",
+            "power_coordinator",
+            "host_cli",
+            "tui",
+            "deep_sleep_resume",
+        }
+        build_only_features = {
+            "espnow_lr250_adapter",
+            "reference_firmware_builds",
+            "development_psk_aead",
+            "nvs_replay_store",
+            "nvs_ledger_store",
+            "espnow_power_port",
+        }
+        test(
+            "host_tested_features",
+            all(
+                feature_map[name]["implemented"] is True
+                and feature_map[name]["host_tested"] is True
+                for name in host_tested_features
+            ),
+        )
+        test(
+            "build_only_adapters_not_host_tested",
+            all(
+                feature_map[name]["implemented"] is True
+                and feature_map[name]["build_tested"] is True
+                and feature_map[name]["host_tested"] is False
+                for name in build_only_features
+            ),
+        )
+        test(
             "nothing_falsely_qualified",
             all(
                 item["qualified"] is False
+                and item["hardware_tested"] is False
                 and item["default_enabled"] is False
                 for item in feature_map.values()
             ),
@@ -86,18 +168,32 @@ def validate(root: Path) -> dict:
                     "quorum_authority",
                     "mesh_ota",
                     "service_provider_failover",
-                    "tui",
                     "lora_tx",
-                    "deep_sleep_resume",
+                    "explicit_gateway",
+                    "small_remote_config",
+                    "secure_unicast",
                 }
             ),
         )
         test(
-            "wire_not_falsely_frozen",
-            features["wire_frozen"] is False
-            and semantic["wire_frozen"] is False
+            "wire_v1_frozen_crypto_pending",
+            features["wire_frozen"] is True
+            and semantic["wire_frozen"] is True
             and semantic["crypto_suite"] is None
-            and semantic["frame_numeric_ids"] is None,
+            and semantic["frame_numeric_ids"] == EXPECTED_FRAME_IDS
+            and "wire_byte_layout" not in semantic["open_gates"]
+            and "mandatory_security_profile_and_vectors" in semantic["open_gates"],
+        )
+        all_semantic_names = {
+            name
+            for names in semantic["membership_allowlist"].values()
+            for name in names
+        } | set(semantic["member_only"]) | set(
+            semantic["bootstrap_requires_transaction"]
+        )
+        test(
+            "wire_ids_cover_all_semantic_names",
+            set(semantic["frame_numeric_ids"]) == all_semantic_names,
         )
         test(
             "initial_jitter_separate",

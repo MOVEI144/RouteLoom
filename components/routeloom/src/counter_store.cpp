@@ -1,8 +1,21 @@
 #include "routeloom/counter_store.hpp"
 
+#include <cstddef>
 #include <limits>
 
+#include "routeloom/crc32.hpp"
+
 namespace routeloom {
+
+namespace {
+
+std::uint32_t counter_record_crc(const CounterRecord& record) noexcept {
+  return crc32_iso_hdlc(
+      ByteView{reinterpret_cast<const std::uint8_t*>(&record),
+               offsetof(CounterRecord, crc)});
+}
+
+}  // namespace
 
 CounterLease::CounterLease(CounterStore& store, const std::uint32_t slot,
                            const std::uint32_t context_id, const std::uint16_t key_epoch,
@@ -19,6 +32,10 @@ Status CounterLease::initialize() noexcept {
   auto status = store_.load(slot_, record, found);
   if (!status) return status;
   if (found) {
+    if (record.crc != counter_record_crc(record)) {
+      return Status::error(StatusCode::IntegrityError,
+                           "counter record integrity check failed");
+    }
     if (record.context_id != context_id_ || record.key_epoch != key_epoch_ ||
         record.direction != direction_) {
       return Status::error(StatusCode::Conflict, "counter store context mismatch");
@@ -44,6 +61,7 @@ Status CounterLease::reserve_block() noexcept {
   next.direction = direction_;
   next.high_water_exclusive = end_ + block_size_;
   next.generation = generation_ + 1;
+  next.crc = counter_record_crc(next);
   const auto status = store_.commit(slot_, next);
   if (!status) return status;
   cursor_ = end_;

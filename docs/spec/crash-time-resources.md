@@ -24,7 +24,7 @@ Message ID、round、crypto counterは別。保存済み同一ciphertextをそ�
 | 秘密鍵・membership | SECURITY_RECOVERY_REQUIRED。無認証再Joinへ降格しない |
 | nonce予約・rx replay | 旧contextを無効化。正規再確立までDATA禁止 |
 | Authority/voter | 管理発行／投票停止。QUARANTINED_NON_VOTER等 |
-| route frontier | 当該sourceの選択・有限広告停止。安全な回復規則が必要 |
+| route frontier | 当該sourceの選択・有限広告停止。回復はrouting.md §11のorigin generation＋tombstone dwell規則で行う（portable model凍結） |
 | spool/dedup | 該当record隔離、結果不明通知。別IDの新イベントにしない |
 | 単なる候補cache | 廃棄して再探索。ただし鍵・所属まで消さない |
 

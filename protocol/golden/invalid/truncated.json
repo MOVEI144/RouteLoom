@@ -1,0 +1,8 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "truncated",
+  "comment": "frame cut inside the link ciphertext",
+  "expect": "link",
+  "local_node": 2,
+  "encoded_hex": "524c0100100101000400000a000000010000000000000001000000000000000300000000000000010000000000000002000000070000000000000009"
+}

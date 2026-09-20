@@ -19,6 +19,10 @@
 #include "routeloom/routing.hpp"
 #include "routeloom/wire.hpp"
 
+#include "test_ledger.hpp"
+#include "test_security.hpp"
+#include "test_sim.hpp"
+
 namespace {
 
 int failures = 0;
@@ -26,83 +30,10 @@ int failures = 0;
 #define CHECK_OK(expr) do { const auto _status = (expr); if (!_status.ok()) { std::fprintf(stderr, "STATUS failed %s:%d: %s (%s)\n", __FILE__, __LINE__, #expr, _status.detail); ++failures; } } while (false)
 
 using namespace routeloom;
-
-std::uint64_t mix(std::uint64_t state, std::uint64_t value) {
-  state ^= value + 0x9e3779b97f4a7c15ULL + (state << 6U) + (state >> 2U);
-  state *= 0xbf58476d1ce4e5b9ULL;
-  return state;
-}
-
-class TestSecurity final : public SecurityProvider {
- public:
-  bool ready() const noexcept override { return true; }
-
-  Status next_counter(const SecurityContext& context, std::uint64_t& counter) noexcept override {
-    auto key = std::make_tuple(static_cast<int>(context.scope), context.network,
-                               context.sender, context.receiver, context.epoch);
-    counter = counters_[key]++;
-    return Status::success();
-  }
-
-  Status seal(const SecurityContext& context, const std::uint64_t counter,
-              const ByteView aad, const ByteView plaintext,
-              const MutableByteView ciphertext,
-              std::array<std::uint8_t, kAeadTagSize>& tag) noexcept override {
-    if (ciphertext.size < plaintext.size) return Status::error(StatusCode::NoCapacity, "test ciphertext");
-    auto state = seed(context, counter);
-    for (std::size_t i = 0; i < plaintext.size; ++i) {
-      state = mix(state, i + 1);
-      ciphertext.data[i] = plaintext.data[i] ^ static_cast<std::uint8_t>(state >> 56U);
-    }
-    make_tag(context, counter, aad, ByteView{ciphertext.data, plaintext.size}, tag);
-    return Status::success();
-  }
-
-  Status open(const SecurityContext& context, const std::uint64_t counter,
-              const ByteView aad, const ByteView ciphertext,
-              const std::array<std::uint8_t, kAeadTagSize>& tag,
-              const MutableByteView plaintext) noexcept override {
-    if (plaintext.size < ciphertext.size) return Status::error(StatusCode::NoCapacity, "test plaintext");
-    std::array<std::uint8_t, kAeadTagSize> expected{};
-    make_tag(context, counter, aad, ciphertext, expected);
-    std::uint8_t diff = 0;
-    for (std::size_t i = 0; i < tag.size(); ++i) diff |= expected[i] ^ tag[i];
-    if (diff != 0) return Status::error(StatusCode::AuthenticationFailed, "test tag mismatch");
-    auto state = seed(context, counter);
-    for (std::size_t i = 0; i < ciphertext.size; ++i) {
-      state = mix(state, i + 1);
-      plaintext.data[i] = ciphertext.data[i] ^ static_cast<std::uint8_t>(state >> 56U);
-    }
-    return Status::success();
-  }
-
- private:
-  using Key = std::tuple<int, NetworkId, NodeId, NodeId, std::uint16_t>;
-  std::map<Key, std::uint64_t> counters_{};
-
-  static std::uint64_t seed(const SecurityContext& context, std::uint64_t counter) {
-    std::uint64_t state = 0x726f7574656c6f6fULL;
-    state = mix(state, static_cast<std::uint64_t>(context.scope));
-    state = mix(state, context.network);
-    state = mix(state, context.sender);
-    state = mix(state, context.receiver);
-    state = mix(state, context.epoch);
-    return mix(state, counter);
-  }
-
-  static void make_tag(const SecurityContext& context, std::uint64_t counter,
-                       ByteView aad, ByteView ciphertext,
-                       std::array<std::uint8_t, kAeadTagSize>& tag) {
-    std::uint64_t left = seed(context, counter);
-    std::uint64_t right = mix(left, 0x746167ULL);
-    for (std::size_t i = 0; i < aad.size; ++i) left = mix(left, aad.data[i]);
-    for (std::size_t i = 0; i < ciphertext.size; ++i) right = mix(right, ciphertext.data[i]);
-    for (int i = 0; i < 8; ++i) {
-      tag[i] = static_cast<std::uint8_t>(left >> (56 - i * 8));
-      tag[8 + i] = static_cast<std::uint8_t>(right >> (56 - i * 8));
-    }
-  }
-};
+using routeloom_test::TestSecurity;
+using routeloom_test::CapturingObserver;
+using routeloom_test::SimNetwork;
+using routeloom_test::SimRadio;
 
 class MemoryCounterStore final : public CounterStore {
  public:
@@ -119,78 +50,6 @@ class MemoryCounterStore final : public CounterStore {
   std::map<std::uint32_t, CounterRecord> records;
 };
 
-struct CapturingObserver final : NodeObserver {
-  std::vector<std::vector<std::uint8_t>> messages;
-  std::vector<DeliveryResult> delivery_events;
-  std::vector<std::string> diagnostics;
-
-  void on_message(const MessageKey&, NodeId, ByteView payload) noexcept override {
-    messages.emplace_back(payload.data, payload.data + payload.size);
-  }
-  void on_delivery(const DeliveryResult& result) noexcept override { delivery_events.push_back(result); }
-  void on_diagnostic(const char* reason, NodeId, const MessageId*) noexcept override {
-    diagnostics.emplace_back(reason);
-  }
-};
-
-class SimNetwork;
-class SimRadio final : public RadioPort {
- public:
-  SimRadio(SimNetwork& network, NodeId owner) : network_(network), owner_(owner) {}
-  Status send(NodeId peer, std::uint64_t token, ByteView frame) noexcept override;
-  Status recover() noexcept override { return Status::success(); }
- private:
-  SimNetwork& network_;
-  NodeId owner_;
-};
-
-class SimNetwork {
- public:
-  struct Pending {
-    NodeId from;
-    NodeId to;
-    std::uint64_t token;
-    std::vector<std::uint8_t> frame;
-  };
-
-  void register_node(NodeId id, MeshNode* node) { nodes[id] = node; }
-  void connect(NodeId a, NodeId b) { links.insert(normalize(a, b)); }
-  void disconnect(NodeId a, NodeId b) { links.erase(normalize(a, b)); }
-  bool connected(NodeId a, NodeId b) const { return links.count(normalize(a, b)) != 0; }
-
-  Status enqueue(NodeId from, NodeId to, std::uint64_t token, ByteView frame) {
-    queue.push_back(Pending{from, to, token, std::vector<std::uint8_t>(frame.data, frame.data + frame.size)});
-    return Status::success();
-  }
-
-  void flush(MonotonicMs now) {
-    std::size_t safety = 0;
-    while (!queue.empty() && safety++ < 10000) {
-      Pending pending = std::move(queue.front());
-      queue.pop_front();
-      const bool success = connected(pending.from, pending.to) && nodes.count(pending.to) != 0;
-      nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
-      if (success) {
-        nodes.at(pending.to)->on_radio_receive(
-            pending.from, ByteView{pending.frame.data(), pending.frame.size()}, RadioRxMetadata{-60}, now);
-      }
-    }
-    CHECK(safety < 10000);
-  }
-
- private:
-  static std::pair<NodeId, NodeId> normalize(NodeId a, NodeId b) {
-    return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
-  }
-  std::map<NodeId, MeshNode*> nodes;
-  std::set<std::pair<NodeId, NodeId>> links;
-  std::deque<Pending> queue;
-};
-
-Status SimRadio::send(NodeId peer, std::uint64_t token, ByteView frame) noexcept {
-  return network_.enqueue(owner_, peer, token, frame);
-}
-
 void run_network(std::vector<MeshNode*>& nodes, SimNetwork& network,
                  MonotonicMs begin, MonotonicMs end, MonotonicMs step = 5) {
   for (MonotonicMs now = begin; now <= end; now += step) {
@@ -199,22 +58,6 @@ void run_network(std::vector<MeshNode*>& nodes, SimNetwork& network,
   }
 }
 
-
-class MemoryAuthorityStore final : public AuthorityStore {
- public:
-  Status load(AuthorityRecord& record, bool& found) noexcept override {
-    found = has_record;
-    if (found) record = stored;
-    return Status::success();
-  }
-  Status commit(const AuthorityRecord& record) noexcept override {
-    stored = record;
-    has_record = true;
-    return Status::success();
-  }
-  AuthorityRecord stored{};
-  bool has_record{false};
-};
 
 void test_admission_contract() {
   CHECK(frame_allowed(MembershipState::Unprovisioned, FrameType::Discover));
@@ -242,7 +85,7 @@ void test_deadline_resume() {
 }
 
 void test_single_authority() {
-  MemoryAuthorityStore store;
+  routeloom_test::FaultyLedgerStorage store;
   SingleAuthority authority(1, 99, store);
   CHECK_OK(authority.initialize());
   AuthorityOperation op{};
@@ -398,16 +241,18 @@ void test_wire_forwarding() {
 
 void test_routing() {
   RouteTable table;
-  CHECK(table.consider(RouteAdvertisement{9, 100, 0}, 2, 10, 0, 1000) == RouteUpdateResult::Accepted);
+  CHECK(table.consider(RouteAdvertisement{9, 1, 100, 0}, 2, 10, 0, 1000) == RouteUpdateResult::Accepted);
   CHECK(table.best(9).next_hop == 2);
   CHECK(table.mark_advertised(9));
-  CHECK(table.consider(RouteAdvertisement{9, 100, 20}, 3, 10, 1, 1000) == RouteUpdateResult::Infeasible);
+  CHECK(table.consider(RouteAdvertisement{9, 1, 100, 20}, 3, 10, 1, 1000) == RouteUpdateResult::Infeasible);
   CHECK(!table.needs_sequence_request(9));  // the feasible route via 2 still exists
-  table.invalidate_next_hop(2);
+  table.invalidate_next_hop(2, 2);
   CHECK(table.needs_sequence_request(9));
-  CHECK(table.consider(RouteAdvertisement{9, 101, 20}, 3, 10, 2, 1000) == RouteUpdateResult::Accepted);
+  // The infeasible via-3 candidate is retained (it can carry a SeqNoRequest),
+  // so accepting a newer sequence through it reports Updated, not Accepted.
+  CHECK(table.consider(RouteAdvertisement{9, 1, 101, 20}, 3, 10, 3, 1000) == RouteUpdateResult::Updated);
   CHECK(table.best(9).next_hop == 3);
-  table.invalidate_next_hop(3);
+  table.invalidate_next_hop(3, 4);
   CHECK(!table.best(9).valid);
 }
 
@@ -459,14 +304,59 @@ void test_diamond_repair() {
   run_network(nodes,network,0,800);
   CHECK(n1.routes().best(4).valid);
   network.disconnect(2,4);
-  n2.remove_neighbor(4); n4.remove_neighbor(2);
-  run_network(nodes,network,805,1500);
+  n2.remove_neighbor(4, 805); n4.remove_neighbor(2, 805);
+  run_network(nodes,network,805,4000);
   const std::array<std::uint8_t,3> payload{{9,8,7}};
   MessageId id{};
-  CHECK_OK(n1.send(4,ByteView{payload.data(),payload.size()},SendOptions{},1505,id));
-  run_network(nodes,network,1505,3000);
+  CHECK_OK(n1.send(4,ByteView{payload.data(),payload.size()},SendOptions{},4005,id));
+  run_network(nodes,network,4005,14000);
   CHECK(o4.messages.size() == 1);
   CHECK(n1.delivery(id).state == DeliveryState::Delivered);
+}
+
+void test_delivery_terminal_eviction() {
+  // kDeliveryCapacity is 8. Terminal records are history, not live work:
+  // without eviction the table wedges after eight sends and every later
+  // send() fails with NoCapacity forever.
+  SimNetwork network;
+  TestSecurity sec;
+  CapturingObserver obs;
+  SimRadio radio(network, 1);
+  NodeConfig cfg{1, 1, 301};
+  MeshNode node(cfg, radio, sec, obs);
+  network.register_node(1, &node);
+  CHECK_OK(node.start(0));
+  const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
+
+  // Eight live (non-terminal) sends fill the table; the ninth must fail —
+  // live records are never evicted.
+  std::array<MessageId, 8> ids{};
+  for (int i = 0; i < 8; ++i) {
+    CHECK_OK(node.send(2, ByteView{payload.data(), payload.size()},
+                       SendOptions{}, static_cast<MonotonicMs>(i), ids[i]));
+  }
+  {
+    MessageId id{};
+    CHECK(node.send(2, ByteView{payload.data(), payload.size()}, SendOptions{},
+                    100, id)
+              .code == StatusCode::NoCapacity);
+  }
+  // Cancelling an entry turns it into terminal history. The next send must
+  // evict that record and succeed instead of staying wedged — forever.
+  for (int round = 0; round < 8; ++round) {
+    CHECK_OK(node.cancel(ids[round]));  // → CancelledBeforeTx (terminal)
+    CHECK_OK(node.send(2, ByteView{payload.data(), payload.size()},
+                       SendOptions{}, static_cast<MonotonicMs>(200 + round),
+                       ids[round]));
+  }
+  // Steady state: cancel+send cycles keep recovering, evicting one terminal
+  // record per send.
+  for (int round = 0; round < 8; ++round) {
+    CHECK_OK(node.cancel(ids[round]));
+    MessageId id{};
+    CHECK_OK(node.send(2, ByteView{payload.data(), payload.size()},
+                       SendOptions{}, static_cast<MonotonicMs>(400 + round), id));
+  }
 }
 
 }  // namespace
@@ -482,6 +372,7 @@ int main() {
   test_routing();
   test_three_hop_delivery();
   test_diamond_repair();
+  test_delivery_terminal_eviction();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

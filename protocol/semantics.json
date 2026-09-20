@@ -1,8 +1,36 @@
 {
   "schema_version": 1,
   "status": "semantic-contract-not-wire-abi",
-  "wire_frozen": false,
-  "frame_numeric_ids": null,
+  "wire_frozen": true,
+  "wire_profile": "WIRE_V1_CORE_FIXED_250",
+  "frame_numeric_ids": {
+    "DISCOVER": 1,
+    "OFFER": 2,
+    "BOOTSTRAP_AUTH": 3,
+    "MEMBERSHIP_RESULT": 4,
+    "BOOTSTRAP_CHUNK": 5,
+    "BOOTSTRAP_REPLY": 6,
+    "MEMBERSHIP_QUERY": 7,
+    "DATA": 16,
+    "HOP_ACCEPT": 17,
+    "END_RECEIPT": 18,
+    "APP_RESULT": 19,
+    "BUSY": 20,
+    "SERVICE": 21,
+    "CONTROL": 22,
+    "TIME_SYNC": 23,
+    "CHANNEL_NOTICE": 24,
+    "ROUTE_UPDATE": 32,
+    "ROUTE_WITHDRAW": 33,
+    "SEQNO_REQUEST": 34,
+    "ROUTE_REQUEST": 35,
+    "NEIGHBOR_PROBE": 40,
+    "NEIGHBOR_RESULT": 41,
+    "DIAGNOSTIC": 48,
+    "CONTROL_OBJECT": 49,
+    "OBJECT_CHUNK": 50,
+    "OBJECT_ACK": 51
+  },
   "crypto_suite": null,
   "membership_allowlist": {
     "UNPROVISIONED": [
@@ -118,7 +146,6 @@
     "key"
   ],
   "open_gates": [
-    "wire_byte_layout",
     "mandatory_security_profile_and_vectors",
     "routing_restart_gc_profile",
     "quorum_proof_and_snapshot",

@@ -1,7 +1,7 @@
 name: SDK build and tests
 on:
   push:
-    branches: [main, implementation/core-fixed-250]
+    branches: [main, implementation/core-fixed-250, implementation/pre-hil-software]
   pull_request:
   workflow_dispatch:
 permissions:
@@ -29,13 +29,63 @@ jobs:
           if [ '${{ matrix.compiler }}' = clang ]; then export CC=clang CXX=clang++; else export CC=gcc CXX=g++; fi
           cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=${{ matrix.sanitizer }} -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel 2
-          ctest --test-dir build --output-on-failure
+          ctest --test-dir build --output-on-failure | tee ctest-report-${{ matrix.compiler }}-san${{ matrix.sanitizer }}.txt
+      - name: C++ test inventory
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### Portable C++ test targets'
+            echo ''
+            echo 'Covers: wire codec, wire golden vectors (valid + invalid), routing'
+            echo '(3hop/diamond/10hop/partition-merge/loop-freedom), authority ledger'
+            echo 'power-cut, USB codec/session/credit, power coordinator model,'
+            echo 'replay/end-protection hardening, C ABI.'
+            echo ''
+            echo '```'
+            ctest --test-dir build -N || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Documentation and contract tests
         run: |
           python3 tools/check_docs.py
           python3 tools/sync_reference_tables.py --check
           python3 tools/check_review_contracts.py
           python3 -m unittest discover -s tests -v
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: test-report-${{ matrix.compiler }}-san${{ matrix.sanitizer }}
+          path: ctest-report-*.txt
+          retention-days: 30
+  wire-golden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: C++ wire and USB golden-vector tests (valid + invalid)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel 2 --target routeloom_golden_tests routeloom_usb_tests
+          ctest --test-dir build --output-on-failure -R 'routeloom_(golden|usb)_tests'
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal
+          rustup override set 1.85.1
+      - name: Rust wire and USB golden-vector tests
+        working-directory: host
+        run: cargo test -p routeloom-wire -p routeloom-protocol
+      - name: Regenerate shared vectors and require byte-identical files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --manifest-path host/Cargo.toml -p routeloom-wire --example gen_golden
+          cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
+          git diff --exit-code -- protocol/golden protocol/usb-golden
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -43,6 +93,16 @@ jobs:
       fail-fast: false
       matrix:
         target: [esp32c3, esp32s3, esp32c5]
+        # deep_sleep compiles the CONFIG_ROUTELOOM_DEEP_SLEEP=y path
+        # (espnow_power hooks + gated code in main.cpp) — compile-time
+        # validation only, not a hardware power claim.
+        profile: [normal, deep_sleep]
+        # bridge_node exposes the portable UsbBridge on USB Serial/JTAG.
+        # It has no deep-sleep variant, so that combination is excluded.
+        app: [reference_node, bridge_node]
+        exclude:
+          - app: bridge_node
+            profile: deep_sleep
     container:
       image: espressif/idf:v6.0.3
     steps:
@@ -57,22 +117,32 @@ jobs:
           . "$IDF_PATH/export.sh"
           git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
           test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
-          cd firmware/reference_node
+          cd firmware/${{ matrix.app }}
           idf.py set-target '${{ matrix.target }}'
+          if [ '${{ matrix.profile }}' = deep_sleep ]; then
+            printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
+          fi
           idf.py build
+          if [ '${{ matrix.profile }}' = deep_sleep ]; then
+            # Prove the kconfig symbol survived re-resolution and the
+            # deep-sleep code path was actually compiled in.
+            grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+          else
+            ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
+          fi
           idf.py size > build/size-report.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.target }}
+          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}
           path: |
             idf-commit.txt
-            firmware/reference_node/build/*.bin
-            firmware/reference_node/build/*.elf
-            firmware/reference_node/build/*.map
-            firmware/reference_node/build/size-report.txt
-            firmware/reference_node/build/log/*
-            firmware/reference_node/sdkconfig
+            firmware/${{ matrix.app }}/build/*.bin
+            firmware/${{ matrix.app }}/build/*.elf
+            firmware/${{ matrix.app }}/build/*.map
+            firmware/${{ matrix.app }}/build/size-report.txt
+            firmware/${{ matrix.app }}/build/log/*
+            firmware/${{ matrix.app }}/sdkconfig
           retention-days: 30
   rust:
     runs-on: ubuntu-24.04
@@ -91,7 +161,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --all-targets
-      - run: cargo build --workspace --release
+      - run: cargo build --workspace --release --all-targets
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -99,5 +169,8 @@ jobs:
           path: |
             host/target/release/routeloom-host
             host/target/release/routeloomctl
+            host/target/release/routeloom-tui
+            host/target/release/examples/gen_golden
+            host/target/release/examples/gen_usb_golden
             host/Cargo.lock
           retention-days: 30

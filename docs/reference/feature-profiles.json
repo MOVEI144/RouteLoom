@@ -1,7 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "spec_revision": "1.1",
-  "wire_frozen": false,
+  "wire_frozen": true,
   "initial_profile": "CORE_FIXED_250",
   "implementation_status": "core-fixed-250-prototype",
   "initial_control": "SINGLE_AUTHORITY",
@@ -14,11 +14,21 @@
     "esp32s3",
     "esp32c5"
   ],
+  "maturity_levels": [
+    "implemented",
+    "host_tested",
+    "build_tested",
+    "hardware_tested",
+    "qualified"
+  ],
   "features": {
     "portable_core": {
       "design_target": true,
       "initial_target": true,
       "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
@@ -27,22 +37,47 @@
         ".github/workflows/sdk.yml"
       ]
     },
+    "wire_v1_codec": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/wire.hpp",
+        "components/routeloom/src/wire.cpp",
+        "host/routeloom-wire",
+        "protocol/golden",
+        "tests/cpp/test_golden.cpp",
+        "host/routeloom-wire/tests/golden.rs"
+      ]
+    },
     "c_api": {
       "design_target": true,
       "initial_target": true,
       "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
-        "components/routeloom/include/routeloom/c_api.h",
+        "components/routeloom/include/routeloom/routeloom.h",
         "components/routeloom/src/c_api.cpp",
-        "tests/cpp/test_main.cpp"
+        "tests/cpp/test_main.cpp",
+        "tests/cpp/c_api_smoke.c"
       ]
     },
     "espnow_lr250_adapter": {
       "design_target": true,
       "initial_target": true,
       "implemented": true,
+      "host_tested": false,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
@@ -55,6 +90,9 @@
       "design_target": true,
       "initial_target": true,
       "implemented": true,
+      "host_tested": false,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
@@ -68,6 +106,9 @@
       "design_target": false,
       "initial_target": true,
       "implemented": true,
+      "host_tested": false,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
@@ -75,22 +116,144 @@
         "docs/implementation/README.md"
       ]
     },
+    "security_hardening": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/replay.hpp",
+        "components/routeloom/src/replay.cpp",
+        "components/routeloom/include/routeloom/security.hpp",
+        "components/routeloom/src/node.cpp",
+        "tests/cpp/test_hardening.cpp"
+      ]
+    },
+    "nvs_replay_store": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": false,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom_espnow/include/routeloom/nvs_replay_store.hpp",
+        "components/routeloom_espnow/src/nvs_replay_store.cpp"
+      ]
+    },
     "multi_hop_repair": {
       "design_target": true,
       "initial_target": true,
       "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
         "components/routeloom/src/routing.cpp",
         "components/routeloom/src/node.cpp",
-        "tests/cpp/test_main.cpp"
+        "tests/cpp/test_main.cpp",
+        "tests/cpp/test_sim.hpp",
+        "tests/cpp/test_routing_sims.cpp"
+      ]
+    },
+    "authority_ledger": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/authority.hpp",
+        "components/routeloom/src/authority.cpp",
+        "tests/cpp/test_ledger.cpp",
+        "tests/cpp/test_ledger.hpp"
+      ]
+    },
+    "nvs_ledger_store": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": false,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom_espnow/include/routeloom/nvs_ledger_store.hpp",
+        "components/routeloom_espnow/src/nvs_ledger_store.cpp"
+      ]
+    },
+    "usb_device_bridge": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/usb_codec.hpp",
+        "components/routeloom/include/routeloom/usb_session.hpp",
+        "components/routeloom/include/routeloom/usb_bridge.hpp",
+        "components/routeloom/src/usb_codec.cpp",
+        "components/routeloom/src/usb_session.cpp",
+        "components/routeloom/src/usb_bridge.cpp",
+        "host/routeloom-protocol",
+        "protocol/usb-golden",
+        "tests/cpp/test_usb.cpp",
+        "host/routeloom-protocol/tests/usb_golden.rs",
+        "firmware/bridge_node"
+      ]
+    },
+    "power_coordinator": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/power.hpp",
+        "components/routeloom/src/power.cpp",
+        "tests/cpp/test_power.cpp"
+      ]
+    },
+    "espnow_power_port": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": false,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom_espnow/include/routeloom/espnow_power.hpp",
+        "components/routeloom_espnow/src/espnow_power.cpp",
+        "firmware/reference_node"
       ]
     },
     "host_cli": {
       "design_target": true,
       "initial_target": true,
       "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": [
@@ -99,18 +262,46 @@
         ".github/workflows/sdk.yml"
       ]
     },
-    "secure_unicast": {
+    "tui": {
       "design_target": true,
-      "initial_target": true,
-      "implemented": false,
+      "initial_target": false,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
-      "evidence": null
+      "evidence": [
+        "host/routeloom-tui",
+        "host/routeloom-tui/tests/snapshot.rs",
+        "host/routeloom-tui/tests/reconnect.rs",
+        "host/routeloom-tui/tests/queue.rs"
+      ]
     },
     "deep_sleep_resume": {
       "design_target": true,
       "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/power.hpp",
+        "components/routeloom/src/power.cpp",
+        "components/routeloom_espnow/src/espnow_power.cpp",
+        "firmware/reference_node",
+        "tests/cpp/test_power.cpp"
+      ]
+    },
+    "secure_unicast": {
+      "design_target": true,
+      "initial_target": true,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -119,6 +310,9 @@
       "design_target": true,
       "initial_target": true,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -127,6 +321,9 @@
       "design_target": true,
       "initial_target": true,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -135,6 +332,9 @@
       "design_target": true,
       "initial_target": false,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -143,6 +343,9 @@
       "design_target": true,
       "initial_target": false,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -151,6 +354,9 @@
       "design_target": true,
       "initial_target": false,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -159,6 +365,9 @@
       "design_target": true,
       "initial_target": false,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -167,14 +376,9 @@
       "design_target": true,
       "initial_target": false,
       "implemented": false,
-      "qualified": false,
-      "default_enabled": false,
-      "evidence": null
-    },
-    "tui": {
-      "design_target": true,
-      "initial_target": false,
-      "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null
@@ -183,6 +387,9 @@
       "design_target": true,
       "initial_target": false,
       "implemented": false,
+      "host_tested": false,
+      "build_tested": false,
+      "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
       "evidence": null

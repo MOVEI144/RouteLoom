@@ -1,0 +1,23 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "data_link_only",
+  "comment": "unprotected-payload DATA (link layer protection only)",
+  "type": 16,
+  "flags": 0,
+  "delivery": 0,
+  "delivery_round": 0,
+  "hop_remaining": 1,
+  "network": 1,
+  "origin": 1,
+  "destination": 2,
+  "previous_hop": 1,
+  "next_hop": 2,
+  "session": 7,
+  "sequence": 11,
+  "remaining_deadline_ms": 2000,
+  "original_lifetime_ms": 2000,
+  "link_epoch": 1,
+  "end_epoch": 1,
+  "payload_hex": "6c696e6b2d6f6e6c79",
+  "encoded_hex": "524c0100100000000100000900000001000000000000000100000000000000020000000000000001000000000000000200000007000000000000000b000007d0000007d00001000100000000000000000000000000000000aa1d645ba09db8a236611d8ec311fa5affe10300819e451a56"
+}
