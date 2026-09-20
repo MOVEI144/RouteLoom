@@ -21,7 +21,10 @@
 //! - Deadlines use wall-clock elapsed validity mapped onto the device's
 //!   monotonic clock through TIME_SAMPLE mappings (review-addendum §1
 //!   arithmetic); no mapping, no dispatch — and no deadline is ever
-//!   extended.
+//!   extended. Every deadline check is additionally capped by the
+//!   record's monotonic-clock budget (`accepted_mono_ms + ttl`), so a
+//!   wall-clock rewind that stays above the admit stamp still cannot
+//!   stretch a TTL.
 
 use routeloom_protocol::host_ops::{
     self, BootLease, Evidence, HostOpsResult, LaneRequest, QueryResponse, Receipt, SlotState,
@@ -153,6 +156,7 @@ pub enum DeadlineDecision {
 /// significant: malformed mappings fail before expiry arithmetic, the
 /// margin comparison happens before any subtraction, and every add is
 /// checked — nothing wraps or saturates into extra validity.
+#[cfg(test)]
 pub fn deadline_decision(
     accepted_ms: u64,
     ttl_ms: u32,
@@ -163,6 +167,21 @@ pub fn deadline_decision(
     let Some(deadline) = accepted_ms.checked_add(u64::from(ttl_ms)) else {
         return DeadlineDecision::ArithmeticOverflow;
     };
+    deadline_decision_at(accepted_ms, deadline, mapping, device_now, host_now)
+}
+
+/// `deadline_decision` against a pre-computed deadline. The caller may
+/// tighten `accepted_ms + ttl_ms` — the dispatcher caps it at the record's
+/// monotonic budget — but never widen it. All other checks are unchanged:
+/// malformed mappings still fail before expiry arithmetic and nothing
+/// wraps or saturates into extra validity.
+fn deadline_decision_at(
+    accepted_ms: u64,
+    deadline: u64,
+    mapping: Option<TimeMapping>,
+    device_now: u64,
+    host_now: u64,
+) -> DeadlineDecision {
     // Host clock below the admission stamp: elapsed validity is
     // unprovable, so dispatch is prohibited until it recovers.
     if host_now < accepted_ms {
@@ -204,6 +223,27 @@ pub fn deadline_decision(
     DeadlineDecision::Ready(device_deadline)
 }
 
+/// The record's effective deadline: the wall deadline `accepted + ttl`
+/// tightened by the monotonic budget. A wall-clock rewind that lands
+/// above `accepted_ms` is invisible to `now < accepted_ms` checks, so the
+/// monotonic anchor (`accepted_mono_ms`, stamped at admit time) supplies
+/// the real remaining life: the deadline is pulled back to
+/// `now + mono_remaining` whenever that is earlier — a rewound clock can
+/// never hand a fresh TIME_SAMPLE more life than real elapsed leaves.
+/// An unanchored record (pre-restart row, lane tombstone, legacy admit)
+/// falls back to the wall deadline — across a boot boundary trusted
+/// elapsed is unprovable, which is the restart path's existing contract.
+/// `None` means the wall deadline itself overflowed — hold, never wrap.
+fn capped_deadline_ms(op: &StoredOperation, now: u64, mono: u64) -> Option<u64> {
+    let wall = op.accepted_ms.checked_add(u64::from(op.ttl_ms))?;
+    if op.accepted_mono_ms == 0 {
+        return Some(wall);
+    }
+    let mono_deadline = op.accepted_mono_ms.checked_add(u64::from(op.ttl_ms))?;
+    let mono_remaining = mono_deadline.saturating_sub(mono);
+    Some(wall.min(now.saturating_add(mono_remaining)))
+}
+
 /// Project the device clock forward from a mapping: `d + (now - h1)` at
 /// the same rate. The drift margin already covers the relative error the
 /// projection can hide, and the device re-checks the deadline on receipt,
@@ -221,10 +261,12 @@ pub struct DispatchRequest {
 }
 
 /// Per-tick emit context threaded through the dispatch pass: the bound
-/// device lease, the tick timestamp, and the request sink.
+/// device lease, the tick timestamps (wall `now` and rewind-proof
+/// `mono`), and the request sink.
 struct Pass<'a> {
     lease: BootLease,
     now: u64,
+    mono: u64,
     out: &'a mut Vec<DispatchRequest>,
 }
 
@@ -265,6 +307,11 @@ pub struct Dispatcher {
     mapping: Option<TimeMapping>,
     /// Device `retired_through` as last reported to us.
     floor: u64,
+    /// The lease-up floor probe has been answered this lease: the device
+    /// refuses the reserved `through = 0` target with InvalidRequest but
+    /// still reports its live floor, so "unknown" and "confirmed 0" must
+    /// be distinguished — a lost probe is re-issued until answered.
+    floor_known: bool,
     next_request: u64,
     next_nonce: u64,
     pending: HashMap<u64, Pending>,
@@ -291,6 +338,7 @@ impl Dispatcher {
             lease: None,
             mapping: None,
             floor: 0,
+            floor_known: false,
             next_request: 0,
             next_nonce: 0,
             pending: HashMap::new(),
@@ -318,12 +366,17 @@ impl Dispatcher {
     }
 
     /// One pass: consume nothing (replies go through `handle_reply`),
-    /// produce the request bodies the wire needs next.
-    pub fn tick<S: OperationStore>(
+    /// produce the request bodies the wire needs next. `now` is the wall
+    /// clock; `mono` is a process-monotonic millisecond clock on the same
+    /// axis as `StoredOperation::accepted_mono_ms` — deadline checks are
+    /// capped by the monotonic budget so a wall-clock rewind can never
+    /// stretch a TTL.
+    pub fn tick_mono<S: OperationStore>(
         &mut self,
         store: &mut S,
         link: &LinkSnapshot,
         now: u64,
+        mono: u64,
     ) -> Vec<DispatchRequest> {
         let mut out = Vec::new();
         let lease = link.lease();
@@ -347,7 +400,7 @@ impl Dispatcher {
         // Host-side sweeps need no link: expiry and clock rewind are
         // provable locally for records that never reached USB.
         for op in &ops {
-            self.sweep(store, op, now);
+            self.sweep(store, op, now, mono);
         }
         let Some(lease_bytes) = self.lease else {
             return out;
@@ -365,6 +418,7 @@ impl Dispatcher {
         let mut pass = Pass {
             lease,
             now,
+            mono,
             out: &mut out,
         };
         self.dispatch_pass(store, &sorted, link, &mut pass, &mut highwater);
@@ -372,6 +426,18 @@ impl Dispatcher {
         self.skip_pass(&sorted, lease_bytes, now, &mut out);
         self.retire_pass(&sorted, lease_bytes, now, &mut out);
         out
+    }
+
+    /// Honest-clock convenience wrapper: tests that do not exercise a
+    /// wall-clock rewind drive wall and monotonic time identically.
+    #[cfg(test)]
+    fn tick<S: OperationStore>(
+        &mut self,
+        store: &mut S,
+        link: &LinkSnapshot,
+        now: u64,
+    ) -> Vec<DispatchRequest> {
+        self.tick_mono(store, link, now, now)
     }
 
     /// Lease bookkeeping on any change: dead-lease live records become
@@ -389,6 +455,7 @@ impl Dispatcher {
         self.mapping = None;
         self.last_attempt.clear();
         self.floor = 0;
+        self.floor_known = false;
         match lease {
             Some(bytes) => {
                 self.note(format!("lease up {}", hex16(&bytes)));
@@ -424,18 +491,40 @@ impl Dispatcher {
                         }
                     }
                 }
-                // Probe the floor: RETIRE_THROUGH(0) moves nothing and the
-                // response carries the device's current retired_through.
+                // Probe the floor: RETIRE_THROUGH(0) is a reserved target
+                // the device refuses as InvalidRequest — but the response
+                // still carries the live `retired_through`, which makes it
+                // the read-only floor query. `retire_pass` re-issues the
+                // probe until a response lands (`floor_known`).
                 out.push(self.emit_retire(0, bytes, now));
             }
             None => self.note("link down".to_string()),
         }
     }
 
-    /// Local sweeps that need no device: wall-clock expiry for provably
-    /// unsubmitted records and clock-rewind uncertainty.
-    fn sweep<S: OperationStore>(&mut self, store: &mut S, op: &StoredOperation, now: u64) {
+    /// Local sweeps that need no device: expiry for provably unsubmitted
+    /// records and clock-rewind uncertainty. The expiry bar is the
+    /// monotonic-capped deadline, so a wall rewind that lands above the
+    /// admit stamp cannot stretch the TTL — the record expires on real
+    /// elapsed time.
+    fn sweep<S: OperationStore>(
+        &mut self,
+        store: &mut S,
+        op: &StoredOperation,
+        now: u64,
+        mono: u64,
+    ) {
         if op.concluded() {
+            return;
+        }
+        let Some(deadline) = capped_deadline_ms(op, now, mono) else {
+            return;
+        };
+        // The monotonic cap can expire a record while the rewound wall
+        // clock still sits below the admit stamp — real elapsed time is
+        // the proof that matters, so check expiry before the rewind park.
+        if now >= deadline {
+            self.expire_unsubmitted(store, op.seq, now);
             return;
         }
         if now < op.accepted_ms {
@@ -462,15 +551,7 @@ impl Dispatcher {
                     true
                 });
             }
-            return;
         }
-        let Some(deadline) = op.accepted_ms.checked_add(u64::from(op.ttl_ms)) else {
-            return;
-        };
-        if now < deadline {
-            return;
-        }
-        self.expire_unsubmitted(store, op.seq, now);
     }
 
     /// Mark a provably-never-sent record EXPIRED_BEFORE_DISPATCH.
@@ -555,8 +636,14 @@ impl Dispatcher {
                 .mapping
                 .map(|m| project_device_now(&m, now))
                 .unwrap_or(0);
+            // The device deadline derives from the monotonic-capped wall
+            // deadline: a rewound host clock cannot hand a fresh
+            // TIME_SAMPLE more remaining life than real elapsed leaves.
+            let Some(deadline) = capped_deadline_ms(op, now, pass.mono) else {
+                continue;
+            };
             let decision =
-                deadline_decision(op.accepted_ms, op.ttl_ms, self.mapping, device_now, now);
+                deadline_decision_at(op.accepted_ms, deadline, self.mapping, device_now, now);
             let device_deadline = match decision {
                 // "No budget" does not mean "deadline elapsed": the sweep
                 // owns the EXPIRED_BEFORE_DISPATCH transition and only
@@ -753,7 +840,9 @@ impl Dispatcher {
     /// RETIRE_THROUGH over the contiguous prefix of positions the device
     /// has confirmed terminal (or we confirmed empty). Holes are filled by
     /// the skip pass first; a position with no settled record stops the
-    /// floor — the design never retires across the unknown.
+    /// floor — the design never retires across the unknown. While the
+    /// lease-up floor probe is unanswered it is re-issued here: the
+    /// pending timeout dropping it must not strand the floor at 0.
     fn retire_pass(
         &mut self,
         ops: &[StoredOperation],
@@ -768,6 +857,13 @@ impl Dispatcher {
         {
             return;
         }
+        if !self.floor_known {
+            // RETIRE_THROUGH(0) is the read-only floor query: the device
+            // refuses the reserved target as InvalidRequest but reports
+            // its current retired_through either way.
+            out.push(self.emit_retire(0, lease, now));
+            return;
+        }
         let attached: BTreeMap<u64, &StoredOperation> = ops
             .iter()
             .filter_map(|op| {
@@ -777,11 +873,17 @@ impl Dispatcher {
             .collect();
         let mut target = self.floor;
         while let Some(op) = attached.get(&target.saturating_add(1)) {
-            let settled = op.concluded()
-                && op
-                    .dispatch
-                    .as_ref()
-                    .is_some_and(|a| a.device_terminal && !a.skip_pending);
+            // 04 §5 keeps the gateway's send responsibility separate from
+            // host long-term result tracking: once the device reported a
+            // terminal slot (and the evidence is committed — the same
+            // atomic record update sets the marker), the position may
+            // retire even when the host record stays INDETERMINATE. What
+            // must never retire is the unconfirmed: `device_terminal` is
+            // only set by authenticated device evidence.
+            let settled = op
+                .dispatch
+                .as_ref()
+                .is_some_and(|a| a.device_terminal && !a.skip_pending);
             if !settled {
                 break;
             }
@@ -1257,7 +1359,15 @@ impl Dispatcher {
         }
         match response.result {
             HostOpsResult::Ok => {
-                self.floor = self.floor.max(response.retired_through);
+                self.adopt_floor(store, response.retired_through, response.lease.0);
+            }
+            // The device refuses the reserved `through = 0` target as
+            // InvalidRequest — the probe's answer is the reported floor.
+            // Only the probe may adopt from an error result, and only
+            // after the same-lease check above: arbitrary failures under a
+            // foreign or lane-mismatched echo are never trusted.
+            HostOpsResult::InvalidRequest if through == 0 => {
+                self.adopt_floor(store, response.retired_through, response.lease.0);
             }
             HostOpsResult::RetireRefused => {
                 self.note(format!(
@@ -1266,7 +1376,7 @@ impl Dispatcher {
                 ));
                 // The reported floor is authoritative here too — a lagging
                 // view must not wedge the lane.
-                self.floor = self.floor.max(response.retired_through);
+                self.adopt_floor(store, response.retired_through, response.lease.0);
                 // The refused span is (floor, through]: the response's
                 // retired_through is the device's CURRENT floor, not the
                 // refused target. Records above the adopted floor get
@@ -1301,6 +1411,53 @@ impl Dispatcher {
                 }
             }
             other => self.note(format!("retire result {other:?}")),
+        }
+    }
+
+    /// Adopt a floor the device reported in a same-lease retire response
+    /// (Ok, RetireRefused, or the InvalidRequest answer to the `through=0`
+    /// probe). Positions at or below the reported floor are retired on the
+    /// device — confirmed-terminal by definition — so mark ours the same
+    /// way the QUERY `Retired` result would: a still-open record lands
+    /// INDETERMINATE, and a pending SKIP is moot because the position no
+    /// longer exists. This is what lets a restarted host whose tombstone
+    /// window is shorter than the device's retire span rejoin the lane.
+    fn adopt_floor<S: OperationStore>(&mut self, store: &mut S, reported: u64, lease: [u8; 16]) {
+        self.floor_known = true;
+        if reported <= self.floor {
+            return;
+        }
+        self.floor = reported;
+        self.note(format!("device floor adopted at {reported}"));
+        let Ok(ops) = store.dispatch_view() else {
+            self.note("dispatch_view fault during floor adoption".to_string());
+            return;
+        };
+        for op in ops {
+            let below = op
+                .dispatch
+                .as_ref()
+                .is_some_and(|a| a.lease == lease && a.dispatch_seq <= reported);
+            if !below {
+                continue;
+            }
+            let _ = store.update_operation(op.seq, &mut |o| {
+                // Snapshot the conclusion flag before borrowing the
+                // attachment (same borrow split as `adopt_slot`).
+                let concluded = o.concluded();
+                let Some(d) = o.dispatch.as_mut() else {
+                    return false;
+                };
+                if d.device_terminal && !d.skip_pending && concluded {
+                    return false;
+                }
+                d.device_terminal = true;
+                d.skip_pending = false;
+                if !concluded {
+                    o.dispatch_state = DispatchState::Indeterminate;
+                }
+                true
+            });
         }
     }
 
@@ -1502,6 +1659,7 @@ pub fn dispatch_once(
     outbound: &mpsc::SyncSender<Outbound>,
     dispatcher: &mut Dispatcher,
     now: u64,
+    mono: u64,
 ) {
     let replies = state.dispatch_inbox.drain();
     let requests = {
@@ -1512,7 +1670,7 @@ pub fn dispatch_once(
         for (request, body) in replies {
             dispatcher.handle_reply(&mut *store, request, &body, now);
         }
-        dispatcher.tick(&mut *store, &link_snapshot(state), now)
+        dispatcher.tick_mono(&mut *store, &link_snapshot(state), now, mono)
     };
     for note in dispatcher.take_notes() {
         push_event(
@@ -1558,7 +1716,13 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
         .lineage();
     let mut dispatcher = Dispatcher::new(dispatcher_id);
     loop {
-        dispatch_once(&state, &outbound, &mut dispatcher, now_ms());
+        dispatch_once(
+            &state,
+            &outbound,
+            &mut dispatcher,
+            now_ms(),
+            crate::mono_ms(),
+        );
         state.dispatch_inbox.wait(Duration::from_millis(TICK_MS));
     }
 }
@@ -1568,6 +1732,7 @@ mod tests {
     use super::*;
     use crate::canonical::{self, SendRequest};
     use crate::send_store::{CancelOutcome, MemoryOperationStore, SubmitOutcome};
+    use crate::sqlite_store::SqliteOperationStore;
     use routeloom_protocol::host_ops::{
         decode_lane_request, decode_submit, decode_time_sample_request, encode_query_response,
         encode_receipt, encode_retire_response, encode_time_sample_response, RetireResponse,
@@ -1636,6 +1801,22 @@ mod tests {
     fn admitted(store: &mut MemoryOperationStore, key: u8, ttl: u32, now: u64) -> u64 {
         store.open_epoch((UID, NET), now).unwrap();
         match store.submit(UID, &request(key, ttl), now) {
+            SubmitOutcome::Accepted { seq } => seq,
+            _ => panic!("submit failed"),
+        }
+    }
+
+    /// Admit with an explicit monotonic anchor — rewind tests drive wall
+    /// and monotonic clocks on divergent synthetic values.
+    fn admitted_mono(
+        store: &mut MemoryOperationStore,
+        key: u8,
+        ttl: u32,
+        now: u64,
+        mono: u64,
+    ) -> u64 {
+        store.open_epoch((UID, NET), now).unwrap();
+        match store.submit_at(UID, &request(key, ttl), now, mono) {
             SubmitOutcome::Accepted { seq } => seq,
             _ => panic!("submit failed"),
         }
@@ -2740,5 +2921,472 @@ mod tests {
         let record = op(&store, seq);
         assert_eq!(record.dispatch_state, DispatchState::Indeterminate);
         assert!(record.dispatch.as_ref().unwrap().device_terminal);
+    }
+
+    /// RETIRE_THROUGH(0) is the read-only floor probe: the device refuses
+    /// the reserved target as InvalidRequest but still reports its live
+    /// retired_through. The host must adopt that floor — without it a
+    /// floor ahead of our records can never be learned and the lane
+    /// wedges at 0 (review: the probe previously stranded host restarts
+    /// whose device had already retired past the retained window).
+    #[test]
+    fn floor_probe_adopts_reported_floor() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let probe = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("floor probe");
+        assert_eq!(
+            decode_lane_request(&probe.body, SUB_RETIRE_THROUGH)
+                .unwrap()
+                .seq,
+            0
+        );
+        // Refused target, live floor in the response: adopted.
+        dispatcher.handle_reply(
+            &mut store,
+            probe.request,
+            &retire_response(HostOpsResult::InvalidRequest, 64),
+            1_010,
+        );
+        assert_eq!(dispatcher.floor, 64);
+        assert!(dispatcher.floor_known);
+        // A known floor stops the probes.
+        let out = dispatcher.tick(&mut store, &link(), 1_020);
+        assert!(!out.iter().any(|r| sub_of(r) == SUB_RETIRE_THROUGH));
+    }
+
+    /// The probe answer is only trusted under the live lease — a foreign
+    /// lease echo reports nothing.
+    #[test]
+    fn floor_probe_rejects_foreign_lease() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let probe = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("floor probe");
+        let foreign = encode_retire_response(&RetireResponse {
+            result: HostOpsResult::InvalidRequest,
+            lease: BootLease::derive(BOOT + 9, NODE),
+            retired_through: 64,
+        });
+        dispatcher.handle_reply(&mut store, probe.request, &foreign, 1_010);
+        assert_eq!(dispatcher.floor, 0);
+        assert!(!dispatcher.floor_known);
+    }
+
+    /// A probe that never gets its answer is re-issued: the pending
+    /// timeout dropping it must not strand the floor unknown forever.
+    #[test]
+    fn lost_floor_probe_is_reissued() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        assert!(out.iter().any(|r| sub_of(r) == SUB_RETIRE_THROUGH));
+        // Never answered: the pending times out and the next pass probes
+        // again instead of sitting at an unknown floor.
+        let out = dispatcher.tick(&mut store, &link(), 1_000 + RESPONSE_TIMEOUT_MS + 50);
+        let reprobe = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("lost probe re-issued");
+        assert_eq!(
+            decode_lane_request(&reprobe.body, SUB_RETIRE_THROUGH)
+                .unwrap()
+                .seq,
+            0
+        );
+    }
+
+    /// The review's wedge: a device floor ahead of every position the
+    /// restarted host can still name (its tombstone window is only the
+    /// top LANE_HOLE_WINDOW of consumed seqs) must not strand the lane.
+    /// RAM_ONLY positions 1..=34 were consumed before the crash; on the
+    /// same-boot device positions 1..=2 were already retired, 3..=34 are
+    /// provable holes. After the probe adopts floor=2 the tombstones
+    /// resolve via QUERY→NotRetained→SKIP, the floor climbs to 34 and a
+    /// fresh operation dispatches on seq 35.
+    #[test]
+    fn restart_rejoins_lane_past_retired_prefix() {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-dispatch-floor-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ops.db");
+        // Boot N of the daemon: 34 volatile records claim lane positions
+        // under this device's lease, then the process "dies".
+        {
+            let mut store = SqliteOperationStore::open(&path).unwrap();
+            let lineage = store.lineage();
+            store.open_epoch((UID, NET), 1_000).unwrap();
+            // Submit everything while the records are still HostQueued —
+            // the active quota counts DispatchPrepared/GatewayAccepted
+            // records, and 34 prepared records would legitimately exceed
+            // ACTIVE_CAP=32. The lane positions are what matter here.
+            let mut seqs = Vec::new();
+            for key in 0..34u8 {
+                let SubmitOutcome::Accepted { seq } =
+                    store.submit(UID, &request(key, 30_000), 1_000)
+                else {
+                    panic!("submit failed");
+                };
+                seqs.push(seq);
+            }
+            for seq in seqs {
+                assert!(matches!(
+                    store.prepare_dispatch(seq, lease(), lineage),
+                    Ok(PrepareOutcome::Prepared(_))
+                ));
+            }
+        }
+        // Restart against the same device boot. Volatile records are gone;
+        // tombstones stand in only for the top of the consumed range
+        // (dispatch_next=35 → seqs 2..=34); the device retired 1..=2.
+        let mut store = SqliteOperationStore::open(&path).unwrap();
+        let mut dispatcher = Dispatcher::new(store.lineage());
+        let out = dispatcher.tick(&mut store, &link(), 2_000);
+        let probe = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("floor probe after restart");
+        // The same tick already polls every unresolved attached position:
+        // the 33 tombstones stand in for consumed seqs 2..=34.
+        let queries: Vec<&DispatchRequest> = out
+            .iter()
+            .filter(|r| sub_of(r) == SUB_QUERY_DISPATCH)
+            .collect();
+        assert_eq!(queries.len(), 33, "33 tombstone positions to resolve");
+        dispatcher.handle_reply(
+            &mut store,
+            probe.request,
+            &retire_response(HostOpsResult::InvalidRequest, 2),
+            2_010,
+        );
+        assert_eq!(dispatcher.floor, 2, "probe floor adopted");
+        let mut pending_queries: Vec<(u64, u64)> = queries
+            .iter()
+            .map(|q| {
+                (
+                    q.request,
+                    decode_lane_request(&q.body, SUB_QUERY_DISPATCH)
+                        .unwrap()
+                        .seq,
+                )
+            })
+            .collect();
+        for (request, dseq) in pending_queries.drain(..) {
+            dispatcher.handle_reply(
+                &mut store,
+                request,
+                &query_response(
+                    HostOpsResult::NotRetained,
+                    SlotState::Empty,
+                    dseq,
+                    Evidence::None,
+                    [0; 32],
+                    [0; 24],
+                ),
+                2_030,
+            );
+        }
+        // Every hole owes a SKIP; only positions inside floor+32 emit now.
+        let out = dispatcher.tick(&mut store, &link(), 2_040);
+        let skips: Vec<(u64, u64)> = out
+            .iter()
+            .filter(|r| sub_of(r) == SUB_SKIP)
+            .map(|s| {
+                (
+                    s.request,
+                    decode_lane_request(&s.body, SUB_SKIP).unwrap().seq,
+                )
+            })
+            .collect();
+        // Position 2 was settled by floor adoption (already retired);
+        // the remaining 32 holes each owe a SKIP.
+        assert_eq!(skips.len(), 32);
+        for (request, dseq) in skips {
+            dispatcher.handle_reply(
+                &mut store,
+                request,
+                &receipt(
+                    SUB_SKIP,
+                    HostOpsResult::Ok,
+                    SlotState::Skipped,
+                    dseq,
+                    Evidence::None,
+                    [0; 32],
+                ),
+                2_050,
+            );
+        }
+        // The contiguous terminal prefix retires to 34.
+        let out = dispatcher.tick(&mut store, &link(), 2_060);
+        let retire = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("retire over resolved tombstones");
+        assert_eq!(
+            decode_lane_request(&retire.body, SUB_RETIRE_THROUGH)
+                .unwrap()
+                .seq,
+            34
+        );
+        dispatcher.handle_reply(
+            &mut store,
+            retire.request,
+            &retire_response(HostOpsResult::Ok, 34),
+            2_070,
+        );
+        assert_eq!(dispatcher.floor, 34);
+        // The next operation dispatches on the allocator's resumed seq.
+        let SubmitOutcome::Accepted { seq } = ({
+            let (epoch, _) = store.open_epoch((UID, NET), 2_100).unwrap();
+            let mut req = request(0x77, 30_000);
+            req.epoch = epoch;
+            store.submit(UID, &req, 2_100)
+        }) else {
+            panic!("submit failed");
+        };
+        let _ = seq;
+        // No mapping yet: the pass emits TIME_SAMPLE; answer it, then the
+        // SUBMIT must go out on dispatch_seq 35 — inside the device window.
+        let out = dispatcher.tick(&mut store, &link(), 2_110);
+        let sample = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_TIME_SAMPLE)
+            .expect("fresh mapping needed");
+        let nonce = decode_time_sample_request(&sample.body).unwrap().nonce;
+        dispatcher.handle_reply(
+            &mut store,
+            sample.request,
+            &time_sample(nonce, 42_000),
+            2_120,
+        );
+        let out = dispatcher.tick(&mut store, &link(), 2_130);
+        let submit = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_SUBMIT)
+            .expect("new op dispatches after floor recovery");
+        assert_eq!(decode_submit(&submit.body).unwrap().dispatch_seq, 35);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Finding 2 control case: a wall-clock rewind that lands still above
+    /// `accepted_ms` is invisible to `now < accepted_ms` — the monotonic
+    /// budget must still retire the record at real TTL.
+    #[test]
+    fn rewind_midflight_expires_on_monotonic_budget() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        // Admitted at wall 1000 / mono 1000, ttl 1000 → wall deadline 2000.
+        let seq = admitted_mono(&mut store, 0x10, 1_000, 1_000, 1_000);
+        // Real elapsed 800ms; the wall clock was rewound 600ms mid-flight
+        // and reads 1200 — still after the admit stamp, so the wall-only
+        // check saw ~800ms of phantom life.
+        dispatcher.tick_mono(&mut store, &offline(), 1_200, 1_800);
+        assert_eq!(op(&store, seq).dispatch_state, DispatchState::HostQueued);
+        // Real elapsed reaches the TTL while the wall clock shows 600ms.
+        dispatcher.tick_mono(&mut store, &offline(), 1_600, 2_000);
+        assert_eq!(
+            op(&store, seq).dispatch_state,
+            DispatchState::ExpiredBeforeDispatch,
+            "expiry follows real elapsed time, not the rewound wall clock"
+        );
+        // An unanchored record (legacy admit / post-restart load) cannot
+        // prove trusted elapsed and keeps wall-deadline semantics.
+        let legacy = admitted(&mut store, 0x11, 1_000, 1_000);
+        dispatcher.tick_mono(&mut store, &offline(), 1_600, 99_999);
+        assert_eq!(op(&store, legacy).dispatch_state, DispatchState::HostQueued);
+    }
+
+    /// A fresh TIME_SAMPLE after a rewind must rebuild the device deadline
+    /// from the monotonic budget — never regain the wall-inflated life.
+    #[test]
+    fn fresh_sample_after_rewind_gains_no_life() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let seq = admitted_mono(&mut store, 0x20, 1_000, 1_000, 1_000);
+        // Lease up at wall 1000 / mono 1000 → probe + TIME_SAMPLE.
+        let out = dispatcher.tick_mono(&mut store, &link(), 1_000, 1_000);
+        let probe = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .unwrap();
+        let sample = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_TIME_SAMPLE)
+            .unwrap();
+        dispatcher.handle_reply(
+            &mut store,
+            probe.request,
+            &retire_response(HostOpsResult::InvalidRequest, 0),
+            1_005,
+        );
+        let nonce = decode_time_sample_request(&sample.body).unwrap().nonce;
+        dispatcher.handle_reply(
+            &mut store,
+            sample.request,
+            &time_sample(nonce, 5_000),
+            1_010,
+        );
+        // Mapping d=5000, h0=1000, h1=1010. Real elapsed 800: the wall
+        // clock rewound 600 and reads 1200 while mono reads 1800 — only
+        // 200ms of real budget remains of the ttl=1000.
+        let out = dispatcher.tick_mono(&mut store, &link(), 1_200, 1_800);
+        let submit = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_SUBMIT)
+            .expect("real budget still permits dispatch");
+        let body = decode_submit(&submit.body).unwrap();
+        // Capped deadline: min(2000, 1200 + 200) = 1400 → remaining 390,
+        // span 400, margin 2 → device deadline 5000 + 388. Uncapped wall
+        // arithmetic would have granted ~990ms (≈5988).
+        assert_eq!(body.device_deadline, 5_388);
+        // At real elapsed 1000 (mono 2000, wall 1400) a still-queued
+        // sibling expires even though the wall says 400ms remain.
+        let queued = admitted_mono(&mut store, 0x21, 1_000, 1_000, 1_000);
+        dispatcher.tick_mono(&mut store, &link(), 1_400, 2_000);
+        assert_eq!(
+            op(&store, queued).dispatch_state,
+            DispatchState::ExpiredBeforeDispatch
+        );
+        assert_eq!(
+            op(&store, seq).dispatch_state,
+            DispatchState::DispatchPrepared,
+            "already-sent record is governed by the device deadline it was given"
+        );
+    }
+
+    /// The link-down wait cannot shelter a record past real TTL either:
+    /// expiry while reconnecting consults the same monotonic budget.
+    #[test]
+    fn reconnect_wait_past_ttl_expires_on_monotonic_budget() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let seq = admitted_mono(&mut store, 0x22, 1_000, 1_000, 1_000);
+        // Link down the whole time; real elapsed 1200ms, wall shows 200.
+        dispatcher.tick_mono(&mut store, &offline(), 1_200, 2_200);
+        assert_eq!(
+            op(&store, seq).dispatch_state,
+            DispatchState::ExpiredBeforeDispatch
+        );
+    }
+
+    /// Finding 3: a device-terminal INDETERMINATE head position must not
+    /// wedge the retire floor. The host record keeps INDETERMINATE (the
+    /// outcome is honestly unknown) but the lane position is confirmed
+    /// terminal — the gateway's send responsibility ended and 04 §5 lets
+    /// the floor pass it once the evidence is committed.
+    #[test]
+    fn device_terminal_indeterminate_head_unblocks_retire() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let first = admitted(&mut store, 0x30, 30_000, 1_000);
+        let s1 = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        // seq 1: the device reports Failed — terminal on the lane, honest
+        // INDETERMINATE on the host record, never concluded.
+        let hash1 = op(&store, first).hash;
+        dispatcher.handle_reply(
+            &mut store,
+            s1.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::Ok,
+                SlotState::Failed,
+                1,
+                Evidence::None,
+                hash1,
+            ),
+            1_050,
+        );
+        let record = op(&store, first);
+        assert_eq!(record.dispatch_state, DispatchState::Indeterminate);
+        assert!(!record.concluded());
+        assert!(record.dispatch.as_ref().unwrap().device_terminal);
+        // seq 2 Delivered; 31 more queued ops fill the window behind them.
+        let second = admitted(&mut store, 0x31, 30_000, 1_055);
+        let out = dispatcher.tick(&mut store, &link(), 1_060);
+        let s2 = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_SUBMIT)
+            .expect("second submit");
+        // The confirmed-terminal head already lets the floor past seq 1.
+        let r1 = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("retire through the terminal head");
+        assert_eq!(
+            decode_lane_request(&r1.body, SUB_RETIRE_THROUGH)
+                .unwrap()
+                .seq,
+            1
+        );
+        dispatcher.handle_reply(
+            &mut store,
+            r1.request,
+            &retire_response(HostOpsResult::Ok, 1),
+            1_065,
+        );
+        let hash2 = op(&store, second).hash;
+        dispatcher.handle_reply(
+            &mut store,
+            s2.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::Ok,
+                SlotState::Delivered,
+                2,
+                Evidence::EndSdkReceived,
+                hash2,
+            ),
+            1_070,
+        );
+        for i in 0..31u8 {
+            admitted(&mut store, 0x40 + i, 30_000, 1_100);
+        }
+        let out = dispatcher.tick(&mut store, &link(), 1_200);
+        let submits = out
+            .iter()
+            .filter(|r| sub_of(r) == host_ops::SUB_SUBMIT)
+            .count();
+        // floor=1 frees position 33 — the regression proof: before the fix
+        // the floor wedged at 0 and only 30 of the 31 queued ops could go.
+        assert_eq!(submits, 31, "retired head frees the 33rd position");
+        // The Failed head is device-terminal: the retire prefix must pass
+        // it — before the fix, `concluded()` gated the walk and the floor
+        // never moved, wedging every send behind position 33.
+        let retire = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_RETIRE_THROUGH)
+            .expect("retire must pass the device-terminal head");
+        assert_eq!(
+            decode_lane_request(&retire.body, SUB_RETIRE_THROUGH)
+                .unwrap()
+                .seq,
+            2
+        );
+        dispatcher.handle_reply(
+            &mut store,
+            retire.request,
+            &retire_response(HostOpsResult::Ok, 2),
+            1_210,
+        );
+        assert_eq!(dispatcher.floor, 2);
+        // The head record keeps its honest INDETERMINATE outcome — the
+        // position retired, the long-term tracking did not change.
+        assert_eq!(
+            op(&store, first).dispatch_state,
+            DispatchState::Indeterminate
+        );
     }
 }

@@ -28,7 +28,7 @@ use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Bounded observation buffers. The daemon keeps only what it legitimately
 /// observes on the USB stream; mesh truth it cannot see stays `unknown`.
@@ -649,6 +649,14 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Process-monotonic milliseconds — the rewind-proof counterpart of
+/// `now_ms` used for deadline budgets (TX-I2 records it on every admitted
+/// operation so a wall-clock rewind can never stretch a TTL).
+fn mono_ms() -> u64 {
+    static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 /// Escapes for JSON string contexts: quotes, backslashes and every C0
@@ -1945,7 +1953,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 path.display(),
                 receive_log::hex_lower(&store.lineage())
             );
-            StoreBackend::Sqlite(store)
+            StoreBackend::Sqlite(Box::new(store))
         }
         None => {
             eprintln!("operation store: memory (RAM_ONLY only; pass --op-store for durability)");
@@ -2357,7 +2365,7 @@ mod tests {
 
         // First pass: no mapping yet → lease probe (RETIRE_THROUGH 0) and a
         // TIME_SAMPLE request go to the writer queue as sealed HostOps.
-        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now);
+        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now, now);
         let mut sample_request = None;
         let mut saw_probe = false;
         while let Ok(outbound) = rx.try_recv() {
@@ -2393,7 +2401,7 @@ mod tests {
                 device_time: 1_000,
             }),
         );
-        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now + 1);
+        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now + 1, now + 1);
         let mut submit_request = None;
         while let Ok(outbound) = rx.try_recv() {
             let Outbound::Seal(frame) = outbound else {
@@ -2433,7 +2441,7 @@ mod tests {
                 evidence: Evidence::GatewayAccepted,
             }),
         );
-        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now + 2);
+        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now + 2, now + 2);
         let store = state.operation_store.lock().unwrap();
         let op = store.get_by_seq(seq).unwrap().unwrap();
         assert_eq!(

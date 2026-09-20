@@ -19,6 +19,20 @@
 //! every other state untouched — HOST_QUEUED was never transmitted, and
 //! INDETERMINATE is never auto-reissued. Retire advances the persisted
 //! floor and deletes records atomically over the contiguous retired prefix.
+//!
+//! Two restart/failure rules deserve their own mention. First, the RAM_ONLY
+//! dedup map is volatile by contract (04-capacity-storage.md §3 — no
+//! guarantee across a daemon stop), so a restart cannot tell a resubmitted
+//! RAM_ONLY key from a new one while its accept-epoch is still open. The
+//! store therefore seals every still-open epoch in one transaction at open:
+//! resubmitted keys fail closed with EPOCH_CLOSED, durable records keep
+//! answering Replay/get_by_key, and new sends mint a fresh epoch — never a
+//! second execution under a recycled identity. Second, payloads live in the
+//! DB file AND its WAL/journal sidecars, so the file is created owner-only
+//! before SQLite ever sees the path (the unix VFS derives sidecar modes
+//! from the main file) and every file is chmod 0600 again once sidecars
+//! exist — a chmod failure refuses startup rather than leaving the WAL
+//! readable by a different UID behind the API ACL's back.
 
 use crate::canonical::SendRequest;
 use crate::send_store::{
@@ -129,6 +143,44 @@ fn store_file_bytes(path: &Path) -> Option<u64> {
         total += std::fs::metadata(sidecar).map(|m| m.len()).unwrap_or(0);
     }
     Some(total)
+}
+
+/// Owner-only mode on the store file and every sidecar SQLite may have
+/// created (-wal, -shm, -journal). Payloads live in these files and the
+/// WAL is addressed by page, not by the API ACL — a permissive umask at
+/// creation would leave them readable by a different UID, which is an
+/// ACL bypass, not a hygiene issue. The main file must exist and take
+/// the mode; missing sidecars are skipped; any other failure refuses
+/// startup — never warn-and-continue on a store holding payloads.
+#[cfg(unix)]
+fn enforce_owner_only(path: &Path) -> Result<(), OpenError> {
+    use std::os::unix::fs::PermissionsExt;
+    let chmod = |target: PathBuf, required: bool| -> Result<(), OpenError> {
+        match std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)) {
+            Ok(()) => Ok(()),
+            Err(e) if !required && e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(OpenError {
+                message: format!(
+                    "STORE_RECOVERY_REQUIRED: cannot make {} owner-only: {e}",
+                    target.display()
+                ),
+            }),
+        }
+    };
+    chmod(path.to_path_buf(), true)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        chmod(PathBuf::from(sidecar), false)?;
+    }
+    Ok(())
+}
+
+/// Non-unix builds have no POSIX mode to enforce; the platform's own ACLs
+/// govern the files instead.
+#[cfg(not(unix))]
+fn enforce_owner_only(_path: &Path) -> Result<(), OpenError> {
+    Ok(())
 }
 
 struct ScopeRow {
@@ -259,6 +311,9 @@ fn read_operation_row(row: &rusqlite::Row<'_>) -> Result<StoredOperation, rusqli
         canonical: row.get(13)?,
         hash,
         accepted_ms: db_to_ms(row.get::<_, i64>(15)?).ok_or_else(|| corrupt("accepted_ms"))?,
+        // Filled by the caller from `mono_anchor`: the stamp is volatile
+        // by design, never persisted.
+        accepted_mono_ms: 0,
         dispatch_state: DispatchState::parse(&state_text)
             .ok_or_else(|| corrupt("dispatch_state"))?,
         terminal_ms,
@@ -298,6 +353,12 @@ pub struct SqliteOperationStore {
     /// open, keyed by `u64::MAX - dispatch_seq` — outside every real
     /// sequence space.
     lane_tombstones: HashMap<u64, StoredOperation>,
+    /// Monotonic admit stamps for durable records this boot (seq → mono
+    /// ms). Deliberately volatile: a monotonic clock is meaningless across
+    /// a restart, so reopened rows read back `accepted_mono_ms == 0` and
+    /// keep the pre-anchor wall-clock deadline semantics. RAM-overlay
+    /// records carry the stamp on the struct itself.
+    mono_anchor: HashMap<u64, u64>,
 }
 
 impl std::fmt::Debug for SqliteOperationStore {
@@ -325,6 +386,28 @@ impl SqliteOperationStore {
                         parent.display()
                     ),
                 })?;
+            }
+            // Create the file owner-only BEFORE SQLite ever opens the
+            // path: the unix VFS derives the -wal/-shm/-journal modes
+            // from the main file at creation, so a 0600 main file keeps
+            // the sidecars owner-only from birth instead of for the
+            // window between WAL setup and a later chmod. create_new
+            // keeps a path that appeared since `fresh` fatal.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path)
+                    .map_err(|e| OpenError {
+                        message: format!(
+                            "STORE_RECOVERY_REQUIRED: cannot create operation store {}: {e}",
+                            path.display()
+                        ),
+                    })?;
             }
         }
         let mut conn = Connection::open(path).map_err(|e| OpenError {
@@ -373,6 +456,12 @@ impl SqliteOperationStore {
                 }
             }
         };
+        // Tighten a validated existing file (and any sidecars left by an
+        // older version) BEFORE journal_mode=WAL: SQLite derives the mode
+        // of sidecars it creates from the main file, so this is the last
+        // point where that inheritance is still controllable. Fresh files
+        // were already born 0600 above; chmod failure refuses startup.
+        enforce_owner_only(path)?;
         // WAL where the filesystem allows it, rollback journal otherwise —
         // either is durable with FULL synchronous. Under EXCLUSIVE locking
         // a second opener fails here (or on the probe above under WAL)
@@ -415,14 +504,6 @@ impl SqliteOperationStore {
                 if let Ok(dir) = std::fs::File::open(parent) {
                     let _ = dir.sync_all();
                 }
-            }
-            // Payloads live in this file: owner-only from creation. The
-            // process umask still governs the -wal/-shm sidecars sqlite
-            // creates later.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             }
         }
         match version {
@@ -486,6 +567,27 @@ impl SqliteOperationStore {
                     path.display()
                 ),
             });
+        }
+        // Seal every still-open accept-epoch in one transaction. The
+        // RAM_ONLY dedup map is volatile by contract, so a restart cannot
+        // distinguish a resubmitted RAM_ONLY key from a new one under a
+        // still-open epoch — the review's double-send hole. Closing here
+        // makes old keys fail closed: durable records keep resolving
+        // Replay/get_by_key, everything else under the epoch gets
+        // EPOCH_CLOSED, and the next open_epoch mints a fresh number.
+        // An open epoch already present in closed_epoch is corruption —
+        // the INSERT faults and open refuses rather than merging it.
+        {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO closed_epoch(uid, network, epoch) SELECT uid, network, open_epoch FROM scope_epoch WHERE open_epoch IS NOT NULL",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE scope_epoch SET open_epoch=NULL, open_ms=NULL WHERE open_epoch IS NOT NULL",
+                [],
+            )?;
+            tx.commit()?;
         }
         // Crash recovery for DISPATCH_PREPARED records, split on the
         // persisted `submitted` claim flag: a record whose flag says the
@@ -597,6 +699,7 @@ impl SqliteOperationStore {
                                 canonical: Vec::new(),
                                 hash: [0; 32],
                                 accepted_ms: 0,
+                                accepted_mono_ms: 0,
                                 dispatch_state: DispatchState::Indeterminate,
                                 terminal_ms: Some(0),
                                 dispatch: Some(dispatch),
@@ -606,6 +709,12 @@ impl SqliteOperationStore {
                 }
             }
         }
+        // Final sweep now that WAL recovery and the writes above have
+        // materialized every sidecar: main file, -wal, -shm and -journal
+        // all owner-only. This is the regression-proof layer — even if
+        // the mode-inheritance assumption above ever stopped holding,
+        // a file left group/other-readable here refuses startup.
+        enforce_owner_only(path)?;
         Ok(Self {
             path: path.to_path_buf(),
             lineage,
@@ -613,6 +722,7 @@ impl SqliteOperationStore {
             ram_by_identity: HashMap::new(),
             ram_by_seq: HashMap::new(),
             lane_tombstones,
+            mono_anchor: HashMap::new(),
         })
     }
 
@@ -786,8 +896,11 @@ impl SqliteOperationStore {
         path: &Path,
         uid: u32,
         req: &SendRequest,
-        now_ms: u64,
+        // Wall and monotonic admit stamps travel together: the record's
+        // TTL runs on `now_ms`, the rewind-proof budget on `mono_ms`.
+        stamps: (u64, u64),
     ) -> Result<SubmitOutcome, rusqlite::Error> {
+        let (now_ms, mono_ms) = stamps;
         let identity = OpIdentity {
             uid,
             network: req.network,
@@ -917,6 +1030,7 @@ impl SqliteOperationStore {
             canonical: req.canonical.clone(),
             hash: req.hash,
             accepted_ms: now_ms,
+            accepted_mono_ms: mono_ms,
             dispatch_state: DispatchState::HostQueued,
             terminal_ms: None,
             dispatch: None,
@@ -995,7 +1109,7 @@ impl SqliteOperationStore {
     /// next commit via SQLite's commit hook (a hook returning true turns
     /// the COMMIT into a ROLLBACK), then disarm.
     #[cfg(test)]
-    fn veto_next_commit(&self) {
+    pub fn veto_next_commit(&self) {
         let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.conn.commit_hook(Some(move || {
             armed.swap(false, std::sync::atomic::Ordering::Relaxed)
@@ -1054,6 +1168,18 @@ impl SqliteOperationStore {
             ],
         )?;
         Ok(Ok((epoch, true)))
+    }
+
+    /// Merge the volatile monotonic admit stamp back into a row-read
+    /// record: the DB column layout predates the anchor and a monotonic
+    /// stamp is meaningless after a restart anyway.
+    fn with_mono_anchor(&self, mut op: StoredOperation) -> StoredOperation {
+        if op.accepted_mono_ms == 0 {
+            if let Some(mono) = self.mono_anchor.get(&op.seq) {
+                op.accepted_mono_ms = *mono;
+            }
+        }
+        op
     }
 
     /// Lane allocator for the RAM-overlay branch of prepare_dispatch — the
@@ -1118,12 +1244,19 @@ impl OperationStore for SqliteOperationStore {
         outcome
     }
 
-    fn submit(&mut self, uid: u32, req: &SendRequest, now_ms: u64) -> SubmitOutcome {
+    fn submit_at(
+        &mut self,
+        uid: u32,
+        req: &SendRequest,
+        now_ms: u64,
+        mono_ms: u64,
+    ) -> SubmitOutcome {
         let Self {
             conn,
             ram_by_identity,
             ram_by_seq,
             path,
+            mono_anchor,
             ..
         } = self;
         let tx = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
@@ -1138,7 +1271,7 @@ impl OperationStore for SqliteOperationStore {
             path.as_path(),
             uid,
             req,
-            now_ms,
+            (now_ms, mono_ms),
         ) {
             Ok(outcome) => outcome,
             Err(error) => return Self::fault(error),
@@ -1146,6 +1279,13 @@ impl OperationStore for SqliteOperationStore {
         match tx.commit() {
             Ok(()) => {
                 Self::apply_ram_delta(ram_by_identity, ram_by_seq, delta);
+                // Volatile monotonic admit stamp (see the field): only
+                // recorded once the record itself committed.
+                if let SubmitOutcome::Accepted { seq } = outcome {
+                    if mono_ms != 0 {
+                        mono_anchor.insert(seq, mono_ms);
+                    }
+                }
                 outcome
             }
             Err(error) => Self::fault(error),
@@ -1169,6 +1309,7 @@ impl OperationStore for SqliteOperationStore {
                 read_operation_row,
             )
             .optional()
+            .map(|op| op.map(|op| self.with_mono_anchor(op)))
             .map_err(|error| {
                 eprintln!("opstore fault: {error}");
             })
@@ -1192,6 +1333,7 @@ impl OperationStore for SqliteOperationStore {
                 read_operation_row,
             )
             .optional()
+            .map(|op| op.map(|op| self.with_mono_anchor(op)))
             .map_err(|error| {
                 eprintln!("opstore fault: {error}");
             })
@@ -1229,7 +1371,7 @@ impl OperationStore for SqliteOperationStore {
             .map_err(failed)?;
         let rows = stmt.query_map([], read_operation_row).map_err(failed)?;
         for row in rows {
-            out.push(row.map_err(failed)?);
+            out.push(self.with_mono_anchor(row.map_err(failed)?));
         }
         // Lane tombstones carry attachments too — the dispatcher resolves
         // them through the same query/skip/retire passes.
@@ -1543,8 +1685,10 @@ mod tests {
         {
             let mut store = db.open();
             assert_eq!(store.lineage(), lineage);
-            // Same epoch binds without creating a new one.
-            assert_eq!(store.open_epoch((501, 1), 100), Ok((1, false)));
+            // The restart sealed epoch 1 — the RAM dedup map is gone, so
+            // the store cannot re-admit under it safely. open_epoch mints
+            // a fresh number instead of rebinding.
+            assert_eq!(store.open_epoch((501, 1), 100), Ok((2, true)));
             // Durable record intact, byte for byte.
             let op = store.get_by_seq(1).unwrap().unwrap();
             assert_eq!(op.payload, vec![0x00, 0xff]);
@@ -1557,7 +1701,8 @@ mod tests {
                 key: durable("00112233445566778899aabbccddeeff", 1).key,
             };
             assert_eq!(store.get_by_key(&identity).unwrap().unwrap().seq, 1);
-            // Replay after restart returns the same id, not a new record.
+            // Replay after restart returns the same id, not a new record —
+            // durable dedup resolves before the epoch check.
             match store.submit(501, &durable("00112233445566778899aabbccddeeff", 1), 2000) {
                 SubmitOutcome::Replay { seq } => assert_eq!(seq, 1),
                 other => panic!("expected replay, got {}", outcome_name(&other)),
@@ -1567,7 +1712,7 @@ mod tests {
             let seq = submit(
                 &mut store,
                 501,
-                &durable("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1),
+                &durable("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 2),
                 2000,
             );
             assert_eq!(seq, 3);
@@ -1644,10 +1789,12 @@ mod tests {
         }
         {
             let mut store = db.open();
-            // Still epoch 2 after the restart — no rotation replayed.
+            // The restart sealed the still-open epoch 2 alongside the
+            // already-closed 1 — no rotation is replayed and the next
+            // open_epoch mints a fresh number.
             assert_eq!(
                 store.open_epoch((501, 1), EPOCH_WINDOW_MS + 1),
-                Ok((2, false))
+                Ok((3, true))
             );
             assert!(matches!(
                 store.submit(501, &durable("ffffffffffffffffffffffffffffffff", 1), 0),
@@ -2171,11 +2318,13 @@ mod tests {
             assert!(tomb.payload.is_empty());
             assert!(tomb.dispatch.as_ref().unwrap().submitted);
             // The allocator resumes: the next binding is seq 4, never a
-            // re-issue of a seq the device may still hold.
+            // re-issue of a seq the device may still hold. The restart
+            // sealed epoch 1, so the new send mints a fresh epoch first.
+            assert_eq!(store.open_epoch((501, 1), 0), Ok((2, true)));
             let d = submit(
                 &mut store,
                 501,
-                &durable("dddddddddddddddddddddddddddddddd", 1),
+                &durable("dddddddddddddddddddddddddddddddd", 2),
                 0,
             );
             match store.prepare_dispatch(d, lease, dispatcher).unwrap() {
@@ -2268,5 +2417,130 @@ mod tests {
         let _store = db.open();
         let mode = std::fs::metadata(&db.path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// The reviewer's double-send repro: a RAM_ONLY op resubmitted under
+    /// its still-open epoch after a restart must NOT be re-admitted with
+    /// a new sequence — the dedup map is volatile, so the epoch itself is
+    /// sealed and old keys fail closed. Durable keys still replay.
+    #[test]
+    fn restart_seals_open_epoch_against_ram_replays() {
+        let db = TestDb::new("epochseal");
+        let ram_req = ram("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1);
+        let durable_req = durable("00112233445566778899aabbccddeeff", 1);
+        {
+            let mut store = db.open();
+            assert_eq!(store.open_epoch((501, 1), 0), Ok((1, true)));
+            assert_eq!(submit(&mut store, 501, &durable_req, 0), 1);
+            assert_eq!(submit(&mut store, 501, &ram_req, 0), 2);
+        }
+        {
+            let mut store = db.open();
+            // Same request, same lineage, same epoch: refused as
+            // EPOCH_CLOSED, never re-issued as a new operation.
+            assert!(matches!(
+                store.submit(501, &ram_req, 100),
+                SubmitOutcome::EpochClosed
+            ));
+            let identity = OpIdentity {
+                uid: 501,
+                network: 1,
+                epoch: 1,
+                key: ram_req.key,
+            };
+            assert!(store.get_by_key(&identity).unwrap().is_none());
+            // A durable key under the sealed epoch still replays —
+            // identity resolves before the epoch check.
+            match store.submit(501, &durable_req, 100) {
+                SubmitOutcome::Replay { seq } => assert_eq!(seq, 1),
+                other => panic!("expected replay, got {}", outcome_name(&other)),
+            }
+            // A key never issued under the sealed epoch fails closed too.
+            assert!(matches!(
+                store.submit(501, &ram("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1), 100),
+                SubmitOutcome::EpochClosed
+            ));
+            // New sends mint a fresh epoch and never reuse a sequence.
+            assert_eq!(store.open_epoch((501, 1), 100), Ok((2, true)));
+            assert_eq!(
+                submit(
+                    &mut store,
+                    501,
+                    &ram("cccccccccccccccccccccccccccccccc", 2),
+                    100
+                ),
+                3
+            );
+        }
+    }
+
+    /// The DB and every sidecar (-wal/-shm) stay owner-only on a
+    /// world-searchable directory — the protection comes from the file
+    /// modes, not from a private parent — and reopening a store whose
+    /// files were loosened to 0644 tightens them again instead of
+    /// serving a WAL a different UID could read around the API ACL.
+    #[cfg(unix)]
+    #[test]
+    fn store_files_stay_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-cap1-perms-{}-{}",
+            std::process::id(),
+            TEST_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let db = TestDb {
+            path: dir.join("store.db"),
+        };
+        let assert_all_owner_only = |dir: &Path| {
+            let entries: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            // EXCLUSIVE locking keeps the wal-index in heap memory, so
+            // -shm may legitimately never exist — whatever SQLite did
+            // create must be owner-only.
+            assert!(
+                entries.len() >= 2,
+                "expected db plus WAL sidecar, got {entries:?}"
+            );
+            for file in entries {
+                let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "{} is {mode:o}", file.display());
+            }
+        };
+        {
+            let mut store = db.open();
+            store.open_epoch((501, 1), 0).unwrap();
+            submit(
+                &mut store,
+                501,
+                &durable("00112233445566778899aabbccddeeff", 1),
+                0,
+            );
+            assert_all_owner_only(&dir);
+        }
+        // Loosen everything to what a permissive umask once produced —
+        // reopen must repair it, not warn-and-continue.
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let file = entry.unwrap().path();
+            if file.is_file() {
+                std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            }
+        }
+        {
+            let mut store = db.open();
+            // The restart sealed epoch 1 — admit under a fresh epoch.
+            assert_eq!(store.open_epoch((501, 1), 1), Ok((2, true)));
+            submit(
+                &mut store,
+                501,
+                &durable("11111111111111111111111111111111", 2),
+                1,
+            );
+            assert_all_owner_only(&dir);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

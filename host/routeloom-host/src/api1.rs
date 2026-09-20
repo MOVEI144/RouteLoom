@@ -58,8 +58,10 @@ pub struct ApiContext<'a, S: OperationStore> {
 
 struct ApiError {
     code: &'static str,
-    /// JSON object body for `error.detail` (without the braces content is
-    /// appended after the mandatory "message" member).
+    /// `error.detail.message` — every error carries one.
+    message: String,
+    /// Additional `error.detail` members as `"key":value` pairs joined by
+    /// commas (no leading comma; the serializer adds the separator).
     extra_fields: String,
     retryable: bool,
 }
@@ -68,7 +70,8 @@ impl ApiError {
     fn simple(code: &'static str, message: &str) -> Self {
         Self {
             code,
-            extra_fields: format!(",\"message\":\"{}\"", escape_string(message)),
+            message: message.to_string(),
+            extra_fields: String::new(),
             retryable: false,
         }
     }
@@ -200,10 +203,15 @@ fn error_response(request_id: Option<&str>, error: &ApiError) -> String {
         || "null".to_string(),
         |id| format!("\"{}\"", escape_string(id)),
     );
+    let extra = if error.extra_fields.is_empty() {
+        String::new()
+    } else {
+        format!(",{}", error.extra_fields)
+    };
     let response = format!(
-        "{{\"v\":1,\"request_id\":{id},\"ok\":false,\"error\":{{\"code\":\"{}\",\"detail\":{{{}}},\"retryable\":{}}}}}",
+        "{{\"v\":1,\"request_id\":{id},\"ok\":false,\"error\":{{\"code\":\"{}\",\"detail\":{{\"message\":\"{}\"{extra}}},\"retryable\":{}}}}}",
         error.code,
-        error.extra_fields,
+        escape_string(&error.message),
         error.retryable,
     );
     bound_response(response)
@@ -384,8 +392,9 @@ fn messages_read<S: OperationStore>(
         let (oldest, tail, ..) = log.bounds(network, ctx.now_ms);
         return Err(ApiError {
             code: "CURSOR_EPOCH_CHANGED",
+            message: "cursor belongs to a previous daemon epoch".to_string(),
             extra_fields: format!(
-                ",\"message\":\"cursor belongs to a previous daemon epoch\",\"loss_count\":null,\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"",
+                "\"loss_count\":null,\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"",
                 cursor_at(oldest.saturating_sub(1)),
                 cursor_at(tail),
             ),
@@ -400,8 +409,9 @@ fn messages_read<S: OperationStore>(
             tail_seq,
         } => Err(ApiError {
             code: "CURSOR_GAP",
+            message: "receive-log records were reclaimed ahead of this cursor".to_string(),
             extra_fields: format!(
-                ",\"message\":\"receive-log records were reclaimed ahead of this cursor\",\"lost_from\":{lost_from},\"lost_to\":{lost_to},\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"",
+                "\"lost_from\":{lost_from},\"lost_to\":{lost_to},\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"",
                 cursor_at(oldest_seq.saturating_sub(1)),
                 cursor_at(tail_seq),
             ),
@@ -519,8 +529,11 @@ fn operations_open_epoch<S: OperationStore>(
 }
 
 /// `messages.submit`: validate, gate capabilities, authorize SEND, then
-/// admit into the operation table. Replays return the same OperationId;
-/// same key with different bytes is a CONFLICT, never an overwrite.
+/// admit into the operation table. Replays return the same OperationId
+/// with the record's current status — the same document operations.get
+/// reports, so a resubmitted key on a cancelled/expired/delivered
+/// operation answers its real state, never a fabricated HOST_QUEUED.
+/// Same key with different bytes is a CONFLICT, never an overwrite.
 fn messages_submit<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -560,14 +573,27 @@ fn messages_submit<S: OperationStore>(
         .operation_store
         .lock()
         .expect("operation store poisoned");
-    match store.submit(uid, &req, ctx.now_ms) {
-        SubmitOutcome::Accepted { seq } | SubmitOutcome::Replay { seq } => {
+    // The monotonic stamp rides alongside the wall admit time so a
+    // wall-clock rewind can never stretch the dispatch deadline.
+    match store.submit_at(uid, &req, ctx.now_ms, crate::mono_ms()) {
+        SubmitOutcome::Accepted { seq } => {
             Ok(submit_result(&store.lineage(), seq, req.storage))
+        }
+        // Replay answers the committed record through the operations.get
+        // serializer — its committed dispatch_state, evidence and
+        // message_key, not the admission-time placeholders.
+        SubmitOutcome::Replay { seq } => {
+            let record = store
+                .get_by_seq(seq)
+                .map_err(|()| store_fault())?
+                .expect("replay seq admitted above");
+            Ok(op_status(&record, &store.lineage(), ctx.now_ms))
         }
         SubmitOutcome::Conflict { existing_seq } => Err(ApiError {
             code: "CONFLICT",
+            message: "same idempotency key with different request bytes".to_string(),
             extra_fields: format!(
-                ",\"message\":\"same idempotency key with different request bytes\",\"existing_operation_id\":\"{}\"",
+                "\"existing_operation_id\":\"{}\"",
                 canonical::format_operation_id(&store.lineage(), existing_seq),
             ),
             retryable: false,
@@ -590,8 +616,9 @@ fn messages_submit<S: OperationStore>(
 fn rate_limited(deny: RateDeny) -> ApiError {
     ApiError {
         code: "RATE_LIMITED",
+        message: "admission rate limit exceeded".to_string(),
         extra_fields: format!(
-            ",\"message\":\"admission rate limit exceeded\",\"scope\":\"{}\",\"retry_after_ms\":{}",
+            "\"scope\":\"{}\",\"retry_after_ms\":{}",
             deny.scope, deny.retry_after_ms,
         ),
         retryable: true,
@@ -604,8 +631,9 @@ fn no_capacity(status: &CapacityStatus) -> ApiError {
         .map_or_else(|| "null".to_string(), |ms| ms.to_string());
     ApiError {
         code: "NO_CAPACITY",
+        message: "operation store has no free admission slot".to_string(),
         extra_fields: format!(
-            ",\"message\":\"operation store has no free admission slot\",\"free_slots\":{},\"free_bytes\":{},\"reclaimable_at\":{reclaimable}",
+            "\"free_slots\":{},\"free_bytes\":{},\"reclaimable_at\":{reclaimable}",
             status.free_slots, status.free_bytes,
         ),
         retryable: true,
@@ -839,10 +867,8 @@ fn operations_cancel<S: OperationStore>(
         }
         Ok(CancelOutcome::TooLate(state)) => Err(ApiError {
             code: "CANCEL_TOO_LATE",
-            extra_fields: format!(
-                ",\"message\":\"a USB write may already have begun; remote undo is not promised\",\"dispatch_state\":\"{}\"",
-                state.name(),
-            ),
+            message: "a USB write may already have begun; remote undo is not promised".to_string(),
+            extra_fields: format!("\"dispatch_state\":\"{}\"", state.name()),
             retryable: false,
         }),
         // The record was there at authorization; a race removed it.
@@ -1029,6 +1055,44 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    /// Every error response must parse as JSON and carry the contracted
+    /// envelope — `ok:false`, `error.code` string, `error.detail` object
+    /// with a `message` member, `error.retryable` bool. Substring asserts
+    /// missed the malformed `"detail":{,...}` emission; a real parse does
+    /// not. Returns the document for per-code member checks.
+    fn assert_error_schema(response: &str, code: &str) -> Json {
+        let parsed = routeloom_json::parse(response).unwrap_or_else(|error| {
+            panic!("{code} response is not valid JSON ({error}): {response}")
+        });
+        assert_eq!(
+            parsed.get("v").and_then(Json::as_u64),
+            Some(1),
+            "{response}"
+        );
+        assert_eq!(
+            parsed.get("ok").and_then(Json::as_bool),
+            Some(false),
+            "{response}"
+        );
+        let error = parsed.get("error").expect("error member missing");
+        assert_eq!(
+            error.get("code").and_then(Json::as_str),
+            Some(code),
+            "{response}"
+        );
+        let detail = error.get("detail").expect("detail member missing");
+        assert!(matches!(detail, Json::Object(_)), "{response}");
+        assert!(
+            detail.get("message").and_then(Json::as_str).is_some(),
+            "{response}"
+        );
+        assert!(
+            error.get("retryable").and_then(Json::as_bool).is_some(),
+            "{response}"
+        );
+        parsed
     }
 
     fn ingest(log: &Mutex<ReceiveLog>, network: u64, msg_seq: u64, payload: &[u8], ms: u64) {
@@ -1806,6 +1870,12 @@ mod tests {
         assert!(ok.contains("\"ok\":true"), "{ok}");
     }
 
+    fn get_line(operation_id: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{operation_id}\"}}}}"
+        )
+    }
+
     fn cancel_line(operation_id: &str) -> String {
         format!(
             "{{\"v\":1,\"request_id\":\"x\",\"method\":\"operations.cancel\",\"params\":{{\"operation_id\":\"{operation_id}\"}}}}"
@@ -2067,5 +2137,376 @@ mod tests {
             &c,
         );
         assert!(response.contains("INVALID_CURSOR"), "{response}");
+    }
+
+    /// Regression for the malformed `"detail":{,...}` emission: every
+    /// error path — message-only (simple) and each format!-built
+    /// multi-field detail — must emit a document a real JSON parser
+    /// accepts, with the contracted envelope shape.
+    #[test]
+    fn error_responses_are_valid_json() {
+        // Envelope, method and receive-path errors (READ_PAYLOAD grant).
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        for (body, code) in [
+            ("{\"v\":1,\"method\":\"x\"}", "INVALID_REQUEST"),
+            (
+                "{\"v\":1,\"request_id\":\"u\",\"method\":\"bogus\"}",
+                "UNKNOWN_METHOD",
+            ),
+            (
+                "{\"v\":1,\"request_id\":\"u\",\"method\":\"capabilities.get\",\"params\":{\"x\":1}}",
+                "INVALID_ARGUMENT",
+            ),
+            (
+                "{\"v\":1,\"request_id\":\"u\",\"method\":\"messages.read\",\"params\":{\"from\":\"earliest\"}}",
+                "INVALID_ARGUMENT",
+            ),
+            (
+                "{\"v\":1,\"request_id\":\"u\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"cursor\":\"!!bogus!!\"}}",
+                "INVALID_CURSOR",
+            ),
+        ] {
+            assert_error_schema(&handle(body.as_bytes(), &c), code);
+        }
+        let denied = ctx(None, &acl, &log, &store, &limiter, 0);
+        assert_error_schema(
+            &handle(
+                b"{\"v\":1,\"request_id\":\"u\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
+                &denied,
+            ),
+            "AuthorizationFailed",
+        );
+        // Cursor errors carry multi-field details: each member must be a
+        // real object member, not a comma-glued fragment.
+        for i in 0..(crate::receive_log::ENTRIES_PER_NETWORK + 2) as u64 {
+            ingest(&log, 1, i, b"p", 100);
+        }
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
+        let mint = |network: u64, epoch: [u8; 16], last_scanned: u64| {
+            Cursor {
+                network,
+                acl_view: acl.revision(),
+                epoch,
+                last_scanned,
+            }
+            .encode()
+        };
+        let read = |network: &str, token: &str| {
+            handle(
+                format!(
+                    "{{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{{\"network\":\"{network}\",\"cursor\":\"{token}\"}}}}"
+                )
+                .as_bytes(),
+                &c,
+            )
+        };
+        assert_error_schema(
+            &read("0000000000000002", &mint(1, [9; 16], 1)),
+            "CURSOR_SCOPE_MISMATCH",
+        );
+        let epoch_changed = assert_error_schema(
+            &read("0000000000000001", &mint(1, [3; 16], 1)),
+            "CURSOR_EPOCH_CHANGED",
+        );
+        let detail = epoch_changed.get("error").unwrap().get("detail").unwrap();
+        assert!(detail.get("loss_count").unwrap().is_null());
+        assert!(detail.get("oldest_cursor").unwrap().as_str().is_some());
+        assert!(detail.get("tail_cursor").unwrap().as_str().is_some());
+        let gap = assert_error_schema(
+            &read("0000000000000001", &mint(1, [9; 16], 1)),
+            "CURSOR_GAP",
+        );
+        let detail = gap.get("error").unwrap().get("detail").unwrap();
+        assert!(detail.get("lost_from").unwrap().as_u64().is_some());
+        assert!(detail.get("lost_to").unwrap().as_u64().is_some());
+
+        // Send-path and store errors (SEND + READ_OPERATION grants).
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        let submit = |params: &str| {
+            format!("{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{params}}}")
+        };
+        let key = "00112233445566778899aabbccddeeff";
+        let big = "00".repeat(129);
+        for (params, code) in [
+            (
+                format!(
+                    "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"{big}\",\"payload_len\":129,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
+                ),
+                "PAYLOAD_TOO_LARGE",
+            ),
+            (
+                format!(
+                    "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\",\"delivery\":\"APPLIED\"}}}}"
+                ),
+                "UNSUPPORTED",
+            ),
+        ] {
+            assert_error_schema(&handle(submit(&params).as_bytes(), &c), code);
+        }
+        // Accept, then same key + different bytes → CONFLICT carrying the
+        // existing id as a real member.
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &c);
+        let id = result_field(&accepted, "operation_id");
+        let conflict = submit(&format!(
+            "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"ffff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
+        ));
+        let conflicted = assert_error_schema(&handle(conflict.as_bytes(), &c), "CONFLICT");
+        assert_eq!(
+            conflicted
+                .get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("existing_operation_id")
+                .unwrap()
+                .as_str(),
+            Some(id.as_str())
+        );
+        // A never-issued seq is NOT_FOUND.
+        let missing = format!("{}:00000000000000ff", id.split(':').next().unwrap());
+        assert_error_schema(&handle(get_line(&missing).as_bytes(), &c), "NOT_FOUND");
+        // The second cancel lands on the committed terminal state →
+        // CANCEL_TOO_LATE with dispatch_state as a real member.
+        let cancelled = handle(cancel_line(&id).as_bytes(), &c);
+        assert!(cancelled.contains("\"ok\":true"), "{cancelled}");
+        let too_late =
+            assert_error_schema(&handle(cancel_line(&id).as_bytes(), &c), "CANCEL_TOO_LATE");
+        assert_eq!(
+            too_late
+                .get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("dispatch_state")
+                .unwrap()
+                .as_str(),
+            Some("CANCELLED_BEFORE_DISPATCH")
+        );
+        // Fill the table (direct store writes, like the capacity test);
+        // a fresh key then answers NO_CAPACITY with numeric members.
+        {
+            let mut guard = store.lock().unwrap();
+            for i in 0..crate::send_store::RECORD_CAP {
+                let json = format!(
+                    "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{i:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
+                );
+                let req = canonical::parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+                let _ = guard.submit(501, &req, 0);
+            }
+        }
+        let full = assert_error_schema(
+            &handle(
+                submit_line("ffffffffffffffffffffffffffffffff", &epoch).as_bytes(),
+                &c,
+            ),
+            "NO_CAPACITY",
+        );
+        let detail = full.get("error").unwrap().get("detail").unwrap();
+        assert_eq!(detail.get("free_slots").unwrap().as_u64(), Some(0));
+        assert_eq!(detail.get("free_bytes").unwrap().as_u64(), Some(0));
+        assert!(detail.get("reclaimable_at").unwrap().as_u64().is_some());
+        // RATE_LIMITED: drain the admission budget (some tokens already
+        // spent above); each rejection is still a valid envelope.
+        let mut limited = None;
+        for i in 0..64_u64 {
+            let response = handle(submit_line(&format!("ff{i:030x}"), &epoch).as_bytes(), &c);
+            if response.contains("RATE_LIMITED") {
+                limited = Some(assert_error_schema(&response, "RATE_LIMITED"));
+                break;
+            }
+            assert_error_schema(&response, "NO_CAPACITY");
+        }
+        let limited = limited.expect("admission budget drains within 64 submits");
+        let detail = limited.get("error").unwrap().get("detail").unwrap();
+        assert_eq!(detail.get("scope").unwrap().as_str(), Some("principal"));
+        assert!(detail.get("retry_after_ms").unwrap().as_u64().is_some());
+        assert_eq!(
+            limited
+                .get("error")
+                .unwrap()
+                .get("retryable")
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
+        // Rotating the epoch closes it for new keys → EPOCH_CLOSED.
+        let later = ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            crate::send_store::EPOCH_WINDOW_MS,
+        );
+        let rotated = handle(
+            b"{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+            &later,
+        );
+        assert!(
+            rotated.contains("\"admission_epoch\":\"0000000000000002\""),
+            "{rotated}"
+        );
+        assert_error_schema(
+            &handle(
+                submit_line("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &epoch).as_bytes(),
+                &later,
+            ),
+            "EPOCH_CLOSED",
+        );
+        // The response-size fallback is a hand-written literal; it must
+        // satisfy the same envelope contract.
+        assert_error_schema(&bound_response("x".repeat(RESPONSE_MAX_BYTES)), "INTERNAL");
+    }
+
+    /// STORE_RECOVERY_REQUIRED over the wire: a vetoed store commit must
+    /// still surface as a well-formed error envelope.
+    #[test]
+    fn store_fault_response_is_valid_json() {
+        use crate::sqlite_store::SqliteOperationStore;
+        let path =
+            std::env::temp_dir().join(format!("routeloom-api1-fault-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let acl = send_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let fault_store = Mutex::new(SqliteOperationStore::open(&path).unwrap());
+        let c = ctx(Some(501), &acl, &log, &fault_store, &limiter, 0);
+        let opened = handle(
+            b"{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+            &c,
+        );
+        assert!(opened.contains("\"ok\":true"), "{opened}");
+        fault_store.lock().unwrap().veto_next_commit();
+        assert_error_schema(
+            &handle(
+                submit_line("55555555555555555555555555555555", "0000000000000001").as_bytes(),
+                &c,
+            ),
+            "STORE_RECOVERY_REQUIRED",
+        );
+        drop(fault_store);
+        let _ = std::fs::remove_file(&path);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
+    /// A replayed submit reports the record's committed state — the same
+    /// document operations.get returns — never a fabricated HOST_QUEUED
+    /// (the reviewer's reproduction: submit, cancel, resubmit lied).
+    #[test]
+    fn submit_replay_reports_committed_state() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let owner = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
+        let get =
+            |id: &str| routeloom_json::parse(&handle(get_line(id).as_bytes(), &owner)).unwrap();
+        let replay_result = |key: &str| {
+            let response = handle(submit_line(key, &epoch).as_bytes(), &owner);
+            let parsed = routeloom_json::parse(&response).unwrap();
+            assert_eq!(
+                parsed.get("ok").and_then(Json::as_bool),
+                Some(true),
+                "{response}"
+            );
+            parsed.get("result").unwrap().clone()
+        };
+        // The reviewer's reproduction: cancel, then resubmit the same
+        // key+content → CANCELLED_BEFORE_DISPATCH, not HOST_QUEUED.
+        let key = "00112233445566778899aabbccddeeff";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &owner);
+        let id = result_field(&accepted, "operation_id");
+        let cancelled = handle(cancel_line(&id).as_bytes(), &owner);
+        assert!(cancelled.contains("\"ok\":true"), "{cancelled}");
+        let replay = replay_result(key);
+        assert_eq!(
+            replay.get("dispatch_state").and_then(Json::as_str),
+            Some("CANCELLED_BEFORE_DISPATCH"),
+        );
+        assert_eq!(Some(&replay), get(&id).get("result"));
+        // Other committed states replay honestly too — expired,
+        // indeterminate, rejected — each equal to operations.get's report.
+        for (key, state) in [
+            (
+                "11111111111111111111111111111111",
+                DispatchState::ExpiredBeforeDispatch,
+            ),
+            (
+                "22222222222222222222222222222222",
+                DispatchState::Indeterminate,
+            ),
+            (
+                "33333333333333333333333333333333",
+                DispatchState::RejectedNotAccepted,
+            ),
+        ] {
+            let accepted = handle(submit_line(key, &epoch).as_bytes(), &owner);
+            let id = result_field(&accepted, "operation_id");
+            let seq = u64::from_str_radix(id.rsplit(':').next().unwrap(), 16).unwrap();
+            store
+                .lock()
+                .unwrap()
+                .set_state_for_test(seq, state, Some(1000));
+            let replay = replay_result(key);
+            assert_eq!(
+                replay.get("dispatch_state").and_then(Json::as_str),
+                Some(state.name()),
+            );
+            assert_eq!(Some(&replay), get(&id).get("result"), "{key}");
+        }
+        // A delivered op replays its terminal state plus the learned
+        // message_key and evidence.
+        let key = "44444444444444444444444444444444";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &owner);
+        let id = result_field(&accepted, "operation_id");
+        let seq = u64::from_str_radix(id.rsplit(':').next().unwrap(), 16).unwrap();
+        {
+            let mut guard = store.lock().unwrap();
+            guard.prepare_dispatch(seq, [9; 16], [8; 16]).unwrap();
+            guard
+                .update_operation(seq, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.submitted = true;
+                    d.ev_gateway_accepted = true;
+                    d.ev_end_sdk = true;
+                    d.msg_session = Some(0x0abc);
+                    d.msg_seq = Some(77);
+                    op.dispatch_state = DispatchState::EndSdkReceived;
+                    op.terminal_ms = Some(1000);
+                    true
+                })
+                .unwrap();
+        }
+        let replay = replay_result(key);
+        assert_eq!(
+            replay.get("dispatch_state").and_then(Json::as_str),
+            Some("END_SDK_RECEIVED"),
+        );
+        let message_key = replay.get("message_key").unwrap();
+        assert_eq!(
+            message_key.get("session").and_then(Json::as_str),
+            Some("00000abc")
+        );
+        assert_eq!(
+            message_key.get("sequence").and_then(Json::as_str),
+            Some("000000000000004d")
+        );
+        assert_eq!(Some(&replay), get(&id).get("result"));
+        // A still-queued op still replays HOST_QUEUED.
+        let key = "55555555555555555555555555555555";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &owner);
+        let id = result_field(&accepted, "operation_id");
+        let replay = replay_result(key);
+        assert_eq!(
+            replay.get("dispatch_state").and_then(Json::as_str),
+            Some("HOST_QUEUED"),
+        );
+        assert_eq!(Some(&replay), get(&id).get("result"));
     }
 }

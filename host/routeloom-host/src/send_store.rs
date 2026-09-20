@@ -150,6 +150,13 @@ pub struct StoredOperation {
     pub canonical: Vec<u8>,
     pub hash: [u8; 32],
     pub accepted_ms: u64,
+    /// Process-monotonic admit stamp on the dispatcher's monotonic axis —
+    /// the rewind-proof counterpart of `accepted_ms` (TX-I2 deadline
+    /// arithmetic caps the wall deadline at `accepted_mono_ms + ttl`).
+    /// 0 means no anchor: records loaded after a daemon restart and lane
+    /// tombstones cannot prove trusted elapsed time and keep the
+    /// pre-anchor wall-clock semantics.
+    pub accepted_mono_ms: u64,
     pub dispatch_state: DispatchState,
     /// Set when the record enters a terminal state; protection lapses
     /// RETENTION_MS later. None for non-terminal records.
@@ -410,7 +417,24 @@ pub trait OperationStore {
     /// `NoCapacity` at the unretired-epoch ceiling or scope bound.
     fn open_epoch(&mut self, scope: EpochScope, now_ms: u64)
         -> Result<(u64, bool), OpenEpochError>;
-    fn submit(&mut self, uid: u32, req: &SendRequest, now_ms: u64) -> SubmitOutcome;
+    /// Wall-clock-only admit used by tests and legacy callers: leaves the
+    /// record unanchored (`accepted_mono_ms == 0`), which keeps the
+    /// pre-anchor deadline semantics.
+    #[cfg(test)]
+    fn submit(&mut self, uid: u32, req: &SendRequest, now_ms: u64) -> SubmitOutcome {
+        self.submit_at(uid, req, now_ms, 0)
+    }
+    /// `submit` with an explicit monotonic admit stamp: production callers
+    /// pass `mono_ms()` so the dispatcher can bound deadlines by real
+    /// elapsed time even when the wall clock rewinds. `mono_ms == 0`
+    /// leaves the record unanchored (legacy/tests).
+    fn submit_at(
+        &mut self,
+        uid: u32,
+        req: &SendRequest,
+        now_ms: u64,
+        mono_ms: u64,
+    ) -> SubmitOutcome;
     /// Err(()) is a store fault, not absence — the API answers
     /// STORE_RECOVERY_REQUIRED rather than NOT_FOUND.
     fn get_by_seq(&self, seq: u64) -> Result<Option<StoredOperation>, ()>;
@@ -824,7 +848,13 @@ impl OperationStore for MemoryOperationStore {
         Ok((epoch, true))
     }
 
-    fn submit(&mut self, uid: u32, req: &SendRequest, now_ms: u64) -> SubmitOutcome {
+    fn submit_at(
+        &mut self,
+        uid: u32,
+        req: &SendRequest,
+        now_ms: u64,
+        mono_ms: u64,
+    ) -> SubmitOutcome {
         let identity = OpIdentity {
             uid,
             network: req.network,
@@ -877,6 +907,7 @@ impl OperationStore for MemoryOperationStore {
                 canonical: req.canonical.clone(),
                 hash: req.hash,
                 accepted_ms: now_ms,
+                accepted_mono_ms: mono_ms,
                 dispatch_state: DispatchState::HostQueued,
                 terminal_ms: None,
                 dispatch: None,
@@ -962,7 +993,9 @@ impl OperationStore for MemoryOperationStore {
 /// generic `OperationStore` so the API layer never branches on backend.
 pub enum StoreBackend {
     Memory(MemoryOperationStore),
-    Sqlite(SqliteOperationStore),
+    // Boxed: the durable provider is much larger than the memory one and
+    // this enum is matched on every store call.
+    Sqlite(Box<SqliteOperationStore>),
 }
 
 impl Default for StoreBackend {
@@ -997,10 +1030,16 @@ impl OperationStore for StoreBackend {
         }
     }
 
-    fn submit(&mut self, uid: u32, req: &SendRequest, now_ms: u64) -> SubmitOutcome {
+    fn submit_at(
+        &mut self,
+        uid: u32,
+        req: &SendRequest,
+        now_ms: u64,
+        mono_ms: u64,
+    ) -> SubmitOutcome {
         match self {
-            Self::Memory(store) => store.submit(uid, req, now_ms),
-            Self::Sqlite(store) => store.submit(uid, req, now_ms),
+            Self::Memory(store) => store.submit_at(uid, req, now_ms, mono_ms),
+            Self::Sqlite(store) => store.submit_at(uid, req, now_ms, mono_ms),
         }
     }
 
