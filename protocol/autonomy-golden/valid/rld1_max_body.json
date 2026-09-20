@@ -1,0 +1,14 @@
+{
+  "body_hex": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "capability_bits": 4294967295,
+  "claimed_node": 18446744073709551615,
+  "codec": "rld1",
+  "encoded_hex": "524c44310101002c00a00000ffffffffffffffffffffffff000102030405060708090a0b0c0d0e0fffffffff5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+  "expect": "ok",
+  "flags": 0,
+  "format": "routeloom-autonomy-v1-golden",
+  "kind": 1,
+  "name": "rld1_max_body",
+  "network_hint": 4294967295,
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f"
+}

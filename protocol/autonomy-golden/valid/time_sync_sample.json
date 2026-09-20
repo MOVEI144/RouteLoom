@@ -1,0 +1,12 @@
+{
+  "codec": "time_sync",
+  "encoded_hex": "0101a1a2a3a4a5a6a7a80000002a000000000036ee800000000c",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "time_sync_sample",
+  "reference_ms": 3600000,
+  "sequence": 42,
+  "source": 11647051513882650536,
+  "subtype": 1,
+  "uncertainty_ms": 12
+}

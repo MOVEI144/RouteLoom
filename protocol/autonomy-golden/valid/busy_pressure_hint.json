@@ -1,0 +1,18 @@
+{
+  "binding_generation": 4,
+  "codec": "busy",
+  "encoded_hex": "01020520000000000000000500000003000000000000006300000000040000004d000003e8ff",
+  "expect": "ok",
+  "feedback_sequence": 77,
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "busy_pressure_hint",
+  "pressure": 255,
+  "reason": 5,
+  "referenced_origin": 5,
+  "referenced_round": 0,
+  "referenced_sequence": 99,
+  "referenced_session": 3,
+  "referenced_type": 32,
+  "retry_after_ms": 1000,
+  "subtype": 2
+}

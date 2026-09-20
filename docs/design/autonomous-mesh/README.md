@@ -1,0 +1,66 @@
+# 自律Mesh拡張の設計 — Issues #3 / #4 / #5
+
+設計版：0.2-draft／2026-09-19。**実装を進めるための設計PRであり、機能の実装完了・RF認定を宣言しない。**
+
+## 目的
+
+手動MAC登録、一本の経路への集中、固定チャンネルという三つの制約を解消する。ただし、自動化を増やした結果として所属・配送・暗号・経路安全性を壊さない。
+
+| Issue | 要求の読み取り | この設計の決定 |
+|---|---|---|
+| [#3](https://github.com/MOVEI144/RouteLoom/issues/3) | 追加・交換でMACの調査と再フラッシュが必要 | 有界な発見、相互確認、認可済みIdentityとMACのbinding、Peer lease。発見とJoinを分離 |
+| [#4](https://github.com/MOVEI144/RouteLoom/issues/4) | metricだけで経路を選び、混雑を避けられない | 送信公平化・明示BUSY・局所backpressureを先行。現在もfeasibleな経路の中で、平滑化した負荷を考慮 |
+| [#5](https://github.com/MOVEI144/RouteLoom/issues/5) | 干渉時にチャンネルを実行中変更できない | 観測→診断survey→手動計画→条件付き自動移行。単一Authorityでも実装でき、復旧手順を計画へ含める |
+
+利用者は用途を指定し、経路やMACを書かない。SDKは「見つかった」「認証できた」「所属が許可された」「今中継に使える」を別の状態として公開する。
+
+## 読み順
+
+1. [共通アーキテクチャ・API・資源](01-integration.md)
+2. [#3 近隣発見と安全なPeer管理](02-discovery.md) → [既存所属状態・FrameType・admissionとの対応](06-membership-admission.md)
+3. [#4 輻輳制御と安定した経路回避](03-congestion.md)
+4. [#5 チャンネル調査・移行・復旧](04-channel-migration.md)
+5. [実装順序・受入条件・引継ぎ](05-implementation.md)
+6. [参照したIssue・コード・一次資料](sources.md)
+
+[設計パラメーター](contracts.json)と[受入シナリオ](scenarios.json)はこの設計専用。現在のruntime設定やfeature-profilesを置き換えない。
+
+## 現在のコードと、このPRの基点
+
+- PR作成の基点：main `31b3eb0ae7080d713e7acd7ee3b7f31b43423465`。
+- 追加で読んだ実装：PR #2 `cdcf0fe33b51854d4b62478e7fbc193cc8c386d8`。
+- 確認時、PR #2はopen。修正後のCI成功は確認したが、修正の全面再レビュー・マージは今回行わない。
+- このDraftはmain向けの独立した設計差分。**PR #2の実装をコピーしたり、そのPRを代理でマージしたりしない。**
+- ここへ実装を積む前にPR #2の採用済み変更をmainから取り込み、コード対応表を再確認する。PR #2がさらに更新された場合は固定SHAを明示的に更新する。
+
+## 設計の優先順位
+
+```text
+通信が成立する                         まず近隣を安全に発見
+     ↓
+今の経路を維持する                     局所的に送信量と経路を調整
+     ↓
+必要性が確認された全体変更だけ行う     計画されたチャンネル移行
+```
+
+再送・発見・最適化・移行が別々に無線を操作する構造にはしない。データが消えた場合に成功と表示しない。電池の有無ではなく、受信可能時間と許された電力で参加役割を決める。
+
+## 範囲
+
+初期対象は2.4GHz ESP-NOW、全Wi-Fi LR250。LR500適応、LoRa送信、定常multi-channel、Raft実装、本番Identity基盤そのものの完成はこの三Issueの実装依存にしない。将来追加の能力境界は保持する。
+
+新機能の設計上のprofile名は `AUTONOMY_LR250_V1`。実効有効化には実装・認定・配備条件が必要。既存 `CORE_FIXED_250` の既定値は変更しない。設計PRのマージだけでIssueをcloseしたり、implemented/qualifiedをtrueにしない。
+
+## 明示した限界
+
+同じ場所でも送信・受信の条件は違う。混雑の原因をRSSI一つから断定しない。単一radioで複数channelを常時同時受信できない。無線での全ノード同時切替を原子的transactionとして保証しない。
+
+「置くだけ」は、有効なIdentity・所属許可・RF配備条件を持つ端末に対してMAC設定不要という意味。無設定の第三者端末を近くのネットワークへ無認証加入させる意味ではない。
+
+## PR #6レビュー反映（0.2-draft）
+
+[レビューコメント](https://github.com/MOVEI144/RouteLoom/pull/6#issuecomment-5741118628)に対応し、既存の6状態・型番号1〜7を採用したまま近隣phaseとcarrierを併用する規約を追加した。`frame_allowed()`と意味allowlistの不一致も明示し、実装時に一つの文脈付きgateへ揃える。Memberを再参加状態へ戻す回避策や、RLD1で通常DATAを通す例外は認めない。firmware matrix追随を実装前の必須作業にした。
+
+## 検証表示
+
+このPRのcheckerは設計ファイル、サイズ予算、パラメーター関係、Issueとシナリオの対応を検査する。protocolの正しさ・収束・暗号・電波性能を実証するものではない。各受入シナリオの実行状態は未実行のまま保持する。

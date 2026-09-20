@@ -1,0 +1,15 @@
+{
+  "binding_generation": 2,
+  "codec": "neighbor_result",
+  "encoded_hex": "010100000002000003e90120000000120000246000007530",
+  "est_airtime_us": 9312,
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "lease_granted_ms": 30000,
+  "name": "neighbor_result_reachable",
+  "pressure": 32,
+  "probe_sequence": 1001,
+  "queue_delay_ms": 18,
+  "result": 1,
+  "subtype": 1
+}

@@ -29,7 +29,7 @@
 
 ## 未確定を隠さない
 
-暗号suite/Providerの実装選定、最終wire byte layout、SDK ABI layout、正確なrouting更新timer、合意ライブラリと媒体は、採用規則を決めた上で実装レビューとvectorで凍結する。代替案の列挙で責任を曖昧にせず、[STATUS](../STATUS.md)のゲートとして追跡する。
+暗号suite/Providerの実装選定、SDK ABI layout、合意ライブラリと媒体は、採用規則を決めた上で実装レビューとvectorで凍結する。代替案の列挙で責任を曖昧にせず、[STATUS](../STATUS.md)のゲートとして追跡する。最終wire byte layoutとrouting更新timerはCORE_FIXED_250 profileで凍結済み（`wire.hpp`のWire v1、`routing.hpp`/`node.cpp`の定数、共通golden vector）。
 
 ## 参照実装の扱い
 

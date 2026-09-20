@@ -1,0 +1,11 @@
+{
+  "codec": "object_chunk",
+  "data_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "encoded_hex": "0101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "object_chunk_first",
+  "object_hash_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "offset": 0,
+  "subtype": 1
+}

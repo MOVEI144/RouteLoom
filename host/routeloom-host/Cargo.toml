@@ -7,5 +7,10 @@ rust-version.workspace = true
 [dependencies]
 routeloom-protocol = { path = "../routeloom-protocol" }
 
+[dev-dependencies]
+# The TUI's parser validates that the JSON this daemon emits stays compatible
+# with the client data model — one protocol, not two.
+routeloom-tui = { path = "../routeloom-tui" }
+
 [lints]
 workspace = true

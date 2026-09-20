@@ -5,13 +5,26 @@
 #include <cstdio>
 #include <cstring>
 
+#include "esp_attr.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
+#if CONFIG_ROUTELOOM_DISCOVERY
+#include "routeloom/espnow_autonomy.hpp"
+#endif
+#if CONFIG_ROUTELOOM_MIGRATION
+#include "routeloom/espnow_migration.hpp"
+#include "routeloom/nvs_ledger_store.hpp"
+#endif
+#include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
+#include "routeloom/power.hpp"
 #include "routeloom/psk_security.hpp"
-#include "sdkconfig.h"
 
 namespace {
 constexpr char kTag[] = "RouteLoomRef";
@@ -25,10 +38,12 @@ using routeloom::NodeObserver;
 using routeloom::Status;
 using routeloom::StatusCode;
 using routeloom::espnow::DevelopmentPskSecurityProvider;
+using routeloom::espnow::EspNowPowerPort;
 using routeloom::espnow::EspNowRuntime;
 using routeloom::espnow::EspNowRuntimeConfig;
 using routeloom::espnow::MacAddress;
 using routeloom::espnow::NvsCounterStore;
+using routeloom::espnow::NvsSleepStorage;
 
 class LogObserver final : public NodeObserver {
  public:
@@ -126,6 +141,61 @@ Status next_boot_session(std::uint32_t& session) noexcept {
   for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
+#if CONFIG_ROUTELOOM_DEEP_SLEEP
+
+// RTC slow-memory marker: written right before esp_deep_sleep_start and
+// cleared on boot. Lost on a full power cut — exactly the cases that must
+// not be classified as a sleep resume.
+RTC_DATA_ATTR std::uint32_t s_sleep_marker = 0;
+constexpr std::uint32_t kSleepMarkerValue = 0x524c5057;  // "RLPW"
+
+class LogPowerEvents final : public routeloom::PowerEvents {
+ public:
+  void on_transition(const routeloom::PowerState from,
+                     const routeloom::PowerState to,
+                     const char* reason) noexcept override {
+    ESP_LOGI(kTag, "power %s -> %s (%s)", routeloom::power_state_name(from),
+             routeloom::power_state_name(to), reason);
+  }
+  void on_pending_result(const routeloom::PendingDeliveryRecord& record,
+                         const routeloom::StatusCode result) noexcept override {
+    ESP_LOGI(kTag, "pending %lu/%llu -> %u",
+             static_cast<unsigned long>(record.original_id.session),
+             static_cast<unsigned long long>(record.original_id.sequence),
+             static_cast<unsigned>(result));
+  }
+  void on_diagnostic(const char* reason) noexcept override {
+    ESP_LOGW(kTag, "power diagnostic: %s", reason);
+  }
+};
+
+routeloom::ResetCause classify_boot() noexcept {
+  // esp_sleep_get_wakeup_causes() returns a *bitmap* of esp_sleep_source_t
+  // values — on a non-sleep reset it reports BIT(ESP_SLEEP_WAKEUP_UNDEFINED),
+  // which is nonzero. Mask the UNDEFINED bit before treating the bitmap as
+  // evidence of a real sleep wakeup so brownout/watchdog resets are not
+  // misclassified as deep-sleep resumes.
+  const std::uint32_t wakeup =
+      esp_sleep_get_wakeup_causes() & ~(1U << ESP_SLEEP_WAKEUP_UNDEFINED);
+  const esp_reset_reason_t reason = esp_reset_reason();
+  const bool marked = s_sleep_marker == kSleepMarkerValue;
+  s_sleep_marker = 0;
+  if (marked && (reason == ESP_RST_DEEPSLEEP || wakeup != 0U)) {
+    return routeloom::ResetCause::DeepSleepWake;
+  }
+  if (reason == ESP_RST_POWERON || reason == ESP_RST_BROWNOUT ||
+      reason == ESP_RST_UNKNOWN) {
+    return routeloom::ResetCause::ColdBoot;
+  }
+  return routeloom::ResetCause::OtherReset;
+}
+
+routeloom::MonotonicMs monotonic_now_ms() noexcept {
+  return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
+}
+
+#endif  // CONFIG_ROUTELOOM_DEEP_SLEEP
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -153,8 +223,20 @@ extern "C" void app_main(void) {
   }
   static DevelopmentPskSecurityProvider security;
   status = security.initialize(key, counter_store, "rlreplay");
-  std::fill(key.begin(), key.end(), 0);
   if (!status) fail(status.detail);
+
+#if CONFIG_ROUTELOOM_MIGRATION
+  // Channel migration (issue #5): durable plan/commit/active state plus the
+  // dev-PSK commit verifier. The plan store opens BEFORE the runtime so the
+  // committed channel can reconcile the boot channel — a committed plan
+  // never restores a channel by itself, it only picks the channel the radio
+  // starts on, and restart() still runs the participant's resume checks.
+  static routeloom::espnow::NvsPlanStore plan_store;
+  status = plan_store.open("rlplan");
+  if (!status) fail(status.detail);
+  std::uint8_t boot_channel = 0;
+  const bool have_boot_channel = plan_store.boot_channel(boot_channel).ok();
+#endif
 
   std::uint32_t message_session = 0;
   status = next_boot_session(message_session);
@@ -165,8 +247,60 @@ extern "C" void app_main(void) {
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  // Origin generation must rise every boot so peers discard the previous
+  // incarnation's route state. It is derived from the persisted monotonic
+  // boot session, mapped into 1..0xFFFF (0 is the "unset" sentinel).
+  config.node.route_generation = static_cast<std::uint16_t>(
+      ((message_session - 1U) % 0xFFFFU) + 1U);
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
+#if CONFIG_ROUTELOOM_MIGRATION
+  if (have_boot_channel) {
+    ESP_LOGW(kTag, "migration boot channel %u overrides static %u",
+             static_cast<unsigned>(boot_channel),
+             static_cast<unsigned>(config.channel));
+    config.channel = boot_channel;
+  }
+#endif
   config.max_tx_power_qdbm = CONFIG_ROUTELOOM_TX_POWER_QDBM;
+
+#if CONFIG_ROUTELOOM_MIGRATION
+  routeloom::espnow::EspNowMigrationConfig migration_config{};
+  const bool self_authority =
+#if CONFIG_ROUTELOOM_MIGRATION_SELF_AUTHORITY
+      true;
+#else
+      false;
+#endif
+  migration_config.mode = CONFIG_ROUTELOOM_MIGRATION == 1
+                              ? routeloom::MigrationMode::Observe
+                              : routeloom::MigrationMode::Manual;
+  migration_config.authority_role = self_authority;
+  migration_config.agent.authority_role = self_authority;
+  migration_config.agent.participant.node = config.node.node;
+  migration_config.agent.participant.network = config.node.network;
+  migration_config.agent.participant.authority =
+      self_authority ? config.node.node
+                     : static_cast<NodeId>(CONFIG_ROUTELOOM_MIGRATION_AUTHORITY);
+  migration_config.agent.participant.home_channel = config.channel;
+  migration_config.agent.self_rediscovery_capable = true;
+  // Measurement inputs are deployment parameters, not firmware guesses.
+  migration_config.agent.measurements.management_rtt_p99_ms =
+      CONFIG_ROUTELOOM_MIGRATION_RTT_P99_MS;
+  migration_config.agent.measurements.control_delivery_bound_ms =
+      CONFIG_ROUTELOOM_MIGRATION_DELIVERY_BOUND_MS;
+  migration_config.agent.measurements.required_transfer_ms =
+      CONFIG_ROUTELOOM_MIGRATION_TRANSFER_BOUND_MS;
+  migration_config.agent.measurements.measured_switch_bound_ms =
+      CONFIG_ROUTELOOM_MIGRATION_SWITCH_BOUND_MS;
+  migration_config.coordinator.node = config.node.node;
+  migration_config.coordinator.home_channel = config.channel;
+  // Commit evidence derives from the same dev-PSK master key, domain
+  // separated inside the verifier — Development profile only.
+  static routeloom::espnow::DevPskCommitVerifier commit_verifier;
+  status = commit_verifier.initialize(key);
+  if (!status) fail(status.detail);
+#endif
+  std::fill(key.begin(), key.end(), 0);
 
   static EspNowRuntime runtime(config, security, observer);
   status = runtime.initialize();
@@ -182,10 +316,124 @@ extern "C" void app_main(void) {
     if (!status) fail(status.detail);
   }
 
+#if CONFIG_ROUTELOOM_DISCOVERY
+  // Autonomous discovery (issue #3): the RLD1 bootstrap lane plus the
+  // portable NeighborDiscovery engine, attached to the runtime's
+  // DiscoveryPort. Dev-PSK possession authentication only — EXPERIMENTAL.
+  routeloom::MacAddress self_mac{};
+  status = runtime.local_mac(self_mac);
+  if (!status) fail(status.detail);
+  routeloom::DiscoveryConfig discovery_config{};
+  discovery_config.node = config.node.node;
+  discovery_config.mac = self_mac;
+  discovery_config.network = config.node.network;
+  // The 4-byte hint is a discovery filter only, never membership evidence.
+  discovery_config.network_hint =
+      static_cast<std::uint32_t>(config.node.network);
+  discovery_config.capability_bits = CONFIG_ROUTELOOM_CAPABILITY;
+  routeloom::espnow::EspNowAutonomyPolicy autonomy_policy{};
+#if CONFIG_ROUTELOOM_DISCOVERY_MEMBER
+  autonomy_policy.self_member = true;
+#else
+  autonomy_policy.self_member = false;
+#endif
+#if CONFIG_ROUTELOOM_DISCOVERY_AUTO_APPROVE
+  autonomy_policy.auto_approve = true;
+#else
+  autonomy_policy.auto_approve = false;
+#endif
+#if CONFIG_ROUTELOOM_DISCOVERY_INITIATE
+  autonomy_policy.initiate = true;
+#else
+  autonomy_policy.initiate = false;
+#endif
+  static routeloom::espnow::EspNowAutonomy autonomy(
+      discovery_config, autonomy_policy, runtime, security, kTag);
+  status = autonomy.start();
+  if (!status) fail(status.detail);
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL discovery active: dev-PSK possession proof is not "
+           "a production identity");
+#endif
+
+#if CONFIG_ROUTELOOM_MIGRATION
+  // Channel migration (issue #5): participant + coordinator over the
+  // authenticated control-object lane, with durable plan/commit/active
+  // records in "rlplan". The authority role needs a durable authority ledger
+  // (operation ids + audit anchor) before it may issue.
+  static routeloom::espnow::NvsLedgerStore authority_ledger;
+  if (self_authority) {
+    status = authority_ledger.open("rlmauth");
+    if (!status) fail(status.detail);
+  }
+  static routeloom::espnow::EspNowMigration migration(
+      migration_config, runtime, plan_store, commit_verifier,
+      self_authority ? &authority_ledger : nullptr);
+  status = migration.start();
+  if (!status) fail(status.detail);
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL migration lane active (mode=%d): dev-PSK commit "
+           "evidence is not a production identity",
+           CONFIG_ROUTELOOM_MIGRATION);
+#endif
+
+#if CONFIG_ROUTELOOM_DEEP_SLEEP
+  static NvsSleepStorage sleep_storage(counter_store);
+  static EspNowPowerPort power_port(runtime);
+  static LogPowerEvents power_events;
+  routeloom::PowerConfig power_config{};
+  static routeloom::PowerCoordinator coordinator(
+      power_config, runtime.node(), power_port, sleep_storage, power_events);
+
+  // Cold boot vs deep-sleep resume are distinct coordinator inputs. Elapsed
+  // time across sleep is reported unknown until a trusted RTC interval is
+  // wired, so durable pendings park as TIME_UNCERTAIN instead of resending.
+  status = coordinator.begin(classify_boot(), routeloom::ElapsedInterval{0, 0, false},
+                             monotonic_now_ms());
+  if (!status) fail(status.detail);
+  runtime.mark_started();
+
+  routeloom::SleepRequest request{};
+  request.pending_policy = routeloom::SleepWorkPolicy::Fail;
+  request.wake.wake_after_ms = CONFIG_ROUTELOOM_SLEEP_DURATION_MS;
+  bool prepared = false;
+  const std::int64_t prepare_at_us =
+      esp_timer_get_time() +
+      static_cast<std::int64_t>(CONFIG_ROUTELOOM_SLEEP_AFTER_MS) * 1000LL;
+  const std::int64_t stop_at_us = prepare_at_us + 30000000LL;
+  // Single-threaded pump: the runtime task is not started so app_main owns
+  // both the event drain and the coordinator poll.
+  while (coordinator.state() != routeloom::PowerState::Sleeping &&
+         esp_timer_get_time() < stop_at_us) {
+    runtime.poll_once();
+    coordinator.poll(monotonic_now_ms());
+    if (!prepared && coordinator.state() == routeloom::PowerState::Running &&
+        esp_timer_get_time() >= prepare_at_us) {
+      status = coordinator.sleep_prepare(request, monotonic_now_ms());
+      if (!status) fail(status.detail);
+      prepared = true;
+    }
+    if (coordinator.state() == routeloom::PowerState::ReadyToSleep) {
+      s_sleep_marker = kSleepMarkerValue;
+      status =
+          coordinator.sleep_enter(coordinator.ticket(), monotonic_now_ms());
+      if (!status) fail(status.detail);
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+  if (coordinator.state() != routeloom::PowerState::Sleeping) {
+    fail("sleep deadline exceeded");
+  }
+#else
   status = runtime.start_task();
   if (!status) fail(status.detail);
-  ESP_LOGW(
-      kTag,
-      "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
-      "production identity profile");
+#endif
+  // The development PSK profile is pinned to SecurityProfile::Development;
+  // this firmware can never report itself as production-secure.
+  if (security.security_profile() != routeloom::SecurityProfile::Production) {
+    ESP_LOGW(
+        kTag,
+        "EXPERIMENTAL CORE_FIXED_250 started; development PSK is not a "
+        "production identity profile");
+  }
 }

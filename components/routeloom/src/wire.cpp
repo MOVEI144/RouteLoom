@@ -17,17 +17,28 @@ bool known_frame_type(const std::uint8_t value) noexcept {
     case FrameType::Offer:
     case FrameType::BootstrapAuth:
     case FrameType::MembershipResult:
+    case FrameType::BootstrapChunk:
+    case FrameType::BootstrapReply:
+    case FrameType::MembershipQuery:
     case FrameType::Data:
     case FrameType::HopAccept:
     case FrameType::EndReceipt:
     case FrameType::AppResult:
     case FrameType::Busy:
+    case FrameType::Service:
+    case FrameType::Control:
+    case FrameType::TimeSync:
+    case FrameType::ChannelNotice:
     case FrameType::RouteUpdate:
     case FrameType::RouteWithdraw:
     case FrameType::SeqnoRequest:
+    case FrameType::RouteRequest:
     case FrameType::NeighborProbe:
     case FrameType::NeighborResult:
     case FrameType::Diagnostic:
+    case FrameType::ControlObject:
+    case FrameType::ObjectChunk:
+    case FrameType::ObjectAck:
       return true;
   }
   return false;
@@ -38,7 +49,7 @@ Status write_header(const Header& header, MutableByteView output) noexcept {
     return Status::error(StatusCode::NoCapacity, "wire header output too small");
   }
   if (header.network > UINT32_MAX) {
-    return Status::error(StatusCode::InvalidArgument, "v0 network id exceeds 32 bits");
+    return Status::error(StatusCode::InvalidArgument, "v1 network id exceeds 32 bits");
   }
   ByteWriter writer(output);
   Status status;
@@ -126,6 +137,12 @@ Status read_header(ByteView encoded, Header& header) noexcept {
   return validate_header(header);
 }
 
+// End-to-end AAD covers only the end-immutable fields of semantics.json
+// (network, origin, message session+sequence, bound destination, delivery
+// contract, flags, original lifetime, payload length) plus version, end epoch
+// and end counter. Hop-mutable fields (previous/next hop, hop remaining,
+// delivery round, remaining deadline, link epoch/counter) must never be added
+// here: relays rewrite them and would break the end tag.
 Status make_end_aad(const Header& header,
                     std::array<std::uint8_t, kEndAadMax>& bytes,
                     std::size_t& length) noexcept {
@@ -135,6 +152,7 @@ Status make_end_aad(const Header& header,
   RL_WRITE(writer.write_u8(kMajor));
   RL_WRITE(writer.write_u8(kMinor));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(header.type)));
+  RL_WRITE(writer.write_u8(header.flags));
   RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(header.delivery)));
   RL_WRITE(writer.write_u32(static_cast<std::uint32_t>(header.network)));
   RL_WRITE(writer.write_u64(header.origin));
@@ -185,13 +203,23 @@ Status wrap_link(const Header& header,
 }  // namespace
 
 Status validate_header(const Header& header) noexcept {
+  // The decoder rejects unknown types and out-of-range delivery classes
+  // (read_header): the encoder must never emit a frame its own decoder
+  // refuses (wire-protocol.md §unknown-type contract).
+  if (!known_frame_type(static_cast<std::uint8_t>(header.type))) {
+    return Status::error(StatusCode::InvalidArgument, "unknown frame type");
+  }
+  if (static_cast<std::uint8_t>(header.delivery) >
+      static_cast<std::uint8_t>(DeliveryClass::Applied)) {
+    return Status::error(StatusCode::InvalidArgument, "unknown delivery class");
+  }
   if (header.network == 0 || header.network > UINT32_MAX ||
       header.origin == kInvalidNodeId || header.destination == kInvalidNodeId ||
       header.previous_hop == kInvalidNodeId || header.next_hop == kInvalidNodeId) {
     return Status::error(StatusCode::InvalidArgument, "wire identity field is invalid");
   }
   if (header.payload_length > kMaxApplicationPayload) {
-    return Status::error(StatusCode::InvalidArgument, "payload exceeds v0 limit");
+    return Status::error(StatusCode::InvalidArgument, "payload exceeds v1 limit");
   }
   if (header.hop_remaining == 0 && header.destination != header.next_hop) {
     return Status::error(StatusCode::InvalidArgument, "hop budget exhausted before destination");
@@ -283,11 +311,22 @@ Status open_end(const LinkOpenedFrame& input,
   if (input.header.destination != local_node) {
     return Status::error(StatusCode::AuthorizationFailed, "end payload is not addressed to this node");
   }
+  // Callers may build LinkOpenedFrame directly (open_link validates these, but
+  // the fields are public): reject sizes that cannot fit the fixed buffers
+  // before any length arithmetic or memcpy.
+  if (input.header.payload_length > kMaxApplicationPayload ||
+      input.protected_payload_size > input.protected_payload.size()) {
+    return Status::error(StatusCode::ProtocolError, "frame field out of range");
+  }
   output = PlainFrame{};
   output.header = input.header;
   output.payload_size = input.header.payload_length;
 
   if ((input.header.flags & kFlagEndProtected) == 0) {
+    // Link-only frame: the wire layer accepts the plain payload — whether
+    // unprotected DATA is admissible is a delivery-layer policy (the mesh
+    // node's SecurityProfile drops it in normal mode), not a wire-codec
+    // invariant.
     if (input.protected_payload_size != input.header.payload_length) {
       return Status::error(StatusCode::ProtocolError, "plain control payload length mismatch");
     }
@@ -319,8 +358,19 @@ Status forward(const LinkOpenedFrame& input,
                const std::uint32_t remaining_deadline_ms,
                SecurityProvider& security,
                EncodedFrame& output) noexcept {
-  if (input.header.next_hop != local_node || input.header.destination == local_node) {
+  if (input.header.next_hop != local_node || input.header.destination == local_node ||
+      next_hop == kInvalidNodeId || next_hop == local_node) {
+    // next_hop == destination is the normal final hop — only the invalid
+    // sentinel and self-forwarding are rejected here.
     return Status::error(StatusCode::InvalidState, "frame is not forwardable by this node");
+  }
+  // Same defensive bounds as open_end: the fields are public and must be
+  // consistent before the protected bytes are re-wrapped.
+  const std::size_t expected_plain = static_cast<std::size_t>(input.header.payload_length) +
+      (((input.header.flags & kFlagEndProtected) != 0) ? kAeadTagSize : 0U);
+  if (input.header.payload_length > kMaxApplicationPayload ||
+      input.protected_payload_size != expected_plain) {
+    return Status::error(StatusCode::ProtocolError, "frame field out of range");
   }
   if (input.header.hop_remaining <= 1 || remaining_deadline_ms == 0) {
     return Status::error(StatusCode::Expired, "forwarding budget exhausted");

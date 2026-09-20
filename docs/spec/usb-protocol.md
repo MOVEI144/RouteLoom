@@ -1,10 +1,10 @@
 # USB／Serial transport契約
 
-改訂1.1。フレーミング・認可・creditの意味を定義する。最終field offset／暗号Profile／IDLは未凍結。実装済みtransportではない。
+改訂1.2。フレーミング・認可・creditの意味を定義する。最終field offset／暗号Profile／IDLは未凍結。Rust host codecと携帯可能C++ device bridge（session、credit、MeshNode統合）は実装済みで、`protocol/usb-golden`の共有vectorでbyte相互検証済み。ただし開発profile認証であり、実USB driver・HIL・本番Profileは未認定。
 
 ## 1. フレームと境界
 
-COBS＋0 delimiterを基準。decoded最大4096B、body最大はheader・保護・CRCを差し引く。CRCはCRC-32/ISO-HDLC（reflected polynomial 0xEDB88320、init/xorout 0xFFFFFFFF、check("123456789")=0xCBF43926）、little-endian32bitで末尾へ置く。CRC対象はdecoded CRC直前のbytes、CRC自体とCOBSは除く。CRCは認証ではない。
+COBS＋0 delimiterを基準。decoded最大4096B、body最大はheader・保護・CRCを差し引く。CRCはCRC-32/ISO-HDLC（reflected polynomial 0xEDB88320、init/xorout 0xFFFFFFFF、check("123456789")=0xCBF43926）、他fieldと同じくbig-endian32bitで末尾へ置く。CRC対象はdecoded CRC直前のbytes、CRC自体とCOBSは除く。CRCは認証ではない。
 
 最大符号化長は保守的にn+floor(n/254)+2（delimiter込み）。decoded overlengthを検出しても次delimiterまで有界に捨て、再同期する。部分frameは最後のbyteから1000msで破棄する。実USB伝送速度と相互待ちで達成可能かを認定する。
 
@@ -17,6 +17,8 @@ HELLOは未認証。device/host credential、nonces、protocol範囲、選択版
 firmware hashの自己申告はattestationではない。COM番号やUSB serial文字列を機器本人証明にしない。Networkを切り替える場合も認証scopeと再認可を確認する。未認証のCREDITを送信許可として処理しない。
 
 再接続は新sessionで、partial frame、grant、consumed、request tokenを再使用しない。stable Message IDやhost idempotency identityだけを明示的に再照会する。認証方式と最終byte vectorはG-SEC/G-USBに残す。
+
+現行実装は**EXPERIMENTALな開発profile**として、共有secretと決定的なtranscript結合MAC（label分離domain、u64 wrap演算）でHELLO/AUTH/session frame tagを検証する。本番Identity・真正暗学suiteではなく、G-SECの責務である。
 
 ## 3. credit：方向・session別の累積許可
 

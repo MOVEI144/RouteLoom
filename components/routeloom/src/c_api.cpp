@@ -115,6 +115,7 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
   output.message_session = input.message_session;
   output.link_epoch = input.link_epoch;
   output.end_epoch = input.end_epoch;
+  output.route_generation = input.route_generation;
   output.route_advertisement_period_ms = input.route_advertisement_period_ms;
   output.route_lifetime_ms = input.route_lifetime_ms;
   output.hop_accept_timeout_ms = input.hop_accept_timeout_ms;
@@ -157,6 +158,7 @@ void rl_node_config_init(rl_node_config_t* config) {
   config->abi_version = RL_ABI_VERSION;
   config->link_epoch = 1;
   config->end_epoch = 1;
+  config->route_generation = 1;
   config->route_advertisement_period_ms = 5000;
   config->route_lifetime_ms = 15000;
   config->hop_accept_timeout_ms = 60;
@@ -212,9 +214,10 @@ rl_status_code_t rl_add_neighbor(rl_context_t* context, const rl_node_id_t neigh
                             : to_c(context->node.add_neighbor(neighbor, link_metric, now_ms).code);
 }
 
-rl_status_code_t rl_remove_neighbor(rl_context_t* context, const rl_node_id_t neighbor) {
+rl_status_code_t rl_remove_neighbor(rl_context_t* context, const rl_node_id_t neighbor,
+                                    const rl_monotonic_ms_t now_ms) {
   return context == nullptr ? RL_STATUS_INVALID_ARGUMENT
-                            : to_c(context->node.remove_neighbor(neighbor).code);
+                            : to_c(context->node.remove_neighbor(neighbor, now_ms).code);
 }
 
 rl_status_code_t rl_send(rl_context_t* context, const rl_node_id_t destination,

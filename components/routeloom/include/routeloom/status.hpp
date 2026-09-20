@@ -28,6 +28,24 @@ enum class StatusCode : std::uint16_t {
   Conflict,
   Busy,
   InternalError,
+  // Autonomous-mesh reason codes (docs/design/autonomous-mesh/01-integration.md
+  // §8). Appended after the v1 set — existing values are never renumbered.
+  DiscoveryBudgetExhausted,
+  AuthRequired,
+  ApprovalRequired,
+  BindingConflict,
+  PeerCapacity,
+  Congested,
+  RemoteBusy,
+  NoFeasibleAlternative,
+  SurveyRequiresOutagePermission,
+  LegacyParticipant,
+  ClockUncertain,
+  PlanNotCommitted,
+  RecoveryRequired,
+  // The production auth profile has no qualified provider; reported instead
+  // of a stub that would claim security (02-discovery.md §5).
+  AuthProfileUnavailable,
 };
 
 struct Status {

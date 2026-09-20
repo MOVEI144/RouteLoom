@@ -10,6 +10,11 @@ using NodeId = std::uint64_t;
 using NetworkId = std::uint64_t;
 using MonotonicMs = std::uint64_t;
 
+// A link-layer radio address (ESP-NOW/Wi-Fi MAC). Distinct from NodeId: a
+// NodeId is a provisioned identity, a MacAddress is a transport address that
+// can change across hardware swaps and must never be used as an identity.
+using MacAddress = std::array<std::uint8_t, 6>;
+
 constexpr NodeId kInvalidNodeId = 0;
 constexpr NodeId kBroadcastNodeId = UINT64_MAX;
 constexpr std::size_t kMaxApplicationPayload = 128;
@@ -69,22 +74,35 @@ enum class Priority : std::uint8_t {
   Urgent = 3,
 };
 
+// Frozen Wire v1 frame type IDs (see protocol/semantics.json frame_numeric_ids).
+// Gaps between groups are reserved for future types in the same class.
 enum class FrameType : std::uint8_t {
   Discover = 1,
   Offer = 2,
   BootstrapAuth = 3,
   MembershipResult = 4,
+  BootstrapChunk = 5,
+  BootstrapReply = 6,
+  MembershipQuery = 7,
   Data = 16,
   HopAccept = 17,
   EndReceipt = 18,
   AppResult = 19,
   Busy = 20,
+  Service = 21,
+  Control = 22,
+  TimeSync = 23,
+  ChannelNotice = 24,
   RouteUpdate = 32,
   RouteWithdraw = 33,
   SeqnoRequest = 34,
+  RouteRequest = 35,
   NeighborProbe = 40,
   NeighborResult = 41,
   Diagnostic = 48,
+  ControlObject = 49,
+  ObjectChunk = 50,
+  ObjectAck = 51,
 };
 
 enum class SecurityScope : std::uint8_t {
@@ -117,6 +135,9 @@ struct SendOptions {
   Priority priority{Priority::Normal};
   std::uint32_t lifetime_ms{5000};
   std::uint8_t hop_limit{kDefaultHopLimit};
+  // Request durability across deep sleep: the power coordinator persists the
+  // delivery into the sleep image instead of failing it at drain.
+  bool persist_across_sleep{false};
 };
 
 struct DeliveryResult {

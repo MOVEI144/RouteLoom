@@ -7,25 +7,25 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 fn usage() {
-    eprintln!("routeloomctl [--socket PATH] status|diagnostics|send <node> <hex>");
+    eprintln!("routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
     let mut socket = PathBuf::from("/tmp/routeloom.sock");
     let mut remaining = Vec::new();
+    // --socket is accepted in any position, not only before the command.
     while let Some(argument) = args.next() {
         if argument == "--socket" {
             socket = PathBuf::from(args.next().ok_or("--socket requires a path")?);
         } else {
             remaining.push(argument);
-            remaining.extend(args);
-            break;
         }
     }
     let command = match remaining.as_slice() {
         [name] if name == "status" => "STATUS".to_string(),
         [name] if name == "diagnostics" => "DIAGNOSTICS".to_string(),
+        [name] if name == "autonomy" => "AUTONOMY".to_string(),
         [name, node, payload] if name == "send" => format!("SEND {node} {payload}"),
         _ => {
             usage();

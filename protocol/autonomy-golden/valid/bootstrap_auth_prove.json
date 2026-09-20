@@ -1,0 +1,10 @@
+{
+  "body_hex": "70726f76652d626f6479",
+  "codec": "bootstrap_auth",
+  "encoded_hex": "0101000070726f76652d626f6479",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "bootstrap_auth_prove",
+  "phase": 1,
+  "step_index": 0
+}
