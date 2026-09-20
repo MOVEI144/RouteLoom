@@ -6,6 +6,7 @@ mod api1;
 mod canonical;
 mod receive_log;
 mod send_store;
+mod sqlite_store;
 
 use acl::Acl;
 use receive_log::{Ingress, ReceiveLog};
@@ -14,7 +15,7 @@ use routeloom_protocol::dev_session::{
     DIRECTION_HOST_TO_DEVICE, FLAG_AUTH, PROTECTED_BODY_OVERHEAD,
 };
 use routeloom_protocol::{encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder};
-use send_store::MemoryOperationStore;
+use send_store::{mint_id128, MemoryOperationStore, OperationStore, StoreBackend};
 use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs::{File, OpenOptions};
@@ -625,10 +626,15 @@ struct State {
     /// = default deny for privileged API1 methods while diagnostics verbs
     /// keep working.
     acl: Acl,
-    /// Bounded in-memory operation table for `messages.submit` and the
-    /// operation queries (TX-I1). RAM only: no durability, no epoch
-    /// rotation — CAP-I1 swaps this seam for the SQLite store.
-    operation_store: Mutex<MemoryOperationStore>,
+    /// Operation table for `messages.submit` and the operation queries:
+    /// the memory provider by default, the durable SQLite provider once
+    /// `--op-store` names a database file. Capabilities and evidence
+    /// follow whichever backend is bound.
+    operation_store: Mutex<StoreBackend>,
+    /// Token buckets guarding `messages.submit`/`operations.open_epoch`
+    /// (capacity.host_rate_per_minute + burst). Daemon-wide so the
+    /// per-principal and global budgets hold across connections.
+    rate_limiter: Mutex<send_store::AdmissionLimiter>,
 }
 
 fn now_ms() -> u64 {
@@ -1598,6 +1604,7 @@ fn serve_client(
                 acl: &state.acl,
                 receive_log: &state.receive_log,
                 operation_store: &state.operation_store,
+                rate_limiter: &state.rate_limiter,
                 now_ms: now_ms(),
             };
             api1::handle(&raw[b"API1 ".len()..], &ctx)
@@ -1704,11 +1711,23 @@ fn serve_client(
     }
 }
 
-fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
+struct DaemonArgs {
+    socket: PathBuf,
+    device: Option<PathBuf>,
+    acl_file: Option<PathBuf>,
+    op_store: Option<PathBuf>,
+}
+
+fn parse_args() -> Result<DaemonArgs, String> {
+    parse_args_from(env::args().skip(1))
+}
+
+fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, String> {
     let mut socket = PathBuf::from("/tmp/routeloom.sock");
     let mut device = None;
     let mut acl_file = None;
-    let mut args = env::args().skip(1);
+    let mut op_store = None;
+    let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--socket" => socket = PathBuf::from(args.next().ok_or("--socket requires a path")?),
@@ -1724,38 +1743,35 @@ fn parse_args() -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), String> {
                     args.next().ok_or("--api-acl-file requires a path")?,
                 ))
             }
+            // Durable operation-store file (CAP-I1). Absent = memory
+            // provider: RAM_ONLY submits only, storage_durable:false.
+            "--op-store" => {
+                op_store = Some(PathBuf::from(
+                    args.next().ok_or("--op-store requires a path")?,
+                ))
+            }
             "--help" | "-h" => {
-                println!("routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH]");
+                println!(
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH]"
+                );
                 process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    Ok((socket, device, acl_file))
-}
-
-/// Fresh 128-bit id minted once per daemon start: the receive-log epoch
-/// (contracts.json: daemon_restart_changes_cursor_epoch) and the operation
-/// store lineage each get one. Falls back to time^pid if /dev/urandom is
-/// unavailable — still non-repeating.
-fn mint_id128() -> [u8; 16] {
-    let mut epoch = [0_u8; 16];
-    if File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut epoch))
-        .is_err()
-    {
-        let seed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            ^ u128::from(process::id());
-        epoch = seed.to_be_bytes();
-    }
-    epoch
+    Ok(DaemonArgs {
+        socket,
+        device,
+        acl_file,
+        op_store,
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (socket_path, device, acl_path) = parse_args().map_err(io::Error::other)?;
+    let args = parse_args().map_err(io::Error::other)?;
+    let socket_path = args.socket;
+    let device = args.device;
+    let acl_path = args.acl_file;
     // A malformed ACL file is a hard startup error — silently degrading to
     // default-deny could surprise operators who believe grants are active.
     let acl = match &acl_path {
@@ -1767,6 +1783,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if acl_path.is_some() {
         eprintln!("api acl loaded: revision {}", acl.revision());
     }
+    // Same for the durable store: a suspect database refuses to start
+    // rather than serving old keys under a fresh empty lineage.
+    let operation_store = match &args.op_store {
+        Some(path) => {
+            let store = sqlite_store::SqliteOperationStore::open(path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            eprintln!(
+                "operation store: sqlite at {} (lineage {})",
+                path.display(),
+                receive_log::hex_lower(&store.lineage())
+            );
+            StoreBackend::Sqlite(store)
+        }
+        None => {
+            eprintln!("operation store: memory (RAM_ONLY only; pass --op-store for durability)");
+            StoreBackend::Memory(MemoryOperationStore::new(mint_id128()))
+        }
+    };
     // Only remove a leftover unix socket — never unlink a regular file or a
     // path a second instance happens to point at.
     if let Ok(meta) = std::fs::metadata(&socket_path) {
@@ -1784,7 +1818,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(State {
         device: device.clone(),
         receive_log: Mutex::new(ReceiveLog::new(mint_id128())),
-        operation_store: Mutex::new(MemoryOperationStore::new(mint_id128())),
+        operation_store: Mutex::new(operation_store),
         acl,
         ..State::default()
     });
@@ -2575,5 +2609,23 @@ mod tests {
         assert_eq!(client.events.len(), 3);
         assert_eq!(client.authority.state, "unknown");
         assert_eq!(client.adapter.node, Some(42));
+    }
+
+    #[test]
+    fn op_store_flag_parses() {
+        let args =
+            |words: &[&str]| parse_args_from(words.iter().map(|w| w.to_string())).expect("parse");
+        let defaults = args(&[]);
+        assert_eq!(defaults.socket, PathBuf::from("/tmp/routeloom.sock"));
+        assert!(defaults.device.is_none());
+        assert!(defaults.acl_file.is_none());
+        assert!(defaults.op_store.is_none());
+        let durable = args(&["--op-store", "/var/lib/routeloom/ops.db"]);
+        assert_eq!(
+            durable.op_store,
+            Some(PathBuf::from("/var/lib/routeloom/ops.db"))
+        );
+        assert!(parse_args_from(["--op-store".to_string()].into_iter()).is_err());
+        assert!(parse_args_from(["--bogus".to_string()].into_iter()).is_err());
     }
 }

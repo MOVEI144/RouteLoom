@@ -29,7 +29,10 @@ use crate::canonical;
 use crate::receive_log::{
     Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
 };
-use crate::send_store::{OpIdentity, OperationStore, StoredOperation, SubmitOutcome};
+use crate::send_store::{
+    AdmissionLimiter, CapacityStatus, OpIdentity, OpenEpochError, OperationStore, RateDeny,
+    StoredOperation, SubmitOutcome,
+};
 use routeloom_json::{escape_string, Json};
 use std::sync::Mutex;
 
@@ -42,12 +45,15 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// Per-request inputs the dispatch layer needs. `uid` is the socket peer's
 /// OS credential (None when the platform cannot supply one — default deny).
 /// The store is generic over `OperationStore` so CAP-I1 can swap the memory
-/// table for SQLite without touching this dispatch layer.
+/// table for SQLite without touching this dispatch layer. `rate_limiter`
+/// is daemon-wide (04 §4: per-principal and global budgets), so limits
+/// hold across connections.
 pub struct ApiContext<'a, S: OperationStore> {
     pub uid: Option<u32>,
     pub acl: &'a Acl,
     pub receive_log: &'a Mutex<ReceiveLog>,
     pub operation_store: &'a Mutex<S>,
+    pub rate_limiter: &'a Mutex<AdmissionLimiter>,
     pub now_ms: u64,
 }
 
@@ -210,15 +216,21 @@ fn bound_response(response: String) -> String {
     response
 }
 
-/// Honest capability advertisement: only what this phase implements.
+/// Honest capability advertisement: only what this daemon implements.
 /// `rx_events_v1`/`ingress_loss_observable` are false on the old firmware —
 /// gateway-side drops before DataFromMesh cannot be proven or counted here.
-/// The send side accepts RAM_ONLY storage only (`storage_durable:false`,
-/// CAP-I1) and queues without USB dispatch (`host_queued_only`, CAP-I2).
+/// `storage_durable` follows the bound operation store (true with
+/// `--op-store`, false for the memory provider); both queue without USB
+/// dispatch (`host_queued_only`, CAP-I2).
 fn capabilities<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<String, ApiError> {
     let epoch_known = ctx.uid.is_some();
+    let durable = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned")
+        .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":false}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":false,\"dispatch\":\"host_queued_only\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":false}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"host_queued_only\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -434,7 +446,9 @@ fn read_result(outcome: ReadOutcome, cursor_at: &dyn Fn(u64) -> String) -> Strin
 
 /// `operations.open_epoch` params: `{network}`. Binds the caller's
 /// admission epoch for that network (SEND grant required), opening epoch 1
-/// on first use. Epoch rotation/close is CAP-I1 — this phase never closes.
+/// on first use and rotating hourly past it. At the unretired-epoch
+/// ceiling no new epoch can be issued and admission stops with
+/// NO_CAPACITY; already admitted keys stay queryable.
 fn operations_open_epoch<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -464,15 +478,26 @@ fn operations_open_epoch<S: OperationStore>(
             "principal lacks SEND on this network",
         ));
     };
+    // Rate limit before any admission work so epoch spam cannot bypass
+    // the budget either (04 §4).
+    if let Err(deny) = ctx
+        .rate_limiter
+        .lock()
+        .expect("rate limiter poisoned")
+        .admit(uid, ctx.now_ms)
+    {
+        return Err(rate_limited(deny));
+    }
     let mut store = ctx
         .operation_store
         .lock()
         .expect("operation store poisoned");
-    match store.open_epoch((uid, network)) {
+    match store.open_epoch((uid, network), ctx.now_ms) {
         Ok((epoch, _)) => Ok(format!(
             "\"network\":\"{network:016x}\",\"admission_epoch\":\"{epoch:016x}\""
         )),
-        Err(()) => Err(no_capacity()),
+        Err(OpenEpochError::NoCapacity) => Err(no_capacity(&store.capacity_status(ctx.now_ms))),
+        Err(OpenEpochError::StoreFault) => Err(store_fault()),
     }
     .map(|fields| format!("{{{fields}}}"))
 }
@@ -486,7 +511,14 @@ fn messages_submit<S: OperationStore>(
 ) -> Result<String, ApiError> {
     let req = canonical::parse_submit(params)
         .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
-    canonical::admission_check(&req, canonical::wants_persist_sleep(params))
+    // The durability flag is immutable per store, so a short lock here
+    // cannot race the admission below.
+    let store_durable = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned")
+        .durable();
+    canonical::admission_check(&req, canonical::wants_persist_sleep(params), store_durable)
         .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
     let Some(uid) = ctx
         .uid
@@ -497,13 +529,24 @@ fn messages_submit<S: OperationStore>(
             "principal lacks SEND on this network",
         ));
     };
+    // Charged before the store sees the request: replays and CONFLICTs
+    // cost a token too, so a spammed key cannot ride the dedup path for
+    // free (04 §4).
+    if let Err(deny) = ctx
+        .rate_limiter
+        .lock()
+        .expect("rate limiter poisoned")
+        .admit(uid, ctx.now_ms)
+    {
+        return Err(rate_limited(deny));
+    }
     let mut store = ctx
         .operation_store
         .lock()
         .expect("operation store poisoned");
     match store.submit(uid, &req, ctx.now_ms) {
         SubmitOutcome::Accepted { seq } | SubmitOutcome::Replay { seq } => {
-            Ok(submit_result(&store.lineage(), seq))
+            Ok(submit_result(&store.lineage(), seq, req.storage))
         }
         SubmitOutcome::Conflict { existing_seq } => Err(ApiError {
             code: "CONFLICT",
@@ -517,25 +560,60 @@ fn messages_submit<S: OperationStore>(
             "INVALID_PARAMS",
             "admission_epoch is not open for this principal and network; call operations.open_epoch",
         )),
-        SubmitOutcome::NoCapacity => Err(no_capacity()),
+        SubmitOutcome::EpochClosed => Err(ApiError::simple(
+            "EPOCH_CLOSED",
+            "admission_epoch is closed for new keys; known keys stay queryable via operations.get_by_key",
+        )),
+        SubmitOutcome::NoCapacity => Err(no_capacity(&store.capacity_status(ctx.now_ms))),
+        SubmitOutcome::StoreFault => Err(store_fault()),
     }
 }
 
-fn no_capacity() -> ApiError {
+/// Admission throttle (04 §4): retryable, and names which scope — the
+/// caller's own bucket or the all-principals one — ran dry.
+fn rate_limited(deny: RateDeny) -> ApiError {
     ApiError {
-        code: "NO_CAPACITY",
-        extra_fields:
-            ",\"message\":\"operation table is full\",\"free_slots\":0,\"reclaimable_at\":null"
-                .to_string(),
+        code: "RATE_LIMITED",
+        extra_fields: format!(
+            ",\"message\":\"admission rate limit exceeded\",\"scope\":\"{}\",\"retry_after_ms\":{}",
+            deny.scope, deny.retry_after_ms,
+        ),
         retryable: true,
     }
 }
 
-/// Accept response per 03-send-api.md §1, with honest TX-I1 evidence: RAM
-/// retention only — durable retention arrives with CAP-I1.
-fn submit_result(lineage: &[u8; 16], seq: u64) -> String {
+fn no_capacity(status: &CapacityStatus) -> ApiError {
+    let reclaimable = status
+        .reclaimable_at_ms
+        .map_or_else(|| "null".to_string(), |ms| ms.to_string());
+    ApiError {
+        code: "NO_CAPACITY",
+        extra_fields: format!(
+            ",\"message\":\"operation store has no free admission slot\",\"free_slots\":{},\"free_bytes\":{},\"reclaimable_at\":{reclaimable}",
+            status.free_slots, status.free_bytes,
+        ),
+        retryable: true,
+    }
+}
+
+fn store_fault() -> ApiError {
+    ApiError::simple(
+        "STORE_RECOVERY_REQUIRED",
+        "operation store fault; the daemon cannot vouch for this outcome",
+    )
+}
+
+/// Accept response per 03-send-api.md §1. The evidence tag follows the
+/// admitted storage class: HOST_DURABLE_RETAINED only leaves a store that
+/// actually retains the record across restarts.
+fn submit_result(lineage: &[u8; 16], seq: u64, storage: u8) -> String {
+    let evidence = if storage == canonical::STORAGE_DURABLE {
+        "HOST_DURABLE_RETAINED"
+    } else {
+        "HOST_RAM_RETAINED"
+    };
     format!(
-        "{{\"operation_id\":\"{}\",\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"HOST_RAM_RETAINED\"],\"message_key\":null}}",
+        "{{\"operation_id\":\"{}\",\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"{evidence}\"],\"message_key\":null}}",
         canonical::format_operation_id(lineage, seq)
     )
 }
@@ -571,13 +649,14 @@ fn operations_get<S: OperationStore>(
         .lock()
         .expect("operation store poisoned");
     let record = match store.get_by_seq(seq) {
-        Some(record) if store.lineage() == lineage => record,
-        _ => {
+        Ok(Some(record)) if store.lineage() == lineage => record,
+        Ok(_) => {
             return Err(ApiError::simple(
                 "NOT_FOUND",
                 "no operation with that id in this store",
             ))
         }
+        Err(()) => return Err(store_fault()),
     };
     if !ctx.uid.is_some_and(|uid| {
         ctx.acl
@@ -658,7 +737,7 @@ fn operations_get_by_key<S: OperationStore>(
         epoch,
         key,
     };
-    let Some(record) = store.get_by_key(&identity) else {
+    let Some(record) = store.get_by_key(&identity).map_err(|()| store_fault())? else {
         return Err(ApiError::simple(
             "NOT_FOUND",
             "no operation with that key in this store",
@@ -673,8 +752,13 @@ fn operations_get_by_key<S: OperationStore>(
 /// and state transitions belong to TX-I2.
 fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> String {
     let elapsed = now_ms.saturating_sub(record.accepted_ms) >= u64::from(record.ttl_ms);
+    let evidence = if record.storage == canonical::STORAGE_DURABLE {
+        "HOST_DURABLE_RETAINED"
+    } else {
+        "HOST_RAM_RETAINED"
+    };
     format!(
-        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"HOST_RAM_RETAINED\"],\"message_key\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":false,\"time_uncertain\":false}}}}",
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[\"{evidence}\"],\"message_key\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":false,\"time_uncertain\":false}}}}",
         canonical::format_operation_id(lineage, record.seq),
         record.network,
         record.epoch,
@@ -688,6 +772,7 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         record.ttl_ms,
         canonical::storage_name(record.storage),
         record.hop_limit,
+        record.dispatch_state.name(),
     )
 }
 
@@ -737,6 +822,7 @@ mod tests {
         acl: &'a Acl,
         log: &'a Mutex<ReceiveLog>,
         store: &'a Mutex<S>,
+        limiter: &'a Mutex<AdmissionLimiter>,
         now: u64,
     ) -> ApiContext<'a, S> {
         ApiContext {
@@ -744,15 +830,23 @@ mod tests {
             acl,
             receive_log: log,
             operation_store: store,
+            rate_limiter: limiter,
             now_ms: now,
         }
     }
 
-    fn test_env() -> (Acl, Mutex<ReceiveLog>, Mutex<MemoryOperationStore>) {
+    #[allow(clippy::type_complexity)]
+    fn test_env() -> (
+        Acl,
+        Mutex<ReceiveLog>,
+        Mutex<MemoryOperationStore>,
+        Mutex<AdmissionLimiter>,
+    ) {
         (
             send_acl(),
             Mutex::new(ReceiveLog::new([9; 16])),
             Mutex::new(MemoryOperationStore::new([0xab; 16])),
+            Mutex::new(AdmissionLimiter::new(0)),
         )
     }
 
@@ -761,8 +855,9 @@ mod tests {
         acl: &Acl,
         log: &Mutex<ReceiveLog>,
         store: &Mutex<MemoryOperationStore>,
+        limiter: &Mutex<AdmissionLimiter>,
     ) -> String {
-        let c = ctx(Some(501), acl, log, store, 0);
+        let c = ctx(Some(501), acl, log, store, limiter, 0);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
             &c,
@@ -816,7 +911,8 @@ mod tests {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         // Missing request_id / bad v / unknown field / dup key / non-object.
         for body in [
             "{\"v\":1,\"method\":\"capabilities.get\"}",
@@ -854,7 +950,8 @@ mod tests {
         let acl = Acl::empty();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
-        let c = ctx(None, &acl, &log, &store, 0);
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"c1\",\"method\":\"capabilities.get\"}",
             &c,
@@ -879,7 +976,8 @@ mod tests {
         let acl = Acl::empty();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
-        let c = ctx(None, &acl, &log, &store, 0);
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"u\",\"method\":\"operations.cancel\",\"params\":{}}",
             &c,
@@ -897,9 +995,10 @@ mod tests {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
         ingest(&log, 1, 1, b"hello", 100);
         // Authorized uid reads the payload.
-        let c = ctx(Some(501), &acl, &log, &store, 200);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
             &c,
@@ -912,7 +1011,7 @@ mod tests {
         // Unknown uid and ungranted uid are denied, even though legacy
         // diagnostic verbs keep working for them.
         for uid in [None, Some(7)] {
-            let c = ctx(uid, &acl, &log, &store, 200);
+            let c = ctx(uid, &acl, &log, &store, &limiter, 200);
             let response = handle(
                 b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\"}}",
                 &c,
@@ -926,7 +1025,8 @@ mod tests {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         let response = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"latest\"}}",
             &c,
@@ -941,10 +1041,11 @@ mod tests {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
         for i in 0..5_u64 {
             ingest(&log, 1, i, format!("m{i}").as_bytes(), 100);
         }
-        let c = ctx(Some(501), &acl, &log, &store, 200);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
         let first = handle(
             b"{\"v\":1,\"request_id\":\"r\",\"method\":\"messages.read\",\"params\":{\"network\":\"0000000000000001\",\"from\":\"earliest\",\"limit\":2}}",
             &c,
@@ -1055,7 +1156,8 @@ mod tests {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         for params in [
             "{\"from\":\"earliest\"}",            // no network
             "{\"network\":\"0000000000000001\"}", // neither
@@ -1087,11 +1189,12 @@ mod tests {
         let acl = acl_with(501);
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
         // Fill past the per-network cap so the front is reclaimed.
         for i in 0..(crate::receive_log::ENTRIES_PER_NETWORK + 2) as u64 {
             ingest(&log, 1, i, b"p", 100);
         }
-        let c = ctx(Some(501), &acl, &log, &store, 200);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 200);
         let stale = Cursor {
             network: 1,
             acl_view: acl.revision(),
@@ -1115,8 +1218,8 @@ mod tests {
 
     #[test]
     fn open_epoch_binds_and_requires_send() {
-        let (acl, log, store) = test_env();
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let (acl, log, store, limiter) = test_env();
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         let first = handle(
             b"{\"v\":1,\"request_id\":\"e1\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
             &c,
@@ -1164,7 +1267,7 @@ mod tests {
             ),
             (Some(501), "{}", "INVALID_PARAMS"),
         ] {
-            let c = ctx(uid, &acl, &log, &store, 0);
+            let c = ctx(uid, &acl, &log, &store, &limiter, 0);
             let request = format!(
                 "{{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{params}}}"
             );
@@ -1175,9 +1278,9 @@ mod tests {
 
     #[test]
     fn submit_accepts_replays_and_conflicts() {
-        let (acl, log, store) = test_env();
-        let epoch = open_test_epoch(&acl, &log, &store);
-        let c = ctx(Some(501), &acl, &log, &store, 1000);
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
         let key = "00112233445566778899aabbccddeeff";
         let first = handle(submit_line(key, &epoch).as_bytes(), &c);
         assert!(first.contains("\"ok\":true"), "{first}");
@@ -1213,27 +1316,27 @@ mod tests {
 
     #[test]
     fn submit_requires_open_epoch_and_send_grant() {
-        let (acl, log, store) = test_env();
+        let (acl, log, store, limiter) = test_env();
         // No epoch opened yet: well-formed submit is rejected.
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         let response = handle(
             submit_line("00112233445566778899aabbccddeeff", "0000000000000001").as_bytes(),
             &c,
         );
         assert!(response.contains("INVALID_PARAMS"), "{response}");
         assert!(response.contains("open_epoch"), "{response}");
-        let epoch = open_test_epoch(&acl, &log, &store);
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
         // SEND denied without a grant; principal is the peer uid, never a
         // request field (which is itself an unknown-param reject).
         for uid in [None, Some(7)] {
-            let c = ctx(uid, &acl, &log, &store, 0);
+            let c = ctx(uid, &acl, &log, &store, &limiter, 0);
             let response = handle(
                 submit_line("00112233445566778899aabbccddeeff", &epoch).as_bytes(),
                 &c,
             );
             assert!(response.contains("AuthorizationFailed"), "{response}");
         }
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         let spoofed = format!(
             "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"00112233445566778899aabbccddeeff\",\"principal\":7,\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
         );
@@ -1242,9 +1345,9 @@ mod tests {
 
     #[test]
     fn submit_validation_rejects() {
-        let (acl, log, store) = test_env();
-        let epoch = open_test_epoch(&acl, &log, &store);
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         let base = |params: &str| {
             format!("{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{params}}}")
         };
@@ -1294,10 +1397,10 @@ mod tests {
 
     #[test]
     fn query_needs_read_operation_and_is_network_scoped() {
-        let (acl, log, store) = test_env();
-        let epoch = open_test_epoch(&acl, &log, &store);
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
         let key = "00112233445566778899aabbccddeeff";
-        let submitter = ctx(Some(501), &acl, &log, &store, 1000);
+        let submitter = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
         let accepted = handle(submit_line(key, &epoch).as_bytes(), &submitter);
         let id = result_field(&accepted, "operation_id");
         // Owner queries by id and by key.
@@ -1318,7 +1421,7 @@ mod tests {
             assert!(!response.contains("payload_hex"), "{response}");
         }
         // deadline_elapsed flips once ttl passes (read-only observation).
-        let late = ctx(Some(501), &acl, &log, &store, 1000 + 5000);
+        let late = ctx(Some(501), &acl, &log, &store, &limiter, 1000 + 5000);
         let request = format!(
             "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
         );
@@ -1326,7 +1429,7 @@ mod tests {
         assert!(response.contains("\"deadline_elapsed\":true"), "{response}");
         // Another uid's grant is scoped to network 2: denied on network 1's
         // record by id, and its own key namespace finds nothing by key.
-        let other = ctx(Some(7), &acl, &log, &store, 1000);
+        let other = ctx(Some(7), &acl, &log, &store, &limiter, 1000);
         let by_id = format!(
             "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
         );
@@ -1354,10 +1457,141 @@ mod tests {
         assert!(handle(foreign.as_bytes(), &submitter).contains("NOT_FOUND"));
     }
 
+    /// CAP04 over the wire: rotation closes the epoch; new keys fail
+    /// with EPOCH_CLOSED while the known key replays and stays queryable.
+    #[test]
+    fn closed_epoch_rejects_new_keys_but_replays_known() {
+        let (acl, log, store, limiter) = test_env();
+        let first = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let key = "00112233445566778899aabbccddeeff";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &first);
+        let id = result_field(&accepted, "operation_id");
+        // An hour later the daemon rotates to epoch 2.
+        let later = ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            crate::send_store::EPOCH_WINDOW_MS,
+        );
+        let rotated = handle(
+            b"{\"v\":1,\"request_id\":\"e2\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+            &later,
+        );
+        assert!(
+            rotated.contains("\"admission_epoch\":\"0000000000000002\""),
+            "{rotated}"
+        );
+        let fresh = submit_line("ffffffffffffffffffffffffffffffff", &epoch);
+        let closed = handle(fresh.as_bytes(), &later);
+        assert!(closed.contains("EPOCH_CLOSED"), "{closed}");
+        assert!(closed.contains("\"retryable\":false"), "{closed}");
+        // Same key+payload still replays the original id; queries work.
+        let replay = handle(submit_line(key, &epoch).as_bytes(), &later);
+        assert_eq!(result_field(&replay, "operation_id"), id, "{replay}");
+        let query = format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get_by_key\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\"}}}}"
+        );
+        let status = handle(query.as_bytes(), &later);
+        assert!(status.contains("\"ok\":true"), "{status}");
+        assert!(
+            status.contains(&format!("\"operation_id\":\"{id}\"")),
+            "{status}"
+        );
+    }
+
+    /// CAP-I1 restart over the wire: HOST_DURABLE submits are admitted
+    /// with durable evidence, and a reopened store answers the same ids.
+    #[test]
+    fn durable_submit_survives_store_reopen() {
+        use crate::sqlite_store::SqliteOperationStore;
+        let path = std::env::temp_dir().join(format!(
+            "routeloom-cap1-api1-{}-{}.db",
+            std::process::id(),
+            "restart"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let acl = send_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let durable_lineage;
+        let id;
+        {
+            let store = Mutex::new(SqliteOperationStore::open(&path).unwrap());
+            durable_lineage = store.lock().unwrap().lineage();
+            let c = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
+            let caps = handle(
+                b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\"}",
+                &c,
+            );
+            assert!(caps.contains("\"storage_durable\":true"), "{caps}");
+            let epoch = handle(
+                b"{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000001\"}}",
+                &c,
+            );
+            assert!(
+                epoch.contains("\"admission_epoch\":\"0000000000000001\""),
+                "{epoch}"
+            );
+            // Default options mean HOST_DURABLE — admittable here.
+            let submit = handle(
+                b"{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"00ff\",\"payload_len\":2}}",
+                &c,
+            );
+            assert!(submit.contains("\"ok\":true"), "{submit}");
+            assert!(
+                submit.contains("\"evidence\":[\"HOST_DURABLE_RETAINED\"]"),
+                "{submit}"
+            );
+            id = result_field(&submit, "operation_id");
+            // RAM_ONLY still admits, tagged for what it is.
+            let ram = handle(
+                b"{\"v\":1,\"request_id\":\"s2\",\"method\":\"messages.submit\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"destination\":{\"kind\":\"node\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\"}}}",
+                &c,
+            );
+            assert!(
+                ram.contains("\"evidence\":[\"HOST_RAM_RETAINED\"]"),
+                "{ram}"
+            );
+        }
+        // Simulate the daemon restart: reopen the same file.
+        {
+            let store = Mutex::new(SqliteOperationStore::open(&path).unwrap());
+            assert_eq!(store.lock().unwrap().lineage(), durable_lineage);
+            let c = ctx(Some(501), &acl, &log, &store, &limiter, 2000);
+            let query = format!(
+                "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+            );
+            let status = handle(query.as_bytes(), &c);
+            assert!(status.contains("\"ok\":true"), "{status}");
+            assert!(status.contains("\"payload_len\":2"), "{status}");
+            assert!(
+                status.contains("\"dispatch_state\":\"HOST_QUEUED\""),
+                "{status}"
+            );
+            assert!(
+                status.contains("\"evidence\":[\"HOST_DURABLE_RETAINED\"]"),
+                "{status}"
+            );
+            // The RAM record did not survive the restart.
+            let gone = handle(
+                b"{\"v\":1,\"request_id\":\"q2\",\"method\":\"operations.get_by_key\",\"params\":{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}",
+                &c,
+            );
+            assert!(gone.contains("NOT_FOUND"), "{gone}");
+        }
+        let _ = std::fs::remove_file(&path);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+    }
+
     #[test]
     fn full_table_reports_no_capacity() {
-        let (acl, log, store) = test_env();
-        let epoch = open_test_epoch(&acl, &log, &store);
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
         {
             let mut guard = store.lock().unwrap();
             for i in 0..crate::send_store::RECORD_CAP {
@@ -1371,13 +1605,64 @@ mod tests {
                 ));
             }
         }
-        let c = ctx(Some(501), &acl, &log, &store, 0);
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
         let response = handle(
             submit_line("ffffffffffffffffffffffffffffffff", &epoch).as_bytes(),
             &c,
         );
         assert!(response.contains("NO_CAPACITY"), "{response}");
         assert!(response.contains("\"free_slots\":0"), "{response}");
+        assert!(response.contains("\"free_bytes\":0"), "{response}");
+        assert!(response.contains("\"reclaimable_at\":null"), "{response}");
         assert!(response.contains("\"retryable\":true"), "{response}");
+    }
+
+    /// Rate limiting (capacity.host_rate_per_minute/burst, 04 §4):
+    /// open_epoch and submit share one budget, the burst drains then
+    /// denial names the tighter scope, duplicates are still charged, and
+    /// a token interval later admission recovers.
+    #[test]
+    fn admission_rate_limit_scopes_and_recovers() {
+        let (acl, log, store, limiter) = test_env();
+        // open_epoch itself spends from the same budget.
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let key = |i: usize| format!("{i:032x}");
+        // Burst: open_epoch + 15 submits spend all 16 tokens.
+        for i in 0..15 {
+            let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+            let response = handle(submit_line(&key(i), &epoch).as_bytes(), &c);
+            assert!(response.contains("\"ok\":true"), "{i}: {response}");
+        }
+        // Next submit from the same principal: its own bucket is empty.
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        let denied = handle(submit_line(&key(15), &epoch).as_bytes(), &c);
+        assert!(denied.contains("RATE_LIMITED"), "{denied}");
+        assert!(denied.contains("\"scope\":\"principal\""), "{denied}");
+        assert!(denied.contains("\"retryable\":true"), "{denied}");
+        assert!(denied.contains("\"retry_after_ms\":"), "{denied}");
+        // Duplicates are charged too: replaying a known key throttles
+        // rather than answering for free.
+        let replay = handle(submit_line(&key(0), &epoch).as_bytes(), &c);
+        assert!(replay.contains("RATE_LIMITED"), "{replay}");
+        // The shared bucket binds other principals: uid 7's open_epoch on
+        // its own network is throttled by the global scope.
+        let c7 = ctx(Some(7), &acl, &log, &store, &limiter, 0);
+        let denied7 = handle(
+            b"{\"v\":1,\"request_id\":\"e\",\"method\":\"operations.open_epoch\",\"params\":{\"network\":\"0000000000000002\"}}",
+            &c7,
+        );
+        assert!(denied7.contains("RATE_LIMITED"), "{denied7}");
+        assert!(denied7.contains("\"scope\":\"global\""), "{denied7}");
+        // One token-interval later a single admission succeeds again.
+        let later = ctx(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            crate::send_store::RATE_TOKEN_INTERVAL_MS,
+        );
+        let ok = handle(submit_line(&key(15), &epoch).as_bytes(), &later);
+        assert!(ok.contains("\"ok\":true"), "{ok}");
     }
 }

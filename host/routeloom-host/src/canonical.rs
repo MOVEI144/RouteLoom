@@ -2,11 +2,12 @@
 //!
 //! `parse_submit` validates one `messages.submit` params object: unknown
 //! fields, wrong types and out-of-range values are rejected before any state
-//! is touched. `admission_check` then enforces the TX-I1 capability line —
+//! is touched. `admission_check` then enforces the capability line —
 //! known-but-unimplemented values (APPLIED delivery, non-NORMAL priority,
-//! durable storage, sleep persistence) fail as UNSUPPORTED, never silently
-//! downgrade. The two stages are split so the canonical-serialization tests
-//! can check hash vectors for requests this phase refuses to admit.
+//! sleep persistence, durable storage without a durable store) fail as
+//! UNSUPPORTED, never silently downgrade. The two stages are split so the
+//! canonical-serialization tests can check hash vectors for requests the
+//! daemon refuses to admit.
 //!
 //! Canonical form (03-send-api.md §3): schema:u8=1, network:u32,
 //! destination_kind:u8, destination:u64, delivery:u8, priority:u8,
@@ -393,8 +394,14 @@ fn default_options() -> (u8, u8, u32, u8, u8) {
 }
 
 /// Capability gate after schema validation. Every rejection here names the
-/// deferred phase instead of falling back to a weaker behavior.
-pub fn admission_check(req: &SendRequest, persist_sleep: bool) -> Result<(), SubmitReject> {
+/// missing capability instead of falling back to a weaker behavior.
+/// `store_durable` is the bound operation store's durability: HOST_DURABLE
+/// submits are admitted only where the store retains them across restarts.
+pub fn admission_check(
+    req: &SendRequest,
+    persist_sleep: bool,
+    store_durable: bool,
+) -> Result<(), SubmitReject> {
     if req.delivery == DELIVERY_APPLIED {
         return Err(SubmitReject::unsupported(
             "delivery APPLIED is not enabled in this phase",
@@ -405,9 +412,9 @@ pub fn admission_check(req: &SendRequest, persist_sleep: bool) -> Result<(), Sub
             "only priority NORMAL is enabled in this phase",
         ));
     }
-    if req.storage == STORAGE_DURABLE {
+    if req.storage == STORAGE_DURABLE && !store_durable {
         return Err(SubmitReject::unsupported(
-            "storage HOST_DURABLE needs the CAP-I1 durable store; pass storage RAM_ONLY for in-memory acceptance",
+            "storage HOST_DURABLE needs a durable operation store; pass storage RAM_ONLY for in-memory acceptance",
         ));
     }
     if persist_sleep {
@@ -691,11 +698,12 @@ mod tests {
                 "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{options}}}"
             )
         };
-        // The HOST_DURABLE default itself is unadmittable in this phase.
+        // The HOST_DURABLE default is admittable only with a durable store.
         let defaulted = parse_submit(&submit_params(&base("{}"))).unwrap();
         assert_eq!(defaulted.storage, STORAGE_DURABLE);
-        let err = admission_check(&defaulted, false).unwrap_err();
+        let err = admission_check(&defaulted, false, false).unwrap_err();
         assert_eq!(err.code, "UNSUPPORTED");
+        assert!(admission_check(&defaulted, false, true).is_ok());
         for options in [
             "{\"delivery\":\"APPLIED\",\"storage\":\"RAM_ONLY\"}",
             "{\"priority\":\"URGENT\",\"storage\":\"RAM_ONLY\"}",
@@ -706,19 +714,19 @@ mod tests {
             let json = base(options);
             let req = parse_submit(&submit_params(&json)).expect(&json);
             let persist = wants_persist_sleep(&submit_params(&json));
-            let err = admission_check(&req, persist).expect_err(&json);
+            let err = admission_check(&req, persist, false).expect_err(&json);
             assert_eq!(err.code, "UNSUPPORTED", "{json}");
         }
         // BEST_EFFORT + RAM_ONLY is the admittable non-default mix.
         let json = base("{\"delivery\":\"BEST_EFFORT\",\"storage\":\"RAM_ONLY\"}");
         let req = parse_submit(&submit_params(&json)).unwrap();
-        assert!(admission_check(&req, false).is_ok());
+        assert!(admission_check(&req, false, false).is_ok());
         // Gateway destination parses and encodes distinctly from node.
         let gw = "{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000012\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{\"kind\":\"gateway\",\"id\":\"0000000000000003\"},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{\"storage\":\"RAM_ONLY\"}}";
         let req = parse_submit(&submit_params(gw)).unwrap();
         assert_eq!(req.dest_kind, DEST_GATEWAY);
         assert_eq!(req.canonical[5], DEST_GATEWAY);
-        assert!(admission_check(&req, false).is_ok());
+        assert!(admission_check(&req, false, false).is_ok());
     }
 
     #[test]
