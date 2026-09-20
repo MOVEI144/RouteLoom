@@ -389,7 +389,7 @@ ConfigJournal::ConfigJournal(const ConfigJournalConfig& config,
 Status ConfigJournal::decode_slot(const std::uint8_t slot, JournalRecord& record,
                                   SlotContent& content, bool& committed_fields) noexcept {
   committed_fields = false;
-  std::array<std::uint8_t, kConfigJournalSlotBytes> raw{};
+  auto& raw = scratch_a_;
   const Status status =
       storage_.read(slot, MutableByteView{raw.data(), raw.size()});
   if (!status) return status;
@@ -536,7 +536,7 @@ Status ConfigJournal::store_record(const JournalRecord& record) noexcept {
     return st;
   };
 
-  std::array<std::uint8_t, kConfigJournalSlotBytes> image{};
+  auto& image = scratch_a_;
   // Phase 1: land the record unsealed; a power cut leaves a discardable
   // pending record and the previous committed state survives.
   Status status = encode(0, image);
@@ -549,7 +549,7 @@ Status ConfigJournal::store_record(const JournalRecord& record) noexcept {
   status = storage_.write(target_slot, ByteView{image.data(), record_len});
   if (!status) return status;
   // Phase 3: readback verify before any phase advance.
-  std::array<std::uint8_t, kConfigJournalSlotBytes> verify{};
+  auto& verify = scratch_b_;
   status = storage_.read(target_slot, MutableByteView{verify.data(), verify.size()});
   if (!status) return status;
   if (std::memcmp(verify.data(), image.data(), record_len) != 0) {
@@ -669,7 +669,7 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
       !endpoint::config_namespace_valid(config_.config_namespace)) {
     return Status::error(StatusCode::InvalidArgument, "config journal identity invalid");
   }
-  std::array<JournalRecord, kConfigJournalSlots> parsed{};
+  auto& parsed = parsed_;
   std::array<SlotContent, kConfigJournalSlots> content{};
   std::array<bool, kConfigJournalSlots> unreadable{};
   std::array<bool, kConfigJournalSlots> committed_fields{};

@@ -567,6 +567,14 @@ class ConfigJournal {
   std::array<ResultRecord, kConfigResultRecords> results_{};
   MonotonicMs last_now_ms_{0};
   ConfigStats stats_{};
+
+  // Big transient work areas live in the object, not the stack: the journal
+  // is statically allocated by the runtime, so member scratch costs .bss
+  // once instead of pushing multi-KB frames onto task stacks (observed:
+  // ESP32-C3 main-task stack protection fault during initialize()).
+  std::array<JournalRecord, kConfigJournalSlots> parsed_{};
+  std::array<std::uint8_t, kConfigJournalSlotBytes> scratch_a_{};
+  std::array<std::uint8_t, kConfigJournalSlotBytes> scratch_b_{};
 };
 
 // --- Issuer side -------------------------------------------------------------------
