@@ -16,6 +16,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/status.cpp
   src/usb_bridge.cpp
   src/usb_codec.cpp
+  src/usb_host_ops.cpp
   src/usb_session.cpp
   src/wire.cpp
 )

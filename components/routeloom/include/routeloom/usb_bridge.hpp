@@ -14,6 +14,7 @@
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_codec.hpp"
+#include "routeloom/usb_host_ops.hpp"
 #include "routeloom/usb_session.hpp"
 
 namespace routeloom::usb {
@@ -163,6 +164,27 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver {
                       ByteView inner, MonotonicMs now_ms) noexcept;
   void handle_data_to_mesh(std::uint64_t request, ByteView inner,
                            MonotonicMs now_ms) noexcept;
+  void handle_host_ops(std::uint64_t request, ByteView inner,
+                       MonotonicMs now_ms) noexcept;
+  void handle_ops_submit(std::uint64_t request, ByteView inner,
+                         MonotonicMs now_ms) noexcept;
+  void handle_ops_query(std::uint64_t request, ByteView inner,
+                        MonotonicMs now_ms) noexcept;
+  void handle_ops_retire(std::uint64_t request, ByteView inner,
+                         MonotonicMs now_ms) noexcept;
+  void handle_ops_skip(std::uint64_t request, ByteView inner,
+                       MonotonicMs now_ms) noexcept;
+  void handle_ops_time_sample(std::uint64_t request, ByteView inner,
+                              MonotonicMs now_ms) noexcept;
+  void send_receipt(const DispatchReceipt& receipt, std::uint64_t request,
+                    MonotonicMs now_ms) noexcept;
+  void send_query_response(const QueryResponse& response, std::uint64_t request,
+                           MonotonicMs now_ms) noexcept;
+  void send_retire_response(const RetireResponse& response, std::uint64_t request,
+                            MonotonicMs now_ms) noexcept;
+  void send_time_sample_response(const TimeSampleResponse& response,
+                                 std::uint64_t request,
+                                 MonotonicMs now_ms) noexcept;
   void handle_credit(std::uint64_t request, ByteView inner,
                      MonotonicMs now_ms) noexcept;
   void issue_rx_grant(bool initial, MonotonicMs now_ms) noexcept;
@@ -215,8 +237,17 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver {
   bool tx_wire_active_{false};
 
   std::uint64_t pending_request_{0};
+  // True while a host_ops SUBMIT's synchronous mesh->send runs: the Accepted/
+  // Queued callbacks it fires must be suppressed (the window record is
+  // created right after, and later callbacks correlate through it).
+  bool ops_send_active_{false};
   FixedPool<RequestMap, kRequestMapCapacity> request_map_{};
   IdempotencyTable idempotency_{};
+  // Gateway dispatch window (CAP-I2). Bound to the boot lease at
+  // construction; like the idempotency records it intentionally survives
+  // USB reconnects (same boot = same lane/records). A reboot rebuilds the
+  // bridge with a new lease, which wipes the window by construction.
+  DispatchWindow window_;
   BridgeStats stats_{};
 };
 

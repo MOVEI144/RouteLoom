@@ -4,6 +4,7 @@
 use std::fmt;
 
 pub mod dev_session;
+pub mod host_ops;
 
 pub const MAX_DECODED_FRAME: usize = 4096;
 pub const MAGIC: [u8; 4] = *b"RLU1";
@@ -19,6 +20,7 @@ pub enum FrameKind {
     DataToMesh = 16,
     DataFromMesh = 17,
     DeliveryEvent = 18,
+    HostOps = 19,
     Credit = 32,
     Diagnostic = 33,
     Error = 34,
@@ -35,6 +37,7 @@ impl TryFrom<u8> for FrameKind {
             16 => Self::DataToMesh,
             17 => Self::DataFromMesh,
             18 => Self::DeliveryEvent,
+            19 => Self::HostOps,
             32 => Self::Credit,
             33 => Self::Diagnostic,
             34 => Self::Error,

@@ -40,7 +40,10 @@ void write_u16(std::uint8_t* p, std::uint16_t v) noexcept {
 }  // namespace
 
 UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
-    : config_(config), stream_(stream), decoder_(*this) {}
+    : config_(config),
+      stream_(stream),
+      decoder_(*this),
+      window_(BootLease::derive(config.boot_id, config.node)) {}
 
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
@@ -307,6 +310,9 @@ void UsbBridge::dispatch_inner(const FrameKind kind, const std::uint16_t flags,
     case FrameKind::DataToMesh:
       handle_data_to_mesh(request, inner, now_ms);
       break;
+    case FrameKind::HostOps:
+      handle_host_ops(request, inner, now_ms);
+      break;
     case FrameKind::Error:
     case FrameKind::Diagnostic:
       break;  // host-reported status; accounted in stats only
@@ -464,6 +470,419 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
     map->id = id;
     map->request = request;
   }
+}
+
+void UsbBridge::handle_host_ops(const std::uint64_t request,
+                                    const ByteView inner,
+                                    const MonotonicMs now_ms) noexcept {
+  // Mutual-negotiation enforcement, device side: the subcommands are served
+  // only when this build is configured to speak host_ops_v1 (advertised in
+  // HelloAck). The host side — send only when advertised — is TX-I2's duty.
+  if ((config_.capability & kCapHostOpsV1) == 0) {
+    send_error(UsbErrorCode::Unsupported, request, "HOST_OPS_UNSUPPORTED", now_ms);
+    return;
+  }
+  if (inner.size < 2) {
+    send_error(UsbErrorCode::ProtocolError, request, "HOST_OPS_MALFORMED", now_ms);
+    return;
+  }
+  if (inner.data[0] != kHostOpsSchema) {
+    send_error(UsbErrorCode::ProtocolError, request, "HOST_OPS_SCHEMA", now_ms);
+    return;
+  }
+  switch (static_cast<HostOpsSub>(inner.data[1])) {
+    case HostOpsSub::Submit:
+      handle_ops_submit(request, inner, now_ms);
+      break;
+    case HostOpsSub::QueryDispatch:
+      handle_ops_query(request, inner, now_ms);
+      break;
+    case HostOpsSub::RetireThrough:
+      handle_ops_retire(request, inner, now_ms);
+      break;
+    case HostOpsSub::Skip:
+      handle_ops_skip(request, inner, now_ms);
+      break;
+    case HostOpsSub::TimeSample:
+      handle_ops_time_sample(request, inner, now_ms);
+      break;
+    default:
+      send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
+      break;
+  }
+}
+
+void UsbBridge::send_receipt(const DispatchReceipt& receipt,
+                             const std::uint64_t request,
+                             const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kReceiptSize> body{};
+  std::size_t body_size = 0;
+  if (!encode_receipt(receipt, MutableByteView{body.data(), body.size()},
+                      body_size)) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), body_size},
+          now_ms);
+}
+
+void UsbBridge::send_query_response(const QueryResponse& response,
+                                    const std::uint64_t request,
+                                    const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kQueryResponseSize> body{};
+  std::size_t body_size = 0;
+  if (!encode_query_response(response, MutableByteView{body.data(), body.size()},
+                             body_size)) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), body_size},
+          now_ms);
+}
+
+void UsbBridge::send_retire_response(const RetireResponse& response,
+                                     const std::uint64_t request,
+                                     const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kRetireResponseSize> body{};
+  std::size_t body_size = 0;
+  if (!encode_retire_response(response, MutableByteView{body.data(), body.size()},
+                              body_size)) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), body_size},
+          now_ms);
+}
+
+void UsbBridge::send_time_sample_response(const TimeSampleResponse& response,
+                                          const std::uint64_t request,
+                                          const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kTimeSampleResponseSize> body{};
+  std::size_t body_size = 0;
+  if (!encode_time_sample_response(response,
+                                   MutableByteView{body.data(), body.size()},
+                                   body_size)) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), body_size},
+          now_ms);
+}
+
+namespace {
+
+// Fills a receipt's record fields from a stored slot (replay/conflict/refusal
+// answers carry the authoritative slot state, not the request's claims).
+void fill_receipt_from_slot(DispatchReceipt& receipt,
+                            const DispatchWindow::Slot& slot) noexcept {
+  receipt.state = slot.state;
+  receipt.hash = slot.hash;
+  receipt.msg_session = slot.msg_session;
+  receipt.msg_seq = slot.msg_seq;
+  receipt.msg_valid = slot.msg_valid;
+  receipt.evidence = slot.evidence;
+}
+
+void fill_query_from_slot(QueryResponse& response,
+                          const DispatchWindow::Slot& slot) noexcept {
+  response.state = slot.state;
+  response.hash = slot.hash;
+  response.operation_id = slot.operation_id;
+  response.msg_session = slot.msg_session;
+  response.msg_seq = slot.msg_seq;
+  response.msg_valid = slot.msg_valid;
+  response.evidence = slot.evidence;
+}
+
+}  // namespace
+
+void UsbBridge::handle_ops_submit(const std::uint64_t request,
+                                  const ByteView inner,
+                                  const MonotonicMs now_ms) noexcept {
+  SubmitRequest submit{};
+  if (!decode_submit(inner, submit)) {
+    send_error(UsbErrorCode::ProtocolError, request, "SUBMIT_MALFORMED", now_ms);
+    return;
+  }
+  DispatchReceipt receipt{};
+  receipt.sub = HostOpsSub::Submit;
+  receipt.lease = window_.lease();
+  receipt.dispatch_seq = submit.dispatch_seq;
+  receipt.hash = submit.canonical_hash;
+
+  const DispatchWindow::SubmitCheck check = window_.check_submit(
+      submit.lease, submit.dispatcher, submit.dispatch_seq, submit.canonical_hash);
+  switch (check) {
+    case DispatchWindow::SubmitCheck::LeaseMismatch:
+      receipt.result = HostOpsResult::LeaseMismatch;
+      send_receipt(receipt, request, now_ms);
+      return;
+    case DispatchWindow::SubmitCheck::InvalidId:
+      receipt.result = HostOpsResult::InvalidRequest;
+      send_receipt(receipt, request, now_ms);
+      return;
+    case DispatchWindow::SubmitCheck::LaneMismatch:
+      receipt.result = HostOpsResult::LaneMismatch;
+      send_receipt(receipt, request, now_ms);
+      return;
+    case DispatchWindow::SubmitCheck::Retired:
+      receipt.result = HostOpsResult::Retired;
+      send_receipt(receipt, request, now_ms);
+      return;
+    case DispatchWindow::SubmitCheck::WindowFull:
+      receipt.result = HostOpsResult::WindowFull;
+      send_receipt(receipt, request, now_ms);
+      return;
+    case DispatchWindow::SubmitCheck::Replay:
+    case DispatchWindow::SubmitCheck::Conflict: {
+      const DispatchWindow::Slot* slot = window_.find(submit.dispatch_seq);
+      if (slot != nullptr) fill_receipt_from_slot(receipt, *slot);
+      receipt.result = check == DispatchWindow::SubmitCheck::Replay
+                           ? HostOpsResult::Existing
+                           : HostOpsResult::Conflict;
+      send_receipt(receipt, request, now_ms);
+      return;
+    }
+    case DispatchWindow::SubmitCheck::Admit:
+      break;
+  }
+
+  // Admitted position: validate the canonical request before touching the
+  // mesh. Structural failures are InvalidRequest; known-but-unenabled values
+  // are Unsupported — never silently downgraded.
+  CanonicalFields fields{};
+  if (!parse_canonical_request(submit.canonical, fields)) {
+    receipt.result = HostOpsResult::InvalidRequest;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  // The canonical network must match the authenticated session network:
+  // a dispatcher confused (or lying) about its network must not send into
+  // another one.
+  if (transcript_.network > 0xFFFFFFFFULL ||
+      fields.network != static_cast<std::uint32_t>(transcript_.network)) {
+    receipt.result = HostOpsResult::InvalidRequest;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  if (fields.dest_kind == 1) {
+    // Gateway-local destination: no application sink exists in this slice,
+    // so there is nothing honest to do with it yet (APP scope).
+    receipt.result = HostOpsResult::Unsupported;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  if (fields.delivery == 2 || fields.priority != 1 || fields.persist_sleep) {
+    receipt.result = HostOpsResult::Unsupported;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  if (fields.destination == config_.node) {
+    receipt.result = HostOpsResult::InvalidRequest;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+
+  // Device-deadline enforcement at admission (03 §4): late USB arrivals never
+  // send. The terminal Expired record keeps the position accounted so a
+  // retry replays the same outcome instead of wedging the retire prefix.
+  if (now_ms >= submit.device_deadline) {
+    if (!window_.record_expired(submit.dispatcher, submit.dispatch_seq,
+                                submit.canonical_hash, submit.operation_id,
+                                fields.delivery)) {
+      receipt.result = HostOpsResult::MeshRejected;
+      send_receipt(receipt, request, now_ms);
+      return;
+    }
+    receipt.result = HostOpsResult::Expired;
+    receipt.state = DispatchWindow::State::Expired;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+
+  if (config_.mesh == nullptr) {
+    receipt.result = HostOpsResult::MeshRejected;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  SendOptions options{};
+  options.delivery = fields.delivery == 0 ? DeliveryClass::BestEffort
+                                          : DeliveryClass::Reliable;
+  options.priority = Priority::Normal;
+  const std::uint64_t remaining = submit.device_deadline - now_ms;
+  options.lifetime_ms = remaining > UINT32_MAX
+                            ? UINT32_MAX
+                            : static_cast<std::uint32_t>(remaining);
+  options.hop_limit = fields.hop_limit;
+  options.persist_across_sleep = false;
+  MessageId id{};
+  ops_send_active_ = true;
+  const Status status =
+      config_.mesh->send(fields.destination, fields.payload, options, now_ms, id);
+  ops_send_active_ = false;
+  if (!status) {
+    // Refused or full: no record is created, so a later retry is a clean
+    // Admit — never a Conflict against a half-created entry.
+    receipt.result = HostOpsResult::MeshRejected;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
+                           submit.canonical_hash, submit.operation_id,
+                           fields.delivery, id.session, id.sequence)) {
+    // Defensive: check-then-record is atomic for our single-threaded caller.
+    receipt.result = HostOpsResult::MeshRejected;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  receipt.result = HostOpsResult::Ok;
+  receipt.state = DispatchWindow::State::Sent;
+  receipt.msg_session = id.session;
+  receipt.msg_seq = id.sequence;
+  receipt.msg_valid = true;
+  receipt.evidence = DispatchWindow::Evidence::GatewayAccepted;
+  send_receipt(receipt, request, now_ms);
+}
+
+void UsbBridge::handle_ops_query(const std::uint64_t request,
+                                 const ByteView inner,
+                                 const MonotonicMs now_ms) noexcept {
+  LaneRequest query{};
+  if (!decode_lane_request(inner, HostOpsSub::QueryDispatch, query)) {
+    send_error(UsbErrorCode::ProtocolError, request, "QUERY_MALFORMED", now_ms);
+    return;
+  }
+  QueryResponse response{};
+  response.lease = window_.lease();
+  response.dispatch_seq = query.seq;
+  DispatchWindow::Slot slot{};
+  const DispatchWindow::QueryOutcome outcome =
+      window_.query(query.lease, query.dispatcher, query.seq, slot);
+  switch (outcome) {
+    case DispatchWindow::QueryOutcome::Found:
+      response.result = HostOpsResult::Ok;
+      fill_query_from_slot(response, slot);
+      break;
+    case DispatchWindow::QueryOutcome::Retired:
+      response.result = HostOpsResult::Retired;
+      break;
+    case DispatchWindow::QueryOutcome::NotRetained:
+      response.result = HostOpsResult::NotRetained;
+      break;
+    case DispatchWindow::QueryOutcome::LeaseMismatch:
+      response.result = HostOpsResult::LeaseMismatch;
+      break;
+    case DispatchWindow::QueryOutcome::LaneMismatch:
+      response.result = HostOpsResult::LaneMismatch;
+      break;
+    case DispatchWindow::QueryOutcome::InvalidId:
+      response.result = HostOpsResult::InvalidRequest;
+      break;
+  }
+  send_query_response(response, request, now_ms);
+}
+
+void UsbBridge::handle_ops_retire(const std::uint64_t request,
+                                  const ByteView inner,
+                                  const MonotonicMs now_ms) noexcept {
+  LaneRequest retire{};
+  if (!decode_lane_request(inner, HostOpsSub::RetireThrough, retire)) {
+    send_error(UsbErrorCode::ProtocolError, request, "RETIRE_MALFORMED", now_ms);
+    return;
+  }
+  RetireResponse response{};
+  response.lease = window_.lease();
+  const DispatchWindow::RetireOutcome outcome =
+      window_.retire_through(retire.lease, retire.dispatcher, retire.seq);
+  switch (outcome) {
+    case DispatchWindow::RetireOutcome::Advanced:
+    case DispatchWindow::RetireOutcome::NoopFloor:
+      response.result = HostOpsResult::Ok;
+      break;
+    case DispatchWindow::RetireOutcome::RefusedSpan:
+      response.result = HostOpsResult::RetireRefused;
+      break;
+    case DispatchWindow::RetireOutcome::LeaseMismatch:
+      response.result = HostOpsResult::LeaseMismatch;
+      break;
+    case DispatchWindow::RetireOutcome::LaneMismatch:
+      response.result = HostOpsResult::LaneMismatch;
+      break;
+  }
+  response.retired_through = window_.retired_through();
+  send_retire_response(response, request, now_ms);
+}
+
+void UsbBridge::handle_ops_skip(const std::uint64_t request,
+                                const ByteView inner,
+                                const MonotonicMs now_ms) noexcept {
+  LaneRequest skip{};
+  if (!decode_lane_request(inner, HostOpsSub::Skip, skip)) {
+    send_error(UsbErrorCode::ProtocolError, request, "SKIP_MALFORMED", now_ms);
+    return;
+  }
+  DispatchReceipt receipt{};
+  receipt.sub = HostOpsSub::Skip;
+  receipt.lease = window_.lease();
+  receipt.dispatch_seq = skip.seq;
+  const DispatchWindow::SkipOutcome outcome =
+      window_.skip(skip.lease, skip.dispatcher, skip.seq);
+  switch (outcome) {
+    case DispatchWindow::SkipOutcome::Skipped:
+      receipt.result = HostOpsResult::Ok;
+      receipt.state = DispatchWindow::State::Skipped;
+      break;
+    case DispatchWindow::SkipOutcome::ReplaySkipped:
+      receipt.result = HostOpsResult::Existing;
+      receipt.state = DispatchWindow::State::Skipped;
+      break;
+    case DispatchWindow::SkipOutcome::Occupied: {
+      const DispatchWindow::Slot* slot = window_.find(skip.seq);
+      if (slot != nullptr) fill_receipt_from_slot(receipt, *slot);
+      receipt.result = HostOpsResult::SkipRefused;
+      break;
+    }
+    case DispatchWindow::SkipOutcome::Retired:
+      receipt.result = HostOpsResult::Retired;
+      break;
+    case DispatchWindow::SkipOutcome::WindowFull:
+      receipt.result = HostOpsResult::WindowFull;
+      break;
+    case DispatchWindow::SkipOutcome::LeaseMismatch:
+      receipt.result = HostOpsResult::LeaseMismatch;
+      break;
+    case DispatchWindow::SkipOutcome::LaneMismatch:
+      receipt.result = HostOpsResult::LaneMismatch;
+      break;
+    case DispatchWindow::SkipOutcome::InvalidId:
+      receipt.result = HostOpsResult::InvalidRequest;
+      break;
+  }
+  send_receipt(receipt, request, now_ms);
+}
+
+void UsbBridge::handle_ops_time_sample(const std::uint64_t request,
+                                       const ByteView inner,
+                                       const MonotonicMs now_ms) noexcept {
+  TimeSampleRequest sample{};
+  if (!decode_time_sample_request(inner, sample)) {
+    send_error(UsbErrorCode::ProtocolError, request, "TIME_SAMPLE_MALFORMED",
+               now_ms);
+    return;
+  }
+  // Read-only echo: the protected-session seal already binds this answer to
+  // the session and direction; the CURRENT lease is always reported so the
+  // host can detect a reboot from any reply. Sample ordering/acceptance on
+  // the host (nonce freshness, mapping validity) is TX-I2's loop — the
+  // device just answers truthfully.
+  TimeSampleResponse response{};
+  response.lease = window_.lease();
+  response.nonce = sample.nonce;
+  response.device_time = now_ms;
+  response.result = (window_.lease().valid() && sample.lease == window_.lease())
+                        ? HostOpsResult::Ok
+                        : HostOpsResult::LeaseMismatch;
+  send_time_sample_response(response, request, now_ms);
 }
 
 void UsbBridge::issue_rx_grant(const bool initial, const MonotonicMs now_ms) noexcept {
@@ -675,8 +1094,9 @@ void UsbBridge::reset_session_state() noexcept {
   pending_request_ = 0;
   request_map_ = FixedPool<RequestMap, kRequestMapCapacity>{};
   decoder_.reset();
-  // Idempotency records intentionally survive: their scope is the host
-  // identity, not the session. Everything else volatile is cleared.
+  // Idempotency records and the dispatch window intentionally survive: their
+  // scope is the host identity / boot lease, not the session. Everything
+  // else volatile is cleared.
 }
 
 std::uint64_t UsbBridge::request_for(const MessageId& id) const noexcept {
@@ -702,6 +1122,17 @@ void UsbBridge::on_message(const MessageKey& key, const NodeId source,
 }
 
 void UsbBridge::on_delivery(const DeliveryResult& result) noexcept {
+  // Host-ops-correlated deliveries update the dispatch window instead of
+  // emitting a DeliveryEvent: their authoritative state is pulled via
+  // QUERY_DISPATCH (TX-I2), and the SUBMIT request id is session-scoped while
+  // window records outlive reconnects. (A duplicate callback for an already
+  // retired record is the one case that still emits: the record is gone by
+  // design, so the host reads it as a stale event.)
+  if (ops_send_active_ ||
+      window_.note_mesh_outcome(result.id.session, result.id.sequence,
+                                result.state)) {
+    return;
+  }
   // inner: request(8) || msg_session(4) || msg_seq(8) || state(1) ||
   //        reason_len(1) || reason
   const std::uint64_t request =

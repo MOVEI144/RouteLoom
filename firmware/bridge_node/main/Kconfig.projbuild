@@ -119,6 +119,11 @@ config ROUTELOOM_USB_DEV_SECRET
 
 config ROUTELOOM_CAPABILITY
     hex "Capability bitmap reported in HelloAck"
-    default 0x3
+    default 0x7
+    help
+        Bit 2 (0x4) advertises host_ops_v1: the USB bridge serves the
+        SUBMIT/QUERY_DISPATCH/RETIRE_THROUGH/SKIP/TIME_SAMPLE subcommands
+        (FrameKind HostOps) and binds them to the NVS-monotonic boot lease.
+        Bits 0-1 are the legacy default with no per-bit meaning assigned.
 
 endmenu

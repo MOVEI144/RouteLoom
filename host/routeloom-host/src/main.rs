@@ -1008,6 +1008,19 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         FrameKind::KeepAlive => {
             push_event(state, ms, "\"kind\":\"keepalive\"".to_string());
         }
+        // HostOps receipts/answers are observed here; parsing them into
+        // dispatch state is TX-I2's loop (CAP-I2 ships the codec only).
+        FrameKind::HostOps => {
+            push_event(
+                state,
+                ms,
+                format!(
+                    "\"kind\":\"frame\",\"frame_kind\":{},\"body_len\":{}",
+                    frame.kind as u8,
+                    body.len(),
+                ),
+            );
+        }
         // Hello/DataToMesh are host→device kinds; if they arrive from the
         // device we still record them as observed frames.
         FrameKind::Hello | FrameKind::DataToMesh => {
