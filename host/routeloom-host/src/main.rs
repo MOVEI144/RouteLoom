@@ -28,7 +28,7 @@ use std::process;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Bounded observation buffers. The daemon keeps only what it legitimately
 /// observes on the USB stream; mesh truth it cannot see stays `unknown`.
@@ -1622,6 +1622,20 @@ fn serve_client(
                 b"{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"detail\":{\"message\":\"request exceeds 8192 bytes\"},\"retryable\":false}}\n",
             );
             let _ = writer.flush();
+            // Lingering close: half-close our write side, then drain
+            // whatever the client still has in flight. Closing with
+            // unread inbound data makes Linux send RST, which can
+            // destroy the error response we just wrote.
+            let _ = writer.shutdown(std::net::Shutdown::Write);
+            let _ = writer.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut sink = [0u8; 4096];
+            let mut drained = 0usize;
+            while drained < 1_048_576 {
+                match reader.read(&mut sink) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => drained += n,
+                }
+            }
             return Ok(());
         }
         while matches!(raw.last(), Some(b'\n' | b'\r')) {
