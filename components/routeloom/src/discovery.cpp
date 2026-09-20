@@ -124,8 +124,9 @@ Status DevPskAuthenticator::attest(const autonomy::AuthPhase phase,
                                    AuthTag& out) noexcept {
   // "RLA1" | phase u8 | reserved 3B | requester node | responder node |
   // requester mac | responder mac | pad | network | requester nonce |
-  // responder nonce | requester capability | responder capability.
-  std::array<std::uint8_t, 88> aad{};
+  // responder nonce | requester capability | responder capability |
+  // scope_binding 32B (02-discovery-scope §5.2).
+  std::array<std::uint8_t, 120> aad{};
   ByteWriter writer(MutableByteView{aad.data(), aad.size()});
   const bool requester_side =
       phase == autonomy::AuthPhase::Prove || phase == autonomy::AuthPhase::Finish;
@@ -153,6 +154,8 @@ Status DevPskAuthenticator::attest(const autonomy::AuthPhase phase,
   RL_WRITE(writer.write_bytes(ByteView{transcript.responder_nonce.data(), 16}));
   RL_WRITE(writer.write_u32(transcript.requester_capability));
   RL_WRITE(writer.write_u32(transcript.responder_capability));
+  RL_WRITE(writer.write_bytes(
+      ByteView{transcript.scope_binding.data(), transcript.scope_binding.size()}));
 #undef RL_WRITE
   const SecurityContext context{SecurityScope::Link, transcript.network, sender,
                                 receiver, domain_tag_};
@@ -283,15 +286,43 @@ NeighborDiscovery::NeighborDiscovery(const DiscoveryConfig& config, DiscoveryPor
 }
 
 Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   if (started_) {
     return Status::error(StatusCode::InvalidState, "discovery already started");
+  }
+  // Broad Commissioning-scope discovery is never valid on Network 0 — this
+  // check precedes the generic network!=0 rule so the specific code wins.
+  if (scope_mode_scoped(config_.scope_mode) &&
+      config_.scope_class == endpoint::ScopeClass::Commissioning &&
+      config_.network == 0) {
+    return Status::error(StatusCode::NetworkRequired,
+                         "commissioning scope requires a Network");
   }
   if (config_.node == kInvalidNodeId || config_.network == 0 ||
       mac_equal(config_.mac, discovery_const::kBroadcastMac) ||
       config_.cookie_bucket_ms == 0 || config_.candidate_ttl_ms == 0 ||
       config_.awake_lease_ms == 0) {
     return Status::error(StatusCode::InvalidArgument, "discovery config invalid");
+  }
+  if (scope_mode_scoped(config_.scope_mode)) {
+    if (config_.scope_provider == nullptr ||
+        config_.scope == kInvalidScopeRef) {
+      return Status::error(StatusCode::InvalidArgument,
+                           "scoped mode requires a scope provider and ScopeRef");
+    }
+    // Required is unusable when the authenticator cannot fold scope_binding
+    // into the transcript — never silently advertise it (02 §5.2).
+    if (config_.scope_mode == ScopeMode::Required &&
+        !authenticator_.binds_scope()) {
+      return Status::error(StatusCode::AuthProfileUnavailable,
+                           "authenticator cannot process scope_binding");
+    }
+    // OptionalMigration legacy window: owner-proven deadline, capped at the
+    // 24h contract maximum measured from this start (02 §2.2).
+    migration_deadline_ms_ =
+        config_.migration_until_ms == 0
+            ? 0
+            : std::min(config_.migration_until_ms,
+                       now_ms + kScopeLegacyMigrationMaxMs);
   }
   membership_.initialize(hooks_, config_.network);
   started_ = true;
@@ -304,6 +335,13 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
   }
   const Status status = membership_.begin_discovery();
   if (!status) return status;
+  // Required with an unusable scope stops discovery outright — never a
+  // downgrade to OpenLegacy/Off (02-discovery-scope §2.2, §2.6).
+  if (config_.scope_mode == ScopeMode::Required && !scope_tx_usable()) {
+    ++scope_stats_.key_unavailable;
+    return Status::error(StatusCode::AuthProfileUnavailable,
+                         "required scope key unavailable");
+  }
   if (outbound_.active) {
     return Status::error(StatusCode::WouldBlock, "discovery exchange in flight");
   }
@@ -339,7 +377,8 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
 
 // --- RX: RLD1 carrier -----------------------------------------------------------
 
-void NeighborDiscovery::on_rld1_rx(const MacAddress& source, const ByteView frame,
+void NeighborDiscovery::on_rld1_rx(const DiscoveryRxMetadata& rx,
+                                   const ByteView frame,
                                    const MonotonicMs now_ms) noexcept {
   if (!started_) return;
   autonomy::Rld1Envelope env{};
@@ -356,18 +395,34 @@ void NeighborDiscovery::on_rld1_rx(const MacAddress& source, const ByteView fram
     event("KIND_REJECT", env.claimed_node);
     return;
   }
+  // Scoped modes enforce the observed-destination rule (02-discovery-scope
+  // §2.4): DISCOVER is broadcast-only, everything else must be unicast to
+  // this node. Claimed addresses in the frame are never consulted.
+  if (scope_mode_scoped(config_.scope_mode)) {
+    const bool wants_broadcast = env.kind == FrameType::Discover;
+    const MacAddress& expected =
+        wants_broadcast ? discovery_const::kBroadcastMac : config_.mac;
+    if (!mac_equal(rx.destination, expected)) {
+      if (env.kind == FrameType::Discover || env.kind == FrameType::Offer) {
+        ++scope_stats_.mac_rejected;
+      } else {
+        ++stats_.kind_rejects;
+      }
+      return;
+    }
+  }
   switch (env.kind) {
     case FrameType::Discover:
-      handle_discover(source, env, now_ms);
+      handle_discover(rx, env, frame, now_ms);
       break;
     case FrameType::Offer:
-      handle_offer(source, env, now_ms);
+      handle_offer(rx, env, frame, now_ms);
       break;
     case FrameType::BootstrapAuth:
-      handle_auth(source, env, now_ms);
+      handle_auth(rx.source, env, now_ms);
       break;
     case FrameType::BootstrapChunk:
-      handle_chunk(source, env, now_ms);
+      handle_chunk(rx.source, env, now_ms);
       break;
     case FrameType::BootstrapReply:
       // Fragment control replies are informational only; v1 sends chunks
@@ -380,22 +435,226 @@ void NeighborDiscovery::on_rld1_rx(const MacAddress& source, const ByteView fram
   }
 }
 
-void NeighborDiscovery::handle_discover(const MacAddress& source,
+// Scope-filtered DISCOVER pipeline (02-discovery-scope §2.4/§2.5): cheap
+// parse -> raw budget -> lane classify -> hint -> MAC verify -> dedup ->
+// in-scope density -> candidate reservation. Raw accounting never
+// contaminates density, candidate, transient or auth resources.
+void NeighborDiscovery::handle_discover(const DiscoveryRxMetadata& rx,
                                         const autonomy::Rld1Envelope& env,
+                                        const ByteView frame,
                                         const MonotonicMs now_ms) noexcept {
   ++stats_.discovers_rx;
+  const bool scoped_mode = scope_mode_scoped(config_.scope_mode);
+  if (scoped_mode) {
+    ++scope_stats_.raw_rx;
+    if (!raw_budget_.consume(now_ms)) {
+      ++scope_stats_.budget_dropped;
+      return;
+    }
+  }
+  if (env.body_size == 0) {
+    handle_discover_legacy(rx.source, env, frame, now_ms);
+    return;
+  }
+  if (!scoped_mode || env.body[0] != endpoint::kScopeBodyVersion) {
+    // An unknown body version is a REJECT — a malformed v2 frame is never
+    // reinterpreted as a legacy exchange (02-discovery-scope §2.2).
+    ++stats_.kind_rejects;
+    return;
+  }
+  handle_discover_scoped(rx, env, frame, now_ms);
+}
+
+void NeighborDiscovery::handle_discover_legacy(
+    const MacAddress& source, const autonomy::Rld1Envelope& env,
+    const ByteView frame, const MonotonicMs now_ms) noexcept {
+  const bool scoped_mode = scope_mode_scoped(config_.scope_mode);
+  // The 4-byte hint is only an exploration filter: mismatches never reach a
+  // candidate record and never imply membership either way (02 §4).
+  if (env.network_hint != config_.network_hint) {
+    if (scoped_mode) ++scope_stats_.hint_mismatch;
+    return;
+  }
+  if (env.claimed_node == config_.node || env.claimed_node == kInvalidNodeId) return;
+  ScopeExchangeContext exchange{};
+  // The transcript binding always needs the real DISCOVER digest — in
+  // Off/OpenLegacy too, or both sides compute different scope_bindings.
+  sha256(frame, exchange.discover_digest);
+  if (scoped_mode) {
+    // OptionalMigration inside its window admits the legacy lane; Required
+    // treats a tag-less frame as a silent drop — no per-source oracle.
+    if (!legacy_permitted(now_ms)) {
+      ++scope_stats_.mac_rejected;
+      return;
+    }
+    std::array<std::uint8_t, 16> content{};
+    std::memcpy(content.data(), exchange.discover_digest.data(), content.size());
+    switch (dedup_.check(source, env.transaction_nonce, 0, 0, content, now_ms)) {
+      case ScopeDedupResult::New:
+        break;
+      case ScopeDedupResult::Duplicate:
+        ++scope_stats_.duplicate;
+        return;
+      case ScopeDedupResult::Conflict:
+        ++scope_stats_.dedup_conflict;
+        return;
+      case ScopeDedupResult::Full:
+        ++scope_stats_.dedup_full;
+        return;
+    }
+  }
   // Density is measured BEFORE recording this event so a lone DISCOVER is
   // always answered (02 §6: suppression must never pin the probability to 0).
   const std::uint32_t density = recent_discovers(now_ms);
-  discover_times_[discover_cursor_ % discover_times_.size()] = now_ms;
-  ++discover_cursor_;
+  record_discover(now_ms);
+  admit_discover(source, env, exchange, density, now_ms);
+}
 
-  // The 4-byte hint is only an exploration filter: mismatches never reach a
-  // candidate record and never imply membership either way (02 §4).
-  if (env.network_hint != config_.network_hint) return;
+void NeighborDiscovery::handle_discover_scoped(
+    const DiscoveryRxMetadata& rx, const autonomy::Rld1Envelope& env,
+    const ByteView frame, const MonotonicMs now_ms) noexcept {
+  endpoint::Rld1DiscoverBodyV2 body{};
+  if (!endpoint::scope_discover_body_decode(
+          ByteView{env.body.data(), env.body_size}, body)) {
+    ++stats_.kind_rejects;  // malformed v2 — never reinterpreted as legacy
+    return;
+  }
   if (env.claimed_node == config_.node || env.claimed_node == kInvalidNodeId) return;
-  // Local Revoked is already screened by the RX gate (frame_allowed=false).
+  if (!scope_rx_usable()) {
+    ++scope_stats_.key_unavailable;
+    return;
+  }
+  std::uint32_t current = 0;
+  if (!config_.scope_provider->current_generation(config_.scope, current)) {
+    ++scope_stats_.key_unavailable;  // key loss stops discovery; no downgrade
+    return;
+  }
+  if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
+                                                   now_ms)) {
+    ++scope_stats_.unknown_generation;
+    return;
+  }
+  // Cheap hint candidate check against OUR configured class: the hint space
+  // separates Member from Commissioning, so a frame of the other class fails
+  // here without any MAC work (02 §2.4). The (class,generation,network)->hint
+  // map is cached so this step never costs a scope-MAC operation.
+  std::uint32_t hint = 0;
+  if (!scoped_hint_for(config_.scope_class, body.generation, hint) ||
+      env.network_hint != hint) {
+    ++scope_stats_.hint_mismatch;
+    return;
+  }
+  // Step 4 (scope MAC verify) is deferred to the Owner poll so a burst can
+  // never exceed kScopeMacsPerPoll verifications per poll.
+  PendingVerify* pending = pending_verify_.allocate();
+  if (pending == nullptr) {
+    ++scope_stats_.budget_dropped;
+    return;
+  }
+  pending->offer = false;
+  pending->rx = rx;
+  pending->env = env;
+  if (frame.size <= pending->frame.bytes.size()) {
+    std::memcpy(pending->frame.bytes.data(), frame.data, frame.size);
+    pending->frame.size = frame.size;
+  }
+  sha256(frame, pending->frame_digest);
+  pending->generation = body.generation;
+  pending->scope_class = body.scope_class;
+  pending->expected_tag = body.tag;
+}
 
+void NeighborDiscovery::drain_scope_pending(const MonotonicMs now_ms) noexcept {
+  std::size_t spent = 0;
+  std::array<PendingVerify*, kScopePendingCapacity> done{};
+  std::size_t done_count = 0;
+  pending_verify_.for_each([&](PendingVerify& pending) {
+    if (spent >= kScopeMacsPerPoll) return;  // bounded MACs per Owner poll
+    ++spent;
+    done[done_count++] = &pending;
+    Status status;
+    if (pending.offer) {
+      ByteBuffer<endpoint::kScopeOfferMacInputSize> input{};
+      status = endpoint::scope_offer_mac_input(
+          config_.network, config_.mac, pending.rx.source,
+          ByteView{pending.discover_digest.data(), pending.discover_digest.size()},
+          ByteView{pending.frame.bytes.data(), autonomy::kRld1HeaderSize},
+          ByteView{pending.frame.bytes.data() + autonomy::kRld1HeaderSize, 44},
+          input);
+      if (status.ok()) {
+        status = scope_tag_verify(*config_.scope_provider, config_.scope,
+                                  pending.generation, input.view(),
+                                  pending.expected_tag);
+      }
+    } else {
+      ByteBuffer<endpoint::kScopeDiscoverMacInputSize> input{};
+      status = endpoint::scope_discover_mac_input(
+          config_.network, pending.rx.source, discovery_const::kBroadcastMac,
+          ByteView{pending.frame.bytes.data(), autonomy::kRld1HeaderSize},
+          ByteView{pending.frame.bytes.data() + autonomy::kRld1HeaderSize, 8},
+          input);
+      if (status.ok()) {
+        status = scope_tag_verify(*config_.scope_provider, config_.scope,
+                                  pending.generation, input.view(),
+                                  pending.expected_tag);
+      }
+    }
+    if (!status) {
+      ++scope_stats_.mac_rejected;  // silent drop — no per-source oracle
+      return;
+    }
+    if (pending.offer) {
+      accept_scoped_offer(pending, now_ms);
+    } else {
+      admit_scoped_discover(pending, now_ms);
+    }
+  });
+  for (std::size_t i = 0; i < done_count; ++i) {
+    pending_verify_.release(done[i]);
+  }
+}
+
+void NeighborDiscovery::admit_scoped_discover(PendingVerify& pending,
+                                              const MonotonicMs now_ms) noexcept {
+  // Dedup — only MAC-verified frames populate the table, and a re-receive
+  // never extends the 8s first-sight window (02 §2.5).
+  std::array<std::uint8_t, 16> content{};
+  std::memcpy(content.data(), pending.frame_digest.data(), content.size());
+  switch (dedup_.check(pending.rx.source, pending.env.transaction_nonce,
+                       static_cast<std::uint8_t>(pending.scope_class),
+                       pending.generation, content, now_ms)) {
+    case ScopeDedupResult::New:
+      break;
+    case ScopeDedupResult::Duplicate:
+      ++scope_stats_.duplicate;
+      return;
+    case ScopeDedupResult::Conflict:
+      ++scope_stats_.dedup_conflict;
+      return;
+    case ScopeDedupResult::Full:
+      ++scope_stats_.dedup_full;
+      return;
+  }
+  ++scope_stats_.scope_accepted;
+  const std::uint32_t density = recent_discovers(now_ms);
+  record_discover(now_ms);
+  ScopeExchangeContext exchange{};
+  exchange.scoped = true;
+  exchange.scope_class = pending.scope_class;
+  exchange.generation = pending.generation;
+  exchange.discover_digest = pending.frame_digest;
+  admit_discover(pending.rx.source, pending.env, exchange, density, now_ms);
+}
+
+// Shared candidate/transient reservation + cookie/OFFER scheduling for both
+// lanes — the scope layer only decides WHETHER this point is reached.
+void NeighborDiscovery::admit_discover(
+    const MacAddress& source, const autonomy::Rld1Envelope& env,
+    const ScopeExchangeContext& exchange, const std::uint32_t density,
+    const MonotonicMs now_ms) noexcept {
+  if (scope_mode_scoped(config_.scope_mode) && !exchange.scoped) {
+    ++scope_stats_.legacy_used;
+  }
   // A duplicate DISCOVER for a live candidate refreshes it in place — MAC
   // churn cannot multiply candidate records (D3-04: quota is global).
   Candidate* candidate = find_candidate(source, env.transaction_nonce);
@@ -405,15 +664,18 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
     });
     if (candidate != nullptr) {
       // An in-flight authentication must not be re-keyed by a fresh
-      // unauthenticated DISCOVER: overwriting the nonce/claim would both
-      // strand the honest requester's PROVE and pin the transient slot.
-      if (candidate->phase != NeighborPhase::Candidate) {
+      // unauthenticated DISCOVER, and a scoped candidate is never rewritten
+      // by the other lane: overwriting the nonce/claim/digest would strand
+      // the honest requester's PROVE and corrupt the transcript binding.
+      if (candidate->phase != NeighborPhase::Candidate ||
+          candidate->exchange.scoped != exchange.scoped) {
         return;
       }
       // Same radio, new attempt nonce: re-issue under the newest nonce.
       candidate->txn_nonce = env.transaction_nonce;
       candidate->claimed_node = env.claimed_node;
       candidate->expires_at_ms = now_ms + config_.candidate_ttl_ms;
+      candidate->exchange = exchange;
     }
   }
   if (candidate == nullptr) {
@@ -432,6 +694,7 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
     candidate = candidates_.allocate();
     if (candidate == nullptr) {
       ++stats_.peer_capacity;
+      if (scope_mode_scoped(config_.scope_mode)) ++scope_stats_.candidate_full;
       event("PEER_CAPACITY", env.claimed_node);
       return;
     }
@@ -442,6 +705,7 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
     candidate->peer_capability = env.capability_bits;
     candidate->phase = NeighborPhase::Candidate;
     candidate->expires_at_ms = now_ms + config_.candidate_ttl_ms;
+    candidate->exchange = exchange;
   }
 
   // A transient peer slot is required to answer — without one the candidate
@@ -449,6 +713,7 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
   if (!candidate->transient_held) {
     if (!reserve_transient()) {
       ++stats_.peer_capacity;
+      if (scope_mode_scoped(config_.scope_mode)) ++scope_stats_.candidate_full;
       event("PEER_CAPACITY", env.claimed_node);
       return;  // parked; poll() retries while the TTL lasts
     }
@@ -472,31 +737,157 @@ void NeighborDiscovery::handle_discover(const MacAddress& source,
   }
 }
 
-void NeighborDiscovery::handle_offer(const MacAddress& source,
+void NeighborDiscovery::handle_offer(const DiscoveryRxMetadata& rx,
                                      const autonomy::Rld1Envelope& env,
+                                     const ByteView frame,
                                      const MonotonicMs now_ms) noexcept {
   ++stats_.offers_rx;
+  const bool scoped_mode = scope_mode_scoped(config_.scope_mode);
+  if (scoped_mode) {
+    ++scope_stats_.raw_rx;
+    if (!raw_budget_.consume(now_ms)) {
+      ++scope_stats_.budget_dropped;
+      return;
+    }
+  }
   if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
       outbound_.have_offer || now_ms > outbound_.stage_deadline_ms) {
     return;
   }
   // The OFFER echoes our transaction nonce; anything else is not ours.
   if (!nonce_equal(env.transaction_nonce, outbound_.our_nonce)) return;
-  if (env.network_hint != config_.network_hint) return;
+
+  if (env.body_size >= 1 && env.body[0] == endpoint::kScopeBodyVersion) {
+    if (!scoped_mode) {
+      ++stats_.kind_rejects;  // v2 is never reinterpreted on a legacy node
+      return;
+    }
+    queue_offer_verify(rx, env, frame, now_ms);
+    return;
+  }
+  // Legacy v1 OFFER lane. In Optional it is only valid while a legacy
+  // attempt is actually ours; in Required it is a tag-less drop.
+  if (scoped_mode &&
+      (!legacy_permitted(now_ms) || outbound_.exchange.scoped)) {
+    ++scope_stats_.mac_rejected;
+    return;
+  }
+  if (env.network_hint != config_.network_hint) {
+    if (scoped_mode) ++scope_stats_.hint_mismatch;
+    return;
+  }
   if (env.body_size != kOfferBodySize || env.body[0] != 1 || env.body[2] != 0 ||
       env.body[3] != 0) {
     ++stats_.kind_rejects;
     return;
   }
+  std::array<std::uint8_t, 16> cookie{};
+  std::array<std::uint8_t, 16> responder_nonce{};
+  std::memcpy(cookie.data(), env.body.data() + 4, 16);
+  std::memcpy(responder_nonce.data(), env.body.data() + 20, 16);
+  accept_offer(rx.source, env, cookie, responder_nonce, frame, now_ms);
+}
+
+void NeighborDiscovery::queue_offer_verify(
+    const DiscoveryRxMetadata& rx, const autonomy::Rld1Envelope& env,
+    const ByteView frame, const MonotonicMs now_ms) noexcept {
+  endpoint::Rld1OfferBodyV2 body{};
+  if (!endpoint::scope_offer_body_decode(
+          ByteView{env.body.data(), env.body_size}, body)) {
+    ++stats_.kind_rejects;  // malformed v2 — never reinterpreted as legacy
+    return;
+  }
+  if (!scope_rx_usable()) {
+    ++scope_stats_.key_unavailable;
+    return;
+  }
+  std::uint32_t current = 0;
+  if (!config_.scope_provider->current_generation(config_.scope, current)) {
+    ++scope_stats_.key_unavailable;
+    return;
+  }
+  if (!config_.scope_provider->accepted_generation(config_.scope, body.generation,
+                                                   now_ms)) {
+    ++scope_stats_.unknown_generation;
+    return;
+  }
+  // The OFFER must answer OUR scoped DISCOVER: class/generation pin to the
+  // attempt context so a foreign or replayed scoped offer cannot bind.
+  if (!outbound_.exchange.scoped ||
+      body.scope_class != outbound_.exchange.scope_class ||
+      body.generation != outbound_.exchange.generation) {
+    ++scope_stats_.mac_rejected;
+    return;
+  }
+  std::uint32_t hint = 0;
+  if (!scoped_hint_for(config_.scope_class, body.generation, hint) ||
+      env.network_hint != hint) {
+    ++scope_stats_.hint_mismatch;
+    return;
+  }
+  PendingVerify* pending = pending_verify_.allocate();
+  if (pending == nullptr) {
+    ++scope_stats_.budget_dropped;
+    return;
+  }
+  pending->offer = true;
+  pending->rx = rx;
+  pending->env = env;
+  if (frame.size <= pending->frame.bytes.size()) {
+    std::memcpy(pending->frame.bytes.data(), frame.data, frame.size);
+    pending->frame.size = frame.size;
+  }
+  sha256(frame, pending->frame_digest);
+  pending->discover_digest = outbound_.exchange.discover_digest;
+  pending->generation = body.generation;
+  pending->scope_class = body.scope_class;
+  pending->expected_tag = body.tag;
+  pending->offer_cookie = body.cookie;
+  pending->offer_nonce = body.responder_nonce;
+}
+
+void NeighborDiscovery::accept_scoped_offer(PendingVerify& pending,
+                                            const MonotonicMs now_ms) noexcept {
+  // State may have moved while the frame waited in the verify queue —
+  // re-check the whole cheap-parse chain on the freshest context.
+  if (!outbound_.active || outbound_.stage != OutboundStage::AwaitingOffers ||
+      outbound_.have_offer || now_ms > outbound_.stage_deadline_ms ||
+      !nonce_equal(pending.env.transaction_nonce, outbound_.our_nonce) ||
+      !outbound_.exchange.scoped ||
+      pending.scope_class != outbound_.exchange.scope_class ||
+      pending.generation != outbound_.exchange.generation ||
+      pending.discover_digest != outbound_.exchange.discover_digest) {
+    return;
+  }
+  ++scope_stats_.scope_accepted;
+  outbound_.have_offer = true;
+  outbound_.peer_mac = pending.rx.source;
+  outbound_.peer_node = pending.env.claimed_node;
+  outbound_.peer_capability = pending.env.capability_bits;
+  outbound_.cookie_echo = pending.offer_cookie;
+  outbound_.peer_nonce = pending.offer_nonce;
+  outbound_.exchange.offer_digest = pending.frame_digest;
+  outbound_.stage = OutboundStage::ProvePending;
+  outbound_.stage_deadline_ms = now_ms + config_.auth_timeout_ms;
+  membership_.begin_authentication();
+}
+
+void NeighborDiscovery::accept_offer(
+    const MacAddress& source, const autonomy::Rld1Envelope& env,
+    const std::array<std::uint8_t, 16>& cookie,
+    const std::array<std::uint8_t, 16>& responder_nonce,
+    const ByteView frame, const MonotonicMs now_ms) noexcept {
   // First valid OFFER wins; the exchange stays single (global handshakes=1).
   outbound_.have_offer = true;
   outbound_.peer_mac = source;
   outbound_.peer_node = env.claimed_node;
   outbound_.peer_capability = env.capability_bits;
-  std::memcpy(outbound_.cookie_echo.data(), env.body.data() + 4, 16);
-  std::memcpy(outbound_.peer_nonce.data(), env.body.data() + 20, 16);
+  outbound_.cookie_echo = cookie;
+  outbound_.peer_nonce = responder_nonce;
+  sha256(frame, outbound_.exchange.offer_digest);
   outbound_.stage = OutboundStage::ProvePending;
   outbound_.stage_deadline_ms = now_ms + config_.auth_timeout_ms;
+  if (scope_mode_scoped(config_.scope_mode)) ++scope_stats_.legacy_used;
   // Starting a bounded mutual exchange transitions a joining node
   // Discovering -> Authenticating; a Member stays Member (D3-11).
   membership_.begin_authentication();
@@ -567,7 +958,8 @@ void NeighborDiscovery::handle_prove(const MacAddress& source,
   const AuthTranscript transcript{env.claimed_node, config_.node, source, config_.mac,
                                   config_.network, candidate->txn_nonce,
                                   candidate->our_nonce, candidate->peer_capability,
-                                  config_.capability_bits};
+                                  config_.capability_bits,
+                                  candidate->exchange.binding()};
   if (!authenticator_.verify(autonomy::AuthPhase::Prove, transcript, prove_tag)) {
     ++stats_.auth_tag_rejects;
     event("AUTH_FAILED", env.claimed_node);
@@ -627,7 +1019,8 @@ void NeighborDiscovery::handle_confirm(const MacAddress& source,
                                   outbound_.peer_mac, config_.network,
                                   outbound_.our_nonce, outbound_.peer_nonce,
                                   config_.capability_bits,
-                                  outbound_.peer_capability};
+                                  outbound_.peer_capability,
+                                  outbound_.exchange.binding()};
   if (!authenticator_.verify(autonomy::AuthPhase::Confirm, transcript,
                              confirm_tag)) {
     ++stats_.auth_tag_rejects;
@@ -641,10 +1034,11 @@ void NeighborDiscovery::handle_confirm(const MacAddress& source,
   const std::uint32_t peer_cap = outbound_.peer_capability;
   const auto req_nonce = outbound_.our_nonce;
   const auto resp_nonce = outbound_.peer_nonce;
+  const ScopeExchangeContext exchange = outbound_.exchange;
   outbound_ = Outbound{};
   release_transient();
   complete_exchange(peer_mac, peer_node, peer_cap, req_nonce, resp_nonce,
-                    confirm_tag, /*we_are_requester=*/true, now_ms);
+                    confirm_tag, exchange, /*we_are_requester=*/true, now_ms);
 }
 
 void NeighborDiscovery::handle_finish(const MacAddress& source,
@@ -662,7 +1056,8 @@ void NeighborDiscovery::handle_finish(const MacAddress& source,
   const AuthTranscript transcript{env.claimed_node, config_.node, source, config_.mac,
                                   config_.network, candidate->txn_nonce,
                                   candidate->our_nonce, candidate->peer_capability,
-                                  config_.capability_bits};
+                                  config_.capability_bits,
+                                  candidate->exchange.binding()};
   if (!authenticator_.verify(autonomy::AuthPhase::Finish, transcript, finish_tag)) {
     ++stats_.auth_tag_rejects;
     event("AUTH_FAILED", env.claimed_node);
@@ -674,9 +1069,10 @@ void NeighborDiscovery::handle_finish(const MacAddress& source,
   const std::uint32_t peer_cap = candidate->peer_capability;
   const auto req_nonce = candidate->txn_nonce;
   const auto resp_nonce = candidate->our_nonce;
+  const ScopeExchangeContext exchange = candidate->exchange;
   release_candidate(*candidate);
   complete_exchange(source, peer_node, peer_cap, req_nonce, resp_nonce, finish_tag,
-                    /*we_are_requester=*/false, now_ms);
+                    exchange, /*we_are_requester=*/false, now_ms);
 }
 
 // --- RX: RLD1 fragmentation ------------------------------------------------------
@@ -890,6 +1286,7 @@ void NeighborDiscovery::complete_exchange(
     const std::uint32_t peer_capability,
     const std::array<std::uint8_t, 16>& requester_nonce,
     const std::array<std::uint8_t, 16>& responder_nonce, const AuthTag& closing_tag,
+    const ScopeExchangeContext& exchange,
     const bool we_are_requester, const MonotonicMs now_ms) noexcept {
   AuthTranscript transcript{};
   transcript.requester_node = we_are_requester ? config_.node : peer_node;
@@ -903,6 +1300,7 @@ void NeighborDiscovery::complete_exchange(
       we_are_requester ? config_.capability_bits : peer_capability;
   transcript.responder_capability =
       we_are_requester ? peer_capability : config_.capability_bits;
+  transcript.scope_binding = exchange.binding();
 
   AuthenticatedPeerProof proof;
   if (!authenticator_.issue_proof(transcript, config_.node, closing_tag, proof) ||
@@ -1126,7 +1524,8 @@ AdmissionRole NeighborDiscovery::local_role() const noexcept {
 Status NeighborDiscovery::emit_rld1(const MacAddress& dest, const FrameType kind,
                                     const std::array<std::uint8_t, 16>& nonce,
                                     const NodeId claimed, const ByteView body,
-                                    const MonotonicMs now_ms) noexcept {
+                                    const MonotonicMs now_ms,
+                                    ScopeDigest* frame_digest) noexcept {
   if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Tx, kind,
             /*transaction_alive=*/true, now_ms)) {
     ++stats_.rate_limited;
@@ -1144,9 +1543,14 @@ Status NeighborDiscovery::emit_rld1(const MacAddress& dest, const FrameType kind
   std::memcpy(env.body.data(), body.data, body.size);
   env.body_size = body.size;
   autonomy::Rld1Encoded encoded{};
-  const Status status = autonomy::rld1_encode(env, encoded);
+  Status status = autonomy::rld1_encode(env, encoded);
   if (!status) return status;
-  return port_.send_rld1(dest, encoded.view());
+  status = port_.send_rld1(dest, encoded.view());
+  if (status.ok() && frame_digest != nullptr) {
+    // The auth transcript binds the exact emitted frame bytes (02 §5.2).
+    sha256(encoded.view(), *frame_digest);
+  }
+  return status;
 }
 
 Status NeighborDiscovery::emit_auth_body(
@@ -1206,13 +1610,99 @@ Status NeighborDiscovery::send_chunk_reply(
 }
 
 Status NeighborDiscovery::send_discover(const MonotonicMs now_ms) noexcept {
-  return emit_rld1(discovery_const::kBroadcastMac, FrameType::Discover,
-                   outbound_.our_nonce, config_.node, ByteView{nullptr, 0},
-                   now_ms);
+  const bool scoped = scoped_attempt(now_ms);
+  if (!scoped && scope_mode_scoped(config_.scope_mode)) {
+    if (!legacy_permitted(now_ms)) {
+      // Required (or Optional outside the window) with an unusable scope:
+      // stop the exchange — never silently downgrade to legacy (02 §2.2).
+      ++scope_stats_.key_unavailable;
+      return Status::error(StatusCode::AuthProfileUnavailable,
+                           "scope unusable; discovery stopped");
+    }
+    // OptionalMigration: the single bounded legacy fallback attempt is
+    // consumed here — a distinct attempt, never retried as legacy.
+    outbound_.legacy_attempted = true;
+    ++scope_stats_.legacy_used;
+  }
+  if (!scoped) {
+    // A legacy attempt binds a distinct transcript: scoped=false and zeroed
+    // class/generation with the real legacy frame digest (02 §2.4).
+    outbound_.exchange = ScopeExchangeContext{};
+    return emit_rld1(discovery_const::kBroadcastMac, FrameType::Discover,
+                     outbound_.our_nonce, config_.node, ByteView{nullptr, 0},
+                     now_ms, &outbound_.exchange.discover_digest);
+  }
+  return send_scoped_discover(now_ms);
+}
+
+Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcept {
+  DiscoveryScopeProvider& provider = *config_.scope_provider;
+  std::uint32_t generation = 0;
+  if (!provider.current_generation(config_.scope, generation)) {
+    ++scope_stats_.key_unavailable;
+    return Status::error(StatusCode::AuthProfileUnavailable,
+                         "scope key unavailable");
+  }
+  std::uint32_t hint = 0;
+  Status status = scope_hint(provider, config_.scope, generation,
+                             config_.scope_class, config_.network, hint);
+  if (!status) return status;
+  // Encode once with a zero tag so the MAC input can cover the actual
+  // header44 + body prefix8; then patch the tag in and re-encode (02 §2.4).
+  endpoint::Rld1DiscoverBodyV2 body{};
+  body.scope_class = config_.scope_class;
+  body.generation = generation;
+  endpoint::EncodedScopeBody encoded_body{};
+  status = endpoint::scope_discover_body_encode(body, encoded_body);
+  if (!status) return status;
+  autonomy::Rld1Envelope env{};
+  env.kind = FrameType::Discover;
+  env.network_hint = hint;
+  env.claimed_node = config_.node;
+  env.transaction_nonce = outbound_.our_nonce;
+  env.capability_bits = config_.capability_bits;
+  std::memcpy(env.body.data(), encoded_body.bytes.data(), encoded_body.size);
+  env.body_size = encoded_body.size;
+  autonomy::Rld1Encoded pass{};
+  status = autonomy::rld1_encode(env, pass);
+  if (!status) return status;
+  ByteBuffer<endpoint::kScopeDiscoverMacInputSize> input{};
+  status = endpoint::scope_discover_mac_input(
+      config_.network, config_.mac, discovery_const::kBroadcastMac,
+      ByteView{pass.bytes.data(), autonomy::kRld1HeaderSize},
+      ByteView{pass.bytes.data() + autonomy::kRld1HeaderSize, 8}, input);
+  if (!status) return status;
+  ScopeTag tag{};
+  status = provider.scope_tag(config_.scope, generation, input.view(), tag);
+  if (!status) {
+    ++scope_stats_.key_unavailable;
+    return status;
+  }
+  std::memcpy(env.body.data() + 8, tag.data(), tag.size());
+  autonomy::Rld1Encoded encoded{};
+  status = autonomy::rld1_encode(env, encoded);
+  if (!status) return status;
+  if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Tx, FrameType::Discover,
+            /*transaction_alive=*/true, now_ms)) {
+    ++stats_.rate_limited;
+    return Status::error(StatusCode::AuthorizationFailed, "TX gated");
+  }
+  status = port_.send_rld1(discovery_const::kBroadcastMac, encoded.view());
+  if (status.ok()) {
+    outbound_.exchange.scoped = true;
+    outbound_.exchange.scope_class = config_.scope_class;
+    outbound_.exchange.generation = generation;
+    outbound_.exchange.offer_digest = ScopeDigest{};
+    sha256(encoded.view(), outbound_.exchange.discover_digest);
+  }
+  return status;
 }
 
 Status NeighborDiscovery::send_offer(Candidate& candidate,
                                      const MonotonicMs now_ms) noexcept {
+  if (candidate.exchange.scoped) {
+    return send_scoped_offer(candidate, now_ms);
+  }
   std::array<std::uint8_t, kOfferBodySize> body{};
   ByteWriter writer(MutableByteView{body.data(), body.size()});
   const std::uint32_t density = recent_discovers(now_ms);
@@ -1224,13 +1714,93 @@ Status NeighborDiscovery::send_offer(Candidate& candidate,
   }
   const Status status =
       emit_rld1(candidate.mac, FrameType::Offer, candidate.txn_nonce,
-                config_.node, ByteView{body.data(), writer.size()}, now_ms);
+                config_.node, ByteView{body.data(), writer.size()}, now_ms,
+                &candidate.exchange.offer_digest);
   if (status.ok()) {
     candidate.offer_pending = false;
     ++stats_.offers_tx;
     // The OFFER commits us to a bounded mutual exchange: a non-member
     // responder becomes Authenticating so the incoming PROVE passes the
     // coarse allowlist; a Member stays Member (06 §4.2).
+    membership_.begin_authentication();
+  }
+  return status;
+}
+
+Status NeighborDiscovery::send_scoped_offer(Candidate& candidate,
+                                            const MonotonicMs now_ms) noexcept {
+  DiscoveryScopeProvider& provider = *config_.scope_provider;
+  const std::uint32_t generation = candidate.exchange.generation;
+  const endpoint::ScopeClass scope_class = candidate.exchange.scope_class;
+  if (!provider.accepted_generation(config_.scope, generation, now_ms)) {
+    // The pinned generation left its acceptance window — drop the candidate
+    // rather than emit a frame a conforming peer must reject.
+    ++scope_stats_.key_unavailable;
+    release_candidate(candidate);
+    relax_membership();
+    return Status::error(StatusCode::AuthProfileUnavailable,
+                         "scope generation expired");
+  }
+  std::uint32_t hint = 0;
+  Status status =
+      scope_hint(provider, config_.scope, generation, scope_class,
+                 config_.network, hint);
+  if (!status) return status;
+  endpoint::Rld1OfferBodyV2 body{};
+  const std::uint32_t density = recent_discovers(now_ms);
+  body.density = density > 255 ? 255 : static_cast<std::uint8_t>(density);
+  body.cookie = candidate.cookie;
+  body.responder_nonce = candidate.our_nonce;
+  body.scope_class = scope_class;
+  body.generation = generation;
+  endpoint::EncodedScopeBody encoded_body{};
+  status = endpoint::scope_offer_body_encode(body, encoded_body);
+  if (!status) return status;
+  autonomy::Rld1Envelope env{};
+  env.kind = FrameType::Offer;
+  env.network_hint = hint;
+  env.claimed_node = config_.node;
+  env.transaction_nonce = candidate.txn_nonce;
+  env.capability_bits = config_.capability_bits;
+  std::memcpy(env.body.data(), encoded_body.bytes.data(), encoded_body.size);
+  env.body_size = encoded_body.size;
+  autonomy::Rld1Encoded pass{};
+  status = autonomy::rld1_encode(env, pass);
+  if (!status) return status;
+  // OFFER tag input binds the requester's observed MAC, our observed MAC and
+  // the exact accepted DISCOVER digest (02 §2.4).
+  ByteBuffer<endpoint::kScopeOfferMacInputSize> input{};
+  status = endpoint::scope_offer_mac_input(
+      config_.network, candidate.mac, config_.mac,
+      ByteView{candidate.exchange.discover_digest.data(),
+               candidate.exchange.discover_digest.size()},
+      ByteView{pass.bytes.data(), autonomy::kRld1HeaderSize},
+      ByteView{pass.bytes.data() + autonomy::kRld1HeaderSize, 44}, input);
+  if (!status) return status;
+  ScopeTag tag{};
+  status = provider.scope_tag(config_.scope, generation, input.view(), tag);
+  if (!status) {
+    // The pinned generation can no longer authenticate this exchange —
+    // drop the candidate rather than emit a frame that cannot verify.
+    ++scope_stats_.key_unavailable;
+    release_candidate(candidate);
+    relax_membership();
+    return status;
+  }
+  std::memcpy(env.body.data() + 44, tag.data(), tag.size());
+  autonomy::Rld1Encoded encoded{};
+  status = autonomy::rld1_encode(env, encoded);
+  if (!status) return status;
+  if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Tx, FrameType::Offer,
+            /*transaction_alive=*/true, now_ms)) {
+    ++stats_.rate_limited;
+    return Status::error(StatusCode::AuthorizationFailed, "TX gated");
+  }
+  status = port_.send_rld1(candidate.mac, encoded.view());
+  if (status.ok()) {
+    sha256(encoded.view(), candidate.exchange.offer_digest);
+    candidate.offer_pending = false;
+    ++stats_.offers_tx;
     membership_.begin_authentication();
   }
   return status;
@@ -1244,7 +1814,8 @@ Status NeighborDiscovery::send_prove(const MonotonicMs now_ms) noexcept {
                                   outbound_.peer_mac, config_.network,
                                   outbound_.our_nonce, outbound_.peer_nonce,
                                   config_.capability_bits,
-                                  outbound_.peer_capability};
+                                  outbound_.peer_capability,
+                                  outbound_.exchange.binding()};
   AuthTag tag{};
   Status status = authenticator_.attest(autonomy::AuthPhase::Prove, transcript, tag);
   if (!status) return status;
@@ -1274,7 +1845,8 @@ Status NeighborDiscovery::send_confirm(Candidate& candidate,
                                   candidate.mac, config_.mac, config_.network,
                                   candidate.txn_nonce, candidate.our_nonce,
                                   candidate.peer_capability,
-                                  config_.capability_bits};
+                                  config_.capability_bits,
+                                  candidate.exchange.binding()};
   AuthTag tag{};
   Status status =
       authenticator_.attest(autonomy::AuthPhase::Confirm, transcript, tag);
@@ -1293,7 +1865,8 @@ Status NeighborDiscovery::send_finish(const MonotonicMs now_ms) noexcept {
                                   outbound_.peer_mac, config_.network,
                                   outbound_.our_nonce, outbound_.peer_nonce,
                                   config_.capability_bits,
-                                  outbound_.peer_capability};
+                                  outbound_.peer_capability,
+                                  outbound_.exchange.binding()};
   AuthTag tag{};
   Status status =
       authenticator_.attest(autonomy::AuthPhase::Finish, transcript, tag);
@@ -1335,6 +1908,10 @@ Status NeighborDiscovery::send_probe(Neighbor& neighbor,
 
 void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   if (!started_) return;
+
+  // Scope-MAC verification is budgeted to kScopeMacsPerPoll per Owner poll
+  // so a wrong-scope burst can never starve DATA/ACK work (02 §2.5).
+  drain_scope_pending(now_ms);
 
   // Due OFFERs and parked candidates retrying for a transient slot.
   std::array<Candidate*, discovery_const::kCandidateCapacity> due{};
@@ -1637,6 +2214,81 @@ void NeighborDiscovery::reevaluate(const MonotonicMs now_ms) noexcept {
 }
 
 // --- internals -------------------------------------------------------------------
+
+// Scope RX lanes are usable only while the provider can verify tags AND the
+// authenticator can fold the resulting scope_binding into the transcript —
+// otherwise an accepted scoped exchange could never be proven (02 §5.2).
+bool NeighborDiscovery::scope_rx_usable() const noexcept {
+  return config_.scope_provider != nullptr &&
+         config_.scope != kInvalidScopeRef &&
+         authenticator_.binds_scope();
+}
+
+bool NeighborDiscovery::scope_tx_usable() noexcept {
+  if (!scope_rx_usable()) return false;
+  std::uint32_t generation = 0;
+  return config_.scope_provider->current_generation(config_.scope, generation);
+}
+
+// Whether the next outbound DISCOVER attempt is a scoped v2 frame.
+bool NeighborDiscovery::scoped_attempt(const MonotonicMs now_ms) noexcept {
+  if (!scope_mode_scoped(config_.scope_mode) || !scope_tx_usable()) {
+    return false;
+  }
+  if (config_.scope_mode == ScopeMode::Required) return true;
+  // OptionalMigration: scoped first and after the single legacy fallback;
+  // the fallback occupies exactly one retry (02 §2.2).
+  return outbound_.attempts == 0 || outbound_.legacy_attempted ||
+         !legacy_permitted(now_ms);
+}
+
+bool NeighborDiscovery::legacy_permitted(const MonotonicMs now_ms) const noexcept {
+  switch (config_.scope_mode) {
+    case ScopeMode::Off:
+    case ScopeMode::OpenLegacy:
+      return true;
+    case ScopeMode::OptionalMigration:
+      // Owner-proven deadline (0 = unprovable -> Required-like), capped at
+      // the 24h contract maximum measured from start (02 §2.2).
+      return migration_deadline_ms_ != 0 && now_ms < migration_deadline_ms_;
+    case ScopeMode::Required:
+      return false;
+  }
+  return false;
+}
+
+// (class,generation,network)->hint cache: keeps step-3 hint checks MAC-free
+// after the first computation per key (02 §2.4).
+bool NeighborDiscovery::scoped_hint_for(const endpoint::ScopeClass scope_class,
+                                        const std::uint32_t generation,
+                                        std::uint32_t& out) noexcept {
+  for (const HintEntry& entry : hint_cache_) {
+    if (entry.valid && entry.scope_class == scope_class &&
+        entry.generation == generation) {
+      out = entry.hint;
+      return true;
+    }
+  }
+  if (config_.scope_provider == nullptr) return false;
+  std::uint32_t hint = 0;
+  if (!scope_hint(*config_.scope_provider, config_.scope, generation,
+                  scope_class, config_.network, hint)) {
+    return false;
+  }
+  HintEntry& slot = hint_cache_[hint_cursor_ % hint_cache_.size()];
+  ++hint_cursor_;
+  slot.valid = true;
+  slot.scope_class = scope_class;
+  slot.generation = generation;
+  slot.hint = hint;
+  out = hint;
+  return true;
+}
+
+void NeighborDiscovery::record_discover(const MonotonicMs now_ms) noexcept {
+  discover_times_[discover_cursor_ % discover_times_.size()] = now_ms;
+  ++discover_cursor_;
+}
 
 NeighborDiscovery::Candidate* NeighborDiscovery::find_candidate(
     const MacAddress& mac, const std::array<std::uint8_t, 16>& nonce) noexcept {

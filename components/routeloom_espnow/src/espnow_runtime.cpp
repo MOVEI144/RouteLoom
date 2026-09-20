@@ -571,7 +571,8 @@ void EspNowRuntime::poll_once() noexcept {
     BootstrapEvent rx{};
     while (xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE) {
       discovery_->on_rld1_rx(
-          rx.source, ByteView{rx.data.data(), rx.length}, rx.received_ms);
+          DiscoveryRxMetadata{rx.source, rx.destination},
+          ByteView{rx.data.data(), rx.length}, rx.received_ms);
     }
     discovery_->poll(now);
     reconcile_autonomy(now);
@@ -1289,6 +1290,10 @@ void EspNowRuntime::enqueue_rx(
     }
     BootstrapEvent event{};
     std::memcpy(event.source.data(), info->src_addr, event.source.size());
+    if (info->des_addr != nullptr) {
+      std::memcpy(event.destination.data(), info->des_addr,
+                  event.destination.size());
+    }
     event.received_ms = now_ms();
     event.length = static_cast<std::uint16_t>(length);
     event.rssi_dbm = info->rx_ctrl != nullptr ? info->rx_ctrl->rssi : 0;

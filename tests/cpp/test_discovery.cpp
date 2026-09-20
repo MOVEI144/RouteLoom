@@ -244,7 +244,7 @@ void DiscMedium::deliver_rld1(const MacAddress& src, const MacAddress& dest,
     if (u->mac == src) continue;
     if (dest == discovery_const::kBroadcastMac || u->mac == dest) {
       if (!link_open(src, u->mac)) continue;
-      u->engine.on_rld1_rx(src, bytes, now);
+      u->engine.on_rld1_rx(DiscoveryRxMetadata{src, dest}, bytes, now);
     }
   }
 }
@@ -456,7 +456,8 @@ void test_rld1_kind_rejects() {
   for (const std::uint8_t kind : {4, 7, 16, 99}) {  // Result/Query/DATA/unknown
     const auto bytes = forged_envelope(kind, 9, nonce, ByteView{nullptr, 0});
     CHECK(!bytes.empty());
-    b.engine.on_rld1_rx(attacker, ByteView{bytes.data(), bytes.size()},
+    b.engine.on_rld1_rx({attacker, b.mac},
+                        ByteView{bytes.data(), bytes.size()},
                         world.medium.now);
   }
   CHECK(b.engine.stats().kind_rejects == 4);
@@ -490,14 +491,14 @@ void test_cookie_rejects() {
   const auto forged = auth_envelope(autonomy::AuthPhase::Prove, 1, nonce,
                                     ByteView{prove_body.data(), prove_body.size()});
   CHECK(!forged.empty());
-  b.engine.on_rld1_rx(a.mac, ByteView{forged.data(), forged.size()},
+  b.engine.on_rld1_rx({a.mac, b.mac}, ByteView{forged.data(), forged.size()},
                       world.medium.now);
   CHECK(b.engine.stats().cookie_rejects == 1);
   CHECK(b.observer.has("COOKIE_REJECT"));
   CHECK(b.engine.candidate_count() == 0);  // reject releases the transaction
 
   // Same forged PROVE again: no live transaction, silently ignored.
-  b.engine.on_rld1_rx(a.mac, ByteView{forged.data(), forged.size()},
+  b.engine.on_rld1_rx({a.mac, b.mac}, ByteView{forged.data(), forged.size()},
                       world.medium.now);
   CHECK(b.engine.stats().cookie_rejects == 1);
 
@@ -521,7 +522,8 @@ void test_cookie_rejects() {
   const auto discover2 = forged_envelope(
       static_cast<std::uint8_t>(FrameType::Discover), 1, nonce2,
       ByteView{nullptr, 0});
-  b.engine.on_rld1_rx(a.mac, ByteView{discover2.data(), discover2.size()},
+  b.engine.on_rld1_rx({a.mac, discovery_const::kBroadcastMac},
+                      ByteView{discover2.data(), discover2.size()},
                       world.medium.now);
   world.medium.now += 400;
   b.engine.poll(world.medium.now);
@@ -534,7 +536,7 @@ void test_cookie_rejects() {
       autonomy::AuthPhase::Prove, 1, nonce2,
       ByteView{replay_body.data(), replay_body.size()});
   CHECK(!replay.empty());
-  b.engine.on_rld1_rx(a.mac, ByteView{replay.data(), replay.size()},
+  b.engine.on_rld1_rx({a.mac, b.mac}, ByteView{replay.data(), replay.size()},
                       world.medium.now);
   CHECK(b.engine.stats().cookie_rejects == 2);
   CHECK(b.port.count_kind(FrameType::BootstrapAuth) == 0);  // never CONFIRMed
@@ -592,7 +594,8 @@ void test_capacity() {
         forged_envelope(static_cast<std::uint8_t>(FrameType::Discover),
                         100 + i, std::array<std::uint8_t, 16>{},
                         ByteView{nullptr, 0});
-    b.engine.on_rld1_rx(mac_of(static_cast<std::uint8_t>(0x10 + i)),
+    b.engine.on_rld1_rx({mac_of(static_cast<std::uint8_t>(0x10 + i)),
+                         discovery_const::kBroadcastMac},
                         ByteView{bytes.data(), bytes.size()}, world.medium.now);
   }
   CHECK(b.engine.candidate_count() == 16);
@@ -617,7 +620,8 @@ void test_density_suppression() {
         forged_envelope(static_cast<std::uint8_t>(FrameType::Discover),
                         100 + i, std::array<std::uint8_t, 16>{},
                         ByteView{nullptr, 0});
-    b.engine.on_rld1_rx(mac_of(static_cast<std::uint8_t>(0x30 + i)),
+    b.engine.on_rld1_rx({mac_of(static_cast<std::uint8_t>(0x30 + i)),
+                         discovery_const::kBroadcastMac},
                         ByteView{bytes.data(), bytes.size()}, world.medium.now);
   }
   CHECK(b.engine.stats().discovers_rx == 8);
@@ -865,9 +869,11 @@ void test_fragment_reassembly() {
                                  ByteView{payload.bytes.data(), 20});
   const auto c2 = chunk_envelope(1, nonce, txn, 20, 36,
                                  ByteView{payload.bytes.data() + 20, 16});
-  b.engine.on_rld1_rx(a.mac, ByteView{c1.data(), c1.size()}, world.medium.now);
+  b.engine.on_rld1_rx({a.mac, b.mac}, ByteView{c1.data(), c1.size()},
+                      world.medium.now);
   CHECK(b.engine.stats().auth_tag_rejects == 0);  // nothing dispatched yet
-  b.engine.on_rld1_rx(a.mac, ByteView{c2.data(), c2.size()}, world.medium.now);
+  b.engine.on_rld1_rx({a.mac, b.mac}, ByteView{c2.data(), c2.size()},
+                      world.medium.now);
   // The reassembled PROVE ran the cookie check (passed) and failed the tag:
   // evidence the inner dispatch happened on the completed object.
   CHECK(b.engine.stats().auth_tag_rejects == 1);
@@ -888,25 +894,28 @@ void test_fragment_rejects() {
   // No live transaction owns this nonce -> rejected, no slot consumed.
   const std::uint8_t data[4] = {1, 2, 3, 4};
   auto c = chunk_envelope(7, nonce, 1, 0, 8, ByteView{data, 4});
-  b.engine.on_rld1_rx(peer, ByteView{c.data(), c.size()}, world.medium.now);
+  b.engine.on_rld1_rx({peer, b.mac}, ByteView{c.data(), c.size()},
+                      world.medium.now);
   CHECK(b.engine.stats().kind_rejects == 1);
 
   // Oversize total (>1024) and out-of-order offsets are rejected/NAKed.
   auto big = chunk_envelope(7, nonce, 1, 0, 2000, ByteView{data, 4});
-  b.engine.on_rld1_rx(peer, ByteView{big.data(), big.size()}, world.medium.now);
+  b.engine.on_rld1_rx({peer, b.mac}, ByteView{big.data(), big.size()},
+                      world.medium.now);
   CHECK(b.engine.stats().kind_rejects == 2);
 
   // Give the peer a live transaction, then deliver out-of-order.
   const auto disc = forged_envelope(
       static_cast<std::uint8_t>(FrameType::Discover), 7,
       std::array<std::uint8_t, 16>{}, ByteView{nullptr, 0});
-  b.engine.on_rld1_rx(peer, ByteView{disc.data(), disc.size()},
-                      world.medium.now);
+  b.engine.on_rld1_rx({peer, discovery_const::kBroadcastMac},
+                      ByteView{disc.data(), disc.size()}, world.medium.now);
   CHECK(b.engine.candidate_count() == 1);
   auto ooo = chunk_envelope(7, std::array<std::uint8_t, 16>{}, 9, 8, 20,
                             ByteView{data, 4});
   const std::size_t replies = b.port.count_kind(FrameType::BootstrapReply);
-  b.engine.on_rld1_rx(peer, ByteView{ooo.data(), ooo.size()}, world.medium.now);
+  b.engine.on_rld1_rx({peer, b.mac}, ByteView{ooo.data(), ooo.size()},
+                      world.medium.now);
   CHECK(b.port.count_kind(FrameType::BootstrapReply) == replies + 1);
 
   // Garbage inner object: reassembly completes but decode fails -> reject.
@@ -915,7 +924,8 @@ void test_fragment_rejects() {
   auto g1 = chunk_envelope(7, std::array<std::uint8_t, 16>{}, 10, 0, 8,
                            ByteView{garbage.data(), 8});
   const std::uint32_t rejects = b.engine.stats().kind_rejects;
-  b.engine.on_rld1_rx(peer, ByteView{g1.data(), g1.size()}, world.medium.now);
+  b.engine.on_rld1_rx({peer, b.mac}, ByteView{g1.data(), g1.size()},
+                      world.medium.now);
   CHECK(b.engine.stats().kind_rejects == rejects + 1);
 
   // Assembly bound: 4 slots. Five live transactions each opening one chunk
@@ -929,9 +939,11 @@ void test_fragment_rejects() {
     const auto d = forged_envelope(
         static_cast<std::uint8_t>(FrameType::Discover), 50 + i, n,
         ByteView{nullptr, 0});
-    b.engine.on_rld1_rx(mac, ByteView{d.data(), d.size()}, world.medium.now);
+    b.engine.on_rld1_rx({mac, discovery_const::kBroadcastMac},
+                        ByteView{d.data(), d.size()}, world.medium.now);
     const auto k = chunk_envelope(50 + i, n, 77, 0, 20, ByteView{data, 4});
-    b.engine.on_rld1_rx(mac, ByteView{k.data(), k.size()}, world.medium.now);
+    b.engine.on_rld1_rx({mac, b.mac}, ByteView{k.data(), k.size()},
+                        world.medium.now);
   }
   CHECK(b.engine.stats().peer_capacity > capacity);
 }
@@ -951,13 +963,13 @@ void test_stale_finish() {
   const auto fin = auth_envelope(autonomy::AuthPhase::Finish, 1,
                                  std::array<std::uint8_t, 16>{},
                                  ByteView{tag.data(), 16});
-  b.engine.on_rld1_rx(a.mac, ByteView{fin.data(), fin.size()},
+  b.engine.on_rld1_rx({a.mac, b.mac}, ByteView{fin.data(), fin.size()},
                       world.medium.now);
   CHECK(b.engine.candidate_count() == 0);
   CHECK(!b.observer.has("BOUND"));
 
   // Same for a CONFIRM with no live outbound at the requester side.
-  a.engine.on_rld1_rx(b.mac, ByteView{fin.data(), fin.size()},
+  a.engine.on_rld1_rx({b.mac, a.mac}, ByteView{fin.data(), fin.size()},
                       world.medium.now);
   CHECK(a.engine.stats().auths_completed == 0);
 }
@@ -1007,8 +1019,8 @@ void test_candidate_ttl() {
   const auto bytes =
       forged_envelope(static_cast<std::uint8_t>(FrameType::Discover), 55,
                       std::array<std::uint8_t, 16>{}, ByteView{nullptr, 0});
-  b.engine.on_rld1_rx(mac_of(0x51), ByteView{bytes.data(), bytes.size()},
-                      world.medium.now);
+  b.engine.on_rld1_rx({mac_of(0x51), discovery_const::kBroadcastMac},
+                      ByteView{bytes.data(), bytes.size()}, world.medium.now);
   CHECK(b.engine.candidate_count() == 1);
   NeighborPhase phase{};
   CHECK(b.engine.phase_of(mac_of(0x51), phase) &&

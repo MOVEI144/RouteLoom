@@ -210,9 +210,12 @@ class EspNowRuntime final : public RadioPort,
     std::array<std::uint8_t, kMaxEspNowBody> data{};
   };
   // Bootstrap-lane record: self-contained RLD1 envelope + observed metadata.
-  // No NodeId is resolved in the callback (01 §3.1).
+  // No NodeId is resolved in the callback (01 §3.1). `destination` is the
+  // observed des_addr so the scope filter can enforce DISCOVER-broadcast /
+  // OFFER-unicast and bind the MAC input (02-discovery-scope §2.4).
   struct BootstrapEvent {
     routeloom::MacAddress source{};
+    routeloom::MacAddress destination{};
     MonotonicMs received_ms{0};
     std::uint16_t length{0};
     std::int8_t rssi_dbm{0};

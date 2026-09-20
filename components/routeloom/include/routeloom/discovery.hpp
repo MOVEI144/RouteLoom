@@ -25,6 +25,8 @@
 #include "routeloom/admission.hpp"
 #include "routeloom/autonomy.hpp"
 #include "routeloom/autonomy_wire.hpp"
+#include "routeloom/discovery_scope.hpp"
+#include "routeloom/endpoint_wire.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/peer_directory.hpp"
 #include "routeloom/security.hpp"
@@ -76,6 +78,11 @@ struct AuthTranscript {
   std::array<std::uint8_t, 16> responder_nonce{};
   std::uint32_t requester_capability{0};
   std::uint32_t responder_capability{0};
+  // SHA256(domain_binding || class|generation|scheme|scoped ||
+  // discover_digest||offer_digest) — ties the proof to the exact exchanged
+  // frames (02-discovery-scope §2.4). Legacy exchanges bind the same field
+  // with class/generation/scheme/scoped zeroed and real legacy digests.
+  ScopeDigest scope_binding{};
 };
 
 // OFFER cookie material (02 §5): bound to the requester's MAC + transaction
@@ -131,6 +138,11 @@ class NeighborAuthenticator {
   // qualified production profile (G-SEC) reports Production.
   virtual SecurityProfile security_profile() const noexcept = 0;
 
+  // Whether attest/verify fold AuthTranscript::scope_binding into the tag.
+  // Required-scope discovery is only usable with a provider that returns
+  // true — an older provider would silently drop the binding (02 §2.4/§5.2).
+  virtual bool binds_scope() const noexcept { return false; }
+
   // OFFER cookie (02 §5): seal/verify the cookie material for this node as
   // responder. Verify MUST accept the current and previous time bucket only.
   virtual Status cookie_seal(const CookieMaterial& material, AuthTag& out) noexcept = 0;
@@ -178,6 +190,7 @@ class DevPskAuthenticator final : public NeighborAuthenticator {
   SecurityProfile security_profile() const noexcept override {
     return SecurityProfile::Development;
   }
+  bool binds_scope() const noexcept override { return true; }
   Status cookie_seal(const CookieMaterial& material, AuthTag& out) noexcept override;
   Status cookie_verify(const CookieMaterial& material,
                        const AuthTag& cookie) noexcept override;
@@ -294,6 +307,16 @@ struct DiscoveryConfig {
   NetworkId network{0};
   std::uint32_t network_hint{0};     // 4-byte discovery filter, never proof
   std::uint32_t capability_bits{0};
+  // Discovery Scope Key filter (02-discovery-scope). Off/OpenLegacy keep the
+  // exact legacy pipeline; OptionalMigration/Required engage scoped lanes.
+  ScopeMode scope_mode{ScopeMode::Off};
+  DiscoveryScopeProvider* scope_provider{nullptr};
+  ScopeRef scope{kInvalidScopeRef};
+  endpoint::ScopeClass scope_class{endpoint::ScopeClass::Member};
+  // OptionalMigration only: owner-proven absolute deadline for the legacy
+  // fallback lane (0 = never; capped at +24h from start). A restart that
+  // cannot prove elapsed migration time must leave this 0 -> Required-like.
+  MonotonicMs migration_until_ms{0};
   std::uint32_t candidate_ttl_ms{5000};       // contracts candidate_ttl_ms
   std::uint32_t awake_lease_ms{30000};        // awake_neighbor_lease_ms
   std::uint32_t idle_refresh_ms{10000};       // idle_refresh_ms
@@ -333,6 +356,14 @@ class NullDiscoveryObserver final : public DiscoveryObserver {
   void on_discovery_event(const char*, NodeId) noexcept override {}
 };
 
+// Observed RX link metadata (02-discovery-scope §2.4): the MACs the radio
+// actually saw, never values claimed inside the frame. Scoped MAC inputs
+// and the DISCOVER-broadcast/OFFER-unicast rules bind these, not the body.
+struct DiscoveryRxMetadata {
+  MacAddress source{};
+  MacAddress destination{};
+};
+
 // Observable counters so storms and capacity behavior are never silent.
 struct DiscoveryStats {
   std::uint32_t discovers_rx{0};
@@ -367,9 +398,10 @@ class NeighborDiscovery {
   Status begin_discovery(MonotonicMs now_ms) noexcept;
 
   // Ingress points fed by the Owner after carrier classification. RLD1 input
-  // arrives only here; authenticated Wire-lane autonomy payloads via
-  // on_wire_rx. An unknown source MAC on the Wire lane is rejected outright.
-  void on_rld1_rx(const MacAddress& source, ByteView frame, MonotonicMs now_ms) noexcept;
+  // arrives only here with OBSERVED source/destination MACs; authenticated
+  // Wire-lane autonomy payloads via on_wire_rx. An unknown source MAC on the
+  // Wire lane is rejected outright.
+  void on_rld1_rx(const DiscoveryRxMetadata& rx, ByteView frame, MonotonicMs now_ms) noexcept;
   void on_wire_rx(const MacAddress& source, FrameType type, ByteView payload,
                   MonotonicMs now_ms) noexcept;
 
@@ -403,6 +435,8 @@ class NeighborDiscovery {
   const MembershipController& membership() const noexcept { return membership_; }
   MembershipController& membership() noexcept { return membership_; }
   const DiscoveryStats& stats() const noexcept { return stats_; }
+  // Aggregate scope-filter counters only — never keys, tags or sources.
+  const ScopeStats& scope_stats() const noexcept { return scope_stats_; }
   std::size_t candidate_count() const noexcept { return candidates_.size(); }
   std::size_t neighbor_count() const noexcept { return neighbors_.size(); }
 
@@ -427,6 +461,10 @@ class NeighborDiscovery {
     MonotonicMs offer_due_ms{0};
     bool offer_pending{false};
     bool transient_held{false};
+    // Pins the accepted DISCOVER's scope context (class/generation + frame
+    // digest, legacy = scoped:false) so the OFFER tag and the final
+    // transcript binding reproduce the exact exchange (02 §2.4/§5.2).
+    ScopeExchangeContext exchange{};
   };
 
   struct Neighbor {
@@ -459,6 +497,28 @@ class NeighborDiscovery {
     std::uint8_t attempts{0};
     bool transient_held{false};
     bool have_offer{false};
+    // Scope context of the CURRENT attempt (02 §2.4): legacy attempts carry
+    // scoped=false so a migration fallback binds a distinct transcript.
+    ScopeExchangeContext exchange{};
+    // OptionalMigration: the single permitted legacy fallback attempt is
+    // consumed once per outbound exchange — never retried as legacy.
+    bool legacy_attempted{false};
+  };
+
+  // A v2 Discover/Offer that passed cheap parse+hint and waits for its
+  // bounded scope-MAC verification (at most kScopeMacsPerPoll per Owner poll).
+  struct PendingVerify {
+    bool offer{false};
+    DiscoveryRxMetadata rx{};
+    autonomy::Rld1Envelope env{};
+    autonomy::Rld1Encoded frame{};
+    ScopeDigest frame_digest{};      // SHA256 of this exact frame
+    ScopeDigest discover_digest{};   // offer lane: digest of our DISCOVER
+    ScopeTag expected_tag{};
+    std::uint32_t generation{0};
+    endpoint::ScopeClass scope_class{endpoint::ScopeClass::Member};
+    std::array<std::uint8_t, 16> offer_cookie{};
+    std::array<std::uint8_t, 16> offer_nonce{};
   };
 
   struct RxAssembly {
@@ -472,10 +532,20 @@ class NeighborDiscovery {
   };
 
   // RLD1 handlers.
-  void handle_discover(const MacAddress& source,
-                       const autonomy::Rld1Envelope& env, MonotonicMs now_ms) noexcept;
-  void handle_offer(const MacAddress& source, const autonomy::Rld1Envelope& env,
-                    MonotonicMs now_ms) noexcept;
+  void handle_discover(const DiscoveryRxMetadata& rx,
+                       const autonomy::Rld1Envelope& env, ByteView frame,
+                       MonotonicMs now_ms) noexcept;
+  void handle_discover_legacy(const MacAddress& source,
+                              const autonomy::Rld1Envelope& env, ByteView frame,
+                              MonotonicMs now_ms) noexcept;
+  void handle_discover_scoped(const DiscoveryRxMetadata& rx,
+                              const autonomy::Rld1Envelope& env, ByteView frame,
+                              MonotonicMs now_ms) noexcept;
+  void handle_offer(const DiscoveryRxMetadata& rx, const autonomy::Rld1Envelope& env,
+                    ByteView frame, MonotonicMs now_ms) noexcept;
+  void queue_offer_verify(const DiscoveryRxMetadata& rx,
+                          const autonomy::Rld1Envelope& env, ByteView frame,
+                          MonotonicMs now_ms) noexcept;
   void handle_auth(const MacAddress& source, const autonomy::Rld1Envelope& env,
                    MonotonicMs now_ms) noexcept;
   void handle_chunk(const MacAddress& source, const autonomy::Rld1Envelope& env,
@@ -494,14 +564,36 @@ class NeighborDiscovery {
 
   // Exchange machinery.
   Status send_discover(MonotonicMs now_ms) noexcept;
+  Status send_scoped_discover(MonotonicMs now_ms) noexcept;
   Status send_offer(Candidate& candidate, MonotonicMs now_ms) noexcept;
+  Status send_scoped_offer(Candidate& candidate, MonotonicMs now_ms) noexcept;
   Status send_prove(MonotonicMs now_ms) noexcept;
   Status send_confirm(Candidate& candidate, MonotonicMs now_ms) noexcept;
   Status send_finish(MonotonicMs now_ms) noexcept;
   Status send_probe(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
   Status emit_rld1(const MacAddress& dest, FrameType kind,
                    const std::array<std::uint8_t, 16>& nonce, NodeId claimed,
-                   ByteView body, MonotonicMs now_ms) noexcept;
+                   ByteView body, MonotonicMs now_ms,
+                   ScopeDigest* frame_digest = nullptr) noexcept;
+
+  // Scope pipeline (02-discovery-scope §2.4-§2.7).
+  void drain_scope_pending(MonotonicMs now_ms) noexcept;
+  void admit_scoped_discover(PendingVerify& pending, MonotonicMs now_ms) noexcept;
+  void accept_scoped_offer(PendingVerify& pending, MonotonicMs now_ms) noexcept;
+  void admit_discover(const MacAddress& source, const autonomy::Rld1Envelope& env,
+                      const ScopeExchangeContext& exchange, std::uint32_t density,
+                      MonotonicMs now_ms) noexcept;
+  void accept_offer(const MacAddress& source, const autonomy::Rld1Envelope& env,
+                    const std::array<std::uint8_t, 16>& cookie,
+                    const std::array<std::uint8_t, 16>& responder_nonce,
+                    ByteView frame, MonotonicMs now_ms) noexcept;
+  bool scope_rx_usable() const noexcept;
+  bool scope_tx_usable() noexcept;
+  bool scoped_attempt(MonotonicMs now_ms) noexcept;
+  bool legacy_permitted(MonotonicMs now_ms) const noexcept;
+  bool scoped_hint_for(endpoint::ScopeClass scope_class, std::uint32_t generation,
+                       std::uint32_t& out) noexcept;
+  void record_discover(MonotonicMs now_ms) noexcept;
   Status emit_auth_body(const MacAddress& dest,
                         const std::array<std::uint8_t, 16>& nonce, NodeId claimed,
                         const autonomy::BootstrapAuthBody& body,
@@ -517,12 +609,15 @@ class NeighborDiscovery {
             bool transaction_alive, MonotonicMs now_ms) noexcept;
   AdmissionRole local_role() const noexcept;
 
-  // `we_are_requester` selects which transcript side is local.
+  // `we_are_requester` selects which transcript side is local; `exchange`
+  // binds the exact DISCOVER/OFFER digests into the auth transcript.
   void complete_exchange(const MacAddress& peer_mac, NodeId peer_node,
                          std::uint32_t peer_capability,
                          const std::array<std::uint8_t, 16>& requester_nonce,
                          const std::array<std::uint8_t, 16>& responder_nonce,
-                         const AuthTag& closing_tag, bool we_are_requester,
+                         const AuthTag& closing_tag,
+                         const ScopeExchangeContext& exchange,
+                         bool we_are_requester,
                          MonotonicMs now_ms) noexcept;
   void fail_outbound(MonotonicMs now_ms, const char* reason) noexcept;
   void release_candidate(Candidate& candidate) noexcept;
@@ -572,6 +667,23 @@ class NeighborDiscovery {
   std::size_t pins_used_{0};
   DiscoveryStats stats_{};
   bool started_{false};
+
+  // Scope-filter state (02-discovery-scope §2.5-§2.7): raw ingress token
+  // bucket, replay dedup, the bounded pending-MAC queue and the cached
+  // (class,generation)->hint hints that keep step-3 checks MAC-free.
+  ScopeRawBudget raw_budget_{};
+  ScopeDedupTable dedup_{};
+  FixedPool<PendingVerify, kScopePendingCapacity> pending_verify_{};
+  struct HintEntry {
+    bool valid{false};
+    endpoint::ScopeClass scope_class{endpoint::ScopeClass::Member};
+    std::uint32_t generation{0};
+    std::uint32_t hint{0};
+  };
+  std::array<HintEntry, 4> hint_cache_{};
+  std::size_t hint_cursor_{0};
+  MonotonicMs migration_deadline_ms_{0};
+  ScopeStats scope_stats_{};
 };
 
 }  // namespace routeloom
