@@ -222,6 +222,7 @@ Status SingleAuthority::initialize() noexcept {
     initialized_ = true;
     has_active_ = false;
     state_ = AuthorityRecord{network_, authority_, 1, 0, Digest256{}};
+    last_operation_hash_ = Digest256{};
     revision_ = recovery_floor_;
     return Status::error(code, detail);
   };
@@ -244,6 +245,7 @@ Status SingleAuthority::initialize() noexcept {
       return quarantine(StatusCode::IntegrityError, "authority ledger chain inconsistent");
     }
     state_ = parsed[newer].state;
+    last_operation_hash_ = parsed[newer].operation_hash;
     revision_ = parsed[newer].revision;
     active_slot_ = newer;
     has_active_ = true;
@@ -256,6 +258,7 @@ Status SingleAuthority::initialize() noexcept {
   } else if (valid == 1) {
     const std::uint8_t slot = content[0] == SlotContent::Valid ? 0 : 1;
     state_ = parsed[slot].state;
+    last_operation_hash_ = parsed[slot].operation_hash;
     revision_ = parsed[slot].revision;
     active_slot_ = slot;
     has_active_ = true;
@@ -267,6 +270,7 @@ Status SingleAuthority::initialize() noexcept {
     return quarantine(StatusCode::IntegrityError, "authority ledger corrupt");
   } else {
     state_ = AuthorityRecord{network_, authority_, 1, 0, Digest256{}};
+    last_operation_hash_ = Digest256{};
     revision_ = 0;
     has_active_ = false;
   }
@@ -341,9 +345,30 @@ Status SingleAuthority::commit(const AuthorityOperation& operation,
       store_record(target, next, revision_ + 1U, state_.state_hash, operation.operation_hash);
   if (!stored) return stored;
   state_ = next;
+  last_operation_hash_ = operation.operation_hash;
   ++revision_;
   active_slot_ = target;
   has_active_ = true;
+  return Status::success();
+}
+
+Status SingleAuthority::build_operation(const AuthorityOperationKind kind,
+                                        const Digest256& operation_hash,
+                                        AuthorityOperation& out) const noexcept {
+  if (!initialized_) {
+    return Status::error(StatusCode::InvalidState, "authority not initialized");
+  }
+  if (quarantined_) {
+    return Status::error(StatusCode::IntegrityError, "authority ledger quarantined");
+  }
+  out = AuthorityOperation{};
+  out.network = state_.network;
+  out.authority = state_.authority;
+  out.generation = state_.generation;
+  out.sequence = state_.applied_sequence + 1U;
+  out.kind = kind;
+  out.previous_state_hash = state_.state_hash;
+  out.operation_hash = operation_hash;
   return Status::success();
 }
 
@@ -404,6 +429,7 @@ Status SingleAuthority::recover(const std::uint32_t new_generation) noexcept {
   slot_reserved_[0] = StatusCode::Ok;
   slot_reserved_[1] = StatusCode::Ok;
   state_ = genesis;
+  last_operation_hash_ = Digest256{};
   revision_ = revision;
   active_slot_ = 0;
   has_active_ = true;

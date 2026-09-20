@@ -99,6 +99,19 @@ class SingleAuthority {
 
   const AuthorityRecord& state() const noexcept { return state_; }
   bool quarantined() const noexcept { return quarantined_; }
+  // The operation_hash of the newest committed record. Remote-config
+  // resume uses it to tell "our commit already landed before the power
+  // loss" from "a different operation took the sequence".
+  const Digest256& last_operation_hash() const noexcept {
+    return last_operation_hash_;
+  }
+  // Build the next AuthorityOperation against the current ledger state:
+  // generation + sequence = applied_sequence+1 + the state-hash chain link.
+  // The caller supplies the real operation_hash (e.g. SHA-256 over the
+  // canonical operation bytes) — never bind_operation_payload() in a
+  // production trust path.
+  Status build_operation(AuthorityOperationKind kind, const Digest256& operation_hash,
+                         AuthorityOperation& out) const noexcept;
   // Committed ledger revision; while quarantined, the highest structurally
   // valid revision seen so operators can tell state was lost, not absent.
   std::uint64_t revision() const noexcept { return revision_; }
@@ -116,6 +129,7 @@ class SingleAuthority {
   NodeId authority_{kInvalidNodeId};
   LedgerStorage& storage_;
   AuthorityRecord state_{};
+  Digest256 last_operation_hash_{};
   std::uint64_t revision_{0};
   std::uint64_t recovery_floor_{0};
   // Highest authority generation proven by any committed record this boot —

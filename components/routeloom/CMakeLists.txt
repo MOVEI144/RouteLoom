@@ -3,6 +3,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/autonomy_wire.cpp
   src/byte_io.cpp
   src/channel_plan.cpp
+  src/config.cpp
   src/crc32.cpp
   src/c_api.cpp
   src/counter_store.cpp
