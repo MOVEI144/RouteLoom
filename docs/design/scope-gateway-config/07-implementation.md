@@ -15,6 +15,8 @@
 
 P0〜P6はsoftware、P7は実機。Production Providerの選定・監査は#10と共同で進める。本番認証未認定の間はEXPERIMENTALを必須にし、動くのでproductionと呼ばない。
 
+現状：P0〜P5は本branchへ実装済み、P6（公開確認＝機能flag/ON-OFF build/診断/maturity/docs）はこの改訂で実施。P7の実機証拠は未取得。
+
 ## 7.2 具体的な変更先
 
 | 変更先 | 責任 |
@@ -44,6 +46,8 @@ USB HostOps=19/schema1/sub1〜5、canonical1の26B形、OSprincipal/Network/key 
 この設計PRの専用CIはdesign checkerとC/C++宣言のsyntax-only。通常の既存SDK CIは回帰確認として実行されても、新機能の試験ではない。
 
 実装PRではGCC/Clang×ASan/UBSan、Rust fmt/clippy/test、C++/Rust共有wire/USB vectors、実host＋C++ bridgeの統合、Store/Clock故障注入を追加する。firmwareは採用済みmatrix（reference normal/deep_sleep×3target、bridge normal×3target、observe既存構成）を維持し、新機能をONにした構成を別に追加する。compileされないif分岐をbuild-testedにしない。
+
+P6で`sdk.yml`へ`features`軸を追加した：`endpoints_on`はbridge_nodeに`CONFIG_ROUTELOOM_CAPABILITY=0x1f`（bit3 gateway＋bit4 config attach/広告）、`config_target_on`はreference_nodeに`CONFIG_ROUTELOOM_CONFIG=y`（NVS journal target）。base matrixは全機能OFFの既定のままで、build後にsdkconfigへ両方向のgrepをかけてON/OFF両分岐が実際にcompileされたことを確認する。実行はCI側のみ。
 
 ## 7.5 完了の証拠
 

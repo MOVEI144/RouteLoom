@@ -2,7 +2,7 @@
 
 ## 6.1 設計と実装の検査を分ける
 
-[cases.json](cases.json)の46件は**planned_not_run**。今回のcheckerは登録値・数式・バイト形式の設計例・宣言の構文を検査するだけで、46件を実行した扱いにはしない。
+[cases.json](cases.json)の46件は**partially_executed**（P6時点）。39件はportable/host試験で実コードを通して実行済みで、各caseの`status:"portable_passed"`と`evidence`が実行した試験fileを指す（例：S01–S11は`tests/cpp/test_scope.cpp`、C01–C14は`tests/cpp/test_config.cpp`、Gatewayは`tests/cpp/test_gateway.cpp`＋`tests/cpp/test_host_ops.cpp`＋`host/routeloom-host/src/{api1,dispatch}.rs`、I02は同一golden corpusを`tests/cpp/test_endpoint.cpp`と`host/routeloom-wire/tests/endpoint.rs`で実行）。7件（S12・G09・G12・I03・I06・I07・I08）は実機・電源・PTY/CI・配布docsの証拠待ちで`planned_not_run`のまま。今回のcheckerは登録値・数式・バイト形式・台帳整合を検査するだけで、実機・資格を証明しない。
 
 実装時は各ケースへcommit、実行コマンド、fixture、観測点、expected/actual、ログ、結果を結び付ける。実コードが呼ばれないmodelだけで機能を完成扱いにしない。既存PR #2/#13の回帰試験を残す。
 

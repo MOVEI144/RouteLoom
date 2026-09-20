@@ -1,6 +1,6 @@
 # 5. Wire・API・互換性
 
-**実装対象の設計契約**であり、既存decoderの対応済み宣言ではない。unsigned integerはbig-endian、boolは0/1、reservedは0。未知の必須値、重複field、末尾余剰、長さ不一致は拒否し、C構造体をmemcpyしない。[契約JSON](contracts.json)と[宣言案](sdk-contract.h)を同時管理する。
+**実装対象の設計契約**であり、このbranchのP0〜P5でportable codec・runtime・Host配線として実装済み（[README](README.md)の実装状況参照）。hardware/資格の証拠ではない。unsigned integerはbig-endian、boolは0/1、reservedは0。未知の必須値、重複field、末尾余剰、長さ不一致は拒否し、C構造体をmemcpyしない。[契約JSON](contracts.json)と[宣言案](sdk-contract.h)を同時管理する。
 
 ## 5.1 既存登録を守る
 
@@ -101,7 +101,7 @@ permitは既存38B manifest(kind3)、38+nB chunk(n≤90)、37B object ACKで運�
 
 ## 5.6 USB登録とcredit
 
-USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。追加capability案はbit3 gateway_endpoint_v1、bit4 config_endpoint_v1。Hello認証へ結合し未交渉はUnsupported。実装時に#13採用HEADの衝突を再検査する。
+USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。実装済みcapabilityはbit3 gateway_endpoint_v1、bit4 config_endpoint_v1。Hello認証へ結合し未交渉はUnsupported。bridgeは`attach_gateway`/`attach_config`でendpointを接続した時だけ対応bitを広告する（attach＝広告であり、未attachのbuildはbitを立てない）。firmware側は`CONFIG_ROUTELOOM_CAPABILITY`の同bitがONの時だけattachし、OFFなら未attach・未広告のまま全opがUnsupportedを返す。実装時に#13採用HEADの衝突を再検査した（本branchで対応済み）。
 
 新inner共通形はschema:u8=1/sub:u8/payload_len:u16/payload。replyはpayload先頭result:u16。完全長を検査しUSB session/request IDで対応付ける。全て通常creditを消費し、既存Credit/KeepAlive予約を無制限HostOpsへ拡張しない。
 
@@ -122,7 +122,7 @@ HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB ses
 
 ## 5.7 Host canonical/API
 
-既存API1へgateway.resolveとconfig.get/propose/statusを追加し、一daemonを維持。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。
+既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/getを実装済みで追加し、一daemonを維持。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
 
 Gateway canonical schema2は既存26B field形を保ち、dest_kind=1のpayload_len直前に `scope:u8/reserved:u8/token16/gateway_boot8/egress_gateway8` を加える（34B）。payload≤96で最大156B、SUBMIT固定108Bを加え264B。schema1 Node=0はそのまま、schema1の未実装Gatewayを自動変換しない。
 
@@ -144,4 +144,4 @@ Scopeは鍵bytesでなくProvider handle、Config発行はローカルsetupで�
 {"v":1,"request_id":"c1","method":"config.propose","params":{"network":"0000000000000001","target":"0000000000000030","namespace":1,"schema":1,"expected_revision":"7","base_hash":"<64 hex characters>","key":"<32 hex characters>","ttl_ms":5000,"patch":[{"field":1,"type":"u8","value":1}]}}
 ```
 
-山括弧は説明用placeholder。[examples.json](examples.json)は具体的な合成値。これらを現行daemonで実行可能なAPIと表示しない。
+山括弧は説明用placeholder。[examples.json](examples.json)は具体的な合成値。両methodは現行daemonで実装済み（dev profile・EXPERIMENTAL。capability未交渉・ACL不足・未登録ではhonestな拒否/未解決を返す）が、ここの値はfixtureであり実在のnetwork/operation/keyを意味しない。`gateway.resolve`は自host endpointのlive bindingだけを答え、remote Gatewayのresolveは`resolved:false`で返す。

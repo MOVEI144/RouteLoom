@@ -105,6 +105,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // endpoint, enables the gateway role bound to this boot id, and wires the
   // bridge in as BOTH the HOST_RECEIVE_RAM sink (0x11/0x12 ingress) and the
   // observer for host-originated gateway sends (schema-2 SUBMIT).
+  // Attaching also advertises CAP_GATEWAY_ENDPOINT_V1 in HelloAck (mirroring
+  // attach_config): the bit is set exactly when the endpoint exists, so a
+  // build that never attaches answers Unsupported instead of advertising.
   // Returns the enable_gateway result (boot id must be nonzero).
   Status attach_gateway(GatewayDelivery& gateway) noexcept;
 

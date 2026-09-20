@@ -2,7 +2,7 @@
   "design_version": "0.1-draft",
   "baseline_sha": "610c5b27dd741a759051724fb9cc10c82b556314",
   "host_reference_sha": "6030baa7046c6d6dfe466df3071b58c0c6797139",
-  "runtime_implemented": false,
+  "runtime_implemented": true,
   "hardware_tested": false,
   "qualified": false,
   "runtime_default_changes": false,
@@ -12,5 +12,5 @@
   "gateway": {"payload_max":96,"submit_prefix":32,"query_bytes":52,"descriptor_bytes":86,"outcome_bytes":84,"endpoint_records":4,"pending_max":8,"receipt_records":32,"receipt_hold_ms":60000,"accepted_per_minute":20,"burst":8,"capacity_margin":4,"lease_ms":15000,"renew_ms":5000,"message_lifetime_max_ms":30000,"identity_failover":false,"host_receipt_requires_insert_ack":true,"host_independent_signature":false,"incremental_ram_budget_bytes":8192},
   "config": {"canonical_header":176,"patch_max":512,"field_count_max":16,"field_value_max":96,"snapshot_max":512,"cose_overhead_max":86,"permit_encoded_max":774,"object_max":1024,"namespace_max":4,"default_namespaces":1,"transactions_per_target":1,"issuer_outbox":4,"records":8,"result_hold_ms":300000,"accepted_per_minute":1,"burst":1,"challenge_max_ms":30000,"reassembly_timeout_ms":10000,"slot_bytes":4096,"slots_per_namespace":2,"global_sequence_equals_target_revision":false,"scope_key_authorizes_config":false,"auto_reset_corrupt_revision":false},
   "usb": {"frame_kind":19,"gateway_capability_bit":3,"config_capability_bit":4,"extension_prefix":4,"ingress_payload_max":180,"ingress_frame_body_max":184,"ingress_ack_body":74,"canonical_v2_max":156,"host_submit_fixed":108,"host_submit_v2_max":264,"gateway_subtypes":[16,17,18,19],"config_subtypes":[32,33,34,35],"ordinary_credit":true},
-  "acceptance": {"scenario_count":46,"status":"planned_not_run","executed_runtime_scenarios":0}
+  "acceptance": {"scenario_count":46,"status":"partially_executed","executed_runtime_scenarios":39}
 }

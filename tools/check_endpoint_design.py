@@ -21,7 +21,8 @@ def contract_errors(c: dict) -> list[str]:
             errors.append(name)
     try:
         require(c['design_version'] == '0.1-draft', 'design version')
-        require(all(c[k] is False for k in ('runtime_implemented', 'hardware_tested', 'qualified', 'runtime_default_changes')), 'maturity unchanged')
+        require(c['runtime_implemented'] is True, 'runtime implemented')
+        require(all(c[k] is False for k in ('hardware_tested', 'qualified', 'runtime_default_changes')), 'maturity unchanged')
         require(c['issues'] == [14,16,17], 'issue scope')
         w,s,g,f,u = (c[k] for k in ('wire','scope','gateway','config','usb'))
         require(w['header_bytes'] == 88 and w['tag_bytes'] == 16 and w['application_max'] == 128, 'wire v1 budget')
@@ -58,7 +59,7 @@ def contract_errors(c: dict) -> list[str]:
         require(u['gateway_capability_bit']==3 and u['config_capability_bit']==4 and u['ordinary_credit'], 'USB capabilities/credit')
         require(u['ingress_payload_max']==32+20+32+96 and u['ingress_frame_body_max']==u['ingress_payload_max']+4==184, 'USB ingress accounting')
         require(u['canonical_v2_max']==26+34+96 and u['host_submit_v2_max']==u['canonical_v2_max']+u['host_submit_fixed']==264, 'USB submit accounting')
-        require(c['acceptance']=={'scenario_count':46,'status':'planned_not_run','executed_runtime_scenarios':0}, 'unexecuted inventory')
+        require(c['acceptance']=={'scenario_count':46,'status':'partially_executed','executed_runtime_scenarios':39}, 'acceptance inventory')
     except (KeyError, TypeError, ValueError) as exc:
         errors.append('schema: '+str(exc))
     return errors
@@ -108,10 +109,17 @@ def run(root: Path) -> dict:
             candidate=(file.parent/unquote(parsed.path)).resolve()
             check(candidate.is_relative_to(root.resolve()) and candidate.exists(), 'link:'+file.name+':'+target)
             links+=1
-    check(cs['status']=='planned_not_run' and len(cs['cases'])==46, 'scenario inventory')
+    check(cs['status']=='partially_executed' and len(cs['cases'])==46, 'scenario inventory')
     expected={f'{letter}{n:02}' for letter,count in [('S',12),('G',12),('C',14),('I',8)] for n in range(1,count+1)}
     check({x['id'] for x in cs['cases']}==expected and len(cs['cases'])==len(expected), 'case IDs')
     check(all(all(x.get(k) for k in ('area','setup','action','expect')) for x in cs['cases']), 'case detail')
+    # Per-case execution status: portable_passed cases name real test files;
+    # hardware/power/PTY cases stay planned_not_run — never silently flipped.
+    check(all(x.get('status') in ('portable_passed','planned_not_run') for x in cs['cases']), 'case statuses')
+    check(all(x.get('evidence') for x in cs['cases'] if x.get('status')=='portable_passed'), 'executed cases cite evidence')
+    check(all((root/ev).exists() for x in cs['cases'] for ev in x.get('evidence',[])), 'case evidence paths exist')
+    check(sum(1 for x in cs['cases'] if x.get('status')=='portable_passed')==c['acceptance']['executed_runtime_scenarios'], 'executed count matches cases')
+    check(all(x.get('status')=='planned_not_run' for x in cs['cases'] if x['id'] in {'S12','G09','G12','I07'}), 'hardware-only cases stay pending')
     s=c['scope']; f=ex['scope']; key=bytes(range(32))
     dp=bytes.fromhex(f['discover_hex']);op=bytes.fromhex(f['offer_hex'])
     network=struct.pack('>Q',f['network']);src=bytes.fromhex(f['requester_mac_hex']);dst=bytes.fromhex(f['responder_mac_hex'])
@@ -166,14 +174,15 @@ def run(root: Path) -> dict:
     cose=b'\xd2\x84'+cbor_bytes(protected)+b'\xa0'+cbor_bytes(bytes(688))+cbor_bytes(bytes(64))
     check(len(cose)==774, 'COSE maximum shape (not signature validation)')
     check(all(x['v']==1 and x['method'] in ('gateway.resolve','config.propose') for x in ex['api_examples']), 'API example framing')
-    mutations=[(('runtime_implemented',),True),(('qualified',),True),(('scope','tag_bytes'),12),(('scope','required_fallback'),True),(('scope','grants_membership'),True),(('scope','key_generations'),99),(('wire','network_supported_max'),2**64-1),(('gateway','payload_max'),128),(('gateway','receipt_records'),16),(('gateway','identity_failover'),True),(('gateway','host_receipt_requires_insert_ack'),False),(('config','scope_key_authorizes_config'),True),(('config','global_sequence_equals_target_revision'),True),(('config','auto_reset_corrupt_revision'),True),(('config','object_max'),65535),(('usb','frame_kind'),17),(('usb','ordinary_credit'),False),(('acceptance','executed_runtime_scenarios'),46)]
+    mutations=[(('runtime_implemented',),False),(('hardware_tested',),True),(('qualified',),True),(('scope','tag_bytes'),12),(('scope','required_fallback'),True),(('scope','grants_membership'),True),(('scope','key_generations'),99),(('wire','network_supported_max'),2**64-1),(('gateway','payload_max'),128),(('gateway','receipt_records'),16),(('gateway','identity_failover'),True),(('gateway','host_receipt_requires_insert_ack'),False),(('config','scope_key_authorizes_config'),True),(('config','global_sequence_equals_target_revision'),True),(('config','auto_reset_corrupt_revision'),True),(('config','object_max'),65535),(('usb','frame_kind'),17),(('usb','ordinary_credit'),False),(('acceptance','status'),'planned_not_run'),(('acceptance','executed_runtime_scenarios'),46)]
     for path,value in mutations:
         bad=copy.deepcopy(c); target=bad
         for part in path[:-1]:
             target=target[part]
         target[path[-1]]=value
         check(bool(contract_errors(bad)), 'mutation:'+'.'.join(path))
-    return {'scope':'design-lint-and-serialization-only','passed':not issues,'errors':issues,'checks':len(checks),'documents':len(markdown),'local_links':links,'negative_manifest_mutations':len(mutations),'planned_runtime_cases':46,'executed_runtime_cases':0,'hardware_tested':False,'signature_validation_tested':False}
+    executed=sum(1 for x in cs['cases'] if x.get('status')=='portable_passed')
+    return {'scope':'design-lint-and-serialization-only','passed':not issues,'errors':issues,'checks':len(checks),'documents':len(markdown),'local_links':links,'negative_manifest_mutations':len(mutations),'planned_runtime_cases':46,'executed_runtime_cases':executed,'hardware_tested':False,'signature_validation_tested':False}
 
 
 def main() -> int:

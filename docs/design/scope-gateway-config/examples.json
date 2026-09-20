@@ -1,5 +1,6 @@
 {
- "status":"design-serialization-fixtures-not-runtime-tests",
+ "status":"wire-fixtures-synthetic;api-methods-implemented-dev-profile",
+ "api_examples_status":"gateway.resolve and config.propose are implemented by host/routeloom-host (API1) and routeloomctl; param values here stay synthetic fixtures, never real ids/keys",
  "scope":{"id":"scope-v2-synthetic","key_construction":"bytes(range(32)); PUBLIC TEST ONLY; never provision","network":1,"generation":7,"scope_class":1,"requester_mac_hex":"020000000011","responder_mac_hex":"020000000022","hint":1270764460,"discover_hex":"524c44310101002c004400004bbe53ac0000000000000011000102030405060708090a0b0c0d0e0f0000000502010100000000076c4a8a95e7617a2ae3792c9d617bc625","offer_hex":"524c44310102002c006800004bbe53ac0000000000000022000102030405060708090a0b0c0d0e0f0000000502010000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5101112131415161718191a1b1c1d1e1f0101000000000007685e20b006b97edba6015b3aac5ea207","discover_digest_hex":"c5c79e799483a13a0bc85df11ae4e001b62170fed0262eadf94da9be9057ddd9","offer_digest_hex":"309e9be74284f0fff1911ad8d958b1c2f94bea7b833da5a3102844326d1695be"},
  "hmac_rfc4231_case1":{"key_hex":"0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b","data_hex":"4869205468657265","sha256_hex":"b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"},
  "gateway_submits":[
