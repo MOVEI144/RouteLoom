@@ -20,6 +20,12 @@ target_compile_definitions(routeloom_golden_tests PRIVATE
     ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
 add_test(NAME routeloom_golden_tests COMMAND routeloom_golden_tests)
 
+add_executable(routeloom_host_ops_tests test_host_ops.cpp)
+target_link_libraries(routeloom_host_ops_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_host_ops_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_host_ops_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_host_ops_tests COMMAND routeloom_host_ops_tests)
+
 add_executable(routeloom_usb_tests test_usb.cpp)
 target_link_libraries(routeloom_usb_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_usb_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

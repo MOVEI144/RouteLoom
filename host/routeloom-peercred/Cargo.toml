@@ -1,0 +1,13 @@
+[package]
+name = "routeloom-peercred"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# Deliberate exception to the workspace `unsafe_code = "forbid"` lint: peer
+# credentials on a Unix socket require OS syscalls (getpeereid on macOS,
+# getsockopt(SO_PEERCRED) on Linux) and std exposes no stable safe API for
+# them (`UnixStream::peer_cred` is still unstable). Isolating the single
+# unsafe FFI boundary here keeps the rest of the host workspace unsafe-free.
+[lints.rust]
+unsafe_code = "allow"

@@ -147,6 +147,7 @@ Status decode_frame(const ByteView decoded, UsbFrame& out) noexcept {
     case FrameKind::DataToMesh:
     case FrameKind::DataFromMesh:
     case FrameKind::DeliveryEvent:
+    case FrameKind::HostOps:
     case FrameKind::Credit:
     case FrameKind::Diagnostic:
     case FrameKind::Error:
