@@ -1,7 +1,11 @@
 name: SDK build and tests
 on:
   push:
-    branches: [main, implementation/core-fixed-250, implementation/pre-hil-software]
+    branches:
+      - main
+      - implementation/core-fixed-250
+      - implementation/pre-hil-software
+      - design/autonomous-mesh-issues-3-4-5
   pull_request:
   workflow_dispatch:
 permissions:
@@ -40,7 +44,9 @@ jobs:
             echo 'Covers: wire codec, wire golden vectors (valid + invalid), routing'
             echo '(3hop/diamond/10hop/partition-merge/loop-freedom), authority ledger'
             echo 'power-cut, USB codec/session/credit, power coordinator model,'
-            echo 'replay/end-protection hardening, C ABI.'
+            echo 'replay/end-protection hardening, C ABI, autonomy codecs + golden'
+            echo 'vectors, neighbor discovery, congestion scheduler/BUSY, channel-plan'
+            echo 'coordinator, migration engine + wire transport, load-aware routing.'
             echo ''
             echo '```'
             ctest --test-dir build -N || true
@@ -85,7 +91,8 @@ jobs:
           set -euo pipefail
           cargo run --manifest-path host/Cargo.toml -p routeloom-wire --example gen_golden
           cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
-          git diff --exit-code -- protocol/golden protocol/usb-golden
+          python3 tools/gen_autonomy_vectors.py
+          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -100,9 +107,20 @@ jobs:
         # bridge_node exposes the portable UsbBridge on USB Serial/JTAG.
         # It has no deep-sleep variant, so that combination is excluded.
         app: [reference_node, bridge_node]
+        # autonomy=observe compiles the EXPERIMENTAL autonomy lane:
+        # RLD1 discovery + the migration participant in Observe mode
+        # (CONFIG_ROUTELOOM_DISCOVERY=y, CONFIG_ROUTELOOM_MIGRATION=1).
+        # Compile-time coverage only — not RF validation, and Observe never
+        # moves the radio. AutoGuarded stays opt-in (no kconfig exposes it).
+        autonomy: [off]
         exclude:
           - app: bridge_node
             profile: deep_sleep
+        include:
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: observe
     container:
       image: espressif/idf:v6.0.3
     steps:
@@ -122,6 +140,9 @@ jobs:
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             printf 'CONFIG_ROUTELOOM_DEEP_SLEEP=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.autonomy }}' = observe ]; then
+            printf 'CONFIG_ROUTELOOM_DISCOVERY=y\nCONFIG_ROUTELOOM_MIGRATION=1\n' >> sdkconfig
+          fi
           idf.py build
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             # Prove the kconfig symbol survived re-resolution and the
@@ -130,11 +151,20 @@ jobs:
           else
             ! grep -q '^CONFIG_ROUTELOOM_DEEP_SLEEP=y' sdkconfig
           fi
+          if [ '${{ matrix.autonomy }}' = observe ]; then
+            # Prove the autonomy symbols survived re-resolution and the
+            # Observe-mode lane was actually compiled in.
+            grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
+            grep -q '^CONFIG_ROUTELOOM_MIGRATION=1' sdkconfig
+          else
+            ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
+            ! grep -q '^CONFIG_ROUTELOOM_MIGRATION=[12]' sdkconfig
+          fi
           idf.py size > build/size-report.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}
+          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}
           path: |
             idf-commit.txt
             firmware/${{ matrix.app }}/build/*.bin

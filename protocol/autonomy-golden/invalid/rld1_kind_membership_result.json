@@ -1,0 +1,8 @@
+{
+  "codec": "rld1",
+  "encoded_hex": "524c44310104002c002d0000000000010000000000000002000102030405060708090a0b0c0d0e0f0000000078",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "rld1_kind_membership_result",
+  "note": "kind 4 is forbidden on the RLD1 carrier"
+}

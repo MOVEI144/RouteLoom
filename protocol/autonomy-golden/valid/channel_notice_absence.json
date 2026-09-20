@@ -1,0 +1,14 @@
+{
+  "channel_epoch": 3,
+  "codec": "channel_notice",
+  "duration_ms": 200,
+  "encoded_hex": "01010b0c0d0e0f1011120000000300000096000000c8010007",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "channel_notice_absence",
+  "protected_cut_id": 7,
+  "reason": 1,
+  "starts_in_ms": 150,
+  "subject": 796025588171149586,
+  "subtype": 1
+}

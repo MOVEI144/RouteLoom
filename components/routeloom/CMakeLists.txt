@@ -1,9 +1,14 @@
 set(ROUTELOOM_CORE_SOURCES
   src/authority.cpp
+  src/autonomy_wire.cpp
   src/byte_io.cpp
+  src/channel_plan.cpp
   src/crc32.cpp
   src/c_api.cpp
   src/counter_store.cpp
+  src/discovery.cpp
+  src/migration.cpp
+  src/migration_wire.cpp
   src/node.cpp
   src/power.cpp
   src/replay.cpp

@@ -39,3 +39,7 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 ## 2026-09-17レビュー反映
 
 [採否と根拠・残る作業](reviews/2026-09-17-response.md)、[実装プロファイル](spec/release-profiles.md)、[電源断・期限・資源](spec/crash-time-resources.md)、[資源予算](spec/resource-profiles.md)、[意味の正本](../protocol/README.md)。Wireの完全凍結と、実装時の必須安全契約を分けた改訂。
+
+## 2026-09-19 自律Mesh拡張の設計Draft
+
+[Issues #3・#4・#5の設計と実装バックログ](design/autonomous-mesh/README.md)：近隣発見、輻輳制御・経路負荷回避、チャンネル調査・協調移行。設計専用パラメーターと40件の未実行受入シナリオを含む。現行runtimeの既定値や実装成熟度を変更するものではない。

@@ -491,6 +491,100 @@ struct Event {
     json: String,
 }
 
+/// Autonomy-lane view derived from device Diagnostic frames (discovery
+/// engine reasons + migration agent events). Every field stays `None`
+/// until the device actually emits it — unknown is reported as null,
+/// never synthesized.
+#[derive(Default)]
+struct AutonomyState {
+    /// Participant phase from PHASE_* events (stable/assess/...).
+    phase: Option<String>,
+    /// Coordinator judgment from ASSESS_* events.
+    assess: Option<String>,
+    /// Coordinator mode from MIGRATION_MODE_* events.
+    migration_mode: Option<String>,
+    /// Latest gated-operation detail (AUTOGUARDED_*/AUTOSURVEY_*/SURVEY_*).
+    gate_detail: Option<String>,
+    last_discovery_ms: Option<u64>,
+    last_discovery: Option<String>,
+    last_migration_ms: Option<u64>,
+    last_migration: Option<String>,
+    discovery_events: u64,
+    migration_events: u64,
+}
+
+/// Discovery-engine reason strings (components/routeloom/src/discovery.cpp).
+/// Everything else autonomy-related is a migration-lane event.
+const DISCOVERY_REASONS: &[&str] = &[
+    "PEER_CAPACITY",
+    "KIND_REJECT",
+    "COOKIE_REJECT",
+    "AUTH_FAILED",
+    "DATA_REJECT",
+    "REACHABLE",
+    "BINDING_CONFLICT",
+    "MEMBERSHIP_PENDING",
+    "BOUND",
+    "STALE",
+    "REVOKED",
+];
+
+/// Classify a device diagnostic reason into the autonomy view. Reasons are
+/// bounded engine strings — classified, never parsed for data.
+fn note_autonomy(state: &State, ms: u64, reason: &str) {
+    let migration = reason.starts_with("PHASE_")
+        || reason.starts_with("ASSESS_")
+        || reason.starts_with("AUTOSURVEY_")
+        || reason.starts_with("AUTOGUARDED_")
+        || reason.starts_with("MIGRATION_")
+        || reason.starts_with("PLAN_")
+        || reason.starts_with("COMMIT_")
+        || reason.starts_with("SNAPSHOT_")
+        || reason.starts_with("CHANNEL_NOTICE")
+        || reason.starts_with("HELPER_")
+        || reason.starts_with("PENDING_SEND")
+        || reason.starts_with("READINESS_")
+        || reason.starts_with("RESULT_")
+        // Only the migration agent's divergence diagnostic is a migration
+        // event — the power coordinator's RESUME_* reasons (RESUME_CONFIRMED,
+        // RESUME_DISCOVERY_STARTED, RESUME_UNCONFIRMED) are unrelated.
+        || reason == "RESUME_CHANNEL_DIVERGED"
+        || reason.starts_with("TIME_SYNC")
+        || reason.starts_with("CONTROL_OBJECT")
+        || reason.starts_with("OBJECT_")
+        || reason.starts_with("SURVEY_")
+        || reason.starts_with("PROTECTED_CUT_")
+        || reason.starts_with("LEGACY_")
+        || reason.starts_with("CLOCK_");
+    let discovery = !migration && DISCOVERY_REASONS.contains(&reason);
+    if !migration && !discovery {
+        return;
+    }
+    let mut autonomy = state.autonomy.lock().expect("autonomy poisoned");
+    if discovery {
+        autonomy.discovery_events += 1;
+        autonomy.last_discovery_ms = Some(ms);
+        autonomy.last_discovery = Some(reason.to_string());
+        return;
+    }
+    autonomy.migration_events += 1;
+    autonomy.last_migration_ms = Some(ms);
+    autonomy.last_migration = Some(reason.to_string());
+    if let Some(phase) = reason.strip_prefix("PHASE_") {
+        autonomy.phase = Some(phase.to_ascii_lowercase());
+    } else if let Some(verdict) = reason.strip_prefix("ASSESS_") {
+        autonomy.assess = Some(verdict.to_ascii_lowercase());
+    } else if let Some(mode) = reason.strip_prefix("MIGRATION_MODE_") {
+        autonomy.migration_mode = Some(mode.to_ascii_lowercase());
+    }
+    if reason.starts_with("AUTOGUARDED_")
+        || reason.starts_with("AUTOSURVEY_")
+        || reason.starts_with("SURVEY_")
+    {
+        autonomy.gate_detail = Some(reason.to_string());
+    }
+}
+
 #[derive(Default)]
 struct State {
     device: Option<PathBuf>,
@@ -507,6 +601,7 @@ struct State {
     events: Mutex<VecDeque<Event>>,
     event_seq: AtomicU64,
     events_dropped: AtomicU64,
+    autonomy: Mutex<AutonomyState>,
 }
 
 fn now_ms() -> u64 {
@@ -775,6 +870,9 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
                 if let Some(peer) = peer {
                     touch_node(state, peer, "peer", ms);
                 }
+                if let Some(reason_text) = reason.as_deref() {
+                    note_autonomy(state, ms, reason_text);
+                }
                 push_event(
                     state,
                     ms,
@@ -996,6 +1094,33 @@ fn authority_json(state: &State) -> String {
     format!(
         "{{\"state\":\"unknown\",\"source\":null,\"network\":{},\"detail\":\"no control-plane ledger is attached to this daemon\"}}",
         json_opt_u64(network),
+    )
+}
+
+/// The autonomy view is assembled only from real device Diagnostic events;
+/// every field is null until the device emits it. This is a host-side view
+/// of an EXPERIMENTAL lane — it is not RF validation and carries no
+/// production-qualification claim.
+fn autonomy_json(state: &State) -> String {
+    let autonomy = state.autonomy.lock().expect("autonomy poisoned");
+    let last = |ms: Option<u64>, reason: &Option<String>| -> String {
+        match (ms, reason.as_deref()) {
+            (Some(ms), Some(reason)) => {
+                format!("{{\"ms\":{ms},\"reason\":\"{}\"}}", json_escape(reason))
+            }
+            _ => "null".to_string(),
+        }
+    };
+    format!(
+        "{{\"migration_mode\":{},\"participant_phase\":{},\"assess_verdict\":{},\"gate_detail\":{},\"last_discovery\":{},\"last_migration\":{},\"discovery_events\":{},\"migration_events\":{},\"experimental\":true}}",
+        json_opt_str(autonomy.migration_mode.as_deref()),
+        json_opt_str(autonomy.phase.as_deref()),
+        json_opt_str(autonomy.assess.as_deref()),
+        json_opt_str(autonomy.gate_detail.as_deref()),
+        last(autonomy.last_discovery_ms, &autonomy.last_discovery),
+        last(autonomy.last_migration_ms, &autonomy.last_migration),
+        autonomy.discovery_events,
+        autonomy.migration_events,
     )
 }
 
@@ -1359,6 +1484,7 @@ fn serve_client(
             "DELIVERIES" => deliveries_json(&state),
             "EVENTS" => events_json(&state),
             "AUTHORITY" => authority_json(&state),
+            "AUTONOMY" => autonomy_json(&state),
             "SEND" if fields.len() == 3 => {
                 let destination = fields[1].parse::<u64>();
                 let payload = parse_hex(fields[2]);
@@ -1435,7 +1561,7 @@ fn serve_client(
                 }
             }
             "QUIT" => return Ok(()),
-            _ => "{\"error\":\"commands: STATUS, DIAGNOSTICS, SEND <node> <hex>, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, QUIT\"}".into(),
+            _ => "{\"error\":\"commands: STATUS, DIAGNOSTICS, SEND <node> <hex>, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, AUTONOMY, QUIT\"}".into(),
         };
         writer.write_all(response.as_bytes())?;
         writer.write_all(b"\n")?;

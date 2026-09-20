@@ -1,0 +1,8 @@
+{
+  "codec": "object_chunk",
+  "encoded_hex": "0101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f000000056162",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "object_chunk_length_mismatch",
+  "note": "declared chunk length disagrees with bytes present"
+}

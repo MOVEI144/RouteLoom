@@ -4,4 +4,4 @@
 
 [参加](../docs/spec/identity-membership.md)、[Wire](../docs/spec/wire-protocol.md)、[永続化](../docs/spec/crash-time-resources.md)、[USB](../docs/spec/usb-protocol.md)と合わせて読む。
 
-`tests/test_contracts.py`は意味の負例を検査する小モデル。ESP32実装、暗号Provider、Babel全体、Raft、実RFの正しさの証明ではない。C++／Rust共通golden vectorは[golden/](golden/README.md)に置き、両実装がbyte一致するかを試験する。
+`tests/test_contracts.py`は意味の負例を検査する小モデル。ESP32実装、暗号Provider、Babel全体、Raft、実RFの正しさの証明ではない。C++／Rust共通golden vectorは[golden/](golden/README.md)に置き、両実装がbyte一致するかを試験する。自律mesh拡張の新control payloadとRLD1 envelopeのvectorは[autonomy-golden/](autonomy-golden/README.md)に置く（Wire v1自体は不変）。

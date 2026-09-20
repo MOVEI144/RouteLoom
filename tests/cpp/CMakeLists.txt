@@ -38,6 +38,55 @@ target_include_directories(routeloom_hardening_tests PRIVATE ${CMAKE_CURRENT_SOU
 target_compile_options(routeloom_hardening_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_hardening_tests COMMAND routeloom_hardening_tests)
 
+add_executable(routeloom_autonomy_tests test_autonomy.cpp)
+target_link_libraries(routeloom_autonomy_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_autonomy_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_autonomy_tests PRIVATE
+    ROUTELOOM_AUTONOMY_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/autonomy-golden")
+add_test(NAME routeloom_autonomy_tests COMMAND routeloom_autonomy_tests)
+
+add_executable(routeloom_discovery_tests test_discovery.cpp)
+target_link_libraries(routeloom_discovery_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_discovery_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_discovery_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_discovery_tests COMMAND routeloom_discovery_tests)
+
+add_executable(routeloom_congestion_tests test_congestion.cpp)
+target_link_libraries(routeloom_congestion_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_congestion_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_congestion_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_congestion_tests COMMAND routeloom_congestion_tests)
+
+add_executable(routeloom_load_routing_tests test_routing_load.cpp)
+target_link_libraries(routeloom_load_routing_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_load_routing_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_load_routing_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_load_routing_tests COMMAND routeloom_load_routing_tests)
+
+add_executable(routeloom_channel_tests test_channel.cpp)
+target_link_libraries(routeloom_channel_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_channel_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_channel_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_channel_tests COMMAND routeloom_channel_tests)
+
+add_executable(routeloom_migration_tests test_migration.cpp)
+target_link_libraries(routeloom_migration_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_migration_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_migration_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_migration_tests COMMAND routeloom_migration_tests)
+
+add_executable(routeloom_migration_wire_tests test_migration_wire.cpp)
+target_link_libraries(routeloom_migration_wire_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_migration_wire_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_migration_wire_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_migration_wire_tests COMMAND routeloom_migration_wire_tests)
+
+add_executable(routeloom_baseline_diff_tests test_baseline_diff.cpp)
+target_link_libraries(routeloom_baseline_diff_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_baseline_diff_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_baseline_diff_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_baseline_diff_tests COMMAND routeloom_baseline_diff_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)

@@ -1,0 +1,8 @@
+{
+  "codec": "bootstrap_auth",
+  "encoded_hex": "0107000078",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "bootstrap_auth_bad_phase",
+  "note": "auth phase 7 is not a logical phase"
+}

@@ -28,12 +28,87 @@ config ROUTELOOM_PEER_MAC
     string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
     default "00:00:00:00:00:00"
 
+config ROUTELOOM_DISCOVERY
+    bool "Enable autonomous neighbor discovery (RLD1 bootstrap lane)"
+    default n
+    help
+        EXPERIMENTAL: enables the RLD1 bootstrap lane, the portable
+        NeighborDiscovery engine and dev-PSK possession authentication.
+        Static ROUTELOOM_PEER_* registration keeps working alongside.
+
+config ROUTELOOM_DISCOVERY_MEMBER
+    bool "DEV: treat this node as a provisioned network member"
+    default y
+    depends on ROUTELOOM_DISCOVERY
+    help
+        Development stand-in for durable membership evidence. A production
+        build must source this from real provisioning state.
+
+config ROUTELOOM_DISCOVERY_AUTO_APPROVE
+    bool "DEV: auto-approve the membership commit (no authority round trip)"
+    default y
+    depends on ROUTELOOM_DISCOVERY
+
+config ROUTELOOM_DISCOVERY_INITIATE
+    bool "Broadcast DISCOVER at startup instead of only responding"
+    default y
+    depends on ROUTELOOM_DISCOVERY
+
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
     help
         Shared development key. Never use this default in a deployment. This provider does not
         replace the planned device-identity/EDHOC security profile.
+
+config ROUTELOOM_MIGRATION
+    int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
+    range 0 2
+    default 0
+    help
+        EXPERIMENTAL: wires the migration participant + control-object
+        transport onto the authenticated Wire lane. Observe runs the
+        coordinator's evidence collection only; Manual additionally permits
+        operator-driven plan issuance/surveys. Requires peers (static
+        ROUTELOOM_PEER_* or discovery). Disabled keeps the static-channel
+        path exactly as before.
+
+config ROUTELOOM_MIGRATION_AUTHORITY
+    hex "Migration authority Node ID"
+    default 0x1
+    depends on ROUTELOOM_MIGRATION != 0
+
+config ROUTELOOM_MIGRATION_SELF_AUTHORITY
+    bool "DEV: this node is the migration authority (issuer)"
+    default n
+    depends on ROUTELOOM_MIGRATION = 2
+    help
+        EXPERIMENTAL: the issuer commits plans through a dev-PSK MAC under
+        SecurityProfile::Development — never a production identity claim.
+
+config ROUTELOOM_MIGRATION_RTT_P99_MS
+    int "Measured management RTT P99 bound (ms) — deployment input"
+    range 1 60000
+    default 250
+    depends on ROUTELOOM_MIGRATION != 0
+
+config ROUTELOOM_MIGRATION_DELIVERY_BOUND_MS
+    int "Measured control delivery bound (ms) — deployment input"
+    range 1 60000
+    default 2000
+    depends on ROUTELOOM_MIGRATION != 0
+
+config ROUTELOOM_MIGRATION_TRANSFER_BOUND_MS
+    int "Measured prepare-phase transfer bound (ms) — deployment input"
+    range 1 30000
+    default 2000
+    depends on ROUTELOOM_MIGRATION != 0
+
+config ROUTELOOM_MIGRATION_SWITCH_BOUND_MS
+    int "Measured local channel-switch bound (ms) — deployment input"
+    range 1 5000
+    default 50
+    depends on ROUTELOOM_MIGRATION != 0
 
 config ROUTELOOM_USB_DEV_SECRET
     string "DEVELOPMENT ONLY USB session shared secret (ASCII, <=63 chars)"

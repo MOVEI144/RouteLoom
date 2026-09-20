@@ -1,0 +1,12 @@
+{
+  "binding_generation": 2,
+  "codec": "neighbor_probe",
+  "encoded_hex": "010100000002000003e900000000075bcd1500007530",
+  "expect": "ok",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "neighbor_probe",
+  "probe_sequence": 1001,
+  "requested_lease_ms": 30000,
+  "sent_ms": 123456789,
+  "subtype": 1
+}

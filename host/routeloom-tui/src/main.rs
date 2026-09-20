@@ -105,7 +105,7 @@ fn run_inner(stdout: &mut impl Write, socket: PathBuf, interval_ms: u64) -> io::
                     }
                     KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => tab = tab.next(),
                     KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => tab = tab.prev(),
-                    KeyCode::Char(digit @ '1'..='8') => {
+                    KeyCode::Char(digit @ '1'..='9') => {
                         tab = Tab::from_index(usize::from(digit as u8 - b'1'))
                     }
                     _ => {}

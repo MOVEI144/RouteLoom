@@ -1,0 +1,14 @@
+{
+  "body_hex": "646973632d68696e74",
+  "capability_bits": 3,
+  "claimed_node": 72623859790382856,
+  "codec": "rld1",
+  "encoded_hex": "524c44310101002c00350000c0ffee010102030405060708000102030405060708090a0b0c0d0e0f00000003646973632d68696e74",
+  "expect": "ok",
+  "flags": 0,
+  "format": "routeloom-autonomy-v1-golden",
+  "kind": 1,
+  "name": "rld1_discover",
+  "network_hint": 3237998081,
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f"
+}

@@ -23,6 +23,10 @@ enum class AuthorityOperationKind : std::uint8_t {
   RemoteConfig = 1,
   MembershipApproval = 2,
   MembershipRevocation = 3,
+  // Verified channel-migration plan commit (04-channel-migration.md §5-§6):
+  // operation_hash binds the plan blob digest, so the ledger reference
+  // transitively binds every plan field.
+  ChannelMigration = 4,
 };
 
 struct AuthorityOperation {

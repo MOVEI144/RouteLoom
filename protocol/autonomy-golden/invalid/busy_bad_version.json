@@ -1,0 +1,8 @@
+{
+  "codec": "busy",
+  "encoded_hex": "020101100000000000000005000000070000000000000009000000000100000002000000140a",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "busy_bad_version",
+  "note": "unsupported payload version"
+}

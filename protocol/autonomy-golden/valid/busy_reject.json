@@ -1,0 +1,18 @@
+{
+  "binding_generation": 9,
+  "codec": "busy",
+  "encoded_hex": "01010110010203040506070800000007112233445566778802000000090000000b000000fa80",
+  "expect": "ok",
+  "feedback_sequence": 11,
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "busy_reject",
+  "pressure": 128,
+  "reason": 1,
+  "referenced_origin": 72623859790382856,
+  "referenced_round": 2,
+  "referenced_sequence": 1234605616436508552,
+  "referenced_session": 7,
+  "referenced_type": 16,
+  "retry_after_ms": 250,
+  "subtype": 1
+}

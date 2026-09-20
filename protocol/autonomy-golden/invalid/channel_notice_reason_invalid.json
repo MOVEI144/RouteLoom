@@ -1,0 +1,8 @@
+{
+  "codec": "channel_notice",
+  "encoded_hex": "010100000000000000050000000300000096000000c8090000",
+  "expect": "error",
+  "format": "routeloom-autonomy-v1-golden",
+  "name": "channel_notice_reason_invalid",
+  "note": "absence reason above the valid enum range"
+}

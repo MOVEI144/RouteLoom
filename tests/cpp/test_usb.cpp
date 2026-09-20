@@ -895,8 +895,16 @@ void test_golden_session() {
         MessageId id{};
         CHECK_OK(world.n2.send(1, ByteView{payload.data(), payload.size()},
                                SendOptions{}, now, id));
-        world.n2.poll(now);
-        world.net.flush(now);
+        // The boot-time route advertisement rides the management class and
+        // may take the first dispatch turn; poll until the DATA is on air.
+        bool on_air = false;
+        for (int i = 0; i < 4 && !on_air; ++i) {
+          world.n2.poll(now);
+          world.net.flush(now);
+          for (const auto& s : world.net.sights) {
+            on_air = on_air || s.type == FrameType::Data;
+          }
+        }
       }
       expected_out.insert(expected_out.end(), wire.begin(), wire.end());
     } else {

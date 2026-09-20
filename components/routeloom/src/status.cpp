@@ -27,6 +27,20 @@ const char* status_code_name(const StatusCode code) noexcept {
     case StatusCode::Conflict: return "CONFLICT";
     case StatusCode::Busy: return "BUSY";
     case StatusCode::InternalError: return "INTERNAL_ERROR";
+    case StatusCode::DiscoveryBudgetExhausted: return "DISCOVERY_BUDGET_EXHAUSTED";
+    case StatusCode::AuthRequired: return "AUTH_REQUIRED";
+    case StatusCode::ApprovalRequired: return "APPROVAL_REQUIRED";
+    case StatusCode::BindingConflict: return "BINDING_CONFLICT";
+    case StatusCode::PeerCapacity: return "PEER_CAPACITY";
+    case StatusCode::Congested: return "CONGESTED";
+    case StatusCode::RemoteBusy: return "REMOTE_BUSY";
+    case StatusCode::NoFeasibleAlternative: return "NO_FEASIBLE_ALTERNATIVE";
+    case StatusCode::SurveyRequiresOutagePermission: return "SURVEY_REQUIRES_OUTAGE_PERMISSION";
+    case StatusCode::LegacyParticipant: return "LEGACY_PARTICIPANT";
+    case StatusCode::ClockUncertain: return "CLOCK_UNCERTAIN";
+    case StatusCode::PlanNotCommitted: return "PLAN_NOT_COMMITTED";
+    case StatusCode::RecoveryRequired: return "RECOVERY_REQUIRED";
+    case StatusCode::AuthProfileUnavailable: return "AUTH_PROFILE_UNAVAILABLE";
   }
   return "UNKNOWN";
 }
