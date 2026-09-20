@@ -170,11 +170,15 @@ void RouteTable::evaluate_entry(Entry& entry, const MonotonicMs now_ms) noexcept
     // No committed route, or the committed hop just lost validity (expired,
     // withdrawn, FD-tightened): repair commits the raw best immediately —
     // the improvement hold never applies to failure recovery (03 §7). The
-    // post-switch hold DOES apply: without it the just-abandoned hop or a
-    // third candidate could win the route back on the next evaluation.
+    // post-switch hold applies only when this REPLACES a previously
+    // committed hop: without it the just-abandoned hop or a third candidate
+    // could win the route back on the next evaluation. Arming it on the
+    // very first acquisition would pin a suboptimal first commit and
+    // starve the improvement path instead.
+    const bool was_committed = entry.committed_next_hop != kInvalidNodeId;
     const RouteCandidate* raw = best_candidate(entry, kInvalidNodeId);
     entry.committed_next_hop = raw != nullptr ? raw->next_hop : kInvalidNodeId;
-    if (raw != nullptr) {
+    if (raw != nullptr && was_committed) {
       entry.switch_hold_until_ms = now_ms + kSwitchHoldMs;
     }
     entry.improvement_next_hop = kInvalidNodeId;

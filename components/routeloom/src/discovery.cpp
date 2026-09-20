@@ -1,5 +1,6 @@
 #include "routeloom/discovery.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
@@ -1170,8 +1171,8 @@ Status NeighborDiscovery::emit_auth_body(
   const std::uint16_t total = static_cast<std::uint16_t>(encoded.size);
   std::uint16_t offset = 0;
   while (offset < total) {
-    const std::size_t piece =
-        (total - offset) > kChunkDataMax ? kChunkDataMax : (total - offset);
+    const std::size_t piece = std::min<std::size_t>(
+        static_cast<std::size_t>(total - offset), kChunkDataMax);
     std::array<std::uint8_t, kChunkHeaderSize + kChunkDataMax> chunk{};
     ByteWriter writer(MutableByteView{chunk.data(), chunk.size()});
     if (!writer.write_u8(1) || !writer.write_u8(1) ||

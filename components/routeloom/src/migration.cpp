@@ -712,6 +712,8 @@ Status MigrationParticipant::store_active_record(
 
 // --- plan validation -------------------------------------------------------------------
 
+namespace {
+
 // Domain-independent structural legality of a signed plan — shared by the
 // issuer (MigrationAuthority::commit_plan) and every participant adoption
 // path. Clock mapping is a pure shift, so expiry/switch ordering holds in
@@ -739,6 +741,8 @@ Status plan_structure_status(const MigrationPlan& plan) noexcept {
   }
   return Status::success();
 }
+
+}  // namespace
 
 Status MigrationParticipant::check_plan_structure(
     const MigrationPlan& plan) const noexcept {
