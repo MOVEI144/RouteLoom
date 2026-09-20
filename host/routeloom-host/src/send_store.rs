@@ -4,11 +4,12 @@
 //! idempotency records and lookups behind one interface so api1.rs never
 //! touches storage directly. Two providers share this contract —
 //! `MemoryOperationStore` (bounded RAM only, no persistence) and the SQLite
-//! store in `sqlite_store.rs` (durable). Everything the daemon admits in
-//! this phase stays HOST_QUEUED: dispatch to USB is CAP-I2/TX-I2, so no
-//! production path marks records terminal or indeterminate yet. The state
-//! vocabulary, retire rules and restart recovery below exist so that later
-//! phase can persist its states without changing this contract.
+//! store in `sqlite_store.rs` (durable). TX-I2's dispatcher (`dispatch.rs`)
+//! drives records past HOST_QUEUED through the same store boundary —
+//! `prepare_dispatch` persists the dispatch identity before any USB write,
+//! `update_operation` linearizes every later transition, and
+//! `cancel_operation` shares that boundary so a cancel and a submit can
+//! never both win.
 //!
 //! Identity is `(uid, network, admission_epoch, caller_key)`; the first
 //! submit assigns `lineage:seq` and replays return the same id. Same
@@ -49,9 +50,9 @@ pub const RATE_TOKEN_INTERVAL_MS: u64 = 60_000 / HOST_RATE_PER_MINUTE;
 /// holds no state a fresh one would not, so those are pruned first.
 const MAX_TRACKED_PRINCIPALS: usize = 1024;
 
-/// Dispatch states (03-send-api.md §5). CAP-I1 admits HOST_QUEUED only; the
-/// rest are classified here so retire, quota and recovery logic treat them
-/// correctly once later phases produce them.
+/// Dispatch states (03-send-api.md §5). The TX-I2 dispatcher in
+/// `dispatch.rs` drives records through them via the store-level
+/// transitions; the API layer only ever admits HOST_QUEUED.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DispatchState {
     HostQueued,
@@ -130,9 +131,8 @@ pub struct OpIdentity {
 #[derive(Clone, Debug)]
 pub struct StoredOperation {
     pub seq: u64,
-    /// Owning principal — recorded for the CAP-I1 audit/dispatcher handoff;
-    /// queries authorize on the network grant, not this field.
-    #[allow(dead_code)]
+    /// Owning principal — queries authorize on the network grant;
+    /// `operations.cancel` additionally requires the owning uid.
     pub uid: u32,
     pub network: u64,
     pub epoch: u64,
@@ -144,8 +144,8 @@ pub struct StoredOperation {
     pub ttl_ms: u32,
     pub storage: u8,
     pub hop_limit: u8,
-    /// Payload bytes are retained for the CAP-I2/TX-I2 dispatcher handoff;
-    /// nothing in this phase transmits them.
+    /// Payload bytes are retained for the TX-I2 dispatcher handoff: the
+    /// dispatcher rebuilds the SUBMIT body (canonical bytes) from them.
     pub payload: Vec<u8>,
     pub canonical: Vec<u8>,
     pub hash: [u8; 32],
@@ -154,6 +154,210 @@ pub struct StoredOperation {
     /// Set when the record enters a terminal state; protection lapses
     /// RETENTION_MS later. None for non-terminal records.
     pub terminal_ms: Option<u64>,
+    /// Device-position binding once the TX-I2 dispatcher prepares this
+    /// record (DISPATCH_PREPARED commit). None while HOST_QUEUED and never
+    /// reassigned: one record owns at most one dispatch position.
+    pub dispatch: Option<DispatchAttachment>,
+}
+
+impl StoredOperation {
+    /// The host committed a final outcome for this record: a terminal
+    /// vocabulary state, or `terminal_ms` set for a resolved device-terminal
+    /// outcome that has no terminal vocabulary name (03 §5 has none for a
+    /// completed BEST_EFFORT MAC attempt — the record stays
+    /// GATEWAY_ACCEPTED with MAC_ATTEMPT_REPORTED evidence but leaves the
+    /// active set and becomes retirable).
+    pub fn concluded(&self) -> bool {
+        self.dispatch_state.is_terminal() || self.terminal_ms.is_some()
+    }
+}
+
+/// Result of an atomic HOST_QUEUED → DISPATCH_PREPARED transition.
+#[derive(Debug)]
+pub enum PrepareOutcome {
+    /// Bound and state-committed; carries the new attachment.
+    Prepared(DispatchAttachment),
+    /// The record moved on (cancel/expiry raced in); carries its state.
+    NotQueued(DispatchState),
+    NotFound,
+}
+
+/// Result of `operations.cancel` (03 §5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// Linearized before any external write could start.
+    Cancelled,
+    /// A USB write may already have left; carries the current state. The
+    /// store still records the late `cancel_requested` observation.
+    TooLate(DispatchState),
+    NotFound,
+}
+
+/// Shared cancel transition used by both store providers. Cancellable iff
+/// HOST_QUEUED or DISPATCH_PREPARED with `submitted == false` — the only
+/// states where the host can still prove no external write began.
+fn cancel_transition(op: &mut StoredOperation, now_ms: u64) -> CancelOutcome {
+    let cancellable = match op.dispatch_state {
+        DispatchState::HostQueued => true,
+        DispatchState::DispatchPrepared => op.dispatch.as_ref().is_some_and(|d| !d.submitted),
+        _ => false,
+    };
+    if let Some(d) = op.dispatch.as_mut() {
+        d.cancel_requested = true;
+    }
+    if !cancellable {
+        return CancelOutcome::TooLate(op.dispatch_state);
+    }
+    op.dispatch_state = DispatchState::CancelledBeforeDispatch;
+    op.terminal_ms = Some(now_ms);
+    if let Some(d) = op.dispatch.as_mut() {
+        // The allocated position is now a known hole; a SKIP must fill it
+        // before the device retire prefix can pass.
+        d.skip_pending = true;
+    }
+    CancelOutcome::Cancelled
+}
+
+/// TX-I2 dispatch bookkeeping persisted alongside a prepared record
+/// (04-capacity-storage.md §5: Gateway BootLease × dispatcher × dispatch_seq
+/// identity, plus what the host has proven about the USB write so far).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchAttachment {
+    pub lease: [u8; 16],
+    pub dispatcher: [u8; 16],
+    pub dispatch_seq: u64,
+    /// True once the SUBMIT may have left the host — claimed toward the
+    /// single writer before enqueue. While false the device provably holds
+    /// no record at this dispatch_seq: the frame either never reached the
+    /// writer, the write was torn (a COBS prefix without a delimiter cannot
+    /// decode), or a device response proved the position empty
+    /// (NotRetained/WindowFull/MeshRejected). CANCELLED_BEFORE_DISPATCH and
+    /// EXPIRED_BEFORE_DISPATCH proofs require this to be false.
+    pub submitted: bool,
+    /// A SKIP is owed to fill this position (cancelled, expired or refused
+    /// holes block the device retire prefix until skipped).
+    pub skip_pending: bool,
+    /// True once a device receipt/query reported a terminal slot state for
+    /// this dispatch_seq, or a SKIP confirmed the hole. Only such positions
+    /// count toward the host-driven RETIRE_THROUGH floor.
+    pub device_terminal: bool,
+    /// Stable message key once the gateway accepts (None until then).
+    pub msg_session: Option<u32>,
+    pub msg_seq: Option<u64>,
+    /// Evidence stages reached (01 §5: distinct proofs, never one bool).
+    /// `ev_end_sdk` is only set for reliable delivery; a best-effort mesh
+    /// completion sets `ev_mac_attempt` without promoting the evidence.
+    pub ev_gateway_accepted: bool,
+    pub ev_mac_attempt: bool,
+    pub ev_end_sdk: bool,
+    /// A cancel request was observed; retained even when it arrived too
+    /// late so the record keeps the honest observation.
+    pub cancel_requested: bool,
+    pub time_uncertain: bool,
+}
+
+/// Versioned blob layout for the durable `operations.dispatch` column
+/// (55 bytes). A single opaque column lets later fields extend the inner
+/// version without another schema migration.
+const ATTACH_BLOB_VERSION: u8 = 1;
+const ATTACH_BLOB_SIZE: usize = 55;
+
+impl DispatchAttachment {
+    pub fn fresh(lease: [u8; 16], dispatcher: [u8; 16], dispatch_seq: u64) -> Self {
+        Self {
+            lease,
+            dispatcher,
+            dispatch_seq,
+            submitted: false,
+            skip_pending: false,
+            device_terminal: false,
+            msg_session: None,
+            msg_seq: None,
+            ev_gateway_accepted: false,
+            ev_mac_attempt: false,
+            ev_end_sdk: false,
+            cancel_requested: false,
+            time_uncertain: false,
+        }
+    }
+
+    /// Serialize for the durable `operations.dispatch` column.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(ATTACH_BLOB_SIZE);
+        out.push(ATTACH_BLOB_VERSION);
+        out.extend_from_slice(&self.lease);
+        out.extend_from_slice(&self.dispatcher);
+        out.extend_from_slice(&self.dispatch_seq.to_be_bytes());
+        let mut flags = 0u8;
+        if self.submitted {
+            flags |= 1;
+        }
+        if self.skip_pending {
+            flags |= 2;
+        }
+        if self.device_terminal {
+            flags |= 4;
+        }
+        if self.msg_session.is_some() {
+            flags |= 8;
+        }
+        if self.cancel_requested {
+            flags |= 16;
+        }
+        if self.time_uncertain {
+            flags |= 32;
+        }
+        out.push(flags);
+        let evidence = if self.ev_end_sdk {
+            3u8
+        } else if self.ev_mac_attempt {
+            2
+        } else if self.ev_gateway_accepted {
+            1
+        } else {
+            0
+        };
+        out.push(evidence);
+        out.extend_from_slice(&self.msg_session.unwrap_or(0).to_be_bytes());
+        out.extend_from_slice(&self.msg_seq.unwrap_or(0).to_be_bytes());
+        out
+    }
+
+    /// Parse the durable blob; `None` on wrong version or length.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != ATTACH_BLOB_SIZE || bytes[0] != ATTACH_BLOB_VERSION {
+            return None;
+        }
+        let mut lease = [0u8; 16];
+        lease.copy_from_slice(&bytes[1..17]);
+        let mut dispatcher = [0u8; 16];
+        dispatcher.copy_from_slice(&bytes[17..33]);
+        let mut seq = [0u8; 8];
+        seq.copy_from_slice(&bytes[33..41]);
+        let flags = bytes[41];
+        let evidence = bytes[42];
+        let mut session = [0u8; 4];
+        session.copy_from_slice(&bytes[43..47]);
+        let mut msg_seq = [0u8; 8];
+        msg_seq.copy_from_slice(&bytes[47..55]);
+        let msg_session = u32::from_be_bytes(session);
+        let msg_seq = u64::from_be_bytes(msg_seq);
+        Some(Self {
+            lease,
+            dispatcher,
+            dispatch_seq: u64::from_be_bytes(seq),
+            submitted: flags & 1 != 0,
+            skip_pending: flags & 2 != 0,
+            device_terminal: flags & 4 != 0,
+            msg_session: (flags & 8 != 0).then_some(msg_session),
+            msg_seq: (flags & 8 != 0).then_some(msg_seq),
+            ev_gateway_accepted: evidence >= 1,
+            ev_mac_attempt: evidence == 2,
+            ev_end_sdk: evidence == 3,
+            cancel_requested: flags & 16 != 0,
+            time_uncertain: flags & 32 != 0,
+        })
+    }
 }
 
 pub enum SubmitOutcome {
@@ -208,6 +412,45 @@ pub trait OperationStore {
     fn get_by_seq(&self, seq: u64) -> Result<Option<StoredOperation>, ()>;
     fn get_by_key(&self, identity: &OpIdentity) -> Result<Option<StoredOperation>, ()>;
     fn capacity_status(&self, now_ms: u64) -> CapacityStatus;
+    /// Every record the dispatch loop must see: all non-concluded records
+    /// plus every record still holding a dispatch attachment (concluded
+    /// attachments are needed to drive the device retire floor).
+    fn dispatch_view(&self) -> Result<Vec<StoredOperation>, ()>;
+    /// Atomic HOST_QUEUED → DISPATCH_PREPARED: allocates the next
+    /// dispatch_seq for `lease` (per-lease allocator, persisted by durable
+    /// stores) and binds the attachment in the same transition.
+    fn prepare_dispatch(
+        &mut self,
+        op_seq: u64,
+        lease: [u8; 16],
+        dispatcher: [u8; 16],
+    ) -> Result<PrepareOutcome, ()>;
+    /// Linearized read-modify-write on one record. `mutate` returns false
+    /// to veto; Ok(false) means the record is missing or the veto held.
+    /// The dispatcher uses this for every post-prepare transition so a
+    /// racing cancel or expiry is linearized at the same boundary.
+    fn update_operation(
+        &mut self,
+        op_seq: u64,
+        mutate: &mut dyn FnMut(&mut StoredOperation) -> bool,
+    ) -> Result<bool, ()>;
+    /// Atomic cancel, linearized with dispatch: cancellable only while no
+    /// external write may have begun (HOST_QUEUED or DISPATCH_PREPARED
+    /// without `submitted`). A late request still lands the
+    /// `cancel_requested` observation.
+    fn cancel_operation(&mut self, op_seq: u64, now_ms: u64) -> Result<CancelOutcome, ()> {
+        let mut outcome = CancelOutcome::NotFound;
+        let found = self.update_operation(op_seq, &mut |op| {
+            outcome = cancel_transition(op, now_ms);
+            // Commit even on TooLate so the observation is appended.
+            true
+        })?;
+        Ok(if found {
+            outcome
+        } else {
+            CancelOutcome::NotFound
+        })
+    }
 }
 
 /// Fresh 128-bit id minted once per store lineage. Falls back to time^pid
@@ -391,6 +634,11 @@ impl Default for AdmissionLimiter {
 pub struct MemoryOperationStore {
     lineage: [u8; 16],
     next_seq: u64,
+    /// Per-lease dispatch_seq allocator: the lease currently bound to the
+    /// lane and the next sequence to hand out. A lease change restarts the
+    /// lane at 1 — the device's window restarted with its boot.
+    dispatch_lease: Option<[u8; 16]>,
+    dispatch_next: u64,
     epochs: HashMap<EpochScope, ScopeEpochs>,
     by_identity: HashMap<OpIdentity, u64>,
     by_seq: HashMap<u64, StoredOperation>,
@@ -401,10 +649,24 @@ impl MemoryOperationStore {
         Self {
             lineage,
             next_seq: 1,
+            dispatch_lease: None,
+            dispatch_next: 1,
             epochs: HashMap::new(),
             by_identity: HashMap::new(),
             by_seq: HashMap::new(),
         }
+    }
+
+    /// Next dispatch_seq under `lease`; a different lease rebinds the lane
+    /// and restarts numbering at 1.
+    fn alloc_dispatch_seq(&mut self, lease: [u8; 16]) -> u64 {
+        if self.dispatch_lease != Some(lease) {
+            self.dispatch_lease = Some(lease);
+            self.dispatch_next = 1;
+        }
+        let seq = self.dispatch_next.max(1);
+        self.dispatch_next = seq.saturating_add(1).max(1);
+        seq
     }
 
     /// Zero lineage for unit tests; the daemon mints a fresh one per start.
@@ -431,7 +693,7 @@ impl MemoryOperationStore {
                 .values()
                 .filter(|op| op.uid == scope.0 && op.network == scope.1 && op.epoch == candidate)
                 .all(|op| {
-                    op.dispatch_state.is_terminal()
+                    op.concluded()
                         && op
                             .terminal_ms
                             .is_some_and(|t| t.saturating_add(RETENTION_MS) <= now_ms)
@@ -459,7 +721,7 @@ impl MemoryOperationStore {
         let mut active = 0;
         let mut per_principal: HashMap<u32, usize> = HashMap::new();
         for op in self.by_seq.values() {
-            if op.dispatch_state.is_active() {
+            if op.dispatch_state.is_active() && !op.concluded() {
                 active += 1;
                 *per_principal.entry(op.uid).or_default() += 1;
             }
@@ -470,7 +732,7 @@ impl MemoryOperationStore {
     fn reclaimable_at(&self, now_ms: u64) -> Option<u64> {
         self.by_seq
             .values()
-            .filter(|op| op.dispatch_state.is_terminal())
+            .filter(|op| op.concluded())
             .filter_map(|op| op.terminal_ms.map(|t| t.saturating_add(RETENTION_MS)))
             .filter(|lapse| *lapse > now_ms)
             .min()
@@ -607,6 +869,7 @@ impl OperationStore for MemoryOperationStore {
                 accepted_ms: now_ms,
                 dispatch_state: DispatchState::HostQueued,
                 terminal_ms: None,
+                dispatch: None,
             },
         );
         SubmitOutcome::Accepted { seq }
@@ -631,6 +894,47 @@ impl OperationStore for MemoryOperationStore {
             free_bytes: free_slots as u64 * RECORD_RESERVATION_BYTES,
             reclaimable_at_ms: self.reclaimable_at(now_ms),
         }
+    }
+
+    fn dispatch_view(&self) -> Result<Vec<StoredOperation>, ()> {
+        Ok(self
+            .by_seq
+            .values()
+            .filter(|op| !op.concluded() || op.dispatch.is_some())
+            .cloned()
+            .collect())
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        op_seq: u64,
+        lease: [u8; 16],
+        dispatcher: [u8; 16],
+    ) -> Result<PrepareOutcome, ()> {
+        match self.by_seq.get(&op_seq) {
+            None => return Ok(PrepareOutcome::NotFound),
+            Some(op) if op.dispatch_state != DispatchState::HostQueued || op.dispatch.is_some() => {
+                return Ok(PrepareOutcome::NotQueued(op.dispatch_state));
+            }
+            Some(_) => {}
+        }
+        let dispatch_seq = self.alloc_dispatch_seq(lease);
+        let attachment = DispatchAttachment::fresh(lease, dispatcher, dispatch_seq);
+        let op = self.by_seq.get_mut(&op_seq).expect("record checked above");
+        op.dispatch = Some(attachment.clone());
+        op.dispatch_state = DispatchState::DispatchPrepared;
+        Ok(PrepareOutcome::Prepared(attachment))
+    }
+
+    fn update_operation(
+        &mut self,
+        op_seq: u64,
+        mutate: &mut dyn FnMut(&mut StoredOperation) -> bool,
+    ) -> Result<bool, ()> {
+        let Some(op) = self.by_seq.get_mut(&op_seq) else {
+            return Ok(false);
+        };
+        Ok(mutate(op))
     }
 }
 
@@ -699,6 +1003,36 @@ impl OperationStore for StoreBackend {
         match self {
             Self::Memory(store) => store.capacity_status(now_ms),
             Self::Sqlite(store) => store.capacity_status(now_ms),
+        }
+    }
+
+    fn dispatch_view(&self) -> Result<Vec<StoredOperation>, ()> {
+        match self {
+            Self::Memory(store) => store.dispatch_view(),
+            Self::Sqlite(store) => store.dispatch_view(),
+        }
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        op_seq: u64,
+        lease: [u8; 16],
+        dispatcher: [u8; 16],
+    ) -> Result<PrepareOutcome, ()> {
+        match self {
+            Self::Memory(store) => store.prepare_dispatch(op_seq, lease, dispatcher),
+            Self::Sqlite(store) => store.prepare_dispatch(op_seq, lease, dispatcher),
+        }
+    }
+
+    fn update_operation(
+        &mut self,
+        op_seq: u64,
+        mutate: &mut dyn FnMut(&mut StoredOperation) -> bool,
+    ) -> Result<bool, ()> {
+        match self {
+            Self::Memory(store) => store.update_operation(op_seq, mutate),
+            Self::Sqlite(store) => store.update_operation(op_seq, mutate),
         }
     }
 }

@@ -4,6 +4,7 @@ compile_error!("routeloom-host v0.1 currently requires a Unix platform");
 mod acl;
 mod api1;
 mod canonical;
+mod dispatch;
 mod receive_log;
 mod send_store;
 mod sqlite_store;
@@ -635,6 +636,11 @@ struct State {
     /// (capacity.host_rate_per_minute + burst). Daemon-wide so the
     /// per-principal and global budgets hold across connections.
     rate_limiter: Mutex<send_store::AdmissionLimiter>,
+    /// Verified HostOps response bodies (keyed by our request id) waiting
+    /// for the TX-I2 dispatch thread. The read thread posts; the dispatch
+    /// thread drains — never the other way, so the USB read path can
+    /// never be blocked by store work.
+    dispatch_inbox: dispatch::DispatchInbox,
 }
 
 fn now_ms() -> u64 {
@@ -1008,15 +1014,17 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         FrameKind::KeepAlive => {
             push_event(state, ms, "\"kind\":\"keepalive\"".to_string());
         }
-        // HostOps receipts/answers are observed here; parsing them into
-        // dispatch state is TX-I2's loop (CAP-I2 ships the codec only).
+        // HostOps receipts/answers go to the TX-I2 dispatch thread, keyed
+        // by the request id we issued. Posting never blocks: a full inbox
+        // drops the body and the dispatcher re-queries on timeout.
         FrameKind::HostOps => {
+            state.dispatch_inbox.post(frame.request, body.to_vec());
             push_event(
                 state,
                 ms,
                 format!(
-                    "\"kind\":\"frame\",\"frame_kind\":{},\"body_len\":{}",
-                    frame.kind as u8,
+                    "\"kind\":\"host_ops_rx\",\"request\":{},\"body_len\":{}",
+                    frame.request,
                     body.len(),
                 ),
             );
@@ -1840,6 +1848,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // down.
     let (outbound_tx, outbound_rx) = mpsc::sync_channel(MAX_OUTBOUND);
     let device_session = Arc::new(Mutex::new(DeviceSession::new()));
+    // The TX-I2 dispatch thread runs whether or not a device is attached:
+    // it performs the host-side expiry/cancel sweeps while USB is absent
+    // and starts driving SUBMIT/QUERY/SKIP/RETIRE/TIME_SAMPLE the moment
+    // an authenticated host_ops session exists. It shares the single
+    // writer queue — counter assignment and wire order stay in one place.
+    {
+        let dispatch_state = Arc::clone(&state);
+        let dispatch_outbound = outbound_tx.clone();
+        thread::spawn(move || dispatch::dispatch_loop(dispatch_state, dispatch_outbound));
+    }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
         {
@@ -2130,6 +2148,153 @@ mod tests {
         // 1 → data. On the wire the grant seals first since it queued first.
         assert_eq!(counter, 1);
         assert_eq!(inner, &[0; 16]);
+    }
+
+    /// TX-I2 wiring check: `dispatch_once` must pull replies from the
+    /// daemon inbox, drive the dispatcher against the real `State`, and
+    /// push HostOps frames onto the single writer queue — the same path
+    /// `dispatch_loop` runs in production.
+    #[test]
+    fn dispatch_once_round_trips_through_inbox_and_writer_queue() {
+        use routeloom_protocol::host_ops::{
+            decode_time_sample_request, encode_receipt, encode_time_sample_response, BootLease,
+            Evidence, HostOpsResult, Receipt, SlotState, TimeSampleResponse, CAP_HOST_OPS_V1,
+            SUB_RETIRE_THROUGH, SUB_SUBMIT, SUB_TIME_SAMPLE,
+        };
+
+        let state = State::default();
+        {
+            let mut info = state.session.lock().unwrap();
+            info.authenticated = true;
+            info.node = Some(0x0abc);
+            info.boot = Some(7);
+            info.network = Some(1);
+            info.capability = Some(CAP_HOST_OPS_V1);
+        }
+        // Admit one RELIABLE operation on network 1 into the memory store.
+        let now = now_ms();
+        let seq = {
+            let payload = vec![0x2a, 0x55];
+            let canonical = canonical::canonical_bytes(
+                1,
+                canonical::DEST_NODE,
+                3,
+                canonical::DELIVERY_RELIABLE,
+                canonical::PRIORITY_NORMAL,
+                canonical::STORAGE_RAM,
+                30_000,
+                canonical::HOP_DEFAULT,
+                &payload,
+            );
+            let request = canonical::SendRequest {
+                network: 1,
+                epoch: 1,
+                key: [9; 16],
+                dest_kind: canonical::DEST_NODE,
+                dest: 3,
+                delivery: canonical::DELIVERY_RELIABLE,
+                priority: canonical::PRIORITY_NORMAL,
+                ttl_ms: 30_000,
+                storage: canonical::STORAGE_RAM,
+                hop_limit: canonical::HOP_DEFAULT,
+                payload,
+                hash: canonical::sha256(&canonical),
+                canonical,
+            };
+            let mut store = state.operation_store.lock().unwrap();
+            store.open_epoch((501, 1), now).unwrap();
+            match store.submit(501, &request, now) {
+                send_store::SubmitOutcome::Accepted { seq } => seq,
+                _ => panic!("submit failed"),
+            }
+        };
+
+        let (tx, rx) = mpsc::sync_channel::<Outbound>(MAX_OUTBOUND);
+        let mut dispatcher = dispatch::Dispatcher::new([0x77; 16]);
+
+        // First pass: no mapping yet → lease probe (RETIRE_THROUGH 0) and a
+        // TIME_SAMPLE request go to the writer queue as sealed HostOps.
+        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now);
+        let mut sample_request = None;
+        let mut saw_probe = false;
+        while let Ok(outbound) = rx.try_recv() {
+            let frame = match outbound {
+                Outbound::Seal(frame) => frame,
+                Outbound::Raw(_) => panic!("host ops must queue for sealing"),
+            };
+            assert_eq!(frame.kind, FrameKind::HostOps);
+            match frame.body[1] {
+                SUB_RETIRE_THROUGH => saw_probe = true,
+                SUB_TIME_SAMPLE => sample_request = Some((frame.request, frame.body)),
+                other => panic!("unexpected host op {other}"),
+            }
+        }
+        assert!(saw_probe && sample_request.is_some());
+        // Nothing submitted until the clock mapping exists.
+        {
+            let store = state.operation_store.lock().unwrap();
+            let op = store.get_by_seq(seq).unwrap().unwrap();
+            assert_eq!(op.dispatch_state, send_store::DispatchState::HostQueued);
+        }
+
+        // The device answers the sample through the inbox — the same slot
+        // `record_frame` fills for verified HostOps frames.
+        let (request_id, body) = sample_request.unwrap();
+        let sample = decode_time_sample_request(&body).unwrap();
+        state.dispatch_inbox.post(
+            request_id,
+            encode_time_sample_response(&TimeSampleResponse {
+                result: HostOpsResult::Ok,
+                lease: sample.lease,
+                nonce: sample.nonce,
+                device_time: 1_000,
+            }),
+        );
+        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now + 1);
+        let mut submit_request = None;
+        while let Ok(outbound) = rx.try_recv() {
+            let Outbound::Seal(frame) = outbound else {
+                panic!("host ops must queue for sealing")
+            };
+            if frame.body[1] == SUB_SUBMIT {
+                submit_request = Some(frame.request);
+            }
+        }
+        let submit_request = submit_request.expect("mapped clock must release the SUBMIT");
+        {
+            let store = state.operation_store.lock().unwrap();
+            let op = store.get_by_seq(seq).unwrap().unwrap();
+            assert_eq!(
+                op.dispatch_state,
+                send_store::DispatchState::DispatchPrepared
+            );
+            assert!(op.dispatch.as_ref().unwrap().submitted);
+        }
+
+        // A Sent receipt posted by the read thread promotes the record to
+        // GATEWAY_ACCEPTED on the next pass.
+        state.dispatch_inbox.post(
+            submit_request,
+            encode_receipt(&Receipt {
+                sub: SUB_SUBMIT,
+                result: HostOpsResult::Ok,
+                state: SlotState::Sent,
+                lease: BootLease::derive(7, 0x0abc),
+                dispatch_seq: 1,
+                hash: [0; 32],
+                msg_session: 5,
+                msg_seq: 1,
+                msg_valid: true,
+                evidence: Evidence::GatewayAccepted,
+            }),
+        );
+        dispatch::dispatch_once(&state, &tx, &mut dispatcher, now + 2);
+        let store = state.operation_store.lock().unwrap();
+        let op = store.get_by_seq(seq).unwrap().unwrap();
+        assert_eq!(
+            op.dispatch_state,
+            send_store::DispatchState::GatewayAccepted
+        );
     }
 
     #[test]

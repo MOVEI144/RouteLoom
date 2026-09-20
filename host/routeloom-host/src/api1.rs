@@ -19,10 +19,9 @@
 //!
 //! Methods in this phase: `capabilities.get` (unauthenticated),
 //! `messages.read` (READ_PAYLOAD), `operations.open_epoch` + `messages.submit`
-//! (SEND) and `operations.get`/`operations.get_by_key` (READ_OPERATION). The
-//! principal always comes from the socket peer's OS credential, never from
-//! request JSON. `operations.cancel` is a later phase (TX-I2) and answers
-//! UNSUPPORTED_METHOD rather than silently degrading.
+//! (SEND), `operations.get`/`operations.get_by_key` (READ_OPERATION) and
+//! `operations.cancel` (owning principal with SEND). The principal always
+//! comes from the socket peer's OS credential, never from request JSON.
 
 use crate::acl::{self, Acl};
 use crate::canonical;
@@ -30,8 +29,8 @@ use crate::receive_log::{
     Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
 };
 use crate::send_store::{
-    AdmissionLimiter, CapacityStatus, OpIdentity, OpenEpochError, OperationStore, RateDeny,
-    StoredOperation, SubmitOutcome,
+    AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity, OpenEpochError,
+    OperationStore, RateDeny, StoredOperation, SubmitOutcome,
 };
 use routeloom_json::{escape_string, Json};
 use std::sync::Mutex;
@@ -77,7 +76,7 @@ impl ApiError {
 
 /// Methods named by 01-contracts.md but implemented in later phases — they
 /// must not fall through to UNKNOWN_METHOD and pretend they don't exist.
-const LATER_PHASE_METHODS: &[&str] = &["operations.cancel"];
+const LATER_PHASE_METHODS: &[&str] = &[];
 
 /// Handle one API1 request body (the bytes after `API1 `, newline stripped).
 /// Always returns a complete JSON response document (no trailing newline).
@@ -161,6 +160,7 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
         "messages.submit" => messages_submit(&params, ctx).map(|r| (request_id, r)),
         "operations.get" => operations_get(&params, ctx).map(|r| (request_id, r)),
         "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (request_id, r)),
+        "operations.cancel" => operations_cancel(&params, ctx).map(|r| (request_id, r)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -220,8 +220,10 @@ fn bound_response(response: String) -> String {
 /// `rx_events_v1`/`ingress_loss_observable` are false on the old firmware —
 /// gateway-side drops before DataFromMesh cannot be proven or counted here.
 /// `storage_durable` follows the bound operation store (true with
-/// `--op-store`, false for the memory provider); both queue without USB
-/// dispatch (`host_queued_only`, CAP-I2).
+/// `--op-store`, false for the memory provider). `dispatch` names the TX-I2
+/// mechanism: the host_ops_v1 dispatch-window protocol over the USB session.
+/// A live session is not guaranteed — records still admit HOST_QUEUED while
+/// the link is down and the dispatcher picks them up on connect.
 fn capabilities<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<String, ApiError> {
     let epoch_known = ctx.uid.is_some();
     let durable = ctx
@@ -230,7 +232,7 @@ fn capabilities<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Result<String, Ap
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":false}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"host_queued_only\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -746,19 +748,139 @@ fn operations_get_by_key<S: OperationStore>(
     Ok(op_status(&record, &store.lineage(), ctx.now_ms))
 }
 
-/// Query response. Payload bytes are never included: READ_OPERATION must
-/// not leak what only READ_PAYLOAD may read — length and hash suffice.
-/// `deadline_elapsed` is a read-only wall-clock observation; enforcement
-/// and state transitions belong to TX-I2.
+/// `operations.cancel` params: `{operation_id}` (03 §5). Only the owning
+/// principal — the uid that submitted — holding SEND on the record's
+/// network may cancel; READ_OPERATION is deliberately not enough because
+/// cancellation mutates someone else's send pipeline. The store's
+/// `cancel_operation` linearizes against the dispatcher's claim: a cancel
+/// that lands before any USB write could have begun returns the record's
+/// new CANCELLED_BEFORE_DISPATCH status; a late one answers
+/// CANCEL_TOO_LATE with the current state (the `cancel_requested`
+/// observation is still recorded — never silently dropped).
+fn operations_cancel<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "operation_id" {
+            return Err(ApiError::simple(
+                "INVALID_PARAMS",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(text) = params.get("operation_id").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_PARAMS",
+            "operation_id must be a string",
+        ));
+    };
+    let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
+        return Err(ApiError::simple(
+            "INVALID_PARAMS",
+            "operation_id must be <32-hex lineage>:<16-hex sequence>",
+        ));
+    };
+    let mut store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    if store.lineage() != lineage {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no operation with that id in this store",
+        ));
+    }
+    let record = match store.get_by_seq(seq) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return Err(ApiError::simple(
+                "NOT_FOUND",
+                "no operation with that id in this store",
+            ))
+        }
+        Err(()) => return Err(store_fault()),
+    };
+    let owns = ctx.uid.is_some_and(|uid| {
+        uid == record.uid && ctx.acl.permit(uid, record.network, acl::PERM_SEND)
+    });
+    if !owns {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "cancel requires the owning principal with SEND on this network",
+        ));
+    }
+    match store.cancel_operation(seq, ctx.now_ms) {
+        Ok(CancelOutcome::Cancelled) => {
+            // Re-read so the response reports the committed record —
+            // including the SKIP bookkeeping the cancel installed.
+            let record = store
+                .get_by_seq(seq)
+                .map_err(|()| store_fault())?
+                .expect("record committed by cancel");
+            Ok(op_status(&record, &store.lineage(), ctx.now_ms))
+        }
+        Ok(CancelOutcome::TooLate(state)) => Err(ApiError {
+            code: "CANCEL_TOO_LATE",
+            extra_fields: format!(
+                ",\"message\":\"a USB write may already have begun; remote undo is not promised\",\"dispatch_state\":\"{}\"",
+                state.name(),
+            ),
+            retryable: false,
+        }),
+        // The record was there at authorization; a race removed it.
+        Ok(CancelOutcome::NotFound) => Err(ApiError::simple(
+            "NOT_FOUND",
+            "no operation with that id in this store",
+        )),
+        Err(()) => Err(store_fault()),
+    }
+}
+
+/// Query response (01 §5: state, evidence, application_outcome and
+/// observation are orthogonal fields). Payload bytes are never included:
+/// READ_OPERATION must not leak what only READ_PAYLOAD may read — length
+/// and hash suffice. `evidence` accumulates honestly: the retention tag
+/// first, then each device-attested stage once it was actually reported —
+/// GATEWAY_ACCEPTED when the stable MessageKey was learned,
+/// MAC_ATTEMPT_REPORTED for a best-effort completion (never promoted to
+/// END_SDK_RECEIVED), END_SDK_RECEIVED on the end receipt.
+/// `application_outcome` stays null — APPLIED delivery is a later phase.
+/// `deadline_elapsed` is a read-only wall-clock observation; the record's
+/// `dispatch_state` is the committed conclusion.
 fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> String {
     let elapsed = now_ms.saturating_sub(record.accepted_ms) >= u64::from(record.ttl_ms);
-    let evidence = if record.storage == canonical::STORAGE_DURABLE {
+    let mut evidence = vec![if record.storage == canonical::STORAGE_DURABLE {
         "HOST_DURABLE_RETAINED"
     } else {
         "HOST_RAM_RETAINED"
-    };
+    }];
+    let mut message_key = "null".to_string();
+    let mut cancel_requested = false;
+    let mut time_uncertain = record.dispatch_state == DispatchState::TimeUncertain;
+    if let Some(att) = &record.dispatch {
+        if att.ev_gateway_accepted {
+            evidence.push("GATEWAY_ACCEPTED");
+        }
+        if att.ev_mac_attempt {
+            evidence.push("MAC_ATTEMPT_REPORTED");
+        }
+        if att.ev_end_sdk {
+            evidence.push("END_SDK_RECEIVED");
+        }
+        if let (Some(session), Some(seq)) = (att.msg_session, att.msg_seq) {
+            message_key = format!("{{\"session\":\"{session:08x}\",\"sequence\":\"{seq:016x}\"}}");
+        }
+        cancel_requested = att.cancel_requested;
+        time_uncertain |= att.time_uncertain;
+    }
+    let evidence_json = evidence
+        .iter()
+        .map(|tag| format!("\"{tag}\""))
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[\"{evidence}\"],\"message_key\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":false,\"time_uncertain\":false}}}}",
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
         canonical::format_operation_id(lineage, record.seq),
         record.network,
         record.epoch,
@@ -962,27 +1084,22 @@ mod tests {
         assert!(response.contains("\"operations.open_epoch\":true"));
         assert!(response.contains("\"operations.get\":true"));
         assert!(response.contains("\"operations.get_by_key\":true"));
-        assert!(response.contains("\"operations.cancel\":false"));
+        assert!(response.contains("\"operations.cancel\":true"));
         assert!(response.contains("\"rx_events_v1\":false"));
         assert!(response.contains("\"ingress_loss_observable\":false"));
         assert!(response.contains("\"durable_receive\":false"));
         assert!(response.contains("\"pc_service_destination\":false"));
         assert!(response.contains("\"storage_durable\":false"));
-        assert!(response.contains("\"dispatch\":\"host_queued_only\""));
+        assert!(response.contains("\"dispatch\":\"usb_host_ops_v1\""));
     }
 
     #[test]
-    fn unsupported_and_unknown_methods() {
+    fn unknown_method_rejected() {
         let acl = Acl::empty();
         let log = Mutex::new(ReceiveLog::new([9; 16]));
         let store = Mutex::new(MemoryOperationStore::test_store());
         let limiter = Mutex::new(AdmissionLimiter::new(0));
         let c = ctx(None, &acl, &log, &store, &limiter, 0);
-        let response = handle(
-            b"{\"v\":1,\"request_id\":\"u\",\"method\":\"operations.cancel\",\"params\":{}}",
-            &c,
-        );
-        assert!(response.contains("UNSUPPORTED_METHOD"));
         let response = handle(
             b"{\"v\":1,\"request_id\":\"u\",\"method\":\"bogus\",\"params\":{}}",
             &c,
@@ -1664,5 +1781,145 @@ mod tests {
         );
         let ok = handle(submit_line(&key(15), &epoch).as_bytes(), &later);
         assert!(ok.contains("\"ok\":true"), "{ok}");
+    }
+
+    fn cancel_line(operation_id: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"x\",\"method\":\"operations.cancel\",\"params\":{{\"operation_id\":\"{operation_id}\"}}}}"
+        )
+    }
+
+    /// TX-I2 `operations.cancel` (03 §5): linearized against dispatch —
+    /// cancellable only while no external write may have begun, late
+    /// requests answer CANCEL_TOO_LATE and still record the observation.
+    #[test]
+    fn operations_cancel_lifecycle() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let owner = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
+        let accepted = handle(
+            submit_line("00112233445566778899aabbccddeeff", &epoch).as_bytes(),
+            &owner,
+        );
+        let id = result_field(&accepted, "operation_id");
+        // Owner cancels a still-queued record: ok + the committed status.
+        let response = handle(cancel_line(&id).as_bytes(), &owner);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(
+            response.contains("\"dispatch_state\":\"CANCELLED_BEFORE_DISPATCH\""),
+            "{response}"
+        );
+        // A second cancel hits the committed terminal state → TOO_LATE.
+        let again = handle(cancel_line(&id).as_bytes(), &owner);
+        assert!(again.contains("\"ok\":false"), "{again}");
+        assert!(again.contains("CANCEL_TOO_LATE"), "{again}");
+        assert!(
+            again.contains("\"dispatch_state\":\"CANCELLED_BEFORE_DISPATCH\""),
+            "{again}"
+        );
+        // Non-owner and unidentified principals are denied; unknown and
+        // malformed ids get their own codes.
+        let key2 = "11111111111111111111111111111111";
+        let accepted2 = handle(submit_line(key2, &epoch).as_bytes(), &owner);
+        let id2 = result_field(&accepted2, "operation_id");
+        for uid in [None, Some(7)] {
+            let c = ctx(uid, &acl, &log, &store, &limiter, 1000);
+            let response = handle(cancel_line(&id2).as_bytes(), &c);
+            assert!(
+                response.contains("AuthorizationFailed"),
+                "{uid:?}: {response}"
+            );
+        }
+        let response = handle(
+            cancel_line("abababababababababababababababab:0000000000000009").as_bytes(),
+            &owner,
+        );
+        assert!(response.contains("NOT_FOUND"), "{response}");
+        let response = handle(cancel_line("not-an-id").as_bytes(), &owner);
+        assert!(response.contains("INVALID_PARAMS"), "{response}");
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"x\",\"method\":\"operations.cancel\",\"params\":{}}",
+            &owner,
+        );
+        assert!(response.contains("INVALID_PARAMS"), "{response}");
+        // Once a USB write may have left, cancel is TOO_LATE — and the
+        // observation lands on the record for later queries.
+        {
+            let mut guard = store.lock().unwrap();
+            let seq = 2_u64; // second submit
+            assert!(matches!(
+                guard.prepare_dispatch(seq, [9; 16], [8; 16]).unwrap(),
+                crate::send_store::PrepareOutcome::Prepared(_)
+            ));
+            guard
+                .update_operation(seq, &mut |op| {
+                    if let Some(d) = op.dispatch.as_mut() {
+                        d.submitted = true;
+                    }
+                    true
+                })
+                .unwrap();
+        }
+        let late = handle(cancel_line(&id2).as_bytes(), &owner);
+        assert!(late.contains("CANCEL_TOO_LATE"), "{late}");
+        assert!(
+            late.contains("\"dispatch_state\":\"DISPATCH_PREPARED\""),
+            "{late}"
+        );
+        let query = format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id2}\"}}}}"
+        );
+        let status = handle(query.as_bytes(), &owner);
+        assert!(status.contains("\"cancel_requested\":true"), "{status}");
+        assert!(
+            status.contains("\"dispatch_state\":\"DISPATCH_PREPARED\""),
+            "{status}"
+        );
+    }
+
+    /// Evidence/message_key/observation fields follow the committed
+    /// attachment rather than staying static placeholders.
+    #[test]
+    fn op_status_reflects_dispatch_evidence() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let owner = ctx(Some(501), &acl, &log, &store, &limiter, 1000);
+        let accepted = handle(
+            submit_line("00112233445566778899aabbccddeeff", &epoch).as_bytes(),
+            &owner,
+        );
+        let id = result_field(&accepted, "operation_id");
+        {
+            let mut guard = store.lock().unwrap();
+            guard.prepare_dispatch(1, [9; 16], [8; 16]).unwrap();
+            guard
+                .update_operation(1, &mut |op| {
+                    let d = op.dispatch.as_mut().unwrap();
+                    d.submitted = true;
+                    d.ev_gateway_accepted = true;
+                    d.msg_session = Some(0x0abc);
+                    d.msg_seq = Some(77);
+                    op.dispatch_state = crate::send_store::DispatchState::GatewayAccepted;
+                    true
+                })
+                .unwrap();
+        }
+        let query = format!(
+            "{{\"v\":1,\"request_id\":\"q\",\"method\":\"operations.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+        );
+        let status = handle(query.as_bytes(), &owner);
+        assert!(
+            status.contains("\"evidence\":[\"HOST_RAM_RETAINED\",\"GATEWAY_ACCEPTED\"]"),
+            "{status}"
+        );
+        assert!(
+            status.contains(
+                "\"message_key\":{\"session\":\"00000abc\",\"sequence\":\"000000000000004d\"}"
+            ),
+            "{status}"
+        );
+        assert!(status.contains("\"application_outcome\":null"), "{status}");
+        assert!(status.contains("\"cancel_requested\":false"), "{status}");
+        assert!(status.contains("\"time_uncertain\":false"), "{status}");
     }
 }

@@ -22,16 +22,20 @@
 
 use crate::canonical::SendRequest;
 use crate::send_store::{
-    mint_id128, CapacityStatus, DispatchState, EpochScope, OpIdentity, OpenEpochError,
-    OperationStore, StoredOperation, SubmitOutcome, ACTIVE_CAP, ACTIVE_PER_PRINCIPAL_CAP,
-    EPOCH_WINDOW_MS, MAX_UNRETIRED_EPOCHS, RECORD_CAP, RECORD_RESERVATION_BYTES, RETENTION_MS,
-    STORE_BYTES_CAP,
+    mint_id128, CapacityStatus, DispatchAttachment, DispatchState, EpochScope, OpIdentity,
+    OpenEpochError, OperationStore, PrepareOutcome, StoredOperation, SubmitOutcome, ACTIVE_CAP,
+    ACTIVE_PER_PRINCIPAL_CAP, EPOCH_WINDOW_MS, MAX_UNRETIRED_EPOCHS, RECORD_CAP,
+    RECORD_RESERVATION_BYTES, RETENTION_MS, STORE_BYTES_CAP,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-const SCHEMA_VERSION: u32 = 1;
+/// Schema v2 adds `operations.dispatch` — the TX-I2 dispatch attachment
+/// blob. A v1 file is migrated by one additive `ALTER TABLE` inside a
+/// transaction (the column defaults to NULL, exactly what a never-dispatched
+/// record means); anything else is still refused rather than rewritten.
+const SCHEMA_VERSION: u32 = 2;
 
 const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -54,6 +58,7 @@ CREATE TABLE IF NOT EXISTS operations(
     accepted_ms INTEGER NOT NULL,
     dispatch_state TEXT NOT NULL DEFAULT 'HOST_QUEUED',
     terminal_ms INTEGER,
+    dispatch BLOB,
     UNIQUE(uid, network, epoch, key));
 CREATE INDEX IF NOT EXISTS idx_operations_scope_epoch
     ON operations(uid, network, epoch);
@@ -200,6 +205,11 @@ fn read_operation_row(row: &rusqlite::Row<'_>) -> Result<StoredOperation, rusqli
         None => None,
         Some(raw) => Some(db_to_ms(raw).ok_or_else(|| corrupt("terminal_ms"))?),
     };
+    let dispatch_raw: Option<Vec<u8>> = row.get(18)?;
+    let dispatch = match dispatch_raw {
+        None => None,
+        Some(raw) => Some(DispatchAttachment::decode(&raw).ok_or_else(|| corrupt("dispatch"))?),
+    };
     Ok(StoredOperation {
         seq: row.get::<_, i64>(0)? as u64,
         uid: row.get::<_, i64>(1)? as u32,
@@ -220,10 +230,11 @@ fn read_operation_row(row: &rusqlite::Row<'_>) -> Result<StoredOperation, rusqli
         dispatch_state: DispatchState::parse(&state_text)
             .ok_or_else(|| corrupt("dispatch_state"))?,
         terminal_ms,
+        dispatch,
     })
 }
 
-const OPERATION_COLUMNS: &str = "seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms";
+const OPERATION_COLUMNS: &str = "seq, uid, network, epoch, key, dest_kind, dest, delivery, priority, ttl_ms, storage, hop_limit, payload, canonical, hash, accepted_ms, dispatch_state, terminal_ms, dispatch";
 
 /// RAM-overlay mutations staged inside a transaction and applied only
 /// after its commit succeeds — the overlay must never diverge from what
@@ -273,7 +284,7 @@ impl SqliteOperationStore {
                 })?;
             }
         }
-        let conn = Connection::open(path).map_err(|e| OpenError {
+        let mut conn = Connection::open(path).map_err(|e| OpenError {
             message: format!(
                 "STORE_RECOVERY_REQUIRED: cannot open operation store {}: {e}",
                 path.display()
@@ -312,13 +323,37 @@ impl SqliteOperationStore {
                     path.display()
                 ),
             })?;
-        if version.as_slice() != SCHEMA_VERSION.to_be_bytes() {
-            return Err(OpenError {
-                message: format!(
-                    "STORE_RECOVERY_REQUIRED: {} has an unknown store schema; refusing to erase or migrate it",
-                    path.display()
-                ),
-            });
+        let version: Option<u32> = <[u8; 4]>::try_from(version.as_slice())
+            .ok()
+            .map(u32::from_be_bytes);
+        match version {
+            Some(SCHEMA_VERSION) => {}
+            // v1 → v2: one additive nullable column for the TX-I2 dispatch
+            // attachment, committed atomically with the version bump.
+            Some(1) => {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let has_dispatch: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('operations') WHERE name='dispatch'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if has_dispatch == 0 {
+                    tx.execute("ALTER TABLE operations ADD COLUMN dispatch BLOB", [])?;
+                }
+                tx.execute(
+                    "UPDATE meta SET value=?1 WHERE key='schema_version'",
+                    params![SCHEMA_VERSION.to_be_bytes().to_vec()],
+                )?;
+                tx.commit()?;
+            }
+            _ => {
+                return Err(OpenError {
+                    message: format!(
+                        "STORE_RECOVERY_REQUIRED: {} has an unknown store schema; refusing to erase or migrate it",
+                        path.display()
+                    ),
+                });
+            }
         }
         let check: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         if check != "ok" {
@@ -339,13 +374,39 @@ impl SqliteOperationStore {
                 path.display()
             ),
         })?;
-        // Crash recovery: DISPATCH_PREPARED records may or may not have
-        // reached USB — surface them as indeterminate, never as success,
-        // and never re-dispatch them. All other states reload untouched.
-        let recovered = conn.execute(
-            "UPDATE operations SET dispatch_state='INDETERMINATE' WHERE dispatch_state='DISPATCH_PREPARED'",
-            [],
-        )?;
+        // Crash recovery for DISPATCH_PREPARED records, split on the
+        // persisted `submitted` claim flag: a record whose flag says the
+        // SUBMIT may have left becomes INDETERMINATE (resolved by
+        // QUERY_DISPATCH, never re-executed), while a record whose flag
+        // says no USB write was ever claimed stays DISPATCH_PREPARED —
+        // the dispatcher re-drives the same bound dispatch_seq, which the
+        // device's replay rules make idempotent. An absent or undecodable
+        // attachment cannot prove either side, so it is treated as
+        // claimed. All other states reload untouched.
+        let mut recovered = 0u64;
+        {
+            let mut stmt = conn.prepare(
+                "SELECT seq, dispatch FROM operations WHERE dispatch_state='DISPATCH_PREPARED'",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (seq, blob) in rows {
+                let claimed = blob
+                    .as_deref()
+                    .and_then(DispatchAttachment::decode)
+                    .map_or(true, |att| att.submitted);
+                if claimed {
+                    conn.execute(
+                        "UPDATE operations SET dispatch_state='INDETERMINATE' WHERE seq=?1",
+                        params![seq],
+                    )?;
+                    recovered += 1;
+                }
+            }
+        }
         if recovered > 0 {
             eprintln!("opstore: {recovered} prepared operation(s) recovered as INDETERMINATE");
         }
@@ -377,6 +438,45 @@ impl SqliteOperationStore {
         })
     }
 
+    /// Per-lease dispatch_seq allocator, persisted in meta so a daemon
+    /// restart resumes the lane's numbering instead of re-issuing a seq the
+    /// device may still hold. A different lease rebinds the lane and
+    /// restarts numbering at 1 — matching the device's fresh window.
+    fn dispatch_next_tx(tx: &Transaction<'_>, lease: [u8; 16]) -> Result<u64, rusqlite::Error> {
+        let bound: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='dispatch_lease'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let next = if bound.as_deref() == Some(&lease[..]) {
+            let raw: Vec<u8> = tx.query_row(
+                "SELECT value FROM meta WHERE key='dispatch_next'",
+                [],
+                |row| row.get(0),
+            )?;
+            blob_u64(raw).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Blob,
+                    "dispatch_next".into(),
+                )
+            })?
+        } else {
+            1
+        };
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('dispatch_lease', ?1)",
+            params![lease.to_vec()],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('dispatch_next', ?1)",
+            params![u64_blob(next.saturating_add(1).max(1))],
+        )?;
+        Ok(next)
+    }
+
     /// Same retire rule as the memory provider, applied to durable rows
     /// and the RAM overlay together: floor, closed-set and records move
     /// in the caller's transaction, so a crash leaves either everything
@@ -402,22 +502,26 @@ impl SqliteOperationStore {
             {
                 break;
             }
+            // Eligible when every record concluded and its protection
+            // lapsed: `terminal_ms` is set on every terminal transition and
+            // on resolved device-terminal outcomes with no terminal
+            // vocabulary name (a completed BEST_EFFORT keeps
+            // GATEWAY_ACCEPTED), so `terminal_ms IS NOT NULL` is the
+            // concluded test — never a state-name list alone.
             let mut eligible = true;
             {
                 let mut stmt = tx.prepare(
-                    "SELECT dispatch_state, terminal_ms FROM operations WHERE uid=?1 AND network=?2 AND epoch=?3",
+                    "SELECT terminal_ms FROM operations WHERE uid=?1 AND network=?2 AND epoch=?3",
                 )?;
                 let rows = stmt
                     .query_map(params![uid, network as i64, u64_blob(candidate)], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+                        row.get::<_, Option<i64>>(0)
                     })?;
                 for row in rows {
-                    let (state_text, terminal_raw) = row?;
-                    let terminal = terminal_raw.and_then(db_to_ms);
-                    let lapsed = terminal.is_some_and(|t| t.saturating_add(RETENTION_MS) <= now_ms);
-                    if !DispatchState::parse(&state_text).is_some_and(|s| s.is_terminal())
-                        || !lapsed
-                    {
+                    let lapsed = row?
+                        .and_then(db_to_ms)
+                        .is_some_and(|t| t.saturating_add(RETENTION_MS) <= now_ms);
+                    if !lapsed {
                         eligible = false;
                         break;
                     }
@@ -428,7 +532,7 @@ impl SqliteOperationStore {
                     .values()
                     .filter(|op| op.uid == uid && op.network == network && op.epoch == candidate)
                     .all(|op| {
-                        op.dispatch_state.is_terminal()
+                        op.concluded()
                             && op
                                 .terminal_ms
                                 .is_some_and(|t| t.saturating_add(RETENTION_MS) <= now_ms)
@@ -542,15 +646,19 @@ impl SqliteOperationStore {
         }
         let records: i64 = tx.query_row("SELECT COUNT(*) FROM operations", [], |row| row.get(0))?;
         let total_records = records as usize + ram_by_identity.len();
+        // An in-flight state only counts while the record is unresolved —
+        // a concluded device-terminal outcome (terminal_ms set) frees its
+        // active slot even though the vocabulary has no terminal name for
+        // a completed BEST_EFFORT.
         let active: i64 = tx.query_row(
-            &format!("SELECT COUNT(*) FROM operations WHERE dispatch_state IN ({ACTIVE_SQL})"),
+            &format!("SELECT COUNT(*) FROM operations WHERE dispatch_state IN ({ACTIVE_SQL}) AND terminal_ms IS NULL"),
             [],
             |row| row.get(0),
         )?;
         let mut total_active = active as usize;
         let mut principal_active = 0;
         for op in ram_by_identity.values() {
-            if op.dispatch_state.is_active() {
+            if op.dispatch_state.is_active() && !op.concluded() {
                 total_active += 1;
                 if op.uid == uid {
                     principal_active += 1;
@@ -562,7 +670,7 @@ impl SqliteOperationStore {
         }
         let durable_principal: i64 = tx.query_row(
             &format!(
-                "SELECT COUNT(*) FROM operations WHERE uid=?1 AND dispatch_state IN ({ACTIVE_SQL})"
+                "SELECT COUNT(*) FROM operations WHERE uid=?1 AND dispatch_state IN ({ACTIVE_SQL}) AND terminal_ms IS NULL"
             ),
             params![uid],
             |row| row.get(0),
@@ -597,6 +705,7 @@ impl SqliteOperationStore {
             accepted_ms: now_ms,
             dispatch_state: DispatchState::HostQueued,
             terminal_ms: None,
+            dispatch: None,
         };
         if req.storage == crate::canonical::STORAGE_RAM {
             // Staged, not inserted: the overlay gains the record only
@@ -731,6 +840,24 @@ impl SqliteOperationStore {
             ],
         )?;
         Ok(Ok((epoch, true)))
+    }
+
+    /// Lane allocator for the RAM-overlay branch of prepare_dispatch — the
+    /// meta keys live in the durable file even though the record does not,
+    /// so a restart still resumes the same lease's numbering.
+    fn alloc_lane_seq(conn: &mut Connection, lease: [u8; 16]) -> Result<u64, ()> {
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        let next = Self::dispatch_next_tx(&tx, lease)
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        if next == 0 || next == u64::MAX {
+            eprintln!("opstore fault: dispatch sequence allocator exhausted");
+            return Err(());
+        }
+        tx.commit()
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        Ok(next)
     }
 }
 
@@ -868,6 +995,163 @@ impl OperationStore for SqliteOperationStore {
             },
         )
     }
+
+    fn dispatch_view(&self) -> Result<Vec<StoredOperation>, ()> {
+        let failed = |error: rusqlite::Error| {
+            eprintln!("opstore fault: {error}");
+        };
+        let mut out: Vec<StoredOperation> = self
+            .ram_by_identity
+            .values()
+            .filter(|op| !op.concluded() || op.dispatch.is_some())
+            .cloned()
+            .collect();
+        // Live records plus every record still carrying a dispatch
+        // attachment (needed to drive the device retire floor).
+        let mut stmt = self
+            .conn
+            .prepare(&format!(
+                "SELECT {OPERATION_COLUMNS} FROM operations WHERE dispatch IS NOT NULL OR (terminal_ms IS NULL AND dispatch_state NOT IN ({TERMINAL_SQL}))"
+            ))
+            .map_err(failed)?;
+        let rows = stmt.query_map([], read_operation_row).map_err(failed)?;
+        for row in rows {
+            out.push(row.map_err(failed)?);
+        }
+        Ok(out)
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        op_seq: u64,
+        lease: [u8; 16],
+        dispatcher: [u8; 16],
+    ) -> Result<PrepareOutcome, ()> {
+        // RAM-overlay records are volatile by contract; mutate in place.
+        if let Some(identity) = self.ram_by_seq.get(&op_seq).copied() {
+            let Some(op) = self.ram_by_identity.get_mut(&identity) else {
+                return Ok(PrepareOutcome::NotFound);
+            };
+            if op.dispatch_state != DispatchState::HostQueued || op.dispatch.is_some() {
+                return Ok(PrepareOutcome::NotQueued(op.dispatch_state));
+            }
+            // The overlay uses the durable allocator too: sequence numbers
+            // must never repeat within a lease regardless of storage class.
+            let dispatch_seq = Self::alloc_lane_seq(&mut self.conn, lease)?;
+            let attachment = DispatchAttachment::fresh(lease, dispatcher, dispatch_seq);
+            op.dispatch = Some(attachment.clone());
+            op.dispatch_state = DispatchState::DispatchPrepared;
+            return Ok(PrepareOutcome::Prepared(attachment));
+        }
+        if op_seq > i64::MAX as u64 {
+            return Ok(PrepareOutcome::NotFound);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        let outcome = (|| -> Result<Option<PrepareOutcome>, rusqlite::Error> {
+            let Some(op) = tx
+                .query_row(
+                    &format!("SELECT {OPERATION_COLUMNS} FROM operations WHERE seq=?1"),
+                    params![op_seq as i64],
+                    read_operation_row,
+                )
+                .optional()?
+            else {
+                return Ok(Some(PrepareOutcome::NotFound));
+            };
+            if op.dispatch_state != DispatchState::HostQueued || op.dispatch.is_some() {
+                return Ok(Some(PrepareOutcome::NotQueued(op.dispatch_state)));
+            }
+            let dispatch_seq = Self::dispatch_next_tx(&tx, lease)?;
+            if dispatch_seq == 0 || dispatch_seq == u64::MAX {
+                // Reserved position — never issue it.
+                return Ok(None);
+            }
+            let attachment = DispatchAttachment::fresh(lease, dispatcher, dispatch_seq);
+            // DISPATCH_PREPARED and its identity commit together, before
+            // any USB write can be claimed for this dispatch_seq.
+            tx.execute(
+                "UPDATE operations SET dispatch_state='DISPATCH_PREPARED', dispatch=?1 WHERE seq=?2",
+                params![attachment.encode(), op.seq as i64],
+            )?;
+            Ok(Some(PrepareOutcome::Prepared(attachment)))
+        })();
+        match outcome {
+            Ok(Some(outcome)) => {
+                tx.commit()
+                    .map_err(|error| eprintln!("opstore fault: {error}"))?;
+                Ok(outcome)
+            }
+            Ok(None) => {
+                eprintln!("opstore fault: dispatch sequence allocator exhausted");
+                Err(())
+            }
+            Err(error) => {
+                eprintln!("opstore fault: {error}");
+                Err(())
+            }
+        }
+    }
+
+    fn update_operation(
+        &mut self,
+        op_seq: u64,
+        mutate: &mut dyn FnMut(&mut StoredOperation) -> bool,
+    ) -> Result<bool, ()> {
+        if let Some(identity) = self.ram_by_seq.get(&op_seq).copied() {
+            return Ok(self
+                .ram_by_identity
+                .get_mut(&identity)
+                .is_some_and(&mut *mutate));
+        }
+        if op_seq > i64::MAX as u64 {
+            return Ok(false);
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        let applied = (|| -> Result<Option<bool>, rusqlite::Error> {
+            let Some(mut op) = tx
+                .query_row(
+                    &format!("SELECT {OPERATION_COLUMNS} FROM operations WHERE seq=?1"),
+                    params![op_seq as i64],
+                    read_operation_row,
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            if !mutate(&mut op) {
+                return Ok(Some(false));
+            }
+            tx.execute(
+                "UPDATE operations SET dispatch_state=?1, terminal_ms=?2, dispatch=?3 WHERE seq=?4",
+                params![
+                    op.dispatch_state.name(),
+                    op.terminal_ms.map(ms_to_db),
+                    op.dispatch.as_ref().map(DispatchAttachment::encode),
+                    op.seq as i64,
+                ],
+            )?;
+            Ok(Some(true))
+        })();
+        match applied {
+            Ok(Some(true)) => {
+                tx.commit()
+                    .map_err(|error| eprintln!("opstore fault: {error}"))?;
+                Ok(true)
+            }
+            // Missing record or vetoed mutation: nothing committed.
+            Ok(_) => Ok(false),
+            Err(error) => {
+                eprintln!("opstore fault: {error}");
+                Err(())
+            }
+        }
+    }
 }
 
 fn measured_capacity(
@@ -888,9 +1172,7 @@ fn measured_capacity(
     let cutoff = ms_to_db(now_ms.saturating_sub(RETENTION_MS));
     let durable_lapse: Option<i64> = conn
             .query_row(
-                &format!(
-                    "SELECT MIN(terminal_ms) FROM operations WHERE dispatch_state IN ({TERMINAL_SQL}) AND terminal_ms IS NOT NULL AND terminal_ms > ?1"
-                ),
+                "SELECT MIN(terminal_ms) FROM operations WHERE terminal_ms IS NOT NULL AND terminal_ms > ?1",
                 params![cutoff],
                 |row| row.get(0),
             )
@@ -899,7 +1181,7 @@ fn measured_capacity(
         .and_then(db_to_ms)
         .map(|t| t.saturating_add(RETENTION_MS));
     for op in ram.values() {
-        if !op.dispatch_state.is_terminal() {
+        if !op.concluded() {
             continue;
         }
         if let Some(end) = op.terminal_ms.map(|t| t.saturating_add(RETENTION_MS)) {
