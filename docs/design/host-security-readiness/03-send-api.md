@@ -5,7 +5,7 @@
 先に`operations.open_epoch`で現在の受付epochを取得し、callerが選んだ128bit keyを`messages.submit`へ渡す。単純なCLIは新規keyを生成して表示してよいが、ライブラリはcallerのkeyを勝手に変更しない。再提出は同じepoch/key、照会はOperationIdまたはepoch/keyで行う。
 
 ```text
-API1 {"v":1,"request_id":"s1","method":"messages.submit","params":{"network":"0000000000000001","admission_epoch":"0000000000000012","key":"00112233445566778899aabbccddeeff00","destination":{"kind":"node","id":"0000000000000003"},"payload_hex":"00ff80","payload_len":3,"options":{"delivery":"RELIABLE","priority":"NORMAL","ttl_ms":5000,"deadline_policy":"WALL_ELAPSED_VALIDITY","storage":"HOST_DURABLE","hop_limit":10}}}
+API1 {"v":1,"request_id":"s1","method":"messages.submit","params":{"network":"0000000000000001","admission_epoch":"0000000000000012","key":"00112233445566778899aabbccddeeff","destination":{"kind":"node","id":"0000000000000003"},"payload_hex":"00ff80","payload_len":3,"options":{"delivery":"RELIABLE","priority":"NORMAL","ttl_ms":5000,"deadline_policy":"WALL_ELAPSED_VALIDITY","storage":"HOST_DURABLE","hop_limit":10}}}
 ```
 
 受付応答例：`{"v":1,"request_id":"s1","ok":true,"result":{"operation_id":"<store-lineage128>:0000000000000001","dispatch_state":"HOST_QUEUED","evidence":["HOST_DURABLE_RETAINED"],"message_key":null}}`。これは配送完了ではない。受付応答喪失後は`operations.get_by_key`へ同じscope/keyを渡す。
@@ -38,7 +38,7 @@ canonical_requestは以下を順に固定幅big-endian連結する：schema:u8=1
 
 Host受付時刻Hと期限D=H+ttlを保存。Host待ち、USB待ち、再認証、RF再送を全て引く。HostとESP32の単調時計は直接比較しない。
 
-保護sessionの時刻照会でdevice時刻dがHostの[h0,h1]間に採られたと分かる時だけ、保守的なdevice期限 `d + max(0,D-h1) - drift_margin` を使う。時刻mappingの有効期間は5秒、許容時計誤差は実装profileの測定上限（初期設計1000ppm＋量子化1ms）。時刻応答を遅らせれば残寿命は減るだけ。下限を選ぶことで転送待ちを無料にしない。
+保護sessionの時刻照会でdevice時刻dがHostの[h0,h1]間に採られたと分かる時だけ、保守的なdevice期限 `d + max(0,D-h1) - drift_margin` を使う。時刻mappingの有効期間は5秒、許容時計誤差は実装profileの測定上限（初期設計1000ppm＋量子化1ms）。drift_marginは1ms＋ceil(1000ppm×max(0,D-h0))以上とし、実測上限がこれを超えるplatformは使用不可にする。Host/Deviceのclockが停止・逆行・再基準化した場合もmappingを失効する。時刻応答を遅らせれば残寿命は減るだけ。下限を選ぶことで転送待ちを無料にしない。
 
 新SUBMIT bodyはdevice_boot_leaseとdevice_deadlineを持ち、deviceは受信後もqueue/pop時に比較する。CPU停止やUSB buffer滞留で遅れた要求も期限後は出さない。TimeSampleは保護session、boot、query nonceへ結合し、順不同/旧sampleを拒否する。USBの最大遅延を仮定して単に固定100msを引く方式は採らない。
 

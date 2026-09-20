@@ -31,7 +31,7 @@ NodeIdは64bitの管理割当IDを維持し、MACや公開鍵の切詰めhashへ
 
 credential CREDはdeterministic CBORのCCS（cnfにP-256 COSE_Key）。kid計算の公開COSE_Keyはkty=EC2、crv=P-256、x/y各32B、alg=ES256を固定し、秘密dを含めない。ID_CREDはkidで参照し、未知kidの公開credential取得は認証前の小さい組立枠で行う。取得できただけでは信用しない。
 
-MembershipGrantはCOSE_Sign1/ES256。署名payloadはdeterministic CBOR配列 `[1, network_u32, node_u64, kid_bstr32, role_bits_u32, authority_generation_u64, membership_revision_u64, not_before_u64, not_after_u64]`。時刻単位はUTC秒。配列順、整数最短表現、長さ、署名の発行権を検査。credential最大256B、grant最大256B、個々のbootstrap object最大2048B。複数objectを無制限連結しない。
+MembershipGrantはCOSE_Sign1/ES256。署名payloadはdeterministic CBOR配列 `[1, network_u32, node_u64, kid_bstr32, role_bits_u32, authority_generation_u64, membership_revision_u64, not_before_u64, not_after_u64]`。時刻単位はUTC秒。配列順、整数最短表現、長さ、署名の発行権を検査。credential最大256B、grant最大256B、認証前bootstrap object最大1024B、認証済みControlObject最大2048B。既存P0の上限を拡大しない。複数objectを無制限連結しない。
 
 rolesはendpoint/relay/gateway/authorityを分離する。通常member鍵で任意originの新世代やserviceを発行してよいとはしない。Route originのIdentity・generation・sequenceの証拠は、origin署名objectを既存ControlObjectで運びキャッシュし、データ転送のmutable metricとは分ける。未検証の新世代広告は保留/拒否する。この署名配布の実装・容量確認なしに、侵害memberにも強いrouting認可を完成扱いにしない。
 
@@ -92,9 +92,9 @@ Secure Boot、Flash/NVS暗号化、debug制限、eFuse変更は独立した配�
 
 ## 8. 資源予算と測定ゲート
 
-C3/S3の初期予算：全体2handshake枠、preauth同時1、1object2048B、2秒あたり新規高コスト認証1件、失敗backoff最大60秒。cookie/cheap parse→bounded assembly→credential/cryptoの順。source MACだけでなく全体CPU/RAM枠を制限し、memberのDATA/ACK用queueを分離する。
+C3/S3の初期予算：全体1handshake枠（用途間でも直列化）、preauth同時1、認証前1object1024B、2秒あたり新規高コスト認証1件、失敗backoff最大60秒。cookie/cheap parse→bounded assembly→credential/cryptoの順。source MACだけでなく全体CPU/RAM枠を制限し、memberのDATA/ACK用queueを分離する。
 
-設計上の認証scratch上限は2枠合算48KiB、live context32×256B=8KiBを仮予算とする。**sizeof/内部heap/stack/Flash/処理時間の実測値は未取得**。libedhocの既定VLAを未検証長で使わず、custom bounded memory backendを使う。C3全体budgetに収まらない場合は同時数を減らし、監査や長さ検査を削らない。
+設計上の認証scratch上限は全体48KiB、live context32×256B=8KiBを仮予算とする。**sizeof/内部heap/stack/Flash/処理時間の実測値は未取得**。libedhocの既定VLAを未検証長で使わず、custom bounded memory backendを使う。C3全体budgetに収まらない場合は同時数を減らし、監査や長さ検査を削らない。
 
 suite2の小さいkid参照handshakeでも、RouteLoomの証拠/断片headerを含めた総bytesとLR占有は実encoderで測る。2048B objectが無条件に少ない無線frameへ収まるとはしない。正常/未知kid/Grant更新/再起動を分けてbenchmarkする。
 

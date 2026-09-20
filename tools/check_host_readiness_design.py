@@ -187,6 +187,23 @@ def run(root: Path) -> dict:
             resolved = (path.parent / unquote(url.path)).resolve()
             require("link:" + target, resolved.is_relative_to(root.resolve()) and resolved.is_file())
             links += 1
+    prose_examples = 0
+    for path in docs:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.startswith("API1 "):
+                continue
+            try:
+                example = strict_json(line[5:])
+                require("api-example-version:" + path.name, example["v"] == 1)
+                if example["method"] == "messages.submit":
+                    canonical_send(example["params"])
+                prose_examples += 1
+            except (ValueError, KeyError, TypeError) as exc:
+                errors.append("api-example:" + path.name + ":" + str(exc))
+    require("api-examples-present", prose_examples >= 3)
+    security_text = (directory / "05-production-security.md").read_text(encoding="utf-8")
+    require("security-prose-budget", "認証前bootstrap object最大1024B" in security_text and "全体1handshake枠" in security_text)
+    require("epoch-prose-prefix", "連続したprefixだけ" in (directory / "04-capacity-storage.md").read_text(encoding="utf-8"))
     combined = "\n".join(x.read_text() for x in docs)
     require("capacity-prose", "3050" in combined and "26" in combined)
     mutation_values = [
@@ -210,7 +227,7 @@ def run(root: Path) -> dict:
         if failed:
             detected.append(".".join(keys))
     return {"scope": "draft-design-and-example-validation-only", "passed": not errors, "errors": errors,
-            "design_documents": len(docs), "local_links": links, "serialization_valid_examples": len(fixtures["valid_send"]),
+            "design_documents": len(docs), "local_links": links, "serialization_valid_examples": len(fixtures["valid_send"]), "prose_api_examples": prose_examples,
             "invalid_examples_rejected": len(fixtures["invalid_send"]), "mutations_detected": detected,
             "capacity_and_size_calculations": metrics, "planned_scenarios": len(cases), "planned_scenarios_executed": 0,
             "runtime_tested": False, "crypto_tested": False, "hardware_tested": False}
