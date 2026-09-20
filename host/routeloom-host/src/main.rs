@@ -4,6 +4,7 @@ compile_error!("routeloom-host v0.1 currently requires a Unix platform");
 mod acl;
 mod api1;
 mod canonical;
+mod config;
 mod dispatch;
 mod receive_log;
 mod send_store;
@@ -651,6 +652,16 @@ struct State {
     /// published once per dispatch pass by the registration lane. api1
     /// reads it for `gateway.resolve` and the schema-2 submit binding.
     gateway_lane: dispatch::GatewayLane,
+    /// Config operation registry (P5): api1 submits `config.*` requests and
+    /// reads outcomes; the dispatch thread drives them through the lane.
+    config_ops: dispatch::ConfigOps,
+    /// The daemon's configured config issuer node id (--config-authority).
+    /// None means no authority is provisioned — `config.propose` is refused
+    /// honestly while challenge/status queries still run.
+    config_authority: Option<u64>,
+    /// The authority generation bound into each signed permit command
+    /// (--config-authority-generation). Provisioned, never auto-incremented.
+    config_authority_generation: u32,
     /// This daemon run's incarnation id, minted at startup — bound into
     /// every HOST_REGISTER so a restarted daemon is provably a different
     /// host boot to the device (05 §5.6).
@@ -1699,6 +1710,8 @@ fn serve_client(
                 rate_limiter: &state.rate_limiter,
                 session: &state.session,
                 gateway_lane: &state.gateway_lane,
+                config_ops: &state.config_ops,
+                config_authority: state.config_authority,
                 now_ms: now_ms(),
                 now_mono: mono_ms(),
             };
@@ -1847,6 +1860,15 @@ struct DaemonArgs {
     device: Option<PathBuf>,
     acl_file: Option<PathBuf>,
     op_store: Option<PathBuf>,
+    config_authority: Option<u64>,
+    config_authority_generation: u32,
+}
+
+/// Parse a node/authority id argument as hexadecimal — the codebase's node
+/// id convention (e.g. `3` or `0000000000000003`). Accepts an optional `0x`.
+fn parse_hex_id(text: &str, flag: &str) -> Result<u64, String> {
+    u64::from_str_radix(text.trim_start_matches("0x"), 16)
+        .map_err(|_| format!("{flag} requires a hexadecimal id"))
 }
 
 fn parse_args() -> Result<DaemonArgs, String> {
@@ -1858,6 +1880,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut device = None;
     let mut acl_file = None;
     let mut op_store = None;
+    let mut config_authority = None;
+    let mut config_authority_generation = 1;
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1881,9 +1905,25 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     args.next().ok_or("--op-store requires a path")?,
                 ))
             }
+            // Config issuer node id the daemon signs permits under (P5).
+            // Absent = no authority provisioned: config.propose is refused
+            // while challenge/status queries still run.
+            "--config-authority" => {
+                let text = args.next().ok_or("--config-authority requires a hex id")?;
+                config_authority = Some(parse_hex_id(&text, "--config-authority")?);
+            }
+            // Authority generation bound into each signed command — must
+            // match the generation the target permits.
+            "--config-authority-generation" => {
+                config_authority_generation = args
+                    .next()
+                    .ok_or("--config-authority-generation requires a number")?
+                    .parse::<u32>()
+                    .map_err(|_| "--config-authority-generation must be an integer")?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N]"
                 );
                 process::exit(0);
             }
@@ -1895,6 +1935,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         device,
         acl_file,
         op_store,
+        config_authority,
+        config_authority_generation,
     })
 }
 
@@ -2039,8 +2081,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         operation_store: Mutex::new(operation_store),
         acl,
         host_boot,
+        config_authority: args.config_authority,
+        config_authority_generation: args.config_authority_generation,
         ..State::default()
     });
+    if let Some(authority) = args.config_authority {
+        eprintln!(
+            "config authority: node {:016x} generation {} (dev permit profile — EXPERIMENTAL, not a production identity)",
+            authority, args.config_authority_generation
+        );
+    } else {
+        eprintln!("config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)");
+    }
     // Bounded outbound queue: SEND is back-pressured at MAX_OUTBOUND pending
     // frames instead of growing memory without limit while the adapter is
     // down.

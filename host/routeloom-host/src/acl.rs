@@ -45,6 +45,10 @@ use std::path::Path;
 pub const PERM_READ_PAYLOAD: u8 = 1;
 pub const PERM_SEND: u8 = 2;
 pub const PERM_READ_OPERATION: u8 = 4;
+/// Remote-config operations (P5): issuing permits and reading config status
+/// are a distinct privileged grant — config writes change device behaviour,
+/// so they are never implied by SEND or READ_OPERATION.
+pub const PERM_CONFIG: u8 = 8;
 
 /// Depth bound for the ACL document itself (same strict parser as IPC).
 const ACL_MAX_DEPTH: usize = 8;
@@ -168,6 +172,7 @@ fn parse_permissions(value: &Json) -> Result<u8, String> {
             Some("READ_PAYLOAD") => PERM_READ_PAYLOAD,
             Some("SEND") => PERM_SEND,
             Some("READ_OPERATION") => PERM_READ_OPERATION,
+            Some("CONFIG") => PERM_CONFIG,
             Some(other) => return Err(format!("unknown permission \"{other}\"")),
             None => return Err("permission entries must be strings".to_string()),
         };
@@ -200,7 +205,8 @@ mod tests {
                 "*": ["READ_OPERATION"],
                 "0000000000000001": ["READ_PAYLOAD", "SEND"]
             }},
-            "7": {"networks": {"0000000000000002": ["READ_PAYLOAD"]}}
+            "7": {"networks": {"0000000000000002": ["READ_PAYLOAD"]}},
+            "9": {"networks": {"*": ["CONFIG"]}}
         }
     }"#;
 
@@ -214,6 +220,10 @@ mod tests {
         assert!(!acl.permit(501, 9, PERM_READ_PAYLOAD));
         assert!(acl.permit(7, 2, PERM_READ_PAYLOAD));
         assert!(!acl.permit(7, 1, PERM_READ_PAYLOAD));
+        // CONFIG is its own grant: 501 has SEND but not CONFIG; 9 has only CONFIG.
+        assert!(!acl.permit(501, 1, PERM_CONFIG));
+        assert!(acl.permit(9, 1, PERM_CONFIG));
+        assert!(!acl.permit(9, 1, PERM_SEND));
     }
 
     #[test]

@@ -65,6 +65,28 @@ config ROUTELOOM_DEVELOPMENT_KEY_HEX
         Shared development key. Never use this default in a deployment. This provider does not
         replace the planned device-identity/EDHOC security profile.
 
+config ROUTELOOM_CONFIG
+    bool "Enable the remote-config target endpoint (RCC1 permit journal)"
+    default n
+    help
+        EXPERIMENTAL: installs a ConfigTarget on the routed end-protected
+        lane with a durable NVS-backed ConfigJournal and a dev-profile
+        authority verifier. The permit path is a dev HMAC under
+        SecurityProfile::Development — never a production identity claim.
+        Requires peers (static ROUTELOOM_PEER_* or discovery). Disabled
+        keeps the node exactly as before (no config intake, no journal).
+
+config ROUTELOOM_CONFIG_AUTHORITY
+    hex "Config authority Node ID permitted to issue permits"
+    default 0x1
+    depends on ROUTELOOM_CONFIG
+
+config ROUTELOOM_CONFIG_AUTHORITY_GENERATION
+    int "Permitted authority generation for config permits"
+    range 1 2147483647
+    default 1
+    depends on ROUTELOOM_CONFIG
+
 config ROUTELOOM_MIGRATION
     int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
     range 0 2

@@ -104,6 +104,35 @@ class GatewayServiceSink {
   virtual void poll(MonotonicMs now_ms) noexcept = 0;
 };
 
+// Routed end-protected config endpoint (docs/design/scope-gateway-config/
+// 04-remote-config.md §5, 05-wire-api.md §5.5): the ConfigTarget/ConfigGateway
+// components install one to receive end-verified Control (22) and
+// ConfigPermit-kind object (ControlObject 49 / ObjectChunk 50 / ObjectAck 51)
+// payloads at this node, plus completion notices for typed jobs queued
+// through send_typed. These types ALSO carry the link-scoped autonomous
+// migration objects — that path is unchanged (AutonomyFrameSink, never
+// end-protected, destination==self). Only the END-PROTECTED forms route here:
+// the node layer has link-authenticated, deduplicated and end-opened the
+// frame, so `frame` is verified plaintext — but the permit inside still
+// faces the real ConfigAuthorityVerifier; transport never grants authority.
+class ConfigEndpointSink {
+ public:
+  virtual ~ConfigEndpointSink() = default;
+  // Terminal end-verified config frame for this node. `frame.header.type`
+  // distinguishes Control (challenge/status) from the object types
+  // (manifest/chunk/ack); `peer` is the authenticated previous hop and
+  // `frame.header.origin` the end-authenticated origin to reply to.
+  virtual void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
+                               MonotonicMs now_ms) noexcept = 0;
+  // First authenticated HOP_ACCEPT (hop_accepted=true) or terminal job
+  // failure (false + `reason`) for a send_typed job, correlated by the
+  // caller-supplied MessageId.
+  virtual void on_config_job_done(const MessageId& id, bool hop_accepted,
+                                  const char* reason, MonotonicMs now_ms) noexcept = 0;
+  // Monotonic tick from MeshNode::poll for the component's bounded retries.
+  virtual void poll(MonotonicMs now_ms) noexcept = 0;
+};
+
 // Pause contract (01-integration.md §3.3): narrower than blanket draining.
 // A PauseReason names WHY traffic is held; the mask selects WHICH traffic is
 // held so the control needed to coordinate a survey/cutover keeps flowing —
@@ -197,6 +226,19 @@ class MeshNode {
   // receipt-class Management traffic while Query/Submit stay Normal.
   Status send_service(NodeId destination, ByteView payload, std::uint32_t lifetime_ms,
                       Priority priority, MonotonicMs now_ms, MessageId& id) noexcept;
+  // Install/clear the routed config endpoint (ConfigTarget on a config node,
+  // ConfigGateway on a bridge; nullptr disables). With no sink, inbound
+  // end-protected config frames are still dedup'd/hop-ACKed/forwarded but
+  // terminate as CONFIG_NO_ENDPOINT — retries expire into an honest timeout.
+  void set_config_sink(ConfigEndpointSink* sink) noexcept { config_sink_ = sink; }
+  // Queue one end-protected routed frame of `type` (Control 22 or the
+  // ConfigPermit object types 49/50/51) for `destination`, with the same
+  // bounded hop-accept-per-hop exchange send_service uses. Completion is
+  // reported through the config sink's on_config_job_done. Service=21 stays
+  // on send_service — this lane is for the config component's own types.
+  Status send_typed(FrameType type, NodeId destination, ByteView payload,
+                    std::uint32_t lifetime_ms, MonotonicMs now_ms,
+                    MessageId& id) noexcept;
   // Free TX-pool slots: the Service endpoint needs this to make the
   // atomic admission reservation (pending + dedup + reply budget) the
   // contract demands before accepting work (03 §3.4).
@@ -451,7 +493,7 @@ class MeshNode {
 
   enum class JobForm : std::uint8_t { Plain, Forwarded };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
-                                       GatewayService };
+                                       GatewayService, Config };
 
   struct AckKey {
     FrameType accepted_type{FrameType::Data};
@@ -680,11 +722,12 @@ class MeshNode {
   Status queue_seqno_request(NodeId peer, NodeId requester, NodeId destination,
                              RouteSequence requested_sequence, std::uint32_t request_id,
                              std::uint8_t ttl, MonotonicMs now_ms) noexcept;
-  // Shared enqueue for send_service/resend_service: a Plain Service job
-  // owned by the installed gateway sink, hop-accept required.
-  Status queue_service_job(const MessageId& id, NodeId destination, ByteView payload,
-                           std::uint8_t round, std::uint32_t lifetime_ms,
-                           Priority priority, MonotonicMs now_ms) noexcept;
+  // Shared enqueue for send_service/resend_service/send_typed: a Plain
+  // end-protected routed job of `type` owned by `owner`, hop-accept required.
+  Status queue_typed_job(FrameType type, JobOwner owner, const MessageId& id,
+                         NodeId destination, ByteView payload, std::uint8_t round,
+                         std::uint32_t lifetime_ms, Priority priority,
+                         MonotonicMs now_ms) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
@@ -723,11 +766,15 @@ class MeshNode {
                          MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
-  // Service=21: transit forwards untouched (dedup + forward + hop ACK),
-  // terminal hands the end-verified payload to the gateway sink. Never
-  // enters the DATA path and never emits END_RECEIPT.
-  void handle_service(const wire::LinkOpenedFrame& frame, NodeId peer,
-                      MonotonicMs now_ms) noexcept;
+  // End-protected routed traffic (Service 21, Control 22 and the
+  // ConfigPermit object types 49/50/51): transit forwards untouched (dedup
+  // + forward + hop ACK keyed on the frame's own type), terminal hands the
+  // end-verified payload to the matching sink (Service -> gateway sink,
+  // the config types -> config sink). Never enters the DATA path and never
+  // emits END_RECEIPT. The link-scoped autonomy forms of 49/50/51 keep
+  // their separate destination==self path and never reach here.
+  void handle_routed(const wire::LinkOpenedFrame& frame, NodeId peer,
+                     MonotonicMs now_ms) noexcept;
   void handle_busy(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
@@ -766,6 +813,7 @@ class MeshNode {
   RouteTable routes_{};
   AutonomyFrameSink* autonomy_sink_{nullptr};
   GatewayServiceSink* gateway_sink_{nullptr};
+  ConfigEndpointSink* config_sink_{nullptr};
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};
   FixedPool<Delivery, kDeliveryCapacity> deliveries_{};
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};

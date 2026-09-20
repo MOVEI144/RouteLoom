@@ -18,6 +18,11 @@ pub const CAP_HOST_OPS_V1: u32 = 1 << 2;
 /// scope-2 ReceiveLog ingress + ACK, and unregister. Advertised separately
 /// from host_ops_v1.
 pub const CAP_GATEWAY_ENDPOINT_V1: u32 = 1 << 3;
+/// scope-gateway-config P5 (05-wire-api.md §5.6): the device serves the
+/// Config HostOps subcommands 0x20-0x23 — challenge/status queries and
+/// permit-object transfer — through the attached ConfigGateway. Advertised
+/// separately from host_ops_v1 and the gateway endpoint.
+pub const CAP_CONFIG_ENDPOINT_V1: u32 = 1 << 4;
 pub const HOST_OPS_SCHEMA: u8 = 1;
 
 pub const SUB_SUBMIT: u8 = 0x01;
@@ -847,6 +852,248 @@ pub fn decode_host_unregister_response(
     Ok(HostUnregisterResponse { result })
 }
 
+// --- Config endpoint subcommands (scope-gateway-config/05-wire-api.md
+// §5.6, P5) ------------------------------------------------------------------
+//
+// The remote-config HostOps family (0x20-0x23) shares the gateway inner
+// common form (schema:u8=1, sub:u8, payload_len:u16, payload). 0x20's async
+// reply is the separate 0x22 subcommand; 0x21 and 0x23 answer under their
+// own sub — the frame-level request id correlates them. Every reply opens
+// with a u16 ConfigOpsResult: Ok only means the device proved the mesh step
+// it was asked for (a query answer or an assembled permit object), never a
+// config verdict — the permit's own phase/reason is a separate status read.
+pub const SUB_CONFIG_QUERY: u8 = 0x20;
+pub const SUB_CONFIG_PERMIT: u8 = 0x21;
+pub const SUB_CONFIG_STATUS: u8 = 0x22;
+pub const SUB_CONFIG_CHALLENGE: u8 = 0x23;
+
+pub const CONFIG_QUERY_REQUEST_PAYLOAD: usize = 26; // target8+ns2+opid16
+pub const CONFIG_CHALLENGE_REQUEST_PAYLOAD: usize = 28; // target8+ns2+schema2+nonce16
+pub const CONFIG_PERMIT_MAX: usize = 1024; // kind-3 object ceiling
+pub const CONFIG_REPLY_FIXED_PAYLOAD: usize = 10; // result2+target8
+pub const CONFIG_STATUS_BODY_SIZE: usize = 72; // endpoint::ControlStatus
+pub const CONFIG_CHALLENGE_BODY_SIZE: usize = 92; // endpoint::ControlChallenge
+
+/// Typed result for the Config HostOps family — a u16 on the wire. Ok means
+/// the device proved the mesh step (query answered / object assembled),
+/// never a config verdict. INDETERMINATE names "the outcome cannot be
+/// proven" — never a success and never a silent retry trigger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u16)]
+pub enum ConfigOpsResult {
+    /// Answered / object assembled at the target.
+    Ok = 0,
+    /// A config operation is already in flight.
+    Busy = 1,
+    /// Authenticated but not authorized (ACL/capability).
+    Denied = 3,
+    /// The config endpoint is not enabled on this device.
+    Unsupported = 4,
+    /// Malformed request or field-inconsistent.
+    Invalid = 5,
+    /// Outcome cannot be proven (deadline, torn exchange).
+    Indeterminate = 7,
+    /// No mesh route to the target.
+    NoRoute = 8,
+    /// The target did not answer inside the window.
+    Timeout = 9,
+}
+
+impl ConfigOpsResult {
+    pub fn try_from_u16(value: u16) -> Result<Self, HostOpsError> {
+        Ok(match value {
+            0 => Self::Ok,
+            1 => Self::Busy,
+            3 => Self::Denied,
+            4 => Self::Unsupported,
+            5 => Self::Invalid,
+            7 => Self::Indeterminate,
+            8 => Self::NoRoute,
+            9 => Self::Timeout,
+            _ => return Err(HostOpsError::UnknownEnum("config_result", 0xFF)),
+        })
+    }
+}
+
+fn config_result_valid(result: u16) -> bool {
+    ConfigOpsResult::try_from_u16(result).is_ok()
+}
+
+/// The body length a 0x21/0x22/0x23 reply may carry, by subcommand. The
+/// permit reply is result-only; the query replies carry the fixed endpoint
+/// body on Ok and none on failure — so {0, N} is the legal set.
+fn config_reply_body_valid(sub: u8, body_size: usize) -> bool {
+    match sub {
+        SUB_CONFIG_PERMIT => body_size == 0,
+        SUB_CONFIG_STATUS => body_size == 0 || body_size == CONFIG_STATUS_BODY_SIZE,
+        SUB_CONFIG_CHALLENGE => body_size == 0 || body_size == CONFIG_CHALLENGE_BODY_SIZE,
+        _ => false,
+    }
+}
+
+/// The sub byte of a config-family inner body, if it is one (0x20-0x23).
+/// Used to peel config replies out of the generic response-routing lane
+/// without decoding the whole family up front.
+pub fn config_sub(inner: &[u8]) -> Option<u8> {
+    if inner.len() < 2 || inner[0] != HOST_OPS_SCHEMA {
+        return None;
+    }
+    match inner[1] {
+        SUB_CONFIG_QUERY | SUB_CONFIG_PERMIT | SUB_CONFIG_STATUS | SUB_CONFIG_CHALLENGE => {
+            Some(inner[1])
+        }
+        _ => None,
+    }
+}
+
+/// 0x20 CONFIG_QUERY (H→G): target:u64, config_namespace:u16, operation_id:16.
+/// Async reply -> 0x22 CONFIG_STATUS.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigQueryRequest {
+    pub target: u64,
+    pub config_namespace: u16,
+    pub operation_id: [u8; 16],
+}
+
+pub fn encode_config_query(request: &ConfigQueryRequest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + CONFIG_QUERY_REQUEST_PAYLOAD);
+    gateway_head(&mut out, SUB_CONFIG_QUERY, CONFIG_QUERY_REQUEST_PAYLOAD);
+    out.extend_from_slice(&request.target.to_be_bytes());
+    out.extend_from_slice(&request.config_namespace.to_be_bytes());
+    out.extend_from_slice(&request.operation_id);
+    out
+}
+
+pub fn decode_config_query(inner: &[u8]) -> Result<ConfigQueryRequest, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_CONFIG_QUERY,
+        CONFIG_QUERY_REQUEST_PAYLOAD,
+        CONFIG_QUERY_REQUEST_PAYLOAD,
+    )?;
+    Ok(ConfigQueryRequest {
+        target: u64_at(payload, 0)?,
+        config_namespace: u16_at(payload, 8)?,
+        operation_id: fixed(payload, 10)?,
+    })
+}
+
+/// 0x23 CONFIG_CHALLENGE (H→G query): target:u64, config_namespace:u16,
+/// schema:u16, client_nonce:16. Async reply -> 0x23 CONFIG_CHALLENGE.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigChallengeRequest {
+    pub target: u64,
+    pub config_namespace: u16,
+    pub schema: u16,
+    pub client_nonce: [u8; 16],
+}
+
+pub fn encode_config_challenge(request: &ConfigChallengeRequest) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + CONFIG_CHALLENGE_REQUEST_PAYLOAD);
+    gateway_head(
+        &mut out,
+        SUB_CONFIG_CHALLENGE,
+        CONFIG_CHALLENGE_REQUEST_PAYLOAD,
+    );
+    out.extend_from_slice(&request.target.to_be_bytes());
+    out.extend_from_slice(&request.config_namespace.to_be_bytes());
+    out.extend_from_slice(&request.schema.to_be_bytes());
+    out.extend_from_slice(&request.client_nonce);
+    out
+}
+
+pub fn decode_config_challenge(inner: &[u8]) -> Result<ConfigChallengeRequest, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_CONFIG_CHALLENGE,
+        CONFIG_CHALLENGE_REQUEST_PAYLOAD,
+        CONFIG_CHALLENGE_REQUEST_PAYLOAD,
+    )?;
+    Ok(ConfigChallengeRequest {
+        target: u64_at(payload, 0)?,
+        config_namespace: u16_at(payload, 8)?,
+        schema: u16_at(payload, 10)?,
+        client_nonce: fixed(payload, 12)?,
+    })
+}
+
+/// 0x21 CONFIG_PERMIT (H→G): target:u64, permit bytes (1..CONFIG_PERMIT_MAX).
+/// Async reply -> 0x21 CONFIG_PERMIT (result only, no body).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigPermitRequest {
+    pub target: u64,
+    pub permit: Vec<u8>,
+}
+
+pub fn encode_config_permit(request: &ConfigPermitRequest) -> Result<Vec<u8>, HostOpsError> {
+    if request.permit.is_empty() || request.permit.len() > CONFIG_PERMIT_MAX {
+        return Err(HostOpsError::CanonicalTooLarge);
+    }
+    let payload_len = 8 + request.permit.len();
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + payload_len);
+    gateway_head(&mut out, SUB_CONFIG_PERMIT, payload_len);
+    out.extend_from_slice(&request.target.to_be_bytes());
+    out.extend_from_slice(&request.permit);
+    Ok(out)
+}
+
+pub fn decode_config_permit(inner: &[u8]) -> Result<ConfigPermitRequest, HostOpsError> {
+    // target:u64 (8) + permit (1..CONFIG_PERMIT_MAX).
+    let payload = gateway_body(inner, SUB_CONFIG_PERMIT, 8 + 1, 8 + CONFIG_PERMIT_MAX)?;
+    Ok(ConfigPermitRequest {
+        target: u64_at(payload, 0)?,
+        permit: payload[8..].to_vec(),
+    })
+}
+
+/// Shared reply shape for 0x21/0x22/0x23: result:u16, target:u64, then an
+/// optional body — the raw ControlStatus (72 B) for a 0x22 reply or the raw
+/// ControlChallenge (92 B) for a 0x23 reply on Ok; empty on any failure and
+/// always for the 0x21 reply. The host decodes the body with the endpoint
+/// codec; the device forwards it verbatim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigReply {
+    pub result: u16,
+    pub target: u64,
+    pub body: Vec<u8>,
+}
+
+/// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge; the body
+/// length the codec accepts is derived from it (0 for 0x21; 0-or-fixed for
+/// the query replies).
+pub fn encode_config_reply(sub: u8, reply: &ConfigReply) -> Result<Vec<u8>, HostOpsError> {
+    if !config_reply_body_valid(sub, reply.body.len()) || !config_result_valid(reply.result) {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    let payload_len = CONFIG_REPLY_FIXED_PAYLOAD + reply.body.len();
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + payload_len);
+    gateway_head(&mut out, sub, payload_len);
+    out.extend_from_slice(&reply.result.to_be_bytes());
+    out.extend_from_slice(&reply.target.to_be_bytes());
+    out.extend_from_slice(&reply.body);
+    Ok(out)
+}
+
+pub fn decode_config_reply(inner: &[u8], sub: u8) -> Result<ConfigReply, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        sub,
+        CONFIG_REPLY_FIXED_PAYLOAD,
+        CONFIG_REPLY_FIXED_PAYLOAD + CONFIG_CHALLENGE_BODY_SIZE,
+    )?;
+    let result = u16_at(payload, 0)?;
+    let target = u64_at(payload, 2)?;
+    let body = payload[CONFIG_REPLY_FIXED_PAYLOAD..].to_vec();
+    if !config_result_valid(result) || !config_reply_body_valid(sub, body.len()) {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    Ok(ConfigReply {
+        result,
+        target,
+        body,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,5 +1289,183 @@ mod tests {
         ] {
             assert!(state.is_terminal());
         }
+    }
+
+    // --- Config endpoint family (0x20-0x23) --------------------------------
+
+    #[test]
+    fn config_result_round_trip_and_unknown() {
+        for value in [0u16, 1, 3, 4, 5, 7, 8, 9] {
+            let result = ConfigOpsResult::try_from_u16(value).unwrap();
+            assert_eq!(result as u16, value);
+        }
+        for bad in [2u16, 6, 10, 0xFFFF] {
+            assert!(ConfigOpsResult::try_from_u16(bad).is_err(), "bad {bad}");
+        }
+    }
+
+    #[test]
+    fn config_sub_peels_only_config_family() {
+        for sub in [
+            SUB_CONFIG_QUERY,
+            SUB_CONFIG_PERMIT,
+            SUB_CONFIG_STATUS,
+            SUB_CONFIG_CHALLENGE,
+        ] {
+            let inner = [HOST_OPS_SCHEMA, sub, 0, 0];
+            assert_eq!(config_sub(&inner), Some(sub));
+        }
+        for sub in [SUB_HOST_REGISTER, SUB_GATEWAY_INGRESS, 0x7F] {
+            let inner = [HOST_OPS_SCHEMA, sub, 0, 0];
+            assert_eq!(config_sub(&inner), None);
+        }
+        assert_eq!(config_sub(&[2, SUB_CONFIG_QUERY]), None); // wrong schema
+        assert_eq!(config_sub(&[HOST_OPS_SCHEMA]), None); // too short
+    }
+
+    #[test]
+    fn config_query_round_trip() {
+        let request = ConfigQueryRequest {
+            target: 0x1122_3344_5566_7788,
+            config_namespace: 1,
+            operation_id: [0xAB; 16],
+        };
+        let bytes = encode_config_query(&request);
+        assert_eq!(
+            bytes.len(),
+            GATEWAY_INNER_HEAD_SIZE + CONFIG_QUERY_REQUEST_PAYLOAD
+        );
+        assert_eq!(bytes[1], SUB_CONFIG_QUERY);
+        assert_eq!(decode_config_query(&bytes).unwrap(), request);
+        assert!(decode_config_query(&bytes[..bytes.len() - 1]).is_err());
+        let mut wrong_sub = bytes.clone();
+        wrong_sub[1] = SUB_CONFIG_STATUS;
+        assert_eq!(
+            decode_config_query(&wrong_sub),
+            Err(HostOpsError::SubcommandMismatch)
+        );
+    }
+
+    #[test]
+    fn config_challenge_round_trip() {
+        let request = ConfigChallengeRequest {
+            target: 0x0102_0304_0506_0708,
+            config_namespace: 1,
+            schema: 1,
+            client_nonce: [0xCD; 16],
+        };
+        let bytes = encode_config_challenge(&request);
+        assert_eq!(
+            bytes.len(),
+            GATEWAY_INNER_HEAD_SIZE + CONFIG_CHALLENGE_REQUEST_PAYLOAD
+        );
+        assert_eq!(decode_config_challenge(&bytes).unwrap(), request);
+        assert!(decode_config_challenge(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn config_permit_round_trip_and_bounds() {
+        for permit_len in [1usize, 100, CONFIG_PERMIT_MAX] {
+            let request = ConfigPermitRequest {
+                target: 7,
+                permit: vec![0x5C; permit_len],
+            };
+            let bytes = encode_config_permit(&request).unwrap();
+            assert_eq!(bytes.len(), GATEWAY_INNER_HEAD_SIZE + 8 + permit_len);
+            assert_eq!(decode_config_permit(&bytes).unwrap(), request);
+        }
+        assert!(encode_config_permit(&ConfigPermitRequest {
+            target: 1,
+            permit: Vec::new()
+        })
+        .is_err());
+        assert!(encode_config_permit(&ConfigPermitRequest {
+            target: 1,
+            permit: vec![0; CONFIG_PERMIT_MAX + 1]
+        })
+        .is_err());
+        // A zero-length permit body (target only) is below the 9-byte floor.
+        let mut short = Vec::new();
+        gateway_head(&mut short, SUB_CONFIG_PERMIT, 8);
+        short.extend_from_slice(&7_u64.to_be_bytes());
+        assert!(decode_config_permit(&short).is_err());
+    }
+
+    #[test]
+    fn config_reply_per_sub_body_rules() {
+        // Permit reply: result-only (empty body always).
+        let reply = ConfigReply {
+            result: ConfigOpsResult::Ok as u16,
+            target: 9,
+            body: Vec::new(),
+        };
+        let bytes = encode_config_reply(SUB_CONFIG_PERMIT, &reply).unwrap();
+        assert_eq!(
+            bytes.len(),
+            GATEWAY_INNER_HEAD_SIZE + CONFIG_REPLY_FIXED_PAYLOAD
+        );
+        assert_eq!(
+            decode_config_reply(&bytes, SUB_CONFIG_PERMIT).unwrap(),
+            reply
+        );
+        // A permit reply may not carry a body.
+        let with_body = ConfigReply {
+            body: vec![0; 4],
+            ..reply.clone()
+        };
+        assert!(encode_config_reply(SUB_CONFIG_PERMIT, &with_body).is_err());
+
+        // Status reply: 72-byte body on Ok.
+        let status_reply = ConfigReply {
+            result: ConfigOpsResult::Ok as u16,
+            target: 9,
+            body: vec![0x22; CONFIG_STATUS_BODY_SIZE],
+        };
+        let bytes = encode_config_reply(SUB_CONFIG_STATUS, &status_reply).unwrap();
+        assert_eq!(
+            bytes.len(),
+            GATEWAY_INNER_HEAD_SIZE + CONFIG_REPLY_FIXED_PAYLOAD + CONFIG_STATUS_BODY_SIZE
+        );
+        assert_eq!(
+            decode_config_reply(&bytes, SUB_CONFIG_STATUS).unwrap(),
+            status_reply
+        );
+        // Wrong body size is rejected.
+        let bad_body = ConfigReply {
+            body: vec![0; 10],
+            ..status_reply.clone()
+        };
+        assert!(encode_config_reply(SUB_CONFIG_STATUS, &bad_body).is_err());
+        let mut forged = encode_config_reply(SUB_CONFIG_STATUS, &status_reply).unwrap();
+        forged.truncate(forged.len() - 1);
+        assert!(decode_config_reply(&forged, SUB_CONFIG_STATUS).is_err());
+
+        // Challenge reply: 92-byte body on Ok.
+        let challenge_reply = ConfigReply {
+            result: ConfigOpsResult::Ok as u16,
+            target: 9,
+            body: vec![0x23; CONFIG_CHALLENGE_BODY_SIZE],
+        };
+        let bytes = encode_config_reply(SUB_CONFIG_CHALLENGE, &challenge_reply).unwrap();
+        assert_eq!(
+            decode_config_reply(&bytes, SUB_CONFIG_CHALLENGE).unwrap(),
+            challenge_reply
+        );
+
+        // Failure replies carry no body, whatever the sub.
+        for sub in [SUB_CONFIG_STATUS, SUB_CONFIG_CHALLENGE, SUB_CONFIG_PERMIT] {
+            let failure = ConfigReply {
+                result: ConfigOpsResult::Timeout as u16,
+                target: 9,
+                body: Vec::new(),
+            };
+            let bytes = encode_config_reply(sub, &failure).unwrap();
+            assert_eq!(decode_config_reply(&bytes, sub).unwrap(), failure);
+        }
+        // An unknown result value is rejected on decode.
+        let mut bad_result = encode_config_reply(SUB_CONFIG_PERMIT, &reply).unwrap();
+        bad_result[GATEWAY_INNER_HEAD_SIZE] = 0;
+        bad_result[GATEWAY_INNER_HEAD_SIZE + 1] = 2; // result=2 (unused)
+        assert!(decode_config_reply(&bad_result, SUB_CONFIG_PERMIT).is_err());
     }
 }

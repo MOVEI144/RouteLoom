@@ -24,6 +24,7 @@
 #include "routeloom/espnow_migration.hpp"
 #include "routeloom/nvs_ledger_store.hpp"
 #endif
+#include "routeloom/config_wire.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/psk_security.hpp"
@@ -283,6 +284,20 @@ extern "C" void app_main(void) {
   if ((bridge_config.capability & routeloom::usb::kCapGatewayEndpointV1) !=
       0) {
     status = bridge.attach_gateway(gateway);
+    if (!status) fail(status.detail);
+  }
+
+  // Config endpoint (scope-gateway-config P5): the bridge issues Config
+  // challenge/status queries and kind-3 permit transfers toward a target on
+  // the host's behalf over the routed end-protected lane. The bridge is the
+  // component's ConfigHostSink — each async outcome is framed back to the
+  // host under the 0x21/0x22/0x23 subcommand it was requested with. The
+  // CAP_CONFIG_ENDPOINT_V1 bit gates admission; without it the ops answer
+  // Unsupported. The node poll drives the component's bounded retries.
+  static routeloom::MeshConfigPort config_port(runtime.node());
+  static routeloom::ConfigGateway config_gateway(config_port, bridge);
+  if ((bridge_config.capability & routeloom::usb::kCapConfigEndpointV1) != 0) {
+    status = bridge.attach_config(config_gateway);
     if (!status) fail(status.detail);
   }
 

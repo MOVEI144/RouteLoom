@@ -8,6 +8,10 @@ rust-version.workspace = true
 routeloom-protocol = { path = "../routeloom-protocol" }
 routeloom-json = { path = "../routeloom-json" }
 routeloom-peercred = { path = "../routeloom-peercred" }
+# P5 config issuer: the RCC1 command, snapshot/patch TLV and Control
+# challenge/status codecs live in routeloom-wire (the golden-tested mirror
+# of the device endpoint codecs) — reused, never re-implemented.
+routeloom-wire = { path = "../routeloom-wire" }
 # CAP-I1 durable OperationStore backend (04-capacity-storage.md §3: local
 # SQLite transactional adapter, no external DB service). Bundled amalgamation
 # keeps the daemon free of a system sqlite dependency. rusqlite MIT,

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|cancel <opid>"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>"
     );
 }
 
@@ -116,6 +116,60 @@ fn cancel_request(id: &str) -> String {
     )
 }
 
+/// Build the API1 `config.challenge` request line. `config_namespace`/`schema`
+/// are emitted as JSON numbers (already u16-validated by the caller); the
+/// network/target arrive lowercased 16-hex.
+fn config_challenge_request(network: &str, target: &str, ns: u16, schema: u16) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.challenge\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"schema\":{schema}}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `config.status` request line. `operation_id` is the 32-hex
+/// id the verdict is read for — the status verb returns the real phase/reason,
+/// never a claimed one.
+fn config_status_request(network: &str, target: &str, ns: u16, operation_id: &str) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.status\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"operation_id\":\"{operation_id}\"}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `config.propose` request line. `patch` is a pre-built JSON
+/// array of `{field_id, field_type, value}` entries (built by
+/// `config_propose_command`, spliced in as a nested value — never a quoted
+/// string). `apply_budget_ms` is omitted when the caller leaves it 0 (= use
+/// the whole remaining challenge budget).
+fn config_propose_request(
+    network: &str,
+    target: &str,
+    ns: u16,
+    schema: u16,
+    base_snapshot: &str,
+    patch: &str,
+    apply_budget_ms: u32,
+) -> String {
+    let budget = if apply_budget_ms == 0 {
+        String::new()
+    } else {
+        format!(",\"apply_budget_ms\":{apply_budget_ms}")
+    };
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.propose\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"schema\":{schema},\"base_snapshot\":\"{base_snapshot}\",\"patch\":{patch}{budget}}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `config.get` request line. `id` is the `cfg`-prefixed op
+/// token the submit verbs return — the config op space, never operations.get.
+fn config_get_request(id: &str) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.get\",\"params\":{{\"config_op\":\"{id}\"}}}}",
+        request_id(),
+    )
+}
+
 /// Build the API1 `messages.read` request line for the `receive` command.
 /// `cursor` characters are validated against the base64url alphabet so the
 /// token cannot inject JSON — it arrives as an opaque string, never trusted.
@@ -158,6 +212,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "gateway-get" => gateway_get_command(rest)?,
         [name, rest @ ..] if name == "operation-get" => operation_get_command(rest)?,
         [name, rest @ ..] if name == "operation-get-by-key" => operation_get_by_key_command(rest)?,
+        [name, rest @ ..] if name == "config-challenge" => config_challenge_command(rest)?,
+        [name, rest @ ..] if name == "config-status" => config_status_command(rest)?,
+        [name, rest @ ..] if name == "config-propose" => config_propose_command(rest)?,
+        [name, rest @ ..] if name == "config-get" => config_get_command(rest)?,
         [name, id] if name == "cancel" => cancel_command(id)?,
         _ => {
             usage();
@@ -657,6 +715,257 @@ fn cancel_command(id: &str) -> Result<String, Box<dyn std::error::Error>> {
     Ok(cancel_request(&id.to_ascii_lowercase()))
 }
 
+// --- config.* verbs (scope-gateway-config P5) --------------------------------
+//
+// Thin clients over the API1 config methods. Acceptance is NEVER a config
+// verdict — the daemon answers PENDING and the real outcome is read with
+// `config-get`. These verbs need PERM_CONFIG; a normal messages.send grant
+// cannot reach them.
+
+/// Decimal or `0x`-hex u16 — config namespaces, schemas, patch field ids.
+fn parse_u16(text: &str) -> Option<u16> {
+    match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u16::from_str_radix(hex, 16).ok(),
+        None => text.parse::<u16>().ok(),
+    }
+}
+
+/// Even-length hex ≤ `max_bytes` — base snapshots and patch values. Empty is
+/// allowed (the API accepts a zero-length snapshot/value).
+fn is_hex_max(text: &str, max_bytes: usize) -> bool {
+    text.len() % 2 == 0
+        && text.len() <= max_bytes * 2
+        && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `field_type` names — a number 1-4 is accepted too (the API maps both) and
+/// normalised to the name the wire encoder documents.
+fn config_field_type_name(text: &str) -> Option<&'static str> {
+    match text.to_ascii_lowercase().as_str() {
+        "bool" | "1" => Some("bool"),
+        "u8" | "2" => Some("u8"),
+        "u32" | "3" => Some("u32"),
+        "bytes" | "4" => Some("bytes"),
+        _ => None,
+    }
+}
+
+/// Pull the value for `--flag` from the arg stream or report a missing value.
+fn opt_value<'a>(
+    args: &mut impl Iterator<Item = &'a String>,
+    flag: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(args
+        .next()
+        .ok_or_else(|| format!("{flag} requires a value"))?
+        .to_string())
+}
+
+/// A required 16-hex node/network id → lowercased.
+fn want_hex16(flag: &str, value: String) -> Result<String, Box<dyn std::error::Error>> {
+    if !is_hex(&value, 16) {
+        return Err(format!("{flag} must be a 16-hex id").into());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+/// A required u16 option (decimal or 0x-hex).
+fn want_u16(flag: &str, value: String) -> Result<u16, Box<dyn std::error::Error>> {
+    parse_u16(&value).ok_or_else(|| format!("{flag} must be a u16 (decimal or 0x-hex)").into())
+}
+
+/// `config-challenge --network <16hex> --target <16hex> --config-namespace
+/// <u16> --schema <u16>`. Issues a ChallengeQuery for (target, namespace);
+/// the ControlChallenge body — the freshness + CAS inputs a propose consumes
+/// — arrives via `config-get` on the returned op token.
+fn config_challenge_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut ns: Option<u16> = None;
+    let mut schema: Option<u16> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            "--config-namespace" => {
+                ns = Some(want_u16(
+                    "--config-namespace",
+                    opt_value(&mut args, "--config-namespace")?,
+                )?)
+            }
+            "--schema" => schema = Some(want_u16("--schema", opt_value(&mut args, "--schema")?)?),
+            other => return Err(format!("unknown config-challenge option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("config-challenge requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("config-challenge requires --target <16hex>")?,
+    )?;
+    let ns = ns.ok_or("config-challenge requires --config-namespace <u16>")?;
+    let schema = schema.ok_or("config-challenge requires --schema <u16>")?;
+    Ok(config_challenge_request(&network, &target, ns, schema))
+}
+
+/// `config-status --network <16hex> --target <16hex> --config-namespace <u16>
+/// --operation-id <32hex>`. Reads the real phase/reason verdict of the config
+/// operation `operation_id` names — never a claimed one.
+fn config_status_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut ns: Option<u16> = None;
+    let mut operation_id: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            "--config-namespace" => {
+                ns = Some(want_u16(
+                    "--config-namespace",
+                    opt_value(&mut args, "--config-namespace")?,
+                )?)
+            }
+            "--operation-id" => operation_id = Some(opt_value(&mut args, "--operation-id")?),
+            other => return Err(format!("unknown config-status option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("config-status requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("config-status requires --target <16hex>")?,
+    )?;
+    let ns = ns.ok_or("config-status requires --config-namespace <u16>")?;
+    let operation_id = operation_id.ok_or("config-status requires --operation-id <32hex>")?;
+    if !is_hex(&operation_id, 32) {
+        return Err("--operation-id must be a 32-hex operation id".into());
+    }
+    Ok(config_status_request(
+        &network,
+        &target,
+        ns,
+        &operation_id.to_ascii_lowercase(),
+    ))
+}
+
+/// `config-propose --network <16hex> --target <16hex> --config-namespace
+/// <u16> --schema <u16> --base-snapshot <hex≤512B> --field <id>:<type>:<hex>
+/// [--field ...] [--apply-budget-ms <u32>]`. `--field` is repeatable (1-16
+/// entries); `type` is bool|u8|u32|bytes (or 1-4). The daemon runs
+/// challenge → sign → permit transfer → status; acceptance is PENDING, never
+/// ACTIVE — the verdict is read with `config-get`.
+fn config_propose_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut ns: Option<u16> = None;
+    let mut schema: Option<u16> = None;
+    let mut base_snapshot: Option<String> = None;
+    let mut fields: Vec<String> = Vec::new();
+    let mut apply_budget_ms: u32 = 0;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            "--config-namespace" => {
+                ns = Some(want_u16(
+                    "--config-namespace",
+                    opt_value(&mut args, "--config-namespace")?,
+                )?)
+            }
+            "--schema" => schema = Some(want_u16("--schema", opt_value(&mut args, "--schema")?)?),
+            "--base-snapshot" => base_snapshot = Some(opt_value(&mut args, "--base-snapshot")?),
+            "--field" => fields.push(opt_value(&mut args, "--field")?),
+            "--apply-budget-ms" => {
+                let raw = opt_value(&mut args, "--apply-budget-ms")?;
+                apply_budget_ms = raw
+                    .parse::<u32>()
+                    .map_err(|_| "--apply-budget-ms must be a u32")?;
+            }
+            other => return Err(format!("unknown config-propose option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("config-propose requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("config-propose requires --target <16hex>")?,
+    )?;
+    let ns = ns.ok_or("config-propose requires --config-namespace <u16>")?;
+    let schema = schema.ok_or("config-propose requires --schema <u16>")?;
+    let base_snapshot = base_snapshot.ok_or("config-propose requires --base-snapshot <hex>")?;
+    if !is_hex_max(&base_snapshot, 512) {
+        return Err("--base-snapshot must be even-length hex ≤ 512 bytes".into());
+    }
+    if fields.is_empty() || fields.len() > 16 {
+        return Err("config-propose requires 1-16 --field <id>:<type>:<hex> entries".into());
+    }
+    let mut patch = String::from("[");
+    for (i, spec) in fields.iter().enumerate() {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() != 3 {
+            return Err(format!("--field must be <id>:<type>:<hex> (got \"{spec}\")").into());
+        }
+        let field_id = want_u16("--field id", parts[0].to_string())?;
+        let field_type = config_field_type_name(parts[1])
+            .ok_or("--field type must be bool|u8|u32|bytes (or 1-4)")?;
+        if !is_hex_max(parts[2], 96) {
+            return Err("--field value must be even-length hex ≤ 96 bytes".into());
+        }
+        if i > 0 {
+            patch.push(',');
+        }
+        patch.push_str(&format!(
+            "{{\"field_id\":{field_id},\"field_type\":\"{field_type}\",\"value\":\"{}\"}}",
+            parts[2].to_ascii_lowercase()
+        ));
+    }
+    patch.push(']');
+    Ok(config_propose_request(
+        &network,
+        &target,
+        ns,
+        schema,
+        &base_snapshot.to_ascii_lowercase(),
+        &patch,
+        apply_budget_ms,
+    ))
+}
+
+/// `config-get --id <cfg-token>`: thin client over `config.get` — reads one
+/// config op's honest outcome (PENDING/CHALLENGED/STATUS/NO_CHANGE/REFUSED/
+/// TIMEOUT/INDETERMINATE/…). The `cfg` prefix marks the config op space — it
+/// never collides with messages.*/gateway.* ids.
+fn config_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut id: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--id" => id = Some(opt_value(&mut args, "--id")?),
+            other => return Err(format!("unknown config-get option: {other}").into()),
+        }
+    }
+    let id = id.ok_or("config-get requires --id <cfg-op-token>")?;
+    // cfg<1-16 hex> — the daemon also accepts a bare hex id, but the ctl
+    // requires the explicit cfg token so the op space is never ambiguous.
+    let hex = id
+        .strip_prefix("cfg")
+        .ok_or("config-get id must be a cfg-prefixed op token")?;
+    if hex.is_empty() || hex.len() > 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("--id must be cfg<1-16 hex>".into());
+    }
+    Ok(config_get_request(&id.to_ascii_lowercase()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1047,5 +1356,188 @@ mod tests {
         );
         assert!(gateway_get_command(&args(&["--id", "bogus"])).is_err());
         assert!(gateway_get_command(&args(&[])).is_err());
+    }
+
+    #[test]
+    fn config_challenge_builds_api1_line() {
+        let line = config_challenge_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--schema",
+            "0x12",
+        ]))
+        .unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"config.challenge\""), "{line}");
+        assert!(line.contains("\"network\":\"0000000000000001\""), "{line}");
+        assert!(line.contains("\"target\":\"0000000000000009\""), "{line}");
+        assert!(line.contains("\"config_namespace\":7"), "{line}");
+        assert!(line.contains("\"schema\":18"), "{line}"); // 0x12 → 18
+                                                           // Missing pieces and malformed ids are refused client-side.
+        assert!(config_challenge_command(&args(&[])).is_err());
+        assert!(config_challenge_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "zz",
+            "--config-namespace",
+            "7",
+            "--schema",
+            "1",
+        ]))
+        .is_err());
+        assert!(config_challenge_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "70000",
+            "--schema",
+            "1",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn config_status_builds_api1_line() {
+        let line = config_status_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--operation-id",
+            "00112233445566778899AABBCCDDEEFF",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"method\":\"config.status\""), "{line}");
+        assert!(line.contains("\"config_namespace\":7"), "{line}");
+        assert!(
+            line.contains("\"operation_id\":\"00112233445566778899aabbccddeeff\""),
+            "{line}"
+        );
+        assert!(config_status_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--operation-id",
+            "tooshort",
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn config_propose_builds_api1_line() {
+        let line = config_propose_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--schema",
+            "1",
+            "--base-snapshot",
+            "aabb",
+            "--field",
+            "5:u32:0000002a",
+            "--field",
+            "1:bool:01",
+            "--apply-budget-ms",
+            "500",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"method\":\"config.propose\""), "{line}");
+        assert!(line.contains("\"base_snapshot\":\"aabb\""), "{line}");
+        // Both fields are emitted as a nested patch array, verbatim order.
+        assert!(
+            line.contains(
+                "\"patch\":[{\"field_id\":5,\"field_type\":\"u32\",\"value\":\"0000002a\"},{\"field_id\":1,\"field_type\":\"bool\",\"value\":\"01\"}]"
+            ),
+            "{line}"
+        );
+        assert!(line.contains("\"apply_budget_ms\":500"), "{line}");
+        // Zero budget is omitted entirely (daemon uses the whole challenge budget).
+        let no_budget = config_propose_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--schema",
+            "1",
+            "--base-snapshot",
+            "aabb",
+            "--field",
+            "5:u32:0000002a",
+        ]))
+        .unwrap();
+        assert!(!no_budget.contains("apply_budget_ms"), "{no_budget}");
+        // No fields, a bad field shape, an unknown type, or bad value hex fail.
+        assert!(config_propose_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--schema",
+            "1",
+            "--base-snapshot",
+            "aabb",
+        ]))
+        .is_err());
+        for bad in [
+            "5:u32",
+            "5:u32:zz:extra",
+            "5:bogus:00",
+            "5:u32:0",
+            "x:u32:00",
+        ] {
+            assert!(
+                config_propose_command(&args(&[
+                    "--network",
+                    "0000000000000001",
+                    "--target",
+                    "0000000000000009",
+                    "--config-namespace",
+                    "7",
+                    "--schema",
+                    "1",
+                    "--base-snapshot",
+                    "aabb",
+                    "--field",
+                    bad,
+                ]))
+                .is_err(),
+                "--field {bad} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn config_get_builds_api1_line() {
+        let line = config_get_command(&args(&["--id", "cfg0000000000000007"])).unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"config.get\""), "{line}");
+        assert!(
+            line.contains("\"config_op\":\"cfg0000000000000007\""),
+            "{line}"
+        );
+        // The cfg prefix is required — a bare hex id is rejected so the op
+        // space is never ambiguous against messages.*/gateway.* tokens.
+        assert!(config_get_command(&args(&["--id", "0000000000000007"])).is_err());
+        assert!(config_get_command(&args(&["--id", "cfgzz"])).is_err());
+        assert!(config_get_command(&args(&[])).is_err());
     }
 }

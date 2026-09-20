@@ -13,12 +13,19 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
-#if CONFIG_ROUTELOOM_DISCOVERY
+#if CONFIG_ROUTELOOM_DISCOVERY || CONFIG_ROUTELOOM_CONFIG
 #include "routeloom/espnow_autonomy.hpp"
 #endif
 #if CONFIG_ROUTELOOM_MIGRATION
 #include "routeloom/espnow_migration.hpp"
 #include "routeloom/nvs_ledger_store.hpp"
+#endif
+#if CONFIG_ROUTELOOM_CONFIG
+#include "routeloom/config.hpp"
+#include "routeloom/config_dev.hpp"
+#include "routeloom/config_wire.hpp"
+#include "routeloom/discovery_scope.hpp"  // sha256
+#include "routeloom/nvs_config_store.hpp"
 #endif
 #include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
@@ -196,6 +203,160 @@ routeloom::MonotonicMs monotonic_now_ms() noexcept {
 
 #endif  // CONFIG_ROUTELOOM_DEEP_SLEEP
 
+#if CONFIG_ROUTELOOM_CONFIG
+
+// Reference desired-state provider for the SDK namespace (04 §4.2). Applies
+// the committed snapshot: diagnostics_level (field 1) drives esp_log level
+// immediately; discovery_enabled (2) / relay_allowed (3) are committed
+// durably and surfaced through accessors the runtime consults — the live
+// enforcement hooks are the deferred integration step, never claimed here.
+// apply/restore are idempotent and complete on the next poll (async token);
+// read_active returns the last committed bytes so the journal's readback
+// verification is real, not a log string.
+class RefNodeConfigProvider final : public routeloom::ConfigProvider {
+ public:
+  // Persist the active snapshot so it survives reboot alongside the journal.
+  Status open(const char* name_space) noexcept {
+    nvs_handle_t handle = 0;
+    if (nvs_open(name_space, NVS_READWRITE, &handle) != ESP_OK) {
+      return Status::error(StatusCode::StorageFailure, "config values nvs_open");
+    }
+    std::size_t actual = sizeof(active_.bytes);
+    const esp_err_t error = nvs_get_blob(handle, "active", active_.bytes.data(), &actual);
+    nvs_close(handle);
+    if (error == ESP_OK && actual <= active_.bytes.size()) {
+      active_.size = actual;
+    }
+    return Status::success();
+  }
+  Status validate(const std::uint16_t, const std::uint16_t,
+                  const ByteView) noexcept override {
+    return Status::success();
+  }
+  Status prepare(const std::uint16_t, const std::uint16_t,
+                 const ByteView) noexcept override {
+    return Status::success();
+  }
+  Status apply(const std::uint16_t, const ByteView next,
+               routeloom::OperationToken& token) noexcept override {
+    if (next.size > pending_.bytes.size()) {
+      return Status::error(StatusCode::NoCapacity, "config snapshot oversized");
+    }
+    pending_.size = next.size;
+    std::memcpy(pending_.bytes.data(), next.data, next.size);
+    token = routeloom::OperationToken{++token_id_};
+    return Status::success();
+  }
+  Status restore(const std::uint16_t, const ByteView snapshot,
+                 routeloom::OperationToken& token) noexcept override {
+    if (snapshot.size > pending_.bytes.size()) {
+      return Status::error(StatusCode::NoCapacity, "config snapshot oversized");
+    }
+    pending_.size = snapshot.size;
+    std::memcpy(pending_.bytes.data(), snapshot.data, snapshot.size);
+    token = routeloom::OperationToken{++token_id_};
+    return Status::success();
+  }
+  Status poll(const routeloom::OperationToken token, bool& done,
+              Status& outcome) noexcept override {
+    done = false;
+    outcome = Status::success();
+    if (token.value != token_id_) {
+      return Status::error(StatusCode::NotFound, "config token unknown");
+    }
+    commit_pending();
+    done = true;
+    return Status::success();
+  }
+  Status read_active(const std::uint16_t, const routeloom::MutableByteView target,
+                     std::size_t& out_size) noexcept override {
+    if (active_.size > target.size) {
+      return Status::error(StatusCode::NoCapacity, "config read buffer small");
+    }
+    std::memcpy(target.data, active_.bytes.data(), active_.size);
+    out_size = active_.size;
+    return Status::success();
+  }
+
+  bool discovery_enabled() const noexcept { return discovery_enabled_; }
+  bool relay_allowed() const noexcept { return relay_allowed_; }
+
+ private:
+  void commit_pending() noexcept {
+    active_.size = pending_.size;
+    std::memcpy(active_.bytes.data(), pending_.bytes.data(), pending_.size);
+    persist();
+    apply_fields();
+  }
+  void persist() noexcept {
+    nvs_handle_t handle = 0;
+    if (nvs_open("rlcfgv", NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_set_blob(handle, "active", active_.bytes.data(), active_.size) == ESP_OK) {
+      (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+  }
+  // Decode the committed TLV and drive the effects the node can apply.
+  void apply_fields() noexcept {
+    routeloom::endpoint::ConfigField fields[routeloom::endpoint::kConfigFieldCountMax]{};
+    std::uint16_t count = 0;
+    if (!routeloom::config_tlv_decode(active_.view(), fields,
+                                    routeloom::endpoint::kConfigFieldCountMax,
+                                    count)
+             .ok()) {
+      return;
+    }
+    for (std::uint16_t i = 0; i < count; ++i) {
+      switch (fields[i].field_id) {
+        case 1:  // diagnostics_level u8 0..2 -> esp_log level
+          esp_log_level_set("*", static_cast<esp_log_level_t>(fields[i].value[0] + 1));
+          break;
+        case 2:
+          discovery_enabled_ = fields[i].value[0] != 0;
+          break;
+        case 3:
+          relay_allowed_ = fields[i].value[0] != 0;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  routeloom::ByteBuffer<routeloom::endpoint::kConfigSnapshotMax> active_{};
+  routeloom::ByteBuffer<routeloom::endpoint::kConfigSnapshotMax> pending_{};
+  std::uint64_t token_id_{0};
+  bool discovery_enabled_{true};
+  bool relay_allowed_{true};
+};
+
+// Maintenance/admission boundary for a mesh-only reference node (04 §4.8):
+// this profile's only management path is the mesh itself — there is no
+// independent admin path (no USB host, no serial console on the data plane).
+// A change that disables discovery, disables relay or changes the migration
+// policy can therefore remove the node's own reachability, so the gate
+// refuses it outright. A build that gains an independent path would pass a
+// different flag; success is never claimed by dropping in-flight DATA.
+class RefNodeMaintenanceGate final : public routeloom::ConfigMaintenanceGate {
+ public:
+  explicit RefNodeMaintenanceGate(const bool independent_admin_path) noexcept
+      : independent_admin_path_(independent_admin_path) {}
+  Status check(const routeloom::ConfigMaintenanceCheck& request) noexcept override {
+    if (!independent_admin_path_ &&
+        (request.discovery_disabling || request.relay_disabling ||
+         request.migration_changing)) {
+      return Status::error(StatusCode::AuthorizationFailed,
+                          "config would remove the only management path");
+    }
+    return Status::success();
+  }
+
+ private:
+  bool independent_admin_path_{false};
+};
+
+#endif  // CONFIG_ROUTELOOM_CONFIG
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -300,6 +461,26 @@ extern "C" void app_main(void) {
   status = commit_verifier.initialize(key);
   if (!status) fail(status.detail);
 #endif
+
+#if CONFIG_ROUTELOOM_CONFIG
+  // Derive the dev permit key BEFORE the link master key is wiped below:
+  // config_dev_key = SHA256("RouteLoom/config-dev/v1" || master_key). The
+  // host mirror derives the same bytes — never the raw link key — so config
+  // auth is a distinct, domain-separated secret.
+  constexpr char kConfigDevDomain[] = "RouteLoom/config-dev/v1";
+  static routeloom::ScopeDigest config_dev_key{};
+  {
+    std::array<std::uint8_t, 64> config_key_material{};
+    std::memcpy(config_key_material.data(), kConfigDevDomain,
+                sizeof(kConfigDevDomain) - 1);
+    std::memcpy(config_key_material.data() + sizeof(kConfigDevDomain) - 1,
+                key.data(), key.size());
+    routeloom::sha256(
+        ByteView{config_key_material.data(),
+                 sizeof(kConfigDevDomain) - 1 + key.size()},
+        config_dev_key);
+  }
+#endif
   std::fill(key.begin(), key.end(), 0);
 
   static EspNowRuntime runtime(config, security, observer);
@@ -375,6 +556,49 @@ extern "C" void app_main(void) {
            "EXPERIMENTAL migration lane active (mode=%d): dev-PSK commit "
            "evidence is not a production identity",
            CONFIG_ROUTELOOM_MIGRATION);
+#endif
+
+#if CONFIG_ROUTELOOM_CONFIG
+  // Remote-config target (P5): durable NVS-backed ConfigJournal + a
+  // dev-profile permit verifier, exposed to the routed end-protected lane
+  // through ConfigTarget. The dev key is domain-separated from the link
+  // master key so permit auth never reuses the link secret directly.
+  static routeloom::espnow::NvsConfigStore config_store;
+  status = config_store.open("rlcfg");
+  if (!status) fail(status.detail);
+  static RefNodeConfigProvider config_provider;
+  status = config_provider.open("rlcfgv");
+  if (!status) fail(status.detail);
+  static RefNodeMaintenanceGate config_gate(/*independent_admin_path=*/false);
+  static routeloom::ConfigRateLimiter config_limiter;
+  static routeloom::espnow::EspNowEntropySource config_entropy;
+  // The domain-separated dev permit key was derived above, before the link
+  // master key was wiped (SHA256("RouteLoom/config-dev/v1" || master_key)).
+  static routeloom::DevConfigAuthorityVerifier config_verifier(
+      ByteView{config_dev_key.data(), config_dev_key.size()});
+  routeloom::ConfigJournalConfig journal_config{};
+  journal_config.network = CONFIG_ROUTELOOM_NETWORK_ID;
+  journal_config.target = static_cast<NodeId>(CONFIG_ROUTELOOM_NODE_ID);
+  journal_config.config_namespace = routeloom::endpoint::kConfigNamespaceSdk;
+  journal_config.boot_incarnation = message_session;
+  journal_config.authorized_issuer =
+      static_cast<NodeId>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY);
+  journal_config.authority_generation =
+      static_cast<std::uint32_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY_GENERATION);
+  static routeloom::ConfigJournal config_journal(
+      journal_config, config_store, config_verifier, config_entropy,
+      config_limiter, &config_provider, /*validator=*/nullptr, &config_gate);
+  status = config_journal.initialize(monotonic_now_ms());
+  if (!status) fail(status.detail);
+  static routeloom::MeshConfigPort config_port(runtime.node());
+  static routeloom::ConfigTarget config_target(config_port);
+  status = config_target.add_journal(
+      routeloom::endpoint::kConfigNamespaceSdk, config_journal);
+  if (!status) fail(status.detail);
+  runtime.node().set_config_sink(&config_target);
+  ESP_LOGW(kTag,
+           "EXPERIMENTAL config target active (dev HMAC permit profile, not "
+           "a production identity)");
 #endif
 
 #if CONFIG_ROUTELOOM_DEEP_SLEEP

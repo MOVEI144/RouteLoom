@@ -829,6 +829,10 @@ Status MeshNode::decode_ack_payload(const ByteView payload, AckKey& key) noexcep
   const bool known_type = type == static_cast<std::uint8_t>(FrameType::Data) ||
       type == static_cast<std::uint8_t>(FrameType::EndReceipt) ||
       type == static_cast<std::uint8_t>(FrameType::Service) ||
+      type == static_cast<std::uint8_t>(FrameType::Control) ||
+      type == static_cast<std::uint8_t>(FrameType::ControlObject) ||
+      type == static_cast<std::uint8_t>(FrameType::ObjectChunk) ||
+      type == static_cast<std::uint8_t>(FrameType::ObjectAck) ||
       type == static_cast<std::uint8_t>(FrameType::RouteUpdate) ||
       type == static_cast<std::uint8_t>(FrameType::SeqnoRequest);
   if (reader.remaining() != 0 || !known_type) {
@@ -1091,8 +1095,9 @@ Status MeshNode::send_service(const NodeId destination, const ByteView payload,
     return Status::error(StatusCode::InvalidArgument, "invalid service send");
   }
   id = MessageId{config_.message_session, next_message_sequence_++};
-  return queue_service_job(id, destination, payload, /*round=*/0, lifetime_ms,
-                           priority, now_ms);
+  return queue_typed_job(FrameType::Service, JobOwner::GatewayService, id,
+                         destination, payload, /*round=*/0, lifetime_ms,
+                         priority, now_ms);
 }
 
 Status MeshNode::resend_service(const MessageId& id, const NodeId destination,
@@ -1111,30 +1116,59 @@ Status MeshNode::resend_service(const MessageId& id, const NodeId destination,
       lifetime_ms == 0) {
     return Status::error(StatusCode::InvalidArgument, "invalid service resend");
   }
-  return queue_service_job(id, destination, payload, round, lifetime_ms,
-                           Priority::Normal, now_ms);
+  return queue_typed_job(FrameType::Service, JobOwner::GatewayService, id,
+                         destination, payload, round, lifetime_ms,
+                         Priority::Normal, now_ms);
 }
 
-Status MeshNode::queue_service_job(const MessageId& id, const NodeId destination,
-                                   const ByteView payload, const std::uint8_t round,
-                                   const std::uint32_t lifetime_ms,
-                                   const Priority priority,
-                                   const MonotonicMs now_ms) noexcept {
+Status MeshNode::send_typed(const FrameType type, const NodeId destination,
+                            const ByteView payload, const std::uint32_t lifetime_ms,
+                            const MonotonicMs now_ms, MessageId& id) noexcept {
+  last_clock_ms_ = now_ms;
+  if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
+  ++work_generation_;
+  if (paused(pause::kAppAdmission)) {
+    return Status::error(StatusCode::InvalidState,
+                         sleep_draining_ ? "NODE_DRAINING" : "NODE_PAUSED");
+  }
+  // This lane exists for the routed end-protected config types only. The
+  // link-scoped autonomy forms of the object types must NOT be sent here
+  // (they keep their own MigrationWirePort path), and Service stays on
+  // send_service.
+  const bool config_type = type == FrameType::Control ||
+      type == FrameType::ControlObject || type == FrameType::ObjectChunk ||
+      type == FrameType::ObjectAck;
+  if (!config_type || destination == kInvalidNodeId || destination == config_.node ||
+      payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
+      lifetime_ms == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid typed send");
+  }
+  id = MessageId{config_.message_session, next_message_sequence_++};
+  return queue_typed_job(type, JobOwner::Config, id, destination, payload,
+                         /*round=*/0, lifetime_ms, Priority::Normal, now_ms);
+}
+
+Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
+                                 const MessageId& id, const NodeId destination,
+                                 const ByteView payload, const std::uint8_t round,
+                                 const std::uint32_t lifetime_ms,
+                                 const Priority priority,
+                                 const MonotonicMs now_ms) noexcept {
   const auto route = routes_.best(destination);
   if (!route.valid || find_neighbor(route.next_hop) == nullptr) {
     return Status::error(StatusCode::NoRoute, "NO_ROUTE");
   }
   TxJob job{};
   job.form = JobForm::Plain;
-  job.owner = JobOwner::GatewayService;
+  job.owner = owner;
   job.peer = route.next_hop;
   // 03 §3.3: link authentication + bounded hop acceptance on every hop,
   // including the terminal gateway and the receipt's return path.
   job.requires_hop_accept = true;
   job.max_attempts = config_.max_link_attempts;
   job.deadline_ms = now_ms + lifetime_ms;
-  job.ack = AckKey{FrameType::Service, MessageKey{config_.node, id}, round};
-  job.plain.header.type = FrameType::Service;
+  job.ack = AckKey{type, MessageKey{config_.node, id}, round};
+  job.plain.header.type = type;
   // §5.3: every Service payload is link AND end protected — the plaintext
   // path does not exist for this type (receivers drop it).
   job.plain.header.flags = wire::kFlagEndProtected;
@@ -1422,6 +1456,12 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     }
     return;
   }
+  if (job.owner == JobOwner::Config) {
+    if (config_sink_ != nullptr) {
+      config_sink_->on_config_job_done(job.ack.key.id, true, "HOP_ACCEPTED", now_ms);
+    }
+    return;
+  }
   (void)hop_accepted;
   if (job.owner != JobOwner::OriginDelivery) return;
   auto* delivery = find_delivery(job.ack.key.id);
@@ -1446,6 +1486,12 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   if (job.owner == JobOwner::GatewayService) {
     if (gateway_sink_ != nullptr) {
       gateway_sink_->on_service_job_done(job.ack.key.id, false, reason, now_ms);
+    }
+    return;
+  }
+  if (job.owner == JobOwner::Config) {
+    if (config_sink_ != nullptr) {
+      config_sink_->on_config_job_done(job.ack.key.id, false, reason, now_ms);
     }
     return;
   }
@@ -1703,14 +1749,18 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
 // transit: dedup + bounded forward + hop ACK referencing type 21. A node
 // without the endpoint drops at the terminal with an explicit diagnostic —
 // retries then expire into an honest timeout, never a DATA-style success.
-void MeshNode::handle_service(const wire::LinkOpenedFrame& frame, const NodeId peer,
-                              const MonotonicMs now_ms) noexcept {
+void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId peer,
+                             const MonotonicMs now_ms) noexcept {
   const MessageKey key{frame.header.origin, frame.header.message};
+  // The routed lane is shared by Service (21) and the config types (22/49/
+  // 50/51): dedup is keyed on the frame's own type so a manifest, a chunk
+  // and a Control query from the same origin never alias one another.
+  const FrameType type = frame.header.type;
 
-  // Frame-level dedup: a Service frame re-received on the same round only
-  // re-ACKs. A resubmission on a NEW round reaches the component again —
-  // its own dedup table decides PENDING/stored-receipt/CONFLICT.
-  if (find_dedup(key, FrameType::Service, frame.header.delivery_round) != nullptr) {
+  // Frame-level dedup: a frame re-received on the same round only re-ACKs.
+  // A resubmission on a NEW round reaches the component again — its own
+  // dedup table decides PENDING/stored-receipt/CONFLICT.
+  if (find_dedup(key, type, frame.header.delivery_round) != nullptr) {
     if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
     return;
   }
@@ -1724,15 +1774,15 @@ void MeshNode::handle_service(const wire::LinkOpenedFrame& frame, const NodeId p
     }
     if (scheduler_.free_slots() < 1) {
       ++busy_stats_.busy_send_failed;
-      observer_.on_diagnostic("SERVICE_NO_ACK_SLOT", peer, &frame.header.message);
+      observer_.on_diagnostic("ROUTED_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
-    auto* entry = allocate_dedup(key, FrameType::Service, frame.header.delivery_round,
+    auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
                                  now_ms + 60000);
     if (entry == nullptr) {
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-      observer_.on_diagnostic("SERVICE_NO_DEDUP_SLOT", peer, &frame.header.message);
+      observer_.on_diagnostic("ROUTED_NO_DEDUP_SLOT", peer, &frame.header.message);
       return;
     }
     if (!queue_hop_accept(frame.header, now_ms)) {
@@ -1742,48 +1792,59 @@ void MeshNode::handle_service(const wire::LinkOpenedFrame& frame, const NodeId p
       return;
     }
     entry->delivered = true;
-    if (gateway_sink_ != nullptr) {
-      gateway_sink_->on_service_payload(peer, plain, now_ms);
+    if (type == FrameType::Service) {
+      if (gateway_sink_ != nullptr) {
+        gateway_sink_->on_service_payload(peer, plain, now_ms);
+      } else {
+        observer_.on_diagnostic("SERVICE_NO_ENDPOINT", peer, &frame.header.message);
+      }
     } else {
-      observer_.on_diagnostic("SERVICE_NO_ENDPOINT", peer, &frame.header.message);
+      // Control/ControlObject/ObjectChunk/ObjectAck: the config endpoint
+      // owns the terminal payload. A node without one reports it honestly —
+      // the origin's retries expire into a timeout, never a false success.
+      if (config_sink_ != nullptr) {
+        config_sink_->on_config_frame(peer, plain, now_ms);
+      } else {
+        observer_.on_diagnostic("CONFIG_NO_ENDPOINT", peer, &frame.header.message);
+      }
     }
     return;
   }
 
   // Transit: bounded admission, forward the still-protected bytes, then
-  // ACK — a relay never interprets a Service payload terminally.
+  // ACK — a relay never interprets a routed payload terminally.
   const auto route = routes_.best(frame.header.destination);
   if (!route.valid || route.next_hop == peer) {
-    observer_.on_diagnostic("SERVICE_TRANSIT_NO_ROUTE", peer, &frame.header.message);
+    observer_.on_diagnostic("ROUTED_TRANSIT_NO_ROUTE", peer, &frame.header.message);
     return;
   }
   const AdmitVerdict admit =
       scheduler_.check(config_.node, /*scope=*/peer, frame.header.origin, 2);
   if (admit != AdmitVerdict::Admitted) {
     emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), now_ms);
-    observer_.on_diagnostic("SERVICE_TRANSIT_DENIED", peer, &frame.header.message);
+    observer_.on_diagnostic("ROUTED_TRANSIT_DENIED", peer, &frame.header.message);
     return;
   }
-  auto* entry = allocate_dedup(key, FrameType::Service, frame.header.delivery_round,
+  auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
                                now_ms + 60000);
   if (entry == nullptr) {
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-    observer_.on_diagnostic("SERVICE_NO_DEDUP_SLOT", peer, &frame.header.message);
+    observer_.on_diagnostic("ROUTED_NO_DEDUP_SLOT", peer, &frame.header.message);
     return;
   }
   if (!queue_forward(frame, route.next_hop, now_ms)) {
     dedup_.release(entry);
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-    observer_.on_diagnostic("SERVICE_TRANSIT_RESERVATION_FAILED", peer,
+    observer_.on_diagnostic("ROUTED_TRANSIT_RESERVATION_FAILED", peer,
                             &frame.header.message);
     return;
   }
   entry->forwarded = true;
   if (!queue_hop_accept(frame.header, now_ms)) {
     // The forward stays committed; the sender's retry dedups and re-ACKs.
-    observer_.on_diagnostic("SERVICE_TRANSIT_ACK_FULL", peer, &frame.header.message);
+    observer_.on_diagnostic("ROUTED_TRANSIT_ACK_FULL", peer, &frame.header.message);
     return;
   }
 }
@@ -2154,7 +2215,18 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
       handle_data(frame, peer, now_ms);
       break;
     case FrameType::Service:
-      handle_service(frame, peer, now_ms);
+      handle_routed(frame, peer, now_ms);
+      break;
+    case FrameType::Control:
+      // Control (22) is routed config traffic only in this tree — it must
+      // be end-protected like Service. There is no link-scoped plaintext
+      // form, so an unprotected Control frame is always rejected.
+      if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+        handle_routed(frame, peer, now_ms);
+      } else {
+        observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer,
+                                &frame.header.message);
+      }
       break;
     case FrameType::EndReceipt:
       handle_end_receipt(frame, peer, now_ms);
@@ -2186,9 +2258,6 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
     case FrameType::NeighborResult:
     case FrameType::TimeSync:
     case FrameType::ChannelNotice:
-    case FrameType::ControlObject:
-    case FrameType::ObjectChunk:
-    case FrameType::ObjectAck:
       // Link-scoped autonomy control (02-discovery.md §3, migration
       // transport 04-channel-migration.md §5-§9): strictly 1-hop, bound to
       // the immediate peer, never end-protected. The sink re-validates
@@ -2197,6 +2266,28 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
       // signature verifier before they can move any state.
       if (autonomy_sink_ != nullptr && frame.header.destination == config_.node &&
           (frame.header.flags & wire::kFlagEndProtected) == 0) {
+        autonomy_sink_->on_autonomy_frame(
+            peer, frame.header.type,
+            ByteView{frame.protected_payload.data(), frame.header.payload_length},
+            now_ms);
+      } else {
+        observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
+                                &frame.header.message);
+      }
+      break;
+    case FrameType::ControlObject:
+    case FrameType::ObjectChunk:
+    case FrameType::ObjectAck:
+      if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+        // End-protected routed object traffic: the ConfigPermit (kind 3)
+        // class rides the same manifest/chunk/ack carriers as migration
+        // but multi-hop, end-authenticated to the terminal. The node layer
+        // dedups/forwards/opens-end; the config sink still faces the real
+        // permit verifier — routing never grants authority.
+        handle_routed(frame, peer, now_ms);
+      } else if (autonomy_sink_ != nullptr && frame.header.destination == config_.node) {
+        // Link-scoped autonomous objects (migration kinds 1/2): strictly
+        // 1-hop, bound to the immediate peer, never end-protected.
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
@@ -2426,10 +2517,13 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
     schedule_sequence_requests(now_ms);
     schedule_route_advertisements(now_ms);
   }
-  // The Service endpoint shares the node's monotonic clock and pause
-  // discipline: its retries, lease and receipt-hold expiries advance here.
+  // The Service and config endpoints share the node's monotonic clock and
+  // pause discipline: their retries, leases and expiries advance here.
   if (gateway_sink_ != nullptr) {
     gateway_sink_->poll(now_ms);
+  }
+  if (config_sink_ != nullptr) {
+    config_sink_->poll(now_ms);
   }
   dispatch_next(now_ms);
 }

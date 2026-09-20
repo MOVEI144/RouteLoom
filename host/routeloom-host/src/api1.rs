@@ -25,15 +25,20 @@
 
 use crate::acl::{self, Acl};
 use crate::canonical;
+use crate::config::{ConfigOutcome, ConfigRequest};
 use crate::receive_log::{
-    Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
+    hex_lower, Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
 };
 use crate::send_store::{
     AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity, OpenEpochError,
     OperationStore, RateDeny, StoredOperation, SubmitOutcome,
 };
 use routeloom_json::{escape_string, Json};
+use routeloom_protocol::host_ops::ConfigOpsResult;
+use routeloom_wire::endpoint::{ConfigField, ConfigFieldType, ConfigPhase, ConfigReason};
 use std::sync::Mutex;
+
+use crate::dispatch::ConfigOpRecord;
 
 use crate::SessionInfo;
 
@@ -60,6 +65,13 @@ pub struct ApiContext<'a, S: OperationStore> {
     pub rate_limiter: &'a Mutex<AdmissionLimiter>,
     pub session: &'a Mutex<SessionInfo>,
     pub gateway_lane: &'a crate::dispatch::GatewayLane,
+    /// Config op registry (P5): `config.*` submits queue here and `config.get`
+    /// reads outcomes. Separate operation space from messages.*/gateway.*.
+    pub config_ops: &'a crate::dispatch::ConfigOps,
+    /// The daemon's configured config issuer node id — None means no
+    /// authority is provisioned, so `config.propose` is refused honestly
+    /// while queries still run.
+    pub config_authority: Option<u64>,
     pub now_ms: u64,
     /// Process-monotonic clock on the same axis as the registration
     /// mirror's `lease_deadline_mono` — wall `now_ms` cannot judge a
@@ -177,6 +189,10 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
         "operations.cancel" => operations_cancel(&params, ctx).map(|r| (request_id, r)),
         "gateway.resolve" => gateway_resolve(&params, ctx).map(|r| (request_id, r)),
         "gateway.get" => gateway_get(&params, ctx).map(|r| (request_id, r)),
+        "config.challenge" => config_challenge(&params, ctx).map(|r| (request_id, r)),
+        "config.status" => config_status(&params, ctx).map(|r| (request_id, r)),
+        "config.propose" => config_propose(&params, ctx).map(|r| (request_id, r)),
+        "config.get" => config_get(&params, ctx).map(|r| (request_id, r)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -267,7 +283,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -282,6 +298,7 @@ fn capabilities<S: OperationStore>(
         crate::canonical::HOP_DEFAULT,
         crate::receive_log::NORMAL_PAYLOAD_MAX,
         ctx.acl.revision(),
+        config_auth = ctx.config_authority.is_some(),
     ))
 }
 
@@ -1159,6 +1176,523 @@ fn operations_cancel<S: OperationStore>(
     }
 }
 
+// --- Remote-config methods (scope-gateway-config P5, 05-wire-api.md §5.6) ----
+//
+// `config.*` is an asynchronous admin surface: a submit queues a request on
+// the config lane and returns a config op id the caller polls with
+// `config.get`. Acceptance is NEVER a config verdict — the honest outcome
+// (CHALLENGED/STATUS/NO_CHANGE/REFUSED/TIMEOUT/INDETERMINATE/…) arrives via
+// the lane. PERM_CONFIG gates every verb: a normal messages.send grant can
+// neither read config state nor issue a permit.
+
+/// The config op id token — a `cfg`-prefixed space so it can never collide
+/// with a messages.* or gateway.* operation id.
+fn config_op_token(op_id: u64) -> String {
+    format!("cfg{op_id:016x}")
+}
+
+fn parse_config_op(text: &str) -> Option<u64> {
+    let hex = text.strip_prefix("cfg").unwrap_or(text);
+    if hex.is_empty() || hex.len() > 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok().filter(|&v| v != 0)
+}
+
+/// A u16 field accepts a JSON number or a hex/decimal string.
+fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
+    let invalid = || {
+        ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("{name} must be a u16 (number or hex string)"),
+        )
+    };
+    match value {
+        None => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("{name} is required"),
+        )),
+        Some(json) => {
+            if let Some(n) = json.as_u64() {
+                return u16::try_from(n).map_err(|_| invalid());
+            }
+            if let Some(text) = json.as_str() {
+                return u16::from_str_radix(text.trim_start_matches("0x"), 16)
+                    .or_else(|_| text.parse::<u16>())
+                    .map_err(|_| invalid());
+            }
+            Err(invalid())
+        }
+    }
+}
+
+/// Variable-length hex → bytes (even length, ≤ `max` bytes).
+fn parse_hex_bytes(text: &str, max: usize) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 || text.len() > max * 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks_exact(2) {
+        out.push(u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?);
+    }
+    Some(out)
+}
+
+fn parse_hex_16(text: &str) -> Option<[u8; 16]> {
+    parse_hex_bytes(text, 16)?.try_into().ok()
+}
+
+/// `config.*` shared ACL check: PERM_CONFIG on the named network. An
+/// unauthorized principal gets the same denial shape as the other admin
+/// verbs — never a hint about what the config surface can do.
+fn config_permit(ctx: &ApiContext<'_, impl OperationStore>, network: u64) -> bool {
+    ctx.uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_CONFIG))
+}
+
+fn config_denied() -> ApiError {
+    ApiError::simple(
+        "AuthorizationFailed",
+        "principal lacks CONFIG on this network",
+    )
+}
+
+/// `config.challenge` params: `{network, target, config_namespace, schema}`.
+/// Issues a ChallengeQuery for (target, namespace); the ControlChallenge body
+/// — the freshness + CAS inputs a propose consumes — is the outcome read via
+/// config.get.
+fn config_challenge<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "target" | "config_namespace" | "schema"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = u16_field(params.get("config_namespace"), "config_namespace")?;
+    let schema = u16_field(params.get("schema"), "schema")?;
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    let request = ConfigRequest::Challenge {
+        target,
+        config_namespace,
+        schema,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("challenge ns={config_namespace} schema={schema}"),
+        network,
+        target,
+    )
+}
+
+/// `config.status` params: `{network, target, config_namespace, operation_id}`.
+/// Issues a StatusQuery for `operation_id` — reads the real phase/reason
+/// verdict of the config operation that id names.
+fn config_status<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "target" | "config_namespace" | "operation_id"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = u16_field(params.get("config_namespace"), "config_namespace")?;
+    let Some(op_text) = params.get("operation_id").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be a 32-hex string",
+        ));
+    };
+    let Some(operation_id) = parse_hex_16(op_text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be a 32-hex string",
+        ));
+    };
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    let request = ConfigRequest::Status {
+        target,
+        config_namespace,
+        operation_id,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("status ns={config_namespace} op={op_text}"),
+        network,
+        target,
+    )
+}
+
+/// `config.propose` params: `{network, target, config_namespace, schema,
+/// base_snapshot, patch, apply_budget_ms?}`. Runs challenge → sign → permit
+/// transfer → status read. `base_snapshot` is the issuer's held snapshot TLV
+/// the CAS chain verifies; `patch` is an array of `{field_id, field_type,
+/// value}` entries. Requires a configured authority AND PERM_CONFIG — a
+/// normal send grant can never issue a permit.
+fn config_propose<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network"
+                | "target"
+                | "config_namespace"
+                | "schema"
+                | "base_snapshot"
+                | "patch"
+                | "apply_budget_ms"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = u16_field(params.get("config_namespace"), "config_namespace")?;
+    let schema = u16_field(params.get("schema"), "schema")?;
+    let Some(base_text) = params.get("base_snapshot").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "base_snapshot must be a hex string",
+        ));
+    };
+    let Some(base_snapshot) = parse_hex_bytes(base_text, 512) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "base_snapshot must be even-length hex ≤ 512 bytes",
+        ));
+    };
+    let patch = config_patch_fields(params.get("patch"))?;
+    let apply_budget_ms = match params.get("apply_budget_ms") {
+        None => 0,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(n) => n,
+            None => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "apply_budget_ms must be a u32",
+                ))
+            }
+        },
+    };
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    // Honest early refusal: no configured authority means no permit can be
+    // signed — say so rather than queue a request the lane will deny.
+    if ctx.config_authority.is_none() {
+        return Err(ApiError::simple(
+            "CONFIG_NO_AUTHORITY",
+            "no config authority configured (daemon --config-authority); permits cannot be issued",
+        ));
+    }
+    let field_count = patch.len();
+    let request = ConfigRequest::Propose {
+        target,
+        config_namespace,
+        schema,
+        base_snapshot,
+        patch,
+        apply_budget_ms,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("propose ns={config_namespace} schema={schema} fields={field_count}"),
+        network,
+        target,
+    )
+}
+
+/// `config.get` params: `{config_op}`. Reads one config op's record — the
+/// honest terminal outcome once resolved, or PENDING. An unauthorized
+/// principal gets NOT_FOUND (no existence oracle), matching gateway.get.
+fn config_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "config_op" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(text) = params.get("config_op").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "config_op must be a config op token string",
+        ));
+    };
+    let Some(op_id) = parse_config_op(text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "config_op must be a cfg-prefixed hex token",
+        ));
+    };
+    let Some(record) = ctx.config_ops.get(op_id) else {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no config operation with that id",
+        ));
+    };
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, record.network, acl::PERM_CONFIG))
+    {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no config operation with that id",
+        ));
+    }
+    Ok(config_outcome_json(&record))
+}
+
+/// Shared `{network, target}` parsing for the submit verbs.
+fn config_target_params(params: &Json) -> Result<(u64, u64), ApiError> {
+    let Some(network_text) = params.get("network").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "network must be a 16-hex string",
+        ));
+    };
+    let network = acl::parse_network_hex(network_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+    let Some(target_text) = params.get("target").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "target must be a 16-hex node id",
+        ));
+    };
+    let Some(target) = parse_hex_u64(target_text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "target must be a 16-hex node id",
+        ));
+    };
+    Ok((network, target))
+}
+
+/// Queue one config request on the lane; answers the accepted submit shape.
+/// A full inbox is an honest NO_CAPACITY, never a silent drop.
+fn config_submit_op<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    request: ConfigRequest,
+    summary: String,
+    network: u64,
+    target: u64,
+) -> Result<String, ApiError> {
+    match ctx
+        .config_ops
+        .submit(request, summary, network, target, ctx.now_ms)
+    {
+        Ok(op_id) => Ok(format!(
+            "{{\"config_op\":\"{}\",\"state\":\"PENDING\",\"submitted_ms\":{}}}",
+            config_op_token(op_id),
+            ctx.now_ms
+        )),
+        Err(()) => Err(ApiError {
+            code: "NO_CAPACITY",
+            message: "config op queue is full; retry when in-flight ops resolve".to_string(),
+            extra_fields: String::new(),
+            retryable: true,
+        }),
+    }
+}
+
+/// `patch` array → sorted `ConfigField` vec. Field ids must be unique; the
+/// wire encoder requires them strictly ascending, so they are sorted here.
+fn config_patch_fields(value: Option<&Json>) -> Result<Vec<ConfigField>, ApiError> {
+    let invalid = |m: &str| ApiError::simple("INVALID_ARGUMENT", m);
+    let Some(arr) = value.and_then(Json::as_array) else {
+        return Err(invalid(
+            "patch must be an array of {field_id, field_type, value} entries",
+        ));
+    };
+    if arr.is_empty() || arr.len() > 16 {
+        return Err(invalid("patch must carry 1-16 fields"));
+    }
+    let mut fields = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let field_id = u16_field(entry.get("field_id"), "patch field_id")?;
+        let field_type = config_field_type(entry.get("field_type"))?;
+        let Some(value_text) = entry.get("value").and_then(Json::as_str) else {
+            return Err(invalid("patch value must be a hex string"));
+        };
+        let Some(value) = parse_hex_bytes(value_text, 96) else {
+            return Err(invalid("patch value must be even-length hex ≤ 96 bytes"));
+        };
+        fields.push(ConfigField {
+            field_id,
+            field_type,
+            value,
+        });
+    }
+    fields.sort_by_key(|f| f.field_id);
+    if fields.windows(2).any(|w| w[0].field_id == w[1].field_id) {
+        return Err(invalid("patch field_ids must be unique"));
+    }
+    Ok(fields)
+}
+
+/// `field_type` accepts a name ("bool"|"u8"|"u32"|"bytes") or a number 1-4.
+fn config_field_type(value: Option<&Json>) -> Result<ConfigFieldType, ApiError> {
+    if let Some(name) = value.and_then(Json::as_str) {
+        match name.to_ascii_lowercase().as_str() {
+            "bool" => return Ok(ConfigFieldType::Bool),
+            "u8" => return Ok(ConfigFieldType::U8),
+            "u32" => return Ok(ConfigFieldType::U32),
+            "bytes" => return Ok(ConfigFieldType::Bytes),
+            _ => {}
+        }
+    }
+    match u16_field(value, "patch field_type")? {
+        1 => Ok(ConfigFieldType::Bool),
+        2 => Ok(ConfigFieldType::U8),
+        3 => Ok(ConfigFieldType::U32),
+        4 => Ok(ConfigFieldType::Bytes),
+        _ => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "patch field_type must be 1(Bool)|2(U8)|3(U32)|4(Bytes)",
+        )),
+    }
+}
+
+fn config_phase_name(phase: ConfigPhase) -> &'static str {
+    match phase {
+        ConfigPhase::Idle => "IDLE",
+        ConfigPhase::Prepared => "PREPARED",
+        ConfigPhase::Decided => "DECIDED",
+        ConfigPhase::ApplyIntent => "APPLY_INTENT",
+        ConfigPhase::Applying => "APPLYING",
+        ConfigPhase::Verifying => "VERIFYING",
+        ConfigPhase::Active => "ACTIVE",
+        ConfigPhase::Interrupted => "INTERRUPTED",
+        ConfigPhase::Quarantined => "QUARANTINED",
+    }
+}
+
+fn config_reason_name(reason: ConfigReason) -> &'static str {
+    match reason {
+        ConfigReason::Ok => "OK",
+        ConfigReason::InProgress => "IN_PROGRESS",
+        ConfigReason::StaleRevision => "STALE_REVISION",
+        ConfigReason::BaseHashMismatch => "BASE_HASH_MISMATCH",
+        ConfigReason::InvalidPatch => "INVALID_PATCH",
+        ConfigReason::Deadline => "DEADLINE",
+        ConfigReason::AuthorityDenied => "AUTHORITY_DENIED",
+        ConfigReason::Unsupported => "UNSUPPORTED",
+        ConfigReason::Capacity => "CAPACITY",
+        ConfigReason::StorageFailure => "STORAGE_FAILURE",
+        ConfigReason::ApplyInterrupted => "APPLY_INTERRUPTED",
+        ConfigReason::VerifyFailed => "VERIFY_FAILED",
+        ConfigReason::RecoveryRequired => "RECOVERY_REQUIRED",
+        ConfigReason::MaintenanceBusy => "MAINTENANCE_BUSY",
+        ConfigReason::NoChange => "NO_CHANGE",
+        ConfigReason::ResultExpired => "RESULT_EXPIRED",
+    }
+}
+
+fn config_ops_result_name(result: ConfigOpsResult) -> &'static str {
+    match result {
+        ConfigOpsResult::Ok => "OK",
+        ConfigOpsResult::Busy => "BUSY",
+        ConfigOpsResult::Denied => "DENIED",
+        ConfigOpsResult::Unsupported => "UNSUPPORTED",
+        ConfigOpsResult::Invalid => "INVALID",
+        ConfigOpsResult::Indeterminate => "INDETERMINATE",
+        ConfigOpsResult::NoRoute => "NO_ROUTE",
+        ConfigOpsResult::Timeout => "TIMEOUT",
+    }
+}
+
+/// Serialize a config op record for `config.get`. The `state` names the
+/// honest outcome — PERMIT_ASSEMBLED is reported as assembled, never ACTIVE;
+/// only the Status body's phase/reason is a real config verdict.
+fn config_outcome_json(record: &ConfigOpRecord) -> String {
+    let base = format!(
+        "\"config_op\":\"{}\",\"network\":\"{:016x}\",\"target\":\"{:016x}\",\"op\":\"{}\"",
+        config_op_token(record.op_id),
+        record.network,
+        record.target,
+        escape_string(&record.summary)
+    );
+    match &record.outcome {
+        None => format!(
+            "{{{base},\"state\":\"PENDING\",\"submitted_ms\":{}}}",
+            record.submitted_ms
+        ),
+        Some(outcome) => {
+            let (state, detail) = match outcome {
+                ConfigOutcome::Challenged(c) => (
+                    "CHALLENGED",
+                    format!(
+                        ",\"challenge\":{{\"config_namespace\":{},\"schema\":{},\"target_boot\":{},\"revision\":{},\"active_hash\":\"{}\",\"valid_for_ms\":{}}}",
+                        c.config_namespace,
+                        c.schema,
+                        c.target_boot,
+                        c.revision,
+                        hex_lower(&c.active_hash),
+                        c.valid_for_ms
+                    ),
+                ),
+                ConfigOutcome::Statused(s) => (
+                    "STATUS",
+                    format!(
+                        ",\"status\":{{\"phase\":\"{}\",\"reason\":\"{}\",\"config_namespace\":{},\"operation_id\":\"{}\",\"decision_revision\":{},\"active_revision\":{},\"active_hash\":\"{}\"}}",
+                        config_phase_name(s.phase),
+                        config_reason_name(s.reason),
+                        s.config_namespace,
+                        hex_lower(&s.operation_id),
+                        s.decision_revision,
+                        s.active_revision,
+                        hex_lower(&s.active_hash)
+                    ),
+                ),
+                ConfigOutcome::PermitAssembled => ("PERMIT_ASSEMBLED", String::new()),
+                ConfigOutcome::NoChange => ("NO_CHANGE", String::new()),
+                ConfigOutcome::Refused(r) => (
+                    "REFUSED",
+                    format!(",\"result\":\"{}\"", config_ops_result_name(*r)),
+                ),
+                ConfigOutcome::Timeout => ("TIMEOUT", String::new()),
+                ConfigOutcome::Indeterminate => ("INDETERMINATE", String::new()),
+                ConfigOutcome::ProtocolError => ("PROTOCOL_ERROR", String::new()),
+            };
+            format!(
+                "{{{base},\"state\":\"{state}\"{detail},\"resolved_ms\":{}}}",
+                record.resolved_ms.unwrap_or(0)
+            )
+        }
+    }
+}
+
 /// Query response (01 §5: state, evidence, application_outcome and
 /// observation are orthogonal fields). Payload bytes are never included:
 /// READ_OPERATION must not leak what only READ_PAYLOAD may read — length
@@ -1317,6 +1851,8 @@ mod tests {
             limiter,
             leaked_session(),
             leaked_lane(),
+            leaked_config_ops(),
+            None,
             now,
         )
     }
@@ -1329,6 +1865,10 @@ mod tests {
         Box::leak(Box::new(crate::dispatch::GatewayLane::default()))
     }
 
+    fn leaked_config_ops() -> &'static crate::dispatch::ConfigOps {
+        Box::leak(Box::new(crate::dispatch::ConfigOps::default()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn ctx_lane<'a, S: OperationStore>(
         uid: Option<u32>,
@@ -1338,6 +1878,8 @@ mod tests {
         limiter: &'a Mutex<AdmissionLimiter>,
         session: &'a Mutex<SessionInfo>,
         lane: &'a crate::dispatch::GatewayLane,
+        config_ops: &'a crate::dispatch::ConfigOps,
+        config_authority: Option<u64>,
         now: u64,
     ) -> ApiContext<'a, S> {
         ApiContext {
@@ -1348,6 +1890,8 @@ mod tests {
             rate_limiter: limiter,
             session,
             gateway_lane: lane,
+            config_ops,
+            config_authority,
             now_ms: now,
             now_mono: now,
         }
@@ -2935,6 +3479,8 @@ mod tests {
             &limiter,
             &session,
             &lane,
+            leaked_config_ops(),
+            None,
             100,
         );
         let key = "66666666666666666666666666666666";
@@ -2969,6 +3515,8 @@ mod tests {
             &limiter,
             &session,
             &lane,
+            leaked_config_ops(),
+            None,
             100,
         );
         let key = "77777777777777777777777777777777";
@@ -3045,6 +3593,8 @@ mod tests {
             &limiter,
             &session,
             &lane,
+            leaked_config_ops(),
+            None,
             100,
         );
         // A node-destination op is answered with the same NOT_FOUND an
@@ -3061,7 +3611,18 @@ mod tests {
         assert_error_schema(&response, "NOT_FOUND");
         // A principal without READ_OPERATION on the op's network gets the
         // same NOT_FOUND (no existence oracle).
-        let uid7 = ctx_lane(Some(7), &acl, &log, &store, &limiter, &session, &lane, 100);
+        let uid7 = ctx_lane(
+            Some(7),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
         let response = handle(gw_get_line(&id).as_bytes(), &uid7);
         assert_error_schema(&response, "NOT_FOUND");
     }
@@ -3078,6 +3639,8 @@ mod tests {
             &limiter,
             &session,
             &lane,
+            leaked_config_ops(),
+            None,
             100,
         );
         let digest = "44".repeat(32);
@@ -3174,6 +3737,8 @@ mod tests {
             &limiter,
             &session,
             &empty_lane,
+            leaked_config_ops(),
+            None,
             100,
         );
         let response = handle(
@@ -3212,6 +3777,8 @@ mod tests {
             &limiter,
             &session,
             &lane,
+            leaked_config_ops(),
+            None,
             100,
         );
         let digest = "44".repeat(32);
@@ -3232,11 +3799,384 @@ mod tests {
         );
         assert_error_schema(&response, "AuthorizationFailed");
         // Unauthenticated socket peer is denied outright.
-        let anon = ctx_lane(None, &acl, &log, &store, &limiter, &session, &lane, 100);
+        let anon = ctx_lane(
+            None,
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
         let response = handle(
             gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
             &anon,
         );
         assert_error_schema(&response, "AuthorizationFailed");
+    }
+
+    // --- config.* verbs ------------------------------------------------------
+    //
+    // uid 9 is a config admin (CONFIG on every network, no SEND — the grants
+    // are orthogonal); uid 501 is a plain sender (SEND+READ_OPERATION on net
+    // 1, no CONFIG). The pair proves the admin ACL is distinct from
+    // messages.send in both directions.
+
+    fn config_acl() -> Acl {
+        Acl::parse(
+            "{\"principals\":{\"9\":{\"networks\":{\"*\":[\"CONFIG\"]}},\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}}}}",
+        )
+        .unwrap()
+    }
+
+    /// A config-facing fixture: a REAL ConfigOps hub (ops are queryable, not
+    /// a leaked sink) plus an authenticated session. The gateway lane is
+    /// unused by the config verbs.
+    fn config_fixture() -> (
+        Mutex<SessionInfo>,
+        crate::dispatch::GatewayLane,
+        crate::dispatch::ConfigOps,
+    ) {
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        (
+            session,
+            crate::dispatch::GatewayLane::default(),
+            crate::dispatch::ConfigOps::default(),
+        )
+    }
+
+    fn cfg_req(method: &str, params: &str) -> String {
+        format!("{{\"v\":1,\"request_id\":\"c\",\"method\":\"{method}\",\"params\":{{{params}}}}}")
+    }
+
+    const CFG_TARGET: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\"";
+    const CFG_CHALLENGE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"schema\":1";
+    const CFG_STATUS_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"operation_id\":\"00112233445566778899aabbccddeeff\"";
+    const CFG_PROPOSE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000002a\"}]";
+
+    #[test]
+    fn config_challenge_submits_a_pending_op() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(response.contains("\"state\":\"PENDING\""), "{response}");
+        // Acceptance mints a cfg-namespaced op id — never a verdict.
+        let token = result_field(&response, "config_op");
+        assert!(token.starts_with("cfg"), "{token}");
+        // The op is queryable via config.get and still honestly PENDING.
+        let get = handle(
+            cfg_req("config.get", &format!("\"config_op\":\"{token}\"")).as_bytes(),
+            &c,
+        );
+        assert!(get.contains("\"ok\":true"), "{get}");
+        assert!(get.contains("\"state\":\"PENDING\""), "{get}");
+        assert!(get.contains("\"op\":\"challenge ns=7 schema=1\""), "{get}");
+        assert!(get.contains("\"network\":\"0000000000000001\""), "{get}");
+    }
+
+    #[test]
+    fn config_verbs_require_config_grant_not_send() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        // uid 501: SEND+READ_OPERATION on net 1 but no CONFIG. Valid params for
+        // every verb so the failure is purely the missing admin grant.
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        for (method, params) in [
+            ("config.challenge", CFG_CHALLENGE_PARAMS),
+            ("config.status", CFG_STATUS_PARAMS),
+            ("config.propose", CFG_PROPOSE_PARAMS),
+        ] {
+            let response = handle(cfg_req(method, params).as_bytes(), &c);
+            assert_error_schema(&response, "AuthorizationFailed");
+        }
+        // Anonymous socket peer is denied outright.
+        let anon = ctx_lane(
+            None,
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &anon,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+    }
+
+    #[test]
+    fn config_propose_without_authority_is_an_honest_refusal() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        // CONFIG grant present but NO --config-authority: the daemon cannot
+        // sign a permit, so it refuses rather than queue a doomed request.
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            None,
+            100,
+        );
+        let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
+        assert_error_schema(&response, "CONFIG_NO_AUTHORITY");
+        // The read-only verbs still work without an authority — they never
+        // sign anything.
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+    }
+
+    #[test]
+    fn config_propose_submits_a_pending_op() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        // Acceptance is PENDING — never ACTIVE or APPLIED.
+        assert!(response.contains("\"state\":\"PENDING\""), "{response}");
+        assert!(!response.contains("ACTIVE"), "{response}");
+    }
+
+    #[test]
+    fn config_params_are_validated() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        // Unknown param key.
+        let bad = format!("{CFG_CHALLENGE_PARAMS},\"bogus\":1");
+        assert_error_schema(
+            &handle(cfg_req("config.challenge", &bad).as_bytes(), &c),
+            "INVALID_ARGUMENT",
+        );
+        // Missing required field (network).
+        assert_error_schema(
+            &handle(
+                cfg_req(
+                    "config.challenge",
+                    "\"target\":\"0000000000000009\",\"config_namespace\":7,\"schema\":1",
+                )
+                .as_bytes(),
+                &c,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        // Bad target hex.
+        let bad = "\"network\":\"0000000000000001\",\"target\":\"zz\",\"config_namespace\":7,\"schema\":1";
+        assert_error_schema(
+            &handle(cfg_req("config.challenge", bad).as_bytes(), &c),
+            "INVALID_ARGUMENT",
+        );
+        // status: operation_id must be a 32-hex string.
+        assert_error_schema(
+            &handle(
+                cfg_req(
+                    "config.status",
+                    "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"operation_id\":\"short\"",
+                )
+                .as_bytes(),
+                &c,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        // propose: empty patch, bad field_type, and duplicate field_id.
+        for patch in [
+            "\"patch\":[]",
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"bogus\",\"value\":\"00\"}]",
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"00\"},{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"01\"}]",
+        ] {
+            let params = format!(
+                "{CFG_TARGET},\"config_namespace\":7,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"
+            );
+            assert_error_schema(
+                &handle(cfg_req("config.propose", &params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+    }
+
+    #[test]
+    fn config_get_has_no_existence_oracle() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        // uid 9 (config admin) submits a challenge on net 1.
+        let c9 = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &c9,
+        );
+        let token = result_field(&response, "config_op");
+        // A principal without CONFIG on that network gets NOT_FOUND — the same
+        // shape as an unknown id, so config ops are no existence oracle.
+        let c501 = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let get = cfg_req("config.get", &format!("\"config_op\":\"{token}\""));
+        assert_error_schema(&handle(get.as_bytes(), &c501), "NOT_FOUND");
+        // A malformed token is INVALID_ARGUMENT; a well-formed unknown op is
+        // NOT_FOUND (identical to the forbidden case).
+        assert_error_schema(
+            &handle(
+                cfg_req("config.get", "\"config_op\":\"bogus\"").as_bytes(),
+                &c9,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_schema(
+            &handle(
+                cfg_req("config.get", "\"config_op\":\"cfg0000000000000fff\"").as_bytes(),
+                &c9,
+            ),
+            "NOT_FOUND",
+        );
+    }
+
+    #[test]
+    fn config_outcome_json_reports_honest_states() {
+        // Direct serialization coverage for the distinct terminal states —
+        // the lane's verdict is surfaced verbatim; PERMIT_ASSEMBLED is never
+        // claimed ACTIVE, and INDETERMINATE/TIMEOUT stay distinct.
+        let base = ConfigOpRecord {
+            op_id: 7,
+            summary: "propose ns=7".to_string(),
+            network: 1,
+            target: 9,
+            outcome: None,
+            submitted_ms: 100,
+            resolved_ms: None,
+        };
+        let pending = config_outcome_json(&base);
+        assert!(pending.contains("\"state\":\"PENDING\""), "{pending}");
+        for (outcome, want) in [
+            (ConfigOutcome::PermitAssembled, "PERMIT_ASSEMBLED"),
+            (ConfigOutcome::NoChange, "NO_CHANGE"),
+            (ConfigOutcome::Timeout, "TIMEOUT"),
+            (ConfigOutcome::Indeterminate, "INDETERMINATE"),
+            (ConfigOutcome::ProtocolError, "PROTOCOL_ERROR"),
+        ] {
+            let json = config_outcome_json(&ConfigOpRecord {
+                outcome: Some(outcome),
+                resolved_ms: Some(150),
+                ..base.clone()
+            });
+            assert!(json.contains(&format!("\"state\":\"{want}\"")), "{json}");
+            assert!(!json.contains("ACTIVE"), "{json}");
+        }
+        let refused = config_outcome_json(&ConfigOpRecord {
+            outcome: Some(ConfigOutcome::Refused(ConfigOpsResult::Denied)),
+            resolved_ms: Some(150),
+            ..base.clone()
+        });
+        assert!(refused.contains("\"state\":\"REFUSED\""), "{refused}");
+        assert!(refused.contains("\"result\":\"DENIED\""), "{refused}");
     }
 }

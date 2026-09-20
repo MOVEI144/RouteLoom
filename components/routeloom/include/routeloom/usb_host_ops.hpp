@@ -40,11 +40,17 @@ constexpr std::uint32_t kCapHostOpsV1 = 1u << 2;
 // expose the dispatch window without the gateway host lane.
 constexpr std::uint32_t kCapGatewayEndpointV1 = 1u << 3;
 
+// scope-gateway-config P5 (docs/design/scope-gateway-config/05-wire-api.md
+// §5.6): the device serves the Config HostOps subcommands 0x20-0x23 —
+// status/challenge queries and the ConfigPermit object transfer toward a
+// target. Advertised separately so a bridge build can expose the gateway
+// host lane without the remote-config endpoint.
+constexpr std::uint32_t kCapConfigEndpointV1 = 1u << 4;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
-// §5.6 (0x10-0x13): registered once, never renumbered locally. 0x20-0x23
-// are reserved for the config phase and are NOT implemented here.
+// §5.6 (0x10-0x13, 0x20-0x23): registered once, never renumbered locally.
 enum class HostOpsSub : std::uint8_t {
   Submit = 0x01,
   QueryDispatch = 0x02,
@@ -55,6 +61,10 @@ enum class HostOpsSub : std::uint8_t {
   GatewayIngress = 0x11,    // G→H request: scope-2 payload for ReceiveLog
   GatewayIngressAck = 0x12, // H→G response: storage outcome for 0x11
   HostUnregister = 0x13,    // H→G request: drop the current registration
+  ConfigQuery = 0x20,       // H→G request: status query -> async 0x22 reply
+  ConfigPermit = 0x21,      // H→G request: permit transfer -> async 0x21 reply
+  ConfigStatus = 0x22,      // G→H reply: ControlStatus for a 0x20 query
+  ConfigChallenge = 0x23,   // H→G query / G→H reply: ControlChallenge exchange
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -91,6 +101,24 @@ enum class GatewayOpsResult : std::uint8_t {
   Invalid = 5,        // malformed or field-inconsistent request
   Storage = 6,        // ReceiveLog storage failed — never ACKed as stored
   Indeterminate = 7,  // outcome cannot be proven (e.g. torn exchange)
+};
+
+// Typed result for the Config HostOps family (0x21/0x22/0x23 replies), a
+// u16 on the wire so the family can grow without colliding with the
+// gateway/host_ops enums. Ok means the device proved the mesh step it was
+// asked for — a query answer or an assembled permit object. It is NEVER a
+// config verdict: the permit's own phase/reason is a separate status read.
+// INDETERMINATE names "the outcome cannot be proven" — never a success and
+// never a silent retry trigger.
+enum class ConfigOpsResult : std::uint16_t {
+  Ok = 0,             // answered / object assembled at the target
+  Busy = 1,           // a config operation is already in flight
+  Denied = 3,         // authenticated but not authorized (ACL/capability)
+  Unsupported = 4,    // the config endpoint is not enabled on this device
+  Invalid = 5,        // malformed request or field-inconsistent
+  Indeterminate = 7,  // outcome cannot be proven (deadline, torn exchange)
+  NoRoute = 8,        // no mesh route to the target
+  Timeout = 9,        // the target did not answer inside the window
 };
 
 constexpr std::size_t kBootLeaseSize = 16;
@@ -614,5 +642,76 @@ Status encode_host_unregister(const HostUnregisterRequest& request,
                               MutableByteView out, std::size_t& written) noexcept;
 Status decode_host_unregister_response(ByteView inner,
                                        HostUnregisterResponse& out) noexcept;
+
+// --- Config endpoint subcommands (scope-gateway-config/05-wire-api.md §5.6,
+// P5) ---------------------------------------------------------------------
+//
+// These four share the gateway family's inner common form — schema:u8=1,
+// sub:u8, payload_len:u16, payload — but the request/reply relationship is
+// ASYNC over the mesh: the device forwards the query/transfer, then reports
+// once under the same frame-level request id. 0x20's reply is the separate
+// 0x22 ConfigStatus subcommand; 0x21 and 0x23 answer under their own sub.
+// Every reply carries a u16 ConfigOpsResult first: Ok only means the mesh
+// step was proven (a query answer or an assembled permit object) — never a
+// config verdict.
+//
+// 0x20 CONFIG_QUERY (H→G): target:u64, config_namespace:u16, operation_id:16.
+//   Async reply -> 0x22 CONFIG_STATUS.
+struct ConfigQueryRequest {
+  NodeId target{kInvalidNodeId};
+  std::uint16_t config_namespace{0};
+  std::array<std::uint8_t, 16> operation_id{};
+};
+constexpr std::size_t kConfigQueryRequestPayload = 26;
+
+// 0x23 CONFIG_CHALLENGE (H→G query): target:u64, config_namespace:u16,
+//   schema:u16, client_nonce:16. Async reply -> 0x23 CONFIG_CHALLENGE.
+struct ConfigChallengeRequest {
+  NodeId target{kInvalidNodeId};
+  std::uint16_t config_namespace{0};
+  std::uint16_t schema{0};
+  std::array<std::uint8_t, 16> client_nonce{};
+};
+constexpr std::size_t kConfigChallengeRequestPayload = 28;
+
+// 0x21 CONFIG_PERMIT (H→G): target:u64, permit bytes (1..kConfigPermitMax).
+//   Async reply -> 0x21 CONFIG_PERMIT (result only, no body).
+struct ConfigPermitRequest {
+  NodeId target{kInvalidNodeId};
+  ByteView permit{};  // borrows the decoded body (decode) or caller bytes
+};
+// The signed-permit object bound: matches the device ConfigPermit kind-3
+// object ceiling (config_wire / autonomy object budget).
+constexpr std::size_t kConfigPermitMax = 1024;
+
+// Shared reply shape for 0x21/0x22/0x23: result:u16, target:u64, then an
+// optional body — the raw ControlStatus (72 B) for a 0x22 reply or the raw
+// ControlChallenge (92 B) for a 0x23 reply on Ok; empty on any failure and
+// always for the 0x21 reply. The host decodes the body with the endpoint
+// codec; the device forwards it verbatim.
+struct ConfigReply {
+  std::uint16_t result{0};  // ConfigOpsResult
+  NodeId target{kInvalidNodeId};
+  ByteView body{};  // 0 / 72 / 92 bytes depending on sub+result
+};
+constexpr std::size_t kConfigReplyFixedPayload = 10;   // result + target
+constexpr std::size_t kConfigStatusBodySize = 72;      // endpoint::ControlStatus
+constexpr std::size_t kConfigChallengeBodySize = 92;   // endpoint::ControlChallenge
+
+Status decode_config_query(ByteView inner, ConfigQueryRequest& out) noexcept;
+Status encode_config_query(const ConfigQueryRequest& request, MutableByteView out,
+                           std::size_t& written) noexcept;
+Status decode_config_challenge(ByteView inner, ConfigChallengeRequest& out) noexcept;
+Status encode_config_challenge(const ConfigChallengeRequest& request,
+                               MutableByteView out, std::size_t& written) noexcept;
+Status decode_config_permit(ByteView inner, ConfigPermitRequest& out) noexcept;
+Status encode_config_permit(const ConfigPermitRequest& request, MutableByteView out,
+                            std::size_t& written) noexcept;
+// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge; the body
+// length the codec accepts is derived from it (0 for 0x21; 0-or-fixed for
+// the query replies).
+Status encode_config_reply(HostOpsSub sub, const ConfigReply& reply,
+                           MutableByteView out, std::size_t& written) noexcept;
+Status decode_config_reply(ByteView inner, HostOpsSub sub, ConfigReply& out) noexcept;
 
 }  // namespace routeloom::usb

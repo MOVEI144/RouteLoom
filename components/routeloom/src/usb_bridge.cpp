@@ -60,6 +60,15 @@ Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
   return gateway.enable_gateway(role);
 }
 
+Status UsbBridge::attach_config(ConfigGateway& gateway) noexcept {
+  config_gateway_ = &gateway;
+  if (config_.mesh != nullptr) {
+    config_.mesh->set_config_sink(&gateway);
+  }
+  config_.capability |= kCapConfigEndpointV1;
+  return Status::success();
+}
+
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.push(input, now_ms);
@@ -522,10 +531,152 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       send_error(UsbErrorCode::ProtocolError, request, "INGRESS_DIRECTION",
                  now_ms);
       break;
+    case HostOpsSub::ConfigQuery:
+      handle_config_query(request, inner, now_ms);
+      break;
+    case HostOpsSub::ConfigChallenge:
+      handle_config_challenge(request, inner, now_ms);
+      break;
+    case HostOpsSub::ConfigPermit:
+      handle_config_permit(request, inner, now_ms);
+      break;
+    case HostOpsSub::ConfigStatus:
+      // 0x22 is device→host only (the async reply to a 0x20 query): a host
+      // issuing one is a protocol violation, never a request to answer.
+      send_error(UsbErrorCode::ProtocolError, request, "STATUS_DIRECTION",
+                 now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
   }
+}
+
+ConfigOpsResult UsbBridge::config_result_for(const Status& status) noexcept {
+  switch (status.code) {
+    case StatusCode::WouldBlock:
+      return ConfigOpsResult::Busy;
+    case StatusCode::NoRoute:
+      return ConfigOpsResult::NoRoute;
+    case StatusCode::InvalidArgument:
+      return ConfigOpsResult::Invalid;
+    default:
+      return ConfigOpsResult::Indeterminate;
+  }
+}
+
+void UsbBridge::send_config_reply(const std::uint64_t request,
+                                  const std::uint8_t sub,
+                                  const ConfigOpsResult result,
+                                  const NodeId target, const ByteView body,
+                                  const MonotonicMs now_ms) noexcept {
+  ConfigReply reply{};
+  reply.result = static_cast<std::uint16_t>(result);
+  reply.target = target;
+  reply.body = body;
+  std::array<std::uint8_t,
+             kGatewayInnerHeadSize + kConfigReplyFixedPayload +
+                 kConfigChallengeBodySize>
+      encoded{};
+  std::size_t body_size = 0;
+  if (encode_config_reply(static_cast<HostOpsSub>(sub), reply,
+                          MutableByteView{encoded.data(), encoded.size()},
+                          body_size)) {
+    enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), body_size},
+            now_ms);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::on_config_reply(const std::uint64_t request,
+                                const std::uint8_t sub,
+                                const ConfigOpsResult result,
+                                const NodeId target, const ByteView body,
+                                const MonotonicMs now_ms) noexcept {
+  send_config_reply(request, sub, result, target, body, now_ms);
+}
+
+void UsbBridge::handle_config_query(const std::uint64_t request,
+                                    const ByteView inner,
+                                    const MonotonicMs now_ms) noexcept {
+  ConfigQueryRequest query{};
+  if (!decode_config_query(inner, query)) {
+    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_QUERY_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigStatus),
+                      ConfigOpsResult::Unsupported, query.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status =
+      config_gateway_->submit_status_query(request, query.target,
+                                           query.config_namespace,
+                                           query.operation_id, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigStatus),
+                      config_result_for(status), query.target, ByteView{}, now_ms);
+  }
+  // Admitted: the answer lands asynchronously on on_config_reply (0x22).
+}
+
+void UsbBridge::handle_config_challenge(const std::uint64_t request,
+                                        const ByteView inner,
+                                        const MonotonicMs now_ms) noexcept {
+  ConfigChallengeRequest challenge{};
+  if (!decode_config_challenge(inner, challenge)) {
+    send_error(UsbErrorCode::ProtocolError, request,
+               "CONFIG_CHALLENGE_MALFORMED", now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request,
+                      static_cast<std::uint8_t>(HostOpsSub::ConfigChallenge),
+                      ConfigOpsResult::Unsupported, challenge.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status = config_gateway_->submit_challenge(
+      request, challenge.target, challenge.config_namespace, challenge.schema,
+      challenge.client_nonce, now_ms);
+  if (!status) {
+    send_config_reply(request,
+                      static_cast<std::uint8_t>(HostOpsSub::ConfigChallenge),
+                      config_result_for(status), challenge.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the answer lands asynchronously on on_config_reply (0x23).
+}
+
+void UsbBridge::handle_config_permit(const std::uint64_t request,
+                                     const ByteView inner,
+                                     const MonotonicMs now_ms) noexcept {
+  ConfigPermitRequest permit{};
+  if (!decode_config_permit(inner, permit)) {
+    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_PERMIT_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigPermit),
+                      ConfigOpsResult::Unsupported, permit.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status = config_gateway_->submit_permit(
+      request, permit.target, permit.permit, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigPermit),
+                      config_result_for(status), permit.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the ack resolves asynchronously on on_config_reply (0x21).
 }
 
 void UsbBridge::send_receipt(const DispatchReceipt& receipt,

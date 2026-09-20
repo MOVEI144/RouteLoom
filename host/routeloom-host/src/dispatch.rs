@@ -27,16 +27,22 @@
 //!   stretch a TTL.
 
 use routeloom_protocol::host_ops::{
-    self, BootLease, Evidence, GatewayOpsResult, HostOpsResult, LaneRequest, QueryResponse,
-    Receipt, SlotState, SubmitRequest, TimeSampleRequest, CAP_GATEWAY_ENDPOINT_V1, CAP_HOST_OPS_V1,
-    SUB_QUERY_DISPATCH, SUB_RETIRE_THROUGH, SUB_SKIP,
+    self, BootLease, ConfigOpsResult, Evidence, GatewayOpsResult, HostOpsResult, LaneRequest,
+    QueryResponse, Receipt, SlotState, SubmitRequest, TimeSampleRequest, CAP_CONFIG_ENDPOINT_V1,
+    CAP_GATEWAY_ENDPOINT_V1, CAP_HOST_OPS_V1, SUB_QUERY_DISPATCH, SUB_RETIRE_THROUGH, SUB_SKIP,
 };
 use routeloom_protocol::{Frame, FrameKind};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::send_store::{DispatchState, OperationStore, PrepareOutcome, StoredOperation};
+use crate::config::{
+    config_dev_key, ConfigIssuer, ConfigLane, ConfigOutcome, ConfigRequest, ConfigStep,
+};
+use crate::send_store::{
+    mint_id128, ConfigAuthorityLedger, DispatchState, OperationStore, PrepareOutcome,
+    StoredOperation,
+};
 use crate::{json_escape, now_ms, push_event, Outbound, State};
 
 // contracts.json / design constants.
@@ -106,6 +112,9 @@ pub struct LinkSnapshot {
     /// The device serves the Gateway HostOps family (cap bit 3): host
     /// registration, scope-2 ingress and unregister.
     pub gateway_ops: bool,
+    /// The device serves the Config HostOps family (cap bit 4): challenge /
+    /// status queries and permit-object transfer (P5).
+    pub config_ops: bool,
     /// Authenticated USB session id — the registration binds this.
     pub session: u64,
     /// The daemon's own incarnation id (minted once per run, bound into
@@ -138,6 +147,9 @@ fn link_snapshot(state: &State) -> LinkSnapshot {
         gateway_ops: info
             .capability
             .is_some_and(|c| c & CAP_GATEWAY_ENDPOINT_V1 != 0),
+        config_ops: info
+            .capability
+            .is_some_and(|c| c & CAP_CONFIG_ENDPOINT_V1 != 0),
         session: info.id.unwrap_or(0),
         host_boot: state.host_boot,
         node: info.node.unwrap_or(0),
@@ -189,6 +201,164 @@ impl GatewayLane {
     pub fn clear(&self) {
         *self.current.lock().expect("gateway lane poisoned") = None;
     }
+}
+
+// --- Config operation registry (scope-gateway-config P5) ---------------------
+//
+// Config ops get their own operation space — never the messages.* or
+// gateway.* tables. The api1 layer submits a `ConfigRequest` and gets back a
+// config op id; the dispatch thread drives it through the `ConfigLane` and
+// writes the terminal `ConfigOutcome` here. `config.get` reads the record.
+// Both ends are bounded so a stalled link or a spammed submit can never grow
+// the hub without limit, and a queued request is only drained while a live
+// session can carry it — it stays PENDING rather than fabricating a result.
+
+/// api→dispatch request bound for the config lane. Only the wire essentials
+/// ride the inbox — the summary/network/target/submitted metadata is already
+/// committed to the `ConfigOpRecord` at submit time, so `config.get` reads it
+/// from there rather than carrying a second copy through the queue.
+struct QueuedConfig {
+    op_id: u64,
+    request: ConfigRequest,
+}
+
+/// The api-visible record for one config op. `outcome` is None while the op
+/// is queued or in flight — never a guessed verdict.
+#[derive(Clone, Debug)]
+pub struct ConfigOpRecord {
+    pub op_id: u64,
+    pub summary: String,
+    pub network: u64,
+    pub target: u64,
+    pub outcome: Option<ConfigOutcome>,
+    pub submitted_ms: u64,
+    pub resolved_ms: Option<u64>,
+}
+
+/// Bound on queued (not yet driven) requests and on retained records.
+const CONFIG_INBOX_CAP: usize = 32;
+const CONFIG_RECORD_CAP: usize = 128;
+
+#[derive(Default)]
+struct ConfigOpsInner {
+    next_op: u64,
+    inbox: VecDeque<QueuedConfig>,
+    records: HashMap<u64, ConfigOpRecord>,
+    /// Resolved op ids in completion order — the FIFO eviction order once the
+    /// record table is full (in-flight ops are never evicted).
+    resolved_order: VecDeque<u64>,
+}
+
+/// Shared config op hub: api1 is the producer/reader, the dispatch thread the
+/// consumer/writer. One Mutex guards the whole structure — submits and
+/// resolutions are short and the dispatch pass never holds the store lock and
+/// this lock together long enough to matter.
+#[derive(Default)]
+pub struct ConfigOps {
+    inner: Mutex<ConfigOpsInner>,
+}
+
+impl ConfigOps {
+    /// Queue a client request for the dispatch lane. Returns the config op id
+    /// the client polls with `config.get`, or Err(()) when the inbox is full —
+    /// an honest capacity refusal, never a silent drop.
+    pub fn submit(
+        &self,
+        request: ConfigRequest,
+        summary: String,
+        network: u64,
+        target: u64,
+        now_ms: u64,
+    ) -> Result<u64, ()> {
+        let mut inner = self.inner.lock().expect("config ops poisoned");
+        if inner.inbox.len() >= CONFIG_INBOX_CAP || inner.records.len() >= CONFIG_RECORD_CAP {
+            return Err(());
+        }
+        let op_id = inner.next_op.wrapping_add(1).max(1);
+        inner.next_op = op_id;
+        inner.inbox.push_back(QueuedConfig { op_id, request });
+        inner.records.insert(
+            op_id,
+            ConfigOpRecord {
+                op_id,
+                summary,
+                network,
+                target,
+                outcome: None,
+                submitted_ms: now_ms,
+                resolved_ms: None,
+            },
+        );
+        Ok(op_id)
+    }
+
+    /// Pop the head queued request for the dispatch pass. Only called while a
+    /// live session can carry it AND the lane is free — the caller gates on
+    /// `link.active && !config_busy()`, so a queued op stays PENDING behind a
+    /// busy lane rather than being pulled off the queue only to resolve Busy.
+    fn take_request(&self) -> Option<QueuedConfig> {
+        self.inner
+            .lock()
+            .expect("config ops poisoned")
+            .inbox
+            .pop_front()
+    }
+
+    /// Record the terminal outcome for an op the lane resolved.
+    fn resolve(&self, op_id: u64, outcome: ConfigOutcome, now_ms: u64) {
+        let mut inner = self.inner.lock().expect("config ops poisoned");
+        if let Some(record) = inner.records.get_mut(&op_id) {
+            record.outcome = Some(outcome);
+            record.resolved_ms = Some(now_ms);
+            inner.resolved_order.push_back(op_id);
+        }
+        // Bound the retained record table: evict the oldest RESOLVED entries
+        // first so in-flight ops are never dropped out from under a reader.
+        while inner.records.len() > CONFIG_RECORD_CAP {
+            let Some(oldest) = inner.resolved_order.pop_front() else {
+                break;
+            };
+            inner.records.remove(&oldest);
+        }
+    }
+
+    /// Read one op's record for `config.get`.
+    pub fn get(&self, op_id: u64) -> Option<ConfigOpRecord> {
+        self.inner
+            .lock()
+            .expect("config ops poisoned")
+            .records
+            .get(&op_id)
+            .cloned()
+    }
+}
+
+/// The single in-flight wire step the dispatcher is tracking for the config
+/// lane (the lane holds at most one outstanding request at a time).
+#[derive(Clone, Copy)]
+struct ConfigPending {
+    /// Dispatcher-assigned wire request id stamped on the emitted frame.
+    wire: u64,
+    /// The lane's own request id — what `on_reply`/`on_dropped` expects.
+    lane: u64,
+    /// The config op id the in-flight request resolves.
+    op_id: u64,
+}
+
+/// The dispatcher-owned config lane state. `authority`/`generation` are the
+/// daemon's configured SingleAuthority inputs; the sequence is allocated and
+/// durably committed per-propose by the store layer (`ConfigAuthorityLedger`).
+struct ConfigRuntime {
+    lane: ConfigLane,
+    /// Configured issuer node id; 0 means no authority is configured and
+    /// Propose is refused (queries still run).
+    authority: u64,
+    /// Authority generation bound into each signed command.
+    generation: u32,
+    pending: Option<ConfigPending>,
+    /// Emit bodies the lane produced this pass, drained into the wire queue
+    /// on the leased path — cleared when the link cannot carry them.
+    emits: Vec<DispatchRequest>,
 }
 
 /// One authenticated device-clock observation: the device monotonic time
@@ -404,6 +574,14 @@ pub struct Dispatcher {
     /// `State.gateway_lane` — Some(record) on a fresh grant, None on
     /// session/link loss. Drained by `dispatch_once` only.
     gateway_publish: Option<Option<GatewayRegistration>>,
+    /// The config lane runtime (P5) — None until `attach_config` wires a
+    /// `ConfigLane`. Queries/proposes only run while it and the device's
+    /// config capability are present.
+    config: Option<ConfigRuntime>,
+    /// Config outcomes resolved this pass, drained by `dispatch_once` into
+    /// `State.config_ops`. Lives outside `config` so a refused submit can
+    /// still be reported even when no lane is attached.
+    config_done: Vec<(u64, ConfigOutcome)>,
     /// Bounded diagnostics drained by the loop into the event ring.
     notes: Vec<String>,
 }
@@ -433,8 +611,25 @@ impl Dispatcher {
             gateway_bind: (0, 0),
             gateway_next_emit: 0,
             gateway_publish: None,
+            config: None,
+            config_done: Vec::new(),
             notes: Vec::new(),
         }
+    }
+
+    /// Wire the config lane in (P5): the dispatch loop attaches a `ConfigLane`
+    /// at startup with the daemon's configured authority inputs. `authority`
+    /// is the issuer node id (0 = unconfigured → Propose refused, queries
+    /// still run); `generation` is the authority generation bound into signed
+    /// commands. The per-propose sequence comes from the durable ledger.
+    pub fn attach_config(&mut self, lane: ConfigLane, authority: u64, generation: u32) {
+        self.config = Some(ConfigRuntime {
+            lane,
+            authority,
+            generation,
+            pending: None,
+            emits: Vec::new(),
+        });
     }
 
     fn alloc_request(&mut self) -> u64 {
@@ -459,6 +654,160 @@ impl Dispatcher {
     /// committed values.
     pub fn take_gateway_publish(&mut self) -> Option<Option<GatewayRegistration>> {
         self.gateway_publish.take()
+    }
+
+    /// Config outcomes resolved this pass, drained by `dispatch_once` into
+    /// `State.config_ops` — same once-per-pass committed-value discipline as
+    /// the registration mirror.
+    pub fn take_config_done(&mut self) -> Vec<(u64, ConfigOutcome)> {
+        std::mem::take(&mut self.config_done)
+    }
+
+    /// Whether the config lane currently holds an in-flight request. The
+    /// dispatch pass only pulls a queued op off `State.config_ops` while this
+    /// is false, so a queued op stays PENDING behind a busy lane instead of
+    /// being drained and refused Busy.
+    pub fn config_busy(&self) -> bool {
+        self.config.as_ref().is_some_and(|c| c.lane.busy())
+    }
+
+    /// Advance the config lane on a `ConfigStep`: an Emit becomes a wire
+    /// request stamped with a fresh dispatcher request id (so it can never
+    /// alias a SUBMIT/QUERY pending), and a Done resolves the op id's
+    /// outcome. Wire id -> lane id rides in `pending` — one in-flight only.
+    fn drive_config_step(&mut self, step: ConfigStep, op_id: u64) {
+        if self.config.is_none() {
+            return;
+        }
+        match step {
+            ConfigStep::Emit { request, body } => {
+                // alloc_request borrows the whole dispatcher, so it runs
+                // before the config field borrow below.
+                let wire = self.alloc_request();
+                let cfg = self.config.as_mut().expect("checked above");
+                cfg.emits.push(DispatchRequest {
+                    request: wire,
+                    body,
+                });
+                cfg.pending = Some(ConfigPending {
+                    wire,
+                    lane: request,
+                    op_id,
+                });
+            }
+            ConfigStep::Done(outcome) => {
+                let cfg = self.config.as_mut().expect("checked above");
+                cfg.pending = None;
+                self.config_done.push((op_id, outcome));
+            }
+        }
+    }
+
+    /// Submit one queued api request to the lane. Gates on the device's
+    /// config capability and, for Propose, on a configured authority — a
+    /// refusal is an honest terminal outcome, never a fabricated result. The
+    /// SingleAuthority commit order allocates + durably commits the sequence
+    /// BEFORE the lane signs, so a crash can gap but never reuse one.
+    fn config_submit<L: ConfigAuthorityLedger>(
+        &mut self,
+        ledger: &mut L,
+        link: &LinkSnapshot,
+        op_id: u64,
+        request: ConfigRequest,
+        now: u64,
+    ) {
+        if !link.config_ops {
+            self.config_done
+                .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Unsupported)));
+            return;
+        }
+        let Some(cfg) = self.config.as_mut() else {
+            self.config_done
+                .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Unsupported)));
+            return;
+        };
+        if cfg.lane.busy() {
+            self.config_done
+                .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Busy)));
+            return;
+        }
+        if let ConfigRequest::Propose { .. } = request {
+            // A signed permit needs a configured authority, a live mesh
+            // network to bind into the AAD, and an issuer that actually holds
+            // a signing key — none of these is client-supplied.
+            if cfg.authority == 0 || link.network == 0 || !cfg.lane.issuer_ready() {
+                self.config_done
+                    .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));
+                return;
+            }
+            let Ok(sequence) = ledger.config_authority_next() else {
+                // The durable sequence could not be committed: the issuance
+                // cannot be proven, so report Indeterminate, never a seq we
+                // did not durably own.
+                self.config_done.push((op_id, ConfigOutcome::Indeterminate));
+                return;
+            };
+            cfg.lane.set_issuer_identity(link.network, cfg.authority);
+            cfg.lane.set_authority(cfg.generation, sequence);
+        }
+        let step = cfg.lane.submit(request, now);
+        self.drive_config_step(step, op_id);
+    }
+
+    /// Route one inbox body to the lane when it answers the in-flight config
+    /// wire request. Returns true when consumed (so `handle_reply` does not
+    /// fall through to "unmatched").
+    fn config_reply(&mut self, request: u64, inner: &[u8], now: u64) -> bool {
+        let pending = match self.config.as_ref().and_then(|c| c.pending) {
+            Some(p) if p.wire == request => p,
+            _ => return false,
+        };
+        let step = {
+            let cfg = self.config.as_mut().expect("checked above");
+            cfg.pending = None;
+            cfg.lane.on_reply(pending.lane, inner, now)
+        };
+        self.drive_config_step(step, pending.op_id);
+        true
+    }
+
+    /// Deadline enforcement for the in-flight config step: a query deadline
+    /// resolves Timeout, a permit-transfer deadline Indeterminate. Runs every
+    /// pass regardless of link state — a stalled step must still resolve.
+    /// `carry` is false when the link cannot serve config right now, in which
+    /// case buffered emits are dropped (the in-flight request then resolves
+    /// via its own deadline) rather than sent to a dead endpoint.
+    fn config_pass(&mut self, now: u64, carry: bool, out: &mut Vec<DispatchRequest>) {
+        let Some(cfg) = self.config.as_mut() else {
+            return;
+        };
+        if let Some(outcome) = cfg.lane.poll(now) {
+            let op_id = cfg.pending.map(|p| p.op_id).unwrap_or(0);
+            cfg.pending = None;
+            self.config_done.push((op_id, outcome));
+        }
+        if carry {
+            out.append(&mut cfg.emits);
+        } else {
+            cfg.emits.clear();
+        }
+    }
+
+    /// A config emit the outbound queue refused — provably never reached the
+    /// device, so resolve the in-flight step honestly instead of leaving it
+    /// to time out. Returns true when `request` was the config wire id.
+    fn config_dropped(&mut self, request: u64) -> bool {
+        let pending = match self.config.as_ref().and_then(|c| c.pending) {
+            Some(p) if p.wire == request => p,
+            _ => return false,
+        };
+        let step = {
+            let cfg = self.config.as_mut().expect("checked above");
+            cfg.pending = None;
+            cfg.lane.on_dropped(pending.lane)
+        };
+        self.drive_config_step(step, pending.op_id);
+        true
     }
 
     /// Gateway registration lane (05 §5.6): keep one live (session,
@@ -604,6 +953,10 @@ impl Dispatcher {
         {
             self.sample = None;
         }
+        // Config lane sweep: deadline enforcement is a host-side proof and
+        // runs every pass regardless of link state; buffered emits only go
+        // out while the link actually serves the config family.
+        self.config_pass(now, link.config_ops && self.lease.is_some(), &mut out);
         let Ok(ops) = store.dispatch_view() else {
             self.note("dispatch_view fault".to_string());
             return out;
@@ -1228,6 +1581,9 @@ impl Dispatcher {
                 }
             }
         }
+        // A config emit that never reached the writer resolves its in-flight
+        // step honestly (Timeout for a query, Indeterminate for a transfer).
+        self.config_dropped(request);
         if self.sample.is_some_and(|s| s.request == request) {
             self.sample = None;
         }
@@ -1243,6 +1599,12 @@ impl Dispatcher {
     ) {
         if self.sample.is_some_and(|s| s.request == request) {
             self.on_time_sample(inner, now);
+            return;
+        }
+        // Config replies land in the same inbox keyed by the dispatcher's
+        // wire request id — route them to the lane before the generic
+        // pending lookup, which does not own them.
+        if self.config_reply(request, inner, now) {
             return;
         }
         let Some(pending) = self.pending.remove(&request) else {
@@ -2054,6 +2416,17 @@ pub fn dispatch_once(
 ) {
     let replies = state.dispatch_inbox.drain();
     let ingress = state.ingress_inbox.drain();
+    let link = link_snapshot(state);
+    // A config submission drains only while a live session can carry it AND
+    // the lane is free — a dead link or a busy lane leaves the head queued
+    // for a later pass (still honestly PENDING) rather than pulling it off
+    // the queue only to fabricate a refusal. A session that cannot serve
+    // config refuses honestly inside config_submit instead.
+    let config_req = if link.active && !dispatcher.config_busy() {
+        state.config_ops.take_request()
+    } else {
+        None
+    };
     let requests = {
         let mut store = state
             .operation_store
@@ -2062,8 +2435,18 @@ pub fn dispatch_once(
         for (request, body) in replies {
             dispatcher.handle_reply(&mut *store, request, &body, now);
         }
-        dispatcher.tick_mono(&mut *store, &link_snapshot(state), now, mono)
+        // Feed a config submission before tick so its first Emit rides this
+        // pass's wire queue.
+        if let Some(queued) = config_req {
+            dispatcher.config_submit(&mut *store, &link, queued.op_id, queued.request, now);
+        }
+        dispatcher.tick_mono(&mut *store, &link, now, mono)
     };
+    // Publish config outcomes exactly once per pass — api1 only ever reads
+    // committed values.
+    for (op_id, outcome) in dispatcher.take_config_done() {
+        state.config_ops.resolve(op_id, outcome, now);
+    }
     // Publish the registration mirror exactly once per pass — api1 only
     // ever reads committed values.
     if let Some(publish) = dispatcher.take_gateway_publish() {
@@ -2124,6 +2507,46 @@ pub fn dispatch_once(
     }
 }
 
+/// Reserve subtracted from the challenge's apply budget before the issuer
+/// signs — the same safety margin the device profile assumes so a permit is
+/// never cut to the wire's last millisecond.
+const CONFIG_SAFETY_MARGIN_MS: u32 = 500;
+
+/// Fill `buf` with fresh entropy from the store's 128-bit minter (urandom
+/// with a non-repeating fallback) — the lane's operation_id / client_nonce
+/// draws. Injected as a closure so tests stay deterministic.
+fn fill_config_entropy(buf: &mut [u8]) {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let block = mint_id128();
+        let n = (buf.len() - filled).min(block.len());
+        buf[filled..filled + n].copy_from_slice(&block[..n]);
+        filled += n;
+    }
+}
+
+/// Build the config lane for the dispatch thread: the dev-profile issuer
+/// derived from the link development secret (domain-separated — never the
+/// raw PSK), the daemon's configured authority/generation, and real entropy.
+/// An unset authority yields a lane that can answer queries but refuses
+/// every Propose honestly.
+fn config_lane_for(state: &State) -> ConfigLane {
+    let dev_key = config_dev_key(crate::DEV_SECRET);
+    let authority = state.config_authority.unwrap_or(0);
+    let issuer = ConfigIssuer::new(
+        dev_key.to_vec(),
+        /*network=*/ 0, // rebound to the live session network per propose
+        authority,
+        CONFIG_SAFETY_MARGIN_MS,
+    );
+    ConfigLane::new(
+        issuer,
+        state.config_authority_generation,
+        /*authority_sequence=*/ 0, // fed from the durable ledger per propose
+        Box::new(fill_config_entropy),
+    )
+}
+
 /// The dispatch thread: keeps working through USB outages — records stay
 /// queued while the link is down and host-side expiry still applies.
 pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
@@ -2133,6 +2556,11 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
         .expect("operation store poisoned")
         .lineage();
     let mut dispatcher = Dispatcher::new(dispatcher_id);
+    dispatcher.attach_config(
+        config_lane_for(&state),
+        state.config_authority.unwrap_or(0),
+        state.config_authority_generation,
+    );
     loop {
         dispatch_once(
             &state,
@@ -2156,6 +2584,10 @@ mod tests {
         encode_receipt, encode_retire_response, encode_time_sample_response, RetireResponse,
         TimeSampleResponse,
     };
+    use routeloom_wire::autonomy::EncodedPayload;
+    use routeloom_wire::endpoint::{
+        control_challenge_encode, ConfigField, ConfigFieldType, ControlChallenge,
+    };
 
     const UID: u32 = 501;
     const NET: u64 = 1;
@@ -2173,6 +2605,7 @@ mod tests {
             session: 0,
             host_boot: HOST_BOOT,
             gateway_ops: true,
+            config_ops: true,
         }
     }
 
@@ -2186,6 +2619,7 @@ mod tests {
             session: 0,
             host_boot: 0,
             gateway_ops: false,
+            config_ops: false,
         }
     }
 
@@ -4236,5 +4670,181 @@ mod tests {
             panic!("read on a missing network answers an empty batch")
         };
         assert!(batch.records.is_empty());
+    }
+
+    // --- Config lane dispatch (scope-gateway-config P5) ------------------------
+    //
+    // The api1 tests cannot reach this glue: the dispatcher's wire-id remap,
+    // the emit/reply/drop/done plumbing, and the single-in-flight gate that
+    // keeps a queued op PENDING behind a busy lane.
+
+    /// A config lane for dispatch tests — the same dev-profile issuer the
+    /// live loop builds (`config_lane_for`), over deterministic entropy.
+    fn test_config_lane() -> ConfigLane {
+        let issuer = ConfigIssuer::new(config_dev_key(crate::DEV_SECRET).to_vec(), NET, 0x42, 100);
+        let mut counter = 0x30_u8;
+        ConfigLane::new(
+            issuer,
+            1,
+            0,
+            Box::new(move |out: &mut [u8]| {
+                counter = counter.wrapping_add(1);
+                for b in out.iter_mut() {
+                    *b = counter;
+                }
+            }),
+        )
+    }
+
+    fn config_challenge_reply(target: u64, ch: &ControlChallenge) -> Vec<u8> {
+        let mut body = EncodedPayload::default();
+        control_challenge_encode(ch, &mut body).unwrap();
+        host_ops::encode_config_reply(
+            host_ops::SUB_CONFIG_CHALLENGE,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Ok as u16,
+                target,
+                body: body.view().to_vec(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn config_challenge() -> ControlChallenge {
+        ControlChallenge {
+            config_namespace: 1,
+            schema: 1,
+            client_nonce: [0x11; 16],
+            target_boot: 0x99,
+            challenge_nonce: [0x22; 16],
+            revision: 3,
+            active_hash: [0x44; 32],
+            valid_for_ms: 5_000,
+        }
+    }
+
+    /// The wire request id of the config emit in a tick's queue, matched by
+    /// the config subcommand byte (`body[1]`).
+    fn config_wire(out: &[DispatchRequest], sub: u8) -> u64 {
+        out.iter()
+            .find(|r| r.body.get(1) == Some(&sub))
+            .expect("a config emit this pass")
+            .request
+    }
+
+    fn challenge_request() -> ConfigRequest {
+        ConfigRequest::Challenge {
+            target: 0x99,
+            config_namespace: 1,
+            schema: 1,
+        }
+    }
+
+    fn propose_request() -> ConfigRequest {
+        ConfigRequest::Propose {
+            target: 0x99,
+            config_namespace: 1,
+            schema: 1,
+            base_snapshot: vec![0xaa],
+            patch: vec![ConfigField {
+                field_id: 1,
+                field_type: ConfigFieldType::U8,
+                value: vec![1],
+            }],
+            apply_budget_ms: 0,
+        }
+    }
+
+    #[test]
+    fn config_lane_round_trip_through_the_dispatcher() {
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        assert!(!dispatcher.config_busy());
+        dispatcher.config_submit(&mut store, &link(), 7, challenge_request(), 1_000);
+        assert!(
+            dispatcher.config_busy(),
+            "a submit leaves a request in flight"
+        );
+        // The first Emit rides this pass's wire queue under a dispatcher-
+        // assigned wire request id, remapped from the lane's own id.
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        // A valid ControlChallenge reply on that wire id resolves the op.
+        let ch = config_challenge();
+        dispatcher.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(7, ConfigOutcome::Challenged(ch))]
+        );
+        assert!(!dispatcher.config_busy());
+    }
+
+    #[test]
+    fn config_emit_drop_resolves_an_honest_timeout() {
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        dispatcher.config_submit(&mut store, &link(), 11, challenge_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        // The outbound queue refused the frame — provably never reached the
+        // device, so the in-flight query resolves Timeout, never a claim.
+        dispatcher.emit_dropped(&mut store, wire);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(11, ConfigOutcome::Timeout)]
+        );
+    }
+
+    #[test]
+    fn config_submit_refuses_without_capability_or_authority() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        // A link that cannot serve config refuses honestly — not fabricated.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut dead = link();
+        dead.config_ops = false;
+        dispatcher.config_submit(&mut store, &dead, 21, challenge_request(), 1_000);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(21, ConfigOutcome::Refused(ConfigOpsResult::Unsupported))]
+        );
+        // A Propose against a lane with no configured authority is Denied
+        // before any emit — the daemon cannot sign what it has no issuer for.
+        let mut no_auth = Dispatcher::new([9; 16]);
+        no_auth.attach_config(test_config_lane(), 0, 1);
+        no_auth.config_submit(&mut store, &link(), 22, propose_request(), 1_000);
+        assert_eq!(
+            no_auth.take_config_done(),
+            vec![(22, ConfigOutcome::Refused(ConfigOpsResult::Denied))]
+        );
+        // The authority-0 lane still answers a Challenge — queries never sign.
+        no_auth.config_submit(&mut store, &link(), 23, challenge_request(), 1_000);
+        let out = no_auth.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        let ch = config_challenge();
+        no_auth.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
+        assert_eq!(
+            no_auth.take_config_done(),
+            vec![(23, ConfigOutcome::Challenged(ch))]
+        );
+    }
+
+    #[test]
+    fn config_ops_inbox_pops_one_at_a_time_fifo() {
+        // The busy-lane gate (`config_busy`) keeps a queued op PENDING; the
+        // inbox hands out one op per free pass in FIFO order, never draining
+        // a waiting op just to refuse it Busy.
+        let ops = crate::dispatch::ConfigOps::default();
+        let a = ops
+            .submit(challenge_request(), "a".to_string(), NET, 9, 0)
+            .unwrap();
+        let b = ops
+            .submit(challenge_request(), "b".to_string(), NET, 9, 0)
+            .unwrap();
+        assert_eq!(ops.take_request().map(|q| q.op_id), Some(a));
+        assert_eq!(ops.take_request().map(|q| q.op_id), Some(b));
+        assert!(ops.take_request().is_none());
     }
 }

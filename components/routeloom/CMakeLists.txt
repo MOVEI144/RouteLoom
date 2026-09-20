@@ -4,6 +4,8 @@ set(ROUTELOOM_CORE_SOURCES
   src/byte_io.cpp
   src/channel_plan.cpp
   src/config.cpp
+  src/config_dev.cpp
+  src/config_wire.cpp
   src/crc32.cpp
   src/c_api.cpp
   src/counter_store.cpp

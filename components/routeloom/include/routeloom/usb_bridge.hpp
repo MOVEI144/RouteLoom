@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/config_wire.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/gateway.hpp"
 #include "routeloom/node.hpp"
@@ -79,7 +80,8 @@ struct BridgeStats {
 };
 
 class UsbBridge final : public UsbFrameSink, public NodeObserver,
-                        public GatewayHostSink, public GatewayDeliveryObserver {
+                        public GatewayHostSink, public GatewayDeliveryObserver,
+                        public ConfigHostSink {
  public:
   struct Config {
     ByteView secret{};  // dev-profile shared secret; caller-owned, must outlive the bridge
@@ -105,6 +107,12 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // observer for host-originated gateway sends (schema-2 SUBMIT).
   // Returns the enable_gateway result (boot id must be nonzero).
   Status attach_gateway(GatewayDelivery& gateway) noexcept;
+
+  // Late config binding (P5): installs the component as the node's routed
+  // config endpoint (set_config_sink) and advertises CAP_CONFIG_ENDPOINT_V1
+  // in HelloAck. The bridge is the component's ConfigHostSink — the async
+  // 0x21/0x22/0x23 replies land on on_config_reply.
+  Status attach_config(ConfigGateway& gateway) noexcept;
 
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
@@ -140,6 +148,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void on_gateway_resolved(const GatewayEndpoint& endpoint, NodeId gateway,
                            Status result) noexcept override;
   void on_gateway_result(const GatewaySendResult& result) noexcept override;
+
+  // ConfigHostSink (P5): the config component's async outcome. Encodes the
+  // 0x21/0x22/0x23 reply body and queues it under the original request id —
+  // the reply is framed, never an optimistic claim of application.
+  void on_config_reply(std::uint64_t request, std::uint8_t sub,
+                       ConfigOpsResult result, NodeId target, ByteView body,
+                       MonotonicMs now_ms) noexcept override;
 
   SessionState state() const noexcept { return state_; }
   std::uint64_t session_id() const noexcept {
@@ -227,6 +242,22 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                        MonotonicMs now_ms) noexcept;
   void handle_ops_time_sample(std::uint64_t request, ByteView inner,
                               MonotonicMs now_ms) noexcept;
+  // Config endpoint requests (0x20/0x21/0x23): decode, gate on
+  // CAP_CONFIG_ENDPOINT_V1 + an attached component, then hand to
+  // ConfigGateway. Synchronous refusals answer immediately with the mapped
+  // ConfigOpsResult; admitted work reports asynchronously on on_config_reply.
+  void handle_config_query(std::uint64_t request, ByteView inner,
+                           MonotonicMs now_ms) noexcept;
+  void handle_config_challenge(std::uint64_t request, ByteView inner,
+                               MonotonicMs now_ms) noexcept;
+  void handle_config_permit(std::uint64_t request, ByteView inner,
+                            MonotonicMs now_ms) noexcept;
+  // Maps a synchronous submit_* Status to the wire result code.
+  static ConfigOpsResult config_result_for(const Status& status) noexcept;
+  // Encodes + queues a 0x21/0x22/0x23 reply under `request`.
+  void send_config_reply(std::uint64_t request, std::uint8_t sub,
+                         ConfigOpsResult result, NodeId target, ByteView body,
+                         MonotonicMs now_ms) noexcept;
   void send_receipt(const DispatchReceipt& receipt, std::uint64_t request,
                     MonotonicMs now_ms) noexcept;
   void send_query_response(const QueryResponse& response, std::uint64_t request,
@@ -376,6 +407,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
 
   // --- Gateway host lane state (P3) ------------------------------------------
   GatewayDelivery* gateway_{nullptr};
+  // Routed config endpoint (P5): the bridge-facing ConfigGateway, installed
+  // as the mesh node's config_sink_. nullptr -> config ops Unsupported.
+  ConfigGateway* config_gateway_{nullptr};
   HostRegistration registration_{};
   // Bounded pending 0x11 ingress slots — shared by wire submits and the
   // host loopback so the 8-deep pending bound is one honest pool.

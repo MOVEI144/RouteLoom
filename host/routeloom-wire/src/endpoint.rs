@@ -721,7 +721,7 @@ pub fn control_challenge_query_decode(encoded: &[u8]) -> Result<ControlChallenge
 /// Challenge2 (92B): the ChallengeQuery 24B head with sub2 (client_nonce is
 /// the echo) | target_boot u64 | challenge_nonce 16B | revision u64 |
 /// active_hash 32B | valid_for_ms u32.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlChallenge {
     pub config_namespace: u16,
     pub schema: u16,
@@ -843,7 +843,7 @@ pub fn control_status_query_decode(encoded: &[u8]) -> Result<ControlStatusQuery>
 
 /// Status4 (72B): ver/sub4 | ns u16 | opid 16B | decision_rev u64 |
 /// active_rev u64 | phase u8 | reserved u8=0 | reason u16 | active_hash 32B.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlStatus {
     pub config_namespace: u16,
     pub operation_id: [u8; 16],
@@ -1221,4 +1221,109 @@ pub fn config_snapshot_hash_input(
     raw.extend_from_slice(&schema.to_be_bytes());
     raw.extend_from_slice(snapshot_tlv);
     Ok(raw)
+}
+
+// --- Snapshot / patch TLV (§5.4) ----------------------------------------------
+//
+// A snapshot is the complete sorted TLV of every active config field; a patch
+// is a sorted TLV of the fields to change. Both share the RCC1 field record
+// (id u16 | type u8 | len u16 | value), strictly ascending ids, <=16 fields,
+// value <=96 B, no trailing bytes.
+
+fn tlv_field_encode(field: &ConfigField, out: &mut Vec<u8>) {
+    out.extend_from_slice(&field.field_id.to_be_bytes());
+    out.push(field.field_type as u8);
+    out.extend_from_slice(&(field.value.len() as u16).to_be_bytes());
+    out.extend_from_slice(&field.value);
+}
+
+/// Serialize already-sorted, already-valid fields into snapshot TLV bytes.
+/// `config_command_valid_fields` enforces the sort/type/length/512 bound;
+/// an empty field set encodes to an empty snapshot.
+pub fn config_tlv_encode(fields: &[ConfigField]) -> Result<Vec<u8>> {
+    let patch_len = config_command_valid_fields(fields)?;
+    let mut out = Vec::with_capacity(patch_len);
+    for field in fields {
+        tlv_field_encode(field, &mut out);
+    }
+    Ok(out)
+}
+
+/// Parse a snapshot TLV into fields: known types, exact lengths, strictly
+/// ascending ids, <=16 fields, no trailing bytes.
+pub fn config_tlv_decode(tlv: &[u8]) -> Result<Vec<ConfigField>> {
+    if tlv.len() > CONFIG_SNAPSHOT_MAX {
+        return reject();
+    }
+    let mut fields: Vec<ConfigField> = Vec::new();
+    let mut cursor = 0_usize;
+    let mut previous_id = 0_u16;
+    while cursor < tlv.len() {
+        if tlv.len() - cursor < 5 {
+            return reject();
+        }
+        let field_id = u16::from_be_bytes(tlv[cursor..cursor + 2].try_into().expect("fixed"));
+        let field_type_raw = tlv[cursor + 2];
+        let declared = u16::from_be_bytes(tlv[cursor + 3..cursor + 5].try_into().expect("fixed"));
+        let Some(value_len) = tlv_value_length(field_type_raw, declared) else {
+            return reject();
+        };
+        if !fields.is_empty() && field_id <= previous_id {
+            return reject();
+        }
+        previous_id = field_id;
+        let start = cursor + 5;
+        if tlv.len() - start < value_len {
+            return reject();
+        }
+        let value = tlv[start..start + value_len].to_vec();
+        if field_type_raw == 1 && value != [0] && value != [1] {
+            return reject();
+        }
+        let field_type = match field_type_raw {
+            1 => ConfigFieldType::Bool,
+            2 => ConfigFieldType::U8,
+            3 => ConfigFieldType::U32,
+            4 => ConfigFieldType::Bytes,
+            _ => return reject(),
+        };
+        fields.push(ConfigField {
+            field_id,
+            field_type,
+            value,
+        });
+        if fields.len() > CONFIG_FIELD_COUNT_MAX {
+            return reject();
+        }
+        cursor = start + value_len;
+    }
+    Ok(fields)
+}
+
+/// Merge a validated patch onto a base snapshot: patch fields overwrite the
+/// same id, others are retained; the output stays strictly ascending. The
+/// bool is `false` when the merged result equals the base — the issuer's
+/// NO_CHANGE check before signing (no revision, no flash write).
+pub fn config_patch_apply(base_tlv: &[u8], patch: &[ConfigField]) -> Result<(Vec<u8>, bool)> {
+    let base = config_tlv_decode(base_tlv)?;
+    config_command_valid_fields(patch)?;
+    let mut merged: Vec<ConfigField> = Vec::with_capacity(base.len() + patch.len());
+    let (mut i, mut j) = (0_usize, 0_usize);
+    while i < base.len() || j < patch.len() {
+        if i < base.len() && (j >= patch.len() || base[i].field_id < patch[j].field_id) {
+            merged.push(base[i].clone());
+            i += 1;
+        } else if j < patch.len() && (i >= base.len() || patch[j].field_id < base[i].field_id) {
+            merged.push(patch[j].clone());
+            j += 1;
+        } else {
+            // Same field id on both sides: the patch value wins.
+            merged.push(patch[j].clone());
+            i += 1;
+            j += 1;
+        }
+    }
+    let next = config_tlv_encode(&merged)?;
+    let changed = next != base_tlv;
+    Ok((next, changed))
 }

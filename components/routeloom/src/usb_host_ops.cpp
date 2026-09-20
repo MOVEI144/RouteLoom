@@ -1170,4 +1170,187 @@ Status decode_host_unregister_response(const ByteView inner,
   return Status::success();
 }
 
+// --- Config endpoint subcommands (0x20-0x23) --------------------------------
+namespace {
+
+bool config_result_valid(const std::uint16_t result) noexcept {
+  switch (static_cast<ConfigOpsResult>(result)) {
+    case ConfigOpsResult::Ok:
+    case ConfigOpsResult::Busy:
+    case ConfigOpsResult::Denied:
+    case ConfigOpsResult::Unsupported:
+    case ConfigOpsResult::Invalid:
+    case ConfigOpsResult::Indeterminate:
+    case ConfigOpsResult::NoRoute:
+    case ConfigOpsResult::Timeout:
+      return true;
+  }
+  return false;
+}
+
+// The body length a 0x21/0x22/0x23 reply may carry, by subcommand. The
+// permit reply is result-only; the query replies carry the fixed endpoint
+// body on Ok and none on failure — so {0, N} is the legal set.
+bool config_reply_body_valid(const HostOpsSub sub, const std::size_t body_size) noexcept {
+  switch (sub) {
+    case HostOpsSub::ConfigPermit:
+      return body_size == 0;
+    case HostOpsSub::ConfigStatus:
+      return body_size == 0 || body_size == kConfigStatusBodySize;
+    case HostOpsSub::ConfigChallenge:
+      return body_size == 0 || body_size == kConfigChallengeBodySize;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+Status decode_config_query(const ByteView inner, ConfigQueryRequest& out) noexcept {
+  out = ConfigQueryRequest{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::ConfigQuery, kConfigQueryRequestPayload,
+                   kConfigQueryRequestPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (read) read = reader.read_u16(out.config_namespace);
+  if (read) {
+    read = reader.read_bytes(
+        MutableByteView{out.operation_id.data(), out.operation_id.size()});
+  }
+  return read;
+}
+
+Status encode_config_query(const ConfigQueryRequest& request,
+                           const MutableByteView out,
+                           std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::ConfigQuery,
+                                     kConfigQueryRequestPayload);
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_u16(request.config_namespace);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{request.operation_id.data(), request.operation_id.size()});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_config_challenge(const ByteView inner,
+                               ConfigChallengeRequest& out) noexcept {
+  out = ConfigChallengeRequest{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::ConfigChallenge,
+                   kConfigChallengeRequestPayload, kConfigChallengeRequestPayload,
+                   payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (read) read = reader.read_u16(out.config_namespace);
+  if (read) read = reader.read_u16(out.schema);
+  if (read) {
+    read = reader.read_bytes(
+        MutableByteView{out.client_nonce.data(), out.client_nonce.size()});
+  }
+  return read;
+}
+
+Status encode_config_challenge(const ConfigChallengeRequest& request,
+                               const MutableByteView out,
+                               std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::ConfigChallenge,
+                                     kConfigChallengeRequestPayload);
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_u16(request.config_namespace);
+  if (status) status = writer.write_u16(request.schema);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{request.client_nonce.data(), request.client_nonce.size()});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_config_permit(const ByteView inner, ConfigPermitRequest& out) noexcept {
+  out = ConfigPermitRequest{};
+  ByteView payload{};
+  // target:u64 (8) + permit (1..kConfigPermitMax).
+  const Status status =
+      gateway_body(inner, HostOpsSub::ConfigPermit, 8 + 1, 8 + kConfigPermitMax,
+                   payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (!read) return read;
+  out.permit = ByteView{payload.data + reader.consumed(), reader.remaining()};
+  return Status::success();
+}
+
+Status encode_config_permit(const ConfigPermitRequest& request,
+                            const MutableByteView out,
+                            std::size_t& written) noexcept {
+  written = 0;
+  if (request.permit.size == 0 || request.permit.size > kConfigPermitMax) {
+    return Status::error(StatusCode::InvalidArgument, "config permit size");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::ConfigPermit,
+      static_cast<std::uint16_t>(8 + request.permit.size));
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_bytes(request.permit);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status encode_config_reply(const HostOpsSub sub, const ConfigReply& reply,
+                           const MutableByteView out,
+                           std::size_t& written) noexcept {
+  written = 0;
+  if (!config_reply_body_valid(sub, reply.body.size) ||
+      !config_result_valid(reply.result)) {
+    return Status::error(StatusCode::InvalidArgument, "config reply invalid");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, sub,
+      static_cast<std::uint16_t>(kConfigReplyFixedPayload + reply.body.size));
+  if (status) status = writer.write_u16(reply.result);
+  if (status) status = writer.write_u64(reply.target);
+  if (status) status = writer.write_bytes(reply.body);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_config_reply(const ByteView inner, const HostOpsSub sub,
+                           ConfigReply& out) noexcept {
+  out = ConfigReply{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, sub, kConfigReplyFixedPayload,
+                   kConfigReplyFixedPayload + kConfigChallengeBodySize, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u16(out.result);
+  if (read) read = reader.read_u64(out.target);
+  if (!read) return read;
+  out.body = ByteView{payload.data + reader.consumed(), reader.remaining()};
+  if (!config_result_valid(out.result) ||
+      !config_reply_body_valid(sub, out.body.size)) {
+    return Status::error(StatusCode::ProtocolError, "CONFIG_REPLY_INVALID");
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::usb

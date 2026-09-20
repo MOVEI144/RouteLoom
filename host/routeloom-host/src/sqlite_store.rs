@@ -1199,6 +1199,45 @@ impl SqliteOperationStore {
             .map_err(|error| eprintln!("opstore fault: {error}"))?;
         Ok(next)
     }
+
+    /// Config SingleAuthority ledger (scope-gateway-config P5): a monotonic
+    /// `authority_sequence` persisted in `meta` so a daemon restart resumes
+    /// numbering instead of re-issuing a sequence the target may still hold.
+    /// The value is read and bumped in one immediate transaction — the
+    /// sequence is consumed whether or not the permit later applies, so a
+    /// crash leaves a gap, never a reuse.
+    pub fn config_authority_next_tx(&mut self) -> Result<u64, ()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        let raw: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='config_auth_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        let next = match raw {
+            Some(raw) => blob_u64(raw).ok_or_else(|| {
+                eprintln!("opstore fault: corrupt config_auth_seq cursor");
+            })?,
+            None => 1,
+        };
+        if next == 0 || next == u64::MAX {
+            eprintln!("opstore fault: config authority sequence exhausted");
+            return Err(());
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES('config_auth_seq', ?1)",
+            params![u64_blob(next.saturating_add(1))],
+        )
+        .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        tx.commit()
+            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+        Ok(next)
+    }
 }
 
 impl OperationStore for SqliteOperationStore {
