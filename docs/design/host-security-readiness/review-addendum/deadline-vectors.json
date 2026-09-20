@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scope": "design_arithmetic_not_runtime_or_hil",
+  "clock_encoding": "exact_decimal_strings",
+  "cases": [
+    {"id":"baseline","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"1120","d":"2000","device_now":"2020"},"expected":{"reason":"ready","device_deadline":"6884"}},
+    {"id":"remaining-less-than-margin","input":{"h":"0","ttl":1,"h0":"0","h1":"0","host_now":"0","d":"0","device_now":"0"},"expected":{"reason":"expired_budget","device_deadline":null}},
+    {"id":"remaining-equals-margin","input":{"h":"0","ttl":2,"h0":"0","h1":"0","host_now":"0","d":"0","device_now":"0"},"expected":{"reason":"expired_budget","device_deadline":null}},
+    {"id":"remaining-one-above-margin","input":{"h":"0","ttl":3,"h0":"0","h1":"0","host_now":"0","d":"0","device_now":"0"},"expected":{"reason":"ready","device_deadline":"1"}},
+    {"id":"device-counter-zero","input":{"h":"0","ttl":5000,"h0":"0","h1":"0","host_now":"0","d":"0","device_now":"0"},"expected":{"reason":"ready","device_deadline":"4994"}},
+    {"id":"host-at-deadline","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"6000","d":"2000","device_now":"2020"},"expected":{"reason":"expired_budget","device_deadline":null}},
+    {"id":"device-at-deadline","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"1120","d":"2000","device_now":"6884"},"expected":{"reason":"expired_budget","device_deadline":null}},
+    {"id":"unknown-clock","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"1120","d":"2000","device_now":"2020","clock_valid":false},"expected":{"reason":"time_uncertain","device_deadline":null}},
+    {"id":"unordered-clock-sample","input":{"h":"1000","ttl":5000,"h0":"1111","h1":"1110","host_now":"1120","d":"2000","device_now":"2020"},"expected":{"reason":"time_uncertain","device_deadline":null}},
+    {"id":"sample-too-old","input":{"h":"0","ttl":30000,"h0":"0","h1":"1","host_now":"5001","d":"0","device_now":"5001"},"expected":{"reason":"time_uncertain","device_deadline":null}},
+    {"id":"host-add-overflow","input":{"h":"18446744073709551605","ttl":11,"h0":"18446744073709551605","h1":"18446744073709551605","host_now":"18446744073709551605","d":"2000","device_now":"2020"},"expected":{"reason":"arithmetic_overflow","device_deadline":null}},
+    {"id":"device-add-overflow","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"1120","d":"18446744073709551613","device_now":"18446744073709551613"},"expected":{"reason":"arithmetic_overflow","device_deadline":null}},
+    {"id":"device-exact-max-no-wrap","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"1120","d":"18446744073709546731","device_now":"18446744073709546731"},"expected":{"reason":"ready","device_deadline":"18446744073709551615"}},
+    {"id":"device-clock-regression","input":{"h":"1000","ttl":5000,"h0":"1100","h1":"1110","host_now":"1120","d":"2000","device_now":"1999"},"expected":{"reason":"time_uncertain","device_deadline":null}}
+  ]
+}
