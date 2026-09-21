@@ -20,6 +20,7 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 ## 補助資料
 
 - [判断記録・旧案との差異](spec/decisions.md)
+- [互換性・版管理ポリシー](spec/compatibility.md)
 - [将来の無線追加](spec/transport-extension.md)
 - [用語](spec/glossary.md)
 - [公式資料と参照実装](references/official-sources.md)

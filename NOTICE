@@ -1,0 +1,79 @@
+RouteLoom
+Copyright 2026 RouteLoom contributors
+
+This product is licensed under the Apache License, Version 2.0
+(the "License"); you may not use this file except in compliance with
+the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+========================================================================
+Third-party components
+========================================================================
+
+This project includes or depends on the following third-party software.
+All listed licenses were verified to be compatible with distribution
+under Apache-2.0; no copyleft (GPL/LGPL/AGPL) components are used.
+
+Vendored in this repository
+---------------------------
+
+* micro-ecc (uECC) — BSD 2-Clause License
+  Location : components/routeloom/third_party/micro-ecc/ (LICENSE.txt)
+  Copyright: (c) 2014, Kenneth MacKay
+  Upstream : https://github.com/kmackay/micro-ecc
+  Notes    : Vendored source snapshot inside the portable component so
+             component-manager subtree fetches still build. Provides the
+             P-256 verification used by the RLCP1_COSE_ESP256 permit
+             profile. The full license text ships in
+             components/routeloom/third_party/micro-ecc/LICENSE.txt and
+             must be retained in source and binary redistributions.
+
+Build-time / linked dependencies (not vendored)
+-----------------------------------------------
+
+* ESP-IDF (Espressif IoT Development Framework) — Apache-2.0
+  Usage    : SDK and toolchain for the firmware/ applications and the
+             components/routeloom_espnow adapter (which REQUIRES the IDF
+             builtin components esp_wifi, esp_event, esp_netif,
+             esp_timer, freertos, nvs_flash and mbedtls — mbedTLS,
+             Apache-2.0, provides the PSA AES-GCM backend). Pinned to
+             tag v6.0.3 (commit 76f5dedd9950a3012fee8fb7d5586df21fc67802,
+             asserted in CI). Fetched via the espressif/idf container
+             image or a normal ESP-IDF install; no ESP-IDF source is
+             vendored here.
+  Upstream : https://github.com/espressif/esp-idf
+
+Rust crates (host workspace; exact versions pinned in host/Cargo.lock)
+---------------------------------------------------------------------
+
+Direct dependencies:
+
+* rusqlite — MIT (https://github.com/rusqlite/rusqlite)
+  Used with the "bundled" feature, which compiles the SQLite
+  amalgamation (public domain, https://sqlite.org) into the binary via
+  libsqlite3-sys (MIT). No system SQLite is required.
+* crossterm — MIT (https://github.com/crossterm-rs/crossterm)
+
+Transitive dependencies resolve to MIT, Apache-2.0, MIT OR Apache-2.0,
+Zlib, or "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT" licensed
+crates (e.g. bitflags, cc, cfg-if, errno, fallible-iterator,
+fallible-streaming-iterator, foldhash, hashbrown, hashlink, libc,
+libsqlite3-sys, linux-raw-sys, lock_api, log, mio, parking_lot,
+parking_lot_core, pkg-config, rustix, scopeguard, shlex, signal-hook,
+signal-hook-mio, signal-hook-registry, smallvec, plus Windows-only
+support crates). The authoritative list of resolved versions is
+host/Cargo.lock; each release also publishes a generated SBOM
+(CycloneDX JSON) enumerating every resolved crate and its license.
+
+========================================================================
+The Apache-2.0 license grants no trademark rights (Section 6). RouteLoom
+documentation links to external official documentation for reference
+only; such links do not imply redistribution rights for those materials.
+========================================================================
