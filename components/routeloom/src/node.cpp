@@ -1229,6 +1229,12 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
   job.plain.header.original_lifetime_ms = data.original_lifetime_ms;
   job.plain.header.link_epoch = config_.link_epoch;
   job.plain.header.end_epoch = config_.end_epoch;
+  // Known wire ambiguity: the ack key is {our node id, the ORIGIN's
+  // MessageId, round}. Two origins that mint the same (session, sequence)
+  // produce identical keys for receipts to different destinations; a
+  // HOP_ACCEPT then matches the first awaiting entry and ends the
+  // sibling's link wait early. Bounded — dedup pins, emit budgets, and
+  // end-to-end retries are unaffected.
   job.ack = AckKey{FrameType::EndReceipt, MessageKey{config_.node, data.message},
                    data.delivery_round};
   auto status = encode_receipt_payload(data, job.plain.payload, job.plain.payload_size);
@@ -1625,6 +1631,8 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       if (delivery == nullptr || sleep_terminal(delivery->state)) {
         TxJob discarded{};
         scheduler_.take_selected(discarded);
+        observer_.on_diagnostic("STALE_JOB_DROPPED", queued->peer,
+                                &queued->ack.key.id);
         continue;
       }
     }

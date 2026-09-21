@@ -3,9 +3,13 @@
 Byte-exact test vectors for the provisioning wire formats and the trust
 manifest acceptance pipeline (`docs/design/sdk-completion/
 04-provisioning-lifecycle.md` §4.3, §4.5.1, §4.12). The Rust harness
-(`host/routeloom-provision/tests/golden.rs`) loads every document here;
-the device C++ suite reads the same files so both implementations agree
-on every byte and every verdict.
+(`host/routeloom-provision/tests/golden.rs`) loads every document here
+and checks byte + verdict agreement. The C++ provisioning tests do not
+parse these JSON files — they rebuild the same objects from the shared
+fixed seeds in `tests/cpp/test_provisioning.hpp`, so byte agreement
+between the implementations follows from the shared key material, and
+verdict agreement is asserted Rust-side only. A C++ JSON-consuming
+golden harness is deferred work.
 
 All documents carry `"format": "routeloom-provisioning-golden-v1"` and a
 `kind` tag. Every multi-byte wire field is big-endian; byte strings are
