@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "design_version": "0.1-draft",
+  "status": "implemented_not_qualified",
+  "issues": [4, 7, 9, 10, 12],
+  "repository": "MOVEI144/RouteLoom",
+  "snapshots": {
+    "main": "cee2c4a8727ba9d7c79caec2700ccbb2aadeb21f",
+    "dedup_implementation_commit": "2eb26e6",
+    "esp_idf_tag": "v6.0.3",
+    "esp_idf_commit": "76f5dedd9950a3012fee8fb7d5586df21fc67802"
+  },
+  "runtime_changes_in_this_pr": true,
+  "features": {
+    "applied_delivery": {"issue": 12, "doc": "01-applied-delivery.md", "implemented_by_this_pr": true, "qualified": false},
+    "dedup_capacity_classes": {"issue": 9, "doc": "02-dedup-capacity.md", "implemented_by_this_pr": true, "qualified": false},
+    "congestion_routing_coupling": {"issue": 4, "doc": "03-congestion-routing.md", "implemented_by_this_pr": true, "qualified": false},
+    "provisioning_lifecycle": {"issue": 10, "doc": "04-provisioning-lifecycle.md", "implemented_by_this_pr": true, "qualified": false},
+    "receive_api": {"issue": 7, "doc": "05-receive-api.md", "implemented_by_this_pr": true, "qualified": false}
+  },
+  "dedup": {
+    "capacity": 64,
+    "entry_bytes_measured_host": 152,
+    "entry_bytes_static_assert_ceiling": 176,
+    "pool_bytes": 9792,
+    "hard_cap_ms": 60000,
+    "terminal_slack_ms": 30000,
+    "transit_slack_ms": 5000,
+    "transit_reserve": 8,
+    "terminal_admission_refused_at_pool_size": 56,
+    "per_upstream_max": 24,
+    "evidence_cap": 16,
+    "delivery_records": 8,
+    "max_failure_replays": 3,
+    "failure_replay_min_interval_ms": 1000,
+    "transit_failure_reports_per_peer_per_window": 2,
+    "diag_budget_window_ms": 1000,
+    "transit_failure_seen_records": 8,
+    "phases": {"Live": 0, "Resolved": 1, "Evidence": 2, "Terminal": 3},
+    "never_evicted_phases": ["Live", "Terminal"],
+    "eviction_order": ["expired", "resolved_earliest_expiry", "evidence_oldest", "refuse"],
+    "retention_formula": "expires_at = min(first_seen_ms + hard_cap_ms, horizon_ms + slack(phase))",
+    "terminal_refresh_never_exceeds_hard_cap": true,
+    "counters": [
+      "admitted_terminal", "admitted_transit", "refused_pool_full",
+      "refused_terminal_reserve", "refused_upstream_cap",
+      "evicted_resolved", "evicted_evidence", "expired",
+      "delivery_terminal_evicted"
+    ],
+    "diagnostics": [
+      "DEDUP_OVERFLOW", "DEDUP_TERMINAL_RESERVE", "DEDUP_UPSTREAM_CAP",
+      "DEDUP_EVICTED_RESOLVED", "DEDUP_EVICTED_EVIDENCE",
+      "DELIVERY_HISTORY_EVICTED",
+      "TRANSIT_DEDUP_CONFLICT", "ROUTED_DEDUP_CONFLICT",
+      "RECEIPT_DEDUP_CONFLICT", "SEQNO_DEDUP_FULL"
+    ]
+  },
+  "documents": [
+    "01-applied-delivery.md", "02-dedup-capacity.md",
+    "03-congestion-routing.md", "04-provisioning-lifecycle.md",
+    "05-receive-api.md"
+  ]
+}
