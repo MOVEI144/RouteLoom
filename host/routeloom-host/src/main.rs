@@ -59,6 +59,13 @@ const DEVICE_TX_GRANT_BYTES: u64 = 65_536;
 /// (docs/spec/security.md).
 const DEV_SECRET: &[u8] = b"routeloom-dev-secret";
 const DEV_PRINCIPAL: &[u8] = b"routeloom-host";
+/// Default dev-permit master, hex-encoded — the same placeholder the
+/// firmware Kconfig default ships (ROUTELOOM_DEVELOPMENT_KEY_HEX), so an
+/// unconfigured daemon↔device pair agrees on the EXPERIMENTAL dev profile.
+/// Deployments must provision a different key on both sides; this provider
+/// never claims a production identity.
+const DEFAULT_CONFIG_DEV_KEY_HEX: &str =
+    "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121";
 /// Idle interval between session keepalives.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// Re-Hello cadence while the handshake is unfinished: a Hello sent while
@@ -662,6 +669,10 @@ struct State {
     /// The authority generation bound into each signed permit command
     /// (--config-authority-generation). Provisioned, never auto-incremented.
     config_authority_generation: u32,
+    /// Dev-permit master key bytes (--config-dev-key-hex): the issuer and
+    /// the target's DevConfigAuthorityVerifier must derive from the same
+    /// master — SHA256("RouteLoom/config-dev/v1" || master) on both sides.
+    config_dev_key: Vec<u8>,
     /// This daemon run's incarnation id, minted at startup — bound into
     /// every HOST_REGISTER so a restarted daemon is provably a different
     /// host boot to the device (05 §5.6).
@@ -1862,6 +1873,7 @@ struct DaemonArgs {
     op_store: Option<PathBuf>,
     config_authority: Option<u64>,
     config_authority_generation: u32,
+    config_dev_key: Vec<u8>,
 }
 
 /// Parse a node/authority id argument as hexadecimal — the codebase's node
@@ -1869,6 +1881,23 @@ struct DaemonArgs {
 fn parse_hex_id(text: &str, flag: &str) -> Result<u64, String> {
     u64::from_str_radix(text.trim_start_matches("0x"), 16)
         .map_err(|_| format!("{flag} requires a hexadecimal id"))
+}
+
+/// Decode a `--config-dev-key-hex` master: an even-length hex string whose
+/// bytes feed `SHA256("RouteLoom/config-dev/v1" || master)` — the identical
+/// derivation the firmware target performs on its own Kconfig key.
+fn parse_dev_key_hex(text: &str, flag: &str) -> Result<Vec<u8>, String> {
+    let hex = text.trim_start_matches("0x");
+    if hex.len() % 2 != 0 || hex.is_empty() {
+        return Err(format!("{flag} requires an even-length hex string"));
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|_| format!("{flag} requires an even-length hex string"))
+        })
+        .collect()
 }
 
 fn parse_args() -> Result<DaemonArgs, String> {
@@ -1882,6 +1911,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut op_store = None;
     let mut config_authority = None;
     let mut config_authority_generation = 1;
+    let mut config_dev_key_hex = DEFAULT_CONFIG_DEV_KEY_HEX.to_string();
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1921,14 +1951,32 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     .parse::<u32>()
                     .map_err(|_| "--config-authority-generation must be an integer")?;
             }
+            // Dev-profile permit master (hex) — must equal the target's
+            // ROUTELOOM_DEVELOPMENT_KEY_HEX or every signed permit fails
+            // AuthorityDenied on the device. Default = the firmware's own
+            // Kconfig placeholder so a default pair agrees end to end.
+            "--config-dev-key-hex" => {
+                config_dev_key_hex = args
+                    .next()
+                    .ok_or("--config-dev-key-hex requires a hex key")?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX]"
                 );
                 process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
         }
+    }
+    // Reserved ids are never a valid issuer: capabilities would report an
+    // authority configured while every propose is denied downstream, and
+    // generation 0 can never satisfy the firmware Kconfig minimum of 1.
+    if matches!(config_authority, Some(0) | Some(u64::MAX)) {
+        return Err("--config-authority must not be a reserved id".to_string());
+    }
+    if config_authority_generation == 0 {
+        return Err("--config-authority-generation must be >= 1".to_string());
     }
     Ok(DaemonArgs {
         socket,
@@ -1937,6 +1985,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         op_store,
         config_authority,
         config_authority_generation,
+        config_dev_key: parse_dev_key_hex(&config_dev_key_hex, "--config-dev-key-hex")?,
     })
 }
 
@@ -2087,6 +2136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_ops: dispatch::ConfigOps::with_boot(host_boot),
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
+        config_dev_key: args.config_dev_key,
         ..State::default()
     });
     if let Some(authority) = args.config_authority {
@@ -3249,5 +3299,43 @@ mod tests {
         );
         assert!(parse_args_from(["--op-store".to_string()].into_iter()).is_err());
         assert!(parse_args_from(["--bogus".to_string()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn config_dev_key_defaults_to_the_firmware_master() {
+        // The default decodes to the same master the firmware Kconfig ships
+        // ("ROUTELOOM-DEVELOPMENT-KEY-ONLY!!"), so a default daemon↔device
+        // pair derives matching permit keys. A mismatched master signs
+        // permits the target can only deny — the arg must not drift.
+        let parse =
+            |words: &[&str]| parse_args_from(words.iter().map(|w| w.to_string())).expect("parse");
+        let defaults = parse(&[]);
+        assert_eq!(
+            defaults.config_dev_key,
+            b"ROUTELOOM-DEVELOPMENT-KEY-ONLY!!".to_vec()
+        );
+        let custom = parse(&["--config-dev-key-hex", "deadbeef"]);
+        assert_eq!(custom.config_dev_key, vec![0xde, 0xad, 0xbe, 0xef]);
+        for bad_args in [
+            vec!["--config-dev-key-hex"],
+            vec!["--config-dev-key-hex", "abc"],
+            vec!["--config-dev-key-hex", "zz"],
+        ] {
+            assert!(parse_args_from(bad_args.into_iter().map(String::from)).is_err());
+        }
+    }
+
+    #[test]
+    fn config_authority_rejects_reserved_and_zero_generation() {
+        for authority in ["0", "0x0", "ffffffffffffffff"] {
+            assert!(parse_args_from(
+                ["--config-authority".to_string(), authority.to_string()].into_iter()
+            )
+            .is_err());
+        }
+        assert!(parse_args_from(
+            ["--config-authority-generation".to_string(), "0".to_string()].into_iter()
+        )
+        .is_err());
     }
 }

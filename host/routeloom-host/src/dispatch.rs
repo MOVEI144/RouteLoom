@@ -2578,7 +2578,10 @@ fn fill_config_entropy(buf: &mut [u8]) {
 /// An unset authority yields a lane that can answer queries but refuses
 /// every Propose honestly.
 fn config_lane_for(state: &State) -> ConfigLane {
-    let dev_key = config_dev_key(crate::DEV_SECRET);
+    // The permit master must equal the target's own key material — the
+    // firmware verifier derives identically from ROUTELOOM_DEVELOPMENT_KEY_HEX,
+    // so a mismatched master signs permits the device can only deny.
+    let dev_key = config_dev_key(&state.config_dev_key);
     let authority = state.config_authority.unwrap_or(0);
     let issuer = ConfigIssuer::new(
         dev_key.to_vec(),
