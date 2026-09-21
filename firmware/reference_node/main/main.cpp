@@ -287,17 +287,25 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
         return Status::success();
       }
       commit_done_ = true;
-      drain_deadline_ms_ = esp_log_timestamp() + kDrainBoundMs;
+      drain_start_ms_ = esp_log_timestamp();
     }
     // Honest drain (01 §1.6): a relay-off commit stays APPLYING while
     // accepted transit work is still in flight — completing early would
-    // claim quiescence that does not exist. Bounded: work that outlives
-    // the bound is reported as applied-with-residue, not hung on.
-    if (node_ != nullptr && !relay_allowed_ &&
-        node_->transit_in_flight() > 0 &&
-        esp_log_timestamp() < drain_deadline_ms_) {
+    // claim quiescence that does not exist. The bound is elapsed-time
+    // arithmetic (wrap-safe). On expiry the commit is still a success —
+    // the relay gate IS applied — but the residue is surfaced as an
+    // explicit warning rather than silently folded into the verdict; the
+    // stranded frames resolve under their own per-frame deadlines.
+    const bool draining =
+        node_ != nullptr && !relay_allowed_ && node_->transit_in_flight() > 0;
+    if (draining &&
+        esp_log_timestamp() - drain_start_ms_ < kDrainBoundMs) {
       done = false;
       return Status::success();
+    }
+    if (draining) {
+      ESP_LOGW(kTag, "relay-off commit applied with transit residue: "
+                     "frames drain under their own deadlines");
     }
     done = true;
     return Status::success();
@@ -410,7 +418,7 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
   // Drain accounting for a relay-off commit: the operation reports done
   // only when in-flight transit has drained or the bound elapsed.
   bool commit_done_{false};
-  std::uint32_t drain_deadline_ms_{0};
+  std::uint32_t drain_start_ms_{0};
   static constexpr std::uint32_t kDrainBoundMs = 30000;
 };
 

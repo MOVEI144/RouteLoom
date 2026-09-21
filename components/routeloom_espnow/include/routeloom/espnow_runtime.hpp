@@ -195,6 +195,11 @@ class EspNowRuntime final : public RadioPort,
     return bootstrap_rx_dropped_;
   }
   std::uint32_t rx_dropped() const noexcept { return rx_dropped_; }
+  // Recovery-required visibility (02 §2.3): a fenced or quarantined MAC
+  // stays unavailable until its owed callback arrives or recover()
+  // rebuilds the driver — the host must be able to see that state.
+  bool tx_fence_active() const noexcept { return fenced_outstanding_; }
+  std::size_t quarantined_peers() const noexcept { return quarantined_count_; }
 
  private:
   enum class EventKind : std::uint8_t { Rx, Tx };
@@ -321,7 +326,7 @@ class EspNowRuntime final : public RadioPort,
   // Caller holds callback_lock_. Purges quarantine entries whose radio
   // generation is no longer current, then reports whether `mac` remains
   // quarantined (a callback is still owed for a retired send to it).
-  bool tx_quarantined(const MacAddress& mac, MonotonicMs now) noexcept;
+  bool tx_quarantined(const MacAddress& mac) noexcept;
   // Stage a TX completion event when event_queue_ refuses it. Caller holds
   // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
   void stage_lost_tx(const Event& event) noexcept;
@@ -382,7 +387,6 @@ class EspNowRuntime final : public RadioPort,
   // The fenced send's frozen submit record — its late callback reports as
   // Unknown evidence under these original generations (X-02).
   RawTx fenced_pending_{};
-  MonotonicMs fenced_until_ms_{0};
   bool fenced_outstanding_{false};
   // MAC quarantine (02 §2.3/X-02): a watchdog-retired send still owes the
   // driver a callback. While its radio generation is current the MAC stays

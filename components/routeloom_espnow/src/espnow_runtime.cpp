@@ -790,22 +790,18 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     raw_tx_[kept++] = raw_tx_[i];  // stays outstanding — MAC remains blocked
   }
   raw_tx_count_ = kept;
-  if (tx_quarantined(mac, now)) {
+  if (tx_quarantined(mac)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
                          "TX callback quarantine on peer");
   }
   // The reserved-send fence gates raw sends too: a watchdog-retired
   // reserved TX still owes a callback that must never resolve this send.
-  if (fenced_outstanding_) {
-    if (now - fenced_pending_.sent_ms >=
-        config_.node.callback_watchdog_ms * 4U) {
-      fenced_outstanding_ = false;
-      ++stale_tx_results_;
-    } else if (fenced_mac_ == mac) {
-      portEXIT_CRITICAL(&callback_lock_);
-      return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
-    }
+  // No timer releases the fence — only the owed callback or driver
+  // recovery (02 §2.3); the peer stays unavailable until then.
+  if (fenced_outstanding_ && fenced_mac_ == mac) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
   }
   for (std::size_t i = 0; i < raw_tx_count_; ++i) {
     if (raw_tx_[i].mac == mac) {
@@ -916,24 +912,18 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                            "autonomy TX in flight to peer");
     }
   }
-  if (tx_quarantined(peer_mac, now)) {
+  if (tx_quarantined(peer_mac)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
                          "TX callback quarantine on peer");
   }
-  if (fenced_outstanding_) {
-    // The fence holds until the owed callback lands or a dwell bound far
-    // past the driver contract expires — a radio-generation change alone
-    // does NOT establish callback quiescence, so it can never release the
-    // fence (X-02). Expiry is counted as lost-callback evidence.
-    if (now - fenced_pending_.sent_ms >=
-        config_.node.callback_watchdog_ms * 4U) {
-      fenced_outstanding_ = false;
-      ++stale_tx_results_;
-    } else if (fenced_mac_ == peer_mac) {
-      portEXIT_CRITICAL(&callback_lock_);
-      return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
-    }
+  // The fence releases only on the owed callback or driver recovery —
+  // neither a timer nor a generation change establishes callback
+  // quiescence (02 §2.3 / X-02). The MAC stays fenced until then and
+  // recovery-required is visible via tx_fence_active().
+  if (fenced_outstanding_ && fenced_mac_ == peer_mac) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
   }
   pending_tx_ = true;
   pending_token_ = token;
@@ -1467,13 +1457,26 @@ Status EspNowRuntime::recover() noexcept {
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     fenced_mac_ = pending_mac_;
-    fenced_until_ms_ = now + config_.node.callback_watchdog_ms;
     fenced_outstanding_ = true;
     pending_tx_ = false;
     pending_token_ = 0;
   }
   portEXIT_CRITICAL(&callback_lock_);
-  return rebuild_driver();
+  const Status status = rebuild_driver();
+  if (status) {
+    // rebuild_driver() is the tested callback-quiescence barrier
+    // (02 §2.3): esp_now_deinit unregisters the send callback and tears
+    // down driver state, so no pre-recovery completion can arrive after
+    // this point — every quarantined/fenced MAC is released. Queued stale
+    // events resolve by token/lane, never by MAC reuse.
+    portENTER_CRITICAL(&callback_lock_);
+    quarantined_count_ = 0;
+    fenced_outstanding_ = false;
+    expired_tx_count_ = 0;
+    raw_tx_count_ = 0;
+    portEXIT_CRITICAL(&callback_lock_);
+  }
+  return status;
 }
 
 void EspNowRuntime::receive_callback(
@@ -1837,7 +1840,6 @@ void EspNowRuntime::channel_fence_tx() noexcept {
     fenced_pending_.radio_generation = RadioGeneration{pending_generation_};
     fenced_pending_.channel_epoch = pending_channel_epoch_;
     fenced_pending_.length_class = pending_length_class_;
-    fenced_until_ms_ = now + config_.node.callback_watchdog_ms;
     fenced_outstanding_ = true;
     pending_tx_ = false;
     pending_token_ = 0;
@@ -1849,26 +1851,17 @@ void EspNowRuntime::channel_fence_tx() noexcept {
   }
 }
 
-bool EspNowRuntime::tx_quarantined(const MacAddress& mac,
-                                   const MonotonicMs now) noexcept {
-  // Quarantine releases ONLY on the owed callback's arrival (consumed in
-  // the TX callback path) or on a dwell bound far beyond the driver
-  // contract — a software generation change does NOT establish callback
-  // quiescence, so it can never release an entry (X-02). Dwell expiry is
-  // counted as lost-callback evidence, not silent cleanup.
-  const std::uint32_t dwell = config_.node.callback_watchdog_ms * 4U;
-  std::size_t kept = 0;
-  bool found = false;
+bool EspNowRuntime::tx_quarantined(const MacAddress& mac) noexcept {
+  // Quarantine release has exactly two paths (02 §2.3): the owed callback
+  // arrives and consumes the entry in the TX callback handler, or driver
+  // recovery (recover()->rebuild_driver()) establishes callback
+  // quiescence. No timer and no software generation change can release an
+  // entry — a callback that is still owed would resolve a replacement
+  // send to this MAC with no way to tell it apart.
   for (std::size_t i = 0; i < quarantined_count_; ++i) {
-    if (now - quarantined_tx_[i].sent_ms >= dwell) {
-      ++stale_tx_results_;
-      continue;
-    }
-    if (quarantined_tx_[i].mac == mac) found = true;
-    quarantined_tx_[kept++] = quarantined_tx_[i];
+    if (quarantined_tx_[i].mac == mac) return true;
   }
-  quarantined_count_ = kept;
-  return found;
+  return false;
 }
 
 void EspNowRuntime::stage_lost_tx(const Event& event) noexcept {

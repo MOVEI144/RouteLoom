@@ -1414,11 +1414,12 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       // Bind the retained transit record to the attempt actually
       // submitted — dispatch may have retargeted next_hop after admission
       // (route repair), so the stored downstream/binding must reflect the
-      // real attempt, not the enqueue-time route.
-      const MessageKey tkey{physical_.job.plain.header.origin,
-                            physical_.job.plain.header.message};
-      if (auto* entry = find_dedup(tkey, physical_.job.plain.header.type,
-                                   physical_.job.plain.header.delivery_round)) {
+      // real attempt, not the enqueue-time route. The job's ack key holds
+      // the transit record's identity; forwarded jobs keep no plain
+      // header.
+      if (auto* entry = find_dedup(physical_.job.ack.key,
+                                   physical_.job.ack.accepted_type,
+                                   physical_.job.ack.round)) {
         entry->downstream_peer = physical_.job.peer;
         entry->downstream_binding = BindingGeneration{0};
         if (const auto* s = telemetry_peers_.find(physical_.job.peer);
@@ -2894,26 +2895,24 @@ ObservationBucket* MeshNode::observation_bucket(
 
 void MeshNode::obs_tx_submitted(TxJob& job, const std::uint64_t token,
                                 const MonotonicMs now_ms) noexcept {
-  // One immutable observation identity per physical attempt (02 §2.3):
-  // prefer the key the runtime froze at submission; only when the runtime
-  // did not stamp one (host simulation harness) fall back to the peer
-  // summary — stamped onto the job so every later accounting site reuses
-  // it verbatim.
-  if (!job.obs_key_set) {
-    ObservationKey key{};
-    if (submit_identity_.valid && submit_identity_.token == token) {
-      key = submit_identity_.key;
-      submit_identity_.valid = false;
-    } else {
-      key = ObservationKey{BindingGeneration{0}, ObservationDirection::Egress,
-                           RadioGeneration{0}, ChannelEpoch{0},
-                           frame_length_class(job.tx_cost), job.peer};
-      if (const auto* summary = telemetry_peers_.find(job.peer);
-          summary != nullptr && !summary->stale) {
-        key.binding = summary->binding;
-        key.radio = summary->radio;
-        key.channel = summary->channel;
-      }
+  // One immutable observation identity per PHYSICAL ATTEMPT (02 §2.3):
+  // every accepted submission re-stamps the key the runtime froze for
+  // THIS token — a retry after a rebind/channel change must not inherit
+  // the first attempt's identity. Only when the runtime did not stamp one
+  // (host simulation harness) fall back to the peer summary.
+  if (submit_identity_.valid && submit_identity_.token == token) {
+    job.obs_key = submit_identity_.key;
+    job.obs_key_set = true;
+    submit_identity_.valid = false;
+  } else if (!job.obs_key_set) {
+    ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                       RadioGeneration{0}, ChannelEpoch{0},
+                       frame_length_class(job.tx_cost), job.peer};
+    if (const auto* summary = telemetry_peers_.find(job.peer);
+        summary != nullptr && !summary->stale) {
+      key.binding = summary->binding;
+      key.radio = summary->radio;
+      key.channel = summary->channel;
     }
     job.obs_key = key;
     job.obs_key_set = true;
@@ -2937,9 +2936,21 @@ void MeshNode::obs_tx_submitted(TxJob& job, const std::uint64_t token,
       }
     }
     ++bucket->sojourn_samples;
-    // Queue sojourn: enqueue -> handed to radio (03 §3).
+    // Queue sojourn: enqueue -> handed to radio (03 §3). Lifetime EWMA
+    // plus the current window's own measurement — window fields are what
+    // snapshot freshness is judged against.
     ewma_add(bucket->queue_sojourn_ms_ewma, now_ms - job.enqueued_at_ms,
              bucket->sojourn_samples);
+    ++bucket->current.queue_samples;
+    ewma_add(bucket->current.queue_us_ewma,
+             (now_ms - job.enqueued_at_ms) * 1000,
+             bucket->current.queue_samples);
+    ++bucket->current.tx_submitted;
+    bucket->current.present = true;
+    if (bucket->current.first_sample_ms == 0) {
+      bucket->current.first_sample_ms = now_ms;
+    }
+    bucket->current.last_sample_ms = now_ms;
   }
   // Per-peer mirror (03 §6): the A->B queue picture and the exchange ratio
   // are per-next-hop, so the global bucket is mirrored into the neighbor
@@ -3237,18 +3248,19 @@ Status MeshNode::build_telemetry_snapshot(
     bucket = telemetry_bucket(key);
   }
   // Contributing measurement stamps: RSSI group → last_rssi_ms; bucket
-  // group → the current window's own sample stamp (never last_update_ms,
-  // which is bookkeeping).
+  // group → the current window's OLDEST contributing sample
+  // (first_sample_ms — never last_update_ms bookkeeping, and never the
+  // newest sample which would overstate freshness).
   MonotonicMs oldest_contributing = 0;
   const bool rssi_contributes = summary->rssi_present;
   const bool bucket_contributes =
       bucket != nullptr && bucket->current.present &&
-      bucket->current.last_sample_ms != 0;
+      bucket->current.first_sample_ms != 0;
   if (rssi_contributes) oldest_contributing = summary->last_rssi_ms;
   if (bucket_contributes &&
       (oldest_contributing == 0 ||
-       bucket->current.last_sample_ms < oldest_contributing)) {
-    oldest_contributing = bucket->current.last_sample_ms;
+       bucket->current.first_sample_ms < oldest_contributing)) {
+    oldest_contributing = bucket->current.first_sample_ms;
   }
   const auto within_bound = [&](const MonotonicMs stamp) {
     return stamp != 0 && now_ms - stamp <= query.max_age_ms;
@@ -3258,7 +3270,7 @@ Status MeshNode::build_telemetry_snapshot(
   if (query.max_age_ms != 0 &&
       !(rssi_contributes && within_bound(summary->last_rssi_ms)) &&
       !(bucket_contributes &&
-        within_bound(bucket->current.last_sample_ms))) {
+        within_bound(bucket->current.first_sample_ms))) {
     reject_reason = DiagnosticRejectReason::Stale;
     return Status::error(StatusCode::Expired,
                          "no contributing measurement within bound");
@@ -3329,7 +3341,7 @@ Status MeshNode::build_telemetry_snapshot(
       const bool bucket_fresh =
           query.max_age_ms == 0
               ? bucket_contributes
-              : within_bound(bucket->current.last_sample_ms);
+              : within_bound(bucket->current.first_sample_ms);
       if (bucket_fresh) out.validity |= kTelemetryValidBucket;
       out.window_ms = static_cast<std::uint32_t>(
           std::min<std::uint64_t>(now_ms - bucket->window_start_ms, UINT32_MAX));
@@ -3341,10 +3353,18 @@ Status MeshNode::build_telemetry_snapshot(
       out.hop_accepts = clamp(bucket->hop_accepted);
       out.hop_timeouts = bucket->hop_timeouts;
       out.busy = clamp(bucket->busy_deferrals);
-      out.queue_us_ewma = bucket->queue_sojourn_ms_ewma * 1000;
-      if (bucket->service_samples > 0 && bucket_fresh) {
+      // Queue EWMA is a current-window measurement like the driver EWMA —
+      // only reported when the window contributed queue samples.
+      if (bucket->current.queue_samples > 0 && bucket_fresh) {
+        out.queue_us_ewma = bucket->current.queue_us_ewma;
+      }
+      // The driver-service EWMA is only fresh evidence when the CURRENT
+      // window actually contributed a driver measurement — a lifetime
+      // aggregate freshened by an unrelated observation would misreport
+      // stale data as current (02 §2.4).
+      if (bucket->current.driver_samples > 0 && bucket_fresh) {
         out.validity |= kTelemetryValidDriverEwma;
-        out.driver_us_ewma = bucket->driver_service_us_ewma;
+        out.driver_us_ewma = bucket->current.driver_us_ewma;
       }
       out.saturation_mask |= bucket->saturation_mask;
       if (bucket->stale || !bucket_fresh) out.validity |= kTelemetryStale;
@@ -3362,6 +3382,7 @@ Status MeshNode::build_telemetry_snapshot(
 MeshNode::DiagBudget* MeshNode::diag_budget(const NodeId peer,
                                             const MonotonicMs now_ms) noexcept {
   DiagBudget* free_slot = nullptr;
+  DiagBudget* reclaimable = nullptr;
   for (auto& entry : diag_budget_) {
     if (entry.peer == peer) {
       // Single window-reset point: every pacing counter tied to this
@@ -3374,13 +3395,30 @@ MeshNode::DiagBudget* MeshNode::diag_budget(const NodeId peer,
       }
       return &entry;
     }
-    if (entry.peer == kInvalidNodeId && free_slot == nullptr) {
-      free_slot = &entry;
+    if (entry.peer == kInvalidNodeId) {
+      if (free_slot == nullptr) free_slot = &entry;
+      continue;
+    }
+    // A slot whose every pacing restriction has expired carries no live
+    // state — reclaiming it is not eviction, it is reuse of an entry that
+    // enforces nothing. This bounds residency without ever losing live
+    // pacing history.
+    const bool expired =
+        now_ms - entry.window_start_ms >= kDiagBudgetWindowMs &&
+        (entry.last_cap_reply_ms == 0 ||
+         now_ms - entry.last_cap_reply_ms >= kCapReplyMinIntervalMs) &&
+        (entry.last_query_ms == 0 ||
+         now_ms - entry.last_query_ms >= kDiagQueryMinIntervalMs);
+    if (expired &&
+        (reclaimable == nullptr ||
+         entry.window_start_ms < reclaimable->window_start_ms)) {
+      reclaimable = &entry;
     }
   }
   // A full table NEVER evicts a live budget — eviction would silently
   // reset that peer's pacing state. nullptr is a refusal: callers drop and
   // count, they do not admit unbounded work.
+  if (free_slot == nullptr) free_slot = reclaimable;
   if (free_slot == nullptr) return nullptr;
   *free_slot = DiagBudget{};
   free_slot->peer = peer;
@@ -3629,19 +3667,31 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
       return;
     }
     // The reply must answer under the SAME binding generation the query
-    // was issued in — a post-rebind reply is stale evidence.
+    // was issued in — a post-rebind reply is stale evidence. A summary
+    // already marked stale proves the rebind happened; binding 0 recorded
+    // at query time means no binding was known, so the reply's own
+    // (fresh) binding establishes the baseline rather than violating it.
+    const auto* summary = telemetry_peers_.find(peer);
+    const bool summary_current = summary != nullptr && !summary->stale;
     const BindingGeneration current_binding =
-        (telemetry_peers_.find(peer) != nullptr)
-            ? telemetry_peers_.find(peer)->binding
-            : BindingGeneration{0};
-    if (current_binding != pending->binding) {
-      *pending = PendingCapQuery{};
+        summary_current ? summary->binding : BindingGeneration{0};
+    const bool binding_violated =
+        summary != nullptr && summary->stale
+            ? true  // stale summary = a rebind happened after the query
+            : pending->binding != BindingGeneration{0} &&
+                  current_binding != pending->binding;
+    // Consuming a pending entry — matched or not — still paces renewal:
+    // otherwise a rejected reply would permit an immediate reprobe storm.
+    if (auto* neighbor = find_neighbor(peer)) {
+      neighbor->last_cap_exchange_ms = now_ms;
+    }
+    *pending = PendingCapQuery{};
+    if (binding_violated) {
       ++telemetry_event_drops_;
       observer_.on_diagnostic("DIAGNOSTIC_CAP_REPLY_STALE_BINDING", peer,
                               &frame.header.message);
       return;
     }
-    *pending = PendingCapQuery{};
     // A reply must name a concrete responder boot — node_boot==0 means the
     // peer never initialized an incarnation, so the grant cannot be bound
     // to any identity (04 §capabilities).
