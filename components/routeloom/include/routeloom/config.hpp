@@ -524,7 +524,7 @@ class ConfigJournal {
   Status start_restore(Transaction& txn, endpoint::ConfigReason reason) noexcept;
   Status finish_transaction(Transaction& txn, endpoint::ConfigPhase phase,
                             endpoint::ConfigReason reason) noexcept;
-  Transaction boot_txn() const noexcept;
+  Transaction& boot_txn() noexcept;  // fills boot_txn_; callers take it by ref
   Status record_result(const Transaction& txn, endpoint::ConfigPhase phase,
                        endpoint::ConfigReason reason, MonotonicMs now_ms) noexcept;
   bool find_result(const std::array<std::uint8_t, 16>& operation_id,
@@ -571,10 +571,27 @@ class ConfigJournal {
   // Big transient work areas live in the object, not the stack: the journal
   // is statically allocated by the runtime, so member scratch costs .bss
   // once instead of pushing multi-KB frames onto task stacks (observed:
-  // ESP32-C3 main-task stack protection fault during initialize()).
+  // ESP32-C3 main-task stack protection fault during initialize(), then on
+  // the submit/poll path — ~12 KB of frames against the 8 KB task stack).
   std::array<JournalRecord, kConfigJournalSlots> parsed_{};
   std::array<std::uint8_t, kConfigJournalSlotBytes> scratch_a_{};
   std::array<std::uint8_t, kConfigJournalSlotBytes> scratch_b_{};
+  // Submit-path scratch: submit_permit decodes canonical/command and builds
+  // the transaction in submit_txn_, then commits it to txn_ in one shot —
+  // early returns never leave a half-built transaction active. The permit
+  // patch merge and the maintenance-boundary decode get their own field
+  // scratch so no two live buffers ever alias.
+  Transaction submit_txn_{};
+  JournalRecord record_scratch_{};  // persist_phase/recover record staging
+  std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> merge_a_{};
+  std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> merge_b_{};
+  std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> fields_a_{};
+  std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> fields_b_{};
+  // Poll/recovery-path scratch: boot_txn() fills boot_txn_ once per use and
+  // callers pass it to finish_transaction by reference; readback_ holds the
+  // provider read_active bytes for the restore/verify comparisons.
+  Transaction boot_txn_{};
+  std::array<std::uint8_t, endpoint::kConfigSnapshotMax> readback_{};
 };
 
 // --- Issuer side -------------------------------------------------------------------

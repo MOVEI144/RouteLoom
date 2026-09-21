@@ -201,12 +201,18 @@ Status config_snapshot_hash(const std::uint16_t config_namespace, const std::uin
   return Status::success();
 }
 
-Status config_patch_apply(const ByteView base_tlv, const ConfigField* const patch,
-                          const std::uint16_t patch_count,
+namespace {
+
+// The merge's two 16-field work areas (~3.3 KB) come from the caller so the
+// journal's submit path can supply member scratch instead of task stack;
+// the public config_patch_apply wrapper below keeps its own locals for
+// issuer/test callers where stack is not constrained.
+Status config_patch_merge(const ByteView base_tlv, const ConfigField* const patch,
+                          const std::uint16_t patch_count, ConfigField* const merged,
+                          ConfigField* const out_fields,
                           ByteBuffer<endpoint::kConfigSnapshotMax>& next,
                           bool& changed) noexcept {
   changed = false;
-  ConfigField merged[endpoint::kConfigFieldCountMax]{};
   std::uint16_t base_count = 0;
   Status status = config_tlv_decode(base_tlv, merged, endpoint::kConfigFieldCountMax,
                                     base_count);
@@ -230,7 +236,6 @@ Status config_patch_apply(const ByteView base_tlv, const ConfigField* const patc
     previous_id = field.field_id;
   }
   // Merge: patch wins per id; result stays ascending.
-  ConfigField out_fields[endpoint::kConfigFieldCountMax]{};
   std::uint16_t out_count = 0;
   std::uint16_t base_i = 0, patch_i = 0;
   while (base_i < base_count || patch_i < patch_count) {
@@ -258,6 +263,18 @@ Status config_patch_apply(const ByteView base_tlv, const ConfigField* const patc
               (base_tlv.size == 0 ||
                std::memcmp(next.bytes.data(), base_tlv.data, base_tlv.size) == 0));
   return Status::success();
+}
+
+}  // namespace
+
+Status config_patch_apply(const ByteView base_tlv, const ConfigField* const patch,
+                          const std::uint16_t patch_count,
+                          ByteBuffer<endpoint::kConfigSnapshotMax>& next,
+                          bool& changed) noexcept {
+  ConfigField merged[endpoint::kConfigFieldCountMax]{};
+  ConfigField out_fields[endpoint::kConfigFieldCountMax]{};
+  return config_patch_merge(base_tlv, patch, patch_count, merged, out_fields, next,
+                            changed);
 }
 
 Status config_permit_aad(const NetworkId network, const NodeId target,
@@ -565,7 +582,8 @@ Status ConfigJournal::store_record(const JournalRecord& record) noexcept {
 
 Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason reason,
                                     const Transaction& txn) noexcept {
-  JournalRecord record{};
+  JournalRecord& record = record_scratch_;
+  record = JournalRecord{};
   record.store_generation = store_generation_ + 1;
   record.phase = phase;
   record.reason = reason;
@@ -846,7 +864,7 @@ Status ConfigJournal::resolve_recovered(const MonotonicMs now_ms) noexcept {
     case ConfigPhase::Decided: {
       // Revision stays consumed; the challenge is dead across the boot
       // change, so the first apply never happens — record the interruption.
-      Transaction txn = boot_txn();
+      Transaction& txn = boot_txn();
       const Status stored =
           persist_phase(ConfigPhase::Interrupted, ConfigReason::Deadline, txn);
       if (!stored) return stored;
@@ -1130,13 +1148,17 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
     return Status::error(StatusCode::InvalidArgument, "config permit size invalid");
   }
 
+  // The canonical decode buffer, the decoded command and the in-build
+  // transaction are member scratch (~7 KB of .bss, not task stack);
+  // submit_txn_ is reset here so every early return leaves txn_ untouched.
+  submit_txn_ = Transaction{};
   ConfigPermitContext context{};
   context.network = config_.network;
   context.target = config_.target;
   context.config_namespace = config_.config_namespace;
   context.authorized_issuer = config_.authorized_issuer;
   context.authority_generation = config_.authority_generation;
-  endpoint::EncodedConfigCommand canonical{};
+  endpoint::EncodedConfigCommand& canonical = submit_txn_.canonical;
   bool verified = false;
   Status status = verifier_.verify_permit(context, permit, canonical, verified);
   if (!status) {
@@ -1151,7 +1173,7 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   }
   ++stats_.permits_verified;
 
-  endpoint::ConfigCommand command{};
+  endpoint::ConfigCommand& command = submit_txn_.command;
   status = endpoint::config_command_decode(canonical.view(), command);
   if (!status) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::InvalidPatch);
@@ -1212,10 +1234,11 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   if (!status) return status;
 
   // Compute the next snapshot and re-check the signed hash claim.
-  Transaction txn{};
+  Transaction& txn = submit_txn_;
   bool changed = false;
-  status = config_patch_apply(active_snapshot_.view(), command.fields.data(),
-                              command.field_count, txn.next_snapshot, changed);
+  status = config_patch_merge(active_snapshot_.view(), command.fields.data(),
+                              command.field_count, merge_a_.data(), merge_b_.data(),
+                              txn.next_snapshot, changed);
   if (!status) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::InvalidPatch);
     return Status::error(StatusCode::InvalidArgument, "config patch rejected");
@@ -1234,9 +1257,7 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
     return Status::error(StatusCode::AlreadyExists, "config patch no-op");
   }
   txn.active = true;
-  txn.command = command;
   txn.command_digest = digest;
-  txn.canonical = canonical;
   txn.permit.size = permit.size;
   std::memcpy(txn.permit.bytes.data(), permit.data, permit.size);
   txn.prev_snapshot = active_snapshot_;
@@ -1273,8 +1294,8 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   // Maintenance/admission boundary for management-path-removing changes
   // (04 §4.8): detect transitions against the current snapshot.
   {
-    ConfigField base_fields[endpoint::kConfigFieldCountMax]{};
-    ConfigField next_fields[endpoint::kConfigFieldCountMax]{};
+    ConfigField* const base_fields = fields_a_.data();
+    ConfigField* const next_fields = fields_b_.data();
     std::uint16_t base_count = 0, next_count = 0;
     status = config_tlv_decode(active_snapshot_.view(), base_fields,
                                endpoint::kConfigFieldCountMax, base_count);
@@ -1465,7 +1486,7 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
                                                 boot_.restore_snapshot.view(), token);
       if (!started) {
         boot_.restore_pending = false;
-        Transaction txn = boot_txn();
+        Transaction& txn = boot_txn();
         const Status stored = finish_transaction(
             txn, ConfigPhase::Quarantined, ConfigReason::RecoveryRequired);
         static_cast<void>(stored);
@@ -1479,7 +1500,8 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     const Status polled = provider_->poll(boot_.token, done, outcome);
     if (!polled || !done) return;
     boot_.restore_pending = false;
-    std::array<std::uint8_t, endpoint::kConfigSnapshotMax> active{};
+    auto& active = readback_;
+    active.fill(0);
     std::size_t active_size = 0;
     const Status read = provider_->read_active(
         config_.config_namespace, MutableByteView{active.data(), active.size()},
@@ -1488,14 +1510,14 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
         read.ok() && outcome.ok() && active_size == boot_.restore_snapshot.size &&
         std::memcmp(active.data(), boot_.restore_snapshot.bytes.data(), active_size) == 0;
     if (restored && boot_.resolve) {
-      Transaction txn = boot_txn();
+      Transaction& txn = boot_txn();
       const Status stored = finish_transaction(
           txn, ConfigPhase::Interrupted, boot_.interrupt_reason);
       static_cast<void>(stored);
     } else if (!restored) {
       // Whether resolving an APPLY_INTENT window or reconfirming an ACTIVE
       // configuration, an unrestorable state is never silently continued.
-      Transaction txn = boot_txn();
+      Transaction& txn = boot_txn();
       const Status stored = finish_transaction(
           txn, ConfigPhase::Quarantined, ConfigReason::RecoveryRequired);
       static_cast<void>(stored);
@@ -1518,7 +1540,8 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     // VERIFYING: real active values must match the desired snapshot —
     // log strings are never proof (04 §4.6).
     phase_ = ConfigPhase::Verifying;
-    std::array<std::uint8_t, endpoint::kConfigSnapshotMax> active{};
+    auto& active = readback_;
+    active.fill(0);
     std::size_t active_size = 0;
     const Status read = provider_->read_active(
         config_.config_namespace, MutableByteView{active.data(), active.size()},
@@ -1542,7 +1565,8 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     Status outcome = Status::success();
     const Status polled = provider_->poll(txn_.token, done, outcome);
     if (!polled || !done) return;
-    std::array<std::uint8_t, endpoint::kConfigSnapshotMax> active{};
+    auto& active = readback_;
+    active.fill(0);
     std::size_t active_size = 0;
     const Status read = provider_->read_active(
         config_.config_namespace, MutableByteView{active.data(), active.size()},
@@ -1557,8 +1581,9 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
   }
 }
 
-ConfigJournal::Transaction ConfigJournal::boot_txn() const noexcept {
-  Transaction txn{};
+ConfigJournal::Transaction& ConfigJournal::boot_txn() noexcept {
+  Transaction& txn = boot_txn_;
+  txn = Transaction{};
   txn.active = true;
   txn.command.operation_id = durable_.operation_id;
   txn.command.authority = durable_.issuer;
@@ -1586,7 +1611,8 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   }
   // Re-provision: the surviving known value (if any) is adopted under the
   // new generation; the proven revision floor is never regressed.
-  JournalRecord record = durable_;
+  JournalRecord& record = record_scratch_;
+  record = durable_;
   record.store_generation = new_store_generation;
   record.phase = has_active_ ? ConfigPhase::Interrupted : ConfigPhase::Idle;
   record.reason = ConfigReason::RecoveryRequired;
