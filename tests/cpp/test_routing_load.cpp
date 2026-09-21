@@ -129,6 +129,23 @@ wire::EncodedFrame craft_frame(TestSecurity& cipher, const wire::Header& header,
 }
 
 // An authenticated BUSY frame `from` -> `to` carrying `payload`.
+// End-protected transit DATA `prev` -> `relay` bound for `destination` with a
+// spoofable `origin` (relays never end-verify the claimed origin).
+wire::EncodedFrame craft_transit(TestSecurity& cipher, NodeId prev, NodeId relay,
+                                 NodeId origin, NodeId destination,
+                                 std::uint64_t seq) {
+  return craft_frame(cipher,
+                     mk_header(FrameType::Data, origin, destination, prev, relay,
+                               MessageId{42, seq}, wire::kFlagEndProtected),
+                     payload_view());
+}
+
+void inject(Harness& h, NodeId receiver, NodeId peer,
+            const wire::EncodedFrame& frame) {
+  h.at(receiver)->on_radio_receive(peer, frame.view(), RadioRxMetadata{-60},
+                                   h.now);
+}
+
 wire::EncodedFrame craft_busy(TestSecurity& cipher, NodeId from, NodeId to,
                               autonomy::BusyPayload& payload,
                               std::uint64_t wire_seq) {
@@ -430,9 +447,22 @@ void test_queue_penalty_ownership() {
   // Ownership: only OUR egress toward 2 is penalized — the idle link to 3
   // is untouched, and nothing of 2's own queue leaks into our metric.
   CHECK(a->peer_link_cost(3) == 1);
-  // The penalty decays with the observation window.
-  h.now += 2001;
-  h.step(1);
+  // The penalty decays once evidence expires — asymmetric slew
+  // (sdk-completion/03 §3.4): each relax step halves the excess above the
+  // honest target once the relax window elapses, and a residual <=
+  // ceil(base/4) snaps closed. While the drain's refusal/sojourn evidence is
+  // still fresh the cost may legitimately stay high, so give the window a
+  // full expiry first, then require monotone convergence to nominal.
+  h.now += 4001;  // outlive every evidence window (2 s) from the drain
+  RouteMetric previous = a->peer_link_cost(2);
+  for (int window = 0; window < 8 && previous != 1; ++window) {
+    h.now += 2000;
+    h.step(1);
+    const RouteMetric cost = a->peer_link_cost(2);
+    fprintf(stderr,"W%d cost=%u\n", window, cost);
+    CHECK(cost <= previous);  // relax never worsens
+    previous = cost;
+  }
   CHECK(a->peer_link_cost(2) == 1);
 }
 
@@ -701,6 +731,90 @@ void test_no_multipath() {
   }
 }
 
+// §3.4 refusal-pressure floor: a saturated scheduler stops producing
+// sojourn samples exactly when congestion is worst. Once refusals are
+// actually observed, pool occupancy inflates every link cost even with
+// zero fresh sojourn — occupancy alone (no refusal) must NOT inflate.
+void test_refusal_pressure_floor() {
+  // §3.4 gate math (pure): occupancy alone is never enough — the floor
+  // needs a refusal observed inside the observation window. A saturated
+  // but refusal-free pool cannot be built in the sim (the 8-deep control
+  // lane refuses before the 32-deep pool reaches 50% of data-only jobs),
+  // so the gate's no-refusal side is covered here.
+  CHECK(!refusal_floor_active(100, 0, 1000));   // never refused
+  CHECK(!refusal_floor_active(49, 500, 1000));  // below watermark
+  CHECK(refusal_floor_active(50, 500, 1000));   // watermark + fresh refusal
+  CHECK(!refusal_floor_active(90, 500,
+                              500 + kObservationWindowMs + 1));  // stale
+  CHECK(refusal_penalty_steps(50) == 1);
+  CHECK(refusal_penalty_steps(89) == 4);
+  CHECK(refusal_penalty_steps(100) == kQueuePenaltyMaxMultiple);
+
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(3);
+  (void)h.add(4);
+  (void)h.add(5);
+  (void)h.add(6);
+  h.link(1, 3);
+  h.link(1, 4);
+  h.link(1, 5);
+  h.link(1, 6);
+  // link() already wires neighbors; transit can be admitted immediately.
+  // Establish peer 6's baseline origin generation (gen=1) so a later bump
+  // registers as a restart — the first-seen generation never resets.
+  {
+    std::array<std::uint8_t, 64> body{};
+    ByteWriter w(MutableByteView{body.data(), body.size()});
+    CHECK_OK(w.write_u8(1));
+    CHECK_OK(w.write_u64(6));
+    CHECK_OK(w.write_u16(1));
+    CHECK_OK(w.write_u16(1));
+    CHECK_OK(w.write_u16(0));
+    auto adv0 = craft_frame(
+        h.cipher,
+        mk_header(FrameType::RouteUpdate, 6, 1, 6, 1, MessageId{77, 1}),
+        ByteView{body.data(), w.size()});
+    inject(h, 1, 6, adv0);
+    ++h.now;
+    h.step(1);
+  }
+  CHECK(a->peer_link_cost(6) == 1);  // baseline: nominal before congestion
+
+  // Push past capacity: transit admissions are refused, the floor engages
+  // and every link inflates even though no sojourn sample was ever
+  // measured — the starvation blind spot the floor exists to cover.
+  for (std::uint64_t i = 1; i <= 60; ++i) {
+    const NodeId prev = 3 + (i % 3);
+    inject(h, 1, prev, craft_transit(h.cipher, prev, 1, 5000 + i, 6, i));
+    ++h.now;
+  }
+  h.step(1);
+  CHECK(a->congestion_stats().admissions_rejected > 0);
+  CHECK(a->peer_link_cost(6) > 1);
+  CHECK(a->peer_link_cost(3) > 1);  // node-level pressure, every neighbor
+
+  // §3.7 identity reset: a peer restart (higher self-generation in its
+  // route update) clears the measurement mirror synchronously — evidence
+  // must not follow the new incarnation. Assert before the next refresh:
+  // node-level refusal pressure may legitimately re-inflate afterwards.
+  std::array<std::uint8_t, 64> rec_body{};
+  ByteWriter w(MutableByteView{rec_body.data(), rec_body.size()});
+  CHECK_OK(w.write_u8(1));
+  CHECK_OK(w.write_u64(6));        // self record from 6
+  CHECK_OK(w.write_u16(9));        // origin generation bump (baseline was 1)
+  CHECK_OK(w.write_u16(1));        // sequence
+  CHECK_OK(w.write_u16(0));        // metric: self is 0
+  auto adv = craft_frame(
+      h.cipher,
+      mk_header(FrameType::RouteUpdate, 6, 1, 6, 1, MessageId{77, 2}),
+      ByteView{rec_body.data(), w.size()});
+  inject(h, 1, 6, adv);
+  CHECK(a->peer_link_cost(6) == 1);  // mirror reset: back to nominal
+  // The non-restarted peer keeps its measured inflation.
+  CHECK(a->peer_link_cost(3) > 1);
+}
+
 }  // namespace
 
 int main() {
@@ -716,6 +830,7 @@ int main() {
   test_sustained_busy_switches_route();
   test_feedback_ordering_ttl();
   test_no_multipath();
+  test_refusal_pressure_floor();
   if (failures == 0) {
     std::printf("RouteLoom load-routing tests passed\n");
     return 0;

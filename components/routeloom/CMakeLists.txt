@@ -29,11 +29,14 @@ set(ROUTELOOM_CORE_SOURCES
   src/wire.cpp
 )
 
-# Vendored micro-ecc (BSD-2, third_party/micro-ecc/LICENSE.txt): the
-# RLCP1_COSE_ESP256 permit verifier's P-256 backend. Identical arithmetic on
-# host and firmware. Only secp256r1 is compiled; other curves stay disabled.
+# Vendored micro-ecc (BSD-2, third_party/micro-ecc/LICENSE.txt inside this
+# component): the RLCP1_COSE_ESP256 permit verifier's P-256 backend. Identical
+# arithmetic on host and firmware. Only secp256r1 is compiled; other curves
+# stay disabled. The copy lives inside the component so the component stays
+# self-contained when fetched by the IDF component manager (a git `path`
+# dependency copies only this directory).
 set(ROUTELOOM_UECC_SRC
-  ${CMAKE_CURRENT_LIST_DIR}/../../third_party/micro-ecc/uECC.c
+  ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc/uECC.c
 )
 # uECC_* defines only affect uECC.c, so they are applied target-wide: the
 # IDF component-requirements pass forbids set_source_files_properties.
@@ -46,7 +49,7 @@ set(ROUTELOOM_UECC_DEFS
 if(COMMAND idf_component_register)
   idf_component_register(
     SRCS ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC}
-    INCLUDE_DIRS include ${CMAKE_CURRENT_LIST_DIR}/../../third_party/micro-ecc
+    INCLUDE_DIRS include ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc
   )
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS})
@@ -57,7 +60,7 @@ else()
   add_library(routeloom_core STATIC ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC})
   target_include_directories(routeloom_core PUBLIC include)
   target_include_directories(routeloom_core PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/../../third_party/micro-ecc)
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc)
   target_compile_features(routeloom_core PUBLIC cxx_std_17)
   target_compile_definitions(routeloom_core PRIVATE ${ROUTELOOM_UECC_DEFS})
   target_compile_options(routeloom_core PRIVATE

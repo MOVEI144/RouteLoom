@@ -2,8 +2,11 @@
 
 // Congestion-control contract types and pinned parameters for the
 // autonomous-mesh profile (docs/design/autonomous-mesh/03-congestion.md §4, §5
-// and contracts.json congestion.*). This phase implements capacity protection
-// and congestion control only — route-metric coupling stays off until P3.
+// and contracts.json congestion.*). The route-metric coupling is specified in
+// docs/design/sdk-completion/03-congestion-routing.md: measured base + a
+// bounded queue/refusal penalty feed RouteTable::update_link_cost, gated by
+// the evidence rules below — congestion can only ever make a link look worse,
+// never better.
 //
 // Invariants encoded here:
 //   - Accepted RELIABLE work is never silently dropped by queue control; only
@@ -61,6 +64,13 @@ constexpr std::uint32_t kQueueTargetMs = 50;
 // egress delay above queue_target_ms, capped at queue_penalty_max_multiple.
 constexpr std::uint32_t kQueuePenaltyStepMs = 50;
 constexpr std::uint32_t kQueuePenaltyMaxMultiple = 4;
+// Refusal-pressure floor (sdk-completion/03 §3.4): a saturated scheduler
+// stops producing sojourn samples exactly when congestion is worst, so pool
+// occupancy maps directly to penalty *steps* — never converted to ms.
+// occupancy 50–59% -> 1 step ... >=80% -> 4 (the same cap as queue_ms).
+constexpr std::uint32_t kRefusalStepWatermarkLowPercent = 50;
+constexpr std::uint32_t kRefusalStepPerTenPercent = 10;
+constexpr std::uint32_t kLinkCostRelaxSnapDivisor = 4;
 // Minimum authenticated accepts before a measured exchange ratio may move a
 // link cost off its nominal value (03 §6.1 — sample-poor links keep nominal).
 constexpr std::uint32_t kExchangeMinAccepts = 4;
@@ -80,6 +90,9 @@ constexpr std::uint8_t kCombinedPhysicalAttemptsMax = 6;
 // Observation / feedback freshness (03-congestion.md §3).
 constexpr std::uint32_t kObservationWindowMs = 2000;
 constexpr std::uint32_t kFeedbackTtlMs = 3000;
+// Asymmetric slew (sdk-completion/03 §3.4): cost improvement is time-gated
+// to one relax step per observation window; worsening is immediate.
+constexpr std::uint32_t kLinkCostRelaxWindowMs = kObservationWindowMs;
 
 // Frame-length classes for observation keys (encoded size on air).
 constexpr std::uint8_t frame_length_class(const std::size_t encoded_size) noexcept {
@@ -353,22 +366,77 @@ constexpr RouteMetric measured_link_base(const RouteMetric nominal,
 // §6.2 queue penalty: only the LOCAL egress-queue delay toward the peer is
 // added — the peer's own queue lives inside its advertised metric and is
 // never re-added (no double count).
-//   p = b * min(4, ceil(max(0, Q_ms - 50) / 50));  link = sat_add(b, p)
-constexpr RouteMetric queue_penalized_cost(const RouteMetric base,
-                                           const std::uint32_t queue_ms) noexcept {
-  if (base == kInfiniteRouteMetric) return base;
-  if (base == 0) return 1;  // never emit a 0-cost link (only self is 0)
+//   steps_q = min(4, ceil(max(0, Q_ms - 50) / 50))
+constexpr std::uint32_t queue_penalty_steps(const std::uint32_t queue_ms) noexcept {
   const std::uint32_t excess =
       queue_ms > kQueueTargetMs ? queue_ms - kQueueTargetMs : 0;
   const std::uint64_t steps =
       (static_cast<std::uint64_t>(excess) + kQueuePenaltyStepMs - 1U) /
       kQueuePenaltyStepMs;
-  const std::uint64_t multiple =
-      steps > kQueuePenaltyMaxMultiple ? kQueuePenaltyMaxMultiple : steps;
+  return steps > kQueuePenaltyMaxMultiple
+             ? kQueuePenaltyMaxMultiple
+             : static_cast<std::uint32_t>(steps);
+}
+
+// §3.4 refusal-pressure floor: a saturated pool stops producing sojourn
+// samples exactly when congestion is worst. Pool occupancy is not a time
+// unit, so it maps directly to penalty steps — never added as ms.
+//   steps_r = occupancy >= 50% ? min(4, 1 + (occupancy - 50) / 10) : 0
+constexpr std::uint32_t refusal_penalty_steps(
+    const std::uint32_t occupancy_percent) noexcept {
+  if (occupancy_percent < kRefusalStepWatermarkLowPercent) return 0;
+  const std::uint32_t steps =
+      1U + (occupancy_percent - kRefusalStepWatermarkLowPercent) /
+               kRefusalStepPerTenPercent;
+  return steps > kQueuePenaltyMaxMultiple ? kQueuePenaltyMaxMultiple : steps;
+}
+
+// §3.4 floor gate: occupancy crosses the watermark AND a refusal was
+// observed within the observation window. Occupancy alone still produces
+// sojourn samples — a merely-full pool must not inflate the metric; a
+// stale refusal must not hold it inflated either.
+constexpr bool refusal_floor_active(const std::uint32_t occupancy_percent,
+                                    const MonotonicMs last_refusal_ms,
+                                    const MonotonicMs now_ms) noexcept {
+  return occupancy_percent >= kRefusalStepWatermarkLowPercent &&
+         last_refusal_ms != 0 &&
+         now_ms - last_refusal_ms <= kObservationWindowMs;
+}
+
+// link = base * (1 + m), saturating at wire infinity. The combined multiple
+// m = max(steps_q, steps_r): pool saturation and per-peer sojourn are two
+// readings of the same congestion — never added (sdk-completion/03 §3.4).
+constexpr RouteMetric penalized_cost(const RouteMetric base,
+                                     const std::uint32_t multiple) noexcept {
+  if (base == kInfiniteRouteMetric) return base;
+  if (base == 0) return 1;  // never emit a 0-cost link (only self is 0)
   const std::uint64_t total =
-      static_cast<std::uint64_t>(base) * (1U + multiple);
+      static_cast<std::uint64_t>(base) * (1ULL + multiple);
   return total >= kInfiniteRouteMetric ? kInfiniteRouteMetric
                                        : static_cast<RouteMetric>(total);
+}
+
+constexpr RouteMetric queue_penalized_cost(const RouteMetric base,
+                                           const std::uint32_t queue_ms) noexcept {
+  return penalized_cost(base, queue_penalty_steps(queue_ms));
+}
+
+// §3.4 asymmetric slew, relax direction only (worsening is immediate and
+// handled by the caller). Per observation window the cost recovers at most
+// half of its excess above `target`; a residual <= ceil(base/divisor) snaps
+// closed so cost always returns exactly to the honest target. Call only
+// when `target < current` and the relax window elapsed.
+constexpr RouteMetric relax_link_cost(const RouteMetric current,
+                                      const RouteMetric target,
+                                      const RouteMetric base) noexcept {
+  const std::uint32_t excess =
+      current > target ? static_cast<std::uint32_t>(current - target) : 0;
+  const std::uint32_t snap =
+      base / kLinkCostRelaxSnapDivisor > 0 ? base / kLinkCostRelaxSnapDivisor
+                                           : 1U;
+  if (excess <= snap) return target;
+  const std::uint32_t step = excess / 2U > 0 ? excess / 2U : 1U;
+  return static_cast<RouteMetric>(current - step);
 }
 
 }  // namespace routeloom

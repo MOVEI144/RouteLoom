@@ -61,9 +61,10 @@ bool MeshNode::TxScheduler::control_job(const TxJob& job) noexcept {
 
 SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
   if (job.form == JobForm::Forwarded) {
-    // Transit traffic keeps its lane across hops: receipts ride management,
-    // everything else is normal.
-    return job.forwarded.header.type == FrameType::EndReceipt
+    // Transit traffic keeps its lane across hops: receipts and application
+    // results ride management, everything else is normal.
+    return (job.forwarded.header.type == FrameType::EndReceipt ||
+            job.forwarded.header.type == FrameType::AppResult)
                ? SchedClass::Management
                : SchedClass::Normal;
   }
@@ -86,6 +87,9 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
       }
       return SchedClass::Normal;
     case FrameType::EndReceipt:
+    case FrameType::AppResult:
+      // APP_RESULT traffic is receipt-class management work (01 §1.6): it
+      // must not starve behind bulk DATA or confirmations stop flowing.
       return SchedClass::Management;
     case FrameType::RouteUpdate:
     case FrameType::SeqnoRequest:
@@ -437,6 +441,24 @@ Status MeshNode::start(const MonotonicMs now_ms) noexcept {
   if (security_.security_profile() != SecurityProfile::Production) {
     observer_.on_diagnostic("SECURITY_PROFILE_EXPERIMENTAL", kInvalidNodeId, nullptr);
   }
+  // Lease safety under metric churn (sdk-completion/03 §3.8, D4-06): a full
+  // route table needs ceil(capacity / records-per-frame) advertisement
+  // periods to be refreshed through the rotating cursor. A lifetime shorter
+  // than that bound lets tail routes expire before their refresh lands —
+  // surfaced once as a diagnostic; whether it is a defect depends on how
+  // large the table actually grows, so it is not a boot failure.
+  {
+    const std::uint64_t pages =
+        (kMaxRouteEntries + kMaxRouteRecordsPerFrame - 1) /
+        kMaxRouteRecordsPerFrame;
+    const std::uint64_t bound =
+        pages * config_.route_advertisement_period_ms +
+        kTriggeredJitterMs + config_.route_advertisement_period_ms;
+    if (config_.route_lifetime_ms <= bound) {
+      observer_.on_diagnostic("ROUTE_REFRESH_BOUND_EXCEEDED", kInvalidNodeId,
+                              nullptr);
+    }
+  }
   return Status::success();
 }
 
@@ -472,6 +494,7 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->queue_sojourn_ewma_ms = 0;
   record->sojourn_samples = 0;
   record->last_sojourn_ms = 0;
+  record->sojourn_window_ms = 0;
   record->busy_active = false;
   record->busy_since_ms = 0;
   record->last_busy_feedback_ms = 0;
@@ -604,11 +627,76 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
     return Status::error(StatusCode::InvalidArgument, "invalid send request");
   }
   if (options.delivery == DeliveryClass::Applied) {
-    return Status::error(StatusCode::Unsupported, "APPLIED is not implemented in CORE_FIXED_250");
+    // APPLIED requires the destination's execution lease — the parameter
+    // only exists on send_applied; there is no silent downgrade path.
+    return Status::error(StatusCode::Unsupported,
+                         "APPLIED sends require send_applied()");
   }
   return enqueue_delivery(
       MessageId{config_.message_session, next_message_sequence_}, destination,
       payload, options, now_ms, id);
+}
+
+Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
+                              const ExecutionLease& lease, const SendOptions& options,
+                              const MonotonicMs now_ms, MessageId& id) noexcept {
+  last_clock_ms_ = now_ms;
+  if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
+  ++work_generation_;
+  if (paused(pause::kAppAdmission)) {
+    return Status::error(StatusCode::InvalidState,
+                         sleep_draining_ ? "NODE_DRAINING" : "NODE_PAUSED");
+  }
+  if (destination == kInvalidNodeId || destination == config_.node ||
+      payload.size > kAppliedUserPayloadMax ||
+      (payload.size > 0 && payload.data == nullptr) ||
+      options.lifetime_ms == 0 || options.hop_limit == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid applied send request");
+  }
+  if (options.delivery != DeliveryClass::Applied) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "send_applied requires DeliveryClass::Applied");
+  }
+  if (options.persist_across_sleep) {
+    return Status::error(StatusCode::Unsupported,
+                         "APPLIED sleep persistence is not implemented");
+  }
+  // The wire body is `execution_lease || user_payload` (01 §1.2); the lease
+  // is verified by the destination against its own incarnation, never trusted.
+  std::array<std::uint8_t, kMaxApplicationPayload> body{};
+  std::memcpy(body.data(), lease.data(), lease.size());
+  if (payload.size > 0) std::memcpy(body.data() + lease.size(), payload.data, payload.size);
+  return enqueue_delivery(
+      MessageId{config_.message_session, next_message_sequence_}, destination,
+      ByteView{body.data(), lease.size() + payload.size}, options, now_ms, id);
+}
+
+ExecutionLease MeshNode::applied_lease() const noexcept {
+  // magic | message_session u32 | end_epoch u16 | boot_incarnation u64 — the
+  // magic keeps a computed lease nonzero so all-zero on the wire is always
+  // "no assertion" and refuses (01 §1.2).
+  ExecutionLease lease{};
+  ByteWriter writer(MutableByteView{lease.data(), lease.size()});
+  (void)writer.write_u16(endpoint::kAppliedLeaseMagic);
+  (void)writer.write_u32(config_.message_session);
+  (void)writer.write_u16(config_.end_epoch);
+  (void)writer.write_u64(config_.boot_incarnation);
+  return lease;
+}
+
+bool MeshNode::applied_result(const MessageId& id, AppliedResultView& out) const noexcept {
+  const auto* delivery = find_delivery(id);
+  if (delivery == nullptr || !delivery->applied_present) {
+    out = AppliedResultView{};
+    return false;
+  }
+  out.present = true;
+  out.late = delivery->applied_late;
+  out.outcome = static_cast<endpoint::AppResultOutcome>(delivery->applied_outcome);
+  out.code = delivery->applied_code;
+  out.size = delivery->applied_result_size;
+  std::memcpy(out.data.data(), delivery->applied_result.data(), out.size);
+  return true;
 }
 
 Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
@@ -626,7 +714,10 @@ Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
     return Status::error(StatusCode::InvalidArgument, "invalid send request");
   }
   if (options.delivery == DeliveryClass::Applied) {
-    return Status::error(StatusCode::Unsupported, "APPLIED is not implemented in CORE_FIXED_250");
+    // Resume of APPLIED work is deferred (sdk-completion/01 §1.10): the
+    // request's lease/digest bookkeeping does not survive a real sleep.
+    return Status::error(StatusCode::Unsupported,
+                         "APPLIED resume is not implemented");
   }
   if (auto* existing = find_delivery(id)) {
     if (!sleep_terminal(existing->state)) {
@@ -754,7 +845,8 @@ Status MeshNode::queue_origin_data(Delivery& delivery, const MonotonicMs now_ms)
   job.form = JobForm::Plain;
   job.owner = JobOwner::OriginDelivery;
   job.peer = route.next_hop;
-  job.requires_hop_accept = delivery.options.delivery == DeliveryClass::Reliable;
+  job.requires_hop_accept = delivery.options.delivery == DeliveryClass::Reliable ||
+                            delivery.options.delivery == DeliveryClass::Applied;
   job.max_attempts = config_.max_link_attempts;
   job.deadline_ms = delivery.expires_at_ms;
   job.ack = AckKey{FrameType::Data, MessageKey{config_.node, delivery.id}, delivery.round};
@@ -845,7 +937,8 @@ Status MeshNode::decode_ack_payload(const ByteView payload, AckKey& key) noexcep
       type == static_cast<std::uint8_t>(FrameType::ObjectAck) ||
       type == static_cast<std::uint8_t>(FrameType::RouteUpdate) ||
       type == static_cast<std::uint8_t>(FrameType::SeqnoRequest) ||
-      type == static_cast<std::uint8_t>(FrameType::Diagnostic);
+      type == static_cast<std::uint8_t>(FrameType::Diagnostic) ||
+      type == static_cast<std::uint8_t>(FrameType::AppResult);
   if (reader.remaining() != 0 || !known_type) {
     return Status::error(StatusCode::ProtocolError, "invalid hop accept payload");
   }
@@ -1317,6 +1410,11 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       // Callback-uncertain results are accounted separately from RF loss
       // and BUSY — the job still retries within its bounded attempt budget.
       obs_count(job, &ObservationBucket::unknown_results, now_ms);
+      // §3.3 evidence gate: an Unknown resolution taints the peer's metric
+      // window — it may worsen but never improve until the next roll.
+      if (Neighbor* neighbor = find_neighbor(job.peer)) {
+        neighbor->metric_window_dirty = true;
+      }
       // No driver observation will ever land for this attempt — release
       // its bucket pin here or the evidence could never be reclaimed.
       if (auto* bucket = job_bucket(job, now_ms);
@@ -1699,6 +1797,13 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       if (scheduler_.free_slots() >= 2) {
         (void)queue_hop_accept(frame.header, now_ms);
         (void)queue_end_receipt(frame.header, now_ms);
+        if (frame.header.delivery == DeliveryClass::Applied) {
+          // APPLIED (01 §1.5): a new-round retransmission replays the stored
+          // verdict — the endpoint is never invoked twice for one MessageKey.
+          if (auto* record = find_applied(key)) {
+            emit_applied_result(*record, now_ms);
+          }
+        }
       }
       return;
     }
@@ -1744,6 +1849,11 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     if (duplicate->delivered && frame.header.destination == config_.node &&
         scheduler_.free_slots() >= 1) {
       (void)queue_end_receipt(frame.header, now_ms);
+      if (frame.header.delivery == DeliveryClass::Applied) {
+        if (auto* record = find_applied(key)) {
+          emit_applied_result(*record, now_ms);
+        }
+      }
     }
     return;
   }
@@ -1773,20 +1883,53 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       observer_.on_diagnostic("ADMISSION_NO_DEDUP_SLOT", peer, &frame.header.message);
       return;
     }
+    // APPLIED (01 §1.4): the result record is part of admission — accepted
+    // work must always have a place to store its verdict, so reservation
+    // happens BEFORE the hop ACK. An existing record covers re-admission
+    // after the dedup record expired while the result was still held.
+    AppliedRecord* applied = nullptr;
+    bool applied_new = false;
+    if (frame.header.delivery == DeliveryClass::Applied) {
+      applied = find_applied(key);
+      if (applied == nullptr) {
+        applied = allocate_applied(
+            frame.header, ByteView{plain.payload.data(), plain.payload_size}, now_ms);
+        if (applied == nullptr) {
+          dedup_.release(entry);
+          emit_busy_or_drop(peer, frame.header,
+                            static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                            now_ms);
+          observer_.on_diagnostic("APPLIED_NO_RESULT_SLOT", peer,
+                                  &frame.header.message);
+          return;
+        }
+        applied_new = true;
+      }
+    }
     if (!queue_hop_accept(frame.header, now_ms)) {
       // The reply itself could not be reserved (control lane full): the
       // admission failed pre-acceptance, so report it honestly — the BUSY
       // most likely cannot be queued either and is counted as unsent.
       dedup_.release(entry);
+      if (applied_new) applied_records_.release(applied);
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
       return;
     }
     entry->delivered = true;
-    observer_.on_message(key, frame.header.origin,
-                         ByteView{plain.payload.data(), plain.payload_size});
-    const auto receipt_status = queue_end_receipt(frame.header, now_ms);
-    if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
+    if (applied != nullptr) {
+      // END_RECEIPT is SDK-level acceptance evidence first (01 §1.3); the
+      // application verdict follows as its own APP_RESULT RESULT frame.
+      const auto receipt_status = queue_end_receipt(frame.header, now_ms);
+      if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
+      dispatch_applied(frame.header, ByteView{plain.payload.data(), plain.payload_size},
+                       *applied, applied_new, now_ms);
+    } else {
+      observer_.on_message(key, frame.header.origin,
+                           ByteView{plain.payload.data(), plain.payload_size});
+      const auto receipt_status = queue_end_receipt(frame.header, now_ms);
+      if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
+    }
     return;
   }
 
@@ -1949,6 +2092,10 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       }
     } else if (type == FrameType::Diagnostic) {
       handle_diagnostic(plain, peer, now_ms);
+    } else if (type == FrameType::AppResult) {
+      // sdk-completion/01: RESULT/STATUS resolve origin-side APPLIED waits,
+      // QUERY/RESULT_ACK answer from/consume terminal result records.
+      handle_app_result(plain, peer, now_ms);
     } else {
       // Control/ControlObject/ObjectChunk/ObjectAck: the config endpoint
       // owns the terminal payload. A node without one reports it honestly —
@@ -2252,7 +2399,28 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
   }
   entry->delivered = true;
   if (auto* delivery = find_delivery(original.id)) {
-    set_delivery_state(*delivery, DeliveryState::Delivered, "END_RECEIVED");
+    if (delivery->options.delivery == DeliveryClass::Applied) {
+      // APPLIED (01 §1.3): END_RECEIPT is SDK-acceptance evidence only — the
+      // delivery keeps waiting for the application verdict. The receipt must
+      // come from the delivery's own bound destination.
+      if (delivery->destination != frame.header.origin) {
+        observer_.on_diagnostic("APPLIED_RECEIPT_MISMATCH", peer,
+                                &frame.header.message);
+      } else if (delivery->state == DeliveryState::WaitingForEndReceipt &&
+                 delivery->app_phase == 0) {
+        delivery->app_phase = 1;
+        delivery->next_round_at_ms =
+            std::min(delivery->expires_at_ms,
+                     now_ms + applied_window_ms(delivery->options.hop_limit,
+                                                config_.hop_accept_timeout_ms));
+        set_delivery_state(*delivery, DeliveryState::WaitingForEndReceipt,
+                           "APP_RESULT_PENDING");
+      }
+      // A receipt for an already-committed/expired APPLIED delivery is
+      // idempotent — dedup-suppressed per round, ignored otherwise.
+    } else {
+      set_delivery_state(*delivery, DeliveryState::Delivered, "END_RECEIVED");
+    }
   }
   (void)round;
 }
@@ -2292,6 +2460,9 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
   }
   if (restarted) {
     routes_.invalidate_next_hop(peer, now_ms, false);
+    // §3.7 identity reset: measurement gathered against the previous
+    // incarnation is unattributable to this one.
+    reset_neighbor_measurement(*neighbor);
     trigger_route_advertisement(now_ms);
     observer_.on_diagnostic("PEER_RESTARTED_ROUTES_FLUSHED", peer, nullptr);
   }
@@ -2474,7 +2645,8 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   // plaintext encoding at all (05 §5.3).
   if ((frame.header.type == FrameType::Data ||
        frame.header.type == FrameType::Service ||
-       frame.header.type == FrameType::EndReceipt) &&
+       frame.header.type == FrameType::EndReceipt ||
+       frame.header.type == FrameType::AppResult) &&
       (frame.header.flags & wire::kFlagEndProtected) == 0) {
     observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer, &frame.header.message);
     return;
@@ -2960,11 +3132,14 @@ void MeshNode::obs_tx_submitted(TxJob& job, const std::uint64_t token,
     ewma_add(neighbor->queue_sojourn_ewma_ms, now_ms - job.enqueued_at_ms,
              neighbor->sojourn_samples);
     neighbor->last_sojourn_ms = now_ms;
+    neighbor->metric_sources |= Neighbor::kMetricSourceLocalSojourn;
+    if (neighbor->sojourn_window_ms == 0) neighbor->sojourn_window_ms = now_ms;
     if (job.requires_hop_accept) {
       // Eligible attempt work for the exchange-cost ratio: every physical
       // submission counts, including submissions that later fail (§6.1).
       if (neighbor->exchange_window_ms == 0) neighbor->exchange_window_ms = now_ms;
       ++neighbor->exchange_work;
+      neighbor->metric_sources |= Neighbor::kMetricSourceLocalExchange;
     }
   }
 }
@@ -3008,6 +3183,7 @@ void MeshNode::obs_hop_result(const TxJob& job, const bool accepted,
   if (accepted) {
     if (auto* neighbor = find_neighbor(job.peer)) {
       ++neighbor->exchange_accepts;  // authenticated-accept success (03 §6.1)
+      neighbor->metric_sources |= Neighbor::kMetricSourceLocalExchange;
     }
   }
 }
@@ -3070,6 +3246,11 @@ void MeshNode::note_radio_tx(const RadioTxObservation& observation,
       break;
     case RadioTxOutcome::Unknown:
       ++bucket->unknown_results;
+      // §3.3 evidence gate: an Unknown resolution taints the peer's metric
+      // window — it may worsen but never improve until the next roll.
+      if (Neighbor* neighbor = find_neighbor(observation.peer)) {
+        neighbor->metric_window_dirty = true;
+      }
       break;
   }
   if (observation.completed_us > observation.submitted_us) {
@@ -3998,17 +4179,34 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
 // P3 load coupling (03-congestion.md §6, §7)
 // ---------------------------------------------------------------------------
 
+void MeshNode::reset_neighbor_measurement(Neighbor& neighbor) noexcept {
+  neighbor.exchange_work = 0;
+  neighbor.exchange_accepts = 0;
+  neighbor.exchange_window_ms = 0;
+  neighbor.queue_sojourn_ewma_ms = 0;
+  neighbor.sojourn_samples = 0;
+  neighbor.last_sojourn_ms = 0;
+  neighbor.sojourn_window_ms = 0;
+  neighbor.metric_window_dirty = false;
+  neighbor.metric_sources = 0;
+  neighbor.last_cost_relax_ms = 0;
+  neighbor.link_cost = neighbor.metric;
+}
+
 void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) noexcept {
   // §6.1 base cost: the measured exchange ratio against the nominal. The
   // measured cost is in units of exchanges (attempt count per authenticated
   // accept), never driver microseconds — driver service time may already
   // contain MAC retries, so using it would double-count ETX. Below the
   // minimum sample count the nominal stands (no measured reference is ever
-  // invented).
+  // invented). A dirty window (sdk-completion/03 §3.3 — some attempt resolved
+  // Unknown) may still count work toward worsening but must never let the
+  // measured ratio improve the base off nominal.
   RouteMetric base = neighbor.metric;
   if (neighbor.exchange_accepts >= kExchangeMinAccepts) {
-    base = measured_link_base(neighbor.metric, neighbor.exchange_work,
-                              neighbor.exchange_accepts);
+    const RouteMetric measured = measured_link_base(
+        neighbor.metric, neighbor.exchange_work, neighbor.exchange_accepts);
+    if (!neighbor.metric_window_dirty || measured >= base) base = measured;
   }
   // §6.2 queue penalty: ONLY our egress sojourn toward this peer, smoothed
   // over the observation window. A stale or absent sample reads as 0 — a
@@ -4019,7 +4217,35 @@ void MeshNode::refresh_link_cost(Neighbor& neighbor, const MonotonicMs now_ms) n
               now_ms - neighbor.last_sojourn_ms <= kObservationWindowMs
           ? neighbor.queue_sojourn_ewma_ms
           : 0;
-  const RouteMetric cost = queue_penalized_cost(base, queue_ms);
+  // §3.4 refusal-pressure floor: a saturated scheduler stops producing
+  // sojourn samples exactly when congestion is worst, so pool occupancy is
+  // folded in as penalty steps — same cap, max() not + (one congestion
+  // reading, counted once). The floor engages only while refusals are
+  // actually observed (§3.3 evidence): occupancy alone still produces
+  // sojourn samples, so a merely-full pool must not inflate the metric.
+  const bool refusal_pressure = refusal_floor_active(
+      scheduler_.occupancy_percent(), last_refusal_ms_, now_ms);
+  const std::uint32_t steps_r =
+      refusal_pressure ? refusal_penalty_steps(scheduler_.occupancy_percent())
+                       : 0;
+  const std::uint32_t multiple =
+      queue_ms != 0 || steps_r != 0
+          ? (queue_penalty_steps(queue_ms) > steps_r
+                 ? queue_penalty_steps(queue_ms)
+                 : steps_r)
+          : 0;
+  const RouteMetric target = penalized_cost(base, multiple);
+  // §3.4 asymmetric slew: worsening applies immediately; improvement is
+  // time-gated to one relax step per observation window and suppressed
+  // while the window is dirty (incomplete evidence never improves a cost).
+  RouteMetric cost = neighbor.link_cost;
+  if (target >= cost) {
+    cost = target;
+  } else if (!neighbor.metric_window_dirty &&
+             now_ms - neighbor.last_cost_relax_ms >= kLinkCostRelaxWindowMs) {
+    cost = relax_link_cost(cost, target, base);
+    neighbor.last_cost_relax_ms = now_ms;
+  }
   if (cost != neighbor.link_cost) {
     neighbor.link_cost = cost;
     // Recompute stored candidates from their advertised metrics; never
@@ -4039,6 +4265,13 @@ void MeshNode::set_relay_enabled(const bool enabled) noexcept {
 }
 
 void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
+  // §3.4 refusal-pressure evidence: the floor engages on observed refusals,
+  // not occupancy alone — a full-but-flowing pool still produces sojourn
+  // samples. Track the scheduler's rejection counter once per refresh.
+  if (scheduler_.stats_.admissions_rejected != last_admission_rejections_) {
+    last_admission_rejections_ = scheduler_.stats_.admissions_rejected;
+    last_refusal_ms_ = now_ms;
+  }
   neighbors_.for_each([&](Neighbor& neighbor) {
     if (!neighbor.active) return;
     // Decaying observation window (03 §3): halve the exchange counters per
@@ -4048,6 +4281,17 @@ void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
       neighbor.exchange_work >>= 1;
       neighbor.exchange_accepts >>= 1;
       neighbor.exchange_window_ms += kObservationWindowMs;
+      // Window roll clears the dirty flag (§3.3): a bounded suppression of
+      // metric improvement, never a latch.
+      neighbor.metric_window_dirty = false;
+    }
+    // The sojourn EWMA decays on its own window anchor (§3.4): sparse fresh
+    // samples must not keep re-exposing a stale-inflated average — a quiet
+    // queue after a burst converges within a few windows, not minutes.
+    while (neighbor.sojourn_window_ms != 0 &&
+           now_ms - neighbor.sojourn_window_ms >= kObservationWindowMs) {
+      neighbor.queue_sojourn_ewma_ms >>= 1;
+      neighbor.sojourn_window_ms += kObservationWindowMs;
     }
     // Feedback TTL (03 §3/§5): sustained-busy survives only on fresh
     // authenticated feedback; silence past the TTL releases it so an old
