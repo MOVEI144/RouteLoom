@@ -537,7 +537,11 @@ pub fn service_outcome_encode(payload: &ServiceOutcome, out: &mut EncodedPayload
     if !outcome_reason_ok(payload.subtype, payload.reason as u16) {
         return invalid("service outcome reason does not match its subtype");
     }
-    if all_zero(&payload.token) || payload.gateway_boot == 0 || payload.ref_origin == 0 {
+    if all_zero(&payload.token)
+        || payload.gateway_boot == 0
+        || payload.ref_origin == 0
+        || payload.ref_origin == BROADCAST_NODE_ID
+    {
         return invalid("service outcome token/boot/origin must be nonzero");
     }
     let mut raw = Vec::with_capacity(SERVICE_OUTCOME_SIZE);
@@ -580,6 +584,7 @@ pub fn service_outcome_decode(encoded: &[u8]) -> Result<ServiceOutcome> {
         || all_zero(&token)
         || gateway_boot == 0
         || ref_origin == 0
+        || ref_origin == BROADCAST_NODE_ID
     {
         return reject();
     }
@@ -1135,7 +1140,9 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
         || next_revision != expected_revision + 1
         || network == 0
         || target == 0
+        || target == BROADCAST_NODE_ID
         || authority == 0
+        || authority == BROADCAST_NODE_ID
         || target_boot == 0
         || all_zero(&operation_id)
         || all_zero(&challenge_nonce)

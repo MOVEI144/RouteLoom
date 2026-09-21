@@ -476,6 +476,14 @@ def main():
     bad("config_zero_authority", "config_command",
         rcc1(patch=good_patch, **{**base, "authority": 0}),
         "authority 0 is the invalid node id")
+    # Broadcast node-id fields: u64::MAX is the broadcast id, also never a
+    # unicast peer — the codec must refuse it exactly like 0.
+    bad("config_broadcast_target", "config_command",
+        rcc1(patch=good_patch, **{**base, "target": 0xFFFFFFFFFFFFFFFF}),
+        "target broadcast id is reserved")
+    bad("config_broadcast_authority", "config_command",
+        rcc1(patch=good_patch, **{**base, "authority": 0xFFFFFFFFFFFFFFFF}),
+        "authority broadcast id is reserved")
     # Trailing bytes: a decoder consumes exactly its frame — leftover bytes
     # are a framing violation, never ignorable padding.
     bad("config_trailing_byte", "config_command",
