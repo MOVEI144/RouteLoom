@@ -16,6 +16,9 @@
 #if CONFIG_ROUTELOOM_DISCOVERY || CONFIG_ROUTELOOM_CONFIG
 #include "routeloom/espnow_autonomy.hpp"
 #endif
+#if CONFIG_ROUTELOOM_DISCOVERY
+#include "routeloom/espnow_scope_provider.hpp"
+#endif
 #if CONFIG_ROUTELOOM_MIGRATION
 #include "routeloom/espnow_migration.hpp"
 #include "routeloom/nvs_ledger_store.hpp"
@@ -149,7 +152,9 @@ Status next_boot_session(std::uint32_t& session) noexcept {
   for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
-routeloom::MonotonicMs monotonic_now_ms() noexcept {
+// Used by the CONFIG and DEEP_SLEEP opt-in paths only; in a default build it
+// has no caller, so it is marked maybe_unused rather than deleted.
+[[maybe_unused]] routeloom::MonotonicMs monotonic_now_ms() noexcept {
   return static_cast<routeloom::MonotonicMs>(esp_timer_get_time() / 1000);
 }
 
@@ -614,6 +619,26 @@ extern "C" void app_main(void) {
   discovery_config.network_hint =
       static_cast<std::uint32_t>(config.node.network);
   discovery_config.capability_bits = CONFIG_ROUTELOOM_CAPABILITY;
+#if CONFIG_ROUTELOOM_DISCOVERY_SCOPE != 0
+  // Discovery Scope Key (issue #14): the dev-profile provider derives
+  // per-generation keys from the configured base key. A scoped mode whose
+  // key cannot install fails boot — never a silent Off downgrade.
+  static routeloom::espnow::DevScopeProvider scope_provider(
+      routeloom::ScopeRef{CONFIG_ROUTELOOM_DISCOVERY_SCOPE_REF});
+  std::array<std::uint8_t, routeloom::kScopeKeyBytes> scope_key{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX, scope_key)) {
+    fail("invalid ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX");
+  }
+  status = scope_provider.install(
+      routeloom::ByteView{scope_key.data(), scope_key.size()},
+      CONFIG_ROUTELOOM_DISCOVERY_SCOPE_GENERATION, 0);
+  scope_key.fill(0);
+  if (!status) fail(status.detail);
+  discovery_config.scope_mode =
+      static_cast<routeloom::ScopeMode>(CONFIG_ROUTELOOM_DISCOVERY_SCOPE);
+  discovery_config.scope_provider = &scope_provider;
+  discovery_config.scope = scope_provider.ref();
+#endif
   routeloom::espnow::EspNowAutonomyPolicy autonomy_policy{};
 #if CONFIG_ROUTELOOM_DISCOVERY_MEMBER
   autonomy_policy.self_member = true;
@@ -644,6 +669,10 @@ extern "C" void app_main(void) {
   // authenticated control-object lane, with durable plan/commit/active
   // records in "rlplan". The authority role needs a durable authority ledger
   // (operation ids + audit anchor) before it may issue.
+  // Wired vs host-only: this node executes inbound verified commits and runs
+  // surveys/cutover; nothing local mints a plan — MigrationAuthority::
+  // commit_plan() has no firmware/USB caller today and is exercised by host
+  // tests only.
   static routeloom::espnow::NvsLedgerStore authority_ledger;
   if (self_authority) {
     status = authority_ledger.open("rlmauth");
@@ -773,6 +802,13 @@ extern "C" void app_main(void) {
 #endif
 
 #if CONFIG_ROUTELOOM_DEEP_SLEEP
+  // Wired: PowerCoordinator driven single-threaded (no runtime task), two-
+  // slot NVS sleep image, RTC-marker + wake-cause classification, timer wake
+  // via esp_deep_sleep_start. Not wired (host/port only): trusted RTC
+  // elapsed interval (pendings park TIME_UNCERTAIN), GPIO wake mask, and
+  // bounded rediscovery — EspNowPowerPort::start_discovery reports
+  // Unsupported, so an unconfirmed resume ends RESUME_UNCONFIRMED/
+  // DISCOVERY_REQUIRED instead of fabricating rediscovery.
   static NvsSleepStorage sleep_storage(counter_store);
   static EspNowPowerPort power_port(runtime);
   static LogPowerEvents power_events;

@@ -58,6 +58,40 @@ config ROUTELOOM_DISCOVERY_INITIATE
     default y
     depends on ROUTELOOM_DISCOVERY
 
+config ROUTELOOM_DISCOVERY_SCOPE
+    int "Discovery scope mode (0=Off, 1=OpenLegacy, 2=OptionalMigration, 3=Required)"
+    range 0 3
+    default 0
+    depends on ROUTELOOM_DISCOVERY
+    help
+        EXPERIMENTAL: wires a dev-profile scope-key provider into
+        discovery. Required (3) accepts only scope-tagged discovery
+        traffic and fails closed on key loss; OptionalMigration (2)
+        keeps a bounded legacy fallback lane. The provider derives
+        per-generation keys from ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX —
+        a firmware-config key recoverable by flash readout, never a
+        production credential.
+
+config ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX
+    string "DEVELOPMENT ONLY 32-byte scope base key in hex"
+    default ""
+    depends on ROUTELOOM_DISCOVERY_SCOPE != 0
+    help
+        Base key for the dev scope provider. Empty fails boot loudly
+        when a scoped mode is selected — never a silent Off downgrade.
+
+config ROUTELOOM_DISCOVERY_SCOPE_REF
+    hex "Scope reference handle announced to the engine"
+    range 0x1 0xffffffff
+    default 0x524c5343
+    depends on ROUTELOOM_DISCOVERY_SCOPE != 0
+
+config ROUTELOOM_DISCOVERY_SCOPE_GENERATION
+    int "Initial scope key generation (monotonic, never 0)"
+    range 1 2147483647
+    default 1
+    depends on ROUTELOOM_DISCOVERY_SCOPE != 0
+
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"

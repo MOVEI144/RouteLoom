@@ -19,6 +19,7 @@
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_autonomy.hpp"
+#include "routeloom/espnow_scope_provider.hpp"
 #endif
 #if CONFIG_ROUTELOOM_MIGRATION
 #include "routeloom/espnow_migration.hpp"
@@ -347,6 +348,26 @@ extern "C" void app_main(void) {
   discovery_config.network_hint =
       static_cast<std::uint32_t>(config.node.network);
   discovery_config.capability_bits = CONFIG_ROUTELOOM_CAPABILITY;
+#if CONFIG_ROUTELOOM_DISCOVERY_SCOPE != 0
+  // Discovery Scope Key (issue #14): the dev-profile provider derives
+  // per-generation keys from the configured base key. A scoped mode whose
+  // key cannot install fails boot — never a silent Off downgrade.
+  static routeloom::espnow::DevScopeProvider scope_provider(
+      routeloom::ScopeRef{CONFIG_ROUTELOOM_DISCOVERY_SCOPE_REF});
+  std::array<std::uint8_t, routeloom::kScopeKeyBytes> scope_key{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX, scope_key)) {
+    fail("invalid ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX");
+  }
+  status = scope_provider.install(
+      routeloom::ByteView{scope_key.data(), scope_key.size()},
+      CONFIG_ROUTELOOM_DISCOVERY_SCOPE_GENERATION, 0);
+  scope_key.fill(0);
+  if (!status) fail(status.detail);
+  discovery_config.scope_mode =
+      static_cast<routeloom::ScopeMode>(CONFIG_ROUTELOOM_DISCOVERY_SCOPE);
+  discovery_config.scope_provider = &scope_provider;
+  discovery_config.scope = scope_provider.ref();
+#endif
   routeloom::espnow::EspNowAutonomyPolicy autonomy_policy{};
 #if CONFIG_ROUTELOOM_DISCOVERY_MEMBER
   autonomy_policy.self_member = true;
@@ -377,6 +398,10 @@ extern "C" void app_main(void) {
   // authenticated control-object lane. The single-threaded pump below drives
   // the agent through runtime.poll_once(). The authority role additionally
   // needs a durable authority ledger before it may issue.
+  // Wired vs host-only: this node executes inbound verified commits and runs
+  // surveys/cutover; nothing local mints a plan — MigrationAuthority::
+  // commit_plan() has no firmware/USB caller today and is exercised by host
+  // tests only.
   static routeloom::espnow::NvsLedgerStore authority_ledger;
   if (self_authority) {
     status = authority_ledger.open("rlmauth");
@@ -403,6 +428,13 @@ extern "C" void app_main(void) {
         "identity profile");
   }
 
+  // Power management is deliberately unwired on this profile: the bridge is
+  // a USB-powered always-on gateway — deep sleep would sever the USB
+  // Serial/JTAG session and its mesh presence, and no HostOps verb requests
+  // sleep, so there is no real sleep/wake integration point to hook. The
+  // PowerCoordinator/EspNowPowerPort path is wired (and CI-compiled) only on
+  // the reference node under CONFIG_ROUTELOOM_DEEP_SLEEP; for this firmware
+  // it remains host-tested only.
   // Single-threaded pump: app_main owns serial RX, the bridge's periodic
   // work (handshake/credit/partial-frame timeouts, TX pump) and the runtime
   // event drain, so no extra task can interleave bridge polls.

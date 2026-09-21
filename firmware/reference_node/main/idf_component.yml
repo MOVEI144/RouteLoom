@@ -1,0 +1,7 @@
+# Main component manifest. The RouteLoom components are consumed from this
+# checkout via EXTRA_COMPONENT_DIRS (firmware/reference_node/CMakeLists.txt);
+# their idf_component.yml manifests let the component manager resolve the
+# routeloom_espnow -> routeloom/routeloom dependency locally with no
+# registry access. See docs/implementation/component-distribution.md (a).
+dependencies:
+  idf: ">=6.0"
