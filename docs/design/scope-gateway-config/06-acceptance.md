@@ -91,6 +91,34 @@ S12（二scope近接RF）、G09（受理/receipt境界での電断）、G12の�
 
 引き続き単板ではS12/G09/I07/複数台config配送は`planned_not_run`のまま。
 
+### 6.7.2 二台実機ペア試験（2026-09-21第三便、SHA `7992353`系）
+
+ESP32-C3を2台構成に拡張して初めての**実ESP-NOW RF経路**での検証。CI paired cell（`paired_bridge`/`paired_target`、SHA `e340896`で追加）のartifactを両機へ書込み。これは同一室内・同一チャネル・既定TX powerのbench計測であり、到達距離・混雑・電源変動・資格のRF証拠ではない。
+
+**構成**
+
+- Board A（bridge/gateway）：MAC `94:a9:90:6a:ee:c4`、node `0x1`、`paired_bridge`（capability `0x1f`、静的peer=node 2 MAC、discovery有効）
+- Board B（reference/config target）：MAC `94:a9:90:7a:b5:60`、node `0x2`、`paired_target`（`ROUTELOOM_CONFIG=y`、静的peer=node 1、discovery有効）
+- ネットワーク `0x524c0001`、USB-Serial/JTAG経由のhost daemon＋実ESP-NOWリンク
+
+**実RFで観測した挙動（session note、資格証拠ではない）**
+
+- Discovery：`discovery event=BOUND peer=1`を実電波で発火（RLD1経路の初実機確認）。`STALE`は30秒binding lease切れで発生し、静的peer登録によるdata経路維持と併用（設計通りの分離）。
+- メッセージ配送：host→bridge→**実ESP-NOW**→node 2の`deadbeef`系payloadが`END_SDK_RECEIVED`で完走し、target側consoleに`message origin=1 session=… bytes=5`を出力。
+- RCC1フルパイプライン：challenge→permit→propose→apply→statusが実RFで完走。`active_revision` 0→1→2、`active_hash`が`7e463416…`（空snapshotの検算一致）→`c7725e6d…`→`7882a827…`へ遷移し、いずれも`SHA256(domain‖ns‖schema‖TLV)`のローカル独立検算とbyte一致。
+- NVS永続性：電源リセット2回（boot incarnation 508→509→511）を跨いで`revision`/`active_hash`が復元 — journal二重slot＋provider NVS blobの実媒体復旧を確認。
+- 冪等性：同一内容の再proposeは`NO_CHANGE`でrevision/flash消費なし。
+- CAS拒否：古いbase snapshotでのproposeは`REFUSED/STALE`で正直終端。
+- 正直な入力拒否：schema範囲外の`diagnostics_level u8:05`（許容0..2）は`REFUSED/DENIED`（`InvalidPatch`→`ObjectAckStatus::Failed`）— validatorの正直な拒否がwire上で誤分類されないことを確認。
+
+**実機でのみ再現した欠陥（修正済み）**
+
+- `DevConfigAuthorityVerifier::verify_permit`内の`Stack protection fault`（task `routeloom`、8KB stack）。permit受信経路（`handle_chunk`→`reassemble_complete`→`submit_permit`→`verify_permit`）で`ConfigCommand` ≈1.8KBローカル＋tag staging 1KBが積み上がり~400B溢れ。`7992353`でHMAC入力をstreaming化＋decodeをmember scratch化（実測frame 1.9KB→0.45KB）。CIはbuildのみで検出不能、ホストテストでは絶対に出ないシリコン限定欠陥。修正後はpermit処理をpanic 0で完走。
+
+**依然として未検証**
+
+- S12（二scope近接RF）はscope PSKを変えた2台構成が別途必要。G09電断（journal途中切断の損傷モデル）は本試験のリセットがcommit完了後であり厳密な中断注入ではない。I07（3hop・4台）、到達距離、チャネル混雑、電源設計、dev-HMAC以外のpermit profile（本番COSE）は全て未実施。
+
 ## 6.8 合否
 
 安全性違反は一件でもfail。性能は既存のscope付き目標と投入負荷を測定前に固定し、成功標本だけで集計しない。未実施/失敗/対象外/blockedを区別。未知のRAM消費を0にせず、sizeofと内部heap低水位、Flash書込み回数・最大停止時間を測る。
