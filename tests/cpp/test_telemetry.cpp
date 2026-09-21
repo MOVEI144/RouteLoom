@@ -635,6 +635,204 @@ void test_relay_gate() {
   CHECK(hop2_sights == 0);
 }
 
+// --- D2: TransitFailure (subtype 5) -------------------------------------------
+
+void test_transit_failure_codec() {
+  TransitFailure report{};
+  report.ref_origin = 1;
+  report.ref_session = 7001;
+  report.ref_sequence = 42;
+  report.ref_destination = 3;
+  report.ref_type = static_cast<std::uint8_t>(FrameType::Data);
+  report.ref_round = 0;
+  report.phase = TransitFailurePhase::FailedPostAcceptance;
+  report.reason = TransitFailureReason::RetryExhausted;
+  report.claimed_reporter = 2;
+  report.report_id = 7;
+  for (int i = 0; i < 32; ++i) report.fingerprint[i] = static_cast<std::uint8_t>(i);
+
+  std::array<std::uint8_t, kTransitFailureBodySize> body{};
+  CHECK_OK(transit_failure_encode(report,
+                                  MutableByteView{body.data(), body.size()}));
+  CHECK(body[0] == kDiagnosticBodyVersion && body[1] == 5);
+  TransitFailure decoded{};
+  CHECK_OK(transit_failure_decode(ByteView{body.data(), body.size()}, decoded));
+  CHECK(decoded.ref_origin == 1 && decoded.ref_destination == 3);
+  CHECK(decoded.ref_session == 7001 && decoded.ref_sequence == 42);
+  CHECK(decoded.phase == TransitFailurePhase::FailedPostAcceptance);
+  CHECK(decoded.reason == TransitFailureReason::RetryExhausted);
+  CHECK(decoded.claimed_reporter == 2 && decoded.report_id == 7);
+  CHECK(decoded.fingerprint == report.fingerprint);
+
+  // Rejects: bad size, unknown phase/reason, zero report_id, broadcast ref.
+  CHECK(transit_failure_decode(ByteView{body.data(), body.size() - 1}, decoded)
+            .code == StatusCode::ProtocolError);
+  std::array<std::uint8_t, kTransitFailureBodySize> bad = body;
+  bad[34] = 3;  // phase out of range
+  CHECK(transit_failure_decode(ByteView{bad.data(), bad.size()}, decoded)
+            .code == StatusCode::ProtocolError);
+  bad = body;
+  bad[35] = 12;  // reason out of range
+  CHECK(transit_failure_decode(ByteView{bad.data(), bad.size()}, decoded)
+            .code == StatusCode::ProtocolError);
+  bad = body;
+  bad[47] = 0; bad[46] = 0; bad[45] = 0; bad[44] = 0;  // report_id = 0
+  CHECK(transit_failure_decode(ByteView{bad.data(), bad.size()}, decoded)
+            .code == StatusCode::ProtocolError);
+}
+
+// Relay-disabled refusal emits a link-only TransitFailure (phase0 /
+// RELAY_DISABLED) to the immediate upstream — never a silent black hole.
+void test_transit_failure_relay_disabled() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* origin = world.add(1);
+  auto* relay = world.add(2);
+  world.add(3);
+  DiagSink sink_origin;
+  origin->set_diagnostic_sink(&sink_origin);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.link(2, 3, 1, 1);
+  world.run(300, 5);
+  world.net.sights.clear();
+
+  relay->set_relay_enabled(false);
+  SendOptions opts{};
+  MessageId id{};
+  CHECK_OK(world.at(1)->send(3, payload_view(), opts, world.now, id));
+  world.run(800, 5);
+
+  // Node 2 must have emitted a link-only Diagnostic toward node 1.
+  std::size_t reports = 0;
+  for (const auto& s : world.net.sights) {
+    if (s.type == FrameType::Diagnostic && s.from == 2 && s.to == 1 &&
+        s.hop_remaining == 1) {
+      ++reports;
+    }
+  }
+  CHECK(reports >= 1);
+  // The origin's sink receives the subtype-5 body with the refusal verdict.
+  CHECK(!sink_origin.bodies.empty());
+  if (sink_origin.bodies.empty()) return;
+  const auto& body = sink_origin.bodies.back();
+  CHECK(body.size() == kTransitFailureBodySize && body[1] == 5);
+  TransitFailure report{};
+  CHECK_OK(transit_failure_decode(ByteView{body.data(), body.size()}, report));
+  CHECK(report.phase == TransitFailurePhase::RefusedPreAcceptance);
+  CHECK(report.reason == TransitFailureReason::RelayDisabled);
+  CHECK(report.claimed_reporter == 2);
+  CHECK(report.ref_origin == 1 && report.ref_destination == 3);
+  CHECK(report.ref_sequence == id.sequence);
+}
+
+// Post-acceptance transit failure: the relay accepted the frame (HOP_ACCEPT
+// went back), then its downstream link died — retries exhaust and the
+// retained record emits a phase-1 TransitFailure to the upstream peer.
+void test_transit_failure_post_acceptance() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* origin = world.add(1);
+  world.add(2);
+  world.add(3);
+  DiagSink sink_origin;
+  origin->set_diagnostic_sink(&sink_origin);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.link(2, 3, 1, 1);
+  world.run(400, 5);
+  world.net.sights.clear();
+
+  // The radio link dies while the relay's route is still cached — the frame
+  // is accepted under a stale route, every forward attempt then fails at
+  // the radio, and the exhausted job reports back.
+  world.net.disconnect(2, 3);
+  SendOptions opts{};
+  MessageId id{};
+  CHECK_OK(world.at(1)->send(3, payload_view(), opts, world.now, id));
+  world.run(2000, 5);
+
+  bool reported = false;
+  for (const auto& body : sink_origin.bodies) {
+    if (body.size() != kTransitFailureBodySize || body[1] != 5) continue;
+    TransitFailure report{};
+    if (!transit_failure_decode(ByteView{body.data(), body.size()}, report)
+             .ok()) {
+      continue;
+    }
+    if (report.ref_origin == 1 && report.ref_sequence == id.sequence &&
+        report.claimed_reporter == 2 &&
+        report.phase == TransitFailurePhase::FailedPostAcceptance &&
+        (report.reason == TransitFailureReason::RetryExhausted ||
+         report.reason == TransitFailureReason::Deadline)) {
+      reported = true;
+      // The fingerprint must pin the accepted frame's protected bytes —
+      // a zeroed fingerprint would be an unverifiable report.
+      bool nonzero = false;
+      for (const auto b : report.fingerprint) nonzero |= (b != 0);
+      CHECK(nonzero);
+    }
+  }
+  CHECK(reported);
+}
+
+// Propagation: a mid-chain relay that holds the retained transit record
+// regenerates the report toward ITS upstream, preserving the claimed
+// reporter verbatim (unverified claim, per design).
+void test_transit_failure_propagation() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* origin = world.add(1);
+  world.add(2);
+  world.add(3);
+  world.add(4);
+  DiagSink sink_origin;
+  origin->set_diagnostic_sink(&sink_origin);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.link(2, 3, 1, 1);
+  world.link(3, 4, 1, 1);
+  world.run(600, 5);
+  world.net.sights.clear();
+
+  // 3's downstream link dies before the send: 3 still holds a cached route,
+  // accepts the transit frame, fails every forward attempt and reports to
+  // 2 — which regenerates the report toward 1 under its own link auth.
+  world.net.disconnect(3, 4);
+  SendOptions opts{};
+  MessageId id{};
+  CHECK_OK(world.at(1)->send(4, payload_view(), opts, world.now, id));
+  world.run(2500, 5);
+
+  // Node 3 reports to 2; node 2 regenerates the report toward node 1.
+  std::size_t reports_32 = 0, reports_21 = 0;
+  for (const auto& s : world.net.sights) {
+    if (s.type != FrameType::Diagnostic || s.hop_remaining != 1) continue;
+    if (s.from == 3 && s.to == 2) ++reports_32;
+    if (s.from == 2 && s.to == 1) ++reports_21;
+  }
+  CHECK(reports_32 >= 1);
+  CHECK(reports_21 >= 1);
+
+  // The origin's copy preserves claimed_reporter=3 — an unverified claim
+  // authenticated only as "heard from neighbor 2".
+  bool propagated = false;
+  for (const auto& body : sink_origin.bodies) {
+    if (body.size() != kTransitFailureBodySize || body[1] != 5) continue;
+    TransitFailure report{};
+    if (!transit_failure_decode(ByteView{body.data(), body.size()}, report)
+             .ok()) {
+      continue;
+    }
+    if (report.ref_origin == 1 && report.ref_sequence == id.sequence &&
+        report.claimed_reporter == 3 &&
+        report.phase == TransitFailurePhase::FailedPostAcceptance) {
+      propagated = true;
+    }
+  }
+  CHECK(propagated);
+}
+
 }  // namespace
 
 int main() {
@@ -651,6 +849,10 @@ int main() {
   test_node_remote_query_denied();
   test_node_remote_query_nopeer();
   test_relay_gate();
+  test_transit_failure_codec();
+  test_transit_failure_relay_disabled();
+  test_transit_failure_post_acceptance();
+  test_transit_failure_propagation();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d telemetry checks failed\n", failures);

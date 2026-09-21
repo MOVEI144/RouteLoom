@@ -543,6 +543,19 @@ class MeshNode {
     MonotonicMs expires_at_ms{0};
     bool delivered{false};
     bool forwarded{false};
+    // Transit correlation (01 §failure evidence): retained ONLY for accepted
+    // transit work — the upstream neighbor that handed us the frame and the
+    // fingerprint of its end-protected bytes, so a post-acceptance failure
+    // can be reported back without ever claiming end-verification.
+    NodeId upstream_peer{kInvalidNodeId};
+    std::array<std::uint8_t, 32> fingerprint{};
+    bool has_fingerprint{false};
+    // A transit record that already emitted a TransitFailure: a re-received
+    // duplicate re-emits the retained evidence instead of blindly re-ACKing
+    // a dead job (01 §same-key-after-failure).
+    bool failure_reported{false};
+    std::uint8_t reported_phase{0};
+    std::uint8_t reported_reason{0};
   };
 
   struct Delivery {
@@ -861,6 +874,26 @@ class MeshNode {
   // new route.
   void handle_diagnostic_link(NodeId peer, const wire::LinkOpenedFrame& frame,
                               MonotonicMs now_ms) noexcept;
+  // Emit one bounded link-only TransitFailure toward `upstream` (hop-1,
+  // BestEffort, never hop-ACKed — a report must not spawn reports).
+  void emit_transit_failure(NodeId upstream, const TransitFailure& report,
+                            MonotonicMs now_ms) noexcept;
+  // fail_job hook for JobOwner::Transit: find the retained transit record
+  // for job.ack and report the post-acceptance failure to its upstream.
+  void report_transit_failure(const TxJob& job, const char* reason,
+                              MonotonicMs now_ms) noexcept;
+  // Map a local failure reason onto the wire reason space; phase is 1 for a
+  // proven local failure, 2 when the attempt outcome cannot be proven.
+  static void map_transit_reason(const char* reason, TransitFailurePhase& phase,
+                                 TransitFailureReason& out) noexcept;
+  // Refused-before-acceptance report (relay gate): no retained record, the
+  // fingerprint is computed from the received frame on the spot.
+  void emit_transit_refusal(const wire::LinkOpenedFrame& frame,
+                            TransitFailureReason reason,
+                            MonotonicMs now_ms) noexcept;
+  void handle_transit_failure_report(NodeId peer,
+                                     const TransitFailure& report,
+                                     MonotonicMs now_ms) noexcept;
   Status queue_diagnostic_reply(NodeId destination, ByteView body,
                                 std::uint32_t lifetime_ms,
                                 MonotonicMs now_ms) noexcept;
@@ -904,6 +937,21 @@ class MeshNode {
   GatewayServiceSink* gateway_sink_{nullptr};
   ConfigEndpointSink* config_sink_{nullptr};
   DiagnosticSink* diagnostic_sink_{nullptr};
+  // Seen-table for inbound TransitFailure reports (dedup on
+  // reference+phase+reason — a different report_id must not restart work).
+  struct TransitFailureSeen {
+    MessageKey key{};
+    FrameType type{FrameType::Data};
+    std::uint8_t round{0};
+    std::uint8_t phase{0};
+    std::uint8_t reason{0};
+    MonotonicMs expires_at_ms{0};
+  };
+  static constexpr std::size_t kTransitFailureSeenCapacity = 8;
+  std::array<TransitFailureSeen, kTransitFailureSeenCapacity>
+      transit_failure_seen_{};
+  // Per-boot monotone report id; nonzero, wrap suppresses new reports.
+  std::uint32_t next_failure_report_id_{1};
   bool relay_enabled_{true};
   bool telemetry_remote_{false};
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};

@@ -422,4 +422,97 @@ Status capabilities_reply_decode(const ByteView body,
   return Status::success();
 }
 
+// TransitFailure layout (80 B): prefix4 || ref_origin8 || ref_session4 ||
+// ref_sequence8 || ref_destination8 || type1|round1|phase1|reason1 ||
+// claimed_reporter8 || report_id4 || fingerprint32.
+Status transit_failure_encode(const TransitFailure& report,
+                              const MutableByteView out) noexcept {
+  if (out.size != kTransitFailureBodySize ||
+      report.ref_origin == kInvalidNodeId ||
+      report.ref_origin == kBroadcastNodeId ||
+      report.ref_destination == kInvalidNodeId ||
+      report.ref_destination == kBroadcastNodeId ||
+      report.claimed_reporter == kInvalidNodeId ||
+      report.claimed_reporter == kBroadcastNodeId ||
+      report.ref_session == 0 || report.ref_sequence == 0 ||
+      report.report_id == 0 ||
+      static_cast<std::uint8_t>(report.phase) > 2 ||
+      static_cast<std::uint8_t>(report.reason) < 1 ||
+      static_cast<std::uint8_t>(report.reason) > 11) {
+    return reject();
+  }
+  ByteWriter writer{out};
+  Status status = prefix_write(writer, DiagnosticSubtype::TransitFailure);
+  if (!status) return status;
+  status = writer.write_u64(report.ref_origin);
+  if (!status) return status;
+  status = writer.write_u32(report.ref_session);
+  if (!status) return status;
+  status = writer.write_u64(report.ref_sequence);
+  if (!status) return status;
+  status = writer.write_u64(report.ref_destination);
+  if (!status) return status;
+  status = writer.write_u8(report.ref_type);
+  if (!status) return status;
+  status = writer.write_u8(report.ref_round);
+  if (!status) return status;
+  status = writer.write_u8(static_cast<std::uint8_t>(report.phase));
+  if (!status) return status;
+  status = writer.write_u8(static_cast<std::uint8_t>(report.reason));
+  if (!status) return status;
+  status = writer.write_u64(report.claimed_reporter);
+  if (!status) return status;
+  status = writer.write_u32(report.report_id);
+  if (!status) return status;
+  return writer.write_bytes(
+      ByteView{report.fingerprint.data(), report.fingerprint.size()});
+}
+
+Status transit_failure_decode(const ByteView body,
+                              TransitFailure& out) noexcept {
+  if (body.size != kTransitFailureBodySize) return reject();
+  ByteReader reader{body};
+  Status status = prefix_read(reader, DiagnosticSubtype::TransitFailure);
+  if (!status) return status;
+  std::uint8_t type = 0, round = 0, phase = 0, reason = 0;
+  status = reader.read_u64(out.ref_origin);
+  if (!status) return status;
+  status = reader.read_u32(out.ref_session);
+  if (!status) return status;
+  status = reader.read_u64(out.ref_sequence);
+  if (!status) return status;
+  status = reader.read_u64(out.ref_destination);
+  if (!status) return status;
+  status = reader.read_u8(type);
+  if (!status) return status;
+  status = reader.read_u8(round);
+  if (!status) return status;
+  status = reader.read_u8(phase);
+  if (!status) return status;
+  status = reader.read_u8(reason);
+  if (!status) return status;
+  status = reader.read_u64(out.claimed_reporter);
+  if (!status) return status;
+  status = reader.read_u32(out.report_id);
+  if (!status) return status;
+  status = reader.read_bytes(
+      MutableByteView{out.fingerprint.data(), out.fingerprint.size()});
+  if (!status) return status;
+  if (!expect_consumed(reader)) return reject();
+  if (out.ref_origin == kInvalidNodeId || out.ref_origin == kBroadcastNodeId ||
+      out.ref_destination == kInvalidNodeId ||
+      out.ref_destination == kBroadcastNodeId ||
+      out.claimed_reporter == kInvalidNodeId ||
+      out.claimed_reporter == kBroadcastNodeId ||
+      out.ref_session == 0 || out.ref_sequence == 0 || out.report_id == 0 ||
+      phase > 2 || reason < 1 || reason > 11) {
+    return reject();
+  }
+  out.ref_type = type;
+  out.ref_round = round;
+  out.phase = static_cast<TransitFailurePhase>(phase);
+  out.reason = static_cast<TransitFailureReason>(reason);
+  return Status::success();
+}
+
 }  // namespace routeloom

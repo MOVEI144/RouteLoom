@@ -1495,6 +1495,13 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     }
     return;
   }
+  // Accepted transit work that failed post-acceptance reports a bounded
+  // TransitFailure to its retained upstream — BUSY is pre-acceptance only
+  // and must never retract an earlier HOP_ACCEPT.
+  if (job.owner == JobOwner::Transit) {
+    report_transit_failure(job, reason, now_ms);
+    return;
+  }
   if (job.owner != JobOwner::OriginDelivery) return;
   auto* delivery = find_delivery(job.ack.key.id);
   if (delivery == nullptr) return;
@@ -1648,6 +1655,27 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   }
 
   if (auto* duplicate = find_dedup(key, FrameType::Data, frame.header.delivery_round)) {
+    // A transit record that already reported a failure re-emits that
+    // retained evidence — never a blind re-ACK of a dead job (01 §policy).
+    if (duplicate->failure_reported) {
+      TransitFailure reemit{};
+      reemit.ref_origin = key.origin;
+      reemit.ref_session = key.id.session;
+      reemit.ref_sequence = key.id.sequence;
+      reemit.ref_destination = frame.header.destination;
+      reemit.ref_type = static_cast<std::uint8_t>(FrameType::Data);
+      reemit.ref_round = frame.header.delivery_round;
+      reemit.phase =
+          static_cast<TransitFailurePhase>(duplicate->reported_phase);
+      reemit.reason =
+          static_cast<TransitFailureReason>(duplicate->reported_reason);
+      reemit.claimed_reporter = config_.node;
+      reemit.report_id = next_failure_report_id_;
+      if (next_failure_report_id_ != UINT32_MAX) ++next_failure_report_id_;
+      reemit.fingerprint = duplicate->fingerprint;
+      emit_transit_failure(duplicate->upstream_peer, reemit, now_ms);
+      return;
+    }
     if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
     if (duplicate->delivered && frame.header.destination == config_.node &&
         scheduler_.free_slots() >= 1) {
@@ -1704,6 +1732,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   // the sender's bounded retries expire, never a fabricated accept.
   if (!transit_permitted()) {
     ++transit_refused_;
+    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, now_ms);
     observer_.on_diagnostic("TRANSIT_RELAY_DISABLED", peer, &frame.header.message);
     return;
   }
@@ -1711,6 +1740,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   if (!route.valid || route.next_hop == peer) {
     // A route problem, not a capacity problem: keep the legacy drop +
     // sender-timeout semantics (03 §5 — BUSY is for admission failure).
+    emit_transit_refusal(frame, TransitFailureReason::NoRoute, now_ms);
     observer_.on_diagnostic("TRANSIT_NO_ROUTE", peer, &frame.header.message);
     return;
   }
@@ -1743,6 +1773,12 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     return;
   }
   entry->forwarded = true;
+  // Retain the upstream correlation + fingerprint so a later post-acceptance
+  // failure can report TransitFailure to the exact peer that handed us the
+  // frame — never broadcast, never origin-claimed.
+  entry->upstream_peer = frame.header.previous_hop;
+  entry->has_fingerprint =
+      wire::transit_fingerprint(frame, entry->fingerprint).ok();
   if (!queue_hop_accept(frame.header, now_ms)) {
     // The accepted forward stays committed — accepted work is never silently
     // dropped. The sender's retry hits the dedup and re-ACKs instead of
@@ -1768,8 +1804,28 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
 
   // Frame-level dedup: a frame re-received on the same round only re-ACKs.
   // A resubmission on a NEW round reaches the component again — its own
-  // dedup table decides PENDING/stored-receipt/CONFLICT.
-  if (find_dedup(key, type, frame.header.delivery_round) != nullptr) {
+  // dedup table decides PENDING/stored-receipt/CONFLICT. A transit record
+  // that already reported a failure re-emits the retained evidence instead.
+  if (auto* duplicate = find_dedup(key, type, frame.header.delivery_round)) {
+    if (duplicate->failure_reported) {
+      TransitFailure reemit{};
+      reemit.ref_origin = key.origin;
+      reemit.ref_session = key.id.session;
+      reemit.ref_sequence = key.id.sequence;
+      reemit.ref_destination = frame.header.destination;
+      reemit.ref_type = static_cast<std::uint8_t>(type);
+      reemit.ref_round = frame.header.delivery_round;
+      reemit.phase =
+          static_cast<TransitFailurePhase>(duplicate->reported_phase);
+      reemit.reason =
+          static_cast<TransitFailureReason>(duplicate->reported_reason);
+      reemit.claimed_reporter = config_.node;
+      reemit.report_id = next_failure_report_id_;
+      if (next_failure_report_id_ != UINT32_MAX) ++next_failure_report_id_;
+      reemit.fingerprint = duplicate->fingerprint;
+      emit_transit_failure(duplicate->upstream_peer, reemit, now_ms);
+      return;
+    }
     if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
     return;
   }
@@ -1826,12 +1882,14 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   // ACK — a relay never interprets a routed payload terminally.
   if (!transit_permitted()) {
     ++transit_refused_;
+    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, now_ms);
     observer_.on_diagnostic("ROUTED_TRANSIT_RELAY_DISABLED", peer,
                             &frame.header.message);
     return;
   }
   const auto route = routes_.best(frame.header.destination);
   if (!route.valid || route.next_hop == peer) {
+    emit_transit_refusal(frame, TransitFailureReason::NoRoute, now_ms);
     observer_.on_diagnostic("ROUTED_TRANSIT_NO_ROUTE", peer, &frame.header.message);
     return;
   }
@@ -1859,6 +1917,9 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     return;
   }
   entry->forwarded = true;
+  entry->upstream_peer = frame.header.previous_hop;
+  entry->has_fingerprint =
+      wire::transit_fingerprint(frame, entry->fingerprint).ok();
   if (!queue_hop_accept(frame.header, now_ms)) {
     // The forward stays committed; the sender's retry dedups and re-ACKs.
     observer_.on_diagnostic("ROUTED_TRANSIT_ACK_FULL", peer, &frame.header.message);
@@ -3008,12 +3069,210 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
                             &frame.header.message);
     return;
   }
+  const auto subtype = static_cast<DiagnosticSubtype>(body.data[1]);
+  if (subtype == DiagnosticSubtype::TransitFailure) {
+    TransitFailure report{};
+    if (transit_failure_decode(body, report).ok()) {
+      // Node-internal correlation/propagation first; the sink still sees
+      // the body so a host can surface upstream failure evidence.
+      handle_transit_failure_report(peer, report, now_ms);
+      if (diagnostic_sink_ != nullptr) {
+        diagnostic_sink_->on_diagnostic_body(peer, body, now_ms);
+      }
+    } else {
+      ++telemetry_event_drops_;
+      observer_.on_diagnostic("TRANSIT_FAILURE_REJECTED", peer,
+                              &frame.header.message);
+    }
+    return;
+  }
   if (diagnostic_sink_ != nullptr) {
     diagnostic_sink_->on_diagnostic_body(peer, body, now_ms);
   } else {
     observer_.on_diagnostic("DIAGNOSTIC_NO_ENDPOINT", peer,
                             &frame.header.message);
   }
+}
+
+// ---------------------------------------------------------------------------
+// TransitFailure (01-forwarding §policy, 04 §4.2): bounded one-hop failure
+// evidence for accepted transit work. Reports are link-only hop-1 BestEffort
+// addressed to the retained upstream peer; they are dedup'd on
+// reference+phase+reason, never ACKed, and never spawn further reports.
+// ---------------------------------------------------------------------------
+
+void MeshNode::map_transit_reason(const char* reason,
+                                  TransitFailurePhase& phase,
+                                  TransitFailureReason& out) noexcept {
+  phase = TransitFailurePhase::FailedPostAcceptance;
+  if (std::strcmp(reason, "DEADLINE_EXPIRED") == 0) {
+    out = TransitFailureReason::Deadline;
+  } else if (std::strcmp(reason, "NO_ROUTE") == 0) {
+    out = TransitFailureReason::NoRoute;
+  } else if (std::strcmp(reason, "DRIVER_RESULT_UNKNOWN") == 0) {
+    // The radio never proved the outcome — honest unknown, not a failure.
+    phase = TransitFailurePhase::OutcomeUnknown;
+    out = TransitFailureReason::CallbackUnknown;
+  } else {
+    // Budget/queue/MAC exhaustion: the accepted work was retried to its
+    // bound and still failed — proven local failure.
+    out = TransitFailureReason::RetryExhausted;
+  }
+}
+
+void MeshNode::emit_transit_failure(const NodeId upstream,
+                                    const TransitFailure& report,
+                                    const MonotonicMs now_ms) noexcept {
+  if (upstream == kInvalidNodeId || upstream == kBroadcastNodeId ||
+      upstream == config_.node || report.report_id == 0) {
+    return;
+  }
+  std::array<std::uint8_t, kTransitFailureBodySize> body{};
+  if (!transit_failure_encode(report, MutableByteView{body.data(), body.size()})) {
+    ++telemetry_event_drops_;
+    return;
+  }
+  TxJob job{};
+  job.form = JobForm::Plain;
+  // Diagnostic owner: a report's own failure must never recursively spawn
+  // another report — fail_job drops it silently by design.
+  job.owner = JobOwner::Diagnostic;
+  job.peer = upstream;
+  job.requires_hop_accept = false;
+  job.max_attempts = 1;
+  job.deadline_ms = now_ms + kControlLifetimeMs;
+  job.plain.header.type = FrameType::Diagnostic;
+  job.plain.header.delivery = DeliveryClass::BestEffort;
+  job.plain.header.hop_remaining = 1;
+  job.plain.header.network = config_.network;
+  job.plain.header.origin = config_.node;
+  job.plain.header.destination = upstream;
+  job.plain.header.previous_hop = config_.node;
+  job.plain.header.next_hop = upstream;
+  job.plain.header.message =
+      MessageId{config_.message_session, next_control_sequence_++};
+  job.plain.header.remaining_deadline_ms = kControlLifetimeMs;
+  job.plain.header.original_lifetime_ms = kControlLifetimeMs;
+  job.plain.header.link_epoch = config_.link_epoch;
+  job.plain.header.end_epoch = config_.end_epoch;
+  std::memcpy(job.plain.payload.data(), body.data(), body.size());
+  job.plain.payload_size = body.size();
+  if (!scheduler_.enqueue(std::move(job), config_.node, now_ms)) {
+    // A report that cannot be queued is a counted loss, never a spin.
+    ++telemetry_event_drops_;
+  }
+}
+
+void MeshNode::emit_transit_refusal(const wire::LinkOpenedFrame& frame,
+                                    const TransitFailureReason reason,
+                                    const MonotonicMs now_ms) noexcept {
+  // Pre-acceptance refusal: no retained record — the fingerprint is computed
+  // from the received frame so the report still pins the exact operation.
+  TransitFailure report{};
+  report.ref_origin = frame.header.origin;
+  report.ref_session = frame.header.message.session;
+  report.ref_sequence = frame.header.message.sequence;
+  report.ref_destination = frame.header.destination;
+  report.ref_type = static_cast<std::uint8_t>(frame.header.type);
+  report.ref_round = frame.header.delivery_round;
+  report.phase = TransitFailurePhase::RefusedPreAcceptance;
+  report.reason = reason;
+  report.claimed_reporter = config_.node;
+  report.report_id = next_failure_report_id_;
+  if (next_failure_report_id_ != UINT32_MAX) ++next_failure_report_id_;
+  if (!wire::transit_fingerprint(frame, report.fingerprint).ok()) return;
+  emit_transit_failure(frame.header.previous_hop, report, now_ms);
+}
+
+void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
+                                      const MonotonicMs now_ms) noexcept {
+  // Only jobs whose accepted work we retained (dedup entry with upstream +
+  // fingerprint) produce a report — link-local control jobs (BUSY emits
+  // with owner Transit) have no record and exit here.
+  auto* entry = dedup_.find([&](const DedupEntry& value) {
+    return value.key == job.ack.key && value.type == job.ack.accepted_type &&
+           value.round == job.ack.round && value.forwarded;
+  });
+  if (entry == nullptr || !entry->has_fingerprint ||
+      entry->upstream_peer == kInvalidNodeId) {
+    return;
+  }
+  TransitFailure report{};
+  report.ref_origin = job.ack.key.origin;
+  report.ref_session = job.ack.key.id.session;
+  report.ref_sequence = job.ack.key.id.sequence;
+  report.ref_destination = job.forwarded.header.destination;
+  report.ref_type = static_cast<std::uint8_t>(job.ack.accepted_type);
+  report.ref_round = job.ack.round;
+  map_transit_reason(reason, report.phase, report.reason);
+  report.claimed_reporter = config_.node;
+  report.report_id = next_failure_report_id_;
+  if (next_failure_report_id_ != UINT32_MAX) ++next_failure_report_id_;
+  report.fingerprint = entry->fingerprint;
+  // Retain the evidence for re-emission if the sender retries onto the same
+  // dedup record — a re-ACK would falsely claim the job is alive.
+  entry->failure_reported = true;
+  entry->reported_phase = static_cast<std::uint8_t>(report.phase);
+  entry->reported_reason = static_cast<std::uint8_t>(report.reason);
+  emit_transit_failure(entry->upstream_peer, report, now_ms);
+}
+
+void MeshNode::handle_transit_failure_report(const NodeId /*peer*/,
+                                             const TransitFailure& report,
+                                             const MonotonicMs now_ms) noexcept {
+  // Dedup on reference+phase+reason: a fresh report_id must not restart the
+  // exchange for an already-processed failure (04 §4.2).
+  TransitFailureSeen* free_slot = nullptr;
+  for (auto& seen : transit_failure_seen_) {
+    const bool live = seen.expires_at_ms > now_ms;
+    if (live && seen.key.origin == report.ref_origin &&
+        seen.key.id.session == report.ref_session &&
+        seen.key.id.sequence == report.ref_sequence &&
+        seen.type == static_cast<FrameType>(report.ref_type) &&
+        seen.round == report.ref_round &&
+        seen.phase == static_cast<std::uint8_t>(report.phase) &&
+        seen.reason == static_cast<std::uint8_t>(report.reason)) {
+      return;  // already processed — counted silence
+    }
+    if (!live) free_slot = &seen;
+    if (free_slot == nullptr && seen.expires_at_ms == 0) free_slot = &seen;
+  }
+  if (free_slot == nullptr) {
+    ++telemetry_event_drops_;
+    return;
+  }
+  free_slot->key = MessageKey{report.ref_origin,
+                              MessageId{report.ref_session, report.ref_sequence}};
+  free_slot->type = static_cast<FrameType>(report.ref_type);
+  free_slot->round = report.ref_round;
+  free_slot->phase = static_cast<std::uint8_t>(report.phase);
+  free_slot->reason = static_cast<std::uint8_t>(report.reason);
+  free_slot->expires_at_ms = now_ms + 60000;
+
+  // Propagate only when we hold the retained transit record for the SAME
+  // reference: the report is regenerated toward our upstream with the
+  // claimed reporter preserved verbatim (unverified — we authenticated
+  // only `peer`). Our stored fingerprint matches by construction since it
+  // excludes hop-mutable fields; a mismatch would mean the peer referenced
+  // different bytes than the frame we accepted.
+  const MessageKey ref_key{report.ref_origin,
+                           MessageId{report.ref_session, report.ref_sequence}};
+  auto* entry = dedup_.find([&](const DedupEntry& value) {
+    return value.key == ref_key &&
+           value.type == static_cast<FrameType>(report.ref_type) &&
+           value.round == report.ref_round && value.forwarded;
+  });
+  if (entry == nullptr || entry->upstream_peer == kInvalidNodeId) return;
+  if (entry->has_fingerprint &&
+      entry->fingerprint != report.fingerprint) {
+    // The peer reported bytes we never forwarded — unverified claim,
+    // propagate nothing and count the anomaly.
+    ++telemetry_event_drops_;
+    return;
+  }
+  TransitFailure onward = report;
+  onward.fingerprint = entry->fingerprint;
+  emit_transit_failure(entry->upstream_peer, onward, now_ms);
 }
 
 // ---------------------------------------------------------------------------

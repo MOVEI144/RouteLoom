@@ -185,6 +185,7 @@ constexpr std::size_t kTelemetryQueryBodySize = 24;      // prefix included
 constexpr std::size_t kTelemetrySnapshotBodySize = 128;  // prefix included
 constexpr std::size_t kDiagnosticRejectBodySize = 24;    // prefix included
 constexpr std::size_t kCapabilitiesReplyBodySize = 40;   // prefix included
+constexpr std::size_t kTransitFailureBodySize = 80;      // prefix included
 
 // TelemetryQuery validation bounds (04 §4.2).
 constexpr std::uint32_t kTelemetryMaxAgeLimitMs = 3000;
@@ -326,5 +327,57 @@ struct CapabilitiesReply {
 Status capabilities_reply_encode(const CapabilitiesReply& reply,
                                  MutableByteView out) noexcept;
 Status capabilities_reply_decode(ByteView body, CapabilitiesReply& out) noexcept;
+
+// --- TransitFailure (subtype 5, link-only, hop-1, BestEffort) -----------------
+//
+// Bounded one-hop post-admission failure evidence (01-forwarding §policy,
+// 04 §4.2 layout). It NEVER retracts accepted work: BUSY stays strictly
+// pre-acceptance. The link authenticates only the immediate reporting
+// neighbor — claimed_reporting_node is preserved verbatim as an UNVERIFIED
+// claim, and the fingerprint pins the referenced frame's end-protected
+// bytes so a report cannot be retargeted at a different operation.
+enum class TransitFailurePhase : std::uint8_t {
+  RefusedPreAcceptance = 0,  // never accepted locally (e.g. relay disabled)
+  FailedPostAcceptance = 1,  // accepted work that later failed
+  OutcomeUnknown = 2,        // attempt outcome cannot be proven
+};
+enum class TransitFailureReason : std::uint8_t {
+  RelayDisabled = 1,
+  HopExhausted = 2,
+  NoRoute = 3,
+  DuplicatePath = 4,
+  MessageConflict = 5,
+  RetryExhausted = 6,
+  Deadline = 7,
+  PeerGone = 8,
+  SecurityUnavailable = 9,
+  CallbackUnknown = 10,
+  TimeUncertain = 11,
+};
+
+struct TransitFailure {
+  // Reference to the failed frame: logical identity + type/round — a report
+  // about a different round or type is a different report.
+  NodeId ref_origin{kInvalidNodeId};
+  std::uint32_t ref_session{0};
+  std::uint64_t ref_sequence{0};
+  NodeId ref_destination{kInvalidNodeId};
+  std::uint8_t ref_type{0};
+  std::uint8_t ref_round{0};
+  TransitFailurePhase phase{TransitFailurePhase::RefusedPreAcceptance};
+  TransitFailureReason reason{TransitFailureReason::RelayDisabled};
+  // UNVERIFIED claim of the node that first observed the failure — the
+  // receiver authenticated only its immediate neighbor.
+  NodeId claimed_reporter{kInvalidNodeId};
+  // Per-reporting-boot monotone, nonzero; wrap stops reports until reboot.
+  std::uint32_t report_id{0};
+  // SHA256("RouteLoom/transit-fingerprint/v1" || NUL || end-AAD ||
+  //        protected payload incl. end tag) — excludes hop-mutable fields.
+  std::array<std::uint8_t, 32> fingerprint{};
+};
+
+Status transit_failure_encode(const TransitFailure& report,
+                              MutableByteView out) noexcept;
+Status transit_failure_decode(ByteView body, TransitFailure& out) noexcept;
 
 }  // namespace routeloom

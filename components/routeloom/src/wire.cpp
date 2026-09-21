@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
 
 namespace routeloom::wire {
 namespace {
@@ -385,6 +386,30 @@ Status forward(const LinkOpenedFrame& input,
   return wrap_link(header,
                    ByteView{input.protected_payload.data(), input.protected_payload_size},
                    security, output);
+}
+
+Status transit_fingerprint(const LinkOpenedFrame& frame,
+                           std::array<std::uint8_t, 32>& out) noexcept {
+  out = {};
+  std::array<std::uint8_t, kEndAadMax> aad{};
+  std::size_t aad_size = 0;
+  Status status = make_end_aad(frame.header, aad, aad_size);
+  if (!status) return status;
+  if (frame.protected_payload_size > frame.protected_payload.size()) {
+    return Status::error(StatusCode::ProtocolError, "protected payload range");
+  }
+  static constexpr char kDomain[] = "RouteLoom/transit-fingerprint/v1";
+  Sha256 hash;
+  hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(kDomain),
+                       sizeof(kDomain)});  // includes the NUL terminator
+  hash.update(ByteView{aad.data(), aad_size});
+  hash.update(ByteView{frame.protected_payload.data(),
+                       frame.protected_payload_size});
+  ScopeDigest digest{};
+  hash.finish(digest);
+  static_assert(sizeof(digest) == 32, "digest holds a SHA-256");
+  std::memcpy(out.data(), digest.data(), 32);
+  return Status::success();
 }
 
 }  // namespace routeloom::wire

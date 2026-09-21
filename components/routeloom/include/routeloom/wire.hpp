@@ -125,4 +125,13 @@ Status forward(const LinkOpenedFrame& input,
                SecurityProvider& security,
                EncodedFrame& output) noexcept;
 
+// TransitFailure fingerprint (m1-completion 04 §4.2): SHA256 over
+// "RouteLoom/transit-fingerprint/v1" || NUL || the exact end-AAD encoding ||
+// the protected payload including its end tag. Hop-mutable fields are
+// excluded, so every relay on the path computes the SAME fingerprint for
+// the same protected bytes — a report cannot be retargeted to a different
+// operation without invalidating the fingerprint.
+Status transit_fingerprint(const LinkOpenedFrame& frame,
+                           std::array<std::uint8_t, 32>& out) noexcept;
+
 }  // namespace routeloom::wire
