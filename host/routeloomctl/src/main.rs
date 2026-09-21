@@ -6,9 +6,14 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
+mod provision;
+
 fn usage() {
     eprintln!(
         "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>"
+    );
+    eprintln!(
+        "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
     );
 }
 
@@ -194,6 +199,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             socket = PathBuf::from(args.next().ok_or("--socket requires a path")?);
         } else {
             remaining.push(argument);
+        }
+    }
+    // provision-* are local operations — they build/sign/verify files and
+    // never open the daemon socket (04-provisioning-lifecycle §4.4).
+    if let Some(name) = remaining.first().map(String::as_str) {
+        match name {
+            "provision-keygen" => return provision::provision_keygen_command(&remaining[1..]),
+            "provision-image" => return provision::provision_image_command(&remaining[1..]),
+            "provision-manifest" => return provision::provision_manifest_command(&remaining[1..]),
+            "provision-verify" => return provision::provision_verify_command(&remaining[1..]),
+            _ => {}
         }
     }
     let command = match remaining.as_slice() {
