@@ -577,6 +577,27 @@ fn messages_submit<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
+    // Authorize before the binding-dependent parse can leak registration
+    // state: a gateway destination parses differently depending on whether
+    // a live registration exists, so an unauthorized principal probing a
+    // well-formed network must meet AuthorizationFailed — never the
+    // GATEWAY_UNAVAILABLE-shaped rejection that would reveal the mirror
+    // (05 §5.7). A malformed network cannot satisfy the probe and falls
+    // through to the parse error below, identical for every principal.
+    if let Some(network) = params
+        .get("network")
+        .and_then(Json::as_str)
+        .and_then(|text| acl::parse_network_hex(text).ok())
+    {
+        ctx.uid
+            .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+            .ok_or_else(|| {
+                ApiError::simple(
+                    "AuthorizationFailed",
+                    "principal lacks SEND on this network",
+                )
+            })?;
+    }
     // The schema-2 binding comes from the daemon's own registration
     // mirror — the client can never declare token/boot/egress itself.
     // Node destinations ignore it; gateway destinations REQUIRE a live
@@ -3557,6 +3578,43 @@ mod tests {
         );
         // And the op never entered the store.
         assert!(store.lock().unwrap().dispatch_view().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gateway_submit_denied_before_registration_state_can_leak() {
+        // uid 999 has no SEND grant: it must meet AuthorizationFailed
+        // regardless of registration state — GATEWAY_UNAVAILABLE would
+        // reveal whether a live mirror exists to a principal that may
+        // never learn it.
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        let lane = crate::dispatch::GatewayLane::default();
+        let c = ctx_lane(
+            Some(999),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let key = "77777777777777777777777777777777";
+        let response = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
     }
 
     #[test]
