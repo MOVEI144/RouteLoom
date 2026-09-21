@@ -5118,8 +5118,8 @@ mod tests {
         let b = ops_b
             .submit(challenge_request(), "b".to_string(), NET, 9, 0)
             .unwrap();
-        let tag_a = (0x1122_3344_u32 ^ 0) | 1;
-        let tag_b = (0x5566_7788_u32 ^ 0) | 1;
+        let tag_a = 0x1122_3344_u32 | 1;
+        let tag_b = 0x5566_7788_u32 | 1;
         assert_eq!(a >> 32, u64::from(tag_a));
         assert_eq!(b >> 32, u64::from(tag_b));
         assert_ne!(a >> 32, 0, "the tag word is never zero");
