@@ -469,3 +469,55 @@ fn invalid_vectors_are_rejected() {
         );
     }
 }
+
+#[test]
+fn snapshot_encode_rejects_over_sixteen_fields() {
+    // The C++ encoder refuses count > 16 outright; the Rust bare-TLV path
+    // shared the field validator but skipped the count bound, so a
+    // host-encoded snapshot could diverge from what the device accepts.
+    let fields: Vec<ConfigField> = (1..=17)
+        .map(|id| ConfigField {
+            field_id: id,
+            field_type: ConfigFieldType::U8,
+            value: vec![id as u8],
+        })
+        .collect();
+    assert!(config_tlv_encode(&fields).is_err());
+    assert!(config_tlv_encode(&fields[..16]).is_ok());
+}
+
+#[test]
+fn command_encode_rejects_broadcast_target_and_authority() {
+    // target/authority are logical unicast ids: 0 and u64::MAX (broadcast)
+    // are both reserved — the C++ codec refuses both, so the host side
+    // must agree or a broadcast-addressed permit would leave the station.
+    let mut command = ConfigCommand {
+        config_namespace: 1,
+        schema: 1,
+        network: 7,
+        target: 0x11,
+        authority: 0x42,
+        authority_generation: 1,
+        authority_sequence: 1,
+        operation_id: [1; 16],
+        expected_revision: 0,
+        next_revision: 1,
+        base_snapshot_hash: [0; 32],
+        next_snapshot_hash: [0; 32],
+        target_boot: 1,
+        challenge_nonce: [2; 16],
+        apply_within_ms: 1000,
+        fields: vec![ConfigField {
+            field_id: 1,
+            field_type: ConfigFieldType::U8,
+            value: vec![1],
+        }],
+    };
+    let mut out = Vec::new();
+    assert!(config_command_encode(&command, &mut out).is_ok());
+    command.target = u64::MAX;
+    assert!(config_command_encode(&command, &mut out).is_err());
+    command.target = 0x11;
+    command.authority = u64::MAX;
+    assert!(config_command_encode(&command, &mut out).is_err());
+}

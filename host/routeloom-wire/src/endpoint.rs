@@ -9,7 +9,7 @@
 //! trailing bytes. Layouts are pinned by `protocol/endpoint-golden/`.
 
 use crate::autonomy::EncodedPayload;
-use crate::{ErrorCode, Result, WireError};
+use crate::{ErrorCode, Result, WireError, BROADCAST_NODE_ID};
 
 fn err<T>(detail: &'static str) -> Result<T> {
     Err(WireError::new(ErrorCode::ProtocolError, detail))
@@ -995,6 +995,12 @@ pub struct ConfigCommand {
 }
 
 fn config_command_valid_fields(fields: &[ConfigField]) -> Result<usize> {
+    // The bare-TLV path shares this validator and the C++ encoder refuses
+    // >16 fields outright — enforce the same bound here or a host-encoded
+    // snapshot diverges from what the device can accept.
+    if fields.len() > CONFIG_FIELD_COUNT_MAX {
+        return invalid("config field count exceeds 16");
+    }
     let mut patch_len = 0_usize;
     let mut previous_id = 0_u16;
     for (index, field) in fields.iter().enumerate() {
@@ -1030,9 +1036,14 @@ fn config_command_header_check(command: &ConfigCommand) -> Result<()> {
     if !config_namespace_valid(command.config_namespace) {
         return invalid("config namespace is not registered");
     }
+    // target/authority are logical unicast node ids: 0 (invalid) and
+    // u64::MAX (broadcast) are both reserved and can never be a peer —
+    // mirrors the C++ codec's check in endpoint_wire.cpp.
     if command.network == 0
         || command.target == 0
+        || command.target == BROADCAST_NODE_ID
         || command.authority == 0
+        || command.authority == BROADCAST_NODE_ID
         || all_zero(&command.operation_id)
         || command.target_boot == 0
         || all_zero(&command.challenge_nonce)
