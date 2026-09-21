@@ -1198,12 +1198,15 @@ void NeighborDiscovery::on_wire_rx(const MacAddress& source, const FrameType typ
       neighbor->phase == NeighborPhase::Conflict ||
       neighbor->phase == NeighborPhase::Revoked) {
     ++stats_.kind_rejects;
+    event("WIRE_NEIGHBOR_REJECT", neighbor != nullptr ? neighbor->node
+                                                    : kInvalidNodeId);
     event("KIND_REJECT", kInvalidNodeId);
     return;
   }
   if (!gate(AdmissionCarrier::WireV1, AdmissionDirection::Rx, type,
             /*transaction_alive=*/true, now_ms)) {
     ++stats_.kind_rejects;
+    event("WIRE_GATE_REJECT", neighbor->node);
     return;
   }
   switch (type) {
@@ -1229,9 +1232,20 @@ void NeighborDiscovery::on_wire_rx(const MacAddress& source, const FrameType typ
 void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
                                      const MonotonicMs now_ms) noexcept {
   autonomy::NeighborProbePayload probe{};
-  if (!autonomy::neighbor_probe_decode(payload, probe) ||
-      probe.binding_generation != neighbor.generation) {
+  if (!autonomy::neighbor_probe_decode(payload, probe)) {
     ++stats_.kind_rejects;
+    event("PROBE_DECODE_REJECT", neighbor.node);
+    return;
+  }
+  // Binding generations advance independently on each side's re-auth: a
+  // peer at a NEWER epoch proves its record moved forward — adopt that
+  // epoch so a re-announced peer can never wedge the exchange (02 §9).
+  // A strictly-older generation is stale-epoch evidence and still rejects.
+  if (probe.binding_generation.value > neighbor.generation.value) {
+    neighbor.generation = probe.binding_generation;
+  } else if (probe.binding_generation.value < neighbor.generation.value) {
+    ++stats_.kind_rejects;
+    event("PROBE_GEN_MISMATCH", neighbor.node);
     return;
   }
   // An authenticated probe is liveness evidence: refresh the lease and reply.
@@ -1261,12 +1275,25 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
                                             const ByteView payload,
                                             const MonotonicMs now_ms) noexcept {
   autonomy::NeighborResultPayload result{};
-  if (!autonomy::neighbor_result_decode(payload, result) ||
-      result.probe_sequence == 0 ||
-      result.probe_sequence != neighbor.probe_outstanding ||
-      result.binding_generation != neighbor.generation) {
+  if (!autonomy::neighbor_result_decode(payload, result)) {
     ++stats_.kind_rejects;
+    event("RESULT_DECODE_REJECT", neighbor.node);
+    return;
+  }
+  if (result.probe_sequence == 0 ||
+      result.probe_sequence != neighbor.probe_outstanding) {
+    ++stats_.kind_rejects;
+    event("RESULT_SEQ_MISMATCH", neighbor.node);
     return;  // late/foreign results never promote a dead exchange
+  }
+  // Same forward-adoption as handle_probe: the responder's newer epoch is
+  // binding progress; an older one is stale evidence (02 §9).
+  if (result.binding_generation.value > neighbor.generation.value) {
+    neighbor.generation = result.binding_generation;
+  } else if (result.binding_generation.value < neighbor.generation.value) {
+    ++stats_.kind_rejects;
+    event("RESULT_GEN_MISMATCH", neighbor.node);
+    return;
   }
   neighbor.probe_outstanding = 0;
   if (result.result != autonomy::NeighborResultCode::Reachable) {

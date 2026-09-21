@@ -508,6 +508,13 @@ extern "C" void app_main(void) {
   // boot session, mapped into 1..0xFFFF (0 is the "unset" sentinel).
   config.node.route_generation = static_cast<std::uint16_t>(
       ((message_session - 1U) % 0xFFFFU) + 1U);
+  // Replay epochs must advance with every boot: the persisted floor rejects
+  // anything at-or-below the newest seen epoch, so a boot that reuses the
+  // previous epoch can never re-establish a lost replay window (replay.cpp
+  // REPLAY_STATE_LOST wedge). The boot session is already the persisted
+  // monotonic counter, mapped into the non-zero epoch space.
+  config.node.link_epoch = config.node.route_generation;
+  config.node.end_epoch = config.node.route_generation;
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
 #if CONFIG_ROUTELOOM_MIGRATION
   if (have_boot_channel) {
