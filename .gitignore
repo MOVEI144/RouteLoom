@@ -5,6 +5,7 @@ __pycache__/
 /review-contract-results.json
 /contract-test-results.txt
 /routeloom-docs.zip
+/site/
 /build/
 /build-*/
 /host/target/

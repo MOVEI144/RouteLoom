@@ -173,4 +173,27 @@ config ROUTELOOM_CAPABILITY
         a bit is only advertised when the matching endpoint is actually
         attached (dev profile; not a production identity claim).
 
+config ROUTELOOM_TRUST_STORE
+    bool "Boot-validate the NVS trust/credential stores (rltrust/rlcred)"
+    default n
+    help
+        EXPERIMENTAL (sdk-completion/04-provisioning-lifecycle.md):
+        opens the "rltrust" and "rlcred" NVS regions, validates the
+        RLT1 trust image / RLC1 credential records at boot, logs
+        epoch/anchor/quarantine diagnostics (REPROVISION_REQUIRED on
+        quarantine or credential epoch-window exhaustion), and sources
+        the mesh network identity from the committed image's low 32
+        bits when one is active.
+
+        Scope honesty: this profile is the USB host-side gateway — it
+        has NO config-target permit verifier (that lives on the target
+        node's ConfigJournal; see reference_node's same-named option),
+        so the store supplies identity + diagnostics only and nothing
+        consumes the device credential. There is no provisioning flow
+        yet: no manufactured NVS image tool, no maintenance-console
+        install verb, no trust-manifest endpoint. An empty store is a
+        normal pre-provisioning state, not an error. NVS budget (§4.9):
+        ~1.5 extra pages — production deployments need an enlarged or
+        dedicated NVS partition, NOT set up here.
+
 endmenu

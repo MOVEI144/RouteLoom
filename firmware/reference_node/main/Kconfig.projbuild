@@ -136,11 +136,43 @@ config ROUTELOOM_CONFIG_PROFILE
 config ROUTELOOM_CONFIG_COSE_KEY_HEX
     string "COSE authority P-256 public key, X||Y as 128 hex chars"
     default ""
-    depends on ROUTELOOM_CONFIG_PROFILE = 1
+    depends on ROUTELOOM_CONFIG_PROFILE = 1 && !ROUTELOOM_TRUST_STORE
     help
         The single provisioned authority key for ESP256 permits; its kid
         is CONFIG_ROUTELOOM_CONFIG_AUTHORITY. Off-curve/short keys fail
         the build's runtime check at boot (provision() refuses).
+        Hidden under ROUTELOOM_TRUST_STORE: the trust image is then the
+        only accepted key source, so no compile-time key exists to set.
+
+config ROUTELOOM_TRUST_STORE
+    bool "Source the permit verifier from the NVS trust store (rltrust)"
+    default n
+    depends on ROUTELOOM_CONFIG && ROUTELOOM_CONFIG_PROFILE = 1
+    help
+        EXPERIMENTAL production path (sdk-completion/04-provisioning-
+        lifecycle.md): the permit verifier is a TrustView resolving
+        authority key records from the committed RLT1 trust image in the
+        "rltrust" NVS namespace, and the journal's network binds the
+        image's full u64 NetworkId (deployment generation in the upper
+        bits; Wire v1 still carries only the low 32). The dev-HMAC and
+        compile-time-key paths are compiled out — a production policy
+        never accepts a dev envelope.
+
+        There is NO provisioning flow yet: no manufactured NVS image
+        tool, no maintenance-console install verb, no trust-manifest
+        endpoint (ControlObjectKind=4 is unimplemented). An unprovisioned
+        store is a normal pre-provisioning state that leaves the verifier
+        not-ready — config intake refuses while routing continues. A
+        quarantined or sibling-unproven store logs REPROVISION_REQUIRED
+        at boot; recovery is the store's explicit recover(), wired to
+        nothing in this firmware.
+
+        Also opens "rlcred" for boot diagnostics and the §4.8 epoch-
+        window check; the credential itself is consumed by no wired path
+        (membership/EDHOC is a separate workstream). NVS budget (§4.9):
+        rlcred+rltrust add ~1.5 pages to a nearly-full default pool —
+        a production deployment needs an enlarged or dedicated NVS
+        partition, which is NOT set up here.
 
 config ROUTELOOM_TELEMETRY_REMOTE
     bool "Answer remote Diagnostic (48) telemetry queries over the mesh"

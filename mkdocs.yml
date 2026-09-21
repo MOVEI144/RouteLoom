@@ -1,0 +1,151 @@
+# RouteLoom documentation site (issue #15).
+# Deployed to https://movei144.github.io/RouteLoom/ by .github/workflows/pages.yml.
+# docs_dir is docs/: no document file is moved or renamed for the site.
+site_name: RouteLoom 文書
+site_description: 組み込み向け適応Mesh SDK（ESP32-C3/S3/C5、ESP-NOW）の設計・実装文書。実装プロトタイプでありRF・本番認定は未完了。
+site_url: https://movei144.github.io/RouteLoom/
+repo_name: MOVEI144/RouteLoom
+repo_url: https://github.com/MOVEI144/RouteLoom
+edit_uri: edit/main/docs/
+docs_dir: docs
+copyright: Copyright &copy; 2026 RouteLoom contributors — Apache-2.0
+
+theme:
+  name: material
+  language: ja
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: ダークモードに切り替え
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: ライトモードに切り替え
+  features:
+    - navigation.indexes
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - content.action.edit
+
+plugins:
+  # Japanese segmentation ships with mkdocs (lunr.ja.js); the index is built
+  # client-side, so no extra Python packages are needed.
+  - search:
+      lang: ja
+      separator: '[\s\-\.,:;\(\)\[\]{}「」『』、。・？！!?／/:;]+'
+
+# Rewrites ../ links that escape docs/ into github.com blob URLs, and serves
+# about.md from the repository-root README.md. See the file for details.
+hooks:
+  - tools/mkdocs_hooks.py
+
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+
+# Navigation mirrors the reading order (読み順) of docs/README.md.
+nav:
+  - 文書案内: README.md
+  - RouteLoomについて: about.md
+  - はじめに読む:
+    - 実装案内（v0.1実装）: implementation/README.md
+    - 全体仕様・SDKの責任境界: spec/overview.md
+    - アーキテクチャと実行モデル: spec/architecture.md
+    - 実装状況とリリース条件: STATUS.md
+  - 仕様:
+    - 組み込みSDK APIの契約: spec/sdk-api.md
+    - 配送保証・キュー・永続化: spec/delivery-storage.md
+    - Edge PC接続サービスとクライアントAPI: spec/host.md
+    - Identity・参加・離脱・再接続: spec/identity-membership.md
+    - セキュリティ契約: spec/security.md
+    - 管理合意・Controller・設定世代: spec/control-plane.md
+    - 無線サブシステム（ESP-NOW / Wi-Fi LR）: spec/radio.md
+    - 干渉調査と協調チャンネル移行: spec/channel-migration.md
+    - 経路制御・複数出口・分断修復: spec/routing.md
+    - 省電力・Deep Sleep・受信可用性: spec/power.md
+    - 無線Wire形式と版管理: spec/wire-protocol.md
+    - USB／Serial transport契約: spec/usb-protocol.md
+    - 遠隔設定・診断転送・ファーム更新: spec/remote-management.md
+    - CLI・TUI・観測契約: spec/diagnostics.md
+    - 受入試験・性能・失敗注入: spec/acceptance.md
+    - 実装順序と公開計画: spec/implementation-plan.md
+    - 実装プロファイルと機能の成熟度: spec/release-profiles.md
+    - 電源断・時刻・受理資源の横断契約: spec/crash-time-resources.md
+    - 資源・preauth・board資格のプロファイル: spec/resource-profiles.md
+    - 設計判断と統合時の整合性: spec/decisions.md
+    - 互換性・版管理ポリシー: spec/compatibility.md
+    - Transport境界・将来のLoRa追加: spec/transport-extension.md
+    - 用語: spec/glossary.md
+  - ハードウェア:
+    - hardware/README.md
+    - XIAO ESP32-C3: hardware/xiao-esp32c3.md
+    - XIAO ESP32-S3: hardware/xiao-esp32s3.md
+    - XIAO ESP32-C5: hardware/xiao-esp32c5.md
+    - XIAO ESP32-S3＋Wio-SX1262 B2B: hardware/xiao-esp32s3-wio-sx1262.md
+    - 電源・RF・適合確認: hardware/power-rf-compliance.md
+  - 実装ガイド:
+    - コンポーネント配布と外部プロジェクトからの利用: implementation/component-distribution.md
+    - Hardware-in-the-loop (HIL) harness: hil.md
+  - リファレンス:
+    - 公式資料と参照実装: references/official-sources.md
+    - radio-defaults.json: reference/radio-defaults.json
+    - boards.json: reference/boards.json
+    - requirements.json: reference/requirements.json
+    - feature-profiles.json: reference/feature-profiles.json
+    - resource-profiles.json: reference/resource-profiles.json
+    - review-disposition.json: reference/review-disposition.json
+  - レビュー:
+    - 外部レビューへの対応（仕様改訂1.1）: reviews/2026-09-17-response.md
+  - 設計Draft:
+    - "自律Mesh拡張（Issue #3/#4/#5）":
+      - design/autonomous-mesh/README.md
+      - 共通設計 — 所有権・API・資源・互換性: design/autonomous-mesh/01-integration.md
+      - "Issue #3 — 近隣発見・IdentityとMACのbinding": design/autonomous-mesh/02-discovery.md
+      - "Issue #4 — 輻輳制御・負荷を考慮した経路選択": design/autonomous-mesh/03-congestion.md
+      - "Issue #5 — チャンネル調査・実行中移行・取り残しからの復帰": design/autonomous-mesh/04-channel-migration.md
+      - 実装バックログ・受入・Draft PRの進め方: design/autonomous-mesh/05-implementation.md
+      - 既存Membership・FrameType・admissionとの統合契約: design/autonomous-mesh/06-membership-admission.md
+      - 根拠・読んだコード・既存仕様との差分: design/autonomous-mesh/sources.md
+    - "Host連携・容量・本番認証・運用資格（Issue #7〜#12）":
+      - design/host-security-readiness/README.md
+      - 01 — 共通契約と既存コードへの接続: design/host-security-readiness/01-contracts.md
+      - "02 — 本文を取得する受信API（Issue #7）": design/host-security-readiness/02-receive-api.md
+      - "03 — 条件付き送信と同じ依頼の追跡（Issue #8）": design/host-security-readiness/03-send-api.md
+      - "04 — 容量・保持・退役とクラッシュ（Issue #9）": design/host-security-readiness/04-capacity-storage.md
+      - "05 — 本番機器認証と鍵の運用（Issue #10）": design/host-security-readiness/05-production-security.md
+      - "06 — 実機・継続通信・復旧の試験計画（Issue #11）": design/host-security-readiness/06-hil-plan.md
+      - "07 — APPLIED配送と結果照会（Issue #12）": design/host-security-readiness/07-applied-delivery.md
+      - 08 — 実装順序・移行・設計受入: design/host-security-readiness/08-implementation.md
+      - 固定根拠・採用判断・確認範囲: design/host-security-readiness/sources.md
+      - レビュー補足 — 期限境界・信頼の更新・休眠復帰・検証契約: design/host-security-readiness/review-addendum/README.md
+    - M1 completion:
+      - 0. M1 completion — integrated design: design/m1-completion/00-overview.md
+      - 1. Multi-hop forwarding: design/m1-completion/01-forwarding.md
+      - 2. Real RF telemetry: design/m1-completion/02-telemetry.md
+      - 3. Asymmetric configuration permit profile: design/m1-completion/03-signing.md
+      - 4. Shared contracts, interactions and acceptance decisions: design/m1-completion/04-cross-cutting.md
+    - "Scope・Gateway・Small Config（Issue #14/#16/#17）":
+      - design/scope-gateway-config/README.md
+      - 1. 共通契約と接続点: design/scope-gateway-config/01-integration.md
+      - 2. Discovery Scope Key: design/scope-gateway-config/02-discovery-scope.md
+      - 3. Explicit Gateway配送: design/scope-gateway-config/03-explicit-gateway.md
+      - 4. Small Remote Config: design/scope-gateway-config/04-remote-config.md
+      - 5. Wire・API・互換性: design/scope-gateway-config/05-wire-api.md
+      - 6. 受入・失敗注入・証拠: design/scope-gateway-config/06-acceptance.md
+      - 7. 実装順序とレビュー条件: design/scope-gateway-config/07-implementation.md
+      - 8. 判断記録・一次資料: design/scope-gateway-config/08-decisions-sources.md
+      - 9. 関連バックログ・重複させない責任: design/scope-gateway-config/09-backlog.md
+    - SDK completion:
+      - "1. APPLIED delivery semantics（Issue #12）": design/sdk-completion/01-applied-delivery.md
+      - "2. Dedup capacity and the continuous-send steady state（Issue #9）": design/sdk-completion/02-dedup-capacity.md
+      - 3. Congestion → route-metric coupling: design/sdk-completion/03-congestion-routing.md
+      - 4. Provisioning lifecycle — credential deployment, rotation and revocation: design/sdk-completion/04-provisioning-lifecycle.md
+      - 5. Receive API — poll semantics, subscription streams, and multi-consumer delivery: design/sdk-completion/05-receive-api.md
+  - ライセンス（Apache-2.0）: https://github.com/MOVEI144/RouteLoom/blob/main/LICENSE

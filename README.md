@@ -7,6 +7,7 @@
 
 ## 設計の入口
 
+- [文書サイト（GitHub Pages）](https://movei144.github.io/RouteLoom/)
 - [文書一覧・読み順](docs/README.md)
 - [全体仕様と責任境界](docs/spec/overview.md)
 - [組み込みSDK API](docs/spec/sdk-api.md)
