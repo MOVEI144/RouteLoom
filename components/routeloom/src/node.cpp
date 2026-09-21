@@ -1317,6 +1317,12 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       // Callback-uncertain results are accounted separately from RF loss
       // and BUSY — the job still retries within its bounded attempt budget.
       obs_count(job, &ObservationBucket::unknown_results, now_ms);
+      // No driver observation will ever land for this attempt — release
+      // its bucket pin here or the evidence could never be reclaimed.
+      if (auto* bucket = job_bucket(job, now_ms);
+          bucket != nullptr && bucket->pending_completions != 0) {
+        --bucket->pending_completions;
+      }
       (void)radio_.recover();
       retry_or_fail(job, "DRIVER_RESULT_UNKNOWN", now_ms);
     }
@@ -1445,6 +1451,14 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   // runtime's own submitted/completed timestamps — a second measurement
   // here would double-record and inflate it with Owner/RX backlog (03 §3).
   physical_ = PhysicalInflight{};
+  // The attempt resolved: release the bucket pin its submission took.
+  // (Driver-side note_radio_tx never touches pins — raw-lane completions
+  // must not consume a pin belonging to an in-flight job under the same
+  // observation key.)
+  if (auto* bucket = job_bucket(job, now_ms);
+      bucket != nullptr && bucket->pending_completions != 0) {
+    --bucket->pending_completions;
+  }
   auto* neighbor = find_neighbor(job.peer);
   if (!success) {
     if (neighbor != nullptr && neighbor->consecutive_failures < UINT8_MAX) {
@@ -3036,9 +3050,6 @@ void MeshNode::note_radio_tx(const RadioTxObservation& observation,
       now_ms);
   if (bucket == nullptr) return;  // observation_bucket already counted overflow
   bucket->observer_boot = config_.boot_incarnation;
-  // This observation completes one submitted attempt — release the pin
-  // (saturating: a stale double-callback can never underflow the count).
-  if (bucket->pending_completions != 0) --bucket->pending_completions;
   switch (observation.outcome) {
     case RadioTxOutcome::Success:
       ++bucket->tx_mac_success;
