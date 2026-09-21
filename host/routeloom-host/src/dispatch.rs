@@ -259,6 +259,24 @@ pub struct ConfigOps {
 }
 
 impl ConfigOps {
+    /// A config op id namespaces the daemon incarnation that minted it:
+    /// `(tag << 32) | seq` where `tag` folds `host_boot` into the high word
+    /// (bit 0 forced so the tag is never zero). The records table is
+    /// RAM-only, so without the tag a restarted daemon would reissue
+    /// `cfg...0001` and a stale `config.get` token would resolve to a
+    /// DIFFERENT operation — the tag makes a pre-restart token provably
+    /// not this boot's. `ConfigOps::default()` keeps the zero tag, which
+    /// is only for tests and fixtures.
+    pub fn with_boot(host_boot: u64) -> Self {
+        let tag = ((host_boot as u32) ^ ((host_boot >> 32) as u32)) | 1;
+        Self {
+            inner: Mutex::new(ConfigOpsInner {
+                next_op: u64::from(tag) << 32,
+                ..ConfigOpsInner::default()
+            }),
+        }
+    }
+
     /// Queue a client request for the dispatch lane. Returns the config op id
     /// the client polls with `config.get`, or Err(()) when the inbox is full —
     /// an honest capacity refusal, never a silent drop.
@@ -271,6 +289,17 @@ impl ConfigOps {
         now_ms: u64,
     ) -> Result<u64, ()> {
         let mut inner = self.inner.lock().expect("config ops poisoned");
+        // Evict one resolved record to make room BEFORE the capacity
+        // check: the cap must refuse only while every retained record is
+        // still live (queued or in flight) — a resolved record is history,
+        // not occupancy. In-flight ops are never evicted.
+        if inner.records.len() >= CONFIG_RECORD_CAP {
+            while let Some(oldest) = inner.resolved_order.pop_front() {
+                if inner.records.remove(&oldest).is_some() {
+                    break;
+                }
+            }
+        }
         if inner.inbox.len() >= CONFIG_INBOX_CAP || inner.records.len() >= CONFIG_RECORD_CAP {
             return Err(());
         }
@@ -743,8 +772,10 @@ impl Dispatcher {
             let Ok(sequence) = ledger.config_authority_next() else {
                 // The durable sequence could not be committed: the issuance
                 // cannot be proven, so report Indeterminate, never a seq we
-                // did not durably own.
-                self.config_done.push((op_id, ConfigOutcome::Indeterminate));
+                // did not durably own. No operation_id was minted yet —
+                // the failure precedes issuance, so none is carried.
+                self.config_done
+                    .push((op_id, ConfigOutcome::Indeterminate(None)));
                 return;
             };
             cfg.lane.set_issuer_identity(link.network, cfg.authority);
@@ -2281,14 +2312,28 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
         )
     };
     let prefix = &ingress.submit_prefix;
-    let mut token = [0u8; 16];
-    token.copy_from_slice(
+    let mut prefix_token = [0u8; 16];
+    prefix_token.copy_from_slice(
         &prefix[host_ops::SERVICE_PREFIX_TOKEN_OFFSET..host_ops::SERVICE_PREFIX_TOKEN_OFFSET + 16],
     );
+    // The device binds the 0x12 ACK to its live HOST registration token —
+    // `ack.token == registration_.token` in usb_bridge.cpp — never to the
+    // Service Submit prefix token, which on a real mesh ingress is the
+    // ORIGIN's lease token (they only coincide on loopback, where the
+    // device synthesizes the prefix from the registration itself). The
+    // prefix token still participates in the digest recompute below —
+    // only the ACK's token field changes. When no mirror is bound to this
+    // session the ACK can never bind anyway: echo the presented prefix
+    // token so the device drops it honestly rather than claiming a
+    // binding we do not hold.
+    let ack_token = match state.gateway_lane.current() {
+        Some(reg) if reg.usb_session == session_id => reg.token,
+        _ => prefix_token,
+    };
     let answer = |outcome: GatewayOpsResult| {
         Some(host_ops::encode_gateway_ingress_ack(
             &host_ops::GatewayIngressAck {
-                token,
+                token: ack_token,
                 ref_origin: ingress.ref_origin,
                 ref_session: ingress.ref_session,
                 ref_sequence: ingress.ref_sequence,
@@ -2338,13 +2383,15 @@ fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>>
         event("invalid", "no authenticated session".to_string());
         return answer(GatewayOpsResult::Invalid);
     }
-    // The device only issues ingress under a live registration, so the
-    // prefix token is what its record holds — echoing it binds the ACK.
-    // A divergence between prefix token and our mirror only means our
-    // mirror is behind (its grant response was lost): store anyway, the
-    // device validates the binding on its own record.
+    // The device only issues ingress under a live registration; the prefix
+    // token is the ORIGIN's lease token, which differs from the host
+    // registration token on every real mesh submit. A divergence is
+    // expected, not an error — noted for diagnostics only. The storage
+    // decision never depends on either token: the digest recompute below
+    // is the proof, and the device validates the ACK binding on its own
+    // registration record.
     if let Some(reg) = state.gateway_lane.current() {
-        if reg.usb_session == session_id && reg.token != token {
+        if reg.usb_session == session_id && reg.token != prefix_token {
             event(
                 "note",
                 "prefix token differs from registration mirror".to_string(),
@@ -2586,7 +2633,8 @@ mod tests {
     };
     use routeloom_wire::autonomy::EncodedPayload;
     use routeloom_wire::endpoint::{
-        control_challenge_encode, ConfigField, ConfigFieldType, ControlChallenge,
+        control_challenge_encode, control_status_encode, ConfigField, ConfigFieldType, ConfigPhase,
+        ConfigReason, ControlChallenge, ControlStatus,
     };
 
     const UID: u32 = 501;
@@ -4501,15 +4549,33 @@ mod tests {
         state
     }
 
+    /// Install the host registration mirror the dispatch pass publishes —
+    /// `token` is what the device will bind the 0x12 ACK against.
+    fn mirror(state: &State, token: [u8; 16], usb_session: u64) {
+        state.gateway_lane.set(GatewayRegistration {
+            token,
+            gateway_boot: BOOT,
+            host_digest: [0x9d; 32],
+            egress: NODE,
+            usb_session,
+            lease_deadline_mono: u64::MAX,
+        });
+    }
+
     #[test]
     fn ingress_stores_then_acks_ok() {
         let state = gw_state();
+        // Loopback shape: the device synthesizes the Service Submit prefix
+        // from the registration itself, so prefix token == registration
+        // token — the case the existing code happened to answer correctly.
+        mirror(&state, [0xa1; 16], 7);
         let prefix = submit_prefix([0xa1; 16], BOOT, 3);
         let body = ingress_body(prefix, 0xdead, 9, 42, &[1, 2, 3]);
         let ack = gateway_ingress_ack(&state, &body, 5_000).expect("ack produced");
         let ack = ack_of(&ack);
         assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
-        // The ACK echoes every field the device bound into the request.
+        // The ACK echoes the bound reference fields; the token is the
+        // registration's (equal to the prefix token on loopback only).
         assert_eq!(ack.token, [0xa1; 16]);
         assert_eq!(ack.ref_origin, 0xdead);
         assert_eq!(ack.ref_session, 9);
@@ -4527,6 +4593,63 @@ mod tests {
         assert_eq!(records[0].payload, vec![1, 2, 3]);
         assert_eq!(records[0].origin, 0xdead);
         assert_eq!(records[0].gateway, Some(NODE));
+    }
+
+    #[test]
+    fn ingress_acks_registration_token_not_prefix_token() {
+        // Real mesh ingress: the Service Submit prefix carries the ORIGIN's
+        // lease token, which differs from the host registration token. The
+        // device binds the ACK with `ack.token == registration_.token` —
+        // echoing the prefix token (the old behavior) made every real-path
+        // ACK fail binding and the pending ingress expire unproven.
+        let state = gw_state();
+        mirror(&state, [0x5e; 16], 7);
+        let prefix = submit_prefix([0xa1; 16], BOOT, 3);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[1, 2, 3]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).expect("ack produced");
+        let ack = ack_of(&ack);
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(
+            ack.token, [0x5e; 16],
+            "the ACK token is the registration mirror's, not the prefix's"
+        );
+        // The storage proof still commits to the prefix as received —
+        // the payload lands in the log exactly once.
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_000, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!("stored record must be readable")
+        };
+        assert_eq!(batch.records.len(), 1);
+        // Refusals bind the same way — an Invalid outcome still carries
+        // the registration token so the device can correlate it.
+        let foreign = submit_prefix([0xa1; 16], BOOT + 1, 1);
+        let body = ingress_body(foreign, 0xdead, 9, 43, &[9]);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Invalid as u16);
+        assert_eq!(ack.token, [0x5e; 16]);
+    }
+
+    #[test]
+    fn ingress_without_bound_mirror_cannot_bind_the_ack() {
+        // No mirror published (or one bound to a dead session): no honest
+        // token exists — the ACK echoes the presented prefix token so the
+        // device drops it as unbound rather than accepting a binding the
+        // host cannot vouch for. The storage outcome still reports truth.
+        let state = gw_state();
+        let prefix = submit_prefix([0x77; 16], BOOT, 1);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[9]);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(ack.token, [0x77; 16]);
+        // A mirror minted under a DIFFERENT usb session is equally unusable.
+        let state = gw_state();
+        mirror(&state, [0x5e; 16], 8);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(ack.token, [0x77; 16]);
     }
 
     #[test]
@@ -4740,6 +4863,40 @@ mod tests {
         }
     }
 
+    fn status_request() -> ConfigRequest {
+        ConfigRequest::Status {
+            target: 0x99,
+            config_namespace: 1,
+            operation_id: [0xaa; 16],
+        }
+    }
+
+    fn control_status(op_id: [u8; 16]) -> ControlStatus {
+        ControlStatus {
+            config_namespace: 1,
+            operation_id: op_id,
+            decision_revision: 5,
+            active_revision: 5,
+            phase: ConfigPhase::Active,
+            reason: ConfigReason::Ok,
+            active_hash: [0x33; 32],
+        }
+    }
+
+    fn config_status_reply(target: u64, status: &ControlStatus) -> Vec<u8> {
+        let mut body = EncodedPayload::default();
+        control_status_encode(status, &mut body).unwrap();
+        host_ops::encode_config_reply(
+            host_ops::SUB_CONFIG_STATUS,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Ok as u16,
+                target,
+                body: body.view().to_vec(),
+            },
+        )
+        .unwrap()
+    }
+
     fn propose_request() -> ConfigRequest {
         ConfigRequest::Propose {
             target: 0x99,
@@ -4770,8 +4927,17 @@ mod tests {
         // assigned wire request id, remapped from the lane's own id.
         let out = dispatcher.tick(&mut store, &link(), 1_000);
         let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
-        // A valid ControlChallenge reply on that wire id resolves the op.
-        let ch = config_challenge();
+        // A valid ControlChallenge reply on that wire id resolves the op —
+        // the echo must carry the nonce the issuer drew, so replay it from
+        // the emitted request body exactly as the device would.
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_CHALLENGE))
+            .expect("the challenge emit");
+        let mut ch = config_challenge();
+        ch.client_nonce = host_ops::decode_config_challenge(&emit.body)
+            .unwrap()
+            .client_nonce;
         dispatcher.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
         assert_eq!(
             dispatcher.take_config_done(),
@@ -4823,12 +4989,144 @@ mod tests {
         no_auth.config_submit(&mut store, &link(), 23, challenge_request(), 1_000);
         let out = no_auth.tick(&mut store, &link(), 1_000);
         let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
-        let ch = config_challenge();
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_CHALLENGE))
+            .expect("the challenge emit");
+        let mut ch = config_challenge();
+        ch.client_nonce = host_ops::decode_config_challenge(&emit.body)
+            .unwrap()
+            .client_nonce;
         no_auth.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
         assert_eq!(
             no_auth.take_config_done(),
             vec![(23, ConfigOutcome::Challenged(ch))]
         );
+    }
+
+    #[test]
+    fn config_reply_with_a_foreign_echo_is_a_protocol_error() {
+        // Regression: the device echoes the challenge's client_nonce / the
+        // status's operation_id from the QUERY it answered. A reply that
+        // carries someone else's echo — collision, replug-stale, buggy —
+        // must not resolve the current op: PROTOCOL_ERROR, never a claim.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        dispatcher.config_submit(&mut store, &link(), 7, challenge_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        let ch = config_challenge(); // nonce 0x11.. — never what we emitted
+        dispatcher.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(7, ConfigOutcome::ProtocolError)]
+        );
+        // Same for a Status reply echoing a different operation id.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        dispatcher.config_submit(&mut store, &link(), 8, status_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_QUERY);
+        dispatcher.handle_reply(
+            &mut store,
+            wire,
+            &config_status_reply(0x99, &control_status([0xbb; 16])),
+            1_050,
+        );
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(8, ConfigOutcome::ProtocolError)]
+        );
+    }
+
+    #[test]
+    fn config_ops_evict_resolved_records_before_refusing() {
+        // Regression: the inbox bound is separate from the record bound.
+        // Resolved records are memory, not capacity — at the cap they are
+        // evicted oldest-first; refusal is only for a table full of LIVE
+        // records (all-live refusal: config_ops_refuse_only_when_all_live).
+        let ops = crate::dispatch::ConfigOps::default();
+        let mut live = Vec::new();
+        for _ in 0..CONFIG_RECORD_CAP {
+            let op_id = ops
+                .submit(challenge_request(), "x".to_string(), NET, 9, 0)
+                .unwrap();
+            live.push(op_id);
+            // Drain the inbox so the record bound, not the inbox bound,
+            // is what the table is full of — in-flight records are live.
+            ops.take_request();
+        }
+        // Resolve the first half — they become eviction candidates.
+        for &op_id in &live[..CONFIG_RECORD_CAP / 2] {
+            ops.resolve(op_id, ConfigOutcome::Timeout, 1_000);
+        }
+        // A fresh submit fits: resolved records yield, not refuse.
+        let next = ops.submit(challenge_request(), "y".to_string(), NET, 9, 0);
+        assert!(next.is_ok(), "resolved records must not count as capacity");
+        // The newest resolved records still poll; the oldest are gone.
+        assert_eq!(
+            ops.get(live[CONFIG_RECORD_CAP / 2]).map(|r| r.op_id),
+            Some(live[CONFIG_RECORD_CAP / 2])
+        );
+        assert!(ops.get(live[0]).is_none(), "oldest resolved evicted first");
+    }
+
+    #[test]
+    fn config_ops_refuse_only_when_all_live() {
+        // The record cap's refusal is reserved for genuine occupancy: 128
+        // records still queued or in flight. (Draining the inbox keeps the
+        // records live — take_request does not resolve them.)
+        let ops = crate::dispatch::ConfigOps::default();
+        for _ in 0..CONFIG_RECORD_CAP {
+            ops.submit(challenge_request(), "x".to_string(), NET, 9, 0)
+                .unwrap();
+            ops.take_request();
+        }
+        assert!(
+            ops.submit(challenge_request(), "y".to_string(), NET, 9, 0)
+                .is_err(),
+            "128 live records must refuse — the table is honestly full"
+        );
+        // The inbox bound is independent: 32 undrained submits refuse even
+        // with the record table nearly empty.
+        let ops = crate::dispatch::ConfigOps::default();
+        for _ in 0..CONFIG_INBOX_CAP {
+            ops.submit(challenge_request(), "x".to_string(), NET, 9, 0)
+                .unwrap();
+        }
+        assert!(ops
+            .submit(challenge_request(), "y".to_string(), NET, 9, 0)
+            .is_err());
+    }
+
+    #[test]
+    fn config_op_ids_are_namespaced_by_host_boot() {
+        // After a reboot the RAM-only table restarts its counter — a stale
+        // caller's `cfg...1` must not reach a NEW op. The op id embeds a
+        // boot tag in the high 32 bits (the folded host_boot, bit 0 forced
+        // so the tag is never zero); two boots can never mint the same
+        // token for the same sequence.
+        let ops_a = crate::dispatch::ConfigOps::with_boot(0x1122_3344);
+        let ops_b = crate::dispatch::ConfigOps::with_boot(0x5566_7788);
+        let a = ops_a
+            .submit(challenge_request(), "a".to_string(), NET, 9, 0)
+            .unwrap();
+        let b = ops_b
+            .submit(challenge_request(), "b".to_string(), NET, 9, 0)
+            .unwrap();
+        let tag_a = (0x1122_3344_u32 ^ 0) | 1;
+        let tag_b = (0x5566_7788_u32 ^ 0) | 1;
+        assert_eq!(a >> 32, u64::from(tag_a));
+        assert_eq!(b >> 32, u64::from(tag_b));
+        assert_ne!(a >> 32, 0, "the tag word is never zero");
+        assert_ne!(a, b, "same counter, different boot — different token");
+        assert_ne!(a & 0xffff_ffff, 0, "the sequence never starts at zero");
+        // Per-boot counters count up within their own namespace.
+        let a2 = ops_a
+            .submit(challenge_request(), "c".to_string(), NET, 9, 0)
+            .unwrap();
+        assert_eq!(a2 - a, 1);
     }
 
     #[test]

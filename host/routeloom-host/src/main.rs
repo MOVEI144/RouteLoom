@@ -2081,6 +2081,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         operation_store: Mutex::new(operation_store),
         acl,
         host_boot,
+        // Config op tokens are namespaced to this daemon incarnation so a
+        // `config.get` token from before a restart can never resolve to a
+        // different op minted by the new boot (RAM-only ids).
+        config_ops: dispatch::ConfigOps::with_boot(host_boot),
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
         ..State::default()

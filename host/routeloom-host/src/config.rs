@@ -315,6 +315,9 @@ impl ConfigIssuer {
 
     /// Record a received Challenge2 for (target, namespace). The remaining
     /// apply budget is measured from THIS receipt on the issuer's clock.
+    /// A challenge this ledger refuses REPLACES nothing and evicts any
+    /// previously cached record for the same key — a stale nonce/revision
+    /// must never be signable by a later propose.
     pub fn note_challenge(
         &mut self,
         challenge: &ControlChallenge,
@@ -325,6 +328,8 @@ impl ConfigIssuer {
             || all_zero(&challenge.challenge_nonce)
             || challenge.target_boot == 0
         {
+            self.challenges
+                .remove(&(target, challenge.config_namespace));
             return Err(ConfigError::InvalidArgument);
         }
         self.challenges.insert(
@@ -502,15 +507,25 @@ pub enum ConfigOutcome {
     /// A ControlStatus body arrived — the operation's real verdict.
     Statused(ControlStatus),
     /// The permit object assembled at the target (0x21 Ok) — NOT active.
-    PermitAssembled,
+    /// Carries the issued device operation_id when the lane minted one, so
+    /// `config.get` can still name the operation a follow-up StatusQuery
+    /// would read.
+    PermitAssembled(Option<[u8; 16]>),
     /// The patch was a no-op (NO_CHANGE): nothing was signed or sent.
     NoChange,
     /// Device-side refusal (Busy/Denied/Unsupported/Invalid/NoRoute).
     Refused(ConfigOpsResult),
+    /// Issuer-side refusal: the proposal's base snapshot failed the CAS
+    /// check against the challenge's active_hash — a client fault naming
+    /// a stale base, never a wire fault and never a success.
+    RefusedStale,
     /// The target did not answer a query inside the window.
     Timeout,
     /// A permit transfer could not be proven (deadline / torn exchange).
-    Indeterminate,
+    /// Carries the issued device operation_id when the propose had already
+    /// minted one — the device may hold that operation, so the caller can
+    /// keep querying it — and None when failure preceded issuance.
+    Indeterminate(Option<[u8; 16]>),
     /// A malformed, mismatched or out-of-turn reply.
     ProtocolError,
 }
@@ -525,18 +540,25 @@ pub enum ConfigStep {
 }
 
 enum Phase {
-    /// Waiting on a 0x23 reply carrying the ControlChallenge body.
-    Challenge,
+    /// Waiting on a 0x23 reply carrying the ControlChallenge body. The
+    /// reply must echo the (schema, client_nonce) the query emitted — a
+    /// body answering a different query is a protocol fault, not input.
+    Challenge { schema: u16, client_nonce: [u8; 16] },
     /// Waiting on a 0x21 reply (permit transfer ack) before the status read.
     Permit,
-    /// Waiting on a 0x22 reply carrying the ControlStatus body.
-    Status,
+    /// Waiting on a 0x22 reply carrying the ControlStatus body. The body
+    /// must echo the queried operation_id.
+    Status { operation_id: [u8; 16] },
 }
 
 struct InFlight {
     request: u64,
     phase: Phase,
     deadline_ms: u64,
+    /// The request's target — every ConfigReply echoes it back.
+    target: u64,
+    /// The request's namespace — a challenge/status body must echo it.
+    config_namespace: u16,
 }
 
 /// Per-request state for a Propose in progress.
@@ -691,8 +713,13 @@ impl ConfigLane {
         });
         self.in_flight = Some(InFlight {
             request,
-            phase: Phase::Challenge,
+            phase: Phase::Challenge {
+                schema,
+                client_nonce,
+            },
             deadline_ms: now_ms + CONFIG_QUERY_TIMEOUT_MS,
+            target,
+            config_namespace,
         });
         ConfigStep::Emit { request, body }
     }
@@ -712,13 +739,21 @@ impl ConfigLane {
         });
         self.in_flight = Some(InFlight {
             request,
-            phase: Phase::Status,
+            phase: Phase::Status { operation_id },
             deadline_ms: now_ms + CONFIG_QUERY_TIMEOUT_MS,
+            target,
+            config_namespace,
         });
         ConfigStep::Emit { request, body }
     }
 
-    fn emit_permit(&mut self, target: u64, permit: Vec<u8>, now_ms: u64) -> ConfigStep {
+    fn emit_permit(
+        &mut self,
+        target: u64,
+        config_namespace: u16,
+        permit: Vec<u8>,
+        now_ms: u64,
+    ) -> ConfigStep {
         let request = self.alloc_request();
         let body =
             match host_ops::encode_config_permit(&host_ops::ConfigPermitRequest { target, permit })
@@ -733,6 +768,8 @@ impl ConfigLane {
             request,
             phase: Phase::Permit,
             deadline_ms: now_ms + CONFIG_PERMIT_TIMEOUT_MS,
+            target,
+            config_namespace,
         });
         ConfigStep::Emit { request, body }
     }
@@ -745,15 +782,33 @@ impl ConfigLane {
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
         };
         if in_flight.request != request {
-            // Restore: an unexpected id means a routing bug upstream, not a
-            // resolution of the outstanding request.
-            self.in_flight = Some(in_flight);
+            // A reply naming a different lane id means the exchange is
+            // torn upstream: the outstanding request can never resolve
+            // cleanly now, so the lane clears rather than staying armed
+            // behind an op that is already resolving ProtocolError.
+            self.propose = None;
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
         }
         match in_flight.phase {
-            Phase::Challenge => self.on_challenge_reply(inner, now_ms),
-            Phase::Permit => self.on_permit_reply(inner, now_ms),
-            Phase::Status => self.on_status_reply(inner, now_ms),
+            Phase::Challenge {
+                schema,
+                client_nonce,
+            } => self.on_challenge_reply(
+                inner,
+                in_flight.target,
+                in_flight.config_namespace,
+                schema,
+                client_nonce,
+                now_ms,
+            ),
+            Phase::Permit => self.on_permit_reply(inner, in_flight.target, now_ms),
+            Phase::Status { operation_id } => self.on_status_reply(
+                inner,
+                in_flight.target,
+                in_flight.config_namespace,
+                operation_id,
+                now_ms,
+            ),
         }
     }
 
@@ -765,12 +820,15 @@ impl ConfigLane {
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
         };
         if in_flight.request != request {
-            self.in_flight = Some(in_flight);
+            // Same torn-exchange rule as on_reply: a mismatched drop
+            // notification cannot resolve the outstanding request, and the
+            // lane must not stay armed behind an already-resolved op.
+            self.propose = None;
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
         }
-        self.propose = None;
+        let operation_id = self.propose.take().map(|p| p.operation_id);
         ConfigStep::Done(match in_flight.phase {
-            Phase::Permit => ConfigOutcome::Indeterminate,
+            Phase::Permit => ConfigOutcome::Indeterminate(operation_id),
             _ => ConfigOutcome::Timeout,
         })
     }
@@ -783,14 +841,22 @@ impl ConfigLane {
             return None;
         }
         let phase = self.in_flight.take().map(|i| i.phase)?;
-        self.propose = None;
+        let operation_id = self.propose.take().map(|p| p.operation_id);
         Some(match phase {
-            Phase::Permit => ConfigOutcome::Indeterminate,
+            Phase::Permit => ConfigOutcome::Indeterminate(operation_id),
             _ => ConfigOutcome::Timeout,
         })
     }
 
-    fn on_challenge_reply(&mut self, inner: &[u8], now_ms: u64) -> ConfigStep {
+    fn on_challenge_reply(
+        &mut self,
+        inner: &[u8],
+        target: u64,
+        config_namespace: u16,
+        schema: u16,
+        client_nonce: [u8; 16],
+        now_ms: u64,
+    ) -> ConfigStep {
         let reply = match host_ops::decode_config_reply(inner, SUB_CONFIG_CHALLENGE) {
             Ok(reply) => reply,
             Err(_) => {
@@ -798,6 +864,12 @@ impl ConfigLane {
                 return ConfigStep::Done(ConfigOutcome::ProtocolError);
             }
         };
+        // A reply must echo the query's target: a refusal naming a
+        // different target is a mismatched reply, never a claimed outcome.
+        if reply.target != target {
+            self.propose = None;
+            return ConfigStep::Done(ConfigOutcome::ProtocolError);
+        }
         let result = match ConfigOpsResult::try_from_u16(reply.result) {
             Ok(result) => result,
             Err(_) => {
@@ -806,8 +878,8 @@ impl ConfigLane {
             }
         };
         if result != ConfigOpsResult::Ok {
-            self.propose = None;
-            return ConfigStep::Done(map_refusal(result));
+            let operation_id = self.propose.take().map(|p| p.operation_id);
+            return ConfigStep::Done(map_refusal(result, operation_id));
         }
         let challenge = match control_challenge_decode(&reply.body) {
             Ok(challenge) => challenge,
@@ -816,6 +888,17 @@ impl ConfigLane {
                 return ConfigStep::Done(ConfigOutcome::ProtocolError);
             }
         };
+        // The body must answer THIS query: namespace, schema and the
+        // emitted client_nonce all echo. A body bound to a different
+        // query (stale replay, crossed wire) is a protocol fault — it may
+        // never seed the challenge ledger the permit is signed against.
+        if challenge.config_namespace != config_namespace
+            || challenge.schema != schema
+            || challenge.client_nonce != client_nonce
+        {
+            self.propose = None;
+            return ConfigStep::Done(ConfigOutcome::ProtocolError);
+        }
         if self.propose.is_none() {
             // Standalone challenge query: report the body, done.
             return ConfigStep::Done(ConfigOutcome::Challenged(challenge));
@@ -827,7 +910,13 @@ impl ConfigLane {
             let propose = self.propose.as_ref().expect("checked");
             (propose.target, propose.config_namespace, propose.schema)
         };
-        self.issuer.note_challenge(&challenge, target, now_ms).ok();
+        if let Err(error) = self.issuer.note_challenge(&challenge, target, now_ms) {
+            // A challenge the ledger refuses leaves NO cached record —
+            // signing a later propose against a stale nonce/revision would
+            // mint a permit the target must reject.
+            self.propose = None;
+            return ConfigStep::Done(map_issue_error(error));
+        }
         let outcome = {
             let propose = self.propose.as_ref().expect("checked");
             self.issuer.propose(
@@ -848,7 +937,9 @@ impl ConfigLane {
                 self.propose = None;
                 ConfigStep::Done(ConfigOutcome::NoChange)
             }
-            Ok(ProposeOutcome::Issued(issued)) => self.emit_permit(target, issued.permit, now_ms),
+            Ok(ProposeOutcome::Issued(issued)) => {
+                self.emit_permit(target, config_namespace, issued.permit, now_ms)
+            }
             Err(error) => {
                 self.propose = None;
                 ConfigStep::Done(map_issue_error(error))
@@ -856,7 +947,7 @@ impl ConfigLane {
         }
     }
 
-    fn on_permit_reply(&mut self, inner: &[u8], now_ms: u64) -> ConfigStep {
+    fn on_permit_reply(&mut self, inner: &[u8], target: u64, now_ms: u64) -> ConfigStep {
         let reply = match host_ops::decode_config_reply(inner, SUB_CONFIG_PERMIT) {
             Ok(reply) => reply,
             Err(_) => {
@@ -864,6 +955,10 @@ impl ConfigLane {
                 return ConfigStep::Done(ConfigOutcome::ProtocolError);
             }
         };
+        if reply.target != target {
+            self.propose = None;
+            return ConfigStep::Done(ConfigOutcome::ProtocolError);
+        }
         let result = match ConfigOpsResult::try_from_u16(reply.result) {
             Ok(result) => result,
             Err(_) => {
@@ -872,14 +967,14 @@ impl ConfigLane {
             }
         };
         if result != ConfigOpsResult::Ok {
-            self.propose = None;
-            return ConfigStep::Done(map_refusal(result));
+            let operation_id = self.propose.take().map(|p| p.operation_id);
+            return ConfigStep::Done(map_refusal(result, operation_id));
         }
         // The object assembled — NOT a config verdict. Read the operation's
         // real status with a follow-up StatusQuery on the same operation_id.
         // The ProposeState stays live until the status reply resolves it.
         let Some(propose) = self.propose.as_ref() else {
-            return ConfigStep::Done(ConfigOutcome::PermitAssembled);
+            return ConfigStep::Done(ConfigOutcome::PermitAssembled(None));
         };
         let (target, config_namespace, operation_id) = (
             propose.target,
@@ -889,38 +984,63 @@ impl ConfigLane {
         self.emit_status(target, config_namespace, operation_id, now_ms)
     }
 
-    fn on_status_reply(&mut self, inner: &[u8], _now_ms: u64) -> ConfigStep {
+    fn on_status_reply(
+        &mut self,
+        inner: &[u8],
+        target: u64,
+        config_namespace: u16,
+        operation_id: [u8; 16],
+        _now_ms: u64,
+    ) -> ConfigStep {
         self.propose = None;
         let reply = match host_ops::decode_config_reply(inner, SUB_CONFIG_STATUS) {
             Ok(reply) => reply,
             Err(_) => return ConfigStep::Done(ConfigOutcome::ProtocolError),
         };
+        if reply.target != target {
+            return ConfigStep::Done(ConfigOutcome::ProtocolError);
+        }
         let result = match ConfigOpsResult::try_from_u16(reply.result) {
             Ok(result) => result,
             Err(_) => return ConfigStep::Done(ConfigOutcome::ProtocolError),
         };
         if result != ConfigOpsResult::Ok {
-            return ConfigStep::Done(map_refusal(result));
+            return ConfigStep::Done(map_refusal(result, Some(operation_id)));
         }
-        match control_status_decode(&reply.body) {
-            Ok(status) => ConfigStep::Done(ConfigOutcome::Statused(status)),
-            Err(_) => ConfigStep::Done(ConfigOutcome::ProtocolError),
+        let status = match control_status_decode(&reply.body) {
+            Ok(status) => status,
+            Err(_) => return ConfigStep::Done(ConfigOutcome::ProtocolError),
+        };
+        // The body must answer THIS query — the queried operation_id and
+        // namespace echo. A status bound to a different operation would
+        // report a verdict for work we did not ask about.
+        if status.config_namespace != config_namespace || status.operation_id != operation_id {
+            return ConfigStep::Done(ConfigOutcome::ProtocolError);
         }
+        ConfigStep::Done(ConfigOutcome::Statused(status))
     }
 }
 
-fn map_refusal(result: ConfigOpsResult) -> ConfigOutcome {
+fn map_refusal(result: ConfigOpsResult, operation_id: Option<[u8; 16]>) -> ConfigOutcome {
     match result {
         ConfigOpsResult::Timeout => ConfigOutcome::Timeout,
-        ConfigOpsResult::Indeterminate => ConfigOutcome::Indeterminate,
+        ConfigOpsResult::Indeterminate => ConfigOutcome::Indeterminate(operation_id),
         other => ConfigOutcome::Refused(other),
     }
 }
 
+/// Issuer-side faults are client faults, not wire faults: an invalid or
+/// oversize input is the same refusal the endpoint codec would emit
+/// (Invalid), and a CAS mismatch names a stale base snapshot distinctly so
+/// the caller can re-read and retry — none of them is a ProtocolError,
+/// which the wire reserves for malformed/mismatched replies.
 fn map_issue_error(error: ConfigError) -> ConfigOutcome {
     match error {
         ConfigError::Expired => ConfigOutcome::Timeout,
-        ConfigError::Stale | ConfigError::Malformed => ConfigOutcome::ProtocolError,
+        ConfigError::Stale => ConfigOutcome::RefusedStale,
+        ConfigError::InvalidArgument | ConfigError::Malformed | ConfigError::TooLarge => {
+            ConfigOutcome::Refused(ConfigOpsResult::Invalid)
+        }
         _ => ConfigOutcome::ProtocolError,
     }
 }
@@ -1171,6 +1291,14 @@ mod tests {
         }
     }
 
+    /// The client_nonce the lane stamped on a challenge emit — the value a
+    /// reply's ControlChallenge body must echo back to be accepted.
+    fn emitted_nonce(body: &[u8]) -> [u8; 16] {
+        host_ops::decode_config_challenge(body)
+            .unwrap()
+            .client_nonce
+    }
+
     fn done(step: ConfigStep) -> ConfigOutcome {
         match step {
             ConfigStep::Done(outcome) => outcome,
@@ -1209,8 +1337,10 @@ mod tests {
         // The first emit is a ConfigChallenge request (0x23).
         assert_eq!(body1[1], SUB_CONFIG_CHALLENGE);
         assert!(lane.busy());
-        // The device answers with a ControlChallenge bound to the base hash.
-        let ch = challenge(1, 1, &base, 4);
+        // The device answers with a ControlChallenge bound to the base hash
+        // and echoing the query's client_nonce.
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body1);
         let (req2, body2) = emit(lane.on_reply(req1, &challenge_reply(0x99, &ch), 1_100));
         // Next emit is the ConfigPermit transfer (0x21).
         assert_eq!(body2[1], SUB_CONFIG_PERMIT);
@@ -1227,13 +1357,11 @@ mod tests {
         let (req3, body3) = emit(lane.on_reply(req2, &ack, 1_200));
         // Object assembled -> the lane follows with a StatusQuery (0x20).
         assert_eq!(body3[1], host_ops::SUB_CONFIG_QUERY);
-        // The terminal verdict arrives as a ControlStatus body.
-        let outcome = done(lane.on_reply(
-            req3,
-            &status_reply(0x99, &control_status([0x01; 16])),
-            1_300,
-        ));
-        assert_eq!(outcome, ConfigOutcome::Statused(control_status([0x01; 16])));
+        // The terminal verdict arrives as a ControlStatus body echoing the
+        // operation_id the StatusQuery carried.
+        let op = host_ops::decode_config_query(&body3).unwrap().operation_id;
+        let outcome = done(lane.on_reply(req3, &status_reply(0x99, &control_status(op)), 1_300));
+        assert_eq!(outcome, ConfigOutcome::Statused(control_status(op)));
         assert!(!lane.busy());
     }
 
@@ -1251,7 +1379,8 @@ mod tests {
             1_000,
         ));
         assert_eq!(body[1], SUB_CONFIG_CHALLENGE);
-        let ch = challenge(1, 1, &base, 4);
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body);
         let outcome = done(lane.on_reply(req, &challenge_reply(0x99, &ch), 1_100));
         assert_eq!(outcome, ConfigOutcome::Challenged(ch));
         // Standalone status lookup by operation id.
@@ -1288,10 +1417,11 @@ mod tests {
         );
         assert!(!lane.busy());
         // A permit transfer that is never acked -> Indeterminate (the object
-        // may have assembled without the ack reaching us).
+        // may have assembled without the ack reaching us), carrying the
+        // issued operation_id so the caller can keep querying it.
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         let patch = vec![field(1, ConfigFieldType::U8, &[2])];
-        let (req1, _b1) = emit(lane.submit(
+        let (req1, body1) = emit(lane.submit(
             ConfigRequest::Propose {
                 target: 0x99,
                 config_namespace: 1,
@@ -1302,11 +1432,14 @@ mod tests {
             },
             2_000,
         ));
-        let ch = challenge(1, 1, &base, 4);
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body1);
         let (_req2, _b2) = emit(lane.on_reply(req1, &challenge_reply(0x99, &ch), 2_100));
+        // The propose's operation_id was the lane's second entropy draw
+        // (the standalone challenge above consumed the first).
         assert_eq!(
             lane.poll(2_100 + CONFIG_PERMIT_TIMEOUT_MS),
-            Some(ConfigOutcome::Indeterminate)
+            Some(ConfigOutcome::Indeterminate(Some([0x02; 16])))
         );
     }
 
@@ -1367,7 +1500,7 @@ mod tests {
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         // Patch identical to base -> NO_CHANGE before any permit is sent.
         let patch = vec![field(1, ConfigFieldType::U8, &[1])];
-        let (req1, _b1) = emit(lane.submit(
+        let (req1, body1) = emit(lane.submit(
             ConfigRequest::Propose {
                 target: 0x99,
                 config_namespace: 1,
@@ -1378,9 +1511,249 @@ mod tests {
             },
             1_000,
         ));
-        let ch = challenge(1, 1, &base, 4);
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body1);
         let outcome = done(lane.on_reply(req1, &challenge_reply(0x99, &ch), 1_100));
         assert_eq!(outcome, ConfigOutcome::NoChange);
+        assert!(!lane.busy());
+    }
+
+    #[test]
+    fn challenge_reply_must_echo_the_emitted_query() {
+        let mut lane = make_lane();
+        let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
+        let (req, body) = emit(lane.submit(
+            ConfigRequest::Challenge {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+            },
+            1_000,
+        ));
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body);
+        // A different client_nonce than the query emitted: the body may
+        // decode cleanly and still not answer THIS query — ProtocolError,
+        // never a Challenged verdict and never a ledger seed.
+        let mut foreign = ch.clone();
+        foreign.client_nonce = [0xEE; 16];
+        assert_eq!(
+            done(lane.on_reply(req, &challenge_reply(0x99, &foreign), 1_100)),
+            ConfigOutcome::ProtocolError
+        );
+        assert!(!lane.busy());
+        // A mismatched namespace or schema is the same torn exchange.
+        for (ns, schema) in [(2_u16, 1_u16), (1, 9)] {
+            let mut lane = make_lane();
+            let (req, body) = emit(lane.submit(
+                ConfigRequest::Challenge {
+                    target: 0x99,
+                    config_namespace: ns,
+                    schema,
+                },
+                1_000,
+            ));
+            // The reply claims to answer the query but binds a different
+            // namespace/schema pair than the request carried.
+            let mut ch = challenge(
+                if ns == 2 { 1 } else { ns },
+                if ns == 2 { schema } else { 1 },
+                &base,
+                4,
+            );
+            ch.client_nonce = emitted_nonce(&body);
+            assert_eq!(
+                done(lane.on_reply(req, &challenge_reply(0x99, &ch), 1_100)),
+                ConfigOutcome::ProtocolError
+            );
+        }
+        // A reply naming a different target is equally foreign.
+        let mut lane = make_lane();
+        let (req, body) = emit(lane.submit(
+            ConfigRequest::Challenge {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+            },
+            1_000,
+        ));
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body);
+        assert_eq!(
+            done(lane.on_reply(req, &challenge_reply(0x77, &ch), 1_100)),
+            ConfigOutcome::ProtocolError
+        );
+        // And the echo-bound happy path still resolves Challenged.
+        let mut lane = make_lane();
+        let (req, body) = emit(lane.submit(
+            ConfigRequest::Challenge {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+            },
+            1_000,
+        ));
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body);
+        assert_eq!(
+            done(lane.on_reply(req, &challenge_reply(0x99, &ch), 1_100)),
+            ConfigOutcome::Challenged(ch)
+        );
+    }
+
+    #[test]
+    fn status_reply_must_echo_the_queried_operation() {
+        let mut lane = make_lane();
+        let (req, _body) = emit(lane.submit(
+            ConfigRequest::Status {
+                target: 0x99,
+                config_namespace: 1,
+                operation_id: [0x7B; 16],
+            },
+            1_000,
+        ));
+        // A well-formed status body for a DIFFERENT operation id: it
+        // decodes, it even reports Active — and it is not our query's
+        // verdict.
+        assert_eq!(
+            done(lane.on_reply(req, &status_reply(0x99, &control_status([0x7C; 16])), 1_100)),
+            ConfigOutcome::ProtocolError
+        );
+        assert!(!lane.busy());
+        // Same for a foreign namespace or target.
+        let mut lane = make_lane();
+        let (req, _body) = emit(lane.submit(
+            ConfigRequest::Status {
+                target: 0x99,
+                config_namespace: 1,
+                operation_id: [0x7B; 16],
+            },
+            1_000,
+        ));
+        let mut foreign_ns = control_status([0x7B; 16]);
+        foreign_ns.config_namespace = 0x8000;
+        assert_eq!(
+            done(lane.on_reply(req, &status_reply(0x99, &foreign_ns), 1_100)),
+            ConfigOutcome::ProtocolError
+        );
+        let mut lane = make_lane();
+        let (req, _body) = emit(lane.submit(
+            ConfigRequest::Status {
+                target: 0x99,
+                config_namespace: 1,
+                operation_id: [0x7B; 16],
+            },
+            1_000,
+        ));
+        assert_eq!(
+            done(lane.on_reply(req, &status_reply(0x77, &control_status([0x7B; 16])), 1_100)),
+            ConfigOutcome::ProtocolError
+        );
+    }
+
+    #[test]
+    fn mismatched_lane_reply_clears_the_in_flight_step() {
+        let mut lane = make_lane();
+        let (req, _body) = emit(lane.submit(
+            ConfigRequest::Challenge {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+            },
+            1_000,
+        ));
+        assert!(lane.busy());
+        // A reply naming a lane id that is not in flight resolves the op
+        // ProtocolError AND frees the lane — it must not stay armed behind
+        // an op that already resolved.
+        assert_ne!(req, 999);
+        assert_eq!(
+            lane.on_reply(999, &[1, SUB_CONFIG_CHALLENGE, 0, 0], 1_020),
+            ConfigStep::Done(ConfigOutcome::ProtocolError)
+        );
+        assert!(!lane.busy());
+        // Same rule for a drop notification naming a different lane id.
+        let mut lane = make_lane();
+        let (req, _body) = emit(lane.submit(
+            ConfigRequest::Challenge {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+            },
+            1_000,
+        ));
+        assert_ne!(req, 999);
+        assert_eq!(
+            lane.on_dropped(999),
+            ConfigStep::Done(ConfigOutcome::ProtocolError)
+        );
+        assert!(!lane.busy());
+    }
+
+    #[test]
+    fn refused_note_challenge_evicts_the_cached_record() {
+        let mut issuer = ConfigIssuer::new(DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+        let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
+        let ch = challenge(1, 1, &base, 4);
+        issuer.note_challenge(&ch, 0x99, 1_000).unwrap();
+        let patch = vec![field(1, ConfigFieldType::U8, &[2])];
+        // A refused challenge note must evict the cached record: without
+        // eviction a later propose would sign the stale nonce/revision.
+        let mut bad = ch.clone();
+        bad.target_boot = 0; // nonzero-boot invariant — decode would refuse too
+        assert_eq!(
+            issuer.note_challenge(&bad, 0x99, 2_000),
+            Err(ConfigError::InvalidArgument)
+        );
+        assert_eq!(
+            issuer.propose(0x99, 1, 1, &base, &patch, 0, 2_100, 1, 9, [0x5A; 16]),
+            Err(ConfigError::ChallengeMissing)
+        );
+    }
+
+    #[test]
+    fn client_faults_map_to_honest_refusals() {
+        // Invalid/oversize/malformed client inputs are the same refusal the
+        // endpoint codec emits; a CAS mismatch names a stale base distinctly.
+        assert_eq!(
+            map_issue_error(ConfigError::InvalidArgument),
+            ConfigOutcome::Refused(ConfigOpsResult::Invalid)
+        );
+        assert_eq!(
+            map_issue_error(ConfigError::TooLarge),
+            ConfigOutcome::Refused(ConfigOpsResult::Invalid)
+        );
+        assert_eq!(
+            map_issue_error(ConfigError::Malformed),
+            ConfigOutcome::Refused(ConfigOpsResult::Invalid)
+        );
+        assert_eq!(
+            map_issue_error(ConfigError::Stale),
+            ConfigOutcome::RefusedStale
+        );
+        // A stale base snapshot through the full lane resolves RefusedStale —
+        // the client may re-read the challenge and retry, never a wire fault.
+        let mut lane = make_lane();
+        let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
+        let wrong_base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[9])]).unwrap();
+        let patch = vec![field(1, ConfigFieldType::U8, &[2])];
+        let (req1, body1) = emit(lane.submit(
+            ConfigRequest::Propose {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+                base_snapshot: wrong_base.clone(),
+                patch,
+                apply_budget_ms: 0,
+            },
+            1_000,
+        ));
+        let mut ch = challenge(1, 1, &base, 4);
+        ch.client_nonce = emitted_nonce(&body1);
+        assert_eq!(
+            done(lane.on_reply(req1, &challenge_reply(0x99, &ch), 1_100)),
+            ConfigOutcome::RefusedStale
+        );
         assert!(!lane.busy());
     }
 }

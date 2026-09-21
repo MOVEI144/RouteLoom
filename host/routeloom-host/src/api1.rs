@@ -35,14 +35,19 @@ use crate::send_store::{
 };
 use routeloom_json::{escape_string, Json};
 use routeloom_protocol::host_ops::ConfigOpsResult;
-use routeloom_wire::endpoint::{ConfigField, ConfigFieldType, ConfigPhase, ConfigReason};
+use routeloom_wire::endpoint::{
+    config_namespace_valid, config_tlv_encode, ConfigField, ConfigFieldType, ConfigPhase,
+    ConfigReason,
+};
 use std::sync::Mutex;
 
 use crate::dispatch::ConfigOpRecord;
 
 use crate::SessionInfo;
 
-// contracts.json `ipc.*`
+// contracts.json `ipc.*`: the bound names the WHOLE request line —
+// `API1 ` (5B) + JSON body + newline (1B) — and the socket layer enforces
+// it on the raw bytes before this module ever sees the body.
 pub const REQUEST_MAX_BYTES: usize = 8192;
 pub const RESPONSE_MAX_BYTES: usize = 65536;
 pub const JSON_MAX_DEPTH: usize = 8;
@@ -107,7 +112,11 @@ const LATER_PHASE_METHODS: &[&str] = &[];
 /// Handle one API1 request body (the bytes after `API1 `, newline stripped).
 /// Always returns a complete JSON response document (no trailing newline).
 pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String {
-    if body.len() >= REQUEST_MAX_BYTES {
+    // The advertised bound covers the whole line: `API1 ` + body + '\n'.
+    // The body alone therefore may not exceed REQUEST_MAX_BYTES - 6 —
+    // an oversized line the socket layer would have refused must get the
+    // same answer from a direct call, never a different one.
+    if body.len() + 6 > REQUEST_MAX_BYTES {
         return error_response(
             None,
             &ApiError::simple("INVALID_REQUEST", "request too large"),
@@ -1191,20 +1200,29 @@ fn config_op_token(op_id: u64) -> String {
     format!("cfg{op_id:016x}")
 }
 
+/// `config_op` accepts exactly the canonical token `config_op_token`
+/// mints: `cfg` + 16 lowercase hex digits. Bare hex, short forms and any
+/// other spelling are rejected, never trimmed into a valid id.
 fn parse_config_op(text: &str) -> Option<u64> {
-    let hex = text.strip_prefix("cfg").unwrap_or(text);
-    if hex.is_empty() || hex.len() > 16 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let hex = text.strip_prefix("cfg")?;
+    if hex.len() != 16
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     u64::from_str_radix(hex, 16).ok().filter(|&v| v != 0)
 }
 
-/// A u16 field accepts a JSON number or a hex/decimal string.
+/// A u16 field accepts a JSON number or a string. String parsing follows
+/// routeloomctl's rule exactly: only an explicit `0x`/`0X` prefix means
+/// hexadecimal — an unprefixed "10" is decimal 10, never 16.
 fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
     let invalid = || {
         ApiError::simple(
             "INVALID_ARGUMENT",
-            &format!("{name} must be a u16 (number or hex string)"),
+            &format!("{name} must be a u16 (number, decimal, or 0x-hex string)"),
         )
     };
     match value {
@@ -1217,9 +1235,10 @@ fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
                 return u16::try_from(n).map_err(|_| invalid());
             }
             if let Some(text) = json.as_str() {
-                return u16::from_str_radix(text.trim_start_matches("0x"), 16)
-                    .or_else(|_| text.parse::<u16>())
-                    .map_err(|_| invalid());
+                return match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    Some(hex) => u16::from_str_radix(hex, 16).map_err(|_| invalid()),
+                    None => text.parse::<u16>().map_err(|_| invalid()),
+                };
             }
             Err(invalid())
         }
@@ -1257,6 +1276,21 @@ fn config_denied() -> ApiError {
     )
 }
 
+/// `config_namespace` must name a registered namespace — SDK `1` or an
+/// application `0x8000..=0xFFFE`. The endpoint codecs refuse anything
+/// else, so the API refuses it at admission with INVALID_ARGUMENT rather
+/// than queueing a request the wire cannot carry.
+fn config_ns_field(value: Option<&Json>) -> Result<u16, ApiError> {
+    let ns = u16_field(value, "config_namespace")?;
+    if !config_namespace_valid(ns) {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "config_namespace must be 1 (SDK) or 0x8000-0xfffe (application)",
+        ));
+    }
+    Ok(ns)
+}
+
 /// `config.challenge` params: `{network, target, config_namespace, schema}`.
 /// Issues a ChallengeQuery for (target, namespace); the ControlChallenge body
 /// — the freshness + CAS inputs a propose consumes — is the outcome read via
@@ -1277,7 +1311,7 @@ fn config_challenge<S: OperationStore>(
         }
     }
     let (network, target) = config_target_params(params)?;
-    let config_namespace = u16_field(params.get("config_namespace"), "config_namespace")?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
     let schema = u16_field(params.get("schema"), "schema")?;
     if !config_permit(ctx, network) {
         return Err(config_denied());
@@ -1315,7 +1349,7 @@ fn config_status<S: OperationStore>(
         }
     }
     let (network, target) = config_target_params(params)?;
-    let config_namespace = u16_field(params.get("config_namespace"), "config_namespace")?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
     let Some(op_text) = params.get("operation_id").and_then(Json::as_str) else {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
@@ -1373,7 +1407,7 @@ fn config_propose<S: OperationStore>(
         }
     }
     let (network, target) = config_target_params(params)?;
-    let config_namespace = u16_field(params.get("config_namespace"), "config_namespace")?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
     let schema = u16_field(params.get("schema"), "schema")?;
     let Some(base_text) = params.get("base_snapshot").and_then(Json::as_str) else {
         return Err(ApiError::simple(
@@ -1490,12 +1524,11 @@ fn config_target_params(params: &Json) -> Result<(u64, u64), ApiError> {
             "target must be a 16-hex node id",
         ));
     };
-    let Some(target) = parse_hex_u64(target_text) else {
-        return Err(ApiError::simple(
-            "INVALID_ARGUMENT",
-            "target must be a 16-hex node id",
-        ));
-    };
+    // Reserved wire addresses (0 and u64::MAX) are not config targets —
+    // same rule canonical::parse_node_hex applies to messages.submit and
+    // gateway.resolve.
+    let target = canonical::parse_node_hex(target_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
     Ok((network, target))
 }
 
@@ -1557,6 +1590,14 @@ fn config_patch_fields(value: Option<&Json>) -> Result<Vec<ConfigField>, ApiErro
     fields.sort_by_key(|f| f.field_id);
     if fields.windows(2).any(|w| w[0].field_id == w[1].field_id) {
         return Err(invalid("patch field_ids must be unique"));
+    }
+    // The admission check IS the wire check: the same validator
+    // `config_command_encode` runs — exact type/value lengths (bool/u8
+    // = 1B, u32 = 4B), bool values 0|1, strictly ascending ids and the
+    // 512-byte patch total — so a patch the wire cannot carry is refused
+    // here with INVALID_ARGUMENT, never queued to fail downstream.
+    if let Err(error) = config_tlv_encode(&fields) {
+        return Err(invalid(error.detail));
     }
     Ok(fields)
 }
@@ -1632,6 +1673,17 @@ fn config_ops_result_name(result: ConfigOpsResult) -> &'static str {
     }
 }
 
+/// The device operation_id an outcome carries, rendered for `config.get`:
+/// on outcomes where the device-side operation may still be unresolved
+/// (permit assembled, indeterminate transfer) the caller needs the id to
+/// issue `config.status` against it. RAM-only records keep it only while
+/// the record lives — a daemon restart forgets both.
+fn operation_id_detail(operation_id: Option<[u8; 16]>) -> String {
+    operation_id.map_or_else(String::new, |id| {
+        format!(",\"operation_id\":\"{}\"", hex_lower(&id))
+    })
+}
+
 /// Serialize a config op record for `config.get`. The `state` names the
 /// honest outcome — PERMIT_ASSEMBLED is reported as assembled, never ACTIVE;
 /// only the Status body's phase/reason is a real config verdict.
@@ -1675,14 +1727,19 @@ fn config_outcome_json(record: &ConfigOpRecord) -> String {
                         hex_lower(&s.active_hash)
                     ),
                 ),
-                ConfigOutcome::PermitAssembled => ("PERMIT_ASSEMBLED", String::new()),
+                ConfigOutcome::PermitAssembled(op) => {
+                    ("PERMIT_ASSEMBLED", operation_id_detail(*op))
+                }
                 ConfigOutcome::NoChange => ("NO_CHANGE", String::new()),
                 ConfigOutcome::Refused(r) => (
                     "REFUSED",
                     format!(",\"result\":\"{}\"", config_ops_result_name(*r)),
                 ),
+                ConfigOutcome::RefusedStale => ("REFUSED", ",\"result\":\"STALE\"".to_string()),
                 ConfigOutcome::Timeout => ("TIMEOUT", String::new()),
-                ConfigOutcome::Indeterminate => ("INDETERMINATE", String::new()),
+                ConfigOutcome::Indeterminate(op) => {
+                    ("INDETERMINATE", operation_id_detail(*op))
+                }
                 ConfigOutcome::ProtocolError => ("PROTOCOL_ERROR", String::new()),
             };
             format!(
@@ -3860,9 +3917,9 @@ mod tests {
     }
 
     const CFG_TARGET: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\"";
-    const CFG_CHALLENGE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"schema\":1";
-    const CFG_STATUS_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"operation_id\":\"00112233445566778899aabbccddeeff\"";
-    const CFG_PROPOSE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000002a\"}]";
+    const CFG_CHALLENGE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1";
+    const CFG_STATUS_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"operation_id\":\"00112233445566778899aabbccddeeff\"";
+    const CFG_PROPOSE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000002a\"}]";
 
     #[test]
     fn config_challenge_submits_a_pending_op() {
@@ -3899,7 +3956,7 @@ mod tests {
         );
         assert!(get.contains("\"ok\":true"), "{get}");
         assert!(get.contains("\"state\":\"PENDING\""), "{get}");
-        assert!(get.contains("\"op\":\"challenge ns=7 schema=1\""), "{get}");
+        assert!(get.contains("\"op\":\"challenge ns=1 schema=1\""), "{get}");
         assert!(get.contains("\"network\":\"0000000000000001\""), "{get}");
     }
 
@@ -4040,7 +4097,7 @@ mod tests {
             &handle(
                 cfg_req(
                     "config.challenge",
-                    "\"target\":\"0000000000000009\",\"config_namespace\":7,\"schema\":1",
+                    "\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1",
                 )
                 .as_bytes(),
                 &c,
@@ -4048,7 +4105,7 @@ mod tests {
             "INVALID_ARGUMENT",
         );
         // Bad target hex.
-        let bad = "\"network\":\"0000000000000001\",\"target\":\"zz\",\"config_namespace\":7,\"schema\":1";
+        let bad = "\"network\":\"0000000000000001\",\"target\":\"zz\",\"config_namespace\":1,\"schema\":1";
         assert_error_schema(
             &handle(cfg_req("config.challenge", bad).as_bytes(), &c),
             "INVALID_ARGUMENT",
@@ -4058,7 +4115,7 @@ mod tests {
             &handle(
                 cfg_req(
                     "config.status",
-                    "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":7,\"operation_id\":\"short\"",
+                    "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"operation_id\":\"short\"",
                 )
                 .as_bytes(),
                 &c,
@@ -4072,7 +4129,7 @@ mod tests {
             "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"00\"},{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"01\"}]",
         ] {
             let params = format!(
-                "{CFG_TARGET},\"config_namespace\":7,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"
+                "{CFG_TARGET},\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"
             );
             assert_error_schema(
                 &handle(cfg_req("config.propose", &params).as_bytes(), &c),
@@ -4147,7 +4204,7 @@ mod tests {
         // claimed ACTIVE, and INDETERMINATE/TIMEOUT stay distinct.
         let base = ConfigOpRecord {
             op_id: 7,
-            summary: "propose ns=7".to_string(),
+            summary: "propose ns=1".to_string(),
             network: 1,
             target: 9,
             outcome: None,
@@ -4157,10 +4214,10 @@ mod tests {
         let pending = config_outcome_json(&base);
         assert!(pending.contains("\"state\":\"PENDING\""), "{pending}");
         for (outcome, want) in [
-            (ConfigOutcome::PermitAssembled, "PERMIT_ASSEMBLED"),
+            (ConfigOutcome::PermitAssembled(None), "PERMIT_ASSEMBLED"),
             (ConfigOutcome::NoChange, "NO_CHANGE"),
             (ConfigOutcome::Timeout, "TIMEOUT"),
-            (ConfigOutcome::Indeterminate, "INDETERMINATE"),
+            (ConfigOutcome::Indeterminate(None), "INDETERMINATE"),
             (ConfigOutcome::ProtocolError, "PROTOCOL_ERROR"),
         ] {
             let json = config_outcome_json(&ConfigOpRecord {
@@ -4170,6 +4227,23 @@ mod tests {
             });
             assert!(json.contains(&format!("\"state\":\"{want}\"")), "{json}");
             assert!(!json.contains("ACTIVE"), "{json}");
+            // No issued operation id: the field stays absent, never null.
+            assert!(!json.contains("operation_id"), "{json}");
+        }
+        // Unresolved outcomes name the device operation they may still hold.
+        for outcome in [
+            ConfigOutcome::PermitAssembled(Some([0x42; 16])),
+            ConfigOutcome::Indeterminate(Some([0x42; 16])),
+        ] {
+            let json = config_outcome_json(&ConfigOpRecord {
+                outcome: Some(outcome),
+                resolved_ms: Some(150),
+                ..base.clone()
+            });
+            assert!(
+                json.contains("\"operation_id\":\"42424242424242424242424242424242\""),
+                "{json}"
+            );
         }
         let refused = config_outcome_json(&ConfigOpRecord {
             outcome: Some(ConfigOutcome::Refused(ConfigOpsResult::Denied)),
@@ -4178,5 +4252,231 @@ mod tests {
         });
         assert!(refused.contains("\"state\":\"REFUSED\""), "{refused}");
         assert!(refused.contains("\"result\":\"DENIED\""), "{refused}");
+        // The issuer-side stale-CAS refusal is a distinct refused result.
+        let stale = config_outcome_json(&ConfigOpRecord {
+            outcome: Some(ConfigOutcome::RefusedStale),
+            resolved_ms: Some(150),
+            ..base.clone()
+        });
+        assert!(stale.contains("\"state\":\"REFUSED\""), "{stale}");
+        assert!(stale.contains("\"result\":\"STALE\""), "{stale}");
+    }
+
+    #[test]
+    fn u16_field_parses_decimal_unless_0x_prefixed() {
+        let num = |v: u64| Json::Number(v.to_string());
+        let text = |s: &str| Json::String(s.to_string());
+        let get = |v: &Json| u16_field(Some(v), "x").ok();
+        // Numbers pass through; strings follow routeloomctl: only an
+        // explicit 0x/0X prefix means hex — "10" is decimal 10, not 16.
+        assert_eq!(get(&num(42)), Some(42));
+        assert_eq!(get(&text("10")), Some(10));
+        assert_eq!(get(&text("0x10")), Some(16));
+        assert_eq!(get(&text("0X1f")), Some(31));
+        assert_eq!(get(&text("010")), Some(10));
+        assert_eq!(get(&text("65535")), Some(65535));
+        assert_eq!(get(&text("0xffff")), Some(65535));
+        for bad in [
+            num(65_536),
+            text("0x"),
+            text("0x10000"),
+            text("zz"),
+            text(""),
+        ] {
+            assert_eq!(get(&bad), None, "{bad:?}");
+        }
+        // "-1" parses as decimal, fails the u16 range — never as hex.
+        assert_eq!(get(&text("-1")), None);
+    }
+
+    #[test]
+    fn parse_config_op_requires_the_canonical_token() {
+        assert_eq!(parse_config_op("cfg0000000000000001"), Some(1));
+        assert_eq!(parse_config_op("cfgffffffffffffffff"), Some(u64::MAX));
+        // Bare hex, short forms, missing prefix, zero id, uppercase —
+        // none of them name an op.
+        for bad in [
+            "0000000000000001",
+            "cfg1",
+            "cfg",
+            "cfg0000000000000000",
+            "cfg00000000000000001",
+            "cfgABCDEFABCDEFABCD",
+            "op0000000000000001",
+            "cfg-000000000000001",
+        ] {
+            assert_eq!(parse_config_op(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn request_body_bound_counts_the_whole_line() {
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        // The advertised 8192 bound covers `API1 ` + body + '\n': a body
+        // of 8186 is the largest that fits the line; 8187 is too large.
+        let body = vec![b'x'; REQUEST_MAX_BYTES - 6];
+        let response = handle(&body, &c);
+        assert!(!response.contains("request too large"), "{response}");
+        assert_error_schema(&response, "INVALID_REQUEST");
+        let body = vec![b'x'; REQUEST_MAX_BYTES - 5];
+        let response = handle(&body, &c);
+        assert_error_schema(&response, "INVALID_REQUEST");
+        assert!(response.contains("request too large"), "{response}");
+    }
+
+    #[test]
+    fn config_verbs_reject_reserved_target_ids() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        // Node ids 0 and u64::MAX are reserved wire addresses (01 §6) —
+        // config targets follow the same rule as messages.submit.
+        for target in ["0000000000000000", "ffffffffffffffff"] {
+            let params = format!(
+                "\"network\":\"0000000000000001\",\"target\":\"{target}\",\"config_namespace\":1,\"schema\":1"
+            );
+            assert_error_schema(
+                &handle(cfg_req("config.challenge", &params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+    }
+
+    #[test]
+    fn config_namespace_must_be_registered() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        // 2 is not a namespace (SDK=1, application 0x8000-0xfffe); the
+        // wire codecs refuse it, so the API refuses it up front.
+        for (method, params) in [
+            (
+                "config.challenge",
+                "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":2,\"schema\":1",
+            ),
+            (
+                "config.status",
+                "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":2,\"operation_id\":\"00112233445566778899aabbccddeeff\"",
+            ),
+            (
+                "config.propose",
+                "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":2,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"01\"}]",
+            ),
+        ] {
+            assert_error_schema(
+                &handle(cfg_req(method, params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+        // The application range's own bounds hold too.
+        for ns in [0x7fff_u16, 0xffff_u16] {
+            let params = format!("{CFG_TARGET},\"config_namespace\":{ns},\"schema\":1");
+            assert_error_schema(
+                &handle(cfg_req("config.challenge", &params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+    }
+
+    #[test]
+    fn config_patch_must_be_wire_encodable() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let propose = |patch: &str| {
+            let params = format!(
+                "{CFG_TARGET},\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"
+            );
+            handle(cfg_req("config.propose", &params).as_bytes(), &c)
+        };
+        // Exact type/value lengths: bool/u8 = 1 byte, u32 = 4 bytes.
+        for patch in [
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"bool\",\"value\":\"02\"}]", // bool not 0|1
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"bool\",\"value\":\"0000\"}]", // bool len 2
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"0001\"}]", // u8 len 2
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0001\"}]", // u32 len 2
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000000001\"}]", // u32 len 5
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"\"}]", // u8 empty
+        ] {
+            assert_error_schema(&propose(patch), "INVALID_ARGUMENT");
+        }
+        // The 512-byte patch total is a wire bound: each field costs
+        // 5 + value_len. 6 x (5+96) = 606 > 512 must refuse at the API.
+        let big = format!(
+            "\"patch\":[{}]",
+            (0..6_u16)
+                .map(|i| format!(
+                    "{{\"field_id\":{},\"field_type\":\"bytes\",\"value\":\"{}\"}}",
+                    i + 1,
+                    "ab".repeat(96)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_error_schema(&propose(&big), "INVALID_ARGUMENT");
+        // A maximal legal patch is accepted (16 x u8: 16*(5+1)=96 <= 512).
+        let ok = format!(
+            "\"patch\":[{}]",
+            (0..16_u16)
+                .map(|i| format!(
+                    "{{\"field_id\":{},\"field_type\":\"u8\",\"value\":\"{:02x}\"}}",
+                    i + 1,
+                    i
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let response = propose(&ok);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        // And bytes fields accept 0-length values on the wire.
+        let response =
+            propose("\"patch\":[{\"field_id\":1,\"field_type\":\"bytes\",\"value\":\"\"}]");
+        assert!(response.contains("\"ok\":true"), "{response}");
     }
 }
