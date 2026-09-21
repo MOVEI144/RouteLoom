@@ -546,6 +546,10 @@ class MeshNode {
   // Dedup capacity surface (sdk-completion/02 §2.4): saturating admission,
   // refusal and eviction counters — every forced reclaim/refusal is visible.
   const DedupStats& dedup_stats() const noexcept { return dedup_stats_; }
+  // Live dedup residency (records currently occupying the fixed pool).
+  // Read-only test/diagnostic surface for the capacity invariants of
+  // sdk-completion/02 §2.5 — always <= kDedupCapacity (64) by construction.
+  std::size_t dedup_resident() const noexcept { return dedup_.size(); }
   // Current per-peer in-flight window (1..4) used by the dispatch gate.
   std::uint8_t peer_tx_window(NodeId peer) const noexcept;
   // Marks a peer as implementing the Busy(20) feedback payload. Until
@@ -806,7 +810,7 @@ class MeshNode {
     std::uint8_t failure_replays{0};
     MonotonicMs last_replay_ms{0};
   };
-  // sdk-completion/02 §2.4 budget: 160 B measured on host after the phase +
+  // sdk-completion/02 §2.4 budget: 152 B measured on host after the phase +
   // first_seen_ms addition (144 B before). Xtensa may differ by alignment
   // only — a larger entry shrinks real capacity silently, so growth is a
   // deliberate, documented change.

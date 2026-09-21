@@ -174,3 +174,41 @@ target_include_directories(routeloom_trust_view_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_trust_view_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_trust_view_tests COMMAND routeloom_trust_view_tests)
+
+# State-machine property tests (issue #19): deterministic seeded random op
+# sequences over SimNetwork asserting delivery/dedup invariants.
+add_executable(routeloom_property_tests test_properties.cpp)
+target_link_libraries(routeloom_property_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_property_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_property_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_property_tests COMMAND routeloom_property_tests)
+
+# APPLIED delivery (sdk-completion/01-applied-delivery.md): APP_RESULT body
+# codecs, origin/terminal state machines, bounded QUERY recovery, replay and
+# refusal discipline, multi-hop traversal.
+add_executable(routeloom_applied_tests test_applied.cpp)
+target_link_libraries(routeloom_applied_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_applied_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_applied_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_applied_tests COMMAND routeloom_applied_tests)
+
+# Cross-cutting fault-injection tests (issue #20): storage corruption/power
+# cuts on counter/replay/trust persistence, clock faults, and bounded-pool
+# saturation. Needs ${CMAKE_CURRENT_SOURCE_DIR} for the shared fixtures and
+# ROUTELOOM_UECC_DIR for test_provisioning.hpp's P-256 key generation.
+add_executable(routeloom_fault_tests test_fault_injection.cpp)
+target_link_libraries(routeloom_fault_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_fault_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_fault_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_fault_tests COMMAND routeloom_fault_tests)
+
+# Dedup capacity classes (sdk-completion/02-dedup-capacity.md, issue #9):
+# phase births/eviction order/reserve/upstream cap/evidence cap + replay,
+# retention bounds, class-(a) delivery eviction, and continuous-send
+# below/above capacity with honest saturation.
+add_executable(routeloom_dedup_tests test_dedup.cpp)
+target_link_libraries(routeloom_dedup_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_dedup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_dedup_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_dedup_tests COMMAND routeloom_dedup_tests)

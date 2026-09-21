@@ -486,7 +486,24 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   auto* record = find_neighbor(neighbor);
   if (record == nullptr) {
     record = neighbors_.allocate();
-    if (record == nullptr) return Status::error(StatusCode::NoCapacity, "neighbor table full");
+    if (record == nullptr) {
+      // Tombstoned records only remember a departed peer's last-seen
+      // generation — soft state. Reclaim one before refusing, or churn
+      // through more than the table capacity in distinct peers permanently
+      // exhausts the pool (issue #20).
+      record = neighbors_.find(
+          [](const Neighbor& value) { return !value.active; });
+      if (record != nullptr) {
+        // A different identity inherits this slot: the per-peer feedback
+        // ordering state is anti-replay continuity for THAT peer only and
+        // must not transfer.
+        record->last_feedback_seq = kNoFeedbackSeq;
+        record->feedback_seen = false;
+      }
+    }
+    if (record == nullptr) {
+      return Status::error(StatusCode::NoCapacity, "neighbor table full");
+    }
     record->generation = 0;  // last-seen origin generation; survives re-adds
   }
   record->node = neighbor;
@@ -1601,8 +1618,11 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
   while (TxJob* queued = scheduler_.select(now_ms, *this)) {
     if (queued->owner == JobOwner::OriginDelivery) {
       auto* delivery = find_delivery(queued->ack.key.id);
-      if (delivery == nullptr || delivery->state == DeliveryState::CancelledBeforeTx ||
-          delivery->state == DeliveryState::Expired || delivery->state == DeliveryState::Failed) {
+      // A queued retry for an already-terminal delivery is stale work:
+      // dispatching it would burn airtime on a duplicate the receiver's
+      // dedup pin suppresses anyway, and its outcome must never touch the
+      // settled verdict. Delivered/Indeterminate are terminal too.
+      if (delivery == nullptr || sleep_terminal(delivery->state)) {
         TxJob discarded{};
         scheduler_.take_selected(discarded);
         continue;
@@ -1758,7 +1778,11 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   awaiting->expires_at_ms =
       now_ms + (busy_deferred ? busy_retry_ms : config_.hop_accept_timeout_ms);
   if (awaiting->job.owner == JobOwner::OriginDelivery) {
-    if (auto* delivery = find_delivery(awaiting->job.ack.key.id)) {
+    if (auto* delivery = find_delivery(awaiting->job.ack.key.id);
+        delivery != nullptr && !sleep_terminal(delivery->state)) {
+      // A receipt/RESULT may have settled the verdict while this frame was
+      // with the driver — the hop-accept wait of its stale job must not
+      // demote a terminal state.
       set_delivery_state(*delivery, DeliveryState::WaitingForHopAccept, "HOP_ACCEPT_PENDING");
     }
   }
@@ -1795,11 +1819,10 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     set_delivery_state(*delivery, DeliveryState::Delivered, "TX_MAC_DONE");
     return;
   }
-  // APPLIED: a verified RESULT may have resolved the delivery while its DATA
-  // job was still completing — the receipt wait must never demote a terminal
-  // verdict (sdk-completion/01 §1.3).
-  if (delivery->options.delivery == DeliveryClass::Applied &&
-      sleep_terminal(delivery->state)) {
+  // A verified RESULT/END_RECEIPT may have resolved the delivery while its
+  // DATA job was still completing — for EVERY class the receipt wait must
+  // never demote a terminal verdict (sdk-completion/01 §1.3).
+  if (sleep_terminal(delivery->state)) {
     return;
   }
   delivery->next_round_at_ms = std::min(
@@ -1833,10 +1856,17 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   if (job.owner != JobOwner::OriginDelivery) return;
   auto* delivery = find_delivery(job.ack.key.id);
   if (delivery == nullptr) return;
+  // A stale DATA job (queued/dispatched before the verdict landed — e.g. a
+  // retry round in flight when a late END_RECEIPT resolved the delivery)
+  // must never demote a terminal verdict: Delivered cannot fall back to
+  // WaitingForRoute/Failed on evidence that predates the resolution.
+  if (sleep_terminal(delivery->state)) {
+    return;
+  }
   // APPLIED: a stale DATA job failure must not cancel a result wait already
   // in progress, and must never demote a stored verdict (01 §1.5).
   if (delivery->options.delivery == DeliveryClass::Applied &&
-      (delivery->app_phase != 0 || sleep_terminal(delivery->state))) {
+      delivery->app_phase != 0) {
     return;
   }
   if ((delivery->options.delivery == DeliveryClass::Reliable ||
@@ -2649,7 +2679,11 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
       }
       // A receipt for an already-committed/expired APPLIED delivery is
       // idempotent — dedup-suppressed per round, ignored otherwise.
-    } else {
+    } else if (delivery->state != DeliveryState::Delivered) {
+      // Delivered is absorbing: a late receipt is verified evidence that may
+      // still promote Failed/Expired/Indeterminate, but it must never
+      // re-fire a terminal verdict (e.g. a BestEffort TX_MAC_DONE) — a
+      // second on_delivery for the same id would double-count completion.
       set_delivery_state(*delivery, DeliveryState::Delivered, "END_RECEIVED");
     }
   }
@@ -5131,23 +5165,46 @@ void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {
   neighbors_.for_each([&](Neighbor& neighbor) {
     if (!neighbor.active) return;
     // Decaying observation window (03 §3): halve the exchange counters per
-    // elapsed window — a bounded aggregate, never raw samples.
-    while (neighbor.exchange_window_ms != 0 &&
-           now_ms - neighbor.exchange_window_ms >= kObservationWindowMs) {
-      neighbor.exchange_work >>= 1;
-      neighbor.exchange_accepts >>= 1;
-      neighbor.exchange_window_ms += kObservationWindowMs;
-      // Window roll clears the dirty flag (§3.3): a bounded suppression of
-      // metric improvement, never a latch.
-      neighbor.metric_window_dirty = false;
+    // elapsed window — a bounded aggregate, never raw samples. The elapsed
+    // count is computed, not iterated: the subtraction is modulo-2^64, so a
+    // backwards or jumping clock would otherwise read as ~2^63 elapsed
+    // windows and a per-window loop could never return. A u32 halves to
+    // zero within 32 shifts, so the count saturates; advancing the anchor
+    // by the full elapsed span lands it just under `now_ms` and the next
+    // window rolls normally.
+    if (neighbor.exchange_window_ms != 0) {
+      const std::uint64_t elapsed_windows =
+          (now_ms - neighbor.exchange_window_ms) / kObservationWindowMs;
+      if (elapsed_windows != 0) {
+        if (elapsed_windows >= 32) {
+          neighbor.exchange_work = 0;
+          neighbor.exchange_accepts = 0;
+        } else {
+          neighbor.exchange_work >>= static_cast<unsigned>(elapsed_windows);
+          neighbor.exchange_accepts >>= static_cast<unsigned>(elapsed_windows);
+        }
+        neighbor.exchange_window_ms += kObservationWindowMs * elapsed_windows;
+        // Window roll clears the dirty flag (§3.3): a bounded suppression of
+        // metric improvement, never a latch.
+        neighbor.metric_window_dirty = false;
+      }
     }
     // The sojourn EWMA decays on its own window anchor (§3.4): sparse fresh
     // samples must not keep re-exposing a stale-inflated average — a quiet
-    // queue after a burst converges within a few windows, not minutes.
-    while (neighbor.sojourn_window_ms != 0 &&
-           now_ms - neighbor.sojourn_window_ms >= kObservationWindowMs) {
-      neighbor.queue_sojourn_ewma_ms >>= 1;
-      neighbor.sojourn_window_ms += kObservationWindowMs;
+    // queue after a burst converges within a few windows, not minutes. Same
+    // computed-roll collapse as the exchange window above.
+    if (neighbor.sojourn_window_ms != 0) {
+      const std::uint64_t elapsed_windows =
+          (now_ms - neighbor.sojourn_window_ms) / kObservationWindowMs;
+      if (elapsed_windows != 0) {
+        if (elapsed_windows >= 32) {
+          neighbor.queue_sojourn_ewma_ms = 0;
+        } else {
+          neighbor.queue_sojourn_ewma_ms >>=
+              static_cast<unsigned>(elapsed_windows);
+        }
+        neighbor.sojourn_window_ms += kObservationWindowMs * elapsed_windows;
+      }
     }
     // Feedback TTL (03 §3/§5): sustained-busy survives only on fresh
     // authenticated feedback; silence past the TTL releases it so an old
