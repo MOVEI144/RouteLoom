@@ -78,6 +78,9 @@ class DevConfigAuthorityVerifier final : public ConfigAuthorityVerifier {
 
  private:
   ByteView dev_key_{};
+  // Decode scratch — a stack local would cost ~1.8 KiB of the Owner task's
+  // 8 KiB stack on top of the reassembly/submit call chain.
+  endpoint::ConfigCommand command_{};
 };
 
 }  // namespace routeloom

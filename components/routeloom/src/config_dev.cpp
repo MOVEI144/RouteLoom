@@ -16,32 +16,20 @@ ByteView dev_domain() noexcept {
       sizeof(kConfigDevPermitDomain)};
 }
 
-// HMAC input = domain bytes (incl. NUL) || aad || canonical.
-Status build_tag_input(ByteView aad, ByteView canonical,
-                       ByteBuffer<kConfigPermitObjectMax>& input) noexcept {
-  ByteWriter writer(input.writable());
-  Status status = writer.write_bytes(dev_domain());
-  if (status.ok()) status = writer.write_bytes(aad);
-  if (status.ok()) status = writer.write_bytes(canonical);
-  if (!status.ok()) return status;
-  input.size = writer.size();
-  return Status::success();
-}
-
 }  // namespace
 
+// HMAC input = domain bytes (incl. NUL) || aad || canonical, streamed into
+// the MAC — a staged copy would cost a kConfigPermitObjectMax stack frame.
 Status config_dev_permit_tag(
     ByteView dev_key, ByteView aad, ByteView canonical,
     std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept {
   if (dev_key.size == 0 || aad.size != kConfigPermitAadSize ||
-      canonical.size == 0) {
+      canonical.size == 0 ||
+      dev_domain().size + aad.size + canonical.size > kConfigPermitObjectMax) {
     return Status::error(StatusCode::InvalidArgument, "config dev tag input");
   }
-  ByteBuffer<kConfigPermitObjectMax> input{};
-  const Status built = build_tag_input(aad, canonical, input);
-  if (!built.ok()) return built;
   ScopeDigest mac{};
-  hmac_sha256(dev_key, input.view(), mac);
+  hmac_sha256(dev_key, dev_domain(), aad, canonical, mac);
   std::memcpy(out.data(), mac.data(), kConfigDevPermitTagSize);
   return Status::success();
 }
@@ -106,13 +94,12 @@ Status DevConfigAuthorityVerifier::verify_permit(
   // The envelope is authentic; decode the canonical command and apply the
   // identity policy. A decode failure under a valid MAC means a broken peer
   // (reported as an error, not denied).
-  endpoint::ConfigCommand command{};
-  const Status decoded = endpoint::config_command_decode(canonical, command);
+  const Status decoded = endpoint::config_command_decode(canonical, command_);
   if (!decoded.ok()) return decoded;
-  if (command.network != context.network || command.target != context.target ||
-      command.config_namespace != context.config_namespace ||
-      command.authority != context.authorized_issuer ||
-      command.authority_generation != context.authority_generation) {
+  if (command_.network != context.network || command_.target != context.target ||
+      command_.config_namespace != context.config_namespace ||
+      command_.authority != context.authorized_issuer ||
+      command_.authority_generation != context.authority_generation) {
     return Status::success();  // not the configured authority: denied
   }
   if (canonical.size > payload.bytes.size()) {

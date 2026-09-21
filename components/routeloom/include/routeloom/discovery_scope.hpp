@@ -91,6 +91,10 @@ class Sha256 {
 
 void sha256(ByteView input, ScopeDigest& out) noexcept;
 void hmac_sha256(ByteView key, ByteView input, ScopeDigest& out) noexcept;
+// Multi-part variant: MACs part_a||part_b||part_c without a staging buffer
+// (callers on 8 KiB task stacks cannot afford a kConfigPermitObjectMax local).
+void hmac_sha256(ByteView key, ByteView part_a, ByteView part_b, ByteView part_c,
+                 ScopeDigest& out) noexcept;
 // Fixed-time whole-buffer compare; different lengths never equal.
 bool constant_time_equal(ByteView a, ByteView b) noexcept;
 

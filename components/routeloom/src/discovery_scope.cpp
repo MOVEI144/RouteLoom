@@ -150,6 +150,12 @@ void sha256(const ByteView input, ScopeDigest& out) noexcept {
 
 void hmac_sha256(const ByteView key, const ByteView input,
                  ScopeDigest& out) noexcept {
+  hmac_sha256(key, input, ByteView{}, ByteView{}, out);
+}
+
+void hmac_sha256(const ByteView key, const ByteView part_a,
+                 const ByteView part_b, const ByteView part_c,
+                 ScopeDigest& out) noexcept {
   std::array<std::uint8_t, 64> pad_key{};
   if (key.size > 64) {
     ScopeDigest hashed{};
@@ -164,7 +170,9 @@ void hmac_sha256(const ByteView key, const ByteView input,
   {
     Sha256 hash;
     hash.update(ByteView{pad.data(), pad.size()});
-    hash.update(input);
+    hash.update(part_a);
+    hash.update(part_b);
+    hash.update(part_c);
     hash.finish(inner);
   }
   for (std::size_t i = 0; i < pad.size(); ++i) pad[i] = pad_key[i] ^ 0x5c;
