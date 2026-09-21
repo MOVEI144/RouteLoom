@@ -107,9 +107,9 @@ Status scope_binding_encode(const ScopeBindingInput& input,
 // responder MAC 6B | SHA256(discover) 32B | RLD1 header 44B | body prefix 44B.
 // The domain string (with trailing NUL) is prepended by the helpers.
 constexpr std::size_t kScopeDiscoverMacInputSize =
-    sizeof(kScopeDiscoverDomain) + 8 + 6 + 6 + 44 + 8;   // 100
+    sizeof(kScopeDiscoverDomain) + 8 + 6 + 6 + 44 + 8;   // 98
 constexpr std::size_t kScopeOfferMacInputSize =
-    sizeof(kScopeOfferDomain) + 8 + 6 + 6 + 32 + 44 + 44;  // 167
+    sizeof(kScopeOfferDomain) + 8 + 6 + 6 + 32 + 44 + 44;  // 163
 Status scope_discover_mac_input(NetworkId network, MacAddress requester,
                                 MacAddress destination, ByteView rld1_header,
                                 ByteView body_prefix,

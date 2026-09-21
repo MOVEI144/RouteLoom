@@ -34,7 +34,7 @@ use crate::canonical::sha256;
 //            canonical)[..16]
 pub const CONFIG_PERMIT_DOMAIN: &[u8] = b"RouteLoom/config-permit/v1\0";
 pub const CONFIG_DEV_PERMIT_DOMAIN: &[u8] = b"RouteLoom/config-permit-dev/v1\0";
-pub const CONFIG_PERMIT_AAD_SIZE: usize = CONFIG_PERMIT_DOMAIN.len() + 8 + 8 + 2; // 44
+pub const CONFIG_PERMIT_AAD_SIZE: usize = CONFIG_PERMIT_DOMAIN.len() + 8 + 8 + 2; // 45
 pub const CONFIG_DEV_PERMIT_TAG_SIZE: usize = 16;
 pub const CONFIG_PERMIT_OBJECT_MAX: usize = 1024;
 /// Minimum dev-permit envelope (aad || shortest RCC1 header || tag). Only the
@@ -110,7 +110,7 @@ fn all_zero(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| b == 0)
 }
 
-/// aad = domain || network u64 || target u64 || config_namespace u16 (44 B).
+/// aad = domain || network u64 || target u64 || config_namespace u16 (45 B).
 /// The scope binding the permit's tag authenticates.
 pub fn config_permit_aad(
     network: u64,
