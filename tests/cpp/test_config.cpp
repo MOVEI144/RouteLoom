@@ -124,6 +124,7 @@ class FakeOutboxStorage final : public ConfigOutboxStorage {
     if (slot >= kConfigIssuerOutboxSlots || data.size == 0 || data.size > kOutboxSlot) {
       return Status::error(StatusCode::InvalidArgument, "bad outbox write");
     }
+    last_write_size = data.size;
     const std::size_t call = write_calls++;
     if (call == cut_call) {
       const std::size_t landed = cut_bytes < data.size ? cut_bytes : data.size;
@@ -138,6 +139,7 @@ class FakeOutboxStorage final : public ConfigOutboxStorage {
   }
   std::array<std::array<std::uint8_t, kOutboxSlot>, kConfigIssuerOutboxSlots> slots_{};
   std::size_t write_calls{0};
+  std::size_t last_write_size{0};
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
   std::size_t drop_call{std::numeric_limits<std::size_t>::max()};
@@ -408,28 +410,19 @@ struct TargetRig {
   Status boot_status_ = Status::success();
 };
 
-// Drive one end-to-end update against a rig: challenge -> command -> sign ->
-// submit -> poll until terminal. Returns the submit Status and fills the
-// final verdict. `patch` fields must already be sorted+valid.
-Status drive_update(TargetRig& rig, const ConfigField* patch,
-                    const std::uint16_t patch_count, MonotonicMs& now_ms,
-                    const std::uint64_t expected_revision,
+// Build a command bound to `challenge` (the caller picked the challenge),
+// sign it and submit. Returns the submit Status; the permit stays in
+// last_permit_ / last_command_ like drive_update.
+Status submit_bound(TargetRig& rig, const endpoint::ControlChallenge& challenge,
+                    const ConfigField* patch, const std::uint16_t patch_count,
+                    const MonotonicMs now_ms, const std::uint64_t expected_revision,
                     const ByteView base_snapshot, ConfigVerdict& verdict,
+                    const std::uint32_t apply_within_ms = 0,
                     ConfigCommand* command_out = nullptr) {
-  endpoint::ControlChallengeQuery query{};
-  query.config_namespace = rig.config.config_namespace;
-  query.schema = rig.config.schema;
-  query.client_nonce = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6};
-  endpoint::EncodedServicePayload encoded{};
-  Status status = rig.journal->handle_challenge_query(query, now_ms, encoded);
-  if (!status) return status;
-  endpoint::ControlChallenge challenge{};
-  status = endpoint::control_challenge_decode(encoded.view(), challenge);
-  if (!status) return status;
-
   ByteBuffer<endpoint::kConfigSnapshotMax> next{};
   bool changed = false;
-  status = config_patch_apply(base_snapshot, patch, patch_count, next, changed);
+  Status status =
+      config_patch_apply(base_snapshot, patch, patch_count, next, changed);
   if (!status) return status;
   Digest256 base_hash{}, next_hash{};
   status = config_snapshot_hash(rig.config.config_namespace, rig.config.schema,
@@ -457,7 +450,8 @@ Status drive_update(TargetRig& rig, const ConfigField* patch,
   command.next_snapshot_hash = next_hash;
   command.target_boot = rig.config.boot_incarnation;
   command.challenge_nonce = challenge.challenge_nonce;
-  command.apply_within_ms = challenge.valid_for_ms;
+  command.apply_within_ms =
+      apply_within_ms != 0 ? apply_within_ms : challenge.valid_for_ms;
   command.field_count = patch_count;
   for (std::uint16_t i = 0; i < patch_count; ++i) command.fields[i] = patch[i];
   if (command_out != nullptr) *command_out = command;
@@ -466,8 +460,29 @@ Status drive_update(TargetRig& rig, const ConfigField* patch,
   build_permit(signer_, command, permit);
   last_permit_ = permit;
   last_command_ = command;
-  status = rig.journal->submit_permit(permit.view(), now_ms, true, verdict);
-  return status;
+  return rig.journal->submit_permit(permit.view(), now_ms, true, verdict);
+}
+
+// Drive one end-to-end update against a rig: challenge -> command -> sign ->
+// submit. Returns the submit Status and fills the verdict. `patch` fields
+// must already be sorted+valid.
+Status drive_update(TargetRig& rig, const ConfigField* patch,
+                    const std::uint16_t patch_count, MonotonicMs& now_ms,
+                    const std::uint64_t expected_revision,
+                    const ByteView base_snapshot, ConfigVerdict& verdict,
+                    ConfigCommand* command_out = nullptr) {
+  endpoint::ControlChallengeQuery query{};
+  query.config_namespace = rig.config.config_namespace;
+  query.schema = rig.config.schema;
+  query.client_nonce = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, 5, 6};
+  endpoint::EncodedServicePayload encoded{};
+  Status status = rig.journal->handle_challenge_query(query, now_ms, encoded);
+  if (!status) return status;
+  endpoint::ControlChallenge challenge{};
+  status = endpoint::control_challenge_decode(encoded.view(), challenge);
+  if (!status) return status;
+  return submit_bound(rig, challenge, patch, patch_count, now_ms,
+                      expected_revision, base_snapshot, verdict, 0, command_out);
 }
 
 void drain(TargetRig& rig, MonotonicMs& now_ms, const int polls = 6) {
@@ -945,8 +960,8 @@ void test_c06_fault_injection_decided() {
     CHECK(rig.journal->decision_revision() == 1);
   }
 
-  // Readback failure at the DECIDED seal: the committed record IS durable
-  // even though the submit reported failure — boot resolves it to
+  // DECIDED committed, then the deferred APPLY_INTENT write is dropped in
+  // poll: the committed DECIDED record IS durable — boot resolves it to
   // INTERRUPTED (challenge dead across the boot), revision consumed.
   {
     TargetRig rig;
@@ -956,13 +971,15 @@ void test_c06_fault_injection_decided() {
     ConfigVerdict verdict{};
     CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
     drain(rig, now_ms);
-    // Fail the read inside the DECIDED commit's readback phase.
-    rig.storage.drop_call = rig.storage.write_calls + 2;  // hit APPLY_INTENT w0
+    // Drop the APPLY_INTENT pending write — it runs inside poll(), not
+    // inside submit (the RX path only ever commits DECIDED).
+    rig.storage.drop_call = rig.storage.write_calls + 2;
     const ConfigField patch2[] = {sdk_u8(1, 2)};
     const Status submitted =
         drive_update(rig, patch2, 1, now_ms += 61000, 1,
                      rig.journal->active_snapshot(), verdict);
-    CHECK(!submitted.ok());
+    CHECK(submitted.ok());  // DECIDED is durable; the intent write defers
+    rig.journal->poll(now_ms += 10);  // intent write dropped -> stays pending
     rig.boot(now_ms += 10);
     CHECK_OK(rig.boot_status_);
     drain(rig, now_ms);
@@ -1001,7 +1018,9 @@ void test_c07_apply_window_power_loss() {
     rig.provider.partial_apply = true;  // simulate a half-applied write
     CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
                           rig.journal->active_snapshot(), verdict));
-    // The apply token is outstanding and the provider's active is partial.
+    // Land APPLY_INTENT and kick the apply (both deferred out of submit):
+    // the apply token is outstanding and the provider's active is partial.
+    rig.journal->poll(now_ms += 10);
     rig.config.boot_incarnation = kBoot + 1;
     rig.boot(now_ms += 10);  // "power loss": new journal on the same storage
     CHECK_OK(rig.boot_status_);
@@ -1034,6 +1053,7 @@ void test_c07_apply_window_power_loss() {
     const ConfigField patch2[] = {sdk_u8(1, 2)};
     CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
                           rig.journal->active_snapshot(), verdict));
+    rig.journal->poll(now_ms += 10);  // land APPLY_INTENT + kick the apply
     rig.provider.restore_result =
         Status::error(StatusCode::StorageFailure, "restore dead");
     rig.config.boot_incarnation = kBoot + 1;
@@ -1094,10 +1114,17 @@ void test_c09_slot_corruption() {
     CHECK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
                        rig.journal->active_snapshot(), verdict)
               .code == StatusCode::RecoveryRequired);
+    // A permit submission reports the verdict-level refusal too.
+    CHECK(rig.journal->submit_permit(last_permit_.view(), now_ms, true, verdict)
+              .code == StatusCode::RecoveryRequired);
     CHECK(verdict.reason == ConfigReason::RecoveryRequired);
     // Authorized recovery re-opens intake without regressing the floor.
-    CHECK_OK(rig.journal->recover(10, now_ms));
+    CHECK_OK(rig.journal->recover(10, now_ms, false));
     CHECK(!rig.journal->uncertain());
+    // The adopted survivor is INTERRUPTED: its prev-restore was scheduled
+    // by recover() and must settle before intake re-opens.
+    drain(rig, now_ms);
+    CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
     CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
                           rig.journal->active_snapshot(), verdict));
     drain(rig, now_ms);
@@ -1122,9 +1149,17 @@ void test_c09_slot_corruption() {
     ConfigVerdict v{};
     CHECK(rig.journal->submit_permit(last_permit_.view(), now_ms, true, v).code ==
           StatusCode::IntegrityError);
-    CHECK(rig.journal->recover(0, now_ms).code == StatusCode::InvalidArgument);
-    CHECK_OK(rig.journal->recover(11, now_ms));
+    CHECK(rig.journal->recover(0, now_ms, false).code == StatusCode::InvalidArgument);
+    // With no verifiable survivor, a plain recover() must NOT fabricate a
+    // base — the journal stays quarantined (04 §4.7: never an automatic
+    // return to revision 0).
+    CHECK(rig.journal->recover(11, now_ms, false).code ==
+          StatusCode::RecoveryRequired);
+    CHECK(rig.journal->quarantined());
+    // Only an explicit re-provision attestation may establish the base.
+    CHECK_OK(rig.journal->recover(11, now_ms, true));
     CHECK(!rig.journal->quarantined());
+    CHECK(rig.journal->phase() == ConfigPhase::Idle);
   }
 }
 
@@ -1779,12 +1814,17 @@ void test_issuer_outbox_bounds() {
   IssuedOperation op{};
   CHECK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
             .code == StatusCode::NoCapacity);
-  // Resume finishes all four without ever re-sequenceing the blobs.
+  // Resume finishes all four. Each entry's own commit DID land, but
+  // applied has moved past it and no sibling holds its sequence — that
+  // makes the "this entry consumed the sequence" claim unprovable (an
+  // outside ledger consumer could hold it), so every entry is re-minted
+  // under a fresh sequence and committed again rather than signing a
+  // canonical whose commit cannot be proven.
   ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
                        rig.entropy);
   CHECK_OK(resumed.initialize());
   CHECK(resumed.signed_count() == 4);
-  CHECK(rig.ledger.state().applied_sequence == 4);
+  CHECK(rig.ledger.state().applied_sequence == 8);
 }
 
 // --- Apply-path failure -> restore -> INTERRUPTED ------------------------------------------
@@ -1857,6 +1897,482 @@ void test_storage_contract() {
   CHECK(journal_bad2.initialize(now_ms).code == StatusCode::InvalidArgument);
 }
 
+// --- Recovery / floor / deferred-intent regressions ---------------------------------------
+
+// The generation/revision floors must advance on every committed record:
+// recover() may never re-mint a generation this boot already consumed,
+// nor roll a decided revision back (06 §6.3).
+void test_floor_advance_on_commit() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  // Apply fails AND the restore fails -> QUARANTINED record committed.
+  rig.provider.apply_result =
+      Status::error(StatusCode::StorageFailure, "apply dead");
+  rig.provider.restore_result =
+      Status::error(StatusCode::StorageFailure, "restore dead");
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->quarantined());
+  // Generations 1..3 (DECIDED, APPLY_INTENT, QUARANTINED) are all consumed
+  // this boot — recovery must start above them, not above a stale floor.
+  CHECK(rig.journal->recover(2, now_ms, false).code == StatusCode::InvalidArgument);
+  CHECK(rig.journal->recover(3, now_ms, false).code == StatusCode::InvalidArgument);
+  CHECK_OK(rig.journal->recover(4, now_ms, false));
+  CHECK(!rig.journal->quarantined());
+  // The decided revision was adopted — never rolled back to a lower base.
+  CHECK(rig.journal->decision_revision() == 1);
+}
+
+// An ACTIVE survivor stays ACTIVE across recovery: losing the sibling
+// slot's evidence does not roll the target back to a previous snapshot.
+void test_active_survivor_recover() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  const std::size_t active_size = rig.journal->active_snapshot().size;
+
+  // Corrupt the NON-ACTIVE sibling slot (the stale APPLY_INTENT record).
+  rig.storage.corrupt(1, 200);
+  rig.boot(now_ms += 10);
+  CHECK(!rig.boot_status_.ok());
+  CHECK(rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+
+  CHECK_OK(rig.journal->recover(4, now_ms, false));
+  CHECK(!rig.journal->uncertain());
+  // The survivor is adopted as ACTIVE with its confirmed snapshot — the
+  // recover() code used to degrade it to INTERRUPTED and roll back.
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 1);
+  CHECK(rig.journal->active_revision() == 1);
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.provider.active_.size == active_size);
+}
+
+// A terminal write dropped on the boot-resolution path is retried by
+// poll() — the durable record must not stay APPLY_INTENT forever.
+void test_boot_terminal_persist_retry() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  // Land update 2's APPLY_INTENT with the apply kicked but never finished.
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                        rig.journal->active_snapshot(), verdict));
+  rig.journal->poll(now_ms += 10);
+  // Boot: the APPLY_INTENT survivor restores prev; the terminal
+  // INTERRUPTED write is then dropped — it must retry, not vanish.
+  rig.storage.drop_call = rig.storage.write_calls;  // next write = finish w0
+  rig.boot(now_ms += 10);
+  CHECK_OK(rig.boot_status_);
+  // One poll: restore kicks AND completes -> the terminal write is dropped.
+  rig.journal->poll(now_ms += 10);
+  CHECK(rig.journal->phase() == ConfigPhase::ApplyIntent);  // not terminal yet
+  rig.journal->poll(now_ms += 10);  // retry lands the INTERRUPTED record
+  CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
+  // Prove durability: a subsequent boot reads the INTERRUPTED record.
+  rig.boot(now_ms += 10);
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
+  CHECK(rig.journal->decision_revision() == 2);
+}
+
+// One requester's challenge churn must never kill another requester's
+// outstanding challenge; a full table refuses Busy rather than evicting.
+void test_challenge_churn() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+
+  // The "admin" requester holds the first slot.
+  endpoint::ControlChallengeQuery admin_q{};
+  admin_q.config_namespace = 1;
+  admin_q.schema = 1;
+  admin_q.client_nonce = {0xAA, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK_OK(rig.journal->handle_challenge_query(admin_q, now_ms, encoded));
+  endpoint::ControlChallenge admin_challenge{};
+  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), admin_challenge));
+
+  // Three other requesters fill the remaining slots.
+  for (std::uint8_t i = 0; i < 3; ++i) {
+    endpoint::ControlChallengeQuery q{};
+    q.config_namespace = 1;
+    q.schema = 1;
+    q.client_nonce = {0xB0, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i};
+    endpoint::EncodedServicePayload out{};
+    CHECK_OK(rig.journal->handle_challenge_query(q, now_ms += 5, out));
+  }
+  // Table full: a fifth DISTINCT requester is refused Busy — outstanding
+  // challenges are never evicted by churn.
+  endpoint::ControlChallengeQuery extra{};
+  extra.config_namespace = 1;
+  extra.schema = 1;
+  extra.client_nonce = {0xC0, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9};
+  endpoint::EncodedServicePayload out{};
+  CHECK(rig.journal->handle_challenge_query(extra, now_ms += 5, out).code ==
+        StatusCode::Busy);
+  // The admin's re-query refreshes its OWN slot only — and its permit
+  // bound to the refreshed challenge still validates.
+  CHECK_OK(rig.journal->handle_challenge_query(admin_q, now_ms += 5, encoded));
+  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), admin_challenge));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(submit_bound(rig, admin_challenge, patch, 1, now_ms, 0, ByteView{},
+                        verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 1);
+}
+
+// submit_permit returns right after DECIDED: no APPLY_INTENT write and no
+// provider apply on the radio RX path — both land inside poll().
+void test_deferred_intent() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  CHECK(rig.provider.apply_calls == 0);  // apply never ran on the RX path
+  CHECK(rig.journal->phase() == ConfigPhase::Decided);
+  CHECK(rig.journal->stats().accepted == 1);
+  const std::size_t writes = rig.storage.write_calls;
+  rig.journal->poll(now_ms += 10);  // APPLY_INTENT write + apply kick
+  CHECK(rig.provider.apply_calls == 1);
+  CHECK(rig.journal->phase() == ConfigPhase::Applying);
+  CHECK(rig.storage.write_calls == writes + 2);  // pending + seal only
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+
+  // The apply-window deadline is re-checked at the true apply time: a
+  // first poll past the window ends INTERRUPTED — never applied late.
+  TargetRig rig2;
+  MonotonicMs t = 1000;
+  CHECK_OK(rig2.journal->initialize(t));
+  endpoint::ControlChallengeQuery q{};
+  q.config_namespace = 1;
+  q.schema = 1;
+  q.client_nonce = {7, 7, 7, 7, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK_OK(rig2.journal->handle_challenge_query(q, t, encoded));
+  endpoint::ControlChallenge challenge{};
+  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), challenge));
+  ConfigVerdict v2{};
+  CHECK_OK(submit_bound(rig2, challenge, patch, 1, t, 0, ByteView{}, v2,
+                        100 /* apply_within_ms */));
+  rig2.journal->poll(t + 200);  // past the window at the true apply time
+  CHECK(rig2.journal->phase() == ConfigPhase::Interrupted);
+  CHECK(rig2.provider.apply_calls == 0);  // the apply never started
+}
+
+// A DECIDED write fault returns the acceptance token — the refusal
+// consumed nothing, so the budget is not burned by storage faults.
+void test_storage_failure_refunds_budget() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+
+  // Second update inside the same 60 s window: drop its DECIDED write.
+  rig.storage.drop_call = rig.storage.write_calls;  // DECIDED pending write
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK(drive_update(rig, patch2, 1, now_ms, 1,
+                     rig.journal->active_snapshot(), verdict)
+            .code == StatusCode::StorageFailure);
+  CHECK(rig.journal->stats().storage_failures == 1);
+
+  // A third update in the same window would exceed the 2/60 s budget if
+  // the failed DECIDED had burned its token — it must still be admitted.
+  const ConfigField patch3[] = {sdk_u8(1, 0)};
+  CHECK_OK(drive_update(rig, patch3, 1, now_ms, 1,
+                        rig.journal->active_snapshot(), verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 2);
+}
+
+// While storage is unproven every intake path refuses — challenges,
+// manifests and chunks included, not just submit_permit.
+void test_uncertain_intake_refused() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  rig.storage.corrupt(1, 200);  // lose the non-ACTIVE sibling
+  rig.boot(now_ms += 10);
+  CHECK(rig.journal->uncertain());
+
+  endpoint::ControlChallengeQuery q{};
+  q.config_namespace = 1;
+  q.schema = 1;
+  q.client_nonce = {7, 7, 7, 7, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK(rig.journal->handle_challenge_query(q, now_ms, encoded).code ==
+        StatusCode::RecoveryRequired);
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = 64;
+  manifest.object_hash[0] = 1;
+  CHECK(rig.journal->note_object_manifest(manifest, now_ms).code ==
+        StatusCode::RecoveryRequired);
+  autonomy::ObjectChunkPayload chunk{};
+  CHECK(rig.journal->note_object_chunk(chunk, now_ms).code ==
+        StatusCode::RecoveryRequired);
+}
+
+// A committed-seal record that fails structural validation is noise: it
+// must NOT bound the recovery floor (bitrot could otherwise mint an
+// arbitrary floor and wedge recovery forever).
+void test_floor_corrupt_structural() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  // Damage the ACTIVE record's reserved byte (offset 21): the record
+  // parses but fails semantic validation — Corrupt WITHOUT floor proof.
+  rig.storage.corrupt(0, 21);
+  rig.boot(now_ms += 10);
+  CHECK(rig.journal->uncertain());
+  // The floor came only from the valid sibling (generation 2): the
+  // corrupt record's gen-3 claim cannot wedge recovery.
+  CHECK_OK(rig.journal->recover(3, now_ms, false));
+  CHECK(!rig.journal->uncertain());
+}
+
+// Corrupt-but-present evidence is never "fresh": erased + corrupt slots
+// quarantine; a foreign record reports its identity mismatch — neither
+// may silently adopt an empty base.
+void test_fresh_vs_impaired() {
+  {
+    TargetRig rig;
+    MonotonicMs now_ms = 1000;
+    rig.storage.fill(0, 0xA5);  // undecodable garbage, not erased
+    rig.boot(now_ms);
+    CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+    CHECK(rig.journal->quarantined());
+  }
+  {
+    TargetRig rig;
+    MonotonicMs now_ms = 1000;
+    CHECK_OK(rig.journal->initialize(now_ms));
+    const ConfigField patch[] = {sdk_u8(1, 1)};
+    ConfigVerdict verdict{};
+    CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+    drain(rig, now_ms);
+    // Same durable bytes, journal configured for a different network.
+    TargetRig foreign;
+    foreign.config.network = kNet + 1;
+    foreign.storage.slots_ = rig.storage.slots_;
+    foreign.boot(now_ms += 10);
+    CHECK(foreign.boot_status_.code == StatusCode::Conflict);
+  }
+}
+
+// The revision pair is codec-enforced end to end: a permit can never
+// carry next_revision != expected_revision + 1 to validate_command.
+void test_revision_pair_contract() {
+  ConfigCommand command{};
+  command.config_namespace = 1;
+  command.schema = 1;
+  command.network = kNet;
+  command.target = kTarget;
+  command.authority = kAuthority;
+  command.authority_generation = 1;
+  command.authority_sequence = 1;
+  command.operation_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  command.expected_revision = 5;
+  command.next_revision = 7;  // != expected + 1
+  command.base_snapshot_hash[0] = 1;
+  command.next_snapshot_hash[0] = 2;
+  command.target_boot = kBoot;
+  command.challenge_nonce = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  command.apply_within_ms = 1000;
+  command.field_count = 1;
+  command.fields[0] = sdk_u8(1, 1);
+  endpoint::EncodedConfigCommand canonical{};
+  CHECK(endpoint::config_command_encode(command, canonical).code ==
+        StatusCode::InvalidArgument);
+}
+
+// A duplicate manifest with a different total_len contradicts the
+// assembly in progress — a protocol conflict, never re-ACKed.
+void test_manifest_length_conflict() {
+  TargetRig rig;
+  MonotonicMs t = 1000;
+  CHECK_OK(rig.journal->initialize(t));
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = 64;
+  manifest.object_hash[0] = 0xAB;
+  CHECK_OK(rig.journal->note_object_manifest(manifest, t));
+  manifest.total_len = 128;  // same object hash, different declared length
+  CHECK(rig.journal->note_object_manifest(manifest, t).code ==
+        StatusCode::Conflict);
+}
+
+// RESULT_EXPIRED is the wire answer — the Status4 response is emitted,
+// not dropped behind an error Status.
+void test_status_result_expired() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  const ConfigCommand op1 = last_command_;
+  // A later operation supersedes op1 as the durable record — the status
+  // query then falls through to op1's (now expired) result record.
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                        rig.journal->active_snapshot(), verdict));
+  drain(rig, now_ms);
+  endpoint::ControlStatusQuery sq{};
+  sq.config_namespace = 1;
+  sq.operation_id = op1.operation_id;
+  endpoint::EncodedServicePayload reply{};
+  CHECK_OK(rig.journal->handle_status_query(sq, now_ms + kConfigResultHoldMs + 1,
+                                            reply));
+  endpoint::ControlStatus status{};
+  CHECK_OK(endpoint::control_status_decode(reply.view(), status));
+  CHECK(status.phase == ConfigPhase::Idle);
+  CHECK(status.reason == ConfigReason::ResultExpired);
+}
+
+// A CRC-failed SIGNED outbox entry is impaired — never a free slot: its
+// signature may already have been consumed.
+void test_impaired_outbox_slot() {
+  IssuerRig rig;
+  rig.boot();
+  CHECK_OK(rig.issuer.initialize());
+  const MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms),
+                                     kTarget, now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  IssuedOperation op{};
+  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms,
+                              op));
+  CHECK(op.issued);
+  CHECK(op.slot == 0);
+  // Corrupt the signed record's payload (past the 24-byte header): the
+  // record parses under a committed seal but fails CRC.
+  rig.outbox.slots_[0][40] ^= 0xFFU;
+  // A new propose must skip the impaired slot — never reuse it.
+  IssuedOperation op2{};
+  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms,
+                              op2));
+  CHECK(op2.issued);
+  CHECK(op2.slot == 1);
+  // Resume reports the impairment instead of silently freeing the slot.
+  const auto snapshot = rig.outbox.slots_[0];
+  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
+                       rig.entropy);
+  CHECK(!resumed.initialize().ok());
+  CHECK(rig.outbox.slots_[0] == snapshot);  // never cleared or overwritten
+}
+
+// Unique holder of a consumed sequence is unprovable: resume re-mints the
+// operation under a fresh sequence and commits it, rather than signing a
+// canonical whose ledger commit cannot be proven.
+void test_issuer_remint_sequence() {
+  IssuerRig rig;
+  rig.boot();
+  CHECK_OK(rig.issuer.initialize());
+  const MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms),
+                                     kTarget, now_ms));
+  // Power cut inside the ledger commit: the PENDING outbox entry (seq 1)
+  // persisted, but its commit never landed.
+  rig.ledger_storage.cut_call = 0;
+  rig.ledger_storage.cut_bytes = 40;
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  IssuedOperation op{};
+  CHECK(!rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
+             .ok());
+  CHECK(rig.ledger.state().applied_sequence == 0);
+  // An outside consumer then takes sequences 1 and 2 — the ledger's
+  // global sequence is shared, config ops are not its only commits.
+  for (int i = 0; i < 2; ++i) {
+    AuthorityOperation external{};
+    Digest256 hash{};
+    sha256(ByteView{reinterpret_cast<const std::uint8_t*>("ext"), 3}, hash);
+    CHECK_OK(rig.ledger.build_operation(
+        AuthorityOperationKind::MembershipApproval, hash, external));
+    CHECK_OK(rig.ledger.apply_membership_approval(external, hash, true));
+  }
+  CHECK(rig.ledger.state().applied_sequence == 2);
+  // Resume: whether the entry's own commit landed is unprovable — it is
+  // re-minted to sequence 3, committed, then signed.
+  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
+                       rig.entropy);
+  CHECK_OK(resumed.initialize());
+  CHECK(resumed.signed_count() == 1);
+  CHECK(rig.ledger.state().applied_sequence == 3);
+  ByteBuffer<kConfigPermitObjectMax> permit{};
+  CHECK_OK(resumed.signed_permit(0, permit));
+  endpoint::ConfigCommand decoded{};
+  CHECK_OK(endpoint::config_command_decode(
+      ByteView{permit.bytes.data() + kPermitAadSize,
+               permit.size - kPermitAadSize - kPermitTagSize},
+      decoded));
+  CHECK(decoded.authority_sequence == 3);
+}
+
+// Superseded outbox entries are tombstoned with a short pending-seal
+// header — not a full 2048-byte erase (the §6.8 flash budget counts writes).
+void test_outbox_tombstone_size() {
+  IssuerRig rig;
+  rig.boot();
+  CHECK_OK(rig.issuer.initialize());
+  const MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms),
+                                     kTarget, now_ms));
+  rig.ledger_storage.cut_call = 0;
+  rig.ledger_storage.cut_bytes = 40;
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  IssuedOperation op{};
+  CHECK(!rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
+             .ok());
+  // An outside consumer takes sequence 1: the pending entry is provably
+  // superseded and gets tombstoned on resume.
+  AuthorityOperation external{};
+  Digest256 hash{};
+  sha256(ByteView{reinterpret_cast<const std::uint8_t*>("ext"), 3}, hash);
+  CHECK_OK(rig.ledger.build_operation(AuthorityOperationKind::MembershipApproval,
+                                      hash, external));
+  CHECK_OK(rig.ledger.apply_membership_approval(external, hash, true));
+  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
+                       rig.entropy);
+  const Status status = resumed.initialize();
+  CHECK(status.code == StatusCode::Conflict);  // superseded, honestly reported
+  CHECK(resumed.signed_count() == 0);
+  CHECK(resumed.pending_count() == 0);
+  CHECK(rig.outbox.last_write_size <= 32);
+}
+
 }  // namespace
 
 int main() {
@@ -1890,6 +2406,22 @@ int main() {
   // Provider apply/verify failure -> restore semantics.
   test_apply_failure_restores();
   test_storage_contract();
+  // Recovery/floor/deferred-intent regressions.
+  test_floor_advance_on_commit();
+  test_active_survivor_recover();
+  test_boot_terminal_persist_retry();
+  test_challenge_churn();
+  test_deferred_intent();
+  test_storage_failure_refunds_budget();
+  test_uncertain_intake_refused();
+  test_floor_corrupt_structural();
+  test_fresh_vs_impaired();
+  test_revision_pair_contract();
+  test_manifest_length_conflict();
+  test_status_result_expired();
+  test_impaired_outbox_slot();
+  test_issuer_remint_sequence();
+  test_outbox_tombstone_size();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

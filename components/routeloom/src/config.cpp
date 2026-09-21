@@ -471,8 +471,13 @@ Status ConfigJournal::decode_slot(const std::uint8_t slot, JournalRecord& record
       permit_len > kConfigPermitObjectMax || expect != length ||
       phase > static_cast<std::uint8_t>(ConfigPhase::Quarantined) ||
       reason > static_cast<std::uint16_t>(ConfigReason::ResultExpired)) {
-    // A committed-seal record whose fields parse still bounds the floor.
-    committed_fields = st.ok();
+    // A record that fails structural or semantic validation is
+    // indistinguishable from noise: it cannot be proven to be a real
+    // committed record, so it must NOT bound the generation/revision
+    // floors — otherwise bitrot could mint an arbitrary floor and wedge
+    // recovery forever (06 §6.3). Only the fully-parsed,
+    // committed-seal record below that fails solely on CRC still bounds
+    // the floors, mirroring the ledger's recovery_floor_.
     content = SlotContent::Corrupt;
     return Status::success();
   }
@@ -577,6 +582,16 @@ Status ConfigJournal::store_record(const JournalRecord& record) noexcept {
   // record's pre-commit window.
   active_slot_ = target_slot;
   has_active_ = true;
+  // Every committed seal is durable proof of how far the journal advanced:
+  // the floors move with it so a later recover() in the same boot can never
+  // re-mint a generation this boot already consumed, nor regress a decided
+  // revision (06 §6.3 — mirrors the ledger's recovery_floor_).
+  if (record.store_generation > proven_floor_) {
+    proven_floor_ = record.store_generation;
+  }
+  if (record.decision_revision > revision_floor_) {
+    revision_floor_ = record.decision_revision;
+  }
   return Status::success();
 }
 
@@ -899,15 +914,46 @@ Status ConfigJournal::resolve_recovered(const MonotonicMs now_ms) noexcept {
 Status ConfigJournal::handle_challenge_query(
     const endpoint::ControlChallengeQuery& query, const MonotonicMs now_ms,
     endpoint::EncodedServicePayload& out) noexcept {
+  last_now_ms_ = now_ms;
   if (!initialized_ || quarantined_) {
     return Status::error(StatusCode::InvalidState, "config journal not accepting");
+  }
+  if (uncertain_) {
+    // Storage is not proven: minting fresh challenges invites acceptance
+    // work the journal is not allowed to perform until recover() runs.
+    return Status::error(StatusCode::RecoveryRequired,
+                        "config journal storage uncertain");
   }
   if (query.config_namespace != config_.config_namespace ||
       query.schema != config_.schema) {
     return Status::error(StatusCode::Unsupported, "config challenge schema mismatch");
   }
-  // A fresh nonce128 per query; a new query supersedes the outstanding one
-  // so permits bound to a stale nonce can never be replayed after re-issue.
+  // A fresh nonce128 per query. Each requester owns one slot keyed by
+  // client_nonce — its re-query supersedes only its own challenge; a full
+  // table of live challenges refuses Busy rather than evicting another
+  // requester's in-flight challenge, which would let any member lock out
+  // configuration by churning queries (rate+sender binding is the wire
+  // contract's only constraint on who may ask).
+  Challenge* slot = nullptr;
+  Challenge* free_slot = nullptr;
+  for (Challenge& candidate : challenges_) {
+    if (candidate.outstanding && candidate.client_nonce == query.client_nonce) {
+      slot = &candidate;
+      break;
+    }
+    const bool expired = !candidate.outstanding ||
+                         now_ms < candidate.issued_ms ||
+                         now_ms - candidate.issued_ms > candidate.valid_for_ms;
+    if (expired && free_slot == nullptr) {
+      free_slot = &candidate;
+    }
+  }
+  if (slot == nullptr) {
+    slot = free_slot;
+  }
+  if (slot == nullptr) {
+    return Status::error(StatusCode::Busy, "config challenge table full");
+  }
   std::array<std::uint8_t, 16> nonce{};
   bool filled = false;
   for (int attempt = 0; attempt < 4 && !filled; ++attempt) {
@@ -918,12 +964,12 @@ Status ConfigJournal::handle_challenge_query(
   if (!filled) {
     return Status::error(StatusCode::InternalError, "config challenge entropy failed");
   }
-  challenge_.outstanding = true;
-  challenge_.nonce = nonce;
-  challenge_.client_nonce = query.client_nonce;
-  challenge_.schema = query.schema;
-  challenge_.issued_ms = now_ms;
-  challenge_.valid_for_ms = config_.challenge_valid_ms;
+  slot->outstanding = true;
+  slot->nonce = nonce;
+  slot->client_nonce = query.client_nonce;
+  slot->schema = query.schema;
+  slot->issued_ms = now_ms;
+  slot->valid_for_ms = config_.challenge_valid_ms;
   stats_.challenges_issued++;
 
   endpoint::ControlChallenge challenge{};
@@ -934,13 +980,24 @@ Status ConfigJournal::handle_challenge_query(
   challenge.challenge_nonce = nonce;
   challenge.revision = decision_revision_;
   challenge.active_hash = active_hash_;
-  challenge.valid_for_ms = challenge_.valid_for_ms;
+  challenge.valid_for_ms = slot->valid_for_ms;
   return endpoint::control_challenge_encode(challenge, out);
+}
+
+const ConfigJournal::Challenge* ConfigJournal::find_challenge(
+    const std::array<std::uint8_t, 16>& nonce) const noexcept {
+  for (const Challenge& candidate : challenges_) {
+    if (candidate.outstanding && candidate.nonce == nonce) {
+      return &candidate;
+    }
+  }
+  return nullptr;
 }
 
 Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& query,
                                           const MonotonicMs now_ms,
                                           endpoint::EncodedServicePayload& out) noexcept {
+  last_now_ms_ = now_ms;
   if (!initialized_) {
     return Status::error(StatusCode::InvalidState, "config journal not initialized");
   }
@@ -972,15 +1029,16 @@ Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& qu
   const ResultRecord* record = nullptr;
   if (find_result(query.operation_id, record)) {
     if (now_ms - record->stored_ms >= kConfigResultHoldMs) {
-      // The result window closed: RESULT_EXPIRED, never a silent re-run.
+      // The result window closed: RESULT_EXPIRED goes ON THE WIRE as the
+      // response's reason — a non-success return would drop the encoded
+      // payload and leave the requester with nothing (05 §5.x, 06 §6.2:
+      // unknown is never turned into success, but expiry IS the answer).
       status.phase = ConfigPhase::Idle;
       status.reason = ConfigReason::ResultExpired;
       status.decision_revision = record->decision_revision;
       status.active_revision = record->active_revision;
       status.active_hash = record->active_hash;
-      const Status encoded = endpoint::control_status_encode(status, out);
-      if (!encoded) return encoded;
-      return Status::error(StatusCode::NotFound, "config result expired");
+      return endpoint::control_status_encode(status, out);
     }
     status.phase = record->phase;
     status.reason = record->reason;
@@ -994,8 +1052,15 @@ Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& qu
 
 Status ConfigJournal::note_object_manifest(
     const autonomy::ControlObjectPayload& manifest, const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
   if (!initialized_ || quarantined_) {
     return Status::error(StatusCode::InvalidState, "config journal not accepting");
+  }
+  if (uncertain_) {
+    // Storage is not proven: a reassembly would only feed a permit the
+    // journal must refuse anyway — do not consume intake resources.
+    return Status::error(StatusCode::RecoveryRequired,
+                        "config journal storage uncertain");
   }
   if (manifest.kind != autonomy::ControlObjectKind::ConfigPermit ||
       manifest.total_len == 0 || manifest.total_len > kConfigPermitObjectMax ||
@@ -1004,9 +1069,14 @@ Status ConfigJournal::note_object_manifest(
     return Status::error(StatusCode::ProtocolError, "config manifest invalid");
   }
   if (reassembly_.active) {
-    if (reassembly_.manifest.object_hash == manifest.object_hash &&
-        reassembly_.manifest.total_len == manifest.total_len) {
-      return Status::success();  // same manifest re-delivered: idempotent
+    if (reassembly_.manifest.object_hash == manifest.object_hash) {
+      if (reassembly_.manifest.total_len == manifest.total_len) {
+        return Status::success();  // same manifest re-delivered: idempotent
+      }
+      // Same object hash with a different declared length contradicts the
+      // assembly in progress — a protocol violation, never re-ACKed.
+      ++stats_.reassembly_rejects;
+      return Status::error(StatusCode::Conflict, "config manifest length conflict");
     }
     ++stats_.reassembly_rejects;
     return Status::error(StatusCode::Busy, "config reassembly busy");
@@ -1021,6 +1091,13 @@ Status ConfigJournal::note_object_manifest(
 
 Status ConfigJournal::note_object_chunk(const autonomy::ObjectChunkPayload& chunk,
                                         const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
+  if (uncertain_ || quarantined_) {
+    // Same gate as the manifest path: no intake while storage is unproven.
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::RecoveryRequired,
+                        "config journal storage uncertain");
+  }
   if (!reassembly_.active) {
     ++stats_.reassembly_rejects;
     return Status::error(StatusCode::InvalidState, "config chunk without manifest");
@@ -1097,21 +1174,29 @@ Status ConfigJournal::validate_command(const endpoint::ConfigCommand& command,
     return Status::error(StatusCode::AuthorizationFailed, "config scope denied");
   }
   // Challenge binding (04 §4.4): nonce + this boot + local elapsed only.
-  if (!challenge_.outstanding || challenge_.nonce != command.challenge_nonce ||
+  // The permit must match SOME outstanding challenge slot — the nonce is
+  // unpredictable to anyone but the requester it was issued to.
+  const Challenge* challenge = find_challenge(command.challenge_nonce);
+  if (challenge == nullptr ||
       config_.boot_incarnation != command.target_boot) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::AuthorityDenied);
     ++stats_.permits_denied;
     return Status::error(StatusCode::AuthorizationFailed, "config challenge mismatch");
   }
-  const MonotonicMs elapsed = now_ms >= challenge_.issued_ms
-                                 ? now_ms - challenge_.issued_ms
+  const MonotonicMs elapsed = now_ms >= challenge->issued_ms
+                                 ? now_ms - challenge->issued_ms
                                  : UINT64_MAX;
-  if (!clock_known || elapsed > challenge_.valid_for_ms ||
+  if (!clock_known || elapsed > challenge->valid_for_ms ||
       elapsed > command.apply_within_ms) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::Deadline);
     return Status::error(StatusCode::Expired, "config challenge expired");
   }
-  // CAS on the per-target revision (never the global sequence).
+  // CAS on the per-target revision. The codec already guarantees
+  // next_revision == expected_revision + 1 and expected != UINT64_MAX in
+  // both encode and decode, so only the CAS needs checking here; the
+  // authority_sequence is deliberately NOT enforced — §4.3 gives it no
+  // target-side ordering semantics (the ledger's global sequence has
+  // holes from other consumers; the issuer's signature already binds it).
   if (command.expected_revision != decision_revision_) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::StaleRevision);
     ++stats_.stale_revision;
@@ -1356,52 +1441,25 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   // consumed here and never returned, even if apply later fails.
   status = persist_phase(ConfigPhase::Decided, ConfigReason::Ok, txn);
   if (!status) {
+    // The seal never landed: nothing was accepted, so the consumed token
+    // goes back — a refusal consumes no budget.
+    rate_limiter_.refund();
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::StorageFailure);
     ++stats_.storage_failures;
     return status;
   }
   decision_revision_ = command.next_revision;
 
-  // Deadline re-check before APPLY_INTENT: past the budget the apply must
-  // not start (06 §6.3) — the decided revision stays consumed and the
-  // operation ends INTERRUPTED.
-  const MonotonicMs elapsed = now_ms >= challenge_.issued_ms
-                                 ? now_ms - challenge_.issued_ms
-                                 : UINT64_MAX;
-  if (elapsed > command.apply_within_ms) {
-    const Status stored =
-        persist_phase(ConfigPhase::Interrupted, ConfigReason::Deadline, txn);
-    if (!stored) {
-      fill_verdict(verdict, ConfigPhase::Decided, ConfigReason::StorageFailure);
-      ++stats_.storage_failures;
-      return stored;
-    }
-    stats_.interrupted++;
-    const Status recorded =
-        record_result(txn, ConfigPhase::Interrupted, ConfigReason::Deadline, now_ms);
-    fill_verdict(verdict, ConfigPhase::Interrupted, ConfigReason::Deadline);
-    return recorded.ok() ? Status::error(StatusCode::Expired, "config apply window expired")
-                         : recorded;
-  }
-
-  status = persist_phase(ConfigPhase::ApplyIntent, ConfigReason::Ok, txn);
-  if (!status) {
-    // The DECIDED record is durable and safe: a later boot interrupts it.
-    fill_verdict(verdict, ConfigPhase::Decided, ConfigReason::StorageFailure);
-    ++stats_.storage_failures;
-    return status;
-  }
-
-  OperationToken token{kInvalidOperationToken};
-  status = provider_->apply(config_.config_namespace, txn.next_snapshot.view(), token);
-  if (!status) {
-    const Status restore = start_restore(txn, ConfigReason::ApplyInterrupted);
-    if (!restore) return restore;
-  } else {
-    txn.applying = true;
-    txn.token = token;
-    phase_ = ConfigPhase::Applying;
-  }
+  // APPLY_INTENT persistence and the provider apply defer to poll(): this
+  // handler runs on the radio RX path, where a journal record is a full
+  // write-seal-readback cycle and the apply itself must never execute.
+  // The apply-window deadline is re-checked in poll at the true apply
+  // time; a power cut in between leaves a durable DECIDED that a boot
+  // interrupts — the same safe outcome.
+  const Challenge* challenge = find_challenge(command.challenge_nonce);
+  txn.challenge_issued_ms =
+      challenge != nullptr ? challenge->issued_ms : UINT64_MAX;
+  txn.intent_pending = true;
   txn_ = txn;
   ++stats_.accepted;
   fill_verdict(verdict, phase_, ConfigReason::InProgress);
@@ -1434,12 +1492,13 @@ Status ConfigJournal::finish_transaction(Transaction& txn, const ConfigPhase pha
   if (!stored) {
     // The durable record still says APPLY_INTENT (or DECIDED): a boot
     // restores and interrupts, which is the same safe outcome. For the
-    // live transaction, retry the terminal write on the next poll.
-    if (&txn == &txn_) {
-      txn_.pending_phase = phase;
-      txn_.pending_reason = reason;
-      txn_.pending_persist = true;
-    }
+    // live transaction — AND for the boot-resolution scratch transaction —
+    // retry the terminal write on the next poll rather than dropping it:
+    // a dropped boot-resolution write would leave the durable record
+    // forever APPLY_INTENT while in-memory phase already moved on.
+    txn.pending_phase = phase;
+    txn.pending_reason = reason;
+    txn.pending_persist = true;
     ++stats_.storage_failures;
     return stored;
   }
@@ -1459,6 +1518,7 @@ Status ConfigJournal::finish_transaction(Transaction& txn, const ConfigPhase pha
   txn.applying = false;
   txn.restoring = false;
   txn.pending_persist = false;
+  txn.intent_pending = false;
   return recorded.ok() ? Status::success() : recorded;
 }
 
@@ -1475,6 +1535,16 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     const ConfigReason reason = txn_.pending_reason;
     txn_.pending_persist = false;
     const Status stored = finish_transaction(txn_, phase, reason);
+    static_cast<void>(stored);
+    return;
+  }
+  if (boot_txn_.active && boot_txn_.pending_persist) {
+    // Same retry for the boot-resolution scratch transaction: its terminal
+    // write faulted after restore_pending was already cleared.
+    const ConfigPhase phase = boot_txn_.pending_phase;
+    const ConfigReason reason = boot_txn_.pending_reason;
+    boot_txn_.pending_persist = false;
+    const Status stored = finish_transaction(boot_txn_, phase, reason);
     static_cast<void>(stored);
     return;
   }
@@ -1525,6 +1595,43 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     return;
   }
   if (!txn_.active || provider_ == nullptr) return;
+
+  // Deferred APPLY_INTENT + apply kickoff (submit_permit returns right
+  // after DECIDED — the radio RX path never performs the intent commit or
+  // the provider call). The apply-window deadline is re-checked NOW, at
+  // the true apply time, against the consumed challenge's issue instant.
+  if (txn_.intent_pending) {
+    const MonotonicMs elapsed = now_ms >= txn_.challenge_issued_ms
+                                    ? now_ms - txn_.challenge_issued_ms
+                                    : UINT64_MAX;
+    if (elapsed > txn_.command.apply_within_ms) {
+      const Status finished =
+          finish_transaction(txn_, ConfigPhase::Interrupted, ConfigReason::Deadline);
+      static_cast<void>(finished);
+      return;
+    }
+    const Status stored =
+        persist_phase(ConfigPhase::ApplyIntent, ConfigReason::Ok, txn_);
+    if (!stored) {
+      // The DECIDED record is durable and safe — a later boot interrupts
+      // it; the intent write retries on the next poll.
+      ++stats_.storage_failures;
+      return;
+    }
+    txn_.intent_pending = false;
+    OperationToken token{kInvalidOperationToken};
+    const Status applied = provider_->apply(config_.config_namespace,
+                                            txn_.next_snapshot.view(), token);
+    if (!applied) {
+      const Status restore = start_restore(txn_, ConfigReason::ApplyInterrupted);
+      static_cast<void>(restore);
+      return;
+    }
+    txn_.applying = true;
+    txn_.token = token;
+    phase_ = ConfigPhase::Applying;
+    return;
+  }
 
   if (txn_.applying) {
     bool done = false;
@@ -1598,25 +1705,50 @@ ConfigJournal::Transaction& ConfigJournal::boot_txn() noexcept {
 }
 
 Status ConfigJournal::recover(const std::uint32_t new_store_generation,
-                              const MonotonicMs now_ms) noexcept {
+                              const MonotonicMs now_ms,
+                              const bool reprovision) noexcept {
   if (!initialized_) {
     return Status::error(StatusCode::InvalidState, "config journal not initialized");
   }
   if (!quarantined_ && !uncertain_) {
     return Status::error(StatusCode::InvalidState, "config journal not impaired");
   }
-  if (new_store_generation <= proven_floor_) {
+  if (new_store_generation <= proven_floor_ ||
+      new_store_generation <= store_generation_) {
+    // Below either bound the generation has already been consumed this
+    // boot — re-minting it would make pre-loss artifacts indistinguishable
+    // from recovered ones.
     return Status::error(StatusCode::InvalidArgument,
                         "config recovery must exceed the proven generation");
+  }
+  if (!has_active_ && !reprovision) {
+    // No verifiable record survives: adopting an empty base would silently
+    // fabricate state — an undelegated authority decision. The journal
+    // stays quarantined/uncertain until the operator attests a
+    // re-provisioning under a fresh trust generation (04 §4.7, 06 §6.3:
+    // never an automatic return to revision 0).
+    return Status::error(StatusCode::RecoveryRequired,
+                        "config recovery needs re-provision attestation");
   }
   // Re-provision: the surviving known value (if any) is adopted under the
   // new generation; the proven revision floor is never regressed.
   JournalRecord& record = record_scratch_;
   record = durable_;
   record.store_generation = new_store_generation;
-  record.phase = has_active_ ? ConfigPhase::Interrupted : ConfigPhase::Idle;
+  // A surviving ACTIVE record stays ACTIVE: the configuration it proved
+  // was never interrupted, only the sibling evidence was lost — degrading
+  // it to INTERRUPTED would roll the target back to the previous snapshot
+  // for no reason. Any other survivor recovers as INTERRUPTED and
+  // re-derives state through the normal boot restore path.
+  record.phase = !has_active_
+                     ? ConfigPhase::Idle
+                     : (durable_.phase == ConfigPhase::Active
+                            ? ConfigPhase::Active
+                            : ConfigPhase::Interrupted);
   record.reason = ConfigReason::RecoveryRequired;
-  record.decision_revision = revision_floor_;
+  record.decision_revision = revision_floor_ > decision_revision_
+                                 ? revision_floor_
+                                 : decision_revision_;
   record.network = config_.network;
   record.target = config_.target;
   record.config_namespace = config_.config_namespace;
@@ -1640,6 +1772,23 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   reassembly_.active = false;
   const Status adopted = adopt_record(record);
   if (!adopted) return adopted;
+  // The adopted survivor's provider state must be re-issued for THIS boot:
+  // an interrupted record re-restores its prev snapshot; an ACTIVE record
+  // re-asserts its confirmed one. resolve stays false — the durable record
+  // is already terminal, nothing further persists on success.
+  if (provider_ != nullptr &&
+      (record.phase == ConfigPhase::Interrupted ||
+       record.phase == ConfigPhase::Active)) {
+    const ByteBuffer<endpoint::kConfigSnapshotMax>& snapshot =
+        record.phase == ConfigPhase::Active ? record.next_snapshot
+                                            : record.prev_snapshot;
+    if (snapshot.size > 0) {
+      boot_.restore_snapshot = snapshot;
+      boot_.restore_pending = true;
+      boot_.restore_started = false;
+      boot_.resolve = false;
+    }
+  }
   last_now_ms_ = now_ms;
   return Status::success();
 }
@@ -1871,6 +2020,10 @@ Status ConfigIssuer::commit_and_sign(
   sha256(canonical.view(), operation_hash);
 
   const std::uint64_t applied = ledger_.state().applied_sequence;
+  // Set when the canonical still needs its ledger commit — the normal
+  // applied<sequence path, or a re-mint after the unique-holder proof
+  // fails below.
+  bool needs_commit = applied < command.authority_sequence;
   if (applied >= command.authority_sequence) {
     if (applied == command.authority_sequence &&
         ledger_.last_operation_hash() == operation_hash) {
@@ -1942,10 +2095,26 @@ Status ConfigIssuer::commit_and_sign(
         return Status::error(StatusCode::InvalidState,
                             "config sequence ownership ambiguous");
       }
-      // Unique holder of a consumed sequence: this entry's own commit is
-      // the one that landed — fall through to signing, unchanged.
+      // Unique holder of a consumed sequence — but whether THIS entry's
+      // commit is the one that landed is UNPROVABLE: last_operation_hash
+      // covers only the newest commit and an outside ledger consumer may
+      // hold this sequence (the target's CAS axis is the revision, not
+      // the global sequence). Signing an unproven canonical could deliver
+      // a permit whose commit never happened — the wire contract's "sign
+      // only what the ledger proves" rule. Instead re-mint the same
+      // operation under a fresh sequence and commit it now: if the
+      // original commit did land, the ledger merely holds a duplicate —
+      // the unsigned original is never re-signed and the operation still
+      // lands exactly once.
+      command.authority_generation = ledger_.state().generation;
+      command.authority_sequence = ledger_.state().applied_sequence + 1U;
+      const Status encoded = endpoint::config_command_encode(command, canonical);
+      if (!encoded) return encoded;
+      sha256(canonical.view(), operation_hash);
+      needs_commit = true;
     }
-  } else {
+  }
+  if (needs_commit) {
     AuthorityOperation operation{};
     Status status =
         ledger_.build_operation(AuthorityOperationKind::RemoteConfig, operation_hash,
@@ -1979,9 +2148,20 @@ Status ConfigIssuer::clear_entry(const std::uint8_t slot) noexcept {
   if (slot >= kConfigIssuerOutboxSlots) {
     return Status::error(StatusCode::InvalidArgument, "config outbox slot invalid");
   }
-  std::array<std::uint8_t, kConfigOutboxRecordBytes> erased{};
-  erased.fill(0xFFU);
-  return storage_.write(slot, ByteView{erased.data(), erased.size()});
+  // Tombstone: a valid 28-byte header under the PENDING seal classifies as
+  // a never-committed (always discardable) record without rewriting the
+  // whole 2048-byte slot — the §6.8 flash budget counts writes. The prior
+  // full-size 0xFF erase did the same job at ~73x the write cost.
+  std::array<std::uint8_t, 28> tombstone{};
+  ByteWriter writer(MutableByteView{tombstone.data(), tombstone.size()});
+  Status status = writer.write_u32(kOutboxMagic);
+  if (status) status = writer.write_u16(kOutboxFormat);
+  if (status) status =
+      writer.write_u16(static_cast<std::uint16_t>(tombstone.size()));
+  if (status) status = writer.write_u32(kOutboxSchemaVersion);
+  if (status) status = writer.write_u32(0);  // pending seal: never committed
+  if (!status) return status;
+  return storage_.write(slot, ByteView{tombstone.data(), tombstone.size()});
 }
 
 Status ConfigIssuer::persist_entry(const std::uint8_t slot, const std::uint8_t state,
@@ -2050,10 +2230,18 @@ Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& state,
   if (st) st = reader.read_u32(seal);
   if (!st || magic != kOutboxMagic || format != kOutboxFormat ||
       schema != kOutboxSchemaVersion || length < kOutboxHeaderSize + 4 ||
-      length > kOutboxRecordMax || seal != kOutboxSealCommitted) {
-    // Pending or unverifiable entries are discardable: the canonical command
-    // was never signed, so nothing trusted it.
-    return Status::success();
+      length > kOutboxRecordMax) {
+    // Neither erased nor a legible record: the slot may hide a committed
+    // SIGNED entry whose signature was already consumed — never report it
+    // as a free slot.
+    return Status::error(StatusCode::IntegrityError, "config outbox slot unreadable");
+  }
+  if (seal != kOutboxSealCommitted) {
+    // A pending record (seal 0) was never committed and is always safe to
+    // discard; any other seal value under a legible header is corruption —
+    // the state byte cannot be trusted, so treat the slot as impaired.
+    if (seal == 0) return Status::success();
+    return Status::error(StatusCode::IntegrityError, "config outbox seal unknown");
   }
   std::uint8_t found_state = 0, reserved8 = 0;
   std::uint16_t reserved16 = 0, canonical_len = 0, permit_len = 0;
@@ -2068,7 +2256,9 @@ Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& state,
       (found_state != kOutboxPending && found_state != kOutboxSigned) ||
       canonical_len == 0 || canonical_len > endpoint::kRcc1MaxTotal ||
       permit_len > kConfigPermitObjectMax || expect != length) {
-    return Status::success();
+    // A committed-seal record whose fields do not validate may hold a
+    // consumed signature — impaired, never a free slot.
+    return Status::error(StatusCode::IntegrityError, "config outbox entry impaired");
   }
   st = reader.read_bytes(MutableByteView{canonical.bytes.data(), canonical_len});
   if (st) canonical.size = canonical_len;
@@ -2077,7 +2267,10 @@ Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& state,
   std::uint32_t crc = 0;
   if (st) st = reader.read_u32(crc);
   if (!st || crc32_iso_hdlc(ByteView{raw.data(), static_cast<std::size_t>(length) - 4}) != crc) {
-    return Status::success();
+    // Same argument: a CRC-failed SIGNED entry is not "empty" — its
+    // signature may already have been consumed, so the slot stays
+    // unavailable until an operator clears it.
+    return Status::error(StatusCode::IntegrityError, "config outbox entry crc");
   }
   state = found_state;
   return Status::success();

@@ -72,6 +72,11 @@ constexpr std::uint32_t kConfigAcceptWindowMs = 60000;
 // sustained rate plus the burst allowance, so config admits 2 per 60 s.
 constexpr std::uint32_t kConfigAcceptCapacity =
     kConfigAcceptPerMinute + kConfigAcceptBurst;
+// Outstanding challenges per journal (implementation bound — no contract
+// constant pins it). Keyed by requester client_nonce so one requester's
+// re-query refreshes only its own slot; a full table refuses rather than
+// evicting another requester's in-flight challenge.
+constexpr std::size_t kConfigChallengeSlots = 4;
 
 // --- Schema / TLV layer ---------------------------------------------------------
 
@@ -285,6 +290,13 @@ class ConfigRateLimiter {
     return true;
   }
 
+  // Return one token after a spend that produced nothing — a DECIDED write
+  // that faulted persisted no record, so the refusal consumes no budget
+  // (duplicates, refusals and status queries consume nothing).
+  void refund() noexcept {
+    if (tokens_ < kConfigAcceptCapacity) ++tokens_;
+  }
+
  private:
   std::uint32_t tokens_{kConfigAcceptCapacity};
   MonotonicMs last_ms_{0};
@@ -398,8 +410,15 @@ class ConfigJournal {
   // attests a fresh store generation and re-establishes intake. The
   // surviving "known value" (if any) is adopted under the new generation;
   // the proven revision floor is never regressed, so pre-loss permits can
-  // never re-validate. Never invoked implicitly.
-  Status recover(std::uint32_t new_store_generation, MonotonicMs now_ms) noexcept;
+  // never re-validate. Never invoked implicitly. When NO verifiable record
+  // survives, adopting a base would silently fabricate state — an
+  // undelegated authority decision — so recovery stays impaired unless
+  // `reprovision` explicitly attests this is a re-provisioning under a
+  // fresh trust generation (04 §4.7: total loss requires re-provisioning,
+  // never an automatic return to revision 0). The flag is unnecessary
+  // whenever a survivor exists; the survivor is adopted as-is either way.
+  Status recover(std::uint32_t new_store_generation, MonotonicMs now_ms,
+                 bool reprovision) noexcept;
 
   endpoint::ConfigPhase phase() const noexcept { return phase_; }
   std::uint64_t decision_revision() const noexcept { return decision_revision_; }
@@ -470,8 +489,10 @@ class ConfigJournal {
     bool applying{false};   // provider.apply token outstanding
     bool restoring{false};  // provider.restore token outstanding
     bool pending_persist{false};  // terminal record write deferred by a storage fault
+    bool intent_pending{false};   // APPLY_INTENT persist + apply deferred to poll()
     endpoint::ConfigPhase pending_phase{endpoint::ConfigPhase::Idle};
     endpoint::ConfigReason pending_reason{endpoint::ConfigReason::Ok};
+    MonotonicMs challenge_issued_ms{0};  // issue time of the consumed challenge
     endpoint::ConfigCommand command{};
     endpoint::EncodedConfigCommand canonical{};
     Digest256 command_digest{};
@@ -535,6 +556,9 @@ class ConfigJournal {
                           const Digest256& digest, MonotonicMs now_ms,
                           bool clock_known, ConfigVerdict& verdict) noexcept;
   Status reassemble_complete(MonotonicMs now_ms) noexcept;
+  // The outstanding challenge carrying `nonce`, or nullptr — the permit
+  // binds the nonce, so any live slot may satisfy it.
+  const Challenge* find_challenge(const std::array<std::uint8_t, 16>& nonce) const noexcept;
 
   ConfigJournalConfig config_{};
   ConfigJournalStorage& storage_;
@@ -559,7 +583,7 @@ class ConfigJournal {
   bool uncertain_{false};
   bool quarantined_{false};
 
-  Challenge challenge_{};
+  std::array<Challenge, kConfigChallengeSlots> challenges_{};
   Transaction txn_{};
   Boot boot_{};
   Reassembly reassembly_{};
