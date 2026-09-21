@@ -87,6 +87,15 @@ config ROUTELOOM_CONFIG_AUTHORITY_GENERATION
     default 1
     depends on ROUTELOOM_CONFIG
 
+config ROUTELOOM_TELEMETRY_REMOTE
+    bool "Answer remote Diagnostic (48) telemetry queries over the mesh"
+    default y
+    help
+        EXPERIMENTAL bench surface: the node answers end-protected
+        TelemetryQuery frames with bounded 128-byte snapshots of its
+        measured link state. Collection is always on; this only controls
+        remote answering (02-telemetry §4.2 opt-in).
+
 config ROUTELOOM_MIGRATION
     int "Channel migration mode (0=Disabled, 1=Observe, 2=Manual)"
     range 0 2

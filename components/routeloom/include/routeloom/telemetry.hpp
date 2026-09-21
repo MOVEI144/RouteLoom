@@ -53,6 +53,10 @@ struct PeerTelemetrySummary {
   std::int16_t rssi_ewma_q8_8{0};
   std::uint32_t rssi_samples{0};
   MonotonicMs last_sample_ms{0};
+  // Last observed receive channel of this peer's frames (diagnostic only —
+  // the attribution epoch is `channel`, this is the numeric RF channel).
+  std::uint8_t last_channel{0};
+  bool channel_present{false};
   ObservationProvenance provenance{ObservationProvenance::LocalDriver};
   bool occupied{false};
   bool rssi_present{false};
@@ -93,6 +97,10 @@ class PeerTelemetryTable {
     }
     entry->provenance = provenance;
     entry->last_sample_ms = now_ms;
+    if (metadata.channel_valid) {
+      entry->last_channel = metadata.channel;
+      entry->channel_present = true;
+    }
     if (!metadata.rssi_valid) return entry;
     entry->rssi_present = true;
     if (entry->rssi_samples == UINT32_MAX) {
@@ -176,10 +184,14 @@ constexpr std::size_t kDiagnosticPrefixSize = 4;
 constexpr std::size_t kTelemetryQueryBodySize = 24;      // prefix included
 constexpr std::size_t kTelemetrySnapshotBodySize = 128;  // prefix included
 constexpr std::size_t kDiagnosticRejectBodySize = 24;    // prefix included
+constexpr std::size_t kCapabilitiesReplyBodySize = 40;   // prefix included
 
 // TelemetryQuery validation bounds (04 §4.2).
 constexpr std::uint32_t kTelemetryMaxAgeLimitMs = 3000;
 constexpr std::uint8_t kTelemetryPeerSummaryClass = 255;
+// One outstanding remote query may occupy the routed lane at most this long;
+// the reply borrows the query's own remaining deadline and never extends it.
+constexpr std::uint32_t kTelemetryQueryLifetimeMs = 5000;
 
 struct TelemetryQuery {
   std::uint32_t request_id{0};  // nonzero
@@ -284,5 +296,35 @@ struct DiagnosticReject {
 Status diagnostic_reject_encode(const DiagnosticReject& reject,
                                 MutableByteView out) noexcept;
 Status diagnostic_reject_decode(ByteView body, DiagnosticReject& out) noexcept;
+
+// CapabilitiesReply feature bits (04 §capabilities): what this node is wired
+// to do RIGHT NOW — forward_v1 additionally requires the current effective
+// relay permission, permit_profiles advertises only configured AND accepted
+// profiles with ready providers, never every compiled algorithm.
+enum CapabilityFeature : std::uint8_t {
+  kCapForwardV1 = 1u << 0,
+  kCapLocalTelemetryV1 = 1u << 1,
+  kCapTransitFailureV1 = 1u << 2,
+  kCapRemoteTelemetryV1 = 1u << 3,
+  kCapBusyV1 = 1u << 4,
+};
+enum PermitProfileBit : std::uint8_t {
+  kPermitProfileDevHmac = 1u << 0,
+  kPermitProfileCoseEsp256 = 1u << 1,
+};
+
+// Fixed 40-byte link-only reply (subtype 2). A CapabilitiesQuery itself is
+// the bare 4-byte prefix (subtype 1) — no fields.
+struct CapabilitiesReply {
+  NodeId observer{kInvalidNodeId};
+  std::uint64_t observer_boot{0};
+  std::uint8_t features{0};
+  std::uint8_t permit_profiles{0};
+  bool relay_effective{false};
+};
+
+Status capabilities_reply_encode(const CapabilitiesReply& reply,
+                                 MutableByteView out) noexcept;
+Status capabilities_reply_decode(ByteView body, CapabilitiesReply& out) noexcept;
 
 }  // namespace routeloom

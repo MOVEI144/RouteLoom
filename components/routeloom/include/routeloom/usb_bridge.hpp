@@ -81,7 +81,7 @@ struct BridgeStats {
 
 class UsbBridge final : public UsbFrameSink, public NodeObserver,
                         public GatewayHostSink, public GatewayDeliveryObserver,
-                        public ConfigHostSink {
+                        public ConfigHostSink, public DiagnosticSink {
  public:
   struct Config {
     ByteView secret{};  // dev-profile shared secret; caller-owned, must outlive the bridge
@@ -116,6 +116,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // in HelloAck. The bridge is the component's ConfigHostSink — the async
   // 0x21/0x22/0x23 replies land on on_config_reply.
   Status attach_config(ConfigGateway& gateway) noexcept;
+
+  // Late diagnostics binding (m1-completion D1d): installs this bridge as
+  // the node's DiagnosticSink so remote TelemetrySnapshot/Reject bodies
+  // correlate to pending 0x30 requests, and advertises CAP_M1_DIAGNOSTICS_V1
+  // in HelloAck. Requires config_.mesh to be set; the remote-answer opt-in
+  // (telemetry_remote) stays the owner's separate decision.
+  Status attach_diagnostics() noexcept;
 
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
@@ -158,6 +165,12 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void on_config_reply(std::uint64_t request, std::uint8_t sub,
                        ConfigOpsResult result, NodeId target, ByteView body,
                        MonotonicMs now_ms) noexcept override;
+
+  // DiagnosticSink (D1d): a remote observer's end-verified Snapshot/Reject
+  // resolves the pending 0x30 request matching its request_id — correlation
+  // is on the diagnostic body's own id, never the transport message.
+  void on_diagnostic_body(NodeId observer, ByteView body,
+                          MonotonicMs now_ms) noexcept override;
 
   SessionState state() const noexcept { return state_; }
   std::uint64_t session_id() const noexcept {
@@ -261,6 +274,28 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void send_config_reply(std::uint64_t request, std::uint8_t sub,
                          ConfigOpsResult result, NodeId target, ByteView body,
                          MonotonicMs now_ms) noexcept;
+  // Diagnostic request (0x30): decode, gate on CAP_M1_DIAGNOSTICS_V1, then
+  // answer locally (CapabilitiesQuery, local TelemetryQuery) or admit a
+  // bounded remote TelemetryQuery whose reply lands on on_diagnostic_body.
+  void handle_diagnostic_request(std::uint64_t request, ByteView inner,
+                                 MonotonicMs now_ms) noexcept;
+  // Encodes + queues a 0x31 reply under `request`.
+  void send_diagnostic_reply(std::uint64_t request, ConfigOpsResult result,
+                             NodeId observer, ByteView body,
+                             MonotonicMs now_ms) noexcept;
+  // One in-flight remote telemetry query per bounded slot; correlated by
+  // the diagnostic body's own request_id, never the transport MessageId.
+  static constexpr std::size_t kPendingDiagnosticCapacity = 4;
+  struct PendingDiagnostic {
+    bool active{false};
+    std::uint32_t request_id{0};
+    std::uint64_t usb_request{0};
+    NodeId observer{kInvalidNodeId};
+    MonotonicMs expires_ms{0};
+  };
+  PendingDiagnostic* find_pending_diagnostic(std::uint32_t request_id,
+                                             NodeId observer) noexcept;
+  PendingDiagnostic* alloc_pending_diagnostic() noexcept;
   void send_receipt(const DispatchReceipt& receipt, std::uint64_t request,
                     MonotonicMs now_ms) noexcept;
   void send_query_response(const QueryResponse& response, std::uint64_t request,
@@ -430,6 +465,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   std::array<PendingIngress, kGatewayPendingMax> pending_ingress_{};
   std::array<PendingGatewaySend, kGatewayPendingMax> pending_sends_{};
   std::uint64_t next_ingress_request_{1};
+  // Bounded remote diagnostic queries (D1d): full -> the 0x30 request is
+  // refused with Busy, never silently queued beyond the bound.
+  std::array<PendingDiagnostic, kPendingDiagnosticCapacity> pending_diag_{};
   BridgeStats stats_{};
 };
 

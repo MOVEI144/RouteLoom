@@ -302,6 +302,13 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
 
   bool discovery_enabled() const noexcept { return discovery_enabled_; }
   bool relay_allowed() const noexcept { return relay_allowed_; }
+  // Live relay gate (01-forwarding §policy): config commits apply the flag
+  // to the running node — disabling stops NEW transit admission only;
+  // accepted work drains on its original deadlines.
+  void attach_node(routeloom::MeshNode* node) noexcept {
+    node_ = node;
+    if (node_ != nullptr) node_->set_relay_enabled(relay_allowed_);
+  }
 
  private:
   // A snapshot becomes "active" only once it is durable: persist the
@@ -351,6 +358,7 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
           break;
         case 3:
           relay_allowed_ = fields[i].value[0] != 0;
+          if (node_ != nullptr) node_->set_relay_enabled(relay_allowed_);
           break;
         default:
           break;
@@ -364,6 +372,7 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
   std::uint64_t token_id_{0};
   bool discovery_enabled_{true};
   bool relay_allowed_{true};
+  routeloom::MeshNode* node_{nullptr};
 };
 
 // Maintenance/admission boundary for a mesh-only reference node (04 §4.8):
@@ -657,6 +666,10 @@ extern "C" void app_main(void) {
       routeloom::endpoint::kConfigNamespaceSdk, config_journal);
   if (!status) fail(status.detail);
   runtime.node().set_config_sink(&config_target);
+  // The committed config image drives the live relay gate from now on
+  // (field 3 relay_allowed); attach after the sink so the gate reflects the
+  // durable snapshot, not just the compile-time default.
+  config_provider.attach_node(&runtime.node());
   ESP_LOGW(kTag,
            "EXPERIMENTAL config target active (dev HMAC permit profile, not "
            "a production identity)");
@@ -666,6 +679,13 @@ extern "C" void app_main(void) {
   ESP_LOGI(kTag, "config store writes=%llu bytes=%llu",
            static_cast<unsigned long long>(cfg_writes.commits),
            static_cast<unsigned long long>(cfg_writes.bytes));
+#endif
+
+#if CONFIG_ROUTELOOM_TELEMETRY_REMOTE
+  // Bench surface (02-telemetry §4.2): answer routed Diagnostic(48)
+  // telemetry queries. Local collection is unconditional; this is only the
+  // remote-answer opt-in.
+  runtime.node().set_telemetry_remote(true);
 #endif
 
 #if CONFIG_ROUTELOOM_DEEP_SLEEP

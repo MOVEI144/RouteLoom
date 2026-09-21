@@ -39,6 +39,8 @@ using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
 
 constexpr NetworkId kNet = 7;
+const std::uint8_t kPayload[] = "telemetry-test";
+ByteView payload_view() { return ByteView{kPayload, sizeof(kPayload) - 1}; }
 
 RadioRxMetadataV2 meta(const std::int8_t rssi, const std::uint32_t binding = 7,
                        const std::uint32_t radio = 3,
@@ -481,6 +483,158 @@ void test_node_tx_observation() {
   f.node->note_radio_tx(obs, 140);
 }
 
+// --- D1c: Diagnostic (48) query -> snapshot over the routed lane --------------
+
+struct DiagSink final : DiagnosticSink {
+  std::vector<std::vector<std::uint8_t>> bodies;
+  void on_diagnostic_body(NodeId, ByteView body, MonotonicMs) noexcept override {
+    bodies.emplace_back(body.data, body.data + body.size);
+  }
+};
+
+// A remote TelemetryQuery (end-protected type48) is answered with a real
+// TelemetrySnapshot carrying the peer summary the queried node measured.
+void test_node_remote_query_snapshot() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* a = world.add(1);
+  auto* b = world.add(2);
+  DiagSink sink_a;
+  a->set_diagnostic_sink(&sink_a);
+  b->set_telemetry_remote(true);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+
+  // Seed B's peer summary for A with driver-provenance RX evidence.
+  const auto seed = craft_data(*world.security[2], 1, 2, 900);
+  RadioRxMetadataV2 v2 = meta(-61, /*binding=*/5, /*radio=*/2, /*epoch=*/1);
+  v2.channel = 6;
+  v2.channel_valid = true;
+  b->on_radio_receive(1, seed.view(), v2, world.now);
+
+  TelemetryQuery q{};
+  q.request_id = 0xCAFE;
+  q.peer = 1;
+  q.direction = ObservationDirection::Egress;
+  q.length_class = kTelemetryPeerSummaryClass;
+  q.max_age_ms = 0;
+  CHECK_OK(a->send_telemetry_query(2, q, world.now));
+  world.run(500, 5);
+
+  CHECK(!sink_a.bodies.empty());
+  if (sink_a.bodies.empty()) return;
+  const auto& body = sink_a.bodies.back();
+  CHECK(body.size() == kTelemetrySnapshotBodySize);
+  CHECK(body[0] == kDiagnosticBodyVersion && body[1] == 4);
+  TelemetrySnapshot snap{};
+  CHECK_OK(telemetry_snapshot_decode(
+      ByteView{body.data(), body.size()}, snap));
+  CHECK(snap.request_id == 0xCAFE);
+  CHECK(snap.observer == 2 && snap.peer == 1);
+  CHECK((snap.validity & kTelemetryValidRssi) != 0);
+  // The query's own arrival refreshes the summary via the sim's V1 path —
+  // and its zeroed generations mismatch the seeded V2 identity, so the
+  // record restarts (stale identity never merges into a fresh window).
+  CHECK((snap.validity & kTelemetrySourceInjectedTest) != 0);
+  // Route ads and the query itself all arrive via V1 with rssi -60.
+  CHECK(snap.rssi_samples >= 1 && snap.rssi_last == -60);
+  CHECK(snap.binding.value == 0 && snap.radio.value == 0);
+}
+
+// Remote answering is opt-in: a node with telemetry_remote off answers an
+// authenticated query with an honest Denied reject, not silence.
+void test_node_remote_query_denied() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* a = world.add(1);
+  world.add(2);
+  DiagSink sink_a;
+  a->set_diagnostic_sink(&sink_a);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+
+  TelemetryQuery q{};
+  q.request_id = 7;
+  q.peer = 1;
+  q.length_class = kTelemetryPeerSummaryClass;
+  CHECK_OK(a->send_telemetry_query(2, q, world.now));
+  world.run(500, 5);
+
+  CHECK(!sink_a.bodies.empty());
+  if (sink_a.bodies.empty()) return;
+  const auto& body = sink_a.bodies.back();
+  CHECK(body.size() == kDiagnosticRejectBodySize && body[1] == 6);
+  DiagnosticReject rej{};
+  CHECK_OK(diagnostic_reject_decode(ByteView{body.data(), body.size()}, rej));
+  CHECK(rej.request_id == 7 &&
+        rej.reason == DiagnosticRejectReason::Denied &&
+        rej.observer == 2);
+}
+
+// A query for a peer with no observation record gets NoPeer, not a zero
+// record (04 §4.2 — absence is evidence, never an invented measurement).
+void test_node_remote_query_nopeer() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* a = world.add(1);
+  auto* b = world.add(2);
+  DiagSink sink_a;
+  a->set_diagnostic_sink(&sink_a);
+  b->set_telemetry_remote(true);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+
+  TelemetryQuery q{};
+  q.request_id = 9;
+  q.peer = 77;
+  q.length_class = kTelemetryPeerSummaryClass;
+  CHECK_OK(a->send_telemetry_query(2, q, world.now));
+  world.run(500, 5);
+
+  CHECK(!sink_a.bodies.empty());
+  if (sink_a.bodies.empty()) return;
+  DiagnosticReject rej{};
+  CHECK_OK(diagnostic_reject_decode(
+      ByteView{sink_a.bodies.back().data(), sink_a.bodies.back().size()}, rej));
+  CHECK(rej.request_id == 9 &&
+        rej.reason == DiagnosticRejectReason::NoPeer);
+}
+
+// --- D2: relay gate -----------------------------------------------------------
+
+// A node with relay disabled refuses new transit work honestly — the frame
+// is not forwarded and the refusal is counted. Final-destination traffic to
+// the leaf itself still flows.
+void test_relay_gate() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  world.add(1);
+  auto* relay = world.add(2);
+  world.add(3);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.link(2, 3, 1, 1);
+  // Let route advertisements propagate 1 -> 2 -> 3 direction evidence.
+  world.run(300, 5);
+  world.net.sights.clear();
+
+  relay->set_relay_enabled(false);
+  CHECK(!relay->transit_permitted());
+  CHECK(relay->relay_enabled() == false);
+
+  SendOptions opts{};
+  MessageId id{};
+  (void)world.at(1)->send(3, payload_view(), opts, world.now, id);
+  world.run(800, 5);
+
+  // The relay must not have emitted a hop-2 DATA forward.
+  std::size_t hop2_sights = 0;
+  for (const auto& s : world.net.sights) {
+    if (s.type == FrameType::Data && s.from == 2 && s.to == 3) ++hop2_sights;
+  }
+  CHECK(hop2_sights == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -493,6 +647,10 @@ int main() {
   test_node_rx_telemetry();
   test_node_rx_unauthenticated();
   test_node_tx_observation();
+  test_node_remote_query_snapshot();
+  test_node_remote_query_denied();
+  test_node_remote_query_nopeer();
+  test_relay_gate();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d telemetry checks failed\n", failures);

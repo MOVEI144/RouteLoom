@@ -1698,6 +1698,15 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     return;
   }
 
+  // Relay policy gate (01-forwarding §policy): a disabled/draining relay
+  // refuses NEW transit admission before any dedup/route work — accepted
+  // frames already in flight drain on their own deadlines. Honest refusal:
+  // the sender's bounded retries expire, never a fabricated accept.
+  if (!transit_permitted()) {
+    ++transit_refused_;
+    observer_.on_diagnostic("TRANSIT_RELAY_DISABLED", peer, &frame.header.message);
+    return;
+  }
   const auto route = routes_.best(frame.header.destination);
   if (!route.valid || route.next_hop == peer) {
     // A route problem, not a capacity problem: keep the legacy drop +
@@ -1798,6 +1807,8 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       } else {
         observer_.on_diagnostic("SERVICE_NO_ENDPOINT", peer, &frame.header.message);
       }
+    } else if (type == FrameType::Diagnostic) {
+      handle_diagnostic(plain, peer, now_ms);
     } else {
       // Control/ControlObject/ObjectChunk/ObjectAck: the config endpoint
       // owns the terminal payload. A node without one reports it honestly —
@@ -1813,6 +1824,12 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
 
   // Transit: bounded admission, forward the still-protected bytes, then
   // ACK — a relay never interprets a routed payload terminally.
+  if (!transit_permitted()) {
+    ++transit_refused_;
+    observer_.on_diagnostic("ROUTED_TRANSIT_RELAY_DISABLED", peer,
+                            &frame.header.message);
+    return;
+  }
   const auto route = routes_.best(frame.header.destination);
   if (!route.valid || route.next_hop == peer) {
     observer_.on_diagnostic("ROUTED_TRANSIT_NO_ROUTE", peer, &frame.header.message);
@@ -2278,6 +2295,19 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       }
       break;
     }
+    case FrameType::Diagnostic:
+      // 02-telemetry §4.2: dispatch on the outer protection class first.
+      // End-protected diagnostics ride the routed lane (dedup/forward/
+      // terminal); link-only subtypes are hop-1 local handling only.
+      if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+        handle_routed(frame, peer, now_ms);
+      } else if (frame.header.destination == config_.node) {
+        handle_diagnostic_link(peer, frame, now_ms);
+      } else {
+        observer_.on_diagnostic("DIAGNOSTIC_SCOPE_REJECTED", peer,
+                                &frame.header.message);
+      }
+      break;
     case FrameType::Busy:
       // Link-scoped congestion feedback (03-congestion.md §5): strictly
       // 1-hop, bound to the immediate peer, never end-protected.
@@ -2737,6 +2767,253 @@ const ObservationBucket* MeshNode::telemetry_bucket(
     const ObservationKey& key) const noexcept {
   return observations_.find(
       [&](const ObservationBucket& value) { return value.key == key; });
+}
+
+// ---------------------------------------------------------------------------
+// D1c Diagnostic (48) dispatch (02-telemetry §4.2)
+// ---------------------------------------------------------------------------
+
+Status MeshNode::send_telemetry_query(const NodeId observer,
+                                      const TelemetryQuery& query,
+                                      const MonotonicMs now_ms) noexcept {
+  if (!started_) {
+    return Status::error(StatusCode::InvalidState, "node not started");
+  }
+  if (observer == kInvalidNodeId || observer == kBroadcastNodeId ||
+      observer == config_.node) {
+    return Status::error(StatusCode::InvalidArgument, "invalid observer");
+  }
+  std::array<std::uint8_t, kTelemetryQueryBodySize> body{};
+  const Status status =
+      telemetry_query_encode(query, MutableByteView{body.data(), body.size()});
+  if (!status) return status;
+  // Bounded reply path: the query's own lifetime (capped at the 5 s design
+  // bound) limits how long the exchange may occupy the routed lane.
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  return queue_typed_job(FrameType::Diagnostic, JobOwner::Diagnostic, id,
+                         observer, ByteView{body.data(), body.size()}, 0,
+                         kTelemetryQueryLifetimeMs, Priority::Normal, now_ms);
+}
+
+Status MeshNode::queue_diagnostic_reply(const NodeId destination,
+                                        const ByteView body,
+                                        const std::uint32_t lifetime_ms,
+                                        const MonotonicMs now_ms) noexcept {
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  return queue_typed_job(FrameType::Diagnostic, JobOwner::Diagnostic, id,
+                         destination, body, 0, lifetime_ms, Priority::Normal,
+                         now_ms);
+}
+
+Status MeshNode::build_telemetry_snapshot(
+    const TelemetryQuery& query, const MonotonicMs now_ms,
+    TelemetrySnapshot& out, DiagnosticRejectReason& reject_reason) noexcept {
+  const PeerTelemetrySummary* summary = telemetry_peers_.find(query.peer);
+  if (summary == nullptr) {
+    reject_reason = DiagnosticRejectReason::NoPeer;
+    return Status::error(StatusCode::NotFound, "no telemetry for peer");
+  }
+  if (summary->stale) {
+    reject_reason = DiagnosticRejectReason::Stale;
+    return Status::error(StatusCode::InvalidState, "telemetry stale");
+  }
+  const std::uint32_t age_ms =
+      now_ms > summary->last_sample_ms ? now_ms - summary->last_sample_ms : 0;
+  if (query.max_age_ms != 0 && age_ms > query.max_age_ms) {
+    reject_reason = DiagnosticRejectReason::Stale;
+    return Status::error(StatusCode::Expired, "telemetry older than bound");
+  }
+
+  out = TelemetrySnapshot{};
+  out.request_id = query.request_id;
+  out.observer = config_.node;
+  out.observer_boot = config_.boot_incarnation;
+  out.peer = query.peer;
+  out.binding = summary->binding;
+  out.radio = summary->radio;
+  out.channel_epoch = summary->channel;
+  out.channel = summary->channel_present ? summary->last_channel : 0;
+  out.direction = query.direction;
+  out.length_class = query.length_class;
+  out.sampled_at_ms = summary->last_sample_ms;
+  out.sample_age_ms = age_ms;
+  out.event_drops = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(telemetry_event_drops_, UINT32_MAX));
+
+  if (summary->rssi_present) {
+    out.validity |= kTelemetryValidRssi;
+    out.rssi_last = summary->rssi_last;
+    out.rssi_min = summary->rssi_min;
+    out.rssi_max = summary->rssi_max;
+    out.rssi_ewma_q8_8 = summary->rssi_ewma_q8_8;
+    out.rssi_samples = summary->rssi_samples;
+    if (summary->rssi_saturated) out.saturation_mask |= kSatRssiSamples;
+  }
+  out.validity |= summary->provenance == ObservationProvenance::LocalDriver
+                      ? kTelemetrySourceLocalDriver
+                      : kTelemetrySourceInjectedTest;
+  if (summary->stale) out.validity |= kTelemetryStale;
+
+  // A peer-summary-class query stops at the RSSI record; a bucket class
+  // additionally fills the counters for that exact observation key.
+  if (query.length_class != kTelemetryPeerSummaryClass) {
+    const ObservationKey key{summary->binding, query.direction, summary->radio,
+                             summary->channel, query.length_class, query.peer};
+    const ObservationBucket* bucket = telemetry_bucket(key);
+    if (bucket != nullptr) {
+      const auto clamp = [](const std::uint64_t v) {
+        return static_cast<std::uint32_t>(std::min<std::uint64_t>(v, UINT32_MAX));
+      };
+      out.validity |= kTelemetryValidBucket;
+      out.window_ms = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(now_ms - bucket->window_start_ms, UINT32_MAX));
+      out.tx_submitted = clamp(bucket->tx_submitted);
+      out.tx_mac_success = bucket->tx_mac_success;
+      out.tx_mac_fail = bucket->tx_mac_fail;
+      out.tx_unknown = clamp(bucket->unknown_results);
+      out.sdk_retries = bucket->sdk_retries;
+      out.hop_accepts = clamp(bucket->hop_accepted);
+      out.hop_timeouts = bucket->hop_timeouts;
+      out.busy = clamp(bucket->busy_deferrals);
+      out.queue_us_ewma = bucket->queue_sojourn_ms_ewma * 1000;
+      if (bucket->service_samples > 0) {
+        out.validity |= kTelemetryValidDriverEwma;
+        out.driver_us_ewma = bucket->driver_service_us_ewma;
+      }
+      out.saturation_mask |= bucket->saturation_mask;
+      if (bucket->stale) out.validity |= kTelemetryStale;
+      if (bucket->current.incomplete) out.validity |= kTelemetryWindowIncomplete;
+    }
+    // No matching bucket is not an error: the summary stands alone with the
+    // bucket-validity bit clear (04 §4.2 — never invent a zero measurement).
+  }
+  return Status::success();
+}
+
+// CapabilitiesReply (04 §capabilities): advertises only what is wired AND
+// currently permitted — forward_v1 requires the live relay gate, not just
+// build support; permit_profiles lists only profiles with a ready endpoint.
+CapabilitiesReply MeshNode::build_capabilities_reply() const noexcept {
+  CapabilitiesReply reply{};
+  reply.observer = config_.node;
+  reply.observer_boot = config_.boot_incarnation;
+  reply.features = kCapLocalTelemetryV1 | kCapBusyV1;
+  if (transit_permitted()) reply.features |= kCapForwardV1;
+  if (telemetry_remote_) reply.features |= kCapRemoteTelemetryV1;
+  reply.relay_effective = transit_permitted();
+  if (config_sink_ != nullptr) reply.permit_profiles |= kPermitProfileDevHmac;
+  return reply;
+}
+
+void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
+                                 const NodeId peer,
+                                 const MonotonicMs now_ms) noexcept {
+  const ByteView body{frame.payload.data(), frame.payload_size};
+  // Subtype dispatch happens on the end-verified body only — a malformed or
+  // unversioned body is a drop, never a fallthrough to a link-only parser.
+  if (body.size < kDiagnosticPrefixSize || body.data[0] != kDiagnosticBodyVersion ||
+      body.data[2] != 0 || body.data[3] != 0) {
+    observer_.on_diagnostic("DIAGNOSTIC_BODY_REJECTED", peer,
+                            &frame.header.message);
+    return;
+  }
+  const auto subtype = static_cast<DiagnosticSubtype>(body.data[1]);
+  const auto origin = frame.header.origin;
+  const std::uint32_t lifetime_ms = frame.header.remaining_deadline_ms;
+
+  auto reply_reject = [&](const DiagnosticRejectReason reason,
+                          const std::uint32_t request_id) {
+    DiagnosticReject reject{};
+    reject.request_id = request_id;
+    reject.reason = reason;
+    reject.observer = config_.node;
+    std::array<std::uint8_t, kDiagnosticRejectBodySize> out{};
+    if (!diagnostic_reject_encode(reject,
+                                  MutableByteView{out.data(), out.size()})) {
+      return;
+    }
+    if (!queue_diagnostic_reply(origin, ByteView{out.data(), out.size()},
+                                lifetime_ms, now_ms)) {
+      // A reject that cannot be queued is a counted loss, never a spin.
+      ++telemetry_event_drops_;
+    }
+  };
+
+  switch (subtype) {
+    case DiagnosticSubtype::TelemetryQuery: {
+      TelemetryQuery query{};
+      if (!telemetry_query_decode(body, query).ok()) {
+        observer_.on_diagnostic("DIAGNOSTIC_QUERY_REJECTED", peer,
+                                &frame.header.message);
+        return;
+      }
+      if (!telemetry_remote_) {
+        reply_reject(DiagnosticRejectReason::Denied, query.request_id);
+        return;
+      }
+      TelemetrySnapshot snapshot{};
+      DiagnosticRejectReason reason{};
+      if (!build_telemetry_snapshot(query, now_ms, snapshot, reason)) {
+        reply_reject(reason, query.request_id);
+        return;
+      }
+      std::array<std::uint8_t, kTelemetrySnapshotBodySize> out{};
+      if (!telemetry_snapshot_encode(snapshot,
+                                     MutableByteView{out.data(), out.size()})) {
+        ++telemetry_event_drops_;
+        return;
+      }
+      if (!queue_diagnostic_reply(origin, ByteView{out.data(), out.size()},
+                                  lifetime_ms, now_ms)) {
+        ++telemetry_event_drops_;
+      }
+      return;
+    }
+    case DiagnosticSubtype::TelemetrySnapshot:
+    case DiagnosticSubtype::DiagnosticReject:
+      if (diagnostic_sink_ != nullptr) {
+        diagnostic_sink_->on_diagnostic_body(origin, body, now_ms);
+      } else {
+        observer_.on_diagnostic("DIAGNOSTIC_NO_ENDPOINT", peer,
+                                &frame.header.message);
+      }
+      return;
+    default:
+      // Unknown/unsupported subtype on an authenticated body: honest reject
+      // when a request_id is present, otherwise a counted drop (04 §4.2).
+      if (body.size >= 8) {
+        std::uint32_t request_id = 0;
+        for (int i = 0; i < 4; ++i) {
+          request_id = (request_id << 8U) | body.data[4 + i];
+        }
+        reply_reject(DiagnosticRejectReason::Unsupported, request_id);
+      } else {
+        ++telemetry_event_drops_;
+      }
+      return;
+  }
+}
+
+void MeshNode::handle_diagnostic_link(const NodeId peer,
+                                      const wire::LinkOpenedFrame& frame,
+                                      const MonotonicMs now_ms) noexcept {
+  // Link-only Diagnostic subtypes (CapabilitiesQuery/Reply, TransitFailure):
+  // link-authenticated hop-1 traffic — surfaced to the sink for correlation,
+  // never forwarded and never answered on a routed lane.
+  const ByteView body{frame.protected_payload.data(),
+                      frame.header.payload_length};
+  if (body.size < kDiagnosticPrefixSize ||
+      body.data[0] != kDiagnosticBodyVersion) {
+    observer_.on_diagnostic("DIAGNOSTIC_BODY_REJECTED", peer,
+                            &frame.header.message);
+    return;
+  }
+  if (diagnostic_sink_ != nullptr) {
+    diagnostic_sink_->on_diagnostic_body(peer, body, now_ms);
+  } else {
+    observer_.on_diagnostic("DIAGNOSTIC_NO_ENDPOINT", peer,
+                            &frame.header.message);
+  }
 }
 
 // ---------------------------------------------------------------------------

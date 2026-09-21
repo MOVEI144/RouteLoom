@@ -47,6 +47,14 @@ constexpr std::uint32_t kCapGatewayEndpointV1 = 1u << 3;
 // host lane without the remote-config endpoint.
 constexpr std::uint32_t kCapConfigEndpointV1 = 1u << 4;
 
+// m1-completion D1d (04-cross-cutting §USB proposal): the device serves the
+// Diagnostic HostOps subcommands 0x30/0x31 — a DiagnosticRequest tunnels a
+// bounded diagnostic body (local CapabilitiesQuery or local/remote
+// TelemetryQuery) and the DiagnosticResponse carries the outcome. Advertised
+// only when a diagnostic handler is attached; bound into the authenticated
+// Hello transcript like the other capability bits.
+constexpr std::uint32_t kCapM1DiagnosticsV1 = 1u << 5;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
@@ -65,6 +73,8 @@ enum class HostOpsSub : std::uint8_t {
   ConfigPermit = 0x21,      // H→G request: permit transfer -> async 0x21 reply
   ConfigStatus = 0x22,      // G→H reply: ControlStatus for a 0x20 query
   ConfigChallenge = 0x23,   // H→G query / G→H reply: ControlChallenge exchange
+  DiagnosticRequest = 0x30, // H→G request: observer:u64 || diagnostic body
+  DiagnosticResponse = 0x31,// G→H reply: result/observer/body_len || body
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -713,5 +723,32 @@ Status encode_config_permit(const ConfigPermitRequest& request, MutableByteView 
 Status encode_config_reply(HostOpsSub sub, const ConfigReply& reply,
                            MutableByteView out, std::size_t& written) noexcept;
 Status decode_config_reply(ByteView inner, HostOpsSub sub, ConfigReply& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Diagnostic HostOps family (m1-completion 04-cross-cutting §USB proposal).
+//
+// 0x30 DIAGNOSTIC_REQUEST (H→G): observer:u64 || diagnostic_body. The body is
+//   a type-48 wire body INCLUDING its 4-byte prefix: a CapabilitiesQuery
+//   (4B) is answered locally only — link-only discovery is never tunnelled
+//   as a remote mesh query; a TelemetryQuery (24B) is answered locally when
+//   observer == this node, else forwarded end-protected and the response
+//   lands asynchronously on 0x31 under the same frame-level request id.
+// 0x31 DIAGNOSTIC_RESPONSE (G→H): result:u16 || observer:u64 || body_len:u16
+//   || body. Body is the verbatim diagnostic body — CapabilitiesReply (40B),
+//   TelemetrySnapshot (128B) or DiagnosticReject (24B); empty on a local
+//   failure result. Result uses the ConfigOpsResult u16 space.
+struct DiagnosticRequestView {
+  NodeId observer{kInvalidNodeId};
+  ByteView body{};  // borrows `inner`; includes the 4-byte diagnostic prefix
+};
+constexpr std::size_t kDiagnosticRequestFixed = 8;    // observer:u64
+constexpr std::size_t kDiagnosticReplyFixed = 12;     // result + observer + len
+constexpr std::size_t kDiagnosticReplyMaxBody = 128;  // TelemetrySnapshot
+
+Status decode_diagnostic_request(ByteView inner,
+                                 DiagnosticRequestView& out) noexcept;
+Status encode_diagnostic_reply(std::uint16_t result, NodeId observer,
+                               ByteView body, MutableByteView out,
+                               std::size_t& written) noexcept;
 
 }  // namespace routeloom::usb

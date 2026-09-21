@@ -350,4 +350,76 @@ Status diagnostic_reject_decode(const ByteView body, DiagnosticReject& out) noex
   return Status::success();
 }
 
+// CapabilitiesReply layout (40 B): prefix4 || features1 || permit_profiles1
+// || relay_effective1 || reserved1 || observer8 || observer_boot8 || reserved16.
+Status capabilities_reply_encode(const CapabilitiesReply& reply,
+                                 const MutableByteView out) noexcept {
+  if (out.size != kCapabilitiesReplyBodySize ||
+      reply.observer == kInvalidNodeId ||
+      reply.observer == kBroadcastNodeId ||
+      (reply.features & ~0x1Fu) != 0 || (reply.permit_profiles & ~0x3u) != 0) {
+    return reject();
+  }
+  ByteWriter writer{out};
+  Status status = prefix_write(writer, DiagnosticSubtype::CapabilitiesReply);
+  if (!status) return status;
+  status = writer.write_u8(reply.features);
+  if (!status) return status;
+  status = writer.write_u8(reply.permit_profiles);
+  if (!status) return status;
+  status = writer.write_u8(reply.relay_effective ? 1 : 0);
+  if (!status) return status;
+  status = writer.write_u8(0);
+  if (!status) return status;
+  status = writer.write_u64(reply.observer);
+  if (!status) return status;
+  status = writer.write_u64(reply.observer_boot);
+  if (!status) return status;
+  for (int i = 0; i < 16; ++i) {
+    status = writer.write_u8(0);
+    if (!status) return status;
+  }
+  return Status::success();
+}
+
+Status capabilities_reply_decode(const ByteView body,
+                                 CapabilitiesReply& out) noexcept {
+  if (body.size != kCapabilitiesReplyBodySize) return reject();
+  ByteReader reader{body};
+  Status status = prefix_read(reader, DiagnosticSubtype::CapabilitiesReply);
+  if (!status) return status;
+  std::uint8_t features = 0, profiles = 0, relay = 0, reserved = 0;
+  std::uint64_t observer = 0, boot = 0;
+  status = reader.read_u8(features);
+  if (!status) return status;
+  status = reader.read_u8(profiles);
+  if (!status) return status;
+  status = reader.read_u8(relay);
+  if (!status) return status;
+  status = reader.read_u8(reserved);
+  if (!status) return status;
+  status = reader.read_u64(observer);
+  if (!status) return status;
+  status = reader.read_u64(boot);
+  if (!status) return status;
+  for (int i = 0; i < 16; ++i) {
+    std::uint8_t pad = 0;
+    status = reader.read_u8(pad);
+    if (!status) return status;
+    reserved |= pad;
+  }
+  if (!expect_consumed(reader)) return reject();
+  if ((features & ~0x1Fu) != 0 || (profiles & ~0x3u) != 0 || relay > 1 ||
+      reserved != 0 || observer == kInvalidNodeId ||
+      observer == kBroadcastNodeId) {
+    return reject();
+  }
+  out.features = features;
+  out.permit_profiles = profiles;
+  out.relay_effective = relay != 0;
+  out.observer = observer;
+  out.observer_boot = boot;
+  return Status::success();
+}
+
 }  // namespace routeloom

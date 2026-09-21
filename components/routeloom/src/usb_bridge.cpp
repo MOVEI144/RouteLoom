@@ -5,6 +5,7 @@
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/telemetry.hpp"
 
 namespace routeloom::usb {
 namespace {
@@ -77,6 +78,15 @@ Status UsbBridge::attach_config(ConfigGateway& gateway) noexcept {
   return Status::success();
 }
 
+Status UsbBridge::attach_diagnostics() noexcept {
+  if (config_.mesh == nullptr) {
+    return Status::error(StatusCode::InvalidState, "diagnostics needs mesh");
+  }
+  config_.mesh->set_diagnostic_sink(this);
+  config_.capability |= kCapM1DiagnosticsV1;
+  return Status::success();
+}
+
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.push(input, now_ms);
@@ -106,6 +116,17 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
   // Gateway lane: resolved endpoints become sends, outstanding ingress is
   // resent once inside its ack window, and stale slots expire.
   pump_gateway(now_ms);
+  // Remote diagnostic queries expire into an honest Timeout reply — a lost
+  // snapshot is reported, never left hanging or claimed answered.
+  for (auto& slot : pending_diag_) {
+    if (slot.active && now_ms >= slot.expires_ms) {
+      const std::uint64_t usb_request = slot.usb_request;
+      const NodeId observer = slot.observer;
+      slot = PendingDiagnostic{};
+      send_diagnostic_reply(usb_request, ConfigOpsResult::Timeout, observer,
+                            ByteView{}, now_ms);
+    }
+  }
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
       data_q_.empty()) {
@@ -553,6 +574,15 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       send_error(UsbErrorCode::ProtocolError, request, "STATUS_DIRECTION",
                  now_ms);
       break;
+    case HostOpsSub::DiagnosticRequest:
+      handle_diagnostic_request(request, inner, now_ms);
+      break;
+    case HostOpsSub::DiagnosticResponse:
+      // 0x31 is device→host only — a host issuing one is a protocol
+      // violation, never a request to answer.
+      send_error(UsbErrorCode::ProtocolError, request, "DIAG_DIRECTION",
+                 now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
@@ -602,6 +632,188 @@ void UsbBridge::on_config_reply(const std::uint64_t request,
                                 const NodeId target, const ByteView body,
                                 const MonotonicMs now_ms) noexcept {
   send_config_reply(request, sub, result, target, body, now_ms);
+}
+
+UsbBridge::PendingDiagnostic* UsbBridge::find_pending_diagnostic(
+    const std::uint32_t request_id, const NodeId observer) noexcept {
+  for (auto& slot : pending_diag_) {
+    if (slot.active && slot.request_id == request_id &&
+        slot.observer == observer) {
+      return &slot;
+    }
+  }
+  return nullptr;
+}
+
+UsbBridge::PendingDiagnostic* UsbBridge::alloc_pending_diagnostic() noexcept {
+  for (auto& slot : pending_diag_) {
+    if (!slot.active) return &slot;
+  }
+  return nullptr;
+}
+
+void UsbBridge::send_diagnostic_reply(const std::uint64_t request,
+                                      const ConfigOpsResult result,
+                                      const NodeId observer,
+                                      const ByteView body,
+                                      const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kDiagnosticReplyFixed +
+                              kDiagnosticReplyMaxBody>
+      encoded{};
+  std::size_t written = 0;
+  if (encode_diagnostic_reply(static_cast<std::uint16_t>(result), observer,
+                              body,
+                              MutableByteView{encoded.data(), encoded.size()},
+                              written)) {
+    enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), written},
+            now_ms);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
+                                          const ByteView inner,
+                                          const MonotonicMs now_ms) noexcept {
+  DiagnosticRequestView req{};
+  if (!decode_diagnostic_request(inner, req).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "DIAG_REQ_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapM1DiagnosticsV1) == 0 ||
+      config_.mesh == nullptr) {
+    send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  // Body must be a version-1 diagnostic prefix with a known subtype.
+  if (req.body.size < kDiagnosticPrefixSize ||
+      req.body.data[0] != kDiagnosticBodyVersion || req.body.data[2] != 0 ||
+      req.body.data[3] != 0) {
+    send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  const auto subtype = static_cast<DiagnosticSubtype>(req.body.data[1]);
+  const bool local = req.observer == config_.node;
+
+  if (subtype == DiagnosticSubtype::CapabilitiesQuery) {
+    // Link-only discovery is never tunnelled to a remote mesh target.
+    if (!local) {
+      send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
+                            ByteView{}, now_ms);
+      return;
+    }
+    std::array<std::uint8_t, kCapabilitiesReplyBodySize> out{};
+    if (!capabilities_reply_encode(config_.mesh->build_capabilities_reply(),
+                                   MutableByteView{out.data(), out.size()})) {
+      ++stats_.dropped_frames;
+      return;
+    }
+    send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                          ByteView{out.data(), out.size()}, now_ms);
+    return;
+  }
+
+  if (subtype != DiagnosticSubtype::TelemetryQuery) {
+    send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  TelemetryQuery query{};
+  if (!telemetry_query_decode(req.body, query).ok()) {
+    send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+
+  if (local) {
+    TelemetrySnapshot snapshot{};
+    DiagnosticRejectReason reason{};
+    if (config_.mesh->build_telemetry_snapshot(query, now_ms, snapshot,
+                                               reason)) {
+      std::array<std::uint8_t, kTelemetrySnapshotBodySize> out{};
+      if (!telemetry_snapshot_encode(
+              snapshot, MutableByteView{out.data(), out.size()})) {
+        ++stats_.dropped_frames;
+        return;
+      }
+      send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                            ByteView{out.data(), out.size()}, now_ms);
+    } else {
+      // Local rejection surfaces as a verbatim DiagnosticReject body — the
+      // host sees the same reason space a remote observer would.
+      DiagnosticReject reject{};
+      reject.request_id = query.request_id;
+      reject.reason = reason;
+      reject.observer = config_.node;
+      std::array<std::uint8_t, kDiagnosticRejectBodySize> out{};
+      if (diagnostic_reject_encode(reject,
+                                   MutableByteView{out.data(), out.size()})) {
+        send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                              ByteView{out.data(), out.size()}, now_ms);
+      } else {
+        ++stats_.dropped_frames;
+      }
+    }
+    return;
+  }
+
+  // Remote: bounded async query — slot exhaustion is an honest Busy, and
+  // the request's own lifetime bounds the wait (poll() expires the slot).
+  PendingDiagnostic* slot = alloc_pending_diagnostic();
+  if (slot == nullptr) {
+    send_diagnostic_reply(request, ConfigOpsResult::Busy, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  const Status status =
+      config_.mesh->send_telemetry_query(req.observer, query, now_ms);
+  if (!status) {
+    send_diagnostic_reply(request, config_result_for(status), req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  slot->active = true;
+  slot->request_id = query.request_id;
+  slot->usb_request = request;
+  slot->observer = req.observer;
+  slot->expires_ms = now_ms + kTelemetryQueryLifetimeMs;
+}
+
+void UsbBridge::on_diagnostic_body(const NodeId observer, const ByteView body,
+                                   const MonotonicMs now_ms) noexcept {
+  if (body.size < kDiagnosticPrefixSize ||
+      body.data[0] != kDiagnosticBodyVersion) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  const auto subtype = static_cast<DiagnosticSubtype>(body.data[1]);
+  std::uint32_t request_id = 0;
+  if (subtype == DiagnosticSubtype::TelemetrySnapshot) {
+    TelemetrySnapshot snapshot{};
+    if (!telemetry_snapshot_decode(body, snapshot).ok()) return;
+    request_id = snapshot.request_id;
+  } else if (subtype == DiagnosticSubtype::DiagnosticReject) {
+    DiagnosticReject reject{};
+    if (!diagnostic_reject_decode(body, reject).ok()) return;
+    request_id = reject.request_id;
+  } else {
+    // Link-only subtypes (capabilities/transit-failure) have no pending
+    // USB request — a counted drop, never a reply.
+    ++stats_.dropped_frames;
+    return;
+  }
+  PendingDiagnostic* slot = find_pending_diagnostic(request_id, observer);
+  if (slot == nullptr) {
+    ++stats_.dropped_frames;  // unsolicited/late body: counted, not trusted
+    return;
+  }
+  const std::uint64_t usb_request = slot->usb_request;
+  *slot = PendingDiagnostic{};
+  send_diagnostic_reply(usb_request, ConfigOpsResult::Ok, observer, body,
+                        now_ms);
 }
 
 void UsbBridge::handle_config_query(const std::uint64_t request,

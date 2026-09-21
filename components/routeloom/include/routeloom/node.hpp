@@ -34,6 +34,10 @@ struct NodeConfig {
   // observations then carry observer_boot 0 and hosts must treat boot
   // attribution as unknown.
   std::uint64_t boot_incarnation{0};
+  // Transit eligibility starts enabled; the Owner drives set_relay_enabled
+  // for runtime config/drain (01-forwarding §policy). Remote telemetry
+  // answering stays opt-in via set_telemetry_remote.
+ 
   std::uint8_t max_link_attempts{2};
   std::uint8_t max_end_to_end_rounds{3};
 };
@@ -139,6 +143,18 @@ class ConfigEndpointSink {
   virtual void poll(MonotonicMs now_ms) noexcept = 0;
 };
 
+// Terminal sink for end-protected Diagnostic (48) bodies (02-telemetry
+// §4.2): TelemetrySnapshot and DiagnosticReject subtypes addressed to this
+// node arrive here already subtype-validated and end-verified. The sink
+// owns request_id correlation; a node without a sink drops with an honest
+// diagnostic, never a fabricated answer.
+class DiagnosticSink {
+ public:
+  virtual ~DiagnosticSink() = default;
+  virtual void on_diagnostic_body(NodeId observer, ByteView body,
+                                  MonotonicMs now_ms) noexcept = 0;
+};
+
 // Pause contract (01-integration.md §3.3): narrower than blanket draining.
 // A PauseReason names WHY traffic is held; the mask selects WHICH traffic is
 // held so the control needed to coordinate a survey/cutover keeps flowing —
@@ -233,6 +249,18 @@ class MeshNode {
   // hop-ACKed/forwarded but terminate as SERVICE_NO_ENDPOINT — the origin's
   // retries expire into an honest timeout, never a DATA-style success.
   void set_gateway_sink(GatewayServiceSink* sink) noexcept { gateway_sink_ = sink; }
+  // Owner-side relay gate (01-forwarding §policy): runtime config and drain
+  // requests write this; effective transit permission additionally requires
+  // a live binding context. Reads expose configured vs effective separately.
+  void set_relay_enabled(bool enabled) noexcept { relay_enabled_ = enabled; }
+  bool relay_enabled() const noexcept { return relay_enabled_; }
+  // Effective transit permission for NEW admissions. Accepted transit
+  // already queued keeps its original deadline — this only gates new work.
+  bool transit_permitted() const noexcept { return started_ && relay_enabled_; }
+  // Remote Diagnostic (48) telemetry queries are opt-in — answering is
+  // disabled unless the owner enables it (02 §4.2 note).
+  void set_telemetry_remote(bool enabled) noexcept { telemetry_remote_ = enabled; }
+  bool telemetry_remote() const noexcept { return telemetry_remote_; }
   // Queue an end-protected Service=21 payload for `destination` with a
   // bounded hop-accept exchange per hop. send_service allocates a fresh
   // logical MessageId from the node's own sequence space (outcomes the
@@ -254,6 +282,23 @@ class MeshNode {
   // end-protected config frames are still dedup'd/hop-ACKed/forwarded but
   // terminate as CONFIG_NO_ENDPOINT — retries expire into an honest timeout.
   void set_config_sink(ConfigEndpointSink* sink) noexcept { config_sink_ = sink; }
+  // Install/clear the end-protected Diagnostic (48) terminal sink — the
+  // surface remote TelemetrySnapshot/Reject bodies arrive on (02 §4.2).
+  void set_diagnostic_sink(DiagnosticSink* sink) noexcept { diagnostic_sink_ = sink; }
+  // Issue an end-protected TelemetryQuery toward `observer` over the routed
+  // lane (02 §4.2). Returns the wire submission status; the request's own
+  // deadline bounds the exchange.
+  Status send_telemetry_query(NodeId observer, const TelemetryQuery& query,
+                              MonotonicMs now_ms) noexcept;
+  // Local-only capability advertisement (04 §capabilities): what this node
+  // is wired and currently permitted to do — never a claim about a remote.
+  CapabilitiesReply build_capabilities_reply() const noexcept;
+  // Local snapshot builder shared by the remote diagnostic handler and the
+  // USB diagnostic request: fills `out` or reports the reject reason —
+  // never fabricates a zeroed record for a missing/stale peer.
+  Status build_telemetry_snapshot(const TelemetryQuery& query,
+                                  MonotonicMs now_ms, TelemetrySnapshot& out,
+                                  DiagnosticRejectReason& reason) noexcept;
   // Queue one end-protected routed frame of `type` (Control 22 or the
   // ConfigPermit object types 49/50/51) for `destination`, with the same
   // bounded hop-accept-per-hop exchange send_service uses. Completion is
@@ -516,7 +561,7 @@ class MeshNode {
 
   enum class JobForm : std::uint8_t { Plain, Forwarded };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
-                                       GatewayService, Config };
+                                       GatewayService, Config, Diagnostic };
 
   struct AckKey {
     FrameType accepted_type{FrameType::Data};
@@ -805,6 +850,20 @@ class MeshNode {
   // their separate destination==self path and never reach here.
   void handle_routed(const wire::LinkOpenedFrame& frame, NodeId peer,
                      MonotonicMs now_ms) noexcept;
+  // End-protected Diagnostic (48) terminal handling (02-telemetry §4.2):
+  // subtype dispatch on the verified body — TelemetryQuery answers with a
+  // bounded snapshot or an honest DiagnosticReject; Snapshot/Reject surface
+  // to the diagnostic sink.
+  void handle_diagnostic(const wire::PlainFrame& frame, NodeId peer,
+                         MonotonicMs now_ms) noexcept;
+  // Link-only Diagnostic subtypes addressed to this node (Capabilities,
+  // TransitFailure): surfaced to the diagnostic sink; never answered on a
+  // new route.
+  void handle_diagnostic_link(NodeId peer, const wire::LinkOpenedFrame& frame,
+                              MonotonicMs now_ms) noexcept;
+  Status queue_diagnostic_reply(NodeId destination, ByteView body,
+                                std::uint32_t lifetime_ms,
+                                MonotonicMs now_ms) noexcept;
   void handle_busy(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
@@ -844,6 +903,9 @@ class MeshNode {
   AutonomyFrameSink* autonomy_sink_{nullptr};
   GatewayServiceSink* gateway_sink_{nullptr};
   ConfigEndpointSink* config_sink_{nullptr};
+  DiagnosticSink* diagnostic_sink_{nullptr};
+  bool relay_enabled_{true};
+  bool telemetry_remote_{false};
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};
   FixedPool<Delivery, kDeliveryCapacity> deliveries_{};
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};
@@ -878,6 +940,9 @@ class MeshNode {
   // unauthenticated bytes to a peer.
   PeerTelemetryTable telemetry_peers_{};
   std::uint64_t telemetry_event_drops_{0};
+  // Transit refusals under a disabled/draining relay gate (01 §policy) —
+  // counted so relay-off is evidence, not a silent black hole.
+  std::uint64_t transit_refused_{0};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.
   MonotonicMs last_clock_ms_{0};

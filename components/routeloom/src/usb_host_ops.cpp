@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/telemetry.hpp"
 
 namespace routeloom::usb {
 namespace {
@@ -1350,6 +1351,48 @@ Status decode_config_reply(const ByteView inner, const HostOpsSub sub,
       !config_reply_body_valid(sub, out.body.size)) {
     return Status::error(StatusCode::ProtocolError, "CONFIG_REPLY_INVALID");
   }
+  return Status::success();
+}
+
+Status decode_diagnostic_request(const ByteView inner,
+                                 DiagnosticRequestView& out) noexcept {
+  out = DiagnosticRequestView{};
+  ByteView payload{};
+  // Body sizes are subtype-defined (4B prefix .. 24B TelemetryQuery); the
+  // diagnostic codec itself rejects anything else — here we only bound the
+  // tunnel to a single 24-byte query body.
+  const Status status = gateway_body(
+      inner, HostOpsSub::DiagnosticRequest,
+      kDiagnosticRequestFixed + kDiagnosticPrefixSize,
+      kDiagnosticRequestFixed + kTelemetryQueryBodySize, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.observer);
+  if (read) {
+    out.body = ByteView{payload.data + kDiagnosticRequestFixed,
+                        payload.size - kDiagnosticRequestFixed};
+  }
+  return read;
+}
+
+Status encode_diagnostic_reply(const std::uint16_t result,
+                               const NodeId observer, const ByteView body,
+                               const MutableByteView out,
+                               std::size_t& written) noexcept {
+  written = 0;
+  if (body.size > kDiagnosticReplyMaxBody) {
+    return Status::error(StatusCode::InvalidArgument, "diag reply oversized");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::DiagnosticResponse,
+      static_cast<std::uint16_t>(kDiagnosticReplyFixed + body.size));
+  if (status) status = writer.write_u16(result);
+  if (status) status = writer.write_u64(observer);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(body.size));
+  if (status) status = writer.write_bytes(body);
+  if (!status) return status;
+  written = writer.size();
   return Status::success();
 }
 
