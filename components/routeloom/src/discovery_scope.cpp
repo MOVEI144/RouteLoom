@@ -315,17 +315,15 @@ ScopeDedupResult ScopeDedupTable::check(
     const std::uint8_t scope_class, const std::uint32_t generation,
     const std::array<std::uint8_t, 16>& content,
     const MonotonicMs now_ms) noexcept {
-  // Expire records whose first-sight window has fully passed. TTL is from
-  // first sight only — re-receiving a record never extends it (02 §2.5).
-  std::array<Record*, kScopeDedupCapacity> expired{};
-  std::size_t expired_count = 0;
-  records_.for_each([&](Record& record) {
-    if (now_ms >= record.first_seen_ms + kScopeDedupTtlMs) {
-      expired[expired_count++] = &record;
-    }
-  });
-  for (std::size_t i = 0; i < expired_count; ++i) records_.release(expired[i]);
-
+  // class/generation 0 marks the unauthenticated legacy lane; only
+  // MAC-verified scoped frames populate nonzero records.
+  const bool verified_in = scope_class != 0;
+  // Exact-key lookup across ALL retained records — live AND expired. A
+  // record whose first-sight window closed still answers Duplicate/Conflict
+  // for an exact-key replay instead of re-admitting it as fresh work: an
+  // honest retransmission always carries a fresh nonce, so a post-TTL key
+  // match is a replay and must not count as new density (02 §2.5). TTL is
+  // still measured from first sight only — re-receiving extends nothing.
   const Record* found = records_.find([&](const Record& record) {
     return record.source == source && record.nonce == nonce &&
            record.scope_class == scope_class && record.generation == generation;
@@ -334,10 +332,38 @@ ScopeDedupResult ScopeDedupTable::check(
     return found->content == content ? ScopeDedupResult::Duplicate
                                      : ScopeDedupResult::Conflict;
   }
+
+  // Victim ordering when no free slot exists: expired records are taken
+  // before live ones (legacy-expired first — verified replay memory is the
+  // last thing to give up), and only a MAC-verified scoped record may
+  // evict the oldest LIVE legacy record. Verified records are never
+  // evicted by unauthenticated traffic, and a live verified record is
+  // never evicted at all — protected semantics preserved (02 §2.5).
+  Record* expired_legacy = nullptr;
+  Record* expired_scoped = nullptr;
+  Record* live_legacy = nullptr;
+  records_.for_each([&](Record& record) {
+    const bool legacy = record.scope_class == 0;
+    const bool expired = now_ms >= record.first_seen_ms + kScopeDedupTtlMs;
+    if (expired) {
+      Record*& victim = legacy ? expired_legacy : expired_scoped;
+      if (victim == nullptr || record.first_seen_ms < victim->first_seen_ms) {
+        victim = &record;
+      }
+    } else if (legacy && (live_legacy == nullptr ||
+                          record.first_seen_ms < live_legacy->first_seen_ms)) {
+      live_legacy = &record;
+    }
+  });
   Record* record = records_.allocate();
   if (record == nullptr) {
-    // Full of in-window records: protected records are never evicted (02 §2.5).
-    return ScopeDedupResult::Full;
+    record = expired_legacy != nullptr ? expired_legacy : expired_scoped;
+    if (record == nullptr) {
+      record = verified_in ? live_legacy : nullptr;
+      if (record == nullptr) {
+        return ScopeDedupResult::Full;
+      }
+    }
   }
   record->source = source;
   record->nonce = nonce;

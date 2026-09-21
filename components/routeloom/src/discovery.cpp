@@ -569,6 +569,17 @@ void NeighborDiscovery::drain_scope_pending(const MonotonicMs now_ms) noexcept {
   std::array<PendingVerify*, kScopePendingCapacity> done{};
   std::size_t done_count = 0;
   pending_verify_.for_each([&](PendingVerify& pending) {
+    // Generation re-check AT VERIFY TIME: the queue-time gate admitted the
+    // frame while its generation was accepted, but a previous generation's
+    // overlap can close while the frame sits in the queue — queueing is not
+    // evidence, the tag must still verify under an accepted generation.
+    if (!config_.scope_provider->accepted_generation(config_.scope,
+                                                     pending.generation,
+                                                     now_ms)) {
+      ++scope_stats_.unknown_generation;
+      done[done_count++] = &pending;
+      return;
+    }
     if (spent >= kScopeMacsPerPoll) return;  // bounded MACs per Owner poll
     ++spent;
     done[done_count++] = &pending;

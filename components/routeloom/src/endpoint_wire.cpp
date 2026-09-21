@@ -450,8 +450,11 @@ Status service_outcome_encode(const ServiceOutcome& payload,
   if (!reason_ok) {
     return invalid("service outcome reason does not match its subtype");
   }
+  // ref_origin is a logical unicast node id: 0 (invalid) and u64::MAX
+  // (broadcast) are both reserved, never a real origin.
   if (all_zero(ByteView{payload.token.data(), payload.token.size()}) ||
-      payload.gateway_boot == 0 || payload.ref_origin == kInvalidNodeId) {
+      payload.gateway_boot == 0 || payload.ref_origin == kInvalidNodeId ||
+      payload.ref_origin == kBroadcastNodeId) {
     return invalid("service outcome token/boot/origin must be nonzero");
   }
   out.clear();
@@ -512,7 +515,7 @@ Status service_outcome_decode(const ByteView encoded, ServiceOutcome& out) noexc
        reason <= 8);
   if (flags != 0 || reserved != 0 || !gateway_scope_valid(raw_scope) || !reason_ok ||
       all_zero(ByteView{out.token.data(), out.token.size()}) || out.gateway_boot == 0 ||
-      out.ref_origin == kInvalidNodeId) {
+      out.ref_origin == kInvalidNodeId || out.ref_origin == kBroadcastNodeId) {
     return reject();
   }
   out.subtype = static_cast<ServiceSubtype>(subtype);
@@ -753,8 +756,11 @@ Status config_command_encode(const ConfigCommand& command,
   if (!config_namespace_valid(command.config_namespace)) {
     return invalid("config namespace is not registered");
   }
+  // target/authority are logical unicast node ids: 0 (invalid) and
+  // u64::MAX (broadcast) are both reserved and can never be a peer.
   if (command.network == 0 || command.target == kInvalidNodeId ||
-      command.authority == kInvalidNodeId ||
+      command.target == kBroadcastNodeId || command.authority == kInvalidNodeId ||
+      command.authority == kBroadcastNodeId ||
       all_zero(ByteView{command.operation_id.data(), command.operation_id.size()}) ||
       command.target_boot == 0 ||
       all_zero(ByteView{command.challenge_nonce.data(), command.challenge_nonce.size()})) {
@@ -880,7 +886,8 @@ Status config_command_decode(const ByteView encoded, ConfigCommand& out) noexcep
       out.expected_revision == UINT64_MAX ||
       out.next_revision != out.expected_revision + 1 ||
       out.network == 0 || out.target == kInvalidNodeId ||
-      out.authority == kInvalidNodeId || out.target_boot == 0 ||
+      out.target == kBroadcastNodeId || out.authority == kInvalidNodeId ||
+      out.authority == kBroadcastNodeId || out.target_boot == 0 ||
       all_zero(ByteView{out.operation_id.data(), out.operation_id.size()}) ||
       all_zero(ByteView{out.challenge_nonce.data(), out.challenge_nonce.size()})) {
     return reject();

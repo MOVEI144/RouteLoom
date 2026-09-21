@@ -49,6 +49,11 @@ constexpr std::uint8_t kGatewayMaxRounds = 3;   // E2E rounds incl. the first
 // scope-2 record waits for the host ingress ACK before its outcome becomes
 // an explicit non-success. Always inside the submit's own deadline.
 constexpr std::uint32_t kGatewayHostAckMs = 5000;
+// Implementation-chosen bound (design pins no value): once the ACK deadline
+// passed, a late ACK still gets one grace window to complete the record —
+// then the wait concludes as a stored non-success and the pending slot
+// frees, so a dead host can never pin all 8 slots for the 60s hold.
+constexpr std::uint32_t kGatewayHostAckGraceMs = 5000;
 // capabilities bit 0 in the Descriptor: HOST_RECEIVE_RAM ingress exists.
 constexpr std::uint32_t kGatewayCapHostReceive = 0x01u;
 
@@ -490,6 +495,9 @@ class GatewayDelivery final : public GatewayServiceSink {
   NullGatewayObserver null_observer_{};
   Role role_{};
   RateBucket rate_{};
+  // Query admissions get their own bucket so a refused-Query flood cannot
+  // starve either Submit admissions or honest resolves.
+  RateBucket query_rate_{};
   GatewayStats stats_{};
   std::uint64_t nonce_counter_{0};
   std::array<EndpointRecord, kGatewayEndpointRecords> endpoints_{};

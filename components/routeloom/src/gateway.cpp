@@ -298,10 +298,11 @@ Status GatewayDelivery::send(const GatewayEndpoint& endpoint,
   if (lifetime_ms == 0 || lifetime_ms > kGatewayLifetimeMaxMs) {
     return Status::error(StatusCode::InvalidArgument, "lifetime over 30s max");
   }
-  // §5.3: the requested lifetime must fit the remaining descriptor lease —
-  // never silently shorten the lifetime or extend the lease.
+  // §5.3: the requested lifetime must fit STRICTLY inside the remaining
+  // descriptor lease — equality already ends at a dead token, so the
+  // boundary case is refused too (never shortened, never extended).
   if (now_ms >= record->lease_deadline_ms ||
-      lifetime_ms > record->lease_deadline_ms - now_ms) {
+      lifetime_ms >= record->lease_deadline_ms - now_ms) {
     return Status::error(StatusCode::InvalidState, "ENDPOINT_LEASE_TOO_SHORT");
   }
   // Reserve the result slot BEFORE any transmit — acceptance failure leaves
@@ -391,7 +392,7 @@ void GatewayDelivery::retry_send(OriginSend& send, const MonotonicMs now_ms) noe
                 endpoint::ServiceReason::Deadline, "LIFETIME_EXPIRED");
     return;
   }
-  ++send.round;
+  const std::uint8_t round = static_cast<std::uint8_t>(send.round + 1);
   send.next_round_ms = 0;
   const std::uint32_t remaining =
       static_cast<std::uint32_t>(send.expires_at_ms - now_ms);
@@ -414,13 +415,17 @@ void GatewayDelivery::retry_send(OriginSend& send, const MonotonicMs now_ms) noe
     return;
   }
   const Status resent = node_.resend_service(send.id, send.gateway,
-                                             canonical.view(), send.round,
+                                             canonical.view(), round,
                                              remaining, now_ms);
   if (!resent) {
-    finish_send(send, send.hop_accepted ? GatewaySendState::Indeterminate
-                                        : GatewaySendState::Expired,
-                endpoint::ServiceReason::Deadline, resent.detail);
+    // A synchronous refusal (no route yet, TX pool full, node paused) is
+    // TRANSIENT — it spent no airtime, so it spends no round and never
+    // finishes the send. Re-arm on the tick; expires_at still bounds the
+    // whole effort.
+    send.next_round_ms = now_ms + kRetryBackoffMs;
+    return;
   }
+  send.round = round;   // a round is spent only once its frame is queued
 }
 
 // --- Gateway role --------------------------------------------------------------------
@@ -507,6 +512,13 @@ void GatewayDelivery::handle_query(const NodeId peer,
     ++stats_.queries_dropped;
     return;
   }
+  // Queries share the submit admission discipline: a bounded token bucket
+  // keeps a query flood from churning answers and (below) from exhausting
+  // the 4-slot issued pool with refusals (03 §3.4).
+  if (!query_rate_.consume(now_ms)) {
+    ++stats_.queries_dropped;
+    return;
+  }
   // Scope-2 readiness: the descriptor is only issued when the authenticated
   // host registration is live AND matches the pinned principal (03 §3.2).
   HostBinding binding{};
@@ -521,11 +533,46 @@ void GatewayDelivery::handle_query(const NodeId peer,
   // Replies address the logical ORIGIN, not the previous hop — over a
   // multi-hop path routing picks the next hop from the destination.
   const NodeId origin = frame.header.origin;
+  const MessageKey query_key{origin, frame.header.message};
+
+  // A refusal never stores an IssuedToken: it mints an ephemeral token that
+  // only binds this Reject to the exchange (the codec requires nonzero).
+  // The origin correlates Rejects by request digest + MessageKey, never by
+  // token validity — so refused Queries can never exhaust the issue pool.
+  const auto reject_query = [&](const endpoint::ServiceReason reason) {
+    endpoint::ServiceOutcome reject{};
+    reject.subtype = endpoint::ServiceSubtype::Reject;
+    reject.scope = query.scope;
+    mint_token(reject.token);
+    reject.gateway_boot = role_.gateway_boot;
+    reject.ref_origin = query_key.origin;
+    reject.ref_session = query_key.id.session;
+    reject.ref_sequence = query_key.id.sequence;
+    reject.request_digest =
+        submit_digest(ByteView{frame.payload.data(), frame.payload_size});
+    reject.reason = reason;
+    endpoint::EncodedServicePayload encoded{};
+    if (endpoint::service_outcome_encode(reject, encoded)) {
+      MessageId emit_id{};
+      (void)node_.send_service(origin, encoded.view(), kOutcomeLifetimeMs,
+                               Priority::Management, now_ms, emit_id);
+    }
+  };
+
+  if (query.scope == endpoint::GatewayScope::HostReceiveRam && !host_bound) {
+    // Explicit refusal instead of an unverifiable descriptor (G02-style):
+    // the Reject references the Query's own MessageKey for correlation.
+    ++stats_.submits_host_unavailable;
+    reject_query(endpoint::ServiceReason::HostUnavailable);
+    return;
+  }
+
   IssuedToken* issued = issued_.allocate();
   if (issued == nullptr) {
+    // Issue pool full: an explicit capacity refusal beats silence — the
+    // origin's resolve fails fast instead of expiring.
     ++stats_.queries_dropped;
-    // Even a capacity refusal needs a token to bind the Reject to; without
-    // an issue slot the only honest answer is silence → resolve timeout.
+    reject_query(endpoint::ServiceReason::Capacity);
     return;
   }
   mint_token(issued->token);
@@ -533,32 +580,6 @@ void GatewayDelivery::handle_query(const NodeId peer,
   issued->scope = query.scope;
   issued->binding = host_bound ? binding : HostBinding{};
   issued->lease_deadline_ms = now_ms + kGatewayDescriptorLeaseMs;
-
-  const MessageKey query_key{origin, frame.header.message};
-  if (query.scope == endpoint::GatewayScope::HostReceiveRam && !host_bound) {
-    // Explicit refusal instead of an unverifiable descriptor (G02-style):
-    // the Reject carries the minted token so the codec stays honest, and it
-    // references the Query's own MessageKey for the origin to correlate.
-    ++stats_.submits_host_unavailable;
-    endpoint::ServiceOutcome reject{};
-    reject.subtype = endpoint::ServiceSubtype::Reject;
-    reject.scope = query.scope;
-    reject.token = issued->token;
-    reject.gateway_boot = role_.gateway_boot;
-    reject.ref_origin = query_key.origin;
-    reject.ref_session = query_key.id.session;
-    reject.ref_sequence = query_key.id.sequence;
-    reject.request_digest =
-        submit_digest(ByteView{frame.payload.data(), frame.payload_size});
-    reject.reason = endpoint::ServiceReason::HostUnavailable;
-    endpoint::EncodedServicePayload encoded{};
-    if (endpoint::service_outcome_encode(reject, encoded)) {
-      MessageId emit_id{};
-      (void)node_.send_service(origin, encoded.view(), kOutcomeLifetimeMs,
-                               Priority::Management, now_ms, emit_id);
-    }
-    return;
-  }
 
   endpoint::ServiceDescriptor descriptor{};
   descriptor.scope = query.scope;
@@ -834,10 +855,16 @@ void GatewayDelivery::handle_descriptor(const NodeId peer,
     ++stats_.outcomes_rejected;
     return;   // not our descriptor — keep waiting for the real one
   }
+  // The claimed lease is clamped to the contract bound — a descriptor
+  // advertising a longer lease (up to u32::MAX, ~136 years) can never pin
+  // an origin endpoint past the gateway's own issued-token lease (03 §3.2).
+  const std::uint32_t lease_ms = descriptor.lease_ms < kGatewayDescriptorLeaseMs
+                                   ? descriptor.lease_ms
+                                   : kGatewayDescriptorLeaseMs;
   // The lease is measured from when the Query left, so the whole RTT is
   // uncertainty the origin never trusts (03 §3.2).
   const MonotonicMs rtt = now_ms - record->query_sent_ms;
-  if (descriptor.lease_ms <= rtt) {
+  if (lease_ms <= rtt) {
     fail_resolve(endpoint_index(record),
                  Status::error(StatusCode::Expired, "LEASE_EXPIRED_ON_ARRIVAL"));
     return;
@@ -846,7 +873,7 @@ void GatewayDelivery::handle_descriptor(const NodeId peer,
   record->gateway_boot = descriptor.gateway_boot;
   record->host_digest = descriptor.host_digest;
   record->max_payload = descriptor.max_payload;
-  record->lease_deadline_ms = record->query_sent_ms + descriptor.lease_ms;
+  record->lease_deadline_ms = record->query_sent_ms + lease_ms;
   record->state = EndpointState::Ready;
   ++stats_.resolves_succeeded;
   observer_->on_gateway_resolved(
@@ -1020,7 +1047,7 @@ void GatewayDelivery::poll(const MonotonicMs now_ms) noexcept {
       continue;
     }
     if (record.next_round_ms != 0 && now_ms >= record.next_round_ms) {
-      ++record.round;
+      const std::uint8_t round = static_cast<std::uint8_t>(record.round + 1);
       record.next_round_ms = 0;
       const std::uint32_t remaining = static_cast<std::uint32_t>(
           record.resolve_deadline_ms - now_ms);
@@ -1037,11 +1064,15 @@ void GatewayDelivery::poll(const MonotonicMs now_ms) noexcept {
       }
       const Status resent =
           node_.resend_service(record.query_id, record.gateway,
-                               canonical.view(), record.round, remaining,
+                               canonical.view(), round, remaining,
                                now_ms);
       if (!resent) {
-        fail_resolve(i, resent);
+        // Same transient-refusal rule as sends: no airtime was spent, so no
+        // round is spent — re-arm on the tick inside the resolve deadline.
+        record.next_round_ms = now_ms + kRetryBackoffMs;
+        continue;
       }
+      record.round = round;
     }
   }
 
@@ -1088,15 +1119,44 @@ void GatewayDelivery::poll(const MonotonicMs now_ms) noexcept {
 
   // Host ACK timeout: evidence is RETAINED (the store may have happened);
   // the origin's own deadline expires into an honest INDETERMINATE while a
-  // late ACK can still complete the record (03 §3.4, G03).
+  // late ACK can still complete the record (03 §3.4, G03). But the wait is
+  // bounded — once a timed-out record also exhausts its grace window it
+  // concludes as a stored non-success and the pending slot frees, so a dead
+  // host can never pin all 8 slots for the whole 60s hold.
+  PendingRecord* conclude[kGatewayPendingMax]{};
+  std::size_t conclude_count = 0;
   pending_.for_each([&](PendingRecord& pending) {
-    if (pending.state == PendingState::WaitHost && !pending.host_timed_out &&
-        pending.host_ack_deadline_ms != 0 &&
-        now_ms >= pending.host_ack_deadline_ms) {
+    if (pending.state != PendingState::WaitHost ||
+        pending.host_ack_deadline_ms == 0 ||
+        now_ms < pending.host_ack_deadline_ms) {
+      return;
+    }
+    if (!pending.host_timed_out) {
       pending.host_timed_out = true;
       ++stats_.host_ingress_timeouts;
     }
+    if (now_ms >= pending.host_ack_deadline_ms + kGatewayHostAckGraceMs &&
+        conclude_count < kGatewayPendingMax) {
+      conclude[conclude_count++] = &pending;
+    }
   });
+  for (std::size_t i = 0; i < conclude_count; ++i) {
+    PendingRecord* pending = conclude[i];
+    const std::size_t index = pending_.index_of(pending);
+    DedupRecord* record = receipts_.find(
+        [&](const DedupRecord& value) {
+          return value.pending_index == index;
+        });
+    if (record == nullptr || record->state != DedupState::Pending) {
+      release_pending(pending);   // orphaned slot — free it regardless
+      continue;
+    }
+    // Deadline is the honest stored outcome: no success evidence arrived
+    // inside the bounded window. The dedup record keeps answering
+    // duplicates for its full hold; only the pending slot frees early.
+    complete_pending(*record, endpoint::ServiceSubtype::Reject,
+                     endpoint::ServiceReason::Deadline, now_ms);
+  }
 }
 
 // --- Host seam --------------------------------------------------------------------------

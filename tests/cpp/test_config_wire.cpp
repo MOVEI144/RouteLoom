@@ -234,6 +234,40 @@ class LoopbackPort final : public ConfigWirePort {
   std::size_t count_{0};
 };
 
+// Records the last ObjectAck delivered to a sink (target-side ack observe).
+class RecordingAckSink final : public ConfigEndpointSink {
+ public:
+  void on_config_frame(const NodeId, const wire::PlainFrame& frame,
+                       const MonotonicMs) noexcept override {
+    if (frame.header.type != FrameType::ObjectAck) return;
+    autonomy::ObjectAckPayload ack{};
+    if (autonomy::object_ack_decode(
+            ByteView{frame.payload.data(), frame.payload_size}, ack)) {
+      ++acks;
+      last_status = ack.status;
+      last_received = ack.received_len;
+    }
+  }
+  void on_config_job_done(const MessageId&, bool, const char*,
+                          const MonotonicMs) noexcept override {}
+  void poll(const MonotonicMs) noexcept override {}
+  int acks{0};
+  autonomy::ObjectAckStatus last_status{autonomy::ObjectAckStatus::Ok};
+  std::uint16_t last_received{0};
+};
+
+// A terminal-side PlainFrame as the routed lane would deliver it.
+wire::PlainFrame object_frame(const NodeId origin, const FrameType type,
+                              const ByteView payload) {
+  wire::PlainFrame frame{};
+  frame.header.type = type;
+  frame.header.origin = origin;
+  frame.header.destination = kTarget;
+  frame.payload_size = payload.size;
+  std::memcpy(frame.payload.data(), payload.data, payload.size);
+  return frame;
+}
+
 // Records every gateway -> host reply.
 class RecordingHost final : public ConfigHostSink {
  public:
@@ -578,6 +612,153 @@ void test_query_timeout() {
   CHECK(host.last_result == ConfigOpsResult::Timeout);
 }
 
+// A duplicate manifest carrying the live object's hash but a DIFFERENT
+// declared length is a conflict — it must be Failed, not re-acked as
+// progress against a byte count the reassembly never accepted.
+void test_manifest_duplicate_total_len_conflict() {
+  MonotonicMs now_ms = 4000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort gw_port(kGateway, tgt_peer);
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  tgt_port.peer_dest_ = kGateway;
+
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now_ms));
+  ConfigTarget target(tgt_port);
+  CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+  RecordingAckSink sink{};
+  gw_peer = &sink;
+
+  const std::array<std::uint8_t, 8> obj{{1, 2, 3, 4, 5, 6, 7, 8}};
+  autonomy::ControlObjectPayload manifest{};
+  manifest.subtype = autonomy::ControlObjectSubtype::Manifest;
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = static_cast<std::uint16_t>(obj.size());
+  sha256(ByteView{obj.data(), obj.size()}, manifest.object_hash);
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+
+  // First manifest opens the intake: the ack is Incomplete, slot held.
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.acks == 1);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(target.object_active());
+
+  // Same object hash, different declared length → conflict answer Failed.
+  manifest.total_len = 64;
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.acks == 2);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(target.object_active());  // the live intake is untouched
+
+  // A byte-consistent duplicate still re-acks as Incomplete — only the
+  // length-mismatched variant is a conflict.
+  manifest.total_len = static_cast<std::uint16_t>(obj.size());
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.acks == 3);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Incomplete);
+}
+
+// An end-authenticated reply that does not echo THIS query's client_nonce /
+// operation_id (or its namespace) is a foreign frame — it must never
+// complete the outstanding query.
+void test_query_reply_echo_binding() {
+  MonotonicMs now_ms = 5000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort gw_port(kGateway, tgt_peer);
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  gw_port.peer_dest_ = kTarget;
+  tgt_port.peer_dest_ = kGateway;
+  RecordingHost host{};
+  ConfigGateway gateway(gw_port, host);
+  (void)tgt_peer;
+
+  const std::array<std::uint8_t, 16> client_nonce = {9, 9, 9, 9, 9, 9, 9, 9,
+                                                   9, 9, 9, 9, 9, 9, 9, 9};
+  CHECK_OK(gateway.submit_challenge(0xF0, kTarget, endpoint::kConfigNamespaceSdk,
+                                    1, client_nonce, now_ms));
+  gw_port.flush(now_ms);   // the query goes out; nothing answers it yet
+
+  endpoint::ControlChallenge forged{};
+  forged.config_namespace = endpoint::kConfigNamespaceSdk;
+  forged.schema = 1;
+  forged.target_boot = 9;
+  forged.revision = 1;
+  forged.valid_for_ms = 60000;
+  forged.challenge_nonce.fill(0x33);
+  forged.active_hash.fill(0x44);
+  endpoint::EncodedServicePayload enc{};
+
+  // Right origin, right subtype, valid encoding — WRONG nonce echo.
+  forged.client_nonce.fill(0x77);
+  CHECK_OK(endpoint::control_challenge_encode(forged, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 0);
+  CHECK(gateway.query_active());
+
+  // Right nonce echo but a different namespace — still foreign.
+  forged.client_nonce = client_nonce;
+  forged.config_namespace = 0x8000;   // a different registered namespace
+  CHECK_OK(endpoint::control_challenge_encode(forged, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 0);
+  CHECK(gateway.query_active());
+
+  // The query outlives the forgeries and resolves honestly at its deadline.
+  for (int i = 0; i < 400; ++i) {
+    now_ms += 10;
+    gateway.poll(now_ms);
+  }
+  CHECK(host.calls == 1);
+  CHECK(host.last_result == ConfigOpsResult::Timeout);
+
+  // Status query: a reply echoing a different operation_id never completes.
+  const std::array<std::uint8_t, 16> operation_id = {0xA1, 1, 2, 3, 4, 5, 6, 7,
+                                                   8, 9, 10, 11, 12, 13, 14, 15};
+  CHECK_OK(gateway.submit_status_query(0xF1, kTarget,
+                                       endpoint::kConfigNamespaceSdk,
+                                       operation_id, now_ms));
+  gw_port.flush(now_ms);
+  endpoint::ControlStatus status{};
+  status.config_namespace = endpoint::kConfigNamespaceSdk;
+  status.operation_id.fill(0x99);    // not the queried operation id
+  status.phase = ConfigPhase::Active;
+  status.reason = ConfigReason::Ok;
+  CHECK_OK(endpoint::control_status_encode(status, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 1);            // still only the timeout report
+  CHECK(gateway.query_active());
+
+  // The correctly echoed reply DOES complete — binding, not silence.
+  status.operation_id = operation_id;
+  CHECK_OK(endpoint::control_status_encode(status, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 2);
+  CHECK(host.last_result == ConfigOpsResult::Ok);
+  CHECK(!gateway.query_active());
+}
+
 }  // namespace
 
 int main() {
@@ -585,6 +766,8 @@ int main() {
   test_challenge_status_wire();
   test_permit_transfer_e2e();
   test_query_timeout();
+  test_manifest_duplicate_total_len_conflict();
+  test_query_reply_echo_binding();
   if (failures == 0) {
     std::printf("config_wire tests OK\n");
     return 0;

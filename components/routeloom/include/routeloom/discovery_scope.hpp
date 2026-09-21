@@ -219,8 +219,13 @@ class ScopeRawBudget {
 // --- Replay dedup (02 §2.5) -----------------------------------------------------
 // Key: (source MAC, txn nonce, class, generation); legacy entries use
 // class/generation 0. TTL is 8s from FIRST sight — a re-receive refreshes
-// nothing. Same key + different content is Conflict; records complete
-// exchanges as tombstones inside the window and are never evicted early.
+// nothing. Records are retained past TTL purely as replay tombstones: an
+// exact-key match always answers Duplicate/Conflict (a post-TTL replay is
+// a replay, never fresh density). Same key + different content is Conflict.
+// Victim order when the table is full: expired records first (legacy before
+// verified); a MAC-verified scoped record may additionally evict the oldest
+// LIVE legacy record. Verified records are never evicted by unauthenticated
+// traffic, and a live verified record is never evicted at all.
 enum class ScopeDedupResult : std::uint8_t {
   New = 0,
   Duplicate,

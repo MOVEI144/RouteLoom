@@ -204,6 +204,11 @@ class ConfigGateway final : public ConfigEndpointSink {
     std::uint8_t usb_sub{0};      // 0x22 status / 0x23 challenge
     QueryExpect expect{QueryExpect::None};
     MonotonicMs deadline_ms{0};
+    // Reply binding (05 §5.5): the client_nonce / operation_id as SENT —
+    // an end-authenticated reply that doesn't echo them is a foreign frame,
+    // never this query's completion.
+    std::array<std::uint8_t, 16> echo{};
+    std::uint16_t config_namespace{0};
   };
   enum class TransferPhase : std::uint8_t { Chunks, AwaitAck };
   struct PermitTransfer {

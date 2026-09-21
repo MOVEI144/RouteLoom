@@ -552,6 +552,35 @@ void test_endpoint_golden() {
   }
 }
 
+// Every valid vector must still reject with one trailing byte appended:
+// decoders consume exactly their frame — leftover bytes are a framing
+// violation, never ignorable padding.
+void test_trailing_byte_rejected() {
+  const std::filesystem::path dir(ROUTELOOM_ENDPOINT_GOLDEN_DIR);
+  for (const auto& path : list_json(dir / "valid")) {
+    bool ok = false;
+    const Fields fields = parse_flat_json(read_file(path, ok));
+    CHECK(ok);
+    const std::string codec = fields.count("codec") != 0U ? fields.at("codec") : "";
+    // Encode-only canonical helpers have no decoder to feed.
+    if (codec == "scope_binding" || codec == "scope_discover_mac_input" ||
+        codec == "scope_offer_mac_input" || codec == "config_snapshot_input") {
+      continue;
+    }
+    std::vector<std::uint8_t> encoded;
+    CHECK(fields.count("encoded_hex") != 0U &&
+          hex_decode(fields.at("encoded_hex"), encoded));
+    encoded.push_back(0x00);
+    const std::string name = fields.count("name") != 0U ? fields.at("name")
+                                                      : path.filename().string();
+    if (!decode_expect_error(codec, encoded)) {
+      std::fprintf(stderr, "valid vector %s accepted a trailing 0x00\n",
+                   name.c_str());
+      ++failures;
+    }
+  }
+}
+
 // Direct codec round-trips covering shapes the vectors do not pin.
 void test_codec_roundtrip() {
   ep::Rld1DiscoverBodyV2 discover{};
@@ -631,11 +660,79 @@ void test_codec_roundtrip() {
   CHECK(!ep::config_command_encode(command, rcc));
 }
 
+// Reserved node ids (0 = invalid, u64::MAX = broadcast) can never appear in
+// a logical node-id field — both directions, encode and decode.
+void test_reserved_node_ids() {
+  ep::ConfigCommand command{};
+  command.config_namespace = 1;
+  command.schema = 1;
+  command.network = 1;
+  command.target = 0x30;
+  command.authority = 0x10;
+  command.authority_sequence = 1;
+  command.operation_id.fill(0x55);
+  command.expected_revision = 7;
+  command.next_revision = 8;
+  command.target_boot = 9;
+  command.challenge_nonce.fill(0x66);
+  command.apply_within_ms = 5000;
+  command.fields[0].field_id = 1;
+  command.fields[0].type = ep::ConfigFieldType::U8;
+  command.fields[0].value[0] = 1;
+  command.fields[0].value_size = 1;
+  command.field_count = 1;
+  ep::EncodedConfigCommand rcc{};
+  CHECK_OK(ep::config_command_encode(command, rcc));
+
+  // Encode side: broadcast is refused the same way node id 0 is.
+  const NodeId good_target = command.target;
+  command.target = kBroadcastNodeId;
+  CHECK(!ep::config_command_encode(command, rcc));
+  command.target = good_target;
+  command.authority = kBroadcastNodeId;
+  CHECK(!ep::config_command_encode(command, rcc));
+  command.authority = 0x10;
+  CHECK_OK(ep::config_command_encode(command, rcc));
+
+  // Decode side: patch the wire bytes to u64::MAX (target at offset 20,
+  // authority at offset 28 in the RCC1 header) — both must reject.
+  ep::EncodedConfigCommand forged = rcc;
+  std::memset(forged.bytes.data() + 20, 0xFF, 8);
+  ep::ConfigCommand back{};
+  CHECK(!ep::config_command_decode(forged.view(), back));
+  forged = rcc;
+  std::memset(forged.bytes.data() + 28, 0xFF, 8);
+  CHECK(!ep::config_command_decode(forged.view(), back));
+
+  // Service outcome ref_origin: encode and decode both refuse broadcast.
+  ep::ServiceOutcome outcome{};
+  outcome.subtype = ep::ServiceSubtype::Reject;
+  outcome.scope = ep::GatewayScope::GatewaySdkRam;
+  outcome.token.fill(0x11);
+  outcome.gateway_boot = 7;
+  outcome.ref_origin = 0x30;
+  outcome.ref_session = 1;
+  outcome.ref_sequence = 2;
+  outcome.request_digest.fill(0x22);
+  outcome.reason = ep::ServiceReason::Capacity;
+  ep::EncodedServicePayload encoded{};
+  CHECK_OK(ep::service_outcome_encode(outcome, encoded));
+  outcome.ref_origin = kBroadcastNodeId;
+  CHECK(!ep::service_outcome_encode(outcome, encoded));
+  // ref_origin sits at offset 28 in the outcome layout.
+  ep::EncodedServicePayload bad = encoded;
+  std::memset(bad.bytes.data() + 28, 0xFF, 8);
+  ep::ServiceOutcome out_back{};
+  CHECK(!ep::service_outcome_decode(bad.view(), out_back));
+}
+
 }  // namespace
 
 int main() {
   test_codec_roundtrip();
+  test_reserved_node_ids();
   test_endpoint_golden();
+  test_trailing_byte_rejected();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d endpoint checks failed\n", failures);

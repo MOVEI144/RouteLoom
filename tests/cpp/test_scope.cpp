@@ -963,6 +963,122 @@ void test_s11_old_provider_unusable() {
         StatusCode::AuthProfileUnavailable);
 }
 
+// --- Dedup lane policy: an unauthenticated flood can never crowd out verified ---
+
+// A table full of LIVE legacy (unauthenticated) records still makes room
+// for a MAC-verified scoped frame — verified traffic is the protected
+// class and a legacy flood can never starve it (02 §2.5).
+void test_dedup_legacy_flood_scoped_wins() {
+  ScopeWorld world;
+  ScopeUnit& b = world.add(2, 0xB2, /*member=*/true,
+                           ScopeMode::OptionalMigration, 0x11,
+                           ScopeClass::Member, /*migration_until_ms=*/60000);
+  world.start_all();
+
+  // 33 distinct legacy keys: the 32-record dedup table fills entirely
+  // with unauthenticated entries — the 33rd hits the full bound.
+  for (std::uint8_t i = 0; i < 33; ++i) {
+    std::array<std::uint8_t, 16> nonce{};
+    nonce[15] = i;
+    const auto frame = legacy_discover_frame(100 + i, kHint, nonce);
+    world.medium.now += 40;   // keep the 32/s raw budget replenished
+    b.engine.on_rld1_rx({mac_of(static_cast<std::uint8_t>(0x60 + i)),
+                         discovery_const::kBroadcastMac},
+                        ByteView{frame.data(), frame.size()},
+                        world.medium.now);
+  }
+  CHECK(b.engine.scope_stats().dedup_full >= 1);
+
+  // A MAC-verified scoped frame still gets its dedup record: it evicts
+  // the oldest live legacy entry rather than being starved by the flood.
+  std::array<std::uint8_t, 16> nonce{};
+  nonce[15] = 0x77;
+  const auto frame = scoped_discover_frame(b.scope_provider, kGen,
+                                           ScopeClass::Member, kNetwork, 9,
+                                           mac_of(0x44), nonce);
+  CHECK(!frame.empty());
+  b.engine.on_rld1_rx({mac_of(0x44), discovery_const::kBroadcastMac},
+                      ByteView{frame.data(), frame.size()}, world.medium.now);
+  b.engine.poll(world.medium.now);   // drains the deferred MAC verify
+  CHECK(b.engine.scope_stats().scope_accepted == 1);
+}
+
+// --- Dedup tombstones: a post-TTL replay is still a replay -----------------------
+
+// Expired dedup records are RETAINED as replay tombstones: re-receiving
+// the exact sniffed bytes past the 8s TTL answers Duplicate — never
+// fresh density, never a second OFFER, never a re-opened exchange.
+void test_dedup_replay_past_ttl() {
+  ScopeWorld world;
+  ScopeUnit& b = world.add(2, 0xB2, /*member=*/true, ScopeMode::Required, 0x11);
+  world.start_all();
+  const MacAddress peer = mac_of(0x44);
+  std::array<std::uint8_t, 16> nonce{};
+  nonce[15] = 0x55;
+  const auto frame = scoped_discover_frame(b.scope_provider, kGen,
+                                           ScopeClass::Member, kNetwork, 9,
+                                           peer, nonce);
+  CHECK(!frame.empty());
+  b.engine.on_rld1_rx({peer, discovery_const::kBroadcastMac},
+                      ByteView{frame.data(), frame.size()}, world.medium.now);
+  b.engine.poll(world.medium.now);
+  CHECK(b.engine.scope_stats().scope_accepted == 1);
+  world.run(500);
+  CHECK(b.port.count_kind(FrameType::Offer) == 1);
+
+  // Replay the identical frame past the 8s dedup TTL: the retained
+  // tombstone still answers Duplicate — an honest retransmission always
+  // carries a fresh nonce, so a post-TTL key match is a replay.
+  world.medium.now += kScopeDedupTtlMs + 1000;
+  const std::uint32_t raw_before = b.engine.scope_stats().raw_rx;
+  b.engine.on_rld1_rx({peer, discovery_const::kBroadcastMac},
+                      ByteView{frame.data(), frame.size()}, world.medium.now);
+  b.engine.poll(world.medium.now);
+  // The replay reached the pipeline, PASSED MAC verify (mac_rejected stays
+  // 0 — it is a genuine frame), and only then did the tombstone dedup it.
+  CHECK(b.engine.scope_stats().raw_rx == raw_before + 1);
+  CHECK(b.engine.scope_stats().mac_rejected == 0);
+  CHECK(b.engine.scope_stats().duplicate == 1);
+  CHECK(b.engine.scope_stats().scope_accepted == 1);   // not re-admitted
+  world.run(500);
+  CHECK(b.port.count_kind(FrameType::Offer) == 1);     // no second offer
+}
+
+// --- Pending verify: the generation gate is re-checked at drain time -------------
+
+// Queueing is not evidence: a frame admitted to the deferred-MAC queue
+// while its generation was accepted must still verify under an ACCEPTED
+// generation when the queue drains — a rotation whose overlap expires
+// mid-queue drops it as unknown_generation, never a MAC'd admission.
+void test_pending_verify_generation_recheck() {
+  ScopeWorld world;
+  ScopeUnit& b = world.add(2, 0xB2, /*member=*/true, ScopeMode::Required, 0x11);
+  world.start_all();
+  const MacAddress peer = mac_of(0x44);
+  std::array<std::uint8_t, 16> nonce{};
+  nonce[15] = 0x66;
+  // Signed under generation 1 while gen1 is still current — queues fine.
+  const auto frame = scoped_discover_frame(b.scope_provider, 1,
+                                           ScopeClass::Member, kNetwork, 9,
+                                           peer, nonce);
+  CHECK(!frame.empty());
+  b.engine.on_rld1_rx({peer, discovery_const::kBroadcastMac},
+                      ByteView{frame.data(), frame.size()}, world.medium.now);
+
+  // The provider rotates and the previous-generation overlap expires
+  // BEFORE the deferred verify drains the queue.
+  CHECK_OK(b.scope_provider.rotate(2, world.medium.now));
+  world.medium.now += kScopePreviousOverlapMaxMs + 1000;
+  b.engine.poll(world.medium.now);
+  // Dropped at the drain-time generation re-check — it never reached the
+  // MAC verify step, so mac_rejected must stay zero.
+  CHECK(b.engine.scope_stats().unknown_generation == 1);
+  CHECK(b.engine.scope_stats().mac_rejected == 0);
+  CHECK(b.engine.scope_stats().scope_accepted == 0);
+  CHECK(b.engine.candidate_count() == 0);
+  CHECK(b.port.count_kind(FrameType::Offer) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -977,6 +1093,9 @@ int main() {
   test_s09_observed_mac_binding();
   test_s10_class_separation();
   test_s11_old_provider_unusable();
+  test_dedup_legacy_flood_scoped_wins();
+  test_dedup_replay_past_ttl();
+  test_pending_verify_generation_recheck();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d scope checks failed\n", failures);

@@ -142,10 +142,13 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
 
   ConfigJournal* journal = nullptr;
   if (intake_.active) {
-    // One reassembly at a time (kConfigTransactionsPerTarget): a conflicting
-    // manifest for a different object is refused; a duplicate of the live
+    // One reassembly at a time (kConfigTransactionsPerTarget): a manifest
+    // for a different object is refused — and so is one carrying the same
+    // object hash but a different declared length (a conflicting manifest,
+    // not a duplicate). Only a byte-consistent duplicate of the live
     // manifest is re-acked by the owning journal.
-    if (intake_.hash != manifest.object_hash) {
+    if (intake_.hash != manifest.object_hash ||
+        manifest.total_len != intake_.total_len) {
       send_ack(origin, manifest.object_hash, intake_.received,
                autonomy::ObjectAckStatus::Failed, now_ms);
       return;
@@ -298,6 +301,8 @@ Status ConfigGateway::submit_status_query(
   query_.usb_sub = kSubConfigStatus;
   query_.expect = QueryExpect::Status;
   query_.deadline_ms = now_ms + config_wire_const::kQueryTimeoutMs;
+  query_.echo = operation_id;
+  query_.config_namespace = config_namespace;
   return Status::success();
 }
 
@@ -328,6 +333,8 @@ Status ConfigGateway::submit_challenge(
   query_.usb_sub = kSubConfigChallenge;
   query_.expect = QueryExpect::Challenge;
   query_.deadline_ms = now_ms + config_wire_const::kQueryTimeoutMs;
+  query_.echo = client_nonce;
+  query_.config_namespace = config_namespace;
   return Status::success();
 }
 
@@ -413,12 +420,18 @@ void ConfigGateway::on_config_frame(const NodeId peer, const wire::PlainFrame& f
       const ByteView body{frame.payload.data(), frame.payload_size};
       if (query_.expect == QueryExpect::Challenge && subtype == kSubChallenge) {
         endpoint::ControlChallenge challenge{};
-        if (endpoint::control_challenge_decode(body, challenge)) {
+        // The reply must echo THIS query's nonce and namespace — any other
+        // end-authenticated frame from the target is foreign, not ours.
+        if (endpoint::control_challenge_decode(body, challenge) &&
+            challenge.client_nonce == query_.echo &&
+            challenge.config_namespace == query_.config_namespace) {
           finish_query(ConfigOpsResult::Ok, body, now_ms);
         }
       } else if (query_.expect == QueryExpect::Status && subtype == kSubStatus) {
         endpoint::ControlStatus status{};
-        if (endpoint::control_status_decode(body, status)) {
+        if (endpoint::control_status_decode(body, status) &&
+            status.operation_id == query_.echo &&
+            status.config_namespace == query_.config_namespace) {
           finish_query(ConfigOpsResult::Ok, body, now_ms);
         }
       }

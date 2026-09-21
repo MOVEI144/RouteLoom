@@ -1000,6 +1000,272 @@ void test_send_bounded_retries() {
   CHECK(submit_rounds <= kGatewayMaxRounds + 1);  // resolve Query + ≤3 Submit rounds
 }
 
+// --- Query flood: refusals mint ephemeral tokens, never issued records ---------
+
+void test_query_flood_no_token_wedge() {
+  GatewayWorld g;
+  g.add(1);
+  g.add(2);
+  g.w.start_all();
+  g.w.link(1, 2, 1, 1);
+  g.attach(1);
+  auto* gateway = g.attach(2);
+  TestHostSink host{};
+  host.ready = false;   // scope-2 host down: every scope-2 Query is refused
+  for (std::size_t i = 0; i < 32; ++i) host.binding.principal_digest[i] = 0xA0;
+  GatewayRoleConfig role{};
+  role.gateway_boot = 42;
+  role.capabilities = kGatewayCapHostReceive;
+  role.host_sink = &host;
+  CHECK_OK(gateway->enable_gateway(role));
+  g.w.run(2500);
+
+  HostDigest expected{};
+  for (std::size_t i = 0; i < 32; ++i) expected[i] = 0xA0;
+  endpoint::ServiceQuery query{};
+  query.scope = GatewayScope::HostReceiveRam;
+  for (std::size_t i = 0; i < 16; ++i) query.nonce[i] = 0x5A;
+  query.expected_host_digest = expected;
+  EncodedServicePayload encoded_query{};
+  CHECK_OK(endpoint::service_query_encode(query, encoded_query));
+
+  // 12 refused Queries: the dedicated query bucket bounds the burst at 8 —
+  // and the decisive property is that NO refusal ever occupies one of the
+  // 4 issued-token records (pre-fix each refusal minted a real IssuedToken,
+  // so 4 refused Queries wedged the entire pool).
+  for (std::uint64_t seq = 1; seq <= 12; ++seq) {
+    wire::PlainFrame frame =
+        service_frame(1, MessageId{200, seq}, encoded_query.view());
+    g.gd(2)->on_service_payload(1, frame, g.w.now);
+    CHECK(g.gd(2)->issued_tokens_used() == 0);
+    g.w.run(20);   // flush each emitted Reject; still inside a refill tick
+  }
+  CHECK(g.gd(2)->stats().submits_host_unavailable == kGatewayRateBurst);
+  CHECK(g.gd(2)->stats().queries_dropped == 4);
+
+  // The flood can never starve an honest resolve: after one refill tick a
+  // scope-1 Query still earns a real issued token and its descriptor.
+  g.w.run(3500);   // one 20/min bucket token refilled
+  const HostDigest zero_host{};
+  GatewayEndpoint endpoint = resolve_or_fail(
+      g, 1, 2, GatewayScope::GatewaySdkRam, zero_host, 10000);
+  CHECK(wait_ready(g, 1, endpoint));
+  CHECK(g.gd(2)->issued_tokens_used() == 1);
+}
+
+// --- Descriptor lease clamp ------------------------------------------------------
+
+// A descriptor advertising a huge lease_ms is clamped to the 15s contract
+// bound measured from when the Query left — a forged or buggy gateway can
+// never pin an origin endpoint beyond the issued-token lease (03 §3.2).
+void test_descriptor_lease_clamped() {
+  GatewayWorld g;
+  g.add(1);
+  g.add(2);
+  g.w.start_all();
+  g.w.link(1, 2, 1, 1);
+  auto* origin = g.attach(1);
+  auto* gateway = g.attach(2);
+  GatewayRoleConfig role{};
+  role.gateway_boot = 42;
+  CHECK_OK(gateway->enable_gateway(role));
+
+  // The resolve issues its Query but nothing answers it — the descriptor
+  // is forged in directly at the component seam. The query nonce is the
+  // component's deterministic (counter,node) value — mirrors make_nonce:
+  // first resolve on node 1 -> counter 1 at byte 0, node id at byte 8.
+  const HostDigest zero_host{};
+  const MonotonicMs resolved_at = g.w.now;
+  GatewayEndpoint endpoint = resolve_or_fail(
+      g, 1, 2, GatewayScope::GatewaySdkRam, zero_host, 10000);
+  GatewayToken nonce{};
+  nonce[0] = 1;
+  nonce[8] = 1;
+  endpoint::ServiceDescriptor forged{};
+  forged.scope = GatewayScope::GatewaySdkRam;
+  forged.echo_nonce = nonce;
+  forged.token.fill(0x66);
+  forged.gateway_boot = 42;
+  forged.max_payload = static_cast<std::uint16_t>(kGatewayPayloadMaxBytes);
+  forged.lease_ms = 0xFFFFFFFF;   // ~136 years advertised
+  EncodedServicePayload encoded{};
+  CHECK_OK(endpoint::service_descriptor_encode(forged, encoded));
+  wire::PlainFrame frame = service_frame(2, MessageId{300, 1}, encoded.view());
+  g.gd(1)->on_service_payload(2, frame, g.w.now);
+
+  CHECK(g.gd(1)->endpoint_state(endpoint) == EndpointState::Ready);
+  GatewayEndpointInfo info{};
+  CHECK(origin->endpoint_info(endpoint, info));
+  // Clamped to the contract bound from query_sent — the advertised value
+  // can only ever shorten the lease, never stretch it.
+  CHECK(info.lease_deadline_ms == resolved_at + kGatewayDescriptorLeaseMs);
+  // And the clamp is real: the endpoint still goes Stale at that bound.
+  g.w.run(kGatewayDescriptorLeaseMs + 100);
+  CHECK(g.gd(1)->endpoint_state(endpoint) == EndpointState::Stale);
+}
+
+// --- Send lifetime vs lease margin -------------------------------------------------
+
+// The send lifetime must fit STRICTLY inside the remaining descriptor
+// lease — the boundary value already ends on a dead token and is refused
+// with the same ENDPOINT_LEASE_TOO_SHORT, never silently shortened.
+void test_send_lifetime_lease_boundary() {
+  GatewayWorld g;
+  g.add(1);
+  g.add(2);
+  g.w.start_all();
+  g.w.link(1, 2, 1, 1);
+  auto* origin = g.attach(1);
+  auto* gateway = g.attach(2);
+  GatewayRoleConfig role{};
+  role.gateway_boot = 42;
+  CHECK_OK(gateway->enable_gateway(role));
+  g.w.run(2500);
+
+  const HostDigest zero_host{};
+  GatewayEndpoint endpoint = resolve_or_fail(
+      g, 1, 2, GatewayScope::GatewaySdkRam, zero_host, 10000);
+  CHECK(wait_ready(g, 1, endpoint));
+  GatewayEndpointInfo info{};
+  CHECK(origin->endpoint_info(endpoint, info));
+
+  const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
+  const std::uint32_t remaining =
+      static_cast<std::uint32_t>(info.lease_deadline_ms - g.w.now);
+  MessageId id{};
+  const Status boundary =
+      origin->send(endpoint, ByteView{payload.data(), payload.size()},
+                   remaining, g.w.now, id);
+  CHECK(!boundary);
+  CHECK(boundary.code == StatusCode::InvalidState);
+  // One tick inside the boundary is accepted and completes honestly.
+  CHECK_OK(origin->send(endpoint, ByteView{payload.data(), payload.size()},
+                        remaining - 1, g.w.now, id));
+  g.w.run(3000);
+  CHECK(g.gobs(1)->results.back().state == GatewaySendState::EndpointReceived);
+}
+
+// --- Transient resend refusal -----------------------------------------------------
+
+// A synchronous resend refusal (route lost, queue pressure) spent no
+// airtime, so it spends no round and never finishes the send — the round
+// is re-armed on the tick and still completes once the route returns.
+void test_send_retry_transient_no_route() {
+  GatewayWorld g;
+  g.add(1);
+  g.add(2);
+  g.w.start_all();
+  g.w.link(1, 2, 1, 1);
+  auto* origin = g.attach(1);
+  auto* gateway = g.attach(2);
+  GatewayRoleConfig role{};
+  role.gateway_boot = 42;
+  CHECK_OK(gateway->enable_gateway(role));
+  g.w.run(2500);
+
+  const HostDigest zero_host{};
+  GatewayEndpoint endpoint = resolve_or_fail(
+      g, 1, 2, GatewayScope::GatewaySdkRam, zero_host, 10000);
+  CHECK(wait_ready(g, 1, endpoint));
+
+  const std::array<std::uint8_t, 4> payload{{5, 6, 7, 8}};
+  MessageId id{};
+  CHECK_OK(origin->send(endpoint, ByteView{payload.data(), payload.size()},
+                        12000, g.w.now, id));
+  // Kill the path before the first job transmits: every queued attempt and
+  // every synchronous resend now refuses NoRoute — a transient stall, not
+  // an outcome. The send must NOT conclude while its lifetime is open.
+  g.w.unlink(1, 2);
+  g.w.run(1500);
+  CHECK(g.gobs(1)->results.empty());
+  // Restore the route inside the send lifetime: a re-armed round must
+  // still queue, deliver and earn the real receipt.
+  g.w.link(1, 2, 1, 1);
+  g.w.run(5000);
+  CHECK(g.gobs(1)->results.size() == 1);
+  CHECK(g.gobs(1)->results.back().id == id);
+  CHECK(g.gobs(1)->results.back().state == GatewaySendState::EndpointReceived);
+}
+
+// --- Host ACK grace: bounded wait, then conclude and free -------------------------
+
+// A lost host-ingress ACK gets one bounded grace window to complete the
+// stored record; after it the wait concludes as a stored non-success and
+// the pending slot frees — a dead host can never pin all 8 slots for the
+// whole 60s dedup hold. The concluded record still answers duplicates
+// with its stored outcome, and a too-late ACK is dropped.
+void test_host_ack_grace_concludes() {
+  GatewayWorld g;
+  g.add(1);
+  g.add(2);
+  g.w.start_all();
+  g.w.link(1, 2, 1, 1);
+  auto* origin = g.attach(1);
+  auto* gateway = g.attach(2);
+  TestHostSink host{};
+  host.ready = true;
+  for (std::size_t i = 0; i < 32; ++i) host.binding.principal_digest[i] = 0xA0;
+  host.binding.host_boot = 7;
+  host.binding.usb_session = 9;
+  GatewayRoleConfig role{};
+  role.gateway_boot = 42;
+  role.capabilities = kGatewayCapHostReceive;
+  role.host_sink = &host;
+  CHECK_OK(gateway->enable_gateway(role));
+  g.w.run(2500);
+
+  HostDigest expected{};
+  for (std::size_t i = 0; i < 32; ++i) expected[i] = 0xA0;
+  GatewayEndpoint endpoint = resolve_or_fail(
+      g, 1, 2, GatewayScope::HostReceiveRam, expected, 10000);
+  CHECK(wait_ready(g, 1, endpoint));
+  GatewayEndpointInfo info{};
+  CHECK(origin->endpoint_info(endpoint, info));
+
+  const std::array<std::uint8_t, 4> payload{{9, 9, 9, 9}};
+  MessageId id{};
+  // 12s lifetime comfortably exceeds deadline+grace (~10s) but stays
+  // inside the remaining descriptor lease.
+  CHECK_OK(origin->send(endpoint, ByteView{payload.data(), payload.size()},
+                        12000, g.w.now, id));
+  for (int i = 0; i < 200 && host.ingresses.empty(); ++i) g.w.run(50);
+  CHECK(host.ingresses.size() == 1);
+  CHECK(g.gd(2)->pending_records_used() == 1);
+
+  // Past the ACK deadline but inside grace: the slot is still held — a
+  // late ACK here would still complete it (the seam test covers that).
+  g.w.run(kGatewayHostAckMs + 500);
+  CHECK(g.gd(2)->pending_records_used() == 1);
+  CHECK(g.gd(2)->stats().host_ingress_timeouts == 1);
+
+  // Past deadline+grace: the wait concludes as a stored non-success and
+  // the pending slot frees while the dedup record stays for its hold.
+  g.w.run(kGatewayHostAckGraceMs + 500);
+  CHECK(g.gd(2)->pending_records_used() == 0);
+  CHECK(g.gd(2)->receipt_records_used() == 1);
+  CHECK(g.gd(2)->stats().host_ram_receipts == 0);
+  // The emitted Reject(Deadline) reached the origin while its send window
+  // was still open — an honest Failed, never a fabricated success.
+  CHECK(g.gobs(1)->results.size() == 1);
+  CHECK(g.gobs(1)->results.back().id == id);
+  CHECK(g.gobs(1)->results.back().state == GatewaySendState::Failed);
+  CHECK(g.gobs(1)->results.back().reason == ServiceReason::Deadline);
+
+  // A duplicate Submit gets the stored outcome re-sent (60s hold kept);
+  // a too-late host ACK can never complete the concluded record.
+  const EncodedServicePayload dup = encode_submit(
+      GatewayScope::HostReceiveRam, info.token, info.gateway_boot,
+      ByteView{payload.data(), payload.size()});
+  wire::PlainFrame dup_frame = service_frame(1, id, dup.view());
+  const std::uint32_t resend_before = g.gd(2)->stats().outcomes_resend;
+  g.gd(2)->on_service_payload(1, dup_frame, g.w.now);
+  CHECK(g.gd(2)->stats().submits_duplicate == 1);
+  CHECK(g.gd(2)->stats().outcomes_resend == resend_before + 1);
+  g.gd(2)->on_host_ingress_ack(host.ingresses.back(), /*stored=*/true, g.w.now);
+  CHECK(g.gd(2)->stats().host_ram_receipts == 0);
+  CHECK(g.gd(2)->pending_records_used() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1015,6 +1281,11 @@ int main() {
   test_token_and_lease_basics();
   test_scope2_host_seam();
   test_send_bounded_retries();
+  test_query_flood_no_token_wedge();
+  test_descriptor_lease_clamped();
+  test_send_lifetime_lease_boundary();
+  test_send_retry_transient_no_route();
+  test_host_ack_grace_concludes();
   if (failures != 0) {
     std::fprintf(stderr, "%d gateway checks failed\n", failures);
     return 1;
