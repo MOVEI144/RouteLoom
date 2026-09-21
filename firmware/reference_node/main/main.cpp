@@ -22,6 +22,7 @@
 #endif
 #if CONFIG_ROUTELOOM_CONFIG
 #include "routeloom/config.hpp"
+#include "routeloom/config_cose.hpp"
 #include "routeloom/config_dev.hpp"
 #include "routeloom/config_wire.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
@@ -625,8 +626,29 @@ extern "C" void app_main(void) {
   static routeloom::espnow::EspNowEntropySource config_entropy;
   // The domain-separated dev permit key was derived above, before the link
   // master key was wiped (SHA256("RouteLoom/config-dev/v1" || master_key)).
+#if CONFIG_ROUTELOOM_CONFIG_PROFILE == 1
+  // RLCP1_COSE_ESP256 (m1-completion/03-signing.md): the single provisioned
+  // authority P-256 key. The verifier accepts ONLY the fixed COSE_Sign1
+  // shape — a dev-HMAC permit is rejected by profile, never by fallback.
+  static routeloom::CoseEsp256AuthorityVerifier config_verifier;
+  {
+    std::array<std::uint8_t, routeloom::kCosePublicKeySize> pubkey{};
+    if (!parse_hex(CONFIG_ROUTELOOM_CONFIG_COSE_KEY_HEX, pubkey)) {
+      fail("invalid COSE authority key hex");
+    }
+    config_verifier.provision(
+        static_cast<std::uint64_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY),
+        ByteView{pubkey.data(), pubkey.size()});
+    if (!config_verifier.ready()) {
+      fail("COSE authority key is not a valid P-256 point");
+    }
+    std::fill(pubkey.begin(), pubkey.end(), 0);
+  }
+  ESP_LOGW(kTag, "config profile: RLCP1_COSE_ESP256 (asymmetric permit)");
+#else
   static routeloom::DevConfigAuthorityVerifier config_verifier(
       ByteView{config_dev_key.data(), config_dev_key.size()});
+#endif
   routeloom::ConfigJournalConfig journal_config{};
   journal_config.network = CONFIG_ROUTELOOM_NETWORK_ID;
   journal_config.target = static_cast<NodeId>(CONFIG_ROUTELOOM_NODE_ID);
