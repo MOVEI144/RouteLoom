@@ -80,6 +80,17 @@ S12（二scope近接RF）、G09（受理/receipt境界での電断）、G12の�
 - `NO_CAPACITY`応答の`free_slots`はRECORD_CAP基準を報告するが、実際に枯渇したのはper-principal上限8 — `rate_limited`がscopeを名指しするのと同粒度で、どのboundが満杯か応答が名指しすべき。
 - 実リセット時にUSB-Serial/JTAG経路へ`InvalidMagic`を1件観測（再列挙中のgarbage）。`protocol_errors`に正直計上されsupervisorが自動復旧した — ノイズ混入を例外化せず数える挙動は正しい。
 
+### 6.7.1 レビュー修正後の再検証（2026-09-21第二便、SHA `004d840`系）
+
+16本のコードレビューで確定した修正（`67e43e3`〜`004d840`、CI run `35555822197`全緑 artifact）を同じ1台へ書込み、以下を再確認。これもUSB給電・single-hop経路のみの証拠であり、session noteであって資格証拠ではない。
+
+- `endpoints_on` bridge：COBS session再認証→`gateway-resolve`が実デバイスtoken（boot `0x1cd`、lease≈8s）を発行。`gateway-send`(HOST_RECEIVE_RAM)は`HOST_RAM_RETAINED`→`GATEWAY_ACCEPTED`→`HOST_RAM_RECEIVED`→`END_SDK_RECEIVED`で完走し、payloadがReceiveLogへ`gateway_mirror`で格納 — 修正版のlive-registration ACK bindingとlost-ACK grace pathが実シリコンで動作。
+- 同一key再提出は同一operation_idとstored outcomeを返した（dedup不変）。`config-challenge`はnode 1へ到達しconfig target非搭載を`REFUSED/INVALID`の正直な拒否で終端（client errorをwire faultと誤認しない分類が実機で確認）。
+- `config_target_on` reference node：新journal semantics（floor前進・deferred APPLY_INTENT・4-slot challenge table・reprovision gated recover）を含むbuildが実NVS上でpanic 0件で起動、`EXPERIMENTAL config target active`→`CORE_FIXED_250 started`→`app_main`復帰まで完走。修正後のsubmit/poll経路（最悪call-chain ~13KB→~1.8KB）は実機boot-loopが消えたことで間接確認。
+- host側：8件の同時op投入後の9件目が`NO_CAPACITY`の正直な拒否（host admission slot境界）。config op idがboot-tag名前空間形式（`cfg<boot-hex><seq>`）で発行されることを実機経路で確認。
+
+引き続き単板ではS12/G09/I07/複数台config配送は`planned_not_run`のまま。
+
 ## 6.8 合否
 
 安全性違反は一件でもfail。性能は既存のscope付き目標と投入負荷を測定前に固定し、成功標本だけで集計しない。未実施/失敗/対象外/blockedを区別。未知のRAM消費を0にせず、sizeofと内部heap低水位、Flash書込み回数・最大停止時間を測る。
