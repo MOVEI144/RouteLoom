@@ -11,6 +11,12 @@ import sync_reference_tables
 
 EXPECTED_IDF_COMMIT = "76f5dedd9950a3012fee8fb7d5586df21fc67802"
 
+# sizeof(MeshNode::DedupEntry) measured on the host toolchain (sdk-completion
+# 02 §2.4): the phase + first_seen_ms fields grew the record 144 B -> 152 B.
+# The profile dedup budget must cover this real record — reconcile the
+# budget, never shrink the record (static_assert ceiling in node.hpp: 176 B).
+DEDUP_ENTRY_BYTES = 152
+
 # Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
 # FrameType in components/routeloom/include/routeloom/types.hpp.
 EXPECTED_FRAME_IDS = {
@@ -309,7 +315,7 @@ def validate(root: Path) -> dict:
             test(
                 "dedup_allocation:" + name,
                 budget["dedup_and_compact_receipt_records"]
-                >= profile["dedup_entries"] * 64,
+                >= profile["dedup_entries"] * DEDUP_ENTRY_BYTES,
             )
             test(
                 "bounded_lifetime:" + name,

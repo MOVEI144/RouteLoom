@@ -105,7 +105,7 @@ capacity numbers in §2.7 shrink by the documented factor; only
 
 | Class | Contents | Bound | Eviction rule |
 |---|---|---|---|
-| **(a) Origin tracking** | `deliveries_`: `FixedPool<Delivery,8>` (224 B each) — one per `send()`/`resume_delivery()`; typed-lane sends (`send_service`/`send_typed`) are tracked by their owning components instead (GatewayDelivery `sends_`=8/`pending_`=8, host `ConfigOps`=128) and are out of this pool | 8 live+terminal records; in-flight concurrency, not rate | Oldest **terminal-state** record evicted on admission pressure (existing behavior at node.cpp:663–688); a live (non-terminal) record is never evicted — `send()` returns `NoCapacity`. Consequence of terminal eviction: the result becomes unqueryable (`delivery()` → NOT_FOUND); dedup is unaffected because origin records are not dedup state. Add a counter — today this eviction is silent |
+| **(a) Origin tracking** | `deliveries_`: `FixedPool<Delivery,8>` (304 B each) — one per `send()`/`resume_delivery()`; typed-lane sends (`send_service`/`send_typed`) are tracked by their owning components instead (GatewayDelivery `sends_`=8/`pending_`=8, host `ConfigOps`=128) and are out of this pool | 8 live+terminal records; in-flight concurrency, not rate | Oldest **terminal-state** record evicted on admission pressure (existing behavior at node.cpp:663–688); a live (non-terminal) record is never evicted — `send()` returns `NoCapacity`. Consequence of terminal eviction: the result becomes unqueryable (`delivery()` → NOT_FOUND); dedup is unaffected because origin records are not dedup state. Add a counter — today this eviction is silent |
 | **(b) Relay dedup** | `dedup_`: `FixedPool<DedupEntry,64>` — phases Live (job in flight), Resolved (forward completed or routed/receipt consumed — residual duty: re-ACK + propagate late report), Terminal (delivered DATA at this node — the cross-round pin) | 64 shared; `kDedupTransitReserve = 8` slots reserved for non-terminal admissions; `kDedupPerUpstreamMax = 24` transit records per previous-hop | Phase-ordered victim selection on allocation failure (§2.5): expired → Resolved (earliest expiry first) → Evidence (oldest first, bounded by `kEvidenceCap = 16`) → refuse. **Live and Terminal are never evicted** |
 | **(c) Retained failure evidence** | Evidence-phase `dedup_` records (`failure_reported` + `reported_*` fields — verbatim replay material for `replay_retained_failure`) plus the inbound seen-table `transit_failure_seen_` (8 × 40 B) | ≤ 16 Evidence-phase records inside `dedup_`; 8 seen records | Evidence records evictable only after all Resolved records are gone; oldest first. Seen-table keeps its existing rule (reuse expired slot, else drop+count) but its expiry changes to the referenced record's expiry rather than flat 60 s |
 
@@ -123,9 +123,9 @@ emission (2/s/peer). These are unchanged; §2.7 counts them in RAM.
 | `phase` | `DedupPhase` u8: `Live`, `Resolved`, `Evidence`, `Terminal` | drives retention slack + eviction rank; set at admission, transitioned at job resolution (§2.6) |
 | `first_seen_ms` | `MonotonicMs` | base of the 60 s hard cap; mirrors `GatewayDelivery::DedupRecord::first_seen_ms` precedent |
 
-Entry size: 144 B → **160 B** measured (host `sizeof`; Xtensa may differ by
-alignment only — all fields are u8/u64/arrays). Pool total: `64×160 + 64`
-(used-bits) = 10,304 B ≈ **10.1 KiB** vs 9.28 KiB today (+~0.8 KiB).
+Entry size: 144 B → **152 B** measured (host `sizeof`; Xtensa may differ by
+alignment only — all fields are u8/u64/arrays). Pool total: `64×152 + 64`
+(used-bits) = 9,792 B ≈ **9.6 KiB** vs 9.28 KiB today (+~0.5 KiB).
 Eviction ordering
 uses existing `expires_at_ms` (earliest first within a class) — no
 `resolved_at` field is needed.
@@ -248,23 +248,24 @@ Measured `sizeof` (host toolchain, this tree):
 
 | Object | Bytes | Pool | Bytes total |
 |---|---:|---:|---:|
-| `DedupEntry` now → proposed | 144 → 160 | 64 | 9,280 → **10,304** |
-| `Delivery` | 224 | 8 | 1,800 |
+| `DedupEntry` now → proposed | 144 → 152 | 64 | 9,280 → **9,792** |
+| `Delivery` | 304 | 8 | 2,432 |
 | `TxJob` | 888 | 32 | 28,448 |
 | `AwaitingHop` | 904 | 8 | 7,240 |
 | `TransitFailureSeen` | 40 | 8 | 320 |
 | `DiagBudget` / `PendingCapQuery` | 40 | 8 + 8 | 640 |
 | `RouteTable` | — | — | 30,376 |
-| `MeshNode` whole object | — | — | **93,616** (~91.4 KiB BSS) |
+| `MeshNode` whole object | — | — | **96,944** (~94.7 KiB BSS) |
 
 **RAM budget assumed:** the `relay-c3` profile ceiling of 131,072 B
 SDK-side ([resource-profiles.json](../../reference/resource-profiles.json)),
 with the standing C3 gate of ≥32 KiB free internal heap / ≥16 KiB largest
-block under combined peak load (resource-profiles.md). Note the profile's
-`dedup_and_compact_receipt_records` line (6,144 B for 96 entries) is stale
-against the actual 144 B entry — reconcile the JSON line, don't shrink the
-record. The proposed pool stays inside the M1 ≤12 KiB forwarding increment
-that already carried "expanded dedup/outcome state".
+block under combined peak load (resource-profiles.md). The profile's
+`dedup_and_compact_receipt_records` line was reconciled to the real 152 B
+entry (14,592 B for the relay-c3 design target of 96 entries) — the budget
+covers the record, never the other way around. The shipped pool stays
+inside the M1 ≤12 KiB forwarding increment that already carried "expanded
+dedup/outcome state".
 
 **Steady-state formulas** (`r` = aggregate new-message rate per class,
 `L` = message lifetime in seconds; receipts add a second transit record per
@@ -407,7 +408,7 @@ the reserve working; relay-off mid-stream drain; evidence storm with
 | `components/routeloom/include/routeloom/node.hpp` | `DedupPhase` enum; `DedupEntry` += `phase`, `first_seen_ms`; constants (§2.4); `DedupStats` + `dedup_stats()`; decl `dedup_expiry_for()`, `evict_dedup_for_admission()`, `resolve_dedup_for_job()`, `count_transit_upstream()` |
 | `components/routeloom/src/node.cpp` | `allocate_dedup` signature (+role, upstream, deadline) and the §2.5 sweep; six call sites (`handle_data` ×2, `handle_routed` ×2, `handle_end_receipt` ×2); `complete_job` Transit→Resolved hook; `report_transit_failure` → Evidence; terminal refresh formula (~:1698); counters/diagnostics; `transit_failure_seen_` expiry = referenced record expiry (:3977) |
 | `tests/cpp/test_dedup_capacity.cpp` | new; `test_sim.hpp` duplicate-injection hook; CMake registration |
-| `docs/reference/resource-profiles.json` + `spec/resource-profiles.md` | reconcile `dedup_and_compact_receipt_records` with the real 160 B entry |
+| `docs/reference/resource-profiles.json` + `spec/resource-profiles.md` | reconcile `dedup_and_compact_receipt_records` with the real 152 B entry |
 | `host/routeloom-host/src/{dispatch.rs,send_store.rs}` | **no functional change** — resend/NotRetained and 24 h op journal already assume bounded device dedup; add doc cross-reference comments only if touched |
 
 ## 2.13 Open questions
