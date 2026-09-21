@@ -76,6 +76,11 @@ target_include_directories(routeloom_scope_tests PRIVATE ${CMAKE_CURRENT_SOURCE_
 target_compile_options(routeloom_scope_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_scope_tests COMMAND routeloom_scope_tests)
 
+add_executable(routeloom_telemetry_tests test_telemetry.cpp)
+target_link_libraries(routeloom_telemetry_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_telemetry_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_telemetry_tests COMMAND routeloom_telemetry_tests)
+
 add_executable(routeloom_congestion_tests test_congestion.cpp)
 target_link_libraries(routeloom_congestion_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_congestion_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

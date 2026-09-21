@@ -36,6 +36,22 @@ struct RadioRxMetadata {
   std::int8_t rssi_dbm{0};
 };
 
+// V2 is deliberately separate: legacy RadioRxMetadata{-60} callers keep
+// compiling, but do not acquire invented timestamps, validity or generations.
+// The Owner captures these values in the callback and rechecks the identity
+// after link authentication before passing them to the telemetry primitives.
+struct RadioRxMetadataV2 {
+  std::uint64_t received_us{0};
+  BindingGeneration binding_generation{};
+  RadioGeneration radio_generation{};
+  ChannelEpoch channel_epoch{};
+  std::int8_t rssi_dbm{0};
+  bool rssi_valid{false};
+  std::uint8_t channel{0};
+  bool channel_valid{false};
+};
+static_assert(sizeof(RadioRxMetadataV2) <= 24, "bounded RX metadata");
+
 class RadioPort {
  public:
   virtual ~RadioPort() = default;

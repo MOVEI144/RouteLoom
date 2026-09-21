@@ -20,6 +20,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/replay.cpp
   src/routing.cpp
   src/status.cpp
+  src/telemetry.cpp
   src/usb_bridge.cpp
   src/usb_codec.cpp
   src/usb_host_ops.cpp
