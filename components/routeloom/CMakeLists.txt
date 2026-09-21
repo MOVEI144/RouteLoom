@@ -10,6 +10,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/crc32.cpp
   src/c_api.cpp
   src/counter_store.cpp
+  src/device_credential.cpp
   src/discovery.cpp
   src/discovery_scope.cpp
   src/endpoint_wire.cpp
@@ -22,6 +23,9 @@ set(ROUTELOOM_CORE_SOURCES
   src/routing.cpp
   src/status.cpp
   src/telemetry.cpp
+  src/trust_manifest.cpp
+  src/trust_store.cpp
+  src/trust_view.cpp
   src/usb_bridge.cpp
   src/usb_codec.cpp
   src/usb_host_ops.cpp

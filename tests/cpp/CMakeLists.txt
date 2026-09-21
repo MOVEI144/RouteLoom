@@ -135,8 +135,42 @@ target_include_directories(routeloom_config_wire_tests PRIVATE ${CMAKE_CURRENT_S
 target_compile_options(routeloom_config_wire_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_wire_tests COMMAND routeloom_config_wire_tests)
 
+# Provisioning-lifecycle portable core (issue #10): RLT1 trust store, RLC1
+# device credential, RTM1 trust manifest. The micro-ecc include dir is added
+# so the shared fixture can drive real P-256 keypairs/signatures against the
+# vendored copy already linked into routeloom_core.
+set(ROUTELOOM_UECC_DIR ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
+
+add_executable(routeloom_trust_store_tests test_trust_store.cpp)
+target_link_libraries(routeloom_trust_store_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_trust_store_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_trust_store_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_trust_store_tests COMMAND routeloom_trust_store_tests)
+
+add_executable(routeloom_credential_tests test_device_credential.cpp)
+target_link_libraries(routeloom_credential_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_credential_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_credential_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_credential_tests COMMAND routeloom_credential_tests)
+
+add_executable(routeloom_trust_manifest_tests test_trust_manifest.cpp)
+target_link_libraries(routeloom_trust_manifest_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_trust_manifest_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_trust_manifest_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_trust_manifest_tests COMMAND routeloom_trust_manifest_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)
 target_compile_options(routeloom_c_header_test PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_c_header_test COMMAND routeloom_c_header_test)
+
+add_executable(routeloom_trust_view_tests test_trust_view.cpp)
+target_link_libraries(routeloom_trust_view_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_trust_view_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_trust_view_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_trust_view_tests COMMAND routeloom_trust_view_tests)
