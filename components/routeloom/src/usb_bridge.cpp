@@ -637,26 +637,38 @@ void UsbBridge::on_config_reply(const std::uint64_t request,
 UsbBridge::PendingDiagnostic* UsbBridge::find_pending_diagnostic(
     const std::uint32_t request_id, const NodeId observer) noexcept {
   for (auto& slot : pending_diag_) {
-    if (slot.active && slot.request_id == request_id &&
-        slot.observer == observer) {
+    // Session identity participates in the match: a reply from a previous
+    // session's query can never resolve a slot minted under this session.
+    if (slot.active && slot.usb_session == session_id() &&
+        slot.request_id == request_id && slot.observer == observer &&
+        now_ms_ < slot.expires_ms) {
       return &slot;
     }
   }
   return nullptr;
 }
 
-UsbBridge::PendingDiagnostic* UsbBridge::alloc_pending_diagnostic() noexcept {
+UsbBridge::PendingDiagnostic* UsbBridge::alloc_pending_diagnostic(
+    const NodeId observer) noexcept {
+  PendingDiagnostic* free_slot = nullptr;
   for (auto& slot : pending_diag_) {
-    if (!slot.active) return &slot;
+    if (!slot.active) {
+      if (free_slot == nullptr) free_slot = &slot;
+      continue;
+    }
+    // One outstanding query per observer — the mesh exchange cannot
+    // multiplex two in-flight queries at the same target (04 §USB).
+    if (slot.observer == observer) return nullptr;
   }
-  return nullptr;
+  return free_slot;
 }
 
 void UsbBridge::send_diagnostic_reply(const std::uint64_t request,
                                       const ConfigOpsResult result,
                                       const NodeId observer,
                                       const ByteView body,
-                                      const MonotonicMs now_ms) noexcept {
+                                      const MonotonicMs now_ms,
+                                      const MonotonicMs expires_ms) noexcept {
   std::array<std::uint8_t, kGatewayInnerHeadSize + kDiagnosticReplyFixed +
                               kDiagnosticReplyMaxBody>
       encoded{};
@@ -666,7 +678,7 @@ void UsbBridge::send_diagnostic_reply(const std::uint64_t request,
                               MutableByteView{encoded.data(), encoded.size()},
                               written)) {
     enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), written},
-            now_ms);
+            now_ms, expires_ms);
   } else {
     ++stats_.dropped_frames;
   }
@@ -705,9 +717,18 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
                             ByteView{}, now_ms);
       return;
     }
+    // The host's nonce must round-trip: decode the query and echo it (04
+    // §capabilities — a reply is bound to a specific query nonce).
+    CapabilitiesQuery cap_query{};
+    if (!capabilities_query_decode(req.body, cap_query).ok()) {
+      send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                            ByteView{}, now_ms);
+      return;
+    }
     std::array<std::uint8_t, kCapabilitiesReplyBodySize> out{};
-    if (!capabilities_reply_encode(config_.mesh->build_capabilities_reply(),
-                                   MutableByteView{out.data(), out.size()})) {
+    if (!capabilities_reply_encode(
+            config_.mesh->build_capabilities_reply(cap_query.nonce),
+            MutableByteView{out.data(), out.size()})) {
       ++stats_.dropped_frames;
       return;
     }
@@ -760,9 +781,10 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
     return;
   }
 
-  // Remote: bounded async query — slot exhaustion is an honest Busy, and
-  // the request's own lifetime bounds the wait (poll() expires the slot).
-  PendingDiagnostic* slot = alloc_pending_diagnostic();
+  // Remote: bounded async query — slot exhaustion or a duplicate observer
+  // is an honest Busy, and the request's own lifetime bounds the wait
+  // (poll() expires the slot; reset clears all slots with the session).
+  PendingDiagnostic* slot = alloc_pending_diagnostic(req.observer);
   if (slot == nullptr) {
     send_diagnostic_reply(request, ConfigOpsResult::Busy, req.observer,
                           ByteView{}, now_ms);
@@ -778,6 +800,7 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
   slot->active = true;
   slot->request_id = query.request_id;
   slot->usb_request = request;
+  slot->usb_session = session_id();
   slot->observer = req.observer;
   slot->expires_ms = now_ms + kTelemetryQueryLifetimeMs;
 }
@@ -811,9 +834,12 @@ void UsbBridge::on_diagnostic_body(const NodeId observer, const ByteView body,
     return;
   }
   const std::uint64_t usb_request = slot->usb_request;
+  const MonotonicMs deadline = slot->expires_ms;
   *slot = PendingDiagnostic{};
+  // The reply carries the query's own deadline into the TX queue — credit
+  // starvation expires it in flight rather than delivering stale evidence.
   send_diagnostic_reply(usb_request, ConfigOpsResult::Ok, observer, body,
-                        now_ms);
+                        now_ms, deadline);
 }
 
 void UsbBridge::handle_config_query(const std::uint64_t request,
@@ -1389,7 +1415,8 @@ void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
 
 bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
                         const std::uint64_t request, const ByteView inner,
-                        const MonotonicMs now_ms) noexcept {
+                        const MonotonicMs now_ms,
+                        const MonotonicMs expires_ms) noexcept {
   (void)now_ms;
   if (inner.size > kMaxTxInner) {
     ++stats_.dropped_frames;
@@ -1400,6 +1427,7 @@ bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
   item.flags = flags;
   item.request = request;
   item.body_size = inner.size;
+  item.expires_ms = expires_ms;
   if (inner.size > 0) std::memcpy(item.body.data(), inner.data, inner.size);
   const bool queued = is_control_kind(kind) ? control_q_.push(item)
                                           : data_q_.push(item);
@@ -1432,6 +1460,13 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
       control = false;
     }
     if (item == nullptr) return;
+    // Deadline-bound items (diagnostic replies): an expired queued item is
+    // a counted drop — never delivered late as if still fresh evidence.
+    if (item->expires_ms != 0 && now_ms >= item->expires_ms) {
+      if (control) control_q_.drop(); else data_q_.drop();
+      ++stats_.diagnostics_expired;
+      continue;
+    }
 
     const bool protect =
         (state_ == SessionState::Active || state_ == SessionState::Draining) &&
@@ -1560,6 +1595,9 @@ void UsbBridge::reset_session_state() noexcept {
   tx_wire_sent_ = 0;
   pending_request_ = 0;
   request_map_ = FixedPool<RequestMap, kRequestMapCapacity>{};
+  // Pending diagnostic queries are session state: a reconnected session can
+  // never observe a late reply under a minted slot (04 §USB correlation).
+  for (auto& slot : pending_diag_) slot = PendingDiagnostic{};
   decoder_.reset();
   // Gateway lane teardown: the registration dies with the session (a new
   // token is minted per session — old tokens can never be rebound), and

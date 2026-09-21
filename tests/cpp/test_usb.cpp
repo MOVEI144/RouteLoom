@@ -487,6 +487,7 @@ struct World {
     cfg.network = 7;
     cfg.node = node;
     cfg.message_session = session;
+    cfg.boot_incarnation = session;  // firmware wires the same NVS counter
     return cfg;
   }
 
@@ -870,9 +871,15 @@ void test_bridge_diagnostics() {
     }
   };
 
-  // 1) Local CapabilitiesQuery (subtype 1, bare 4-byte prefix).
+  // 1) Local CapabilitiesQuery (subtype 1, nonce16 + reserved4 = 24 B).
   {
-    const std::array<std::uint8_t, 4> query{{1, 1, 0, 0}};
+    CapabilitiesQuery cap_query{};
+    for (std::size_t i = 0; i < cap_query.nonce.size(); ++i) {
+      cap_query.nonce[i] = static_cast<std::uint8_t>(0xA0 + i);
+    }
+    std::array<std::uint8_t, kCapabilitiesQueryBodySize> query{};
+    CHECK_OK(capabilities_query_encode(
+        cap_query, MutableByteView{query.data(), query.size()}));
     world.feed(diag_request(host, 62, /*observer=*/1,
                             ByteView{query.data(), query.size()}), now);
     pump_mesh(8);
@@ -884,10 +891,13 @@ void test_bridge_diagnostics() {
     if (n == kCapabilitiesReplyBodySize) {
       CapabilitiesReply reply{};
       CHECK_OK(capabilities_reply_decode(ByteView{body.data(), n}, reply));
-      CHECK(reply.observer == 1);
+      CHECK(reply.echo_nonce == cap_query.nonce);  // echoed verbatim
+      CHECK(reply.node_boot == 7001);               // n1 boot_incarnation
       CHECK((reply.features & kCapLocalTelemetryV1) != 0);
       CHECK((reply.features & kCapForwardV1) != 0);   // relay on + started
       CHECK((reply.features & kCapRemoteTelemetryV1) == 0);  // n1 not opted in
+      CHECK((reply.features & kCapTransitFailureV1) != 0);
+      CHECK(reply.valid_for_ms == kCapabilitiesValidityMs);
       world.device_sink.frames.clear();
     }
   }

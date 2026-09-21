@@ -72,6 +72,7 @@ class DevConfigAuthorityVerifier final : public ConfigAuthorityVerifier {
   SecurityProfile security_profile() const noexcept override {
     return SecurityProfile::Development;
   }
+  std::uint32_t permit_profile_bit() const noexcept override { return 1u << 0; }
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;

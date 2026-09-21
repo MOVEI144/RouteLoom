@@ -104,6 +104,15 @@ class ConfigTarget final : public ConfigEndpointSink {
   void on_config_job_done(const MessageId& id, bool hop_accepted,
                           const char* reason, MonotonicMs now_ms) noexcept override;
   void poll(MonotonicMs now_ms) noexcept override;
+  std::uint32_t permit_profile_bits() const noexcept override {
+    // M1 selects one profile globally; OR over ready journals still yields
+    // a single bit. An unprovisioned verifier contributes nothing.
+    std::uint32_t bits = 0;
+    for (std::size_t i = 0; i < journal_count_; ++i) {
+      bits |= journals_[i]->permit_profile_bits();
+    }
+    return bits;
+  }
 
   // Diagnostics surface.
   std::uint32_t control_denied() const noexcept { return control_denied_; }

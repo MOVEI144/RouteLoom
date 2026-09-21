@@ -154,6 +154,10 @@ struct RadioTxObservation {
   std::uint64_t completed_us{0};
   std::uint8_t frame_length_class{0};
   RadioTxOutcome outcome{RadioTxOutcome::Unknown};
+  // Where this observation came from — only a real TX-complete callback may
+  // claim LocalDriver; submitted-side bookkeeping and tests must not be
+  // relabelled as driver evidence (02-telemetry §provenance).
+  ObservationProvenance provenance{ObservationProvenance::InjectedTest};
 };
 static_assert(sizeof(RadioTxObservation) <= 64, "bounded TX observation");
 

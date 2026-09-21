@@ -131,9 +131,12 @@ config ROUTELOOM_CAPABILITY
         endpoint unattached and every gateway op answers Unsupported.
         Bit 4 (0x10) is the EXPERIMENTAL opt-in for config_endpoint_v1:
         the build attaches the ConfigGateway lane and serves the 0x20-0x23
-        subcommands; cleared answers Unsupported. The bitmap is bound into
-        the HelloAck authentication transcript — a bit is only advertised
-        when the matching endpoint is actually attached (dev profile; not
-        a production identity claim).
+        subcommands; cleared answers Unsupported. Bit 5 (0x20) is the
+        EXPERIMENTAL opt-in for m1_diagnostics_v1: the build attaches the
+        diagnostic sink and serves the 0x30/0x31 subcommands (local
+        capabilities inline; remote telemetry only if the TARGET opted in).
+        The bitmap is bound into the HelloAck authentication transcript —
+        a bit is only advertised when the matching endpoint is actually
+        attached (dev profile; not a production identity claim).
 
 endmenu

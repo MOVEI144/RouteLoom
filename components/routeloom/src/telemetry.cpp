@@ -350,36 +350,68 @@ Status diagnostic_reject_decode(const ByteView body, DiagnosticReject& out) noex
   return Status::success();
 }
 
-// CapabilitiesReply layout (40 B): prefix4 || features1 || permit_profiles1
-// || relay_effective1 || reserved1 || observer8 || observer_boot8 || reserved16.
+// CapabilitiesQuery layout (24 B): prefix4 || nonce16 || reserved4.
+Status capabilities_query_encode(const CapabilitiesQuery& query,
+                                 const MutableByteView out) noexcept {
+  std::uint8_t acc = 0;
+  for (const auto byte : query.nonce) acc |= byte;
+  if (out.size != kCapabilitiesQueryBodySize || acc == 0) return reject();
+  ByteWriter writer{out};
+  Status status = prefix_write(writer, DiagnosticSubtype::CapabilitiesQuery);
+  if (!status) return status;
+  status = writer.write_bytes(
+      ByteView{query.nonce.data(), query.nonce.size()});
+  if (!status) return status;
+  return writer.write_u32(0);
+}
+
+Status capabilities_query_decode(const ByteView body,
+                                 CapabilitiesQuery& out) noexcept {
+  if (body.size != kCapabilitiesQueryBodySize) return reject();
+  ByteReader reader{body};
+  Status status = prefix_read(reader, DiagnosticSubtype::CapabilitiesQuery);
+  if (!status) return status;
+  std::uint8_t acc = 0;
+  for (std::size_t i = 0; i < kCapabilitiesNonceSize; ++i) {
+    std::uint8_t byte = 0;
+    status = reader.read_u8(byte);
+    if (!status) return status;
+    out.nonce[i] = byte;
+    acc |= byte;
+  }
+  std::uint32_t reserved = 0;
+  status = reader.read_u32(reserved);
+  if (!status) return status;
+  if (!expect_consumed(reader) || acc == 0 || reserved != 0) return reject();
+  return Status::success();
+}
+
+// CapabilitiesReply layout (40 B): prefix4 || echo_nonce16 || node_boot8 ||
+// features4 || permit_profiles4 || valid_for_ms4 (04 §capabilities).
 Status capabilities_reply_encode(const CapabilitiesReply& reply,
                                  const MutableByteView out) noexcept {
-  if (out.size != kCapabilitiesReplyBodySize ||
-      reply.observer == kInvalidNodeId ||
-      reply.observer == kBroadcastNodeId ||
-      (reply.features & ~0x1Fu) != 0 || (reply.permit_profiles & ~0x3u) != 0) {
+  std::uint8_t acc = 0;
+  for (const auto byte : reply.echo_nonce) acc |= byte;
+  if (out.size != kCapabilitiesReplyBodySize || acc == 0 ||
+      reply.node_boot == 0 ||
+      (reply.features & ~0x1Fu) != 0 || (reply.permit_profiles & ~0x3u) != 0 ||
+      reply.valid_for_ms == 0 ||
+      reply.valid_for_ms > kCapabilitiesValidityCapMs) {
     return reject();
   }
   ByteWriter writer{out};
   Status status = prefix_write(writer, DiagnosticSubtype::CapabilitiesReply);
   if (!status) return status;
-  status = writer.write_u8(reply.features);
+  status = writer.write_bytes(
+      ByteView{reply.echo_nonce.data(), reply.echo_nonce.size()});
   if (!status) return status;
-  status = writer.write_u8(reply.permit_profiles);
+  status = writer.write_u64(reply.node_boot);
   if (!status) return status;
-  status = writer.write_u8(reply.relay_effective ? 1 : 0);
+  status = writer.write_u32(reply.features);
   if (!status) return status;
-  status = writer.write_u8(0);
+  status = writer.write_u32(reply.permit_profiles);
   if (!status) return status;
-  status = writer.write_u64(reply.observer);
-  if (!status) return status;
-  status = writer.write_u64(reply.observer_boot);
-  if (!status) return status;
-  for (int i = 0; i < 16; ++i) {
-    status = writer.write_u8(0);
-    if (!status) return status;
-  }
-  return Status::success();
+  return writer.write_u32(reply.valid_for_ms);
 }
 
 Status capabilities_reply_decode(const ByteView body,
@@ -388,37 +420,28 @@ Status capabilities_reply_decode(const ByteView body,
   ByteReader reader{body};
   Status status = prefix_read(reader, DiagnosticSubtype::CapabilitiesReply);
   if (!status) return status;
-  std::uint8_t features = 0, profiles = 0, relay = 0, reserved = 0;
-  std::uint64_t observer = 0, boot = 0;
-  status = reader.read_u8(features);
-  if (!status) return status;
-  status = reader.read_u8(profiles);
-  if (!status) return status;
-  status = reader.read_u8(relay);
-  if (!status) return status;
-  status = reader.read_u8(reserved);
-  if (!status) return status;
-  status = reader.read_u64(observer);
-  if (!status) return status;
-  status = reader.read_u64(boot);
-  if (!status) return status;
-  for (int i = 0; i < 16; ++i) {
-    std::uint8_t pad = 0;
-    status = reader.read_u8(pad);
+  std::uint8_t acc = 0;
+  for (std::size_t i = 0; i < kCapabilitiesNonceSize; ++i) {
+    std::uint8_t byte = 0;
+    status = reader.read_u8(byte);
     if (!status) return status;
-    reserved |= pad;
+    out.echo_nonce[i] = byte;
+    acc |= byte;
   }
-  if (!expect_consumed(reader)) return reject();
-  if ((features & ~0x1Fu) != 0 || (profiles & ~0x3u) != 0 || relay > 1 ||
-      reserved != 0 || observer == kInvalidNodeId ||
-      observer == kBroadcastNodeId) {
+  status = reader.read_u64(out.node_boot);
+  if (!status) return status;
+  status = reader.read_u32(out.features);
+  if (!status) return status;
+  status = reader.read_u32(out.permit_profiles);
+  if (!status) return status;
+  status = reader.read_u32(out.valid_for_ms);
+  if (!status) return status;
+  if (!expect_consumed(reader) || acc == 0 || out.node_boot == 0 ||
+      (out.features & ~0x1Fu) != 0 || (out.permit_profiles & ~0x3u) != 0 ||
+      out.valid_for_ms == 0 ||
+      out.valid_for_ms > kCapabilitiesValidityCapMs) {
     return reject();
   }
-  out.features = features;
-  out.permit_profiles = profiles;
-  out.relay_effective = relay != 0;
-  out.observer = observer;
-  out.observer_boot = boot;
   return Status::success();
 }
 

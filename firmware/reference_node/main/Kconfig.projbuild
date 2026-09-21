@@ -110,7 +110,7 @@ config ROUTELOOM_CONFIG_COSE_KEY_HEX
 
 config ROUTELOOM_TELEMETRY_REMOTE
     bool "Answer remote Diagnostic (48) telemetry queries over the mesh"
-    default y
+    default n
     help
         EXPERIMENTAL bench surface: the node answers end-protected
         TelemetryQuery frames with bounded 128-byte snapshots of its

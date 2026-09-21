@@ -318,6 +318,13 @@ class EspNowRuntime final : public RadioPort,
   Status channel_readback(std::uint8_t& channel) noexcept;
   Status channel_reapply_peers() noexcept;
   void channel_fence_tx() noexcept;
+  // Caller holds callback_lock_. Purges quarantine entries whose radio
+  // generation is no longer current, then reports whether `mac` remains
+  // quarantined (a callback is still owed for a retired send to it).
+  bool tx_quarantined(const MacAddress& mac) noexcept;
+  // Stage a TX completion event when event_queue_ refuses it. Caller holds
+  // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
+  void stage_lost_tx(const Event& event) noexcept;
   void channel_committed(std::uint8_t channel) noexcept;
 
   void enqueue_rx(const esp_now_recv_info_t* info,
@@ -377,6 +384,20 @@ class EspNowRuntime final : public RadioPort,
   RawTx fenced_pending_{};
   MonotonicMs fenced_until_ms_{0};
   bool fenced_outstanding_{false};
+  // MAC quarantine (02 §2.3/X-02): a watchdog-retired send still owes the
+  // driver a callback. While its radio generation is current the MAC stays
+  // quarantined — a late callback consumes the marker as stale evidence and
+  // can never resolve a replacement send to the same destination. Entries
+  // clear on radio-generation change (proven quiescence barrier).
+  static constexpr std::size_t kQuarantineCapacity = 4;
+  std::array<RawTx, kQuarantineCapacity> quarantined_tx_{};
+  std::size_t quarantined_count_{0};
+  // TX completions that could not be enqueued onto event_queue_ are staged
+  // here and drained on the next poll_once — an accepted submission must
+  // resolve exactly once, never disappear into a queue overflow (02 §2.5).
+  static constexpr std::size_t kLostTxCapacity = 4;
+  std::array<Event, kLostTxCapacity> lost_tx_{};
+  std::size_t lost_tx_count_{0};
   std::uint32_t stale_tx_results_{0};
   OwnerChannelPort channel_port_;
   ChannelOperationRunner channel_runner_;

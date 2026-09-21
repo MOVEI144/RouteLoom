@@ -439,6 +439,7 @@ void test_node_tx_observation() {
   obs.completed_us = 1400;
   obs.frame_length_class = 1;
   obs.outcome = RadioTxOutcome::Success;
+  obs.provenance = ObservationProvenance::LocalDriver;
   f.node->note_radio_tx(obs, 100);
 
   const ObservationKey key{BindingGeneration{7}, ObservationDirection::Egress,
@@ -833,6 +834,106 @@ void test_transit_failure_propagation() {
   CHECK(propagated);
 }
 
+// Provenance segregation (02 §2.4): a LocalDriver event that carries no RSSI
+// must retire an InjectedTest aggregate — injected measurements never fold
+// into driver evidence, and a no-RSSI event never freshens the aggregate.
+void test_peer_summary_provenance_segregation() {
+  PeerTelemetryTable table{};
+  auto* e = table.note_rx(5, meta(-70), ObservationProvenance::InjectedTest, 9,
+                          1000);
+  CHECK(e != nullptr && e->rssi_samples == 1 && e->rssi_last == -70);
+  CHECK(e->provenance == ObservationProvenance::InjectedTest);
+  CHECK(e->last_rssi_ms == 1000);
+
+  RadioRxMetadataV2 no_rssi = meta(0);
+  no_rssi.rssi_valid = false;
+  e = table.note_rx(5, no_rssi, ObservationProvenance::LocalDriver, 9, 1100);
+  CHECK(e != nullptr);
+  // The aggregate was retired: no RSSI fields survive the provenance switch.
+  CHECK(e->provenance == ObservationProvenance::LocalDriver);
+  CHECK(!e->rssi_present && e->rssi_samples == 0 && e->last_rssi_ms == 0);
+  // The observation itself is still fresh evidence of the peer's presence.
+  CHECK(e->last_sample_ms == 1100);
+
+  // A real driver RSSI afterwards starts a clean aggregate.
+  e = table.note_rx(5, meta(-50), ObservationProvenance::LocalDriver, 9, 1200);
+  CHECK(e->rssi_present && e->rssi_samples == 1 && e->rssi_last == -50);
+  CHECK(e->last_rssi_ms == 1200);
+}
+
+// Bucket reclaim (02 §bounded state): a full pool still serves a new key by
+// releasing the least-recently-updated EXPIRED bucket — never evicting live
+// evidence and never fabricating a slot.
+void test_bucket_reclaim_expired() {
+  NodeFixture f;
+  // Fill all 8 buckets with distinct identities at t=0.
+  for (std::uint64_t peer = 1; peer <= kObservationBucketCapacity; ++peer) {
+    RadioTxObservation obs{};
+    obs.peer = peer;
+    obs.binding_generation = BindingGeneration{1};
+    obs.radio_generation = RadioGeneration{1};
+    obs.channel_epoch = ChannelEpoch{1};
+    obs.outcome = RadioTxOutcome::Success;
+    obs.completed_us = 1000;
+    obs.submitted_us = 500;
+    f.node->note_radio_tx(obs, 0);
+  }
+  // Pool full: a ninth key inside the window overflows honestly.
+  RadioTxObservation extra{};
+  extra.peer = 99;
+  extra.binding_generation = BindingGeneration{9};
+  extra.radio_generation = RadioGeneration{1};
+  extra.channel_epoch = ChannelEpoch{1};
+  extra.outcome = RadioTxOutcome::Success;
+  f.node->note_radio_tx(extra, 1000);  // still inside the 2 s window
+  const ObservationKey extra_key{BindingGeneration{9},
+                                 ObservationDirection::Egress,
+                                 RadioGeneration{1}, ChannelEpoch{1}, 0, 99};
+  CHECK(f.node->telemetry_bucket(extra_key) == nullptr);
+
+  // Past the window the stale buckets reclaim: the new key is served.
+  f.node->note_radio_tx(extra, 4000);
+  const ObservationBucket* bucket = f.node->telemetry_bucket(extra_key);
+  CHECK(bucket != nullptr);
+  if (bucket != nullptr) CHECK(bucket->tx_mac_success == 1);
+}
+
+// Relay-off withdrawal (01 §1.6): a disabled relay retracts its advertised
+// routes — the origin stops sending it transit, so no refusal is needed.
+void test_relay_off_route_withdrawal() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* origin = world.add(1);
+  world.add(2);
+  world.add(3);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.link(2, 3, 1, 1);
+  world.run(400, 5);
+
+  auto* relay = world.at(2);
+  relay->set_relay_enabled(false);
+  world.run(1200, 5);  // withdrawal advertisement propagates
+  world.net.sights.clear();
+  world.obs(2)->diagnostics.clear();
+
+  SendOptions opts{};
+  MessageId id{};
+  CHECK_OK(origin->send(3, payload_view(), opts, world.now, id));
+  world.run(1500, 5);
+
+  // After the withdrawal lands, node 1 must not keep selecting node 2:
+  // no DATA frame crosses 1->2 and node 2 never has to refuse one.
+  std::size_t transit_attempts = 0;
+  for (const auto& s : world.net.sights) {
+    if (s.type == FrameType::Data && s.from == 1 && s.to == 2) {
+      ++transit_attempts;
+    }
+  }
+  CHECK(transit_attempts == 0);
+  CHECK(!world.obs(2)->has_diag("TRANSIT_RELAY_DISABLED"));
+}
+
 }  // namespace
 
 int main() {
@@ -853,6 +954,9 @@ int main() {
   test_transit_failure_relay_disabled();
   test_transit_failure_post_acceptance();
   test_transit_failure_propagation();
+  test_peer_summary_provenance_segregation();
+  test_bucket_reclaim_expired();
+  test_relay_off_route_withdrawal();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d telemetry checks failed\n", failures);

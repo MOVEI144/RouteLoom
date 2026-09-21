@@ -35,13 +35,13 @@ set(ROUTELOOM_CORE_SOURCES
 set(ROUTELOOM_UECC_SRC
   ${CMAKE_CURRENT_LIST_DIR}/../../third_party/micro-ecc/uECC.c
 )
+# uECC_* defines only affect uECC.c, so they are applied target-wide: the
+# IDF component-requirements pass forbids set_source_files_properties.
 set(ROUTELOOM_UECC_DEFS
   uECC_SUPPORTS_secp160r1=0 uECC_SUPPORTS_secp192r1=0
   uECC_SUPPORTS_secp224r1=0 uECC_SUPPORTS_secp256k1=0
   uECC_SUPPORTS_secp256r1=1 uECC_SQUARE_FUNC=0 uECC_OPTIMIZATION_LEVEL=2
 )
-set_source_files_properties(${ROUTELOOM_UECC_SRC}
-  PROPERTIES COMPILE_DEFINITIONS "${ROUTELOOM_UECC_DEFS}")
 
 if(COMMAND idf_component_register)
   idf_component_register(
@@ -49,6 +49,7 @@ if(COMMAND idf_component_register)
     INCLUDE_DIRS include ${CMAKE_CURRENT_LIST_DIR}/../../third_party/micro-ecc
   )
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS})
   target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
@@ -58,6 +59,7 @@ else()
   target_include_directories(routeloom_core PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../../third_party/micro-ecc)
   target_compile_features(routeloom_core PUBLIC cxx_std_17)
+  target_compile_definitions(routeloom_core PRIVATE ${ROUTELOOM_UECC_DEFS})
   target_compile_options(routeloom_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror>)
 endif()

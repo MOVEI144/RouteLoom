@@ -199,6 +199,10 @@ class FakePermitSigner final : public ConfigPermitSigner {
 class FakeVerifier final : public ConfigAuthorityVerifier {
  public:
   bool ready() const noexcept override { return true; }
+  // Tests that need the expensive-verify intake gate set this flag — the
+  // dev-profile default stays cheap (03-signing §3.3).
+  bool expensive{false};
+  bool verify_is_expensive() const noexcept override { return expensive; }
   Status verify_permit(const ConfigPermitContext& context, const ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override {
@@ -759,6 +763,37 @@ void test_c03_sequence_holes() {
 }
 
 // --- C04: authorization boundary -----------------------------------------------------
+
+// Expensive-verifier intake limiter (03-signing §3.3): one verification
+// start per 5 s, burst 1, charged before any signature work — a flood of
+// well-formed-but-invalid permits cannot monopolize the Owner.
+void test_c04_verify_intake_limit() {
+  TargetRig rig;
+  rig.verifier.expensive = true;  // simulate an ECC-class verifier
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  // The first expensive verification consumes the single intake token.
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+
+  // A second permit inside the window is refused CAPACITY before ANY
+  // signature work — intake refusal is not a denial and spends no revision.
+  ByteBuffer<kConfigPermitObjectMax> forged = last_permit_;
+  forged.bytes[40] ^= 0xFFU;
+  const std::size_t calls = rig.verifier.verify_calls;
+  CHECK(rig.journal->submit_permit(forged.view(), now_ms + 1000, true, verdict)
+            .code == StatusCode::Busy);
+  CHECK(verdict.reason == ConfigReason::Capacity);
+  CHECK(rig.journal->stats().verify_intake_refusals == 1);
+  CHECK(rig.verifier.verify_calls == calls);  // no signature work ran
+
+  // After the window the same forged permit reaches the verifier and is
+  // honestly denied — the limiter gates intake, never the verdict itself.
+  CHECK(rig.journal->submit_permit(forged.view(), now_ms + 7000, true, verdict)
+            .code == StatusCode::AuthenticationFailed);
+  CHECK(rig.verifier.verify_calls == calls + 1);
+}
 
 void test_c04_authorization() {
   TargetRig rig;
@@ -2387,6 +2422,7 @@ int main() {
   test_c01_basic_flow();
   test_c02_cas_conflict();
   test_c03_sequence_holes();
+  test_c04_verify_intake_limit();
   test_c04_authorization();
   test_c05_challenge_bounds();
   test_c06_fault_injection_decided();

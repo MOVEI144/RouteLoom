@@ -52,7 +52,11 @@ struct PeerTelemetrySummary {
   std::int8_t rssi_max{0};
   std::int16_t rssi_ewma_q8_8{0};
   std::uint32_t rssi_samples{0};
+  // last_sample_ms: any authenticated observation (identity freshness).
+  // last_rssi_ms: only events that carried a valid RSSI measurement — a
+  // no-RSSI event can never freshen the RSSI aggregate (02 §provenance).
   MonotonicMs last_sample_ms{0};
+  MonotonicMs last_rssi_ms{0};
   // Last observed receive channel of this peer's frames (diagnostic only —
   // the attribution epoch is `channel`, this is the numeric RF channel).
   std::uint8_t last_channel{0};
@@ -95,6 +99,16 @@ class PeerTelemetryTable {
       entry->channel = metadata.channel_epoch;
       entry->observer_boot = observer_boot;
     }
+    // A provenance change retires the RSSI aggregate: injected measurements
+    // must never fold into the driver-evidence stream (and vice versa).
+    if (entry->provenance != provenance) {
+      entry->rssi_present = false;
+      entry->rssi_saturated = false;
+      entry->rssi_samples = 0;
+      entry->rssi_last = entry->rssi_min = entry->rssi_max = 0;
+      entry->rssi_ewma_q8_8 = 0;
+      entry->last_rssi_ms = 0;
+    }
     entry->provenance = provenance;
     entry->last_sample_ms = now_ms;
     if (metadata.channel_valid) {
@@ -102,6 +116,7 @@ class PeerTelemetryTable {
       entry->channel_present = true;
     }
     if (!metadata.rssi_valid) return entry;
+    entry->last_rssi_ms = now_ms;
     entry->rssi_present = true;
     if (entry->rssi_samples == UINT32_MAX) {
       entry->rssi_saturated = true;
@@ -300,29 +315,46 @@ Status diagnostic_reject_decode(ByteView body, DiagnosticReject& out) noexcept;
 
 // CapabilitiesReply feature bits (04 §capabilities): what this node is wired
 // to do RIGHT NOW — forward_v1 additionally requires the current effective
-// relay permission, permit_profiles advertises only configured AND accepted
-// profiles with ready providers, never every compiled algorithm.
-enum CapabilityFeature : std::uint8_t {
+// relay permission and implies transit_failure_v1 + busy_v1; permit_profiles
+// advertises only the configured AND accepted profile with a ready provider,
+// never every compiled algorithm (zero when no config endpoint is attached).
+enum CapabilityFeature : std::uint32_t {
   kCapForwardV1 = 1u << 0,
   kCapLocalTelemetryV1 = 1u << 1,
   kCapTransitFailureV1 = 1u << 2,
   kCapRemoteTelemetryV1 = 1u << 3,
   kCapBusyV1 = 1u << 4,
 };
-enum PermitProfileBit : std::uint8_t {
+enum PermitProfileBit : std::uint32_t {
   kPermitProfileDevHmac = 1u << 0,
   kPermitProfileCoseEsp256 = 1u << 1,
 };
 
-// Fixed 40-byte link-only reply (subtype 2). A CapabilitiesQuery itself is
-// the bare 4-byte prefix (subtype 1) — no fields.
-struct CapabilitiesReply {
-  NodeId observer{kInvalidNodeId};
-  std::uint64_t observer_boot{0};
-  std::uint8_t features{0};
-  std::uint8_t permit_profiles{0};
-  bool relay_effective{false};
+// CapabilitiesQuery (subtype 1, link-only, hop-1): prefix4 || nonce16 ||
+// reserved4 = 24 bytes. The nonce is an unpredictable nonzero 128-bit value;
+// the reply echoes it under the current link binding (04 §capabilities).
+constexpr std::size_t kCapabilitiesQueryBodySize = 24;
+constexpr std::size_t kCapabilitiesNonceSize = 16;
+struct CapabilitiesQuery {
+  std::array<std::uint8_t, kCapabilitiesNonceSize> nonce{};
 };
+Status capabilities_query_encode(const CapabilitiesQuery& query,
+                                 MutableByteView out) noexcept;
+Status capabilities_query_decode(ByteView body, CapabilitiesQuery& out) noexcept;
+
+// CapabilitiesReply (subtype 2, link-only, hop-1): prefix4 || echo_nonce16 ||
+// node_boot8 || features4 || permit_profiles4 || valid_for_ms4 = 40 bytes.
+struct CapabilitiesReply {
+  std::array<std::uint8_t, kCapabilitiesNonceSize> echo_nonce{};
+  std::uint64_t node_boot{0};  // responder's diagnostic boot incarnation
+  std::uint32_t features{0};
+  std::uint32_t permit_profiles{0};
+  std::uint32_t valid_for_ms{0};
+};
+// Replies are retained at most 15 s and renewed at most once per 5 s; the
+// responder advertises the 5 s renewal horizon (04 §capabilities).
+constexpr std::uint32_t kCapabilitiesValidityMs = 5000;
+constexpr std::uint32_t kCapabilitiesValidityCapMs = 15000;
 
 Status capabilities_reply_encode(const CapabilitiesReply& reply,
                                  MutableByteView out) noexcept;

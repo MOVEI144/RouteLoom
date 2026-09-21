@@ -1245,6 +1245,27 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   context.authority_generation = config_.authority_generation;
   endpoint::EncodedConfigCommand& canonical = submit_txn_.canonical;
   bool verified = false;
+  // Pre-verification intake limiter (03-signing §3.3): one expensive
+  // verification start per 5 s, burst 1 — charged before ANY signature work
+  // so invalid-but-well-formed permits cannot monopolize the Owner. This is
+  // a device-level gate: no per-MAC bypass. A refusal is CAPACITY, not a
+  // denial — it consumes no revision and no acceptance budget.
+  if (verifier_.verify_is_expensive()) {
+    if (!verify_token_ &&
+        now_ms - last_verify_refill_ms_ >= 5000) {
+      verify_token_ = true;
+      last_verify_refill_ms_ = now_ms;
+    } else if (verify_token_ && last_verify_refill_ms_ == 0) {
+      last_verify_refill_ms_ = now_ms;  // anchor the first window
+    }
+    if (!verify_token_) {
+      fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::Capacity);
+      ++stats_.verify_intake_refusals;
+      return Status::error(StatusCode::Busy, "permit verify intake budget");
+    }
+    verify_token_ = false;
+    last_verify_refill_ms_ = now_ms;
+  }
   Status status = verifier_.verify_permit(context, permit, canonical, verified);
   if (!status) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::AuthorityDenied);

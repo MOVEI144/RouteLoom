@@ -77,6 +77,10 @@ struct BridgeStats {
   std::uint64_t credit_denied{0};
   std::uint64_t control_denied{0};
   std::uint64_t dropped_frames{0};
+  // Diagnostic replies dropped because the query's own lifetime expired
+  // while the frame waited for USB credits (04 §USB: credit starvation
+  // must not deliver a stale snapshot nor lose it silently).
+  std::uint64_t diagnostics_expired{0};
 };
 
 class UsbBridge final : public UsbFrameSink, public NodeObserver,
@@ -205,6 +209,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     std::uint64_t request{0};
     std::array<std::uint8_t, kMaxTxInner> body{};
     std::size_t body_size{0};
+    // 0 = never expires; diagnostic replies carry the query's deadline so
+    // credit starvation cannot retain and later deliver stale evidence.
+    MonotonicMs expires_ms{0};
   };
 
   struct RequestMap {
@@ -282,7 +289,8 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // Encodes + queues a 0x31 reply under `request`.
   void send_diagnostic_reply(std::uint64_t request, ConfigOpsResult result,
                              NodeId observer, ByteView body,
-                             MonotonicMs now_ms) noexcept;
+                             MonotonicMs now_ms,
+                             MonotonicMs expires_ms = 0) noexcept;
   // One in-flight remote telemetry query per bounded slot; correlated by
   // the diagnostic body's own request_id, never the transport MessageId.
   static constexpr std::size_t kPendingDiagnosticCapacity = 4;
@@ -290,12 +298,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     bool active{false};
     std::uint32_t request_id{0};
     std::uint64_t usb_request{0};
+    std::uint64_t usb_session{0};   // bound at alloc — never survives reset
     NodeId observer{kInvalidNodeId};
     MonotonicMs expires_ms{0};
   };
   PendingDiagnostic* find_pending_diagnostic(std::uint32_t request_id,
                                              NodeId observer) noexcept;
-  PendingDiagnostic* alloc_pending_diagnostic() noexcept;
+  PendingDiagnostic* alloc_pending_diagnostic(NodeId observer) noexcept;
   void send_receipt(const DispatchReceipt& receipt, std::uint64_t request,
                     MonotonicMs now_ms) noexcept;
   void send_query_response(const QueryResponse& response, std::uint64_t request,
@@ -320,7 +329,8 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void send_error(UsbErrorCode code, std::uint64_t request, const char* reason,
                   MonotonicMs now_ms) noexcept;
   bool enqueue(FrameKind kind, std::uint16_t flags, std::uint64_t request,
-               ByteView inner, MonotonicMs now_ms) noexcept;
+               ByteView inner, MonotonicMs now_ms,
+               MonotonicMs expires_ms = 0) noexcept;
   void pump_tx(MonotonicMs now_ms) noexcept;
   bool take_control_token(std::uint8_t& tokens, MonotonicMs& last_refill,
                           MonotonicMs now_ms) noexcept;

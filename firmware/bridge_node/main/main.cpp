@@ -217,6 +217,7 @@ extern "C" void app_main(void) {
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  config.node.boot_incarnation = message_session;
   // Origin generation must rise every boot so peers discard the previous
   // incarnation's route state. It is derived from the persisted monotonic
   // boot session, mapped into 1..0xFFFF (0 is the "unset" sentinel).
@@ -302,6 +303,15 @@ extern "C" void app_main(void) {
   static routeloom::ConfigGateway config_gateway(config_port, bridge);
   if ((bridge_config.capability & routeloom::usb::kCapConfigEndpointV1) != 0) {
     status = bridge.attach_config(config_gateway);
+    if (!status) fail(status.detail);
+  }
+
+  // M1 diagnostics (m1-completion D1d): the bridge answers HostOps 0x30
+  // diagnostic requests — local capabilities inline, remote telemetry via
+  // the routed type-48 lane — and streams 0x31 replies back. Without the
+  // bit the subcommands answer Unsupported; no mesh sink is installed.
+  if ((bridge_config.capability & routeloom::usb::kCapM1DiagnosticsV1) != 0) {
+    status = bridge.attach_diagnostics();
     if (!status) fail(status.detail);
   }
 

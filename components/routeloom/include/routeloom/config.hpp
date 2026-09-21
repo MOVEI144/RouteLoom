@@ -175,6 +175,15 @@ class ConfigAuthorityVerifier {
   virtual SecurityProfile security_profile() const noexcept {
     return SecurityProfile::Development;
   }
+  // CapabilitiesReply permit_profiles wire bit (04 §capabilities): the ONE
+  // bit this verifier represents — bit0 dev-HMAC, bit1 RLCP1_COSE_ESP256.
+  // 0 = not advertiseable. Only a ready() verifier's bit is advertised.
+  virtual std::uint32_t permit_profile_bit() const noexcept { return 0; }
+  // True when a verification attempt is expensive enough to warrant the
+  // pre-verification intake limiter (03-signing §3.3): asymmetric ECC
+  // verification on the radio Owner must be bounded independently of the
+  // post-verification acceptance budget. Cheap profiles (HMAC) return false.
+  virtual bool verify_is_expensive() const noexcept { return false; }
   // Verify `permit` (profile-defined envelope) against `context`. On
   // success `payload` receives the canonical RCC1 bytes the permit signs;
   // `verified` is set false whenever the signature, the binding or the
@@ -336,6 +345,9 @@ struct ConfigStats {
   std::uint32_t permits_denied{0};
   std::uint32_t accepted{0};
   std::uint32_t rate_refusals{0};
+  // Pre-verification intake refusals (03-signing §3.3): expensive permits
+  // rejected before any signature work — charged even on failure.
+  std::uint32_t verify_intake_refusals{0};
   std::uint32_t stale_revision{0};
   std::uint32_t conflicts{0};
   std::uint32_t no_change{0};
@@ -426,6 +438,12 @@ class ConfigJournal {
   const Digest256& active_hash() const noexcept { return active_hash_; }
   ByteView active_snapshot() const noexcept { return active_snapshot_.view(); }
   bool initialized() const noexcept { return initialized_; }
+  // Capability advertisement (04 §capabilities): the configured verifier's
+  // wire bit when it is provisioned, 0 otherwise — an unready profile is
+  // never advertised.
+  std::uint32_t permit_profile_bits() const noexcept {
+    return verifier_.ready() ? verifier_.permit_profile_bit() : 0;
+  }
   bool uncertain() const noexcept { return uncertain_; }
   bool quarantined() const noexcept { return quarantined_; }
   // True while an operation is between DECIDED and its terminal record:
@@ -590,6 +608,10 @@ class ConfigJournal {
   JournalRecord durable_{};          // newest persisted record (mirrors storage)
   std::array<ResultRecord, kConfigResultRecords> results_{};
   MonotonicMs last_now_ms_{0};
+  // Expensive-permit intake limiter: token bucket, 1 token / 5 s, capacity 1
+  // — charged on every verification START, success or failure (03 §3.3).
+  MonotonicMs last_verify_refill_ms_{0};
+  bool verify_token_{true};
   ConfigStats stats_{};
 
   // Big transient work areas live in the object, not the stack: the journal

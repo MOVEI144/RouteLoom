@@ -359,7 +359,20 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
           break;
         case 3:
           relay_allowed_ = fields[i].value[0] != 0;
-          if (node_ != nullptr) node_->set_relay_enabled(relay_allowed_);
+          if (node_ != nullptr) {
+            node_->set_relay_enabled(relay_allowed_);
+            if (!relay_allowed_) {
+              // Honest drain reporting (01 §1.6): the commit is durable and
+              // withdrawal is advertised, but accepted transit keeps
+              // draining on its own deadlines — log the residue instead of
+              // implying the pipes are already empty.
+              const std::size_t draining = node_->transit_in_flight();
+              if (draining > 0) {
+                ESP_LOGW(kTag, "relay off: %u transit records draining",
+                         static_cast<unsigned>(draining));
+              }
+            }
+          }
           break;
         default:
           break;
@@ -454,6 +467,9 @@ extern "C" void app_main(void) {
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  // Telemetry observations carry the same persisted per-boot incarnation as
+  // the config journal (cross-cutting §4.2) — never the zero "unset".
+  config.node.boot_incarnation = message_session;
   // Origin generation must rise every boot so peers discard the previous
   // incarnation's route state. It is derived from the persisted monotonic
   // boot session, mapped into 1..0xFFFF (0 is the "unset" sentinel).
@@ -692,9 +708,15 @@ extern "C" void app_main(void) {
   // (field 3 relay_allowed); attach after the sink so the gate reflects the
   // durable snapshot, not just the compile-time default.
   config_provider.attach_node(&runtime.node());
+#if CONFIG_ROUTELOOM_CONFIG_PROFILE == 1
+  ESP_LOGW(kTag,
+           "config target active (RLCP1_COSE_ESP256 asymmetric permit — "
+           "verification is real but not production-qualified)");
+#else
   ESP_LOGW(kTag,
            "EXPERIMENTAL config target active (dev HMAC permit profile, not "
            "a production identity)");
+#endif
   // §6.8 flash-write accounting: the NVS adapter counts committed journal
   // writes; logged here so bench runs can read the boot-time baseline.
   const auto cfg_writes = config_store.write_stats();

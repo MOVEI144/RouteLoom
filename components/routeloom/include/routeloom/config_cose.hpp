@@ -91,6 +91,10 @@ class CoseEsp256AuthorityVerifier final : public ConfigAuthorityVerifier {
   SecurityProfile security_profile() const noexcept override {
     return SecurityProfile::Production;
   }
+  std::uint32_t permit_profile_bit() const noexcept override { return 1u << 1; }
+  // P-256 ECDSA on the radio Owner is the expensive path the intake limiter
+  // exists for (03-signing §3.3).
+  bool verify_is_expensive() const noexcept override { return true; }
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
