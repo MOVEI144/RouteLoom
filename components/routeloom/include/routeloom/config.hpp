@@ -306,9 +306,31 @@ class ConfigRateLimiter {
     if (tokens_ < kConfigAcceptCapacity) ++tokens_;
   }
 
+  // Device-global expensive-verification intake gate (03-signing §3.3):
+  // one verification START per 5 s across ALL attached journals — charged
+  // before any signature work so invalid-but-well-formed permits cannot
+  // monopolize the Owner. The embedder owns this object and shares it
+  // between journals, which is what makes the bound device-wide.
+  bool consume_expensive_verify(const MonotonicMs now_ms) noexcept {
+    if (!verify_token_ &&
+        now_ms - last_verify_refill_ms_ >= kExpensiveVerifyIntervalMs) {
+      verify_token_ = true;
+      last_verify_refill_ms_ = now_ms;
+    } else if (verify_token_ && last_verify_refill_ms_ == 0) {
+      last_verify_refill_ms_ = now_ms;  // anchor the first window
+    }
+    if (!verify_token_) return false;
+    verify_token_ = false;
+    last_verify_refill_ms_ = now_ms;
+    return true;
+  }
+  static constexpr std::uint32_t kExpensiveVerifyIntervalMs = 5000;
+
  private:
   std::uint32_t tokens_{kConfigAcceptCapacity};
   MonotonicMs last_ms_{0};
+  MonotonicMs last_verify_refill_ms_{0};
+  bool verify_token_{true};
 };
 
 // --- Target-side pieces ------------------------------------------------------------
@@ -608,10 +630,6 @@ class ConfigJournal {
   JournalRecord durable_{};          // newest persisted record (mirrors storage)
   std::array<ResultRecord, kConfigResultRecords> results_{};
   MonotonicMs last_now_ms_{0};
-  // Expensive-permit intake limiter: token bucket, 1 token / 5 s, capacity 1
-  // — charged on every verification START, success or failure (03 §3.3).
-  MonotonicMs last_verify_refill_ms_{0};
-  bool verify_token_{true};
   ConfigStats stats_{};
 
   // Big transient work areas live in the object, not the stack: the journal

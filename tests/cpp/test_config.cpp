@@ -795,6 +795,45 @@ void test_c04_verify_intake_limit() {
   CHECK(rig.verifier.verify_calls == calls + 1);
 }
 
+// The intake gate is device-global (03-signing §3.3): two journals sharing
+// the embedder's limiter share ONE verification budget — a second journal
+// cannot mint its own burst.
+void test_c04_verify_intake_shared() {
+  TargetRig rig;
+  rig.verifier.expensive = true;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+
+  // A second journal on the SAME rate limiter — the embedder's device-wide
+  // budget object.
+  FakeJournalStorage storage_b{};
+  ConfigJournalConfig config_b = rig.config;
+  config_b.config_namespace = endpoint::kConfigNamespaceSdk;  // any namespace
+  ConfigJournal journal_b(config_b, storage_b, rig.verifier, rig.entropy,
+                          rig.rate, nullptr, nullptr, nullptr);
+  CHECK_OK(journal_b.initialize(now_ms));
+
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  const std::size_t calls = rig.verifier.verify_calls;
+
+  // Journal B's first-ever expensive permit is refused inside the window —
+  // the token journal A spent is the device's only token.
+  ByteBuffer<kConfigPermitObjectMax> forged = last_permit_;
+  forged.bytes[40] ^= 0xFFU;
+  CHECK(journal_b.submit_permit(forged.view(), now_ms + 1000, true, verdict)
+            .code == StatusCode::Busy);
+  CHECK(verdict.reason == ConfigReason::Capacity);
+  CHECK(rig.verifier.verify_calls == calls);  // still no signature work
+
+  // Past the window journal B DOES get served — the budget is shared, not
+  // per-journal stranded.
+  CHECK(journal_b.submit_permit(forged.view(), now_ms + 7000, true, verdict)
+            .code == StatusCode::AuthenticationFailed);
+  CHECK(rig.verifier.verify_calls == calls + 1);
+}
+
 void test_c04_authorization() {
   TargetRig rig;
   MonotonicMs now_ms = 1000;
@@ -2423,6 +2462,7 @@ int main() {
   test_c02_cas_conflict();
   test_c03_sequence_holes();
   test_c04_verify_intake_limit();
+  test_c04_verify_intake_shared();
   test_c04_authorization();
   test_c05_challenge_bounds();
   test_c06_fault_injection_decided();

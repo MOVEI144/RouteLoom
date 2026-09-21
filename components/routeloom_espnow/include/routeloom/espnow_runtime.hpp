@@ -321,7 +321,7 @@ class EspNowRuntime final : public RadioPort,
   // Caller holds callback_lock_. Purges quarantine entries whose radio
   // generation is no longer current, then reports whether `mac` remains
   // quarantined (a callback is still owed for a retired send to it).
-  bool tx_quarantined(const MacAddress& mac) noexcept;
+  bool tx_quarantined(const MacAddress& mac, MonotonicMs now) noexcept;
   // Stage a TX completion event when event_queue_ refuses it. Caller holds
   // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
   void stage_lost_tx(const Event& event) noexcept;
@@ -398,6 +398,11 @@ class EspNowRuntime final : public RadioPort,
   static constexpr std::size_t kLostTxCapacity = 4;
   std::array<Event, kLostTxCapacity> lost_tx_{};
   std::size_t lost_tx_count_{0};
+  // Dedicated staging for the single outstanding RESERVED completion — it
+  // resolves the node's job state and is never displaced by raw-lane
+  // overflow (02 §2.5).
+  Event lost_node_tx_{};
+  bool lost_node_tx_valid_{false};
   std::uint32_t stale_tx_results_{0};
   OwnerChannelPort channel_port_;
   ChannelOperationRunner channel_runner_;

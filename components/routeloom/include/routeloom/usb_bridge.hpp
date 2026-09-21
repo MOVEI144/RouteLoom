@@ -305,6 +305,12 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   PendingDiagnostic* find_pending_diagnostic(std::uint32_t request_id,
                                              NodeId observer) noexcept;
   PendingDiagnostic* alloc_pending_diagnostic(NodeId observer) noexcept;
+  // Bridge-minted mesh correlation id — monotone, nonzero, wraps by reset.
+  // The mesh request_id is NEVER the host-supplied value: a replayed 0x30
+  // request with a recycled id cannot collide with an outstanding slot
+  // because slots key on ids this bridge issued (04 §USB correlation).
+  std::uint32_t next_diag_request_id() noexcept;
+  std::uint32_t next_diag_request_id_{1};
   void send_receipt(const DispatchReceipt& receipt, std::uint64_t request,
                     MonotonicMs now_ms) noexcept;
   void send_query_response(const QueryResponse& response, std::uint64_t request,

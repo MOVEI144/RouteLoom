@@ -878,14 +878,16 @@ void test_bucket_reclaim_expired() {
     obs.submitted_us = 500;
     f.node->note_radio_tx(obs, 0);
   }
-  // Pool full: a ninth key inside the window overflows honestly.
+  // Pool full: a ninth key PAST the aggregation window but INSIDE the
+  // evidence TTL (2.1 s > 2 s, < 3 s) overflows honestly — valid live
+  // evidence is never evicted to make room (02 §bounded state).
   RadioTxObservation extra{};
   extra.peer = 99;
   extra.binding_generation = BindingGeneration{9};
   extra.radio_generation = RadioGeneration{1};
   extra.channel_epoch = ChannelEpoch{1};
   extra.outcome = RadioTxOutcome::Success;
-  f.node->note_radio_tx(extra, 1000);  // still inside the 2 s window
+  f.node->note_radio_tx(extra, 2100);  // past window, inside TTL
   const ObservationKey extra_key{BindingGeneration{9},
                                  ObservationDirection::Egress,
                                  RadioGeneration{1}, ChannelEpoch{1}, 0, 99};
@@ -934,6 +936,35 @@ void test_relay_off_route_withdrawal() {
   CHECK(!world.obs(2)->has_diag("TRANSIT_RELAY_DISABLED"));
 }
 
+// Capability exchange (04 §capabilities): a query gets a nonce-echoed reply
+// that grants a BOUNDED busy_v1 capability — renewal is paced, expiry is
+// honest, and a reply with no responder boot identity never grants.
+void test_capabilities_exchange() {
+  routeloom_test::SimWorld world;
+  world.network_id = kNet;
+  auto* a = world.add(1);
+  world.add(2);
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.run(400, 5);
+  world.obs(1)->diagnostics.clear();
+
+  std::array<std::uint8_t, kCapabilitiesNonceSize> nonce{};
+  nonce.fill(0xAB);
+  CHECK_OK(a->send_capabilities_query(2, nonce, world.now));
+  world.run(200, 5);
+  // The reply echoed our nonce under the responder's boot: grant is live.
+  CHECK(a->peer_busy_capable(2, world.now));
+
+  // Renewal bound: a completed exchange cannot restart inside 5 s.
+  CHECK(a->send_capabilities_query(2, nonce, world.now).code ==
+        StatusCode::Busy);
+
+  // The grant expires at the reply's own valid_for_ms — no permanent flag.
+  world.run(5100, 5);
+  CHECK(!a->peer_busy_capable(2, world.now));
+}
+
 }  // namespace
 
 int main() {
@@ -957,6 +988,7 @@ int main() {
   test_peer_summary_provenance_segregation();
   test_bucket_reclaim_expired();
   test_relay_off_route_withdrawal();
+  test_capabilities_exchange();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d telemetry checks failed\n", failures);

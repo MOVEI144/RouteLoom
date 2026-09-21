@@ -527,6 +527,7 @@ void EspNowRuntime::stop() noexcept {
   expired_tx_count_ = 0;
   quarantined_count_ = 0;
   lost_tx_count_ = 0;
+  lost_node_tx_valid_ = false;
   portEXIT_CRITICAL(&callback_lock_);
   if (espnow_initialized_) {
     (void)esp_now_unregister_recv_cb();
@@ -564,7 +565,34 @@ void EspNowRuntime::poll_once() noexcept {
   }
   const MonotonicMs now = now_ms();
   Event event{};
-  // Staged TX completions first: a queue-full callback already consumed its
+  // The dedicated reserved-completion slot drains FIRST — it resolves the
+  // node's outstanding job and is never displaced by raw traffic.
+  {
+    bool have = false;
+    portENTER_CRITICAL(&callback_lock_);
+    if (lost_node_tx_valid_) {
+      event = lost_node_tx_;
+      lost_node_tx_valid_ = false;
+      have = true;
+    }
+    portEXIT_CRITICAL(&callback_lock_);
+    if (have) {
+      RadioTxObservation staged{};
+      staged.peer = event.peer;
+      staged.binding_generation = event.binding;
+      staged.radio_generation = event.radio_generation;
+      staged.channel_epoch = event.channel_epoch;
+      staged.submitted_us = event.submitted_us;
+      staged.completed_us = event.observed_us;
+      staged.frame_length_class = event.frame_length_class;
+      staged.outcome = event.success ? RadioTxOutcome::Success
+                                     : RadioTxOutcome::Failure;
+      staged.provenance = ObservationProvenance::LocalDriver;
+      node_.note_radio_tx(staged, now);
+      node_.on_radio_tx_result(event.token, event.success, now);
+    }
+  }
+  // Staged TX completions next: a queue-full callback already consumed its
   // pending record — delaying it would leave the node's job unresolved.
   for (;;) {
     portENTER_CRITICAL(&callback_lock_);
@@ -627,7 +655,9 @@ void EspNowRuntime::poll_once() noexcept {
       meta.provenance = ObservationProvenance::LocalDriver;
       // Revalidate the captured identity before dispatch (02 §2.2): an
       // event queued before a rebind or channel commit must not let its
-      // stale generations read as current evidence — retire the summary.
+      // stale generations read as current evidence — retire the summary
+      // AND strip the metadata's freshness so it feeds neither the peer
+      // telemetry summary nor the connectivity oracle.
       {
         bool identity_current = false;
         portENTER_CRITICAL(&callback_lock_);
@@ -638,6 +668,7 @@ void EspNowRuntime::poll_once() noexcept {
             event.radio_generation == channel_runner_.radio_generation() &&
             event.channel_epoch == channel_epoch_;
         portEXIT_CRITICAL(&callback_lock_);
+        meta.identity_current = identity_current;
         if (!identity_current) {
           node_.note_peer_stale(event.peer);
         }
@@ -739,6 +770,8 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
   // expiry is evidence too: each retires into expired_tx_ for Unknown
   // accounting AND into the MAC quarantine — the still-owed callback must
   // never resolve a replacement send to the same destination (02 §2.3).
+  // When the quarantine table is full the entry is NOT retired: it stays
+  // outstanding (blocking that MAC) rather than losing callback tracking.
   std::size_t kept = 0;
   for (std::size_t i = 0; i < raw_tx_count_; ++i) {
     if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
@@ -747,18 +780,32 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     }
     if (quarantined_count_ < quarantined_tx_.size()) {
       quarantined_tx_[quarantined_count_++] = raw_tx_[i];
+      if (expired_tx_count_ < expired_tx_.size()) {
+        expired_tx_[expired_tx_count_++] = raw_tx_[i];
+      } else {
+        ++telemetry_event_drops_;
+      }
+      continue;
     }
-    if (expired_tx_count_ < expired_tx_.size()) {
-      expired_tx_[expired_tx_count_++] = raw_tx_[i];
-    } else {
-      ++telemetry_event_drops_;
-    }
+    raw_tx_[kept++] = raw_tx_[i];  // stays outstanding — MAC remains blocked
   }
   raw_tx_count_ = kept;
-  if (tx_quarantined(mac)) {
+  if (tx_quarantined(mac, now)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
                          "TX callback quarantine on peer");
+  }
+  // The reserved-send fence gates raw sends too: a watchdog-retired
+  // reserved TX still owes a callback that must never resolve this send.
+  if (fenced_outstanding_) {
+    if (now - fenced_pending_.sent_ms >=
+        config_.node.callback_watchdog_ms * 4U) {
+      fenced_outstanding_ = false;
+      ++stale_tx_results_;
+    } else if (fenced_mac_ == mac) {
+      portEXIT_CRITICAL(&callback_lock_);
+      return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
+    }
   }
   for (std::size_t i = 0; i < raw_tx_count_; ++i) {
     if (raw_tx_[i].mac == mac) {
@@ -850,12 +897,17 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
       }
       if (quarantined_count_ < quarantined_tx_.size()) {
         quarantined_tx_[quarantined_count_++] = raw_tx_[i];
+        if (expired_tx_count_ < expired_tx_.size()) {
+          expired_tx_[expired_tx_count_++] = raw_tx_[i];
+        } else {
+          ++telemetry_event_drops_;
+        }
+        continue;
       }
-      if (expired_tx_count_ < expired_tx_.size()) {
-        expired_tx_[expired_tx_count_++] = raw_tx_[i];
-      } else {
-        ++telemetry_event_drops_;
-      }
+      // Quarantine full: keep it outstanding — its MAC stays blocked
+      // rather than losing callback tracking (X-02).
+      raw_outstanding |= raw_tx_[i].mac == peer_mac;
+      raw_tx_[kept++] = raw_tx_[i];
     }
     raw_tx_count_ = kept;
     if (raw_outstanding) {
@@ -864,17 +916,20 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                            "autonomy TX in flight to peer");
     }
   }
-  if (tx_quarantined(peer_mac)) {
+  if (tx_quarantined(peer_mac, now)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock,
                          "TX callback quarantine on peer");
   }
   if (fenced_outstanding_) {
-    // The fence holds until the owed callback lands or the radio generation
-    // moves (a proven quiescence barrier) — a timer alone can never clear it
-    // because an old same-generation callback is indistinguishable (X-02).
-    if (fenced_pending_.radio_generation != channel_runner_.radio_generation()) {
+    // The fence holds until the owed callback lands or a dwell bound far
+    // past the driver contract expires — a radio-generation change alone
+    // does NOT establish callback quiescence, so it can never release the
+    // fence (X-02). Expiry is counted as lost-callback evidence.
+    if (now - fenced_pending_.sent_ms >=
+        config_.node.callback_watchdog_ms * 4U) {
       fenced_outstanding_ = false;
+      ++stale_tx_results_;
     } else if (fenced_mac_ == peer_mac) {
       portEXIT_CRITICAL(&callback_lock_);
       return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
@@ -895,7 +950,16 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
   if (const Peer* record = find_peer(peer)) {
     pending_binding_ = record->binding;
   }
+  // Hand the frozen submit identity to the node so submission accounting
+  // uses the SAME key the completion will carry (02 §2.3 — never a
+  // re-guessed identity mid-attempt).
+  const ObservationKey submit_key{pending_binding_,
+                                  ObservationDirection::Egress,
+                                  RadioGeneration{pending_generation_},
+                                  pending_channel_epoch_,
+                                  pending_length_class_, peer};
   portEXIT_CRITICAL(&callback_lock_);
+  node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
       esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
   if (error != ESP_OK) {
@@ -1785,12 +1849,21 @@ void EspNowRuntime::channel_fence_tx() noexcept {
   }
 }
 
-bool EspNowRuntime::tx_quarantined(const MacAddress& mac) noexcept {
-  const RadioGeneration gen = channel_runner_.radio_generation();
+bool EspNowRuntime::tx_quarantined(const MacAddress& mac,
+                                   const MonotonicMs now) noexcept {
+  // Quarantine releases ONLY on the owed callback's arrival (consumed in
+  // the TX callback path) or on a dwell bound far beyond the driver
+  // contract — a software generation change does NOT establish callback
+  // quiescence, so it can never release an entry (X-02). Dwell expiry is
+  // counted as lost-callback evidence, not silent cleanup.
+  const std::uint32_t dwell = config_.node.callback_watchdog_ms * 4U;
   std::size_t kept = 0;
   bool found = false;
   for (std::size_t i = 0; i < quarantined_count_; ++i) {
-    if (quarantined_tx_[i].radio_generation != gen) continue;  // quiescence barrier
+    if (now - quarantined_tx_[i].sent_ms >= dwell) {
+      ++stale_tx_results_;
+      continue;
+    }
     if (quarantined_tx_[i].mac == mac) found = true;
     quarantined_tx_[kept++] = quarantined_tx_[i];
   }
@@ -1799,6 +1872,18 @@ bool EspNowRuntime::tx_quarantined(const MacAddress& mac) noexcept {
 }
 
 void EspNowRuntime::stage_lost_tx(const Event& event) noexcept {
+  // The reserved (node) completion gets a dedicated slot — it is the only
+  // lane whose result resolves job state, and it can never be displaced by
+  // raw-completions filling the shared staging array (02 §2.5).
+  if (event.tx_lane == TxLane::Reserved) {
+    if (!lost_node_tx_valid_) {
+      lost_node_tx_ = event;
+      lost_node_tx_valid_ = true;
+    } else {
+      ++telemetry_event_drops_;
+    }
+    return;
+  }
   if (lost_tx_count_ < lost_tx_.size()) {
     lost_tx_[lost_tx_count_++] = event;
   } else {

@@ -241,6 +241,15 @@ class MeshNode {
   // callback-absent fencing is the Owner's job — this records what arrived.
   void note_radio_tx(const RadioTxObservation& observation,
                      MonotonicMs now_ms) noexcept;
+  // Submission identity the runtime froze for `token` (02 §2.3): the node
+  // stamps this key onto the job at dispatch so submit/complete accounting
+  // share one immutable identity — never re-guessed from a live summary.
+  void note_tx_submit_identity(const std::uint64_t token,
+                               const ObservationKey& key) noexcept {
+    submit_identity_.token = token;
+    submit_identity_.key = key;
+    submit_identity_.valid = true;
+  }
   // Read-only telemetry surfaces (02 §2.4/§2.7). A missing peer is nullptr,
   // not a zero record.
   const PeerTelemetrySummary* telemetry_peer(NodeId peer) const noexcept;
@@ -270,13 +279,14 @@ class MeshNode {
   // Effective transit permission for NEW admissions. Accepted transit
   // already queued keeps its original deadline — this only gates new work.
   bool transit_permitted() const noexcept { return started_ && relay_enabled_; }
-  // Accepted transit work still draining (01 §1.6): dedup records holding a
-  // live forwarded entry. A relay-off commit can poll this to report drain
-  // honestly instead of claiming completion while forwards are in flight.
+  // Accepted transit work still draining (01 §1.6): live scheduler jobs,
+  // the physically in-flight forward and hop-accept-awaiting transit —
+  // retained dedup evidence records are NOT work and never counted.
   std::size_t transit_in_flight() const noexcept {
-    std::size_t n = 0;
-    dedup_.for_each([&](const DedupEntry& entry) {
-      if (entry.forwarded && entry.expires_at_ms > last_clock_ms_) ++n;
+    std::size_t n = scheduler_.count_owner(JobOwner::Transit);
+    if (physical_.active && physical_.job.owner == JobOwner::Transit) ++n;
+    awaiting_hop_.for_each([&](const AwaitingHop& hop) {
+      if (hop.job.owner == JobOwner::Transit) ++n;
     });
     return n;
   }
@@ -388,6 +398,9 @@ class MeshNode {
   // capability negotiation lands, BUSY replies are emitted only to peers
   // marked here or proven by a valid received BUSY (03 §5, scenario D4-09).
   void set_peer_busy_capable(NodeId peer, bool capable) noexcept;
+  // Whether a live (unexpired) capability grant marks this peer as
+  // Busy(20)-capable right now — read-only mirror of the gate at 03 §5.
+  bool peer_busy_capable(NodeId peer, MonotonicMs now_ms) const noexcept;
   // Effective link cost currently fed to routing for `peer` (nominal base
   // adjusted by the measured exchange ratio and our egress queue penalty,
   // 03 §6). kInfiniteRouteMetric when the peer is unknown.
@@ -520,6 +533,14 @@ class MeshNode {
     std::uint8_t tx_window{kPeerWindowInitial};
     std::uint8_t window_accepts{0};
     bool busy_capable{false};  // peer proved/configured for Busy(20) feedback
+    // Granted-capability state from a nonce-bound CapabilitiesReply: the
+    // grant expires at cap_valid_until_ms under the peer's boot identity —
+    // a reply can never install a permanent capability (04 §capabilities).
+    MonotonicMs cap_valid_until_ms{0};
+    std::uint64_t cap_node_boot{0};
+    // Renewal pacing: last completed/granted capability exchange; a new
+    // query inside kCapQueryRenewalMs is refused.
+    MonotonicMs last_cap_exchange_ms{0};
     // Highest feedback sequence accepted from this peer; stale/replayed
     // BUSY payloads are detected against it (FeedbackSequence ordering tag).
     // feedback_seen is separate so a first seq equal to the sentinel value
@@ -586,15 +607,27 @@ class MeshNode {
     // destination — a TransitFailure report is only valid when it arrives
     // from THIS peer about THIS destination (01 §failure evidence).
     NodeId downstream_peer{kInvalidNodeId};
+    // The downstream's binding generation captured when the forward was
+    // physically submitted — a report is only valid against the attempt we
+    // actually made (dispatch may retarget the route after admission).
+    BindingGeneration downstream_binding{0};
     NodeId ref_destination{kInvalidNodeId};
     std::array<std::uint8_t, 32> fingerprint{};
     bool has_fingerprint{false};
     // A transit record that already emitted a TransitFailure: a re-received
     // duplicate re-emits the retained evidence instead of blindly re-ACKing
-    // a dead job (01 §same-key-after-failure).
+    // a dead job (01 §same-key-after-failure). The retained replay carries
+    // the ORIGINAL claimed reporter/report_id verbatim — a relay may never
+    // re-originate evidence under its own identity.
     bool failure_reported{false};
     std::uint8_t reported_phase{0};
     std::uint8_t reported_reason{0};
+    NodeId reported_reporter{kInvalidNodeId};
+    std::uint32_t reported_id{0};
+    // Replay bounding: a duplicate storm cannot turn one retained failure
+    // into unbounded re-emissions (cap + minimum spacing).
+    std::uint8_t failure_replays{0};
+    MonotonicMs last_replay_ms{0};
   };
 
   struct Delivery {
@@ -648,6 +681,12 @@ class MeshNode {
     // select loop may revisit the same blocked flow up to kMaxSelectRounds
     // times in one pass.
     bool window_block_counted{false};
+    // Observation identity stamped at physical submission (02 §2.3): the
+    // runtime-frozen binding/radio/channel tuple — submission, hop-accept
+    // and completion accounting share ONE key so counters can never split
+    // across a rebind or channel boundary mid-attempt.
+    ObservationKey obs_key{};
+    bool obs_key_set{false};
   };
 
   // Bounded TX scheduler (03-congestion.md §4): a single fixed pool of TxJob
@@ -682,6 +721,15 @@ class MeshNode {
     bool empty() const noexcept { return used_ == 0; }
     bool full() const noexcept { return used_ >= capacity(); }
     std::size_t size() const noexcept { return used_; }
+    // Live jobs of one owner class — used for honest drain visibility:
+    // queued-but-undispatched work, not retained evidence records.
+    std::size_t count_owner(JobOwner owner) const noexcept {
+      std::size_t n = 0;
+      pool_.for_each([&](const TxJob& job) {
+        if (job.owner == owner) ++n;
+      });
+      return n;
+    }
     static constexpr std::size_t capacity() noexcept { return kTxQueueCapacity; }
     std::size_t free_slots() const noexcept { return capacity() - used_; }
     std::size_t control_depth() const noexcept { return control_.count; }
@@ -880,7 +928,9 @@ class MeshNode {
   // (0); the radio Owner keys real epochs via note_radio_tx (03 §3).
   ObservationBucket* observation_bucket(NodeId peer, std::uint8_t length_class,
                                         MonotonicMs now_ms) noexcept;
-  void obs_tx_submitted(const TxJob& job, MonotonicMs now_ms) noexcept;
+  void obs_tx_submitted(TxJob& job, std::uint64_t token,
+                        MonotonicMs now_ms) noexcept;
+  ObservationBucket* job_bucket(const TxJob& job, MonotonicMs now_ms) noexcept;
   void obs_driver_service(const TxJob& job, std::uint32_t service_us,
                           MonotonicMs now_ms) noexcept;
   void obs_hop_result(const TxJob& job, bool accepted, MonotonicMs now_ms) noexcept;
@@ -933,6 +983,8 @@ class MeshNode {
   void handle_transit_failure_report(NodeId peer,
                                      const TransitFailure& report,
                                      MonotonicMs now_ms) noexcept;
+  void replay_retained_failure(DedupEntry& duplicate, FrameType type,
+                               MonotonicMs now_ms) noexcept;
   Status queue_diagnostic_reply(NodeId destination, ByteView body,
                                 std::uint32_t lifetime_ms,
                                 MonotonicMs now_ms) noexcept;
@@ -1018,9 +1070,18 @@ class MeshNode {
     NodeId peer{kInvalidNodeId};
     std::array<std::uint8_t, kCapabilitiesNonceSize> nonce{};
     MonotonicMs expires_at_ms{0};
+    // The peer's binding generation when the query was emitted — a reply
+    // arriving after a rebind is stale evidence and never grants
+    // capability (04 §capabilities).
+    BindingGeneration binding{0};
   };
   static constexpr std::size_t kPendingCapCapacity = 8;
   static constexpr std::uint32_t kCapQueryLifetimeMs = 15000;
+  // Renewal bound (04 §capabilities): a completed/expired probe may not be
+  // restarted for the same peer inside this interval.
+  static constexpr std::uint32_t kCapQueryRenewalMs = 5000;
+  static constexpr std::uint8_t kMaxFailureReplays = 3;
+  static constexpr std::uint32_t kFailureReplayMinIntervalMs = 1000;
   std::array<PendingCapQuery, kPendingCapCapacity> pending_caps_{};
   bool relay_enabled_{true};
   bool telemetry_remote_{false};
@@ -1032,6 +1093,13 @@ class MeshNode {
   TxScheduler scheduler_{};
   FixedPool<AwaitingHop, kAwaitingHopCapacity> awaiting_hop_{};
   PhysicalInflight physical_{};
+  // Single-slot submit identity handoff from the runtime (one physical
+  // send in flight): obs_tx_submitted consumes it for the matching token.
+  struct SubmitIdentity {
+    std::uint64_t token{0};
+    ObservationKey key{};
+    bool valid{false};
+  } submit_identity_{};
   std::uint64_t next_physical_token_{1};
   std::uint64_t next_message_sequence_{1};
   std::uint64_t next_control_sequence_{1};

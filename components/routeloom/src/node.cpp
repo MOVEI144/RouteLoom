@@ -481,6 +481,9 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->tx_window = kPeerWindowInitial;
   record->window_accepts = 0;
   record->busy_capable = false;
+  record->cap_valid_until_ms = 0;
+  record->cap_node_boot = 0;
+  record->last_cap_exchange_ms = 0;
   record->active = true;
   // Direct route to the neighbor itself, seeded at the last-seen generation
   // (0 for a brand-new peer); it upgrades as soon as its self record arrives.
@@ -1273,7 +1276,9 @@ void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected
   // configured for BUSY (03 §5; the D4-09 legacy fallback is the sender's
   // own timeout). A BUSY itself needs a reply slot: without one the frame
   // is dropped and counted, never fabricated.
-  if (neighbor == nullptr || !neighbor->busy_capable || scheduler_.free_slots() < 1) {
+  if (neighbor == nullptr || !neighbor->busy_capable ||
+      neighbor->cap_valid_until_ms <= now_ms ||
+      scheduler_.free_slots() < 1) {
     ++busy_stats_.busy_send_failed;
     return;
   }
@@ -1394,11 +1399,28 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       continue;
     }
     ++submitted.physical_attempts;
-    obs_tx_submitted(submitted, now_ms);
+    obs_tx_submitted(submitted, token, now_ms);
     physical_.job = std::move(submitted);
     physical_.token = token;
     physical_.submitted_at_ms = now_ms;
     physical_.active = true;
+    if (physical_.job.owner == JobOwner::Transit) {
+      // Bind the retained transit record to the attempt actually
+      // submitted — dispatch may have retargeted next_hop after admission
+      // (route repair), so the stored downstream/binding must reflect the
+      // real attempt, not the enqueue-time route.
+      const MessageKey tkey{physical_.job.plain.header.origin,
+                            physical_.job.plain.header.message};
+      if (auto* entry = find_dedup(tkey, physical_.job.plain.header.type,
+                                   physical_.job.plain.header.delivery_round)) {
+        entry->downstream_peer = physical_.job.peer;
+        entry->downstream_binding = BindingGeneration{0};
+        if (const auto* s = telemetry_peers_.find(physical_.job.peer);
+            s != nullptr && s->occupied) {
+          entry->downstream_binding = s->binding;
+        }
+      }
+    }
     if (physical_.job.owner == JobOwner::OriginDelivery) {
       if (auto* delivery = find_delivery(physical_.job.ack.key.id)) {
         set_delivery_state(*delivery, DeliveryState::WaitingForMac, "TX_MAC_PENDING");
@@ -1419,9 +1441,9 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   TxJob job = physical_.job;
   const bool busy_deferred = physical_.busy_deferred;
   const std::uint32_t busy_retry_ms = physical_.busy_retry_ms;
-  // Driver service time (03 §3): driver accept -> TX callback, in
-  // microseconds. May include CCA/MAC retries — it is not airtime.
-  obs_driver_service(job, (now_ms - physical_.submitted_at_ms) * 1000, now_ms);
+  // Driver service time is recorded ONLY by note_radio_tx from the
+  // runtime's own submitted/completed timestamps — a second measurement
+  // here would double-record and inflate it with Owner/RX backlog (03 §3).
   physical_ = PhysicalInflight{};
   auto* neighbor = find_neighbor(job.peer);
   if (!success) {
@@ -1673,15 +1695,21 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     // and — when we retained one — the same end-protected fingerprint.
     // A mismatch is a conflicted retransmission: report it, never ACK it.
     if (duplicate->forwarded) {
-      bool conflicted =
-          frame.header.destination != duplicate->ref_destination ||
-          frame.header.previous_hop != duplicate->upstream_peer;
+      // Destination/identity divergence is a message conflict; a different
+      // upstream parent alone is a duplicate path (01 §dedup conflicts).
       TransitFailureReason conflict = TransitFailureReason::DuplicatePath;
+      bool conflicted = false;
+      if (frame.header.destination != duplicate->ref_destination) {
+        conflicted = true;
+        conflict = TransitFailureReason::MessageConflict;
+      } else if (frame.header.previous_hop != duplicate->upstream_peer) {
+        conflicted = true;
+      }
       if (!conflicted && duplicate->has_fingerprint) {
         std::array<std::uint8_t, 32> incoming{};
         conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
                      incoming != duplicate->fingerprint;
-        conflict = TransitFailureReason::MessageConflict;
+        if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
         emit_transit_refusal(frame, conflict, now_ms);
@@ -1691,27 +1719,10 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       }
     }
     // A transit record that already reported a failure re-emits that
-    // retained evidence — never a blind re-ACK of a dead job (01 §policy).
+    // retained evidence verbatim — never a blind re-ACK of a dead job,
+    // never a re-originated claim under our own identity (01 §policy).
     if (duplicate->failure_reported) {
-      TransitFailure reemit{};
-      reemit.ref_origin = key.origin;
-      reemit.ref_session = key.id.session;
-      reemit.ref_sequence = key.id.sequence;
-      reemit.ref_destination = frame.header.destination;
-      reemit.ref_type = static_cast<std::uint8_t>(FrameType::Data);
-      reemit.ref_round = frame.header.delivery_round;
-      reemit.phase =
-          static_cast<TransitFailurePhase>(duplicate->reported_phase);
-      reemit.reason =
-          static_cast<TransitFailureReason>(duplicate->reported_reason);
-      reemit.claimed_reporter = config_.node;
-      if (next_failure_report_id_ == UINT32_MAX) {
-        ++telemetry_event_drops_;
-        return;
-      }
-      reemit.report_id = next_failure_report_id_++;
-      reemit.fingerprint = duplicate->fingerprint;
-      emit_transit_failure(duplicate->upstream_peer, reemit, now_ms);
+      replay_retained_failure(*duplicate, frame.header.type, now_ms);
       return;
     }
     if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
@@ -1859,15 +1870,19 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   // that already reported a failure re-emits the retained evidence instead.
   if (auto* duplicate = find_dedup(key, type, frame.header.delivery_round)) {
     if (duplicate->forwarded) {
-      bool conflicted =
-          frame.header.destination != duplicate->ref_destination ||
-          frame.header.previous_hop != duplicate->upstream_peer;
       TransitFailureReason conflict = TransitFailureReason::DuplicatePath;
+      bool conflicted = false;
+      if (frame.header.destination != duplicate->ref_destination) {
+        conflicted = true;
+        conflict = TransitFailureReason::MessageConflict;
+      } else if (frame.header.previous_hop != duplicate->upstream_peer) {
+        conflicted = true;
+      }
       if (!conflicted && duplicate->has_fingerprint) {
         std::array<std::uint8_t, 32> incoming{};
         conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
                      incoming != duplicate->fingerprint;
-        conflict = TransitFailureReason::MessageConflict;
+        if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
         emit_transit_refusal(frame, conflict, now_ms);
@@ -1877,25 +1892,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       }
     }
     if (duplicate->failure_reported) {
-      TransitFailure reemit{};
-      reemit.ref_origin = key.origin;
-      reemit.ref_session = key.id.session;
-      reemit.ref_sequence = key.id.sequence;
-      reemit.ref_destination = frame.header.destination;
-      reemit.ref_type = static_cast<std::uint8_t>(type);
-      reemit.ref_round = frame.header.delivery_round;
-      reemit.phase =
-          static_cast<TransitFailurePhase>(duplicate->reported_phase);
-      reemit.reason =
-          static_cast<TransitFailureReason>(duplicate->reported_reason);
-      reemit.claimed_reporter = config_.node;
-      if (next_failure_report_id_ == UINT32_MAX) {
-        ++telemetry_event_drops_;
-        return;
-      }
-      reemit.report_id = next_failure_report_id_++;
-      reemit.fingerprint = duplicate->fingerprint;
-      emit_transit_failure(duplicate->upstream_peer, reemit, now_ms);
+      replay_retained_failure(*duplicate, type, now_ms);
       return;
     }
     if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
@@ -2030,8 +2027,11 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
   auto* neighbor = find_neighbor(peer);
   if (neighbor != nullptr) {
     // A well-formed authenticated BUSY proves the peer implements the
-    // payload — mark it capable for our emit path.
+    // payload — mark it capable for our emit path. The grant is bounded:
+    // direct proof refreshes the same validity window a capabilities
+    // exchange would install.
     neighbor->busy_capable = true;
+    neighbor->cap_valid_until_ms = now_ms + kCapabilitiesValidityMs;
     // The feedback sequence orders load feedback per peer: a stale or
     // replayed BUSY must never re-arm a deferral (03 §5). RFC 1982 serial
     // arithmetic — a plain <= would wedge the sequence forever after the
@@ -2136,12 +2136,56 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
   const MessageKey frame_key{frame.header.origin, frame.header.message};
   if (auto* duplicate = find_dedup(frame_key, FrameType::EndReceipt,
                                    frame.header.delivery_round)) {
-    (void)duplicate;
+    if (duplicate->forwarded) {
+      // Same conflict discipline as DATA/routed transit: a divergent
+      // retransmission is never blindly re-ACKed (01 §dedup conflicts).
+      TransitFailureReason conflict = TransitFailureReason::DuplicatePath;
+      bool conflicted = false;
+      if (frame.header.destination != duplicate->ref_destination) {
+        conflicted = true;
+        conflict = TransitFailureReason::MessageConflict;
+      } else if (frame.header.previous_hop != duplicate->upstream_peer) {
+        conflicted = true;
+      }
+      if (!conflicted && duplicate->has_fingerprint) {
+        std::array<std::uint8_t, 32> incoming{};
+        conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
+                     incoming != duplicate->fingerprint;
+        if (conflicted) conflict = TransitFailureReason::MessageConflict;
+      }
+      if (conflicted) {
+        emit_transit_refusal(frame, conflict, now_ms);
+        observer_.on_diagnostic("RECEIPT_DEDUP_CONFLICT", peer,
+                                &frame.header.message);
+        return;
+      }
+      if (duplicate->failure_reported) {
+        replay_retained_failure(*duplicate, FrameType::EndReceipt, now_ms);
+        return;
+      }
+    }
     if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
     return;
   }
 
   if (frame.header.destination != config_.node) {
+    // Relay-off admits no NEW transit work on any lane — the receipt frame
+    // gets the same honest refusal as DATA (01 §policy).
+    if (!transit_permitted()) {
+      ++transit_refused_;
+      emit_transit_refusal(frame, TransitFailureReason::RelayDisabled,
+                           now_ms);
+      observer_.on_diagnostic("RECEIPT_TRANSIT_RELAY_DISABLED", peer,
+                              &frame.header.message);
+      return;
+    }
+    if (frame.header.remaining_deadline_ms <= rx_age_ms_) {
+      ++transit_refused_;
+      emit_transit_refusal(frame, TransitFailureReason::Deadline, now_ms);
+      observer_.on_diagnostic("RECEIPT_TRANSIT_DEADLINE_SPENT", peer,
+                              &frame.header.message);
+      return;
+    }
     const auto route = routes_.best(frame.header.destination);
     if (!route.valid || route.next_hop == peer || scheduler_.free_slots() < 2) {
       observer_.on_diagnostic("RECEIPT_TRANSIT_NO_ROUTE", peer, &frame.header.message);
@@ -2156,6 +2200,13 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
       return;
     }
     entry->forwarded = true;
+    // Same correlation retention as DATA/routed transit — a post-
+    // acceptance failure can be reported to the exact upstream peer.
+    entry->upstream_peer = frame.header.previous_hop;
+    entry->downstream_peer = route.next_hop;
+    entry->ref_destination = frame.header.destination;
+    entry->has_fingerprint =
+        wire::transit_fingerprint(frame, entry->fingerprint).ok();
     // Accepted work stays committed when the ACK cannot be queued — the
     // sender's retry hits the dedup and re-ACKs.
     (void)queue_hop_accept(frame.header, now_ms);
@@ -2382,18 +2433,21 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   // above) but must never satisfy the saved-peer confirmation window.
   ++rx_generation_;
   // Link-auth + identity passed: the frame is attributable to `peer`, so its
-  // RF metadata may feed the per-peer summary (02-telemetry §2.3). The
-  // record stays per-immediate-peer; relays do not mint evidence for the
-  // origin.
-  if (metadata != nullptr &&
+  // RF metadata may feed the per-peer summary (02-telemetry §2.3) — but only
+  // when the runtime revalidated the captured generations. Stale-identity
+  // metadata is evidence about an OLD binding/channel and refreshes nothing.
+  const bool identity_current =
+      metadata != nullptr && metadata->identity_current;
+  if (metadata != nullptr && identity_current &&
       telemetry_peers_.note_rx(peer, *metadata, metadata->provenance,
                                config_.boot_incarnation, now_ms) ==
           nullptr) {
     ++telemetry_event_drops_;  // table full: bounded loss, never a fake sample
   }
-  // Same bar feeds the migration verify oracle: any link-authenticated,
-  // identity-matched frame is connectivity evidence on the current channel.
-  if (autonomy_sink_ != nullptr) {
+  // Same bar feeds the migration verify oracle: connectivity evidence only
+  // counts when the capture happened under the current channel/radio
+  // generation — a pre-switch frame is not proof of post-switch reachability.
+  if (autonomy_sink_ != nullptr && identity_current) {
     autonomy_sink_->note_link_activity(peer, now_ms);
   }
   // A link-authenticated DATA, SERVICE or END_RECEIPT without end-to-end
@@ -2534,10 +2588,13 @@ void MeshNode::process_awaiting_hop(const MonotonicMs now_ms) noexcept {
       obs_hop_result(job, false, now_ms);
       // Hop-level timeout is its own counter — folded into rf_failures too,
       // but never reported under the wrong name (02 §counter identity).
-      if (auto* bucket = observation_bucket(
-              job.peer, frame_length_class(job.tx_cost), now_ms);
-          bucket != nullptr && bucket->hop_timeouts != UINT32_MAX) {
-        ++bucket->hop_timeouts;
+      // Saturates with its flag set rather than wrapping silently.
+      if (auto* bucket = job_bucket(job, now_ms)) {
+        if (bucket->hop_timeouts != UINT32_MAX) {
+          ++bucket->hop_timeouts;
+        } else {
+          bucket->saturation_mask |= kSatHopTimeouts;
+        }
       }
       retry_or_fail(job, "HOP_ACCEPT_TIMEOUT", now_ms);
     }
@@ -2771,13 +2828,15 @@ ObservationBucket* MeshNode::observation_bucket(
   }
   auto* created = observations_.allocate();
   if (created == nullptr) {
-    // Bounded reclaim (02 §bounded state): a bucket idle longer than one
-    // observation window is stale evidence — release the least-recent
-    // expired entry before declaring overflow. Live buckets are never
-    // evicted.
+    // Bounded reclaim (02 §bounded state): only a bucket whose evidence
+    // validity has fully expired (kFeedbackTtlMs, not the shorter
+    // aggregation window) AND that holds no pins or pending completions
+    // may be released — live evidence and in-flight work are never
+    // evicted into a silent counter reset.
     ObservationBucket* oldest_expired = nullptr;
     observations_.for_each([&](ObservationBucket& value) {
-      if (now_ms - value.last_update_ms < kObservationWindowMs) return;
+      if (value.pins != 0 || value.pending_completions != 0) return;
+      if (now_ms - value.last_update_ms < kFeedbackTtlMs) return;
       if (oldest_expired == nullptr ||
           value.last_update_ms < oldest_expired->last_update_ms) {
         oldest_expired = &value;
@@ -2819,14 +2878,49 @@ ObservationBucket* MeshNode::observation_bucket(
   return observation_bucket(key, now_ms);
 }
 
-void MeshNode::obs_tx_submitted(const TxJob& job, const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
+void MeshNode::obs_tx_submitted(TxJob& job, const std::uint64_t token,
+                                const MonotonicMs now_ms) noexcept {
+  // One immutable observation identity per physical attempt (02 §2.3):
+  // prefer the key the runtime froze at submission; only when the runtime
+  // did not stamp one (host simulation harness) fall back to the peer
+  // summary — stamped onto the job so every later accounting site reuses
+  // it verbatim.
+  if (!job.obs_key_set) {
+    ObservationKey key{};
+    if (submit_identity_.valid && submit_identity_.token == token) {
+      key = submit_identity_.key;
+      submit_identity_.valid = false;
+    } else {
+      key = ObservationKey{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0},
+                           frame_length_class(job.tx_cost), job.peer};
+      if (const auto* summary = telemetry_peers_.find(job.peer);
+          summary != nullptr && !summary->stale) {
+        key.binding = summary->binding;
+        key.radio = summary->radio;
+        key.channel = summary->channel;
+      }
+    }
+    job.obs_key = key;
+    job.obs_key_set = true;
+  }
+  auto* bucket = observation_bucket(job.obs_key, now_ms);
   if (bucket != nullptr) {
     ++bucket->tx_submitted;
+    // The attempt pins its bucket until the completion-side observation
+    // lands — in-flight work can never be reclaimed (02 §bounded state).
+    if (bucket->pending_completions != UINT32_MAX) {
+      ++bucket->pending_completions;
+    }
     if (job.physical_attempts > 1) {
       // A re-submission after MAC failure/timeout is the only SDK-visible
       // retry the driver reports — never claimed as ESP-NOW-internal (02).
-      ++bucket->sdk_retries;
+      // Saturates with its flag set rather than wrapping silently.
+      if (bucket->sdk_retries != UINT32_MAX) {
+        ++bucket->sdk_retries;
+      } else {
+        bucket->saturation_mask |= kSatSdkRetries;
+      }
     }
     ++bucket->sojourn_samples;
     // Queue sojourn: enqueue -> handed to radio (03 §3).
@@ -2850,9 +2944,17 @@ void MeshNode::obs_tx_submitted(const TxJob& job, const MonotonicMs now_ms) noex
   }
 }
 
+ObservationBucket* MeshNode::job_bucket(const TxJob& job,
+                                        const MonotonicMs now_ms) noexcept {
+  // The attempt's own stamped identity when it exists — never re-derive it
+  // from a summary that may have re-bound mid-attempt (02 §2.3).
+  if (job.obs_key_set) return observation_bucket(job.obs_key, now_ms);
+  return observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
+}
+
 void MeshNode::obs_driver_service(const TxJob& job, const std::uint32_t service_us,
                                   const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = job_bucket(job, now_ms);
   if (bucket == nullptr) return;
   ++bucket->service_samples;
   // Driver service: driver acceptance -> TX callback (03 §3). May include
@@ -2862,7 +2964,7 @@ void MeshNode::obs_driver_service(const TxJob& job, const std::uint32_t service_
 
 void MeshNode::obs_hop_result(const TxJob& job, const bool accepted,
                               const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = job_bucket(job, now_ms);
   if (bucket != nullptr) {
     if (accepted) {
       ++bucket->hop_accepted;
@@ -2888,7 +2990,7 @@ void MeshNode::obs_hop_result(const TxJob& job, const bool accepted,
 void MeshNode::obs_count(const TxJob& job,
                          std::uint64_t ObservationBucket::*counter,
                          const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = job_bucket(job, now_ms);
   if (bucket != nullptr) ++(bucket->*counter);
 }
 
@@ -2934,6 +3036,9 @@ void MeshNode::note_radio_tx(const RadioTxObservation& observation,
       now_ms);
   if (bucket == nullptr) return;  // observation_bucket already counted overflow
   bucket->observer_boot = config_.boot_incarnation;
+  // This observation completes one submitted attempt — release the pin
+  // (saturating: a stale double-callback can never underflow the count).
+  if (bucket->pending_completions != 0) --bucket->pending_completions;
   switch (observation.outcome) {
     case RadioTxOutcome::Success:
       ++bucket->tx_mac_success;
@@ -3007,9 +3112,17 @@ Status MeshNode::send_capabilities_query(
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "node not started");
   }
+  auto* const neighbor = find_neighbor(peer);
   if (peer == kInvalidNodeId || peer == kBroadcastNodeId ||
-      peer == config_.node || find_neighbor(peer) == nullptr) {
+      peer == config_.node || neighbor == nullptr) {
     return Status::error(StatusCode::InvalidArgument, "invalid peer");
+  }
+  // Renewal bound (04 §capabilities): a completed or granted exchange may
+  // not be restarted for the same peer inside kCapQueryRenewalMs —
+  // capability probing is bounded airtime, not a polling primitive.
+  if (neighbor->last_cap_exchange_ms != 0 &&
+      now_ms - neighbor->last_cap_exchange_ms < kCapQueryRenewalMs) {
+    return Status::error(StatusCode::Busy, "capability query renewal bound");
   }
   // One outstanding query per peer; replies beyond their lifetime are
   // never matched (04 §capabilities).
@@ -3065,6 +3178,14 @@ Status MeshNode::send_capabilities_query(
   free_slot->peer = peer;
   free_slot->nonce = nonce;
   free_slot->expires_at_ms = now_ms + kCapQueryLifetimeMs;
+  // Pin the peer's binding generation at query time: a reply that arrives
+  // after a rebind is stale evidence and must not grant capability.
+  if (const auto* summary = telemetry_peers_.find(peer);
+      summary != nullptr && summary->occupied) {
+    free_slot->binding = summary->binding;
+  } else {
+    free_slot->binding = BindingGeneration{0};
+  }
   return Status::success();
 }
 
@@ -3090,11 +3211,46 @@ Status MeshNode::build_telemetry_snapshot(
     reject_reason = DiagnosticRejectReason::Stale;
     return Status::error(StatusCode::InvalidState, "telemetry stale");
   }
-  const std::uint32_t age_ms =
-      now_ms > summary->last_sample_ms ? now_ms - summary->last_sample_ms : 0;
-  if (query.max_age_ms != 0 && age_ms > query.max_age_ms) {
+
+  // Freshness is judged ONLY from the measurements that contribute each
+  // field group (02 §2.4): an unrelated recent frame can never relabel an
+  // old RSSI aggregate as fresh, bookkeeping timestamps never freshen a
+  // bucket, and a bound the contributing measurements cannot meet rejects
+  // the whole snapshot as STALE instead of returning stale data with
+  // cleared bits.
+  const ObservationBucket* bucket = nullptr;
+  if (query.length_class != kTelemetryPeerSummaryClass) {
+    const ObservationKey key{summary->binding, query.direction,
+                             summary->radio, summary->channel,
+                             query.length_class, query.peer};
+    bucket = telemetry_bucket(key);
+  }
+  // Contributing measurement stamps: RSSI group → last_rssi_ms; bucket
+  // group → the current window's own sample stamp (never last_update_ms,
+  // which is bookkeeping).
+  MonotonicMs oldest_contributing = 0;
+  const bool rssi_contributes = summary->rssi_present;
+  const bool bucket_contributes =
+      bucket != nullptr && bucket->current.present &&
+      bucket->current.last_sample_ms != 0;
+  if (rssi_contributes) oldest_contributing = summary->last_rssi_ms;
+  if (bucket_contributes &&
+      (oldest_contributing == 0 ||
+       bucket->current.last_sample_ms < oldest_contributing)) {
+    oldest_contributing = bucket->current.last_sample_ms;
+  }
+  const auto within_bound = [&](const MonotonicMs stamp) {
+    return stamp != 0 && now_ms - stamp <= query.max_age_ms;
+  };
+  // A nonzero bound must be satisfiable by at least one contributing
+  // measurement; max_age_ms == 0 means "no bound requested".
+  if (query.max_age_ms != 0 &&
+      !(rssi_contributes && within_bound(summary->last_rssi_ms)) &&
+      !(bucket_contributes &&
+        within_bound(bucket->current.last_sample_ms))) {
     reject_reason = DiagnosticRejectReason::Stale;
-    return Status::error(StatusCode::Expired, "telemetry older than bound");
+    return Status::error(StatusCode::Expired,
+                         "no contributing measurement within bound");
   }
 
   out = TelemetrySnapshot{};
@@ -3108,20 +3264,19 @@ Status MeshNode::build_telemetry_snapshot(
   out.channel = summary->channel_present ? summary->last_channel : 0;
   out.direction = query.direction;
   out.length_class = query.length_class;
-  out.sampled_at_ms = summary->last_sample_ms;
-  out.sample_age_ms = age_ms;
+  out.sampled_at_ms = oldest_contributing;
+  // sample_age is the age of the OLDEST contributing measurement — a
+  // conservative freshness claim that never rides on unrelated activity.
+  out.sample_age_ms =
+      oldest_contributing != 0 && now_ms > oldest_contributing
+          ? static_cast<std::uint32_t>(now_ms - oldest_contributing)
+          : 0;
   out.event_drops = static_cast<std::uint32_t>(
       std::min<std::uint64_t>(telemetry_event_drops_, UINT32_MAX));
 
-  // Freshness is judged from the measurements that contribute each field
-  // group (02 §2.4): an unrelated recent frame can never relabel an old RSSI
-  // aggregate as fresh, and an idle bucket cannot satisfy a tight bound.
-  const auto within_bound = [&](const MonotonicMs stamp) {
-    return query.max_age_ms == 0 ||
-           (stamp != 0 && now_ms - stamp <= query.max_age_ms);
-  };
   const bool rssi_fresh =
-      summary->rssi_present && within_bound(summary->last_rssi_ms);
+      summary->rssi_present &&
+      (query.max_age_ms == 0 || within_bound(summary->last_rssi_ms));
   if (summary->rssi_present) {
     if (rssi_fresh) out.validity |= kTelemetryValidRssi;
     out.rssi_last = summary->rssi_last;
@@ -3131,9 +3286,21 @@ Status MeshNode::build_telemetry_snapshot(
     out.rssi_samples = summary->rssi_samples;
     if (summary->rssi_saturated) out.saturation_mask |= kSatRssiSamples;
   }
+  // Source bits reflect EVERY contributing group: the peer summary's own
+  // provenance plus the detailed bucket's window source mask — an injected
+  // TX measurement is never serialized as driver-derived evidence.
   out.validity |= summary->provenance == ObservationProvenance::LocalDriver
                       ? kTelemetrySourceLocalDriver
                       : kTelemetrySourceInjectedTest;
+  if (bucket != nullptr) {
+    const std::uint8_t src = bucket->current.sources;
+    if (src & (1u << static_cast<unsigned>(ObservationProvenance::LocalDriver))) {
+      out.validity |= kTelemetrySourceLocalDriver;
+    }
+    if (src & (1u << static_cast<unsigned>(ObservationProvenance::InjectedTest))) {
+      out.validity |= kTelemetrySourceInjectedTest;
+    }
+  }
   if (summary->stale || (summary->rssi_present && !rssi_fresh)) {
     out.validity |= kTelemetryStale;
   }
@@ -3141,18 +3308,17 @@ Status MeshNode::build_telemetry_snapshot(
   // A peer-summary-class query stops at the RSSI record; a bucket class
   // additionally fills the counters for that exact observation key.
   if (query.length_class != kTelemetryPeerSummaryClass) {
-    const ObservationKey key{summary->binding, query.direction, summary->radio,
-                             summary->channel, query.length_class, query.peer};
-    const ObservationBucket* bucket = telemetry_bucket(key);
     if (bucket != nullptr) {
       const auto clamp = [](const std::uint64_t v) {
         return static_cast<std::uint32_t>(std::min<std::uint64_t>(v, UINT32_MAX));
       };
       // Lifetime counters are reported as lifetime values regardless of
       // freshness; the bucket-validity bit asserts a contributing sample
-      // inside the requested bound.
-      const bool bucket_fresh = within_bound(
-          std::max(bucket->current.last_sample_ms, bucket->last_update_ms));
+      // inside the requested bound — bookkeeping stamps never count.
+      const bool bucket_fresh =
+          query.max_age_ms == 0
+              ? bucket_contributes
+              : within_bound(bucket->current.last_sample_ms);
       if (bucket_fresh) out.validity |= kTelemetryValidBucket;
       out.window_ms = static_cast<std::uint32_t>(
           std::min<std::uint64_t>(now_ms - bucket->window_start_ms, UINT32_MAX));
@@ -3185,28 +3351,30 @@ Status MeshNode::build_telemetry_snapshot(
 MeshNode::DiagBudget* MeshNode::diag_budget(const NodeId peer,
                                             const MonotonicMs now_ms) noexcept {
   DiagBudget* free_slot = nullptr;
-  DiagBudget* oldest = nullptr;
   for (auto& entry : diag_budget_) {
     if (entry.peer == peer) {
+      // Single window-reset point: every pacing counter tied to this
+      // window resets together — callers only test/increment, never
+      // re-check the elapsed condition (it is already consumed here).
       if (now_ms - entry.window_start_ms >= kDiagBudgetWindowMs) {
         entry.window_start_ms = now_ms;
         entry.window_used = 0;
+        entry.failure_window_used = 0;
       }
       return &entry;
     }
-    if (entry.peer == kInvalidNodeId) {
-      if (free_slot == nullptr) free_slot = &entry;
-    } else if (oldest == nullptr ||
-               entry.window_start_ms < oldest->window_start_ms) {
-      oldest = &entry;
+    if (entry.peer == kInvalidNodeId && free_slot == nullptr) {
+      free_slot = &entry;
     }
   }
-  DiagBudget* slot = free_slot != nullptr ? free_slot : oldest;
-  if (slot == nullptr) return nullptr;
-  *slot = DiagBudget{};
-  slot->peer = peer;
-  slot->window_start_ms = now_ms;
-  return slot;
+  // A full table NEVER evicts a live budget — eviction would silently
+  // reset that peer's pacing state. nullptr is a refusal: callers drop and
+  // count, they do not admit unbounded work.
+  if (free_slot == nullptr) return nullptr;
+  *free_slot = DiagBudget{};
+  free_slot->peer = peer;
+  free_slot->window_start_ms = now_ms;
+  return free_slot;
 }
 
 CapabilitiesReply MeshNode::build_capabilities_reply(
@@ -3272,15 +3440,16 @@ void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
       // Bounded intake: at most one telemetry query per origin per
       // interval — a requester cannot convert authenticated queries into
       // airtime floods (telemetry §2.7; queries are costly: 644 B/edge).
-      if (DiagBudget* budget = diag_budget(origin, now_ms);
-          budget != nullptr) {
-        if (budget->last_query_ms != 0 &&
-            now_ms - budget->last_query_ms < kDiagQueryMinIntervalMs) {
-          ++telemetry_event_drops_;
-          return;
-        }
-        budget->last_query_ms = now_ms;
+      // Budget-table exhaustion refuses rather than admitting untracked
+      // work.
+      DiagBudget* const qbudget = diag_budget(origin, now_ms);
+      if (qbudget == nullptr ||
+          (qbudget->last_query_ms != 0 &&
+           now_ms - qbudget->last_query_ms < kDiagQueryMinIntervalMs)) {
+        ++telemetry_event_drops_;
+        return;
       }
+      qbudget->last_query_ms = now_ms;
       if (!telemetry_remote_) {
         reply_reject(DiagnosticRejectReason::Denied, query.request_id);
         return;
@@ -3348,20 +3517,14 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
     // unbounded dedup/seen-table scans — at most kTransitFailurePerWindow
     // decodable bodies per peer per second.
     DiagBudget* budget = diag_budget(peer, now_ms);
-    if (budget != nullptr) {
-      if (now_ms - budget->window_start_ms >= kDiagBudgetWindowMs) {
-        budget->window_start_ms = now_ms;
-        budget->window_used = 0;
-        budget->failure_window_used = 0;
-      }
-      if (budget->failure_window_used >= kTransitFailurePerWindow) {
-        ++telemetry_event_drops_;
-        return;
-      }
+    if (budget == nullptr ||
+        budget->failure_window_used >= kTransitFailurePerWindow) {
+      ++telemetry_event_drops_;
+      return;
     }
     TransitFailure report{};
     if (transit_failure_decode(body, report).ok()) {
-      if (budget != nullptr) ++budget->failure_window_used;
+      ++budget->failure_window_used;
       // Node-internal correlation/propagation first; the sink still sees
       // the body so a host can surface upstream failure evidence.
       handle_transit_failure_report(peer, report, now_ms);
@@ -3387,9 +3550,10 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
     // a querier cannot convert link-only probes into airtime floods.
     DiagBudget* budget = diag_budget(peer, now_ms);
     // last_*_ms == 0 means "never used": the first query is always admitted
-    // even when the node clock starts near zero.
-    if (budget != nullptr && budget->last_cap_reply_ms != 0 &&
-        now_ms - budget->last_cap_reply_ms < kCapReplyMinIntervalMs) {
+    // even when the node clock starts near zero. A full budget table
+    // refuses — unbounded replies are never emitted.
+    if (budget == nullptr || (budget->last_cap_reply_ms != 0 &&
+        now_ms - budget->last_cap_reply_ms < kCapReplyMinIntervalMs)) {
       ++telemetry_event_drops_;
       return;
     }
@@ -3424,7 +3588,7 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
     std::memcpy(job.plain.payload.data(), out.data(), out.size());
     job.plain.payload_size = out.size();
     if (scheduler_.enqueue(std::move(job), config_.node, now_ms)) {
-      if (budget != nullptr) budget->last_cap_reply_ms = now_ms;
+      budget->last_cap_reply_ms = now_ms;
     } else {
       ++telemetry_event_drops_;
     }
@@ -3453,10 +3617,44 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
                               &frame.header.message);
       return;
     }
+    // The reply must answer under the SAME binding generation the query
+    // was issued in — a post-rebind reply is stale evidence.
+    const BindingGeneration current_binding =
+        (telemetry_peers_.find(peer) != nullptr)
+            ? telemetry_peers_.find(peer)->binding
+            : BindingGeneration{0};
+    if (current_binding != pending->binding) {
+      *pending = PendingCapQuery{};
+      ++telemetry_event_drops_;
+      observer_.on_diagnostic("DIAGNOSTIC_CAP_REPLY_STALE_BINDING", peer,
+                              &frame.header.message);
+      return;
+    }
     *pending = PendingCapQuery{};
-    // Authenticated busy_v1 feeds the BUSY feedback gate (03 §5 / 04
-    // §capabilities); peers without proven support are never sent BUSY.
-    set_peer_busy_capable(peer, (reply.features & kCapBusyV1) != 0);
+    // A reply must name a concrete responder boot — node_boot==0 means the
+    // peer never initialized an incarnation, so the grant cannot be bound
+    // to any identity (04 §capabilities).
+    if (reply.node_boot == 0) {
+      ++telemetry_event_drops_;
+      observer_.on_diagnostic("DIAGNOSTIC_CAP_REPLY_NO_BOOT", peer,
+                              &frame.header.message);
+      return;
+    }
+    // The grant is bounded by the reply's own valid_for_ms under the
+    // responder's boot identity — clamped to the protocol's validity bound
+    // so a reply cannot mint an unbounded grant, and valid_for_ms==0 is
+    // an explicit no-grant rather than a silent default (04 §capabilities).
+    if (auto* neighbor = find_neighbor(peer)) {
+      const std::uint32_t grant_ms =
+          reply.valid_for_ms < kCapabilitiesValidityMs
+              ? reply.valid_for_ms
+              : kCapabilitiesValidityMs;
+      neighbor->cap_node_boot = reply.node_boot;
+      neighbor->cap_valid_until_ms = grant_ms != 0 ? now_ms + grant_ms : 0;
+      neighbor->last_cap_exchange_ms = now_ms;
+      neighbor->busy_capable =
+          grant_ms != 0 && (reply.features & kCapBusyV1) != 0;
+    }
     if (diagnostic_sink_ != nullptr) {
       diagnostic_sink_->on_diagnostic_body(peer, body, now_ms);
     }
@@ -3508,11 +3706,12 @@ void MeshNode::emit_transit_failure(const NodeId upstream,
   // peer per second — a flapping upstream cannot turn our failure evidence
   // into a diagnostic flood. Excess reports are counted drops, not queued.
   DiagBudget* budget = diag_budget(upstream, now_ms);
-  if (budget != nullptr && budget->window_used >= kTransitFailurePerWindow) {
+  if (budget == nullptr ||
+      budget->window_used >= kTransitFailurePerWindow) {
     ++telemetry_event_drops_;
     return;
   }
-  if (budget != nullptr) ++budget->window_used;
+  ++budget->window_used;
   std::array<std::uint8_t, kTransitFailureBodySize> body{};
   if (!transit_failure_encode(report, MutableByteView{body.data(), body.size()})) {
     ++telemetry_event_drops_;
@@ -3574,6 +3773,38 @@ void MeshNode::emit_transit_refusal(const wire::LinkOpenedFrame& frame,
   emit_transit_failure(frame.header.previous_hop, report, now_ms);
 }
 
+void MeshNode::replay_retained_failure(DedupEntry& duplicate,
+                                       const FrameType type,
+                                       const MonotonicMs now_ms) noexcept {
+  // Replay bound: a duplicate storm cannot turn one retained failure into
+  // unbounded re-emissions — capped count with minimum spacing (01 §replay).
+  if (duplicate.failure_replays >= kMaxFailureReplays ||
+      (duplicate.last_replay_ms != 0 &&
+       now_ms - duplicate.last_replay_ms < kFailureReplayMinIntervalMs)) {
+    ++telemetry_event_drops_;
+    return;
+  }
+  TransitFailure reemit{};
+  reemit.ref_origin = duplicate.key.origin;
+  reemit.ref_session = duplicate.key.id.session;
+  reemit.ref_sequence = duplicate.key.id.sequence;
+  reemit.ref_destination = duplicate.ref_destination;
+  reemit.ref_type = static_cast<std::uint8_t>(type);
+  reemit.ref_round = duplicate.round;
+  reemit.phase =
+      static_cast<TransitFailurePhase>(duplicate.reported_phase);
+  reemit.reason =
+      static_cast<TransitFailureReason>(duplicate.reported_reason);
+  // Verbatim: the ORIGINAL claimed reporter and report_id — re-originating
+  // under our own identity would fabricate provenance.
+  reemit.claimed_reporter = duplicate.reported_reporter;
+  reemit.report_id = duplicate.reported_id;
+  reemit.fingerprint = duplicate.fingerprint;
+  ++duplicate.failure_replays;
+  duplicate.last_replay_ms = now_ms;
+  emit_transit_failure(duplicate.upstream_peer, reemit, now_ms);
+}
+
 void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
                                       const MonotonicMs now_ms) noexcept {
   // Only jobs whose accepted work we retained (dedup entry with upstream +
@@ -3602,11 +3833,13 @@ void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
   }
   report.report_id = next_failure_report_id_++;
   report.fingerprint = entry->fingerprint;
-  // Retain the evidence for re-emission if the sender retries onto the same
-  // dedup record — a re-ACK would falsely claim the job is alive.
+  // Retain the evidence for verbatim re-emission if the sender retries onto
+  // the same dedup record — a re-ACK would falsely claim the job is alive.
   entry->failure_reported = true;
   entry->reported_phase = static_cast<std::uint8_t>(report.phase);
   entry->reported_reason = static_cast<std::uint8_t>(report.reason);
+  entry->reported_reporter = report.claimed_reporter;
+  entry->reported_id = report.report_id;
   emit_transit_failure(entry->upstream_peer, report, now_ms);
 }
 
@@ -3652,6 +3885,17 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
     ++telemetry_event_drops_;
     return;
   }
+  // The report must arrive under the SAME binding generation the attempt
+  // was submitted in — a rebind invalidates the correlation (the old peer
+  // identity cannot vouch for work attempted under a new binding).
+  if (entry->downstream_binding != BindingGeneration{0}) {
+    const auto* ds = telemetry_peers_.find(peer);
+    if (ds == nullptr || !ds->occupied ||
+        ds->binding != entry->downstream_binding) {
+      ++telemetry_event_drops_;
+      return;
+    }
+  }
   if (entry->has_fingerprint &&
       entry->fingerprint != report.fingerprint) {
     // The peer reported bytes we never forwarded — unverified claim,
@@ -3672,11 +3916,14 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
   free_slot->expires_at_ms = now_ms + 60000;
 
   // Record the downstream-reported outcome on the retained record: a
-  // re-received upstream duplicate replays this evidence instead of a blind
-  // re-ACK of work the downstream already declared dead (01 §replay).
+  // re-received upstream duplicate replays this evidence VERBATIM (claimed
+  // reporter and report_id preserved) instead of a blind re-ACK of work the
+  // downstream already declared dead (01 §replay).
   entry->failure_reported = true;
   entry->reported_phase = static_cast<std::uint8_t>(report.phase);
   entry->reported_reason = static_cast<std::uint8_t>(report.reason);
+  entry->reported_reporter = report.claimed_reporter;
+  entry->reported_id = report.report_id;
 
   // Propagate toward our upstream with the claimed reporter preserved
   // verbatim (unverified — we authenticated only `peer`). The fingerprint
@@ -3818,7 +4065,20 @@ std::uint8_t MeshNode::peer_tx_window(const NodeId peer) const noexcept {
 }
 
 void MeshNode::set_peer_busy_capable(const NodeId peer, const bool capable) noexcept {
-  if (auto* neighbor = find_neighbor(peer)) neighbor->busy_capable = capable;
+  if (auto* neighbor = find_neighbor(peer)) {
+    neighbor->busy_capable = capable;
+    // A host/configured grant carries the same bounded validity as an
+    // exchange-derived one — it is refreshed, never permanent.
+    neighbor->cap_valid_until_ms =
+        capable ? last_clock_ms_ + kCapabilitiesValidityMs : 0;
+  }
+}
+
+bool MeshNode::peer_busy_capable(const NodeId peer,
+                                 const MonotonicMs now_ms) const noexcept {
+  const auto* neighbor = find_neighbor(peer);
+  return neighbor != nullptr && neighbor->busy_capable &&
+         neighbor->cap_valid_until_ms > now_ms;
 }
 
 }  // namespace routeloom

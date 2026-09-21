@@ -957,7 +957,11 @@ void test_bridge_diagnostics() {
     if (n == kTelemetrySnapshotBodySize) {
       TelemetrySnapshot snap{};
       CHECK_OK(telemetry_snapshot_decode(ByteView{body.data(), n}, snap));
-      CHECK(snap.request_id == 0xBEEF && snap.observer == 2 && snap.peer == 1);
+      // The bridge mints the mesh correlation id — the host-supplied
+      // 0xBEEF is never forwarded, so a replayed request cannot collide
+      // with a live slot (04 §USB correlation).
+      CHECK(snap.request_id != 0xBEEF && snap.request_id != 0 &&
+            snap.observer == 2 && snap.peer == 1);
       world.device_sink.frames.clear();
     }
   }

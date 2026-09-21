@@ -256,6 +256,7 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
     pending_.size = next.size;
     std::memcpy(pending_.bytes.data(), next.data, next.size);
     token = routeloom::OperationToken{++token_id_};
+    commit_done_ = false;
     return Status::success();
   }
   Status restore(const std::uint16_t, const ByteView snapshot,
@@ -266,6 +267,7 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
     pending_.size = snapshot.size;
     std::memcpy(pending_.bytes.data(), snapshot.data, snapshot.size);
     token = routeloom::OperationToken{++token_id_};
+    commit_done_ = false;
     return Status::success();
   }
   Status poll(const routeloom::OperationToken token, bool& done,
@@ -278,7 +280,25 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
     // The terminal outcome is the persist result: a commit that could not
     // land in NVS is reported as a failure (the journal then restores or
     // quarantines) — never claimed as applied.
-    outcome = commit_pending();
+    if (!commit_done_) {
+      outcome = commit_pending();
+      if (!outcome) {
+        done = true;
+        return Status::success();
+      }
+      commit_done_ = true;
+      drain_deadline_ms_ = esp_log_timestamp() + kDrainBoundMs;
+    }
+    // Honest drain (01 §1.6): a relay-off commit stays APPLYING while
+    // accepted transit work is still in flight — completing early would
+    // claim quiescence that does not exist. Bounded: work that outlives
+    // the bound is reported as applied-with-residue, not hung on.
+    if (node_ != nullptr && !relay_allowed_ &&
+        node_->transit_in_flight() > 0 &&
+        esp_log_timestamp() < drain_deadline_ms_) {
+      done = false;
+      return Status::success();
+    }
     done = true;
     return Status::success();
   }
@@ -387,6 +407,11 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
   bool discovery_enabled_{true};
   bool relay_allowed_{true};
   routeloom::MeshNode* node_{nullptr};
+  // Drain accounting for a relay-off commit: the operation reports done
+  // only when in-flight transit has drained or the bound elapsed.
+  bool commit_done_{false};
+  std::uint32_t drain_deadline_ms_{0};
+  static constexpr std::uint32_t kDrainBoundMs = 30000;
 };
 
 // Maintenance/admission boundary for a mesh-only reference node (04 §4.8):

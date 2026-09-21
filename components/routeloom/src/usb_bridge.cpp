@@ -14,6 +14,9 @@ constexpr std::size_t kHelloBodyMin = 8 + 1 + 1 + 1;
 constexpr std::size_t kHelloAckBodySize = 8 + 1 + 8 + 8 + 8 + 4 + kDevTagSize;
 constexpr std::size_t kAuthOkBodySize = kDevTagSize + 8;
 constexpr std::size_t kCreditGrantInnerSize = 1 + 8 + 8;
+// Local diagnostic replies carry the query's 5 s bound as their own TX
+// deadline — a credit-starved reply expires instead of reporting stale data.
+constexpr MonotonicMs kLocalDiagReplyLifetimeMs = kTelemetryQueryLifetimeMs;
 
 std::uint64_t read_u64(const std::uint8_t* p) noexcept {
   std::uint64_t v = 0;
@@ -648,6 +651,12 @@ UsbBridge::PendingDiagnostic* UsbBridge::find_pending_diagnostic(
   return nullptr;
 }
 
+std::uint32_t UsbBridge::next_diag_request_id() noexcept {
+  const std::uint32_t id = next_diag_request_id_;
+  next_diag_request_id_ = (id == UINT32_MAX) ? 1U : id + 1U;
+  return id;
+}
+
 UsbBridge::PendingDiagnostic* UsbBridge::alloc_pending_diagnostic(
     const NodeId observer) noexcept {
   PendingDiagnostic* free_slot = nullptr;
@@ -673,12 +682,18 @@ void UsbBridge::send_diagnostic_reply(const std::uint64_t request,
                               kDiagnosticReplyMaxBody>
       encoded{};
   std::size_t written = 0;
+  // Every diagnostic reply is deadline-bound: a local answer enqueued under
+  // USB credit starvation must expire rather than surface as stale evidence
+  // (04 §USB). expires_ms==0 means "no caller deadline" → use the local
+  // reply bound, never an unbounded queue residency.
+  const MonotonicMs deadline =
+      expires_ms != 0 ? expires_ms : now_ms + kLocalDiagReplyLifetimeMs;
   if (encode_diagnostic_reply(static_cast<std::uint16_t>(result), observer,
                               body,
                               MutableByteView{encoded.data(), encoded.size()},
                               written)) {
     enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), written},
-            now_ms, expires_ms);
+            now_ms, deadline);
   } else {
     ++stats_.dropped_frames;
   }
@@ -790,6 +805,10 @@ void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
                           ByteView{}, now_ms);
     return;
   }
+  // The bridge mints the mesh correlation id — the host's request_id is
+  // never forwarded, so a replayed 0x30 request or a stale cross-session
+  // response cannot resolve a live slot.
+  query.request_id = next_diag_request_id();
   const Status status =
       config_.mesh->send_telemetry_query(req.observer, query, now_ms);
   if (!status) {

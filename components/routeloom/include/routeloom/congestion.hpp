@@ -132,6 +132,12 @@ struct RadioRxMetadataV2 {
   std::uint8_t channel{0};
   bool channel_valid{false};
   ObservationProvenance provenance{ObservationProvenance::LocalDriver};
+  // Runtime revalidation result (02 §2.2): false when the captured
+  // binding/radio/channel generations no longer match the live state —
+  // the frame still dispatches (it is link-authenticated), but its
+  // metadata is stale evidence that must not refresh telemetry or
+  // connectivity oracles.
+  bool identity_current{true};
 };
 static_assert(sizeof(RadioRxMetadataV2) <= 32, "bounded RX metadata");
 
