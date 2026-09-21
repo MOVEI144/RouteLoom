@@ -60,9 +60,6 @@ Status CounterLease::reserve_block() noexcept {
   if (!initialized_) {
     return Status::error(StatusCode::InvalidState, "counter lease is not initialized");
   }
-  if (end_ > std::numeric_limits<std::uint64_t>::max() - block_size_) {
-    return Status::error(StatusCode::CounterExhausted, "counter range exhausted");
-  }
   // The slot is shared per peer pair and this lease may be cached across an
   // epoch advance: re-validate the persisted record before overwriting it.
   // A newer persisted epoch owns the slot now — committing our stale block
@@ -94,6 +91,12 @@ Status CounterLease::reserve_block() noexcept {
                              "counter record rewound");
       }
     }
+  }
+  // Exhaustion is checked AFTER adopting the persisted mark: the adopted
+  // water mark may sit closer to u64 max than the cached end_ did, and an
+  // addition that wraps would commit 0 — reissuing the whole counter space.
+  if (end_ > std::numeric_limits<std::uint64_t>::max() - block_size_) {
+    return Status::error(StatusCode::CounterExhausted, "counter range exhausted");
   }
   CounterRecord next{};
   next.context_id = context_id_;
