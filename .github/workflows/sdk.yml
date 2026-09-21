@@ -244,10 +244,12 @@ jobs:
             paired_bridge)
               grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x1' sdkconfig
               grep -q '^CONFIG_ROUTELOOM_PEER_NODE_ID=0x2' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:7a:b5:60"' sdkconfig
               ;;
             paired_target)
               grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x2' sdkconfig
               grep -q '^CONFIG_ROUTELOOM_PEER_NODE_ID=0x1' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"' sdkconfig
               ;;
           esac
           idf.py size > build/size-report.txt

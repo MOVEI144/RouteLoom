@@ -24,9 +24,11 @@ Status config_dev_permit_tag(
     ByteView dev_key, ByteView aad, ByteView canonical,
     std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept {
   if (dev_key.size == 0 || aad.size != kConfigPermitAadSize ||
-      canonical.size == 0 ||
-      dev_domain().size + aad.size + canonical.size > kConfigPermitObjectMax) {
+      canonical.size == 0) {
     return Status::error(StatusCode::InvalidArgument, "config dev tag input");
+  }
+  if (dev_domain().size + aad.size + canonical.size > kConfigPermitObjectMax) {
+    return Status::error(StatusCode::NoCapacity, "config dev tag input");
   }
   ScopeDigest mac{};
   hmac_sha256(dev_key, dev_domain(), aad, canonical, mac);

@@ -441,6 +441,30 @@ void test_dev_permit_roundtrip() {
   CHECK(!trunc.ok());
 }
 
+// Argument and capacity failures carry distinct status codes: malformed
+// arguments are InvalidArgument, an oversized aggregate is NoCapacity
+// (the staged ByteWriter overflow code the streamed path replaced).
+void test_dev_permit_tag_status_codes() {
+  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
+  std::array<std::uint8_t, kConfigPermitAadSize> aad{};
+  const ByteView key = dev_key();
+  const ByteView canonical{reinterpret_cast<const std::uint8_t*>("x"), 1};
+
+  const ByteView aad_view{aad.data(), aad.size()};
+  Status status =
+      config_dev_permit_tag(ByteView{}, aad_view, canonical, tag);
+  CHECK(status.code == StatusCode::InvalidArgument);
+  status = config_dev_permit_tag(key, ByteView{aad.data(), 1}, canonical, tag);
+  CHECK(status.code == StatusCode::InvalidArgument);
+  status = config_dev_permit_tag(key, aad_view, ByteView{}, tag);
+  CHECK(status.code == StatusCode::InvalidArgument);
+
+  std::array<std::uint8_t, kConfigPermitObjectMax> huge{};
+  const ByteView oversized{huge.data(), huge.size()};
+  status = config_dev_permit_tag(key, aad_view, oversized, tag);
+  CHECK(status.code == StatusCode::NoCapacity);
+}
+
 // --- Wire round trips ---------------------------------------------------------
 
 // Advance both endpoints one bounded step: each poll() may enqueue more
@@ -768,6 +792,7 @@ int main() {
   test_query_timeout();
   test_manifest_duplicate_total_len_conflict();
   test_query_reply_echo_binding();
+  test_dev_permit_tag_status_codes();
   if (failures == 0) {
     std::printf("config_wire tests OK\n");
     return 0;

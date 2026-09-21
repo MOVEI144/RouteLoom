@@ -1079,6 +1079,56 @@ void test_pending_verify_generation_recheck() {
   CHECK(b.port.count_kind(FrameType::Offer) == 0);
 }
 
+// The multi-part hmac_sha256 must MAC exactly the concatenation of its
+// parts — including at SHA-256 block boundaries — and degenerate to the
+// one-part form when the extra parts are empty.
+void test_hmac_sha256_split_equivalence() {
+  // RFC 4231 test case 1 anchors the primitive itself.
+  std::array<std::uint8_t, 20> key20{};
+  key20.fill(0x0b);
+  const ByteView rfc_input{reinterpret_cast<const std::uint8_t*>("Hi There"), 8};
+  ScopeDigest mac{};
+  hmac_sha256(ByteView{key20.data(), key20.size()}, rfc_input, mac);
+  const std::array<std::uint8_t, 32> rfc_expect{
+      0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf,
+      0xce, 0xaf, 0x0b, 0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83,
+      0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7};
+  CHECK(std::memcmp(mac.data(), rfc_expect.data(), mac.size()) == 0);
+
+  // Split-equivalence across a mixed-size input, exercised at several
+  // split points including the 64-byte block edge.
+  std::array<std::uint8_t, 9> key{};
+  for (std::size_t i = 0; i < key.size(); ++i) key[i] = static_cast<std::uint8_t>(i + 1);
+  std::array<std::uint8_t, 200> input{};
+  for (std::size_t i = 0; i < input.size(); ++i) {
+    input[i] = static_cast<std::uint8_t>(i * 31u + 7u);
+  }
+  const ByteView whole{input.data(), input.size()};
+  ScopeDigest expected{};
+  hmac_sha256(ByteView{key.data(), key.size()}, whole, expected);
+  const std::size_t splits[] = {1, 7, 63, 64, 65, 127, 128};
+  for (const std::size_t a : splits) {
+    for (const std::size_t b : splits) {
+      if (a + b > whole.size) continue;
+      ScopeDigest got{};
+      hmac_sha256(ByteView{key.data(), key.size()},
+                  ByteView{input.data(), a},
+                  ByteView{input.data() + a, b},
+                  ByteView{input.data() + a + b, whole.size - a - b}, got);
+      CHECK(std::memcmp(got.data(), expected.data(), got.size()) == 0);
+    }
+  }
+  // Empty extra parts degenerate to the one-part result; empty middle
+  // parts between non-empty parts are equally no-ops.
+  ScopeDigest got{};
+  hmac_sha256(ByteView{key.data(), key.size()}, whole, ByteView{}, ByteView{}, got);
+  CHECK(std::memcmp(got.data(), expected.data(), got.size()) == 0);
+  hmac_sha256(ByteView{key.data(), key.size()},
+              ByteView{input.data(), 10}, ByteView{},
+              ByteView{input.data() + 10, whole.size - 10}, got);
+  CHECK(std::memcmp(got.data(), expected.data(), got.size()) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1096,6 +1146,7 @@ int main() {
   test_dedup_legacy_flood_scoped_wins();
   test_dedup_replay_past_ttl();
   test_pending_verify_generation_recheck();
+  test_hmac_sha256_split_equivalence();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d scope checks failed\n", failures);
