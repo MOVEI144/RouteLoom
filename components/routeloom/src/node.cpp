@@ -2787,11 +2787,15 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
   std::uint32_t code = 0;
   ByteView result_data{};
   bool dispatched = false;
+  // Hoisted to function scope: result_data ByteViews below alias these
+  // objects, and the memcpy into record.result_data runs after the block.
+  ExecutionLease current{};
+  AppliedReply reply{};
   if (body.size < endpoint::kAppliedLeaseBytes) {
     code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::MalformedRequest);
     ++applied_stats_.refusals_malformed;
   } else {
-    const ExecutionLease current = applied_lease();
+    current = applied_lease();
     bool lease_zero = true;
     for (std::size_t i = 0; i < endpoint::kAppliedLeaseBytes; ++i) {
       if (body.data[i] != 0) lease_zero = false;
@@ -2808,7 +2812,7 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
       code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::NoEndpoint);
       ++applied_stats_.refusals_no_endpoint;
     } else {
-      AppliedReply reply{};
+      reply = AppliedReply{};
       const AppliedRequest request{record.key, data.origin,
                                    ByteView{body.data + endpoint::kAppliedLeaseBytes,
                                             body.size - endpoint::kAppliedLeaseBytes},
