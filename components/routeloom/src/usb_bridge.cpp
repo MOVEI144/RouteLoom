@@ -418,15 +418,14 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   // the host-chosen identity in the inner body — stable across sessions, so
   // records may legitimately persist past a reconnect. The canonical hash
   // binds kind+body (key, destination and payload together).
-  std::array<std::uint8_t, kMaxTxInner + 1> canonical{};
-  canonical[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
+  canonical_[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
   if (inner.size > kMaxTxInner) {
     send_error(UsbErrorCode::PayloadTooLarge, request, "PAYLOAD_TOO_LARGE", now_ms);
     return;
   }
-  std::memcpy(canonical.data() + 1, inner.data, inner.size);
+  std::memcpy(canonical_.data() + 1, inner.data, inner.size);
   const DevTag hash =
-      payload_hash(ByteView{canonical.data(), inner.size + 1});
+      payload_hash(ByteView{canonical_.data(), inner.size + 1});
   IdempotencyRecord* record = nullptr;
   const IdempotencyResult result = idempotency_.submit(
       ByteView{transcript_.principal.data(), transcript_.principal_len},
@@ -1225,7 +1224,6 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     const bool protect =
         (state_ == SessionState::Active || state_ == SessionState::Draining) &&
         item->kind != FrameKind::Hello && item->kind != FrameKind::HelloAck;
-    std::array<std::uint8_t, kMaxTxInner + kProtectedBodyOverhead> body{};
     std::size_t body_size = 0;
     std::uint64_t session = 0;
     if (protect) {
@@ -1234,17 +1232,16 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
           seal_body(proof_.key, kDirDeviceToHost, tx_counter_, item->kind,
                     item->flags, item->request,
                     ByteView{item->body.data(), item->body_size},
-                    MutableByteView{body.data(), body.size()}, body_size);
+                    MutableByteView{tx_body_.data(), tx_body_.size()}, body_size);
       if (!status) {
-        TxItem dropped{};
-        if (control) control_q_.pop(dropped); else data_q_.pop(dropped);
+        if (control) control_q_.drop(); else data_q_.drop();
         ++stats_.dropped_frames;
         continue;
       }
     } else {
       body_size = item->body_size;
       if (item->body_size > 0) {
-        std::memcpy(body.data(), item->body.data(), item->body_size);
+        std::memcpy(tx_body_.data(), item->body.data(), item->body_size);
       }
     }
     const std::uint64_t decoded_len =
@@ -1252,8 +1249,7 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     if (control) {
       // Zero-credit CONTROL reservation: ≤4 frames × ≤256B, 10/s burst 4.
       if (decoded_len > kControlMaxDecoded) {
-        TxItem dropped{};
-        control_q_.pop(dropped);
+        control_q_.drop();
         ++stats_.control_denied;
         continue;
       }
@@ -1271,16 +1267,15 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     std::size_t wire_size = 0;
     const Status status =
         encode_frame(item->kind, item->flags, session, item->request,
-                     ByteView{body.data(), body_size},
+                     ByteView{tx_body_.data(), body_size},
+                     MutableByteView{encode_scratch_.data(), encode_scratch_.size()},
                      MutableByteView{tx_wire_.data(), tx_wire_.size()}, wire_size);
     if (!status) {
-      TxItem dropped{};
-      if (control) control_q_.pop(dropped); else data_q_.pop(dropped);
+      if (control) control_q_.drop(); else data_q_.drop();
       ++stats_.dropped_frames;
       continue;
     }
-    TxItem sent{};
-    if (control) control_q_.pop(sent); else data_q_.pop(sent);
+    if (control) control_q_.drop(); else data_q_.drop();
     tx_wire_size_ = wire_size;
     tx_wire_sent_ = 0;
     tx_wire_active_ = true;

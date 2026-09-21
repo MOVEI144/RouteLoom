@@ -78,6 +78,25 @@ Status NvsConfigStore::read(const std::uint8_t slot, const MutableByteView targe
   if (actual < target.size) {
     std::memset(target.data + actual, kErasedFill, target.size - actual);
   }
+  // A blob that EXISTS but reads back uniformly erased (or zeroed) is a
+  // torn/anomalous write — evidence the slot was touched, never proof it
+  // was never written. Only a missing key (NOT_FOUND above) may classify
+  // Empty; a present-but-erased blob is reported Corrupt so the journal
+  // quarantines instead of treating the slot as provably absent and
+  // silently restarting at revision 0.
+  const std::uint8_t fill = target.data[0];
+  if (fill == kErasedFill || fill == 0x00U) {
+    bool uniform = true;
+    for (std::size_t i = 1; i < target.size; ++i) {
+      if (target.data[i] != fill) {
+        uniform = false;
+        break;
+      }
+    }
+    if (uniform) {
+      std::memset(target.data, kCorruptFill, target.size);
+    }
+  }
   return Status::success();
 }
 
@@ -92,7 +111,12 @@ Status NvsConfigStore::write(const std::uint8_t slot, const ByteView data) noexc
   esp_err_t error = nvs_set_blob(handle_, key, data.data, data.size);
   if (error != ESP_OK) return nvs_status(error, "nvs_set_blob failed");
   error = nvs_commit(handle_);
-  return nvs_status(error, "nvs_commit failed");
+  if (error != ESP_OK) return nvs_status(error, "nvs_commit failed");
+  // Count only committed writes — the §6.8 flash budget measures what
+  // actually landed, not attempted calls that NVS rejected.
+  ++stats_.commits;
+  stats_.bytes += data.size;
+  return Status::success();
 }
 
 }  // namespace routeloom::espnow

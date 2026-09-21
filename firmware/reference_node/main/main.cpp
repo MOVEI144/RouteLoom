@@ -211,14 +211,24 @@ routeloom::ResetCause classify_boot() noexcept {
 // durably and surfaced through accessors the runtime consults — the live
 // enforcement hooks are the deferred integration step, never claimed here.
 // apply/restore are idempotent and complete on the next poll (async token);
-// read_active returns the last committed bytes so the journal's readback
-// verification is real, not a log string.
+// read_active returns the persisted blob so the journal's readback
+// verification proves durability, not a log string or a RAM echo.
 class RefNodeConfigProvider final : public routeloom::ConfigProvider {
  public:
   // Persist the active snapshot so it survives reboot alongside the journal.
+  // The NVS namespace is stashed: every provider instance owns ONE config
+  // namespace, so persist()/read_active() must use the namespace it was
+  // opened with — never a shared "active" blob that a second namespace's
+  // apply could overwrite.
   Status open(const char* name_space) noexcept {
+    if (name_space == nullptr ||
+        std::strlen(name_space) >= sizeof(namespace_)) {
+      return Status::error(StatusCode::InvalidArgument,
+                           "config values namespace invalid");
+    }
+    std::memcpy(namespace_, name_space, std::strlen(name_space) + 1);
     nvs_handle_t handle = 0;
-    if (nvs_open(name_space, NVS_READWRITE, &handle) != ESP_OK) {
+    if (nvs_open(namespace_, NVS_READWRITE, &handle) != ESP_OK) {
       return Status::error(StatusCode::StorageFailure, "config values nvs_open");
     }
     std::size_t actual = sizeof(active_.bytes);
@@ -264,17 +274,29 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
     if (token.value != token_id_) {
       return Status::error(StatusCode::NotFound, "config token unknown");
     }
-    commit_pending();
+    // The terminal outcome is the persist result: a commit that could not
+    // land in NVS is reported as a failure (the journal then restores or
+    // quarantines) — never claimed as applied.
+    outcome = commit_pending();
     done = true;
     return Status::success();
   }
   Status read_active(const std::uint16_t, const routeloom::MutableByteView target,
                      std::size_t& out_size) noexcept override {
-    if (active_.size > target.size) {
-      return Status::error(StatusCode::NoCapacity, "config read buffer small");
+    // The readback input is the persisted blob, not the RAM copy: the
+    // journal's VERIFYING step must prove the snapshot is durable, not
+    // merely staged in RAM.
+    nvs_handle_t handle = 0;
+    if (nvs_open(namespace_, NVS_READONLY, &handle) != ESP_OK) {
+      return Status::error(StatusCode::StorageFailure, "config readback nvs_open");
     }
-    std::memcpy(target.data, active_.bytes.data(), active_.size);
-    out_size = active_.size;
+    std::size_t actual = target.size;
+    const esp_err_t error = nvs_get_blob(handle, "active", target.data, &actual);
+    nvs_close(handle);
+    if (error != ESP_OK) {
+      return Status::error(StatusCode::StorageFailure, "config readback failed");
+    }
+    out_size = actual;
     return Status::success();
   }
 
@@ -282,19 +304,32 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
   bool relay_allowed() const noexcept { return relay_allowed_; }
 
  private:
-  void commit_pending() noexcept {
+  // A snapshot becomes "active" only once it is durable: persist the
+  // pending image FIRST, then update the RAM copy and apply live fields.
+  // A failed write leaves active_ == the last durable image and reports
+  // the failure — the RAM copy never runs ahead of flash.
+  Status commit_pending() noexcept {
+    const Status persisted = persist();
+    if (!persisted) return persisted;
     active_.size = pending_.size;
     std::memcpy(active_.bytes.data(), pending_.bytes.data(), pending_.size);
-    persist();
     apply_fields();
+    return Status::success();
   }
-  void persist() noexcept {
+  // Writes the PENDING image (the candidate for activation) under this
+  // provider's own namespace — the caller decides activation on success.
+  Status persist() noexcept {
     nvs_handle_t handle = 0;
-    if (nvs_open("rlcfgv", NVS_READWRITE, &handle) != ESP_OK) return;
-    if (nvs_set_blob(handle, "active", active_.bytes.data(), active_.size) == ESP_OK) {
-      (void)nvs_commit(handle);
+    if (nvs_open(namespace_, NVS_READWRITE, &handle) != ESP_OK) {
+      return Status::error(StatusCode::StorageFailure, "config persist nvs_open");
     }
+    esp_err_t error =
+        nvs_set_blob(handle, "active", pending_.bytes.data(), pending_.size);
+    if (error == ESP_OK) error = nvs_commit(handle);
     nvs_close(handle);
+    return error == ESP_OK
+               ? Status::success()
+               : Status::error(StatusCode::StorageFailure, "config persist commit");
   }
   // Decode the committed TLV and drive the effects the node can apply.
   void apply_fields() noexcept {
@@ -325,6 +360,7 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
 
   routeloom::ByteBuffer<routeloom::endpoint::kConfigSnapshotMax> active_{};
   routeloom::ByteBuffer<routeloom::endpoint::kConfigSnapshotMax> pending_{};
+  char namespace_[16]{};
   std::uint64_t token_id_{0};
   bool discovery_enabled_{true};
   bool relay_allowed_{true};
@@ -565,10 +601,16 @@ extern "C" void app_main(void) {
   // master key so permit auth never reuses the link secret directly.
   static routeloom::espnow::NvsConfigStore config_store;
   status = config_store.open("rlcfg");
-  if (!status) fail(status.detail);
+  if (!status) {
+    // Not fatal: the journal's own initialize() will report the storage
+    // fault; the node stays up degraded rather than halting the mesh.
+    ESP_LOGE(kTag, "config store open failed: %s", status.detail);
+  }
   static RefNodeConfigProvider config_provider;
   status = config_provider.open("rlcfgv");
-  if (!status) fail(status.detail);
+  if (!status) {
+    ESP_LOGE(kTag, "config provider open failed: %s", status.detail);
+  }
   static RefNodeMaintenanceGate config_gate(/*independent_admin_path=*/false);
   static routeloom::ConfigRateLimiter config_limiter;
   static routeloom::espnow::EspNowEntropySource config_entropy;
@@ -589,7 +631,26 @@ extern "C" void app_main(void) {
       journal_config, config_store, config_verifier, config_entropy,
       config_limiter, &config_provider, /*validator=*/nullptr, &config_gate);
   status = config_journal.initialize(monotonic_now_ms());
-  if (!status) fail(status.detail);
+  if (!status) {
+    // Journal impairment is NOT a node-fatal condition (04 §4.7, 06 §6.3):
+    // halting here would take down mesh routing/discovery for the whole
+    // network, while the impaired journal can still serve honest answers.
+    // The journal is attached anyway — an initialized-but-impaired journal
+    // adopts its surviving record as a known value, refuses new intake
+    // with RecoveryRequired/quarantined verdicts, and still answers status
+    // queries; an uninitialized one reports "not initialized". Either way
+    // the wire outcome is honest and the node keeps routing.
+    //
+    // Recovery is deliberately NOT implicit: §6.3 requires authorized
+    // recovery evidence from the authority or redeployment. This profile
+    // wires no recovery verb — ConfigJournal::recover() stays an explicit
+    // operator/host call (exercised by tests), so the field path is
+    // re-provisioning/redeploy, never an unattended self-reset.
+    ESP_LOGE(kTag,
+             "config journal init failed: %s — running degraded "
+             "(routing continues, config intake refuses)",
+             status.detail);
+  }
   static routeloom::MeshConfigPort config_port(runtime.node());
   static routeloom::ConfigTarget config_target(config_port);
   status = config_target.add_journal(
@@ -599,6 +660,12 @@ extern "C" void app_main(void) {
   ESP_LOGW(kTag,
            "EXPERIMENTAL config target active (dev HMAC permit profile, not "
            "a production identity)");
+  // §6.8 flash-write accounting: the NVS adapter counts committed journal
+  // writes; logged here so bench runs can read the boot-time baseline.
+  const auto cfg_writes = config_store.write_stats();
+  ESP_LOGI(kTag, "config store writes=%llu bytes=%llu",
+           static_cast<unsigned long long>(cfg_writes.commits),
+           static_cast<unsigned long long>(cfg_writes.bytes));
 #endif
 
 #if CONFIG_ROUTELOOM_DEEP_SLEEP
@@ -641,6 +708,10 @@ extern "C" void app_main(void) {
       s_sleep_marker = kSleepMarkerValue;
       status =
           coordinator.sleep_enter(coordinator.ticket(), monotonic_now_ms());
+      // The marker claims "sleep in progress" only while sleep_enter runs:
+      // a return — failure or an unexpected non-sleep success — must not
+      // leave it armed for the reset path to misread as a sleep cycle.
+      s_sleep_marker = 0;
       if (!status) fail(status.detail);
     }
     vTaskDelay(pdMS_TO_TICKS(2));

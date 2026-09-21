@@ -98,10 +98,12 @@ class CollectSink final : public UsbFrameSink {
 std::vector<std::uint8_t> encode(FrameKind kind, std::uint16_t flags,
                                  std::uint64_t session, std::uint64_t request,
                                  ByteView body) {
+  std::array<std::uint8_t, kMaxDecodedFrame> scratch{};
   std::array<std::uint8_t, kMaxEncodedFrame> out{};
   std::size_t written = 0;
   const Status status =
       encode_frame(kind, flags, session, request, body,
+                   MutableByteView{scratch.data(), scratch.size()},
                    MutableByteView{out.data(), out.size()}, written);
   if (!status) return {};
   return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
@@ -196,12 +198,22 @@ void test_frame_max_body_boundary() {
   CHECK(sink.errors.empty());
 
   // One byte over the limit is rejected by encode, not truncated.
+  std::array<std::uint8_t, kMaxDecodedFrame> scratch{};
   std::array<std::uint8_t, kMaxEncodedFrame> out{};
   std::size_t written = 0;
   CHECK(encode_frame(FrameKind::DataToMesh, 0, 1, 2,
                      ByteView{body.data(), kMaxBodySize + 1},
+                     MutableByteView{scratch.data(), scratch.size()},
                      MutableByteView{out.data(), out.size()}, written)
             .code == StatusCode::InvalidArgument);
+
+  // An undersized scratch is rejected honestly, never truncated into.
+  std::array<std::uint8_t, 64> small_scratch{};
+  CHECK(encode_frame(FrameKind::DataToMesh, 0, 1, 2,
+                     ByteView{body.data(), 128},
+                     MutableByteView{small_scratch.data(), small_scratch.size()},
+                     MutableByteView{out.data(), out.size()}, written)
+            .code == StatusCode::NoCapacity);
 }
 
 void test_frame_codec() {

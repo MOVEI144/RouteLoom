@@ -1298,11 +1298,15 @@ void EspNowRuntime::enqueue_rx(
     event.length = static_cast<std::uint16_t>(length);
     event.rssi_dbm = info->rx_ctrl != nullptr ? info->rx_ctrl->rssi : 0;
     std::memcpy(event.data.data(), data, event.length);
-    portENTER_CRITICAL(&callback_lock_);
+    // The event is fully local: nothing here needs callback_lock_, so the
+    // queue send runs outside it (same shape as the wire lane below and
+    // enqueue_tx) — holding the WiFi-task critical section across queue
+    // internals stretches it over every RLD1 frame.
     if (xQueueSend(bootstrap_queue_, &event, 0) != pdTRUE) {
+      portENTER_CRITICAL(&callback_lock_);
       ++bootstrap_rx_dropped_;
+      portEXIT_CRITICAL(&callback_lock_);
     }
-    portEXIT_CRITICAL(&callback_lock_);
     return;
   }
   // The peer table can be rewritten by the poll task's lease sync — resolve

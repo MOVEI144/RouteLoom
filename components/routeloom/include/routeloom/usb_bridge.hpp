@@ -388,9 +388,20 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   std::uint8_t rx_tokens_{kControlBurst};
   MonotonicMs rx_bucket_ms_{0};
 
+  // TX-path staging lives in members (the bridge is a static object in
+  // firmware): pump_tx runs on every emitted frame on an 8 KB main task,
+  // so frame/body scratch must be .bss, never task stack. Single-threaded
+  // use only — no caller may hold a view into these across a bridge call.
+  static constexpr std::size_t kMaxTxBody = kMaxTxInner + kProtectedBodyOverhead;
+  static constexpr std::size_t kTxScratchBytes = kHeaderSize + kMaxTxBody + kCrcSize;
   FixedQueue<TxItem, kControlQueueCapacity> control_q_{};
   FixedQueue<TxItem, kDataQueueCapacity> data_q_{};
   std::array<std::uint8_t, kMaxEncodedFrame> tx_wire_{};
+  std::array<std::uint8_t, kMaxTxBody> tx_body_{};
+  std::array<std::uint8_t, kTxScratchBytes> encode_scratch_{};
+  // DataToMesh canonical hash staging (kind || inner) — same stack-to-.bss
+  // pattern as the TX scratch above; consumed before mesh->send runs.
+  std::array<std::uint8_t, kMaxTxInner + 1> canonical_{};
   std::size_t tx_wire_size_{0};
   std::size_t tx_wire_sent_{0};
   bool tx_wire_active_{false};

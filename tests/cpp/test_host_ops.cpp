@@ -1040,9 +1040,11 @@ class CollectSink final : public UsbFrameSink {
 std::vector<std::uint8_t> encode(FrameKind kind, std::uint16_t flags,
                                  std::uint64_t session, std::uint64_t request,
                                  ByteView body) {
+  std::array<std::uint8_t, kMaxDecodedFrame> scratch{};
   std::array<std::uint8_t, kMaxEncodedFrame> out{};
   std::size_t written = 0;
   if (!encode_frame(kind, flags, session, request, body,
+                    MutableByteView{scratch.data(), scratch.size()},
                     MutableByteView{out.data(), out.size()}, written)) {
     return {};
   }

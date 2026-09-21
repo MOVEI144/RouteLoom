@@ -44,7 +44,11 @@ using routeloom::espnow::MacAddress;
 using routeloom::espnow::NvsCounterStore;
 
 // UsbBridge emits COBS+CRC32 frames through this stream. Partial writes are
-// expected: the bridge retries the remainder on the next poll.
+// expected: the bridge retries the remainder on the next poll. The write is
+// deliberately nonblocking — app_main is the single pump task, so a blocked
+// write here (host stopped draining without a disconnect) would starve
+// runtime.poll_once() and the mesh RX path beneath it. A full TX buffer
+// reports written=0; the bridge resumes from tx_wire_sent_ next poll.
 class UsbSerialStream final : public routeloom::usb::ByteStream {
  public:
   Status write(ByteView data, std::size_t& written) noexcept override {
@@ -53,7 +57,7 @@ class UsbSerialStream final : public routeloom::usb::ByteStream {
       return Status::success();
     }
     const int result = usb_serial_jtag_write_bytes(
-        data.data, data.size, pdMS_TO_TICKS(20));
+        data.data, data.size, pdMS_TO_TICKS(0));
     if (result < 0) {
       return Status::error(StatusCode::RadioFailure, "usb jtag write failed");
     }

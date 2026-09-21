@@ -38,6 +38,15 @@ class FixedQueue {
     return true;
   }
 
+  // Drops the head without moving it — for callers that only need the slot
+  // back (a moved-out TxItem copy would just be discarded anyway).
+  bool drop() noexcept {
+    if (size_ == 0) return false;
+    head_ = (head_ + 1) % Capacity;
+    --size_;
+    return true;
+  }
+
   T* front() noexcept { return size_ == 0 ? nullptr : &items_[head_]; }
   const T* front() const noexcept { return size_ == 0 ? nullptr : &items_[head_]; }
   bool empty() const noexcept { return size_ == 0; }
@@ -105,6 +114,11 @@ class FixedPool {
     return false;
   }
 
+  // Contract: `fn` must not mutate THIS pool — release()/clear() of the
+  // iterated element is safe only by statement ordering (nothing may touch
+  // it afterwards), and allocate() can make a later index revisit a slot
+  // mid-iteration. Collect the targets during for_each, then mutate after
+  // it returns. Mutating a DIFFERENT pool is fine.
   template <typename Fn>
   void for_each(Fn fn) noexcept {
     for (std::size_t i = 0; i < Capacity; ++i) {
