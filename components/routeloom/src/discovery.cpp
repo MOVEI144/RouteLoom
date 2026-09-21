@@ -357,7 +357,7 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
   }
   if (!reserve_transient()) {
     ++stats_.peer_capacity;
-    event("PEER_CAPACITY", kInvalidNodeId);
+    reject_event("PEER_CAPACITY", kInvalidNodeId);
     return Status::error(StatusCode::PeerCapacity, "no transient peer slot");
   }
   outbound_ = Outbound{};
@@ -386,13 +386,13 @@ void NeighborDiscovery::on_rld1_rx(const DiscoveryRxMetadata& rx,
   // here is a REJECT — never a fallback into the Wire parser (06 §3.1).
   if (!autonomy::rld1_decode(frame, env)) {
     ++stats_.kind_rejects;
-    event("KIND_REJECT", kInvalidNodeId);
+    reject_event("KIND_REJECT", kInvalidNodeId);
     return;
   }
   if (!gate(AdmissionCarrier::Rld1, AdmissionDirection::Rx, env.kind,
             /*transaction_alive=*/true, now_ms)) {
     ++stats_.kind_rejects;
-    event("KIND_REJECT", env.claimed_node);
+    reject_event("KIND_REJECT", env.claimed_node);
     return;
   }
   // Scoped modes enforce the observed-destination rule (02-discovery-scope
@@ -706,7 +706,7 @@ void NeighborDiscovery::admit_discover(
     if (candidate == nullptr) {
       ++stats_.peer_capacity;
       if (scope_mode_scoped(config_.scope_mode)) ++scope_stats_.candidate_full;
-      event("PEER_CAPACITY", env.claimed_node);
+      reject_event("PEER_CAPACITY", env.claimed_node);
       return;
     }
     candidate->id = CandidateId{next_candidate_id_++};
@@ -725,7 +725,7 @@ void NeighborDiscovery::admit_discover(
     if (!reserve_transient()) {
       ++stats_.peer_capacity;
       if (scope_mode_scoped(config_.scope_mode)) ++scope_stats_.candidate_full;
-      event("PEER_CAPACITY", env.claimed_node);
+      reject_event("PEER_CAPACITY", env.claimed_node);
       return;  // parked; poll() retries while the TTL lasts
     }
     candidate->transient_held = true;
@@ -911,7 +911,7 @@ void NeighborDiscovery::handle_auth(const MacAddress& source,
   if (!autonomy::bootstrap_auth_decode(
           ByteView{env.body.data(), env.body_size}, auth)) {
     ++stats_.kind_rejects;
-    event("KIND_REJECT", env.claimed_node);
+    reject_event("KIND_REJECT", env.claimed_node);
     return;
   }
   switch (auth.phase) {
@@ -960,7 +960,7 @@ void NeighborDiscovery::handle_prove(const MacAddress& source,
   }
   if (!cookie || cookie_echo != candidate->cookie) {
     ++stats_.cookie_rejects;
-    event("COOKIE_REJECT", candidate->claimed_node);
+    reject_event("COOKIE_REJECT", candidate->claimed_node);
     release_candidate(*candidate);
     relax_membership();
     return;
@@ -973,7 +973,7 @@ void NeighborDiscovery::handle_prove(const MacAddress& source,
                                   candidate->exchange.binding()};
   if (!authenticator_.verify(autonomy::AuthPhase::Prove, transcript, prove_tag)) {
     ++stats_.auth_tag_rejects;
-    event("AUTH_FAILED", env.claimed_node);
+    reject_event("AUTH_FAILED", env.claimed_node);
     release_candidate(*candidate);
     relax_membership();
     return;
@@ -1035,7 +1035,7 @@ void NeighborDiscovery::handle_confirm(const MacAddress& source,
   if (!authenticator_.verify(autonomy::AuthPhase::Confirm, transcript,
                              confirm_tag)) {
     ++stats_.auth_tag_rejects;
-    event("AUTH_FAILED", outbound_.peer_node);
+    reject_event("AUTH_FAILED", outbound_.peer_node);
     fail_outbound(now_ms, "AUTH_FAILED");
     return;
   }
@@ -1071,7 +1071,7 @@ void NeighborDiscovery::handle_finish(const MacAddress& source,
                                   candidate->exchange.binding()};
   if (!authenticator_.verify(autonomy::AuthPhase::Finish, transcript, finish_tag)) {
     ++stats_.auth_tag_rejects;
-    event("AUTH_FAILED", env.claimed_node);
+    reject_event("AUTH_FAILED", env.claimed_node);
     release_candidate(*candidate);
     relax_membership();
     return;
@@ -1127,7 +1127,7 @@ void NeighborDiscovery::handle_chunk(const MacAddress& source,
     slot = assemblies_.allocate();
     if (slot == nullptr) {
       ++stats_.peer_capacity;
-      event("PEER_CAPACITY", kInvalidNodeId);
+      reject_event("PEER_CAPACITY", kInvalidNodeId);
       return;
     }
     slot->active = true;
@@ -1159,7 +1159,7 @@ void NeighborDiscovery::handle_chunk(const MacAddress& source,
   assemblies_.release(slot);
   if (!ok) {
     ++stats_.kind_rejects;
-    event("KIND_REJECT", kInvalidNodeId);
+    reject_event("KIND_REJECT", kInvalidNodeId);
     return;
   }
   // Completed-inner dispatch re-checks admission on the freshest context —
@@ -1198,15 +1198,15 @@ void NeighborDiscovery::on_wire_rx(const MacAddress& source, const FrameType typ
       neighbor->phase == NeighborPhase::Conflict ||
       neighbor->phase == NeighborPhase::Revoked) {
     ++stats_.kind_rejects;
-    event("WIRE_NEIGHBOR_REJECT", neighbor != nullptr ? neighbor->node
+    reject_event("WIRE_NEIGHBOR_REJECT", neighbor != nullptr ? neighbor->node
                                                     : kInvalidNodeId);
-    event("KIND_REJECT", kInvalidNodeId);
+    reject_event("KIND_REJECT", kInvalidNodeId);
     return;
   }
   if (!gate(AdmissionCarrier::WireV1, AdmissionDirection::Rx, type,
             /*transaction_alive=*/true, now_ms)) {
     ++stats_.kind_rejects;
-    event("WIRE_GATE_REJECT", neighbor->node);
+    reject_event("WIRE_GATE_REJECT", neighbor->node);
     return;
   }
   switch (type) {
@@ -1223,7 +1223,7 @@ void NeighborDiscovery::on_wire_rx(const MacAddress& source, const FrameType typ
           !neighbor->peer_member_verified ||
           membership_.state() != MembershipState::Member) {
         ++stats_.kind_rejects;
-        event("DATA_REJECT", neighbor->node);
+        reject_event("DATA_REJECT", neighbor->node);
       }
       break;
   }
@@ -1234,7 +1234,7 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   autonomy::NeighborProbePayload probe{};
   if (!autonomy::neighbor_probe_decode(payload, probe)) {
     ++stats_.kind_rejects;
-    event("PROBE_DECODE_REJECT", neighbor.node);
+    reject_event("PROBE_DECODE_REJECT", neighbor.node);
     return;
   }
   // Binding generations advance independently on each side's re-auth: a
@@ -1245,7 +1245,7 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
     neighbor.generation = probe.binding_generation;
   } else if (probe.binding_generation.value < neighbor.generation.value) {
     ++stats_.kind_rejects;
-    event("PROBE_GEN_MISMATCH", neighbor.node);
+    reject_event("PROBE_GEN_MISMATCH", neighbor.node);
     return;
   }
   // An authenticated probe is liveness evidence: refresh the lease and reply.
@@ -1277,13 +1277,13 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
   autonomy::NeighborResultPayload result{};
   if (!autonomy::neighbor_result_decode(payload, result)) {
     ++stats_.kind_rejects;
-    event("RESULT_DECODE_REJECT", neighbor.node);
+    reject_event("RESULT_DECODE_REJECT", neighbor.node);
     return;
   }
   if (result.probe_sequence == 0 ||
       result.probe_sequence != neighbor.probe_outstanding) {
     ++stats_.kind_rejects;
-    event("RESULT_SEQ_MISMATCH", neighbor.node);
+    reject_event("RESULT_SEQ_MISMATCH", neighbor.node);
     return;  // late/foreign results never promote a dead exchange
   }
   // Same forward-adoption as handle_probe: the responder's newer epoch is
@@ -1292,7 +1292,7 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
     neighbor.generation = result.binding_generation;
   } else if (result.binding_generation.value < neighbor.generation.value) {
     ++stats_.kind_rejects;
-    event("RESULT_GEN_MISMATCH", neighbor.node);
+    reject_event("RESULT_GEN_MISMATCH", neighbor.node);
     return;
   }
   neighbor.probe_outstanding = 0;
@@ -1344,7 +1344,7 @@ void NeighborDiscovery::complete_exchange(
   if (!authenticator_.issue_proof(transcript, config_.node, closing_tag, proof) ||
       !proof.valid() || proof.peer() != peer_node ||
       !mac_equal(proof.mac(), peer_mac)) {
-    event("AUTH_FAILED", peer_node);
+    reject_event("AUTH_FAILED", peer_node);
     return;
   }
   ++stats_.auths_completed;
@@ -1382,7 +1382,7 @@ void NeighborDiscovery::complete_exchange(
           conflict->lease_expires_at_ms = now_ms + config_.candidate_ttl_ms;
         }
         ++stats_.conflicts;
-        event("BINDING_CONFLICT", peer_node);
+        reject_event("BINDING_CONFLICT", peer_node);
         return;
       }
       // Old binding is dead: revoke it and re-bind at a new generation so
@@ -1408,7 +1408,7 @@ void NeighborDiscovery::complete_exchange(
       // A different identity on an address we already bound: reject rather
       // than hand the address to a second NodeId.
       ++stats_.conflicts;
-      event("BINDING_CONFLICT", peer_node);
+      reject_event("BINDING_CONFLICT", peer_node);
       return;
     }
     // Re-authentication of the same (node, MAC): bump the binding generation
@@ -1444,7 +1444,7 @@ void NeighborDiscovery::complete_exchange(
     }
     if (neighbor == nullptr) {
       ++stats_.peer_capacity;
-      event("PEER_CAPACITY", peer_node);
+      reject_event("PEER_CAPACITY", peer_node);
       return;
     }
   }
@@ -1468,7 +1468,7 @@ void NeighborDiscovery::complete_exchange(
       // Logical binding exists; the driver-slot shortage is reported, never
       // silently absorbed (02 §7).
       ++stats_.peer_capacity;
-      event("PEER_CAPACITY", peer_node);
+      reject_event("PEER_CAPACITY", peer_node);
     }
     event("BOUND", peer_node);
     send_probe(*neighbor, now_ms);
@@ -2060,7 +2060,7 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
           n.last_confirmed_ms = now_ms;
           if (!reserve_regular(n)) {
             ++stats_.peer_capacity;
-            event("PEER_CAPACITY", n.node);
+            reject_event("PEER_CAPACITY", n.node);
           }
           event("BOUND", n.node);
           send_probe(n, now_ms);
@@ -2248,7 +2248,7 @@ Status NeighborDiscovery::pin_peer(const NodeId peer) noexcept {
   if (neighbor->pinned) return Status::success();
   if (pins_used_ >= discovery_const::kRegularPinsMax) {
     ++stats_.peer_capacity;
-    event("PEER_CAPACITY", peer);
+    reject_event("PEER_CAPACITY", peer);
     return Status::error(StatusCode::PeerCapacity, "regular pin budget");
   }
   neighbor->pinned = true;

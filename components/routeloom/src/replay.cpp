@@ -124,13 +124,22 @@ Status ReplayGuard::open_context(const SecurityContext& context,
 
   ReplayWindowRecord record{};
   bool window_found = false;
-  status = store_.load_window(window_slot(context), record, window_found);
+  // Windows share one slot per peer pair (the epoch-free floor slot), so an
+  // epoch advance rewrites the same record instead of leaking one record
+  // per boot. Epochs below the floor are rejected before this load, so a
+  // valid-CRC record with a foreign fingerprint can only be a stale
+  // previous-epoch window — safe to replace, never serve.
+  const std::uint32_t slot = floor_slot(context);
+  status = store_.load_window(slot, record, window_found);
   if (!status) return status;
   if (window_found) {
-    if (record.crc != window_crc(record) || record.initialized == 0 ||
-        record.context_fingerprint != replay_context_fingerprint(context)) {
+    if (record.crc != window_crc(record) || record.initialized == 0) {
       return Status::error(StatusCode::IntegrityError,
                            "replay window corrupt");
+    }
+    if (record.context_fingerprint != replay_context_fingerprint(context)) {
+      record = ReplayWindowRecord{};
+      record.context_fingerprint = replay_context_fingerprint(context);
     }
   } else {
     // A missing window at the current floor epoch means the persisted replay
@@ -149,7 +158,8 @@ Status ReplayGuard::open_context(const SecurityContext& context,
   if (!status) return status;
 
   window.record = record;
-  window.slot = window_slot(context);
+  window.slot = slot;
+  window.epoch = context.epoch;
   window.open = true;
   return Status::success();
 }
@@ -157,6 +167,19 @@ Status ReplayGuard::open_context(const SecurityContext& context,
 Status ReplayGuard::accept(Window& window, const std::uint64_t counter) noexcept {
   if (!window.open) {
     return Status::error(StatusCode::InvalidState, "replay window not open");
+  }
+  // The slot is shared per peer pair: if the floor advanced past this
+  // window's epoch (peer re-handshake), the live record belongs to a newer
+  // context and this stale window must not commit over it.
+  {
+    ReplayFloorRecord floor{};
+    bool floor_found = false;
+    const auto floor_status = store_.load_floor(window.slot, floor, floor_found);
+    if (!floor_status) return floor_status;
+    if (floor_found && floor.crc == floor_crc(floor) && floor.initialized != 0 &&
+        window.epoch < floor.minimum_epoch) {
+      return Status::error(StatusCode::ReplayRejected, "REPLAY_EPOCH_STALE");
+    }
   }
   ReplayWindowRecord next = window.record;
   if (next.initialized == 0) {

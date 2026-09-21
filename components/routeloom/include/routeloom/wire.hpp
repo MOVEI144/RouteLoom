@@ -121,6 +121,7 @@ Status open_end(const LinkOpenedFrame& frame,
 Status forward(const LinkOpenedFrame& input,
                NodeId local_node,
                NodeId next_hop,
+               std::uint16_t link_epoch,
                std::uint32_t remaining_deadline_ms,
                SecurityProvider& security,
                EncodedFrame& output) noexcept;

@@ -36,12 +36,20 @@ Status CounterLease::initialize() noexcept {
       return Status::error(StatusCode::IntegrityError,
                            "counter record integrity check failed");
     }
-    if (record.context_id != context_id_ || record.key_epoch != key_epoch_ ||
-        record.direction != direction_) {
+    if (record.context_id != context_id_ || record.direction != direction_) {
       return Status::error(StatusCode::Conflict, "counter store context mismatch");
     }
-    cursor_ = record.high_water_exclusive;
-    end_ = record.high_water_exclusive;
+    if (record.key_epoch > key_epoch_) {
+      // A newer persisted epoch belongs to a context we must not rewind.
+      return Status::error(StatusCode::Conflict, "counter store epoch regression");
+    }
+    if (record.key_epoch == key_epoch_) {
+      cursor_ = record.high_water_exclusive;
+      end_ = record.high_water_exclusive;
+    }
+    // Older persisted epoch: the same slot is re-keyed for the new epoch —
+    // counters restart because the nonce space is epoch-scoped. The record
+    // generation stays monotonic across the re-key.
     generation_ = record.generation;
   }
   initialized_ = true;

@@ -212,13 +212,17 @@ void run_valid_vector(const std::filesystem::path& path) {
     const NodeId forwarder = at("fwd_local_node");
     const NodeId forward_next = at("fwd_next_hop");
     const auto forward_budget = static_cast<std::uint32_t>(at("fwd_remaining_deadline_ms"));
+    // The forwarder stamps its OWN link epoch; vectors that predate the
+    // field share the origin epoch, so fall back to link_epoch.
+    const auto forward_epoch = static_cast<std::uint16_t>(
+        fields.count("fwd_link_epoch") != 0U ? at("fwd_link_epoch") : at("link_epoch"));
     std::vector<std::uint8_t> expected_fwd;
     CHECK(hex_decode(fields.at("fwd_encoded_hex"), expected_fwd));
     CHECK(present);
     TestSecurity forward_security;
     wire::EncodedFrame forwarded{};
-    CHECK_OK(wire::forward(opened, forwarder, forward_next, forward_budget,
-                           forward_security, forwarded));
+    CHECK_OK(wire::forward(opened, forwarder, forward_next, forward_epoch,
+                           forward_budget, forward_security, forwarded));
     CHECK(same_bytes(expected_fwd, forwarded.view()));
 
     TestSecurity next_security;

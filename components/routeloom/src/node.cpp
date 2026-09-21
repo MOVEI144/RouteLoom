@@ -1301,8 +1301,8 @@ Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
                                                       remaining);
     status = wire::encode_new(job.plain, security_, job.encoded);
   } else {
-    status = wire::forward(job.forwarded, config_.node, job.peer, remaining, security_,
-                           job.encoded);
+    status = wire::forward(job.forwarded, config_.node, job.peer, config_.link_epoch,
+                           remaining, security_, job.encoded);
   }
   if (status) job.encoded_valid = true;
   return status;

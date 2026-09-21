@@ -356,6 +356,7 @@ Status open_end(const LinkOpenedFrame& input,
 Status forward(const LinkOpenedFrame& input,
                const NodeId local_node,
                const NodeId next_hop,
+               const std::uint16_t link_epoch,
                const std::uint32_t remaining_deadline_ms,
                SecurityProvider& security,
                EncodedFrame& output) noexcept {
@@ -379,6 +380,12 @@ Status forward(const LinkOpenedFrame& input,
   Header header = input.header;
   header.previous_hop = local_node;
   header.next_hop = next_hop;
+  // The link context keys on (previous_hop, next_hop, link_epoch): with
+  // boot-advancing epochs the origin's epoch differs from the forwarder's,
+  // so the outgoing hop MUST be stamped with OUR epoch — inheriting the
+  // incoming one would wedge the downstream link floor either direction
+  // (replay REPLAY_EPOCH_STALE, or an irreversible floor ratchet).
+  header.link_epoch = link_epoch;
   --header.hop_remaining;
   header.remaining_deadline_ms = std::min(remaining_deadline_ms, header.remaining_deadline_ms);
   auto status = security.next_counter(link_context(header), header.link_counter);

@@ -1453,7 +1453,6 @@ Status EspNowRuntime::recover() noexcept {
   // send may still arrive and must never satisfy a post-recover send to
   // the same MAC (X-02). The driver rebuild below re-registers peers but
   // cannot cancel an already-queued driver completion.
-  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     fenced_mac_ = pending_mac_;
@@ -1824,9 +1823,6 @@ Status EspNowRuntime::channel_reapply_peers() noexcept {
 
 void EspNowRuntime::channel_fence_tx() noexcept {
   bool fenced = false;
-  // now_ms() outside the critical section — the clock read may take its own
-  // lock on some ports and must never nest inside callback_lock_.
-  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     // The straggler keeps its own record: its late callback resolves as

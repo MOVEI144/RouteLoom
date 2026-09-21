@@ -647,6 +647,34 @@ class NeighborDiscovery {
     observer_.on_discovery_event(reason, peer);
   }
 
+  // Reject-path events can fire at line rate under malformed/replayed
+  // traffic: thin emission deterministically (1st, then every 8th) per
+  // reason so logging can never crowd out the RX path. The aggregate loss
+  // stays observable through stats_.*_rejects counters, which still count
+  // every occurrence.
+  void reject_event(const char* reason, NodeId peer) noexcept {
+    RejectBudget* budget = reject_budgets_.find(
+        [&](const RejectBudget& b) { return b.reason == reason; });
+    if (budget == nullptr) {
+      budget = reject_budgets_.allocate();
+      if (budget == nullptr) {
+        event(reason, peer);  // reasons are a fixed literal set; emit anyway
+        return;
+      }
+      budget->reason = reason;
+      budget->count = 0;
+    }
+    ++budget->count;
+    if ((budget->count & 7U) == 1U) {
+      event(reason, peer);
+    }
+  }
+
+  struct RejectBudget {
+    const char* reason{nullptr};
+    std::uint16_t count{0};
+  };
+
   DiscoveryConfig config_{};
   DiscoveryPort& port_;
   NeighborAuthenticator& authenticator_;
@@ -658,6 +686,9 @@ class NeighborDiscovery {
   FixedPool<Candidate, discovery_const::kCandidateCapacity> candidates_{};
   FixedPool<Neighbor, discovery_const::kNeighborCapacity> neighbors_{};
   FixedPool<RxAssembly, discovery_const::kReassemblySlots> assemblies_{};
+  // Reject-reason literals are a fixed compile-time set (13 today); 16
+  // slots cover all of them so throttling never evicts under mixed floods.
+  FixedPool<RejectBudget, 16> reject_budgets_{};
   std::array<MonotonicMs, discovery_const::kCandidateCapacity> discover_times_{};
   std::size_t discover_cursor_{0};
 
