@@ -470,6 +470,37 @@ fn invalid_vectors_are_rejected() {
     }
 }
 
+/// Every valid vector must still reject with one trailing byte appended:
+/// decoders consume exactly their frame — leftover bytes are a framing
+/// violation, never ignorable padding. Mirrors the same check in
+/// tests/cpp/test_endpoint.cpp.
+#[test]
+fn trailing_byte_is_rejected() {
+    let dir = golden_dir().join("valid");
+    for path in list_json(&dir) {
+        let text = fs::read_to_string(&path).expect("read vector");
+        let fields = parse_flat_json(&text);
+        let name = fields.get("name").cloned().unwrap_or_default();
+        let codec = fields.get("codec").expect("codec").as_str();
+        // Encode-only canonical helpers have no decoder to feed.
+        if matches!(
+            codec,
+            "scope_binding"
+                | "scope_discover_mac_input"
+                | "scope_offer_mac_input"
+                | "config_snapshot_input"
+        ) {
+            continue;
+        }
+        let mut encoded = hex_field(&fields, "encoded_hex");
+        encoded.push(0x00);
+        assert!(
+            decode_vector(codec, &encoded).is_err(),
+            "{name}: accepted a trailing 0x00"
+        );
+    }
+}
+
 #[test]
 fn snapshot_encode_rejects_over_sixteen_fields() {
     // The C++ encoder refuses count > 16 outright; the Rust bare-TLV path

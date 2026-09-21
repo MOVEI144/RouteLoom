@@ -74,6 +74,8 @@ Providerは非同期completion tokenを返し、無線taskをblockしない。pa
 
 write → NVS commit → readback/整合性検証の成功後だけ次phaseへ進む。別キーにrevisionとsnapshotを分けてatomicだと仮定しない。CRCは破損検出で、本人認証の代わりではない。NVSの実電断安全性とFlash寿命は#20/#11の試験対象。
 
+NVS write amplification（実装から導出した回数であり、実測のwear値ではない）：target側は受理1件あたりjournal record3本（DECIDED・APPLY_INTENT・ACTIVE）× unsealed＋committed sealの2相write＝6 commit、加えてproviderのactive blob永続化が1 commitで計約7 commit。device issuer側は一操作あたりoutbox pending record2 commit＋SingleAuthority ledger record2 commit＋signed record2 commit＝6 commitで、superseded/cleared entryごとに2048Bのerase marker（0xFF blob）をさらに1 commit書き込む。結果record・challengeはRAMのみで書込まない。この重複writeは破損回復の代償であり、wear-leveling・寿命評価は#20へdeferする — 受理上限（1分1件）の運用でもこの書込み量を前提とする。
+
 | 停止位置 | 復帰時の処理 |
 |---|---|
 | DECIDED前 | 旧active維持。未受理として期限/同IDを再照会 |

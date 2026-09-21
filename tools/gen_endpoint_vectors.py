@@ -469,6 +469,30 @@ def main():
     bad("config_zero_challenge", "config_command",
         rcc1(patch=good_patch, **{**base, "challenge_nonce": bytes(16)}),
         "challenge nonce must be nonzero")
+    # Zero node-id fields: 0 is the reserved invalid id, never a peer.
+    bad("config_zero_target", "config_command",
+        rcc1(patch=good_patch, **{**base, "target": 0}),
+        "target 0 is the invalid node id")
+    bad("config_zero_authority", "config_command",
+        rcc1(patch=good_patch, **{**base, "authority": 0}),
+        "authority 0 is the invalid node id")
+    # Trailing bytes: a decoder consumes exactly its frame — leftover bytes
+    # are a framing violation, never ignorable padding.
+    bad("config_trailing_byte", "config_command",
+        rcc1(patch=good_patch + b"\x00", **base),
+        "one byte trails the declared TLV region")
+    bad("service_submit_trailing", "service_submit",
+        service_submit(2, token, 9, b"xy", declared=1),
+        "payload_len is one byte short of the bytes present")
+    bad("service_query_trailing", "service_query",
+        service_query(2, nonce, digest32) + b"\x00",
+        "fixed-size query with a trailing byte")
+    bad("control_status_trailing", "control_status",
+        control_status(1, opid, 8, 8, 6, 0, digest32) + b"\x00",
+        "fixed-size status with a trailing byte")
+    bad("discover_v2_trailing", "scope_discover",
+        discover_body_bytes + b"\x00",
+        "25 bytes is not the v2 body either")
 
     print(f"wrote {len(list((OUT / 'valid').glob('*.json')))} valid and "
           f"{len(list((OUT / 'invalid').glob('*.json')))} invalid vectors to {OUT}")

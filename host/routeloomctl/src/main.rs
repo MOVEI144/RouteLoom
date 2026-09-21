@@ -396,7 +396,7 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
             "--delivery" => {
                 delivery = args
                     .next()
-                    .ok_or("--delivery requires BEST_EFFORT|RELIABLE|APPLIED")?
+                    .ok_or("--delivery requires BEST_EFFORT|RELIABLE")?
                     .to_string()
             }
             "--storage" => {
@@ -434,8 +434,11 @@ fn submit_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>>
     if payload.len() > 256 {
         return Err("--payload exceeds 128 bytes".into());
     }
-    if !matches!(delivery.as_str(), "BEST_EFFORT" | "RELIABLE" | "APPLIED") {
-        return Err("--delivery must be BEST_EFFORT|RELIABLE|APPLIED".into());
+    // The daemon advertises and accepts only BEST_EFFORT|RELIABLE — APPLIED
+    // is a later phase (issue #12) and is refused here instead of letting a
+    // request the daemon will reject leave the station.
+    if !matches!(delivery.as_str(), "BEST_EFFORT" | "RELIABLE") {
+        return Err("--delivery must be BEST_EFFORT|RELIABLE".into());
     }
     if !matches!(storage.as_str(), "RAM_ONLY" | "HOST_DURABLE") {
         return Err("--storage must be RAM_ONLY|HOST_DURABLE".into());
@@ -1149,6 +1152,23 @@ mod tests {
             "",
             "--key",
             "short",
+        ]))
+        .is_err());
+        // APPLIED is not a delivery the daemon accepts — the client refuses
+        // it too rather than emit a request answered UNSUPPORTED.
+        assert!(submit_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--epoch",
+            "0000000000000001",
+            "--to",
+            "0000000000000003",
+            "--payload",
+            "",
+            "--key",
+            "00112233445566778899aabbccddeeff",
+            "--delivery",
+            "APPLIED",
         ]))
         .is_err());
     }

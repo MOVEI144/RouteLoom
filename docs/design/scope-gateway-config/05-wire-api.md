@@ -58,7 +58,7 @@ ACK参照type21、Service専用dedup/receipt、end保護、最大128BをC++/Rust
 
 ## 5.4 Config canonical command
 
-RCC1をCOSE_Sign1 payloadとする。header176B＋patch最大512B=最大688B。next_revision=expected+1、overflow拒否。空/no-op patchは発行前NO_CHANGEで、revisionを消費しない。
+RCC1をcanonical commandとして運び、本番案ではCOSE_Sign1 payloadとする（現profileのdev envelopeは§5.4末）。header176B＋patch最大512B=最大688B。next_revision=expected+1、overflow拒否。空/no-op patchは発行前NO_CHANGEで、revisionを消費しない。
 
 | offset | field | bytes |
 |---:|---|---:|
@@ -81,6 +81,8 @@ snapshot hashは `SHA256("RouteLoom/config-snapshot/v1\0" || namespace:u16 || sc
 本番案：COSE tag18、protected `{1:-7,4:bstr(authority_u64_BE)}`、unprotected空map、payload=RCC1、ES256 P-256のraw R||S署名64B。external_aadはASCII `RouteLoom/config-permit/v1`＋NUL＋Network8＋target8＋namespace2。RFC9052 Sig_structure/RFC9053に従い#10の正式Providerを共用する。kidは検索ヒントであり権限ではない。
 
 重複label、非最小/indefinite CBOR、未対応crit/header、detached payload、別curve/key用途、署名不一致を拒否する。限定形状のoverhead最大86B、permit最大774B、quota1024B内。ゼロ署名による長さfixtureを署名検証成功と扱わない。実署名vector・独立cryptoレビューは別gate。
+
+**774Bは本番案の登録形状boundであり、実装済みruntimeの上限ではない。** 実装済みdev profile（`config_dev.hpp`がEXPERIMENTAL・非productionと明示するHMAC envelope：aad45B＋RCC1最大688B＋tag16B）の実上限は**749B**で、COSE_Sign1検証器自体は未実装（#10の正式Providerと共用予定）。`contracts.json`は両方を別fieldで登録し、`permit_dev_encoded_max`が実装側の上限を表す。
 
 ## 5.5 Config制御・object転送
 
@@ -112,13 +114,13 @@ USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。実装済みcapabil
 | 0x12 GatewayIngressAck | H→G: token16/refMessageKey20/request_digest32/outcome2。70B＋共通4=74B |
 | 0x13 HostUnregister | H→G: token16。現在sessionが所有するrecordのみ失効 |
 | 0x20 ConfigQuery | H→G: target8/ns2/opid16。Gateway受領で対象成功を代用しない |
-| 0x21 ConfigPermit | H→G: target8/object_len2/COSE bytes≤1024。署名原本を転送 |
+| 0x21 ConfigPermit | H→G: target8＋permit bytes（payload残り1..1024。`object_len` fieldはなく長さは共通`payload_len`由来）。署名原本を転送 |
 | 0x22 ConfigStatus | G→H: target8/ControlStatus72 |
 | 0x23 ConfigChallenge | 双方向: target8/ControlQuery24またはChallenge92。request IDで形を固定 |
 
 USB result/outcomeは0 OK、1 BUSY、2 STALE、3 DENIED、4 UNSUPPORTED、5 INVALID、6 STORAGE、7 INDETERMINATE。IngressAck 0はReceiveLogへ実格納済みの場合だけ。receipt/digest/messagekeyの照合前に信用しない。
 
-HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB sessionでのrenewは同token、sessionが変われば新token。GatewayIngress/ACKはpending8件分の双方向creditを受理前に予約し、slow readerで枯渇したらBUSY。DATA/ACKとcounter順序を既存Owner/writerで直列化する。
+HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB sessionでのrenewは同token、sessionが変われば新token。GatewayIngressは受理時にpending8枠の一件を占有し、IngressAckまたは5秒のACK期限で解放する。queue時点でのcredit予約はなく、USB frameは双方向とも既存のper-frame creditを送受信時に消費する。pending満杯なら新しいSubmitをCAPACITYで拒否する。HostはReceiveLogへの実格納（duplicate/conflictを区別）後にのみACKを返す。DATA/ACKとcounter順序を既存Owner/writerで直列化する。
 
 ## 5.7 Host canonical/API
 
@@ -129,6 +131,8 @@ Gateway canonical schema2は既存26B field形を保ち、dest_kind=1のpayload_
 egress_gatewayは送信に使うローカル出口、destinationは最終Gateway。どちらもcanonical hashへ含める。Host keyのscopeは認証principal/Network/operation_class/受付epoch/key。別token/egressで同keyを再提出したらCONFLICT。再接続で新key/新tokenを作って自動再実行しない。
 
 Configは別operation_class。Config operation ID16B、Host OperationId24B、wire MessageKey20Bを区別する。APIの受付とConfig Status ACTIVEを別の結果にし、全エラーを正しいJSONで返す。
+
+Host側のdurable状態はSQLiteのAuthority sequenceだけである。`config.get`のoperation recordはRAMのみで、daemon再起動は進行中opを失う。op idはboot名づけされるため、再起動前のstale tokenが別opへ解決されることはない。復帰した受付はINDETERMINATEと報告し、記録を再構成して自動再実行しない。§4.3の耐電断outbox順序はdevice issuer/target側の契約であり、Host issuerのop履歴を永続とは読まない。
 
 ## 5.8 C/C++ APIと例
 

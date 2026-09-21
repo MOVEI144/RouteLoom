@@ -2,7 +2,7 @@
 
 ## 6.1 設計と実装の検査を分ける
 
-[cases.json](cases.json)の46件は**partially_executed**（P6時点）。39件はportable/host試験で実コードを通して実行済みで、各caseの`status:"portable_passed"`と`evidence`が実行した試験fileを指す（例：S01–S11は`tests/cpp/test_scope.cpp`、C01–C14は`tests/cpp/test_config.cpp`、Gatewayは`tests/cpp/test_gateway.cpp`＋`tests/cpp/test_host_ops.cpp`＋`host/routeloom-host/src/{api1,dispatch}.rs`、I02は同一golden corpusを`tests/cpp/test_endpoint.cpp`と`host/routeloom-wire/tests/endpoint.rs`で実行）。7件（S12・G09・G12・I03・I06・I07・I08）は実機・電源・PTY/CI・配布docsの証拠待ちで`planned_not_run`のまま。今回のcheckerは登録値・数式・バイト形式・台帳整合を検査するだけで、実機・資格を証明しない。
+[cases.json](cases.json)の46件は**partially_executed**（P6時点）。39件はportable/host試験で実コードを通して実行済みで、各caseの`status:"portable_passed"`と`evidence`が実行した試験fileを指す（例：S01–S11は`tests/cpp/test_scope.cpp`、C01–C14は`tests/cpp/test_config.cpp`、Gatewayは`tests/cpp/test_gateway.cpp`＋`tests/cpp/test_host_ops.cpp`＋`host/routeloom-host/src/{api1,dispatch}.rs`、I02は同一golden corpusを`tests/cpp/test_endpoint.cpp`と`host/routeloom-wire/tests/endpoint.rs`で実行）。7件（S12・G09・G12・I03・I06・I07・I08）は実機・電源・PTY/CI・配布docsの証拠待ちで`planned_not_run`のまま。今回のcheckerは登録値・数式・バイト形式・台帳整合を検査するだけで、実機・資格を証明しない。`evidence`はsource fileへのpointerでありrun logではない。検証可能なrun（SHA `91279d2`、2026-09-21 local）：`ctest --test-dir build --output-on-failure`は22/22 pass、`cargo test -p routeloom-wire -p routeloom-protocol`はpass、full `cargo test --workspace --all-targets`はsandboxのsocket-bind制限で2失敗（`api_listener_mode_is_owner_only`、`daemon_restart_reconnects`、いずれも`bind: Operation not permitted`）。再現は同SHAでの同コマンド再実行。CI greenはrun ID＋SHA引用時のみ主張する。
 
 実装時は各ケースへcommit、実行コマンド、fixture、観測点、expected/actual、ログ、結果を結び付ける。実コードが呼ばれないmodelだけで機能を完成扱いにしない。既存PR #2/#13の回帰試験を残す。
 
@@ -57,13 +57,13 @@ Scopeの異key100 responderは先にmodelで確認し、実機は保有台数で
 
 保有1台のESP32-C3（MAC `94:a9:90:6a:ee:c4`、rev v0.4、USB-Serial/JTAG、4MB flash）に対し、CI artifact（`firmware-bridge_node-esp32c3-normal-off-endpoints_on`、`firmware-reference_node-esp32c3-normal-off-config_target_on`、同`deep_sleep-off-off`、いずれも`202ddf8`/`755ed53`ビルド）をesptoolでapp partition `0x10000`へ書込み実施。単板のためmesh/RF/2scope/3hop/遠隔Gateway配送は全て対象外であり、以下は**USB給電・single-hop USB経路のみ**の証拠であってRF/HIL証拠ではない。
 
-**実機で観測した挙動（pass）**
+**実機で観測した挙動（pass、raw log添付なしのsession noteであり資格証拠ではない）**
 
 - USB COBS session：hello_ack（node 1、network `0x524c0001`、capability `0x1f`）→auth_ok→credit_grant→`lease up`が実シリコンで完走。`endpoints_on`のcapability広告が実機で確認できた。
 - Gateway endpoint：`gateway.resolve`が実デバイス発行のregistration（`host_digest`=SHA256(session principal)、boot incarnation、`lease_ms`≈14s）を返した。`gateway-send`(HOST_RECEIVE_RAM)は`GATEWAY_ACCEPTED`→`HOST_RAM_RECEIVED`→`END_SDK_RECEIVED`のevidence連鎖で完走し、payloadはhost ReceiveLogへ`endpoint_kind=gateway_mirror`・`EXPERIMENTAL_DEV_PSK`表記で実格納された。
 - 正直な終端：peer不在のnode宛sendは実デバイスがmessage_keyを発行した上で`INDETERMINATE`（成功捏造なし）。事前cancelは`CANCELLED_BEFORE_DISPATCH`。同一key再提出は同一operation_idを返し`deadline_elapsed`を正直に報告。
 - Bounded資源：uid当たりactive上限8に到達した9件目がretryable `NO_CAPACITY`で拒否。8件のINDETERMINATE終端後に`device floor adopted`が4→9へ進み、PR #13のretire/floor採用が実機で退役を解放した。
-- Reset/boot lease：実リセットでboot incarnationが6→7へ進み旧sessionは破棄、再authと新leaseが張った。crash-loop firmware（deep_sleep版、stack bug中）でcounterが183まで進んだ事実は、boot incarnationがNVSに永続しfirmware跨ぎで単調であることの実証。
+- Reset/boot lease：実リセットでboot incarnationが6→7へ進み旧sessionは破棄、再authと新leaseが張った。crash-loop firmware（deep_sleep版、stack bug中）でcounterが183まで進んだ事実は、同一firmware・同一NVS namespace（`rlboot`/`session`）内でboot incarnationが永続し単調であることの実証。異なるfirmware image間で同じNVS partition/namespaceが維持されるかはpartition構成・flash手順次第であり、firmware跨ぎの単調性は未検証のopen limitation（cross-flashでcounterが初期化され得る）とする。
 - Config target起動：`config_target_on`が実NVS上で`NvsConfigStore` open→`ConfigJournal::initialize`→`ConfigTarget`登録を完走し`EXPERIMENTAL config target active`をlog出力（消去済みNVSでのclean init）。
 - Deep sleep cycle：`deep_sleep` profileがRTC marker書込み→実deep sleep（USB-Serial/JTAG detachをmacOS側で観測）→30s RTC wake→`power RUNNING -> RESUMING (WAKE_DEEP_SLEEP)`と分類→保存peer 0件のため正直に`ColdStart` outcome→次cycleへ推移。power imageのNVS往復が実睡眠を跨いで動いた。
 

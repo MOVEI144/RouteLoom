@@ -34,7 +34,7 @@
 |---|---|
 | documented | 完了（本set） |
 | implemented（codec・portable core・Host配線・dev profile identity） | 完了・**EXPERIMENTAL** |
-| host/build tested | portable `ctest` 22件＋`cargo test --workspace`、firmware ON/OFF buildはCI |
+| host/build tested | portable `ctest` 22/22 pass（`cmake --build build --parallel`＋`ctest --test-dir build --output-on-failure`、SHA `91279d2`、2026-09-21 local）・Rust wire/protocol pass（`cargo test -p routeloom-wire -p routeloom-protocol`、同SHA・同日）・full `cargo test --workspace --all-targets`は同条件で2件失敗（`routeloom-host: api_listener_mode_is_owner_only`、`routeloom-tui reconnect: daemon_restart_reconnects`、いずれも`bind: Operation not permitted`のsandbox制限）・firmware ON/OFFはCIのcompile証拠のみ（`.github/workflows/sdk.yml`のfeatures軸、hardware証拠ではない）。CI greenを主張する場合はrun ID＋SHAの引用が必要 |
 | hardware tested | **単板USB/電源のみ実施**（2026-09-21、ESP32-C3 `94:a9:90:6a:ee:c4`、6.7節 — mesh/RF/HILは未実施で`hardware_tested`フラグはfalseのまま） |
 | qualified | **未実施** |
 

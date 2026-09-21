@@ -1,0 +1,8 @@
+{
+  "codec": "control_status",
+  "encoded_hex": "01040001353535353535353535353535353535350000000000000008000000000000000806000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_status_trailing",
+  "note": "fixed-size status with a trailing byte"
+}

@@ -1,0 +1,8 @@
+{
+  "codec": "service_submit",
+  "encoded_hex": "01030200313131313131313131313131313131310000000000000009000100007879",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "service_submit_trailing",
+  "note": "payload_len is one byte short of the bytes present"
+}

@@ -47,7 +47,14 @@ def contract_errors(c: dict) -> list[str]:
         require(0<g['renew_ms']<g['lease_ms']==15000, 'endpoint lease')
         require(not g['identity_failover'] and g['host_receipt_requires_insert_ack'] and not g['host_independent_signature'], 'gateway evidence')
         require(f['canonical_header']==176 and f['patch_max']==512, 'config canonical')
-        require(f['canonical_header']+f['patch_max']+f['cose_overhead_max']==f['permit_encoded_max']==774<=f['object_max']==1024, 'signed object size')
+        # 774 is the REGISTERED production-shaped bound only: the dev profile
+        # that actually runs caps a permit at aad45+RCC1max688+tag16=749 and
+        # the COSE_Sign1 verifier is not implemented (lands with #10). The
+        # arithmetic is checked as contract data, never as runtime evidence.
+        require(f['canonical_header']+f['patch_max']+f['cose_overhead_max']==f['permit_encoded_max']==774<=f['object_max']==1024, 'registered COSE shape bound (unimplemented)')
+        require(f['permit_dev_aad_bytes']==45 and f['permit_dev_tag_bytes']==16, 'dev permit envelope fields')
+        require(f['permit_dev_aad_bytes']+f['canonical_header']+f['patch_max']+f['permit_dev_tag_bytes']==f['permit_dev_encoded_max']==749<=f['permit_encoded_max'], 'implemented dev permit bound')
+        require(f['cose_sign1_implemented'] is False, 'COSE Sign1 provider unimplemented (#10)')
         require(w['chunk_prefix']+w['chunk_data']==128 and w['chunk_data']==90, 'chunk size')
         require(f['field_count_max']==16 and f['field_value_max']==96, 'patch bounds')
         records=(f['accepted_per_minute']*f['result_hold_ms']+59999)//60000+f['transactions_per_target']+f['burst']
@@ -172,9 +179,9 @@ def run(root: Path) -> dict:
     # Shape/size only: the zero signature is deliberately NOT a valid signature.
     protected=b'\xa2\x01\x26\x04\x48'+bytes(8)
     cose=b'\xd2\x84'+cbor_bytes(protected)+b'\xa0'+cbor_bytes(bytes(688))+cbor_bytes(bytes(64))
-    check(len(cose)==774, 'COSE maximum shape (not signature validation)')
+    check(len(cose)==774, 'COSE registered maximum shape — design fixture only, not an implemented verifier (#10)')
     check(all(x['v']==1 and x['method'] in ('gateway.resolve','config.propose') for x in ex['api_examples']), 'API example framing')
-    mutations=[(('runtime_implemented',),False),(('hardware_tested',),True),(('qualified',),True),(('scope','tag_bytes'),12),(('scope','required_fallback'),True),(('scope','grants_membership'),True),(('scope','key_generations'),99),(('wire','network_supported_max'),2**64-1),(('gateway','payload_max'),128),(('gateway','receipt_records'),16),(('gateway','identity_failover'),True),(('gateway','host_receipt_requires_insert_ack'),False),(('config','scope_key_authorizes_config'),True),(('config','global_sequence_equals_target_revision'),True),(('config','auto_reset_corrupt_revision'),True),(('config','object_max'),65535),(('usb','frame_kind'),17),(('usb','ordinary_credit'),False),(('acceptance','status'),'planned_not_run'),(('acceptance','executed_runtime_scenarios'),46)]
+    mutations=[(('runtime_implemented',),False),(('hardware_tested',),True),(('qualified',),True),(('scope','tag_bytes'),12),(('scope','required_fallback'),True),(('scope','grants_membership'),True),(('scope','key_generations'),99),(('wire','network_supported_max'),2**64-1),(('gateway','payload_max'),128),(('gateway','receipt_records'),16),(('gateway','identity_failover'),True),(('gateway','host_receipt_requires_insert_ack'),False),(('config','scope_key_authorizes_config'),True),(('config','global_sequence_equals_target_revision'),True),(('config','auto_reset_corrupt_revision'),True),(('config','cose_sign1_implemented'),True),(('config','object_max'),65535),(('usb','frame_kind'),17),(('usb','ordinary_credit'),False),(('acceptance','status'),'planned_not_run'),(('acceptance','executed_runtime_scenarios'),46)]
     for path,value in mutations:
         bad=copy.deepcopy(c); target=bad
         for part in path[:-1]:
