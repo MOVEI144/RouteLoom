@@ -89,6 +89,9 @@ class ReplayGuard {
     // floor: a stale in-memory window must never overwrite the live record.
     std::uint16_t epoch{0};
     bool open{false};
+    // Peer-pair fingerprint of the owning context; lets accept() validate
+    // the persisted floor is still THIS pair's record, not just any blob.
+    std::uint64_t peer_fingerprint{0};
   };
 
   // window_slot is the per-(context, epoch) fingerprint; floor_slot is the

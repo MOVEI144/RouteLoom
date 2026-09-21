@@ -21,6 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include "routeloom/admission.hpp"
 #include "routeloom/autonomy.hpp"
@@ -653,8 +654,9 @@ class NeighborDiscovery {
   // stays observable through stats_.*_rejects counters, which still count
   // every occurrence.
   void reject_event(const char* reason, NodeId peer) noexcept {
-    RejectBudget* budget = reject_budgets_.find(
-        [&](const RejectBudget& b) { return b.reason == reason; });
+    RejectBudget* budget = reject_budgets_.find([&](const RejectBudget& b) {
+      return b.reason != nullptr && std::strcmp(b.reason, reason) == 0;
+    });
     if (budget == nullptr) {
       budget = reject_budgets_.allocate();
       if (budget == nullptr) {

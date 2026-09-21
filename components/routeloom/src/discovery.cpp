@@ -1035,7 +1035,6 @@ void NeighborDiscovery::handle_confirm(const MacAddress& source,
   if (!authenticator_.verify(autonomy::AuthPhase::Confirm, transcript,
                              confirm_tag)) {
     ++stats_.auth_tag_rejects;
-    reject_event("AUTH_FAILED", outbound_.peer_node);
     fail_outbound(now_ms, "AUTH_FAILED");
     return;
   }
@@ -1344,6 +1343,7 @@ void NeighborDiscovery::complete_exchange(
   if (!authenticator_.issue_proof(transcript, config_.node, closing_tag, proof) ||
       !proof.valid() || proof.peer() != peer_node ||
       !mac_equal(proof.mac(), peer_mac)) {
+    ++stats_.auth_tag_rejects;
     reject_event("AUTH_FAILED", peer_node);
     return;
   }
@@ -1499,7 +1499,7 @@ void NeighborDiscovery::cancel_competing(const MacAddress& mac,
 void NeighborDiscovery::fail_outbound(const MonotonicMs now_ms,
                                       const char* reason) noexcept {
   (void)now_ms;
-  event(reason, outbound_.peer_node);
+  reject_event(reason, outbound_.peer_node);
   outbound_ = Outbound{};
   release_transient();
   relax_membership();

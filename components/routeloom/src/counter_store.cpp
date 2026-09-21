@@ -63,6 +63,38 @@ Status CounterLease::reserve_block() noexcept {
   if (end_ > std::numeric_limits<std::uint64_t>::max() - block_size_) {
     return Status::error(StatusCode::CounterExhausted, "counter range exhausted");
   }
+  // The slot is shared per peer pair and this lease may be cached across an
+  // epoch advance: re-validate the persisted record before overwriting it.
+  // A newer persisted epoch owns the slot now — committing our stale block
+  // would rewind the newer context's counter space into nonce reuse.
+  {
+    CounterRecord persisted{};
+    bool found = false;
+    const auto load_status = store_.load(slot_, persisted, found);
+    if (!load_status) return load_status;
+    if (found) {
+      if (persisted.crc != counter_record_crc(persisted)) {
+        return Status::error(StatusCode::IntegrityError,
+                             "counter record integrity check failed");
+      }
+      if (persisted.key_epoch > key_epoch_) {
+        return Status::error(StatusCode::Conflict,
+                             "counter slot superseded by newer epoch");
+      }
+      if (persisted.key_epoch == key_epoch_ &&
+          persisted.high_water_exclusive > end_) {
+        // Another lease for this same context reserved ahead — adopt the
+        // newer water mark forward, never rewind it.
+        cursor_ = persisted.high_water_exclusive;
+        end_ = persisted.high_water_exclusive;
+        generation_ = persisted.generation;
+      } else if (persisted.key_epoch == key_epoch_ &&
+                 persisted.high_water_exclusive < end_) {
+        return Status::error(StatusCode::IntegrityError,
+                             "counter record rewound");
+      }
+    }
+  }
   CounterRecord next{};
   next.context_id = context_id_;
   next.key_epoch = key_epoch_;

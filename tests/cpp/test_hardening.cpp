@@ -409,6 +409,37 @@ void test_replay_epoch_advance_rekeys_shared_slot() {
   CHECK(guard.open_context(kCtx, stale).code == StatusCode::ReplayRejected);
 }
 
+void test_replay_stale_record_at_floor_epoch_is_state_lost() {
+  // Interrupted transition: floor ratcheted to epoch 4 but the epoch-4
+  // window was never committed (crash between ratchet and first accept).
+  // The slot still holds the epoch-3 record. Reopening epoch 4 must NOT
+  // treat the stale record as the live window — at the floor epoch a
+  // foreign record is a missing window, i.e. REPLAY_STATE_LOST. Recovery
+  // is the next epoch advance, exactly like the absent-blob case.
+  FlakyReplayStore store;
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window epoch3{};
+    CHECK_OK(guard.open_context(kCtx, epoch3));
+    CHECK_OK(guard.accept(epoch3, 7));
+  }
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window epoch4{};
+    SecurityContext newer = kCtx;
+    newer.epoch = 4;
+    CHECK_OK(guard.open_context(newer, epoch4));  // ratchets floor, no commit
+  }
+  ReplayGuard guard(store);
+  ReplayGuard::Window window{};
+  SecurityContext at4 = kCtx;
+  at4.epoch = 4;
+  CHECK(guard.open_context(at4, window).code == StatusCode::ReplayRejected);
+  SecurityContext at5 = kCtx;
+  at5.epoch = 5;
+  CHECK_OK(guard.open_context(at5, window));  // advance recovers
+}
+
 void test_replay_corruption_is_not_a_fresh_context() {
   FlakyReplayStore store;
   {
@@ -538,6 +569,37 @@ void test_counter_lease_epoch_advance_rekeys_same_slot() {
   }
 }
 
+void test_counter_lease_stale_context_cannot_rewind_newer_epoch() {
+  // Two cached contexts at different epochs share one slot. If the stale
+  // epoch-1 lease outlives the epoch-2 re-key, its next reservation must
+  // fail instead of overwriting the epoch-2 record — otherwise the epoch-2
+  // counter space rewinds into nonce reuse.
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  CounterLease epoch1(store, 7, 99, 1, 0, 4);
+  CHECK_OK(epoch1.initialize());
+  CHECK_OK(epoch1.next(value));  // reserves [0,4) at epoch 1
+  {
+    CounterLease epoch2(store, 7, 99, 2, 0, 4);
+    CHECK_OK(epoch2.initialize());  // re-keys the slot to epoch 2
+    CHECK_OK(epoch2.next(value));
+    CHECK(value == 0);  // fresh epoch-2 counter space
+  }
+  // The stale epoch-1 lease can still drain its pre-reserved block (safe:
+  // those counters live under the epoch-1 context and the peer floor
+  // rejects them), but its next reservation must not clobber the record.
+  CHECK_OK(epoch1.next(value));  // drains the old [1,4) reservation
+  CHECK_OK(epoch1.next(value));
+  CHECK_OK(epoch1.next(value));
+  CHECK(epoch1.next(value).code == StatusCode::Conflict);
+  // The epoch-2 record is untouched: a fresh lease resumes past the
+  // committed water mark — epoch-2's reserved space was not rewound.
+  CounterLease epoch2_again(store, 7, 99, 2, 0, 4);
+  CHECK_OK(epoch2_again.initialize());
+  CHECK_OK(epoch2_again.next(value));
+  CHECK(value == 4);
+}
+
 void test_counter_record_rewound_rejected() {
   MemoryCounterStore store;
   {
@@ -655,6 +717,8 @@ int main() {
   test_counter_lease_never_reissues_across_restarts();
   test_counter_lease_context_mismatch_rejected();
   test_counter_lease_epoch_advance_rekeys_same_slot();
+  test_counter_lease_stale_context_cannot_rewind_newer_epoch();
+  test_replay_stale_record_at_floor_epoch_is_state_lost();
   test_counter_record_rewound_rejected();
   test_security_profile_marker();
   test_plaintext_data_rejected();

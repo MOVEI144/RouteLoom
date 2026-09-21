@@ -680,6 +680,7 @@ pub fn forward<S: SecurityProvider>(
     input: &LinkOpenedFrame,
     local_node: u64,
     next_hop: u64,
+    link_epoch: u16,
     remaining_deadline_ms: u32,
     security: &mut S,
     output: &mut EncodedFrame,
@@ -715,6 +716,11 @@ pub fn forward<S: SecurityProvider>(
     let mut header = input.header.clone();
     header.previous_hop = local_node;
     header.next_hop = next_hop;
+    // The link context keys on (previous_hop, next_hop, link_epoch): with
+    // boot-advancing epochs the origin's epoch differs from the forwarder's,
+    // so the outgoing hop MUST be stamped with OUR epoch — inheriting the
+    // incoming one would wedge the downstream link floor either direction.
+    header.link_epoch = link_epoch;
     header.hop_remaining -= 1;
     header.remaining_deadline_ms = remaining_deadline_ms.min(header.remaining_deadline_ms);
     header.link_counter = security.next_counter(&link_context(&header))?;
