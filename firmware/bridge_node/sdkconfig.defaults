@@ -17,3 +17,4 @@ CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
 # (~3.5 KB) overflows in MeshNode/bridge call depth (observed: stack
 # protection fault right after startup).
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y

@@ -1,0 +1,8 @@
+{
+  "codec": "scope_offer",
+  "encoded_hex": "02010001a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5101112131415161718191a1b1c1d1e1f0101000000000007685e20b006b97edba6015b3aac5ea207",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "offer_v2_nonzero_reserved",
+  "note": "reserved u16 must be zero"
+}

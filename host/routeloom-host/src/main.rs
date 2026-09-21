@@ -4,6 +4,7 @@ compile_error!("routeloom-host v0.1 currently requires a Unix platform");
 mod acl;
 mod api1;
 mod canonical;
+mod config;
 mod dispatch;
 mod receive_log;
 mod send_store;
@@ -58,6 +59,13 @@ const DEVICE_TX_GRANT_BYTES: u64 = 65_536;
 /// (docs/spec/security.md).
 const DEV_SECRET: &[u8] = b"routeloom-dev-secret";
 const DEV_PRINCIPAL: &[u8] = b"routeloom-host";
+/// Default dev-permit master, hex-encoded — the same placeholder the
+/// firmware Kconfig default ships (ROUTELOOM_DEVELOPMENT_KEY_HEX), so an
+/// unconfigured daemon↔device pair agrees on the EXPERIMENTAL dev profile.
+/// Deployments must provision a different key on both sides; this provider
+/// never claims a production identity.
+const DEFAULT_CONFIG_DEV_KEY_HEX: &str =
+    "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121";
 /// Idle interval between session keepalives.
 const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// Re-Hello cadence while the handshake is unfinished: a Hello sent while
@@ -642,6 +650,33 @@ struct State {
     /// thread drains — never the other way, so the USB read path can
     /// never be blocked by store work.
     dispatch_inbox: dispatch::DispatchInbox,
+    /// Device-issued GATEWAY_INGRESS (0x11) bodies waiting for the
+    /// dispatch thread's storage pass. Separate from `dispatch_inbox`:
+    /// these are requests to US (their request id is the device's), and
+    /// the ACK must follow storage, never precede it.
+    ingress_inbox: dispatch::DispatchInbox,
+    /// The host's live registration mirror at the attached gateway —
+    /// published once per dispatch pass by the registration lane. api1
+    /// reads it for `gateway.resolve` and the schema-2 submit binding.
+    gateway_lane: dispatch::GatewayLane,
+    /// Config operation registry (P5): api1 submits `config.*` requests and
+    /// reads outcomes; the dispatch thread drives them through the lane.
+    config_ops: dispatch::ConfigOps,
+    /// The daemon's configured config issuer node id (--config-authority).
+    /// None means no authority is provisioned — `config.propose` is refused
+    /// honestly while challenge/status queries still run.
+    config_authority: Option<u64>,
+    /// The authority generation bound into each signed permit command
+    /// (--config-authority-generation). Provisioned, never auto-incremented.
+    config_authority_generation: u32,
+    /// Dev-permit master key bytes (--config-dev-key-hex): the issuer and
+    /// the target's DevConfigAuthorityVerifier must derive from the same
+    /// master — SHA256("RouteLoom/config-dev/v1" || master) on both sides.
+    config_dev_key: Vec<u8>,
+    /// This daemon run's incarnation id, minted at startup — bound into
+    /// every HOST_REGISTER so a restarted daemon is provably a different
+    /// host boot to the device (05 §5.6).
+    host_boot: u64,
 }
 
 fn now_ms() -> u64 {
@@ -1023,11 +1058,21 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         FrameKind::KeepAlive => {
             push_event(state, ms, "\"kind\":\"keepalive\"".to_string());
         }
-        // HostOps receipts/answers go to the TX-I2 dispatch thread, keyed
-        // by the request id we issued. Posting never blocks: a full inbox
-        // drops the body and the dispatcher re-queries on timeout.
+        // HostOps splits two ways by subcommand: device-issued
+        // GATEWAY_INGRESS (0x11) goes to the ingress lane — its ACK must
+        // follow storage, and its request id is the device's own — while
+        // every other body is a reply to a request WE issued and lands in
+        // the dispatcher inbox keyed by our request id. Posting never
+        // blocks: a full inbox drops the body and the lane re-queries or
+        // the device resends inside its own ack window.
         FrameKind::HostOps => {
-            state.dispatch_inbox.post(frame.request, body.to_vec());
+            if routeloom_protocol::host_ops::gateway_sub(body)
+                == Some(routeloom_protocol::host_ops::SUB_GATEWAY_INGRESS)
+            {
+                state.ingress_inbox.post(frame.request, body.to_vec());
+            } else {
+                state.dispatch_inbox.post(frame.request, body.to_vec());
+            }
             push_event(
                 state,
                 ms,
@@ -1389,6 +1434,13 @@ fn merge_session_inbound(state: &State, inbound: &SessionInbound, frame: &Frame,
     }
     if let Some(session_id) = inbound.auth_session {
         let mut info = state.session.lock().expect("session poisoned");
+        if info.id != Some(session_id) {
+            // A new authenticated session can never inherit the previous
+            // session's gateway registration — clear the mirror
+            // immediately; the dispatch lane re-registers under the new
+            // binding on its next pass.
+            state.gateway_lane.clear();
+        }
         info.authenticated = true;
         info.id = Some(session_id);
     }
@@ -1542,6 +1594,10 @@ fn adapter_supervisor(
                     let mut info = state.session.lock().expect("session poisoned");
                     *info = SessionInfo::default();
                 }
+                // A reconnect is a brand-new USB session: the gateway
+                // registration bound to the dead session can never be
+                // inherited — the lane re-registers on its next pass.
+                state.gateway_lane.clear();
                 push_event(
                     &state,
                     now_ms(),
@@ -1570,6 +1626,10 @@ fn adapter_supervisor(
                     let mut info = state.session.lock().expect("session poisoned");
                     *info = SessionInfo::default();
                 }
+                // Link lost: the registration bound to the dead session is
+                // stale — clear it so no schema-2 canonical can still cite
+                // the token (a reconnect re-registers under a fresh one).
+                state.gateway_lane.clear();
                 if let Err(error) = result {
                     set_error(&state, error.to_string());
                 }
@@ -1659,7 +1719,12 @@ fn serve_client(
                 receive_log: &state.receive_log,
                 operation_store: &state.operation_store,
                 rate_limiter: &state.rate_limiter,
+                session: &state.session,
+                gateway_lane: &state.gateway_lane,
+                config_ops: &state.config_ops,
+                config_authority: state.config_authority,
                 now_ms: now_ms(),
+                now_mono: mono_ms(),
             };
             api1::handle(&raw[b"API1 ".len()..], &ctx)
         } else {
@@ -1806,6 +1871,33 @@ struct DaemonArgs {
     device: Option<PathBuf>,
     acl_file: Option<PathBuf>,
     op_store: Option<PathBuf>,
+    config_authority: Option<u64>,
+    config_authority_generation: u32,
+    config_dev_key: Vec<u8>,
+}
+
+/// Parse a node/authority id argument as hexadecimal — the codebase's node
+/// id convention (e.g. `3` or `0000000000000003`). Accepts an optional `0x`.
+fn parse_hex_id(text: &str, flag: &str) -> Result<u64, String> {
+    u64::from_str_radix(text.trim_start_matches("0x"), 16)
+        .map_err(|_| format!("{flag} requires a hexadecimal id"))
+}
+
+/// Decode a `--config-dev-key-hex` master: an even-length hex string whose
+/// bytes feed `SHA256("RouteLoom/config-dev/v1" || master)` — the identical
+/// derivation the firmware target performs on its own Kconfig key.
+fn parse_dev_key_hex(text: &str, flag: &str) -> Result<Vec<u8>, String> {
+    let hex = text.trim_start_matches("0x");
+    if hex.len() % 2 != 0 || hex.is_empty() {
+        return Err(format!("{flag} requires an even-length hex string"));
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|_| format!("{flag} requires an even-length hex string"))
+        })
+        .collect()
 }
 
 fn parse_args() -> Result<DaemonArgs, String> {
@@ -1817,6 +1909,9 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut device = None;
     let mut acl_file = None;
     let mut op_store = None;
+    let mut config_authority = None;
+    let mut config_authority_generation = 1;
+    let mut config_dev_key_hex = DEFAULT_CONFIG_DEV_KEY_HEX.to_string();
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -1840,20 +1935,57 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     args.next().ok_or("--op-store requires a path")?,
                 ))
             }
+            // Config issuer node id the daemon signs permits under (P5).
+            // Absent = no authority provisioned: config.propose is refused
+            // while challenge/status queries still run.
+            "--config-authority" => {
+                let text = args.next().ok_or("--config-authority requires a hex id")?;
+                config_authority = Some(parse_hex_id(&text, "--config-authority")?);
+            }
+            // Authority generation bound into each signed command — must
+            // match the generation the target permits.
+            "--config-authority-generation" => {
+                config_authority_generation = args
+                    .next()
+                    .ok_or("--config-authority-generation requires a number")?
+                    .parse::<u32>()
+                    .map_err(|_| "--config-authority-generation must be an integer")?;
+            }
+            // Dev-profile permit master (hex) — must equal the target's
+            // ROUTELOOM_DEVELOPMENT_KEY_HEX or every signed permit fails
+            // AuthorityDenied on the device. Default = the firmware's own
+            // Kconfig placeholder so a default pair agrees end to end.
+            "--config-dev-key-hex" => {
+                config_dev_key_hex = args
+                    .next()
+                    .ok_or("--config-dev-key-hex requires a hex key")?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX]"
                 );
                 process::exit(0);
             }
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
+    // Reserved ids are never a valid issuer: capabilities would report an
+    // authority configured while every propose is denied downstream, and
+    // generation 0 can never satisfy the firmware Kconfig minimum of 1.
+    if matches!(config_authority, Some(0) | Some(u64::MAX)) {
+        return Err("--config-authority must not be a reserved id".to_string());
+    }
+    if config_authority_generation == 0 {
+        return Err("--config-authority-generation must be >= 1".to_string());
+    }
     Ok(DaemonArgs {
         socket,
         device,
         acl_file,
         op_store,
+        config_authority,
+        config_authority_generation,
+        config_dev_key: parse_dev_key_hex(&config_dev_key_hex, "--config-dev-key-hex")?,
     })
 }
 
@@ -1967,7 +2099,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 "warning: memory operation store — a daemon restart requires a gateway reboot for dispatch (the device rejects the new lane with LaneMismatch); pass --op-store for a durable lane"
             );
-            StoreBackend::Memory(MemoryOperationStore::new(mint_id128()))
+            StoreBackend::Memory(Box::new(MemoryOperationStore::new(mint_id128())))
         }
     };
     // Only remove a leftover unix socket — never unlink a regular file or a
@@ -1984,13 +2116,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
+    // The daemon's incarnation id for HOST_REGISTER: fresh per run,
+    // nonzero and non-reserved so a restarted daemon can never alias the
+    // previous run's registration (05 §5.6 host_boot).
+    let mut host_boot = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as u64
+        ^ u64::from(process::id()).rotate_left(32);
+    if host_boot == 0 || host_boot == u64::MAX {
+        host_boot ^= 0x5A;
+    }
     let state = Arc::new(State {
         device: device.clone(),
         receive_log: Mutex::new(ReceiveLog::new(mint_id128())),
         operation_store: Mutex::new(operation_store),
         acl,
+        host_boot,
+        // Config op tokens are namespaced to this daemon incarnation so a
+        // `config.get` token from before a restart can never resolve to a
+        // different op minted by the new boot (RAM-only ids).
+        config_ops: dispatch::ConfigOps::with_boot(host_boot),
+        config_authority: args.config_authority,
+        config_authority_generation: args.config_authority_generation,
+        config_dev_key: args.config_dev_key,
         ..State::default()
     });
+    if let Some(authority) = args.config_authority {
+        eprintln!(
+            "config authority: node {:016x} generation {} (dev permit profile — EXPERIMENTAL, not a production identity)",
+            authority, args.config_authority_generation
+        );
+    } else {
+        eprintln!("config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)");
+    }
     // Bounded outbound queue: SEND is back-pressured at MAX_OUTBOUND pending
     // frames instead of growing memory without limit while the adapter is
     // down.
@@ -2348,6 +2504,7 @@ mod tests {
                 ttl_ms: 30_000,
                 storage: canonical::STORAGE_RAM,
                 hop_limit: canonical::HOP_DEFAULT,
+                gateway: None,
                 payload,
                 hash,
                 canonical,
@@ -3142,5 +3299,43 @@ mod tests {
         );
         assert!(parse_args_from(["--op-store".to_string()].into_iter()).is_err());
         assert!(parse_args_from(["--bogus".to_string()].into_iter()).is_err());
+    }
+
+    #[test]
+    fn config_dev_key_defaults_to_the_firmware_master() {
+        // The default decodes to the same master the firmware Kconfig ships
+        // ("ROUTELOOM-DEVELOPMENT-KEY-ONLY!!"), so a default daemon↔device
+        // pair derives matching permit keys. A mismatched master signs
+        // permits the target can only deny — the arg must not drift.
+        let parse =
+            |words: &[&str]| parse_args_from(words.iter().map(|w| w.to_string())).expect("parse");
+        let defaults = parse(&[]);
+        assert_eq!(
+            defaults.config_dev_key,
+            b"ROUTELOOM-DEVELOPMENT-KEY-ONLY!!".to_vec()
+        );
+        let custom = parse(&["--config-dev-key-hex", "deadbeef"]);
+        assert_eq!(custom.config_dev_key, vec![0xde, 0xad, 0xbe, 0xef]);
+        for bad_args in [
+            vec!["--config-dev-key-hex"],
+            vec!["--config-dev-key-hex", "abc"],
+            vec!["--config-dev-key-hex", "zz"],
+        ] {
+            assert!(parse_args_from(bad_args.into_iter().map(String::from)).is_err());
+        }
+    }
+
+    #[test]
+    fn config_authority_rejects_reserved_and_zero_generation() {
+        for authority in ["0", "0x0", "ffffffffffffffff"] {
+            assert!(parse_args_from(
+                ["--config-authority".to_string(), authority.to_string()].into_iter()
+            )
+            .is_err());
+        }
+        assert!(parse_args_from(
+            ["--config-authority-generation".to_string(), "0".to_string()].into_iter()
+        )
+        .is_err());
     }
 }

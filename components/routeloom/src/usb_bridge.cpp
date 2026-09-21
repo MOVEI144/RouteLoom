@@ -3,6 +3,9 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
+#include "routeloom/endpoint_wire.hpp"
+#include "routeloom/telemetry.hpp"
 
 namespace routeloom::usb {
 namespace {
@@ -11,6 +14,9 @@ constexpr std::size_t kHelloBodyMin = 8 + 1 + 1 + 1;
 constexpr std::size_t kHelloAckBodySize = 8 + 1 + 8 + 8 + 8 + 4 + kDevTagSize;
 constexpr std::size_t kAuthOkBodySize = kDevTagSize + 8;
 constexpr std::size_t kCreditGrantInnerSize = 1 + 8 + 8;
+// Local diagnostic replies carry the query's 5 s bound as their own TX
+// deadline — a credit-starved reply expires instead of reporting stale data.
+constexpr MonotonicMs kLocalDiagReplyLifetimeMs = kTelemetryQueryLifetimeMs;
 
 std::uint64_t read_u64(const std::uint8_t* p) noexcept {
   std::uint64_t v = 0;
@@ -45,6 +51,45 @@ UsbBridge::UsbBridge(const Config& config, ByteStream& stream) noexcept
       decoder_(*this),
       window_(BootLease::derive(config.boot_id, config.node)) {}
 
+Status UsbBridge::attach_gateway(GatewayDelivery& gateway) noexcept {
+  gateway_ = &gateway;
+  gateway.attach();
+  gateway.set_observer(*this);
+  // The role advertises HOST_RECEIVE_RAM only because this bridge IS the
+  // sink: scope-2 descriptors are never issued against a sink-less role.
+  GatewayRoleConfig role{};
+  role.gateway_boot = config_.boot_id;
+  role.capabilities = kGatewayCapHostReceive;
+  role.host_sink = this;
+  const Status enabled = gateway.enable_gateway(role);
+  // Attaching the endpoint IS the advertisement: CAP_GATEWAY_ENDPOINT_V1 is
+  // set exactly when the component exists and its role is enabled, mirroring
+  // attach_config (bit 4). Builds that never attach keep the bit clear and
+  // answer Unsupported.
+  if (enabled.ok()) {
+    config_.capability |= kCapGatewayEndpointV1;
+  }
+  return enabled;
+}
+
+Status UsbBridge::attach_config(ConfigGateway& gateway) noexcept {
+  config_gateway_ = &gateway;
+  if (config_.mesh != nullptr) {
+    config_.mesh->set_config_sink(&gateway);
+  }
+  config_.capability |= kCapConfigEndpointV1;
+  return Status::success();
+}
+
+Status UsbBridge::attach_diagnostics() noexcept {
+  if (config_.mesh == nullptr) {
+    return Status::error(StatusCode::InvalidState, "diagnostics needs mesh");
+  }
+  config_.mesh->set_diagnostic_sink(this);
+  config_.capability |= kCapM1DiagnosticsV1;
+  return Status::success();
+}
+
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.push(input, now_ms);
@@ -70,6 +115,20 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
   if ((state_ == SessionState::Hello || state_ == SessionState::Authenticating) &&
       now_ms - state_entered_ms_ > kHandshakeTimeoutMs) {
     reset_session_state();
+  }
+  // Gateway lane: resolved endpoints become sends, outstanding ingress is
+  // resent once inside its ack window, and stale slots expire.
+  pump_gateway(now_ms);
+  // Remote diagnostic queries expire into an honest Timeout reply — a lost
+  // snapshot is reported, never left hanging or claimed answered.
+  for (auto& slot : pending_diag_) {
+    if (slot.active && now_ms >= slot.expires_ms) {
+      const std::uint64_t usb_request = slot.usb_request;
+      const NodeId observer = slot.observer;
+      slot = PendingDiagnostic{};
+      send_diagnostic_reply(usb_request, ConfigOpsResult::Timeout, observer,
+                            ByteView{}, now_ms);
+    }
   }
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
@@ -383,15 +442,14 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   // the host-chosen identity in the inner body — stable across sessions, so
   // records may legitimately persist past a reconnect. The canonical hash
   // binds kind+body (key, destination and payload together).
-  std::array<std::uint8_t, kMaxTxInner + 1> canonical{};
-  canonical[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
+  canonical_[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
   if (inner.size > kMaxTxInner) {
     send_error(UsbErrorCode::PayloadTooLarge, request, "PAYLOAD_TOO_LARGE", now_ms);
     return;
   }
-  std::memcpy(canonical.data() + 1, inner.data, inner.size);
+  std::memcpy(canonical_.data() + 1, inner.data, inner.size);
   const DevTag hash =
-      payload_hash(ByteView{canonical.data(), inner.size + 1});
+      payload_hash(ByteView{canonical_.data(), inner.size + 1});
   IdempotencyRecord* record = nullptr;
   const IdempotencyResult result = idempotency_.submit(
       ByteView{transcript_.principal.data(), transcript_.principal_len},
@@ -489,10 +547,400 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::TimeSample:
       handle_ops_time_sample(request, inner, now_ms);
       break;
+    case HostOpsSub::HostRegister:
+      handle_host_register(request, inner, now_ms);
+      break;
+    case HostOpsSub::GatewayIngressAck:
+      handle_ingress_ack(request, inner, now_ms);
+      break;
+    case HostOpsSub::HostUnregister:
+      handle_host_unregister(request, inner, now_ms);
+      break;
+    case HostOpsSub::GatewayIngress:
+      // 0x11 is device→host only: the host issuing one is a protocol
+      // violation, never a request to answer.
+      send_error(UsbErrorCode::ProtocolError, request, "INGRESS_DIRECTION",
+                 now_ms);
+      break;
+    case HostOpsSub::ConfigQuery:
+      handle_config_query(request, inner, now_ms);
+      break;
+    case HostOpsSub::ConfigChallenge:
+      handle_config_challenge(request, inner, now_ms);
+      break;
+    case HostOpsSub::ConfigPermit:
+      handle_config_permit(request, inner, now_ms);
+      break;
+    case HostOpsSub::ConfigStatus:
+      // 0x22 is device→host only (the async reply to a 0x20 query): a host
+      // issuing one is a protocol violation, never a request to answer.
+      send_error(UsbErrorCode::ProtocolError, request, "STATUS_DIRECTION",
+                 now_ms);
+      break;
+    case HostOpsSub::DiagnosticRequest:
+      handle_diagnostic_request(request, inner, now_ms);
+      break;
+    case HostOpsSub::DiagnosticResponse:
+      // 0x31 is device→host only — a host issuing one is a protocol
+      // violation, never a request to answer.
+      send_error(UsbErrorCode::ProtocolError, request, "DIAG_DIRECTION",
+                 now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
   }
+}
+
+ConfigOpsResult UsbBridge::config_result_for(const Status& status) noexcept {
+  switch (status.code) {
+    case StatusCode::WouldBlock:
+      return ConfigOpsResult::Busy;
+    case StatusCode::NoRoute:
+      return ConfigOpsResult::NoRoute;
+    case StatusCode::InvalidArgument:
+      return ConfigOpsResult::Invalid;
+    default:
+      return ConfigOpsResult::Indeterminate;
+  }
+}
+
+void UsbBridge::send_config_reply(const std::uint64_t request,
+                                  const std::uint8_t sub,
+                                  const ConfigOpsResult result,
+                                  const NodeId target, const ByteView body,
+                                  const MonotonicMs now_ms) noexcept {
+  ConfigReply reply{};
+  reply.result = static_cast<std::uint16_t>(result);
+  reply.target = target;
+  reply.body = body;
+  std::array<std::uint8_t,
+             kGatewayInnerHeadSize + kConfigReplyFixedPayload +
+                 kConfigChallengeBodySize>
+      encoded{};
+  std::size_t body_size = 0;
+  if (encode_config_reply(static_cast<HostOpsSub>(sub), reply,
+                          MutableByteView{encoded.data(), encoded.size()},
+                          body_size)) {
+    enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), body_size},
+            now_ms);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::on_config_reply(const std::uint64_t request,
+                                const std::uint8_t sub,
+                                const ConfigOpsResult result,
+                                const NodeId target, const ByteView body,
+                                const MonotonicMs now_ms) noexcept {
+  send_config_reply(request, sub, result, target, body, now_ms);
+}
+
+UsbBridge::PendingDiagnostic* UsbBridge::find_pending_diagnostic(
+    const std::uint32_t request_id, const NodeId observer) noexcept {
+  for (auto& slot : pending_diag_) {
+    // Session identity participates in the match: a reply from a previous
+    // session's query can never resolve a slot minted under this session.
+    if (slot.active && slot.usb_session == session_id() &&
+        slot.request_id == request_id && slot.observer == observer &&
+        now_ms_ < slot.expires_ms) {
+      return &slot;
+    }
+  }
+  return nullptr;
+}
+
+std::uint32_t UsbBridge::next_diag_request_id() noexcept {
+  const std::uint32_t id = next_diag_request_id_;
+  next_diag_request_id_ = (id == UINT32_MAX) ? 1U : id + 1U;
+  return id;
+}
+
+UsbBridge::PendingDiagnostic* UsbBridge::alloc_pending_diagnostic(
+    const NodeId observer) noexcept {
+  PendingDiagnostic* free_slot = nullptr;
+  for (auto& slot : pending_diag_) {
+    if (!slot.active) {
+      if (free_slot == nullptr) free_slot = &slot;
+      continue;
+    }
+    // One outstanding query per observer — the mesh exchange cannot
+    // multiplex two in-flight queries at the same target (04 §USB).
+    if (slot.observer == observer) return nullptr;
+  }
+  return free_slot;
+}
+
+void UsbBridge::send_diagnostic_reply(const std::uint64_t request,
+                                      const ConfigOpsResult result,
+                                      const NodeId observer,
+                                      const ByteView body,
+                                      const MonotonicMs now_ms,
+                                      const MonotonicMs expires_ms) noexcept {
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kDiagnosticReplyFixed +
+                              kDiagnosticReplyMaxBody>
+      encoded{};
+  std::size_t written = 0;
+  // Every diagnostic reply is deadline-bound: a local answer enqueued under
+  // USB credit starvation must expire rather than surface as stale evidence
+  // (04 §USB). expires_ms==0 means "no caller deadline" → use the local
+  // reply bound, never an unbounded queue residency.
+  const MonotonicMs deadline =
+      expires_ms != 0 ? expires_ms : now_ms + kLocalDiagReplyLifetimeMs;
+  if (encode_diagnostic_reply(static_cast<std::uint16_t>(result), observer,
+                              body,
+                              MutableByteView{encoded.data(), encoded.size()},
+                              written)) {
+    enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), written},
+            now_ms, deadline);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::handle_diagnostic_request(const std::uint64_t request,
+                                          const ByteView inner,
+                                          const MonotonicMs now_ms) noexcept {
+  DiagnosticRequestView req{};
+  if (!decode_diagnostic_request(inner, req).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "DIAG_REQ_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapM1DiagnosticsV1) == 0 ||
+      config_.mesh == nullptr) {
+    send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  // Body must be a version-1 diagnostic prefix with a known subtype.
+  if (req.body.size < kDiagnosticPrefixSize ||
+      req.body.data[0] != kDiagnosticBodyVersion || req.body.data[2] != 0 ||
+      req.body.data[3] != 0) {
+    send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  const auto subtype = static_cast<DiagnosticSubtype>(req.body.data[1]);
+  const bool local = req.observer == config_.node;
+
+  if (subtype == DiagnosticSubtype::CapabilitiesQuery) {
+    // Link-only discovery is never tunnelled to a remote mesh target.
+    if (!local) {
+      send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
+                            ByteView{}, now_ms);
+      return;
+    }
+    // The host's nonce must round-trip: decode the query and echo it (04
+    // §capabilities — a reply is bound to a specific query nonce).
+    CapabilitiesQuery cap_query{};
+    if (!capabilities_query_decode(req.body, cap_query).ok()) {
+      send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                            ByteView{}, now_ms);
+      return;
+    }
+    std::array<std::uint8_t, kCapabilitiesReplyBodySize> out{};
+    if (!capabilities_reply_encode(
+            config_.mesh->build_capabilities_reply(cap_query.nonce),
+            MutableByteView{out.data(), out.size()})) {
+      ++stats_.dropped_frames;
+      return;
+    }
+    send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                          ByteView{out.data(), out.size()}, now_ms);
+    return;
+  }
+
+  if (subtype != DiagnosticSubtype::TelemetryQuery) {
+    send_diagnostic_reply(request, ConfigOpsResult::Unsupported, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  TelemetryQuery query{};
+  if (!telemetry_query_decode(req.body, query).ok()) {
+    send_diagnostic_reply(request, ConfigOpsResult::Invalid, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+
+  if (local) {
+    TelemetrySnapshot snapshot{};
+    DiagnosticRejectReason reason{};
+    if (config_.mesh->build_telemetry_snapshot(query, now_ms, snapshot,
+                                               reason)) {
+      std::array<std::uint8_t, kTelemetrySnapshotBodySize> out{};
+      if (!telemetry_snapshot_encode(
+              snapshot, MutableByteView{out.data(), out.size()})) {
+        ++stats_.dropped_frames;
+        return;
+      }
+      send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                            ByteView{out.data(), out.size()}, now_ms);
+    } else {
+      // Local rejection surfaces as a verbatim DiagnosticReject body — the
+      // host sees the same reason space a remote observer would.
+      DiagnosticReject reject{};
+      reject.request_id = query.request_id;
+      reject.reason = reason;
+      reject.observer = config_.node;
+      std::array<std::uint8_t, kDiagnosticRejectBodySize> out{};
+      if (diagnostic_reject_encode(reject,
+                                   MutableByteView{out.data(), out.size()})) {
+        send_diagnostic_reply(request, ConfigOpsResult::Ok, config_.node,
+                              ByteView{out.data(), out.size()}, now_ms);
+      } else {
+        ++stats_.dropped_frames;
+      }
+    }
+    return;
+  }
+
+  // Remote: bounded async query — slot exhaustion or a duplicate observer
+  // is an honest Busy, and the request's own lifetime bounds the wait
+  // (poll() expires the slot; reset clears all slots with the session).
+  PendingDiagnostic* slot = alloc_pending_diagnostic(req.observer);
+  if (slot == nullptr) {
+    send_diagnostic_reply(request, ConfigOpsResult::Busy, req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  // The bridge mints the mesh correlation id — the host's request_id is
+  // never forwarded, so a replayed 0x30 request or a stale cross-session
+  // response cannot resolve a live slot.
+  query.request_id = next_diag_request_id();
+  const Status status =
+      config_.mesh->send_telemetry_query(req.observer, query, now_ms);
+  if (!status) {
+    send_diagnostic_reply(request, config_result_for(status), req.observer,
+                          ByteView{}, now_ms);
+    return;
+  }
+  slot->active = true;
+  slot->request_id = query.request_id;
+  slot->usb_request = request;
+  slot->usb_session = session_id();
+  slot->observer = req.observer;
+  slot->expires_ms = now_ms + kTelemetryQueryLifetimeMs;
+}
+
+void UsbBridge::on_diagnostic_body(const NodeId observer, const ByteView body,
+                                   const MonotonicMs now_ms) noexcept {
+  if (body.size < kDiagnosticPrefixSize ||
+      body.data[0] != kDiagnosticBodyVersion) {
+    ++stats_.dropped_frames;
+    return;
+  }
+  const auto subtype = static_cast<DiagnosticSubtype>(body.data[1]);
+  std::uint32_t request_id = 0;
+  if (subtype == DiagnosticSubtype::TelemetrySnapshot) {
+    TelemetrySnapshot snapshot{};
+    if (!telemetry_snapshot_decode(body, snapshot).ok()) return;
+    request_id = snapshot.request_id;
+  } else if (subtype == DiagnosticSubtype::DiagnosticReject) {
+    DiagnosticReject reject{};
+    if (!diagnostic_reject_decode(body, reject).ok()) return;
+    request_id = reject.request_id;
+  } else {
+    // Link-only subtypes (capabilities/transit-failure) have no pending
+    // USB request — a counted drop, never a reply.
+    ++stats_.dropped_frames;
+    return;
+  }
+  PendingDiagnostic* slot = find_pending_diagnostic(request_id, observer);
+  if (slot == nullptr) {
+    ++stats_.dropped_frames;  // unsolicited/late body: counted, not trusted
+    return;
+  }
+  const std::uint64_t usb_request = slot->usb_request;
+  const MonotonicMs deadline = slot->expires_ms;
+  *slot = PendingDiagnostic{};
+  // The reply carries the query's own deadline into the TX queue — credit
+  // starvation expires it in flight rather than delivering stale evidence.
+  send_diagnostic_reply(usb_request, ConfigOpsResult::Ok, observer, body,
+                        now_ms, deadline);
+}
+
+void UsbBridge::handle_config_query(const std::uint64_t request,
+                                    const ByteView inner,
+                                    const MonotonicMs now_ms) noexcept {
+  ConfigQueryRequest query{};
+  if (!decode_config_query(inner, query)) {
+    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_QUERY_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigStatus),
+                      ConfigOpsResult::Unsupported, query.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status =
+      config_gateway_->submit_status_query(request, query.target,
+                                           query.config_namespace,
+                                           query.operation_id, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigStatus),
+                      config_result_for(status), query.target, ByteView{}, now_ms);
+  }
+  // Admitted: the answer lands asynchronously on on_config_reply (0x22).
+}
+
+void UsbBridge::handle_config_challenge(const std::uint64_t request,
+                                        const ByteView inner,
+                                        const MonotonicMs now_ms) noexcept {
+  ConfigChallengeRequest challenge{};
+  if (!decode_config_challenge(inner, challenge)) {
+    send_error(UsbErrorCode::ProtocolError, request,
+               "CONFIG_CHALLENGE_MALFORMED", now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request,
+                      static_cast<std::uint8_t>(HostOpsSub::ConfigChallenge),
+                      ConfigOpsResult::Unsupported, challenge.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status = config_gateway_->submit_challenge(
+      request, challenge.target, challenge.config_namespace, challenge.schema,
+      challenge.client_nonce, now_ms);
+  if (!status) {
+    send_config_reply(request,
+                      static_cast<std::uint8_t>(HostOpsSub::ConfigChallenge),
+                      config_result_for(status), challenge.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the answer lands asynchronously on on_config_reply (0x23).
+}
+
+void UsbBridge::handle_config_permit(const std::uint64_t request,
+                                     const ByteView inner,
+                                     const MonotonicMs now_ms) noexcept {
+  ConfigPermitRequest permit{};
+  if (!decode_config_permit(inner, permit)) {
+    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_PERMIT_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigPermit),
+                      ConfigOpsResult::Unsupported, permit.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status = config_gateway_->submit_permit(
+      request, permit.target, permit.permit, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigPermit),
+                      config_result_for(status), permit.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the ack resolves asynchronously on on_config_reply (0x21).
 }
 
 void UsbBridge::send_receipt(const DispatchReceipt& receipt,
@@ -717,10 +1165,9 @@ void UsbBridge::handle_ops_submit(const std::uint64_t request,
     return;
   }
   if (fields.dest_kind == 1) {
-    // Gateway-local destination: no application sink exists in this slice,
-    // so there is nothing honest to do with it yet (APP scope).
-    receipt.result = HostOpsResult::Unsupported;
-    send_receipt(receipt, request, now_ms);
+    // Schema-2 gateway destination (P3): bound to the live host
+    // registration; routed to the host loopback or a remote gateway.
+    handle_gateway_submit(submit, fields, receipt, request, now_ms);
     return;
   }
   if (fields.delivery == 2 || fields.priority != 1 || fields.persist_sleep) {
@@ -987,7 +1434,8 @@ void UsbBridge::send_error(const UsbErrorCode code, const std::uint64_t request,
 
 bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
                         const std::uint64_t request, const ByteView inner,
-                        const MonotonicMs now_ms) noexcept {
+                        const MonotonicMs now_ms,
+                        const MonotonicMs expires_ms) noexcept {
   (void)now_ms;
   if (inner.size > kMaxTxInner) {
     ++stats_.dropped_frames;
@@ -998,6 +1446,7 @@ bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
   item.flags = flags;
   item.request = request;
   item.body_size = inner.size;
+  item.expires_ms = expires_ms;
   if (inner.size > 0) std::memcpy(item.body.data(), inner.data, inner.size);
   const bool queued = is_control_kind(kind) ? control_q_.push(item)
                                           : data_q_.push(item);
@@ -1030,11 +1479,17 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
       control = false;
     }
     if (item == nullptr) return;
+    // Deadline-bound items (diagnostic replies): an expired queued item is
+    // a counted drop — never delivered late as if still fresh evidence.
+    if (item->expires_ms != 0 && now_ms >= item->expires_ms) {
+      if (control) control_q_.drop(); else data_q_.drop();
+      ++stats_.diagnostics_expired;
+      continue;
+    }
 
     const bool protect =
         (state_ == SessionState::Active || state_ == SessionState::Draining) &&
         item->kind != FrameKind::Hello && item->kind != FrameKind::HelloAck;
-    std::array<std::uint8_t, kMaxTxInner + kProtectedBodyOverhead> body{};
     std::size_t body_size = 0;
     std::uint64_t session = 0;
     if (protect) {
@@ -1043,17 +1498,16 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
           seal_body(proof_.key, kDirDeviceToHost, tx_counter_, item->kind,
                     item->flags, item->request,
                     ByteView{item->body.data(), item->body_size},
-                    MutableByteView{body.data(), body.size()}, body_size);
+                    MutableByteView{tx_body_.data(), tx_body_.size()}, body_size);
       if (!status) {
-        TxItem dropped{};
-        if (control) control_q_.pop(dropped); else data_q_.pop(dropped);
+        if (control) control_q_.drop(); else data_q_.drop();
         ++stats_.dropped_frames;
         continue;
       }
     } else {
       body_size = item->body_size;
       if (item->body_size > 0) {
-        std::memcpy(body.data(), item->body.data(), item->body_size);
+        std::memcpy(tx_body_.data(), item->body.data(), item->body_size);
       }
     }
     const std::uint64_t decoded_len =
@@ -1061,8 +1515,7 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     if (control) {
       // Zero-credit CONTROL reservation: ≤4 frames × ≤256B, 10/s burst 4.
       if (decoded_len > kControlMaxDecoded) {
-        TxItem dropped{};
-        control_q_.pop(dropped);
+        control_q_.drop();
         ++stats_.control_denied;
         continue;
       }
@@ -1080,16 +1533,15 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
     std::size_t wire_size = 0;
     const Status status =
         encode_frame(item->kind, item->flags, session, item->request,
-                     ByteView{body.data(), body_size},
+                     ByteView{tx_body_.data(), body_size},
+                     MutableByteView{encode_scratch_.data(), encode_scratch_.size()},
                      MutableByteView{tx_wire_.data(), tx_wire_.size()}, wire_size);
     if (!status) {
-      TxItem dropped{};
-      if (control) control_q_.pop(dropped); else data_q_.pop(dropped);
+      if (control) control_q_.drop(); else data_q_.drop();
       ++stats_.dropped_frames;
       continue;
     }
-    TxItem sent{};
-    if (control) control_q_.pop(sent); else data_q_.pop(sent);
+    if (control) control_q_.drop(); else data_q_.drop();
     tx_wire_size_ = wire_size;
     tx_wire_sent_ = 0;
     tx_wire_active_ = true;
@@ -1162,7 +1614,15 @@ void UsbBridge::reset_session_state() noexcept {
   tx_wire_sent_ = 0;
   pending_request_ = 0;
   request_map_ = FixedPool<RequestMap, kRequestMapCapacity>{};
+  // Pending diagnostic queries are session state: a reconnected session can
+  // never observe a late reply under a minted slot (04 §USB correlation).
+  for (auto& slot : pending_diag_) slot = PendingDiagnostic{};
   decoder_.reset();
+  // Gateway lane teardown: the registration dies with the session (a new
+  // token is minted per session — old tokens can never be rebound), and
+  // in-flight ingress/send slots are failed honestly instead of leaking a
+  // forever-Sent window record that would wedge the retire prefix.
+  clear_gateway_state();
   // Idempotency records and the dispatch window intentionally survive: their
   // scope is the host identity / boot lease, not the session. Everything
   // else volatile is cleared.
@@ -1241,6 +1701,582 @@ void UsbBridge::on_diagnostic(const char* reason, const NodeId peer,
   if (reason_len > 0) std::memcpy(inner.data() + size + 1, reason, reason_len);
   enqueue(FrameKind::Diagnostic, 0, 0,
           ByteView{inner.data(), size + 1 + reason_len}, now_ms_);
+}
+
+// --- Gateway host lane (scope-gateway-config/05-wire-api.md §5.6, P3) ------
+
+namespace {
+
+constexpr MonotonicMs kHostRegisterLeaseMs = 15000;   // design: grant 15s
+constexpr MonotonicMs kIngressResendMs = 1200;        // one retry inside 5s window
+constexpr std::uint64_t kIngressAckWindowMs = 5000;   // == kGatewayHostAckMs
+constexpr std::uint32_t kGatewayResolveBudgetMs = 5000;
+
+bool reserved_id(const std::uint64_t value) noexcept {
+  return value == 0 || value == UINT64_MAX;
+}
+
+}  // namespace
+
+bool UsbBridge::host_ready(HostBinding& binding) noexcept {
+  if (!registration_.active || now_ms_ >= registration_.lease_deadline_ms) {
+    return false;
+  }
+  binding.principal_digest = registration_.principal_digest;
+  binding.host_boot = registration_.host_boot;
+  binding.usb_session = registration_.usb_session;
+  return true;
+}
+
+Status UsbBridge::host_ingress(const MessageKey& key,
+                               const RequestDigest& request_digest,
+                               const ByteView submit_prefix, const ByteView payload,
+                               const MonotonicMs now_ms) noexcept {
+  return queue_ingress(/*loopback=*/false, key, request_digest, submit_prefix,
+                       payload, /*dispatch_seq=*/0, now_ms);
+}
+
+Status UsbBridge::queue_ingress(const bool loopback, const MessageKey& key,
+                                const RequestDigest& digest,
+                                const ByteView submit_prefix,
+                                const ByteView payload,
+                                const std::uint64_t dispatch_seq,
+                                const MonotonicMs now_ms) noexcept {
+  if (submit_prefix.size != endpoint::kServiceSubmitHeaderSize ||
+      payload.size > kCanonicalGatewayPayloadMax) {
+    return Status::error(StatusCode::InvalidArgument, "ingress framing");
+  }
+  PendingIngress* slot = nullptr;
+  for (PendingIngress& candidate : pending_ingress_) {
+    if (!candidate.occupied) {
+      slot = &candidate;
+      break;
+    }
+  }
+  if (slot == nullptr) {
+    return Status::error(StatusCode::NoCapacity, "ingress slots full");
+  }
+  GatewayIngress frame{};
+  std::memcpy(frame.submit_prefix.data(), submit_prefix.data,
+              frame.submit_prefix.size());
+  frame.ref_origin = key.origin;
+  frame.ref_session = key.id.session;
+  frame.ref_sequence = key.id.sequence;
+  frame.request_digest = digest;
+  frame.payload = payload;
+  std::size_t body_size = 0;
+  if (!encode_gateway_ingress(
+          frame, MutableByteView{slot->body.data(), slot->body.size()},
+          body_size)) {
+    return Status::error(StatusCode::InternalError, "ingress encode");
+  }
+  slot->occupied = true;
+  slot->loopback = loopback;
+  slot->resent = false;
+  slot->request = next_ingress_request_++;
+  slot->dispatch_seq = dispatch_seq;
+  slot->key = key;
+  slot->digest = digest;
+  slot->body_size = static_cast<std::uint16_t>(body_size);
+  slot->resend_at_ms = now_ms + kIngressResendMs;
+  slot->deadline_ms = now_ms + kIngressAckWindowMs;
+  if (!enqueue(FrameKind::HostOps, 0, slot->request,
+               ByteView{slot->body.data(), slot->body_size}, now_ms)) {
+    *slot = PendingIngress{};
+    return Status::error(StatusCode::NoCapacity, "ingress queue full");
+  }
+  return Status::success();
+}
+
+UsbBridge::PendingIngress* UsbBridge::find_ingress(
+    const std::uint64_t request) noexcept {
+  for (PendingIngress& slot : pending_ingress_) {
+    if (slot.occupied && slot.request == request) return &slot;
+  }
+  return nullptr;
+}
+
+UsbBridge::PendingGatewaySend* UsbBridge::find_gateway_send(
+    const std::uint64_t dispatch_seq) noexcept {
+  for (PendingGatewaySend& send : pending_sends_) {
+    if (send.occupied && send.dispatch_seq == dispatch_seq) return &send;
+  }
+  return nullptr;
+}
+
+void UsbBridge::fail_gateway_send(const std::uint64_t dispatch_seq) noexcept {
+  // Sent-but-unresolved ends as Failed: adopt_slot maps it to the host's
+  // INDETERMINATE — the conservative answer for an unknowable outcome.
+  (void)window_.note_gateway_outcome(dispatch_seq, /*received=*/false,
+                                   /*host_receive_ram=*/false);
+}
+
+void UsbBridge::free_gateway_send(PendingGatewaySend& send) noexcept {
+  if (send.endpoint_held && gateway_ != nullptr) {
+    gateway_->endpoint_release(send.endpoint);
+  }
+  send = PendingGatewaySend{};
+}
+
+void UsbBridge::clear_gateway_state() noexcept {
+  registration_ = HostRegistration{};
+  for (PendingIngress& slot : pending_ingress_) {
+    if (slot.occupied && slot.loopback) {
+      // The loopback position can never complete after session loss:
+      // mark it Failed instead of leaking a forever-Sent record.
+      fail_gateway_send(slot.dispatch_seq);
+    }
+    slot = PendingIngress{};
+  }
+  for (PendingGatewaySend& send : pending_sends_) {
+    if (send.occupied) {
+      fail_gateway_send(send.dispatch_seq);
+      free_gateway_send(send);
+    }
+  }
+}
+
+void UsbBridge::handle_gateway_submit(const SubmitRequest& submit,
+                                      const CanonicalFields& fields,
+                                      DispatchReceipt& receipt,
+                                      const std::uint64_t request,
+                                      const MonotonicMs now_ms) noexcept {
+  const auto refuse = [&](const HostOpsResult result) {
+    receipt.result = result;
+    send_receipt(receipt, request, now_ms);
+  };
+  if ((config_.capability & kCapGatewayEndpointV1) == 0 || gateway_ == nullptr ||
+      !gateway_->gateway_enabled()) {
+    refuse(HostOpsResult::Unsupported);
+    return;
+  }
+  if (fields.delivery == 2 || fields.priority != 1 || fields.persist_sleep) {
+    refuse(HostOpsResult::Unsupported);
+    return;
+  }
+  // The schema-2 binding IS the authority check: token == the live
+  // registration token, gateway_boot == this adapter's boot, egress ==
+  // this node. Anything else is stale or foreign — never rebound (05 §5.4).
+  if (!registration_.active || now_ms >= registration_.lease_deadline_ms ||
+      fields.gateway_token != registration_.token ||
+      fields.gateway_boot != config_.boot_id ||
+      fields.egress_gateway != config_.node) {
+    refuse(HostOpsResult::InvalidRequest);
+    return;
+  }
+  // Device-deadline enforcement at admission — identical to the node path.
+  if (now_ms >= submit.device_deadline) {
+    if (!window_.record_expired(submit.dispatcher, submit.dispatch_seq,
+                                submit.canonical_hash, submit.operation_id,
+                                fields.delivery)) {
+      send_record_refusal_receipt(receipt, submit, request, now_ms);
+      return;
+    }
+    receipt.result = HostOpsResult::Expired;
+    receipt.state = DispatchWindow::State::Expired;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  const std::uint64_t remaining = submit.device_deadline - now_ms;
+  const std::uint32_t lifetime = static_cast<std::uint32_t>(
+      remaining < fields.ttl_ms ? remaining : fields.ttl_ms);
+
+  if (fields.destination == config_.node) {
+    // Host loopback: the payload is delivered to THIS session's ReceiveLog.
+    // Only HOST_RECEIVE_RAM is meaningful here — a scope-1 mailbox delivery
+    // has no local consumer.
+    if (fields.gateway_scope !=
+        static_cast<std::uint8_t>(endpoint::GatewayScope::HostReceiveRam)) {
+      refuse(HostOpsResult::InvalidRequest);
+      return;
+    }
+    // Synthesize the canonical Service Submit prefix exactly as the wire
+    // form carries it: ver1/sub3/scope/flags0 | token16 | boot8 | plen2 |
+    // reserved2. The host recomputes the digest over prefix+payload.
+    std::array<std::uint8_t, endpoint::kServiceSubmitHeaderSize> prefix{};
+    {
+      ByteWriter writer(MutableByteView{prefix.data(), prefix.size()});
+      (void)writer.write_u8(endpoint::kServicePayloadVersion);
+      (void)writer.write_u8(
+          static_cast<std::uint8_t>(endpoint::ServiceSubtype::Submit));
+      (void)writer.write_u8(fields.gateway_scope);
+      (void)writer.write_u8(0);
+      (void)writer.write_bytes(
+          ByteView{registration_.token.data(), registration_.token.size()});
+      (void)writer.write_u64(config_.boot_id);
+      (void)writer.write_u16(static_cast<std::uint16_t>(fields.payload.size));
+      (void)writer.write_u16(0);
+    }
+    // Canonical bytes = prefix || payload (identical to the wire submit);
+    // the digest is the same value handle_submit computes for wire frames.
+    std::array<std::uint8_t,
+               endpoint::kServiceSubmitHeaderSize + kCanonicalGatewayPayloadMax>
+        canonical{};
+    std::memcpy(canonical.data(), prefix.data(), prefix.size());
+    if (fields.payload.size > 0) {
+      std::memcpy(canonical.data() + prefix.size(), fields.payload.data,
+                  fields.payload.size);
+    }
+    RequestDigest digest{};
+    sha256(ByteView{canonical.data(), prefix.size() + fields.payload.size},
+           digest);
+    const std::uint32_t synth_session =
+        static_cast<std::uint32_t>(proof_.session_id);
+    const MessageKey key{config_.node,
+                         MessageId{synth_session, submit.dispatch_seq}};
+    const Status queued =
+        queue_ingress(/*loopback=*/true, key, digest,
+                      ByteView{prefix.data(), prefix.size()}, fields.payload,
+                      submit.dispatch_seq, now_ms);
+    if (!queued) {
+      refuse(HostOpsResult::MeshRejected);
+      return;
+    }
+    if (!window_.record_sent(submit.dispatcher, submit.dispatch_seq,
+                             submit.canonical_hash, submit.operation_id,
+                             fields.delivery, synth_session,
+                             submit.dispatch_seq)) {
+      send_record_refusal_receipt(receipt, submit, request, now_ms);
+      return;
+    }
+    receipt.result = HostOpsResult::Ok;
+    receipt.state = DispatchWindow::State::Sent;
+    receipt.msg_session = synth_session;
+    receipt.msg_seq = submit.dispatch_seq;
+    receipt.msg_valid = true;
+    receipt.evidence = DispatchWindow::Evidence::GatewayAccepted;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+
+  // Remote gateway: admit the position (Sent, no wire key yet), then run
+  // the component's own authenticated resolve→send→result path. The SUBMIT
+  // answer reports the admitted position immediately; progress and the
+  // terminal receipt surface through QUERY_DISPATCH.
+  PendingGatewaySend* send = find_gateway_send(submit.dispatch_seq);
+  if (send != nullptr) free_gateway_send(*send);  // defensive: Admit = fresh
+  send = nullptr;
+  for (PendingGatewaySend& candidate : pending_sends_) {
+    if (!candidate.occupied) {
+      send = &candidate;
+      break;
+    }
+  }
+  if (send == nullptr) {
+    refuse(HostOpsResult::MeshRejected);
+    return;
+  }
+  if (!window_.record_pending(submit.dispatcher, submit.dispatch_seq,
+                              submit.canonical_hash, submit.operation_id,
+                              fields.delivery)) {
+    send_record_refusal_receipt(receipt, submit, request, now_ms);
+    return;
+  }
+  send->occupied = true;
+  send->dispatch_seq = submit.dispatch_seq;
+  send->destination = fields.destination;
+  send->scope = fields.gateway_scope;
+  send->payload_size = fields.payload.size;
+  if (fields.payload.size > 0) {
+    std::memcpy(send->payload.data(), fields.payload.data,
+                fields.payload.size);
+  }
+  send->lifetime_ms = lifetime < kGatewayLifetimeMaxMs
+                          ? lifetime
+                          : kGatewayLifetimeMaxMs;
+  send->deadline_ms = now_ms + remaining;
+  send->stage = GatewaySendStage::Resolving;
+  // Scope-2 remote delivery pins the SAME authenticated principal bound to
+  // this registration (same-principal delivery — the only host identity
+  // the canonical can prove); scope-1 carries the required zero digest.
+  HostDigest expected{};
+  if (fields.gateway_scope ==
+      static_cast<std::uint8_t>(endpoint::GatewayScope::HostReceiveRam)) {
+    expected = registration_.principal_digest;
+  }
+  const endpoint::GatewayScope scope =
+      fields.gateway_scope ==
+              static_cast<std::uint8_t>(endpoint::GatewayScope::HostReceiveRam)
+          ? endpoint::GatewayScope::HostReceiveRam
+          : endpoint::GatewayScope::GatewaySdkRam;
+  const std::uint32_t resolve_budget =
+      remaining < kGatewayResolveBudgetMs
+          ? static_cast<std::uint32_t>(remaining)
+          : kGatewayResolveBudgetMs;
+  const Status resolved =
+      gateway_->resolve(fields.destination, scope, expected, resolve_budget,
+                        now_ms, send->endpoint);
+  if (!resolved) {
+    fail_gateway_send(send->dispatch_seq);
+    *send = PendingGatewaySend{};
+    const DispatchWindow::Slot* slot = window_.find(submit.dispatch_seq);
+    if (slot != nullptr) fill_receipt_from_slot(receipt, *slot);
+    receipt.result = HostOpsResult::Ok;
+    send_receipt(receipt, request, now_ms);
+    return;
+  }
+  send->endpoint_held = true;
+  receipt.result = HostOpsResult::Ok;
+  receipt.state = DispatchWindow::State::Sent;
+  receipt.evidence = DispatchWindow::Evidence::GatewayAccepted;
+  send_receipt(receipt, request, now_ms);
+}
+
+void UsbBridge::handle_host_register(const std::uint64_t request,
+                                     const ByteView inner,
+                                     const MonotonicMs now_ms) noexcept {
+  HostRegisterRequest reg{};
+  if (!decode_host_register(inner, reg)) {
+    send_error(UsbErrorCode::ProtocolError, request, "REGISTER_MALFORMED",
+               now_ms);
+    return;
+  }
+  HostRegisterResponse response{};
+  const auto answer = [&]() {
+    std::array<std::uint8_t,
+               kGatewayInnerHeadSize + kHostRegisterResponsePayload>
+        body{};
+    std::size_t body_size = 0;
+    if (encode_host_register_response(
+            response, MutableByteView{body.data(), body.size()}, body_size)) {
+      enqueue(FrameKind::HostOps, 0, request,
+              ByteView{body.data(), body_size}, now_ms);
+    } else {
+      ++stats_.dropped_frames;
+    }
+  };
+  if ((config_.capability & kCapGatewayEndpointV1) == 0 || gateway_ == nullptr ||
+      !gateway_->gateway_enabled()) {
+    response.result = static_cast<std::uint16_t>(GatewayOpsResult::Unsupported);
+    answer();
+    return;
+  }
+  // The registration binds the AUTHENTICATED session: the network must
+  // match the transcript, the host boot must be a real incarnation id and
+  // the requested lease must be nonzero and sane.
+  if (reg.network != transcript_.network) {
+    response.result = static_cast<std::uint16_t>(GatewayOpsResult::Denied);
+    answer();
+    return;
+  }
+  if (reserved_id(reg.host_boot) || reg.lease_ms == 0 ||
+      reg.lease_ms > 60000) {
+    response.result = static_cast<std::uint16_t>(GatewayOpsResult::Invalid);
+    answer();
+    return;
+  }
+  if (registration_.active && registration_.host_boot == reg.host_boot &&
+      registration_.usb_session == proof_.session_id) {
+    // Renewal: same session + same host boot extends the CURRENT token —
+    // the host cannot rotate its own binding without a new session.
+    registration_.lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
+  } else {
+    HostDigest digest{};
+    sha256(ByteView{transcript_.principal.data(), transcript_.principal_len},
+           digest);
+    registration_.active = true;
+    registration_.host_boot = reg.host_boot;
+    registration_.usb_session = proof_.session_id;
+    registration_.principal_digest = digest;
+    registration_.lease_deadline_ms = now_ms + kHostRegisterLeaseMs;
+    ++registration_.counter;
+    // Token = session || counter: unique per (session, register), never
+    // zero, never carried across sessions — the binding authenticates it.
+    write_u64(registration_.token.data(), proof_.session_id);
+    write_u64(registration_.token.data() + 8, registration_.counter);
+  }
+  response.token = registration_.token;
+  response.gateway_boot = config_.boot_id;
+  response.host_digest = registration_.principal_digest;
+  response.lease_ms = kHostRegisterLeaseMs;
+  response.result = static_cast<std::uint16_t>(GatewayOpsResult::Ok);
+  answer();
+}
+
+void UsbBridge::handle_host_unregister(const std::uint64_t request,
+                                       const ByteView inner,
+                                       const MonotonicMs now_ms) noexcept {
+  HostUnregisterRequest unreg{};
+  if (!decode_host_unregister(inner, unreg)) {
+    send_error(UsbErrorCode::ProtocolError, request, "UNREGISTER_MALFORMED",
+               now_ms);
+    return;
+  }
+  HostUnregisterResponse response{};
+  const auto answer = [&]() {
+    std::array<std::uint8_t,
+               kGatewayInnerHeadSize + kHostUnregisterResponsePayload>
+        body{};
+    std::size_t body_size = 0;
+    if (encode_host_unregister_response(
+            response, MutableByteView{body.data(), body.size()}, body_size)) {
+      enqueue(FrameKind::HostOps, 0, request,
+              ByteView{body.data(), body_size}, now_ms);
+    } else {
+      ++stats_.dropped_frames;
+    }
+  };
+  if ((config_.capability & kCapGatewayEndpointV1) == 0 || gateway_ == nullptr ||
+      !gateway_->gateway_enabled()) {
+    response.result = static_cast<std::uint16_t>(GatewayOpsResult::Unsupported);
+    answer();
+    return;
+  }
+  // Only the CURRENT session's token may release the registration — a
+  // stale or foreign token can never revoke the replacement binding.
+  if (!registration_.active ||
+      unreg.token != registration_.token ||
+      registration_.usb_session != proof_.session_id) {
+    response.result = static_cast<std::uint16_t>(GatewayOpsResult::Stale);
+    answer();
+    return;
+  }
+  registration_ = HostRegistration{};
+  response.result = static_cast<std::uint16_t>(GatewayOpsResult::Ok);
+  answer();
+}
+
+void UsbBridge::handle_ingress_ack(const std::uint64_t request,
+                                   const ByteView inner,
+                                   const MonotonicMs now_ms) noexcept {
+  GatewayIngressAck ack{};
+  if (!decode_gateway_ingress_ack(inner, ack)) {
+    send_error(UsbErrorCode::ProtocolError, request, "ACK_MALFORMED", now_ms);
+    return;
+  }
+  PendingIngress* slot = find_ingress(request);
+  if (slot == nullptr) {
+    // No pending record for this request id: a stray or replayed ACK is
+    // not evidence for anything — counted, never trusted.
+    ++stats_.rx_errors;
+    return;
+  }
+  const bool bound = registration_.active &&
+                     ack.token == registration_.token &&
+                     ack.ref_origin == slot->key.origin &&
+                     ack.ref_session == slot->key.id.session &&
+                     ack.ref_sequence == slot->key.id.sequence &&
+                     ack.request_digest == slot->digest;
+  if (!bound) {
+    // A mismatched ACK is not storage evidence: the slot stays armed so
+    // the real answer can still land inside the ack window.
+    ++stats_.rx_errors;
+    return;
+  }
+  const bool stored =
+      ack.outcome == static_cast<std::uint16_t>(GatewayOpsResult::Ok);
+  const MessageKey key = slot->key;
+  const bool loopback = slot->loopback;
+  const std::uint64_t dispatch_seq = slot->dispatch_seq;
+  *slot = PendingIngress{};
+  if (loopback) {
+    (void)window_.note_gateway_outcome(dispatch_seq, stored,
+                                     /*host_receive_ram=*/stored);
+  } else if (gateway_ != nullptr) {
+    // The component emits the Service Receipt only on real storage
+    // evidence; a non-OK outcome completes as an honest non-success.
+    gateway_->on_host_ingress_ack(key, stored, now_ms);
+  }
+}
+
+void UsbBridge::on_gateway_resolved(const GatewayEndpoint& endpoint,
+                                    const NodeId gateway,
+                                    const Status result) noexcept {
+  // The callback is only a hint: pump_gateway() derives each pending
+  // send's true state from endpoint_state() every tick, which stays exact
+  // even when two resolves to the same gateway finish in one poll.
+  (void)endpoint;
+  (void)gateway;
+  (void)result;
+}
+
+void UsbBridge::on_gateway_result(const GatewaySendResult& result) noexcept {
+  for (PendingGatewaySend& send : pending_sends_) {
+    if (!send.occupied || send.stage != GatewaySendStage::Sent ||
+        send.sent_id != result.id) {
+      continue;
+    }
+    const bool received = result.state == GatewaySendState::EndpointReceived;
+    const bool host_ram =
+        send.scope ==
+        static_cast<std::uint8_t>(endpoint::GatewayScope::HostReceiveRam);
+    (void)window_.note_gateway_outcome(send.dispatch_seq, received,
+                                       host_ram && received);
+    free_gateway_send(send);
+    return;
+  }
+}
+
+void UsbBridge::pump_gateway(const MonotonicMs now_ms) noexcept {
+  // Outstanding ingress: one bounded resend inside the ack window (a lost
+  // 0x12 must not strand the pending record — G03); the host dedups on the
+  // bound MessageKey so the retry is safe.
+  for (PendingIngress& slot : pending_ingress_) {
+    if (!slot.occupied) continue;
+    if (now_ms >= slot.deadline_ms) {
+      const bool loopback = slot.loopback;
+      const std::uint64_t dispatch_seq = slot.dispatch_seq;
+      slot = PendingIngress{};
+      if (loopback) fail_gateway_send(dispatch_seq);
+      // Wire slots: the component's own host_ack_deadline completes the
+      // record as a non-success — no double ingress ever.
+      continue;
+    }
+    if (!slot.resent && now_ms >= slot.resend_at_ms) {
+      if (enqueue(FrameKind::HostOps, 0, slot.request,
+                  ByteView{slot.body.data(), slot.body_size}, now_ms)) {
+        slot.resent = true;
+      }
+    }
+  }
+  // Host-originated sends: resolve → send → window outcome.
+  for (PendingGatewaySend& send : pending_sends_) {
+    if (!send.occupied) continue;
+    if (now_ms >= send.deadline_ms) {
+      fail_gateway_send(send.dispatch_seq);
+      free_gateway_send(send);
+      continue;
+    }
+    if (send.stage == GatewaySendStage::Resolving && gateway_ != nullptr) {
+      const EndpointState state = gateway_->endpoint_state(send.endpoint);
+      if (state == EndpointState::Resolving) continue;
+      if (state != EndpointState::Ready) {
+        fail_gateway_send(send.dispatch_seq);
+        free_gateway_send(send);
+        continue;
+      }
+      send.stage = GatewaySendStage::Ready;
+    }
+    if (send.stage == GatewaySendStage::Ready && gateway_ != nullptr) {
+      const std::uint64_t remaining =
+          send.deadline_ms > now_ms ? send.deadline_ms - now_ms : 0;
+      std::uint32_t lifetime = send.lifetime_ms;
+      if (remaining < lifetime) {
+        lifetime = static_cast<std::uint32_t>(remaining);
+      }
+      if (lifetime == 0) {
+        fail_gateway_send(send.dispatch_seq);
+        free_gateway_send(send);
+        continue;
+      }
+      MessageId id{};
+      const Status sent =
+          gateway_->send(send.endpoint,
+                         ByteView{send.payload.data(), send.payload_size},
+                         lifetime, now_ms, id);
+      if (!sent) {
+        fail_gateway_send(send.dispatch_seq);
+        free_gateway_send(send);
+        continue;
+      }
+      send.sent_id = id;
+      send.stage = GatewaySendStage::Sent;
+      (void)window_.bind_message(send.dispatch_seq, id.session, id.sequence);
+      // The send record holds its own endpoint reference — release ours.
+      gateway_->endpoint_release(send.endpoint);
+      send.endpoint_held = false;
+    }
+  }
 }
 
 }  // namespace routeloom::usb

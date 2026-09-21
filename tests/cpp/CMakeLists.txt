@@ -51,11 +51,35 @@ target_compile_definitions(routeloom_autonomy_tests PRIVATE
     ROUTELOOM_AUTONOMY_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/autonomy-golden")
 add_test(NAME routeloom_autonomy_tests COMMAND routeloom_autonomy_tests)
 
+add_executable(routeloom_endpoint_tests test_endpoint.cpp)
+target_link_libraries(routeloom_endpoint_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_endpoint_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_endpoint_tests PRIVATE
+    ROUTELOOM_ENDPOINT_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/endpoint-golden")
+add_test(NAME routeloom_endpoint_tests COMMAND routeloom_endpoint_tests)
+
+add_executable(routeloom_gateway_tests test_gateway.cpp)
+target_link_libraries(routeloom_gateway_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_gateway_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_gateway_tests COMMAND routeloom_gateway_tests)
+
 add_executable(routeloom_discovery_tests test_discovery.cpp)
 target_link_libraries(routeloom_discovery_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_discovery_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_discovery_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_discovery_tests COMMAND routeloom_discovery_tests)
+
+add_executable(routeloom_scope_tests test_scope.cpp)
+target_link_libraries(routeloom_scope_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_scope_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_scope_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_scope_tests COMMAND routeloom_scope_tests)
+
+add_executable(routeloom_telemetry_tests test_telemetry.cpp)
+target_link_libraries(routeloom_telemetry_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_telemetry_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_telemetry_tests COMMAND routeloom_telemetry_tests)
 
 add_executable(routeloom_congestion_tests test_congestion.cpp)
 target_link_libraries(routeloom_congestion_tests PRIVATE routeloom_core)
@@ -92,6 +116,24 @@ target_link_libraries(routeloom_baseline_diff_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_baseline_diff_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_baseline_diff_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_baseline_diff_tests COMMAND routeloom_baseline_diff_tests)
+
+add_executable(routeloom_config_tests test_config.cpp)
+target_link_libraries(routeloom_config_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_config_tests COMMAND routeloom_config_tests)
+
+add_executable(routeloom_cose_tests test_config_cose.cpp)
+target_link_libraries(routeloom_cose_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_cose_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_cose_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_cose_tests COMMAND routeloom_cose_tests)
+
+add_executable(routeloom_config_wire_tests test_config_wire.cpp)
+target_link_libraries(routeloom_config_wire_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_config_wire_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_config_wire_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_config_wire_tests COMMAND routeloom_config_wire_tests)
 
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)

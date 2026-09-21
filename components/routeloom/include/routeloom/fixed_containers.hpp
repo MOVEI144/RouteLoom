@@ -38,6 +38,15 @@ class FixedQueue {
     return true;
   }
 
+  // Drops the head without moving it — for callers that only need the slot
+  // back (a moved-out TxItem copy would just be discarded anyway).
+  bool drop() noexcept {
+    if (size_ == 0) return false;
+    head_ = (head_ + 1) % Capacity;
+    --size_;
+    return true;
+  }
+
   T* front() noexcept { return size_ == 0 ? nullptr : &items_[head_]; }
   const T* front() const noexcept { return size_ == 0 ? nullptr : &items_[head_]; }
   bool empty() const noexcept { return size_ == 0; }
@@ -105,6 +114,11 @@ class FixedPool {
     return false;
   }
 
+  // Contract: `fn` must not mutate THIS pool — release()/clear() of the
+  // iterated element is safe only by statement ordering (nothing may touch
+  // it afterwards), and allocate() can make a later index revisit a slot
+  // mid-iteration. Collect the targets during for_each, then mutate after
+  // it returns. Mutating a DIFFERENT pool is fine.
   template <typename Fn>
   void for_each(Fn fn) noexcept {
     for (std::size_t i = 0; i < Capacity; ++i) {
@@ -135,6 +149,26 @@ class FixedPool {
   }
 
   constexpr std::size_t capacity() const noexcept { return Capacity; }
+
+  // Stable slot index for compact cross-record links (e.g. a dedup record
+  // pointing at its pending slot with a u8 instead of an 8-byte pointer).
+  // Returns Capacity when the pointer is not a member of this pool.
+  std::size_t index_of(const T* item) const noexcept {
+    for (std::size_t i = 0; i < Capacity; ++i) {
+      if (&items_[i] == item) return i;
+    }
+    return Capacity;
+  }
+
+  T* at(std::size_t index) noexcept {
+    if (index >= Capacity || !used_[index]) return nullptr;
+    return &items_[index];
+  }
+
+  const T* at(std::size_t index) const noexcept {
+    if (index >= Capacity || !used_[index]) return nullptr;
+    return &items_[index];
+  }
 
  private:
   // Reconstruct instead of assigning T{} so the pool also supports entries

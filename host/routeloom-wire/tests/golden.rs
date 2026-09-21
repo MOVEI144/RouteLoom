@@ -216,6 +216,13 @@ fn valid_vectors_encode_and_decode_byte_exact() {
             let forwarder = u64_field(&fields, "fwd_local_node");
             let forward_next = u64_field(&fields, "fwd_next_hop");
             let budget = u64_field(&fields, "fwd_remaining_deadline_ms") as u32;
+            // The forwarder stamps its OWN link epoch; vectors that predate
+            // the field share the origin epoch, so fall back to link_epoch.
+            let forward_epoch = if fields.contains_key("fwd_link_epoch") {
+                u64_field(&fields, "fwd_link_epoch") as u16
+            } else {
+                u64_field(&fields, "link_epoch") as u16
+            };
             let expected_fwd = hex_decode(fwd_hex);
 
             let mut forward_security = TestSecurity::new();
@@ -224,6 +231,7 @@ fn valid_vectors_encode_and_decode_byte_exact() {
                 &opened,
                 forwarder,
                 forward_next,
+                forward_epoch,
                 budget,
                 &mut forward_security,
                 &mut forwarded,

@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "routeloom/congestion.hpp"
+#include "routeloom/telemetry.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
@@ -28,6 +29,15 @@ struct NodeConfig {
   std::uint32_t route_lifetime_ms{15000};
   std::uint32_t hop_accept_timeout_ms{60};
   std::uint32_t callback_watchdog_ms{1000};
+  // Per-boot incarnation stamped on this node's telemetry observations
+  // (02-telemetry §2.4). Distinct from message_session; 0 means unset —
+  // observations then carry observer_boot 0 and hosts must treat boot
+  // attribution as unknown.
+  std::uint64_t boot_incarnation{0};
+  // Transit eligibility starts enabled; the Owner drives set_relay_enabled
+  // for runtime config/drain (01-forwarding §policy). Remote telemetry
+  // answering stays opt-in via set_telemetry_remote.
+ 
   std::uint8_t max_link_attempts{2};
   std::uint8_t max_end_to_end_rounds{3};
 };
@@ -80,6 +90,73 @@ class AutonomyFrameSink {
     (void)peer;
     (void)now_ms;
   }
+};
+
+// Service=21 terminal endpoint (docs/design/scope-gateway-config/
+// 03-explicit-gateway.md): the GatewayDelivery component installs one to
+// receive end-verified Service payloads at this node and completion notices
+// for Service jobs it queued through send_service/resend_service. Service
+// traffic never enters the DATA path — no on_message, no END_RECEIPT, no
+// Delivery records; completion is the component's own evidence contract.
+class GatewayServiceSink {
+ public:
+  virtual ~GatewayServiceSink() = default;
+  // Terminal Service frame for this node: link + end verified, same-round
+  // duplicates already suppressed and the hop ACK already queued.
+  virtual void on_service_payload(NodeId peer, const wire::PlainFrame& frame,
+                                  MonotonicMs now_ms) noexcept = 0;
+  // First authenticated HOP_ACCEPT (hop_accepted=true) or terminal job
+  // failure (false + `reason`) for a send_service/resend_service job,
+  // correlated by the caller-supplied MessageId.
+  virtual void on_service_job_done(const MessageId& id, bool hop_accepted,
+                                   const char* reason, MonotonicMs now_ms) noexcept = 0;
+  // Monotonic tick from MeshNode::poll for the component's bounded retries.
+  virtual void poll(MonotonicMs now_ms) noexcept = 0;
+};
+
+// Routed end-protected config endpoint (docs/design/scope-gateway-config/
+// 04-remote-config.md §5, 05-wire-api.md §5.5): the ConfigTarget/ConfigGateway
+// components install one to receive end-verified Control (22) and
+// ConfigPermit-kind object (ControlObject 49 / ObjectChunk 50 / ObjectAck 51)
+// payloads at this node, plus completion notices for typed jobs queued
+// through send_typed. These types ALSO carry the link-scoped autonomous
+// migration objects — that path is unchanged (AutonomyFrameSink, never
+// end-protected, destination==self). Only the END-PROTECTED forms route here:
+// the node layer has link-authenticated, deduplicated and end-opened the
+// frame, so `frame` is verified plaintext — but the permit inside still
+// faces the real ConfigAuthorityVerifier; transport never grants authority.
+class ConfigEndpointSink {
+ public:
+  virtual ~ConfigEndpointSink() = default;
+  // Terminal end-verified config frame for this node. `frame.header.type`
+  // distinguishes Control (challenge/status) from the object types
+  // (manifest/chunk/ack); `peer` is the authenticated previous hop and
+  // `frame.header.origin` the end-authenticated origin to reply to.
+  virtual void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
+                               MonotonicMs now_ms) noexcept = 0;
+  // First authenticated HOP_ACCEPT (hop_accepted=true) or terminal job
+  // failure (false + `reason`) for a send_typed job, correlated by the
+  // caller-supplied MessageId.
+  virtual void on_config_job_done(const MessageId& id, bool hop_accepted,
+                                  const char* reason, MonotonicMs now_ms) noexcept = 0;
+  // Monotonic tick from MeshNode::poll for the component's bounded retries.
+  virtual void poll(MonotonicMs now_ms) noexcept = 0;
+  // CapabilitiesReply permit_profiles bitmap (04 §capabilities): bits for
+  // configured AND ready verifier profiles only — 0 means the sink accepts
+  // no permits or its verifier is unprovisioned.
+  virtual std::uint32_t permit_profile_bits() const noexcept { return 0; }
+};
+
+// Terminal sink for end-protected Diagnostic (48) bodies (02-telemetry
+// §4.2): TelemetrySnapshot and DiagnosticReject subtypes addressed to this
+// node arrive here already subtype-validated and end-verified. The sink
+// owns request_id correlation; a node without a sink drops with an honest
+// diagnostic, never a fabricated answer.
+class DiagnosticSink {
+ public:
+  virtual ~DiagnosticSink() = default;
+  virtual void on_diagnostic_body(NodeId observer, ByteView body,
+                                  MonotonicMs now_ms) noexcept = 0;
 };
 
 // Pause contract (01-integration.md §3.3): narrower than blanket draining.
@@ -152,8 +229,132 @@ class MeshNode {
   void poll(MonotonicMs now_ms) noexcept;
   void on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
                         MonotonicMs now_ms) noexcept;
+  // M1 telemetry entry point (m1-completion/02-telemetry.md §2.3): same
+  // receive path, plus bounded RF observation. The V1 overload forwards with
+  // InjectedTest provenance — only the production adapter supplies
+  // LocalDriver evidence.
+  void on_radio_receive(NodeId peer, ByteView frame,
+                        const RadioRxMetadataV2& metadata,
+                        MonotonicMs now_ms) noexcept;
+  // Completion observation for one submitted TX attempt (02 §2.2/§2.3). The
+  // Owner calls this exactly once per submission, including unknown outcomes;
+  // callback-absent fencing is the Owner's job — this records what arrived.
+  void note_radio_tx(const RadioTxObservation& observation,
+                     MonotonicMs now_ms) noexcept;
+  // Submission identity the runtime froze for `token` (02 §2.3): the node
+  // stamps this key onto the job at dispatch so submit/complete accounting
+  // share one immutable identity — never re-guessed from a live summary.
+  void note_tx_submit_identity(const std::uint64_t token,
+                               const ObservationKey& key) noexcept {
+    submit_identity_.token = token;
+    submit_identity_.key = key;
+    submit_identity_.valid = true;
+  }
+  // Read-only telemetry surfaces (02 §2.4/§2.7). A missing peer is nullptr,
+  // not a zero record.
+  const PeerTelemetrySummary* telemetry_peer(NodeId peer) const noexcept;
+  const ObservationBucket* telemetry_bucket(const ObservationKey& key) const noexcept;
+  // Identity invalidation from the runtime: an RX event queued before a
+  // rebind/switch must retire the peer's stale summary, not refresh it.
+  void note_peer_stale(NodeId peer) noexcept {
+    telemetry_peers_.mark_stale(peer);
+  }
+  std::uint64_t telemetry_event_drops() const noexcept { return telemetry_event_drops_; }
   // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
   void set_autonomy_sink(AutonomyFrameSink* sink) noexcept { autonomy_sink_ = sink; }
+  // Install/clear the Service=21 endpoint (GatewayDelivery wiring, nullptr
+  // disables). With no sink, inbound Service frames are still dedup'd/
+  // hop-ACKed/forwarded but terminate as SERVICE_NO_ENDPOINT — the origin's
+  // retries expire into an honest timeout, never a DATA-style success.
+  void set_gateway_sink(GatewayServiceSink* sink) noexcept { gateway_sink_ = sink; }
+  // Owner-side relay gate (01-forwarding §policy): runtime config and drain
+  // requests write this; effective transit permission additionally requires
+  // a live binding context. Reads expose configured vs effective separately.
+  // Disabling withdraws our transit advertisements immediately (infinity
+  // update on the next maintenance tick is too late — neighbors keep
+  // sending us work we will refuse). Accepted in-flight work still drains
+  // on its own deadlines.
+  void set_relay_enabled(bool enabled) noexcept;
+  bool relay_enabled() const noexcept { return relay_enabled_; }
+  // Effective transit permission for NEW admissions. Accepted transit
+  // already queued keeps its original deadline — this only gates new work.
+  bool transit_permitted() const noexcept { return started_ && relay_enabled_; }
+  // Accepted transit work still draining (01 §1.6): live scheduler jobs,
+  // the physically in-flight forward and hop-accept-awaiting transit —
+  // retained dedup evidence records are NOT work and never counted.
+  std::size_t transit_in_flight() const noexcept {
+    std::size_t n = scheduler_.count_owner(JobOwner::Transit);
+    if (physical_.active && physical_.job.owner == JobOwner::Transit) ++n;
+    awaiting_hop_.for_each([&](const AwaitingHop& hop) {
+      if (hop.job.owner == JobOwner::Transit) ++n;
+    });
+    return n;
+  }
+  // Remote Diagnostic (48) telemetry queries are opt-in — answering is
+  // disabled unless the owner enables it (02 §4.2 note).
+  void set_telemetry_remote(bool enabled) noexcept { telemetry_remote_ = enabled; }
+  bool telemetry_remote() const noexcept { return telemetry_remote_; }
+  // Queue an end-protected Service=21 payload for `destination` with a
+  // bounded hop-accept exchange per hop. send_service allocates a fresh
+  // logical MessageId from the node's own sequence space (outcomes the
+  // gateway emits are likewise new MessageKeys); resend_service re-queues an
+  // existing id for the next E2E round. Completion is reported through the
+  // sink's on_service_job_done — never through DeliveryResult.
+  Status send_service(NodeId destination, ByteView payload, std::uint32_t lifetime_ms,
+                      MonotonicMs now_ms, MessageId& id) noexcept;
+  Status resend_service(const MessageId& id, NodeId destination, ByteView payload,
+                        std::uint8_t round, std::uint32_t lifetime_ms,
+                        MonotonicMs now_ms) noexcept;
+  // Priority-tagged variant for endpoint control traffic: the gateway
+  // component emits its outcomes (Descriptor/Receipt/Pending/Reject) as
+  // receipt-class Management traffic while Query/Submit stay Normal.
+  Status send_service(NodeId destination, ByteView payload, std::uint32_t lifetime_ms,
+                      Priority priority, MonotonicMs now_ms, MessageId& id) noexcept;
+  // Install/clear the routed config endpoint (ConfigTarget on a config node,
+  // ConfigGateway on a bridge; nullptr disables). With no sink, inbound
+  // end-protected config frames are still dedup'd/hop-ACKed/forwarded but
+  // terminate as CONFIG_NO_ENDPOINT — retries expire into an honest timeout.
+  void set_config_sink(ConfigEndpointSink* sink) noexcept { config_sink_ = sink; }
+  // Install/clear the end-protected Diagnostic (48) terminal sink — the
+  // surface remote TelemetrySnapshot/Reject bodies arrive on (02 §4.2).
+  void set_diagnostic_sink(DiagnosticSink* sink) noexcept { diagnostic_sink_ = sink; }
+  // Issue an end-protected TelemetryQuery toward `observer` over the routed
+  // lane (02 §4.2). Returns the wire submission status; the request's own
+  // deadline bounds the exchange.
+  Status send_telemetry_query(NodeId observer, const TelemetryQuery& query,
+                              MonotonicMs now_ms) noexcept;
+  // Local-only capability advertisement (04 §capabilities): what this node
+  // is wired and currently permitted to do — never a claim about a remote.
+  // `echo_nonce` is the nonce from the CapabilitiesQuery being answered
+  // (the USB local path supplies the host's query nonce verbatim).
+  CapabilitiesReply build_capabilities_reply(
+      const std::array<std::uint8_t, kCapabilitiesNonceSize>& echo_nonce)
+      const noexcept;
+  // Send a link-only CapabilitiesQuery (subtype 1, hop-1) to an admitted
+  // peer. One outstanding query per peer (04 §capabilities); the caller's
+  // nonce must be unpredictable/nonzero. Returns error when the peer already
+  // has an outstanding probe or the table is full.
+  Status send_capabilities_query(
+      NodeId peer, const std::array<std::uint8_t, kCapabilitiesNonceSize>& nonce,
+      MonotonicMs now_ms) noexcept;
+  // Local snapshot builder shared by the remote diagnostic handler and the
+  // USB diagnostic request: fills `out` or reports the reject reason —
+  // never fabricates a zeroed record for a missing/stale peer.
+  Status build_telemetry_snapshot(const TelemetryQuery& query,
+                                  MonotonicMs now_ms, TelemetrySnapshot& out,
+                                  DiagnosticRejectReason& reason) noexcept;
+  // Queue one end-protected routed frame of `type` (Control 22 or the
+  // ConfigPermit object types 49/50/51) for `destination`, with the same
+  // bounded hop-accept-per-hop exchange send_service uses. Completion is
+  // reported through the config sink's on_config_job_done. Service=21 stays
+  // on send_service — this lane is for the config component's own types.
+  Status send_typed(FrameType type, NodeId destination, ByteView payload,
+                    std::uint32_t lifetime_ms, MonotonicMs now_ms,
+                    MessageId& id) noexcept;
+  // Free TX-pool slots: the Service endpoint needs this to make the
+  // atomic admission reservation (pending + dedup + reply budget) the
+  // contract demands before accepting work (03 §3.4).
+  std::size_t tx_free_slots() const noexcept { return scheduler_.free_slots(); }
   void on_radio_tx_result(std::uint64_t token, bool success,
                           MonotonicMs now_ms) noexcept;
 
@@ -197,6 +398,9 @@ class MeshNode {
   // capability negotiation lands, BUSY replies are emitted only to peers
   // marked here or proven by a valid received BUSY (03 §5, scenario D4-09).
   void set_peer_busy_capable(NodeId peer, bool capable) noexcept;
+  // Whether a live (unexpired) capability grant marks this peer as
+  // Busy(20)-capable right now — read-only mirror of the gate at 03 §5.
+  bool peer_busy_capable(NodeId peer, MonotonicMs now_ms) const noexcept;
   // Effective link cost currently fed to routing for `peer` (nominal base
   // adjusted by the measured exchange ratio and our egress queue penalty,
   // 03 §6). kInfiniteRouteMetric when the peer is unknown.
@@ -329,6 +533,14 @@ class MeshNode {
     std::uint8_t tx_window{kPeerWindowInitial};
     std::uint8_t window_accepts{0};
     bool busy_capable{false};  // peer proved/configured for Busy(20) feedback
+    // Granted-capability state from a nonce-bound CapabilitiesReply: the
+    // grant expires at cap_valid_until_ms under the peer's boot identity —
+    // a reply can never install a permanent capability (04 §capabilities).
+    MonotonicMs cap_valid_until_ms{0};
+    std::uint64_t cap_node_boot{0};
+    // Renewal pacing: last completed/granted capability exchange; a new
+    // query inside kCapQueryRenewalMs is refused.
+    MonotonicMs last_cap_exchange_ms{0};
     // Highest feedback sequence accepted from this peer; stale/replayed
     // BUSY payloads are detected against it (FeedbackSequence ordering tag).
     // feedback_seen is separate so a first seq equal to the sentinel value
@@ -386,6 +598,36 @@ class MeshNode {
     MonotonicMs expires_at_ms{0};
     bool delivered{false};
     bool forwarded{false};
+    // Transit correlation (01 §failure evidence): retained ONLY for accepted
+    // transit work — the upstream neighbor that handed us the frame and the
+    // fingerprint of its end-protected bytes, so a post-acceptance failure
+    // can be reported back without ever claiming end-verification.
+    NodeId upstream_peer{kInvalidNodeId};
+    // The downstream neighbor this transit was forwarded to and the frame's
+    // destination — a TransitFailure report is only valid when it arrives
+    // from THIS peer about THIS destination (01 §failure evidence).
+    NodeId downstream_peer{kInvalidNodeId};
+    // The downstream's binding generation captured when the forward was
+    // physically submitted — a report is only valid against the attempt we
+    // actually made (dispatch may retarget the route after admission).
+    BindingGeneration downstream_binding{0};
+    NodeId ref_destination{kInvalidNodeId};
+    std::array<std::uint8_t, 32> fingerprint{};
+    bool has_fingerprint{false};
+    // A transit record that already emitted a TransitFailure: a re-received
+    // duplicate re-emits the retained evidence instead of blindly re-ACKing
+    // a dead job (01 §same-key-after-failure). The retained replay carries
+    // the ORIGINAL claimed reporter/report_id verbatim — a relay may never
+    // re-originate evidence under its own identity.
+    bool failure_reported{false};
+    std::uint8_t reported_phase{0};
+    std::uint8_t reported_reason{0};
+    NodeId reported_reporter{kInvalidNodeId};
+    std::uint32_t reported_id{0};
+    // Replay bounding: a duplicate storm cannot turn one retained failure
+    // into unbounded re-emissions (cap + minimum spacing).
+    std::uint8_t failure_replays{0};
+    MonotonicMs last_replay_ms{0};
   };
 
   struct Delivery {
@@ -403,7 +645,8 @@ class MeshNode {
   };
 
   enum class JobForm : std::uint8_t { Plain, Forwarded };
-  enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit };
+  enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
+                                       GatewayService, Config, Diagnostic };
 
   struct AckKey {
     FrameType accepted_type{FrameType::Data};
@@ -438,6 +681,12 @@ class MeshNode {
     // select loop may revisit the same blocked flow up to kMaxSelectRounds
     // times in one pass.
     bool window_block_counted{false};
+    // Observation identity stamped at physical submission (02 §2.3): the
+    // runtime-frozen binding/radio/channel tuple — submission, hop-accept
+    // and completion accounting share ONE key so counters can never split
+    // across a rebind or channel boundary mid-attempt.
+    ObservationKey obs_key{};
+    bool obs_key_set{false};
   };
 
   // Bounded TX scheduler (03-congestion.md §4): a single fixed pool of TxJob
@@ -472,6 +721,15 @@ class MeshNode {
     bool empty() const noexcept { return used_ == 0; }
     bool full() const noexcept { return used_ >= capacity(); }
     std::size_t size() const noexcept { return used_; }
+    // Live jobs of one owner class — used for honest drain visibility:
+    // queued-but-undispatched work, not retained evidence records.
+    std::size_t count_owner(JobOwner owner) const noexcept {
+      std::size_t n = 0;
+      pool_.for_each([&](const TxJob& job) {
+        if (job.owner == owner) ++n;
+      });
+      return n;
+    }
     static constexpr std::size_t capacity() noexcept { return kTxQueueCapacity; }
     std::size_t free_slots() const noexcept { return capacity() - used_; }
     std::size_t control_depth() const noexcept { return control_.count; }
@@ -632,6 +890,12 @@ class MeshNode {
   Status queue_seqno_request(NodeId peer, NodeId requester, NodeId destination,
                              RouteSequence requested_sequence, std::uint32_t request_id,
                              std::uint8_t ttl, MonotonicMs now_ms) noexcept;
+  // Shared enqueue for send_service/resend_service/send_typed: a Plain
+  // end-protected routed job of `type` owned by `owner`, hop-accept required.
+  Status queue_typed_job(FrameType type, JobOwner owner, const MessageId& id,
+                         NodeId destination, ByteView payload, std::uint8_t round,
+                         std::uint32_t lifetime_ms, Priority priority,
+                         MonotonicMs now_ms) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
@@ -653,11 +917,20 @@ class MeshNode {
   void refresh_neighbor_load(MonotonicMs now_ms) noexcept;
   void refresh_link_cost(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
 
+  void receive_impl(NodeId peer, ByteView frame, const RadioRxMetadataV2* metadata,
+                    MonotonicMs now_ms) noexcept;
+
   // Observation aggregation (03 §3): bounded buckets keyed by the contract
   // tuple. find-or-allocate returns nullptr only when the pool is exhausted.
-  ObservationBucket* observation_bucket(std::uint8_t length_class,
+  ObservationBucket* observation_bucket(const ObservationKey& key,
                                         MonotonicMs now_ms) noexcept;
-  void obs_tx_submitted(const TxJob& job, MonotonicMs now_ms) noexcept;
+  // Convenience: egress bucket with portable-core placeholder generations
+  // (0); the radio Owner keys real epochs via note_radio_tx (03 §3).
+  ObservationBucket* observation_bucket(NodeId peer, std::uint8_t length_class,
+                                        MonotonicMs now_ms) noexcept;
+  void obs_tx_submitted(TxJob& job, std::uint64_t token,
+                        MonotonicMs now_ms) noexcept;
+  ObservationBucket* job_bucket(const TxJob& job, MonotonicMs now_ms) noexcept;
   void obs_driver_service(const TxJob& job, std::uint32_t service_us,
                           MonotonicMs now_ms) noexcept;
   void obs_hop_result(const TxJob& job, bool accepted, MonotonicMs now_ms) noexcept;
@@ -670,6 +943,51 @@ class MeshNode {
                          MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
+  // End-protected routed traffic (Service 21, Control 22 and the
+  // ConfigPermit object types 49/50/51): transit forwards untouched (dedup
+  // + forward + hop ACK keyed on the frame's own type), terminal hands the
+  // end-verified payload to the matching sink (Service -> gateway sink,
+  // the config types -> config sink). Never enters the DATA path and never
+  // emits END_RECEIPT. The link-scoped autonomy forms of 49/50/51 keep
+  // their separate destination==self path and never reach here.
+  void handle_routed(const wire::LinkOpenedFrame& frame, NodeId peer,
+                     MonotonicMs now_ms) noexcept;
+  // End-protected Diagnostic (48) terminal handling (02-telemetry §4.2):
+  // subtype dispatch on the verified body — TelemetryQuery answers with a
+  // bounded snapshot or an honest DiagnosticReject; Snapshot/Reject surface
+  // to the diagnostic sink.
+  void handle_diagnostic(const wire::PlainFrame& frame, NodeId peer,
+                         MonotonicMs now_ms) noexcept;
+  // Link-only Diagnostic subtypes addressed to this node (Capabilities,
+  // TransitFailure): surfaced to the diagnostic sink; never answered on a
+  // new route.
+  void handle_diagnostic_link(NodeId peer, const wire::LinkOpenedFrame& frame,
+                              MonotonicMs now_ms) noexcept;
+  // Emit one bounded link-only TransitFailure toward `upstream` (hop-1,
+  // BestEffort, never hop-ACKed — a report must not spawn reports).
+  void emit_transit_failure(NodeId upstream, const TransitFailure& report,
+                            MonotonicMs now_ms) noexcept;
+  // fail_job hook for JobOwner::Transit: find the retained transit record
+  // for job.ack and report the post-acceptance failure to its upstream.
+  void report_transit_failure(const TxJob& job, const char* reason,
+                              MonotonicMs now_ms) noexcept;
+  // Map a local failure reason onto the wire reason space; phase is 1 for a
+  // proven local failure, 2 when the attempt outcome cannot be proven.
+  static void map_transit_reason(const char* reason, TransitFailurePhase& phase,
+                                 TransitFailureReason& out) noexcept;
+  // Refused-before-acceptance report (relay gate): no retained record, the
+  // fingerprint is computed from the received frame on the spot.
+  void emit_transit_refusal(const wire::LinkOpenedFrame& frame,
+                            TransitFailureReason reason,
+                            MonotonicMs now_ms) noexcept;
+  void handle_transit_failure_report(NodeId peer,
+                                     const TransitFailure& report,
+                                     MonotonicMs now_ms) noexcept;
+  void replay_retained_failure(DedupEntry& duplicate, FrameType type,
+                               MonotonicMs now_ms) noexcept;
+  Status queue_diagnostic_reply(NodeId destination, ByteView body,
+                                std::uint32_t lifetime_ms,
+                                MonotonicMs now_ms) noexcept;
   void handle_busy(const wire::LinkOpenedFrame& frame, NodeId peer,
                    MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
@@ -707,6 +1025,66 @@ class MeshNode {
   NodeObserver& observer_;
   RouteTable routes_{};
   AutonomyFrameSink* autonomy_sink_{nullptr};
+  GatewayServiceSink* gateway_sink_{nullptr};
+  ConfigEndpointSink* config_sink_{nullptr};
+  DiagnosticSink* diagnostic_sink_{nullptr};
+  // Seen-table for inbound TransitFailure reports (dedup on
+  // reference+phase+reason — a different report_id must not restart work).
+  struct TransitFailureSeen {
+    MessageKey key{};
+    FrameType type{FrameType::Data};
+    std::uint8_t round{0};
+    std::uint8_t phase{0};
+    std::uint8_t reason{0};
+    MonotonicMs expires_at_ms{0};
+  };
+  static constexpr std::size_t kTransitFailureSeenCapacity = 8;
+  std::array<TransitFailureSeen, kTransitFailureSeenCapacity>
+      transit_failure_seen_{};
+  // Per-boot monotone report id; nonzero, wrap suppresses new reports.
+  std::uint32_t next_failure_report_id_{1};
+  // Diagnostic intake/emission budgets (04 §capabilities, telemetry §2.7,
+  // forwarding §1.4): bounded per-peer pacing for capability replies,
+  // routed telemetry queries and emitted TransitFailure reports — a peer
+  // cannot keep the radio busy with diagnostic traffic.
+  struct DiagBudget {
+    NodeId peer{kInvalidNodeId};
+    MonotonicMs window_start_ms{0};
+    std::uint8_t window_used{0};
+    // Inbound TransitFailure intake bound (kTransitFailurePerWindow per
+    // 1 s window shares window_start_ms with window_used).
+    std::uint8_t failure_window_used{0};
+    MonotonicMs last_cap_reply_ms{0};
+    MonotonicMs last_query_ms{0};
+  };
+  static constexpr std::size_t kDiagBudgetCapacity = 8;
+  static constexpr std::uint8_t kTransitFailurePerWindow = 2;  // per 1 s/peer
+  static constexpr std::uint32_t kDiagBudgetWindowMs = 1000;
+  static constexpr std::uint32_t kCapReplyMinIntervalMs = 1000;
+  static constexpr std::uint32_t kDiagQueryMinIntervalMs = 200;
+  std::array<DiagBudget, kDiagBudgetCapacity> diag_budget_{};
+  DiagBudget* diag_budget(NodeId peer, MonotonicMs now_ms) noexcept;
+  // Outstanding capability probes (04 §capabilities): a reply is accepted
+  // only when its echo_nonce matches a live entry for the answering peer.
+  struct PendingCapQuery {
+    NodeId peer{kInvalidNodeId};
+    std::array<std::uint8_t, kCapabilitiesNonceSize> nonce{};
+    MonotonicMs expires_at_ms{0};
+    // The peer's binding generation when the query was emitted — a reply
+    // arriving after a rebind is stale evidence and never grants
+    // capability (04 §capabilities).
+    BindingGeneration binding{0};
+  };
+  static constexpr std::size_t kPendingCapCapacity = 8;
+  static constexpr std::uint32_t kCapQueryLifetimeMs = 15000;
+  // Renewal bound (04 §capabilities): a completed/expired probe may not be
+  // restarted for the same peer inside this interval.
+  static constexpr std::uint32_t kCapQueryRenewalMs = 5000;
+  static constexpr std::uint8_t kMaxFailureReplays = 3;
+  static constexpr std::uint32_t kFailureReplayMinIntervalMs = 1000;
+  std::array<PendingCapQuery, kPendingCapCapacity> pending_caps_{};
+  bool relay_enabled_{true};
+  bool telemetry_remote_{false};
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};
   FixedPool<Delivery, kDeliveryCapacity> deliveries_{};
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};
@@ -715,6 +1093,13 @@ class MeshNode {
   TxScheduler scheduler_{};
   FixedPool<AwaitingHop, kAwaitingHopCapacity> awaiting_hop_{};
   PhysicalInflight physical_{};
+  // Single-slot submit identity handoff from the runtime (one physical
+  // send in flight): obs_tx_submitted consumes it for the matching token.
+  struct SubmitIdentity {
+    std::uint64_t token{0};
+    ObservationKey key{};
+    bool valid{false};
+  } submit_identity_{};
   std::uint64_t next_physical_token_{1};
   std::uint64_t next_message_sequence_{1};
   std::uint64_t next_control_sequence_{1};
@@ -735,6 +1120,18 @@ class MeshNode {
   // Bounded observation buckets (03 §3 groundwork for P3).
   static constexpr std::size_t kObservationCapacity = 8;
   FixedPool<ObservationBucket, kObservationCapacity> observations_{};
+  // M1 telemetry (m1-completion/02-telemetry.md): per-peer RF summaries and
+  // the count of frames that never reached telemetry because they failed
+  // link authentication or identity checks — telemetry never credits
+  // unauthenticated bytes to a peer.
+  PeerTelemetryTable telemetry_peers_{};
+  std::uint64_t telemetry_event_drops_{0};
+  // Transit refusals under a disabled/draining relay gate (01 §policy) —
+  // counted so relay-off is evidence, not a silent black hole.
+  std::uint64_t transit_refused_{0};
+  // Driver-queue age of the frame currently inside receive_impl — debited
+  // from the forwarding budget by queue_forward (01 §lifetime).
+  std::uint32_t rx_age_ms_{0};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.
   MonotonicMs last_clock_ms_{0};

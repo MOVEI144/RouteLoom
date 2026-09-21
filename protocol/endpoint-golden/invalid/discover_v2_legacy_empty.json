@@ -1,0 +1,8 @@
+{
+  "codec": "scope_discover",
+  "encoded_hex": "",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "discover_v2_legacy_empty",
+  "note": "legacy empty discover body must not decode as v2"
+}

@@ -144,6 +144,9 @@ def main():
         ("control_object_channel_plan", "control_object", dict(
             subtype=1, kind=1, total_len=512, object_hash_hex=obj_hash.hex()),
          control_object(1, 1, 0, 512, obj_hash)),
+        ("control_object_config_permit", "control_object", dict(
+            subtype=1, kind=3, total_len=774, object_hash_hex=obj_hash.hex()),
+         control_object(1, 3, 0, 774, obj_hash)),
         ("object_chunk_first", "object_chunk", dict(
             subtype=1, object_hash_hex=obj_hash.hex(), offset=0,
             data_hex=bytes(range(32)).hex()),
@@ -266,6 +269,9 @@ def main():
     bad("control_object_oversize", "control_object",
         control_object(1, 1, 0, 3000, obj_hash),
         "total_len exceeds the 2048-byte object limit")
+    bad("control_object_unknown_kind", "control_object",
+        control_object(1, 4, 0, 512, obj_hash),
+        "object kind 4 is unassigned")
 
     print(f"wrote {len(list((OUT / 'valid').glob('*.json')))} valid and "
           f"{len(list((OUT / 'invalid').glob('*.json')))} invalid vectors to {OUT}")

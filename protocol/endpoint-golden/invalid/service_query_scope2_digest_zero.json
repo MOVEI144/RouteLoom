@@ -1,0 +1,8 @@
+{
+  "codec": "service_query",
+  "encoded_hex": "01010200000102030405060708090a0b0c0d0e0f0000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "service_query_scope2_digest_zero",
+  "note": "scope 2 forbids the any-host zero digest"
+}

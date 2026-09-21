@@ -1,0 +1,13 @@
+{
+  "codec": "scope_offer",
+  "cookie_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+  "density": 1,
+  "encoded_hex": "02010000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5101112131415161718191a1b1c1d1e1f0101000000000007685e20b006b97edba6015b3aac5ea207",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "generation": 7,
+  "name": "scope_offer_v2",
+  "responder_nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "scope_class": 1,
+  "tag_hex": "685e20b006b97edba6015b3aac5ea207"
+}

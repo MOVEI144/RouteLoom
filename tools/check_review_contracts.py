@@ -117,6 +117,9 @@ def validate(root: Path) -> dict:
             "host_cli",
             "tui",
             "deep_sleep_resume",
+            "discovery_scope",
+            "explicit_gateway",
+            "small_remote_config",
         }
         build_only_features = {
             "espnow_lr250_adapter",
@@ -169,9 +172,23 @@ def validate(root: Path) -> dict:
                     "mesh_ota",
                     "service_provider_failover",
                     "lora_tx",
+                    "secure_unicast",
+                }
+            ),
+        )
+        test(
+            "scope_gateway_config_implemented_experimental",
+            all(
+                feature_map[name]["implemented"] is True
+                and feature_map[name]["host_tested"] is True
+                and feature_map[name]["build_tested"] is True
+                and feature_map[name]["hardware_tested"] is False
+                and feature_map[name]["qualified"] is False
+                and feature_map[name]["default_enabled"] is False
+                for name in {
+                    "discovery_scope",
                     "explicit_gateway",
                     "small_remote_config",
-                    "secure_unicast",
                 }
             ),
         )

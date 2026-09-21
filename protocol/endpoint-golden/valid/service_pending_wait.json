@@ -1,0 +1,16 @@
+{
+  "codec": "service_outcome",
+  "encoded_hex": "010502003131313131313131313131313131313100000000000000090000000000000022000000070000000000000063000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00010000",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "gateway_boot": 9,
+  "name": "service_pending_wait",
+  "reason": 1,
+  "ref_origin": 34,
+  "ref_sequence": 99,
+  "ref_session": 7,
+  "request_digest_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "scope": 2,
+  "subtype": 5,
+  "token_hex": "31313131313131313131313131313131"
+}

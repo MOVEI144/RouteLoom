@@ -111,18 +111,78 @@ enum class ObservationDirection : std::uint8_t {
   Ingress = 1,
 };
 
+enum class ObservationProvenance : std::uint8_t {
+  InjectedTest = 0,
+  LocalDriver = 1,
+  AuthenticatedRemoteReport = 2,
+};
+
+// V2 is deliberately separate from the legacy {rssi}-only metadata: legacy
+// callers keep compiling, but do not acquire invented timestamps, validity
+// or generations. The Owner captures these values in the callback and
+// rechecks the identity after link authentication before passing them to
+// the telemetry primitives (02-telemetry §2.3).
+struct RadioRxMetadataV2 {
+  std::uint64_t received_us{0};
+  BindingGeneration binding_generation{};
+  RadioGeneration radio_generation{};
+  ChannelEpoch channel_epoch{};
+  std::int8_t rssi_dbm{0};
+  bool rssi_valid{false};
+  std::uint8_t channel{0};
+  bool channel_valid{false};
+  ObservationProvenance provenance{ObservationProvenance::LocalDriver};
+  // Runtime revalidation result (02 §2.2): false when the captured
+  // binding/radio/channel generations no longer match the live state —
+  // the frame still dispatches (it is link-authenticated), but its
+  // metadata is stale evidence that must not refresh telemetry or
+  // connectivity oracles.
+  bool identity_current{true};
+};
+static_assert(sizeof(RadioRxMetadataV2) <= 32, "bounded RX metadata");
+
+// One submitted TX attempt's completion evidence (02-telemetry §2.3). The
+// Owner stamps submitted_us at driver acceptance and completed_us in the
+// callback; generations are copied from the Owner's pending record so a
+// stale callback can never be attributed to a newer radio/channel identity.
+enum class RadioTxOutcome : std::uint8_t {
+  Success = 0,   // driver reported TX_OK — MAC-level only, never hop acceptance
+  Failure = 1,   // driver reported failure
+  Unknown = 2,   // callback watchdog expired / fenced / indeterminate
+};
+
+struct RadioTxObservation {
+  NodeId peer{kInvalidNodeId};
+  BindingGeneration binding_generation{};
+  RadioGeneration radio_generation{};
+  ChannelEpoch channel_epoch{};
+  std::uint64_t submitted_us{0};
+  std::uint64_t completed_us{0};
+  std::uint8_t frame_length_class{0};
+  RadioTxOutcome outcome{RadioTxOutcome::Unknown};
+  // Where this observation came from — only a real TX-complete callback may
+  // claim LocalDriver; submitted-side bookkeeping and tests must not be
+  // relabelled as driver evidence (02-telemetry §provenance).
+  ObservationProvenance provenance{ObservationProvenance::InjectedTest};
+};
+static_assert(sizeof(RadioTxObservation) <= 64, "bounded TX observation");
+
+constexpr std::size_t kObservationBucketCapacity = 8;
+
 struct ObservationKey {
   BindingGeneration binding{};
   ObservationDirection direction{ObservationDirection::Egress};
   RadioGeneration radio{};
   ChannelEpoch channel{};
   std::uint8_t frame_length_class{0};
+  // Appended so the legacy five-field aggregate initializer remains valid.
+  NodeId peer{kInvalidNodeId};
 
   friend constexpr bool operator==(const ObservationKey& a,
                                    const ObservationKey& b) noexcept {
     return a.binding == b.binding && a.direction == b.direction &&
            a.radio == b.radio && a.channel == b.channel &&
-           a.frame_length_class == b.frame_length_class;
+           a.frame_length_class == b.frame_length_class && a.peer == b.peer;
   }
   friend constexpr bool operator!=(const ObservationKey& a,
                                    const ObservationKey& b) noexcept {
@@ -144,6 +204,25 @@ constexpr void ewma_add(std::uint32_t& ewma, const std::uint32_t sample,
     ewma -= (ewma - sample) / 8;
   }
 }
+
+// Bounded current/previous telemetry evidence, separate from lifetime totals.
+// Source bits are internal provenance bits, not wire validity bits. A mixed
+// source window cannot provide a positive metric input.
+struct ObservationWindow {
+  MonotonicMs first_sample_ms{0};
+  MonotonicMs last_sample_ms{0};
+  std::uint32_t tx_submitted{0};
+  std::uint32_t hop_accepts{0};
+  std::uint32_t queue_us_ewma{0};
+  std::uint32_t driver_us_ewma{0};
+  std::uint32_t hop_rtt_us_ewma{0};
+  std::uint32_t queue_samples{0};
+  std::uint32_t driver_samples{0};
+  std::uint32_t hop_rtt_samples{0};
+  std::uint8_t sources{0};
+  bool present{false};
+  bool incomplete{false};
+};
 
 // Per-key aggregate. EWMA uses alpha = 1/8; counters never decrease.
 // BUSY deferrals, RF-loss retries and callback-uncertain results are kept as
@@ -169,7 +248,40 @@ struct ObservationBucket {
   std::uint64_t indeterminate{0};      // deliveries with unknown outcome
   MonotonicMs window_start_ms{0};
   MonotonicMs last_update_ms{0};
+
+  // D1a uses tx_submitted/hop_accepted/unknown_results/busy_deferrals above
+  // as lifetime totals (clamped to the wire's u32 range). rf_failures remains
+  // the legacy combined counter; it cannot supply either of these two fields.
+  std::uint32_t tx_mac_success{0};
+  std::uint32_t tx_mac_fail{0};
+  std::uint32_t sdk_retries{0};
+  std::uint32_t hop_timeouts{0};
+  std::uint32_t event_drops{0};
+  std::uint32_t saturation_mask{0};
+  std::uint64_t observer_boot{0};
+  ObservationWindow current{};
+  ObservationWindow previous{};
+  std::uint32_t pending_completions{0};
+  std::uint16_t pins{0};
+  bool stale{false};
+
+  bool positive_metric_input(MonotonicMs now_ms) const noexcept;
 };
+
+// 02-telemetry.md §2.4-§2.5: only a complete, fresh window whose samples all
+// came from the local driver may raise a route metric. Injected, remote,
+// mixed-source, incomplete or stale windows can never improve a link's
+// apparent cost — they can still withdraw a route through failure handling.
+inline bool ObservationBucket::positive_metric_input(
+    const MonotonicMs now_ms) const noexcept {
+  constexpr std::uint8_t kLocalDriverBit =
+      static_cast<std::uint8_t>(1u << static_cast<unsigned>(
+                                  ObservationProvenance::LocalDriver));
+  if (!current.present || current.incomplete || stale) return false;
+  if (current.sources != kLocalDriverBit) return false;
+  if (current.last_sample_ms > now_ms) return false;  // clock uncertainty
+  return now_ms - current.last_sample_ms <= kFeedbackTtlMs;
+}
 
 // --- Statistics ---------------------------------------------------------------
 

@@ -4,17 +4,18 @@
 
 ## 実装済みの縦切り
 
-- `components/routeloom`：C++17 portable core、C ABI、凍結済みWire v1 codec（`protocol/golden`のC++／Rust共有vector、test cipher）、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、generation／tombstone／hold-down、bounded seqno、SeqNoRequest、SingleAuthorityの2スロット耐電断操作台帳（CRC-32/ISO-HDLC、hash chain、QUARANTINED回復）、deadline再開規則、portable ReplayGuard、DATA/END_RECEIPTの強制end保護、PowerCoordinator、USB/Serial device bridge（streaming codec、開発session、累積credit、MeshNode統合）。
+- `components/routeloom`：C++17 portable core、C ABI、凍結済みWire v1 codec（`protocol/golden`のC++／Rust共有vector、test cipher）、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、generation／tombstone／hold-down、bounded seqno、SeqNoRequest、SingleAuthorityの2スロット耐電断操作台帳（CRC-32/ISO-HDLC、hash chain、QUARANTINED回復）、deadline再開規則、portable ReplayGuard、DATA/END_RECEIPTの強制end保護、PowerCoordinator、USB/Serial device bridge（streaming codec、開発session、累積credit、MeshNode統合）。**EXPERIMENTAL**（Issue #14/#16/#17、opt-in）：Discovery Scope filter（RLD1 body v2、hint/tag gate、generation rotation、scope dedup、auth-transcript scope_binding、Required-without-bindingは起動拒否で降格なし）、Service21 Explicit Gateway（resolve/token、Submit/Receipt、HOST_RECEIVE_RAM sink、UsbBridge 0x10〜0x13 lane）、RCC1 Small Remote Config（schema/CAS、2-slot ConfigJournal、dev HMAC permit、Control22＋object kind3転送、UsbBridge 0x20〜0x23 lane）。集計counterは`scope_stats()`/`GatewayStats`/`ConfigStats`のgetter経由。
 - `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、NVS authority ledger store、NVS replay store、ESP-NOW PowerPort＋NVS sleep storage、PSA AES-GCM開発用PSK Provider。
-- `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。`ROUTELOOM_DEEP_SLEEP`選択時にdeep-sleep経路を配線。NVS異常時はIdentity／counterを守るため自動eraseしない。
-- `host/`：Wire v1 codec library、COBS＋CRC32のUSB/Serial framing library、開発session helper、golden vector generator（`gen_golden`／`gen_usb_golden`）、Unix daemon、CLI、TUI。
-- `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、10hop配送・分断再結合・loop-freedom、authority ledger電断simulation、USB session/credit/golden vector、power coordinator model、replay・end保護hardening、C ABI。
+- `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。`ROUTELOOM_DEEP_SLEEP`選択時にdeep-sleep経路を配線。`ROUTELOOM_DISCOVERY`でautonomy discovery、`ROUTELOOM_CONFIG`でEXPERIMENTALなRCC1 target（NVS store＋dev HMAC verifier＋ConfigJournal）をopt-in配線（既定n）。NVS異常時はIdentity／counterを守るため自動eraseしない。
+- `firmware/bridge_node`：C3/S3/C5でcompileされるUSB bridge firmware。`ROUTELOOM_CAPABILITY`（既定0x7）のbit3でgateway_endpoint_v1、bit4でconfig_endpoint_v1をopt-in attach＋HelloAck広告。OFFでは未attach・全opがUnsupported。
+- `host/`：Wire v1 codec library、COBS＋CRC32のUSB/Serial framing library、開発session helper、golden vector generator（`gen_golden`／`gen_usb_golden`）、Unix daemon、CLI、TUI。daemonのAPI1はgateway.resolve/gateway.get（schema-2 submitは`messages.submit`）とconfig.challenge/status/propose/getを実装（dev profile・ACL認可、capability未交渉はhonest拒否）。`routeloomctl`に同名subcommand（例は下記）。
+- `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、10hop配送・分断再結合・loop-freedom、authority ledger電断simulation、USB session/credit/golden vector、power coordinator model、replay・end保護hardening、C ABI、scope（S01〜S11）、gateway（Gケース）、host ops/capability gate、config（C01〜C14）＋config wire/dev permit。
 
 ## 継続CI
 
 - Portable core：GCC／Clang、ASan/UBSanのON/OFF。
 - Rust：fmt、Clippy `-D warnings`、unit test、release build。
-- ESP-IDF：固定`v6.0.3`のC3／S3／C5 reference firmware buildとsize artifact。
+- ESP-IDF：固定`v6.0.3`のC3／S3／C5 reference＋bridge firmware buildとsize artifact。`features`軸でEXPERIMENTAL機能ON（bridge `ROUTELOOM_CAPABILITY=0x1f`、reference `ROUTELOOM_CONFIG=y`）をbase OFF matrixに追加し、sdkconfigへON/OFF両方向のgrepをかける。
 - 文書・意味契約：生成表、negative mutation、小状態モデル。
 
 CI成功はhost/build evidence。実機起動、空中通信、到達距離、電池、都市部干渉を証明しない。
@@ -28,6 +29,8 @@ Wire v1の数値IDとbyte layoutはtest cipher vector付きで凍結済み。本
 ESP-IDF build成功は実RF通信、到達距離、技適・認証、電池寿命、100node/10hopを証明しない。C3/S3/C5の実機HILを別に行う。
 
 Host daemonのTTY backendは初期のByteStream実装。認証済みUSB session（開発profile）とdevice側bridgeはportable実装済みで`protocol/usb-golden`の共有vectorでC++／Rust相互検証済み。実USB driver・HILは`G-USB`として残る。
+
+Discovery Scopeのdev scope keyとConfigのdev HMAC permitはともに開発用で、production identityではない。COSE/ES256のpermit署名検証・scope bindingの本番Providerは未実装（#10待ち）。Gateway/Configの実機配送・電断・HIL証拠は未取得（#11/#18待ち）。
 
 ## ローカルportable test
 
@@ -61,4 +64,22 @@ cd host
 cargo test --workspace
 cargo run -p routeloom-host -- --socket /tmp/routeloom.sock
 cargo run -p routeloomctl -- status
+```
+
+EXPERIMENTAL endpoint操作（正本は`routeloomctl`のusage；device側のcapability attachとACL grantが前提）：
+
+```bash
+routeloomctl gateway-resolve --network <16hex> --gateway <16hex> \
+  --scope HOST_RECEIVE_RAM --expected-host <64hex>
+routeloomctl gateway-send --network <16hex> --epoch <16hex> --to <16hex> \
+  --scope HOST_RECEIVE_RAM --payload <hex>
+routeloomctl gateway-get --id <opid>
+routeloomctl config-challenge --network <16hex> --target <16hex> \
+  --config-namespace <u16> --schema <u16>
+routeloomctl config-propose --network <16hex> --target <16hex> \
+  --config-namespace <u16> --schema <u16> --base-snapshot <hex> \
+  --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]
+routeloomctl config-status --network <16hex> --target <16hex> \
+  --config-namespace <u16> --operation-id <32hex>
+routeloomctl config-get --id <cfg-opid>
 ```

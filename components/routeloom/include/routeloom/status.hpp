@@ -46,6 +46,9 @@ enum class StatusCode : std::uint16_t {
   // The production auth profile has no qualified provider; reported instead
   // of a stub that would claim security (02-discovery.md §5).
   AuthProfileUnavailable,
+  // Broad Commissioning-scope discovery requires a real Network; Network 0
+  // is never valid for it (02-discovery-scope.md §2.2).
+  NetworkRequired,
 };
 
 struct Status {

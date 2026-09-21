@@ -258,9 +258,13 @@ pub struct DispatchAttachment {
     /// Evidence stages reached (01 §5: distinct proofs, never one bool).
     /// `ev_end_sdk` is only set for reliable delivery; a best-effort mesh
     /// completion sets `ev_mac_attempt` without promoting the evidence.
+    /// `ev_host_receive` is the scope-2 gateway terminal: a verified
+    /// Service Receipt proving the registered host's ReceiveLog stored
+    /// the payload — it is never promoted to an ordinary SDK receipt.
     pub ev_gateway_accepted: bool,
     pub ev_mac_attempt: bool,
     pub ev_end_sdk: bool,
+    pub ev_host_receive: bool,
     /// A cancel request was observed; retained even when it arrived too
     /// late so the record keeps the honest observation.
     pub cancel_requested: bool,
@@ -287,6 +291,7 @@ impl DispatchAttachment {
             ev_gateway_accepted: false,
             ev_mac_attempt: false,
             ev_end_sdk: false,
+            ev_host_receive: false,
             cancel_requested: false,
             time_uncertain: false,
         }
@@ -319,7 +324,12 @@ impl DispatchAttachment {
             flags |= 32;
         }
         out.push(flags);
-        let evidence = if self.ev_end_sdk {
+        // Highest stage reached; stages are cumulative proofs, and a
+        // reader that predates HOST_RAM (4) still sees >=1 — the honest
+        // subset of what the device proved.
+        let evidence = if self.ev_host_receive {
+            4u8
+        } else if self.ev_end_sdk {
             3u8
         } else if self.ev_mac_attempt {
             2
@@ -365,6 +375,7 @@ impl DispatchAttachment {
             ev_gateway_accepted: evidence >= 1,
             ev_mac_attempt: evidence == 2,
             ev_end_sdk: evidence == 3,
+            ev_host_receive: evidence == 4,
             cancel_requested: flags & 16 != 0,
             time_uncertain: flags & 32 != 0,
         })
@@ -485,6 +496,21 @@ pub trait OperationStore {
             CancelOutcome::NotFound
         })
     }
+}
+
+/// The SingleAuthority-style config ledger: a monotonically increasing
+/// `authority_sequence` handed out once per proposed permit (scope-gateway-
+/// config P5, 04-remote-config.md §4.3). A value is allocated and committed
+/// together so a crash between allocate and sign can never re-issue the same
+/// sequence for a different command — gaps from failed proposes are fine,
+/// reuse is not. The memory provider keeps the counter in RAM (honest
+/// caveat: a restart restarts numbering, matching its RAM_ONLY durability);
+/// the durable provider persists it in the `meta` table.
+pub trait ConfigAuthorityLedger {
+    /// Allocate the next authority sequence and commit the bump. Returns the
+    /// value bound into this permit's command; Err(()) is a store fault —
+    /// the caller must refuse the propose, never guess a sequence.
+    fn config_authority_next(&mut self) -> Result<u64, ()>;
 }
 
 /// Fresh 128-bit id minted once per store lineage. Falls back to time^pid
@@ -673,6 +699,10 @@ pub struct MemoryOperationStore {
     /// lane at 1 — the device's window restarted with its boot.
     dispatch_lease: Option<[u8; 16]>,
     dispatch_next: u64,
+    /// Config SingleAuthority sequence (RAM-only: a restart restarts at 1,
+    /// matching this provider's RAM_ONLY durability — never silently
+    /// presented as durable).
+    config_auth_next: u64,
     epochs: HashMap<EpochScope, ScopeEpochs>,
     by_identity: HashMap<OpIdentity, u64>,
     by_seq: HashMap<u64, StoredOperation>,
@@ -685,6 +715,7 @@ impl MemoryOperationStore {
             next_seq: 1,
             dispatch_lease: None,
             dispatch_next: 1,
+            config_auth_next: 1,
             epochs: HashMap::new(),
             by_identity: HashMap::new(),
             by_seq: HashMap::new(),
@@ -992,15 +1023,15 @@ impl OperationStore for MemoryOperationStore {
 /// durable SQLite provider once `--op-store` names a database file. One
 /// generic `OperationStore` so the API layer never branches on backend.
 pub enum StoreBackend {
-    Memory(MemoryOperationStore),
-    // Boxed: the durable provider is much larger than the memory one and
-    // this enum is matched on every store call.
+    // Both variants boxed: the providers are much larger than a pointer
+    // and this enum is matched on every store call.
+    Memory(Box<MemoryOperationStore>),
     Sqlite(Box<SqliteOperationStore>),
 }
 
 impl Default for StoreBackend {
     fn default() -> Self {
-        Self::Memory(MemoryOperationStore::default())
+        Self::Memory(Box::default())
     }
 }
 
@@ -1095,6 +1126,29 @@ impl OperationStore for StoreBackend {
     }
 }
 
+impl ConfigAuthorityLedger for MemoryOperationStore {
+    fn config_authority_next(&mut self) -> Result<u64, ()> {
+        let seq = self.config_auth_next.max(1);
+        self.config_auth_next = seq.saturating_add(1).max(1);
+        Ok(seq)
+    }
+}
+
+impl ConfigAuthorityLedger for SqliteOperationStore {
+    fn config_authority_next(&mut self) -> Result<u64, ()> {
+        self.config_authority_next_tx()
+    }
+}
+
+impl ConfigAuthorityLedger for StoreBackend {
+    fn config_authority_next(&mut self) -> Result<u64, ()> {
+        match self {
+            Self::Memory(store) => store.config_authority_next(),
+            Self::Sqlite(store) => store.config_authority_next(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,7 +1158,7 @@ mod tests {
         let json = format!(
             "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch:016x}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"{payload_hex}\",\"payload_len\":{payload_len},\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
         );
-        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+        let mut req = parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
         assert_eq!(req.storage, STORAGE_RAM);
         req.epoch = epoch;
         req
@@ -1188,8 +1242,8 @@ mod tests {
                 "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"0000000000000001\",\"key\":\"00112233445566778899aabbccddeeff\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\",\"ttl_ms\":{ttl}}}}}"
             )
         };
-        let a = parse_submit(&routeloom_json::parse(&json(5000)).unwrap()).unwrap();
-        let b = parse_submit(&routeloom_json::parse(&json(6000)).unwrap()).unwrap();
+        let a = parse_submit(&routeloom_json::parse(&json(5000)).unwrap(), None).unwrap();
+        let b = parse_submit(&routeloom_json::parse(&json(6000)).unwrap(), None).unwrap();
         submit(&mut store, &a);
         assert!(matches!(
             store.submit(501, &b, 2000),

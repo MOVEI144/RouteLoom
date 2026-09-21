@@ -191,13 +191,18 @@ DevelopmentPskSecurityProvider::tx_context(
   created->use_stamp = ++context_stamp_;
   created->context = context;
   created->fingerprint = replay_context_fingerprint(context);
+  // The lease occupies one slot per peer pair (the epoch-free floor slot),
+  // so every boot-advancing epoch rewrites the same record rather than
+  // leaking one persisted counter record per boot. Epoch identity lives in
+  // CounterRecord::key_epoch; initialize() treats an older persisted epoch
+  // as superseded and a newer one as a conflict.
+  const std::uint64_t peer_fingerprint = replay_peer_fingerprint(context);
   const std::uint8_t direction = static_cast<std::uint8_t>(
       (context.scope == SecurityScope::EndToEnd ? 2U : 0U) |
       (context.sender < context.receiver ? 0U : 1U));
   created->lease.emplace(
-      *counter_store_, ReplayGuard::window_slot(context),
-      static_cast<std::uint32_t>(created->fingerprint ^
-                                 (created->fingerprint >> 32U)),
+      *counter_store_, ReplayGuard::floor_slot(context),
+      static_cast<std::uint32_t>(peer_fingerprint ^ (peer_fingerprint >> 32U)),
       context.epoch, direction, 256);
   if (!created->lease->initialize()) {
     tx_contexts_.release(created);

@@ -25,17 +25,29 @@
 
 use crate::acl::{self, Acl};
 use crate::canonical;
+use crate::config::{ConfigOutcome, ConfigRequest};
 use crate::receive_log::{
-    Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
+    hex_lower, Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
 };
 use crate::send_store::{
     AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity, OpenEpochError,
     OperationStore, RateDeny, StoredOperation, SubmitOutcome,
 };
 use routeloom_json::{escape_string, Json};
+use routeloom_protocol::host_ops::ConfigOpsResult;
+use routeloom_wire::endpoint::{
+    config_namespace_valid, config_tlv_encode, ConfigField, ConfigFieldType, ConfigPhase,
+    ConfigReason,
+};
 use std::sync::Mutex;
 
-// contracts.json `ipc.*`
+use crate::dispatch::ConfigOpRecord;
+
+use crate::SessionInfo;
+
+// contracts.json `ipc.*`: the bound names the WHOLE request line —
+// `API1 ` (5B) + JSON body + newline (1B) — and the socket layer enforces
+// it on the raw bytes before this module ever sees the body.
 pub const REQUEST_MAX_BYTES: usize = 8192;
 pub const RESPONSE_MAX_BYTES: usize = 65536;
 pub const JSON_MAX_DEPTH: usize = 8;
@@ -46,14 +58,30 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// The store is generic over `OperationStore` so CAP-I1 can swap the memory
 /// table for SQLite without touching this dispatch layer. `rate_limiter`
 /// is daemon-wide (04 §4: per-principal and global budgets), so limits
-/// hold across connections.
+/// hold across connections. `session`/`gateway_lane` expose the live USB
+/// session and the dispatcher's host-registration mirror — read-only here:
+/// the schema-2 binding always comes from the daemon's own lane state,
+/// never from request JSON.
 pub struct ApiContext<'a, S: OperationStore> {
     pub uid: Option<u32>,
     pub acl: &'a Acl,
     pub receive_log: &'a Mutex<ReceiveLog>,
     pub operation_store: &'a Mutex<S>,
     pub rate_limiter: &'a Mutex<AdmissionLimiter>,
+    pub session: &'a Mutex<SessionInfo>,
+    pub gateway_lane: &'a crate::dispatch::GatewayLane,
+    /// Config op registry (P5): `config.*` submits queue here and `config.get`
+    /// reads outcomes. Separate operation space from messages.*/gateway.*.
+    pub config_ops: &'a crate::dispatch::ConfigOps,
+    /// The daemon's configured config issuer node id — None means no
+    /// authority is provisioned, so `config.propose` is refused honestly
+    /// while queries still run.
+    pub config_authority: Option<u64>,
     pub now_ms: u64,
+    /// Process-monotonic clock on the same axis as the registration
+    /// mirror's `lease_deadline_mono` — wall `now_ms` cannot judge a
+    /// mono-anchored deadline.
+    pub now_mono: u64,
 }
 
 struct ApiError {
@@ -84,7 +112,11 @@ const LATER_PHASE_METHODS: &[&str] = &[];
 /// Handle one API1 request body (the bytes after `API1 `, newline stripped).
 /// Always returns a complete JSON response document (no trailing newline).
 pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String {
-    if body.len() >= REQUEST_MAX_BYTES {
+    // The advertised bound covers the whole line: `API1 ` + body + '\n'.
+    // The body alone therefore may not exceed REQUEST_MAX_BYTES - 6 —
+    // an oversized line the socket layer would have refused must get the
+    // same answer from a direct call, never a different one.
+    if body.len() + 6 > REQUEST_MAX_BYTES {
         return error_response(
             None,
             &ApiError::simple("INVALID_REQUEST", "request too large"),
@@ -164,6 +196,12 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
         "operations.get" => operations_get(&params, ctx).map(|r| (request_id, r)),
         "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (request_id, r)),
         "operations.cancel" => operations_cancel(&params, ctx).map(|r| (request_id, r)),
+        "gateway.resolve" => gateway_resolve(&params, ctx).map(|r| (request_id, r)),
+        "gateway.get" => gateway_get(&params, ctx).map(|r| (request_id, r)),
+        "config.challenge" => config_challenge(&params, ctx).map(|r| (request_id, r)),
+        "config.status" => config_status(&params, ctx).map(|r| (request_id, r)),
+        "config.propose" => config_propose(&params, ctx).map(|r| (request_id, r)),
+        "config.get" => config_get(&params, ctx).map(|r| (request_id, r)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -254,7 +292,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -269,6 +307,7 @@ fn capabilities<S: OperationStore>(
         crate::canonical::HOP_DEFAULT,
         crate::receive_log::NORMAL_PAYLOAD_MAX,
         ctx.acl.revision(),
+        config_auth = ctx.config_authority.is_some(),
     ))
 }
 
@@ -538,8 +577,39 @@ fn messages_submit<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
-    let req = canonical::parse_submit(params)
-        .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
+    // Authorize before the binding-dependent parse can leak registration
+    // state: a gateway destination parses differently depending on whether
+    // a live registration exists, so an unauthorized principal probing a
+    // well-formed network must meet AuthorizationFailed — never the
+    // GATEWAY_UNAVAILABLE-shaped rejection that would reveal the mirror
+    // (05 §5.7). A malformed network cannot satisfy the probe and falls
+    // through to the parse error below, identical for every principal.
+    if let Some(network) = params
+        .get("network")
+        .and_then(Json::as_str)
+        .and_then(|text| acl::parse_network_hex(text).ok())
+    {
+        ctx.uid
+            .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+            .ok_or_else(|| {
+                ApiError::simple(
+                    "AuthorizationFailed",
+                    "principal lacks SEND on this network",
+                )
+            })?;
+    }
+    // The schema-2 binding comes from the daemon's own registration
+    // mirror — the client can never declare token/boot/egress itself.
+    // Node destinations ignore it; gateway destinations REQUIRE a live
+    // binding or the parse names GATEWAY_UNAVAILABLE instead of minting
+    // one (05 §5.7).
+    let binding = gateway_binding(ctx);
+    let req = canonical::parse_submit(params, binding.as_ref()).map_err(|reject| ApiError {
+        code: reject.code,
+        message: reject.message,
+        extra_fields: String::new(),
+        retryable: reject.retryable,
+    })?;
     // The durability flag is immutable per store, so a short lock here
     // cannot race the admission below.
     let store_durable = ctx
@@ -548,7 +618,12 @@ fn messages_submit<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     canonical::admission_check(&req, canonical::wants_persist_sleep(params), store_durable)
-        .map_err(|reject| ApiError::simple(reject.code, &reject.message))?;
+        .map_err(|reject| ApiError {
+            code: reject.code,
+            message: reject.message,
+            extra_fields: String::new(),
+            retryable: reject.retryable,
+        })?;
     let Some(uid) = ctx
         .uid
         .filter(|uid| ctx.acl.permit(*uid, req.network, acl::PERM_SEND))
@@ -660,6 +735,257 @@ fn submit_result(lineage: &[u8; 16], seq: u64, storage: u8) -> String {
         "{{\"operation_id\":\"{}\",\"dispatch_state\":\"HOST_QUEUED\",\"evidence\":[\"{evidence}\"],\"message_key\":null}}",
         canonical::format_operation_id(lineage, seq)
     )
+}
+
+/// The daemon's live schema-2 binding: the registration mirror pinned to
+/// the CURRENT authenticated session, dropped when the mirror names a
+/// dead session or an expired lease. `None` means "no usable binding" —
+/// never "mint one anyway".
+fn gateway_binding<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+) -> Option<canonical::GatewayEndpointBinding> {
+    let registration = ctx.gateway_lane.current()?;
+    let (authenticated, session_id) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (info.authenticated, info.id.unwrap_or(0))
+    };
+    if !authenticated || registration.usb_session != session_id {
+        return None;
+    }
+    if ctx.now_mono >= registration.lease_deadline_mono {
+        return None;
+    }
+    Some(canonical::GatewayEndpointBinding {
+        token: registration.token,
+        gateway_boot: registration.gateway_boot,
+        egress: registration.egress,
+    })
+}
+
+/// `gateway.resolve` params per 05-wire-api.md §5.7:
+/// `{network, gateway, scope, expected_host}`. The only endpoint this
+/// daemon can honestly resolve is its OWN host endpoint at the attached
+/// gateway — the registration lane's live state. A remote gateway's
+/// endpoint is a mesh-side question the USB session cannot answer, and a
+/// missing/mismatched registration is reported as `resolved:false` with
+/// the reason, never as a fabricated descriptor. The token itself is
+/// deliberately not in the result: callers bind schema-2 through
+/// `messages.submit`, which reads the mirror directly.
+fn gateway_resolve<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "gateway" | "scope" | "expected_host"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let network = match params.get("network").and_then(Json::as_str) {
+        Some(text) => {
+            acl::parse_network_hex(text).map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?
+        }
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "network must be a 16-hex string",
+            ))
+        }
+    };
+    let gateway = match params.get("gateway").and_then(Json::as_str) {
+        Some(text) => parse_hex_u64(text)
+            .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "gateway must be a 16-hex id"))?,
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "gateway must be a 16-hex id",
+            ))
+        }
+    };
+    if gateway == 0 || gateway == u64::MAX {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "gateway must not be a reserved id",
+        ));
+    }
+    let scope = match params.get("scope").and_then(Json::as_str) {
+        Some(name @ ("HOST_RECEIVE_RAM" | "GATEWAY_SDK_RAM")) => name,
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "scope must be HOST_RECEIVE_RAM or GATEWAY_SDK_RAM",
+            ))
+        }
+        None => return Err(ApiError::simple("INVALID_ARGUMENT", "scope is required")),
+    };
+    // Scope 2 names a specific host digest; scope 1's digest slot is the
+    // all-zero sentinel, so a nonzero expected_host there is malformed.
+    let expected_host = match params.get("expected_host") {
+        None if scope == "HOST_RECEIVE_RAM" => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "expected_host is required for HOST_RECEIVE_RAM",
+            ))
+        }
+        None => None,
+        Some(Json::String(text)) => {
+            let digest = parse_hex_32(text).ok_or_else(|| {
+                ApiError::simple("INVALID_ARGUMENT", "expected_host must be a 64-hex digest")
+            })?;
+            if scope == "GATEWAY_SDK_RAM" && digest != [0; 32] {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "expected_host must be all-zero for GATEWAY_SDK_RAM",
+                ));
+            }
+            Some(digest)
+        }
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "expected_host must be a 64-hex string",
+            ))
+        }
+    };
+    // The query reads daemon state only — still an operation read on the
+    // named network, so an unauthorized principal gets the same denial
+    // shape the other queries use.
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
+    {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks READ_OPERATION on this network",
+        ));
+    }
+    let unresolved = |reason: &str| Ok(format!("{{\"resolved\":false,\"reason\":\"{reason}\"}}"));
+    let (authenticated, session_network, session_node, session_id) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (
+            info.authenticated,
+            info.network.unwrap_or(0),
+            info.node.unwrap_or(0),
+            info.id.unwrap_or(0),
+        )
+    };
+    if !authenticated {
+        return unresolved("session_not_authenticated");
+    }
+    if session_network != network {
+        return unresolved("network_not_on_session");
+    }
+    if session_node != gateway {
+        // Only the ATTACHED gateway's host endpoint is resolvable here —
+        // a remote endpoint is a mesh-side resolve the daemon cannot see.
+        return unresolved("gateway_not_attached");
+    }
+    if scope == "GATEWAY_SDK_RAM" {
+        // The host daemon is a HOST endpoint only; the gateway's own SDK
+        // mailbox is not ours to describe.
+        return unresolved("scope_not_host_endpoint");
+    }
+    let Some(registration) = ctx.gateway_lane.current() else {
+        return unresolved("not_registered");
+    };
+    if registration.usb_session != session_id || ctx.now_mono >= registration.lease_deadline_mono {
+        return unresolved("not_registered");
+    }
+    if expected_host != Some(registration.host_digest) {
+        return unresolved("host_digest_mismatch");
+    }
+    Ok(format!(
+        "{{\"resolved\":true,\"scope\":\"HOST_RECEIVE_RAM\",\"host_digest\":\"{}\",\"gateway_boot\":\"{:016x}\",\"egress\":\"{:016x}\",\"lease_ms\":{}}}",
+        crate::receive_log::hex_lower(&registration.host_digest),
+        registration.gateway_boot,
+        registration.egress,
+        registration.lease_deadline_mono.saturating_sub(ctx.now_mono),
+    ))
+}
+
+/// `gateway.get` params: `{operation_id}` — the outcome query for a
+/// schema-2 submit (G11: consult the original outcome rather than
+/// re-issuing toward another egress). Same visibility rules as
+/// operations.get; a node-destination record is answered with the same
+/// NOT_FOUND shape so the method cannot be used as a destination-kind
+/// oracle.
+fn gateway_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "operation_id" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(text) = params.get("operation_id").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be a string",
+        ));
+    };
+    let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be <32-hex lineage>:<16-hex sequence>",
+        ));
+    };
+    let store = ctx
+        .operation_store
+        .lock()
+        .expect("operation store poisoned");
+    let record = match store.get_by_seq(seq) {
+        Ok(Some(record)) if store.lineage() == lineage => record,
+        Ok(_) => {
+            return Err(ApiError::simple(
+                "NOT_FOUND",
+                "no gateway operation with that id in this store",
+            ))
+        }
+        Err(()) => return Err(store_fault()),
+    };
+    if !ctx.uid.is_some_and(|uid| {
+        ctx.acl
+            .permit(uid, record.network, acl::PERM_READ_OPERATION)
+    }) {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no gateway operation with that id in this store",
+        ));
+    }
+    if record.dest_kind != canonical::DEST_GATEWAY {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no gateway operation with that id in this store",
+        ));
+    }
+    Ok(op_status(&record, &store.lineage(), ctx.now_ms))
+}
+
+fn parse_hex_u64(text: &str) -> Option<u64> {
+    if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    u64::from_str_radix(text, 16).ok()
+}
+
+fn parse_hex_32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+        out[i] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(out)
 }
 
 /// `operations.get` params: `{operation_id}`. Any principal holding
@@ -880,6 +1206,571 @@ fn operations_cancel<S: OperationStore>(
     }
 }
 
+// --- Remote-config methods (scope-gateway-config P5, 05-wire-api.md §5.6) ----
+//
+// `config.*` is an asynchronous admin surface: a submit queues a request on
+// the config lane and returns a config op id the caller polls with
+// `config.get`. Acceptance is NEVER a config verdict — the honest outcome
+// (CHALLENGED/STATUS/NO_CHANGE/REFUSED/TIMEOUT/INDETERMINATE/…) arrives via
+// the lane. PERM_CONFIG gates every verb: a normal messages.send grant can
+// neither read config state nor issue a permit.
+
+/// The config op id token — a `cfg`-prefixed space so it can never collide
+/// with a messages.* or gateway.* operation id.
+fn config_op_token(op_id: u64) -> String {
+    format!("cfg{op_id:016x}")
+}
+
+/// `config_op` accepts exactly the canonical token `config_op_token`
+/// mints: `cfg` + 16 lowercase hex digits. Bare hex, short forms and any
+/// other spelling are rejected, never trimmed into a valid id.
+fn parse_config_op(text: &str) -> Option<u64> {
+    let hex = text.strip_prefix("cfg")?;
+    if hex.len() != 16
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    u64::from_str_radix(hex, 16).ok().filter(|&v| v != 0)
+}
+
+/// A u16 field accepts a JSON number or a string. String parsing follows
+/// routeloomctl's rule exactly: only an explicit `0x`/`0X` prefix means
+/// hexadecimal — an unprefixed "10" is decimal 10, never 16.
+fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
+    let invalid = || {
+        ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("{name} must be a u16 (number, decimal, or 0x-hex string)"),
+        )
+    };
+    match value {
+        None => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("{name} is required"),
+        )),
+        Some(json) => {
+            if let Some(n) = json.as_u64() {
+                return u16::try_from(n).map_err(|_| invalid());
+            }
+            if let Some(text) = json.as_str() {
+                return match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    Some(hex) => u16::from_str_radix(hex, 16).map_err(|_| invalid()),
+                    None => text.parse::<u16>().map_err(|_| invalid()),
+                };
+            }
+            Err(invalid())
+        }
+    }
+}
+
+/// Variable-length hex → bytes (even length, ≤ `max` bytes).
+fn parse_hex_bytes(text: &str, max: usize) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 || text.len() > max * 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 2);
+    for pair in text.as_bytes().chunks_exact(2) {
+        out.push(u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?);
+    }
+    Some(out)
+}
+
+fn parse_hex_16(text: &str) -> Option<[u8; 16]> {
+    parse_hex_bytes(text, 16)?.try_into().ok()
+}
+
+/// `config.*` shared ACL check: PERM_CONFIG on the named network. An
+/// unauthorized principal gets the same denial shape as the other admin
+/// verbs — never a hint about what the config surface can do.
+fn config_permit(ctx: &ApiContext<'_, impl OperationStore>, network: u64) -> bool {
+    ctx.uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_CONFIG))
+}
+
+fn config_denied() -> ApiError {
+    ApiError::simple(
+        "AuthorizationFailed",
+        "principal lacks CONFIG on this network",
+    )
+}
+
+/// `config_namespace` must name a registered namespace — SDK `1` or an
+/// application `0x8000..=0xFFFE`. The endpoint codecs refuse anything
+/// else, so the API refuses it at admission with INVALID_ARGUMENT rather
+/// than queueing a request the wire cannot carry.
+fn config_ns_field(value: Option<&Json>) -> Result<u16, ApiError> {
+    let ns = u16_field(value, "config_namespace")?;
+    if !config_namespace_valid(ns) {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "config_namespace must be 1 (SDK) or 0x8000-0xfffe (application)",
+        ));
+    }
+    Ok(ns)
+}
+
+/// `config.challenge` params: `{network, target, config_namespace, schema}`.
+/// Issues a ChallengeQuery for (target, namespace); the ControlChallenge body
+/// — the freshness + CAS inputs a propose consumes — is the outcome read via
+/// config.get.
+fn config_challenge<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "target" | "config_namespace" | "schema"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
+    let schema = u16_field(params.get("schema"), "schema")?;
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    let request = ConfigRequest::Challenge {
+        target,
+        config_namespace,
+        schema,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("challenge ns={config_namespace} schema={schema}"),
+        network,
+        target,
+    )
+}
+
+/// `config.status` params: `{network, target, config_namespace, operation_id}`.
+/// Issues a StatusQuery for `operation_id` — reads the real phase/reason
+/// verdict of the config operation that id names.
+fn config_status<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "target" | "config_namespace" | "operation_id"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
+    let Some(op_text) = params.get("operation_id").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be a 32-hex string",
+        ));
+    };
+    let Some(operation_id) = parse_hex_16(op_text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "operation_id must be a 32-hex string",
+        ));
+    };
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    let request = ConfigRequest::Status {
+        target,
+        config_namespace,
+        operation_id,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("status ns={config_namespace} op={op_text}"),
+        network,
+        target,
+    )
+}
+
+/// `config.propose` params: `{network, target, config_namespace, schema,
+/// base_snapshot, patch, apply_budget_ms?}`. Runs challenge → sign → permit
+/// transfer → status read. `base_snapshot` is the issuer's held snapshot TLV
+/// the CAS chain verifies; `patch` is an array of `{field_id, field_type,
+/// value}` entries. Requires a configured authority AND PERM_CONFIG — a
+/// normal send grant can never issue a permit.
+fn config_propose<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network"
+                | "target"
+                | "config_namespace"
+                | "schema"
+                | "base_snapshot"
+                | "patch"
+                | "apply_budget_ms"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
+    let schema = u16_field(params.get("schema"), "schema")?;
+    let Some(base_text) = params.get("base_snapshot").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "base_snapshot must be a hex string",
+        ));
+    };
+    let Some(base_snapshot) = parse_hex_bytes(base_text, 512) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "base_snapshot must be even-length hex ≤ 512 bytes",
+        ));
+    };
+    let patch = config_patch_fields(params.get("patch"))?;
+    let apply_budget_ms = match params.get("apply_budget_ms") {
+        None => 0,
+        Some(value) => match value.as_u64().and_then(|n| u32::try_from(n).ok()) {
+            Some(n) => n,
+            None => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "apply_budget_ms must be a u32",
+                ))
+            }
+        },
+    };
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    // Honest early refusal: no configured authority means no permit can be
+    // signed — say so rather than queue a request the lane will deny.
+    if ctx.config_authority.is_none() {
+        return Err(ApiError::simple(
+            "CONFIG_NO_AUTHORITY",
+            "no config authority configured (daemon --config-authority); permits cannot be issued",
+        ));
+    }
+    let field_count = patch.len();
+    let request = ConfigRequest::Propose {
+        target,
+        config_namespace,
+        schema,
+        base_snapshot,
+        patch,
+        apply_budget_ms,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("propose ns={config_namespace} schema={schema} fields={field_count}"),
+        network,
+        target,
+    )
+}
+
+/// `config.get` params: `{config_op}`. Reads one config op's record — the
+/// honest terminal outcome once resolved, or PENDING. An unauthorized
+/// principal gets NOT_FOUND (no existence oracle), matching gateway.get.
+fn config_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "config_op" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(text) = params.get("config_op").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "config_op must be a config op token string",
+        ));
+    };
+    let Some(op_id) = parse_config_op(text) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "config_op must be a cfg-prefixed hex token",
+        ));
+    };
+    let Some(record) = ctx.config_ops.get(op_id) else {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no config operation with that id",
+        ));
+    };
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, record.network, acl::PERM_CONFIG))
+    {
+        return Err(ApiError::simple(
+            "NOT_FOUND",
+            "no config operation with that id",
+        ));
+    }
+    Ok(config_outcome_json(&record))
+}
+
+/// Shared `{network, target}` parsing for the submit verbs.
+fn config_target_params(params: &Json) -> Result<(u64, u64), ApiError> {
+    let Some(network_text) = params.get("network").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "network must be a 16-hex string",
+        ));
+    };
+    let network = acl::parse_network_hex(network_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+    let Some(target_text) = params.get("target").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "target must be a 16-hex node id",
+        ));
+    };
+    // Reserved wire addresses (0 and u64::MAX) are not config targets —
+    // same rule canonical::parse_node_hex applies to messages.submit and
+    // gateway.resolve.
+    let target = canonical::parse_node_hex(target_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+    Ok((network, target))
+}
+
+/// Queue one config request on the lane; answers the accepted submit shape.
+/// A full inbox is an honest NO_CAPACITY, never a silent drop.
+fn config_submit_op<S: OperationStore>(
+    ctx: &ApiContext<'_, S>,
+    request: ConfigRequest,
+    summary: String,
+    network: u64,
+    target: u64,
+) -> Result<String, ApiError> {
+    match ctx
+        .config_ops
+        .submit(request, summary, network, target, ctx.now_ms)
+    {
+        Ok(op_id) => Ok(format!(
+            "{{\"config_op\":\"{}\",\"state\":\"PENDING\",\"submitted_ms\":{}}}",
+            config_op_token(op_id),
+            ctx.now_ms
+        )),
+        Err(()) => Err(ApiError {
+            code: "NO_CAPACITY",
+            message: "config op queue is full; retry when in-flight ops resolve".to_string(),
+            extra_fields: String::new(),
+            retryable: true,
+        }),
+    }
+}
+
+/// `patch` array → sorted `ConfigField` vec. Field ids must be unique; the
+/// wire encoder requires them strictly ascending, so they are sorted here.
+fn config_patch_fields(value: Option<&Json>) -> Result<Vec<ConfigField>, ApiError> {
+    let invalid = |m: &str| ApiError::simple("INVALID_ARGUMENT", m);
+    let Some(arr) = value.and_then(Json::as_array) else {
+        return Err(invalid(
+            "patch must be an array of {field_id, field_type, value} entries",
+        ));
+    };
+    if arr.is_empty() || arr.len() > 16 {
+        return Err(invalid("patch must carry 1-16 fields"));
+    }
+    let mut fields = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let field_id = u16_field(entry.get("field_id"), "patch field_id")?;
+        let field_type = config_field_type(entry.get("field_type"))?;
+        let Some(value_text) = entry.get("value").and_then(Json::as_str) else {
+            return Err(invalid("patch value must be a hex string"));
+        };
+        let Some(value) = parse_hex_bytes(value_text, 96) else {
+            return Err(invalid("patch value must be even-length hex ≤ 96 bytes"));
+        };
+        fields.push(ConfigField {
+            field_id,
+            field_type,
+            value,
+        });
+    }
+    fields.sort_by_key(|f| f.field_id);
+    if fields.windows(2).any(|w| w[0].field_id == w[1].field_id) {
+        return Err(invalid("patch field_ids must be unique"));
+    }
+    // The admission check IS the wire check: the same validator
+    // `config_command_encode` runs — exact type/value lengths (bool/u8
+    // = 1B, u32 = 4B), bool values 0|1, strictly ascending ids and the
+    // 512-byte patch total — so a patch the wire cannot carry is refused
+    // here with INVALID_ARGUMENT, never queued to fail downstream.
+    if let Err(error) = config_tlv_encode(&fields) {
+        return Err(invalid(error.detail));
+    }
+    Ok(fields)
+}
+
+/// `field_type` accepts a name ("bool"|"u8"|"u32"|"bytes") or a number 1-4.
+fn config_field_type(value: Option<&Json>) -> Result<ConfigFieldType, ApiError> {
+    if let Some(name) = value.and_then(Json::as_str) {
+        match name.to_ascii_lowercase().as_str() {
+            "bool" => return Ok(ConfigFieldType::Bool),
+            "u8" => return Ok(ConfigFieldType::U8),
+            "u32" => return Ok(ConfigFieldType::U32),
+            "bytes" => return Ok(ConfigFieldType::Bytes),
+            _ => {}
+        }
+    }
+    match u16_field(value, "patch field_type")? {
+        1 => Ok(ConfigFieldType::Bool),
+        2 => Ok(ConfigFieldType::U8),
+        3 => Ok(ConfigFieldType::U32),
+        4 => Ok(ConfigFieldType::Bytes),
+        _ => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "patch field_type must be 1(Bool)|2(U8)|3(U32)|4(Bytes)",
+        )),
+    }
+}
+
+fn config_phase_name(phase: ConfigPhase) -> &'static str {
+    match phase {
+        ConfigPhase::Idle => "IDLE",
+        ConfigPhase::Prepared => "PREPARED",
+        ConfigPhase::Decided => "DECIDED",
+        ConfigPhase::ApplyIntent => "APPLY_INTENT",
+        ConfigPhase::Applying => "APPLYING",
+        ConfigPhase::Verifying => "VERIFYING",
+        ConfigPhase::Active => "ACTIVE",
+        ConfigPhase::Interrupted => "INTERRUPTED",
+        ConfigPhase::Quarantined => "QUARANTINED",
+    }
+}
+
+fn config_reason_name(reason: ConfigReason) -> &'static str {
+    match reason {
+        ConfigReason::Ok => "OK",
+        ConfigReason::InProgress => "IN_PROGRESS",
+        ConfigReason::StaleRevision => "STALE_REVISION",
+        ConfigReason::BaseHashMismatch => "BASE_HASH_MISMATCH",
+        ConfigReason::InvalidPatch => "INVALID_PATCH",
+        ConfigReason::Deadline => "DEADLINE",
+        ConfigReason::AuthorityDenied => "AUTHORITY_DENIED",
+        ConfigReason::Unsupported => "UNSUPPORTED",
+        ConfigReason::Capacity => "CAPACITY",
+        ConfigReason::StorageFailure => "STORAGE_FAILURE",
+        ConfigReason::ApplyInterrupted => "APPLY_INTERRUPTED",
+        ConfigReason::VerifyFailed => "VERIFY_FAILED",
+        ConfigReason::RecoveryRequired => "RECOVERY_REQUIRED",
+        ConfigReason::MaintenanceBusy => "MAINTENANCE_BUSY",
+        ConfigReason::NoChange => "NO_CHANGE",
+        ConfigReason::ResultExpired => "RESULT_EXPIRED",
+    }
+}
+
+fn config_ops_result_name(result: ConfigOpsResult) -> &'static str {
+    match result {
+        ConfigOpsResult::Ok => "OK",
+        ConfigOpsResult::Busy => "BUSY",
+        ConfigOpsResult::Denied => "DENIED",
+        ConfigOpsResult::Unsupported => "UNSUPPORTED",
+        ConfigOpsResult::Invalid => "INVALID",
+        ConfigOpsResult::Indeterminate => "INDETERMINATE",
+        ConfigOpsResult::NoRoute => "NO_ROUTE",
+        ConfigOpsResult::Timeout => "TIMEOUT",
+    }
+}
+
+/// The device operation_id an outcome carries, rendered for `config.get`:
+/// on outcomes where the device-side operation may still be unresolved
+/// (permit assembled, indeterminate transfer) the caller needs the id to
+/// issue `config.status` against it. RAM-only records keep it only while
+/// the record lives — a daemon restart forgets both.
+fn operation_id_detail(operation_id: Option<[u8; 16]>) -> String {
+    operation_id.map_or_else(String::new, |id| {
+        format!(",\"operation_id\":\"{}\"", hex_lower(&id))
+    })
+}
+
+/// Serialize a config op record for `config.get`. The `state` names the
+/// honest outcome — PERMIT_ASSEMBLED is reported as assembled, never ACTIVE;
+/// only the Status body's phase/reason is a real config verdict.
+fn config_outcome_json(record: &ConfigOpRecord) -> String {
+    let base = format!(
+        "\"config_op\":\"{}\",\"network\":\"{:016x}\",\"target\":\"{:016x}\",\"op\":\"{}\"",
+        config_op_token(record.op_id),
+        record.network,
+        record.target,
+        escape_string(&record.summary)
+    );
+    match &record.outcome {
+        None => format!(
+            "{{{base},\"state\":\"PENDING\",\"submitted_ms\":{}}}",
+            record.submitted_ms
+        ),
+        Some(outcome) => {
+            let (state, detail) = match outcome {
+                ConfigOutcome::Challenged(c) => (
+                    "CHALLENGED",
+                    format!(
+                        ",\"challenge\":{{\"config_namespace\":{},\"schema\":{},\"target_boot\":{},\"revision\":{},\"active_hash\":\"{}\",\"valid_for_ms\":{}}}",
+                        c.config_namespace,
+                        c.schema,
+                        c.target_boot,
+                        c.revision,
+                        hex_lower(&c.active_hash),
+                        c.valid_for_ms
+                    ),
+                ),
+                ConfigOutcome::Statused(s) => (
+                    "STATUS",
+                    format!(
+                        ",\"status\":{{\"phase\":\"{}\",\"reason\":\"{}\",\"config_namespace\":{},\"operation_id\":\"{}\",\"decision_revision\":{},\"active_revision\":{},\"active_hash\":\"{}\"}}",
+                        config_phase_name(s.phase),
+                        config_reason_name(s.reason),
+                        s.config_namespace,
+                        hex_lower(&s.operation_id),
+                        s.decision_revision,
+                        s.active_revision,
+                        hex_lower(&s.active_hash)
+                    ),
+                ),
+                ConfigOutcome::PermitAssembled(op) => {
+                    ("PERMIT_ASSEMBLED", operation_id_detail(*op))
+                }
+                ConfigOutcome::NoChange => ("NO_CHANGE", String::new()),
+                ConfigOutcome::Refused(r) => (
+                    "REFUSED",
+                    format!(",\"result\":\"{}\"", config_ops_result_name(*r)),
+                ),
+                ConfigOutcome::RefusedStale => ("REFUSED", ",\"result\":\"STALE\"".to_string()),
+                ConfigOutcome::Timeout => ("TIMEOUT", String::new()),
+                ConfigOutcome::Indeterminate(op) => {
+                    ("INDETERMINATE", operation_id_detail(*op))
+                }
+                ConfigOutcome::ProtocolError => ("PROTOCOL_ERROR", String::new()),
+            };
+            format!(
+                "{{{base},\"state\":\"{state}\"{detail},\"resolved_ms\":{}}}",
+                record.resolved_ms.unwrap_or(0)
+            )
+        }
+    }
+}
+
 /// Query response (01 §5: state, evidence, application_outcome and
 /// observation are orthogonal fields). Payload bytes are never included:
 /// READ_OPERATION must not leak what only READ_PAYLOAD may read — length
@@ -911,6 +1802,11 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         if att.ev_end_sdk {
             evidence.push("END_SDK_RECEIVED");
         }
+        // Scope-2 terminal: the registered host's ReceiveLog stored the
+        // payload — a distinct proof, never promoted to END_SDK_RECEIVED.
+        if att.ev_host_receive {
+            evidence.push("HOST_RAM_RECEIVED");
+        }
         if let (Some(session), Some(seq)) = (att.msg_session, att.msg_seq) {
             message_key = format!("{{\"session\":\"{session:08x}\",\"sequence\":\"{seq:016x}\"}}");
         }
@@ -922,14 +1818,22 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         .map(|tag| format!("\"{tag}\""))
         .collect::<Vec<_>>()
         .join(",");
+    // A schema-2 record's destination reports the binding that was hashed
+    // in — read back out of the retained canonical bytes, so the answer
+    // always reflects what was committed rather than a parallel field.
+    let destination_json = gateway_destination_json(record).unwrap_or_else(|| {
+        format!(
+            "{{\"kind\":\"{}\",\"id\":\"{:016x}\"}}",
+            canonical::dest_kind_name(record.dest_kind),
+            record.dest,
+        )
+    });
     format!(
-        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{{\"kind\":\"{}\",\"id\":\"{:016x}\"}},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
+        "{{\"operation_id\":\"{}\",\"network\":\"{:016x}\",\"admission_epoch\":\"{:016x}\",\"key\":\"{}\",\"destination\":{destination_json},\"payload_len\":{},\"canonical_hash\":\"{}\",\"options\":{{\"delivery\":\"{}\",\"priority\":\"{}\",\"ttl_ms\":{},\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"storage\":\"{}\",\"hop_limit\":{},\"persist_across_sleep\":false}},\"dispatch_state\":\"{}\",\"evidence\":[{evidence_json}],\"message_key\":{message_key},\"application_outcome\":null,\"observation\":{{\"deadline_elapsed\":{elapsed},\"cancel_requested\":{cancel_requested},\"time_uncertain\":{time_uncertain}}}}}",
         canonical::format_operation_id(lineage, record.seq),
         record.network,
         record.epoch,
         crate::receive_log::hex_lower(&record.key),
-        canonical::dest_kind_name(record.dest_kind),
-        record.dest,
         record.payload.len(),
         crate::receive_log::hex_lower(&record.hash),
         canonical::delivery_name(record.delivery),
@@ -939,6 +1843,31 @@ fn op_status(record: &StoredOperation, lineage: &[u8; 16], now_ms: u64) -> Strin
         record.hop_limit,
         record.dispatch_state.name(),
     )
+}
+
+/// The schema-2 destination object for a gateway operation: the extension
+/// is decoded out of the retained canonical bytes (version 2, dest_kind
+/// gateway, 60-byte head) — `None` for anything else, so a record can
+/// never report a binding it did not hash.
+fn gateway_destination_json(record: &StoredOperation) -> Option<String> {
+    let c = &record.canonical;
+    if record.dest_kind != canonical::DEST_GATEWAY || c.len() < 60 || c[0] != 2 || c[5] != 1 {
+        return None;
+    }
+    let scope = match c[24] {
+        canonical::GATEWAY_SCOPE_SDK_RAM => "GATEWAY_SDK_RAM",
+        canonical::GATEWAY_SCOPE_HOST_RAM => "HOST_RECEIVE_RAM",
+        _ => return None,
+    };
+    let mut token = [0u8; 16];
+    token.copy_from_slice(&c[26..42]);
+    let gateway_boot = u64::from_be_bytes(c[42..50].try_into().expect("8"));
+    let egress = u64::from_be_bytes(c[50..58].try_into().expect("8"));
+    Some(format!(
+        "{{\"kind\":\"gateway\",\"id\":\"{:016x}\",\"scope\":\"{scope}\",\"token\":\"{}\",\"gateway_boot\":\"{gateway_boot:016x}\",\"egress\":\"{egress:016x}\"}}",
+        record.dest,
+        crate::receive_log::hex_lower(&token),
+    ))
 }
 
 /// Result of pushing one DataFromMesh payload into the log — surfaced as a
@@ -990,13 +1919,59 @@ mod tests {
         limiter: &'a Mutex<AdmissionLimiter>,
         now: u64,
     ) -> ApiContext<'a, S> {
+        // Node-path tests never touch the session/lane — fresh, empty
+        // fixtures are leaked per call (test-local, no cross-test state).
+        ctx_lane(
+            uid,
+            acl,
+            log,
+            store,
+            limiter,
+            leaked_session(),
+            leaked_lane(),
+            leaked_config_ops(),
+            None,
+            now,
+        )
+    }
+
+    fn leaked_session() -> &'static Mutex<SessionInfo> {
+        Box::leak(Box::new(Mutex::new(SessionInfo::default())))
+    }
+
+    fn leaked_lane() -> &'static crate::dispatch::GatewayLane {
+        Box::leak(Box::new(crate::dispatch::GatewayLane::default()))
+    }
+
+    fn leaked_config_ops() -> &'static crate::dispatch::ConfigOps {
+        Box::leak(Box::new(crate::dispatch::ConfigOps::default()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ctx_lane<'a, S: OperationStore>(
+        uid: Option<u32>,
+        acl: &'a Acl,
+        log: &'a Mutex<ReceiveLog>,
+        store: &'a Mutex<S>,
+        limiter: &'a Mutex<AdmissionLimiter>,
+        session: &'a Mutex<SessionInfo>,
+        lane: &'a crate::dispatch::GatewayLane,
+        config_ops: &'a crate::dispatch::ConfigOps,
+        config_authority: Option<u64>,
+        now: u64,
+    ) -> ApiContext<'a, S> {
         ApiContext {
             uid,
             acl,
             receive_log: log,
             operation_store: store,
             rate_limiter: limiter,
+            session,
+            gateway_lane: lane,
+            config_ops,
+            config_authority,
             now_ms: now,
+            now_mono: now,
         }
     }
 
@@ -1802,7 +2777,8 @@ mod tests {
                 let json = format!(
                     "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{i:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
                 );
-                let req = canonical::parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+                let req =
+                    canonical::parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
                 assert!(matches!(
                     guard.submit(501, &req, 0),
                     SubmitOutcome::Accepted { .. }
@@ -2296,7 +3272,8 @@ mod tests {
                 let json = format!(
                     "{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{i:032x}\",\"destination\":{{\"kind\":\"node\",\"id\":\"0000000000000003\"}},\"payload_hex\":\"\",\"payload_len\":0,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}"
                 );
-                let req = canonical::parse_submit(&routeloom_json::parse(&json).unwrap()).unwrap();
+                let req =
+                    canonical::parse_submit(&routeloom_json::parse(&json).unwrap(), None).unwrap();
                 let _ = guard.submit(501, &req, 0);
             }
         }
@@ -2508,5 +3485,1056 @@ mod tests {
             Some("HOST_QUEUED"),
         );
         assert_eq!(Some(&replay), get(&id).get("result"));
+    }
+
+    // ---- Gateway API (05-wire-api.md §5.7) ----
+
+    /// An authenticated session on the attached gateway plus the
+    /// dispatcher's published registration mirror — the state a live
+    /// schema-2 binding needs.
+    fn gw_fixture() -> (Mutex<SessionInfo>, crate::dispatch::GatewayLane) {
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        let lane = crate::dispatch::GatewayLane::default();
+        lane.set(crate::dispatch::GatewayRegistration {
+            token: [0xa1; 16],
+            gateway_boot: 0x999,
+            host_digest: [0x44; 32],
+            egress: 0x0abc,
+            usb_session: 7,
+            lease_deadline_mono: u64::MAX,
+        });
+        (session, lane)
+    }
+
+    fn gw_submit_line(key: &str, epoch: &str, scope: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"s\",\"method\":\"messages.submit\",\"params\":{{\"network\":\"0000000000000001\",\"admission_epoch\":\"{epoch}\",\"key\":\"{key}\",\"destination\":{{\"kind\":\"gateway\",\"id\":\"0000000000000020\",\"scope\":\"{scope}\"}},\"payload_hex\":\"00ff\",\"payload_len\":2,\"options\":{{\"storage\":\"RAM_ONLY\"}}}}}}"
+        )
+    }
+
+    fn gw_resolve_line(scope: &str, expected_host: Option<&str>) -> String {
+        let host =
+            expected_host.map_or_else(String::new, |h| format!(",\"expected_host\":\"{h}\""));
+        format!(
+            "{{\"v\":1,\"request_id\":\"r\",\"method\":\"gateway.resolve\",\"params\":{{\"network\":\"0000000000000001\",\"gateway\":\"0000000000000abc\",\"scope\":\"{scope}\"{host}}}}}"
+        )
+    }
+
+    fn gw_get_line(id: &str) -> String {
+        format!(
+            "{{\"v\":1,\"request_id\":\"g\",\"method\":\"gateway.get\",\"params\":{{\"operation_id\":\"{id}\"}}}}"
+        )
+    }
+
+    #[test]
+    fn gateway_submit_without_registration_is_retryable_unavailable() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        // Session authenticated but NO registration mirror: the daemon
+        // must refuse rather than mint a binding — GATEWAY_UNAVAILABLE,
+        // retryable (a later resolve+submit may succeed).
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        let lane = crate::dispatch::GatewayLane::default();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let key = "66666666666666666666666666666666";
+        let response = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        let parsed = assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
+        assert_eq!(
+            parsed
+                .get("error")
+                .unwrap()
+                .get("retryable")
+                .and_then(Json::as_bool),
+            Some(true),
+            "{response}"
+        );
+        // And the op never entered the store.
+        assert!(store.lock().unwrap().dispatch_view().unwrap().is_empty());
+    }
+
+    #[test]
+    fn gateway_submit_denied_before_registration_state_can_leak() {
+        // uid 999 has no SEND grant: it must meet AuthorizationFailed
+        // regardless of registration state — GATEWAY_UNAVAILABLE would
+        // reveal whether a live mirror exists to a principal that may
+        // never learn it.
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        let lane = crate::dispatch::GatewayLane::default();
+        let c = ctx_lane(
+            Some(999),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let key = "77777777777777777777777777777777";
+        let response = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+    }
+
+    #[test]
+    fn gateway_submit_binds_schema2_and_get_reports_it() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let key = "77777777777777777777777777777777";
+        let accepted = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        assert!(accepted.contains("\"ok\":true"), "{accepted}");
+        let id = result_field(&accepted, "operation_id");
+        // The admitted record is a real schema-2 canonical bound to the
+        // registration mirror — version 2, kind gateway, token/boot/egress
+        // embedded in the hashed bytes.
+        let seq = u64::from_str_radix(id.rsplit(':').next().unwrap(), 16).unwrap();
+        let record = store
+            .lock()
+            .unwrap()
+            .get_by_seq(seq)
+            .unwrap()
+            .expect("admitted above");
+        assert_eq!(record.dest_kind, 1);
+        assert_eq!(record.canonical[0], 2);
+        assert_eq!(record.canonical.len(), 60 + 2);
+        // gateway.get answers the same status document operations.get
+        // reports — with the schema-2 destination rendered.
+        let got = handle(gw_get_line(&id).as_bytes(), &c);
+        assert!(got.contains("\"ok\":true"), "{got}");
+        let parsed = routeloom_json::parse(&got).unwrap();
+        let result = parsed.get("result").unwrap();
+        assert_eq!(
+            result.get("operation_id").and_then(Json::as_str),
+            Some(id.as_str()),
+            "{got}"
+        );
+        let destination = result.get("destination").unwrap();
+        assert_eq!(
+            destination.get("kind").and_then(Json::as_str),
+            Some("gateway"),
+            "{got}"
+        );
+        assert_eq!(
+            destination.get("scope").and_then(Json::as_str),
+            Some("HOST_RECEIVE_RAM"),
+            "{got}"
+        );
+        // Replay of the same key answers the committed record, and
+        // gateway.get stays the honest outcome query for it.
+        let replay = handle(
+            gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
+            &c,
+        );
+        assert!(replay.contains("\"ok\":true"), "{replay}");
+        assert_eq!(
+            routeloom_json::parse(&replay)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("operation_id")
+                .and_then(Json::as_str),
+            Some(id.as_str()),
+            "{replay}"
+        );
+    }
+
+    #[test]
+    fn gateway_get_hides_node_and_foreign_ops() {
+        let (acl, log, store, limiter) = test_env();
+        let epoch = open_test_epoch(&acl, &log, &store, &limiter);
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        // A node-destination op is answered with the same NOT_FOUND an
+        // unknown id gets — the method is not a destination-kind oracle.
+        let key = "88888888888888888888888888888888";
+        let accepted = handle(submit_line(key, &epoch).as_bytes(), &c);
+        let id = result_field(&accepted, "operation_id");
+        let response = handle(gw_get_line(&id).as_bytes(), &c);
+        assert_error_schema(&response, "NOT_FOUND");
+        let response = handle(
+            gw_get_line("0000000000000000000000000000abcd:00000000000000ff").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "NOT_FOUND");
+        // A principal without READ_OPERATION on the op's network gets the
+        // same NOT_FOUND (no existence oracle).
+        let uid7 = ctx_lane(
+            Some(7),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let response = handle(gw_get_line(&id).as_bytes(), &uid7);
+        assert_error_schema(&response, "NOT_FOUND");
+    }
+
+    #[test]
+    fn gateway_resolve_reports_the_live_binding() {
+        let (acl, log, store, limiter) = test_env();
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let digest = "44".repeat(32);
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        assert_eq!(
+            result.get("resolved").and_then(Json::as_bool),
+            Some(true),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("host_digest").and_then(Json::as_str),
+            Some(digest.as_str()),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("gateway_boot").and_then(Json::as_str),
+            Some("0000000000000999"),
+            "{response}"
+        );
+        assert_eq!(
+            result.get("egress").and_then(Json::as_str),
+            Some("0000000000000abc"),
+            "{response}"
+        );
+        // The token itself is never disclosed through the API.
+        assert!(!response.contains("a1a1a1a1"), "{response}");
+        // Wrong expected_host → resolved:false with the reason.
+        let wrong = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&"55".repeat(32))).as_bytes(),
+            &c,
+        );
+        let parsed = routeloom_json::parse(&wrong).unwrap();
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("resolved")
+                .and_then(Json::as_bool),
+            Some(false),
+            "{wrong}"
+        );
+        assert_eq!(
+            parsed
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str),
+            Some("host_digest_mismatch"),
+            "{wrong}"
+        );
+        // SDK scope is the gateway's own mailbox — not ours to describe.
+        let sdk = handle(
+            gw_resolve_line("GATEWAY_SDK_RAM", Some(&"00".repeat(32))).as_bytes(),
+            &c,
+        );
+        assert!(
+            routeloom_json::parse(&sdk)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("scope_not_host_endpoint"),
+            "{sdk}"
+        );
+        // A different attached node id is "not attached", never resolved.
+        let other = handle(
+            "{\"v\":1,\"request_id\":\"r\",\"method\":\"gateway.resolve\",\"params\":{\"network\":\"0000000000000001\",\"gateway\":\"0000000000000020\",\"scope\":\"HOST_RECEIVE_RAM\",\"expected_host\":\"4444444444444444444444444444444444444444444444444444444444444444\"}}".as_bytes(),
+            &c,
+        );
+        assert!(
+            routeloom_json::parse(&other)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("gateway_not_attached"),
+            "{other}"
+        );
+        // No registration → not_registered (still ok:true, resolved:false).
+        let empty_lane = crate::dispatch::GatewayLane::default();
+        let c2 = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &empty_lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &c2,
+        );
+        assert!(
+            routeloom_json::parse(&response)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("not_registered"),
+            "{response}"
+        );
+        // Missing expected_host on HOST scope is an argument error, not
+        // an unresolved answer.
+        let response = handle(gw_resolve_line("HOST_RECEIVE_RAM", None).as_bytes(), &c);
+        assert_error_schema(&response, "INVALID_ARGUMENT");
+    }
+
+    #[test]
+    fn gateway_acl_is_enforced() {
+        // READ_PAYLOAD only — no SEND, no READ_OPERATION.
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane) = gw_fixture();
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let digest = "44".repeat(32);
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+        store.lock().unwrap().open_epoch((501, 1), 0).unwrap();
+        let response = handle(
+            gw_submit_line(
+                "99999999999999999999999999999999",
+                "0000000000000001",
+                "HOST_RECEIVE_RAM",
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+        // Unauthenticated socket peer is denied outright.
+        let anon = ctx_lane(
+            None,
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            leaked_config_ops(),
+            None,
+            100,
+        );
+        let response = handle(
+            gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
+            &anon,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+    }
+
+    // --- config.* verbs ------------------------------------------------------
+    //
+    // uid 9 is a config admin (CONFIG on every network, no SEND — the grants
+    // are orthogonal); uid 501 is a plain sender (SEND+READ_OPERATION on net
+    // 1, no CONFIG). The pair proves the admin ACL is distinct from
+    // messages.send in both directions.
+
+    fn config_acl() -> Acl {
+        Acl::parse(
+            "{\"principals\":{\"9\":{\"networks\":{\"*\":[\"CONFIG\"]}},\"501\":{\"networks\":{\"0000000000000001\":[\"SEND\",\"READ_OPERATION\"]}}}}",
+        )
+        .unwrap()
+    }
+
+    /// A config-facing fixture: a REAL ConfigOps hub (ops are queryable, not
+    /// a leaked sink) plus an authenticated session. The gateway lane is
+    /// unused by the config verbs.
+    fn config_fixture() -> (
+        Mutex<SessionInfo>,
+        crate::dispatch::GatewayLane,
+        crate::dispatch::ConfigOps,
+    ) {
+        let session = Mutex::new(SessionInfo {
+            authenticated: true,
+            id: Some(7),
+            node: Some(0x0abc),
+            boot: Some(7),
+            network: Some(1),
+            ..SessionInfo::default()
+        });
+        (
+            session,
+            crate::dispatch::GatewayLane::default(),
+            crate::dispatch::ConfigOps::default(),
+        )
+    }
+
+    fn cfg_req(method: &str, params: &str) -> String {
+        format!("{{\"v\":1,\"request_id\":\"c\",\"method\":\"{method}\",\"params\":{{{params}}}}}")
+    }
+
+    const CFG_TARGET: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\"";
+    const CFG_CHALLENGE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1";
+    const CFG_STATUS_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"operation_id\":\"00112233445566778899aabbccddeeff\"";
+    const CFG_PROPOSE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000002a\"}]";
+
+    #[test]
+    fn config_challenge_submits_a_pending_op() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(response.contains("\"state\":\"PENDING\""), "{response}");
+        // Acceptance mints a cfg-namespaced op id — never a verdict.
+        let token = result_field(&response, "config_op");
+        assert!(token.starts_with("cfg"), "{token}");
+        // The op is queryable via config.get and still honestly PENDING.
+        let get = handle(
+            cfg_req("config.get", &format!("\"config_op\":\"{token}\"")).as_bytes(),
+            &c,
+        );
+        assert!(get.contains("\"ok\":true"), "{get}");
+        assert!(get.contains("\"state\":\"PENDING\""), "{get}");
+        assert!(get.contains("\"op\":\"challenge ns=1 schema=1\""), "{get}");
+        assert!(get.contains("\"network\":\"0000000000000001\""), "{get}");
+    }
+
+    #[test]
+    fn config_verbs_require_config_grant_not_send() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        // uid 501: SEND+READ_OPERATION on net 1 but no CONFIG. Valid params for
+        // every verb so the failure is purely the missing admin grant.
+        let c = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        for (method, params) in [
+            ("config.challenge", CFG_CHALLENGE_PARAMS),
+            ("config.status", CFG_STATUS_PARAMS),
+            ("config.propose", CFG_PROPOSE_PARAMS),
+        ] {
+            let response = handle(cfg_req(method, params).as_bytes(), &c);
+            assert_error_schema(&response, "AuthorizationFailed");
+        }
+        // Anonymous socket peer is denied outright.
+        let anon = ctx_lane(
+            None,
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &anon,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+    }
+
+    #[test]
+    fn config_propose_without_authority_is_an_honest_refusal() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        // CONFIG grant present but NO --config-authority: the daemon cannot
+        // sign a permit, so it refuses rather than queue a doomed request.
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            None,
+            100,
+        );
+        let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
+        assert_error_schema(&response, "CONFIG_NO_AUTHORITY");
+        // The read-only verbs still work without an authority — they never
+        // sign anything.
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &c,
+        );
+        assert!(response.contains("\"ok\":true"), "{response}");
+    }
+
+    #[test]
+    fn config_propose_submits_a_pending_op() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        // Acceptance is PENDING — never ACTIVE or APPLIED.
+        assert!(response.contains("\"state\":\"PENDING\""), "{response}");
+        assert!(!response.contains("ACTIVE"), "{response}");
+    }
+
+    #[test]
+    fn config_params_are_validated() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        // Unknown param key.
+        let bad = format!("{CFG_CHALLENGE_PARAMS},\"bogus\":1");
+        assert_error_schema(
+            &handle(cfg_req("config.challenge", &bad).as_bytes(), &c),
+            "INVALID_ARGUMENT",
+        );
+        // Missing required field (network).
+        assert_error_schema(
+            &handle(
+                cfg_req(
+                    "config.challenge",
+                    "\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1",
+                )
+                .as_bytes(),
+                &c,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        // Bad target hex.
+        let bad = "\"network\":\"0000000000000001\",\"target\":\"zz\",\"config_namespace\":1,\"schema\":1";
+        assert_error_schema(
+            &handle(cfg_req("config.challenge", bad).as_bytes(), &c),
+            "INVALID_ARGUMENT",
+        );
+        // status: operation_id must be a 32-hex string.
+        assert_error_schema(
+            &handle(
+                cfg_req(
+                    "config.status",
+                    "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"operation_id\":\"short\"",
+                )
+                .as_bytes(),
+                &c,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        // propose: empty patch, bad field_type, and duplicate field_id.
+        for patch in [
+            "\"patch\":[]",
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"bogus\",\"value\":\"00\"}]",
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"00\"},{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"01\"}]",
+        ] {
+            let params = format!(
+                "{CFG_TARGET},\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"
+            );
+            assert_error_schema(
+                &handle(cfg_req("config.propose", &params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+    }
+
+    #[test]
+    fn config_get_has_no_existence_oracle() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        // uid 9 (config admin) submits a challenge on net 1.
+        let c9 = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
+            &c9,
+        );
+        let token = result_field(&response, "config_op");
+        // A principal without CONFIG on that network gets NOT_FOUND — the same
+        // shape as an unknown id, so config ops are no existence oracle.
+        let c501 = ctx_lane(
+            Some(501),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let get = cfg_req("config.get", &format!("\"config_op\":\"{token}\""));
+        assert_error_schema(&handle(get.as_bytes(), &c501), "NOT_FOUND");
+        // A malformed token is INVALID_ARGUMENT; a well-formed unknown op is
+        // NOT_FOUND (identical to the forbidden case).
+        assert_error_schema(
+            &handle(
+                cfg_req("config.get", "\"config_op\":\"bogus\"").as_bytes(),
+                &c9,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        assert_error_schema(
+            &handle(
+                cfg_req("config.get", "\"config_op\":\"cfg0000000000000fff\"").as_bytes(),
+                &c9,
+            ),
+            "NOT_FOUND",
+        );
+    }
+
+    #[test]
+    fn config_outcome_json_reports_honest_states() {
+        // Direct serialization coverage for the distinct terminal states —
+        // the lane's verdict is surfaced verbatim; PERMIT_ASSEMBLED is never
+        // claimed ACTIVE, and INDETERMINATE/TIMEOUT stay distinct.
+        let base = ConfigOpRecord {
+            op_id: 7,
+            summary: "propose ns=1".to_string(),
+            network: 1,
+            target: 9,
+            outcome: None,
+            submitted_ms: 100,
+            resolved_ms: None,
+        };
+        let pending = config_outcome_json(&base);
+        assert!(pending.contains("\"state\":\"PENDING\""), "{pending}");
+        for (outcome, want) in [
+            (ConfigOutcome::PermitAssembled(None), "PERMIT_ASSEMBLED"),
+            (ConfigOutcome::NoChange, "NO_CHANGE"),
+            (ConfigOutcome::Timeout, "TIMEOUT"),
+            (ConfigOutcome::Indeterminate(None), "INDETERMINATE"),
+            (ConfigOutcome::ProtocolError, "PROTOCOL_ERROR"),
+        ] {
+            let json = config_outcome_json(&ConfigOpRecord {
+                outcome: Some(outcome),
+                resolved_ms: Some(150),
+                ..base.clone()
+            });
+            assert!(json.contains(&format!("\"state\":\"{want}\"")), "{json}");
+            assert!(!json.contains("ACTIVE"), "{json}");
+            // No issued operation id: the field stays absent, never null.
+            assert!(!json.contains("operation_id"), "{json}");
+        }
+        // Unresolved outcomes name the device operation they may still hold.
+        for outcome in [
+            ConfigOutcome::PermitAssembled(Some([0x42; 16])),
+            ConfigOutcome::Indeterminate(Some([0x42; 16])),
+        ] {
+            let json = config_outcome_json(&ConfigOpRecord {
+                outcome: Some(outcome),
+                resolved_ms: Some(150),
+                ..base.clone()
+            });
+            assert!(
+                json.contains("\"operation_id\":\"42424242424242424242424242424242\""),
+                "{json}"
+            );
+        }
+        let refused = config_outcome_json(&ConfigOpRecord {
+            outcome: Some(ConfigOutcome::Refused(ConfigOpsResult::Denied)),
+            resolved_ms: Some(150),
+            ..base.clone()
+        });
+        assert!(refused.contains("\"state\":\"REFUSED\""), "{refused}");
+        assert!(refused.contains("\"result\":\"DENIED\""), "{refused}");
+        // The issuer-side stale-CAS refusal is a distinct refused result.
+        let stale = config_outcome_json(&ConfigOpRecord {
+            outcome: Some(ConfigOutcome::RefusedStale),
+            resolved_ms: Some(150),
+            ..base.clone()
+        });
+        assert!(stale.contains("\"state\":\"REFUSED\""), "{stale}");
+        assert!(stale.contains("\"result\":\"STALE\""), "{stale}");
+    }
+
+    #[test]
+    fn u16_field_parses_decimal_unless_0x_prefixed() {
+        let num = |v: u64| Json::Number(v.to_string());
+        let text = |s: &str| Json::String(s.to_string());
+        let get = |v: &Json| u16_field(Some(v), "x").ok();
+        // Numbers pass through; strings follow routeloomctl: only an
+        // explicit 0x/0X prefix means hex — "10" is decimal 10, not 16.
+        assert_eq!(get(&num(42)), Some(42));
+        assert_eq!(get(&text("10")), Some(10));
+        assert_eq!(get(&text("0x10")), Some(16));
+        assert_eq!(get(&text("0X1f")), Some(31));
+        assert_eq!(get(&text("010")), Some(10));
+        assert_eq!(get(&text("65535")), Some(65535));
+        assert_eq!(get(&text("0xffff")), Some(65535));
+        for bad in [
+            num(65_536),
+            text("0x"),
+            text("0x10000"),
+            text("zz"),
+            text(""),
+        ] {
+            assert_eq!(get(&bad), None, "{bad:?}");
+        }
+        // "-1" parses as decimal, fails the u16 range — never as hex.
+        assert_eq!(get(&text("-1")), None);
+    }
+
+    #[test]
+    fn parse_config_op_requires_the_canonical_token() {
+        assert_eq!(parse_config_op("cfg0000000000000001"), Some(1));
+        assert_eq!(parse_config_op("cfgffffffffffffffff"), Some(u64::MAX));
+        // Bare hex, short forms, missing prefix, zero id, uppercase —
+        // none of them name an op.
+        for bad in [
+            "0000000000000001",
+            "cfg1",
+            "cfg",
+            "cfg0000000000000000",
+            "cfg00000000000000001",
+            "cfgABCDEFABCDEFABCD",
+            "op0000000000000001",
+            "cfg-000000000000001",
+        ] {
+            assert_eq!(parse_config_op(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn request_body_bound_counts_the_whole_line() {
+        let acl = acl_with(501);
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 0);
+        // The advertised 8192 bound covers `API1 ` + body + '\n': a body
+        // of 8186 is the largest that fits the line; 8187 is too large.
+        let body = vec![b'x'; REQUEST_MAX_BYTES - 6];
+        let response = handle(&body, &c);
+        assert!(!response.contains("request too large"), "{response}");
+        assert_error_schema(&response, "INVALID_REQUEST");
+        let body = vec![b'x'; REQUEST_MAX_BYTES - 5];
+        let response = handle(&body, &c);
+        assert_error_schema(&response, "INVALID_REQUEST");
+        assert!(response.contains("request too large"), "{response}");
+    }
+
+    #[test]
+    fn config_verbs_reject_reserved_target_ids() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        // Node ids 0 and u64::MAX are reserved wire addresses (01 §6) —
+        // config targets follow the same rule as messages.submit.
+        for target in ["0000000000000000", "ffffffffffffffff"] {
+            let params = format!(
+                "\"network\":\"0000000000000001\",\"target\":\"{target}\",\"config_namespace\":1,\"schema\":1"
+            );
+            assert_error_schema(
+                &handle(cfg_req("config.challenge", &params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+    }
+
+    #[test]
+    fn config_namespace_must_be_registered() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        // 2 is not a namespace (SDK=1, application 0x8000-0xfffe); the
+        // wire codecs refuse it, so the API refuses it up front.
+        for (method, params) in [
+            (
+                "config.challenge",
+                "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":2,\"schema\":1",
+            ),
+            (
+                "config.status",
+                "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":2,\"operation_id\":\"00112233445566778899aabbccddeeff\"",
+            ),
+            (
+                "config.propose",
+                "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":2,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"01\"}]",
+            ),
+        ] {
+            assert_error_schema(
+                &handle(cfg_req(method, params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+        // The application range's own bounds hold too.
+        for ns in [0x7fff_u16, 0xffff_u16] {
+            let params = format!("{CFG_TARGET},\"config_namespace\":{ns},\"schema\":1");
+            assert_error_schema(
+                &handle(cfg_req("config.challenge", &params).as_bytes(), &c),
+                "INVALID_ARGUMENT",
+            );
+        }
+    }
+
+    #[test]
+    fn config_patch_must_be_wire_encodable() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            100,
+        );
+        let propose = |patch: &str| {
+            let params = format!(
+                "{CFG_TARGET},\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"
+            );
+            handle(cfg_req("config.propose", &params).as_bytes(), &c)
+        };
+        // Exact type/value lengths: bool/u8 = 1 byte, u32 = 4 bytes.
+        for patch in [
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"bool\",\"value\":\"02\"}]", // bool not 0|1
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"bool\",\"value\":\"0000\"}]", // bool len 2
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"0001\"}]", // u8 len 2
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0001\"}]", // u32 len 2
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000000001\"}]", // u32 len 5
+            "\"patch\":[{\"field_id\":1,\"field_type\":\"u8\",\"value\":\"\"}]", // u8 empty
+        ] {
+            assert_error_schema(&propose(patch), "INVALID_ARGUMENT");
+        }
+        // The 512-byte patch total is a wire bound: each field costs
+        // 5 + value_len. 6 x (5+96) = 606 > 512 must refuse at the API.
+        let big = format!(
+            "\"patch\":[{}]",
+            (0..6_u16)
+                .map(|i| format!(
+                    "{{\"field_id\":{},\"field_type\":\"bytes\",\"value\":\"{}\"}}",
+                    i + 1,
+                    "ab".repeat(96)
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_error_schema(&propose(&big), "INVALID_ARGUMENT");
+        // A maximal legal patch is accepted (16 x u8: 16*(5+1)=96 <= 512).
+        let ok = format!(
+            "\"patch\":[{}]",
+            (0..16_u16)
+                .map(|i| format!(
+                    "{{\"field_id\":{},\"field_type\":\"u8\",\"value\":\"{:02x}\"}}",
+                    i + 1,
+                    i
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let response = propose(&ok);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        // And bytes fields accept 0-length values on the wire.
+        let response =
+            propose("\"patch\":[{\"field_id\":1,\"field_type\":\"bytes\",\"value\":\"\"}]");
+        assert!(response.contains("\"ok\":true"), "{response}");
     }
 }

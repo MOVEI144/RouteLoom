@@ -98,10 +98,12 @@ class CollectSink final : public UsbFrameSink {
 std::vector<std::uint8_t> encode(FrameKind kind, std::uint16_t flags,
                                  std::uint64_t session, std::uint64_t request,
                                  ByteView body) {
+  std::array<std::uint8_t, kMaxDecodedFrame> scratch{};
   std::array<std::uint8_t, kMaxEncodedFrame> out{};
   std::size_t written = 0;
   const Status status =
       encode_frame(kind, flags, session, request, body,
+                   MutableByteView{scratch.data(), scratch.size()},
                    MutableByteView{out.data(), out.size()}, written);
   if (!status) return {};
   return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
@@ -196,12 +198,22 @@ void test_frame_max_body_boundary() {
   CHECK(sink.errors.empty());
 
   // One byte over the limit is rejected by encode, not truncated.
+  std::array<std::uint8_t, kMaxDecodedFrame> scratch{};
   std::array<std::uint8_t, kMaxEncodedFrame> out{};
   std::size_t written = 0;
   CHECK(encode_frame(FrameKind::DataToMesh, 0, 1, 2,
                      ByteView{body.data(), kMaxBodySize + 1},
+                     MutableByteView{scratch.data(), scratch.size()},
                      MutableByteView{out.data(), out.size()}, written)
             .code == StatusCode::InvalidArgument);
+
+  // An undersized scratch is rejected honestly, never truncated into.
+  std::array<std::uint8_t, 64> small_scratch{};
+  CHECK(encode_frame(FrameKind::DataToMesh, 0, 1, 2,
+                     ByteView{body.data(), 128},
+                     MutableByteView{small_scratch.data(), small_scratch.size()},
+                     MutableByteView{out.data(), out.size()}, written)
+            .code == StatusCode::NoCapacity);
 }
 
 void test_frame_codec() {
@@ -475,6 +487,7 @@ struct World {
     cfg.network = 7;
     cfg.node = node;
     cfg.message_session = session;
+    cfg.boot_incarnation = session;  // firmware wires the same NVS counter
     return cfg;
   }
 
@@ -787,6 +800,208 @@ void test_bridge_partial_write() {
   world.stream.max_write = static_cast<std::size_t>(-1);
 }
 
+// ---------------------------------------------------- M1 diagnostics (D1d)
+
+// Collects the first HostOps 0x31 reply the device emits: opens the sealed
+// frame, verifies the inner head, returns payload offset or 0.
+std::size_t diag_reply_at(const HostDriver& host, const CollectSink& sink,
+                          std::array<std::uint8_t, 256>& body,
+                          std::uint16_t& result) {
+  for (const auto& record : sink.frames) {
+    if (record.frame.kind != FrameKind::HostOps) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                   opened)) {
+      continue;
+    }
+    if (opened.size < 4 || opened.data[0] != kHostOpsSchema ||
+        opened.data[1] != static_cast<std::uint8_t>(HostOpsSub::DiagnosticResponse)) {
+      continue;
+    }
+    const std::size_t payload_len =
+        (static_cast<std::size_t>(opened.data[2]) << 8U) | opened.data[3];
+    if (opened.size != 4 + payload_len || payload_len < 12) continue;
+    result = (static_cast<std::uint16_t>(opened.data[4]) << 8U) | opened.data[5];
+    const std::size_t n = payload_len - 12;
+    std::memcpy(body.data(), opened.data + 4 + 12, n);
+    body[n] = 0;
+    return n;
+  }
+  return 0;
+}
+
+// Builds a sealed 0x30 DiagnosticRequest: inner = schema|sub|len16|
+// observer:u64|body.
+std::vector<std::uint8_t> diag_request(HostDriver& host, std::uint64_t request,
+                                       NodeId observer, ByteView body) {
+  std::vector<std::uint8_t> inner(4 + 8 + body.size, 0);
+  inner[0] = kHostOpsSchema;
+  inner[1] = static_cast<std::uint8_t>(HostOpsSub::DiagnosticRequest);
+  inner[2] = static_cast<std::uint8_t>((8 + body.size) >> 8U);
+  inner[3] = static_cast<std::uint8_t>(8 + body.size);
+  write_u64(inner.data() + 4, observer);
+  std::memcpy(inner.data() + 12, body.data, body.size);
+  return host.sealed(FrameKind::HostOps, request,
+                     ByteView{inner.data(), inner.size()});
+}
+
+void test_bridge_diagnostics() {
+  World world;
+  // Diagnostics must be attached BEFORE the handshake so bit5 lands in the
+  // authenticated capability transcript.
+  CHECK_OK(world.bridge.attach_diagnostics());
+  world.n2.set_telemetry_remote(true);
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x5555, 60) != 0);
+  const auto grant = grant_body(16, 32768);
+  world.feed(host.sealed(FrameKind::Credit, 61,
+                         ByteView{grant.data(), grant.size()}), now);
+  world.drain(now);
+  world.device_sink.frames.clear();
+
+  auto pump_mesh = [&](int rounds) {
+    for (int i = 0; i < rounds; ++i) {
+      world.n1.poll(now);
+      world.n2.poll(now);
+      world.net.flush(now);
+      world.drain(now);
+      now += 5;
+    }
+  };
+
+  // 1) Local CapabilitiesQuery (subtype 1, nonce16 + reserved4 = 24 B).
+  {
+    CapabilitiesQuery cap_query{};
+    for (std::size_t i = 0; i < cap_query.nonce.size(); ++i) {
+      cap_query.nonce[i] = static_cast<std::uint8_t>(0xA0 + i);
+    }
+    std::array<std::uint8_t, kCapabilitiesQueryBodySize> query{};
+    CHECK_OK(capabilities_query_encode(
+        cap_query, MutableByteView{query.data(), query.size()}));
+    world.feed(diag_request(host, 62, /*observer=*/1,
+                            ByteView{query.data(), query.size()}), now);
+    pump_mesh(8);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    const std::size_t n = diag_reply_at(host, world.device_sink, body, result);
+    CHECK(n == kCapabilitiesReplyBodySize);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    if (n == kCapabilitiesReplyBodySize) {
+      CapabilitiesReply reply{};
+      CHECK_OK(capabilities_reply_decode(ByteView{body.data(), n}, reply));
+      CHECK(reply.echo_nonce == cap_query.nonce);  // echoed verbatim
+      CHECK(reply.node_boot == 7001);               // n1 boot_incarnation
+      CHECK((reply.features & kCapLocalTelemetryV1) != 0);
+      CHECK((reply.features & kCapForwardV1) != 0);   // relay on + started
+      CHECK((reply.features & kCapRemoteTelemetryV1) == 0);  // n1 not opted in
+      CHECK((reply.features & kCapTransitFailureV1) != 0);
+      CHECK(reply.valid_for_ms == kCapabilitiesValidityMs);
+      world.device_sink.frames.clear();
+    }
+  }
+
+  // 2) Local TelemetryQuery — seed n1's summary for peer 2 with real RX
+  //    traffic first (the sim injects V1 -> honest InjectedTest provenance).
+  {
+    SendOptions opts{};
+    MessageId id{};
+    const std::array<std::uint8_t, 4> msg{{9, 9, 9, 9}};
+    CHECK_OK(world.n2.send(1, ByteView{msg.data(), msg.size()}, opts, now, id));
+    pump_mesh(20);
+
+    TelemetryQuery query{};
+    query.request_id = 0x1234;
+    query.peer = 2;
+    query.length_class = kTelemetryPeerSummaryClass;
+    std::array<std::uint8_t, kTelemetryQueryBodySize> qbody{};
+    CHECK_OK(telemetry_query_encode(
+        query, MutableByteView{qbody.data(), qbody.size()}));
+    world.feed(diag_request(host, 63, /*observer=*/1,
+                            ByteView{qbody.data(), qbody.size()}), now);
+    pump_mesh(8);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    const std::size_t n = diag_reply_at(host, world.device_sink, body, result);
+    CHECK(n == kTelemetrySnapshotBodySize);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    if (n == kTelemetrySnapshotBodySize) {
+      TelemetrySnapshot snap{};
+      CHECK_OK(telemetry_snapshot_decode(ByteView{body.data(), n}, snap));
+      CHECK(snap.request_id == 0x1234 && snap.observer == 1 && snap.peer == 2);
+      CHECK((snap.validity & kTelemetrySourceInjectedTest) != 0);
+      world.device_sink.frames.clear();
+    }
+  }
+
+  // 3) Remote TelemetryQuery: observer=2 crosses the routed lane — the
+  //    reply lands on the bridge's DiagnosticSink and resolves the pending
+  //    slot under the SAME usb request id.
+  {
+    TelemetryQuery query{};
+    query.request_id = 0xBEEF;
+    query.peer = 1;
+    query.length_class = kTelemetryPeerSummaryClass;
+    std::array<std::uint8_t, kTelemetryQueryBodySize> qbody{};
+    CHECK_OK(telemetry_query_encode(
+        query, MutableByteView{qbody.data(), qbody.size()}));
+    world.feed(diag_request(host, 64, /*observer=*/2,
+                            ByteView{qbody.data(), qbody.size()}), now);
+    pump_mesh(40);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    const std::size_t n = diag_reply_at(host, world.device_sink, body, result);
+    CHECK(n == kTelemetrySnapshotBodySize);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    if (n == kTelemetrySnapshotBodySize) {
+      TelemetrySnapshot snap{};
+      CHECK_OK(telemetry_snapshot_decode(ByteView{body.data(), n}, snap));
+      // The bridge mints the mesh correlation id — the host-supplied
+      // 0xBEEF is never forwarded, so a replayed request cannot collide
+      // with a live slot (04 §USB correlation).
+      CHECK(snap.request_id != 0xBEEF && snap.request_id != 0 &&
+            snap.observer == 2 && snap.peer == 1);
+      world.device_sink.frames.clear();
+    }
+  }
+
+  // 4) A remote observer with no route gets an immediate honest NoRoute —
+  //    never a pending slot that can only expire.
+  {
+    TelemetryQuery query{};
+    query.request_id = 0x77;
+    query.peer = 1;
+    query.length_class = kTelemetryPeerSummaryClass;
+    std::array<std::uint8_t, kTelemetryQueryBodySize> qbody{};
+    CHECK_OK(telemetry_query_encode(
+        query, MutableByteView{qbody.data(), qbody.size()}));
+    world.feed(diag_request(host, 65, /*observer=*/99,
+                            ByteView{qbody.data(), qbody.size()}), now);
+    pump_mesh(8);
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    diag_reply_at(host, world.device_sink, body, result);
+    CHECK(result == static_cast<std::uint16_t>(ConfigOpsResult::NoRoute));
+    world.device_sink.frames.clear();
+  }
+
+  // 5) Malformed body (short prefix) -> Invalid, not a crash.
+  {
+    const std::array<std::uint8_t, 2> bad{{1, 3}};
+    world.feed(diag_request(host, 66, /*observer=*/1,
+                            ByteView{bad.data(), bad.size()}), now);
+    pump_mesh(8);
+    // 2-byte body fails decode_diagnostic_request's min bound entirely ->
+    // ProtocolError Error frame, not a 0x31.
+    std::array<std::uint8_t, 256> body{};
+    std::uint16_t result = 0xFFFF;
+    diag_reply_at(host, world.device_sink, body, result);
+    CHECK(result == 0xFFFF);
+    world.device_sink.frames.clear();
+  }
+}
+
 // ------------------------------------------------------------- golden files
 
 using Fields = std::map<std::string, std::string>;
@@ -947,6 +1162,7 @@ int main() {
   test_bridge_session_lifecycle();
   test_bridge_idempotent_send();
   test_bridge_partial_write();
+  test_bridge_diagnostics();
   test_golden_session();
   if (failures != 0) {
     std::fprintf(stderr, "%d usb checks failed\n", failures);

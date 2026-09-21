@@ -117,6 +117,19 @@ class SimNetwork {
       } else {
         ++dropped;
       }
+      {
+        // The simulated driver emits the same TX-complete observation the
+        // real runtime's callback produces — driver service is measured
+        // here, not inside on_radio_tx_result (02-telemetry §2.3).
+        routeloom::RadioTxObservation obs{};
+        obs.peer = pending.to;
+        obs.submitted_us = static_cast<std::uint64_t>(now) * 1000u;
+        obs.completed_us = obs.submitted_us + 50u;
+        obs.outcome = success ? routeloom::RadioTxOutcome::Success
+                              : routeloom::RadioTxOutcome::Failure;
+        obs.provenance = routeloom::ObservationProvenance::LocalDriver;
+        nodes.at(pending.from)->note_radio_tx(obs, now);
+      }
       nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
       if (success) {
         nodes.at(pending.to)->on_radio_receive(
@@ -185,6 +198,7 @@ struct SimWorld {
     config.network = network_id;
     config.node = id;
     config.message_session = 100 + static_cast<std::uint32_t>(id);
+    config.boot_incarnation = 0xB000 + static_cast<std::uint32_t>(id);
     config.route_generation = generation;
     config.route_advertisement_period_ms = adv_ms;
     config.route_lifetime_ms = life_ms;

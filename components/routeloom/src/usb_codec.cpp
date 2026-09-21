@@ -90,7 +90,8 @@ Status cobs_decode(const ByteView input, const MutableByteView out,
 
 Status encode_frame(const FrameKind kind, const std::uint16_t flags,
                     const std::uint64_t session, const std::uint64_t request,
-                    const ByteView body, const MutableByteView out,
+                    const ByteView body, const MutableByteView scratch,
+                    const MutableByteView out,
                     std::size_t& written) noexcept {
   written = 0;
   if (body.size > kMaxBodySize || body.size > 0xFFFFU) {
@@ -99,8 +100,13 @@ Status encode_frame(const FrameKind kind, const std::uint16_t flags,
   if (out.data == nullptr || out.size < kMaxEncodedFrame) {
     return Status::error(StatusCode::NoCapacity, "frame output too small");
   }
-  std::array<std::uint8_t, kMaxDecodedFrame> decoded{};
-  ByteWriter writer(MutableByteView{decoded.data(), decoded.size()});
+  // The caller owns the decoded-staging buffer so this frame path carries
+  // no multi-KB stack buffer on the (bounded) calling task.
+  const std::size_t decoded_need = kHeaderSize + body.size + kCrcSize;
+  if (scratch.data == nullptr || scratch.size < decoded_need) {
+    return Status::error(StatusCode::NoCapacity, "frame scratch too small");
+  }
+  ByteWriter writer(MutableByteView{scratch.data, decoded_need});
   Status status = writer.write_u32(kMagic);
   if (status) status = writer.write_u8(kProtocolVersion);
   if (status) status = writer.write_u8(static_cast<std::uint8_t>(kind));
@@ -110,11 +116,11 @@ Status encode_frame(const FrameKind kind, const std::uint16_t flags,
   if (status) status = writer.write_u16(static_cast<std::uint16_t>(body.size));
   if (status) status = writer.write_bytes(body);
   if (!status) return status;
-  const std::uint32_t crc = crc32_iso_hdlc(ByteView{decoded.data(), writer.size()});
+  const std::uint32_t crc = crc32_iso_hdlc(ByteView{scratch.data, writer.size()});
   status = writer.write_u32(crc);
   if (!status) return status;
   std::size_t encoded = 0;
-  status = cobs_encode(ByteView{decoded.data(), writer.size()}, out, encoded);
+  status = cobs_encode(ByteView{scratch.data, writer.size()}, out, encoded);
   if (!status) return status;
   out.data[encoded++] = 0;  // delimiter
   written = encoded;

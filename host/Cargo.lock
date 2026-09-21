@@ -197,6 +197,7 @@ dependencies = [
  "routeloom-peercred",
  "routeloom-protocol",
  "routeloom-tui",
+ "routeloom-wire",
  "rusqlite",
 ]
 

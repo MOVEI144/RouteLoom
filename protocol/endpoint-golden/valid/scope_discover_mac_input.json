@@ -1,0 +1,12 @@
+{
+  "body_prefix_hex": "0201010000000007",
+  "codec": "scope_discover_mac_input",
+  "destination_mac_hex": "ffffffffffff",
+  "encoded_hex": "526f7574654c6f6f6d2f44534b2f76312f646973636f766572000000000000000001020000000011ffffffffffff524c44310101002c004400004bbe53ac0000000000000011000102030405060708090a0b0c0d0e0f000000050201010000000007",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "header_hex": "524c44310101002c004400004bbe53ac0000000000000011000102030405060708090a0b0c0d0e0f00000005",
+  "name": "scope_discover_mac_input",
+  "network": 1,
+  "requester_mac_hex": "020000000011"
+}

@@ -1,0 +1,10 @@
+{
+  "codec": "scope_discover",
+  "encoded_hex": "02010100000000076c4a8a95e7617a2ae3792c9d617bc625",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "generation": 7,
+  "name": "scope_discover_v2",
+  "scope_class": 1,
+  "tag_hex": "6c4a8a95e7617a2ae3792c9d617bc625"
+}

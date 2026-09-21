@@ -1,0 +1,8 @@
+{
+  "codec": "control_challenge_query",
+  "encoded_hex": "010100010001000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_cq_zero_nonce",
+  "note": "client nonce must be nonzero"
+}

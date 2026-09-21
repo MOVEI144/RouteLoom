@@ -74,8 +74,13 @@ Status cobs_encode(ByteView input, MutableByteView out, std::size_t& written) no
 Status cobs_decode(ByteView input, MutableByteView out, std::size_t& written) noexcept;
 
 // Encodes one full wire frame (header + body + CRC, COBS, delimiter).
+// `scratch` stages the decoded (pre-COBS) bytes: it must hold
+// kHeaderSize + body.size + kCrcSize bytes and must not alias `body` or
+// `out`. Caller-owned so the staging buffer can live in .bss (a member of a
+// static bridge) instead of task stack — this runs on every emitted frame.
 Status encode_frame(FrameKind kind, std::uint16_t flags, std::uint64_t session,
-                    std::uint64_t request, ByteView body, MutableByteView out,
+                    std::uint64_t request, ByteView body,
+                    MutableByteView scratch, MutableByteView out,
                     std::size_t& written) noexcept;
 
 // Validates and splits one decoded (post-COBS) buffer. `out.body` aliases

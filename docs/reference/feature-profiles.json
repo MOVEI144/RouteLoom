@@ -306,27 +306,63 @@
       "default_enabled": false,
       "evidence": null
     },
-    "explicit_gateway": {
+    "discovery_scope": {
       "design_target": true,
       "initial_target": true,
-      "implemented": false,
-      "host_tested": false,
-      "build_tested": false,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
       "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
-      "evidence": null
+      "evidence": [
+        "components/routeloom/include/routeloom/discovery_scope.hpp",
+        "components/routeloom/src/discovery_scope.cpp",
+        "components/routeloom/src/discovery.cpp",
+        "tests/cpp/test_scope.cpp",
+        "docs/design/scope-gateway-config"
+      ]
+    },
+    "explicit_gateway": {
+      "design_target": true,
+      "initial_target": true,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
+      "hardware_tested": false,
+      "qualified": false,
+      "default_enabled": false,
+      "evidence": [
+        "components/routeloom/include/routeloom/gateway.hpp",
+        "components/routeloom/src/gateway.cpp",
+        "components/routeloom/src/usb_bridge.cpp",
+        "tests/cpp/test_gateway.cpp",
+        "tests/cpp/test_host_ops.cpp",
+        "host/routeloom-host/src/dispatch.rs",
+        "host/routeloom-host/src/api1.rs",
+        "docs/design/scope-gateway-config"
+      ]
     },
     "small_remote_config": {
       "design_target": true,
       "initial_target": true,
-      "implemented": false,
-      "host_tested": false,
-      "build_tested": false,
+      "implemented": true,
+      "host_tested": true,
+      "build_tested": true,
       "hardware_tested": false,
       "qualified": false,
       "default_enabled": false,
-      "evidence": null
+      "evidence": [
+        "components/routeloom/include/routeloom/config.hpp",
+        "components/routeloom/src/config.cpp",
+        "components/routeloom/include/routeloom/config_wire.hpp",
+        "components/routeloom/src/config_wire.cpp",
+        "tests/cpp/test_config.cpp",
+        "tests/cpp/test_config_wire.cpp",
+        "host/routeloom-host/src/config.rs",
+        "host/routeloom-host/src/api1.rs",
+        "docs/design/scope-gateway-config"
+      ]
     },
     "adaptive_lr500": {
       "design_target": true,

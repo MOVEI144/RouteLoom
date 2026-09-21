@@ -33,15 +33,48 @@ namespace routeloom::usb {
 // answers HostOps frames with Unsupported unless this bit is configured.
 constexpr std::uint32_t kCapHostOpsV1 = 1u << 2;
 
+// scope-gateway-config P3 (docs/design/scope-gateway-config/05-wire-api.md
+// §5.6): the device serves the Gateway HostOps subcommands 0x10-0x13 —
+// host endpoint registration, scope-2 ReceiveLog ingress + ACK, and
+// unregister. Advertised separately from host_ops_v1 so a bridge build can
+// expose the dispatch window without the gateway host lane.
+constexpr std::uint32_t kCapGatewayEndpointV1 = 1u << 3;
+
+// scope-gateway-config P5 (docs/design/scope-gateway-config/05-wire-api.md
+// §5.6): the device serves the Config HostOps subcommands 0x20-0x23 —
+// status/challenge queries and the ConfigPermit object transfer toward a
+// target. Advertised separately so a bridge build can expose the gateway
+// host lane without the remote-config endpoint.
+constexpr std::uint32_t kCapConfigEndpointV1 = 1u << 4;
+
+// m1-completion D1d (04-cross-cutting §USB proposal): the device serves the
+// Diagnostic HostOps subcommands 0x30/0x31 — a DiagnosticRequest tunnels a
+// bounded diagnostic body (local CapabilitiesQuery or local/remote
+// TelemetryQuery) and the DiagnosticResponse carries the outcome. Advertised
+// only when a diagnostic handler is attached; bound into the authenticated
+// Hello transcript like the other capability bits.
+constexpr std::uint32_t kCapM1DiagnosticsV1 = 1u << 5;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 
-// 03-send-api.md §6: registered once, never renumbered locally.
+// 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
+// §5.6 (0x10-0x13, 0x20-0x23): registered once, never renumbered locally.
 enum class HostOpsSub : std::uint8_t {
   Submit = 0x01,
   QueryDispatch = 0x02,
   RetireThrough = 0x03,
   Skip = 0x04,
   TimeSample = 0x05,
+  HostRegister = 0x10,      // H→G request: register/renew the host endpoint
+  GatewayIngress = 0x11,    // G→H request: scope-2 payload for ReceiveLog
+  GatewayIngressAck = 0x12, // H→G response: storage outcome for 0x11
+  HostUnregister = 0x13,    // H→G request: drop the current registration
+  ConfigQuery = 0x20,       // H→G request: status query -> async 0x22 reply
+  ConfigPermit = 0x21,      // H→G request: permit transfer -> async 0x21 reply
+  ConfigStatus = 0x22,      // G→H reply: ControlStatus for a 0x20 query
+  ConfigChallenge = 0x23,   // H→G query / G→H reply: ControlChallenge exchange
+  DiagnosticRequest = 0x30, // H→G request: observer:u64 || diagnostic body
+  DiagnosticResponse = 0x31,// G→H reply: result/observer/body_len || body
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -64,6 +97,40 @@ enum class HostOpsResult : std::uint8_t {
   Unsupported = 13,  // valid request, capability not enabled (APPLIED, ...)
 };
 
+// Typed result/outcome for the Gateway HostOps family (0x10-0x13 replies
+// and the 0x12 ingress ACK outcome). Values are the design's fixed set —
+// a u16 on the wire so the family can grow without colliding with
+// HostOpsResult. STORAGE names "the host could not persist"; INDETERMINATE
+// names "the host could not prove the outcome" — neither is a success.
+enum class GatewayOpsResult : std::uint8_t {
+  Ok = 0,
+  Busy = 1,           // host capacity/rate exhausted: retryable
+  Stale = 2,          // token/session from an old incarnation
+  Denied = 3,         // authenticated but not authorized for this
+  Unsupported = 4,    // capability not enabled on this device
+  Invalid = 5,        // malformed or field-inconsistent request
+  Storage = 6,        // ReceiveLog storage failed — never ACKed as stored
+  Indeterminate = 7,  // outcome cannot be proven (e.g. torn exchange)
+};
+
+// Typed result for the Config HostOps family (0x21/0x22/0x23 replies), a
+// u16 on the wire so the family can grow without colliding with the
+// gateway/host_ops enums. Ok means the device proved the mesh step it was
+// asked for — a query answer or an assembled permit object. It is NEVER a
+// config verdict: the permit's own phase/reason is a separate status read.
+// INDETERMINATE names "the outcome cannot be proven" — never a success and
+// never a silent retry trigger.
+enum class ConfigOpsResult : std::uint16_t {
+  Ok = 0,             // answered / object assembled at the target
+  Busy = 1,           // a config operation is already in flight
+  Denied = 3,         // authenticated but not authorized (ACL/capability)
+  Unsupported = 4,    // the config endpoint is not enabled on this device
+  Invalid = 5,        // malformed request or field-inconsistent
+  Indeterminate = 7,  // outcome cannot be proven (deadline, torn exchange)
+  NoRoute = 8,        // no mesh route to the target
+  Timeout = 9,        // the target did not answer inside the window
+};
+
 constexpr std::size_t kBootLeaseSize = 16;
 constexpr std::size_t kDispatcherIdSize = 16;
 constexpr std::size_t kOperationIdSize = 24;  // store lineage 16B + seq 8B
@@ -72,11 +139,16 @@ constexpr std::size_t kCanonicalHashSize = 32;
 // SUBMIT inner: schema:u8, sub:u8, boot_lease:16, dispatcher:16, seq:u64,
 // operation_id:24, canonical_hash:32, device_deadline:u64,
 // canonical_length:u16, canonical_request. Fixed part 108B (design §6,
-// contracts.json wire.usb_submit_fixed_bytes), canonical 26..154B.
+// contracts.json wire.usb_submit_fixed_bytes); canonical 26..154B for
+// schema 1, 60..156B for schema 2 (gateway destination extension).
 constexpr std::size_t kSubmitFixedSize = 108;
-constexpr std::size_t kSubmitMaxSize = 262;  // 108 + 26 + 128
+constexpr std::size_t kSubmitMaxSize = 264;  // 108 + 60 + 96
 constexpr std::size_t kCanonicalMinSize = 26;
-constexpr std::size_t kCanonicalMaxSize = 154;  // 26 + 128 payload
+constexpr std::size_t kCanonicalMaxSize = 156;  // schema2: 60 + 96 payload
+// Schema-2 gateway destination extension (05 §5.4): scope + reserved +
+// token16 + gateway_boot8 + egress_gateway8 inserted before payload_len.
+constexpr std::size_t kCanonicalGatewayFixedSize = 60;
+constexpr std::size_t kCanonicalGatewayPayloadMax = 96;
 // QUERY_DISPATCH / RETIRE_THROUGH / SKIP share one shape: schema, sub,
 // boot_lease:16, dispatcher:16, seq_or_through:u64.
 constexpr std::size_t kLaneRequestSize = 42;
@@ -154,10 +226,17 @@ Status encode_time_sample_request(const TimeSampleRequest& request,
 // Parsed canonical send request (03 §3): schema:u8=1, network:u32,
 // dest_kind:u8, destination:u64, delivery:u8, priority:u8, policy:u8,
 // storage:u8, ttl:u32, hop:u8, persist:u8, payload_len:u16, payload.
+// Schema 2 (scope-gateway-config/05-wire-api.md §5.4) is REQUIRED for
+// dest_kind=1: the same 26B head with a 34B extension inserted before
+// payload_len — scope:u8, reserved:u8, token:16, gateway_boot:u64,
+// egress_gateway:u64 — so the fixed part is 60B and payload is ≤96B.
+// A schema-1 canonical carrying dest_kind=1 is malformed, never silently
+// reinterpreted.
 struct CanonicalFields {
+  std::uint8_t schema{1};
   std::uint32_t network{0};
   std::uint8_t dest_kind{0};  // 0 node, 1 gateway
-  NodeId destination{kInvalidNodeId};
+  NodeId destination{kInvalidNodeId};  // schema2: the FINAL gateway node
   std::uint8_t delivery{0};  // 0 best-effort, 1 reliable, 2 applied
   std::uint8_t priority{0};
   std::uint8_t storage{0};
@@ -165,13 +244,22 @@ struct CanonicalFields {
   std::uint8_t hop_limit{0};
   bool persist_sleep{false};
   ByteView payload{};
+  // Schema-2 gateway extension (zero when schema==1 / dest_kind==0).
+  std::uint8_t gateway_scope{0};  // 1 GATEWAY_SDK_RAM, 2 HOST_RECEIVE_RAM
+  std::array<std::uint8_t, 16> gateway_token{};
+  std::uint64_t gateway_boot{0};
+  NodeId egress_gateway{kInvalidNodeId};
 };
 
-// Strict structural parse: exact 26+payload_len length, schema 1, known enum
-// ranges, reserved node addresses rejected for node destinations. Delivery /
-// priority / persist values that are structurally valid but not enabled in
-// this phase are REPORTED, not rejected — the caller gates them to
-// HostOpsResult::Unsupported (never silently downgraded).
+// Strict structural parse: exact 26+payload_len (schema 1) or
+// 60+payload_len (schema 2) length, known enum ranges, reserved node
+// addresses rejected for node destinations. Delivery / priority / persist
+// values that are structurally valid but not enabled in this phase are
+// REPORTED, not rejected — the caller gates them to
+// HostOpsResult::Unsupported (never silently downgraded). Schema-2 range
+// rules: reserved==0, scope in {1,2}, payload_len ≤96, token/gateway_boot/
+// egress non-reserved; token↔registration and egress↔node binding are the
+// caller's job (they need session state the parser does not have).
 Status parse_canonical_request(ByteView canonical, CanonicalFields& out) noexcept;
 
 // Gateway dispatch window: the short-term per-lane record of dispatch_seq
@@ -204,12 +292,16 @@ class DispatchWindow {
 
   // Evidence stage (01 §5: distinct proofs, never one bool). Best-effort
   // mesh completion is MacAttemptReported — promoting it to EndSdkReceived
-  // would lie about an end receipt that never existed.
+  // would lie about an end receipt that never existed. HostRamReceived is
+  // the scope-2 gateway terminal: the verified Service Receipt for
+  // HOST_RECEIVE_RAM — the registered host's ReceiveLog stored the payload
+  // (distinct from a gateway-local SDK mailbox receipt).
   enum class Evidence : std::uint8_t {
     None = 0,
     GatewayAccepted = 1,
     MacAttemptReported = 2,
     EndSdkReceived = 3,
+    HostRamReceived = 4,
   };
 
   struct Slot {
@@ -320,6 +412,34 @@ class DispatchWindow {
       const std::array<std::uint8_t, kOperationIdSize>& operation_id,
       std::uint8_t delivery, std::uint32_t msg_session,
       std::uint64_t msg_seq) noexcept;
+
+  // Gateway sends (schema 2): the position is admitted for gateway
+  // dispatch BEFORE the wire MessageKey exists — the endpoint resolve must
+  // complete first. Records a Sent slot with msg_valid=false and binds the
+  // lane (the position is committed to a send). bind_message fills the key
+  // once gateway_->send issues it; QUERY honestly reports Sent without a
+  // key while the resolve is in flight.
+  bool record_pending(
+      const std::array<std::uint8_t, kDispatcherIdSize>& dispatcher,
+      std::uint64_t dispatch_seq,
+      const std::array<std::uint8_t, kCanonicalHashSize>& hash,
+      const std::array<std::uint8_t, kOperationIdSize>& operation_id,
+      std::uint8_t delivery) noexcept;
+
+  // Fills the wire MessageKey on a record_pending slot once the gateway
+  // submit is issued. Only a Sent slot with msg_valid=false may be bound —
+  // any other state returns false (defensive).
+  bool bind_message(std::uint64_t dispatch_seq, std::uint32_t msg_session,
+                    std::uint64_t msg_seq) noexcept;
+
+  // Terminal outcome for a gateway send, correlated by window position —
+  // never by a message key that could collide with an unrelated slot.
+  // `received` is the verified Service Receipt; `host_receive_ram` says
+  // the receipt's scope was HOST_RECEIVE_RAM (host ReceiveLog storage),
+  // which becomes the HostRamReceived evidence rather than
+  // EndSdkReceived.
+  bool note_gateway_outcome(std::uint64_t dispatch_seq, bool received,
+                            bool host_receive_ram) noexcept;
 
   // Read-only lookup for QUERY_DISPATCH: fills `slot` on Found. Never
   // mutates, never extends anything, never re-executes.
@@ -432,5 +552,203 @@ struct TimeSampleResponse {
 Status encode_time_sample_response(const TimeSampleResponse& response,
                                    MutableByteView out, std::size_t& written) noexcept;
 Status decode_time_sample_response(ByteView inner, TimeSampleResponse& out) noexcept;
+
+// --- Gateway host endpoint subcommands (scope-gateway-config/05-wire-api.md
+// §5.6, P3) -------------------------------------------------------------
+//
+// These four subcommands share a different inner common form than the
+// 0x01-0x05 family: schema:u8=1, sub:u8, payload_len:u16, payload. Every
+// request gets a same-sub reply carrying a u16 GatewayOpsResult first —
+// except 0x12, which IS the reply to a device-issued 0x11 (the frame-level
+// request id correlates them).
+constexpr std::size_t kGatewayInnerHeadSize = 4;
+
+// 0x10 HOST_REGISTER (H→G): network:u64, host_boot:u64, lease_ms:u32.
+struct HostRegisterRequest {
+  std::uint64_t network{0};
+  std::uint64_t host_boot{0};
+  std::uint32_t lease_ms{0};
+};
+constexpr std::size_t kHostRegisterRequestPayload = 20;
+
+// 0x10 reply: result:u16, token:16, gateway_boot:u64, host_digest:32,
+// lease_ms:u32. The token binds principal + host boot + USB session and is
+// the value the schema-2 canonical carries as gateway_token.
+struct HostRegisterResponse {
+  std::uint16_t result{0};
+  std::array<std::uint8_t, 16> token{};
+  std::uint64_t gateway_boot{0};
+  std::array<std::uint8_t, 32> host_digest{};
+  std::uint32_t lease_ms{0};
+};
+constexpr std::size_t kHostRegisterResponsePayload = 62;
+
+// 0x11 GATEWAY_INGRESS (G→H, device-issued): the canonical Service Submit
+// prefix:32, the referenced MessageKey:20 (origin:u64, session:u32,
+// sequence:u64), the request digest:32 (SHA-256 over prefix+payload), and
+// the payload itself (0..96B). The host recomputes the digest before
+// storing — a mismatched digest can never produce a success ACK.
+struct GatewayIngress {
+  std::array<std::uint8_t, 32> submit_prefix{};
+  std::uint64_t ref_origin{0};
+  std::uint32_t ref_session{0};
+  std::uint64_t ref_sequence{0};
+  std::array<std::uint8_t, 32> request_digest{};
+  ByteView payload{};  // borrows the frame body (decode) or caller bytes
+};
+constexpr std::size_t kGatewayIngressFixedPayload = 84;   // 32+20+32, no payload
+constexpr std::size_t kGatewayIngressMaxPayload = 180;    // +96 payload
+
+// 0x12 GATEWAY_INGRESS_ACK (H→G): session token:16, ref MessageKey:20,
+// request digest:32, outcome:u16 (GatewayOpsResult). The device verifies
+// all bound fields before trusting the outcome — a wrong key/digest/token
+// can never mark a record stored.
+struct GatewayIngressAck {
+  std::array<std::uint8_t, 16> token{};
+  std::uint64_t ref_origin{0};
+  std::uint32_t ref_session{0};
+  std::uint64_t ref_sequence{0};
+  std::array<std::uint8_t, 32> request_digest{};
+  std::uint16_t outcome{0};
+};
+constexpr std::size_t kGatewayIngressAckPayload = 70;
+
+// 0x13 HOST_UNREGISTER (H→G): token:16. Only the registration bound to the
+// CURRENT session may be released — a stale token can never revoke the
+// replacement session's endpoint.
+struct HostUnregisterRequest {
+  std::array<std::uint8_t, 16> token{};
+};
+constexpr std::size_t kHostUnregisterRequestPayload = 16;
+
+// 0x13 reply: result:u16.
+struct HostUnregisterResponse {
+  std::uint16_t result{0};
+};
+constexpr std::size_t kHostUnregisterResponsePayload = 2;
+
+Status decode_host_register(ByteView inner, HostRegisterRequest& out) noexcept;
+Status encode_host_register_response(const HostRegisterResponse& response,
+                                     MutableByteView out,
+                                     std::size_t& written) noexcept;
+Status encode_host_register(const HostRegisterRequest& request,
+                            MutableByteView out, std::size_t& written) noexcept;
+Status decode_host_register_response(ByteView inner,
+                                     HostRegisterResponse& out) noexcept;
+
+Status encode_gateway_ingress(const GatewayIngress& request,
+                              MutableByteView out, std::size_t& written) noexcept;
+Status decode_gateway_ingress(ByteView inner, GatewayIngress& out) noexcept;
+Status encode_gateway_ingress_ack(const GatewayIngressAck& ack,
+                                  MutableByteView out,
+                                  std::size_t& written) noexcept;
+Status decode_gateway_ingress_ack(ByteView inner, GatewayIngressAck& out) noexcept;
+
+Status decode_host_unregister(ByteView inner, HostUnregisterRequest& out) noexcept;
+Status encode_host_unregister_response(const HostUnregisterResponse& response,
+                                       MutableByteView out,
+                                       std::size_t& written) noexcept;
+Status encode_host_unregister(const HostUnregisterRequest& request,
+                              MutableByteView out, std::size_t& written) noexcept;
+Status decode_host_unregister_response(ByteView inner,
+                                       HostUnregisterResponse& out) noexcept;
+
+// --- Config endpoint subcommands (scope-gateway-config/05-wire-api.md §5.6,
+// P5) ---------------------------------------------------------------------
+//
+// These four share the gateway family's inner common form — schema:u8=1,
+// sub:u8, payload_len:u16, payload — but the request/reply relationship is
+// ASYNC over the mesh: the device forwards the query/transfer, then reports
+// once under the same frame-level request id. 0x20's reply is the separate
+// 0x22 ConfigStatus subcommand; 0x21 and 0x23 answer under their own sub.
+// Every reply carries a u16 ConfigOpsResult first: Ok only means the mesh
+// step was proven (a query answer or an assembled permit object) — never a
+// config verdict.
+//
+// 0x20 CONFIG_QUERY (H→G): target:u64, config_namespace:u16, operation_id:16.
+//   Async reply -> 0x22 CONFIG_STATUS.
+struct ConfigQueryRequest {
+  NodeId target{kInvalidNodeId};
+  std::uint16_t config_namespace{0};
+  std::array<std::uint8_t, 16> operation_id{};
+};
+constexpr std::size_t kConfigQueryRequestPayload = 26;
+
+// 0x23 CONFIG_CHALLENGE (H→G query): target:u64, config_namespace:u16,
+//   schema:u16, client_nonce:16. Async reply -> 0x23 CONFIG_CHALLENGE.
+struct ConfigChallengeRequest {
+  NodeId target{kInvalidNodeId};
+  std::uint16_t config_namespace{0};
+  std::uint16_t schema{0};
+  std::array<std::uint8_t, 16> client_nonce{};
+};
+constexpr std::size_t kConfigChallengeRequestPayload = 28;
+
+// 0x21 CONFIG_PERMIT (H→G): target:u64, permit bytes (1..kConfigPermitMax).
+//   Async reply -> 0x21 CONFIG_PERMIT (result only, no body).
+struct ConfigPermitRequest {
+  NodeId target{kInvalidNodeId};
+  ByteView permit{};  // borrows the decoded body (decode) or caller bytes
+};
+// The signed-permit object bound: matches the device ConfigPermit kind-3
+// object ceiling (config_wire / autonomy object budget).
+constexpr std::size_t kConfigPermitMax = 1024;
+
+// Shared reply shape for 0x21/0x22/0x23: result:u16, target:u64, then an
+// optional body — the raw ControlStatus (72 B) for a 0x22 reply or the raw
+// ControlChallenge (92 B) for a 0x23 reply on Ok; empty on any failure and
+// always for the 0x21 reply. The host decodes the body with the endpoint
+// codec; the device forwards it verbatim.
+struct ConfigReply {
+  std::uint16_t result{0};  // ConfigOpsResult
+  NodeId target{kInvalidNodeId};
+  ByteView body{};  // 0 / 72 / 92 bytes depending on sub+result
+};
+constexpr std::size_t kConfigReplyFixedPayload = 10;   // result + target
+constexpr std::size_t kConfigStatusBodySize = 72;      // endpoint::ControlStatus
+constexpr std::size_t kConfigChallengeBodySize = 92;   // endpoint::ControlChallenge
+
+Status decode_config_query(ByteView inner, ConfigQueryRequest& out) noexcept;
+Status encode_config_query(const ConfigQueryRequest& request, MutableByteView out,
+                           std::size_t& written) noexcept;
+Status decode_config_challenge(ByteView inner, ConfigChallengeRequest& out) noexcept;
+Status encode_config_challenge(const ConfigChallengeRequest& request,
+                               MutableByteView out, std::size_t& written) noexcept;
+Status decode_config_permit(ByteView inner, ConfigPermitRequest& out) noexcept;
+Status encode_config_permit(const ConfigPermitRequest& request, MutableByteView out,
+                            std::size_t& written) noexcept;
+// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge; the body
+// length the codec accepts is derived from it (0 for 0x21; 0-or-fixed for
+// the query replies).
+Status encode_config_reply(HostOpsSub sub, const ConfigReply& reply,
+                           MutableByteView out, std::size_t& written) noexcept;
+Status decode_config_reply(ByteView inner, HostOpsSub sub, ConfigReply& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Diagnostic HostOps family (m1-completion 04-cross-cutting §USB proposal).
+//
+// 0x30 DIAGNOSTIC_REQUEST (H→G): observer:u64 || diagnostic_body. The body is
+//   a type-48 wire body INCLUDING its 4-byte prefix: a CapabilitiesQuery
+//   (4B) is answered locally only — link-only discovery is never tunnelled
+//   as a remote mesh query; a TelemetryQuery (24B) is answered locally when
+//   observer == this node, else forwarded end-protected and the response
+//   lands asynchronously on 0x31 under the same frame-level request id.
+// 0x31 DIAGNOSTIC_RESPONSE (G→H): result:u16 || observer:u64 || body_len:u16
+//   || body. Body is the verbatim diagnostic body — CapabilitiesReply (40B),
+//   TelemetrySnapshot (128B) or DiagnosticReject (24B); empty on a local
+//   failure result. Result uses the ConfigOpsResult u16 space.
+struct DiagnosticRequestView {
+  NodeId observer{kInvalidNodeId};
+  ByteView body{};  // borrows `inner`; includes the 4-byte diagnostic prefix
+};
+constexpr std::size_t kDiagnosticRequestFixed = 8;    // observer:u64
+constexpr std::size_t kDiagnosticReplyFixed = 12;     // result + observer + len
+constexpr std::size_t kDiagnosticReplyMaxBody = 128;  // TelemetrySnapshot
+
+Status decode_diagnostic_request(ByteView inner,
+                                 DiagnosticRequestView& out) noexcept;
+Status encode_diagnostic_reply(std::uint16_t result, NodeId observer,
+                               ByteView body, MutableByteView out,
+                               std::size_t& written) noexcept;
 
 }  // namespace routeloom::usb

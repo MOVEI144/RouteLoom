@@ -113,6 +113,16 @@ jobs:
         # Compile-time coverage only — not RF validation, and Observe never
         # moves the radio. AutoGuarded stays opt-in (no kconfig exposes it).
         autonomy: [off]
+        # features selects the scope-gateway-config opt-ins (P6):
+        #   endpoints_on     — bridge_node with the USB capability bits
+        #                      gateway_endpoint_v1 (bit3) + config_endpoint_v1
+        #                      (bit4) set, so both endpoints attach.
+        #   config_target_on — reference_node with CONFIG_ROUTELOOM_CONFIG=y,
+        #                      the NVS-journal ConfigTarget path.
+        # The base matrix keeps every feature OFF (defaults), so both
+        # branches compile. Compile-time coverage only — never a hardware
+        # or qualification claim.
+        features: [off]
         exclude:
           - app: bridge_node
             profile: deep_sleep
@@ -121,6 +131,32 @@ jobs:
             target: esp32c3
             profile: normal
             autonomy: observe
+            features: off
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: endpoints_on
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: config_target_on
+          # Paired bench cells: two ESP32-C3 boards flashed as a real
+          # 2-node mesh (static neighbor + RLD1 discovery lane running
+          # alongside). autonomy=discover enables CONFIG_ROUTELOOM_DISCOVERY
+          # without the migration lane. The PEER_MAC values are the bench
+          # boards' hardware MACs — dev fixtures, not secrets.
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: discover
+            features: paired_bridge
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: discover
+            features: paired_target
     container:
       image: espressif/idf:v6.0.3
     steps:
@@ -143,6 +179,32 @@ jobs:
           if [ '${{ matrix.autonomy }}' = observe ]; then
             printf 'CONFIG_ROUTELOOM_DISCOVERY=y\nCONFIG_ROUTELOOM_MIGRATION=1\n' >> sdkconfig
           fi
+          if [ '${{ matrix.autonomy }}' = discover ]; then
+            printf 'CONFIG_ROUTELOOM_DISCOVERY=y\n' >> sdkconfig
+          fi
+          if [ '${{ matrix.features }}' = paired_bridge ]; then
+            # Bench pair node 1: USB gateway/bridge talking to node 2.
+            printf 'CONFIG_ROUTELOOM_CAPABILITY=0x1f\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_NODE_ID=0x1\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_PEER_NODE_ID=0x2\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:7a:b5:60"\n' >> sdkconfig
+          fi
+          if [ '${{ matrix.features }}' = paired_target ]; then
+            # Bench pair node 2: reference node carrying the RCC1 journal.
+            printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_NODE_ID=0x2\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_PEER_NODE_ID=0x1\n' >> sdkconfig
+            printf 'CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"\n' >> sdkconfig
+          fi
+          if [ '${{ matrix.features }}' = endpoints_on ]; then
+            # bridge_node opt-in: capability bits 3 (gateway_endpoint_v1)
+            # and 4 (config_endpoint_v1) attach + advertise both endpoints.
+            printf 'CONFIG_ROUTELOOM_CAPABILITY=0x1f\n' >> sdkconfig
+          fi
+          if [ '${{ matrix.features }}' = config_target_on ]; then
+            # reference_node opt-in: the RCC1 permit journal endpoint.
+            printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
+          fi
           idf.py build
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             # Prove the kconfig symbol survived re-resolution and the
@@ -156,15 +218,45 @@ jobs:
             # Observe-mode lane was actually compiled in.
             grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
             grep -q '^CONFIG_ROUTELOOM_MIGRATION=1' sdkconfig
+          elif [ '${{ matrix.autonomy }}' = discover ]; then
+            # Paired bench cells run the discovery lane without migration.
+            grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
+            ! grep -q '^CONFIG_ROUTELOOM_MIGRATION=[12]' sdkconfig
           else
             ! grep -q '^CONFIG_ROUTELOOM_DISCOVERY=y' sdkconfig
             ! grep -q '^CONFIG_ROUTELOOM_MIGRATION=[12]' sdkconfig
           fi
+          case '${{ matrix.features }}' in
+            endpoints_on|paired_bridge)
+              # Prove the endpoint opt-in survived re-resolution: bits 3+4
+              # on top of the 0x7 default, so both endpoints attach.
+              grep -q '^CONFIG_ROUTELOOM_CAPABILITY=0x1f' sdkconfig
+              ;;
+            *) ! grep -q '^CONFIG_ROUTELOOM_CAPABILITY=0x1f' sdkconfig ;;
+          esac
+          case '${{ matrix.features }}' in
+            config_target_on|paired_target)
+              grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig
+              ;;
+            *) ! grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig ;;
+          esac
+          case '${{ matrix.features }}' in
+            paired_bridge)
+              grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x1' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_PEER_NODE_ID=0x2' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:7a:b5:60"' sdkconfig
+              ;;
+            paired_target)
+              grep -q '^CONFIG_ROUTELOOM_NODE_ID=0x2' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_PEER_NODE_ID=0x1' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_PEER_MAC="94:a9:90:6a:ee:c4"' sdkconfig
+              ;;
+          esac
           idf.py size > build/size-report.txt
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}
+          name: firmware-${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}-${{ matrix.features }}
           path: |
             idf-commit.txt
             firmware/${{ matrix.app }}/build/*.bin

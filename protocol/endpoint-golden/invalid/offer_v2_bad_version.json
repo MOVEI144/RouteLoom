@@ -1,0 +1,8 @@
+{
+  "codec": "scope_offer",
+  "encoded_hex": "01010000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5101112131415161718191a1b1c1d1e1f0101000000000007685e20b006b97edba6015b3aac5ea207",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "offer_v2_bad_version",
+  "note": "legacy/unknown body version"
+}

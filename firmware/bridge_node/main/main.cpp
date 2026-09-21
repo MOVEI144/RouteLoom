@@ -24,6 +24,7 @@
 #include "routeloom/espnow_migration.hpp"
 #include "routeloom/nvs_ledger_store.hpp"
 #endif
+#include "routeloom/config_wire.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/psk_security.hpp"
@@ -43,7 +44,11 @@ using routeloom::espnow::MacAddress;
 using routeloom::espnow::NvsCounterStore;
 
 // UsbBridge emits COBS+CRC32 frames through this stream. Partial writes are
-// expected: the bridge retries the remainder on the next poll.
+// expected: the bridge retries the remainder on the next poll. The write is
+// deliberately nonblocking — app_main is the single pump task, so a blocked
+// write here (host stopped draining without a disconnect) would starve
+// runtime.poll_once() and the mesh RX path beneath it. A full TX buffer
+// reports written=0; the bridge resumes from tx_wire_sent_ next poll.
 class UsbSerialStream final : public routeloom::usb::ByteStream {
  public:
   Status write(ByteView data, std::size_t& written) noexcept override {
@@ -52,7 +57,7 @@ class UsbSerialStream final : public routeloom::usb::ByteStream {
       return Status::success();
     }
     const int result = usb_serial_jtag_write_bytes(
-        data.data, data.size, pdMS_TO_TICKS(20));
+        data.data, data.size, pdMS_TO_TICKS(0));
     if (result < 0) {
       return Status::error(StatusCode::RadioFailure, "usb jtag write failed");
     }
@@ -212,11 +217,17 @@ extern "C" void app_main(void) {
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  config.node.boot_incarnation = message_session;
   // Origin generation must rise every boot so peers discard the previous
   // incarnation's route state. It is derived from the persisted monotonic
   // boot session, mapped into 1..0xFFFF (0 is the "unset" sentinel).
   config.node.route_generation = static_cast<std::uint16_t>(
       ((message_session - 1U) % 0xFFFFU) + 1U);
+  // Replay epochs advance with every boot (see reference_node): a reused
+  // epoch can never re-establish a lost replay window — the persisted floor
+  // would reject it forever (replay.cpp REPLAY_STATE_LOST wedge).
+  config.node.link_epoch = config.node.route_generation;
+  config.node.end_epoch = config.node.route_generation;
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
 #if CONFIG_ROUTELOOM_MIGRATION
   if (have_boot_channel) {
@@ -273,6 +284,41 @@ extern "C" void app_main(void) {
   status = runtime.initialize();
   if (!status) fail(status.detail);
   bridge.set_mesh(&runtime.node());
+
+  // Gateway endpoint (scope-gateway-config P3): one component owns the mesh
+  // responder role AND the host-originated send path. The USB capability
+  // bit gates both — a build that does not advertise it never answers a
+  // Query and never accepts a registration. The node's own poll drives the
+  // sink through the service-sink interface (attach() installs it).
+  static routeloom::GatewayDelivery gateway(runtime.node());
+  if ((bridge_config.capability & routeloom::usb::kCapGatewayEndpointV1) !=
+      0) {
+    status = bridge.attach_gateway(gateway);
+    if (!status) fail(status.detail);
+  }
+
+  // Config endpoint (scope-gateway-config P5): the bridge issues Config
+  // challenge/status queries and kind-3 permit transfers toward a target on
+  // the host's behalf over the routed end-protected lane. The bridge is the
+  // component's ConfigHostSink — each async outcome is framed back to the
+  // host under the 0x21/0x22/0x23 subcommand it was requested with. The
+  // CAP_CONFIG_ENDPOINT_V1 bit gates admission; without it the ops answer
+  // Unsupported. The node poll drives the component's bounded retries.
+  static routeloom::MeshConfigPort config_port(runtime.node());
+  static routeloom::ConfigGateway config_gateway(config_port, bridge);
+  if ((bridge_config.capability & routeloom::usb::kCapConfigEndpointV1) != 0) {
+    status = bridge.attach_config(config_gateway);
+    if (!status) fail(status.detail);
+  }
+
+  // M1 diagnostics (m1-completion D1d): the bridge answers HostOps 0x30
+  // diagnostic requests — local capabilities inline, remote telemetry via
+  // the routed type-48 lane — and streams 0x31 replies back. Without the
+  // bit the subcommands answer Unsupported; no mesh sink is installed.
+  if ((bridge_config.capability & routeloom::usb::kCapM1DiagnosticsV1) != 0) {
+    status = bridge.attach_diagnostics();
+    if (!status) fail(status.detail);
+  }
 
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};

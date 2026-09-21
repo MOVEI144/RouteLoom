@@ -78,7 +78,7 @@ impl EncodedPayload {
         &self.bytes[..self.size]
     }
 
-    fn wrap(raw: &[u8]) -> Result<Self> {
+    pub(crate) fn wrap(raw: &[u8]) -> Result<Self> {
         if raw.len() > MAX_APPLICATION_PAYLOAD {
             return Err(WireError::new(
                 ErrorCode::NoCapacity,
@@ -428,6 +428,9 @@ pub enum ControlObjectSubtype {
 pub enum ControlObjectKind {
     ChannelPlan = 1,
     RecoverySnapshot = 2,
+    /// Scope-gateway-config §5.1: end-protected routed config permits ride
+    /// the same object transfer; link-only kinds 1/2 keep their path.
+    ConfigPermit = 3,
 }
 
 #[derive(Clone, Debug)]
@@ -465,6 +468,7 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
     let kind = match encoded[2] {
         1 => ControlObjectKind::ChannelPlan,
         2 => ControlObjectKind::RecoverySnapshot,
+        3 => ControlObjectKind::ConfigPermit,
         _ => return reject(),
     };
     let total_len = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));

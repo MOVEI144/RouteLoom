@@ -267,7 +267,7 @@ void test_link_open_is_not_origin_verification() {
 
   // Only the bound destination verifies the origin end-to-end.
   wire::EncodedFrame onward{};
-  CHECK_OK(wire::forward(at_relay, 2, 3, 4900, relay, onward));
+  CHECK_OK(wire::forward(at_relay, 2, 3, /*link_epoch=*/1, 4900, relay, onward));
   wire::LinkOpenedFrame at_destination{};
   CHECK_OK(wire::open_link(onward.view(), 3, destination, at_destination));
   CHECK_OK(wire::open_end(at_destination, 3, destination, out));
@@ -373,12 +373,71 @@ void test_replay_floor_enforced_per_frame() {
   newer.epoch = 4;
   ReplayGuard::Window epoch4{};
   CHECK_OK(guard.open_context(newer, epoch4));
-  // A cached epoch-3 window still contains admissible counters — only the
-  // per-frame floor check stops old-epoch frames. This is why providers must
-  // call check_floor on cached contexts, not just at window creation.
-  CHECK_OK(guard.accept(epoch3, 6));  // window alone would admit it
+  // A cached epoch-3 window still contains admissible counters, but windows
+  // share one persisted slot per peer pair: accept() re-checks the floor so
+  // a stale window can never commit over the live epoch-4 record. Providers
+  // still run check_floor per frame as the primary gate.
+  CHECK(guard.accept(epoch3, 6).code == StatusCode::ReplayRejected);
   CHECK(guard.check_floor(kCtx).code == StatusCode::ReplayRejected);
   CHECK_OK(guard.check_floor(newer));
+  // The epoch-4 record is intact: its own window still accepts normally.
+  CHECK_OK(guard.accept(epoch4, 0));
+}
+
+void test_replay_epoch_advance_rekeys_shared_slot() {
+  // Windows persist at one slot per peer pair. A peer booting onto a newer
+  // epoch re-keys the same record in place — storage stays O(peers) across
+  // any number of epoch advances instead of leaking one record per boot.
+  FlakyReplayStore store;
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window epoch3{};
+    CHECK_OK(guard.open_context(kCtx, epoch3));
+    CHECK_OK(guard.accept(epoch3, 42));
+  }
+  const auto records_after_epoch3 = store.windows.size();
+  SecurityContext newer = kCtx;
+  newer.epoch = 4;
+  ReplayGuard guard(store);
+  ReplayGuard::Window epoch4{};
+  CHECK_OK(guard.open_context(newer, epoch4));
+  // Re-keyed, not corrupted: the counter space is fresh for the new epoch.
+  CHECK_OK(guard.accept(epoch4, 0));
+  CHECK(store.windows.size() == records_after_epoch3);
+  // Epoch 3 is permanently below the floor now.
+  ReplayGuard::Window stale{};
+  CHECK(guard.open_context(kCtx, stale).code == StatusCode::ReplayRejected);
+}
+
+void test_replay_stale_record_at_floor_epoch_is_state_lost() {
+  // Interrupted transition: floor ratcheted to epoch 4 but the epoch-4
+  // window was never committed (crash between ratchet and first accept).
+  // The slot still holds the epoch-3 record. Reopening epoch 4 must NOT
+  // treat the stale record as the live window — at the floor epoch a
+  // foreign record is a missing window, i.e. REPLAY_STATE_LOST. Recovery
+  // is the next epoch advance, exactly like the absent-blob case.
+  FlakyReplayStore store;
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window epoch3{};
+    CHECK_OK(guard.open_context(kCtx, epoch3));
+    CHECK_OK(guard.accept(epoch3, 7));
+  }
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window epoch4{};
+    SecurityContext newer = kCtx;
+    newer.epoch = 4;
+    CHECK_OK(guard.open_context(newer, epoch4));  // ratchets floor, no commit
+  }
+  ReplayGuard guard(store);
+  ReplayGuard::Window window{};
+  SecurityContext at4 = kCtx;
+  at4.epoch = 4;
+  CHECK(guard.open_context(at4, window).code == StatusCode::ReplayRejected);
+  SecurityContext at5 = kCtx;
+  at5.epoch = 5;
+  CHECK_OK(guard.open_context(at5, window));  // advance recovers
 }
 
 void test_replay_corruption_is_not_a_fresh_context() {
@@ -484,6 +543,61 @@ void test_counter_lease_context_mismatch_rejected() {
   CHECK_OK(first.next(value));
   CounterLease mismatched(store, 7, 55, 1, 0, 4);  // different context id
   CHECK(mismatched.initialize().code == StatusCode::Conflict);
+}
+
+void test_counter_lease_epoch_advance_rekeys_same_slot() {
+  // Boot-advancing epochs share one slot per peer pair: a newer epoch
+  // re-keys the record in place (fresh counter space is safe — nonces are
+  // epoch-scoped), while a regression stays fail-closed.
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  {
+    CounterLease lease(store, 7, 99, 1, 0, 4);
+    CHECK_OK(lease.initialize());
+    CHECK_OK(lease.next(value));
+    CHECK_OK(lease.next(value));
+  }
+  {
+    CounterLease lease(store, 7, 99, 2, 0, 4);  // next boot, same peer pair
+    CHECK_OK(lease.initialize());
+    CHECK_OK(lease.next(value));
+    CHECK(value == 0);  // new epoch -> fresh counter space
+  }
+  {
+    CounterLease regressed(store, 7, 99, 1, 0, 4);
+    CHECK(regressed.initialize().code == StatusCode::Conflict);
+  }
+}
+
+void test_counter_lease_stale_context_cannot_rewind_newer_epoch() {
+  // Two cached contexts at different epochs share one slot. If the stale
+  // epoch-1 lease outlives the epoch-2 re-key, its next reservation must
+  // fail instead of overwriting the epoch-2 record — otherwise the epoch-2
+  // counter space rewinds into nonce reuse.
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  CounterLease epoch1(store, 7, 99, 1, 0, 4);
+  CHECK_OK(epoch1.initialize());
+  CHECK_OK(epoch1.next(value));  // reserves [0,4) at epoch 1
+  {
+    CounterLease epoch2(store, 7, 99, 2, 0, 4);
+    CHECK_OK(epoch2.initialize());  // re-keys the slot to epoch 2
+    CHECK_OK(epoch2.next(value));
+    CHECK(value == 0);  // fresh epoch-2 counter space
+  }
+  // The stale epoch-1 lease can still drain its pre-reserved block (safe:
+  // those counters live under the epoch-1 context and the peer floor
+  // rejects them), but its next reservation must not clobber the record.
+  CHECK_OK(epoch1.next(value));  // drains the old [1,4) reservation
+  CHECK_OK(epoch1.next(value));
+  CHECK_OK(epoch1.next(value));
+  CHECK(epoch1.next(value).code == StatusCode::Conflict);
+  // The epoch-2 record is untouched: a fresh lease resumes past the
+  // committed water mark — epoch-2's reserved space was not rewound.
+  CounterLease epoch2_again(store, 7, 99, 2, 0, 4);
+  CHECK_OK(epoch2_again.initialize());
+  CHECK_OK(epoch2_again.next(value));
+  CHECK(value == 4);
 }
 
 void test_counter_record_rewound_rejected() {
@@ -595,12 +709,16 @@ int main() {
   test_replay_window_survives_restart();
   test_replay_window_loss_requires_new_epoch();
   test_replay_floor_enforced_per_frame();
+  test_replay_epoch_advance_rekeys_shared_slot();
   test_replay_corruption_is_not_a_fresh_context();
   test_replay_commit_failure_rolls_back();
   test_replay_floor_cold_start_semantics();
   test_counter_lease_commit_failure_issues_nothing();
   test_counter_lease_never_reissues_across_restarts();
   test_counter_lease_context_mismatch_rejected();
+  test_counter_lease_epoch_advance_rekeys_same_slot();
+  test_counter_lease_stale_context_cannot_rewind_newer_epoch();
+  test_replay_stale_record_at_floor_epoch_is_state_lost();
   test_counter_record_rewound_rejected();
   test_security_profile_marker();
   test_plaintext_data_rejected();

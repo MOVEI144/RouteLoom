@@ -72,6 +72,10 @@ MonotonicMs EspNowRuntime::now_ms() const noexcept {
   return static_cast<MonotonicMs>(esp_timer_get_time() / 1000);
 }
 
+std::uint64_t EspNowRuntime::now_us() noexcept {
+  return static_cast<std::uint64_t>(esp_timer_get_time());
+}
+
 EspNowRuntime::Peer* EspNowRuntime::find_peer(const NodeId node) noexcept {
   for (auto& peer : peers_) {
     if (peer.used && peer.node == node) {
@@ -516,9 +520,14 @@ void EspNowRuntime::stop() noexcept {
   }
   pending_tx_ = false;
   pending_token_ = 0;
+  pending_node_ = kInvalidNodeId;
   pending_generation_ = 0;
   fenced_outstanding_ = false;
   raw_tx_count_ = 0;
+  expired_tx_count_ = 0;
+  quarantined_count_ = 0;
+  lost_tx_count_ = 0;
+  lost_node_tx_valid_ = false;
   portEXIT_CRITICAL(&callback_lock_);
   if (espnow_initialized_) {
     (void)esp_now_unregister_recv_cb();
@@ -556,22 +565,164 @@ void EspNowRuntime::poll_once() noexcept {
   }
   const MonotonicMs now = now_ms();
   Event event{};
+  // The dedicated reserved-completion slot drains FIRST — it resolves the
+  // node's outstanding job and is never displaced by raw traffic.
+  {
+    bool have = false;
+    portENTER_CRITICAL(&callback_lock_);
+    if (lost_node_tx_valid_) {
+      event = lost_node_tx_;
+      lost_node_tx_valid_ = false;
+      have = true;
+    }
+    portEXIT_CRITICAL(&callback_lock_);
+    if (have) {
+      RadioTxObservation staged{};
+      staged.peer = event.peer;
+      staged.binding_generation = event.binding;
+      staged.radio_generation = event.radio_generation;
+      staged.channel_epoch = event.channel_epoch;
+      staged.submitted_us = event.submitted_us;
+      staged.completed_us = event.observed_us;
+      staged.frame_length_class = event.frame_length_class;
+      staged.outcome = event.success ? RadioTxOutcome::Success
+                                     : RadioTxOutcome::Failure;
+      staged.provenance = ObservationProvenance::LocalDriver;
+      node_.note_radio_tx(staged, now);
+      node_.on_radio_tx_result(event.token, event.success, now);
+    }
+  }
+  // Staged TX completions next: a queue-full callback already consumed its
+  // pending record — delaying it would leave the node's job unresolved.
+  for (;;) {
+    portENTER_CRITICAL(&callback_lock_);
+    if (lost_tx_count_ == 0) {
+      portEXIT_CRITICAL(&callback_lock_);
+      break;
+    }
+    event = lost_tx_[--lost_tx_count_];
+    portEXIT_CRITICAL(&callback_lock_);
+    RadioTxObservation staged{};
+    staged.peer = event.peer;
+    staged.binding_generation = event.binding;
+    staged.radio_generation = event.radio_generation;
+    staged.channel_epoch = event.channel_epoch;
+    staged.submitted_us = event.submitted_us;
+    staged.completed_us = event.observed_us;
+    staged.frame_length_class = event.frame_length_class;
+    staged.outcome = event.tx_lane == TxLane::Stale
+                         ? RadioTxOutcome::Unknown
+                         : (event.success ? RadioTxOutcome::Success
+                                          : RadioTxOutcome::Failure);
+    staged.provenance = ObservationProvenance::LocalDriver;
+    node_.note_radio_tx(staged, now);
+    if (event.tx_lane == TxLane::Reserved) {
+      node_.on_radio_tx_result(event.token, event.success, now);
+    }
+  }
   while (xQueueReceive(event_queue_, &event, 0) == pdTRUE) {
     if (event.kind == EventKind::Tx) {
-      node_.on_radio_tx_result(event.token, event.success, now);
+      // Telemetry gets every completion lane; the node's job resolution only
+      // ever sees the Reserved lane — raw/stale completions resolve nothing
+      // (X-02, 02-telemetry §2.2).
+      RadioTxObservation obs{};
+      obs.peer = event.peer;
+      obs.binding_generation = event.binding;
+      obs.radio_generation = event.radio_generation;
+      obs.channel_epoch = event.channel_epoch;
+      obs.submitted_us = event.submitted_us;
+      obs.completed_us = event.observed_us;
+      obs.frame_length_class = event.frame_length_class;
+      obs.outcome = event.tx_lane == TxLane::Stale
+                        ? RadioTxOutcome::Unknown
+                        : (event.success ? RadioTxOutcome::Success
+                                         : RadioTxOutcome::Failure);
+      obs.provenance = ObservationProvenance::LocalDriver;
+      node_.note_radio_tx(obs, now);
+      if (event.tx_lane == TxLane::Reserved) {
+        node_.on_radio_tx_result(event.token, event.success, now);
+      }
     } else {
+      RadioRxMetadataV2 meta{};
+      meta.received_us = event.observed_us;
+      meta.binding_generation = event.binding;
+      meta.radio_generation = event.radio_generation;
+      meta.channel_epoch = event.channel_epoch;
+      meta.rssi_dbm = event.rssi_dbm;
+      meta.rssi_valid = event.rssi_valid;
+      meta.channel = event.channel;
+      meta.channel_valid = event.channel_valid;
+      meta.provenance = ObservationProvenance::LocalDriver;
+      // Revalidate the captured identity before dispatch (02 §2.2): an
+      // event queued before a rebind or channel commit must not let its
+      // stale generations read as current evidence — retire the summary
+      // AND strip the metadata's freshness so it feeds neither the peer
+      // telemetry summary nor the connectivity oracle.
+      {
+        bool identity_current = false;
+        portENTER_CRITICAL(&callback_lock_);
+        if (const Peer* record = find_peer(event.source.data())) {
+          identity_current = record->binding == event.binding;
+        }
+        identity_current = identity_current &&
+            event.radio_generation == channel_runner_.radio_generation() &&
+            event.channel_epoch == channel_epoch_;
+        portEXIT_CRITICAL(&callback_lock_);
+        meta.identity_current = identity_current;
+        if (!identity_current) {
+          node_.note_peer_stale(event.peer);
+        }
+      }
       rx_source_ = event.source;
       node_.on_radio_receive(
-          event.peer, ByteView{event.data.data(), event.length},
-          RadioRxMetadata{event.rssi_dbm}, now);
+          event.peer, ByteView{event.data.data(), event.length}, meta, now);
       rx_source_ = {};
     }
+  }
+  // Callback watchdog on the reserved send: a driver that never calls back
+  // must not wedge pending_tx_ forever. Fencing moves it to the stale lane
+  // where a late callback resolves as Unknown evidence, never success.
+  {
+    bool fence = false;
+    portENTER_CRITICAL(&callback_lock_);
+    if (pending_tx_ &&
+        now - pending_sent_ms_ >= config_.node.callback_watchdog_ms) {
+      fence = true;
+    }
+    portEXIT_CRITICAL(&callback_lock_);
+    if (fence) {
+      channel_fence_tx();
+    }
+  }
+  // Watchdog-retired raw sends surface as Unknown completions.
+  for (;;) {
+    RawTx retired{};
+    portENTER_CRITICAL(&callback_lock_);
+    if (expired_tx_count_ == 0) {
+      portEXIT_CRITICAL(&callback_lock_);
+      break;
+    }
+    retired = expired_tx_[--expired_tx_count_];
+    portEXIT_CRITICAL(&callback_lock_);
+    RadioTxObservation obs{};
+    obs.peer = retired.node;
+    obs.binding_generation = retired.binding;
+    obs.radio_generation = retired.radio_generation;
+    obs.channel_epoch = retired.channel_epoch;
+    obs.submitted_us = retired.submitted_us;
+    obs.completed_us = 0;
+    obs.frame_length_class = retired.length_class;
+    obs.outcome = RadioTxOutcome::Unknown;
+    // The submission was real driver work — only the outcome is unknown.
+    obs.provenance = ObservationProvenance::LocalDriver;
+    node_.note_radio_tx(obs, now);
   }
   if (discovery_ != nullptr && bootstrap_queue_ != nullptr) {
     BootstrapEvent rx{};
     while (xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE) {
       discovery_->on_rld1_rx(
-          rx.source, ByteView{rx.data.data(), rx.length}, rx.received_ms);
+          DiscoveryRxMetadata{rx.source, rx.destination},
+          ByteView{rx.data.data(), rx.length}, rx.received_ms);
     }
     discovery_->poll(now);
     reconcile_autonomy(now);
@@ -615,14 +766,43 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     return Status::error(StatusCode::WouldBlock,
                          "reserved DATA TX in flight to peer");
   }
-  // Retire entries whose completion never arrived (callback watchdog).
+  // Retire entries whose completion never arrived (callback watchdog). The
+  // expiry is evidence too: each retires into expired_tx_ for Unknown
+  // accounting AND into the MAC quarantine — the still-owed callback must
+  // never resolve a replacement send to the same destination (02 §2.3).
+  // When the quarantine table is full the entry is NOT retired: it stays
+  // outstanding (blocking that MAC) rather than losing callback tracking.
   std::size_t kept = 0;
   for (std::size_t i = 0; i < raw_tx_count_; ++i) {
     if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
       raw_tx_[kept++] = raw_tx_[i];
+      continue;
     }
+    if (quarantined_count_ < quarantined_tx_.size()) {
+      quarantined_tx_[quarantined_count_++] = raw_tx_[i];
+      if (expired_tx_count_ < expired_tx_.size()) {
+        expired_tx_[expired_tx_count_++] = raw_tx_[i];
+      } else {
+        ++telemetry_event_drops_;
+      }
+      continue;
+    }
+    raw_tx_[kept++] = raw_tx_[i];  // stays outstanding — MAC remains blocked
   }
   raw_tx_count_ = kept;
+  if (tx_quarantined(mac)) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock,
+                         "TX callback quarantine on peer");
+  }
+  // The reserved-send fence gates raw sends too: a watchdog-retired
+  // reserved TX still owes a callback that must never resolve this send.
+  // No timer releases the fence — only the owed callback or driver
+  // recovery (02 §2.3); the peer stays unavailable until then.
+  if (fenced_outstanding_ && fenced_mac_ == mac) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
+  }
   for (std::size_t i = 0; i < raw_tx_count_; ++i) {
     if (raw_tx_[i].mac == mac) {
       portEXIT_CRITICAL(&callback_lock_);
@@ -634,8 +814,21 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::WouldBlock, "autonomy TX window full");
   }
-  raw_tx_[raw_tx_count_].mac = mac;
-  raw_tx_[raw_tx_count_].sent_ms = now;
+  RawTx& raw = raw_tx_[raw_tx_count_];
+  raw.mac = mac;
+  raw.sent_ms = now;
+  // Submit-time observation record (02 §2.2): identity snapshot taken now —
+  // the completion can never attribute to a newer binding/radio/channel.
+  raw.submitted_us = now_us();
+  raw.radio_generation = channel_runner_.radio_generation();
+  raw.channel_epoch = channel_epoch_;
+  raw.length_class = frame_length_class(frame.size);
+  raw.node = kInvalidNodeId;
+  raw.binding = BindingGeneration{0};
+  if (const Peer* record = find_peer(mac.bytes.data())) {
+    raw.node = record->node;
+    raw.binding = record->binding;
+  }
   ++raw_tx_count_;
   portEXIT_CRITICAL(&callback_lock_);
   const esp_err_t error =
@@ -696,7 +889,21 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
       if (now - raw_tx_[i].sent_ms < config_.node.callback_watchdog_ms) {
         raw_outstanding |= raw_tx_[i].mac == peer_mac;
         raw_tx_[kept++] = raw_tx_[i];
+        continue;
       }
+      if (quarantined_count_ < quarantined_tx_.size()) {
+        quarantined_tx_[quarantined_count_++] = raw_tx_[i];
+        if (expired_tx_count_ < expired_tx_.size()) {
+          expired_tx_[expired_tx_count_++] = raw_tx_[i];
+        } else {
+          ++telemetry_event_drops_;
+        }
+        continue;
+      }
+      // Quarantine full: keep it outstanding — its MAC stays blocked
+      // rather than losing callback tracking (X-02).
+      raw_outstanding |= raw_tx_[i].mac == peer_mac;
+      raw_tx_[kept++] = raw_tx_[i];
     }
     raw_tx_count_ = kept;
     if (raw_outstanding) {
@@ -705,21 +912,44 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
                            "autonomy TX in flight to peer");
     }
   }
-  if (fenced_outstanding_) {
-    if (now >= fenced_until_ms_) {
-      fenced_outstanding_ = false;
-    } else if (fenced_mac_ == peer_mac) {
-      // A fenced callback for this MAC may still be in flight: refuse the
-      // new send so the old completion can never be attributed to it (X-02).
-      portEXIT_CRITICAL(&callback_lock_);
-      return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
-    }
+  if (tx_quarantined(peer_mac)) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock,
+                         "TX callback quarantine on peer");
+  }
+  // The fence releases only on the owed callback or driver recovery —
+  // neither a timer nor a generation change establishes callback
+  // quiescence (02 §2.3 / X-02). The MAC stays fenced until then and
+  // recovery-required is visible via tx_fence_active().
+  if (fenced_outstanding_ && fenced_mac_ == peer_mac) {
+    portEXIT_CRITICAL(&callback_lock_);
+    return Status::error(StatusCode::WouldBlock, "TX_FENCE_GUARD");
   }
   pending_tx_ = true;
   pending_token_ = token;
+  pending_node_ = peer;
   pending_mac_ = peer_mac;
+  pending_sent_ms_ = now;
   pending_generation_ = channel_runner_.radio_generation().value;
+  // Submit-time observation record: the completion copies these verbatim so
+  // attribution never re-reads live identity state (02 §2.2/X-02).
+  pending_submitted_us_ = now_us();
+  pending_length_class_ = frame_length_class(frame.size);
+  pending_channel_epoch_ = channel_epoch_;
+  pending_binding_ = BindingGeneration{0};
+  if (const Peer* record = find_peer(peer)) {
+    pending_binding_ = record->binding;
+  }
+  // Hand the frozen submit identity to the node so submission accounting
+  // uses the SAME key the completion will carry (02 §2.3 — never a
+  // re-guessed identity mid-attempt).
+  const ObservationKey submit_key{pending_binding_,
+                                  ObservationDirection::Egress,
+                                  RadioGeneration{pending_generation_},
+                                  pending_channel_epoch_,
+                                  pending_length_class_, peer};
   portEXIT_CRITICAL(&callback_lock_);
+  node_.note_tx_submit_identity(token, submit_key);
   const esp_err_t error =
       esp_now_send(peer_mac.bytes.data(), frame.data, frame.size);
   if (error != ESP_OK) {
@@ -1154,6 +1384,18 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
         break;
     }
   }
+  // Mirror the verified binding generation onto every used peer slot —
+  // telemetry attribution keys on it (02-telemetry §2.4); unresolved peers
+  // keep generation 0, which reports honestly as "no binding epoch".
+  for (auto& peer : peers_) {
+    if (!peer.used) {
+      continue;
+    }
+    BindingGeneration generation{0};
+    if (discovery_->binding_generation_of(peer.node, generation)) {
+      peer.binding = generation;
+    }
+  }
   // Autonomy-managed regular peers mirror the engine's bound records.
   for (auto& peer : peers_) {
     if (!peer.used || !peer.autonomy) {
@@ -1211,17 +1453,29 @@ Status EspNowRuntime::recover() noexcept {
   // send may still arrive and must never satisfy a post-recover send to
   // the same MAC (X-02). The driver rebuild below re-registers peers but
   // cannot cancel an already-queued driver completion.
-  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     fenced_mac_ = pending_mac_;
-    fenced_until_ms_ = now + config_.node.callback_watchdog_ms;
     fenced_outstanding_ = true;
     pending_tx_ = false;
     pending_token_ = 0;
   }
   portEXIT_CRITICAL(&callback_lock_);
-  return rebuild_driver();
+  const Status status = rebuild_driver();
+  if (status) {
+    // rebuild_driver() is the tested callback-quiescence barrier
+    // (02 §2.3): esp_now_deinit unregisters the send callback and tears
+    // down driver state, so no pre-recovery completion can arrive after
+    // this point — every quarantined/fenced MAC is released. Queued stale
+    // events resolve by token/lane, never by MAC reuse.
+    portENTER_CRITICAL(&callback_lock_);
+    quarantined_count_ = 0;
+    fenced_outstanding_ = false;
+    expired_tx_count_ = 0;
+    raw_tx_count_ = 0;
+    portEXIT_CRITICAL(&callback_lock_);
+  }
+  return status;
 }
 
 void EspNowRuntime::receive_callback(
@@ -1289,25 +1543,37 @@ void EspNowRuntime::enqueue_rx(
     }
     BootstrapEvent event{};
     std::memcpy(event.source.data(), info->src_addr, event.source.size());
+    if (info->des_addr != nullptr) {
+      std::memcpy(event.destination.data(), info->des_addr,
+                  event.destination.size());
+    }
     event.received_ms = now_ms();
     event.length = static_cast<std::uint16_t>(length);
     event.rssi_dbm = info->rx_ctrl != nullptr ? info->rx_ctrl->rssi : 0;
     std::memcpy(event.data.data(), data, event.length);
-    portENTER_CRITICAL(&callback_lock_);
+    // The event is fully local: nothing here needs callback_lock_, so the
+    // queue send runs outside it (same shape as the wire lane below and
+    // enqueue_tx) — holding the WiFi-task critical section across queue
+    // internals stretches it over every RLD1 frame.
     if (xQueueSend(bootstrap_queue_, &event, 0) != pdTRUE) {
+      portENTER_CRITICAL(&callback_lock_);
       ++bootstrap_rx_dropped_;
+      portEXIT_CRITICAL(&callback_lock_);
     }
-    portEXIT_CRITICAL(&callback_lock_);
     return;
   }
   // The peer table can be rewritten by the poll task's lease sync — resolve
-  // and copy the (node, mac) pair under the lock so the queued event keeps
-  // the MAC the frame actually arrived from.
+  // and copy the (node, mac, binding) triple under the lock so the queued
+  // event keeps the MAC the frame actually arrived from.
   NodeId peer_node = kInvalidNodeId;
+  BindingGeneration peer_binding{0};
   portENTER_CRITICAL(&callback_lock_);
   if (const Peer* peer = find_peer(info->src_addr)) {
     peer_node = peer->node;
+    peer_binding = peer->binding;
   }
+  const RadioGeneration radio_gen = channel_runner_.radio_generation();
+  const ChannelEpoch channel_epoch = channel_epoch_;
   portEXIT_CRITICAL(&callback_lock_);
   if (peer_node == kInvalidNodeId) {
     return;
@@ -1315,10 +1581,25 @@ void EspNowRuntime::enqueue_rx(
   Event event{};
   event.kind = EventKind::Rx;
   event.peer = peer_node;
+  event.binding = peer_binding;
+  event.radio_generation = radio_gen;
+  event.channel_epoch = channel_epoch;
   std::memcpy(event.source.data(), info->src_addr, event.source.size());
   event.length = static_cast<std::uint16_t>(length);
-  event.rssi_dbm =
-      info->rx_ctrl != nullptr ? info->rx_ctrl->rssi : 0;
+  event.frame_length_class = frame_length_class(event.length);
+  if (info->rx_ctrl != nullptr) {
+    event.rssi_dbm = info->rx_ctrl->rssi;
+    event.rssi_valid = true;
+    event.channel = static_cast<std::uint8_t>(info->rx_ctrl->channel);
+    event.channel_valid = info->rx_ctrl->channel > 0;
+    // Driver-stamped receive time; absent it the capture time still bounds
+    // the sample from above — never fabricated as the driver value.
+    event.observed_us = info->rx_ctrl->timestamp != 0
+                            ? static_cast<std::uint64_t>(info->rx_ctrl->timestamp)
+                            : now_us();
+  } else {
+    event.observed_us = now_us();
+  }
   std::memcpy(event.data.data(), data, event.length);
   if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
     // Queue-full drops are load evidence (05 §5), not silent loss.
@@ -1337,6 +1618,7 @@ void EspNowRuntime::enqueue_tx(
   }
   Event event{};
   event.kind = EventKind::Tx;
+  event.observed_us = now_us();
   portENTER_CRITICAL(&callback_lock_);
   const bool pending_match =
       pending_tx_ && std::memcmp(pending_mac_.bytes.data(), info->des_addr,
@@ -1344,47 +1626,114 @@ void EspNowRuntime::enqueue_tx(
   if (pending_match &&
       pending_generation_ != channel_runner_.radio_generation().value) {
     // Completion for a pre-switch configuration: it cannot resolve the
-    // newer send — account separately, never as success or failure (X-02).
+    // newer send — accounted under its ORIGINAL generations as Unknown,
+    // never as success or failure on the new identity (X-02).
     ++stale_tx_results_;
+    event.tx_lane = TxLane::Stale;
+    event.peer = pending_node_;
+    event.success = status == ESP_NOW_SEND_SUCCESS;
+    event.submitted_us = pending_submitted_us_;
+    event.binding = pending_binding_;
+    event.radio_generation = RadioGeneration{pending_generation_};
+    event.channel_epoch = pending_channel_epoch_;
+    event.frame_length_class = pending_length_class_;
     pending_tx_ = false;
     pending_token_ = 0;
+    if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
+      // A completed send must resolve exactly once: the observation is
+      // staged for poll_once, never dropped into queue overflow (02 §2.5).
+      stage_lost_tx(event);
+    }
     portEXIT_CRITICAL(&callback_lock_);
     return;
   }
   if (!pending_match) {
+    // A callback for a watchdog-retired (quarantined) MAC is the owed
+    // straggler itself: consume the marker as stale evidence — it can never
+    // resolve a replacement send that reused the destination (02 §2.3).
+    for (std::size_t i = 0; i < quarantined_count_; ++i) {
+      if (std::memcmp(quarantined_tx_[i].mac.bytes.data(), info->des_addr,
+                      quarantined_tx_[i].mac.bytes.size()) == 0) {
+        ++stale_tx_results_;
+        quarantined_tx_[i] = quarantined_tx_[--quarantined_count_];
+        portEXIT_CRITICAL(&callback_lock_);
+        return;
+      }
+    }
     if (fenced_outstanding_ &&
         std::memcmp(fenced_mac_.bytes.data(), info->des_addr,
                     fenced_mac_.bytes.size()) == 0) {
-      // The fenced straggler arrived late: accounted separately and never
-      // merged with a send that ran under the newer configuration (X-02).
+      // The fenced straggler arrived late: Unknown evidence under its own
+      // generations, never merged with a send that ran under the newer
+      // configuration (X-02).
       ++stale_tx_results_;
+      event.tx_lane = TxLane::Stale;
+      event.peer = fenced_pending_.node;
+      event.submitted_us = fenced_pending_.submitted_us;
+      event.binding = fenced_pending_.binding;
+      event.radio_generation = fenced_pending_.radio_generation;
+      event.channel_epoch = fenced_pending_.channel_epoch;
+      event.frame_length_class = fenced_pending_.length_class;
       fenced_outstanding_ = false;
+      if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
+        stage_lost_tx(event);
+      }
       portEXIT_CRITICAL(&callback_lock_);
       return;
     }
     // Not the reserved node-TX completion: retire the tracked raw send for
     // this MAC (if any) and account it — never as the reserved slot.
+    bool raw_found = false;
     for (std::size_t i = 0; i < raw_tx_count_; ++i) {
       if (std::memcmp(raw_tx_[i].mac.bytes.data(), info->des_addr,
                       raw_tx_[i].mac.bytes.size()) == 0) {
+        event.tx_lane = TxLane::Raw;
+        event.peer = raw_tx_[i].node;
+        event.submitted_us = raw_tx_[i].submitted_us;
+        event.binding = raw_tx_[i].binding;
+        event.radio_generation = raw_tx_[i].radio_generation;
+        event.channel_epoch = raw_tx_[i].channel_epoch;
+        event.frame_length_class = raw_tx_[i].length_class;
         raw_tx_[i] = raw_tx_[--raw_tx_count_];
+        raw_found = true;
         break;
       }
     }
+    if (!raw_found) {
+      // A callback for a send we already watchdog-retired or never tracked:
+      // counted, never attributed to anything.
+      ++stale_tx_results_;
+      portEXIT_CRITICAL(&callback_lock_);
+      return;
+    }
+    event.success = status == ESP_NOW_SEND_SUCCESS;
     if (status == ESP_NOW_SEND_SUCCESS) {
       ++autonomy_tx_ok_;
     } else {
       ++autonomy_tx_failed_;
     }
     portEXIT_CRITICAL(&callback_lock_);
+    if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
+      portENTER_CRITICAL(&callback_lock_);
+      stage_lost_tx(event);
+      portEXIT_CRITICAL(&callback_lock_);
+    }
     return;
   }
   event.token = pending_token_;
+  event.peer = pending_node_;
   event.success = status == ESP_NOW_SEND_SUCCESS;
+  event.submitted_us = pending_submitted_us_;
+  event.binding = pending_binding_;
+  event.radio_generation = RadioGeneration{pending_generation_};
+  event.channel_epoch = pending_channel_epoch_;
+  event.frame_length_class = pending_length_class_;
   pending_tx_ = false;
   pending_token_ = 0;
+  if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
+    stage_lost_tx(event);
+  }
   portEXIT_CRITICAL(&callback_lock_);
-  (void)xQueueSend(event_queue_, &event, 0);
 }
 
 // --- Radio operation arbiter + ChannelPort (04 §3/§8) ---------------------------
@@ -1474,15 +1823,19 @@ Status EspNowRuntime::channel_reapply_peers() noexcept {
 
 void EspNowRuntime::channel_fence_tx() noexcept {
   bool fenced = false;
-  // now_ms() outside the critical section — the clock read may take its own
-  // lock on some ports and must never nest inside callback_lock_.
-  const MonotonicMs now = now_ms();
   portENTER_CRITICAL(&callback_lock_);
   if (pending_tx_) {
     // The straggler keeps its own record: its late callback resolves as
     // unknown/stale — never as a fabricated success or failure (X-02).
     fenced_mac_ = pending_mac_;
-    fenced_until_ms_ = now + config_.node.callback_watchdog_ms;
+    fenced_pending_.mac = pending_mac_;
+    fenced_pending_.node = pending_node_;
+    fenced_pending_.sent_ms = pending_sent_ms_;
+    fenced_pending_.submitted_us = pending_submitted_us_;
+    fenced_pending_.binding = pending_binding_;
+    fenced_pending_.radio_generation = RadioGeneration{pending_generation_};
+    fenced_pending_.channel_epoch = pending_channel_epoch_;
+    fenced_pending_.length_class = pending_length_class_;
     fenced_outstanding_ = true;
     pending_tx_ = false;
     pending_token_ = 0;
@@ -1494,10 +1847,48 @@ void EspNowRuntime::channel_fence_tx() noexcept {
   }
 }
 
+bool EspNowRuntime::tx_quarantined(const MacAddress& mac) noexcept {
+  // Quarantine release has exactly two paths (02 §2.3): the owed callback
+  // arrives and consumes the entry in the TX callback handler, or driver
+  // recovery (recover()->rebuild_driver()) establishes callback
+  // quiescence. No timer and no software generation change can release an
+  // entry — a callback that is still owed would resolve a replacement
+  // send to this MAC with no way to tell it apart.
+  for (std::size_t i = 0; i < quarantined_count_; ++i) {
+    if (quarantined_tx_[i].mac == mac) return true;
+  }
+  return false;
+}
+
+void EspNowRuntime::stage_lost_tx(const Event& event) noexcept {
+  // The reserved (node) completion gets a dedicated slot — it is the only
+  // lane whose result resolves job state, and it can never be displaced by
+  // raw-completions filling the shared staging array (02 §2.5).
+  if (event.tx_lane == TxLane::Reserved) {
+    if (!lost_node_tx_valid_) {
+      lost_node_tx_ = event;
+      lost_node_tx_valid_ = true;
+    } else {
+      ++telemetry_event_drops_;
+    }
+    return;
+  }
+  if (lost_tx_count_ < lost_tx_.size()) {
+    lost_tx_[lost_tx_count_++] = event;
+  } else {
+    ++telemetry_event_drops_;
+  }
+}
+
 void EspNowRuntime::channel_committed(const std::uint8_t channel) noexcept {
   // Only after readback-verified apply + peer re-apply: config_.channel is
   // never assigned alone (04 §8 forbids the bare assignment cutover).
   config_.channel = channel;
+  // Telemetry attribution epoch: observations before and after this commit
+  // must never merge (02-telemetry §2.4).
+  portENTER_CRITICAL(&callback_lock_);
+  ++channel_epoch_.value;
+  portEXIT_CRITICAL(&callback_lock_);
 }
 
 void EspNowRuntime::note_diagnostic(const char* reason,

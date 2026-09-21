@@ -1,0 +1,42 @@
+name: Endpoint design checks
+on:
+  push:
+    branches: [main, design/scope-gateway-config]
+    paths:
+      - docs/design/scope-gateway-config/**
+      - tools/check_endpoint_design.py
+      - components/routeloom/include/routeloom/routeloom.h
+      - .github/workflows/endpoint-design.yml
+  pull_request:
+    paths:
+      - docs/design/scope-gateway-config/**
+      - tools/check_endpoint_design.py
+      - components/routeloom/include/routeloom/routeloom.h
+      - .github/workflows/endpoint-design.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  design-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check design contracts and serialization examples
+        run: python3 tools/check_endpoint_design.py --report endpoint-design-report.json
+      - name: Syntax check C and C++ declaration proposal (not a linked implementation)
+        run: |
+          printf '#include "sdk-contract.h"\n' > /tmp/endpoint-contract.c
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I components/routeloom/include -I docs/design/scope-gateway-config /tmp/endpoint-contract.c
+          c++ -x c++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only -I components/routeloom/include -I docs/design/scope-gateway-config /tmp/endpoint-contract.c
+      - name: Archive design evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: endpoint-design-evidence
+          path: |
+            endpoint-design-report.json
+            docs/design/scope-gateway-config/
+          retention-days: 30

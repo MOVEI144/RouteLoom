@@ -41,6 +41,7 @@ const char* status_code_name(const StatusCode code) noexcept {
     case StatusCode::PlanNotCommitted: return "PLAN_NOT_COMMITTED";
     case StatusCode::RecoveryRequired: return "RECOVERY_REQUIRED";
     case StatusCode::AuthProfileUnavailable: return "AUTH_PROFILE_UNAVAILABLE";
+    case StatusCode::NetworkRequired: return "NETWORK_REQUIRED";
   }
   return "UNKNOWN";
 }

@@ -210,6 +210,7 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
                 kind: match u64_field(fields, "kind") {
                     1 => ControlObjectKind::ChannelPlan,
                     2 => ControlObjectKind::RecoverySnapshot,
+                    3 => ControlObjectKind::ConfigPermit,
                     other => panic!("bad object kind {other}"),
                 },
                 total_len: u64_field(fields, "total_len") as u16,

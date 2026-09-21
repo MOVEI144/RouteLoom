@@ -27,16 +27,22 @@
 //!   stretch a TTL.
 
 use routeloom_protocol::host_ops::{
-    self, BootLease, Evidence, HostOpsResult, LaneRequest, QueryResponse, Receipt, SlotState,
-    SubmitRequest, TimeSampleRequest, CAP_HOST_OPS_V1, SUB_QUERY_DISPATCH, SUB_RETIRE_THROUGH,
-    SUB_SKIP,
+    self, BootLease, ConfigOpsResult, Evidence, GatewayOpsResult, HostOpsResult, LaneRequest,
+    QueryResponse, Receipt, SlotState, SubmitRequest, TimeSampleRequest, CAP_CONFIG_ENDPOINT_V1,
+    CAP_GATEWAY_ENDPOINT_V1, CAP_HOST_OPS_V1, SUB_QUERY_DISPATCH, SUB_RETIRE_THROUGH, SUB_SKIP,
 };
 use routeloom_protocol::{Frame, FrameKind};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use crate::send_store::{DispatchState, OperationStore, PrepareOutcome, StoredOperation};
+use crate::config::{
+    config_dev_key, ConfigIssuer, ConfigLane, ConfigOutcome, ConfigRequest, ConfigStep,
+};
+use crate::send_store::{
+    mint_id128, ConfigAuthorityLedger, DispatchState, OperationStore, PrepareOutcome,
+    StoredOperation,
+};
 use crate::{json_escape, now_ms, push_event, Outbound, State};
 
 // contracts.json / design constants.
@@ -44,6 +50,15 @@ pub const DISPATCH_WINDOW: u64 = 32;
 pub const TIME_SAMPLE_MAX_AGE_MS: u64 = 5_000;
 pub const CLOCK_PPM: u64 = 1_000;
 pub const CLOCK_QUANTUM_MS: u64 = 1;
+
+/// HostRegister lane (05-wire-api.md §5.6): the daemon asks for a 15s
+/// lease — the device grants what it grants (it currently always grants
+/// 15s and rejects requests above 60s). Renewal runs at half the granted
+/// lease so one lost response never lapses the binding.
+pub const HOST_REGISTER_LEASE_REQUEST_MS: u32 = 15_000;
+/// Floor between registration attempts — a Busy/failed answer retries on
+/// this cadence instead of every 40ms tick.
+const REGISTER_RETRY_MS: u64 = 250;
 
 /// Poll cadence for live positions and the response window after which an
 /// unanswered request is dropped and re-issued via QUERY.
@@ -94,6 +109,17 @@ impl DispatchInbox {
 pub struct LinkSnapshot {
     pub active: bool,
     pub host_ops: bool,
+    /// The device serves the Gateway HostOps family (cap bit 3): host
+    /// registration, scope-2 ingress and unregister.
+    pub gateway_ops: bool,
+    /// The device serves the Config HostOps family (cap bit 4): challenge /
+    /// status queries and permit-object transfer (P5).
+    pub config_ops: bool,
+    /// Authenticated USB session id — the registration binds this.
+    pub session: u64,
+    /// The daemon's own incarnation id (minted once per run, bound into
+    /// every registration so two daemon runs can never alias).
+    pub host_boot: u64,
     pub node: u64,
     pub boot: u64,
     pub network: u64,
@@ -118,10 +144,250 @@ fn link_snapshot(state: &State) -> LinkSnapshot {
     LinkSnapshot {
         active: info.authenticated,
         host_ops: info.capability.is_some_and(|c| c & CAP_HOST_OPS_V1 != 0),
+        gateway_ops: info
+            .capability
+            .is_some_and(|c| c & CAP_GATEWAY_ENDPOINT_V1 != 0),
+        config_ops: info
+            .capability
+            .is_some_and(|c| c & CAP_CONFIG_ENDPOINT_V1 != 0),
+        session: info.id.unwrap_or(0),
+        host_boot: state.host_boot,
         node: info.node.unwrap_or(0),
         boot: info.boot.unwrap_or(0),
         network: info.network.unwrap_or(0),
     }
+}
+
+/// The live host registration mirror the dispatcher publishes for the API
+/// surface: the (session, host_boot) binding the attached gateway minted,
+/// with the deadline it granted. `usb_session`/`egress` pin which session
+/// and adapter this record belongs to — a new session or adapter can never
+/// inherit it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GatewayRegistration {
+    pub token: [u8; 16],
+    pub gateway_boot: u64,
+    /// SHA-256 of the authenticated session principal — the digest a
+    /// scope-2 endpoint expects.
+    pub host_digest: [u8; 32],
+    pub egress: u64,
+    pub usb_session: u64,
+    /// Process-monotonic deadline of the granted lease; the mirror stops
+    /// being usable past it even before the next tick clears it.
+    pub lease_deadline_mono: u64,
+}
+
+/// Shared, dispatcher-owned registration record. Writers are the dispatch
+/// thread only; readers (api1) take the whole record under one short lock
+/// and re-check `usb_session` against the session layer before trusting
+/// the binding.
+#[derive(Default)]
+pub struct GatewayLane {
+    current: Mutex<Option<GatewayRegistration>>,
+}
+
+impl GatewayLane {
+    pub fn current(&self) -> Option<GatewayRegistration> {
+        self.current.lock().expect("gateway lane poisoned").clone()
+    }
+
+    /// Publish a committed grant. Production callers are the dispatch
+    /// loop only (via `take_gateway_publish`); `pub(crate)` so api-level
+    /// tests can install a fixture without driving the wire lane.
+    pub(crate) fn set(&self, registration: GatewayRegistration) {
+        *self.current.lock().expect("gateway lane poisoned") = Some(registration);
+    }
+
+    pub fn clear(&self) {
+        *self.current.lock().expect("gateway lane poisoned") = None;
+    }
+}
+
+// --- Config operation registry (scope-gateway-config P5) ---------------------
+//
+// Config ops get their own operation space — never the messages.* or
+// gateway.* tables. The api1 layer submits a `ConfigRequest` and gets back a
+// config op id; the dispatch thread drives it through the `ConfigLane` and
+// writes the terminal `ConfigOutcome` here. `config.get` reads the record.
+// Both ends are bounded so a stalled link or a spammed submit can never grow
+// the hub without limit, and a queued request is only drained while a live
+// session can carry it — it stays PENDING rather than fabricating a result.
+
+/// api→dispatch request bound for the config lane. Only the wire essentials
+/// ride the inbox — the summary/network/target/submitted metadata is already
+/// committed to the `ConfigOpRecord` at submit time, so `config.get` reads it
+/// from there rather than carrying a second copy through the queue.
+struct QueuedConfig {
+    op_id: u64,
+    request: ConfigRequest,
+}
+
+/// The api-visible record for one config op. `outcome` is None while the op
+/// is queued or in flight — never a guessed verdict.
+#[derive(Clone, Debug)]
+pub struct ConfigOpRecord {
+    pub op_id: u64,
+    pub summary: String,
+    pub network: u64,
+    pub target: u64,
+    pub outcome: Option<ConfigOutcome>,
+    pub submitted_ms: u64,
+    pub resolved_ms: Option<u64>,
+}
+
+/// Bound on queued (not yet driven) requests and on retained records.
+const CONFIG_INBOX_CAP: usize = 32;
+const CONFIG_RECORD_CAP: usize = 128;
+
+#[derive(Default)]
+struct ConfigOpsInner {
+    next_op: u64,
+    inbox: VecDeque<QueuedConfig>,
+    records: HashMap<u64, ConfigOpRecord>,
+    /// Resolved op ids in completion order — the FIFO eviction order once the
+    /// record table is full (in-flight ops are never evicted).
+    resolved_order: VecDeque<u64>,
+}
+
+/// Shared config op hub: api1 is the producer/reader, the dispatch thread the
+/// consumer/writer. One Mutex guards the whole structure — submits and
+/// resolutions are short and the dispatch pass never holds the store lock and
+/// this lock together long enough to matter.
+#[derive(Default)]
+pub struct ConfigOps {
+    inner: Mutex<ConfigOpsInner>,
+}
+
+impl ConfigOps {
+    /// A config op id namespaces the daemon incarnation that minted it:
+    /// `(tag << 32) | seq` where `tag` folds `host_boot` into the high word
+    /// (bit 0 forced so the tag is never zero). The records table is
+    /// RAM-only, so without the tag a restarted daemon would reissue
+    /// `cfg...0001` and a stale `config.get` token would resolve to a
+    /// DIFFERENT operation — the tag makes a pre-restart token provably
+    /// not this boot's. `ConfigOps::default()` keeps the zero tag, which
+    /// is only for tests and fixtures.
+    pub fn with_boot(host_boot: u64) -> Self {
+        let tag = ((host_boot as u32) ^ ((host_boot >> 32) as u32)) | 1;
+        Self {
+            inner: Mutex::new(ConfigOpsInner {
+                next_op: u64::from(tag) << 32,
+                ..ConfigOpsInner::default()
+            }),
+        }
+    }
+
+    /// Queue a client request for the dispatch lane. Returns the config op id
+    /// the client polls with `config.get`, or Err(()) when the inbox is full —
+    /// an honest capacity refusal, never a silent drop.
+    pub fn submit(
+        &self,
+        request: ConfigRequest,
+        summary: String,
+        network: u64,
+        target: u64,
+        now_ms: u64,
+    ) -> Result<u64, ()> {
+        let mut inner = self.inner.lock().expect("config ops poisoned");
+        // Evict one resolved record to make room BEFORE the capacity
+        // check: the cap must refuse only while every retained record is
+        // still live (queued or in flight) — a resolved record is history,
+        // not occupancy. In-flight ops are never evicted.
+        if inner.records.len() >= CONFIG_RECORD_CAP {
+            while let Some(oldest) = inner.resolved_order.pop_front() {
+                if inner.records.remove(&oldest).is_some() {
+                    break;
+                }
+            }
+        }
+        if inner.inbox.len() >= CONFIG_INBOX_CAP || inner.records.len() >= CONFIG_RECORD_CAP {
+            return Err(());
+        }
+        let op_id = inner.next_op.wrapping_add(1).max(1);
+        inner.next_op = op_id;
+        inner.inbox.push_back(QueuedConfig { op_id, request });
+        inner.records.insert(
+            op_id,
+            ConfigOpRecord {
+                op_id,
+                summary,
+                network,
+                target,
+                outcome: None,
+                submitted_ms: now_ms,
+                resolved_ms: None,
+            },
+        );
+        Ok(op_id)
+    }
+
+    /// Pop the head queued request for the dispatch pass. Only called while a
+    /// live session can carry it AND the lane is free — the caller gates on
+    /// `link.active && !config_busy()`, so a queued op stays PENDING behind a
+    /// busy lane rather than being pulled off the queue only to resolve Busy.
+    fn take_request(&self) -> Option<QueuedConfig> {
+        self.inner
+            .lock()
+            .expect("config ops poisoned")
+            .inbox
+            .pop_front()
+    }
+
+    /// Record the terminal outcome for an op the lane resolved.
+    fn resolve(&self, op_id: u64, outcome: ConfigOutcome, now_ms: u64) {
+        let mut inner = self.inner.lock().expect("config ops poisoned");
+        if let Some(record) = inner.records.get_mut(&op_id) {
+            record.outcome = Some(outcome);
+            record.resolved_ms = Some(now_ms);
+            inner.resolved_order.push_back(op_id);
+        }
+        // Bound the retained record table: evict the oldest RESOLVED entries
+        // first so in-flight ops are never dropped out from under a reader.
+        while inner.records.len() > CONFIG_RECORD_CAP {
+            let Some(oldest) = inner.resolved_order.pop_front() else {
+                break;
+            };
+            inner.records.remove(&oldest);
+        }
+    }
+
+    /// Read one op's record for `config.get`.
+    pub fn get(&self, op_id: u64) -> Option<ConfigOpRecord> {
+        self.inner
+            .lock()
+            .expect("config ops poisoned")
+            .records
+            .get(&op_id)
+            .cloned()
+    }
+}
+
+/// The single in-flight wire step the dispatcher is tracking for the config
+/// lane (the lane holds at most one outstanding request at a time).
+#[derive(Clone, Copy)]
+struct ConfigPending {
+    /// Dispatcher-assigned wire request id stamped on the emitted frame.
+    wire: u64,
+    /// The lane's own request id — what `on_reply`/`on_dropped` expects.
+    lane: u64,
+    /// The config op id the in-flight request resolves.
+    op_id: u64,
+}
+
+/// The dispatcher-owned config lane state. `authority`/`generation` are the
+/// daemon's configured SingleAuthority inputs; the sequence is allocated and
+/// durably committed per-propose by the store layer (`ConfigAuthorityLedger`).
+struct ConfigRuntime {
+    lane: ConfigLane,
+    /// Configured issuer node id; 0 means no authority is configured and
+    /// Propose is refused (queries still run).
+    authority: u64,
+    /// Authority generation bound into each signed command.
+    generation: u32,
+    pending: Option<ConfigPending>,
+    /// Emit bodies the lane produced this pass, drained into the wire queue
+    /// on the leased path — cleared when the link cannot carry them.
+    emits: Vec<DispatchRequest>,
 }
 
 /// One authenticated device-clock observation: the device monotonic time
@@ -276,6 +542,8 @@ enum PendingKind {
     Query,
     Skip,
     Retire,
+    /// HOST_REGISTER request awaiting the device's reply.
+    Register,
 }
 
 struct Pending {
@@ -320,6 +588,29 @@ pub struct Dispatcher {
     last_attempt: HashMap<u64, u64>,
     /// A device clock regression was observed on this lease.
     clock_degraded: bool,
+    /// Gateway registration lane: the USB session the current lane state
+    /// binds (0 = unbound). Any session change clears the published mirror
+    /// and forces a fresh 0x10 — a token minted under another session can
+    /// never be inherited.
+    gateway_session: u64,
+    /// Session/egress the in-flight or published registration binds —
+    /// stashed at emit time so `handle_reply` needs no link snapshot.
+    gateway_bind: (u64, u64),
+    /// Monotonic time of the next allowed 0x10 emit (renewal half-lease or
+    /// a retry floor). 0 means "due now".
+    gateway_next_emit: u64,
+    /// The mirror value the dispatch loop must publish to
+    /// `State.gateway_lane` — Some(record) on a fresh grant, None on
+    /// session/link loss. Drained by `dispatch_once` only.
+    gateway_publish: Option<Option<GatewayRegistration>>,
+    /// The config lane runtime (P5) — None until `attach_config` wires a
+    /// `ConfigLane`. Queries/proposes only run while it and the device's
+    /// config capability are present.
+    config: Option<ConfigRuntime>,
+    /// Config outcomes resolved this pass, drained by `dispatch_once` into
+    /// `State.config_ops`. Lives outside `config` so a refused submit can
+    /// still be reported even when no lane is attached.
+    config_done: Vec<(u64, ConfigOutcome)>,
     /// Bounded diagnostics drained by the loop into the event ring.
     notes: Vec<String>,
 }
@@ -345,8 +636,29 @@ impl Dispatcher {
             sample: None,
             last_attempt: HashMap::new(),
             clock_degraded: false,
+            gateway_session: 0,
+            gateway_bind: (0, 0),
+            gateway_next_emit: 0,
+            gateway_publish: None,
+            config: None,
+            config_done: Vec::new(),
             notes: Vec::new(),
         }
+    }
+
+    /// Wire the config lane in (P5): the dispatch loop attaches a `ConfigLane`
+    /// at startup with the daemon's configured authority inputs. `authority`
+    /// is the issuer node id (0 = unconfigured → Propose refused, queries
+    /// still run); `generation` is the authority generation bound into signed
+    /// commands. The per-propose sequence comes from the durable ledger.
+    pub fn attach_config(&mut self, lane: ConfigLane, authority: u64, generation: u32) {
+        self.config = Some(ConfigRuntime {
+            lane,
+            authority,
+            generation,
+            pending: None,
+            emits: Vec::new(),
+        });
     }
 
     fn alloc_request(&mut self) -> u64 {
@@ -363,6 +675,285 @@ impl Dispatcher {
     /// Diagnostics collected this pass, drained by the driving loop.
     pub fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    /// The mirror publish the dispatch loop owes `State.gateway_lane`, if
+    /// any. Some(Some(reg)) publishes a fresh grant, Some(None) clears a
+    /// dead binding — drained once per pass so readers only ever see
+    /// committed values.
+    pub fn take_gateway_publish(&mut self) -> Option<Option<GatewayRegistration>> {
+        self.gateway_publish.take()
+    }
+
+    /// Config outcomes resolved this pass, drained by `dispatch_once` into
+    /// `State.config_ops` — same once-per-pass committed-value discipline as
+    /// the registration mirror.
+    pub fn take_config_done(&mut self) -> Vec<(u64, ConfigOutcome)> {
+        std::mem::take(&mut self.config_done)
+    }
+
+    /// Whether the config lane currently holds an in-flight request. The
+    /// dispatch pass only pulls a queued op off `State.config_ops` while this
+    /// is false, so a queued op stays PENDING behind a busy lane instead of
+    /// being drained and refused Busy.
+    pub fn config_busy(&self) -> bool {
+        self.config.as_ref().is_some_and(|c| c.lane.busy())
+    }
+
+    /// Advance the config lane on a `ConfigStep`: an Emit becomes a wire
+    /// request stamped with a fresh dispatcher request id (so it can never
+    /// alias a SUBMIT/QUERY pending), and a Done resolves the op id's
+    /// outcome. Wire id -> lane id rides in `pending` — one in-flight only.
+    fn drive_config_step(&mut self, step: ConfigStep, op_id: u64) {
+        if self.config.is_none() {
+            return;
+        }
+        match step {
+            ConfigStep::Emit { request, body } => {
+                // alloc_request borrows the whole dispatcher, so it runs
+                // before the config field borrow below.
+                let wire = self.alloc_request();
+                let cfg = self.config.as_mut().expect("checked above");
+                cfg.emits.push(DispatchRequest {
+                    request: wire,
+                    body,
+                });
+                cfg.pending = Some(ConfigPending {
+                    wire,
+                    lane: request,
+                    op_id,
+                });
+            }
+            ConfigStep::Done(outcome) => {
+                let cfg = self.config.as_mut().expect("checked above");
+                cfg.pending = None;
+                self.config_done.push((op_id, outcome));
+            }
+        }
+    }
+
+    /// Submit one queued api request to the lane. Gates on the device's
+    /// config capability and, for Propose, on a configured authority — a
+    /// refusal is an honest terminal outcome, never a fabricated result. The
+    /// SingleAuthority commit order allocates + durably commits the sequence
+    /// BEFORE the lane signs, so a crash can gap but never reuse one.
+    fn config_submit<L: ConfigAuthorityLedger>(
+        &mut self,
+        ledger: &mut L,
+        link: &LinkSnapshot,
+        op_id: u64,
+        request: ConfigRequest,
+        now: u64,
+    ) {
+        if !link.config_ops {
+            self.config_done
+                .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Unsupported)));
+            return;
+        }
+        let Some(cfg) = self.config.as_mut() else {
+            self.config_done
+                .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Unsupported)));
+            return;
+        };
+        if cfg.lane.busy() {
+            self.config_done
+                .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Busy)));
+            return;
+        }
+        if let ConfigRequest::Propose { .. } = request {
+            // A signed permit needs a configured authority, a live mesh
+            // network to bind into the AAD, and an issuer that actually holds
+            // a signing key — none of these is client-supplied.
+            if cfg.authority == 0 || link.network == 0 || !cfg.lane.issuer_ready() {
+                self.config_done
+                    .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));
+                return;
+            }
+            let Ok(sequence) = ledger.config_authority_next() else {
+                // The durable sequence could not be committed: the issuance
+                // cannot be proven, so report Indeterminate, never a seq we
+                // did not durably own. No operation_id was minted yet —
+                // the failure precedes issuance, so none is carried.
+                self.config_done
+                    .push((op_id, ConfigOutcome::Indeterminate(None)));
+                return;
+            };
+            cfg.lane.set_issuer_identity(link.network, cfg.authority);
+            cfg.lane.set_authority(cfg.generation, sequence);
+        }
+        let step = cfg.lane.submit(request, now);
+        self.drive_config_step(step, op_id);
+    }
+
+    /// Route one inbox body to the lane when it answers the in-flight config
+    /// wire request. Returns true when consumed (so `handle_reply` does not
+    /// fall through to "unmatched").
+    fn config_reply(&mut self, request: u64, inner: &[u8], now: u64) -> bool {
+        let pending = match self.config.as_ref().and_then(|c| c.pending) {
+            Some(p) if p.wire == request => p,
+            _ => return false,
+        };
+        let step = {
+            let cfg = self.config.as_mut().expect("checked above");
+            cfg.pending = None;
+            cfg.lane.on_reply(pending.lane, inner, now)
+        };
+        self.drive_config_step(step, pending.op_id);
+        true
+    }
+
+    /// Deadline enforcement for the in-flight config step: a query deadline
+    /// resolves Timeout, a permit-transfer deadline Indeterminate. Runs every
+    /// pass regardless of link state — a stalled step must still resolve.
+    /// `carry` is false when the link cannot serve config right now, in which
+    /// case buffered emits are dropped (the in-flight request then resolves
+    /// via its own deadline) rather than sent to a dead endpoint.
+    fn config_pass(&mut self, now: u64, carry: bool, out: &mut Vec<DispatchRequest>) {
+        let Some(cfg) = self.config.as_mut() else {
+            return;
+        };
+        if let Some(outcome) = cfg.lane.poll(now) {
+            let op_id = cfg.pending.map(|p| p.op_id).unwrap_or(0);
+            cfg.pending = None;
+            self.config_done.push((op_id, outcome));
+        }
+        if carry {
+            out.append(&mut cfg.emits);
+        } else {
+            cfg.emits.clear();
+        }
+    }
+
+    /// A config emit the outbound queue refused — provably never reached the
+    /// device, so resolve the in-flight step honestly instead of leaving it
+    /// to time out. Returns true when `request` was the config wire id.
+    fn config_dropped(&mut self, request: u64) -> bool {
+        let pending = match self.config.as_ref().and_then(|c| c.pending) {
+            Some(p) if p.wire == request => p,
+            _ => return false,
+        };
+        let step = {
+            let cfg = self.config.as_mut().expect("checked above");
+            cfg.pending = None;
+            cfg.lane.on_dropped(pending.lane)
+        };
+        self.drive_config_step(step, pending.op_id);
+        true
+    }
+
+    /// Gateway registration lane (05 §5.6): keep one live (session,
+    /// host_boot) binding while the link serves the family. The lane only
+    /// ever binds the CURRENT session — a session id change retires the
+    /// mirror immediately, so a stale-session token can never authorize a
+    /// schema-2 canonical.
+    fn gateway_pass(
+        &mut self,
+        link: &LinkSnapshot,
+        now: u64,
+        mono: u64,
+        out: &mut Vec<DispatchRequest>,
+    ) {
+        if !(link.gateway_ops && link.session != 0 && link.host_boot != 0) {
+            // No gateway family or no daemon incarnation id: the lane
+            // cannot run. Drop any mirror bound to the dead session.
+            if self.gateway_session != 0 {
+                self.gateway_session = 0;
+                self.gateway_publish = Some(None);
+            }
+            return;
+        }
+        if self.gateway_session != link.session {
+            // New authenticated session: the device cleared its record —
+            // publish the loss (only when a prior binding could still be
+            // mirrored — a first bind has nothing to clear) and
+            // re-register under the new binding.
+            let had_binding = self.gateway_session != 0;
+            self.gateway_session = link.session;
+            self.gateway_bind = (link.session, link.node);
+            self.gateway_next_emit = 0;
+            if had_binding {
+                self.gateway_publish = Some(None);
+            }
+        }
+        // One 0x10 in flight at a time; renewal/failure cadence is bounded
+        // by gateway_next_emit.
+        let in_flight = self
+            .pending
+            .values()
+            .any(|p| p.kind == PendingKind::Register);
+        if in_flight || mono < self.gateway_next_emit {
+            return;
+        }
+        let request = self.alloc_request();
+        let body = host_ops::encode_host_register(&host_ops::HostRegisterRequest {
+            network: link.network,
+            host_boot: link.host_boot,
+            lease_ms: HOST_REGISTER_LEASE_REQUEST_MS,
+        });
+        self.pending.insert(
+            request,
+            Pending {
+                op_seq: None,
+                kind: PendingKind::Register,
+                sent_ms: now,
+                // For Register pendings `through` carries the emit-time
+                // monotonic stamp: lease deadlines anchored at the
+                // REQUEST are strictly earlier than the device's
+                // response-time grant — conservative, never overclaiming.
+                through: mono,
+            },
+        );
+        // Floor on re-emit: while a response is pending this only arms the
+        // post-response gap; on Ok the handler pushes it out to half the
+        // granted lease.
+        self.gateway_next_emit = mono + REGISTER_RETRY_MS;
+        out.push(DispatchRequest { request, body });
+    }
+
+    /// HOST_REGISTER reply: only a result-Ok bound to the CURRENT session
+    /// publishes a mirror. Busy is the retryable answer (re-emit on the
+    /// retry cadence); every other outcome is a diagnostic, never a silent
+    /// rebind. `emit_mono` is the request's monotonic stamp — lease
+    /// deadlines anchored there expire strictly before the device's own
+    /// grant would, so the mirror never outlives the real binding.
+    fn on_host_register_response(&mut self, inner: &[u8], emit_mono: u64, _now: u64) {
+        match host_ops::decode_host_register_response(inner) {
+            Ok(response) => {
+                let Ok(result) = GatewayOpsResult::try_from_u16(response.result) else {
+                    self.note(format!(
+                        "host register reply carries unknown result {}",
+                        response.result
+                    ));
+                    return;
+                };
+                match result {
+                    GatewayOpsResult::Ok => {
+                        let (session, egress) = self.gateway_bind;
+                        // The granted lease clamps our renewal: refresh at
+                        // half of it (at least one retry floor out).
+                        let lease = u64::from(response.lease_ms);
+                        self.gateway_next_emit = emit_mono + (lease / 2).max(REGISTER_RETRY_MS);
+                        self.gateway_publish = Some(Some(GatewayRegistration {
+                            token: response.token,
+                            gateway_boot: response.gateway_boot,
+                            host_digest: response.host_digest,
+                            egress,
+                            usb_session: session,
+                            lease_deadline_mono: emit_mono + lease,
+                        }));
+                    }
+                    GatewayOpsResult::Busy => {
+                        // Retryable: leave the retry floor as armed.
+                    }
+                    other => {
+                        self.note(format!(
+                            "host register refused: {other:?} (binding stays unpublished)"
+                        ));
+                    }
+                }
+            }
+            Err(error) => self.note(format!("host register reply undecodable: {error}")),
+        }
     }
 
     /// One pass: consume nothing (replies go through `handle_reply`),
@@ -393,6 +984,10 @@ impl Dispatcher {
         {
             self.sample = None;
         }
+        // Config lane sweep: deadline enforcement is a host-side proof and
+        // runs every pass regardless of link state; buffered emits only go
+        // out while the link actually serves the config family.
+        self.config_pass(now, link.config_ops && self.lease.is_some(), &mut out);
         let Ok(ops) = store.dispatch_view() else {
             self.note("dispatch_view fault".to_string());
             return out;
@@ -405,6 +1000,7 @@ impl Dispatcher {
         let Some(lease_bytes) = self.lease else {
             return out;
         };
+        self.gateway_pass(link, now, mono, &mut out);
         let lease = BootLease(lease_bytes);
         let mut sorted = ops;
         sorted.sort_by_key(|op| op.seq);
@@ -456,6 +1052,15 @@ impl Dispatcher {
         self.last_attempt.clear();
         self.floor = 0;
         self.floor_known = false;
+        // The registration mirror cannot outlive the lease it was bound
+        // under — a new boot/adapter gets a fresh lane. Publish the clear
+        // only when a bound session could still be mirrored; the first
+        // lease adoption has nothing to unpublish.
+        if self.gateway_session != 0 {
+            self.gateway_publish = Some(None);
+        }
+        self.gateway_session = 0;
+        self.gateway_next_emit = 0;
         match lease {
             Some(bytes) => {
                 self.note(format!("lease up {}", hex16(&bytes)));
@@ -1007,6 +1612,9 @@ impl Dispatcher {
                 }
             }
         }
+        // A config emit that never reached the writer resolves its in-flight
+        // step honestly (Timeout for a query, Indeterminate for a transfer).
+        self.config_dropped(request);
         if self.sample.is_some_and(|s| s.request == request) {
             self.sample = None;
         }
@@ -1022,6 +1630,12 @@ impl Dispatcher {
     ) {
         if self.sample.is_some_and(|s| s.request == request) {
             self.on_time_sample(inner, now);
+            return;
+        }
+        // Config replies land in the same inbox keyed by the dispatcher's
+        // wire request id — route them to the lane before the generic
+        // pending lookup, which does not own them.
+        if self.config_reply(request, inner, now) {
             return;
         }
         let Some(pending) = self.pending.remove(&request) else {
@@ -1051,6 +1665,7 @@ impl Dispatcher {
                 Ok(response) => self.on_retire_response(store, &response, pending.through),
                 Err(error) => self.note(format!("retire response undecodable: {error}")),
             },
+            PendingKind::Register => self.on_host_register_response(inner, pending.through, now),
         }
     }
 
@@ -1583,6 +2198,18 @@ impl Dispatcher {
                                 o.terminal_ms = Some(now);
                             }
                         }
+                        // Scope-2 terminal: the verified Service Receipt
+                        // proving the registered host's ReceiveLog stored
+                        // the payload — terminal like END_SDK but kept as
+                        // its own proof, never promoted to an ordinary
+                        // SDK receipt (05 §5.6).
+                        Evidence::HostRamReceived => {
+                            d.ev_host_receive = true;
+                            if !concluded {
+                                o.dispatch_state = DispatchState::EndSdkReceived;
+                                o.terminal_ms = Some(now);
+                            }
+                        }
                         Evidence::MacAttemptReported => {
                             // Best-effort completion: terminal on the
                             // device, honest as MAC_ATTEMPT_REPORTED — no
@@ -1651,8 +2278,181 @@ fn hex16(bytes: &[u8; 16]) -> String {
     out
 }
 
+/// Resolve one device-issued GATEWAY_INGRESS (0x11) into its ACK body
+/// (0x12) — or None when no honest answer can be formed. The ACK follows
+/// storage, never precedes it: the payload is verified (prefix shape +
+/// recomputed digest) and ingested into the ReceiveLog FIRST, and only the
+/// committed ingest outcome names the ACK result. The request id and the
+/// bound fields (token, ref MessageKey, request_digest) are echoed from
+/// the ingress — the device correlates the ACK on all of them, so a stale
+/// or foreign value can never mark a record stored.
+fn gateway_ingress_ack(state: &State, inner: &[u8], now: u64) -> Option<Vec<u8>> {
+    let ingress = match host_ops::decode_gateway_ingress(inner) {
+        Ok(ingress) => ingress,
+        Err(error) => {
+            push_event(
+                state,
+                now,
+                format!(
+                    "\"kind\":\"gw_ingress\",\"outcome\":\"malformed\",\"detail\":\"{}\"",
+                    json_escape(&error.to_string())
+                ),
+            );
+            return None;
+        }
+    };
+    let (authenticated, session_id, network, node, boot) = {
+        let info = state.session.lock().expect("session poisoned");
+        (
+            info.authenticated,
+            info.id.unwrap_or(0),
+            info.network.unwrap_or(0),
+            info.node.unwrap_or(0),
+            info.boot.unwrap_or(0),
+        )
+    };
+    let prefix = &ingress.submit_prefix;
+    let mut prefix_token = [0u8; 16];
+    prefix_token.copy_from_slice(
+        &prefix[host_ops::SERVICE_PREFIX_TOKEN_OFFSET..host_ops::SERVICE_PREFIX_TOKEN_OFFSET + 16],
+    );
+    // The device binds the 0x12 ACK to its live HOST registration token —
+    // `ack.token == registration_.token` in usb_bridge.cpp — never to the
+    // Service Submit prefix token, which on a real mesh ingress is the
+    // ORIGIN's lease token (they only coincide on loopback, where the
+    // device synthesizes the prefix from the registration itself). The
+    // prefix token still participates in the digest recompute below —
+    // only the ACK's token field changes. When no mirror is bound to this
+    // session the ACK can never bind anyway: echo the presented prefix
+    // token so the device drops it honestly rather than claiming a
+    // binding we do not hold.
+    let ack_token = match state.gateway_lane.current() {
+        Some(reg) if reg.usb_session == session_id => reg.token,
+        _ => prefix_token,
+    };
+    let answer = |outcome: GatewayOpsResult| {
+        Some(host_ops::encode_gateway_ingress_ack(
+            &host_ops::GatewayIngressAck {
+                token: ack_token,
+                ref_origin: ingress.ref_origin,
+                ref_session: ingress.ref_session,
+                ref_sequence: ingress.ref_sequence,
+                request_digest: ingress.request_digest,
+                outcome: outcome as u16,
+            },
+        ))
+    };
+    let event = |outcome: &str, detail: String| {
+        push_event(
+            state,
+            now,
+            format!(
+                "\"kind\":\"gw_ingress\",\"outcome\":\"{outcome}\",\"origin\":{},\"msg_session\":{},\"msg_seq\":{},\"detail\":\"{}\"",
+                ingress.ref_origin,
+                ingress.ref_session,
+                ingress.ref_sequence,
+                json_escape(&detail)
+            ),
+        );
+    };
+    // The frame arrived sealed on the live session; the prefix still has
+    // to be the exact wire shape the digest commits to — version, submit
+    // subtype, host-receive scope, zero flags/reserved, matching length.
+    let prefix_len = u16::from_be_bytes([
+        prefix[host_ops::SERVICE_PREFIX_LEN_OFFSET],
+        prefix[host_ops::SERVICE_PREFIX_LEN_OFFSET + 1],
+    ]) as usize;
+    let prefix_boot = u64::from_be_bytes(
+        prefix[host_ops::SERVICE_PREFIX_BOOT_OFFSET..host_ops::SERVICE_PREFIX_BOOT_OFFSET + 8]
+            .try_into()
+            .expect("8"),
+    );
+    let well_formed = prefix[0] == 1
+        && prefix[1] == 3
+        && prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] == 2
+        && prefix[3] == 0
+        && prefix[30] == 0
+        && prefix[31] == 0
+        && prefix_len == ingress.payload.len()
+        && ingress.payload.len() <= host_ops::CANONICAL_GATEWAY_PAYLOAD_MAX;
+    if !well_formed {
+        event("invalid", "submit prefix shape".to_string());
+        return answer(GatewayOpsResult::Invalid);
+    }
+    if !authenticated || session_id == 0 {
+        event("invalid", "no authenticated session".to_string());
+        return answer(GatewayOpsResult::Invalid);
+    }
+    // The device only issues ingress under a live registration; the prefix
+    // token is the ORIGIN's lease token, which differs from the host
+    // registration token on every real mesh submit. A divergence is
+    // expected, not an error — noted for diagnostics only. The storage
+    // decision never depends on either token: the digest recompute below
+    // is the proof, and the device validates the ACK binding on its own
+    // registration record.
+    if let Some(reg) = state.gateway_lane.current() {
+        if reg.usb_session == session_id && reg.token != prefix_token {
+            event(
+                "note",
+                "prefix token differs from registration mirror".to_string(),
+            );
+        }
+    }
+    if boot != 0 && prefix_boot != boot {
+        // The submit was bound to a different adapter boot — the device
+        // could not have accepted it on this session.
+        event("invalid", "gateway_boot mismatch".to_string());
+        return answer(GatewayOpsResult::Invalid);
+    }
+    // The storage proof is recomputed, never trusted: digest over the
+    // exact Service Submit prefix plus the payload as received.
+    let mut digest_input = Vec::with_capacity(prefix.len() + ingress.payload.len());
+    digest_input.extend_from_slice(prefix);
+    digest_input.extend_from_slice(&ingress.payload);
+    if crate::canonical::sha256(&digest_input) != ingress.request_digest {
+        event("invalid", "request digest mismatch".to_string());
+        return answer(GatewayOpsResult::Invalid);
+    }
+    let outcome = {
+        let mut log = state.receive_log.lock().expect("receive log poisoned");
+        log.ingest(
+            crate::receive_log::Ingress {
+                network,
+                gateway: (node != 0).then_some(node),
+                origin: ingress.ref_origin,
+                msg_session: ingress.ref_session,
+                msg_seq: ingress.ref_sequence,
+                payload: ingress.payload.clone(),
+            },
+            now,
+        )
+    };
+    let (outcome, name) = match outcome {
+        // Stored AND Duplicate both name "the payload is in the log" —
+        // the resend path depends on the second delivery being as good
+        // as the first (G03).
+        crate::receive_log::IngestOutcome::Stored { .. }
+        | crate::receive_log::IngestOutcome::Duplicate { .. } => (GatewayOpsResult::Ok, "stored"),
+        crate::receive_log::IngestOutcome::Conflict { .. } => {
+            (GatewayOpsResult::Invalid, "conflict")
+        }
+        // Capacity/credit exhaustion is the retryable answer: the caller
+        // may retry once room exists, and the record is never claimed
+        // stored (G07/BUSY).
+        crate::receive_log::IngestOutcome::RejectedNetworkCap => {
+            (GatewayOpsResult::Busy, "network_cap")
+        }
+        crate::receive_log::IngestOutcome::RejectedOversize => {
+            (GatewayOpsResult::Invalid, "oversize")
+        }
+    };
+    event(name, String::new());
+    answer(outcome)
+}
+
 /// One dispatch pass against the shared daemon state: drain inbound
-/// replies, run the tick, push the resulting frames at the writer queue.
+/// replies and device-issued ingress, run the tick, publish the
+/// registration mirror, push the resulting frames at the writer queue.
 /// Extracted from `dispatch_loop` so tests can drive it step by step.
 pub fn dispatch_once(
     state: &State,
@@ -1662,6 +2462,18 @@ pub fn dispatch_once(
     mono: u64,
 ) {
     let replies = state.dispatch_inbox.drain();
+    let ingress = state.ingress_inbox.drain();
+    let link = link_snapshot(state);
+    // A config submission drains only while a live session can carry it AND
+    // the lane is free — a dead link or a busy lane leaves the head queued
+    // for a later pass (still honestly PENDING) rather than pulling it off
+    // the queue only to fabricate a refusal. A session that cannot serve
+    // config refuses honestly inside config_submit instead.
+    let config_req = if link.active && !dispatcher.config_busy() {
+        state.config_ops.take_request()
+    } else {
+        None
+    };
     let requests = {
         let mut store = state
             .operation_store
@@ -1670,8 +2482,26 @@ pub fn dispatch_once(
         for (request, body) in replies {
             dispatcher.handle_reply(&mut *store, request, &body, now);
         }
-        dispatcher.tick_mono(&mut *store, &link_snapshot(state), now, mono)
+        // Feed a config submission before tick so its first Emit rides this
+        // pass's wire queue.
+        if let Some(queued) = config_req {
+            dispatcher.config_submit(&mut *store, &link, queued.op_id, queued.request, now);
+        }
+        dispatcher.tick_mono(&mut *store, &link, now, mono)
     };
+    // Publish config outcomes exactly once per pass — api1 only ever reads
+    // committed values.
+    for (op_id, outcome) in dispatcher.take_config_done() {
+        state.config_ops.resolve(op_id, outcome, now);
+    }
+    // Publish the registration mirror exactly once per pass — api1 only
+    // ever reads committed values.
+    if let Some(publish) = dispatcher.take_gateway_publish() {
+        match publish {
+            Some(registration) => state.gateway_lane.set(registration),
+            None => state.gateway_lane.clear(),
+        }
+    }
     for note in dispatcher.take_notes() {
         push_event(
             state,
@@ -1681,6 +2511,24 @@ pub fn dispatch_once(
                 json_escape(&note)
             ),
         );
+    }
+    // Device-issued ingress resolves here, not in the reply lane: the ACK
+    // body is produced only after the storage outcome is decided, and it
+    // rides the same bounded writer queue under the request id the device
+    // issued. A full queue loses the ACK — the device's own resend inside
+    // its ack window gives us another pass, and a lost record is honest
+    // non-success, never a claimed store.
+    for (request, body) in ingress {
+        if let Some(ack) = gateway_ingress_ack(state, &body, now) {
+            let frame = Frame {
+                kind: FrameKind::HostOps,
+                flags: 0,
+                session: 0,
+                request,
+                body: ack,
+            };
+            let _ = outbound.try_send(Outbound::Seal(frame));
+        }
     }
     for request in requests {
         let frame = Frame {
@@ -1706,6 +2554,49 @@ pub fn dispatch_once(
     }
 }
 
+/// Reserve subtracted from the challenge's apply budget before the issuer
+/// signs — the same safety margin the device profile assumes so a permit is
+/// never cut to the wire's last millisecond.
+const CONFIG_SAFETY_MARGIN_MS: u32 = 500;
+
+/// Fill `buf` with fresh entropy from the store's 128-bit minter (urandom
+/// with a non-repeating fallback) — the lane's operation_id / client_nonce
+/// draws. Injected as a closure so tests stay deterministic.
+fn fill_config_entropy(buf: &mut [u8]) {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let block = mint_id128();
+        let n = (buf.len() - filled).min(block.len());
+        buf[filled..filled + n].copy_from_slice(&block[..n]);
+        filled += n;
+    }
+}
+
+/// Build the config lane for the dispatch thread: the dev-profile issuer
+/// derived from the link development secret (domain-separated — never the
+/// raw PSK), the daemon's configured authority/generation, and real entropy.
+/// An unset authority yields a lane that can answer queries but refuses
+/// every Propose honestly.
+fn config_lane_for(state: &State) -> ConfigLane {
+    // The permit master must equal the target's own key material — the
+    // firmware verifier derives identically from ROUTELOOM_DEVELOPMENT_KEY_HEX,
+    // so a mismatched master signs permits the device can only deny.
+    let dev_key = config_dev_key(&state.config_dev_key);
+    let authority = state.config_authority.unwrap_or(0);
+    let issuer = ConfigIssuer::new(
+        dev_key.to_vec(),
+        /*network=*/ 0, // rebound to the live session network per propose
+        authority,
+        CONFIG_SAFETY_MARGIN_MS,
+    );
+    ConfigLane::new(
+        issuer,
+        state.config_authority_generation,
+        /*authority_sequence=*/ 0, // fed from the durable ledger per propose
+        Box::new(fill_config_entropy),
+    )
+}
+
 /// The dispatch thread: keeps working through USB outages — records stay
 /// queued while the link is down and host-side expiry still applies.
 pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
@@ -1715,6 +2606,11 @@ pub fn dispatch_loop(state: Arc<State>, outbound: mpsc::SyncSender<Outbound>) {
         .expect("operation store poisoned")
         .lineage();
     let mut dispatcher = Dispatcher::new(dispatcher_id);
+    dispatcher.attach_config(
+        config_lane_for(&state),
+        state.config_authority.unwrap_or(0),
+        state.config_authority_generation,
+    );
     loop {
         dispatch_once(
             &state,
@@ -1738,11 +2634,17 @@ mod tests {
         encode_receipt, encode_retire_response, encode_time_sample_response, RetireResponse,
         TimeSampleResponse,
     };
+    use routeloom_wire::autonomy::EncodedPayload;
+    use routeloom_wire::endpoint::{
+        control_challenge_encode, control_status_encode, ConfigField, ConfigFieldType, ConfigPhase,
+        ConfigReason, ControlChallenge, ControlStatus,
+    };
 
     const UID: u32 = 501;
     const NET: u64 = 1;
     const NODE: u64 = 0x0abc;
     const BOOT: u64 = 7;
+    const HOST_BOOT: u64 = 0x99;
 
     fn link() -> LinkSnapshot {
         LinkSnapshot {
@@ -1751,6 +2653,10 @@ mod tests {
             node: NODE,
             boot: BOOT,
             network: NET,
+            session: 0,
+            host_boot: HOST_BOOT,
+            gateway_ops: true,
+            config_ops: true,
         }
     }
 
@@ -1761,6 +2667,10 @@ mod tests {
             node: 0,
             boot: 0,
             network: 0,
+            session: 0,
+            host_boot: 0,
+            gateway_ops: false,
+            config_ops: false,
         }
     }
 
@@ -1792,6 +2702,7 @@ mod tests {
             ttl_ms: ttl,
             storage: canonical::STORAGE_RAM,
             hop_limit: canonical::HOP_DEFAULT,
+            gateway: None,
             payload,
             hash: canonical::sha256(&canonical),
             canonical,
@@ -3388,5 +4299,853 @@ mod tests {
             op(&store, first).dispatch_state,
             DispatchState::Indeterminate
         );
+    }
+
+    // ---- Gateway registration lane (05-wire-api.md §5.6) ----
+
+    /// A live snapshot bound to authenticated session 7 on the attached
+    /// gateway — the shape the lane needs before it emits 0x10.
+    fn gw_link() -> LinkSnapshot {
+        let mut link = link();
+        link.gateway_ops = true;
+        link.session = 7;
+        link.host_boot = HOST_BOOT;
+        link
+    }
+
+    fn register_response(result: GatewayOpsResult, lease_ms: u32) -> Vec<u8> {
+        host_ops::encode_host_register_response(&host_ops::HostRegisterResponse {
+            result: result as u16,
+            token: [0xa1; 16],
+            gateway_boot: 0x999,
+            host_digest: [0x44; 32],
+            lease_ms,
+        })
+    }
+
+    fn register_of(requests: &[DispatchRequest]) -> Option<&DispatchRequest> {
+        requests
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_HOST_REGISTER)
+    }
+
+    #[test]
+    fn register_lane_binds_session_and_publishes_mirror() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        let register = register_of(&out).expect("0x10 emitted for a live session");
+        let request = host_ops::decode_host_register(&register.body).unwrap();
+        assert_eq!(request.network, NET);
+        assert_eq!(request.host_boot, HOST_BOOT);
+        assert_eq!(request.lease_ms, HOST_REGISTER_LEASE_REQUEST_MS);
+        // Nothing published until the device answers.
+        assert!(dispatcher.take_gateway_publish().is_none());
+        // One 0x10 in flight: an immediate re-tick emits nothing new.
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_010, 2_010);
+        assert!(register_of(&out).is_none());
+        dispatcher.handle_reply(
+            &mut store,
+            register.request,
+            &register_response(GatewayOpsResult::Ok, 10_000),
+            1_020,
+        );
+        let Some(Some(registration)) = dispatcher.take_gateway_publish() else {
+            panic!("grant must publish the mirror");
+        };
+        assert_eq!(registration.token, [0xa1; 16]);
+        assert_eq!(registration.gateway_boot, 0x999);
+        assert_eq!(registration.host_digest, [0x44; 32]);
+        assert_eq!(registration.egress, NODE);
+        assert_eq!(registration.usb_session, 7);
+        // The lease deadline is anchored at the REQUEST's monotonic stamp
+        // (2_000) — strictly earlier than any response-time grant.
+        assert_eq!(registration.lease_deadline_mono, 2_000 + 10_000);
+        // Publish drained once — a second take returns None.
+        assert!(dispatcher.take_gateway_publish().is_none());
+    }
+
+    #[test]
+    fn register_renews_at_half_the_granted_lease() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        let register = register_of(&out).expect("0x10 emitted");
+        dispatcher.handle_reply(
+            &mut store,
+            register.request,
+            &register_response(GatewayOpsResult::Ok, 10_000),
+            1_020,
+        );
+        dispatcher.take_gateway_publish();
+        // Before emit_mono + lease/2 there is nothing to renew.
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 3_000, 6_999);
+        assert!(register_of(&out).is_none());
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 3_100, 7_001);
+        let renewal = register_of(&out).expect("renewal due at half lease");
+        // The renewal re-asks under the same binding.
+        let request = host_ops::decode_host_register(&renewal.body).unwrap();
+        assert_eq!(request.host_boot, HOST_BOOT);
+    }
+
+    #[test]
+    fn register_busy_retries_on_the_retry_floor() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        let register = register_of(&out).expect("0x10 emitted");
+        dispatcher.handle_reply(
+            &mut store,
+            register.request,
+            &register_response(GatewayOpsResult::Busy, 0),
+            1_020,
+        );
+        // Busy publishes nothing and re-emits only after the retry floor.
+        assert!(dispatcher.take_gateway_publish().is_none());
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_100, 2_100);
+        assert!(register_of(&out).is_none());
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_300, 2_260);
+        assert!(register_of(&out).is_some());
+    }
+
+    #[test]
+    fn register_refusal_is_noted_and_never_published() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        let register = register_of(&out).expect("0x10 emitted");
+        dispatcher.handle_reply(
+            &mut store,
+            register.request,
+            &register_response(GatewayOpsResult::Denied, 0),
+            1_020,
+        );
+        assert!(dispatcher.take_gateway_publish().is_none());
+        let notes = dispatcher.take_notes();
+        assert!(
+            notes.iter().any(|n| n.contains("host register refused")),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn register_lane_needs_family_session_and_incarnation() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        // No gateway family → nothing.
+        let mut no_family = gw_link();
+        no_family.gateway_ops = false;
+        let out = dispatcher.tick_mono(&mut store, &no_family, 1_000, 2_000);
+        assert!(register_of(&out).is_none());
+        // Session 0 (unauthenticated) → nothing.
+        let mut no_session = gw_link();
+        no_session.session = 0;
+        let out = dispatcher.tick_mono(&mut store, &no_session, 1_000, 2_000);
+        assert!(register_of(&out).is_none());
+        // No daemon incarnation → nothing.
+        let mut no_boot = gw_link();
+        no_boot.host_boot = 0;
+        let out = dispatcher.tick_mono(&mut store, &no_boot, 1_000, 2_000);
+        assert!(register_of(&out).is_none());
+    }
+
+    #[test]
+    fn session_change_drops_mirror_and_registers_fresh() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        let register = register_of(&out).expect("0x10 emitted");
+        dispatcher.handle_reply(
+            &mut store,
+            register.request,
+            &register_response(GatewayOpsResult::Ok, 10_000),
+            1_020,
+        );
+        assert!(matches!(dispatcher.take_gateway_publish(), Some(Some(_))));
+        // A new authenticated session can never inherit the old token:
+        // the mirror is cleared and a fresh 0x10 goes out immediately.
+        let mut new_session = gw_link();
+        new_session.session = 8;
+        let out = dispatcher.tick_mono(&mut store, &new_session, 1_100, 2_100);
+        assert!(matches!(dispatcher.take_gateway_publish(), Some(None)));
+        assert!(register_of(&out).is_some());
+    }
+
+    #[test]
+    fn lane_loss_publishes_mirror_clear() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        let mut dispatcher = Dispatcher::new([0x77; 16]);
+        let out = dispatcher.tick_mono(&mut store, &gw_link(), 1_000, 2_000);
+        let register = register_of(&out).expect("0x10 emitted");
+        dispatcher.handle_reply(
+            &mut store,
+            register.request,
+            &register_response(GatewayOpsResult::Ok, 10_000),
+            1_020,
+        );
+        dispatcher.take_gateway_publish();
+        // Link down → the dead-session binding is unpublished, and the
+        // lane stops emitting until a live session returns.
+        let out = dispatcher.tick_mono(&mut store, &offline(), 1_100, 2_100);
+        assert!(matches!(dispatcher.take_gateway_publish(), Some(None)));
+        assert!(register_of(&out).is_none());
+    }
+
+    // ---- Gateway ingress → ReceiveLog → 0x12 (05-wire-api.md §5.6) ----
+
+    /// A well-formed Service Submit prefix for `token`/`boot` carrying
+    /// `payload_len` — exactly the shape `queue_ingress` synthesizes on
+    /// the device.
+    fn submit_prefix(token: [u8; 16], boot: u64, payload_len: usize) -> [u8; 32] {
+        let mut prefix = [0u8; 32];
+        prefix[0] = 1; // service payload version
+        prefix[1] = 3; // ServiceSubtype::Submit
+        prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] = 2; // host receive RAM
+        prefix[host_ops::SERVICE_PREFIX_TOKEN_OFFSET..host_ops::SERVICE_PREFIX_TOKEN_OFFSET + 16]
+            .copy_from_slice(&token);
+        prefix[host_ops::SERVICE_PREFIX_BOOT_OFFSET..host_ops::SERVICE_PREFIX_BOOT_OFFSET + 8]
+            .copy_from_slice(&boot.to_be_bytes());
+        prefix[host_ops::SERVICE_PREFIX_LEN_OFFSET..host_ops::SERVICE_PREFIX_LEN_OFFSET + 2]
+            .copy_from_slice(&(payload_len as u16).to_be_bytes());
+        prefix
+    }
+
+    /// Encode a device-issued 0x11 with a digest honestly computed over
+    /// prefix+payload — the only way to earn an Ok ACK.
+    fn ingress_body(
+        prefix: [u8; 32],
+        origin: u64,
+        msg_session: u32,
+        msg_seq: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut digest_input = Vec::with_capacity(32 + payload.len());
+        digest_input.extend_from_slice(&prefix);
+        digest_input.extend_from_slice(payload);
+        host_ops::encode_gateway_ingress(&host_ops::GatewayIngress {
+            submit_prefix: prefix,
+            ref_origin: origin,
+            ref_session: msg_session,
+            ref_sequence: msg_seq,
+            request_digest: canonical::sha256(&digest_input),
+            payload: payload.to_vec(),
+        })
+        .unwrap()
+    }
+
+    fn ack_of(body: &[u8]) -> host_ops::GatewayIngressAck {
+        host_ops::decode_gateway_ingress_ack(body).expect("decodable ack")
+    }
+
+    /// Daemon state with an authenticated session on the attached gateway.
+    fn gw_state() -> State {
+        let state = State::default();
+        {
+            let mut info = state.session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(7);
+            info.node = Some(NODE);
+            info.boot = Some(BOOT);
+            info.network = Some(NET);
+            info.capability = Some(CAP_HOST_OPS_V1 | CAP_GATEWAY_ENDPOINT_V1);
+        }
+        state
+    }
+
+    /// Install the host registration mirror the dispatch pass publishes —
+    /// `token` is what the device will bind the 0x12 ACK against.
+    fn mirror(state: &State, token: [u8; 16], usb_session: u64) {
+        state.gateway_lane.set(GatewayRegistration {
+            token,
+            gateway_boot: BOOT,
+            host_digest: [0x9d; 32],
+            egress: NODE,
+            usb_session,
+            lease_deadline_mono: u64::MAX,
+        });
+    }
+
+    #[test]
+    fn ingress_stores_then_acks_ok() {
+        let state = gw_state();
+        // Loopback shape: the device synthesizes the Service Submit prefix
+        // from the registration itself, so prefix token == registration
+        // token — the case the existing code happened to answer correctly.
+        mirror(&state, [0xa1; 16], 7);
+        let prefix = submit_prefix([0xa1; 16], BOOT, 3);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[1, 2, 3]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).expect("ack produced");
+        let ack = ack_of(&ack);
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        // The ACK echoes the bound reference fields; the token is the
+        // registration's (equal to the prefix token on loopback only).
+        assert_eq!(ack.token, [0xa1; 16]);
+        assert_eq!(ack.ref_origin, 0xdead);
+        assert_eq!(ack.ref_session, 9);
+        assert_eq!(ack.ref_sequence, 42);
+        // And the payload is really in the log — the ACK follows storage.
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_000, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!("stored record must be readable")
+        };
+        let records = batch.records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].payload, vec![1, 2, 3]);
+        assert_eq!(records[0].origin, 0xdead);
+        assert_eq!(records[0].gateway, Some(NODE));
+    }
+
+    #[test]
+    fn ingress_acks_registration_token_not_prefix_token() {
+        // Real mesh ingress: the Service Submit prefix carries the ORIGIN's
+        // lease token, which differs from the host registration token. The
+        // device binds the ACK with `ack.token == registration_.token` —
+        // echoing the prefix token (the old behavior) made every real-path
+        // ACK fail binding and the pending ingress expire unproven.
+        let state = gw_state();
+        mirror(&state, [0x5e; 16], 7);
+        let prefix = submit_prefix([0xa1; 16], BOOT, 3);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[1, 2, 3]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).expect("ack produced");
+        let ack = ack_of(&ack);
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(
+            ack.token, [0x5e; 16],
+            "the ACK token is the registration mirror's, not the prefix's"
+        );
+        // The storage proof still commits to the prefix as received —
+        // the payload lands in the log exactly once.
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_000, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!("stored record must be readable")
+        };
+        assert_eq!(batch.records.len(), 1);
+        // Refusals bind the same way — an Invalid outcome still carries
+        // the registration token so the device can correlate it.
+        let foreign = submit_prefix([0xa1; 16], BOOT + 1, 1);
+        let body = ingress_body(foreign, 0xdead, 9, 43, &[9]);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Invalid as u16);
+        assert_eq!(ack.token, [0x5e; 16]);
+    }
+
+    #[test]
+    fn ingress_without_bound_mirror_cannot_bind_the_ack() {
+        // No mirror published (or one bound to a dead session): no honest
+        // token exists — the ACK echoes the presented prefix token so the
+        // device drops it as unbound rather than accepting a binding the
+        // host cannot vouch for. The storage outcome still reports truth.
+        let state = gw_state();
+        let prefix = submit_prefix([0x77; 16], BOOT, 1);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[9]);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(ack.token, [0x77; 16]);
+        // A mirror minted under a DIFFERENT usb session is equally unusable.
+        let state = gw_state();
+        mirror(&state, [0x5e; 16], 8);
+        let ack = ack_of(&gateway_ingress_ack(&state, &body, 5_000).unwrap());
+        assert_eq!(ack.outcome, GatewayOpsResult::Ok as u16);
+        assert_eq!(ack.token, [0x77; 16]);
+    }
+
+    #[test]
+    fn ingress_duplicate_replays_ok_not_conflict() {
+        let state = gw_state();
+        let prefix = submit_prefix([0xa1; 16], BOOT, 2);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[7, 7]);
+        let first = gateway_ingress_ack(&state, &body, 5_000).unwrap();
+        assert_eq!(ack_of(&first).outcome, GatewayOpsResult::Ok as u16);
+        // G03: the resend path depends on a second delivery of identical
+        // bytes being as good as the first — Ok again, never Conflict.
+        let second = gateway_ingress_ack(&state, &body, 5_010).unwrap();
+        assert_eq!(ack_of(&second).outcome, GatewayOpsResult::Ok as u16);
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_010, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!()
+        };
+        let records = batch.records;
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn ingress_conflict_never_overwrites_or_acks_ok() {
+        let state = gw_state();
+        let prefix = submit_prefix([0xa1; 16], BOOT, 2);
+        let first = ingress_body(prefix, 0xdead, 9, 42, &[1, 1]);
+        gateway_ingress_ack(&state, &first, 5_000).unwrap();
+        // Same MessageKey, different payload: the existing record is
+        // authoritative — the answer is non-success and the log keeps
+        // the first bytes.
+        let mut conflicting = ingress_body(prefix, 0xdead, 9, 42, &[2, 2]);
+        let ack = gateway_ingress_ack(&state, &conflicting, 5_010).unwrap();
+        assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Invalid as u16);
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_010, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!()
+        };
+        let records = batch.records;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].payload, vec![1, 1]);
+        conflicting.clear();
+    }
+
+    #[test]
+    fn ingress_bad_digest_cannot_ack_success() {
+        let state = gw_state();
+        let prefix = submit_prefix([0xa1; 16], BOOT, 2);
+        let mut body = ingress_body(prefix, 0xdead, 9, 42, &[1, 2]);
+        // Corrupt the digest — storage must never be claimed for bytes
+        // that do not hash to the bound value. The digest sits at inner
+        // offset 4 (head) + 52 (prefix32 + refkey20) .. 84.
+        body[60] ^= 0xFF;
+        let ack = gateway_ingress_ack(&state, &body, 5_000).unwrap();
+        assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Invalid as u16);
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_000, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!()
+        };
+        let records = batch.records;
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn ingress_malformed_prefix_and_wrong_boot_are_invalid() {
+        let state = gw_state();
+        // Scope 1 (SDK RAM) is not this daemon's endpoint — refused.
+        let mut prefix = submit_prefix([0xa1; 16], BOOT, 1);
+        prefix[host_ops::SERVICE_PREFIX_SCOPE_OFFSET] = 1;
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[9]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).unwrap();
+        assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Invalid as u16);
+        // A prefix bound to a different adapter boot could not have been
+        // accepted on this session.
+        let foreign = submit_prefix([0xa1; 16], BOOT + 1, 1);
+        let body = ingress_body(foreign, 0xdead, 9, 43, &[9]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).unwrap();
+        assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Invalid as u16);
+    }
+
+    #[test]
+    fn ingress_without_session_is_invalid_not_stored() {
+        let state = State::default(); // unauthenticated
+        let prefix = submit_prefix([0xa1; 16], BOOT, 1);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[9]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).unwrap();
+        assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Invalid as u16);
+    }
+
+    #[test]
+    fn ingress_undecodable_gets_no_ack() {
+        let state = gw_state();
+        assert!(
+            gateway_ingress_ack(&state, &[1, host_ops::SUB_GATEWAY_INGRESS, 0, 2], 5_000).is_none()
+        );
+    }
+
+    #[test]
+    fn ingress_at_network_capacity_acks_busy_never_stored() {
+        let state = gw_state();
+        // Saturate the network table with other networks first: the
+        // session's network then lands beyond MAX_NETWORKS, and the honest
+        // answer is the retryable Busy — the record is never claimed.
+        {
+            let mut log = state.receive_log.lock().unwrap();
+            for network in 100..100 + crate::receive_log::MAX_NETWORKS as u64 {
+                let outcome = log.ingest(
+                    crate::receive_log::Ingress {
+                        network,
+                        gateway: None,
+                        origin: 1,
+                        msg_session: 1,
+                        msg_seq: 1,
+                        payload: vec![0xaa],
+                    },
+                    4_000,
+                );
+                assert!(matches!(
+                    outcome,
+                    crate::receive_log::IngestOutcome::Stored { .. }
+                ));
+            }
+        }
+        let prefix = submit_prefix([0xa1; 16], BOOT, 1);
+        let body = ingress_body(prefix, 0xdead, 9, 42, &[9]);
+        let ack = gateway_ingress_ack(&state, &body, 5_000).expect("ack produced");
+        assert_eq!(ack_of(&ack).outcome, GatewayOpsResult::Busy as u16);
+        let read = {
+            let mut log = state.receive_log.lock().unwrap();
+            log.read(NET, 0, 8, 5_000, false)
+        };
+        let crate::receive_log::ReadOutcome::Batch(batch) = read else {
+            panic!("read on a missing network answers an empty batch")
+        };
+        assert!(batch.records.is_empty());
+    }
+
+    // --- Config lane dispatch (scope-gateway-config P5) ------------------------
+    //
+    // The api1 tests cannot reach this glue: the dispatcher's wire-id remap,
+    // the emit/reply/drop/done plumbing, and the single-in-flight gate that
+    // keeps a queued op PENDING behind a busy lane.
+
+    /// A config lane for dispatch tests — the same dev-profile issuer the
+    /// live loop builds (`config_lane_for`), over deterministic entropy.
+    fn test_config_lane() -> ConfigLane {
+        let issuer = ConfigIssuer::new(config_dev_key(crate::DEV_SECRET).to_vec(), NET, 0x42, 100);
+        let mut counter = 0x30_u8;
+        ConfigLane::new(
+            issuer,
+            1,
+            0,
+            Box::new(move |out: &mut [u8]| {
+                counter = counter.wrapping_add(1);
+                for b in out.iter_mut() {
+                    *b = counter;
+                }
+            }),
+        )
+    }
+
+    fn config_challenge_reply(target: u64, ch: &ControlChallenge) -> Vec<u8> {
+        let mut body = EncodedPayload::default();
+        control_challenge_encode(ch, &mut body).unwrap();
+        host_ops::encode_config_reply(
+            host_ops::SUB_CONFIG_CHALLENGE,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Ok as u16,
+                target,
+                body: body.view().to_vec(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn config_challenge() -> ControlChallenge {
+        ControlChallenge {
+            config_namespace: 1,
+            schema: 1,
+            client_nonce: [0x11; 16],
+            target_boot: 0x99,
+            challenge_nonce: [0x22; 16],
+            revision: 3,
+            active_hash: [0x44; 32],
+            valid_for_ms: 5_000,
+        }
+    }
+
+    /// The wire request id of the config emit in a tick's queue, matched by
+    /// the config subcommand byte (`body[1]`).
+    fn config_wire(out: &[DispatchRequest], sub: u8) -> u64 {
+        out.iter()
+            .find(|r| r.body.get(1) == Some(&sub))
+            .expect("a config emit this pass")
+            .request
+    }
+
+    fn challenge_request() -> ConfigRequest {
+        ConfigRequest::Challenge {
+            target: 0x99,
+            config_namespace: 1,
+            schema: 1,
+        }
+    }
+
+    fn status_request() -> ConfigRequest {
+        ConfigRequest::Status {
+            target: 0x99,
+            config_namespace: 1,
+            operation_id: [0xaa; 16],
+        }
+    }
+
+    fn control_status(op_id: [u8; 16]) -> ControlStatus {
+        ControlStatus {
+            config_namespace: 1,
+            operation_id: op_id,
+            decision_revision: 5,
+            active_revision: 5,
+            phase: ConfigPhase::Active,
+            reason: ConfigReason::Ok,
+            active_hash: [0x33; 32],
+        }
+    }
+
+    fn config_status_reply(target: u64, status: &ControlStatus) -> Vec<u8> {
+        let mut body = EncodedPayload::default();
+        control_status_encode(status, &mut body).unwrap();
+        host_ops::encode_config_reply(
+            host_ops::SUB_CONFIG_STATUS,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Ok as u16,
+                target,
+                body: body.view().to_vec(),
+            },
+        )
+        .unwrap()
+    }
+
+    fn propose_request() -> ConfigRequest {
+        ConfigRequest::Propose {
+            target: 0x99,
+            config_namespace: 1,
+            schema: 1,
+            base_snapshot: vec![0xaa],
+            patch: vec![ConfigField {
+                field_id: 1,
+                field_type: ConfigFieldType::U8,
+                value: vec![1],
+            }],
+            apply_budget_ms: 0,
+        }
+    }
+
+    #[test]
+    fn config_lane_round_trip_through_the_dispatcher() {
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        assert!(!dispatcher.config_busy());
+        dispatcher.config_submit(&mut store, &link(), 7, challenge_request(), 1_000);
+        assert!(
+            dispatcher.config_busy(),
+            "a submit leaves a request in flight"
+        );
+        // The first Emit rides this pass's wire queue under a dispatcher-
+        // assigned wire request id, remapped from the lane's own id.
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        // A valid ControlChallenge reply on that wire id resolves the op —
+        // the echo must carry the nonce the issuer drew, so replay it from
+        // the emitted request body exactly as the device would.
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_CHALLENGE))
+            .expect("the challenge emit");
+        let mut ch = config_challenge();
+        ch.client_nonce = host_ops::decode_config_challenge(&emit.body)
+            .unwrap()
+            .client_nonce;
+        dispatcher.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(7, ConfigOutcome::Challenged(ch))]
+        );
+        assert!(!dispatcher.config_busy());
+    }
+
+    #[test]
+    fn config_emit_drop_resolves_an_honest_timeout() {
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        dispatcher.config_submit(&mut store, &link(), 11, challenge_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        // The outbound queue refused the frame — provably never reached the
+        // device, so the in-flight query resolves Timeout, never a claim.
+        dispatcher.emit_dropped(&mut store, wire);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(11, ConfigOutcome::Timeout)]
+        );
+    }
+
+    #[test]
+    fn config_submit_refuses_without_capability_or_authority() {
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        // A link that cannot serve config refuses honestly — not fabricated.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut dead = link();
+        dead.config_ops = false;
+        dispatcher.config_submit(&mut store, &dead, 21, challenge_request(), 1_000);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(21, ConfigOutcome::Refused(ConfigOpsResult::Unsupported))]
+        );
+        // A Propose against a lane with no configured authority is Denied
+        // before any emit — the daemon cannot sign what it has no issuer for.
+        let mut no_auth = Dispatcher::new([9; 16]);
+        no_auth.attach_config(test_config_lane(), 0, 1);
+        no_auth.config_submit(&mut store, &link(), 22, propose_request(), 1_000);
+        assert_eq!(
+            no_auth.take_config_done(),
+            vec![(22, ConfigOutcome::Refused(ConfigOpsResult::Denied))]
+        );
+        // The authority-0 lane still answers a Challenge — queries never sign.
+        no_auth.config_submit(&mut store, &link(), 23, challenge_request(), 1_000);
+        let out = no_auth.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_CHALLENGE))
+            .expect("the challenge emit");
+        let mut ch = config_challenge();
+        ch.client_nonce = host_ops::decode_config_challenge(&emit.body)
+            .unwrap()
+            .client_nonce;
+        no_auth.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
+        assert_eq!(
+            no_auth.take_config_done(),
+            vec![(23, ConfigOutcome::Challenged(ch))]
+        );
+    }
+
+    #[test]
+    fn config_reply_with_a_foreign_echo_is_a_protocol_error() {
+        // Regression: the device echoes the challenge's client_nonce / the
+        // status's operation_id from the QUERY it answered. A reply that
+        // carries someone else's echo — collision, replug-stale, buggy —
+        // must not resolve the current op: PROTOCOL_ERROR, never a claim.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        dispatcher.config_submit(&mut store, &link(), 7, challenge_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_CHALLENGE);
+        let ch = config_challenge(); // nonce 0x11.. — never what we emitted
+        dispatcher.handle_reply(&mut store, wire, &config_challenge_reply(0x99, &ch), 1_050);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(7, ConfigOutcome::ProtocolError)]
+        );
+        // Same for a Status reply echoing a different operation id.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        dispatcher.config_submit(&mut store, &link(), 8, status_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_QUERY);
+        dispatcher.handle_reply(
+            &mut store,
+            wire,
+            &config_status_reply(0x99, &control_status([0xbb; 16])),
+            1_050,
+        );
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(8, ConfigOutcome::ProtocolError)]
+        );
+    }
+
+    #[test]
+    fn config_ops_evict_resolved_records_before_refusing() {
+        // Regression: the inbox bound is separate from the record bound.
+        // Resolved records are memory, not capacity — at the cap they are
+        // evicted oldest-first; refusal is only for a table full of LIVE
+        // records (all-live refusal: config_ops_refuse_only_when_all_live).
+        let ops = crate::dispatch::ConfigOps::default();
+        let mut live = Vec::new();
+        for _ in 0..CONFIG_RECORD_CAP {
+            let op_id = ops
+                .submit(challenge_request(), "x".to_string(), NET, 9, 0)
+                .unwrap();
+            live.push(op_id);
+            // Drain the inbox so the record bound, not the inbox bound,
+            // is what the table is full of — in-flight records are live.
+            ops.take_request();
+        }
+        // Resolve the first half — they become eviction candidates.
+        for &op_id in &live[..CONFIG_RECORD_CAP / 2] {
+            ops.resolve(op_id, ConfigOutcome::Timeout, 1_000);
+        }
+        // A fresh submit fits: resolved records yield, not refuse.
+        let next = ops.submit(challenge_request(), "y".to_string(), NET, 9, 0);
+        assert!(next.is_ok(), "resolved records must not count as capacity");
+        // The newest resolved records still poll; the oldest are gone.
+        assert_eq!(
+            ops.get(live[CONFIG_RECORD_CAP / 2]).map(|r| r.op_id),
+            Some(live[CONFIG_RECORD_CAP / 2])
+        );
+        assert!(ops.get(live[0]).is_none(), "oldest resolved evicted first");
+    }
+
+    #[test]
+    fn config_ops_refuse_only_when_all_live() {
+        // The record cap's refusal is reserved for genuine occupancy: 128
+        // records still queued or in flight. (Draining the inbox keeps the
+        // records live — take_request does not resolve them.)
+        let ops = crate::dispatch::ConfigOps::default();
+        for _ in 0..CONFIG_RECORD_CAP {
+            ops.submit(challenge_request(), "x".to_string(), NET, 9, 0)
+                .unwrap();
+            ops.take_request();
+        }
+        assert!(
+            ops.submit(challenge_request(), "y".to_string(), NET, 9, 0)
+                .is_err(),
+            "128 live records must refuse — the table is honestly full"
+        );
+        // The inbox bound is independent: 32 undrained submits refuse even
+        // with the record table nearly empty.
+        let ops = crate::dispatch::ConfigOps::default();
+        for _ in 0..CONFIG_INBOX_CAP {
+            ops.submit(challenge_request(), "x".to_string(), NET, 9, 0)
+                .unwrap();
+        }
+        assert!(ops
+            .submit(challenge_request(), "y".to_string(), NET, 9, 0)
+            .is_err());
+    }
+
+    #[test]
+    fn config_op_ids_are_namespaced_by_host_boot() {
+        // After a reboot the RAM-only table restarts its counter — a stale
+        // caller's `cfg...1` must not reach a NEW op. The op id embeds a
+        // boot tag in the high 32 bits (the folded host_boot, bit 0 forced
+        // so the tag is never zero); two boots can never mint the same
+        // token for the same sequence.
+        let ops_a = crate::dispatch::ConfigOps::with_boot(0x1122_3344);
+        let ops_b = crate::dispatch::ConfigOps::with_boot(0x5566_7788);
+        let a = ops_a
+            .submit(challenge_request(), "a".to_string(), NET, 9, 0)
+            .unwrap();
+        let b = ops_b
+            .submit(challenge_request(), "b".to_string(), NET, 9, 0)
+            .unwrap();
+        let tag_a = 0x1122_3344_u32 | 1;
+        let tag_b = 0x5566_7788_u32 | 1;
+        assert_eq!(a >> 32, u64::from(tag_a));
+        assert_eq!(b >> 32, u64::from(tag_b));
+        assert_ne!(a >> 32, 0, "the tag word is never zero");
+        assert_ne!(a, b, "same counter, different boot — different token");
+        assert_ne!(a & 0xffff_ffff, 0, "the sequence never starts at zero");
+        // Per-boot counters count up within their own namespace.
+        let a2 = ops_a
+            .submit(challenge_request(), "c".to_string(), NET, 9, 0)
+            .unwrap();
+        assert_eq!(a2 - a, 1);
+    }
+
+    #[test]
+    fn config_ops_inbox_pops_one_at_a_time_fifo() {
+        // The busy-lane gate (`config_busy`) keeps a queued op PENDING; the
+        // inbox hands out one op per free pass in FIFO order, never draining
+        // a waiting op just to refuse it Busy.
+        let ops = crate::dispatch::ConfigOps::default();
+        let a = ops
+            .submit(challenge_request(), "a".to_string(), NET, 9, 0)
+            .unwrap();
+        let b = ops
+            .submit(challenge_request(), "b".to_string(), NET, 9, 0)
+            .unwrap();
+        assert_eq!(ops.take_request().map(|q| q.op_id), Some(a));
+        assert_eq!(ops.take_request().map(|q| q.op_id), Some(b));
+        assert!(ops.take_request().is_none());
     }
 }

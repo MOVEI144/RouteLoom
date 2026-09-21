@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
 
 namespace routeloom::wire {
 namespace {
@@ -355,6 +356,7 @@ Status open_end(const LinkOpenedFrame& input,
 Status forward(const LinkOpenedFrame& input,
                const NodeId local_node,
                const NodeId next_hop,
+               const std::uint16_t link_epoch,
                const std::uint32_t remaining_deadline_ms,
                SecurityProvider& security,
                EncodedFrame& output) noexcept {
@@ -378,6 +380,12 @@ Status forward(const LinkOpenedFrame& input,
   Header header = input.header;
   header.previous_hop = local_node;
   header.next_hop = next_hop;
+  // The link context keys on (previous_hop, next_hop, link_epoch): with
+  // boot-advancing epochs the origin's epoch differs from the forwarder's,
+  // so the outgoing hop MUST be stamped with OUR epoch — inheriting the
+  // incoming one would wedge the downstream link floor either direction
+  // (replay REPLAY_EPOCH_STALE, or an irreversible floor ratchet).
+  header.link_epoch = link_epoch;
   --header.hop_remaining;
   header.remaining_deadline_ms = std::min(remaining_deadline_ms, header.remaining_deadline_ms);
   auto status = security.next_counter(link_context(header), header.link_counter);
@@ -385,6 +393,30 @@ Status forward(const LinkOpenedFrame& input,
   return wrap_link(header,
                    ByteView{input.protected_payload.data(), input.protected_payload_size},
                    security, output);
+}
+
+Status transit_fingerprint(const LinkOpenedFrame& frame,
+                           std::array<std::uint8_t, 32>& out) noexcept {
+  out = {};
+  std::array<std::uint8_t, kEndAadMax> aad{};
+  std::size_t aad_size = 0;
+  Status status = make_end_aad(frame.header, aad, aad_size);
+  if (!status) return status;
+  if (frame.protected_payload_size > frame.protected_payload.size()) {
+    return Status::error(StatusCode::ProtocolError, "protected payload range");
+  }
+  static constexpr char kDomain[] = "RouteLoom/transit-fingerprint/v1";
+  Sha256 hash;
+  hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(kDomain),
+                       sizeof(kDomain)});  // includes the NUL terminator
+  hash.update(ByteView{aad.data(), aad_size});
+  hash.update(ByteView{frame.protected_payload.data(),
+                       frame.protected_payload_size});
+  ScopeDigest digest{};
+  hash.finish(digest);
+  static_assert(sizeof(digest) == 32, "digest holds a SHA-256");
+  std::memcpy(out.data(), digest.data(), 32);
+  return Status::success();
 }
 
 }  // namespace routeloom::wire

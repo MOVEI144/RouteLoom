@@ -4,6 +4,7 @@ idf_component_register(
     src/espnow_migration.cpp
     src/espnow_power.cpp
     src/espnow_runtime.cpp
+    src/nvs_config_store.cpp
     src/nvs_counter_store.cpp
     src/nvs_ledger_store.cpp
     src/nvs_replay_store.cpp

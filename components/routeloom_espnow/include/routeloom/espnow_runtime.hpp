@@ -97,6 +97,7 @@ class EspNowRuntime final : public RadioPort,
 
   std::uint8_t channel() const noexcept { return config_.channel; }
   MonotonicMs now_ms() const noexcept;
+  static std::uint64_t now_us() noexcept;
   // Iterate registered peer mappings (NodeId, MAC, link metric,
   // autonomy-managed flag) for the power coordinator's peer-cache capture.
   template <typename Fn>
@@ -194,9 +195,18 @@ class EspNowRuntime final : public RadioPort,
     return bootstrap_rx_dropped_;
   }
   std::uint32_t rx_dropped() const noexcept { return rx_dropped_; }
+  // Recovery-required visibility (02 §2.3): a fenced or quarantined MAC
+  // stays unavailable until its owed callback arrives or recover()
+  // rebuilds the driver — the host must be able to see that state.
+  bool tx_fence_active() const noexcept { return fenced_outstanding_; }
+  std::size_t quarantined_peers() const noexcept { return quarantined_count_; }
 
  private:
   enum class EventKind : std::uint8_t { Rx, Tx };
+  // TX completion provenance (02-telemetry §2.2): which lane a send callback
+  // belongs to. Stale/fenced completions are evidence under their ORIGINAL
+  // generations — they resolve nothing in the node.
+  enum class TxLane : std::uint8_t { Reserved, Raw, Stale };
   struct Event {
     EventKind kind{EventKind::Rx};
     NodeId peer{kInvalidNodeId};
@@ -207,12 +217,28 @@ class EspNowRuntime final : public RadioPort,
     std::uint16_t length{0};
     std::int8_t rssi_dbm{0};
     bool success{false};
+    // D1b observation fields: captured in the callback, attributed by the
+    // generations recorded at submit time so a stale callback can never mint
+    // evidence under a newer radio/channel identity.
+    TxLane tx_lane{TxLane::Reserved};
+    std::uint64_t observed_us{0};    // rx: driver timestamp; tx: completed_us
+    std::uint64_t submitted_us{0};   // tx only
+    BindingGeneration binding{};
+    RadioGeneration radio_generation{};
+    ChannelEpoch channel_epoch{};
+    std::uint8_t channel{0};
+    std::uint8_t frame_length_class{0};
+    bool rssi_valid{false};
+    bool channel_valid{false};
     std::array<std::uint8_t, kMaxEspNowBody> data{};
   };
   // Bootstrap-lane record: self-contained RLD1 envelope + observed metadata.
-  // No NodeId is resolved in the callback (01 §3.1).
+  // No NodeId is resolved in the callback (01 §3.1). `destination` is the
+  // observed des_addr so the scope filter can enforce DISCOVER-broadcast /
+  // OFFER-unicast and bind the MAC input (02-discovery-scope §2.4).
   struct BootstrapEvent {
     routeloom::MacAddress source{};
+    routeloom::MacAddress destination{};
     MonotonicMs received_ms{0};
     std::uint16_t length{0};
     std::int8_t rssi_dbm{0};
@@ -231,6 +257,10 @@ class EspNowRuntime final : public RadioPort,
     // Whether this peer was added to the MeshNode neighbor table at
     // REACHABLE (so a later release can undo exactly that).
     bool neighbor_added{false};
+    // Discovery binding generation mirrored from the engine — the identity
+    // epoch stamped on this peer's RX/TX observations (02 §2.4). 0 until
+    // the first bound record resolves it.
+    BindingGeneration binding{0};
   };
   // A driver peer held for an in-flight auth exchange — no NodeId exists yet
   // (the claimed id is unverified until the transcript verifies).
@@ -293,6 +323,13 @@ class EspNowRuntime final : public RadioPort,
   Status channel_readback(std::uint8_t& channel) noexcept;
   Status channel_reapply_peers() noexcept;
   void channel_fence_tx() noexcept;
+  // Caller holds callback_lock_. Purges quarantine entries whose radio
+  // generation is no longer current, then reports whether `mac` remains
+  // quarantined (a callback is still owed for a retired send to it).
+  bool tx_quarantined(const MacAddress& mac) noexcept;
+  // Stage a TX completion event when event_queue_ refuses it. Caller holds
+  // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
+  void stage_lost_tx(const Event& event) noexcept;
   void channel_committed(std::uint8_t channel) noexcept;
 
   void enqueue_rx(const esp_now_recv_info_t* info,
@@ -313,8 +350,15 @@ class EspNowRuntime final : public RadioPort,
   QueueHandle_t bootstrap_queue_{nullptr};
   TaskHandle_t task_{nullptr};
   std::uint64_t pending_token_{0};
+  NodeId pending_node_{kInvalidNodeId};
   MacAddress pending_mac_{};
   std::uint32_t pending_generation_{0};
+  // Submit-time observation record for the reserved TX (02 §2.3): copied
+  // into the completion event so attribution never re-reads live state.
+  std::uint64_t pending_submitted_us_{0};
+  BindingGeneration pending_binding_{0};
+  ChannelEpoch pending_channel_epoch_{0};
+  std::uint8_t pending_length_class_{0};
   // In-flight non-reserved (bootstrap/probe/migration) sends, one entry per
   // destination MAC. Entries retire on their completion callback or after
   // callback_watchdog_ms; while an entry exists both send_raw() to that MAC
@@ -322,15 +366,47 @@ class EspNowRuntime final : public RadioPort,
   struct RawTx {
     MacAddress mac{};
     MonotonicMs sent_ms{0};
+    // Submit-time observation record (same rule as the reserved lane).
+    NodeId node{kInvalidNodeId};
+    std::uint64_t submitted_us{0};
+    BindingGeneration binding{0};
+    RadioGeneration radio_generation{};
+    ChannelEpoch channel_epoch{0};
+    std::uint8_t length_class{0};
   };
   std::array<RawTx, kRawTxCapacity> raw_tx_{};
   std::size_t raw_tx_count_{0};
+  // Watchdog-retired raw sends awaiting Unknown accounting on the poll task
+  // (node state may only be touched there — never inside callback_lock_).
+  std::array<RawTx, kRawTxCapacity> expired_tx_{};
+  std::size_t expired_tx_count_{0};
   // A fenced TX whose completion may still arrive: new sends to the same MAC
   // are guarded until the stale callback lands or the guard window passes,
   // so an old callback can never satisfy a new send (X-02).
   MacAddress fenced_mac_{};
-  MonotonicMs fenced_until_ms_{0};
+  // The fenced send's frozen submit record — its late callback reports as
+  // Unknown evidence under these original generations (X-02).
+  RawTx fenced_pending_{};
   bool fenced_outstanding_{false};
+  // MAC quarantine (02 §2.3/X-02): a watchdog-retired send still owes the
+  // driver a callback. While its radio generation is current the MAC stays
+  // quarantined — a late callback consumes the marker as stale evidence and
+  // can never resolve a replacement send to the same destination. Entries
+  // clear on radio-generation change (proven quiescence barrier).
+  static constexpr std::size_t kQuarantineCapacity = 4;
+  std::array<RawTx, kQuarantineCapacity> quarantined_tx_{};
+  std::size_t quarantined_count_{0};
+  // TX completions that could not be enqueued onto event_queue_ are staged
+  // here and drained on the next poll_once — an accepted submission must
+  // resolve exactly once, never disappear into a queue overflow (02 §2.5).
+  static constexpr std::size_t kLostTxCapacity = 4;
+  std::array<Event, kLostTxCapacity> lost_tx_{};
+  std::size_t lost_tx_count_{0};
+  // Dedicated staging for the single outstanding RESERVED completion — it
+  // resolves the node's job state and is never displaced by raw-lane
+  // overflow (02 §2.5).
+  Event lost_node_tx_{};
+  bool lost_node_tx_valid_{false};
   std::uint32_t stale_tx_results_{0};
   OwnerChannelPort channel_port_;
   ChannelOperationRunner channel_runner_;
@@ -345,6 +421,14 @@ class EspNowRuntime final : public RadioPort,
   std::uint32_t rx_dropped_{0};
   std::uint32_t autonomy_tx_ok_{0};
   std::uint32_t autonomy_tx_failed_{0};
+  // Owner-side channel epoch: bumped on every readback-verified committed
+  // channel (channel_committed). Distinct from the numeric channel — two
+  // commits to the same channel still move the epoch.
+  ChannelEpoch channel_epoch_{0};
+  std::uint32_t telemetry_event_drops_{0};
+  // Submit ms of the reserved TX — the poll-task callback watchdog so a
+  // never-completing send cannot wedge pending_tx_ forever (02 §2.2).
+  MonotonicMs pending_sent_ms_{0};
   bool pending_tx_{false};
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};

@@ -84,9 +84,21 @@ class ReplayGuard {
   struct Window {
     ReplayWindowRecord record{};
     std::uint32_t slot{0};
+    // The context epoch this window was opened for. Windows share one
+    // persisted slot per peer pair, so accept() re-checks this against the
+    // floor: a stale in-memory window must never overwrite the live record.
+    std::uint16_t epoch{0};
     bool open{false};
+    // Peer-pair fingerprint of the owning context; lets accept() validate
+    // the persisted floor is still THIS pair's record, not just any blob.
+    std::uint64_t peer_fingerprint{0};
   };
 
+  // window_slot is the per-(context, epoch) fingerprint; floor_slot is the
+  // epoch-free peer-pair fingerprint. Persisted windows and counter leases
+  // live at floor_slot so epoch advances re-key one record in place —
+  // storage stays O(peers) regardless of how many epochs a peer burns
+  // through (otherwise every boot would leak a record in NVS).
   static std::uint32_t window_slot(const SecurityContext& context) noexcept;
   static std::uint32_t floor_slot(const SecurityContext& context) noexcept;
 

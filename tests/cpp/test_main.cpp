@@ -227,7 +227,7 @@ void test_wire_forwarding() {
   wire::LinkOpenedFrame at_b{};
   CHECK_OK(wire::open_link(first.view(), 2, b_security, at_b));
   wire::EncodedFrame second{};
-  CHECK_OK(wire::forward(at_b, 2, 3, 4900, b_security, second));
+  CHECK_OK(wire::forward(at_b, 2, 3, /*link_epoch=*/1, 4900, b_security, second));
   wire::LinkOpenedFrame at_c{};
   CHECK_OK(wire::open_link(second.view(), 3, c_security, at_c));
   wire::PlainFrame opened{};
@@ -237,6 +237,47 @@ void test_wire_forwarding() {
 
   second.bytes[100] ^= 1;
   CHECK(!wire::open_link(second.view(), 3, c_security, at_c));
+}
+
+void test_wire_forwarding_link_epoch() {
+  // Boot-advancing epochs: origin A runs epoch 7, forwarder B runs epoch 3.
+  // The B->C hop MUST carry B's epoch — inheriting A's 7 would ratchet C's
+  // replay floor for the B->C context above B's own probes and wedge the
+  // link (REPLAY_EPOCH_STALE / REPLAY_STATE_LOST).
+  TestSecurity a_security, b_security, c_security;
+  wire::PlainFrame plain{};
+  plain.header.type = FrameType::Data;
+  plain.header.flags = wire::kFlagEndProtected;
+  plain.header.delivery = DeliveryClass::Reliable;
+  plain.header.hop_remaining = 4;
+  plain.header.network = 1;
+  plain.header.origin = 1;
+  plain.header.destination = 3;
+  plain.header.previous_hop = 1;
+  plain.header.next_hop = 2;
+  plain.header.message = MessageId{7, 9};
+  plain.header.remaining_deadline_ms = 5000;
+  plain.header.original_lifetime_ms = 5000;
+  plain.header.link_epoch = 7;
+  plain.header.end_epoch = 7;
+  const char* text = "route-loom";
+  plain.payload_size = std::strlen(text);
+  std::memcpy(plain.payload.data(), text, plain.payload_size);
+
+  wire::EncodedFrame first{};
+  CHECK_OK(wire::encode_new(plain, a_security, first));
+  wire::LinkOpenedFrame at_b{};
+  CHECK_OK(wire::open_link(first.view(), 2, b_security, at_b));
+  CHECK(at_b.header.link_epoch == 7);
+  wire::EncodedFrame second{};
+  CHECK_OK(wire::forward(at_b, 2, 3, /*link_epoch=*/3, 4900, b_security, second));
+  wire::LinkOpenedFrame at_c{};
+  CHECK_OK(wire::open_link(second.view(), 3, c_security, at_c));
+  CHECK(at_c.header.link_epoch == 3);
+  CHECK(at_c.header.end_epoch == 7);  // end epoch is the ORIGIN's, untouched
+  wire::PlainFrame opened{};
+  CHECK_OK(wire::open_end(at_c, 3, c_security, opened));
+  CHECK(opened.payload_size == std::strlen(text));
 }
 
 void test_routing() {
@@ -369,6 +410,7 @@ int main() {
   test_byte_io();
   test_counter_lease();
   test_wire_forwarding();
+  test_wire_forwarding_link_epoch();
   test_routing();
   test_three_hop_delivery();
   test_diamond_repair();

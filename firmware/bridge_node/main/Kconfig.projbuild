@@ -125,5 +125,18 @@ config ROUTELOOM_CAPABILITY
         SUBMIT/QUERY_DISPATCH/RETIRE_THROUGH/SKIP/TIME_SAMPLE subcommands
         (FrameKind HostOps) and binds them to the NVS-monotonic boot lease.
         Bits 0-1 are the legacy default with no per-bit meaning assigned.
+        Bit 3 (0x8) is the EXPERIMENTAL opt-in for gateway_endpoint_v1:
+        the build attaches the GatewayDelivery component and answers the
+        0x10-0x13 host registration/ingress subcommands; cleared leaves the
+        endpoint unattached and every gateway op answers Unsupported.
+        Bit 4 (0x10) is the EXPERIMENTAL opt-in for config_endpoint_v1:
+        the build attaches the ConfigGateway lane and serves the 0x20-0x23
+        subcommands; cleared answers Unsupported. Bit 5 (0x20) is the
+        EXPERIMENTAL opt-in for m1_diagnostics_v1: the build attaches the
+        diagnostic sink and serves the 0x30/0x31 subcommands (local
+        capabilities inline; remote telemetry only if the TARGET opted in).
+        The bitmap is bound into the HelloAck authentication transcript —
+        a bit is only advertised when the matching endpoint is actually
+        attached (dev profile; not a production identity claim).
 
 endmenu
