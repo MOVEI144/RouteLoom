@@ -395,4 +395,125 @@ Status config_snapshot_hash_input(std::uint16_t config_namespace, std::uint16_t 
                                   ByteView snapshot_tlv,
                                   ByteBuffer<kConfigSnapshotInputMax>& out) noexcept;
 
+// --- AppResult=19 bodies (sdk-completion/01-applied-delivery.md §1.2) ---------
+// Four subtypes share one 68B head: ver u8=1 | subtype u8 | outcome u8 |
+// flags u8=0 | network u32 | original_origin u64 | original_session u32 |
+// original_sequence u64 | original_destination u64 | request_digest 32B.
+// APP_RESULT frames ride the end-protected routed lane as Reliable management
+// traffic; the bodies below are the plaintext of that lane.
+
+constexpr std::uint8_t kAppResultBodyVersion = 1;
+constexpr std::size_t kAppResultHeadSize = 68;
+constexpr std::size_t kAppResultDataMax = 48;
+
+enum class AppResultSubtype : std::uint8_t {
+  Result = 1,
+  Query = 2,
+  ResultAck = 3,
+  Status = 4,
+};
+
+// RESULT outcome byte values.
+enum class AppResultOutcome : std::uint8_t {
+  Success = 0,
+  Failure = 1,
+};
+
+// STATUS outcome byte values (an answer to a QUERY).
+enum class AppResultStatusCode : std::uint8_t {
+  Pending = 1,
+  Indeterminate = 2,
+  Expired = 3,
+  NotRetained = 4,
+};
+
+// SDK-reserved application_code band. The node generates these refusal
+// verdicts itself; an endpoint reply carrying a code inside the band is
+// rewritten to InternalError so app bytes can never impersonate the SDK.
+constexpr std::uint32_t kAppResultSdkCodeBase = 0xffff0000u;
+enum class AppResultRefusal : std::uint32_t {
+  InternalError = 0xffff0000u,
+  StaleLease = 0xffff0001u,
+  NoEndpoint = 0xffff0002u,
+  Capacity = 0xffff0003u,
+  MalformedRequest = 0xffff0004u,
+};
+
+struct AppResultHead {
+  AppResultSubtype subtype{AppResultSubtype::Result};
+  std::uint8_t outcome{0};  // AppResultOutcome / AppResultStatusCode per subtype
+  std::uint32_t network{0};
+  NodeId original_origin{kInvalidNodeId};
+  std::uint32_t original_session{0};
+  std::uint64_t original_sequence{0};
+  NodeId original_destination{kInvalidNodeId};
+  std::array<std::uint8_t, 32> request_digest{};
+};
+
+// RESULT1 (74..122B): head | application_code u32 | result_len u16 |
+// result[0..48].
+struct AppResultBody {
+  AppResultHead head;
+  std::uint32_t application_code{0};
+  std::array<std::uint8_t, kAppResultDataMax> data{};
+  std::uint16_t data_size{0};  // 0..48
+};
+constexpr std::size_t kAppResultBodyMinSize = kAppResultHeadSize + 6;  // 74
+constexpr std::size_t kAppResultBodyMaxSize = kAppResultBodyMinSize + kAppResultDataMax;  // 122
+Status app_result_encode(const AppResultBody& body, EncodedServicePayload& out) noexcept;
+Status app_result_decode(ByteView encoded, AppResultBody& out) noexcept;
+
+// QUERY2 (76B): head(outcome=0) | query_nonce u64.
+struct AppResultQuery {
+  AppResultHead head;
+  std::uint64_t query_nonce{0};
+};
+constexpr std::size_t kAppResultQuerySize = kAppResultHeadSize + 8;  // 76
+Status app_result_query_encode(const AppResultQuery& query, EncodedServicePayload& out) noexcept;
+Status app_result_query_decode(ByteView encoded, AppResultQuery& out) noexcept;
+
+// RESULT_ACK3 (100B): head(outcome=0) | result_digest 32B.
+struct AppResultAck {
+  AppResultHead head;
+  std::array<std::uint8_t, 32> result_digest{};
+};
+constexpr std::size_t kAppResultAckSize = kAppResultHeadSize + 32;  // 100
+Status app_result_ack_encode(const AppResultAck& ack, EncodedServicePayload& out) noexcept;
+Status app_result_ack_decode(ByteView encoded, AppResultAck& out) noexcept;
+
+// STATUS4 (76B): head(outcome=AppResultStatusCode) | query_nonce u64 (echo).
+struct AppResultStatus {
+  AppResultHead head;
+  std::uint64_t query_nonce{0};
+};
+constexpr std::size_t kAppResultStatusSize = kAppResultHeadSize + 8;  // 76
+Status app_result_status_encode(const AppResultStatus& status, EncodedServicePayload& out) noexcept;
+Status app_result_status_decode(ByteView encoded, AppResultStatus& out) noexcept;
+
+// APPLIED request body shape inside an end-protected DATA frame:
+// execution_lease 16B || user payload (0..kAppliedUserPayloadMax).
+// Lease: magic u16=0x4c01 | message_session u32 | end_epoch u16 |
+// boot_incarnation u64. The magic makes a computed lease never all-zero, so an
+// all-zero lease on the wire is unambiguously "no assertion" and refuses.
+constexpr std::size_t kAppliedLeaseBytes = 16;
+constexpr std::uint16_t kAppliedLeaseMagic = 0x4c01;
+constexpr std::size_t kAppliedUserPayloadMax = kMaxApplicationPayload - kAppliedLeaseBytes;  // 112
+
+// request_digest (§1.2): SHA-256 over
+// "RouteLoom/app-request/v1" || NUL || network u64 | origin u64 |
+// destination u64 | session u32 | sequence u64 | delivery u8 |
+// original_lifetime u32 | payload_len u16 | payload — every end-immutable
+// field of the request, so origin and destination compute identical digests.
+void applied_request_digest(NetworkId network, NodeId origin, NodeId destination,
+                            std::uint32_t session, std::uint64_t sequence,
+                            DeliveryClass delivery, std::uint32_t original_lifetime_ms,
+                            ByteView payload,
+                            std::array<std::uint8_t, 32>& out) noexcept;
+
+// result_digest (§1.2): SHA-256 over "RouteLoom/app-result/v1" || NUL || the
+// canonical RESULT body bytes — deterministic encoding lets the destination
+// validate a RESULT_ACK against its stored record.
+void applied_result_digest(ByteView canonical_result_body,
+                           std::array<std::uint8_t, 32>& out) noexcept;
+
 }  // namespace routeloom::endpoint

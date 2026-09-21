@@ -8,6 +8,7 @@
 
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
 
 namespace routeloom {
 namespace {
@@ -32,6 +33,12 @@ constexpr std::size_t kSeqnoRequestPayloadBytes = 8 + 8 + 2 + 4 + 1;
 // burst delayed by a small deterministic jitter.
 constexpr std::uint32_t kTriggeredUpdateMinIntervalMs = 1000;
 constexpr std::uint32_t kTriggeredJitterMs = 64;
+
+// Saturating u64 counter bump (sdk-completion/02 §2.4): a counter that would
+// exceed UINT64_MAX pins — unreachable within a boot, never wrapping.
+void saturating_inc(std::uint64_t& counter) noexcept {
+  if (counter != UINT64_MAX) ++counter;
+}
 
 // Map a scheduler admission verdict onto a BUSY reason (03 §5). The reason
 // is derived from the verdict — a BUSY that was never transmitted is never
@@ -549,17 +556,173 @@ MeshNode::DedupEntry* MeshNode::find_dedup(const MessageKey& key, const FrameTyp
   });
 }
 
-MeshNode::DedupEntry* MeshNode::allocate_dedup(const MessageKey& key, const FrameType type,
-                                               const std::uint8_t round,
-                                               const MonotonicMs expires_at_ms) noexcept {
+const MeshNode::DedupEntry* MeshNode::find_dedup(const MessageKey& key,
+                                               const FrameType type,
+                                               const std::uint8_t round) const noexcept {
+  return dedup_.find([&](const DedupEntry& value) {
+    return value.key == key && value.type == type && value.round == round;
+  });
+}
+
+std::size_t MeshNode::count_transit_upstream(const NodeId upstream) const noexcept {
+  // The per-previous-hop bound covers every non-terminal record the peer
+  // injected — transit forwards AND terminal-side Resolved births. Terminal
+  // pins are bounded by the reserve instead (02 §2.5).
+  std::size_t count = 0;
+  dedup_.for_each([&](const DedupEntry& value) {
+    if (value.phase != DedupPhase::Terminal && value.upstream_peer == upstream) {
+      ++count;
+    }
+  });
+  return count;
+}
+
+MonotonicMs MeshNode::dedup_expiry_for(const DedupPhase phase,
+                                       const std::uint32_t deadline_remaining_ms,
+                                       const MonotonicMs first_seen_ms,
+                                       const MonotonicMs now_ms) const noexcept {
+  // horizon = now + (remaining_deadline - rx_age): the latest instant a
+  // legitimate retry of this round can arrive (02 §2.2). The path-length
+  // factor is already spent by the frame's own deadline arithmetic.
+  const std::uint32_t remaining =
+      deadline_remaining_ms > rx_age_ms_ ? deadline_remaining_ms - rx_age_ms_ : 0;
+  const MonotonicMs horizon = now_ms + remaining;
+  const MonotonicMs slack =
+      phase == DedupPhase::Terminal ? kTerminalSlackMs : kTransitSlackMs;
+  const MonotonicMs duty = horizon + slack;
+  const MonotonicMs cap = first_seen_ms + kDedupHardCapMs;
+  return std::min(cap, duty);
+}
+
+bool MeshNode::evict_dedup_for_admission(const MonotonicMs now_ms) noexcept {
+  // Phase-ordered victim selection (02 §2.5): an already-expired record is a
+  // normal expiry release, never a forced eviction; then earliest-expiry
+  // Resolved (residual duty only: re-ACK + late-report relay), then oldest
+  // Evidence (verbatim replay material). Live and Terminal are skipped —
+  // evicting one would orphan accepted work or break the exactly-once pin.
+  if (auto* expired = dedup_.find(
+          [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; })) {
+    dedup_.release(expired);
+    saturating_inc(dedup_stats_.expired);
+    return true;
+  }
+  DedupEntry* victim = nullptr;
+  dedup_.for_each([&](DedupEntry& value) {
+    if (value.phase == DedupPhase::Resolved &&
+        (victim == nullptr || value.expires_at_ms < victim->expires_at_ms)) {
+      victim = &value;
+    }
+  });
+  if (victim == nullptr) {
+    dedup_.for_each([&](DedupEntry& value) {
+      if (value.phase == DedupPhase::Evidence &&
+          (victim == nullptr || value.first_seen_ms < victim->first_seen_ms)) {
+        victim = &value;
+      }
+    });
+  }
+  if (victim == nullptr) return false;  // all-Live/Terminal: honest overflow
+  const MessageId victim_id = victim->key.id;
+  const NodeId victim_peer = victim->upstream_peer;
+  const bool was_resolved = victim->phase == DedupPhase::Resolved;
+  dedup_.release(victim);
+  saturating_inc(was_resolved ? dedup_stats_.evicted_resolved
+                              : dedup_stats_.evicted_evidence);
+  observer_.on_diagnostic(was_resolved ? "DEDUP_EVICTED_RESOLVED"
+                                       : "DEDUP_EVICTED_EVIDENCE",
+                          victim_peer, &victim_id);
+  return true;
+}
+
+MeshNode::DedupEntry* MeshNode::allocate_dedup(
+    const MessageKey& key, const FrameType type, const std::uint8_t round,
+    const DedupPhase phase, const NodeId upstream,
+    const std::uint32_t deadline_remaining_ms, const MonotonicMs now_ms) noexcept {
   if (auto* existing = find_dedup(key, type, round)) return existing;
+
+  // Class admission gates (02 §2.5) run BEFORE touching the pool: terminal
+  // pins may never reach into the transit reserve, and one previous-hop peer
+  // may not monopolize retained non-terminal state.
+  if (phase == DedupPhase::Terminal &&
+      dedup_.size() >= kDedupCapacity - kDedupTransitReserve) {
+    saturating_inc(dedup_stats_.refused_terminal_reserve);
+    observer_.on_diagnostic("DEDUP_TERMINAL_RESERVE", upstream, &key.id);
+    return nullptr;
+  }
+  if (phase != DedupPhase::Terminal &&
+      count_transit_upstream(upstream) >= kDedupPerUpstreamMax) {
+    saturating_inc(dedup_stats_.refused_upstream_cap);
+    observer_.on_diagnostic("DEDUP_UPSTREAM_CAP", upstream, &key.id);
+    return nullptr;
+  }
+
   auto* entry = dedup_.allocate();
-  if (entry == nullptr) return nullptr;
+  if (entry == nullptr) {
+    if (!evict_dedup_for_admission(now_ms)) {
+      // True overflow: only Live/Terminal records remain. Refusal pressure
+      // becomes BUSY backpressure at the call site — never dedup weakening.
+      saturating_inc(dedup_stats_.refused_pool_full);
+      observer_.on_diagnostic("DEDUP_OVERFLOW", upstream, &key.id);
+      return nullptr;
+    }
+    entry = dedup_.allocate();
+    if (entry == nullptr) {
+      // Unreachable: the sweep just freed a slot. Counted, never silent.
+      saturating_inc(dedup_stats_.refused_pool_full);
+      observer_.on_diagnostic("DEDUP_OVERFLOW", upstream, &key.id);
+      return nullptr;
+    }
+  }
   entry->key = key;
   entry->type = type;
   entry->round = round;
-  entry->expires_at_ms = expires_at_ms;
+  entry->phase = phase;
+  entry->first_seen_ms = now_ms;
+  entry->expires_at_ms =
+      dedup_expiry_for(phase, deadline_remaining_ms, now_ms, now_ms);
+  // The upstream correlation is admission-time state: it feeds the per-peer
+  // cap above and the TransitFailure replay path for forwarded records.
+  entry->upstream_peer = upstream;
+  saturating_inc(phase == DedupPhase::Terminal ? dedup_stats_.admitted_terminal
+                                             : dedup_stats_.admitted_transit);
   return entry;
+}
+
+void MeshNode::resolve_dedup_for_job(const TxJob& job) noexcept {
+  // Only forwarded jobs carry a retained transit record (job.ack mirrors the
+  // forwarded frame's identity); locally originated Transit-owner emissions
+  // (our END_RECEIPT, BUSY) never match a dedup key.
+  if (job.form != JobForm::Forwarded) return;
+  if (auto* entry = find_dedup(job.ack.key, job.ack.accepted_type, job.ack.round);
+      entry != nullptr && entry->phase == DedupPhase::Live) {
+    // The hop-accept resolved the exchange: residual duty is re-ACK of
+    // upstream duplicates plus propagating a late downstream report (02 §2.6).
+    entry->phase = DedupPhase::Resolved;
+  }
+}
+
+void MeshNode::mark_dedup_evidence(DedupEntry& entry) noexcept {
+  if (entry.phase == DedupPhase::Evidence) return;
+  // Residency bound (02 §2.3c): at most kEvidenceCap Evidence records. At the
+  // cap the oldest existing evidence is force-reclaimed — a counted, bounded
+  // loss of verbatim-replay material, never an unbounded table.
+  std::size_t evidence = 0;
+  DedupEntry* oldest = nullptr;
+  dedup_.for_each([&](DedupEntry& value) {
+    if (&value == &entry || value.phase != DedupPhase::Evidence) return;
+    ++evidence;
+    if (oldest == nullptr || value.first_seen_ms < oldest->first_seen_ms) {
+      oldest = &value;
+    }
+  });
+  if (evidence >= kEvidenceCap && oldest != nullptr) {
+    const MessageId victim_id = oldest->key.id;
+    const NodeId victim_peer = oldest->upstream_peer;
+    dedup_.release(oldest);
+    saturating_inc(dedup_stats_.evicted_evidence);
+    observer_.on_diagnostic("DEDUP_EVICTED_EVIDENCE", victim_peer, &victim_id);
+  }
+  entry.phase = DedupPhase::Evidence;
 }
 
 void MeshNode::set_delivery_state(Delivery& delivery, const DeliveryState state,
@@ -771,7 +934,14 @@ Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
       }
     });
     if (oldest_terminal != nullptr) {
+      // Class-(a) terminal eviction (sdk-completion/02 §2.3a): the result
+      // becomes unqueryable — a real history loss, so it is counted and
+      // diagnosed, never silent. Live deliveries are never evicted.
+      const MessageId evicted_id = oldest_terminal->id;
       deliveries_.release(oldest_terminal);
+      saturating_inc(dedup_stats_.delivery_terminal_evicted);
+      observer_.on_diagnostic("DELIVERY_HISTORY_EVICTED", kInvalidNodeId,
+                              &evicted_id);
       record = deliveries_.allocate();
     }
     if (record == nullptr) {
@@ -1611,6 +1781,12 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     return;
   }
   (void)hop_accepted;
+  if (job.owner == JobOwner::Transit) {
+    // sdk-completion/02 §2.6: a completed forward demotes its dedup record to
+    // residual re-ACK/report-relay duty — Resolved is the evictable class.
+    resolve_dedup_for_job(job);
+    return;
+  }
   if (job.owner != JobOwner::OriginDelivery) return;
   auto* delivery = find_delivery(job.ack.key.id);
   if (delivery == nullptr) return;
@@ -1619,13 +1795,17 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     set_delivery_state(*delivery, DeliveryState::Delivered, "TX_MAC_DONE");
     return;
   }
-  const auto retry_window = static_cast<std::uint32_t>(std::max<std::uint64_t>(
-      kMinimumEndToEndRetryMs,
-      std::min<std::uint64_t>(
-          std::numeric_limits<std::uint32_t>::max(),
-          static_cast<std::uint64_t>(delivery->options.hop_limit) *
-              config_.hop_accept_timeout_ms * 2U)));
-  delivery->next_round_at_ms = std::min(delivery->expires_at_ms, now_ms + retry_window);
+  // APPLIED: a verified RESULT may have resolved the delivery while its DATA
+  // job was still completing — the receipt wait must never demote a terminal
+  // verdict (sdk-completion/01 §1.3).
+  if (delivery->options.delivery == DeliveryClass::Applied &&
+      sleep_terminal(delivery->state)) {
+    return;
+  }
+  delivery->next_round_at_ms = std::min(
+      delivery->expires_at_ms,
+      now_ms + applied_window_ms(delivery->options.hop_limit,
+                                 config_.hop_accept_timeout_ms));
   set_delivery_state(*delivery, DeliveryState::WaitingForEndReceipt, "END_RECEIPT_PENDING");
 }
 
@@ -1653,12 +1833,25 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   if (job.owner != JobOwner::OriginDelivery) return;
   auto* delivery = find_delivery(job.ack.key.id);
   if (delivery == nullptr) return;
-  if (delivery->options.delivery == DeliveryClass::Reliable &&
+  // APPLIED: a stale DATA job failure must not cancel a result wait already
+  // in progress, and must never demote a stored verdict (01 §1.5).
+  if (delivery->options.delivery == DeliveryClass::Applied &&
+      (delivery->app_phase != 0 || sleep_terminal(delivery->state))) {
+    return;
+  }
+  if ((delivery->options.delivery == DeliveryClass::Reliable ||
+       delivery->options.delivery == DeliveryClass::Applied) &&
       now_ms < delivery->expires_at_ms &&
       static_cast<std::uint8_t>(delivery->round + 1U) < config_.max_end_to_end_rounds) {
     ++delivery->round;
     delivery->next_round_at_ms = now_ms + 50;
     set_delivery_state(*delivery, DeliveryState::WaitingForRoute, reason);
+    return;
+  }
+  if (delivery->options.delivery == DeliveryClass::Applied) {
+    // Rounds exhausted on a transmitted request — the destination may have
+    // executed it; Indeterminate is the honest verdict (01 §1.9).
+    set_delivery_state(*delivery, DeliveryState::Indeterminate, "APP_RESULT_TIMEOUT");
     return;
   }
   set_delivery_state(*delivery, DeliveryState::Failed, reason);
@@ -1790,10 +1983,19 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   // A terminal recipient must acknowledge the new round without applying the payload twice.
   if (frame.header.destination == config_.node) {
     auto* terminal = dedup_.find([&](const DedupEntry& value) {
-      return value.key == key && value.type == FrameType::Data && value.delivered;
+      return value.key == key && value.type == FrameType::Data &&
+             value.phase == DedupPhase::Terminal && value.delivered;
     });
     if (terminal != nullptr) {
-      terminal->expires_at_ms = std::max(terminal->expires_at_ms, now_ms + 60000);
+      // Cross-round refresh (sdk-completion/02 §2.6): re-ACK + re-emit the
+      // receipt, retention extends only to the new round's horizon + terminal
+      // slack and can NEVER pass the first-seen hard cap — duplicates do not
+      // extend retention (crash-time §4).
+      terminal->expires_at_ms =
+          std::max(terminal->expires_at_ms,
+                   dedup_expiry_for(DedupPhase::Terminal,
+                                    frame.header.remaining_deadline_ms,
+                                    terminal->first_seen_ms, now_ms));
       if (scheduler_.free_slots() >= 2) {
         (void)queue_hop_accept(frame.header, now_ms);
         (void)queue_end_receipt(frame.header, now_ms);
@@ -1872,15 +2074,19 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       observer_.on_diagnostic("ADMISSION_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
+    // Terminal admission (sdk-completion/02 §2.3b): the delivered-DATA pin —
+    // never evictable, bounded by the transit reserve. A refusal is already
+    // counted + diagnosed inside allocate_dedup (DEDUP_OVERFLOW /
+    // DEDUP_TERMINAL_RESERVE); the sender still gets an honest BUSY/drop.
     auto* entry = allocate_dedup(key, FrameType::Data, frame.header.delivery_round,
-                                 now_ms + 60000);
+                                 DedupPhase::Terminal, peer,
+                                 frame.header.remaining_deadline_ms, now_ms);
     if (entry == nullptr) {
       // Bounded dedup exhaustion is a capacity failure: the sender gets a
       // pre-acceptance BUSY (when a reply slot is affordable) instead of a
       // silent black hole.
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-      observer_.on_diagnostic("ADMISSION_NO_DEDUP_SLOT", peer, &frame.header.message);
       return;
     }
     // APPLIED (01 §1.4): the result record is part of admission — accepted
@@ -1970,12 +2176,14 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     observer_.on_diagnostic("TRANSIT_ADMISSION_DENIED", peer, &frame.header.message);
     return;
   }
+  // Transit admission (sdk-completion/02): Live record bounded by the
+  // per-upstream cap and the expired->Resolved->Evidence eviction sweep.
   auto* entry = allocate_dedup(key, FrameType::Data, frame.header.delivery_round,
-                               now_ms + 60000);
+                               DedupPhase::Live, peer,
+                               frame.header.remaining_deadline_ms, now_ms);
   if (entry == nullptr) {
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-    observer_.on_diagnostic("ADMISSION_NO_DEDUP_SLOT", peer, &frame.header.message);
     return;
   }
   // The forward is committed BEFORE its HOP_ACCEPT reply is queued: a failed
@@ -2069,12 +2277,15 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       observer_.on_diagnostic("ROUTED_NO_ACK_SLOT", peer, &frame.header.message);
       return;
     }
+    // Terminal routed delivery is born Resolved (sdk-completion/02 §2.6): the
+    // component's own dedup is the second layer — the node record's residual
+    // duty is re-ACK of same-round retries only, so it stays evictable.
     auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
-                                 now_ms + 60000);
+                                 DedupPhase::Resolved, peer,
+                                 frame.header.remaining_deadline_ms, now_ms);
     if (entry == nullptr) {
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-      observer_.on_diagnostic("ROUTED_NO_DEDUP_SLOT", peer, &frame.header.message);
       return;
     }
     if (!queue_hop_accept(frame.header, now_ms)) {
@@ -2139,11 +2350,11 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     return;
   }
   auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
-                               now_ms + 60000);
+                               DedupPhase::Live, peer,
+                               frame.header.remaining_deadline_ms, now_ms);
   if (entry == nullptr) {
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
-    observer_.on_diagnostic("ROUTED_NO_DEDUP_SLOT", peer, &frame.header.message);
     return;
   }
   if (!queue_forward(frame, route.next_hop, now_ms)) {
@@ -2354,8 +2565,17 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
       return;
     }
     auto* entry = allocate_dedup(frame_key, FrameType::EndReceipt,
-                                 frame.header.delivery_round, now_ms + 60000);
-    if (entry == nullptr) return;
+                                 frame.header.delivery_round, DedupPhase::Live,
+                                 peer, frame.header.remaining_deadline_ms,
+                                 now_ms);
+    if (entry == nullptr) {
+      // Was silently lossy — sdk-completion/02 §2.8: the refusal is counted +
+      // diagnosed inside allocate_dedup and the relay gets an honest BUSY.
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        now_ms);
+      return;
+    }
     // Forward first: a failed reservation must not leave a false ACK behind.
     if (!queue_forward(frame, route.next_hop, now_ms)) {
       dedup_.release(entry);
@@ -2390,9 +2610,20 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     return;
   }
   if (scheduler_.free_slots() < 1) return;
+  // Receipt consumed at the origin (sdk-completion/02 §2.6): born Resolved —
+  // the residual duty is re-ACK of retried receipts while the delivery turns
+  // terminal, so the record stays evictable under the transit class.
   auto* entry = allocate_dedup(frame_key, FrameType::EndReceipt, frame.header.delivery_round,
-                               now_ms + 60000);
-  if (entry == nullptr) return;
+                               DedupPhase::Resolved, peer,
+                               frame.header.remaining_deadline_ms, now_ms);
+  if (entry == nullptr) {
+    // Was silently lossy — counted + diagnosed inside allocate_dedup; the
+    // relay's bounded retry recovers, or an honest BUSY heads upstream.
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                      now_ms);
+    return;
+  }
   if (!queue_hop_accept(frame.header, now_ms)) {
     dedup_.release(entry);
     return;
@@ -2423,6 +2654,576 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     }
   }
   (void)round;
+}
+
+// --- APPLIED delivery (sdk-completion/01-applied-delivery.md) -----------------
+
+std::uint32_t MeshNode::applied_window_ms(const std::uint8_t hop_limit,
+                                          const std::uint32_t hop_timeout_ms) noexcept {
+  // Same hop-scaled window the END_RECEIPT retry path uses — a RESULT/QUERY
+  // answer has a comparable round trip.
+  return static_cast<std::uint32_t>(std::max<std::uint64_t>(
+      kMinimumEndToEndRetryMs,
+      std::min<std::uint64_t>(std::numeric_limits<std::uint32_t>::max(),
+                              static_cast<std::uint64_t>(hop_limit) *
+                                  hop_timeout_ms * 2U)));
+}
+
+MeshNode::AppliedRecord* MeshNode::find_applied(const MessageKey& key) noexcept {
+  return applied_records_.find(
+      [&](const AppliedRecord& record) { return record.key == key; });
+}
+
+const MeshNode::AppliedRecord* MeshNode::find_applied(const MessageKey& key) const noexcept {
+  return applied_records_.find(
+      [&](const AppliedRecord& record) { return record.key == key; });
+}
+
+MeshNode::AppliedRecord* MeshNode::allocate_applied(
+    const wire::Header& data, const ByteView body, const MonotonicMs now_ms) noexcept {
+  auto* record = applied_records_.allocate();
+  if (record == nullptr) {
+    // Reclaim expired records first, then the oldest ACKed one — its only
+    // residual duty is dedup answers and the origin already proved it
+    // received the verdict (01 §1.7). Unacked in-window records are never
+    // evicted into a lost verdict.
+    while (auto* expired = applied_records_.find([&](const AppliedRecord& value) {
+             return value.expires_at_ms <= now_ms;
+           })) {
+      ++applied_stats_.expired;
+      applied_records_.release(expired);
+    }
+    record = applied_records_.allocate();
+  }
+  if (record == nullptr) {
+    AppliedRecord* oldest_acked = nullptr;
+    applied_records_.for_each([&](AppliedRecord& value) {
+      if (value.acked && (oldest_acked == nullptr ||
+                          value.expires_at_ms < oldest_acked->expires_at_ms)) {
+        oldest_acked = &value;
+      }
+    });
+    if (oldest_acked != nullptr) {
+      ++applied_stats_.evicted;
+      applied_records_.release(oldest_acked);
+      record = applied_records_.allocate();
+    }
+  }
+  if (record == nullptr) {
+    ++applied_stats_.refusals_capacity;
+    return nullptr;
+  }
+  *record = AppliedRecord{};
+  record->key = MessageKey{data.origin, data.message};
+  endpoint::applied_request_digest(
+      data.network, data.origin, data.destination, data.message.session,
+      data.message.sequence, data.delivery, data.original_lifetime_ms, body,
+      record->request_digest);
+  record->expires_at_ms = now_ms + kAppliedResultHoldMs;
+  record->emit_deadline_ms = static_cast<MonotonicMs>(std::min<std::uint64_t>(
+      static_cast<std::uint64_t>(now_ms) + kAppliedResultHoldMs,
+      static_cast<std::uint64_t>(now_ms) + data.remaining_deadline_ms +
+          kAppliedLateResultMs));
+  return record;
+}
+
+void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
+                                AppliedRecord& record, const bool fresh,
+                                const MonotonicMs now_ms) noexcept {
+  if (!fresh) {
+    // A re-delivered key answers from the stored verdict — the endpoint is
+    // never invoked twice (01 §1.5). A digest mismatch means the origin
+    // reused the MessageKey for different bytes: the committed result still
+    // answers, the conflict is counted.
+    std::array<std::uint8_t, 32> digest{};
+    endpoint::applied_request_digest(
+        data.network, data.origin, data.destination, data.message.session,
+        data.message.sequence, data.delivery, data.original_lifetime_ms, body,
+        digest);
+    if (digest != record.request_digest) {
+      ++applied_stats_.mismatched;
+      observer_.on_diagnostic("APPLIED_KEY_CONFLICT", data.previous_hop,
+                              &data.message);
+    }
+    (void)emit_applied_result(record, now_ms);
+    return;
+  }
+
+  endpoint::AppResultOutcome outcome = endpoint::AppResultOutcome::Failure;
+  std::uint32_t code = 0;
+  ByteView result_data{};
+  bool dispatched = false;
+  if (body.size < endpoint::kAppliedLeaseBytes) {
+    code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::MalformedRequest);
+    ++applied_stats_.refusals_malformed;
+  } else {
+    const ExecutionLease current = applied_lease();
+    bool lease_zero = true;
+    for (std::size_t i = 0; i < endpoint::kAppliedLeaseBytes; ++i) {
+      if (body.data[i] != 0) lease_zero = false;
+    }
+    if (lease_zero || !constant_time_equal(
+                          ByteView{body.data, endpoint::kAppliedLeaseBytes},
+                          ByteView{current.data(), current.size()})) {
+      // Stale/absent lease: refused without running the endpoint; the result
+      // carries the CURRENT lease so the origin can retry once correctly.
+      code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::StaleLease);
+      ++applied_stats_.refusals_stale_lease;
+      result_data = ByteView{current.data(), current.size()};
+    } else if (applied_sink_ == nullptr) {
+      code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::NoEndpoint);
+      ++applied_stats_.refusals_no_endpoint;
+    } else {
+      AppliedReply reply{};
+      const AppliedRequest request{record.key, data.origin,
+                                   ByteView{body.data + endpoint::kAppliedLeaseBytes,
+                                            body.size - endpoint::kAppliedLeaseBytes},
+                                   data.remaining_deadline_ms};
+      applied_sink_->on_applied_request(request, reply);
+      dispatched = true;
+      ++applied_stats_.requests_dispatched;
+      outcome = reply.outcome;
+      code = reply.code;
+      if (reply.size > endpoint::kAppResultDataMax ||
+          code >= endpoint::kAppResultSdkCodeBase) {
+        // Endpoint contract violation: oversize data or a code inside the
+        // SDK-reserved band is rewritten to an honest InternalError — app
+        // bytes can never impersonate an SDK refusal (01 §1.2).
+        outcome = endpoint::AppResultOutcome::Failure;
+        code = static_cast<std::uint32_t>(endpoint::AppResultRefusal::InternalError);
+      } else {
+        result_data = ByteView{reply.data.data(), reply.size};
+      }
+    }
+  }
+  (void)dispatched;
+  record.outcome = static_cast<std::uint8_t>(outcome);
+  record.application_code = code;
+  record.result_size = static_cast<std::uint8_t>(result_data.size);
+  if (result_data.size > 0) {
+    std::memcpy(record.result_data.data(), result_data.data, result_data.size);
+  }
+  ++applied_stats_.results_committed;
+  (void)emit_applied_result(record, now_ms);
+}
+
+Status MeshNode::emit_applied_result(AppliedRecord& record,
+                                     const MonotonicMs now_ms) noexcept {
+  if (record.emits >= kAppliedMaxEmits || now_ms >= record.emit_deadline_ms ||
+      now_ms < record.next_emit_ms) {
+    ++applied_stats_.result_emits_suppressed;
+    return Status::error(StatusCode::WouldBlock, "APPLIED_EMIT_BUDGET");
+  }
+  endpoint::AppResultBody body{};
+  body.head.subtype = endpoint::AppResultSubtype::Result;
+  body.head.outcome = record.outcome;
+  body.head.network = static_cast<std::uint32_t>(config_.network);
+  body.head.original_origin = record.key.origin;
+  body.head.original_session = record.key.id.session;
+  body.head.original_sequence = record.key.id.sequence;
+  body.head.original_destination = config_.node;
+  body.head.request_digest = record.request_digest;
+  body.application_code = record.application_code;
+  body.data_size = record.result_size;
+  if (record.result_size > 0) {
+    std::memcpy(body.data.data(), record.result_data.data(), record.result_size);
+  }
+  endpoint::EncodedServicePayload encoded{};
+  auto status = endpoint::app_result_encode(body, encoded);
+  if (!status) return status;
+  // The RESULT's wire identity echoes the request's MessageId (the
+  // END_RECEIPT precedent); the emit index rides delivery_round so each
+  // bounded retransmission is a distinct frame at dedup, ≤3 total.
+  const auto lifetime = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      std::numeric_limits<std::uint32_t>::max(),
+      static_cast<std::uint64_t>(record.emit_deadline_ms - now_ms)));
+  status = queue_typed_job(FrameType::AppResult, JobOwner::Applied, record.key.id,
+                           record.key.origin, encoded.view(), record.emits,
+                           lifetime, Priority::Management, now_ms);
+  if (!status) {
+    ++applied_stats_.result_emits_suppressed;
+    return status;
+  }
+  ++record.emits;
+  ++applied_stats_.results_emitted;
+  record.next_emit_ms =
+      now_ms + applied_window_ms(kDefaultHopLimit, config_.hop_accept_timeout_ms);
+  return Status::success();
+}
+
+void MeshNode::emit_app_status(const NodeId origin, const MessageKey& key,
+                               const std::array<std::uint8_t, 32>& request_digest,
+                               const endpoint::AppResultStatusCode code,
+                               const std::uint64_t nonce,
+                               const std::uint32_t lifetime_ms,
+                               const MonotonicMs now_ms) noexcept {
+  endpoint::AppResultStatus body{};
+  body.head.subtype = endpoint::AppResultSubtype::Status;
+  body.head.outcome = static_cast<std::uint8_t>(code);
+  body.head.network = static_cast<std::uint32_t>(config_.network);
+  body.head.original_origin = key.origin;
+  body.head.original_session = key.id.session;
+  body.head.original_sequence = key.id.sequence;
+  body.head.original_destination = config_.node;
+  body.head.request_digest = request_digest;
+  body.query_nonce = nonce;
+  endpoint::EncodedServicePayload encoded{};
+  if (!endpoint::app_result_status_encode(body, encoded)) {
+    ++applied_stats_.result_emits_suppressed;
+    return;
+  }
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  const auto status =
+      queue_typed_job(FrameType::AppResult, JobOwner::Applied, id, origin,
+                      encoded.view(), 0, std::max<std::uint32_t>(lifetime_ms, 1),
+                      Priority::Management, now_ms);
+  if (status) {
+    ++applied_stats_.status_sent;
+  } else {
+    ++applied_stats_.result_emits_suppressed;
+  }
+}
+
+void MeshNode::emit_app_result_ack(const NodeId terminal,
+                                   const endpoint::AppResultHead& head,
+                                   const ByteView canonical_result_body,
+                                   const MonotonicMs now_ms) noexcept {
+  endpoint::AppResultAck ack{};
+  ack.head.subtype = endpoint::AppResultSubtype::ResultAck;
+  ack.head.outcome = 0;
+  ack.head.network = static_cast<std::uint32_t>(config_.network);
+  ack.head.original_origin = head.original_origin;
+  ack.head.original_session = head.original_session;
+  ack.head.original_sequence = head.original_sequence;
+  ack.head.original_destination = head.original_destination;
+  ack.head.request_digest = head.request_digest;
+  endpoint::applied_result_digest(canonical_result_body, ack.result_digest);
+  endpoint::EncodedServicePayload encoded{};
+  if (!endpoint::app_result_ack_encode(ack, encoded)) return;
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  // An ACK asserts receipt of that RESULT only — it never asserts
+  // re-processing and never gets an ACK itself (01 §1.3).
+  (void)queue_typed_job(FrameType::AppResult, JobOwner::Applied, id, terminal,
+                        encoded.view(), 0, kControlLifetimeMs * 4,
+                        Priority::Management, now_ms);
+}
+
+Status MeshNode::emit_app_query(Delivery& delivery, const MonotonicMs now_ms) noexcept {
+  endpoint::AppResultQuery query{};
+  query.head.subtype = endpoint::AppResultSubtype::Query;
+  query.head.outcome = 0;
+  query.head.network = static_cast<std::uint32_t>(config_.network);
+  query.head.original_origin = config_.node;
+  query.head.original_session = delivery.id.session;
+  query.head.original_sequence = delivery.id.sequence;
+  query.head.original_destination = delivery.destination;
+  endpoint::applied_request_digest(
+      config_.network, config_.node, delivery.destination, delivery.id.session,
+      delivery.id.sequence, DeliveryClass::Applied, delivery.options.lifetime_ms,
+      ByteView{delivery.payload.data(), delivery.payload_size},
+      query.head.request_digest);
+  query.query_nonce = delivery.app_query_nonce;
+  endpoint::EncodedServicePayload encoded{};
+  if (!endpoint::app_result_query_encode(query, encoded)) {
+    return Status::error(StatusCode::InvalidArgument, "applied query encode failed");
+  }
+  const auto lifetime = static_cast<std::uint32_t>(
+      std::min<std::uint64_t>(delivery.expires_at_ms - now_ms,
+                              std::numeric_limits<std::uint32_t>::max()));
+  const MessageId id{config_.message_session, next_control_sequence_++};
+  const auto status =
+      queue_typed_job(FrameType::AppResult, JobOwner::Applied, id,
+                      delivery.destination, encoded.view(), 0, lifetime,
+                      Priority::Management, now_ms);
+  if (status) ++applied_stats_.queries_sent;
+  return status;
+}
+
+bool MeshNode::applied_answer_gate(const NodeId peer, const MonotonicMs now_ms) noexcept {
+  auto* budget = diag_budget(peer, now_ms);
+  if (budget == nullptr) return false;
+  if (budget->last_applied_ms != 0 &&
+      now_ms - budget->last_applied_ms < kAppliedAnswerMinIntervalMs) {
+    return false;
+  }
+  budget->last_applied_ms = now_ms;
+  return true;
+}
+
+void MeshNode::handle_app_result(const wire::PlainFrame& frame, const NodeId peer,
+                                 const MonotonicMs now_ms) noexcept {
+  const ByteView body{frame.payload.data(), frame.payload_size};
+  const auto malformed = [&]() noexcept {
+    ++applied_stats_.malformed;
+    observer_.on_diagnostic("APPLIED_RESULT_MALFORMED", peer, &frame.header.message);
+  };
+  const auto mismatched = [&](const char* reason) noexcept {
+    ++applied_stats_.mismatched;
+    observer_.on_diagnostic(reason, peer, &frame.header.message);
+  };
+  if (body.size < 2 || body.data == nullptr) {
+    malformed();
+    return;
+  }
+  const std::uint32_t network32 = static_cast<std::uint32_t>(frame.header.network);
+  switch (static_cast<endpoint::AppResultSubtype>(body.data[1])) {
+    case endpoint::AppResultSubtype::Result: {
+      endpoint::AppResultBody result{};
+      if (!endpoint::app_result_decode(body, result)) {
+        malformed();
+        return;
+      }
+      const auto& head = result.head;
+      // A RESULT must be issued by the request's bound destination and name
+      // us as its origin — relays and unrelated nodes can never produce one.
+      if (head.network != network32 || head.original_origin != config_.node ||
+          head.original_destination != frame.header.origin) {
+        mismatched("APPLIED_RESULT_MISMATCH");
+        return;
+      }
+      // The result is end-verified: always acknowledge so the terminal's
+      // emit budget stops. The ACK asserts receipt, never re-processing.
+      emit_app_result_ack(frame.header.origin, head, body, now_ms);
+      auto* delivery = find_delivery(
+          MessageId{head.original_session, head.original_sequence});
+      if (delivery == nullptr ||
+          delivery->options.delivery != DeliveryClass::Applied ||
+          delivery->destination != frame.header.origin ||
+          delivery->state == DeliveryState::Accepted ||
+          delivery->state == DeliveryState::Queued ||
+          delivery->state == DeliveryState::WaitingForRoute ||
+          delivery->state == DeliveryState::CancelledBeforeTx) {
+        mismatched("APPLIED_RESULT_ORPHAN");
+        return;
+      }
+      std::array<std::uint8_t, 32> digest{};
+      endpoint::applied_request_digest(
+          config_.network, config_.node, delivery->destination,
+          delivery->id.session, delivery->id.sequence, DeliveryClass::Applied,
+          delivery->options.lifetime_ms,
+          ByteView{delivery->payload.data(), delivery->payload_size}, digest);
+      if (digest != head.request_digest) {
+        mismatched("APPLIED_RESULT_MISMATCH");
+        return;
+      }
+      if (delivery->applied_present) {
+        // Idempotent replay: the same verdict re-ACKs; a DIFFERENT verdict
+        // under the same binding is a conflict — the first committed
+        // outcome is never overwritten (01 §1.5).
+        const bool same =
+            delivery->applied_outcome == head.outcome &&
+            delivery->applied_code == result.application_code &&
+            delivery->applied_result_size == result.data_size &&
+            (result.data_size == 0 ||
+             std::memcmp(delivery->applied_result.data(), result.data.data(),
+                         result.data_size) == 0);
+        if (!same) mismatched("APPLIED_RESULT_CONFLICT");
+        return;
+      }
+      delivery->applied_present = true;
+      delivery->applied_outcome = head.outcome;
+      delivery->applied_code = result.application_code;
+      delivery->applied_result_size = static_cast<std::uint8_t>(result.data_size);
+      if (result.data_size > 0) {
+        std::memcpy(delivery->applied_result.data(), result.data.data(),
+                    result.data_size);
+      }
+      ++applied_stats_.results_accepted;
+      AppliedResultView view{};
+      view.present = true;
+      view.outcome = static_cast<endpoint::AppResultOutcome>(head.outcome);
+      view.code = result.application_code;
+      view.size = static_cast<std::uint8_t>(result.data_size);
+      if (result.data_size > 0) {
+        std::memcpy(view.data.data(), result.data.data(), result.data_size);
+      }
+      if (sleep_terminal(delivery->state)) {
+        // Late evidence is stored and surfaced but never flips the terminal
+        // verdict (01 §1.3).
+        delivery->applied_late = true;
+        view.late = true;
+        ++applied_stats_.results_late;
+        if (std::strcmp(delivery->reason, "APP_RESULT_TIMEOUT") == 0) {
+          delivery->reason = "APP_RESULT_LATE";
+        }
+      } else if (head.outcome ==
+                 static_cast<std::uint8_t>(endpoint::AppResultOutcome::Success)) {
+        set_delivery_state(*delivery, DeliveryState::Delivered, "APP_APPLIED");
+      } else {
+        set_delivery_state(*delivery, DeliveryState::Failed, "APP_REJECTED");
+      }
+      observer_.on_applied_result(MessageKey{config_.node, delivery->id}, view);
+      return;
+    }
+    case endpoint::AppResultSubtype::Query: {
+      endpoint::AppResultQuery query{};
+      if (!endpoint::app_result_query_decode(body, query)) {
+        malformed();
+        return;
+      }
+      const auto& head = query.head;
+      // A QUERY must come from the request's origin and ask about work
+      // destined to us.
+      if (head.network != network32 || head.original_destination != config_.node ||
+          head.original_origin != frame.header.origin) {
+        mismatched("APPLIED_QUERY_MISMATCH");
+        return;
+      }
+      ++applied_stats_.queries_received;
+      const MessageKey req_key{head.original_origin,
+                               MessageId{head.original_session,
+                                         head.original_sequence}};
+      auto* record = find_applied(req_key);
+      if (record == nullptr) {
+        if (!applied_answer_gate(frame.header.origin, now_ms)) {
+          ++applied_stats_.result_emits_suppressed;
+          return;
+        }
+        emit_app_status(frame.header.origin, req_key, head.request_digest,
+                        endpoint::AppResultStatusCode::NotRetained,
+                        query.query_nonce, frame.header.remaining_deadline_ms,
+                        now_ms);
+        return;
+      }
+      if (record->request_digest != head.request_digest) {
+        mismatched("APPLIED_QUERY_MISMATCH");
+        return;
+      }
+      if (now_ms >= record->emit_deadline_ms) {
+        if (applied_answer_gate(frame.header.origin, now_ms)) {
+          emit_app_status(frame.header.origin, req_key, head.request_digest,
+                          endpoint::AppResultStatusCode::Expired,
+                          query.query_nonce, frame.header.remaining_deadline_ms,
+                          now_ms);
+        }
+        return;
+      }
+      // The stored verdict answers the query — the endpoint is never rerun.
+      (void)emit_applied_result(*record, now_ms);
+      return;
+    }
+    case endpoint::AppResultSubtype::ResultAck: {
+      endpoint::AppResultAck ack{};
+      if (!endpoint::app_result_ack_decode(body, ack)) {
+        malformed();
+        return;
+      }
+      const auto& head = ack.head;
+      if (head.network != network32 || head.original_destination != config_.node ||
+          head.original_origin != frame.header.origin) {
+        mismatched("APPLIED_ACK_MISMATCH");
+        return;
+      }
+      auto* record = find_applied(
+          MessageKey{head.original_origin,
+                     MessageId{head.original_session, head.original_sequence}});
+      if (record == nullptr) return;  // expired: stale evidence, not an error
+      if (record->request_digest != head.request_digest) {
+        mismatched("APPLIED_ACK_MISMATCH");
+        return;
+      }
+      // Recompute the canonical RESULT bytes from the stored record — the
+      // ACK's result_digest must match the exact committed body (01 §1.2).
+      endpoint::AppResultBody stored{};
+      stored.head.subtype = endpoint::AppResultSubtype::Result;
+      stored.head.outcome = record->outcome;
+      stored.head.network = network32;
+      stored.head.original_origin = record->key.origin;
+      stored.head.original_session = record->key.id.session;
+      stored.head.original_sequence = record->key.id.sequence;
+      stored.head.original_destination = config_.node;
+      stored.head.request_digest = record->request_digest;
+      stored.application_code = record->application_code;
+      stored.data_size = record->result_size;
+      if (record->result_size > 0) {
+        std::memcpy(stored.data.data(), record->result_data.data(), record->result_size);
+      }
+      endpoint::EncodedServicePayload canonical{};
+      if (!endpoint::app_result_encode(stored, canonical)) return;
+      std::array<std::uint8_t, 32> expected{};
+      endpoint::applied_result_digest(canonical.view(), expected);
+      if (!constant_time_equal(ByteView{expected.data(), expected.size()},
+                               ByteView{ack.result_digest.data(),
+                                        ack.result_digest.size()})) {
+        mismatched("APPLIED_ACK_MISMATCH");
+        return;
+      }
+      record->acked = true;
+      ++applied_stats_.result_acks;
+      return;
+    }
+    case endpoint::AppResultSubtype::Status: {
+      endpoint::AppResultStatus status_body{};
+      if (!endpoint::app_result_status_decode(body, status_body)) {
+        malformed();
+        return;
+      }
+      const auto& head = status_body.head;
+      if (head.network != network32 || head.original_origin != config_.node ||
+          head.original_destination != frame.header.origin) {
+        mismatched("APPLIED_STATUS_MISMATCH");
+        return;
+      }
+      ++applied_stats_.statuses_received;
+      auto* delivery = find_delivery(
+          MessageId{head.original_session, head.original_sequence});
+      if (delivery == nullptr ||
+          delivery->options.delivery != DeliveryClass::Applied ||
+          delivery->destination != frame.header.origin) {
+        mismatched("APPLIED_STATUS_ORPHAN");
+        return;
+      }
+      // A STATUS only ever answers OUR latest QUERY — an unmatched nonce is
+      // not evidence about this delivery (01 §1.3).
+      if (delivery->app_queries == 0 ||
+          status_body.query_nonce != delivery->app_query_nonce) {
+        mismatched("APPLIED_STATUS_UNMATCHED");
+        return;
+      }
+      if (sleep_terminal(delivery->state)) return;
+      switch (static_cast<endpoint::AppResultStatusCode>(head.outcome)) {
+        case endpoint::AppResultStatusCode::Pending:
+          // Still executing at the terminal: keep waiting inside the deadline.
+          delivery->next_round_at_ms = std::min(
+              delivery->expires_at_ms,
+              now_ms + applied_window_ms(delivery->options.hop_limit,
+                                         config_.hop_accept_timeout_ms));
+          break;
+        case endpoint::AppResultStatusCode::Indeterminate:
+          set_delivery_state(*delivery, DeliveryState::Indeterminate,
+                             "APP_RESULT_INDETERMINATE");
+          break;
+        case endpoint::AppResultStatusCode::Expired:
+          set_delivery_state(*delivery, DeliveryState::Indeterminate,
+                             "APP_RESULT_EXPIRED");
+          break;
+        case endpoint::AppResultStatusCode::NotRetained:
+          set_delivery_state(*delivery, DeliveryState::Indeterminate,
+                             "APP_RESULT_NOT_RETAINED");
+          break;
+      }
+      return;
+    }
+  }
+  malformed();
+}
+
+void MeshNode::process_applied(const MonotonicMs now_ms) noexcept {
+  // Retention expiry: after the hold the record is gone and a QUERY answers
+  // NotRetained honestly (01 §1.6).
+  while (auto* expired = applied_records_.find(
+             [&](const AppliedRecord& value) { return value.expires_at_ms <= now_ms; })) {
+    ++applied_stats_.expired;
+    applied_records_.release(expired);
+  }
+  // Emit retries: an unacked committed result retransmits inside its window
+  // and emit budget; dedup/QUERY replays share the same counters.
+  applied_records_.for_each([&](AppliedRecord& record) {
+    if (!record.acked && record.emits < kAppliedMaxEmits &&
+        now_ms >= record.next_emit_ms && now_ms < record.emit_deadline_ms) {
+      (void)emit_applied_result(record, now_ms);
+    }
+  });
 }
 
 void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId peer,
@@ -2673,6 +3474,11 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
     case FrameType::EndReceipt:
       handle_end_receipt(frame, peer, now_ms);
       break;
+    case FrameType::AppResult:
+      // sdk-completion/01: APP_RESULT rides the routed end-protected lane —
+      // transit dedup/forwards it, terminals dispatch the body subtype.
+      handle_routed(frame, peer, now_ms);
+      break;
     case FrameType::HopAccept:
     case FrameType::RouteUpdate:
     case FrameType::SeqnoRequest: {
@@ -2797,6 +3603,17 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
       return;
     }
     if (now_ms >= delivery.expires_at_ms) {
+      // APPLIED (01 §1.3): a transmitted APPLIED request may already have
+      // executed at the destination — post-TX expiry is Indeterminate,
+      // never the unproven Failed and never END_RECEIVED-promoted.
+      if (delivery.options.delivery == DeliveryClass::Applied &&
+          (delivery.state == DeliveryState::WaitingForMac ||
+           delivery.state == DeliveryState::WaitingForHopAccept ||
+           delivery.state == DeliveryState::WaitingForEndReceipt)) {
+        set_delivery_state(delivery, DeliveryState::Indeterminate,
+                           "APP_RESULT_TIMEOUT");
+        return;
+      }
       set_delivery_state(delivery, DeliveryState::Expired, "DEADLINE_EXPIRED");
       return;
     }
@@ -2807,9 +3624,37 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
          delivery.state == DeliveryState::WaitingForEndReceipt) &&
         now_ms >= delivery.next_round_at_ms) {
       if (delivery.state == DeliveryState::WaitingForEndReceipt) {
+        if (delivery.options.delivery == DeliveryClass::Applied &&
+            delivery.app_phase != 0) {
+          // Application-pending window elapsed: bounded QUERY recovery
+          // (<=kAppliedMaxQueries), then the delivery simply waits out its
+          // deadline — a late RESULT still resolves it (01 §1.3).
+          if (delivery.app_queries < kAppliedMaxQueries) {
+            delivery.app_query_nonce = next_app_nonce_++;
+            if (emit_app_query(delivery, now_ms)) {
+              ++delivery.app_queries;
+            }
+            delivery.next_round_at_ms = std::min(
+                delivery.expires_at_ms,
+                now_ms + applied_window_ms(delivery.options.hop_limit,
+                                           config_.hop_accept_timeout_ms));
+          } else {
+            delivery.next_round_at_ms = delivery.expires_at_ms;
+          }
+          return;
+        }
         if (static_cast<std::uint8_t>(delivery.round + 1U) >=
             config_.max_end_to_end_rounds) {
-          set_delivery_state(delivery, DeliveryState::Failed, "END_RECEIPT_TIMEOUT");
+          // For APPLIED the last round's DATA may have landed and executed —
+          // Indeterminate, not the unproven Failed (01 §1.9).
+          set_delivery_state(
+              delivery,
+              delivery.options.delivery == DeliveryClass::Applied
+                  ? DeliveryState::Indeterminate
+                  : DeliveryState::Failed,
+              delivery.options.delivery == DeliveryClass::Applied
+                  ? "APP_RESULT_TIMEOUT"
+                  : "END_RECEIPT_TIMEOUT");
           return;
         }
         ++delivery.round;
@@ -2829,6 +3674,7 @@ void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
         [&](const DedupEntry& value) { return value.expires_at_ms <= now_ms; });
     if (expired == nullptr) break;
     dedup_.release(expired);
+    saturating_inc(dedup_stats_.expired);
   }
 }
 
@@ -2972,6 +3818,9 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   expire_sequence_requests(now_ms);
   process_awaiting_hop(now_ms);
   process_delivery_timeouts(now_ms);
+  // APPLIED terminal bookkeeping: result-record retention expiry and the
+  // bounded RESULT emit retry pass (sdk-completion/01 §1.4/§1.6).
+  process_applied(now_ms);
   routes_.for_each_selected_change(
       [&](const RouteSelection&) { trigger_route_advertisement(now_ms); },
       now_ms);
@@ -4082,6 +4931,9 @@ void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
   entry->reported_reason = static_cast<std::uint8_t>(report.reason);
   entry->reported_reporter = report.claimed_reporter;
   entry->reported_id = report.report_id;
+  // Post-acceptance failure retained: the record demotes to the Evidence
+  // class (sdk-completion/02 §2.6) — still evictable, after all Resolved.
+  mark_dedup_evidence(*entry);
   emit_transit_failure(entry->upstream_peer, report, now_ms);
 }
 
@@ -4155,7 +5007,10 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
   free_slot->round = report.ref_round;
   free_slot->phase = static_cast<std::uint8_t>(report.phase);
   free_slot->reason = static_cast<std::uint8_t>(report.reason);
-  free_slot->expires_at_ms = now_ms + 60000;
+  // The seen-record never outlives the transit record it references
+  // (sdk-completion/02 §2.3c) — a flat 60 s would pin report suppression
+  // past the evidence's own retention.
+  free_slot->expires_at_ms = entry->expires_at_ms;
 
   // Record the downstream-reported outcome on the retained record: a
   // re-received upstream duplicate replays this evidence VERBATIM (claimed
@@ -4166,6 +5021,7 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
   entry->reported_reason = static_cast<std::uint8_t>(report.reason);
   entry->reported_reporter = report.claimed_reporter;
   entry->reported_id = report.report_id;
+  mark_dedup_evidence(*entry);
 
   // Propagate toward our upstream with the claimed reporter preserved
   // verbatim (unverified — we authenticated only `peer`). The fingerprint
