@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "routeloom/congestion.hpp"
+#include "routeloom/telemetry.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
@@ -28,6 +29,11 @@ struct NodeConfig {
   std::uint32_t route_lifetime_ms{15000};
   std::uint32_t hop_accept_timeout_ms{60};
   std::uint32_t callback_watchdog_ms{1000};
+  // Per-boot incarnation stamped on this node's telemetry observations
+  // (02-telemetry §2.4). Distinct from message_session; 0 means unset —
+  // observations then carry observer_boot 0 and hosts must treat boot
+  // attribution as unknown.
+  std::uint64_t boot_incarnation{0};
   std::uint8_t max_link_attempts{2};
   std::uint8_t max_end_to_end_rounds{3};
 };
@@ -35,22 +41,6 @@ struct NodeConfig {
 struct RadioRxMetadata {
   std::int8_t rssi_dbm{0};
 };
-
-// V2 is deliberately separate: legacy RadioRxMetadata{-60} callers keep
-// compiling, but do not acquire invented timestamps, validity or generations.
-// The Owner captures these values in the callback and rechecks the identity
-// after link authentication before passing them to the telemetry primitives.
-struct RadioRxMetadataV2 {
-  std::uint64_t received_us{0};
-  BindingGeneration binding_generation{};
-  RadioGeneration radio_generation{};
-  ChannelEpoch channel_epoch{};
-  std::int8_t rssi_dbm{0};
-  bool rssi_valid{false};
-  std::uint8_t channel{0};
-  bool channel_valid{false};
-};
-static_assert(sizeof(RadioRxMetadataV2) <= 24, "bounded RX metadata");
 
 class RadioPort {
  public:
@@ -219,6 +209,23 @@ class MeshNode {
   void poll(MonotonicMs now_ms) noexcept;
   void on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
                         MonotonicMs now_ms) noexcept;
+  // M1 telemetry entry point (m1-completion/02-telemetry.md §2.3): same
+  // receive path, plus bounded RF observation. The V1 overload forwards with
+  // InjectedTest provenance — only the production adapter supplies
+  // LocalDriver evidence.
+  void on_radio_receive(NodeId peer, ByteView frame,
+                        const RadioRxMetadataV2& metadata,
+                        MonotonicMs now_ms) noexcept;
+  // Completion observation for one submitted TX attempt (02 §2.2/§2.3). The
+  // Owner calls this exactly once per submission, including unknown outcomes;
+  // callback-absent fencing is the Owner's job — this records what arrived.
+  void note_radio_tx(const RadioTxObservation& observation,
+                     MonotonicMs now_ms) noexcept;
+  // Read-only telemetry surfaces (02 §2.4/§2.7). A missing peer is nullptr,
+  // not a zero record.
+  const PeerTelemetrySummary* telemetry_peer(NodeId peer) const noexcept;
+  const ObservationBucket* telemetry_bucket(const ObservationKey& key) const noexcept;
+  std::uint64_t telemetry_event_drops() const noexcept { return telemetry_event_drops_; }
   // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
   void set_autonomy_sink(AutonomyFrameSink* sink) noexcept { autonomy_sink_ = sink; }
   // Install/clear the Service=21 endpoint (GatewayDelivery wiring, nullptr
@@ -765,9 +772,16 @@ class MeshNode {
   void refresh_neighbor_load(MonotonicMs now_ms) noexcept;
   void refresh_link_cost(Neighbor& neighbor, MonotonicMs now_ms) noexcept;
 
+  void receive_impl(NodeId peer, ByteView frame, const RadioRxMetadataV2* metadata,
+                    MonotonicMs now_ms) noexcept;
+
   // Observation aggregation (03 §3): bounded buckets keyed by the contract
   // tuple. find-or-allocate returns nullptr only when the pool is exhausted.
-  ObservationBucket* observation_bucket(std::uint8_t length_class,
+  ObservationBucket* observation_bucket(const ObservationKey& key,
+                                        MonotonicMs now_ms) noexcept;
+  // Convenience: egress bucket with portable-core placeholder generations
+  // (0); the radio Owner keys real epochs via note_radio_tx (03 §3).
+  ObservationBucket* observation_bucket(NodeId peer, std::uint8_t length_class,
                                         MonotonicMs now_ms) noexcept;
   void obs_tx_submitted(const TxJob& job, MonotonicMs now_ms) noexcept;
   void obs_driver_service(const TxJob& job, std::uint32_t service_us,
@@ -858,6 +872,12 @@ class MeshNode {
   // Bounded observation buckets (03 §3 groundwork for P3).
   static constexpr std::size_t kObservationCapacity = 8;
   FixedPool<ObservationBucket, kObservationCapacity> observations_{};
+  // M1 telemetry (m1-completion/02-telemetry.md): per-peer RF summaries and
+  // the count of frames that never reached telemetry because they failed
+  // link authentication or identity checks — telemetry never credits
+  // unauthenticated bytes to a peer.
+  PeerTelemetryTable telemetry_peers_{};
+  std::uint64_t telemetry_event_drops_{0};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.
   MonotonicMs last_clock_ms_{0};

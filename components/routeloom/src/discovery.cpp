@@ -2159,6 +2159,17 @@ bool NeighborDiscovery::binding_of(const NodeId peer, BindingId& out) const noex
   return true;
 }
 
+bool NeighborDiscovery::binding_generation_of(
+    const NodeId peer, BindingGeneration& out) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  if (neighbor == nullptr || neighbor->binding == kInvalidBindingId ||
+      !resolvable_phase(neighbor->phase)) {
+    return false;
+  }
+  out = neighbor->generation;
+  return true;
+}
+
 bool NeighborDiscovery::node_of(const MacAddress& mac, NodeId& out) const noexcept {
   const Neighbor* neighbor = find_neighbor(mac);
   if (neighbor == nullptr || neighbor->node == kInvalidNodeId ||

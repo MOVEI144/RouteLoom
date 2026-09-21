@@ -97,6 +97,7 @@ class EspNowRuntime final : public RadioPort,
 
   std::uint8_t channel() const noexcept { return config_.channel; }
   MonotonicMs now_ms() const noexcept;
+  static std::uint64_t now_us() noexcept;
   // Iterate registered peer mappings (NodeId, MAC, link metric,
   // autonomy-managed flag) for the power coordinator's peer-cache capture.
   template <typename Fn>
@@ -197,6 +198,10 @@ class EspNowRuntime final : public RadioPort,
 
  private:
   enum class EventKind : std::uint8_t { Rx, Tx };
+  // TX completion provenance (02-telemetry §2.2): which lane a send callback
+  // belongs to. Stale/fenced completions are evidence under their ORIGINAL
+  // generations — they resolve nothing in the node.
+  enum class TxLane : std::uint8_t { Reserved, Raw, Stale };
   struct Event {
     EventKind kind{EventKind::Rx};
     NodeId peer{kInvalidNodeId};
@@ -207,6 +212,19 @@ class EspNowRuntime final : public RadioPort,
     std::uint16_t length{0};
     std::int8_t rssi_dbm{0};
     bool success{false};
+    // D1b observation fields: captured in the callback, attributed by the
+    // generations recorded at submit time so a stale callback can never mint
+    // evidence under a newer radio/channel identity.
+    TxLane tx_lane{TxLane::Reserved};
+    std::uint64_t observed_us{0};    // rx: driver timestamp; tx: completed_us
+    std::uint64_t submitted_us{0};   // tx only
+    BindingGeneration binding{};
+    RadioGeneration radio_generation{};
+    ChannelEpoch channel_epoch{};
+    std::uint8_t channel{0};
+    std::uint8_t frame_length_class{0};
+    bool rssi_valid{false};
+    bool channel_valid{false};
     std::array<std::uint8_t, kMaxEspNowBody> data{};
   };
   // Bootstrap-lane record: self-contained RLD1 envelope + observed metadata.
@@ -234,6 +252,10 @@ class EspNowRuntime final : public RadioPort,
     // Whether this peer was added to the MeshNode neighbor table at
     // REACHABLE (so a later release can undo exactly that).
     bool neighbor_added{false};
+    // Discovery binding generation mirrored from the engine — the identity
+    // epoch stamped on this peer's RX/TX observations (02 §2.4). 0 until
+    // the first bound record resolves it.
+    BindingGeneration binding{0};
   };
   // A driver peer held for an in-flight auth exchange — no NodeId exists yet
   // (the claimed id is unverified until the transcript verifies).
@@ -316,8 +338,15 @@ class EspNowRuntime final : public RadioPort,
   QueueHandle_t bootstrap_queue_{nullptr};
   TaskHandle_t task_{nullptr};
   std::uint64_t pending_token_{0};
+  NodeId pending_node_{kInvalidNodeId};
   MacAddress pending_mac_{};
   std::uint32_t pending_generation_{0};
+  // Submit-time observation record for the reserved TX (02 §2.3): copied
+  // into the completion event so attribution never re-reads live state.
+  std::uint64_t pending_submitted_us_{0};
+  BindingGeneration pending_binding_{0};
+  ChannelEpoch pending_channel_epoch_{0};
+  std::uint8_t pending_length_class_{0};
   // In-flight non-reserved (bootstrap/probe/migration) sends, one entry per
   // destination MAC. Entries retire on their completion callback or after
   // callback_watchdog_ms; while an entry exists both send_raw() to that MAC
@@ -325,13 +354,27 @@ class EspNowRuntime final : public RadioPort,
   struct RawTx {
     MacAddress mac{};
     MonotonicMs sent_ms{0};
+    // Submit-time observation record (same rule as the reserved lane).
+    NodeId node{kInvalidNodeId};
+    std::uint64_t submitted_us{0};
+    BindingGeneration binding{0};
+    RadioGeneration radio_generation{};
+    ChannelEpoch channel_epoch{0};
+    std::uint8_t length_class{0};
   };
   std::array<RawTx, kRawTxCapacity> raw_tx_{};
   std::size_t raw_tx_count_{0};
+  // Watchdog-retired raw sends awaiting Unknown accounting on the poll task
+  // (node state may only be touched there — never inside callback_lock_).
+  std::array<RawTx, kRawTxCapacity> expired_tx_{};
+  std::size_t expired_tx_count_{0};
   // A fenced TX whose completion may still arrive: new sends to the same MAC
   // are guarded until the stale callback lands or the guard window passes,
   // so an old callback can never satisfy a new send (X-02).
   MacAddress fenced_mac_{};
+  // The fenced send's frozen submit record — its late callback reports as
+  // Unknown evidence under these original generations (X-02).
+  RawTx fenced_pending_{};
   MonotonicMs fenced_until_ms_{0};
   bool fenced_outstanding_{false};
   std::uint32_t stale_tx_results_{0};
@@ -348,6 +391,14 @@ class EspNowRuntime final : public RadioPort,
   std::uint32_t rx_dropped_{0};
   std::uint32_t autonomy_tx_ok_{0};
   std::uint32_t autonomy_tx_failed_{0};
+  // Owner-side channel epoch: bumped on every readback-verified committed
+  // channel (channel_committed). Distinct from the numeric channel — two
+  // commits to the same channel still move the epoch.
+  ChannelEpoch channel_epoch_{0};
+  std::uint32_t telemetry_event_drops_{0};
+  // Submit ms of the reserved TX — the poll-task callback watchdog so a
+  // never-completing send cannot wedge pending_tx_ forever (02 §2.2).
+  MonotonicMs pending_sent_ms_{0};
   bool pending_tx_{false};
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};

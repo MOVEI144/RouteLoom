@@ -117,6 +117,46 @@ enum class ObservationProvenance : std::uint8_t {
   AuthenticatedRemoteReport = 2,
 };
 
+// V2 is deliberately separate from the legacy {rssi}-only metadata: legacy
+// callers keep compiling, but do not acquire invented timestamps, validity
+// or generations. The Owner captures these values in the callback and
+// rechecks the identity after link authentication before passing them to
+// the telemetry primitives (02-telemetry §2.3).
+struct RadioRxMetadataV2 {
+  std::uint64_t received_us{0};
+  BindingGeneration binding_generation{};
+  RadioGeneration radio_generation{};
+  ChannelEpoch channel_epoch{};
+  std::int8_t rssi_dbm{0};
+  bool rssi_valid{false};
+  std::uint8_t channel{0};
+  bool channel_valid{false};
+  ObservationProvenance provenance{ObservationProvenance::LocalDriver};
+};
+static_assert(sizeof(RadioRxMetadataV2) <= 32, "bounded RX metadata");
+
+// One submitted TX attempt's completion evidence (02-telemetry §2.3). The
+// Owner stamps submitted_us at driver acceptance and completed_us in the
+// callback; generations are copied from the Owner's pending record so a
+// stale callback can never be attributed to a newer radio/channel identity.
+enum class RadioTxOutcome : std::uint8_t {
+  Success = 0,   // driver reported TX_OK — MAC-level only, never hop acceptance
+  Failure = 1,   // driver reported failure
+  Unknown = 2,   // callback watchdog expired / fenced / indeterminate
+};
+
+struct RadioTxObservation {
+  NodeId peer{kInvalidNodeId};
+  BindingGeneration binding_generation{};
+  RadioGeneration radio_generation{};
+  ChannelEpoch channel_epoch{};
+  std::uint64_t submitted_us{0};
+  std::uint64_t completed_us{0};
+  std::uint8_t frame_length_class{0};
+  RadioTxOutcome outcome{RadioTxOutcome::Unknown};
+};
+static_assert(sizeof(RadioTxObservation) <= 64, "bounded TX observation");
+
 constexpr std::size_t kObservationBucketCapacity = 8;
 
 struct ObservationKey {

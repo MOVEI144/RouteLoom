@@ -2170,7 +2170,24 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
 void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
                                 const RadioRxMetadata& metadata,
                                 const MonotonicMs now_ms) noexcept {
-  (void)metadata;
+  // V1 callers carry no observation provenance; every in-tree V1 path is a
+  // test/sim shim, so evidence is marked InjectedTest rather than invented.
+  RadioRxMetadataV2 v2{};
+  v2.rssi_dbm = metadata.rssi_dbm;
+  v2.rssi_valid = true;
+  v2.provenance = ObservationProvenance::InjectedTest;
+  receive_impl(peer, encoded, &v2, now_ms);
+}
+
+void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
+                                const RadioRxMetadataV2& metadata,
+                                const MonotonicMs now_ms) noexcept {
+  receive_impl(peer, encoded, &metadata, now_ms);
+}
+
+void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
+                            const RadioRxMetadataV2* const metadata,
+                            const MonotonicMs now_ms) noexcept {
   if (!started_) return;
   last_clock_ms_ = now_ms;
   // Any received frame — even one that fails decode — is radio activity and
@@ -2180,16 +2197,28 @@ void MeshNode::on_radio_receive(const NodeId peer, const ByteView encoded,
   auto status = wire::open_link(encoded, config_.node, security_, frame);
   if (!status) {
     observer_.on_diagnostic(status.detail, peer, nullptr);
+    ++telemetry_event_drops_;  // unauthenticated bytes never reach telemetry
     return;
   }
   if (frame.header.network != config_.network || frame.header.previous_hop != peer) {
     observer_.on_diagnostic("LINK_IDENTITY_MISMATCH", peer, &frame.header.message);
+    ++telemetry_event_drops_;
     return;
   }
   // Only authenticated, well-formed traffic from our network confirms a
   // resume: junk or foreign frames still count as work (ticket invalidation
   // above) but must never satisfy the saved-peer confirmation window.
   ++rx_generation_;
+  // Link-auth + identity passed: the frame is attributable to `peer`, so its
+  // RF metadata may feed the per-peer summary (02-telemetry §2.3). The
+  // record stays per-immediate-peer; relays do not mint evidence for the
+  // origin.
+  if (metadata != nullptr &&
+      telemetry_peers_.note_rx(peer, *metadata, metadata->provenance,
+                               config_.boot_incarnation, now_ms) ==
+          nullptr) {
+    ++telemetry_event_drops_;  // table full: bounded loss, never a fake sample
+  }
   // Same bar feeds the migration verify oracle: any link-authenticated,
   // identity-matched frame is connectivity evidence on the current channel.
   if (autonomy_sink_ != nullptr) {
@@ -2533,11 +2562,7 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
 // ---------------------------------------------------------------------------
 
 ObservationBucket* MeshNode::observation_bucket(
-    const std::uint8_t length_class, const MonotonicMs now_ms) noexcept {
-  // Binding/radio/channel generations stay at their portable-core placeholder
-  // (0); the radio Owner keys real epochs once they exist (03 §3).
-  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
-                           RadioGeneration{0}, ChannelEpoch{0}, length_class};
+    const ObservationKey& key, const MonotonicMs now_ms) noexcept {
   auto* existing = observations_.find(
       [&](const ObservationBucket& value) { return value.key == key; });
   if (existing != nullptr) {
@@ -2555,8 +2580,17 @@ ObservationBucket* MeshNode::observation_bucket(
   return created;
 }
 
+ObservationBucket* MeshNode::observation_bucket(
+    const NodeId peer, const std::uint8_t length_class,
+    const MonotonicMs now_ms) noexcept {
+  return observation_bucket(
+      ObservationKey{BindingGeneration{0}, ObservationDirection::Egress,
+                     RadioGeneration{0}, ChannelEpoch{0}, length_class, peer},
+      now_ms);
+}
+
 void MeshNode::obs_tx_submitted(const TxJob& job, const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
   if (bucket != nullptr) {
     ++bucket->tx_submitted;
     ++bucket->sojourn_samples;
@@ -2583,7 +2617,7 @@ void MeshNode::obs_tx_submitted(const TxJob& job, const MonotonicMs now_ms) noex
 
 void MeshNode::obs_driver_service(const TxJob& job, const std::uint32_t service_us,
                                   const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
   if (bucket == nullptr) return;
   ++bucket->service_samples;
   // Driver service: driver acceptance -> TX callback (03 §3). May include
@@ -2593,7 +2627,7 @@ void MeshNode::obs_driver_service(const TxJob& job, const std::uint32_t service_
 
 void MeshNode::obs_hop_result(const TxJob& job, const bool accepted,
                               const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
   if (bucket != nullptr) {
     if (accepted) {
       ++bucket->hop_accepted;
@@ -2619,7 +2653,7 @@ void MeshNode::obs_hop_result(const TxJob& job, const bool accepted,
 void MeshNode::obs_count(const TxJob& job,
                          std::uint64_t ObservationBucket::*counter,
                          const MonotonicMs now_ms) noexcept {
-  auto* bucket = observation_bucket(frame_length_class(job.tx_cost), now_ms);
+  auto* bucket = observation_bucket(job.peer, frame_length_class(job.tx_cost), now_ms);
   if (bucket != nullptr) ++(bucket->*counter);
 }
 
@@ -2646,8 +2680,63 @@ void MeshNode::obs_final(const Delivery& delivery, const DeliveryState state,
   }
   // Final results aggregate under the default length class — a delivery has
   // no single on-air frame size.
-  auto* bucket = observation_bucket(0, now_ms);
+  auto* bucket = observation_bucket(delivery.destination, 0, now_ms);
   if (bucket != nullptr) ++(bucket->*counter);
+}
+
+// ---------------------------------------------------------------------------
+// M1 telemetry entry points (02-telemetry.md §2.3)
+// ---------------------------------------------------------------------------
+
+void MeshNode::note_radio_tx(const RadioTxObservation& observation,
+                             const MonotonicMs now_ms) noexcept {
+  if (!started_ || observation.peer == kInvalidNodeId) return;
+  auto* bucket = observation_bucket(
+      ObservationKey{observation.binding_generation,
+                     ObservationDirection::Egress, observation.radio_generation,
+                     observation.channel_epoch, observation.frame_length_class,
+                     observation.peer},
+      now_ms);
+  if (bucket == nullptr) return;  // observation_bucket already counted overflow
+  bucket->observer_boot = config_.boot_incarnation;
+  switch (observation.outcome) {
+    case RadioTxOutcome::Success:
+      ++bucket->tx_mac_success;
+      break;
+    case RadioTxOutcome::Failure:
+      ++bucket->tx_mac_fail;
+      break;
+    case RadioTxOutcome::Unknown:
+      ++bucket->unknown_results;
+      break;
+  }
+  if (observation.completed_us > observation.submitted_us) {
+    const std::uint32_t service_us = static_cast<std::uint32_t>(
+        observation.completed_us - observation.submitted_us);
+    ++bucket->service_samples;
+    ++bucket->current.driver_samples;
+    ewma_add(bucket->driver_service_us_ewma, service_us,
+             bucket->service_samples);
+    ewma_add(bucket->current.driver_us_ewma, service_us,
+             bucket->current.driver_samples);
+  }
+  bucket->current.present = true;
+  bucket->current.sources |= static_cast<std::uint8_t>(
+      1u << static_cast<unsigned>(ObservationProvenance::LocalDriver));
+  bucket->current.last_sample_ms = now_ms;
+  if (bucket->current.first_sample_ms == 0) {
+    bucket->current.first_sample_ms = now_ms;
+  }
+}
+
+const PeerTelemetrySummary* MeshNode::telemetry_peer(const NodeId peer) const noexcept {
+  return telemetry_peers_.find(peer);
+}
+
+const ObservationBucket* MeshNode::telemetry_bucket(
+    const ObservationKey& key) const noexcept {
+  return observations_.find(
+      [&](const ObservationBucket& value) { return value.key == key; });
 }
 
 // ---------------------------------------------------------------------------

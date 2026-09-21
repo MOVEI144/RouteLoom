@@ -418,6 +418,10 @@ class NeighborDiscovery {
   bool data_permitted(const MacAddress& mac) const noexcept;
   bool data_permitted(NodeId peer) const noexcept;
   bool binding_of(NodeId peer, BindingId& out) const noexcept;
+  // Binding generation under which the peer's verified record stands — the
+  // epoch that keys telemetry attribution (02-telemetry §2.4). Same
+  // resolvability bar as binding_of; false when no live binding exists.
+  bool binding_generation_of(NodeId peer, BindingGeneration& out) const noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
   // resolve). False when the MAC has no neighbor record.

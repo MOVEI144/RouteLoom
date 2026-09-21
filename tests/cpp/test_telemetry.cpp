@@ -3,8 +3,15 @@
 #include <cstdio>
 #include <cstring>
 
+#include <memory>
+
 #include "routeloom/byte_io.hpp"
+#include "routeloom/node.hpp"
 #include "routeloom/telemetry.hpp"
+#include "routeloom/wire.hpp"
+
+#include "test_security.hpp"
+#include "test_sim.hpp"
 
 namespace {
 
@@ -28,6 +35,10 @@ int failures = 0;
   } while (false)
 
 using namespace routeloom;
+using routeloom_test::SimNetwork;
+using routeloom_test::SimRadio;
+
+constexpr NetworkId kNet = 7;
 
 RadioRxMetadataV2 meta(const std::int8_t rssi, const std::uint32_t binding = 7,
                        const std::uint32_t radio = 3,
@@ -320,6 +331,156 @@ void test_positive_metric_input() {
   CHECK(!bucket.positive_metric_input(1000));
 }
 
+// --- D1b node-level wiring (02-telemetry §2.3) -------------------------------
+
+wire::EncodedFrame craft_data(routeloom_test::TestSecurity& cipher,
+                              NodeId from, NodeId to, std::uint64_t seq) {
+  wire::Header h{};
+  h.type = FrameType::Data;
+  h.delivery = DeliveryClass::Reliable;
+  h.hop_remaining = kDefaultHopLimit;
+  h.network = kNet;
+  h.origin = from;
+  h.destination = to;
+  h.previous_hop = from;
+  h.next_hop = to;
+  h.message = MessageId{1, seq};
+  h.remaining_deadline_ms = 5000;
+  h.original_lifetime_ms = 5000;
+  h.link_epoch = 1;
+  h.end_epoch = 1;
+  wire::PlainFrame plain{};
+  plain.header = h;
+  wire::EncodedFrame out{};
+  CHECK_OK(wire::encode_new(plain, cipher, out));
+  return out;
+}
+
+struct NodeFixture {
+  routeloom_test::TestSecurity cipher;
+  routeloom_test::CapturingObserver observer;
+  SimNetwork net;
+  SimRadio radio;
+  std::unique_ptr<MeshNode> node;
+
+  NodeFixture() : radio(net, 1) {
+    NodeConfig cfg{};
+    cfg.network = kNet;
+    cfg.node = 1;
+    cfg.message_session = 101;
+    cfg.boot_incarnation = 0xB007;
+    cfg.route_advertisement_period_ms = 30000;
+    cfg.route_lifetime_ms = 60000;
+    node = std::make_unique<MeshNode>(cfg, radio, cipher, observer);
+    net.register_node(1, node.get());
+    CHECK_OK(node->start(0));
+  }
+};
+
+// Authenticated RX through the V2 path lands in the peer summary with
+// driver provenance and the Owner-supplied generations — the V1 shim path
+// reports the same event as injected test evidence instead.
+void test_node_rx_telemetry() {
+  NodeFixture f;
+  const auto frame = craft_data(f.cipher, 2, 1, 500);
+
+  RadioRxMetadataV2 v2 = meta(-55, /*binding=*/7, /*radio=*/3, /*epoch=*/1);
+  v2.channel = 6;
+  v2.channel_valid = true;
+  f.node->on_radio_receive(2, frame.view(), v2, 100);
+
+  const PeerTelemetrySummary* s = f.node->telemetry_peer(2);
+  CHECK(s != nullptr);
+  CHECK(s->rssi_present && s->rssi_last == -55 && s->rssi_samples == 1);
+  CHECK(s->provenance == ObservationProvenance::LocalDriver);
+  CHECK(s->binding.value == 7 && s->radio.value == 3);
+  CHECK(s->channel.value == 1 && s->observer_boot == 0xB007);
+
+  // Same frame via the legacy V1 entry point: attributed but honestly
+  // marked as injected evidence, not a driver measurement.
+  f.node->on_radio_receive(3, frame.view(), RadioRxMetadata{-60}, 110);
+  const PeerTelemetrySummary* injected = f.node->telemetry_peer(3);
+  // previous_hop mismatch (frame says 2, caller says 3) — link-auth passes
+  // but identity check drops it before telemetry: unauthenticated bytes
+  // never mint a peer record.
+  CHECK(injected == nullptr);
+  CHECK(f.node->telemetry_event_drops() == 1);
+
+  const auto frame3 = craft_data(f.cipher, 3, 1, 501);
+  f.node->on_radio_receive(3, frame3.view(), RadioRxMetadata{-60}, 120);
+  injected = f.node->telemetry_peer(3);
+  CHECK(injected != nullptr);
+  CHECK(injected->provenance == ObservationProvenance::InjectedTest);
+  CHECK(injected->rssi_last == -60);
+}
+
+// Garbage or foreign-network frames increment the drop counter and never
+// create peer summaries.
+void test_node_rx_unauthenticated() {
+  NodeFixture f;
+  const std::array<std::uint8_t, 8> junk{0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3, 4};
+  f.node->on_radio_receive(9, ByteView{junk.data(), junk.size()}, meta(-40), 200);
+  CHECK(f.node->telemetry_peer(9) == nullptr);
+  CHECK(f.node->telemetry_event_drops() == 1);
+}
+
+// note_radio_tx keys the bucket by the full observation tuple and splits
+// success/failure/unknown honestly.
+void test_node_tx_observation() {
+  NodeFixture f;
+  RadioTxObservation obs{};
+  obs.peer = 2;
+  obs.binding_generation = BindingGeneration{7};
+  obs.radio_generation = RadioGeneration{3};
+  obs.channel_epoch = ChannelEpoch{1};
+  obs.submitted_us = 1000;
+  obs.completed_us = 1400;
+  obs.frame_length_class = 1;
+  obs.outcome = RadioTxOutcome::Success;
+  f.node->note_radio_tx(obs, 100);
+
+  const ObservationKey key{BindingGeneration{7}, ObservationDirection::Egress,
+                           RadioGeneration{3}, ChannelEpoch{1}, 1, 2};
+  const ObservationBucket* bucket = f.node->telemetry_bucket(key);
+  CHECK(bucket != nullptr);
+  CHECK(bucket->tx_mac_success == 1 && bucket->tx_mac_fail == 0);
+  CHECK(bucket->unknown_results == 0);
+  CHECK(bucket->driver_service_us_ewma == 400);
+  CHECK(bucket->current.present);
+  CHECK(bucket->current.sources ==
+        static_cast<std::uint8_t>(
+            1u << static_cast<unsigned>(ObservationProvenance::LocalDriver)));
+  CHECK(bucket->observer_boot == 0xB007);
+
+  obs.outcome = RadioTxOutcome::Failure;
+  f.node->note_radio_tx(obs, 110);
+  obs.outcome = RadioTxOutcome::Unknown;
+  obs.completed_us = 0;
+  f.node->note_radio_tx(obs, 120);
+  bucket = f.node->telemetry_bucket(key);
+  CHECK(bucket->tx_mac_fail == 1 && bucket->unknown_results == 1);
+  // Failed/unknown completions carry no service-time sample.
+  CHECK(bucket->service_samples == 2);
+
+  // A different radio generation is a different bucket — stale completions
+  // can never fold into the new identity's counters.
+  obs.radio_generation = RadioGeneration{4};
+  obs.completed_us = 1500;
+  obs.outcome = RadioTxOutcome::Success;
+  f.node->note_radio_tx(obs, 130);
+  const ObservationKey key4{BindingGeneration{7}, ObservationDirection::Egress,
+                            RadioGeneration{4}, ChannelEpoch{1}, 1, 2};
+  const ObservationBucket* fresh = f.node->telemetry_bucket(key4);
+  CHECK(fresh != nullptr && fresh->tx_mac_success == 1);
+  CHECK(fresh->tx_mac_fail == 0 && fresh->unknown_results == 0);
+  bucket = f.node->telemetry_bucket(key);
+  CHECK(bucket->tx_mac_success == 1);  // untouched by the gen-4 completion
+
+  // Broadcast/invalid peers are never telemetry subjects.
+  obs.peer = kInvalidNodeId;
+  f.node->note_radio_tx(obs, 140);
+}
+
 }  // namespace
 
 int main() {
@@ -329,6 +490,9 @@ int main() {
   test_snapshot_codec();
   test_reject_codec();
   test_positive_metric_input();
+  test_node_rx_telemetry();
+  test_node_rx_unauthenticated();
+  test_node_tx_observation();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d telemetry checks failed\n", failures);

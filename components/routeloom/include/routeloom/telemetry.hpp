@@ -13,7 +13,6 @@
 #include "routeloom/autonomy.hpp"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/congestion.hpp"
-#include "routeloom/node.hpp"
 #include "routeloom/peer_directory.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
