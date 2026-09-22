@@ -896,6 +896,64 @@ void test_helper_visit_schedule_and_budget() {
   CHECK(participant.phase() == ParticipantPhase::Stable);
 }
 
+void test_helper_visit_gap_waits_for_next_window() {
+  // A poll that lands in a period's post-dwell gap must NOT spend the
+  // index on a dead-on-arrival visit — its deadline already passed, so the
+  // runner would reject it Expired while the period's rendezvous is still
+  // consumed. The slot waits for the next period's begin instead (04 §9.2).
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  plan.recovery.helpers[0] = kSelf;  // this node IS a designated helper
+  plan.recovery.helper_count = 2;
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  drive_full_migration(participant, runner, rig, plan, blob, hash, op, kNow);
+  // Period 0's visit was issued during VERIFYING: let the runner finish it
+  // so the schedule is free for the gap checks.
+  for (MonotonicMs t = 7503; t <= 8400; t += 10) {
+    runner.poll(t);
+    participant.poll(t);
+  }
+  CHECK(participant.stats().helper_visits == 1);
+  CHECK(rig.port.committed == 6);  // the visit returned home, verified
+
+  // Gap poll: inside period 1's [dwell end, next begin) — the index is
+  // unconsumed but its dwell is over. No visit, no absence notice, and the
+  // slot stays open for the next period.
+  const std::size_t log_mark = rig.log.size();
+  participant.poll(13400);
+  runner.poll(13400);
+  CHECK(participant.stats().helper_visits == 1);
+  for (std::size_t i = log_mark; i < rig.log.size(); ++i) {
+    CHECK(rig.log[i].compare(0, 7, "helper+") != 0);
+  }
+
+  // The next period's begin issues a live visit: the deadline is in the
+  // future, so the slot produces a real rendezvous rather than an Expired
+  // rejection.
+  participant.poll(17500);
+  runner.poll(17500);
+  CHECK(participant.stats().helper_visits == 2);
+  CHECK(runner.visiting());          // off-channel dwell on old channel 1
+  CHECK(rig.port.committed == 1);
+  runner.poll(18300);                // dwell over -> verified return home
+  participant.poll(18301);           // consumes the result
+  CHECK(rig.port.committed == 6);
+
+  // Regression: a poll inside a period's dwell still issues on a fresh
+  // index.
+  participant.poll(22600);           // inside period 3's dwell [22500,23300)
+  CHECK(participant.stats().helper_visits == 3);
+}
+
 void test_verify_deadline_without_activity_recovers() {
   // 04 §10: VERIFY closes on authenticated link activity. A window that
   // expires with zero evidence is a verify FAILURE -> stranded-side
@@ -1502,6 +1560,7 @@ int main() {
   test_cutover_fence_and_late_callback();
   test_cutover_indeterminate_and_failed();
   test_helper_visit_schedule_and_budget();
+  test_helper_visit_gap_waits_for_next_window();
   test_verify_deadline_without_activity_recovers();
   test_verify_activity_after_stable_is_ignored();
   test_stranded_node_recovery_via_snapshot();

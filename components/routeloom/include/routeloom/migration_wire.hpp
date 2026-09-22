@@ -65,6 +65,9 @@ constexpr std::uint32_t kPendingTtlMs = 60000;
 constexpr std::size_t kPumpFramesPerPoll = 4;
 constexpr std::uint32_t kDefaultTimesyncPeriodMs = 5000;
 constexpr std::uint32_t kDefaultTimesyncUncertaintyMs = 4;
+// Bounded ChannelCutover retries within one committed-vs-active divergence
+// episode; exhaustion is the RECOVERY_REQUIRED diagnosis boundary (04 §9).
+constexpr std::uint8_t kChannelReconcileAttempts = 3;
 }  // namespace migration_wire_const
 
 // --- Message kinds inside ChannelPlan objects ---------------------------------
@@ -354,11 +357,11 @@ class MigrationAgent final : public MigrationFrameSink,
   void poll(MonotonicMs now_ms) noexcept override;
   void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept override;
 
-  // Cold/resume entry: load durable records via the engine and flag a
-  // physical-channel reconcile when the durable active record disagrees
-  // with the runner's committed channel (normally firmware already boots
-  // onto it; a mismatch means the boot-time read was unavailable). The
-  // reconcile is a real verified ChannelCutover, never a bare assignment.
+  // Cold/resume entry: load durable records via the engine. Afterwards the
+  // poll loop continuously reconciles the runner's committed channel with
+  // the engine's active record — whether the divergence came from an
+  // unavailable boot-time read or a mid-run stranded radio — through a
+  // real verified ChannelCutover, never a bare assignment.
   Status resume(MonotonicMs now_ms) noexcept;
 
   // --- authority (Manual) issuance -------------------------------------------
@@ -503,9 +506,13 @@ class MigrationAgent final : public MigrationFrameSink,
   // on change only, never per-poll spam.
   AssessVerdict last_assess_verdict_{AssessVerdict::Stable};
   bool serving_{false};
-  bool reconcile_needed_{false};
   OperationToken reconcile_token_{kInvalidOperationToken};
   bool reconcile_pending_op_{false};
+  // Per-divergence-episode bookkeeping for the live committed-vs-active
+  // reconcile: failed ops so far, plus the exhaustion latch — both reset
+  // the moment the channels agree again.
+  std::uint8_t reconcile_attempts_{0};
+  bool reconcile_exhausted_{false};
   bool survey_pending_{false};
   OperationToken survey_token_{kInvalidOperationToken};
   std::uint32_t survey_lease_id_{0};
