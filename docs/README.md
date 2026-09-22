@@ -2,6 +2,8 @@
 
 文書基準日：2026-09-17。統合仕様版：1.1。**ソフトウェアのv1.0リリースではない。**
 
+文書サイト：https://movei144.github.io/RouteLoom/ — 本`docs/`からmkdocsで機械生成した閲覧用コピーである。正本はこのリポジトリの文書であり、サイトへの掲載は実装状況・認定の証拠を追加しない。
+
 RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台帳、設備の意味、画面、センサー判定、業務DBは所有しない。
 
 ## 読み順
@@ -20,6 +22,7 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 ## 補助資料
 
 - [判断記録・旧案との差異](spec/decisions.md)
+- [互換性・版管理ポリシー](spec/compatibility.md)
 - [将来の無線追加](spec/transport-extension.md)
 - [用語](spec/glossary.md)
 - [公式資料と参照実装](references/official-sources.md)

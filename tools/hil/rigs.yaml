@@ -1,0 +1,83 @@
+# RouteLoom HIL bench descriptions (issue #18).
+#
+# Parsed by tools/hil/rig.py's YAML-subset loader — keep to nested maps,
+# lists of scalars, and plain/quoted scalars. No anchors, flow collections
+# or block scalars (the loader rejects them on purpose).
+#
+# Each bench maps a role name to:
+#   app        firmware app under firmware/<app> (build dir = firmware/<app>/build)
+#   chip       esp32c3 | esp32s3 | esp32c5 (checked only with `rig.py --probe`)
+#   role       bridge | reference (free-form, drives scenario requirements)
+#   node_id    mesh node id as built (ROUTELOOM_NODE_ID) — used in `send` steps
+#   port_globs serial device globs, first match per platform wins;
+#              macOS: /dev/cu.* (never /dev/tty.* — tty.* blocks on carrier)
+#              Linux: prefer /dev/serial/by-id/* for stable names
+#   serial_hint  substring that must appear in the matched path (disambiguator)
+#   console    usb-serial-jtag (needs DTR asserted to emit output!)
+#              uart0 (external USB-UART adapter wired to UART0 pins)
+#              none (no readable console on the bench)
+#   baud / flash_baud
+#   dtr / rts  modem-line levels the capture should assert (DTR is REQUIRED
+#              for the reference node's USB-Serial-JTAG console)
+#   reset      esptool | dtr-rts | command | none — how reset_boards reboots
+#              the board. dtr-rts pulses RTS(EN) while holding DTR(IO9) low
+#              for a normal boot; esptool runs `esptool -p <port> read-mac`
+#              (which resets via the ROM bootloader connect sequence);
+#              command runs `reset_command` with {port} substituted.
+#   reset_command  shell command template for reset=command
+#
+# NEVER point a capture at the bridge's USB port for logging: the bridge
+# owns USB Serial/JTAG for the COBS protocol; its logs go to UART0 which is
+# not wired on this bench. Bridge state is observed through the host daemon
+# socket (routeloomctl) only.
+
+rigs:
+  bench-a:
+    # The default dev bench: one bridge node (node 0x1, USB protocol to the
+    # host daemon) and one reference mesh node (node 0x2, USB-Serial-JTAG
+    # console). Matches firmware/*/sdkconfig defaults:
+    #   bridge_node:      ROUTELOOM_NODE_ID=0x1, peer 0x2
+    #   reference_node:   ROUTELOOM_NODE_ID=0x2, peer 0x1, channel 6
+    #
+    # To find the real port names on macOS:
+    #   system_profiler SPUSBDataType        # see what is attached
+    #   ls /dev/cu.usbmodem*                 # ESP32-C3/S3 USJ enumerates here
+    # On Linux prefer /dev/serial/by-id/usb-* paths. Tighten port_globs /
+    # serial_hint so each role resolves to exactly one device — an
+    # AMBIGUOUS board counts the bench OFFLINE for scenario purposes.
+    description: "two-node C3 bench: USB bridge + one reference mesh node"
+    host:
+      daemon_bin: host/target/debug/routeloom-host
+      ctl_bin: host/target/debug/routeloomctl
+      socket: /tmp/routeloom-hil-bench-a.sock
+      poll_interval_s: 0.5
+      command_timeout_s: 10
+    boards:
+      bridge:
+        app: bridge_node
+        chip: esp32c3
+        role: bridge
+        node_id: 0x1
+        console: none            # logs on UART0, not wired — daemon socket only
+        baud: 115200
+        flash_baud: 460800
+        port_globs:
+          - /dev/cu.usbmodem*
+          - /dev/serial/by-id/*
+          - /dev/ttyACM*
+        # serial_hint: "usbmodem101"  # set per-bench once hardware is mapped
+        reset: esptool
+      ref-a:
+        app: reference_node
+        chip: esp32c3
+        role: reference
+        node_id: 0x2
+        console: usb-serial-jtag # DTR must be asserted or no output appears
+        baud: 115200
+        flash_baud: 460800
+        port_globs:
+          - /dev/cu.usbserial-*
+          - /dev/cu.usbmodem*
+          - /dev/serial/by-id/*
+          - /dev/ttyACM*
+        reset: esptool

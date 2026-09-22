@@ -4,5 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+# provision-* verbs: local provisioning operations (04-provisioning-
+# lifecycle §4.4) — RLT1/RTM1/RLC1 codecs, dev root signer, NVS set.
+routeloom-provision = { path = "../routeloom-provision" }
+# Image/credential spec documents are JSON — the workspace's one parser.
+routeloom-json = { path = "../routeloom-json" }
+
 [lints]
 workspace = true

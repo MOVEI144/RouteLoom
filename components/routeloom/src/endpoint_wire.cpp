@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
 
 namespace routeloom::endpoint {
 namespace {
@@ -948,6 +949,249 @@ Status config_snapshot_hash_input(const std::uint16_t config_namespace,
 #undef RL_WRITE
   out.size = writer.size();
   return Status::success();
+}
+
+// --- AppResult=19 bodies (sdk-completion/01-applied-delivery.md §1.2) ---------
+
+namespace {
+
+bool app_result_subtype_valid(const std::uint8_t value) noexcept {
+  return value >= static_cast<std::uint8_t>(AppResultSubtype::Result) &&
+         value <= static_cast<std::uint8_t>(AppResultSubtype::Status);
+}
+
+Status app_result_head_write(const AppResultHead& head, ByteWriter& writer) noexcept {
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kAppResultBodyVersion));
+  RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(head.subtype)));
+  RL_WRITE(writer.write_u8(head.outcome));
+  RL_WRITE(writer.write_u8(0));  // flags
+  RL_WRITE(writer.write_u32(head.network));
+  RL_WRITE(writer.write_u64(head.original_origin));
+  RL_WRITE(writer.write_u32(head.original_session));
+  RL_WRITE(writer.write_u64(head.original_sequence));
+  RL_WRITE(writer.write_u64(head.original_destination));
+  RL_WRITE(writer.write_bytes(ByteView{head.request_digest.data(), head.request_digest.size()}));
+#undef RL_WRITE
+  return Status::success();
+}
+
+// Shared strict checks for the 68B head. `expected_subtype` is verified by the
+// caller after this returns; outcome validity is subtype-scoped and also
+// checked by the caller.
+Status app_result_head_read(ByteReader& reader, AppResultHead& out) noexcept {
+  std::uint8_t version = 0;
+  std::uint8_t subtype = 0;
+  std::uint8_t flags = 0;
+  Status status;
+#define RL_READ(expr) do { status = (expr); if (!status) return reject(); } while (false)
+  RL_READ(reader.read_u8(version));
+  RL_READ(reader.read_u8(subtype));
+  RL_READ(reader.read_u8(out.outcome));
+  RL_READ(reader.read_u8(flags));
+  RL_READ(reader.read_u32(out.network));
+  RL_READ(reader.read_u64(out.original_origin));
+  RL_READ(reader.read_u32(out.original_session));
+  RL_READ(reader.read_u64(out.original_sequence));
+  RL_READ(reader.read_u64(out.original_destination));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.request_digest.data(), out.request_digest.size()}));
+#undef RL_READ
+  if (version != kAppResultBodyVersion || flags != 0 ||
+      !app_result_subtype_valid(subtype) || out.network == 0 ||
+      out.original_origin == kInvalidNodeId ||
+      out.original_destination == kInvalidNodeId || out.original_sequence == 0) {
+    return reject();
+  }
+  out.subtype = static_cast<AppResultSubtype>(subtype);
+  return Status::success();
+}
+
+bool app_result_head_encodable(const AppResultHead& head) noexcept {
+  return app_result_subtype_valid(static_cast<std::uint8_t>(head.subtype)) &&
+         head.network != 0 && head.original_origin != kInvalidNodeId &&
+         head.original_destination != kInvalidNodeId && head.original_sequence != 0;
+}
+
+}  // namespace
+
+Status app_result_encode(const AppResultBody& body, EncodedServicePayload& out) noexcept {
+  if (body.head.subtype != AppResultSubtype::Result ||
+      body.head.outcome > static_cast<std::uint8_t>(AppResultOutcome::Failure) ||
+      body.data_size > kAppResultDataMax || !app_result_head_encodable(body.head)) {
+    return invalid("app_result_encode: invalid field");
+  }
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(app_result_head_write(body.head, writer));
+  RL_WRITE(writer.write_u32(body.application_code));
+  RL_WRITE(writer.write_u16(body.data_size));
+  RL_WRITE(writer.write_bytes(ByteView{body.data.data(), body.data_size}));
+#undef RL_WRITE
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status app_result_decode(ByteView encoded, AppResultBody& out) noexcept {
+  if (encoded.size < kAppResultBodyMinSize || encoded.size > kAppResultBodyMaxSize) {
+    return reject();
+  }
+  ByteReader reader(encoded);
+  AppResultHead head;
+  if (!app_result_head_read(reader, head)) return reject();
+  if (head.subtype != AppResultSubtype::Result ||
+      head.outcome > static_cast<std::uint8_t>(AppResultOutcome::Failure)) {
+    return reject();
+  }
+  std::uint32_t code = 0;
+  std::uint16_t data_size = 0;
+  if (!reader.read_u32(code) || !reader.read_u16(data_size) ||
+      data_size > kAppResultDataMax || reader.remaining() != data_size) {
+    return reject();
+  }
+  out.head = head;
+  out.application_code = code;
+  out.data_size = data_size;
+  if (!reader.read_bytes(MutableByteView{out.data.data(), data_size})) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status app_result_query_encode(const AppResultQuery& query, EncodedServicePayload& out) noexcept {
+  if (query.head.subtype != AppResultSubtype::Query || query.head.outcome != 0 ||
+      query.query_nonce == 0 || !app_result_head_encodable(query.head)) {
+    return invalid("app_result_query_encode: invalid field");
+  }
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(app_result_head_write(query.head, writer));
+  RL_WRITE(writer.write_u64(query.query_nonce));
+#undef RL_WRITE
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status app_result_query_decode(ByteView encoded, AppResultQuery& out) noexcept {
+  if (encoded.size != kAppResultQuerySize) return reject();
+  ByteReader reader(encoded);
+  AppResultHead head;
+  if (!app_result_head_read(reader, head)) return reject();
+  std::uint64_t nonce = 0;
+  if (!reader.read_u64(nonce) || head.subtype != AppResultSubtype::Query ||
+      head.outcome != 0 || nonce == 0) {
+    return reject();
+  }
+  out.head = head;
+  out.query_nonce = nonce;
+  return Status::success();
+}
+
+Status app_result_ack_encode(const AppResultAck& ack, EncodedServicePayload& out) noexcept {
+  if (ack.head.subtype != AppResultSubtype::ResultAck || ack.head.outcome != 0 ||
+      !app_result_head_encodable(ack.head)) {
+    return invalid("app_result_ack_encode: invalid field");
+  }
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(app_result_head_write(ack.head, writer));
+  RL_WRITE(writer.write_bytes(ByteView{ack.result_digest.data(), ack.result_digest.size()}));
+#undef RL_WRITE
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status app_result_ack_decode(ByteView encoded, AppResultAck& out) noexcept {
+  if (encoded.size != kAppResultAckSize) return reject();
+  ByteReader reader(encoded);
+  AppResultHead head;
+  if (!app_result_head_read(reader, head)) return reject();
+  if (head.subtype != AppResultSubtype::ResultAck || head.outcome != 0) {
+    return reject();
+  }
+  out.head = head;
+  if (!reader.read_bytes(
+          MutableByteView{out.result_digest.data(), out.result_digest.size()})) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status app_result_status_encode(const AppResultStatus& status_body,
+                                EncodedServicePayload& out) noexcept {
+  const auto outcome = status_body.head.outcome;
+  if (status_body.head.subtype != AppResultSubtype::Status ||
+      outcome < static_cast<std::uint8_t>(AppResultStatusCode::Pending) ||
+      outcome > static_cast<std::uint8_t>(AppResultStatusCode::NotRetained) ||
+      status_body.query_nonce == 0 || !app_result_head_encodable(status_body.head)) {
+    return invalid("app_result_status_encode: invalid field");
+  }
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(app_result_head_write(status_body.head, writer));
+  RL_WRITE(writer.write_u64(status_body.query_nonce));
+#undef RL_WRITE
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status app_result_status_decode(ByteView encoded, AppResultStatus& out) noexcept {
+  if (encoded.size != kAppResultStatusSize) return reject();
+  ByteReader reader(encoded);
+  AppResultHead head;
+  if (!app_result_head_read(reader, head)) return reject();
+  std::uint64_t nonce = 0;
+  if (!reader.read_u64(nonce) || head.subtype != AppResultSubtype::Status ||
+      head.outcome < static_cast<std::uint8_t>(AppResultStatusCode::Pending) ||
+      head.outcome > static_cast<std::uint8_t>(AppResultStatusCode::NotRetained) ||
+      nonce == 0) {
+    return reject();
+  }
+  out.head = head;
+  out.query_nonce = nonce;
+  return Status::success();
+}
+
+void applied_request_digest(const NetworkId network, const NodeId origin,
+                            const NodeId destination, const std::uint32_t session,
+                            const std::uint64_t sequence, const DeliveryClass delivery,
+                            const std::uint32_t original_lifetime_ms,
+                            const ByteView payload,
+                            std::array<std::uint8_t, 32>& out) noexcept {
+  // 43B of fixed fields then the payload — streaming update avoids a
+  // contiguous staging buffer so a 128B payload never needs a second copy.
+  Sha256 hash;
+  hash.update(ByteView{reinterpret_cast<const std::uint8_t*>("RouteLoom/app-request/v1"), 24});
+  const std::uint8_t nul = 0;
+  hash.update(ByteView{&nul, 1});
+  std::array<std::uint8_t, 43> fixed{};
+  ByteWriter writer(MutableByteView{fixed.data(), fixed.size()});
+  (void)writer.write_u64(network);
+  (void)writer.write_u64(origin);
+  (void)writer.write_u64(destination);
+  (void)writer.write_u32(session);
+  (void)writer.write_u64(sequence);
+  (void)writer.write_u8(static_cast<std::uint8_t>(delivery));
+  (void)writer.write_u32(original_lifetime_ms);
+  (void)writer.write_u16(static_cast<std::uint16_t>(payload.size));
+  hash.update(ByteView{fixed.data(), writer.size()});
+  hash.update(payload);
+  hash.finish(out);
+}
+
+void applied_result_digest(const ByteView canonical_result_body,
+                           std::array<std::uint8_t, 32>& out) noexcept {
+  Sha256 hash;
+  hash.update(ByteView{reinterpret_cast<const std::uint8_t*>("RouteLoom/app-result/v1"), 23});
+  const std::uint8_t nul = 0;
+  hash.update(ByteView{&nul, 1});
+  hash.update(canonical_result_body);
+  hash.finish(out);
 }
 
 }  // namespace routeloom::endpoint

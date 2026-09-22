@@ -3,6 +3,7 @@ members = [
     "routeloom-protocol",
     "routeloom-wire",
     "routeloom-host",
+    "routeloom-provision",
     "routeloomctl",
     "routeloom-tui",
     "routeloom-json",

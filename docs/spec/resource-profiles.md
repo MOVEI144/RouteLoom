@@ -7,9 +7,9 @@
 <!-- generated:resources:start -->
 | Profile | RX / TX | Active destinations | Dedup | SDK概算 / 上限 (bytes) | 実測 |
 |---|---:|---:|---:|---:|---|
-| leaf-small | 8 / 8 | 4 | 32 | 51232 / 65536 | 未実測 |
-| relay-c3 | 24 / 24 | 32 | 96 | 92384 / 131072 | 未実測 |
-| gateway-s3 | 48 / 48 | 128 | 256 | 154560 / 245760 | 未実測 |
+| leaf-small | 8 / 8 | 4 | 32 | 54048 / 65536 | 未実測 |
+| relay-c3 | 24 / 24 | 32 | 96 | 100832 / 131072 | 未実測 |
+| gateway-s3 | 48 / 48 | 128 | 256 | 177088 / 245760 | 未実測 |
 <!-- generated:resources:end -->
 
 各budget合計はprofile ceiling以下であることをCI検査する。CPU/crypto libraryによりscratchが増えたら、定数を偽って合格にせずprofileを改訂する。voterは未予算化・無効。C3を含む全ノードに一つの最大設定を強制しない。

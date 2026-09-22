@@ -1,0 +1,21 @@
+[package]
+name = "routeloom-provision"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# P-256 ECDSA for the root-anchor/authority/device keypair and the RTM1
+# manifest signature — the host mirror of the device's vendored micro-ecc
+# (uECC_secp256r1). `ecdsa` gives the restricted-profile sign/verify path
+# (RFC 6979 deterministic signing, low-S normalization available on
+# Signature); `sha256` wires SHA-256 as the curve's DigestPrimitive so
+# sign()/sign_prehash() use the same hash the device verifier applies.
+# Pure Rust, no unsafe — the workspace forbids it.
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "sha256"] }
+# Minimal in-workspace JSON: the dev root-key file and the manufactured
+# NVS set descriptor are JSON documents — one protocol, no new parser.
+routeloom-json = { path = "../routeloom-json" }
+
+[lints]
+workspace = true

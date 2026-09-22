@@ -41,12 +41,32 @@ typedef enum rl_status_code {
   RL_STATUS_INTEGRITY_ERROR,
   RL_STATUS_CONFLICT,
   RL_STATUS_BUSY,
-  RL_STATUS_INTERNAL_ERROR
+  RL_STATUS_INTERNAL_ERROR,
+  /* Autonomous-mesh reason codes — appended in the same order as
+     StatusCode (status.hpp); numeric parity is asserted in c_api.cpp. */
+  RL_STATUS_DISCOVERY_BUDGET_EXHAUSTED,
+  RL_STATUS_AUTH_REQUIRED,
+  RL_STATUS_APPROVAL_REQUIRED,
+  RL_STATUS_BINDING_CONFLICT,
+  RL_STATUS_PEER_CAPACITY,
+  RL_STATUS_CONGESTED,
+  RL_STATUS_REMOTE_BUSY,
+  RL_STATUS_NO_FEASIBLE_ALTERNATIVE,
+  RL_STATUS_SURVEY_REQUIRES_OUTAGE_PERMISSION,
+  RL_STATUS_LEGACY_PARTICIPANT,
+  RL_STATUS_CLOCK_UNCERTAIN,
+  RL_STATUS_PLAN_NOT_COMMITTED,
+  RL_STATUS_RECOVERY_REQUIRED,
+  RL_STATUS_AUTH_PROFILE_UNAVAILABLE,
+  RL_STATUS_NETWORK_REQUIRED
 } rl_status_code_t;
 
 typedef enum rl_delivery_class {
   RL_DELIVERY_BEST_EFFORT = 0,
   RL_DELIVERY_RELIABLE = 1,
+  /* APPLIED is not yet exposed over the C ABI: rl_send rejects it with
+     RL_STATUS_UNSUPPORTED. Use the C++ send_applied()/applied_result()
+     surface; a dedicated rl_send_applied may follow. */
   RL_DELIVERY_APPLIED = 2
 } rl_delivery_class_t;
 

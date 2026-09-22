@@ -1,0 +1,25 @@
+# ESP-IDF Component Manager manifest for the portable RouteLoom mesh core.
+# Consumption paths (docs/implementation/component-distribution.md):
+#   - local checkout via EXTRA_COMPONENT_DIRS (no registry involved)
+#   - component-manager git dependency on this repository
+# The component is intentionally self-contained: vendored micro-ecc lives in
+# third_party/micro-ecc inside this directory so a git `path` fetch, which
+# copies only this subtree, still builds.
+name: routeloom/routeloom
+version: 0.1.0
+description: >-
+  RouteLoom portable mesh core: Wire v1 codec, routing, delivery/storage,
+  replay/authority state and the C ABI. C++17, chip-agnostic; the ESP-NOW
+  radio owner and NVS stores live in routeloom/routeloom_espnow.
+url: https://github.com/MOVEI144/RouteLoom
+repository: https://github.com/MOVEI144/RouteLoom.git
+issues: https://github.com/MOVEI144/RouteLoom/issues
+license: Apache-2.0
+tags:
+  - mesh
+  - routeloom
+  - wire-v1
+dependencies:
+  # Only ESP-IDF v6.0.3 is CI-validated today; the portable core itself has
+  # no ESP-IDF API dependencies.
+  idf: ">=6.0"

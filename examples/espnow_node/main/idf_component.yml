@@ -1,0 +1,27 @@
+## Consumption style (b): component-manager git dependencies.
+##
+## This example is built in-repo with style (a) — the project CMakeLists.txt
+## adds ../../components to EXTRA_COMPONENT_DIRS, so no managed dependencies
+## are needed and the block below stays commented out.
+##
+## When the example is copied into an external project (no ../../components),
+## uncomment the two git dependencies so the component manager fetches both
+## RouteLoom components from this repository. `version` is the git ref to
+## check out — pin a tag or commit SHA for anything beyond experimentation.
+##
+## dependencies:
+##   routeloom/routeloom:
+##     git: https://github.com/MOVEI144/RouteLoom.git
+##     path: components/routeloom
+##     version: main
+##   routeloom/routeloom_espnow:
+##     git: https://github.com/MOVEI144/RouteLoom.git
+##     path: components/routeloom_espnow
+##     version: main
+##
+## The routeloom/routeloom entry must stay declared alongside
+## routeloom/routeloom_espnow: the bindings' manifest depends on the core, and
+## no registry release exists for the solver to fall back to.
+
+dependencies:
+  idf: ">=6.0"

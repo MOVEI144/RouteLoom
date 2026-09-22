@@ -7,6 +7,7 @@
 
 ## 設計の入口
 
+- [文書サイト（GitHub Pages）](https://movei144.github.io/RouteLoom/)
 - [文書一覧・読み順](docs/README.md)
 - [全体仕様と責任境界](docs/spec/overview.md)
 - [組み込みSDK API](docs/spec/sdk-api.md)
@@ -32,4 +33,4 @@ ESP32-C3 / ESP32-S3 / ESP32-C5、2.4 GHz ESP-NOW、Wi-Fi LR 250/500 kbps。最�
 
 ## ライセンス
 
-公開時点でライセンスは未選定です。正式なオープンソースリリース前にライセンスと第三者素材の扱いを確定します。文書中の公式資料へのリンクは、その資料の再配布許諾を意味しません。
+Apache-2.0（[LICENSE](LICENSE)）。第三者素材の帰属は[NOTICE](NOTICE)を参照。脆弱性報告は[SECURITY.md](SECURITY.md)、互換性・版管理ポリシーは[docs/spec/compatibility.md](docs/spec/compatibility.md)を参照。文書中の公式資料へのリンクは、その資料の再配布許諾を意味しません。

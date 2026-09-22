@@ -97,7 +97,15 @@ class SimNetwork {
     return routeloom::Status::success();
   }
 
-  // Returns the number of undelivered frames (link down or node missing).
+  // Optional deterministic loss hook for the property tests (issue #19):
+  // when non-null, flush() consults it once per queued frame and a true
+  // verdict drops the frame exactly like RF loss — no sighting, and the
+  // sender still gets an honest TX-failure result. Null keeps flush()
+  // lossless for the deterministic routing tests.
+  bool (*drop_frame)(const Pending& pending) = nullptr;
+
+  // Returns the number of undelivered frames (link down, node missing, or
+  // dropped by the loss hook).
   std::size_t flush(routeloom::MonotonicMs now) {
     std::size_t dropped = 0;
     std::size_t safety = 0;
@@ -108,7 +116,9 @@ class SimNetwork {
         ++dropped;
         continue;
       }
-      const bool success = connected(pending.from, pending.to) && nodes.count(pending.to) != 0;
+      const bool dropped_by_hook = drop_frame != nullptr && drop_frame(pending);
+      const bool success = !dropped_by_hook && connected(pending.from, pending.to) &&
+                           nodes.count(pending.to) != 0;
       if (success) {
         FrameSight sight{};
         if (sight_frame(routeloom::ByteView{pending.frame.data(), pending.frame.size()}, sight)) {

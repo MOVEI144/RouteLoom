@@ -91,8 +91,9 @@ jobs:
           set -euo pipefail
           cargo run --manifest-path host/Cargo.toml -p routeloom-wire --example gen_golden
           cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
+          cargo run --manifest-path host/Cargo.toml -p routeloom-provision --example gen_provisioning_golden
           python3 tools/gen_autonomy_vectors.py
-          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden
+          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -295,4 +296,54 @@ jobs:
             host/target/release/examples/gen_golden
             host/target/release/examples/gen_usb_golden
             host/Cargo.lock
+          retention-days: 30
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build coverage-guided fuzzers (Clang + ASan/UBSan)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CC=clang CXX=clang++
+          cmake -S . -B build-fuzz -DROUTELOOM_BUILD_TESTS=ON \
+            -DROUTELOOM_BUILD_FUZZERS=ON -DROUTELOOM_ENABLE_SANITIZERS=ON \
+            -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build-fuzz --parallel 2 \
+            --target fuzz_wire_frame fuzz_usb_codec fuzz_autonomy \
+                     fuzz_endpoint fuzz_host_ops fuzz_migration fuzz_cose
+      # Bounded CI-time fuzzing — NOT continuous fuzzing. Each target gets a
+      # 60 s coverage-guided run over its seed corpus on top of the corpus
+      # regression replay that ctest already runs on every platform. This is
+      # a smoke that keeps the libFuzzer harnesses exercised and catches
+      # shallow crashes; long-running fuzzing belongs to dedicated
+      # infrastructure (e.g. OSS-Fuzz).
+      - name: Bounded fuzz run (60 s per target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fuzz-artifacts
+          for target in wire_frame usb_codec autonomy endpoint host_ops migration cose; do
+            echo "=== fuzz_${target} ==="
+            # libFuzzer wants the corpus dir to exist; it also accumulates
+            # newly discovered coverage units here for artifact upload.
+            mkdir -p tests/fuzz/corpus/${target}
+            ./build-fuzz/tests/fuzz/fuzz_${target} \
+              tests/fuzz/corpus/${target} \
+              -max_total_time=60 -rss_limit_mb=2048 \
+              -artifact_prefix=fuzz-artifacts/ -print_final_stats=1
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          # Crash reproducer files (crash-*/leak-*/oom-*) written to
+          # fuzz-artifacts/ by -artifact_prefix, plus the corpus the target
+          # accumulated (including any newly discovered coverage units).
+          name: fuzz-artifacts
+          path: |
+            fuzz-artifacts/
+            tests/fuzz/corpus/
           retention-days: 30

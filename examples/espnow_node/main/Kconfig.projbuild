@@ -1,0 +1,38 @@
+menu "RouteLoom ESP-NOW node example"
+
+config ROUTELOOM_NETWORK_ID
+    hex "Network ID (low 32 bits on Wire v1)"
+    default 0x524c0001
+
+config ROUTELOOM_NODE_ID
+    hex "Node ID"
+    default 0x1
+
+config ROUTELOOM_CHANNEL
+    int "2.4 GHz Wi-Fi channel"
+    range 1 13
+    default 6
+
+config ROUTELOOM_TX_POWER_QDBM
+    int "Approved test profile TX power, quarter-dBm"
+    range 8 80
+    default 40
+    help
+        This value is only a development profile. It is not a regulatory or product approval.
+
+config ROUTELOOM_PEER_NODE_ID
+    hex "Static peer Node ID; 0 disables peer registration"
+    default 0x0
+
+config ROUTELOOM_PEER_MAC
+    string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
+    default "00:00:00:00:00:00"
+
+config ROUTELOOM_DEVELOPMENT_KEY_HEX
+    string "DEVELOPMENT ONLY 32-byte network master key in hex"
+    default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"
+    help
+        Shared development key. Never use this default in a deployment. This provider does not
+        replace the planned device-identity/EDHOC security profile.
+
+endmenu

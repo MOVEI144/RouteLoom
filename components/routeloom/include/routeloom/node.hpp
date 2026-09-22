@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "routeloom/congestion.hpp"
+#include "routeloom/endpoint_wire.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/routing.hpp"
@@ -53,12 +54,89 @@ class RadioPort {
   virtual Status recover() noexcept = 0;
 };
 
+// --- APPLIED delivery (sdk-completion/01-applied-delivery.md) -----------------
+// The terminal endpoint contract is synchronous and bounded: the node calls
+// on_applied_request at most once per logical APPLIED message, the endpoint
+// fills the reply, and the verdict is committed to a result record emitted as
+// APP_RESULT RESULT. Dedup/replays answer from the stored record — the
+// endpoint is never re-invoked for a retransmission.
+
+using ExecutionLease = std::array<std::uint8_t, endpoint::kAppliedLeaseBytes>;
+constexpr std::size_t kAppliedUserPayloadMax = endpoint::kAppliedUserPayloadMax;
+constexpr std::size_t kAppliedResultCapacity = 8;
+constexpr std::uint32_t kAppliedResultHoldMs = 60000;
+constexpr std::uint32_t kAppliedLateResultMs = 30000;
+constexpr std::uint8_t kAppliedMaxEmits = 3;
+constexpr std::uint8_t kAppliedMaxQueries = 2;
+constexpr std::uint32_t kAppliedAnswerMinIntervalMs = 200;
+
+struct AppliedRequest {
+  MessageKey key{};                  // {request origin, original MessageId}
+  NodeId source{kInvalidNodeId};     // == key.origin
+  ByteView payload{};                // user bytes; the 16B lease is stripped
+  std::uint32_t remaining_ms{0};     // request's remaining deadline at dispatch
+};
+
+struct AppliedReply {
+  endpoint::AppResultOutcome outcome{endpoint::AppResultOutcome::Failure};
+  std::uint32_t code{0};             // app-chosen; the SDK band is rewritten
+  std::array<std::uint8_t, endpoint::kAppResultDataMax> data{};
+  std::uint8_t size{0};              // 0..48
+};
+
+class AppliedEndpointSink {
+ public:
+  virtual ~AppliedEndpointSink() = default;
+  virtual void on_applied_request(const AppliedRequest& request,
+                                  AppliedReply& reply) noexcept = 0;
+};
+
+// Stored origin-side view of a verified RESULT (01 §1.3 applied_result()).
+struct AppliedResultView {
+  bool present{false};
+  bool late{false};                  // arrived after the delivery went terminal
+  endpoint::AppResultOutcome outcome{endpoint::AppResultOutcome::Failure};
+  std::uint32_t code{0};
+  std::array<std::uint8_t, endpoint::kAppResultDataMax> data{};
+  std::uint8_t size{0};
+};
+
+struct AppliedStats {
+  std::uint32_t requests_dispatched{0};
+  std::uint32_t refusals_stale_lease{0};
+  std::uint32_t refusals_no_endpoint{0};
+  std::uint32_t refusals_capacity{0};
+  std::uint32_t refusals_malformed{0};
+  std::uint32_t results_committed{0};
+  std::uint32_t results_emitted{0};
+  std::uint32_t result_emits_suppressed{0};
+  std::uint32_t result_acks{0};
+  std::uint32_t queries_received{0};
+  std::uint32_t queries_sent{0};
+  std::uint32_t status_sent{0};
+  std::uint32_t statuses_received{0};
+  std::uint32_t results_accepted{0};
+  std::uint32_t results_late{0};
+  std::uint32_t malformed{0};
+  std::uint32_t mismatched{0};
+  std::uint32_t evicted{0};
+  std::uint32_t expired{0};
+};
+
 class NodeObserver {
  public:
   virtual ~NodeObserver() = default;
   virtual void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept = 0;
   virtual void on_delivery(const DeliveryResult& result) noexcept = 0;
   virtual void on_diagnostic(const char* reason, NodeId peer, const MessageId* message) noexcept = 0;
+  // APPLIED verdict at the origin (sdk-completion/01 §1.3): fires once per
+  // stored RESULT — on-time or `late`. Defaulted (not pure) so existing
+  // observer implementations keep compiling without an APPLIED surface.
+  virtual void on_applied_result(const MessageKey& key,
+                                 const AppliedResultView& result) noexcept {
+    (void)key;
+    (void)result;
+  }
 };
 
 class NullObserver final : public NodeObserver {
@@ -211,6 +289,55 @@ struct DeliverySnapshot {
   ByteView payload{};
 };
 
+// --- Dedup capacity classes (sdk-completion/02-dedup-capacity.md, issue #9) ---
+// Pinned constants mirror docs/design/sdk-completion/contracts.json `dedup.*`.
+//
+// Every dedup_ pool record carries a lifecycle phase that fixes its eviction
+// rank and its post-deadline retention slack:
+//   Live     — an accepted forward job is still committed against the record
+//   Resolved — the job resolved (hop-accepted) or the record was born with
+//              only re-ACK duty (routed terminal delivery, consumed receipt)
+//   Evidence — Resolved + a retained verbatim TransitFailure for replay
+//   Terminal — delivered DATA at this node; the cross-round exactly-once pin
+// Live and Terminal records are NEVER evicted to admit new traffic — pressure
+// becomes an honest refusal instead of a weakened exactly-once guarantee.
+enum class DedupPhase : std::uint8_t {
+  Live = 0,
+  Resolved = 1,
+  Evidence = 2,
+  Terminal = 3,
+};
+
+// Retention: expires_at = min(first_seen_ms + kDedupHardCapMs,
+//                             horizon_ms + slack(phase)) where horizon is the
+// frame's own deadline at this node (remaining_deadline minus the driver-queue
+// debit). Duplicates never extend retention past the first-seen hard cap.
+constexpr std::uint32_t kDedupHardCapMs = 60000;      // first-seen cap (spec floor)
+constexpr std::uint32_t kTerminalSlackMs = 30000;     // cross-round exactly-once pin
+constexpr std::uint32_t kTransitSlackMs = 5000;       // report budget + drain margin
+// Admission bounds: terminal pins may occupy at most
+// kDedupCapacity - kDedupTransitReserve slots so transit/evictable traffic
+// always keeps a reserve; one previous-hop peer may hold at most
+// kDedupPerUpstreamMax non-terminal records; Evidence residency is capped.
+constexpr std::size_t kDedupTransitReserve = 8;
+constexpr std::size_t kDedupPerUpstreamMax = 24;
+constexpr std::size_t kEvidenceCap = 16;
+
+// Saturating u64 counters in the CongestionStats idiom — a counter that would
+// exceed UINT64_MAX pins (unreachable within a boot). Surfaces every forced
+// refusal/eviction so dedup weakening is never silent.
+struct DedupStats {
+  std::uint64_t admitted_terminal{0};         // terminal (pinned) admissions
+  std::uint64_t admitted_transit{0};          // non-terminal admissions
+  std::uint64_t refused_pool_full{0};         // sweep found no evictable record
+  std::uint64_t refused_terminal_reserve{0};  // terminal denied a reserved slot
+  std::uint64_t refused_upstream_cap{0};      // per-upstream bound hit
+  std::uint64_t evicted_resolved{0};          // Resolved records force-reclaimed
+  std::uint64_t evicted_evidence{0};          // Evidence records force-reclaimed
+  std::uint64_t expired{0};                   // expire_dedup/expired reclaims
+  std::uint64_t delivery_terminal_evicted{0}; // class (a) result-history loss
+};
+
 class MeshNode {
  public:
   MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
@@ -223,6 +350,25 @@ class MeshNode {
 
   Status send(NodeId destination, ByteView payload, const SendOptions& options,
               MonotonicMs now_ms, MessageId& id) noexcept;
+  // APPLIED send (sdk-completion/01): the request body is
+  // `lease || payload` — `lease` must be the destination's current
+  // ExecutionLease (applied_lease() at that node); a stale/absent lease is
+  // refused by the destination with a committed StaleLease RESULT carrying
+  // the current lease. `options.delivery` must be DeliveryClass::Applied and
+  // payload <= kAppliedUserPayloadMax (112B). persist_across_sleep is
+  // refused — APPLIED sleep persistence is deferred (01 §1.10).
+  Status send_applied(NodeId destination, ByteView payload,
+                      const ExecutionLease& lease, const SendOptions& options,
+                      MonotonicMs now_ms, MessageId& id) noexcept;
+  // This node's current execution lease — what an origin must place in the
+  // request prefix for this boot incarnation.
+  ExecutionLease applied_lease() const noexcept;
+  // Install/clear the application endpoint (nullptr disables — inbound
+  // APPLIED requests then commit a NoEndpoint refusal RESULT).
+  void set_applied_sink(AppliedEndpointSink* sink) noexcept { applied_sink_ = sink; }
+  // The stored RESULT view for a delivery: false when none was verified.
+  bool applied_result(const MessageId& id, AppliedResultView& out) const noexcept;
+  const AppliedStats& applied_stats() const noexcept { return applied_stats_; }
   Status cancel(const MessageId& id) noexcept;
   DeliveryResult delivery(const MessageId& id) const noexcept;
 
@@ -256,8 +402,13 @@ class MeshNode {
   const ObservationBucket* telemetry_bucket(const ObservationKey& key) const noexcept;
   // Identity invalidation from the runtime: an RX event queued before a
   // rebind/switch must retire the peer's stale summary, not refresh it.
+  // The metric mirror resets with it (sdk-completion/03 §3.7): evidence
+  // measured under a previous link identity is unattributable to this one.
   void note_peer_stale(NodeId peer) noexcept {
     telemetry_peers_.mark_stale(peer);
+    if (Neighbor* neighbor = find_neighbor(peer)) {
+      reset_neighbor_measurement(*neighbor);
+    }
   }
   std::uint64_t telemetry_event_drops() const noexcept { return telemetry_event_drops_; }
   // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
@@ -392,6 +543,13 @@ class MeshNode {
   // --- Congestion control (03-congestion.md §4, §5) ----------------------------
   // Live scheduler/BUSY counters for tests, diagnostics and the P3 observer.
   CongestionStats congestion_stats() const noexcept;
+  // Dedup capacity surface (sdk-completion/02 §2.4): saturating admission,
+  // refusal and eviction counters — every forced reclaim/refusal is visible.
+  const DedupStats& dedup_stats() const noexcept { return dedup_stats_; }
+  // Live dedup residency (records currently occupying the fixed pool).
+  // Read-only test/diagnostic surface for the capacity invariants of
+  // sdk-completion/02 §2.5 — always <= kDedupCapacity (64) by construction.
+  std::size_t dedup_resident() const noexcept { return dedup_.size(); }
   // Current per-peer in-flight window (1..4) used by the dispatch gate.
   std::uint8_t peer_tx_window(NodeId peer) const noexcept;
   // Marks a peer as implementing the Busy(20) feedback payload. Until
@@ -556,10 +714,27 @@ class MeshNode {
     std::uint32_t exchange_accepts{0};
     MonotonicMs exchange_window_ms{0};
     // Per-peer egress queue sojourn EWMA (03 §6.2): only OUR delay toward
-    // this peer may penalize the link cost. Stale samples read as 0.
+    // this peer may penalize the link cost. Stale samples read as 0. The
+    // EWMA halves once per observation window anchored at sojourn_window_ms
+    // (§3.4): sparse fresh samples cannot keep re-exposing an inflated
+    // average — after a burst the penalty converges within a few windows.
     std::uint32_t queue_sojourn_ewma_ms{0};
     std::uint32_t sojourn_samples{0};
     MonotonicMs last_sojourn_ms{0};
+    MonotonicMs sojourn_window_ms{0};
+    // Evidence gate for the metric mirror (sdk-completion/03 §3.3): a window
+    // containing any Unknown-resolution attempt is dirty — dirty evidence may
+    // worsen link_cost but never improve it; cleared on the next window roll.
+    // metric_sources tracks which provenance classes wrote the mirror so a
+    // future remote-sample wiring cannot silently violate local-only input:
+    // bit0 = local exchange counters, bit1 = local queue-sojourn samples.
+    static constexpr std::uint8_t kMetricSourceLocalExchange = 1u << 0;
+    static constexpr std::uint8_t kMetricSourceLocalSojourn = 1u << 1;
+    bool metric_window_dirty{false};
+    std::uint8_t metric_sources{0};
+    // Asymmetric slew state (§3.4): last time link_cost relaxed toward the
+    // honest target; improvement steps are spaced one per observation window.
+    MonotonicMs last_cost_relax_ms{0};
     // Sustained authenticated-busy feedback (03 §7 severe-busy): set while
     // matched BUSY deferrals or pressure hints keep arriving; cleared by an
     // authenticated accept or when feedback goes stale past its TTL. It is
@@ -595,6 +770,12 @@ class MeshNode {
     MessageKey key{};
     FrameType type{FrameType::Data};
     std::uint8_t round{0};
+    // Capacity class (sdk-completion/02 §2.3): drives retention slack and
+    // eviction rank — Live/Terminal are never eviction victims.
+    DedupPhase phase{DedupPhase::Live};
+    // Admission timestamp: the base of the kDedupHardCapMs retention cap —
+    // refreshes on re-receipt can never push a record past it (02 §2.6).
+    MonotonicMs first_seen_ms{0};
     MonotonicMs expires_at_ms{0};
     bool delivered{false};
     bool forwarded{false};
@@ -629,6 +810,11 @@ class MeshNode {
     std::uint8_t failure_replays{0};
     MonotonicMs last_replay_ms{0};
   };
+  // sdk-completion/02 §2.4 budget: 152 B measured on host after the phase +
+  // first_seen_ms addition (144 B before). Xtensa may differ by alignment
+  // only — a larger entry shrinks real capacity silently, so growth is a
+  // deliberate, documented change.
+  static_assert(sizeof(DedupEntry) <= 176, "dedup entry size budget");
 
   struct Delivery {
     MessageId id{};
@@ -642,11 +828,44 @@ class MeshNode {
     MonotonicMs next_round_at_ms{0};
     std::uint8_t round{0};
     const char* reason{"NONE"};
+    // APPLIED (sdk-completion/01 §1.3): END_RECEIPT moves an Applied delivery
+    // to app_phase 1 — the application verdict is still pending; only a
+    // verified APP_RESULT RESULT resolves it. QUERYs while waiting are
+    // bounded by kAppliedMaxQueries and correlated by app_query_nonce.
+    std::uint8_t app_phase{0};  // 0 = awaiting END_RECEIPT, 1 = awaiting RESULT
+    std::uint8_t app_queries{0};
+    std::uint64_t app_query_nonce{0};
+    // Stored verified RESULT (01 §1.3): survives a terminal state so a late
+    // result is reported, never silently dropped.
+    bool applied_present{false};
+    bool applied_late{false};
+    std::uint8_t applied_outcome{0};
+    std::uint32_t applied_code{0};
+    std::array<std::uint8_t, endpoint::kAppResultDataMax> applied_result{};
+    std::uint8_t applied_result_size{0};
+  };
+
+  // Terminal-side committed verdict record (01 §1.4): one per delivered
+  // APPLIED MessageKey, held kAppliedResultHoldMs so retransmissions/QUERYs
+  // replay the stored result instead of re-invoking the endpoint.
+  struct AppliedRecord {
+    MessageKey key{};  // {original_origin, original MessageId}
+    std::array<std::uint8_t, 32> request_digest{};
+    MonotonicMs expires_at_ms{0};
+    MonotonicMs emit_deadline_ms{0};  // request deadline + kAppliedLateResultMs
+    MonotonicMs next_emit_ms{0};
+    std::uint8_t emits{0};
+    bool acked{false};  // a matching RESULT_ACK landed
+    std::uint8_t outcome{0};  // endpoint::AppResultOutcome
+    std::uint32_t application_code{0};
+    std::array<std::uint8_t, endpoint::kAppResultDataMax> result_data{};
+    std::uint8_t result_size{0};
   };
 
   enum class JobForm : std::uint8_t { Plain, Forwarded };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
-                                       GatewayService, Config, Diagnostic };
+                                       GatewayService, Config, Diagnostic,
+                                       Applied };
 
   struct AckKey {
     FrameType accepted_type{FrameType::Data};
@@ -860,12 +1079,47 @@ class MeshNode {
   Status validate_config() const noexcept;
   Neighbor* find_neighbor(NodeId node) noexcept;
   const Neighbor* find_neighbor(NodeId node) const noexcept;
+  // Identity reset (sdk-completion/03 §3.7): clears the measurement mirror
+  // and returns link_cost to nominal — evidence gathered under a previous
+  // peer incarnation/binding must not move the current identity's metric.
+  static void reset_neighbor_measurement(Neighbor& neighbor) noexcept;
   Delivery* find_delivery(const MessageId& id) noexcept;
   const Delivery* find_delivery(const MessageId& id) const noexcept;
   DedupEntry* find_dedup(const MessageKey& key, FrameType type,
                          std::uint8_t round) noexcept;
+  const DedupEntry* find_dedup(const MessageKey& key, FrameType type,
+                               std::uint8_t round) const noexcept;
+  // Phase-aware admission (sdk-completion/02 §2.5): class gates run BEFORE the
+  // pool is touched (terminal-reserve, per-upstream cap); a full pool triggers
+  // the bounded sweep expired -> Resolved -> Evidence, and Live/Terminal
+  // records are never victims. `phase` is the birth phase (Terminal | Live |
+  // Resolved — Evidence is only ever a post-resolution transition), `upstream`
+  // the authenticated previous hop, `deadline_remaining_ms` the frame's own
+  // remaining deadline (rx_age debited inside). Returns nullptr only after a
+  // counted, diagnosed refusal — callers answer with BUSY/drop paths.
   DedupEntry* allocate_dedup(const MessageKey& key, FrameType type,
-                             std::uint8_t round, MonotonicMs expires_at_ms) noexcept;
+                             std::uint8_t round, DedupPhase phase,
+                             NodeId upstream, std::uint32_t deadline_remaining_ms,
+                             MonotonicMs now_ms) noexcept;
+  // expires_at = min(first_seen + kDedupHardCapMs, horizon + slack(phase));
+  // horizon = now + max(0, deadline_remaining - rx_age). Shared by admission
+  // and the terminal re-receipt refresh.
+  MonotonicMs dedup_expiry_for(DedupPhase phase, std::uint32_t deadline_remaining_ms,
+                               MonotonicMs first_seen_ms,
+                               MonotonicMs now_ms) const noexcept;
+  // Non-terminal records admitted from `upstream` (the per-previous-hop bound).
+  std::size_t count_transit_upstream(NodeId upstream) const noexcept;
+  // Free exactly one evictable slot for a new admission: expired first (counts
+  // as a normal expiry, never an eviction), then the earliest-expiry Resolved,
+  // then the oldest Evidence. Live/Terminal are skipped unconditionally.
+  // Emits the forced-eviction diagnostic/counter; false = true overflow.
+  bool evict_dedup_for_admission(MonotonicMs now_ms) noexcept;
+  // complete_job hook for JobOwner::Transit: the forward resolved, so the
+  // record's duty shrinks to re-ACK + late-report relay (Live -> Resolved).
+  void resolve_dedup_for_job(const TxJob& job) noexcept;
+  // Resolved -> Evidence with the kEvidenceCap residency bound: at the cap the
+  // oldest existing Evidence record is force-reclaimed (counted + diagnosed).
+  void mark_dedup_evidence(DedupEntry& entry) noexcept;
 
   void set_delivery_state(Delivery& delivery, DeliveryState state,
                           const char* reason) noexcept;
@@ -992,6 +1246,37 @@ class MeshNode {
                    MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
                           MonotonicMs now_ms) noexcept;
+  // APPLIED (sdk-completion/01): terminal-side dispatch stores the verdict in
+  // an AppliedRecord then emits RESULT; the origin side validates RESULT/
+  // STATUS against the delivery and QUERY/RESULT_ACK against the record pool.
+  AppliedRecord* find_applied(const MessageKey& key) noexcept;
+  const AppliedRecord* find_applied(const MessageKey& key) const noexcept;
+  // find-or-allocate is split: handle_data allocates BEFORE the hop ACK so a
+  // full pool is a pre-acceptance refusal, never accepted work without a
+  // place to store its verdict.
+  AppliedRecord* allocate_applied(const wire::Header& data, ByteView body,
+                                  MonotonicMs now_ms) noexcept;
+  void dispatch_applied(const wire::Header& data, ByteView body,
+                        AppliedRecord& record, bool fresh,
+                        MonotonicMs now_ms) noexcept;
+  void handle_app_result(const wire::PlainFrame& frame, NodeId peer,
+                         MonotonicMs now_ms) noexcept;
+  Status emit_applied_result(AppliedRecord& record, MonotonicMs now_ms) noexcept;
+  void emit_app_status(NodeId origin, const MessageKey& key,
+                       const std::array<std::uint8_t, 32>& request_digest,
+                       endpoint::AppResultStatusCode code, std::uint64_t nonce,
+                       std::uint32_t lifetime_ms, MonotonicMs now_ms) noexcept;
+  void emit_app_result_ack(NodeId terminal, const endpoint::AppResultHead& head,
+                           ByteView canonical_result_body,
+                           MonotonicMs now_ms) noexcept;
+  Status emit_app_query(Delivery& delivery, MonotonicMs now_ms) noexcept;
+  // poll() driver: expiry sweep + bounded RESULT emit retries.
+  void process_applied(MonotonicMs now_ms) noexcept;
+  bool applied_answer_gate(NodeId peer, MonotonicMs now_ms) noexcept;
+  // Same hop-scaled wait window the END_RECEIPT retry path uses (a RESULT or
+  // QUERY answer has a comparable trip). `hop_limit` is the frame's own.
+  static std::uint32_t applied_window_ms(std::uint8_t hop_limit,
+                                         std::uint32_t hop_timeout_ms) noexcept;
   void handle_route_update(const wire::PlainFrame& frame, NodeId peer,
                            MonotonicMs now_ms) noexcept;
   void handle_seqno_request(const wire::PlainFrame& frame, NodeId peer,
@@ -1056,6 +1341,10 @@ class MeshNode {
     std::uint8_t failure_window_used{0};
     MonotonicMs last_cap_reply_ms{0};
     MonotonicMs last_query_ms{0};
+    // APPLIED answer gate (sdk-completion/01 §1.4): QUERY answers (RESULT
+    // replay / STATUS) are paced to one per kAppliedAnswerMinIntervalMs per
+    // peer so QUERY floods cannot amplify into unbounded transmissions.
+    MonotonicMs last_applied_ms{0};
   };
   static constexpr std::size_t kDiagBudgetCapacity = 8;
   static constexpr std::uint8_t kTransitFailurePerWindow = 2;  // per 1 s/peer
@@ -1085,9 +1374,20 @@ class MeshNode {
   std::array<PendingCapQuery, kPendingCapCapacity> pending_caps_{};
   bool relay_enabled_{true};
   bool telemetry_remote_{false};
+  // Refusal-pressure evidence (sdk-completion/03 §3.4): last observed
+  // admissions_rejected counter value and when it last changed.
+  std::uint64_t last_admission_rejections_{0};
+  MonotonicMs last_refusal_ms_{0};
+
   FixedPool<Neighbor, kNeighborCapacity> neighbors_{};
   FixedPool<Delivery, kDeliveryCapacity> deliveries_{};
   FixedPool<DedupEntry, kDedupCapacity> dedup_{};
+  // Terminal APPLIED result records (sdk-completion/01 §1.6): bounded pool,
+  // eviction order expired -> oldest acked -> refuse admission.
+  FixedPool<AppliedRecord, kAppliedResultCapacity> applied_records_{};
+  AppliedEndpointSink* applied_sink_{nullptr};
+  AppliedStats applied_stats_{};
+  std::uint64_t next_app_nonce_{1};
   FixedPool<SeqnoSeen, kSeqnoSeenCapacity> seqno_seen_{};
   FixedPool<SeqnoState, kSeqnoStateCapacity> seqno_state_{};
   TxScheduler scheduler_{};
@@ -1117,6 +1417,9 @@ class MeshNode {
   // BUSY-side statistics; merged into congestion_stats() with the
   // scheduler's own counters.
   CongestionStats busy_stats_{};
+  // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
+  // forced evictions and expiry releases, all saturating u64.
+  DedupStats dedup_stats_{};
   // Bounded observation buckets (03 §3 groundwork for P3).
   static constexpr std::size_t kObservationCapacity = 8;
   FixedPool<ObservationBucket, kObservationCapacity> observations_{};

@@ -1,0 +1,300 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+concurrency:
+  # One release pipeline per tag; never cancel a running release.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  # Portable C++ source tarball: the portable core, its tests and golden
+  # vectors, vendored third-party code, spec docs and license texts.
+  # Excludes host/ (Rust) and firmware/ (ESP-IDF) which ship separately.
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build portable C++ source tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ github.ref_name }}'
+          mkdir -p dist
+          prefix="routeloom-${version}-src/"
+          # Path list is resolved against tracked files so the tarball
+          # stays correct whether vendored code lives at top-level
+          # third_party/ or under a component directory.
+          paths='CMakeLists.txt LICENSE NOTICE README.md'
+          for d in components tests protocol docs third_party; do
+            if git ls-files --error-unmatch "$d" >/dev/null 2>&1; then
+              paths="$paths $d"
+            fi
+          done
+          # git archive embeds the commit timestamp, so output is
+          # byte-reproducible for a given tag; gzip -n adds no timestamp.
+          # shellcheck disable=SC2086
+          git archive --format=tar --prefix="$prefix" HEAD -- $paths \
+            | gzip -n -9 > "dist/routeloom-${version}-src.tar.gz"
+          {
+            echo "artifact: routeloom-${version}-src.tar.gz"
+            echo "tag: ${version}"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "contents: portable C++ core (components/), tests/,"
+            echo "  vendored micro-ecc, protocol golden vectors, docs,"
+            echo "  license texts. Excludes host/ and firmware/."
+            echo "git: $(git --version)"
+            echo "cmake: $(cmake --version | head -1)"
+            echo "gcc: $(gcc --version | head -1)"
+          } > dist/manifest.txt
+          tar -tzf "dist/routeloom-${version}-src.tar.gz" > /dev/null
+          echo "entries: $(tar -tzf "dist/routeloom-${version}-src.tar.gz" | wc -l)"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-src
+          path: |
+            dist/*.tar.gz
+            dist/manifest.txt
+          retention-days: 30
+  # Host binaries for linux x86_64 (glibc). The dependency set (rusqlite
+  # bundled SQLite, crossterm) has no openssl or other dynamic library
+  # requirements beyond libc; musl static builds are not currently produced.
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: host
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal
+          rustup override set 1.85.1
+      - name: Build host tools (locked)
+        run: cargo build --workspace --release --locked
+      - name: Package host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ github.ref_name }}'
+          stage="routeloom-${version}-linux-x86_64"
+          mkdir -p "dist/$stage"
+          cp target/release/routeloom-host target/release/routeloomctl \
+             target/release/routeloom-tui "dist/$stage/"
+          cp Cargo.lock ../LICENSE ../NOTICE "dist/$stage/"
+          {
+            echo "artifact: routeloom-${version}-linux-x86_64.tar.gz"
+            echo "tag: ${version}"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "target: x86_64-unknown-linux-gnu (glibc dynamic; no musl build yet)"
+            echo "rustc: $(rustc --version)"
+            echo "cargo: $(cargo --version)"
+            echo "cargo build --workspace --release --locked"
+            echo "linked libraries:"
+            ldd "dist/$stage/routeloom-host" | sed 's/^/  /'
+          } > "dist/$stage/manifest.txt"
+          tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-host-linux-x86_64
+          path: host/dist/*.tar.gz
+          retention-days: 30
+  # Firmware for every shipping app/target pair, built in the same pinned
+  # ESP-IDF container as CI (tag pin + asserted commit, per sdk.yml).
+  firmware:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [esp32c3, esp32s3, esp32c5]
+        app: [reference_node, bridge_node]
+    container:
+      image: espressif/idf:v6.0.3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          git -C "$IDF_PATH" rev-parse HEAD | tee idf-commit.txt
+          test "$(cat idf-commit.txt)" = 76f5dedd9950a3012fee8fb7d5586df21fc67802
+          cd "firmware/${{ matrix.app }}"
+          idf.py set-target '${{ matrix.target }}'
+          idf.py build
+          idf.py size > build/size-report.txt
+      - name: Package firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh" >/dev/null 2>&1 || true
+          version='${{ github.ref_name }}'
+          stage="routeloom-${version}-firmware-${{ matrix.app }}-${{ matrix.target }}"
+          mkdir -p "dist/$stage"
+          cd "firmware/${{ matrix.app }}"
+          cp build/*.bin build/*.elf build/*.map "../../dist/$stage/"
+          for f in build/bootloader/bootloader.bin build/partition_table/partition-table.bin \
+                   build/flasher_args.json build/flash_args build/size-report.txt sdkconfig; do
+            if [ -f "$f" ]; then cp "$f" "../../dist/$stage/"; fi
+          done
+          cd "$GITHUB_WORKSPACE"
+          {
+            echo "artifact: ${stage}.tar.gz"
+            echo "tag: ${version}"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "app: ${{ matrix.app }}  target: ${{ matrix.target }}"
+            echo "image: espressif/idf:v6.0.3"
+            echo "esp-idf commit: $(cat idf-commit.txt)"
+            echo "idf.py: $(idf.py --version 2>/dev/null || echo n/a)"
+            echo "cmake: $(cmake --version | head -1)"
+          } > "dist/$stage/manifest.txt"
+          tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-firmware-${{ matrix.app }}-${{ matrix.target }}
+          path: dist/*.tar.gz
+          retention-days: 30
+  # SBOM: CycloneDX 1.5 JSON generated from `cargo metadata` (resolved
+  # crate versions + declared licenses) plus curated entries for the
+  # vendored and build-time components cargo cannot see.
+  sbom:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.85.1 --profile minimal
+          rustup override set 1.85.1
+      - name: Generate dependency inventory
+        working-directory: host
+        run: |
+          cargo metadata --format-version 1 --locked > ../cargo-metadata.json
+          cargo tree --locked > ../cargo-tree.txt
+      - name: Generate CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ github.ref_name }}'
+          mkdir -p dist
+          VERSION="$version" python3 - <<'PY'
+          import json, os, re
+          meta = json.load(open('cargo-metadata.json'))
+          components = []
+          def lic_expr(raw):
+              expr = raw.replace('/', ' OR ')
+              return {"expression": expr}
+          for p in sorted(meta['packages'], key=lambda p: (p['name'], p['version'])):
+              if p['source'] is None:
+                  continue  # workspace crates are RouteLoom itself
+              c = {"type": "library", "name": p['name'], "version": p['version'],
+                   "purl": f"pkg:cargo/{p['name']}@{p['version']}"}
+              if p.get('license'):
+                  c["licenses"] = [lic_expr(p['license'])]
+              components.append(c)
+          components += [
+              {"type": "library", "name": "micro-ecc",
+               "description": "Vendored snapshot at components/routeloom/third_party/micro-ecc (uECC P-256)",
+               "purl": "pkg:github/kmackay/micro-ecc",
+               "licenses": [{"license": {"id": "BSD-2-Clause"}}]},
+              {"type": "framework", "name": "esp-idf", "version": "v6.0.3",
+               "description": "Build-time SDK for firmware/; commit 76f5dedd9950a3012fee8fb7d5586df21fc67802; not vendored",
+               "purl": "pkg:github/espressif/esp-idf@v6.0.3",
+               "licenses": [{"license": {"id": "Apache-2.0"}}]},
+              {"type": "library", "name": "SQLite",
+               "description": "Bundled amalgamation compiled by libsqlite3-sys (bundled feature)",
+               "licenses": [{"license": {"name": "Public Domain"}}]},
+          ]
+          bom = {
+              "bomFormat": "CycloneDX",
+              "specVersion": "1.5",
+              "version": 1,
+              "metadata": {
+                  "component": {"type": "application", "name": "RouteLoom",
+                                "version": os.environ['VERSION']},
+                  "tools": [{"vendor": "RouteLoom",
+                             "name": "cargo metadata + curated entries"}],
+              },
+              "components": components,
+          }
+          out = f"dist/routeloom-{os.environ['VERSION']}-sbom.json"
+          with open(out, 'w') as f:
+              json.dump(bom, f, indent=2)
+              f.write('\n')
+          print(f"{out}: {len(components)} components")
+          PY
+          cp cargo-tree.txt cargo-metadata.json dist/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-sbom
+          path: dist/*
+          retention-days: 30
+  # Assemble every artifact, checksum, and create a draft GitHub release.
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: [source, host, firmware, sbom]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums and release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ github.ref_name }}'
+          cd dist
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          cd ..
+          cat dist/SHA256SUMS.txt
+          {
+            echo "# RouteLoom ${version}"
+            echo ''
+            echo '**Pre-1.0 implementation prototype** (`CORE_FIXED_250`).'
+            echo 'Host/build-tested only — not RF/HIL qualified and not'
+            echo 'production-security reviewed. See `docs/STATUS.md` for open'
+            echo 'gates and `docs/spec/compatibility.md` for what is stable.'
+            echo ''
+            echo '## Artifacts'
+            echo ''
+            echo '| File | Contents |'
+            echo '|---|---|'
+            echo "| \`routeloom-${version}-src.tar.gz\` | Portable C++ core, tests, vendored third-party code, protocol vectors, docs |"
+            echo "| \`routeloom-${version}-linux-x86_64.tar.gz\` | Host daemon/CLI/TUI (x86_64 glibc; rustc 1.85.1, \`--locked\`) |"
+            echo '| `routeloom-*-firmware-<app>-<target>.tar.gz` | ESP-IDF v6.0.3 firmware (elf/bin/map/sdkconfig) per app/target |'
+            echo "| \`routeloom-${version}-sbom.json\` | CycloneDX 1.5 SBOM + cargo tree/metadata |"
+            echo '| `SHA256SUMS.txt` | Checksums for all of the above |'
+            echo ''
+            echo 'Firmware images ship with the development PSK — a public test'
+            echo 'fixture, not a credential. See `SECURITY.md` before any deployment.'
+          } > release-notes.md
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create '${{ github.ref_name }}' \
+            --draft \
+            --title 'RouteLoom ${{ github.ref_name }}' \
+            --notes-file release-notes.md \
+            dist/*

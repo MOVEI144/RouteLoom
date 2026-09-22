@@ -9,6 +9,7 @@ mod dispatch;
 mod receive_log;
 mod send_store;
 mod sqlite_store;
+mod subscribe;
 
 use acl::Acl;
 use receive_log::{Ingress, ReceiveLog};
@@ -73,6 +74,19 @@ const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5
 /// session would sit in AwaitHelloAck until the next cable reconnect
 /// (observed on real hardware after a device reset).
 const HELLO_RETRY_MS: u64 = 1_000;
+/// An Active session that has seen no inbound frame for this long is dead
+/// at the far end even when the adapter fd stays healthy — the silent
+/// reboot/half-open case no wire error can signal. A live session always
+/// sees traffic at least every KEEPALIVE_INTERVAL (the device echoes each
+/// keepalive); three missed intervals is a dead peer, not a busy one.
+const SESSION_LIVENESS_MS: u64 = 3 * KEEPALIVE_INTERVAL.as_millis() as u64;
+
+/// The liveness predicate the writer loop applies each tick: `last_rx` is
+/// the wall ms of the last decoded inbound frame (0 = none yet — harmless,
+/// Active requires a completed handshake which itself produced inbound).
+fn session_stalled(now: u64, last_rx: u64) -> bool {
+    now.saturating_sub(last_rx) >= SESSION_LIVENESS_MS
+}
 
 /// After AUTH every session frame body is `counter || tag || inner`
 /// (dev_session.rs). The daemon owns the host role of the dev-session
@@ -135,6 +149,12 @@ struct SessionInbound {
     hello_info: Option<(u8, u64, u64, u64, u32)>,
     /// Session id once AUTH completes.
     auth_session: Option<u64>,
+    /// The frame proved the far end no longer holds our session (a
+    /// stale-session echo, a session-fatal error, a tag desync, or a lost
+    /// proof): the authenticated mirror and the gateway registration bound
+    /// to it are dead and must be cleared, never inherited by the session
+    /// the re-hello is starting.
+    session_lost: bool,
 }
 
 /// Host-side dev-session state machine; the protocol/usb-golden vectors are
@@ -407,17 +427,27 @@ impl DeviceSession {
                 let key = match self.proof.as_ref() {
                     Some(proof) => proof.key,
                     None => {
-                        self.phase = SessionPhase::Disconnected;
+                        // Defensive: Active without a proof cannot serve
+                        // traffic — fall back to a fresh handshake rather
+                        // than wedging the lane.
+                        result.session_lost = true;
+                        result.outbound.push(Outbound::Raw(self.begin()));
                         return result;
                     }
                 };
                 // frame_tag does not cover the session id — check it
-                // explicitly so a stale-session frame is dropped before
-                // the (also-failing) tag check.
+                // explicitly. A frame under any other session id proves
+                // the far end lost our binding (the device holds exactly
+                // one session; a reboot that kept the serial link answers
+                // our traffic with unsealed, session-0 errors). Dropping
+                // it without re-helloing would wedge the session forever:
+                // restart the handshake so the link recovers on its own.
                 if frame.session != self.session_id {
                     result
                         .notes
                         .push("\"kind\":\"session_drop\",\"reason\":\"stale session\"".to_string());
+                    result.session_lost = true;
+                    result.outbound.push(Outbound::Raw(self.begin()));
                     return result;
                 }
                 match open_body(&key, DIRECTION_DEVICE_TO_HOST, frame) {
@@ -467,6 +497,7 @@ impl DeviceSession {
                             let code = u16::from_be_bytes([inner[0], inner[1]]);
                             if matches!(code, 2 | 3 | 4 | 11) {
                                 result.inner = Some(inner);
+                                result.session_lost = true;
                                 result.outbound.push(Outbound::Raw(self.begin()));
                                 return result;
                             }
@@ -481,6 +512,7 @@ impl DeviceSession {
                             "\"kind\":\"session_drop\",\"reason\":\"SESSION_TAG_INVALID\""
                                 .to_string(),
                         );
+                        result.session_lost = true;
                         result.outbound.push(Outbound::Raw(self.begin()));
                     }
                 }
@@ -511,10 +543,13 @@ struct Delivery {
     updated_ms: u64,
 }
 
-/// One ring-buffer entry; `seq` lives inside `json` so clients can
-/// deduplicate across polls.
-struct Event {
-    json: String,
+/// One ring-buffer entry. `seq`/`kind` are stored alongside `json` (which
+/// also embeds them) so the events subscription stream can filter and
+/// resume without re-parsing every line.
+pub struct Event {
+    pub seq: u64,
+    pub kind: String,
+    pub json: String,
 }
 
 /// Autonomy-lane view derived from device Diagnostic frames (discovery
@@ -615,6 +650,12 @@ fn note_autonomy(state: &State, ms: u64, reason: &str) {
 struct State {
     device: Option<PathBuf>,
     connected: AtomicBool,
+    /// Wall-clock ms of the last successfully decoded inbound frame — the
+    /// writer loop's session-liveness signal. Any decodable frame proves
+    /// the far end is emitting; silence while Active means the session
+    /// died without a wire error (e.g. a gateway reboot that kept the
+    /// serial link up).
+    last_rx_ms: AtomicU64,
     rx_frames: AtomicU64,
     tx_frames: AtomicU64,
     tx_bytes: AtomicU64,
@@ -627,6 +668,14 @@ struct State {
     events: Mutex<VecDeque<Event>>,
     event_seq: AtomicU64,
     events_dropped: AtomicU64,
+    /// Push-receive subscription registry (issue #7): per-connection
+    /// subscriptions, bounded staging queues and the pump wakeup channel.
+    /// Ids are tagged with host_boot so a pre-restart token can never
+    /// resolve into this incarnation.
+    subscriptions: subscribe::SubscriptionHub,
+    /// Per-connection id source for subscription hub scoping — ids are
+    /// process-local and never on the wire.
+    next_conn: AtomicU64,
     autonomy: Mutex<AutonomyState>,
     /// Bounded receive log for the API1 `messages.read` surface (Issue #7):
     /// retains actual DataFromMesh payloads as HOST_RAM_RETAINED evidence.
@@ -725,18 +774,37 @@ fn set_error(state: &State, message: String) {
     *state.last_error.lock().expect("last_error poisoned") = Some(message);
 }
 
+/// Every event body carries `"kind":"..."`; extract it for the events
+/// subscription filter (the serialized json keeps it too).
+fn event_kind(fields: &str) -> String {
+    const KEY: &str = "\"kind\":\"";
+    let Some(start) = fields.find(KEY) else {
+        return "unknown".to_string();
+    };
+    let rest = &fields[start + KEY.len()..];
+    let end = rest.find('"').unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
 fn push_event(state: &State, ms: u64, fields: String) {
     // Allocate the sequence under the events lock: concurrent producers
     // otherwise interleave fetch_add and push_back so stored order diverges
     // from seq order.
-    let mut events = state.events.lock().expect("events poisoned");
-    let seq = state.event_seq.fetch_add(1, Ordering::Relaxed);
-    let json = format!("{{\"seq\":{seq},\"ms\":{ms},{fields}}}");
-    if events.len() >= MAX_EVENTS {
-        events.pop_front();
-        state.events_dropped.fetch_add(1, Ordering::Relaxed);
+    let kind = event_kind(&fields);
+    {
+        let mut events = state.events.lock().expect("events poisoned");
+        let seq = state.event_seq.fetch_add(1, Ordering::Relaxed);
+        let json = format!("{{\"seq\":{seq},\"ms\":{ms},{fields}}}");
+        if events.len() >= MAX_EVENTS {
+            events.pop_front();
+            state.events_dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        events.push_back(Event { seq, kind, json });
     }
-    events.push_back(Event { json });
+    // Lock order (DispatchInbox discipline): the data lock is released
+    // before the hub is woken, and the pump never holds the hub mutex
+    // while acquiring the ring.
+    state.subscriptions.notify();
 }
 
 fn touch_node(state: &State, id: u64, role: &'static str, seen_ms: u64) {
@@ -1142,21 +1210,27 @@ fn receive_ingest(
         );
         return;
     }
-    let outcome = state
-        .receive_log
-        .lock()
-        .expect("receive log poisoned")
-        .ingest(
-            Ingress {
-                network,
-                gateway,
-                origin,
-                msg_session,
-                msg_seq,
-                payload: payload.to_vec(),
-            },
-            ms,
-        );
+    let outcome = {
+        let outcome = state
+            .receive_log
+            .lock()
+            .expect("receive log poisoned")
+            .ingest(
+                Ingress {
+                    network,
+                    gateway,
+                    origin,
+                    msg_session,
+                    msg_seq,
+                    payload: payload.to_vec(),
+                },
+                ms,
+            );
+        outcome
+    };
+    // Wake subscription pumps and parked messages.read waiters — the log
+    // lock is already released before the hub is notified (lock order).
+    state.subscriptions.notify();
     if let Some(fields) = api1::ingest_diagnostic(&outcome) {
         push_event(state, ms, fields);
     }
@@ -1366,6 +1440,10 @@ fn adapter_read_loop(
                     match result {
                         Ok(frame) => {
                             state.rx_frames.fetch_add(1, Ordering::Relaxed);
+                            // Any well-formed frame is link liveness — the
+                            // session layer separately decides whether it
+                            // belongs to the live session.
+                            state.last_rx_ms.store(now_ms(), Ordering::Relaxed);
                             let mut inbound = {
                                 let mut guard = session.lock().expect("device session poisoned");
                                 guard.handle(&frame)
@@ -1421,6 +1499,18 @@ fn adapter_read_loop(
 /// identity, authenticated session id, session notes as events, and the
 /// verified inner body to record_frame.
 fn merge_session_inbound(state: &State, inbound: &SessionInbound, frame: &Frame, ms: u64) {
+    if inbound.session_lost {
+        // The session died at the far end (stale-session echo, fatal
+        // error, tag desync): the mirror and the gateway registration
+        // bound to that session can never be inherited — clear them
+        // before the re-hello's new binding lands. Mirrors the adapter
+        // teardown in adapter_supervisor, minus the fd.
+        {
+            let mut info = state.session.lock().expect("session poisoned");
+            *info = SessionInfo::default();
+        }
+        state.gateway_lane.clear();
+    }
     if let Some((version, node, boot, network, capability)) = inbound.hello_info {
         {
             let mut info = state.session.lock().expect("session poisoned");
@@ -1469,6 +1559,37 @@ fn adapter_writer_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let now = now_ms();
                 let mut guard = session.lock().expect("device session poisoned");
+                // Silent-peer watchdog: the adapter can stay open while the
+                // gateway reboots behind it — our sealed frames are then
+                // dropped unanswered and nothing ever errors the read. A
+                // session with no inbound traffic for SESSION_LIVENESS_MS
+                // is torn down and re-handshaken in place; the link layer
+                // is provably alive, so no adapter reopen is needed.
+                if guard.phase == SessionPhase::Active
+                    && session_stalled(now, state.last_rx_ms.load(Ordering::Relaxed))
+                {
+                    let hello = guard.begin();
+                    drop(guard);
+                    // The registration mirror and the authenticated view
+                    // belong to the dead session — same teardown as an
+                    // adapter drop, minus the fd.
+                    {
+                        let mut info = state.session.lock().expect("session poisoned");
+                        *info = SessionInfo::default();
+                    }
+                    state.gateway_lane.clear();
+                    push_event(
+                        &state,
+                        now,
+                        "\"kind\":\"session\",\"state\":\"stalled\",\"detail\":\"no inbound traffic; restarting handshake\""
+                            .to_string(),
+                    );
+                    match transmit(&writer_slot, &state, &hello) {
+                        Ok(_) => last_tx_ms = now,
+                        Err(error) => set_error(&state, error.to_string()),
+                    }
+                    continue;
+                }
                 if guard.handshake_retry_due(now) {
                     // The writer is the only place allowed to emit frames,
                     // so the re-Hello is written here directly rather than
@@ -1570,6 +1691,37 @@ fn configure_raw_tty(path: &Path) {
         .status();
 }
 
+/// Bounded exponential backoff for adapter (re)open attempts: an unplugged
+/// cable can come back at any time, but a permanently missing device must
+/// not spin the retry loop. Doubles from 500ms to a 5s ceiling; a
+/// successful attach resets the streak to the fast retry.
+struct ReconnectBackoff {
+    delay_ms: u64,
+}
+
+impl ReconnectBackoff {
+    const INITIAL_MS: u64 = 500;
+    const MAX_MS: u64 = 5_000;
+
+    fn new() -> Self {
+        Self {
+            delay_ms: Self::INITIAL_MS,
+        }
+    }
+
+    /// The delay before the next attempt; doubles toward the cap.
+    fn next(&mut self) -> std::time::Duration {
+        let delay = self.delay_ms;
+        self.delay_ms = self.delay_ms.saturating_mul(2).min(Self::MAX_MS);
+        std::time::Duration::from_millis(delay)
+    }
+
+    /// A successful attach restarts the streak from the fast retry.
+    fn reset(&mut self) {
+        self.delay_ms = Self::INITIAL_MS;
+    }
+}
+
 fn adapter_supervisor(
     device: PathBuf,
     state: Arc<State>,
@@ -1577,7 +1729,10 @@ fn adapter_supervisor(
     session: Arc<Mutex<DeviceSession>>,
     outbound: mpsc::SyncSender<Outbound>,
 ) {
-    let mut backoff_ms = 500_u64;
+    let mut backoff = ReconnectBackoff::new();
+    // Open failures are logged once per streak, not per retry — the event
+    // ring must not flush on a missing device.
+    let mut open_failed = false;
     loop {
         configure_raw_tty(&device);
         match OpenOptions::new()
@@ -1589,7 +1744,8 @@ fn adapter_supervisor(
             Ok((reader, writer)) => {
                 *writer_slot.lock().expect("writer slot poisoned") = Some(writer);
                 state.connected.store(true, Ordering::Relaxed);
-                backoff_ms = 500;
+                backoff.reset();
+                open_failed = false;
                 {
                     let mut info = state.session.lock().expect("session poisoned");
                     *info = SessionInfo::default();
@@ -1640,13 +1796,23 @@ fn adapter_supervisor(
                 );
             }
             Err(error) => {
+                if !open_failed {
+                    open_failed = true;
+                    push_event(
+                        &state,
+                        now_ms(),
+                        format!(
+                            "\"kind\":\"adapter\",\"state\":\"open_failed\",\"detail\":\"{}\"",
+                            json_escape(&error.to_string())
+                        ),
+                    );
+                }
                 set_error(&state, format!("adapter open failed: {error}"));
             }
         }
         // Bounded exponential backoff: cable reconnects do not require a
         // daemon restart, and a missing device cannot spin the retry loop.
-        thread::sleep(std::time::Duration::from_millis(backoff_ms));
-        backoff_ms = (backoff_ms.saturating_mul(2)).min(5_000);
+        thread::sleep(backoff.next());
     }
 }
 
@@ -1667,7 +1833,30 @@ fn serve_client(
     let _ = stream.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
     let reader_stream = stream.try_clone()?;
     let mut reader = BufReader::new(reader_stream);
-    let mut writer = stream;
+    // The writer is shared with this connection's subscription pump:
+    // notification lines and response lines serialize under one mutex so
+    // neither can interleave mid-line.
+    let writer = Arc::new(Mutex::new(stream));
+    // Process-local connection id scoping this connection's subscriptions;
+    // the drop guard fails the pump's liveness flag even on early returns.
+    let conn_id = state.next_conn.fetch_add(1, Ordering::Relaxed);
+    let conn_alive = Arc::new(AtomicBool::new(true));
+    struct ConnTeardown {
+        alive: Arc<AtomicBool>,
+        state: Arc<State>,
+        conn_id: u64,
+    }
+    impl Drop for ConnTeardown {
+        fn drop(&mut self) {
+            self.alive.store(false, Ordering::Relaxed);
+            self.state.subscriptions.remove_conn(self.conn_id);
+        }
+    }
+    let _conn_guard = ConnTeardown {
+        alive: conn_alive.clone(),
+        state: Arc::clone(&state),
+        conn_id,
+    };
     // Raw byte line buffer: IPC requests are validated as UTF-8 *after*
     // framing so an invalid API1 line gets an explicit error, not a dropped
     // connection.
@@ -1686,16 +1875,19 @@ fn serve_client(
             return Ok(());
         }
         if raw.len() == api1::REQUEST_MAX_BYTES && !raw.ends_with(b"\n") {
-            let _ = writer.write_all(
-                b"{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"detail\":{\"message\":\"request exceeds 8192 bytes\"},\"retryable\":false}}\n",
-            );
-            let _ = writer.flush();
-            // Lingering close: half-close our write side, then drain
-            // whatever the client still has in flight. Closing with
-            // unread inbound data makes Linux send RST, which can
-            // destroy the error response we just wrote.
-            let _ = writer.shutdown(std::net::Shutdown::Write);
-            let _ = writer.set_read_timeout(Some(Duration::from_millis(200)));
+            {
+                let mut w = writer.lock().expect("writer poisoned");
+                let _ = w.write_all(
+                    b"{\"v\":1,\"request_id\":null,\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"detail\":{\"message\":\"request exceeds 8192 bytes\"},\"retryable\":false}}\n",
+                );
+                let _ = w.flush();
+                // Lingering close: half-close our write side, then drain
+                // whatever the client still has in flight. Closing with
+                // unread inbound data makes Linux send RST, which can
+                // destroy the error response we just wrote.
+                let _ = w.shutdown(std::net::Shutdown::Write);
+                let _ = w.set_read_timeout(Some(Duration::from_millis(200)));
+            }
             let mut sink = [0u8; 4096];
             let mut drained = 0usize;
             while drained < 1_048_576 {
@@ -1712,7 +1904,7 @@ fn serve_client(
         if raw.is_empty() {
             continue;
         }
-        let response = if raw.starts_with(b"API1 ") {
+        let (response, effect) = if raw.starts_with(b"API1 ") {
             let ctx = api1::ApiContext {
                 uid: peer_uid,
                 acl: &state.acl,
@@ -1723,19 +1915,36 @@ fn serve_client(
                 gateway_lane: &state.gateway_lane,
                 config_ops: &state.config_ops,
                 config_authority: state.config_authority,
+                link: api1::LinkStatus {
+                    configured: state.device.is_some(),
+                    connected: state.connected.load(Ordering::Relaxed),
+                    last_error: state
+                        .last_error
+                        .lock()
+                        .expect("last_error poisoned")
+                        .clone(),
+                },
+                subscriptions: &state.subscriptions,
+                conn_id,
+                event_ring: api1::EventRing {
+                    events: &state.events,
+                    next_seq: &state.event_seq,
+                    dropped: &state.events_dropped,
+                },
                 now_ms: now_ms(),
                 now_mono: mono_ms(),
             };
-            api1::handle(&raw[b"API1 ".len()..], &ctx)
+            api1::handle_conn(&raw[b"API1 ".len()..], &ctx)
         } else {
-            match std::str::from_utf8(&raw) {
-                Err(_) => "{\"error\":\"request line is not valid UTF-8\"}".to_string(),
-                Ok(line) => {
-                    let fields: Vec<&str> = line.split_whitespace().collect();
-                    if fields.is_empty() {
-                        continue;
-                    }
-                    match fields[0].to_ascii_uppercase().as_str() {
+            (
+                match std::str::from_utf8(&raw) {
+                    Err(_) => "{\"error\":\"request line is not valid UTF-8\"}".to_string(),
+                    Ok(line) => {
+                        let fields: Vec<&str> = line.split_whitespace().collect();
+                        if fields.is_empty() {
+                            continue;
+                        }
+                        match fields[0].to_ascii_uppercase().as_str() {
             "STATUS" | "DIAGNOSTICS" => status_json(&state),
             "ADAPTER" => adapter_json(&state),
             "NODES" => nodes_json(&state),
@@ -1857,12 +2066,33 @@ fn serve_client(
             "QUIT" => return Ok(()),
             _ => "{\"error\":\"commands: STATUS, DIAGNOSTICS, SEND <node> <hex>, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, AUTONOMY, QUIT — or API1 <json>\"}".into(),
                     }
-                }
-            }
+                    }
+                },
+                None,
+            )
         };
-        writer.write_all(response.as_bytes())?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
+        {
+            let mut w = writer.lock().expect("writer poisoned");
+            w.write_all(response.as_bytes())?;
+            w.write_all(b"\n")?;
+            w.flush()?;
+        }
+        // §5.8 rule 1 (05-receive-api): a subscription's first notification
+        // must never precede the ok that created it — the effect is applied
+        // only after the response line is flushed.
+        if let Some(api1::ConnEffect::Subscribed { id }) = effect {
+            if state.subscriptions.activate(conn_id, id) {
+                // First live subscription on this connection — spawn its
+                // pump. The pump exits on conn_alive (guard above) or when
+                // the hub reports the connection gone.
+                let pump_state = Arc::clone(&state);
+                let pump_writer = Arc::clone(&writer);
+                let pump_alive = Arc::clone(&conn_alive);
+                thread::spawn(move || {
+                    subscribe::pump_connection(pump_state, conn_id, pump_writer, pump_alive);
+                });
+            }
+        }
     }
 }
 
@@ -2134,6 +2364,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `config.get` token from before a restart can never resolve to a
         // different op minted by the new boot (RAM-only ids).
         config_ops: dispatch::ConfigOps::with_boot(host_boot),
+        subscriptions: subscribe::SubscriptionHub::with_boot(host_boot),
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
         config_dev_key: args.config_dev_key,

@@ -18,20 +18,36 @@
 //! other field is rejected, never ignored.
 //!
 //! Methods in this phase: `capabilities.get` (unauthenticated),
-//! `messages.read` (READ_PAYLOAD), `operations.open_epoch` + `messages.submit`
-//! (SEND), `operations.get`/`operations.get_by_key` (READ_OPERATION) and
+//! `messages.read` (READ_PAYLOAD — now with optional `wait_ms`
+//! long-polling), the push receive surface `messages.subscribe` /
+//! `messages.unsubscribe` / `messages.subscriptions` (issue #7;
+//! `messages` stream needs READ_PAYLOAD, or READ_OPERATION for
+//! metadata-only; the `events` stream is unauthenticated like EVENTS),
+//! `operations.open_epoch` + `messages.submit` (SEND),
+//! `operations.get`/`operations.get_by_key` (READ_OPERATION) and
 //! `operations.cancel` (owning principal with SEND). The principal always
 //! comes from the socket peer's OS credential, never from request JSON.
+//!
+//! A successful `messages.subscribe` also returns a [`ConnEffect`] — the
+//! socket layer applies it only after the ok line is flushed, which is
+//! how the daemon guarantees no notification can ever precede the
+//! response that created the subscription.
 
 use crate::acl::{self, Acl};
 use crate::canonical;
 use crate::config::{ConfigOutcome, ConfigRequest};
 use crate::receive_log::{
-    hex_lower, Cursor, IngestOutcome, ReadOutcome, ReceiveLog, CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
+    hex_lower, Cursor, IngestOutcome, ReadOutcome, ReceiveLog, RxRecord, CURSOR_MAX_DECODED_BYTES,
+    PAGE_LIMIT,
 };
 use crate::send_store::{
     AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity, OpenEpochError,
     OperationStore, RateDeny, StoredOperation, SubmitOutcome,
+};
+use crate::subscribe::{
+    self, CapacityDeny, EvFilter, MsgFilter, SubKind, SubscriptionHub, HEARTBEAT_MS_DEFAULT,
+    HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, NOTIFY_LINE_MAX, SUBS_PER_CONNECTION, SUBS_PER_PRINCIPAL,
+    SUBS_TOTAL, SUB_QUEUE_BYTES, SUB_QUEUE_EVENTS, WAIT_MS_MAX,
 };
 use routeloom_json::{escape_string, Json};
 use routeloom_protocol::host_ops::ConfigOpsResult;
@@ -39,7 +55,10 @@ use routeloom_wire::endpoint::{
     config_namespace_valid, config_tlv_encode, ConfigField, ConfigFieldType, ConfigPhase,
     ConfigReason,
 };
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::dispatch::ConfigOpRecord;
 
@@ -62,6 +81,20 @@ pub const REQUEST_ID_MAX: usize = 64;
 /// session and the dispatcher's host-registration mirror — read-only here:
 /// the schema-2 binding always comes from the daemon's own lane state,
 /// never from request JSON.
+/// Point-in-time USB link snapshot handed in per request: `configured`
+/// says a --device path exists at all, `connected` that the adapter fd is
+/// currently open. Combined with the session mirror (`attached` =
+/// connected AND authenticated) so clients can distinguish disconnected /
+/// reconnecting / attached without parsing the event ring.
+#[derive(Clone, Default)]
+pub struct LinkStatus {
+    pub configured: bool,
+    pub connected: bool,
+    /// Last adapter/session error the supervisor recorded — the "why"
+    /// behind a disconnected state.
+    pub last_error: Option<String>,
+}
+
 pub struct ApiContext<'a, S: OperationStore> {
     pub uid: Option<u32>,
     pub acl: &'a Acl,
@@ -77,11 +110,44 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// authority is provisioned, so `config.propose` is refused honestly
     /// while queries still run.
     pub config_authority: Option<u64>,
+    /// USB link snapshot captured by the socket layer before dispatch —
+    /// powers link.get.
+    pub link: LinkStatus,
+    /// Push-receive subscription registry (issue #7): subscribe/
+    /// unsubscribe/subscriptions register and deregister here, and
+    /// `messages.read` long-polls wait on its change condvar. RAM-only —
+    /// subscriptions die with their connection.
+    pub subscriptions: &'a SubscriptionHub,
+    /// Connection id the socket layer minted — scopes subscription
+    /// ownership (ids are never resolvable across connections).
+    pub conn_id: u64,
+    /// The daemon's diagnostic event ring — the `stream:"events"`
+    /// subscribe source.
+    pub event_ring: EventRing<'a>,
     pub now_ms: u64,
     /// Process-monotonic clock on the same axis as the registration
     /// mirror's `lease_deadline_mono` — wall `now_ms` cannot judge a
     /// mono-anchored deadline.
     pub now_mono: u64,
+}
+
+/// Borrowed views of the daemon's diagnostic event ring — the
+/// `stream:"events"` subscribe source. `events` entries carry `seq`
+/// (from `next_seq`), `kind` and the serialized JSON line.
+#[derive(Clone, Copy)]
+pub struct EventRing<'a> {
+    pub events: &'a Mutex<VecDeque<crate::Event>>,
+    pub next_seq: &'a AtomicU64,
+    pub dropped: &'a AtomicU64,
+}
+
+/// Side effects the socket layer applies only AFTER the response line is
+/// flushed — §5.8 rule 1: no notification may precede the ok that created
+/// its subscription.
+pub enum ConnEffect {
+    /// Activate this pending subscription (spawn the connection pump if
+    /// it is not running yet).
+    Subscribed { id: u64 },
 }
 
 struct ApiError {
@@ -111,97 +177,146 @@ const LATER_PHASE_METHODS: &[&str] = &[];
 
 /// Handle one API1 request body (the bytes after `API1 `, newline stripped).
 /// Always returns a complete JSON response document (no trailing newline).
+///
+/// `handle` discards connection-level effects — it exists for direct
+/// request/response tests. The socket layer uses [`handle_conn`], which
+/// additionally returns the [`ConnEffect`] a successful
+/// `messages.subscribe` carries (pending → activate after the response
+/// flush).
+#[cfg(test)]
 pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String {
+    handle_conn(body, ctx).0
+}
+
+/// Handle one API1 request body, returning `(response, effect)`.
+/// The response must be flushed to the socket BEFORE the effect is
+/// applied — that is what keeps notification lines ordered behind the ok
+/// they belong to.
+pub fn handle_conn<S: OperationStore>(
+    body: &[u8],
+    ctx: &ApiContext<'_, S>,
+) -> (String, Option<ConnEffect>) {
     // The advertised bound covers the whole line: `API1 ` + body + '\n'.
     // The body alone therefore may not exceed REQUEST_MAX_BYTES - 6 —
     // an oversized line the socket layer would have refused must get the
     // same answer from a direct call, never a different one.
     if body.len() + 6 > REQUEST_MAX_BYTES {
-        return error_response(
+        return (
+            error_response(
+                None,
+                &ApiError::simple("INVALID_REQUEST", "request too large"),
+            ),
             None,
-            &ApiError::simple("INVALID_REQUEST", "request too large"),
         );
     }
     let text = match std::str::from_utf8(body) {
         Ok(text) => text,
         Err(_) => {
-            return error_response(
+            return (
+                error_response(
+                    None,
+                    &ApiError::simple("INVALID_REQUEST", "request is not valid UTF-8"),
+                ),
                 None,
-                &ApiError::simple("INVALID_REQUEST", "request is not valid UTF-8"),
             )
         }
     };
     let root = match routeloom_json::parse_bounded(text, JSON_MAX_DEPTH) {
         Ok(root) => root,
         Err(error) => {
-            return error_response(
+            return (
+                error_response(
+                    None,
+                    &ApiError::simple("INVALID_REQUEST", &format!("invalid JSON: {error}")),
+                ),
                 None,
-                &ApiError::simple("INVALID_REQUEST", &format!("invalid JSON: {error}")),
             )
         }
     };
     let Json::Object(fields) = &root else {
-        return error_response(
+        return (
+            error_response(
+                None,
+                &ApiError::simple("INVALID_REQUEST", "request must be an object"),
+            ),
             None,
-            &ApiError::simple("INVALID_REQUEST", "request must be an object"),
         );
     };
     // Envelope schema: exactly the defined fields — unknown fields are a
     // schema violation, not something to skip.
     for (key, _) in fields {
         if !matches!(key.as_str(), "v" | "request_id" | "method" | "params") {
-            return error_response(
-                extract_request_id(&root).as_deref(),
-                &ApiError::simple("INVALID_REQUEST", &format!("unknown field \"{key}\"")),
+            return (
+                error_response(
+                    extract_request_id(&root).as_deref(),
+                    &ApiError::simple("INVALID_REQUEST", &format!("unknown field \"{key}\"")),
+                ),
+                None,
             );
         }
     }
     let request_id = extract_request_id(&root);
     let Some(request_id) = request_id.as_deref() else {
-        return error_response(
-            None,
-            &ApiError::simple(
-                "INVALID_REQUEST",
-                "request_id must be a string of 1-64 ASCII chars",
+        return (
+            error_response(
+                None,
+                &ApiError::simple(
+                    "INVALID_REQUEST",
+                    "request_id must be a string of 1-64 ASCII chars",
+                ),
             ),
+            None,
         );
     };
     if root.get("v").and_then(Json::as_u64) != Some(1) {
-        return error_response(
-            Some(request_id),
-            &ApiError::simple("INVALID_REQUEST", "v must be 1"),
+        return (
+            error_response(
+                Some(request_id),
+                &ApiError::simple("INVALID_REQUEST", "v must be 1"),
+            ),
+            None,
         );
     }
     let Some(method) = root.get("method").and_then(Json::as_str) else {
-        return error_response(
-            Some(request_id),
-            &ApiError::simple("INVALID_REQUEST", "method must be a string"),
+        return (
+            error_response(
+                Some(request_id),
+                &ApiError::simple("INVALID_REQUEST", "method must be a string"),
+            ),
+            None,
         );
     };
     let params = match root.get("params") {
         None | Some(Json::Null) => Json::Object(Vec::new()),
         Some(value @ Json::Object(_)) => value.clone(),
         Some(_) => {
-            return error_response(
-                Some(request_id),
-                &ApiError::simple("INVALID_REQUEST", "params must be an object"),
+            return (
+                error_response(
+                    Some(request_id),
+                    &ApiError::simple("INVALID_REQUEST", "params must be an object"),
+                ),
+                None,
             )
         }
     };
-    let response = match method {
-        "capabilities.get" => capabilities(&params, ctx).map(|r| (request_id, r)),
-        "messages.read" => messages_read(&params, ctx).map(|r| (request_id, r)),
-        "operations.open_epoch" => operations_open_epoch(&params, ctx).map(|r| (request_id, r)),
-        "messages.submit" => messages_submit(&params, ctx).map(|r| (request_id, r)),
-        "operations.get" => operations_get(&params, ctx).map(|r| (request_id, r)),
-        "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (request_id, r)),
-        "operations.cancel" => operations_cancel(&params, ctx).map(|r| (request_id, r)),
-        "gateway.resolve" => gateway_resolve(&params, ctx).map(|r| (request_id, r)),
-        "gateway.get" => gateway_get(&params, ctx).map(|r| (request_id, r)),
-        "config.challenge" => config_challenge(&params, ctx).map(|r| (request_id, r)),
-        "config.status" => config_status(&params, ctx).map(|r| (request_id, r)),
-        "config.propose" => config_propose(&params, ctx).map(|r| (request_id, r)),
-        "config.get" => config_get(&params, ctx).map(|r| (request_id, r)),
+    let dispatch: Result<(String, Option<ConnEffect>), ApiError> = match method {
+        "capabilities.get" => capabilities(&params, ctx).map(|r| (r, None)),
+        "messages.read" => messages_read(&params, ctx).map(|r| (r, None)),
+        "messages.subscribe" => messages_subscribe(&params, ctx).map(|(r, e)| (r, Some(e))),
+        "messages.unsubscribe" => messages_unsubscribe(&params, ctx).map(|r| (r, None)),
+        "messages.subscriptions" => messages_subscriptions(&params, ctx).map(|r| (r, None)),
+        "operations.open_epoch" => operations_open_epoch(&params, ctx).map(|r| (r, None)),
+        "messages.submit" => messages_submit(&params, ctx).map(|r| (r, None)),
+        "operations.get" => operations_get(&params, ctx).map(|r| (r, None)),
+        "operations.get_by_key" => operations_get_by_key(&params, ctx).map(|r| (r, None)),
+        "operations.cancel" => operations_cancel(&params, ctx).map(|r| (r, None)),
+        "gateway.resolve" => gateway_resolve(&params, ctx).map(|r| (r, None)),
+        "gateway.get" => gateway_get(&params, ctx).map(|r| (r, None)),
+        "link.get" => link_get(&params, ctx).map(|r| (r, None)),
+        "config.challenge" => config_challenge(&params, ctx).map(|r| (r, None)),
+        "config.status" => config_status(&params, ctx).map(|r| (r, None)),
+        "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
+        "config.get" => config_get(&params, ctx).map(|r| (r, None)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -211,9 +326,9 @@ pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String
             &format!("unknown method \"{method}\""),
         )),
     };
-    match response {
-        Ok((request_id, result)) => ok_response(request_id, &result),
-        Err(error) => error_response(Some(request_id), &error),
+    match dispatch {
+        Ok((result, effect)) => (ok_response(request_id, &result), effect),
+        Err(error) => (error_response(Some(request_id), &error), None),
     }
 }
 
@@ -292,7 +407,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"durable_receive\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -312,13 +427,19 @@ fn capabilities<S: OperationStore>(
 }
 
 /// `messages.read` params: `{network, from:"earliest"|"latest" XOR cursor,
-/// limit}`. Result per 02-receive-api.md §2.
+/// limit, wait_ms}`. Result per 02-receive-api.md §2; `wait_ms` adds the
+/// additive long-poll mode from 05-receive-api.md §5.3.2 — park until at
+/// least one retained record exists or the window expires, never holding
+/// the receive-log lock across the sleep.
 fn messages_read<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
-        if !matches!(key.as_str(), "network" | "from" | "cursor" | "limit") {
+        if !matches!(
+            key.as_str(),
+            "network" | "from" | "cursor" | "limit" | "wait_ms"
+        ) {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
@@ -369,6 +490,18 @@ fn messages_read<S: OperationStore>(
             }
         },
     };
+    let wait_ms = match params.get("wait_ms") {
+        None => 0,
+        Some(value) => match value.as_u64() {
+            Some(n) if n <= WAIT_MS_MAX => n,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!("wait_ms must be an integer 0..={WAIT_MS_MAX}"),
+                ))
+            }
+        },
+    };
 
     // The token is a position, not a permission: re-check the OS principal's
     // ACL grant on every request, before any cursor is trusted.
@@ -395,17 +528,94 @@ fn messages_read<S: OperationStore>(
         .encode()
     };
 
-    if let Some(from) = from {
+    // Resolve the read start once: `from` anchors at earliest/latest, the
+    // cursor path runs the shared validation ladder (decode → scope →
+    // epoch). Position errors are returned before any wait begins.
+    let (after, check_position) = if let Some(from) = from {
         let after = if from == "latest" {
             log.bounds(network, ctx.now_ms).1
         } else {
             0
         };
-        let outcome = log.read(network, after, limit, ctx.now_ms, false);
-        return Ok(read_result(outcome, &cursor_at));
-    }
+        (after, false)
+    } else {
+        let cursor = checked_cursor(
+            &mut log,
+            cursor_token.expect("cursor checked above"),
+            network,
+            acl_view,
+            ctx.now_ms,
+        )?;
+        (cursor.last_scanned, true)
+    };
 
-    let token = cursor_token.expect("cursor checked above");
+    // Long-poll: re-check under the lock each pass, sleep on the
+    // subscription hub's change condvar (ingest notifies) in between —
+    // the log lock is dropped for the entire sleep so producers and other
+    // readers are never blocked by a parked waiter.
+    let deadline = (wait_ms > 0).then(|| Instant::now() + Duration::from_millis(wait_ms));
+    loop {
+        let outcome = log.read(network, after, limit, ctx.now_ms, check_position);
+        match outcome {
+            ReadOutcome::Gap {
+                lost_from,
+                lost_to,
+                oldest_seq,
+                tail_seq,
+            } => {
+                return Err(cursor_gap(
+                    lost_from, lost_to, oldest_seq, tail_seq, &cursor_at,
+                ))
+            }
+            ReadOutcome::Future => {
+                return Err(ApiError::simple(
+                    "INVALID_CURSOR",
+                    "cursor points beyond the current tail",
+                ))
+            }
+            ReadOutcome::Batch(batch) => {
+                if let (true, Some(dl)) = (batch.records.is_empty(), deadline) {
+                    let remaining = dl.checked_duration_since(Instant::now());
+                    if let Some(remaining) = remaining.filter(|r| !r.is_zero()) {
+                        // Snapshot the dirty epoch BEFORE releasing the
+                        // lock so a notify landing between the read and
+                        // the wait is observed, never slept through.
+                        let seen = ctx.subscriptions.dirty_epoch();
+                        drop(log);
+                        ctx.subscriptions.wait(seen, remaining);
+                        log = ctx.receive_log.lock().expect("receive log poisoned");
+                        continue;
+                    }
+                    // Window expired: the last (still empty) batch is the
+                    // honest answer, flagged wait_expired.
+                    return Ok(read_result(
+                        ReadOutcome::Batch(batch),
+                        &cursor_at,
+                        Some(true),
+                    ));
+                }
+                return Ok(read_result(
+                    ReadOutcome::Batch(batch),
+                    &cursor_at,
+                    deadline.map(|_| false),
+                ));
+            }
+        }
+    }
+}
+
+/// Shared cursor-validation ladder for `messages.read` and
+/// `messages.subscribe` (§5.4.2): decode → network scope → ACL-view scope
+/// → epoch. The epoch failure mints fresh oldest/tail cursors under the
+/// live epoch so the client can resume explicitly.
+fn checked_cursor(
+    log: &mut ReceiveLog,
+    token: &str,
+    network: u64,
+    acl_view: u64,
+    now_ms: u64,
+) -> Result<Cursor, ApiError> {
+    let epoch = log.epoch();
     let Some(cursor) = Cursor::decode(token) else {
         return Err(ApiError::simple(
             "INVALID_CURSOR",
@@ -428,7 +638,16 @@ fn messages_read<S: OperationStore>(
         // A previous daemon epoch's loss count is unknowable — report null
         // rather than fabricating one. The cursors below are minted under
         // the current epoch so the client can resume explicitly.
-        let (oldest, tail, ..) = log.bounds(network, ctx.now_ms);
+        let (oldest, tail, ..) = log.bounds(network, now_ms);
+        let cursor_at = |last_scanned: u64| {
+            Cursor {
+                network,
+                acl_view,
+                epoch,
+                last_scanned,
+            }
+            .encode()
+        };
         return Err(ApiError {
             code: "CURSOR_EPOCH_CHANGED",
             message: "cursor belongs to a previous daemon epoch".to_string(),
@@ -440,33 +659,38 @@ fn messages_read<S: OperationStore>(
             retryable: false,
         });
     }
-    match log.read(network, cursor.last_scanned, limit, ctx.now_ms, true) {
-        ReadOutcome::Gap {
-            lost_from,
-            lost_to,
-            oldest_seq,
-            tail_seq,
-        } => Err(ApiError {
-            code: "CURSOR_GAP",
-            message: "receive-log records were reclaimed ahead of this cursor".to_string(),
-            extra_fields: format!(
-                "\"lost_from\":{lost_from},\"lost_to\":{lost_to},\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"",
-                cursor_at(oldest_seq.saturating_sub(1)),
-                cursor_at(tail_seq),
-            ),
-            retryable: false,
-        }),
-        ReadOutcome::Future => Err(ApiError::simple(
-            "INVALID_CURSOR",
-            "cursor points beyond the current tail",
-        )),
-        outcome @ ReadOutcome::Batch(_) => Ok(read_result(outcome, &cursor_at)),
+    Ok(cursor)
+}
+
+/// The CURSOR_GAP error — same shape for `messages.read` and a failed
+/// `messages.subscribe` (`on_gap:"fail"`).
+fn cursor_gap(
+    lost_from: u64,
+    lost_to: u64,
+    oldest_seq: u64,
+    tail_seq: u64,
+    cursor_at: &dyn Fn(u64) -> String,
+) -> ApiError {
+    ApiError {
+        code: "CURSOR_GAP",
+        message: "receive-log records were reclaimed ahead of this cursor".to_string(),
+        extra_fields: format!(
+            "\"lost_from\":{lost_from},\"lost_to\":{lost_to},\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"",
+            cursor_at(oldest_seq.saturating_sub(1)),
+            cursor_at(tail_seq),
+        ),
+        retryable: false,
     }
 }
 
 /// Serialize a read batch. `cursor_at` mints cursors under the current
-/// epoch/acl_view/network.
-fn read_result(outcome: ReadOutcome, cursor_at: &dyn Fn(u64) -> String) -> String {
+/// epoch/acl_view/network. `wait_expired` is `Some(_)` only when the
+/// request carried `wait_ms` — true on timeout, false when data arrived.
+fn read_result(
+    outcome: ReadOutcome,
+    cursor_at: &dyn Fn(u64) -> String,
+    wait_expired: Option<bool>,
+) -> String {
     let ReadOutcome::Batch(batch) = outcome else {
         unreachable!("gap/future handled by caller")
     };
@@ -475,20 +699,7 @@ fn read_result(outcome: ReadOutcome, cursor_at: &dyn Fn(u64) -> String) -> Strin
         if index > 0 {
             records_json.push(',');
         }
-        records_json.push_str(&format!(
-            "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",\"assurance\":{{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}}}}",
-            record.network,
-            record.gateway.map_or_else(
-                || "null".to_string(),
-                |g| format!("\"{g:016x}\""),
-            ),
-            record.origin,
-            record.msg_session,
-            record.msg_seq,
-            crate::receive_log::hex_lower(&record.payload),
-            record.payload.len(),
-            cursor_at(record.seq),
-        ));
+        records_json.push_str(&record_json(record, &cursor_at(record.seq)));
     }
     records_json.push(']');
     // Position after the last returned record; an empty batch resumes at
@@ -498,8 +709,11 @@ fn read_result(outcome: ReadOutcome, cursor_at: &dyn Fn(u64) -> String) -> Strin
         Some(record) => cursor_at(record.seq),
         None => cursor_at(batch.after_seq),
     };
+    let wait_field = wait_expired.map_or_else(String::new, |expired| {
+        format!(",\"wait_expired\":{expired}")
+    });
     format!(
-        "{{\"records\":{records_json},\"next_cursor\":\"{next_cursor}\",\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\",\"more\":{},\"retention\":{{\"seconds\":{},\"entries\":{},\"bytes\":{}}}}}",
+        "{{\"records\":{records_json},\"next_cursor\":\"{next_cursor}\",\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\",\"more\":{},\"retention\":{{\"seconds\":{},\"entries\":{},\"bytes\":{}}}{wait_field}}}",
         cursor_at(batch.oldest_seq.saturating_sub(1)),
         cursor_at(batch.tail_seq),
         batch.more,
@@ -507,6 +721,594 @@ fn read_result(outcome: ReadOutcome, cursor_at: &dyn Fn(u64) -> String) -> Strin
         batch.entries,
         batch.bytes,
     )
+}
+
+/// One received record with its payload — the shared shape of
+/// `messages.read` batches and `kind:"message"` subscription
+/// notifications. `cursor` is the per-record cursor (seq position).
+pub(crate) fn record_json(record: &RxRecord, cursor: &str) -> String {
+    format!(
+        "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_hex\":\"{}\",\"payload_len\":{},\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",\"assurance\":{{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}}}}",
+        record.network,
+        record.gateway.map_or_else(
+            || "null".to_string(),
+            |g| format!("\"{g:016x}\""),
+        ),
+        record.origin,
+        record.msg_session,
+        record.msg_seq,
+        crate::receive_log::hex_lower(&record.payload),
+        record.payload.len(),
+        cursor,
+    )
+}
+
+/// The metadata-only sibling used by `payloads:false` subscriptions
+/// (READ_OPERATION): every field except the payload, replaced by its
+/// sha256 so a metadata client can still deduplicate/audit.
+pub(crate) fn record_meta_json(record: &RxRecord, cursor: &str) -> String {
+    format!(
+        "{{\"v\":1,\"network\":\"{:016x}\",\"gateway\":{},\"origin\":\"{:016x}\",\"message\":{{\"session\":\"{:08x}\",\"sequence\":\"{:016x}\"}},\"payload_len\":{},\"payload_sha256\":\"{}\",\"cursor\":\"{}\",\"endpoint_kind\":\"gateway_mirror\",\"evidence\":\"HOST_RAM_RETAINED\",\"assurance\":{{\"profile\":\"EXPERIMENTAL_DEV_PSK\",\"origin\":\"group-key-claim\"}}}}",
+        record.network,
+        record.gateway.map_or_else(
+            || "null".to_string(),
+            |g| format!("\"{g:016x}\""),
+        ),
+        record.origin,
+        record.msg_session,
+        record.msg_seq,
+        record.payload.len(),
+        hex_lower(&canonical::sha256(&record.payload)),
+        cursor,
+    )
+}
+
+/// Capacity refusal for `messages.subscribe` (§5.3.5): retryable, and
+/// names which of the three bounds ran dry — the caller's connection, its
+/// principal across connections, or the daemon-wide total.
+fn subscribe_capacity(deny: CapacityDeny) -> ApiError {
+    let scope = match deny {
+        CapacityDeny::Connection => "connection",
+        CapacityDeny::Principal => "principal",
+        CapacityDeny::Global => "global",
+    };
+    ApiError {
+        code: "NO_CAPACITY",
+        message: "subscription capacity exhausted".to_string(),
+        extra_fields: format!("\"scope\":\"{scope}\""),
+        retryable: true,
+    }
+}
+
+/// Parse a `filter.origins`/`filter.gateways` member: an array of ≤8
+/// 16-hex node ids. The values are positions, not validated principals —
+/// any well-formed id is a legal filter term even if it never matches.
+fn parse_id_list(params: &Json, key: &str) -> Result<Option<Vec<u64>>, ApiError> {
+    let Some(value) = params.get(key) else {
+        return Ok(None);
+    };
+    let Some(items) = value.as_array() else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("filter.{key} must be an array"),
+        ));
+    };
+    if items.len() > subscribe::FILTER_MAX {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!(
+                "filter.{key} accepts at most {} entries",
+                subscribe::FILTER_MAX
+            ),
+        ));
+    }
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("filter.{key} entries must be 16-hex strings"),
+            ));
+        };
+        let lowered = text.to_ascii_lowercase();
+        if lowered.len() != 16 || !lowered.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("filter.{key} entries must be 16-hex strings"),
+            ));
+        }
+        ids.push(u64::from_str_radix(&lowered, 16).expect("validated hex"));
+    }
+    Ok(Some(ids))
+}
+
+/// `messages.subscribe` params (05-receive-api.md §5.3.1):
+/// `{stream?, network?, from|cursor?, on_gap?, payloads?, filter?,
+/// heartbeat_ms?, durable?}`.
+///
+/// Registers a PENDING subscription in the hub and returns the ok result
+/// plus `ConnEffect::Subscribed` — the socket layer flips it live only
+/// after this response is on the wire, so a notification can never beat
+/// the response that created it. Position is resolved under the
+/// receive-log lock (the `from:"latest"` tail snapshot) but the hub
+/// registration follows after the lock is released — an ingest landing
+/// in between is still delivered, just flagged as post-snapshot.
+fn messages_subscribe<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<(String, ConnEffect), ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "stream"
+                | "network"
+                | "from"
+                | "cursor"
+                | "on_gap"
+                | "payloads"
+                | "filter"
+                | "heartbeat_ms"
+                | "durable"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let stream = match params.get("stream") {
+        None => "messages",
+        Some(value) => match value.as_str() {
+            Some(text) => text,
+            None => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "stream must be a string",
+                ))
+            }
+        },
+    };
+    let events = match stream {
+        "messages" => false,
+        "events" => true,
+        _ => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "stream must be \"messages\" or \"events\"",
+            ))
+        }
+    };
+    // durable is refused as a capability, never silently downgraded —
+    // capabilities advertises durable_subscription:false (§5.4.4).
+    match params.get("durable") {
+        None => {}
+        Some(Json::Bool(true)) => {
+            return Err(ApiError::simple(
+                "UNSUPPORTED",
+                "durable subscriptions are not supported",
+            ))
+        }
+        Some(Json::Bool(false)) => {}
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "durable must be a boolean",
+            ))
+        }
+    }
+    let heartbeat_ms = match params.get("heartbeat_ms") {
+        None => subscribe::HEARTBEAT_MS_DEFAULT,
+        Some(value) => match value.as_u64() {
+            Some(0) => 0,
+            Some(n) if (subscribe::HEARTBEAT_MS_MIN..=subscribe::HEARTBEAT_MS_MAX).contains(&n) => {
+                n
+            }
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!(
+                        "heartbeat_ms must be 0 or {}..={}",
+                        subscribe::HEARTBEAT_MS_MIN,
+                        subscribe::HEARTBEAT_MS_MAX,
+                    ),
+                ))
+            }
+        },
+    };
+    let filter = match params.get("filter") {
+        None | Some(Json::Null) => None,
+        Some(value @ Json::Object(_)) => Some(value),
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "filter must be an object",
+            ))
+        }
+    };
+
+    if events {
+        // The events stream is a volatile diagnostic mirror — it has no
+        // network, no cursor, no payload knob, and no durability knob.
+        for key in ["network", "cursor", "on_gap", "payloads", "durable"] {
+            if params.get(key).is_some() {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!("{key} is not valid for stream \"events\""),
+                ));
+            }
+        }
+        let from = match params.get("from") {
+            None => "latest",
+            Some(value) => match value.as_str() {
+                Some(text) => text,
+                None => {
+                    return Err(ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        "from must be \"earliest\" or \"latest\"",
+                    ))
+                }
+            },
+        };
+        if from != "earliest" && from != "latest" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "from must be \"earliest\" or \"latest\"",
+            ));
+        }
+        let mut kinds: Option<Vec<String>> = None;
+        if let Some(filter) = filter {
+            for (key, _) in filter.object_entries() {
+                if key != "kinds" {
+                    return Err(ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        &format!("unknown filter key \"{key}\" for stream \"events\""),
+                    ));
+                }
+            }
+            if let Some(value) = filter.get("kinds") {
+                let Some(items) = value.as_array() else {
+                    return Err(ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        "filter.kinds must be an array",
+                    ));
+                };
+                if items.len() > subscribe::KINDS_MAX {
+                    return Err(ApiError::simple(
+                        "INVALID_ARGUMENT",
+                        &format!(
+                            "filter.kinds accepts at most {} entries",
+                            subscribe::KINDS_MAX
+                        ),
+                    ));
+                }
+                let mut list = Vec::with_capacity(items.len());
+                for item in items {
+                    let Some(text) = item.as_str() else {
+                        return Err(ApiError::simple(
+                            "INVALID_ARGUMENT",
+                            "filter.kinds entries must be strings",
+                        ));
+                    };
+                    if !subscribe::EVENT_KINDS.contains(&text) {
+                        return Err(ApiError::simple(
+                            "INVALID_ARGUMENT",
+                            &format!("unknown event kind \"{text}\""),
+                        ));
+                    }
+                    list.push(text.to_string());
+                }
+                kinds = Some(list);
+            }
+        }
+        // Positions are bare event seqs — valid only on this connection.
+        let (position, oldest) = {
+            let ring = ctx.event_ring.events.lock().expect("events poisoned");
+            let next = ctx.event_ring.next_seq.load(Ordering::Relaxed);
+            let oldest = ring.front().map_or(next, |event| event.seq);
+            (if from == "earliest" { oldest } else { next }, oldest)
+        };
+        let dropped_total = ctx.event_ring.dropped.load(Ordering::Relaxed);
+        let acl_view = ctx.acl.revision();
+        let id = ctx
+            .subscriptions
+            .subscribe(
+                ctx.conn_id,
+                ctx.uid,
+                SubKind::Events(EvFilter { kinds }),
+                position,
+                acl_view,
+                heartbeat_ms,
+                ctx.now_ms,
+            )
+            .map_err(subscribe_capacity)?;
+        let result = format!(
+            "{{\"subscription\":\"{}\",\"stream\":\"events\",\"position\":{{\"event_seq\":{position},\"oldest_event_seq\":{oldest},\"dropped_total\":{dropped_total}}},\"queue\":{{\"max_notifications\":{SUB_QUEUE_EVENTS},\"max_bytes\":{SUB_QUEUE_BYTES},\"line_max_bytes\":{NOTIFY_LINE_MAX}}},\"heartbeat_ms\":{heartbeat_ms}}}",
+            subscribe::token(id),
+        );
+        return Ok((result, ConnEffect::Subscribed { id }));
+    }
+
+    // ---- stream:"messages" ----
+    if let Some(filter) = filter {
+        for (key, _) in filter.object_entries() {
+            if !matches!(key.as_str(), "origins" | "gateways") {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!("unknown filter key \"{key}\" for stream \"messages\""),
+                ));
+            }
+        }
+    }
+    let Some(network_text) = params.get("network").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "network must be a 16-hex string",
+        ));
+    };
+    let network = acl::parse_network_hex(network_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+    let from = params.get("from").and_then(Json::as_str);
+    let cursor_token = params.get("cursor").and_then(Json::as_str);
+    if params.get("from").is_some() && from.is_none()
+        || params.get("cursor").is_some() && cursor_token.is_none()
+    {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "from/cursor must be strings",
+        ));
+    }
+    if from.is_some() == cursor_token.is_some() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "exactly one of from or cursor is required",
+        ));
+    }
+    if let Some(from) = from {
+        if from != "earliest" && from != "latest" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "from must be \"earliest\" or \"latest\"",
+            ));
+        }
+    }
+    let on_gap = match params.get("on_gap") {
+        None => "fail",
+        Some(value) => match value.as_str() {
+            Some(text @ ("fail" | "skip")) => text,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "on_gap must be \"fail\" or \"skip\"",
+                ))
+            }
+        },
+    };
+    let payloads = match params.get("payloads") {
+        None => true,
+        Some(Json::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "payloads must be a boolean",
+            ))
+        }
+    };
+    let origins = match filter {
+        Some(filter) => parse_id_list(filter, "origins")?,
+        None => None,
+    };
+    let gateways = match filter {
+        Some(filter) => parse_id_list(filter, "gateways")?,
+        None => None,
+    };
+
+    // Grant follows the payload mode: payloads:true needs READ_PAYLOAD,
+    // payloads:false needs only READ_OPERATION (§5.6).
+    let permission = if payloads {
+        acl::PERM_READ_PAYLOAD
+    } else {
+        acl::PERM_READ_OPERATION
+    };
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, permission))
+    {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks the required receive grant on this network",
+        ));
+    }
+
+    // Resolve the start position under the receive-log lock — the
+    // `from:"latest"` tail snapshot and the cursor ladder both run here.
+    // Registration in the hub follows immediately after unlock; an ingest
+    // landing in between still has seq > position and is delivered live.
+    let mut log = ctx.receive_log.lock().expect("receive log poisoned");
+    let epoch = log.epoch();
+    let acl_view = ctx.acl.revision();
+    let cursor_at = |position: u64| {
+        Cursor {
+            network,
+            acl_view,
+            epoch,
+            last_scanned: position,
+        }
+        .encode()
+    };
+    let mut start_gap: Option<String> = None;
+    let position = if let Some(from) = from {
+        if from == "latest" {
+            log.bounds(network, ctx.now_ms).1
+        } else {
+            0
+        }
+    } else {
+        let token = cursor_token.expect("cursor checked above");
+        let cursor = checked_cursor(&mut log, token, network, acl_view, ctx.now_ms)?;
+        // Probe the position without consuming a page: limit 0 still runs
+        // the Future/Gap checks against the tombstone.
+        match log.read(network, cursor.last_scanned, 0, ctx.now_ms, true) {
+            ReadOutcome::Future => {
+                return Err(ApiError::simple(
+                    "INVALID_CURSOR",
+                    "cursor points beyond the current tail",
+                ))
+            }
+            ReadOutcome::Gap {
+                lost_from,
+                lost_to,
+                oldest_seq,
+                tail_seq,
+            } => {
+                if on_gap == "fail" {
+                    return Err(cursor_gap(
+                        lost_from, lost_to, oldest_seq, tail_seq, &cursor_at,
+                    ));
+                }
+                // skip: subscribe succeeds and the FIRST notification is a
+                // gap{start_position} marker naming the unrecoverable range.
+                start_gap = Some(format!(
+                    "\"cause\":\"start_position\",\"lost_from\":{lost_from},\"lost_to\":{lost_to},\"resume_cursor\":\"{}\",\"recoverable_via_read\":false,\"ms\":{}",
+                    cursor_at(lost_to),
+                    ctx.now_ms,
+                ));
+                lost_to
+            }
+            ReadOutcome::Batch(_) => cursor.last_scanned,
+        }
+    };
+    let (oldest, tail, ..) = log.bounds(network, ctx.now_ms);
+    drop(log);
+
+    let id = ctx
+        .subscriptions
+        .subscribe(
+            ctx.conn_id,
+            ctx.uid,
+            SubKind::Messages(MsgFilter {
+                network,
+                origins,
+                gateways,
+                payloads,
+            }),
+            position,
+            acl_view,
+            heartbeat_ms,
+            ctx.now_ms,
+        )
+        .map_err(subscribe_capacity)?;
+    if let Some(body) = start_gap {
+        ctx.subscriptions.stage_marker(ctx.conn_id, id, "gap", body);
+    }
+    let result = format!(
+        "{{\"subscription\":\"{}\",\"stream\":\"messages\",\"network\":\"{network:016x}\",\"payloads\":{payloads},\"epoch\":\"{}\",\"acl_revision\":{acl_view},\"position\":{{\"cursor\":\"{}\",\"oldest_cursor\":\"{}\",\"tail_cursor\":\"{}\"}},\"queue\":{{\"max_notifications\":{SUB_QUEUE_EVENTS},\"max_bytes\":{SUB_QUEUE_BYTES},\"line_max_bytes\":{NOTIFY_LINE_MAX}}},\"heartbeat_ms\":{heartbeat_ms}}}",
+        subscribe::token(id),
+        hex_lower(&epoch),
+        cursor_at(position),
+        cursor_at(oldest.saturating_sub(1)),
+        cursor_at(tail),
+    );
+    Ok((result, ConnEffect::Subscribed { id }))
+}
+
+/// `messages.unsubscribe` params: `{subscription}` — own-connection ids
+/// only; unknown or foreign ids resolve NOT_FOUND (there is no
+/// cross-connection existence oracle). The response carries the
+/// subscription's final counters.
+fn messages_unsubscribe<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "subscription" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(token) = params.get("subscription").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "subscription must be a subscription id string",
+        ));
+    };
+    let Some(id) = subscribe::parse_token(token) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "subscription is not a subscription id",
+        ));
+    };
+    match ctx.subscriptions.unsubscribe(ctx.conn_id, id, ctx.now_ms) {
+        Some(stats) => Ok(format!(
+            "{{\"ended\":true,\"delivered\":{},\"dropped\":{},\"gaps\":{},\"lifetime_ms\":{}}}",
+            stats.delivered, stats.dropped, stats.gaps, stats.lifetime_ms,
+        )),
+        None => Err(ApiError::simple("NOT_FOUND", "unknown subscription id")),
+    }
+}
+
+/// `messages.subscriptions` takes no params and lists the caller's own
+/// connection's subscriptions — never another connection's.
+fn messages_subscriptions<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    if !params.object_entries().is_empty() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "messages.subscriptions takes no params",
+        ));
+    }
+    let epoch = ctx
+        .receive_log
+        .lock()
+        .expect("receive log poisoned")
+        .epoch();
+    let acl_view = ctx.acl.revision();
+    let entries = ctx.subscriptions.list(ctx.conn_id);
+    let mut out = String::from("{\"subscriptions\":[");
+    for (index, entry) in entries.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        if entry.is_events {
+            out.push_str(&format!(
+                "{{\"id\":\"{}\",\"stream\":\"events\",\"event_seq\":{},\"delivered\":{},\"dropped\":{},\"gaps\":{},\"queued\":{},\"queued_bytes\":{},\"created_ms\":{}}}",
+                subscribe::token(entry.id),
+                entry.position,
+                entry.delivered,
+                entry.dropped,
+                entry.gaps,
+                entry.queued,
+                entry.queued_bytes,
+                entry.created_ms,
+            ));
+        } else {
+            let cursor = Cursor {
+                network: entry.network.unwrap_or(0),
+                acl_view,
+                epoch,
+                last_scanned: entry.position,
+            }
+            .encode();
+            out.push_str(&format!(
+                "{{\"id\":\"{}\",\"stream\":\"messages\",\"network\":\"{:016x}\",\"payloads\":{},\"position_cursor\":\"{}\",\"delivered\":{},\"dropped\":{},\"gaps\":{},\"queued\":{},\"queued_bytes\":{},\"created_ms\":{}}}",
+                subscribe::token(entry.id),
+                entry.network.unwrap_or(0),
+                entry.payloads,
+                cursor,
+                entry.delivered,
+                entry.dropped,
+                entry.gaps,
+                entry.queued,
+                entry.queued_bytes,
+                entry.created_ms,
+            ));
+        }
+    }
+    out.push_str("]}");
+    Ok(out)
 }
 
 /// `operations.open_epoch` params: `{network}`. Binds the caller's
@@ -968,6 +1770,63 @@ fn gateway_get<S: OperationStore>(
         ));
     }
     Ok(op_status(&record, &store.lineage(), ctx.now_ms))
+}
+
+/// `link.get` takes no params and needs no grant: the adapter state is a
+/// daemon-health fact, not a network-scoped secret — a disconnected link
+/// is observable by the absence of every other surface anyway. `state`
+/// distinguishes "disconnected" (adapter absent or open keeps failing),
+/// "reconnecting" (fd open, handshake/session not yet authenticated), and
+/// "attached" (authenticated session on a live adapter). The lane token
+/// itself stays hidden — `lane_registered` and `lane_lease_ms` are what a
+/// caller needs to know whether dispatch will run.
+fn link_get<S: OperationStore>(params: &Json, ctx: &ApiContext<'_, S>) -> Result<String, ApiError> {
+    if !params.object_entries().is_empty() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "link.get takes no params",
+        ));
+    }
+    let (authenticated, session_id, gateway_node, gateway_boot) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (info.authenticated, info.id, info.node, info.boot)
+    };
+    let attached = ctx.link.connected && authenticated;
+    let state = if attached {
+        "attached"
+    } else if ctx.link.connected {
+        "reconnecting"
+    } else {
+        "disconnected"
+    };
+    let opt_hex =
+        |v: Option<u64>| v.map_or_else(|| "null".to_string(), |v| format!("\"{v:016x}\""));
+    let opt_u64 = |v: Option<u64>| v.map_or_else(|| "null".to_string(), |v| v.to_string());
+    // The registration mirror only counts when it still belongs to THIS
+    // session and its lease has not lapsed — a stale mirror must never
+    // report a lane the dispatcher would refuse to use.
+    let (lane_registered, lane_lease_ms) = match ctx.gateway_lane.current() {
+        Some(reg)
+            if authenticated
+                && Some(reg.usb_session) == session_id
+                && ctx.now_mono < reg.lease_deadline_mono =>
+        {
+            (true, reg.lease_deadline_mono.saturating_sub(ctx.now_mono))
+        }
+        _ => (false, 0),
+    };
+    let last_error = ctx.link.last_error.as_deref().map_or_else(
+        || "null".to_string(),
+        |e| format!("\"{}\"", escape_string(e)),
+    );
+    Ok(format!(
+        "{{\"configured\":{},\"connected\":{},\"authenticated\":{authenticated},\"state\":\"{state}\",\"session_id\":{},\"gateway\":{},\"gateway_boot\":{},\"lane_registered\":{lane_registered},\"lane_lease_ms\":{lane_lease_ms},\"last_error\":{last_error}}}",
+        ctx.link.configured,
+        ctx.link.connected,
+        opt_u64(session_id),
+        opt_hex(gateway_node),
+        opt_hex(gateway_boot),
+    ))
 }
 
 fn parse_hex_u64(text: &str) -> Option<u64> {
@@ -1931,6 +2790,9 @@ mod tests {
             leaked_lane(),
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             now,
         )
     }
@@ -1947,6 +2809,18 @@ mod tests {
         Box::leak(Box::new(crate::dispatch::ConfigOps::default()))
     }
 
+    fn leaked_hub() -> &'static SubscriptionHub {
+        Box::leak(Box::new(SubscriptionHub::default()))
+    }
+
+    fn leaked_event_ring() -> EventRing<'static> {
+        EventRing {
+            events: Box::leak(Box::new(Mutex::new(VecDeque::new()))),
+            next_seq: Box::leak(Box::new(AtomicU64::new(0))),
+            dropped: Box::leak(Box::new(AtomicU64::new(0))),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn ctx_lane<'a, S: OperationStore>(
         uid: Option<u32>,
@@ -1958,6 +2832,9 @@ mod tests {
         lane: &'a crate::dispatch::GatewayLane,
         config_ops: &'a crate::dispatch::ConfigOps,
         config_authority: Option<u64>,
+        subscriptions: &'a SubscriptionHub,
+        conn_id: u64,
+        event_ring: EventRing<'a>,
         now: u64,
     ) -> ApiContext<'a, S> {
         ApiContext {
@@ -1970,6 +2847,10 @@ mod tests {
             gateway_lane: lane,
             config_ops,
             config_authority,
+            subscriptions,
+            conn_id,
+            event_ring,
+            link: LinkStatus::default(),
             now_ms: now,
             now_mono: now,
         }
@@ -3559,6 +4440,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let key = "66666666666666666666666666666666";
@@ -3607,6 +4491,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let key = "77777777777777777777777777777777";
@@ -3632,6 +4519,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let key = "77777777777777777777777777777777";
@@ -3710,6 +4600,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         // A node-destination op is answered with the same NOT_FOUND an
@@ -3736,6 +4629,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(gw_get_line(&id).as_bytes(), &uid7);
@@ -3756,6 +4652,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let digest = "44".repeat(32);
@@ -3854,6 +4753,9 @@ mod tests {
             &empty_lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(
@@ -3894,6 +4796,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let digest = "44".repeat(32);
@@ -3924,6 +4829,9 @@ mod tests {
             &lane,
             leaked_config_ops(),
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(
@@ -3996,6 +4904,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(
@@ -4037,6 +4948,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         for (method, params) in [
@@ -4058,6 +4972,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(
@@ -4086,6 +5003,9 @@ mod tests {
             &lane,
             &config_ops,
             None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
@@ -4116,6 +5036,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
@@ -4142,6 +5065,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         // Unknown param key.
@@ -4214,6 +5140,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let response = handle(
@@ -4233,6 +5162,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let get = cfg_req("config.get", &format!("\"config_op\":\"{token}\""));
@@ -4403,6 +5335,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         // Node ids 0 and u64::MAX are reserved wire addresses (01 §6) —
@@ -4435,6 +5370,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         // 2 is not a namespace (SDK=1, application 0x8000-0xfffe); the
@@ -4485,6 +5423,9 @@ mod tests {
             &lane,
             &config_ops,
             Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
             100,
         );
         let propose = |patch: &str| {

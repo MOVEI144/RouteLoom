@@ -13,6 +13,13 @@ rl_status_code_t to_c(const StatusCode code) noexcept {
   return static_cast<rl_status_code_t>(code);
 }
 
+// to_c/from_c rely on numeric parity between the two enums; pin both
+// ends so a reordered or extended StatusCode breaks the build, not the
+// ABI silently.
+static_assert(static_cast<rl_status_code_t>(StatusCode::NetworkRequired) ==
+                  RL_STATUS_NETWORK_REQUIRED,
+              "rl_status_code_t must mirror StatusCode order and range");
+
 Status from_c(const rl_status_code_t code, const char* detail) noexcept {
   return code == RL_STATUS_OK
       ? Status::success()

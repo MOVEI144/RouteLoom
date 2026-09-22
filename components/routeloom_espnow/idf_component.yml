@@ -1,0 +1,36 @@
+# ESP-IDF Component Manager manifest for the RouteLoom ESP-NOW bindings.
+# Mirrors the CMake REQUIRES: routeloom (mesh core), plus the IDF builtins
+# esp_wifi, esp_event, esp_netif, esp_timer, freertos, nvs_flash and mbedtls.
+# IDF builtin components are expressed through the CMake REQUIRES and the
+# `idf` version floor — they are not registry dependencies and are not
+# repeated in `dependencies` below.
+name: routeloom/routeloom_espnow
+version: 0.1.0
+description: >-
+  RouteLoom ESP-NOW radio owner for the CORE_FIXED_250 profile: fixed-channel
+  ESP-NOW transport with Wi-Fi LR250, NVS-backed counter/replay/config/ledger
+  stores and the EXPERIMENTAL development-PSK security provider (AES-GCM via
+  PSA; a development profile, never a production identity).
+url: https://github.com/MOVEI144/RouteLoom
+repository: https://github.com/MOVEI144/RouteLoom.git
+issues: https://github.com/MOVEI144/RouteLoom/issues
+license: Apache-2.0
+tags:
+  - mesh
+  - espnow
+  - routeloom
+  - wifi-lr
+# Only these targets are compiled in CI (espressif/idf:v6.0.3). Other
+# ESP-NOW-capable chips may work but are unvalidated — see
+# docs/implementation/component-distribution.md.
+targets:
+  - esp32c3
+  - esp32s3
+  - esp32c5
+dependencies:
+  idf: ">=6.0"
+  # Resolved locally when this repository's components/ directory is on the
+  # component search path (EXTRA_COMPONENT_DIRS), or via the git dependency
+  # block documented in examples/espnow_node/README.md. Not yet published to
+  # the component registry.
+  routeloom/routeloom: "^0.1.0"

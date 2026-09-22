@@ -19,10 +19,16 @@
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_autonomy.hpp"
+#include "routeloom/espnow_scope_provider.hpp"
 #endif
 #if CONFIG_ROUTELOOM_MIGRATION
 #include "routeloom/espnow_migration.hpp"
 #include "routeloom/nvs_ledger_store.hpp"
+#endif
+#if CONFIG_ROUTELOOM_TRUST_STORE
+#include "routeloom/device_credential.hpp"
+#include "routeloom/nvs_cred_store.hpp"
+#include "routeloom/nvs_trust_store.hpp"
 #endif
 #include "routeloom/config_wire.hpp"
 #include "routeloom/espnow_runtime.hpp"
@@ -184,6 +190,130 @@ extern "C" void app_main(void) {
   status = next_boot_session(message_session);
   if (!status) fail(status.detail);
 
+#if CONFIG_ROUTELOOM_TRUST_STORE
+  // Production trust stores (sdk-completion/04-provisioning-lifecycle.md
+  // §4.2.2/§4.4): the RLT1 trust image ("rltrust" t0/t1) and the RLC1
+  // device credential ("rlcred" d0/d1) are validated at boot. Impairment
+  // is never node-fatal and never triggers an erase or reformat — a
+  // quarantined store logs REPROVISION_REQUIRED and the node keeps
+  // routing degraded.
+  //
+  // Scope honesty: this profile is the USB host-side gateway — it has NO
+  // config-target permit verifier (that lives on the target node's
+  // ConfigJournal, e.g. reference_node). The store here supplies boot
+  // diagnostics plus the mesh network identity; nothing consumes the
+  // credential yet (the membership/EDHOC workstream owns that). There is
+  // NO install verb and no manufactured provisioning flow in this
+  // firmware — first install is a physical/deployment act owned by the
+  // host tooling workstream (routeloom-provision).
+  static routeloom::espnow::NvsTrustStore trust_store_storage;
+  auto trust_status = trust_store_storage.open("rltrust");
+  if (!trust_status) {
+    ESP_LOGE(kTag, "trust store open failed: %s", trust_status.detail);
+  }
+  static routeloom::espnow::NvsCredStore cred_store_storage;
+  auto cred_status = cred_store_storage.open("rlcred");
+  if (!cred_status) {
+    ESP_LOGE(kTag, "credential store open failed: %s", cred_status.detail);
+  }
+  static routeloom::TrustStore trust_store(trust_store_storage);
+  static routeloom::DeviceCredentialStore credential_store(
+      cred_store_storage);
+  trust_status = trust_store.initialize();
+  if (!trust_status) {
+    ESP_LOGE(kTag, "trust store init: %s", trust_status.detail);
+  }
+  cred_status = credential_store.initialize();
+  if (!cred_status) {
+    ESP_LOGE(kTag, "credential store init: %s", cred_status.detail);
+  }
+  if (trust_store.quarantined() || credential_store.quarantined()) {
+    ESP_LOGE(kTag,
+             "REPROVISION_REQUIRED: trust/credential store quarantined — "
+             "recovery is an explicit operator act, never an implicit reset");
+  } else if (trust_store.uncertain() || credential_store.uncertain()) {
+    ESP_LOGE(kTag,
+             "REPROVISION_REQUIRED: trust/credential sibling state unproven "
+             "— possibly-stale state is refused until recover()");
+  }
+  ESP_LOGI(kTag,
+           "trust store: epoch=%lu gen_floor=%lu anchors=%u keys=%u "
+           "revocations=%u flags=0x%02x active=%d uncertain=%d quarantined=%d",
+           static_cast<unsigned long>(trust_store.store_epoch()),
+           static_cast<unsigned long>(trust_store.min_authority_generation()),
+           static_cast<unsigned>(trust_store.image().anchor_count),
+           static_cast<unsigned>(trust_store.image().key_count),
+           static_cast<unsigned>(trust_store.image().revocation_count),
+           static_cast<unsigned>(trust_store.flags()),
+           trust_store.has_active() ? 1 : 0,
+           trust_store.uncertain() ? 1 : 0,
+           trust_store.quarantined() ? 1 : 0);
+  if (credential_store.has_active()) {
+    const routeloom::DeviceCredential& credential =
+        credential_store.credential();
+    ESP_LOGI(kTag,
+             "credential: node=%llu key_location=%u status=%u grant=%uB "
+             "generation_base=%lu",
+             static_cast<unsigned long long>(credential.node_id),
+             static_cast<unsigned>(credential.key_location),
+             static_cast<unsigned>(credential.cred_status),
+             static_cast<unsigned>(credential.grant.size),
+             static_cast<unsigned long>(credential.generation_base_session));
+    // §4.8 epoch-window check: when (session - generation_base_session)
+    // reaches the 0xFFF0 threshold the next boots would wrap the u16 wire
+    // epoch under peer floors that can never accept it — the design's
+    // REPROVISION_REQUIRED wedge, reported as a diagnostic (the dev link
+    // profile still brings the mesh up; the production credential epoch
+    // has no consumer wired yet).
+    std::uint16_t credential_epoch = 0;
+    const routeloom::Status epoch_status =
+        routeloom::credential_epoch_for_session(
+            message_session, credential.generation_base_session,
+            credential_epoch);
+    if (!epoch_status) {
+      ESP_LOGE(kTag,
+               "REPROVISION_REQUIRED: credential epoch window — %s "
+               "(session=%lu base=%lu)",
+               epoch_status.detail,
+               static_cast<unsigned long>(message_session),
+               static_cast<unsigned long>(
+                   credential.generation_base_session));
+    }
+  } else {
+    ESP_LOGI(kTag,
+             "credential: none provisioned (uncertain=%d quarantined=%d)",
+             credential_store.uncertain() ? 1 : 0,
+             credential_store.quarantined() ? 1 : 0);
+  }
+  // §4.8: the provisioned NetworkId carries the deployment generation in
+  // the upper 32 bits. Wire v1 encodes only the low 32 (wire.cpp rejects
+  // >u32), so the radio/mesh identity is the low half. Building
+  // SecurityContexts from the provisioned u64 rather than the wire field
+  // is the membership/endpoint workstream — deliberately NOT wired here.
+  const routeloom::NetworkId provisioned_network =
+      trust_store.has_active()
+          ? (trust_store.network() & 0xFFFFFFFFULL)
+          : static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID);
+  if (trust_store.has_active() &&
+      provisioned_network !=
+          static_cast<routeloom::NetworkId>(CONFIG_ROUTELOOM_NETWORK_ID)) {
+    ESP_LOGW(kTag,
+             "trust image network low32 0x%08lx overrides static 0x%08x",
+             static_cast<unsigned long>(provisioned_network),
+             static_cast<unsigned>(CONFIG_ROUTELOOM_NETWORK_ID));
+  }
+  // §4.9 wear instrumentation: committed-write counters, same WriteStats
+  // shape as the config-journal adapter (boot baseline; nothing below
+  // commits to these stores yet).
+  const auto trust_writes = trust_store_storage.write_stats();
+  const auto cred_writes = cred_store_storage.write_stats();
+  ESP_LOGI(kTag, "store writes: trust=%llu/%lluB cred=%llu/%lluB",
+           static_cast<unsigned long long>(trust_writes.commits),
+           static_cast<unsigned long long>(trust_writes.bytes),
+           static_cast<unsigned long long>(cred_writes.commits),
+           static_cast<unsigned long long>(cred_writes.bytes));
+#endif
+
   // The bridge protocol owns USB Serial/JTAG exclusively; the console was
   // moved to UART0 in sdkconfig.defaults so log text can never interleave
   // into the COBS stream.
@@ -201,7 +331,12 @@ extern "C" void app_main(void) {
       ByteView{reinterpret_cast<const std::uint8_t*>(secret),
                std::strlen(secret)};
   bridge_config.node = CONFIG_ROUTELOOM_NODE_ID;
+#if CONFIG_ROUTELOOM_TRUST_STORE
+  // The bridge reports the same provisioned mesh identity as the radio.
+  bridge_config.network = provisioned_network;
+#else
   bridge_config.network = CONFIG_ROUTELOOM_NETWORK_ID;
+#endif
   // Boot ID doubles as the persisted boot session: a host can tell a reboot
   // apart from a reconnect and must never see the value regress.
   bridge_config.boot_id = message_session;
@@ -214,7 +349,13 @@ extern "C" void app_main(void) {
   static routeloom::usb::UsbBridge bridge(bridge_config, stream);
 
   EspNowRuntimeConfig config{};
+#if CONFIG_ROUTELOOM_TRUST_STORE
+  // The committed trust image owns the deployment's network identity;
+  // only the low 32 bits are wire-visible on Wire v1 (see above).
+  config.node.network = provisioned_network;
+#else
   config.node.network = CONFIG_ROUTELOOM_NETWORK_ID;
+#endif
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
   config.node.boot_incarnation = message_session;
@@ -347,6 +488,26 @@ extern "C" void app_main(void) {
   discovery_config.network_hint =
       static_cast<std::uint32_t>(config.node.network);
   discovery_config.capability_bits = CONFIG_ROUTELOOM_CAPABILITY;
+#if CONFIG_ROUTELOOM_DISCOVERY_SCOPE != 0
+  // Discovery Scope Key (issue #14): the dev-profile provider derives
+  // per-generation keys from the configured base key. A scoped mode whose
+  // key cannot install fails boot — never a silent Off downgrade.
+  static routeloom::espnow::DevScopeProvider scope_provider(
+      routeloom::ScopeRef{CONFIG_ROUTELOOM_DISCOVERY_SCOPE_REF});
+  std::array<std::uint8_t, routeloom::kScopeKeyBytes> scope_key{};
+  if (!parse_hex(CONFIG_ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX, scope_key)) {
+    fail("invalid ROUTELOOM_DISCOVERY_SCOPE_KEY_HEX");
+  }
+  status = scope_provider.install(
+      routeloom::ByteView{scope_key.data(), scope_key.size()},
+      CONFIG_ROUTELOOM_DISCOVERY_SCOPE_GENERATION, 0);
+  scope_key.fill(0);
+  if (!status) fail(status.detail);
+  discovery_config.scope_mode =
+      static_cast<routeloom::ScopeMode>(CONFIG_ROUTELOOM_DISCOVERY_SCOPE);
+  discovery_config.scope_provider = &scope_provider;
+  discovery_config.scope = scope_provider.ref();
+#endif
   routeloom::espnow::EspNowAutonomyPolicy autonomy_policy{};
 #if CONFIG_ROUTELOOM_DISCOVERY_MEMBER
   autonomy_policy.self_member = true;
@@ -377,6 +538,10 @@ extern "C" void app_main(void) {
   // authenticated control-object lane. The single-threaded pump below drives
   // the agent through runtime.poll_once(). The authority role additionally
   // needs a durable authority ledger before it may issue.
+  // Wired vs host-only: this node executes inbound verified commits and runs
+  // surveys/cutover; nothing local mints a plan — MigrationAuthority::
+  // commit_plan() has no firmware/USB caller today and is exercised by host
+  // tests only.
   static routeloom::espnow::NvsLedgerStore authority_ledger;
   if (self_authority) {
     status = authority_ledger.open("rlmauth");
@@ -403,6 +568,13 @@ extern "C" void app_main(void) {
         "identity profile");
   }
 
+  // Power management is deliberately unwired on this profile: the bridge is
+  // a USB-powered always-on gateway — deep sleep would sever the USB
+  // Serial/JTAG session and its mesh presence, and no HostOps verb requests
+  // sleep, so there is no real sleep/wake integration point to hook. The
+  // PowerCoordinator/EspNowPowerPort path is wired (and CI-compiled) only on
+  // the reference node under CONFIG_ROUTELOOM_DEEP_SLEEP; for this firmware
+  // it remains host-tested only.
   // Single-threaded pump: app_main owns serial RX, the bridge's periodic
   // work (handshake/credit/partial-frame timeouts, TX pump) and the runtime
   // event drain, so no extra task can interleave bridge polls.
