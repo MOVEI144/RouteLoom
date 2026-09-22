@@ -962,6 +962,40 @@ void test_adaptive_hop_timeout_expands_and_caps() {
   CHECK(h2.data_sights(capped_seq) == 2);
 }
 
+// radio.md §8 + 04 §4.2 (#45): the populated hop-RTT EWMA must carry its
+// wire validity bit — a nonzero measurement flagged absent is discarded by
+// receivers honoring the flag, and a class with no contributing samples
+// reports zero with the bit clear.
+void test_telemetry_hop_rtt_validity_bit() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  MessageId m{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+  drive_tx(h, 1, m.sequence, 1);
+  h.now += 10;
+  inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0, 1));
+
+  TelemetryQuery query{};
+  query.request_id = 7;
+  query.peer = 2;
+  query.direction = ObservationDirection::Egress;
+  query.length_class = 1;
+  TelemetrySnapshot snap{};
+  DiagnosticRejectReason reason{};
+  CHECK_OK(a->build_telemetry_snapshot(query, h.now, snap, reason));
+  CHECK((snap.validity & kTelemetryValidHopRttEwma) != 0);
+  CHECK(snap.hop_rtt_us_ewma != 0);
+
+  query.length_class = 2;
+  TelemetrySnapshot empty{};
+  CHECK_OK(a->build_telemetry_snapshot(query, h.now, empty, reason));
+  CHECK((empty.validity & kTelemetryValidHopRttEwma) == 0);
+  CHECK(empty.hop_rtt_us_ewma == 0);
+}
+
 // radio.md §8 (#45): a link retry is re-queued with jittered not_before —
 // 0..20 ms normally, 20..100 ms while the peer reports busy — so a frozen
 // clock can never trigger the retransmission.
@@ -1058,6 +1092,7 @@ int main() {
   test_observation_buckets();
   test_adaptive_hop_timeout_shrinks();
   test_adaptive_hop_timeout_expands_and_caps();
+  test_telemetry_hop_rtt_validity_bit();
   test_link_retry_jitter();
   test_hop_timeout_config_floor();
   if (failures == 0) {

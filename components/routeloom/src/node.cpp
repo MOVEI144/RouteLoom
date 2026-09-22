@@ -4522,6 +4522,7 @@ Status MeshNode::build_telemetry_snapshot(
       }
       // Same window-freshness rule for the HOP_ACCEPT RTT EWMA (radio.md §8).
       if (bucket->current.hop_rtt_samples > 0 && bucket_fresh) {
+        out.validity |= kTelemetryValidHopRttEwma;
         out.hop_rtt_us_ewma = bucket->current.hop_rtt_us_ewma;
       }
       out.saturation_mask |= bucket->saturation_mask;
