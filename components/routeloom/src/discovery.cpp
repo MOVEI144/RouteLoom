@@ -1739,6 +1739,8 @@ Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcep
     outbound_.exchange.generation = generation;
     outbound_.exchange.offer_digest = ScopeDigest{};
     sha256(encoded.view(), outbound_.exchange.discover_digest);
+  } else {
+    ++stats_.send_failures;
   }
   return status;
 }
@@ -1847,6 +1849,8 @@ Status NeighborDiscovery::send_scoped_offer(Candidate& candidate,
     candidate.offer_pending = false;
     ++stats_.offers_tx;
     membership_.begin_authentication();
+  } else {
+    ++stats_.send_failures;
   }
   return status;
 }

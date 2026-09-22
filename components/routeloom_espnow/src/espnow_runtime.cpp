@@ -526,6 +526,8 @@ void EspNowRuntime::stop() noexcept {
   raw_tx_count_ = 0;
   expired_tx_count_ = 0;
   quarantined_count_ = 0;
+  quarantine_notice_count_ = 0;
+  quarantine_recover_next_ms_ = 0;
   lost_tx_count_ = 0;
   lost_node_tx_valid_ = false;
   portEXIT_CRITICAL(&callback_lock_);
@@ -1521,9 +1523,19 @@ Status EspNowRuntime::recover() noexcept {
     // this point — every quarantined/fenced MAC is released. Queued stale
     // events resolve by token/lane, never by MAC reuse.
     portENTER_CRITICAL(&callback_lock_);
+    // Raw sends still in flight die with the driver: the owed callback can
+    // never arrive after the rebuild, so retire each into expired_tx_ —
+    // the same Unknown-evidence path the callback watchdog uses — rather
+    // than dropping their resolution silently (02 §2.3/§2.5).
+    for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+      if (expired_tx_count_ < expired_tx_.size()) {
+        expired_tx_[expired_tx_count_++] = raw_tx_[i];
+      } else {
+        ++telemetry_event_drops_;
+      }
+    }
     quarantined_count_ = 0;
     fenced_outstanding_ = false;
-    expired_tx_count_ = 0;
     raw_tx_count_ = 0;
     portEXIT_CRITICAL(&callback_lock_);
   }
