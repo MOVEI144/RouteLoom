@@ -199,8 +199,10 @@ void inject(Harness& h, NodeId receiver, NodeId peer,
 // Step `id` until `expected` DATA transmissions of `seq` have been observed.
 // Background jobs (the one boot-time route advertisement) may legitimately
 // consume a dispatch turn, so callers must not assume one poll == one DATA.
+// The retry path adds link-jitter (radio.md §8, <=20 ms) before a
+// retransmission is select-eligible — the step budget must outlast it.
 void drive_tx(Harness& h, NodeId id, std::uint64_t seq, std::size_t expected,
-              int max_steps = 16) {
+              int max_steps = 64) {
   for (int k = 0; k < max_steps && h.data_sights(seq) < expected; ++k) {
     h.step(id);
     ++h.now;
@@ -842,6 +844,197 @@ void test_busy_feedback_wrap() {
   CHECK(a->congestion_stats().busy_stale == 1);
 }
 
+// radio.md §8 (#45): per-peer link RTT EWMA replaces the fixed 60 ms
+// hop-accept deadline — clamp(ewma*2, 20, 250). Scripted accepts at
+// controlled delays populate the EWMA; a silent exchange then exposes the
+// adapted deadline through its retry timing.
+void test_adaptive_hop_timeout_shrinks() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);   // never polled: only our scripted accepts land
+  h.link(1, 2);
+
+  // Three ~10 ms accepts seed the per-peer EWMA (first sample seeds it).
+  for (int s = 0; s < 3; ++s) {
+    MessageId m{};
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+    drive_tx(h, 1, m.sequence, 1);
+    h.now += 10;
+    inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0,
+                                 static_cast<std::uint64_t>(s + 1)));
+  }
+  // The previously dead window fields are now populated by the accept path
+  // (the small DATA frame lands in frame-length class 1).
+  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 1, 2};
+  const ObservationBucket* bucket = a->telemetry_bucket(key);
+  CHECK(bucket != nullptr);
+  if (bucket == nullptr) return;
+  CHECK(bucket->current.hop_rtt_samples == 3);
+  CHECK(bucket->current.hop_accepts >= 3);
+  CHECK(bucket->current.hop_rtt_us_ewma >= 9000 &&
+        bucket->current.hop_rtt_us_ewma <= 12000);
+
+  // ewma ~= 10 ms -> effective = clamp(20, 20, 250) = 20 ms: a silent
+  // exchange now expires far inside the old fixed 60 ms.
+  MessageId silent{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, silent));
+  drive_tx(h, 1, silent.sequence, 1);
+  h.now += 14;
+  h.step(1);
+  h.step(1);
+  CHECK(h.data_sights(silent.sequence) == 1);  // ~+15 ms: still awaiting
+  h.now += 35;
+  drive_tx(h, 1, silent.sequence, 2);          // expired ~+20 -> retry TX2
+  CHECK(h.data_sights(silent.sequence) == 2);
+}
+
+// Same mechanism upward: a measured RTT above half the base lifts the
+// deadline past 60 ms, and a large EWMA caps it at the spec's 250 ms.
+void test_adaptive_hop_timeout_expands_and_caps() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  for (int s = 0; s < 2; ++s) {
+    MessageId m{};
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+    drive_tx(h, 1, m.sequence, 1);
+    h.now += 55;
+    inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0,
+                                 static_cast<std::uint64_t>(s + 10)));
+  }
+  // ewma ~= 55 ms -> effective ~= 110 ms: the old 60 ms fixed timeout would
+  // already have retried here.
+  MessageId mid{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, mid));
+  drive_tx(h, 1, mid.sequence, 1);
+  h.now += 65;
+  h.step(1);
+  h.step(1);
+  CHECK(h.data_sights(mid.sequence) == 1);
+  h.now += 80;
+  drive_tx(h, 1, mid.sequence, 2);
+  CHECK(h.data_sights(mid.sequence) == 2);
+
+  // Cap: feed samples just inside each successive effective deadline —
+  // the EWMA climbs until clamp(ewma*2) saturates at 250 ms. Transit
+  // forwards run the same awaiting/accept path without spending the
+  // bounded delivery table.
+  Harness h2;
+  MeshNode* a2 = h2.add(1);
+  (void)h2.add(2);
+  (void)h2.add(3);
+  h2.link(1, 2);
+  h2.link(1, 3);
+  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 1, 3};
+  for (int s = 0; s < 14; ++s) {
+    const ObservationBucket* b = a2->telemetry_bucket(key);
+    const std::uint32_t ewma_ms =
+        b != nullptr ? b->current.hop_rtt_us_ewma / 1000 : 0;
+    if (ewma_ms * 2 >= kLinkRtoMaxMs) break;
+    const std::uint64_t seq = 500 + static_cast<std::uint64_t>(s);
+    inject(h2, 1, 2,
+           craft_transit(h2.cipher, 2, 1, 5000 + s, 3, seq));
+    drive_tx(h2, 1, seq, 1);
+    h2.now += ewma_ms == 0
+                  ? 59
+                  : std::min<std::uint32_t>(2 * ewma_ms, kLinkRtoMaxMs) - 10;
+    inject(h2, 1, 3,
+           craft_accept(h2.cipher, 3, 1, FrameType::Data, 5000 + s,
+                        MessageId{42, seq}, 0, static_cast<std::uint64_t>(s + 20)));
+  }
+  const ObservationBucket* b = a2->telemetry_bucket(key);
+  CHECK(b != nullptr && b->current.hop_rtt_us_ewma / 1000 * 2 >= kLinkRtoMaxMs);
+  // A silent transit forward now expires at the 250 ms ceiling, not the
+  // old 60 ms.
+  const std::uint64_t capped_seq = 999;
+  inject(h2, 1, 2, craft_transit(h2.cipher, 2, 1, 7000, 3, capped_seq));
+  drive_tx(h2, 1, capped_seq, 1);
+  h2.now += 245;
+  h2.step(1);
+  h2.step(1);
+  CHECK(h2.data_sights(capped_seq) == 1);
+  h2.now += 45;
+  drive_tx(h2, 1, capped_seq, 2);
+  CHECK(h2.data_sights(capped_seq) == 2);
+}
+
+// radio.md §8 (#45): a link retry is re-queued with jittered not_before —
+// 0..20 ms normally, 20..100 ms while the peer reports busy — so a frozen
+// clock can never trigger the retransmission.
+void test_link_retry_jitter() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);
+  h.now += 70;   // awaiting deadline crossed
+  h.step(1);     // expiry processed -> retry re-queued with jitter
+  // The deterministic first jitter on node 1 is nonzero (17 ms): at a
+  // frozen clock the retry stays queued, unlike the old immediate path.
+  h.step(1);
+  h.step(1);
+  CHECK(h.data_sights(data.sequence) == 1);
+  h.now += 25;   // past the 20 ms bound -> eligible
+  drive_tx(h, 1, data.sequence, 2);
+  CHECK(h.data_sights(data.sequence) == 2);
+
+  // Congested range: a matched BUSY Reject marks the peer busy, then a
+  // timed-out retry is held back >=20 ms and <=100 ms.
+  Harness h2;
+  MeshNode* a2 = h2.add(1);
+  (void)h2.add(2);
+  h2.link(1, 2);
+  MessageId busy_job{};
+  CHECK_OK(a2->send(2, payload_view(), SendOptions{}, h2.now, busy_job));
+  drive_tx(h2, 1, busy_job.sequence, 1);
+  auto reject = busy_for(busy_job, 1, 0, 50, 1);
+  inject(h2, 1, 2, craft_busy(h2.cipher, 2, 1, reject, 1));
+  MessageId j2{};
+  CHECK_OK(a2->send(2, payload_view(), SendOptions{}, h2.now, j2));
+  drive_tx(h2, 1, j2.sequence, 1);
+  h2.now += 70;
+  h2.step(1);    // j2 expiry -> retry held 20..100 ms
+  h2.now += 15;
+  h2.step(1);
+  h2.step(1);
+  CHECK(h2.data_sights(j2.sequence) == 1);   // not_before >= +20
+  h2.now += 100;                             // not_before <= +100
+  drive_tx(h2, 1, j2.sequence, 2);
+  CHECK(h2.data_sights(j2.sequence) == 2);
+}
+
+// radio.md §8 (#45): the adaptive floor is also the config floor — a
+// hop_accept_timeout_ms below 20 ms can only violate the physical bound.
+void test_hop_timeout_config_floor() {
+  NodeConfig cfg{};
+  cfg.network = kNet;
+  cfg.node = 1;
+  cfg.message_session = 101;
+  cfg.route_generation = 1;
+  cfg.route_advertisement_period_ms = 30000;
+  cfg.route_lifetime_ms = 60000;
+  cfg.max_link_attempts = 2;
+  cfg.max_end_to_end_rounds = 3;
+  SimNetwork net;
+  TestSecurity cipher;
+  CapturingObserver observer;
+  SimRadio radio(net, 1);
+
+  cfg.hop_accept_timeout_ms = kLinkRtoMinMs - 1;
+  MeshNode low(cfg, radio, cipher, observer);
+  CHECK(low.start(0).code == StatusCode::InvalidArgument);
+
+  cfg.hop_accept_timeout_ms = kLinkRtoMinMs;
+  MeshNode floor(cfg, radio, cipher, observer);
+  CHECK_OK(floor.start(0));
+}
+
 }  // namespace
 
 int main() {
@@ -863,6 +1056,10 @@ int main() {
   test_watermarks();
   test_busy_never_cancels();
   test_observation_buckets();
+  test_adaptive_hop_timeout_shrinks();
+  test_adaptive_hop_timeout_expands_and_caps();
+  test_link_retry_jitter();
+  test_hop_timeout_config_floor();
   if (failures == 0) {
     std::printf("RouteLoom congestion tests passed\n");
     return 0;

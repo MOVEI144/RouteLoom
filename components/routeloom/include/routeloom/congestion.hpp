@@ -87,6 +87,20 @@ constexpr std::uint8_t kWindowGrowAccepts = 8;  // consecutive authenticated acc
 constexpr std::uint8_t kRfAttemptsMax = 2;
 constexpr std::uint8_t kBusyReadmissionsMax = 4;
 constexpr std::uint8_t kCombinedPhysicalAttemptsMax = 6;
+// Link-layer RTO (radio.md §8: RTO初期60ms、適応20〜250ms): the configured
+// NodeConfig::hop_accept_timeout_ms is the initial value; per-peer
+// adaptation measures the HOP_ACCEPT round trip as an EWMA and clamps
+// ewma*kLinkRtoMargin into [kLinkRtoMinMs, kLinkRtoMaxMs].
+constexpr std::uint32_t kLinkRtoMinMs = 20;
+constexpr std::uint32_t kLinkRtoMaxMs = 250;
+constexpr std::uint32_t kLinkRtoMargin = 2;
+// Link-retry decorrelation (radio.md §8: 通常0〜20ms、混雑20〜100ms): a
+// deterministic delay before a retransmission — the larger band while the
+// peer shows sustained BUSY feedback. The first transmission of a job is
+// never delayed (初回DATAの無条件jitterは0ms).
+constexpr std::uint32_t kLinkRetryJitterNormalMaxMs = 20;
+constexpr std::uint32_t kLinkRetryJitterCongestedMinMs = 20;
+constexpr std::uint32_t kLinkRetryJitterCongestedMaxMs = 100;
 // Observation / feedback freshness (03-congestion.md §3).
 constexpr std::uint32_t kObservationWindowMs = 2000;
 constexpr std::uint32_t kFeedbackTtlMs = 3000;
