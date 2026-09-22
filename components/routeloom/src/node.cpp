@@ -3823,7 +3823,10 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
     // in-flight cap and the dedup window).
     if (inflight >= kSeqnoMaxInflight) return;
 
-    const NodeId next = routes_.request_next_hop(destination, state->attempts);
+    // Candidate rotation uses probe_cursor, not the saturating backoff
+    // counter: a capped attempts would pin every later request to
+    // hops[attempts % count] and starve the other candidates forever.
+    const NodeId next = routes_.request_next_hop(destination, state->probe_cursor);
     if (next == kInvalidNodeId || next == config_.node) return;
     const std::uint32_t request_id = next_seqno_request_id_++;
     auto* seen = seqno_seen_.allocate();
@@ -3832,8 +3835,11 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
     if (queue_seqno_request(next, config_.node, destination, requested_sequence,
                             request_id, kDefaultHopLimit, now_ms)) {
       // Saturate, never wrap: attempts==0 would zero the backoff below and
-      // turn the bounded cadence into a per-poll flood.
+      // turn the bounded cadence into a per-poll flood. The probe cursor is
+      // deliberately NOT saturating — it wraps so candidate rotation keeps
+      // cycling past the backoff cap.
       if (state->attempts != UINT8_MAX) ++state->attempts;
+      ++state->probe_cursor;
       ++inflight;
       state->last_sent_ms = now_ms;
       // Linear backoff keeps retries bounded without a growing flood; the
