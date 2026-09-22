@@ -8,6 +8,7 @@
 #include "psa/crypto.h"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/crc32.hpp"
+#include "routeloom/secure_clear.hpp"
 
 namespace routeloom::espnow {
 namespace {
@@ -28,7 +29,7 @@ Status nvs_status(const esp_err_t error, const char* detail) noexcept {
 // --- DevPskCommitVerifier ---------------------------------------------------------
 
 DevPskCommitVerifier::~DevPskCommitVerifier() {
-  std::memset(key_.data(), 0, key_.size());
+  secure_clear(key_);
   ready_ = false;
 }
 
@@ -59,7 +60,7 @@ Status DevPskCommitVerifier::initialize(
                       &out_length);
   (void)psa_destroy_key(key_id);
   if (result != PSA_SUCCESS || out_length != key_.size()) {
-    std::memset(key_.data(), 0, key_.size());
+    secure_clear(key_);
     return Status::error(StatusCode::InternalError,
                          "PSA HMAC derivation failed");
   }
@@ -92,7 +93,7 @@ Status DevPskCommitVerifier::mac(const ByteView input,
                            out.data(), out.size(), &out_length);
   (void)psa_destroy_key(key_id);
   if (result != PSA_SUCCESS || out_length != out.size()) {
-    std::memset(out.data(), 0, out.size());
+    secure_clear(out);
     return Status::error(StatusCode::InternalError, "PSA HMAC failed");
   }
   return Status::success();

@@ -165,8 +165,11 @@ class NullObserver final : public NodeObserver {
 class AutonomyFrameSink {
  public:
   virtual ~AutonomyFrameSink() = default;
+  // captured_ms: when the frame was captured on the node's own clock
+  // (received_us at radio enqueue); 0 = unknown, treated as now_ms.
   virtual void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
-                                 MonotonicMs now_ms) noexcept = 0;
+                                 MonotonicMs now_ms,
+                                 MonotonicMs captured_ms = 0) noexcept = 0;
   // Verify oracle (04 §10): fires for EVERY frame that cleared link
   // authentication + network/peer identity — not just autonomy types. The
   // migration agent uses it to close VERIFY on real connectivity evidence.
@@ -730,6 +733,13 @@ class MeshNode {
     std::uint32_t sojourn_samples{0};
     MonotonicMs last_sojourn_ms{0};
     MonotonicMs sojourn_window_ms{0};
+    // Per-peer HOP_ACCEPT round-trip EWMA (radio.md §8 adaptive RTO), in ms:
+    // MAC-accept -> authenticated accept arrival, measured on live
+    // exchanges only — a BUSY deferral's wait is peer-directed, never a
+    // link measurement. hop_rtt_samples == 0 means "unmeasured": the
+    // configured initial timeout applies.
+    std::uint32_t hop_rtt_ewma_ms{0};
+    std::uint32_t hop_rtt_samples{0};
     // Evidence gate for the metric mirror (sdk-completion/03 §3.3): a window
     // containing any Unknown-resolution attempt is dirty — dirty evidence may
     // worsen link_cost but never improve it; cleared on the next window roll.
@@ -894,6 +904,10 @@ class MeshNode {
     std::uint8_t attempts{0};
     std::uint8_t max_attempts{1};
     MonotonicMs deadline_ms{0};
+    // Earliest select eligibility (radio.md §8 link-retry jitter): 0 on a
+    // first transmission — retries stamp now+jitter so re-queued jobs yield
+    // the scheduler until the decorrelation delay elapses.
+    MonotonicMs not_before_ms{0};
     wire::EncodedFrame encoded{};
     bool encoded_valid{false};
     // Scheduler metadata — assigned at admission, preserved across requeues.
@@ -1083,6 +1097,8 @@ class MeshNode {
   struct AwaitingHop {
     TxJob job{};
     MonotonicMs expires_at_ms{0};
+    // MAC-accept time of this exchange — the RTT base for the adaptive RTO.
+    MonotonicMs sent_at_ms{0};
     // An authenticated BUSY deferred this exchange: on expiry the job is
     // re-admitted against its BUSY readmission budget instead of consuming
     // an RF-loss attempt (03 §5).
@@ -1166,6 +1182,8 @@ class MeshNode {
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
+  void resolve_radio_tx_result(std::uint64_t token, bool success,
+                               MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
   void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
@@ -1178,6 +1196,15 @@ class MeshNode {
   std::size_t peer_inflight(NodeId peer) const noexcept;
   std::uint8_t peer_window(NodeId peer) const noexcept;
   std::uint32_t busy_retry_hint() const noexcept;
+  // Adaptive per-peer hop-accept timeout (radio.md §8): the configured
+  // initial value while the peer is unmeasured, then EWMA*kLinkRtoMargin
+  // inside [kLinkRtoMinMs, kLinkRtoMaxMs].
+  std::uint32_t effective_hop_timeout_ms(NodeId peer) const noexcept;
+  // Deterministic retransmission eligibility time (radio.md §8 jitter):
+  // node id decorrelates peers, a counter decorrelates successive retries;
+  // never lands past the job's own deadline.
+  MonotonicMs link_retry_not_before_ms(const TxJob& job,
+                                       MonotonicMs now_ms) noexcept;
 
   // P3 load coupling (03 §6/§7): per-neighbor observation decay, busy-TTL,
   // effective link-cost refresh and the route-switch hysteresis tick.
@@ -1446,6 +1473,9 @@ class MeshNode {
   MonotonicMs triggered_at_ms_{0};
   MonotonicMs next_triggered_ms_{0};
   std::uint32_t trigger_counter_{0};
+  // Retry-jitter decorrelation counter — same convention as
+  // trigger_counter_ (node.cpp trigger_route_advertisement).
+  std::uint32_t retry_jitter_counter_{0};
   // Node-global ordering tag stamped on emitted BUSY payloads; receivers
   // compare it per-peer to reject stale/replayed feedback (03 §5).
   std::uint32_t next_feedback_sequence_{1};

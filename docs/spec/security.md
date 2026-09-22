@@ -35,6 +35,8 @@ CORE_FIXED_250実装はこの契約を強制する。アプリDATAとEND_RECEIPT
 
 開発Providerはこの規則を次の構造で実装する。context毎（scope+network+sender+receiver+epoch）の永続window recordと、peer pair毎（同tupleからepochを除いたもの）の永続epoch floorを持つ。同epochのwindow recordが消失していれば新規受付せず拒否し（reject-or-rehandshake）、floorを下回るepochは常に拒否する。window・floorのcommit失敗は受理を巻き戻し、破損recordはIntegrityErrorとして扱いfresh contextへ落とさない。floor自体の消失は初期bootと区別できないため、信頼できる単調状態または外部再認証なしの完全なrollback防止は保証外のままとする。TX側counterはMessage IDやsequenceから導出せず、Provider所有の耐電断予約から採番する。
 
+window・floor・TX counterの永続slotは公開のkeyless折り畳みから導出されるため、共有PSKを持つ内部者はNodeIdを選んで衝突を決定的に製造できる。衝突はcounter側ではcontext不一致の`Conflict`となり当該宛先への恒久TX不能に、replay側では他contextのrecord相互占有になる。dev profileではこの脅威を保証外とし、G-SECのidentity設計はslot導出に秘密saltを含め、衝突の狙い撃ちにcredential保有を要求することとする。
+
 ## 5. credential・鍵更新・削除
 
 trust anchor、device private key、membership証拠、session secretを異なるstore名で扱う。秘密はログ・USB診断・crash dumpに出さない。フラッシュ暗号化、Secure Boot、debug制限は配備プロファイルとして管理し、eFuseの不可逆設定をSDKが黙って実行しない。

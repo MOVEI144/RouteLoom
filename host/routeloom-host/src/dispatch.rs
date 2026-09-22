@@ -613,6 +613,11 @@ pub struct Dispatcher {
     config_done: Vec<(u64, ConfigOutcome)>,
     /// Bounded diagnostics drained by the loop into the event ring.
     notes: Vec<String>,
+    /// Dedup marker for the LaneMismatch diagnostic — re-armed on every
+    /// lease change. A bound foreign lane rejects every verb we emit, so
+    /// an undeduplicated note would flood the 64-deep ring on every op
+    /// and every skip_pending retry for the whole window lifetime.
+    lane_mismatch_noted: bool,
 }
 
 impl Dispatcher {
@@ -643,6 +648,7 @@ impl Dispatcher {
             config: None,
             config_done: Vec::new(),
             notes: Vec::new(),
+            lane_mismatch_noted: false,
         }
     }
 
@@ -670,6 +676,22 @@ impl Dispatcher {
         if self.notes.len() < 64 {
             self.notes.push(detail);
         }
+    }
+
+    /// The once-per-lease LaneMismatch diagnostic: the device lane is
+    /// bound to a different dispatcher id — this daemon recreated its
+    /// store and minted a new lineage, or a second daemon shares the
+    /// gateway — so every verb bounces until the gateway reboots and
+    /// wipes the window.
+    fn note_lane_mismatch(&mut self) {
+        if self.lane_mismatch_noted {
+            return;
+        }
+        self.lane_mismatch_noted = true;
+        self.note(
+            "gateway dispatch lane bound to a different dispatcher id — dispatch rejected until gateway reboot (store lineage changed or a second daemon shares the gateway)"
+                .to_string(),
+        );
     }
 
     /// Diagnostics collected this pass, drained by the driving loop.
@@ -1052,6 +1074,9 @@ impl Dispatcher {
         self.last_attempt.clear();
         self.floor = 0;
         self.floor_known = false;
+        // A new lease means a fresh device window — a lane conflict
+        // under it is new evidence worth another diagnostic.
+        self.lane_mismatch_noted = false;
         // The registration mirror cannot outlive the lease it was bound
         // under — a new boot/adapter gets a fresh lane. Publish the clear
         // only when a bound session could still be mirrored; the first
@@ -1767,6 +1792,9 @@ impl Dispatcher {
             HostOpsResult::LaneMismatch
             | HostOpsResult::InvalidRequest
             | HostOpsResult::Unsupported => {
+                if receipt.result == HostOpsResult::LaneMismatch {
+                    self.note_lane_mismatch();
+                }
                 let _ = store.update_operation(op_seq, &mut |o| {
                     if !o.concluded() {
                         o.dispatch_state = DispatchState::RejectedNotAccepted;
@@ -1880,6 +1908,9 @@ impl Dispatcher {
             HostOpsResult::LeaseMismatch
             | HostOpsResult::LaneMismatch
             | HostOpsResult::Conflict => {
+                if response.result == HostOpsResult::LaneMismatch {
+                    self.note_lane_mismatch();
+                }
                 let _ = store.update_operation(op_seq, &mut |o| {
                     if !o.concluded() {
                         o.dispatch_state = DispatchState::Indeterminate;
@@ -1943,6 +1974,9 @@ impl Dispatcher {
             HostOpsResult::LeaseMismatch
             | HostOpsResult::LaneMismatch
             | HostOpsResult::InvalidRequest => {
+                if receipt.result == HostOpsResult::LaneMismatch {
+                    self.note_lane_mismatch();
+                }
                 let _ = store.update_operation(op_seq, &mut |o| {
                     if !o.concluded() {
                         o.dispatch_state = DispatchState::Indeterminate;
@@ -3796,6 +3830,93 @@ mod tests {
             1_150 + QUERY_INTERVAL_MS,
         );
         assert_eq!(op(&store, b).dispatch_state, DispatchState::Indeterminate);
+    }
+
+    /// LaneMismatch = the device lane is bound to another dispatcher id
+    /// (recreated store lineage, or a second daemon on the gateway). The
+    /// record terminates REJECTED_NOT_ACCEPTED and exactly one diagnostic
+    /// reaches the note/event stream per lease: the mismatch recurs on
+    /// every verb until the gateway reboots, so a per-receipt note would
+    /// flood the ring.
+    #[test]
+    fn lane_mismatch_terminates_and_notes_once_per_lease() {
+        let mut store = MemoryOperationStore::new([7; 16]);
+        let mut dispatcher = Dispatcher::new([7; 16]);
+        let lane_notes =
+            |notes: &[String]| notes.iter().filter(|n| n.contains("dispatcher id")).count();
+        let a = admitted(&mut store, 0xf1, 30_000, 1_000);
+        let s1 = drive_to_submit(&mut dispatcher, &mut store, 1_000);
+        let _ = dispatcher.take_notes();
+        let seq_a = decode_submit(&s1.body).unwrap().dispatch_seq;
+        dispatcher.handle_reply(
+            &mut store,
+            s1.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::LaneMismatch,
+                SlotState::Empty,
+                seq_a,
+                Evidence::None,
+                [0; 32],
+            ),
+            1_050,
+        );
+        assert_eq!(
+            op(&store, a).dispatch_state,
+            DispatchState::RejectedNotAccepted
+        );
+        let notes = dispatcher.take_notes();
+        assert_eq!(lane_notes(&notes), 1, "{notes:?}");
+        // The rejected hole still owes a SKIP — and the bound lane
+        // refuses it too: the same recurring mismatch, no second note.
+        let out = dispatcher.tick(&mut store, &link(), 1_100);
+        let skip = out
+            .iter()
+            .find(|r| sub_of(r) == SUB_SKIP)
+            .expect("skip emitted")
+            .request;
+        dispatcher.handle_reply(
+            &mut store,
+            skip,
+            &receipt(
+                SUB_SKIP,
+                HostOpsResult::LaneMismatch,
+                SlotState::Empty,
+                seq_a,
+                Evidence::None,
+                [0; 32],
+            ),
+            1_110,
+        );
+        let notes = dispatcher.take_notes();
+        assert_eq!(lane_notes(&notes), 0, "{notes:?}");
+        // A second op's SUBMIT hits the same bound lane — still silent.
+        let b = admitted(&mut store, 0xf2, 30_000, 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_200);
+        let s2 = out
+            .iter()
+            .find(|r| sub_of(r) == host_ops::SUB_SUBMIT)
+            .expect("second submit");
+        let seq_b = decode_submit(&s2.body).unwrap().dispatch_seq;
+        dispatcher.handle_reply(
+            &mut store,
+            s2.request,
+            &receipt(
+                host_ops::SUB_SUBMIT,
+                HostOpsResult::LaneMismatch,
+                SlotState::Empty,
+                seq_b,
+                Evidence::None,
+                [0; 32],
+            ),
+            1_210,
+        );
+        assert_eq!(
+            op(&store, b).dispatch_state,
+            DispatchState::RejectedNotAccepted
+        );
+        let notes = dispatcher.take_notes();
+        assert_eq!(lane_notes(&notes), 0, "{notes:?}");
     }
 
     /// The device reporting an expired slot while our marker says

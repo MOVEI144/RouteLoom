@@ -340,6 +340,12 @@ struct RamDelta {
 pub struct SqliteOperationStore {
     path: PathBuf,
     lineage: [u8; 16],
+    /// Whether `open` minted this file (and therefore the lineage): a new
+    /// lineage is a new dispatcher id on the wire, so any gateway lane
+    /// still bound under a lost store's lineage rejects every dispatch
+    /// verb until the device reboots — the caller warns. False whenever
+    /// an existing store file was reopened.
+    created_fresh: bool,
     conn: Connection,
     ram_by_identity: HashMap<OpIdentity, StoredOperation>,
     ram_by_seq: HashMap<u64, OpIdentity>,
@@ -718,12 +724,21 @@ impl SqliteOperationStore {
         Ok(Self {
             path: path.to_path_buf(),
             lineage,
+            created_fresh: fresh,
             conn,
             ram_by_identity: HashMap::new(),
             ram_by_seq: HashMap::new(),
             lane_tombstones,
             mono_anchor: HashMap::new(),
         })
+    }
+
+    /// True only when `open` created the store file — i.e. this boot
+    /// minted a brand-new lineage rather than resuming one on disk.
+    /// A fresh lineage invalidates every gateway dispatch lane bound
+    /// under a previous store until the device reboots.
+    pub fn was_created_fresh(&self) -> bool {
+        self.created_fresh
     }
 
     fn fault(error: rusqlite::Error) -> SubmitOutcome {
@@ -1755,6 +1770,23 @@ mod tests {
                 2000,
             );
             assert_eq!(seq, 3);
+        }
+    }
+
+    /// `was_created_fresh` is the lineage-loss signal: a store that
+    /// minted its file this open reports it so the caller can warn about
+    /// orphaned gateway lanes; reopening the same file reports false —
+    /// the lineage survived and no lane moved.
+    #[test]
+    fn was_created_fresh_only_on_first_open() {
+        let db = TestDb::new("created-fresh");
+        {
+            let store = db.open();
+            assert!(store.was_created_fresh());
+        }
+        {
+            let store = db.open();
+            assert!(!store.was_created_fresh());
         }
     }
 

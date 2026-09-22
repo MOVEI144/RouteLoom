@@ -202,8 +202,10 @@ void inject(Harness& h, NodeId receiver, NodeId peer,
 // Step `id` until `expected` DATA transmissions of `seq` have been observed.
 // Background jobs (the one boot-time route advertisement) may legitimately
 // consume a dispatch turn, so callers must not assume one poll == one DATA.
+// The retry path adds link-jitter (radio.md §8, <=20 ms) before a
+// retransmission is select-eligible — the step budget must outlast it.
 void drive_tx(Harness& h, NodeId id, std::uint64_t seq, std::size_t expected,
-              int max_steps = 16) {
+              int max_steps = 64) {
   for (int k = 0; k < max_steps && h.data_sights(seq) < expected; ++k) {
     h.step(id);
     ++h.now;
@@ -345,16 +347,19 @@ void test_flow_caps() {
   h.link(1, 4);
   h.link(1, 6);
 
-  // 12 forwards claiming the SAME origin, alternating two sender scopes so
-  // the per-origin cap (not the per-scope cap) is what trips.
-  for (std::uint64_t i = 1; i <= 12; ++i) {
+  // 14 forwards claiming the SAME origin, alternating two sender scopes so
+  // the per-origin cap (not the per-scope cap) is what trips. Each step
+  // drains the accept AND sends the next queued job inside the same flush
+  // (TX-complete submits directly) — the peer window holds 2 forwards in
+  // flight, so 14 admissions leave 12 pooled against the cap.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     const NodeId peer = (i % 2 == 0) ? 3 : 4;
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, i));
     h.step(1);  // drains the accept; the forward job accumulates
     ++h.now;
   }
   const NodeId peer = 3;
-  inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, 13));
+  inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, 15));
   CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
   CHECK(a->congestion_stats().busy_send_failed >= 1);  // legacy peer: counted drop
   CHECK(a->congestion_stats().flows_active <= kFlowDescriptorsMax);
@@ -372,14 +377,17 @@ void test_busy_emission() {
   h.link(2, 4);
   b->set_peer_busy_capable(3, true);
 
-  // 12 transit DATA from P with distinct origins fill the per-scope cap.
-  for (std::uint64_t i = 1; i <= 12; ++i) {
+  // 14 transit DATA from P with distinct origins fill the per-scope cap.
+  // Each step drains the accept AND sends the next queued job inside the
+  // same flush (TX-complete submits directly) — the peer window holds 2
+  // forwards in flight, so 14 admissions leave 12 pooled against the cap.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
     h.step(2);  // drains the HOP_ACCEPT so the control lane stays usable
     ++h.now;
   }
   const std::size_t sights_before = h.net.sights.size();
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 13));
+  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
   CHECK(b->congestion_stats().busy_sent == 1);
 
   h.step(2);  // BUSY leaves via the reserved control lane
@@ -405,15 +413,16 @@ void test_busy_legacy_peer() {
   (void)h.add(4);
   h.link(3, 2);
   h.link(2, 4);
-  // NB: no set_peer_busy_capable — P is a legacy peer.
-
-  for (std::uint64_t i = 1; i <= 12; ++i) {
+  // NB: no set_peer_busy_capable — P is a legacy peer. Two forwards go
+  // in flight under the peer window while each step drains the rest, so
+  // 14 admissions leave the per-scope cap full.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
     h.step(2);
     ++h.now;
   }
   const std::size_t sights_before = h.net.sights.size();
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 13));
+  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
   CHECK(b->congestion_stats().busy_sent == 0);
   CHECK(b->congestion_stats().busy_send_failed >= 1);
   for (std::size_t i = sights_before; i < h.net.sights.size(); ++i) {
@@ -665,16 +674,18 @@ void test_watermarks() {
   h.link(1, 5);
   h.link(1, 6);
 
-  // 26 forwards accumulate; each step drains that frame's control-lane
-  // accept. Cycling three sender scopes keeps every cap below its bound.
-  for (std::uint64_t i = 1; i <= 26; ++i) {
+  // 29 forwards accumulate; each step drains that frame's control-lane
+  // accept AND sends the next queued job inside the same flush — the peer
+  // window holds 2 forwards in flight (the boot advertisement is drained
+  // too), leaving 27 pooled. Cycling three sender scopes keeps every cap
+  // below its bound.
+  for (std::uint64_t i = 1; i <= 29; ++i) {
     const NodeId peer = 3 + (i % 3);
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 5000 + i, 6, i));
     h.step(1);
     ++h.now;
   }
-  // 26 forwards + 1 boot-time route advertisement = 27/32 (84%) — the
-  // bulk-stop watermark is active.
+  // 27 pooled forwards = 27/32 (84%) — the bulk-stop watermark is active.
   CHECK(a->congestion_stats().queued == 27);
 
   SendOptions bulk{};
@@ -845,6 +856,281 @@ void test_busy_feedback_wrap() {
   CHECK(a->congestion_stats().busy_stale == 1);
 }
 
+// radio.md §8 (#45): per-peer link RTT EWMA replaces the fixed 60 ms
+// hop-accept deadline — clamp(ewma*2, 20, 250). Scripted accepts at
+// controlled delays populate the EWMA; a silent exchange then exposes the
+// adapted deadline through its retry timing.
+void test_adaptive_hop_timeout_shrinks() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);   // never polled: only our scripted accepts land
+  h.link(1, 2);
+
+  // Three ~10 ms accepts seed the per-peer EWMA (first sample seeds it).
+  for (int s = 0; s < 3; ++s) {
+    MessageId m{};
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+    drive_tx(h, 1, m.sequence, 1);
+    h.now += 10;
+    inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0,
+                                 static_cast<std::uint64_t>(s + 1)));
+  }
+  // The previously dead window fields are now populated by the accept path
+  // (the small DATA frame lands in frame-length class 2 once the #46
+  // fixed per-frame charge is included).
+  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 2, 2};
+  const ObservationBucket* bucket = a->telemetry_bucket(key);
+  CHECK(bucket != nullptr);
+  if (bucket == nullptr) return;
+  CHECK(bucket->current.hop_rtt_samples == 3);
+  CHECK(bucket->current.hop_accepts >= 3);
+  CHECK(bucket->current.hop_rtt_us_ewma >= 9000 &&
+        bucket->current.hop_rtt_us_ewma <= 12000);
+
+  // ewma ~= 10 ms -> effective = clamp(20, 20, 250) = 20 ms: a silent
+  // exchange now expires far inside the old fixed 60 ms.
+  MessageId silent{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, silent));
+  drive_tx(h, 1, silent.sequence, 1);
+  h.now += 14;
+  h.step(1);
+  h.step(1);
+  CHECK(h.data_sights(silent.sequence) == 1);  // ~+15 ms: still awaiting
+  h.now += 35;
+  drive_tx(h, 1, silent.sequence, 2);          // expired ~+20 -> retry TX2
+  CHECK(h.data_sights(silent.sequence) == 2);
+}
+
+// Same mechanism upward: a measured RTT above half the base lifts the
+// deadline past 60 ms, and a large EWMA caps it at the spec's 250 ms.
+void test_adaptive_hop_timeout_expands_and_caps() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  for (int s = 0; s < 2; ++s) {
+    MessageId m{};
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+    drive_tx(h, 1, m.sequence, 1);
+    h.now += 55;
+    inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0,
+                                 static_cast<std::uint64_t>(s + 10)));
+  }
+  // ewma ~= 55 ms -> effective ~= 110 ms: the old 60 ms fixed timeout would
+  // already have retried here.
+  MessageId mid{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, mid));
+  drive_tx(h, 1, mid.sequence, 1);
+  h.now += 65;
+  h.step(1);
+  h.step(1);
+  CHECK(h.data_sights(mid.sequence) == 1);
+  h.now += 80;
+  drive_tx(h, 1, mid.sequence, 2);
+  CHECK(h.data_sights(mid.sequence) == 2);
+
+  // Cap: feed samples just inside each successive effective deadline —
+  // the EWMA climbs until clamp(ewma*2) saturates at 250 ms. Transit
+  // forwards run the same awaiting/accept path without spending the
+  // bounded delivery table.
+  Harness h2;
+  MeshNode* a2 = h2.add(1);
+  (void)h2.add(2);
+  (void)h2.add(3);
+  h2.link(1, 2);
+  h2.link(1, 3);
+  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 2, 3};
+  for (int s = 0; s < 14; ++s) {
+    const ObservationBucket* b = a2->telemetry_bucket(key);
+    const std::uint32_t ewma_ms =
+        b != nullptr ? b->current.hop_rtt_us_ewma / 1000 : 0;
+    if (ewma_ms * 2 >= kLinkRtoMaxMs) break;
+    const std::uint64_t seq = 500 + static_cast<std::uint64_t>(s);
+    inject(h2, 1, 2,
+           craft_transit(h2.cipher, 2, 1, 5000 + s, 3, seq));
+    drive_tx(h2, 1, seq, 1);
+    h2.now += ewma_ms == 0
+                  ? 59
+                  : std::min<std::uint32_t>(2 * ewma_ms, kLinkRtoMaxMs) - 10;
+    inject(h2, 1, 3,
+           craft_accept(h2.cipher, 3, 1, FrameType::Data, 5000 + s,
+                        MessageId{42, seq}, 0, static_cast<std::uint64_t>(s + 20)));
+  }
+  const ObservationBucket* b = a2->telemetry_bucket(key);
+  CHECK(b != nullptr && b->current.hop_rtt_us_ewma / 1000 * 2 >= kLinkRtoMaxMs);
+  // A silent transit forward now expires at the 250 ms ceiling, not the
+  // old 60 ms.
+  const std::uint64_t capped_seq = 999;
+  inject(h2, 1, 2, craft_transit(h2.cipher, 2, 1, 7000, 3, capped_seq));
+  drive_tx(h2, 1, capped_seq, 1);
+  h2.now += 245;
+  h2.step(1);
+  h2.step(1);
+  CHECK(h2.data_sights(capped_seq) == 1);
+  h2.now += 45;
+  drive_tx(h2, 1, capped_seq, 2);
+  CHECK(h2.data_sights(capped_seq) == 2);
+}
+
+// PR review (#45 follow-up): the HOP_ACCEPT match key carries no attempt
+// discriminator, so a delayed accept landing after a retransmission may
+// answer an earlier attempt — measuring `now - sent_at_ms` against the
+// latest send would learn a too-short RTT. Retransmitted exchanges still
+// resolve the accept but feed nothing into RTO adaptation.
+void test_retransmitted_exchange_not_rtt_sampled() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);   // never polled: only our scripted accepts land
+  h.link(1, 2);
+
+  // First TX ~1 ms; the unmeasured peer waits the configured 60 ms.
+  MessageId m{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+  drive_tx(h, 1, m.sequence, 1);
+
+  // Past the awaiting deadline: expiry re-queues the retry under jitter,
+  // then the retransmission lands (portable repro: retry ~78 ms).
+  h.now += 77;
+  h.step(1);
+  drive_tx(h, 1, m.sequence, 2);
+
+  // The delayed accept for the first attempt arrives ~2 ms after the
+  // retry went out — ambiguous, so it resolves without an RTT sample.
+  h.now += 2;
+  inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0, 77));
+
+  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 2, 2};
+  const ObservationBucket* bucket = a->telemetry_bucket(key);
+  CHECK(bucket != nullptr);
+  if (bucket == nullptr) return;
+  CHECK(bucket->current.hop_accepts == 1);
+  CHECK(bucket->current.hop_rtt_samples == 0);
+
+  // RTO keeps the configured 60 ms: stepped in 1 ms ticks, the follow-up
+  // delivery sees just one transmission inside that window — a collapsed
+  // 20 ms RTO would have expired and re-sent (2 sights) before it ends.
+  MessageId next{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, next));
+  drive_tx(h, 1, next.sequence, 1);
+  for (int t = 0; t < 50; ++t) {
+    h.step(1);
+    ++h.now;
+  }
+  CHECK(h.data_sights(next.sequence) == 1);
+}
+
+// radio.md §8 + 04 §4.2 (#45): the populated hop-RTT EWMA must carry its
+// wire validity bit — a nonzero measurement flagged absent is discarded by
+// receivers honoring the flag, and a class with no contributing samples
+// reports zero with the bit clear.
+void test_telemetry_hop_rtt_validity_bit() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  MessageId m{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+  drive_tx(h, 1, m.sequence, 1);
+  h.now += 10;
+  inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0, 1));
+
+  TelemetryQuery query{};
+  query.request_id = 7;
+  query.peer = 2;
+  query.direction = ObservationDirection::Egress;
+  query.length_class = 2;  // small DATA + #46 fixed charge
+  TelemetrySnapshot snap{};
+  DiagnosticRejectReason reason{};
+  CHECK_OK(a->build_telemetry_snapshot(query, h.now, snap, reason));
+  CHECK((snap.validity & kTelemetryValidHopRttEwma) != 0);
+  CHECK(snap.hop_rtt_us_ewma != 0);
+
+  query.length_class = 1;
+  TelemetrySnapshot empty{};
+  CHECK_OK(a->build_telemetry_snapshot(query, h.now, empty, reason));
+  CHECK((empty.validity & kTelemetryValidHopRttEwma) == 0);
+  CHECK(empty.hop_rtt_us_ewma == 0);
+}
+
+// radio.md §8 (#45): a link retry is re-queued with jittered not_before —
+// 0..20 ms normally, 20..100 ms while the peer reports busy — so a frozen
+// clock can never trigger the retransmission.
+void test_link_retry_jitter() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);
+  h.now += 70;   // awaiting deadline crossed
+  h.step(1);     // expiry processed -> retry re-queued with jitter
+  // The deterministic first jitter on node 1 is nonzero (17 ms): at a
+  // frozen clock the retry stays queued, unlike the old immediate path.
+  h.step(1);
+  h.step(1);
+  CHECK(h.data_sights(data.sequence) == 1);
+  h.now += 25;   // past the 20 ms bound -> eligible
+  drive_tx(h, 1, data.sequence, 2);
+  CHECK(h.data_sights(data.sequence) == 2);
+
+  // Congested range: a matched BUSY Reject marks the peer busy, then a
+  // timed-out retry is held back >=20 ms and <=100 ms.
+  Harness h2;
+  MeshNode* a2 = h2.add(1);
+  (void)h2.add(2);
+  h2.link(1, 2);
+  MessageId busy_job{};
+  CHECK_OK(a2->send(2, payload_view(), SendOptions{}, h2.now, busy_job));
+  drive_tx(h2, 1, busy_job.sequence, 1);
+  auto reject = busy_for(busy_job, 1, 0, 50, 1);
+  inject(h2, 1, 2, craft_busy(h2.cipher, 2, 1, reject, 1));
+  MessageId j2{};
+  CHECK_OK(a2->send(2, payload_view(), SendOptions{}, h2.now, j2));
+  drive_tx(h2, 1, j2.sequence, 1);
+  h2.now += 70;
+  h2.step(1);    // j2 expiry -> retry held 20..100 ms
+  h2.now += 15;
+  h2.step(1);
+  h2.step(1);
+  CHECK(h2.data_sights(j2.sequence) == 1);   // not_before >= +20
+  h2.now += 100;                             // not_before <= +100
+  drive_tx(h2, 1, j2.sequence, 2);
+  CHECK(h2.data_sights(j2.sequence) == 2);
+}
+
+// radio.md §8 (#45): the adaptive floor is also the config floor — a
+// hop_accept_timeout_ms below 20 ms can only violate the physical bound.
+void test_hop_timeout_config_floor() {
+  NodeConfig cfg{};
+  cfg.network = kNet;
+  cfg.node = 1;
+  cfg.message_session = 101;
+  cfg.route_generation = 1;
+  cfg.route_advertisement_period_ms = 30000;
+  cfg.route_lifetime_ms = 60000;
+  cfg.max_link_attempts = 2;
+  cfg.max_end_to_end_rounds = 3;
+  SimNetwork net;
+  TestSecurity cipher;
+  CapturingObserver observer;
+  SimRadio radio(net, 1);
+
+  cfg.hop_accept_timeout_ms = kLinkRtoMinMs - 1;
+  MeshNode low(cfg, radio, cipher, observer);
+  CHECK(low.start(0).code == StatusCode::InvalidArgument);
+
+  cfg.hop_accept_timeout_ms = kLinkRtoMinMs;
+  MeshNode floor(cfg, radio, cipher, observer);
+  CHECK_OK(floor.start(0));
+}
+
+
 // --- issue #46: transmission-budget accounting (radio.md §9/§14) -------------
 
 std::size_t route_ads(const Harness& h, NodeId from) {
@@ -946,10 +1232,12 @@ void test_control_budget_gate() {
   h.step(1);
   CHECK(route_ads(h, 1) == 1);
 
-  // Once the wait lands the bucket has refilled and the ad emits.
+  // Once the wait lands the bucket has refilled and the ad emits — the
+  // periodic ad and the neighbor-add trigger both pass the refilled gate,
+  // and TX-complete submits the second frame inside the same step.
   h.now += 7000;
   h.step(1);
-  CHECK(route_ads(h, 1) == 2);
+  CHECK(route_ads(h, 1) == 3);
   CHECK(a->congestion_stats().service_us_control >= 24000);
 }
 
@@ -972,11 +1260,11 @@ void test_control_budget_unsatisfiable() {
   // The next tick needs ~11850µs of refill — a wait the 200ms lease
   // cannot absorb. The neighbor-add trigger is armed by then too, so
   // both emission paths report the breach (one diag per episode) and go
-  // out unfunded: the burst takes the single in-flight TX slot, the
-  // queued periodic frame follows on the next dispatch.
+  // out unfunded: the burst takes the single in-flight TX slot and the
+  // queued periodic frame follows as soon as it completes (same step).
   h.now += 150;
   h.step(1);
-  CHECK(route_ads(h, 1) == 2);
+  CHECK(route_ads(h, 1) == 3);
   CHECK(a->congestion_stats().control_budget_unsatisfiable == 2);
   CHECK(h.observer(1)->has_diag("CONTROL_BUDGET_UNSATISFIABLE"));
 
@@ -984,7 +1272,7 @@ void test_control_budget_unsatisfiable() {
   // counter records every unfunded emission.
   h.now += 500;
   h.step(1);
-  CHECK(route_ads(h, 1) == 3);
+  CHECK(route_ads(h, 1) == 4);
   CHECK(a->congestion_stats().control_budget_unsatisfiable == 3);
 }
 
@@ -1017,20 +1305,26 @@ void test_control_budget_over_capacity_service() {
   CHECK(a->congestion_stats().control_budget_unsatisfiable == 0);
 
   // Inside the wait the ad stays parked; once the debt is repaid the
-  // emission lands.
+  // emission lands (periodic + neighbor-add trigger, sent back to back in
+  // the same step).
   h.now += 18500;
   h.step(1);
   CHECK(route_ads(h, 1) == 1);
   h.now += 2000;
   h.step(1);
-  CHECK(route_ads(h, 1) == 2);
+  CHECK(route_ads(h, 1) == 3);
   CHECK(a->congestion_stats().service_us_control >= 40000);
 
-  // Emissions keep flowing at the real airtime rate (~1 frame per 20s):
-  // route maintenance survives on the node's own budget over the lease.
+  // Emissions keep flowing at the real airtime rate: the back-to-back
+  // pair debited ~40000µs, so the next emission waits ~40s — inside the
+  // 60s lease. Route maintenance survives on the node's own budget.
   h.now += 21000;
   h.step(1);
   CHECK(route_ads(h, 1) == 3);
+  CHECK(a->congestion_stats().control_budget_unsatisfiable == 0);
+  h.now += 20000;
+  h.step(1);
+  CHECK(route_ads(h, 1) >= 4);
   CHECK(a->congestion_stats().control_budget_unsatisfiable == 0);
 }
 
@@ -1120,6 +1414,12 @@ int main() {
   test_watermarks();
   test_busy_never_cancels();
   test_observation_buckets();
+  test_adaptive_hop_timeout_shrinks();
+  test_adaptive_hop_timeout_expands_and_caps();
+  test_retransmitted_exchange_not_rtt_sampled();
+  test_telemetry_hop_rtt_validity_bit();
+  test_link_retry_jitter();
+  test_hop_timeout_config_floor();
   test_charge_fixed_cost();
   test_airtime_ledger_domains();
   test_control_budget_gate();

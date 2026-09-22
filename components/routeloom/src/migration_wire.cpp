@@ -1,6 +1,8 @@
 #include "routeloom/migration_wire.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "routeloom/byte_io.hpp"
 
@@ -826,7 +828,9 @@ void MigrationAgent::record_readiness(const NodeId peer,
   // older offer must not count toward the next plan's gate (04 §7).
   entry->plan_hash = report.plan_hash;
   entry->answered = true;
-  entry->ready = report.status == ReadyStatus::Ready;
+  // READY is evidence of the full condition set — an unarmed clock is not
+  // ready even when the blob stored fine (04 §7).
+  entry->ready = report.status == ReadyStatus::Ready && report.clock_ok;
   entry->migration_capable = report.migration_capable;
   entry->sleep_lease_valid = report.sleep_lease_valid;
   entry->rediscovery_capable = report.rediscovery_capable;
@@ -1218,7 +1222,8 @@ void MigrationAgent::pump_pending(const MonotonicMs now_ms) noexcept {
 void MigrationAgent::on_migration_frame(const NodeId peer,
                                         const FrameType type,
                                         const ByteView payload,
-                                        const MonotonicMs now_ms) noexcept {
+                                        const MonotonicMs now_ms,
+                                        const MonotonicMs captured_ms) noexcept {
   switch (type) {
     case FrameType::ControlObject: {
       autonomy::ControlObjectPayload manifest{};
@@ -1278,13 +1283,36 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
         // (D5-03). Other samples are valid wire traffic, not clock evidence.
         return;
       }
+      if (peer != sample.source) {
+        // TimeSync is strictly 1-hop: the claimed source must be the
+        // link-authenticated sender itself, anything else is a forgery.
+        owner_.on_migration_event("TIME_SYNC_SOURCE_MISMATCH", peer);
+        return;
+      }
+      // Queue residence sits inside the verified bound (04 §8): measure the
+      // offset at capture and debit capture-to-processing time from the same
+      // uncertainty budget, so an over-bound sample is refused by note_clock.
+      const MonotonicMs captured =
+          captured_ms != 0 ? captured_ms : now_ms;
       ClockMapping mapping{};
-      mapping.peer_offset_ms = static_cast<std::int64_t>(
-                                   sample.reference_ms) -
-                               static_cast<std::int64_t>(now_ms);
-      mapping.uncertainty_ms =
-          sample.uncertainty_ms + config_.rx_clock_slack_ms;
-      (void)participant_.note_clock(mapping, now_ms);
+      mapping.peer_offset_ms =
+          static_cast<std::int64_t>(sample.reference_ms) -
+          static_cast<std::int64_t>(captured);
+      mapping.uncertainty_ms = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(
+              static_cast<std::uint64_t>(sample.uncertainty_ms) +
+                  (now_ms - captured) + config_.rx_clock_slack_ms,
+              std::numeric_limits<std::uint32_t>::max()));
+      if (participant_.note_clock(mapping, now_ms).ok() &&
+          participant_.phase() == ParticipantPhase::Preparing) {
+        // The READY gate only accepts clock_ok evidence: a node that armed
+        // after its first report re-reports READY, or it would look unready
+        // for the rest of the prepare window.
+        const MigrationPlan* plan = participant_.pending_plan();
+        emit_ready_report(participant_.pending_hash(),
+                          plan != nullptr ? plan->new_epoch : ChannelEpoch{},
+                          ReadyStatus::Ready, now_ms);
+      }
       break;
     }
     default:
@@ -1477,8 +1505,12 @@ Status MigrationAgent::offer_plan(
     issued_snapshot_size_ = wrapped;
   }
 
-  // The authority's own node is a plan participant too: local prepare now,
-  // local commit evidence at release_commit.
+  // The authority's own node is a plan participant too: it can never hear
+  // its own TimeSync, so it self-arms once here — identity mapping, the
+  // authority's clock IS the authority domain (needed for its own
+  // feasibility check, issued_switch_local_ms_ and its own cutover).
+  (void)participant_.note_clock(
+      ClockMapping{0, config_.timesync_uncertainty_ms}, now_ms);
   (void)participant_.prepare(plan_blob, config_.measurements, now_ms);
   issued_switch_local_ms_ = participant_.pending_switch_local();
 
@@ -1578,11 +1610,10 @@ Status MigrationAgent::resume(const MonotonicMs now_ms) noexcept {
   if (!status) return status;
   last_phase_ = participant_.phase();
   // Durable active record vs physical committed channel: firmware normally
-  // already booted onto the record's channel; a mismatch means the
-  // boot-time read was unavailable — reconcile through a real verified
-  // ChannelCutover, never a bare assignment.
-  reconcile_needed_ =
-      participant_.active_channel() != runner_.committed_channel();
+  // already booted onto the record's channel; any mismatch — boot-time
+  // read unavailable or a mid-run stranded radio — is reconciled
+  // continuously in poll() through a real verified ChannelCutover, never
+  // a bare assignment.
   next_snapshot_request_ms_ = now_ms + config_.snapshot_request_period_ms;
   next_timesync_ms_ = now_ms + config_.timesync_period_ms;
   return Status::success();
@@ -1633,30 +1664,43 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
     last_phase_ = phase;
   }
 
-  // Resume-time channel reconcile: one bounded verified re-apply, never
-  // while a plan is mid-flight (the engine's own cutover owns the runner).
-  if (reconcile_needed_ && !reconcile_pending_op_ &&
-      !participant_.in_progress()) {
-    if (!runner_.busy()) {
-      RadioOperation op{};
-      op.kind = RadioOperationKind::ChannelCutover;
-      op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
-      op.constraints.channel = participant_.active_channel();
-      op.constraints.outage_permitted = true;
-      reconcile_token_ = runner_.request(op, now_ms);
-      reconcile_pending_op_ = true;
-    }
-  } else if (reconcile_pending_op_) {
+  // Live channel reconcile (04 §9.2): the runner's committed channel must
+  // always equal the engine's active record — a stranded visit return or
+  // an unavailable boot-time read otherwise parks the radio on the wrong
+  // channel with no diagnosis. Never while a plan is mid-flight: the
+  // engine's own cutover owns the runner then.
+  const bool channel_diverged =
+      runner_.committed_channel() != participant_.active_channel();
+  if (!channel_diverged) {
+    // Channels agree: the episode is over, the next divergence gets a
+    // fresh attempt budget.
+    reconcile_attempts_ = 0;
+    reconcile_exhausted_ = false;
+  }
+  if (reconcile_pending_op_) {
     OperationResult result{};
     if (runner_.result(reconcile_token_, result) &&
         result.outcome != OperationOutcome::Pending) {
       reconcile_pending_op_ = false;
-      reconcile_needed_ = false;
-      if (result.outcome != OperationOutcome::Applied) {
+      if (result.outcome != OperationOutcome::Applied &&
+          ++reconcile_attempts_ >=
+              migration_wire_const::kChannelReconcileAttempts) {
+        reconcile_exhausted_ = true;
         owner_.on_migration_event("RESUME_CHANNEL_DIVERGED",
                                   kInvalidNodeId);
+        participant_.note_recovery_violation(now_ms);
       }
     }
+  }
+  if (channel_diverged && !reconcile_pending_op_ && !reconcile_exhausted_ &&
+      !participant_.in_progress() && !runner_.busy()) {
+    RadioOperation op{};
+    op.kind = RadioOperationKind::ChannelCutover;
+    op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
+    op.constraints.channel = participant_.active_channel();
+    op.constraints.outage_permitted = true;
+    reconcile_token_ = runner_.request(op, now_ms);
+    reconcile_pending_op_ = true;
   }
   if (survey_pending_) {
     OperationResult result{};

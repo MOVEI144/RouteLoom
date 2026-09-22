@@ -276,12 +276,14 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
 
 MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
                                                const MeshNode& node) noexcept {
-  (void)now_ms;
   if (selected_ != nullptr) return nullptr;
   // Reserved control lane first: a required ACK/BUSY response never waits
   // behind bulk DATA (03 §4) and is never held by the pause mask — it is
-  // exactly the control a pause must keep alive (01 §3.3).
-  if (TxJob* job = control_.pop_front()) {
+  // exactly the control a pause must keep alive (01 §3.3). A control job
+  // carrying a retry-jitter hold defers to the next select pass, same as a
+  // window-blocked flow.
+  if (control_.head != nullptr && control_.head->not_before_ms <= now_ms) {
+    TxJob* job = control_.pop_front();
     selected_ = job;
     selected_control_ = true;
     selected_flow_ = nullptr;
@@ -315,6 +317,14 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
         if (head == nullptr) {
           // Defensive: an empty flow is never supposed to sit in the ring.
           if (!flow->overflow) flows_.release(flow);
+          continue;
+        }
+        if (head->not_before_ms > now_ms) {
+          // Link-retry jitter hold (radio.md §8): the job waits for its
+          // decorrelation delay — skipped like a window-blocked head and
+          // revisited on a later pass.
+          flow->in_rr = true;
+          (void)ring.push(flow);
           continue;
         }
         if (!node.tx_admitted_now(*head)) {
@@ -437,7 +447,8 @@ Status MeshNode::validate_config() const noexcept {
       config_.message_session == 0 || config_.route_generation == 0 ||
       config_.route_advertisement_period_ms == 0 ||
       config_.route_lifetime_ms <= config_.route_advertisement_period_ms ||
-      config_.hop_accept_timeout_ms == 0 || config_.callback_watchdog_ms == 0 ||
+      config_.hop_accept_timeout_ms < kLinkRtoMinMs ||
+      config_.callback_watchdog_ms == 0 ||
       config_.max_link_attempts == 0 || config_.max_end_to_end_rounds == 0 ||
       // rf_attempts_max is a pinned contract value (03 §5), not a tunable:
       // a config above it would silently exceed the RF-loss retry budget.
@@ -535,6 +546,8 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->sojourn_samples = 0;
   record->last_sojourn_ms = 0;
   record->sojourn_window_ms = 0;
+  record->hop_rtt_ewma_ms = 0;
+  record->hop_rtt_samples = 0;
   record->busy_active = false;
   record->busy_since_ms = 0;
   record->last_busy_feedback_ms = 0;
@@ -1751,6 +1764,16 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
                                   const MonotonicMs now_ms) noexcept {
+  resolve_radio_tx_result(token, success, now_ms);
+  // A resolved send frees the driver's single in-flight slot at once:
+  // submit the next frame inside the same task turn — waiting for the next
+  // poll tick leaves idle airtime between back-to-back frames.
+  dispatch_next(now_ms);
+}
+
+void MeshNode::resolve_radio_tx_result(const std::uint64_t token,
+                                       const bool success,
+                                       const MonotonicMs now_ms) noexcept {
   last_clock_ms_ = now_ms;
   ++work_generation_;
   if (!physical_.active || physical_.token != token) {
@@ -1799,8 +1822,11 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   // An authenticated BUSY that arrived while the frame was with the driver
   // takes effect now: the exchange is deferred, not retried as RF loss.
   awaiting->busy_deferred = busy_deferred;
+  awaiting->sent_at_ms = now_ms;
   awaiting->expires_at_ms =
-      now_ms + (busy_deferred ? busy_retry_ms : config_.hop_accept_timeout_ms);
+      now_ms + (busy_deferred
+                    ? busy_retry_ms
+                    : effective_hop_timeout_ms(awaiting->job.peer));
   if (awaiting->job.owner == JobOwner::OriginDelivery) {
     if (auto* delivery = find_delivery(awaiting->job.ack.key.id);
         delivery != nullptr && !sleep_terminal(delivery->state)) {
@@ -1923,6 +1949,9 @@ void MeshNode::retry_or_fail(TxJob& job, const char* reason,
     // Each SDK retry receives a fresh link counter. Reusing a captured frame would
     // make strict anti-replay incompatible with reliable delivery.
     job.encoded_valid = false;
+    // Link-retry decorrelation (radio.md §8): the re-queued job is not
+    // select-eligible until the jittered delay elapses.
+    job.not_before_ms = link_retry_not_before_ms(job, now_ms);
     TxJob pending = std::move(job);
     if (!scheduler_.enqueue(std::move(pending), config_.node, now_ms)) {
       fail_job(pending, "TX_QUEUE_FULL", now_ms);
@@ -1976,6 +2005,41 @@ std::uint8_t MeshNode::peer_window(const NodeId peer) const noexcept {
   return neighbor->tx_window;
 }
 
+std::uint32_t MeshNode::effective_hop_timeout_ms(
+    const NodeId peer) const noexcept {
+  const auto* neighbor = find_neighbor(peer);
+  // Unmeasured peers keep the configured initial RTO (radio.md §8); a
+  // measured peer adapts inside the clamped band. The sample count, not the
+  // EWMA value, gates adaptation — an honestly measured ~0 ms round trip
+  // still clamps to the floor.
+  if (neighbor == nullptr || neighbor->hop_rtt_samples == 0) {
+    return config_.hop_accept_timeout_ms;
+  }
+  const std::uint64_t scaled =
+      static_cast<std::uint64_t>(neighbor->hop_rtt_ewma_ms) * kLinkRtoMargin;
+  return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      kLinkRtoMaxMs, std::max<std::uint64_t>(kLinkRtoMinMs, scaled)));
+}
+
+MonotonicMs MeshNode::link_retry_not_before_ms(
+    const TxJob& job, const MonotonicMs now_ms) noexcept {
+  const auto* neighbor = find_neighbor(job.peer);
+  const bool congested = neighbor != nullptr && neighbor->busy_active;
+  const std::uint32_t bound =
+      congested
+          ? kLinkRetryJitterCongestedMaxMs - kLinkRetryJitterCongestedMinMs + 1
+          : kLinkRetryJitterNormalMaxMs + 1;
+  // Deterministic spread, same convention as the route-advertisement jitter
+  // (~node.cpp:3834): node id decorrelates peers, the counter decorrelates
+  // successive retries — no RNG needed.
+  const std::uint32_t offset = static_cast<std::uint32_t>(
+      (config_.node * 31ULL + ++retry_jitter_counter_ * 7ULL) % bound);
+  const std::uint32_t jitter =
+      congested ? kLinkRetryJitterCongestedMinMs + offset : offset;
+  // A retry delayed past its own deadline never gets its last attempt.
+  return std::min(now_ms + jitter, job.deadline_ms);
+}
+
 bool MeshNode::tx_admitted_now(const TxJob& job) const noexcept {
   // Only jobs that enter the HOP_ACCEPT exchange consume window slots.
   // Both bounds apply BEFORE the send: the peer window and the global
@@ -2004,14 +2068,43 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
   }
   TxJob job = awaiting->job;
   const bool was_deferred = awaiting->busy_deferred;
+  const MonotonicMs sent_at_ms = awaiting->sent_at_ms;
   awaiting_hop_.release(awaiting);
   obs_hop_result(job, true, now_ms);
+  // HOP_ACCEPT round trip, MAC-accept -> authenticated accept. Only a live
+  // exchange measures the path — a BUSY deferral's wait is peer-directed
+  // and must never enter the adaptive RTO average (radio.md §8). The match
+  // key carries no attempt discriminator, so after a retransmission an
+  // accept may answer an earlier attempt and `now - sent_at_ms` would
+  // learn a too-short RTT against the wrong baseline: retransmitted
+  // exchanges resolve normally but cannot feed RTO adaptation.
+  const bool rtt_sampled = !was_deferred && job.physical_attempts <= 1 &&
+                           now_ms >= sent_at_ms;
+  const std::uint32_t rtt_ms =
+      rtt_sampled ? static_cast<std::uint32_t>(now_ms - sent_at_ms) : 0;
+  if (auto* bucket = job_bucket(job, now_ms)) {
+    ++bucket->current.hop_accepts;
+    if (rtt_sampled) {
+      ++bucket->current.hop_rtt_samples;
+      ewma_add(bucket->current.hop_rtt_us_ewma, rtt_ms * 1000u,
+               bucket->current.hop_rtt_samples);
+    }
+    bucket->current.present = true;
+    if (bucket->current.first_sample_ms == 0) {
+      bucket->current.first_sample_ms = now_ms;
+    }
+    bucket->current.last_sample_ms = now_ms;
+  }
   if (auto* neighbor = find_neighbor(peer)) {
-    // A BUSY-deferred exchange that still completes does not break the
-    // authenticated-accept streak — the accept is authoritative.
-    (void)was_deferred;
+    if (rtt_sampled) {
+      ++neighbor->hop_rtt_samples;
+      ewma_add(neighbor->hop_rtt_ewma_ms, rtt_ms,
+               neighbor->hop_rtt_samples);
+    }
     // An authenticated accept proves work gets through: it releases the
     // sustained-busy state that feeds the severe-busy repair path (03 §7).
+    // A BUSY-deferred exchange that still completes does not break the
+    // authenticated-accept streak — the accept is authoritative.
     neighbor->busy_active = false;
     neighbor->busy_since_ms = 0;
     neighbor->last_busy_feedback_ms = 0;
@@ -3592,7 +3685,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
-            now_ms);
+            now_ms, now_ms - rx_age_ms);
       } else {
         observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
                                 &frame.header.message);
@@ -3614,7 +3707,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
-            now_ms);
+            now_ms, now_ms - rx_age_ms);
       } else {
         observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
                                 &frame.header.message);
@@ -4636,6 +4729,11 @@ Status MeshNode::build_telemetry_snapshot(
         out.validity |= kTelemetryValidDriverEwma;
         out.driver_us_ewma = bucket->current.driver_us_ewma;
       }
+      // Same window-freshness rule for the HOP_ACCEPT RTT EWMA (radio.md §8).
+      if (bucket->current.hop_rtt_samples > 0 && bucket_fresh) {
+        out.validity |= kTelemetryValidHopRttEwma;
+        out.hop_rtt_us_ewma = bucket->current.hop_rtt_us_ewma;
+      }
       out.saturation_mask |= bucket->saturation_mask;
       if (bucket->stale || !bucket_fresh) out.validity |= kTelemetryStale;
       if (bucket->current.incomplete) out.validity |= kTelemetryWindowIncomplete;
@@ -5283,6 +5381,8 @@ void MeshNode::reset_neighbor_measurement(Neighbor& neighbor) noexcept {
   neighbor.sojourn_samples = 0;
   neighbor.last_sojourn_ms = 0;
   neighbor.sojourn_window_ms = 0;
+  neighbor.hop_rtt_ewma_ms = 0;
+  neighbor.hop_rtt_samples = 0;
   neighbor.metric_window_dirty = false;
   neighbor.metric_sources = 0;
   neighbor.last_cost_relax_ms = 0;
