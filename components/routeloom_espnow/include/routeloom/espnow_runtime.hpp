@@ -323,9 +323,11 @@ class EspNowRuntime final : public RadioPort,
   Status channel_readback(std::uint8_t& channel) noexcept;
   Status channel_reapply_peers() noexcept;
   void channel_fence_tx() noexcept;
-  // Caller holds callback_lock_. Purges quarantine entries whose radio
-  // generation is no longer current, then reports whether `mac` remains
-  // quarantined (a callback is still owed for a retired send to it).
+  // Caller holds callback_lock_. Reports whether `mac` is quarantined — a
+  // watchdog-retired send to it still owes a callback. Entries release
+  // only when the owed TX callback consumes them as stale evidence or
+  // recover()->rebuild_driver() establishes callback quiescence; no timer
+  // or generation change releases an entry (02 §2.3, X-02).
   bool tx_quarantined(const MacAddress& mac) noexcept;
   // Stage a TX completion event when event_queue_ refuses it. Caller holds
   // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
@@ -389,10 +391,12 @@ class EspNowRuntime final : public RadioPort,
   RawTx fenced_pending_{};
   bool fenced_outstanding_{false};
   // MAC quarantine (02 §2.3/X-02): a watchdog-retired send still owes the
-  // driver a callback. While its radio generation is current the MAC stays
-  // quarantined — a late callback consumes the marker as stale evidence and
-  // can never resolve a replacement send to the same destination. Entries
-  // clear on radio-generation change (proven quiescence barrier).
+  // driver a callback. The MAC stays quarantined until the owed callback
+  // arrives — it consumes the entry as stale evidence so it can never
+  // resolve a replacement send to the same destination — or
+  // recover()->rebuild_driver() establishes the tested
+  // callback-quiescence barrier; a radio-generation change alone proves
+  // no quiescence and never releases an entry.
   static constexpr std::size_t kQuarantineCapacity = 4;
   std::array<RawTx, kQuarantineCapacity> quarantined_tx_{};
   std::size_t quarantined_count_{0};
