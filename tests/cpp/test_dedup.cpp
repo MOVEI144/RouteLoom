@@ -279,6 +279,9 @@ void drive_evidence(Harness& h, NodeId relay, NodeId upstream,
        k < 16 && h.sights(FrameType::Diagnostic, relay, upstream) == before;
        ++k) {
     h.step(relay);
+    // The second attempt waits out its link-retry jitter (radio.md §8,
+    // <=20 ms): time must advance for the retry to become select-eligible.
+    h.now += 8;
   }
   h.net.drop_frame = nullptr;
   g_drop_from = g_drop_to = kInvalidNodeId;
@@ -655,6 +658,9 @@ void test_evidence_cap_and_replay() {
        h.sights(FrameType::Diagnostic, 1, up) < diags_before + 4;
        ++k) {
     h.step(1);
+    // Retries carry link-retry jitter (radio.md §8, <=20 ms): advance the
+    // clock so each re-queued attempt becomes select-eligible.
+    h.now += 8;
   }
   h.net.drop_frame = nullptr;
   g_drop_from = g_drop_to = kInvalidNodeId;
