@@ -858,6 +858,20 @@ void test_agent_timesync_rearm() {
                                       payload.view(), now);
   CHECK(!world.part.agent.participant().clock_valid());
 
+  // A forged sample — claiming the authority's id but arriving from another
+  // link peer — is refused and reported: TimeSync is strictly 1-hop, so the
+  // claimed source must be the link-authenticated sender.
+  autonomy::TimeSyncPayload spoofed{};
+  spoofed.source = kAuthority;
+  spoofed.sequence = 88;
+  spoofed.reference_ms = now + 60;
+  spoofed.uncertainty_ms = 4;
+  CHECK_OK(autonomy::time_sync_encode(spoofed, payload));
+  world.part.agent.on_migration_frame(kPeer, FrameType::TimeSync,
+                                      payload.view(), now);
+  CHECK(!world.part.agent.participant().clock_valid());
+  CHECK(world.part.owner.has_event("TIME_SYNC_SOURCE_MISMATCH"));
+
   // An over-uncertainty sample — even from the authority — is refused and
   // never re-arms a cold clock (20ms bound, 04 §8).
   autonomy::TimeSyncPayload sloppy{};
@@ -869,6 +883,27 @@ void test_agent_timesync_rearm() {
   world.part.agent.on_migration_frame(kAuthority, FrameType::TimeSync,
                                       payload.view(), now);
   CHECK(!world.part.agent.participant().clock_valid());
+
+  // Queue residence debits the verified bound: a sample captured 30ms ago
+  // overflows the 20ms bound once residence is counted in the uncertainty.
+  autonomy::TimeSyncPayload aged{};
+  aged.source = kAuthority;
+  aged.sequence = 111;
+  aged.reference_ms = now + 60;
+  aged.uncertainty_ms = 4;
+  CHECK_OK(autonomy::time_sync_encode(aged, payload));
+  world.part.agent.on_migration_frame(kAuthority, FrameType::TimeSync,
+                                      payload.view(), now, now - 30);
+  CHECK(!world.part.agent.participant().clock_valid());
+
+  // The same sample captured 10ms ago stays inside the bound, and the armed
+  // offset is measured at capture (now-10), not at processing (now).
+  world.part.agent.on_migration_frame(kAuthority, FrameType::TimeSync,
+                                      payload.view(), now, now - 10);
+  CHECK(world.part.agent.participant().clock_valid());
+  CHECK(world.part.agent.participant().clock_mapping().peer_offset_ms ==
+        static_cast<std::int64_t>(aged.reference_ms) -
+            static_cast<std::int64_t>(now - 10));
 
   // The authority's periodic in-bounds sample re-arms it. (First emission
   // is scheduled timesync_period_ms after resume.)

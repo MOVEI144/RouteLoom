@@ -1,6 +1,8 @@
 #include "routeloom/migration_wire.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <limits>
 
 #include "routeloom/byte_io.hpp"
 
@@ -1220,7 +1222,8 @@ void MigrationAgent::pump_pending(const MonotonicMs now_ms) noexcept {
 void MigrationAgent::on_migration_frame(const NodeId peer,
                                         const FrameType type,
                                         const ByteView payload,
-                                        const MonotonicMs now_ms) noexcept {
+                                        const MonotonicMs now_ms,
+                                        const MonotonicMs captured_ms) noexcept {
   switch (type) {
     case FrameType::ControlObject: {
       autonomy::ControlObjectPayload manifest{};
@@ -1280,12 +1283,26 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
         // (D5-03). Other samples are valid wire traffic, not clock evidence.
         return;
       }
+      if (peer != sample.source) {
+        // TimeSync is strictly 1-hop: the claimed source must be the
+        // link-authenticated sender itself, anything else is a forgery.
+        owner_.on_migration_event("TIME_SYNC_SOURCE_MISMATCH", peer);
+        return;
+      }
+      // Queue residence sits inside the verified bound (04 §8): measure the
+      // offset at capture and debit capture-to-processing time from the same
+      // uncertainty budget, so an over-bound sample is refused by note_clock.
+      const MonotonicMs captured =
+          captured_ms != 0 ? captured_ms : now_ms;
       ClockMapping mapping{};
-      mapping.peer_offset_ms = static_cast<std::int64_t>(
-                                   sample.reference_ms) -
-                               static_cast<std::int64_t>(now_ms);
-      mapping.uncertainty_ms =
-          sample.uncertainty_ms + config_.rx_clock_slack_ms;
+      mapping.peer_offset_ms =
+          static_cast<std::int64_t>(sample.reference_ms) -
+          static_cast<std::int64_t>(captured);
+      mapping.uncertainty_ms = static_cast<std::uint32_t>(
+          std::min<std::uint64_t>(
+              static_cast<std::uint64_t>(sample.uncertainty_ms) +
+                  (now_ms - captured) + config_.rx_clock_slack_ms,
+              std::numeric_limits<std::uint32_t>::max()));
       if (participant_.note_clock(mapping, now_ms).ok() &&
           participant_.phase() == ParticipantPhase::Preparing) {
         // The READY gate only accepts clock_ok evidence: a node that armed

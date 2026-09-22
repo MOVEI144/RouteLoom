@@ -1146,7 +1146,8 @@ Status EspNowRuntime::send_wire(const BindingId binding,
 
 void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
                                       const ByteView payload,
-                                      const MonotonicMs now_ms) noexcept {
+                                      const MonotonicMs now_ms,
+                                      const MonotonicMs captured_ms) noexcept {
   // Migration control payloads route to the attached migration sink; the
   // MeshNode admission gate (open_link + identity checks) already ran, and
   // the sink re-validates semantics (authority signature, phase) itself.
@@ -1157,7 +1158,8 @@ void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
     case FrameType::ObjectChunk:
     case FrameType::ObjectAck:
       if (migration_ != nullptr) {
-        migration_->on_migration_frame(peer, type, payload, now_ms);
+        migration_->on_migration_frame(peer, type, payload, now_ms,
+                                       captured_ms);
       }
       return;
     default:
@@ -1651,7 +1653,8 @@ void EspNowRuntime::enqueue_rx(
   // Wi-Fi init, wraps ~71.6 min) — a different time base than esp_timer, so
   // it must never feed deadline accounting against now_ms(). The esp_timer
   // enqueue stamp still bounds driver-queue dwell from above at ms
-  // granularity, which is all the rx_age_ms_ debit requires.
+  // granularity, which is all the rx_age_ms_ debit requires, and is the
+  // only stamp that can measure queue residence (TimeSync captured_ms).
   event.observed_us = now_us();
   std::memcpy(event.data.data(), data, event.length);
   if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {

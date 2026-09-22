@@ -3586,7 +3586,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
-            now_ms);
+            now_ms, now_ms - rx_age_ms);
       } else {
         observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
                                 &frame.header.message);
@@ -3608,7 +3608,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
-            now_ms);
+            now_ms, now_ms - rx_age_ms);
       } else {
         observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
                                 &frame.header.message);

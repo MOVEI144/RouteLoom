@@ -146,7 +146,8 @@ class EspNowRuntime final : public RadioPort,
   // --- AutonomyFrameSink --------------------------------------------------------
   // Wire-lane autonomy RX after MeshNode's open_link + identity checks.
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
-                         MonotonicMs now_ms) noexcept override;
+                         MonotonicMs now_ms,
+                         MonotonicMs captured_ms = 0) noexcept override;
   // Verify oracle (04 §10): forwards authenticated traffic to the migration
   // sink — but ONLY while no radio operation owns the channel. Frames
   // observed during a survey/helper visit or mid-cutover drain are
