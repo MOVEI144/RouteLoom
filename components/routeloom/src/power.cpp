@@ -360,6 +360,11 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
 void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   transition(PowerState::Persisting,
              node_.quiesced() ? "DRAIN_SETTLED" : "DRAIN_DEADLINE");
+  // Records already durable in the previous image — e.g. a pending retained
+  // when its resume re-inject failed — are invisible to the node snapshot
+  // below: the live delivery is no longer offerable. They are carried over
+  // explicitly once the fresh snapshot has landed.
+  const auto previous_pending = image_.pending;
   image_ = PowerImage{};
   image_.network = node_.config().network;
   image_.node = node_.config().node;
@@ -390,10 +395,55 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
                              }
                              return false;
                            });
+  // Carry over still-live records the snapshot did not cover. A record the
+  // snapshot re-persisted under the same logical id is superseded by it;
+  // one that outlived its deadline while awake terminates loudly here; one
+  // that cannot fit reports NoCapacity rather than vanishing silently.
+  bool previous_had_pending = false;
+  for (const auto& record : previous_pending) {
+    if (!record.used) continue;
+    previous_had_pending = true;
+    bool covered = false;
+    for (const auto& fresh : image_.pending) {
+      if (fresh.used && fresh.original_id == record.original_id) {
+        covered = true;
+        break;
+      }
+    }
+    if (covered) continue;
+    if (record.expires_at_ms <= now_ms) {
+      events_.on_pending_result(record, StatusCode::Expired);
+      continue;
+    }
+    bool placed = false;
+    for (auto& slot : image_.pending) {
+      if (slot.used) continue;
+      slot = record;
+      slot.stored_remaining_ms =
+          static_cast<std::uint32_t>(record.expires_at_ms - now_ms);
+      placed = true;
+      break;
+    }
+    if (!placed) {
+      events_.on_pending_result(record, StatusCode::NoCapacity);
+    }
+  }
   const auto status = persist_image();
   if (!status) {
     abort_to_running(status.detail);
     return;
+  }
+  if (previous_had_pending) {
+    // The slot this commit did not touch still holds the previous image,
+    // whose copies of these records carry a longer, pre-decay stored
+    // budget. Overwrite it too so a torn commit cannot resurrect that
+    // budget — same dual-write pattern sleep_enter uses for its refresh.
+    image_.sequence = image_sequence_ + 1;
+    const auto second = commit_image(image_);
+    if (!second) {
+      abort_to_running(second.detail);
+      return;
+    }
   }
   // Phase 2: the image is durable — only now apply dispositions and drop the
   // radio-bound queues.
@@ -590,10 +640,13 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
     if (!sent.ok() && keep != nullptr) {
       // Re-injection failed (queue full, draining, ...): keep the durable
       // record — with the decayed lifetime — so a later sleep image retries
-      // it instead of dropping it at the storage layer.
+      // it instead of dropping it at the storage layer. expires_at_ms is
+      // RAM-only bookkeeping, so it is re-anchored on this boot's clock and
+      // awake time still counts against the deadline.
       *keep = record;
       keep->used = true;
       keep->stored_remaining_ms = remaining;
+      keep->expires_at_ms = now_ms + remaining;
     }
   }
 }

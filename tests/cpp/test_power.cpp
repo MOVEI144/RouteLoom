@@ -928,6 +928,92 @@ void test_pending_reinject_failure_retained() {
   }
 }
 
+// Issue #49 regression: a durable pending retained after a failed resume
+// re-inject must survive the next sleep cycle on the same incarnation —
+// re-injected on the following wake or explicitly terminated, never
+// silently dropped when finish_drain rebuilds the image.
+void test_retained_pending_survives_next_sleep_cycle() {
+  MemoryPowerStorage storage;
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    w.pump(60);
+    (void)queue_pending(w, 99, true);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  }
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.node.start(w.now));
+    for (std::size_t i = 0; i < MeshNode::delivery_capacity(); ++i) {
+      // Live WaitingForRoute entries fill the pool so the durable re-inject
+      // collides with an already-live id and the record is retained.
+      (void)queue_pending(w, static_cast<NodeId>(90 + i), false);
+    }
+    CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
+                                 ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::AlreadyExists) == 1);
+    w.pump(60);  // past the confirm window -> RUNNING
+    // Same incarnation goes back to sleep and wakes again: the retained
+    // record must be carried into the new image and retried, not dropped.
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+    CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
+                                ElapsedInterval{0, 0, true}, w.now));
+    // The drain freed the colliding slot, so the retry re-injects cleanly.
+    CHECK(w.events.pending_with(StatusCode::Ok) == 1);
+    CHECK(w.events.pending_results.size() == 2);  // [AlreadyExists, Ok]
+  }
+}
+
+// Companion to the test above: a retained record whose deadline runs out
+// while the node is still awake must be terminated by an explicit Expired
+// result at the next sleep — not persisted again and not dropped silently.
+void test_retained_pending_expires_while_awake() {
+  MemoryPowerStorage storage;
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    w.pump(60);
+    (void)queue_pending(w, 99, true, 5000);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  }
+  {
+    PowerWorld w(storage);
+    w.platform_peer(2, 0xaa);
+    CHECK_OK(w.node.start(w.now));
+    for (std::size_t i = 0; i < MeshNode::delivery_capacity(); ++i) {
+      (void)queue_pending(w, static_cast<NodeId>(90 + i), false);
+    }
+    CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
+                                 ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::AlreadyExists) == 1);
+    w.pump(60);
+    w.now += 5000;  // stay awake past the retained record's remaining budget
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK(w.events.pending_with(StatusCode::Expired) == 1);
+    CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+    CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
+                                ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::Ok) == 0);  // nothing re-injected
+    CHECK(w.events.pending_results.size() == 2);  // [AlreadyExists, Expired]
+  }
+}
+
 void test_resume_confirm_fast_and_discovery() {
   // Fast path: an RX inside the confirm window marks FastResume.
   {
@@ -1155,6 +1241,8 @@ int main() {
   test_power_cut_during_persist_write();
   test_power_cut_during_consume_commit();
   test_pending_reinject_failure_retained();
+  test_retained_pending_survives_next_sleep_cycle();
+  test_retained_pending_expires_while_awake();
   test_resume_confirm_fast_and_discovery();
   test_image_slots_alternate();
   test_persist_failure_aborts();
