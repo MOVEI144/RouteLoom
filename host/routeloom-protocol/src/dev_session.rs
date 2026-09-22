@@ -224,7 +224,13 @@ pub fn open_body<'a>(
         frame.request,
         inner,
     );
-    if expected != frame.body[8..8 + DEV_TAG_SIZE] {
+    // Constant-time tag check, mirroring the XOR fold in the C++ peer
+    // (usb_session.cpp): slice `!=` short-circuits on the first mismatch.
+    let mut diff = 0_u8;
+    for (a, b) in expected.iter().zip(&frame.body[8..8 + DEV_TAG_SIZE]) {
+        diff |= a ^ b;
+    }
+    if diff != 0 {
         return Err(ProtocolError::CrcMismatch); // integrity failure class
     }
     Ok((counter, inner))

@@ -123,6 +123,14 @@ class ReplayGuard {
   // is never treated as accepted.
   Status accept(Window& window, std::uint64_t counter) noexcept;
 
+  // Rejects caused by fingerprint-mismatched persisted records — the
+  // observable signature of two peer pairs folded onto one u32 slot (or
+  // foreign replay state at the slot), a permanent mutual-reject fault that
+  // otherwise has no diagnostic.
+  std::uint32_t foreign_fingerprint_rejects() const noexcept {
+    return foreign_fingerprint_rejects_;
+  }
+
  private:
   Status floor_state(const SecurityContext& context, ReplayFloorRecord& floor,
                      bool& found) noexcept;
@@ -130,6 +138,7 @@ class ReplayGuard {
                        const ReplayFloorRecord& floor, bool found) noexcept;
 
   ReplayStore& store_;
+  std::uint32_t foreign_fingerprint_rejects_{0};
 };
 
 }  // namespace routeloom

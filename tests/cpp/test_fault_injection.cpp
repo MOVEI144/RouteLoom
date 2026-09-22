@@ -478,9 +478,12 @@ void test_replay_foreign_floor_record() {
   store.plant_floor(ReplayGuard::floor_slot(ctx), foreign);
 
   CHECK(guard.check_floor(ctx).code == StatusCode::IntegrityError);
+  CHECK(guard.foreign_fingerprint_rejects() == 1);
   CHECK(guard.accept(window, 7).code == StatusCode::IntegrityError);
+  CHECK(guard.foreign_fingerprint_rejects() == 2);
   ReplayGuard::Window reopened{};
   CHECK(guard.open_context(ctx, reopened).code == StatusCode::IntegrityError);
+  CHECK(guard.foreign_fingerprint_rejects() == 3);
 }
 
 // ============================================================================

@@ -17,6 +17,8 @@ constexpr char kTag[] = "RouteLoom";
 // Wire-lane autonomy control frames are 1-hop liveness exchanges; a short
 // lifetime keeps a stale probe from circulating.
 constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
+// poll_once runs every ~2ms: stack headroom is logged once a minute.
+constexpr std::uint64_t kStackHwmLogIntervalMs = 60000;
 
 Status esp_status(const esp_err_t error, const StatusCode code,
                   const char* detail) noexcept {
@@ -186,7 +188,11 @@ Status EspNowRuntime::initialize_wifi() noexcept {
   country.cc[2] = '\0';
   country.schan = config_.country_first_channel;
   country.nchan = config_.country_channel_count;
-  country.max_tx_power = config_.max_tx_power_qdbm;
+  // wifi_country_t::max_tx_power is in dBm — esp_wifi_set_max_tx_power maps
+  // its qdBm argument into this field via a {power -> dBm} table (IDF v6.0.3
+  // Wi-Fi API reference). The effective cap is re-applied below in qdBm.
+  country.max_tx_power =
+      static_cast<int8_t>(config_.max_tx_power_qdbm / 4);
   country.policy = WIFI_COUNTRY_POLICY_MANUAL;
   if ((error = esp_wifi_set_country(&country)) != ESP_OK ||
       (error = esp_wifi_set_protocol(
@@ -594,6 +600,15 @@ void EspNowRuntime::poll_once() noexcept {
     return;
   }
   const MonotonicMs now = now_ms();
+  // Stack headroom of the CALLING task: poll_once is driven by the runtime
+  // task (start_task) or by the app_main pump loops (bridge_node,
+  // reference_node deep-sleep), so this one site covers whichever stack the
+  // firmware drains events on. Rate-limited — this path runs every ~2ms.
+  if (now - stack_hwm_log_ms_ >= kStackHwmLogIntervalMs) {
+    stack_hwm_log_ms_ = now;
+    ESP_LOGI(kTag, "stack hwm %s %lu B", pcTaskGetName(nullptr),
+             static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
+  }
   Event event{};
   // The dedicated reserved-completion slot drains FIRST — it resolves the
   // node's outstanding job and is never displaced by raw traffic.
@@ -1606,6 +1621,10 @@ void EspNowRuntime::enqueue_rx(
   if (const Peer* peer = find_peer(info->src_addr)) {
     peer_node = peer->node;
     peer_binding = peer->binding;
+  } else {
+    // Unknown-MAC non-RLD1 frames are dropped — counted so neighbouring
+    // networks and peer churn are observable.
+    ++unknown_peer_rx_;
   }
   const RadioGeneration radio_gen = channel_runner_.radio_generation();
   const ChannelEpoch channel_epoch = channel_epoch_;
