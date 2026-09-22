@@ -1336,7 +1336,14 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
       s.window_begin_ms + index * s.visit_period_ms;
   const MonotonicMs end_auth = begin_auth + s.dwell_ms;
   if (begin_auth >= s.window_end_ms || end_auth > s.window_end_ms) return;
-  if (now_auth < begin_auth || index == helper_index_) return;
+  // A visit may only be issued inside its period's dwell: a poll in the
+  // post-dwell gap waits for the next period's begin rather than spending
+  // the index on a visit whose deadline already passed (an Expired
+  // rejection that still consumes the period's rendezvous).
+  if (now_auth < begin_auth || now_auth >= end_auth ||
+      index == helper_index_) {
+    return;
+  }
   // Notify BEFORE queueing the visit: the absence notice goes to
   // home-channel peers, and once the runner owns the radio the home
   // context is gone (the wire notice would be suppressed as off-channel).

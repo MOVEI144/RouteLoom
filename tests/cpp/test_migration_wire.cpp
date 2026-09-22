@@ -1023,6 +1023,62 @@ void test_agent_resume_reconcile() {
   CHECK(world.part.port.committed == 6);
 }
 
+// Live channel reconcile (04 §9.2): a committed-vs-active divergence that
+// appears MID-RUN — e.g. a visit return that failed and left the radio
+// behind — is converged by a bounded verified ChannelCutover, not only at
+// resume time.
+void test_agent_live_reconcile() {
+  AgentWorld world;
+  MonotonicMs now = kNow;
+  // Radio committed on 6 while the durable record says 1 — the state a
+  // stranded visit return leaves behind.
+  CHECK_OK(world.part.runner.set_home_channel(6));
+  for (int round = 0;
+       round < 20 && world.part.runner.committed_channel() != 1; ++round) {
+    world.part.agent.poll(now);
+    world.part.runner.poll(now);
+    now += 5;
+  }
+  CHECK(world.part.runner.committed_channel() == 1);
+  CHECK(world.part.port.committed == 1);
+  CHECK(world.part.port.channel == 1);
+  CHECK(!world.part.owner.has_event("RESUME_CHANNEL_DIVERGED"));
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Stable);
+}
+
+// A permanently refusing driver exhausts the bounded reconcile budget:
+// one RESUME_CHANNEL_DIVERGED event, then the terminal RECOVERY_REQUIRED
+// diagnosis — never a silent park and never an unbounded retry loop.
+void test_agent_reconcile_exhaustion_required() {
+  AgentWorld world;
+  MonotonicMs now = kNow;
+  CHECK_OK(world.part.runner.set_home_channel(6));
+  world.part.port.set_fail = true;  // every re-apply is refused
+  for (int round = 0; round < 20; ++round) {
+    world.part.agent.poll(now);
+    world.part.runner.poll(now);
+    now += 5;
+  }
+  CHECK(world.part.agent.participant().phase() ==
+        ParticipantPhase::RecoveryRequired);
+  CHECK(world.part.agent.participant().stats().recovery_required == 1);
+  int diverged_events = 0;
+  for (const auto& event : world.part.owner.events) {
+    if (event.find("RESUME_CHANNEL_DIVERGED") != std::string::npos) {
+      ++diverged_events;
+    }
+  }
+  CHECK(diverged_events == 1);
+  // Latched for the episode: further polls issue no more radio ops.
+  const int calls_at_exhaustion = world.part.port.set_calls;
+  for (int round = 0; round < 10; ++round) {
+    world.part.agent.poll(now);
+    world.part.runner.poll(now);
+    now += 5;
+  }
+  CHECK(world.part.port.set_calls == calls_at_exhaustion);
+}
+
 void test_agent_release_requires_offer() {
   AgentWorld world;
   CHECK(world.auth.agent.release_commit(kNow).code ==
@@ -1661,6 +1717,8 @@ int main() {
   test_agent_timesync_rearm();
   test_agent_snapshot_serving();
   test_agent_resume_reconcile();
+  test_agent_live_reconcile();
+  test_agent_reconcile_exhaustion_required();
   test_agent_release_requires_offer();
   test_agent_pending_bounded();
   test_agent_authority_stopped();

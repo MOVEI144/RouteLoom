@@ -1610,11 +1610,10 @@ Status MigrationAgent::resume(const MonotonicMs now_ms) noexcept {
   if (!status) return status;
   last_phase_ = participant_.phase();
   // Durable active record vs physical committed channel: firmware normally
-  // already booted onto the record's channel; a mismatch means the
-  // boot-time read was unavailable — reconcile through a real verified
-  // ChannelCutover, never a bare assignment.
-  reconcile_needed_ =
-      participant_.active_channel() != runner_.committed_channel();
+  // already booted onto the record's channel; any mismatch — boot-time
+  // read unavailable or a mid-run stranded radio — is reconciled
+  // continuously in poll() through a real verified ChannelCutover, never
+  // a bare assignment.
   next_snapshot_request_ms_ = now_ms + config_.snapshot_request_period_ms;
   next_timesync_ms_ = now_ms + config_.timesync_period_ms;
   return Status::success();
@@ -1665,30 +1664,43 @@ void MigrationAgent::poll(const MonotonicMs now_ms) noexcept {
     last_phase_ = phase;
   }
 
-  // Resume-time channel reconcile: one bounded verified re-apply, never
-  // while a plan is mid-flight (the engine's own cutover owns the runner).
-  if (reconcile_needed_ && !reconcile_pending_op_ &&
-      !participant_.in_progress()) {
-    if (!runner_.busy()) {
-      RadioOperation op{};
-      op.kind = RadioOperationKind::ChannelCutover;
-      op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
-      op.constraints.channel = participant_.active_channel();
-      op.constraints.outage_permitted = true;
-      reconcile_token_ = runner_.request(op, now_ms);
-      reconcile_pending_op_ = true;
-    }
-  } else if (reconcile_pending_op_) {
+  // Live channel reconcile (04 §9.2): the runner's committed channel must
+  // always equal the engine's active record — a stranded visit return or
+  // an unavailable boot-time read otherwise parks the radio on the wrong
+  // channel with no diagnosis. Never while a plan is mid-flight: the
+  // engine's own cutover owns the runner then.
+  const bool channel_diverged =
+      runner_.committed_channel() != participant_.active_channel();
+  if (!channel_diverged) {
+    // Channels agree: the episode is over, the next divergence gets a
+    // fresh attempt budget.
+    reconcile_attempts_ = 0;
+    reconcile_exhausted_ = false;
+  }
+  if (reconcile_pending_op_) {
     OperationResult result{};
     if (runner_.result(reconcile_token_, result) &&
         result.outcome != OperationOutcome::Pending) {
       reconcile_pending_op_ = false;
-      reconcile_needed_ = false;
-      if (result.outcome != OperationOutcome::Applied) {
+      if (result.outcome != OperationOutcome::Applied &&
+          ++reconcile_attempts_ >=
+              migration_wire_const::kChannelReconcileAttempts) {
+        reconcile_exhausted_ = true;
         owner_.on_migration_event("RESUME_CHANNEL_DIVERGED",
                                   kInvalidNodeId);
+        participant_.note_recovery_violation(now_ms);
       }
     }
+  }
+  if (channel_diverged && !reconcile_pending_op_ && !reconcile_exhausted_ &&
+      !participant_.in_progress() && !runner_.busy()) {
+    RadioOperation op{};
+    op.kind = RadioOperationKind::ChannelCutover;
+    op.deadline_ms = now_ms + migration_const::kGuardFloorMs * 20U;
+    op.constraints.channel = participant_.active_channel();
+    op.constraints.outage_permitted = true;
+    reconcile_token_ = runner_.request(op, now_ms);
+    reconcile_pending_op_ = true;
   }
   if (survey_pending_) {
     OperationResult result{};

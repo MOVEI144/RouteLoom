@@ -666,7 +666,7 @@ class FakeChannelPort final : public ChannelPort {
   bool tx_quiesced() const noexcept override { return quiesced; }
   Status set_channel(std::uint8_t ch) noexcept override {
     ++set_calls;
-    if (set_calls >= set_fail_from) {
+    if (set_calls == set_fail_at || set_calls >= set_fail_from) {
       return Status::error(StatusCode::RadioFailure, "scripted set failure");
     }
     channel = ch;
@@ -702,6 +702,7 @@ class FakeChannelPort final : public ChannelPort {
   int reapply_calls{0};
   int fence_calls{0};
   int committed_calls{0};
+  int set_fail_at{0};
   int set_fail_from{std::numeric_limits<int>::max()};
   int readback_fail_at{0};
   int readback_wrong_at{0};
@@ -848,6 +849,55 @@ void test_runner_fail_and_indeterminate() {
   }
 }
 
+void test_runner_visit_return_retries() {
+  {  // A refused return leaves the radio KNOWN off-home: the runner stays
+     // in the dwell and retries on the next poll — a transient refusal is
+     // absorbed and the visit still lands APPLIED, verified home.
+    FakeChannelPort port;
+    port.set_fail_at = 2;  // the first return attempt is refused once
+    ChannelOperationRunner runner(port, ops_config());
+    const OperationToken token = runner.request(visit(6, 100), 0);
+    runner.poll(10);
+    CHECK(runner.visiting());
+    runner.poll(200);   // dwell over; the first return is refused
+    CHECK(runner.visiting());  // retry armed, still off-home
+    CHECK(outcome(runner, token).outcome == OperationOutcome::Pending);
+    runner.poll(201);   // bounded retry: verified return home
+    CHECK(!runner.visiting());
+    CHECK(outcome(runner, token).outcome == OperationOutcome::Applied);
+    CHECK(port.committed == 1);
+  }
+  {  // Every return refused: the bounded budget exhausts to FAILED —
+     // verified still off-home, never a silent park and never a loop.
+    FakeChannelPort port;
+    port.set_fail_from = 2;
+    ChannelOperationRunner runner(port, ops_config());
+    const OperationToken token = runner.request(visit(6, 100), 0);
+    runner.poll(10);
+    runner.poll(200);  // return attempt 1 refused
+    runner.poll(201);  // attempt 2 refused
+    runner.poll(202);  // attempt 3 refused -> budget exhausted -> FAILED
+    const OperationResult r = outcome(runner, token);
+    CHECK(r.outcome == OperationOutcome::Failed);
+    CHECK(!runner.busy());
+    CHECK(port.set_calls == 4);  // visit apply + 3 bounded return attempts
+  }
+  {  // A return whose readback lies is the uncertain boundary: INDETERMINATE
+     // at once — a retry cannot make an unknown side effect more known.
+    FakeChannelPort port;
+    port.readback_wrong_at = 2;  // the return's readback lies
+    ChannelOperationRunner runner(port, ops_config());
+    const OperationToken token = runner.request(visit(6, 100), 0);
+    runner.poll(10);
+    runner.poll(200);
+    const OperationResult r = outcome(runner, token);
+    CHECK(r.outcome == OperationOutcome::Indeterminate);
+    CHECK(r.reason == StatusCode::DriverResultUnknown);
+    CHECK(!runner.visiting());
+    CHECK(port.set_calls == 2);  // no retry on the unknown boundary
+  }
+}
+
 void test_runner_drain_fence() {
   // D5-10/X-02: a pending TX straggler is fenced — its missed callback
   // resolves as unknown, never fabricated — then the apply proceeds.
@@ -973,6 +1023,7 @@ int main() {
   test_runner_rejects();
   test_runner_verified_apply();
   test_runner_visit_returns_home();
+  test_runner_visit_return_retries();
   test_runner_fail_and_indeterminate();
   test_runner_drain_fence();
   test_pause_mask_keeps_control_flowing();
