@@ -826,7 +826,9 @@ void MigrationAgent::record_readiness(const NodeId peer,
   // older offer must not count toward the next plan's gate (04 §7).
   entry->plan_hash = report.plan_hash;
   entry->answered = true;
-  entry->ready = report.status == ReadyStatus::Ready;
+  // READY is evidence of the full condition set — an unarmed clock is not
+  // ready even when the blob stored fine (04 §7).
+  entry->ready = report.status == ReadyStatus::Ready && report.clock_ok;
   entry->migration_capable = report.migration_capable;
   entry->sleep_lease_valid = report.sleep_lease_valid;
   entry->rediscovery_capable = report.rediscovery_capable;
@@ -1284,7 +1286,16 @@ void MigrationAgent::on_migration_frame(const NodeId peer,
                                static_cast<std::int64_t>(now_ms);
       mapping.uncertainty_ms =
           sample.uncertainty_ms + config_.rx_clock_slack_ms;
-      (void)participant_.note_clock(mapping, now_ms);
+      if (participant_.note_clock(mapping, now_ms).ok() &&
+          participant_.phase() == ParticipantPhase::Preparing) {
+        // The READY gate only accepts clock_ok evidence: a node that armed
+        // after its first report re-reports READY, or it would look unready
+        // for the rest of the prepare window.
+        const MigrationPlan* plan = participant_.pending_plan();
+        emit_ready_report(participant_.pending_hash(),
+                          plan != nullptr ? plan->new_epoch : ChannelEpoch{},
+                          ReadyStatus::Ready, now_ms);
+      }
       break;
     }
     default:
@@ -1477,8 +1488,12 @@ Status MigrationAgent::offer_plan(
     issued_snapshot_size_ = wrapped;
   }
 
-  // The authority's own node is a plan participant too: local prepare now,
-  // local commit evidence at release_commit.
+  // The authority's own node is a plan participant too: it can never hear
+  // its own TimeSync, so it self-arms once here — identity mapping, the
+  // authority's clock IS the authority domain (needed for its own
+  // feasibility check, issued_switch_local_ms_ and its own cutover).
+  (void)participant_.note_clock(
+      ClockMapping{0, config_.timesync_uncertainty_ms}, now_ms);
   (void)participant_.prepare(plan_blob, config_.measurements, now_ms);
   issued_switch_local_ms_ = participant_.pending_switch_local();
 
