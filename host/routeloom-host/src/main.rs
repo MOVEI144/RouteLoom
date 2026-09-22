@@ -738,9 +738,11 @@ fn now_ms() -> u64 {
 /// Process-monotonic milliseconds — the rewind-proof counterpart of
 /// `now_ms` used for deadline budgets (TX-I2 records it on every admitted
 /// operation so a wall-clock rewind can never stretch a TTL).
+/// `accepted_mono_ms == 0` is the "no monotonic anchor" sentinel in the
+/// operation store, so the first sub-millisecond observation clamps to 1.
 fn mono_ms() -> u64 {
     static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
+    BASE.get_or_init(Instant::now).elapsed().as_millis().max(1) as u64
 }
 
 /// Escapes for JSON string contexts: quotes, backslashes and every C0
@@ -2289,6 +2291,10 @@ impl Drop for ClientGuard {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Anchor the monotonic base at process start — `mono_ms` is the
+    // rewind-proof deadline axis, so it should measure daemon uptime rather
+    // than time-since-first-admitted-operation.
+    let _ = mono_ms();
     let args = parse_args().map_err(io::Error::other)?;
     let socket_path = args.socket;
     let device = args.device;
