@@ -39,6 +39,7 @@ foreach(target ${ROUTELOOM_FUZZ_TARGETS})
   target_compile_options(fuzz_${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
   if(ROUTELOOM_FUZZER_ENABLED)
     target_compile_options(fuzz_${target} PRIVATE -fsanitize=fuzzer)
+    target_compile_definitions(fuzz_${target} PRIVATE ROUTELOOM_LIBFUZZER=1)
     target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer)
   endif()
   # Same command line in both modes: replay main walks the directory and

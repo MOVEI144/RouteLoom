@@ -116,8 +116,16 @@ fn write_valid(dir: &Path, case: &Case) {
         open_link(&encoded, local, &mut opener, &mut opened).expect("golden open_link failed");
         let mut forwarder = TestSecurity::new();
         let mut forwarded = EncodedFrame::default();
-        forward(&opened, local, next, opened.header.link_epoch, budget, &mut forwarder, &mut forwarded)
-            .expect("golden forward failed");
+        forward(
+            &opened,
+            local,
+            next,
+            opened.header.link_epoch,
+            budget,
+            &mut forwarder,
+            &mut forwarded,
+        )
+        .expect("golden forward failed");
         json += &format!(
             ",\n  \"fwd_local_node\": {},\n  \"fwd_next_hop\": {},\n  \"fwd_remaining_deadline_ms\": {},\n  \"fwd_encoded_hex\": \"{}\"",
             local,
@@ -494,7 +502,16 @@ fn main() {
     opened.protected_payload[inner] ^= 0x01;
     let mut forwarder = TestSecurity::new();
     let mut forwarded = EncodedFrame::default();
-    forward(&opened, 2, 3, opened.header.link_epoch, 4900, &mut forwarder, &mut forwarded).expect("forward failed");
+    forward(
+        &opened,
+        2,
+        3,
+        opened.header.link_epoch,
+        4900,
+        &mut forwarder,
+        &mut forwarded,
+    )
+    .expect("forward failed");
     write_invalid(
         &invalid_dir,
         "tampered_end_tag",

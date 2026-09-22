@@ -141,7 +141,11 @@ pub enum SubKind {
 enum StageItem {
     /// Droppable under queue pressure; `seq` is the log/event seq the
     /// line covers, used to name the coalesced marker's lost range.
-    Data { seq: u64, kind: &'static str, body: String },
+    Data {
+        seq: u64,
+        kind: &'static str,
+        body: String,
+    },
     /// Never dropped — markers and heartbeats charge the separate
     /// SUB_CONTROL_RESERVE bound instead.
     Control { kind: &'static str, body: String },
@@ -232,8 +236,13 @@ impl StageQueue {
             let (marker_kind, marker_body) = marker(lost_from, lost_to);
             self.control_bytes += marker_body.len() + LINE_OVERHEAD;
             self.control_len += 1;
-            self.items
-                .insert(start, StageItem::Control { kind: marker_kind, body: marker_body });
+            self.items.insert(
+                start,
+                StageItem::Control {
+                    kind: marker_kind,
+                    body: marker_body,
+                },
+            );
             stat.dropped += (end - start) as u64;
             stat.markers += 1;
             if self.control_len > SUB_CONTROL_RESERVE {
@@ -871,7 +880,10 @@ fn pump_pass(
             SubKind::Events(filter) => produce_events(state, snap, filter, now),
         };
         worked |= progressed;
-        if state.subscriptions.stage(conn_id, snap.id, work, &marker, now) {
+        if state
+            .subscriptions
+            .stage(conn_id, snap.id, work, &marker, now)
+        {
             fatal = true;
         }
     }
@@ -977,7 +989,10 @@ fn produce_messages(
     } else {
         acl::PERM_READ_OPERATION
     };
-    if !snap.uid.is_some_and(|uid| state.acl.permit(uid, filter.network, perm)) {
+    if !snap
+        .uid
+        .is_some_and(|uid| state.acl.permit(uid, filter.network, perm))
+    {
         work.end_reason = Some("unauthorized");
         return (work, true);
     }
@@ -1011,7 +1026,10 @@ fn produce_messages(
                         let (kind, record_body) = if filter.payloads {
                             ("message", record_json(record, &cursor_at(record.seq)))
                         } else {
-                            ("message_meta", record_meta_json(record, &cursor_at(record.seq)))
+                            (
+                                "message_meta",
+                                record_meta_json(record, &cursor_at(record.seq)),
+                            )
                         };
                         work.items.push(StagedLine {
                             control: false,
@@ -1069,12 +1087,7 @@ fn produce_messages(
 /// entries with seq >= position, mark overflow when the ring has already
 /// lapped the position, heartbeat on schedule. The events stream has no
 /// cursor — positions are bare event seqs living only on this connection.
-fn produce_events(
-    state: &State,
-    snap: &SubSnap,
-    filter: &EvFilter,
-    now: u64,
-) -> (StageWork, bool) {
+fn produce_events(state: &State, snap: &SubSnap, filter: &EvFilter, now: u64) -> (StageWork, bool) {
     let mut work = StageWork::default();
     let mut position = snap.position;
     let mut progressed = false;
@@ -1160,7 +1173,14 @@ mod tests {
         let tok = token(id);
         assert!(tok.starts_with("sub"), "{tok}");
         assert_eq!(parse_token(&tok), Some(id));
-        for bad in ["", "sub", "sub1", "subzzzzzzzzzzzzzzzz", "SUB0000000000000001", "x"] {
+        for bad in [
+            "",
+            "sub",
+            "sub1",
+            "subzzzzzzzzzzzzzzzz",
+            "SUB0000000000000001",
+            "x",
+        ] {
             assert!(parse_token(bad).is_none(), "{bad}");
         }
         // A token minted under a different boot tag never resolves here.
@@ -1176,7 +1196,8 @@ mod tests {
         let hub = SubscriptionHub::default();
         // 4 per connection.
         for _ in 0..SUBS_PER_CONNECTION {
-            hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000).unwrap();
+            hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000)
+                .unwrap();
         }
         assert_eq!(
             hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000),
@@ -1193,8 +1214,10 @@ mod tests {
                 .unwrap();
         }
         // uid 2 has 4 total (1 on conn 1 was uid 1 — recount: uid2 has 2).
-        hub.subscribe(4, Some(2), msg_sub(1), 0, 1, 0, 1_000).unwrap();
-        hub.subscribe(4, Some(2), msg_sub(1), 0, 1, 0, 1_000).unwrap();
+        hub.subscribe(4, Some(2), msg_sub(1), 0, 1, 0, 1_000)
+            .unwrap();
+        hub.subscribe(4, Some(2), msg_sub(1), 0, 1, 0, 1_000)
+            .unwrap();
         assert_eq!(
             hub.subscribe(5, Some(2), msg_sub(1), 0, 1, 0, 1_000),
             Err(CapacityDeny::Principal)
@@ -1221,12 +1244,16 @@ mod tests {
     fn remove_conn_frees_counts() {
         let hub = SubscriptionHub::default();
         for _ in 0..SUBS_PER_CONNECTION {
-            hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000).unwrap();
+            hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000)
+                .unwrap();
         }
-        assert!(hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000).is_err());
+        assert!(hub
+            .subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000)
+            .is_err());
         hub.remove_conn(1);
         assert!(hub.conn_gone(1));
-        hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000).unwrap();
+        hub.subscribe(1, Some(1), msg_sub(1), 0, 1, 0, 1_000)
+            .unwrap();
     }
 
     #[test]
@@ -1263,7 +1290,12 @@ mod tests {
     /// Marker closure used by queue tests (messages shape is irrelevant —
     /// the queue only needs (kind, body)).
     fn test_marker() -> impl Fn(u64, u64) -> (&'static str, String) {
-        move |lo, hi| ("gap", format!("\"cause\":\"queue_overflow\",\"lost_from\":{lo},\"lost_to\":{hi}"))
+        move |lo, hi| {
+            (
+                "gap",
+                format!("\"cause\":\"queue_overflow\",\"lost_from\":{lo},\"lost_to\":{hi}"),
+            )
+        }
     }
 
     #[test]
@@ -1362,7 +1394,11 @@ mod tests {
         let lines = hub.drain(3);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("\"kind\":\"ended\""), "{}", lines[0]);
-        assert!(lines[0].contains("\"reason\":\"unauthorized\""), "{}", lines[0]);
+        assert!(
+            lines[0].contains("\"reason\":\"unauthorized\""),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("\"delivered\":3"), "{}", lines[0]);
         assert!(hub.unsubscribe(3, id, 300).is_none(), "ended id is gone");
     }
@@ -1373,8 +1409,16 @@ mod tests {
         let id = hub
             .subscribe(1, Some(1), msg_sub(9), 4, 1, 0, 1_000)
             .unwrap();
-        hub.subscribe(2, Some(1), SubKind::Events(EvFilter { kinds: None }), 7, 1, 0, 1_000)
-            .unwrap();
+        hub.subscribe(
+            2,
+            Some(1),
+            SubKind::Events(EvFilter { kinds: None }),
+            7,
+            1,
+            0,
+            1_000,
+        )
+        .unwrap();
         let mine = hub.list(1);
         assert_eq!(mine.len(), 1);
         assert_eq!(mine[0].id, id);

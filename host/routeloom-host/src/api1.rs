@@ -37,8 +37,8 @@ use crate::acl::{self, Acl};
 use crate::canonical;
 use crate::config::{ConfigOutcome, ConfigRequest};
 use crate::receive_log::{
-    hex_lower, Cursor, IngestOutcome, ReadOutcome, ReceiveLog, RxRecord,
-    CURSOR_MAX_DECODED_BYTES, PAGE_LIMIT,
+    hex_lower, Cursor, IngestOutcome, ReadOutcome, ReceiveLog, RxRecord, CURSOR_MAX_DECODED_BYTES,
+    PAGE_LIMIT,
 };
 use crate::send_store::{
     AdmissionLimiter, CancelOutcome, CapacityStatus, DispatchState, OpIdentity, OpenEpochError,
@@ -46,8 +46,8 @@ use crate::send_store::{
 };
 use crate::subscribe::{
     self, CapacityDeny, EvFilter, MsgFilter, SubKind, SubscriptionHub, HEARTBEAT_MS_DEFAULT,
-    HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, NOTIFY_LINE_MAX, SUB_QUEUE_BYTES, SUB_QUEUE_EVENTS,
-    SUBS_PER_CONNECTION, SUBS_PER_PRINCIPAL, SUBS_TOTAL, WAIT_MS_MAX,
+    HEARTBEAT_MS_MAX, HEARTBEAT_MS_MIN, NOTIFY_LINE_MAX, SUBS_PER_CONNECTION, SUBS_PER_PRINCIPAL,
+    SUBS_TOTAL, SUB_QUEUE_BYTES, SUB_QUEUE_EVENTS, WAIT_MS_MAX,
 };
 use routeloom_json::{escape_string, Json};
 use routeloom_protocol::host_ops::ConfigOpsResult;
@@ -201,7 +201,10 @@ pub fn handle_conn<S: OperationStore>(
     // same answer from a direct call, never a different one.
     if body.len() + 6 > REQUEST_MAX_BYTES {
         return (
-            error_response(None, &ApiError::simple("INVALID_REQUEST", "request too large")),
+            error_response(
+                None,
+                &ApiError::simple("INVALID_REQUEST", "request too large"),
+            ),
             None,
         );
     }
@@ -432,7 +435,10 @@ fn messages_read<S: OperationStore>(
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
-        if !matches!(key.as_str(), "network" | "from" | "cursor" | "limit" | "wait_ms") {
+        if !matches!(
+            key.as_str(),
+            "network" | "from" | "cursor" | "limit" | "wait_ms"
+        ) {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
                 &format!("unknown param \"{key}\""),
@@ -555,7 +561,11 @@ fn messages_read<S: OperationStore>(
                 lost_to,
                 oldest_seq,
                 tail_seq,
-            } => return Err(cursor_gap(lost_from, lost_to, oldest_seq, tail_seq, &cursor_at)),
+            } => {
+                return Err(cursor_gap(
+                    lost_from, lost_to, oldest_seq, tail_seq, &cursor_at,
+                ))
+            }
             ReadOutcome::Future => {
                 return Err(ApiError::simple(
                     "INVALID_CURSOR",
@@ -630,13 +640,15 @@ fn checked_cursor(
         // rather than fabricating one. The cursors below are minted under
         // the current epoch so the client can resume explicitly.
         let (oldest, tail, ..) = log.bounds(network, now_ms);
-        let cursor_at = |last_scanned: u64| Cursor {
-            network,
-            acl_view,
-            epoch,
-            last_scanned,
-        }
-        .encode();
+        let cursor_at = |last_scanned: u64| {
+            Cursor {
+                network,
+                acl_view,
+                epoch,
+                last_scanned,
+            }
+            .encode()
+        };
         return Err(ApiError {
             code: "CURSOR_EPOCH_CHANGED",
             message: "cursor belongs to a previous daemon epoch".to_string(),
@@ -785,7 +797,10 @@ fn parse_id_list(params: &Json, key: &str) -> Result<Option<Vec<u64>>, ApiError>
     if items.len() > subscribe::FILTER_MAX {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
-            &format!("filter.{key} accepts at most {} entries", subscribe::FILTER_MAX),
+            &format!(
+                "filter.{key} accepts at most {} entries",
+                subscribe::FILTER_MAX
+            ),
         ));
     }
     let mut ids = Vec::with_capacity(items.len());
@@ -826,8 +841,15 @@ fn messages_subscribe<S: OperationStore>(
     for (key, _) in params.object_entries() {
         if !matches!(
             key.as_str(),
-            "stream" | "network" | "from" | "cursor" | "on_gap" | "payloads" | "filter"
-                | "heartbeat_ms" | "durable"
+            "stream"
+                | "network"
+                | "from"
+                | "cursor"
+                | "on_gap"
+                | "payloads"
+                | "filter"
+                | "heartbeat_ms"
+                | "durable"
         ) {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
@@ -879,7 +901,9 @@ fn messages_subscribe<S: OperationStore>(
         None => subscribe::HEARTBEAT_MS_DEFAULT,
         Some(value) => match value.as_u64() {
             Some(0) => 0,
-            Some(n) if (subscribe::HEARTBEAT_MS_MIN..=subscribe::HEARTBEAT_MS_MAX).contains(&n) => n,
+            Some(n) if (subscribe::HEARTBEAT_MS_MIN..=subscribe::HEARTBEAT_MS_MAX).contains(&n) => {
+                n
+            }
             _ => {
                 return Err(ApiError::simple(
                     "INVALID_ARGUMENT",
@@ -952,7 +976,10 @@ fn messages_subscribe<S: OperationStore>(
                 if items.len() > subscribe::KINDS_MAX {
                     return Err(ApiError::simple(
                         "INVALID_ARGUMENT",
-                        &format!("filter.kinds accepts at most {} entries", subscribe::KINDS_MAX),
+                        &format!(
+                            "filter.kinds accepts at most {} entries",
+                            subscribe::KINDS_MAX
+                        ),
                     ));
                 }
                 let mut list = Vec::with_capacity(items.len());
@@ -1100,13 +1127,15 @@ fn messages_subscribe<S: OperationStore>(
     let mut log = ctx.receive_log.lock().expect("receive log poisoned");
     let epoch = log.epoch();
     let acl_view = ctx.acl.revision();
-    let cursor_at = |position: u64| Cursor {
-        network,
-        acl_view,
-        epoch,
-        last_scanned: position,
-    }
-    .encode();
+    let cursor_at = |position: u64| {
+        Cursor {
+            network,
+            acl_view,
+            epoch,
+            last_scanned: position,
+        }
+        .encode()
+    };
     let mut start_gap: Option<String> = None;
     let position = if let Some(from) = from {
         if from == "latest" {
@@ -1134,11 +1163,7 @@ fn messages_subscribe<S: OperationStore>(
             } => {
                 if on_gap == "fail" {
                     return Err(cursor_gap(
-                        lost_from,
-                        lost_to,
-                        oldest_seq,
-                        tail_seq,
-                        &cursor_at,
+                        lost_from, lost_to, oldest_seq, tail_seq, &cursor_at,
                     ));
                 }
                 // skip: subscribe succeeds and the FIRST notification is a
@@ -1236,7 +1261,11 @@ fn messages_subscriptions<S: OperationStore>(
             "messages.subscriptions takes no params",
         ));
     }
-    let epoch = ctx.receive_log.lock().expect("receive log poisoned").epoch();
+    let epoch = ctx
+        .receive_log
+        .lock()
+        .expect("receive log poisoned")
+        .epoch();
     let acl_view = ctx.acl.revision();
     let entries = ctx.subscriptions.list(ctx.conn_id);
     let mut out = String::from("{\"subscriptions\":[");
@@ -1752,10 +1781,7 @@ fn gateway_get<S: OperationStore>(
 /// "attached" (authenticated session on a live adapter). The lane token
 /// itself stays hidden — `lane_registered` and `lane_lease_ms` are what a
 /// caller needs to know whether dispatch will run.
-fn link_get<S: OperationStore>(
-    params: &Json,
-    ctx: &ApiContext<'_, S>,
-) -> Result<String, ApiError> {
+fn link_get<S: OperationStore>(params: &Json, ctx: &ApiContext<'_, S>) -> Result<String, ApiError> {
     if !params.object_entries().is_empty() {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
@@ -1764,12 +1790,7 @@ fn link_get<S: OperationStore>(
     }
     let (authenticated, session_id, gateway_node, gateway_boot) = {
         let info = ctx.session.lock().expect("session poisoned");
-        (
-            info.authenticated,
-            info.id,
-            info.node,
-            info.boot,
-        )
+        (info.authenticated, info.id, info.node, info.boot)
     };
     let attached = ctx.link.connected && authenticated;
     let state = if attached {
@@ -1779,9 +1800,8 @@ fn link_get<S: OperationStore>(
     } else {
         "disconnected"
     };
-    let opt_hex = |v: Option<u64>| {
-        v.map_or_else(|| "null".to_string(), |v| format!("\"{v:016x}\""))
-    };
+    let opt_hex =
+        |v: Option<u64>| v.map_or_else(|| "null".to_string(), |v| format!("\"{v:016x}\""));
     let opt_u64 = |v: Option<u64>| v.map_or_else(|| "null".to_string(), |v| v.to_string());
     // The registration mirror only counts when it still belongs to THIS
     // session and its lease has not lapsed — a stale mirror must never
@@ -1792,10 +1812,7 @@ fn link_get<S: OperationStore>(
                 && Some(reg.usb_session) == session_id
                 && ctx.now_mono < reg.lease_deadline_mono =>
         {
-            (
-                true,
-                reg.lease_deadline_mono.saturating_sub(ctx.now_mono),
-            )
+            (true, reg.lease_deadline_mono.saturating_sub(ctx.now_mono))
         }
         _ => (false, 0),
     };
@@ -2777,7 +2794,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            now)
+            now,
+        )
     }
 
     fn leaked_session() -> &'static Mutex<SessionInfo> {
@@ -4426,7 +4444,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let key = "66666666666666666666666666666666";
         let response = handle(
             gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
@@ -4476,7 +4495,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let key = "77777777777777777777777777777777";
         let response = handle(
             gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
@@ -4503,7 +4523,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let key = "77777777777777777777777777777777";
         let accepted = handle(
             gw_submit_line(key, &epoch, "HOST_RECEIVE_RAM").as_bytes(),
@@ -4583,7 +4604,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         // A node-destination op is answered with the same NOT_FOUND an
         // unknown id gets — the method is not a destination-kind oracle.
         let key = "88888888888888888888888888888888";
@@ -4611,7 +4633,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(gw_get_line(&id).as_bytes(), &uid7);
         assert_error_schema(&response, "NOT_FOUND");
     }
@@ -4633,7 +4656,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let digest = "44".repeat(32);
         let response = handle(
             gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
@@ -4733,7 +4757,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(
             gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
             &c2,
@@ -4775,7 +4800,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let digest = "44".repeat(32);
         let response = handle(
             gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
@@ -4807,7 +4833,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(
             gw_resolve_line("HOST_RECEIVE_RAM", Some(&digest)).as_bytes(),
             &anon,
@@ -4881,7 +4908,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(
             cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
             &c,
@@ -4924,7 +4952,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         for (method, params) in [
             ("config.challenge", CFG_CHALLENGE_PARAMS),
             ("config.status", CFG_STATUS_PARAMS),
@@ -4947,7 +4976,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(
             cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
             &anon,
@@ -4977,7 +5007,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
         assert_error_schema(&response, "CONFIG_NO_AUTHORITY");
         // The read-only verbs still work without an authority — they never
@@ -5009,7 +5040,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(cfg_req("config.propose", CFG_PROPOSE_PARAMS).as_bytes(), &c);
         assert!(response.contains("\"ok\":true"), "{response}");
         // Acceptance is PENDING — never ACTIVE or APPLIED.
@@ -5037,7 +5069,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         // Unknown param key.
         let bad = format!("{CFG_CHALLENGE_PARAMS},\"bogus\":1");
         assert_error_schema(
@@ -5111,7 +5144,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let response = handle(
             cfg_req("config.challenge", CFG_CHALLENGE_PARAMS).as_bytes(),
             &c9,
@@ -5132,7 +5166,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let get = cfg_req("config.get", &format!("\"config_op\":\"{token}\""));
         assert_error_schema(&handle(get.as_bytes(), &c501), "NOT_FOUND");
         // A malformed token is INVALID_ARGUMENT; a well-formed unknown op is
@@ -5304,7 +5339,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         // Node ids 0 and u64::MAX are reserved wire addresses (01 §6) —
         // config targets follow the same rule as messages.submit.
         for target in ["0000000000000000", "ffffffffffffffff"] {
@@ -5338,7 +5374,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         // 2 is not a namespace (SDK=1, application 0x8000-0xfffe); the
         // wire codecs refuse it, so the API refuses it up front.
         for (method, params) in [
@@ -5390,7 +5427,8 @@ mod tests {
             leaked_hub(),
             7,
             leaked_event_ring(),
-            100);
+            100,
+        );
         let propose = |patch: &str| {
             let params = format!(
                 "{CFG_TARGET},\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",{patch}"

@@ -32,7 +32,13 @@
 #include <string>
 #include <vector>
 
-#if defined(__has_feature)
+// CMake defines ROUTELOOM_LIBFUZZER when the target is built with
+// -fsanitize=fuzzer (explicit is deterministic across clang versions —
+// __has_feature(fuzzer) is not reliably true on all of them); the
+// feature probe remains as a fallback for non-CMake builds.
+#if defined(ROUTELOOM_LIBFUZZER)
+#  define ROUTELOOM_HAS_LIBFUZZER 1
+#elif defined(__has_feature)
 #  if __has_feature(fuzzer)
 #    define ROUTELOOM_HAS_LIBFUZZER 1
 #  endif

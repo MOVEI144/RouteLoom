@@ -1936,14 +1936,15 @@ fn serve_client(
             };
             api1::handle_conn(&raw[b"API1 ".len()..], &ctx)
         } else {
-            (match std::str::from_utf8(&raw) {
-                Err(_) => "{\"error\":\"request line is not valid UTF-8\"}".to_string(),
-                Ok(line) => {
-                    let fields: Vec<&str> = line.split_whitespace().collect();
-                    if fields.is_empty() {
-                        continue;
-                    }
-                    match fields[0].to_ascii_uppercase().as_str() {
+            (
+                match std::str::from_utf8(&raw) {
+                    Err(_) => "{\"error\":\"request line is not valid UTF-8\"}".to_string(),
+                    Ok(line) => {
+                        let fields: Vec<&str> = line.split_whitespace().collect();
+                        if fields.is_empty() {
+                            continue;
+                        }
+                        match fields[0].to_ascii_uppercase().as_str() {
             "STATUS" | "DIAGNOSTICS" => status_json(&state),
             "ADAPTER" => adapter_json(&state),
             "NODES" => nodes_json(&state),
@@ -2065,9 +2066,10 @@ fn serve_client(
             "QUIT" => return Ok(()),
             _ => "{\"error\":\"commands: STATUS, DIAGNOSTICS, SEND <node> <hex>, ADAPTER, NODES, DELIVERIES, EVENTS, AUTHORITY, AUTONOMY, QUIT — or API1 <json>\"}".into(),
                     }
-                }
-            },
-            None)
+                    }
+                },
+                None,
+            )
         };
         {
             let mut w = writer.lock().expect("writer poisoned");
