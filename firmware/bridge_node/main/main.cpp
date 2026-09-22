@@ -137,10 +137,15 @@ Status next_boot_session(std::uint32_t& session) noexcept {
                              "boot session commit failed");
 }
 
-// RTC slow memory survives esp_restart but not a power cycle: the streak
-// bounds a persistent fault's restart cadence (exponential backoff capped
-// below) and is cleared once a boot completes or on power-on.
-RTC_DATA_ATTR std::uint32_t s_fail_streak = 0;
+// .rtc_noinit is the only RAM the boot path never re-initializes, so it is
+// what actually survives esp_restart (.rtc.data is re-copied from the image
+// on every non-deep-sleep reset). Power-on leaves it garbage, so a magic
+// word tells a real streak from random RAM. The streak bounds a persistent
+// fault's restart cadence (exponential backoff capped below) and is cleared
+// once a boot completes or on power-on.
+constexpr std::uint32_t kFailMagic = 0x524c4641;  // "RLFA"
+RTC_NOINIT_ATTR std::uint32_t s_fail_magic;
+RTC_NOINIT_ATTR std::uint32_t s_fail_streak;
 
 [[noreturn]] void fail(const char* detail) {
   const std::uint32_t streak = s_fail_streak;
@@ -161,6 +166,12 @@ routeloom::MonotonicMs monotonic_now_ms() noexcept {
 }  // namespace
 
 extern "C" void app_main(void) {
+  // A matching magic is the only thing that distinguishes a streak that
+  // survived esp_restart from power-on garbage in .rtc_noinit.
+  if (s_fail_magic != kFailMagic) {
+    s_fail_magic = kFailMagic;
+    s_fail_streak = 0;
+  }
   // Identity, nonce reservations, replay state and message sessions share NVS.
   // Never erase it automatically after a version/capacity error: that would
   // silently turn a recoverable storage problem into key/counter rollback.
