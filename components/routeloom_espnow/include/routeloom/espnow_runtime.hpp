@@ -306,6 +306,11 @@ class EspNowRuntime final : public RadioPort,
   Status register_broadcast_peer() noexcept;
   Status ensure_transient_peer(const MacAddress& mac) noexcept;
   Status promote_to_regular(NodeId node, const MacAddress& mac) noexcept;
+  // Caller holds callback_lock_. Frees one driverless resolvable marker
+  // (autonomy slot kept for a Stale/Suspended record) so a fresh binding
+  // can take its slot — Bound/Reachable and static peers are never
+  // victims. Returns false when no marker is evictable.
+  bool evict_driverless_marker() noexcept;
   void release_driver_peer(const MacAddress& mac, NodeId node) noexcept;
   void release_autonomy_peer(Peer& peer, MonotonicMs now) noexcept;
   void reconcile_autonomy(MonotonicMs now) noexcept;
