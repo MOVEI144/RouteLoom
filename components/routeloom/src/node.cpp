@@ -3742,16 +3742,24 @@ void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
 
 std::int64_t MeshNode::control_budget_balance(const MonotonicMs now_ms) noexcept {
   if (now_ms > control_budget_last_ms_) {
-    // Spec-envelope refill (1000µs/s == 1µs/ms); elapsed time beyond the
-    // capacity can never matter, so it is clamped before the multiply.
+    // Spec-envelope refill (1000µs/s == 1µs/ms). A balance that ran
+    // negative through an over-capacity completion debit earns credit for
+    // the whole interval, so elapsed clamps to the headroom to a FULL
+    // bucket — not the capacity itself; credit beyond a full bucket is
+    // unreachable anyway. The modular subtraction keeps room correct for
+    // any negative balance.
+    const std::uint64_t room =
+        control_budget_tokens_us_ >=
+                static_cast<std::int64_t>(kControlBudgetCapacityUs)
+            ? 0
+            : static_cast<std::uint64_t>(
+                  static_cast<std::int64_t>(kControlBudgetCapacityUs)) -
+                  static_cast<std::uint64_t>(control_budget_tokens_us_);
     const std::uint64_t elapsed = std::min<std::uint64_t>(
-        now_ms - control_budget_last_ms_, kControlBudgetCapacityUs);
+        now_ms - control_budget_last_ms_, room);
     control_budget_last_ms_ = now_ms;
-    const std::int64_t accrued = static_cast<std::int64_t>(
+    control_budget_tokens_us_ += static_cast<std::int64_t>(
         elapsed * kControlBudgetRefillUsPerS / 1000ULL);
-    control_budget_tokens_us_ = std::min<std::int64_t>(
-        static_cast<std::int64_t>(kControlBudgetCapacityUs),
-        control_budget_tokens_us_ + accrued);
   }
   return control_budget_tokens_us_;
 }
@@ -3761,10 +3769,18 @@ MonotonicMs MeshNode::control_budget_wait_ms(const MonotonicMs now_ms) noexcept 
   // control-domain service, seeded at the pinned max-frame cost before any
   // sample exists. This keeps the bucket honest under the spec envelope
   // without charging a full worst-case frame the local driver never
-  // actually burns.
-  const std::int64_t deficit =
-      static_cast<std::int64_t>(control_service_ewma_us_) -
-      control_budget_balance(now_ms);
+  // actually burns. Demand is clamped to the bucket capacity: the refill
+  // can never push the balance past one max frame's air time (§14 burst
+  // >= 1 max frame), so a single over-capacity sample — driver service
+  // including CCA backoff/retries — would otherwise defer against a
+  // balance the bucket can never reach, silently stalling all management
+  // emissions. The excess cost still arrives as the completion debit and
+  // is repaid through the wait computed for the next emission (§8: a
+  // normal route must never expire on this node's own budget wait).
+  const std::int64_t demand = std::min<std::int64_t>(
+      static_cast<std::int64_t>(control_service_ewma_us_),
+      static_cast<std::int64_t>(kControlBudgetCapacityUs));
+  const std::int64_t deficit = demand - control_budget_balance(now_ms);
   if (deficit <= 0) return 0;
   // deficit µs at the pinned refill rate -> ms, rounding up so the wait
   // lands affordable rather than one tick short.
@@ -3927,6 +3943,10 @@ void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
   }
   control_budget_unsat_reported_ = false;
   triggered_advertisement_ = false;
+  // The gate charges affordability for ONE frame, then emits one
+  // RouteUpdate per active neighbor: a multi-neighbor burst under-charges
+  // up front, repaid as each completion debits its measured service (the
+  // charge-at-completion model the rest of §14 runs on).
   // >=50% queue watermark: triggered bursts run at half rate (03 §4).
   next_triggered_ms_ = now_ms + kTriggeredUpdateMinIntervalMs *
                                    (scheduler_.background_reduced() ? 2 : 1);

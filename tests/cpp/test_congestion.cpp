@@ -979,6 +979,52 @@ void test_control_budget_unsatisfiable() {
   CHECK(route_ads(h, 1) == 1);
 }
 
+// #46 livelock regression: a single control-domain completion reporting
+// service ABOVE the bucket capacity (driver service incl. CCA backoff /
+// retries, e.g. 20000µs > 12000µs) seeds demand past the reachable balance.
+// Demand clamps to capacity so a full bucket always affords one emission;
+// the excess debit is repaid through the wait for the next one — a normal
+// route must never expire on this node's own budget wait (§8).
+void test_control_budget_over_capacity_service() {
+  Harness h;
+  h.net.service_us = 20000;  // one frame burns more than the 12000µs bucket
+  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 60000);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  // The boot ad emits against the full bucket; its completion debits
+  // 20000µs (the balance runs negative) and seeds demand at 20000µs.
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+  CHECK(a->congestion_stats().service_us_control >= 20000);
+
+  // The next tick defers by the true debt (~19850µs ≈ 20s at 1000µs/s),
+  // not forever: the gate never waits on a balance the refill cannot
+  // reach, so the wait stays finite and well under the 60s lease — no
+  // unsatisfiable, no silent stall.
+  h.now += 150;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+  CHECK(a->congestion_stats().control_budget_unsatisfiable == 0);
+
+  // Inside the wait the ad stays parked; once the debt is repaid the
+  // emission lands.
+  h.now += 18500;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+  h.now += 2000;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 2);
+  CHECK(a->congestion_stats().service_us_control >= 40000);
+
+  // Emissions keep flowing at the real airtime rate (~1 frame per 20s):
+  // route maintenance survives on the node's own budget over the lease.
+  h.now += 21000;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 3);
+  CHECK(a->congestion_stats().control_budget_unsatisfiable == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1004,6 +1050,7 @@ int main() {
   test_airtime_ledger_domains();
   test_control_budget_gate();
   test_control_budget_unsatisfiable();
+  test_control_budget_over_capacity_service();
   if (failures == 0) {
     std::printf("RouteLoom congestion tests passed\n");
     return 0;
