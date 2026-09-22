@@ -149,6 +149,9 @@ class TestPort final : public DiscoveryPort {
   }
 
   std::vector<Sent> sent;
+  // When >0, the next N sends fail without delivering — the deterministic
+  // radio-refusal path for failure-accounting tests.
+  int fail_next{0};
 
  private:
   DiscMedium* medium_;
@@ -226,6 +229,10 @@ struct Unit {
 };
 
 Status TestPort::send_rld1(const MacAddress& dest, const ByteView encoded) noexcept {
+  if (fail_next > 0) {
+    --fail_next;
+    return Status::error(StatusCode::RadioFailure, "injected send failure");
+  }
   const FrameType kind = encoded.size > 5
                              ? static_cast<FrameType>(encoded.data[5])
                              : FrameType::Diagnostic;
@@ -238,6 +245,10 @@ Status TestPort::send_rld1(const MacAddress& dest, const ByteView encoded) noexc
 
 Status TestPort::send_wire(BindingId, const MacAddress& dest, const FrameType type,
                            const ByteView payload) noexcept {
+  if (fail_next > 0) {
+    --fail_next;
+    return Status::error(StatusCode::RadioFailure, "injected send failure");
+  }
   sent.push_back(Sent{dest, true, type, medium_->now,
                       std::vector<std::uint8_t>(payload.data,
                                                 payload.data + payload.size)});
@@ -1229,6 +1240,40 @@ void test_stranded_rediscovery_rebinds() {
   CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
 }
 
+// Port-level send refusal is counted: the RLD1 and wire lanes both bump
+// stats().send_failures, retries still complete the exchange, and the
+// refused send never counts toward offers_tx/probes_tx.
+void test_send_failure_stats() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+
+  // RLD1 lane: the responder's first OFFER fails at the port — the
+  // exchange retries and still completes, but the refusal is counted.
+  const std::uint32_t offers_before = b.engine.stats().offers_tx;
+  b.port.fail_next = 1;
+  run_exchange(world, a);
+  CHECK(b.engine.stats().send_failures == 1);
+  CHECK(a.engine.stats().send_failures == 0);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(b.engine.stats().offers_tx > offers_before);
+
+  // Wire lane: with b->a blocked, a's own refresh probes are the only
+  // sends on its port — the first is refused and counted, and since the
+  // failed send cleared probe_outstanding the next poll retries (peer
+  // probes would otherwise keep resetting the refresh timer).
+  world.medium.block(b.mac, a.mac);
+  const std::uint32_t probes_before = a.engine.stats().probes_tx;
+  a.port.fail_next = 1;
+  world.run(10100);  // past idle_refresh_ms — a fires probes, port refuses 1
+  CHECK(a.engine.stats().send_failures == 1);
+  CHECK(a.engine.stats().probes_tx > probes_before);
+}
+
 }  // namespace
 
 int main() {
@@ -1255,6 +1300,7 @@ int main() {
   test_stale_reprobe_bounded();
   test_stale_reprobe_never_targets_dead();
   test_stranded_rediscovery_rebinds();
+  test_send_failure_stats();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d discovery checks failed\n", failures);

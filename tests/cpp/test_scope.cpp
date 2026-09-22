@@ -239,6 +239,9 @@ class ScopePort final : public DiscoveryPort {
     return n;
   }
   std::vector<Sent> sent;
+  // When >0, the next N sends fail without delivering — the deterministic
+  // radio-refusal path for failure-accounting tests.
+  int fail_next{0};
 
  private:
   ScopeMedium* medium_;
@@ -319,6 +322,10 @@ struct ScopeUnit {
 };
 
 Status ScopePort::send_rld1(const MacAddress& dest, const ByteView encoded) noexcept {
+  if (fail_next > 0) {
+    --fail_next;
+    return Status::error(StatusCode::RadioFailure, "injected send failure");
+  }
   const FrameType kind = encoded.size > 5
                              ? static_cast<FrameType>(encoded.data[5])
                              : FrameType::Diagnostic;
@@ -1129,6 +1136,33 @@ void test_hmac_sha256_split_equivalence() {
   CHECK(std::memcmp(got.data(), expected.data(), got.size()) == 0);
 }
 
+// Port refusals on the scoped (V2) sends count too — send_scoped_discover
+// and send_scoped_offer call the port directly, bypassing emit_rld1, but
+// a refused frame is never silent: stats().send_failures must reflect it.
+void test_scoped_send_failures() {
+  ScopeWorld world;
+  ScopeUnit& a = world.add(1, 0xA1, /*member=*/true, ScopeMode::Required, 0x11);
+  ScopeUnit& b = world.add(2, 0xB2, /*member=*/true, ScopeMode::Required, 0x11);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+
+  // a's first scoped DISCOVER is refused synchronously; the exchange driver
+  // retries it after the offer-window timeout plus backoff.
+  a.port.fail_next = 1;
+  (void)a.engine.begin_discovery(world.medium.now);
+  CHECK(a.engine.stats().send_failures == 1);
+
+  // b's first scoped OFFER is refused; offer_pending stays set so the next
+  // poll retries — the exchange still completes.
+  b.port.fail_next = 1;
+  world.run(6000);  // covers the 320ms window + 2s first backoff
+  CHECK(b.engine.stats().send_failures == 1);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
+}
+
 }  // namespace
 
 int main() {
@@ -1146,6 +1180,7 @@ int main() {
   test_dedup_legacy_flood_scoped_wins();
   test_dedup_replay_past_ttl();
   test_pending_verify_generation_recheck();
+  test_scoped_send_failures();
   test_hmac_sha256_split_equivalence();
 
   if (failures != 0) {

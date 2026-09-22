@@ -562,6 +562,8 @@ void EspNowRuntime::stop() noexcept {
   raw_tx_count_ = 0;
   expired_tx_count_ = 0;
   quarantined_count_ = 0;
+  quarantine_notice_count_ = 0;
+  quarantine_recover_next_ms_ = 0;
   lost_tx_count_ = 0;
   lost_node_tx_valid_ = false;
   portEXIT_CRITICAL(&callback_lock_);
@@ -762,6 +764,56 @@ void EspNowRuntime::poll_once() noexcept {
     obs.provenance = ObservationProvenance::LocalDriver;
     node_.note_radio_tx(obs, now);
   }
+  // Quarantine notices staged inside callback_lock_ drain here — observer
+  // work runs only on the poll task (same rule as expired_tx_).
+  for (;;) {
+    NodeId peer = kInvalidNodeId;
+    portENTER_CRITICAL(&callback_lock_);
+    if (quarantine_notice_count_ == 0) {
+      portEXIT_CRITICAL(&callback_lock_);
+      break;
+    }
+    peer = quarantine_notices_[--quarantine_notice_count_];
+    portEXIT_CRITICAL(&callback_lock_);
+    observer_.on_diagnostic("OP_TX_QUARANTINED", peer, nullptr);
+  }
+  // Raw-lane quarantine self-recovery (02 §2.3/X-02): entries release only
+  // via the owed callback or recover()->rebuild_driver(). The node's
+  // reserved-lane watchdog is the sole in-band recover() caller and it
+  // needs an in-flight DATA send — a node that only runs discovery would
+  // hold a quarantined MAC forever, every later send returning WouldBlock.
+  // After kQuarantineRecoverWindows watchdog windows of dwell the runtime
+  // recovers itself; the trigger defers while a serialized channel
+  // operation owns the radio (rebuild_driver() must not tear down an
+  // in-flight survey/visit) and is rate-limited to one attempt per
+  // watchdog window so a failing driver cannot storm rebuilds.
+  {
+    NodeId recover_peer = kInvalidNodeId;
+    bool due = false;
+    portENTER_CRITICAL(&callback_lock_);
+    if (quarantined_count_ != 0 && now >= quarantine_recover_next_ms_) {
+      std::size_t oldest = 0;
+      for (std::size_t i = 1; i < quarantined_count_; ++i) {
+        if (quarantined_tx_[i].sent_ms < quarantined_tx_[oldest].sent_ms) {
+          oldest = i;
+        }
+      }
+      if (now - quarantined_tx_[oldest].sent_ms >=
+          static_cast<MonotonicMs>(config_.node.callback_watchdog_ms) *
+              kQuarantineRecoverWindows) {
+        due = true;
+        recover_peer = quarantined_tx_[oldest].node;
+      }
+    }
+    portEXIT_CRITICAL(&callback_lock_);
+    if (due && !channel_runner_.busy()) {
+      observer_.on_diagnostic("OP_TX_QUARANTINE_RECOVER", recover_peer,
+                              nullptr);
+      quarantine_recover_next_ms_ =
+          now + config_.node.callback_watchdog_ms;
+      (void)recover();
+    }
+  }
   if (discovery_ != nullptr && bootstrap_queue_ != nullptr) {
     BootstrapEvent rx{};
     while (xQueueReceive(bootstrap_queue_, &rx, 0) == pdTRUE) {
@@ -825,6 +877,7 @@ Status EspNowRuntime::send_raw(const MacAddress& mac,
     }
     if (quarantined_count_ < quarantined_tx_.size()) {
       quarantined_tx_[quarantined_count_++] = raw_tx_[i];
+      stage_quarantine_notice(raw_tx_[i].node);
       if (expired_tx_count_ < expired_tx_.size()) {
         expired_tx_[expired_tx_count_++] = raw_tx_[i];
       } else {
@@ -938,6 +991,7 @@ Status EspNowRuntime::send(const NodeId peer, const std::uint64_t token,
       }
       if (quarantined_count_ < quarantined_tx_.size()) {
         quarantined_tx_[quarantined_count_++] = raw_tx_[i];
+        stage_quarantine_notice(raw_tx_[i].node);
         if (expired_tx_count_ < expired_tx_.size()) {
           expired_tx_[expired_tx_count_++] = raw_tx_[i];
         } else {
@@ -1639,9 +1693,19 @@ Status EspNowRuntime::recover() noexcept {
     // this point — every quarantined/fenced MAC is released. Queued stale
     // events resolve by token/lane, never by MAC reuse.
     portENTER_CRITICAL(&callback_lock_);
+    // Raw sends still in flight die with the driver: the owed callback can
+    // never arrive after the rebuild, so retire each into expired_tx_ —
+    // the same Unknown-evidence path the callback watchdog uses — rather
+    // than dropping their resolution silently (02 §2.3/§2.5).
+    for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+      if (expired_tx_count_ < expired_tx_.size()) {
+        expired_tx_[expired_tx_count_++] = raw_tx_[i];
+      } else {
+        ++telemetry_event_drops_;
+      }
+    }
     quarantined_count_ = 0;
     fenced_outstanding_ = false;
-    expired_tx_count_ = 0;
     raw_tx_count_ = 0;
     portEXIT_CRITICAL(&callback_lock_);
   }
@@ -2032,6 +2096,14 @@ bool EspNowRuntime::tx_quarantined(const MacAddress& mac) noexcept {
     if (quarantined_tx_[i].mac == mac) return true;
   }
   return false;
+}
+
+void EspNowRuntime::stage_quarantine_notice(const NodeId node) noexcept {
+  if (quarantine_notice_count_ < quarantine_notices_.size()) {
+    quarantine_notices_[quarantine_notice_count_++] = node;
+  } else {
+    ++telemetry_event_drops_;
+  }
 }
 
 void EspNowRuntime::stage_lost_tx(const Event& event) noexcept {

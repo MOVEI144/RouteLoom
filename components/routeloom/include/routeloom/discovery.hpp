@@ -403,6 +403,9 @@ struct DiscoveryStats {
   std::uint32_t conflicts{0};
   std::uint32_t simultaneous_resolved{0};
   std::uint32_t stale_expirations{0};
+  // Sends the radio port refused — transport failure is never silent
+  // (offers_tx/probes_tx count accepted sends only).
+  std::uint32_t send_failures{0};
 };
 
 // The portable per-peer lifecycle + RLD1 exchange engine. One instance per
