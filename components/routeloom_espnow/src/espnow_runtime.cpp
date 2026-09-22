@@ -497,21 +497,33 @@ Status EspNowRuntime::start_task(const char* name) noexcept {
     return Status::error(StatusCode::AlreadyExists,
                          "runtime task exists");
   }
+  TaskHandle_t handle = nullptr;
   const BaseType_t result = xTaskCreatePinnedToCore(
       &EspNowRuntime::task_entry, name == nullptr ? "routeloom" : name,
       config_.task_stack_bytes / sizeof(StackType_t), this,
-      config_.task_priority, &task_, config_.task_core);
-  return result == pdPASS
-             ? Status::success()
-             : Status::error(StatusCode::NoCapacity,
-                             "runtime task allocation failed");
+      config_.task_priority, &handle, config_.task_core);
+  if (result != pdPASS) {
+    return Status::error(StatusCode::NoCapacity,
+                         "runtime task allocation failed");
+  }
+  task_ = handle;
+  return Status::success();
 }
 
 void EspNowRuntime::stop() noexcept {
   started_ = false;
-  if (task_ != nullptr) {
-    for (int i = 0; i < 50 && task_ != nullptr; ++i) {
+  // Join before teardown: the poll task self-nulls task_ only after its
+  // in-flight poll_once() returns, and the queues it drains are freed
+  // below. A stop() issued on the poll task itself skips the wait — the
+  // task exits its loop on started_ == false and self-deletes.
+  const TaskHandle_t task = task_.load();
+  if (task != nullptr && task != xTaskGetCurrentTaskHandle()) {
+    std::uint32_t waited_ms = 0;
+    while (task_.load() != nullptr) {
       vTaskDelay(pdMS_TO_TICKS(1));
+      if (++waited_ms % 5000 == 0) {
+        ESP_LOGW(kTag, "runtime task still draining");
+      }
     }
   }
   portENTER_CRITICAL(&callback_lock_);

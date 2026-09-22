@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -348,7 +349,7 @@ class EspNowRuntime final : public RadioPort,
   NeighborDiscovery* discovery_{nullptr};
   QueueHandle_t event_queue_{nullptr};
   QueueHandle_t bootstrap_queue_{nullptr};
-  TaskHandle_t task_{nullptr};
+  std::atomic<TaskHandle_t> task_{nullptr};
   std::uint64_t pending_token_{0};
   NodeId pending_node_{kInvalidNodeId};
   MacAddress pending_mac_{};
@@ -433,7 +434,7 @@ class EspNowRuntime final : public RadioPort,
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};
   bool espnow_initialized_{false};
-  bool started_{false};
+  std::atomic<bool> started_{false};
 };
 
 }  // namespace routeloom::espnow
