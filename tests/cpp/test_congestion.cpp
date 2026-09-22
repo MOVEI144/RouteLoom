@@ -55,14 +55,15 @@ struct Harness {
   std::map<NodeId, std::unique_ptr<MeshNode>> node;
   MonotonicMs now{0};
 
-  MeshNode* add(NodeId id, std::uint8_t rounds = 3, std::uint8_t attempts = 2) {
+  MeshNode* add(NodeId id, std::uint8_t rounds = 3, std::uint8_t attempts = 2,
+                std::uint32_t adv_ms = 30000, std::uint32_t life_ms = 60000) {
     NodeConfig cfg{};
     cfg.network = kNet;
     cfg.node = id;
     cfg.message_session = 100 + static_cast<std::uint32_t>(id);
     cfg.route_generation = 1;
-    cfg.route_advertisement_period_ms = 30000;  // one boot ad, then quiet
-    cfg.route_lifetime_ms = 60000;
+    cfg.route_advertisement_period_ms = adv_ms;  // default: one boot ad, then quiet
+    cfg.route_lifetime_ms = life_ms;
     cfg.hop_accept_timeout_ms = 60;
     cfg.max_link_attempts = attempts;
     cfg.max_end_to_end_rounds = rounds;
@@ -842,6 +843,142 @@ void test_busy_feedback_wrap() {
   CHECK(a->congestion_stats().busy_stale == 1);
 }
 
+// --- issue #46: transmission-budget accounting (radio.md §9/§14) -------------
+
+std::size_t route_ads(const Harness& h, NodeId from) {
+  std::size_t count = 0;
+  for (const auto& s : h.net.sights) {
+    if (s.type == FrameType::RouteUpdate && s.from == from) ++count;
+  }
+  return count;
+}
+
+// #46 fixed cost: the DRR charge includes the pinned per-frame fixed cost —
+// a small body lands in the largest frame-length class where body-only
+// accounting left it mid-sized (88 hdr + 16 tag + 96 fixed + 15 payload =
+// 215B estimated; the pre-fix 119B sat in class 1).
+void test_charge_fixed_cost() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);
+
+  const ObservationKey large{BindingGeneration{0}, ObservationDirection::Egress,
+                             RadioGeneration{0}, ChannelEpoch{0}, 2, 2};
+  const ObservationBucket* bucket = a->telemetry_bucket(large);
+  CHECK(bucket != nullptr);
+  if (bucket != nullptr) CHECK(bucket->tx_submitted >= 2);  // boot ad + DATA
+  // Submission-side class moves 1 -> 2 under the fixed charge (the obs-side
+  // class-0 bucket from driver callbacks is unchanged and not asserted).
+  const ObservationKey mid{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 1, 2};
+  CHECK(a->telemetry_bucket(mid) == nullptr);
+}
+
+// #46 ledger: every completed TX debits its measured driver-service µs into
+// a per-domain accumulator — the control lane charges the accepted work's
+// own ACK domain, management class charges the gated control domain,
+// scheduled DATA charges work, off-scheduler traffic lands in misc.
+void test_airtime_ledger_domains() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  MeshNode* b = h.add(2);
+  h.link(1, 2);
+  MessageId data{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, data));
+  drive_tx(h, 1, data.sequence, 1);  // A's DATA delivered; B queues HOP_ACCEPT
+  h.step(2);                       // B's control-lane HOP_ACCEPT completes
+  h.step(2);                       // B's boot advertisement completes
+
+  const CongestionStats sa = a->congestion_stats();
+  CHECK(sa.service_us_work >= 50);     // scheduled DATA
+  CHECK(sa.service_us_control >= 50);  // boot RouteUpdate (management class)
+  const CongestionStats sb = b->congestion_stats();
+  CHECK(sb.service_us_ack >= 50);      // control-lane HOP_ACCEPT
+  CHECK(sb.service_us_control >= 50);  // B's own boot advertisement
+
+  // An off-scheduler completion (no matching in-flight token) -> misc.
+  RadioTxObservation raw{};
+  raw.peer = 2;
+  raw.submitted_us = 1000;
+  raw.completed_us = 2000;
+  raw.outcome = RadioTxOutcome::Success;
+  raw.provenance = ObservationProvenance::LocalDriver;
+  a->note_radio_tx(raw, h.now);
+  CHECK(a->congestion_stats().service_us_misc == 1000);
+
+  // An Unknown completion carries no measured service — nothing is debited.
+  RadioTxObservation unknown = raw;
+  unknown.completed_us = 0;
+  unknown.outcome = RadioTxOutcome::Unknown;
+  a->note_radio_tx(unknown, h.now);
+  CHECK(a->congestion_stats().service_us_misc == 1000);
+}
+
+// #46 gate: the §14 management bucket gates emissions by air time — when the
+// local balance cannot cover one frame's air time the advertisement
+// stretches by the computed token wait instead of queueing on debt.
+void test_control_budget_gate() {
+  Harness h;
+  h.net.service_us = 12000;  // every TX reports one full frame of driver service
+  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 60000);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  // The boot ad emits immediately against the full 12000µs bucket; its
+  // completion debits 12000µs of control-domain service (demand calibrates
+  // to the same 12000µs, so the bucket is fully drained).
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+  CHECK(a->congestion_stats().service_us_control >= 12000);
+
+  // The next tick cannot cover one frame's air time: the ad stretches by
+  // the computed token wait (~12s) rather than queueing on debt.
+  h.now += 150;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+  h.now += 5000;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+
+  // Once the wait lands the bucket has refilled and the ad emits.
+  h.now += 7000;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 2);
+  CHECK(a->congestion_stats().service_us_control >= 24000);
+}
+
+// #46 unsatisfiable: when the token wait would exceed the route lease the
+// emission is unsatisfiable — surfaced and counted, never queued as a
+// normal emission (§14 CONTROL_BUDGET_UNSATISFIABLE).
+void test_control_budget_unsatisfiable() {
+  Harness h;
+  h.net.service_us = 12000;  // one ad drains the whole 12000µs bucket
+  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 200);
+  (void)h.add(2);
+  h.link(1, 2);
+
+  // The boot ad emits against a full bucket, then debits all of it.
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+
+  // The next tick needs ~11850µs of refill — a wait far beyond the 200ms
+  // lease. Unsatisfiable: counted + surfaced, not queued as an emission.
+  h.now += 150;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+  CHECK(a->congestion_stats().control_budget_unsatisfiable >= 1);
+  CHECK(h.observer(1)->has_diag("CONTROL_BUDGET_UNSATISFIABLE"));
+
+  // The emission stays parked at its stretched slot, not resent.
+  h.now += 500;
+  h.step(1);
+  CHECK(route_ads(h, 1) == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -863,6 +1000,10 @@ int main() {
   test_watermarks();
   test_busy_never_cancels();
   test_observation_buckets();
+  test_charge_fixed_cost();
+  test_airtime_ledger_domains();
+  test_control_budget_gate();
+  test_control_budget_unsatisfiable();
   if (failures == 0) {
     std::printf("RouteLoom congestion tests passed\n");
     return 0;

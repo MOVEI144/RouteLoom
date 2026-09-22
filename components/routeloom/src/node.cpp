@@ -40,6 +40,11 @@ void saturating_inc(std::uint64_t& counter) noexcept {
   if (counter != UINT64_MAX) ++counter;
 }
 
+// Saturating u64 add for the airtime ledger — same pin-on-overflow rule.
+void saturating_add(std::uint64_t& counter, const std::uint64_t delta) noexcept {
+  counter = UINT64_MAX - counter < delta ? UINT64_MAX : counter + delta;
+}
+
 // Map a scheduler admission verdict onto a BUSY reason (03 §5). The reason
 // is derived from the verdict — a BUSY that was never transmitted is never
 // reported as sent.
@@ -110,6 +115,12 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
   }
 }
 
+AirtimeDomain MeshNode::TxScheduler::airtime_domain(const TxJob& job) noexcept {
+  if (control_job(job)) return AirtimeDomain::Ack;
+  return classify(job) == SchedClass::Management ? AirtimeDomain::Control
+                                               : AirtimeDomain::Work;
+}
+
 void MeshNode::TxScheduler::flow_key(const TxJob& job, const NodeId self,
                                      NodeId& scope, NodeId& origin,
                                      NodeId& destination) noexcept {
@@ -130,8 +141,10 @@ void MeshNode::TxScheduler::flow_key(const TxJob& job, const NodeId self,
 void MeshNode::TxScheduler::charge_cost(TxJob& job) noexcept {
   // Estimated TX cost = expected encoded length in bytes. This profile is
   // single-rate, so frame length is the cost unit (03 §4: charge estimated
-  // TX cost by length/rate, not frame count).
-  std::uint64_t cost = wire::kHeaderSize + kAeadTagSize;
+  // TX cost by length/rate, not frame count). The pinned fixed cost stands
+  // for the MAC header + preamble + MAC ACK every frame occupies (radio.md
+  // §9 — body bytes alone undercharge a frame by ~70-105B of air time).
+  std::uint64_t cost = wire::kHeaderSize + kAeadTagSize + kTxFrameFixedCostBytes;
   if (job.form == JobForm::Forwarded) {
     cost += job.forwarded.protected_payload_size;
   } else {
@@ -443,6 +456,9 @@ Status MeshNode::start(const MonotonicMs now_ms) noexcept {
   }
   started_ = true;
   next_route_advertisement_ms_ = now_ms;
+  // §14 control budget starts full at boot; the bucket is a spec-envelope
+  // capability, not measured capacity.
+  control_budget_last_ms_ = now_ms;
   // A development-profile provider is allowed to run but is always surfaced
   // as EXPERIMENTAL; nothing in this node claims production security status.
   if (security_.security_profile() != SecurityProfile::Production) {
@@ -3724,6 +3740,48 @@ void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
   }
 }
 
+std::int64_t MeshNode::control_budget_balance(const MonotonicMs now_ms) noexcept {
+  if (now_ms > control_budget_last_ms_) {
+    // Spec-envelope refill (1000µs/s == 1µs/ms); elapsed time beyond the
+    // capacity can never matter, so it is clamped before the multiply.
+    const std::uint64_t elapsed = std::min<std::uint64_t>(
+        now_ms - control_budget_last_ms_, kControlBudgetCapacityUs);
+    control_budget_last_ms_ = now_ms;
+    const std::int64_t accrued = static_cast<std::int64_t>(
+        elapsed * kControlBudgetRefillUsPerS / 1000ULL);
+    control_budget_tokens_us_ = std::min<std::int64_t>(
+        static_cast<std::int64_t>(kControlBudgetCapacityUs),
+        control_budget_tokens_us_ + accrued);
+  }
+  return control_budget_tokens_us_;
+}
+
+MonotonicMs MeshNode::control_budget_wait_ms(const MonotonicMs now_ms) noexcept {
+  // Emission demand = the calibrated per-frame air time: EWMA of measured
+  // control-domain service, seeded at the pinned max-frame cost before any
+  // sample exists. This keeps the bucket honest under the spec envelope
+  // without charging a full worst-case frame the local driver never
+  // actually burns.
+  const std::int64_t deficit =
+      static_cast<std::int64_t>(control_service_ewma_us_) -
+      control_budget_balance(now_ms);
+  if (deficit <= 0) return 0;
+  // deficit µs at the pinned refill rate -> ms, rounding up so the wait
+  // lands affordable rather than one tick short.
+  return (static_cast<std::uint64_t>(deficit) * 1000ULL +
+          kControlBudgetRefillUsPerS - 1ULL) /
+         kControlBudgetRefillUsPerS;
+}
+
+void MeshNode::note_control_budget_unsat() noexcept {
+  saturating_inc(budget_stats_.control_budget_unsatisfiable);
+  if (!control_budget_unsat_reported_) {
+    control_budget_unsat_reported_ = true;
+    observer_.on_diagnostic("CONTROL_BUDGET_UNSATISFIABLE", kInvalidNodeId,
+                            nullptr);
+  }
+}
+
 void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept {
   if (now_ms < next_route_advertisement_ms_ || scheduler_.full()) return;
   std::array<NodeId, kNeighborCapacity> active{};
@@ -3735,6 +3793,20 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
     next_route_advertisement_ms_ = now_ms + config_.route_advertisement_period_ms;
     return;
   }
+  // §14 management airtime budget: an emission may only schedule while the
+  // local bucket covers one frame's air time. When it cannot, this tick
+  // stretches by the computed token wait (auto-extending the period); a
+  // wait beyond the route lease is unsatisfiable — surfaced and counted,
+  // never queued as a normal emission.
+  const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
+  if (wait_ms > 0) {
+    if (wait_ms > config_.route_lifetime_ms) {
+      note_control_budget_unsat();
+    }
+    next_route_advertisement_ms_ = now_ms + wait_ms;
+    return;
+  }
+  control_budget_unsat_reported_ = false;
   const NodeId peer = active[route_neighbor_cursor_ % count];
   route_neighbor_cursor_ = (route_neighbor_cursor_ + 1) % count;
   (void)queue_route_update(peer, now_ms);
@@ -3842,6 +3914,18 @@ void MeshNode::trigger_route_advertisement(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
   if (!triggered_advertisement_ || now_ms < triggered_at_ms_) return;
+  // Same §14 gate as the periodic path: an unaffordable burst re-arms at
+  // its token wait instead of queueing on debt, and a wait beyond the
+  // route lease surfaces CONTROL_BUDGET_UNSATISFIABLE.
+  const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
+  if (wait_ms > 0) {
+    if (wait_ms > config_.route_lifetime_ms) {
+      note_control_budget_unsat();
+    }
+    triggered_at_ms_ = now_ms + wait_ms;
+    return;  // stays armed
+  }
+  control_budget_unsat_reported_ = false;
   triggered_advertisement_ = false;
   // >=50% queue watermark: triggered bursts run at half rate (03 §4).
   next_triggered_ms_ = now_ms + kTriggeredUpdateMinIntervalMs *
@@ -4124,6 +4208,51 @@ void MeshNode::obs_final(const Delivery& delivery, const DeliveryState state,
 void MeshNode::note_radio_tx(const RadioTxObservation& observation,
                              const MonotonicMs now_ms) noexcept {
   if (!started_ || observation.peer == kInvalidNodeId) return;
+  const std::uint64_t service_us =
+      observation.completed_us > observation.submitted_us
+          ? observation.completed_us - observation.submitted_us
+          : 0;
+  if (service_us > 0) {
+    // §14 airtime ledger: debit the measured driver service before any
+    // bucket bookkeeping — the ledger is a fixed accumulator and must
+    // record even when the bounded bucket pool cannot. A token that
+    // matches the in-flight submission attributes to that job's domain;
+    // anything else (raw lane, bootstrap, stale callback) lands in Misc.
+    AirtimeDomain domain = AirtimeDomain::Misc;
+    if (observation.token != 0 && physical_.active &&
+        observation.token == physical_.token) {
+      domain = TxScheduler::airtime_domain(physical_.job);
+    }
+    switch (domain) {
+      case AirtimeDomain::Ack:
+        saturating_add(budget_stats_.service_us_ack, service_us);
+        break;
+      case AirtimeDomain::Work:
+        saturating_add(budget_stats_.service_us_work, service_us);
+        break;
+      case AirtimeDomain::Control:
+        saturating_add(budget_stats_.service_us_control, service_us);
+        // §14 charges the gated domain at completion: measured service
+        // debits the bucket and may run it negative — the deficit is
+        // repaid through the wait computed for the next management
+        // emission, never by queueing on debt. The same sample calibrates
+        // the demand the gate charges per emission.
+        control_budget_balance(now_ms);
+        control_budget_tokens_us_ -= static_cast<std::int64_t>(service_us);
+        ++control_service_samples_;
+        ewma_add(control_service_ewma_us_,
+                 static_cast<std::uint32_t>(
+                     std::min<std::uint64_t>(service_us, UINT32_MAX)),
+                 control_service_samples_);
+        break;
+      case AirtimeDomain::Optimization:
+        saturating_add(budget_stats_.service_us_optimization, service_us);
+        break;
+      case AirtimeDomain::Misc:
+        saturating_add(budget_stats_.service_us_misc, service_us);
+        break;
+    }
+  }
   auto* bucket = observation_bucket(
       ObservationKey{observation.binding_generation,
                      ObservationDirection::Egress, observation.radio_generation,
@@ -4148,14 +4277,13 @@ void MeshNode::note_radio_tx(const RadioTxObservation& observation,
       }
       break;
   }
-  if (observation.completed_us > observation.submitted_us) {
-    const std::uint32_t service_us = static_cast<std::uint32_t>(
-        observation.completed_us - observation.submitted_us);
+  if (service_us > 0) {
+    const std::uint32_t service_us32 = static_cast<std::uint32_t>(service_us);
     ++bucket->service_samples;
     ++bucket->current.driver_samples;
-    ewma_add(bucket->driver_service_us_ewma, service_us,
+    ewma_add(bucket->driver_service_us_ewma, service_us32,
              bucket->service_samples);
-    ewma_add(bucket->current.driver_us_ewma, service_us,
+    ewma_add(bucket->current.driver_us_ewma, service_us32,
              bucket->current.driver_samples);
   }
   bucket->current.present = true;
@@ -5284,6 +5412,7 @@ void MeshNode::note_peer_pressure(const NodeId peer, const std::uint8_t pressure
 CongestionStats MeshNode::congestion_stats() const noexcept {
   CongestionStats merged = busy_stats_;
   merged += scheduler_.stats_;
+  merged += budget_stats_;
   merged.queued = scheduler_.size();
   merged.control_queued = scheduler_.control_depth();
   merged.flows_active = scheduler_.flows_active();
