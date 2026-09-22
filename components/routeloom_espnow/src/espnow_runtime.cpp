@@ -1597,14 +1597,13 @@ void EspNowRuntime::enqueue_rx(
     event.rssi_valid = true;
     event.channel = static_cast<std::uint8_t>(info->rx_ctrl->channel);
     event.channel_valid = info->rx_ctrl->channel > 0;
-    // Driver-stamped receive time; absent it the capture time still bounds
-    // the sample from above — never fabricated as the driver value.
-    event.observed_us = info->rx_ctrl->timestamp != 0
-                            ? static_cast<std::uint64_t>(info->rx_ctrl->timestamp)
-                            : now_us();
-  } else {
-    event.observed_us = now_us();
   }
+  // rx_ctrl->timestamp runs on the Wi-Fi MAC's own 32-bit µs clock (epoch =
+  // Wi-Fi init, wraps ~71.6 min) — a different time base than esp_timer, so
+  // it must never feed deadline accounting against now_ms(). The esp_timer
+  // enqueue stamp still bounds driver-queue dwell from above at ms
+  // granularity, which is all the rx_age_ms_ debit requires.
+  event.observed_us = now_us();
   std::memcpy(event.data.data(), data, event.length);
   if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
     // Queue-full drops are load evidence (05 §5), not silent loss.
