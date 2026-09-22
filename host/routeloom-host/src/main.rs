@@ -2315,6 +2315,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 path.display(),
                 receive_log::hex_lower(&store.lineage())
             );
+            // The store lineage IS the dispatcher identity on the wire —
+            // same lane hazard as the memory store below: a freshly
+            // created database means a new lineage, and a gateway still
+            // bound to a lost store's lineage rejects every dispatch
+            // verb with LaneMismatch until it reboots. First-ever boots
+            // hit this too, so the wording stays conditional.
+            if store.was_created_fresh() {
+                eprintln!(
+                    "warning: operation store created fresh (lineage {}) — if this replaces a lost or corrupt store, any gateway still bound to the old lineage rejects dispatch with LaneMismatch until it is rebooted",
+                    receive_log::hex_lower(&store.lineage())
+                );
+            }
             StoreBackend::Sqlite(Box::new(store))
         }
         None => {
