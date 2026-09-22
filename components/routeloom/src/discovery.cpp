@@ -1258,8 +1258,12 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   result.lease_granted_ms = config_.awake_lease_ms;
   autonomy::EncodedPayload encoded{};
   if (autonomy::neighbor_result_encode(result, encoded).ok()) {
-    port_.send_wire(neighbor.binding, neighbor.mac, FrameType::NeighborResult,
-                    encoded.view());
+    const Status sent = port_.send_wire(neighbor.binding, neighbor.mac,
+                                        FrameType::NeighborResult,
+                                        encoded.view());
+    if (!sent) {
+      ++stats_.send_failures;
+    }
   }
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
@@ -1584,6 +1588,9 @@ Status NeighborDiscovery::emit_rld1(const MacAddress& dest, const FrameType kind
   Status status = autonomy::rld1_encode(env, encoded);
   if (!status) return status;
   status = port_.send_rld1(dest, encoded.view());
+  if (!status) {
+    ++stats_.send_failures;
+  }
   if (status.ok() && frame_digest != nullptr) {
     // The auth transcript binds the exact emitted frame bytes (02 §5.2).
     sha256(encoded.view(), *frame_digest);
@@ -1938,6 +1945,7 @@ Status NeighborDiscovery::send_probe(Neighbor& neighbor,
     ++stats_.probes_tx;
   } else {
     neighbor.probe_outstanding = 0;
+    ++stats_.send_failures;
   }
   return status;
 }

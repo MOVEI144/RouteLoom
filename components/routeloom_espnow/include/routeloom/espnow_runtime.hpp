@@ -330,6 +330,9 @@ class EspNowRuntime final : public RadioPort,
   // Stage a TX completion event when event_queue_ refuses it. Caller holds
   // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
   void stage_lost_tx(const Event& event) noexcept;
+  // Stage an OP_TX_QUARANTINED notice for the poll task. Caller holds
+  // callback_lock_. Bounded; overflow counts via telemetry_event_drops_.
+  void stage_quarantine_notice(NodeId node) noexcept;
   void channel_committed(std::uint8_t channel) noexcept;
 
   void enqueue_rx(const esp_now_recv_info_t* info,
@@ -396,6 +399,22 @@ class EspNowRuntime final : public RadioPort,
   static constexpr std::size_t kQuarantineCapacity = 4;
   std::array<RawTx, kQuarantineCapacity> quarantined_tx_{};
   std::size_t quarantined_count_{0};
+  // Raw-lane quarantine self-recovery (02 §2.3/X-02): the node's
+  // reserved-lane watchdog is the only in-band recover() caller and it
+  // needs an in-flight DATA send — a discovery-only node would otherwise
+  // hold a quarantined MAC forever. An entry dwelling this many
+  // callback-watchdog windows proves the callback is lost (not merely
+  // late), so poll_once drives recover() itself.
+  static constexpr std::uint32_t kQuarantineRecoverWindows = 4;
+  // Quarantine inserts happen inside callback_lock_, so the
+  // OP_TX_QUARANTINED diagnostic is staged here and drained on the poll
+  // task — same shape as expired_tx_ (observer work never runs inside the
+  // critical section). Overflow counts as telemetry_event_drops_.
+  std::array<NodeId, kQuarantineCapacity> quarantine_notices_{};
+  std::size_t quarantine_notice_count_{0};
+  // Rate limit on self-recover attempts — at most one per watchdog window
+  // so a failing driver rebuild cannot storm every poll.
+  MonotonicMs quarantine_recover_next_ms_{0};
   // TX completions that could not be enqueued onto event_queue_ are staged
   // here and drained on the next poll_once — an accepted submission must
   // resolve exactly once, never disappear into a queue overflow (02 §2.5).
