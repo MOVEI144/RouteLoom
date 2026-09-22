@@ -588,10 +588,21 @@ void test_agent_full_migration() {
   CHECK(token.valid() && token.experimental());
   CHECK(world.auth.agent.serving() == false);
 
-  // PREPARE distribution + READY collection.
+  // PREPARE distribution + READY collection. The blob stores fine but the
+  // participant's clock is still unarmed — the gate counts only READY
+  // evidence carrying clock_ok (04 §7; issue #38).
   world.pump_n(now, 30);
   CHECK(world.part.agent.participant().phase() == ParticipantPhase::Preparing);
+  CHECK(!world.part.agent.participant().clock_valid());
   ParticipantReadiness readiness{};
+  CHECK(world.auth.agent.readiness_of(kSelf, readiness));
+  CHECK(!readiness.ready);
+  CHECK(!world.auth.agent.readiness_verdict().commit_permitted);
+  // The authority's periodic TimeSync (5s cadence on Home) arms the
+  // participant; the re-reported READY then carries clock_ok.
+  now = 5000;
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().clock_valid());
   CHECK(world.auth.agent.readiness_of(kSelf, readiness));
   CHECK(readiness.ready);
   const RequiredSetVerdict verdict = world.auth.agent.readiness_verdict();
@@ -637,6 +648,37 @@ void test_agent_full_migration() {
   world.pump_n(now, 10);
   CHECK(world.part.agent.participant().active_epoch().value == 1);
   CHECK(world.auth.authority.cooldown_until() > now);
+}
+
+// The READY gate refuses commit release while a required node's clock is
+// unarmed — READY evidence without clock_ok is not READY (04 §7, issue
+// #38). Once the authority's TimeSync arms the participant, the
+// re-reported READY opens the gate.
+void test_agent_release_denied_until_clock_armed() {
+  AgentWorld world;
+  MonotonicMs now = kNow;
+  const IssuedPlan issued = issue_plan(1, now + 30000, 1);
+  VerifiedAuthorityPlan token{};
+  CHECK_OK(world.auth.agent.offer_plan(
+      issued.plan, ByteView{issued.blob.data(), issued.blob_size},
+      issued.operation,
+      ByteView{issued.signature.data(), issued.signature.size()},
+      Digest256{}, ByteView{}, ByteView{}, false, now, token));
+  // Blob delivered + READY answered while the participant is still
+  // unarmed — the gate must not open.
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Preparing);
+  CHECK(!world.part.agent.participant().clock_valid());
+  CHECK(world.auth.agent.release_commit(now).code == StatusCode::WouldBlock);
+  CHECK(world.auth.owner.has_event("COMMIT_RELEASE_DENIED"));
+  // Authority TimeSync arms the participant; the re-reported READY opens
+  // the gate on the next release attempt.
+  now = 5000;
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().clock_valid());
+  CHECK_OK(world.auth.agent.release_commit(now));
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Committed);
 }
 
 // A CommitEvidence object with a wrong signature must be rejected by the
@@ -746,6 +788,10 @@ void test_agent_stale_epoch_evidence() {
       issued.operation,
       ByteView{issued.signature.data(), issued.signature.size()},
       Digest256{}, ByteView{}, ByteView{}, false, now, token));
+  world.pump_n(now, 30);
+  // The participant's clock arms on the authority's periodic TimeSync —
+  // the READY gate opens only after that (issue #38).
+  now = 5000;
   world.pump_n(now, 30);
   CHECK_OK(world.auth.agent.release_commit(now));
   world.pump_n(now, 30);
@@ -879,6 +925,10 @@ void test_agent_snapshot_serving() {
       issued.operation,
       ByteView{issued.signature.data(), issued.signature.size()},
       Digest256{}, ByteView{}, ByteView{}, false, now, token));
+  world.pump_n(now, 30);
+  // The participant's clock arms on the authority's periodic TimeSync —
+  // the READY gate opens only after that (issue #38).
+  now = 5000;
   world.pump_n(now, 30);
   CHECK_OK(world.auth.agent.release_commit(now));
   world.pump_n(now, 30);
@@ -1604,6 +1654,7 @@ int main() {
   test_exchange_ack_timeout_bounded();
   test_exchange_duplicate_delivery();
   test_agent_full_migration();
+  test_agent_release_denied_until_clock_armed();
   test_agent_forged_commit_evidence();
   test_agent_wrong_authority_blob();
   test_agent_stale_epoch_evidence();

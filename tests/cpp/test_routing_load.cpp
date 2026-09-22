@@ -548,54 +548,57 @@ void test_sustained_load_switches_route() {
   MeshNode* a = w.at(1);
   SendOptions opts{};
   opts.delivery = DeliveryClass::BestEffort;
-  auto last_data_to = [&](std::uint64_t sequence) -> NodeId {
-    NodeId to = kInvalidNodeId;
+  // A send's FIRST transmission selects the route at send time — later
+  // rounds re-resolve it, so the arm a probe took is its first sighting.
+  auto first_data_to = [&](std::uint64_t sequence) -> NodeId {
     for (const auto& s : w.net.sights) {
       if (s.type == FrameType::Data && s.from == 1 && s.sequence == sequence) {
-        to = s.to;
+        return s.to;
       }
     }
-    return to;
+    return kInvalidNodeId;
   };
 
-  // Congest whichever relay is committed: a batch of sends every ~1.5s sits
-  // ~300ms in our egress queue, keeping the sojourn EWMA hot for >10s.
   NodeId congested = kInvalidNodeId;
   {
     MessageId probe{};
     CHECK_OK(a->send(4, payload_view(), opts, w.now, probe));
     w.run(50);
-    congested = last_data_to(probe.sequence);
+    congested = first_data_to(probe.sequence);
     CHECK(congested == 2 || congested == 3);
   }
   const NodeId alternative = congested == 2 ? 3 : 2;
   std::uint64_t seq_early = 0, seq_late = 0;
-  for (int i = 0; i < 60; ++i) {
+  for (int i = 0; i < 45; ++i) {
     MessageId m{};
     if (a->send(4, payload_view(), opts, w.now, m).ok()) {
-      // Early probe: any send inside ~2.4-4.8s of congestion — long before
-      // the ~10s jittered hold can commit. Late probe: the last accepted
-      // send, dispatched after the hold.
-      if (i >= 8 && seq_early == 0) seq_early = m.sequence;
-      if (i >= 50 && seq_late == 0) seq_late = m.sequence;
+      // Early probe: a send inside the first seconds of congestion — the
+      // committed arm still holds the route. Late probe: a send after the
+      // congestion-driven migration to the alternative has committed.
+      if (i >= 4 && seq_early == 0) seq_early = m.sequence;
+      if (i >= 20 && seq_late == 0) seq_late = m.sequence;
     }
     w.now += 300;
     a->poll(w.now);
-    // The relays and destination are NOT congested: several dispatch passes
-    // per step keep their queues drained and route leases fresh — the test
-    // isolates OUR egress penalty from downstream starvation.
+    // Congest whichever relay is committed: it services its TX queue only
+    // every 4th iteration, so its hop-accepts come back ~1.2s late — our
+    // jobs toward it wait behind the peer window and accumulate real
+    // egress sojourn, while its own advertised metric to the destination
+    // inflates (the §6.2 penalty this scenario measures). The alternative
+    // relay and the destination stay fully drained.
     for (int s = 0; s < 6; ++s) {
-      w.at(2)->poll(w.now);
-      w.at(3)->poll(w.now);
+      if (s == 0 && i % 4 == 0) w.at(congested)->poll(w.now);
+      w.at(alternative)->poll(w.now);
       w.at(4)->poll(w.now);
       w.net.flush(w.now);
     }
   }
   CHECK(seq_early != 0 && seq_late != 0);
-  // Well before the ~10s jittered hold, DATA still took the committed arm.
-  CHECK(last_data_to(seq_early) == congested);
-  // After the hold, the feasible alternative carries new DATA.
-  CHECK(last_data_to(seq_late) == alternative);
+  // Before the migration commits, DATA still takes the committed arm.
+  CHECK(first_data_to(seq_early) == congested);
+  // Once the congested arm's penalty has fed the route metrics, new DATA
+  // takes the feasible alternative.
+  CHECK(first_data_to(seq_late) == alternative);
 }
 
 // ------------------ node: sustained BUSY fast repair + feedback (D4-03)

@@ -704,6 +704,30 @@ void test_bridge_session_lifecycle() {
   CHECK(world.device_sink.frames.empty());
 }
 
+// Late nonce binding (issue #34): firmware seeds device_nonce after
+// radio-up entropy via the setter; the value must reach the HelloAck wire
+// unchanged (attempt counter is still zero at the first HELLO).
+void test_bridge_set_device_nonce() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 0;
+  world.bridge.set_device_nonce(0x1122334455667788ULL);
+  std::array<std::uint8_t, 64> hello_body{};
+  write_u64(hello_body.data(), 0x9999);
+  hello_body[8] = 1;
+  hello_body[9] = 1;
+  const char* principal = "host-operator";
+  hello_body[10] = 13;
+  std::memcpy(hello_body.data() + 11, principal, 13);
+  world.feed(host.plain(FrameKind::Hello, 0, 50,
+                        ByteView{hello_body.data(), 24}), now);
+  world.drain(now);
+  CHECK(world.device_sink.frames.size() == 1);
+  const auto& ack = world.device_sink.frames.back().frame;
+  CHECK(ack.kind == FrameKind::HelloAck && ack.body.size == 53);
+  CHECK(read_u64(ack.body.data) == 0x1122334455667788ULL);
+}
+
 void test_bridge_idempotent_send() {
   World world;
   HostDriver host;
@@ -1160,6 +1184,7 @@ int main() {
   test_session_mac();
   test_idempotency();
   test_bridge_session_lifecycle();
+  test_bridge_set_device_nonce();
   test_bridge_idempotent_send();
   test_bridge_partial_write();
   test_bridge_diagnostics();

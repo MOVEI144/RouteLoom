@@ -248,7 +248,11 @@ class UnavailableAuthenticator final : public NeighborAuthenticator {
 
 // Deployment policy consulted by the membership controller. For the dev
 // profile this is an explicit allowlist/approval hook; a production
-// implementation backs these with the real admission provider.
+// implementation backs these with the real admission provider. The
+// production backing must also persist LOCAL revocation (authority
+// ledger): the controller's Revoked state is RAM-only, so a reboot
+// re-derives membership from `local_member` — a revocation the hooks
+// cannot prove fails open back to Member/Discovering.
 class MembershipHooks {
  public:
   virtual ~MembershipHooks() = default;
@@ -293,7 +297,10 @@ class MembershipController {
   MembershipState retry_commit(MembershipHooks& hooks, NodeId self,
                                NetworkId network) noexcept;
   // Authoritative revocation of THIS node's membership: every binding
-  // becomes unusable; the radio path may not self-rejoin (06 §5).
+  // becomes unusable; the radio path may not self-rejoin (06 §5). The
+  // revoked state is RAM-only — persistence is a production-hooks
+  // (authority ledger) requirement, so a reboot before durable backing
+  // exists fails open.
   void revoke() noexcept { state_ = MembershipState::Revoked; }
 
  private:
