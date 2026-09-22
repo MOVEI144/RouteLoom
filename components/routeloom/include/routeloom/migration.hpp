@@ -673,6 +673,10 @@ class MigrationParticipant {
   Status validate_plan_feasibility(const MigrationPlan& plan,
                                    const PlanMeasurements& m,
                                    MonotonicMs now_ms) const noexcept;
+  // Committed entry point shared by commit/adopt/refetch/resume. When the
+  // clock is unarmed it also derives the local bound on remaining plan
+  // validity that keeps an unarmed Committed from wedging forever.
+  void enter_committed(MonotonicMs now_ms) noexcept;
   // stranded_on_old: the verified commit is held but unapplied and the node
   // is known to still be on the old channel — one bounded re-follow is
   // allowed; otherwise recovery waits for signed material.
@@ -695,8 +699,9 @@ class MigrationParticipant {
   // The plan hash the stored commit record references; set whenever a
   // commit lands so a later blob is accepted only under that digest.
   Digest256 commit_plan_hash_{};
-  // Working authority->local mapping (from the verified plan or a fresh
-  // note_clock sample). A stored pre-restart mapping is never re-armed.
+  // Working authority->local mapping, armed ONLY by a fresh authenticated
+  // TimeSync sample (note_clock). The mapping embedded in the signed plan
+  // is issuer-side content and is never adopted as this node's clock.
   ClockMapping clock_mapping_{};
   MonotonicMs prepare_deadline_ms_{0};
   MonotonicMs verify_deadline_ms_{0};
@@ -715,6 +720,12 @@ class MigrationParticipant {
   std::size_t helper_index_{static_cast<std::size_t>(-1)};
   bool helper_visit_active_{false};
   OperationToken helper_token_{kInvalidOperationToken};
+  // Local-time bound derived at unarmed Committed entry:
+  // entry + (expiry_ms - switch_reference_ms) + guard_ms. The plan's own
+  // validity span bounds the wait for an authenticated clock; lapsing it
+  // unarmed demotes to Recovering/scout rather than wedging Committed
+  // forever (0 = no bound pending).
+  MonotonicMs unarmed_committed_deadline_ms_{0};
   // One bounded re-follow of a held commit after a failed cutover left the
   // node verifiably on the old channel. `available` is a one-shot budget so
   // a failing driver can never loop the retry (04 §9.1).
