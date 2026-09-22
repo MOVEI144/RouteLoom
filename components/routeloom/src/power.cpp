@@ -363,8 +363,13 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   // Records already durable in the previous image — e.g. a pending retained
   // when its resume re-inject failed — are invisible to the node snapshot
   // below: the live delivery is no longer offerable. They are carried over
-  // explicitly once the fresh snapshot has landed.
-  const auto previous_pending = image_.pending;
+  // explicitly once the fresh snapshot has landed. The whole image is kept
+  // for rollback: while the deliveries it references are still live (i.e.
+  // until apply_sleep_dispositions runs), image_ must only ever describe
+  // durable-bound pendings. An abort before then restores this image so the
+  // uncommitted snapshot cannot leak into the next drain's carry-over set
+  // and resurrect work that completed while the node stayed awake.
+  const auto previous_image = image_;
   image_ = PowerImage{};
   image_.network = node_.config().network;
   image_.node = node_.config().node;
@@ -400,7 +405,7 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   // one that outlived its deadline while awake terminates loudly here; one
   // that cannot fit reports NoCapacity rather than vanishing silently.
   bool previous_had_pending = false;
-  for (const auto& record : previous_pending) {
+  for (const auto& record : previous_image.pending) {
     if (!record.used) continue;
     previous_had_pending = true;
     bool covered = false;
@@ -430,6 +435,10 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   }
   const auto status = persist_image();
   if (!status) {
+    // Abort before dispositions ran: the rebuilt image was never persisted
+    // and every delivery it captured is still live. Roll back so its
+    // records do not become holdover input for the next drain.
+    image_ = previous_image;
     abort_to_running(status.detail);
     return;
   }
@@ -441,6 +450,7 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
     image_.sequence = image_sequence_ + 1;
     const auto second = commit_image(image_);
     if (!second) {
+      image_ = previous_image;
       abort_to_running(second.detail);
       return;
     }

@@ -1014,6 +1014,68 @@ void test_retained_pending_expires_while_awake() {
   }
 }
 
+// Issue #49 review regression: when finish_drain's image commit fails the
+// sleep attempt aborts with every snapshotted delivery still live — the
+// uncommitted records must NOT stay in image_ and leak into the next
+// drain's carry-over set. The delivery completes normally while awake, so
+// the following sleep/wake must re-inject nothing: a completed delivery is
+// never resurrected.
+void test_completed_delivery_not_carried_over() {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  // Node 2 is wired into the sim but not yet a neighbor — the durable send
+  // parks in WaitingForRoute until a route appears after the abort.
+  TestSecurity security_b;
+  CapturingObserver observer_b;
+  SimRadio radio_b(w.net, 2);
+  NodeConfig config_b = PowerWorld::make_config();
+  config_b.node = 2;
+  MeshNode b(config_b, radio_b, security_b, observer_b);
+  w.net.register_node(7, &w.node);
+  w.net.register_node(2, &b);
+  w.net.connect(7, 2);
+  CHECK_OK(b.start(0));
+
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  const MessageId id = queue_pending(w, 2, true);
+  CHECK(w.node.delivery(id).state == DeliveryState::WaitingForRoute);
+
+  // First image write fails: the snapshot is committed nowhere and the
+  // original delivery stays live (same setup as persist-failure test).
+  w.storage.drop_call = 0;
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  w.pump(600);  // drain deadline -> finish_drain -> commit fails -> abort
+  CHECK(w.coordinator.state() == PowerState::Running);
+  CHECK(w.node.delivery(id).state == DeliveryState::WaitingForRoute);
+
+  // Route appears while awake; the delivery runs to terminal Delivered.
+  CHECK_OK(w.node.add_neighbor(2, 1, w.now));
+  CHECK_OK(b.add_neighbor(7, 1, w.now));
+  // w.pump only drives the coordinator's node; poll b too so its TX
+  // scheduler emits the hop-accept and end-receipt that finish the run.
+  for (int i = 0; i < 200 &&
+                  w.node.delivery(id).state != DeliveryState::Delivered;
+       ++i) {
+    b.poll(w.now);
+    w.pump(5);
+  }
+  CHECK(observer_b.messages.size() == 1);
+  CHECK(w.node.delivery(id).state == DeliveryState::Delivered);
+
+  // Next sleep/wake: zero re-injections and the verdict is preserved —
+  // the aborted snapshot record must not be carried over.
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
+                              ElapsedInterval{0, 0, true}, w.now));
+  CHECK(w.events.pending_results.empty());
+  CHECK(w.node.delivery(id).state == DeliveryState::Delivered);
+}
+
 void test_resume_confirm_fast_and_discovery() {
   // Fast path: an RX inside the confirm window marks FastResume.
   {
@@ -1243,6 +1305,7 @@ int main() {
   test_pending_reinject_failure_retained();
   test_retained_pending_survives_next_sleep_cycle();
   test_retained_pending_expires_while_awake();
+  test_completed_delivery_not_carried_over();
   test_resume_confirm_fast_and_discovery();
   test_image_slots_alternate();
   test_persist_failure_aborts();
