@@ -80,6 +80,11 @@ class EspNowRuntime final : public RadioPort,
   Status register_neighbor(NodeId node, const MacAddress& mac,
                            RouteMetric link_metric) noexcept;
   Status start() noexcept;
+  // Lifecycle calls are single-caller: a caller must serialize
+  // start_task()/stop() against each other, and must not issue them on
+  // the poll task itself — a stop() reaching the teardown from inside a
+  // poll_once observer callback cannot wait on itself, so it skips the
+  // join and frees the queues under the in-flight frame.
   Status start_task(const char* name = "routeloom") noexcept;
   void stop() noexcept;
   void poll_once() noexcept;
@@ -349,7 +354,14 @@ class EspNowRuntime final : public RadioPort,
   NeighborDiscovery* discovery_{nullptr};
   QueueHandle_t event_queue_{nullptr};
   QueueHandle_t bootstrap_queue_{nullptr};
+  // Poll-task lifecycle: task_running_ is claimed (CAS) by start_task()
+  // BEFORE the task can exist and released by task_entry after its loop,
+  // so both the double-start guard and stop()'s join cover the window
+  // where the task already runs but has not published its handle. task_
+  // is written ONLY by task_entry (self-published first, self-cleared
+  // last) and read by stop() to recognize a call on the poll task.
   std::atomic<TaskHandle_t> task_{nullptr};
+  std::atomic<bool> task_running_{false};
   std::uint64_t pending_token_{0};
   NodeId pending_node_{kInvalidNodeId};
   MacAddress pending_mac_{};

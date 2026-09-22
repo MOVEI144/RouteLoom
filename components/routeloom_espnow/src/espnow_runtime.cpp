@@ -478,11 +478,18 @@ Status EspNowRuntime::start() noexcept {
 
 void EspNowRuntime::task_entry(void* argument) noexcept {
   auto* runtime = static_cast<EspNowRuntime*>(argument);
+  // task_ has a single writer — this task: self-published first so a
+  // stop() running on it recognizes the self-call, self-cleared before
+  // the join flag drops so a joiner never observes a dangling handle.
+  runtime->task_ = xTaskGetCurrentTaskHandle();
   while (runtime->started_) {
     runtime->poll_once();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
   runtime->task_ = nullptr;
+  // Released last: once task_running_ reads false, a joining stop() owns
+  // the teardown and frees the queues this task was draining.
+  runtime->task_running_ = false;
   vTaskDelete(nullptr);
 }
 
@@ -493,35 +500,46 @@ Status EspNowRuntime::start_task(const char* name) noexcept {
       return status;
     }
   }
-  if (task_ != nullptr) {
+  // Liveness is claimed before the task exists: it may start on another
+  // core (or preempt this one at a higher priority) in the window before
+  // xTaskCreatePinnedToCore returns, and both stop()'s join and this
+  // double-start guard must already see it. task_running_ is that flag;
+  // task_ is left for the task itself to publish (single writer).
+  bool expected = false;
+  if (!task_running_.compare_exchange_strong(expected, true)) {
     return Status::error(StatusCode::AlreadyExists,
                          "runtime task exists");
   }
-  TaskHandle_t handle = nullptr;
   const BaseType_t result = xTaskCreatePinnedToCore(
       &EspNowRuntime::task_entry, name == nullptr ? "routeloom" : name,
       config_.task_stack_bytes / sizeof(StackType_t), this,
-      config_.task_priority, &handle, config_.task_core);
+      config_.task_priority, nullptr, config_.task_core);
   if (result != pdPASS) {
+    task_running_ = false;
     return Status::error(StatusCode::NoCapacity,
                          "runtime task allocation failed");
   }
-  task_ = handle;
   return Status::success();
 }
 
 void EspNowRuntime::stop() noexcept {
   started_ = false;
-  // Join before teardown: the poll task self-nulls task_ only after its
-  // in-flight poll_once() returns, and the queues it drains are freed
-  // below. A stop() issued on the poll task itself skips the wait — the
-  // task exits its loop on started_ == false and self-deletes.
-  const TaskHandle_t task = task_.load();
-  if (task != nullptr && task != xTaskGetCurrentTaskHandle()) {
-    std::uint32_t waited_ms = 0;
-    while (task_.load() != nullptr) {
+  // Join before teardown: the poll task clears task_running_ only after
+  // its in-flight poll_once() returns, and the queues it drains are
+  // freed below. The wait covers the whole create→exit window, since
+  // task_running_ is claimed before the task can run (start_task()).
+  // Contract (header): single caller, never issued on the poll task — a
+  // stop() reaching here from inside a poll_once observer callback
+  // cannot wait on itself, so it skips the join and still tears the
+  // queues down under the in-flight frame (configASSERT on the next
+  // queue touch), the same hazard the pre-join code had.
+  if (task_.load() != xTaskGetCurrentTaskHandle()) {
+    constexpr TickType_t kWarnIntervalTicks = pdMS_TO_TICKS(5000);
+    TickType_t waited_ticks = 0;
+    while (task_running_.load()) {
       vTaskDelay(pdMS_TO_TICKS(1));
-      if (++waited_ms % 5000 == 0) {
+      if (++waited_ticks >= kWarnIntervalTicks) {
+        waited_ticks = 0;
         ESP_LOGW(kTag, "runtime task still draining");
       }
     }
