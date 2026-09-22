@@ -330,7 +330,21 @@ struct DiscoveryConfig {
   std::uint32_t backoff_max_ms{16000};
   std::uint32_t probe_timeout_ms{2000};       // unanswered probe retry bound
   std::uint8_t max_attempts{5};
+  // Stale re-confirmation (02 §9): a lapsed-lease record keeps resolving,
+  // so a slow unicast re-probe can re-open the lane without a full exchange.
+  // The cadence stays well below idle_refresh and the attempt budget parks
+  // the record dormant until fresh RX evidence — a permanently partitioned
+  // peer can never turn this into a background storm (02 §6).
+  std::uint32_t stale_reprobe_ms{150000};     // stale re-probe cadence
+  std::uint8_t stale_reprobe_attempts{4};     // probes before dormancy
 };
+
+// Phases where the verified MAC<->NodeId mapping may still resolve.
+// Conflict records are quarantined (the mapping is disputed) and Revoked
+// bindings are dead — neither may attribute traffic or sends. Stale keeps
+// resolving precisely so re-confirmation probes can find the peer;
+// Suspended is a planned absence, not a broken binding.
+bool resolvable_phase(NeighborPhase phase) noexcept;
 
 // Radio-facing TX surface the Owner implements (P1b wires this to the real
 // driver; tests wire it to a fake medium). send_rld1 carries the bootstrap
@@ -486,6 +500,11 @@ class NeighborDiscovery {
     MonotonicMs suspended_until_ms{0};
     std::uint32_t probe_outstanding{0};
     MonotonicMs probe_deadline_ms{0};
+    // Stale re-confirmation scheduler (02 §9): first tick fires immediately
+    // on the demotion poll, then every stale_reprobe_ms. The attempt count
+    // only counts emitted probes; verified RX evidence re-arms it.
+    MonotonicMs next_reprobe_ms{0};
+    std::uint8_t stale_reprobes{0};
   };
 
   struct Outbound {
@@ -699,6 +718,11 @@ class NeighborDiscovery {
   std::uint32_t next_binding_id_{1};
   std::uint32_t next_probe_sequence_{1};
   MonotonicMs next_handshake_ms_{0};   // 1/s burst-1 token bucket
+  // Stranded-node re-discovery (04 §9.2): armed when the last usable edge
+  // is gone but resolvable Stale records survive; backoff doubles
+  // backoff_base -> backoff_max between bounded begin_discovery runs.
+  MonotonicMs next_rediscovery_ms_{0};
+  std::uint32_t rediscovery_backoff_ms_{0};
   std::size_t transient_used_{0};
   std::size_t regular_used_{0};
   std::size_t pins_used_{0};

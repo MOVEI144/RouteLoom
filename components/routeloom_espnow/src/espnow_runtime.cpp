@@ -1026,9 +1026,12 @@ Status EspNowRuntime::send_wire(const BindingId binding,
     return Status::error(StatusCode::InvalidState,
                          "autonomy engine not attached");
   }
-  if (channel_runner_.busy()) {
+  if (channel_runner_.busy() && !channel_runner_.visiting()) {
     // The authenticated home lane holds while the Owner runs a serialized
-    // channel operation (04 §3/§8).
+    // channel operation (04 §3/§8) — except inside the off-channel dwell,
+    // where authenticated probe traffic IS the stranded-node recovery lane
+    // the visit exists to reach (04 §9.2). Only the allowlist below rides
+    // it, so nothing else can slip onto the visit channel.
     return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
   // Only post-BIND availability probes ride this path; the allowlist is
@@ -1048,7 +1051,7 @@ Status EspNowRuntime::send_wire(const BindingId binding,
   }
   MacAddress mac{};
   mac.bytes = dest;
-  const Peer* record = find_peer(mac.bytes.data());
+  Peer* record = find_peer(mac.bytes.data());
   if (record == nullptr) {
     // Binding exists but no regular driver peer yet: promote now. A full
     // partition surfaces PEER_CAPACITY to the engine — never a silent drop.
@@ -1060,6 +1063,13 @@ Status EspNowRuntime::send_wire(const BindingId binding,
   } else if (record->node != node) {
     return Status::error(StatusCode::Conflict,
                          "mac bound to another node");
+  } else if (!record->driver_registered) {
+    // A kept resolvable marker (Stale/Suspended) re-arms its driver
+    // registration on demand — releasing it never deleted the mapping.
+    const Status status = register_driver_peer(*record);
+    if (!status) {
+      return status;
+    }
   }
   wire::PlainFrame frame{};
   frame.header.type = type;
@@ -1173,8 +1183,8 @@ Status EspNowRuntime::migration_send(const NodeId peer, const FrameType type,
       return Status::error(StatusCode::InvalidArgument,
                            "type not allowed on the migration lane");
   }
-  const Peer* record = find_peer(peer);
-  if (record == nullptr || !record->driver_registered) {
+  Peer* record = find_peer(peer);
+  if (record == nullptr) {
     return Status::error(StatusCode::NotFound,
                          "peer is not driver-registered");
   }
@@ -1188,6 +1198,13 @@ Status EspNowRuntime::migration_send(const NodeId peer, const FrameType type,
          phase != NeighborPhase::Reachable)) {
       return Status::error(StatusCode::AuthorizationFailed,
                            "peer binding not current");
+    }
+  }
+  if (!record->driver_registered) {
+    // Kept resolvable markers re-arm on demand (04 §9.2).
+    const Status status = register_driver_peer(*record);
+    if (!status) {
+      return status;
     }
   }
   wire::PlainFrame frame{};
@@ -1227,8 +1244,11 @@ std::size_t EspNowRuntime::migration_peers(NodeId* out,
   std::size_t count = 0;
   for (const auto& peer : peers_) {
     if (count >= capacity) break;
-    if (!peer.used || !peer.driver_registered) continue;
+    if (!peer.used) continue;
     if (peer.autonomy) {
+      // Discovery-managed peers qualify by verified phase alone: a kept
+      // marker may be driverless while resolvable — migration_send re-arms
+      // the driver registration when the plan actually transmits.
       NeighborPhase phase{};
       if (discovery_ == nullptr ||
           !discovery_->phase_of(peer.node, phase) ||
@@ -1236,6 +1256,8 @@ std::size_t EspNowRuntime::migration_peers(NodeId* out,
            phase != NeighborPhase::Reachable)) {
         continue;
       }
+    } else if (!peer.driver_registered) {
+      continue;  // static peers still need the driver record itself
     }
     out[count++] = peer.node;
   }
@@ -1243,6 +1265,32 @@ std::size_t EspNowRuntime::migration_peers(NodeId* out,
 }
 
 // --- Peer lease sync (02 §7, contracts peer_partition) ---------------------------
+
+// Caller holds callback_lock_. A driverless resolvable marker (autonomy
+// slot kept for a Stale/Suspended record) is the only evictable regular
+// peer: its verified mapping is provably idle, and freeing it is how the
+// partition recovers slots for fresh bindings. Bound/Reachable records and
+// static peers are never victims.
+bool EspNowRuntime::evict_driverless_marker() noexcept {
+  for (auto& candidate : peers_) {
+    if (!candidate.used || !candidate.autonomy ||
+        candidate.driver_registered) {
+      continue;
+    }
+    NeighborPhase phase{};
+    if (discovery_ == nullptr ||
+        !discovery_->phase_of(candidate.node, phase) ||
+        (phase != NeighborPhase::Stale &&
+         phase != NeighborPhase::Suspended)) {
+      continue;
+    }
+    candidate.used = false;
+    candidate.autonomy = false;
+    candidate.node = kInvalidNodeId;
+    return true;
+  }
+  return false;
+}
 
 Status EspNowRuntime::promote_to_regular(const NodeId node,
                                          const MacAddress& mac) noexcept {
@@ -1253,18 +1301,52 @@ Status EspNowRuntime::promote_to_regular(const NodeId node,
   }
   if (record != nullptr) {
     const bool mismatch = record->node != node || !(record->mac == mac);
-    const bool registered = record->driver_registered;
-    portEXIT_CRITICAL(&callback_lock_);
-    if (mismatch) {
+    if (!mismatch) {
+      const bool registered = record->driver_registered;
+      portEXIT_CRITICAL(&callback_lock_);
+      // An existing (e.g. statically configured) mapping stays
+      // owner-managed; it satisfies the lease but is never auto-released.
+      if (!registered) {
+        const Status status = register_driver_peer(*record);
+        if (!status) {
+          return status;
+        }
+      }
+      // A transient slot may still pin this MAC: the driver registration
+      // moved to this record, so release its bookkeeping or the duplicate
+      // pin never frees.
+      portENTER_CRITICAL(&callback_lock_);
+      if (TransientPeer* slot = find_transient(mac.bytes.data())) {
+        slot->used = false;
+      }
+      portEXIT_CRITICAL(&callback_lock_);
+      return Status::success();
+    }
+    // The mapping moved: this driverless resolvable marker is superseded
+    // by a newer binding on the same node or MAC, so evict it and take the
+    // fresh path below — otherwise the stale slot blocks the new mapping
+    // forever. A registered or non-resolvable record still conflicts.
+    NeighborPhase phase{};
+    const bool superseded =
+        record->autonomy && !record->driver_registered &&
+        discovery_ != nullptr &&
+        discovery_->phase_of(record->node, phase) &&
+        (phase == NeighborPhase::Stale ||
+         phase == NeighborPhase::Suspended);
+    if (!superseded) {
+      portEXIT_CRITICAL(&callback_lock_);
       return Status::error(StatusCode::Conflict,
                            "peer identity mismatch");
     }
-    // An existing (e.g. statically configured) mapping stays owner-managed;
-    // it satisfies the lease but is never auto-released.
-    if (!registered) {
-      return register_driver_peer(*record);
-    }
-    return Status::success();
+    record->used = false;
+    record->autonomy = false;
+    record->node = kInvalidNodeId;
+    record = nullptr;
+  }
+  if (regular_used() >= regular_budget()) {
+    // Full partition: a driverless marker is the only thing that may make
+    // room — a Bound/Reachable peer is never evicted for capacity.
+    (void)evict_driverless_marker();
   }
   if (regular_used() >= regular_budget()) {
     portEXIT_CRITICAL(&callback_lock_);
@@ -1364,7 +1446,12 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
         break;  // in-flight exchange holds the transient slot
       case NeighborPhase::ApprovalPending:
       case NeighborPhase::Bound:
-      case NeighborPhase::Reachable: {
+      case NeighborPhase::Reachable:
+      case NeighborPhase::Stale:
+      case NeighborPhase::Suspended: {
+        // Resolvable records hold the lane: the transient registration
+        // promotes under the verified mapping so bootstrap traffic keeps
+        // working through a lease lapse (02 §9, 04 §9.2).
         NodeId node = kInvalidNodeId;
         if (discovery_->node_of(slot.mac.bytes, node) &&
             promote_to_regular(node, slot.mac).ok()) {
@@ -1378,7 +1465,8 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
         break;
       }
       default:
-        // Stale/Suspended/Conflict/Revoked: release the driver peer.
+        // Conflict/Revoked (or a record the engine dropped): dead records
+        // keep no driver peer.
         release_driver_peer(slot.mac, kInvalidNodeId);
         slot.used = false;
         break;
@@ -1425,6 +1513,36 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
           peer.neighbor_added = true;
           portEXIT_CRITICAL(&callback_lock_);
         }
+      }
+      continue;
+    }
+    if (known && resolvable_phase(phase)) {
+      // Stale/Suspended (the resolvable phases left): the verified binding
+      // still resolves, so keep the logical slot — enqueue_rx must keep
+      // attributing this MAC's frames to the engine record or the
+      // re-join lane dies for good (issue #40, 04 §9.2). Only the driver
+      // registration and the routing-neighbor link are released; sends
+      // re-arm the driver on demand.
+      NodeId bound = kInvalidNodeId;
+      if (!discovery_->node_of(peer.mac.bytes, bound) ||
+          bound != peer.node) {
+        // The engine's binding for this node moved to another MAC — this
+        // slot pins sends to a dead address; release it entirely.
+        release_autonomy_peer(peer, now);
+        continue;
+      }
+      if (peer.neighbor_added) {
+        (void)node_.remove_neighbor(peer.node, now);
+      }
+      const bool had_driver = peer.driver_registered;
+      const MacAddress mac = peer.mac;
+      const NodeId node = peer.node;
+      portENTER_CRITICAL(&callback_lock_);
+      peer.neighbor_added = false;
+      peer.driver_registered = false;
+      portEXIT_CRITICAL(&callback_lock_);
+      if (had_driver) {
+        release_driver_peer(mac, node);
       }
       continue;
     }
