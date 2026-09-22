@@ -179,10 +179,11 @@ const LATER_PHASE_METHODS: &[&str] = &[];
 /// Always returns a complete JSON response document (no trailing newline).
 ///
 /// `handle` discards connection-level effects — it exists for direct
-/// request/response tests and legacy call sites. The socket layer uses
-/// [`handle_conn`], which additionally returns the [`ConnEffect`] a
-/// successful `messages.subscribe` carries (pending → activate after the
-/// response flush).
+/// request/response tests. The socket layer uses [`handle_conn`], which
+/// additionally returns the [`ConnEffect`] a successful
+/// `messages.subscribe` carries (pending → activate after the response
+/// flush).
+#[cfg(test)]
 pub fn handle<S: OperationStore>(body: &[u8], ctx: &ApiContext<'_, S>) -> String {
     handle_conn(body, ctx).0
 }
@@ -573,10 +574,8 @@ fn messages_read<S: OperationStore>(
                 ))
             }
             ReadOutcome::Batch(batch) => {
-                if batch.records.is_empty() && deadline.is_some() {
-                    let remaining = deadline
-                        .expect("checked")
-                        .checked_duration_since(Instant::now());
+                if let (true, Some(dl)) = (batch.records.is_empty(), deadline) {
+                    let remaining = dl.checked_duration_since(Instant::now());
                     if let Some(remaining) = remaining.filter(|r| !r.is_zero()) {
                         // Snapshot the dirty epoch BEFORE releasing the
                         // lock so a notify landing between the read and
