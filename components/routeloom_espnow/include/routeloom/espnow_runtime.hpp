@@ -221,7 +221,7 @@ class EspNowRuntime final : public RadioPort,
     // generations recorded at submit time so a stale callback can never mint
     // evidence under a newer radio/channel identity.
     TxLane tx_lane{TxLane::Reserved};
-    std::uint64_t observed_us{0};    // rx: driver timestamp; tx: completed_us
+    std::uint64_t observed_us{0};    // rx: enqueue stamp (esp_timer); tx: completed_us
     std::uint64_t submitted_us{0};   // tx only
     BindingGeneration binding{};
     RadioGeneration radio_generation{};
