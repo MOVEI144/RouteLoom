@@ -34,6 +34,7 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/psk_security.hpp"
+#include "routeloom/secure_clear.hpp"
 #include "routeloom/usb_bridge.hpp"
 
 namespace {
@@ -136,9 +137,21 @@ Status next_boot_session(std::uint32_t& session) noexcept {
                              "boot session commit failed");
 }
 
+// RTC slow memory survives esp_restart but not a power cycle: the streak
+// bounds a persistent fault's restart cadence (exponential backoff capped
+// below) and is cleared once a boot completes or on power-on.
+RTC_DATA_ATTR std::uint32_t s_fail_streak = 0;
+
 [[noreturn]] void fail(const char* detail) {
-  ESP_LOGE(kTag, "fatal: %s", detail);
-  for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+  const std::uint32_t streak = s_fail_streak;
+  s_fail_streak = streak + 1U;
+  const std::uint32_t shift = streak < 6U ? streak : 6U;
+  const std::uint32_t backoff_ms = 500U << shift;
+  ESP_LOGE(kTag, "fatal: %s (streak=%lu, restart in %lu ms)", detail,
+           static_cast<unsigned long>(streak + 1U),
+           static_cast<unsigned long>(backoff_ms));
+  vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+  esp_restart();
 }
 
 routeloom::MonotonicMs monotonic_now_ms() noexcept {
@@ -341,10 +354,6 @@ extern "C" void app_main(void) {
   // apart from a reconnect and must never see the value regress.
   bridge_config.boot_id = message_session;
   bridge_config.capability = CONFIG_ROUTELOOM_CAPABILITY;
-  // Device nonce seeds the session transcript; hardware RNG makes every
-  // boot's handshake unique even if the same host nonce recurs.
-  bridge_config.device_nonce =
-      (static_cast<std::uint64_t>(esp_random()) << 32U) | esp_random();
 
   static routeloom::usb::UsbBridge bridge(bridge_config, stream);
 
@@ -417,7 +426,7 @@ extern "C" void app_main(void) {
   status = commit_verifier.initialize(key);
   if (!status) fail(status.detail);
 #endif
-  std::fill(key.begin(), key.end(), 0);
+  routeloom::secure_clear(key);
 
   // The bridge is the node's observer: mesh deliveries and diagnostics are
   // reported to the host as DataFromMesh/Delivery/Diag frames.
@@ -425,6 +434,13 @@ extern "C" void app_main(void) {
   status = runtime.initialize();
   if (!status) fail(status.detail);
   bridge.set_mesh(&runtime.node());
+  // Device nonce seeds the session transcript; sampling esp_random only
+  // once the radio is up follows the entropy contract (security spec §9):
+  // pre-RF hardware RNG draws weaker entropy. Set before the pump loop so
+  // no HELLO can observe a zero nonce; per-boot uniqueness still holds
+  // even if the same host nonce recurs.
+  bridge.set_device_nonce(
+      (static_cast<std::uint64_t>(esp_random()) << 32U) | esp_random());
 
   // Gateway endpoint (scope-gateway-config P3): one component owns the mesh
   // responder role AND the host-originated send path. The USB capability
@@ -501,7 +517,7 @@ extern "C" void app_main(void) {
   status = scope_provider.install(
       routeloom::ByteView{scope_key.data(), scope_key.size()},
       CONFIG_ROUTELOOM_DISCOVERY_SCOPE_GENERATION, 0);
-  scope_key.fill(0);
+  routeloom::secure_clear(scope_key);
   if (!status) fail(status.detail);
   discovery_config.scope_mode =
       static_cast<routeloom::ScopeMode>(CONFIG_ROUTELOOM_DISCOVERY_SCOPE);
@@ -560,6 +576,9 @@ extern "C" void app_main(void) {
 
   status = runtime.start();
   if (!status) fail(status.detail);
+  // Boot complete — the pump loop below is the node's main loop, so a
+  // later fatal is a runtime fault rather than a boot-loop streak.
+  s_fail_streak = 0;
 
   if (security.security_profile() != routeloom::SecurityProfile::Production) {
     ESP_LOGW(

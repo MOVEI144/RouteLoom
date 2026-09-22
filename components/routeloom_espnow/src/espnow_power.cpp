@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "esp_now.h"
 #include "esp_sleep.h"
+#include "esp_wifi.h"
 #include "soc/soc_caps.h"
 
 namespace routeloom::espnow {
@@ -47,7 +48,7 @@ Status EspNowPowerPort::capture_cache(PowerImage& image) noexcept {
 
 Status EspNowPowerPort::quiesce_radio() noexcept {
   // Stop the event path so no new RX/TX work can be delivered to MeshNode.
-  // In-flight driver state is left for the SoC to reset on deep-sleep entry.
+  // The driver itself is stopped later by enter_sleep()'s esp_wifi_stop().
   const esp_err_t rx = esp_now_unregister_recv_cb();
   const esp_err_t tx = esp_now_unregister_send_cb();
   if (rx != ESP_OK || tx != ESP_OK) {
@@ -108,7 +109,16 @@ Status EspNowPowerPort::configure_wake(const WakePlan& plan) noexcept {
 }
 
 Status EspNowPowerPort::enter_sleep() noexcept {
+  // ESP-IDF expects Wi-Fi stopped before deep sleep: a live driver keeps
+  // RF calibration/phy state across the boundary, with target-dependent
+  // sleep-current and resume side effects. The stop lives here rather than
+  // in quiesce_radio() because the coordinator's abort path
+  // (start_radio() -> runtime_.recover()) never restarts Wi-Fi.
+  (void)esp_wifi_stop();
   esp_deep_sleep_start();
+  // esp_deep_sleep_start does not return on success; if it did, no sleep
+  // happened, so restore the driver the stop above took down.
+  (void)esp_wifi_start();
   return Status::error(StatusCode::InternalError,
                       "esp_deep_sleep_start returned");
 }

@@ -42,6 +42,7 @@
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
 #include "routeloom/psk_security.hpp"
+#include "routeloom/secure_clear.hpp"
 
 namespace {
 constexpr char kTag[] = "RouteLoomRef";
@@ -153,9 +154,21 @@ Status next_boot_session(std::uint32_t& session) noexcept {
                              "boot session commit failed");
 }
 
+// RTC slow memory survives esp_restart but not a power cycle: the streak
+// bounds a persistent fault's restart cadence (exponential backoff capped
+// below) and is cleared once a boot completes or on power-on.
+RTC_DATA_ATTR std::uint32_t s_fail_streak = 0;
+
 [[noreturn]] void fail(const char* detail) {
-  ESP_LOGE(kTag, "fatal: %s", detail);
-  for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+  const std::uint32_t streak = s_fail_streak;
+  s_fail_streak = streak + 1U;
+  const std::uint32_t shift = streak < 6U ? streak : 6U;
+  const std::uint32_t backoff_ms = 500U << shift;
+  ESP_LOGE(kTag, "fatal: %s (streak=%lu, restart in %lu ms)", detail,
+           static_cast<unsigned long>(streak + 1U),
+           static_cast<unsigned long>(backoff_ms));
+  vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+  esp_restart();
 }
 
 // Used by the CONFIG and DEEP_SLEEP opt-in paths only; in a default build it
@@ -720,9 +733,10 @@ extern "C" void app_main(void) {
         ByteView{config_key_material.data(),
                  sizeof(kConfigDevDomain) - 1 + key.size()},
         config_dev_key);
+    routeloom::secure_clear(config_key_material);
   }
 #endif
-  std::fill(key.begin(), key.end(), 0);
+  routeloom::secure_clear(key);
 
   static EspNowRuntime runtime(config, security, observer);
   status = runtime.initialize();
@@ -766,7 +780,7 @@ extern "C" void app_main(void) {
   status = scope_provider.install(
       routeloom::ByteView{scope_key.data(), scope_key.size()},
       CONFIG_ROUTELOOM_DISCOVERY_SCOPE_GENERATION, 0);
-  scope_key.fill(0);
+  routeloom::secure_clear(scope_key);
   if (!status) fail(status.detail);
   discovery_config.scope_mode =
       static_cast<routeloom::ScopeMode>(CONFIG_ROUTELOOM_DISCOVERY_SCOPE);
@@ -995,6 +1009,9 @@ extern "C" void app_main(void) {
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
+  // Boot complete — the pump loop below is the node's main loop, so a
+  // later fatal is a runtime fault rather than a boot-loop streak.
+  s_fail_streak = 0;
 
   routeloom::SleepRequest request{};
   request.pending_policy = routeloom::SleepWorkPolicy::Fail;
@@ -1034,6 +1051,8 @@ extern "C" void app_main(void) {
 #else
   status = runtime.start_task();
   if (!status) fail(status.detail);
+  // Boot complete — the runtime task is the node's main loop.
+  s_fail_streak = 0;
 #endif
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.
