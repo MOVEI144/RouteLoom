@@ -1096,7 +1096,8 @@ Status EspNowRuntime::send_wire(const BindingId binding,
 
 void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
                                       const ByteView payload,
-                                      const MonotonicMs now_ms) noexcept {
+                                      const MonotonicMs now_ms,
+                                      const MonotonicMs captured_ms) noexcept {
   // Migration control payloads route to the attached migration sink; the
   // MeshNode admission gate (open_link + identity checks) already ran, and
   // the sink re-validates semantics (authority signature, phase) itself.
@@ -1107,7 +1108,8 @@ void EspNowRuntime::on_autonomy_frame(const NodeId peer, const FrameType type,
     case FrameType::ObjectChunk:
     case FrameType::ObjectAck:
       if (migration_ != nullptr) {
-        migration_->on_migration_frame(peer, type, payload, now_ms);
+        migration_->on_migration_frame(peer, type, payload, now_ms,
+                                       captured_ms);
       }
       return;
     default:
@@ -1592,14 +1594,11 @@ void EspNowRuntime::enqueue_rx(
     event.rssi_valid = true;
     event.channel = static_cast<std::uint8_t>(info->rx_ctrl->channel);
     event.channel_valid = info->rx_ctrl->channel > 0;
-    // Driver-stamped receive time; absent it the capture time still bounds
-    // the sample from above — never fabricated as the driver value.
-    event.observed_us = info->rx_ctrl->timestamp != 0
-                            ? static_cast<std::uint64_t>(info->rx_ctrl->timestamp)
-                            : now_us();
-  } else {
-    event.observed_us = now_us();
   }
+  // Stamp on the node's own clock: rx_ctrl->timestamp runs on the driver's
+  // separate epoch (and wraps), so only an enqueue-side stamp can measure
+  // queue residence against now_us().
+  event.observed_us = now_us();
   std::memcpy(event.data.data(), data, event.length);
   if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
     // Queue-full drops are load evidence (05 §5), not silent loss.

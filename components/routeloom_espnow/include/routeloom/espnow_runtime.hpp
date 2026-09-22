@@ -140,7 +140,8 @@ class EspNowRuntime final : public RadioPort,
   // --- AutonomyFrameSink --------------------------------------------------------
   // Wire-lane autonomy RX after MeshNode's open_link + identity checks.
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
-                         MonotonicMs now_ms) noexcept override;
+                         MonotonicMs now_ms,
+                         MonotonicMs captured_ms = 0) noexcept override;
   // Verify oracle (04 §10): forwards authenticated traffic to the migration
   // sink — but ONLY while no radio operation owns the channel. Frames
   // observed during a survey/helper visit or mid-cutover drain are
@@ -221,7 +222,7 @@ class EspNowRuntime final : public RadioPort,
     // generations recorded at submit time so a stale callback can never mint
     // evidence under a newer radio/channel identity.
     TxLane tx_lane{TxLane::Reserved};
-    std::uint64_t observed_us{0};    // rx: driver timestamp; tx: completed_us
+    std::uint64_t observed_us{0};    // rx: enqueue stamp on now_us()'s clock; tx: completed_us
     std::uint64_t submitted_us{0};   // tx only
     BindingGeneration binding{};
     RadioGeneration radio_generation{};
