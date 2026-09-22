@@ -288,9 +288,12 @@ class PlanExchange {
 class MigrationFrameSink {
  public:
   virtual ~MigrationFrameSink() = default;
+  // captured_ms: when the frame was captured on the node's own clock
+  // (received_us at radio enqueue); 0 = unknown, treated as now_ms.
   virtual void on_migration_frame(NodeId peer, FrameType type,
                                   ByteView payload,
-                                  MonotonicMs now_ms) noexcept = 0;
+                                  MonotonicMs now_ms,
+                                  MonotonicMs captured_ms = 0) noexcept = 0;
   virtual void poll(MonotonicMs now_ms) noexcept = 0;
   // Any link-authenticated frame receipt is connectivity evidence. The
   // Owner reports it so VERIFY closes on real traffic instead of a blind
@@ -350,7 +353,8 @@ class MigrationAgent final : public MigrationFrameSink,
 
   // MigrationFrameSink
   void on_migration_frame(NodeId peer, FrameType type, ByteView payload,
-                          MonotonicMs now_ms) noexcept override;
+                          MonotonicMs now_ms,
+                          MonotonicMs captured_ms = 0) noexcept override;
   void poll(MonotonicMs now_ms) noexcept override;
   void note_link_activity(NodeId peer, MonotonicMs now_ms) noexcept override;
 

@@ -588,10 +588,21 @@ void test_agent_full_migration() {
   CHECK(token.valid() && token.experimental());
   CHECK(world.auth.agent.serving() == false);
 
-  // PREPARE distribution + READY collection.
+  // PREPARE distribution + READY collection. The blob stores fine but the
+  // participant's clock is still unarmed — the gate counts only READY
+  // evidence carrying clock_ok (04 §7; issue #38).
   world.pump_n(now, 30);
   CHECK(world.part.agent.participant().phase() == ParticipantPhase::Preparing);
+  CHECK(!world.part.agent.participant().clock_valid());
   ParticipantReadiness readiness{};
+  CHECK(world.auth.agent.readiness_of(kSelf, readiness));
+  CHECK(!readiness.ready);
+  CHECK(!world.auth.agent.readiness_verdict().commit_permitted);
+  // The authority's periodic TimeSync (5s cadence on Home) arms the
+  // participant; the re-reported READY then carries clock_ok.
+  now = 5000;
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().clock_valid());
   CHECK(world.auth.agent.readiness_of(kSelf, readiness));
   CHECK(readiness.ready);
   const RequiredSetVerdict verdict = world.auth.agent.readiness_verdict();
@@ -637,6 +648,37 @@ void test_agent_full_migration() {
   world.pump_n(now, 10);
   CHECK(world.part.agent.participant().active_epoch().value == 1);
   CHECK(world.auth.authority.cooldown_until() > now);
+}
+
+// The READY gate refuses commit release while a required node's clock is
+// unarmed — READY evidence without clock_ok is not READY (04 §7, issue
+// #38). Once the authority's TimeSync arms the participant, the
+// re-reported READY opens the gate.
+void test_agent_release_denied_until_clock_armed() {
+  AgentWorld world;
+  MonotonicMs now = kNow;
+  const IssuedPlan issued = issue_plan(1, now + 30000, 1);
+  VerifiedAuthorityPlan token{};
+  CHECK_OK(world.auth.agent.offer_plan(
+      issued.plan, ByteView{issued.blob.data(), issued.blob_size},
+      issued.operation,
+      ByteView{issued.signature.data(), issued.signature.size()},
+      Digest256{}, ByteView{}, ByteView{}, false, now, token));
+  // Blob delivered + READY answered while the participant is still
+  // unarmed — the gate must not open.
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Preparing);
+  CHECK(!world.part.agent.participant().clock_valid());
+  CHECK(world.auth.agent.release_commit(now).code == StatusCode::WouldBlock);
+  CHECK(world.auth.owner.has_event("COMMIT_RELEASE_DENIED"));
+  // Authority TimeSync arms the participant; the re-reported READY opens
+  // the gate on the next release attempt.
+  now = 5000;
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().clock_valid());
+  CHECK_OK(world.auth.agent.release_commit(now));
+  world.pump_n(now, 30);
+  CHECK(world.part.agent.participant().phase() == ParticipantPhase::Committed);
 }
 
 // A CommitEvidence object with a wrong signature must be rejected by the
@@ -747,6 +789,10 @@ void test_agent_stale_epoch_evidence() {
       ByteView{issued.signature.data(), issued.signature.size()},
       Digest256{}, ByteView{}, ByteView{}, false, now, token));
   world.pump_n(now, 30);
+  // The participant's clock arms on the authority's periodic TimeSync —
+  // the READY gate opens only after that (issue #38).
+  now = 5000;
+  world.pump_n(now, 30);
   CHECK_OK(world.auth.agent.release_commit(now));
   world.pump_n(now, 30);
   CHECK(world.part.agent.participant().committed_epoch().value == 1);
@@ -812,6 +858,20 @@ void test_agent_timesync_rearm() {
                                       payload.view(), now);
   CHECK(!world.part.agent.participant().clock_valid());
 
+  // A forged sample — claiming the authority's id but arriving from another
+  // link peer — is refused and reported: TimeSync is strictly 1-hop, so the
+  // claimed source must be the link-authenticated sender.
+  autonomy::TimeSyncPayload spoofed{};
+  spoofed.source = kAuthority;
+  spoofed.sequence = 88;
+  spoofed.reference_ms = now + 60;
+  spoofed.uncertainty_ms = 4;
+  CHECK_OK(autonomy::time_sync_encode(spoofed, payload));
+  world.part.agent.on_migration_frame(kPeer, FrameType::TimeSync,
+                                      payload.view(), now);
+  CHECK(!world.part.agent.participant().clock_valid());
+  CHECK(world.part.owner.has_event("TIME_SYNC_SOURCE_MISMATCH"));
+
   // An over-uncertainty sample — even from the authority — is refused and
   // never re-arms a cold clock (20ms bound, 04 §8).
   autonomy::TimeSyncPayload sloppy{};
@@ -823,6 +883,27 @@ void test_agent_timesync_rearm() {
   world.part.agent.on_migration_frame(kAuthority, FrameType::TimeSync,
                                       payload.view(), now);
   CHECK(!world.part.agent.participant().clock_valid());
+
+  // Queue residence debits the verified bound: a sample captured 30ms ago
+  // overflows the 20ms bound once residence is counted in the uncertainty.
+  autonomy::TimeSyncPayload aged{};
+  aged.source = kAuthority;
+  aged.sequence = 111;
+  aged.reference_ms = now + 60;
+  aged.uncertainty_ms = 4;
+  CHECK_OK(autonomy::time_sync_encode(aged, payload));
+  world.part.agent.on_migration_frame(kAuthority, FrameType::TimeSync,
+                                      payload.view(), now, now - 30);
+  CHECK(!world.part.agent.participant().clock_valid());
+
+  // The same sample captured 10ms ago stays inside the bound, and the armed
+  // offset is measured at capture (now-10), not at processing (now).
+  world.part.agent.on_migration_frame(kAuthority, FrameType::TimeSync,
+                                      payload.view(), now, now - 10);
+  CHECK(world.part.agent.participant().clock_valid());
+  CHECK(world.part.agent.participant().clock_mapping().peer_offset_ms ==
+        static_cast<std::int64_t>(aged.reference_ms) -
+            static_cast<std::int64_t>(now - 10));
 
   // The authority's periodic in-bounds sample re-arms it. (First emission
   // is scheduled timesync_period_ms after resume.)
@@ -844,6 +925,10 @@ void test_agent_snapshot_serving() {
       issued.operation,
       ByteView{issued.signature.data(), issued.signature.size()},
       Digest256{}, ByteView{}, ByteView{}, false, now, token));
+  world.pump_n(now, 30);
+  // The participant's clock arms on the authority's periodic TimeSync —
+  // the READY gate opens only after that (issue #38).
+  now = 5000;
   world.pump_n(now, 30);
   CHECK_OK(world.auth.agent.release_commit(now));
   world.pump_n(now, 30);
@@ -1569,6 +1654,7 @@ int main() {
   test_exchange_ack_timeout_bounded();
   test_exchange_duplicate_delivery();
   test_agent_full_migration();
+  test_agent_release_denied_until_clock_armed();
   test_agent_forged_commit_evidence();
   test_agent_wrong_authority_blob();
   test_agent_stale_epoch_evidence();

@@ -16,6 +16,7 @@
 #include "routeloom/counter_store.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/replay.hpp"
+#include "routeloom/secure_clear.hpp"
 #include "routeloom/wire.hpp"
 
 #include "test_security.hpp"
@@ -348,6 +349,9 @@ void test_replay_window_loss_requires_new_epoch() {
   // Same epoch: reject-or-rehandshake. Without the persisted window the node
   // cannot prove counters at or below the last persisted maximum are fresh.
   CHECK(guard.open_context(kCtx, window).code == StatusCode::ReplayRejected);
+  // A missing window is lost state, not a foreign fingerprint — the
+  // collision counter stays at zero.
+  CHECK(guard.foreign_fingerprint_rejects() == 0);
   // Older epoch: stale by the floor, always rejected.
   SecurityContext older = kCtx;
   older.epoch = 2;
@@ -435,9 +439,13 @@ void test_replay_stale_record_at_floor_epoch_is_state_lost() {
   SecurityContext at4 = kCtx;
   at4.epoch = 4;
   CHECK(guard.open_context(at4, window).code == StatusCode::ReplayRejected);
+  // The stale foreign-fingerprint record forcing REPLAY_STATE_LOST is the
+  // counted collision signature; the epoch-advance re-key below is not.
+  CHECK(guard.foreign_fingerprint_rejects() == 1);
   SecurityContext at5 = kCtx;
   at5.epoch = 5;
   CHECK_OK(guard.open_context(at5, window));  // advance recovers
+  CHECK(guard.foreign_fingerprint_rejects() == 1);
 }
 
 void test_replay_corruption_is_not_a_fresh_context() {
@@ -698,6 +706,26 @@ void test_plaintext_data_rejected() {
   CHECK(world.obs(2)->has_diag("END_PROTECTION_REQUIRED"));
 }
 
+// Non-elidable zeroization (issue #34): volatile-store clearing of key
+// material — the buffer must read as all-zero afterwards, including via a
+// read that the compiler cannot fold into the write.
+void test_secure_clear() {
+  std::array<std::uint8_t, 32> secret{};
+  secret.fill(0xA5);
+  routeloom::secure_clear(secret);
+  for (const auto byte : secret) CHECK(byte == 0);
+
+  // Pointer form over a prefix clears exactly the prefix.
+  std::array<std::uint8_t, 16> buffer{};
+  buffer.fill(0xFF);
+  routeloom::secure_clear(buffer.data(), 8);
+  for (std::size_t i = 0; i < buffer.size(); ++i) {
+    CHECK(buffer[i] == (i < 8 ? 0 : 0xFF));
+  }
+
+  routeloom::secure_clear(nullptr, 0);  // null + zero size is a no-op
+}
+
 }  // namespace
 
 int main() {
@@ -722,6 +750,7 @@ int main() {
   test_counter_record_rewound_rejected();
   test_security_profile_marker();
   test_plaintext_data_rejected();
+  test_secure_clear();
   if (failures != 0) {
     std::fprintf(stderr, "%d hardening checks failed\n", failures);
     return 1;

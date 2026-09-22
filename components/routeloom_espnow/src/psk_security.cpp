@@ -1,5 +1,7 @@
 #include "routeloom/psk_security.hpp"
 
+#include "routeloom/secure_clear.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -66,7 +68,7 @@ Status compute_hmac_sha256(
                            output.data(), output.size(), &output_length);
   (void)psa_destroy_key(key_id);
   if (result != PSA_SUCCESS || output_length != output.size()) {
-    std::fill(output.begin(), output.end(), 0);
+    secure_clear(output);
     return Status::error(StatusCode::InternalError,
                          "PSA HMAC key derivation failed");
   }
@@ -102,7 +104,7 @@ Status DevelopmentPskSecurityProvider::initialize(
   const auto store_status = replay_store_.open(replay_namespace);
   if (!store_status) {
     counter_store_ = nullptr;
-    std::fill(master_key_.begin(), master_key_.end(), 0);
+    secure_clear(master_key_);
     return Status::error(StatusCode::StorageFailure,
                          "replay nvs_open failed");
   }
@@ -119,7 +121,7 @@ void DevelopmentPskSecurityProvider::close() noexcept {
   replay_store_.close();
   ready_ = false;
   counter_store_ = nullptr;
-  std::fill(master_key_.begin(), master_key_.end(), 0);
+  secure_clear(master_key_);
 }
 
 bool DevelopmentPskSecurityProvider::same_context(
@@ -299,7 +301,7 @@ Status DevelopmentPskSecurityProvider::seal(
   psa_key_id_t key_id = 0;
   status = import_aes_key(key, key_id);
   if (!status) {
-    std::fill(key.begin(), key.end(), 0);
+    secure_clear(key);
     return status;
   }
 
@@ -313,11 +315,11 @@ Status DevelopmentPskSecurityProvider::seal(
       plaintext_data, plaintext.size, output.data(), output.size(),
       &output_length);
   destroy_key(key_id);
-  std::fill(key.begin(), key.end(), 0);
+  secure_clear(key);
 
   if (result != PSA_SUCCESS ||
       output_length != plaintext.size + kAeadTagSize) {
-    std::fill(output.begin(), output.end(), 0);
+    secure_clear(output);
     return Status::error(StatusCode::InternalError,
                          "PSA AES-GCM seal failed");
   }
@@ -325,7 +327,7 @@ Status DevelopmentPskSecurityProvider::seal(
     std::memcpy(ciphertext.data, output.data(), plaintext.size);
   }
   std::memcpy(tag.data(), output.data() + plaintext.size, tag.size());
-  std::fill(output.begin(), output.end(), 0);
+  secure_clear(output);
   return Status::success();
 }
 
@@ -361,7 +363,7 @@ Status DevelopmentPskSecurityProvider::open(
   psa_key_id_t key_id = 0;
   status = import_aes_key(key, key_id);
   if (!status) {
-    std::fill(key.begin(), key.end(), 0);
+    secure_clear(key);
     return status;
   }
 
@@ -373,13 +375,13 @@ Status DevelopmentPskSecurityProvider::open(
       input.data(), ciphertext.size + tag.size(), output.data(),
       output.size(), &output_length);
   destroy_key(key_id);
-  std::fill(key.begin(), key.end(), 0);
-  std::fill(input.begin(), input.end(), 0);
+  secure_clear(key);
+  secure_clear(input);
 
   if (result != PSA_SUCCESS || output_length != ciphertext.size) {
-    std::fill(output.begin(), output.end(), 0);
+    secure_clear(output);
     if (plaintext.data != nullptr && plaintext.size != 0) {
-      std::memset(plaintext.data, 0, plaintext.size);
+      secure_clear(plaintext.data, plaintext.size);
     }
     return Status::error(StatusCode::AuthenticationFailed,
                          "AES-GCM authentication failed");
@@ -388,7 +390,7 @@ Status DevelopmentPskSecurityProvider::open(
   if (output_length != 0) {
     std::memcpy(plaintext.data, output.data(), output_length);
   }
-  std::fill(output.begin(), output.end(), 0);
+  secure_clear(output);
 
   RxContext* replay = nullptr;
   status = rx_context(context, replay);
@@ -396,7 +398,7 @@ Status DevelopmentPskSecurityProvider::open(
     status = replay_guard_.accept(replay->window, counter);
   }
   if (!status && plaintext.data != nullptr && plaintext.size != 0) {
-    std::memset(plaintext.data, 0, plaintext.size);
+    secure_clear(plaintext.data, plaintext.size);
   }
   return status;
 }

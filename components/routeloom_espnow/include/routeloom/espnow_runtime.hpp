@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -79,6 +80,11 @@ class EspNowRuntime final : public RadioPort,
   Status register_neighbor(NodeId node, const MacAddress& mac,
                            RouteMetric link_metric) noexcept;
   Status start() noexcept;
+  // Lifecycle calls are single-caller: a caller must serialize
+  // start_task()/stop() against each other, and must not issue them on
+  // the poll task itself — a stop() reaching the teardown from inside a
+  // poll_once observer callback cannot wait on itself, so it skips the
+  // join and frees the queues under the in-flight frame.
   Status start_task(const char* name = "routeloom") noexcept;
   void stop() noexcept;
   void poll_once() noexcept;
@@ -140,7 +146,8 @@ class EspNowRuntime final : public RadioPort,
   // --- AutonomyFrameSink --------------------------------------------------------
   // Wire-lane autonomy RX after MeshNode's open_link + identity checks.
   void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
-                         MonotonicMs now_ms) noexcept override;
+                         MonotonicMs now_ms,
+                         MonotonicMs captured_ms = 0) noexcept override;
   // Verify oracle (04 §10): forwards authenticated traffic to the migration
   // sink — but ONLY while no radio operation owns the channel. Frames
   // observed during a survey/helper visit or mid-cutover drain are
@@ -195,6 +202,10 @@ class EspNowRuntime final : public RadioPort,
     return bootstrap_rx_dropped_;
   }
   std::uint32_t rx_dropped() const noexcept { return rx_dropped_; }
+  // Non-RLD1 frames dropped because the source MAC is not in the peer
+  // table — neighbouring-mesh interference and peer churn otherwise leave
+  // no observable trace in the field.
+  std::uint32_t unknown_peer_rx() const noexcept { return unknown_peer_rx_; }
   // Recovery-required visibility (02 §2.3): a fenced or quarantined MAC
   // stays unavailable until its owed callback arrives or recover()
   // rebuilds the driver — the host must be able to see that state.
@@ -221,7 +232,7 @@ class EspNowRuntime final : public RadioPort,
     // generations recorded at submit time so a stale callback can never mint
     // evidence under a newer radio/channel identity.
     TxLane tx_lane{TxLane::Reserved};
-    std::uint64_t observed_us{0};    // rx: driver timestamp; tx: completed_us
+    std::uint64_t observed_us{0};    // rx: enqueue stamp (esp_timer); tx: completed_us
     std::uint64_t submitted_us{0};   // tx only
     BindingGeneration binding{};
     RadioGeneration radio_generation{};
@@ -295,6 +306,11 @@ class EspNowRuntime final : public RadioPort,
   Status register_broadcast_peer() noexcept;
   Status ensure_transient_peer(const MacAddress& mac) noexcept;
   Status promote_to_regular(NodeId node, const MacAddress& mac) noexcept;
+  // Caller holds callback_lock_. Frees one driverless resolvable marker
+  // (autonomy slot kept for a Stale/Suspended record) so a fresh binding
+  // can take its slot — Bound/Reachable and static peers are never
+  // victims. Returns false when no marker is evictable.
+  bool evict_driverless_marker() noexcept;
   void release_driver_peer(const MacAddress& mac, NodeId node) noexcept;
   void release_autonomy_peer(Peer& peer, MonotonicMs now) noexcept;
   void reconcile_autonomy(MonotonicMs now) noexcept;
@@ -323,9 +339,11 @@ class EspNowRuntime final : public RadioPort,
   Status channel_readback(std::uint8_t& channel) noexcept;
   Status channel_reapply_peers() noexcept;
   void channel_fence_tx() noexcept;
-  // Caller holds callback_lock_. Purges quarantine entries whose radio
-  // generation is no longer current, then reports whether `mac` remains
-  // quarantined (a callback is still owed for a retired send to it).
+  // Caller holds callback_lock_. Reports whether `mac` is quarantined — a
+  // watchdog-retired send to it still owes a callback. Entries release
+  // only when the owed TX callback consumes them as stale evidence or
+  // recover()->rebuild_driver() establishes callback quiescence; no timer
+  // or generation change releases an entry (02 §2.3, X-02).
   bool tx_quarantined(const MacAddress& mac) noexcept;
   // Stage a TX completion event when event_queue_ refuses it. Caller holds
   // callback_lock_. Bounded; overflow is counted via telemetry_event_drops_.
@@ -351,7 +369,14 @@ class EspNowRuntime final : public RadioPort,
   NeighborDiscovery* discovery_{nullptr};
   QueueHandle_t event_queue_{nullptr};
   QueueHandle_t bootstrap_queue_{nullptr};
-  TaskHandle_t task_{nullptr};
+  // Poll-task lifecycle: task_running_ is claimed (CAS) by start_task()
+  // BEFORE the task can exist and released by task_entry after its loop,
+  // so both the double-start guard and stop()'s join cover the window
+  // where the task already runs but has not published its handle. task_
+  // is written ONLY by task_entry (self-published first, self-cleared
+  // last) and read by stop() to recognize a call on the poll task.
+  std::atomic<TaskHandle_t> task_{nullptr};
+  std::atomic<bool> task_running_{false};
   std::uint64_t pending_token_{0};
   NodeId pending_node_{kInvalidNodeId};
   MacAddress pending_mac_{};
@@ -392,10 +417,12 @@ class EspNowRuntime final : public RadioPort,
   RawTx fenced_pending_{};
   bool fenced_outstanding_{false};
   // MAC quarantine (02 §2.3/X-02): a watchdog-retired send still owes the
-  // driver a callback. While its radio generation is current the MAC stays
-  // quarantined — a late callback consumes the marker as stale evidence and
-  // can never resolve a replacement send to the same destination. Entries
-  // clear on radio-generation change (proven quiescence barrier).
+  // driver a callback. The MAC stays quarantined until the owed callback
+  // arrives — it consumes the entry as stale evidence so it can never
+  // resolve a replacement send to the same destination — or
+  // recover()->rebuild_driver() establishes the tested
+  // callback-quiescence barrier; a radio-generation change alone proves
+  // no quiescence and never releases an entry.
   static constexpr std::size_t kQuarantineCapacity = 4;
   std::array<RawTx, kQuarantineCapacity> quarantined_tx_{};
   std::size_t quarantined_count_{0};
@@ -438,6 +465,7 @@ class EspNowRuntime final : public RadioPort,
   routeloom::MacAddress rx_source_{};
   std::uint32_t bootstrap_rx_dropped_{0};
   std::uint32_t rx_dropped_{0};
+  std::uint32_t unknown_peer_rx_{0};
   std::uint32_t autonomy_tx_ok_{0};
   std::uint32_t autonomy_tx_failed_{0};
   // Owner-side channel epoch: bumped on every readback-verified committed
@@ -448,11 +476,13 @@ class EspNowRuntime final : public RadioPort,
   // Submit ms of the reserved TX — the poll-task callback watchdog so a
   // never-completing send cannot wedge pending_tx_ forever (02 §2.2).
   MonotonicMs pending_sent_ms_{0};
+  // Last stack high-water-mark log tick (poll_once rate limit).
+  MonotonicMs stack_hwm_log_ms_{0};
   bool pending_tx_{false};
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};
   bool espnow_initialized_{false};
-  bool started_{false};
+  std::atomic<bool> started_{false};
 };
 
 }  // namespace routeloom::espnow

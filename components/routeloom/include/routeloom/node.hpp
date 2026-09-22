@@ -157,8 +157,11 @@ class NullObserver final : public NodeObserver {
 class AutonomyFrameSink {
  public:
   virtual ~AutonomyFrameSink() = default;
+  // captured_ms: when the frame was captured on the node's own clock
+  // (received_us at radio enqueue); 0 = unknown, treated as now_ms.
   virtual void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
-                                 MonotonicMs now_ms) noexcept = 0;
+                                 MonotonicMs now_ms,
+                                 MonotonicMs captured_ms = 0) noexcept = 0;
   // Verify oracle (04 §10): fires for EVERY frame that cleared link
   // authentication + network/peer identity — not just autonomy types. The
   // migration agent uses it to close VERIFY on real connectivity evidence.
@@ -1153,6 +1156,8 @@ class MeshNode {
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
+  void resolve_radio_tx_result(std::uint64_t token, bool success,
+                               MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
   void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
