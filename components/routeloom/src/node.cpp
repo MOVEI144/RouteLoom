@@ -1748,6 +1748,16 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
                                   const MonotonicMs now_ms) noexcept {
+  resolve_radio_tx_result(token, success, now_ms);
+  // A resolved send frees the driver's single in-flight slot at once:
+  // submit the next frame inside the same task turn — waiting for the next
+  // poll tick leaves idle airtime between back-to-back frames.
+  dispatch_next(now_ms);
+}
+
+void MeshNode::resolve_radio_tx_result(const std::uint64_t token,
+                                       const bool success,
+                                       const MonotonicMs now_ms) noexcept {
   last_clock_ms_ = now_ms;
   ++work_generation_;
   if (!physical_.active || physical_.token != token) {

@@ -99,6 +99,13 @@ class ReplayGuard {
   // live at floor_slot so epoch advances re-key one record in place —
   // storage stays O(peers) regardless of how many epochs a peer burns
   // through (otherwise every boot would leak a record in NVS).
+  // The u32 fold is a public, keyless computation: an insider who can pick
+  // a NodeId can manufacture a targeted slot collision deterministically.
+  // On the counter side a foreign record at the same slot wedges the lease
+  // with Conflict (permanent TX failure to that destination); on the
+  // replay side the colliding records cross-claim each other's state.
+  // G-SEC identity design must derive these slots under a secret salt so
+  // collision targeting requires the credential, not just the algorithm.
   static std::uint32_t window_slot(const SecurityContext& context) noexcept;
   static std::uint32_t floor_slot(const SecurityContext& context) noexcept;
 
@@ -116,6 +123,14 @@ class ReplayGuard {
   // is never treated as accepted.
   Status accept(Window& window, std::uint64_t counter) noexcept;
 
+  // Rejects caused by fingerprint-mismatched persisted records — the
+  // observable signature of two peer pairs folded onto one u32 slot (or
+  // foreign replay state at the slot), a permanent mutual-reject fault that
+  // otherwise has no diagnostic.
+  std::uint32_t foreign_fingerprint_rejects() const noexcept {
+    return foreign_fingerprint_rejects_;
+  }
+
  private:
   Status floor_state(const SecurityContext& context, ReplayFloorRecord& floor,
                      bool& found) noexcept;
@@ -123,6 +138,7 @@ class ReplayGuard {
                        const ReplayFloorRecord& floor, bool found) noexcept;
 
   ReplayStore& store_;
+  std::uint32_t foreign_fingerprint_rejects_{0};
 };
 
 }  // namespace routeloom

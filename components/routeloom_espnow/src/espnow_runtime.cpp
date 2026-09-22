@@ -17,6 +17,8 @@ constexpr char kTag[] = "RouteLoom";
 // Wire-lane autonomy control frames are 1-hop liveness exchanges; a short
 // lifetime keeps a stale probe from circulating.
 constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
+// poll_once runs every ~2ms: stack headroom is logged once a minute.
+constexpr std::uint64_t kStackHwmLogIntervalMs = 60000;
 
 Status esp_status(const esp_err_t error, const StatusCode code,
                   const char* detail) noexcept {
@@ -186,7 +188,11 @@ Status EspNowRuntime::initialize_wifi() noexcept {
   country.cc[2] = '\0';
   country.schan = config_.country_first_channel;
   country.nchan = config_.country_channel_count;
-  country.max_tx_power = config_.max_tx_power_qdbm;
+  // wifi_country_t::max_tx_power is in dBm — esp_wifi_set_max_tx_power maps
+  // its qdBm argument into this field via a {power -> dBm} table (IDF v6.0.3
+  // Wi-Fi API reference). The effective cap is re-applied below in qdBm.
+  country.max_tx_power =
+      static_cast<int8_t>(config_.max_tx_power_qdbm / 4);
   country.policy = WIFI_COUNTRY_POLICY_MANUAL;
   if ((error = esp_wifi_set_country(&country)) != ESP_OK ||
       (error = esp_wifi_set_protocol(
@@ -478,11 +484,18 @@ Status EspNowRuntime::start() noexcept {
 
 void EspNowRuntime::task_entry(void* argument) noexcept {
   auto* runtime = static_cast<EspNowRuntime*>(argument);
+  // task_ has a single writer — this task: self-published first so a
+  // stop() running on it recognizes the self-call, self-cleared before
+  // the join flag drops so a joiner never observes a dangling handle.
+  runtime->task_ = xTaskGetCurrentTaskHandle();
   while (runtime->started_) {
     runtime->poll_once();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
   runtime->task_ = nullptr;
+  // Released last: once task_running_ reads false, a joining stop() owns
+  // the teardown and frees the queues this task was draining.
+  runtime->task_running_ = false;
   vTaskDelete(nullptr);
 }
 
@@ -493,25 +506,48 @@ Status EspNowRuntime::start_task(const char* name) noexcept {
       return status;
     }
   }
-  if (task_ != nullptr) {
+  // Liveness is claimed before the task exists: it may start on another
+  // core (or preempt this one at a higher priority) in the window before
+  // xTaskCreatePinnedToCore returns, and both stop()'s join and this
+  // double-start guard must already see it. task_running_ is that flag;
+  // task_ is left for the task itself to publish (single writer).
+  bool expected = false;
+  if (!task_running_.compare_exchange_strong(expected, true)) {
     return Status::error(StatusCode::AlreadyExists,
                          "runtime task exists");
   }
   const BaseType_t result = xTaskCreatePinnedToCore(
       &EspNowRuntime::task_entry, name == nullptr ? "routeloom" : name,
       config_.task_stack_bytes / sizeof(StackType_t), this,
-      config_.task_priority, &task_, config_.task_core);
-  return result == pdPASS
-             ? Status::success()
-             : Status::error(StatusCode::NoCapacity,
-                             "runtime task allocation failed");
+      config_.task_priority, nullptr, config_.task_core);
+  if (result != pdPASS) {
+    task_running_ = false;
+    return Status::error(StatusCode::NoCapacity,
+                         "runtime task allocation failed");
+  }
+  return Status::success();
 }
 
 void EspNowRuntime::stop() noexcept {
   started_ = false;
-  if (task_ != nullptr) {
-    for (int i = 0; i < 50 && task_ != nullptr; ++i) {
+  // Join before teardown: the poll task clears task_running_ only after
+  // its in-flight poll_once() returns, and the queues it drains are
+  // freed below. The wait covers the whole create→exit window, since
+  // task_running_ is claimed before the task can run (start_task()).
+  // Contract (header): single caller, never issued on the poll task — a
+  // stop() reaching here from inside a poll_once observer callback
+  // cannot wait on itself, so it skips the join and still tears the
+  // queues down under the in-flight frame (configASSERT on the next
+  // queue touch), the same hazard the pre-join code had.
+  if (task_.load() != xTaskGetCurrentTaskHandle()) {
+    constexpr TickType_t kWarnIntervalTicks = pdMS_TO_TICKS(5000);
+    TickType_t waited_ticks = 0;
+    while (task_running_.load()) {
       vTaskDelay(pdMS_TO_TICKS(1));
+      if (++waited_ticks >= kWarnIntervalTicks) {
+        waited_ticks = 0;
+        ESP_LOGW(kTag, "runtime task still draining");
+      }
     }
   }
   portENTER_CRITICAL(&callback_lock_);
@@ -564,6 +600,15 @@ void EspNowRuntime::poll_once() noexcept {
     return;
   }
   const MonotonicMs now = now_ms();
+  // Stack headroom of the CALLING task: poll_once is driven by the runtime
+  // task (start_task) or by the app_main pump loops (bridge_node,
+  // reference_node deep-sleep), so this one site covers whichever stack the
+  // firmware drains events on. Rate-limited — this path runs every ~2ms.
+  if (now - stack_hwm_log_ms_ >= kStackHwmLogIntervalMs) {
+    stack_hwm_log_ms_ = now;
+    ESP_LOGI(kTag, "stack hwm %s %lu B", pcTaskGetName(nullptr),
+             static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
+  }
   Event event{};
   // The dedicated reserved-completion slot drains FIRST — it resolves the
   // node's outstanding job and is never displaced by raw traffic.
@@ -993,6 +1038,11 @@ Status EspNowRuntime::send_rld1(const routeloom::MacAddress& dest,
   if (discovery_ == nullptr) {
     return Status::error(StatusCode::InvalidState,
                          "autonomy engine not attached");
+  }
+  if (channel_runner_.busy()) {
+    // A serialized channel operation owns the radio (04 §3/§8): RLD1
+    // bootstrap frames hold rather than emit onto the survey/visit channel.
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
   }
   if (encoded.data == nullptr || encoded.size == 0 ||
       encoded.size > autonomy::kRld1MaxTotal) {
@@ -1571,6 +1621,10 @@ void EspNowRuntime::enqueue_rx(
   if (const Peer* peer = find_peer(info->src_addr)) {
     peer_node = peer->node;
     peer_binding = peer->binding;
+  } else {
+    // Unknown-MAC non-RLD1 frames are dropped — counted so neighbouring
+    // networks and peer churn are observable.
+    ++unknown_peer_rx_;
   }
   const RadioGeneration radio_gen = channel_runner_.radio_generation();
   const ChannelEpoch channel_epoch = channel_epoch_;
@@ -1592,14 +1646,13 @@ void EspNowRuntime::enqueue_rx(
     event.rssi_valid = true;
     event.channel = static_cast<std::uint8_t>(info->rx_ctrl->channel);
     event.channel_valid = info->rx_ctrl->channel > 0;
-    // Driver-stamped receive time; absent it the capture time still bounds
-    // the sample from above — never fabricated as the driver value.
-    event.observed_us = info->rx_ctrl->timestamp != 0
-                            ? static_cast<std::uint64_t>(info->rx_ctrl->timestamp)
-                            : now_us();
-  } else {
-    event.observed_us = now_us();
   }
+  // rx_ctrl->timestamp runs on the Wi-Fi MAC's own 32-bit µs clock (epoch =
+  // Wi-Fi init, wraps ~71.6 min) — a different time base than esp_timer, so
+  // it must never feed deadline accounting against now_ms(). The esp_timer
+  // enqueue stamp still bounds driver-queue dwell from above at ms
+  // granularity, which is all the rx_age_ms_ debit requires.
+  event.observed_us = now_us();
   std::memcpy(event.data.data(), data, event.length);
   if (xQueueSend(event_queue_, &event, 0) != pdTRUE) {
     // Queue-full drops are load evidence (05 §5), not silent loss.

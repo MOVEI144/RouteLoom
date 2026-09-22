@@ -344,16 +344,19 @@ void test_flow_caps() {
   h.link(1, 4);
   h.link(1, 6);
 
-  // 12 forwards claiming the SAME origin, alternating two sender scopes so
-  // the per-origin cap (not the per-scope cap) is what trips.
-  for (std::uint64_t i = 1; i <= 12; ++i) {
+  // 14 forwards claiming the SAME origin, alternating two sender scopes so
+  // the per-origin cap (not the per-scope cap) is what trips. Each step
+  // drains the accept AND sends the next queued job inside the same flush
+  // (TX-complete submits directly) — the peer window holds 2 forwards in
+  // flight, so 14 admissions leave 12 pooled against the cap.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     const NodeId peer = (i % 2 == 0) ? 3 : 4;
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, i));
     h.step(1);  // drains the accept; the forward job accumulates
     ++h.now;
   }
   const NodeId peer = 3;
-  inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, 13));
+  inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, 15));
   CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
   CHECK(a->congestion_stats().busy_send_failed >= 1);  // legacy peer: counted drop
   CHECK(a->congestion_stats().flows_active <= kFlowDescriptorsMax);
@@ -371,14 +374,17 @@ void test_busy_emission() {
   h.link(2, 4);
   b->set_peer_busy_capable(3, true);
 
-  // 12 transit DATA from P with distinct origins fill the per-scope cap.
-  for (std::uint64_t i = 1; i <= 12; ++i) {
+  // 14 transit DATA from P with distinct origins fill the per-scope cap.
+  // Each step drains the accept AND sends the next queued job inside the
+  // same flush (TX-complete submits directly) — the peer window holds 2
+  // forwards in flight, so 14 admissions leave 12 pooled against the cap.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
     h.step(2);  // drains the HOP_ACCEPT so the control lane stays usable
     ++h.now;
   }
   const std::size_t sights_before = h.net.sights.size();
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 13));
+  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
   CHECK(b->congestion_stats().busy_sent == 1);
 
   h.step(2);  // BUSY leaves via the reserved control lane
@@ -404,15 +410,16 @@ void test_busy_legacy_peer() {
   (void)h.add(4);
   h.link(3, 2);
   h.link(2, 4);
-  // NB: no set_peer_busy_capable — P is a legacy peer.
-
-  for (std::uint64_t i = 1; i <= 12; ++i) {
+  // NB: no set_peer_busy_capable — P is a legacy peer. Two forwards go
+  // in flight under the peer window while each step drains the rest, so
+  // 14 admissions leave the per-scope cap full.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
     h.step(2);
     ++h.now;
   }
   const std::size_t sights_before = h.net.sights.size();
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 13));
+  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
   CHECK(b->congestion_stats().busy_sent == 0);
   CHECK(b->congestion_stats().busy_send_failed >= 1);
   for (std::size_t i = sights_before; i < h.net.sights.size(); ++i) {
@@ -664,16 +671,18 @@ void test_watermarks() {
   h.link(1, 5);
   h.link(1, 6);
 
-  // 26 forwards accumulate; each step drains that frame's control-lane
-  // accept. Cycling three sender scopes keeps every cap below its bound.
-  for (std::uint64_t i = 1; i <= 26; ++i) {
+  // 29 forwards accumulate; each step drains that frame's control-lane
+  // accept AND sends the next queued job inside the same flush — the peer
+  // window holds 2 forwards in flight (the boot advertisement is drained
+  // too), leaving 27 pooled. Cycling three sender scopes keeps every cap
+  // below its bound.
+  for (std::uint64_t i = 1; i <= 29; ++i) {
     const NodeId peer = 3 + (i % 3);
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 5000 + i, 6, i));
     h.step(1);
     ++h.now;
   }
-  // 26 forwards + 1 boot-time route advertisement = 27/32 (84%) — the
-  // bulk-stop watermark is active.
+  // 27 pooled forwards = 27/32 (84%) — the bulk-stop watermark is active.
   CHECK(a->congestion_stats().queued == 27);
 
   SendOptions bulk{};

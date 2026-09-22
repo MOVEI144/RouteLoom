@@ -73,6 +73,15 @@ Status ReplayGuard::floor_state(const SecurityContext& context,
   const auto status =
       store_.load_floor(floor_slot(context), floor, found);
   if (!status) return status;
+  if (found && floor.crc == floor_crc(floor) && floor.initialized != 0 &&
+      floor.peer_fingerprint != replay_peer_fingerprint(context)) {
+    // A structurally valid floor owned by a different peer pair is a u32
+    // slot collision (or foreign replay state): the pairs would reject each
+    // other forever, so the reject is counted separately for diagnosis.
+    ++foreign_fingerprint_rejects_;
+    return Status::error(StatusCode::IntegrityError,
+                         "replay floor foreign fingerprint");
+  }
   if (found && (floor.crc != floor_crc(floor) || floor.initialized == 0 ||
                 floor.peer_fingerprint != replay_peer_fingerprint(context))) {
     // Corrupt replay state is never treated as a fresh context.
@@ -144,6 +153,7 @@ Status ReplayGuard::open_context(const SecurityContext& context,
       // mid-epoch loss condition — the floor stays fail-closed and the
       // peer must advance to a newer epoch to recover.
       if (floor_found && context.epoch <= floor.minimum_epoch) {
+        ++foreign_fingerprint_rejects_;
         return Status::error(StatusCode::ReplayRejected, "REPLAY_STATE_LOST");
       }
       record = ReplayWindowRecord{};
@@ -187,6 +197,14 @@ Status ReplayGuard::accept(Window& window, const std::uint64_t counter) noexcept
     if (!floor_status) return floor_status;
     if (!floor_found) {
       return Status::error(StatusCode::ReplayRejected, "REPLAY_STATE_LOST");
+    }
+    if (floor.crc == floor_crc(floor) && floor.initialized != 0 &&
+        floor.peer_fingerprint != window.peer_fingerprint) {
+      // Same collision signature as floor_state: a valid floor owned by a
+      // different peer pair at this window's shared slot.
+      ++foreign_fingerprint_rejects_;
+      return Status::error(StatusCode::IntegrityError,
+                           "replay floor foreign fingerprint");
     }
     if (floor.crc != floor_crc(floor) || floor.initialized == 0 ||
         floor.peer_fingerprint != window.peer_fingerprint) {

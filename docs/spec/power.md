@@ -68,4 +68,4 @@ Portable `PowerCoordinator`（`components/routeloom/include/routeloom/power.hpp`
 
 §3の未完了メッセージはFail／Save／Deferの契約へ移し、保存はCRC付き2スロットの電源imageへ入る。§5の復帰はcold bootとdeep-sleep wakeを別入力として起動処理を通り、保存peer→bounded確認窓→失敗時のみ限定discoveryの順で進む。経過時間が不明なdurable pendingは`TIME_UNCERTAIN`で止め、自動再送しない。host model試験で全遷移、ticket無効化、各policy、電源断を跨ぐcounter非後退、cold/resume分離を確認した。
 
-ESP-NOW側は`EspNowPowerPort`とNVS image adapterを実装し、reference firmwareは`ROUTELOOM_DEEP_SLEEP`選択時のみ`esp_deep_sleep_start`経路・RTC marker・wake原因分類を配線する（build-tested）。bounded discoveryはESP-NOW adapterが現状UNSUPPORTEDを返す。実機の消費電流、wake timing、RTC経過時間、RF挙動は未試験であり、本節をHIL証拠として扱わない。
+ESP-NOW側は`EspNowPowerPort`とNVS image adapterを実装し、reference firmwareは`ROUTELOOM_DEEP_SLEEP`選択時のみ`esp_deep_sleep_start`経路・RTC marker・wake原因分類を配線する（build-tested）。`enter_sleep`はdeep sleep突入直前に`esp_wifi_stop()`を実施し、`esp_deep_sleep_start`が復帰した場合のみ`esp_wifi_start()`でabort経路のradioを復帰させる（issue #34）。bounded discoveryはESP-NOW adapterが現状UNSUPPORTEDを返す。実機の消費電流、wake timing、RTC経過時間、RF挙動は未試験であり、本節をHIL証拠として扱わない。
