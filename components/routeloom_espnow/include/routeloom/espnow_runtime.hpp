@@ -195,6 +195,10 @@ class EspNowRuntime final : public RadioPort,
     return bootstrap_rx_dropped_;
   }
   std::uint32_t rx_dropped() const noexcept { return rx_dropped_; }
+  // Non-RLD1 frames dropped because the source MAC is not in the peer
+  // table — neighbouring-mesh interference and peer churn otherwise leave
+  // no observable trace in the field.
+  std::uint32_t unknown_peer_rx() const noexcept { return unknown_peer_rx_; }
   // Recovery-required visibility (02 §2.3): a fenced or quarantined MAC
   // stays unavailable until its owed callback arrives or recover()
   // rebuilds the driver — the host must be able to see that state.
@@ -419,6 +423,7 @@ class EspNowRuntime final : public RadioPort,
   routeloom::MacAddress rx_source_{};
   std::uint32_t bootstrap_rx_dropped_{0};
   std::uint32_t rx_dropped_{0};
+  std::uint32_t unknown_peer_rx_{0};
   std::uint32_t autonomy_tx_ok_{0};
   std::uint32_t autonomy_tx_failed_{0};
   // Owner-side channel epoch: bumped on every readback-verified committed
@@ -429,6 +434,8 @@ class EspNowRuntime final : public RadioPort,
   // Submit ms of the reserved TX — the poll-task callback watchdog so a
   // never-completing send cannot wedge pending_tx_ forever (02 §2.2).
   MonotonicMs pending_sent_ms_{0};
+  // Last stack high-water-mark log tick (poll_once rate limit).
+  MonotonicMs stack_hwm_log_ms_{0};
   bool pending_tx_{false};
   bool broadcast_peer_{false};
   bool wifi_initialized_{false};

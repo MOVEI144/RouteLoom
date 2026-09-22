@@ -348,6 +348,9 @@ void test_replay_window_loss_requires_new_epoch() {
   // Same epoch: reject-or-rehandshake. Without the persisted window the node
   // cannot prove counters at or below the last persisted maximum are fresh.
   CHECK(guard.open_context(kCtx, window).code == StatusCode::ReplayRejected);
+  // A missing window is lost state, not a foreign fingerprint — the
+  // collision counter stays at zero.
+  CHECK(guard.foreign_fingerprint_rejects() == 0);
   // Older epoch: stale by the floor, always rejected.
   SecurityContext older = kCtx;
   older.epoch = 2;
@@ -435,9 +438,13 @@ void test_replay_stale_record_at_floor_epoch_is_state_lost() {
   SecurityContext at4 = kCtx;
   at4.epoch = 4;
   CHECK(guard.open_context(at4, window).code == StatusCode::ReplayRejected);
+  // The stale foreign-fingerprint record forcing REPLAY_STATE_LOST is the
+  // counted collision signature; the epoch-advance re-key below is not.
+  CHECK(guard.foreign_fingerprint_rejects() == 1);
   SecurityContext at5 = kCtx;
   at5.epoch = 5;
   CHECK_OK(guard.open_context(at5, window));  // advance recovers
+  CHECK(guard.foreign_fingerprint_rejects() == 1);
 }
 
 void test_replay_corruption_is_not_a_fresh_context() {
