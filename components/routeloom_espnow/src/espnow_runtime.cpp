@@ -994,6 +994,11 @@ Status EspNowRuntime::send_rld1(const routeloom::MacAddress& dest,
     return Status::error(StatusCode::InvalidState,
                          "autonomy engine not attached");
   }
+  if (channel_runner_.busy()) {
+    // A serialized channel operation owns the radio (04 §3/§8): RLD1
+    // bootstrap frames hold rather than emit onto the survey/visit channel.
+    return Status::error(StatusCode::WouldBlock, "RADIO_OP_IN_PROGRESS");
+  }
   if (encoded.data == nullptr || encoded.size == 0 ||
       encoded.size > autonomy::kRld1MaxTotal) {
     return Status::error(StatusCode::InvalidArgument,
