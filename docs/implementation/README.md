@@ -32,6 +32,10 @@ Host daemonのTTY backendは初期のByteStream実装。認証済みUSB session�
 
 Discovery Scopeのdev scope keyとConfigのdev HMAC permitはともに開発用で、production identityではない。COSE/ES256のpermit署名検証・scope bindingの本番Providerは未実装（#10待ち）。Gateway/Configの実機配送・電断・HIL証拠は未取得（#11/#18待ち）。
 
+MembershipControllerの`Revoked`はRAMのみで、再起動時の`initialize`は`hooks.local_member`から再評価する。dev hooksは固定フラグのため、失効したノードは再起動でfail-openに復帰する。失効の耐電断永続化（authority ledgerへのcommit）は本番hooks実装の要件。
+
+replayのwindow/floor/counter slotは公開のkeyless FNV折り畳みから導出されるため、共有PSKを持つ内部者はNodeIdを選んで衝突を決定的に製造できる（counter側では`Conflict`で当該宛先への恒久TX不能）。dev profileでは保証外とし、G-SECのidentity設計ではslot導出に秘密saltを含めることを要件とする。
+
 ## ローカルportable test
 
 ```bash

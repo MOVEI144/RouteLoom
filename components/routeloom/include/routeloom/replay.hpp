@@ -99,6 +99,13 @@ class ReplayGuard {
   // live at floor_slot so epoch advances re-key one record in place —
   // storage stays O(peers) regardless of how many epochs a peer burns
   // through (otherwise every boot would leak a record in NVS).
+  // The u32 fold is a public, keyless computation: an insider who can pick
+  // a NodeId can manufacture a targeted slot collision deterministically.
+  // On the counter side a foreign record at the same slot wedges the lease
+  // with Conflict (permanent TX failure to that destination); on the
+  // replay side the colliding records cross-claim each other's state.
+  // G-SEC identity design must derive these slots under a secret salt so
+  // collision targeting requires the credential, not just the algorithm.
   static std::uint32_t window_slot(const SecurityContext& context) noexcept;
   static std::uint32_t floor_slot(const SecurityContext& context) noexcept;
 
