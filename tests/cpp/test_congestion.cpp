@@ -962,6 +962,54 @@ void test_adaptive_hop_timeout_expands_and_caps() {
   CHECK(h2.data_sights(capped_seq) == 2);
 }
 
+// PR review (#45 follow-up): the HOP_ACCEPT match key carries no attempt
+// discriminator, so a delayed accept landing after a retransmission may
+// answer an earlier attempt — measuring `now - sent_at_ms` against the
+// latest send would learn a too-short RTT. Retransmitted exchanges still
+// resolve the accept but feed nothing into RTO adaptation.
+void test_retransmitted_exchange_not_rtt_sampled() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);   // never polled: only our scripted accepts land
+  h.link(1, 2);
+
+  // First TX ~1 ms; the unmeasured peer waits the configured 60 ms.
+  MessageId m{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
+  drive_tx(h, 1, m.sequence, 1);
+
+  // Past the awaiting deadline: expiry re-queues the retry under jitter,
+  // then the retransmission lands (portable repro: retry ~78 ms).
+  h.now += 77;
+  h.step(1);
+  drive_tx(h, 1, m.sequence, 2);
+
+  // The delayed accept for the first attempt arrives ~2 ms after the
+  // retry went out — ambiguous, so it resolves without an RTT sample.
+  h.now += 2;
+  inject(h, 1, 2, craft_accept(h.cipher, 2, 1, FrameType::Data, 1, m, 0, 77));
+
+  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+                           RadioGeneration{0}, ChannelEpoch{0}, 1, 2};
+  const ObservationBucket* bucket = a->telemetry_bucket(key);
+  CHECK(bucket != nullptr);
+  if (bucket == nullptr) return;
+  CHECK(bucket->current.hop_accepts == 1);
+  CHECK(bucket->current.hop_rtt_samples == 0);
+
+  // RTO keeps the configured 60 ms: stepped in 1 ms ticks, the follow-up
+  // delivery sees just one transmission inside that window — a collapsed
+  // 20 ms RTO would have expired and re-sent (2 sights) before it ends.
+  MessageId next{};
+  CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, next));
+  drive_tx(h, 1, next.sequence, 1);
+  for (int t = 0; t < 50; ++t) {
+    h.step(1);
+    ++h.now;
+  }
+  CHECK(h.data_sights(next.sequence) == 1);
+}
+
 // radio.md §8 + 04 §4.2 (#45): the populated hop-RTT EWMA must carry its
 // wire validity bit — a nonzero measurement flagged absent is discarded by
 // receivers honoring the flag, and a class with no contributing samples
@@ -1092,6 +1140,7 @@ int main() {
   test_observation_buckets();
   test_adaptive_hop_timeout_shrinks();
   test_adaptive_hop_timeout_expands_and_caps();
+  test_retransmitted_exchange_not_rtt_sampled();
   test_telemetry_hop_rtt_validity_bit();
   test_link_retry_jitter();
   test_hop_timeout_config_floor();

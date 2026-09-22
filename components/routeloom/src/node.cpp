@@ -2047,8 +2047,13 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
   obs_hop_result(job, true, now_ms);
   // HOP_ACCEPT round trip, MAC-accept -> authenticated accept. Only a live
   // exchange measures the path — a BUSY deferral's wait is peer-directed
-  // and must never enter the adaptive RTO average (radio.md §8).
-  const bool rtt_sampled = !was_deferred && now_ms >= sent_at_ms;
+  // and must never enter the adaptive RTO average (radio.md §8). The match
+  // key carries no attempt discriminator, so after a retransmission an
+  // accept may answer an earlier attempt and `now - sent_at_ms` would
+  // learn a too-short RTT against the wrong baseline: retransmitted
+  // exchanges resolve normally but cannot feed RTO adaptation.
+  const bool rtt_sampled = !was_deferred && job.physical_attempts <= 1 &&
+                           now_ms >= sent_at_ms;
   const std::uint32_t rtt_ms =
       rtt_sampled ? static_cast<std::uint32_t>(now_ms - sent_at_ms) : 0;
   if (auto* bucket = job_bucket(job, now_ms)) {
