@@ -3789,6 +3789,36 @@ MonotonicMs MeshNode::control_budget_wait_ms(const MonotonicMs now_ms) noexcept 
          kControlBudgetRefillUsPerS;
 }
 
+bool MeshNode::control_budget_refresh_fits(const MonotonicMs now_ms,
+                                           const MonotonicMs wait_ms,
+                                           const std::size_t fanout) noexcept {
+  // Fan-out draw: every neighbor's refresh pulls the same bucket, so the
+  // capacity decision prices `fanout` frames at the calibrated demand —
+  // not just this emission — when bounding the wait inside the lease.
+  const std::int64_t workload = static_cast<std::int64_t>(fanout) *
+                                std::min<std::int64_t>(
+                                    static_cast<std::int64_t>(control_service_ewma_us_),
+                                    static_cast<std::int64_t>(kControlBudgetCapacityUs));
+  const std::int64_t deficit = workload - control_budget_balance(now_ms);
+  const std::uint64_t afford_ms =
+      deficit <= 0 ? 0
+                   : (static_cast<std::uint64_t>(deficit) * 1000ULL +
+                      kControlBudgetRefillUsPerS - 1ULL) /
+                         kControlBudgetRefillUsPerS;
+  // Page count: the live route table's record pages each neighbor must
+  // cycle through (the frame carries the self record plus entries).
+  const std::uint64_t pages =
+      (static_cast<std::uint64_t>(routes_.size()) + kMaxRouteRecordsPerFrame) /
+      kMaxRouteRecordsPerFrame;
+  // 03 §8 refresh bound — pages*round_period + budget_wait + jitter +
+  // loss_margin — against the ACTUAL lease the refresh must land inside.
+  const std::uint64_t bound =
+      pages * config_.route_advertisement_period_ms +
+      std::max<std::uint64_t>(wait_ms, afford_ms) + kTriggeredJitterMs +
+      config_.route_advertisement_period_ms;
+  return config_.route_lifetime_ms > bound;
+}
+
 void MeshNode::note_control_budget_unsat() noexcept {
   saturating_inc(budget_stats_.control_budget_unsatisfiable);
   if (!control_budget_unsat_reported_) {
@@ -3809,20 +3839,28 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
     next_route_advertisement_ms_ = now_ms + config_.route_advertisement_period_ms;
     return;
   }
-  // §14 management airtime budget: an emission may only schedule while the
-  // local bucket covers one frame's air time. When it cannot, this tick
-  // stretches by the computed token wait (auto-extending the period); a
-  // wait beyond the route lease is unsatisfiable — surfaced and counted,
-  // never queued as a normal emission.
-  const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
-  if (wait_ms > 0) {
-    if (wait_ms > config_.route_lifetime_ms) {
+  // §14 management airtime budget — calibrated profiles only. The
+  // uncalibrated default profile never applies the spec-envelope refill
+  // limit to route maintenance (radio.md §9/§14). When enabled, an
+  // emission may only schedule while the bucket covers one frame's air
+  // time; a needed deferral is allowed only while the §8 refresh bound
+  // (fan-out × demand, live page count, actual lease) still fits —
+  // otherwise the budget cannot sustain route maintenance for this
+  // configuration: the emission goes out unfunded (a normal route must
+  // never expire on this node's own budget wait) and the breach is
+  // surfaced, never queued as a normal emission.
+  if (config_.control_budget_gate_enabled) {
+    const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
+    if (wait_ms > 0) {
+      if (control_budget_refresh_fits(now_ms, wait_ms, count)) {
+        next_route_advertisement_ms_ = now_ms + wait_ms;
+        return;
+      }
       note_control_budget_unsat();
+    } else {
+      control_budget_unsat_reported_ = false;
     }
-    next_route_advertisement_ms_ = now_ms + wait_ms;
-    return;
   }
-  control_budget_unsat_reported_ = false;
   const NodeId peer = active[route_neighbor_cursor_ % count];
   route_neighbor_cursor_ = (route_neighbor_cursor_ + 1) % count;
   (void)queue_route_update(peer, now_ms);
@@ -3930,18 +3968,26 @@ void MeshNode::trigger_route_advertisement(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
   if (!triggered_advertisement_ || now_ms < triggered_at_ms_) return;
-  // Same §14 gate as the periodic path: an unaffordable burst re-arms at
-  // its token wait instead of queueing on debt, and a wait beyond the
-  // route lease surfaces CONTROL_BUDGET_UNSATISFIABLE.
-  const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
-  if (wait_ms > 0) {
-    if (wait_ms > config_.route_lifetime_ms) {
+  // Same §14 gate as the periodic path — calibrated profiles only: an
+  // unaffordable burst re-arms at its token wait, but only while the §8
+  // refresh bound (fan-out × demand, page count, actual lease) can absorb
+  // it; otherwise the burst goes out unfunded and the breach surfaces.
+  if (config_.control_budget_gate_enabled) {
+    const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
+    if (wait_ms > 0) {
+      std::size_t fanout = 0;
+      neighbors_.for_each([&](const Neighbor& neighbor) {
+        if (neighbor.active) ++fanout;
+      });
+      if (control_budget_refresh_fits(now_ms, wait_ms, fanout)) {
+        triggered_at_ms_ = now_ms + wait_ms;
+        return;  // stays armed
+      }
       note_control_budget_unsat();
+    } else {
+      control_budget_unsat_reported_ = false;
     }
-    triggered_at_ms_ = now_ms + wait_ms;
-    return;  // stays armed
   }
-  control_budget_unsat_reported_ = false;
   triggered_advertisement_ = false;
   // The gate charges affordability for ONE frame, then emits one
   // RouteUpdate per active neighbor: a multi-neighbor burst under-charges

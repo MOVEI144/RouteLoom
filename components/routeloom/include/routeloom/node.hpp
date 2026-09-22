@@ -28,6 +28,14 @@ struct NodeConfig {
   std::uint16_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
+  // §14 management airtime budget gate (03-congestion.md §8, radio.md
+  // §9/§14): the pinned spec-envelope refill is an UNCALIBRATED
+  // capability, not a measured allocation — it must not gate route
+  // maintenance in the default profile. Enable only for a calibrated
+  // profile whose capacity decision covers fan-out, route-table page
+  // count and the lease refresh deadline; the gate then re-checks that
+  // bound on every deferred emission.
+  bool control_budget_gate_enabled{false};
   std::uint32_t hop_accept_timeout_ms{60};
   std::uint32_t callback_watchdog_ms{1000};
   // Per-boot incarnation stamped on this node's telemetry observations
@@ -1308,6 +1316,14 @@ class MeshNode {
   // Milliseconds until the bucket covers the calibrated air-time estimate
   // of one management frame, 0 when it already can.
   MonotonicMs control_budget_wait_ms(MonotonicMs now_ms) noexcept;
+  // §8 capacity decision for a gated profile: true while a deferral of
+  // `wait_ms` still lets the route refresh land inside the actual lease —
+  // refresh_bound = pages*round_period + fan-out wait + jitter + margin —
+  // where the fan-out wait covers `fanout` frames at the calibrated
+  // demand and pages is the live table's record-page count. False means
+  // the budget cannot sustain route maintenance for this configuration.
+  bool control_budget_refresh_fits(MonotonicMs now_ms, MonotonicMs wait_ms,
+                                   std::size_t fanout) noexcept;
   // Record a §14 CONTROL_BUDGET_UNSATISFIABLE breach: the saturating
   // counter every time, the observer diagnostic once per breach episode
   // (re-armed when an emission again fits inside the route lease).

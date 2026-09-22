@@ -109,7 +109,9 @@ constexpr std::size_t kTxFrameFixedCostBytes = 96;
 // frame at 250kbps plus fixed overhead — §14 "burst >= 1 max frame").
 // These are SPEC-ENVELOPE values pinned in radio-defaults.json: the bucket
 // is an UNCALIBRATED capability, not measured capacity or 100-node
-// qualification.
+// qualification — so the gate stays OFF unless the profile opts in
+// (NodeConfig::control_budget_gate_enabled) and proves the §8 refresh
+// bound fits inside the lease.
 constexpr std::uint32_t kControlBudgetNetworkUsPerS = 100000;
 constexpr std::uint32_t kControlBudgetDesignNodes = 100;
 constexpr std::uint32_t kControlBudgetRefillUsPerS =

@@ -56,7 +56,8 @@ struct Harness {
   MonotonicMs now{0};
 
   MeshNode* add(NodeId id, std::uint8_t rounds = 3, std::uint8_t attempts = 2,
-                std::uint32_t adv_ms = 30000, std::uint32_t life_ms = 60000) {
+                std::uint32_t adv_ms = 30000, std::uint32_t life_ms = 60000,
+                bool budget_gate = false) {
     NodeConfig cfg{};
     cfg.network = kNet;
     cfg.node = id;
@@ -64,6 +65,7 @@ struct Harness {
     cfg.route_generation = 1;
     cfg.route_advertisement_period_ms = adv_ms;  // default: one boot ad, then quiet
     cfg.route_lifetime_ms = life_ms;
+    cfg.control_budget_gate_enabled = budget_gate;
     cfg.hop_accept_timeout_ms = 60;
     cfg.max_link_attempts = attempts;
     cfg.max_end_to_end_rounds = rounds;
@@ -924,7 +926,7 @@ void test_airtime_ledger_domains() {
 void test_control_budget_gate() {
   Harness h;
   h.net.service_us = 12000;  // every TX reports one full frame of driver service
-  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 60000);
+  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 60000, /*gate*/ true);
   (void)h.add(2);
   h.link(1, 2);
 
@@ -951,13 +953,15 @@ void test_control_budget_gate() {
   CHECK(a->congestion_stats().service_us_control >= 24000);
 }
 
-// #46 unsatisfiable: when the token wait would exceed the route lease the
-// emission is unsatisfiable — surfaced and counted, never queued as a
-// normal emission (§14 CONTROL_BUDGET_UNSATISFIABLE).
+// #46 unsatisfiable: when the §8 refresh bound cannot absorb the token
+// wait inside the actual lease, the emission is unsatisfiable — surfaced
+// and counted — but still sent: a normal route must never expire on this
+// node's own budget wait (03 §8), so an unsatisfiable gate emits anyway
+// rather than parking route maintenance.
 void test_control_budget_unsatisfiable() {
   Harness h;
   h.net.service_us = 12000;  // one ad drains the whole 12000µs bucket
-  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 200);
+  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 200, /*gate*/ true);
   (void)h.add(2);
   h.link(1, 2);
 
@@ -965,18 +969,23 @@ void test_control_budget_unsatisfiable() {
   h.step(1);
   CHECK(route_ads(h, 1) == 1);
 
-  // The next tick needs ~11850µs of refill — a wait far beyond the 200ms
-  // lease. Unsatisfiable: counted + surfaced, not queued as an emission.
+  // The next tick needs ~11850µs of refill — a wait the 200ms lease
+  // cannot absorb. The neighbor-add trigger is armed by then too, so
+  // both emission paths report the breach (one diag per episode) and go
+  // out unfunded: the burst takes the single in-flight TX slot, the
+  // queued periodic frame follows on the next dispatch.
   h.now += 150;
   h.step(1);
-  CHECK(route_ads(h, 1) == 1);
-  CHECK(a->congestion_stats().control_budget_unsatisfiable >= 1);
+  CHECK(route_ads(h, 1) == 2);
+  CHECK(a->congestion_stats().control_budget_unsatisfiable == 2);
   CHECK(h.observer(1)->has_diag("CONTROL_BUDGET_UNSATISFIABLE"));
 
-  // The emission stays parked at its stretched slot, not resent.
+  // Emissions keep flowing on schedule while the breach is open; the
+  // counter records every unfunded emission.
   h.now += 500;
   h.step(1);
-  CHECK(route_ads(h, 1) == 1);
+  CHECK(route_ads(h, 1) == 3);
+  CHECK(a->congestion_stats().control_budget_unsatisfiable == 3);
 }
 
 // #46 livelock regression: a single control-domain completion reporting
@@ -988,7 +997,7 @@ void test_control_budget_unsatisfiable() {
 void test_control_budget_over_capacity_service() {
   Harness h;
   h.net.service_us = 20000;  // one frame burns more than the 12000µs bucket
-  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 60000);
+  MeshNode* a = h.add(1, 3, 2, /*adv*/ 100, /*life*/ 60000, /*gate*/ true);
   (void)h.add(2);
   h.link(1, 2);
 
@@ -1025,6 +1034,71 @@ void test_control_budget_over_capacity_service() {
   CHECK(a->congestion_stats().control_budget_unsatisfiable == 0);
 }
 
+// #46 review regression (P1): the UNCALIBRATED §14 bucket must not gate
+// the default profile. Four nodes in a line — relays 2 and 3 each carry
+// fan-out 2 — run the default 5000ms period / 15000ms lease with a
+// measured-realistic 12000µs driver service per TX. Under the
+// unconditional 1ms/s envelope the relay's fan-out refill starved route
+// maintenance and the end-to-end route expired inside ~27s; with the
+// gate off the route must survive sustained operation and no
+// unsatisfiable event may be raised.
+void test_control_budget_default_profile_ungated() {
+  Harness h;
+  h.net.service_us = 12000;  // measured-realistic full-frame service
+  for (NodeId id = 1; id <= 4; ++id) {
+    (void)h.add(id, 3, 2, /*adv*/ 5000, /*life*/ 15000);
+  }
+  h.link(1, 2);
+  h.link(2, 3);
+  h.link(3, 4);
+
+  // Sustained operation across six leases: from the first checkpoint on,
+  // 1's route to 4 through both relays must stay leased — not just at
+  // startup.
+  for (std::uint32_t t = 0; t <= 90000; t += 50) {
+    h.now += 50;
+    for (NodeId id = 1; id <= 4; ++id) h.step(id);
+    if (t >= 30000 && t % 15000 == 0) {
+      CHECK(h.at(1)->routes().best(4).valid);
+    }
+  }
+  CHECK(h.at(1)->routes().best(4).valid);
+  for (NodeId id = 1; id <= 4; ++id) {
+    CHECK(h.at(id)->congestion_stats().control_budget_unsatisfiable == 0);
+    CHECK(!h.observer(id)->has_diag("CONTROL_BUDGET_UNSATISFIABLE"));
+  }
+}
+
+// Same default multi-adjacency configuration with the gate ENABLED: the
+// §8 capacity decision reports the envelope budget cannot sustain the
+// fan-out workload inside the actual lease — UNSATISFIABLE surfaces once
+// per episode — yet the emissions still go out unfunded, so the route
+// never expires on the nodes' own budget waits either.
+void test_control_budget_default_profile_capacity_flag() {
+  Harness h;
+  h.net.service_us = 12000;
+  for (NodeId id = 1; id <= 4; ++id) {
+    (void)h.add(id, 3, 2, /*adv*/ 5000, /*life*/ 15000, /*gate*/ true);
+  }
+  h.link(1, 2);
+  h.link(2, 3);
+  h.link(3, 4);
+
+  for (std::uint32_t t = 0; t <= 90000; t += 50) {
+    h.now += 50;
+    for (NodeId id = 1; id <= 4; ++id) h.step(id);
+    if (t >= 30000 && t % 15000 == 0) {
+      CHECK(h.at(1)->routes().best(4).valid);
+    }
+  }
+  CHECK(h.at(1)->routes().best(4).valid);
+  // The capacity decision fired on the relays: the fan-out workload
+  // cannot be repaid inside the lease — counted and surfaced, while
+  // route maintenance continued on unfunded emissions.
+  CHECK(h.at(2)->congestion_stats().control_budget_unsatisfiable >= 1);
+  CHECK(h.observer(2)->has_diag("CONTROL_BUDGET_UNSATISFIABLE"));
+}
+
 }  // namespace
 
 int main() {
@@ -1051,6 +1125,8 @@ int main() {
   test_control_budget_gate();
   test_control_budget_unsatisfiable();
   test_control_budget_over_capacity_service();
+  test_control_budget_default_profile_ungated();
+  test_control_budget_default_profile_capacity_flag();
   if (failures == 0) {
     std::printf("RouteLoom congestion tests passed\n");
     return 0;

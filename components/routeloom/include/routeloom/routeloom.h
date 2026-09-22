@@ -126,7 +126,10 @@ typedef struct rl_node_config {
   uint8_t max_end_to_end_rounds;
   /* Origin generation of this node's route source; persisted monotonic, +1 per boot. */
   uint16_t route_generation;
-  uint8_t reserved[4];
+  /* Nonzero: the §14 management airtime budget gate applies (calibrated
+     profile only — see NodeConfig::control_budget_gate_enabled). */
+  uint8_t control_budget_gate_enabled;
+  uint8_t reserved[3];
 } rl_node_config_t;
 
 typedef struct rl_send_options {
