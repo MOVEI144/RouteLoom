@@ -225,14 +225,10 @@ int main() {
   CHECK(autonomy.busy_tx > 0);
   CHECK(autonomy.senders_busy_received > 0);
 
-  // Backpressure must not lose meaningfully more application data than
-  // the silent-drop baseline under the same load. The saturated operating
-  // point resolves a marginal delivery either way on single-attempt
-  // timing noise — adaptive RTO legitimately shifts which exchanges
-  // settle inside their lifetime — so the bound carries a one-message
-  // tolerance: deferral buys time, it never evicts an admitted job
-  // wholesale.
-  CHECK(autonomy.delivered + 1 >= baseline.delivered);
+  // Backpressure must not lose more application data than the silent-drop
+  // baseline under the same load. Deferral buys time; it never evicts an
+  // admitted job.
+  CHECK(autonomy.delivered >= baseline.delivered);
 
   // Every offered message resolves to a declared outcome in both runs —
   // the scheduler never silently loses one.
