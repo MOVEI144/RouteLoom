@@ -112,6 +112,11 @@ class RouteTable {
   // its previous-incarnation state is stale but fresh ads must not be held.
   void invalidate_next_hop(NodeId next_hop, MonotonicMs now_ms, bool hold = true) noexcept;
   void expire(MonotonicMs now_ms) noexcept;
+  // Capacity preemption for direct-neighbor admission (issue #50): releases
+  // the entry with the smallest armed tombstone_expires_at_ms, dropping its
+  // feasibility state early. Returns false when nothing is armed — normal
+  // GC still waits out the full dwell and live entries are never victims.
+  bool reclaim_tombstone() noexcept;
 
   // --- Load coupling (03-congestion.md §6.3, §7) ------------------------------
   // Identity used for the improvement-hold jitter; set once at boot.

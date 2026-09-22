@@ -842,6 +842,54 @@ void test_busy_feedback_wrap() {
   CHECK(a->congestion_stats().busy_stale == 1);
 }
 
+// Issue #50-2 invariant: when the 8-slot hop-wait table is full, a new
+// exchange must defer at select and burn zero attempt budget — capacity is
+// not RF loss. The blocked job transmits only after a slot frees. The
+// blocked job is a transit forward (delivery slots are 8 too, so a ninth
+// origin send() cannot even be created — a relay needs no delivery record).
+void test_awaiting_full_defers_without_attempts() {
+  Harness h;
+  MeshNode* a = h.add(1);
+  (void)h.add(2);
+  (void)h.add(5);  // transit source, a neighbor of the relay under test
+  h.link(1, 2);
+  h.link(1, 5);
+
+  // Park then BUSY-defer all 8 awaiting slots: each filler transmits once,
+  // then an authenticated BUSY(1000) holds the slot ~1s. Deferred slots are
+  // not inflight, so the peer window (initial 2) never gates this setup.
+  constexpr std::size_t kAwaitingSlots = 8;
+  std::array<MessageId, kAwaitingSlots> ids{};
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, ids[i]));
+    drive_tx(h, 1, ids[i].sequence, 1);
+    auto busy = busy_for(ids[i], 1, 0, 1000, static_cast<std::uint32_t>(i + 1));
+    inject(h, 1, 2, craft_busy(h.cipher, 2, 1, busy, 100 + i));
+  }
+  CHECK(a->congestion_stats().busy_received == kAwaitingSlots);
+
+  // The over-capacity job: transit DATA arriving from neighbor 5 bound for
+  // direct peer 2. Every select defers it on the full table — zero
+  // transmissions, i.e. zero attempts burned, while the wait itself must
+  // not fail it.
+  constexpr std::uint64_t kTransitSeq = 42;
+  inject(h, 1, 5, craft_transit(h.cipher, 5, 1, 999, 2, kTransitSeq));
+  for (int i = 0; i < 200; ++i) {  // ~200ms inside the deferral window
+    h.step(1);
+    ++h.now;
+  }
+  CHECK(h.data_sights(kTransitSeq) == 0);
+
+  // Deferred fillers drain (~+1s plus hop-accept churn): the transit job
+  // then transmits on its own budget — proof the capacity wait consumed
+  // nothing.
+  for (int i = 0; i < 3000 && h.data_sights(kTransitSeq) == 0; ++i) {
+    h.step(1);
+    ++h.now;
+  }
+  CHECK(h.data_sights(kTransitSeq) >= 1);
+}
+
 }  // namespace
 
 int main() {
@@ -859,6 +907,7 @@ int main() {
   test_busy_zero_pressure_hint();
   test_busy_feedback_wrap();
   test_peer_window_shrink_grow();
+  test_awaiting_full_defers_without_attempts();
   test_attempt_budgets();
   test_watermarks();
   test_busy_never_cancels();

@@ -77,9 +77,9 @@ source/frontierを失った直後にFDをinfinityで新規化して古い広告�
 
 portable profileでは以下を凍結した（`routing.hpp`/`node.cpp`の定数）。source keyは `(network, destination, origin generation)` で、ROUTE_UPDATEの各recordは destination(8)+generation(2)+sequence(2)+metric(2)の14byteを持つ。origin generationはnodeの永続化単調値で、bootごとに増加させる。自nodeより低いgenerationの広告は常に棄却し、高いgenerationはそのsourceのFD・候補・tombstoneを全て再初期化する。隣接nodeの自己recordでgenerationが上がった時、そのpeer経由の全候補をhold-down無しで破棄する（再起動relayの前世代stateを残さない）。
 
-FDは最後の候補が消えてもtombstoneとして60秒（`kRouteTombstoneDwellMs`）保持し、GCはdwell経過後のみ行う。撤回・隣接喪失したnext hopは500ms（`kRouteHoldDownMs`）hold-downする。triggered広告はneighbor喪失・selected route変更・sequence bumpで起動し、最小間隔1秒・最大64msの決定的jitterでburstを束ねる。1 frameのrecord上限は9で、selected routeの全dumpはper-neighborの回転cursorで複数更新へ分割する。
+FDは最後の候補が消えてもtombstoneとして60秒（`kRouteTombstoneDwellMs`）保持し、GCはdwell経過後のみ行う。例外として、route table満杯時のdirect-neighbor admit（add_neighbor）は最も古いarm済みtombstoneを1件だけ早期reclaimしてよい（issue #50；学習routeの氾濫には適用しない）。撤回・隣接喪失したnext hopは500ms（`kRouteHoldDownMs`）hold-downする。triggered広告はneighbor喪失・selected route変更・sequence bumpで起動し、最小間隔1秒・最大64msの決定的jitterでburstを束ねる。1 frameのrecord上限は9で、selected routeの全dumpはper-neighborの回転cursorで複数更新へ分割する。
 
-SeqNoRequestは宛先ごとにcooldown 2秒から線形に最大30秒までbackoffし、attemptは8回・同時in-flightは4件・state dwellは30秒・TTL上限10で打ち切る。これらはportable modelで検証済みの値であり、実機・RF上の成立証明ではない。
+SeqNoRequestは宛先ごとにcooldown 2秒から線形に最大30秒までbackoffし、attemptが飽和した後も最大cooldownのbounded cadenceで再試行を続ける（打ち切り無し・attemptsは255で飽和）。同時in-flightは4件・state dwellは30秒・TTL上限10。これらはportable modelで検証済みの値であり、実機・RF上の成立証明ではない。
 
 管理者不在での通常DATAを成立させるため、正常再起動の度に任意の新originをAuthorityへ発行させる方式を無条件に追加しない。origin sequenceを中継が勝手に増加させない。source keyを増やして古いsourceの安全履歴を逃れる実装は禁止。
 

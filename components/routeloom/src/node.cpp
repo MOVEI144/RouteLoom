@@ -24,7 +24,6 @@ constexpr std::size_t kMaxRouteRecordsPerFrame =
 constexpr std::uint32_t kSeqnoRequestLifetimeMs = 2000;
 constexpr std::uint32_t kSeqnoRequestCooldownMs = 2000;
 constexpr std::uint32_t kSeqnoRequestMaxCooldownMs = 30000;
-constexpr std::uint8_t kSeqnoRequestMaxAttempts = 8;
 constexpr std::size_t kSeqnoMaxInflight = 4;
 constexpr std::uint32_t kSeqnoStateDwellMs = 30000;
 constexpr std::uint8_t kSeqnoRequestMaxTtl = kDefaultHopLimit;
@@ -535,8 +534,16 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   // Direct route to the neighbor itself, seeded at the last-seen generation
   // (0 for a brand-new peer); it upgrades as soon as its self record arrives.
   const RouteAdvertisement direct{neighbor, record->generation, 0, 0};
-  const auto result = routes_.consider(direct, neighbor, link_metric, now_ms,
-                                       config_.route_lifetime_ms);
+  auto result = routes_.consider(direct, neighbor, link_metric, now_ms,
+                                 config_.route_lifetime_ms);
+  if (result == RouteUpdateResult::NoCapacity && routes_.reclaim_tombstone()) {
+    // A tombstone only remembers a dead destination's feasibility state —
+    // soft state. Under saturation a direct-neighbor admission preempts the
+    // oldest one (issue #50, same tradeoff as the neighbor-table reclaim
+    // under issue #20); a learned-route flood still sees NoCapacity.
+    result = routes_.consider(direct, neighbor, link_metric, now_ms,
+                              config_.route_lifetime_ms);
+  }
   if (result == RouteUpdateResult::NoCapacity) {
     record->active = false;
     return Status::error(StatusCode::NoCapacity, "route table full");
@@ -1776,7 +1783,20 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   }
   auto* awaiting = awaiting_hop_.allocate();
   if (awaiting == nullptr) {
-    retry_or_fail(job, "HOP_WAIT_TABLE_FULL", now_ms);
+    // A full hop-wait table is a capacity shortfall, not RF loss (issue
+    // #50): defer without consuming the retry budget. The frame did reach
+    // the air so physical_attempts stays counted; tx_admitted_now re-gates
+    // capacity before the next send.
+    if (now_ms >= job.deadline_ms) {
+      fail_job(job, "DEADLINE_EXPIRED", now_ms);
+      return;
+    }
+    observer_.on_diagnostic("HOP_WAIT_TABLE_FULL", job.peer, &job.ack.key.id);
+    job.encoded_valid = false;
+    TxJob pending = std::move(job);
+    if (!scheduler_.enqueue(std::move(pending), config_.node, now_ms)) {
+      fail_job(pending, "TX_QUEUE_FULL", now_ms);
+    }
     return;
   }
   awaiting->job = std::move(job);
@@ -3763,7 +3783,7 @@ void MeshNode::expire_sequence_requests(const MonotonicMs now_ms) noexcept {
 void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
   // Sequence requests are the repair path for infeasible destinations —
   // they must keep flowing under a data flood (03 §8). Bounded by the
-  // per-destination attempt cap, the global in-flight cap, linear backoff
+  // global in-flight cap, linear backoff saturating at the max cooldown
   // and the queue admission check below; no watermark early-out.
   // Outstanding = requests sent inside the dedup window, still waiting for a
   // fresh advertisement. Bounded so a dead origin cannot pile up requests.
@@ -3795,11 +3815,13 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
     }
     state->requested_sequence = requested_sequence;
     if (now_ms < state->next_request_ms || scheduler_.full()) return;
-    // Retry cap survives dedup expiry in seqno_state_: after the cap the
-    // destination simply waits for organic fresh advertisements.
-    if (state->attempts >= kSeqnoRequestMaxAttempts || inflight >= kSeqnoMaxInflight) {
-      return;
-    }
+    // No retry cap (issue #50): a destination whose infeasible
+    // advertisements keep renewing their lease would never see a fresh
+    // sequence again if probing stopped — permanent unreachability with no
+    // recovery path. Requests keep flowing on the bounded max-cooldown
+    // cadence instead (per-destination rate still capped by backoff, the
+    // in-flight cap and the dedup window).
+    if (inflight >= kSeqnoMaxInflight) return;
 
     const NodeId next = routes_.request_next_hop(destination, state->attempts);
     if (next == kInvalidNodeId || next == config_.node) return;
@@ -3809,7 +3831,9 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
     *seen = SeqnoSeen{config_.node, destination, request_id, now_ms + kSeqnoRequestLifetimeMs};
     if (queue_seqno_request(next, config_.node, destination, requested_sequence,
                             request_id, kDefaultHopLimit, now_ms)) {
-      ++state->attempts;
+      // Saturate, never wrap: attempts==0 would zero the backoff below and
+      // turn the bounded cadence into a per-poll flood.
+      if (state->attempts != UINT8_MAX) ++state->attempts;
       ++inflight;
       state->last_sent_ms = now_ms;
       // Linear backoff keeps retries bounded without a growing flood; the

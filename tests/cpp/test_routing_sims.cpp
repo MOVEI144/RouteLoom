@@ -423,6 +423,71 @@ void test_seqno_intermediate_answers() {
   CHECK(saw_update_to_1);
 }
 
+// Issue #50-1 helpers: drop every seqno request at the wire and count a
+// node's SEQNO_REQUEST_SENT diagnostics (dropped frames leave no sightings,
+// so the sender's own log is the probe signal).
+bool drop_seqno_frames(const routeloom_test::SimNetwork::Pending& pending) {
+  FrameSight sight{};
+  return routeloom_test::sight_frame(
+             ByteView{pending.frame.data(), pending.frame.size()}, sight) &&
+         sight.type == FrameType::SeqnoRequest;
+}
+
+std::size_t seqno_sends(const routeloom_test::CapturingObserver& obs) {
+  std::size_t count = 0;
+  for (const auto& diag : obs.diagnostics) {
+    if (diag.rfind("SEQNO_REQUEST_SENT", 0) == 0) ++count;
+  }
+  return count;
+}
+
+// Issue #50-1: a destination whose infeasible advertisements keep renewing
+// their lease must keep being probed past the old 8-attempt cap — on the
+// bounded max-cooldown cadence — or it stays permanently unreachable.
+void test_seqno_retry_past_cap() {
+  SimWorld w;
+  // Triangle: node 1 holds the direct route to 3 and advertises it, so its
+  // FD for 3 tightens to (seq S, metric 1). Node 2's advertisements of 3 at
+  // the same sequence with metric 1 are never strictly better: once the 1-3
+  // link dies they stay infeasible yet keep renewing the candidate lease —
+  // the deadlock shape from issue #50.
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.link(1, 3, 1, 1);
+  w.run(4000);
+  CHECK(w.at(1)->routes().best(3).valid);
+  CHECK(w.at(1)->routes().best(3).next_hop == 3);  // direct route selected
+
+  // Wire-level death only — no remove_neighbor, so node 3's sequence stays
+  // put and no organic repair can happen. Every seqno request is lost.
+  w.net.disconnect(1, 3);
+  w.net.drop_frame = drop_seqno_frames;
+  w.run(2000);  // direct candidate invalidated; probing begins
+
+  // The first ~56s after probing starts cover the old 8-attempt window
+  // (linear backoff: gaps 2,4,...,16s then the 30s ceiling).
+  w.run(90000);
+  const std::size_t sends_early = seqno_sends(*w.obs(1));
+  CHECK(sends_early >= 8);
+  // Past the old cap the probes must NOT stop — but they ride the bounded
+  // 30s cadence, never a flood: ~4-5 sends in the next two minutes.
+  w.run(120000);
+  const std::size_t late = seqno_sends(*w.obs(1)) - sends_early;
+  CHECK(late >= 3);
+  CHECK(late <= 8);
+
+  // Repair lands the moment requests get through again: node 3 bumps its
+  // sequence, the fresh advertisement is feasible, data delivers.
+  w.net.drop_frame = nullptr;
+  w.run(45000);
+  CHECK(w.at(1)->routes().best(3).valid);
+  CHECK(w.at(1)->routes().best(3).next_hop == 2);  // repaired via node 2
+  send_and_expect(w, 1, 3, 15000, "seqno-post-cap-repair");
+  check_no_forward_loops(w.net.sights);
+}
+
 void test_multiple_origins_pinning() {
   SimWorld w;
   // Two gateways behind different arms: an explicit destination must never be
@@ -472,6 +537,7 @@ int main() {
   test_partition_merge();
   test_retraction_propagates();
   test_seqno_intermediate_answers();
+  test_seqno_retry_past_cap();
   test_multiple_origins_pinning();
   if (failures != 0) {
     std::fprintf(stderr, "%d routing-sim checks failed\n", failures);

@@ -756,7 +756,9 @@ class MeshNode {
   };
 
   // Per-destination request state. Survives dedup (seqno_seen_) expiry so the
-  // retry cap and cooldown still apply after the seen-record is gone.
+  // backoff/cooldown still applies after the seen-record is gone. attempts
+  // saturates (never wraps) — post-cap probes ride the max cooldown (issue
+  // #50).
   struct SeqnoState {
     NodeId destination{kInvalidNodeId};
     RouteSequence requested_sequence{0};
