@@ -17,6 +17,7 @@
 // the neighbor decay windows under clock faults, dedup reserve/cap/eviction
 // bounds, and queue/neighbor/route-table saturation with live-state checks.
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #include <set>
 #include <vector>
 
+#include "routeloom/byte_io.hpp"
 #include "routeloom/counter_store.hpp"
 #include "routeloom/crc32.hpp"
 #include "routeloom/node.hpp"
@@ -778,6 +780,115 @@ void test_route_table_saturation() {
   CHECK(table.best(0xFFFF).valid);
 }
 
+// Issue #50-3: under saturation a direct-neighbor admission may preempt the
+// OLDEST armed tombstone — exactly one — while a learned-route flood still
+// sees NoCapacity and a live entry is never a victim.
+void test_route_table_tombstone_reclaim() {
+  RouteTable table;
+  const MonotonicMs t = 1000;
+  for (NodeId dest = 0x1000; dest < 0x1000 + kMaxRouteEntries; ++dest) {
+    const RouteAdvertisement ad{dest, /*generation=*/1, /*sequence=*/1,
+                                /*metric=*/10};
+    CHECK(table.consider(ad,
+                         /*next_hop=*/static_cast<NodeId>(0x2000 + (dest - 0x1000)),
+                         /*link_metric=*/1, t, /*lifetime_ms=*/60000) ==
+          RouteUpdateResult::Accepted);
+  }
+  CHECK(table.size() == kMaxRouteEntries);
+  // Arm FD on the three entries whose tombstones we arm below.
+  CHECK(table.mark_advertised(0x1000));
+  CHECK(table.mark_advertised(0x1001));
+  CHECK(table.mark_advertised(0x1002));
+  // Tombstones arm oldest-first: 0x1000, then 0x1001, then 0x1002.
+  table.invalidate_next_hop(0x2000, t + 1);
+  table.invalidate_next_hop(0x2001, t + 2);
+  table.invalidate_next_hop(0x2002, t + 3);
+  // A brand-new destination is still refused: saturation stays honest.
+  const RouteAdvertisement extra{0xFFFF, 1, 1, 10};
+  CHECK(table.consider(extra, 7, 1, t + 4, 60000) ==
+        RouteUpdateResult::NoCapacity);
+  // The reclaim preempts exactly the oldest armed tombstone (0x1000).
+  CHECK(table.reclaim_tombstone());
+  CHECK(table.size() == kMaxRouteEntries - 1);
+  CHECK(table.consider(extra, 7, 1, t + 5, 60000) ==
+        RouteUpdateResult::Accepted);
+  // The second-oldest tombstone still holds its FD: the same stale shape is
+  // infeasible against 0x1001 (seq 1 == FD, metric 50 not < FD metric 11).
+  CHECK(table.consider(RouteAdvertisement{0x1001, 1, 1, 50}, 9, 1, t + 6,
+                       60000) == RouteUpdateResult::Infeasible);
+  // Only 0x1002's tombstone is still armed (0x1001's cleared when the
+  // infeasible candidate was recorded) — the next reclaim frees exactly it.
+  CHECK(table.reclaim_tombstone());
+  CHECK(table.size() == kMaxRouteEntries - 1);
+  // The preempted entry's FD is gone with it: the identical stale
+  // re-advertisement of 0x1000 now looks fresh — the bounded cost of the
+  // preemption tradeoff, confined to the reclaimed destination only.
+  CHECK(table.consider(RouteAdvertisement{0x1000, 1, 1, 50}, 9, 1, t + 7,
+                       60000) == RouteUpdateResult::Accepted);
+  // With no tombstone armed the reclaim is a no-op — a live entry is never
+  // preempted.
+  RouteTable live;
+  CHECK(live.consider(RouteAdvertisement{0x3000, 1, 1, 10}, 7, 1, t, 60000) ==
+        RouteUpdateResult::Accepted);
+  CHECK(!live.reclaim_tombstone());
+  CHECK(live.size() == 1 && live.best(0x3000).valid);
+}
+
+// Issue #50-3 at the node level: a route table saturated with tombstones
+// must not refuse a direct-neighbor admission — the admission preempts one
+// tombstone and the new peer's direct route is usable.
+void test_neighbor_admission_reclaims_tombstone() {
+  SimWorld world;
+  world.network_id = kNet;
+  world.add(1);  // node under test
+  world.add(2);  // route advertiser (later departs)
+  world.add(3);  // the new direct peer; deliberately NOT linked to 1 or 2
+  world.start_all();
+  world.link(1, 2, 1, 1);
+  world.run(400);
+
+  // Fill node 1's route table (128 entries) with phantom destinations
+  // learned from neighbor 2 — wire records are
+  // dest u64 | generation u16 | sequence u16 | metric u16, 9 per frame.
+  constexpr std::size_t kRecordsPerFrame = 9;
+  constexpr std::size_t kRecordBytes = 14;
+  std::uint64_t wire_seq = 1;
+  NodeId phantom = 0x1000;
+  while (world.at(1)->routes().size() < kMaxRouteEntries) {
+    const std::size_t n = std::min<std::size_t>(
+        kRecordsPerFrame, kMaxRouteEntries - world.at(1)->routes().size());
+    std::array<std::uint8_t, 1 + kRecordsPerFrame * kRecordBytes> body{};
+    ByteWriter writer(MutableByteView{body.data(), body.size()});
+    CHECK_OK(writer.write_u8(static_cast<std::uint8_t>(n)));
+    for (std::size_t i = 0; i < n; ++i) {
+      CHECK_OK(writer.write_u64(phantom++));
+      CHECK_OK(writer.write_u16(1));   // generation
+      CHECK_OK(writer.write_u16(1));   // sequence
+      CHECK_OK(writer.write_u16(10));  // metric
+    }
+    inject(world, 1, 2,
+           craft_frame(*world.security[2],
+                       mk_header(FrameType::RouteUpdate, 2, 1, 2, 1,
+                                 MessageId{777, wire_seq++}, 0, 30000),
+                       ByteView{body.data(), writer.size()}),
+           world.now);
+    world.run(5);
+  }
+  CHECK(world.at(1)->routes().size() == kMaxRouteEntries);
+
+  // Neighbor 2 departs: every learned route loses its only candidate and
+  // arms a tombstone — the full table is tombstones.
+  CHECK_OK(world.at(1)->remove_neighbor(2, world.now));
+  CHECK(world.at(1)->routes().size() == kMaxRouteEntries);
+
+  // Pre-fix this returned NoCapacity and dropped the neighbor record; now
+  // the admission preempts the oldest tombstone and the direct route works.
+  CHECK_OK(world.at(1)->add_neighbor(3, 1, world.now));
+  CHECK(world.at(1)->routes().size() == kMaxRouteEntries);
+  CHECK(world.at(1)->routes().best(3).valid);
+  CHECK(world.at(1)->routes().best(3).next_hop == 3);
+}
+
 // The 32-entry neighbor table refuses a 33rd peer without losing existing
 // neighbors; updates to admitted peers keep working while full.
 void test_neighbor_table_saturation() {
@@ -1098,7 +1209,9 @@ int main() {
   RUN(test_clock_backwards_dedup_retention);
   // Capacity
   RUN(test_route_table_saturation);
+  RUN(test_route_table_tombstone_reclaim);
   RUN(test_neighbor_table_saturation);
+  RUN(test_neighbor_admission_reclaims_tombstone);
   RUN(test_dedup_terminal_reserve_and_pool_full);
   RUN(test_dedup_upstream_cap);
   RUN(test_dedup_eviction_expired_then_resolved);

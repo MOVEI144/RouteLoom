@@ -483,6 +483,22 @@ void RouteTable::expire(const MonotonicMs now_ms) noexcept {
   });
 }
 
+bool RouteTable::reclaim_tombstone() noexcept {
+  // Only the oldest ARMED tombstone is eligible: evicting anything younger
+  // would trade bounded FD memory for faster capacity churn, and a live
+  // entry (no tombstone armed) is never a victim — collect first, release
+  // after the pool scan per the for_each contract.
+  Entry* oldest = nullptr;
+  entries_.for_each([&](Entry& entry) {
+    if (entry.tombstone_expires_at_ms == 0) return;
+    if (oldest == nullptr ||
+        entry.tombstone_expires_at_ms < oldest->tombstone_expires_at_ms) {
+      oldest = &entry;
+    }
+  });
+  return entries_.release(oldest);
+}
+
 RouteSelection RouteTable::best(const NodeId destination) const noexcept {
   const auto* entry = find(destination);
   return entry == nullptr ? RouteSelection{} : select(*entry);

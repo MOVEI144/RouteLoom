@@ -181,6 +181,7 @@ struct CapturingObserver final : routeloom::NodeObserver {
   std::vector<std::vector<std::uint8_t>> messages;
   std::vector<routeloom::DeliveryResult> delivery_events;
   std::vector<std::string> diagnostics;
+  std::vector<routeloom::NodeId> diagnostic_peers;  // peer arg, index-aligned with diagnostics
 
   void on_message(const routeloom::MessageKey&, routeloom::NodeId,
                   routeloom::ByteView payload) noexcept override {
@@ -189,8 +190,9 @@ struct CapturingObserver final : routeloom::NodeObserver {
   void on_delivery(const routeloom::DeliveryResult& result) noexcept override {
     delivery_events.push_back(result);
   }
-  void on_diagnostic(const char* reason, routeloom::NodeId, const routeloom::MessageId*) noexcept override {
+  void on_diagnostic(const char* reason, routeloom::NodeId peer, const routeloom::MessageId*) noexcept override {
     diagnostics.emplace_back(reason);
+    diagnostic_peers.push_back(peer);
   }
 
   bool has_diag(const char* prefix) const {

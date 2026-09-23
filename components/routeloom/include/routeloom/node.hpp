@@ -774,7 +774,11 @@ class MeshNode {
   };
 
   // Per-destination request state. Survives dedup (seqno_seen_) expiry so the
-  // retry cap and cooldown still apply after the seen-record is gone.
+  // backoff/cooldown still applies after the seen-record is gone. attempts
+  // saturates (never wraps) — post-cap probes ride the max cooldown (issue
+  // #50). probe_cursor is the independent next-hop rotation cursor: it wraps
+  // freely so post-cap requests keep walking every candidate instead of
+  // pinning hops[saturated_attempts % count].
   struct SeqnoState {
     NodeId destination{kInvalidNodeId};
     RouteSequence requested_sequence{0};
@@ -782,6 +786,7 @@ class MeshNode {
     MonotonicMs last_sent_ms{0};
     MonotonicMs expires_at_ms{0};
     std::uint8_t attempts{0};
+    std::uint8_t probe_cursor{0};
   };
 
   struct DedupEntry {

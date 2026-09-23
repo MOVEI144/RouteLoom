@@ -423,6 +423,171 @@ void test_seqno_intermediate_answers() {
   CHECK(saw_update_to_1);
 }
 
+// Issue #50-1 helpers: drop every seqno request at the wire and count a
+// node's SEQNO_REQUEST_SENT diagnostics (dropped frames leave no sightings,
+// so the sender's own log is the probe signal).
+bool drop_seqno_frames(const routeloom_test::SimNetwork::Pending& pending) {
+  FrameSight sight{};
+  return routeloom_test::sight_frame(
+             ByteView{pending.frame.data(), pending.frame.size()}, sight) &&
+         sight.type == FrameType::SeqnoRequest;
+}
+
+std::size_t seqno_sends(const routeloom_test::CapturingObserver& obs) {
+  std::size_t count = 0;
+  for (const auto& diag : obs.diagnostics) {
+    if (diag.rfind("SEQNO_REQUEST_SENT", 0) == 0) ++count;
+  }
+  return count;
+}
+
+// Issue #50-1: a destination whose infeasible advertisements keep renewing
+// their lease must keep being probed past the old 8-attempt cap — on the
+// bounded max-cooldown cadence — or it stays permanently unreachable.
+void test_seqno_retry_past_cap() {
+  SimWorld w;
+  // Triangle: node 1 holds the direct route to 3 and advertises it, so its
+  // FD for 3 tightens to (seq S, metric 1). Node 2's advertisements of 3 at
+  // the same sequence with metric 1 are never strictly better: once the 1-3
+  // link dies they stay infeasible yet keep renewing the candidate lease —
+  // the deadlock shape from issue #50.
+  for (NodeId id = 1; id <= 3; ++id) w.add(id);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(2, 3, 1, 1);
+  w.link(1, 3, 1, 1);
+  w.run(4000);
+  CHECK(w.at(1)->routes().best(3).valid);
+  CHECK(w.at(1)->routes().best(3).next_hop == 3);  // direct route selected
+
+  // Wire-level death only — no remove_neighbor, so node 3's sequence stays
+  // put and no organic repair can happen. Every seqno request is lost.
+  w.net.disconnect(1, 3);
+  w.net.drop_frame = drop_seqno_frames;
+  w.run(2000);  // direct candidate invalidated; probing begins
+
+  // The first ~56s after probing starts cover the old 8-attempt window
+  // (linear backoff: gaps 2,4,...,16s then the 30s ceiling).
+  w.run(90000);
+  const std::size_t sends_early = seqno_sends(*w.obs(1));
+  CHECK(sends_early >= 8);
+  // Past the old cap the probes must NOT stop — but they ride the bounded
+  // 30s cadence, never a flood: ~4-5 sends in the next two minutes.
+  w.run(120000);
+  const std::size_t late = seqno_sends(*w.obs(1)) - sends_early;
+  CHECK(late >= 3);
+  CHECK(late <= 8);
+
+  // Repair lands the moment requests get through again: node 3 bumps its
+  // sequence, the fresh advertisement is feasible, data delivers.
+  w.net.drop_frame = nullptr;
+  w.run(45000);
+  CHECK(w.at(1)->routes().best(3).valid);
+  CHECK(w.at(1)->routes().best(3).next_hop == 2);  // repaired via node 2
+  send_and_expect(w, 1, 3, 15000, "seqno-post-cap-repair");
+  check_no_forward_loops(w.net.sights);
+}
+
+// Injects a route update frame carrying a single record straight into a
+// node's RX path — the portable equivalent of "keep feeding this node the
+// advertisement" used by the issue-#50 review's portable repro.
+std::uint64_t g_inject_message_seq = 1;
+void inject_route_update(SimWorld& w, NodeId from, NodeId to, NodeId dest,
+                         std::uint16_t generation, std::uint16_t sequence,
+                         std::uint16_t metric) {
+  std::array<std::uint8_t, 15> payload{};
+  {
+    ByteWriter writer(MutableByteView{payload.data(), payload.size()});
+    CHECK_OK(writer.write_u8(1));
+    CHECK_OK(writer.write_u64(dest));
+    CHECK_OK(writer.write_u16(generation));
+    CHECK_OK(writer.write_u16(sequence));
+    CHECK_OK(writer.write_u16(metric));
+  }
+  wire::PlainFrame plain{};
+  plain.header.type = FrameType::RouteUpdate;
+  plain.header.delivery = DeliveryClass::BestEffort;
+  plain.header.hop_remaining = 1;
+  plain.header.network = w.network_id;
+  plain.header.origin = from;
+  plain.header.destination = to;
+  plain.header.previous_hop = from;
+  plain.header.next_hop = to;
+  plain.header.message = MessageId{static_cast<std::uint32_t>(900 + from),
+                                   g_inject_message_seq++};
+  plain.header.remaining_deadline_ms = 60000;
+  plain.header.original_lifetime_ms = 60000;
+  plain.payload_size = payload.size();
+  std::memcpy(plain.payload.data(), payload.data(), payload.size());
+  wire::EncodedFrame encoded{};
+  CHECK_OK(wire::encode_new(plain, *w.security[from], encoded));
+  w.at(to)->on_radio_receive(from, encoded.view(), RadioRxMetadata{-60}, w.now);
+}
+
+// Issue #50 review follow-up: the saturating backoff counter must not also
+// drive next-hop candidate selection. Node 1's FD for 99 tightens to
+// (seq 1, metric 1) once it advertises the injected metric-0 route; the
+// via-2 / via-3 advertisements at seq 1 metric 1 are then never strictly
+// better, so they stay infeasible alternates. Feeding those advertisements
+// indefinitely keeps their candidate leases alive — the review's portable
+// repro — and past the 255-attempt saturation the requests must still
+// round-robin BOTH candidates instead of pinning hops[255 % 2] forever.
+void test_seqno_probe_cursor_past_cap() {
+  SimWorld w;
+  for (NodeId id = 1; id <= 3; ++id) w.add(id, 1, 100, 10000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.link(1, 3, 1, 1);
+  w.run(4000);
+
+  // FD establishment: an injected feasible-looking advertisement from
+  // peer 2 (adv metric 0) is selected and re-advertised at metric 1, so
+  // node 1's FD for 99 becomes (seq 1, metric 1).
+  inject_route_update(w, 2, 1, 99, 1, 1, 0);
+  w.run(4000);
+  CHECK(w.at(1)->routes().best(99).valid);
+  CHECK(w.at(1)->routes().best(99).next_hop == 2);
+
+  // Peer 3 joins as a second (infeasible) candidate, then peer 2's route is
+  // retracted — every surviving candidate is now infeasible vs the FD and
+  // seqno probing starts. Past the withdraw hold-down the finite
+  // re-injection below brings via-2 back as an infeasible candidate.
+  inject_route_update(w, 3, 1, 99, 1, 1, 1);
+  inject_route_update(w, 2, 1, 99, 1, 1, kInfiniteRouteMetric);
+  w.run(600, 2000);
+  CHECK(w.at(1)->routes().needs_sequence_request(99));
+
+  // Sends 1-16 ride the linear backoff (~240s total); every later send sits
+  // on the 30s ceiling, so ~9e6 ms of sim time reaches ~300 sends — well
+  // past the 255-attempt saturation. Nodes 2/3 have no route to 99, so the
+  // requests never resolve and the deadlock persists.
+  for (int chunk = 0; chunk < 1500; ++chunk) {
+    w.run(6000, 2000);
+    inject_route_update(w, 2, 1, 99, 1, 1, 1);
+    inject_route_update(w, 3, 1, 99, 1, 1, 1);
+  }
+
+  const auto& diagnostics = w.obs(1)->diagnostics;
+  const auto& peers = w.obs(1)->diagnostic_peers;
+  std::size_t sends = 0;
+  std::size_t post_cap_to_2 = 0;
+  std::size_t post_cap_to_3 = 0;
+  for (std::size_t i = 0; i < diagnostics.size(); ++i) {
+    if (diagnostics[i].rfind("SEQNO_REQUEST_SENT", 0) != 0) continue;
+    ++sends;
+    if (sends > 255) {
+      if (peers[i] == 2) ++post_cap_to_2;
+      if (peers[i] == 3) ++post_cap_to_3;
+    }
+  }
+  CHECK(sends >= 280);  // deadlock persists well past the saturation point
+  // With selection driven by the saturated counter, every post-cap request
+  // lands on the same candidate (255 % 2); the independent cursor must keep
+  // both alternates in rotation.
+  CHECK(post_cap_to_2 >= 10);
+  CHECK(post_cap_to_3 >= 10);
+}
+
 void test_multiple_origins_pinning() {
   SimWorld w;
   // Two gateways behind different arms: an explicit destination must never be
@@ -472,6 +637,8 @@ int main() {
   test_partition_merge();
   test_retraction_propagates();
   test_seqno_intermediate_answers();
+  test_seqno_retry_past_cap();
+  test_seqno_probe_cursor_past_cap();
   test_multiple_origins_pinning();
   if (failures != 0) {
     std::fprintf(stderr, "%d routing-sim checks failed\n", failures);
