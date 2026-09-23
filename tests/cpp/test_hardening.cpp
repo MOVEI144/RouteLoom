@@ -3,17 +3,22 @@
 //  - link-layer authentication is not origin authorization
 //  - crypto counters are provider-owned, independent of Message ID
 //  - replay windows + epoch floors under simulated power cuts / store loss
+//  - flash-wear bounds: replay ceiling reservation, TX lease checkpoints
 //  - EXPERIMENTAL security-profile enforcement and no plaintext DATA path
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "routeloom/counter_store.hpp"
+#include "routeloom/crc32.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/replay.hpp"
 #include "routeloom/secure_clear.hpp"
@@ -110,10 +115,12 @@ class MemoryCounterStore final : public CounterStore {
       return Status::error(StatusCode::StorageFailure, "commit dropped");
     }
     records[slot] = record;
+    ++commits;
     return Status::success();
   }
   std::map<std::uint32_t, CounterRecord> records;
   bool fail_commits{false};
+  std::size_t commits{0};  // durable commits = flash writes on device
 };
 
 // ReplayStore test double that can lose window blobs, corrupt records and
@@ -137,6 +144,7 @@ class FlakyReplayStore final : public ReplayStore {
       return Status::error(StatusCode::StorageFailure, "window commit dropped");
     }
     windows[slot] = record;
+    ++window_commits;
     return Status::success();
   }
   Status load_floor(std::uint32_t slot, ReplayFloorRecord& record,
@@ -155,6 +163,7 @@ class FlakyReplayStore final : public ReplayStore {
       return Status::error(StatusCode::StorageFailure, "floor commit dropped");
     }
     floors[slot] = record;
+    ++floor_commits;
     return Status::success();
   }
 
@@ -162,6 +171,9 @@ class FlakyReplayStore final : public ReplayStore {
   std::map<std::uint32_t, ReplayFloorRecord> floors;
   bool fail_loads{false};
   bool fail_commits{false};
+  // Durable commits = NVS flash writes on device (issue #30 budget).
+  std::size_t window_commits{0};
+  std::size_t floor_commits{0};
 };
 
 wire::PlainFrame data_plain(std::uint8_t flags) {
@@ -326,18 +338,26 @@ void test_replay_window_survives_restart() {
     CHECK_OK(guard.accept(window, 10));
     CHECK_OK(guard.accept(window, 11));
   }
-  // Simulated restart: new guard, same persisted store.
+  // Simulated restart: new guard, same persisted store; the RAM window is
+  // gone and only the reservation ceiling committed by the first accept
+  // (10 + kReplayReservationAhead) survived.
   ReplayGuard guard(store);
   ReplayGuard::Window window{};
   CHECK_OK(guard.open_context(kCtx, window));
-  // The persisted window still rejects counters it covers.
+  // The persisted ceiling still rejects every counter it covers.
   CHECK(guard.accept(window, 10).code == StatusCode::ReplayRejected);
   CHECK(guard.accept(window, 11).code == StatusCode::ReplayRejected);
-  // Counter 5 is inside the window and was never accepted — out-of-order
-  // delivery keeps it admissible, exactly once.
-  CHECK_OK(guard.accept(window, 5));
+  // Counter 5 was never accepted, but the out-of-order bitmap that proved
+  // it fresh lived in RAM: after a restart everything at or below the
+  // ceiling is conservatively treated as seen (reject, never re-admit).
   CHECK(guard.accept(window, 5).code == StatusCode::ReplayRejected);
-  CHECK_OK(guard.accept(window, 12));
+  const std::uint64_t ceiling = 10 + kReplayReservationAhead;
+  CHECK(guard.accept(window, 12).code == StatusCode::ReplayRejected);
+  CHECK(guard.accept(window, ceiling).code == StatusCode::ReplayRejected);
+  // Above the ceiling nothing can have been accepted before the restart.
+  CHECK_OK(guard.accept(window, ceiling + 2));
+  CHECK_OK(guard.accept(window, ceiling + 1));  // out of order, still fresh
+  CHECK(guard.accept(window, ceiling + 1).code == StatusCode::ReplayRejected);
 }
 
 void test_replay_window_loss_requires_new_epoch() {
@@ -463,7 +483,7 @@ void test_replay_corruption_is_not_a_fresh_context() {
     CHECK_OK(guard.accept(window, 7));
   }
   // Bit rot inside the persisted window must not turn into a fresh accept.
-  store.windows.begin()->second.bitmap ^= 0x1fULL;
+  store.windows.begin()->second.accepted_ceiling ^= 0x1fULL;
   ReplayGuard guard(store);
   ReplayGuard::Window window{};
   CHECK(guard.open_context(kCtx, window).code == StatusCode::IntegrityError);
@@ -498,12 +518,18 @@ void test_replay_commit_failure_rolls_back() {
   ReplayGuard::Window blocked_window{};
   CHECK(!blocked.open_context(kCtx, blocked_window));
 
-  // A failed window commit rolls the in-memory window back: the frame is not
-  // accepted and the counter can be retried once the store recovers.
-  CHECK(guard.accept(window, 6).code == StatusCode::StorageFailure);
-  store.fail_commits = false;
+  // Counters under the reserved ceiling need no commit at all, so a failing
+  // store does not affect them.
   CHECK_OK(guard.accept(window, 6));
-  CHECK(guard.accept(window, 6).code == StatusCode::ReplayRejected);
+  // Crossing the ceiling needs a commit. A failed one leaves the in-memory
+  // window untouched: the frame is not accepted and the counter can be
+  // retried once the store recovers.
+  const std::uint64_t beyond = 5 + kReplayReservationAhead + 1;
+  CHECK(guard.accept(window, beyond).code == StatusCode::StorageFailure);
+  CHECK_OK(guard.accept(window, 7));  // the window did not slide
+  store.fail_commits = false;
+  CHECK_OK(guard.accept(window, beyond));
+  CHECK(guard.accept(window, beyond).code == StatusCode::ReplayRejected);
 }
 
 void test_replay_floor_cold_start_semantics() {
@@ -779,6 +805,443 @@ void test_epochs_survive_past_u16_boot_budget() {
   }
 }
 
+// --- Flash wear: replay ceiling reservation (issue #30) ---------------------
+
+std::uint64_t next_random(std::uint64_t& state) {
+  state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+  return state >> 33;
+}
+
+void test_replay_commits_bounded_per_reservation() {
+  // Before #30 every accepted frame committed the window (one NVS write per
+  // authenticated frame). The persisted ceiling is now raised only when the
+  // live maximum crosses it: one commit per kReplayReservationAhead + 1
+  // counters advanced.
+  constexpr std::uint64_t kFrames = 10000;
+  FlakyReplayStore store;
+  ReplayGuard guard(store);
+  ReplayGuard::Window window{};
+  CHECK_OK(guard.open_context(kCtx, window));
+  const std::size_t floor_commits = store.floor_commits;
+  CHECK(floor_commits == 1);  // cold-start floor, written once
+  for (std::uint64_t counter = 0; counter < kFrames; ++counter) {
+    CHECK_OK(guard.accept(window, counter));
+  }
+  CHECK(store.window_commits ==
+        (kFrames + kReplayReservationAhead) / (kReplayReservationAhead + 1));
+  CHECK(store.floor_commits == floor_commits);  // only on epoch change
+
+  // Jittered delivery (neighbouring frames swapped) costs the same.
+  FlakyReplayStore jitter_store;
+  ReplayGuard jitter(jitter_store);
+  ReplayGuard::Window jitter_window{};
+  CHECK_OK(jitter.open_context(kCtx, jitter_window));
+  for (std::uint64_t counter = 0; counter < kFrames; counter += 2) {
+    CHECK_OK(jitter.accept(jitter_window, counter + 1));
+    CHECK_OK(jitter.accept(jitter_window, counter));
+  }
+  CHECK(jitter_store.window_commits <= kFrames / kReplayReservationAhead + 1);
+
+  // reservation_ahead = 0 reproduces the old cost: a commit per advance.
+  FlakyReplayStore eager_store;
+  ReplayGuard eager(eager_store, 0);
+  ReplayGuard::Window eager_window{};
+  CHECK_OK(eager.open_context(kCtx, eager_window));
+  for (std::uint64_t counter = 0; counter < 100; ++counter) {
+    CHECK_OK(eager.accept(eager_window, counter));
+  }
+  CHECK(eager_store.window_commits == 100);
+}
+
+void test_replay_out_of_order_within_window_before_crash() {
+  FlakyReplayStore store;
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window window{};
+    CHECK_OK(guard.open_context(kCtx, window));
+    // Out-of-order frames below the live maximum are admitted from the RAM
+    // bitmap exactly once, with no extra commit.
+    CHECK_OK(guard.accept(window, 10));
+    CHECK_OK(guard.accept(window, 13));
+    CHECK_OK(guard.accept(window, 11));
+    CHECK_OK(guard.accept(window, 12));
+    CHECK_OK(guard.accept(window, 60));
+    CHECK_OK(guard.accept(window, 20));
+    CHECK_OK(guard.accept(window, 70));
+    CHECK_OK(guard.accept(window, 7));  // 63 behind: last bit of the window
+    CHECK(guard.accept(window, 6).code == StatusCode::ReplayRejected);
+    CHECK(guard.accept(window, 11).code == StatusCode::ReplayRejected);
+    CHECK(guard.accept(window, 20).code == StatusCode::ReplayRejected);
+    CHECK(store.window_commits == 1);  // all under ceiling 10 + ahead
+    CHECK_OK(guard.accept(window, 10 + kReplayReservationAhead + 1));
+    CHECK(store.window_commits == 2);
+    // Power cut here: no close_context, the RAM window is simply lost.
+  }
+  const std::uint64_t ceiling = 10 + kReplayReservationAhead + 1 +
+                                kReplayReservationAhead;
+  CHECK(store.windows.begin()->second.accepted_ceiling == ceiling);
+  ReplayGuard guard(store);
+  ReplayGuard::Window window{};
+  CHECK_OK(guard.open_context(kCtx, window));
+  for (const std::uint64_t seen : {7ULL, 10ULL, 11ULL, 12ULL, 13ULL, 20ULL,
+                                   60ULL, 70ULL,
+                                   10ULL + kReplayReservationAhead + 1}) {
+    CHECK(guard.accept(window, seen).code == StatusCode::ReplayRejected);
+  }
+  // Never accepted, but at or below the ceiling: conservatively rejected.
+  CHECK(guard.accept(window, 8).code == StatusCode::ReplayRejected);
+  CHECK(guard.accept(window, ceiling).code == StatusCode::ReplayRejected);
+  CHECK_OK(guard.accept(window, ceiling + 1));
+}
+
+void test_replay_crash_never_reaccepts() {
+  // Randomized power cuts: a peer keeps sending increasing counters with
+  // gaps, stragglers and replays; the receiver loses its RAM at random
+  // points (sometimes after a clean close_context). No counter may ever be
+  // accepted twice, fresh counters above the persisted ceiling are always
+  // accepted, and fresh counters at or below it are the only (bounded) loss.
+  FlakyReplayStore store;
+  std::set<std::uint64_t> accepted;
+  std::vector<std::uint64_t> sent;
+  std::uint64_t state = 0x5eed5eed5eedULL;
+  std::uint64_t sender = 0;
+  std::size_t lost_fresh = 0;
+  constexpr int kBoots = 40;
+  for (int boot = 0; boot < kBoots; ++boot) {
+    ReplayGuard guard(store);
+    ReplayGuard::Window window{};
+    CHECK_OK(guard.open_context(kCtx, window));
+    const bool had_ceiling = window.live;
+    const std::uint64_t ceiling_at_open = window.maximum_counter;
+    for (const std::uint64_t old : accepted) {
+      CHECK(guard.accept(window, old).code == StatusCode::ReplayRejected);
+    }
+    std::size_t lost_this_boot = 0;
+    const std::uint64_t frames = 1 + next_random(state) % 300;
+    for (std::uint64_t frame = 0; frame < frames; ++frame) {
+      if (!sent.empty() && next_random(state) % 4 == 0) {
+        // Straggler or replay of something already sent.
+        const std::uint64_t pick = sent[next_random(state) % sent.size()];
+        const auto status = guard.accept(window, pick);
+        if (status.ok()) CHECK(accepted.insert(pick).second);
+        continue;
+      }
+      const std::uint64_t fresh = sender;
+      sender += 1 + (next_random(state) % 5 == 0 ? next_random(state) % 90 : 0);
+      sent.push_back(fresh);
+      const auto status = guard.accept(window, fresh);
+      if (had_ceiling && fresh <= ceiling_at_open) {
+        CHECK(status.code == StatusCode::ReplayRejected);
+        ++lost_this_boot;
+      } else {
+        CHECK_OK(status);
+      }
+      if (status.ok()) CHECK(accepted.insert(fresh).second);
+    }
+    CHECK(lost_this_boot <= kReplayReservationAhead);
+    lost_fresh += lost_this_boot;
+    if (boot % 3 == 0) {
+      (void)guard.close_context(window);  // clean shutdown tightens
+    }
+  }
+  CHECK(lost_fresh <= kBoots * kReplayReservationAhead);
+  CHECK(!accepted.empty());
+  // Commit budget: one per reservation step of counter space advanced, plus
+  // at most a re-reservation and a tighten per boot.
+  CHECK(store.window_commits <=
+        sender / (kReplayReservationAhead + 1) + 2 * kBoots + 1);
+}
+
+void test_replay_close_context_tightens_ceiling() {
+  FlakyReplayStore store;
+  ReplayGuard guard(store);
+  ReplayGuard::Window window{};
+  CHECK_OK(guard.open_context(kCtx, window));
+  for (std::uint64_t counter = 0; counter < 10; ++counter) {
+    CHECK_OK(guard.accept(window, counter));
+  }
+  CHECK(store.window_commits == 1);
+  // Eviction / clean shutdown: lower the ceiling to the live maximum so a
+  // reopen loses no fresh counter.
+  CHECK_OK(guard.close_context(window));
+  CHECK(!window.open);
+  CHECK(store.window_commits == 2);
+  CHECK(store.windows.begin()->second.accepted_ceiling == 9);
+  ReplayGuard::Window reopened{};
+  CHECK_OK(guard.open_context(kCtx, reopened));
+  CHECK(guard.accept(reopened, 9).code == StatusCode::ReplayRejected);
+  CHECK(guard.accept(reopened, 3).code == StatusCode::ReplayRejected);
+  CHECK_OK(guard.accept(reopened, 10));  // the very next fresh counter
+  CHECK(store.window_commits == 3);
+  // Nothing outstanding (maximum == ceiling right after a reopen): no write.
+  ReplayGuard restarted(store);
+  ReplayGuard::Window idle{};
+  CHECK_OK(restarted.open_context(kCtx, idle));
+  CHECK_OK(restarted.close_context(idle));
+  CHECK(store.window_commits == 3);
+
+  // A stale-epoch window never tightens over the re-keyed record.
+  FlakyReplayStore rekey_store;
+  ReplayGuard rekey(rekey_store);
+  ReplayGuard::Window epoch3{};
+  CHECK_OK(rekey.open_context(kCtx, epoch3));
+  CHECK_OK(rekey.accept(epoch3, 100));
+  SecurityContext newer = kCtx;
+  newer.epoch = 4;
+  ReplayGuard::Window epoch4{};
+  CHECK_OK(rekey.open_context(newer, epoch4));
+  CHECK_OK(rekey.accept(epoch4, 0));
+  const ReplayWindowRecord live = rekey_store.windows.begin()->second;
+  CHECK(rekey.close_context(epoch3).code == StatusCode::ReplayRejected);
+  CHECK(std::memcmp(&live, &rekey_store.windows.begin()->second,
+                    sizeof(live)) == 0);
+}
+
+void test_replay_duplicate_window_cannot_lower_ceiling() {
+  // Callers keep one Window per context, but a second one must never be
+  // able to overwrite (and so lower) a ceiling it did not write: that would
+  // re-admit the other window's counters after a restart.
+  FlakyReplayStore store;
+  ReplayGuard guard(store);
+  ReplayGuard::Window first{};
+  CHECK_OK(guard.open_context(kCtx, first));
+  ReplayGuard::Window twin = first;  // duplicated fresh state
+  for (std::uint64_t counter = 0; counter <= 10; ++counter) {
+    CHECK_OK(guard.accept(first, counter));
+  }
+  // The fresh twin would re-key the slot over first's record: refused.
+  CHECK(guard.accept(twin, 11).code == StatusCode::ReplayRejected);
+
+  ReplayGuard::Window late{};
+  CHECK_OK(guard.open_context(kCtx, late));  // starts at first's ceiling
+  const std::uint64_t above = 10 + kReplayReservationAhead + 1;
+  CHECK_OK(guard.accept(late, above));  // raises the ceiling past `above`
+  // `first` still believes its (older) ceiling is current. Tightening to
+  // its live maximum 10 would re-admit `above` after a restart.
+  CHECK(guard.close_context(first).code == StatusCode::ReplayRejected);
+  CHECK(store.windows.begin()->second.accepted_ceiling >= above);
+  ReplayGuard restarted(store);
+  ReplayGuard::Window window{};
+  CHECK_OK(restarted.open_context(kCtx, window));
+  CHECK(restarted.accept(window, above).code == StatusCode::ReplayRejected);
+}
+
+void test_replay_legacy_window_record_read_conservatively() {
+  // A pre-reservation record (layout 0) stored the maximum accepted counter
+  // where the ceiling lives now. Reading it as a ceiling rejects a superset
+  // of what it used to reject; an unknown layout is corruption.
+  FlakyReplayStore store;
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window window{};
+    CHECK_OK(guard.open_context(kCtx, window));
+    CHECK_OK(guard.accept(window, 1));
+  }
+  ReplayWindowRecord& record = store.windows.begin()->second;
+  record.layout = 0;
+  record.accepted_ceiling = 40;  // legacy maximum_counter
+  record.legacy_bitmap = 0x5;
+  record.crc = crc32_iso_hdlc(
+      ByteView{reinterpret_cast<const std::uint8_t*>(&record),
+               offsetof(ReplayWindowRecord, crc)});
+  {
+    ReplayGuard guard(store);
+    ReplayGuard::Window window{};
+    CHECK_OK(guard.open_context(kCtx, window));
+    CHECK(guard.accept(window, 40).code == StatusCode::ReplayRejected);
+    CHECK(guard.accept(window, 39).code == StatusCode::ReplayRejected);
+    CHECK_OK(guard.accept(window, 41));
+  }
+  CHECK(store.windows.begin()->second.layout == kReplayRecordLayout);
+  ReplayWindowRecord& rewritten = store.windows.begin()->second;
+  rewritten.layout = 7;
+  rewritten.crc = crc32_iso_hdlc(
+      ByteView{reinterpret_cast<const std::uint8_t*>(&rewritten),
+               offsetof(ReplayWindowRecord, crc)});
+  ReplayGuard guard(store);
+  ReplayGuard::Window window{};
+  CHECK(guard.open_context(kCtx, window).code == StatusCode::IntegrityError);
+}
+
+// --- Flash wear: evicted TX leases resume their block (issue #57) ---------
+
+void test_counter_lease_resume_skips_block_commit() {
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  CounterLeaseCheckpoint parked{};
+  {
+    CounterLease lease(store, 7, 99, 1, 0, 8);
+    CHECK_OK(lease.initialize());
+    for (std::uint64_t expect = 0; expect < 3; ++expect) {
+      CHECK_OK(lease.next(value));
+      CHECK(value == expect);
+    }
+    parked = lease.checkpoint();  // cache eviction: cut, then drop
+  }
+  CHECK(parked.cursor == 3 && parked.end == 8);
+  CHECK(store.commits == 1);
+  CounterLease resumed(store, 7, 99, 1, 0, 8);
+  CHECK_OK(resumed.resume(parked));
+  for (std::uint64_t expect = 3; expect < 8; ++expect) {
+    CHECK_OK(resumed.next(value));
+    CHECK(value == expect);
+  }
+  CHECK(store.commits == 1);  // the parked remainder cost no flash write
+  CHECK_OK(resumed.next(value));
+  CHECK(value == 8);
+  CHECK(store.commits == 2);
+}
+
+void test_counter_lease_resume_refuses_stale_checkpoint() {
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  CounterLease lease(store, 7, 99, 1, 0, 4);
+  CHECK_OK(lease.initialize());
+  CHECK_OK(lease.next(value));  // reserves [0,4)
+  const CounterLeaseCheckpoint stale = lease.checkpoint();
+  // A newer reservation was committed after the cut (by this or another
+  // lease): the block may have been issued, so the checkpoint is void.
+  CounterLease other(store, 7, 99, 1, 0, 4);
+  CHECK_OK(other.initialize());
+  CHECK_OK(other.next(value));
+  CHECK(value == 4);
+  CounterLease resumed(store, 7, 99, 1, 0, 4);
+  CHECK_OK(resumed.resume(stale));
+  CHECK_OK(resumed.next(value));
+  CHECK(value == 8);  // fresh block past the persisted water mark
+
+  // A checkpoint cut from another lease identity is ignored even when the
+  // records happen to carry the same high-water and generation.
+  MemoryCounterStore twin_store;
+  CounterLease left(twin_store, 1, 99, 1, 0, 4);
+  CounterLease right(twin_store, 2, 99, 1, 0, 4);
+  CHECK_OK(left.initialize());
+  CHECK_OK(right.initialize());
+  CHECK_OK(left.next(value));
+  CHECK_OK(right.next(value));
+  const CounterLeaseCheckpoint foreign = left.checkpoint();
+  CounterLease wrong(twin_store, 2, 99, 1, 0, 4);
+  CHECK_OK(wrong.resume(foreign));
+  CHECK_OK(wrong.next(value));
+  CHECK(value == 4);
+  // Nor is one for another epoch or direction of the same slot.
+  CounterLeaseCheckpoint other_direction = right.checkpoint();
+  other_direction.direction = 1;
+  CounterLease direction_lease(twin_store, 2, 99, 1, 0, 4);
+  CHECK_OK(direction_lease.resume(other_direction));
+  CHECK_OK(direction_lease.next(value));
+  CHECK(value == 8);
+}
+
+void test_counter_checkpoint_cache_single_use_and_bounded() {
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  std::vector<CounterLeaseCheckpoint> checkpoints;
+  for (std::uint32_t slot = 1; slot <= 3; ++slot) {
+    CounterLease lease(store, slot, 99, 1, 0, 4);
+    CHECK_OK(lease.initialize());
+    CHECK_OK(lease.next(value));
+    checkpoints.push_back(lease.checkpoint());
+  }
+  const CounterLeaseCheckpoint probe1 = checkpoints[0];
+  const CounterLeaseCheckpoint probe3 = checkpoints[2];
+  CounterCheckpointCache<2> cache;
+  CounterLeaseCheckpoint out{};
+  cache.park(checkpoints[0]);
+  CHECK(cache.size() == 1);
+  CHECK(cache.take(probe1, out));
+  CHECK(out.slot == 1 && out.cursor == 1);
+  CHECK(!cache.take(probe1, out));  // single use
+  // Nothing left to resume: not parked.
+  CounterLeaseCheckpoint drained = checkpoints[0];
+  drained.cursor = drained.end;
+  cache.park(drained);
+  CHECK(cache.size() == 0);
+  // Bounded: the oldest checkpoint is dropped (forfeit, never reused).
+  cache.park(checkpoints[0]);
+  cache.park(checkpoints[1]);
+  cache.park(checkpoints[2]);
+  CHECK(cache.size() == 2);
+  CHECK(!cache.take(probe1, out));
+  CHECK(cache.take(probe3, out));
+  // Re-parking one identity replaces its entry.
+  cache.park(checkpoints[1]);
+  CHECK(cache.size() == 1);
+  cache.clear();
+  CHECK(cache.size() == 0);
+}
+
+// Models DevelopmentPskSecurityProvider's TX pool: kPool live leases (LRU),
+// evictions parked in a kParked checkpoint cache, random reboots. Returns
+// the number of counter commits; `duplicate` flags any reissued counter.
+std::size_t run_lease_churn(const bool park, bool& duplicate) {
+  constexpr std::size_t kPool = 2;
+  constexpr std::uint32_t kContexts = 5;
+  MemoryCounterStore store;
+  CounterCheckpointCache<3> cache;
+  std::array<std::optional<CounterLease>, kPool> pool{};
+  std::array<std::uint32_t, kPool> owner{};
+  std::array<std::uint64_t, kPool> stamp{};
+  std::set<std::pair<std::uint32_t, std::uint64_t>> issued;
+  std::uint64_t state = 0xC0FFEEULL;
+  std::uint64_t clock = 0;
+  for (int step = 0; step < 6000; ++step) {
+    if (next_random(state) % 700 == 0) {  // power cut: RAM gone
+      for (auto& lease : pool) lease.reset();
+      cache.clear();
+    }
+    const std::uint32_t slot =
+        1 + static_cast<std::uint32_t>(next_random(state) % kContexts);
+    std::size_t index = kPool;
+    for (std::size_t i = 0; i < kPool; ++i) {
+      if (pool[i].has_value() && owner[i] == slot) index = i;
+    }
+    if (index == kPool) {
+      index = 0;
+      for (std::size_t i = 0; i < kPool; ++i) {
+        if (!pool[i].has_value()) {
+          index = i;
+          break;
+        }
+        if (stamp[i] < stamp[index]) index = i;
+      }
+      // Same order as the provider: claim this context's checkpoint before
+      // parking the evicted lease, so a full cache cannot drop it first.
+      CounterLeaseCheckpoint identity{};
+      identity.slot = slot;
+      identity.context_id = 99;
+      identity.key_epoch = 1;
+      CounterLeaseCheckpoint parked{};
+      const bool resume = park && cache.take(identity, parked);
+      if (pool[index].has_value()) {
+        if (park) cache.park(pool[index]->checkpoint());
+        pool[index].reset();
+      }
+      pool[index].emplace(store, slot, 99, 1, 0, 16);
+      owner[index] = slot;
+      CHECK_OK(resume ? pool[index]->resume(parked)
+                      : pool[index]->initialize());
+    }
+    stamp[index] = ++clock;
+    std::uint64_t value = 0;
+    CHECK_OK(pool[index]->next(value));
+    if (!issued.insert({slot, value}).second) duplicate = true;
+  }
+  return store.commits;
+}
+
+void test_counter_lease_eviction_churn_never_reissues() {
+  bool duplicate = false;
+  const std::size_t without_parking = run_lease_churn(false, duplicate);
+  CHECK(!duplicate);
+  const std::size_t with_parking = run_lease_churn(true, duplicate);
+  CHECK(!duplicate);
+  // Five contexts round-robin through a two-lease pool: without parking
+  // nearly every eviction commits a fresh block; with the checkpoint cache
+  // only block exhaustion and reboots do (about 400 vs 3600 here).
+  CHECK(with_parking * 5 < without_parking);
+}
+
 }  // namespace
 
 int main() {
@@ -802,6 +1265,16 @@ int main() {
   test_counter_lease_stale_context_cannot_rewind_newer_epoch();
   test_replay_stale_record_at_floor_epoch_is_state_lost();
   test_counter_record_rewound_rejected();
+  test_replay_commits_bounded_per_reservation();
+  test_replay_out_of_order_within_window_before_crash();
+  test_replay_crash_never_reaccepts();
+  test_replay_close_context_tightens_ceiling();
+  test_replay_duplicate_window_cannot_lower_ceiling();
+  test_replay_legacy_window_record_read_conservatively();
+  test_counter_lease_resume_skips_block_commit();
+  test_counter_lease_resume_refuses_stale_checkpoint();
+  test_counter_checkpoint_cache_single_use_and_bounded();
+  test_counter_lease_eviction_churn_never_reissues();
   test_security_profile_marker();
   test_plaintext_data_rejected();
   test_secure_clear();

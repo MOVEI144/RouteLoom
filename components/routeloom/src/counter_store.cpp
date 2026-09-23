@@ -59,6 +59,35 @@ Status CounterLease::initialize() noexcept {
   return Status::success();
 }
 
+Status CounterLease::resume(const CounterLeaseCheckpoint& checkpoint) noexcept {
+  const auto status = initialize();
+  if (!status) return status;
+  // initialize() leaves cursor_ == end_ == the persisted high-water and
+  // generation_ == the persisted generation for a same-epoch record (end_
+  // stays 0 otherwise). A match proves the checkpoint's block is still the
+  // newest reservation: any other lease would have committed a new block,
+  // and so a new generation, before issuing a single counter from it.
+  if (same_lease_identity(this->checkpoint(), checkpoint) &&
+      checkpoint.cursor < checkpoint.end &&
+      end_ != 0 && end_ == checkpoint.end &&
+      generation_ == checkpoint.generation) {
+    cursor_ = checkpoint.cursor;
+  }
+  return Status::success();
+}
+
+CounterLeaseCheckpoint CounterLease::checkpoint() const noexcept {
+  CounterLeaseCheckpoint result{};
+  result.slot = slot_;
+  result.context_id = context_id_;
+  result.key_epoch = key_epoch_;
+  result.direction = direction_;
+  result.cursor = cursor_;
+  result.end = end_;
+  result.generation = generation_;
+  return result;
+}
+
 Status CounterLease::reserve_block() noexcept {
   if (!initialized_) {
     return Status::error(StatusCode::InvalidState, "counter lease is not initialized");

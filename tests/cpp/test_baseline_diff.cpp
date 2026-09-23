@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #include "routeloom/congestion.hpp"
@@ -69,7 +70,7 @@ struct Pending {
   NodeId sender;
   MessageId id;
   MonotonicMs sent_ms;
-  bool settled;
+  DeliveryState outcome;  // first terminal verdict; Empty while in flight
 };
 
 struct RunResult {
@@ -78,7 +79,8 @@ struct RunResult {
   std::size_t refused = 0;    // send() rejected at admission (own caps full)
   std::size_t delivered = 0;
   std::size_t failed = 0;     // Failed + Expired
-  std::size_t pending = 0;    // still in flight at the horizon
+  std::size_t pending = 0;    // no terminal verdict by the horizon
+  std::size_t app_delivered = 0;  // on_message count at the destination
   std::size_t data_tx = 0;    // DATA frame transmissions on the air
   std::size_t busy_tx = 0;    // BUSY frames emitted
   std::size_t accept_tx = 0;  // HOP_ACCEPT frames
@@ -88,6 +90,7 @@ struct RunResult {
   std::uint64_t relay_busy_failed = 0;
   std::uint64_t senders_busy_received = 0;
   std::uint64_t senders_readmitted = 0;
+  std::uint64_t history_evicted = 0;  // sender delivery-table recycling
 };
 
 bool terminal(DeliveryState state) {
@@ -105,12 +108,22 @@ RunResult run_scenario(const bool autonomy) {
   MeshNode* relay = world.add(kRelay);
   (void)world.add(kDestination);
   world.start_all();
-  for (NodeId sender : kSenders) {
-    world.link(sender, kRelay, 1, 1);
-    if (autonomy) relay->set_peer_busy_capable(sender, true);
-  }
+  for (NodeId sender : kSenders) world.link(sender, kRelay, 1, 1);
   world.link(kRelay, kDestination, 1, 1);
-  world.run(2500);  // converge: identical prefix in both runs
+  // The autonomy relay holds a configured BUSY grant for every sender. A
+  // grant is bounded (kCapabilitiesValidityMs) and refreshed by its owner —
+  // re-applied every tick here, so the lane stays enabled for the whole run
+  // instead of silently reverting to the baseline's legacy drop once the
+  // first grant lapses mid-scenario.
+  const auto refresh_grants = [&]() {
+    if (!autonomy) return;
+    for (NodeId sender : kSenders) relay->set_peer_busy_capable(sender, true);
+  };
+  const auto run = [&](MonotonicMs ms) {
+    refresh_grants();
+    world.run(ms);
+  };
+  run(2500);  // converge: identical prefix in both runs
   CHECK(world.at(kSenders[0])->routes().best(kDestination).valid);
 
   // Identical offered load: every sender offers kMessagesPerSender messages
@@ -120,17 +133,31 @@ RunResult run_scenario(const bool autonomy) {
   std::size_t offered = 0, admitted = 0, refused = 0;
   std::uint64_t latency_ms = 0;
   std::size_t latency_n = 0;
-  // Completion detector: DeliveryResult carries no timestamp, so each step
-  // re-reads delivery state and stamps the first terminal observation.
+  // Outcome detector. The sender's 8-slot delivery table recycles terminal
+  // history for new sends (DELIVERY_HISTORY_EVICTED), so re-reading
+  // delivery() at the horizon reports Empty for results that were delivered
+  // and then evicted — the source of the old "delivered 25 vs 30" wobble.
+  // The verdict is therefore taken from the on_delivery event stream (every
+  // state change, in order); the first terminal event is final (a verdict
+  // is never demoted or promoted — test_properties).
+  std::map<NodeId, std::size_t> cursor;
   const auto settle = [&]() {
-    for (auto& p : pending) {
-      if (p.settled) continue;
-      const DeliveryResult d = world.at(p.sender)->delivery(p.id);
-      if (!terminal(d.state)) continue;
-      p.settled = true;
-      if (d.state == DeliveryState::Delivered) {
-        latency_ms += world.now - p.sent_ms;
-        ++latency_n;
+    for (NodeId sender : kSenders) {
+      const auto& events = world.obs(sender)->delivery_events;
+      for (std::size_t& i = cursor[sender]; i < events.size(); ++i) {
+        const DeliveryResult& event = events[i];
+        if (!terminal(event.state)) continue;
+        for (auto& p : pending) {
+          if (p.sender != sender || !(p.id == event.id) ||
+              p.outcome != DeliveryState::Empty) {
+            continue;
+          }
+          p.outcome = event.state;
+          if (event.state == DeliveryState::Delivered) {
+            latency_ms += world.now - p.sent_ms;
+            ++latency_n;
+          }
+        }
       }
     }
   };
@@ -144,19 +171,22 @@ RunResult run_scenario(const bool autonomy) {
       ++offered;
       if (status.ok()) {
         ++admitted;
-        pending.push_back(Pending{sender, id, world.now, false});
+        pending.push_back(Pending{sender, id, world.now, DeliveryState::Empty});
       } else {
         ++refused;
       }
+      // A refused send() may still have emitted events (history eviction
+      // happens inside send): fold them in before the next send.
+      settle();
     }
-    world.run(4);
+    run(4);
     settle();
   }
   // Drain horizon: identical in both runs, long enough for every retry,
   // deferral and readmission budget to exhaust.
   const MonotonicMs drain_end = world.now + 12000;
   while (world.now < drain_end) {
-    world.run(10);
+    run(10);
     settle();
   }
 
@@ -167,12 +197,12 @@ RunResult run_scenario(const bool autonomy) {
   r.latency_ms = latency_ms;
   r.latency_n = latency_n;
   for (const auto& p : pending) {
-    const DeliveryResult d = world.at(p.sender)->delivery(p.id);
-    if (d.state == DeliveryState::Delivered) ++r.delivered;
-    if (d.state == DeliveryState::Failed || d.state == DeliveryState::Expired)
+    if (p.outcome == DeliveryState::Delivered) ++r.delivered;
+    if (p.outcome == DeliveryState::Failed || p.outcome == DeliveryState::Expired)
       ++r.failed;
-    if (!terminal(d.state)) ++r.pending;
+    if (p.outcome == DeliveryState::Empty) ++r.pending;
   }
+  r.app_delivered = world.obs(kDestination)->messages.size();
   for (const auto& sight : world.net.sights) {
     if (sight.type == FrameType::Data) ++r.data_tx;
     if (sight.type == FrameType::Busy) ++r.busy_tx;
@@ -185,6 +215,7 @@ RunResult run_scenario(const bool autonomy) {
     const CongestionStats s = world.at(sender)->congestion_stats();
     r.senders_busy_received += s.busy_received;
     r.senders_readmitted += s.busy_readmitted;
+    r.history_evicted += world.at(sender)->dedup_stats().delivery_terminal_evicted;
   }
   return r;
 }
@@ -192,11 +223,12 @@ RunResult run_scenario(const bool autonomy) {
 void report(const char* name, const RunResult& r) {
   std::printf(
       "[%s] offered=%zu admitted=%zu refused=%zu delivered=%zu failed=%zu "
-      "pending=%zu | data_tx=%zu busy_tx=%zu accept_tx=%zu | relay busy "
+      "pending=%zu app=%zu hist_evicted=%llu | data_tx=%zu busy_tx=%zu accept_tx=%zu | relay busy "
       "sent=%llu failed=%llu | senders busy_rx=%llu readmit=%llu | "
       "mean_latency=%llums (n=%zu)\n",
       name, r.offered, r.admitted, r.refused, r.delivered, r.failed,
-      r.pending, r.data_tx, r.busy_tx, r.accept_tx,
+      r.pending, r.app_delivered,
+      static_cast<unsigned long long>(r.history_evicted), r.data_tx, r.busy_tx, r.accept_tx,
       static_cast<unsigned long long>(r.relay_busy_sent),
       static_cast<unsigned long long>(r.relay_busy_failed),
       static_cast<unsigned long long>(r.senders_busy_received),
@@ -229,6 +261,12 @@ int main() {
   // baseline under the same load. Deferral buys time; it never evicts an
   // admitted job.
   CHECK(autonomy.delivered >= baseline.delivered);
+
+  // The verdicts are the application's truth: every Delivered verdict is
+  // exactly one on_message at the destination, in both runs (no duplicate
+  // from BUSY readmission, no delivery the origin was not told about).
+  CHECK(baseline.app_delivered == baseline.delivered);
+  CHECK(autonomy.app_delivered == autonomy.delivered);
 
   // Every offered message resolves to a declared outcome in both runs —
   // the scheduler never silently loses one.

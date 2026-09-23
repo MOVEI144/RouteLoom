@@ -116,8 +116,15 @@ Status DevelopmentPskSecurityProvider::initialize(
 void DevelopmentPskSecurityProvider::close() noexcept {
   // Cached contexts hold leases bound to the old counter store and replay
   // windows tied to the old store handle: they must not survive a close or a
-  // later re-initialize would reuse stale state.
+  // later re-initialize would reuse stale state. Live replay windows first
+  // lower their persisted ceiling to the live maximum (best effort; a
+  // failure keeps the higher, still safe ceiling), so a clean restart
+  // rejects only out-of-order stragglers rather than a reservation step.
+  rx_contexts_.for_each([&](RxContext& value) {
+    (void)replay_guard_.close_context(value.window);
+  });
   tx_contexts_.clear();
+  parked_leases_.clear();
   rx_contexts_.clear();
   replay_store_.close();
   ready_ = false;
@@ -177,10 +184,32 @@ DevelopmentPskSecurityProvider::tx_context(
   if (counter_store_ == nullptr) {
     return nullptr;
   }
+  // The lease occupies one slot per peer pair (the epoch-free floor slot),
+  // so every boot-advancing epoch rewrites the same record rather than
+  // leaking one persisted counter record per boot. Epoch identity lives in
+  // CounterRecord::key_epoch; initialize() treats an older persisted epoch
+  // as superseded and a newer one as a conflict.
+  const std::uint64_t peer_fingerprint = replay_peer_fingerprint(context);
+  CounterLeaseCheckpoint identity{};
+  identity.slot = ReplayGuard::floor_slot(context);
+  identity.context_id =
+      static_cast<std::uint32_t>(peer_fingerprint ^ (peer_fingerprint >> 32U));
+  identity.key_epoch = context.epoch;
+  identity.direction = static_cast<std::uint8_t>(
+      (context.scope == SecurityScope::EndToEnd ? 2U : 0U) |
+      (context.sender < context.receiver ? 0U : 1U));
+  // Claim this context's parked block (if any) BEFORE the eviction below
+  // parks another lease: a full cache would otherwise drop the very
+  // checkpoint about to be resumed. take() removes it, so a parked block
+  // resumes at most once; resume() re-validates it against the store.
+  CounterLeaseCheckpoint parked{};
+  const bool resume_parked = parked_leases_.take(identity, parked);
   auto* created = tx_contexts_.allocate();
   if (created == nullptr) {
-    // Bounded pool: evict the least-recently-used context. A dropped lease
-    // forfeits only the uncommitted remainder of its reserved block, which is
+    // Bounded pool: evict the least-recently-used context. Its unissued
+    // block remainder is parked as a RAM checkpoint so re-creating the
+    // context resumes the block instead of committing a new one (#57). A
+    // checkpoint dropped from the full cache forfeits only that remainder,
     // the designed crash-recovery behavior — counters never rewind.
     TxContext* oldest = nullptr;
     tx_contexts_.for_each([&](TxContext& value) {
@@ -188,7 +217,13 @@ DevelopmentPskSecurityProvider::tx_context(
         oldest = &value;
       }
     });
-    if (oldest == nullptr || !tx_contexts_.release(oldest)) {
+    if (oldest == nullptr) {
+      return nullptr;
+    }
+    if (oldest->lease.has_value()) {
+      parked_leases_.park(oldest->lease->checkpoint());
+    }
+    if (!tx_contexts_.release(oldest)) {
       return nullptr;
     }
     created = tx_contexts_.allocate();
@@ -199,20 +234,11 @@ DevelopmentPskSecurityProvider::tx_context(
   created->use_stamp = ++context_stamp_;
   created->context = context;
   created->fingerprint = replay_context_fingerprint(context);
-  // The lease occupies one slot per peer pair (the epoch-free floor slot),
-  // so every boot-advancing epoch rewrites the same record rather than
-  // leaking one persisted counter record per boot. Epoch identity lives in
-  // CounterRecord::key_epoch; initialize() treats an older persisted epoch
-  // as superseded and a newer one as a conflict.
-  const std::uint64_t peer_fingerprint = replay_peer_fingerprint(context);
-  const std::uint8_t direction = static_cast<std::uint8_t>(
-      (context.scope == SecurityScope::EndToEnd ? 2U : 0U) |
-      (context.sender < context.receiver ? 0U : 1U));
-  created->lease.emplace(
-      *counter_store_, ReplayGuard::floor_slot(context),
-      static_cast<std::uint32_t>(peer_fingerprint ^ (peer_fingerprint >> 32U)),
-      context.epoch, direction, 256);
-  if (!created->lease->initialize()) {
+  created->lease.emplace(*counter_store_, identity.slot, identity.context_id,
+                         identity.key_epoch, identity.direction, 256);
+  const Status lease_status = resume_parked ? created->lease->resume(parked)
+                                            : created->lease->initialize();
+  if (!lease_status) {
     tx_contexts_.release(created);
     return nullptr;
   }
@@ -249,14 +275,20 @@ Status DevelopmentPskSecurityProvider::rx_context(
   }
   auto* created = rx_contexts_.allocate();
   if (created == nullptr) {
-    // Bounded pool: evict the least-recently-used cached window. Windows are
-    // persisted on accept, so eviction only forces a reload from the store.
+    // Bounded pool: evict the least-recently-used cached window. The live
+    // window is RAM-only above a persisted ceiling; close_context lowers
+    // that ceiling to the live maximum (<= 1 commit) so the reopen rejects
+    // only out-of-order stragglers, not a whole reservation step of fresh
+    // counters. A failed tighten keeps the higher ceiling: still replay-safe.
     RxContext* oldest = nullptr;
     rx_contexts_.for_each([&](RxContext& value) {
       if (oldest == nullptr || value.use_stamp < oldest->use_stamp) {
         oldest = &value;
       }
     });
+    if (oldest != nullptr) {
+      (void)replay_guard_.close_context(oldest->window);
+    }
     if (oldest == nullptr || !rx_contexts_.release(oldest)) {
       return Status::error(StatusCode::NoCapacity,
                            "security rx context table full");

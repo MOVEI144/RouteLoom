@@ -13,6 +13,8 @@
 
 commit前に落ちれば未予約区間では一度も送っていない。commit後・利用前ならその区間を捨てるだけ。利用中に落ちても次はend以降。失敗時にcursorを0へ戻さない。counter枯渇は新contextへ正規再確立する。
 
+有限のcontext cacheから追い出されたleaseは、未使用区間[cursor,end)をRAM上のcheckpointとして退避してよい。同じcontextを再作成したとき、保存recordのidentity・high-water・record_generationがcheckpoint時点から不変である場合に限りその区間から再開し、新区間をcommitしない。他のleaseは発行前に必ず新区間をcommitしてgenerationを進めるので、不変であれば区間は未発行と証明できる。checkpointは単回使用で再起動を越えない（再起動後は規則4どおり）。checkpointを捨てることは未使用分を捨てるだけで安全側。開発PSK Providerの既定は稼働lease32件＋checkpoint64件（issue #57）。
+
 Message ID、round、crypto counterは別。保存済み同一ciphertextをそのまま再送することと、新AAD／平文で同nonceを再利用することを分ける。宛先が変わったend保護は新context／新counter条件を満たす。
 
 ## 2. 受信replayと破損
@@ -28,6 +30,14 @@ Message ID、round、crypto counterは別。保存済み同一ciphertextをそ�
 | spool/dedup | 該当record隔離、結果不明通知。別IDの新イベントにしない |
 | 単なる候補cache | 廃棄して再探索。ただし鍵・所属まで消さない |
 
+rx replayの永続recordは64bit windowそのものではなく、受理済み最大値より前方に予約した上限（accepted ceiling）とする。windowはRAMに置き、受理した最大値が保存済みceilingを越えたときだけ`ceiling＝最大値＋K`（既定K＝64）を耐電断commitし、commit成功後にだけ受理を報告する。したがって受理済みcounterは常に保存ceiling以下であり、再起動（RAM喪失）後はceiling以下を全て既受理として拒否し、ceilingを越えるcounterから受理を再開する。
+
+- commitは同一contextのcounterがK＋1前進するごとに1回。window内の順序入替え（最大値以下）はcommitしない。
+- 電源断後に失うのは、ceilingまでの最大K個の新counterと、RAM bitmapにあった未着の順序入替え分だけ。送信側は新counterで再送する。
+- cache追い出し・Provider closeではceilingをRAMの最大値まで引き下げ（最大1 commit）、再open時の損失を順序入替え分に限る。引下げ失敗は高いceilingが残るだけで安全側。
+- 引上げ・引下げは、そのwindowが直前に読込／commitしたrecordと保存recordが一致する場合だけ書く（CAS）。同一contextの別windowが先にcommitしていれば拒否し、他windowが受理したcounterを再受理可能にしない。
+- commit失敗は受理を巻き戻す（RAM windowも動かさない）。旧形式（layout 0、最大値を同じ位置に保存）のrecordはceilingとして読む。旧windowより広く拒否するだけで安全側。その他のlayoutは破損。
+
 完全な古いsnapshotの悪意ある復元はCRCだけでは検出できない。この小モデルのpower-cut試験はその攻撃へのantirollback証明ではない。
 
 ## 3. 期限
@@ -40,7 +50,20 @@ RUNNING_TIME_ONLYを明示的に選ぶ場合は停電中を数えない別契約
 
 ## 4. dedup・receiptと副作用
 
-max lifetime30000ms＋late result30000msを通常retentionの最低設計値60000msとする。retentionは初回受理からで、duplicateで無限延長しない。接続context、入場rate、容量も制限する。期限前のprotected entryはLRUで追い出さない。時間不明の記録はそのまま容量を占め、新規admissionを止め得る。
+max lifetime30000ms＋late result30000msを通常retentionの設計値60000msとする（`kTerminalRetentionMs`。APPLIED結果保持、gateway receipt保持も同じ値から導出し、60000のliteralを散在させない）。retentionは初回受理からで、duplicateで無限延長しない。接続context、入場rate、容量も制限する。期限前のprotected entryはLRUで追い出さない。時間不明の記録はそのまま容量を占め、新規admissionを止め得る。
+
+dedup記録の保持は役割で分ける（issue #39）。期限はadmission時に `min(初回受理＋60000ms, horizon＋slack)` で決め、horizonは受信frame自身の残forwarding deadline（hop滞留を差し引き、30000msで頭打ち）とする。
+
+| 役割 | 責務 | slack | 最長 |
+|---|---|---|---|
+| 終端（自ノード宛DATAのpin） | アプリへのexactly-once。originの最終round・sleep復帰再送は全てorigin期限以前に届くので、期限後もlate result分保持 | 30000ms | 60000ms（max lifetimeのmessage） |
+| 非終端（中継の転送DATA・END_RECEIPT、originが消費したreceipt、component宛routed） | 同roundの二重forward抑止・再ACKと下流TransitFailureの中継。frameが有効な間だけ（routedはcomponent側dedupが二段目） | 5000ms（報告予算3000ms＋drain余裕） | 35000ms |
+
+中継記録を60000ms固定にすると、Reliable 1件でDATA＋END_RECEIPTの2記録を消費するため64記録の中継上限は約0.5msg/sだった。frame期限基準（既定寿命5000msで約10秒）では1中継の定常占有は約 `2×r×(L＋5秒)`、終端pinは約 `r×min(L＋30秒, 60秒)`（r：通過message率、L：寿命）。中継記録を早く手放しても、後続nodeの記録と終端pinがアプリへの二重配送を止める（中継での余分な再forwardは有界・計数付き）。
+
+容量はbuild時のresource profile定数とする（`dedup_entries`：leaf-small 32、relay-c3 96、gateway-s3 256。既定はrelay）。動的確保はしない。終端pinはpoolの7/8まで（残り1/8は非終端用予備）で、判定はpin数による。poolが満杯でもpin数が上限未満なら、期限切れ→Resolved→Evidenceの順で非終端記録を回収してpinを受理する。前hopごとの非終端記録は3/8までで、上限到達時はその前hop自身の回収可能な記録から回収する（他の前hopの記録は追い出さない）。転送中（Live）と終端pinは追い出さず、回収先がなければBUSY／計数付きdropで拒否する。
+
+既定のWALL_ELAPSED_VALIDITYでは寿命は停止時間を含み最大30000msなので、送信側が60000msを超えてsleepした永続pendingは復帰時に必ずEXPIREDとなり、元IDで再送しない。受信側pinが満了した後に同じMessageが届くことはない。60000ms以内の復帰再送は受信側pin（origin期限＋30000ms）の内側に届き抑止される。RUNNING_TIME_ONLY（§3）はこの保証の外で、長時間停止後の再送は受信側pin満了後に届き得る。
 
 同じMessageで不変payload／宛先のhashが変わればCONFLICT。終端DELIVEREDは新roundでも再適用せずreceiptを再送。同roundのduplicateは二重forwardしないが、FAILED後の新roundは再forward可能。
 
@@ -69,6 +92,21 @@ epoch／route generationの起動回数予算（旧#29/#48）はWire v2で32bit�
 | 資源 | 現行の上限 | 主因 | 追跡 |
 |---|---|---|---|
 | NVS entry数 | ピアごとのcounter lease／replay floor／windowキーに削除経路がない。既定24KiB NVSで累計12〜38ピアに達すると新規通信とboot session書込が失敗し得る | 鍵とcounterの削除は再ハンドシェイク設計が前提 | #37 |
-| flash書込回数 | 認証済み受信frameごとにreplay windowをcommit（終端では最大2 commit）。TX counterは256枚ごと、context溢れ時はframeごと。既定NVSでは持続10 frame/sで約1ヶ月の概算 | fail-closedなreplay永続化 | #30、#57 |
-| remote config | 受理1件≈7〜8 commit。rate上限（1/min＋burst1）で連続運用すると摩耗寿命は概算1〜2年。人手運用なら問題にならない | ConfigJournalの2スロット耐電断commit | #57 |
+| flash書込回数 | 下の書込予算表のとおり。旧実装は認証済み受信frameごとにreplay windowをcommitし（終端では2 commit）、持続10 frame/sで既定NVSが約1ヶ月の概算だった。§2のceiling予約後はreplay側が約1/65となり、同条件で約5年の概算。同時に活動するcontextがcache容量を越える配備では、追い出し1回ごとに最大2 commitへ戻る | fail-closedなreplay永続化、有限context cache | #30、#57 |
+| remote config | 受理1件≈7〜8 commit。rate上限（1/min＋burst1）で連続運用すると摩耗寿命は概算1〜2年。人手運用なら問題にならない（運用規則は[遠隔設定 §10](remote-management.md)） | ConfigJournalの2スロット耐電断commit | #57 |
+
+flash書込予算（開発PSK Provider既定値。contextはscope・peer pair・epochの組、1 commitはNVS blob書込＋`nvs_commit`一回）。
+
+| 経路 | commit契機 | 目安 |
+|---|---|---|
+| RX replay ceiling | 受理最大値が保存ceilingを越えたとき（K＝`kReplayReservationAhead`＝64） | contextごとにcounter 65前進で1回。window内の順序入替えは0。終端nodeはlink＋endの2 contextで各1/65 |
+| RX epoch floor | peerのepochが進んだとき | peerの再起動1回につき1回 |
+| RX context追い出し | 同時に活動するRX contextが`kRxContextCapacity`＝64を越えたとき | 追い出し1回で引下げ1回＋再open後の予約1回 |
+| RX正常close | Provider close時 | 保持contextごとに最大1回 |
+| TX counter lease | 予約区間（256）を使い切ったとき | contextごとにcounter 256で1回 |
+| TX context追い出し | 稼働`kTxContextCapacity`＝32件＋checkpoint`kParkedLeaseCapacity`＝64件を越えて再作成したとき | checkpointが残っていれば0、溢れていれば再作成1回につき1回 |
+| 起動 | boot sessionの前進、新epochでの各TX context初回予約、相手側のfloor・ceiling | 起動1回につき1＋送信context数（相手側でpeerごと2）。Deep Sleep周期のnodeは起動回数で見積もる |
+| remote config | 受理1件 | 約7〜8回（rate上限1/min＋burst1） |
+
+概算：持続10 frame/sを受ける終端nodeは旧20 commit/sから約0.31 commit/s、中継nodeは旧約10 commit/sから約0.19 commit/s（RX link 1/65＋TX link 1/256）。数値は既定値からの計算で、実機のNVS page消費は未計測。
 

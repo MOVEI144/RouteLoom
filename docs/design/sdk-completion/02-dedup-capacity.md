@@ -420,3 +420,33 @@ the reserve working; relay-off mid-stream drain; evidence storm with
   §4.2 fields are frozen).
 - Whether `AwaitingHop` residency (8) needs a transit-specific sub-reserve;
   current per-peer window + retry path is judged sufficient — sim evidence.
+
+## 2.14 Issue #39 update — profile capacity, upstream recycling, pin-count reserve
+
+Implemented after the review of issue #39 (relay ceiling ≈0.5 msg/s and the
+>60 s sleep duplicate). The phase model, retention formula and eviction order
+above are unchanged; three bounds were corrected.
+
+| Change | Before | After | Why |
+|---|---|---|---|
+| Pool capacity | fixed 64 | compile-time profile constant `kDedupCapacity` = `ROUTELOOM_DEDUP_CAPACITY` ∈ {32 leaf, 96 relay (default), 256 gateway}; host CMake `ROUTELOOM_DEDUP_PROFILE`, ESP-IDF Kconfig *RouteLoom → Dedup capacity profile*; PUBLIC definition (changes `sizeof(MeshNode)`) | resource-profiles.json already budgets 32/96/256 × 152 B |
+| Class bounds | 8 / 24 / 16 | ratios of the reviewed 64-slot design: reserve `C/8`, per-upstream `3C/8`, evidence `C/4` (relay: 12 / 36 / 24) | scale with the pool |
+| Terminal reserve gate | refused when `pool size ≥ C − reserve` | refused when **pins** `≥ C − reserve` (§2.10 row "Terminal pins ≥ N"); a full pool with evictable records reclaims one via the §2.5 sweep | a pool crowded by Resolved transit records refused delivery to the node's own application ("collateral" refusal in #39) |
+| Per-upstream bound | refusal once the upstream holds 24 non-terminal records, Resolved included | at the bound the upstream recycles **its own** records (expired → earliest-expiry Resolved → oldest Evidence), counted as `evicted_*`; refusal only when all its records are Live | the bound counted finished exchanges, so one upstream carrying DATA + receipts was capped at 24 / (L + 5 s) records/s — the residual protocol-layer ceiling of #39 (0.69/s at L = 30 s) |
+| Retention literals | `60000` / `30000` repeated | `kTerminalRetentionMs = kMaxMessageLifetimeMs + kLateResultTtlMs` (types.hpp) feeds `kDedupHardCapMs`, `kAppliedResultHoldMs`, `kGatewayReceiptHoldMs`; `kTerminalSlackMs = kLateResultTtlMs`; horizon clamps a claimed deadline to `kMaxMessageLifetimeMs` | one derivation, spec §4 |
+
+Exactly-once is unaffected: Live and Terminal records are still never victims,
+the upstream recycling only ever releases records the global sweep could
+already release, and the terminal pin still outlives the origin's own expiry
+by 30 s. The sleep half of #39 needs no code: lifetime is wall-elapsed
+including sleep and capped at 30 s, so a durable pending woken after > 60 s
+resumes `EXPIRED` (test_power `test_long_sleep_pending_expires_no_duplicate`).
+`RUNNING_TIME_ONLY` stays outside that guarantee (crash-time-resources §3/§4).
+
+Relay-profile arithmetic (L = 5 s default lifetime): relay occupancy
+`2·r·(L + 5 s)` → 96 records sustain ≈4.8 msg/s through one relay, bounded
+per upstream by recycling rather than refusal; terminal pins
+`r·min(L + 30 s, 60 s)` → 84 pins ≈2.4 msg/s (L = 5 s) / 1.4 msg/s (L = 30 s)
+per destination; the gateway profile (224 pins) ≈6.4 / 3.7 msg/s.
+Regression: `test_line_throughput_two_sources` (3-node line, 2 × 1.5 msg/s ×
+120 s, zero refusals/evictions, relay peak residency 60/96).

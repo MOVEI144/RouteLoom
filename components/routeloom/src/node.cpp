@@ -641,8 +641,11 @@ MonotonicMs MeshNode::dedup_expiry_for(const DedupPhase phase,
   // horizon = now + (remaining_deadline - rx_age): the latest instant a
   // legitimate retry of this round can arrive (02 §2.2). The path-length
   // factor is already spent by the frame's own deadline arithmetic.
-  const std::uint32_t remaining =
-      deadline_remaining_ms > rx_age_ms_ ? deadline_remaining_ms - rx_age_ms_ : 0;
+  // A frame claiming more than the origin lifetime ceiling cannot come from
+  // a conformant origin (issue #55): retention is sized on the ceiling, so
+  // the claim buys no longer residency than a max-lifetime message.
+  const std::uint32_t claimed = std::min(deadline_remaining_ms, kMaxMessageLifetimeMs);
+  const std::uint32_t remaining = claimed > rx_age_ms_ ? claimed - rx_age_ms_ : 0;
   const MonotonicMs horizon = now_ms + remaining;
   const MonotonicMs slack =
       phase == DedupPhase::Terminal ? kTerminalSlackMs : kTransitSlackMs;
@@ -679,16 +682,71 @@ bool MeshNode::evict_dedup_for_admission(const MonotonicMs now_ms) noexcept {
     });
   }
   if (victim == nullptr) return false;  // all-Live/Terminal: honest overflow
-  const MessageId victim_id = victim->key.id;
-  const NodeId victim_peer = victim->upstream_peer;
-  const bool was_resolved = victim->phase == DedupPhase::Resolved;
-  dedup_.release(victim);
+  release_dedup_victim(*victim);
+  return true;
+}
+
+bool MeshNode::evict_dedup_for_upstream(const NodeId upstream,
+                                        const MonotonicMs now_ms) noexcept {
+  // Per-upstream bound (02 §2.5, #39): the bound limits how much of the pool
+  // one previous hop may occupy — it is not a rate limit. At the bound the
+  // upstream recycles its OWN evictable records in the global phase order
+  // (expired -> earliest-expiry Resolved -> oldest Evidence), so a busy but
+  // honest upstream is throttled by its live work, not by the retention of
+  // exchanges that already finished. Other upstreams' records and every
+  // Live/Terminal record are untouched; the refusal remains when all of its
+  // records are Live.
+  const auto mine = [upstream](const DedupEntry& value) {
+    return value.phase != DedupPhase::Terminal && value.upstream_peer == upstream;
+  };
+  if (auto* expired = dedup_.find([&](const DedupEntry& value) {
+        return mine(value) && value.expires_at_ms <= now_ms;
+      })) {
+    dedup_.release(expired);
+    saturating_inc(dedup_stats_.expired);
+    return true;
+  }
+  DedupEntry* victim = nullptr;
+  dedup_.for_each([&](DedupEntry& value) {
+    if (mine(value) && value.phase == DedupPhase::Resolved &&
+        (victim == nullptr || value.expires_at_ms < victim->expires_at_ms)) {
+      victim = &value;
+    }
+  });
+  if (victim == nullptr) {
+    dedup_.for_each([&](DedupEntry& value) {
+      if (mine(value) && value.phase == DedupPhase::Evidence &&
+          (victim == nullptr || value.first_seen_ms < victim->first_seen_ms)) {
+        victim = &value;
+      }
+    });
+  }
+  if (victim == nullptr) return false;  // every record it holds is Live
+  release_dedup_victim(*victim);
+  return true;
+}
+
+void MeshNode::release_dedup_victim(DedupEntry& victim) noexcept {
+  // A forced eviction is always counted + diagnosed (02 §2.8): the possible
+  // consequence (one extra re-forward of a late duplicate, or loss of the
+  // verbatim failure replay) is never silent.
+  const MessageId victim_id = victim.key.id;
+  const NodeId victim_peer = victim.upstream_peer;
+  const bool was_resolved = victim.phase == DedupPhase::Resolved;
+  dedup_.release(&victim);
   saturating_inc(was_resolved ? dedup_stats_.evicted_resolved
                               : dedup_stats_.evicted_evidence);
   observer_.on_diagnostic(was_resolved ? "DEDUP_EVICTED_RESOLVED"
                                        : "DEDUP_EVICTED_EVIDENCE",
                           victim_peer, &victim_id);
-  return true;
+}
+
+std::size_t MeshNode::count_terminal_pins() const noexcept {
+  std::size_t count = 0;
+  dedup_.for_each([&](const DedupEntry& value) {
+    if (value.phase == DedupPhase::Terminal) ++count;
+  });
+  return count;
 }
 
 MeshNode::DedupEntry* MeshNode::allocate_dedup(
@@ -700,14 +758,19 @@ MeshNode::DedupEntry* MeshNode::allocate_dedup(
   // Class admission gates (02 §2.5) run BEFORE touching the pool: terminal
   // pins may never reach into the transit reserve, and one previous-hop peer
   // may not monopolize retained non-terminal state.
-  if (phase == DedupPhase::Terminal &&
-      dedup_.size() >= kDedupCapacity - kDedupTransitReserve) {
+  //
+  // The reserve bounds the number of PINS (02 §2.10 "Terminal pins >= N"),
+  // not the pool size: a pool crowded with evictable Resolved/Evidence
+  // transit records must not refuse delivery to this node's own application
+  // while the sweep below could reclaim one of them (#39 collateral refusal).
+  if (phase == DedupPhase::Terminal && count_terminal_pins() >= kDedupTerminalPinMax) {
     saturating_inc(dedup_stats_.refused_terminal_reserve);
     observer_.on_diagnostic("DEDUP_TERMINAL_RESERVE", upstream, &key.id);
     return nullptr;
   }
   if (phase != DedupPhase::Terminal &&
-      count_transit_upstream(upstream) >= kDedupPerUpstreamMax) {
+      count_transit_upstream(upstream) >= kDedupPerUpstreamMax &&
+      !evict_dedup_for_upstream(upstream, now_ms)) {
     saturating_inc(dedup_stats_.refused_upstream_cap);
     observer_.on_diagnostic("DEDUP_UPSTREAM_CAP", upstream, &key.id);
     return nullptr;

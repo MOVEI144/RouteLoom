@@ -1277,6 +1277,146 @@ void test_resume_reuses_original_id_dedup_once() {
   CHECK(observer_b.messages.size() == 1);
 }
 
+// Issue #39 rig: A (the PowerWorld node 7) sends one max-lifetime durable
+// DATA to B, whose END_RECEIPTs are swallowed so A's delivery stays
+// non-terminal and is persisted across sleep. Unlike the test above, B is
+// polled on the shared wall clock throughout — its terminal pin expires on
+// schedule, so suppression is proven by live retention, not by a record
+// that was never swept.
+struct ResumeDedupRig {
+  MemoryPowerStorage storage;
+  PowerWorld w{storage};
+  TestSecurity security_b;
+  CapturingObserver observer_b;
+  SimRadio radio_b_inner{w.net, 2};
+  DropTypeRadio radio_b{radio_b_inner, FrameType::EndReceipt};
+  MeshNode b{make_b_config(), radio_b, security_b, observer_b};
+  MessageId id{};
+
+  static NodeConfig make_b_config() {
+    NodeConfig config = PowerWorld::make_config();
+    config.node = 2;
+    return config;
+  }
+
+  // Both nodes run: A through its coordinator, B directly.
+  void pump(MonotonicMs duration) {
+    const MonotonicMs end = w.now + duration;
+    for (; w.now <= end; w.now += 5) {
+      w.coordinator.poll(w.now);
+      b.poll(w.now);
+      w.net.flush(w.now);
+    }
+  }
+
+  std::size_t data_to_b() const {
+    std::size_t count = 0;
+    for (const auto& sight : w.net.sights) {
+      if (sight.type == FrameType::Data && sight.from == PowerWorld::kSelf &&
+          sight.to == 2) {
+        ++count;
+      }
+    }
+    return count;
+  }
+
+  // Deliver once to B, then sleep with the delivery still pending.
+  void deliver_then_sleep() {
+    w.platform_peer(2, 0xaa);
+    w.net.register_node(PowerWorld::kSelf, &w.node);
+    w.net.register_node(2, &b);
+    w.net.connect(PowerWorld::kSelf, 2);
+    CHECK_OK(b.start(0));
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, 0));
+    pump(60);
+    CHECK_OK(w.node.add_neighbor(2, 1, w.now));
+    CHECK_OK(b.add_neighbor(PowerWorld::kSelf, 1, w.now));
+    id = queue_pending(w, 2, true, kMaxMessageLifetimeMs);
+    pump(100);  // DATA -> B delivers once; END_RECEIPT swallowed
+    CHECK(observer_b.messages.size() == 1);
+    CHECK(b.dedup_stats().admitted_terminal == 1);
+    const auto state = w.node.delivery(id).state;
+    CHECK(state != DeliveryState::Delivered && state != DeliveryState::Empty);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    for (int i = 0; i < 400 && w.coordinator.state() != PowerState::ReadyToSleep;
+         ++i) {
+      pump(0);
+    }
+    CHECK(w.coordinator.state() == PowerState::ReadyToSleep);
+    CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  }
+
+  // A sleeps `sleep_ms` of wall time; B keeps running on the same clock.
+  void sleep_and_wake(MonotonicMs sleep_ms) {
+    const MonotonicMs wake_at = w.now + sleep_ms;
+    while (w.now < wake_at) {
+      b.poll(w.now);
+      w.now += 100;
+    }
+    w.now = wake_at;
+    b.poll(w.now);
+    CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
+                                ElapsedInterval{sleep_ms, sleep_ms + 50, true},
+                                w.now));
+  }
+};
+
+// Issue #39 (b): the receiver's clock runs 61 s past the delivery while the
+// sender sleeps. B's terminal pin (max lifetime + late result = 60 s) has
+// expired, so a resend under the original id would reach the application a
+// second time. Lifetime is wall-elapsed including sleep and origin lifetimes
+// are capped at 30 s: the durable pending must resume as EXPIRED and never
+// be resent.
+void test_long_sleep_pending_expires_no_duplicate() {
+  ResumeDedupRig rig;
+  rig.deliver_then_sleep();
+  const std::size_t data_before = rig.data_to_b();
+  rig.sleep_and_wake(61000);
+  // The danger is real: B's exactly-once pin is gone.
+  CHECK(rig.b.dedup_stats().expired >= 1);
+  CHECK(rig.b.dedup_resident() == 0);
+  // The sender refuses to resend on its own expiry.
+  CHECK(rig.w.events.pending_with(StatusCode::Expired) == 1);
+  CHECK(rig.w.events.pending_with(StatusCode::Ok) == 0);
+  rig.pump(2000);
+  CHECK(rig.data_to_b() == data_before);          // nothing on the air
+  CHECK(rig.observer_b.messages.size() == 1);     // delivered exactly once
+  CHECK(rig.b.dedup_stats().admitted_terminal == 1);
+}
+
+// Issue #39: a 20 s sleep resumes with ~10 s of lifetime left. The resend
+// under the original id reaches B inside its pin and is suppressed; the
+// origin's own expiry (<= 30 s after send) precedes the pin's (60 s), so
+// when the pin finally expires nothing is left to resend.
+void test_short_sleep_resend_dedups_once() {
+  ResumeDedupRig rig;
+  rig.deliver_then_sleep();
+  const MonotonicMs first_seen = rig.w.now;
+  const std::size_t data_before = rig.data_to_b();
+  rig.sleep_and_wake(20000);
+  CHECK(rig.b.dedup_stats().expired == 0);  // pin alive at wake
+  CHECK(rig.w.events.pending_with(StatusCode::Ok) == 1);
+  rig.pump(200);
+  CHECK(rig.data_to_b() > data_before);            // the resend reached B
+  CHECK(rig.observer_b.messages.size() == 1);      // ...and was suppressed
+  CHECK(rig.b.dedup_stats().admitted_terminal == 1);
+  // Retries continue until the resumed lifetime runs out (receipts are
+  // swallowed); the verdict turns terminal well before the pin expires.
+  rig.pump(12000);
+  const auto state = rig.w.node.delivery(rig.id).state;
+  CHECK(state == DeliveryState::Expired || state == DeliveryState::Failed);
+  CHECK(rig.w.now - first_seen < kDedupHardCapMs);
+  CHECK(rig.b.dedup_resident() == 1);  // pin still holding
+  // Past the pin's end: it expires, and the origin sends nothing more.
+  const std::size_t data_settled = rig.data_to_b();
+  rig.pump(kDedupHardCapMs);
+  CHECK(rig.b.dedup_resident() == 0);
+  CHECK(rig.data_to_b() == data_settled);
+  CHECK(rig.observer_b.messages.size() == 1);
+}
+
 
 // Issue #55: the 30s normal-lifetime ceiling is enforced at every origin
 // send API — refused, never silently clamped (dedup retention is sized on
@@ -1341,6 +1481,8 @@ int main() {
   test_persist_failure_keeps_pending_live();
   test_ready_wait_deducts_pending_lifetime();
   test_resume_reuses_original_id_dedup_once();
+  test_long_sleep_pending_expires_no_duplicate();
+  test_short_sleep_resend_dedups_once();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;

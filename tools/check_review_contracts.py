@@ -378,6 +378,45 @@ def validate(root: Path) -> dict:
                 and profile["measured_peak_bytes"] is None
                 and profile["voter_enabled"] is False,
             )
+        # The compile-time dedup profiles (node.hpp, issue #39) are the
+        # resource-profile values, and the ESP-IDF Kconfig / host CMake
+        # selectors offer exactly those capacities.
+        profile_entries = {
+            "Leaf": resources["profiles"]["leaf-small"]["dedup_entries"],
+            "Relay": resources["profiles"]["relay-c3"]["dedup_entries"],
+            "Gateway": resources["profiles"]["gateway-s3"]["dedup_entries"],
+        }
+        node_hpp = (
+            root / "components/routeloom/include/routeloom/node.hpp"
+        ).read_text(encoding="utf-8")
+        header_caps = {
+            name: int(value)
+            for name, value in re.findall(
+                r"constexpr std::size_t kDedupCapacity(Leaf|Relay|Gateway) = (\d+);",
+                node_hpp,
+            )
+        }
+        test("dedup_profile_capacities", header_caps == profile_entries,
+             "node.hpp kDedupCapacity{Leaf,Relay,Gateway} vs dedup_entries")
+        default_cap = re.search(
+            r"#define ROUTELOOM_DEDUP_CAPACITY (\d+)", node_hpp
+        )
+        test(
+            "dedup_default_relay",
+            default_cap is not None
+            and int(default_cap.group(1)) == profile_entries["Relay"],
+        )
+        kconfig = (root / "components/routeloom/Kconfig").read_text(encoding="utf-8")
+        kconfig_caps = sorted(
+            int(value)
+            for value in re.findall(
+                r"^\s*default (\d+)\b", kconfig, re.M
+            )
+        )
+        test(
+            "dedup_kconfig_capacities",
+            kconfig_caps == sorted(profile_entries.values()),
+        )
         preauth = resources["preauth"]
         test(
             "preauth_bounded",

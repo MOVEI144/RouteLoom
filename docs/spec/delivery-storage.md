@@ -38,7 +38,7 @@ IN_PROGRESS、FORWARDED、FAILED、DELIVEREDと、保持しているreceiptを�
 
 同roundのduplicateには必要なhop応答だけ返し、二重forwardを避ける。失敗した旧roundを一度見た理由で新roundまで捨てない。終端DELIVEREDならpayloadを再実行せず保存した結果を返す。
 
-dedup保持期間はmessage最大寿命と許容再送期間より短くしない。固定RAM容量で期限を守れない場合は入場を制限する。永続配送の再起動またぎdedupは永続storeを必要とする。動作不明のままクラッシュしたAPPLIED処理はINDETERMINATEを返し、アプリの照会／冪等キーで解決する。
+dedup保持期間はmessage最大寿命と許容再送期間より短くしない。終端（自ノード宛）の記録はorigin期限＋late result30000ms（初回受理から最大60000ms）保持してアプリへのexactly-onceを守る。中継の転送記録は同roundの二重forward抑止だけが責務なので、frame自身の残期限＋5000msで手放す（固定60000msにしない。[電源断・期限・資源契約](crash-time-resources.md) §4）。容量はresource profileのbuild時定数（leaf32／relay96／gateway256）。固定RAM容量で期限を守れない場合は入場を制限する。永続配送の再起動またぎdedupは永続storeを必要とする。動作不明のままクラッシュしたAPPLIED処理はINDETERMINATEを返し、アプリの照会／冪等キーで解決する。
 
 ## 6. 期限とキャンセル
 
@@ -63,6 +63,6 @@ secret storeと通常payload queueは分離する。flash耐久性とCPU停止�
 
 [電源断・期限・資源契約](crash-time-resources.md)をこの文書の詳細契約とする。既定はWALL_ELAPSED_VALIDITY、再起動で経過時間不明ならTIME_UNCERTAINとして自動再送を保留する。RUNNING_TIME_ONLYは明示的に別意味を選ぶ実験profileのみで、既定にしない。
 
-max_message_lifetime=30000ms、late_result_ttl=30000ms。保護中dedupをLRUで追い出さず、資源profileに応じて新規受理を断る。時間不明の記録は自動expiryせず容量へ計上し、必要ならadmissionを停止する。
+max_message_lifetime=30000ms、late_result_ttl=30000ms。保護中dedupをLRUで追い出さず、資源profileに応じて新規受理を断る。寿命は停止時間を含むため、60000msを超えてsleepした送信側の永続pendingはEXPIREDとなり、受信側dedup満了後に元IDで再送されない。時間不明の記録は自動expiryせず容量へ計上し、必要ならadmissionを停止する。
 
 APPLIEDはprovider_failover=falseが既定。別providerへ切り替えることと同じ宛先へのroute切替は別。共有冪等状態がない複数PCへの同一副作用の再適用をSDKだけで防げると扱わない。
