@@ -1,0 +1,23 @@
+{
+  "abort_retry_ms": 0,
+  "abort_status": 0,
+  "codec": "relay_object",
+  "dir": 2,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_00_hex": "01027e57ab1e00a100000000077702000000123405010004cf8eea",
+  "frame_00_type": 4,
+  "frame_count": 1,
+  "joiner_mac_hex": "020000001234",
+  "message_hex": "cf8eea",
+  "name": "relay_down_error_final",
+  "note": "EDHOC error from the authority: final, type 4",
+  "object_hex": "01027e57ab1e00a100000000077702000000123405010004cf8eea",
+  "phase": 4,
+  "proxy": 45317471250417527,
+  "relay_id": 2119674654,
+  "rssi_u8": 0,
+  "state": 1,
+  "step": 5,
+  "wire_type": 4
+}

@@ -1,0 +1,15 @@
+{
+  "codec": "join_object",
+  "cookie_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+  "cookie_present": 1,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "message_hex": "8040b96c247cee60842ee62b897793aef3633dd119e846439a33cbeec660437bab76ac70622166f70808ca8a1062757a56025fea321803c3f01759f045afd5945440d5bbfd3ee07c28dc05af3a88826f9c5d2054dcd82ff86e83e16627c89d710e1481d882502d06b001b38998",
+  "name": "join_object_r1_cookie",
+  "note": "R1 with ticket and cookie",
+  "object_hex": "010501000100c0c1c2c3c4c5c6c7c8c9cacbcccdcecf8040b96c247cee60842ee62b897793aef3633dd119e846439a33cbeec660437bab76ac70622166f70808ca8a1062757a56025fea321803c3f01759f045afd5945440d5bbfd3ee07c28dc05af3a88826f9c5d2054dcd82ff86e83e16627c89d710e1481d882502d06b001b38998",
+  "phase": 5,
+  "relay_status": 0,
+  "retry_after_ms": 0,
+  "step": 1
+}

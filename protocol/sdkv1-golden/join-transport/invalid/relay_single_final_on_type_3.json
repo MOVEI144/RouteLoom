@@ -1,0 +1,9 @@
+{
+  "codec": "relay_single_frame",
+  "encoded_hex": "01027e57ab1e00a1000000000777020000001234040100045d4b55546e93a52053625cf4749b22522b2e51d8587edd64e5244c59f15ab006a1d202830fab951d",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "relay_single_final_on_type_3",
+  "note": "a final down object rides type 4",
+  "wire_type": 3
+}

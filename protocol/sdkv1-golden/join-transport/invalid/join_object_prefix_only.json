@@ -1,0 +1,8 @@
+{
+  "codec": "join_object",
+  "encoded_hex": "01040200",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_object_prefix_only",
+  "note": "phase 4 needs its 2 B head"
+}

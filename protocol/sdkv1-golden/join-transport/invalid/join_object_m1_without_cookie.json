@@ -1,0 +1,8 @@
+{
+  "codec": "join_object",
+  "encoded_hex": "010401000000010203",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_object_m1_without_cookie",
+  "note": "m1 carries the cookie"
+}

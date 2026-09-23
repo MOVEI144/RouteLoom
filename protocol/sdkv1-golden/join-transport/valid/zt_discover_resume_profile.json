@@ -1,0 +1,16 @@
+{
+  "avoid0": 0,
+  "avoid1": 0,
+  "body_hex": "030300000000000349746ee2000000000000000000000000",
+  "claimed_node": 45317471250420276,
+  "codec": "zt_discover_frame",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_hex": "524c44310101002c004400000000000000a1000000001234101112131415161718191a1b1c1d1e1f00000000030300000000000349746ee2000000000000000000000000",
+  "name": "zt_discover_resume_profile",
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "note": "RLJOIN1 + RLRES1",
+  "org_hint": 1232367330,
+  "preferred_site_hint": 0,
+  "profile_bits": 3
+}

@@ -1,0 +1,23 @@
+{
+  "abort_retry_ms": 0,
+  "abort_status": 0,
+  "codec": "relay_object",
+  "dir": 2,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_00_hex": "01027e57ab1e00a100000000077702000000123402010005566e26acb29e89a1fbcb4c5a7368c0ecc71d26dac38337950234d11b329880aad3c4ba5e40ff50230e1a58c915b2bbd4ed1d2ff8",
+  "frame_00_type": 4,
+  "frame_count": 1,
+  "joiner_mac_hex": "020000001234",
+  "message_hex": "566e26acb29e89a1fbcb4c5a7368c0ecc71d26dac38337950234d11b329880aad3c4ba5e40ff50230e1a58c915b2bbd4ed1d2ff8",
+  "name": "relay_down_r2_final",
+  "note": "R2 final",
+  "object_hex": "01027e57ab1e00a100000000077702000000123402010005566e26acb29e89a1fbcb4c5a7368c0ecc71d26dac38337950234d11b329880aad3c4ba5e40ff50230e1a58c915b2bbd4ed1d2ff8",
+  "phase": 5,
+  "proxy": 45317471250417527,
+  "relay_id": 2119674654,
+  "rssi_u8": 0,
+  "state": 1,
+  "step": 2,
+  "wire_type": 4
+}

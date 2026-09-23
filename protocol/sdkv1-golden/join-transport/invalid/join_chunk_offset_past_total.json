@@ -1,0 +1,9 @@
+{
+  "carrier": "rld1",
+  "codec": "join_chunk",
+  "encoded_hex": "014210111213013e012c00",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_chunk_offset_past_total",
+  "note": "offset < total"
+}

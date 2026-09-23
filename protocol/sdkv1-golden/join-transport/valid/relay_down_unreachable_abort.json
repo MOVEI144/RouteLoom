@@ -1,0 +1,23 @@
+{
+  "abort_retry_ms": 5000,
+  "abort_status": 2,
+  "codec": "relay_object",
+  "dir": 2,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_00_hex": "01027e57ab1e00a1000000000777020000001234030200040200001388",
+  "frame_00_type": 4,
+  "frame_count": 1,
+  "joiner_mac_hex": "020000001234",
+  "message_hex": "",
+  "name": "relay_down_unreachable_abort",
+  "note": "gateway has no host: abort",
+  "object_hex": "01027e57ab1e00a1000000000777020000001234030200040200001388",
+  "phase": 4,
+  "proxy": 45317471250417527,
+  "relay_id": 2119674654,
+  "rssi_u8": 0,
+  "state": 2,
+  "step": 3,
+  "wire_type": 4
+}

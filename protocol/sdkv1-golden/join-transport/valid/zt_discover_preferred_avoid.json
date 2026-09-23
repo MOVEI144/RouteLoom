@@ -1,0 +1,16 @@
+{
+  "avoid0": 2691661002,
+  "avoid1": 1432778632,
+  "body_hex": "030300010000000349746ee211223344a06f7cca55667788",
+  "claimed_node": 45317471250420276,
+  "codec": "zt_discover_frame",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_hex": "524c44310101002c004400000000000000a1000000001234101112131415161718191a1b1c1d1e1f00000000030300010000000349746ee211223344a06f7cca55667788",
+  "name": "zt_discover_preferred_avoid",
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "note": "preferred site plus two avoided sites (flags bit0 derived)",
+  "org_hint": 1232367330,
+  "preferred_site_hint": 287454020,
+  "profile_bits": 3
+}

@@ -1,0 +1,8 @@
+{
+  "codec": "zt_discover_frame",
+  "encoded_hex": "524c44310101002c004400000000000100a1000000001234101112131415161718191a1b1c1d1e1f00000000030300000000000149746ee2000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "zt_discover_network_hint",
+  "note": "DISCOVER carries network_hint 0"
+}
