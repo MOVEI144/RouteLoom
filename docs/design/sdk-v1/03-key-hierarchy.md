@@ -1,6 +1,6 @@
 # 03 — 鍵階層・Wire v2 epochとの対応・SecurityProviderの変更
 
-用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。以下のラベル・info形式は採用案で、C++/Rust共通vectorで凍結するまで**未確定**。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
+用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
 
 ## 1. 鍵の木
 
@@ -46,9 +46,38 @@ Site Authority ── GK_g（32B乱数、authority channelで配布、RLS1）
 | 32771 | DAMS | 32B | join exchangeのみ（本書で追加） |
 | 32772 | pending再試行秘密 | 32B | join pendingのticket再試行（本書で追加） |
 
-### 2.2 HKDFのinfo形式（RouteLoom独自、案）
+### 2.2 HKDFのinfo形式（RouteLoom独自、P1-4で凍結）
 
-`info = ASCII label || 0x00 || 固定幅BE fields`。saltは各所で明記。例：`"RouteLoom/v1/resume-key" 0x00 || purpose u8 || direction u8 || network u64 || node_I u64 || node_R u64 || cid_I u32 || cid_R u32 || transcript_hash 32B`。labelの一覧と固定幅は共通vector（[08](08-implementation-plan.md) P1-4）で凍結する。
+`info = ASCII label || 0x00 || 固定幅BE fields`。labelはすべて`"RouteLoom/v1/<名前>"`。28B出力は`key16 || iv12`。この表は[key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)（C++）と`host/routeloom-keysched`（Rust）が実装し、独立したPython生成器`tools/gen_sdkv1_derivation_vectors.py`の出力`protocol/sdkv1-golden/derivations/`にbyte一致することをCIで検査する。変更はprotocol変更であり、vectorの再生成を伴う。
+
+| 名前 | 構成（HKDF-SHA-256、`E`＝Expand、`X`＝Extract） | 長さ |
+|---|---|---|
+| PRK_g | `X(salt = "RouteLoom/v1/group" 0x00 ‖ network u64, IKM = GK_g 32B)` | 32 |
+| K_bcast | `E(PRK_g, "RouteLoom/v1/bcast-link" 0x00 ‖ g u32 ‖ tx u64 ‖ tx_boot u32)` | 28 |
+| K_gend | `E(PRK_g, "RouteLoom/v1/group-end" 0x00 ‖ g u32 ‖ group_id u64 ‖ origin u64 ‖ session u32)` | 28 |
+| K_dsk(g) | `E(PRK_g, "RouteLoom/v1/dsk-member" 0x00 ‖ g u32)` | 32 |
+| rid | `first8(HMAC(RMS, "RouteLoom/v1/rid" 0x00 ‖ purpose u8))` | 8 |
+| K_auth | `E(X(salt = "RouteLoom/v1/resume-auth"（NUL無し）, RMS), "RouteLoom/v1/resume-auth" 0x00 ‖ purpose u8 ‖ network u64 ‖ node_I u64 ‖ node_R u64)` | 32 |
+| binding（routed） | `SHA-256("RouteLoom/v1/resume-binding" 0x00 ‖ purpose u8 ‖ node_I u64 ‖ node_R u64)` | 32 |
+| binding（link） | `SHA-256("RouteLoom/v1/resume-binding" 0x00 ‖ 0x01 ‖ MAC_I 6B ‖ MAC_R 6B ‖ carrier_digest 32B)` | 32 |
+| mac_I | `first16(HMAC(K_auth, "RouteLoom/v1/R1" 0x00 ‖ binding ‖ R1[0..len−16)))` | 16 |
+| mac_R | `first16(HMAC(K_auth, "RouteLoom/v1/R2" 0x00 ‖ binding ‖ R1 ‖ R2[0..36)))` | 16 |
+| TH | `SHA-256(R1 ‖ R2)`（R2は52Bのstatus 0形） | 32 |
+| PRK_res | `X(salt = nonce_I ‖ nonce_R, IKM = RMS)` | 32 |
+| K_conf | `E(PRK_res, "RouteLoom/v1/resume-confirm" 0x00 ‖ TH)` | 32 |
+| mac_I3 | `first16(HMAC(K_conf, "RouteLoom/v1/R3" 0x00 ‖ TH))` | 16 |
+| key/iv(dir) | `E(PRK_res, "RouteLoom/v1/resume-key" 0x00 ‖ purpose u8 ‖ dir u8 ‖ network u64 ‖ node_I u64 ‖ node_R u64 ‖ cid_I u32 ‖ cid_R u32 ‖ TH 32B)`、dir：1＝I→R、2＝R→I | 28 |
+| AEAD nonce | `iv XOR (zero6 ‖ counter u48)`、counter＞2^48−1は拒否（wrapしない） | 12 |
+| AuthorityEnvelope | 鍵＝purpose 4（authority、RMS＝DAMS）のkey/iv(dir)。AAD＝header 12B `ver u8=1 ‖ type u8 (1..8) ‖ ctx_id u32≠0 ‖ counter u48`、全長28〜2048B | — |
+
+**Resolved in implementation（P1-4、最も保守的な選択）**
+
+- labelの綴り：06 §2.1の短い表記（`"resume-key"`、`"R1"`等）と§2.2の例（`"RouteLoom/v1/resume-key"`）が食い違っていたため、全labelを`"RouteLoom/v1/"`付きに統一した（他protocolや他用途とのlabel衝突を避ける）。
+- K_authのinfo：06はinfoにlabelを付けていなかったが、§2.2の規則（全infoはlabelで始まる）に合わせ、saltと同じ`"RouteLoom/v1/resume-auth"`をinfoの先頭にも置く。saltはNUL無しのASCIIのまま。
+- authority／pending-joinの`node_R`：Site Authorityはmesh nodeではないため、`node_R = site_id`（RLS1とSiteOfferにある64bit値）とする。gatewayは最大4台で入れ替わるため束縛しない。
+- binding：routed（end／authority／pending-join）は上表の固定幅SHA-256。linkは観測MACの組（initiator→responderの向きで固定）とRLD1 carrierのtransaction digest（32B、P4-2で定義）を畳み込む。
+- AuthorityEnvelopeの上限：128Bを超えるとControlObjectで運ぶため、authenticated objectの上限2048Bを全長の上限とする。ciphertext 0Bは許す。
+- EDHOC Exporter label（§2.1）とExporter contextはP2で実装するため、vectorは未作成（定数だけ`key_schedule.hpp`に置く）。
 
 ## 3. 暗号suiteとnonce
 
@@ -118,9 +147,9 @@ deep sleep中はRAMが消えるため、親とのlink contextとgatewayとのE2E
 
 ```text
 PRK_g        = HKDF-Extract(salt = "RouteLoom/v1/group" 0x00 || network u64, IKM = GK_g)
-K_bcast      = HKDF-Expand(PRK_g, "bcast-link" 0x00 || g u32 || tx u64 || tx_boot u32, 28)  → key16 || iv12
-K_gend       = HKDF-Expand(PRK_g, "group-end" 0x00 || g u32 || group_id u64 || origin u64 || session u32, 28)
-K_dsk(g)     = HKDF-Expand(PRK_g, "dsk-member" 0x00 || g u32, 32)   → Member class scope鍵（generation = g）
+K_bcast      = HKDF-Expand(PRK_g, "RouteLoom/v1/bcast-link" 0x00 || g u32 || tx u64 || tx_boot u32, 28)  → key16 || iv12
+K_gend       = HKDF-Expand(PRK_g, "RouteLoom/v1/group-end" 0x00 || g u32 || group_id u64 || origin u64 || session u32, 28)
+K_dsk(g)     = HKDF-Expand(PRK_g, "RouteLoom/v1/dsk-member" 0x00 || g u32, 32)   → Member class scope鍵（generation = g）
 ```
 
 `tx_boot`・`session`は送信者の永続boot session（`rlboot`、起動ごとに単調増加）。送信者鍵は起動ごとに変わるため、counterはRAMで0から数えてよい。前提は`rlboot`が巻き戻らないこと。巻き戻りの検出は[05](05-nvs-state-37.md) §3.3の単一witnessで行う。
@@ -294,7 +323,7 @@ struct SessionStats { std::uint32_t tx_deferred, tx_unavailable, rx_auth_require
 
 | ID | 内容 |
 |---|---|
-| V1-K01 | Exporter/HKDFで導出したlink鍵が両端で一致し、方向・purposeで異なる（C++/Rust共通vector） |
+| V1-K01 | Exporter/HKDFで導出したlink鍵が両端で一致し、方向・purposeで異なる（C++/Rust共通vector）。**HKDF（RLRES1）部分はこのbranchで実行済み**（`routeloom_key_schedule_tests`、`routeloom-keysched`）。Exporter部分はP2 |
 | V1-K02 | 未知context idは`AuthRequired`、開発Providerへfallbackしない |
 | V1-K03 | counterを2^48近くへ注入：再鍵し、wrapしない |
 | V1-K04 | 再起動後に永続counterが無くても、捕獲した旧contextのframeは拒否される |

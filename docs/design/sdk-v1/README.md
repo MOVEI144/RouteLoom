@@ -37,8 +37,10 @@
 |---|---|---|
 | HKDF-SHA-256（RFC 5869） | [kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)／[kdf.cpp](../../../components/routeloom/src/kdf.cpp) | RFC 5869 付録A.1〜A.3のPRK/OKMと引数拒否を[test_kdf.cpp](../../../tests/cpp/test_kdf.cpp)で検査 |
 | SecurityProviderのsession API（P4-1）：`tx_epoch`／`context_state`、`SessionInstaller`、予約scope `GroupLink`＝3、MeshNodeの保留配線 | [security.hpp](../../../components/routeloom/include/routeloom/security.hpp)、[03 §8.1](03-key-hierarchy.md) | 既定実装で全byte不変（V1-K10）、test Providerでの保留・epoch・非再使用を[test_session.cpp](../../../tests/cpp/test_session.cpp)で検査 |
+| 導出labelとinfo形式の凍結（P1-4：group鍵、RLRES1、AuthorityEnvelope header、AEAD nonce） | [key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)、`host/routeloom-keysched` | 独立Python生成器の`protocol/sdkv1-golden/derivations/`にC++（[test_key_schedule.cpp](../../../tests/cpp/test_key_schedule.cpp)）とRustがbyte一致（[03 §2.2](03-key-hierarchy.md)） |
+| RLRES1の状態機械（P1-5、単独class、両role） | [rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp) | replay・反射・古いepoch／世代・別現場・壊れた入力・順序違い・格下げ・表の枯渇を[test_rlres1.cpp](../../../tests/cpp/test_rlres1.cpp)と`fuzz_rlres1`で検査（[06 §2.2.1](06-fast-rejoin.md)） |
 
-それ以外（EDHOC統合、証明書codec、RLI1/RLS1/RRS1、RLRES1、group鍵、USB/API1、tooling、partition変更）は**未実装**。RouteLoom独自の導出ラベルも未凍結で、HKDF実装はラベルを固定しない。
+それ以外（EDHOC統合、証明書codec、RLI1/RLS1/RRS1、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、tooling、partition変更）は**未実装**。
 
 ## この設計で主張しないこと
 
