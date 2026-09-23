@@ -86,4 +86,7 @@ routeloomctl config-propose --network <16hex> --target <16hex> \
 routeloomctl config-status --network <16hex> --target <16hex> \
   --config-namespace <u16> --operation-id <32hex>
 routeloomctl config-get --id <cfg-opid>
+routeloomctl group-send --network <16hex> --group <1-65535|ALL> --payload <hex> \
+  [--priority URGENT] [--ordered] [--wait-ms 2000]
+routeloomctl group-get --id <grp-opid> [--wait-ms 15000]
 ```
