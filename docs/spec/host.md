@@ -4,7 +4,7 @@
 
 Rust製routeloom-hostがUSB adapterを所有し、routeloomctlとTUI、利用アプリが同じHost APIへ接続する。PC上のアプリをESP32へ載せる必要はない。ESP32側にはGateway bridge＋通常Mesh SDKをビルドする。
 
-v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）、`group.send/get`（§10、EXPERIMENTAL）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
+v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）、`group.send/get`（§10、EXPERIMENTAL）、SDK v1 Site Authorityの`site.status`・`join.policy.get/set`・`join.requests.list`・`join.decide`・`devices.discovered.list`・`members.list/get`・`membership.revoke`（§11、EXPERIMENTAL、`--site-authority`指定時）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
 
 一つのdaemonが複数USB adapterと複数ネットワークを扱える。adapter、Network、Gateway、host serviceを別の識別子にする。相互転送は明示許可がある場合だけで、v1は異Networkの透過bridgeを提供しない。
 
@@ -169,3 +169,43 @@ routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
 ```
 
 制約：開発profileのEXPERIMENTAL機能。host試験（lane状態機械・API1・USB golden byte一致・daemon配線）のみで、実機のbridge_nodeとの疎通・実RFは未確認。表・墓標・結果はRAMのみ。
+
+## 11. Site Authority（SDK v1ゼロタッチ参加、EXPERIMENTAL）
+
+現場PCのdaemonがSDK v1のSite Authority（[設計07](../design/sdk-v1/07-host-api-tooling.md)、[02 §8](../design/sdk-v1/02-zero-touch-join.md)）を兼ねる。SAKはESP32に置かない。参加する機器とEDHOC（RFC 9528 method 0、suite 2）を直接行い、身元（DevCert）を検証してからKGuardに参加可否を聞き、答えをMemberCert・SitePackage・RemovalNoticeとして暗号的に執行する。
+
+**起動**：`routeloom-host --site-authority DIR`。`DIR/site-authority.json`（`routeloom-site-authority-v1`：SiteCert、任意でSite CA公開鍵、Device CA id・公開鍵、channel、channel_epoch、gateway 1〜4台）、`DIR/sak.key`（`routeloom-root-key-v1`、0600、root_id＝site_id。開発用custodyで本番のHSM/TPMではない）、`DIR/site.db`（初回に0600で作成）。SAKとSiteCertの鍵・site_idが一致しない、別の現場の台帳、hash chainの破損はいずれも起動エラー。指定しなければSite Authorityは無く、各methodは`SITE_AUTHORITY_UNAVAILABLE`。
+
+**権限**：ACL file（§4）の新しいgrant `MEMBERSHIP_READ`（一覧・状態・event）、`MEMBERSHIP_DECIDE`（`join.decide`、`membership.revoke`）、`MEMBERSHIP_ADMIN`（`join.policy.*`）を、SiteCertのnetwork下位32bit（またはワイルドカード`*`）に対して与える。既存のSEND等からは導かれない。
+
+**API1**：
+
+- `site.status` → 現場の識別（site_id、network、site_epoch、SAK fingerprint）、rs_epoch、gk_epoch／staged、member・removed・未確認・発見済み・参加要求の数、policy、counters、`usb{configured,attached,join_relay:"not_wired"}`
+- `join.policy.get` / `join.policy.set {zero_touch_open?, decision_mode?:"kguard|closed", decision_timeout_ms?:500..5000, pending_retry_after_s?:30..3600}`
+- `join.requests.list` → `requests[]`（`join_request_id`＝`jr-`＋16hex、device・kid・model・hw_rev・cert_serial・fw_version・capability・requested_role・previously_removed・kid_conflict・via・attempt・remaining_ms・`state:"awaiting|decided"`、≤256）
+- `join.decide {join_request_id, device_id, verdict:"allow"|"pending"|"deny", role|retry_after_s|reason, idempotency_key}` → allowは台帳commit後に`{"state":"committed","generation","member_cert_serial","operation_id","applied"}`、pending/denyは`"state":"recorded"`。`applied`は待っている試行へ届いた（`current_attempt`）か次の試行で効く（`next_attempt`）か
+- `devices.discovered.list {after?, limit?:1..128}` → `devices[]`、`next_after`、`total`（≤1024、last_seenのLRU）。検証に失敗した機器は載らない
+- `members.list {after?, limit?, include_removed?}` / `members.get {device_id}` → generation、role、MemberCert serial、`confirm_state`（`allowed_unconfirmed`／`active`、削除済みはnull）、`delivered`、時刻、削除理由
+- `membership.revoke {device_id, expected_generation, reason:"removed|lost|replaced|blocked", idempotency_key}` → `{"operation_id","state":"committed","rs_epoch","gk_rotation":{"from","to","state":"staged"},"distribution":"not_implemented"}`
+- `operations.get {operation_id:"op-…"}` → approve（`committed`→`delivered`→`confirmed`）／revoke（`committed`、配布は`not_implemented`で全memberを`unknown`と数える）
+
+JSONの例は[07 §2.4](../design/sdk-v1/07-host-api-tooling.md)。idempotencyのidentityは`(principal, idempotency_key)`で、同じkey・同じ内容は保存済みの答え、内容違いは`CONFLICT`。決定済みの要求に別のverdict、`expected_generation`の不一致、kid conflictのallowも`CONFLICT`。storeが書けなければ`STORE_FAILURE`（retryable、何も変えていない）で、成功に変換しない。
+
+**event**（`stream:"events"`、`filter.kinds`で選択）：`join.request`、`join.decided`、`device.discovered`、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`。
+
+**参加の中継**：機器のEDHOC messageはproxy→gateway→USB HostOps 0x40/0x41/0x42（[02 §7](../design/sdk-v1/02-zero-touch-join.md)）で届く設計だが、そのcodecは並行作業中で**まだdaemonに結線していない**。Site Authorityは`JoinTransport` trait越しに中継を受け、現在はin-processの試験用transportだけが繋がる（`capabilities.get`の`site.join_relay:"not_wired"`）。
+
+**アプリ向け（`routeloom-client`）**：`site::SiteAdmin` trait（`site_status`、`join_requests`、`decide`、`discovered`、`members`／`member`、`revoke`、`site_events`）をRouteLoomTransportが実装する。`site::KGuardMock`は割当表（ここ→allow、他現場→deny not_here、禁止→deny blocked、未知→pending）で未決定の要求に答える試験用の実装。
+
+```rust
+use routeloom_client::{api1::RouteLoomTransport, site::{Assignment, KGuardMock, Role, SiteAdmin}};
+
+let site = RouteLoomTransport::new("/tmp/routeloom.sock", 0x0a1b2c3d);
+let kguard = KGuardMock::default();
+kguard.assign(0x00a1_0000_0000_1234, Assignment::Here(Role::Endpoint));
+for event in site.site_events()? {
+    if event?.kind == "join.request" { kguard.serve_once(&site)?; }
+}
+```
+
+制約：EXPERIMENTAL（本番Profileではない）。host試験のみで、実機のgateway・proxyとの疎通は無い。GKの配布・更新とauthority channel（JoinConfirm、P5）、RRS1の配布（P6）、site_epoch cutover、SiteCert発行tool（P7-2）は未実装。DAMS・GKはDB fileの0600で守るだけでhost鍵の封緘は無い。

@@ -76,6 +76,72 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 
 `join.request`、`join.decided`、`member.confirmed`、`member.reissued`、`member.revoked`、`device.discovered`（初回・1分以上空いた再出現）、`gk.rotated`、`rrs.published`、`cutover.progress`、`authority.error`。各イベントは単調な`cursor`を持ち、既存receive APIと同じcursor・overflow規則に従う。
 
+### 2.4 実装状況（P3-3、このbranch、host試験のみ・実機未接続）
+
+`routeloom-host`の`--site-authority DIR`で起動するSite Authority（[site/](../../../host/routeloom-host/src/site/mod.rs)）と、そのAPI1面（[api1/site.rs](../../../host/routeloom-host/src/api1/site.rs)）、KGuard側の`routeloom-client::site`（`SiteAdmin` trait、RouteLoom実装、`KGuardMock`）を実装した。上の案との違いと確定した形を以下に記す。USBの参加中継（0x40〜0x42、P3-2）とauthority channel（P5）には**まだ配線していない**。
+
+**EDHOC**：Responderは新crate `host/routeloom-edhoc`（pure Rust、RustCrypto primitive、suite 2、method 0と、RFC 9529 trace用のmethod 3）。`lakers`はmethod 3（STAT-STAT）専用、vendor済みlibedhocへのFFIはworkspaceの`unsafe_code = "forbid"`に反するため、自作engineを二つの基準で固定した：RFC 9529 §3を両roleでbyte一致（§4の不正messageは全拒否。§4.1.2はlibedhocと違い拒否）、および実機側stack（libedhoc＋`routeloom::edhoc` backend）との**method 0のjoin transcriptを両方向でbyte一致**（[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)。Rustはcargo test、C++はctest `routeloom_edhoc_interop_replay`で同じfileを再生）。ID_CREDは両方向ともkid（SHA-256(COSE_Key)）、証明書は**EADで値渡し**：EAD_2＝SiteOffer＋SiteCert、EAD_3＝JoinRequest＋DevCert（label `-65541`、`routeloom_join::JOIN_EAD_CREDENTIAL_LABEL`、**暫定値**。機器側の定義と統合時に一致させる）。CRED_xはその証明書のbyte列なので、差し替えはSignature_2/3で失敗する。
+
+**機器側への指摘（統合時に必須）**：証明書を値渡しするとlibedhocのarena使用量はInitiator 1408B／Responder 1440Bになり、現在の`ROUTELOOM_EDHOC_ARENA_BYTES`（1280B）ではmessage_2（機器側）の処理が`EDHOC_ERROR_NOT_ENOUGH_MEMORY`で失敗する。arenaを1.5KiB以上にしない限り参加できない（kid参照のみなら808B／840Bで収まる）。
+
+**DAMS**：Exporter label 32771、context＝決定的CBOR配列`["RouteLoom",1,4,network,node,site_id,device_kid,sak_kid]`（`routeloom_join::dams_exporter_context`、05 §5の先頭8要素だけを使う**暫定形**）。Allowの配送前に台帳へ保存する。
+
+**API1（確定形）**。権限は新しいACL grant `MEMBERSHIP_READ` / `MEMBERSHIP_DECIDE` / `MEMBERSHIP_ADMIN`（既存のSEND等とは独立、site networkの下位32bitで判定）。principalはsocketのpeer credentialだけで決まる。
+
+| method | 権限 | params → result |
+|---|---|---|
+| `site.status` | READ | なし → site_id、network、site_epoch、SAK fingerprint（kid）、rs_epoch、gk_epoch／gk_staged、member・removed・unconfirmed数、discovered・join_requests数、live exchange数、channel、gateways、ledger_seq、policy、counters（`rejected_unverified{reason}`等）、`usb{configured,attached,join_relay:"not_wired"}` |
+| `join.policy.get` / `.set` | ADMIN | `zero_touch_open`、`decision_mode`（`kguard`/`closed`）、`decision_timeout_ms`（500〜5000）、`pending_retry_after_s`（30〜3600）。setは部分更新 |
+| `join.requests.list` | READ | 開いている参加要求（≤256）：`state`＝`awaiting`／`decided`、`remaining_ms` |
+| `join.decide` | DECIDE | `join_request_id`、`device_id`、`verdict`＋その引数だけ（allow→`role`、pending→`retry_after_s`、deny→`reason`）、`idempotency_key` |
+| `devices.discovered.list` | READ | `after?`、`limit?`（1〜128）→ `devices[]`、`next_after`、`total`、`max:1024` |
+| `members.list` / `members.get` | READ | `after?`、`limit?`、`include_removed?` ／ `device_id` |
+| `membership.revoke` | DECIDE | `device_id`、`expected_generation`、`reason`（removed/lost/replaced/blocked）、`idempotency_key` |
+| `operations.get` | READ | `op-…`（approve／revoke）はSite Authorityが答える。grant無しは存在を明かさずNOT_FOUND |
+
+```json
+// join.request（stream "events"、ringのseq/ms付き）
+{"seq":12,"ms":1790000000000,"kind":"join.request","join_request_id":"jr-0000000000000001",
+ "device_id":"00a1000000001234","kid":"b3…(64 hex)","model":17,"hw_rev":2,"cert_serial":90211,
+ "fw_version":17039360,"capability":["relay"],"requested_role":"endpoint",
+ "previously_removed":false,"kid_conflict":false,
+ "via":{"gateway":"00a1000000000001","proxy":"00a1000000000777","authority_hops":2,"joiner_rssi_dbm":-60},
+ "deadline_ms":2000,"attempt":1}
+// join.decide allow → 台帳commit後に応答
+{"state":"committed","join_request_id":"jr-0000000000000001","device_id":"00a1000000001234",
+ "verdict":"allow","role":"endpoint","generation":1,"member_cert_serial":1,
+ "operation_id":"op-0000000000000001","applied":"current_attempt"}
+// join.decide pending / deny → "state":"recorded"（"applied":"next_attempt"は期限後の決定）
+// membership.revoke
+{"operation_id":"op-0000000000000002","state":"committed","device_id":"00a1000000001234",
+ "generation":1,"rs_epoch":1,"gk_rotation":{"from":1,"to":2,"state":"staged"},
+ "distribution":"not_implemented"}
+// operations.get op-…2
+{"operation_id":"op-0000000000000002","kind":"revoke","device_id":"00a1000000001234","generation":1,
+ "state":"committed","rs_epoch":1,
+ "distribution":{"state":"not_implemented","reached":null,"members":0,"unknown":0},
+ "gk_rotation":{"from":1,"to":2,"state":"staged"},"created_ms":1790000000030}
+// members.get
+{"member":{"device_id":"00a1000000001234","kid":"b3…","state":"member","generation":1,"role":"endpoint",
+ "member_cert_serial":1,"confirm_state":"allowed_unconfirmed","delivered":true,"model":17,"hw_rev":2,
+ "cert_serial":90211,"approved_ms":…,"delivered_ms":…,"confirmed_ms":null,"last_seen_ms":…,
+ "removed_ms":null,"removal_reason":null}}
+```
+
+エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`不一致・削除済みへのrevokeは`CONFLICT`、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
+
+**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`gk.rotated`・`cutover.progress`は対応する機能（P5・P6-2）が無いので出さない。
+
+**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かず同じMemberCertを再発行（`member.reissued`）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。同じNodeIdで別kidは`kid_conflict:true`で、allowは`CONFLICT`（先に既存membershipをrevokeする）。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
+
+**永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由）、`ledger`（approve/revokeのSHA-256 hash chain。起動時に検証し、切れていれば拒否）、`rrs`（発行した全RRS1）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertを発行する`site-cert`（P7-2）は未実装。
+
+**GKの境界（P5）**：初回起動時にGK epoch 1を生成してSitePackageに載せる。削除時は次のGKを`staged`で作るだけで、配布・activation・24時間周期の更新はP5。stagedは新規参加者にも渡さない（全memberに配るまでactivateしない）。
+
+**transport**：`site::transport::JoinTransport`（`RelayUp`＝0x40の中身、`Outbound::Down`＝0x41、`Outbound::Abort`＝0x42、step 1〜4＝EDHOC message、5＝EDHOC error、status 0継続／1最終）とin-process実装。USBへの結線（HostOps codec・capability bit）は並行作業（P3-2）の後に統合者が`UsbJoinRelay`経由で行う。authority channel（JoinConfirm→`member_confirmed`）の受け口はあるが、P5までmemberは`allowed_unconfirmed`のまま。
+
+**試験**：`cargo test -p routeloom-edhoc`（RFC 9529、method 0、interop replay）、`cargo test -p routeloom-host site::`（状態機械、SQLite、再起動後の同一MemberCert再発行、削除とRRS1／RemovalNoticeの検証、admission上限、store故障、API面）、daemonのAPI1 socket経由で`KGuardMock`が`SiteAdmin`を操作する端から端までの試験（未割当→pending→割当→Allowを`join_allow_verify`で検証、deny not_here、ACL、idempotency、削除）。
+
 ## 3. 永続化（host）
 
 既存の`sqlite_store.rs`系のstoreに次の表を足す（名前は案）。
@@ -187,12 +253,12 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 
 | ID | 内容 |
 |---|---|
-| V1-H01 | `join.request`→`join.decide(allow)`→台帳commit→`member.confirmed`の順序 |
-| V1-H02 | 期限後のdecisionが次の試行で反映 |
-| V1-H03 | idempotency：同key再送は同結果、別verdictはConflict |
-| V1-H04 | `membership.revoke`の`expected_generation`不一致はConflict |
-| V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数 |
-| V1-H06 | ACL：read権限では`join.decide`不可 |
-| V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行 |
+| V1-H01 | `join.request`→`join.decide(allow)`→台帳commit→`member.confirmed`の順序（**P3-3でhost試験済み**：commit後にだけ`committed`とmessage_4、`member_confirmed`の受け口で`active`。実機のJoinConfirmはP5） |
+| V1-H02 | 期限後のdecisionが次の試行で反映（**P3-3でhost試験済み**：allow／deny、`applied:"next_attempt"`） |
+| V1-H03 | idempotency：同key再送は同結果、別verdictはConflict（**P3-3でhost試験済み**、API1 socket経由を含む） |
+| V1-H04 | `membership.revoke`の`expected_generation`不一致はConflict（**P3-3でhost試験済み**） |
+| V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数（**P3-3は`committed`まで**：配布（P5/P6）が無いので`distribution:"not_implemented"`、全memberを`unknown`と数える） |
+| V1-H06 | ACL：read権限では`join.decide`不可（**P3-3でhost試験済み**：`MEMBERSHIP_READ`だけのprincipalは一覧可・revoke不可、grant無しは`site.status`も不可） |
+| V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行（**P3-3でhost試験済み**：SQLite storeを開き直し、同じMemberCert byte列を再発行） |
 | V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
 | V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。機器の保守verbとHILは未実施） |
