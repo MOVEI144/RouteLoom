@@ -28,6 +28,56 @@ config ROUTELOOM_PEER_MAC
     string "Static peer station MAC (aa:bb:cc:dd:ee:ff)"
     default "00:00:00:00:00:00"
 
+config ROUTELOOM_ROUTE_GATEWAY_SCOPED
+    bool "Gateway-scoped routing profile (100-node sites)"
+    default n
+    help
+        Switches the node from the flat routing profile to the
+        gateway-scoped profile (docs/design/sdk-v1/routing-scale.md,
+        issue #41): routes to the listed gateways are proactive and
+        refreshed along the gateway tree; other destinations are learned
+        up the tree or on demand (ROUTE_REQUEST). Every node of a site
+        must enable it with the same gateway set. Disabled keeps the flat
+        profile and the SDK route timers (5000 ms / 15000 ms) unchanged.
+
+config ROUTELOOM_ROUTE_GATEWAY_1
+    hex "Primary route gateway Node ID"
+    default 0x1
+    depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+    help
+        The site gateway, normally the bridge_node's ROUTELOOM_NODE_ID.
+        Preferred uplink when a second gateway is configured. Must be
+        non-zero; the build fails otherwise.
+
+config ROUTELOOM_ROUTE_GATEWAY_2
+    hex "Secondary route gateway Node ID; 0 = none"
+    default 0x0
+    depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+    help
+        Optional second gateway of the site (at most two). Must differ
+        from the first gateway.
+
+config ROUTELOOM_ROUTE_PERIOD_MS
+    int "Scoped route advertisement period (tick), ms"
+    range 1000 60000
+    default 5000
+    depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+    help
+        Scheduling tick of the scoped profile. Each gateway-tree link is
+        refreshed once per 6 ticks (route_refresh_ticks, SDK default).
+
+config ROUTELOOM_ROUTE_LIFETIME_MS
+    int "Scoped route lifetime (lease), ms"
+    range 14000 3600000
+    default 90000
+    depends on ROUTELOOM_ROUTE_GATEWAY_SCOPED
+    help
+        Lease of every learned route. The lease rule (routing-scale.md
+        section 5) requires lifetime >= (2 x 6 + 2) x period, i.e. at least
+        70000 ms at the 5000 ms tick; the build fails on a violating pair
+        (the node would otherwise refuse to start with
+        ROUTE_LIFETIME_BELOW_REFRESH_BOUND). Product value: 90000 ms.
+
 config ROUTELOOM_DEVELOPMENT_KEY_HEX
     string "DEVELOPMENT ONLY 32-byte network master key in hex"
     default "524f5554454c4f4f4d2d444556454c4f504d454e542d4b45592d4f4e4c592121"

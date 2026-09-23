@@ -120,6 +120,10 @@ jobs:
         #                      (bit4) set, so both endpoints attach.
         #   config_target_on — reference_node with CONFIG_ROUTELOOM_CONFIG=y,
         #                      the NVS-journal ConfigTarget path.
+        #   route_scoped     — CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y (issue
+        #                      #41 gateway-scoped routing profile, 5 s tick /
+        #                      90 s lease defaults; the bridge lists itself,
+        #                      the reference node names gateway 0x1).
         # The base matrix keeps every feature OFF (defaults), so both
         # branches compile. Compile-time coverage only — never a hardware
         # or qualification claim.
@@ -143,6 +147,16 @@ jobs:
             profile: normal
             autonomy: off
             features: config_target_on
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: route_scoped
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: route_scoped
           # Paired bench cells: two ESP32-C3 boards flashed as a real
           # 2-node mesh (static neighbor + RLD1 discovery lane running
           # alongside). autonomy=discover enables CONFIG_ROUTELOOM_DISCOVERY
@@ -206,6 +220,11 @@ jobs:
             # reference_node opt-in: the RCC1 permit journal endpoint.
             printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.features }}' = route_scoped ]; then
+            # Gateway-scoped routing profile (issue #41); the gateway id,
+            # tick and lease come from the Kconfig defaults.
+            printf 'CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y\n' >> sdkconfig
+          fi
           idf.py build
           if [ '${{ matrix.profile }}' = deep_sleep ]; then
             # Prove the kconfig symbol survived re-resolution and the
@@ -240,6 +259,15 @@ jobs:
               grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig ;;
+          esac
+          case '${{ matrix.features }}' in
+            route_scoped)
+              # Prove the scoped symbols resolved to the product timers.
+              grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_ROUTE_PERIOD_MS=5000$' sdkconfig
+              grep -q '^CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS=90000$' sdkconfig
+              ;;
+            *) ! grep -q '^CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED=y' sdkconfig ;;
           esac
           case '${{ matrix.features }}' in
             paired_bridge)
