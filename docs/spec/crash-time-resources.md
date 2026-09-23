@@ -32,7 +32,7 @@ Message ID、round、crypto counterは別。保存済み同一ciphertextをそ�
 
 ## 3. 期限
 
-既定WALL_ELAPSED_VALIDITYは停止時間も寿命に含む。通常message寿命は最大30000ms、roundでも延長しない。信頼できる経過時間の区間が[lo,hi]ならremainingからhiを差し引く安全側判定を使う。hiが寿命を超えたらEXPIRED（安全側）で送信しない。区間そのものが得られなければTIME_UNCERTAINで保留し、経過不明を0にしない。
+既定WALL_ELAPSED_VALIDITYは停止時間も寿命に含む。通常message寿命は最大30000ms、roundでも延長しない。portable coreの送信API（`send`／`send_applied`／`resume_delivery`／`send_service`／`resend_service`）は30000ms（`kMaxMessageLifetimeMs`）を超える寿命を短縮せずInvalidArgumentで拒否する。信頼できる経過時間の区間が[lo,hi]ならremainingからhiを差し引く安全側判定を使う。hiが寿命を超えたらEXPIRED（安全側）で送信しない。区間そのものが得られなければTIME_UNCERTAINで保留し、経過不明を0にしない。
 
 RUNNING_TIME_ONLYを明示的に選ぶ場合は停電中を数えない別契約。古い副作用命令への既定にせず、終端も最大保持・認可条件を受け入れたprofileでだけ提供する。非対応ならUNSUPPORTED。
 
@@ -54,10 +54,22 @@ APPLIED provider failoverは既定false。変更を許すのはshared idempotenc
 
 物理Wi-Fi callbackの受信bufferはまだSDK配送受理ではない。未認証frameはcheap parse→global ingress quota→cookie/transaction→bounded assembly→暗号確認→member admissionの順。cookieだけでは機器認証ではない。
 
-Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transactionで追加保護されるPeerを含めnonbroadcast19を越えない。reply lease同時3、link transaction寿命1500msを初期上限とする。ただし物理TX不明中のPeerをtimeoutだけで削除しない。TX隔離・driver停止の安全確認が先。
+Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transactionで追加保護されるPeerを含めnonbroadcast19を越えない。reply lease同時3、link transaction寿命1500msを初期上限とする（CORE_FIXED_250実装では未実装：`PeerLeasePurpose::ExpectedReply`は宣言のみで、reply lease数とtransaction寿命は強制されていない。issue #55）。ただし物理TX不明中のPeerをtimeoutだけで削除しない。TX隔離・driver停止の安全確認が先。
 
 予約不能なら通常はBUSYを返すが、reply容量自体が無ければBUSY送信も保証しない。drop理由をローカル記録し、相手側は既存の有限retryで回復する。全接続へbroadcast BUSYを散布しない。
 
 ## 6. 試験の意味
 
 `tests/test_contracts.py`ではcommit前後・区間利用後のcold reboot、期限不明、重複grant、予約rollback、APPLIED failover拒否を小モデルで検査する。NVSの実atomicity、暗号演算、実callback排出、真の分散routingは別の実装／HILゲート。
+
+## 7. 寿命資源の既知上限（CORE_FIXED_250 prototype、未解決）
+
+次の上限は現行実装の性質であり、設計変更（G-SEC／G-POWERで扱う）まで解消しない。配備判断の前提として明記する。数値はissueの概算で、実機計測ではない。
+
+| 資源 | 現行の上限 | 主因 | 追跡 |
+|---|---|---|---|
+| epoch／route generation | 起動（deep-sleep wakeを含む）ごとに16bit値を1消費。65,535回の起動でwrapし、ピアのreplay floor・route tableと自身のTX counter leaseが当該ノードを恒久拒否する。1分周期wakeなら約45日 | Wire v1のepochがu16、boot sessionから導出 | #29、#48 |
+| NVS entry数 | ピアごとのcounter lease／replay floor／windowキーに削除経路がない。既定24KiB NVSで累計12〜38ピアに達すると新規通信とboot session書込が失敗し得る | 鍵とcounterの削除は再ハンドシェイク設計が前提 | #37 |
+| flash書込回数 | 認証済み受信frameごとにreplay windowをcommit（終端では最大2 commit）。TX counterは256枚ごと、context溢れ時はframeごと。既定NVSでは持続10 frame/sで約1ヶ月の概算 | fail-closedなreplay永続化 | #30、#57 |
+| remote config | 受理1件≈7〜8 commit。rate上限（1/min＋burst1）で連続運用すると摩耗寿命は概算1〜2年。人手運用なら問題にならない | ConfigJournalの2スロット耐電断commit | #57 |
+

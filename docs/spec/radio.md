@@ -159,7 +159,7 @@ HOP_ACCEPT前にframe、dedup、transaction、reply Peer lease、ACK slotを一�
 
 初回DATAにはSDKの無条件random jitterを加えない。0〜20msはlink retryのみ。driver CCA/backoffは残る。認証・受理後のHOP_ACCEPTを、当該DATAのforwardより先に予約queueへ投入するが、外部無線による送信時刻までは保証しない。END_RECEIPT受領時点のAPI完了と最後のlink ACK送信時間は別計測。
 
-16slotsは予約TDMAではなく応答時刻の分散。DISCOVER/OFFERは全body96B以下。requesterは一度に1transaction、cold-startに0〜1000msのばらつき、失敗後500〜2000msから最大60秒へbackoffする（sleep予算が優先）。responderはglobal応答上限を守り、要求が混んだときの候補選択をrotateして一つの要求に固定しない。
+16slotsは予約TDMAではなく応答時刻の分散。DISCOVER/OFFERはRLD1 envelope全体で160B以下（`kRld1MaxTotal`、scoped OFFERは実測104B）。requesterは一度に1transaction、cold-startに0〜1000msのばらつき、失敗後500〜2000msから最大60秒へbackoffする（sleep予算が優先）。responderはglobal応答上限を守り、要求が混んだときの候補選択をrotateして一つの要求に固定しない。
 
 高密度ではrequest nonce由来の応答抽選率を1、1/2、1/4、1/8へ抑えられるが、未認証の密度値だけで変更しない。窓を延長する場合はrequesterのdwellと明示交渉し、200msの既定滞在を黙って越えない。この適応は実RF認定までexperimental。単独cold Joinと100台同時JoinのSLOは別。
 
