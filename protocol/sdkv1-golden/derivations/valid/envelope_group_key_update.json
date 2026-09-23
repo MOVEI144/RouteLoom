@@ -1,0 +1,13 @@
+{
+  "codec": "authority_envelope",
+  "counter": 16909060,
+  "ctx_id": 1431655765,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "header_hex": "010255555555000001020304",
+  "iv_hex": "f4480a89a89bc758b4c073d3",
+  "name": "envelope_group_key_update",
+  "nonce_hex": "f4480a89a89bc758b5c270d7",
+  "type": 2,
+  "version": 1
+}

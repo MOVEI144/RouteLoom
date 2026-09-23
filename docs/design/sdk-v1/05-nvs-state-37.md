@@ -48,6 +48,8 @@ RLP1 slot（84B）:
 80 u32 crc32
 ```
 
+空slot（`state=0`）は`purpose`以降の全fieldが0（RMSを消去済み）。未書込み・CRC不一致のslotも空として扱う。sealは持たない（1 slotの書込みが途中で切れてもCRCで空になり、帰結はfull EDHOCだけ）。P1-3の`ResumeCache`はslot内容をRAMに持たず毎回storageを走査する（slot数によらずRAM 96B、C3 gatewayでも同じ）。
+
 | 規則 | 内容 |
 |---|---|
 | 書く時 | full EDHOC完了時だけ（新RMS）。再開（RLRES1）では書かない |

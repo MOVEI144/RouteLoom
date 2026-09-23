@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r2",
+  "encoded_hex": "00000000415263748596a7b8c9daebfc0d1e2f400000000000000007000000040000000c838ed6a351ea810497b339768300f323",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r2_zero_cid",
+  "note": "cid_R must be non-zero",
+  "reason": "zero_context_id"
+}

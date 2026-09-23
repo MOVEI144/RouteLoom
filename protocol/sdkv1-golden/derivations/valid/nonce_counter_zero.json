@@ -1,0 +1,9 @@
+{
+  "codec": "aead_nonce",
+  "counter": 0,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "iv_hex": "3c4d5e6f8091a2b3c4d5e6f7",
+  "name": "nonce_counter_zero",
+  "nonce_hex": "3c4d5e6f8091a2b3c4d5e6f7"
+}

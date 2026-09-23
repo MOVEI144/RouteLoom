@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r2",
+  "encoded_hex": "00000000415263748596a7b8",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r2_ok_without_mac",
+  "note": "status 0 must be the 52-byte authenticated form",
+  "reason": "length_mismatch"
+}

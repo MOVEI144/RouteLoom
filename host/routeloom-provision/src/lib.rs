@@ -23,6 +23,8 @@
 //! - [`signer`] — `RootSigner` seam, the dev `FileRootSigner`, keypair
 //!   generation and P-256 helpers.
 //! - [`nvs`] — the manufactured `rltrust`/`rlcred`/`rlboot` blob set.
+//! - [`sdkv1`] — SDK v1 RLCW1 certificates and RLI1/RLS1/RRS1/RLP1 records
+//!   (docs/design/sdk-v1/, golden vectors in `protocol/sdkv1-golden/`).
 //! - [`cbor`], [`crc32`], [`sha256`] — shared byte primitives mirroring the
 //!   device's restricted canonical-CBOR helpers, `crc32_iso_hdlc` and
 //!   `Sha256`.
@@ -33,6 +35,7 @@ pub mod credential;
 pub mod image;
 pub mod manifest;
 pub mod nvs;
+pub mod sdkv1;
 pub mod sha256;
 pub mod signer;
 pub mod verify;

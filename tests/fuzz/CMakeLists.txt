@@ -28,6 +28,8 @@ set(ROUTELOOM_FUZZ_TARGETS
   host_ops
   migration
   cose
+  rlres1
+  sdkv1
 )
 
 foreach(target ${ROUTELOOM_FUZZ_TARGETS})
@@ -51,3 +53,11 @@ foreach(target ${ROUTELOOM_FUZZ_TARGETS})
                    ${CMAKE_CURRENT_SOURCE_DIR}/corpus/${target}
                    -runs=1 -seed=7)
 endforeach()
+
+# RLRES1 (sdk-v1 plan P1-5): besides the shared corpus replay + 1 mutation,
+# a longer deterministic mutation run over its committed seeds (genuine
+# transcripts selected by mode byte) so ctest exercises the forged-message
+# invariants on every compiler, not only in the libFuzzer CI job.
+add_test(NAME fuzz_rlres1_mutation
+         COMMAND fuzz_rlres1 ${CMAKE_CURRENT_SOURCE_DIR}/corpus/rlres1
+                 -runs=4000 -seed=11)

@@ -71,20 +71,23 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: C++ wire and USB golden-vector tests (valid + invalid)
+      - name: C++ wire, USB and SDK v1 golden-vector tests (valid + invalid)
         shell: bash
         run: |
           set -euo pipefail
           cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
-          cmake --build build --parallel 2 --target routeloom_golden_tests routeloom_usb_tests
-          ctest --test-dir build --output-on-failure -R 'routeloom_(golden|usb)_tests'
+          cmake --build build --parallel 2 --target routeloom_golden_tests routeloom_usb_tests routeloom_key_schedule_tests routeloom_sdkv1_golden_tests
+          ctest --test-dir build --output-on-failure -R 'routeloom_(golden|usb|key_schedule|sdkv1_golden)_tests'
       - name: Rust toolchain
         run: |
           rustup toolchain install 1.85.1 --profile minimal
           rustup override set 1.85.1
       - name: Rust wire and USB golden-vector tests
         working-directory: host
-        run: cargo test -p routeloom-wire -p routeloom-protocol
+        run: cargo test -p routeloom-wire -p routeloom-protocol -p routeloom-keysched
+      - name: Rust SDK v1 golden vectors (RFC 6979 re-sign must match)
+        working-directory: host
+        run: cargo test -p routeloom-provision --test sdkv1_golden
       - name: Regenerate shared vectors and require byte-identical files
         shell: bash
         run: |
@@ -93,7 +96,12 @@ jobs:
           cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
           cargo run --manifest-path host/Cargo.toml -p routeloom-provision --example gen_provisioning_golden
           python3 tools/gen_autonomy_vectors.py
-          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden
+          python3 tools/gen_sdkv1_derivation_vectors.py
+          python3 tools/gen_sdkv1_vectors.py
+          git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden
+          # git diff ignores untracked files: a generator that starts
+          # emitting an unreviewed vector must fail too.
+          test -z "$(git status --porcelain -- protocol/sdkv1-golden)"
   firmware:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -353,7 +361,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Debug
           cmake --build build-fuzz --parallel 2 \
             --target fuzz_wire_frame fuzz_usb_codec fuzz_autonomy \
-                     fuzz_endpoint fuzz_host_ops fuzz_migration fuzz_cose
+                     fuzz_endpoint fuzz_host_ops fuzz_migration fuzz_cose fuzz_rlres1 fuzz_sdkv1
       # Bounded CI-time fuzzing — NOT continuous fuzzing. Each target gets a
       # 60 s coverage-guided run over its seed corpus on top of the corpus
       # regression replay that ctest already runs on every platform. This is
@@ -365,7 +373,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p fuzz-artifacts
-          for target in wire_frame usb_codec autonomy endpoint host_ops migration cose; do
+          for target in wire_frame usb_codec autonomy endpoint host_ops migration cose rlres1 sdkv1; do
             echo "=== fuzz_${target} ==="
             # libFuzzer wants the corpus dir to exist; it also accumulates
             # newly discovered coverage units here for artifact upload.

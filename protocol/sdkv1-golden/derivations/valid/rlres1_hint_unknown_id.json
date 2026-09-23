@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_hint",
+  "encoded_hex": "0100000071a03e2a817e281e",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "rlres1_hint_unknown_id",
+  "rid_hex": "71a03e2a817e281e",
+  "status": 1
+}

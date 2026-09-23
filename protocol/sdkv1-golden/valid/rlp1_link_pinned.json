@@ -1,0 +1,18 @@
+{
+  "codec": "rlp1",
+  "created_gk_epoch": 203,
+  "expect": "ok",
+  "flags": 1,
+  "format": "routeloom-sdkv1-golden-v1",
+  "last_used_boot": 512,
+  "name": "rlp1_link_pinned",
+  "network": 13054454845,
+  "peer": 45317471250417527,
+  "peer_cert_hex": "d28443a10126a0587ba4011b5173000000000042021b00a100000000077708a101a50102032620012158200b0aeb1a218f4b35280f479f05879413d129dd861e8aa840ffdf12e8981a2601225820d01241864371171509917cfc677ff4cf4d52e9352bc90f2e73e9c18baf29c6983a0001000086031b000000030a1b2c3d02010319113d5840e079be6c490ee9625bbfad94703ced4a745141cfe3fcda96e46b0aa3e392ec59749cb92c87b4bca982279f98b35ddd67226d131cb02ffd825034e32cf755e823",
+  "peer_cert_id_hex": "7bab16de6d80fe1c",
+  "peer_generation": 1,
+  "purpose": 1,
+  "record_hex": "524c50310101010100a1000000000777000000030a1b2c3d7bab16de6d80fe1c00000001000000cb0000020000000000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebff36bc5c1",
+  "rms_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "state": 1
+}

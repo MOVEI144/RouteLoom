@@ -1,0 +1,9 @@
+{
+  "codec": "authority_envelope",
+  "encoded_hex": "01040000000000000000000500000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "envelope_zero_ctx",
+  "note": "ctx_id must be non-zero",
+  "reason": "zero_context_id"
+}

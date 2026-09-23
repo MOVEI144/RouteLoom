@@ -24,30 +24,32 @@ R1  I→R  (60B、pending用はticket付きで最大109B)
  28 u32 cid_I                 — I側の受信context id（03 §4.2）
  32 u32 site_epoch | 36 u32 rs_epoch | 40 u32 gk_epoch
  [purpose=5のみ: u8 ticket_len | ticket ≤48B]
- .. 16B mac_I = first16(HMAC(K_auth, "R1" 0x00 || binding || 上記全field))
+ .. 16B mac_I = first16(HMAC(K_auth, "RouteLoom/v1/R1" 0x00 || binding || 上記全field))
 
 R2  R→I  (52B)
   0 u8  status (0 ok, 1 unknown_id, 2 expired, 3 revoked_hint) | 1 u8 flags | 2 u16 reserved
   4 16B nonce_R | 20 u32 cid_R
  24 u32 site_epoch | 28 u32 rs_epoch | 32 u32 gk_epoch
- 36 16B mac_R = first16(HMAC(K_auth, "R2" 0x00 || binding || R1 || R2[0..36)))
-      status≠0 の時はmac無し（12B）＝未認証hint。Iはfull EDHOCへ移る
+ 36 16B mac_R = first16(HMAC(K_auth, "RouteLoom/v1/R2" 0x00 || binding || R1 || R2[0..36)))
+      status≠0 の時はmac無し（12B）＝未認証hint：0 status | 1 flags=0 | 2 reserved=0 | 4 8B rid（R1のridの写し）。
+      Iはfull EDHOCへ移る
 
 R3  I→R  (16B)
-  0 16B mac_I3 = first16(HMAC(K_conf, "R3" 0x00 || TH))
+  0 16B mac_I3 = first16(HMAC(K_conf, "RouteLoom/v1/R3" 0x00 || TH))
 ```
 
 導出（HKDF-SHA-256、[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)）：
 
 ```text
-K_auth = HKDF(salt="RouteLoom/v1/resume-auth", IKM=RMS, info=purpose||network u64||node_I||node_R, 32)
+K_auth = HKDF(salt="RouteLoom/v1/resume-auth", IKM=RMS,
+              info="RouteLoom/v1/resume-auth" 0x00||purpose||network u64||node_I||node_R, 32)
 TH     = SHA-256(R1 || R2)
 PRK    = HKDF-Extract(salt = nonce_I || nonce_R, IKM = RMS)
-K_conf = HKDF-Expand(PRK, "resume-confirm" 0x00 || TH, 32)
-key/iv(dir) = HKDF-Expand(PRK, "resume-key" 0x00 || purpose || dir || network || node_I || node_R || cid_I || cid_R || TH, 28)
+K_conf = HKDF-Expand(PRK, "RouteLoom/v1/resume-confirm" 0x00 || TH, 32)
+key/iv(dir) = HKDF-Expand(PRK, "RouteLoom/v1/resume-key" 0x00 || purpose || dir || network || node_I || node_R || cid_I || cid_R || TH, 28)
 ```
 
-`binding`は、link用ではRLD1の観測MAC（送信元・宛先）とheader digest（scope bindingと同じ考え方、[02-discovery-scope §2.4](../scope-gateway-config/02-discovery-scope.md)）、end/authority用ではorigin・destinationのNodeId。
+`binding`は、link用ではRLD1の観測MAC（送信元・宛先）とheader digest（scope bindingと同じ考え方、[02-discovery-scope §2.4](../scope-gateway-config/02-discovery-scope.md)）、end/authority用ではorigin・destinationのNodeId。凍結した形（[03](03-key-hierarchy.md) §2.2）：routed（end／authority／pending-join）は`SHA-256("RouteLoom/v1/resume-binding" 0x00 ‖ purpose ‖ node_I ‖ node_R)`、linkは`SHA-256("RouteLoom/v1/resume-binding" 0x00 ‖ 0x01 ‖ MAC_I ‖ MAC_R ‖ carrier_digest 32B)`（MACはinitiator→responderの向き、carrier_digestはP4-2のRLD1 carrierが定義）。authority／pending-joinの`node_R`はsite_id。
 
 ### 2.2 状態機械
 
@@ -61,6 +63,49 @@ key/iv(dir) = HKDF-Expand(PRK, "resume-key" 0x00 || purpose || dir || network ||
 | R | WAIT_R3 | 不正・期限切れ | 破棄（捕獲R1の再送はここで止まる） |
 
 Iは自分のcontextをR2検証後に有効化してよい：R2のmac_Rは自分の新しいnonce_Iを含むので再送できない。Rは相手の鍵確認（R3）を見るまで有効化しない。
+
+### 2.2.1 実装（P1-5、このbranch）
+
+[rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp)／`rlres1.cpp`の`rlres1::Engine`は、MeshNodeを持たない単独classとして両roleを実装する（P4-2の`HandshakeEngine`が駆動する）。heapもstaticも使わず、状態はinstance内の固定表だけ（`sizeof(Engine)`＝64bit hostで2200B、試験で上限2304Bを検査。ESP32-C3 gatewayを規模の下限として`kMaxInitiatorSessions`＝4、`kMaxResponderSessions`＝4、replay cache 16件）。時計は各呼び出しの`now`で注入し、乱数・context id・再開slot検索・RRS1判定は`Environment`経由。
+
+```text
+begin() ──R1──> [I: WAIT_R2]             on_r1() ─ 検査 ─> R2 ──> [R: WAIT_R3]（contextは未有効）
+on_r2(): 1通だけ受ける → SendAndInstall(R3) ／ Fallback(理由)
+on_r3(): 1通だけ受ける → Install ／ 破棄(理由)
+next_expired(now): 期限切れsessionを1件ずつ返す（Iはfull EDHOCへ）
+```
+
+各sessionは期待する1通だけを受け、それ以外は理由付きで拒否・計数する（`reject_count`）。拒否理由と試験（[test_rlres1.cpp](../../../tests/cpp/test_rlres1.cpp)、[test_key_schedule.cpp](../../../tests/cpp/test_key_schedule.cpp)、[fuzz_rlres1.cpp](../../../tests/fuzz/fuzz_rlres1.cpp)）：
+
+| 攻撃・事象 | 拒否理由 | contextの作成 |
+|---|---|---|
+| R1再送（完了後・WAIT_R3中） | `ReplayedNonce`（直近16件のnonce_I） | なし |
+| replay cacheから外れた古いR1 | R2は返すがWAIT_R3のまま期限切れ（`Timeout`） | なし（R3を作れない） |
+| R2再送（完了後）／古いR2を新sessionへ | `NoSession`／`BadMac`→Fallback | なし |
+| R3再送（完了後）／古いR3を新sessionへ／R3欠落 | `NoSession`／`BadMac`／`Timeout` | なし |
+| 自分のR1の反射、R2・R3の反射 | `Reflection`（自分のnonce_I）／`NoSession` | なし |
+| 同時開始（双方がR1） | 小さいNodeIdの側が`SimultaneousOpen`で拒否、大きい側が自分の開始を取り下げて応答 | 1組だけ |
+| GK epochが古い（RMS作成前、または2以上後ろ）／2以上先 | `StaleGkEpoch`／`FutureGkEpoch` | なし |
+| RMS期限（created_gk_epoch＋2 ≤ gk） | 開始側`SlotExpired`、応答側はmac検証後にhint expired | なし |
+| RRS1で世代失効 | `PeerRevoked`（応答側はhint revoked） | なし |
+| site_epoch不一致 | `SiteEpochMismatch` | なし |
+| 別現場（未知rid／別networkのslot／network違いのRMS／送信元の食い違い／観測MACの食い違い） | `UnknownResumptionId`（hint）／`WrongNetwork`／`BadMac`／`PeerMismatch`／`BadMac` | なし |
+| 短い・長い・壊れたR1/R2/R3、全bitの1bit反転 | `Malformed`（`DecodeError`付き）／`BadMac` | なし |
+| 順序違い（R2・R3を先に、R1をR2の位置に、R2をR3の位置に、別purpose） | `NoSession`／`Malformed` | なし |
+| 格下げ（偽hint、他人のrid、flags、status 0の12B化、purpose書換え、ticket除去、機器にauthority応答を要求） | `UnauthenticatedHint`／`HintMismatch`／`Malformed`／`UnknownResumptionId`／`PurposeNotServed` | なし（偽hintでもslotは無効化しない） |
+| 表の枯渇（開始4件、応答4件、応答rate、重複） | `TableFull`／`RateLimited`／`DuplicateSession`（追い出さない） | なし |
+| 乱数・context id不可 | `EntropyUnavailable`／`ContextIdUnavailable` | なし |
+
+**Resolved in implementation（P1-5、最も保守的な選択）**
+
+- 1 session＝1通：WAIT_R2はR2（hint・不正mac・壊れた形を含む）を1通受けた時点で終わる（§2.2の「mac不正→full EDHOC」をそのまま採る）。WAIT_R3も1通で終わる。攻撃者が1通注入すればfull EDHOCになるが、これは可用性の問題で鍵は作られない。
+- 未認証hint（12B）は`status ‖ flags=0 ‖ reserved=0 ‖ rid 8B`。hintを出すのは未知rid（mac検証不可）と、mac検証後の期限切れ・失効だけ。mac不正・replay・epoch不一致・表満杯は何も返さない（oracleを与えない）。
+- 応答側の検査順：形→purpose提供可否→反射→rid→送信元→network→mac_I→replay cache記録→期限・失効（hint）→site_epoch→gk_epoch→重複・同時開始→表→rate→乱数・context id。replay cacheはmac検証に通ったnonce_Iだけを記録し、16件を超えると古い順に上書きする（上書きで失うのは早期拒否だけで、WAIT_R3の鍵確認が本来の防御）。
+- gk_epochの許容幅：link／endは`|peer − 自分| ≤ 1`かつ`peer ≥ created_gk_epoch`（24時間更新1回分のoverlap）。authority／pending-joinはgk_epochを検査しない（GKが古いことが問合せの理由になるため）。rs_epochは拒否に使わず、`peer_rs_behind`／`local_rs_behind`として返す（[04](04-removal-revocation.md) §4の取得契機）。
+- 同一(peer, purpose)の進行中sessionは各role 1件。新しいR1が来ても進行中のsessionを置き換えない（`DuplicateSession`）。同時開始は小さいNodeIdの開始を残す（両側で同じ判断になる決定的規則）。
+- 応答側の期限も`1秒＋hop×0.3秒`（routedのR3もhopを渡るため。linkはhop 0で1秒）。hopは最大16。
+- 機器は既定でlink／endだけに応答し、authority／pending-joinの応答（Site Authority側）は明示設定が要る（`Limits::responder_purposes`）。
+- `configure()`は`site_epoch == network >> 32`を要求し、site_epochの変更（cutover）は全sessionを破棄する。`update_epochs()`はGK／RRS1 epochだけを更新できる。
 
 ### 2.3 用途別の使い方
 
@@ -142,8 +187,8 @@ T_total ≈ max(T_link + T_route, T_e2e) + 乱数起動待ち
 | ID | 内容 |
 |---|---|
 | V1-F01 | 再起動後、KGuard・authorityへの問合せ0件でREACHABLEまで戻る |
-| V1-F02 | RLRES1：R1再送・R2再送・R3欠落の各攻撃でcontextが作られない |
-| V1-F03 | RLRES1の鍵・mac共通vector（C++/Rust） |
+| V1-F02 | RLRES1：R1再送・R2再送・R3欠落の各攻撃でcontextが作られない。**このbranchで実行済み**（engine単体、`routeloom_rlres1_tests`＋`fuzz_rlres1`、§2.2.1） |
+| V1-F03 | RLRES1の鍵・mac共通vector（C++/Rust）。**このbranchで実行済み**（`protocol/sdkv1-golden/derivations/`、`routeloom_key_schedule_tests`、`routeloom-keysched`） |
 | V1-F04 | 中継器停止：予備近隣がREACHABLEなら暗号handshake 0件で経路切替 |
 | V1-F05 | RMS期限（gk_epoch+2）後はfull EDHOCになる |
 | V1-F06 | HIL：6台以上の一斉復電で復帰時間とT_edhocを実測 |

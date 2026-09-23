@@ -73,7 +73,7 @@ pub enum KeyLocation {
 }
 
 impl KeyLocation {
-    fn from_u8(value: u8) -> Option<Self> {
+    pub(crate) fn from_u8(value: u8) -> Option<Self> {
         Some(match value {
             0 => Self::None,
             1 => Self::NvsPlaintext,

@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r2",
+  "encoded_hex": "00000000415263748596a7",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r2_truncated",
+  "note": "11 bytes",
+  "reason": "truncated"
+}

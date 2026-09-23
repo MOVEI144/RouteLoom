@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r3",
+  "encoded_hex": "cda7ba9942460e2bc145205e5078f64d00",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r3_oversized",
+  "note": "17 bytes",
+  "reason": "oversized"
+}

@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r1",
+  "encoded_hex": "0000000071a03e2a817e281e2132435465768798a9bacbdcedfe0f201111111100000007000000030000000cce337f0209cad07c893af073c10cb0b7",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r1_purpose_zero",
+  "note": "purpose 0 is unassigned",
+  "reason": "bad_purpose"
+}
