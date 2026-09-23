@@ -40,7 +40,20 @@ RUNNING_TIME_ONLYを明示的に選ぶ場合は停電中を数えない別契約
 
 ## 4. dedup・receiptと副作用
 
-max lifetime30000ms＋late result30000msを通常retentionの最低設計値60000msとする。retentionは初回受理からで、duplicateで無限延長しない。接続context、入場rate、容量も制限する。期限前のprotected entryはLRUで追い出さない。時間不明の記録はそのまま容量を占め、新規admissionを止め得る。
+max lifetime30000ms＋late result30000msを通常retentionの設計値60000msとする（`kTerminalRetentionMs`。APPLIED結果保持、gateway receipt保持も同じ値から導出し、60000のliteralを散在させない）。retentionは初回受理からで、duplicateで無限延長しない。接続context、入場rate、容量も制限する。期限前のprotected entryはLRUで追い出さない。時間不明の記録はそのまま容量を占め、新規admissionを止め得る。
+
+dedup記録の保持は役割で分ける（issue #39）。期限はadmission時に `min(初回受理＋60000ms, horizon＋slack)` で決め、horizonは受信frame自身の残forwarding deadline（hop滞留を差し引き、30000msで頭打ち）とする。
+
+| 役割 | 責務 | slack | 最長 |
+|---|---|---|---|
+| 終端（自ノード宛DATAのpin） | アプリへのexactly-once。originの最終round・sleep復帰再送は全てorigin期限以前に届くので、期限後もlate result分保持 | 30000ms | 60000ms（max lifetimeのmessage） |
+| 非終端（中継の転送DATA・END_RECEIPT、originが消費したreceipt、component宛routed） | 同roundの二重forward抑止・再ACKと下流TransitFailureの中継。frameが有効な間だけ（routedはcomponent側dedupが二段目） | 5000ms（報告予算3000ms＋drain余裕） | 35000ms |
+
+中継記録を60000ms固定にすると、Reliable 1件でDATA＋END_RECEIPTの2記録を消費するため64記録の中継上限は約0.5msg/sだった。frame期限基準（既定寿命5000msで約10秒）では1中継の定常占有は約 `2×r×(L＋5秒)`、終端pinは約 `r×min(L＋30秒, 60秒)`（r：通過message率、L：寿命）。中継記録を早く手放しても、後続nodeの記録と終端pinがアプリへの二重配送を止める（中継での余分な再forwardは有界・計数付き）。
+
+容量はbuild時のresource profile定数とする（`dedup_entries`：leaf-small 32、relay-c3 96、gateway-s3 256。既定はrelay）。動的確保はしない。終端pinはpoolの7/8まで（残り1/8は非終端用予備）で、判定はpin数による。poolが満杯でもpin数が上限未満なら、期限切れ→Resolved→Evidenceの順で非終端記録を回収してpinを受理する。前hopごとの非終端記録は3/8までで、上限到達時はその前hop自身の回収可能な記録から回収する（他の前hopの記録は追い出さない）。転送中（Live）と終端pinは追い出さず、回収先がなければBUSY／計数付きdropで拒否する。
+
+既定のWALL_ELAPSED_VALIDITYでは寿命は停止時間を含み最大30000msなので、送信側が60000msを超えてsleepした永続pendingは復帰時に必ずEXPIREDとなり、元IDで再送しない。受信側pinが満了した後に同じMessageが届くことはない。60000ms以内の復帰再送は受信側pin（origin期限＋30000ms）の内側に届き抑止される。RUNNING_TIME_ONLY（§3）はこの保証の外で、長時間停止後の再送は受信側pin満了後に届き得る。
 
 同じMessageで不変payload／宛先のhashが変わればCONFLICT。終端DELIVEREDは新roundでも再適用せずreceiptを再送。同roundのduplicateは二重forwardしないが、FAILED後の新roundは再forward可能。
 
