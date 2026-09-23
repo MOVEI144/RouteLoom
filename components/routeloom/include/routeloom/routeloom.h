@@ -137,6 +137,7 @@ typedef struct rl_send_options {
   uint32_t abi_version;
   rl_delivery_class_t delivery;
   rl_priority_t priority;
+  /* 1..30000; larger values are refused with RL_STATUS_INVALID_ARGUMENT. */
   uint32_t lifetime_ms;
   uint8_t hop_limit;
   uint8_t reserved[7];
