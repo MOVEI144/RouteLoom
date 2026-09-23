@@ -21,7 +21,7 @@
   0  u32  magic "RLI1" (0x524C4931)
   4  u16  format = 1 | u16 used_len
   8  u32  schema_version = 1
- 12  u32  seal (0 pending / committed値は実装時に登録)
+ 12  u32  seal (0 pending / committed 0x1DE71771)
  16  u64  node_id                       — 事務所割当。0と全1は不可
  24  u8   key_location (RLC1と同じ値) | u8 flags | u8 anchor_count (1..3) | u8 reserved=0
           flags bit0 console_locked, bit1 strict_assignment (A2), 他0
@@ -37,7 +37,7 @@
 len-4    u32 crc32_iso_hdlc
 ```
 
-最大 160＋3×80＋4＋256＋4＝**664B**（slot上限1024B）。起動時検査：kid再計算、位置1なら公開鍵の再計算一致、全anchorがP-256曲線上、kind=SiteCAのactiveが1件以上、DevCertのsubject＝node_id・cnf＝pubkey・issuer署名はDevice CAなので機器側では**検証しない**（Device CA公開鍵を機器は持たない）。不一致は破損で、再導出しない。
+最大 160＋3×80＋4＋256＋4＝**664B**（slot上限1024B）。事務所で一度だけ書く記録なので、RLC1と同じく2 slotへ同一内容を書く（twin）。起動時検査：kid再計算、位置1なら公開鍵の再計算一致、全anchorがP-256曲線上、kind=SiteCAのactiveが1件以上、DevCertのsubject＝node_id・cnf＝pubkey・issuer署名はDevice CAなので機器側では**検証しない**（Device CA公開鍵を機器は持たない）。不一致は破損で、再導出しない。
 
 ## 3. 証明書profile RLCW1
 
@@ -53,6 +53,8 @@ len-4    u32 crc32_iso_hdlc
 | 見積もり長 | ≈192B | ≈198B | ≈208B |
 
 見積もり内訳：COSE_Sign1の枠（tag・array・protected・unprotected・payload bstr head・64B署名）≈75B＋payload（map head、iss/sub各10B、cnf≈79B、private claim≈17〜33B）。有効期限claim（exp/nbf）は既定で入れない。機器は信頼できる時刻を持たず、検証したつもりにならないため（[04](04-removal-revocation.md) §6）。
+
+実装（P1-2、[vector README](../../../protocol/sdkv1-golden/README.md)）で次を確定した：COSE_Sign1はtag 18付き・CWT tag 61なし、external AADは空、`cnf`はRFC 8747の`{1: COSE_Key}`でCOSE_KeyはRLC1のkid計算と同じ77B、署名はlow-Sのみ有効（証明書byte列を一意にし、RLP1の`peer_cert_id`と台帳digestを安定させる）。SiteCertの`usage`はbit0（Site Authority）だけ、MemberCertの`role`はbit0 endpoint／bit1 relay／bit2 gateway（0と未知bitは拒否、RLS1の`role`と同値）、`network`の上位32bitは`site_epoch`と一致必須。実長はDevCert 190B・SiteCert 191B・MemberCert 198B（最大208B）。
 
 MemberCertはgrant（[05本番認証 §3](../host-security-readiness/05-production-security.md)のMembershipGrant配列）を**置き換える**提案である。同じ情報（network、node、kid、role、authority世代、revision）をCWTへ移し、EDHOCのcredentialとして直接使えるようにする。kidはcnfの公開鍵から従来規則で計算する。
 
@@ -269,10 +271,13 @@ m3を検証できた未割当機器は、verdictに関係なくhostの**発見�
 
 どれかが不一致なら何も保存せず、その現場をDenyBlocked相当で24時間回避する（Site Authorityの不具合か攻撃なので自動再試行を急がない）。
 
-### 10.3 RLS1 — 現場所属記録（`rlsec`/`rlsite` 二重slot、最大708B）
+### 10.3 RLS1 — 現場所属記録（`rlsec`/`rlsite` 二重slot、最大712B）
+
+GK更新などで繰り返し書くため、trust storeと同じA/B交互書込みにする。その順序付けに`commit_seq`（offset 16）を実装時に追加したので、以下の16以降のoffsetは実際には+4ずれる（実layoutは[vector README](../../../protocol/sdkv1-golden/README.md)）。削除時は`state=0`で本文が全0の記録（tombstone、200B）を両slotへ書き、GK・DAMSの複製を残さない。seal committed値は`0x5173AB1E`。
 
 ```text
   0 u32 magic "RLS1" | 4 u16 format=1 | 6 u16 used_len | 8 u32 schema=1 | 12 u32 seal
+    (実装: 16 u32 commit_seq を挿入)
  16 u64 site_id               | 24 u64 network（全64bit）
  32 u32 assignment_generation | 36 u32 rs_epoch_floor（受理済みRRS1のepoch）
  40 u32 gk_epoch_current      | 44 u32 gk_epoch_next（0=無し）

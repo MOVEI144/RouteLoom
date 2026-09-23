@@ -11,8 +11,8 @@
 | P0-2 | 過去epochの`c*`掃除＋`cmax`証人、永続ピア数上限と`PEER_STATE_CAPACITY`（**このbranchで実装済み**：portable coreでhost試験、[05 §9](05-nvs-state-37.md)） | P0-1 | V1-N04, V1-N05 |
 | **P1 — 部品（hostのみ、共通vector）** | | | |
 | P1-1 | HKDF-SHA-256（**このbranchで実装済み**） | なし | V1-K12 |
-| P1-2 | RLCW1証明書codec（DevCert/SiteCert/MemberCert）C++とRust、`protocol/sdkv1-golden/` | P1-1 | V1-J14（証明書部分） |
-| P1-3 | RLI1/RLS1/RRS1/RLP1のcodecと二重slot store（trust_storeの規律を再利用）、電源断注入 | P1-2 | V1-J08, V1-N02 |
+| P1-2 | RLCW1証明書codec（DevCert/SiteCert/MemberCert）C++とRust、`protocol/sdkv1-golden/`（**このbranchで実装済み**：[rlcw1.hpp](../../../components/routeloom/include/routeloom/rlcw1.hpp)、Rust `routeloom-provision::sdkv1::cert`、独立Python生成器の共通vector。決めた細部は[vector README](../../../protocol/sdkv1-golden/README.md)） | P1-1 | V1-J14（証明書部分） |
+| P1-3 | RLI1/RLS1/RRS1/RLP1のcodecと二重slot store（trust_storeの規律を再利用）、電源断注入（**このbranchで実装済み**：[sdkv1_records.hpp](../../../components/routeloom/include/routeloom/sdkv1_records.hpp)／[sdkv1_store.hpp](../../../components/routeloom/include/routeloom/sdkv1_store.hpp)、全write・全byte境界の電源断試験。RLS1とRRS1記録にA/B用`commit_seq`を追加。NVS adapterは未実装） | P1-2 | V1-J08, V1-N02 |
 | P1-4 | 導出labelとinfo形式の凍結（group、RLRES1、AuthorityEnvelope）、C++/Rust vector（**このbranchで実装済み**：[key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)、`host/routeloom-keysched`、独立Python生成器`tools/gen_sdkv1_derivation_vectors.py`→`protocol/sdkv1-golden/derivations/`、[03 §2.2](03-key-hierarchy.md)） | P1-1 | V1-K01, V1-F03 |
 | P1-5 | RLRES1の状態機械（portable）と攻撃試験（**このbranchで実装済み**：[rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp)の単独`rlres1::Engine`、攻撃試験とfuzz、[06 §2.2.1](06-fast-rejoin.md)） | P1-4 | V1-F02 |
 | **P2 — EDHOC** | | | |
@@ -43,7 +43,7 @@
 | P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
 | P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P0-1／P0-2とP1-1、P1-4／P1-5はこのbranchに含まれる。
+P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P4-1はこのbranchに含まれる。
 
 ## 2. 試験計画
 
@@ -59,7 +59,7 @@ P0は他と独立して先に出せる。P0-1／P0-2とP1-1、P1-4／P1-5はこ�
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
 
 ## 4. 本番を名乗る条件
 
@@ -96,7 +96,7 @@ P0は他と独立して先に出せる。P0-1／P0-2とP1-1、P1-4／P1-5はこ�
 | Q5 | 本番の鍵保管tier（T1平文NVS／T2 flash暗号化＋secure boot） | 少なくともT2を推奨（eFuseは不可逆のため別承認） | 事務所手順と量産時間 |
 | Q6 | EDHOCライブラリ（libedhoc、MIT）への依存を認めるか | 認める（05の選定どおり） | 自作SIGMA-Iは監査負担が大きい |
 | Q7 | KGuardが応答しない時の既定 | pending（機器は再試行） | 自動allowにすると割当前の機器が入る |
-| Q8 | 1現場の規模上限、gatewayのhardware | 100台・gateway≤4、gatewayはS3 | gatewayの再開slot 128件と`rlsec` 128KiB |
+| Q8 | 1現場の規模上限、gatewayのhardware | 100台・gateway≤4。決定：gateway: S3/C3/C5（C3が容量設計の下限） | gatewayの再開slot 128件と`rlsec` 128KiB |
 | Q9 | 削除された機器は自動で未割当に戻るか、物理リセットまで沈黙か | 自動で未割当へ（10分holdoff） | 沈黙を選ぶと再利用に現地作業が要る |
 | Q10 | 隣接現場のKGuardに未割当機器が見えてよいか | よい（経路・RSSIを表示） | 見せない場合、未割当の報告自体ができない |
 | Q11 | GK更新周期と削除時の露出窓 | 24時間、削除時は即時（連結群で1分程度を目標） | 周期を短くすると配布の電波負荷が増える |

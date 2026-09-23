@@ -25,7 +25,7 @@ Site AuthorityのSAKが署名するCOSE_Sign1（ES256）。external AAD＝`"Rout
 28 entries[count] × 16B: node_id u64 | min_generation u32 | reason u8 (1 removed, 2 lost, 3 replaced, 4 blocked) | reserved 3B
 ```
 
-最大payload 28＋32×16＝540B、COSE枠込みで約620B。認証済みobject上限2048B以内。機器は`rlsec`/`rlrevo`の二重slot（各≤640B）に保存する。受理規則：署名がRLS1のSAKで通る、`site_id`/`network`一致、`rs_epoch`が保存済みより大きい、entry重複なし・node_id昇順、`site_epoch_floor`は後退しない。完全置換なので、途中の版を取り逃しても最新版だけで収束する。
+最大payload 28＋32×16＝540B、COSE枠込みで616B（COSE_Sign1はRLCW1と同じtag 18・`{1:-7}`・low-S）。認証済みobject上限2048B以内。機器は`rlsec`/`rlrevo`の二重slot（各≤640B）に保存する。保存記録は`magic "RRS1" | format | used_len | schema | seal(0x2E5E7C0D) | commit_seq u32 | 受信した署名object | CRC`で、32件時にちょうど640B（object無しの24Bがtombstone）。gossipで再送できるよう署名objectをそのまま保存する（P1-3で実装、[vector README](../../../protocol/sdkv1-golden/README.md)）。受理規則：署名がRLS1のSAKで通る、`site_id`/`network`一致、`rs_epoch`が保存済みより大きい、entry重複なし・node_id昇順、`site_epoch_floor`は後退しない。実装では加えて`flags=0`、`rs_epoch≥1`、`min_generation≥1`、`reason`は1〜4、`site_epoch_floor≤network>>32`を要求する。完全置換なので、途中の版を取り逃しても最新版だけで収束する。
 
 容量32件を超える場合は**site_epoch cutover**（§7）で空にする。古いentryを黙って追い出さない。
 

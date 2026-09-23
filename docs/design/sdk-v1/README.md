@@ -39,8 +39,10 @@
 | SecurityProviderのsession API（P4-1）：`tx_epoch`／`context_state`、`SessionInstaller`、予約scope `GroupLink`＝3、MeshNodeの保留配線 | [security.hpp](../../../components/routeloom/include/routeloom/security.hpp)、[03 §8.1](03-key-hierarchy.md) | 既定実装で全byte不変（V1-K10）、test Providerでの保留・epoch・非再使用を[test_session.cpp](../../../tests/cpp/test_session.cpp)で検査 |
 | 導出labelとinfo形式の凍結（P1-4：group鍵、RLRES1、AuthorityEnvelope header、AEAD nonce） | [key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)、`host/routeloom-keysched` | 独立Python生成器の`protocol/sdkv1-golden/derivations/`にC++（[test_key_schedule.cpp](../../../tests/cpp/test_key_schedule.cpp)）とRustがbyte一致（[03 §2.2](03-key-hierarchy.md)） |
 | RLRES1の状態機械（P1-5、単独class、両role） | [rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp) | replay・反射・古いepoch／世代・別現場・壊れた入力・順序違い・格下げ・表の枯渇を[test_rlres1.cpp](../../../tests/cpp/test_rlres1.cpp)と`fuzz_rlres1`で検査（[06 §2.2.1](06-fast-rejoin.md)） |
+| RLCW1証明書codec（P1-2） | [rlcw1.hpp](../../../components/routeloom/include/routeloom/rlcw1.hpp)、Rust `routeloom-provision`の`sdkv1::cert` | 独立Python生成器の[共通vector](../../../protocol/sdkv1-golden/README.md)（valid 17・invalid 76）をC++（検証）とRust（RFC 6979で再署名）がbyte一致で通過、fuzz |
+| RLI1/RLS1/RRS1/RLP1 codecと2スロットstore（P1-3） | [sdkv1_records.hpp](../../../components/routeloom/include/routeloom/sdkv1_records.hpp)／[sdkv1_store.hpp](../../../components/routeloom/include/routeloom/sdkv1_store.hpp) | 同じ共通vector、全write・全byte境界の電源断注入（[test_sdkv1_store.cpp](../../../tests/cpp/test_sdkv1_store.cpp)） |
 
-それ以外（EDHOC統合、証明書codec、RLI1/RLS1/RRS1、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、tooling、partition変更）は**未実装**。
+それ以外（EDHOC統合、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、tooling、partition変更、`rlsec`のNVS adapter）は**未実装**。
 
 ## この設計で主張しないこと
 
