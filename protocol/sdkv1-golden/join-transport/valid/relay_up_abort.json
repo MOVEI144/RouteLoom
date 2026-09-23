@@ -1,0 +1,23 @@
+{
+  "abort_retry_ms": 0,
+  "abort_status": 4,
+  "codec": "relay_object",
+  "dir": 1,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_00_hex": "01017e57ab1e00a10000000007770200000012340302c4040400000000",
+  "frame_00_type": 3,
+  "frame_count": 1,
+  "joiner_mac_hex": "020000001234",
+  "message_hex": "",
+  "name": "relay_up_abort",
+  "note": "proxy ends the relay (device silent)",
+  "object_hex": "01017e57ab1e00a10000000007770200000012340302c4040400000000",
+  "phase": 4,
+  "proxy": 45317471250417527,
+  "relay_id": 2119674654,
+  "rssi_u8": 196,
+  "state": 2,
+  "step": 3,
+  "wire_type": 3
+}

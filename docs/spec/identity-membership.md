@@ -36,6 +36,8 @@ DISCOVERは局所1hopだけ。未認証データを全網へFloodしない。coo
 
 preauth proxyは管理先以外へ任意のpayloadを送る公開relayにはしない。authorizationが完了する前にroute広告、中継許可、service広告を受け入れない。
 
+**ゼロタッチ参加（SDK v1、EXPERIMENTAL、[sdk-v1/02 §5](../design/sdk-v1/02-zero-touch-join.md)）**：RLD1 body v3のZeroTouch class（3）は、network 0の探索を`NETWORK_REQUIRED`で拒否するCommissioning classとは**別class**の例外として、未割当機器（RLI1あり・RLS1なし、Discovering）にnetwork_hint 0のDISCOVERを許す。応答するのは`zero_touch_open`のmemberだけで、交換（BootstrapAuth phase 4〜6、chunk/reply）は下表のAuthenticating／Memberの範囲内に収まる：機器は上り（m1/m3、R1/R3）送信・下り受信、proxyはその逆で、proxyのrelay先は自分のgatewayだけ（Wire FrameType 3〜6、hopごとのlink保護）。cookie検査前に組立てmemoryを使わず、proxyの同時relayは1件、新規m1は2秒に1件、組立ては1件1024B・3秒。`protocol/semantics.json`の`zero_touch_join`がこの範囲を記録する。
+
 ## 6. 再接続
 
 Deep Sleep復帰ではvalidな所属・暗号counterを復元できれば、保存済みchannel/相手へデータ本体から送る。再起動で暗号状態が不明なら安全なsession再確立を行うが、現場への承認し直しとは分離する。

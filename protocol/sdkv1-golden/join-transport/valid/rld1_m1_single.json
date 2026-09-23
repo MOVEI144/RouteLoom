@@ -1,0 +1,19 @@
+{
+  "carrier": "rld1",
+  "claimed_node": 45317471250420276,
+  "codec": "rld1_object_frames",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_00_hex": "524c44310103002c007d00000000000000a1000000001234101112131415161718191a1b1c1d1e1f00000000010401000100c0c1c2c3c4c5c6c7c8c9cacbcccdcecff7e2b5fed74d9c217548aa292512bf6b888747a6dfd390bf4f3dabff6ac30eee9feadba6e33eea6c37c3e302129d2a406ba92ef41f7c23ceb0f02f",
+  "frame_count": 1,
+  "name": "rld1_m1_single",
+  "network_hint": 0,
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "note": "m1 fits one BootstrapAuth frame (81 B body)",
+  "object_hex": "010401000100c0c1c2c3c4c5c6c7c8c9cacbcccdcecff7e2b5fed74d9c217548aa292512bf6b888747a6dfd390bf4f3dabff6ac30eee9feadba6e33eea6c37c3e302129d2a406ba92ef41f7c23ceb0f02f",
+  "object_id": 269554195,
+  "phase": 4,
+  "reply_count": 0,
+  "sender": "device",
+  "step": 1
+}

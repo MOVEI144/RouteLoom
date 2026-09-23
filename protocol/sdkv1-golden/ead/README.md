@@ -77,11 +77,34 @@ network = MemberCert network, role = MemberCert role. The AssignmentTicket
 format is not pinned: an A1 device ignores it; an A2 (strict) device denies
 an Allow without one and fails closed (`Unsupported`) with one.
 
+**Credential item (P3-1, label 65541, `3a 00 01 00 04`)**: libedhoc v2.3.2
+cannot carry `ID_CRED_x = {13 (kcwt): CWT}` by value, so ID_CRED_x is the
+kid (SHA-256 of the cnf COSE_Key) and the full RLCW1 certificate rides this
+critical item, value 1..256 B = one canonical certificate:
+
+| field | items, in this order |
+|---|---|
+| EAD_2 | SiteOffer · Credential(SiteCert) |
+| EAD_3 | JoinRequest · Credential(DevCert) |
+
+Exactly these two items once each, the message item first (the order the
+P3-3 Site Authority emits, `protocol/edhoc-interop/`; padding skipped);
+EAD_1/EAD_4 never
+carry a Credential, and the single-item walk (`join_ead_find`) refuses a
+field that holds one. `join_credential_check` requires the certificate to
+decode as the expected type and its cnf key to hash to the kid of the
+same message's ID_CRED_x (mismatch = authentication failure); chain and
+signature stay the caller's check (Site CA anchor on the device, Device CA
+at the Site Authority). libedhoc delivers EAD_2/EAD_3 before it
+authenticates the peer, so the credential provider can take the
+certificate from here (`tests/cpp/test_edhoc.cpp` runs the whole join
+exchange this way: message_1..4 = 55 / 362 / 341 / 353 B).
+
 ## Files
 
 - `valid/*.json` — `codec` (`hint`, `join_intent`, `site_offer`,
   `join_request`, `site_package`, `removal_notice`, `join_result`,
-  `ead_field`), the decoded fields, `value_hex` and `item_hex` (or
+  `ead_field`, `ead_field_credential`), the decoded fields, `value_hex` and `item_hex` (or
   `object_hex` / `ead_hex`), `expect: "ok"`. Allow vectors carry the
   verification context (`site_cert_hex`, `node`, `device_pubkey_hex`,
   `strict_assignment`, `sak_secret_hex`) and `verified`.
@@ -89,4 +112,6 @@ an Allow without one and fails closed (`Unsupported`) with one.
   `"error"` (every decoder rejects it) or `"deny"` (decodes, but the named
   check fails: SiteOffer vs SiteCert, JoinRequest vs DevCert, JoinIntent
   org_hint vs Site CA, RemovalNotice acceptance, or the Allow check — the
-  `join_allow_*` files are acceptance V1-J12).
+  `join_allow_*` files are acceptance V1-J12). `credential` vectors carry
+  `cert_type` and `kid_hex`: `"deny"` is a wrong type or kid, `"error"` a
+  certificate that does not decode.

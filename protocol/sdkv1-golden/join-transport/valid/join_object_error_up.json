@@ -1,0 +1,15 @@
+{
+  "codec": "join_object",
+  "cookie_hex": "",
+  "cookie_present": 0,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "message_hex": "cf8eea",
+  "name": "join_object_error_up",
+  "note": "EDHOC error",
+  "object_hex": "010405000000cf8eea",
+  "phase": 4,
+  "relay_status": 0,
+  "retry_after_ms": 0,
+  "step": 5
+}

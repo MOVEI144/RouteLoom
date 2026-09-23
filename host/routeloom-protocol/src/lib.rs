@@ -6,6 +6,7 @@ use std::fmt;
 pub mod dev_session;
 pub mod group_ops;
 pub mod host_ops;
+pub mod join_relay;
 pub mod node_status;
 
 pub const MAX_DECODED_FRAME: usize = 4096;

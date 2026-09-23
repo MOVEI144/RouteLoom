@@ -1,0 +1,12 @@
+{
+  "name": "join_relay_result_abort",
+  "direction": "d2h",
+  "kind": 19,
+  "flags": 0,
+  "session": 11827132529830895756,
+  "request": 502,
+  "inner_hex": "0163000e000500000000000000027e57ab1e",
+  "body_hex": "0000000000000008511ebfe39c869eb8ce1830479202f4b80163000e000500000000000000027e57ab1e",
+  "wire_hex": "07524c553101130109a4226a5f8009a08c01010101010301f6022a0101010101011408511ebfe39c869eb8ce1830479202f4b80163020e02050101010101010a027e57ab1efeeeeec700",
+  "note": "Invalid: the gateway no longer knows a finished relay"
+}

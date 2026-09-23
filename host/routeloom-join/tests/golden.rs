@@ -12,12 +12,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use routeloom_join::{
-    join_allow_verify, join_ead_find, join_ead_item_encode, join_org_hint, join_site_hint,
-    removal_notice_aad, JoinEad, JoinIntent, JoinRequest, JoinResult, RemovalNotice, SiteOffer,
-    SitePackage,
+    join_allow_verify, join_credential_check, join_ead_find, join_ead_find_with_credential,
+    join_ead_item_encode, join_org_hint, join_site_hint, removal_notice_aad, JoinEad, JoinIntent,
+    JoinRequest, JoinResult, RemovalNotice, SiteOffer, SitePackage,
 };
 use routeloom_json::Json;
-use routeloom_provision::sdkv1::cert::{cert_decode, cert_issue, CertClaims};
+use routeloom_provision::sdkv1::cert::{cert_decode, cert_issue, CertClaims, CertType};
 use routeloom_provision::signer::FileRootSigner;
 use routeloom_provision::Code;
 
@@ -311,7 +311,39 @@ fn valid(name: &str, doc: &Json) {
             let value = join_ead_find(&ead, label_named(text(doc, "expected"))).unwrap();
             assert_eq!(value, hex(doc, "value_hex"), "{name}");
         }
+        "ead_field_credential" => {
+            let ead = hex(doc, "ead_hex");
+            let expected = label_named(text(doc, "expected"));
+            let (cert, value) = join_ead_find_with_credential(&ead, expected).unwrap();
+            assert_eq!(cert, hex(doc, "credential_hex"), "{name}");
+            assert_eq!(value, hex(doc, "value_hex"), "{name}");
+            assert!(join_ead_find(&ead, expected).is_err(), "{name}");
+            assert_eq!(
+                join_ead_item_encode(JoinEad::Credential, cert).unwrap(),
+                hex(doc, "credential_item_hex"),
+                "{name}"
+            );
+            let claims = join_credential_check(
+                cert,
+                cert_type_named(text(doc, "cert_type")),
+                &hex(doc, "kid_hex"),
+            )
+            .unwrap();
+            assert_eq!(
+                claims.cert_type,
+                cert_type_named(text(doc, "cert_type")),
+                "{name}"
+            );
+        }
         other => panic!("{name}: unknown codec {other}"),
+    }
+}
+
+fn cert_type_named(name: &str) -> CertType {
+    match name {
+        "site" => CertType::Site,
+        "device" => CertType::Device,
+        _ => CertType::Member,
     }
 }
 
@@ -378,6 +410,23 @@ fn invalid(name: &str, doc: &Json) {
                 join_ead_find(&encoded, label_named(text(doc, "expected"))).is_err(),
                 "{name}"
             );
+        }
+        "ead_field_credential" => {
+            assert!(!deny, "{name}");
+            assert!(
+                join_ead_find_with_credential(&encoded, label_named(text(doc, "expected")))
+                    .is_err(),
+                "{name}"
+            );
+        }
+        "credential" => {
+            let checked = join_credential_check(
+                &encoded,
+                cert_type_named(text(doc, "cert_type")),
+                &hex(doc, "kid_hex"),
+            );
+            let code = checked.expect_err(name).code;
+            assert_eq!(code == Code::AuthorizationFailed, deny, "{name}: {code:?}");
         }
         other => panic!("{name}: unknown codec {other}"),
     }

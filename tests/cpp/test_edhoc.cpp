@@ -11,7 +11,11 @@
 //     SHA-256(COSE_Key) of real RLCW1 MemberCerts used as CRED_x — round
 //     trip, exporter agreement, and the failure cases (unknown kid, forged
 //     certificate, wrong key, tampered messages, exhausted arena).
-//  4. Arena / KeyStore unit behaviour, and the sizes and stack high-water
+//  4. The zero-touch join profile (sdk-v1/02 §3, §6; P3-1): DevCert/SiteCert
+//     by kid with the certificates in the Credential EAD item (label 65541),
+//     JoinIntent / SiteOffer / JoinRequest / JoinResult EAD, the real m1..m4
+//     lengths against the transport budgets, and the refusals.
+//  5. Arena / KeyStore unit behaviour, and the sizes and stack high-water
 //     this backend needs (printed; see docs/design/sdk-v1/ram-budget.md).
 //
 // Vectors: protocol/edhoc-rfc9529/chapter3.txt (tools/extract_rfc9529_vectors.py).
@@ -43,6 +47,8 @@
 #include "routeloom/edhoc.hpp"
 #include "routeloom/kdf.hpp"
 #include "routeloom/rlcw1.hpp"
+#include "routeloom/sdkv1_ead.hpp"
+#include "routeloom/sdkv1_join_transport.hpp"
 #include "test_sdkv1.hpp"
 #include "uECC.h"
 
@@ -1071,6 +1077,411 @@ std::size_t measure_stack() {
 }
 #endif
 
+// --- Zero-touch join profile with EAD (sdk-v1/02 §3, §6; P3-1) ------------------
+//
+// Device (Initiator, DevCert) and Site Authority (Responder, SiteCert/SAK),
+// method 0 / suite 2, ID_CRED_x = kid. The certificates travel in the
+// critical Credential EAD item (label 65541) ahead of SiteOffer (EAD_2) and
+// JoinRequest (EAD_3); each side's CredentialProvider resolves the kid to
+// the certificate its EadHandler staged from the same message, verifies it
+// under the right CA and matches the kid (join_credential_check). EAD_1 is
+// the JoinIntent, EAD_4 an Allow JoinResult. The real message lengths are
+// checked against the transport budgets (V1-J14, EDHOC-encoder part).
+
+using routeloom::sdkv1::JoinEad;
+
+Bytes item_field(const edhoc::EadItem* items, const std::size_t count, bool& ok) {
+  // Rebuild the canonical EAD field from libedhoc's parsed tokens so the
+  // strict join walkers apply: only critical join items are acceptable.
+  Bytes field;
+  ok = true;
+  for (std::size_t i = 0; i < count; ++i) {
+    const std::int32_t label = items[i].label;
+    if (label >= 0 || -static_cast<std::int64_t>(label) < 65537 ||
+        -static_cast<std::int64_t>(label) > 65541) {
+      ok = false;
+      return field;
+    }
+    routeloom::ByteBuffer<routeloom::sdkv1::kJoinEadItemMax> item{};
+    if (!routeloom::sdkv1::join_ead_item_encode(static_cast<JoinEad>(-static_cast<std::int64_t>(label)),
+                                                items[i].value, item)
+             .ok()) {
+      ok = false;
+      return field;
+    }
+    field.insert(field.end(), item.bytes.begin(),
+                 item.bytes.begin() + static_cast<std::ptrdiff_t>(item.size));
+  }
+  return field;
+}
+
+edhoc::EadItem ead_item(const JoinEad label, const ByteView value) {
+  return edhoc::EadItem{-static_cast<std::int32_t>(static_cast<std::uint32_t>(label)), value};
+}
+
+// Stages the peer certificate from EAD_2/EAD_3 and resolves the kid to it.
+class JoinCredentials final : public edhoc::CredentialProvider {
+ public:
+  JoinCredentials(const routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax>& own_cert,
+                  const routeloom::Digest256& own_kid, const std::array<std::uint8_t, 32>& priv,
+                  routeloom::sdkv1::CertType peer_type, const routeloom::sdkv1::P256PublicKey& peer_ca)
+      : own_cert_(own_cert), own_kid_(own_kid), priv_(priv), peer_type_(peer_type),
+        peer_ca_(peer_ca) {}
+  Status local(edhoc::Role, edhoc::LocalCredential& out) noexcept override {
+    out.kid = ByteView{own_kid_.data(), own_kid_.size()};
+    out.credential = own_cert_.view();
+    out.private_key = priv_;
+    return Status::success();
+  }
+  Status peer(edhoc::Role, const ByteView kid, edhoc::PeerCredential& out) noexcept override {
+    if (staged.size == 0) return Status::error(StatusCode::NotFound, "no staged certificate");
+    routeloom::sdkv1::CertClaims claims{};
+    Status status = routeloom::sdkv1::join_credential_check(staged.view(), peer_type_, kid, claims);
+    if (!status.ok()) {
+      ++rejected;
+      return status;
+    }
+    bool verified = false;
+    status = routeloom::sdkv1::cert_verify(staged.view(), peer_ca_, claims, verified);
+    if (!status.ok() || !verified) {
+      ++rejected;
+      return Status::error(StatusCode::AuthenticationFailed, "peer certificate chain");
+    }
+    out.credential = staged.view();
+    out.public_key = claims.pubkey;
+    peer_claims = claims;
+    return Status::success();
+  }
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> staged{};
+  routeloom::sdkv1::CertClaims peer_claims{};
+  int rejected{0};
+
+ private:
+  const routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax>& own_cert_;
+  const routeloom::Digest256& own_kid_;
+  std::array<std::uint8_t, 32> priv_;
+  routeloom::sdkv1::CertType peer_type_;
+  routeloom::sdkv1::P256PublicKey peer_ca_;
+};
+
+struct DeviceEad final : edhoc::EadHandler {
+  explicit DeviceEad(JoinCredentials& creds) : creds_(creds) {}
+  Status compose(const int message, edhoc::EadItem* items, const std::size_t capacity,
+                 std::size_t& count) noexcept override {
+    count = 0;
+    if (message == 1) {
+      routeloom::sdkv1::JoinIntent intent{};
+      intent.org_hint = routeloom::sdkv1::join_org_hint(site_ca().pub);
+      intent.profile_bits = routeloom::sdkv1::kJoinProfileRljoin1;
+      if (!routeloom::sdkv1::join_intent_encode(intent, intent_value).ok()) {
+        return Status::error(StatusCode::InternalError, "intent");
+      }
+      items[count++] = ead_item(JoinEad::Intent, intent_value.view());
+    } else if (message == 3) {
+      if (capacity < 2) return Status::error(StatusCode::NoCapacity, "ead capacity");
+      routeloom::sdkv1::JoinRequest request{};
+      request.model = 17;
+      request.fw_version = 0x01040000;
+      if (!routeloom::sdkv1::join_request_encode(request, request_value).ok()) {
+        return Status::error(StatusCode::InternalError, "request");
+      }
+      items[count++] = ead_item(JoinEad::Request, request_value.view());
+      items[count++] = ead_item(JoinEad::Credential, devcert.view());
+    }
+    return Status::success();
+  }
+  Status process(const int message, const edhoc::EadItem* items,
+                 const std::size_t count) noexcept override {
+    bool ok = false;
+    const Bytes field = item_field(items, count, ok);
+    if (!ok) return Status::error(StatusCode::ProtocolError, "ead item");
+    if (message == 2) {
+      ByteView cert{};
+      ByteView value{};
+      Status status = routeloom::sdkv1::join_ead_find_with_credential(
+          view(field), JoinEad::Offer, cert, value);
+      if (!status.ok()) return status;
+      status = routeloom::sdkv1::site_offer_decode(value, offer);
+      if (!status.ok()) return status;
+      // Copy: the item points into libedhoc's buffer, released after the call.
+      creds_.staged.clear();
+      std::memcpy(creds_.staged.bytes.data(), cert.data, cert.size);
+      creds_.staged.size = cert.size;
+      return Status::success();
+    }
+    if (message == 4) {
+      ByteView value{};
+      Status status = routeloom::sdkv1::join_ead_find(view(field), JoinEad::Result, value);
+      if (!status.ok()) return status;
+      result_bytes.assign(value.data, value.data + value.size);
+      return Status::success();
+    }
+    return Status::error(StatusCode::ProtocolError, "unexpected ead");
+  }
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> devcert{};
+  routeloom::ByteBuffer<routeloom::sdkv1::kJoinIntentSize> intent_value{};
+  routeloom::ByteBuffer<routeloom::sdkv1::kJoinRequestSize> request_value{};
+  routeloom::sdkv1::SiteOffer offer{};
+  Bytes result_bytes;
+
+ private:
+  JoinCredentials& creds_;
+};
+
+struct AuthorityEad final : edhoc::EadHandler {
+  explicit AuthorityEad(JoinCredentials& creds) : creds_(creds) {}
+  Status compose(const int message, edhoc::EadItem* items, const std::size_t capacity,
+                 std::size_t& count) noexcept override {
+    count = 0;
+    if (message == 2) {
+      if (capacity < 2) return Status::error(StatusCode::NoCapacity, "ead capacity");
+      routeloom::sdkv1::SiteOffer offer{};
+      offer.site_id = kSiteId;
+      offer.network_low32 = kNetworkLow;
+      offer.site_epoch = kSiteEpoch;
+      if (!routeloom::sdkv1::site_offer_encode(offer, offer_value).ok()) {
+        return Status::error(StatusCode::InternalError, "offer");
+      }
+      items[count++] = ead_item(JoinEad::Offer, offer_value.view());
+      items[count++] = ead_item(JoinEad::Credential, credential_cert->view());
+    } else if (message == 4) {
+      items[count++] = ead_item(JoinEad::Result, result_value.view());
+    }
+    return Status::success();
+  }
+  Status process(const int message, const edhoc::EadItem* items,
+                 const std::size_t count) noexcept override {
+    bool ok = false;
+    const Bytes field = item_field(items, count, ok);
+    if (!ok) return Status::error(StatusCode::ProtocolError, "ead item");
+    if (message == 1) {
+      ByteView value{};
+      Status status = routeloom::sdkv1::join_ead_find(view(field), JoinEad::Intent, value);
+      if (!status.ok()) return status;
+      return routeloom::sdkv1::join_intent_decode(value, intent);
+    }
+    if (message == 3) {
+      ByteView cert{};
+      ByteView value{};
+      Status status = routeloom::sdkv1::join_ead_find_with_credential(
+          view(field), JoinEad::Request, cert, value);
+      if (!status.ok()) return status;
+      status = routeloom::sdkv1::join_request_decode(value, request);
+      if (!status.ok()) return status;
+      creds_.staged.clear();
+      std::memcpy(creds_.staged.bytes.data(), cert.data, cert.size);
+      creds_.staged.size = cert.size;
+      return Status::success();
+    }
+    return Status::error(StatusCode::ProtocolError, "unexpected ead");
+  }
+  const routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax>* credential_cert{nullptr};
+  routeloom::ByteBuffer<routeloom::sdkv1::kSiteOfferSize> offer_value{};
+  routeloom::ByteBuffer<routeloom::sdkv1::kJoinResultMax> result_value{};
+  routeloom::sdkv1::JoinIntent intent{};
+  routeloom::sdkv1::JoinRequest request{};
+
+ private:
+  JoinCredentials& creds_;
+};
+
+// `widest` issues every certificate with its variable-width claims at their
+// maximum encoded width (u16/u32 fields all-ones; the role stays the one the
+// SitePackage names, a 1-byte value either way), so the
+// arena high-water below covers the largest certificates a join can carry.
+routeloom::sdkv1::CertClaims join_devcert_claims(const bool widest) {
+  routeloom::sdkv1::CertClaims c = devcert_claims();
+  if (widest) {
+    c.model = 0xFFFF;
+    c.hw_rev = 0xFF;
+    c.serial = 0xFFFFFFFFU;
+  }
+  return c;
+}
+
+routeloom::sdkv1::CertClaims join_sitecert_claims(const bool widest) {
+  routeloom::sdkv1::CertClaims c = sitecert_claims();
+  if (widest) c.serial = 0xFFFFFFFFU;  // network/epoch stay those of the SiteOffer
+  return c;
+}
+
+routeloom::sdkv1::CertClaims join_membercert_claims(const bool widest) {
+  routeloom::sdkv1::CertClaims c = membercert_claims();
+  if (widest) {
+    c.assignment_generation = 0xFFFFFFFFU;
+    c.serial = 0xFFFFFFFFU;
+  }
+  return c;
+}
+
+struct JoinFixture {
+  explicit JoinFixture(const bool widest = false)
+      : devcert(issue(join_devcert_claims(widest), device_ca())),
+        sitecert(issue(join_sitecert_claims(widest), site_ca())),
+        membercert(issue(join_membercert_claims(widest), sak())) {
+    CHECK(devcert.size > 0 && sitecert.size > 0 && membercert.size > 0);
+    CHECK(routeloom::sdkv1::cert_subject_kid(join_devcert_claims(widest), device_kid).ok());
+    CHECK(routeloom::sdkv1::cert_subject_kid(join_sitecert_claims(widest), sak_kid).ok());
+  }
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> devcert;
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> sitecert;
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> membercert;
+  routeloom::Digest256 device_kid{};
+  routeloom::Digest256 sak_kid{};
+};
+
+bool encode_allow(const JoinFixture& fx, routeloom::ByteBuffer<routeloom::sdkv1::kJoinResultMax>& out) {
+  routeloom::sdkv1::JoinResult result{};
+  result.verdict = routeloom::sdkv1::JoinVerdict::Allow;
+  result.member_cert = fx.membercert.view();
+  routeloom::sdkv1::SitePackage& p = result.site_package;
+  p.site_id = kSiteId;
+  p.network = kNetwork;
+  p.gk_epoch = 1;
+  p.gk.fill(0x6B);
+  p.channel = 6;
+  p.role = routeloom::sdkv1::kMemberRoleEndpoint;
+  p.gateway_count = 1;
+  p.gateways[0] = 0x00A1000000000001ULL;
+  return routeloom::sdkv1::join_result_encode(result, out).ok();
+}
+
+void test_join_profile_with_ead(const bool widest) {
+  JoinFixture fx(widest);
+  JoinCredentials device_creds(fx.devcert, fx.device_kid, device_key().priv,
+                               routeloom::sdkv1::CertType::Site, site_ca().pub);
+  JoinCredentials authority_creds(fx.sitecert, fx.sak_kid, sak().priv,
+                                  routeloom::sdkv1::CertType::Device, device_ca().pub);
+  DeviceEad device_ead(device_creds);
+  device_ead.devcert = fx.devcert;
+  AuthorityEad authority_ead(authority_creds);
+  authority_ead.credential_cert = &fx.sitecert;
+  CHECK(encode_allow(fx, authority_ead.result_value));
+  std::uint64_t rng_i = 0x51;
+  std::uint64_t rng_r = 0x53;
+  auto initiator_config = profile_config(edhoc::Role::Initiator, device_creds, rng_i, 0x31);
+  initiator_config.ead = &device_ead;
+  auto responder_config = profile_config(edhoc::Role::Responder, authority_creds, rng_r, 0x32);
+  responder_config.ead = &authority_ead;
+  edhoc::Session device;
+  edhoc::Session authority;
+  CHECK(device.begin(initiator_config).ok());
+  CHECK(authority.begin(responder_config).ok());
+  Transcript t;
+  CHECK(run(device, authority, t) == 4);
+  note(device);
+  note(authority);
+  CHECK(device_creds.rejected == 0 && authority_creds.rejected == 0);
+  CHECK(authority_creds.peer_claims.subject == kNode);  // the authority learned the DevCert
+  CHECK(device_creds.peer_claims.subject == kSiteId);   // the device authenticated the site
+  CHECK(authority_ead.intent.org_hint == routeloom::sdkv1::join_org_hint(site_ca().pub));
+  CHECK(authority_ead.request.model == 17);
+  CHECK(routeloom::sdkv1::site_offer_matches_site_cert(device_ead.offer,
+                                                       device_creds.peer_claims)
+            .ok());
+  // The device's 02 §10.2 check on the received Allow.
+  routeloom::sdkv1::JoinResult result{};
+  CHECK(routeloom::sdkv1::join_result_decode(view(device_ead.result_bytes), result).ok());
+  routeloom::sdkv1::CertClaims member{};
+  bool verified = false;
+  CHECK(routeloom::sdkv1::join_allow_verify(result, device_creds.peer_claims, kNode,
+                                            device_key().pub, false, member, verified)
+            .ok());
+  CHECK(verified);
+  std::printf("zero-touch join (method 0, kid + certificate in EAD%s): message_1 %zu B, "
+              "message_2 %zu B, message_3 %zu B, message_4 %zu B (DevCert %zu B, SiteCert %zu B, "
+              "MemberCert %zu B)\n",
+              widest ? ", widest certificates" : "", t.m1.size(), t.m2.size(), t.m3.size(),
+              t.m4.size(), fx.devcert.size,
+              fx.sitecert.size, fx.membercert.size);
+  // Transport budgets (02 §5.3/§6, 02 §5.4): m1 with the 2-byte head and
+  // the cookie is one RLD1 frame; every message fits the 960 B ceiling.
+  CHECK(routeloom::sdkv1::kJoinObjectHeadSize + routeloom::sdkv1::kJoinCookieSize + t.m1.size() <=
+        routeloom::autonomy::kRld1MaxBody);
+  for (const Bytes* m : {&t.m2, &t.m3, &t.m4}) {
+    CHECK(m->size() <= routeloom::sdkv1::kJoinMessageMax);
+    const std::size_t rld1_object = routeloom::sdkv1::kJoinObjectHeadSize + m->size();
+    const std::size_t relay_object = routeloom::sdkv1::kRelayHeaderSize + m->size();
+    CHECK(routeloom::sdkv1::join_chunk_count(routeloom::sdkv1::JoinCarrier::Rld1, rld1_object) <= 5);
+    CHECK(routeloom::sdkv1::join_chunk_count(routeloom::sdkv1::JoinCarrier::WireRelay,
+                                             relay_object) <= 4);
+  }
+  if (widest) {
+    const JoinFixture typical;
+    CHECK(fx.devcert.size > typical.devcert.size && fx.sitecert.size > typical.sitecert.size &&
+          fx.membercert.size > typical.membercert.size);
+    CHECK(fx.membercert.size <= routeloom::sdkv1::kRlcw1CertLargest);
+    return;  // the refusal cases below do not depend on certificate width
+  }
+
+  // A SiteCert whose cnf does not hash to ID_CRED_R's kid: the device stops
+  // at message_2 and never sends its identity (02 §12 row 2).
+  {
+    const auto other_site = issue(sitecert_claims(), device_ca());  // signed by the wrong CA
+    JoinCredentials d2(fx.devcert, fx.device_kid, device_key().priv,
+                       routeloom::sdkv1::CertType::Site, site_ca().pub);
+    JoinCredentials a2(fx.sitecert, fx.sak_kid, sak().priv, routeloom::sdkv1::CertType::Device,
+                       device_ca().pub);
+    DeviceEad dev(d2);
+    dev.devcert = fx.devcert;
+    AuthorityEad auth(a2);
+    auth.credential_cert = &other_site;
+    CHECK(encode_allow(fx, auth.result_value));
+    auto ic = profile_config(edhoc::Role::Initiator, d2, rng_i, 0x33);
+    ic.ead = &dev;
+    auto rc = profile_config(edhoc::Role::Responder, a2, rng_r, 0x34);
+    rc.ead = &auth;
+    edhoc::Session i2;
+    edhoc::Session r2;
+    CHECK(i2.begin(ic).ok() && r2.begin(rc).ok());
+    Transcript t2;
+    CHECK(run(i2, r2, t2) == 1);
+    CHECK(d2.rejected == 1);
+    CHECK(a2.staged.size == 0);  // no DevCert ever reached the authority
+    note(i2);
+    note(r2);
+  }
+  // EAD_2 without the Credential item: the device's handler refuses m2.
+  {
+    JoinCredentials d3(fx.devcert, fx.device_kid, device_key().priv,
+                       routeloom::sdkv1::CertType::Site, site_ca().pub);
+    JoinCredentials a3(fx.sitecert, fx.sak_kid, sak().priv, routeloom::sdkv1::CertType::Device,
+                       device_ca().pub);
+    DeviceEad dev(d3);
+    dev.devcert = fx.devcert;
+    struct NoCredential final : edhoc::EadHandler {
+      routeloom::ByteBuffer<routeloom::sdkv1::kSiteOfferSize> offer{};
+      Status compose(const int message, edhoc::EadItem* items, std::size_t,
+                     std::size_t& count) noexcept override {
+        count = 0;
+        if (message == 2) {
+          routeloom::sdkv1::SiteOffer o{};
+          o.site_id = kSiteId;
+          o.network_low32 = kNetworkLow;
+          o.site_epoch = kSiteEpoch;
+          (void)routeloom::sdkv1::site_offer_encode(o, offer);
+          items[count++] = ead_item(JoinEad::Offer, offer.view());
+        }
+        return Status::success();
+      }
+      Status process(int, const edhoc::EadItem*, std::size_t) noexcept override {
+        return Status::success();
+      }
+    } auth;
+    auto ic = profile_config(edhoc::Role::Initiator, d3, rng_i, 0x35);
+    ic.ead = &dev;
+    auto rc = profile_config(edhoc::Role::Responder, a3, rng_r, 0x36);
+    rc.ead = &auth;
+    edhoc::Session i3;
+    edhoc::Session r3;
+    CHECK(i3.begin(ic).ok() && r3.begin(rc).ok());
+    Transcript t3;
+    CHECK(run(i3, r3, t3) == 1);
+    note(i3);
+    note(r3);
+  }
+}
+
 void report_sizes() {
   std::printf("sizeof(edhoc::Session) = %zu B (libedhoc context %zu B of %zu reserved, "
               "arena %zu B, key store %zu B)\n",
@@ -1116,6 +1527,8 @@ int main() {
   test_session_config();
   test_arena();
   test_key_store();
+  test_join_profile_with_ead(false);
+  test_join_profile_with_ead(true);
   report_sizes();
   if (failures != 0) {
     std::fprintf(stderr, "%d EDHOC check(s) failed\n", failures);

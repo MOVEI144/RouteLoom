@@ -1,0 +1,18 @@
+{
+  "name": "join-relay",
+  "secret_hex": "726f7574656c6f6f6d2d6465762d736563726574",
+  "host_nonce": 72623859790382856,
+  "device_nonce": 11578966645329101058,
+  "version": 1,
+  "node": 1,
+  "boot": 756033585153,
+  "network": 7,
+  "capability": 263,
+  "principal": "host-operator",
+  "session_id": 11827132529830895756,
+  "peer_node": 2,
+  "hello_tag_hex": "1ae1775feb3a7d9054fb96e40bfd0b90",
+  "auth_tag_hex": "799bef3d25637c3647b260a310a0ee36",
+  "auth_ok_tag_hex": "dacad965a757613da117d8115e2bb73d",
+  "session_key_hex": "2599f699d36ce8a0218860d543c65aa0"
+}

@@ -25,6 +25,7 @@
 #include "routeloom/group.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/node_status.hpp"
+#include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -73,6 +74,15 @@ constexpr std::uint32_t kCapNodeStatusV1 = 1u << 6;
 // surface (attach_group); bound into the authenticated Hello transcript.
 constexpr std::uint32_t kCapGroupDeliveryV1 = 1u << 7;
 
+// join_relay_v1 (docs/design/sdk-v1/02-zero-touch-join.md §7.2): the device
+// is a gateway that relays zero-touch join exchanges between member proxies
+// and the host's Site Authority — HostOps 0x60-0x63. The design proposed
+// bit 6 and subcommands 0x40-0x42, which node_status_v1 already owns, so
+// the SDK v1 site-authority family moved to 0x60-0x6F (02 §7.4). Advertised
+// only when the bridge owner attaches a JoinRelayGateway
+// (attach_join_relay); bound into the authenticated Hello transcript.
+constexpr std::uint32_t kCapJoinRelayV1 = 1u << 8;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
@@ -99,6 +109,10 @@ enum class HostOpsSub : std::uint8_t {
   GroupSend = 0x50,         // H→G request: group/priority/lifetime || data
   GroupStatus = 0x51,       // G→H reply: summary (0x50/0x52), then a FINAL one
   GroupQuery = 0x52,        // H→G request: MessageId -> 0x51 snapshot
+  JoinRelayUp = 0x60,       // G→H unsolicited (request 0): proxy relay object
+  JoinRelayDown = 0x61,     // H→G request: relay object toward a proxy -> 0x63
+  JoinRelayAbort = 0x62,    // H→G request -> 0x63, or G→H unsolicited notice
+  JoinRelayResult = 0x63,   // G→H reply to 0x61/0x62: result/proxy/relay_id
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -931,5 +945,74 @@ GroupStatusReply group_status_from(std::uint16_t result, const GroupDeliveryResu
 Status encode_group_status(const GroupStatusReply& reply, MutableByteView out,
                            std::size_t& written) noexcept;
 Status decode_group_status(ByteView inner, GroupStatusReply& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Join relay HostOps family (join_relay_v1, docs/design/sdk-v1/02 §7.2 as
+// resolved in §7.4). Same inner common form: schema:u8=1, sub:u8,
+// payload_len:u16, payload; big-endian, exact length. `object` is a relay
+// object (sdkv1_join_transport.hpp: RelayHeader 24 B + message <= 960 B, or
+// + a 5 B abort body) and is validated by the codec.
+//
+// 0x60 JOIN_RELAY_UP (G→H, unsolicited, request id 0), payload 17 B + object:
+//   gateway:u64, from_proxy:u64 (the verified mesh origin; the object's
+//   proxy field must equal it), hops:u8 (1..254 mesh hops; 0 only when
+//   from_proxy == gateway, the gateway's own join), object with dir = up.
+// 0x61 JOIN_RELAY_DOWN (H→G), payload 8 B + object: to_proxy:u64, object
+//   with dir = down and proxy == to_proxy. Answered by 0x63.
+// 0x62 JOIN_RELAY_ABORT, payload 13 B: proxy:u64, relay_id:u32 (nonzero),
+//   reason:u8 (1 proxy_aborted, 2 gateway_expired, 3 delivery_failed,
+//   4 host_aborted). H→G (reason 4) cancels a relay the gateway saw
+//   recently and is answered by 0x63; G→H (request id 0, reasons 1-3)
+//   tells the host the relay ended without an answer.
+// 0x63 JOIN_RELAY_RESULT (G→H, under the 0x61/0x62 request id), payload
+//   14 B: result:u16 (ConfigOpsResult: Ok = handed to the Wire lane, NOT
+//   delivered to the device; Unsupported, Busy, Denied, Invalid, NoRoute,
+//   Indeterminate), proxy:u64, relay_id:u32 (both echo the request; zero
+//   when it could not be parsed that far).
+constexpr std::size_t kJoinRelayUpFixed = 17;
+constexpr std::size_t kJoinRelayDownFixed = 8;
+constexpr std::size_t kJoinRelayAbortPayload = 13;
+constexpr std::size_t kJoinRelayResultPayload = 14;
+constexpr std::size_t kJoinRelayObjectMax = 984;  // sdkv1::kRelayObjectMax
+constexpr std::size_t kJoinRelayUpMaxPayload = kJoinRelayUpFixed + kJoinRelayObjectMax;
+constexpr std::size_t kJoinRelayDownMaxPayload = kJoinRelayDownFixed + kJoinRelayObjectMax;
+constexpr std::uint8_t kJoinRelayHopsMax = 254;
+
+struct JoinRelayUp {
+  NodeId gateway{kInvalidNodeId};
+  NodeId from_proxy{kInvalidNodeId};
+  std::uint8_t hops{0};
+  ByteView object{};  // borrows `inner` (decode) or caller bytes (encode)
+};
+
+struct JoinRelayDown {
+  NodeId to_proxy{kInvalidNodeId};
+  ByteView object{};
+};
+
+struct JoinRelayAbort {
+  NodeId proxy{kInvalidNodeId};
+  std::uint32_t relay_id{0};
+  std::uint8_t reason{0};
+};
+
+struct JoinRelayResult {
+  std::uint16_t result{0};  // ConfigOpsResult
+  NodeId proxy{kInvalidNodeId};
+  std::uint32_t relay_id{0};
+};
+
+Status encode_join_relay_up(const JoinRelayUp& up, MutableByteView out,
+                            std::size_t& written) noexcept;
+Status decode_join_relay_up(ByteView inner, JoinRelayUp& out) noexcept;
+Status encode_join_relay_down(const JoinRelayDown& down, MutableByteView out,
+                              std::size_t& written) noexcept;
+Status decode_join_relay_down(ByteView inner, JoinRelayDown& out) noexcept;
+Status encode_join_relay_abort(const JoinRelayAbort& abort, MutableByteView out,
+                               std::size_t& written) noexcept;
+Status decode_join_relay_abort(ByteView inner, JoinRelayAbort& out) noexcept;
+Status encode_join_relay_result(const JoinRelayResult& result, MutableByteView out,
+                                std::size_t& written) noexcept;
+Status decode_join_relay_result(ByteView inner, JoinRelayResult& out) noexcept;
 
 }  // namespace routeloom::usb

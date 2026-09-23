@@ -1,0 +1,14 @@
+{
+  "bucket": 4886718345,
+  "codec": "cookie",
+  "cookie_hex": "2efd7cd2dc4f636e219b86365617b9fb",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "mac_hex": "020000001234",
+  "name": "cookie_bucket_large",
+  "network_low32": 169552957,
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "note": "HmacJoinCookie: first16(HMAC-SHA-256(key, domain||mac||nonce||proxy||network_low32||bucket))",
+  "proxy": 45317471250417527
+}

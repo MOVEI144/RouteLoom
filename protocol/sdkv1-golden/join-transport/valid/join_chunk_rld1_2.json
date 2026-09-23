@@ -1,0 +1,15 @@
+{
+  "carrier": "rld1",
+  "codec": "join_chunk",
+  "data_hex": "1f5e61d76284c50e7a729c6be39601a4af1caf61da07d348f1ae73c40b4d168dbc61627c559d736c3ec74d658aa75e12d4257c51761554665f24134e35ebf146b3e50f45108faa1cca395aaafc75acd0d82187caf555c8410a441c06c51b4cc04d47e8071aa67738cf40",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "id": 269554195,
+  "name": "join_chunk_rld1_2",
+  "note": "grid 106 B",
+  "offset": 212,
+  "payload_hex": "01421011121300d4017a1f5e61d76284c50e7a729c6be39601a4af1caf61da07d348f1ae73c40b4d168dbc61627c559d736c3ec74d658aa75e12d4257c51761554665f24134e35ebf146b3e50f45108faa1cca395aaafc75acd0d82187caf555c8410a441c06c51b4cc04d47e8071aa67738cf40",
+  "phase": 4,
+  "step": 2,
+  "total": 378
+}

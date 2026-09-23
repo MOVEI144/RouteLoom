@@ -496,3 +496,116 @@ fn group_ops_vectors_are_byte_exact() {
     assert_eq!(&statuses[2].1, settled);
     assert_eq!(h2d, 4); // tx_grant, send, query, close
 }
+
+/// protocol/usb-golden/join-relay: the join_relay_v1 scenario (SDK v1
+/// zero-touch join). Same discipline; the 0x60-0x63 inners decode under the
+/// Rust codec, the relay objects parse, and each 0x63 answers its request.
+#[test]
+fn join_relay_vectors_are_byte_exact() {
+    use routeloom_protocol::join_relay::*;
+
+    let root = golden_dir().join("join-relay");
+    let session = load(&root.join("session.json"));
+    let capability = u64_field(&session, "capability") as u32;
+    assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_JOIN_RELAY_V1);
+    let transcript = Transcript {
+        host_nonce: u64_field(&session, "host_nonce"),
+        device_nonce: u64_field(&session, "device_nonce"),
+        version: 1,
+        node: u64_field(&session, "node"),
+        boot: u64_field(&session, "boot"),
+        network: u64_field(&session, "network"),
+        capability,
+        principal: field(&session, "principal").as_bytes().to_vec(),
+    };
+    let proof = derive_session_proof(
+        &unhex(field(&session, "secret_hex")),
+        &transcript.encode().unwrap(),
+    );
+    assert_eq!(proof.session_id, u64_field(&session, "session_id"));
+
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join("frames"))
+        .expect("frames dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    let (mut d2h, mut h2d) = (0_u64, 0_u64);
+    let mut ups = Vec::new();
+    let mut downs = Vec::new();
+    let mut results = Vec::new();
+    let mut aborts = Vec::new();
+    for path in &files {
+        let vector = load(path);
+        let name = field(&vector, "name").to_string();
+        let direction = field(&vector, "direction");
+        let wire = unhex(field(&vector, "wire_hex"));
+        let frame = decode_wire(&wire);
+        if direction == "h2d" {
+            assert_eq!(encode_frame(&frame).expect("re-encode"), wire, "{name}");
+        }
+        if frame.session == 0 {
+            continue;
+        }
+        let dir = if direction == "h2d" {
+            DIRECTION_HOST_TO_DEVICE
+        } else {
+            DIRECTION_DEVICE_TO_HOST
+        };
+        let (counter, inner) = open_body(&proof.key, dir, &frame).expect("valid tag");
+        let expected = if dir == DIRECTION_HOST_TO_DEVICE {
+            &mut h2d
+        } else {
+            &mut d2h
+        };
+        assert_eq!(counter, *expected, "{name}");
+        *expected += 1;
+        match join_relay_sub(inner) {
+            Some(SUB_JOIN_RELAY_UP) => {
+                assert_eq!(frame.request, 0, "0x60 is unsolicited");
+                let up = decode_join_relay_up(inner).unwrap();
+                assert_eq!(encode_join_relay_up(&up).unwrap(), inner);
+                ups.push(up);
+            }
+            Some(SUB_JOIN_RELAY_DOWN) => {
+                let down = decode_join_relay_down(inner).unwrap();
+                assert_eq!(encode_join_relay_down(&down).unwrap(), inner);
+                downs.push((frame.request, down));
+            }
+            Some(SUB_JOIN_RELAY_ABORT) => aborts.push((
+                direction.to_string(),
+                frame.request,
+                decode_join_relay_abort(inner).unwrap(),
+            )),
+            Some(SUB_JOIN_RELAY_RESULT) => {
+                results.push((frame.request, decode_join_relay_result(inner).unwrap()))
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(ups.len(), 2);
+    let m1 = ups[0].relay_object().unwrap();
+    let m3 = ups[1].relay_object().unwrap();
+    assert_eq!((ups[0].gateway, ups[0].from_proxy, ups[0].hops), (1, 2, 3));
+    assert_eq!((m1.header.step, m3.header.step), (1, 3));
+    assert_eq!(m1.header.relay_id, m3.header.relay_id);
+    assert_eq!(m1.header.joiner_rssi_dbm, -71);
+    assert_eq!(downs.len(), 2);
+    let m4 = RelayObject::decode(&downs[1].1.object).unwrap();
+    assert_eq!(m4.header.state, RelayState::Final);
+    assert_eq!(m4.single_frame_type(), WIRE_TYPE_MEMBERSHIP_RESULT);
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].0, downs[0].0);
+    assert_eq!(results[1].0, downs[1].0);
+    assert!(results[..2]
+        .iter()
+        .all(|(_, r)| r.result == ConfigOpsResult::Ok && r.relay_id == m1.header.relay_id));
+    assert_eq!(results[2].1.result, ConfigOpsResult::Invalid);
+    assert_eq!(aborts.len(), 2);
+    assert_eq!(aborts[0].0, "h2d");
+    assert_eq!(aborts[0].1, results[2].0);
+    assert_eq!(aborts[0].2.reason, RelayAbortReason::HostAborted);
+    assert_eq!((aborts[1].0.as_str(), aborts[1].1), ("d2h", 0));
+    assert_eq!(aborts[1].2.reason, RelayAbortReason::ProxyAborted);
+    assert_eq!(h2d, 5); // tx_grant, down m2, down m4, abort, close
+}

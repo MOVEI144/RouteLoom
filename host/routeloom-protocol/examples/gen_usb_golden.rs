@@ -697,6 +697,7 @@ fn main() -> std::io::Result<()> {
     println!("wrote {} steps to {}", steps.len(), frames_dir.display());
     node_status_scenario(&root.join("node-status"))?;
     group_ops_scenario(&root.join("group-ops"))?;
+    join_relay_scenario(&root.join("join-relay"))?;
     Ok(())
 }
 
@@ -1197,4 +1198,208 @@ fn group_ops_scenario(root: &Path) -> std::io::Result<()> {
         vec![CREDIT_CLOSE],
     );
     finish_session(root, &frames_dir, "group-ops", CAPABILITY_GROUP, &proof, &w)
+}
+
+/// Deterministic opaque EDHOC message bytes (the relay never parses them).
+fn join_message(len: usize, seed: u8) -> Vec<u8> {
+    (0..len)
+        .map(|i| seed.wrapping_add((i as u8).wrapping_mul(31)))
+        .collect()
+}
+
+/// protocol/usb-golden/join-relay: the join_relay_v1 HostOps family (SDK v1
+/// zero-touch join, docs/design/sdk-v1/02 §7.2/§7.4) on a gateway (node 1)
+/// advertising CAP_JOIN_RELAY_V1, with member proxy 2 three hops away. The
+/// C++ replay (test_usb.cpp) attaches a JoinRelayGateway to the bridge and
+/// injects the proxy's Wire relay frames right before each device step.
+/// Scenario: m1 up (single Wire frame) -> host sends m2 down (chunked to the
+/// proxy) -> Ok -> m3 up (4 Wire chunks reassembled) -> host sends the final
+/// m4 -> Ok -> host aborts the finished relay -> Invalid (not known any
+/// more) -> the proxy aborts a second relay -> unsolicited 0x62.
+fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
+    use routeloom_protocol::join_relay as jr;
+
+    const CAPABILITY_JR: u32 = 0x3 | CAP_HOST_OPS_V1 | jr::CAP_JOIN_RELAY_V1;
+    const RELAY_ID: u32 = 0x7E57_AB1E;
+    const HOPS: u8 = 3;
+    const JOINER_MAC: [u8; 6] = [0x02, 0, 0, 0, 0x12, 0x34];
+    let frames_dir = prepare_frames_dir(root)?;
+    let (mut w, proof) =
+        begin_session(CAPABILITY_JR, "capability advertises join_relay_v1 (bit 8)");
+    let mut topup = rx_topup();
+
+    let header = |dir, step, state, rssi| jr::RelayHeader {
+        dir,
+        relay_id: RELAY_ID,
+        proxy: PEER_NODE,
+        joiner_mac: JOINER_MAC,
+        phase: jr::PHASE_EDHOC,
+        step,
+        state,
+        joiner_rssi_dbm: rssi,
+    };
+    let object = |header: jr::RelayHeader, message: Vec<u8>| {
+        jr::RelayObject {
+            header,
+            body: jr::RelayBody::Message(message),
+        }
+        .encode()
+        .expect("valid relay object")
+    };
+    let up = |object: Vec<u8>| {
+        jr::encode_join_relay_up(&jr::JoinRelayUp {
+            gateway: NODE,
+            from_proxy: PEER_NODE,
+            hops: HOPS,
+            object,
+        })
+        .expect("valid up")
+    };
+    let result = |result, relay_id| {
+        jr::encode_join_relay_result(&jr::JoinRelayResult {
+            result,
+            proxy: PEER_NODE,
+            relay_id,
+        })
+        .expect("valid result")
+    };
+
+    w.sealed(
+        "join_relay_up_m1",
+        "d2h",
+        "proxy 2 relays m1 (single Wire frame); unsolicited, request 0",
+        FrameKind::HostOps,
+        0,
+        up(object(
+            header(jr::RelayDirection::Up, 1, jr::RelayState::Continue, -71),
+            join_message(59, 1),
+        )),
+    );
+    let down_m2 = jr::encode_join_relay_down(&jr::JoinRelayDown {
+        to_proxy: PEER_NODE,
+        object: object(
+            header(jr::RelayDirection::Down, 2, jr::RelayState::Continue, 0),
+            join_message(372, 2),
+        ),
+    })
+    .expect("valid down");
+    w.sealed(
+        "join_relay_down_m2",
+        "h2d",
+        "the Site Authority answers with m2 toward proxy 2",
+        FrameKind::HostOps,
+        500,
+        down_m2.clone(),
+    );
+    w.sealed(
+        "join_relay_down_m2_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(down_m2.len()),
+    );
+    w.sealed(
+        "join_relay_result_m2",
+        "d2h",
+        "Ok: m2 handed to the Wire lane as 4 chunks (not yet delivered)",
+        FrameKind::HostOps,
+        500,
+        result(ConfigOpsResult::Ok, RELAY_ID),
+    );
+    w.sealed(
+        "join_relay_up_m3",
+        "d2h",
+        "m3 arrives from proxy 2 as 4 Wire chunks, reassembled by the gateway",
+        FrameKind::HostOps,
+        0,
+        up(object(
+            header(jr::RelayDirection::Up, 3, jr::RelayState::Continue, -64),
+            join_message(404, 3),
+        )),
+    );
+    let down_m4 = jr::encode_join_relay_down(&jr::JoinRelayDown {
+        to_proxy: PEER_NODE,
+        object: object(
+            header(jr::RelayDirection::Down, 4, jr::RelayState::Final, 0),
+            join_message(353, 4),
+        ),
+    })
+    .expect("valid down");
+    w.sealed(
+        "join_relay_down_m4",
+        "h2d",
+        "final m4 (allow): the proxy frees its slot after delivery",
+        FrameKind::HostOps,
+        501,
+        down_m4.clone(),
+    );
+    w.sealed(
+        "join_relay_down_m4_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(down_m4.len()),
+    );
+    w.sealed(
+        "join_relay_result_m4",
+        "d2h",
+        "Ok: m4 handed to the Wire lane",
+        FrameKind::HostOps,
+        501,
+        result(ConfigOpsResult::Ok, RELAY_ID),
+    );
+    let abort = jr::encode_join_relay_abort(&jr::JoinRelayAbort {
+        proxy: PEER_NODE,
+        relay_id: RELAY_ID,
+        reason: jr::RelayAbortReason::HostAborted,
+    })
+    .expect("valid abort");
+    w.sealed(
+        "join_relay_abort_finished",
+        "h2d",
+        "the host cancels the relay it already finished",
+        FrameKind::HostOps,
+        502,
+        abort.clone(),
+    );
+    w.sealed(
+        "join_relay_abort_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(abort.len()),
+    );
+    w.sealed(
+        "join_relay_result_abort",
+        "d2h",
+        "Invalid: the gateway no longer knows a finished relay",
+        FrameKind::HostOps,
+        502,
+        result(ConfigOpsResult::Invalid, RELAY_ID),
+    );
+    w.sealed(
+        "join_relay_proxy_abort",
+        "d2h",
+        "proxy 2 gave up a second relay (device silent): unsolicited 0x62",
+        FrameKind::HostOps,
+        0,
+        jr::encode_join_relay_abort(&jr::JoinRelayAbort {
+            proxy: PEER_NODE,
+            relay_id: RELAY_ID + 1,
+            reason: jr::RelayAbortReason::ProxyAborted,
+        })
+        .expect("valid abort"),
+    );
+    w.sealed(
+        "close",
+        "h2d",
+        "host requests session close; device drains",
+        FrameKind::Credit,
+        503,
+        vec![CREDIT_CLOSE],
+    );
+    finish_session(root, &frames_dir, "join-relay", CAPABILITY_JR, &proof, &w)
 }

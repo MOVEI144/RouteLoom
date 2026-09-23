@@ -1,0 +1,15 @@
+{
+  "carrier": "wire",
+  "codec": "join_chunk",
+  "data_hex": "01020000beef00a100000000077702000000123404010004eba3b62ee0cebc551c983faafb62042c2308dfca7b4b1bcca45a340a531c5a60f96a5e79703ce17559dbe0c7c1ae45d0e36d248e70410ddb1c73dfc5d7ae9c19996991ef82ba3d28a6952d87a917fc2c538ca09cad5992da9779d9ea52ff",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "id": 48879,
+  "name": "join_chunk_wire_0",
+  "note": "grid 118 B",
+  "offset": 0,
+  "payload_hex": "01440000beef0000017901020000beef00a100000000077702000000123404010004eba3b62ee0cebc551c983faafb62042c2308dfca7b4b1bcca45a340a531c5a60f96a5e79703ce17559dbe0c7c1ae45d0e36d248e70410ddb1c73dfc5d7ae9c19996991ef82ba3d28a6952d87a917fc2c538ca09cad5992da9779d9ea52ff",
+  "phase": 4,
+  "step": 4,
+  "total": 377
+}

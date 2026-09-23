@@ -1,0 +1,12 @@
+{
+  "name": "join_relay_abort_finished",
+  "direction": "h2d",
+  "kind": 19,
+  "flags": 0,
+  "session": 11827132529830895756,
+  "request": 502,
+  "inner_hex": "0162000d00000000000000027e57ab1e04",
+  "body_hex": "0000000000000003d8ad9509288a164da9796f2fa9b5c04d0162000d00000000000000027e57ab1e04",
+  "wire_hex": "07524c553101130109a4226a5f8009a08c01010101010301f602290101010101011403d8ad9509288a164da9796f2fa9b5c04d0162020d0101010101010b027e57ab1e0476a1afd000",
+  "note": "the host cancels the relay it already finished"
+}

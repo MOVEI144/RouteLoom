@@ -1,0 +1,8 @@
+{
+  "codec": "join_object",
+  "encoded_hex": "010504000000010203",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_object_resume_step_4",
+  "note": "RLRES1 steps 1..3"
+}

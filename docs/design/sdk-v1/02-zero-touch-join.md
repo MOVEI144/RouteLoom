@@ -43,7 +43,7 @@ len-4    u32 crc32_iso_hdlc
 
 3種類ともCWT（RFC 8392）＝COSE_Sign1（ES256、protected `{1:-7}`、unprotected空）。EDHOCでは`ID_CRED_x = {13 (kcwt): CWT}`として値渡しする（RFC 9528 §3.5.2の登録済みlabel）。deterministic CBOR、整数最短表現、未知claimは拒否。
 
-**未解決（P2-1で判明）**：固定したlibedhoc v2.3.2のcredential APIはID_CREDとしてkid（4）・x5chain（33）・x5t（34）だけを扱い、kcwt（13）による値渡しを符号化・復号できない。このbranchのbackendはkid参照（kid＝cnf鍵のCOSE_KeyのSHA-256全32B、CRED_xにRLCW1証明書そのもの）で動作を確認した。値渡しが要る場面（初対面のmessage_3でDevCert、未cacheのMemberCert）は、P2-3／P4-2で「kid参照＋証明書をEADで運ぶ」か「上流へのkcwt対応」のどちらかに決め、それまで本節の値渡しは採用案のままとする。
+**Resolved in implementation（P3-1、統合担当の決定）**：固定したlibedhoc v2.3.2のcredential APIはID_CREDとしてkid（4）・x5chain（33）・x5t（34）だけを扱い、kcwt（13）による値渡しを符号化・復号できない（P2-1で判明）。そこで**ID_CRED_x＝kid**（cnf鍵のCOSE_KeyのSHA-256全32B、P2-1のbackendと同じ。CRED_xはRLCW1証明書そのもの）とし、**証明書全体はEADで運ぶ**。EAD項目は P2-3 の65537〜65540に続く**label 65541（Credential、critical、`3a 00 01 00 04`）**で、値は正準なRLCW1証明書1枚（1〜256B）。EAD_2＝SiteOffer・Credential(SiteCert)、EAD_3＝JoinRequest・Credential(DevCert)の**この順で各1回**（message項目が先。P3-3のSite Authority〔`routeloom_join::join_ead_credential_item`、`protocol/edhoc-interop/`の記録〕と同じ順に統合時に揃えた）（padding以外の項目・順序違い・重複は拒否、EAD_1/EAD_4には載せない）。libedhocはmessage_2の手順9（EAD処理）を手順10（相手credentialの認証）より前に、message_3でもEAD_3処理を`authenticate_peer`より前に行うので、受信側のCredentialProviderは同じmessageのEADで受け取った証明書をkidに対応付けられる。受け入れは`join_credential_check`：証明書が期待型（m2はSiteCert、m3はDevCert）として復号でき、cnf鍵のkidがID_CRED_xのkidと一致すること（不一致は認証失敗）。発行者署名の検証（機器はSite CA anchor、Site AuthorityはDevice CA）は従来どおり呼び出し側。C++ `sdkv1_ead.hpp`（`join_ead_find_with_credential`）とRust `routeloom-join`に実装し、共通vector（`protocol/sdkv1-golden/ead/`）で一致を確認。`edhoc::Session`に任意の`EadHandler`を足し、この形でDevCert/SiteCertのmethod 0参加交換を最後まで実行した（`tests/cpp/test_edhoc.cpp`、実長は§6）。DAMS（03 §2.1、Exporter label 32771）は機器側ではまだ導出しない：P3-3のSite Authorityが使う暫定context（`routeloom_join::dams_exporter_context`＝`["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]`）に機器側も合わせる前提で、`sdkv1_ead.hpp`に`kTodoDamsExporterLabel`等のTODO定数だけを置き、P5で使う前に両側を共通vectorで固定する。
 
 | claim | DevCert | SiteCert | MemberCert（=Grant） |
 |---|---|---|---|
@@ -66,15 +66,15 @@ MemberCertはgrant（[05本番認証 §3](../host-security-readiness/05-producti
  機器D(未割当)        proxy P(member)          gateway G        Site Authority A(PC)      KGuard
    |--ZT DISCOVER(bcast)->|                        |                    |                    |
    |<-ZT OFFER(cookie,site_hint,org_hint)-|        |                    |                    |
-   |--BA ph4 m1 (cookie echo)->|--Wire relay up--->|--USB 0x40 m1------>|                    |
-   |                           |<-Wire relay down--|<-USB 0x41 m2-------|                    |
+   |--BA ph4 m1 (cookie echo)->|--Wire relay up--->|--USB 0x60 m1------>|                    |
+   |                           |<-Wire relay down--|<-USB 0x61 m2-------|                    |
    |<-BA ph4 m2 (chunks)-------|                   |                    |                    |
    |  SiteCertをSite CAで検証、SAK署名を検証（失敗ならここで中止：身元未送信）              |
-   |--BA ph4 m3 (chunks)------>|--relay up-------->|--USB 0x40 m3------>| DevCert検証        |
+   |--BA ph4 m3 (chunks)------>|--relay up-------->|--USB 0x60 m3------>| DevCert検証        |
    |                           |                   |                    |--join.request----->|
    |                           |                   |                    |<-join.decide-------|
    |                           |                   |                    | allow: 台帳commit→MemberCert発行
-   |<-BA ph4 m4 (chunks)-------|<-relay down(final)|<-USB 0x41 m4-------|                    |
+   |<-BA ph4 m4 (chunks)-------|<-relay down(final)|<-USB 0x61 m4-------|                    |
    |  MemberCert検証→RLS1 commit→Member→近隣とlink確立→JoinConfirm(authority channel)       |
 ```
 
@@ -121,7 +121,23 @@ headerの`network_hint`＝現場network_low32。hint・hops・loadはすべて**
 | 5 | Resume | 1〜3 | RLRES1（[06](06-fast-rejoin.md) §2） |
 | 6 | RelayStatus | 1 | proxy→機器の未認証hint：`status u8 (1 queued, 2 authority_unreachable, 3 busy, 4 aborted) | retry_after_ms u32` |
 
-phase本文が112B（=116−4）を超えるときは既存BootstrapChunk（type 5、header 10B、data≤106B）で分割し、BootstrapReply（type 6、10B本文、総54B）で進捗を返す。**実装上の差分**：現行`bootstrap_auth_decode`は本文を124Bまでに制限しており、組立て後1024Bまでの本文を受けられない。phase 4/5用に1024B上限の組立て済みobject型を追加する（[08](08-implementation-plan.md) P3）。
+phase本文が112B（=116−4）を超えるときは既存BootstrapChunk（type 5、header 10B、data≤106B）で分割し、BootstrapReply（type 6、10B本文、総54B）で進捗を返す。**実装上の差分**：現行`bootstrap_auth_decode`は本文を124Bまでに制限しており、組立て後1024Bまでの本文を受けられない。phase 4/5用に1024B上限の組立て済みobject型を追加する（[08](08-implementation-plan.md) P3、§5.4で実装）。
+
+### 5.4 Resolved in implementation（P3-1）
+
+[sdkv1_join_transport.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_transport.hpp)（codec・有界object slot・admission）と[sdkv1_join_relay.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_relay.hpp)（機器端`ZtJoinerLink`・`JoinProxy`・`JoinRelayGateway`）に実装し、独立Python生成器`tools/gen_sdkv1_join_transport_vectors.py`の共通vector（[`protocol/sdkv1-golden/join-transport/`](../../../protocol/sdkv1-golden/join-transport/README.md)）でbyte一致を検査した。heap・static無し、firmware未配線。設計が決めていなかった点は次のとおり決めた。
+
+- **1 messageの上限960B**：EDHOC／RLRES1 message 1件は1〜960B。RLD1 object（6＋cookie 16＋960＝982B）、relay object（24＋960＝984B）、USB 0x60/0x61本文（≤1005B、bridgeのTX item 1024B以内）がこの1定数で全部収まる。実測のm1〜m4（§6）は最大362Bで余裕がある。
+- **object**：BootstrapAuth prefix `ver=1|phase|step|reserved`の後、phase 4/5は`cookie_echo_present u8|reserved u8|[cookie 16B]|message`。cookieはphase 4 step 1で必須（それ以外は0）、phase 5はstep 1だけが載せてよい（ゼロタッチのproxyは要求）。phase 6（RelayStatus）は`status u8|retry_after_ms u32（≤600000＝ZT_BACKOFF上限）`の9B固定。
+- **chunk／reply**：RLD1（kind 5/6）とWire relay（FrameType 5/6）で同じ形 `ver=1|sub|id u32|offset u16|total u16|data`、replyは`ver|sub|id|received u16|status u8|reserved u8`の10B（設計値の10Bに合わせ末尾1Bを予約）。`sub`＝`phase<<4|step`（0x41〜0x45、0x51〜0x53）で、既存dev-PSK chunk（sub 1）と区別し、完了済みobjectの再送chunkを次のobjectと取り違えない。`id`はRLD1ではtransaction nonceの先頭4B、Wireではrelay_id。offsetはcarrierの格子（RLD1 106B、Wire 118B）上だけ、分割はcarrierの単一frame上限（116B／128B）を超えるobjectだけ（それ以下の分割は拒否）。replyの`received`は連続受信済みbyte数、statusは0 progress／1 complete（received＝total）／2 aborted（received 0）。
+- **組立て（JoinObjectSlot、1件1024B）**：順不同受信（bitmap）、同一内容の重複は再応答、内容の異なる重複・totalの変化は組立て破棄＋aborted、組立て中の別objectはBusyで捨てる（1件だけ）、開始から3秒で破棄。完了したobjectの鍵を覚え、Complete応答が失われた場合の再送chunkには（次のobjectを送信中でも）completeを再送する。同じbufferを送信側でも使い、相手が次のobjectを送ってきたことを暗黙の受領確認として扱う（proxy・機器・gateway slotは各1KB）。送信側は受信側の連続prefixを確定し、未確認chunkだけを再送する。
+- **cookie**：proxy側のstateless cookie＝`first16(HMAC-SHA-256(key, "RouteLoom/zt-cookie/v1" 00 ‖ MAC ‖ nonce ‖ proxy u64 ‖ network_low32 u32 ‖ bucket u64))`（keyは起動時乱数でRAMのみ、bucket 2秒、現在と直前を受理）。分割されたstep 1（例：ticket付きR1 131B）は**offset 0のchunkだけ**がrelayを開ける（先頭22Bにobject headとcookieが平文で入る）。cookie検査の前に組立てmemoryを割り当てない（[06 admission §3.2](../autonomous-mesh/06-membership-admission.md)）。
+- **frame header**：DISCOVERはnetwork_hint 0・capability 0。以降の交換frameは同じtransaction nonceで、機器はnetwork_hint 0・claimed＝自NodeId、proxyはnetwork_hint＝network_low32・claimed＝proxy NodeId、capabilityは0。受信側は相手の値を照合する。
+- **DISCOVER/OFFER v3の検査**：flags bit0は`preferred_site_hint≠0`と同値、avoid枠は前詰め・相異・preferredと別。OFFERのflags未定義bitとreservedは0。proxyはrelay中にOFFERを出さず（§7.3 IDLE行）、m1受付の2秒budgetが残っていない間は`proxy_busy`を立てて出す。
+- **admission**（`zt_admit_rld1`）：Member以外でDiscovering/Authenticatingの機器が**joiner**、Memberが**proxy**。joinerはDISCOVER v3送信・OFFER v3受信（Discovering/Authenticating）、交換frameはAuthenticatingだけで上り送信・下り（とRelayStatus）受信。proxyは逆。chunkは中身のstepの向き、replyはその逆向き。その他の状態（Unprovisioned・AuthorizedPendingCommit・Revoked）はこのlaneを使えない。既存のmembership allowlistの範囲内（`protocol/semantics.json`の`zero_touch_join`）。
+- **proxyの資源**（§13）：同時relay 1件、新規m1は2秒に1件（超過はRelayStatus busy＋待ち時間）、保留OFFER 4件、relay 20秒、機器無応答5秒（下りobjectを渡した後だけ数える）、送信は初回＋再送3回。gatewayは分割object用slot 2件（単一frameのobjectはslot不要）、直近relay 8件を記録。
+
+**未配線**：RLD1 frameの振分け（`zt_rld1_frame`で判別しtransaction nonceで担当engineへ）とrelay portのMeshNode routed Wire（FrameType 3〜6、hopごとのlink保護、`kFlagEndProtected`無し）への接続、firmwareでのengine配置は後続（P3-4／Owner）。参加FSM（候補表・verdict処理・RLS1 commit）はP3-4。
 
 ## 6. EDHOCメッセージの中身と長さ
 
@@ -134,6 +150,8 @@ phase本文が112B（=116−4）を超えるときは既存BootstrapChunk（type
 | m4 pending/deny | A→D | CIPHERTEXT_4（JoinResult＋ticket≤48B）＋tag | ≈70〜100B | 1 |
 
 m1は機器のcookie echo 16Bを含めてRLD1 1 frameに収まる。m1のC_I・m2のC_Rは、参加用EDHOCではauthority channelの識別子として使う（Wire linkのepochには使わない）。message_4は05の方針どおり必須（鍵確認）。
+
+**実長（P3-1、EDHOC encoder込み、V1-J14）**：§3のkid参照＋Credential EADで、DevCert 190B・SiteCert 191B・MemberCert 198B・C_I/C_R 1B・ticket無しのAllowを実際にlibedhoc（`edhoc::Session`＋`EadHandler`）で交換した値は、m1 **55B**、m2 **362B**、m3 **341B**、m4 **353B**（`tests/cpp/test_edhoc.cpp`、host）。m1はphase本文 2＋16＋55＝73B≤112Bで1 frame。m2/m3/m4はRLD1 objectが各4 chunk（368／347／359B）、relay objectもWireで各4 chunk（386／365／377B）で、上の表の「chunk 4」と§7.1の「各3 frame」のうちWire側は4 frameになる。この交換でlibedhocの作業arenaは最大1440B（証明書の可変長claimを全て最大幅にした場合1456B、m2/m3/m4＝366／344／359B）を使い、P2-1の1280Bではm3の作成中に不足したため2048Bに上げた（1456Bに対し25%余裕を保つ最小の切りのよい値。1536Bでは余裕80B＝5%で試験の25%条件を満たさない。session 3880B（LP64）／3472B（RV32、riscv32-esp-elfでのsizeof）、§13）。
 
 機器側hopの合計（allow、OFFER k件）：概算 **2.4KB＋92k B、約30frame**。250kbps PHYで割ったbyte時間は約0.08秒だが、preamble・MAC ACK・再送・chunk間の待ちを含まない下限であり、実測値ではない。
 
@@ -193,7 +211,7 @@ scope鍵（Member class）はGKから導出する（[03](03-key-hierarchy.md) §
 - **AssignmentTicket（A2）は形式未定**：01 §5・§10.2は内容（node、site_id、generation、割当検証鍵の署名）だけを定め、byte列を定めていない。本実装はAllow bodyの長さ付き不透明値（≤128B）として運ぶだけにし、A1の機器は無視、A2（strict）の機器はticket無しを拒否、ticket有りは形式が決まるまで`Unsupported`で**fail closed**（参加しない）。形式の決定は後続（A2を製品で使う前に必須）。
 - **Rust側の置き場所**：Site Authorityは`routeloom-host`に置く（07 §1）ため、事務所tooling（`routeloom-provision`）とは別crate `routeloom-join`にし、証明書とCOSE_Sign1 helperは`routeloom-provision`の`sdkv1`を使う。Rust試験はSite Authorityとして全AllowのMemberCertとRemovalNoticeをRFC 6979で再発行し、生成器のbyte列と一致することを要求する。
 
-未実装・未定のまま残るもの：AssignmentTicketのbyte列、link用EDHOC（03 §4.1）のEADで交換する`(site_epoch, rs_epoch, gk_epoch)`の形式（P4-2）、JoinConfirm（AuthorityEnvelope type 1）の本文、EDHOC encoder込みのm1〜m4実長の検査（V1-J14の残り、P2-1後）。
+未実装・未定のまま残るもの：AssignmentTicketのbyte列、link用EDHOC（03 §4.1）のEADで交換する`(site_epoch, rs_epoch, gk_epoch)`の形式（P4-2）、JoinConfirm（AuthorityEnvelope type 1）の本文。EDHOC encoder込みのm1〜m4実長の検査（V1-J14の残り）はP3-1で実施（§6）。
 
 ## 7. proxyの中継
 
@@ -220,7 +238,7 @@ Wire中継はmember間のlink保護（hopごと）で運び、`kFlagEndProtected
 
 ### 7.2 gateway⇄host（USB HostOps、[07](07-host-api-tooling.md) §4）
 
-`0x40 JoinRelayUp`（G→H：`gateway u64 | from_proxy u64 | hops u8 | RelayHeader＋本文`）、`0x41 JoinRelayDown`（H→G：`to_proxy u64 | RelayHeader＋本文`）、`0x42 JoinRelayAbort`。USB frameは最大4096Bなのでmessageを分割しない。
+`0x40 JoinRelayUp`（G→H：`gateway u64 | from_proxy u64 | hops u8 | RelayHeader＋本文`）、`0x41 JoinRelayDown`（H→G：`to_proxy u64 | RelayHeader＋本文`）、`0x42 JoinRelayAbort`。USB frameは最大4096Bなのでmessageを分割しない。**実装の番号は0x60〜0x63とcapability bit 8**（0x40〜0x42とbit 6はnode_status_v1が使用済み、§7.4）。
 
 ### 7.3 proxyの状態機械
 
@@ -235,6 +253,26 @@ Wire中継はmember間のlink保護（hopごと）で運び、`kFlagEndProtected
 | RELAYING | 開始から20秒、または機器無応答5秒 | `JoinRelayAbort`をup、RelayStatus(aborted) | IDLE |
 | 任意 | 別機器のm1 | RelayStatus(busy, retry_after) | 不変 |
 | 任意 | 自分のmembershipがRevoked／GK不明 | 中継中止、OFFER停止 | IDLE |
+
+### 7.4 Resolved in implementation（P3-2）
+
+`JoinProxy`・`JoinRelayGateway`（[sdkv1_join_relay.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_relay.hpp)）、USB codecと`UsbBridge::attach_join_relay`（[usb_host_ops.hpp](../../../components/routeloom/include/routeloom/usb_host_ops.hpp)）、Rust `routeloom-protocol::join_relay`に実装した。共通vectorはrelay objectが`protocol/sdkv1-golden/join-transport/`、USBが`protocol/usb-golden/join-relay/`（C++ bridgeが同じbyte列を再生、Rustが復号）。
+
+- **RelayHeaderのbyte 23**（予約）を**phase**（4 EDHOC、5 RLRES1）にした：`step`だけではEDHOC m1とRLRES1 R1を区別できない。
+- **stepとstatusの組**：上り継続はEDHOC 1/3/5・RLRES1 1/3、下り継続はstep 2、下り最終（status 1）はEDHOC 4/5・RLRES1 2、中止（status 2）は相の有効step。上りのstatus 1は無し。`joiner_rssi_dbm`は上りだけ（≤0）、下りは0。中止の本文は`status u8 | retry_after_ms u32`の5B（下りはauthority_unreachable／busy／aborted＝そのまま機器へのRelayStatus、上りはaborted）。authorityが上限超過でm2を作らない場合（§8 M1）はこの下り中止で返す。
+- **Wireでの運び方**：128B以下のobjectは1 frame（下りの最終・中止はFrameType 4、それ以外は3）、それを超えるobjectは§5.4のchunk（FrameType 5、`sub`＝phase/step、`id`＝relay_id、118B格子）で送り、受領はFrameType 6（10B）。FrameType 4は大きいm4には使えない（1 frameに入らない）ので、最終かどうかはobject内のstatusで判断する。Wire lane上のFrameType 3〜6はmember間ではrelay専用（byte 1＝dirの1/2。P4-3がWireでBootstrapAuth phase 4/5を使う場合はbyte 1＝4/5で区別でき、dev-PSKのphase 1〜3はRLD1だけ）。
+- **中継先の制限**（`zt_admit_relay`）：両端Member、proxyは設定したgatewayとだけFrameType 3/5/6を送受し4は受信のみ、gatewayはproxyから3/5/6を受けて4も送る。gatewayはobjectのproxy欄がmeshの検証済み送信元と一致しないものを捨てる。
+- **gateway**：分割object用slot 2件（上りの組立てと下りの送信で共用、完了鍵だけ残るslotは再利用可）、直近relay 8件（host_abort用）。host sinkが無い／USB sessionが無い／送信queueが満杯なら上りを捨て、proxyへ下り中止（authority_unreachable、再試行5秒）を返す（07 §7）。下りobjectは受領まで500msごと・送信4回まで再送し、尽きたら`delivery_failed`をhostへ通知する。上りの組立てが3秒で終わらなければ`gateway_expired`。
+- **USB番号の衝突（V1-H08）**：設計の`kCapSiteAuthorityV1 = 1u << 6`とHostOps 0x40〜0x42はnode_status_v1（bit 6、0x40〜0x42）と、0x50〜0x52はgroup_delivery_v1（bit 7）と衝突するため、SDK v1のsite-authority系を**0x60〜0x6F**に置き、参加中継は**capability bit 8（`kCapJoinRelayV1`／`CAP_JOIN_RELAY_V1`）**と**0x60〜0x63**にした。P5のAuthorityUp/Down・SiteStateSet/Report（07 §4の0x43〜0x46）も同じ族の0x64〜0x67に置くことを推奨する（未実装、P5で決定）。capabilityは中継だけを表し、P5はその機能に別bitを割り当てる。
+
+| sub | 方向 | 本文 |
+|---|---|---|
+| `0x60` JOIN_RELAY_UP | G→H（request id 0） | `gateway u64 \| from_proxy u64 \| hops u8 \| relay object`（dir up、proxy＝from_proxy。hopsは1〜254、0はgateway自身の参加でfrom_proxy＝gatewayのときだけ） |
+| `0x61` JOIN_RELAY_DOWN | H→G | `to_proxy u64 \| relay object`（dir down、proxy＝to_proxy）→ `0x63` |
+| `0x62` JOIN_RELAY_ABORT | 双方向 | `proxy u64 \| relay_id u32 \| reason u8`（1 proxy_aborted、2 gateway_expired、3 delivery_failed、4 host_aborted）。H→Gは4だけで`0x63`が答える（gatewayが知らないrelayはInvalid。header全体を持つhostは`0x61`の中止objectを使う）、G→Hはrequest id 0の通知（1〜3） |
+| `0x63` JOIN_RELAY_RESULT | G→H（0x61/0x62のrequest id） | `result u16 \| proxy u64 \| relay_id u32`（ConfigOpsResult：Ok＝Wire laneへ渡した〔機器への配送ではない〕、Unsupported＝未attach、Busy＝slot無し、Denied＝gatewayがMemberでない、Invalid＝不整合・未知relay、NoRoute、Indeterminate） |
+
+形式不正（長さ・schema・relay objectの不正）はHostOps共通どおりError frame（ProtocolError）で、0x60/0x63をhostが送ればdirection違反。gateway自身の参加（hops＝0、proxy無し）は未実装。
 
 ## 8. Site Authorityの処理とKGuard
 
@@ -355,10 +393,10 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | authority同時参加 | 4件 | host側。KGuard待ちを含む |
 | authorityの機器ごと再試行 | pending中は`retry_after`未満の再試行をBusyで返す | flood抑制 |
 | 未検証m1のauthority費用 | ECDH 1回＋署名1回 | PC側で許容。proxy rateで上限が掛かる |
-| 機器側RAM | 組立1件1024B＋EDHOC session（ILP32見積約2.7KB：libedhoc context 576B・作業arena 1280B・key store等。P2-1のhost計測から算出、C3実測はP2-2） | libedhocのbounded backend（05 §8、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)） |
+| 機器側RAM | 組立1件1024B（`ZtJoinerLink`のobject slot）＋EDHOC session（ILP32見積約3.5KB：libedhoc context 576B・作業arena 2048B・key store等。P2-1のhost計測にP3-1のEAD込み参加交換の実測（arena最大1440B）を反映、C3実測はP2-2）。proxyはobject slot 1件、gatewayは2件 | libedhocのbounded backend（05 §8、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)） |
 | memberのDATA | bootstrap queueと分離 | 既存方針 |
 
-## 14. 受入試験（すべてplanned_not_run）
+## 14. 受入試験（下の注記以外はplanned_not_run）
 
 | ID | 内容 | 層 |
 |---|---|---|
@@ -377,3 +415,5 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | V1-J13 | m1/m3の再送攻撃：新しいephemeralにより失敗 | host |
 | V1-J14 | m1〜m4の実長がこの表の予算内（共通vector） | golden |
 | V1-J15 | C3/S3で参加時間とECC処理時間を実測 | HIL |
+
+**このbranchで実行したもの（host、P2-3・P3-1・P3-2）**：V1-J12（P2-3、検査部分）、V1-J14（EAD部分〔P2-3〕とEDHOC encoder込みの実長〔P3-1、§6〕）、V1-J02（`JoinProxy`→`JoinRelayGateway`の中継をhop数3として通し、最終objectでproxy slotが解放される。Wire routingはportで模擬しMeshNodeは通さない）、V1-J10（authority到達不可ではOFFER無し、hostが無いgatewayはauthority_unreachable、authorityのbusy中止、relay中の別機器：いずれも機器へはhintだけで状態は変えない）、V1-J11のうちproxy側（同時6機器のDISCOVERで保留OFFER 4件、m1は1件だけ中継し他はbusy、cookie無しのm1は組立てmemoryも使わず拒否、2秒budget。memberのDATA維持はMeshNode配線後）。いずれも`tests/cpp/test_sdkv1_join_relay.cpp`と`test_sdkv1_join_transport.cpp`。

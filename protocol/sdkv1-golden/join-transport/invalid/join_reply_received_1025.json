@@ -1,0 +1,8 @@
+{
+  "codec": "join_reply",
+  "encoded_hex": "01421011121304010000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_reply_received_1025",
+  "note": "1024 B ceiling"
+}

@@ -1,5 +1,7 @@
 #include "routeloom/sdkv1_ead.hpp"
 
+#include <cstring>
+
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"  // Sha256
 
@@ -131,6 +133,7 @@ bool value_size_ok(const JoinEad label, const std::size_t size) noexcept {
     case JoinEad::Offer: return size == kSiteOfferSize;
     case JoinEad::Request: return size == kJoinRequestSize;
     case JoinEad::Result: return size >= kJoinResultHeadSize && size <= kJoinResultMax;
+    case JoinEad::Credential: return size >= 1 && size <= kRlcw1CertMax;
   }
   return false;
 }
@@ -824,6 +827,75 @@ Status join_ead_find(const ByteView ead, const JoinEad expected, ByteView& value
   }
   if (!found) return malformed("ead item missing");
   value = found_value;
+  return Status::success();
+}
+
+Status join_ead_find_with_credential(const ByteView ead, const JoinEad expected,
+                                     ByteView& credential, ByteView& value) noexcept {
+  credential = ByteView{};
+  value = ByteView{};
+  if (expected != JoinEad::Offer && expected != JoinEad::Request) {
+    return Status::error(StatusCode::InvalidArgument, "credential rides EAD_2/EAD_3 only");
+  }
+  if (ead.data == nullptr || ead.size == 0 || ead.size > kJoinEadFieldMax) {
+    return malformed("ead field bounds");
+  }
+  // 0: nothing yet, 1: message item seen, 2: message item then Credential.
+  int seen = 0;
+  ByteView found_credential{};
+  ByteView found_value{};
+  std::size_t pos = 0;
+  while (pos < ead.size) {
+    bool negative = false;
+    std::uint64_t argument = 0;
+    Status status = read_int(ead, pos, negative, argument);
+    if (!status) return status;
+    ByteView item_value{};
+    bool has_value = false;
+    if (pos < ead.size && (ead.data[pos] >> 5U) == 2) {
+      status = read_bstr(ead, pos, item_value);
+      if (!status) return status;
+      has_value = true;
+    }
+    if (!negative && argument == 0) continue;  // padding: ignored (RFC 9528 §3.8.1)
+    if (!negative) return malformed("ead unexpected item");
+    const std::uint64_t label = argument + 1U;
+    const JoinEad want = seen == 0 ? expected : JoinEad::Credential;
+    if (seen == 2 || label != static_cast<std::uint32_t>(want)) {
+      return malformed(seen == 2 ? "ead item after the credential"
+                                 : "ead message item or credential out of order");
+    }
+    if (!has_value || !value_size_ok(want, item_value.size)) return malformed("ead value size");
+    if (seen == 0) {
+      found_value = item_value;
+    } else {
+      found_credential = item_value;
+    }
+    ++seen;
+  }
+  if (seen != 2) return malformed("ead item missing");
+  credential = found_credential;
+  value = found_value;
+  return Status::success();
+}
+
+Status join_credential_check(const ByteView credential, const CertType type, const ByteView kid,
+                             CertClaims& out) noexcept {
+  out = CertClaims{};
+  CertClaims claims{};
+  Status status = cert_decode(credential, claims);
+  if (!status) return status;
+  if (claims.type != type) {
+    return Status::error(StatusCode::AuthenticationFailed, "credential certificate type");
+  }
+  Digest256 computed{};
+  status = cert_subject_kid(claims, computed);
+  if (!status) return status;
+  if (kid.data == nullptr || kid.size != computed.size() ||
+      std::memcmp(kid.data, computed.data(), computed.size()) != 0) {
+    return Status::error(StatusCode::AuthenticationFailed, "credential does not match the kid");
+  }
+  out = claims;
   return Status::success();
 }
 

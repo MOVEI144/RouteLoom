@@ -1,0 +1,12 @@
+{
+  "name": "join_relay_proxy_abort",
+  "direction": "d2h",
+  "kind": 19,
+  "flags": 0,
+  "session": 11827132529830895756,
+  "request": 0,
+  "inner_hex": "0162000d00000000000000027e57ab1f01",
+  "body_hex": "0000000000000009ffb893a424243f71b01a9176787db1710162000d00000000000000027e57ab1f01",
+  "wire_hex": "07524c553101130109a4226a5f8009a08c010101010101010102290101010101011409ffb893a424243f71b01a9176787db1710162020d0101010101010b027e57ab1f0174f5610d00",
+  "note": "proxy 2 gave up a second relay (device silent): unsolicited 0x62"
+}

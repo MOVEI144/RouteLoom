@@ -1,0 +1,8 @@
+{
+  "codec": "join_object",
+  "encoded_hex": "01060100030000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_object_relay_status_long",
+  "note": "9 B exactly"
+}

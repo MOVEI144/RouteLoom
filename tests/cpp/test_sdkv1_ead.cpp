@@ -362,6 +362,44 @@ void valid_field(const Fields& f) {
   CHECK(same(value, hex(f, "value_hex")));
 }
 
+CertType cert_type_named(const std::string& name) {
+  if (name == "site") return CertType::Site;
+  if (name == "device") return CertType::Device;
+  return CertType::Member;
+}
+
+// P3-1: EAD_2/EAD_3 carry the peer's RLCW1 certificate in the critical
+// Credential item (label 65541) after the message item; the certificate
+// must match the kid the same message's ID_CRED_x names.
+void valid_field_credential(const Fields& f) {
+  const Bytes ead = hex(f, "ead_hex");
+  const JoinEad expected = label_named(f.at("expected"));
+  ByteView credential{};
+  ByteView value{};
+  CHECK(join_ead_find_with_credential(view(ead), expected, credential, value).ok());
+  CHECK(same(credential, hex(f, "credential_hex")));
+  CHECK(same(value, hex(f, "value_hex")));
+  CHECK(num(f, "label") == static_cast<std::uint32_t>(JoinEad::Credential));
+  // The plain single-item walk refuses a field that carries a Credential.
+  ByteView plain{};
+  CHECK(!join_ead_find(view(ead), expected, plain).ok());
+  ByteBuffer<kJoinEadItemMax> item{};
+  CHECK(join_ead_item_encode(JoinEad::Credential, credential, item).ok());
+  CHECK(same(item.view(), hex(f, "credential_item_hex")));
+  CertClaims claims{};
+  const Bytes kid = hex(f, "kid_hex");
+  CHECK(join_credential_check(credential, cert_type_named(f.at("cert_type")), view(kid), claims)
+            .ok());
+  CHECK(claims.type == cert_type_named(f.at("cert_type")));
+  // Swapping the expected message fails.
+  CHECK(!join_ead_find_with_credential(
+             view(ead), expected == JoinEad::Offer ? JoinEad::Request : JoinEad::Offer,
+             credential, value)
+             .ok());
+  CHECK(join_ead_find_with_credential(view(ead), JoinEad::Intent, credential, value).code ==
+        StatusCode::InvalidArgument);
+}
+
 // --- invalid ----------------------------------------------------------------------
 
 void invalid(const Fields& f) {
@@ -416,6 +454,20 @@ void invalid(const Fields& f) {
     ByteView value{};
     CHECK(!join_ead_find(input, label_named(f.at("expected")), value).ok());
     CHECK(value.size == 0);
+  } else if (codec == "ead_field_credential") {
+    CHECK(!deny);
+    ByteView credential{};
+    ByteView value{};
+    CHECK(!join_ead_find_with_credential(input, label_named(f.at("expected")), credential, value)
+               .ok());
+    CHECK(credential.size == 0 && value.size == 0);
+  } else if (codec == "credential") {
+    CertClaims claims{};
+    const Bytes kid = hex(f, "kid_hex");
+    const Status status =
+        join_credential_check(input, cert_type_named(f.at("cert_type")), view(kid), claims);
+    CHECK(!status.ok());
+    CHECK(deny == (status.code == StatusCode::AuthenticationFailed));
   } else {
     CHECK(!"unknown invalid codec");
   }
@@ -526,6 +578,8 @@ void run() {
       if (f.at("name") == "join_result_allow_with_ticket") unit_allow_strict(f);
     } else if (codec == "ead_field") {
       valid_field(f);
+    } else if (codec == "ead_field_credential") {
+      valid_field_credential(f);
     } else {
       CHECK(!"unknown valid codec");
     }

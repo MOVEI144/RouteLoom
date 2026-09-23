@@ -1885,4 +1885,205 @@ Status decode_group_status(const ByteView inner, GroupStatusReply& out) noexcept
   return Status::success();
 }
 
+// --- Join relay family (join_relay_v1, 0x60-0x63) --------------------------
+
+namespace {
+
+bool relay_node_valid(const NodeId node) noexcept {
+  return node != kInvalidNodeId && node != kBroadcastNodeId;
+}
+
+// The object must decode and point the right way at the right proxy.
+Status check_relay_object(const ByteView object, const sdkv1::RelayDirection dir,
+                          const NodeId proxy) noexcept {
+  sdkv1::RelayObject decoded{};
+  const Status status = sdkv1::relay_object_decode(object, decoded);
+  if (!status) return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_OBJECT");
+  if (decoded.header.dir != dir || decoded.header.proxy != proxy) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_OBJECT_HEADER");
+  }
+  return Status::success();
+}
+
+Status check_relay_up(const JoinRelayUp& up) noexcept {
+  if (!relay_node_valid(up.gateway) || !relay_node_valid(up.from_proxy) ||
+      up.hops > kJoinRelayHopsMax || (up.hops == 0) != (up.from_proxy == up.gateway)) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_UP");
+  }
+  return check_relay_object(up.object, sdkv1::RelayDirection::Up, up.from_proxy);
+}
+
+bool join_relay_result_known(const std::uint16_t result) noexcept {
+  switch (result) {
+    case static_cast<std::uint16_t>(ConfigOpsResult::Ok):
+    case static_cast<std::uint16_t>(ConfigOpsResult::Busy):
+    case static_cast<std::uint16_t>(ConfigOpsResult::Denied):
+    case static_cast<std::uint16_t>(ConfigOpsResult::Unsupported):
+    case static_cast<std::uint16_t>(ConfigOpsResult::Invalid):
+    case static_cast<std::uint16_t>(ConfigOpsResult::Indeterminate):
+    case static_cast<std::uint16_t>(ConfigOpsResult::NoRoute):
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool join_relay_result_fields_ok(const JoinRelayResult& result) noexcept {
+  const bool ok = result.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok);
+  return join_relay_result_known(result.result) && result.proxy != kBroadcastNodeId &&
+         (!ok || (relay_node_valid(result.proxy) && result.relay_id != 0));
+}
+
+}  // namespace
+
+static_assert(kJoinRelayObjectMax == sdkv1::kRelayObjectMax, "relay object bound");
+
+Status encode_join_relay_up(const JoinRelayUp& up, const MutableByteView out,
+                            std::size_t& written) noexcept {
+  written = 0;
+  if (!check_relay_up(up)) return Status::error(StatusCode::InvalidArgument, "join relay up");
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::JoinRelayUp,
+      static_cast<std::uint16_t>(kJoinRelayUpFixed + up.object.size));
+  if (status) status = writer.write_u64(up.gateway);
+  if (status) status = writer.write_u64(up.from_proxy);
+  if (status) status = writer.write_u8(up.hops);
+  if (status) status = writer.write_bytes(up.object);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_join_relay_up(const ByteView inner, JoinRelayUp& out) noexcept {
+  out = JoinRelayUp{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::JoinRelayUp, kJoinRelayUpFixed + 1,
+                               kJoinRelayUpMaxPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  JoinRelayUp up{};
+  status = reader.read_u64(up.gateway);
+  if (status) status = reader.read_u64(up.from_proxy);
+  if (status) status = reader.read_u8(up.hops);
+  if (!status) return status;
+  up.object = ByteView{payload.data + kJoinRelayUpFixed, payload.size - kJoinRelayUpFixed};
+  status = check_relay_up(up);
+  if (!status) return status;
+  out = up;
+  return Status::success();
+}
+
+Status encode_join_relay_down(const JoinRelayDown& down, const MutableByteView out,
+                              std::size_t& written) noexcept {
+  written = 0;
+  if (!relay_node_valid(down.to_proxy) ||
+      !check_relay_object(down.object, sdkv1::RelayDirection::Down, down.to_proxy)) {
+    return Status::error(StatusCode::InvalidArgument, "join relay down");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::JoinRelayDown,
+      static_cast<std::uint16_t>(kJoinRelayDownFixed + down.object.size));
+  if (status) status = writer.write_u64(down.to_proxy);
+  if (status) status = writer.write_bytes(down.object);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_join_relay_down(const ByteView inner, JoinRelayDown& out) noexcept {
+  out = JoinRelayDown{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::JoinRelayDown, kJoinRelayDownFixed + 1,
+                               kJoinRelayDownMaxPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  JoinRelayDown down{};
+  status = reader.read_u64(down.to_proxy);
+  if (!status) return status;
+  down.object = ByteView{payload.data + kJoinRelayDownFixed, payload.size - kJoinRelayDownFixed};
+  if (!relay_node_valid(down.to_proxy)) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_DOWN");
+  }
+  status = check_relay_object(down.object, sdkv1::RelayDirection::Down, down.to_proxy);
+  if (!status) return status;
+  out = down;
+  return Status::success();
+}
+
+Status encode_join_relay_abort(const JoinRelayAbort& abort, const MutableByteView out,
+                               std::size_t& written) noexcept {
+  written = 0;
+  if (!relay_node_valid(abort.proxy) || abort.relay_id == 0 ||
+      !sdkv1::relay_abort_reason_known(abort.reason)) {
+    return Status::error(StatusCode::InvalidArgument, "join relay abort");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::JoinRelayAbort,
+                                     static_cast<std::uint16_t>(kJoinRelayAbortPayload));
+  if (status) status = writer.write_u64(abort.proxy);
+  if (status) status = writer.write_u32(abort.relay_id);
+  if (status) status = writer.write_u8(abort.reason);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_join_relay_abort(const ByteView inner, JoinRelayAbort& out) noexcept {
+  out = JoinRelayAbort{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::JoinRelayAbort, kJoinRelayAbortPayload,
+                               kJoinRelayAbortPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  JoinRelayAbort abort{};
+  status = reader.read_u64(abort.proxy);
+  if (status) status = reader.read_u32(abort.relay_id);
+  if (status) status = reader.read_u8(abort.reason);
+  if (!status) return status;
+  if (!relay_node_valid(abort.proxy) || abort.relay_id == 0 ||
+      !sdkv1::relay_abort_reason_known(abort.reason)) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_ABORT");
+  }
+  out = abort;
+  return Status::success();
+}
+
+Status encode_join_relay_result(const JoinRelayResult& result, const MutableByteView out,
+                                std::size_t& written) noexcept {
+  written = 0;
+  if (!join_relay_result_fields_ok(result)) {
+    return Status::error(StatusCode::InvalidArgument, "join relay result");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::JoinRelayResult,
+                                     static_cast<std::uint16_t>(kJoinRelayResultPayload));
+  if (status) status = writer.write_u16(result.result);
+  if (status) status = writer.write_u64(result.proxy);
+  if (status) status = writer.write_u32(result.relay_id);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_join_relay_result(const ByteView inner, JoinRelayResult& out) noexcept {
+  out = JoinRelayResult{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::JoinRelayResult, kJoinRelayResultPayload,
+                               kJoinRelayResultPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  JoinRelayResult result{};
+  status = reader.read_u16(result.result);
+  if (status) status = reader.read_u64(result.proxy);
+  if (status) status = reader.read_u32(result.relay_id);
+  if (!status) return status;
+  if (!join_relay_result_fields_ok(result)) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_RESULT");
+  }
+  out = result;
+  return Status::success();
+}
+
 }  // namespace routeloom::usb

@@ -9,12 +9,17 @@
  *
  * Sized from tests/cpp/test_edhoc.cpp, which reports and checks them: the
  * arena's high-water mark over every handshake in the test (RFC 9529 §3,
- * the method-0 RLCW1 round trip, and 256-byte CRED_x — the RLCW1 maximum —
- * with 32-byte kids on both sides) is 888 bytes in at most 6 live blocks;
- * the test requires >= 25 % headroom. At most 6 key handles are live at once
- * (the local long-term key included). EAD (P2-3) adds its tokens to the
- * scratch and must re-measure. Whole session: 3104 bytes on LP64 hosts,
- * about 2.7 KB on ILP32 (context 576 + arena 1392 + keys 364 + hashes ...).
+ * the method-0 RLCW1 round trip, 256-byte CRED_x — the RLCW1 maximum —
+ * with 32-byte kids on both sides, and the zero-touch join exchange with the
+ * DevCert/SiteCert in the Credential EAD item plus the join EAD, P3-1, also
+ * with every certificate claim at its widest encoding) is 1456 bytes in at
+ * most 6 live blocks (1440 with the typical certificates); the test requires
+ * >= 25 % headroom. P2-1 sized the arena at 1280 bytes (888 without EAD);
+ * the join exchange exhausted it while composing message_3, so P3-1 raised
+ * it to 2048, the smallest round size with 25 % over 1456 (1536 would leave
+ * 80 bytes, 5 %). At most 6 key handles are live at once (the local
+ * long-term key included). Whole session: 3880 bytes on LP64 hosts, 3472 on
+ * RV32 (riscv32-esp-elf sizeof; context 576 + arena 2160 + keys 364 + ...).
  */
 #ifndef ROUTELOOM_EDHOC_STORAGE_H
 #define ROUTELOOM_EDHOC_STORAGE_H
@@ -33,7 +38,7 @@
 #endif
 #define ROUTELOOM_EDHOC_CONTEXT_ALIGN 8
 
-#define ROUTELOOM_EDHOC_ARENA_BYTES 1280
+#define ROUTELOOM_EDHOC_ARENA_BYTES 2048
 #define ROUTELOOM_EDHOC_ARENA_BLOCKS 12
 #define ROUTELOOM_EDHOC_KEY_SLOTS 10
 

@@ -14,6 +14,9 @@
 //! outside the IANA EDHOC EAD registry range (0..65535, which has no
 //! private-use block), so no registered item can collide. Values are
 //! fixed-width big-endian; reserved bytes and undefined flags are zero.
+//! Label 65541 (P3-1) carries the peer's RLCW1 certificate in EAD_2
+//! (SiteCert) and EAD_3 (DevCert) because ID_CRED_x is a kid reference
+//! (`join_ead_find_with_credential`, `join_credential_check`).
 //!
 //! `protocol/sdkv1-golden/ead/` (independent generator
 //! `tools/gen_sdkv1_ead_vectors.py`) pins every byte; this crate re-signs
@@ -60,9 +63,17 @@ pub enum JoinEad {
     Offer = 65538,
     Request = 65539,
     Result = 65540,
+    /// P3-1 (02 §3 "Resolved in implementation"): libedhoc cannot carry
+    /// `ID_CRED_x = {13: CWT}` by value, so ID_CRED_x is the kid (SHA-256 of
+    /// the cnf COSE_Key) and the full RLCW1 certificate rides this critical
+    /// item after the message item: the SiteCert in EAD_2 (the Site
+    /// Authority writes it), the DevCert in EAD_3 (the Site Authority reads
+    /// it before authenticating the device).
+    Credential = 65541,
 }
 
 impl JoinEad {
+    /// The four per-message items (the Credential item is separate).
     pub const ALL: [JoinEad; 4] = [Self::Intent, Self::Offer, Self::Request, Self::Result];
 
     fn value_size_ok(self, size: usize) -> bool {
@@ -71,6 +82,7 @@ impl JoinEad {
             Self::Offer => size == SITE_OFFER_SIZE,
             Self::Request => size == JOIN_REQUEST_SIZE,
             Self::Result => (JOIN_RESULT_HEAD_SIZE..=JOIN_RESULT_MAX).contains(&size),
+            Self::Credential => (1..=CERT_MAX).contains(&size),
         }
     }
 }
@@ -1014,6 +1026,10 @@ pub fn join_ead_find(ead: &[u8], expected: JoinEad) -> Result<&[u8]> {
     if ead.is_empty() || ead.len() > JOIN_EAD_FIELD_MAX {
         return malformed("ead field bounds");
     }
+    if expected == JoinEad::Credential {
+        // Only the four message items stand alone (device: join_ead_known).
+        return malformed("ead unexpected critical item");
+    }
     let mut found: Option<&[u8]> = None;
     let mut pos = 0;
     while pos < ead.len() {
@@ -1060,13 +1076,14 @@ pub fn join_ead_find(ead: &[u8], expected: JoinEad) -> Result<&[u8]> {
 // in EAD_2, the DevCert in EAD_3. CRED_x (what EDHOC MACs and signs) is that
 // certificate's bytes, so a substituted certificate fails Signature_2/3.
 //
-// The label below is this host's placeholder: the device side defines the
-// same item concurrently and the integrator must make the two agree (a
-// mismatch fails closed: the device refuses the unknown critical item).
+// The device side (sdkv1_ead.hpp, P3-1) uses the same label; both are pinned
+// by the shared vectors in protocol/sdkv1-golden/ead and the EDHOC interop
+// transcripts (a mismatch fails closed: the device refuses the unknown
+// critical item).
 
-/// PROVISIONAL absolute EAD label of the "RLCW1 certificate by value" item
-/// (sent critical, `-65541`), next after the four join items.
-pub const JOIN_EAD_CREDENTIAL_LABEL: u32 = 65541;
+/// Absolute EAD label of the "RLCW1 certificate by value" item (sent
+/// critical, `-65541`), next after the four join items.
+pub const JOIN_EAD_CREDENTIAL_LABEL: u32 = JoinEad::Credential as u32;
 
 /// One critical credential item: `-JOIN_EAD_CREDENTIAL_LABEL || bstr(cert)`.
 /// The value must be one canonical RLCW1 certificate (<= 256 B).
@@ -1113,6 +1130,76 @@ pub fn dams_exporter_context(
     write_bstr(&mut out, device_kid);
     write_bstr(&mut out, sak_kid);
     out
+}
+
+/// Largest Credential item: label 5 + bstr head 3 + certificate 256.
+pub const JOIN_CREDENTIAL_ITEM_MAX: usize = JOIN_EAD_LABEL_SIZE + 3 + CERT_MAX;
+
+/// EAD_2 / EAD_3 with the certificate (P3-1): exactly the `expected` message
+/// item (Offer or Request) then `Credential`, both critical with canonical
+/// bstr values, once each; padding is skipped; anything else, another
+/// order or a trailing byte is rejected. Returns `(certificate, value)`.
+pub fn join_ead_find_with_credential(ead: &[u8], expected: JoinEad) -> Result<(&[u8], &[u8])> {
+    if expected != JoinEad::Offer && expected != JoinEad::Request {
+        return err(Code::InvalidArgument, "credential rides EAD_2/EAD_3 only");
+    }
+    if ead.is_empty() || ead.len() > JOIN_EAD_FIELD_MAX {
+        return malformed("ead field bounds");
+    }
+    let mut found: Vec<&[u8]> = Vec::with_capacity(2);
+    let mut pos = 0;
+    while pos < ead.len() {
+        let (negative, argument) = read_int(ead, &mut pos)?;
+        let mut value: Option<&[u8]> = None;
+        if pos < ead.len() && ead[pos] >> 5 == 2 {
+            value = Some(
+                routeloom_provision::cbor::read_bstr(ead, &mut pos, "ead value")
+                    .map_err(|e| Error::new(Code::ProtocolError, e.detail))?,
+            );
+        }
+        if !negative && argument == 0 {
+            continue; // padding
+        }
+        if !negative {
+            return malformed("ead unexpected item");
+        }
+        let want = match found.len() {
+            0 => expected,
+            1 => JoinEad::Credential,
+            _ => return malformed("ead item after the credential"),
+        };
+        if argument.wrapping_add(1) != u64::from(want as u32) {
+            return malformed("ead message item or credential out of order");
+        }
+        match value {
+            Some(v) if want.value_size_ok(v.len()) => found.push(v),
+            _ => return malformed("ead value size"),
+        }
+    }
+    if found.len() != 2 {
+        return malformed("ead item missing");
+    }
+    Ok((found[1], found[0]))
+}
+
+/// The certificate of a Credential item: one canonical RLCW1 certificate of
+/// `cert_type` whose cnf key hashes to `kid` (the ID_CRED_x kid of the same
+/// message). Malformed -> ProtocolError; wrong type or kid ->
+/// AuthorizationFailed (the C++ device side: AuthenticationFailed; this
+/// crate has no separate authentication code). Signature and chain stay the caller's check (the
+/// Site Authority verifies the DevCert under the Device CA).
+pub fn join_credential_check(cert: &[u8], cert_type: CertType, kid: &[u8]) -> Result<CertClaims> {
+    let claims = cert_decode(cert)?;
+    if claims.cert_type != cert_type {
+        return err(Code::AuthorizationFailed, "credential certificate type");
+    }
+    if routeloom_provision::credential::credential_kid(&claims.pubkey).as_slice() != kid {
+        return err(
+            Code::AuthorizationFailed,
+            "credential does not match the kid",
+        );
+    }
+    Ok(claims)
 }
 
 #[cfg(test)]

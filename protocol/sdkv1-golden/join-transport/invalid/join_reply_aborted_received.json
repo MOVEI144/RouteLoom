@@ -1,0 +1,8 @@
+{
+  "codec": "join_reply",
+  "encoded_hex": "014210111213000a0200",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_reply_aborted_received",
+  "note": "an abort carries 0"
+}

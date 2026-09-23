@@ -106,6 +106,53 @@ Status UsbBridge::attach_group() noexcept {
   return Status::success();
 }
 
+Status UsbBridge::attach_join_relay(sdkv1::JoinRelayGateway& gateway) noexcept {
+  join_relay_ = &gateway;
+  gateway.set_host_sink(this);
+  config_.capability |= kCapJoinRelayV1;
+  return Status::success();
+}
+
+Status UsbBridge::relay_up(const NodeId proxy, const std::uint8_t hops,
+                           const ByteView object) noexcept {
+  if (state_ != SessionState::Active || (config_.capability & kCapJoinRelayV1) == 0) {
+    return Status::error(StatusCode::InvalidState, "no host session for join relay");
+  }
+  JoinRelayUp up{};
+  up.gateway = config_.node;
+  up.from_proxy = proxy;
+  up.hops = hops;
+  up.object = object;
+  std::size_t written = 0;
+  const Status status =
+      encode_join_relay_up(up, MutableByteView{tx_body_.data(), tx_body_.size()}, written);
+  if (!status) return status;
+  if (!enqueue(FrameKind::HostOps, 0, 0, ByteView{tx_body_.data(), written}, now_ms_)) {
+    return Status::error(StatusCode::NoCapacity, "join relay up queue full");
+  }
+  return Status::success();
+}
+
+Status UsbBridge::relay_abort(const NodeId proxy, const std::uint32_t relay_id,
+                              const sdkv1::RelayAbortReason reason) noexcept {
+  if (state_ != SessionState::Active || (config_.capability & kCapJoinRelayV1) == 0) {
+    return Status::error(StatusCode::InvalidState, "no host session for join relay");
+  }
+  JoinRelayAbort abort{};
+  abort.proxy = proxy;
+  abort.relay_id = relay_id;
+  abort.reason = static_cast<std::uint8_t>(reason);
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kJoinRelayAbortPayload> body{};
+  std::size_t written = 0;
+  const Status status =
+      encode_join_relay_abort(abort, MutableByteView{body.data(), body.size()}, written);
+  if (!status) return status;
+  if (!enqueue(FrameKind::HostOps, 0, 0, ByteView{body.data(), written}, now_ms_)) {
+    return Status::error(StatusCode::NoCapacity, "join relay abort queue full");
+  }
+  return Status::success();
+}
+
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.push(input, now_ms);
@@ -623,6 +670,17 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       // 0x51 is device→host only.
       send_error(UsbErrorCode::ProtocolError, request, "GROUP_DIRECTION", now_ms);
       break;
+    case HostOpsSub::JoinRelayDown:
+      handle_join_relay_down(request, inner, now_ms);
+      break;
+    case HostOpsSub::JoinRelayAbort:
+      handle_join_relay_abort(request, inner, now_ms);
+      break;
+    case HostOpsSub::JoinRelayUp:
+    case HostOpsSub::JoinRelayResult:
+      // 0x60/0x63 are device→host only.
+      send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_DIRECTION", now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
@@ -975,6 +1033,92 @@ void UsbBridge::send_group_status(const std::uint64_t request,
   } else {
     ++stats_.dropped_frames;
   }
+}
+
+namespace {
+
+// Status of a JoinRelayGateway host call -> the 0x63 result (a u16
+// ConfigOpsResult). Ok only ever means "handed to the Wire lane".
+ConfigOpsResult join_relay_result_for(const Status& status) noexcept {
+  switch (status.code) {
+    case StatusCode::Ok:
+      return ConfigOpsResult::Ok;
+    case StatusCode::NoCapacity:
+    case StatusCode::Busy:
+    case StatusCode::WouldBlock:
+      return ConfigOpsResult::Busy;
+    case StatusCode::NoRoute:
+      return ConfigOpsResult::NoRoute;
+    case StatusCode::InvalidArgument:
+    case StatusCode::ProtocolError:
+    case StatusCode::NotFound:
+      return ConfigOpsResult::Invalid;
+    case StatusCode::InvalidState:
+    case StatusCode::AuthorizationFailed:
+      return ConfigOpsResult::Denied;
+    case StatusCode::Unsupported:
+      return ConfigOpsResult::Unsupported;
+    default:
+      return ConfigOpsResult::Indeterminate;
+  }
+}
+
+}  // namespace
+
+void UsbBridge::send_join_relay_result(const std::uint64_t request, const ConfigOpsResult result,
+                                       const NodeId proxy, const std::uint32_t relay_id,
+                                       const MonotonicMs now_ms) noexcept {
+  JoinRelayResult reply{};
+  reply.result = static_cast<std::uint16_t>(result);
+  reply.proxy = proxy;
+  reply.relay_id = relay_id;
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kJoinRelayResultPayload> body{};
+  std::size_t written = 0;
+  if (!encode_join_relay_result(reply, MutableByteView{body.data(), body.size()}, written)) {
+    send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_RESULT", now_ms);
+    return;
+  }
+  (void)enqueue(FrameKind::HostOps, 0, request, ByteView{body.data(), written}, now_ms);
+}
+
+void UsbBridge::handle_join_relay_down(const std::uint64_t request, const ByteView inner,
+                                       const MonotonicMs now_ms) noexcept {
+  JoinRelayDown down{};
+  sdkv1::RelayObject object{};
+  if (!decode_join_relay_down(inner, down).ok() ||
+      !sdkv1::relay_object_decode(down.object, object).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_MALFORMED", now_ms);
+    return;
+  }
+  if ((config_.capability & kCapJoinRelayV1) == 0 || join_relay_ == nullptr) {
+    send_join_relay_result(request, ConfigOpsResult::Unsupported, down.to_proxy,
+                           object.header.relay_id, now_ms);
+    return;
+  }
+  const Status status = join_relay_->host_down(down.to_proxy, down.object, now_ms);
+  send_join_relay_result(request, join_relay_result_for(status), down.to_proxy,
+                         object.header.relay_id, now_ms);
+}
+
+void UsbBridge::handle_join_relay_abort(const std::uint64_t request, const ByteView inner,
+                                        const MonotonicMs now_ms) noexcept {
+  JoinRelayAbort abort{};
+  if (!decode_join_relay_abort(inner, abort).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_MALFORMED", now_ms);
+    return;
+  }
+  if ((config_.capability & kCapJoinRelayV1) == 0 || join_relay_ == nullptr) {
+    send_join_relay_result(request, ConfigOpsResult::Unsupported, abort.proxy, abort.relay_id,
+                           now_ms);
+    return;
+  }
+  // Only the host's own reason is meaningful host->gateway.
+  const Status status =
+      abort.reason == static_cast<std::uint8_t>(sdkv1::RelayAbortReason::HostAborted)
+          ? join_relay_->host_abort(abort.proxy, abort.relay_id, now_ms)
+          : Status::error(StatusCode::InvalidArgument, "host abort reason");
+  send_join_relay_result(request, join_relay_result_for(status), abort.proxy, abort.relay_id,
+                         now_ms);
 }
 
 void UsbBridge::handle_group_send(const std::uint64_t request, const ByteView inner,

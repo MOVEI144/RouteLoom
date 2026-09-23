@@ -1637,6 +1637,277 @@ void test_golden_group_ops() {
   CHECK(world.bridge.state() == SessionState::Disconnected);
 }
 
+// --- join_relay_v1 (SDK v1 zero-touch join, 02 §7.2/§7.4) ----------------------
+
+struct RecordedWire {
+  NodeId to{kInvalidNodeId};
+  FrameType type{FrameType::Data};
+  std::vector<std::uint8_t> payload;
+};
+
+class RecordingRelayPort final : public sdkv1::ZtRelayPort {
+ public:
+  Status send_relay(const NodeId destination, const FrameType type,
+                    const ByteView payload) noexcept override {
+    frames.push_back(RecordedWire{destination, type,
+                                  std::vector<std::uint8_t>(payload.data, payload.data + payload.size)});
+    return Status::success();
+  }
+  std::vector<RecordedWire> frames;
+};
+
+std::vector<std::uint8_t> sealed_inner(HostDriver& host, const std::uint64_t request,
+                                       const std::vector<std::uint8_t>& inner) {
+  return host.sealed(FrameKind::HostOps, request, ByteView{inner.data(), inner.size()});
+}
+
+std::vector<std::uint8_t> join_down_inner(const NodeId proxy, const std::uint32_t relay_id,
+                                          const std::size_t message_size) {
+  sdkv1::RelayObject object{};
+  object.header.dir = sdkv1::RelayDirection::Down;
+  object.header.relay_id = relay_id;
+  object.header.proxy = proxy;
+  object.header.joiner_mac = MacAddress{{2, 0, 0, 0, 0x12, 0x34}};
+  object.header.step = 2;
+  std::vector<std::uint8_t> message(message_size, 0x5A);
+  object.message = ByteView{message.data(), message.size()};
+  std::vector<std::uint8_t> bytes(sdkv1::kJoinObjectMax);
+  std::size_t written = 0;
+  CHECK_OK(sdkv1::relay_object_encode(object, MutableByteView{bytes.data(), bytes.size()}, written));
+  JoinRelayDown down{};
+  down.to_proxy = proxy;
+  down.object = ByteView{bytes.data(), written};
+  std::vector<std::uint8_t> inner(kGatewayInnerHeadSize + kJoinRelayDownMaxPayload);
+  std::size_t size = 0;
+  CHECK_OK(encode_join_relay_down(down, MutableByteView{inner.data(), inner.size()}, size));
+  inner.resize(size);
+  return inner;
+}
+
+void test_bridge_join_relay() {
+  // One message ceiling bounds every carrier (sdk-v1/02 §7.4): the largest
+  // 0x60/0x61 body fits the bridge's 1024 B TX item.
+  static_assert(kGatewayInnerHeadSize + kJoinRelayUpMaxPayload <= 1024, "0x60 fits a TX item");
+  static_assert(kGatewayInnerHeadSize + kJoinRelayDownMaxPayload <= 1024, "0x61 fits a TX item");
+  // 1) Not attached: 0x61/0x62 are answered Unsupported (V1-H08); malformed
+  //    bodies and device-only subcommands are ProtocolError frames.
+  {
+    World world;
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK(host_handshake(world, host, now, 0x6a6a, 90) != 0);
+    const auto grant = grant_body(16, 32768);
+    world.feed(host.sealed(FrameKind::Credit, 91, ByteView{grant.data(), grant.size()}), now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    world.feed(sealed_inner(host, 92, join_down_inner(2, 77, 40)), now);
+    world.drain(now);
+    const auto results = host_ops_inners(host, world.device_sink, HostOpsSub::JoinRelayResult);
+    CHECK(results.size() == 1);
+    if (results.size() == 1) {
+      JoinRelayResult result{};
+      CHECK_OK(decode_join_relay_result(ByteView{results[0].inner.data(), results[0].inner.size()},
+                                        result));
+      CHECK(results[0].request == 92);
+      CHECK(result.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
+      CHECK(result.proxy == 2 && result.relay_id == 77);
+    }
+    std::uint64_t request = 93;
+    for (const std::vector<std::uint8_t>& bad :
+         {std::vector<std::uint8_t>{1, 0x61, 0, 1, 0},             // truncated
+          std::vector<std::uint8_t>{1, 0x60, 0, 0},                // device -> host only
+          std::vector<std::uint8_t>{1, 0x63, 0, 0}}) {             // device -> host only
+      world.device_sink.frames.clear();
+      now += 500;  // control-frame token bucket (Error frames are rate limited)
+      world.feed(sealed_inner(host, request++, bad), now);
+      world.drain(now);
+      bool error = false;
+      for (const auto& record : world.device_sink.frames) {
+        error = error || record.frame.kind == FrameKind::Error;
+      }
+      CHECK(error);
+    }
+  }
+  // 2) Attached but no session: the gateway's host sink refuses, so the
+  //    gateway answers the proxy authority_unreachable (07 §7).
+  {
+    World world;
+    RecordingRelayPort wire;
+    sdkv1::JoinRelayGatewayConfig config{};
+    config.node = 1;
+    sdkv1::JoinRelayGateway gateway(config, wire);
+    gateway.set_membership(MembershipState::Member);
+    CHECK_OK(world.bridge.attach_join_relay(gateway));
+    const std::uint8_t message[3] = {1, 2, 3};
+    CHECK(!world.bridge.relay_up(2, 1, ByteView{message, 3}).ok());
+    sdkv1::RelayObject up{};
+    up.header.relay_id = 5;
+    up.header.proxy = 2;
+    up.header.joiner_mac = MacAddress{{2, 0, 0, 0, 0x12, 0x34}};
+    up.header.joiner_rssi_dbm = -50;
+    up.message = ByteView{message, 3};
+    std::array<std::uint8_t, 64> bytes{};
+    std::size_t written = 0;
+    CHECK_OK(sdkv1::relay_object_encode(up, MutableByteView{bytes.data(), bytes.size()}, written));
+    gateway.on_relay_rx(2, 1, FrameType::BootstrapAuth, ByteView{bytes.data(), written}, 0);
+    CHECK(wire.frames.size() == 1);
+    if (wire.frames.size() == 1) {
+      sdkv1::RelayObject answer{};
+      CHECK_OK(sdkv1::relay_single_frame_decode(
+          wire.frames[0].type, ByteView{wire.frames[0].payload.data(), wire.frames[0].payload.size()},
+          answer));
+      CHECK(answer.header.state == sdkv1::RelayState::Abort);
+      CHECK(answer.abort.status == sdkv1::RelayStatusCode::AuthorityUnreachable);
+    }
+  }
+}
+
+// protocol/usb-golden/join-relay: the join_relay_v1 family replayed through a
+// real UsbBridge with an attached JoinRelayGateway. The proxy's Wire frames
+// are injected right before the device steps they cause; the gateway's own
+// Wire output toward the proxy is checked against the host's objects.
+void test_golden_join_relay() {
+  const std::filesystem::path root =
+      std::filesystem::path(ROUTELOOM_USB_GOLDEN_DIR) / "join-relay";
+  const Fields session = parse_flat_json(read_file(root / "session.json"));
+  CHECK(!session.empty());
+  const std::uint32_t capability = 0x3 | kCapHostOpsV1 | kCapJoinRelayV1;
+  CHECK(field_u64(session, "capability") == capability);
+  const SessionProof proof = golden_proof(capability);
+  CHECK(proof.session_id == field_u64(session, "session_id"));
+
+  World world;
+  RecordingRelayPort wire;
+  sdkv1::JoinRelayGatewayConfig config{};
+  config.node = 1;
+  sdkv1::JoinRelayGateway gateway(config, wire);
+  gateway.set_membership(MembershipState::Member);
+  CHECK_OK(world.bridge.attach_join_relay(gateway));
+  MonotonicMs now = 0;
+  std::vector<std::filesystem::path> steps;
+  for (const auto& entry : std::filesystem::directory_iterator(root / "frames")) {
+    if (entry.path().extension() == ".json") steps.push_back(entry.path());
+  }
+  std::sort(steps.begin(), steps.end());
+  CHECK(steps.size() >= 19);
+
+  const auto up_object = [](const std::vector<std::uint8_t>& inner, std::vector<std::uint8_t>& out) {
+    JoinRelayUp up{};
+    CHECK_OK(decode_join_relay_up(ByteView{inner.data(), inner.size()}, up));
+    CHECK(up.gateway == 1 && up.from_proxy == 2 && up.hops == 3);
+    out.assign(up.object.data, up.object.data + up.object.size);
+  };
+  std::vector<std::uint8_t> m1_object;
+  std::vector<std::vector<std::uint8_t>> down_objects;
+  std::vector<std::uint8_t> expected_out;
+  std::vector<std::uint8_t> produced;
+  for (const auto& path : steps) {
+    const Fields vector = parse_flat_json(read_file(path));
+    const std::string name = vector.count("name") ? vector.at("name") : "";
+    const std::string direction = vector.count("direction") ? vector.at("direction") : "";
+    std::vector<std::uint8_t> wire_bytes;
+    std::vector<std::uint8_t> inner;
+    CHECK(hex_decode(vector.at("wire_hex"), wire_bytes));
+    CHECK(hex_decode(vector.at("inner_hex"), inner));
+    if (direction == "d2h") {
+      if (name == "join_relay_up_m1") {
+        up_object(inner, m1_object);
+        gateway.on_relay_rx(2, 3, FrameType::BootstrapAuth,
+                            ByteView{m1_object.data(), m1_object.size()}, now);
+      } else if (name == "join_relay_up_m3") {
+        std::vector<std::uint8_t> object;
+        up_object(inner, object);
+        sdkv1::RelayObject decoded{};
+        CHECK_OK(sdkv1::relay_object_decode(ByteView{object.data(), object.size()}, decoded));
+        sdkv1::JoinObjectSlot sender{};
+        CHECK_OK(sender.load(sdkv1::JoinCarrier::WireRelay, decoded.header.phase,
+                             decoded.header.step, decoded.header.relay_id,
+                             ByteView{object.data(), object.size()}, now));
+        CHECK(sender.chunk_total() == 4);
+        for (std::size_t i = 0; i < sender.chunk_total(); ++i) {
+          sdkv1::JoinChunk chunk{};
+          CHECK_OK(sender.chunk_at(i, chunk));
+          std::array<std::uint8_t, kMaxApplicationPayload> payload{};
+          std::size_t size = 0;
+          CHECK_OK(sdkv1::join_chunk_encode(sdkv1::JoinCarrier::WireRelay, chunk,
+                                            MutableByteView{payload.data(), payload.size()}, size));
+          gateway.on_relay_rx(2, 3, FrameType::BootstrapChunk, ByteView{payload.data(), size}, now);
+        }
+      } else if (name == "join_relay_proxy_abort") {
+        JoinRelayAbort notice{};
+        CHECK_OK(decode_join_relay_abort(ByteView{inner.data(), inner.size()}, notice));
+        sdkv1::RelayObject m1{};
+        CHECK_OK(sdkv1::relay_object_decode(ByteView{m1_object.data(), m1_object.size()}, m1));
+        sdkv1::RelayObject abort{};
+        abort.header = m1.header;
+        abort.header.relay_id = notice.relay_id;
+        abort.header.state = sdkv1::RelayState::Abort;
+        abort.abort.status = sdkv1::RelayStatusCode::Aborted;
+        std::array<std::uint8_t, 32> bytes{};
+        std::size_t size = 0;
+        CHECK_OK(sdkv1::relay_object_encode(abort, MutableByteView{bytes.data(), bytes.size()}, size));
+        gateway.on_relay_rx(2, 3, FrameType::BootstrapAuth, ByteView{bytes.data(), size}, now);
+      }
+      expected_out.insert(expected_out.end(), wire_bytes.begin(), wire_bytes.end());
+    } else {
+      if (name.rfind("join_relay_down_", 0) == 0) {
+        JoinRelayDown down{};
+        CHECK_OK(decode_join_relay_down(ByteView{inner.data(), inner.size()}, down));
+        down_objects.emplace_back(down.object.data, down.object.data + down.object.size);
+      }
+      world.feed(wire_bytes, now);
+    }
+    const auto emitted = world.drain_raw(now);
+    produced.insert(produced.end(), emitted.begin(), emitted.end());
+    now += 200;
+  }
+  CHECK(produced == expected_out);
+  if (produced != expected_out) {
+    std::fprintf(stderr, "join-relay golden mismatch: produced %zu bytes, expected %zu\n",
+                 produced.size(), expected_out.size());
+    const std::size_t common = std::min(produced.size(), expected_out.size());
+    for (std::size_t i = 0; i < common; ++i) {
+      if (produced[i] != expected_out[i]) {
+        std::fprintf(stderr, "first divergence at byte %zu: %02x != %02x\n", i,
+                     produced[i], expected_out[i]);
+        break;
+      }
+    }
+  }
+  // The gateway's Wire side: 4 chunks for m2 to proxy 2, receipts for the 4
+  // m3 chunks, 4 chunks for m4 — each down object reassembles to the host's.
+  CHECK(down_objects.size() == 2);
+  std::size_t down_index = 0;
+  sdkv1::JoinObjectSlot receiver{};
+  std::size_t receipts = 0;
+  for (const RecordedWire& frame : wire.frames) {
+    CHECK(frame.to == 2);
+    if (frame.type == FrameType::BootstrapReply) {
+      ++receipts;
+      continue;
+    }
+    CHECK(frame.type == FrameType::BootstrapChunk);
+    sdkv1::JoinChunk chunk{};
+    CHECK_OK(sdkv1::join_chunk_decode(sdkv1::JoinCarrier::WireRelay,
+                                      ByteView{frame.payload.data(), frame.payload.size()}, chunk));
+    const auto accepted = receiver.accept(sdkv1::JoinCarrier::WireRelay, chunk, 0);
+    if (accepted.outcome == sdkv1::JoinObjectSlot::Outcome::Complete && down_index < 2) {
+      const ByteView assembled = receiver.assembled();
+      CHECK(std::vector<std::uint8_t>(assembled.data, assembled.data + assembled.size) ==
+            down_objects[down_index]);
+      ++down_index;
+      receiver.release_assembled();
+    }
+  }
+  CHECK(down_index == 2);
+  CHECK(receipts == 4);
+  CHECK(gateway.stats().up_objects == 2 && gateway.stats().down_objects == 2);
+  CHECK(gateway.stats().proxy_aborts == 1);
+  CHECK(world.bridge.stats().rx_errors == 0);
+  CHECK(world.bridge.stats().auth_failures == 0);
+  CHECK(world.bridge.state() == SessionState::Disconnected);
+}
+
 }  // namespace
 
 int main() {
@@ -1658,6 +1929,8 @@ int main() {
   test_golden_session();
   test_golden_node_status();
   test_golden_group_ops();
+  test_bridge_join_relay();
+  test_golden_join_relay();
   if (failures != 0) {
     std::fprintf(stderr, "%d usb checks failed\n", failures);
     return 1;

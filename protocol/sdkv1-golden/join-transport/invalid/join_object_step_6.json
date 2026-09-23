@@ -1,0 +1,8 @@
+{
+  "codec": "join_object",
+  "encoded_hex": "010406000000010203",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "join_object_step_6",
+  "note": "EDHOC steps 1..5"
+}

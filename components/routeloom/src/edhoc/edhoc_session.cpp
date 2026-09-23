@@ -701,9 +701,59 @@ struct Session::Backend {
     return EDHOC_SUCCESS;
   }
 
+  // --- EAD (RFC 9528 §3.8), bound only when SessionConfig::ead is set -------
+
+  static int message_number(const edhoc_call_context* call) noexcept {
+    return call == nullptr ? 0 : static_cast<int>(call->message) + 1;
+  }
+
+  static int ead_compose(void* user, const edhoc_call_context* call, edhoc_ead_token* tokens,
+                         const std::size_t capacity, std::size_t* count) {
+    if (user == nullptr || tokens == nullptr || count == nullptr) {
+      return EDHOC_ERROR_EAD_COMPOSE_FAILURE;
+    }
+    Session& s = *static_cast<Session*>(user);
+    *count = 0;
+    if (s.config_.ead == nullptr) return EDHOC_SUCCESS;
+    std::array<EadItem, kEadItemsMax> items{};
+    const std::size_t room = std::min(capacity, items.size());
+    std::size_t written = 0;
+    const Status status = s.config_.ead->compose(message_number(call), items.data(), room, written);
+    if (!status.ok() || written > room) return EDHOC_ERROR_EAD_COMPOSE_FAILURE;
+    for (std::size_t i = 0; i < written; ++i) {
+      tokens[i].label = items[i].label;
+      tokens[i].value.value = items[i].value.data;
+      tokens[i].value.length = items[i].value.size;
+    }
+    *count = written;
+    return EDHOC_SUCCESS;
+  }
+
+  static int ead_process(void* user, const edhoc_call_context* call,
+                         const edhoc_ead_token* tokens, const std::size_t count) {
+    if (user == nullptr || (tokens == nullptr && count != 0) || count > kEadItemsMax) {
+      return EDHOC_ERROR_EAD_PROCESS_FAILURE;
+    }
+    Session& s = *static_cast<Session*>(user);
+    if (s.config_.ead == nullptr) return EDHOC_ERROR_EAD_PROCESS_FAILURE;
+    std::array<EadItem, kEadItemsMax> items{};
+    for (std::size_t i = 0; i < count; ++i) {
+      items[i].label = tokens[i].label;
+      items[i].value = ByteView{tokens[i].value.value, tokens[i].value.length};
+    }
+    const Status status = s.config_.ead->process(message_number(call), items.data(), count);
+    return status.ok() ? EDHOC_SUCCESS : EDHOC_ERROR_EAD_PROCESS_FAILURE;
+  }
+
   static const edhoc_crypto kCrypto;
   static const edhoc_credentials kCredentials;
   static const edhoc_platform kPlatform;
+  static const edhoc_ead kEad;
+};
+
+const edhoc_ead Session::Backend::kEad = {
+    &Session::Backend::ead_compose,
+    &Session::Backend::ead_process,
 };
 
 const edhoc_crypto Session::Backend::kCrypto = {
@@ -846,6 +896,9 @@ Status Session::begin(const SessionConfig& config) noexcept {
   }
   if (result == EDHOC_SUCCESS) {
     result = edhoc_bind_platform(ctx, &Backend::kPlatform);
+  }
+  if (result == EDHOC_SUCCESS && config.ead != nullptr) {
+    result = edhoc_bind_ead(ctx, &Backend::kEad);
   }
   const Status status = finish_call(result, "edhoc session setup");
   if (!status.ok()) {

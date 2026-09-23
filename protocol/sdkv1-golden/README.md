@@ -94,5 +94,7 @@ later field zero.
   `expected_site_id`, `expected_network`).
 
 Sub-directories with their own generator and README:
-[`derivations/`](derivations/README.md) (P1-4 key schedule, RLRES1) and
-[`ead/`](ead/README.md) (P2-3 join EAD items and RemovalNotice).
+[`derivations/`](derivations/README.md) (P1-4 key schedule, RLRES1),
+[`ead/`](ead/README.md) (P2-3 join EAD items and RemovalNotice, plus the
+P3-1 Credential item) and [`join-transport/`](join-transport/README.md)
+(P3-1/P3-2 RLD1 body v3, BootstrapAuth phases 4-6, chunks, relay objects).

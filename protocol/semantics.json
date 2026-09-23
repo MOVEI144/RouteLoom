@@ -216,6 +216,42 @@
     "flags": {"NOT_CHILD": 1, "TRUNCATED": 2},
     "semantics": "counts cover the sender's whole subtree for that round; NOT_CHILD carries zero counts; TRUNCATED iff missing_total > missing_count"
   },
+  "zero_touch_join": {
+    "status": "EXPERIMENTAL codecs + portable engines (sdk-v1 P3-1/P3-2); not wired into firmware",
+    "rld1_body_v3": {
+      "body_version": 3,
+      "scope_class": 3,
+      "discover_body_bytes": 24,
+      "offer_body_bytes": 48,
+      "discover_network_hint": 0,
+      "capability_bits": 0
+    },
+    "bootstrap_auth_phases": {"EDHOC_MESSAGE": 4, "RESUME": 5, "RELAY_STATUS": 6},
+    "join_object_max_bytes": 1024,
+    "join_message_max_bytes": 960,
+    "chunk": {
+      "header_bytes": 10,
+      "rld1_data_max": 106,
+      "wire_data_max": 118,
+      "reply_bytes": 10,
+      "sub": "phase << 4 | step",
+      "chunked_only_above": {"RLD1": 116, "WIRE": 128}
+    },
+    "relay_header_bytes": 24,
+    "relay_frame_types": ["BOOTSTRAP_AUTH", "MEMBERSHIP_RESULT", "BOOTSTRAP_CHUNK", "BOOTSTRAP_REPLY"],
+    "relay_final_single_frame_type": "MEMBERSHIP_RESULT",
+    "relay_protection": "link-protected per hop, never END_PROTECTED; destination is the proxy's gateway only",
+    "lane_roles": {
+      "DISCOVERING": "joiner: DISCOVER v3 out, OFFER v3 in",
+      "AUTHENTICATING": "joiner: up steps out, down steps and RELAY_STATUS in",
+      "MEMBER": "proxy: DISCOVER v3 in, OFFER v3 out, up steps in, down steps and RELAY_STATUS out; relay frames to/from its gateway"
+    },
+    "ead_credential_label": 65541,
+    "usb": {
+      "capability_bit": 8,
+      "subcommands": {"JOIN_RELAY_UP": 96, "JOIN_RELAY_DOWN": 97, "JOIN_RELAY_ABORT": 98, "JOIN_RELAY_RESULT": 99}
+    }
+  },
   "max_espnow_body_bytes": 250,
   "max_normal_payload_bytes": 128,
   "counter_independent_of_message_id": true,

@@ -1,0 +1,8 @@
+{
+  "codec": "zt_offer_frame",
+  "encoded_hex": "524c44310102002c005c00000000000000a1000000000777101112131415161718191a1b1c1d1e1f000000000303000100000000000000000000000000000000000102030405060708090a0b0c0d0e0f49746ee2a06f7ccb01000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "name": "zt_offer_network_zero",
+  "note": "OFFER names the site network_low32"
+}

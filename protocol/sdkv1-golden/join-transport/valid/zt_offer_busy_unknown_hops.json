@@ -1,0 +1,20 @@
+{
+  "authority_hops": 255,
+  "body_hex": "0303050333ac11d331866925fc6a2e473f10850da0a1a2a3a4a5a6a7a8a9aaabacadaeaf49746ee2a06f7ccbffc80000",
+  "codec": "zt_offer_frame",
+  "cookie_hex": "33ac11d331866925fc6a2e473f10850d",
+  "density": 5,
+  "expect": "ok",
+  "flags": 3,
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "frame_hex": "524c44310102002c005c00000a1b2c3d00a1000000000777101112131415161718191a1b1c1d1e1f000000000303050333ac11d331866925fc6a2e473f10850da0a1a2a3a4a5a6a7a8a9aaabacadaeaf49746ee2a06f7ccbffc80000",
+  "load": 200,
+  "name": "zt_offer_busy_unknown_hops",
+  "network_low32": 169552957,
+  "nonce_hex": "101112131415161718191a1b1c1d1e1f",
+  "note": "proxy busy hint, hops unknown",
+  "org_hint": 1232367330,
+  "proxy": 45317471250417527,
+  "responder_nonce_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+  "site_hint": 2691661003
+}
