@@ -1251,6 +1251,42 @@ mod tests {
         assert!(ops.step(&mut lane, &link(), 60_000).frames.is_empty());
     }
 
+    /// The application facade parses exactly what this daemon emits: the
+    /// record (group.send/group.get) and the group_settled event body.
+    #[test]
+    fn client_parses_daemon_records_and_events() {
+        use routeloom_client::api1::group_result_from_json;
+        use routeloom_client::GroupState;
+        let ops = GroupOps::default();
+        let mut lane = GroupLane::default();
+        let op = submit(&ops, 1, 0);
+        let parse = |text: &str| {
+            group_result_from_json(&routeloom_json::parse(text).unwrap()).expect("client parses")
+        };
+        let queued = parse(&record_json(&ops.get(op).unwrap()));
+        assert_eq!(queued.state, GroupState::Pending);
+        assert_eq!(queued.id, op_token(op));
+        assert!(queued.delivered.is_none() && queued.message_id.is_none());
+        let out = ops.step(&mut lane, &link(), 0);
+        let mut failed = status(STATE_FAILED, "GROUP_INCOMPLETE");
+        failed.delivered = 97;
+        failed.missing_total = 2;
+        failed.missing = vec![0x29, 0x2a];
+        ops.post_status(out.frames[0].0, encode_group_status(&failed).unwrap());
+        let out = ops.step(&mut lane, &link(), 7);
+        let result = parse(&record_json(&ops.get(op).unwrap()));
+        assert_eq!(result.state, GroupState::Failed);
+        assert_eq!(result.missing, vec![0x29, 0x2a]);
+        assert_eq!(result.delivered, Some(97));
+        assert_eq!(
+            result.message_id.as_deref(),
+            Some("00001b59:8000000000000001")
+        );
+        // The event body is the same record shape (plus `kind`).
+        let event = parse(&format!("{{\"seq\":1,\"ms\":7,{}}}", out.events[0]));
+        assert_eq!(event, result);
+    }
+
     #[test]
     fn device_refusal_is_terminal_with_reason() {
         let ops = GroupOps::default();

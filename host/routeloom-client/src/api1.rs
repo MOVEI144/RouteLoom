@@ -8,12 +8,15 @@
 //! | `membership` | `messages.subscribe {stream:"events", filter.kinds:[node_joined,node_left,link_changed]}` |
 //! | `link_status` | `nodes.get` (NOT_FOUND → [`LinkStatus::unknown`]) |
 //! | `links` | `nodes.list`, following `next_after` |
+//! | `send_group` | `group.send` (fresh key, `wait_ms` = admission wait) |
+//! | `group_result` | `group.get` (`wait_ms` until final) |
 //!
 //! Each call opens its own connection (the daemon serves one request per
 //! line; subscriptions own their connection for the stream's lifetime).
 //! The OS credential of this process is the API1 principal: `send` needs the
 //! SEND grant and `receive` the READ_PAYLOAD grant on `network`
 //! (--api-acl-file); `membership`/`link_status`/`links` need no grant.
+//! `send_group` needs SEND and `group_result` READ_OPERATION.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -24,9 +27,13 @@ use std::sync::Mutex;
 use routeloom_json::Json;
 
 use crate::{
-    Delivery, LinkStatus, MembershipEvent, MembershipKind, MembershipStream, MeshTransport,
-    Message, MessageStream, NodeId, SendHandle, SendOptions, TransportError,
+    Delivery, GroupHandle, GroupId, GroupResult, GroupSendOptions, GroupState, LinkStatus,
+    MembershipEvent, MembershipKind, MembershipStream, MeshTransport, Message, MessageStream,
+    NodeId, Priority, SendHandle, SendOptions, TransportError,
 };
+
+/// The daemon's `wait_ms` ceiling for group.send / group.get.
+pub const GROUP_WAIT_MS_MAX: u32 = 15_000;
 
 /// Event kinds the membership stream subscribes to.
 pub const MEMBERSHIP_EVENT_KINDS: [&str; 3] = ["node_joined", "node_left", "link_changed"];
@@ -130,6 +137,74 @@ pub fn membership_from_event(event: &Json) -> Option<MembershipEvent> {
             .to_string(),
         at_ms: event.get("ms").and_then(Json::as_u64).unwrap_or(0),
         status: event.get("status").and_then(link_status_from_json),
+    })
+}
+
+/// Maps the daemon's group record `state` onto the facade state.
+fn group_state(name: &str) -> Option<GroupState> {
+    Some(match name {
+        "HOST_QUEUED" | "DEVICE_PENDING" => GroupState::Pending,
+        "ACCEPTED"
+        | "WAITING_FOR_ROUTE"
+        | "QUEUED"
+        | "WAITING_FOR_MAC"
+        | "WAITING_FOR_HOP_ACCEPT"
+        | "WAITING_FOR_END_RECEIPT" => GroupState::InProgress,
+        "DELIVERED" => GroupState::Delivered,
+        "FAILED" => GroupState::Failed,
+        "EXPIRED" | "CANCELLED_BEFORE_TX" | "NOT_SENT" => GroupState::Expired,
+        "REFUSED" => GroupState::Refused,
+        "INDETERMINATE" => GroupState::Indeterminate,
+        _ => return None,
+    })
+}
+
+/// Parses the daemon's group record (`group.send`/`group.get` result, and
+/// the body of a `group_settled` event) into the facade type.
+pub fn group_result_from_json(record: &Json) -> Option<GroupResult> {
+    let detail = record.get("state").and_then(Json::as_str)?;
+    let mut state = group_state(detail)?;
+    // The daemon's `final` flag is authoritative: a final record whose
+    // device state is not a known terminal one is at least not pending.
+    if record.get("final").and_then(Json::as_bool)? && !state.is_final() {
+        state = GroupState::Indeterminate;
+    }
+    let missing = match record.get("missing") {
+        Some(Json::Array(ids)) => ids
+            .iter()
+            .map(|id| id.as_str().and_then(parse_hex_u64))
+            .collect::<Option<Vec<_>>>()?,
+        _ => Vec::new(),
+    };
+    Some(GroupResult {
+        id: record.get("group_op").and_then(Json::as_str)?.to_string(),
+        group: record
+            .get("group")
+            .and_then(Json::as_u64)
+            .and_then(|g| u16::try_from(g).ok())?,
+        state,
+        detail: detail.to_string(),
+        reason: record
+            .get("reason")
+            .and_then(Json::as_str)
+            .map(str::to_string),
+        delivered: opt_u32(record.get("delivered")),
+        nonmember: opt_u32(record.get("nonmember")),
+        missing_total: opt_u32(record.get("missing_total")),
+        unaccounted: opt_u32(record.get("unaccounted")),
+        missing,
+        missing_truncated: record
+            .get("missing_truncated")
+            .and_then(Json::as_bool)
+            .unwrap_or(false),
+        message_id: record.get("message").and_then(|m| {
+            Some(format!(
+                "{}:{}",
+                m.get("session").and_then(Json::as_str)?,
+                m.get("sequence").and_then(Json::as_str)?
+            ))
+        }),
+        settled_ms: record.get("settled_ms").and_then(Json::as_u64),
     })
 }
 
@@ -280,6 +355,32 @@ impl RouteLoomTransport {
             options.hop_limit,
         );
         self.call("messages.submit", &params)
+    }
+
+    fn group_send_call(
+        &self,
+        key: &str,
+        group: GroupId,
+        payload: &[u8],
+        options: &GroupSendOptions,
+    ) -> Result<Json, TransportError> {
+        let params = format!(
+            "{{\"network\":\"{:016x}\",\"group\":{group},\"key\":\"{key}\",\"payload_hex\":\"{}\",\"payload_len\":{},\"options\":{{\"priority\":\"{}\",\"ordered\":{},\"ttl_ms\":{},\"hop_limit\":{}}},\"wait_ms\":{}}}",
+            self.network,
+            hex(payload),
+            payload.len(),
+            match options.priority {
+                Priority::Bulk => "BULK",
+                Priority::Normal => "NORMAL",
+                Priority::Management => "MANAGEMENT",
+                Priority::Urgent => "URGENT",
+            },
+            options.ordered,
+            options.ttl_ms,
+            options.hop_limit,
+            options.admission_wait_ms.min(GROUP_WAIT_MS_MAX),
+        );
+        self.call("group.send", &params)
     }
 
     /// Opens a subscription and returns its reader positioned after the ok
@@ -450,6 +551,56 @@ impl MeshTransport for RouteLoomTransport {
             }
         }
         Err(protocol("nodes.list pagination did not terminate"))
+    }
+
+    fn send_group(
+        &self,
+        group: GroupId,
+        payload: &[u8],
+        options: &GroupSendOptions,
+    ) -> Result<GroupHandle, TransportError> {
+        let key = fresh_key(self.counter.load(Ordering::Relaxed));
+        // The key makes the request idempotent at the daemon: a connection
+        // that failed mid-exchange is retried once under the SAME key, so
+        // the retry replays the first attempt instead of sending twice.
+        let result = match self.group_send_call(&key, group, payload, options) {
+            Err(TransportError::Io(_)) => self.group_send_call(&key, group, payload, options)?,
+            other => other?,
+        };
+        let result =
+            group_result_from_json(&result).ok_or_else(|| protocol("unparsable group record"))?;
+        if result.state == GroupState::Refused {
+            let reason = result.reason.clone().unwrap_or_default();
+            return Err(TransportError::Rejected {
+                code: if reason.is_empty() {
+                    "GROUP_REFUSED".to_string()
+                } else {
+                    reason.clone()
+                },
+                message: format!("group send {} refused before transmission", result.id),
+                retryable: reason == "GROUP_QUEUE_FULL",
+            });
+        }
+        Ok(GroupHandle {
+            id: result.id.clone(),
+            result,
+        })
+    }
+
+    fn group_result(&self, id: &str, wait_ms: u32) -> Result<GroupResult, TransportError> {
+        // Ids are daemon tokens (`grp` + hex): anything else would need
+        // JSON escaping and cannot name a record anyway.
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(protocol("group id must be an alphanumeric daemon token"));
+        }
+        let result = self.call(
+            "group.get",
+            &format!(
+                "{{\"group_op\":\"{id}\",\"wait_ms\":{}}}",
+                wait_ms.min(GROUP_WAIT_MS_MAX)
+            ),
+        )?;
+        group_result_from_json(&result).ok_or_else(|| protocol("unparsable group record"))
     }
 }
 
@@ -652,5 +803,124 @@ mod tests {
         let seen = daemon.join().unwrap();
         assert!(seen[1].contains("\"kinds\":[\"node_joined\",\"node_left\",\"link_changed\"]"));
         assert!(seen[0].contains("\"from\":\"latest\""));
+    }
+
+    const GROUP_ADMITTED: &str = "{\"group_op\":\"grp00000001000000a1\",\"network\":\"0000000000000007\",\"group\":65535,\"all\":true,\"state\":\"WAITING_FOR_END_RECEIPT\",\"final\":false,\"result\":\"OK\",\"reason\":\"GROUP_ROUND_PENDING\",\"message\":{\"session\":\"00001b59\",\"sequence\":\"8000000000000001\"},\"gateway\":\"0000000000000001\",\"rounds\":0,\"delivered\":0,\"nonmember\":0,\"missing_total\":0,\"unaccounted\":0,\"missing\":[],\"missing_truncated\":false,\"priority\":\"URGENT\",\"ordered\":false,\"ttl_ms\":5000,\"hop_limit\":10,\"payload_len\":14,\"submitted_ms\":1000,\"admitted_ms\":1010,\"settled_ms\":null,\"clock\":\"host_unix_ms\"}";
+    const GROUP_FAILED: &str = "{\"group_op\":\"grp00000001000000a1\",\"network\":\"0000000000000007\",\"group\":65535,\"all\":true,\"state\":\"FAILED\",\"final\":true,\"result\":\"OK\",\"reason\":\"GROUP_INCOMPLETE\",\"message\":{\"session\":\"00001b59\",\"sequence\":\"8000000000000001\"},\"gateway\":\"0000000000000001\",\"rounds\":12,\"delivered\":97,\"nonmember\":0,\"missing_total\":2,\"unaccounted\":0,\"missing\":[\"0000000000000029\",\"000000000000002a\"],\"missing_truncated\":false,\"priority\":\"URGENT\",\"ordered\":false,\"ttl_ms\":5000,\"hop_limit\":10,\"payload_len\":14,\"submitted_ms\":1000,\"admitted_ms\":1010,\"settled_ms\":7000,\"clock\":\"host_unix_ms\"}";
+    const GROUP_REFUSED: &str = "{\"group_op\":\"grp00000001000000a2\",\"network\":\"0000000000000007\",\"group\":7,\"all\":false,\"state\":\"REFUSED\",\"final\":true,\"result\":\"UNSUPPORTED\",\"reason\":\"GROUP_REQUIRES_GATEWAY_SCOPED\",\"message\":null,\"gateway\":\"0000000000000001\",\"rounds\":null,\"delivered\":null,\"nonmember\":null,\"missing_total\":null,\"unaccounted\":null,\"missing\":null,\"missing_truncated\":null,\"priority\":\"NORMAL\",\"ordered\":true,\"ttl_ms\":5000,\"hop_limit\":10,\"payload_len\":2,\"submitted_ms\":1000,\"admitted_ms\":null,\"settled_ms\":1001,\"clock\":\"host_unix_ms\"}";
+
+    #[test]
+    fn group_records_parse_with_nulls_kept() {
+        let admitted =
+            group_result_from_json(&routeloom_json::parse(GROUP_ADMITTED).unwrap()).unwrap();
+        assert_eq!(admitted.state, GroupState::InProgress);
+        assert_eq!(admitted.group, crate::GROUP_ALL);
+        assert_eq!(
+            admitted.message_id.as_deref(),
+            Some("00001b59:8000000000000001")
+        );
+        let failed = group_result_from_json(&routeloom_json::parse(GROUP_FAILED).unwrap()).unwrap();
+        assert_eq!(failed.state, GroupState::Failed);
+        assert_eq!(
+            (
+                failed.delivered,
+                failed.missing_total,
+                failed.missing.as_slice()
+            ),
+            (Some(97), Some(2), &[0x29_u64, 0x2a][..])
+        );
+        assert_eq!(failed.settled_ms, Some(7000));
+        let refused =
+            group_result_from_json(&routeloom_json::parse(GROUP_REFUSED).unwrap()).unwrap();
+        assert_eq!(refused.state, GroupState::Refused);
+        assert!(refused.delivered.is_none() && refused.message_id.is_none());
+        assert!(refused.missing.is_empty() && !refused.missing_truncated);
+        // Host-side terminal names map onto facade states.
+        for (name, state) in [
+            ("HOST_QUEUED", GroupState::Pending),
+            ("DEVICE_PENDING", GroupState::Pending),
+            ("NOT_SENT", GroupState::Expired),
+            ("INDETERMINATE", GroupState::Indeterminate),
+            ("DELIVERED", GroupState::Delivered),
+        ] {
+            assert_eq!(group_state(name), Some(state), "{name}");
+        }
+        assert!(group_state("SOMETHING_NEW").is_none());
+        // A record whose state name is unknown to this client is refused
+        // rather than guessed.
+        let odd = GROUP_ADMITTED.replace("WAITING_FOR_END_RECEIPT", "TELEPORTED");
+        assert!(group_result_from_json(&routeloom_json::parse(&odd).unwrap()).is_none());
+        // `final:true` wins over a non-terminal device state.
+        let forced = GROUP_ADMITTED.replace("\"final\":false", "\"final\":true");
+        assert_eq!(
+            group_result_from_json(&routeloom_json::parse(&forced).unwrap())
+                .unwrap()
+                .state,
+            GroupState::Indeterminate
+        );
+    }
+
+    #[test]
+    fn send_group_and_group_result_use_group_methods() {
+        fn script(method: &str, params: &Json) -> Vec<String> {
+            match (method, params.get("group").and_then(Json::as_u64)) {
+                ("group.send", Some(65535)) => vec![ok(GROUP_ADMITTED)],
+                ("group.send", _) => vec![ok(GROUP_REFUSED)],
+                ("group.get", _) => vec![ok(GROUP_FAILED)],
+                _ => vec![],
+            }
+        }
+        let dir = temp_dir("group");
+        let (path, daemon) = fake_daemon(&dir, script, 3);
+        let transport = RouteLoomTransport::new(&path, 7);
+        let handle = transport
+            .send_group(
+                crate::GROUP_ALL,
+                b"PUMP3 OVERTEMP",
+                &GroupSendOptions::alarm(),
+            )
+            .unwrap();
+        assert_eq!(handle.id, "grp00000001000000a1");
+        assert_eq!(handle.result.state, GroupState::InProgress);
+        // A refusal before transmission is an error carrying the reason.
+        match transport.send_group(7, b"hi", &GroupSendOptions::ordered_update()) {
+            Err(TransportError::Rejected {
+                code, retryable, ..
+            }) => {
+                assert_eq!(code, "GROUP_REQUIRES_GATEWAY_SCOPED");
+                assert!(!retryable);
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let result = transport.group_result(&handle.id, 60_000).unwrap();
+        assert_eq!(result.state, GroupState::Failed);
+        assert!(transport.group_result("grp\"x", 0).is_err());
+        let seen = daemon.join().unwrap();
+        let send = routeloom_json::parse(&seen[0]).unwrap();
+        let params = send.get("params").unwrap();
+        assert_eq!(
+            params.get("network").and_then(Json::as_str),
+            Some("0000000000000007")
+        );
+        assert_eq!(
+            params.get("payload_hex").and_then(Json::as_str),
+            Some("50554d5033204f56455254454d50")
+        );
+        assert_eq!(params.get("payload_len").and_then(Json::as_u64), Some(14));
+        assert_eq!(
+            params.get("key").and_then(Json::as_str).map(str::len),
+            Some(32)
+        );
+        assert_eq!(params.get("wait_ms").and_then(Json::as_u64), Some(2_000));
+        let options = params.get("options").unwrap();
+        assert_eq!(
+            options.get("priority").and_then(Json::as_str),
+            Some("URGENT")
+        );
+        assert_eq!(options.get("ordered").and_then(Json::as_bool), Some(false));
+        assert!(seen[1].contains("\"ordered\":true"));
+        // group_result clamps wait_ms to the daemon ceiling.
+        assert!(seen[2].contains("\"method\":\"group.get\""));
+        assert!(seen[2].contains("\"wait_ms\":15000"), "{}", seen[2]);
     }
 }

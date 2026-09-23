@@ -10,6 +10,14 @@
 //! 4. [`MeshTransport::link_status`] / [`MeshTransport::links`] — per-device
 //!    link status: connected or not, last-heard time, radio quality.
 //!
+//! Optional fifth operation, added without changing the four above:
+//! [`MeshTransport::send_group`] / [`MeshTransport::group_result`] — one
+//! payload to a group of devices (or all of them, [`GROUP_ALL`]) and the
+//! aggregated outcome (how many accepted it, which ones are unconfirmed).
+//! Transports without group delivery inherit default methods that answer
+//! `Rejected { code: "UNSUPPORTED" }`, so existing implementations keep
+//! compiling and behaving as before.
+//!
 //! The trait names no RouteLoom concept: an ESP-NOW mesh behind a USB
 //! gateway ([`api1::RouteLoomTransport`], a thin client of the routeloom-host
 //! daemon's API1 socket) and, say, a Wi-Fi/TCP transport implement the same
@@ -29,6 +37,13 @@ pub mod api1;
 
 /// Device identity on the transport (RouteLoom: the 64-bit mesh node id).
 pub type NodeId = u64;
+
+/// Group address (RouteLoom: 16-bit group id, 1..=0xFFFF). Devices join
+/// groups locally in their firmware; the sender does not know the members.
+pub type GroupId = u16;
+
+/// The group every device belongs to.
+pub const GROUP_ALL: GroupId = 0xFFFF;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -59,6 +74,130 @@ impl Default for SendOptions {
             durable: false,
         }
     }
+}
+
+/// Scheduling class of a group send (RouteLoom maps it 1:1 onto the mesh
+/// priority; `Urgent` is for alarms and is never held behind other work).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Priority {
+    Bulk,
+    Normal,
+    Management,
+    Urgent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupSendOptions {
+    pub priority: Priority,
+    /// Every receiving device applies this sender's ordered messages in
+    /// send order (bounded hold; a gap is skipped after at most the
+    /// message lifetime). Unordered messages are never held.
+    pub ordered: bool,
+    /// Message lifetime (RouteLoom: 1..=30000 ms).
+    pub ttl_ms: u32,
+    /// Relay budget (RouteLoom: 1..=254).
+    pub hop_limit: u8,
+    /// How long `send_group` waits for the transport to accept or refuse
+    /// the message before returning the in-flight handle (0 = do not wait;
+    /// RouteLoom caps it at 15000 ms).
+    pub admission_wait_ms: u32,
+}
+
+impl Default for GroupSendOptions {
+    fn default() -> Self {
+        Self {
+            priority: Priority::Normal,
+            ordered: false,
+            ttl_ms: 5_000,
+            hop_limit: 10,
+            admission_wait_ms: 2_000,
+        }
+    }
+}
+
+impl GroupSendOptions {
+    /// An alarm: urgent, unordered.
+    pub fn alarm() -> Self {
+        Self {
+            priority: Priority::Urgent,
+            ..Self::default()
+        }
+    }
+
+    /// A display update: normal priority, applied in send order.
+    pub fn ordered_update() -> Self {
+        Self {
+            ordered: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// Where a group send stands. Only the last five are final.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupState {
+    /// Accepted by the host, not yet accepted by the gateway.
+    Pending,
+    /// The gateway accepted it and is still confirming devices.
+    InProgress,
+    /// Every known device confirmed it.
+    Delivered,
+    /// The transport gave up with devices unconfirmed (see `missing`).
+    Failed,
+    /// The lifetime ran out (RouteLoom also uses it for "never sent").
+    Expired,
+    /// Refused before anything was transmitted (see `reason`).
+    Refused,
+    /// The outcome cannot be established (e.g. the gateway connection was
+    /// lost mid-exchange). It may or may not have been sent.
+    Indeterminate,
+}
+
+impl GroupState {
+    pub fn is_final(self) -> bool {
+        !matches!(self, Self::Pending | Self::InProgress)
+    }
+}
+
+/// The aggregated outcome of one group send. Counts are `None` until the
+/// transport reported them — never an invented zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupResult {
+    /// Transport-issued id (pass to [`MeshTransport::group_result`]).
+    pub id: String,
+    pub group: GroupId,
+    pub state: GroupState,
+    /// The transport's own state name (RouteLoom: `HOST_QUEUED`,
+    /// `WAITING_FOR_END_RECEIPT`, `DELIVERED`, `NOT_SENT`, ...).
+    pub detail: String,
+    /// Transport reason (RouteLoom: `GROUP_COMPLETE`, `GROUP_INCOMPLETE`,
+    /// `GROUP_REQUIRES_GATEWAY_SCOPED`, `NO_ADMISSION_REPLY`, ...).
+    pub reason: Option<String>,
+    /// Devices that accepted the message as members of the group.
+    pub delivered: Option<u32>,
+    /// Devices reached that are not members of the group.
+    pub nonmember: Option<u32>,
+    /// Devices that did not confirm.
+    pub missing_total: Option<u32>,
+    /// Devices known to the gateway that no confirmation accounted for.
+    pub unaccounted: Option<u32>,
+    /// Up to a transport-defined number of the unconfirmed device ids.
+    pub missing: Vec<NodeId>,
+    /// `missing` lists fewer ids than `missing_total`.
+    pub missing_truncated: bool,
+    /// Transport message identity once assigned (RouteLoom:
+    /// `session:sequence` hex, as in [`Message::message_id`]).
+    pub message_id: Option<String>,
+    /// Host UNIX ms the result became final.
+    pub settled_ms: Option<u64>,
+}
+
+/// Identity of an accepted group send plus the state known when
+/// `send_group` returned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupHandle {
+    pub id: String,
+    pub result: GroupResult,
 }
 
 /// Opaque, transport-issued identity of an accepted send; query its outcome
@@ -210,6 +349,34 @@ pub trait MeshTransport: Send + Sync {
 
     /// Current status of every device the transport knows.
     fn links(&self) -> Result<Vec<LinkStatus>, TransportError>;
+
+    /// Sends `payload` to every device in `group` ([`GROUP_ALL`] = all).
+    /// `Ok` means the transport accepted the message (the handle's result
+    /// may still be pending); a refusal before transmission is an `Err`.
+    fn send_group(
+        &self,
+        group: GroupId,
+        payload: &[u8],
+        options: &GroupSendOptions,
+    ) -> Result<GroupHandle, TransportError> {
+        let _ = (group, payload, options);
+        Err(unsupported("send_group"))
+    }
+
+    /// The current (or, waiting up to `wait_ms`, the final) outcome of a
+    /// group send.
+    fn group_result(&self, id: &str, wait_ms: u32) -> Result<GroupResult, TransportError> {
+        let _ = (id, wait_ms);
+        Err(unsupported("group_result"))
+    }
+}
+
+fn unsupported(operation: &str) -> TransportError {
+    TransportError::Rejected {
+        code: "UNSUPPORTED".to_string(),
+        message: format!("{operation} is not supported by this transport"),
+        retryable: false,
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +547,33 @@ mod tests {
         let lines: Vec<String> = rx.try_iter().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[1].starts_with("Left 2"));
+    }
+
+    /// Transports that predate group delivery keep compiling and answer
+    /// an explicit UNSUPPORTED — the four-operation contract is unchanged.
+    #[test]
+    fn group_operations_default_to_unsupported() {
+        let mock = MockTransport::default();
+        let dynamic: &dyn MeshTransport = &mock;
+        for result in [
+            dynamic
+                .send_group(GROUP_ALL, b"ALARM", &GroupSendOptions::alarm())
+                .map(|_| ()),
+            dynamic.group_result("x", 0).map(|_| ()),
+        ] {
+            match result {
+                Err(TransportError::Rejected {
+                    code, retryable, ..
+                }) => assert_eq!((code.as_str(), retryable), ("UNSUPPORTED", false)),
+                other => panic!("expected UNSUPPORTED, got {other:?}"),
+            }
+        }
+        let alarm = GroupSendOptions::alarm();
+        assert_eq!(alarm.priority, Priority::Urgent);
+        assert!(!alarm.ordered);
+        assert!(GroupSendOptions::ordered_update().ordered);
+        assert!(!GroupState::Pending.is_final() && !GroupState::InProgress.is_final());
+        assert!(GroupState::Delivered.is_final() && GroupState::Indeterminate.is_final());
     }
 
     #[test]
