@@ -49,6 +49,35 @@ EXPECTED_FRAME_IDS = {
 }
 
 
+# make_end_aad() write expression -> semantics.json end_aad_fields name.
+END_AAD_SOURCE_NAMES = {
+    "kMajor": "version_major",
+    "kMinor": "version_minor",
+    "header.type": "type",
+    "header.flags": "flags",
+    "header.delivery": "delivery_contract",
+    "header.network": "network",
+    "header.origin": "origin_identity",
+    "header.destination": "bound_destination",
+    "header.message.session": "origin_message_session",
+    "header.message.sequence": "message_sequence",
+    "header.original_lifetime_ms": "original_lifetime",
+    "header.end_epoch": "end_epoch",
+    "header.end_counter": "end_counter",
+    "header.payload_length": "payload_length",
+}
+
+
+def end_aad_layout(wire_source: str) -> list:
+    """Ordered (field, bytes) written by make_end_aad() in wire.cpp."""
+    body = wire_source.split("Status make_end_aad(", 1)[1].split("#undef RL_WRITE", 1)[0]
+    layout = []
+    for width, expr in re.findall(r"writer\.write_u(\d+)\((.*)\)\);", body):
+        name = re.search(r"kMajor|kMinor|header\.[a-z_.]+", expr).group(0)
+        layout.append((END_AAD_SOURCE_NAMES.get(name, name), int(width) // 8))
+    return layout
+
+
 def validate(root: Path) -> dict:
     checks = []
 
@@ -272,6 +301,27 @@ def validate(root: Path) -> dict:
         test(
             "aad_disjoint",
             not (set(semantic["end_immutable"]) & set(semantic["hop_mutable"])),
+        )
+        end_aad = [(f["field"], f["bytes"]) for f in semantic["end_aad_fields"]]
+        end_aad_names = {name for name, _ in end_aad}
+        test(
+            "end_aad_matches_wire",
+            end_aad
+            == end_aad_layout(
+                (root / "components/routeloom/src/wire.cpp").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            "protocol/semantics.json end_aad_fields vs make_end_aad()",
+        )
+        test(
+            "end_aad_no_hop_mutable",
+            not (end_aad_names & set(semantic["hop_mutable"])),
+        )
+        test(
+            # The payload itself is the AEAD plaintext; its length is in the AAD.
+            "end_aad_covers_end_immutable",
+            set(semantic["end_immutable"]) - {"payload"} <= end_aad_names,
         )
         test(
             "board_runtime_separate",
