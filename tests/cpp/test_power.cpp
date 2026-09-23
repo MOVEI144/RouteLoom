@@ -1247,7 +1247,9 @@ void test_resume_reuses_original_id_dedup_once() {
   CHECK_OK(w.node.add_neighbor(2, 1, w.now));
   CHECK_OK(b.add_neighbor(7, 1, w.now));
 
-  const MessageId id = queue_pending(w, 2, true, 60000);
+  // The longest lifetime an origin may request (issue #55): a message is
+  // never allowed to outlive the receiver's dedup retention.
+  const MessageId id = queue_pending(w, 2, true, kMaxMessageLifetimeMs);
   w.pump(100);  // DATA -> B delivers once; END_RECEIPT swallowed -> non-terminal
   CHECK(observer_b.messages.size() == 1);
   const auto before_sleep = w.node.delivery(id);
@@ -1275,9 +1277,36 @@ void test_resume_reuses_original_id_dedup_once() {
   CHECK(observer_b.messages.size() == 1);
 }
 
+
+// Issue #55: the 30s normal-lifetime ceiling is enforced at every origin
+// send API — refused, never silently clamped (dedup retention is sized on
+// this bound).
+void test_send_lifetime_ceiling() {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, 0));
+  w.pump(60);
+  const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
+  const ByteView body{payload.data(), payload.size()};
+  MessageId id{};
+  SendOptions options{};
+  options.lifetime_ms = kMaxMessageLifetimeMs;
+  CHECK_OK(w.node.send(9, body, options, w.now, id));
+  options.lifetime_ms = kMaxMessageLifetimeMs + 1;
+  CHECK(w.node.send(9, body, options, w.now, id).code ==
+        StatusCode::InvalidArgument);
+  CHECK(w.node.send_service(9, body, kMaxMessageLifetimeMs + 1, w.now, id)
+            .code == StatusCode::InvalidArgument);
+  CHECK(w.node.resend_service(MessageId{1, 1}, 9, body, 1,
+                              kMaxMessageLifetimeMs + 1, w.now)
+            .code == StatusCode::InvalidArgument);
+}
+
 }  // namespace
 
 int main() {
+  test_send_lifetime_ceiling();
   test_cold_boot_and_errors();
   test_full_cycle_transition_order();
   test_ticket_invalidated_by_app_event();

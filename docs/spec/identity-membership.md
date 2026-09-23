@@ -68,7 +68,7 @@ Deep Sleep復帰ではvalidな所属・暗号counterを復元できれば、保�
 | REVOKED | 通常通信禁止。明示再provisioningは別経路 |
 <!-- generated:join:end -->
 
-DISCOVER/OFFERは未認証・局所1hop・全body96B以下。UNPROVISIONEDはtrustが未導入なら発見までで止める。AUTHENTICATINGに入る最初のBOOTSTRAP_AUTHはcookieとNetwork制約を先に確認して新規transactionへ結び、以後のCHUNK/REPLYはそのID・相手・宛先・期限内だけ許す。
+DISCOVER/OFFERは未認証・局所1hop・RLD1 envelope全体で160B以下（[無線仕様](radio.md)参照）。UNPROVISIONEDはtrustが未導入なら発見までで止める。AUTHENTICATINGに入る最初のBOOTSTRAP_AUTHはcookieとNetwork制約を先に確認して新規transactionへ結び、以後のCHUNK/REPLYはそのID・相手・宛先・期限内だけ許す。
 
 AUTHENTICATINGのpeer本人性はまだ未確定。ROLE承認を先取りしない。MEMBERSHIP_RESULTは認証済みtranscriptと正当なAuthority決定へ結び付け、保存成功後にのみMEMBERへ移る。単なるOFFERにはその権限がない。
 

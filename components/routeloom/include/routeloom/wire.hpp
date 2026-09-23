@@ -46,8 +46,10 @@
 // The link (hop) AEAD authenticates the entire header plus the link plaintext.
 // The end-to-end AEAD, when kFlagEndProtected is set, authenticates only the
 // end-immutable subset listed above (see protocol/semantics.json end_immutable)
-// plus version, end epoch/counter and payload length; hop-mutable fields must
-// never enter the end AAD, or relays could not update them.
+// plus version, frame type, flags, end epoch/counter and payload length — the
+// exact ordered layout is protocol/semantics.json end_aad_fields, checked
+// against make_end_aad() by tools/check_review_contracts.py. Hop-mutable
+// fields must never enter the end AAD, or relays could not update them.
 namespace routeloom::wire {
 
 constexpr std::uint16_t kMagic = 0x524c;  // "RL"

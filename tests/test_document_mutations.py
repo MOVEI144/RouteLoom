@@ -36,4 +36,8 @@ class MutationTests(unittest.TestCase):
     def test_additive_credit_mutation(self):
         self.change_json('protocol/semantics.json',lambda d:d.update(usb_credit='additive-delta')); self.rejected()
 
+    def test_end_aad_drops_type_mutation(self):
+        self.change_json('protocol/semantics.json',lambda d:d.update(end_aad_fields=[f for f in d['end_aad_fields'] if f['field']!='type'])); self.rejected()
+    def test_end_aad_hop_mutable_mutation(self):
+        self.change_json('protocol/semantics.json',lambda d:d['end_aad_fields'].append({'field':'next_hop','bytes':8})); self.rejected()
 if __name__=='__main__': unittest.main()

@@ -64,6 +64,8 @@ voter追加・削除は旧構成の正当な手順で行い、単純な配列上
 
 Authority交代は旧信頼から検証できる明示移行、または物理的な災害復旧として行う。通信できなくなっただけで新keyを自動承認しない。Authority不在で新承認はできないが、有効なmember間のDATAは続けられる。
 
+現行prototypeの制約：SingleAuthority台帳のquarantineからの`recover(new_generation)`は必ずauthority generationを前進させるが、RCC1 Small Remote Configのtarget（ConfigJournal）は受理するauthority generationをbuild時定数でpinしている。そのため災害復旧後のAuthorityは既設targetへ有効なpermitを発行できず、remote configは全台の再provisioning（再flash）まで使えない。新generationの連署によるtrust-update（m1-completion/03-signing）をconfig wireへ実装するまで、`recover()`はこの影響を前提とした物理保守手順として扱う（issue #51）。ConfigJournal自体のquarantineも、回復証跡を運ぶwire verbが無いため現状は物理保守でのみ解除できる。
+
 HA Providerでは内部Raft commitと非voterが検証するproofを別に定義する。構成員変更、旧anchor→snapshot checkpoint、署名者集合、証拠長、ログ圧縮後の検証手順はG-CONTROL未完了として維持する。高termや単独Controller署名へ縮退して自動有効化しない。
 
 ## 9. voter storeが壊れた場合

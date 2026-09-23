@@ -123,6 +123,22 @@
     "original_lifetime",
     "payload"
   ],
+  "end_aad_fields": [
+    {"field": "version_major", "bytes": 1},
+    {"field": "version_minor", "bytes": 1},
+    {"field": "type", "bytes": 1},
+    {"field": "flags", "bytes": 1},
+    {"field": "delivery_contract", "bytes": 1},
+    {"field": "network", "bytes": 4},
+    {"field": "origin_identity", "bytes": 8},
+    {"field": "bound_destination", "bytes": 8},
+    {"field": "origin_message_session", "bytes": 4},
+    {"field": "message_sequence", "bytes": 8},
+    {"field": "original_lifetime", "bytes": 4},
+    {"field": "end_epoch", "bytes": 2},
+    {"field": "end_counter", "bytes": 8},
+    {"field": "payload_length", "bytes": 2}
+  ],
   "hop_mutable": [
     "previous_hop",
     "next_hop",

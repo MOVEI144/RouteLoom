@@ -1409,7 +1409,15 @@ void NeighborDiscovery::complete_exchange(
   if (Neighbor* same = find_neighbor(peer_mac); same != nullptr) {
     if (same->phase == NeighborPhase::Conflict ||
         same->phase == NeighborPhase::Revoked) {
-      return;  // quarantined/revoked records are not re-authenticated implicitly
+      // Quarantined/revoked records are not re-authenticated implicitly —
+      // only forget_peer() re-opens the address. The block is surfaced:
+      // the requester sees a completed exchange, so silence here would
+      // leave "authenticated but unresponsive" undiagnosable (issue #43).
+      reject_event(same->phase == NeighborPhase::Revoked
+                       ? "REVOKED_REBIND_BLOCKED"
+                       : "CONFLICT_REBIND_BLOCKED",
+                   peer_node);
+      return;
     }
     if (same->node != peer_node) {
       // A different identity on an address we already bound: reject rather
@@ -2304,6 +2312,32 @@ Status NeighborDiscovery::revoke_peer(const NodeId peer) noexcept {
     --pins_used_;
   }
   event("REVOKED", peer);
+  return Status::success();
+}
+
+Status NeighborDiscovery::forget_peer(const NodeId peer) noexcept {
+  const auto dead = [&](const Neighbor& n) {
+    return n.node == peer && (n.phase == NeighborPhase::Revoked ||
+                              n.phase == NeighborPhase::Conflict);
+  };
+  if (find_neighbor(peer) == nullptr) {
+    return Status::error(StatusCode::NotFound, "peer not bound");
+  }
+  std::size_t forgotten = 0;
+  // A node may hold several dead records (a revoked old MAC plus conflict
+  // quarantines); each release happens outside the pool scan.
+  while (Neighbor* record = neighbors_.find(dead)) {
+    // Revocation already returned regular/pin accounting; a Conflict
+    // quarantine never held any.
+    if (record->regular_held) --regular_used_;
+    if (record->pinned) --pins_used_;
+    (void)neighbors_.release(record);
+    ++forgotten;
+  }
+  if (forgotten == 0) {
+    return Status::error(StatusCode::InvalidState, "peer binding is live");
+  }
+  event("FORGOTTEN", peer);
   return Status::success();
 }
 

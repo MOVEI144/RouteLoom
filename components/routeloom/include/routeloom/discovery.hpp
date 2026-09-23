@@ -331,7 +331,7 @@ struct DiscoveryConfig {
   std::uint32_t cookie_bucket_ms{2000};       // cookie time bucket
   std::uint32_t auth_timeout_ms{5000};        // bound on one exchange
   std::uint32_t offer_window_ms{discovery_const::kOfferSlots *
-                                discovery_const::kOfferSlotMs};  // 400ms cap
+                                discovery_const::kOfferSlotMs};  // 32 x 10ms = 320ms
   std::uint32_t handshake_start_interval_ms{1000};  // 1/s, burst 1
   std::uint32_t backoff_base_ms{1000};
   std::uint32_t backoff_max_ms{16000};
@@ -454,6 +454,14 @@ class NeighborDiscovery {
 
   // Owner-driven controls.
   Status revoke_peer(NodeId peer) noexcept;                 // -> Revoked (binding unusable)
+  // Explicit exit from Revoked/Conflict (issue #43): drops every dead
+  // (Revoked or Conflict) record held for `peer` so a fresh authenticated
+  // exchange may bind it again — the owner's decision after, e.g., an
+  // authority re-approval or a MAC flip-back. Never implicit: a revoked
+  // record otherwise blocks re-authentication for its whole lifetime.
+  // NotFound when `peer` has no record; InvalidState when its only
+  // records are live (revoke first — a live binding is never forgotten).
+  Status forget_peer(NodeId peer) noexcept;
   Status suspend_peer(NodeId peer, MonotonicMs until_ms) noexcept;  // planned absence
   Status pin_peer(NodeId peer) noexcept;                    // topology pin, <= 12
   // Local membership was revoked/committed elsewhere — re-evaluate pending

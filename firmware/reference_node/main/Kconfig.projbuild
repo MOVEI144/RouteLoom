@@ -246,11 +246,20 @@ config ROUTELOOM_SLEEP_AFTER_MS
     range 1000 3600000
     default 10000
     depends on ROUTELOOM_DEEP_SLEEP
+    help
+        The defaults (10s awake / 30s asleep) are a bench demo duty cycle,
+        NOT a battery operating point: at estimated C3 currents they drain
+        a CR123A in days (issue #58). Battery deployments need a long sleep
+        interval with a short warm resume, sized against docs/spec/power.md.
 
 config ROUTELOOM_SLEEP_DURATION_MS
     int "Timer wake duration for the deep-sleep reference cycle"
     range 100 86400000
     default 30000
     depends on ROUTELOOM_DEEP_SLEEP
+    help
+        Bench demo value (see ROUTELOOM_SLEEP_AFTER_MS). Every wake is a
+        full reboot that consumes one boot session and its 16-bit epochs
+        (issue #29) — very short intervals shorten that budget too.
 
 endmenu
