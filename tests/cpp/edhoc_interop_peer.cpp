@@ -23,6 +23,11 @@
 //       `m<n> <hex>` and the peer's are read from stdin in the same form.
 //
 // Test keys only (the transcript's keys are public test material).
+//
+// Under UBSan the vendored zcbor reports memmove(dst, NULL, 0) for the empty
+// external_aad of message_3/message_4 (zcbor_encode.c str_encode) — the same
+// recoverable upstream report documented in test_edhoc.cpp; it is left
+// visible rather than suppressed.
 
 #include <cstdint>
 #include <cstdio>
