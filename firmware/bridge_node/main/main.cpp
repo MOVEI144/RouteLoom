@@ -488,6 +488,15 @@ extern "C" void app_main(void) {
     if (!status) fail(status.detail);
   }
 
+  // Node status (node_status_v1): the bridge answers HostOps 0x40 paginated
+  // per-node link/route snapshots and, once the host subscribes, streams
+  // 0x42 join/leave/route-change events. Read-only over the node's tables;
+  // without the bit the query answers Unsupported and no event is emitted.
+  if ((bridge_config.capability & routeloom::usb::kCapNodeStatusV1) != 0) {
+    status = bridge.attach_node_status();
+    if (!status) fail(status.detail);
+  }
+
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
     if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {

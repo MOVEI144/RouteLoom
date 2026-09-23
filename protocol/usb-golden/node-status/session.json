@@ -1,0 +1,18 @@
+{
+  "name": "node-status",
+  "secret_hex": "726f7574656c6f6f6d2d6465762d736563726574",
+  "host_nonce": 72623859790382856,
+  "device_nonce": 11578966645329101058,
+  "version": 1,
+  "node": 1,
+  "boot": 756033585153,
+  "network": 7,
+  "capability": 71,
+  "principal": "host-operator",
+  "session_id": 2693810439353116504,
+  "peer_node": 2,
+  "hello_tag_hex": "090b451168194027d721b6775356b227",
+  "auth_tag_hex": "e916ae85810aacc7fcf210bd14053ac7",
+  "auth_ok_tag_hex": "40ff39355701d124a62e836d7a3f4324",
+  "session_key_hex": "0a4b1f898676b1a5bb06d62ac5b423a5"
+}

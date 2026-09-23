@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/node_status.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -55,6 +56,14 @@ constexpr std::uint32_t kCapConfigEndpointV1 = 1u << 4;
 // Hello transcript like the other capability bits.
 constexpr std::uint32_t kCapM1DiagnosticsV1 = 1u << 5;
 
+// node_status_v1 (docs/spec/usb-protocol.md §7, docs/spec/host.md §9): the
+// device serves the NodeStatus HostOps subcommands 0x40-0x42 — paginated
+// per-node link/route snapshots and, once a host subscribes, unsolicited
+// join/leave/route-change events. Advertised only when the bridge owner
+// attaches the surface (attach_node_status); bound into the authenticated
+// Hello transcript like every other capability bit.
+constexpr std::uint32_t kCapNodeStatusV1 = 1u << 6;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
@@ -75,6 +84,9 @@ enum class HostOpsSub : std::uint8_t {
   ConfigChallenge = 0x23,   // H→G query / G→H reply: ControlChallenge exchange
   DiagnosticRequest = 0x30, // H→G request: observer:u64 || diagnostic body
   DiagnosticResponse = 0x31,// G→H reply: result/observer/body_len || body
+  NodeStatusQuery = 0x40,   // H→G request: after/max/flags -> 0x41 page
+  NodeStatusPage = 0x41,    // G→H reply: result/flags/count/cursor || entries
+  NodeEvent = 0x42,         // G→H unsolicited (request 0): seq/kind || entry
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -750,5 +762,71 @@ Status decode_diagnostic_request(ByteView inner,
 Status encode_diagnostic_reply(std::uint16_t result, NodeId observer,
                                ByteView body, MutableByteView out,
                                std::size_t& written) noexcept;
+
+// ---------------------------------------------------------------------------
+// NodeStatus HostOps family (node_status_v1). Same inner common form as the
+// gateway/config families: schema:u8=1, sub:u8, payload_len:u16, payload.
+// All integers big-endian.
+//
+// 0x40 NODE_STATUS_QUERY (H→G), payload 10B:
+//   after:u64 (exclusive NodeId cursor; 0 = from the start), max_entries:u8
+//   (1..kNodeStatusPageMax), flags:u8 (bit0 SUBSCRIBE: (re)arm the event
+//   stream for THIS session before the page is taken; other bits zero).
+// 0x41 NODE_STATUS_PAGE (G→H reply under the query's request id), payload
+//   16B + count*28B: result:u16 (ConfigOpsResult space: Ok / Unsupported),
+//   flags:u8 (bit0 MORE, bit1 EVENTS_ARMED), count:u8, next_after:u64 (the
+//   last listed id, or the query's `after` when count==0), event_seq:u32
+//   (last event sequence issued in this session; 0 = none), entries.
+// 0x42 NODE_EVENT (G→H, unsolicited, request id 0), payload 34B:
+//   sequence:u32 (1-based, contiguous per arm), kind:u8 (NodeEventKind),
+//   reserved:u8=0, entry.
+// Entry (28B): node:u64, flags:u8 (bit7 zero), rssi_last:i8, rssi_ewma:i16
+//   (Q8.8), link_cost:u16, route_metric:u16, next_hop:u64, heard_age_ms:u32.
+// Page entries are strictly ascending by node id; a decoder rejects any
+// page that is not, so a cursor walk can never loop.
+constexpr std::uint8_t kNodeStatusQuerySubscribe = 0x01;
+constexpr std::uint8_t kNodeStatusPageMore = 0x01;
+constexpr std::uint8_t kNodeStatusPageArmed = 0x02;
+constexpr std::size_t kNodeStatusQueryPayload = 10;
+constexpr std::size_t kNodeStatusEntrySize = 28;
+constexpr std::size_t kNodeStatusPageFixed = 16;
+constexpr std::size_t kNodeStatusPageMaxPayload =
+    kNodeStatusPageFixed + kNodeStatusPageMax * kNodeStatusEntrySize;
+constexpr std::size_t kNodeEventPayload = 6 + kNodeStatusEntrySize;
+
+struct NodeStatusQuery {
+  NodeId after{kInvalidNodeId};
+  std::uint8_t max_entries{kNodeStatusPageMax};
+  std::uint8_t flags{0};
+};
+
+struct NodeStatusPageHeader {
+  std::uint16_t result{0};  // ConfigOpsResult
+  std::uint8_t flags{0};
+  std::uint8_t count{0};
+  NodeId next_after{kInvalidNodeId};
+  std::uint32_t event_seq{0};
+};
+
+Status encode_node_status_query(const NodeStatusQuery& query, MutableByteView out,
+                                std::size_t& written) noexcept;
+Status decode_node_status_query(ByteView inner, NodeStatusQuery& out) noexcept;
+
+// Single 28-byte entry codec (shared by pages and events).
+Status encode_node_status_entry(const NodeStatus& status, MutableByteView out) noexcept;
+Status decode_node_status_entry(ByteView entry, NodeStatus& out) noexcept;
+
+// `header.count` must equal `count`; entries must be strictly ascending.
+Status encode_node_status_page(const NodeStatusPageHeader& header,
+                               const NodeStatus* entries, std::size_t count,
+                               MutableByteView out, std::size_t& written) noexcept;
+// Validates head, header ranges, exact length and every entry (including
+// the strict ordering); `entries` borrows `inner` (count*28 bytes).
+Status decode_node_status_page(ByteView inner, NodeStatusPageHeader& header,
+                               ByteView& entries) noexcept;
+
+Status encode_node_event(const NodeEvent& event, MutableByteView out,
+                         std::size_t& written) noexcept;
+Status decode_node_event(ByteView inner, NodeEvent& out) noexcept;
 
 }  // namespace routeloom::usb

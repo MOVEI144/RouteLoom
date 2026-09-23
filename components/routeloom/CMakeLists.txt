@@ -19,6 +19,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/migration.cpp
   src/migration_wire.cpp
   src/node.cpp
+  src/node_status.cpp
   src/power.cpp
   src/replay.cpp
   src/routing.cpp

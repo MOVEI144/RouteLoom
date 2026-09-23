@@ -90,6 +90,14 @@ Status UsbBridge::attach_diagnostics() noexcept {
   return Status::success();
 }
 
+Status UsbBridge::attach_node_status() noexcept {
+  if (config_.mesh == nullptr) {
+    return Status::error(StatusCode::InvalidState, "node status needs mesh");
+  }
+  config_.capability |= kCapNodeStatusV1;
+  return Status::success();
+}
+
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.push(input, now_ms);
@@ -130,6 +138,7 @@ void UsbBridge::poll(const MonotonicMs now_ms) noexcept {
                             ByteView{}, now_ms);
     }
   }
+  pump_node_events(now_ms);
   pump_tx(now_ms);
   if (state_ == SessionState::Draining && !tx_wire_active_ && control_q_.empty() &&
       data_q_.empty()) {
@@ -586,6 +595,15 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       send_error(UsbErrorCode::ProtocolError, request, "DIAG_DIRECTION",
                  now_ms);
       break;
+    case HostOpsSub::NodeStatusQuery:
+      handle_node_status_query(request, inner, now_ms);
+      break;
+    case HostOpsSub::NodeStatusPage:
+    case HostOpsSub::NodeEvent:
+      // 0x41/0x42 are device→host only.
+      send_error(UsbErrorCode::ProtocolError, request, "NODE_STATUS_DIRECTION",
+                 now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
@@ -859,6 +877,83 @@ void UsbBridge::on_diagnostic_body(const NodeId observer, const ByteView body,
   // starvation expires it in flight rather than delivering stale evidence.
   send_diagnostic_reply(usb_request, ConfigOpsResult::Ok, observer, body,
                         now_ms, deadline);
+}
+
+void UsbBridge::handle_node_status_query(const std::uint64_t request,
+                                         const ByteView inner,
+                                         const MonotonicMs now_ms) noexcept {
+  NodeStatusQuery query{};
+  if (!decode_node_status_query(inner, query).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "NODE_STATUS_MALFORMED",
+               now_ms);
+    return;
+  }
+  NodeStatusPageHeader header{};
+  std::size_t count = 0;
+  if ((config_.capability & kCapNodeStatusV1) == 0 || config_.mesh == nullptr) {
+    header.result = static_cast<std::uint16_t>(ConfigOpsResult::Unsupported);
+    header.next_after = query.after;
+  } else {
+    // Arm BEFORE taking the page: the baseline and the first page then
+    // describe the same instant, so no transition can fall between them.
+    if ((query.flags & kNodeStatusQuerySubscribe) != 0) {
+      node_monitor_.arm(*config_.mesh, now_ms);
+      node_monitor_ms_ = now_ms;
+    }
+    bool more = false;
+    count = config_.mesh->node_status_page(query.after, node_page_.data(),
+                                           query.max_entries, now_ms, more);
+    header.result = static_cast<std::uint16_t>(ConfigOpsResult::Ok);
+    header.flags = static_cast<std::uint8_t>(
+        (more ? kNodeStatusPageMore : 0U) |
+        (node_monitor_.armed() ? kNodeStatusPageArmed : 0U));
+    header.next_after = count > 0 ? node_page_[count - 1].node : query.after;
+    header.event_seq = node_monitor_.last_sequence();
+  }
+  header.count = static_cast<std::uint8_t>(count);
+  // Page staging lives in .bss (node_page_wire_), like the TX scratch: a
+  // 468-byte stack array has no place on the 8 KB bridge task.
+  std::size_t written = 0;
+  if (encode_node_status_page(
+          header, node_page_.data(), count,
+          MutableByteView{node_page_wire_.data(), node_page_wire_.size()},
+          written)) {
+    enqueue(FrameKind::HostOps, 0, request,
+            ByteView{node_page_wire_.data(), written}, now_ms);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::pump_node_events(const MonotonicMs now_ms) noexcept {
+  if (state_ != SessionState::Active || !node_monitor_.armed() ||
+      config_.mesh == nullptr ||
+      now_ms - node_monitor_ms_ < kNodeMonitorIntervalMs) {
+    return;
+  }
+  node_monitor_ms_ = now_ms;
+  node_monitor_.poll(
+      *config_.mesh, now_ms, kNodeEventBurst, [&](const NodeEvent& event) {
+        // Application traffic (DataFromMesh / DeliveryEvent) keeps its
+        // reserve: an event that would eat into it waits for a later pass
+        // instead of displacing a delivery. The monitor retries it.
+        if (data_q_.size() + kNodeEventQueueReserve >= data_q_.capacity()) {
+          ++stats_.node_events_deferred;
+          return false;
+        }
+        std::array<std::uint8_t, kGatewayInnerHeadSize + kNodeEventPayload> body{};
+        std::size_t written = 0;
+        if (!encode_node_event(event, MutableByteView{body.data(), body.size()},
+                               written)) {
+          return false;
+        }
+        if (!enqueue(FrameKind::HostOps, 0, 0, ByteView{body.data(), written},
+                     now_ms)) {
+          return false;
+        }
+        ++stats_.node_events;
+        return true;
+      });
 }
 
 void UsbBridge::handle_config_query(const std::uint64_t request,
@@ -1617,6 +1712,10 @@ void UsbBridge::reset_session_state() noexcept {
   // Pending diagnostic queries are session state: a reconnected session can
   // never observe a late reply under a minted slot (04 §USB correlation).
   for (auto& slot : pending_diag_) slot = PendingDiagnostic{};
+  // The node-event baseline belongs to the session that armed it: a new
+  // session starts silent until its host queries with SUBSCRIBE.
+  node_monitor_.disarm();
+  node_monitor_ms_ = 0;
   decoder_.reset();
   // Gateway lane teardown: the registration dies with the session (a new
   // token is minted per session — old tokens can never be rebound), and

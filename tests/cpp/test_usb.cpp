@@ -308,7 +308,7 @@ void test_credit() {
 
 // ------------------------------------------------------------------ session
 
-SessionTranscript golden_transcript() {
+SessionTranscript golden_transcript(std::uint32_t capability = 0x3 | kCapHostOpsV1) {
   SessionTranscript t{};
   t.host_nonce = 0x0102030405060708ULL;
   t.device_nonce = 0xA0B0C0D0E0F00102ULL;
@@ -316,15 +316,15 @@ SessionTranscript golden_transcript() {
   t.node = 1;
   t.boot_id = 0x000000B0071D0001ULL;
   t.network = 7;
-  t.capability = 0x3 | kCapHostOpsV1;
+  t.capability = capability;
   const char* principal = "host-operator";
   t.principal_len = 13;
   std::memcpy(t.principal.data(), principal, t.principal_len);
   return t;
 }
 
-SessionProof golden_proof() {
-  const SessionTranscript transcript = golden_transcript();
+SessionProof golden_proof(std::uint32_t capability = 0x3 | kCapHostOpsV1) {
+  const SessionTranscript transcript = golden_transcript(capability);
   std::array<std::uint8_t, kTranscriptSize> encoded{};
   std::size_t size = 0;
   if (!encode_transcript(transcript,
@@ -1026,6 +1026,241 @@ void test_bridge_diagnostics() {
   }
 }
 
+// ------------------------------------------------ node status (node_status_v1)
+
+// Opens every HostOps frame in the sink and returns the inners whose sub
+// matches, in wire order, with their frame request ids.
+struct OpenedOps {
+  std::uint64_t request{0};
+  std::vector<std::uint8_t> inner;
+};
+
+std::vector<OpenedOps> host_ops_inners(const HostDriver& host,
+                                       const CollectSink& sink,
+                                       const HostOpsSub sub) {
+  std::vector<OpenedOps> out;
+  for (const auto& record : sink.frames) {
+    if (record.frame.kind != FrameKind::HostOps) continue;
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (!open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                   opened)) {
+      continue;
+    }
+    if (opened.size < 2 || opened.data[1] != static_cast<std::uint8_t>(sub)) continue;
+    out.push_back(OpenedOps{record.frame.request,
+                            std::vector<std::uint8_t>(opened.data, opened.data + opened.size)});
+  }
+  return out;
+}
+
+std::vector<std::uint8_t> node_status_request(HostDriver& host, std::uint64_t request,
+                                              NodeId after, std::uint8_t max_entries,
+                                              std::uint8_t flags) {
+  NodeStatusQuery query{};
+  query.after = after;
+  query.max_entries = max_entries;
+  query.flags = flags;
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kNodeStatusQueryPayload> inner{};
+  std::size_t n = 0;
+  if (!encode_node_status_query(query, MutableByteView{inner.data(), inner.size()}, n)) {
+    return {};
+  }
+  return host.sealed(FrameKind::HostOps, request, ByteView{inner.data(), n});
+}
+
+std::vector<NodeEvent> node_events(const HostDriver& host, const CollectSink& sink) {
+  std::vector<NodeEvent> events;
+  for (const auto& opened : host_ops_inners(host, sink, HostOpsSub::NodeEvent)) {
+    NodeEvent event{};
+    CHECK(opened.request == 0);  // unsolicited
+    CHECK_OK(decode_node_event(ByteView{opened.inner.data(), opened.inner.size()}, event));
+    events.push_back(event);
+  }
+  return events;
+}
+
+void test_bridge_node_status() {
+  // 1) Not attached: the query is answered honestly Unsupported, and a
+  //    malformed query is a ProtocolError Error frame, never a page.
+  {
+    World world;
+    HostDriver host;
+    MonotonicMs now = 0;
+    CHECK(host_handshake(world, host, now, 0x6161, 70) != 0);
+    const auto grant = grant_body(16, 32768);
+    world.feed(host.sealed(FrameKind::Credit, 71, ByteView{grant.data(), grant.size()}), now);
+    world.drain(now);
+    world.device_sink.frames.clear();
+    world.feed(node_status_request(host, 72, 0, 16, kNodeStatusQuerySubscribe), now);
+    world.drain(now);
+    const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::NodeStatusPage);
+    CHECK(pages.size() == 1);
+    if (pages.size() == 1) {
+      NodeStatusPageHeader header{};
+      ByteView entries{};
+      CHECK(pages[0].request == 72);
+      CHECK_OK(decode_node_status_page(
+          ByteView{pages[0].inner.data(), pages[0].inner.size()}, header, entries));
+      CHECK(header.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
+      CHECK(header.count == 0 && header.flags == 0);
+    }
+    CHECK(!world.bridge.node_status_monitor().armed());
+    world.device_sink.frames.clear();
+    // max_entries 0 is malformed.
+    std::array<std::uint8_t, 14> bad{{1, 0x40, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
+    world.feed(host.sealed(FrameKind::HostOps, 73, ByteView{bad.data(), bad.size()}), now);
+    world.drain(now);
+    bool error = false;
+    for (const auto& record : world.device_sink.frames) {
+      error = error || record.frame.kind == FrameKind::Error;
+    }
+    CHECK(error);
+    CHECK(host_ops_inners(host, world.device_sink, HostOpsSub::NodeStatusPage).empty());
+    // 0x41/0x42 from the host are direction violations.
+    std::array<std::uint8_t, 4> wrong{{1, 0x42, 0, 0}};
+    world.device_sink.frames.clear();
+    world.feed(host.sealed(FrameKind::HostOps, 74, ByteView{wrong.data(), wrong.size()}), now);
+    world.drain(now);
+    error = false;
+    for (const auto& record : world.device_sink.frames) {
+      error = error || record.frame.kind == FrameKind::Error;
+    }
+    CHECK(error);
+  }
+
+  // 2) Attached: paging, arming, bounded event bursts, session scoping.
+  World world;
+  CHECK_OK(world.bridge.attach_node_status());
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x6262, 80) != 0);
+  const auto grant = grant_body(256, 1u << 20);
+  world.feed(host.sealed(FrameKind::Credit, 81, ByteView{grant.data(), grant.size()}), now);
+  world.drain(now);
+  world.device_sink.frames.clear();
+  for (NodeId id = 10; id < 30; ++id) CHECK_OK(world.n1.add_neighbor(id, 2, now));
+
+  // Walk everything in pages of 8 without subscribing.
+  std::vector<NodeId> walked;
+  NodeId cursor = 0;
+  std::uint64_t request = 82;
+  for (int page = 0; page < 8; ++page) {
+    world.device_sink.frames.clear();
+    world.feed(node_status_request(host, request, cursor, 8, 0), now);
+    world.drain(now);
+    const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::NodeStatusPage);
+    CHECK(pages.size() == 1);
+    if (pages.size() != 1) break;
+    CHECK(pages[0].request == request);
+    ++request;
+    NodeStatusPageHeader header{};
+    ByteView entries{};
+    CHECK_OK(decode_node_status_page(
+        ByteView{pages[0].inner.data(), pages[0].inner.size()}, header, entries));
+    CHECK((header.flags & kNodeStatusPageArmed) == 0);
+    for (std::size_t i = 0; i < header.count; ++i) {
+      NodeStatus entry{};
+      CHECK_OK(decode_node_status_entry(
+          ByteView{entries.data + i * kNodeStatusEntrySize, kNodeStatusEntrySize}, entry));
+      CHECK(entry.neighbor_active() && entry.reachable() &&
+            (entry.flags & kNodeStatusDirect) != 0);
+      walked.push_back(entry.node);
+    }
+    cursor = header.next_after;
+    if ((header.flags & kNodeStatusPageMore) == 0) break;
+  }
+  std::vector<NodeId> expected{2};
+  for (NodeId id = 10; id < 30; ++id) expected.push_back(id);
+  CHECK(walked == expected);
+
+  // Unarmed: mesh changes produce no events.
+  world.device_sink.frames.clear();
+  CHECK_OK(world.n1.remove_neighbor(10, now));
+  now += 1000;
+  world.drain(now);
+  CHECK(node_events(host, world.device_sink).empty());
+
+  // Arm with a one-entry page: the page reports ARMED and event_seq 0.
+  world.device_sink.frames.clear();
+  world.feed(node_status_request(host, request++, 0, 1, kNodeStatusQuerySubscribe), now);
+  world.drain(now);
+  CHECK(world.bridge.node_status_monitor().armed());
+  {
+    const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::NodeStatusPage);
+    CHECK(pages.size() == 1);
+    if (!pages.empty()) {
+      NodeStatusPageHeader header{};
+      ByteView entries{};
+      CHECK_OK(decode_node_status_page(
+          ByteView{pages[0].inner.data(), pages[0].inner.size()}, header, entries));
+      CHECK(header.count == 1 && (header.flags & kNodeStatusPageArmed) != 0 &&
+            (header.flags & kNodeStatusPageMore) != 0 && header.event_seq == 0);
+    }
+  }
+
+  // Leave: NeighborDown + RouteDown for node 11.
+  world.device_sink.frames.clear();
+  CHECK_OK(world.n1.remove_neighbor(11, now));
+  now += 300;
+  world.drain(now);
+  auto events = node_events(host, world.device_sink);
+  CHECK(events.size() == 2);
+  if (events.size() == 2) {
+    CHECK(events[0].sequence == 1 && events[0].kind == NodeEventKind::NeighborDown);
+    CHECK(events[1].sequence == 2 && events[1].kind == NodeEventKind::RouteDown);
+    CHECK(events[0].status.node == 11 && !events[1].status.reachable());
+  }
+
+  // A burst of joins drains kNodeEventBurst events per monitor pass, in
+  // contiguous sequence order, without ever dropping one.
+  world.device_sink.frames.clear();
+  for (NodeId id = 100; id < 106; ++id) CHECK_OK(world.n1.add_neighbor(id, 3, now));
+  now += 300;
+  world.drain(now);
+  CHECK(node_events(host, world.device_sink).size() == 4);
+  for (int i = 0; i < 4; ++i) {
+    now += 300;
+    world.drain(now);
+  }
+  events = node_events(host, world.device_sink);
+  CHECK(events.size() == 12);
+  for (std::size_t i = 0; i < events.size(); ++i) {
+    CHECK(events[i].sequence == 3 + i);
+    CHECK(events[i].kind == (i % 2 == 0 ? NodeEventKind::NeighborUp : NodeEventKind::RouteUp));
+    CHECK(events[i].status.node == 100 + i / 2);
+    CHECK(events[i].status.link_cost == 3);
+  }
+  CHECK(world.bridge.stats().node_events == 14);
+
+  // A resync page reports the sequence the device reached.
+  world.device_sink.frames.clear();
+  world.feed(node_status_request(host, request++, 0, 16, 0), now);
+  world.drain(now);
+  {
+    const auto pages = host_ops_inners(host, world.device_sink, HostOpsSub::NodeStatusPage);
+    CHECK(pages.size() == 1);
+    if (!pages.empty()) {
+      NodeStatusPageHeader header{};
+      ByteView entries{};
+      CHECK_OK(decode_node_status_page(
+          ByteView{pages[0].inner.data(), pages[0].inner.size()}, header, entries));
+      CHECK(header.event_seq == 14 && header.count == 16);
+    }
+  }
+
+  // A new session starts silent: the baseline belonged to the old one.
+  world.device_sink.frames.clear();
+  HostDriver second;
+  CHECK(host_handshake(world, second, now, 0x6363, 90) != 0);
+  CHECK(!world.bridge.node_status_monitor().armed());
+  world.feed(second.sealed(FrameKind::Credit, 91, ByteView{grant.data(), grant.size()}), now);
+  CHECK_OK(world.n1.remove_neighbor(12, now));
+  now += 1000;
+  world.drain(now);
+  CHECK(node_events(second, world.device_sink).empty());
+}
+
 // ------------------------------------------------------------- golden files
 
 using Fields = std::map<std::string, std::string>;
@@ -1173,6 +1408,76 @@ void test_golden_session() {
   CHECK(world.bridge.state() == SessionState::Disconnected);  // close drained
 }
 
+// protocol/usb-golden/node-status: the same replay discipline for the
+// node_status_v1 family. The device advertises CAP_NODE_STATUS_V1; right
+// before the first event vector the mesh loses neighbor 2, and the device's
+// 250 ms monitor pass must emit exactly the golden NeighborDown/RouteDown
+// frames (compared on the concatenated stream, like the session replay).
+void test_golden_node_status() {
+  const std::filesystem::path root =
+      std::filesystem::path(ROUTELOOM_USB_GOLDEN_DIR) / "node-status";
+  const Fields session = parse_flat_json(read_file(root / "session.json"));
+  CHECK(!session.empty());
+  const std::uint32_t capability = 0x3 | kCapHostOpsV1 | kCapNodeStatusV1;
+  CHECK(field_u64(session, "capability") == capability);
+  const SessionProof proof = golden_proof(capability);
+  CHECK(proof.session_id == field_u64(session, "session_id"));
+  std::vector<std::uint8_t> key;
+  CHECK(hex_decode(session.at("session_key_hex"), key));
+  CHECK(key == std::vector<std::uint8_t>(proof.key.begin(), proof.key.end()));
+
+  World world;
+  CHECK_OK(world.bridge.attach_node_status());
+  MonotonicMs now = 0;
+  std::vector<std::filesystem::path> steps;
+  for (const auto& entry : std::filesystem::directory_iterator(root / "frames")) {
+    if (entry.path().extension() == ".json") steps.push_back(entry.path());
+  }
+  std::sort(steps.begin(), steps.end());
+  CHECK(steps.size() >= 12);
+
+  std::vector<std::uint8_t> expected_out;
+  std::vector<std::uint8_t> produced;
+  bool removed = false;
+  for (const auto& path : steps) {
+    const Fields vector = parse_flat_json(read_file(path));
+    const std::string name = vector.count("name") ? vector.at("name") : "";
+    const std::string direction = vector.count("direction") ? vector.at("direction") : "";
+    std::vector<std::uint8_t> wire;
+    CHECK(hex_decode(vector.at("wire_hex"), wire));
+    if (direction == "d2h") {
+      if (name.rfind("node_event_", 0) == 0 && !removed) {
+        removed = true;
+        CHECK_OK(world.n1.remove_neighbor(2, now));
+      }
+      expected_out.insert(expected_out.end(), wire.begin(), wire.end());
+    } else {
+      world.feed(wire, now);
+    }
+    const auto emitted = world.drain_raw(now);
+    produced.insert(produced.end(), emitted.begin(), emitted.end());
+    now += 200;
+  }
+  CHECK(removed);
+  CHECK(produced == expected_out);
+  if (produced != expected_out) {
+    std::fprintf(stderr, "node-status golden mismatch: produced %zu bytes, expected %zu\n",
+                 produced.size(), expected_out.size());
+    const std::size_t common = std::min(produced.size(), expected_out.size());
+    for (std::size_t i = 0; i < common; ++i) {
+      if (produced[i] != expected_out[i]) {
+        std::fprintf(stderr, "first divergence at byte %zu: %02x != %02x\n", i,
+                     produced[i], expected_out[i]);
+        break;
+      }
+    }
+  }
+  CHECK(world.bridge.stats().rx_errors == 0);
+  CHECK(world.bridge.stats().auth_failures == 0);
+  CHECK(world.bridge.stats().node_events == 2);
+  CHECK(world.bridge.state() == SessionState::Disconnected);
+}
+
 }  // namespace
 
 int main() {
@@ -1188,7 +1493,9 @@ int main() {
   test_bridge_idempotent_send();
   test_bridge_partial_write();
   test_bridge_diagnostics();
+  test_bridge_node_status();
   test_golden_session();
+  test_golden_node_status();
   if (failures != 0) {
     std::fprintf(stderr, "%d usb checks failed\n", failures);
     return 1;
