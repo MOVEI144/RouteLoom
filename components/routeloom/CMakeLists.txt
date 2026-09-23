@@ -64,6 +64,26 @@ set(ROUTELOOM_UECC_DEFS
   uECC_SUPPORTS_secp256r1=1 uECC_SQUARE_FUNC=0 uECC_OPTIMIZATION_LEVEL=2
 )
 
+# Vendored libedhoc (MIT) + zcbor (Apache-2.0), the EDHOC (RFC 9528) engine
+# of the SDK v1 join/link handshakes (docs/design/sdk-v1/08 P2-1; pins and
+# licenses in NOTICE and third_party/VENDORED.json). RouteLoom's bounded
+# backend is src/edhoc/. Built on every target so firmware CI compiles it for
+# the 32-bit ESP32 chips, but nothing in the firmware calls it yet, so the
+# linker keeps none of it (no static RAM is added; see ram-budget.md).
+include(${CMAKE_CURRENT_LIST_DIR}/edhoc_sources.cmake)
+# Third-party C only. zcbor's float16 helpers type-pun through pointer casts
+# (zcbor_common.c; undefined behaviour under strict aliasing, and GCC -O2/-Os
+# then reports -Wstrict-aliasing and -Wuninitialized, both in -Wall), so the
+# vendored C is compiled with -fno-strict-aliasing, which makes that code
+# well-defined (EDHOC never encodes floats anyway). Two upstream unused-code
+# warnings (libedhoc's comp_message_number without LIBEDHOC_TESTS,
+# zcbor_any_skip's `additional`) are silenced. ESP-IDF promotes -Wall to
+# errors with -Werror=all, which is why this matters there; RouteLoom's own
+# C++ keeps -Werror, and src/edhoc/edhoc_port.c is the only RouteLoom C file.
+set(ROUTELOOM_THIRD_PARTY_C_RELAX
+  -fno-strict-aliasing -Wno-unused-function -Wno-unused-but-set-variable
+)
+
 # Dedup pool capacity (docs/reference/resource-profiles.json dedup_entries,
 # issue #39) is a compile-time resource-profile constant. It changes
 # sizeof(MeshNode), so it is a PUBLIC definition: every translation unit that
@@ -71,15 +91,23 @@ set(ROUTELOOM_UECC_DEFS
 # component Kconfig (RouteLoom -> Dedup capacity profile); host builds through
 # ROUTELOOM_DEDUP_PROFILE. The default is the relay profile.
 if(COMMAND idf_component_register)
+  # ESP-IDF: libedhoc + zcbor + the glue, without the host-only TF-PSA-Crypto
+  # AES/CCM subset (its mbedtls_* symbols would duplicate ESP-IDF's own Mbed
+  # TLS); builtin_aead_ccm() is nullptr here and the adapter passes a PSA
+  # AeadCcm (routeloom_espnow, psa_edhoc_aead.hpp).
   idf_component_register(
     SRCS ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC}
+         ${ROUTELOOM_LIBEDHOC_SRC} ${ROUTELOOM_ZCBOR_SRC} ${ROUTELOOM_EDHOC_GLUE_SRC}
     INCLUDE_DIRS include ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc
+    PRIV_INCLUDE_DIRS ${ROUTELOOM_EDHOC_INCLUDE_DIRS}
   )
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
-  target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS})
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS}
+    ${ROUTELOOM_EDHOC_C_DEFS})
   target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(${COMPONENT_LIB} PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+    $<$<COMPILE_LANGUAGE:CXX>:-Werror>
+    "$<$<COMPILE_LANGUAGE:C>:${ROUTELOOM_THIRD_PARTY_C_RELAX}>")
   if(CONFIG_ROUTELOOM_DEDUP_CAPACITY)
     target_compile_definitions(${COMPONENT_LIB} PUBLIC
       ROUTELOOM_DEDUP_CAPACITY=${CONFIG_ROUTELOOM_DEDUP_CAPACITY})
@@ -99,14 +127,40 @@ else()
       "ROUTELOOM_DEDUP_PROFILE must be leaf, relay or gateway "
       "(got '${ROUTELOOM_DEDUP_PROFILE}')")
   endif()
-  add_library(routeloom_core STATIC ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC})
+  # Vendored C for EDHOC in its own target, so its (relaxed) warning set stays
+  # scoped to it — like micro-ecc, upstream code builds without RouteLoom's
+  # -Werror. Host builds add the TF-PSA-Crypto AES/CCM subset.
+  add_library(routeloom_edhoc_third_party STATIC
+    ${ROUTELOOM_LIBEDHOC_SRC} ${ROUTELOOM_ZCBOR_SRC} ${ROUTELOOM_TFPSA_SRC})
+  set_target_properties(routeloom_edhoc_third_party PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS ON)
+  target_include_directories(routeloom_edhoc_third_party PRIVATE
+    ${ROUTELOOM_EDHOC_INCLUDE_DIRS} ${ROUTELOOM_TFPSA_INCLUDE_DIRS})
+  target_compile_definitions(routeloom_edhoc_third_party PRIVATE
+    ${ROUTELOOM_EDHOC_C_DEFS} ${ROUTELOOM_TFPSA_DEFS})
+  target_compile_options(routeloom_edhoc_third_party PRIVATE
+    ${ROUTELOOM_THIRD_PARTY_C_RELAX})
+
+  # libedhoc's headers for the glue and for tests that drive the raw API.
+  add_library(routeloom_edhoc_headers INTERFACE)
+  target_include_directories(routeloom_edhoc_headers INTERFACE
+    ${ROUTELOOM_EDHOC_INCLUDE_DIRS})
+
+  add_library(routeloom_core STATIC ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC}
+    ${ROUTELOOM_EDHOC_GLUE_SRC})
   target_include_directories(routeloom_core PUBLIC include)
   target_include_directories(routeloom_core PRIVATE
-    ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc)
+    ${CMAKE_CURRENT_LIST_DIR}/third_party/micro-ecc ${ROUTELOOM_TFPSA_API_INCLUDE_DIRS})
+  target_link_libraries(routeloom_core PRIVATE routeloom_edhoc_headers
+    routeloom_edhoc_third_party)
   target_compile_features(routeloom_core PUBLIC cxx_std_17)
-  target_compile_definitions(routeloom_core PRIVATE ${ROUTELOOM_UECC_DEFS})
+  target_compile_definitions(routeloom_core PRIVATE ${ROUTELOOM_UECC_DEFS}
+    ${ROUTELOOM_EDHOC_C_DEFS} ${ROUTELOOM_TFPSA_DEFS} ROUTELOOM_EDHOC_BUILTIN_AEAD)
   target_compile_options(routeloom_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror>)
+  # The one RouteLoom-owned C file gets the same strictness as the C++.
+  set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/edhoc/edhoc_port.c
+    PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic;-Werror")
   target_compile_definitions(routeloom_core PUBLIC
     ROUTELOOM_DEDUP_CAPACITY=${ROUTELOOM_DEDUP_CAPACITY})
 endif()

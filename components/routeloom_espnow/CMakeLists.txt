@@ -11,6 +11,7 @@ idf_component_register(
     src/nvs_replay_store.cpp
     src/nvs_sdkv1_store.cpp
     src/nvs_trust_store.cpp
+    src/psa_edhoc_aead.cpp
     src/psk_security.cpp
   INCLUDE_DIRS include
   REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls

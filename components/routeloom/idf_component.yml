@@ -2,9 +2,10 @@
 # Consumption paths (docs/implementation/component-distribution.md):
 #   - local checkout via EXTRA_COMPONENT_DIRS (no registry involved)
 #   - component-manager git dependency on this repository
-# The component is intentionally self-contained: vendored micro-ecc lives in
-# third_party/micro-ecc inside this directory so a git `path` fetch, which
-# copies only this subtree, still builds.
+# The component is intentionally self-contained: vendored micro-ecc,
+# libedhoc and zcbor (plus the host-only TF-PSA-Crypto AES/CCM subset) live in
+# third_party/ inside this directory so a git `path` fetch, which copies only
+# this subtree, still builds. Pins: third_party/VENDORED.json and NOTICE.
 name: routeloom/routeloom
 version: 0.1.0
 description: >-
