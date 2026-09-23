@@ -1,0 +1,27 @@
+[package]
+name = "routeloom-edhoc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "EDHOC (RFC 9528) cipher suite 2 for the Site Authority: method 0 (and method 3 for the RFC 9529 trace), kid-referenced credentials, EAD"
+
+[dependencies]
+# P-256 ECDH (ephemeral and static) and ES256 over the same RustCrypto
+# curve the rest of the host uses (routeloom-provision); `ecdh` adds only
+# the Diffie-Hellman wrapper. Pure Rust, no unsafe (the workspace forbids it).
+p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa", "ecdh", "sha256"] }
+sha2 = { version = "0.10", default-features = false }
+hkdf = "0.12"
+# AES-CCM-16-64-128 (suite 2: 16 B key, 13 B nonce, 8 B tag): RustCrypto
+# `ccm` over `aes`, detached in-place API (no alloc feature needed).
+aes = "0.8"
+ccm = { version = "0.5", default-features = false }
+zeroize = { version = "1", default-features = false }
+
+[dev-dependencies]
+# The interop test builds real RLCW1 credentials and join EAD items.
+routeloom-provision = { path = "../routeloom-provision" }
+routeloom-join = { path = "../routeloom-join" }
+
+[lints]
+workspace = true

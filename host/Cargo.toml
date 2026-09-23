@@ -11,6 +11,7 @@ members = [
     "routeloom-client",
     "routeloom-keysched",
     "routeloom-join",
+    "routeloom-edhoc",
 ]
 resolver = "2"
 
