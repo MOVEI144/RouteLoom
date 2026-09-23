@@ -27,9 +27,12 @@ set(ROUTELOOM_CORE_SOURCES
   src/peer_state.cpp
   src/power.cpp
   src/replay.cpp
+  src/rlcw1.cpp
   src/rlres1.cpp
   src/route_scale.cpp
   src/routing.cpp
+  src/sdkv1_records.cpp
+  src/sdkv1_store.cpp
   src/status.cpp
   src/telemetry.cpp
   src/trust_manifest.cpp
