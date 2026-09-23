@@ -4,7 +4,7 @@
 
 Rust製routeloom-hostがUSB adapterを所有し、routeloomctlとTUI、利用アプリが同じHost APIへ接続する。PC上のアプリをESP32へ載せる必要はない。ESP32側にはGateway bridge＋通常Mesh SDKをビルドする。
 
-v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、node membership・route・link・authority等daemonに情報源が無いfieldは`unknown`として返す。
+v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
 
 一つのdaemonが複数USB adapterと複数ネットワークを扱える。adapter、Network、Gateway、host serviceを別の識別子にする。相互転送は明示許可がある場合だけで、v1は異Networkの透過bridgeを提供しない。
 
@@ -70,3 +70,58 @@ operation identityは `(authenticated principal, Network, operation class, idemp
 client初期上限：同時operation8、subscription4、各subscriber queue128eventsかつ256KiB、1event8KiB以下。遅いreaderへcursor gapを通知し、別clientや無線を停止しない。quotaはprincipalとglobal（32clients、8MiB subscriber総量）の両方を検査する。
 
 HostAuthのtranscript／COMMAND保護は[USB](usb-protocol.md)に従う。DATA受領の意味と永続spool commitを分け、requestを記録せず副作用を先に実行しない。
+
+## 9. アプリ向け4操作契約とnode status（EXPERIMENTAL）
+
+組込み先アプリ（KGuard等）はtransportを知らずに次の4操作だけを使う。同じ契約をWi-Fi等の別transportも実装できるよう、Rust crate `routeloom-client`がtrait `MeshTransport`として定義し、RouteLoom実装`api1::RouteLoomTransport`はAPI1の薄いclientに留める。
+
+| 操作 | trait | RouteLoom（API1） |
+|---|---|---|
+| 1. 送信 | `send(dest, payload, &SendOptions) -> SendHandle` | `operations.open_epoch`（初回のみ、cache）＋`messages.submit` |
+| 2. 受信 | `receive() -> MessageStream` | `messages.subscribe {stream:"messages", from:"latest"}` |
+| 3. 参加／離脱 | `membership() -> MembershipStream`（Joined／Left／LinkChanged） | `messages.subscribe {stream:"events", filter:{kinds:["node_joined","node_left","link_changed"]}}` |
+| 4. link状態 | `link_status(node)`／`links()` | `nodes.get`（NOT_FOUNDは`LinkStatus::unknown`＝未接続）／`nodes.list`（`next_after`で全件） |
+
+`SendHandle`は受付（HOST_QUEUED）の証拠で、到達の証拠ではない。`LinkStatus.connected=false`をアプリの「通信なし」表示・表示盤の青帯の唯一の根拠にする。値が無いfieldは`None`/`null`で、0を推測で埋めない。
+
+**情報源**。gatewayがHelloAck bit 2（host_ops_v1）とbit 6を広告すると、daemonのnode status laneが[USB §7](usb-protocol.md)の0x40 pageで全nodeを取得し（初回pageでSUBSCRIBE）、以後0x42 eventを適用し、10秒毎に全件再同期する。`connected`は「gatewayが当該nodeへのfeasible routeを選択している」ことを意味し、gateway自身はUSB sessionが認証済みの間connected（`role:"gateway"`、`hops:0`）。joined／left／link_changedはdaemonが自分の表の遷移から生成するため、機器eventを落としても再同期で必ず1回だけ出る。USB session喪失時は全connected nodeが`node_left{reason:"gateway_lost"}`となる。
+
+**時刻の基準**。API・eventの時刻はすべてhostのUNIX epoch ms（`"clock":"host_unix_ms"`、event ringの`ms`と同一軸）。機器は絶対時刻を送らず経過時間`heard_age_ms`だけを送り、daemonが`last_heard_ms = 受信時刻 − heard_age_ms`を計算する（USB遅延分だけ古めに見える上限値）。`updated_ms`はgatewayが最後に記録を確認した時刻、`changed_ms`は最後のconnected遷移時刻。
+
+**API1**（ACL不要、`link.get`と同じ診断区分。payloadは含まない）：
+
+- `nodes.list` params `{connected?:bool, after?:"16hex", limit?:1..128}` → `{"source":{...},"nodes":[node...],"next_after":"16hex"|null}`
+- `nodes.get` params `{node:"16hex"}` → `{"source":{...},"node":node}`、未報告nodeは`NOT_FOUND`（`detail.source`付き、retryable）
+- `source`：`{"state":"unavailable|unsupported|syncing|live","gateway":"16hex"|null,"session_id":n|null,"synced_ms":n|null,"tracked":n,"evicted":n,"clock":"host_unix_ms"}`
+- `node`：`{"node","role":"peer|gateway","connected","listed","neighbor","direct","hops":0|1|null,"next_hop","route_metric","link_cost","rssi_dbm","rssi_avg_dbm","telemetry_stale","last_heard_ms","heard_age_ms","updated_ms","changed_ms"}`。多hopのhop数はroute metricから推測せずnull。`listed:false`（消滅・gateway喪失後）のnodeはlink系fieldがnullで、`last_heard_ms`だけ残る（「最終通信 xx」表示用）。
+- event（`stream:"events"`）：`{"seq","ms","kind":"node_joined|node_left|link_changed","node":"16hex","gateway","reason"|"change","status":node}`。reasonは`route_up`／`route_down`／`sync`／`vanished`／`gateway_attached`／`gateway_lost`、changeは`neighbor_up`／`neighbor_down`／`next_hop`。
+
+daemon表は最大512件（機器側は最大160 node）で、溢れたら最も古い未接続記録から追い出す。
+
+**routeloomctlでの例**：
+
+```sh
+routeloomctl nodes                                  # 全node（最大128件/page）
+routeloomctl nodes --connected false                # 通信なしのnodeだけ
+routeloomctl nodes --after 0000000000000080 --limit 64
+routeloomctl node-get --node 0000000000000002       # 1台のlink状態
+routeloomctl node-events                            # joined/left/link_changedを流し続ける
+routeloomctl submit --network 0000000000000007 --epoch <16hex> --to 0000000000000002 --payload 0102
+routeloomctl receive --network 0000000000000007 --from latest
+```
+
+**Rustからの例**：
+
+```rust
+use routeloom_client::{api1::RouteLoomTransport, MeshTransport, MembershipKind, SendOptions};
+
+let mesh = RouteLoomTransport::new("/tmp/routeloom.sock", 0x7);
+let handle = mesh.send(0x2, b"unlock", &SendOptions::default())?;
+if !mesh.link_status(0x2)?.connected { /* 表示盤を青帯にする */ }
+for event in mesh.membership()? {
+    let event = event?;
+    if event.kind == MembershipKind::Left { /* 管理画面に「通信なし」 */ }
+}
+```
+
+制約：開発profile（dev PSK）のEXPERIMENTAL機能で、RSSIはgatewayが直接受信したnodeのみ（多hop nodeはnull）、membership承認状態（信頼・失効）はこの面に含まれない。
