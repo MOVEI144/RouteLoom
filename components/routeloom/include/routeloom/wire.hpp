@@ -106,6 +106,19 @@ struct LinkOpenedFrame {
 using EncodedFrame = ByteBuffer<kMaxEspNowBody>;
 
 Status validate_header(const Header& header) noexcept;
+// The security contexts a header is sealed/opened under: link
+// (Link, network, previous_hop, next_hop, link_epoch); end (EndToEnd,
+// network, origin, destination, end_epoch), or for GROUP_DATA (Group,
+// network, origin, kBroadcastNodeId, end_epoch).
+SecurityContext link_context(const Header& header) noexcept;
+SecurityContext end_context(const Header& header) noexcept;
+// Provider-owned epochs (sdk-v1/03 §8): replace header.link_epoch /
+// header.end_epoch with SecurityProvider::tx_epoch() for the context's
+// (scope, receiver). A provider that does not own epochs leaves the
+// configured value. encode_new(), forward() and seal_group() call these
+// before drawing any counter; AuthRequired means "no session yet".
+Status stamp_link_epoch(Header& header, SecurityProvider& security) noexcept;
+Status stamp_end_epoch(Header& header, SecurityProvider& security) noexcept;
 Status encode_new(const PlainFrame& frame,
                   SecurityProvider& security,
                   EncodedFrame& output) noexcept;
@@ -127,6 +140,8 @@ Status open_end(const LinkOpenedFrame& frame,
                 NodeId local_node,
                 SecurityProvider& security,
                 PlainFrame& output) noexcept;
+// `link_epoch` is this node's configured link epoch; the provider may
+// replace it with the outgoing hop's context id (stamp_link_epoch).
 Status forward(const LinkOpenedFrame& input,
                NodeId local_node,
                NodeId next_hop,

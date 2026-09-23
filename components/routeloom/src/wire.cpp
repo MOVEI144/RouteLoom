@@ -172,6 +172,8 @@ Status make_end_aad(const Header& header,
   return Status::success();
 }
 
+}  // namespace
+
 SecurityContext link_context(const Header& header) noexcept {
   return SecurityContext{SecurityScope::Link, header.network, header.previous_hop,
                          header.next_hop, header.link_epoch};
@@ -194,6 +196,17 @@ SecurityContext end_context(const Header& header) noexcept {
   return SecurityContext{SecurityScope::EndToEnd, header.network, header.origin,
                          header.destination, header.end_epoch};
 }
+
+Status stamp_link_epoch(Header& header, SecurityProvider& security) noexcept {
+  return security.tx_epoch(SecurityScope::Link, header.next_hop, header.link_epoch);
+}
+
+Status stamp_end_epoch(Header& header, SecurityProvider& security) noexcept {
+  const SecurityContext context = end_context(header);
+  return security.tx_epoch(context.scope, context.receiver, header.end_epoch);
+}
+
+namespace {
 
 Status wrap_link(const Header& header,
                  ByteView link_plaintext,
@@ -268,6 +281,17 @@ Status encode_new(const PlainFrame& input,
   header.payload_length = static_cast<std::uint16_t>(input.payload_size);
   auto status = validate_header(header);
   if (!status) return status;
+
+  // sdk-v1/03 §8: the provider picks the epochs (a session provider's
+  // context ids; by default the caller's configured values, unchanged).
+  // Both are resolved before any counter is drawn, so a refusal
+  // (AuthRequired: no session yet) consumes nothing.
+  status = stamp_link_epoch(header, security);
+  if (!status) return status;
+  if ((header.flags & kFlagEndProtected) != 0) {
+    status = stamp_end_epoch(header, security);
+    if (!status) return status;
+  }
 
   status = security.next_counter(link_context(header), header.link_counter);
   if (!status) return status;
@@ -412,7 +436,11 @@ Status forward(const LinkOpenedFrame& input,
   header.link_epoch = link_epoch;
   --header.hop_remaining;
   header.remaining_deadline_ms = std::min(remaining_deadline_ms, header.remaining_deadline_ms);
-  auto status = security.next_counter(link_context(header), header.link_counter);
+  // `link_epoch` is the configured value; a session provider replaces it
+  // with the outgoing hop's context id (sdk-v1/03 §8) before any counter.
+  auto status = stamp_link_epoch(header, security);
+  if (!status) return status;
+  status = security.next_counter(link_context(header), header.link_counter);
   if (!status) return status;
   return wrap_link(header,
                    ByteView{input.protected_payload.data(), input.protected_payload_size},
@@ -444,6 +472,10 @@ Status seal_group(const PlainFrame& input, const NodeId local_node,
   header.hop_remaining = static_cast<std::uint8_t>(input.header.hop_remaining + 1U);
   header.link_counter = 0;
   auto status = validate_header(header);
+  if (!status) return status;
+  // The group context's epoch comes from the provider too (sdk-v1/03 §8),
+  // resolved before the end counter is drawn.
+  status = stamp_end_epoch(header, security);
   if (!status) return status;
   status = security.next_counter(end_context(header), header.end_counter);
   if (!status) return status;

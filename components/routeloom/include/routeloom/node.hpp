@@ -528,6 +528,22 @@ struct RouteScaleStats {
   std::uint64_t route_requests_dropped{0};  // invalid, duplicate, rate-limited or no path
 };
 
+// Provider-owned sessions (sdk-v1/03 §8–§9, plan P4-1). All zero with a
+// provider that does not own sessions (the default tx_epoch/context_state,
+// e.g. the development PSK provider). Saturating u32 totals.
+struct SessionStats {
+  // Jobs held because the provider refused tx_epoch() with AuthRequired and
+  // reported the context None or Establishing (counted once per job; the
+  // diagnostic SESSION_REQUIRED / SESSION_PENDING names the context peer).
+  std::uint32_t tx_deferred{0};
+  // Deferred jobs whose deadline passed before a session appeared: failed
+  // with SESSION_UNAVAILABLE instead of JOB_EXPIRED.
+  std::uint32_t tx_unavailable{0};
+  // Received frames whose link or end open returned AuthRequired (unknown
+  // context id, 03 §9); the provider's detail is still the diagnostic.
+  std::uint32_t rx_auth_required{0};
+};
+
 class MeshNode {
  public:
   MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
@@ -743,6 +759,7 @@ class MeshNode {
   bool group_member(GroupId group) const noexcept;
   std::size_t group_membership(GroupId* out, std::size_t capacity) const noexcept;
   const GroupStats& group_stats() const noexcept { return group_stats_; }
+  const SessionStats& session_stats() const noexcept { return session_stats_; }
   // Group lane occupancy (tests/diagnostics): relay/receiver trees in use.
   std::size_t group_trees_in_use() const noexcept { return group_trees_.size(); }
 
@@ -1208,6 +1225,9 @@ class MeshNode {
     // times in one pass.
     bool window_block_counted{false};
     bool obs_key_set{false};
+    // Held for a provider-owned session (sdk-v1/03 §9): the deferral was
+    // counted and diagnosed once; cleared when the job encodes.
+    bool session_deferred{false};
 
     void set_forwarded(const wire::LinkOpenedFrame& frame) noexcept {
       form = JobForm::Forwarded;
@@ -1486,6 +1506,11 @@ class MeshNode {
                          MonotonicMs now_ms) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
+  // True when an AuthRequired encode refusal is a missing/pending session
+  // (context_state None/Establishing): the job waits, deadline-bounded.
+  bool defer_for_session(TxJob& job) noexcept;
+  void note_rx_refusal(const Status& status, NodeId peer,
+                       const MessageId* message) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
   void resolve_radio_tx_result(std::uint64_t token, bool success,
                                MonotonicMs now_ms) noexcept;
@@ -2057,6 +2082,7 @@ class MeshNode {
   // Driver-queue age of the frame currently inside receive_impl — debited
   // from the forwarding budget by queue_forward (01 §lifetime).
   std::uint32_t rx_age_ms_{0};
+  SessionStats session_stats_{};
   // Latest wall time seen on the event path; observation timestamps use it
   // where the call site (e.g. delivery-state transitions) has no clock.
   MonotonicMs last_clock_ms_{0};

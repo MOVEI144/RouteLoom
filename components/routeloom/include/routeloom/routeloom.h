@@ -103,7 +103,10 @@ typedef enum rl_priority {
 typedef enum rl_security_scope {
   RL_SECURITY_LINK = 0,
   RL_SECURITY_END_TO_END = 1,
-  RL_SECURITY_GROUP = 2
+  RL_SECURITY_GROUP = 2,
+  /* Reserved (docs/design/sdk-v1/03-key-hierarchy.md §8): group-key
+     broadcast link scope. The node does not issue it yet; refuse it. */
+  RL_SECURITY_GROUP_LINK = 3
 } rl_security_scope_t;
 
 typedef struct rl_message_id {
@@ -238,6 +241,11 @@ typedef struct rl_radio_vtable {
   rl_status_code_t (*recover)(void* user);
 } rl_radio_vtable_t;
 
+/* The vtable has no session callbacks (SecurityProvider::tx_epoch /
+   context_state, docs/design/sdk-v1/03-key-hierarchy.md §8): a C provider
+   always seals under the configured link_epoch/end_epoch and is treated as
+   always having its keys. Session-owning providers are C++ only until an
+   extension carrying its own struct_size is added. */
 typedef struct rl_security_vtable {
   void* user;
   bool (*ready)(void* user);
