@@ -112,8 +112,13 @@ struct RouteAdvertisement {
   RouteMetric metric{kInfiniteRouteMetric};
 };
 
+// Route records are laid out largest-alignment first (no interior padding):
+// the table holds kMaxRouteEntries x kRouteCandidatesPerDestination of these
+// in static RAM (docs/design/sdk-v1/ram-budget.md).
 struct RouteCandidate {
   NodeId next_hop{kInvalidNodeId};
+  MonotonicMs learned_at_ms{0};
+  MonotonicMs expires_at_ms{0};
   RouteSequence sequence{0};
   RouteMetric metric{kInfiniteRouteMetric};
   // The metric the next hop advertised (without our link cost). Feasibility
@@ -121,8 +126,6 @@ struct RouteCandidate {
   // time — FD only tightens, so a feasible flag snapshotted at consider()
   // can silently go stale and select a route that loops.
   RouteMetric advertised{kInfiniteRouteMetric};
-  MonotonicMs learned_at_ms{0};
-  MonotonicMs expires_at_ms{0};
   // Unexpired infeasible candidates are kept (lease-renewed) so a SeqNoRequest
   // can still ride them; they are never selected for DATA forwarding.
   bool feasible{false};
@@ -329,16 +332,15 @@ class RouteTable {
     bool valid{false};
   };
 
+  // 8-byte members first, then the 4/2/1-byte tail (ram-budget.md): 216 B
+  // per entry instead of 256 B (LP64 and RISC-V/Xtensa).
   struct Entry {
     NodeId destination{kInvalidNodeId};
-    RouteGeneration generation{0};
-    FeasibleDistance feasible{};
     std::array<RouteCandidate, kRouteCandidatesPerDestination> candidates{};
     RouteSelection last_selected{};
     NodeId hold_next_hop{kInvalidNodeId};
     MonotonicMs hold_until_ms{0};
     MonotonicMs tombstone_expires_at_ms{0};
-    bool sequence_request_needed{false};
     // Committed next hop (03 §7): the selection DATA forwarding, the
     // advertised metric and FD updates are all generated from. It moves only
     // through the hysteresis rules in evaluate_entry — never on a bare
@@ -352,6 +354,9 @@ class RouteTable {
     MonotonicMs switch_hold_until_ms{0};
     // Last triggered pure-improvement advertisement for this destination.
     MonotonicMs improvement_ad_ms{0};
+    RouteGeneration generation{0};
+    FeasibleDistance feasible{};
+    bool sequence_request_needed{false};
     // Gateway-scoped profile bookkeeping (never a routing input): a finite
     // record for this destination went to our parent and has not been
     // retracted since — leaving the subtree must send a retraction upward.

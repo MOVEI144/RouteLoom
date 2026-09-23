@@ -449,9 +449,8 @@ std::uint16_t MeshNode::group_routed_subtree(const NodeId child, NodeId* ids,
 bool MeshNode::queue_group_copy(const wire::LinkOpenedFrame& frame, const GroupTree& tree,
                                 const NodeId child, const MonotonicMs now_ms) noexcept {
   TxJob job{};
-  job.form = JobForm::Forwarded;
+  job.set_forwarded(frame);
   job.owner = JobOwner::Group;
-  job.forwarded = frame;
   job.peer = child;
   // Per-hop reliability is the MAC acknowledgement plus bounded link
   // retries; the report is the end-to-end evidence (group-delivery.md §4).

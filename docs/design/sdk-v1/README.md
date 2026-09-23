@@ -17,7 +17,7 @@
 | [07 Host（KGuard）API・事務所tooling](07-host-api-tooling.md) | API1 verb、event、USB HostOps、authorityの永続化、routeloom-provisionの変更 |
 | [08 実装計画・試験・未決事項](08-implementation-plan.md) | PR単位の段階計画、host試験・golden vector・HIL、受入ID、製品責任者の判断が必要な事項 |
 
-同じKGuard要求から派生し、portable coreに実装済み（host試験済み、RF未認定）の設計：[100台・1 gateway向けの経路スケール設計](routing-scale.md)（issue #41）と、その木を使う[group／ALL配送と送信元ごとの順序](group-delivery.md)（ALARMの全台配送、群への表示更新、集約確認とrepair、ORDERED、USB HostOps 0x50〜0x52）。group配送はGKを使わず、開発PSKの`SecurityScope::Group`で保護する。
+同じKGuard要求から派生し、portable coreに実装済み（host試験済み、RF未認定）の設計：[100台・1 gateway向けの経路スケール設計](routing-scale.md)（issue #41）と、その木を使う[group／ALL配送と送信元ごとの順序](group-delivery.md)（ALARMの全台配送、群への表示更新、集約確認とrepair、ORDERED、USB HostOps 0x50〜0x52）。group配送はGKを使わず、開発PSKの`SecurityScope::Group`で保護する。これらの状態はすべて静的確保なので、[静的RAMの予算・role別profile・CI guard](ram-budget.md)でESP32-C3 imageの残量とCIの閾値（8 KiB）を管理する。
 
 既存文書との関係：[05 本番機器認証](../host-security-readiness/05-production-security.md)が選んだ **EDHOC（RFC 9528）method 0／suite 2** とExporter方針を引き継ぎ、[04 provisioning lifecycle](../sdk-completion/04-provisioning-lifecycle.md)の二重slot記録・manifest・失効の規律を再利用する。[06 membership admission](../autonomous-mesh/06-membership-admission.md)の6状態とRLD1許可kind集合{1,2,3,5,6}は変えない。
 

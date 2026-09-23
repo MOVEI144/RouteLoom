@@ -164,7 +164,7 @@ Wire v2 header（88B）・versionは不変。追加は2つのframe typeだけ：
 | 送信元stream（重複窓＋cursor） | 2 | 72B |
 | membership | 8 | 16B |
 
-`sizeof(MeshNode)`は64bit hostで**+4,944B**（leaf 98,952→103,896、relay 108,744→113,688、gateway 133,224→138,168）。unicastの順序用fieldを含む。32bit（i386 ABIで計測）ではMeshNode約102.4KB。`GroupChild`のflagはbit-field（24→16B）にしてある：ESP32-C3のbridge imageはstatic DRAM（.bss）が上限で、当初の構成では`bridge_node`（observe）が864B溢れた。開発PSKの`GroupReplayTable`は約204B（32bit）、USB bridgeの対応表は96B。`docs/reference/resource-profiles.json`の各profileに`group_delivery_state: 6656`を計上した。
+`sizeof(MeshNode)`は64bit hostで**+4,944B**（leaf 98,952→103,896、relay 108,744→113,688、gateway 133,224→138,168）。unicastの順序用fieldを含む。32bit（i386 ABIで計測）ではMeshNode約102.4KB。`GroupChild`のflagはbit-field（24→16B）にしてある：ESP32-C3のbridge imageはstatic DRAM（.bss）が上限で、当初の構成では`bridge_node`（observe）が864B溢れた。開発PSKの`GroupReplayTable`は約204B（32bit）、USB bridgeの対応表は96B。`docs/reference/resource-profiles.json`の各profileに`group_delivery_state: 6656`を計上した。その後のlayout整理で`MeshNode`は64bit relay 84,704B（RISC-V 83,160B）になった（[ram-budget.md](ram-budget.md)）。
 
 ## 11. Host API
 

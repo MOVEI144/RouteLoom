@@ -78,7 +78,9 @@ Status cobs_decode(const ByteView input, const MutableByteView out,
     if (written + chunk + (implicit_zero ? 1U : 0U) > out.size) {
       return Status::error(StatusCode::NoCapacity, "cobs decode overflow");
     }
-    if (chunk > 0) std::memcpy(out.data + written, input.data + index, chunk);
+    // memmove: an in-place decode (out aliases input) copies each chunk to
+    // an offset at or before its source.
+    if (chunk > 0) std::memmove(out.data + written, input.data + index, chunk);
     written += chunk;
     index = next;
     if (implicit_zero) {
@@ -97,12 +99,12 @@ Status encode_frame(const FrameKind kind, const std::uint16_t flags,
   if (body.size > kMaxBodySize || body.size > 0xFFFFU) {
     return Status::error(StatusCode::InvalidArgument, "FRAME_TOO_LARGE");
   }
-  if (out.data == nullptr || out.size < kMaxEncodedFrame) {
-    return Status::error(StatusCode::NoCapacity, "frame output too small");
-  }
   // The caller owns the decoded-staging buffer so this frame path carries
   // no multi-KB stack buffer on the (bounded) calling task.
   const std::size_t decoded_need = kHeaderSize + body.size + kCrcSize;
+  if (out.data == nullptr || out.size < encoded_frame_bound(decoded_need)) {
+    return Status::error(StatusCode::NoCapacity, "frame output too small");
+  }
   if (scratch.data == nullptr || scratch.size < decoded_need) {
     return Status::error(StatusCode::NoCapacity, "frame scratch too small");
   }
@@ -221,17 +223,20 @@ void StreamDecoder::push(const ByteView input, const MonotonicMs now_ms) noexcep
 }
 
 void StreamDecoder::finish_segment() noexcept {
+  // Decoded in place: the segment is consumed here, so the decoded frame
+  // (at most kMaxDecodedFrame bytes, as before) overwrites its own encoding
+  // instead of needing a second multi-KB buffer (ram-budget.md).
   std::size_t decoded_size = 0;
   Status status = cobs_decode(
       ByteView{pending_.data(), pending_size_},
-      MutableByteView{decoded_.data(), decoded_.size()}, decoded_size);
+      MutableByteView{pending_.data(), kMaxDecodedFrame}, decoded_size);
   pending_size_ = 0;
   if (!status) {
     sink_.on_stream_error(status);
     return;
   }
   UsbFrame frame{};
-  status = decode_frame(ByteView{decoded_.data(), decoded_size}, frame);
+  status = decode_frame(ByteView{pending_.data(), decoded_size}, frame);
   if (!status) {
     sink_.on_stream_error(status);
     return;

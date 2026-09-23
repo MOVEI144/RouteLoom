@@ -1220,6 +1220,83 @@ void test_peer_window_bounded() {
 
 }  // namespace
 
+// The node seals into ONE shared encode buffer (ram-budget.md), not one per
+// queued job. Driver back-pressure (WouldBlock) is not an attempt: the job
+// goes back to the head of its lane and, selected again before anything
+// else is sealed, hands the driver the very same sealed bytes (no new link
+// counter). A retry after an RF loss is resealed with a fresh counter.
+class BackpressureRadio final : public RadioPort {
+ public:
+  Status send(NodeId, std::uint64_t token, ByteView frame) noexcept override {
+    frames.emplace_back(frame.data, frame.data + frame.size);
+    if (blocks > 0) {
+      --blocks;
+      return Status::error(StatusCode::WouldBlock, "scripted driver full");
+    }
+    pending_token = token;
+    has_pending = true;
+    return Status::success();
+  }
+  Status recover() noexcept override { return Status::success(); }
+  // Completes the in-flight frame (if any); true when one was completed.
+  bool complete(MeshNode& node, MonotonicMs now, bool ok) {
+    if (!has_pending) return false;
+    has_pending = false;
+    node.on_radio_tx_result(pending_token, ok, now);
+    return true;
+  }
+  std::vector<std::vector<std::uint8_t>> frames;
+  int blocks{0};
+  std::uint64_t pending_token{0};
+  bool has_pending{false};
+};
+
+void test_driver_backpressure_reuses_sealed_frame() {
+  TestSecurity security;
+  CapturingObserver observer;
+  BackpressureRadio radio;
+  NodeConfig config{};
+  config.network = kNet;
+  config.node = 1;
+  config.message_session = 9;
+  config.boot_incarnation = 0xB001;
+  config.route_generation = 1;
+  config.link_epoch = 1;
+  config.end_epoch = 1;  // default max_link_attempts (2): one RF-loss retry
+  MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.start(0));
+  CHECK_OK(node.add_neighbor(2, 1, 0));
+  // Drain start-up control traffic (route advertisements) to an idle queue.
+  MonotonicMs now = 1;
+  for (int i = 0; i < 64; ++i) {
+    node.poll(now);
+    if (!radio.complete(node, now, true)) break;
+  }
+  CHECK(!radio.has_pending);
+  radio.frames.clear();
+
+  radio.blocks = 1;
+  SendOptions options{};
+  options.lifetime_ms = 30000;
+  MessageId id{};
+  CHECK_OK(node.send(2, payload_view(), options, now, id));
+  node.poll(now);
+  node.poll(now);
+  CHECK(radio.frames.size() == 2);
+  CHECK(radio.has_pending);
+  // Refused, then re-offered byte for byte: the same sealed frame.
+  CHECK(radio.frames.size() == 2 && radio.frames[0] == radio.frames[1]);
+
+  // RF loss: the retry is resealed (fresh link counter), never replayed.
+  CHECK(radio.complete(node, now, false));
+  for (MonotonicMs t = now; t < now + 2000 && radio.frames.size() < 3; t += 10) {
+    node.poll(t);
+  }
+  CHECK(radio.frames.size() == 3);
+  CHECK(radio.frames.size() == 3 && radio.frames[2] != radio.frames[1]);
+  CHECK(radio.frames.size() == 3 && radio.frames[2].size() == radio.frames[1].size());
+}
+
 int main() {
 #define RUN(fn)                                          \
   do {                                                   \
@@ -1253,6 +1330,8 @@ int main() {
   RUN(test_dedup_eviction_expired_then_resolved);
   RUN(test_scheduler_pool_saturation);
   RUN(test_peer_window_bounded);
+  // Driver back-pressure
+  RUN(test_driver_backpressure_reuses_sealed_frame);
   return failures == 0 ? (std::puts("RouteLoom fault-injection tests passed"), 0)
                        : (std::fprintf(stderr, "%d fault-injection checks failed\n",
                                        failures),

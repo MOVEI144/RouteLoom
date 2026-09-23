@@ -24,8 +24,14 @@ constexpr std::size_t kHeaderSize = 26;  // magic + version + kind + flags + ses
 constexpr std::size_t kCrcSize = 4;
 constexpr std::size_t kMaxDecodedFrame = 4096;
 constexpr std::size_t kMaxBodySize = kMaxDecodedFrame - kHeaderSize - kCrcSize;
-// Conservative upper bound: n + floor(n/254) + 2 including the delimiter.
-constexpr std::size_t kMaxEncodedFrame = kMaxDecodedFrame + (kMaxDecodedFrame / 254) + 2;
+// Conservative upper bound on the wire size of a frame whose decoded form
+// (header + body + CRC) is `decoded` bytes: n + floor(n/254) + 2 including
+// the delimiter. encode_frame needs exactly this much output space, so a
+// sender that never emits large bodies can stage a smaller buffer.
+constexpr std::size_t encoded_frame_bound(const std::size_t decoded) noexcept {
+  return decoded + (decoded / 254) + 2;
+}
+constexpr std::size_t kMaxEncodedFrame = encoded_frame_bound(kMaxDecodedFrame);
 // Encoded bytes buffered between delimiters before a frame is declared
 // overlength and the decoder enters bounded discard until the next delimiter.
 constexpr std::size_t kMaxPendingEncoded = kMaxDecodedFrame + 64;
@@ -69,15 +75,18 @@ struct UsbFrame {
 };
 
 // COBS encode/decode matching host/routeloom-protocol cobs_encode/cobs_decode
-// exactly. Output excludes the 0x00 delimiter.
+// exactly. Output excludes the 0x00 delimiter. cobs_decode may decode in
+// place: `out.data == input.data` is allowed (every output byte lands at or
+// before the input byte it came from).
 Status cobs_encode(ByteView input, MutableByteView out, std::size_t& written) noexcept;
 Status cobs_decode(ByteView input, MutableByteView out, std::size_t& written) noexcept;
 
 // Encodes one full wire frame (header + body + CRC, COBS, delimiter).
 // `scratch` stages the decoded (pre-COBS) bytes: it must hold
 // kHeaderSize + body.size + kCrcSize bytes and must not alias `body` or
-// `out`. Caller-owned so the staging buffer can live in .bss (a member of a
-// static bridge) instead of task stack — this runs on every emitted frame.
+// `out`. `out` must hold encoded_frame_bound() of that decoded size.
+// Caller-owned so the staging buffer can live in .bss (a member of a static
+// bridge) instead of task stack — this runs on every emitted frame.
 Status encode_frame(FrameKind kind, std::uint16_t flags, std::uint64_t session,
                     std::uint64_t request, ByteView body,
                     MutableByteView scratch, MutableByteView out,
@@ -88,7 +97,8 @@ Status encode_frame(FrameKind kind, std::uint16_t flags, std::uint64_t session,
 Status decode_frame(ByteView decoded, UsbFrame& out) noexcept;
 
 // Receives fully decoded frames and decode failures. `frame.body` is valid
-// only for the duration of on_frame.
+// only for the duration of on_frame, and it lives in the StreamDecoder's
+// buffer: a sink must not push() into the same decoder from inside on_frame.
 class UsbFrameSink {
  public:
   virtual ~UsbFrameSink() = default;
@@ -116,8 +126,11 @@ class StreamDecoder {
   void finish_segment() noexcept;
 
   UsbFrameSink& sink_;
+  // Encoded segment between delimiters; decoded in place at the delimiter,
+  // so the frame handed to the sink (body views included) lives here too.
   std::array<std::uint8_t, kMaxPendingEncoded> pending_{};
-  std::array<std::uint8_t, kMaxDecodedFrame> decoded_{};
+  static_assert(kMaxPendingEncoded >= kMaxDecodedFrame,
+                "in-place decode needs the decoded frame to fit");
   std::size_t pending_size_{0};
   MonotonicMs last_byte_ms_{0};
   bool discarding_{false};

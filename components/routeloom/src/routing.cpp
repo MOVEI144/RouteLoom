@@ -386,9 +386,9 @@ RouteUpdateResult RouteTable::consider(const RouteAdvertisement& advertisement,
   const bool existed = candidate->valid && candidate->next_hop == next_hop;
   // Infeasible candidates are recorded too (lease renewed): they carry
   // SeqNoRequests and become selectable again on a newer sequence.
-  *candidate = RouteCandidate{next_hop, advertisement.sequence, total,
-                              advertisement.metric, now_ms,
-                              now_ms + lifetime_ms, is_feasible, true};
+  *candidate = RouteCandidate{next_hop, now_ms, now_ms + lifetime_ms,
+                              advertisement.sequence, total,
+                              advertisement.metric, is_feasible, true};
   entry->tombstone_expires_at_ms = 0;
   if (is_feasible) {
     entry->sequence_request_needed = false;

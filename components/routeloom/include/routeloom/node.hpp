@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <new>
+#include <type_traits>
 
 #include "routeloom/congestion.hpp"
 #include "routeloom/endpoint_wire.hpp"
@@ -911,19 +913,12 @@ class MeshNode {
   static constexpr std::size_t kSeqnoStateCapacity = 32;
   static constexpr std::uint32_t kNoFeedbackSeq = 0xFFFFFFFFu;
 
+  // Members are grouped 8-byte first, then 4/2/1-byte (ram-budget.md): the
+  // fields of one mechanism are split across the groups, so each keeps its
+  // comment where it is declared. 160 B instead of 192 B (LP64 and RISC-V/Xtensa).
   struct Neighbor {
+    // --- 8-byte members ---
     NodeId node{kInvalidNodeId};
-    RouteMetric metric{1};      // nominal link cost (add_neighbor input)
-    RouteMetric link_cost{1};   // effective cost fed to RouteTable (03 §6)
-    RouteGeneration generation{0};  // last origin generation the peer self-advertised
-    std::uint8_t consecutive_failures{0};
-    std::uint8_t route_cursor{0};  // rotation cursor for periodic route dumps
-    // Congestion state (03-congestion.md §5): per-peer in-flight window and
-    // the consecutive-authenticated-accept streak that grows it. A window is
-    // NOT a memory-slot counter — freeing an awaiting slot never grows it.
-    std::uint8_t tx_window{kPeerWindowInitial};
-    std::uint8_t window_accepts{0};
-    bool busy_capable{false};  // peer proved/configured for Busy(20) feedback
     // Granted-capability state from a nonce-bound CapabilitiesReply: the
     // grant expires at cap_valid_until_ms under the peer's boot identity —
     // a reply can never install a permanent capability (04 §capabilities).
@@ -932,59 +927,18 @@ class MeshNode {
     // Renewal pacing: last completed/granted capability exchange; a new
     // query inside kCapQueryRenewalMs is refused.
     MonotonicMs last_cap_exchange_ms{0};
-    // Highest feedback sequence accepted from this peer; stale/replayed
-    // BUSY payloads are detected against it (FeedbackSequence ordering tag).
-    // feedback_seen is separate so a first seq equal to the sentinel value
-    // cannot disable ordering checks forever.
-    std::uint32_t last_feedback_seq{kNoFeedbackSeq};
-    bool feedback_seen{false};
-    // Per-peer exchange measurement (03 §6.1): decaying-window counters of
-    // eligible attempt work (every physical submission of a hop-accept
-    // exchange — failures included) and authenticated accepts. Below
-    // kExchangeMinAccepts the measured ratio is unused and cost stays
-    // nominal.
-    std::uint32_t exchange_work{0};
-    std::uint32_t exchange_accepts{0};
+    // Window anchor of exchange_work/exchange_accepts (below).
     MonotonicMs exchange_window_ms{0};
-    // Per-peer egress queue sojourn EWMA (03 §6.2): only OUR delay toward
-    // this peer may penalize the link cost. Stale samples read as 0. The
-    // EWMA halves once per observation window anchored at sojourn_window_ms
-    // (§3.4): sparse fresh samples cannot keep re-exposing an inflated
-    // average — after a burst the penalty converges within a few windows.
-    std::uint32_t queue_sojourn_ewma_ms{0};
-    std::uint32_t sojourn_samples{0};
+    // Sample/window anchors of queue_sojourn_ewma_ms (below).
     MonotonicMs last_sojourn_ms{0};
     MonotonicMs sojourn_window_ms{0};
-    // Per-peer HOP_ACCEPT round-trip EWMA (radio.md §8 adaptive RTO), in ms:
-    // MAC-accept -> authenticated accept arrival, measured on live
-    // exchanges only — a BUSY deferral's wait is peer-directed, never a
-    // link measurement. hop_rtt_samples == 0 means "unmeasured": the
-    // configured initial timeout applies.
-    std::uint32_t hop_rtt_ewma_ms{0};
-    std::uint32_t hop_rtt_samples{0};
-    // Evidence gate for the metric mirror (sdk-completion/03 §3.3): a window
-    // containing any Unknown-resolution attempt is dirty — dirty evidence may
-    // worsen link_cost but never improve it; cleared on the next window roll.
-    // metric_sources tracks which provenance classes wrote the mirror so a
-    // future remote-sample wiring cannot silently violate local-only input:
-    // bit0 = local exchange counters, bit1 = local queue-sojourn samples.
-    static constexpr std::uint8_t kMetricSourceLocalExchange = 1u << 0;
-    static constexpr std::uint8_t kMetricSourceLocalSojourn = 1u << 1;
-    bool metric_window_dirty{false};
-    std::uint8_t metric_sources{0};
     // Asymmetric slew state (§3.4): last time link_cost relaxed toward the
     // honest target; improvement steps are spaced one per observation window.
     MonotonicMs last_cost_relax_ms{0};
-    // Sustained authenticated-busy feedback (03 §7 severe-busy): set while
-    // matched BUSY deferrals or pressure hints keep arriving; cleared by an
-    // authenticated accept or when feedback goes stale past its TTL. It is
-    // a hint for the switch discipline, never a metric input. `busy_active`
-    // is the state — busy_since_ms==0 is a legitimate timestamp (t=0), not
-    // a "clear" sentinel.
-    bool busy_active{false};
+    // Sustained authenticated-busy feedback (03 §7 severe-busy): see
+    // busy_active below.
     MonotonicMs busy_since_ms{0};
     MonotonicMs last_busy_feedback_ms{0};
-    std::uint8_t last_pressure{0};
     // Gateway-scoped profile (routing-scale.md §3). child_until_ms: the peer
     // routes to a gateway through us (it poisoned our gateway record) — it
     // gets the periodic downward refresh and its routes travel upward.
@@ -995,6 +949,65 @@ class MeshNode {
     MonotonicMs interest_until_ms{0};
     MonotonicMs last_pull_answer_ms{0};
     NodeId pull_target{kInvalidNodeId};
+    // --- 4-byte members ---
+    RouteGeneration generation{0};  // last origin generation the peer self-advertised
+    // Highest feedback sequence accepted from this peer; stale/replayed
+    // BUSY payloads are detected against it (FeedbackSequence ordering tag).
+    // feedback_seen is separate so a first seq equal to the sentinel value
+    // cannot disable ordering checks forever.
+    std::uint32_t last_feedback_seq{kNoFeedbackSeq};
+    // Per-peer exchange measurement (03 §6.1): decaying-window counters of
+    // eligible attempt work (every physical submission of a hop-accept
+    // exchange — failures included) and authenticated accepts. Below
+    // kExchangeMinAccepts the measured ratio is unused and cost stays
+    // nominal.
+    std::uint32_t exchange_work{0};
+    std::uint32_t exchange_accepts{0};
+    // Per-peer egress queue sojourn EWMA (03 §6.2): only OUR delay toward
+    // this peer may penalize the link cost. Stale samples read as 0. The
+    // EWMA halves once per observation window anchored at sojourn_window_ms
+    // (§3.4): sparse fresh samples cannot keep re-exposing an inflated
+    // average — after a burst the penalty converges within a few windows.
+    std::uint32_t queue_sojourn_ewma_ms{0};
+    std::uint32_t sojourn_samples{0};
+    // Per-peer HOP_ACCEPT round-trip EWMA (radio.md §8 adaptive RTO), in ms:
+    // MAC-accept -> authenticated accept arrival, measured on live
+    // exchanges only — a BUSY deferral's wait is peer-directed, never a
+    // link measurement. hop_rtt_samples == 0 means "unmeasured": the
+    // configured initial timeout applies.
+    std::uint32_t hop_rtt_ewma_ms{0};
+    std::uint32_t hop_rtt_samples{0};
+    // --- 2-byte members ---
+    RouteMetric metric{1};      // nominal link cost (add_neighbor input)
+    RouteMetric link_cost{1};   // effective cost fed to RouteTable (03 §6)
+    // --- 1-byte members ---
+    std::uint8_t consecutive_failures{0};
+    std::uint8_t route_cursor{0};  // rotation cursor for periodic route dumps
+    // Congestion state (03-congestion.md §5): per-peer in-flight window and
+    // the consecutive-authenticated-accept streak that grows it. A window is
+    // NOT a memory-slot counter — freeing an awaiting slot never grows it.
+    std::uint8_t tx_window{kPeerWindowInitial};
+    std::uint8_t window_accepts{0};
+    bool busy_capable{false};  // peer proved/configured for Busy(20) feedback
+    bool feedback_seen{false};
+    // Evidence gate for the metric mirror (sdk-completion/03 §3.3): a window
+    // containing any Unknown-resolution attempt is dirty — dirty evidence may
+    // worsen link_cost but never improve it; cleared on the next window roll.
+    // metric_sources tracks which provenance classes wrote the mirror so a
+    // future remote-sample wiring cannot silently violate local-only input:
+    // bit0 = local exchange counters, bit1 = local queue-sojourn samples.
+    static constexpr std::uint8_t kMetricSourceLocalExchange = 1u << 0;
+    static constexpr std::uint8_t kMetricSourceLocalSojourn = 1u << 1;
+    bool metric_window_dirty{false};
+    std::uint8_t metric_sources{0};
+    // Sustained authenticated-busy feedback (03 §7 severe-busy): set while
+    // matched BUSY deferrals or pressure hints keep arriving; cleared by an
+    // authenticated accept or when feedback goes stale past its TTL. It is
+    // a hint for the switch discipline, never a metric input. `busy_active`
+    // is the state — busy_since_ms==0 is a legitimate timestamp (t=0), not
+    // a "clear" sentinel.
+    bool busy_active{false};
+    std::uint8_t last_pressure{0};
     bool pull_answer_pending{false};
     bool active{false};
   };
@@ -1014,27 +1027,22 @@ class MeshNode {
   // pinning hops[saturated_attempts % count].
   struct SeqnoState {
     NodeId destination{kInvalidNodeId};
-    RouteSequence requested_sequence{0};
     MonotonicMs next_request_ms{0};
     MonotonicMs last_sent_ms{0};
     MonotonicMs expires_at_ms{0};
+    RouteSequence requested_sequence{0};
     std::uint8_t attempts{0};
     std::uint8_t probe_cursor{0};
   };
 
+  // Laid out 8-byte members first, then the 4/1-byte tail (ram-budget.md):
+  // 136 B instead of 152 B on the RISC-V/Xtensa firmware ABIs.
   struct DedupEntry {
     MessageKey key{};
-    FrameType type{FrameType::Data};
-    std::uint8_t round{0};
-    // Capacity class (sdk-completion/02 §2.3): drives retention slack and
-    // eviction rank — Live/Terminal are never eviction victims.
-    DedupPhase phase{DedupPhase::Live};
     // Admission timestamp: the base of the kDedupHardCapMs retention cap —
     // refreshes on re-receipt can never push a record past it (02 §2.6).
     MonotonicMs first_seen_ms{0};
     MonotonicMs expires_at_ms{0};
-    bool delivered{false};
-    bool forwarded{false};
     // Transit correlation (01 §failure evidence): retained ONLY for accepted
     // transit work — the upstream neighbor that handed us the frame and the
     // fingerprint of its end-protected bytes, so a post-acceptance failure
@@ -1044,34 +1052,41 @@ class MeshNode {
     // destination — a TransitFailure report is only valid when it arrives
     // from THIS peer about THIS destination (01 §failure evidence).
     NodeId downstream_peer{kInvalidNodeId};
-    // The downstream's binding generation captured when the forward was
-    // physically submitted — a report is only valid against the attempt we
-    // actually made (dispatch may retarget the route after admission).
-    BindingGeneration downstream_binding{0};
     NodeId ref_destination{kInvalidNodeId};
-    std::array<std::uint8_t, 32> fingerprint{};
-    bool has_fingerprint{false};
     // A transit record that already emitted a TransitFailure: a re-received
     // duplicate re-emits the retained evidence instead of blindly re-ACKing
     // a dead job (01 §same-key-after-failure). The retained replay carries
     // the ORIGINAL claimed reporter/report_id verbatim — a relay may never
     // re-originate evidence under its own identity.
+    NodeId reported_reporter{kInvalidNodeId};
+    // Replay bounding: a duplicate storm cannot turn one retained failure
+    // into unbounded re-emissions (cap + minimum spacing).
+    MonotonicMs last_replay_ms{0};
+    std::array<std::uint8_t, 32> fingerprint{};
+    // The downstream's binding generation captured when the forward was
+    // physically submitted — a report is only valid against the attempt we
+    // actually made (dispatch may retarget the route after admission).
+    BindingGeneration downstream_binding{0};
+    std::uint32_t reported_id{0};
+    FrameType type{FrameType::Data};
+    std::uint8_t round{0};
+    // Capacity class (sdk-completion/02 §2.3): drives retention slack and
+    // eviction rank — Live/Terminal are never eviction victims.
+    DedupPhase phase{DedupPhase::Live};
+    bool delivered{false};
+    bool forwarded{false};
+    bool has_fingerprint{false};
     bool failure_reported{false};
     std::uint8_t reported_phase{0};
     std::uint8_t reported_reason{0};
-    NodeId reported_reporter{kInvalidNodeId};
-    std::uint32_t reported_id{0};
-    // Replay bounding: a duplicate storm cannot turn one retained failure
-    // into unbounded re-emissions (cap + minimum spacing).
     std::uint8_t failure_replays{0};
-    MonotonicMs last_replay_ms{0};
   };
   // sdk-completion/02 §2.4 budget: 152 B measured on host after the phase +
-  // first_seen_ms addition (144 B before). Xtensa may differ by alignment
-  // only — a larger entry shrinks real capacity silently, so growth is a
-  // deliberate, documented change.
+  // first_seen_ms addition (144 B before); the member order above packs it
+  // to 136 B on LP64 and on RISC-V/Xtensa (which align u64 to 8). A larger
+  // entry shrinks real capacity silently, so growth is a deliberate,
+  // documented change.
   static_assert(sizeof(DedupEntry) <= 176, "dedup entry size budget");
-
   struct Delivery {
     MessageId id{};
     NodeId destination{kInvalidNodeId};
@@ -1130,36 +1145,61 @@ class MeshNode {
                                        GatewayService, Config, Diagnostic,
                                        Applied, Group };
 
+  // Records below are laid out largest-alignment first: MeshNode is a static
+  // object in firmware and every byte of padding is .bss on the DRAM-bound
+  // ESP32-C3 images (docs/design/sdk-v1/ram-budget.md).
   struct AckKey {
-    FrameType accepted_type{FrameType::Data};
+    AckKey() noexcept = default;
+    AckKey(const FrameType type, const MessageKey& message,
+           const std::uint8_t ack_round) noexcept
+        : key(message), accepted_type(type), round(ack_round) {}
     MessageKey key{};
+    FrameType accepted_type{FrameType::Data};
     std::uint8_t round{0};
   };
 
   struct TxJob {
-    JobForm form{JobForm::Plain};
-    JobOwner owner{JobOwner::None};
-    wire::PlainFrame plain{};
-    wire::LinkOpenedFrame forwarded{};
+    // The frame a job carries: EITHER a locally built plain frame (sealed at
+    // encode) OR a link-opened frame being forwarded — never both — so the
+    // two share storage (ram-budget.md §3). `form` names the active member
+    // and every reader dispatches on it; set_forwarded() is the only way a
+    // fresh (plain) job becomes a forwarded one. Both frames begin with the
+    // same wire::Header (a common initial sequence).
+    union {
+      wire::PlainFrame plain{};
+      wire::LinkOpenedFrame forwarded;
+    };
     NodeId peer{kInvalidNodeId};
     AckKey ack{};
-    bool requires_hop_accept{false};
-    // RF-loss retry counter (03 §5 rf_attempts_max, per-job, never reset by
-    // peer/rate changes) and the bound for it.
-    std::uint8_t attempts{0};
-    std::uint8_t max_attempts{1};
     MonotonicMs deadline_ms{0};
     // Earliest select eligibility (radio.md §8 link-retry jitter): 0 on a
     // first transmission — retries stamp now+jitter so re-queued jobs yield
     // the scheduler until the decorrelation delay elapses.
     MonotonicMs not_before_ms{0};
-    wire::EncodedFrame encoded{};
-    bool encoded_valid{false};
-    // Scheduler metadata — assigned at admission, preserved across requeues.
-    Priority priority{Priority::Normal};       // origin DATA class input
-    std::uint32_t tx_cost{0};                  // estimated on-air bytes
     MonotonicMs enqueued_at_ms{0};             // queue-sojourn measurement base
+    // Observation identity stamped at physical submission (02 §2.3): the
+    // runtime-frozen binding/radio/channel tuple — submission, hop-accept
+    // and completion accounting share ONE key so counters can never split
+    // across a rebind or channel boundary mid-attempt.
+    ObservationKey obs_key{};
     TxJob* flow_next{nullptr};                 // intrusive per-flow list link
+    // Scheduler metadata — assigned at admission, preserved across requeues.
+    std::uint32_t tx_cost{0};                  // estimated on-air bytes
+    // Identity of this job's sealed frame in MeshNode::tx_encoded_ (0 = not
+    // encoded). The node keeps ONE encode buffer instead of one per job: a
+    // job's sealed frame is reused only while that buffer still holds it
+    // (the driver refused the frame and the job is selected again before
+    // any other job is sealed); otherwise the job is sealed afresh, with a
+    // fresh link counter, exactly like a retry.
+    std::uint32_t encoded_tag{0};
+    JobForm form{JobForm::Plain};
+    JobOwner owner{JobOwner::None};
+    bool requires_hop_accept{false};
+    // RF-loss retry counter (03 §5 rf_attempts_max, per-job, never reset by
+    // peer/rate changes) and the bound for it.
+    std::uint8_t attempts{0};
+    std::uint8_t max_attempts{1};
+    Priority priority{Priority::Normal};       // origin DATA class input
     // Attempt budget accounting (contracts.json congestion.*).
     std::uint8_t busy_readmissions{0};
     std::uint8_t physical_attempts{0};
@@ -1167,13 +1207,18 @@ class MeshNode {
     // select loop may revisit the same blocked flow up to kMaxSelectRounds
     // times in one pass.
     bool window_block_counted{false};
-    // Observation identity stamped at physical submission (02 §2.3): the
-    // runtime-frozen binding/radio/channel tuple — submission, hop-accept
-    // and completion accounting share ONE key so counters can never split
-    // across a rebind or channel boundary mid-attempt.
-    ObservationKey obs_key{};
     bool obs_key_set{false};
+
+    void set_forwarded(const wire::LinkOpenedFrame& frame) noexcept {
+      form = JobForm::Forwarded;
+      // Begins the forwarded member's lifetime; both members are trivially
+      // destructible, so the plain member needs no teardown.
+      ::new (static_cast<void*>(&forwarded)) wire::LinkOpenedFrame(frame);
+    }
   };
+  static_assert(std::is_trivially_copyable_v<wire::PlainFrame> &&
+                    std::is_trivially_copyable_v<wire::LinkOpenedFrame>,
+                "TxJob copies its frame union bytewise");
 
   // Bounded TX scheduler (03-congestion.md §4): a single fixed pool of TxJob
   // slots shared by a small reserved control lane (ACK/required responses)
@@ -1916,6 +1961,12 @@ class MeshNode {
   TxScheduler scheduler_{};
   FixedPool<AwaitingHop, kAwaitingHopCapacity> awaiting_hop_{};
   PhysicalInflight physical_{};
+  // The one sealed frame (TxJob::encoded_tag): only dispatch_next seals, it
+  // hands the driver one frame at a time and the driver copies it, so a
+  // per-job encode buffer would only ever be live for the selected job.
+  wire::EncodedFrame tx_encoded_{};
+  std::uint32_t tx_encoded_tag_{0};   // tag of the job tx_encoded_ holds; 0 = none
+  std::uint32_t last_encoded_tag_{0};
   // Single-slot submit identity handoff from the runtime (one physical
   // send in flight): obs_tx_submitted consumes it for the matching token.
   struct SubmitIdentity {
