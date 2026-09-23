@@ -225,3 +225,13 @@ target_link_libraries(routeloom_node_status_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_node_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_node_status_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_node_status_tests COMMAND routeloom_node_status_tests)
+
+# Bounded persistent peer state (issue #37, docs/design/sdk-v1/05-nvs-state-37.md
+# §4 / plan P0-2): TX counter sweep behind a durable witness, per-peer caps,
+# NVS entry budget arithmetic, and a 200-peer churn against a fixed-capacity
+# NVS model (no (key, counter) reuse, no replay re-acceptance, cap never
+# exceeded, boot-session partition never blocked).
+add_executable(routeloom_peer_state_tests test_peer_state.cpp)
+target_link_libraries(routeloom_peer_state_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_peer_state_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_peer_state_tests COMMAND routeloom_peer_state_tests)

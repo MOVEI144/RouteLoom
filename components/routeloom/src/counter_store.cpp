@@ -16,6 +16,11 @@ std::uint32_t counter_record_crc(const CounterRecord& record) noexcept {
 
 }  // namespace
 
+bool counter_record_intact(const CounterRecord& record) noexcept {
+  return record.crc == counter_record_crc(record) &&
+         record.layout == kCounterRecordLayout;
+}
+
 CounterLease::CounterLease(CounterStore& store, const std::uint32_t slot,
                            const std::uint32_t context_id, const std::uint32_t key_epoch,
                            const std::uint8_t direction, const std::uint32_t block_size) noexcept

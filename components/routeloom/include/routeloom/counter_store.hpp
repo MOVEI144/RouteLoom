@@ -28,6 +28,10 @@ struct CounterRecord {
 constexpr std::uint8_t kCounterRecordLayout = 2;
 static_assert(sizeof(CounterRecord) == 32, "counter record layout");
 
+// True when the record's CRC verifies and it carries the Wire v2 layout —
+// the only records whose key_epoch may be trusted (e.g. by a sweep).
+bool counter_record_intact(const CounterRecord& record) noexcept;
+
 class CounterStore {
  public:
   virtual ~CounterStore() = default;
