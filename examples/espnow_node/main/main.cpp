@@ -132,9 +132,10 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 }  // namespace
 
 extern "C" void app_main(void) {
-  // Identity, nonce reservations, replay state and message sessions share NVS.
-  // Never erase it automatically after a version/capacity error: that would
-  // silently turn a recoverable storage problem into key/counter rollback.
+  // Identity, nonce reservations, replay state and message sessions live in
+  // NVS. Never erase it automatically after a version/capacity error: that
+  // would silently turn a recoverable storage problem into key/counter
+  // rollback.
   const esp_err_t nvs_error = nvs_flash_init();
   if (nvs_error != ESP_OK) {
     ESP_LOGE(kTag,
@@ -144,8 +145,44 @@ extern "C" void app_main(void) {
     fail("NVS initialization failed");
   }
 
+  // The boot session (default "nvs" partition) advances before any
+  // per-peer security state is touched: that state lives in its own
+  // partition (issue #37, sdk-v1/05 §4 D2-a), so exhausting it can never
+  // block this write. Every boot — even one that fails below — consumes a
+  // session, which keeps TX epochs strictly fresh.
+  std::uint32_t message_session = 0;
+  auto status = next_boot_session(message_session);
+  if (!status) fail(status.detail);
+
+  const esp_err_t sec_nvs_error =
+      nvs_flash_init_partition(routeloom::espnow::kSecurityNvsPartition);
+  if (sec_nvs_error != ESP_OK) {
+    ESP_LOGE(kTag,
+             "security NVS partition '%s' init failed (%s); automatic erase "
+             "is disabled: flash the partition table (partitions.csv) and "
+             "erase NVS explicitly",
+             routeloom::espnow::kSecurityNvsPartition,
+             esp_err_to_name(sec_nvs_error));
+    fail("security NVS initialization failed");
+  }
+  if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
+                                              "rlcounter") ||
+      routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
+                                              "rlreplay")) {
+    ESP_LOGW(kTag,
+             "legacy rlcounter/rlreplay state in the default NVS partition "
+             "is orphaned (pre-rlsec layout); an explicit NVS erase reclaims "
+             "it");
+  }
+  std::uint32_t peer_capacity = 0;
+  status = routeloom::espnow::nvs_partition_peer_capacity(
+      routeloom::espnow::kSecurityNvsPartition,
+      routeloom::espnow::kNodeMaxPersistedPeers, peer_capacity);
+  if (!status) fail(status.detail);
+
   static NvsCounterStore counter_store;
-  auto status = counter_store.open("rlcounter");
+  status = counter_store.open("rlcounter",
+                              routeloom::espnow::kSecurityNvsPartition);
   if (!status) fail(status.detail);
 
   std::array<std::uint8_t,
@@ -155,12 +192,18 @@ extern "C" void app_main(void) {
     fail("invalid development key");
   }
   static DevelopmentPskSecurityProvider security;
-  status = security.initialize(key, counter_store, "rlreplay");
+  routeloom::espnow::PeerStateConfig peer_state{};
+  peer_state.replay_namespace = "rlreplay";
+  peer_state.partition = routeloom::espnow::kSecurityNvsPartition;
+  // TX link/end epochs below are the boot session: records of older epochs
+  // are dead and swept (witness first); a session at or below the witness
+  // fails closed here.
+  peer_state.tx_epoch = message_session;
+  peer_state.max_persisted_peers = peer_capacity;
+  status = security.initialize(key, counter_store, peer_state);
   if (!status) fail(status.detail);
-
-  std::uint32_t message_session = 0;
-  status = next_boot_session(message_session);
-  if (!status) fail(status.detail);
+  routeloom::espnow::log_peer_state(kTag, security,
+                                    routeloom::espnow::kSecurityNvsPartition);
 
   static LogObserver observer;
   EspNowRuntimeConfig config{};
