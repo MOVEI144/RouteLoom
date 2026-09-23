@@ -82,6 +82,9 @@ impl NvsEntry {
         match self.namespace {
             NVS_NAMESPACE_TRUST => Some(TRUST_STORE_SLOT_BYTES),
             NVS_NAMESPACE_CRED => Some(CREDENTIAL_SLOT_BYTES),
+            crate::sdkv1::rlsec::NVS_NAMESPACE_IDENTITY => {
+                Some(crate::sdkv1::identity::IDENTITY_SLOT_BYTES)
+            }
             _ => None,
         }
     }
@@ -95,6 +98,31 @@ impl NvsEntry {
         };
         format!("{}_{}.{extension}", self.namespace, self.key)
     }
+}
+
+/// ESP-IDF `nvs_partition_gen.py` input for `entries`: one `namespace` row
+/// whenever the namespace changes, blobs as `file,binary` rows naming
+/// [`NvsEntry::file_name`] (the generator resolves relative paths against
+/// its working directory — run it from the directory holding the files),
+/// u32 values inline. Keys and namespaces are the adapters' exact names.
+pub fn nvs_partition_csv(entries: &[NvsEntry]) -> String {
+    let mut out = String::from("key,type,encoding,value\n");
+    let mut namespace: Option<&str> = None;
+    for entry in entries {
+        if namespace != Some(entry.namespace) {
+            out.push_str(&format!("{},namespace,,\n", entry.namespace));
+            namespace = Some(entry.namespace);
+        }
+        match &entry.value {
+            NvsValue::Blob(_) => out.push_str(&format!(
+                "{},file,binary,{}\n",
+                entry.key,
+                entry.file_name()
+            )),
+            NvsValue::U32(value) => out.push_str(&format!("{},data,u32,{value}\n", entry.key)),
+        }
+    }
+    out
 }
 
 /// The complete manufactured set, in deterministic emission order:

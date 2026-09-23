@@ -13,13 +13,26 @@
 //! - [`revocation`] — RRS1 payload, AAD, Sign1 object, storage record.
 //! - [`resume`] — RLP1 resumption-cache slot.
 //!
+//! Office tooling (P7-1, 07 §6):
+//! - [`devca`] — `DeviceCaSigner` custody seam, dev `FileDeviceCaSigner`,
+//!   DevCert issue (possession-proven keys only) and verification.
+//! - [`pop`] — device-key proof of possession (challenge, sign, verify).
+//! - [`office`] — RLI1 assembly for injected keys, the identity bundle for
+//!   device-generated keys, inventory lines.
+//! - [`rlsec`] — the manufactured `rlsec` NVS set (`rlident` twin pair) and
+//!   its `nvs_partition_gen` CSV.
+//!
 //! The device-side dual-slot stores are C++ only; the host needs the
 //! byte formats, not the power-cut state machine.
 
 pub mod cert;
+pub mod devca;
 pub mod identity;
+pub mod office;
+pub mod pop;
 pub mod resume;
 pub mod revocation;
+pub mod rlsec;
 pub mod site;
 
 use crate::crc32::crc32_iso_hdlc;
