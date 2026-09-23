@@ -1,6 +1,6 @@
-# Wire v1 shared golden vectors
+# Wire v2 shared golden vectors
 
-Byte-exact test vectors for the frozen Wire v1 frame format
+Byte-exact test vectors for the frozen Wire v2 frame format
 (`components/routeloom/include/routeloom/wire.hpp`). Both the C++ harness
 (`tests/cpp/test_golden.cpp`) and the Rust harness
 (`host/routeloom-wire/tests/golden.rs`) load these files and must agree on

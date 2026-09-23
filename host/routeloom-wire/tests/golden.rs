@@ -109,8 +109,8 @@ fn header_from_fields(fields: &Fields) -> Header {
         },
         remaining_deadline_ms: u64_field(fields, "remaining_deadline_ms") as u32,
         original_lifetime_ms: u64_field(fields, "original_lifetime_ms") as u32,
-        link_epoch: u64_field(fields, "link_epoch") as u16,
-        end_epoch: u64_field(fields, "end_epoch") as u16,
+        link_epoch: u64_field(fields, "link_epoch") as u32,
+        end_epoch: u64_field(fields, "end_epoch") as u32,
         ..Header::default()
     }
 }
@@ -142,8 +142,8 @@ fn check_header(header: &Header, fields: &Fields) {
         header.original_lifetime_ms,
         u64_field(fields, "original_lifetime_ms") as u32
     );
-    assert_eq!(header.link_epoch, u64_field(fields, "link_epoch") as u16);
-    assert_eq!(header.end_epoch, u64_field(fields, "end_epoch") as u16);
+    assert_eq!(header.link_epoch, u64_field(fields, "link_epoch") as u32);
+    assert_eq!(header.end_epoch, u64_field(fields, "end_epoch") as u32);
 }
 
 #[test]
@@ -219,9 +219,9 @@ fn valid_vectors_encode_and_decode_byte_exact() {
             // The forwarder stamps its OWN link epoch; vectors that predate
             // the field share the origin epoch, so fall back to link_epoch.
             let forward_epoch = if fields.contains_key("fwd_link_epoch") {
-                u64_field(&fields, "fwd_link_epoch") as u16
+                u64_field(&fields, "fwd_link_epoch") as u32
             } else {
-                u64_field(&fields, "link_epoch") as u16
+                u64_field(&fields, "link_epoch") as u32
             };
             let expected_fwd = hex_decode(fwd_hex);
 

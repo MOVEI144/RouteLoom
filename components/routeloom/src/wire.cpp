@@ -74,10 +74,10 @@ Status write_header(const Header& header, MutableByteView output) noexcept {
   RL_WRITE(writer.write_u64(header.message.sequence));
   RL_WRITE(writer.write_u32(header.remaining_deadline_ms));
   RL_WRITE(writer.write_u32(header.original_lifetime_ms));
-  RL_WRITE(writer.write_u16(header.link_epoch));
-  RL_WRITE(writer.write_u16(header.end_epoch));
-  RL_WRITE(writer.write_u64(header.link_counter));
-  RL_WRITE(writer.write_u64(header.end_counter));
+  RL_WRITE(writer.write_u32(header.link_epoch));
+  RL_WRITE(writer.write_u32(header.end_epoch));
+  RL_WRITE(writer.write_u48(header.link_counter));
+  RL_WRITE(writer.write_u48(header.end_counter));
 #undef RL_WRITE
   if (writer.size() != kHeaderSize) {
     return Status::error(StatusCode::InternalError, "wire header size mismatch");
@@ -118,10 +118,10 @@ Status read_header(ByteView encoded, Header& header) noexcept {
   RL_READ(reader.read_u64(header.message.sequence));
   RL_READ(reader.read_u32(header.remaining_deadline_ms));
   RL_READ(reader.read_u32(header.original_lifetime_ms));
-  RL_READ(reader.read_u16(header.link_epoch));
-  RL_READ(reader.read_u16(header.end_epoch));
-  RL_READ(reader.read_u64(header.link_counter));
-  RL_READ(reader.read_u64(header.end_counter));
+  RL_READ(reader.read_u32(header.link_epoch));
+  RL_READ(reader.read_u32(header.end_epoch));
+  RL_READ(reader.read_u48(header.link_counter));
+  RL_READ(reader.read_u48(header.end_counter));
 #undef RL_READ
   if (magic != kMagic || major != kMajor || minor > kMinor || reserved != 0) {
     return Status::error(StatusCode::ProtocolError, "unsupported wire header");
@@ -161,8 +161,8 @@ Status make_end_aad(const Header& header,
   RL_WRITE(writer.write_u32(header.message.session));
   RL_WRITE(writer.write_u64(header.message.sequence));
   RL_WRITE(writer.write_u32(header.original_lifetime_ms));
-  RL_WRITE(writer.write_u16(header.end_epoch));
-  RL_WRITE(writer.write_u64(header.end_counter));
+  RL_WRITE(writer.write_u32(header.end_epoch));
+  RL_WRITE(writer.write_u48(header.end_counter));
   RL_WRITE(writer.write_u16(header.payload_length));
 #undef RL_WRITE
   length = writer.size();
@@ -227,6 +227,10 @@ Status validate_header(const Header& header) noexcept {
   }
   if ((header.flags & ~kFlagEndProtected) != 0) {
     return Status::error(StatusCode::ProtocolError, "unknown wire flags");
+  }
+  if (header.link_counter > kMaxCryptoCounter ||
+      header.end_counter > kMaxCryptoCounter) {
+    return Status::error(StatusCode::InvalidArgument, "crypto counter exceeds 48 bits");
   }
   if (header.original_lifetime_ms == 0 || header.remaining_deadline_ms > header.original_lifetime_ms) {
     return Status::error(StatusCode::InvalidArgument, "invalid lifetime");
@@ -356,7 +360,7 @@ Status open_end(const LinkOpenedFrame& input,
 Status forward(const LinkOpenedFrame& input,
                const NodeId local_node,
                const NodeId next_hop,
-               const std::uint16_t link_epoch,
+               const std::uint32_t link_epoch,
                const std::uint32_t remaining_deadline_ms,
                SecurityProvider& security,
                EncodedFrame& output) noexcept {

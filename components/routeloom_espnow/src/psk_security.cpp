@@ -15,9 +15,10 @@ constexpr psa_algorithm_t kAeadAlgorithm =
 constexpr psa_algorithm_t kDerivationAlgorithm =
     PSA_ALG_HMAC(PSA_ALG_SHA_256);
 
-void append_u16(std::uint8_t*& out, const std::uint16_t value) noexcept {
-  *out++ = static_cast<std::uint8_t>(value >> 8U);
-  *out++ = static_cast<std::uint8_t>(value);
+void append_u32(std::uint8_t*& out, const std::uint32_t value) noexcept {
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    *out++ = static_cast<std::uint8_t>(value >> shift);
+  }
 }
 
 void append_u64(std::uint8_t*& out, const std::uint64_t value) noexcept {
@@ -134,13 +135,13 @@ bool DevelopmentPskSecurityProvider::same_context(
 Status DevelopmentPskSecurityProvider::derive_key(
     const SecurityContext& context,
     std::array<std::uint8_t, 32>& key) const noexcept {
-  std::array<std::uint8_t, 1 + 8 + 8 + 8 + 2> info{};
+  std::array<std::uint8_t, 1 + 8 + 8 + 8 + 4> info{};
   std::uint8_t* cursor = info.data();
   *cursor++ = static_cast<std::uint8_t>(context.scope);
   append_u64(cursor, context.network);
   append_u64(cursor, context.sender);
   append_u64(cursor, context.receiver);
-  append_u16(cursor, context.epoch);
+  append_u32(cursor, context.epoch);
   return compute_hmac_sha256(master_key_, ByteView{info.data(), info.size()},
                              key);
 }
@@ -151,11 +152,16 @@ void DevelopmentPskSecurityProvider::make_nonce(
   nonce[0] = static_cast<std::uint8_t>(context.scope);
   nonce[1] =
       static_cast<std::uint8_t>(context.sender < context.receiver ? 0U : 1U);
-  nonce[2] = static_cast<std::uint8_t>(context.epoch >> 8U);
-  nonce[3] = static_cast<std::uint8_t>(context.epoch);
-  for (int index = 0; index < 8; ++index) {
-    nonce[4 + index] =
-        static_cast<std::uint8_t>(counter >> (56 - index * 8));
+  // Wire v2: scope u8 | direction u8 | epoch u32 | counter u48. Counters
+  // are bounded by kMaxCryptoCounter, so the 48-bit field is lossless and
+  // (context, epoch, counter) stays unique per key.
+  for (int index = 0; index < 4; ++index) {
+    nonce[2 + index] =
+        static_cast<std::uint8_t>(context.epoch >> (24 - index * 8));
+  }
+  for (int index = 0; index < 6; ++index) {
+    nonce[6 + index] =
+        static_cast<std::uint8_t>(counter >> (40 - index * 8));
   }
 }
 

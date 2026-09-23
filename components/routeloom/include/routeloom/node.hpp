@@ -20,12 +20,12 @@ struct NodeConfig {
   NetworkId network{0};
   NodeId node{kInvalidNodeId};
   std::uint32_t message_session{0};
-  std::uint16_t link_epoch{1};
-  std::uint16_t end_epoch{1};
+  std::uint32_t link_epoch{1};
+  std::uint32_t end_epoch{1};
   // Origin generation for this node's own route source. Must be persisted
   // monotonic and incremented on every boot; a restarted node advertises a
   // higher generation so peers discard its previous-incarnation route state.
-  std::uint16_t route_generation{1};
+  std::uint32_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
   // §14 management airtime budget gate (03-congestion.md §8, radio.md

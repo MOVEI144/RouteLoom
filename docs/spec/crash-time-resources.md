@@ -64,11 +64,10 @@ Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transaction�
 
 ## 7. 寿命資源の既知上限（CORE_FIXED_250 prototype、未解決）
 
-次の上限は現行実装の性質であり、設計変更（G-SEC／G-POWERで扱う）まで解消しない。配備判断の前提として明記する。数値はissueの概算で、実機計測ではない。
+epoch／route generationの起動回数予算（旧#29/#48）はWire v2で32bit化して解消した（32bit boot sessionから直接導出、1分周期wakeでも約8,000年）。次の上限は現行実装の性質であり、設計変更（G-SEC／G-POWERで扱う）まで解消しない。配備判断の前提として明記する。数値はissueの概算で、実機計測ではない。
 
 | 資源 | 現行の上限 | 主因 | 追跡 |
 |---|---|---|---|
-| epoch／route generation | 起動（deep-sleep wakeを含む）ごとに16bit値を1消費。65,535回の起動でwrapし、ピアのreplay floor・route tableと自身のTX counter leaseが当該ノードを恒久拒否する。1分周期wakeなら約45日 | Wire v1のepochがu16、boot sessionから導出 | #29、#48 |
 | NVS entry数 | ピアごとのcounter lease／replay floor／windowキーに削除経路がない。既定24KiB NVSで累計12〜38ピアに達すると新規通信とboot session書込が失敗し得る | 鍵とcounterの削除は再ハンドシェイク設計が前提 | #37 |
 | flash書込回数 | 認証済み受信frameごとにreplay windowをcommit（終端では最大2 commit）。TX counterは256枚ごと、context溢れ時はframeごと。既定NVSでは持続10 frame/sで約1ヶ月の概算 | fail-closedなreplay永続化 | #30、#57 |
 | remote config | 受理1件≈7〜8 commit。rate上限（1/min＋burst1）で連続運用すると摩耗寿命は概算1〜2年。人手運用なら問題にならない | ConfigJournalの2スロット耐電断commit | #57 |

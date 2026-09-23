@@ -194,14 +194,15 @@ fn receipt_payload(
 // Wire v1 route record: destination(8) + origin generation(2) +
 // sequence(2) + metric(2) = 14 bytes.
 fn route_update_payload() -> Vec<u8> {
-    let mut payload = Vec::with_capacity(29);
+    // Wire v2 record: destination u64 | generation u32 | sequence u16 | metric u16.
+    let mut payload = Vec::with_capacity(33);
     payload.push(2_u8); // record count
     payload.extend_from_slice(&2_u64.to_be_bytes()); // self: destination 2
-    payload.extend_from_slice(&1_u16.to_be_bytes()); // generation
+    payload.extend_from_slice(&1_u32.to_be_bytes()); // generation
     payload.extend_from_slice(&0_u16.to_be_bytes()); // sequence
     payload.extend_from_slice(&0_u16.to_be_bytes()); // metric
     payload.extend_from_slice(&3_u64.to_be_bytes()); // destination 3
-    payload.extend_from_slice(&1_u16.to_be_bytes()); // generation
+    payload.extend_from_slice(&1_u32.to_be_bytes()); // generation
     payload.extend_from_slice(&101_u16.to_be_bytes());
     payload.extend_from_slice(&10_u16.to_be_bytes());
     payload
@@ -430,12 +431,25 @@ fn main() {
         &old_version,
     );
 
+    let mut wire_v1 = base.clone();
+    wire_v1[2] = 1;
+    wire_v1[3] = 0;
+    write_invalid(
+        &invalid_dir,
+        "wire_v1_frame",
+        "Wire v1 (16-bit epoch) frame must be rejected by a v2 decoder",
+        "link",
+        2,
+        None,
+        &wire_v1,
+    );
+
     let mut future_version = base.clone();
-    future_version[2] = 2;
+    future_version[2] = 3;
     write_invalid(
         &invalid_dir,
         "future_version",
-        "unsupported major version 2",
+        "unsupported major version 3",
         "link",
         2,
         None,

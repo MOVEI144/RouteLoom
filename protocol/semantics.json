@@ -135,8 +135,8 @@
     {"field": "origin_message_session", "bytes": 4},
     {"field": "message_sequence", "bytes": 8},
     {"field": "original_lifetime", "bytes": 4},
-    {"field": "end_epoch", "bytes": 2},
-    {"field": "end_counter", "bytes": 8},
+    {"field": "end_epoch", "bytes": 4},
+    {"field": "end_counter", "bytes": 6},
     {"field": "payload_length", "bytes": 2}
   ],
   "hop_mutable": [

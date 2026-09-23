@@ -192,6 +192,12 @@ std::uint64_t header_u64(const wire::EncodedFrame& frame, const std::size_t offs
   return value;
 }
 
+std::uint64_t header_u48(const wire::EncodedFrame& frame, const std::size_t offset) {
+  std::uint64_t value = 0;
+  for (int i = 0; i < 6; ++i) value = (value << 8U) | frame.bytes[offset + i];
+  return value;
+}
+
 // --- Task 1: hop/end key separation ---------------------------------------
 
 void test_scope_separation_on_wire() {
@@ -288,8 +294,8 @@ void test_counters_independent_of_message_id() {
   CHECK(first.size == second.size);
   CHECK(std::memcmp(first.bytes.data(), second.bytes.data(), first.size) != 0);
   CHECK(header_u64(first, 52) == 42 && header_u64(second, 52) == 42);  // sequence
-  CHECK(header_u64(first, 72) == 0 && header_u64(second, 72) == 1);    // link counter
-  CHECK(header_u64(first, 80) == 0 && header_u64(second, 80) == 1);    // end counter
+  CHECK(header_u48(first, 76) == 0 && header_u48(second, 76) == 1);    // link counter
+  CHECK(header_u48(first, 82) == 0 && header_u48(second, 82) == 1);    // end counter
 }
 
 // --- Task 4: replay persistence under power cuts ---------------------------
@@ -726,9 +732,57 @@ void test_secure_clear() {
   routeloom::secure_clear(nullptr, 0);  // null + zero size is a no-op
 }
 
+
+// Issue #29/#48 (Wire v2): epochs are 32-bit, so a node that has booted more
+// than 65,535 times keeps working. v1 wrapped the u16 epoch 0xFFFF -> 1,
+// after which every peer's replay floor rejected the node forever and its
+// own TX counter lease refused the "older" epoch (self-bricking). Walk one
+// peer pair across the old wrap point, one epoch per simulated boot.
+void test_epochs_survive_past_u16_boot_budget() {
+  MemoryCounterStore counters;
+  FlakyReplayStore replay;
+  std::uint64_t value = 0;
+  for (std::uint32_t epoch = 65530; epoch <= 65542; ++epoch) {
+    // Sender side: each boot opens a fresh lease for the new epoch on the
+    // same slot. A regressed epoch would be refused as Conflict.
+    CounterLease lease(counters, 1, 99, epoch, 0, 4);
+    CHECK_OK(lease.initialize());
+    CHECK_OK(lease.next(value));
+    CHECK(value == 0);  // epoch-scoped counter space restarts
+    // Receiver side: the floor ratchets to the new epoch and accepts it.
+    ReplayGuard guard(replay);
+    ReplayGuard::Window window{};
+    SecurityContext ctx = kCtx;
+    ctx.epoch = epoch;
+    CHECK_OK(guard.open_context(ctx, window));
+    CHECK_OK(guard.accept(window, value));
+  }
+  // Far past the old budget, in one jump (a long-lived node).
+  CounterLease far(counters, 1, 99, 1000000, 0, 4);
+  CHECK_OK(far.initialize());
+  CHECK_OK(far.next(value));
+  ReplayGuard guard(replay);
+  ReplayGuard::Window window{};
+  SecurityContext ctx = kCtx;
+  ctx.epoch = 1000000;
+  CHECK_OK(guard.open_context(ctx, window));
+  CHECK_OK(guard.accept(window, value));
+  // Anti-replay still holds: an epoch behind the floor — including the
+  // value a v1 wrap would have produced — is rejected, not resurrected.
+  for (const std::uint32_t stale : {1U, 65535U, 999999U}) {
+    SecurityContext old = kCtx;
+    old.epoch = stale;
+    ReplayGuard::Window w{};
+    CHECK(guard.open_context(old, w).code == StatusCode::ReplayRejected);
+    CounterLease back(counters, 1, 99, stale, 0, 4);
+    CHECK(back.initialize().code == StatusCode::Conflict);
+  }
+}
+
 }  // namespace
 
 int main() {
+  test_epochs_survive_past_u16_boot_budget();
   test_scope_separation_on_wire();
   test_scope_keys_not_interchangeable();
   test_link_open_is_not_origin_verification();

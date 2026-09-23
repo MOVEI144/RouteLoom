@@ -364,6 +364,6 @@ int main() {
     std::fprintf(stderr, "%d golden checks failed\n", failures);
     return 1;
   }
-  std::puts("RouteLoom wire v1 golden tests passed");
+  std::puts("RouteLoom wire v2 golden tests passed");
   return 0;
 }

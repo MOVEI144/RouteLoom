@@ -492,11 +492,11 @@ Status app_result_status_decode(ByteView encoded, AppResultStatus& out) noexcept
 
 // APPLIED request body shape inside an end-protected DATA frame:
 // execution_lease 16B || user payload (0..kAppliedUserPayloadMax).
-// Lease: magic u16=0x4c01 | message_session u32 | end_epoch u16 |
-// boot_incarnation u64. The magic makes a computed lease never all-zero, so an
-// all-zero lease on the wire is unambiguously "no assertion" and refuses.
+// Lease (Wire v2): message_session u32 | end_epoch u32 | boot_incarnation u64.
+// message_session is never zero (NodeConfig validation), so a computed lease
+// is never all-zero and an all-zero lease on the wire is unambiguously "no
+// assertion" and refuses.
 constexpr std::size_t kAppliedLeaseBytes = 16;
-constexpr std::uint16_t kAppliedLeaseMagic = 0x4c01;
 constexpr std::size_t kAppliedUserPayloadMax = kMaxApplicationPayload - kAppliedLeaseBytes;  // 112
 
 // request_digest (§1.2): SHA-256 over

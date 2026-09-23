@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define RL_ABI_VERSION 1u
+#define RL_ABI_VERSION 2u  /* 2: Wire v2 — 32-bit epochs and route generation */
 #define RL_MAX_APPLICATION_PAYLOAD 128u
 #define RL_MAX_ESPNOW_BODY 250u
 #define RL_AEAD_TAG_SIZE 16u
@@ -107,7 +107,7 @@ typedef struct rl_security_context {
   rl_network_id_t network;
   rl_node_id_t sender;
   rl_node_id_t receiver;
-  uint16_t epoch;
+  uint32_t epoch;
 } rl_security_context_t;
 
 typedef struct rl_node_config {
@@ -116,8 +116,8 @@ typedef struct rl_node_config {
   rl_network_id_t network;
   rl_node_id_t node;
   uint32_t message_session;
-  uint16_t link_epoch;
-  uint16_t end_epoch;
+  uint32_t link_epoch;
+  uint32_t end_epoch;
   uint32_t route_advertisement_period_ms;
   uint32_t route_lifetime_ms;
   uint32_t hop_accept_timeout_ms;
@@ -125,7 +125,7 @@ typedef struct rl_node_config {
   uint8_t max_link_attempts;
   uint8_t max_end_to_end_rounds;
   /* Origin generation of this node's route source; persisted monotonic, +1 per boot. */
-  uint16_t route_generation;
+  uint32_t route_generation;
   /* Nonzero: the §14 management airtime budget gate applies (calibrated
      profile only — see NodeConfig::control_budget_gate_enabled). */
   uint8_t control_budget_gate_enabled;

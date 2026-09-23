@@ -350,6 +350,7 @@ void test_counter_midlease_slot_revalidation() {
   rewound.key_epoch = 1;
   rewound.high_water_exclusive = 4;
   rewound.generation = 99;
+  rewound.layout = kCounterRecordLayout;
   rewound.crc = record_crc(rewound);
   store.plant(7, rewound);
   CHECK_OK(stale.next(value)); CHECK(value == 9);   // committed block drains
@@ -364,37 +365,40 @@ void test_counter_midlease_slot_revalidation() {
   rekeyed.key_epoch = 2;
   rekeyed.high_water_exclusive = 40;
   rekeyed.generation = 100;
+  rekeyed.layout = kCounterRecordLayout;
   rekeyed.crc = record_crc(rekeyed);
   store.plant(7, rekeyed);
   CHECK(stale.next(value).code == StatusCode::Conflict);
 }
 
-// At the u64 ceiling the lease must exhaust, never wrap to 0 — a wrapped
-// high-water would reissue the entire counter space under the same epoch.
+// At the u48 ceiling (kMaxCryptoCounter, the Wire v2 counter width) the
+// lease must exhaust, never wrap — a wrapped high-water would reissue the
+// entire counter space under the same epoch.
 void test_counter_exhaustion_never_wraps() {
   TornCounterStore store;
   CounterRecord seeded{};
   seeded.context_id = 99;
   seeded.key_epoch = 1;
-  seeded.high_water_exclusive = UINT64_MAX - 1;
+  seeded.high_water_exclusive = kMaxCryptoCounter;
   seeded.generation = 7;
+  seeded.layout = kCounterRecordLayout;
   seeded.crc = record_crc(seeded);
   store.plant(3, seeded);
 
-  // A 4-wide block cannot fit: end_ = MAX-1 would overflow the mark.
+  // A 4-wide block cannot fit: issued values must stay <= kMaxCryptoCounter.
   CounterLease wide(store, 3, 99, 1, 0, 4);
   CHECK_OK(wide.initialize());
   std::uint64_t value = 0;
   CHECK(wide.next(value).code == StatusCode::CounterExhausted);
 
-  // A 1-wide block fits exactly once: end_ reaches MAX, issuing MAX-1.
+  // A 1-wide block fits exactly once, issuing kMaxCryptoCounter itself.
   CounterLease tight(store, 3, 99, 1, 0, 1);
   CHECK_OK(tight.initialize());
   CHECK_OK(tight.next(value));
-  CHECK(value == UINT64_MAX - 1);
+  CHECK(value == kMaxCryptoCounter);
   CHECK(tight.next(value).code == StatusCode::CounterExhausted);
   CHECK(tight.next(value).code == StatusCode::CounterExhausted);
-  CHECK(value == UINT64_MAX - 1);  // failures never write the output
+  CHECK(value == kMaxCryptoCounter);  // failures never write the output
 }
 
 // A load failure inside the shared-slot revalidation propagates and issues
@@ -476,6 +480,7 @@ void test_replay_foreign_floor_record() {
   foreign.minimum_epoch = 1;
   foreign.initialized = 1;
   foreign.generation = 9;
+  foreign.layout = kReplayRecordLayout;
   foreign.crc = record_crc(foreign);
   store.plant_floor(ReplayGuard::floor_slot(ctx), foreign);
 
@@ -848,13 +853,16 @@ void test_neighbor_admission_reclaims_tombstone() {
   world.run(400);
 
   // Fill node 1's route table (128 entries) with phantom destinations
-  // learned from neighbor 2 — wire records are
-  // dest u64 | generation u16 | sequence u16 | metric u16, 9 per frame.
-  constexpr std::size_t kRecordsPerFrame = 9;
-  constexpr std::size_t kRecordBytes = 14;
+  // learned from neighbor 2 — Wire v2 records are
+  // dest u64 | generation u32 | sequence u16 | metric u16, 7 per frame.
+  constexpr std::size_t kRecordsPerFrame = 7;
+  constexpr std::size_t kRecordBytes = 16;
   std::uint64_t wire_seq = 1;
   NodeId phantom = 0x1000;
-  while (world.at(1)->routes().size() < kMaxRouteEntries) {
+  // Bounded: a rejected record format must fail the test, never hang it.
+  for (int guard = 0;
+       guard < 1000 && world.at(1)->routes().size() < kMaxRouteEntries;
+       ++guard) {
     const std::size_t n = std::min<std::size_t>(
         kRecordsPerFrame, kMaxRouteEntries - world.at(1)->routes().size());
     std::array<std::uint8_t, 1 + kRecordsPerFrame * kRecordBytes> body{};
@@ -862,7 +870,7 @@ void test_neighbor_admission_reclaims_tombstone() {
     CHECK_OK(writer.write_u8(static_cast<std::uint8_t>(n)));
     for (std::size_t i = 0; i < n; ++i) {
       CHECK_OK(writer.write_u64(phantom++));
-      CHECK_OK(writer.write_u16(1));   // generation
+      CHECK_OK(writer.write_u32(1));   // generation
       CHECK_OK(writer.write_u16(1));   // sequence
       CHECK_OK(writer.write_u16(10));  // metric
     }

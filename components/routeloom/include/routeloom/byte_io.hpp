@@ -17,6 +17,8 @@ class ByteWriter {
   Status write_u16(std::uint16_t value) noexcept;
   Status write_u32(std::uint32_t value) noexcept;
   Status write_u64(std::uint64_t value) noexcept;
+  // 48-bit big-endian; InvalidArgument when value exceeds 2^48-1.
+  Status write_u48(std::uint64_t value) noexcept;
   Status write_bytes(ByteView value) noexcept;
 
   std::size_t size() const noexcept { return offset_; }
@@ -35,6 +37,7 @@ class ByteReader {
   Status read_u16(std::uint16_t& value) noexcept;
   Status read_u32(std::uint32_t& value) noexcept;
   Status read_u64(std::uint64_t& value) noexcept;
+  Status read_u48(std::uint64_t& value) noexcept;
   Status read_bytes(MutableByteView target) noexcept;
 
   std::size_t remaining() const noexcept { return source_.size - offset_; }

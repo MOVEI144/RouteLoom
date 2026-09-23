@@ -42,6 +42,18 @@ Status ByteWriter::write_u64(const std::uint64_t value) noexcept {
   return Status::success();
 }
 
+Status ByteWriter::write_u48(const std::uint64_t value) noexcept {
+  if (value > 0xFFFFFFFFFFFFULL) {
+    return Status::error(StatusCode::InvalidArgument, "value exceeds 48 bits");
+  }
+  const auto status = reserve(6);
+  if (!status) return status;
+  for (int shift = 40; shift >= 0; shift -= 8) {
+    target_.data[offset_++] = static_cast<std::uint8_t>((value >> shift) & 0xFFU);
+  }
+  return Status::success();
+}
+
 Status ByteWriter::write_bytes(const ByteView value) noexcept {
   if (value.size > 0 && value.data == nullptr) {
     return Status::error(StatusCode::InvalidArgument, "null byte source");
@@ -89,6 +101,14 @@ Status ByteReader::read_u64(std::uint64_t& value) noexcept {
   if (!status) return status;
   value = 0;
   for (int i = 0; i < 8; ++i) value = (value << 8U) | source_.data[offset_++];
+  return Status::success();
+}
+
+Status ByteReader::read_u48(std::uint64_t& value) noexcept {
+  const auto status = require(6);
+  if (!status) return status;
+  value = 0;
+  for (int i = 0; i < 6; ++i) value = (value << 8U) | source_.data[offset_++];
   return Status::success();
 }
 
