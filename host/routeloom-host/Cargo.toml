@@ -23,6 +23,9 @@ rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 # The TUI's parser validates that the JSON this daemon emits stays compatible
 # with the client data model — one protocol, not two.
 routeloom-tui = { path = "../routeloom-tui" }
+# Same rule for the application facade: its API1 backend must parse the
+# node objects and membership events this daemon actually emits.
+routeloom-client = { path = "../routeloom-client" }
 
 [lints]
 workspace = true

@@ -383,6 +383,7 @@ dependencies = [
 name = "routeloom-host"
 version = "0.1.0"
 dependencies = [
+ "routeloom-client",
  "routeloom-json",
  "routeloom-peercred",
  "routeloom-protocol",
