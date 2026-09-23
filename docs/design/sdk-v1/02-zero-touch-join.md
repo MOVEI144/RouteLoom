@@ -135,13 +135,13 @@ m1は機器のcookie echo 16Bを含めてRLD1 1 frameに収まる。m1のC_I・m
 
 機器側hopの合計（allow、OFFER k件）：概算 **2.4KB＋92k B、約30frame**。250kbps PHYで割ったbyte時間は約0.08秒だが、preamble・MAC ACK・再送・chunk間の待ちを含まない下限であり、実測値ではない。
 
-### 6.1 EAD形式（private-use EAD label、登録は実装時）
+### 6.1 EAD形式（EAD label 65537〜65540・critical、P2-3で実装）
 
 | EAD | 載るmsg | 形式（固定長BE、CBOR bstrに格納） | 長さ |
 |---|---|---|---|
 | JoinIntent | m1（平文） | `ver u8=1 | flags u8 | org_hint u32 | profile_bits u32 | reserved u16` | 12B |
-| SiteOffer | m2（暗号化） | `ver u8 | flags u8 | site_id u64 | network_low32 u32 | site_epoch u32 | decision_timeout_ms u16 | reserved u16` | 24B |
-| JoinRequest | m3（暗号化） | `ver u8 | flags u8 | model u16 | fw_version u32 | capability u32 (bit0 sleepy, bit1 relay, bit2 gateway) | requested_role u8 | reserved u8 | last_site_id u64 | last_generation u32` | 30B |
+| SiteOffer | m2（暗号化） | `ver u8 | flags u8 | site_id u64 | network_low32 u32 | site_epoch u32 | decision_timeout_ms u16 | reserved u16` | 22B（P2-3、§6.3） |
+| JoinRequest | m3（暗号化） | `ver u8 | flags u8 | model u16 | fw_version u32 | capability u32 (bit0 sleepy, bit1 relay, bit2 gateway) | requested_role u8 | reserved u8 | last_site_id u64 | last_generation u32` | 26B（P2-3、§6.3） |
 | JoinResult | m4（暗号化） | `ver u8 | verdict u8 | reason u16 | retry_after_s u32 | body_len u16 | reserved u16`＋body | 12B＋body |
 
 JoinIntentは平文で見えるため、身元・割当に関わる値を入れない。
@@ -172,6 +172,26 @@ verdictと本文：
 ```
 
 scope鍵（Member class）はGKから導出する（[03](03-key-hierarchy.md) §6.1）。現場のconfig authority鍵（RLT1）はm4に入れず、参加後にmember専用laneのRTM1 manifestで配る（§10.3）。
+
+### 6.3 Resolved in implementation（P2-3、最も保守的な選択）
+
+§6.1／§6.2のEADと04 §6.1のRemovalNoticeを[sdkv1_ead.hpp](../../../components/routeloom/include/routeloom/sdkv1_ead.hpp)（C++）と`host/routeloom-join`（Rust、Site Authority側。P3-3で`routeloom-host`が使う）に実装し、独立Python生成器`tools/gen_sdkv1_ead_vectors.py`の共通vector（[`protocol/sdkv1-golden/ead/`](../../../protocol/sdkv1-golden/ead/README.md)）でbyte一致を検査した。設計が決めていなかった点は次のとおり決めた。
+
+- **EAD label**：IANAのEDHOC EAD registryは0〜23がStandards Action with Expert Review、24〜65535がSpecification Requiredで、private-use範囲が無い。未登録値の流用を避け、registryの範囲外の**65537（JoinIntent）〜65540（JoinResult）**を使い、すべて**critical（負のlabel）**で送る（`3a 00 01 00 0x`、5B）。RouteLoom joinを知らない相手はEDHOC errorで止まり、EADを無視したまま完了しない。label 5Bのためm1は約59B（C_Iを4B bstrとして）で、§6の見積もり≈52Bより長いが、phase本文2＋cookie 16＋59＝77B≤112BでRLD1 1 frameに収まる（C++試験で静的検査）。
+- **EAD fieldの解析**：各messageは自分の項目をちょうど1回（critical、定義長のbstr、最短形のCBOR head）持つ。padding（label 0、RFC 9528 §3.8.1）は読み飛ばす。それ以外の項目（未知の非critical項目、非criticalの同label、他messageの項目、重複、後続byte）はすべて拒否する。
+- **長さの食い違い**：§6.1の表の長さはSiteOffer 24B・JoinRequest 30Bだったが、列挙したfieldの合計はそれぞれ22B・26B。fieldの幅を正とし、埋め草は足さない（24B／30Bの値は不正vectorで拒否を固定）。
+- **共通の規則**：全項目の先頭`ver`＝1（他はUnsupported）、`flags`は定義bitが無いので0、reservedは0、長さは厳密。JoinIntentの`profile_bits`はbit0（RLJOIN1）必須・bit0〜1のみ。JoinResultの`reason`は理由codeが未定義なので0（理由はverdictが表す）。
+- **retry_after_s**：PendingAssignmentは30〜3600（API1 `join.decide`の範囲）、AuthorityBusyは1〜3600、それ以外（Allow・Deny・Removed）は0。Denyの回避時間（6時間／24時間）は機器側の固定値で、authorityが指定しない。
+- **Allowのbody**：「MemberCert（bstr）」を固定長BEの流儀で`u16 membercert_len (1..256) | MemberCert | SitePackage 120B | u16 ticket_len (0..128) | AssignmentTicket`とした。MemberCert枠はMemberCert 1枚の正準encodingだけを許す。JoinResultの上限は12＋508＝520B（EAD_4項目528B）。実際のMemberCert（198〜208B）・ticket無しではEAD_4項目342〜352Bで、m4はこれにCIPHERTEXT_4のhead 3Bとtag 8Bを足した353〜363B（§6の見積もり≈355B）。
+- **PendingAssignment**のbodyはticket 1〜48B（authority専用の不透明値、RLRES1 R1と同じ上限）。**Removed**のbodyはRemovalNotice（04 §6.1のCOSE_Sign1、payload 28B、ちょうど103B）。`reason`はRRS1と同じ1〜4、generation・rs_epochは1以上、site_id・node_idは0／全1不可。機器は自分のRLS1のsite・network・node・MemberCert世代で受理判定する。Deny・AuthorityBusyのbodyは空。
+- **SitePackage**：flags・reservedは0、site_idは有効、network下位32bitは非0、gk_epoch≥1でGKは非0、channel 1〜14（RLS1と同じ）、roleは非0の既知bit、gateway_count 1〜4で有効・重複なしのid＋未使用枠は0。rs_epoch＝0（RRS1未発行）と時刻・revision類は値を制限しない。
+- **SiteOffer**：`decision_timeout_ms`は500〜5000（API1 `join.policy`の範囲）。機器はm2認証後、site_id・network_low32・site_epochがSiteCertと一致することを確かめる（不一致は拒否）。Site AuthorityはSiteOfferを自分のSiteCertから作る。
+- **JoinRequest**：`requested_role`はMemberCertのrole bit（bit0 endpoint／bit1 relay／bit2 gateway）で非0、relay・gatewayは対応するcapability bitが必要。`last_site_id`＝0なら`last_generation`＝0、非0なら有効idで世代≥1。Site AuthorityはDevCert検証後に`model`がDevCertのmodelと一致することを確かめる。
+- **§10.2の検査**（`join_allow_verify`）：手順1〜4に加え、SitePackageのsite_id＝SiteCertのsub、network＝MemberCertのnetwork、role＝MemberCertのroleを要求する。不一致は「検証不成立」（保存せず回避、V1-J12）で、形式不正（error）とは区別する。
+- **AssignmentTicket（A2）は形式未定**：01 §5・§10.2は内容（node、site_id、generation、割当検証鍵の署名）だけを定め、byte列を定めていない。本実装はAllow bodyの長さ付き不透明値（≤128B）として運ぶだけにし、A1の機器は無視、A2（strict）の機器はticket無しを拒否、ticket有りは形式が決まるまで`Unsupported`で**fail closed**（参加しない）。形式の決定は後続（A2を製品で使う前に必須）。
+- **Rust側の置き場所**：Site Authorityは`routeloom-host`に置く（07 §1）ため、事務所tooling（`routeloom-provision`）とは別crate `routeloom-join`にし、証明書とCOSE_Sign1 helperは`routeloom-provision`の`sdkv1`を使う。Rust試験はSite Authorityとして全AllowのMemberCertとRemovalNoticeをRFC 6979で再発行し、生成器のbyte列と一致することを要求する。
+
+未実装・未定のまま残るもの：AssignmentTicketのbyte列、link用EDHOC（03 §4.1）のEADで交換する`(site_epoch, rs_epoch, gk_epoch)`の形式（P4-2）、JoinConfirm（AuthorityEnvelope type 1）の本文、EDHOC encoder込みのm1〜m4実長の検査（V1-J14の残り、P2-1後）。
 
 ## 7. proxyの中継
 
