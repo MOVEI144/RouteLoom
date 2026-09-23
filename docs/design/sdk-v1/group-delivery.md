@@ -136,7 +136,7 @@ radio.md §14は受理済みDATAの確認を「その仕事への課金」とす
 
 ### 8.2 replay
 
-- group scopeの受信replayは`GroupReplayTable`（RAMのみ、16 sender×64 counterの窓。group数に依存しない）で判定する。表が満杯なら新しいsenderを**拒否**し（既存組を追い出して窓を失うことはしない）、古いepochは拒否する。
+- group scopeの受信replayは`GroupReplayTable`（RAMのみ、`2×kMaxRouteGateways`＝4 sender×64 counterの窓。group数に依存しない。nodeは設定済みgateway以外のoriginのGROUP_DATAをopen前に捨てるので、生きたentryはgateway数で上限が決まる）で判定する。表が満杯なら新しいsenderを**拒否**し（既存組を追い出して窓を失うことはしない）、古いepochは拒否する。
 - 永続化しない（#37：ピアごとのNVS recordを増やさない）。受信側の再起動でこの表は消えるが、group frameはhopごとにlink保護されており、link層のreplay床（既存の永続guard）は残るので、捕獲したframeをそのまま再送しても受理されない。
 - 重複排除（§4）はreplay判定とは独立に、開封前のheaderで行う。
 
@@ -164,7 +164,7 @@ Wire v2 header（88B）・versionは不変。追加は2つのframe typeだけ：
 | 送信元stream（重複窓＋cursor） | 2 | 72B |
 | membership | 8 | 16B |
 
-`sizeof(MeshNode)`は64bit hostで**+5,504B**（leaf 98,952→104,456、relay 108,744→114,248、gateway 133,224→138,728）。unicastの順序用fieldを含む。ESP32（32bit）ではpointerが半分なのでこれ以下。開発PSKの`GroupReplayTable`は約768B、USB bridgeの対応表は96B。`docs/reference/resource-profiles.json`の各profileに`group_delivery_state: 6656`を計上した。
+`sizeof(MeshNode)`は64bit hostで**+4,944B**（leaf 98,952→103,896、relay 108,744→113,688、gateway 133,224→138,168）。unicastの順序用fieldを含む。32bit（i386 ABIで計測）ではMeshNode約102.4KB。`GroupChild`のflagはbit-field（24→16B）にしてある：ESP32-C3のbridge imageはstatic DRAM（.bss）が上限で、当初の構成では`bridge_node`（observe）が864B溢れた。開発PSKの`GroupReplayTable`は約204B（32bit）、USB bridgeの対応表は96B。`docs/reference/resource-profiles.json`の各profileに`group_delivery_state: 6656`を計上した。
 
 ## 11. Host API
 

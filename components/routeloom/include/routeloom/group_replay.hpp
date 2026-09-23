@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
@@ -33,7 +34,11 @@ namespace routeloom {
 
 class GroupReplayTable {
  public:
-  static constexpr std::size_t kCapacity = 16;
+  // Only configured route gateways source group traffic, and the node drops
+  // GROUP_DATA from any other origin before it reaches the provider
+  // (handle_group_data), so live entries are bounded by kMaxRouteGateways.
+  // Twice that leaves room for a gateway replaced without a reboot.
+  static constexpr std::size_t kCapacity = 2 * kMaxRouteGateways;
   static constexpr std::uint32_t kWindow = 64;
 
   // Accept-once check for an AUTHENTICATED group frame (call only after the

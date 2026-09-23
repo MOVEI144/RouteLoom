@@ -1670,18 +1670,25 @@ class MeshNode {
   // Per-message tree bookkeeping for one child of this node. Counts are the
   // child's latest report (its whole subtree); per-round flags are reset
   // when a new round starts.
+  // Flags are 1-bit fields so a child record is 16 B instead of 24 B: the
+  // gateway holds kGroupMaxChildren of these per tree, and the ESP32-C3
+  // bridge image is DRAM-bound (static .bss). C++17 has no default member
+  // initializers for bit-fields, so the constructor zeroes them.
   struct GroupChild {
+    GroupChild() noexcept
+        : complete(false), not_child(false), ever_reported(false), sent(false),
+          reported(false), failed(false) {}
     NodeId node{kInvalidNodeId};
     std::uint16_t delivered{0};
     std::uint16_t nonmember{0};
     std::uint16_t missing{0};
     std::uint8_t report_round{0};
-    bool complete{false};       // latest report: missing 0, or NOT_CHILD
-    bool not_child{false};      // latest report was NOT_CHILD (counted elsewhere)
-    bool ever_reported{false};
-    bool sent{false};           // copy handed to the scheduler this round
-    bool reported{false};       // report for this round received
-    bool failed{false};         // copy never got a MAC ACK this round
+    bool complete : 1;       // latest report: missing 0, or NOT_CHILD
+    bool not_child : 1;      // latest report was NOT_CHILD (counted elsewhere)
+    bool ever_reported : 1;
+    bool sent : 1;           // copy handed to the scheduler this round
+    bool reported : 1;       // report for this round received
+    bool failed : 1;         // copy never got a MAC ACK this round
   };
   // One group message as seen by this node (relay/receiver, or the source's
   // root in GroupOrigin::tree). Holds no payload: relays forward the copy of
