@@ -77,6 +77,7 @@ pub const EVENT_KINDS: &[&str] = &[
     "dispatch",
     "error",
     "frame",
+    "group_settled",
     "gw_ingress",
     "hello_ack",
     "host_ops_rx",

@@ -109,6 +109,9 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// Config op registry (P5): `config.*` submits queue here and `config.get`
     /// reads outcomes. Separate operation space from messages.*/gateway.*.
     pub config_ops: &'a crate::dispatch::ConfigOps,
+    /// group_delivery_v1 op table: `group.send` admits here, `group.get`
+    /// reads; the group lane thread is the only driver.
+    pub group_ops: &'a crate::group::GroupOps,
     /// The daemon's configured config issuer node id — None means no
     /// authority is provisioned, so `config.propose` is refused honestly
     /// while queries still run.
@@ -322,6 +325,8 @@ pub fn handle_conn<S: OperationStore>(
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
         "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
         "config.get" => config_get(&params, ctx).map(|r| (r, None)),
+        "group.send" => group_send(&params, ctx).map(|r| (r, None)),
+        "group.get" => group_get(&params, ctx).map(|r| (r, None)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -412,7 +417,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -426,8 +431,20 @@ fn capabilities<S: OperationStore>(
         crate::canonical::HOP_MAX,
         crate::canonical::HOP_DEFAULT,
         crate::receive_log::NORMAL_PAYLOAD_MAX,
+        crate::group::PAYLOAD_MAX,
+        crate::group::TTL_MIN_MS,
+        crate::group::TTL_MAX_MS,
+        crate::group::TTL_DEFAULT_MS,
+        crate::group::HOP_MIN,
+        crate::group::HOP_MAX,
+        crate::group::HOP_DEFAULT,
+        crate::group::RECORD_CAP,
+        crate::group::QUEUE_CAP,
+        crate::group::LIVE_CAP,
+        crate::group::MEMBERSHIPS_PER_NODE,
         ctx.acl.revision(),
         config_auth = ctx.config_authority.is_some(),
+        group_capable = group_capability_json(ctx),
     ))
 }
 
@@ -1941,6 +1958,372 @@ fn nodes_get<S: OperationStore>(
     }
 }
 
+// --- group_delivery_v1 (group.send / group.get) --------------------------
+//
+// `group.send` needs SEND on the network (it transmits application data to
+// many nodes at once — the same grant as messages.submit, never a weaker
+// one); `group.get` needs READ_OPERATION like operations.get and answers
+// NOT_FOUND to a principal without it (no existence oracle). Records are
+// RAM-only (crate::group bounds); idempotency identity is (principal,
+// network, key) as in host.md §8.
+
+/// `gateway_capable` for capabilities.get: null while no authenticated
+/// session says either way.
+fn group_capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> String {
+    let info = ctx.session.lock().expect("session poisoned");
+    match (info.authenticated, info.capability) {
+        (true, Some(capability)) => crate::group::group_capable(capability).to_string(),
+        _ => "null".to_string(),
+    }
+}
+
+/// `wait_ms`: 0..=WAIT_MS_MAX (default 0 = answer immediately).
+fn group_wait_ms(params: &Json) -> Result<u64, ApiError> {
+    match params.get("wait_ms") {
+        None => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .filter(|ms| *ms <= WAIT_MS_MAX)
+            .ok_or_else(|| {
+                ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!("wait_ms must be an integer 0..={WAIT_MS_MAX}"),
+                )
+            }),
+    }
+}
+
+/// `group`: 1..=65535 as a number, or the string "ALL" (= 65535).
+fn group_id_field(value: Option<&Json>) -> Result<u16, ApiError> {
+    let invalid = || {
+        ApiError::simple(
+            "INVALID_ARGUMENT",
+            "group must be an integer 1..=65535 or \"ALL\"",
+        )
+    };
+    match value {
+        Some(Json::String(name)) if name == "ALL" => Ok(routeloom_protocol::group_ops::GROUP_ALL),
+        Some(json) => json
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|n| *n != 0)
+            .ok_or_else(invalid),
+        None => Err(invalid()),
+    }
+}
+
+/// `options`: `{priority?, ordered?, ttl_ms?, hop_limit?}` with the
+/// device's ranges (lifetime ≤ 30000 ms, hop_limit 1..=254).
+fn group_options(value: Option<&Json>) -> Result<(u8, bool, u32, u8), ApiError> {
+    use crate::group::{HOP_DEFAULT, HOP_MAX, HOP_MIN, TTL_DEFAULT_MS, TTL_MAX_MS, TTL_MIN_MS};
+    let invalid = |m: String| ApiError::simple("INVALID_ARGUMENT", &m);
+    let value = match value {
+        None | Some(Json::Null) => {
+            return Ok((
+                canonical::PRIORITY_NORMAL,
+                false,
+                TTL_DEFAULT_MS,
+                HOP_DEFAULT,
+            ))
+        }
+        Some(value @ Json::Object(_)) => value,
+        Some(_) => return Err(invalid("options must be an object".to_string())),
+    };
+    for (key, _) in value.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "priority" | "ordered" | "ttl_ms" | "hop_limit"
+        ) {
+            return Err(invalid(format!("unknown option \"{key}\"")));
+        }
+    }
+    let priority = match value.get("priority") {
+        None => canonical::PRIORITY_NORMAL,
+        Some(Json::String(name)) => match name.as_str() {
+            "BULK" => canonical::PRIORITY_BULK,
+            "NORMAL" => canonical::PRIORITY_NORMAL,
+            "MANAGEMENT" => canonical::PRIORITY_MANAGEMENT,
+            "URGENT" => canonical::PRIORITY_URGENT,
+            _ => return Err(invalid("unknown priority value".to_string())),
+        },
+        Some(_) => return Err(invalid("priority must be a string".to_string())),
+    };
+    let ordered = match value.get("ordered") {
+        None => false,
+        Some(Json::Bool(ordered)) => *ordered,
+        Some(_) => return Err(invalid("ordered must be a boolean".to_string())),
+    };
+    let ttl_ms = match value.get("ttl_ms") {
+        None => TTL_DEFAULT_MS,
+        Some(number) => number
+            .as_u64()
+            .filter(|ms| (u64::from(TTL_MIN_MS)..=u64::from(TTL_MAX_MS)).contains(ms))
+            .map(|ms| ms as u32)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "ttl_ms must be an integer {TTL_MIN_MS}..={TTL_MAX_MS}"
+                ))
+            })?,
+    };
+    let hop_limit = match value.get("hop_limit") {
+        None => HOP_DEFAULT,
+        Some(number) => number
+            .as_u64()
+            .filter(|hop| (u64::from(HOP_MIN)..=u64::from(HOP_MAX)).contains(hop))
+            .map(|hop| hop as u8)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "hop_limit must be an integer {HOP_MIN}..={HOP_MAX}"
+                ))
+            })?,
+    };
+    Ok((priority, ordered, ttl_ms, hop_limit))
+}
+
+/// `payload_hex` + `payload_len` (must agree), ≤ 127 bytes (the group
+/// payload is 128 B including the device's flags byte).
+fn group_payload(params: &Json) -> Result<Vec<u8>, ApiError> {
+    let invalid_hex =
+        || ApiError::simple("INVALID_ARGUMENT", "payload_hex must be even-length hex");
+    let Some(text) = params.get("payload_hex").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "payload_hex must be a string",
+        ));
+    };
+    if text.len() % 2 != 0 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(invalid_hex());
+    }
+    let Some(declared) = params.get("payload_len").and_then(Json::as_u64) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "payload_len must be an integer",
+        ));
+    };
+    if declared != (text.len() / 2) as u64 {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "payload_len does not match payload_hex bytes",
+        ));
+    }
+    if text.len() / 2 > crate::group::PAYLOAD_MAX {
+        return Err(ApiError::simple(
+            "PAYLOAD_TOO_LARGE",
+            &format!("group payload exceeds {} bytes", crate::group::PAYLOAD_MAX),
+        ));
+    }
+    parse_hex_bytes(text, crate::group::PAYLOAD_MAX).ok_or_else(invalid_hex)
+}
+
+/// The live-gateway gates for a NEW group send (replays skip them).
+fn group_gate<S: OperationStore>(ctx: &ApiContext<'_, S>, network: u64) -> Option<ApiError> {
+    let (authenticated, session_network, capability) = {
+        let info = ctx.session.lock().expect("session poisoned");
+        (
+            info.authenticated && info.id.is_some(),
+            info.network,
+            info.capability,
+        )
+    };
+    if !authenticated {
+        return Some(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message:
+                "no authenticated gateway session; group sends are not queued across a disconnect"
+                    .to_string(),
+            extra_fields: "\"reason\":\"no_session\"".to_string(),
+            retryable: true,
+        });
+    }
+    if session_network != Some(network) {
+        return Some(ApiError {
+            code: "GATEWAY_UNAVAILABLE",
+            message: "the attached gateway serves a different network".to_string(),
+            extra_fields: "\"reason\":\"network_mismatch\"".to_string(),
+            retryable: true,
+        });
+    }
+    if !capability.is_some_and(crate::group::group_capable) {
+        return Some(ApiError {
+            code: "UNSUPPORTED",
+            message: "the attached gateway does not advertise group_delivery_v1 (HelloAck capability bit 7 with host_ops_v1)".to_string(),
+            extra_fields: format!(
+                "\"required_capability\":\"group_delivery_v1\",\"capability\":{}",
+                capability.map_or_else(|| "null".to_string(), |c| c.to_string())
+            ),
+            retryable: false,
+        });
+    }
+    None
+}
+
+/// `group.send` params: `{network, group, key, payload_hex, payload_len,
+/// options?:{priority, ordered, ttl_ms, hop_limit}, wait_ms?}`.
+///
+/// Order: SEND authorization → schema → idempotency (a known
+/// key answers its record even while the gateway is away) → live-gateway
+/// gates (GATEWAY_UNAVAILABLE / UNSUPPORTED without capability bit 7) →
+/// admission (NO_CAPACITY). With `wait_ms` the answer waits until the
+/// gateway accepted or refused the send (or the window ends).
+fn group_send<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    use crate::group::{GroupOps, GroupRequest, SubmitError, SubmitOutcome};
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "group" | "key" | "payload_hex" | "payload_len" | "options" | "wait_ms"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(network_text) = params.get("network").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "network must be a 16-hex string",
+        ));
+    };
+    let network = acl::parse_network_hex(network_text)
+        .map_err(|e| ApiError::simple("INVALID_ARGUMENT", &e))?;
+    let Some(uid) = ctx
+        .uid
+        .filter(|uid| ctx.acl.permit(*uid, network, acl::PERM_SEND))
+    else {
+        return Err(ApiError::simple(
+            "AuthorizationFailed",
+            "principal lacks SEND on this network",
+        ));
+    };
+    let group = group_id_field(params.get("group"))?;
+    let Some(key) = params
+        .get("key")
+        .and_then(Json::as_str)
+        .and_then(|text| canonical::parse_key_hex(text).ok())
+    else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "key must be a 32-hex string",
+        ));
+    };
+    let payload = group_payload(params)?;
+    let (priority, ordered, ttl_ms, hop_limit) = group_options(params.get("options"))?;
+    let wait_ms = group_wait_ms(params)?;
+    // Not charged to the messages.submit token bucket (2/min, burst 16):
+    // an URGENT ALARM must never wait behind a burst of display updates.
+    // Group work is bounded instead by the op table (QUEUE_CAP host-queued,
+    // LIVE_CAP unsettled — NO_CAPACITY beyond), the gateway's 3-entry
+    // source table (REFUSED/BUSY GROUP_QUEUE_FULL) and its own group
+    // air-time bucket (group-delivery.md §7).
+    let request = GroupRequest {
+        network,
+        group,
+        priority,
+        ordered,
+        ttl_ms,
+        hop_limit,
+        payload,
+    };
+    // A replay must not depend on the gateway still being there: the gates
+    // apply only to an identity the table has never seen.
+    let known = ctx.group_ops.knows(uid, network, &key);
+    if !known {
+        if let Some(error) = group_gate(ctx, network) {
+            return Err(error);
+        }
+    }
+    let op_id = match ctx.group_ops.submit(uid, key, request, ctx.now_ms) {
+        Ok(SubmitOutcome::Accepted(op_id) | SubmitOutcome::Replay(op_id)) => op_id,
+        Err(SubmitError::Conflict { existing }) => {
+            return Err(ApiError {
+                code: "CONFLICT",
+                message: "same idempotency key with a different group request".to_string(),
+                extra_fields: format!(
+                    "\"existing_group_op\":\"{}\"",
+                    crate::group::op_token(existing)
+                ),
+                retryable: false,
+            })
+        }
+        Err(SubmitError::WindowExpired) => {
+            return Err(ApiError::simple(
+                "IDEMPOTENCY_WINDOW_EXPIRED",
+                "this key's group operation was evicted from the bounded table; its outcome is no longer held",
+            ))
+        }
+        Err(SubmitError::NoCapacity { queued, live }) => {
+            return Err(ApiError {
+                code: "NO_CAPACITY",
+                message: "group operation table is full; retry when in-flight group sends settle"
+                    .to_string(),
+                extra_fields: format!("\"queued\":{queued},\"unsettled\":{live}"),
+                retryable: true,
+            })
+        }
+    };
+    let record = ctx
+        .group_ops
+        .wait_for(
+            op_id,
+            Duration::from_millis(wait_ms),
+            GroupOps::admission_answered,
+        )
+        .ok_or_else(|| ApiError::simple("NOT_FOUND", "no group operation with that id"))?;
+    Ok(crate::group::record_json(&record))
+}
+
+/// `group.get` params: `{group_op, wait_ms?}`. With `wait_ms` the answer
+/// waits until the record is final (or the window ends).
+fn group_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "group_op" | "wait_ms") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(op_id) = params
+        .get("group_op")
+        .and_then(Json::as_str)
+        .and_then(crate::group::parse_op_token)
+    else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "group_op must be a grp-prefixed 16-hex token",
+        ));
+    };
+    let wait_ms = group_wait_ms(params)?;
+    let not_found = || ApiError::simple("NOT_FOUND", "no group operation with that id");
+    let network = ctx
+        .group_ops
+        .get(op_id)
+        .ok_or_else(not_found)?
+        .request
+        .network;
+    if !ctx
+        .uid
+        .is_some_and(|uid| ctx.acl.permit(uid, network, acl::PERM_READ_OPERATION))
+    {
+        return Err(not_found());
+    }
+    let record = ctx
+        .group_ops
+        .wait_for(
+            op_id,
+            Duration::from_millis(wait_ms),
+            crate::group::GroupOps::settled,
+        )
+        .ok_or_else(not_found)?;
+    Ok(crate::group::record_json(&record))
+}
+
 fn parse_hex_u64(text: &str) -> Option<u64> {
     if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -2921,6 +3304,10 @@ mod tests {
         Box::leak(Box::new(crate::dispatch::ConfigOps::default()))
     }
 
+    fn leaked_group_ops() -> &'static crate::group::GroupOps {
+        Box::leak(Box::new(crate::group::GroupOps::default()))
+    }
+
     fn leaked_hub() -> &'static SubscriptionHub {
         Box::leak(Box::new(SubscriptionHub::default()))
     }
@@ -2962,6 +3349,7 @@ mod tests {
             gateway_lane: lane,
             node_table: &EMPTY_NODE_TABLE,
             config_ops,
+            group_ops: leaked_group_ops(),
             config_authority,
             subscriptions,
             conn_id,
@@ -5753,5 +6141,439 @@ mod tests {
         let response =
             propose("\"patch\":[{\"field_id\":1,\"field_type\":\"bytes\",\"value\":\"\"}]");
         assert!(response.contains("\"ok\":true"), "{response}");
+    }
+
+    // --- group.send / group.get -------------------------------------------
+
+    fn group_session(capability: u32, network: u64) -> &'static Mutex<SessionInfo> {
+        let session = leaked_session();
+        {
+            let mut info = session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(0x5e55);
+            info.node = Some(1);
+            info.network = Some(network);
+            info.capability = Some(capability);
+        }
+        session
+    }
+
+    fn group_line(method: &str, params: &str) -> String {
+        format!("{{\"v\":1,\"request_id\":\"g\",\"method\":\"{method}\",\"params\":{params}}}")
+    }
+
+    const ALARM_PARAMS: &str = "{\"network\":\"0000000000000001\",\"group\":\"ALL\",\"key\":\"000102030405060708090a0b0c0d0e0f\",\"payload_hex\":\"50554d5033204f56455254454d50\",\"payload_len\":14,\"options\":{\"priority\":\"URGENT\",\"ttl_ms\":5000,\"hop_limit\":10}}";
+
+    #[test]
+    fn group_send_authorization_and_schema() {
+        let (acl, log, store, limiter) = test_env();
+        let session = group_session(0x87, 1);
+        let base = ctx(Some(501), &acl, &log, &store, &limiter, 1_000);
+        let c = ApiContext { session, ..base };
+        // uid 7 holds SEND only on network 2.
+        let other = ApiContext {
+            uid: Some(7),
+            ..ctx(Some(7), &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &other);
+        assert_error_schema(&response, "AuthorizationFailed");
+        let unauthenticated = ctx(None, &acl, &log, &store, &limiter, 1_000);
+        let response = handle(
+            group_line("group.send", ALARM_PARAMS).as_bytes(),
+            &unauthenticated,
+        );
+        assert_error_schema(&response, "AuthorizationFailed");
+        let mutate = |from: &str, to: &str| ALARM_PARAMS.replacen(from, to, 1);
+        let long = format!(
+            "\"payload_hex\":\"{}\",\"payload_len\":128",
+            "00".repeat(128)
+        );
+        for (params, code) in [
+            (
+                mutate("\"group\":\"ALL\"", "\"group\":0"),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"group\":\"ALL\"", "\"group\":65536"),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"group\":\"ALL\"", "\"group\":\"all\""),
+                "INVALID_ARGUMENT",
+            ),
+            (mutate(",\"group\":\"ALL\"", ""), "INVALID_ARGUMENT"),
+            (
+                mutate(
+                    "\"key\":\"000102030405060708090a0b0c0d0e0f\"",
+                    "\"key\":\"00\"",
+                ),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"payload_len\":14", "\"payload_len\":13"),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate(
+                    "\"payload_hex\":\"50554d5033204f56455254454d50\",\"payload_len\":14",
+                    &long,
+                ),
+                "PAYLOAD_TOO_LARGE",
+            ),
+            (
+                mutate("\"ttl_ms\":5000", "\"ttl_ms\":0"),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"ttl_ms\":5000", "\"ttl_ms\":30001"),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"hop_limit\":10", "\"hop_limit\":255"),
+                "INVALID_ARGUMENT",
+            ),
+            (mutate("\"URGENT\"", "\"HIGH\""), "INVALID_ARGUMENT"),
+            (
+                mutate("\"ttl_ms\":5000", "\"ordered\":\"yes\""),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"ttl_ms\":5000", "\"delivery\":\"RELIABLE\""),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"group\":\"ALL\"", "\"group\":\"ALL\",\"wait_ms\":15001"),
+                "INVALID_ARGUMENT",
+            ),
+            (
+                mutate("\"group\":\"ALL\"", "\"group\":\"ALL\",\"extra\":1"),
+                "INVALID_ARGUMENT",
+            ),
+        ] {
+            let response = handle(group_line("group.send", &params).as_bytes(), &c);
+            assert_error_schema(&response, code);
+        }
+        // Nothing above was admitted.
+        let response = handle(
+            group_line("group.get", "{\"group_op\":\"grp0000000000000001\"}").as_bytes(),
+            &c,
+        );
+        assert_error_schema(&response, "NOT_FOUND");
+    }
+
+    #[test]
+    fn group_send_live_gateway_gates() {
+        let (acl, log, store, limiter) = test_env();
+        // No authenticated session: retryable, nothing queued.
+        let c = ctx(Some(501), &acl, &log, &store, &limiter, 1_000);
+        let response = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &c);
+        let doc = assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
+        let error = doc.get("error").unwrap();
+        assert_eq!(error.get("retryable").and_then(Json::as_bool), Some(true));
+        assert_eq!(
+            error
+                .get("detail")
+                .and_then(|d| d.get("reason"))
+                .and_then(Json::as_str),
+            Some("no_session")
+        );
+        // Session on another network.
+        let c = ApiContext {
+            session: group_session(0x87, 2),
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &c);
+        let doc = assert_error_schema(&response, "GATEWAY_UNAVAILABLE");
+        assert!(
+            doc.get("error")
+                .unwrap()
+                .get("detail")
+                .unwrap()
+                .get("reason")
+                .and_then(Json::as_str)
+                == Some("network_mismatch")
+        );
+        // Gateway without capability bit 7 (or without host_ops_v1).
+        for capability in [0x07_u32, 0x80] {
+            let c = ApiContext {
+                session: group_session(capability, 1),
+                ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+            };
+            let response = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &c);
+            let doc = assert_error_schema(&response, "UNSUPPORTED");
+            let error = doc.get("error").unwrap();
+            assert_eq!(error.get("retryable").and_then(Json::as_bool), Some(false));
+            let detail = error.get("detail").unwrap();
+            assert_eq!(
+                detail.get("required_capability").and_then(Json::as_str),
+                Some("group_delivery_v1")
+            );
+            assert_eq!(
+                detail.get("capability").and_then(Json::as_u64),
+                Some(u64::from(capability))
+            );
+        }
+    }
+
+    #[test]
+    fn group_send_admits_replays_and_get_follows_the_lane() {
+        use crate::group::{GroupLane, GroupLink, GroupOps};
+        use routeloom_protocol::group_ops::{encode_group_status, GroupStatus};
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static GroupOps = Box::leak(Box::new(GroupOps::default()));
+        let session = group_session(0x87, 1);
+        let c = ApiContext {
+            session,
+            group_ops: ops,
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let response = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        let token = result
+            .get("group_op")
+            .and_then(Json::as_str)
+            .unwrap()
+            .to_string();
+        assert!(token.starts_with("grp"));
+        assert_eq!(
+            result.get("state").and_then(Json::as_str),
+            Some("HOST_QUEUED")
+        );
+        assert_eq!(result.get("final").and_then(Json::as_bool), Some(false));
+        assert_eq!(result.get("group").and_then(Json::as_u64), Some(65535));
+        assert_eq!(
+            result.get("priority").and_then(Json::as_str),
+            Some("URGENT")
+        );
+        assert_eq!(result.get("payload_len").and_then(Json::as_u64), Some(14));
+        for field in [
+            "delivered",
+            "nonmember",
+            "missing_total",
+            "message",
+            "admitted_ms",
+        ] {
+            assert!(
+                result.get(field).unwrap().is_null(),
+                "{field} must be null: {response}"
+            );
+        }
+        // Same key + same request: the same op, even with the gateway gone.
+        session.lock().unwrap().authenticated = false;
+        let replay = handle(group_line("group.send", ALARM_PARAMS).as_bytes(), &c);
+        assert_eq!(result_field(&replay, "group_op"), token);
+        // Same key, different bytes: CONFLICT naming the existing op.
+        let conflict = handle(
+            group_line(
+                "group.send",
+                &ALARM_PARAMS.replace("\"URGENT\"", "\"NORMAL\""),
+            )
+            .as_bytes(),
+            &c,
+        );
+        let doc = assert_error_schema(&conflict, "CONFLICT");
+        assert_eq!(
+            doc.get("error")
+                .and_then(|e| e.get("detail"))
+                .and_then(|d| d.get("existing_group_op"))
+                .and_then(Json::as_str),
+            Some(token.as_str())
+        );
+        session.lock().unwrap().authenticated = true;
+
+        // group.get: READ_OPERATION on the op's network, else NOT_FOUND.
+        let get = group_line("group.get", &format!("{{\"group_op\":\"{token}\"}}"));
+        let stranger = ApiContext {
+            uid: Some(7),
+            ..ApiContext {
+                session,
+                group_ops: ops,
+                ..ctx(Some(7), &acl, &log, &store, &limiter, 1_000)
+            }
+        };
+        assert_error_schema(&handle(get.as_bytes(), &stranger), "NOT_FOUND");
+        assert_error_schema(
+            &handle(
+                group_line("group.get", "{\"group_op\":\"cfg0000000000000001\"}").as_bytes(),
+                &c,
+            ),
+            "INVALID_ARGUMENT",
+        );
+        assert_eq!(
+            result_field(&handle(get.as_bytes(), &c), "state"),
+            "HOST_QUEUED"
+        );
+
+        // Drive the lane: admission, then FINAL.
+        let link = GroupLink {
+            active: true,
+            capable: true,
+            session: 0x5e55,
+            gateway: 1,
+            network: 1,
+        };
+        let mut lane = GroupLane::default();
+        let out = ops.step(&mut lane, &link, 1_000);
+        let request = out.frames[0].0;
+        let mut status = GroupStatus {
+            result: 0,
+            session: 0x1b59,
+            sequence: (1 << 63) | 1,
+            group: 0xFFFF,
+            state: 6,
+            rounds: 1,
+            reason: "GROUP_ROUND_PENDING".to_string(),
+            ..GroupStatus::default()
+        };
+        ops.post_status(request, encode_group_status(&status).unwrap());
+        ops.step(&mut lane, &link, 1_010);
+        let response = handle(get.as_bytes(), &c);
+        assert_eq!(result_field(&response, "state"), "WAITING_FOR_END_RECEIPT");
+        assert_eq!(
+            routeloom_json::parse(&response)
+                .unwrap()
+                .get("result")
+                .unwrap()
+                .get("message")
+                .unwrap()
+                .get("sequence")
+                .and_then(Json::as_str),
+            Some("8000000000000001")
+        );
+        status.state = 7;
+        status.delivered = 99;
+        status.reason = "GROUP_COMPLETE".to_string();
+        ops.post_status(request, encode_group_status(&status).unwrap());
+        let out = ops.step(&mut lane, &link, 1_100);
+        assert_eq!(out.events.len(), 1);
+        let response = handle(
+            group_line(
+                "group.get",
+                &format!("{{\"group_op\":\"{token}\",\"wait_ms\":1000}}"),
+            )
+            .as_bytes(),
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        assert_eq!(
+            result.get("state").and_then(Json::as_str),
+            Some("DELIVERED")
+        );
+        assert_eq!(result.get("final").and_then(Json::as_bool), Some(true));
+        assert_eq!(result.get("delivered").and_then(Json::as_u64), Some(99));
+        assert_eq!(result.get("result").and_then(Json::as_str), Some("OK"));
+        assert_eq!(result.get("settled_ms").and_then(Json::as_u64), Some(1_100));
+        assert_eq!(
+            result.get("clock").and_then(Json::as_str),
+            Some("host_unix_ms")
+        );
+    }
+
+    /// `wait_ms` on group.send returns as soon as the gateway answered.
+    #[test]
+    fn group_send_wait_returns_on_admission() {
+        use crate::group::{GroupLane, GroupLink, GroupOps};
+        use routeloom_protocol::group_ops::{encode_group_status, GroupStatus};
+        let (acl, log, store, limiter) = test_env();
+        let ops: &'static GroupOps = Box::leak(Box::new(GroupOps::default()));
+        let c = ApiContext {
+            session: group_session(0x87, 1),
+            group_ops: ops,
+            ..ctx(Some(501), &acl, &log, &store, &limiter, 1_000)
+        };
+        let driver = std::thread::spawn(move || {
+            let link = GroupLink {
+                active: true,
+                capable: true,
+                session: 0x5e55,
+                gateway: 1,
+                network: 1,
+            };
+            let mut lane = GroupLane::default();
+            for _ in 0..400 {
+                let out = ops.step(&mut lane, &link, 1_000);
+                if let Some((request, _)) = out.frames.first() {
+                    let refusal = GroupStatus {
+                        result: 4, // Unsupported
+                        group: 0xFFFF,
+                        reason: "GROUP_REQUIRES_GATEWAY_SCOPED".to_string(),
+                        ..GroupStatus::default()
+                    };
+                    ops.post_status(*request, encode_group_status(&refusal).unwrap());
+                    ops.step(&mut lane, &link, 1_001);
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        });
+        let started = Instant::now();
+        let response = handle(
+            group_line(
+                "group.send",
+                &ALARM_PARAMS.replacen("\"group\":\"ALL\"", "\"group\":7,\"wait_ms\":10000", 1),
+            )
+            .as_bytes(),
+            &c,
+        );
+        assert!(driver.join().unwrap());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        assert_eq!(result.get("state").and_then(Json::as_str), Some("REFUSED"));
+        assert_eq!(result.get("final").and_then(Json::as_bool), Some(true));
+        assert_eq!(
+            result.get("result").and_then(Json::as_str),
+            Some("UNSUPPORTED")
+        );
+        assert_eq!(
+            result.get("reason").and_then(Json::as_str),
+            Some("GROUP_REQUIRES_GATEWAY_SCOPED")
+        );
+        assert_eq!(result.get("all").and_then(Json::as_bool), Some(false));
+    }
+
+    #[test]
+    fn capabilities_advertise_group_delivery() {
+        let (acl, log, store, limiter) = test_env();
+        let line = b"{\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\"}";
+        let c = ctx(None, &acl, &log, &store, &limiter, 0);
+        let response = handle(line, &c);
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        let methods = result.get("methods").unwrap();
+        assert_eq!(
+            methods.get("group.send").and_then(Json::as_bool),
+            Some(true)
+        );
+        assert_eq!(methods.get("group.get").and_then(Json::as_bool), Some(true));
+        let group = result.get("group").unwrap();
+        assert_eq!(
+            group.get("dispatch").and_then(Json::as_str),
+            Some("usb_group_delivery_v1")
+        );
+        assert!(group.get("gateway_capable").unwrap().is_null());
+        assert_eq!(
+            group.get("payload_max_bytes").and_then(Json::as_u64),
+            Some(127)
+        );
+        assert_eq!(
+            group.get("membership_set").and_then(Json::as_bool),
+            Some(false)
+        );
+        let c = ApiContext {
+            session: group_session(0x87, 1),
+            ..ctx(None, &acl, &log, &store, &limiter, 0)
+        };
+        assert!(handle(line, &c).contains("\"gateway_capable\":true"));
+        let c = ApiContext {
+            session: group_session(0x07, 1),
+            ..ctx(None, &acl, &log, &store, &limiter, 0)
+        };
+        assert!(handle(line, &c).contains("\"gateway_capable\":false"));
+        // group_settled is a subscribable event kind.
+        assert!(crate::subscribe::EVENT_KINDS.contains(&"group_settled"));
     }
 }

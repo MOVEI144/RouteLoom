@@ -6,6 +6,7 @@ mod api1;
 mod canonical;
 mod config;
 mod dispatch;
+mod group;
 mod nodes;
 mod receive_log;
 mod send_store;
@@ -735,6 +736,10 @@ struct State {
     /// source of truth for NODES, `nodes.list`/`nodes.get` and the
     /// node_joined/node_left/link_changed events.
     node_table: Mutex<nodes::NodeTable>,
+    /// group_delivery_v1 operation table + lane inbox (HostOps 0x50-0x52):
+    /// api1 `group.send`/`group.get` submit and read here, the group lane
+    /// thread drives the device exchange and emits `group_settled`.
+    group_ops: group::GroupOps,
 }
 
 fn now_ms() -> u64 {
@@ -1063,6 +1068,13 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
             let code = u16_at(body, 0);
             let request = u64_at(body, 2);
             let reason = reason_at(body, 10);
+            if let Some(request) = request.filter(|r| group::owns_request(*r)) {
+                // A 0x50/0x52 the device refused at the frame level: the
+                // group lane settles or re-polls the record it belongs to.
+                state
+                    .group_ops
+                    .post_error(request, code.unwrap_or(0), reason.clone());
+            }
             if let Some(request) = request {
                 // Error requests share the session request space (credit,
                 // auth, data): only transition a delivery we actually track —
@@ -1147,6 +1159,17 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         // node_status_v1 pages/events belong to the node lane. They are not
         // mirrored as host_ops_rx: a resync every few seconds would flush
         // the bounded ring — the lane publishes the transitions instead.
+        // group_delivery_v1 0x51 statuses belong to the group lane (same
+        // no-mirroring rule: the lane publishes `group_settled` instead).
+        FrameKind::HostOps if group::owns(body) => {
+            if !state.group_ops.post_status(frame.request, body.to_vec()) {
+                push_event(
+                    state,
+                    ms,
+                    "\"kind\":\"rx_drop\",\"reason\":\"group_inbox_full\"".to_string(),
+                );
+            }
+        }
         FrameKind::HostOps if nodes::owns(body) => {
             if !state.node_inbox.post(frame.request, body.to_vec()) {
                 push_event(
@@ -1981,6 +2004,7 @@ fn serve_client(
                 gateway_lane: &state.gateway_lane,
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
+                group_ops: &state.group_ops,
                 config_authority: state.config_authority,
                 link: api1::LinkStatus {
                     configured: state.device.is_some(),
@@ -2447,6 +2471,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `config.get` token from before a restart can never resolve to a
         // different op minted by the new boot (RAM-only ids).
         config_ops: dispatch::ConfigOps::with_boot(host_boot),
+        group_ops: group::GroupOps::with_boot(host_boot),
         subscriptions: subscribe::SubscriptionHub::with_boot(host_boot),
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
@@ -2483,6 +2508,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node_state = Arc::clone(&state);
         let node_outbound = outbound_tx.clone();
         thread::spawn(move || nodes::node_status_loop(node_state, node_outbound));
+    }
+    // group_delivery_v1 lane: writes 0x50/0x52 for group.send records and
+    // settles them from the 0x51 answers. Idle while nothing is queued or
+    // unsettled; same writer queue.
+    {
+        let group_state = Arc::clone(&state);
+        let group_outbound = outbound_tx.clone();
+        thread::spawn(move || group::group_loop(group_state, group_outbound));
     }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
@@ -3783,5 +3816,113 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| e.kind == "node_left" && e.json.contains("\"reason\":\"gateway_lost\"")));
+    }
+
+    /// Inner bytes of one frame of protocol/usb-golden/group-ops.
+    fn group_golden(name: &str) -> Vec<u8> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocol/usb-golden/group-ops/frames")
+            .join(name);
+        let doc = routeloom_json::parse(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let hex = doc
+            .get("inner_hex")
+            .and_then(routeloom_json::Json::as_str)
+            .unwrap();
+        parse_hex(hex).unwrap()
+    }
+
+    /// group_delivery_v1 end to end through the daemon plumbing: an admitted
+    /// group.send record is written as the golden 0x50 on the writer queue,
+    /// `record_frame` routes the golden 0x51 answers to the group lane (never
+    /// the dispatcher inbox or the host_ops_rx mirror), the FINAL settles the
+    /// record and the ring carries exactly one `group_settled`; a USB Error
+    /// frame echoing a group request id settles the next send as REFUSED.
+    #[test]
+    fn group_lane_round_trips_through_record_frame() {
+        use crate::group::{GroupLane, GroupRequest, SubmitOutcome};
+        let state = State::default();
+        {
+            let mut info = state.session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(42);
+            info.node = Some(1);
+            info.network = Some(7);
+            info.capability = Some(0x87);
+        }
+        let request = GroupRequest {
+            network: 7,
+            group: 0xFFFF,
+            priority: 3,
+            ordered: false,
+            ttl_ms: 5000,
+            hop_limit: 10,
+            payload: b"PUMP3 OVERTEMP".to_vec(),
+        };
+        let now = now_ms();
+        let Ok(SubmitOutcome::Accepted(op)) =
+            state.group_ops.submit(501, [1; 16], request.clone(), now)
+        else {
+            panic!("admitted");
+        };
+        let (tx, rx) = mpsc::sync_channel::<Outbound>(MAX_OUTBOUND);
+        let mut lane = GroupLane::default();
+        group::group_once(&state, &tx, &mut lane, now);
+        let Ok(Outbound::Seal(send)) = rx.try_recv() else {
+            panic!("expected a sealed GROUP_SEND");
+        };
+        assert_eq!(send.kind, FrameKind::HostOps);
+        assert_eq!(send.body, group_golden("07_group_send.json"));
+
+        for name in [
+            "09_group_status_admitted.json",
+            "10_group_status_final.json",
+        ] {
+            let body = group_golden(name);
+            record_frame(
+                &state,
+                &frame(FrameKind::HostOps, 0, send.request, body.clone()),
+                &body,
+                now,
+            );
+        }
+        group::group_once(&state, &tx, &mut lane, now + 1);
+        let record = state.group_ops.get(op).unwrap();
+        assert_eq!(record.state_name(), "DELIVERED");
+        {
+            let events = state.events.lock().unwrap();
+            let settled: Vec<&Event> = events
+                .iter()
+                .filter(|e| e.kind == "group_settled")
+                .collect();
+            assert_eq!(settled.len(), 1);
+            assert!(settled[0].json.contains("\"state\":\"DELIVERED\""));
+            assert!(settled[0].json.contains("\"reason\":\"GROUP_COMPLETE\""));
+            assert!(!events.iter().any(|e| e.kind == "host_ops_rx"));
+        }
+
+        // A second send the device rejects at the frame level.
+        let Ok(SubmitOutcome::Accepted(op)) =
+            state.group_ops.submit(501, [2; 16], request, now + 2)
+        else {
+            panic!("admitted");
+        };
+        group::group_once(&state, &tx, &mut lane, now + 2);
+        let Ok(Outbound::Seal(send)) = rx.try_recv() else {
+            panic!("expected a sealed GROUP_SEND");
+        };
+        let mut error = 1_u16.to_be_bytes().to_vec();
+        error.extend_from_slice(&send.request.to_be_bytes());
+        error.push(15);
+        error.extend_from_slice(b"GROUP_MALFORMED");
+        record_frame(
+            &state,
+            &frame(FrameKind::Error, 0, send.request, error.clone()),
+            &error,
+            now + 3,
+        );
+        group::group_once(&state, &tx, &mut lane, now + 4);
+        let record = state.group_ops.get(op).unwrap();
+        assert_eq!(record.state_name(), "REFUSED");
+        assert_eq!(record.reason.as_deref(), Some("GROUP_MALFORMED"));
     }
 }
