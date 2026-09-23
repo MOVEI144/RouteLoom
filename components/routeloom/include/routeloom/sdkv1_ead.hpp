@@ -47,6 +47,7 @@
 // host/routeloom-join. Every decode is allocation-free: the JoinResult
 // decode borrows its byte views from the input.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 

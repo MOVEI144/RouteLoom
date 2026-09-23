@@ -1,7 +1,5 @@
 #include "routeloom/sdkv1_ead.hpp"
 
-#include <cstring>
-
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"  // Sha256
 
