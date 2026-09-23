@@ -92,7 +92,7 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
     return replay_bounds_.count_status();
   }
   // SecurityScope::Group receive state (group-delivery.md §7): RAM-only,
-  // bounded (GroupReplayTable::kCapacity (sender, group) pairs), never
+  // bounded (GroupReplayTable::kCapacity group senders), never
   // persisted — it adds no per-peer NVS records (#37).
   const GroupReplayTable& group_replay() const noexcept { return group_replay_; }
   Status next_counter(const SecurityContext& context,

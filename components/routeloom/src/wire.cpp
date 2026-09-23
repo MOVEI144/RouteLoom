@@ -178,12 +178,20 @@ SecurityContext link_context(const Header& header) noexcept {
 }
 
 SecurityContext end_context(const Header& header) noexcept {
-  // GROUP_DATA is end-protected under the group scope: the receiver is the
-  // group address, and every key holder may open it (group-delivery.md §7).
-  const SecurityScope scope = header.type == FrameType::GroupData
-                                  ? SecurityScope::Group
-                                  : SecurityScope::EndToEnd;
-  return SecurityContext{scope, header.network, header.origin,
+  // GROUP_DATA is end-protected under the group scope, and every key holder
+  // may open it (group-delivery.md §7). The context's receiver is the fixed
+  // site-group domain (kBroadcastNodeId), NOT the destination group: one key,
+  // one counter space and one receive replay window per (sender, epoch)
+  // cover every group that sender addresses. The destination group is still
+  // authenticated — it is part of the end AAD. Keying per group instead would
+  // give each receiver one replay entry per (sender, group) seen anywhere in
+  // the tree (relays open non-member traffic too), exhausting the bounded
+  // table on sites that use many groups.
+  if (header.type == FrameType::GroupData) {
+    return SecurityContext{SecurityScope::Group, header.network, header.origin,
+                           kBroadcastNodeId, header.end_epoch};
+  }
+  return SecurityContext{SecurityScope::EndToEnd, header.network, header.origin,
                          header.destination, header.end_epoch};
 }
 

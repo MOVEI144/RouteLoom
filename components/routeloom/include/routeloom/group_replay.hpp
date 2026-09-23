@@ -3,13 +3,16 @@
 // Bounded, RAM-only receive replay state for SecurityScope::Group contexts
 // (docs/design/sdk-v1/group-delivery.md §7, sdk-v1/03 §6.2/§6.5).
 //
-// One entry per (network, sender, group address): the sender's current
+// One entry per (network, sender, context receiver). The wire layer uses one
+// site-group context per sender (receiver = kBroadcastNodeId; the destination
+// group is authenticated in the end AAD), so a site needs one entry per group
+// SENDER however many groups it uses. Each entry holds the sender's current
 // epoch plus a 64-counter sliding window. Rules:
 //   * a lower epoch than the entry's is refused (a previous sender boot);
 //   * a higher epoch restarts the window (the sender rebooted: new key);
 //   * inside one epoch a counter is accepted once — above the window
 //     maximum it slides the window, below the window it is refused;
-//   * a NEW (sender, group) pair when the table is full is REFUSED and
+//   * a NEW (sender, context) pair when the table is full is REFUSED and
 //     counted, never admitted by evicting another: eviction would re-open
 //     the evicted pair to replay (sdk-v1/03 §6.2).
 // Nothing is persisted, so no per-peer NVS state is added (#37): after a

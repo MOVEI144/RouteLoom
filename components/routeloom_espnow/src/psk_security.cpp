@@ -175,7 +175,9 @@ bool DevelopmentPskSecurityProvider::same_context(
 
 // One key per context: HMAC-SHA-256(PSK, scope | network | sender | receiver
 // | epoch). For SecurityScope::Group (group-delivery.md §7) that is the
-// development "group context key" of (origin, group address, origin epoch):
+// development "group context key" of (origin, site group domain =
+// kBroadcastNodeId, origin epoch) — the destination group is bound by the end
+// AAD, not the key:
 // every node holding the network PSK derives it, and each SENDER has its own
 // key. Nonce uniqueness therefore needs only per-context counters (the TX
 // lease below), exactly as for link/end contexts — two senders never share a
@@ -237,7 +239,7 @@ DevelopmentPskSecurityProvider::tx_context(
       static_cast<std::uint32_t>(peer_fingerprint ^ (peer_fingerprint >> 32U));
   identity.key_epoch = context.epoch;
   // Scope tag in the lease identity: link 0, end-to-end 2, group 4 (the
-  // group TX counter is the source's persisted per-(group, epoch) lease, so
+  // group TX counter is the source's persisted per-epoch site-group lease, so
   // a reboot inside one epoch can never reissue a group counter).
   const auto scope_tag = static_cast<std::uint8_t>(
       context.scope == SecurityScope::EndToEnd
@@ -479,7 +481,7 @@ Status DevelopmentPskSecurityProvider::open(
 
   if (context.scope == SecurityScope::Group) {
     // Group receive replay is RAM-only and bounded (group_replay.hpp): no
-    // persisted floor/window per (sender, group), so group traffic adds no
+    // persisted floor/window per group sender, so group traffic adds no
     // NVS records (#37). A full table refuses NEW senders (counted).
     status = group_replay_.accept(context, counter);
   } else {

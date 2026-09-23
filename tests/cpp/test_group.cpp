@@ -281,7 +281,9 @@ void test_group_security_scope() {
   CHECK_OK(wire::seal_group(plain, 1, source, sealed));
   CHECK(source.contexts.size() == 1);
   CHECK(source.contexts[0].scope == SecurityScope::Group);
-  CHECK(source.contexts[0].sender == 1 && source.contexts[0].receiver == group_address(7) &&
+  // The key domain is the sender's site-group context, not the destination
+  // group (which the end AAD authenticates — see the retarget check below).
+  CHECK(source.contexts[0].sender == 1 && source.contexts[0].receiver == kBroadcastNodeId &&
         source.contexts[0].epoch == 9);
   // Shaped like a frame the source received: forward() spends one hop.
   CHECK(sealed.header.hop_remaining == 11 && sealed.header.next_hop == 1);
@@ -360,6 +362,41 @@ void test_group_replay_table() {
   CHECK(full.capacity_refusals() == 1);
   CHECK(full.accept(SecurityContext{SecurityScope::Group, 1, 100, group_address(1), 1}, 0).code ==
         StatusCode::ReplayRejected);  // existing pairs keep their state
+}
+
+void test_many_groups_share_one_sender_context() {
+  // Regression: every node opens every GROUP_DATA it relays, member or not,
+  // so the replay table must not grow with the number of groups a site uses.
+  // One sender addressing more groups than the table holds stays one entry,
+  // with distinct counters under its single key.
+  ScopeRecorder source;
+  GroupReplayTable table;
+  const std::size_t groups = GroupReplayTable::kCapacity + 8;
+  for (std::size_t i = 0; i < groups; ++i) {
+    wire::PlainFrame plain{};
+    plain.header.type = FrameType::GroupData;
+    plain.header.flags = wire::kFlagEndProtected;
+    plain.header.delivery = DeliveryClass::Reliable;
+    plain.header.hop_remaining = 10;
+    plain.header.network = 1;
+    plain.header.origin = 1;
+    plain.header.destination = group_address(static_cast<GroupId>(i + 1));
+    plain.header.previous_hop = 1;
+    plain.header.next_hop = 1;
+    plain.header.message = MessageId{101, kGroupSequenceFlag | (i + 1)};
+    plain.header.remaining_deadline_ms = 5000;
+    plain.header.original_lifetime_ms = 5000;
+    plain.header.link_epoch = 1;
+    plain.header.end_epoch = 9;
+    plain.payload[0] = 0x02;
+    plain.payload_size = 1;
+    wire::LinkOpenedFrame sealed{};
+    CHECK_OK(wire::seal_group(plain, 1, source, sealed));
+    CHECK(source.contexts.back().receiver == kBroadcastNodeId);
+    CHECK_OK(table.accept(source.contexts.back(), sealed.header.end_counter));
+  }
+  CHECK(table.size() == 1);
+  CHECK(table.capacity_refusals() == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1405,6 +1442,7 @@ int main(int argc, char** argv) {
     test_group_golden_payloads();
     test_group_security_scope();
     test_group_replay_table();
+    test_many_groups_share_one_sender_context();
     test_small_tree_all();
     test_membership_counts();
     test_profile_and_source_rules();

@@ -493,16 +493,24 @@ fn link_context(header: &Header) -> SecurityContext {
 }
 
 fn end_context(header: &Header) -> SecurityContext {
+    // GROUP_DATA is end-protected under the group scope (C++ end_context):
+    // the context receiver is the fixed site-group domain, so one key,
+    // counter space and replay window per (sender, epoch) cover every group;
+    // the destination group stays authenticated through the end AAD.
+    let group = header.frame_type == FrameType::GroupData;
     SecurityContext {
-        // GROUP_DATA is end-protected under the group scope (C++ end_context).
-        scope: if header.frame_type == FrameType::GroupData {
+        scope: if group {
             SecurityScope::Group
         } else {
             SecurityScope::EndToEnd
         },
         network: header.network,
         sender: header.origin,
-        receiver: header.destination,
+        receiver: if group {
+            BROADCAST_NODE_ID
+        } else {
+            header.destination
+        },
         epoch: header.end_epoch,
     }
 }

@@ -182,7 +182,7 @@
     "dedup_key": ["requester", "request_id", "kind"]
   },
   "group_data": {
-    "frame_protection": "link per hop + end protection under the group scope (sender = origin, receiver = group address)",
+    "frame_protection": "link per hop + end protection under the group scope (sender = origin, receiver = broadcast node id as the site group domain; the destination group is authenticated by the end AAD)",
     "destination": "group address = group_address_base | group_id; group 0 reserved; group_all maps to the broadcast node id",
     "group_address_base": "0xFFFFFFFFFFFF0000",
     "group_all": 65535,

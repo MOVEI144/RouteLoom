@@ -88,7 +88,7 @@ recordのdestinationはNeighbor／Discoverでrequester、Replyでtargetに一致
 
 新規type 25／26を割り当てた（headerは不変、[設計](../design/sdk-v1/group-delivery.md)）。gateway-scoped profileでのみ使い、送信元は設定済みroute gatewayに限る。
 
-**GROUP_DATA**はhopごとのlink保護に加え、end保護を**group scope**（`SecurityScope::Group`＝2、sender＝origin、receiver＝group address）で行う。headerの意味：
+**GROUP_DATA**はhopごとのlink保護に加え、end保護を**group scope**（`SecurityScope::Group`＝2、sender＝origin、receiver＝`kBroadcastNodeId`（site group domain）。宛先groupはend AADで認証）で行う。headerの意味：
 
 | field | 値 |
 |---|---|

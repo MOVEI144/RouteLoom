@@ -129,14 +129,14 @@ radio.md §14は受理済みDATAの確認を「その仕事への課金」とす
 
 ### 8.1 scopeとnonce
 
-- `SecurityScope::Group`（2）を追加した。GROUP_DATAのend保護contextは`(Group, network, sender＝origin, receiver＝group address, epoch＝end_epoch)`。AEAD nonceは既存と同じく`scope u8 ‖ 方向 u8 ‖ epoch u32 ‖ counter u48`で、scope byteが違うのでunicastのend nonceと重ならない。
+- `SecurityScope::Group`（2）を追加した。GROUP_DATAのend保護contextは`(Group, network, sender＝origin, receiver＝kBroadcastNodeId（site group domain）, epoch＝end_epoch)`。宛先groupはcontextではなくend AADで認証する（改ざんすると認証失敗）。contextをgroupごとにすると、全nodeが非member宛のframeも開くため、受信replay表が「site内で使われるgroup数×sender数」に比例して埋まり、多group運用で新しいgroupが恒久的に拒否される。senderごと1 contextにすれば鍵・counter空間・replay窓は(sender, epoch)ごとに1つで済む。AEAD nonceは既存と同じく`scope u8 ‖ 方向 u8 ‖ epoch u32 ‖ counter u48`で、scope byteが違うのでunicastのend nonceと重ならない。
 - 送信元はend層を**1回だけ**封止する（`wire::seal_group`）。全ての子・全てのroundは同じend暗号文を運び、link層だけをhopごとに作り直す（link counterは通常どおり毎回新しい）。同じend nonceで**別の平文**を封止することはないので、nonce再使用は起きない。
-- 開発PSK（`components/routeloom_espnow`）は(sender, group address, epoch)ごとの鍵をHMACで導出し、TX counter leaseの方向tagを4（group）にして、unicast end（2）とcounter空間を分ける。test security（`tests/cpp/test_security.hpp`）も同じscopeを実装する。
+- 開発PSK（`components/routeloom_espnow`）は(sender, site group domain, epoch)ごと（＝senderごと）の鍵をHMACで導出し、TX counter leaseの方向tagを4（group）にして、unicast end（2）とcounter空間を分ける。test security（`tests/cpp/test_security.hpp`）も同じscopeを実装する。
 - 受信は`wire::open_group`で開く（宛先への束縛は無い）。`open_end`はGROUP_DATAを拒否し、unicast経路でgroup frameを開けない。GROUP_REPORTはROUTE_UPDATEと同じlink保護のみの1hop frame。
 
 ### 8.2 replay
 
-- group scopeの受信replayは`GroupReplayTable`（RAMのみ、16組×64 counterの窓）で判定する。表が満杯なら新しい(sender, group)組を**拒否**し（既存組を追い出して窓を失うことはしない）、古いepochは拒否する。
+- group scopeの受信replayは`GroupReplayTable`（RAMのみ、16 sender×64 counterの窓。group数に依存しない）で判定する。表が満杯なら新しいsenderを**拒否**し（既存組を追い出して窓を失うことはしない）、古いepochは拒否する。
 - 永続化しない（#37：ピアごとのNVS recordを増やさない）。受信側の再起動でこの表は消えるが、group frameはhopごとにlink保護されており、link層のreplay床（既存の永続guard）は残るので、捕獲したframeをそのまま再送しても受理されない。
 - 重複排除（§4）はreplay判定とは独立に、開封前のheaderで行う。
 
