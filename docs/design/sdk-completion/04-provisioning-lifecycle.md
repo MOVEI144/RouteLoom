@@ -35,7 +35,7 @@ Existing namespaces (observed in [main.cpp](../../../firmware/reference_node/mai
 |---|---|---|
 | `rlboot` | u32 boot session | 1 entry/boot |
 | `rlcounter` | `CounterRecord` leases (256-block reservation) | ~1 commit per 256 sends per context |
-| `rlreplay` | `r*` window (40 B) + `f*` floor (24 B) per peer pair | window commit per accepted frame; floor per epoch advance |
+| `rlreplay` | `r*` window (40 B) + `f*` floor (24 B) per peer pair | window (accepted-ceiling) commit per 65 counters advanced per context since #30 (was: per accepted frame); floor per epoch advance |
 | `rlplan` | migration plan/commit/active | rare |
 | `rlmauth` | authority ledger, 2×156 B slots | per committed authority operation |
 | `rlcfg` | config journal, 2×4096 B slots | per config phase advance (≤2 updates/min by admission cap) |
@@ -272,12 +272,12 @@ Write amplification per event (committed blobs; each `write()` is one `nvs_set_b
 |---|---|---|
 | Boot | 1 (`rlboot`) + ≤P floor commits | ~1 + ~2/peer |
 | TX traffic | 1 commit per 256-counter lease | ~2/context-block |
-| RX traffic | **1 window commit per accepted frame** ([replay.cpp:218-224](../../../components/routeloom/src/replay.cpp)) | ~2/frame — the dominant wear term under sustained load |
+| RX traffic | 1 ceiling commit per 65 counters advanced per context ([replay.cpp](../../../components/routeloom/src/replay.cpp); before #30: **1 window commit per accepted frame**) | ~2/65 per frame at a destination (was ~2/frame, the dominant wear term under sustained load) |
 | Config update | 2 slots × 2 phases = 4 writes of `record_len` (≈152 B–2.2 kB worst case) | ~0.2–2.2 pages/update |
 | Trust manifest apply | 2 slots × 2 phases = 4 writes ≤2048 B | ~0.5–2 pages |
 | Device re-credential | 2 slots × 2 phases ≤1024 B | <1 page |
 
-Endurance arithmetic (ideal uniform leveling, ~6 pages): the sustainable entry-write budget is on the order of `126 entries × 6 pages × 100 k erases` — tens of millions of entries, or equivalently ~600 k total page-erases. Rotations and manifests at operator cadence (even daily) are noise — under ~10⁴ page-equivalents/year. The honest drivers: sustained RX traffic (per-frame commits) and sustained max-rate config updates (2/min cap; a worst-case record is ~2.2 kB ⇒ ~2 page-equivalents per update ⇒ ~4/min ⇒ the erase budget is measurable in months of continuous abuse — and a deployment that actually sustains the cap has bigger problems than wear). Conclusion: **the lifecycle this document adds is wear-trivial; the pre-existing per-frame commit design is the wear ceiling** — extend `WriteStats` to the new stores and measure, and treat the config acceptance cap as a wear bound too. The epoch bound and the endurance bound are independent: a quiet node lives decades and never sees either; a busy bench hits the epoch bound first (reboot-driven), a chatty node hits endurance first.
+Endurance arithmetic (ideal uniform leveling, ~6 pages): the sustainable entry-write budget is on the order of `126 entries × 6 pages × 100 k erases` — tens of millions of entries, or equivalently ~600 k total page-erases. Rotations and manifests at operator cadence (even daily) are noise — under ~10⁴ page-equivalents/year. The honest drivers: sustained RX traffic (per-frame commits) and sustained max-rate config updates (2/min cap; a worst-case record is ~2.2 kB ⇒ ~2 page-equivalents per update ⇒ ~4/min ⇒ the erase budget is measurable in months of continuous abuse — and a deployment that actually sustains the cap has bigger problems than wear). Conclusion: **the lifecycle this document adds is wear-trivial; the pre-existing per-frame commit design was the wear ceiling** (since #30 the replay term is ~1/65 of that — budget in [crash-time-resources §7](../../spec/crash-time-resources.md)) — extend `WriteStats` to the new stores and measure, and treat the config acceptance cap as a wear bound too. The epoch bound and the endurance bound are independent: a quiet node lives decades and never sees either; a busy bench hits the epoch bound first (reboot-driven), a chatty node hits endurance first.
 
 ## 4.10 Threat model and deployment tiers
 

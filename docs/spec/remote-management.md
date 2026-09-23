@@ -61,3 +61,11 @@ maintenance operationにはID、Authority世代、対象、保護到達集合、
 複数daemonからのOTA／relay-off／survey／全体切替を同じ排他へ接続する。期限切れlockを理由に対象が復帰したと推定して別中継を止めない。到達/再起動を確認できなければOUTAGE_UNRESOLVED。後継Authorityも記録を引き継ぐ。古いtopologyなら開始を保留する。
 
 mesh OTAは初期基準線に含めず、まずUSBによるimage更新とstore互換・電断を検査する。仕様は将来機能の実装条件として維持する。
+
+## 10. 設定journalのflash摩耗（運用注記）
+
+RCC1 Small Remote ConfigのConfigJournalは受理1件ごとに2スロット耐電断commitを行い、概算7〜8回のNVS commitを消費する（[電源断契約 §7](crash-time-resources.md)）。摩耗を制限するのはtargetの受理rate上限（1/min＋burst1、60秒で最大2件）だけで、上限一杯の自動投入を続けると既定24KiB NVSで概算1〜2年で寿命に達する。人手による変更頻度では問題にならないため、次を運用規則とする（issue #57）。
+
+- 監視や自動化から周期的に設定を書き戻さない。GETでdesired/activeを比較し、一致していればapplyを発行しない。
+- 複数項目の変更は一つのrevisionへまとめる。
+- 遠隔設定を高頻度に使う配備は、NVS partitionを拡大するか実機計測で摩耗予算を確認してから導入する。
