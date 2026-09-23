@@ -112,13 +112,13 @@ pub(crate) fn finish_record(mut out: Vec<u8>) -> Vec<u8> {
 /// device `read_head`): head fields, exact length, committed seal, CRC,
 /// then schema (Unsupported). Returns a reader positioned after the seal
 /// and the body slice without the CRC.
-pub(crate) fn read_record<'a>(
-    record: &'a [u8],
+pub(crate) fn read_record(
+    record: &[u8],
     magic: u32,
     seal_committed: u32,
     min_len: usize,
     max_len: usize,
-) -> Result<Reader<'a>> {
+) -> Result<Reader<'_>> {
     let mut reader = Reader::new(record);
     let got_magic = reader.u32()?;
     let format = reader.u16()?;
@@ -146,7 +146,7 @@ pub(crate) fn read_record<'a>(
     Ok(Reader::new(&record[..used_len - 4]).skip(SEALED_HEAD_SIZE))
 }
 
-impl<'a> Reader<'a> {
+impl Reader<'_> {
     pub(crate) fn skip(mut self, count: usize) -> Self {
         self.pos = count.min(self.data.len());
         self
