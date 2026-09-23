@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -111,6 +112,20 @@ class SimNetwork {
   // lossless for the deterministic routing tests.
   bool (*drop_frame)(const Pending& pending) = nullptr;
 
+  // Long simulations (issue #59): sightings can be switched off so a
+  // multi-minute 100-node run does not grow an unbounded vector; the
+  // per-sender route-control tally below stays on regardless.
+  bool record_sights{true};
+
+  // Per-sender tally of route-control TX attempts (ROUTE_UPDATE,
+  // SEQNO_REQUEST, ROUTE_REQUEST) — delivered or not, every attempt costs
+  // air time. Encoded frame bytes, for the §14 airtime estimate.
+  struct TxTally {
+    std::uint64_t frames{0};
+    std::uint64_t bytes{0};
+  };
+  std::map<routeloom::NodeId, TxTally> route_control_tx;
+
   // Returns the number of undelivered frames (link down, node missing, or
   // dropped by the loss hook).
   std::size_t flush(routeloom::MonotonicMs now) {
@@ -123,12 +138,23 @@ class SimNetwork {
         ++dropped;
         continue;
       }
+      if (pending.frame.size() > 4) {
+        const auto type = static_cast<routeloom::FrameType>(pending.frame[4]);
+        if (type == routeloom::FrameType::RouteUpdate ||
+            type == routeloom::FrameType::SeqnoRequest ||
+            type == routeloom::FrameType::RouteRequest) {
+          auto& tally = route_control_tx[pending.from];
+          ++tally.frames;
+          tally.bytes += pending.frame.size();
+        }
+      }
       const bool dropped_by_hook = drop_frame != nullptr && drop_frame(pending);
       const bool success = !dropped_by_hook && connected(pending.from, pending.to) &&
                            nodes.count(pending.to) != 0;
       if (success) {
         FrameSight sight{};
-        if (sight_frame(routeloom::ByteView{pending.frame.data(), pending.frame.size()}, sight)) {
+        if (record_sights &&
+            sight_frame(routeloom::ByteView{pending.frame.data(), pending.frame.size()}, sight)) {
           sights.push_back(sight);
         }
       } else {
@@ -216,6 +242,9 @@ struct SimWorld {
   // Epochs stamped on nodes added afterwards (Wire v2: 32-bit).
   std::uint32_t link_epoch{1};
   std::uint32_t end_epoch{1};
+  // Optional per-world config hook applied to every node added afterwards
+  // (e.g. the gateway-scoped routing profile).
+  std::function<void(routeloom::NodeConfig&)> configure;
 
   routeloom::MeshNode* add(routeloom::NodeId id, routeloom::RouteGeneration generation = 1,
                            std::uint32_t adv_ms = 100, std::uint32_t life_ms = 1000) {
@@ -229,6 +258,7 @@ struct SimWorld {
     config.end_epoch = end_epoch;
     config.route_advertisement_period_ms = adv_ms;
     config.route_lifetime_ms = life_ms;
+    if (configure) configure(config);
     security[id] = std::make_unique<routeloom_test::TestSecurity>();
     observers[id] = std::make_unique<CapturingObserver>();
     radios[id] = std::make_unique<SimRadio>(net, id);
