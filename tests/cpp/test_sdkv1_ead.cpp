@@ -369,7 +369,7 @@ CertType cert_type_named(const std::string& name) {
 }
 
 // P3-1: EAD_2/EAD_3 carry the peer's RLCW1 certificate in the critical
-// Credential item (label 65541) ahead of the message item; the certificate
+// Credential item (label 65541) after the message item; the certificate
 // must match the kid the same message's ID_CRED_x names.
 void valid_field_credential(const Fields& f) {
   const Bytes ead = hex(f, "ead_hex");

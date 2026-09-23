@@ -69,7 +69,7 @@ enum class JoinEad : std::uint32_t {
   // ID_CRED_x = {13 (kcwt): CWT} by value, so ID_CRED_x is the kid
   // (SHA-256 of the cnf COSE_Key, as in the P2-1 backend) and the full
   // RLCW1 certificate rides this critical item — the SiteCert in EAD_2, the
-  // DevCert in EAD_3 — ahead of the message's own item.
+  // DevCert in EAD_3 — after the message's own item.
   Credential = 65541,
 };
 
@@ -302,12 +302,14 @@ Status join_ead_item_encode(JoinEad label, ByteView value,
 Status join_ead_find(ByteView ead, JoinEad expected, ByteView& value) noexcept;
 
 // --- Credential item (label 65541, P3-1) ------------------------------------------
-//   EAD_2 = Credential(SiteCert) || SiteOffer
-//   EAD_3 = Credential(DevCert)  || JoinRequest
+//   EAD_2 = SiteOffer   || Credential(SiteCert)
+//   EAD_3 = JoinRequest || Credential(DevCert)
 // The Credential value is one canonical RLCW1 certificate (1..256 B), bstr-
 // wrapped like every item: 3a 00 01 00 04 58/59 len cert. The field must
-// hold exactly these two critical items, Credential first, once each
-// (padding skipped); EAD_1 and EAD_4 never carry a Credential.
+// hold exactly these two critical items, the message item first, once each
+// (padding skipped); EAD_1 and EAD_4 never carry a Credential. The order
+// matches the P3-3 Site Authority (routeloom_join::join_ead_credential_item
+// appended after the message item; protocol/edhoc-interop transcripts).
 // libedhoc hands EAD_2/EAD_3 to the application before it authenticates the
 // peer (edhoc_classic_message_2.c step 9 before step 10,
 // edhoc_classic_message_3.c step 6 before authenticate_peer), so the
@@ -325,5 +327,18 @@ Status join_ead_find_with_credential(ByteView ead, JoinEad expected, ByteView& c
 // the DevCert under the Device CA.
 Status join_credential_check(ByteView credential, CertType type, ByteView kid,
                              CertClaims& out) noexcept;
+
+// --- DAMS (03 §2.1) — TODO(P5): not derived on the device yet ----------------------
+// The device does not export DAMS in P3-1/P3-2. The P3-3 Site Authority uses
+// EDHOC_Exporter(32771, context, 32) with a PROVISIONAL context
+// (routeloom_join::dams_exporter_context, protocol/edhoc-interop/
+// method0_join.txt): the deterministic CBOR array
+//   ["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]
+// When the device derives DAMS it must build exactly these bytes; pin both
+// sides in a shared vector first. The constants below are placeholders so
+// the TODO has one findable name.
+constexpr std::uint64_t kTodoDamsExporterLabel = 32771;
+constexpr std::size_t kTodoDamsSize = 32;
+constexpr std::uint64_t kTodoDamsExporterPurpose = 4;  // authority channel (03 §2 rule 3)
 
 }  // namespace routeloom::sdkv1

@@ -49,7 +49,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     }
   }
 
-  // P3-1: EAD_2/EAD_3 with the Credential item (label 65541) first.
+  // P3-1: EAD_2/EAD_3 with the Credential item (label 65541) after the message item.
   for (const JoinEad label : {JoinEad::Offer, JoinEad::Request}) {
     ByteView credential{};
     ByteView value{};

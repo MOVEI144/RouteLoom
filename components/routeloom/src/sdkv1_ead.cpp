@@ -840,7 +840,7 @@ Status join_ead_find_with_credential(const ByteView ead, const JoinEad expected,
   if (ead.data == nullptr || ead.size == 0 || ead.size > kJoinEadFieldMax) {
     return malformed("ead field bounds");
   }
-  // 0: nothing yet, 1: Credential seen, 2: Credential then the message item.
+  // 0: nothing yet, 1: message item seen, 2: message item then Credential.
   int seen = 0;
   ByteView found_credential{};
   ByteView found_value{};
@@ -860,16 +860,16 @@ Status join_ead_find_with_credential(const ByteView ead, const JoinEad expected,
     if (!negative && argument == 0) continue;  // padding: ignored (RFC 9528 §3.8.1)
     if (!negative) return malformed("ead unexpected item");
     const std::uint64_t label = argument + 1U;
-    const JoinEad want = seen == 0 ? JoinEad::Credential : expected;
+    const JoinEad want = seen == 0 ? expected : JoinEad::Credential;
     if (seen == 2 || label != static_cast<std::uint32_t>(want)) {
-      return malformed(seen == 2 ? "ead item after the message item"
-                                 : "ead credential missing or out of order");
+      return malformed(seen == 2 ? "ead item after the credential"
+                                 : "ead message item or credential out of order");
     }
     if (!has_value || !value_size_ok(want, item_value.size)) return malformed("ead value size");
     if (seen == 0) {
-      found_credential = item_value;
-    } else {
       found_value = item_value;
+    } else {
+      found_credential = item_value;
     }
     ++seen;
   }

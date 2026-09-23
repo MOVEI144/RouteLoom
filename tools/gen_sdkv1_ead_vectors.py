@@ -7,7 +7,7 @@ Authorization Data items of docs/design/sdk-v1/02-zero-touch-join.md
 and the RemovalNotice of 04-removal-revocation.md §6.1, as resolved in
 02 "Resolved in implementation (P2-3)" and protocol/sdkv1-golden/ead/README.md,
 plus the Credential item (label 65541, P3-1: the RLCW1 certificate of a
-kid-referenced ID_CRED_x, ahead of SiteOffer in EAD_2 / JoinRequest in EAD_3).
+kid-referenced ID_CRED_x, after SiteOffer in EAD_2 / JoinRequest in EAD_3).
 It shares no code with the C++ codec (components/routeloom/src/sdkv1_ead.cpp)
 or the Rust mirror (host/routeloom-join); all three must agree on every byte.
 
@@ -643,14 +643,14 @@ def main() -> None:
     site_kid, dev_kid = base.kid(sak_pub), base.kid(device_pub)
     for name, cert, cert_type, kid_value, item, expected, pad, note in (
             ("ead2_sitecert_offer", sitecert, "site", site_kid, offer_item, "offer", False,
-             "EAD_2: Credential(SiteCert) then SiteOffer"),
+             "EAD_2: SiteOffer then Credential(SiteCert)"),
             ("ead3_devcert_request", devcert, "device", dev_kid, request_item, "request", False,
-             "EAD_3: Credential(DevCert) then JoinRequest"),
+             "EAD_3: JoinRequest then Credential(DevCert)"),
             ("ead3_devcert_request_padding", devcert, "device", dev_kid, request_item, "request",
              True, "padding between and after the two items is ignored")):
         cred_item = ead_item("credential", cert)
-        ead = (cred_item + cbor_int(0) + cbor_bstr(b"\x00" * 3) + item + cbor_int(0)) if pad \
-            else cred_item + item
+        ead = (item + cbor_int(0) + cbor_bstr(b"\x00" * 3) + cred_item + cbor_int(0)) if pad \
+            else item + cred_item
         value = site_offer(offer) if expected == "offer" else join_request(request)
         good(name, "ead_field_credential",
              dict(ead_hex=ead.hex(), expected=expected, credential_hex=cert.hex(),
@@ -663,23 +663,23 @@ def main() -> None:
 
     site_item = ead_item("credential", sitecert)
     cbad("ead2_missing_credential", offer_item, "EAD_2 needs the SiteCert credential")
-    cbad("ead2_reversed_order", offer_item + site_item, "the Credential item comes first")
+    cbad("ead2_credential_first", site_item + offer_item, "the SiteOffer item comes first")
     cbad("ead2_credential_only", site_item, "the SiteOffer item is required")
-    cbad("ead2_credential_twice", site_item + site_item + offer_item, "one Credential")
-    cbad("ead2_offer_twice", site_item + offer_item + offer_item, "one SiteOffer")
-    cbad("ead2_extra_intent", site_item + offer_item + intent_item, "no other item")
-    cbad("ead2_request_instead", site_item + request_item, "EAD_2 carries a SiteOffer")
+    cbad("ead2_credential_twice", offer_item + site_item + site_item, "one Credential")
+    cbad("ead2_offer_twice", offer_item + offer_item + site_item, "one SiteOffer")
+    cbad("ead2_extra_intent", offer_item + site_item + intent_item, "no other item")
+    cbad("ead2_request_instead", request_item + site_item, "EAD_2 carries a SiteOffer")
     cbad("ead2_credential_non_critical",
-         cbor_int(LABELS["credential"]) + cbor_bstr(sitecert) + offer_item,
+         offer_item + cbor_int(LABELS["credential"]) + cbor_bstr(sitecert),
          "the Credential item is critical")
-    cbad("ead2_credential_empty", cbor_int(-LABELS["credential"]) + cbor_bstr(b"") + offer_item,
+    cbad("ead2_credential_empty", offer_item + cbor_int(-LABELS["credential"]) + cbor_bstr(b""),
          "a certificate is 1..256 B")
     cbad("ead2_credential_oversize",
-         cbor_int(-LABELS["credential"]) + cbor_bstr(b"\x00" * 257) + offer_item,
+         offer_item + cbor_int(-LABELS["credential"]) + cbor_bstr(b"\x00" * 257),
          "a certificate is at most 256 B")
-    cbad("ead2_credential_no_value", cbor_int(-LABELS["credential"]) + offer_item,
+    cbad("ead2_credential_no_value", offer_item + cbor_int(-LABELS["credential"]),
          "the Credential item carries a value")
-    cbad("ead3_trailing_byte", ead_item("credential", devcert) + request_item + b"\xff",
+    cbad("ead3_trailing_byte", request_item + ead_item("credential", devcert) + b"\xff",
          "trailing byte", expected="request")
 
     # join_credential_check: the certificate decodes as the right type and its

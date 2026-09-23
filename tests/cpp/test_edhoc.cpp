@@ -1185,8 +1185,8 @@ struct DeviceEad final : edhoc::EadHandler {
       if (!routeloom::sdkv1::join_request_encode(request, request_value).ok()) {
         return Status::error(StatusCode::InternalError, "request");
       }
-      items[count++] = ead_item(JoinEad::Credential, devcert.view());
       items[count++] = ead_item(JoinEad::Request, request_value.view());
+      items[count++] = ead_item(JoinEad::Credential, devcert.view());
     }
     return Status::success();
   }
@@ -1242,8 +1242,8 @@ struct AuthorityEad final : edhoc::EadHandler {
       if (!routeloom::sdkv1::site_offer_encode(offer, offer_value).ok()) {
         return Status::error(StatusCode::InternalError, "offer");
       }
-      items[count++] = ead_item(JoinEad::Credential, credential_cert->view());
       items[count++] = ead_item(JoinEad::Offer, offer_value.view());
+      items[count++] = ead_item(JoinEad::Credential, credential_cert->view());
     } else if (message == 4) {
       items[count++] = ead_item(JoinEad::Result, result_value.view());
     }
@@ -1285,16 +1285,49 @@ struct AuthorityEad final : edhoc::EadHandler {
   JoinCredentials& creds_;
 };
 
+// `widest` issues every certificate with its variable-width claims at their
+// maximum encoded width (u16/u32 fields all-ones; the role stays the one the
+// SitePackage names, a 1-byte value either way), so the
+// arena high-water below covers the largest certificates a join can carry.
+routeloom::sdkv1::CertClaims join_devcert_claims(const bool widest) {
+  routeloom::sdkv1::CertClaims c = devcert_claims();
+  if (widest) {
+    c.model = 0xFFFF;
+    c.hw_rev = 0xFF;
+    c.serial = 0xFFFFFFFFU;
+  }
+  return c;
+}
+
+routeloom::sdkv1::CertClaims join_sitecert_claims(const bool widest) {
+  routeloom::sdkv1::CertClaims c = sitecert_claims();
+  if (widest) c.serial = 0xFFFFFFFFU;  // network/epoch stay those of the SiteOffer
+  return c;
+}
+
+routeloom::sdkv1::CertClaims join_membercert_claims(const bool widest) {
+  routeloom::sdkv1::CertClaims c = membercert_claims();
+  if (widest) {
+    c.assignment_generation = 0xFFFFFFFFU;
+    c.serial = 0xFFFFFFFFU;
+  }
+  return c;
+}
+
 struct JoinFixture {
-  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> devcert = issue(devcert_claims(), device_ca());
-  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> sitecert = issue(sitecert_claims(), site_ca());
-  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> membercert = issue(membercert_claims(), sak());
+  explicit JoinFixture(const bool widest = false)
+      : devcert(issue(join_devcert_claims(widest), device_ca())),
+        sitecert(issue(join_sitecert_claims(widest), site_ca())),
+        membercert(issue(join_membercert_claims(widest), sak())) {
+    CHECK(devcert.size > 0 && sitecert.size > 0 && membercert.size > 0);
+    CHECK(routeloom::sdkv1::cert_subject_kid(join_devcert_claims(widest), device_kid).ok());
+    CHECK(routeloom::sdkv1::cert_subject_kid(join_sitecert_claims(widest), sak_kid).ok());
+  }
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> devcert;
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> sitecert;
+  routeloom::ByteBuffer<routeloom::sdkv1::kRlcw1CertMax> membercert;
   routeloom::Digest256 device_kid{};
   routeloom::Digest256 sak_kid{};
-  JoinFixture() {
-    CHECK(routeloom::sdkv1::cert_subject_kid(devcert_claims(), device_kid).ok());
-    CHECK(routeloom::sdkv1::cert_subject_kid(sitecert_claims(), sak_kid).ok());
-  }
 };
 
 bool encode_allow(const JoinFixture& fx, routeloom::ByteBuffer<routeloom::sdkv1::kJoinResultMax>& out) {
@@ -1313,8 +1346,8 @@ bool encode_allow(const JoinFixture& fx, routeloom::ByteBuffer<routeloom::sdkv1:
   return routeloom::sdkv1::join_result_encode(result, out).ok();
 }
 
-void test_join_profile_with_ead() {
-  JoinFixture fx;
+void test_join_profile_with_ead(const bool widest) {
+  JoinFixture fx(widest);
   JoinCredentials device_creds(fx.devcert, fx.device_kid, device_key().priv,
                                routeloom::sdkv1::CertType::Site, site_ca().pub);
   JoinCredentials authority_creds(fx.sitecert, fx.sak_kid, sak().priv,
@@ -1355,10 +1388,11 @@ void test_join_profile_with_ead() {
                                             device_key().pub, false, member, verified)
             .ok());
   CHECK(verified);
-  std::printf("zero-touch join (method 0, kid + certificate in EAD): message_1 %zu B, "
+  std::printf("zero-touch join (method 0, kid + certificate in EAD%s): message_1 %zu B, "
               "message_2 %zu B, message_3 %zu B, message_4 %zu B (DevCert %zu B, SiteCert %zu B, "
               "MemberCert %zu B)\n",
-              t.m1.size(), t.m2.size(), t.m3.size(), t.m4.size(), fx.devcert.size,
+              widest ? ", widest certificates" : "", t.m1.size(), t.m2.size(), t.m3.size(),
+              t.m4.size(), fx.devcert.size,
               fx.sitecert.size, fx.membercert.size);
   // Transport budgets (02 §5.3/§6, 02 §5.4): m1 with the 2-byte head and
   // the cookie is one RLD1 frame; every message fits the 960 B ceiling.
@@ -1371,6 +1405,13 @@ void test_join_profile_with_ead() {
     CHECK(routeloom::sdkv1::join_chunk_count(routeloom::sdkv1::JoinCarrier::Rld1, rld1_object) <= 5);
     CHECK(routeloom::sdkv1::join_chunk_count(routeloom::sdkv1::JoinCarrier::WireRelay,
                                              relay_object) <= 4);
+  }
+  if (widest) {
+    const JoinFixture typical;
+    CHECK(fx.devcert.size > typical.devcert.size && fx.sitecert.size > typical.sitecert.size &&
+          fx.membercert.size > typical.membercert.size);
+    CHECK(fx.membercert.size <= routeloom::sdkv1::kRlcw1CertLargest);
+    return;  // the refusal cases below do not depend on certificate width
   }
 
   // A SiteCert whose cnf does not hash to ID_CRED_R's kid: the device stops
@@ -1486,7 +1527,8 @@ int main() {
   test_session_config();
   test_arena();
   test_key_store();
-  test_join_profile_with_ead();
+  test_join_profile_with_ead(false);
+  test_join_profile_with_ead(true);
   report_sizes();
   if (failures != 0) {
     std::fprintf(stderr, "%d EDHOC check(s) failed\n", failures);

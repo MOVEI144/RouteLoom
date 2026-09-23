@@ -84,10 +84,12 @@ critical item, value 1..256 B = one canonical certificate:
 
 | field | items, in this order |
 |---|---|
-| EAD_2 | Credential(SiteCert) · SiteOffer |
-| EAD_3 | Credential(DevCert) · JoinRequest |
+| EAD_2 | SiteOffer · Credential(SiteCert) |
+| EAD_3 | JoinRequest · Credential(DevCert) |
 
-Exactly these two items once each (padding skipped); EAD_1/EAD_4 never
+Exactly these two items once each, the message item first (the order the
+P3-3 Site Authority emits, `protocol/edhoc-interop/`; padding skipped);
+EAD_1/EAD_4 never
 carry a Credential, and the single-item walk (`join_ead_find`) refuses a
 field that holds one. `join_credential_check` requires the certificate to
 decode as the expected type and its cnf key to hash to the kid of the

@@ -11,13 +11,15 @@
  * arena's high-water mark over every handshake in the test (RFC 9529 §3,
  * the method-0 RLCW1 round trip, 256-byte CRED_x — the RLCW1 maximum —
  * with 32-byte kids on both sides, and the zero-touch join exchange with the
- * DevCert/SiteCert in the Credential EAD item plus the join EAD, P3-1) is
- * 1440 bytes in at most 6 live blocks; the test requires >= 25 % headroom.
- * P2-1 sized the arena at 1280 bytes (888 without EAD); the join exchange
- * exhausted it while composing message_3, so P3-1 raised it to 2048. At
- * most 6 key handles are live at once (the local long-term key included).
- * Whole session: 3880 bytes on LP64 hosts, about 3.5 KB on ILP32
- * (context 576 + arena 2160 + keys 364 + hashes ...).
+ * DevCert/SiteCert in the Credential EAD item plus the join EAD, P3-1, also
+ * with every certificate claim at its widest encoding) is 1456 bytes in at
+ * most 6 live blocks (1440 with the typical certificates); the test requires
+ * >= 25 % headroom. P2-1 sized the arena at 1280 bytes (888 without EAD);
+ * the join exchange exhausted it while composing message_3, so P3-1 raised
+ * it to 2048, the smallest round size with 25 % over 1456 (1536 would leave
+ * 80 bytes, 5 %). At most 6 key handles are live at once (the local
+ * long-term key included). Whole session: 3880 bytes on LP64 hosts, 3472 on
+ * RV32 (riscv32-esp-elf sizeof; context 576 + arena 2160 + keys 364 + ...).
  */
 #ifndef ROUTELOOM_EDHOC_STORAGE_H
 #define ROUTELOOM_EDHOC_STORAGE_H

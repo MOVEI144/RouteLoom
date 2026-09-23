@@ -66,7 +66,7 @@ pub enum JoinEad {
     /// P3-1 (02 §3 "Resolved in implementation"): libedhoc cannot carry
     /// `ID_CRED_x = {13: CWT}` by value, so ID_CRED_x is the kid (SHA-256 of
     /// the cnf COSE_Key) and the full RLCW1 certificate rides this critical
-    /// item ahead of the message item: the SiteCert in EAD_2 (the Site
+    /// item after the message item: the SiteCert in EAD_2 (the Site
     /// Authority writes it), the DevCert in EAD_3 (the Site Authority reads
     /// it before authenticating the device).
     Credential = 65541,
@@ -1135,8 +1135,8 @@ pub fn dams_exporter_context(
 /// Largest Credential item: label 5 + bstr head 3 + certificate 256.
 pub const JOIN_CREDENTIAL_ITEM_MAX: usize = JOIN_EAD_LABEL_SIZE + 3 + CERT_MAX;
 
-/// EAD_2 / EAD_3 with the certificate (P3-1): exactly `Credential` then the
-/// `expected` message item (Offer or Request), both critical with canonical
+/// EAD_2 / EAD_3 with the certificate (P3-1): exactly the `expected` message
+/// item (Offer or Request) then `Credential`, both critical with canonical
 /// bstr values, once each; padding is skipped; anything else, another
 /// order or a trailing byte is rejected. Returns `(certificate, value)`.
 pub fn join_ead_find_with_credential(ead: &[u8], expected: JoinEad) -> Result<(&[u8], &[u8])> {
@@ -1164,12 +1164,12 @@ pub fn join_ead_find_with_credential(ead: &[u8], expected: JoinEad) -> Result<(&
             return malformed("ead unexpected item");
         }
         let want = match found.len() {
-            0 => JoinEad::Credential,
-            1 => expected,
-            _ => return malformed("ead item after the message item"),
+            0 => expected,
+            1 => JoinEad::Credential,
+            _ => return malformed("ead item after the credential"),
         };
         if argument.wrapping_add(1) != u64::from(want as u32) {
-            return malformed("ead credential missing or out of order");
+            return malformed("ead message item or credential out of order");
         }
         match value {
             Some(v) if want.value_size_ok(v.len()) => found.push(v),
@@ -1179,7 +1179,7 @@ pub fn join_ead_find_with_credential(ead: &[u8], expected: JoinEad) -> Result<(&
     if found.len() != 2 {
         return malformed("ead item missing");
     }
-    Ok((found[0], found[1]))
+    Ok((found[1], found[0]))
 }
 
 /// The certificate of a Credential item: one canonical RLCW1 certificate of
