@@ -7,8 +7,8 @@
 | PR | 内容 | 依存 | 主な試験 |
 |---|---|---|---|
 | **P0 — #37の即時緩和（開発profile、protocol変更なし）** | | | |
-| P0-1 | NVS予算model（`tools/`のPython）とCI検査、reference/bridge firmwareに`rlsec` partition（64KiB）、`rlcounter`/`rlreplay`を`nvs_open_from_partition`で移動、`rlboot`は既定`nvs` | なし | V1-N03, V1-N07 |
-| P0-2 | 過去epochの`c*`掃除＋`cmax`証人、永続ピア数上限と`PEER_STATE_CAPACITY` | P0-1 | V1-N04, V1-N05 |
+| P0-1 | NVS予算model（`tools/`のPython）とCI検査、reference/bridge firmwareに`rlsec` partition（64KiB）、`rlcounter`/`rlreplay`を`nvs_open_from_partition`で移動、`rlboot`は既定`nvs`（**このbranchで実装済み**：bridgeは128KiB、examples/espnow_nodeも同じ構成。実機未試験、[05 §9](05-nvs-state-37.md)） | なし | V1-N03, V1-N07 |
+| P0-2 | 過去epochの`c*`掃除＋`cmax`証人、永続ピア数上限と`PEER_STATE_CAPACITY`（**このbranchで実装済み**：portable coreでhost試験、[05 §9](05-nvs-state-37.md)） | P0-1 | V1-N04, V1-N05 |
 | **P1 — 部品（hostのみ、共通vector）** | | | |
 | P1-1 | HKDF-SHA-256（**このbranchで実装済み**） | なし | V1-K12 |
 | P1-2 | RLCW1証明書codec（DevCert/SiteCert/MemberCert）C++とRust、`protocol/sdkv1-golden/` | P1-1 | V1-J14（証明書部分） |
@@ -43,7 +43,7 @@
 | P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
 | P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P1-1はこのbranchに含まれる。
+P0は他と独立して先に出せる。P0-1／P0-2とP1-1はこのbranchに含まれる。
 
 ## 2. 試験計画
 
@@ -59,7 +59,7 @@ P0は他と独立して先に出せる。P1-1はこのbranchに含まれる。
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）だけがこのbranchで実行済み、他はすべてplanned_not_run。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
 
 ## 4. 本番を名乗る条件
 

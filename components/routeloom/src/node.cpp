@@ -104,6 +104,7 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
       return SchedClass::Management;
     case FrameType::RouteUpdate:
     case FrameType::SeqnoRequest:
+    case FrameType::RouteRequest:
       // Route maintenance (advertise/withdraw/repair probes) rides the
       // management class: it must keep flowing under a data flood or the
       // congestion itself can never be repaired (03 §8). It stays out of
@@ -442,6 +443,9 @@ MeshNode::MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider&
                    NodeObserver& observer) noexcept
     : config_(config), radio_(radio), security_(security), observer_(observer) {
   routes_.set_self(config.node);  // improvement-hold jitter identity (03 §7)
+  // Feasibility state must outlive every lease that could still carry a
+  // stale advertisement to us (routing-scale.md §8, RFC 8966 §3.7.3).
+  routes_.set_tombstone_dwell(config.route_lifetime_ms);
 }
 
 Status MeshNode::validate_config() const noexcept {
@@ -457,6 +461,22 @@ Status MeshNode::validate_config() const noexcept {
       // a config above it would silently exceed the RF-loss retry budget.
       config_.max_link_attempts > kRfAttemptsMax) {
     return Status::error(StatusCode::InvalidArgument, "invalid node configuration");
+  }
+  // Gateway-scoped profile (routing-scale.md §5): reserved ids are never a
+  // gateway, and the lease must cover two per-link refresh cycles plus the
+  // margin — otherwise tree routes would expire before their refresh lands,
+  // which is exactly the flap of issue #41. Rejected, never just reported.
+  for (const NodeId gateway : config_.route_gateways) {
+    if (gateway == kBroadcastNodeId) {
+      return Status::error(StatusCode::InvalidArgument, "invalid route gateway");
+    }
+  }
+  if (gateway_scoped() &&
+      !scoped_lifetime_sufficient(config_.route_advertisement_period_ms,
+                                  config_.route_lifetime_ms,
+                                  config_.route_refresh_ticks)) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "ROUTE_LIFETIME_BELOW_REFRESH_BOUND");
   }
   return Status::success();
 }
@@ -479,22 +499,24 @@ Status MeshNode::start(const MonotonicMs now_ms) noexcept {
     observer_.on_diagnostic("SECURITY_PROFILE_EXPERIMENTAL", kInvalidNodeId, nullptr);
   }
   // Lease safety under metric churn (sdk-completion/03 §3.8, D4-06): a full
-  // route table needs ceil(capacity / records-per-frame) advertisement
-  // periods to be refreshed through the rotating cursor. A lifetime shorter
+  // flat-profile table needs ceil(capacity / routes-per-page) advertisement
+  // periods to be refreshed through the rotating cursor (a page carries the
+  // self record plus kRouteUpdateMaxRecords - 1 routes). A lifetime shorter
   // than that bound lets tail routes expire before their refresh lands —
   // surfaced once as a diagnostic; whether it is a defect depends on how
-  // large the table actually grows, so it is not a boot failure.
-  {
-    const std::uint64_t pages =
-        (kMaxRouteEntries + kMaxRouteRecordsPerFrame - 1) /
-        kMaxRouteRecordsPerFrame;
-    const std::uint64_t bound =
-        pages * config_.route_advertisement_period_ms +
-        kTriggeredJitterMs + config_.route_advertisement_period_ms;
-    if (config_.route_lifetime_ms <= bound) {
-      observer_.on_diagnostic("ROUTE_REFRESH_BOUND_EXCEEDED", kInvalidNodeId,
-                              nullptr);
-    }
+  // large the table actually grows, so it is not a boot failure. The
+  // gateway-scoped profile has its own, enforced bound (validate_config).
+  if (!gateway_scoped() &&
+      !flat_lifetime_sufficient(config_.route_advertisement_period_ms,
+                                config_.route_lifetime_ms, kMaxRouteEntries)) {
+    observer_.on_diagnostic("ROUTE_REFRESH_BOUND_EXCEEDED", kInvalidNodeId,
+                            nullptr);
+  }
+  if (gateway_scoped()) {
+    // Deterministic per-node tick offset so a site powered up together does
+    // not refresh every tree link in the same instant.
+    next_route_advertisement_ms_ =
+        now_ms + (config_.node * 2654435761ULL) % config_.route_advertisement_period_ms;
   }
   return Status::success();
 }
@@ -563,6 +585,12 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->cap_valid_until_ms = 0;
   record->cap_node_boot = 0;
   record->last_cap_exchange_ms = 0;
+  // Tree roles are re-learned from the peer's own advertisements.
+  record->child_until_ms = 0;
+  record->interest_until_ms = 0;
+  record->last_pull_answer_ms = 0;
+  record->pull_target = kInvalidNodeId;
+  record->pull_answer_pending = false;
   record->active = true;
   // Direct route to the neighbor itself, seeded at the last-seen generation
   // (0 for a brand-new peer); it upgrades as soon as its self record arrives.
@@ -582,7 +610,10 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
     return Status::error(StatusCode::NoCapacity, "route table full");
   }
   ++config_revision_;
-  next_route_advertisement_ms_ = now_ms;
+  // Flat profile: a new neighbor gets the next dump right away. The scoped
+  // profile keeps its tick grid (a new neighbor pulls what it needs, and a
+  // reset grid would re-phase every tree link).
+  if (!gateway_scoped()) next_route_advertisement_ms_ = now_ms;
   return Status::success();
 }
 
@@ -1131,6 +1162,9 @@ Status MeshNode::queue_origin_data(Delivery& delivery, const MonotonicMs now_ms)
   }
   const auto route = routes_.best(delivery.destination);
   if (!route.valid || find_neighbor(route.next_hop) == nullptr) {
+    // Scoped profile: non-gateway destinations outside our subtree are
+    // found on demand (routing-scale.md §4); the delivery waits for it.
+    request_route_discovery(delivery.destination, now_ms);
     return Status::error(StatusCode::NoRoute, "NO_ROUTE");
   }
   TxJob job{};
@@ -1309,7 +1343,12 @@ Status MeshNode::decode_receipt_payload(const ByteView payload, MessageKey& key,
 Status MeshNode::queue_end_receipt(const wire::Header& data,
                                    const MonotonicMs now_ms) noexcept {
   const auto route = routes_.best(data.origin);
-  if (!route.valid) return Status::error(StatusCode::NoRoute, "NO_RETURN_ROUTE");
+  if (!route.valid) {
+    // The sender's retry round will find the return route once discovery
+    // resolves (scoped profile only; no-op otherwise).
+    request_route_discovery(data.origin, now_ms);
+    return Status::error(StatusCode::NoRoute, "NO_RETURN_ROUTE");
+  }
   TxJob job{};
   job.form = JobForm::Plain;
   job.owner = JobOwner::Transit;
@@ -1347,14 +1386,17 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
   return scheduler_.enqueue(std::move(job), config_.node, now_ms);
 }
 
-Status MeshNode::queue_route_update(const NodeId neighbor,
-                                    const MonotonicMs now_ms) noexcept {
+MeshNode::TxJob MeshNode::link_control_job(const FrameType type, const NodeId neighbor,
+                                           const std::uint32_t lifetime_ms,
+                                           const MonotonicMs now_ms) noexcept {
+  // One-hop, link-protected, best-effort route-control frame bound to the
+  // receiving neighbor (ROUTE_UPDATE / SEQNO_REQUEST / ROUTE_REQUEST).
   TxJob job{};
   job.form = JobForm::Plain;
   job.peer = neighbor;
   job.max_attempts = 1;
-  job.deadline_ms = now_ms + kControlLifetimeMs;
-  job.plain.header.type = FrameType::RouteUpdate;
+  job.deadline_ms = now_ms + lifetime_ms;
+  job.plain.header.type = type;
   job.plain.header.delivery = DeliveryClass::BestEffort;
   job.plain.header.hop_remaining = 1;
   job.plain.header.network = config_.network;
@@ -1363,10 +1405,17 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
   job.plain.header.previous_hop = config_.node;
   job.plain.header.next_hop = neighbor;
   job.plain.header.message = MessageId{config_.message_session, next_control_sequence_++};
-  job.plain.header.remaining_deadline_ms = kControlLifetimeMs;
-  job.plain.header.original_lifetime_ms = kControlLifetimeMs;
+  job.plain.header.remaining_deadline_ms = lifetime_ms;
+  job.plain.header.original_lifetime_ms = lifetime_ms;
   job.plain.header.link_epoch = config_.link_epoch;
   job.plain.header.end_epoch = config_.end_epoch;
+  return job;
+}
+
+Status MeshNode::queue_route_update(const NodeId neighbor,
+                                    const MonotonicMs now_ms) noexcept {
+  TxJob job = link_control_job(FrameType::RouteUpdate, neighbor, kControlLifetimeMs,
+                               now_ms);
 
   ByteWriter writer(MutableByteView{job.plain.payload.data(), job.plain.payload.size()});
   auto status = writer.write_u8(0);  // patched after records are appended
@@ -1442,24 +1491,8 @@ Status MeshNode::queue_seqno_request(const NodeId peer, const NodeId requester,
       requester == kInvalidNodeId) {
     return Status::error(StatusCode::InvalidArgument, "invalid sequence request");
   }
-  TxJob job{};
-  job.form = JobForm::Plain;
-  job.peer = peer;
-  job.max_attempts = 1;
-  job.deadline_ms = now_ms + kSeqnoRequestLifetimeMs;
-  job.plain.header.type = FrameType::SeqnoRequest;
-  job.plain.header.delivery = DeliveryClass::BestEffort;
-  job.plain.header.hop_remaining = 1;
-  job.plain.header.network = config_.network;
-  job.plain.header.origin = config_.node;
-  job.plain.header.destination = peer;
-  job.plain.header.previous_hop = config_.node;
-  job.plain.header.next_hop = peer;
-  job.plain.header.message = MessageId{config_.message_session, next_control_sequence_++};
-  job.plain.header.remaining_deadline_ms = kSeqnoRequestLifetimeMs;
-  job.plain.header.original_lifetime_ms = kSeqnoRequestLifetimeMs;
-  job.plain.header.link_epoch = config_.link_epoch;
-  job.plain.header.end_epoch = config_.end_epoch;
+  TxJob job = link_control_job(FrameType::SeqnoRequest, peer, kSeqnoRequestLifetimeMs,
+                               now_ms);
 
   ByteWriter writer(MutableByteView{job.plain.payload.data(), job.plain.payload.size()});
   Status status;
@@ -1565,6 +1598,7 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
                                  const MonotonicMs now_ms) noexcept {
   const auto route = routes_.best(destination);
   if (!route.valid || find_neighbor(route.next_hop) == nullptr) {
+    request_route_discovery(destination, now_ms);  // scoped profile only
     return Status::error(StatusCode::NoRoute, "NO_ROUTE");
   }
   TxJob job{};
@@ -3513,6 +3547,10 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
     trigger_route_advertisement(now_ms);
     observer_.on_diagnostic("PEER_RESTARTED_ROUTES_FLUSHED", peer, nullptr);
   }
+  // Scoped profile: tree-role inference (poisoned gateway record = the peer
+  // routes to that gateway through us). Scheduling state only — route state
+  // below still moves exclusively through consider().
+  note_scoped_update(*neighbor, records.data(), count, now_ms);
 
   for (std::uint8_t i = 0; i < count; ++i) {
     const auto& advertisement = records[i];
@@ -3568,6 +3606,12 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
     return;
   }
   *seen = SeqnoSeen{requester, destination, request_id, now_ms + kSeqnoRequestLifetimeMs};
+  // Scoped profile: the answer (a fresher sequence) must flow back along the
+  // request's path, which is not necessarily a tree link — the previous hop
+  // registers a short interest so triggered updates reach it, and an answer
+  // from our own table is sent to it directly (routing-scale.md §3.3).
+  Neighbor* requesting = gateway_scoped() ? find_neighbor(peer) : nullptr;
+  if (requesting != nullptr) note_scoped_interest(*requesting, now_ms);
 
   if (destination == config_.node) {
     bool ambiguous = false;
@@ -3594,7 +3638,14 @@ void MeshNode::handle_seqno_request(const wire::PlainFrame& frame, const NodeId 
     const bool requested_newer =
         route_sequence_newer(requested_sequence, selected.sequence, ambiguous);
     if (!requested_newer && !ambiguous) {
-      trigger_route_advertisement(now_ms);
+      if (requesting != nullptr) {
+        // Scoped profile: a generic trigger would only carry self + gateway
+        // records; the requester needs THIS destination's record.
+        requesting->pull_target = destination;
+        requesting->pull_answer_pending = true;
+      } else {
+        trigger_route_advertisement(now_ms);
+      }
       return;
     }
   }
@@ -3727,7 +3778,8 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       break;
     case FrameType::HopAccept:
     case FrameType::RouteUpdate:
-    case FrameType::SeqnoRequest: {
+    case FrameType::SeqnoRequest:
+    case FrameType::RouteRequest: {
       wire::PlainFrame plain{};
       status = wire::open_end(frame, config_.node, security_, plain);
       if (!status) {
@@ -3738,6 +3790,8 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         handle_hop_accept(plain, peer, now_ms);
       } else if (frame.header.type == FrameType::RouteUpdate) {
         handle_route_update(plain, peer, now_ms);
+      } else if (frame.header.type == FrameType::RouteRequest) {
+        handle_route_request(plain, peer, now_ms);
       } else {
         handle_seqno_request(plain, peer, now_ms);
       }
@@ -3990,10 +4044,14 @@ bool MeshNode::control_budget_refresh_fits(const MonotonicMs now_ms,
                       kControlBudgetRefillUsPerS - 1ULL) /
                          kControlBudgetRefillUsPerS;
   // Page count: the live route table's record pages each neighbor must
-  // cycle through (the frame carries the self record plus entries).
+  // cycle through (the frame carries the self record plus entries). The
+  // scoped profile spreads a whole upward cycle inside route_refresh_ticks
+  // periods, so its refresh span is the tick count, not the page count.
   const std::uint64_t pages =
-      (static_cast<std::uint64_t>(routes_.size()) + kMaxRouteRecordsPerFrame) /
-      kMaxRouteRecordsPerFrame;
+      gateway_scoped()
+          ? config_.route_refresh_ticks
+          : (static_cast<std::uint64_t>(routes_.size()) + kMaxRouteRecordsPerFrame) /
+                kMaxRouteRecordsPerFrame;
   // 03 §8 refresh bound — pages*round_period + budget_wait + jitter +
   // loss_margin — against the ACTUAL lease the refresh must land inside.
   const std::uint64_t bound =
@@ -4044,6 +4102,13 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
     } else {
       control_budget_unsat_reported_ = false;
     }
+  }
+  if (gateway_scoped()) {
+    // One tick of the scoped profile: only the gateway-tree links that are
+    // due this tick are refreshed (routing-scale.md §3.2).
+    next_route_advertisement_ms_ = now_ms + config_.route_advertisement_period_ms;
+    run_scoped_tick(now_ms);
+    return;
   }
   const NodeId peer = active[route_neighbor_cursor_ % count];
   route_neighbor_cursor_ = (route_neighbor_cursor_ + 1) % count;
@@ -4150,6 +4215,15 @@ void MeshNode::schedule_sequence_requests(const MonotonicMs now_ms) noexcept {
 }
 
 void MeshNode::trigger_route_advertisement(const MonotonicMs now_ms) noexcept {
+  // Generic triggers (neighbor loss, sequence bump, peer restart, relay
+  // policy) change what every tree link must hear: in the scoped profile the
+  // burst covers the parents (self record + dirty routes) and the children
+  // and interested neighbors (self + gateway records).
+  if (gateway_scoped()) scoped_trigger_all_ = true;
+  arm_triggered_advertisement(now_ms);
+}
+
+void MeshNode::arm_triggered_advertisement(const MonotonicMs now_ms) noexcept {
   // Deterministic jitter decorrelates bursts across nodes without a RNG.
   const MonotonicMs jitter = (config_.node * 31ULL + ++trigger_counter_ * 7ULL) %
                              (kTriggeredJitterMs + 1ULL);
@@ -4190,10 +4264,30 @@ void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
   // >=50% queue watermark: triggered bursts run at half rate (03 §4).
   next_triggered_ms_ = now_ms + kTriggeredUpdateMinIntervalMs *
                                    (scheduler_.background_reduced() ? 2 : 1);
+  if (gateway_scoped()) {
+    // Scoped burst: tree links and interested neighbors only — never the
+    // flat all-neighbor dump (issue #41 burst of F frames per trigger).
+    run_scoped_triggered(now_ms);
+    return;
+  }
   neighbors_.for_each([&](const Neighbor& neighbor) {
     if (!neighbor.active || scheduler_.full()) return;
     (void)queue_route_update(neighbor.node, now_ms);
   });
+}
+
+void MeshNode::scan_selection_changes(const MonotonicMs now_ms) noexcept {
+  if (!gateway_scoped()) {
+    routes_.for_each_selected_change(
+        [&](const RouteSelection&) { trigger_route_advertisement(now_ms); },
+        now_ms);
+    return;
+  }
+  routes_.for_each_selected_change(
+      [&](const RouteSelection& selection, const RouteSelection& previous) {
+        note_scoped_change(selection, previous, now_ms);
+      },
+      now_ms);
 }
 
 void MeshNode::poll(const MonotonicMs now_ms) noexcept {
@@ -4211,15 +4305,23 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // APPLIED terminal bookkeeping: result-record retention expiry and the
   // bounded RESULT emit retry pass (sdk-completion/01 §1.4/§1.6).
   process_applied(now_ms);
-  routes_.for_each_selected_change(
-      [&](const RouteSelection&) { trigger_route_advertisement(now_ms); },
-      now_ms);
+  scan_selection_changes(now_ms);
+  if (gateway_scoped()) expire_route_requests(now_ms);
   if (!paused(pause::kBackgroundWork)) {
     // Background work stops while paused/draining; in-flight queue entries
     // still dispatch below so the TX path can settle.
     run_triggered_advertisement(now_ms);
     schedule_sequence_requests(now_ms);
     schedule_route_advertisements(now_ms);
+    if (gateway_scoped()) {
+      // Scoped profile repair/bootstrap and on-demand paths (routing-scale
+      // §3.3/§4): answers to pulls, pulls for a lost gateway route and
+      // bounded discovery for waiting deliveries.
+      flush_pull_answers(now_ms);
+      schedule_parent_releases(now_ms);
+      schedule_gateway_pulls(now_ms);
+      schedule_route_discovery(now_ms);
+    }
   }
   // The Service and config endpoints share the node's monotonic clock and
   // pause discipline: their retries, leases and expiries advance here.

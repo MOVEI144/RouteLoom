@@ -72,6 +72,18 @@ the core comes from. Pin `version` to a tag or commit SHA — `main` floats.
 development master key. Two boards form a mesh by pointing each at the
 other's MAC and node ID, or run one board peerless to see it boot.
 
+## Partition table and NVS
+
+`partitions.csv` (selected in `sdkconfig.defaults`) adds a 64 KiB `rlsec`
+NVS partition next to the default `nvs`. Per-peer counter/replay state
+(`rlcounter`/`rlreplay`) lives there, so it can never fill the partition that
+holds the boot session (issue #37). Old TX counter records are swept at boot
+and the number of persisted peers is capped (`kNodeMaxPersistedPeers`); a new
+peer beyond the cap is refused with the `PEER_STATE_CAPACITY` diagnostic, never
+silently. Changing the partition table moves NVS: run `idf.py erase-flash`
+before the first flash of this layout (already required by Wire v2). The
+firmware never erases NVS on its own.
+
 ## Honest limits
 
 - Validated targets: `esp32c3`, `esp32s3`, `esp32c5` — matching CI. Other

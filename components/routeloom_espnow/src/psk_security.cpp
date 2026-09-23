@@ -6,6 +6,8 @@
 #include <array>
 #include <cstring>
 
+#include "esp_log.h"
+#include "nvs.h"
 #include "psa/crypto.h"
 
 namespace routeloom::espnow {
@@ -88,10 +90,15 @@ DevelopmentPskSecurityProvider::~DevelopmentPskSecurityProvider() { close(); }
 
 Status DevelopmentPskSecurityProvider::initialize(
     const std::array<std::uint8_t, kMasterKeySize>& master_key,
-    NvsCounterStore& counter_store, const char* replay_namespace) noexcept {
-  if (replay_namespace == nullptr || replay_namespace[0] == '\0') {
+    NvsCounterStore& counter_store, const PeerStateConfig& config) noexcept {
+  if (config.replay_namespace == nullptr ||
+      config.replay_namespace[0] == '\0') {
     return Status::error(StatusCode::InvalidArgument,
                          "replay namespace missing");
+  }
+  if (config.tx_epoch == 0 || config.max_persisted_peers == 0) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "peer state config invalid");
   }
 
   close();
@@ -100,17 +107,42 @@ Status DevelopmentPskSecurityProvider::initialize(
                          "PSA crypto initialization failed");
   }
 
-  master_key_ = master_key;
-  counter_store_ = &counter_store;
-  const auto store_status = replay_store_.open(replay_namespace);
+  const PeerStateLimits limits = peer_state_limits(config.max_persisted_peers);
+  // Sweeps TX records of epochs below tx_epoch (witness committed first) and
+  // refuses a tx_epoch at or below the witness: fail closed before any key
+  // could be reused.
+  const auto counter_status = counters_.open(
+      counter_store, limits.max_counter_records, config.tx_epoch);
+  if (!counter_status) return counter_status;
+  const auto store_status =
+      replay_store_.open(config.replay_namespace, config.partition);
   if (!store_status) {
-    counter_store_ = nullptr;
-    secure_clear(master_key_);
+    counters_.close();
     return Status::error(StatusCode::StorageFailure,
                          "replay nvs_open failed");
   }
+  (void)replay_bounds_.open(replay_store_, limits.max_replay_peers);
+  master_key_ = master_key;
   ready_ = true;
   return Status::success();
+}
+
+PeerStateStats DevelopmentPskSecurityProvider::peer_state_stats()
+    const noexcept {
+  PeerStateStats stats{};
+  stats.counter_records = counters_.records();
+  stats.counter_capacity = counters_.max_records();
+  stats.replay_peers = replay_bounds_.peers();
+  stats.replay_capacity = replay_bounds_.max_peers();
+  stats.capacity_rejects =
+      counters_.capacity_rejects() + replay_bounds_.capacity_rejects();
+  stats.witness_rejects = counters_.witness_rejects();
+  stats.witness = counters_.witness();
+  stats.witness_present = counters_.witness_present();
+  stats.counts_known =
+      counters_.records_known() && replay_bounds_.peers_known();
+  stats.sweep = counters_.sweep_report();
+  return stats;
 }
 
 void DevelopmentPskSecurityProvider::close() noexcept {
@@ -126,9 +158,10 @@ void DevelopmentPskSecurityProvider::close() noexcept {
   tx_contexts_.clear();
   parked_leases_.clear();
   rx_contexts_.clear();
+  replay_bounds_.close();
   replay_store_.close();
+  counters_.close();
   ready_ = false;
-  counter_store_ = nullptr;
   secure_clear(master_key_);
 }
 
@@ -181,7 +214,7 @@ DevelopmentPskSecurityProvider::tx_context(
     existing->use_stamp = ++context_stamp_;
     return existing;
   }
-  if (counter_store_ == nullptr) {
+  if (!counters_.is_open()) {
     return nullptr;
   }
   // The lease occupies one slot per peer pair (the epoch-free floor slot),
@@ -234,7 +267,7 @@ DevelopmentPskSecurityProvider::tx_context(
   created->use_stamp = ++context_stamp_;
   created->context = context;
   created->fingerprint = replay_context_fingerprint(context);
-  created->lease.emplace(*counter_store_, identity.slot, identity.context_id,
+  created->lease.emplace(counters_, identity.slot, identity.context_id,
                          identity.key_epoch, identity.direction, 256);
   const Status lease_status = resume_parked ? created->lease->resume(parked)
                                             : created->lease->initialize();
@@ -439,6 +472,54 @@ Status DevelopmentPskSecurityProvider::open(
     secure_clear(plaintext.data, plaintext.size);
   }
   return status;
+}
+
+void log_peer_state(const char* tag,
+                    const DevelopmentPskSecurityProvider& security,
+                    const char* partition) noexcept {
+  const PeerStateStats stats = security.peer_state_stats();
+  ESP_LOGI(tag,
+           "peer state: tx_records=%lu/%lu rx_peers=%lu/%lu swept=%lu "
+           "kept_current=%lu kept_future=%lu kept_unreadable=%lu "
+           "witness=%lu%s",
+           static_cast<unsigned long>(stats.counter_records),
+           static_cast<unsigned long>(stats.counter_capacity),
+           static_cast<unsigned long>(stats.replay_peers),
+           static_cast<unsigned long>(stats.replay_capacity),
+           static_cast<unsigned long>(stats.sweep.erased),
+           static_cast<unsigned long>(stats.sweep.retained_current),
+           static_cast<unsigned long>(stats.sweep.retained_future),
+           static_cast<unsigned long>(stats.sweep.retained_unreadable),
+           static_cast<unsigned long>(stats.witness),
+           stats.witness_present ? "" : " (none)");
+  const Status sweep = security.counter_sweep_status();
+  if (!sweep) {
+    ESP_LOGE(tag,
+             "PEER_STATE sweep incomplete (%s): dead TX records kept, new "
+             "TX peers refused until the next boot",
+             sweep.detail);
+  }
+  const Status census = security.replay_census_status();
+  if (!census) {
+    ESP_LOGE(tag,
+             "PEER_STATE replay census failed (%s): new RX peers refused",
+             census.detail);
+  }
+  if (stats.sweep.retained_future != 0) {
+    ESP_LOGE(tag,
+             "PEER_STATE %lu TX record(s) newer than this boot session: the "
+             "boot session regressed; those peers fail closed",
+             static_cast<unsigned long>(stats.sweep.retained_future));
+  }
+  nvs_stats_t nvs_stats{};
+  if (nvs_get_stats(partition, &nvs_stats) == ESP_OK) {
+    ESP_LOGI(tag, "nvs '%s': used=%u free=%u total=%u namespaces=%u",
+             partition == nullptr ? NVS_DEFAULT_PART_NAME : partition,
+             static_cast<unsigned>(nvs_stats.used_entries),
+             static_cast<unsigned>(nvs_stats.free_entries),
+             static_cast<unsigned>(nvs_stats.total_entries),
+             static_cast<unsigned>(nvs_stats.namespace_count));
+  }
 }
 
 }  // namespace routeloom::espnow

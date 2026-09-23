@@ -45,8 +45,10 @@ DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool.py")
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_BOOT_SECONDS = 8.0
 
-# Standard offsets for the single-app partition layout
-# (CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y in both firmware apps).
+# Standard bootloader/partition-table offsets. Both firmware apps use a
+# custom partitions.csv (single app + the "rlsec" security NVS partition,
+# issue #37); the partition table itself stays at 0x8000, and the app offset
+# comes from flasher_args.json.
 FALLBACK_FLASH_FILES = {
     "0x0": "bootloader/bootloader.bin",
     "0x8000": "partition_table/partition-table.bin",

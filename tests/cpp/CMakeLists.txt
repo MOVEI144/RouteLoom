@@ -8,6 +8,18 @@ target_link_libraries(routeloom_routing_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_routing_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_routing_tests COMMAND routeloom_routing_tests)
 
+# Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md): the
+# fast unit/small-mesh cases and the 100-node product-timer run are separate
+# ctest entries so the long run parallelises with the rest of the suite.
+add_executable(routeloom_routing_scale_tests test_routing_scale.cpp)
+target_link_libraries(routeloom_routing_scale_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_routing_scale_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_routing_scale_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_routing_scale_tests PRIVATE
+    ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
+add_test(NAME routeloom_routing_scale_unit_tests COMMAND routeloom_routing_scale_tests unit)
+add_test(NAME routeloom_routing_scale_100_node_tests COMMAND routeloom_routing_scale_tests scale)
+
 add_executable(routeloom_ledger_tests test_ledger.cpp)
 target_link_libraries(routeloom_ledger_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_ledger_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -225,3 +237,13 @@ target_link_libraries(routeloom_node_status_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_node_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_node_status_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_node_status_tests COMMAND routeloom_node_status_tests)
+
+# Bounded persistent peer state (issue #37, docs/design/sdk-v1/05-nvs-state-37.md
+# §4 / plan P0-2): TX counter sweep behind a durable witness, per-peer caps,
+# NVS entry budget arithmetic, and a 200-peer churn against a fixed-capacity
+# NVS model (no (key, counter) reuse, no replay re-acceptance, cap never
+# exceeded, boot-session partition never blocked).
+add_executable(routeloom_peer_state_tests test_peer_state.cpp)
+target_link_libraries(routeloom_peer_state_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_peer_state_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_peer_state_tests COMMAND routeloom_peer_state_tests)

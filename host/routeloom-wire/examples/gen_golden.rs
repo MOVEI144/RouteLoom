@@ -208,6 +208,25 @@ fn route_update_payload() -> Vec<u8> {
     payload
 }
 
+// ROUTE_REQUEST (gateway-scoped routing, docs/design/sdk-v1/routing-scale.md):
+// kind u8 | ttl u8 | requester u64 | target u64 | request_id u32 |
+// record (destination u64 | generation u32 | sequence u16 | metric u16) = 38 bytes.
+// The C++ codec test (tests/cpp/test_routing_scale.cpp) checks its encoder
+// against this vector's payload_hex.
+fn route_request_payload() -> Vec<u8> {
+    let mut payload = Vec::with_capacity(38);
+    payload.push(2_u8); // kind: Discover
+    payload.push(10_u8); // ttl
+    payload.extend_from_slice(&0x0102_0304_0506_0708_u64.to_be_bytes()); // requester
+    payload.extend_from_slice(&0x1112_1314_1516_1718_u64.to_be_bytes()); // target
+    payload.extend_from_slice(&0xA1B2_C3D4_u32.to_be_bytes()); // request id
+    payload.extend_from_slice(&0x0102_0304_0506_0708_u64.to_be_bytes()); // record: requester
+    payload.extend_from_slice(&7_u32.to_be_bytes()); // generation
+    payload.extend_from_slice(&0x0123_u16.to_be_bytes()); // sequence
+    payload.extend_from_slice(&0x0010_u16.to_be_bytes()); // metric
+    payload
+}
+
 fn main() {
     let dir = golden_dir();
     let valid_dir = dir.join("valid");
@@ -318,6 +337,26 @@ fn main() {
                 5,
                 1000,
                 &route_update_payload(),
+            ),
+            forward: None,
+        },
+        Case {
+            name: "route_request",
+            comment: "ROUTE_REQUEST Discover (38-byte payload), link protection only",
+            frame: plain(
+                FrameType::RouteRequest,
+                0,
+                DeliveryClass::BestEffort,
+                0,
+                1,
+                2,
+                1,
+                2,
+                1,
+                102,
+                6,
+                2000,
+                &route_request_payload(),
             ),
             forward: None,
         },

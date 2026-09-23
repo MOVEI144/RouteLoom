@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/status.hpp"
@@ -44,6 +45,65 @@ constexpr std::uint32_t kImprovementAdGapMs = 2000;     // improvement_advertise
 constexpr std::uint32_t kImprovementJitterMs = 2000;
 // Bound on remembered per-next-hop busy state (one per neighbor).
 constexpr std::size_t kBusyLinkCapacity = 32;
+
+// --- Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md) ------
+// Up to this many gateway destinations may be configured per site. Every node
+// keeps a proactive route to each of them; other destinations are learned
+// only along the gateway tree (upward) or on demand (ROUTE_REQUEST).
+constexpr std::size_t kMaxRouteGateways = 2;
+// ROUTE_UPDATE framing (Wire v2): count(1) + N x 16-byte records inside the
+// 128-byte payload -> N <= 7; the sender's self record always takes one slot.
+constexpr std::size_t kRouteUpdateRecordBytes = 16;
+constexpr std::size_t kRouteUpdateMaxRecords =
+    (kMaxApplicationPayload - 1) / kRouteUpdateRecordBytes;
+static_assert(kRouteUpdateMaxRecords == 7, "Wire v2 ROUTE_UPDATE carries 7 records");
+// Default per-link refresh cadence in advertisement periods (ticks): with the
+// product period of 5 s every gateway-tree link is refreshed every 30 s.
+constexpr std::uint8_t kScopedDefaultRefreshTicks = 6;
+// Lease margin (ticks) on top of two refresh cycles: one refresh may be lost
+// outright and the next may land up to a tick late (pacing / budget deferral)
+// without the route expiring.
+constexpr std::uint32_t kScopedLeaseMarginTicks = 2;
+
+// Gateway-scoped lease rule (routing-scale.md §5): every tree-link record is
+// re-sent once per `refresh_ticks` periods (the upward pages of one cycle are
+// spread inside that cycle), so the lease must cover two cycles plus margin:
+//   lifetime >= (2 * refresh_ticks + kScopedLeaseMarginTicks) * period.
+constexpr bool scoped_lifetime_sufficient(const std::uint32_t period_ms,
+                                          const std::uint32_t lifetime_ms,
+                                          const std::uint32_t refresh_ticks) noexcept {
+  return period_ms != 0 && refresh_ticks != 0 &&
+         static_cast<std::uint64_t>(lifetime_ms) >=
+             (2ULL * refresh_ticks + kScopedLeaseMarginTicks) * period_ms;
+}
+
+// Flat-profile lease rule for `destinations` selected routes: every neighbor
+// receives one page per period and a page carries kRouteUpdateMaxRecords - 1
+// routes beside the self record, so the lease must exceed the full page
+// rotation plus one period of margin (issue #41).
+constexpr std::uint64_t flat_refresh_pages(const std::uint64_t destinations) noexcept {
+  return destinations == 0
+             ? 1
+             : (destinations + (kRouteUpdateMaxRecords - 1) - 1) /
+                   (kRouteUpdateMaxRecords - 1);
+}
+constexpr bool flat_lifetime_sufficient(const std::uint32_t period_ms,
+                                        const std::uint32_t lifetime_ms,
+                                        const std::uint64_t destinations) noexcept {
+  return period_ms != 0 &&
+         static_cast<std::uint64_t>(lifetime_ms) >
+             (flat_refresh_pages(destinations) + 1ULL) * period_ms;
+}
+
+// Product profile pin (routing-scale.md §5). tools/check_review_contracts.py
+// re-derives the same rule from docs/reference/radio-defaults.json
+// routing.gateway_scoped and checks these constants against it.
+constexpr std::uint32_t kScopedProductPeriodMs = 5000;
+constexpr std::uint32_t kScopedProductLifetimeMs = 90000;
+static_assert(scoped_lifetime_sufficient(kScopedProductPeriodMs,
+                                         kScopedProductLifetimeMs,
+                                         kScopedDefaultRefreshTicks),
+              "product gateway-scoped lease must cover two refresh cycles + margin");
 
 struct RouteAdvertisement {
   NodeId destination{kInvalidNodeId};
@@ -145,6 +205,10 @@ class RouteTable {
 
   RouteSelection best(NodeId destination) const noexcept;
   bool mark_advertised(NodeId destination) noexcept;
+  // Scoped-profile scheduling flag (see Entry::announced_up). Pure
+  // bookkeeping: selection, feasibility and leases never read it.
+  void set_announced_up(NodeId destination, bool announced) noexcept;
+  bool announced_up(NodeId destination) const noexcept;
   bool needs_sequence_request(NodeId destination) const noexcept;
   RouteSequence requested_sequence(NodeId destination) const noexcept;
   // Next hop toward `destination` for a SeqNoRequest: the selected route when
@@ -212,6 +276,19 @@ class RouteTable {
   // (03 §8): a suppressed improvement keeps last_selected stale so it fires
   // once the gap has passed — or is silently covered when a periodic
   // advertisement carries it first (mark_advertised syncs last_selected).
+  // Retraction data for one destination (same rule as for_each_lost).
+  bool lost_route(NodeId destination, LostRoute& out) const noexcept;
+
+  // Tombstone dwell (feasibility-state GC). Never shorter than the default
+  // dwell and never shorter than the route lease: a source entry must outlive
+  // every candidate that could still be advertised to us (RFC 8966 §3.7.3),
+  // or a stale route could pass feasibility against a freshly reset FD.
+  void set_tombstone_dwell(std::uint32_t lifetime_ms) noexcept {
+    tombstone_dwell_ms_ = lifetime_ms > kRouteTombstoneDwellMs ? lifetime_ms
+                                                               : kRouteTombstoneDwellMs;
+  }
+  std::uint32_t tombstone_dwell_ms() const noexcept { return tombstone_dwell_ms_; }
+
   template <typename Fn>
   void for_each_selected_change(Fn fn, MonotonicMs now_ms) noexcept {
     entries_.for_each([&](Entry& entry) {
@@ -232,8 +309,16 @@ class RouteTable {
         return;
       }
       if (pure_improvement) entry.improvement_ad_ms = now_ms;
+      const RouteSelection previous = entry.last_selected;
       entry.last_selected = selection;
-      fn(selection);
+      // Callers may also take the previous snapshot: the gateway-scoped
+      // profile needs the old next hop to route a retraction upward.
+      if constexpr (std::is_invocable_v<Fn&, const RouteSelection&,
+                                        const RouteSelection&>) {
+        fn(selection, previous);
+      } else {
+        fn(selection);
+      }
     });
   }
 
@@ -267,6 +352,10 @@ class RouteTable {
     MonotonicMs switch_hold_until_ms{0};
     // Last triggered pure-improvement advertisement for this destination.
     MonotonicMs improvement_ad_ms{0};
+    // Gateway-scoped profile bookkeeping (never a routing input): a finite
+    // record for this destination went to our parent and has not been
+    // retracted since — leaving the subtree must send a retraction upward.
+    bool announced_up{false};
   };
 
   // Per-next-hop sustained-busy input (03 §7 severe-busy path).
@@ -282,7 +371,7 @@ class RouteTable {
   static RouteSelection select(const Entry& entry) noexcept;
   static RouteCandidate* candidate_slot(Entry& entry, NodeId next_hop) noexcept;
   static bool has_candidates(const Entry& entry) noexcept;
-  static void arm_tombstone(Entry& entry, MonotonicMs now_ms) noexcept;
+  void arm_tombstone(Entry& entry, MonotonicMs now_ms) const noexcept;
   // The candidate via `hop` when it is still selectable (valid, flagged
   // feasible, finite metric and — re-checked — feasible against the CURRENT
   // feasible distance). kInvalidNodeId always yields nullptr.
@@ -298,6 +387,7 @@ class RouteTable {
   FixedPool<Entry, kMaxRouteEntries> entries_{};
   FixedPool<BusyLink, kBusyLinkCapacity> busy_links_{};
   NodeId self_id_{kInvalidNodeId};
+  std::uint32_t tombstone_dwell_ms_{kRouteTombstoneDwellMs};
 };
 
 }  // namespace routeloom

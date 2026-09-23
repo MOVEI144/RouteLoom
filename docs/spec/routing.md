@@ -75,9 +75,9 @@ source keyはNetwork、destination、origin Identity、認証済みorigin genera
 
 source/frontierを失った直後にFDをinfinityで新規化して古い広告を採用しない。当該sourceをROUTE_RECOVERY_REQUIREDにして有限広告とDATA選択を止める。再開方式（安全な永続frontier、またはRFCの寿命条件を満たす回復）、origin generation変更、sequence周回、GC timerをG-ROUTEで一貫して凍結する。この停止規則は安全側であり迅速な復旧が完成した証拠ではない。
 
-portable profileでは以下を凍結した（`routing.hpp`/`node.cpp`の定数）。source keyは `(network, destination, origin generation)` で、ROUTE_UPDATEの各recordは destination(8)+generation(2)+sequence(2)+metric(2)の14byteを持つ。origin generationはnodeの永続化単調値で、bootごとに増加させる。自nodeより低いgenerationの広告は常に棄却し、高いgenerationはそのsourceのFD・候補・tombstoneを全て再初期化する。隣接nodeの自己recordでgenerationが上がった時、そのpeer経由の全候補をhold-down無しで破棄する（再起動relayの前世代stateを残さない）。
+portable profileでは以下を凍結した（`routing.hpp`/`node.cpp`の定数）。source keyは `(network, destination, origin generation)` で、ROUTE_UPDATEの各recordは destination(8)+generation(4)+sequence(2)+metric(2)の16byteを持つ（Wire v2）。origin generationはnodeの永続化単調値で、bootごとに増加させる。自nodeより低いgenerationの広告は常に棄却し、高いgenerationはそのsourceのFD・候補・tombstoneを全て再初期化する。隣接nodeの自己recordでgenerationが上がった時、そのpeer経由の全候補をhold-down無しで破棄する（再起動relayの前世代stateを残さない）。
 
-FDは最後の候補が消えてもtombstoneとして60秒（`kRouteTombstoneDwellMs`）保持し、GCはdwell経過後のみ行う。例外として、route table満杯時のdirect-neighbor admit（add_neighbor）は最も古いarm済みtombstoneを1件だけ早期reclaimしてよい（issue #50；学習routeの氾濫には適用しない）。撤回・隣接喪失したnext hopは500ms（`kRouteHoldDownMs`）hold-downする。triggered広告はneighbor喪失・selected route変更・sequence bumpで起動し、最小間隔1秒・最大64msの決定的jitterでburstを束ねる。1 frameのrecord上限は9で、selected routeの全dumpはper-neighborの回転cursorで複数更新へ分割する。
+FDは最後の候補が消えてもtombstoneとして60秒（`kRouteTombstoneDwellMs`）以上、かつroute lease（`route_lifetime_ms`）以上保持し、GCはdwell経過後のみ行う（leaseより短いdwellでは、まだ隣接に残る古い広告がリセット済みFDを通過しうる）。例外として、route table満杯時のdirect-neighbor admit（add_neighbor）は最も古いarm済みtombstoneを1件だけ早期reclaimしてよい（issue #50；学習routeの氾濫には適用しない）。撤回・隣接喪失したnext hopは500ms（`kRouteHoldDownMs`）hold-downする。triggered広告はneighbor喪失・selected route変更・sequence bumpで起動し、最小間隔1秒・最大64msの決定的jitterでburstを束ねる。1 frameのrecord上限は7（自己record＋6経路）で、flat profileではselected routeの全dumpをper-neighborの回転cursorで複数更新へ分割する。この場合lifetimeは`(ceil(D/6)+1)×period`を超えなければならず、既定5s／15sが支えるのは6宛先までである（issue #41）。100台規模は次節のgateway-scoped profileを使う。
 
 SeqNoRequestは宛先ごとにcooldown 2秒から線形に最大30秒までbackoffし、attemptが飽和した後も最大cooldownのbounded cadenceで再試行を続ける（打ち切り無し・attemptsは255で飽和）。同時in-flightは4件・state dwellは30秒・TTL上限10。これらはportable modelで検証済みの値であり、実機・RF上の成立証明ではない。
 
@@ -86,3 +86,9 @@ SeqNoRequestは宛先ごとにcooldown 2秒から線形に最大30秒までbacko
 pairwise controlのfan-out、active origins、entry長、周期、lease、request最大待ちを同時にcapacity manifestへ決める。token待ちでleaseを破る設定はprofile不成立。small実機での成立を100台へ外挿しない。route restart/GC・量子化単位・timerを未確定のままproduction routing capabilityを有効にしない。
 
 sleep proxy／service originは別権限・lease・移管の規約が必要。初期は明示endpoint中心、未対応のsleep downlinkはNOT_CURRENTLY_REACHABLE。API境界は維持し、未設計のproxyを通常routeとして広告しない。
+
+## 12. Gateway-scoped profile（100台・1 gateway向け）
+
+`NodeConfig::route_gateways`にgatewayを設定したsiteでは、全宛先を全隣接へ定期広告しない。各nodeはgatewayへの経路と自己recordを**gateway木**（gatewayへのcommitted next hopが親）に沿って`route_refresh_ticks`周期（既定6×5s＝30s）で更新し、子の部分木の経路だけを親へ上げる。それ以外の宛先（board間）はROUTE_REQUEST（type 35）の有界なon-demand探索で得る。子の判定はwire flagではなく、gateway recordのpoison reverse（無限大）から推定する。
+
+採用可能条件・sequence・generation・tombstone・hold-downは本書§10〜§11のまま変えない。全ての出力recordはFD更新後に送り、全ての入力recordは`consider()`を通るので、広告相手の限定は「その広告が失われた」のと区別できず、loop-freedomは保たれる。lease規則`lifetime ≥ (2×ticks＋2)×period`は`validate_config`が強制し（違反は`ROUTE_LIFETIME_BELOW_REFRESH_BOUND`で起動拒否）、製品値は5s／90sである。設計、airtime見積り（100台で約72〜78ms/s、§14包絡100ms/s以内）、残るリスクは[routing-scale設計](../design/sdk-v1/routing-scale.md)を参照。

@@ -149,7 +149,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 | `rlboot`の欠落・後退 | §3.3 |
 | 旧layout（v1）の記録 | 既存どおり`IntegrityError`（fail closed）。推測で変換しない |
 
-## 8. 受入試験（planned_not_run）
+## 8. 受入試験（planned_not_run、P0分の状況は§9.5）
 
 | ID | 内容 |
 |---|---|
@@ -161,3 +161,48 @@ rlsec,    data, nvs,     0x190000, 0x10000
 | V1-N06 | `rlboot`欠落を注入：`boot_witness + 2^20`へ進み、group送信者鍵が過去と重複しない |
 | V1-N07 | 予算model（Python）とcodec最大長の一致、partition容量の80%以下 |
 | V1-N08 | HIL：C3で`nvs_get_stats()`の実測値が予算表と矛盾しない |
+
+## 9. P0の実装状況（開発PSK profile、host試験済み・実機未試験）
+
+[08](08-implementation-plan.md)のP0-1／P0-2を実装した。protocol・Wire v2 byte列は変えていない。削除規則は§2のC1/C2に従い、安全に示せない削除は実装していない。
+
+### 9.1 実装したもの
+
+| 策 | 実装 | 場所 |
+|---|---|---|
+| D2-a 起動の分離 | reference_node・examples/espnow_nodeは`rlsec` 64KiB、bridge_node（gateway）は128KiBを`partitions.csv`で確保（`nvs` 24KiB、factory 1.5MiB、表の終端0x1A0000／0x1B0000でESP-IDF既定の2MB設定にも4MB機にも収まる）。`rlcounter`/`rlreplay`は`nvs_open_from_partition("rlsec", …)`。起動順は「既定`nvs`初期化→`rlboot`前進→`nvs_flash_init_partition("rlsec")`→Provider」で、`rlsec`の状態が`rlboot`の書込みを妨げない。sleep imageはsystem状態として既定`nvs`の`rlsleep`へ移した | [partitions.csv](../../../firmware/reference_node/partitions.csv)、[nvs_counter_store](../../../components/routeloom_espnow/src/nvs_counter_store.cpp)、各firmwareの`main.cpp` |
+| D2-b 死んだcounterの掃除 | Provider初期化時に`key_epoch < tx_epoch`（`tx_epoch`＝boot session）のTX recordを掃除する。1 passで最大16件を集め、その最大epochを証人`cmax`（u32）として**先に**commitし、成功後にだけ消去する。証人は単調（下げない）。破損・旧layout・大きさ不一致のrecordはepochが信用できないので消さない（そのslotはIntegrityErrorのまま）。`tx_epoch`より新しいrecordは`rlboot`後退の証拠として残し、ログに出す | [peer_state](../../../components/routeloom/src/peer_state.cpp)の`BoundedCounterStore` |
+| 証人の執行 | 起動時に`tx_epoch ≤ cmax`なら初期化を拒否する（`TX_EPOCH_AT_OR_BELOW_SWEEP_WITNESS`）。加えて**すべての**counter record commitで`key_epoch ≤ cmax`を拒否する。leaseは1個目のcounterを出す前に必ず予約blockをcommitする（`CounterLease::reserve_block`）ので、このcommit gate一つで掃除済みepochの鍵は二度と使われない | 同上 |
+| D2-c 永続ピア数の上限 | 上限は通常64ピア／gateway 128ピア（`kNodeMaxPersistedPeers`／`kGatewayMaxPersistedPeers`）。1ピアはLink＋EndToEndの2 scopeなので、TX record・RX floorそれぞれ上限の2倍のslotを持つ。firmwareは`nvs_get_stats("rlsec")`の総entryから計算した収容数で上限をさらに絞る。**新しい**slotだけを拒否し（`NoCapacity`、detail `PEER_STATE_CAPACITY`）、既存ピアのblock予約・window更新・epoch前進は続く。拒否はTX／RX別に計数し、起動時ログに件数・上限・掃除結果・`rlsec`使用entryを出す。件数の調査（census）に失敗した起動では新規ピアを拒否する（fail closed） | `BoundedCounterStore`／`BoundedReplayStore`、[psk_security](../../../components/routeloom_espnow/src/psk_security.cpp)の`log_peer_state` |
+| D2-d floor/windowは消さない | RX側には削除経路を作っていない。windowはそのpeer pairのfloorがあるslotにしか書かせない（ReplayGuardは常にfloorを先に確定するので挙動は変わらない）ため、windowの数もfloorの上限に収まる | `BoundedReplayStore` |
+| 予算の検査（§5.3） | `tools/nvs_budget.py`がheaderの`static_assert`（record長）と定数、各firmwareの`partitions.csv`・`sdkconfig.defaults`を読み、最悪時entry（上限×20＋固定3）が`rlsec`の使えるentryの80%以下、表がflashに収まること、custom表の選択、factory非縮小を検査する。`tests/test_nvs_budget.py`（負の変異を含む）でCIに入る | [nvs_budget.py](../../../tools/nvs_budget.py) |
+
+計算値：64KiB＝16 page、使えるentry 15×126＝1890、80%＝1512、最悪1283（64ピア）。128KiB＝使える3906、80%＝3124、最悪2563（128ピア）。
+
+### 9.2 各削除の安全性
+
+- **TX recordの掃除（C1）**：recordを消してよいのは、その鍵が二度と使われない時だけ。開発profileのTX鍵は`(PSK, scope, network, 自分, 宛先, epoch)`で決まり、Providerは自分のepoch（boot session）でしか送らない。消すのは`key_epoch < tx_epoch`だけで、消す前にその最大値を`cmax`としてcommitし、以後`key_epoch ≤ cmax`のcommitを全部拒否する。slotには過去に使った最大epochのrecordが残るか（Conflictで古いepochを拒否）、消されていれば`cmax`がそれ以上の値を持つ、という不変条件が常に成り立つ。電源断はどの時点でも、消えたrecordのepochが耐久化済みの`cmax`以下であることを壊さない（証人→消去の順）。
+- **`rlboot`が後退した場合**：既定`nvs`だけが消去され`rlsec`が残ると、boot sessionが`cmax`以下に戻り得る。この時は初期化を拒否する（開始しない）。firmwareは初期化より前にboot sessionを進めるので、拒否された起動ごとにsessionが1つ進み、`cmax`を越えた時点で起動する。越えた時点で掃除済みのepochはすべて`cmax`以下、残っているrecordは自分のslotを守る（それより古いepochはConflict）ので、再使用は起こらない。逆に`rlsec`だけを消した場合は`rlboot`が残るのでepochは新しいままで、過去のTX鍵は使われない（旧来の単一partitionより安全側）。
+- **RX floor／windowは消さない（C2、D2-d）**：開発profileには双方nonceのhandshakeが無く、同じ鍵は同じepochの間ずっと有効である。floorを消すと、捕獲された古いframeがcold startとして受理される。windowだけを消してfloorを残すことは安全（同epochは`REPLAY_STATE_LOST`で拒否）だが、相手のepochはboot sessionなので、**生きているが休止していた**ピアは相手が再起動するまで通信不能になる（P0には相手に再鍵を促す手段が無い）。したがって「休止ピアのLRU追い出し」やfloor＋windowの縮約（tombstone化）は採らず、上限での新規拒否に留めた。
+
+### 9.3 残る制約（本番profileで解消）
+
+- RX側の上限は機器の生涯で累計した(scope, 送信元)に効く。上限到達後の新しい送信元は、全台での開発network id／PSK切替と`rlreplay`/`rlcounter`の明示消去（D2-e）まで通信できない。根本解決はD1（P4-4、開発ProviderのRAM context engine化）。
+- TX側の上限は1起動内の(scope, 宛先)数に効く（起動ごとに掃除される）。
+- `rlident`/`rlsite`/`rltrust`/`rlrevo`/`rlres`（§5.1）はP1-3／P7-1で`rlsec`へ置く。P0では既存の`rltrust`/`rlcred`を既定`nvs`に残した（`rlsec`の保守imageと書込み手順がまだ無いため）。`rlsec`のNVS暗号化（T2）も未適用。
+- 数値はNVS形式からの計算で、実機の`nvs_get_stats()`との照合（V1-N08）は未実施。
+
+### 9.4 移行
+
+partition tableが変わるため、既存機は**flash全体を消去してから**書き込む（`idf.py erase-flash flash`）。Wire v2（v1 recordはIntegrityErrorで拒否）でも既にNVS消去が必要なので、手順は増えない（08 Q13）。消去せずに書いた場合、既定`nvs`に残る旧`rlcounter`/`rlreplay`は使われず、firmwareは起動時に警告を出す（自動消去はしない）。`rlsec`領域が初期化できない場合は理由を出して起動しない（fail closed、自動消去なし）。
+
+### 9.5 受入試験の状況
+
+| ID | 状況 |
+|---|---|
+| V1-N03 | host modelで確認（`routeloom_peer_state_tests`：`rlsec`容量を使い切る構成でも別partitionのboot session書込みは毎回成功）。実機HILは未実施 |
+| V1-N04 | host試験済み（掃除・証人の順序・電源断・`cmax`以下の拒否・`rlboot`後退時の非再使用） |
+| V1-N05 | host試験済み（上限超過の新規拒否と計数、既存ピアの継続、累計200ピアのchurnで上限不超過・(鍵, counter)非再使用・旧frame非再受理） |
+| V1-N07 | CIで実行（`tools/nvs_budget.py`、`tests/test_nvs_budget.py`） |
+| V1-N08 | 未実施（HIL） |
+| V1-N01／N02／N06 | 本番profile向け。P0の対象外 |

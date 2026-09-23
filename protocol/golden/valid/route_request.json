@@ -1,0 +1,23 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "route_request",
+  "comment": "ROUTE_REQUEST Discover (38-byte payload), link protection only",
+  "type": 35,
+  "flags": 0,
+  "delivery": 0,
+  "delivery_round": 0,
+  "hop_remaining": 1,
+  "network": 1,
+  "origin": 2,
+  "destination": 1,
+  "previous_hop": 2,
+  "next_hop": 1,
+  "session": 102,
+  "sequence": 6,
+  "remaining_deadline_ms": 2000,
+  "original_lifetime_ms": 2000,
+  "link_epoch": 1,
+  "end_epoch": 1,
+  "payload_hex": "020a01020304050607081112131415161718a1b2c3d401020304050607080000000701230010",
+  "encoded_hex": "524c02002300000001000026000000010000000000000002000000000000000100000000000000020000000000000001000000660000000000000006000007d0000007d0000000010000000100000000000000000000000084464e94dc3f33eaf7a96f2c6ee9cb47c118c79a307809903874e2d0c6afdc34bc7ed6271f6c3e8c453bb439f9547af8a411923c763a"
+}
