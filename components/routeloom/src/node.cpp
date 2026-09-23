@@ -839,7 +839,8 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
   }
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
-      options.lifetime_ms == 0 || options.hop_limit == 0) {
+      options.lifetime_ms == 0 ||
+      options.lifetime_ms > kMaxMessageLifetimeMs || options.hop_limit == 0) {
     return Status::error(StatusCode::InvalidArgument, "invalid send request");
   }
   if (options.delivery == DeliveryClass::Applied) {
@@ -866,7 +867,8 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kAppliedUserPayloadMax ||
       (payload.size > 0 && payload.data == nullptr) ||
-      options.lifetime_ms == 0 || options.hop_limit == 0) {
+      options.lifetime_ms == 0 ||
+      options.lifetime_ms > kMaxMessageLifetimeMs || options.hop_limit == 0) {
     return Status::error(StatusCode::InvalidArgument, "invalid applied send request");
   }
   if (options.delivery != DeliveryClass::Applied) {
@@ -926,7 +928,8 @@ Status MeshNode::resume_delivery(const MessageId& id, const NodeId destination,
   }
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
-      options.lifetime_ms == 0 || options.hop_limit == 0) {
+      options.lifetime_ms == 0 ||
+      options.lifetime_ms > kMaxMessageLifetimeMs || options.hop_limit == 0) {
     return Status::error(StatusCode::InvalidArgument, "invalid send request");
   }
   if (options.delivery == DeliveryClass::Applied) {
@@ -1429,7 +1432,8 @@ Status MeshNode::send_service(const NodeId destination, const ByteView payload,
   }
   if (destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
-      lifetime_ms == 0) {
+      lifetime_ms == 0 ||
+      lifetime_ms > kMaxMessageLifetimeMs) {
     return Status::error(StatusCode::InvalidArgument, "invalid service send");
   }
   id = MessageId{config_.message_session, next_message_sequence_++};
@@ -1451,7 +1455,8 @@ Status MeshNode::resend_service(const MessageId& id, const NodeId destination,
   }
   if (id.sequence == 0 || destination == kInvalidNodeId || destination == config_.node ||
       payload.size > kMaxApplicationPayload || (payload.size > 0 && payload.data == nullptr) ||
-      lifetime_ms == 0) {
+      lifetime_ms == 0 ||
+      lifetime_ms > kMaxMessageLifetimeMs) {
     return Status::error(StatusCode::InvalidArgument, "invalid service resend");
   }
   return queue_typed_job(FrameType::Service, JobOwner::GatewayService, id,

@@ -18,6 +18,12 @@ using MacAddress = std::array<std::uint8_t, 6>;
 constexpr NodeId kInvalidNodeId = 0;
 constexpr NodeId kBroadcastNodeId = UINT64_MAX;
 constexpr std::size_t kMaxApplicationPayload = 128;
+// Normal message lifetime ceiling (crash-time-resources §3,
+// resource-profiles max_message_lifetime_ms). Origin sends above it are
+// refused, never clamped: dedup retention (lifetime + late result) is
+// sized on this bound, so a longer-lived message could outlive the
+// receiver's duplicate suppression.
+constexpr std::uint32_t kMaxMessageLifetimeMs = 30000;
 constexpr std::size_t kMaxEspNowBody = 250;
 constexpr std::size_t kAeadTagSize = 16;
 constexpr std::uint8_t kDefaultHopLimit = 10;
