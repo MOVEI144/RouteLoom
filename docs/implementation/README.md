@@ -6,8 +6,8 @@
 
 - `components/routeloom`：C++17 portable core、C ABI、凍結済みWire v2 codec（`protocol/golden`のC++／Rust共有vector、test cipher）、有限Queue、BEST_EFFORT/RELIABLE、hop/end receipt、dedup、Babel由来feasibility、generation／tombstone／hold-down、bounded seqno、SeqNoRequest、SingleAuthorityの2スロット耐電断操作台帳（CRC-32/ISO-HDLC、hash chain、QUARANTINED回復）、deadline再開規則、portable ReplayGuard、DATA/END_RECEIPTの強制end保護、PowerCoordinator、USB/Serial device bridge（streaming codec、開発session、累積credit、MeshNode統合）。**EXPERIMENTAL**（Issue #14/#16/#17、opt-in）：Discovery Scope filter（RLD1 body v2、hint/tag gate、generation rotation、scope dedup、auth-transcript scope_binding、Required-without-bindingは起動拒否で降格なし）、Service21 Explicit Gateway（resolve/token、Submit/Receipt、HOST_RECEIVE_RAM sink、UsbBridge 0x10〜0x13 lane）、RCC1 Small Remote Config（schema/CAS、2-slot ConfigJournal、dev HMAC permit、Control22＋object kind3転送、UsbBridge 0x20〜0x23 lane）。集計counterは`scope_stats()`/`GatewayStats`/`ConfigStats`のgetter経由。
 - `components/routeloom_espnow`：ESP-IDF v6.0.3向けの固定channel／LR250 Radio Owner、Peer登録、callback event queue、NVS counter store、NVS authority ledger store、NVS replay store、ESP-NOW PowerPort＋NVS sleep storage、PSA AES-GCM開発用PSK Provider。
-- `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。`ROUTELOOM_DEEP_SLEEP`選択時にdeep-sleep経路を配線。`ROUTELOOM_DISCOVERY`でautonomy discovery、`ROUTELOOM_CONFIG`でEXPERIMENTALなRCC1 target（NVS store＋dev HMAC verifier＋ConfigJournal）をopt-in配線（既定n）。NVS異常時はIdentity／counterを守るため自動eraseしない。
-- `firmware/bridge_node`：C3/S3/C5でcompileされるUSB bridge firmware。`ROUTELOOM_CAPABILITY`（既定0x7）のbit3でgateway_endpoint_v1、bit4でconfig_endpoint_v1をopt-in attach＋HelloAck広告。OFFでは未attach・全opがUnsupported。
+- `firmware/reference_node`：C3/S3/C5でcompileされる実験firmware。静的Peer構成。`ROUTELOOM_DEEP_SLEEP`選択時にdeep-sleep経路を配線。`ROUTELOOM_DISCOVERY`でautonomy discovery、`ROUTELOOM_CONFIG`でEXPERIMENTALなRCC1 target（NVS store＋dev HMAC verifier＋ConfigJournal）をopt-in配線（既定n）。`ROUTELOOM_ROUTE_GATEWAY_SCOPED`（既定n）でgateway-scoped routing profile（`ROUTELOOM_ROUTE_GATEWAY_1`／`_2`、scoped時のみ`ROUTELOOM_ROUTE_PERIOD_MS`＝5000／`ROUTELOOM_ROUTE_LIFETIME_MS`＝90000）。NVS異常時はIdentity／counterを守るため自動eraseしない。
+- `firmware/bridge_node`：C3/S3/C5でcompileされるUSB bridge firmware。`ROUTELOOM_CAPABILITY`（既定0x7）のbit3でgateway_endpoint_v1、bit4でconfig_endpoint_v1をopt-in attach＋HelloAck広告。OFFでは未attach・全opがUnsupported。`ROUTELOOM_ROUTE_GATEWAY_SCOPED`ではbridge自身（`ROUTELOOM_NODE_ID`）を先頭gatewayに載せる（2台目は`ROUTELOOM_ROUTE_GATEWAY_2`）。
 - `host/`：Wire v2 codec library、COBS＋CRC32のUSB/Serial framing library、開発session helper、golden vector generator（`gen_golden`／`gen_usb_golden`）、Unix daemon、CLI、TUI。daemonのAPI1はgateway.resolve/gateway.get（schema-2 submitは`messages.submit`）とconfig.challenge/status/propose/getを実装（dev profile・ACL認可、capability未交渉はhonest拒否）。`routeloomctl`に同名subcommand（例は下記）。
 - `tests/cpp`：codec、counter予約、routing、3hop配送、diamond repair、10hop配送・分断再結合・loop-freedom、authority ledger電断simulation、USB session/credit/golden vector、power coordinator model、replay・end保護hardening、C ABI、scope（S01〜S11）、gateway（Gケース）、host ops/capability gate、config（C01〜C14）＋config wire/dev permit。
 
@@ -15,7 +15,7 @@
 
 - Portable core：GCC／Clang、ASan/UBSanのON/OFF。
 - Rust：fmt、Clippy `-D warnings`、unit test、release build。
-- ESP-IDF：固定`v6.0.3`のC3／S3／C5 reference＋bridge firmware buildとsize artifact。`features`軸でEXPERIMENTAL機能ON（bridge `ROUTELOOM_CAPABILITY=0x1f`、reference `ROUTELOOM_CONFIG=y`）をbase OFF matrixに追加し、sdkconfigへON/OFF両方向のgrepをかける。
+- ESP-IDF：固定`v6.0.3`のC3／S3／C5 reference＋bridge firmware buildとsize artifact。`features`軸でEXPERIMENTAL機能ON（bridge `ROUTELOOM_CAPABILITY=0x1f`、reference `ROUTELOOM_CONFIG=y`、両方の`ROUTELOOM_ROUTE_GATEWAY_SCOPED=y`）をbase OFF matrixに追加し、sdkconfigへON/OFF両方向のgrepをかける。
 - 文書・意味契約：生成表、negative mutation、小状態モデル。
 
 CI成功はhost/build evidence。実機起動、空中通信、到達距離、電池、都市部干渉を証明しない。

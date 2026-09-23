@@ -2,7 +2,7 @@
 
 状態：**portable coreに実装済み・host試験済み（SimWorld）**。実RF・実機・HILでの認定は未実施。Wire v2 headerは不変、予約済みROUTE_REQUEST（type 35）にpayloadを定義した。group key（broadcast暗号）は使わない。
 
-対象コード：`components/routeloom/src/route_scale.cpp`（本profile）、`routing.hpp`（lease規則・定数）、`route_request.hpp`（payload codec）、`node.cpp`（配線・config検査）。試験：`tests/cpp/test_routing_scale.cpp`。関連：[経路仕様](../../spec/routing.md)、[無線§14](../../spec/radio.md)、[輻輳→経路結合](../sdk-completion/03-congestion-routing.md)、[Wire](../../spec/wire-protocol.md)。
+対象コード：`components/routeloom/src/route_scale.cpp`（本profile）、`routing.hpp`（lease規則・定数）、`route_request.hpp`（payload codec）、`node.cpp`（配線・config検査）、`c_api.cpp`（C ABIの設定）、各firmwareの`main/Kconfig.projbuild`・`main.cpp`（Kconfig配線、§5.1）。試験：`tests/cpp/test_routing_scale.cpp`、C APIは`tests/cpp/test_main.cpp`の`test_c_api_route_profile`。関連：[経路仕様](../../spec/routing.md)、[無線§14](../../spec/radio.md)、[輻輳→経路結合](../sdk-completion/03-congestion-routing.md)、[Wire](../../spec/wire-protocol.md)。
 
 ## 1. 問題
 
@@ -100,6 +100,18 @@ flat profileの規則は`lifetime > (ceil(D/6) + 1) × period`（`flat_lifetime_
 
 **tombstoneはleaseより長く**：FDのtombstone保持は`max(60s, lease)`にした（`RouteTable::set_tombstone_dwell`）。leaseを60秒より長くすると、隣接にまだ残っている古い広告が、GC済みで初期化されたFDを通過できてしまう（RFC 8966 §3.7.3の条件）。単体試験で60秒dwell＋90秒leaseのときに古いsequenceが採用されることを示し、修正後はinfeasibleになる。
 
+### 5.1 設定の入口
+
+| 入口 | gateway | tick／lease | 検査 |
+|---|---|---|---|
+| C++ `NodeConfig` | `route_gateways`（最大2、`kInvalidNodeId`は空き枠。1つでも設定でscoped） | `route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（既定6） | `start()`の`validate_config()`がlease規則違反を`InvalidArgument`（`ROUTE_LIFETIME_BELOW_REFRESH_BOUND`）で拒否 |
+| C API `rl_node_config_t` | `route_gateway_count`（0＝flat、既定）＋`route_gateways[RL_MAX_ROUTE_GATEWAYS]`（優先順） | 既存の`route_advertisement_period_ms`／`route_lifetime_ms`、`route_refresh_ticks`（0＝SDK既定6） | `rl_init`が個数超過・count内の0・重複を`RL_STATUS_INVALID_ARGUMENT`で拒否（count以降の要素は無視）。lease規則違反とbroadcast IDは`rl_start`が`RL_STATUS_INVALID_ARGUMENT`で拒否 |
+| firmware Kconfig（reference_node／bridge_node／examples/espnow_node） | `ROUTELOOM_ROUTE_GATEWAY_SCOPED`（既定n）、`ROUTELOOM_ROUTE_GATEWAY_1`（既定0x1）、`ROUTELOOM_ROUTE_GATEWAY_2`（0＝なし）。bridge_nodeはgatewayなので自分の`ROUTELOOM_NODE_ID`を先頭に載せ、`_2`だけを持つ | `ROUTELOOM_ROUTE_PERIOD_MS`（既定5000）／`ROUTELOOM_ROUTE_LIFETIME_MS`（既定90000）。scoped時だけ現れ、flat buildはSDK既定（5s／15s）に触れない | gateway 0・重複・lease規則違反を`static_assert`でbuild失敗にする（起動時拒否より前に止める） |
+
+`rl_node_config_init()`はflat既定（5s／15s、gatewayなし）のままなので、C callerがscopedにするときは5s／90sを明示する（15sのままでは`rl_start`が拒否する）。実効gateway一覧は`rl_route_gateways()`で読める（0件＝flat）。
+
+**C ABIの拡張方針**：新fieldは`rl_node_config_t`の**末尾**に足し、`RL_ABI_VERSION`は2のまま据え置いた。`rl_init`は`struct_size`が構造体全体以上なら新fieldを読み、拡張前の大きさ（`RL_NODE_CONFIG_SIZE_BASE`＝64B）なら末尾を一切読まずflat profileとする。その間の大きさは拒否する。`reserved[3]`の転用を採らなかったのは、gateway ID（u64×2）が3Bに入らないことと、`rl_init`がreservedの0を検査してこなかったため旧callerのreservedを意味ある値として読めないことによる。ABI versionを上げると`abi_version`の完全一致検査で既存callerが全て拒否されるので上げない。`rl_node_config_init()`は新しい全体を書くので、旧header（64B）でbuildしたbinaryがこのlibraryの`rl_node_config_init()`を呼ぶ組合せは不可（pre-1.0は同じsource dropからbuildする前提、[compatibility §4](../../spec/compatibility.md)）。
+
 ## 6. 資源（動的確保なし）
 
 | 状態 | 上限 |
@@ -157,7 +169,7 @@ Wire v2 header（88B）は不変。ROUTE_UPDATEのpayload形式も不変。予�
 - **起動時の嵐**：全台同時起動でpullが約1,900 frameになる。起動jitterや、隣接の広告を一定時間待ってからpullする等の緩和が必要（未実装）。
 - **gatewayの深さとboard間**：木を経由するので、別の枝の深いboard同士は10hopを超えて届かない。
 - **複数gateway**：2つまで設定できるが、上りは各親へ同じ部分木を送る単純な方式で、試験は1 gatewayが中心。
-- **C API・firmware未配線**：`rl_node_config_t`と参照firmwareはまだ`route_gateways`を設定できない（ABI追加が必要）。
+- **hostへの報告なし**：C API（§5.1）とfirmware Kconfigからは設定できるが、USB HostOps（HelloAck・node_status_v1）はrouting profileとgateway一覧を運ばない。golden固定のUSB wire形式への追加が要るので別作業とする。firmwareのgateway一覧はbuild時固定で、remote config（RCC1）からは変えられない。
 - **実RF未検証**：air timeは推定モデル、simは衝突・損失を模擬しない。§14の実測・capacity manifestはG-ROUTEに残る。
 
 **group keyでbroadcast広告が使えるようになった場合**：定常の木維持量はほぼ変わらない（木の平均子数は1なので、子へのunicastをbroadcast 1回に替えても件数は同程度。上りpageは親だけが必要）。変わるのは、(1)全隣接が毎周期gateway metricを聞くので予備候補が常に温まり、親喪失の修復がpull無しで即時になる、(2)pullが隣接数分のunicastから1 broadcastになり起動時の嵐が数分の1になる、(3)木以外への回転送信が不要になる、の3点である。それでも「5秒ごとに全nodeが1 frame」は100台で139ms/sなので、tick×周期の構造と本書のlease規則は残る。
