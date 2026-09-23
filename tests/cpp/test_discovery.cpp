@@ -1274,6 +1274,50 @@ void test_send_failure_stats() {
   CHECK(a.engine.stats().probes_tx > probes_before);
 }
 
+
+// Issue #43: Revoked had no exit. A revoked record now surfaces every
+// blocked re-authentication, and forget_peer() is the explicit exit that
+// lets a fresh exchange bind the peer again — never implicit, never for a
+// live binding.
+void test_forget_revoked_peer() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+
+  // forget_peer never drops a live binding, and an unknown node is NotFound.
+  CHECK(a.engine.forget_peer(2).code == StatusCode::InvalidState);
+  CHECK(a.engine.forget_peer(77).code == StatusCode::NotFound);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+
+  CHECK_OK(a.engine.revoke_peer(2));
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Revoked);
+
+  // A completed exchange cannot resurrect the revoked record, and the block
+  // is observable instead of a silent return.
+  run_exchange(world, a);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Revoked);
+  CHECK(!a.engine.data_permitted(b.mac));
+  CHECK(a.observer.has("REVOKED_REBIND_BLOCKED"));
+
+  // The explicit exit: the dead record is dropped ...
+  CHECK_OK(a.engine.forget_peer(2));
+  CHECK(a.observer.has("FORGOTTEN"));
+  CHECK(!a.engine.phase_of(b.mac, phase));
+  CHECK(a.engine.neighbor_count() == 0);
+  NodeId resolved = kInvalidNodeId;
+  CHECK(!a.engine.node_of(b.mac, resolved));
+  // ... and a fresh authenticated exchange binds the peer again.
+  run_exchange(world, a);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(a.engine.data_permitted(b.mac));
+}
+
 }  // namespace
 
 int main() {
@@ -1301,6 +1345,7 @@ int main() {
   test_stale_reprobe_never_targets_dead();
   test_stranded_rediscovery_rebinds();
   test_send_failure_stats();
+  test_forget_revoked_peer();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d discovery checks failed\n", failures);
