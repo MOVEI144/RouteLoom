@@ -30,6 +30,7 @@ set(ROUTELOOM_FUZZ_TARGETS
   cose
   rlres1
   sdkv1
+  sdkv1_ead
 )
 
 foreach(target ${ROUTELOOM_FUZZ_TARGETS})
@@ -61,3 +62,10 @@ endforeach()
 add_test(NAME fuzz_rlres1_mutation
          COMMAND fuzz_rlres1 ${CMAKE_CURRENT_SOURCE_DIR}/corpus/rlres1
                  -runs=4000 -seed=11)
+
+# Join EAD codecs (sdk-v1 plan P2-3): a longer deterministic mutation run
+# over the seeds tools/gen_sdkv1_ead_vectors.py writes from the golden
+# vectors, so the canonical-re-encode invariant runs on every compiler.
+add_test(NAME fuzz_sdkv1_ead_mutation
+         COMMAND fuzz_sdkv1_ead ${CMAKE_CURRENT_SOURCE_DIR}/corpus/sdkv1_ead
+                 -runs=20000 -seed=13)

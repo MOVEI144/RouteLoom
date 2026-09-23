@@ -1,0 +1,19 @@
+[package]
+name = "routeloom-join"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# SDK v1 zero-touch join EAD codecs (docs/design/sdk-v1/02-zero-touch-join.md
+# §6, plan P2-3) — the Site Authority side that routeloom-host builds on in
+# P3-3. RLCW1 certificates, the restricted ES256 COSE_Sign1 helpers, the
+# signer seam and SHA-256 come from routeloom-provision's sdkv1 module, so
+# no second copy of the certificate profile exists on the host.
+routeloom-provision = { path = "../routeloom-provision" }
+
+[dev-dependencies]
+routeloom-json = { path = "../routeloom-json" }
+
+[lints]
+workspace = true

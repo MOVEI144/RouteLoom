@@ -1,0 +1,213 @@
+# RFC 9529 §3 (EDHOC method 3, cipher suite 2) — values copied verbatim
+# by tools/extract_rfc9529_vectors.py from
+# https://www.rfc-editor.org/rfc/rfc9529.txt (sha256 e220e864adba55278e976e2e1824037a5c51adbe3b359b3519730af7166a7489).
+# Public test keys only. Copyright (c) 2024 IETF Trust and the persons
+# identified as the document authors; Revised BSD License, see README.md.
+# Format: one `name = hex` per line; `#` comments.
+
+# §3.1 message_1 (CBOR Sequence, 37 bytes)
+message_1_first = 03065820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa90e
+
+# §3.2 error (CBOR Sequence, 2 bytes)
+error = 0202
+
+# §3.3 X (Raw Value, 32 bytes)
+X = 368ec1f69aeb659ba37d5a8d45b21bdc0299dceaa8ef235f3ca42ce3530f9525
+
+# §3.3 G_X (Raw Value, 32 bytes)
+G_X = 8af6f430ebe18d34184017a9a11bf511c8dff8f834730b96c1b7c8dbca2fc3b6
+
+# §3.3 C_I (Raw Value, 1 bytes)
+C_I = 37
+
+# §3.3 message_1 (CBOR Sequence, 39 bytes)
+message_1 = 0382060258208af6f430ebe18d34184017a9a11bf511c8dff8f834730b96c1b7c8dbca2fc3b637
+
+# §3.4 Y (Raw Value, 32 bytes)
+Y = e2f4126777205e853b437d6eaca1e1f753cdcc3e2c69fa884b0a1a640977e418
+
+# §3.4 G_Y (Raw Value, 32 bytes)
+G_Y = 419701d7f00a26c2dc587a36dd752549f33763c893422c8ea0f955a13a4ff5d5
+
+# §3.4 C_R (raw value, 1 bytes)
+C_R = 27
+
+# §3.4 H(message_1) (Raw Value, 32 bytes)
+H_message_1 = ca02cabda5a8902749b42f711050bb4dbd52153e87527594b39f50cdf019888c
+
+# §3.4 TH_2 (Raw Value, 32 bytes)
+TH_2 = 356efd53771425e008f3fe3a86c83ff4c6b16e57028ff39d5236c182b202084b
+
+# §3.4 G_XY (Raw Value) (ECDH shared secret, 32 bytes)
+G_XY = 2f0cb7e860ba538fbf5c8bded009f6259b4b628fe1eb7dbe9378e5ecf7a824ba
+
+# §3.4 PRK_2e (Raw Value, 32 bytes)
+PRK_2e = 5aa0d69f3e3d1e0c479f0b8a486690c9802630c3466b1dc92371c982563170b5
+
+# §3.4 SK_R (Raw Value, 32 bytes)
+SK_R = 72cc4761dbd4c78f758931aa589d348d1ef874a7e303ede2f140dcf3e6aa4aac
+
+# §3.4 Responder's public authentication key, 'x'-coordinate (Raw Value, 32 bytes)
+PK_R_x = bbc34960526ea4d32e940cad2a234148ddc21791a12afbcbac93622046dd44f0
+
+# §3.4 Responder's public authentication key, 'y'-coordinate (Raw Value, 32 bytes)
+PK_R_y = 4519e257236b2a0ce2023f0931f1f386ca7afda64fcde0108c224c51eabf6072
+
+# §3.4 SALT_3e2m (Raw Value, 32 bytes)
+SALT_3e2m = af4e103a47cb3cf32570d5c25ad27732bd8d8178e9a69d061c31a27f8e3ca926
+
+# §3.4 G_RX (Raw Value) (ECDH shared secret, 32 bytes)
+G_RX = f2b6eea02220b95eee5a0bc701f074e00a843ea02422f60825fb269b3e161423
+
+# §3.4 PRK_3e2m (Raw Value, 32 bytes)
+PRK_3e2m = 0ca3d3398296b3c03900987620c11f6fce70781c1d1219720f9ec08c122d8434
+
+# §3.4 ID_CRED_R (CBOR Data Item, 4 bytes)
+ID_CRED_R = a1044132
+
+# §3.4 CRED_R (CBOR Data Item, 95 bytes)
+CRED_R = a2026b6578616d706c652e65647508a101a501020241322001215820bbc34960526ea4d32e940cad2a234148ddc21791a12afbcbac93622046dd44f02258204519e257236b2a0ce2023f0931f1f386ca7afda64fcde0108c224c51eabf6072
+
+# §3.4 MAC_2 (Raw Value, 8 bytes)
+MAC_2 = 0943305c899f5c54
+
+# §3.4 PLAINTEXT_2 (CBOR Sequence, 11 bytes)
+PLAINTEXT_2 = 2732480943305c899f5c54
+
+# §3.4 KEYSTREAM_2 (Raw Value, 11 bytes)
+KEYSTREAM_2 = bf50e9e7bad0bb68173399
+
+# §3.4 message_2 (CBOR Sequence, 45 bytes)
+message_2 = 582b419701d7f00a26c2dc587a36dd752549f33763c893422c8ea0f955a13a4ff5d59862a1eef9e0e7e1886fcd
+
+# §3.5 TH_3 (Raw Value, 32 bytes)
+TH_3 = adaf67a78a4bcc91e018f8882762a722000b2507039df0bc1bbf0c161bb3155c
+
+# §3.5 SK_I (Raw Value, 32 bytes)
+SK_I = fb13adeb6518cee5f88417660841142e830a81fe334380a953406a1305e8706b
+
+# §3.5 Initiator's public authentication key, 'x'-coordinate (Raw Value, 32 bytes)
+PK_I_x = ac75e9ece3e50bfc8ed60399889522405c47bf16df96660a41298cb4307f7eb6
+
+# §3.5 Initiator's public authentication key, 'y'-coordinate (Raw Value, 32 bytes)
+PK_I_y = 6e5de611388a4b8a8211334ac7d37ecb52a387d257e6db3c2a93df21ff3affc8
+
+# §3.5 SALT_4e3m (Raw Value, 32 bytes)
+SALT_4e3m = cfddf9515a7e46e7b4dbff31cbd56cd04ba332250de9ea5de1caf9f6d13914a7
+
+# §3.5 G_IY (Raw Value) (ECDH shared secret, 32 bytes)
+G_IY = 080f425085bc6249089eac8f108ea62326857e12ab07d72028ca1b5f36e004b3
+
+# §3.5 PRK_4e3m (Raw Value, 32 bytes)
+PRK_4e3m = 81cc8a298e357044e3c466bb5c0a1e507e01d49238aeba138df94635407c0ff7
+
+# §3.5 ID_CRED_I (CBOR Data Item, 4 bytes)
+ID_CRED_I = a104412b
+
+# §3.5 CRED_I (CBOR Data Item, 107 bytes)
+CRED_I = a2027734322d35302d33312d46462d45462d33372d33322d333908a101a5010202412b2001215820ac75e9ece3e50bfc8ed60399889522405c47bf16df96660a41298cb4307f7eb62258206e5de611388a4b8a8211334ac7d37ecb52a387d257e6db3c2a93df21ff3affc8
+
+# §3.5 MAC_3 (Raw Value, 8 bytes)
+MAC_3 = 623c91df41e34c2f
+
+# §3.5 K_3 (Raw Value, 16 bytes)
+K_3 = 8e7a30042000f7900e8174131f75f3ed
+
+# §3.5 IV_3 (Raw Value, 13 bytes)
+IV_3 = 6d8300c1e23b56153ae70ee457
+
+# §3.5 CIPHERTEXT_3 (Raw Value, 18 bytes)
+CIPHERTEXT_3 = e562097bc417dd5919485ac7891ffd90a9fc
+
+# §3.5 message_3 (CBOR Sequence, 19 bytes)
+message_3 = 52e562097bc417dd5919485ac7891ffd90a9fc
+
+# §3.5 TH_4 (Raw Value, 32 bytes)
+TH_4 = c902b1e3a4326c93c5551f5f3aa6c5ecc0246806765612e52b5d99e6059d6b6e
+
+# §3.6 K_4 (Raw Value, 16 bytes)
+K_4 = d3c77872b6eeb508911bdbd308b2e6a0
+
+# §3.6 IV_4 (Raw Value, 13 bytes)
+IV_4 = 04ff0f44456e96e217853c3601
+
+# §3.6 message_4 (CBOR Sequence, 9 bytes)
+message_4 = 4828c966b7ca304f83
+
+# §3.7 PRK_out (Raw Value, 32 bytes)
+PRK_out = 2c71afc1a9338a940bb3529ca734b886f30d1aba0b4dc51beeaeabdfea9ecbf8
+
+# §3.7 PRK_exporter (Raw Value, 32 bytes)
+PRK_exporter = e14d06699cee248c5a04bf9227bbcd4ce394de7dcb56db43555474171e6446db
+
+# §3.8 Client's OSCORE Sender ID (Raw Value, 1 bytes)
+OSCORE_client_sender_id = 27
+
+# §3.8 Server's OSCORE Sender ID (Raw Value, 1 bytes)
+OSCORE_server_sender_id = 37
+
+# §3.8 OSCORE Master Secret (Raw Value, 16 bytes)
+OSCORE_master_secret = f9868f6a3aca78a05d1485b35030b162
+
+# §3.8 OSCORE Master Salt (Raw Value, 8 bytes)
+OSCORE_master_salt = ada24c7dbfc85eeb
+
+# §3.9 context for KeyUpdate (Raw Value, 16 bytes)
+key_update_context = a01158fdb820890cd6be169602b8bcea
+
+# §3.9 PRK_out after KeyUpdate (Raw Value, 32 bytes)
+key_update_PRK_out = f979537743fe0bd6b9b141ddbd79656c52e6dc7c50ad807754d74d07e87d0d16
+
+# §3.9 PRK_exporter after KeyUpdate (Raw Value, 32 bytes)
+key_update_PRK_exporter = 00fcf7db9b2ead73824e7e830363c805c296f902830fac23d86c359c752f0f17
+
+# §3.9 OSCORE Master Secret after KeyUpdate (Raw Value, 16 bytes)
+key_update_OSCORE_master_secret = 49f72fac02b4658bda21e2dac66fc374
+
+# §3.9 OSCORE Master Salt after KeyUpdate (Raw Value, 8 bytes)
+key_update_OSCORE_master_salt = dd8b24f2aa9b011a
+
+# §4.1.1 invalid message_1 (38 bytes)
+invalid_4_1_1_message_1 = 8403025820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa90e
+
+# §4.1.2 invalid message_1 (38 bytes)
+invalid_4_1_2_message_1 = 03025820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa9410e
+
+# §4.1.3 invalid message_1 (38 bytes)
+invalid_4_1_3_message_1 = 0381025820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa90e
+
+# §4.1.4 invalid message_1 (37 bytes)
+invalid_4_1_4_message_1 = 0302782020616972207370656564206f66206120756e6c6164656e207377616c6c6f77200e
+
+# §4.1.5 invalid message_2 (46 bytes)
+invalid_4_1_5_message_2 = 5820419701d7f00a26c2dc587a36dd752549f33763c893422c8ea0f955a13a4ff5d54b9862a11de42a95d785386a
+
+# §4.1.6 invalid PLAINTEXT_2 (15 bytes)
+invalid_4_1_6_PLAINTEXT_2 = 27a10442321048fa5efa2ebf920bf3
+
+# §4.1.7 invalid PLAINTEXT_2 (12 bytes)
+invalid_4_1_7_PLAINTEXT_2 = 27413248fa5efa2ebf920bf3
+
+# §4.2.1 invalid message_1 (40 bytes)
+invalid_4_2_1_message_1 = 03820218185820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa90e
+
+# §4.2.2 invalid message_1 (37 bytes)
+invalid_4_2_2_message_1 = 03025820ffffffff00000001000000000000000000000000ffffffffffffffffffffffff0e
+
+# §4.2.3 invalid message_1 (37 bytes)
+invalid_4_2_3_message_1 = 03025820a04e73601df544a70ba7ea1e57030f7d4b4eb7f673924e58d54ca77a5e7d4d4a0e
+
+# §4.2.4 invalid message_1 (37 bytes)
+invalid_4_2_4_message_1 = 03005820edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f0e
+
+# §4.2.5 invalid PLAINTEXT_2 (7 bytes)
+invalid_4_2_5_PLAINTEXT_2 = 273244fa5efa2e
+
+# §4.2.6 invalid message_1 (36 bytes)
+invalid_4_2_6_message_1 = 0302581fd9697725d23a688b12d1c7e0108a08c9f71a85a09c20814976ab21122248fc0e
+
+# §4.3.1 invalid message_1 (39 bytes)
+invalid_4_3_1_message_1 = 190003025820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa90e
+
+# §4.3.2 invalid message_1 (40 bytes)
+invalid_4_3_2_message_1 = 039f0602ff5820741a13d7ba048fbb615e94386aa3b61bea5b3d8f65f32620b749bee8d278efa90e

@@ -1,0 +1,8 @@
+{
+  "codec": "join_intent",
+  "encoded_hex": "010049746ee200000003000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_intent_long",
+  "note": "JoinIntent is exactly 12 bytes"
+}

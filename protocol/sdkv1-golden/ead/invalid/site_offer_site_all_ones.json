@@ -1,0 +1,8 @@
+{
+  "codec": "site_offer",
+  "encoded_hex": "0100ffffffffffffffff0a1b2c3d0000000307d00000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "site_offer_site_all_ones",
+  "note": "site_id all-ones is invalid"
+}

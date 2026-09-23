@@ -1,0 +1,8 @@
+{
+  "codec": "join_result",
+  "encoded_hex": "01060000000000050001000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_result_busy_with_body",
+  "note": "AuthorityBusy carries no body"
+}

@@ -1,0 +1,10 @@
+{
+  "codec": "ead_field",
+  "ead_hex": "3a000100034c010400000000000000000000",
+  "expect": "ok",
+  "expected": "result",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_result_only",
+  "note": "EAD_4 with an empty-body JoinResult",
+  "value_hex": "010400000000000000000000"
+}

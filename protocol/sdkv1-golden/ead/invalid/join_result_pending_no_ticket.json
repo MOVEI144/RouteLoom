@@ -1,0 +1,8 @@
+{
+  "codec": "join_result",
+  "encoded_hex": "010200000000012c00000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_result_pending_no_ticket",
+  "note": "pending carries a 1..48 byte ticket"
+}

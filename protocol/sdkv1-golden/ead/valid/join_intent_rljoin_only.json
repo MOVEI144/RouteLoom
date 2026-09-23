@@ -1,0 +1,12 @@
+{
+  "codec": "join_intent",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "item_hex": "3a000100004c010049746ee2000000010000",
+  "label": 65537,
+  "name": "join_intent_rljoin_only",
+  "org_hint": 1232367330,
+  "profile_bits": 1,
+  "site_ca_pubkey_hex": "4dd4f4d64c803bbacbeb82db4ae9323e4516895321fda186290ceb299b61f1c8a1f9721f3d6ecec8b0feecb288423fe0c8588e6d2982aced23fda55a75759f90",
+  "value_hex": "010049746ee2000000010000"
+}

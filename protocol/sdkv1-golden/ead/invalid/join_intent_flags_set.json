@@ -1,0 +1,8 @@
+{
+  "codec": "join_intent",
+  "encoded_hex": "010149746ee2000000030000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_intent_flags_set",
+  "note": "no JoinIntent flag is defined"
+}

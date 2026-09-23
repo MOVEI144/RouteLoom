@@ -1,0 +1,10 @@
+{
+  "codec": "ead_field",
+  "ead_hex": "3a000100004c010049746ee2000000030000",
+  "expect": "ok",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_intent_only",
+  "note": "the single critical item",
+  "value_hex": "010049746ee2000000030000"
+}

@@ -1,0 +1,8 @@
+{
+  "codec": "join_intent",
+  "encoded_hex": "020049746ee2000000030000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_intent_version_2",
+  "note": "unknown version"
+}

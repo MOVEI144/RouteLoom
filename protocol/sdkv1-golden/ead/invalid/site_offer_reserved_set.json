@@ -1,0 +1,8 @@
+{
+  "codec": "site_offer",
+  "encoded_hex": "010051730000000000420a1b2c3d0000000307d00001",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "site_offer_reserved_set",
+  "note": "reserved must be zero"
+}

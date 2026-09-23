@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "3a000100004d010049746ee200000003000000",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_value_size",
+  "note": "JoinIntent value must be 12 bytes"
+}

@@ -125,7 +125,7 @@ pub fn generate_keypair() -> Result<([u8; 32], [u8; 64])> {
 
 /// Fill `out` from /dev/urandom — the host's CSPRNG. Any read failure is
 /// an error, never a downgrade to time/pid material.
-fn fill_random(out: &mut [u8]) -> Result<()> {
+pub fn fill_random(out: &mut [u8]) -> Result<()> {
     let mut file = std::fs::File::open("/dev/urandom")
         .map_err(|_| Error::new(Code::Io, "open /dev/urandom"))?;
     file.read_exact(out)
@@ -183,94 +183,137 @@ impl FileRootSigner {
     /// this file is a custody liability by design (see
     /// FILE_KEY_CUSTODY_WARNING).
     pub fn to_json(&self) -> String {
-        format!(
-            "{{\n  \"format\": \"{ROOT_KEY_FORMAT}\",\n  \"custody\": \"development-file\",\n  \"root_id\": \"{:016x}\",\n  \"secret_hex\": \"{}\",\n  \"pubkey_hex\": \"{}\"\n}}\n",
+        key_document_json(
+            ROOT_KEY_FORMAT,
+            "root_id",
             self.root_id,
-            hex_encode(&self.signing_key.to_bytes()),
-            hex_encode(&self.pubkey),
+            &self.signing_key.to_bytes().into(),
+            &self.pubkey,
         )
+    }
+
+    /// The private scalar, for key-document serialization by the other
+    /// file-backed signers built on this one.
+    pub(crate) fn secret_scalar(&self) -> [u8; 32] {
+        self.signing_key.to_bytes().into()
     }
 
     /// Write the key file with mode 0600, refusing to overwrite an existing
     /// file — clobbering a root key silently is worse than making the
     /// operator delete it deliberately.
     pub fn save(&self, path: &Path) -> Result<()> {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(path)
-            .map_err(|_| Error::new(Code::Io, "root key create (exists? refusing to overwrite)"))?;
-        file.write_all(self.to_json().as_bytes())
-            .map_err(|_| Error::new(Code::Io, "root key write"))?;
-        Self::enforce_private_perms(path)
-    }
-
-    /// Refuse to hand out a key whose file is group/other-accessible —
-    /// POSIX permissions are the only custody this path has (§4.10).
-    #[cfg(unix)]
-    fn enforce_private_perms(path: &Path) -> Result<()> {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(path)
-            .map_err(|_| Error::new(Code::Io, "root key stat"))?
-            .permissions()
-            .mode();
-        if mode & 0o077 != 0 {
-            return err(
-                Code::AuthorizationFailed,
-                "root key file is group/other-accessible (chmod 0600 required)",
-            );
-        }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn enforce_private_perms(_path: &Path) -> Result<()> {
-        Ok(())
+        write_private_file(path, self.to_json().as_bytes())
     }
 
     /// Load a dev root key: parse the JSON document, enforce 0600, and
     /// recompute the pubkey from the secret — a file whose halves disagree
     /// is corruption, never a cue to pick one.
     pub fn load(path: &Path) -> Result<Self> {
-        Self::enforce_private_perms(path)?;
-        let text =
-            std::fs::read_to_string(path).map_err(|_| Error::new(Code::Io, "root key read"))?;
-        let doc = routeloom_json::parse(&text)
-            .map_err(|_| Error::new(Code::ProtocolError, "root key json"))?;
-        if doc.get("format").and_then(|f| f.as_str()) != Some(ROOT_KEY_FORMAT) {
-            return err(Code::ProtocolError, "root key format");
-        }
-        let root_id = doc
-            .get("root_id")
-            .and_then(|v| v.as_str())
-            .and_then(|s| u64::from_str_radix(s, 16).ok())
-            .ok_or(Error::new(Code::ProtocolError, "root key root_id"))?;
-        let secret = doc
-            .get("secret_hex")
-            .and_then(|v| v.as_str())
-            .and_then(|s| hex_decode_exact(s, 32))
-            .ok_or(Error::new(Code::ProtocolError, "root key secret"))?;
-        let claimed_pub = doc
-            .get("pubkey_hex")
-            .and_then(|v| v.as_str())
-            .and_then(|s| hex_decode_exact(s, 64))
-            .ok_or(Error::new(Code::ProtocolError, "root key pubkey"))?;
-        let mut secret_arr = [0_u8; 32];
-        secret_arr.copy_from_slice(&secret);
-        let signer = Self::from_secret(root_id, &secret_arr)?;
-        let mut claimed = [0_u8; 64];
-        claimed.copy_from_slice(&claimed_pub);
-        if signer.pubkey != claimed {
-            return err(Code::IntegrityError, "root key pair inconsistent");
-        }
-        Ok(signer)
+        let (root_id, secret) = read_key_document(path, ROOT_KEY_FORMAT, "root_id")?;
+        Self::from_secret(root_id, &secret)
     }
+}
+
+/// The dev key document shared by the file-backed signers (root, Device
+/// CA): format marker, custody statement, administrative id, secret scalar
+/// and public half.
+pub(crate) fn key_document_json(
+    format: &str,
+    id_field: &str,
+    id: u64,
+    secret: &[u8; 32],
+    pubkey: &[u8; 64],
+) -> String {
+    format!(
+        "{{\n  \"format\": \"{format}\",\n  \"custody\": \"development-file\",\n  \"{id_field}\": \"{id:016x}\",\n  \"secret_hex\": \"{}\",\n  \"pubkey_hex\": \"{}\"\n}}\n",
+        hex_encode(secret),
+        hex_encode(pubkey),
+    )
+}
+
+/// Create `path` with mode 0600 and write `bytes`, refusing to overwrite an
+/// existing file. Used for key documents and for every output that carries
+/// a private scalar (injected-key identity records and their NVS blobs).
+pub fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|_| Error::new(Code::Io, "key file create (exists? refusing to overwrite)"))?;
+    file.write_all(bytes)
+        .map_err(|_| Error::new(Code::Io, "key file write"))?;
+    enforce_private_perms(path)
+}
+
+/// Refuse to hand out a key whose file is group/other-accessible — POSIX
+/// permissions are the only custody this path has (§4.10).
+#[cfg(unix)]
+fn enforce_private_perms(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(path)
+        .map_err(|_| Error::new(Code::Io, "key file stat"))?
+        .permissions()
+        .mode();
+    if mode & 0o077 != 0 {
+        return err(
+            Code::AuthorizationFailed,
+            "key file is group/other-accessible (chmod 0600 required)",
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn enforce_private_perms(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Parse a dev key document: enforce 0600, check the format marker, and
+/// recompute the public half from the secret — a document whose halves
+/// disagree is corruption, never a cue to pick one. Returns (id, secret).
+pub(crate) fn read_key_document(
+    path: &Path,
+    format: &str,
+    id_field: &str,
+) -> Result<(u64, [u8; 32])> {
+    enforce_private_perms(path)?;
+    let text = std::fs::read_to_string(path).map_err(|_| Error::new(Code::Io, "key file read"))?;
+    let doc = routeloom_json::parse(&text)
+        .map_err(|_| Error::new(Code::ProtocolError, "key file json"))?;
+    if doc.get("format").and_then(|f| f.as_str()) != Some(format) {
+        return err(Code::ProtocolError, "key file format");
+    }
+    let id = doc
+        .get(id_field)
+        .and_then(|v| v.as_str())
+        .and_then(|s| u64::from_str_radix(s, 16).ok())
+        .ok_or(Error::new(Code::ProtocolError, "key file id"))?;
+    let secret: [u8; 32] = doc
+        .get("secret_hex")
+        .and_then(|v| v.as_str())
+        .and_then(|s| hex_decode_exact(s, 32))
+        .ok_or(Error::new(Code::ProtocolError, "key file secret"))?
+        .try_into()
+        .expect("32 bytes");
+    let claimed: [u8; 64] = doc
+        .get("pubkey_hex")
+        .and_then(|v| v.as_str())
+        .and_then(|s| hex_decode_exact(s, 64))
+        .ok_or(Error::new(Code::ProtocolError, "key file pubkey"))?
+        .try_into()
+        .expect("64 bytes");
+    let derived = pubkey_from_secret(&secret)
+        .ok_or(Error::new(Code::InvalidArgument, "key file secret range"))?;
+    if derived != claimed {
+        return err(Code::IntegrityError, "key file pair inconsistent");
+    }
+    Ok((id, secret))
 }
 
 impl RootSigner for FileRootSigner {

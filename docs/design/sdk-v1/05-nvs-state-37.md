@@ -191,7 +191,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 
 - RX側の上限は機器の生涯で累計した(scope, 送信元)に効く。上限到達後の新しい送信元は、全台での開発network id／PSK切替と`rlreplay`/`rlcounter`の明示消去（D2-e）まで通信できない。根本解決はD1（P4-4、開発ProviderのRAM context engine化）。
 - TX側の上限は1起動内の(scope, 宛先)数に効く（起動ごとに掃除される）。
-- `rlident`/`rlsite`/`rltrust`/`rlrevo`/`rlres`（§5.1）はP1-3／P7-1で`rlsec`へ置く。P0では既存の`rltrust`/`rlcred`を既定`nvs`に残した（`rlsec`の保守imageと書込み手順がまだ無いため）。`rlsec`のNVS暗号化（T2）も未適用。
+- `rlident`/`rlsite`/`rltrust`/`rlrevo`/`rlres`（§5.1）はP1-3／P7-1で`rlsec`へ置く（`rlident`/`rlsite`/`rlrevo`/`rlres`のNVS adapterと事務所の`rlident` imageはP7-1で実装、firmwareでの生成・配線は未実施、[07 §6.1](07-host-api-tooling.md)）。P0では既存の`rltrust`/`rlcred`を既定`nvs`に残した（`rlsec`の保守imageと書込み手順がまだ無いため）。`rlsec`のNVS暗号化（T2）も未適用。
 - 数値はNVS形式からの計算で、実機の`nvs_get_stats()`との照合（V1-N08）は未実施。
 
 ### 9.4 移行

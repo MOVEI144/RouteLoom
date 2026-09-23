@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "1a000100014c010049746ee2000000030000",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_non_critical",
+  "note": "join items must be critical (negative label)"
+}

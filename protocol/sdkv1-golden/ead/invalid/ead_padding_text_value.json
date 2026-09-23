@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "0061003a000100004c010049746ee2000000030000",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_padding_text_value",
+  "note": "padding values are bstr"
+}

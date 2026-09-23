@@ -1,0 +1,8 @@
+{
+  "codec": "join_request",
+  "encoded_hex": "01000011010400000000000201000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_request_short",
+  "note": "JoinRequest is exactly 26 bytes"
+}

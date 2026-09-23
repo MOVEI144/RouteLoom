@@ -1,0 +1,13 @@
+{
+  "codec": "removal_notice",
+  "encoded_hex": "d28443a10126a0581c01010000ffffffffffffffff00a1000000001234000000030000000f584070c63b46c4097e21cf66c695fc068a97c4f03035897542c74d054458a3970d6c6f613fe8bccf1e85fdb69dc934806abbfddfc399f66ed104c8cfcb6fce49b9f9",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "removal_notice_site_all_ones",
+  "note": "site_id all-ones",
+  "own_generation": 3,
+  "own_network": 13054454845,
+  "own_node": 45317471250420276,
+  "own_site_id": 5869034739393888322,
+  "signer_pubkey_hex": "d797737d4081542dfe111a9a6cba6a52e91118f27a814f8e831e8f72d5165f9308da9652224eaf39f459098b545d520900d372da6e73cf33c4032a8264e7bae4"
+}

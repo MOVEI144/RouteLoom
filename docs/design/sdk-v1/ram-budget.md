@@ -85,6 +85,8 @@ python3 tools/firmware_ram_report.py build/size.json --target <target> --app <ap
 
 **8 KiBの根拠**：静的状態の1機能分の増分（group配送はMeshNodeに約5 KBを足した）に余裕を加えた値である。最後の8 KiBを使う変更は、自分で同じだけ取り戻すか、この表を理由付きで変えるレビューを通す必要がある。linkが失敗して初めて気づく状態には戻さない。これは実行時のheap目標（resource-profilesの空きheap 32 KiB・最大block 16 KiB、HILで測る）とは別の、link前の床である。
 
+**EDHOC（P2-1）**：libedhoc・zcbor・`routeloom::edhoc` backendはrouteloom componentに入りC3/S3/C5のCIでcompileされるが、firmwareからは呼ばれないのでlinkで全て落ち、この表の残量は変わらない（backendは静的状態を持たず、`thread_local`のarena pointer 1つも未参照なら残らない）。P4-2で1 handshake枠（[05本番認証 §8](../host-security-readiness/05-production-security.md)）を静的に置くと、`edhoc::Session` 1個でILP32見積約2.7 KB（host計測3104 Bから算出）が加わる。その時点でこの残量とstack（hostで全handshake約10 KB、C3実測はP2-2）を再確認する。
+
 ## 6. role別profile
 
 容量はcompile time定数で、roleごとに変えられるものは次のとおり。**既定値はすべて従来どおり**で、host test buildも従来の容量で全testを通す。

@@ -1,0 +1,8 @@
+{
+  "codec": "join_result",
+  "encoded_hex": "010600000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_result_busy_retry_zero",
+  "note": "AuthorityBusy retry >= 1"
+}

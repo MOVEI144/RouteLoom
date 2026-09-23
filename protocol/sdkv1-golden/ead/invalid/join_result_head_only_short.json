@@ -1,0 +1,8 @@
+{
+  "codec": "join_result",
+  "encoded_hex": "0101000000000000014200",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_result_head_only_short",
+  "note": "the head is 12 bytes"
+}

@@ -1,0 +1,8 @@
+{
+  "codec": "join_result",
+  "encoded_hex": "010400000000000000000001",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_result_reserved_set",
+  "note": "reserved must be zero"
+}
