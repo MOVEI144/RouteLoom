@@ -213,6 +213,9 @@ struct SimWorld {
   std::map<routeloom::NodeId, std::unique_ptr<SimRadio>> radios;
   std::map<routeloom::NodeId, std::unique_ptr<routeloom::MeshNode>> nodes;
   routeloom::MonotonicMs now{0};
+  // Epochs stamped on nodes added afterwards (Wire v2: 32-bit).
+  std::uint32_t link_epoch{1};
+  std::uint32_t end_epoch{1};
 
   routeloom::MeshNode* add(routeloom::NodeId id, routeloom::RouteGeneration generation = 1,
                            std::uint32_t adv_ms = 100, std::uint32_t life_ms = 1000) {
@@ -222,6 +225,8 @@ struct SimWorld {
     config.message_session = 100 + static_cast<std::uint32_t>(id);
     config.boot_incarnation = 0xB000 + static_cast<std::uint32_t>(id);
     config.route_generation = generation;
+    config.link_epoch = link_epoch;
+    config.end_epoch = end_epoch;
     config.route_advertisement_period_ms = adv_ms;
     config.route_lifetime_ms = life_ms;
     security[id] = std::make_unique<routeloom_test::TestSecurity>();

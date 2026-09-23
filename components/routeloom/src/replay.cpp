@@ -74,6 +74,7 @@ Status ReplayGuard::floor_state(const SecurityContext& context,
       store_.load_floor(floor_slot(context), floor, found);
   if (!status) return status;
   if (found && floor.crc == floor_crc(floor) && floor.initialized != 0 &&
+      floor.layout == kReplayRecordLayout &&
       floor.peer_fingerprint != replay_peer_fingerprint(context)) {
     // A structurally valid floor owned by a different peer pair is a u32
     // slot collision (or foreign replay state): the pairs would reject each
@@ -83,6 +84,7 @@ Status ReplayGuard::floor_state(const SecurityContext& context,
                          "replay floor foreign fingerprint");
   }
   if (found && (floor.crc != floor_crc(floor) || floor.initialized == 0 ||
+                 floor.layout != kReplayRecordLayout ||
                 floor.peer_fingerprint != replay_peer_fingerprint(context))) {
     // Corrupt replay state is never treated as a fresh context.
     return Status::error(StatusCode::IntegrityError,
@@ -101,6 +103,7 @@ Status ReplayGuard::ratchet_floor(const SecurityContext& context,
   next.peer_fingerprint = replay_peer_fingerprint(context);
   next.minimum_epoch = context.epoch;
   next.initialized = 1;
+  next.layout = kReplayRecordLayout;
   next.generation = found ? floor.generation + 1U : 1U;
   next.crc = floor_crc(next);
   return store_.commit_floor(floor_slot(context), next);
@@ -199,6 +202,7 @@ Status ReplayGuard::accept(Window& window, const std::uint64_t counter) noexcept
       return Status::error(StatusCode::ReplayRejected, "REPLAY_STATE_LOST");
     }
     if (floor.crc == floor_crc(floor) && floor.initialized != 0 &&
+      floor.layout == kReplayRecordLayout &&
         floor.peer_fingerprint != window.peer_fingerprint) {
       // Same collision signature as floor_state: a valid floor owned by a
       // different peer pair at this window's shared slot.
@@ -207,6 +211,7 @@ Status ReplayGuard::accept(Window& window, const std::uint64_t counter) noexcept
                            "replay floor foreign fingerprint");
     }
     if (floor.crc != floor_crc(floor) || floor.initialized == 0 ||
+                 floor.layout != kReplayRecordLayout ||
         floor.peer_fingerprint != window.peer_fingerprint) {
       return Status::error(StatusCode::IntegrityError,
                            "replay epoch floor corrupt");

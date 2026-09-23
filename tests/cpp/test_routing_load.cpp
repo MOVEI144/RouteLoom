@@ -771,7 +771,7 @@ void test_refusal_pressure_floor() {
     ByteWriter w(MutableByteView{body.data(), body.size()});
     CHECK_OK(w.write_u8(1));
     CHECK_OK(w.write_u64(6));
-    CHECK_OK(w.write_u16(1));
+    CHECK_OK(w.write_u32(1));  // origin generation (Wire v2: u32)
     CHECK_OK(w.write_u16(1));
     CHECK_OK(w.write_u16(0));
     auto adv0 = craft_frame(
@@ -805,7 +805,7 @@ void test_refusal_pressure_floor() {
   ByteWriter w(MutableByteView{rec_body.data(), rec_body.size()});
   CHECK_OK(w.write_u8(1));
   CHECK_OK(w.write_u64(6));        // self record from 6
-  CHECK_OK(w.write_u16(9));        // origin generation bump (baseline was 1)
+  CHECK_OK(w.write_u32(9));        // origin generation bump (baseline was 1)
   CHECK_OK(w.write_u16(1));        // sequence
   CHECK_OK(w.write_u16(0));        // metric: self is 0
   auto adv = craft_frame(

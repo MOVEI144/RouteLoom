@@ -8,9 +8,14 @@
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
-// Frozen "Wire v1" frame format for the CORE_FIXED_250 profile. All fields are
+// "Wire v2" frame format for the CORE_FIXED_250 profile. All fields are
 // fixed-width big-endian (network byte order). The crypto suite itself is still
 // pending (G-SEC); the layout below does not depend on the chosen suite.
+//
+// v2 vs v1 (issue #29): epochs widen 16 -> 32 bits so a per-boot epoch can
+// never wrap in a device lifetime, and the crypto counters narrow 64 -> 48
+// bits (2.8e14 frames per epoch) so the header stays 88 bytes and the full
+// 128-byte payload still fits the 250-byte ESP-NOW body.
 //
 // Header layout (kHeaderSize = 88 bytes):
 //   offset  size  field                        end-immutable / hop-mutable
@@ -33,10 +38,10 @@
 //   52      8     message sequence             immutable
 //   60      4     remaining deadline ms        hop-mutable (forwarding budget)
 //   64      4     original lifetime ms         immutable
-//   68      2     link epoch                   hop-mutable
-//   70      2     end epoch                    immutable
-//   72      8     link crypto counter          hop-mutable
-//   80      8     end crypto counter           immutable
+//   68      4     link epoch                   hop-mutable
+//   72      4     end epoch                    immutable
+//   76      6     link crypto counter (u48)    hop-mutable
+//   82      6     end crypto counter (u48)     immutable
 //   88      n     link ciphertext: payload [+ end tag if kFlagEndProtected]
 //   88+n    16    link AEAD tag (AAD covers the complete 88-byte header)
 //
@@ -53,15 +58,17 @@
 namespace routeloom::wire {
 
 constexpr std::uint16_t kMagic = 0x524c;  // "RL"
-constexpr std::uint8_t kMajor = 1;
+constexpr std::uint8_t kMajor = 2;
 constexpr std::uint8_t kMinor = 0;
 constexpr std::size_t kHeaderSize = 88;
 constexpr std::uint8_t kFlagEndProtected = 0x01;  // all other flag bits reserved, must be 0
+// Crypto counters are u48 on the wire: routeloom::kMaxCryptoCounter.
+using routeloom::kMaxCryptoCounter;
 
 // A 128-byte application payload plus the header, the end-to-end tag and the
 // link tag must fit the 250-byte ESP-NOW body (248 bytes total).
 static_assert(kHeaderSize + kMaxApplicationPayload + 2 * kAeadTagSize <= kMaxEspNowBody,
-              "wire v1 envelope must fit the 250-byte ESP-NOW body");
+              "wire v2 envelope must fit the 250-byte ESP-NOW body");
 
 struct Header {
   FrameType type{FrameType::Data};
@@ -78,10 +85,10 @@ struct Header {
   MessageId message{};
   std::uint32_t remaining_deadline_ms{0};
   std::uint32_t original_lifetime_ms{0};
-  std::uint16_t link_epoch{0};
-  std::uint16_t end_epoch{0};
-  std::uint64_t link_counter{0};
-  std::uint64_t end_counter{0};
+  std::uint32_t link_epoch{0};
+  std::uint32_t end_epoch{0};
+  std::uint64_t link_counter{0};  // <= kMaxCryptoCounter
+  std::uint64_t end_counter{0};   // <= kMaxCryptoCounter
 };
 
 struct PlainFrame {
@@ -123,7 +130,7 @@ Status open_end(const LinkOpenedFrame& frame,
 Status forward(const LinkOpenedFrame& input,
                NodeId local_node,
                NodeId next_hop,
-               std::uint16_t link_epoch,
+               std::uint32_t link_epoch,
                std::uint32_t remaining_deadline_ms,
                SecurityProvider& security,
                EncodedFrame& output) noexcept;

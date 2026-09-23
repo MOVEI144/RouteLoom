@@ -493,14 +493,15 @@ void test_seqno_retry_past_cap() {
 // advertisement" used by the issue-#50 review's portable repro.
 std::uint64_t g_inject_message_seq = 1;
 void inject_route_update(SimWorld& w, NodeId from, NodeId to, NodeId dest,
-                         std::uint16_t generation, std::uint16_t sequence,
+                         std::uint32_t generation, std::uint16_t sequence,
                          std::uint16_t metric) {
-  std::array<std::uint8_t, 15> payload{};
+  // Wire v2 record: dest u64 | generation u32 | sequence u16 | metric u16.
+  std::array<std::uint8_t, 17> payload{};
   {
     ByteWriter writer(MutableByteView{payload.data(), payload.size()});
     CHECK_OK(writer.write_u8(1));
     CHECK_OK(writer.write_u64(dest));
-    CHECK_OK(writer.write_u16(generation));
+    CHECK_OK(writer.write_u32(generation));
     CHECK_OK(writer.write_u16(sequence));
     CHECK_OK(writer.write_u16(metric));
   }
@@ -618,6 +619,40 @@ void test_multiple_origins_pinning() {
   check_no_forward_loops(w.net.sights);
 }
 
+
+// Issue #29 (Wire v2): route origin generations are 32-bit. A generation past
+// the old u16 budget is a newer incarnation, and the v1 wrap value is stale.
+void test_route_generation_past_u16_budget() {
+  RouteTable table;
+  CHECK(table.consider(RouteAdvertisement{9, 65535, 10, 0}, 2, 10, 0, 5000) ==
+        RouteUpdateResult::Accepted);
+  CHECK(table.mark_advertised(9));
+  // One more boot: generation 65536 resets the source — fresh, not stale.
+  CHECK(table.consider(RouteAdvertisement{9, 65536, 0, 0}, 3, 10, 1, 5000) ==
+        RouteUpdateResult::Accepted);
+  CHECK(table.best(9).generation == 65536);
+  // What a v1 wrap (0xFFFF -> 1) would have advertised is now correctly old.
+  CHECK(table.consider(RouteAdvertisement{9, 1, 500, 0}, 4, 1, 2, 5000) ==
+        RouteUpdateResult::StaleGeneration);
+  CHECK(table.best(9).generation == 65536);
+}
+
+// End to end: two nodes whose boot-derived epochs and route generation are
+// far past 65,535 exchange reliable traffic over Wire v2 unchanged.
+void test_delivery_with_large_epochs() {
+  SimWorld w;
+  w.link_epoch = 70001;
+  w.end_epoch = 90001;
+  w.add(1, /*generation=*/80000);
+  w.link_epoch = 70002;
+  w.end_epoch = 90002;
+  w.add(2, /*generation=*/80000);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  w.run(400);
+  send_and_expect(w, 1, 2, 4000, "large-epochs");
+}
+
 }  // namespace
 
 int main() {
@@ -630,6 +665,8 @@ int main() {
   test_relay_removal();
   test_multi_link_loss();
   test_stale_advertisement_rejected();
+  test_route_generation_past_u16_budget();
+  test_delivery_with_large_epochs();
   test_stale_feasible_candidate_not_selected();
   test_sequence_wrap();
   test_origin_restart();

@@ -20,12 +20,12 @@ struct NodeConfig {
   NetworkId network{0};
   NodeId node{kInvalidNodeId};
   std::uint32_t message_session{0};
-  std::uint16_t link_epoch{1};
-  std::uint16_t end_epoch{1};
+  std::uint32_t link_epoch{1};
+  std::uint32_t end_epoch{1};
   // Origin generation for this node's own route source. Must be persisted
   // monotonic and incremented on every boot; a restarted node advertises a
   // higher generation so peers discard its previous-incarnation route state.
-  std::uint16_t route_generation{1};
+  std::uint32_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
   // §14 management airtime budget gate (03-congestion.md §8, radio.md
@@ -1066,6 +1066,11 @@ class MeshNode {
     }
 
     static constexpr std::size_t kControlLaneCapacity = 8;
+    // Pool slots non-control admission may never take (03 §4/§5): at
+    // saturation the node must still be able to answer the frame it
+    // refuses with a BUSY. Without this reserve the refusal that most needs
+    // backpressure finds no slot and degrades to a silent drop.
+    static constexpr std::size_t kControlReserveSlots = 1;
     static constexpr std::size_t kMaxJobsPerOrigin = 12;
     static constexpr std::size_t kMaxJobsPerScope = 12;
     // DRR: quantum per round per class = weight * 64 bytes of estimated

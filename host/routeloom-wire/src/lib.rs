@@ -49,7 +49,7 @@ pub mod endpoint;
 pub mod test_security;
 
 pub const MAGIC: u16 = 0x524c;
-pub const MAJOR: u8 = 1;
+pub const MAJOR: u8 = 2;
 pub const MINOR: u8 = 0;
 pub const HEADER_SIZE: usize = 88;
 /// `END_PROTECTED` flag; every other flag bit is reserved and must be zero.
@@ -57,6 +57,9 @@ pub const FLAG_END_PROTECTED: u8 = 0x01;
 pub const MAX_APPLICATION_PAYLOAD: usize = 128;
 pub const MAX_ESPNOW_BODY: usize = 250;
 pub const AEAD_TAG_SIZE: usize = 16;
+/// Largest crypto counter: Wire v2 carries u48 counters. A context that
+/// reaches it must move to a new epoch — counters never wrap under one key.
+pub const MAX_CRYPTO_COUNTER: u64 = 0xFFFF_FFFF_FFFF;
 pub const DEFAULT_HOP_LIMIT: u8 = 10;
 pub const INVALID_NODE_ID: u64 = 0;
 pub const BROADCAST_NODE_ID: u64 = u64::MAX;
@@ -179,7 +182,8 @@ pub struct SecurityContext {
     pub network: u64,
     pub sender: u64,
     pub receiver: u64,
-    pub epoch: u16,
+    /// Wire v2: 32-bit, never wraps in a device lifetime.
+    pub epoch: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -263,9 +267,11 @@ pub struct Header {
     pub message: MessageId,
     pub remaining_deadline_ms: u32,
     pub original_lifetime_ms: u32,
-    pub link_epoch: u16,
-    pub end_epoch: u16,
+    pub link_epoch: u32,
+    pub end_epoch: u32,
+    /// `<= MAX_CRYPTO_COUNTER` (u48 on the wire).
     pub link_counter: u64,
+    /// `<= MAX_CRYPTO_COUNTER` (u48 on the wire).
     pub end_counter: u64,
 }
 
@@ -353,6 +359,21 @@ const fn err<T>(code: ErrorCode, detail: &'static str) -> Result<T> {
     Err(WireError::new(code, detail))
 }
 
+/// 48-bit big-endian encoding of a crypto counter.
+fn u48_be(value: u64) -> Result<[u8; 6]> {
+    if value > MAX_CRYPTO_COUNTER {
+        return err(ErrorCode::InvalidArgument, "crypto counter exceeds 48 bits");
+    }
+    let bytes = value.to_be_bytes();
+    Ok(bytes[2..8].try_into().expect("six bytes"))
+}
+
+fn read_u48(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .fold(0_u64, |acc, byte| (acc << 8) | u64::from(*byte))
+}
+
 fn write_header(header: &Header, output: &mut [u8; HEADER_SIZE]) -> Result<()> {
     if header.network > u64::from(u32::MAX) {
         return err(ErrorCode::InvalidArgument, "v1 network id exceeds 32 bits");
@@ -376,10 +397,10 @@ fn write_header(header: &Header, output: &mut [u8; HEADER_SIZE]) -> Result<()> {
     output[52..60].copy_from_slice(&header.message.sequence.to_be_bytes());
     output[60..64].copy_from_slice(&header.remaining_deadline_ms.to_be_bytes());
     output[64..68].copy_from_slice(&header.original_lifetime_ms.to_be_bytes());
-    output[68..70].copy_from_slice(&header.link_epoch.to_be_bytes());
-    output[70..72].copy_from_slice(&header.end_epoch.to_be_bytes());
-    output[72..80].copy_from_slice(&header.link_counter.to_be_bytes());
-    output[80..88].copy_from_slice(&header.end_counter.to_be_bytes());
+    output[68..72].copy_from_slice(&header.link_epoch.to_be_bytes());
+    output[72..76].copy_from_slice(&header.end_epoch.to_be_bytes());
+    output[76..82].copy_from_slice(&u48_be(header.link_counter)?);
+    output[82..88].copy_from_slice(&u48_be(header.end_counter)?);
     Ok(())
 }
 
@@ -417,17 +438,18 @@ fn read_header(encoded: &[u8], header: &mut Header) -> Result<()> {
         u32::from_be_bytes(fixed[60..64].try_into().expect("fixed length"));
     header.original_lifetime_ms =
         u32::from_be_bytes(fixed[64..68].try_into().expect("fixed length"));
-    header.link_epoch = u16::from_be_bytes(fixed[68..70].try_into().expect("fixed length"));
-    header.end_epoch = u16::from_be_bytes(fixed[70..72].try_into().expect("fixed length"));
-    header.link_counter = u64::from_be_bytes(fixed[72..80].try_into().expect("fixed length"));
-    header.end_counter = u64::from_be_bytes(fixed[80..88].try_into().expect("fixed length"));
+    header.link_epoch = u32::from_be_bytes(fixed[68..72].try_into().expect("fixed length"));
+    header.end_epoch = u32::from_be_bytes(fixed[72..76].try_into().expect("fixed length"));
+    header.link_counter = read_u48(&fixed[76..82]);
+    header.end_counter = read_u48(&fixed[82..88]);
     validate_header(header)
 }
 
 /// End-to-end AAD covers only the end-immutable fields of semantics.json
 /// (network, origin, message session+sequence, bound destination, delivery
-/// contract, flags, original lifetime, payload length) plus version, end epoch and
-/// end counter — 53 bytes in the same order as the C++ `make_end_aad`.
+/// contract, flags, original lifetime, payload length) plus version, end epoch
+/// (u32) and end counter (u48) — 53 bytes in the same order as the C++
+/// `make_end_aad` (protocol/semantics.json `end_aad_fields`).
 /// Hop-mutable fields (previous/next hop, hop remaining, delivery round,
 /// remaining deadline, link epoch/counter) must never be added here.
 fn end_aad(header: &Header) -> [u8; 53] {
@@ -443,8 +465,9 @@ fn end_aad(header: &Header) -> [u8; 53] {
     aad[25..29].copy_from_slice(&header.message.session.to_be_bytes());
     aad[29..37].copy_from_slice(&header.message.sequence.to_be_bytes());
     aad[37..41].copy_from_slice(&header.original_lifetime_ms.to_be_bytes());
-    aad[41..43].copy_from_slice(&header.end_epoch.to_be_bytes());
-    aad[43..51].copy_from_slice(&header.end_counter.to_be_bytes());
+    aad[41..45].copy_from_slice(&header.end_epoch.to_be_bytes());
+    // validate_header bounds the counter to 48 bits before any AAD is built.
+    aad[45..51].copy_from_slice(&header.end_counter.to_be_bytes()[2..8]);
     aad[51..53].copy_from_slice(&header.payload_length.to_be_bytes());
     aad
 }
@@ -521,6 +544,9 @@ pub fn validate_header(header: &Header) -> Result<()> {
     }
     if header.flags & !FLAG_END_PROTECTED != 0 {
         return err(ErrorCode::ProtocolError, "unknown wire flags");
+    }
+    if header.link_counter > MAX_CRYPTO_COUNTER || header.end_counter > MAX_CRYPTO_COUNTER {
+        return err(ErrorCode::InvalidArgument, "crypto counter exceeds 48 bits");
     }
     if header.original_lifetime_ms == 0
         || header.remaining_deadline_ms > header.original_lifetime_ms
@@ -680,7 +706,7 @@ pub fn forward<S: SecurityProvider>(
     input: &LinkOpenedFrame,
     local_node: u64,
     next_hop: u64,
-    link_epoch: u16,
+    link_epoch: u32,
     remaining_deadline_ms: u32,
     security: &mut S,
     output: &mut EncodedFrame,

@@ -8,12 +8,17 @@
 
 namespace routeloom {
 
+// Largest crypto counter a context may issue: Wire v2 carries u48 counters
+// (2.8e14 frames per epoch). A context that reaches it must move to a new
+// epoch; counters are never wrapped under the same key.
+constexpr std::uint64_t kMaxCryptoCounter = 0xFFFFFFFFFFFFULL;
+
 struct SecurityContext {
   SecurityScope scope{SecurityScope::Link};
   NetworkId network{0};
   NodeId sender{kInvalidNodeId};
   NodeId receiver{kInvalidNodeId};
-  std::uint16_t epoch{0};
+  std::uint32_t epoch{0};  // Wire v2: 32-bit, never wraps in a device lifetime
 };
 
 // Deployment assurance level a provider is allowed to claim. The default is

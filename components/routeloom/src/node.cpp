@@ -15,10 +15,10 @@ namespace {
 
 constexpr std::uint32_t kControlLifetimeMs = 1000;
 constexpr std::uint32_t kMinimumEndToEndRetryMs = 250;
-// ROUTE_UPDATE record: destination(8) + origin generation(2) + sequence(2) + metric(2)
-constexpr std::size_t kRouteRecordBytes = 14;
+// ROUTE_UPDATE record: destination(8) + origin generation(4) + sequence(2) + metric(2)
+constexpr std::size_t kRouteRecordBytes = 16;
 // ROUTE_UPDATE payload = 1-byte count + N records; the 128-byte payload caps
-// N at floor((128 - 1) / kRouteRecordBytes) = 9.
+// N at floor((128 - 1) / kRouteRecordBytes) = 7.
 constexpr std::size_t kMaxRouteRecordsPerFrame =
     (kMaxApplicationPayload - 1) / kRouteRecordBytes;
 constexpr std::uint32_t kSeqnoRequestLifetimeMs = 2000;
@@ -180,7 +180,11 @@ std::size_t MeshNode::TxScheduler::scope_count(const NodeId scope) const noexcep
 AdmitVerdict MeshNode::TxScheduler::check(const NodeId self, const NodeId scope,
                                           const NodeId origin,
                                           const std::size_t slots_needed) const noexcept {
-  if (free_slots() < slots_needed) return AdmitVerdict::PoolFull;
+  // Non-control admission leaves kControlReserveSlots for the responses
+  // (BUSY / HOP_ACCEPT) a saturated node still owes its peers.
+  if (free_slots() < slots_needed + kControlReserveSlots) {
+    return AdmitVerdict::PoolFull;
+  }
   if (origin_count(origin) >= kMaxJobsPerOrigin) return AdmitVerdict::OriginLimited;
   if (scope != self && scope_count(scope) >= kMaxJobsPerScope) {
     return AdmitVerdict::ScopeLimited;
@@ -890,14 +894,13 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
 }
 
 ExecutionLease MeshNode::applied_lease() const noexcept {
-  // magic | message_session u32 | end_epoch u16 | boot_incarnation u64 — the
-  // magic keeps a computed lease nonzero so all-zero on the wire is always
-  // "no assertion" and refuses (01 §1.2).
+  // message_session u32 | end_epoch u32 | boot_incarnation u64 — the session
+  // is validated nonzero, so a computed lease is never all-zero and all-zero
+  // on the wire is always "no assertion" and refuses (01 §1.2).
   ExecutionLease lease{};
   ByteWriter writer(MutableByteView{lease.data(), lease.size()});
-  (void)writer.write_u16(endpoint::kAppliedLeaseMagic);
   (void)writer.write_u32(config_.message_session);
-  (void)writer.write_u16(config_.end_epoch);
+  (void)writer.write_u32(config_.end_epoch);
   (void)writer.write_u64(config_.boot_incarnation);
   return lease;
 }
@@ -1309,7 +1312,7 @@ Status MeshNode::queue_route_update(const NodeId neighbor,
   auto append = [&](const NodeId destination, const RouteGeneration generation,
                     const RouteSequence sequence, const RouteMetric metric) -> bool {
     if (count >= kMaxRouteRecordsPerFrame) return false;
-    if (writer.write_u64(destination) && writer.write_u16(generation) &&
+    if (writer.write_u64(destination) && writer.write_u32(generation) &&
         writer.write_u16(sequence) && writer.write_u16(metric)) {
       ++count;
       return true;
@@ -3420,7 +3423,7 @@ void MeshNode::handle_route_update(const wire::PlainFrame& frame, const NodeId p
   std::array<RouteAdvertisement, kMaxRouteRecordsPerFrame> records{};
   for (std::uint8_t i = 0; i < count; ++i) {
     if (!reader.read_u64(records[i].destination) ||
-        !reader.read_u16(records[i].generation) ||
+        !reader.read_u32(records[i].generation) ||
         !reader.read_u16(records[i].sequence) ||
         !reader.read_u16(records[i].metric)) {
       return;

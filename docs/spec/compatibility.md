@@ -10,7 +10,7 @@ production security profile and `G-USB` for USB driver qualification).
 
 | Surface | Identifier | Status | Stability promise |
 |---|---|---|---|
-| Wire frame format | Wire v1: `kMajor=1`, `kMinor=0` | **Frozen** for `CORE_FIXED_250` | Byte layout and type IDs never change in place; any change is a new major |
+| Wire frame format | Wire v2: `kMajor=2`, `kMinor=0` | **Frozen** for `CORE_FIXED_250` | Byte layout and type IDs never change in place; any change is a new major (v1 → v2: 32-bit epochs, 48-bit counters) |
 | USB/serial framing | `"RLU1"`, `kProtocolVersion=1` | Implemented, spec rev 1.2 not final | Strict version equality today; final field offsets may still change |
 | C API / ABI | `RL_ABI_VERSION 1` | Implemented | Bumps on ABI-breaking change; additive source-compatible growth allowed |
 | C++ API | `routeloom::` headers | Implemented | Unstable pre-1.0; semver from the first numbered release |
@@ -19,7 +19,7 @@ production security profile and `G-USB` for USB driver qualification).
 | Persisted records | per-store `schema_version` | Implemented | Readers refuse unknown versions; formats are never silently reinterpreted |
 | kconfig schema | `CONFIG_ROUTELOOM_*` | Implemented | Additive; renaming/repurposing a symbol is a breaking change |
 
-## 2. Wire protocol (frozen: Wire v1)
+## 2. Wire protocol (frozen: Wire v2)
 
 Authoritative sources: the offset table in
 [`wire.hpp`](../../components/routeloom/include/routeloom/wire.hpp) and
@@ -35,14 +35,25 @@ with shared C++/Rust golden vectors under `protocol/golden`. Normative text:
   (delivery round, hop remaining, previous/next hop, remaining deadline, link
   epoch, link counter) that relays may rewrite under the link AEAD. New
   hop-mutable behavior must not enter the end-immutable AAD.
-- The cryptographic suite itself is **not** frozen (`G-SEC` open): Wire v1
+- The cryptographic suite itself is **not** frozen (`G-SEC` open): Wire v2
   fixes the layout, not the production cipher suite or credentials.
+- **v1 → v2 (breaking, pre-1.0):** link/end epochs widened from 16 to 32 bits
+  and link/end crypto counters narrowed from 64 to 48 bits (the header stays
+  88 bytes), ROUTE_UPDATE generations widened to 32 bits (16-byte records),
+  and the APPLIED execution lease carries a 32-bit end epoch. v1 frames are
+  rejected. Persisted TX counter and replay floor records moved to layout 2;
+  v1 records fail closed (`IntegrityError`), so a device flashed with v1
+  firmware needs an NVS erase before running v2. The C ABI bumped
+  `RL_ABI_VERSION` to 2 (`rl_node_config_t` / `rl_security_context_t` epoch
+  and generation fields are `uint32_t`). Rationale: issue #29/#48 — a 16-bit
+  epoch consumed per boot wrapped after 65,535 boots and permanently locked
+  the node out.
 
 ### Negotiation rules — implemented vs planned
 
 | Rule | State |
 |---|---|
-| Decode rejects `magic != "RL"`, `major != 1`, `minor > local minor`, or `reserved != 0` | **Implemented** in `components/routeloom/src/wire.cpp` (`decode_header`) and mirrored in `host/routeloom-wire/src/lib.rs`; covered by invalid golden vectors |
+| Decode rejects `magic != "RL"`, `major != 2`, `minor > local minor`, or `reserved != 0` | **Implemented** in `components/routeloom/src/wire.cpp` (`decode_header`) and mirrored in `host/routeloom-wire/src/lib.rs`; covered by invalid golden vectors |
 | Emit `major=1, minor=0` always | **Implemented** (`kMajor`/`kMinor` constants) |
 | Equal major required to participate; unknown frame types rejected | **Implemented** (spec §7: major mismatch means join refusal; unknown types fail decode) |
 | Minor-version feature negotiation between peers | **Specified, not implemented** — v1 has no on-wire capability field; a peer emitting `minor > 0` is rejected by today's code. Any future minor bump must remain decodable by this rule or move to a new major |
@@ -142,7 +153,7 @@ Firmware configuration lives in `firmware/*/main/Kconfig.projbuild` under the
 
 ## 9. Deprecation and breaking-change policy
 
-- **Pre-1.0 (now):** all surfaces except frozen Wire v1 may change without a
+- **Pre-1.0 (now):** all surfaces except frozen Wire v2 may change without a
   deprecation period; changes are recorded in release notes and this file.
 - **Post-1.0:** a breaking change to the C ABI, C++/Rust APIs, daemon JSON
   protocol, or kconfig schema requires a major version bump (or, for

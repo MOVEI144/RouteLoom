@@ -45,12 +45,16 @@ static_assert(sizeof(ReplayWindowRecord) == 40, "replay window layout");
 struct ReplayFloorRecord {  // 24 bytes, fixed layout, no padding
   std::uint64_t peer_fingerprint{0};
   std::uint32_t generation{0};
-  std::uint16_t minimum_epoch{0};
+  std::uint32_t minimum_epoch{0};
   std::uint8_t initialized{0};
-  std::uint8_t reserved[5]{};
+  std::uint8_t layout{0};  // kReplayRecordLayout; v1 (u16 epoch) records read 0
+  std::uint8_t reserved[2]{};
   std::uint32_t crc{0};  // crc32_iso_hdlc over the preceding bytes
 };
 static_assert(sizeof(ReplayFloorRecord) == 24, "replay floor layout");
+// Wire v2 floor (32-bit minimum epoch). A v1 floor (u16 epoch, layout byte
+// 0) is refused as corrupt — fail closed, never reinterpreted.
+constexpr std::uint8_t kReplayRecordLayout = 2;
 
 // Persistent backing for replay records (NVS on device, test doubles on
 // host). Implementations must report commit success only once the record is
@@ -87,7 +91,7 @@ class ReplayGuard {
     // The context epoch this window was opened for. Windows share one
     // persisted slot per peer pair, so accept() re-checks this against the
     // floor: a stale in-memory window must never overwrite the live record.
-    std::uint16_t epoch{0};
+    std::uint32_t epoch{0};
     bool open{false};
     // Peer-pair fingerprint of the owning context; lets accept() validate
     // the persisted floor is still THIS pair's record, not just any blob.

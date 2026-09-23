@@ -1,7 +1,6 @@
 #include "routeloom/counter_store.hpp"
 
 #include <cstddef>
-#include <limits>
 
 #include "routeloom/crc32.hpp"
 
@@ -18,7 +17,7 @@ std::uint32_t counter_record_crc(const CounterRecord& record) noexcept {
 }  // namespace
 
 CounterLease::CounterLease(CounterStore& store, const std::uint32_t slot,
-                           const std::uint32_t context_id, const std::uint16_t key_epoch,
+                           const std::uint32_t context_id, const std::uint32_t key_epoch,
                            const std::uint8_t direction, const std::uint32_t block_size) noexcept
     : store_(store), slot_(slot), context_id_(context_id), key_epoch_(key_epoch),
       direction_(direction), block_size_(block_size) {}
@@ -35,6 +34,10 @@ Status CounterLease::initialize() noexcept {
     if (record.crc != counter_record_crc(record)) {
       return Status::error(StatusCode::IntegrityError,
                            "counter record integrity check failed");
+    }
+    if (record.layout != kCounterRecordLayout) {
+      return Status::error(StatusCode::IntegrityError,
+                           "counter record layout is not Wire v2");
     }
     if (record.context_id != context_id_ || record.direction != direction_) {
       return Status::error(StatusCode::Conflict, "counter store context mismatch");
@@ -74,6 +77,10 @@ Status CounterLease::reserve_block() noexcept {
         return Status::error(StatusCode::IntegrityError,
                              "counter record integrity check failed");
       }
+      if (persisted.layout != kCounterRecordLayout) {
+        return Status::error(StatusCode::IntegrityError,
+                             "counter record layout is not Wire v2");
+      }
       if (persisted.key_epoch > key_epoch_) {
         return Status::error(StatusCode::Conflict,
                              "counter slot superseded by newer epoch");
@@ -93,15 +100,18 @@ Status CounterLease::reserve_block() noexcept {
     }
   }
   // Exhaustion is checked AFTER adopting the persisted mark: the adopted
-  // water mark may sit closer to u64 max than the cached end_ did, and an
-  // addition that wraps would commit 0 — reissuing the whole counter space.
-  if (end_ > std::numeric_limits<std::uint64_t>::max() - block_size_) {
+  // water mark may sit closer to the limit than the cached end_ did. Issued
+  // values must stay <= kMaxCryptoCounter (u48 on the wire); past it the
+  // context needs a new epoch — never a wrap under the same key.
+  // block_size_ is u32, so kMaxCryptoCounter + 1 - block_size_ cannot wrap.
+  if (end_ > kMaxCryptoCounter + 1 - block_size_) {
     return Status::error(StatusCode::CounterExhausted, "counter range exhausted");
   }
   CounterRecord next{};
   next.context_id = context_id_;
   next.key_epoch = key_epoch_;
   next.direction = direction_;
+  next.layout = kCounterRecordLayout;
   next.high_water_exclusive = end_ + block_size_;
   next.generation = generation_ + 1;
   next.crc = counter_record_crc(next);

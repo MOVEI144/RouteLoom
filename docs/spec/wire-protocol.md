@@ -2,7 +2,7 @@
 
 ## 1. 契約の段階
 
-本書はframeの意味・上限・保護境界を定義する。CORE_FIXED_250 profileのbyte offset・固定field割当・frame type番号は**Wire v1として凍結済み**で、`components/routeloom/include/routeloom/wire.hpp`のoffset表と`protocol/semantics.json`の`frame_numeric_ids`が正本である。C++・Rust共通golden vectorは[protocol/golden](../../protocol/golden/README.md)に置く。暗号suiteと本番credentialは引き続きG-SECで凍結する。未確定のバイト列を公開互換プロトコルとして実装者に配布しない。
+本書はframeの意味・上限・保護境界を定義する。CORE_FIXED_250 profileのbyte offset・固定field割当・frame type番号は**Wire v2として凍結済み**で、`components/routeloom/include/routeloom/wire.hpp`のoffset表と`protocol/semantics.json`の`frame_numeric_ids`が正本である。C++・Rust共通golden vectorは[protocol/golden](../../protocol/golden/README.md)に置く。暗号suiteと本番credentialは引き続きG-SECで凍結する。未確定のバイト列を公開互換プロトコルとして実装者に配布しない。
 
 一方、以下の長さ、再送ID、mutable/immutable分離、未知版の拒否、通常DATA非分割は変更管理された必須契約である。
 
@@ -29,7 +29,7 @@ remaining deadline、hop、前回送信者などは中継で変わり得る。en
 
 ## 4. フレーム種類
 
-DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v1）。未知typeは復号を拒否する。
+DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v2でもv1から不変）。未知typeは復号を拒否する。
 
 未所属ではDISCOVER/OFFERと、[参加状態別allowlist](identity-membership.md)に記載した当該transactionのbootstrapだけを許す。認証や承認を終える前のDATA／route／serviceは拒否する。bootstrapを発見と同義にしない。HOP_ACCEPTはそれ自体を再帰ACKしない。END_RECEIPTは新アプリmessageとしてreceiptを要求しない。
 
@@ -54,9 +54,26 @@ protocol majorが合わなければ参加拒否。minor featureは双方capabili
 根拠：[ESP-NOW frame形式](https://docs.espressif.com/projects/esp-idf/en/stable/esp32c3/api-reference/network/esp_now.html)。暗号契約は[Security](security.md)、USBは[別文書](usb-protocol.md)。
 
 
+### Wire v2（v1からの変更）
+
+v1はlink／end epochを16bitとし、firmwareは起動（deep-sleep wakeを含む）ごとにepochを1消費していた。65,535回の起動でwrapすると、ピアのreplay floorとroute tableが当該ノードを恒久拒否し、自身のTX counter leaseも「古いepoch」を拒否して送信不能になった（issue #29/#48）。v2は次のとおり改める。major versionは2、v1 frameは`unsupported wire header`で拒否する。
+
+| field | v1 | v2 |
+|---|---|---|
+| link epoch（offset 68） | u16 | u32 |
+| end epoch | u16（offset 70） | u32（offset 72） |
+| link crypto counter | u64（offset 72） | u48（offset 76） |
+| end crypto counter | u64（offset 80） | u48（offset 82） |
+| ROUTE_UPDATE record | dest u64＋generation u16＋seq u16＋metric u16＝14B（9件/frame） | generation u32で16B（7件/frame） |
+| APPLIED execution lease | magic u16＋session u32＋end epoch u16＋incarnation u64 | session u32＋end epoch u32＋incarnation u64（16Bのまま） |
+
+headerは88Bのまま、payload上限128Bも変えない。counterを48bitに狭めても1 epochあたり2.8×10^14 frameで、使い切ったcontextは同じ鍵で巻き戻さず新しいepochへ移る（`kMaxCryptoCounter`）。AEAD nonce（12B）はscope u8＋方向u8＋epoch u32＋counter u48。firmwareはepochとroute generationを32bitの永続boot sessionから直接導出する。
+
+永続化するTX counter record（32B、layout 2）とreplay floor record（layout 2）も32bit epochへ移行した。v1のrecordは推測で拡張せず`IntegrityError`で拒否する（fail closed）。v1 firmwareを書き込んだ機器をv2へ更新する際はNVSを消去する。
+
 ## 8. 凍結しなくても守る接続契約
 
-[semantics.json](../../protocol/semantics.json)が状態許可と保護範囲を定義する。numeric type IDとfield幅はWire v1として`frame_numeric_ids`に凍結済みだが、crypto suiteは未凍結のまま残し、意味の規約と本番Profileを混同しない。
+[semantics.json](../../protocol/semantics.json)が状態許可と保護範囲を定義する。numeric type IDとfield幅はWire v2として凍結済み（type IDは`frame_numeric_ids`、end AADの順序と幅は`end_aad_fields`）だが、crypto suiteは未凍結のまま残し、意味の規約と本番Profileを混同しない。
 
 end不変部はNetwork、origin、Message ID、固定終端、配送契約、元の最大寿命、payload。hop可変部は前後hop、残hop、残forwarding予算、round、hop crypto counter。可変fieldをend AADへ入れて中継で破壊しない。remaining予算をhop側だけで保護する場合、侵害Relayによる虚偽の延長は終端の独立した時刻／認可検査がない限り完全には防げない。
 

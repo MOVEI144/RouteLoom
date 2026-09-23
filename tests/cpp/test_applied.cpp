@@ -578,22 +578,20 @@ void test_digests() {
 void test_lease_layout() {
   World w;
   MeshNode* node = w.add(2);
-  // magic 0x4c01 | message_session u32 | end_epoch u16 | boot_incarnation u64.
+  // Wire v2: message_session u32 | end_epoch u32 | boot_incarnation u64.
   const ExecutionLease lease = node->applied_lease();
   ByteReader reader(ByteView{lease.data(), lease.size()});
-  std::uint16_t magic = 0;
   std::uint32_t session = 0;
-  std::uint16_t epoch = 0;
+  std::uint32_t epoch = 0;
   std::uint64_t boot = 0;
-  CHECK_OK(reader.read_u16(magic));
   CHECK_OK(reader.read_u32(session));
-  CHECK_OK(reader.read_u16(epoch));
+  CHECK_OK(reader.read_u32(epoch));
   CHECK_OK(reader.read_u64(boot));
-  CHECK(magic == ep::kAppliedLeaseMagic);
+  CHECK(reader.remaining() == 0);
   CHECK(session == 102);
   CHECK(epoch == 1);
   CHECK(boot == 0xB002);
-  // The magic guarantees a computed lease is never all-zero.
+  // The nonzero message session guarantees a computed lease is never all-zero.
   bool nonzero = false;
   for (const auto byte : lease) nonzero |= byte != 0;
   CHECK(nonzero);

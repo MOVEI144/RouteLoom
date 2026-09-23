@@ -50,7 +50,7 @@ fn make_tag(
     tag
 }
 
-type CounterKey = (u8, u64, u64, u64, u16);
+type CounterKey = (u8, u64, u64, u64, u32);
 
 fn counter_key(context: &SecurityContext) -> CounterKey {
     (

@@ -12,7 +12,7 @@ namespace routeloom {
 
 using RouteMetric = std::uint16_t;
 using RouteSequence = std::uint16_t;
-using RouteGeneration = std::uint16_t;
+using RouteGeneration = std::uint32_t;
 
 constexpr RouteMetric kInfiniteRouteMetric = UINT16_MAX;
 constexpr std::size_t kMaxRouteEntries = 128;

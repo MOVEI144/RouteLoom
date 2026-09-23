@@ -6,7 +6,7 @@
 
 | 項目 | 状態 |
 |---|---|
-| 統合アーキテクチャ・無線・SDK契約 | 文書化済み。Wire v1 byte layout・type IDはCORE_FIXED_250向けに凍結（test cipher vector付き）。本番Security Profileは未凍結 |
+| 統合アーキテクチャ・無線・SDK契約 | 文書化済み。Wire v2 byte layout・type IDはCORE_FIXED_250向けに凍結（test cipher vector付き。v1から32bit epoch／48bit counterへ改訂、#29）。本番Security Profileは未凍結 |
 | Portable C++ SDK core | **実装済み・host-tested**。GCC/Clang、ASan/UBSan、有限Queue、配送、dedup、receipt、Babel由来routing、C ABI |
 | ESP-NOW / LR250 adapter | **実装済み・build-tested**。単一Radio Owner、固定channel、Peer、短いcallback queue、NVS counter/replay。2台C3で実電波配送・END_RECEIPT往復を手動smoke確認。到達距離・干渉・長期・資格は未認定 |
 | ESP32 reference firmware | **C3/S3/C5でESP-IDF v6.0.3 build成功**。bridge_nodeはC3実機起動・Rust daemonとの実USB sessionを確認。2台C3（bridge_node＋reference_node）で実ESP-NOW配送・END_RECEIPT往復を手動smoke確認（連続6送＋reset後再送）。HIL suite・マルチホップ・長期は未実施 |
@@ -36,7 +36,7 @@
 
 ## 該当機能の公開前に閉じる項目
 
-- **G-WIRE**：Wire v1 byte layout・型番号・C++／Rust共通golden vector（test cipher）は凍結済み。本番crypto suite適用後のvector更新と残りの管理object・再送round・再起動caseはG-SECと併せて行う。
+- **G-WIRE**：Wire v2 byte layout・型番号・C++／Rust共通golden vector（test cipher）は凍結済み。本番crypto suite適用後のvector更新と残りの管理object・再送round・再起動caseはG-SECと併せて行う。
 - **G-SEC**：機器Identity、Join、credential、必須suite、Entropy、鍵更新、失効、再起動を本番Profileとして独立レビューする。開発PSKを代用しない。
 - **G-ROUTE**：portable実装を基準に、restart／GC／timer、分断再結合、複数origin、10hopをmodel testと実機で認定する。
 - **G-CONTROL**：SingleAuthorityの耐電断台帳は実装・host試験済みで、membership承認／失効／remote config向けの操作型integration pointを持つ。NVS実機・HIL、およびHAの選挙、log、snapshot、構成員変更、proofは別途認定する。
