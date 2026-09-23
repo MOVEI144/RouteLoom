@@ -144,6 +144,35 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 
 鍵を外で作って注入する方法はtier T1未満の選択肢として残す（[04 provisioning §4.4](../sdk-completion/04-provisioning-lifecycle.md)）。事務所でnetwork id・現場鍵・channelを書く手順は無くなる。
 
+### 6.1 実装状況（P7-1、host試験済み・実機未試験）
+
+このbranchで実装したもの。本番custody（HSM）・firmwareの保守verb・実機での書込みは含まない。
+
+| 部品 | 場所 | 内容 |
+|---|---|---|
+| `DeviceCaSigner` | `routeloom-provision`の`sdkv1::devca` | `RootSigner`と同じ境界のtrait（`device_ca_id`・`pubkey`・`sign`）。開発用`FileDeviceCaSigner`は鍵文書`routeloom-device-ca-key-v1`（権限0600で作成、上書き拒否、読込時に公開鍵を再計算して不一致は破損、group/other可読なら拒否）。root鍵文書とは形式が違い、相互に読めない。使用時に「本番custodyではない」警告を出す |
+| DevCert発行 | `devcert_issue` | 所持証明を検証済みの鍵（`VerifiedDeviceKey`、`pop_verify`だけが作る）にだけ発行する。発行後にDevice CA公開鍵で自己検証し、custody側の不具合で不正な証明書を出さない。Site Authority側の検証`devcert_verify`（型・issuer・署名） |
+| 所持証明（PoP） | `sdkv1::pop` | 事務所の32B challengeに対し、機器が認証してほしい鍵自身で署名する制限付きES256 COSE_Sign1（183B）。payload 108B＝`version u8=1 | key_location u8（1/2/3、0は拒否） | reserved u16 | node_id u64 | challenge 32B | pubkey 64B`、external AAD＝`"RouteLoom/device-key-pop/v1" 00`（28B）、low-Sのみ。形式不正はProtocolError、node・challenge不一致と署名不正はAuthorizationFailed。AADのdomainで証明書・RRS1・EDHOCの署名と混同しない |
+| RLI1組立て | `sdkv1::office` | 注入鍵（`nvs-plaintext`）のRLI1を機器の起動検査と同じ規則で作る。機器内生成鍵では秘密を持たないため、機器の保守verbがRLI1を封緘するための`routeloom-identity-bundle-v1`（node_id・flags・anchor・DevCert、秘密なし）を出す。在庫行（node_id・kid・model・hw_rev・cert_serial・device_ca_id、DevCertから導出） |
+| `rlsec` NVS image | `sdkv1::rlsec`、`nvs::nvs_partition_csv` | `rlident`の`i0`/`i1`に同一のcommitted RLI1（used_lenちょうど）。既存P-A1と同じくblob fileとJSON記述子（`routeloom-rlsec-nvs-v1`、partition名付き）を出し、加えてESP-IDF `nvs_partition_gen.py`用CSVを出す。出力前に二重slotとしての読戻し（両blob一致・committed・起動検査合格）を確認 |
+| CLI | `routeloomctl provision-devca-keygen`／`provision-pop-challenge`／`provision-devcert`／`provision-identity` | daemon socketを使わない。使い方は[routeloom-provision README](../../../host/routeloom-provision/README.md) |
+| 機器側NVS adapter | [sdkv1_blob_storage.hpp](../../../components/routeloom/include/routeloom/sdkv1_blob_storage.hpp)、`routeloom_espnow`の`nvs_sdkv1_store` | 4つのstoreを`rlsec`の`rlident`（`i0`/`i1`）・`rlsite`（`s0`/`s1`）・`rlrevo`（`r0`/`r1`）・`rlres`（`s00`〜`s15`、gatewayは`s000`〜`s159`）へ写す。読戻し規約はtrust/credential adapterと同じ（key無し＝未書込み、存在するが全0xFF／全0／長さ0＝破損、slot超過・読込長不一致＝破損、暗黙のeraseなし）。規約とslot対応はportable側にあり、NVSと同じ原子的更新を持つfake NVSでhost試験。ESP-IDF側は`nvs_open_from_partition`・`nvs_get_blob`・`nvs_set_blob`＋`nvs_commit`への転送だけで、firmwareからはまだ生成しない（静的RAM増加なし） |
+
+`rlsec`の書込み手順（注入鍵、開発・bench）：
+
+```sh
+routeloomctl provision-devca-keygen --device-ca-id 0dca000000000001 --out devca.key
+routeloomctl provision-identity --ca-key devca.key --spec identity-spec.json \
+    --node 00a1000000001234 --serial 1 --out-dir dev-00a1000000001234
+cd dev-00a1000000001234
+python -m esp_idf_nvs_partition_gen generate rlsec-nvs.csv rlsec.bin 0x10000   # gatewayは0x20000
+esptool.py write_flash 0x190000 rlsec.bin                                      # partitions.csvのrlsec offset
+```
+
+生成したCSVはPyPIの`esp-idf-nvs-partition-gen`（ESP-IDFの`nvs_partition_gen.py`と同じもの）で64KiB imageにでき、image内の`rlident`/`i0`・`i1`が`identity.rli1`とbyte一致することを手元で確認した（CIには入れていない）。`rlsec`全体を書き換えるので既存の`rlcounter`/`rlreplay`は消える（08 Q13で許容済みのNVS消去）。tier T2のNVS暗号化は生成器の`encrypt`と`nvs_keys` partitionで行うが、flash暗号化・secure bootのeFuse操作は不可逆で別承認のため、この手順にもtoolにも入れていない。
+
+機器内生成（既定）：`provision-pop-challenge --node <id>`→機器の保守verbが鍵生成（Entropy READY後）とPoPを返す→`provision-devcert … --challenge <hex> --pop <file>`がPoPを検証してDevCertと`identity-bundle.json`を出す→保守verbがbundleとDevCertのcnf＝自分の公開鍵を確かめてRLI1を`rlident`へ封緘・readback。**保守verb（firmware側、USB console）は未実装**で、P7-1の残り（firmware follow-up）として扱う。PoPのbyte列はRustの試験でのみ固定しており、firmware実装時に共通vector（`protocol/sdkv1-golden/`）へ加える。
+
 ## 7. 失敗の扱い
 
 | 事象 | 動作 |
@@ -166,4 +195,4 @@ USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自
 | V1-H06 | ACL：read権限では`join.decide`不可 |
 | V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行 |
 | V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
-| V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない |
+| V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。機器の保守verbとHILは未実施） |

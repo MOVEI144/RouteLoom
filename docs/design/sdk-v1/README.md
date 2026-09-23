@@ -42,8 +42,9 @@
 | RLCW1証明書codec（P1-2） | [rlcw1.hpp](../../../components/routeloom/include/routeloom/rlcw1.hpp)、Rust `routeloom-provision`の`sdkv1::cert` | 独立Python生成器の[共通vector](../../../protocol/sdkv1-golden/README.md)（valid 17・invalid 76）をC++（検証）とRust（RFC 6979で再署名）がbyte一致で通過、fuzz |
 | RLI1/RLS1/RRS1/RLP1 codecと2スロットstore（P1-3） | [sdkv1_records.hpp](../../../components/routeloom/include/routeloom/sdkv1_records.hpp)／[sdkv1_store.hpp](../../../components/routeloom/include/routeloom/sdkv1_store.hpp) | 同じ共通vector、全write・全byte境界の電源断注入（[test_sdkv1_store.cpp](../../../tests/cpp/test_sdkv1_store.cpp)） |
 | join用EAD codec（P2-3）：JoinIntent／SiteOffer／JoinRequest／JoinResult／SitePackage、RemovalNotice | [sdkv1_ead.hpp](../../../components/routeloom/include/routeloom/sdkv1_ead.hpp)、Rust `host/routeloom-join` | 独立Python生成器の[共通vector](../../../protocol/sdkv1-golden/ead/README.md)（valid 32・invalid 129、V1-J12のAllow不一致を含む）をC++（検証）とRust（Site AuthorityとしてMemberCert・RemovalNoticeをRFC 6979で再発行）がbyte一致で通過、`fuzz_sdkv1_ead`。EAD labelと未定点は[02 §6.3](02-zero-touch-join.md) |
+| 事務所tooling（P7-1、保守verbを除く）と`rlsec`のNVS adapter | Rust `routeloom-provision`の`sdkv1::{devca,pop,office,rlsec}`、`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、[sdkv1_blob_storage.hpp](../../../components/routeloom/include/routeloom/sdkv1_blob_storage.hpp)＋ESP-IDF `nvs_sdkv1_store` | 発行DevCert・注入鍵RLI1が共通vectorとbyte一致、所持証明の拒否（V1-H09）、fake NVS上で4 storeの読戻し規約と電源断（[test_sdkv1_blob_storage.cpp](../../../tests/cpp/test_sdkv1_blob_storage.cpp)）。ESP-IDF adapterはcompile-onlyでfirmware未配線（[07 §6.1](07-host-api-tooling.md)） |
 
-それ以外（EDHOC統合とEADのEDHOCへの配線、AssignmentTicketの形式、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、tooling、partition変更、`rlsec`のNVS adapter）は**未実装**。
+それ以外（EDHOC統合とEADのEDHOCへの配線、AssignmentTicketの形式、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、Site Authority側tooling（`site-cert`、P7-2）、firmwareの保守verbとstoreの配線、partition変更）は**未実装**。
 
 ## この設計で主張しないこと
 

@@ -12,7 +12,7 @@
 | **P1 — 部品（hostのみ、共通vector）** | | | |
 | P1-1 | HKDF-SHA-256（**このbranchで実装済み**） | なし | V1-K12 |
 | P1-2 | RLCW1証明書codec（DevCert/SiteCert/MemberCert）C++とRust、`protocol/sdkv1-golden/`（**このbranchで実装済み**：[rlcw1.hpp](../../../components/routeloom/include/routeloom/rlcw1.hpp)、Rust `routeloom-provision::sdkv1::cert`、独立Python生成器の共通vector。決めた細部は[vector README](../../../protocol/sdkv1-golden/README.md)） | P1-1 | V1-J14（証明書部分） |
-| P1-3 | RLI1/RLS1/RRS1/RLP1のcodecと二重slot store（trust_storeの規律を再利用）、電源断注入（**このbranchで実装済み**：[sdkv1_records.hpp](../../../components/routeloom/include/routeloom/sdkv1_records.hpp)／[sdkv1_store.hpp](../../../components/routeloom/include/routeloom/sdkv1_store.hpp)、全write・全byte境界の電源断試験。RLS1とRRS1記録にA/B用`commit_seq`を追加。NVS adapterは未実装） | P1-2 | V1-J08, V1-N02 |
+| P1-3 | RLI1/RLS1/RRS1/RLP1のcodecと二重slot store（trust_storeの規律を再利用）、電源断注入（**このbranchで実装済み**：[sdkv1_records.hpp](../../../components/routeloom/include/routeloom/sdkv1_records.hpp)／[sdkv1_store.hpp](../../../components/routeloom/include/routeloom/sdkv1_store.hpp)、全write・全byte境界の電源断試験。RLS1とRRS1記録にA/B用`commit_seq`を追加。NVS adapterはP7-1で実装） | P1-2 | V1-J08, V1-N02 |
 | P1-4 | 導出labelとinfo形式の凍結（group、RLRES1、AuthorityEnvelope）、C++/Rust vector（**このbranchで実装済み**：[key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)、`host/routeloom-keysched`、独立Python生成器`tools/gen_sdkv1_derivation_vectors.py`→`protocol/sdkv1-golden/derivations/`、[03 §2.2](03-key-hierarchy.md)） | P1-1 | V1-K01, V1-F03 |
 | P1-5 | RLRES1の状態機械（portable）と攻撃試験（**このbranchで実装済み**：[rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp)の単独`rlres1::Engine`、攻撃試験とfuzz、[06 §2.2.1](06-fast-rejoin.md)） | P1-4 | V1-F02 |
 | **P2 — EDHOC** | | | |
@@ -37,13 +37,13 @@
 | P6-1 | RRS1の発行・gossip・執行、RemovalNotice、`membership.revoke`と段階表示 | P5-1 | V1-R01〜R07, V1-R09, V1-R10 |
 | P6-2 | site_epoch cutoverとGrantRenew | P6-1 | V1-R08 |
 | **P7 — 事務所tooling** | | | |
-| P7-1 | routeloom-provision：`DeviceCaSigner`、devcert、identity、`rlsec` NVS image。firmwareの保守verb（機器内鍵生成＋所持証明） | P1-2, P1-3 | V1-H09 |
+| P7-1 | routeloom-provision：`DeviceCaSigner`、devcert、identity、`rlsec` NVS image。firmwareの保守verb（機器内鍵生成＋所持証明）（**このbranchで実装済み（保守verbを除く）**：`sdkv1::{devca,pop,office,rlsec}`と`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、所持証明の検証、`nvs_partition_gen`用CSV。P1-3の残りだった`rlsec`のNVS adapter（`sdkv1_blob_storage`＋ESP-IDF `nvs_sdkv1_store`、compile-onlyでfirmware未配線）も同時に実装。firmwareの保守verbは後続、[07 §6.1](07-host-api-tooling.md)） | P1-2, P1-3 | V1-H09 |
 | P7-2 | `site-cert`コマンド、在庫出力 | P7-1 | V1-H09 |
 | **P8 — 認定** | | | |
 | P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
 | P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-3、P4-1はこのbranchに含まれる。
+P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-3、P4-1、P7-1（保守verbを除く）はこのbranchに含まれる。
 
 ## 2. 試験計画
 
@@ -59,7 +59,7 @@ P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-3、P4-1
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査。EDHOC encoder込みの実長はP2-1後）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden、P7-1の発行・PoP部分）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査。EDHOC encoder込みの実長はP2-1後）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
 
 ## 4. 本番を名乗る条件
 
