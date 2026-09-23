@@ -176,6 +176,8 @@ capability bit `kCapSiteAuthorityV1 = 1u << 6`（HelloAckのcapability digestに
 
 USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自身の参加は、USB上で同じEDHOC m1〜m4を0x40/0x41で直接運ぶ（proxy無し、`hops=0`）。KGuardのallowが必要なのは他の機器と同じ。
 
+**Resolved in implementation（P3-2）**：上の表のbit 6と0x40〜0x42はnode_status_v1が、0x50〜0x52とbit 7はgroup_delivery_v1が既に使っているため、参加中継は**capability bit 8（`kCapJoinRelayV1`）とHostOps 0x60 JOIN_RELAY_UP／0x61 JOIN_RELAY_DOWN／0x62 JOIN_RELAY_ABORT／0x63 JOIN_RELAY_RESULT**（0x61/0x62への応答）として実装した（形式は[02 §7.4](02-zero-touch-join.md)、共通vector `protocol/usb-golden/join-relay`、Rust `routeloom-protocol::join_relay`）。表の0x43〜0x46（P5）も同じsite-authority族の0x64〜0x67に置くことを推奨する（未実装）。bitは中継だけを表し、P5の機能は別bitで広告する。gateway自身の参加（`hops=0`）は未実装。
+
 ## 5. KGuardとの典型的な流れ
 
 | 場面 | 流れ |

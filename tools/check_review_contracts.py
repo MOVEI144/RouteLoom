@@ -435,6 +435,73 @@ def validate(root: Path) -> dict:
             <= resources["profiles"]["relay-c3"]["max_message_lifetime_ms"],
             "node.hpp group constants vs radio-defaults.json group_delivery",
         )
+        # Zero-touch join transport (docs/design/sdk-v1/02 §5.4/§7.4, P3-1/
+        # P3-2): the semantics.json contract, the C++ constants, the Rust USB
+        # mirror, the FrameType ids and the membership allowlist must agree.
+        zt = semantic["zero_touch_join"]
+        zt_hpp = (
+            root / "components/routeloom/include/routeloom/sdkv1_join_transport.hpp"
+        ).read_text(encoding="utf-8")
+        usb_hpp = (
+            root / "components/routeloom/include/routeloom/usb_host_ops.hpp"
+        ).read_text(encoding="utf-8")
+        ead_hpp = (
+            root / "components/routeloom/include/routeloom/sdkv1_ead.hpp"
+        ).read_text(encoding="utf-8")
+        jr_rs = (root / "host/routeloom-protocol/src/join_relay.rs").read_text(encoding="utf-8")
+        zt_chunk = zt["chunk"]
+        subs = zt["usb"]["subcommands"]
+        ids = semantic["frame_numeric_ids"]
+        test(
+            "zero_touch_join_contract",
+            f"kZtDiscoverBodySize = {zt['rld1_body_v3']['discover_body_bytes']};" in zt_hpp
+            and f"kZtOfferBodySize = {zt['rld1_body_v3']['offer_body_bytes']};" in zt_hpp
+            and f"kZtBodyVersion = {zt['rld1_body_v3']['body_version']};" in zt_hpp
+            and f"kZtClass = {zt['rld1_body_v3']['scope_class']};" in zt_hpp
+            and f"kJoinMessageMax = {zt['join_message_max_bytes']};" in zt_hpp
+            and f"kRelayHeaderSize = {zt['relay_header_bytes']};" in zt_hpp
+            and f"kJoinChunkHeaderSize = {zt_chunk['header_bytes']};" in zt_hpp
+            and f"kJoinReplySize = {zt_chunk['reply_bytes']};" in zt_hpp
+            and zt_chunk["rld1_data_max"] + zt_chunk["header_bytes"]
+            == zt_chunk["chunked_only_above"]["RLD1"]
+            and zt_chunk["wire_data_max"] + zt_chunk["header_bytes"]
+            == zt_chunk["chunked_only_above"]["WIRE"]
+            == semantic["max_normal_payload_bytes"]
+            and zt["join_object_max_bytes"] == 1024
+            and all(
+                f"{name} = {value}," in zt_hpp
+                for name, value in (
+                    ("EdhocMessage", zt["bootstrap_auth_phases"]["EDHOC_MESSAGE"]),
+                    ("Resume", zt["bootstrap_auth_phases"]["RESUME"]),
+                    ("RelayStatus", zt["bootstrap_auth_phases"]["RELAY_STATUS"]),
+                )
+            )
+            and all(name in ids for name in zt["relay_frame_types"])
+            and ids[zt["relay_final_single_frame_type"]] == 4
+            and f"kCapJoinRelayV1 = 1u << {zt['usb']['capability_bit']};" in usb_hpp
+            and f"CAP_JOIN_RELAY_V1: u32 = 1 << {zt['usb']['capability_bit']};" in jr_rs
+            and all(
+                f"{cxx} = 0x{subs[key]:02x}," in usb_hpp
+                and f"{rs}: u8 = 0x{subs[key]:02x};" in jr_rs
+                for key, cxx, rs in (
+                    ("JOIN_RELAY_UP", "JoinRelayUp", "SUB_JOIN_RELAY_UP"),
+                    ("JOIN_RELAY_DOWN", "JoinRelayDown", "SUB_JOIN_RELAY_DOWN"),
+                    ("JOIN_RELAY_ABORT", "JoinRelayAbort", "SUB_JOIN_RELAY_ABORT"),
+                    ("JOIN_RELAY_RESULT", "JoinRelayResult", "SUB_JOIN_RELAY_RESULT"),
+                )
+            )
+            # The family never reuses node_status_v1 (0x40-0x42) or
+            # group_delivery_v1 (0x50-0x52), nor their capability bits.
+            and not {0x40, 0x41, 0x42, 0x50, 0x51, 0x52} & set(subs.values())
+            and zt["usb"]["capability_bit"] not in (6, 7)
+            and f"Credential = {zt['ead_credential_label']}," in ead_hpp
+            # The lane only uses what the membership allowlist already grants.
+            and {"DISCOVER", "OFFER"} <= set(semantic["membership_allowlist"]["DISCOVERING"])
+            and {"BOOTSTRAP_AUTH", "BOOTSTRAP_CHUNK", "BOOTSTRAP_REPLY"}
+            <= set(semantic["membership_allowlist"]["AUTHENTICATING"])
+            and set(zt["relay_frame_types"]) <= set(semantic["membership_allowlist"]["MEMBER"]),
+            "semantics.json zero_touch_join vs sdkv1_join_transport.hpp / usb_host_ops.hpp / join_relay.rs",
+        )
         estimate = scoped["airtime_estimate_d100"]
         management = radio["scheduling"]["management_network_estimated_us_per_second"]
         per_node_share = management // radio["network"]["qualification_nodes"]

@@ -94,7 +94,7 @@ Secure Boot、Flash/NVS暗号化、debug制限、eFuse変更は独立した配�
 
 C3/S3の初期予算：全体1handshake枠（用途間でも直列化）、preauth同時1、認証前1object1024B、2秒あたり新規高コスト認証1件、失敗backoff最大60秒。cookie/cheap parse→bounded assembly→credential/cryptoの順。source MACだけでなく全体CPU/RAM枠を制限し、memberのDATA/ACK用queueを分離する。
 
-設計上の認証scratch上限は全体48KiB、live context32×256B=8KiBを仮予算とする。**ESP32（C3/S3）でのsizeof/内部heap/stack/Flash/処理時間の実測値は未取得**（SDK v1 P2-2）。hostでの計測（P2-1）は1 handshake session 3104B（64bit、ILP32見積約2.7KB、libedhoc context・作業arena 1280B・key store込み）、作業bufferの最大使用888B（256B CRED_x・32B kid）、method 0の全handshakeのstack約10KB（x86-64）で、C3の数値として扱わない。libedhocの既定VLAを未検証長で使わず、custom bounded memory backendを使う（P2-1で実装：sessionごとの固定arena、heap・VLA無し）。C3全体budgetに収まらない場合は同時数を減らし、監査や長さ検査を削らない。
+設計上の認証scratch上限は全体48KiB、live context32×256B=8KiBを仮予算とする。**ESP32（C3/S3）でのsizeof/内部heap/stack/Flash/処理時間の実測値は未取得**（SDK v1 P2-2）。hostでの計測（P2-1）は1 handshake session 3104B（64bit、ILP32見積約2.7KB、libedhoc context・作業arena 1280B・key store込み）、作業bufferの最大使用888B（256B CRED_x・32B kid）、method 0の全handshakeのstack約10KB（x86-64）で、C3の数値として扱わない（P3-1：証明書をEADで運ぶ参加交換で作業bufferの最大使用が1440Bになり、arenaを2048B・session 3880B〔ILP32見積約3.5KB〕に上げた）。libedhocの既定VLAを未検証長で使わず、custom bounded memory backendを使う（P2-1で実装：sessionごとの固定arena、heap・VLA無し）。C3全体budgetに収まらない場合は同時数を減らし、監査や長さ検査を削らない。
 
 suite2の小さいkid参照handshakeでも、RouteLoomの証拠/断片headerを含めた総bytesとLR占有は実encoderで測る。2048B objectが無条件に少ない無線frameへ収まるとはしない。正常/未知kid/Grant更新/再起動を分けてbenchmarkする。
 

@@ -72,4 +72,17 @@ HelloAck capability bit 7（`0x80`、`kCapGroupDeliveryV1`／`CAP_GROUP_DELIVERY
 
 `0x50`にはすぐ受理結果の`0x51`を返す（`Ok`＋その時点のsummary、または拒否：`Unsupported`＝未attach・flat profile・gateway以外、`Busy`＝source表満杯／node停止中、`Invalid`＝引数、idとcountsは0、`reason`に理由）。受理したmessageが終端状態になると、同じrequest idで**FINAL付きの`0x51`をもう1回だけ**送る。この対応付けはsession単位（最大3件＝node側のsource表と同数）で、再接続後のhostは`0x52`で読む。機器が既に回収したidへの`0x52`は`Ok`／state 0／`NOT_FOUND`。flagsはencoderが導出し、decoderは不一致・予約id・印字不能reasonを拒否する。このnodeが**受信した**group messageは通常の`DataFromMesh`（sequenceのbit63でgroupと分かる）で届く。共有vectorは`protocol/usb-golden/group-ops`（2 node gateway-scoped meshでのC++ bridge replayとRust codec）。daemonはこれをAPI1 `group.send`／`group.get`と`group_settled` eventとして公開する（[host §10](host.md)：未決着の間は`0x52`で読み直し、laneのrequest idは上位16bit `0x4752`の専用範囲）。
 
+## 9. 参加中継（join_relay_v1、EXPERIMENTAL）
+
+SDK v1ゼロタッチ参加で、member proxyが中継する未割当機器のEDHOC／RLRES1交換をgatewayとhostのSite Authorityの間で運ぶ（[sdk-v1/02 §7](../design/sdk-v1/02-zero-touch-join.md)）。HelloAck capability bit 8（`0x100`、`kCapJoinRelayV1`／`CAP_JOIN_RELAY_V1`）を広告するbridgeだけがHostOps `0x60`〜`0x63`を扱う（bit 2も必要）。bitはbridge ownerが`attach_join_relay`でgatewayの`JoinRelayGateway`を渡した時だけ立ち、未attachの`0x61`/`0x62`は`Unsupported`の`0x63`で答える。設計案の`0x40`〜`0x42`とbit 6はnode status（§7）と衝突するためSDK v1のsite-authority族は`0x60`〜`0x6F`に置いた（[02 §7.4](../design/sdk-v1/02-zero-touch-join.md)）。形式は§7と同じ4B head＋payload（big-endian、長さ完全一致）。`relay object`は`RelayHeader 24B`（`ver=1 | dir 1 up/2 down | relay_id u32 | proxy u64 | joiner MAC 6B | step | status 0継続/1最終/2中止 | joiner_rssi_dbm i8 | phase 4 EDHOC/5 RLRES1`）＋EDHOC/RLRES1 message 1〜960B（中止は`status u8 | retry_after_ms u32`）で、codecが全体を検査する。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x60` JOIN_RELAY_UP | G→H（非要求、request id 0） | `gateway:u64`、`from_proxy:u64`（meshで検証済みの送信元、objectのproxyと一致）、`hops:u8`（1〜254）、`relay object`（dir up） |
+| `0x61` JOIN_RELAY_DOWN | H→G | `to_proxy:u64`、`relay object`（dir down、proxy＝to_proxy）。最終の下りはstatus 1、authority側の打切りは中止object |
+| `0x62` JOIN_RELAY_ABORT | H→G／G→H（非要求、request id 0） | `proxy:u64`、`relay_id:u32`（≠0）、`reason:u8`（1 proxy_aborted、2 gateway_expired、3 delivery_failed、4 host_aborted。H→Gは4だけ） |
+| `0x63` JOIN_RELAY_RESULT | G→H（0x61／0x62と同request id） | `result:u16`（ConfigOpsResult空間：`Ok`＝Wire laneへ渡した、`Unsupported`、`Busy`＝gateway slot無し、`Denied`＝gatewayがMemberでない、`Invalid`＝不整合・知らないrelay、`NoRoute`、`Indeterminate`）、`proxy:u64`、`relay_id:u32` |
+
+`Ok`は機器への配送を意味しない（配送の結果は次の上り、または`0x62`の`delivery_failed`で分かる）。gatewayは分割されたobjectを2件まで同時に組み立て／送信し、hostが居ない（sessionが無い・queue満杯）間の上りはproxyへ`authority_unreachable`の中止を返して捨てる。形式不正はError frame（ProtocolError）、`0x60`/`0x63`をhostが送ればdirection違反。共有vectorは`protocol/usb-golden/join-relay`（gateway 1・proxy 2の交換をC++ bridgeがbyte一致で再生、Rust `routeloom-protocol::join_relay`が復号）とrelay objectの`protocol/sdkv1-golden/join-transport`。Site Authority側（daemon）はP3-3。
+
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)
