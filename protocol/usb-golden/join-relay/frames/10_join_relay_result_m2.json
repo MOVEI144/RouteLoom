@@ -1,0 +1,12 @@
+{
+  "name": "join_relay_result_m2",
+  "direction": "d2h",
+  "kind": 19,
+  "flags": 0,
+  "session": 11827132529830895756,
+  "request": 500,
+  "inner_hex": "0163000e000000000000000000027e57ab1e",
+  "body_hex": "0000000000000003aa35d19c3341386a079ba91a22158e6a0163000e000000000000000000027e57ab1e",
+  "wire_hex": "07524c553101130109a4226a5f8009a08c01010101010301f4022a0101010101011403aa35d19c3341386a079ba91a22158e6a0163020e01010101010101010a027e57ab1ee5ef5a9e00",
+  "note": "Ok: m2 handed to the Wire lane as 4 chunks (not yet delivered)"
+}
