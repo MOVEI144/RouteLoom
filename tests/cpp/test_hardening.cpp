@@ -3,7 +3,7 @@
 //  - link-layer authentication is not origin authorization
 //  - crypto counters are provider-owned, independent of Message ID
 //  - replay windows + epoch floors under simulated power cuts / store loss
-//  - flash-wear bounds: replay ceiling reservation
+//  - flash-wear bounds: replay ceiling reservation, TX lease checkpoints
 //  - EXPERIMENTAL security-profile enforcement and no plaintext DATA path
 
 #include <array>
@@ -12,7 +12,9 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <optional>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "routeloom/counter_store.hpp"
@@ -113,10 +115,12 @@ class MemoryCounterStore final : public CounterStore {
       return Status::error(StatusCode::StorageFailure, "commit dropped");
     }
     records[slot] = record;
+    ++commits;
     return Status::success();
   }
   std::map<std::uint32_t, CounterRecord> records;
   bool fail_commits{false};
+  std::size_t commits{0};  // durable commits = flash writes on device
 };
 
 // ReplayStore test double that can lose window blobs, corrupt records and
@@ -1059,6 +1063,185 @@ void test_replay_legacy_window_record_read_conservatively() {
   CHECK(guard.open_context(kCtx, window).code == StatusCode::IntegrityError);
 }
 
+// --- Flash wear: evicted TX leases resume their block (issue #57) ---------
+
+void test_counter_lease_resume_skips_block_commit() {
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  CounterLeaseCheckpoint parked{};
+  {
+    CounterLease lease(store, 7, 99, 1, 0, 8);
+    CHECK_OK(lease.initialize());
+    for (std::uint64_t expect = 0; expect < 3; ++expect) {
+      CHECK_OK(lease.next(value));
+      CHECK(value == expect);
+    }
+    parked = lease.checkpoint();  // cache eviction: cut, then drop
+  }
+  CHECK(parked.cursor == 3 && parked.end == 8);
+  CHECK(store.commits == 1);
+  CounterLease resumed(store, 7, 99, 1, 0, 8);
+  CHECK_OK(resumed.resume(parked));
+  for (std::uint64_t expect = 3; expect < 8; ++expect) {
+    CHECK_OK(resumed.next(value));
+    CHECK(value == expect);
+  }
+  CHECK(store.commits == 1);  // the parked remainder cost no flash write
+  CHECK_OK(resumed.next(value));
+  CHECK(value == 8);
+  CHECK(store.commits == 2);
+}
+
+void test_counter_lease_resume_refuses_stale_checkpoint() {
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  CounterLease lease(store, 7, 99, 1, 0, 4);
+  CHECK_OK(lease.initialize());
+  CHECK_OK(lease.next(value));  // reserves [0,4)
+  const CounterLeaseCheckpoint stale = lease.checkpoint();
+  // A newer reservation was committed after the cut (by this or another
+  // lease): the block may have been issued, so the checkpoint is void.
+  CounterLease other(store, 7, 99, 1, 0, 4);
+  CHECK_OK(other.initialize());
+  CHECK_OK(other.next(value));
+  CHECK(value == 4);
+  CounterLease resumed(store, 7, 99, 1, 0, 4);
+  CHECK_OK(resumed.resume(stale));
+  CHECK_OK(resumed.next(value));
+  CHECK(value == 8);  // fresh block past the persisted water mark
+
+  // A checkpoint cut from another lease identity is ignored even when the
+  // records happen to carry the same high-water and generation.
+  MemoryCounterStore twin_store;
+  CounterLease left(twin_store, 1, 99, 1, 0, 4);
+  CounterLease right(twin_store, 2, 99, 1, 0, 4);
+  CHECK_OK(left.initialize());
+  CHECK_OK(right.initialize());
+  CHECK_OK(left.next(value));
+  CHECK_OK(right.next(value));
+  const CounterLeaseCheckpoint foreign = left.checkpoint();
+  CounterLease wrong(twin_store, 2, 99, 1, 0, 4);
+  CHECK_OK(wrong.resume(foreign));
+  CHECK_OK(wrong.next(value));
+  CHECK(value == 4);
+  // Nor is one for another epoch or direction of the same slot.
+  CounterLeaseCheckpoint other_direction = right.checkpoint();
+  other_direction.direction = 1;
+  CounterLease direction_lease(twin_store, 2, 99, 1, 0, 4);
+  CHECK_OK(direction_lease.resume(other_direction));
+  CHECK_OK(direction_lease.next(value));
+  CHECK(value == 8);
+}
+
+void test_counter_checkpoint_cache_single_use_and_bounded() {
+  MemoryCounterStore store;
+  std::uint64_t value = 0;
+  std::vector<CounterLeaseCheckpoint> checkpoints;
+  for (std::uint32_t slot = 1; slot <= 3; ++slot) {
+    CounterLease lease(store, slot, 99, 1, 0, 4);
+    CHECK_OK(lease.initialize());
+    CHECK_OK(lease.next(value));
+    checkpoints.push_back(lease.checkpoint());
+  }
+  const CounterLeaseCheckpoint probe1 = checkpoints[0];
+  const CounterLeaseCheckpoint probe3 = checkpoints[2];
+  CounterCheckpointCache<2> cache;
+  CounterLeaseCheckpoint out{};
+  cache.park(checkpoints[0]);
+  CHECK(cache.size() == 1);
+  CHECK(cache.take(probe1, out));
+  CHECK(out.slot == 1 && out.cursor == 1);
+  CHECK(!cache.take(probe1, out));  // single use
+  // Nothing left to resume: not parked.
+  CounterLeaseCheckpoint drained = checkpoints[0];
+  drained.cursor = drained.end;
+  cache.park(drained);
+  CHECK(cache.size() == 0);
+  // Bounded: the oldest checkpoint is dropped (forfeit, never reused).
+  cache.park(checkpoints[0]);
+  cache.park(checkpoints[1]);
+  cache.park(checkpoints[2]);
+  CHECK(cache.size() == 2);
+  CHECK(!cache.take(probe1, out));
+  CHECK(cache.take(probe3, out));
+  // Re-parking one identity replaces its entry.
+  cache.park(checkpoints[1]);
+  CHECK(cache.size() == 1);
+  cache.clear();
+  CHECK(cache.size() == 0);
+}
+
+// Models DevelopmentPskSecurityProvider's TX pool: kPool live leases (LRU),
+// evictions parked in a kParked checkpoint cache, random reboots. Returns
+// the number of counter commits; `duplicate` flags any reissued counter.
+std::size_t run_lease_churn(const bool park, bool& duplicate) {
+  constexpr std::size_t kPool = 2;
+  constexpr std::uint32_t kContexts = 5;
+  MemoryCounterStore store;
+  CounterCheckpointCache<3> cache;
+  std::array<std::optional<CounterLease>, kPool> pool{};
+  std::array<std::uint32_t, kPool> owner{};
+  std::array<std::uint64_t, kPool> stamp{};
+  std::set<std::pair<std::uint32_t, std::uint64_t>> issued;
+  std::uint64_t state = 0xC0FFEEULL;
+  std::uint64_t clock = 0;
+  for (int step = 0; step < 6000; ++step) {
+    if (next_random(state) % 700 == 0) {  // power cut: RAM gone
+      for (auto& lease : pool) lease.reset();
+      cache.clear();
+    }
+    const std::uint32_t slot =
+        1 + static_cast<std::uint32_t>(next_random(state) % kContexts);
+    std::size_t index = kPool;
+    for (std::size_t i = 0; i < kPool; ++i) {
+      if (pool[i].has_value() && owner[i] == slot) index = i;
+    }
+    if (index == kPool) {
+      index = 0;
+      for (std::size_t i = 0; i < kPool; ++i) {
+        if (!pool[i].has_value()) {
+          index = i;
+          break;
+        }
+        if (stamp[i] < stamp[index]) index = i;
+      }
+      // Same order as the provider: claim this context's checkpoint before
+      // parking the evicted lease, so a full cache cannot drop it first.
+      CounterLeaseCheckpoint identity{};
+      identity.slot = slot;
+      identity.context_id = 99;
+      identity.key_epoch = 1;
+      CounterLeaseCheckpoint parked{};
+      const bool resume = park && cache.take(identity, parked);
+      if (pool[index].has_value()) {
+        if (park) cache.park(pool[index]->checkpoint());
+        pool[index].reset();
+      }
+      pool[index].emplace(store, slot, 99, 1, 0, 16);
+      owner[index] = slot;
+      CHECK_OK(resume ? pool[index]->resume(parked)
+                      : pool[index]->initialize());
+    }
+    stamp[index] = ++clock;
+    std::uint64_t value = 0;
+    CHECK_OK(pool[index]->next(value));
+    if (!issued.insert({slot, value}).second) duplicate = true;
+  }
+  return store.commits;
+}
+
+void test_counter_lease_eviction_churn_never_reissues() {
+  bool duplicate = false;
+  const std::size_t without_parking = run_lease_churn(false, duplicate);
+  CHECK(!duplicate);
+  const std::size_t with_parking = run_lease_churn(true, duplicate);
+  CHECK(!duplicate);
+  // Five contexts round-robin through a two-lease pool: without parking
+  // nearly every eviction commits a fresh block; with the checkpoint cache
+  // only block exhaustion and reboots do (about 400 vs 3600 here).
+  CHECK(with_parking * 5 < without_parking);
+}
+
 }  // namespace
 
 int main() {
@@ -1088,6 +1271,10 @@ int main() {
   test_replay_close_context_tightens_ceiling();
   test_replay_duplicate_window_cannot_lower_ceiling();
   test_replay_legacy_window_record_read_conservatively();
+  test_counter_lease_resume_skips_block_commit();
+  test_counter_lease_resume_refuses_stale_checkpoint();
+  test_counter_checkpoint_cache_single_use_and_bounded();
+  test_counter_lease_eviction_churn_never_reissues();
   test_security_profile_marker();
   test_plaintext_data_rejected();
   test_secure_clear();
