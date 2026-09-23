@@ -49,7 +49,13 @@ fn parse_hex_u64(text: &str) -> Option<u64> {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
