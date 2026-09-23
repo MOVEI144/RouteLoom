@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r2",
+  "encoded_hex": "04000000415263748596a7b8",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r2_bad_status",
+  "note": "status 4 is unassigned",
+  "reason": "bad_status"
+}

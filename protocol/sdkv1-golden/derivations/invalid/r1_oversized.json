@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r1",
+  "encoded_hex": "0100000071a03e2a817e281e2132435465768798a9bacbdcedfe0f201111111100000007000000030000000cce337f0209cad07c893af073c10cb0b700112233445566778899aabbccddeeff102132435465768798a9bacbdcedfe0f2031425364758697a8b9cadbecfd0e1f3041",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r1_oversized",
+  "note": "110 bytes exceeds the 109-byte R1 maximum",
+  "reason": "oversized"
+}

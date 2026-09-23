@@ -1,0 +1,9 @@
+{
+  "codec": "authority_envelope",
+  "encoded_hex": "01096666666600000000000500000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "envelope_type_nine",
+  "note": "type 9 is unassigned",
+  "reason": "bad_type"
+}

@@ -1,0 +1,9 @@
+{
+  "codec": "authority_envelope",
+  "encoded_hex": "010466666666000000000005000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "envelope_truncated",
+  "note": "27 bytes is shorter than header plus tag",
+  "reason": "truncated"
+}

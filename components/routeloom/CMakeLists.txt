@@ -19,6 +19,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/group_replay.cpp
   src/group_wire.cpp
   src/kdf.cpp
+  src/key_schedule.cpp
   src/migration.cpp
   src/migration_wire.cpp
   src/node.cpp
@@ -26,6 +27,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/peer_state.cpp
   src/power.cpp
   src/replay.cpp
+  src/rlres1.cpp
   src/route_scale.cpp
   src/routing.cpp
   src/status.cpp

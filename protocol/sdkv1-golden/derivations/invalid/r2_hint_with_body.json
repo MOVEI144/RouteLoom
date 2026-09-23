@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r2",
+  "encoded_hex": "01000000415263748596a7b8c9daebfc0d1e2f402222222200000007000000040000000c838ed6a351ea810497b339768300f323",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r2_hint_with_body",
+  "note": "status 1 must be the 12-byte hint form",
+  "reason": "length_mismatch"
+}

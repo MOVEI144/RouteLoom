@@ -181,6 +181,22 @@ target_link_libraries(routeloom_kdf_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_kdf_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_kdf_tests COMMAND routeloom_kdf_tests)
 
+# SDK v1 frozen derivation labels + RLRES1 transcript (plan P1-4, V1-K01 HKDF
+# part, V1-F03): byte-exact against protocol/sdkv1-golden/derivations, which
+# the independent tools/gen_sdkv1_derivation_vectors.py generates.
+add_executable(routeloom_key_schedule_tests test_key_schedule.cpp)
+target_link_libraries(routeloom_key_schedule_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_key_schedule_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_key_schedule_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+add_test(NAME routeloom_key_schedule_tests COMMAND routeloom_key_schedule_tests)
+
+# RLRES1 resume state machine and its attack suite (plan P1-5, V1-F02).
+add_executable(routeloom_rlres1_tests test_rlres1.cpp)
+target_link_libraries(routeloom_rlres1_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_rlres1_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_rlres1_tests COMMAND routeloom_rlres1_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)

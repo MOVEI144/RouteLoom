@@ -1,0 +1,9 @@
+{
+  "codec": "rlres1_r1",
+  "encoded_hex": "05000000d8b21039da4d12d12435465768798a9bacbdcedff001122377777777000000070000000000000000001b370d84434f393b61bc3bc922435336",
+  "expect": "error",
+  "format": "routeloom-sdkv1-derivations-golden",
+  "name": "r1_pending_ticket_len_zero",
+  "note": "ticket_len must be 1..48",
+  "reason": "ticket_length"
+}
