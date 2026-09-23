@@ -54,3 +54,7 @@ RouteLoomは用途非依存の組み込みMesh SDKである。製品の機器台
 ## 2026-09-20 Scope・Gateway・Small Config設計Draft
 
 [Issues #14・#16・#17の仕様・実装計画](design/scope-gateway-config/README.md)：Scope filter、指定Gateway/Host受領、認可された小設定更新。Wire/API宣言案、資源計算、失敗状態、設計例と46件の受入ケース（39件はportable/hostで実行済み、7件は実機等の証拠待ち）を含む。**このbranchではEXPERIMENTALのruntime実装済み**（codec・portable core・Host配線・dev profile、opt-in flag/capability付き）だが、dev HMAC/scope keyはproduction identityではなく、COSE検証・実機・資格は未完了。実装状況と証拠の区別は同READMEのmaturity節を読む。
+
+## 2026-09-23 SDK v1設計Draft（ゼロタッチ参加・機器鍵・削除・#37）
+
+[統合先KGuardの要求とIssue #37の設計](design/sdk-v1/README.md)：事務所では現場非依存のidentityだけを書き、EDHOCでSite Authorityへ参加してKGuardが可否を決める手順、機器鍵からのlink/E2E鍵とnetwork group鍵、失効集合と世代、ピアごとの永続counter/replay recordを不要にするRAM context＋固定slot再開cache、高速再参加、API1/USB/事務所toolingの変更、PR単位の計画。**設計Draftであり、このbranchで実装したのはHKDF-SHA-256（RFC 5869 vector付き）だけ**。

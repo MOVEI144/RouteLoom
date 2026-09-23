@@ -91,7 +91,7 @@ epoch／route generationの起動回数予算（旧#29/#48）はWire v2で32bit�
 
 | 資源 | 現行の上限 | 主因 | 追跡 |
 |---|---|---|---|
-| NVS entry数 | ピアごとのcounter lease／replay floor／windowキーに削除経路がない。既定24KiB NVSで累計12〜38ピアに達すると新規通信とboot session書込が失敗し得る | 鍵とcounterの削除は再ハンドシェイク設計が前提 | #37 |
+| NVS entry数 | ピアごとのcounter lease／replay floor／windowキーに削除経路がない。既定24KiB NVSで累計12〜38ピアに達すると新規通信とboot session書込が失敗し得る | 鍵とcounterの削除は再ハンドシェイク設計が前提（設計Draft：[sdk-v1/05](../design/sdk-v1/05-nvs-state-37.md)、未実装） | #37 |
 | flash書込回数 | 下の書込予算表のとおり。旧実装は認証済み受信frameごとにreplay windowをcommitし（終端では2 commit）、持続10 frame/sで既定NVSが約1ヶ月の概算だった。§2のceiling予約後はreplay側が約1/65となり、同条件で約5年の概算。同時に活動するcontextがcache容量を越える配備では、追い出し1回ごとに最大2 commitへ戻る | fail-closedなreplay永続化、有限context cache | #30、#57 |
 | remote config | 受理1件≈7〜8 commit。rate上限（1/min＋burst1）で連続運用すると摩耗寿命は概算1〜2年。人手運用なら問題にならない（運用規則は[遠隔設定 §10](remote-management.md)） | ConfigJournalの2スロット耐電断commit | #57 |
 
