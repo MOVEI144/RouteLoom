@@ -776,7 +776,7 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     const auto status = wire::open_group(frame, security_, plain);
     if (!status) {
       saturating_inc(group_stats_.open_failures);
-      observer_.on_diagnostic(status.detail, peer, &header.message);
+      note_rx_refusal(status, peer, &header.message);
       return;
     }
     GroupDataHeader head{};

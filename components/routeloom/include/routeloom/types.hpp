@@ -137,7 +137,16 @@ enum class SecurityScope : std::uint8_t {
   // key each (origin, group, epoch) separately (a per-sender subkey): the
   // 12-byte nonce carries no sender, so independent per-sender counters
   // under one shared key would collide (group-delivery.md §7).
+  // This is the design's "GroupEnd" (sdk-v1/03 §8); its value 2 is already
+  // on the wire (nonce byte 0, key derivation, golden vectors) and is kept.
   Group = 2,
+  // Reserved (sdk-v1/03 §6.2, §8, plan P5-1): one-hop broadcast link
+  // protection under the network group key, context (GroupLink, network,
+  // transmitter, kBroadcastNodeId, transmitter boot session). The design
+  // draft numbered it 2; it takes 3 because 2 is Group above. No provider
+  // implements it yet and the node never issues it: a provider MUST refuse
+  // it (Unsupported) until it does.
+  GroupLink = 3,
 };
 
 struct ByteView {

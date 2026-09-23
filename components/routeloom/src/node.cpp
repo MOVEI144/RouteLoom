@@ -1779,7 +1779,15 @@ Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
   // and nothing else was sealed since): hand the same bytes over again.
   if (job.encoded_tag != 0 && job.encoded_tag == tx_encoded_tag_) return Status::success();
   job.encoded_tag = 0;
-  if (now_ms >= job.deadline_ms) return Status::error(StatusCode::Expired, "JOB_EXPIRED");
+  if (now_ms >= job.deadline_ms) {
+    if (job.session_deferred) {
+      // The job waited for a provider-owned session that never became
+      // usable (sdk-v1/03 §9): say so instead of a generic expiry.
+      if (session_stats_.tx_unavailable != UINT32_MAX) ++session_stats_.tx_unavailable;
+      return Status::error(StatusCode::Expired, "SESSION_UNAVAILABLE");
+    }
+    return Status::error(StatusCode::Expired, "JOB_EXPIRED");
+  }
   const auto remaining = static_cast<std::uint32_t>(job.deadline_ms - now_ms);
   // Sealing overwrites the shared buffer: whichever job it held loses its
   // encoding (tags never repeat within a job's lifetime).
@@ -1799,8 +1807,50 @@ Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
     if (++last_encoded_tag_ == 0) last_encoded_tag_ = 1;
     tx_encoded_tag_ = last_encoded_tag_;
     job.encoded_tag = last_encoded_tag_;
+    job.session_deferred = false;
   }
   return status;
+}
+
+bool MeshNode::defer_for_session(TxJob& job) noexcept {
+  // encode refused with AuthRequired. Which context is missing? The link to
+  // the next hop first, then the end layer a fresh frame would seal (a
+  // forwarded frame's end layer is already sealed by its origin).
+  NodeId subject = job.peer;
+  ContextState state = security_.context_state(SecurityScope::Link, job.peer);
+  if (context_usable(state) && job.form == JobForm::Plain &&
+      (job.plain.header.flags & wire::kFlagEndProtected) != 0) {
+    const SecurityContext end = wire::end_context(job.plain.header);
+    subject = end.receiver;
+    state = security_.context_state(end.scope, end.receiver);
+  }
+  // Every involved context is usable: the refusal is an ordinary
+  // authentication failure and the job fails exactly as before.
+  if (context_usable(state)) return false;
+  if (!job.session_deferred) {
+    // Once per job: the provider already knows (it answered None or
+    // Establishing) and owns establishment (the handshake engine, P4-2);
+    // the node only holds the frame, deadline-bounded, without spending a
+    // counter on it.
+    job.session_deferred = true;
+    if (session_stats_.tx_deferred != UINT32_MAX) ++session_stats_.tx_deferred;
+    observer_.on_diagnostic(
+        state == ContextState::None ? "SESSION_REQUIRED" : "SESSION_PENDING",
+        subject, &job.ack.key.id);
+  }
+  return true;
+}
+
+void MeshNode::note_rx_refusal(const Status& status, const NodeId peer,
+                               const MessageId* message) noexcept {
+  // Receive-side refusals keep the provider's detail as the diagnostic; an
+  // unknown context (AuthRequired, sdk-v1/03 §9) is additionally counted —
+  // it is never a replay and never falls back to another key.
+  if (status.code == StatusCode::AuthRequired &&
+      session_stats_.rx_auth_required != UINT32_MAX) {
+    ++session_stats_.rx_auth_required;
+  }
+  observer_.on_diagnostic(status.detail, peer, message);
 }
 
 void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
@@ -1894,6 +1944,13 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
     }
     auto status = encode_job(*queued, now_ms);
     if (!status) {
+      if (status.code == StatusCode::AuthRequired && defer_for_session(*queued)) {
+        // No session with the peer yet (sdk-v1/03 §9): hold the job like a
+        // route-blocked one; its deadline still bounds the wait.
+        scheduler_.defer_selected();
+        if (++route_defers >= kTxQueueCapacity) return;
+        continue;
+      }
       TxJob failed{};
       scheduler_.take_selected(failed);
       fail_job(failed, status.detail, now_ms);
@@ -2417,7 +2474,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
-      observer_.on_diagnostic(status.detail, peer, &frame.header.message);
+      note_rx_refusal(status, peer, &frame.header.message);
       return;
     }
     if (scheduler_.free_slots() < 1) {
@@ -2622,7 +2679,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     wire::PlainFrame plain{};
     const auto status = wire::open_end(frame, config_.node, security_, plain);
     if (!status) {
-      observer_.on_diagnostic(status.detail, peer, &frame.header.message);
+      note_rx_refusal(status, peer, &frame.header.message);
       return;
     }
     if (scheduler_.free_slots() < 1) {
@@ -2951,7 +3008,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
   wire::PlainFrame plain{};
   const auto status = wire::open_end(frame, config_.node, security_, plain);
   if (!status) {
-    observer_.on_diagnostic(status.detail, peer, &frame.header.message);
+    note_rx_refusal(status, peer, &frame.header.message);
     return;
   }
   MessageKey original{};
@@ -3784,7 +3841,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   wire::LinkOpenedFrame frame{};
   auto status = wire::open_link(encoded, config_.node, security_, frame);
   if (!status) {
-    observer_.on_diagnostic(status.detail, peer, nullptr);
+    note_rx_refusal(status, peer, nullptr);
     ++telemetry_event_drops_;  // unauthenticated bytes never reach telemetry
     return;
   }
@@ -3869,7 +3926,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       wire::PlainFrame plain{};
       status = wire::open_end(frame, config_.node, security_, plain);
       if (!status) {
-        observer_.on_diagnostic(status.detail, peer, &frame.header.message);
+        note_rx_refusal(status, peer, &frame.header.message);
         return;
       }
       if (frame.header.type == FrameType::HopAccept) {

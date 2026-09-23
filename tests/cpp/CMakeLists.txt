@@ -258,3 +258,15 @@ target_compile_definitions(routeloom_group_tests PRIVATE
     ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
 add_test(NAME routeloom_group_unit_tests COMMAND routeloom_group_tests unit)
 add_test(NAME routeloom_group_100_node_tests COMMAND routeloom_group_tests scale)
+
+# Provider-owned sessions (docs/design/sdk-v1/03-key-hierarchy.md §8–§9,
+# plan P4-1): tx_epoch/context_state defaults, SessionInstaller, node
+# deferral without a session, no counter spent on a refused frame, and V1-K10
+# (every Wire v2 golden vector reproduced through the provider-epoch path).
+add_executable(routeloom_session_tests test_session.cpp)
+target_link_libraries(routeloom_session_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_session_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_session_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_session_tests PRIVATE
+    ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
+add_test(NAME routeloom_session_tests COMMAND routeloom_session_tests)

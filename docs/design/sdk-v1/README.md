@@ -36,6 +36,7 @@
 | 部品 | 場所 | 証拠 |
 |---|---|---|
 | HKDF-SHA-256（RFC 5869） | [kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)／[kdf.cpp](../../../components/routeloom/src/kdf.cpp) | RFC 5869 付録A.1〜A.3のPRK/OKMと引数拒否を[test_kdf.cpp](../../../tests/cpp/test_kdf.cpp)で検査 |
+| SecurityProviderのsession API（P4-1）：`tx_epoch`／`context_state`、`SessionInstaller`、予約scope `GroupLink`＝3、MeshNodeの保留配線 | [security.hpp](../../../components/routeloom/include/routeloom/security.hpp)、[03 §8.1](03-key-hierarchy.md) | 既定実装で全byte不変（V1-K10）、test Providerでの保留・epoch・非再使用を[test_session.cpp](../../../tests/cpp/test_session.cpp)で検査 |
 
 それ以外（EDHOC統合、証明書codec、RLI1/RLS1/RRS1、RLRES1、group鍵、USB/API1、tooling、partition変更）は**未実装**。RouteLoom独自の導出ラベルも未凍結で、HKDF実装はラベルを固定しない。
 

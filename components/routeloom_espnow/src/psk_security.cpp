@@ -17,6 +17,14 @@ constexpr psa_algorithm_t kAeadAlgorithm =
 constexpr psa_algorithm_t kDerivationAlgorithm =
     PSA_ALG_HMAC(PSA_ALG_SHA_256);
 
+// Scopes the development profile implements. GroupLink (sdk-v1/03 §8) is
+// keyed from the network group key, which this profile does not have: it is
+// refused, never derived from the PSK.
+bool development_scope(const SecurityScope scope) noexcept {
+  return scope == SecurityScope::Link || scope == SecurityScope::EndToEnd ||
+         scope == SecurityScope::Group;
+}
+
 void append_u32(std::uint8_t*& out, const std::uint32_t value) noexcept {
   for (int shift = 24; shift >= 0; shift -= 8) {
     *out++ = static_cast<std::uint8_t>(value >> shift);
@@ -300,6 +308,9 @@ Status DevelopmentPskSecurityProvider::next_counter(
     return Status::error(StatusCode::InvalidState,
                          "security provider not ready");
   }
+  if (!development_scope(context.scope)) {
+    return Status::error(StatusCode::Unsupported, "security scope unsupported");
+  }
   auto* entry = tx_context(context);
   if (entry == nullptr || !entry->lease.has_value()) {
     return Status::error(StatusCode::NoCapacity,
@@ -375,6 +386,9 @@ Status DevelopmentPskSecurityProvider::seal(
     return Status::error(StatusCode::InvalidArgument,
                          "invalid AES-GCM seal input");
   }
+  if (!development_scope(context.scope)) {
+    return Status::error(StatusCode::Unsupported, "security scope unsupported");
+  }
 
   std::array<std::uint8_t, 32> key{};
   std::array<std::uint8_t, 12> nonce{};
@@ -430,6 +444,9 @@ Status DevelopmentPskSecurityProvider::open(
        (ciphertext.data == nullptr || plaintext.data == nullptr))) {
     return Status::error(StatusCode::InvalidArgument,
                          "invalid AES-GCM open input");
+  }
+  if (!development_scope(context.scope)) {
+    return Status::error(StatusCode::Unsupported, "security scope unsupported");
   }
 
   std::array<std::uint8_t, 32> key{};

@@ -186,6 +186,8 @@ SendOptions convert_options(const rl_send_options_t& input) noexcept {
 // Group delivery constants mirror the C++ core (group.hpp, node.hpp).
 static_assert(RL_SECURITY_GROUP == static_cast<int>(SecurityScope::Group),
               "rl_security_scope_t must mirror SecurityScope");
+static_assert(RL_SECURITY_GROUP_LINK == static_cast<int>(SecurityScope::GroupLink),
+              "rl_security_scope_t must mirror SecurityScope");
 static_assert(RL_GROUP_ALL == kGroupAll, "group ALL id");
 static_assert(RL_GROUP_ADDRESS_BASE == kGroupAddressBase, "group address base");
 static_assert(RL_GROUP_SEQUENCE_FLAG == kGroupSequenceFlag, "group sequence flag");
