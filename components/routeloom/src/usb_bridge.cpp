@@ -459,14 +459,15 @@ void UsbBridge::handle_data_to_mesh(const std::uint64_t request,
   // the host-chosen identity in the inner body — stable across sessions, so
   // records may legitimately persist past a reconnect. The canonical hash
   // binds kind+body (key, destination and payload together).
-  canonical_[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
   if (inner.size > kMaxTxInner) {
     send_error(UsbErrorCode::PayloadTooLarge, request, "PAYLOAD_TOO_LARGE", now_ms);
     return;
   }
-  std::memcpy(canonical_.data() + 1, inner.data, inner.size);
+  // Canonical staging in the idle TX body buffer (hashed right here).
+  tx_body_[0] = static_cast<std::uint8_t>(FrameKind::DataToMesh);
+  std::memcpy(tx_body_.data() + 1, inner.data, inner.size);
   const DevTag hash =
-      payload_hash(ByteView{canonical_.data(), inner.size + 1});
+      payload_hash(ByteView{tx_body_.data(), inner.size + 1});
   IdempotencyRecord* record = nullptr;
   const IdempotencyResult result = idempotency_.submit(
       ByteView{transcript_.principal.data(), transcript_.principal_len},
@@ -929,15 +930,17 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
     header.event_seq = node_monitor_.last_sequence();
   }
   header.count = static_cast<std::uint8_t>(count);
-  // Page staging lives in .bss (node_page_wire_), like the TX scratch: a
-  // 468-byte stack array has no place on the 8 KB bridge task.
+  // Page staging lives in .bss (the idle tx_body_), like the TX scratch: a
+  // 468-byte stack array has no place on the 8 KB bridge task. enqueue()
+  // copies it into the TX queue before any pump can reuse the buffer.
   std::size_t written = 0;
   if (encode_node_status_page(
           header, node_page_.data(), count,
-          MutableByteView{node_page_wire_.data(), node_page_wire_.size()},
+          MutableByteView{tx_body_.data(),
+                          kGatewayInnerHeadSize + kNodeStatusPageMaxPayload},
           written)) {
     enqueue(FrameKind::HostOps, 0, request,
-            ByteView{node_page_wire_.data(), written}, now_ms);
+            ByteView{tx_body_.data(), written}, now_ms);
   } else {
     ++stats_.dropped_frames;
   }

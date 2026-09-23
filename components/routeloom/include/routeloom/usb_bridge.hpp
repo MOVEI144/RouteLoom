@@ -236,14 +236,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   static constexpr std::size_t kMaxReasonLen = 64;
 
   struct TxItem {
-    FrameKind kind{FrameKind::KeepAlive};
-    std::uint16_t flags{0};
     std::uint64_t request{0};
-    std::array<std::uint8_t, kMaxTxInner> body{};
-    std::size_t body_size{0};
     // 0 = never expires; diagnostic replies carry the query's deadline so
     // credit starvation cannot retain and later deliver stale evidence.
     MonotonicMs expires_ms{0};
+    std::array<std::uint8_t, kMaxTxInner> body{};
+    std::size_t body_size{0};
+    std::uint16_t flags{0};
+    FrameKind kind{FrameKind::KeepAlive};
   };
 
   struct RequestMap {
@@ -498,12 +498,17 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   static constexpr std::size_t kTxScratchBytes = kHeaderSize + kMaxTxBody + kCrcSize;
   FixedQueue<TxItem, kControlQueueCapacity> control_q_{};
   FixedQueue<TxItem, kDataQueueCapacity> data_q_{};
-  std::array<std::uint8_t, kMaxEncodedFrame> tx_wire_{};
+  // The device never emits a body above kMaxTxBody, so the in-progress wire
+  // frame needs the COBS bound of kTxScratchBytes, not of a 4 KB frame.
+  std::array<std::uint8_t, encoded_frame_bound(kTxScratchBytes)> tx_wire_{};
+  // tx_body_ is live only inside pump_tx (seal -> encode_frame). Between
+  // pumps it doubles as the transient staging of two RX-side encoders that
+  // finish before returning (ram-budget.md): the DataToMesh canonical hash
+  // input (kind || inner) and the node-status page reply — each is copied
+  // into a TxItem or hashed before any pump can run.
   std::array<std::uint8_t, kMaxTxBody> tx_body_{};
+  static_assert(kMaxTxBody >= kMaxTxInner + 1, "canonical DataToMesh staging");
   std::array<std::uint8_t, kTxScratchBytes> encode_scratch_{};
-  // DataToMesh canonical hash staging (kind || inner) — same stack-to-.bss
-  // pattern as the TX scratch above; consumed before mesh->send runs.
-  std::array<std::uint8_t, kMaxTxInner + 1> canonical_{};
   std::size_t tx_wire_size_{0};
   std::size_t tx_wire_sent_{0};
   bool tx_wire_active_{false};
@@ -540,8 +545,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   NodeStatusMonitor node_monitor_{};
   MonotonicMs node_monitor_ms_{0};
   std::array<NodeStatus, kNodeStatusPageMax> node_page_{};
-  std::array<std::uint8_t, kGatewayInnerHeadSize + kNodeStatusPageMaxPayload>
-      node_page_wire_{};
+  // The encoded page reply is staged in tx_body_ (see above).
+  static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kNodeStatusPageMaxPayload,
+                "node-status page staging");
   // group_delivery_v1: admitted 0x50 sends awaiting their FINAL 0x51. The
   // node never holds more than kGroupOriginCapacity unsettled group
   // messages, so this bound cannot refuse a correlation the node admitted.

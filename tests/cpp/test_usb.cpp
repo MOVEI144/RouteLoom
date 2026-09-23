@@ -180,6 +180,68 @@ void test_cobs_exact_capacity() {
             .code == StatusCode::InvalidArgument);
 }
 
+// The stream decoder decodes each segment in place (one buffer, not two).
+// In-place and out-of-place decodes must agree byte for byte, including the
+// 0xFF block and implicit-zero paths and the exactly-full 4096-byte frame.
+void test_cobs_decode_in_place() {
+  for (const std::size_t size :
+       {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{253},
+        std::size_t{254}, std::size_t{255}, std::size_t{508}, std::size_t{1000},
+        kMaxDecodedFrame}) {
+    for (const int pattern : {0, 1, 2}) {
+      std::vector<std::uint8_t> input(size);
+      for (std::size_t i = 0; i < size; ++i) {
+        input[i] = pattern == 0 ? static_cast<std::uint8_t>(next_random())
+                   : pattern == 1 ? static_cast<std::uint8_t>(i % 3 == 0 ? 0 : i)
+                                  : static_cast<std::uint8_t>(0xA5);
+      }
+      std::vector<std::uint8_t> buffer(kMaxEncodedFrame);
+      std::size_t enc = 0;
+      CHECK_OK(cobs_encode(ByteView{input.data(), input.size()},
+                           MutableByteView{buffer.data(), buffer.size()}, enc));
+      std::vector<std::uint8_t> separate(kMaxDecodedFrame);
+      std::size_t dec_separate = 0;
+      CHECK_OK(cobs_decode(ByteView{buffer.data(), enc},
+                           MutableByteView{separate.data(), separate.size()},
+                           dec_separate));
+      std::size_t dec_in_place = 0;
+      CHECK_OK(cobs_decode(ByteView{buffer.data(), enc},
+                           MutableByteView{buffer.data(), kMaxDecodedFrame},
+                           dec_in_place));
+      CHECK(dec_in_place == size && dec_separate == size);
+      CHECK(size == 0 || std::memcmp(buffer.data(), input.data(), size) == 0);
+    }
+  }
+}
+
+// encode_frame needs only encoded_frame_bound(decoded) bytes of output — the
+// bridge stages its TX frame in a buffer sized for its largest body, not a
+// 4 KB frame — and refuses anything smaller without writing past it.
+void test_encode_frame_bounded_output() {
+  CHECK(encoded_frame_bound(kMaxDecodedFrame) == kMaxEncodedFrame);
+  std::vector<std::uint8_t> body(1048);
+  for (std::size_t i = 0; i < body.size(); ++i) {
+    body[i] = static_cast<std::uint8_t>(i % 5 == 0 ? 0 : 0xFF - i);
+  }
+  const std::size_t decoded = kHeaderSize + body.size() + kCrcSize;
+  std::vector<std::uint8_t> scratch(decoded);
+  std::vector<std::uint8_t> tight(encoded_frame_bound(decoded));
+  std::size_t written = 0;
+  CHECK_OK(encode_frame(FrameKind::DataFromMesh, 0, 7, 9,
+                        ByteView{body.data(), body.size()},
+                        MutableByteView{scratch.data(), scratch.size()},
+                        MutableByteView{tight.data(), tight.size()}, written));
+  const std::vector<std::uint8_t> reference = encode(
+      FrameKind::DataFromMesh, 0, 7, 9, ByteView{body.data(), body.size()});
+  CHECK(!reference.empty() && written == reference.size() &&
+        std::memcmp(tight.data(), reference.data(), written) == 0);
+  CHECK(encode_frame(FrameKind::DataFromMesh, 0, 7, 9,
+                     ByteView{body.data(), body.size()},
+                     MutableByteView{scratch.data(), scratch.size()},
+                     MutableByteView{tight.data(), tight.size() - 1}, written)
+            .code == StatusCode::NoCapacity);
+}
+
 void test_frame_max_body_boundary() {
   // kMaxBodySize = 4066 → decoded frame exactly kMaxDecodedFrame (4096):
   // the stream decoder must accept it (the phantom-zero bug rejected it).
@@ -1580,6 +1642,8 @@ void test_golden_group_ops() {
 int main() {
   test_cobs();
   test_cobs_exact_capacity();
+  test_cobs_decode_in_place();
+  test_encode_frame_bounded_output();
   test_frame_max_body_boundary();
   test_frame_codec();
   test_credit();
