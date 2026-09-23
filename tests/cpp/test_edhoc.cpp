@@ -15,6 +15,14 @@
 //     this backend needs (printed; see docs/design/sdk-v1/ram-budget.md).
 //
 // Vectors: protocol/edhoc-rfc9529/chapter3.txt (tools/extract_rfc9529_vectors.py).
+//
+// Known upstream report under UBSan (recoverable, the test still passes):
+// libedhoc's message_3/message_4 Enc_structure encodes the empty
+// external_aad as (NULL, 0), and zcbor copies it with memmove(dst, NULL, 0)
+// (zcbor_encode.c str_encode) — undefined by the letter of the C standard,
+// a no-op on every libc. It comes from the vendored code at the pinned
+// commits, not from RouteLoom inputs, and is left visible rather than
+// suppressed.
 
 #include <algorithm>
 #include <array>
