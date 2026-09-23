@@ -22,6 +22,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "routeloom/group.hpp"
+#include "routeloom/node.hpp"
 #include "routeloom/node_status.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
@@ -64,6 +66,13 @@ constexpr std::uint32_t kCapM1DiagnosticsV1 = 1u << 5;
 // Hello transcript like every other capability bit.
 constexpr std::uint32_t kCapNodeStatusV1 = 1u << 6;
 
+// group_delivery_v1 (docs/design/sdk-v1/group-delivery.md §10): the device
+// serves the Group HostOps subcommands 0x50-0x52 — a host asks the gateway
+// node to send a group/ALL message along its tree and reads the aggregated
+// delivery summary. Advertised only when the bridge owner attaches the
+// surface (attach_group); bound into the authenticated Hello transcript.
+constexpr std::uint32_t kCapGroupDeliveryV1 = 1u << 7;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
@@ -87,6 +96,9 @@ enum class HostOpsSub : std::uint8_t {
   NodeStatusQuery = 0x40,   // H→G request: after/max/flags -> 0x41 page
   NodeStatusPage = 0x41,    // G→H reply: result/flags/count/cursor || entries
   NodeEvent = 0x42,         // G→H unsolicited (request 0): seq/kind || entry
+  GroupSend = 0x50,         // H→G request: group/priority/lifetime || data
+  GroupStatus = 0x51,       // G→H reply: summary (0x50/0x52), then a FINAL one
+  GroupQuery = 0x52,        // H→G request: MessageId -> 0x51 snapshot
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -828,5 +840,96 @@ Status decode_node_status_page(ByteView inner, NodeStatusPageHeader& header,
 Status encode_node_event(const NodeEvent& event, MutableByteView out,
                          std::size_t& written) noexcept;
 Status decode_node_event(ByteView inner, NodeEvent& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Group HostOps family (group_delivery_v1). Same inner common form as the
+// gateway/config/node-status families: schema:u8=1, sub:u8, payload_len:u16,
+// payload. All integers big-endian.
+//
+// 0x50 GROUP_SEND (H→G), payload 12B + data_len:
+//   group:u16 (1..0xFFFF, 0xFFFF = ALL), priority:u8 (0 Bulk..3 Urgent),
+//   flags:u8 (bit0 ORDERED, other bits zero), lifetime_ms:u32
+//   (1..kMaxMessageLifetimeMs), hop_limit:u8 (1..254), reserved:u8=0,
+//   data_len:u16 (<= kGroupPayloadMax), data.
+// 0x52 GROUP_QUERY (H→G), payload 12B: session:u32, sequence:u64 (a group
+//   MessageId: bit63 set).
+// 0x51 GROUP_STATUS (G→H), payload 30B + missing_count*8 + reason_len:
+//   result:u16 (ConfigOpsResult: Ok / Unsupported / Busy / Invalid /
+//   Indeterminate), session:u32, sequence:u64, group:u16, state:u8
+//   (DeliveryState), rounds:u8, delivered:u16, nonmember:u16,
+//   missing_total:u16, unaccounted:u16, flags:u8 (bit0 TRUNCATED =
+//   missing_total > missing_count, bit1 FINAL = terminal state),
+//   missing_count:u8 (<= kGroupReportMissingMax), reason_len:u8
+//   (<= kGroupStatusReasonMax, printable ASCII), reserved:u8=0,
+//   missing ids (u64 each), reason.
+// A 0x50 is answered at once under its request id with the admission
+//   outcome (Ok + the current summary, or a refusal with zero id/counts);
+//   when an admitted message later reaches a terminal state the device
+//   sends ONE more 0x51 with FINAL under the same request id (session-scoped:
+//   a reconnect drops the correlation, the host then polls 0x52). A 0x52 for
+//   an id the device no longer holds answers Ok with state 0 (Empty) and
+//   reason "NOT_FOUND".
+constexpr std::size_t kGroupSendFixedPayload = 12;
+constexpr std::size_t kGroupSendMaxPayload = kGroupSendFixedPayload + kGroupPayloadMax;
+constexpr std::size_t kGroupQueryPayload = 12;
+constexpr std::size_t kGroupStatusFixedPayload = 30;
+constexpr std::size_t kGroupStatusReasonMax = 32;
+constexpr std::size_t kGroupStatusMaxPayload =
+    kGroupStatusFixedPayload + kGroupReportMissingMax * 8 + kGroupStatusReasonMax;
+constexpr std::uint8_t kGroupSendOrdered = 0x01;
+constexpr std::uint8_t kGroupStatusTruncated = 0x01;
+constexpr std::uint8_t kGroupStatusFinal = 0x02;
+
+struct GroupSendRequest {
+  GroupId group{0};
+  Priority priority{Priority::Normal};
+  std::uint8_t flags{0};
+  std::uint32_t lifetime_ms{0};
+  std::uint8_t hop_limit{kDefaultHopLimit};
+  ByteView data{};  // borrows `inner` (decode) or caller bytes (encode)
+};
+
+struct GroupQueryRequest {
+  MessageId id{};
+};
+
+struct GroupStatusReply {
+  std::uint16_t result{0};  // ConfigOpsResult
+  MessageId id{};
+  GroupId group{0};
+  DeliveryState state{DeliveryState::Empty};
+  std::uint8_t rounds{0};
+  std::uint16_t delivered{0};
+  std::uint16_t nonmember{0};
+  std::uint16_t missing_total{0};
+  std::uint16_t unaccounted{0};
+  std::uint8_t flags{0};  // derived by the encoder; checked by the decoder
+  std::uint8_t missing_count{0};
+  std::array<NodeId, kGroupReportMissingMax> missing{};
+  std::uint8_t reason_len{0};
+  std::array<char, kGroupStatusReasonMax> reason{};
+};
+
+// True for the DeliveryState values a group summary never leaves.
+bool group_state_final(DeliveryState state) noexcept;
+
+Status encode_group_send(const GroupSendRequest& request, MutableByteView out,
+                         std::size_t& written) noexcept;
+Status decode_group_send(ByteView inner, GroupSendRequest& out) noexcept;
+Status encode_group_query(const GroupQueryRequest& request, MutableByteView out,
+                          std::size_t& written) noexcept;
+Status decode_group_query(ByteView inner, GroupQueryRequest& out) noexcept;
+// Builds the wire reply from a source-side summary: counts, missing ids and
+// the reason (truncated to kGroupStatusReasonMax) are copied; flags are
+// derived. A non-Ok `result` carries only `group` and the reason.
+GroupStatusReply group_status_from(std::uint16_t result, const GroupDeliveryResult& summary,
+                                   const char* reason) noexcept;
+// The encoder DERIVES `flags` (TRUNCATED/FINAL) from the counts and state and
+// rejects inconsistent replies (a non-Ok result with an id or counts, an Ok
+// id without the group-sequence bit, reserved missing ids, non-printable
+// reason bytes).
+Status encode_group_status(const GroupStatusReply& reply, MutableByteView out,
+                           std::size_t& written) noexcept;
+Status decode_group_status(ByteView inner, GroupStatusReply& out) noexcept;
 
 }  // namespace routeloom::usb

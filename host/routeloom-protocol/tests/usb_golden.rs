@@ -402,3 +402,97 @@ fn node_status_vectors_are_byte_exact() {
     );
     assert_eq!(h2d, 4); // tx_grant, subscribe, resync, close
 }
+
+/// protocol/usb-golden/group-ops: the group_delivery_v1 scenario. Same
+/// discipline as node-status; the 0x50-0x52 inners must decode under the
+/// Rust codec, and both 0x51 answers to the send share its request id.
+#[test]
+fn group_ops_vectors_are_byte_exact() {
+    use routeloom_protocol::group_ops::*;
+
+    let root = golden_dir().join("group-ops");
+    let session = load(&root.join("session.json"));
+    let capability = u64_field(&session, "capability") as u32;
+    assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_GROUP_DELIVERY_V1);
+    let transcript = Transcript {
+        host_nonce: u64_field(&session, "host_nonce"),
+        device_nonce: u64_field(&session, "device_nonce"),
+        version: 1,
+        node: u64_field(&session, "node"),
+        boot: u64_field(&session, "boot"),
+        network: u64_field(&session, "network"),
+        capability,
+        principal: field(&session, "principal").as_bytes().to_vec(),
+    };
+    let proof = derive_session_proof(
+        &unhex(field(&session, "secret_hex")),
+        &transcript.encode().unwrap(),
+    );
+    assert_eq!(proof.session_id, u64_field(&session, "session_id"));
+
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join("frames"))
+        .expect("frames dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    let (mut d2h, mut h2d) = (0_u64, 0_u64);
+    let mut statuses = Vec::new();
+    let mut sends = Vec::new();
+    for path in &files {
+        let vector = load(path);
+        let name = field(&vector, "name").to_string();
+        let direction = field(&vector, "direction");
+        let wire = unhex(field(&vector, "wire_hex"));
+        let frame = decode_wire(&wire);
+        if direction == "h2d" {
+            assert_eq!(encode_frame(&frame).expect("re-encode"), wire, "{name}");
+        }
+        if frame.session == 0 {
+            continue; // handshake frames
+        }
+        let dir = if direction == "h2d" {
+            DIRECTION_HOST_TO_DEVICE
+        } else {
+            DIRECTION_DEVICE_TO_HOST
+        };
+        let (counter, inner) = open_body(&proof.key, dir, &frame).expect("valid tag");
+        let expected = if dir == DIRECTION_HOST_TO_DEVICE {
+            &mut h2d
+        } else {
+            &mut d2h
+        };
+        assert_eq!(counter, *expected, "{name}");
+        *expected += 1;
+        assert_eq!(inner, unhex(field(&vector, "inner_hex")), "{name}");
+        match group_ops_sub(inner) {
+            Some(SUB_GROUP_SEND) => sends.push((frame.request, decode_group_send(inner).unwrap())),
+            Some(SUB_GROUP_QUERY) => {
+                let query = decode_group_query(inner).expect("query parses");
+                assert_eq!(query.sequence, GROUP_SEQUENCE_FLAG | 1);
+            }
+            Some(SUB_GROUP_STATUS) => {
+                statuses.push((frame.request, decode_group_status(inner).unwrap()))
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(sends.len(), 1);
+    let (send_request, send) = &sends[0];
+    assert_eq!((send.group, send.priority), (GROUP_ALL, 3));
+    assert_eq!(send.data, b"PUMP3 OVERTEMP");
+    assert_eq!(statuses.len(), 3);
+    let (admitted_request, admitted) = &statuses[0];
+    let (final_request, settled) = &statuses[1];
+    assert_eq!(admitted_request, send_request);
+    assert_eq!(final_request, send_request);
+    assert!(!admitted.is_final() && settled.is_final());
+    assert_eq!(admitted.sequence, settled.sequence);
+    assert_eq!(
+        (settled.state, settled.delivered, settled.rounds),
+        (STATE_DELIVERED, 1, 1)
+    );
+    assert_eq!(settled.reason, "GROUP_COMPLETE");
+    assert_eq!(&statuses[2].1, settled);
+    assert_eq!(h2d, 4); // tx_grant, send, query, close
+}

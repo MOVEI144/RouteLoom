@@ -98,6 +98,14 @@ Status UsbBridge::attach_node_status() noexcept {
   return Status::success();
 }
 
+Status UsbBridge::attach_group() noexcept {
+  if (config_.mesh == nullptr) {
+    return Status::error(StatusCode::InvalidState, "group needs mesh");
+  }
+  config_.capability |= kCapGroupDeliveryV1;
+  return Status::success();
+}
+
 void UsbBridge::on_bytes(const ByteView input, const MonotonicMs now_ms) noexcept {
   now_ms_ = now_ms;
   decoder_.push(input, now_ms);
@@ -604,6 +612,16 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
       send_error(UsbErrorCode::ProtocolError, request, "NODE_STATUS_DIRECTION",
                  now_ms);
       break;
+    case HostOpsSub::GroupSend:
+      handle_group_send(request, inner, now_ms);
+      break;
+    case HostOpsSub::GroupQuery:
+      handle_group_query(request, inner, now_ms);
+      break;
+    case HostOpsSub::GroupStatus:
+      // 0x51 is device→host only.
+      send_error(UsbErrorCode::ProtocolError, request, "GROUP_DIRECTION", now_ms);
+      break;
     default:
       send_error(UsbErrorCode::Unsupported, request, "SUBCOMMAND_UNKNOWN", now_ms);
       break;
@@ -922,6 +940,137 @@ void UsbBridge::handle_node_status_query(const std::uint64_t request,
             ByteView{node_page_wire_.data(), written}, now_ms);
   } else {
     ++stats_.dropped_frames;
+  }
+}
+
+namespace {
+
+ConfigOpsResult group_refusal_for(const Status& status) noexcept {
+  switch (status.code) {
+    case StatusCode::Unsupported:
+    case StatusCode::CounterExhausted:
+      return ConfigOpsResult::Unsupported;
+    case StatusCode::WouldBlock:
+    case StatusCode::InvalidState:
+      return ConfigOpsResult::Busy;
+    case StatusCode::InvalidArgument:
+      return ConfigOpsResult::Invalid;
+    default:
+      return ConfigOpsResult::Indeterminate;
+  }
+}
+
+}  // namespace
+
+void UsbBridge::send_group_status(const std::uint64_t request,
+                                  const GroupStatusReply& reply,
+                                  const MonotonicMs now_ms) noexcept {
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGroupStatusMaxPayload> encoded{};
+  std::size_t written = 0;
+  if (encode_group_status(reply, MutableByteView{encoded.data(), encoded.size()}, written)) {
+    enqueue(FrameKind::HostOps, 0, request, ByteView{encoded.data(), written}, now_ms);
+  } else {
+    ++stats_.dropped_frames;
+  }
+}
+
+void UsbBridge::handle_group_send(const std::uint64_t request, const ByteView inner,
+                                  const MonotonicMs now_ms) noexcept {
+  GroupSendRequest send{};
+  if (!decode_group_send(inner, send).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "GROUP_MALFORMED", now_ms);
+    return;
+  }
+  GroupDeliveryResult refused{};
+  refused.group = send.group;
+  if ((config_.capability & kCapGroupDeliveryV1) == 0 || config_.mesh == nullptr) {
+    send_group_status(request,
+                      group_status_from(static_cast<std::uint16_t>(ConfigOpsResult::Unsupported),
+                                        refused, "GROUP_UNSUPPORTED"),
+                      now_ms);
+    return;
+  }
+  GroupSendOptions options{};
+  options.priority = send.priority;
+  options.lifetime_ms = send.lifetime_ms;
+  options.hop_limit = send.hop_limit;
+  options.ordered = (send.flags & kGroupSendOrdered) != 0;
+  MessageId id{};
+  const Status status = config_.mesh->send_group(send.group, send.data, options, now_ms, id);
+  if (!status) {
+    send_group_status(request,
+                      group_status_from(static_cast<std::uint16_t>(group_refusal_for(status)),
+                                        refused, status.detail),
+                      now_ms);
+    return;
+  }
+  const GroupDeliveryResult summary = config_.mesh->group_delivery(id);
+  send_group_status(request,
+                    group_status_from(static_cast<std::uint16_t>(ConfigOpsResult::Ok), summary,
+                                      summary.reason),
+                    now_ms);
+  if (group_state_final(summary.state)) return;  // settled already: no FINAL follows
+  // The node holds at most kGroupOriginCapacity unsettled messages; a stale
+  // slot (its message reclaimed without a terminal callback) is reused
+  // before a live one would ever be displaced.
+  PendingGroup* slot = nullptr;
+  for (auto& candidate : pending_group_) {
+    if (!candidate.used) {
+      slot = &candidate;
+      break;
+    }
+  }
+  if (slot == nullptr) {
+    for (auto& candidate : pending_group_) {
+      if (group_state_final(config_.mesh->group_delivery(candidate.id).state) ||
+          config_.mesh->group_delivery(candidate.id).state == DeliveryState::Empty) {
+        slot = &candidate;
+        break;
+      }
+    }
+  }
+  if (slot != nullptr) {
+    slot->id = id;
+    slot->usb_request = request;
+    slot->used = true;
+  }
+}
+
+void UsbBridge::handle_group_query(const std::uint64_t request, const ByteView inner,
+                                   const MonotonicMs now_ms) noexcept {
+  GroupQueryRequest query{};
+  if (!decode_group_query(inner, query).ok()) {
+    send_error(UsbErrorCode::ProtocolError, request, "GROUP_MALFORMED", now_ms);
+    return;
+  }
+  if ((config_.capability & kCapGroupDeliveryV1) == 0 || config_.mesh == nullptr) {
+    send_group_status(request,
+                      group_status_from(static_cast<std::uint16_t>(ConfigOpsResult::Unsupported),
+                                        GroupDeliveryResult{}, "GROUP_UNSUPPORTED"),
+                      now_ms);
+    return;
+  }
+  GroupDeliveryResult summary = config_.mesh->group_delivery(query.id);
+  // An id the node no longer holds answers Ok / Empty / NOT_FOUND and echoes
+  // the queried id (group 0: unknown).
+  summary.id = query.id;
+  send_group_status(request,
+                    group_status_from(static_cast<std::uint16_t>(ConfigOpsResult::Ok), summary,
+                                      summary.reason),
+                    now_ms);
+}
+
+void UsbBridge::on_group_delivery(const GroupDeliveryResult& result) noexcept {
+  if (!group_state_final(result.state)) return;  // repair progress: poll 0x52
+  for (auto& slot : pending_group_) {
+    if (!slot.used || !(slot.id == result.id)) continue;
+    const std::uint64_t request = slot.usb_request;
+    slot = PendingGroup{};
+    send_group_status(request,
+                      group_status_from(static_cast<std::uint16_t>(ConfigOpsResult::Ok), result,
+                                        result.reason),
+                      now_ms_);
+    return;
   }
 }
 
@@ -1716,6 +1865,9 @@ void UsbBridge::reset_session_state() noexcept {
   // session starts silent until its host queries with SUBSCRIBE.
   node_monitor_.disarm();
   node_monitor_ms_ = 0;
+  // FINAL 0x51 correlation is session state too: request ids are
+  // session-scoped, so a new session polls 0x52 instead.
+  for (auto& slot : pending_group_) slot = PendingGroup{};
   decoder_.reset();
   // Gateway lane teardown: the registration dies with the session (a new
   // token is minted per session — old tokens can never be rebound), and

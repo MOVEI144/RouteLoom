@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <string>
 #include <set>
 #include <vector>
 
@@ -1098,11 +1099,11 @@ struct World {
   CollectSink device_sink;
   StreamDecoder device_decoder;
 
-  explicit World(std::uint32_t capability = 0x3 | kCapHostOpsV1)
+  explicit World(std::uint32_t capability = 0x3 | kCapHostOpsV1, bool scoped = false)
       : bridge(config(capability), stream),
         r1(net, 1), r2(net, 2),
-        n1(node_config(1, 7001), r1, sec1, bridge),
-        n2(node_config(2, 2002), r2, sec2, obs2),
+        n1(node_config(1, 7001, scoped), r1, sec1, bridge),
+        n2(node_config(2, 2002, scoped), r2, sec2, obs2),
         device_decoder(device_sink) {
     bridge.set_mesh(&n1);
     net.register_node(1, &n1);
@@ -1124,11 +1125,19 @@ struct World {
     cfg.device_nonce = 0xA0B0C0D0E0F00102ULL;
     return cfg;
   }
-  static NodeConfig node_config(NodeId node, std::uint32_t session) {
+  static NodeConfig node_config(NodeId node, std::uint32_t session, bool scoped = false) {
     NodeConfig cfg{};
     cfg.network = 7;
     cfg.node = node;
     cfg.message_session = session;
+    if (scoped) {
+      // Gateway-scoped profile with node 1 (the bridge node) as the route
+      // gateway — the only profile group delivery runs on.
+      cfg.route_gateways = {1, kInvalidNodeId};
+      cfg.route_advertisement_period_ms = 500;
+      cfg.route_lifetime_ms = 9000;
+      cfg.route_refresh_ticks = kScopedDefaultRefreshTicks;
+    }
     return cfg;
   }
 
@@ -2948,6 +2957,358 @@ void test_bridge_gateway_stale_session() {
   CHECK(ok.result == HostOpsResult::Ok);
 }
 
+// ------------------------------------------------ group_delivery_v1 (0x50-0x52)
+
+std::vector<std::uint8_t> group_send_bytes(const GroupSendRequest& request) {
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGroupSendMaxPayload> out{};
+  std::size_t written = 0;
+  if (!encode_group_send(request, MutableByteView{out.data(), out.size()}, written)) {
+    return {};
+  }
+  return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+std::vector<std::uint8_t> group_query_bytes(const MessageId& id) {
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGroupQueryPayload> out{};
+  std::size_t written = 0;
+  GroupQueryRequest query{};
+  query.id = id;
+  if (!encode_group_query(query, MutableByteView{out.data(), out.size()}, written)) {
+    return {};
+  }
+  return std::vector<std::uint8_t>(out.begin(), out.begin() + written);
+}
+
+bool decode_group_status_bytes(const std::vector<std::uint8_t>& inner, GroupStatusReply& out) {
+  return decode_group_status(ByteView{inner.data(), inner.size()}, out).ok();
+}
+
+std::string group_reason(const GroupStatusReply& reply) {
+  return std::string(reply.reason.data(), reply.reason_len);
+}
+
+void test_group_ops_codecs() {
+  const char* text = "PUMP3 OVERTEMP";
+  GroupSendRequest send{};
+  send.group = kGroupAll;
+  send.priority = Priority::Urgent;
+  send.flags = kGroupSendOrdered;
+  send.lifetime_ms = 5000;
+  send.hop_limit = 10;
+  send.data = ByteView{reinterpret_cast<const std::uint8_t*>(text), std::strlen(text)};
+  auto bytes = group_send_bytes(send);
+  CHECK(bytes.size() == kGatewayInnerHeadSize + kGroupSendFixedPayload + 14);
+  CHECK(bytes[0] == kHostOpsSchema && bytes[1] == 0x50);
+  GroupSendRequest decoded{};
+  CHECK(decode_group_send(ByteView{bytes.data(), bytes.size()}, decoded));
+  CHECK(decoded.group == kGroupAll && decoded.priority == Priority::Urgent &&
+        decoded.flags == kGroupSendOrdered && decoded.lifetime_ms == 5000 &&
+        decoded.hop_limit == 10 && decoded.data.size == 14 &&
+        std::memcmp(decoded.data.data, text, 14) == 0);
+  // Every field bound is enforced on decode (a mutated byte is refused).
+  const auto refuse = [&](std::size_t offset, std::uint8_t value) {
+    auto copy = bytes;
+    copy[offset] = value;
+    GroupSendRequest out{};
+    return !decode_group_send(ByteView{copy.data(), copy.size()}, out).ok();
+  };
+  {
+    auto copy = bytes;
+    copy[4] = copy[5] = 0;  // group 0x0000
+    GroupSendRequest out{};
+    CHECK(!decode_group_send(ByteView{copy.data(), copy.size()}, out));
+  }
+  CHECK(refuse(6, 4));                    // priority beyond Urgent
+  CHECK(refuse(7, 0x02));                 // unknown flag
+  CHECK(refuse(12, 0));                   // hop_limit 0
+  CHECK(refuse(12, 0xFF));                // hop_limit 255
+  CHECK(refuse(13, 1));                   // reserved byte
+  CHECK(refuse(15, 13));                  // data_len != remaining
+  {
+    auto copy = bytes;
+    copy[8] = copy[9] = copy[10] = copy[11] = 0;  // lifetime 0
+    GroupSendRequest out{};
+    CHECK(!decode_group_send(ByteView{copy.data(), copy.size()}, out));
+    copy[10] = 0x75;
+    copy[11] = 0x31;  // 30001 ms > kMaxMessageLifetimeMs
+    CHECK(!decode_group_send(ByteView{copy.data(), copy.size()}, out));
+  }
+  std::array<std::uint8_t, kGroupPayloadMax + 1> big{};
+  send.data = ByteView{big.data(), big.size()};
+  CHECK(group_send_bytes(send).empty());
+  send.data = ByteView{big.data(), kGroupPayloadMax};
+  CHECK(group_send_bytes(send).size() == kGatewayInnerHeadSize + kGroupSendMaxPayload);
+
+  const MessageId id{7001, kGroupSequenceFlag | 3};
+  const auto query = group_query_bytes(id);
+  CHECK(query.size() == kGatewayInnerHeadSize + kGroupQueryPayload);
+  GroupQueryRequest query_out{};
+  CHECK(decode_group_query(ByteView{query.data(), query.size()}, query_out));
+  CHECK(query_out.id == id);
+  CHECK(group_query_bytes(MessageId{7001, 3}).empty());  // not a group id
+
+  // 0x51: flags are derived; a refusal carries no id; ids are checked.
+  GroupDeliveryResult summary{};
+  summary.id = id;
+  summary.group = 7;
+  summary.state = DeliveryState::Failed;
+  summary.rounds = 12;
+  summary.delivered = 80;
+  summary.nonmember = 3;
+  summary.missing_total = 16;
+  summary.unaccounted = 1;
+  summary.missing_count = 2;
+  summary.missing[0] = 41;
+  summary.missing[1] = 42;
+  const auto reply = group_status_from(0, summary, "GROUP_INCOMPLETE");
+  CHECK(reply.flags == (kGroupStatusTruncated | kGroupStatusFinal));
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGroupStatusMaxPayload> wire{};
+  std::size_t written = 0;
+  CHECK(encode_group_status(reply, MutableByteView{wire.data(), wire.size()}, written));
+  CHECK(written == kGatewayInnerHeadSize + kGroupStatusFixedPayload + 16 + 16);
+  std::vector<std::uint8_t> status_bytes(wire.begin(), wire.begin() + written);
+  GroupStatusReply back{};
+  CHECK(decode_group_status_bytes(status_bytes, back));
+  CHECK(back.id == id && back.group == 7 && back.state == DeliveryState::Failed &&
+        back.rounds == 12 && back.delivered == 80 && back.nonmember == 3 &&
+        back.missing_total == 16 && back.unaccounted == 1 && back.missing_count == 2 &&
+        back.missing[0] == 41 && back.missing[1] == 42 &&
+        group_reason(back) == "GROUP_INCOMPLETE");
+  {
+    auto copy = status_bytes;
+    copy[4 + 26] = kGroupStatusFinal;  // TRUNCATED dropped: inconsistent
+    CHECK(!decode_group_status_bytes(copy, back));
+    copy = status_bytes;
+    copy[4 + 29] = 1;  // reserved
+    CHECK(!decode_group_status_bytes(copy, back));
+    copy = status_bytes;
+    copy[4 + 6] = 0;  // sequence without the group bit
+    CHECK(!decode_group_status_bytes(copy, back));
+    copy = status_bytes;
+    for (int i = 0; i < 8; ++i) copy[4 + 30 + i] = 0;  // reserved missing id 0
+    CHECK(!decode_group_status_bytes(copy, back));
+    copy = status_bytes;
+    copy[copy.size() - 1] = 0x07;  // non-printable reason byte
+    CHECK(!decode_group_status_bytes(copy, back));
+    copy = status_bytes;
+    copy.push_back(0);  // trailing byte
+    CHECK(!decode_group_status_bytes(copy, back));
+  }
+  // A refusal: result non-Ok, no id, no counts, flags zero.
+  const auto refusal =
+      group_status_from(static_cast<std::uint16_t>(ConfigOpsResult::Busy), summary,
+                        "GROUP_QUEUE_FULL");
+  CHECK(refusal.id.session == 0 && refusal.id.sequence == 0 && refusal.delivered == 0 &&
+        refusal.flags == 0 && refusal.group == 7);
+  CHECK(encode_group_status(refusal, MutableByteView{wire.data(), wire.size()}, written));
+  GroupStatusReply forged = refusal;
+  forged.delivered = 1;
+  CHECK(!encode_group_status(forged, MutableByteView{wire.data(), wire.size()}, written));
+  // Reasons are clipped to kGroupStatusReasonMax.
+  const auto clipped = group_status_from(0, summary, "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+  CHECK(clipped.reason_len == kGroupStatusReasonMax);
+}
+
+// Sends one sealed HostOps request and returns every opened 0x51 reply the
+// device queued (in order) — the immediate answer and, after mesh pumping,
+// the FINAL one.
+std::vector<GroupStatusReply> opened_group_status(World& world, const HostDriver& host,
+                                                  std::uint64_t request) {
+  std::vector<GroupStatusReply> out;
+  for (const auto& record : world.device_sink.frames) {
+    std::uint64_t counter = 0;
+    ByteView opened{};
+    if (record.frame.kind != FrameKind::HostOps || record.frame.request != request ||
+        !open_body(host.proof.key, kDirDeviceToHost, record.frame, counter, opened)) {
+      continue;
+    }
+    GroupStatusReply reply{};
+    if (decode_group_status(opened, reply)) out.push_back(reply);
+  }
+  return out;
+}
+
+struct GroupWorld : World {
+  GroupWorld() : World(0x3 | kCapHostOpsV1, /*scoped=*/true) {}
+
+  void run_mesh(MonotonicMs& now, MonotonicMs ms) {
+    const MonotonicMs end = now + ms;
+    for (; now <= end; now += 5) {
+      n1.poll(now);
+      n2.poll(now);
+      net.flush(now);
+      bridge.poll(now);
+      const auto bytes = stream.take();
+      if (!bytes.empty()) device_decoder.push(ByteView{bytes.data(), bytes.size()}, now);
+    }
+  }
+};
+
+void test_bridge_group_send_and_final() {
+  GroupWorld world;
+  CHECK(world.bridge.attach_group().ok());
+  MonotonicMs now = 0;
+  world.run_mesh(now, 8000);  // node 2 adopts gateway 1 as its tree parent
+  CHECK(world.n1.scoped_child(2));
+  world.device_sink.frames.clear();
+  HostDriver host;
+  CHECK(host_handshake(world, host, now, 0x5151, 10) != 0);
+
+  const char* text = "PUMP3 OVERTEMP";
+  GroupSendRequest send{};
+  send.group = kGroupAll;
+  send.priority = Priority::Urgent;
+  send.lifetime_ms = 5000;
+  send.hop_limit = 10;
+  send.data = ByteView{reinterpret_cast<const std::uint8_t*>(text), std::strlen(text)};
+  const auto send_body = group_send_bytes(send);
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+  const auto answer = transact(world, host, now, 70,
+                               ByteView{send_body.data(), send_body.size()}, got_error,
+                               error_code);
+  CHECK(!got_error);
+  GroupStatusReply admitted{};
+  CHECK(decode_group_status_bytes(answer, admitted));
+  CHECK(admitted.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+  CHECK(admitted.id.session == 7001 && admitted.id.sequence == (kGroupSequenceFlag | 1));
+  CHECK(admitted.group == kGroupAll && (admitted.flags & kGroupStatusFinal) == 0);
+
+  // The mesh settles the message; the device emits exactly one FINAL 0x51
+  // under the SAME request id, and node 2 receives the alarm once.
+  world.run_mesh(now, 1500);
+  const auto finals = opened_group_status(world, host, 70);
+  CHECK(finals.size() == 1);
+  if (!finals.empty()) {
+    const auto& final_reply = finals.front();
+    CHECK(final_reply.id == admitted.id);
+    CHECK(final_reply.state == DeliveryState::Delivered &&
+          (final_reply.flags & kGroupStatusFinal) != 0);
+    CHECK(final_reply.delivered == 1 && final_reply.missing_total == 0 &&
+          final_reply.unaccounted == 0 && final_reply.rounds == 1);
+    CHECK(group_reason(final_reply) == "GROUP_COMPLETE");
+  }
+  world.device_sink.frames.clear();
+  CHECK(world.obs2.group_messages.size() == 1);
+  if (!world.obs2.group_messages.empty()) {
+    CHECK(world.obs2.group_messages.back().info.key.id == admitted.id);
+  }
+
+  // 0x52 reads the same settled summary; an unknown id answers NOT_FOUND.
+  const auto query = group_query_bytes(admitted.id);
+  const auto polled = transact(world, host, now, 71, ByteView{query.data(), query.size()},
+                               got_error, error_code);
+  GroupStatusReply snapshot{};
+  CHECK(decode_group_status_bytes(polled, snapshot));
+  CHECK(snapshot.state == DeliveryState::Delivered && snapshot.delivered == 1 &&
+        (snapshot.flags & kGroupStatusFinal) != 0);
+  const auto unknown = group_query_bytes(MessageId{7001, kGroupSequenceFlag | 99});
+  const auto missing = transact(world, host, now, 72,
+                                ByteView{unknown.data(), unknown.size()}, got_error,
+                                error_code);
+  GroupStatusReply not_found{};
+  CHECK(decode_group_status_bytes(missing, not_found));
+  CHECK(not_found.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok) &&
+        not_found.state == DeliveryState::Empty && group_reason(not_found) == "NOT_FOUND" &&
+        not_found.id.sequence == (kGroupSequenceFlag | 99));
+
+  // Invalid through the codec never reaches the node: malformed -> Error.
+  auto broken = send_body;
+  broken[13] = 1;  // reserved byte
+  const auto malformed = transact(world, host, now, 73,
+                                  ByteView{broken.data(), broken.size()}, got_error,
+                                  error_code);
+  CHECK(got_error && malformed.empty());
+  // 0x51 is device->host only.
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kGroupStatusMaxPayload> wire{};
+  std::size_t written = 0;
+  CHECK(encode_group_status(snapshot, MutableByteView{wire.data(), wire.size()}, written));
+  transact(world, host, now, 74, ByteView{wire.data(), written}, got_error, error_code);
+  CHECK(got_error);
+  CHECK(world.n1.group_stats().sent == 1);
+}
+
+void test_bridge_group_refusals() {
+  // Without attach_group the family answers Unsupported and sends nothing.
+  {
+    GroupWorld world;
+    MonotonicMs now = 0;
+    world.run_mesh(now, 8000);
+    world.device_sink.frames.clear();
+    HostDriver host;
+    CHECK(host_handshake(world, host, now, 0x5252, 10) != 0);
+    GroupSendRequest send{};
+    send.group = 5;
+    send.lifetime_ms = 3000;
+    const auto body = group_send_bytes(send);
+    bool got_error = false;
+    std::uint16_t error_code = 0;
+    const auto answer = transact(world, host, now, 80, ByteView{body.data(), body.size()},
+                                 got_error, error_code);
+    GroupStatusReply reply{};
+    CHECK(decode_group_status_bytes(answer, reply));
+    CHECK(reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported) &&
+          reply.id.sequence == 0 && reply.group == 5 &&
+          group_reason(reply) == "GROUP_UNSUPPORTED");
+    CHECK(world.n1.group_stats().sent == 0);
+  }
+  // Attached on a flat-profile node: the node refuses (no tree, no flood)
+  // and the refusal reason reaches the host.
+  {
+    World world;
+    CHECK(world.bridge.attach_group().ok());
+    MonotonicMs now = 1000;
+    HostDriver host;
+    CHECK(host_handshake(world, host, now, 0x5353, 10) != 0);
+    GroupSendRequest send{};
+    send.group = kGroupAll;
+    send.lifetime_ms = 3000;
+    const auto body = group_send_bytes(send);
+    bool got_error = false;
+    std::uint16_t error_code = 0;
+    const auto answer = transact(world, host, now, 81, ByteView{body.data(), body.size()},
+                                 got_error, error_code);
+    GroupStatusReply reply{};
+    CHECK(decode_group_status_bytes(answer, reply));
+    CHECK(reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported) &&
+          group_reason(reply) == "GROUP_REQUIRES_GATEWAY_SCOPED");
+  }
+  // Source table full: Normal sends keep the Urgent reserve -> Busy.
+  {
+    GroupWorld world;
+    CHECK(world.bridge.attach_group().ok());
+    MonotonicMs now = 0;
+    world.run_mesh(now, 8000);
+    world.device_sink.frames.clear();
+    HostDriver host;
+    CHECK(host_handshake(world, host, now, 0x5454, 10) != 0);
+    GroupSendRequest send{};
+    send.group = 9;
+    send.lifetime_ms = 20000;
+    const auto body = group_send_bytes(send);
+    bool got_error = false;
+    std::uint16_t error_code = 0;
+    std::vector<GroupStatusReply> replies;
+    for (std::uint64_t request = 90; request < 94; ++request) {
+      const auto answer = transact(world, host, now, request,
+                                   ByteView{body.data(), body.size()}, got_error, error_code);
+      GroupStatusReply reply{};
+      CHECK(decode_group_status_bytes(answer, reply));
+      replies.push_back(reply);
+    }
+    std::size_t ok = 0;
+    std::size_t busy = 0;
+    for (const auto& reply : replies) {
+      if (reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok)) ++ok;
+      if (reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Busy)) {
+        ++busy;
+        CHECK(group_reason(reply) == "GROUP_QUEUE_FULL");
+      }
+    }
+    CHECK(ok == kGroupOriginCapacity - 1 && busy == replies.size() - ok);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -2989,6 +3350,9 @@ int main() {
   test_bridge_gateway_remote_send();
   test_bridge_gateway_unregister();
   test_bridge_gateway_stale_session();
+  test_group_ops_codecs();
+  test_bridge_group_send_and_final();
+  test_bridge_group_refusals();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);
     return 1;
