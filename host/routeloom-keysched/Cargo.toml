@@ -1,0 +1,17 @@
+[package]
+name = "routeloom-keysched"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# SDK v1 key schedule (docs/design/sdk-v1/03-key-hierarchy.md, plan P1-4):
+# HKDF-SHA-256 from RustCrypto. `hmac`/`sha2` are already in the lockfile
+# through p256's RFC 6979 signer; `hkdf` adds only the RFC 5869 wrapper.
+# Pure Rust, no unsafe (the workspace forbids it).
+hkdf = "0.12"
+hmac = "0.12"
+sha2 = { version = "0.10", default-features = false }
+
+[lints]
+workspace = true

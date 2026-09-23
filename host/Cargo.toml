@@ -9,6 +9,7 @@ members = [
     "routeloom-json",
     "routeloom-peercred",
     "routeloom-client",
+    "routeloom-keysched",
 ]
 resolver = "2"
 
