@@ -53,9 +53,9 @@ bool RouteTable::has_candidates(const Entry& entry) noexcept {
   return false;
 }
 
-void RouteTable::arm_tombstone(Entry& entry, const MonotonicMs now_ms) noexcept {
+void RouteTable::arm_tombstone(Entry& entry, const MonotonicMs now_ms) const noexcept {
   if (!has_candidates(entry) && entry.tombstone_expires_at_ms == 0) {
-    entry.tombstone_expires_at_ms = now_ms + kRouteTombstoneDwellMs;
+    entry.tombstone_expires_at_ms = now_ms + tombstone_dwell_ms_;
   }
 }
 
@@ -497,6 +497,26 @@ bool RouteTable::reclaim_tombstone() noexcept {
     }
   });
   return entries_.release(oldest);
+}
+
+void RouteTable::set_announced_up(const NodeId destination, const bool announced) noexcept {
+  auto* entry = entries_.find([&](const Entry& value) { return value.destination == destination; });
+  if (entry != nullptr) entry->announced_up = announced;
+}
+
+bool RouteTable::announced_up(const NodeId destination) const noexcept {
+  const auto* entry = find(destination);
+  return entry != nullptr && entry->announced_up;
+}
+
+bool RouteTable::lost_route(const NodeId destination, LostRoute& out) const noexcept {
+  const auto* entry = find(destination);
+  if (entry == nullptr || select(*entry).valid) return false;
+  if (!has_candidates(*entry) && entry->tombstone_expires_at_ms == 0) return false;
+  out = LostRoute{entry->destination, entry->generation,
+                  entry->feasible.valid ? entry->feasible.sequence
+                                        : static_cast<RouteSequence>(0)};
+  return true;
 }
 
 RouteSelection RouteTable::best(const NodeId destination) const noexcept {

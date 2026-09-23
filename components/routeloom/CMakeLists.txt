@@ -23,6 +23,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/peer_state.cpp
   src/power.cpp
   src/replay.cpp
+  src/route_scale.cpp
   src/routing.cpp
   src/status.cpp
   src/telemetry.cpp

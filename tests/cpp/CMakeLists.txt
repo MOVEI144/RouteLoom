@@ -8,6 +8,18 @@ target_link_libraries(routeloom_routing_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_routing_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_routing_tests COMMAND routeloom_routing_tests)
 
+# Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md): the
+# fast unit/small-mesh cases and the 100-node product-timer run are separate
+# ctest entries so the long run parallelises with the rest of the suite.
+add_executable(routeloom_routing_scale_tests test_routing_scale.cpp)
+target_link_libraries(routeloom_routing_scale_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_routing_scale_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_routing_scale_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_routing_scale_tests PRIVATE
+    ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
+add_test(NAME routeloom_routing_scale_unit_tests COMMAND routeloom_routing_scale_tests unit)
+add_test(NAME routeloom_routing_scale_100_node_tests COMMAND routeloom_routing_scale_tests scale)
+
 add_executable(routeloom_ledger_tests test_ledger.cpp)
 target_link_libraries(routeloom_ledger_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_ledger_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

@@ -9,6 +9,7 @@
 #include "routeloom/telemetry.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/node_status.hpp"
+#include "routeloom/route_request.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/status.hpp"
@@ -29,6 +30,18 @@ struct NodeConfig {
   std::uint32_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
+  // Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md).
+  // All kInvalidNodeId (the default) keeps the flat profile: every selected
+  // route is advertised to every neighbor, page by page. Naming at least one
+  // gateway switches the node to the scoped profile: routes to the listed
+  // gateways are proactive and tree-refreshed, other destinations are
+  // learned upward along the gateway tree or on demand (ROUTE_REQUEST).
+  // Every node of a site must carry the same list; a gateway lists itself.
+  std::array<NodeId, kMaxRouteGateways> route_gateways{};
+  // Scoped profile only: every gateway-tree link is refreshed once per this
+  // many advertisement periods. validate_config() enforces
+  // route_lifetime_ms >= (2 * ticks + kScopedLeaseMarginTicks) * period.
+  std::uint8_t route_refresh_ticks{kScopedDefaultRefreshTicks};
   // §14 management airtime budget gate (03-congestion.md §8, radio.md
   // §9/§14): the pinned spec-envelope refill is an UNCALIBRATED
   // capability, not a measured allocation — it must not gate route
@@ -384,6 +397,24 @@ struct DedupStats {
   std::uint64_t delivery_terminal_evicted{0}; // class (a) result-history loss
 };
 
+// Gateway-scoped routing counters (routing-scale.md §7). Saturating
+// monotonic totals; frames are counted when the job is admitted to the TX
+// scheduler, not when it reaches the air.
+struct RouteScaleStats {
+  std::uint64_t upward_frames{0};         // periodic + triggered frames to a parent
+  std::uint64_t downward_frames{0};       // periodic + triggered frames to children
+  std::uint64_t other_frames{0};          // slow rotation to non-tree neighbors
+  std::uint64_t pull_answers{0};          // answers to a Neighbor ROUTE_REQUEST
+  std::uint64_t pulls_sent{0};            // Neighbor ROUTE_REQUEST frames sent
+  std::uint64_t discoveries_started{0};   // destinations that entered discovery
+  std::uint64_t discovery_requests_sent{0};
+  std::uint64_t discovery_requests_forwarded{0};
+  std::uint64_t discovery_replies_sent{0};
+  std::uint64_t discovery_replies_forwarded{0};
+  std::uint64_t discoveries_resolved{0};  // discovery state closed by a live route
+  std::uint64_t route_requests_dropped{0};  // invalid, duplicate, rate-limited or no path
+};
+
 class MeshNode {
  public:
   MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
@@ -570,6 +601,12 @@ class MeshNode {
   std::size_t node_status_page(NodeId after, NodeStatus* out, std::size_t capacity,
                                MonotonicMs now_ms, bool& more) const noexcept;
 
+  // Gateway-scoped profile (routing-scale.md): true when at least one
+  // gateway is configured. scoped_child() reports whether `neighbor`
+  // currently routes to a gateway through this node (test/diagnostic view).
+  bool gateway_scoped() const noexcept;
+  bool scoped_child(NodeId neighbor) const noexcept;
+  const RouteScaleStats& route_scale_stats() const noexcept { return route_scale_stats_; }
   const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
   bool started() const noexcept { return started_; }
@@ -811,6 +848,17 @@ class MeshNode {
     MonotonicMs busy_since_ms{0};
     MonotonicMs last_busy_feedback_ms{0};
     std::uint8_t last_pressure{0};
+    // Gateway-scoped profile (routing-scale.md §3). child_until_ms: the peer
+    // routes to a gateway through us (it poisoned our gateway record) — it
+    // gets the periodic downward refresh and its routes travel upward.
+    // interest_until_ms: the peer pulled a route or asked for a sequence —
+    // triggered changes are pushed to it. A pending pull answer is emitted
+    // from poll() after the selection-change scan.
+    MonotonicMs child_until_ms{0};
+    MonotonicMs interest_until_ms{0};
+    MonotonicMs last_pull_answer_ms{0};
+    NodeId pull_target{kInvalidNodeId};
+    bool pull_answer_pending{false};
     bool active{false};
   };
 
@@ -1235,6 +1283,8 @@ class MeshNode {
                     std::uint8_t reason, MonotonicMs now_ms) noexcept;
   void emit_busy_or_drop(NodeId peer, const wire::Header& rejected,
                          std::uint8_t reason, MonotonicMs now_ms) noexcept;
+  TxJob link_control_job(FrameType type, NodeId neighbor, std::uint32_t lifetime_ms,
+                         MonotonicMs now_ms) noexcept;
   Status queue_route_update(NodeId neighbor, MonotonicMs now_ms) noexcept;
   Status queue_seqno_request(NodeId peer, NodeId requester, NodeId destination,
                              RouteSequence requested_sequence, std::uint32_t request_id,
@@ -1398,7 +1448,79 @@ class MeshNode {
   // deterministic jitter, bounded by a minimum interval between bursts so a
   // flap storm cannot flood the TX queue.
   void trigger_route_advertisement(MonotonicMs now_ms) noexcept;
+  void arm_triggered_advertisement(MonotonicMs now_ms) noexcept;
   void run_triggered_advertisement(MonotonicMs now_ms) noexcept;
+  // Scans selection changes (triggered-update source). Called from poll()
+  // and before any receive-path emission that could sync the advertised
+  // snapshot (mark_advertised) ahead of the scan.
+  void scan_selection_changes(MonotonicMs now_ms) noexcept;
+
+  // --- Gateway-scoped routing profile (route_scale.cpp, routing-scale.md) ---
+  struct UpwardCycle {
+    NodeId parent{kInvalidNodeId};
+    std::size_t cursor{0};  // eligible records already sent this cycle
+    bool active{false};
+  };
+  struct DiscoveryState {
+    NodeId target{kInvalidNodeId};
+    MonotonicMs next_request_ms{0};
+    MonotonicMs expires_at_ms{0};
+    std::uint8_t attempts{0};
+  };
+  struct RouteRequestSeen {
+    NodeId requester{kInvalidNodeId};
+    std::uint32_t request_id{0};
+    std::uint8_t kind{0};
+    NodeId previous_hop{kInvalidNodeId};  // reverse-path pointer (Discover)
+    MonotonicMs expires_at_ms{0};
+  };
+  static constexpr std::size_t kScopedDirtyCapacity = 16;
+  static constexpr std::size_t kDiscoveryCapacity = 4;
+  static constexpr std::size_t kRouteRequestSeenCapacity = 32;
+
+  bool is_route_gateway(NodeId destination) const noexcept;
+  bool neighbor_is_child(NodeId neighbor, MonotonicMs now_ms) const noexcept;
+  NodeId scoped_uplink(NodeId exclude) const noexcept;
+  std::uint32_t scoped_link_phase(NodeId neighbor) const noexcept;
+  bool upward_eligible(const RouteSelection& selection, NodeId parent,
+                       MonotonicMs now_ms) const noexcept;
+  void note_scoped_change(const RouteSelection& selection,
+                          const RouteSelection& previous,
+                          MonotonicMs now_ms) noexcept;
+  void note_scoped_update(Neighbor& neighbor, const RouteAdvertisement* records,
+                          std::size_t count, MonotonicMs now_ms) noexcept;
+  // Appends the self record and one record per configured gateway (a
+  // retraction when the gateway route is lost) toward `receiver`.
+  std::size_t append_scoped_base(RouteAdvertisement* records, NodeId receiver) noexcept;
+  bool scoped_record(NodeId destination, NodeId receiver,
+                     RouteAdvertisement& record) noexcept;
+  Status enqueue_route_records(NodeId neighbor, const RouteAdvertisement* records,
+                               std::size_t count, MonotonicMs now_ms) noexcept;
+  Status queue_scoped_update(NodeId neighbor, NodeId extra,
+                             MonotonicMs now_ms) noexcept;
+  std::size_t emit_upward(UpwardCycle& cycle, std::size_t max_frames,
+                          MonotonicMs now_ms) noexcept;
+  void emit_upward_dirty(NodeId parent, MonotonicMs now_ms) noexcept;
+  void emit_upward_retractions(NodeId parent, MonotonicMs now_ms) noexcept;
+  bool upward_change_record(NodeId destination, NodeId parent, MonotonicMs now_ms,
+                            RouteAdvertisement& record) noexcept;
+  void mark_scoped_dirty(NodeId destination, MonotonicMs now_ms) noexcept;
+  void note_scoped_interest(Neighbor& neighbor, MonotonicMs now_ms) const noexcept;
+  void schedule_parent_releases(MonotonicMs now_ms) noexcept;
+  void release_parent(NodeId old_parent, MonotonicMs now_ms) noexcept;
+  void defer_parent_release(std::size_t index, NodeId old_parent, MonotonicMs now_ms) noexcept;
+  void run_scoped_tick(MonotonicMs now_ms) noexcept;
+  void run_scoped_triggered(MonotonicMs now_ms) noexcept;
+  void schedule_gateway_pulls(MonotonicMs now_ms) noexcept;
+  void flush_pull_answers(MonotonicMs now_ms) noexcept;
+  void request_route_discovery(NodeId destination, MonotonicMs now_ms) noexcept;
+  void schedule_route_discovery(MonotonicMs now_ms) noexcept;
+  void expire_route_requests(MonotonicMs now_ms) noexcept;
+  bool route_request_forward_budget(MonotonicMs now_ms) noexcept;
+  void handle_route_request(const wire::PlainFrame& frame, NodeId peer,
+                            MonotonicMs now_ms) noexcept;
+  Status queue_route_request(NodeId peer, const RouteRequestPayload& payload,
+                             MonotonicMs now_ms) noexcept;
 
   // §14 management airtime bucket (03-congestion.md §8 — local calibrated
   // accounting only). control_budget_balance refills to `now_ms` and
@@ -1539,6 +1661,26 @@ class MeshNode {
   MonotonicMs triggered_at_ms_{0};
   MonotonicMs next_triggered_ms_{0};
   std::uint32_t trigger_counter_{0};
+  // Gateway-scoped profile state (bounded; routing-scale.md §6).
+  std::array<NodeId, kScopedDirtyCapacity> scoped_dirty_{};
+  std::size_t scoped_dirty_count_{0};
+  bool scoped_dirty_overflow_{false};
+  bool scoped_down_dirty_{false};
+  bool scoped_trigger_all_{false};
+  std::uint32_t scoped_tick_{0};
+  std::size_t scoped_other_cursor_{0};
+  std::array<UpwardCycle, kMaxRouteGateways> upward_{};
+  // Deferred "no longer your child" notice to a former parent (per gateway).
+  std::array<NodeId, kMaxRouteGateways> release_parent_{};
+  std::array<MonotonicMs, kMaxRouteGateways> release_at_ms_{};
+  std::array<MonotonicMs, kMaxRouteGateways> pull_next_ms_{};
+  std::array<std::uint8_t, kMaxRouteGateways> pull_attempts_{};
+  FixedPool<DiscoveryState, kDiscoveryCapacity> discoveries_{};
+  FixedPool<RouteRequestSeen, kRouteRequestSeenCapacity> route_request_seen_{};
+  std::uint32_t next_route_request_id_{1};
+  MonotonicMs route_request_window_ms_{0};
+  std::uint32_t route_request_window_count_{0};
+  RouteScaleStats route_scale_stats_{};
   // Retry-jitter decorrelation counter — same convention as
   // trigger_counter_ (node.cpp trigger_route_advertisement).
   std::uint32_t retry_jitter_counter_{0};
