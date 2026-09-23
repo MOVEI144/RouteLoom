@@ -125,6 +125,7 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
   output.route_generation = input.route_generation;
   output.route_advertisement_period_ms = input.route_advertisement_period_ms;
   output.route_lifetime_ms = input.route_lifetime_ms;
+  output.control_budget_gate_enabled = input.control_budget_gate_enabled != 0;
   output.hop_accept_timeout_ms = input.hop_accept_timeout_ms;
   output.callback_watchdog_ms = input.callback_watchdog_ms;
   output.max_link_attempts = input.max_link_attempts;

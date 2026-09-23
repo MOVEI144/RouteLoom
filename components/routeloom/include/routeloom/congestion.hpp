@@ -108,6 +108,32 @@ constexpr std::uint32_t kFeedbackTtlMs = 3000;
 // to one relax step per observation window; worsening is immediate.
 constexpr std::uint32_t kLinkCostRelaxWindowMs = kObservationWindowMs;
 
+// Fixed per-frame TX cost added to every DRR charge (radio.md §9): MAC
+// header + (unpublished) long-range preamble + the MAC ACK carried by
+// every frame, expressed in byte-equivalent air time. The LR preamble
+// duration is not published — 96B is the middle of the ~70–105B effective
+// estimate, an annotated estimate rather than a measured value.
+constexpr std::size_t kTxFrameFixedCostBytes = 96;
+
+// §14 management airtime budget — the local calibrated token bucket gating
+// management-class (control-domain) emissions (03-congestion.md §8:
+// calibrated local bucket first, no network reallocation). The 100000µs/s
+// network envelope is split evenly across the 100 design nodes, and
+// capacity holds at least one maximum frame's air time (~12000µs: a full
+// frame at 250kbps plus fixed overhead — §14 "burst >= 1 max frame").
+// These are SPEC-ENVELOPE values pinned in radio-defaults.json: the bucket
+// is an UNCALIBRATED capability, not measured capacity or 100-node
+// qualification — so the gate stays OFF unless the profile opts in
+// (NodeConfig::control_budget_gate_enabled) and proves the §8 refresh
+// bound fits inside the lease.
+constexpr std::uint32_t kControlBudgetNetworkUsPerS = 100000;
+constexpr std::uint32_t kControlBudgetDesignNodes = 100;
+constexpr std::uint32_t kControlBudgetRefillUsPerS =
+    kControlBudgetNetworkUsPerS / kControlBudgetDesignNodes;
+constexpr std::uint32_t kControlBudgetCapacityUs = 12000;
+// One management emission must hold a full frame's air time in tokens.
+constexpr std::uint32_t kControlBudgetFrameCostUs = kControlBudgetCapacityUs;
+
 // Frame-length classes for observation keys (encoded size on air).
 constexpr std::uint8_t frame_length_class(const std::size_t encoded_size) noexcept {
   if (encoded_size <= 96) return 0;
@@ -191,6 +217,10 @@ struct RadioTxObservation {
   // claim LocalDriver; submitted-side bookkeeping and tests must not be
   // relabelled as driver evidence (02-telemetry §provenance).
   ObservationProvenance provenance{ObservationProvenance::InjectedTest};
+  // Reserved-lane submission token echoed by the adapter so a completion
+  // can attribute its measured service to the in-flight job's §14 airtime
+  // domain. 0 for raw-lane, bootstrap or injected observations.
+  std::uint64_t token{0};
 };
 static_assert(sizeof(RadioTxObservation) <= 64, "bounded TX observation");
 
@@ -312,6 +342,22 @@ inline bool ObservationBucket::positive_metric_input(
 
 // --- Statistics ---------------------------------------------------------------
 
+// §14 airtime domains (radio.md §9/§14): every completed TX debits its
+// measured driver-service µs to exactly one domain. Ack is the reserved
+// control lane — HOP_ACCEPT/BUSY replies ride inside the accepted work's
+// own budget ("DATAとACKを同じ仕事の予算に含める"); Control is the gated
+// management domain; Optimization is reserved for rate/probe work
+// (currently unwired); Misc covers everything that bypassed the
+// scheduler — discovery, Join and migration raw TXs included — which §14
+// reconciliation still owes an account of.
+enum class AirtimeDomain : std::uint8_t {
+  Ack = 0,
+  Work = 1,
+  Control = 2,
+  Optimization = 3,
+  Misc = 4,
+};
+
 // Live scheduler/BUSY counters for tests, diagnostics and the P3 observer.
 // busy_send_failed counts drops where no reply budget existed — a BUSY that
 // was never transmitted is never counted as sent.
@@ -327,6 +373,17 @@ struct CongestionStats {
   std::uint64_t flow_overflow_merged{0};
   std::uint64_t window_limited{0};  // dispatch passes skipped on a full peer window
   std::uint64_t observation_overflow{0};  // samples dropped on a full bucket pool
+  // §14 airtime ledger: measured driver-service µs debited per domain at TX
+  // completion. Saturating monotonic totals, never reset within a boot.
+  std::uint64_t service_us_ack{0};
+  std::uint64_t service_us_work{0};
+  std::uint64_t service_us_control{0};
+  std::uint64_t service_us_optimization{0};
+  std::uint64_t service_us_misc{0};
+  // Management emissions the control-budget gate could not schedule —
+  // each needed a token wait beyond the route lease (§14
+  // CONTROL_BUDGET_UNSATISFIABLE).
+  std::uint64_t control_budget_unsatisfiable{0};
   std::size_t queued{0};
   std::size_t control_queued{0};
   std::size_t flows_active{0};
@@ -343,6 +400,12 @@ struct CongestionStats {
     flow_overflow_merged += other.flow_overflow_merged;
     window_limited += other.window_limited;
     observation_overflow += other.observation_overflow;
+    service_us_ack += other.service_us_ack;
+    service_us_work += other.service_us_work;
+    service_us_control += other.service_us_control;
+    service_us_optimization += other.service_us_optimization;
+    service_us_misc += other.service_us_misc;
+    control_budget_unsatisfiable += other.control_budget_unsatisfiable;
     return *this;
   }
 };

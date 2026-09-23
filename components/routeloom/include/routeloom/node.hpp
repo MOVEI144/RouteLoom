@@ -28,6 +28,14 @@ struct NodeConfig {
   std::uint16_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
+  // §14 management airtime budget gate (03-congestion.md §8, radio.md
+  // §9/§14): the pinned spec-envelope refill is an UNCALIBRATED
+  // capability, not a measured allocation — it must not gate route
+  // maintenance in the default profile. Enable only for a calibrated
+  // profile whose capacity decision covers fan-out, route-table page
+  // count and the lease refresh deadline; the gate then re-checks that
+  // bound on every deferred emission.
+  bool control_budget_gate_enabled{false};
   std::uint32_t hop_accept_timeout_ms{60};
   std::uint32_t callback_watchdog_ms{1000};
   // Per-boot incarnation stamped on this node's telemetry observations
@@ -951,6 +959,11 @@ class MeshNode {
     void defer_selected() noexcept;
     void clear() noexcept;
 
+    // §14 airtime domain of a scheduled job: the reserved control lane is
+    // the accepted work's own ACK budget, management class is the gated
+    // control domain, everything else is scheduled work.
+    static AirtimeDomain airtime_domain(const TxJob& job) noexcept;
+
     bool empty() const noexcept { return used_ == 0; }
     bool full() const noexcept { return used_ >= capacity(); }
     std::size_t size() const noexcept { return used_; }
@@ -1321,6 +1334,28 @@ class MeshNode {
   void trigger_route_advertisement(MonotonicMs now_ms) noexcept;
   void run_triggered_advertisement(MonotonicMs now_ms) noexcept;
 
+  // §14 management airtime bucket (03-congestion.md §8 — local calibrated
+  // accounting only). control_budget_balance refills to `now_ms` and
+  // returns the signed balance: a completed management TX may run it
+  // negative, and the debt is repaid by the computed wait before the next
+  // emission is scheduled — never by queueing on debt.
+  std::int64_t control_budget_balance(MonotonicMs now_ms) noexcept;
+  // Milliseconds until the bucket covers the calibrated air-time estimate
+  // of one management frame, 0 when it already can.
+  MonotonicMs control_budget_wait_ms(MonotonicMs now_ms) noexcept;
+  // §8 capacity decision for a gated profile: true while a deferral of
+  // `wait_ms` still lets the route refresh land inside the actual lease —
+  // refresh_bound = pages*round_period + fan-out wait + jitter + margin —
+  // where the fan-out wait covers `fanout` frames at the calibrated
+  // demand and pages is the live table's record-page count. False means
+  // the budget cannot sustain route maintenance for this configuration.
+  bool control_budget_refresh_fits(MonotonicMs now_ms, MonotonicMs wait_ms,
+                                   std::size_t fanout) noexcept;
+  // Record a §14 CONTROL_BUDGET_UNSATISFIABLE breach: the saturating
+  // counter every time, the observer diagnostic once per breach episode
+  // (re-armed when an emission again fits inside the route lease).
+  void note_control_budget_unsat() noexcept;
+
   static Status encode_ack_payload(const AckKey& key,
                                    std::array<std::uint8_t, kMaxApplicationPayload>& payload,
                                    std::size_t& size) noexcept;
@@ -1447,6 +1482,20 @@ class MeshNode {
   // BUSY-side statistics; merged into congestion_stats() with the
   // scheduler's own counters.
   CongestionStats busy_stats_{};
+  // §14 ledger + control-budget state: per-domain µs totals merged into
+  // congestion_stats(). The signed token balance may run negative between
+  // emission and completion — §14 charges measured service AT completion,
+  // so a management emission scheduled with tokens in hand repays the
+  // deficit via the wait computed for the NEXT one.
+  CongestionStats budget_stats_{};
+  std::int64_t control_budget_tokens_us_{kControlBudgetCapacityUs};
+  MonotonicMs control_budget_last_ms_{0};
+  // Calibrated emission demand: EWMA (alpha 1/8) of measured control-domain
+  // driver service, seeded at the pinned max-frame cost so the first
+  // emissions gate conservatively until local service is measured.
+  std::uint32_t control_service_ewma_us_{kControlBudgetFrameCostUs};
+  std::uint64_t control_service_samples_{0};
+  bool control_budget_unsat_reported_{false};
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
   // forced evictions and expiry releases, all saturating u64.
   DedupStats dedup_stats_{};
