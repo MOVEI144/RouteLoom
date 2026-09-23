@@ -13,6 +13,8 @@ extern "C" {
 #define RL_MAX_APPLICATION_PAYLOAD 128u
 #define RL_MAX_ESPNOW_BODY 250u
 #define RL_AEAD_TAG_SIZE 16u
+/* Gateway-scoped routing profile: gateways per site (kMaxRouteGateways). */
+#define RL_MAX_ROUTE_GATEWAYS 2u
 
 typedef uint64_t rl_node_id_t;
 typedef uint64_t rl_network_id_t;
@@ -130,7 +132,34 @@ typedef struct rl_node_config {
      profile only — see NodeConfig::control_budget_gate_enabled). */
   uint8_t control_budget_gate_enabled;
   uint8_t reserved[3];
+  /* ---- Tail extension (still RL_ABI_VERSION 2): read only when struct_size
+     >= sizeof(rl_node_config_t). A caller built against the previous header
+     passes struct_size == RL_NODE_CONFIG_SIZE_BASE and keeps the flat
+     routing profile; any other size below the full struct is rejected.
+     rl_node_config_init() fills the full struct.
+
+     Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md).
+     route_gateway_count == 0 (the default) keeps the flat profile. 1..2
+     selects the scoped profile with route_gateways[0..count-1] (in
+     preference order; a gateway lists itself; every node of a site carries
+     the same set). rl_init rejects with RL_STATUS_INVALID_ARGUMENT a count
+     above RL_MAX_ROUTE_GATEWAYS and a zero or duplicate id inside the count;
+     entries at or beyond the count are ignored. rl_start rejects with
+     RL_STATUS_INVALID_ARGUMENT a scoped config whose lease is below
+     (2 * route_refresh_ticks + 2) * route_advertisement_period_ms
+     (ROUTE_LIFETIME_BELOW_REFRESH_BOUND) — the product values are 5000 ms /
+     90000 ms, not the flat defaults rl_node_config_init() sets. */
+  uint8_t route_gateway_count;
+  /* Scoped profile only: per-link refresh cadence in advertisement periods;
+     0 selects the SDK default (6). */
+  uint8_t route_refresh_ticks;
+  uint8_t reserved_ext[6];
+  rl_node_id_t route_gateways[RL_MAX_ROUTE_GATEWAYS];
 } rl_node_config_t;
+
+/* struct_size of rl_node_config_t before the tail extension (the layout
+   through reserved[3]); still accepted by rl_init. */
+#define RL_NODE_CONFIG_SIZE_BASE 64u
 
 typedef struct rl_send_options {
   uint32_t struct_size;
@@ -214,6 +243,12 @@ void rl_on_radio_receive(rl_context_t* context, rl_node_id_t peer,
                          rl_monotonic_ms_t now_ms);
 void rl_on_radio_tx_result(rl_context_t* context, uint64_t token, bool success,
                            rl_monotonic_ms_t now_ms);
+/* Effective routing profile of an initialised context: copies up to
+   `capacity` configured gateway ids into `out_gateways` (may be NULL when
+   capacity is 0) and returns the number configured — 0 means the flat
+   profile. Returns 0 for a NULL context. */
+size_t rl_route_gateways(const rl_context_t* context, rl_node_id_t* out_gateways,
+                         size_t capacity);
 const char* rl_status_code_name(rl_status_code_t code);
 
 #ifdef __cplusplus

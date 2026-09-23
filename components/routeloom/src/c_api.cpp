@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <new>
 
 #include "routeloom/node.hpp"
@@ -115,6 +116,39 @@ class CBridge final : public RadioPort, public SecurityProvider, public NodeObse
   rl_observer_vtable_t observer_{};
 };
 
+// rl_node_config_t tail extension (routeloom.h): the base layout is frozen
+// at RL_NODE_CONFIG_SIZE_BASE bytes; the scoped-routing fields follow it and
+// are read only when the caller's struct_size covers the whole struct.
+static_assert(offsetof(rl_node_config_t, route_gateway_count) == RL_NODE_CONFIG_SIZE_BASE,
+              "rl_node_config_t base layout must stay frozen");
+static_assert(offsetof(rl_node_config_t, route_gateways) == RL_NODE_CONFIG_SIZE_BASE + 8,
+              "rl_node_config_t extension layout");
+static_assert(sizeof(rl_node_config_t) ==
+                  RL_NODE_CONFIG_SIZE_BASE + 8 + 8 * RL_MAX_ROUTE_GATEWAYS,
+              "rl_node_config_t size");
+static_assert(RL_MAX_ROUTE_GATEWAYS == kMaxRouteGateways,
+              "C gateway capacity must mirror kMaxRouteGateways");
+
+bool extended_config(const rl_node_config_t& input) noexcept {
+  return input.struct_size >= sizeof(rl_node_config_t);
+}
+
+// Shape checks the C boundary owns (routeloom.h): a count within capacity,
+// no zero id (it would silently shrink the list) and no duplicate. The lease
+// rule and reserved ids stay with MeshNode::validate_config() at start.
+bool valid_config(const rl_node_config_t& input) noexcept {
+  if (input.abi_version != RL_ABI_VERSION) return false;
+  if (!extended_config(input)) return input.struct_size == RL_NODE_CONFIG_SIZE_BASE;
+  if (input.route_gateway_count > RL_MAX_ROUTE_GATEWAYS) return false;
+  for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
+    if (input.route_gateways[i] == kInvalidNodeId) return false;
+    for (std::size_t j = 0; j < i; ++j) {
+      if (input.route_gateways[j] == input.route_gateways[i]) return false;
+    }
+  }
+  return true;
+}
+
 NodeConfig convert_config(const rl_node_config_t& input) noexcept {
   NodeConfig output{};
   output.network = input.network;
@@ -130,6 +164,14 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
   output.callback_watchdog_ms = input.callback_watchdog_ms;
   output.max_link_attempts = input.max_link_attempts;
   output.max_end_to_end_rounds = input.max_end_to_end_rounds;
+  if (extended_config(input)) {
+    for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
+      output.route_gateways[i] = input.route_gateways[i];
+    }
+    if (input.route_refresh_ticks != 0) {
+      output.route_refresh_ticks = input.route_refresh_ticks;
+    }
+  }
   return output;
 }
 
@@ -173,6 +215,9 @@ void rl_node_config_init(rl_node_config_t* config) {
   config->callback_watchdog_ms = 1000;
   config->max_link_attempts = 2;
   config->max_end_to_end_rounds = 3;
+  // Flat profile (route_gateway_count 0); the scoped refresh cadence is
+  // spelled out so a caller that only adds gateways sees the SDK value.
+  config->route_refresh_ticks = kScopedDefaultRefreshTicks;
 }
 
 void rl_send_options_init(rl_send_options_t* options) {
@@ -195,7 +240,7 @@ rl_status_code_t rl_init(void* storage, const size_t storage_size,
   if (storage == nullptr || config == nullptr || radio == nullptr || security == nullptr ||
       observer == nullptr || out_context == nullptr || storage_size < sizeof(rl_context) ||
       reinterpret_cast<std::uintptr_t>(storage) % alignof(rl_context) != 0 ||
-      !valid_header(config->struct_size, config->abi_version, sizeof(*config))) {
+      !valid_config(*config)) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
   if (radio->send == nullptr || security->ready == nullptr || security->next_counter == nullptr ||
@@ -242,6 +287,18 @@ rl_status_code_t rl_send(rl_context_t* context, const rl_node_id_t destination,
                                          convert_options(*options), now_ms, id);
   if (status) *out_id = to_c(id);
   return to_c(status.code);
+}
+
+size_t rl_route_gateways(const rl_context_t* context, rl_node_id_t* out_gateways,
+                         const size_t capacity) {
+  if (context == nullptr) return 0;
+  std::size_t count = 0;
+  for (const NodeId gateway : context->node.config().route_gateways) {
+    if (gateway == kInvalidNodeId) continue;
+    if (out_gateways != nullptr && count < capacity) out_gateways[count] = gateway;
+    ++count;
+  }
+  return count;
 }
 
 rl_status_code_t rl_cancel(rl_context_t* context, const rl_message_id_t id) {
