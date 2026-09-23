@@ -1066,6 +1066,11 @@ class MeshNode {
     }
 
     static constexpr std::size_t kControlLaneCapacity = 8;
+    // Pool slots non-control admission may never take (03 §4/§5): at
+    // saturation the node must still be able to answer the frame it
+    // refuses with a BUSY. Without this reserve the refusal that most needs
+    // backpressure finds no slot and degrades to a silent drop.
+    static constexpr std::size_t kControlReserveSlots = 1;
     static constexpr std::size_t kMaxJobsPerOrigin = 12;
     static constexpr std::size_t kMaxJobsPerScope = 12;
     // DRR: quantum per round per class = weight * 64 bytes of estimated

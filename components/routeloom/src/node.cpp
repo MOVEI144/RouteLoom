@@ -180,7 +180,11 @@ std::size_t MeshNode::TxScheduler::scope_count(const NodeId scope) const noexcep
 AdmitVerdict MeshNode::TxScheduler::check(const NodeId self, const NodeId scope,
                                           const NodeId origin,
                                           const std::size_t slots_needed) const noexcept {
-  if (free_slots() < slots_needed) return AdmitVerdict::PoolFull;
+  // Non-control admission leaves kControlReserveSlots for the responses
+  // (BUSY / HOP_ACCEPT) a saturated node still owes its peers.
+  if (free_slots() < slots_needed + kControlReserveSlots) {
+    return AdmitVerdict::PoolFull;
+  }
   if (origin_count(origin) >= kMaxJobsPerOrigin) return AdmitVerdict::OriginLimited;
   if (scope != self && scope_count(scope) >= kMaxJobsPerScope) {
     return AdmitVerdict::ScopeLimited;
