@@ -7,6 +7,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 mod provision;
+mod provision_office;
 
 fn usage() {
     eprintln!(
@@ -14,6 +15,9 @@ fn usage() {
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
+    );
+    eprintln!(
+        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>  (SDK v1 office tooling — no daemon socket)"
     );
 }
 
@@ -209,6 +213,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "provision-image" => return provision::provision_image_command(&remaining[1..]),
             "provision-manifest" => return provision::provision_manifest_command(&remaining[1..]),
             "provision-verify" => return provision::provision_verify_command(&remaining[1..]),
+            "provision-devca-keygen" => {
+                return provision_office::provision_devca_keygen_command(&remaining[1..])
+            }
+            "provision-pop-challenge" => {
+                return provision_office::provision_pop_challenge_command(&remaining[1..])
+            }
+            "provision-devcert" => {
+                return provision_office::provision_devcert_command(&remaining[1..])
+            }
+            "provision-identity" => {
+                return provision_office::provision_identity_command(&remaining[1..])
+            }
             _ => {}
         }
     }
