@@ -9,6 +9,7 @@ idf_component_register(
     src/nvs_cred_store.cpp
     src/nvs_ledger_store.cpp
     src/nvs_replay_store.cpp
+    src/nvs_sdkv1_store.cpp
     src/nvs_trust_store.cpp
     src/psk_security.cpp
   INCLUDE_DIRS include
