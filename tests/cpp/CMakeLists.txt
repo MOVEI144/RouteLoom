@@ -247,3 +247,14 @@ add_executable(routeloom_peer_state_tests test_peer_state.cpp)
 target_link_libraries(routeloom_peer_state_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_peer_state_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_peer_state_tests COMMAND routeloom_peer_state_tests)
+
+# Group delivery + per-source ordering (docs/design/sdk-v1/group-delivery.md):
+# unit/small-mesh cases and the 100-node ALARM/burst run as separate entries.
+add_executable(routeloom_group_tests test_group.cpp)
+target_link_libraries(routeloom_group_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_group_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_group_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_group_tests PRIVATE
+    ROUTELOOM_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/golden")
+add_test(NAME routeloom_group_unit_tests COMMAND routeloom_group_tests unit)
+add_test(NAME routeloom_group_100_node_tests COMMAND routeloom_group_tests scale)

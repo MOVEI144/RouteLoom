@@ -31,6 +31,7 @@
         "task_stacks": 12288,
         "usb_buffers": 1024,
         "event_ring": 2048,
+        "group_delivery_state": 6656,
         "allocator_reserve": 4096
       },
       "minimum_internal_free_heap_target_bytes": 32768,
@@ -65,6 +66,7 @@
         "task_stacks": 16384,
         "usb_buffers": 2048,
         "event_ring": 2048,
+        "group_delivery_state": 6656,
         "allocator_reserve": 4096
       },
       "minimum_internal_free_heap_target_bytes": 32768,
@@ -99,6 +101,7 @@
         "task_stacks": 24576,
         "usb_buffers": 8192,
         "event_ring": 2048,
+        "group_delivery_state": 6656,
         "allocator_reserve": 4096
       },
       "minimum_internal_free_heap_target_bytes": 32768,

@@ -29,7 +29,7 @@ remaining deadline、hop、前回送信者などは中継で変わり得る。en
 
 ## 4. フレーム種類
 
-DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v2でもv1から不変）。未知typeは復号を拒否する。
+DISCOVER/OFFER、BOOTSTRAP_AUTH/CHUNK/REPLY、MEMBERSHIP_QUERY/RESULT、NEIGHBOR_PROBE/NEIGHBOR_RESULT、ROUTE_UPDATE/ROUTE_WITHDRAW/ROUTE_REQUEST/SEQNO_REQUEST、DATA、GROUP_DATA/GROUP_REPORT、HOP_ACCEPT/BUSY、END_RECEIPT、APP_RESULT、SERVICE、CONTROL/CONTROL_OBJECT、OBJECT_CHUNK/OBJECT_ACK、TIME_SYNC、CHANNEL_NOTICE、DIAGNOSTICの意味を区別する。完全な識別子と凍結済みnumeric type IDはsemantics.jsonの`frame_numeric_ids`を参照（Wire v2でもv1から不変）。未知typeは復号を拒否する。
 
 未所属ではDISCOVER/OFFERと、[参加状態別allowlist](identity-membership.md)に記載した当該transactionのbootstrapだけを許す。認証や承認を終える前のDATA／route／serviceは拒否する。bootstrapを発見と同義にしない。HOP_ACCEPTはそれ自体を再帰ACKしない。END_RECEIPTは新アプリmessageとしてreceiptを要求しない。
 
@@ -83,6 +83,39 @@ headerは88Bのまま、payload上限128Bも変えない。counterを48bitに狭
 | 22 | record | 16B | ROUTE_UPDATE recordと同一形式（destination u64＋generation u32＋sequence u16＋metric u16） |
 
 recordのdestinationはNeighbor／Discoverでrequester、Replyでtargetに一致しなければならない（不一致は拒否）。受信側はrecordを送信隣接を次hopとする通常の経路広告として`RouteTable::consider()`へ渡し、送信側は有限metricのrecordを出す前にFDを更新する（`mark_advertised`）。したがってROUTE_REQUESTは採用可能条件を迂回しない。golden vectorは[route_request.json](../../protocol/golden/valid/route_request.json)（C++ encoderとRust generatorのpayload一致をtest_routing_scaleで確認）。host（Rust）はこのpayloadを解釈しない。
+
+### GROUP_DATA（type 25）とGROUP_REPORT（type 26）：group配送
+
+新規type 25／26を割り当てた（headerは不変、[設計](../design/sdk-v1/group-delivery.md)）。gateway-scoped profileでのみ使い、送信元は設定済みroute gatewayに限る。
+
+**GROUP_DATA**はhopごとのlink保護に加え、end保護を**group scope**（`SecurityScope::Group`＝2、sender＝origin、receiver＝`kBroadcastNodeId`（site group domain）。宛先groupはend AADで認証）で行う。headerの意味：
+
+| field | 値 |
+|---|---|
+| destination | group address＝`0xFFFF_FFFF_FFFF_0000 + group_id`（group 0は予約、`0xFFFF`＝ALL＝`kBroadcastNodeId`）。このnamespaceのNodeIdは機器に付けない |
+| message sequence | bit63を立てたgroup stream番号（送信元boot sessionごとのu32）。unicastのMessage IDと衝突しない。end AADで認証済みなので、各nodeは**開封前に**重複排除と順序判断ができる |
+| delivery | RELIABLE |
+| delivery_round | bit0〜6＝round番号（0＝初回、1以上＝repair）、bit7＝REFRESH（全relayが全ての子へ再送し、部分木を新しく数え直す）。hop可変field |
+| hop_remaining | 子への転送ごとに1減る（通常のforward） |
+
+end保護されたpayloadは`flags u8 ‖ アプリpayload（0〜127B）`。flagsはbit0 ORDERED、bit1〜2 優先度（0 Bulk〜3 Urgent）、他は0（それ以外は拒否）。送信元はend層を**1回だけ**封止し（`wire::seal_group`）、全ての子・全てのroundはlink層だけ作り直した同じend暗号文を運ぶ。受信側は`wire::open_group`で開く（宛先への束縛はない。`open_end`はgroup frameを拒否する）。各子へは1台ずつMAC ACK付きunicastで送り、HOP_ACCEPTは使わない。
+
+**GROUP_REPORT**はROUTE_UPDATEと同じlink保護のみの1hop frame（子→木の親、`hop_remaining=1`、destination＝next_hop）。固定29B＋missing_count×8B、big-endian：
+
+| offset | field | 型 | 意味 |
+|---:|---|---|---|
+| 0 | source | u64 | group messageの送信元 |
+| 8 | session | u32 | 同Message IDのsession |
+| 12 | sequence | u64 | 同sequence（bit63必須） |
+| 20 | round | u8 | 応答するround番号（REFRESH bitなし） |
+| 21 | flags | u8 | bit0 NOT_CHILD（別の親に従っている：countsは全て0）、bit1 TRUNCATED（missing_total＞missing_count）。他は0 |
+| 22 | delivered | u16 | 送信元以下の部分木で、memberとして受理したnode数 |
+| 24 | nonmember | u16 | 届いたがmemberでないnode数 |
+| 26 | missing_total | u16 | 部分木で未確認のnode数 |
+| 28 | missing_count | u8 | 続くid数（最大12） |
+| 29 | missing | u64×n | 未確認nodeのid |
+
+decoderは長さの完全一致、予約id（0とgroup namespace）の拒否、NOT_CHILDのcounts＝0、TRUNCATEDとcountの整合を検査する。golden vectorは[group_data.json](../../protocol/golden/valid/group_data.json)（relayでのforward込み）と[group_report.json](../../protocol/golden/valid/group_report.json)。Rustは`host/routeloom-wire/src/group.rs`が同じbyte列を生成・解釈する。
 
 永続化するTX counter record（32B、layout 2）とreplay floor record（layout 2）も32bit epochへ移行した。v1のrecordは推測で拡張せず`IntegrityError`で拒否する（fail closed）。v1 firmwareを書き込んだ機器をv2へ更新する際はNVSを消去する。
 

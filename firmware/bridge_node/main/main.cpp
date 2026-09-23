@@ -566,6 +566,15 @@ extern "C" void app_main(void) {
     if (!status) fail(status.detail);
   }
 
+  // Group delivery (group_delivery_v1): the bridge answers HostOps 0x50
+  // GROUP_SEND / 0x52 GROUP_QUERY with 0x51 summaries. The node itself
+  // refuses a send unless it is a route gateway of the gateway-scoped
+  // profile; without the bit every group op answers Unsupported.
+  if ((bridge_config.capability & routeloom::usb::kCapGroupDeliveryV1) != 0) {
+    status = bridge.attach_group();
+    if (!status) fail(status.detail);
+  }
+
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
     if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {

@@ -158,6 +158,7 @@ void DevelopmentPskSecurityProvider::close() noexcept {
   tx_contexts_.clear();
   parked_leases_.clear();
   rx_contexts_.clear();
+  group_replay_.clear();
   replay_bounds_.close();
   replay_store_.close();
   counters_.close();
@@ -172,6 +173,15 @@ bool DevelopmentPskSecurityProvider::same_context(
          left.epoch == right.epoch;
 }
 
+// One key per context: HMAC-SHA-256(PSK, scope | network | sender | receiver
+// | epoch). For SecurityScope::Group (group-delivery.md §7) that is the
+// development "group context key" of (origin, site group domain =
+// kBroadcastNodeId, origin epoch) — the destination group is bound by the end
+// AAD, not the key:
+// every node holding the network PSK derives it, and each SENDER has its own
+// key. Nonce uniqueness therefore needs only per-context counters (the TX
+// lease below), exactly as for link/end contexts — two senders never share a
+// key, so their independent counters can never collide under one key.
 Status DevelopmentPskSecurityProvider::derive_key(
     const SecurityContext& context,
     std::array<std::uint8_t, 32>& key) const noexcept {
@@ -228,9 +238,15 @@ DevelopmentPskSecurityProvider::tx_context(
   identity.context_id =
       static_cast<std::uint32_t>(peer_fingerprint ^ (peer_fingerprint >> 32U));
   identity.key_epoch = context.epoch;
+  // Scope tag in the lease identity: link 0, end-to-end 2, group 4 (the
+  // group TX counter is the source's persisted per-epoch site-group lease, so
+  // a reboot inside one epoch can never reissue a group counter).
+  const auto scope_tag = static_cast<std::uint8_t>(
+      context.scope == SecurityScope::EndToEnd
+          ? 2U
+          : (context.scope == SecurityScope::Group ? 4U : 0U));
   identity.direction = static_cast<std::uint8_t>(
-      (context.scope == SecurityScope::EndToEnd ? 2U : 0U) |
-      (context.sender < context.receiver ? 0U : 1U));
+      scope_tag | (context.sender < context.receiver ? 0U : 1U));
   // Claim this context's parked block (if any) BEFORE the eviction below
   // parks another lease: a full cache would otherwise drop the very
   // checkpoint about to be resumed. take() removes it, so a parked block
@@ -463,10 +479,17 @@ Status DevelopmentPskSecurityProvider::open(
   }
   secure_clear(output);
 
-  RxContext* replay = nullptr;
-  status = rx_context(context, replay);
-  if (status) {
-    status = replay_guard_.accept(replay->window, counter);
+  if (context.scope == SecurityScope::Group) {
+    // Group receive replay is RAM-only and bounded (group_replay.hpp): no
+    // persisted floor/window per group sender, so group traffic adds no
+    // NVS records (#37). A full table refuses NEW senders (counted).
+    status = group_replay_.accept(context, counter);
+  } else {
+    RxContext* replay = nullptr;
+    status = rx_context(context, replay);
+    if (status) {
+      status = replay_guard_.accept(replay->window, counter);
+    }
   }
   if (!status && plaintext.data != nullptr && plaintext.size != 0) {
     secure_clear(plaintext.data, plaintext.size);

@@ -94,9 +94,16 @@ typedef enum rl_priority {
   RL_PRIORITY_URGENT = 3
 } rl_priority_t;
 
+/* A security vtable must refuse (RL_STATUS_UNSUPPORTED) a scope it does not
+   implement. RL_SECURITY_GROUP (group delivery, docs/design/sdk-v1/
+   group-delivery.md §7): sender = the group message's origin, receiver =
+   the group address (RL_GROUP_ADDRESS_BASE | group id); every group key
+   holder may open it; keys MUST be per (sender, group, epoch) — the nonce
+   carries no sender, so a key shared by several senders would reuse nonces. */
 typedef enum rl_security_scope {
   RL_SECURITY_LINK = 0,
-  RL_SECURITY_END_TO_END = 1
+  RL_SECURITY_END_TO_END = 1,
+  RL_SECURITY_GROUP = 2
 } rl_security_scope_t;
 
 typedef struct rl_message_id {
@@ -169,8 +176,54 @@ typedef struct rl_send_options {
   /* 1..30000; larger values are refused with RL_STATUS_INVALID_ARGUMENT. */
   uint32_t lifetime_ms;
   uint8_t hop_limit;
-  uint8_t reserved[7];
+  /* Nonzero: per-source ordering (RELIABLE only; group-delivery.md §6) — not
+     transmitted until the previous ordered message to the same destination
+     is delivered or past its own deadline. Was reserved (zero) before, so
+     existing callers keep unordered delivery. */
+  uint8_t ordered;
+  uint8_t reserved[6];
 } rl_send_options_t;
+
+/* ---- Group delivery (docs/design/sdk-v1/group-delivery.md) --------------
+   Additive symbols: RL_ABI_VERSION stays 2 (existing structs keep their
+   layout; new structs carry their own struct_size/abi_version header).
+   Only a configured route gateway of the gateway-scoped profile may send
+   (rl_send_group returns RL_STATUS_UNSUPPORTED otherwise). Received group
+   messages reach rl_observer_vtable_t.on_message with a group message id:
+   its sequence has RL_GROUP_SEQUENCE_FLAG set (never equal to a unicast id). */
+#define RL_GROUP_ALL 0xFFFFu
+#define RL_GROUP_ADDRESS_BASE 0xFFFFFFFFFFFF0000ull
+#define RL_GROUP_SEQUENCE_FLAG 0x8000000000000000ull
+#define RL_GROUP_PAYLOAD_MAX 127u
+#define RL_GROUP_MISSING_MAX 12u
+#define RL_GROUP_MEMBERSHIP_MAX 8u
+
+typedef struct rl_group_send_options {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  rl_priority_t priority;  /* RL_PRIORITY_URGENT bypasses the source queue/budget */
+  uint32_t lifetime_ms;    /* 1..30000 */
+  uint8_t hop_limit;       /* 1..254 */
+  uint8_t ordered;         /* nonzero: in-order at every receiver (bounded hold) */
+  uint8_t reserved[6];
+} rl_group_send_options_t;
+
+typedef struct rl_group_result {
+  rl_message_id_t id;
+  rl_delivery_state_t state;  /* QUEUED, WAITING_FOR_END_RECEIPT, DELIVERED (complete),
+                                 FAILED (incomplete/superseded), EXPIRED (never sent) */
+  const char* reason;
+  uint16_t group;
+  uint8_t rounds;
+  uint8_t missing_count;      /* ids in missing[] */
+  uint16_t delivered;         /* members that accepted it */
+  uint16_t nonmember;         /* reached, not members */
+  uint16_t missing_total;     /* known in the tree, unconfirmed */
+  uint16_t unaccounted;       /* known to the source, in no report */
+  uint8_t missing_truncated;  /* missing_total > missing_count */
+  uint8_t reserved[7];
+  rl_node_id_t missing[RL_GROUP_MISSING_MAX];
+} rl_group_result_t;
 
 typedef struct rl_delivery_result {
   rl_message_id_t id;
@@ -249,6 +302,19 @@ void rl_on_radio_tx_result(rl_context_t* context, uint64_t token, bool success,
    profile. Returns 0 for a NULL context. */
 size_t rl_route_gateways(const rl_context_t* context, rl_node_id_t* out_gateways,
                          size_t capacity);
+/* Group delivery (see the block above rl_group_send_options_t). */
+void rl_group_send_options_init(rl_group_send_options_t* options);
+rl_status_code_t rl_send_group(rl_context_t* context, uint16_t group,
+                               const uint8_t* payload, size_t payload_size,
+                               const rl_group_send_options_t* options,
+                               rl_monotonic_ms_t now_ms, rl_message_id_t* out_id);
+/* RL_STATUS_NOT_FOUND once the source's record was reclaimed. */
+rl_status_code_t rl_get_group_result(rl_context_t* context, rl_message_id_t id,
+                                     rl_group_result_t* out_result);
+/* Replaces the local group set (ALL is implicit; ids 1..0xFFFE, no
+   duplicates, at most RL_GROUP_MEMBERSHIP_MAX). */
+rl_status_code_t rl_set_group_membership(rl_context_t* context, const uint16_t* groups,
+                                         size_t count);
 const char* rl_status_code_name(rl_status_code_t code);
 
 #ifdef __cplusplus

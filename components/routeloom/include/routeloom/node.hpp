@@ -8,6 +8,7 @@
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/fixed_containers.hpp"
+#include "routeloom/group.hpp"
 #include "routeloom/node_status.hpp"
 #include "routeloom/route_request.hpp"
 #include "routeloom/routing.hpp"
@@ -63,6 +64,104 @@ struct NodeConfig {
  
   std::uint8_t max_link_attempts{2};
   std::uint8_t max_end_to_end_rounds{3};
+  // Group delivery airtime budget at a SOURCE (group-delivery.md §5): the
+  // estimated network-sum air time (data copies + confirmations, §14 model)
+  // that Normal/Bulk/Management group messages may start per second. Urgent
+  // group messages are never held by it (they are debited, may run it into
+  // debt, and delay the next non-urgent message instead). 0 disables the
+  // gate (unbounded — test/bring-up only).
+  std::uint32_t group_airtime_us_per_s{300000};
+};
+
+// --- Group delivery (group.hpp, group.cpp, docs/design/sdk-v1/group-delivery.md)
+// Static bounds (no dynamic allocation). Per-node RAM for all group state is
+// reported in group-delivery.md §9.
+constexpr std::size_t kGroupMembershipMax = 8;    // locally configured groups (+ ALL)
+constexpr std::size_t kGroupTreeCapacity = 4;     // messages tracked as relay/receiver
+constexpr std::size_t kGroupMaxChildren = 10;     // tree children tracked per message
+constexpr std::size_t kGroupOriginCapacity = 3;   // messages tracked as source (1 Urgent reserve)
+constexpr std::size_t kGroupHoldCapacity = 4;     // ordered messages held for a gap
+constexpr std::size_t kGroupStreamCapacity = kMaxRouteGateways;  // sources = gateways
+// Report wait per remaining tree level: a node whose children received the
+// copy with hop_remaining h waits h x this for their reports, one level more
+// than any child waits for its own subtree (nested deadlines).
+constexpr std::uint32_t kGroupLevelWaitMs = 150;
+constexpr std::uint8_t kGroupMaxRounds = 12;         // round 0 + up to 11 repairs (lifetime-bound)
+constexpr std::uint32_t kGroupRepairGapMs = 200;     // pause between rounds at the source
+// An ordered message waiting for a gap is released (the gap skipped) after
+// min(its own remaining lifetime, this) — head-of-line blocking never
+// outlives the message lifetime (group-delivery.md §6).
+constexpr std::uint32_t kGroupOrderMaxHoldMs = 10000;
+// Per-source duplicate window over the group stream numbers.
+constexpr std::uint32_t kGroupSeenWindow = 64;
+// The source retires (Failed, GROUP_SUPERSEDED) a message this many stream
+// numbers behind a newly admitted one, so no receiver window can be outrun.
+constexpr std::uint32_t kGroupStaleSeqs = 32;
+// Airtime bucket depth at the source: two full 100-node messages.
+constexpr std::int64_t kGroupBudgetCapacityUs = 3000000;
+
+struct GroupSendOptions {
+  Priority priority{Priority::Normal};
+  std::uint32_t lifetime_ms{5000};        // 1..kMaxMessageLifetimeMs
+  std::uint8_t hop_limit{kDefaultHopLimit};
+  // In-order delivery at every receiver relative to this source's other
+  // ORDERED group messages (bounded hold, group-delivery.md §6).
+  bool ordered{false};
+};
+
+// What a receiving application learns about a group message.
+struct GroupMessageInfo {
+  MessageKey key{};                 // {source, group MessageId}
+  GroupId group{0};
+  std::uint32_t group_seq{0};       // the source's group stream number
+  Priority priority{Priority::Normal};
+  bool ordered{false};
+  // ORDERED message that arrived after its slot had been skipped (the gap
+  // hold timed out): delivered, but out of order — the app decides.
+  bool late{false};
+};
+
+// Source-side result (group_delivery / on_group_delivery). Counts are the
+// aggregated tree confirmations of the latest round; delivered counts
+// member nodes whose node accepted the message for its application.
+struct GroupDeliveryResult {
+  MessageId id{};
+  GroupId group{0};
+  DeliveryState state{DeliveryState::Empty};
+  const char* reason{"NONE"};
+  std::uint8_t rounds{0};           // rounds sent (0 while queued)
+  std::uint16_t delivered{0};
+  std::uint16_t nonmember{0};       // reached, not a member of the group
+  std::uint16_t missing_total{0};   // nodes known in the tree without confirmation
+  // Nodes the source's route table knows that no report accounted for
+  // (tree inconsistency) — ids unknown, never folded into missing ids.
+  std::uint16_t unaccounted{0};
+  std::uint8_t missing_count{0};    // ids listed below (<= kGroupReportMissingMax)
+  bool missing_truncated{false};    // missing_total > missing_count
+  std::array<NodeId, kGroupReportMissingMax> missing{};
+};
+
+// Saturating counters for the group lane (tests, diagnostics).
+struct GroupStats {
+  std::uint64_t sent{0};              // send_group admissions (source)
+  std::uint64_t rounds_started{0};    // source rounds (repairs included)
+  std::uint64_t repair_rounds{0};
+  std::uint64_t budget_deferrals{0};  // admission waits on the airtime bucket
+  std::uint64_t copies_queued{0};     // GROUP_DATA copies handed to the scheduler
+  std::uint64_t copies_failed{0};     // copies that never got a MAC ACK
+  std::uint64_t reports_sent{0};
+  std::uint64_t not_child_sent{0};
+  std::uint64_t reports_received{0};
+  std::uint64_t reports_unmatched{0};
+  std::uint64_t received{0};          // first receipts (opened)
+  std::uint64_t duplicates{0};        // copies of a message already received
+  std::uint64_t delivered{0};         // handed to the application
+  std::uint64_t held{0};              // ordered messages held for a gap
+  std::uint64_t gaps_skipped{0};      // stream numbers skipped by a hold timeout
+  std::uint64_t late{0};              // ordered messages delivered late
+  std::uint64_t rejected{0};          // invalid/unsupported group frames
+  std::uint64_t open_failures{0};
+  std::uint64_t state_refusals{0};    // no tree slot: subtree reported missing
 };
 
 struct RadioRxMetadata {
@@ -157,6 +256,18 @@ class NodeObserver {
   virtual void on_applied_result(const MessageKey& key,
                                  const AppliedResultView& result) noexcept {
     (void)key;
+    (void)result;
+  }
+  // Group delivery (group-delivery.md). A received group message: the default
+  // forwards to on_message (group MessageIds never collide with unicast
+  // ones — kGroupSequenceFlag), so observers without a group surface still
+  // see the payload exactly once.
+  virtual void on_group_message(const GroupMessageInfo& info, ByteView payload) noexcept {
+    on_message(info.key, info.key.origin, payload);
+  }
+  // Source side: fires when a group message's summary changes (after every
+  // round) and once more when it turns terminal.
+  virtual void on_group_delivery(const GroupDeliveryResult& result) noexcept {
     (void)result;
   }
 };
@@ -607,6 +718,32 @@ class MeshNode {
   bool gateway_scoped() const noexcept;
   bool scoped_child(NodeId neighbor) const noexcept;
   const RouteScaleStats& route_scale_stats() const noexcept { return route_scale_stats_; }
+
+  // --- Group delivery (group.cpp, docs/design/sdk-v1/group-delivery.md) ------
+  // Sends `payload` (<= kGroupPayloadMax) to every member of `group`
+  // (kGroupAll = every node) along the gateway tree. Only a configured route
+  // gateway of the gateway-scoped profile may source group messages: the
+  // flat profile and non-gateway nodes get Unsupported. The message is
+  // queued at the source (airtime bucket, one round-0 propagation at a time;
+  // Urgent bypasses both) and confirmed by per-subtree reports; incomplete
+  // subtrees are re-sent in bounded repair rounds within the lifetime.
+  // WouldBlock when the source table holds no free slot (Normal traffic may
+  // not take the last one — it is reserved for Urgent).
+  Status send_group(GroupId group, ByteView payload, const GroupSendOptions& options,
+                    MonotonicMs now_ms, MessageId& id) noexcept;
+  // Latest summary of a group message this node sourced (state Empty /
+  // reason NOT_FOUND once its record was evicted).
+  GroupDeliveryResult group_delivery(const MessageId& id) const noexcept;
+  // Replaces the locally configured group set (ALL is implicit and may not be
+  // listed; group 0 is reserved; at most kGroupMembershipMax, no duplicates).
+  // Non-member nodes still relay and confirm reachability.
+  Status set_group_membership(const GroupId* groups, std::size_t count) noexcept;
+  bool group_member(GroupId group) const noexcept;
+  std::size_t group_membership(GroupId* out, std::size_t capacity) const noexcept;
+  const GroupStats& group_stats() const noexcept { return group_stats_; }
+  // Group lane occupancy (tests/diagnostics): relay/receiver trees in use.
+  std::size_t group_trees_in_use() const noexcept { return group_trees_.size(); }
+
   const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
   bool started() const noexcept { return started_; }
@@ -962,6 +1099,13 @@ class MeshNode {
     std::uint32_t applied_code{0};
     std::array<std::uint8_t, endpoint::kAppResultDataMax> applied_result{};
     std::uint8_t applied_result_size{0};
+    // Per-source ordering (SendOptions::ordered, group-delivery.md §6): the
+    // delivery is held until its predecessor to the same destination is
+    // Delivered or `order_hold_until_ms` (the predecessor's own deadline)
+    // passed — whichever comes first.
+    MessageId order_after{};
+    MonotonicMs order_hold_until_ms{0};
+    bool order_wait{false};
   };
 
   // Terminal-side committed verdict record (01 §1.4): one per delivered
@@ -984,7 +1128,7 @@ class MeshNode {
   enum class JobForm : std::uint8_t { Plain, Forwarded };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
-                                       Applied };
+                                       Applied, Group };
 
   struct AckKey {
     FrameType accepted_type{FrameType::Data};
@@ -1522,6 +1666,135 @@ class MeshNode {
   Status queue_route_request(NodeId peer, const RouteRequestPayload& payload,
                              MonotonicMs now_ms) noexcept;
 
+  // --- Group delivery (group.cpp, group-delivery.md) ------------------------
+  // Per-message tree bookkeeping for one child of this node. Counts are the
+  // child's latest report (its whole subtree); per-round flags are reset
+  // when a new round starts.
+  // Flags are 1-bit fields so a child record is 16 B instead of 24 B: the
+  // gateway holds kGroupMaxChildren of these per tree, and the ESP32-C3
+  // bridge image is DRAM-bound (static .bss). C++17 has no default member
+  // initializers for bit-fields, so the constructor zeroes them.
+  struct GroupChild {
+    GroupChild() noexcept
+        : complete(false), not_child(false), ever_reported(false), sent(false),
+          reported(false), failed(false) {}
+    NodeId node{kInvalidNodeId};
+    std::uint16_t delivered{0};
+    std::uint16_t nonmember{0};
+    std::uint16_t missing{0};
+    std::uint8_t report_round{0};
+    bool complete : 1;       // latest report: missing 0, or NOT_CHILD
+    bool not_child : 1;      // latest report was NOT_CHILD (counted elsewhere)
+    bool ever_reported : 1;
+    bool sent : 1;           // copy handed to the scheduler this round
+    bool reported : 1;       // report for this round received
+    bool failed : 1;         // copy never got a MAC ACK this round
+  };
+  // One group message as seen by this node (relay/receiver, or the source's
+  // root in GroupOrigin::tree). Holds no payload: relays forward the copy of
+  // the round being processed; the source re-wraps its sealed frame.
+  struct GroupTree {
+    MessageKey key{};
+    GroupId group{0};
+    NodeId parent{kInvalidNodeId};
+    MonotonicMs deadline_ms{0};    // report deadline of the current round
+    MonotonicMs expires_at_ms{0};  // retention (message deadline + slack)
+    std::uint8_t round{0};
+    std::uint8_t child_count{0};
+    std::uint8_t report_resends{0};
+    std::uint8_t missing_count{0};           // ids gathered this round
+    std::uint16_t extra_missing{0};          // untracked children subtrees
+    Priority priority{Priority::Normal};
+    bool origin{false};
+    bool collecting{false};
+    bool reported{false};
+    bool self_delivered{false};    // member: accepted for the application
+    bool self_nonmember{false};
+    std::array<NodeId, kGroupReportMissingMax> missing{};
+    std::array<GroupChild, kGroupMaxChildren> children{};
+  };
+  struct GroupOrigin {
+    MessageId id{};
+    GroupId group{0};
+    Priority priority{Priority::Normal};
+    DeliveryState state{DeliveryState::Empty};
+    const char* reason{"NONE"};
+    MonotonicMs created_at_ms{0};
+    MonotonicMs expires_at_ms{0};
+    MonotonicMs next_round_at_ms{0};
+    std::uint32_t group_seq{0};
+    std::uint32_t node_cost_us{0};  // estimated air time per reached node
+    // High-water of the nodes the source's route table knew since admission:
+    // a route lost to churn mid-delivery must not shrink what "complete"
+    // means (the summary reports it as unaccounted instead).
+    std::uint16_t expected_nodes{0};
+    bool admitted{false};
+    bool budget_waiting{false};     // counted once in budget_deferrals
+    bool force_all{false};          // next round re-sends every child
+    wire::LinkOpenedFrame sealed{};
+    GroupTree tree{};
+    GroupDeliveryResult summary{};
+  };
+  // Per-source receive stream (dedup + ordering), one per gateway.
+  struct GroupStream {
+    NodeId source{kInvalidNodeId};
+    std::uint32_t session{0};
+    std::uint32_t max_seq{0};    // highest stream number seen (0 = none)
+    std::uint64_t seen{0};       // bit i: stream number max_seq - i seen
+    std::uint32_t next_seq{0};   // in-order delivery cursor (0 = unset)
+  };
+  struct GroupHold {
+    GroupMessageInfo info{};
+    MonotonicMs release_at_ms{0};
+    std::uint8_t size{0};
+    std::array<std::uint8_t, kGroupPayloadMax> payload{};
+  };
+
+  void handle_group_data(const wire::LinkOpenedFrame& frame, NodeId peer,
+                         MonotonicMs now_ms) noexcept;
+  void handle_group_report(const wire::PlainFrame& frame, NodeId peer,
+                           MonotonicMs now_ms) noexcept;
+  // complete_job/fail_job hook for JobOwner::Group (copies and reports).
+  void group_job_done(const TxJob& job, bool success, MonotonicMs now_ms) noexcept;
+  // poll() driver: source admission/rounds, report deadlines, hold release,
+  // retention expiry.
+  void process_group(MonotonicMs now_ms) noexcept;
+  GroupTree* find_group_tree(const MessageKey& key) noexcept;
+  GroupOrigin* find_group_origin(const MessageId& id) noexcept;
+  const GroupOrigin* find_group_origin(const MessageId& id) const noexcept;
+  GroupOrigin* origin_of(const GroupTree& tree) noexcept;
+  GroupTree* allocate_group_tree(MonotonicMs now_ms) noexcept;
+  GroupStream* group_stream(NodeId source, std::uint32_t session, bool& stale,
+                            MonotonicMs now_ms) noexcept;
+  static bool group_seen(const GroupStream& stream, std::uint32_t seq) noexcept;
+  static void group_mark_seen(GroupStream& stream, std::uint32_t seq) noexcept;
+  void group_begin_round(GroupTree& tree, const wire::LinkOpenedFrame& frame,
+                         NodeId parent, bool force_all, MonotonicMs now_ms) noexcept;
+  bool queue_group_copy(const wire::LinkOpenedFrame& frame, const GroupTree& tree,
+                        NodeId child, MonotonicMs now_ms) noexcept;
+  bool group_round_resolved(const GroupTree& tree) const noexcept;
+  void group_finalize(GroupTree& tree, MonotonicMs now_ms) noexcept;
+  // Pure: the report this node would send for its current round.
+  void group_build_report(const GroupTree& tree, GroupReportPayload& out) const noexcept;
+  // Routes whose committed next hop is `child` (its subtree in our table):
+  // appends ids to `ids` up to `capacity` via `count`, returns the total.
+  std::uint16_t group_routed_subtree(NodeId child, NodeId* ids, std::size_t capacity,
+                                     std::uint8_t& count) const noexcept;
+  Status queue_group_report(NodeId to, const GroupReportPayload& report,
+                            Priority priority, MonotonicMs now_ms) noexcept;
+  void group_origin_round_done(GroupOrigin& origin, MonotonicMs now_ms) noexcept;
+  void group_origin_terminal(GroupOrigin& origin, DeliveryState state,
+                             const char* reason) noexcept;
+  void group_admit(MonotonicMs now_ms) noexcept;
+  std::int64_t group_budget_balance(MonotonicMs now_ms) noexcept;
+  std::uint16_t group_expected_nodes() const noexcept;
+  // Ordering + application hand-off (group-delivery.md §6).
+  void group_accept(GroupStream& stream, const GroupMessageInfo& info, ByteView app,
+                    bool member, std::uint32_t remaining_ms, MonotonicMs now_ms) noexcept;
+  void group_drain(GroupStream& stream) noexcept;
+  void group_skip_to(GroupStream& stream, std::uint32_t target) noexcept;
+  void group_deliver_app(const GroupMessageInfo& info, ByteView app) noexcept;
+
   // §14 management airtime bucket (03-congestion.md §8 — local calibrated
   // accounting only). control_budget_balance refills to `now_ms` and
   // returns the signed balance: a completed management TX may run it
@@ -1681,6 +1954,17 @@ class MeshNode {
   MonotonicMs route_request_window_ms_{0};
   std::uint32_t route_request_window_count_{0};
   RouteScaleStats route_scale_stats_{};
+  // Group delivery state (bounded; group-delivery.md §9).
+  std::array<GroupId, kGroupMembershipMax> group_membership_{};
+  std::size_t group_membership_count_{0};
+  FixedPool<GroupTree, kGroupTreeCapacity> group_trees_{};
+  FixedPool<GroupOrigin, kGroupOriginCapacity> group_origins_{};
+  FixedPool<GroupStream, kGroupStreamCapacity> group_streams_{};
+  FixedPool<GroupHold, kGroupHoldCapacity> group_holds_{};
+  std::uint32_t next_group_seq_{1};
+  std::int64_t group_budget_tokens_us_{kGroupBudgetCapacityUs};
+  MonotonicMs group_budget_last_ms_{0};
+  GroupStats group_stats_{};
   // Retry-jitter decorrelation counter — same convention as
   // trigger_counter_ (node.cpp trigger_route_advertisement).
   std::uint32_t retry_jitter_counter_{0};

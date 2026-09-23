@@ -227,6 +227,38 @@ fn route_request_payload() -> Vec<u8> {
     payload
 }
 
+// GROUP_DATA end-protected payload (docs/design/sdk-v1/group-delivery.md):
+// flags u8 (ORDERED | priority << 1) || application bytes. The C++ codec test
+// (tests/cpp/test_group.cpp) checks encode_group_data against payload_hex.
+fn group_data_payload() -> Vec<u8> {
+    group::encode_group_data(
+        &group::GroupDataHeader {
+            ordered: true,
+            priority: 3,
+        },
+        b"PUMP3 OVERTEMP",
+    )
+    .expect("group data payload")
+}
+
+// GROUP_REPORT (link-only, child -> tree parent): 29-byte head + missing ids.
+fn group_report_payload() -> Vec<u8> {
+    group::encode_group_report(&group::GroupReport {
+        source: 1,
+        message: MessageId {
+            session: 101,
+            sequence: group::GROUP_SEQUENCE_FLAG | 3,
+        },
+        round: 1,
+        flags: group::GROUP_REPORT_TRUNCATED,
+        delivered: 40,
+        nonmember: 3,
+        missing_total: 5,
+        missing: vec![11, 12],
+    })
+    .expect("group report payload")
+}
+
 fn main() {
     let dir = golden_dir();
     let valid_dir = dir.join("valid");
@@ -357,6 +389,46 @@ fn main() {
                 6,
                 2000,
                 &route_request_payload(),
+            ),
+            forward: None,
+        },
+        Case {
+            name: "group_data",
+            comment: "GROUP_DATA to group 7, group-scope end protection, relayed at node 2 toward child 3",
+            frame: plain(
+                FrameType::GroupData,
+                FLAG_END_PROTECTED,
+                DeliveryClass::Reliable,
+                0,
+                10,
+                1,
+                group::group_address(7),
+                1,
+                2,
+                101,
+                group::GROUP_SEQUENCE_FLAG | 3,
+                5000,
+                &group_data_payload(),
+            ),
+            forward: Some((2, 3, 4900)),
+        },
+        Case {
+            name: "group_report",
+            comment: "GROUP_REPORT from child 2 to tree parent 1 (two missing ids, truncated), link protection only",
+            frame: plain(
+                FrameType::GroupReport,
+                0,
+                DeliveryClass::BestEffort,
+                0,
+                1,
+                2,
+                1,
+                2,
+                1,
+                102,
+                7,
+                1000,
+                &group_report_payload(),
             ),
             forward: None,
         },

@@ -36,6 +36,8 @@ EXPECTED_FRAME_IDS = {
     "CONTROL": 22,
     "TIME_SYNC": 23,
     "CHANNEL_NOTICE": 24,
+    "GROUP_DATA": 25,
+    "GROUP_REPORT": 26,
     "ROUTE_UPDATE": 32,
     "ROUTE_WITHDRAW": 33,
     "SEQNO_REQUEST": 34,
@@ -371,6 +373,67 @@ def validate(root: Path) -> dict:
             and request["ttl_max"] == scoped["route_request_max_ttl"]
             == radio["network"]["hop_max"],
             "semantics.json route payloads vs route_request.hpp and radio-defaults",
+        )
+        # Group delivery (docs/design/sdk-v1/group-delivery.md): the
+        # semantics.json payload contract, group.hpp constants, the FrameType
+        # ids and the radio-defaults group budget must agree.
+        group_hpp = (
+            root / "components/routeloom/include/routeloom/group.hpp"
+        ).read_text(encoding="utf-8")
+        types_hpp = (
+            root / "components/routeloom/include/routeloom/types.hpp"
+        ).read_text(encoding="utf-8")
+        group_data = semantic["group_data"]
+        group_report = semantic["group_report_payload"]
+        group_radio = radio["group_delivery"]
+        report_head = sum(f["bytes"] for f in group_report["fields"])
+        test(
+            "group_payload_contract",
+            f"kGroupReportFixedBytes == {report_head}" in group_hpp
+            and f"kGroupPayloadMax == {group_data['application_payload_max']}" in group_hpp
+            and f"kGroupReportMissingMax = {group_report['missing_max']};" in group_hpp
+            and report_head + group_report["missing_max"] * group_report["missing_id_bytes"]
+            <= semantic["max_normal_payload_bytes"]
+            and group_data["application_payload_max"] + 1
+            == semantic["max_normal_payload_bytes"]
+            and "kGroupAddressBase = 0xFFFFFFFFFFFF0000ULL" in group_hpp
+            and group_data["group_address_base"] == "0xFFFFFFFFFFFF0000"
+            and "GroupData = 25," in types_hpp
+            and "GroupReport = 26," in types_hpp
+            and "Group = 2," in types_hpp,
+            "semantics.json group payloads vs group.hpp / types.hpp",
+        )
+        group_node_hpp = (
+            root / "components/routeloom/include/routeloom/node.hpp"
+        ).read_text(encoding="utf-8")
+        node_constants = {
+            name: int(value)
+            for name, value in re.findall(
+                r"constexpr std::(?:u?int\d+_t|size_t) (kGroup\w+) = (\d+);",
+                group_node_hpp,
+            )
+        }
+        estimate_group = group_radio["estimate_d100"]
+        per_node = estimate_group["copy_us"] + estimate_group["report_us"]
+        test(
+            "group_budget_manifest",
+            node_constants.get("kGroupMaxRounds") == group_radio["max_rounds"]
+            and node_constants.get("kGroupLevelWaitMs") == group_radio["level_wait_ms"]
+            and node_constants.get("kGroupRepairGapMs") == group_radio["repair_gap_ms"]
+            and node_constants.get("kGroupOrderMaxHoldMs")
+            == group_radio["order_max_hold_ms"]
+            and node_constants.get("kGroupBudgetCapacityUs")
+            == group_radio["source_bucket_capacity_us"]
+            and f"group_airtime_us_per_s{{{group_radio['source_budget_us_per_second']}}}"
+            in group_node_hpp
+            # One 100-node message (a copy + a report per board) fits the
+            # bucket, and the §14 model reproduces the manifest's numbers.
+            and estimate_group["network_us_per_message"] == 99 * per_node
+            and estimate_group["network_us_per_message"]
+            <= group_radio["source_bucket_capacity_us"]
+            and (group_radio["max_rounds"] - 1) * group_radio["repair_gap_ms"]
+            <= resources["profiles"]["relay-c3"]["max_message_lifetime_ms"],
+            "node.hpp group constants vs radio-defaults.json group_delivery",
         )
         estimate = scoped["airtime_estimate_d100"]
         management = radio["scheduling"]["management_network_estimated_us_per_second"]

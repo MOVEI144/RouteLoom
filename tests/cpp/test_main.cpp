@@ -203,6 +203,88 @@ rl_node_config_t capi_scoped_base() {
   return config;
 }
 
+// Group delivery over the C ABI (routeloom.h, group-delivery.md §8):
+// additive symbols, RL_ABI_VERSION unchanged.
+void test_c_api_group() {
+  rl_group_send_options_t options{};
+  rl_group_send_options_init(&options);
+  CHECK(options.struct_size == sizeof(options) && options.abi_version == RL_ABI_VERSION);
+  CHECK(options.priority == RL_PRIORITY_NORMAL && options.lifetime_ms == 5000 &&
+        options.hop_limit == 10 && options.ordered == 0);
+  rl_send_options_t send_options{};
+  rl_send_options_init(&send_options);
+  CHECK(send_options.ordered == 0);
+  const uint8_t payload[] = {'A', 'L', 'A', 'R', 'M'};
+  rl_message_id_t id{};
+  // Flat profile: explicit UNSUPPORTED.
+  {
+    CApiNode node;
+    CHECK(node.init(capi_scoped_base()) == RL_STATUS_OK);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+    CHECK(rl_send_group(node.context, RL_GROUP_ALL, payload, sizeof(payload), &options, 1,
+                        &id) == RL_STATUS_UNSUPPORTED);
+  }
+  // The configured gateway sources a group message; a board may not.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 1;
+    config.route_gateways[0] = 7;  // this node
+    config.route_advertisement_period_ms = kScopedProductPeriodMs;
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+    options.priority = RL_PRIORITY_URGENT;
+    CHECK(rl_send_group(node.context, RL_GROUP_ALL, payload, sizeof(payload), &options, 1,
+                        &id) == RL_STATUS_OK);
+    CHECK((id.sequence & RL_GROUP_SEQUENCE_FLAG) != 0 && id.session == 77);
+    rl_group_result_t result{};
+    CHECK(rl_get_group_result(node.context, id, &result) == RL_STATUS_OK);
+    CHECK(result.group == RL_GROUP_ALL && result.id.sequence == id.sequence);
+    // No neighbors: nothing to reach — an honest terminal verdict.
+    rl_poll(node.context, 2);
+    CHECK(rl_get_group_result(node.context, id, &result) == RL_STATUS_OK);
+    CHECK(result.state == RL_DELIVERY_STATE_FAILED && result.delivered == 0);
+    rl_message_id_t unknown{77, RL_GROUP_SEQUENCE_FLAG | 99};
+    CHECK(rl_get_group_result(node.context, unknown, &result) == RL_STATUS_NOT_FOUND);
+    // Argument checks.
+    CHECK(rl_send_group(node.context, 0, payload, sizeof(payload), &options, 1, &id) ==
+          RL_STATUS_INVALID_ARGUMENT);
+    options.struct_size = 4;
+    CHECK(rl_send_group(node.context, 1, payload, sizeof(payload), &options, 1, &id) ==
+          RL_STATUS_INVALID_ARGUMENT);
+    rl_group_send_options_init(&options);
+    // Membership.
+    const uint16_t groups[] = {3, 9};
+    CHECK(rl_set_group_membership(node.context, groups, 2) == RL_STATUS_OK);
+    const uint16_t reserved[] = {RL_GROUP_ALL};
+    CHECK(rl_set_group_membership(node.context, reserved, 1) == RL_STATUS_INVALID_ARGUMENT);
+    CHECK(rl_set_group_membership(node.context, nullptr, 1) == RL_STATUS_INVALID_ARGUMENT);
+    CHECK(rl_set_group_membership(node.context, nullptr, 0) == RL_STATUS_OK);
+  }
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 1;
+    config.route_gateways[0] = 1;  // another node is the gateway
+    config.route_advertisement_period_ms = kScopedProductPeriodMs;
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+    CHECK(rl_send_group(node.context, RL_GROUP_ALL, payload, sizeof(payload), &options, 1,
+                        &id) == RL_STATUS_UNSUPPORTED);
+    // Ordered unicast must be RELIABLE.
+    send_options.ordered = 1;
+    send_options.delivery = RL_DELIVERY_BEST_EFFORT;
+    CHECK(rl_add_neighbor(node.context, 1, 1, 0) == RL_STATUS_OK);
+    CHECK(rl_send(node.context, 1, payload, sizeof(payload), &send_options, 1, &id) ==
+          RL_STATUS_INVALID_ARGUMENT);
+    send_options.delivery = RL_DELIVERY_RELIABLE;
+    CHECK(rl_send(node.context, 1, payload, sizeof(payload), &send_options, 1, &id) ==
+          RL_STATUS_OK);
+  }
+}
+
 void test_c_api_route_profile() {
   // Defaults: the full struct, flat profile, SDK refresh cadence.
   {
@@ -572,6 +654,7 @@ int main() {
   test_single_authority();
   test_c_api_lifecycle();
   test_c_api_route_profile();
+  test_c_api_group();
   test_byte_io();
   test_counter_lease();
   test_wire_forwarding();

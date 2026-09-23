@@ -1613,4 +1613,276 @@ Status decode_node_event(const ByteView inner, NodeEvent& out) noexcept {
   return Status::success();
 }
 
+// --- Group family (0x50-0x52) ----------------------------------------------
+
+namespace {
+
+bool group_reason_valid(const char* const reason, const std::size_t size) noexcept {
+  for (std::size_t i = 0; i < size; ++i) {
+    const auto c = static_cast<unsigned char>(reason[i]);
+    if (c < 0x20 || c > 0x7E) return false;
+  }
+  return true;
+}
+
+bool group_missing_id_valid(const NodeId id) noexcept {
+  return !is_reserved_id(id) && !reserved_node_id(id);
+}
+
+// Structural consistency shared by the encoder and the decoder: a refusal
+// names no message and counts nothing; an answer names a group message.
+Status check_group_status(const GroupStatusReply& reply) noexcept {
+  const bool ok = reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok);
+  const auto state = static_cast<std::uint8_t>(reply.state);
+  if (!config_result_valid(reply.result) ||
+      state > static_cast<std::uint8_t>(DeliveryState::Indeterminate) ||
+      reply.missing_count > kGroupReportMissingMax ||
+      reply.missing_count > reply.missing_total ||
+      reply.reason_len > kGroupStatusReasonMax ||
+      !group_reason_valid(reply.reason.data(), reply.reason_len)) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_STATUS");
+  }
+  if (!ok && (reply.id.session != 0 || reply.id.sequence != 0 ||
+              reply.state != DeliveryState::Empty || reply.rounds != 0 ||
+              reply.delivered != 0 || reply.nonmember != 0 ||
+              reply.missing_total != 0 || reply.unaccounted != 0)) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_STATUS_REFUSAL");
+  }
+  if (ok && !is_group_sequence(reply.id.sequence)) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_STATUS_ID");
+  }
+  for (std::size_t i = 0; i < reply.missing_count; ++i) {
+    if (!group_missing_id_valid(reply.missing[i])) {
+      return Status::error(StatusCode::ProtocolError, "GROUP_STATUS_MISSING");
+    }
+  }
+  return Status::success();
+}
+
+std::uint8_t group_status_flags(const GroupStatusReply& reply) noexcept {
+  return static_cast<std::uint8_t>(
+      (reply.missing_total > reply.missing_count ? kGroupStatusTruncated : 0U) |
+      (group_state_final(reply.state) ? kGroupStatusFinal : 0U));
+}
+
+}  // namespace
+
+bool group_state_final(const DeliveryState state) noexcept {
+  switch (state) {
+    case DeliveryState::Delivered:
+    case DeliveryState::Failed:
+    case DeliveryState::Expired:
+    case DeliveryState::CancelledBeforeTx:
+    case DeliveryState::Indeterminate:
+      return true;
+    default:
+      return false;
+  }
+}
+
+Status encode_group_send(const GroupSendRequest& request, const MutableByteView out,
+                         std::size_t& written) noexcept {
+  written = 0;
+  if (request.group == 0 ||
+      static_cast<std::uint8_t>(request.priority) >
+          static_cast<std::uint8_t>(Priority::Urgent) ||
+      (request.flags & ~kGroupSendOrdered) != 0 || request.lifetime_ms == 0 ||
+      request.lifetime_ms > kMaxMessageLifetimeMs || request.hop_limit == 0 ||
+      request.hop_limit == UINT8_MAX || request.data.size > kGroupPayloadMax ||
+      (request.data.size > 0 && request.data.data == nullptr)) {
+    return Status::error(StatusCode::InvalidArgument, "group send");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::GroupSend,
+      static_cast<std::uint16_t>(kGroupSendFixedPayload + request.data.size));
+  if (status) status = writer.write_u16(request.group);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(request.priority));
+  if (status) status = writer.write_u8(request.flags);
+  if (status) status = writer.write_u32(request.lifetime_ms);
+  if (status) status = writer.write_u8(request.hop_limit);
+  if (status) status = writer.write_u8(0);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(request.data.size));
+  if (status && request.data.size > 0) status = writer.write_bytes(request.data);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_group_send(const ByteView inner, GroupSendRequest& out) noexcept {
+  out = GroupSendRequest{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::GroupSend, kGroupSendFixedPayload,
+                               kGroupSendMaxPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  std::uint8_t priority = 0;
+  std::uint8_t reserved = 0;
+  std::uint16_t data_len = 0;
+  status = reader.read_u16(out.group);
+  if (status) status = reader.read_u8(priority);
+  if (status) status = reader.read_u8(out.flags);
+  if (status) status = reader.read_u32(out.lifetime_ms);
+  if (status) status = reader.read_u8(out.hop_limit);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = reader.read_u16(data_len);
+  if (!status) return status;
+  if (out.group == 0 || priority > static_cast<std::uint8_t>(Priority::Urgent) ||
+      (out.flags & ~kGroupSendOrdered) != 0 || out.lifetime_ms == 0 ||
+      out.lifetime_ms > kMaxMessageLifetimeMs || out.hop_limit == 0 ||
+      out.hop_limit == UINT8_MAX || reserved != 0 || data_len != reader.remaining() ||
+      data_len > kGroupPayloadMax) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_SEND");
+  }
+  out.priority = static_cast<Priority>(priority);
+  out.data = ByteView{payload.data + kGroupSendFixedPayload, data_len};
+  return Status::success();
+}
+
+Status encode_group_query(const GroupQueryRequest& request, const MutableByteView out,
+                          std::size_t& written) noexcept {
+  written = 0;
+  if (!is_group_sequence(request.id.sequence)) {
+    return Status::error(StatusCode::InvalidArgument, "group query");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::GroupQuery,
+                                     static_cast<std::uint16_t>(kGroupQueryPayload));
+  if (status) status = writer.write_u32(request.id.session);
+  if (status) status = writer.write_u64(request.id.sequence);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_group_query(const ByteView inner, GroupQueryRequest& out) noexcept {
+  out = GroupQueryRequest{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::GroupQuery, kGroupQueryPayload,
+                               kGroupQueryPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  status = reader.read_u32(out.id.session);
+  if (status) status = reader.read_u64(out.id.sequence);
+  if (!status) return status;
+  if (!is_group_sequence(out.id.sequence)) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_QUERY");
+  }
+  return Status::success();
+}
+
+GroupStatusReply group_status_from(const std::uint16_t result,
+                                   const GroupDeliveryResult& summary,
+                                   const char* const reason) noexcept {
+  GroupStatusReply reply{};
+  reply.result = result;
+  reply.group = summary.group;
+  if (result == static_cast<std::uint16_t>(ConfigOpsResult::Ok)) {
+    reply.id = summary.id;
+    reply.state = summary.state;
+    reply.rounds = summary.rounds;
+    reply.delivered = summary.delivered;
+    reply.nonmember = summary.nonmember;
+    reply.missing_total = summary.missing_total;
+    reply.unaccounted = summary.unaccounted;
+    reply.missing_count = summary.missing_count <= kGroupReportMissingMax
+                              ? summary.missing_count
+                              : static_cast<std::uint8_t>(kGroupReportMissingMax);
+    for (std::size_t i = 0; i < reply.missing_count; ++i) reply.missing[i] = summary.missing[i];
+  }
+  const char* const text = reason != nullptr ? reason : "";
+  std::size_t length = 0;
+  while (length < kGroupStatusReasonMax && text[length] != '\0') {
+    const auto c = static_cast<unsigned char>(text[length]);
+    reply.reason[length] = (c >= 0x20 && c <= 0x7E) ? text[length] : '?';
+    ++length;
+  }
+  reply.reason_len = static_cast<std::uint8_t>(length);
+  reply.flags = group_status_flags(reply);
+  return reply;
+}
+
+Status encode_group_status(const GroupStatusReply& reply, const MutableByteView out,
+                           std::size_t& written) noexcept {
+  written = 0;
+  if (!check_group_status(reply)) {
+    return Status::error(StatusCode::InvalidArgument, "group status");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::GroupStatus,
+      static_cast<std::uint16_t>(kGroupStatusFixedPayload + reply.missing_count * 8U +
+                                 reply.reason_len));
+  if (status) status = writer.write_u16(reply.result);
+  if (status) status = writer.write_u32(reply.id.session);
+  if (status) status = writer.write_u64(reply.id.sequence);
+  if (status) status = writer.write_u16(reply.group);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(reply.state));
+  if (status) status = writer.write_u8(reply.rounds);
+  if (status) status = writer.write_u16(reply.delivered);
+  if (status) status = writer.write_u16(reply.nonmember);
+  if (status) status = writer.write_u16(reply.missing_total);
+  if (status) status = writer.write_u16(reply.unaccounted);
+  if (status) status = writer.write_u8(group_status_flags(reply));
+  if (status) status = writer.write_u8(reply.missing_count);
+  if (status) status = writer.write_u8(reply.reason_len);
+  if (status) status = writer.write_u8(0);
+  for (std::size_t i = 0; status && i < reply.missing_count; ++i) {
+    status = writer.write_u64(reply.missing[i]);
+  }
+  if (status && reply.reason_len > 0) {
+    status = writer.write_bytes(
+        ByteView{reinterpret_cast<const std::uint8_t*>(reply.reason.data()), reply.reason_len});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_group_status(const ByteView inner, GroupStatusReply& out) noexcept {
+  out = GroupStatusReply{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::GroupStatus, kGroupStatusFixedPayload,
+                               kGroupStatusMaxPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  std::uint8_t state = 0;
+  std::uint8_t reserved = 0;
+  status = reader.read_u16(out.result);
+  if (status) status = reader.read_u32(out.id.session);
+  if (status) status = reader.read_u64(out.id.sequence);
+  if (status) status = reader.read_u16(out.group);
+  if (status) status = reader.read_u8(state);
+  if (status) status = reader.read_u8(out.rounds);
+  if (status) status = reader.read_u16(out.delivered);
+  if (status) status = reader.read_u16(out.nonmember);
+  if (status) status = reader.read_u16(out.missing_total);
+  if (status) status = reader.read_u16(out.unaccounted);
+  if (status) status = reader.read_u8(out.flags);
+  if (status) status = reader.read_u8(out.missing_count);
+  if (status) status = reader.read_u8(out.reason_len);
+  if (status) status = reader.read_u8(reserved);
+  if (!status) return status;
+  if (state > static_cast<std::uint8_t>(DeliveryState::Indeterminate) || reserved != 0 ||
+      out.missing_count > kGroupReportMissingMax || out.reason_len > kGroupStatusReasonMax ||
+      reader.remaining() != out.missing_count * 8U + out.reason_len) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_STATUS");
+  }
+  out.state = static_cast<DeliveryState>(state);
+  for (std::size_t i = 0; status && i < out.missing_count; ++i) {
+    status = reader.read_u64(out.missing[i]);
+  }
+  if (status && out.reason_len > 0) {
+    status = reader.read_bytes(
+        MutableByteView{reinterpret_cast<std::uint8_t*>(out.reason.data()), out.reason_len});
+  }
+  if (!status) return status;
+  status = check_group_status(out);
+  if (!status) return status;
+  if (out.flags != group_status_flags(out)) {
+    return Status::error(StatusCode::ProtocolError, "GROUP_STATUS_FLAGS");
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::usb

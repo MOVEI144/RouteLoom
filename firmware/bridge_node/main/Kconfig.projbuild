@@ -217,6 +217,11 @@ config ROUTELOOM_CAPABILITY
         after a host subscribes, 0x42 join/leave/route-change events;
         cleared answers Unsupported. Rides the HostOps carrier, so it is
         only reachable together with bit 2 (e.g. 0x47).
+        Bit 7 (0x80) is the EXPERIMENTAL opt-in for group_delivery_v1: the
+        bridge serves the 0x50 GROUP_SEND / 0x52 GROUP_QUERY subcommands
+        and answers 0x51 GROUP_STATUS summaries; a send is only admitted
+        when this node is a route gateway of the gateway-scoped profile.
+        Cleared answers Unsupported. Also rides the HostOps carrier (bit 2).
         The bitmap is bound into the HelloAck authentication transcript —
         a bit is only advertised when the matching endpoint is actually
         attached (dev profile; not a production identity claim).

@@ -211,6 +211,27 @@ fn valid_vectors_encode_and_decode_byte_exact() {
             );
         }
 
+        // Group frames: every group key holder opens the group end layer,
+        // wherever it sits in the tree (no destination binding).
+        if plain.header.frame_type == FrameType::GroupData {
+            let mut group_security = TestSecurity::new();
+            let mut out = PlainFrame::default();
+            open_group(&opened, &mut group_security, &mut out)
+                .unwrap_or_else(|e| panic!("{name}: open_group failed: {e}"));
+            assert_eq!(
+                &out.payload[..out.payload_size],
+                payload.as_slice(),
+                "{name}"
+            );
+            let mut tampered = opened.clone();
+            tampered.header.destination = group::group_address(8);
+            let mut out = PlainFrame::default();
+            assert!(
+                open_group(&tampered, &mut TestSecurity::new(), &mut out).is_err(),
+                "{name}: the group address is bound by the end AAD"
+            );
+        }
+
         // Optional second hop: the relay re-wraps the link layer only.
         if let Some(fwd_hex) = fields.get("fwd_encoded_hex") {
             let forwarder = u64_field(&fields, "fwd_local_node");
@@ -271,6 +292,16 @@ fn valid_vectors_encode_and_decode_byte_exact() {
                 "{name}"
             );
 
+            if plain.header.frame_type == FrameType::GroupData {
+                let mut out = PlainFrame::default();
+                open_group(&at_next, &mut TestSecurity::new(), &mut out)
+                    .unwrap_or_else(|e| panic!("{name}: fwd open_group failed: {e}"));
+                assert_eq!(
+                    &out.payload[..out.payload_size],
+                    payload.as_slice(),
+                    "{name}"
+                );
+            }
             if plain.header.destination == forward_next {
                 let mut end_security = TestSecurity::new();
                 let mut out = PlainFrame::default();

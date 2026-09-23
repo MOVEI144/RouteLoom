@@ -456,11 +456,11 @@ struct World {
   CollectSink device_sink;
   StreamDecoder device_decoder;
 
-  World()
+  explicit World(bool scoped = false)
       : bridge(config(), stream),
         r1(net, 1), r2(net, 2),
-        n1(node_config(1, 7001), r1, sec1, bridge),
-        n2(node_config(2, 2002), r2, sec2, obs2),
+        n1(node_config(1, 7001, scoped), r1, sec1, bridge),
+        n2(node_config(2, 2002, scoped), r2, sec2, obs2),
         device_decoder(device_sink) {
     bridge.set_mesh(&n1);
     net.register_node(1, &n1);
@@ -482,13 +482,37 @@ struct World {
     cfg.device_nonce = 0xA0B0C0D0E0F00102ULL;
     return cfg;
   }
-  static NodeConfig node_config(NodeId node, std::uint32_t session) {
+  static NodeConfig node_config(NodeId node, std::uint32_t session, bool scoped = false) {
     NodeConfig cfg{};
     cfg.network = 7;
     cfg.node = node;
     cfg.message_session = session;
     cfg.boot_incarnation = session;  // firmware wires the same NVS counter
+    if (scoped) {
+      // Gateway-scoped profile, node 1 (the bridge node) the route gateway:
+      // the only profile group delivery runs on.
+      cfg.route_gateways = {1, kInvalidNodeId};
+      cfg.route_advertisement_period_ms = 500;
+      cfg.route_lifetime_ms = 9000;
+      cfg.route_refresh_ticks = kScopedDefaultRefreshTicks;
+    }
     return cfg;
+  }
+
+  // Pumps both mesh nodes, the radio and the bridge; returns the device
+  // bytes the bridge emitted meanwhile.
+  std::vector<std::uint8_t> run_mesh(MonotonicMs& now, const MonotonicMs ms) {
+    std::vector<std::uint8_t> out;
+    const MonotonicMs end = now + ms;
+    for (; now < end; now += 5) {
+      n1.poll(now);
+      n2.poll(now);
+      net.flush(now);
+      bridge.poll(now);
+      const auto bytes = stream.take();
+      out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    return out;
   }
 
   void feed(const std::vector<std::uint8_t>& wire, MonotonicMs now) {
@@ -1478,6 +1502,79 @@ void test_golden_node_status() {
   CHECK(world.bridge.state() == SessionState::Disconnected);
 }
 
+// protocol/usb-golden/group-ops: the same replay discipline for the
+// group_delivery_v1 family. The device advertises CAP_GROUP_DELIVERY_V1 on a
+// gateway-scoped two-node mesh; the admitted status is emitted synchronously,
+// and the FINAL status must come out of the mesh pump that runs right
+// before its golden step — under the GROUP_SEND's request id.
+void test_golden_group_ops() {
+  const std::filesystem::path root =
+      std::filesystem::path(ROUTELOOM_USB_GOLDEN_DIR) / "group-ops";
+  const Fields session = parse_flat_json(read_file(root / "session.json"));
+  CHECK(!session.empty());
+  const std::uint32_t capability = 0x3 | kCapHostOpsV1 | kCapGroupDeliveryV1;
+  CHECK(field_u64(session, "capability") == capability);
+  const SessionProof proof = golden_proof(capability);
+  CHECK(proof.session_id == field_u64(session, "session_id"));
+
+  World world(/*scoped=*/true);
+  CHECK_OK(world.bridge.attach_group());
+  MonotonicMs now = 0;
+  // Before the host connects: node 2 adopts gateway 1 as its tree parent.
+  const auto warmup = world.run_mesh(now, 8000);
+  (void)warmup;  // bridge output before the session opens is not part of the replay
+  CHECK(world.n1.scoped_child(2));
+  std::vector<std::filesystem::path> steps;
+  for (const auto& entry : std::filesystem::directory_iterator(root / "frames")) {
+    if (entry.path().extension() == ".json") steps.push_back(entry.path());
+  }
+  std::sort(steps.begin(), steps.end());
+  CHECK(steps.size() >= 14);
+
+  std::vector<std::uint8_t> expected_out;
+  std::vector<std::uint8_t> produced;
+  bool pumped = false;
+  for (const auto& path : steps) {
+    const Fields vector = parse_flat_json(read_file(path));
+    const std::string name = vector.count("name") ? vector.at("name") : "";
+    const std::string direction = vector.count("direction") ? vector.at("direction") : "";
+    std::vector<std::uint8_t> wire;
+    CHECK(hex_decode(vector.at("wire_hex"), wire));
+    if (direction == "d2h") {
+      if (name == "group_status_final") {
+        pumped = true;
+        const auto emitted = world.run_mesh(now, 1000);
+        produced.insert(produced.end(), emitted.begin(), emitted.end());
+      }
+      expected_out.insert(expected_out.end(), wire.begin(), wire.end());
+    } else {
+      world.feed(wire, now);
+    }
+    const auto emitted = world.drain_raw(now);
+    produced.insert(produced.end(), emitted.begin(), emitted.end());
+    now += 200;
+  }
+  CHECK(pumped);
+  CHECK(produced == expected_out);
+  if (produced != expected_out) {
+    std::fprintf(stderr, "group-ops golden mismatch: produced %zu bytes, expected %zu\n",
+                 produced.size(), expected_out.size());
+    const std::size_t common = std::min(produced.size(), expected_out.size());
+    for (std::size_t i = 0; i < common; ++i) {
+      if (produced[i] != expected_out[i]) {
+        std::fprintf(stderr, "first divergence at byte %zu: %02x != %02x\n", i,
+                     produced[i], expected_out[i]);
+        break;
+      }
+    }
+  }
+  CHECK(world.obs2.group_messages.size() == 1);
+  CHECK(world.n1.group_stats().sent == 1);
+  CHECK(world.bridge.stats().rx_errors == 0);
+  CHECK(world.bridge.stats().auth_failures == 0);
+  CHECK(world.bridge.state() == SessionState::Disconnected);
+}
+
 }  // namespace
 
 int main() {
@@ -1496,6 +1593,7 @@ int main() {
   test_bridge_node_status();
   test_golden_session();
   test_golden_node_status();
+  test_golden_group_ops();
   if (failures != 0) {
     std::fprintf(stderr, "%d usb checks failed\n", failures);
     return 1;

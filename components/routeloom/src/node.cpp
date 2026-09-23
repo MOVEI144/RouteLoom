@@ -71,6 +71,25 @@ bool MeshNode::TxScheduler::control_job(const TxJob& job) noexcept {
 }
 
 SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
+  // Group delivery (group-delivery.md §5): copies and confirmations ride the
+  // group message's own priority class — an Urgent alarm overtakes display
+  // updates at every hop, and neither is charged to the management domain
+  // (confirmations of accepted work belong to that work, radio.md §14).
+  const FrameType group_type =
+      job.form == JobForm::Forwarded ? job.forwarded.header.type : job.plain.header.type;
+  if (group_type == FrameType::GroupData || group_type == FrameType::GroupReport) {
+    switch (job.priority) {
+      case Priority::Urgent:
+        return SchedClass::Urgent;
+      case Priority::Management:
+        return SchedClass::Management;
+      case Priority::Bulk:
+        return SchedClass::Bulk;
+      case Priority::Normal:
+        return SchedClass::Normal;
+    }
+    return SchedClass::Normal;
+  }
   if (job.form == JobForm::Forwarded) {
     // Transit traffic keeps its lane across hops: receipts and application
     // results ride management, everything else is normal.
@@ -449,8 +468,10 @@ MeshNode::MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider&
 }
 
 Status MeshNode::validate_config() const noexcept {
+  // Node ids at or above kGroupAddressBase name groups (group.hpp), never a
+  // device — kBroadcastNodeId is the ALL group address.
   if (config_.network == 0 || config_.network > UINT32_MAX ||
-      config_.node == kInvalidNodeId || config_.node == kBroadcastNodeId ||
+      reserved_node_id(config_.node) ||
       config_.message_session == 0 || config_.route_generation == 0 ||
       config_.route_advertisement_period_ms == 0 ||
       config_.route_lifetime_ms <= config_.route_advertisement_period_ms ||
@@ -467,7 +488,7 @@ Status MeshNode::validate_config() const noexcept {
   // margin — otherwise tree routes would expire before their refresh lands,
   // which is exactly the flap of issue #41. Rejected, never just reported.
   for (const NodeId gateway : config_.route_gateways) {
-    if (gateway == kBroadcastNodeId) {
+    if (gateway != kInvalidNodeId && reserved_node_id(gateway)) {
       return Status::error(StatusCode::InvalidArgument, "invalid route gateway");
     }
   }
@@ -493,6 +514,7 @@ Status MeshNode::start(const MonotonicMs now_ms) noexcept {
   // §14 control budget starts full at boot; the bucket is a spec-envelope
   // capability, not measured capacity.
   control_budget_last_ms_ = now_ms;
+  group_budget_last_ms_ = now_ms;
   // A development-profile provider is allowed to run but is always surfaced
   // as EXPERIMENTAL; nothing in this node claims production security status.
   if (security_.security_profile() != SecurityProfile::Production) {
@@ -947,6 +969,12 @@ Status MeshNode::send(const NodeId destination, const ByteView payload,
     return Status::error(StatusCode::Unsupported,
                          "APPLIED sends require send_applied()");
   }
+  if (options.ordered &&
+      (options.delivery != DeliveryClass::Reliable || options.persist_across_sleep)) {
+    // Ordering is proven by the predecessor's END_RECEIPT (RELIABLE only);
+    // the sleep image does not carry the predecessor link.
+    return Status::error(StatusCode::InvalidArgument, "ORDERED_REQUIRES_RELIABLE");
+  }
   return enqueue_delivery(
       MessageId{config_.message_session, next_message_sequence_}, destination,
       payload, options, now_ms, id);
@@ -969,7 +997,7 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
       options.lifetime_ms > kMaxMessageLifetimeMs || options.hop_limit == 0) {
     return Status::error(StatusCode::InvalidArgument, "invalid applied send request");
   }
-  if (options.delivery != DeliveryClass::Applied) {
+  if (options.delivery != DeliveryClass::Applied || options.ordered) {
     return Status::error(StatusCode::InvalidArgument,
                          "send_applied requires DeliveryClass::Applied");
   }
@@ -1117,6 +1145,37 @@ Status MeshNode::enqueue_delivery(const MessageId& id, const NodeId destination,
   record->round = 0;
   set_delivery_state(*record, DeliveryState::Accepted, "TX_ACCEPTED");
   out = record->id;
+
+  if (options.ordered) {
+    // Per-source ordering (group-delivery.md §6): the newest earlier ordered
+    // delivery to the same destination that may still reach it is this
+    // one's predecessor. Delivered is proof of arrival; an undelivered one
+    // can still arrive until its own deadline, so that deadline bounds the
+    // wait (a CancelledBeforeTx predecessor never left and never blocks).
+    const Delivery* predecessor = nullptr;
+    deliveries_.for_each([&](const Delivery& other) {
+      if (&other == record || !other.options.ordered ||
+          other.destination != destination ||
+          other.state == DeliveryState::Delivered ||
+          other.state == DeliveryState::CancelledBeforeTx ||
+          now_ms >= other.expires_at_ms) {
+        return;
+      }
+      if (predecessor == nullptr || other.created_at_ms > predecessor->created_at_ms ||
+          (other.created_at_ms == predecessor->created_at_ms &&
+           other.id.sequence > predecessor->id.sequence)) {
+        predecessor = &other;
+      }
+    });
+    if (predecessor != nullptr) {
+      record->order_after = predecessor->id;
+      record->order_hold_until_ms = predecessor->expires_at_ms;
+      record->order_wait = true;
+      record->next_round_at_ms = now_ms;
+      set_delivery_state(*record, DeliveryState::WaitingForRoute, "ORDER_WAIT");
+      return Status::success();
+    }
+  }
 
   const auto status = queue_origin_data(*record, now_ms);
   if (!status) {
@@ -1793,7 +1852,10 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
     // launching it on a next hop the table no longer selects — a frame
     // sent down an infeasible route can close a forwarding loop (D4-02).
     NodeId routed = kInvalidNodeId;
-    if (queued->form == JobForm::Forwarded) {
+    if (queued->form == JobForm::Forwarded &&
+        queued->forwarded.header.type != FrameType::GroupData) {
+      // Group copies target a tree child chosen at round start; their
+      // destination is a group address, never a unicast route.
       routed = queued->forwarded.header.destination;
     } else if (queued->plain.header.type == FrameType::Data ||
                queued->plain.header.type == FrameType::Service ||
@@ -1965,6 +2027,10 @@ void MeshNode::resolve_radio_tx_result(const std::uint64_t token,
 
 void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
                             const MonotonicMs now_ms) noexcept {
+  if (job.owner == JobOwner::Group) {
+    group_job_done(job, true, now_ms);
+    return;
+  }
   if (job.owner == JobOwner::GatewayService) {
     // The Service endpoint owns completion: the first authenticated
     // HOP_ACCEPT resolves the exchange; the component tracks the rest.
@@ -2009,6 +2075,11 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
 
 void MeshNode::fail_job(TxJob& job, const char* reason,
                         const MonotonicMs now_ms) noexcept {
+  if (job.owner == JobOwner::Group) {
+    (void)reason;
+    group_job_done(job, false, now_ms);
+    return;
+  }
   if (job.owner == JobOwner::GatewayService) {
     if (gateway_sink_ != nullptr) {
       gateway_sink_->on_service_job_done(job.ack.key.id, false, reason, now_ms);
@@ -3744,7 +3815,8 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   if ((frame.header.type == FrameType::Data ||
        frame.header.type == FrameType::Service ||
        frame.header.type == FrameType::EndReceipt ||
-       frame.header.type == FrameType::AppResult) &&
+       frame.header.type == FrameType::AppResult ||
+       frame.header.type == FrameType::GroupData) &&
       (frame.header.flags & wire::kFlagEndProtected) == 0) {
     observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer, &frame.header.message);
     return;
@@ -3776,10 +3848,14 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       // transit dedup/forwards it, terminals dispatch the body subtype.
       handle_routed(frame, peer, now_ms);
       break;
+    case FrameType::GroupData:
+      handle_group_data(frame, peer, now_ms);
+      break;
     case FrameType::HopAccept:
     case FrameType::RouteUpdate:
     case FrameType::SeqnoRequest:
-    case FrameType::RouteRequest: {
+    case FrameType::RouteRequest:
+    case FrameType::GroupReport: {
       wire::PlainFrame plain{};
       status = wire::open_end(frame, config_.node, security_, plain);
       if (!status) {
@@ -3792,6 +3868,8 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         handle_route_update(plain, peer, now_ms);
       } else if (frame.header.type == FrameType::RouteRequest) {
         handle_route_request(plain, peer, now_ms);
+      } else if (frame.header.type == FrameType::GroupReport) {
+        handle_group_report(plain, peer, now_ms);
       } else {
         handle_seqno_request(plain, peer, now_ms);
       }
@@ -3919,6 +3997,20 @@ void MeshNode::process_delivery_timeouts(const MonotonicMs now_ms) noexcept {
     }
     // While retry rounds are paused (sleep drain or an operational pause),
     // the deliveries wait for their disposition instead of making new work.
+    if (delivery.order_wait) {
+      // Held behind its ordered predecessor: released once the predecessor
+      // is Delivered (or gone as never-sent) or its deadline passed — the
+      // head-of-line wait never outlives the predecessor's lifetime.
+      const Delivery* predecessor = find_delivery(delivery.order_after);
+      const bool settled =
+          predecessor != nullptr &&
+          (predecessor->state == DeliveryState::Delivered ||
+           predecessor->state == DeliveryState::CancelledBeforeTx);
+      if (!settled && now_ms < delivery.order_hold_until_ms) return;
+      if (paused(pause::kRetryRounds)) return;
+      delivery.order_wait = false;
+      delivery.next_round_at_ms = now_ms;
+    }
     if (!paused(pause::kRetryRounds) &&
         (delivery.state == DeliveryState::WaitingForRoute ||
          delivery.state == DeliveryState::WaitingForEndReceipt) &&
@@ -4305,6 +4397,9 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // APPLIED terminal bookkeeping: result-record retention expiry and the
   // bounded RESULT emit retry pass (sdk-completion/01 §1.4/§1.6).
   process_applied(now_ms);
+  // Group delivery (group-delivery.md): report deadlines, source rounds and
+  // admission, ordered-hold release, retention expiry.
+  process_group(now_ms);
   scan_selection_changes(now_ms);
   if (gateway_scoped()) expire_route_requests(now_ms);
   if (!paused(pause::kBackgroundWork)) {

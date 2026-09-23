@@ -148,6 +148,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     return node_monitor_;
   }
 
+  // Late group binding (group_delivery_v1): serves HostOps 0x50 GROUP_SEND
+  // and 0x52 GROUP_QUERY on the bridge's mesh node (which must be a route
+  // gateway of the gateway-scoped profile for a send to be admitted) and
+  // answers with 0x51 GROUP_STATUS; an admitted send gets one more FINAL
+  // 0x51 under its request id when it settles. Advertises
+  // CAP_GROUP_DELIVERY_V1 in HelloAck. Requires config_.mesh.
+  Status attach_group() noexcept;
+
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
   // Periodic work: partial-frame timeout, handshake timeout, TX pump,
@@ -164,6 +172,10 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // NodeObserver: mesh events become host frames.
   void on_message(const MessageKey& key, NodeId source, ByteView payload) noexcept override;
   void on_delivery(const DeliveryResult& result) noexcept override;
+  // Group sends admitted through 0x50: a terminal summary becomes the FINAL
+  // 0x51 under the original request id. (Group messages RECEIVED by this
+  // node keep the default on_group_message -> on_message DataFromMesh path.)
+  void on_group_delivery(const GroupDeliveryResult& result) noexcept override;
   void on_diagnostic(const char* reason, NodeId peer,
                      const MessageId* message) noexcept override;
 
@@ -310,6 +322,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // (re)arm the event monitor for this session, then answer one 0x41 page.
   void handle_node_status_query(std::uint64_t request, ByteView inner,
                                 MonotonicMs now_ms) noexcept;
+  // Group send/query (0x50/0x52): decode, gate on CAP_GROUP_DELIVERY_V1,
+  // then answer one 0x51 with the admission outcome / current summary.
+  void handle_group_send(std::uint64_t request, ByteView inner,
+                         MonotonicMs now_ms) noexcept;
+  void handle_group_query(std::uint64_t request, ByteView inner,
+                          MonotonicMs now_ms) noexcept;
+  void send_group_status(std::uint64_t request, const GroupStatusReply& reply,
+                         MonotonicMs now_ms) noexcept;
   // poll(): diff the mesh against the armed baseline at most every
   // kNodeMonitorIntervalMs and queue bounded 0x42 events, leaving the data
   // queue's application reserve untouched.
@@ -522,6 +542,15 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   std::array<NodeStatus, kNodeStatusPageMax> node_page_{};
   std::array<std::uint8_t, kGatewayInnerHeadSize + kNodeStatusPageMaxPayload>
       node_page_wire_{};
+  // group_delivery_v1: admitted 0x50 sends awaiting their FINAL 0x51. The
+  // node never holds more than kGroupOriginCapacity unsettled group
+  // messages, so this bound cannot refuse a correlation the node admitted.
+  struct PendingGroup {
+    MessageId id{};
+    std::uint64_t usb_request{0};
+    bool used{false};
+  };
+  std::array<PendingGroup, kGroupOriginCapacity> pending_group_{};
   BridgeStats stats_{};
 };
 

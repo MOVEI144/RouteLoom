@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <tuple>
 
 #include "routeloom/security.hpp"
@@ -70,6 +71,18 @@ class TestSecurity final : public routeloom::SecurityProvider {
       return routeloom::Status::error(routeloom::StatusCode::AuthenticationFailed,
                                     "test tag mismatch");
     }
+    if (context.scope == routeloom::SecurityScope::Group) {
+      // Group scope replay (group-delivery.md §7): per (sender, group,
+      // epoch) a counter opens once — the node must dedup a group message
+      // on its header BEFORE opening it, so a second open is a defect.
+      const auto replay_key = std::make_tuple(context.network, context.sender,
+                                              context.receiver, context.epoch, counter);
+      if (!group_accepted_.insert(replay_key).second) {
+        ++group_replays_;
+        return routeloom::Status::error(routeloom::StatusCode::ReplayRejected,
+                                        "test group replay");
+      }
+    }
     auto state = seed(context, counter);
     for (std::size_t i = 0; i < ciphertext.size; ++i) {
       state = mix(state, i + 1);
@@ -78,7 +91,15 @@ class TestSecurity final : public routeloom::SecurityProvider {
     return routeloom::Status::success();
   }
 
+  // Group-scope opens refused as replays (tests assert this stays 0 on the
+  // node path: dedup precedes every group open).
+  std::uint64_t group_replays() const noexcept { return group_replays_; }
+
  private:
+  std::set<std::tuple<routeloom::NetworkId, routeloom::NodeId, routeloom::NodeId,
+                      std::uint32_t, std::uint64_t>>
+      group_accepted_{};
+  std::uint64_t group_replays_{0};
   using Key = std::tuple<int, routeloom::NetworkId, routeloom::NodeId, routeloom::NodeId,
                          std::uint16_t>;
   std::map<Key, std::uint64_t> counters_{};

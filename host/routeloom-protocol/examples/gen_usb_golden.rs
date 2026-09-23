@@ -696,6 +696,7 @@ fn main() -> std::io::Result<()> {
     fs::write(root.join("session.json"), session_json)?;
     println!("wrote {} steps to {}", steps.len(), frames_dir.display());
     node_status_scenario(&root.join("node-status"))?;
+    group_ops_scenario(&root.join("group-ops"))?;
     Ok(())
 }
 
@@ -755,120 +756,10 @@ fn node_status_scenario(root: &Path) -> std::io::Result<()> {
     use routeloom_protocol::node_status as ns;
 
     const CAPABILITY_NS: u32 = 0x3 | CAP_HOST_OPS_V1 | ns::CAP_NODE_STATUS_V1;
-    let frames_dir = root.join("frames");
-    fs::create_dir_all(&frames_dir)?;
-    for entry in fs::read_dir(&frames_dir)? {
-        let entry = entry?;
-        if entry.path().extension().is_some_and(|ext| ext == "json") {
-            fs::remove_file(entry.path())?;
-        }
-    }
-    let transcript = Transcript {
-        host_nonce: HOST_NONCE,
-        device_nonce: DEVICE_NONCE,
-        version: 1,
-        node: NODE,
-        boot: BOOT,
-        network: NETWORK,
-        capability: CAPABILITY_NS,
-        principal: PRINCIPAL.to_vec(),
-    };
-    let proof = derive_session_proof(SECRET, &transcript.encode().unwrap());
-    let mut w = SessionSteps {
-        session: proof.session_id,
-        key: proof.key,
-        d2h_counter: 0,
-        h2d_counter: 0,
-        steps: Vec::new(),
-    };
-
-    let mut hello_body = Vec::new();
-    hello_body.extend_from_slice(&HOST_NONCE.to_be_bytes());
-    hello_body.extend_from_slice(&[1, 1, PRINCIPAL.len() as u8]);
-    hello_body.extend_from_slice(PRINCIPAL);
-    w.steps.push(Step {
-        name: "hello",
-        direction: "h2d",
-        frame: Frame {
-            kind: FrameKind::Hello,
-            flags: 0,
-            session: 0,
-            request: 100,
-            body: hello_body.clone(),
-        },
-        inner: hello_body,
-        note: "host opens: nonce, version range, principal",
-    });
-    let mut ack_body = Vec::new();
-    ack_body.extend_from_slice(&DEVICE_NONCE.to_be_bytes());
-    ack_body.push(1);
-    ack_body.extend_from_slice(&NODE.to_be_bytes());
-    ack_body.extend_from_slice(&BOOT.to_be_bytes());
-    ack_body.extend_from_slice(&NETWORK.to_be_bytes());
-    ack_body.extend_from_slice(&CAPABILITY_NS.to_be_bytes());
-    ack_body.extend_from_slice(&proof.hello_tag);
-    w.steps.push(Step {
-        name: "hello_ack",
-        direction: "d2h",
-        frame: Frame {
-            kind: FrameKind::HelloAck,
-            flags: 0,
-            session: 0,
-            request: 100,
-            body: ack_body.clone(),
-        },
-        inner: ack_body,
-        note: "capability advertises node_status_v1 (bit 6)",
-    });
-    w.steps.push(Step {
-        name: "auth",
-        direction: "h2d",
-        frame: Frame {
-            kind: FrameKind::Hello,
-            flags: FLAG_AUTH,
-            session: 0,
-            request: 101,
-            body: proof.auth_tag.to_vec(),
-        },
-        inner: proof.auth_tag.to_vec(),
-        note: "host proves the shared secret over the transcript",
-    });
-    let mut auth_ok_body = proof.auth_ok_tag.to_vec();
-    auth_ok_body.extend_from_slice(&proof.session_id.to_be_bytes());
-    w.steps.push(Step {
-        name: "auth_ok",
-        direction: "d2h",
-        frame: Frame {
-            kind: FrameKind::HelloAck,
-            flags: FLAG_AUTH,
-            session: 0,
-            request: 0,
-            body: auth_ok_body.clone(),
-        },
-        inner: auth_ok_body,
-        note: "device confirms; session id binds the transcript",
-    });
-    let grant = |frames: u64, bytes: u64| {
-        let mut inner = vec![CREDIT_GRANT];
-        inner.extend_from_slice(&frames.to_be_bytes());
-        inner.extend_from_slice(&bytes.to_be_bytes());
-        inner
-    };
-    w.sealed(
-        "rx_grant",
-        "d2h",
-        "initial cumulative grant for host->device sends",
-        FrameKind::Credit,
-        0,
-        grant(RX_GRANT_FRAMES, RX_GRANT_BYTES),
-    );
-    w.sealed(
-        "tx_grant",
-        "h2d",
-        "host grants device->host data sends",
-        FrameKind::Credit,
-        102,
-        grant(TX_GRANT_FRAMES, TX_GRANT_BYTES),
+    let frames_dir = prepare_frames_dir(root)?;
+    let (mut w, proof) = begin_session(
+        CAPABILITY_NS,
+        "capability advertises node_status_v1 (bit 6)",
     );
 
     // Node 2 as the gateway sees it right after admission: active neighbor,
@@ -894,16 +785,7 @@ fn node_status_scenario(root: &Path) -> std::io::Result<()> {
         ..admitted
     };
 
-    let mut consumed_frames = 0_u64;
-    let mut consumed_bytes = 0_u64;
-    let mut topup = |inner_len: usize| {
-        consumed_frames += 1;
-        consumed_bytes += (30 + 24 + inner_len) as u64;
-        grant(
-            consumed_frames + RX_GRANT_FRAMES,
-            consumed_bytes + RX_GRANT_BYTES,
-        )
-    };
+    let mut topup = rx_topup();
 
     let subscribe = ns::encode_node_status_query(&ns::NodeStatusQuery {
         after: 0,
@@ -1014,18 +896,174 @@ fn node_status_scenario(root: &Path) -> std::io::Result<()> {
         vec![CREDIT_CLOSE],
     );
 
+    finish_session(root, &frames_dir, "node-status", CAPABILITY_NS, &proof, &w)
+}
+
+/// Clears (or creates) `<root>/frames` so a regeneration never keeps a
+/// renamed step.
+fn prepare_frames_dir(root: &Path) -> std::io::Result<PathBuf> {
+    let frames_dir = root.join("frames");
+    fs::create_dir_all(&frames_dir)?;
+    for entry in fs::read_dir(&frames_dir)? {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(frames_dir)
+}
+
+fn credit_grant(frames: u64, bytes: u64) -> Vec<u8> {
+    let mut inner = vec![CREDIT_GRANT];
+    inner.extend_from_slice(&frames.to_be_bytes());
+    inner.extend_from_slice(&bytes.to_be_bytes());
+    inner
+}
+
+/// The device's cumulative rx grant after each consumed host_ops request
+/// (one frame plus its encoded size: 30 B header/CRC + 24 B seal + inner).
+fn rx_topup() -> impl FnMut(usize) -> Vec<u8> {
+    let mut consumed_frames = 0_u64;
+    let mut consumed_bytes = 0_u64;
+    move |inner_len: usize| {
+        consumed_frames += 1;
+        consumed_bytes += (30 + 24 + inner_len) as u64;
+        credit_grant(
+            consumed_frames + RX_GRANT_FRAMES,
+            consumed_bytes + RX_GRANT_BYTES,
+        )
+    }
+}
+
+/// Hello/HelloAck/auth/auth_ok plus both initial credit grants for a device
+/// advertising `capability` — the common opening of every scenario session.
+fn begin_session(capability: u32, ack_note: &'static str) -> (SessionSteps, SessionProof) {
+    let transcript = Transcript {
+        host_nonce: HOST_NONCE,
+        device_nonce: DEVICE_NONCE,
+        version: 1,
+        node: NODE,
+        boot: BOOT,
+        network: NETWORK,
+        capability,
+        principal: PRINCIPAL.to_vec(),
+    };
+    let proof = derive_session_proof(SECRET, &transcript.encode().unwrap());
+    let mut w = SessionSteps {
+        session: proof.session_id,
+        key: proof.key,
+        d2h_counter: 0,
+        h2d_counter: 0,
+        steps: Vec::new(),
+    };
+
+    let mut hello_body = Vec::new();
+    hello_body.extend_from_slice(&HOST_NONCE.to_be_bytes());
+    hello_body.extend_from_slice(&[1, 1, PRINCIPAL.len() as u8]);
+    hello_body.extend_from_slice(PRINCIPAL);
+    w.steps.push(Step {
+        name: "hello",
+        direction: "h2d",
+        frame: Frame {
+            kind: FrameKind::Hello,
+            flags: 0,
+            session: 0,
+            request: 100,
+            body: hello_body.clone(),
+        },
+        inner: hello_body,
+        note: "host opens: nonce, version range, principal",
+    });
+    let mut ack_body = Vec::new();
+    ack_body.extend_from_slice(&DEVICE_NONCE.to_be_bytes());
+    ack_body.push(1);
+    ack_body.extend_from_slice(&NODE.to_be_bytes());
+    ack_body.extend_from_slice(&BOOT.to_be_bytes());
+    ack_body.extend_from_slice(&NETWORK.to_be_bytes());
+    ack_body.extend_from_slice(&capability.to_be_bytes());
+    ack_body.extend_from_slice(&proof.hello_tag);
+    w.steps.push(Step {
+        name: "hello_ack",
+        direction: "d2h",
+        frame: Frame {
+            kind: FrameKind::HelloAck,
+            flags: 0,
+            session: 0,
+            request: 100,
+            body: ack_body.clone(),
+        },
+        inner: ack_body,
+        note: ack_note,
+    });
+    w.steps.push(Step {
+        name: "auth",
+        direction: "h2d",
+        frame: Frame {
+            kind: FrameKind::Hello,
+            flags: FLAG_AUTH,
+            session: 0,
+            request: 101,
+            body: proof.auth_tag.to_vec(),
+        },
+        inner: proof.auth_tag.to_vec(),
+        note: "host proves the shared secret over the transcript",
+    });
+    let mut auth_ok_body = proof.auth_ok_tag.to_vec();
+    auth_ok_body.extend_from_slice(&proof.session_id.to_be_bytes());
+    w.steps.push(Step {
+        name: "auth_ok",
+        direction: "d2h",
+        frame: Frame {
+            kind: FrameKind::HelloAck,
+            flags: FLAG_AUTH,
+            session: 0,
+            request: 0,
+            body: auth_ok_body.clone(),
+        },
+        inner: auth_ok_body,
+        note: "device confirms; session id binds the transcript",
+    });
+    w.sealed(
+        "rx_grant",
+        "d2h",
+        "initial cumulative grant for host->device sends",
+        FrameKind::Credit,
+        0,
+        credit_grant(RX_GRANT_FRAMES, RX_GRANT_BYTES),
+    );
+    w.sealed(
+        "tx_grant",
+        "h2d",
+        "host grants device->host data sends",
+        FrameKind::Credit,
+        102,
+        credit_grant(TX_GRANT_FRAMES, TX_GRANT_BYTES),
+    );
+    (w, proof)
+}
+
+/// Writes the step files and the scenario's session.json.
+fn finish_session(
+    root: &Path,
+    frames_dir: &Path,
+    name: &str,
+    capability: u32,
+    proof: &SessionProof,
+    w: &SessionSteps,
+) -> std::io::Result<()> {
     for (index, step) in w.steps.iter().enumerate() {
-        write_step(&frames_dir, index + 1, step)?;
+        write_step(frames_dir, index + 1, step)?;
     }
     let session_json = format!(
-        "{{\n  \"name\": \"node-status\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 1,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"peer_node\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"session_key_hex\": \"{}\"\n}}\n",
+        "{{\n  \"name\": \"{}\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 1,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"peer_node\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"session_key_hex\": \"{}\"\n}}\n",
+        name,
         hex(SECRET),
         HOST_NONCE,
         DEVICE_NONCE,
         NODE,
         BOOT,
         NETWORK,
-        CAPABILITY_NS,
+        capability,
         std::str::from_utf8(PRINCIPAL).expect("ascii principal"),
         proof.session_id,
         PEER_NODE,
@@ -1037,4 +1075,126 @@ fn node_status_scenario(root: &Path) -> std::io::Result<()> {
     fs::write(root.join("session.json"), session_json)?;
     println!("wrote {} steps to {}", w.steps.len(), frames_dir.display());
     Ok(())
+}
+
+/// protocol/usb-golden/group-ops: the group_delivery_v1 HostOps family on a
+/// device advertising CAP_GROUP_DELIVERY_V1. The C++ replay (test_usb.cpp)
+/// drives a two-node gateway-scoped mesh (gateway 1 = the bridge node, node
+/// 2 its tree child) and pumps the mesh right before the FINAL status.
+/// Scenario: GROUP_SEND ALL (Urgent "PUMP3 OVERTEMP") -> immediate status
+/// (round pending) -> FINAL status under the same request id (1 member
+/// reached, 1 round) -> GROUP_QUERY re-reads the settled summary.
+fn group_ops_scenario(root: &Path) -> std::io::Result<()> {
+    use routeloom_protocol::group_ops as go;
+
+    const CAPABILITY_GROUP: u32 = 0x3 | CAP_HOST_OPS_V1 | go::CAP_GROUP_DELIVERY_V1;
+    // DeliveryState::WaitingForEndReceipt: a round is in flight.
+    const STATE_ROUND_PENDING: u8 = 6;
+    let frames_dir = prepare_frames_dir(root)?;
+    let (mut w, proof) = begin_session(
+        CAPABILITY_GROUP,
+        "capability advertises group_delivery_v1 (bit 7)",
+    );
+    let mut topup = rx_topup();
+
+    let sequence = go::GROUP_SEQUENCE_FLAG | 1;
+    let send = go::encode_group_send(&go::GroupSend {
+        group: go::GROUP_ALL,
+        priority: 3,
+        ordered: false,
+        lifetime_ms: 5000,
+        hop_limit: 10,
+        data: b"PUMP3 OVERTEMP".to_vec(),
+    })
+    .expect("valid send");
+    w.sealed(
+        "group_send",
+        "h2d",
+        "host asks the gateway to send an Urgent alarm to ALL",
+        FrameKind::HostOps,
+        400,
+        send.clone(),
+    );
+    w.sealed(
+        "group_send_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(send.len()),
+    );
+    w.sealed(
+        "group_status_admitted",
+        "d2h",
+        "admitted: group stream 1, first round in flight, not FINAL",
+        FrameKind::HostOps,
+        400,
+        go::encode_group_status(&go::GroupStatus {
+            result: ConfigOpsResult::Ok as u16,
+            session: MESH_SESSION,
+            sequence,
+            group: go::GROUP_ALL,
+            state: STATE_ROUND_PENDING,
+            reason: "GROUP_ROUND_PENDING".to_string(),
+            ..go::GroupStatus::default()
+        })
+        .expect("valid status"),
+    );
+    let settled = go::GroupStatus {
+        result: ConfigOpsResult::Ok as u16,
+        session: MESH_SESSION,
+        sequence,
+        group: go::GROUP_ALL,
+        state: go::STATE_DELIVERED,
+        rounds: 1,
+        delivered: 1,
+        reason: "GROUP_COMPLETE".to_string(),
+        ..go::GroupStatus::default()
+    };
+    w.sealed(
+        "group_status_final",
+        "d2h",
+        "FINAL under the send's request id: node 2 confirmed in round 1",
+        FrameKind::HostOps,
+        400,
+        go::encode_group_status(&settled).expect("valid status"),
+    );
+    let query = go::encode_group_query(&go::GroupQuery {
+        session: MESH_SESSION,
+        sequence,
+    })
+    .expect("valid query");
+    w.sealed(
+        "group_query",
+        "h2d",
+        "host re-reads the summary by MessageId",
+        FrameKind::HostOps,
+        401,
+        query.clone(),
+    );
+    w.sealed(
+        "group_query_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(query.len()),
+    );
+    w.sealed(
+        "group_query_status",
+        "d2h",
+        "the settled summary, FINAL",
+        FrameKind::HostOps,
+        401,
+        go::encode_group_status(&settled).expect("valid status"),
+    );
+    w.sealed(
+        "close",
+        "h2d",
+        "host requests session close; device drains",
+        FrameKind::Credit,
+        402,
+        vec![CREDIT_CLOSE],
+    );
+    finish_session(root, &frames_dir, "group-ops", CAPABILITY_GROUP, &proof, &w)
 }

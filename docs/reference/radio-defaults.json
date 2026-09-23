@@ -160,6 +160,29 @@
       }
     }
   },
+  "group_delivery": {
+    "status": "portable-core-host-tested-not-rf-qualified",
+    "design": "docs/design/sdk-v1/group-delivery.md",
+    "profile": "gateway-scoped only; the source is a configured route gateway",
+    "forwarding": "per-child MAC-acknowledged unicast along the gateway tree, no HOP_ACCEPT",
+    "confirmation": "one GROUP_REPORT per tree edge per round (subtree counts + <=12 missing ids)",
+    "level_wait_ms": 150,
+    "repair_gap_ms": 200,
+    "max_rounds": 12,
+    "order_max_hold_ms": 10000,
+    "source_budget_us_per_second": 300000,
+    "source_bucket_capacity_us": 3000000,
+    "urgent_bypasses_budget": true,
+    "airtime_domain": "work (confirmations of accepted work are charged to that work, radio.md §14)",
+    "estimate_d100": {
+      "model": "frame_us = (encoded_bytes + 96) * 32",
+      "payload": "14-byte alarm text + 1 flags byte",
+      "copy_us": 7392,
+      "report_us": 7328,
+      "network_us_per_message": 1457280,
+      "measured_network_us_per_message": 1460000
+    }
+  },
   "scheduling": {
     "drr_weights": {
       "management": 4,

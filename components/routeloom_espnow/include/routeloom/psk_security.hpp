@@ -6,6 +6,7 @@
 
 #include "routeloom/counter_store.hpp"
 #include "routeloom/fixed_containers.hpp"
+#include "routeloom/group_replay.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/nvs_replay_store.hpp"
 #include "routeloom/peer_state.hpp"
@@ -90,6 +91,10 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
   Status replay_census_status() const noexcept {
     return replay_bounds_.count_status();
   }
+  // SecurityScope::Group receive state (group-delivery.md §7): RAM-only,
+  // bounded (GroupReplayTable::kCapacity group senders), never
+  // persisted — it adds no per-peer NVS records (#37).
+  const GroupReplayTable& group_replay() const noexcept { return group_replay_; }
   Status next_counter(const SecurityContext& context,
                       std::uint64_t& counter) noexcept override;
   Status seal(const SecurityContext& context, std::uint64_t counter,
@@ -135,6 +140,7 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
   FixedPool<TxContext, kTxContextCapacity> tx_contexts_{};
   CounterCheckpointCache<kParkedLeaseCapacity> parked_leases_{};
   FixedPool<RxContext, kRxContextCapacity> rx_contexts_{};
+  GroupReplayTable group_replay_{};
   std::uint64_t context_stamp_{0};
 };
 

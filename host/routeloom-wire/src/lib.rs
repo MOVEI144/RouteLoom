@@ -46,6 +46,7 @@ use std::fmt;
 pub mod admission;
 pub mod autonomy;
 pub mod endpoint;
+pub mod group;
 pub mod test_security;
 
 pub const MAGIC: u16 = 0x524c;
@@ -89,6 +90,11 @@ pub enum FrameType {
     Control = 22,
     TimeSync = 23,
     ChannelNotice = 24,
+    /// Group delivery (docs/design/sdk-v1/group-delivery.md): end-protected
+    /// under [`SecurityScope::Group`], forwarded along the gateway tree.
+    GroupData = 25,
+    /// Link-only aggregated confirmation, child -> tree parent.
+    GroupReport = 26,
     RouteUpdate = 32,
     RouteWithdraw = 33,
     SeqnoRequest = 34,
@@ -122,6 +128,8 @@ impl TryFrom<u8> for FrameType {
             22 => Self::Control,
             23 => Self::TimeSync,
             24 => Self::ChannelNotice,
+            25 => Self::GroupData,
+            26 => Self::GroupReport,
             32 => Self::RouteUpdate,
             33 => Self::RouteWithdraw,
             34 => Self::SeqnoRequest,
@@ -174,6 +182,8 @@ impl TryFrom<u8> for DeliveryClass {
 pub enum SecurityScope {
     Link = 0,
     EndToEnd = 1,
+    /// GROUP_DATA end protection: sender = origin, receiver = group address.
+    Group = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -483,11 +493,24 @@ fn link_context(header: &Header) -> SecurityContext {
 }
 
 fn end_context(header: &Header) -> SecurityContext {
+    // GROUP_DATA is end-protected under the group scope (C++ end_context):
+    // the context receiver is the fixed site-group domain, so one key,
+    // counter space and replay window per (sender, epoch) cover every group;
+    // the destination group stays authenticated through the end AAD.
+    let group = header.frame_type == FrameType::GroupData;
     SecurityContext {
-        scope: SecurityScope::EndToEnd,
+        scope: if group {
+            SecurityScope::Group
+        } else {
+            SecurityScope::EndToEnd
+        },
         network: header.network,
         sender: header.origin,
-        receiver: header.destination,
+        receiver: if group {
+            BROADCAST_NODE_ID
+        } else {
+            header.destination
+        },
         epoch: header.end_epoch,
     }
 }
@@ -653,6 +676,12 @@ pub fn open_end<S: SecurityProvider>(
             "end payload is not addressed to this node",
         );
     }
+    if input.header.frame_type == FrameType::GroupData {
+        return err(
+            ErrorCode::AuthorizationFailed,
+            "group frame requires open_group",
+        );
+    }
     // Callers may build LinkOpenedFrame directly (open_link validates these,
     // but the fields are public): reject sizes that cannot fit the fixed
     // buffers before any length arithmetic or slicing.
@@ -686,6 +715,49 @@ pub fn open_end<S: SecurityProvider>(
             "protected payload length mismatch",
         );
     }
+    let aad = end_aad(&input.header);
+    let mut end_tag = [0_u8; AEAD_TAG_SIZE];
+    end_tag.copy_from_slice(
+        &input.protected_payload
+            [usize::from(input.header.payload_length)..input.protected_payload_size],
+    );
+    security.open(
+        &end_context(&input.header),
+        input.header.end_counter,
+        &aad,
+        &input.protected_payload[..usize::from(input.header.payload_length)],
+        &end_tag,
+        &mut output.payload[..output.payload_size],
+    )
+}
+
+/// Opens the group end layer of a link-opened GROUP_DATA frame (C++
+/// `wire::open_group`): any group key holder may call it — there is no
+/// binding to the local node, and success proves membership of the sealer,
+/// never the origin's identity.
+pub fn open_group<S: SecurityProvider>(
+    input: &LinkOpenedFrame,
+    security: &mut S,
+    output: &mut PlainFrame,
+) -> Result<()> {
+    if input.header.frame_type != FrameType::GroupData
+        || input.header.flags & FLAG_END_PROTECTED == 0
+        || !group::is_group_address(input.header.destination)
+    {
+        return err(ErrorCode::AuthorizationFailed, "not a group frame");
+    }
+    if input.header.payload_length > MAX_APPLICATION_PAYLOAD as u16
+        || input.protected_payload_size > input.protected_payload.len()
+        || input.protected_payload_size != usize::from(input.header.payload_length) + AEAD_TAG_SIZE
+    {
+        return err(
+            ErrorCode::ProtocolError,
+            "protected payload length mismatch",
+        );
+    }
+    *output = PlainFrame::default();
+    output.header = input.header.clone();
+    output.payload_size = usize::from(input.header.payload_length);
     let aad = end_aad(&input.header);
     let mut end_tag = [0_u8; AEAD_TAG_SIZE];
     end_tag.copy_from_slice(
