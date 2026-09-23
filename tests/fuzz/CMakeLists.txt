@@ -29,6 +29,7 @@ set(ROUTELOOM_FUZZ_TARGETS
   migration
   cose
   rlres1
+  sdkv1
 )
 
 foreach(target ${ROUTELOOM_FUZZ_TARGETS})

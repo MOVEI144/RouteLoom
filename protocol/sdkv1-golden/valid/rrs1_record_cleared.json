@@ -1,0 +1,9 @@
+{
+  "codec": "rrs1_record",
+  "commit_seq": 7,
+  "count": 0,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rrs1_record_cleared",
+  "record_hex": "5252533100010018000000012e5e7c0d000000073fa16205"
+}

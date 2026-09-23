@@ -1,0 +1,8 @@
+{
+  "codec": "rlp1",
+  "encoded_hex": "524c50310101010100a1000000000777000000030a1b2c3d7bab16de6d80fe1c00000001000000cb0000020000000000a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebff36bc5c0",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rlp1_bad_crc",
+  "note": "CRC mismatch"
+}

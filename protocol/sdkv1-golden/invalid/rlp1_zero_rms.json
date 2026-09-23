@@ -1,0 +1,8 @@
+{
+  "codec": "rlp1",
+  "encoded_hex": "524c50310101010100a1000000000777000000030a1b2c3d7bab16de6d80fe1c00000001000000cb0000020000000000000000000000000000000000000000000000000000000000000000000000000059b7716a",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rlp1_zero_rms",
+  "note": "a valid slot has a nonzero RMS"
+}

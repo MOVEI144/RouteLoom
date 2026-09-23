@@ -1,0 +1,8 @@
+{
+  "codec": "rrs1_record",
+  "encoded_hex": "5252533100010040000000012e5e7c0d0000000500000000000000000000000000000000000000000000000000000000000000000000000000000000db9967b1",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rrs1_record_garbage_object",
+  "note": "stored object must parse as an RRS1 Sign1"
+}
