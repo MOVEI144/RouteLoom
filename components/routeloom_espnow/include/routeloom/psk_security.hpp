@@ -20,7 +20,14 @@ namespace routeloom::espnow {
 class DevelopmentPskSecurityProvider final : public SecurityProvider {
  public:
   static constexpr std::size_t kMasterKeySize = 32;
-  static constexpr std::size_t kContextCapacity = 32;
+  // Flash-wear budget (issue #30, crash-time-resources.md §7):
+  // - TX: kTxContextCapacity live leases.
+  // - RX: kRxContextCapacity live replay windows. The window is RAM-only
+  //   behind a persisted ceiling (ReplayGuard), so an eviction tightens the
+  //   ceiling (<= 1 commit) and the reopen's next accept re-reserves
+  //   (<= 1 commit). Sized so a gateway's link + end contexts stay resident.
+  static constexpr std::size_t kTxContextCapacity = 32;
+  static constexpr std::size_t kRxContextCapacity = 64;
 
   DevelopmentPskSecurityProvider() = default;
   ~DevelopmentPskSecurityProvider() override;
@@ -78,8 +85,8 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
   NvsReplayStore replay_store_{};
   ReplayGuard replay_guard_{replay_store_};
   bool ready_{false};
-  FixedPool<TxContext, kContextCapacity> tx_contexts_{};
-  FixedPool<RxContext, kContextCapacity> rx_contexts_{};
+  FixedPool<TxContext, kTxContextCapacity> tx_contexts_{};
+  FixedPool<RxContext, kRxContextCapacity> rx_contexts_{};
   std::uint64_t context_stamp_{0};
 };
 

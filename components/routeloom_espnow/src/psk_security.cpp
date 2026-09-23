@@ -116,7 +116,13 @@ Status DevelopmentPskSecurityProvider::initialize(
 void DevelopmentPskSecurityProvider::close() noexcept {
   // Cached contexts hold leases bound to the old counter store and replay
   // windows tied to the old store handle: they must not survive a close or a
-  // later re-initialize would reuse stale state.
+  // later re-initialize would reuse stale state. Live replay windows first
+  // lower their persisted ceiling to the live maximum (best effort; a
+  // failure keeps the higher, still safe ceiling), so a clean restart
+  // rejects only out-of-order stragglers rather than a reservation step.
+  rx_contexts_.for_each([&](RxContext& value) {
+    (void)replay_guard_.close_context(value.window);
+  });
   tx_contexts_.clear();
   rx_contexts_.clear();
   replay_store_.close();
@@ -249,14 +255,20 @@ Status DevelopmentPskSecurityProvider::rx_context(
   }
   auto* created = rx_contexts_.allocate();
   if (created == nullptr) {
-    // Bounded pool: evict the least-recently-used cached window. Windows are
-    // persisted on accept, so eviction only forces a reload from the store.
+    // Bounded pool: evict the least-recently-used cached window. The live
+    // window is RAM-only above a persisted ceiling; close_context lowers
+    // that ceiling to the live maximum (<= 1 commit) so the reopen rejects
+    // only out-of-order stragglers, not a whole reservation step of fresh
+    // counters. A failed tighten keeps the higher ceiling: still replay-safe.
     RxContext* oldest = nullptr;
     rx_contexts_.for_each([&](RxContext& value) {
       if (oldest == nullptr || value.use_stamp < oldest->use_stamp) {
         oldest = &value;
       }
     });
+    if (oldest != nullptr) {
+      (void)replay_guard_.close_context(oldest->window);
+    }
     if (oldest == nullptr || !rx_contexts_.release(oldest)) {
       return Status::error(StatusCode::NoCapacity,
                            "security rx context table full");
