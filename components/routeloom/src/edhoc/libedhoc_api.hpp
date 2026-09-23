@@ -10,10 +10,23 @@
 // context header is not C++ (compound literals) and is only used from C
 // (src/edhoc/edhoc_port.c, tests/cpp/edhoc_probe.c).
 
+#include <cstddef>
+#include <cstdint>
+
 #include "edhoc_config.h"
 
+// Some C libraries' C++ headers already provide the mapping (picolibc's
+// sys/cdefs.h on ESP-IDF defines _Static_assert for C++): only define it, and
+// only undefine it, when it is not already there. The C library headers are
+// pulled in first so their definition (if any) is always seen before ours.
+#ifndef _Static_assert
 #define _Static_assert static_assert
+#define ROUTELOOM_DEFINED_STATIC_ASSERT_MAP 1
+#endif
 extern "C" {
 #include <edhoc/edhoc.h>
 }
+#ifdef ROUTELOOM_DEFINED_STATIC_ASSERT_MAP
 #undef _Static_assert
+#undef ROUTELOOM_DEFINED_STATIC_ASSERT_MAP
+#endif
