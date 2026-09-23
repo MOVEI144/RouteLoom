@@ -60,4 +60,16 @@ entry（28B）は `node:u64、flags:u8、rssi_last:i8、rssi_ewma:i16（Q8.8）�
 
 pageはMeshNodeの近隣表・経路表・telemetryから割当なしで組み立てる（最大128経路＋32近隣＝160 node）。eventは250ms毎の有界diff（1回最大4件、data queueの半分はapplication用に予約）で、拒否されたeventは同じsequenceで次回再送されるため欠落しない。session teardownでarmは解除される。共有vectorは`protocol/usb-golden/node-status`（C++ bridge replayとRust codecが同一byteを検証）。host側の扱いは[Host §9](host.md)。
 
+## 8. Group配送（group_delivery_v1、EXPERIMENTAL）
+
+HelloAck capability bit 7（`0x80`、`kCapGroupDeliveryV1`／`CAP_GROUP_DELIVERY_V1`）を広告するbridgeだけがHostOps `0x50`〜`0x52`を扱う（bit 2も必要）。bridgeのnodeがgateway-scoped profileのroute gatewayである時だけ送信が受理される（[設計](../design/sdk-v1/group-delivery.md)）。形式はnode status系と同じ4B head＋payload（big-endian、長さ完全一致）。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x50` GROUP_SEND | H→G | `group:u16`（1〜0xFFFF、0xFFFF＝ALL）、`priority:u8`（0 Bulk〜3 Urgent）、`flags:u8`（bit0 ORDERED）、`lifetime_ms:u32`（1〜30000）、`hop_limit:u8`（1〜254）、`reserved:u8=0`、`data_len:u16`（≤127）、`data` |
+| `0x51` GROUP_STATUS | G→H（0x50／0x52と同request id） | `result:u16`（ConfigOpsResult空間）、`session:u32`、`sequence:u64`、`group:u16`、`state:u8`（DeliveryState）、`rounds:u8`、`delivered:u16`、`nonmember:u16`、`missing_total:u16`、`unaccounted:u16`、`flags:u8`（bit0 TRUNCATED＝missing_total＞missing_count、bit1 FINAL＝終端状態）、`missing_count:u8`（≤12）、`reason_len:u8`（≤32）、`reserved:u8=0`、`missing:u64×n`、`reason`（印字可能ASCII） |
+| `0x52` GROUP_QUERY | H→G | `session:u32`、`sequence:u64`（bit63必須） |
+
+`0x50`にはすぐ受理結果の`0x51`を返す（`Ok`＋その時点のsummary、または拒否：`Unsupported`＝未attach・flat profile・gateway以外、`Busy`＝source表満杯／node停止中、`Invalid`＝引数、idとcountsは0、`reason`に理由）。受理したmessageが終端状態になると、同じrequest idで**FINAL付きの`0x51`をもう1回だけ**送る。この対応付けはsession単位（最大3件＝node側のsource表と同数）で、再接続後のhostは`0x52`で読む。機器が既に回収したidへの`0x52`は`Ok`／state 0／`NOT_FOUND`。flagsはencoderが導出し、decoderは不一致・予約id・印字不能reasonを拒否する。このnodeが**受信した**group messageは通常の`DataFromMesh`（sequenceのbit63でgroupと分かる）で届く。共有vectorは`protocol/usb-golden/group-ops`（2 node gateway-scoped meshでのC++ bridge replayとRust codec）。daemon API1への公開は未実装（設計のfollow-up）。
+
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

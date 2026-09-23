@@ -100,6 +100,14 @@ The C boundary is [`routeloom.h`](../../components/routeloom/include/routeloom/r
   profile and refuses sizes between the two layouts. A binary built against
   an older header must not call a newer `rl_node_config_init()` (it writes
   the whole current struct) — pre-1.0, rebuild from one source drop.
+- Group delivery was added the same additive way, without an ABI bump:
+  `rl_send_options_t.ordered` takes the first former reserved byte (zero
+  keeps the old unordered behaviour; the struct stays 28 bytes), and the new
+  `rl_group_send_options_t` / `rl_group_result_t` / `rl_send_group` /
+  `rl_get_group_result` / `rl_set_group_membership` symbols and
+  `RL_SECURITY_GROUP` scope value are new names only. `rl_context_size()`
+  grew with the group state, which is why storage is always sized at run
+  time ([design](../design/sdk-v1/group-delivery.md)).
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
 - Pre-1.0 the header may still change; consumers should build from the same
