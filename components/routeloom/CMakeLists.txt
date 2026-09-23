@@ -31,6 +31,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/rlres1.cpp
   src/route_scale.cpp
   src/routing.cpp
+  src/sdkv1_ead.cpp
   src/sdkv1_records.cpp
   src/sdkv1_store.cpp
   src/status.cpp
