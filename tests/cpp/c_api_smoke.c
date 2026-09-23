@@ -19,5 +19,23 @@ int main(void) {
     return 5;
   }
   if (rl_route_gateways(NULL, NULL, 0) != 0) return 6;
+  /* Group delivery: additive symbols, ABI version unchanged. */
+  {
+    rl_group_send_options_t group_options;
+    rl_group_result_t result;
+    rl_message_id_t id = {0, 0};
+    rl_group_send_options_init(&group_options);
+    if (group_options.abi_version != RL_ABI_VERSION ||
+        group_options.struct_size != sizeof(group_options) || options.ordered != 0) {
+      return 7;
+    }
+    if (rl_send_group(NULL, RL_GROUP_ALL, NULL, 0, &group_options, 0, &id) !=
+            RL_STATUS_INVALID_ARGUMENT ||
+        rl_get_group_result(NULL, id, &result) != RL_STATUS_INVALID_ARGUMENT ||
+        rl_set_group_membership(NULL, NULL, 0) != RL_STATUS_INVALID_ARGUMENT) {
+      return 8;
+    }
+    if (RL_SECURITY_GROUP != 2 || RL_GROUP_PAYLOAD_MAX != 127u) return 9;
+  }
   return 0;
 }

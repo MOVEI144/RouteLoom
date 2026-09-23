@@ -176,9 +176,30 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
 }
 
 SendOptions convert_options(const rl_send_options_t& input) noexcept {
-  return {static_cast<DeliveryClass>(input.delivery),
-          static_cast<Priority>(input.priority), input.lifetime_ms, input.hop_limit};
+  SendOptions output{static_cast<DeliveryClass>(input.delivery),
+                     static_cast<Priority>(input.priority), input.lifetime_ms,
+                     input.hop_limit};
+  output.ordered = input.ordered != 0;
+  return output;
 }
+
+// Group delivery constants mirror the C++ core (group.hpp, node.hpp).
+static_assert(RL_SECURITY_GROUP == static_cast<int>(SecurityScope::Group),
+              "rl_security_scope_t must mirror SecurityScope");
+static_assert(RL_GROUP_ALL == kGroupAll, "group ALL id");
+static_assert(RL_GROUP_ADDRESS_BASE == kGroupAddressBase, "group address base");
+static_assert(RL_GROUP_SEQUENCE_FLAG == kGroupSequenceFlag, "group sequence flag");
+static_assert(RL_GROUP_PAYLOAD_MAX == kGroupPayloadMax, "group payload limit");
+static_assert(RL_GROUP_MISSING_MAX == kGroupReportMissingMax, "group missing ids");
+static_assert(RL_GROUP_MEMBERSHIP_MAX == kGroupMembershipMax, "group membership limit");
+// `ordered` took the first byte of the former reserved[7]: the layout (and
+// the zero default of existing callers) is unchanged.
+static_assert(offsetof(rl_send_options_t, ordered) ==
+                      offsetof(rl_send_options_t, hop_limit) + 1 &&
+                  offsetof(rl_send_options_t, reserved) ==
+                      offsetof(rl_send_options_t, hop_limit) + 2 &&
+                  sizeof(rl_send_options_t) == 28,
+              "rl_send_options_t layout unchanged");
 
 bool valid_header(const std::uint32_t struct_size, const std::uint32_t abi_version,
                   const std::size_t expected) noexcept {
@@ -299,6 +320,70 @@ size_t rl_route_gateways(const rl_context_t* context, rl_node_id_t* out_gateways
     ++count;
   }
   return count;
+}
+
+void rl_group_send_options_init(rl_group_send_options_t* options) {
+  if (options == nullptr) return;
+  *options = {};
+  options->struct_size = sizeof(*options);
+  options->abi_version = RL_ABI_VERSION;
+  options->priority = RL_PRIORITY_NORMAL;
+  options->lifetime_ms = 5000;
+  options->hop_limit = 10;
+}
+
+rl_status_code_t rl_send_group(rl_context_t* context, const uint16_t group,
+                               const uint8_t* payload, const size_t payload_size,
+                               const rl_group_send_options_t* options,
+                               const rl_monotonic_ms_t now_ms, rl_message_id_t* out_id) {
+  if (context == nullptr || options == nullptr || out_id == nullptr ||
+      (payload_size != 0 && payload == nullptr) ||
+      !valid_header(options->struct_size, options->abi_version, sizeof(*options)) ||
+      static_cast<std::uint32_t>(options->priority) >
+          static_cast<std::uint32_t>(RL_PRIORITY_URGENT)) {
+    return RL_STATUS_INVALID_ARGUMENT;
+  }
+  GroupSendOptions converted{};
+  converted.priority = static_cast<Priority>(options->priority);
+  converted.lifetime_ms = options->lifetime_ms;
+  converted.hop_limit = options->hop_limit;
+  converted.ordered = options->ordered != 0;
+  MessageId id{};
+  const auto status = context->node.send_group(group, ByteView{payload, payload_size},
+                                               converted, now_ms, id);
+  if (status) *out_id = to_c(id);
+  return to_c(status.code);
+}
+
+rl_status_code_t rl_get_group_result(rl_context_t* context, const rl_message_id_t id,
+                                     rl_group_result_t* out_result) {
+  if (context == nullptr || out_result == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  const GroupDeliveryResult result = context->node.group_delivery(from_c(id));
+  *out_result = {};
+  out_result->id = to_c(result.id);
+  out_result->state = static_cast<rl_delivery_state_t>(result.state);
+  out_result->reason = result.reason;
+  out_result->group = result.group;
+  out_result->rounds = result.rounds;
+  out_result->missing_count = result.missing_count;
+  out_result->delivered = result.delivered;
+  out_result->nonmember = result.nonmember;
+  out_result->missing_total = result.missing_total;
+  out_result->unaccounted = result.unaccounted;
+  out_result->missing_truncated = result.missing_truncated ? 1U : 0U;
+  for (std::size_t i = 0; i < result.missing_count && i < RL_GROUP_MISSING_MAX; ++i) {
+    out_result->missing[i] = result.missing[i];
+  }
+  return result.state == DeliveryState::Empty ? RL_STATUS_NOT_FOUND : RL_STATUS_OK;
+}
+
+rl_status_code_t rl_set_group_membership(rl_context_t* context, const uint16_t* groups,
+                                         const size_t count) {
+  if (context == nullptr || (count != 0 && groups == nullptr)) {
+    return RL_STATUS_INVALID_ARGUMENT;
+  }
+  static_assert(sizeof(GroupId) == sizeof(uint16_t), "GroupId is a u16");
+  return to_c(context->node.set_group_membership(groups, count).code);
 }
 
 rl_status_code_t rl_cancel(rl_context_t* context, const rl_message_id_t id) {
