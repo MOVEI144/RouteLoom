@@ -174,6 +174,170 @@ void test_c_api_lifecycle() {
   rl_deinit(context);
 }
 
+// Gateway-scoped routing profile over the C ABI (routeloom.h tail extension).
+struct CApiNode {
+  CApiState state{};
+  rl_radio_vtable_t radio{nullptr, capi_radio_send, capi_radio_recover};
+  rl_security_vtable_t security{&state, capi_security_ready, capi_next_counter,
+                                capi_seal, capi_open};
+  rl_observer_vtable_t observer{};
+  std::vector<std::max_align_t> storage = std::vector<std::max_align_t>(
+      (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
+  rl_context_t* context{nullptr};
+
+  rl_status_code_t init(const rl_node_config_t& config) {
+    return rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
+                   &radio, &security, &observer, &context);
+  }
+  ~CApiNode() {
+    if (context != nullptr) rl_deinit(context);
+  }
+};
+
+rl_node_config_t capi_scoped_base() {
+  rl_node_config_t config{};
+  rl_node_config_init(&config);
+  config.network = 1;
+  config.node = 7;
+  config.message_session = 77;
+  return config;
+}
+
+void test_c_api_route_profile() {
+  // Defaults: the full struct, flat profile, SDK refresh cadence.
+  {
+    const rl_node_config_t config = capi_scoped_base();
+    CHECK(config.struct_size == sizeof(rl_node_config_t));
+    CHECK(config.route_gateway_count == 0);
+    CHECK(config.route_refresh_ticks == kScopedDefaultRefreshTicks);
+    CHECK(config.route_gateways[0] == 0 && config.route_gateways[1] == 0);
+    CHECK(config.route_advertisement_period_ms == 5000);
+    CHECK(config.route_lifetime_ms == 15000);
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    CHECK(rl_route_gateways(node.context, nullptr, 0) == 0);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+  }
+  // One gateway (this node lists itself) with the product timers.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 1;
+    config.route_gateways[0] = 7;
+    config.route_gateways[1] = 0x55;  // beyond the count: ignored
+    config.route_advertisement_period_ms = kScopedProductPeriodMs;
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    std::array<rl_node_id_t, RL_MAX_ROUTE_GATEWAYS> out{};
+    CHECK(rl_route_gateways(node.context, out.data(), out.size()) == 1);
+    CHECK(out[0] == 7 && out[1] == 0);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+  }
+  // Two gateways, preference order kept; a short buffer still reports the
+  // configured count.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 2;
+    config.route_gateways[0] = 1;
+    config.route_gateways[1] = 9;
+    config.route_advertisement_period_ms = kScopedProductPeriodMs;
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    std::array<rl_node_id_t, RL_MAX_ROUTE_GATEWAYS> out{};
+    CHECK(rl_route_gateways(node.context, out.data(), out.size()) == 2);
+    CHECK(out[0] == 1 && out[1] == 9);
+    rl_node_id_t first = 0;
+    CHECK(rl_route_gateways(node.context, &first, 1) == 2);
+    CHECK(first == 1);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+    CHECK(rl_add_neighbor(node.context, 1, 1, 0) == RL_STATUS_OK);
+    rl_poll(node.context, 10000);
+  }
+  // Shape errors are refused at rl_init: count over capacity, a zero id
+  // inside the count, a duplicate id.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = RL_MAX_ROUTE_GATEWAYS + 1;
+    config.route_gateways[0] = 1;
+    config.route_gateways[1] = 2;
+    CApiNode over;
+    CHECK(over.init(config) == RL_STATUS_INVALID_ARGUMENT);
+    CHECK(over.context == nullptr);
+    config.route_gateway_count = 2;
+    config.route_gateways[1] = 0;
+    CApiNode zero;
+    CHECK(zero.init(config) == RL_STATUS_INVALID_ARGUMENT);
+    config.route_gateways[1] = 1;
+    CApiNode duplicate;
+    CHECK(duplicate.init(config) == RL_STATUS_INVALID_ARGUMENT);
+  }
+  // Lease rule (routing-scale.md §5) surfaces as rl_start's status: the flat
+  // 5 s / 15 s defaults are below (2 * 6 + 2) * 5 s for a scoped node.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 1;
+    config.route_gateways[0] = 1;
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_INVALID_ARGUMENT);
+    // Just below / at the bound with the default cadence.
+    config.route_lifetime_ms = 70000 - 1;
+    CApiNode below;
+    CHECK(below.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(below.context, 0) == RL_STATUS_INVALID_ARGUMENT);
+    config.route_lifetime_ms = 70000;
+    CApiNode at;
+    CHECK(at.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(at.context, 0) == RL_STATUS_OK);
+    // route_refresh_ticks reaches the core: 2 ticks need (2*2+2)*5 s = 30 s;
+    // 0 means the SDK default (6), which 30 s does not satisfy.
+    config.route_lifetime_ms = 30000;
+    config.route_refresh_ticks = 2;
+    CApiNode fast;
+    CHECK(fast.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(fast.context, 0) == RL_STATUS_OK);
+    config.route_refresh_ticks = 0;
+    CApiNode defaulted;
+    CHECK(defaulted.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(defaulted.context, 0) == RL_STATUS_INVALID_ARGUMENT);
+    // Reserved ids are the core's to refuse, also at start.
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    config.route_gateways[0] = UINT64_MAX;
+    CApiNode broadcast;
+    CHECK(broadcast.init(config) == RL_STATUS_OK);
+    CHECK(rl_start(broadcast.context, 0) == RL_STATUS_INVALID_ARGUMENT);
+  }
+  // struct_size: the pre-extension size is still accepted and never reads
+  // the tail (flat profile whatever those bytes hold); a size between the
+  // two layouts is refused; a larger (future) size is accepted.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 1;
+    config.route_gateways[0] = 1;
+    config.struct_size = RL_NODE_CONFIG_SIZE_BASE;
+    CApiNode legacy;
+    CHECK(legacy.init(config) == RL_STATUS_OK);
+    CHECK(rl_route_gateways(legacy.context, nullptr, 0) == 0);
+    CHECK(rl_start(legacy.context, 0) == RL_STATUS_OK);
+    config.struct_size = RL_NODE_CONFIG_SIZE_BASE + 8;
+    CApiNode partial;
+    CHECK(partial.init(config) == RL_STATUS_INVALID_ARGUMENT);
+    config.struct_size = RL_NODE_CONFIG_SIZE_BASE - 4;
+    CApiNode truncated;
+    CHECK(truncated.init(config) == RL_STATUS_INVALID_ARGUMENT);
+    config.struct_size = sizeof(rl_node_config_t) + 8;
+    CApiNode larger;
+    CHECK(larger.init(config) == RL_STATUS_OK);
+    CHECK(rl_route_gateways(larger.context, nullptr, 0) == 1);
+    config.struct_size = sizeof(rl_node_config_t);
+    config.abi_version = RL_ABI_VERSION + 1;
+    CApiNode future_abi;
+    CHECK(future_abi.init(config) == RL_STATUS_INVALID_ARGUMENT);
+  }
+  CHECK(rl_route_gateways(nullptr, nullptr, 0) == 0);
+}
+
 void test_byte_io() {
   std::array<std::uint8_t, 32> buffer{};
   ByteWriter writer(MutableByteView{buffer.data(), buffer.size()});
@@ -407,6 +571,7 @@ int main() {
   test_deadline_resume();
   test_single_authority();
   test_c_api_lifecycle();
+  test_c_api_route_profile();
   test_byte_io();
   test_counter_lease();
   test_wire_forwarding();

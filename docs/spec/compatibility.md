@@ -86,11 +86,20 @@ vectors in `protocol/usb-golden`.
 The C boundary is [`routeloom.h`](../../components/routeloom/include/routeloom/routeloom.h)
 (there is no `c_api.h`; `routeloom.h` is the C API). Rules:
 
-- `RL_ABI_VERSION` (currently `1`) identifies the ABI. It is bumped on any
-  change that alters struct layout, enum values, or function signatures.
+- `RL_ABI_VERSION` (currently `2`) identifies the ABI. It is bumped on any
+  change that alters existing field offsets, enum values, or function
+  signatures; `rl_init` requires an exact match.
 - Extensible structs (`rl_node_config_t`, `rl_send_options_t`) carry
   `struct_size` + `abi_version` and zeroed reserved bytes; callers must use
-  the `rl_*_init` helpers. Growth is additive and source-compatible.
+  the `rl_*_init` helpers. Growth is additive and source-compatible: new
+  fields are appended at the tail without an ABI bump and are read only when
+  `struct_size` covers them. `rl_node_config_t` grew this way for the
+  gateway-scoped routing profile (`route_gateway_count`,
+  `route_refresh_ticks`, `route_gateways[2]`); `rl_init` still accepts the
+  pre-extension size `RL_NODE_CONFIG_SIZE_BASE` (64 bytes) as the flat
+  profile and refuses sizes between the two layouts. A binary built against
+  an older header must not call a newer `rl_node_config_init()` (it writes
+  the whole current struct) — pre-1.0, rebuild from one source drop.
 - `rl_context` is opaque; storage is caller-provided via
   `rl_context_size()`/`rl_context_alignment()` + `rl_init`.
 - Pre-1.0 the header may still change; consumers should build from the same

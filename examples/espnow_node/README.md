@@ -72,6 +72,17 @@ the core comes from. Pin `version` to a tag or commit SHA — `main` floats.
 development master key. Two boards form a mesh by pointing each at the
 other's MAC and node ID, or run one board peerless to see it boot.
 
+`ROUTELOOM_ROUTE_GATEWAY_SCOPED` (default `n`) switches the node to the
+gateway-scoped routing profile for large sites
+([routing-scale design](../../docs/design/sdk-v1/routing-scale.md)):
+`ROUTELOOM_ROUTE_GATEWAY_1` (default `0x1`, normally the bridge node's ID)
+and optional `ROUTELOOM_ROUTE_GATEWAY_2` name the site gateways, and
+`ROUTELOOM_ROUTE_PERIOD_MS` / `ROUTELOOM_ROUTE_LIFETIME_MS` (5000 / 90000)
+set the tick and lease. Every node of a site, the bridge included, must
+enable it with the same gateways. A lease below `(2 × 6 + 2) × period`, a
+zero gateway or a duplicate gateway fails the build. Left off, the node keeps
+the flat profile and the SDK's 5 s / 15 s route timers.
+
 ## Partition table and NVS
 
 `partitions.csv` (selected in `sdkconfig.defaults`) adds a 64 KiB `rlsec`

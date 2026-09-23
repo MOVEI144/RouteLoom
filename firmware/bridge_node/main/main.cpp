@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -432,6 +433,31 @@ extern "C" void app_main(void) {
   // would reject it forever (replay.cpp REPLAY_STATE_LOST wedge).
   config.node.link_epoch = config.node.route_generation;
   config.node.end_epoch = config.node.route_generation;
+#if CONFIG_ROUTELOOM_ROUTE_GATEWAY_SCOPED
+  // Gateway-scoped routing profile (docs/design/sdk-v1/routing-scale.md,
+  // issue #41). The bridge is the site gateway and lists itself first; a
+  // violating lease would only surface at boot as
+  // ROUTE_LIFETIME_BELOW_REFRESH_BOUND, so refuse the build instead.
+  static_assert(CONFIG_ROUTELOOM_ROUTE_GATEWAY_2 != CONFIG_ROUTELOOM_NODE_ID,
+                "ROUTELOOM_ROUTE_GATEWAY_2 must differ from this bridge's NODE_ID");
+  static_assert(routeloom::scoped_lifetime_sufficient(
+                    static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_PERIOD_MS),
+                    static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS),
+                    routeloom::kScopedDefaultRefreshTicks),
+                "ROUTELOOM_ROUTE_LIFETIME_MS below (2 * 6 + 2) * ROUTELOOM_ROUTE_PERIOD_MS");
+  config.node.route_gateways[0] = config.node.node;
+  config.node.route_gateways[1] =
+      static_cast<routeloom::NodeId>(CONFIG_ROUTELOOM_ROUTE_GATEWAY_2);
+  config.node.route_advertisement_period_ms =
+      static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_PERIOD_MS);
+  config.node.route_lifetime_ms =
+      static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS);
+  ESP_LOGI(kTag,
+           "routing profile: gateway-scoped gateways=0x%" PRIx64 ",0x%" PRIx64
+           " tick=%" PRIu32 "ms lease=%" PRIu32 "ms",
+           config.node.route_gateways[0], config.node.route_gateways[1],
+           config.node.route_advertisement_period_ms, config.node.route_lifetime_ms);
+#endif
   config.channel = CONFIG_ROUTELOOM_CHANNEL;
 #if CONFIG_ROUTELOOM_MIGRATION
   if (have_boot_channel) {
