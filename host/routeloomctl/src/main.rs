@@ -10,7 +10,7 @@ mod provision;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -236,6 +236,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
         [name, rest @ ..] if name == "node-get" => node_get_command(rest)?,
         [name] if name == "node-events" => node_events_request(),
+        [name, rest @ ..] if name == "group-send" => group_send_command(rest)?,
+        [name, rest @ ..] if name == "group-get" => group_get_command(rest)?,
         _ => {
             usage();
             return Err("invalid command".into());
@@ -1077,6 +1079,134 @@ fn config_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Err
     Ok(config_get_request(&id.to_ascii_lowercase()))
 }
 
+/// `group-send --network <16hex> --group <1-65535|ALL> --payload <hex>
+/// [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered]
+/// [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]`. Thin client
+/// over `group.send`: one payload to every node of a group (ALL = 65535);
+/// the daemon's record (group_op token, state, counts) is printed verbatim.
+fn group_send_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network = None;
+    let mut group = None;
+    let mut payload = None;
+    let mut key = None;
+    let mut priority = "NORMAL".to_string();
+    let mut ordered = false;
+    let mut ttl_ms: u64 = 5_000;
+    let mut hop_limit: u64 = 10;
+    let mut wait_ms: u64 = 0;
+    let mut args = args.iter();
+    let number = |flag: &str, value: String, range: std::ops::RangeInclusive<u64>| {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|n| range.contains(n))
+            .ok_or_else(|| {
+                format!(
+                    "{flag} must be an integer {}-{}",
+                    range.start(),
+                    range.end()
+                )
+            })
+    };
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => {
+                network = Some(want_hex16("--network", opt_value(&mut args, "--network")?)?)
+            }
+            "--group" => {
+                let value = opt_value(&mut args, "--group")?;
+                group = Some(if value.eq_ignore_ascii_case("all") {
+                    "\"ALL\"".to_string()
+                } else {
+                    number("--group", value, 1..=65_535)?.to_string()
+                });
+            }
+            "--payload" => payload = Some(opt_value(&mut args, "--payload")?),
+            "--key" => key = Some(opt_value(&mut args, "--key")?),
+            "--priority" => priority = opt_value(&mut args, "--priority")?,
+            "--ordered" => ordered = true,
+            "--ttl-ms" => {
+                ttl_ms = number("--ttl-ms", opt_value(&mut args, "--ttl-ms")?, 1..=30_000)?
+            }
+            "--hop-limit" => {
+                hop_limit = number("--hop-limit", opt_value(&mut args, "--hop-limit")?, 1..=254)?
+            }
+            "--wait-ms" => {
+                wait_ms = number("--wait-ms", opt_value(&mut args, "--wait-ms")?, 0..=15_000)?
+            }
+            other => return Err(format!("unknown group-send option: {other}").into()),
+        }
+    }
+    let network = network.ok_or("group-send requires --network <16hex>")?;
+    let group = group.ok_or("group-send requires --group <1-65535|ALL>")?;
+    let payload = payload.ok_or("group-send requires --payload <hex>")?;
+    if payload.len() % 2 != 0 || !payload.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("--payload must be even-length hex".into());
+    }
+    if payload.len() > 254 {
+        return Err("--payload exceeds 127 bytes (group payload limit)".into());
+    }
+    if !matches!(
+        priority.as_str(),
+        "BULK" | "NORMAL" | "MANAGEMENT" | "URGENT"
+    ) {
+        return Err("--priority must be BULK|NORMAL|MANAGEMENT|URGENT".into());
+    }
+    let key = match key {
+        Some(key) => {
+            if !is_hex(&key, 32) {
+                return Err("--key must be a 32-hex id".into());
+            }
+            key.to_ascii_lowercase()
+        }
+        None => {
+            let generated = generate_key();
+            eprintln!("generated key: {generated}");
+            generated
+        }
+    };
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"group.send\",\"params\":{{\"network\":\"{network}\",\"group\":{group},\"key\":\"{key}\",\"payload_hex\":\"{}\",\"payload_len\":{},\"options\":{{\"priority\":\"{priority}\",\"ordered\":{ordered},\"ttl_ms\":{ttl_ms},\"hop_limit\":{hop_limit}}},\"wait_ms\":{wait_ms}}}}}",
+        request_id(),
+        payload.to_ascii_lowercase(),
+        payload.len() / 2,
+    ))
+}
+
+/// `group-get --id <grp-token> [--wait-ms 0-15000]`: one group send's
+/// record; with --wait-ms the daemon answers once it is final (or the
+/// window ends).
+fn group_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut id: Option<String> = None;
+    let mut wait_ms: u64 = 0;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--id" => id = Some(opt_value(&mut args, "--id")?),
+            "--wait-ms" => {
+                wait_ms = opt_value(&mut args, "--wait-ms")?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| *n <= 15_000)
+                    .ok_or("--wait-ms must be an integer 0-15000")?
+            }
+            other => return Err(format!("unknown group-get option: {other}").into()),
+        }
+    }
+    let id = id.ok_or("group-get requires --id <grp-op-token>")?;
+    let hex = id
+        .strip_prefix("grp")
+        .ok_or("group-get id must be a grp-prefixed op token")?;
+    if !is_hex(hex, 16) {
+        return Err("--id must be grp<16 hex>".into());
+    }
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"group.get\",\"params\":{{\"group_op\":\"grp{}\",\"wait_ms\":{wait_ms}}}}}",
+        request_id(),
+        hex.to_ascii_lowercase(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1707,5 +1837,86 @@ mod tests {
         assert!(config_get_command(&args(&["--id", "0000000000000007"])).is_err());
         assert!(config_get_command(&args(&["--id", "cfgzz"])).is_err());
         assert!(config_get_command(&args(&[])).is_err());
+    }
+
+    #[test]
+    fn group_commands_build_api1_lines() {
+        let line = group_send_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--group",
+            "all",
+            "--payload",
+            "50554D50",
+            "--key",
+            "000102030405060708090A0B0C0D0E0F",
+            "--priority",
+            "URGENT",
+            "--wait-ms",
+            "2000",
+        ]))
+        .unwrap();
+        let doc = routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).unwrap();
+        assert_eq!(
+            doc.get("method").and_then(routeloom_json::Json::as_str),
+            Some("group.send")
+        );
+        assert!(line.contains("\"group\":\"ALL\""), "{line}");
+        assert!(line.contains("\"key\":\"000102030405060708090a0b0c0d0e0f\""));
+        assert!(line.contains("\"payload_hex\":\"50554d50\",\"payload_len\":4"));
+        assert!(line.contains(
+            "\"options\":{\"priority\":\"URGENT\",\"ordered\":false,\"ttl_ms\":5000,\"hop_limit\":10},\"wait_ms\":2000"
+        ));
+        let line = group_send_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--group",
+            "7",
+            "--payload",
+            "01",
+            "--ordered",
+            "--hop-limit",
+            "254",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"group\":7,"), "{line}");
+        assert!(line.contains("\"ordered\":true"));
+        assert!(line.contains("\"hop_limit\":254"));
+        assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        let base = ["--network", "0000000000000007", "--payload", "01"];
+        for bad in [
+            vec!["--group", "0"],
+            vec!["--group", "65536"],
+            vec!["--group", "7", "--payload", "0"],
+            vec!["--group", "7", "--priority", "HIGH"],
+            vec!["--group", "7", "--ttl-ms", "30001"],
+            vec!["--group", "7", "--hop-limit", "255"],
+            vec!["--group", "7", "--wait-ms", "15001"],
+            vec!["--group", "7", "--key", "00"],
+        ] {
+            let mut words: Vec<&str> = base.to_vec();
+            words.extend(bad.iter().copied());
+            assert!(group_send_command(&args(&words)).is_err(), "{bad:?}");
+        }
+        let long = "00".repeat(128);
+        assert!(group_send_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--group",
+            "7",
+            "--payload",
+            &long
+        ]))
+        .is_err());
+        assert!(group_send_command(&args(&["--group", "7", "--payload", "01"])).is_err());
+
+        let line = group_get_command(&args(&["--id", "grp00000001000000A1", "--wait-ms", "5000"]))
+            .unwrap();
+        assert!(line.contains(
+            "\"method\":\"group.get\",\"params\":{\"group_op\":\"grp00000001000000a1\",\"wait_ms\":5000}"
+        ));
+        assert!(group_get_command(&args(&["--id", "cfg00000001000000a1"])).is_err());
+        assert!(group_get_command(&args(&["--id", "grp1"])).is_err());
+        assert!(group_get_command(&args(&[])).is_err());
     }
 }

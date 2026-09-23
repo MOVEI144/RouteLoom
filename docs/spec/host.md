@@ -4,7 +4,7 @@
 
 Rust製routeloom-hostがUSB adapterを所有し、routeloomctlとTUI、利用アプリが同じHost APIへ接続する。PC上のアプリをESP32へ載せる必要はない。ESP32側にはGateway bridge＋通常Mesh SDKをビルドする。
 
-v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
+v0.1実装の状況：daemonは`--socket`（既定`/tmp/routeloom.sock`）の行指向Unix socket APIを提供する。コマンドは`STATUS`／`DIAGNOSTICS`（カウンタJSON）、`SEND <node> <hex>`、`ADAPTER`（機器・session・credit・カウンタ）、`NODES`（観測node一覧）、`DELIVERIES`（配送追跡）、`EVENTS`（有界event ring）、`AUTHORITY`（現状unknown返却）、`AUTONOMY`（EXPERIMENTAL：機器がDiagnostic経由で実際に報告した発見／migration event由来のmode・phase・判定・gate detail。未報告fieldはnull）、`QUIT`。これに加えてAPI1 JSON request面（`API1 <json>`）が§3のmethod一部を実装済み：`capabilities.get`、`messages.read/submit`、`operations.open_epoch/get/get_by_key/cancel`、`gateway.resolve/get`、`config.challenge/status/propose/get`（EXPERIMENTAL・dev profile。device capability未交渉・ACL不足・未登録はhonest拒否）、`link.get`、`nodes.list/get`（§9）、`group.send/get`（§10、EXPERIMENTAL）。`NODES`は機器がnode_status_v1（[USB §7](usb-protocol.md)）で報告した接続状態・RSSI・直結hop数を返し、報告の無いnodeだけ`unknown`とする。`routeloomctl`は1コマンド接続、`routeloom-tui`は同一JSONをpollして全画面を描画する観測者で、USB deviceは開かない。これは版管理RPC schema（§3）の前段の開発profileであり、authority・承認済みmembership等daemonに情報源が無いfieldは`unknown`として返す。
 
 一つのdaemonが複数USB adapterと複数ネットワークを扱える。adapter、Network、Gateway、host serviceを別の識別子にする。相互転送は明示許可がある場合だけで、v1は異Networkの透過bridgeを提供しない。
 
@@ -73,7 +73,7 @@ HostAuthのtranscript／COMMAND保護は[USB](usb-protocol.md)に従う。DATA�
 
 ## 9. アプリ向け4操作契約とnode status（EXPERIMENTAL）
 
-組込み先アプリ（KGuard等）はtransportを知らずに次の4操作だけを使う。同じ契約をWi-Fi等の別transportも実装できるよう、Rust crate `routeloom-client`がtrait `MeshTransport`として定義し、RouteLoom実装`api1::RouteLoomTransport`はAPI1の薄いclientに留める。
+組込み先アプリ（KGuard等）はtransportを知らずに次の4操作だけを使う（group／ALL配送は4操作を変えずに足した任意の操作で§10）。同じ契約をWi-Fi等の別transportも実装できるよう、Rust crate `routeloom-client`がtrait `MeshTransport`として定義し、RouteLoom実装`api1::RouteLoomTransport`はAPI1の薄いclientに留める。
 
 | 操作 | trait | RouteLoom（API1） |
 |---|---|---|
@@ -125,3 +125,47 @@ for event in mesh.membership()? {
 ```
 
 制約：開発profile（dev PSK）のEXPERIMENTAL機能で、RSSIはgatewayが直接受信したnodeのみ（多hop nodeはnull）、membership承認状態（信頼・失効）はこの面に含まれない。
+
+## 10. group／ALL配送（group_delivery_v1、EXPERIMENTAL）
+
+KGuardが1回の呼び出しで全表示板（ALL）や板の群へ同じpayloadを下ろし、何台が受理したかを知るための面。配送そのものはgatewayのportable core（[設計](../design/sdk-v1/group-delivery.md)）が行い、daemonは[USB §8](usb-protocol.md)のHostOps 0x50〜0x52を中継して結果を有界表に保持する。gatewayがHelloAck bit 7（`0x80`）とbit 2（host_ops_v1）の両方を広告し、gateway-scoped profileのroute gatewayである時だけ使える。
+
+**権限の選択**。`group.send`はSEND（`messages.submit`と同じ。多数のnodeへアプリdataを送るので、より弱い権限にはしない）、`group.get`はREAD_OPERATION（`operations.get`と同じ。権限の無いprincipalには存在を明かさず`NOT_FOUND`）。principalはsocket peerのOS credentialだけから決まる（§4）。`messages.submit`の受付token bucket（2件/分・burst 16）は**課金しない**：URGENTのALARMが表示更新のburstの後ろで待たされないため。代わりにgroup表の上限（host待ち8件・未決着16件、超過は`NO_CAPACITY` retryable）、gatewayの送信元表（3件、超過は`REFUSED`／`GROUP_QUEUE_FULL`）、gatewayのgroup air-time bucket（設計§7）で有界にする。
+
+**API1**：
+
+- `group.send` params `{network:"16hex", group:1..65535|"ALL", key:"32hex", payload_hex, payload_len(≤127), options?:{priority:"BULK|NORMAL|MANAGEMENT|URGENT"(既定NORMAL), ordered:bool(既定false), ttl_ms:1..30000(既定5000), hop_limit:1..254(既定10)}, wait_ms?:0..15000}` → group record。`wait_ms`を付けると、gatewayが受理または拒否するまで（最大その時間）待ってから答える。
+- `group.get` params `{group_op:"grp"+16hex, wait_ms?:0..15000}` → group record。`wait_ms`を付けると`final:true`になるまで待つ。
+- group record：`{"group_op","network","group","all","state","final","result","reason","message":{"session":"8hex","sequence":"16hex"}|null,"gateway","rounds","delivered","nonmember","missing_total","unaccounted","missing":["16hex"...],"missing_truncated","priority","ordered","ttl_ms","hop_limit","payload_len","submitted_ms","admitted_ms","settled_ms","clock":"host_unix_ms"}`。台数・round・`missing`はgatewayが報告するまで`null`（0を推測で埋めない）。`missing`は最大12件で、`missing_total`がそれを超えると`missing_truncated:true`。
+- `state`：`HOST_QUEUED`（daemon受理、未送信）→`DEVICE_PENDING`（0x50送信済み、受理応答待ち）→gatewayの配送状態（`QUEUED`／`WAITING_FOR_END_RECEIPT`等）→終端。終端は`DELIVERED`（既知の全nodeを確認）、`FAILED`（`GROUP_INCOMPLETE`等、未確認idを列挙）、`EXPIRED`、`CANCELLED_BEFORE_TX`、`INDETERMINATE`（gatewayの判定）と、host側の`REFUSED`（何も送信されていない。`result`＝`UNSUPPORTED`／`BUSY`／`INVALID`等、`reason`＝`GROUP_REQUIRES_GATEWAY_SCOPED`／`GROUP_SOURCE_NOT_GATEWAY`／`GROUP_QUEUE_FULL`／`GROUP_CAPABILITY_ABSENT`等）、`NOT_SENT`（機器へ届かなかった：`HOST_DEADLINE`＝ttl内に送れず、`NETWORK_CHANGED`）、`INDETERMINATE`（送られたか分からない：`NO_ADMISSION_REPLY`、`SESSION_LOST_BEFORE_ADMISSION`、`GROUP_RESULT_RECLAIMED`、`NO_FINAL_STATUS`）。**送られたか分からない送信を自動で再送しない**（ALARMの二重送信は再送ではなく別messageになる）。
+- event（`stream:"events"`、kind `group_settled`）：recordが終端になった時に**1件だけ**出る。本体はrecordと同じfield（`kind`・`seq`・`ms`付き、設定値fieldは除く）。
+
+**APIエラー**：SEND無し→`AuthorizationFailed`、引数→`INVALID_ARGUMENT`、127B超→`PAYLOAD_TOO_LARGE`、認証済みsessionが無い／別networkのgateway→`GATEWAY_UNAVAILABLE`（retryable、`detail.reason`＝`no_session`／`network_mismatch`。groupはUSB切断を跨いでqueueしない）、gatewayがbit 7（またはbit 2）を広告しない→`UNSUPPORTED`（retryable false、`detail.required_capability:"group_delivery_v1"`、`detail.capability`）、同じkeyで別内容→`CONFLICT`（`detail.existing_group_op`）、追い出し済みkey→`IDEMPOTENCY_WINDOW_EXPIRED`、表満杯→`NO_CAPACITY`。flat profile等でgatewayが拒否した場合はAPIエラーではなく`state:"REFUSED"`のrecord（`wait_ms`付きならその場で返る）。
+
+**idempotency**：identityは`(principal, network, key)`（§8）。同じidentity・同じ内容の再送は既存recordを返し（gatewayが切断中でも）、内容が違えば`CONFLICT`。保持はRAMのみ：record最大256件（終端済みを古い順に追い出す）、追い出したidentityは1024件まで墓標として覚え、その再送は新しい送信ではなく`IDEMPOTENCY_WINDOW_EXPIRED`になる。daemon再起動で全て失う（op tokenはdaemon起動ごとのtag付きで、再起動前のtokenは別opに解決されない）。
+
+**daemonの動き**：group laneのthreadがqueueの先頭から0x50を送り、同じrequest idの即時0x51で受理／拒否を確定し、受理後はFINAL付き0x51で決着する。FINALはsession単位でgatewayの保持枠も3件なので、未決着の間は2秒ごとに0x52で読み直す（FINALの喪失・USB再接続・push枠不足を吸収）。再接続後は新sessionで直ちに0x52を送る。受理応答が3秒来なければ`NO_ADMISSION_REPLY`、寿命＋30秒でもFINALが無ければ`NO_FINAL_STATUS`で打ち切る。laneのrequest idは専用範囲（上位16bit `0x4752`）で、そのidを持つUSB Error frameもlaneへ戻す。
+
+**membership**：groupへの加入はnode側（firmwareの`set_group_membership`、最大8 group＋ALL）で決まり、USB HostOpsに遠隔設定は無いのでAPI1にも無い（`capabilities.get`の`group.membership_set:false`）。送信元は誰がmemberかを事前に知らず、結果の台数で知る。
+
+`capabilities.get`は`methods`に`group.send`/`group.get`、`group:{dispatch:"usb_group_delivery_v1", gateway_capable:true|false|null, payload_max_bytes:127, priority[...], ttl_ms{...}, hop_limit{...}, records_max:256, queue_max:8, unsettled_max:16, memberships_per_node:8, membership_set:false, events:["group_settled"], storage_durable:false}`を返す（`gateway_capable`は認証済みsessionが無ければnull）。
+
+**アプリ向け（`routeloom-client`）**：4操作契約（§9）は変えず、任意の5番目として`MeshTransport::send_group(group, payload, &GroupSendOptions) -> GroupHandle`と`group_result(id, wait_ms) -> GroupResult`を追加した。group配送を持たないtransportは既定実装で`Rejected{code:"UNSUPPORTED"}`を返すので、既存の実装はそのままcompileし振る舞いも変わらない。RouteLoom実装は`group.send`（新しいkeyを生成、I/O失敗時は同じkeyで1回だけ再試行＝replay）と`group.get`の薄いclient。gatewayが送信前に拒否した場合は`Rejected{code:<reason>}`（`GROUP_QUEUE_FULL`だけretryable）。
+
+```rust
+use routeloom_client::{api1::RouteLoomTransport, GroupSendOptions, GroupState, MeshTransport, GROUP_ALL};
+
+let mesh = RouteLoomTransport::new("/tmp/routeloom.sock", 0x7);
+let alarm = mesh.send_group(GROUP_ALL, b"PUMP3 OVERTEMP", &GroupSendOptions::alarm())?;
+let result = mesh.group_result(&alarm.id, 15_000)?; // FINALまで最大15秒待つ
+if result.state != GroupState::Delivered { /* result.missing に未確認の板 */ }
+mesh.send_group(7, b"MODE:2F", &GroupSendOptions::ordered_update())?; // 2階の板の群へ順序付き
+```
+
+```sh
+routeloomctl group-send --network 0000000000000007 --group ALL --priority URGENT --payload 50554d5033204f56455254454d50 --wait-ms 2000
+routeloomctl group-send --network 0000000000000007 --group 7 --ordered --payload 4d4f44453a3246
+routeloomctl group-get --id grp00000001000000a1 --wait-ms 15000
+```
+
+制約：開発profileのEXPERIMENTAL機能。host試験（lane状態機械・API1・USB golden byte一致・daemon配線）のみで、実機のbridge_nodeとの疎通・実RFは未確認。表・墓標・結果はRAMのみ。
