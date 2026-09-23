@@ -38,7 +38,7 @@ dependencies:
 
 component manager はリポジトリを clone し、`path` で示した subdirectory を `managed_components/` に配置する。**2 つの entry がともに必要**：`routeloom_espnow` の manifest が `routeloom/routeloom` を要求するが、registry には存在しないため、取得先を project manifest が教える必要がある。
 
-git `path` 依存は component の subdirectory **だけ**を取り出す。このため vendored micro-ecc（RLCP1_COSE_ESP256 verifier の P-256 backend、BSD-2）は `components/routeloom/third_party/micro-ecc` に component 内蔵とし、component が自己完結するようにした。
+git `path` 依存は component の subdirectory **だけ**を取り出す。このため vendored micro-ecc（RLCP1_COSE_ESP256 verifier の P-256 backend、BSD-2）は `components/routeloom/third_party/micro-ecc` に component 内蔵とし、component が自己完結するようにした。SDK v1 の EDHOC（P2-1）で追加した libedhoc（MIT）と zcbor（Apache-2.0）も同じ理由で `components/routeloom/third_party/` に置く（pin は `third_party/VENDORED.json` と NOTICE）。host 用 AES-CCM の TF-PSA-Crypto 部分集合も同じ場所にあるが、ESP-IDF build では compile しない（firmware は ESP-IDF 自身の Mbed TLS を PSA 経由で使う）。
 
 ## バージョン固定
 

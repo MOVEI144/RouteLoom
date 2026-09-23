@@ -45,6 +45,8 @@
 | 事務所tooling（P7-1、保守verbを除く）と`rlsec`のNVS adapter | Rust `routeloom-provision`の`sdkv1::{devca,pop,office,rlsec}`、`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、[sdkv1_blob_storage.hpp](../../../components/routeloom/include/routeloom/sdkv1_blob_storage.hpp)＋ESP-IDF `nvs_sdkv1_store` | 発行DevCert・注入鍵RLI1が共通vectorとbyte一致、所持証明の拒否（V1-H09）、fake NVS上で4 storeの読戻し規約と電源断（[test_sdkv1_blob_storage.cpp](../../../tests/cpp/test_sdkv1_blob_storage.cpp)）。ESP-IDF adapterはcompile-onlyでfirmware未配線（[07 §6.1](07-host-api-tooling.md)） |
 
 それ以外（EDHOC統合とEADのEDHOCへの配線、AssignmentTicketの形式、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、Site Authority側tooling（`site-cert`、P7-2）、firmwareの保守verbとstoreの配線、partition変更）は**未実装**。
+| EDHOCライブラリとbounded backend（P2-1） | [edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)、vendor済みlibedhoc v2.3.2＋zcbor（[VENDORED.json](../../../components/routeloom/third_party/VENDORED.json)） | [RFC 9529](../../../protocol/edhoc-rfc9529/README.md) §3（method 3／suite 2）のmessage_1〜4・PRK・exporter・key updateがbyte一致、§4の不正messageを拒否（§4.1.2のみlibedhocが同値として受理、試験で固定）、method 0＋RLCW1 MemberCert（kid参照）の往復と改竄・偽証明書・誤鍵の拒否を[test_edhoc.cpp](../../../tests/cpp/test_edhoc.cpp)で検査。1 session 3104B（64bit host、ILP32見積約2.7KB）、heap・VLA無し。firmwareからは未呼出 |
+それ以外（EDHOCのNode／参加FSMへの統合・EAD・C3/S3実測、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、tooling、partition変更、`rlsec`のNVS adapter）は**未実装**。
 
 ## この設計で主張しないこと
 

@@ -9,7 +9,7 @@
 | 鍵交換 | RFC 9528 EDHOC、method 0（双方署名）、suite 2（P-256/ES256/SHA-256、EDHOC内AES-CCM-16-64-128） |
 | 鍵確認 | message_4をこのprofileでは必須。続いて用途・所属を結び付ける保護されたContextConfirmを双方確認 |
 | 資格情報 | 機器ごとのP-256 RPKをCCSのcnf/COSE_Keyとして扱う。kidは正規公開COSE_KeyのSHA-256全32B |
-| 実装 | libedhoc **v2.3.2 / c8857b62d66be3664d1694bbe4eea37c56c05d9e**、MIT。coreのcallback境界のみ採用 |
+| 実装 | libedhoc **v2.3.2 / c8857b62d66be3664d1694bbe4eea37c56c05d9e**、MIT。coreのcallback境界のみ採用（SDK v1 P2-1でこのcommitをupstreamのままvendor済み：[08](../sdk-v1/08-implementation-plan.md)、依存zcbor 0.8.1も同pin由来） |
 | ESP32暗号backend | 固定ESP-IDF v6.0.3のPSA。Mbed TLS submodule **ce3f3485a121c100f58f36d700cb35b060f6e866**。別のTLS一式を重ねない |
 | Host | 同じlibedhoc coreを小さいFFI adapterから使用。native PSA backendも固定版とsubmodule lockを記録 |
 | 通常frame | 既存Wire v1のサイズを保つAES-GCM-128、16B tag、12B nonce。EDHOC suite内部AEADとは区別 |
@@ -94,7 +94,7 @@ Secure Boot、Flash/NVS暗号化、debug制限、eFuse変更は独立した配�
 
 C3/S3の初期予算：全体1handshake枠（用途間でも直列化）、preauth同時1、認証前1object1024B、2秒あたり新規高コスト認証1件、失敗backoff最大60秒。cookie/cheap parse→bounded assembly→credential/cryptoの順。source MACだけでなく全体CPU/RAM枠を制限し、memberのDATA/ACK用queueを分離する。
 
-設計上の認証scratch上限は全体48KiB、live context32×256B=8KiBを仮予算とする。**sizeof/内部heap/stack/Flash/処理時間の実測値は未取得**。libedhocの既定VLAを未検証長で使わず、custom bounded memory backendを使う。C3全体budgetに収まらない場合は同時数を減らし、監査や長さ検査を削らない。
+設計上の認証scratch上限は全体48KiB、live context32×256B=8KiBを仮予算とする。**ESP32（C3/S3）でのsizeof/内部heap/stack/Flash/処理時間の実測値は未取得**（SDK v1 P2-2）。hostでの計測（P2-1）は1 handshake session 3104B（64bit、ILP32見積約2.7KB、libedhoc context・作業arena 1280B・key store込み）、作業bufferの最大使用888B（256B CRED_x・32B kid）、method 0の全handshakeのstack約10KB（x86-64）で、C3の数値として扱わない。libedhocの既定VLAを未検証長で使わず、custom bounded memory backendを使う（P2-1で実装：sessionごとの固定arena、heap・VLA無し）。C3全体budgetに収まらない場合は同時数を減らし、監査や長さ検査を削らない。
 
 suite2の小さいkid参照handshakeでも、RouteLoomの証拠/断片headerを含めた総bytesとLR占有は実encoderで測る。2048B objectが無条件に少ない無線frameへ収まるとはしない。正常/未知kid/Grant更新/再起動を分けてbenchmarkする。
 

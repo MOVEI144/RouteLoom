@@ -16,7 +16,7 @@
 | P1-4 | 導出labelとinfo形式の凍結（group、RLRES1、AuthorityEnvelope）、C++/Rust vector（**このbranchで実装済み**：[key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)、`host/routeloom-keysched`、独立Python生成器`tools/gen_sdkv1_derivation_vectors.py`→`protocol/sdkv1-golden/derivations/`、[03 §2.2](03-key-hierarchy.md)） | P1-1 | V1-K01, V1-F03 |
 | P1-5 | RLRES1の状態機械（portable）と攻撃試験（**このbranchで実装済み**：[rlres1.hpp](../../../components/routeloom/include/routeloom/rlres1.hpp)の単独`rlres1::Engine`、攻撃試験とfuzz、[06 §2.2.1](06-fast-rejoin.md)） | P1-4 | V1-F02 |
 | **P2 — EDHOC** | | | |
-| P2-1 | libedhoc（05で固定したSHA、MIT）をvendor、bounded memory backend、micro-ecc／PSAのcrypto callback、RFC 9529 vectorをhostで実行、NOTICE更新 | なし | RFC 9529 |
+| P2-1 | libedhoc（05で固定したSHA、MIT）をvendor、bounded memory backend、micro-ecc／PSAのcrypto callback、RFC 9529 vectorをhostで実行、NOTICE更新（**このbranchで実装済み**：libedhoc `c8857b62…`＋zcbor 0.8.1＋host用TF-PSA-Crypto AES/CCMをupstreamのままvendor（[VENDORED.json](../../../components/routeloom/third_party/VENDORED.json)）、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)のsuite 2 backend（固定arena・固定key store、micro-ecc＋`kdf.hpp`、AES-CCMはhost builtin／ESP-IDFはPSA hook）、[RFC 9529 §3／§4](../../../protocol/edhoc-rfc9529/README.md)とmethod 0＋RLCW1 MemberCertの往復をhost試験。firmwareからは未呼出。kcwt値渡しはlibedhoc未対応） | なし | RFC 9529 |
 | P2-2 | C3/S3でEDHOCの署名・検証・ECDH時間、stack、heapを実測（以後のtimeout・並列度の根拠） | P2-1 | V1-J15, V1-F06（一部） |
 | P2-3 | join用EAD（JoinIntent/SiteOffer/JoinRequest/JoinResult/SitePackage）codecとRust mirror（**このbranchで実装済み**：[sdkv1_ead.hpp](../../../components/routeloom/include/routeloom/sdkv1_ead.hpp)、Rust `host/routeloom-join`、04 §6.1のRemovalNoticeも含む。独立Python生成器`tools/gen_sdkv1_ead_vectors.py`の[共通vector](../../../protocol/sdkv1-golden/ead/README.md)、fuzz。EAD labelと未定点は[02 §6.3](02-zero-touch-join.md)、AssignmentTicketの形式は未定で、A2の機器はfail closed） | P1-2 | V1-J12, V1-J14 |
 | **P3 — 搬送とSite Authority** | | | |
@@ -43,7 +43,7 @@
 | P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
 | P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-3、P4-1、P7-1（保守verbを除く）はこのbranchに含まれる。
+P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3、P4-1、P7-1（保守verbを除く）はこのbranchに含まれる。
 
 ## 2. 試験計画
 
@@ -59,13 +59,13 @@ P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-3、P4-1
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden、P7-1の発行・PoP部分）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査。EDHOC encoder込みの実長はP2-1後）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden、P7-1の発行・PoP部分）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-1のRFC 9529 vector（§3のmethod 3／suite 2 traceと§4の不正message。method 0は同suiteのRLCW1往復で確認）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査。EDHOC encoder込みの実長はP2-1後）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
 
 ## 4. 本番を名乗る条件
 
 `security_profile() == Production`を返してよいのは、次をすべて満たすbuildだけ。
 
-1. P2-1のEDHOCがRFC 9529 vectorを通り、P1-4のRouteLoom vectorがC++/Rustで一致。
+1. P2-1のEDHOCがRFC 9529 vectorを通り（このbranchでhost試験：suite 2の§3と§4。§2はsuite 0でbackendの対象外）、P1-4のRouteLoom vectorがC++/Rustで一致。
 2. V1-J・K・R・N・F・Hのhost試験がすべて通過。
 3. P2-2とP8-1のHIL実測が記録され、timeout・並列度がその実測に基づく。
 4. P8-2の独立レビューで未解決の重大指摘が無い。

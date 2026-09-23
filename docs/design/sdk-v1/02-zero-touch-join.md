@@ -43,6 +43,8 @@ len-4    u32 crc32_iso_hdlc
 
 3種類ともCWT（RFC 8392）＝COSE_Sign1（ES256、protected `{1:-7}`、unprotected空）。EDHOCでは`ID_CRED_x = {13 (kcwt): CWT}`として値渡しする（RFC 9528 §3.5.2の登録済みlabel）。deterministic CBOR、整数最短表現、未知claimは拒否。
 
+**未解決（P2-1で判明）**：固定したlibedhoc v2.3.2のcredential APIはID_CREDとしてkid（4）・x5chain（33）・x5t（34）だけを扱い、kcwt（13）による値渡しを符号化・復号できない。このbranchのbackendはkid参照（kid＝cnf鍵のCOSE_KeyのSHA-256全32B、CRED_xにRLCW1証明書そのもの）で動作を確認した。値渡しが要る場面（初対面のmessage_3でDevCert、未cacheのMemberCert）は、P2-3／P4-2で「kid参照＋証明書をEADで運ぶ」か「上流へのkcwt対応」のどちらかに決め、それまで本節の値渡しは採用案のままとする。
+
 | claim | DevCert | SiteCert | MemberCert（=Grant） |
 |---|---|---|---|
 | 1 iss | Device CA id u64 | Site CA id u64 | site_id u64 |
@@ -353,7 +355,7 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | authority同時参加 | 4件 | host側。KGuard待ちを含む |
 | authorityの機器ごと再試行 | pending中は`retry_after`未満の再試行をBusyで返す | flood抑制 |
 | 未検証m1のauthority費用 | ECDH 1回＋署名1回 | PC側で許容。proxy rateで上限が掛かる |
-| 機器側RAM | 組立1件1024B＋EDHOC context（≤2KB見込み、未測定） | libedhocのbounded backend（05 §8） |
+| 機器側RAM | 組立1件1024B＋EDHOC session（ILP32見積約2.7KB：libedhoc context 576B・作業arena 1280B・key store等。P2-1のhost計測から算出、C3実測はP2-2） | libedhocのbounded backend（05 §8、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)） |
 | memberのDATA | bootstrap queueと分離 | 既存方針 |
 
 ## 14. 受入試験（すべてplanned_not_run）
