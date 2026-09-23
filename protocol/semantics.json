@@ -20,6 +20,8 @@
     "CONTROL": 22,
     "TIME_SYNC": 23,
     "CHANNEL_NOTICE": 24,
+    "GROUP_DATA": 25,
+    "GROUP_REPORT": 26,
     "ROUTE_UPDATE": 32,
     "ROUTE_WITHDRAW": 33,
     "SEQNO_REQUEST": 34,
@@ -63,6 +65,8 @@
       "MEMBERSHIP_QUERY",
       "MEMBERSHIP_RESULT",
       "DATA",
+      "GROUP_DATA",
+      "GROUP_REPORT",
       "HOP_ACCEPT",
       "BUSY",
       "END_RECEIPT",
@@ -93,6 +97,8 @@
   ],
   "member_only": [
     "DATA",
+    "GROUP_DATA",
+    "GROUP_REPORT",
     "ROUTE_UPDATE",
     "ROUTE_REQUEST",
     "SEQNO_REQUEST",
@@ -174,6 +180,41 @@
     "record_destination": {"NEIGHBOR": "requester", "DISCOVER": "requester", "REPLY": "target"},
     "record_semantics": "ordinary route advertisement from the sending neighbor: feasibility applies, sender updates FD before a finite record leaves",
     "dedup_key": ["requester", "request_id", "kind"]
+  },
+  "group_data": {
+    "frame_protection": "link per hop + end protection under the group scope (sender = origin, receiver = group address)",
+    "destination": "group address = group_address_base | group_id; group 0 reserved; group_all maps to the broadcast node id",
+    "group_address_base": "0xFFFFFFFFFFFF0000",
+    "group_all": 65535,
+    "message_sequence": "bit 63 set | group stream number (u32 per source boot session): dedup and ordering are decided on the header",
+    "delivery_contract": "RELIABLE",
+    "delivery_round": "bits 0-6 round number, bit 7 REFRESH (every relay re-asks every child)",
+    "payload_fields": [
+      {"field": "flags", "bytes": 1},
+      {"field": "application_payload", "bytes": "0..127"}
+    ],
+    "flags": {"ORDERED": 1, "PRIORITY_MASK": 6, "PRIORITY_SHIFT": 1},
+    "application_payload_max": 127,
+    "source": "a configured route gateway of the gateway-scoped profile",
+    "forwarding": "one MAC-acknowledged unicast copy per gateway-tree child, no HOP_ACCEPT"
+  },
+  "group_report_payload": {
+    "frame_protection": "link-only, one hop (child -> tree parent), hop_remaining 1",
+    "fields": [
+      {"field": "source", "bytes": 8},
+      {"field": "session", "bytes": 4},
+      {"field": "sequence", "bytes": 8},
+      {"field": "round", "bytes": 1},
+      {"field": "flags", "bytes": 1},
+      {"field": "delivered", "bytes": 2},
+      {"field": "nonmember", "bytes": 2},
+      {"field": "missing_total", "bytes": 2},
+      {"field": "missing_count", "bytes": 1}
+    ],
+    "missing_id_bytes": 8,
+    "missing_max": 12,
+    "flags": {"NOT_CHILD": 1, "TRUNCATED": 2},
+    "semantics": "counts cover the sender's whole subtree for that round; NOT_CHILD carries zero counts; TRUNCATED iff missing_total > missing_count"
   },
   "max_espnow_body_bytes": 250,
   "max_normal_payload_bytes": 128,

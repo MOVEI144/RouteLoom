@@ -130,12 +130,12 @@ constexpr FrameType kAllTypes[] = {
     FrameType::MembershipQuery, FrameType::Data, FrameType::HopAccept,
     FrameType::EndReceipt, FrameType::AppResult, FrameType::Busy, FrameType::Service,
     FrameType::Control, FrameType::TimeSync, FrameType::ChannelNotice,
-    FrameType::RouteUpdate, FrameType::RouteWithdraw, FrameType::SeqnoRequest,
+    FrameType::GroupData, FrameType::GroupReport, FrameType::RouteUpdate, FrameType::RouteWithdraw, FrameType::SeqnoRequest,
     FrameType::RouteRequest, FrameType::NeighborProbe, FrameType::NeighborResult,
     FrameType::Diagnostic, FrameType::ControlObject, FrameType::ObjectChunk,
     FrameType::ObjectAck,
 };
-static_assert(sizeof(kAllTypes) / sizeof(kAllTypes[0]) == 26, "26 frozen type ids");
+static_assert(sizeof(kAllTypes) / sizeof(kAllTypes[0]) == 28, "28 assigned type ids");
 
 // Expected matrix derived from protocol/semantics.json membership_allowlist —
 // the normative source. Do not "fix" this table to match the code.
@@ -152,7 +152,7 @@ bool semantics_allows(const MembershipState state, const FrameType type) {
       return type == FrameType::MembershipQuery || type == FrameType::MembershipResult ||
              type == FrameType::BootstrapChunk || type == FrameType::BootstrapReply;
     case MembershipState::Member:
-      // JSON MEMBER = bootstrap set + member_only set = all 26 assigned type
+      // JSON MEMBER = bootstrap set + member_only set = all 28 assigned type
       // ids; `type` here always comes from the kAllTypes list of exactly
       // those ids. Unknown raw ids are checked separately for every state.
       return true;
@@ -179,7 +179,7 @@ void test_frame_allowed_matrix() {
     // Unknown FrameType ids must be denied for every state — including
     // Member, where the old code let `type != Discover && type != Offer`
     // pass anything.
-    for (const std::uint8_t raw : {0, 8, 15, 25, 52, 0xEE, 0xFF}) {
+    for (const std::uint8_t raw : {0, 8, 15, 27, 31, 52, 0xEE, 0xFF}) {
       CHECK(!frame_allowed(state, static_cast<FrameType>(raw)));
     }
   }

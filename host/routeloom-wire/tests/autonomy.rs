@@ -349,7 +349,7 @@ fn invalid_vectors_are_rejected() {
 }
 
 /// The coarse allowlist matrix must match protocol/semantics.json
-/// `membership_allowlist` exactly: 6 states x all 26 known frame types.
+/// `membership_allowlist` exactly: 6 states x all 28 known frame types.
 #[test]
 fn frame_allowed_matches_semantic_allowlist() {
     use FrameType::*;
@@ -362,6 +362,8 @@ fn frame_allowed_matches_semantic_allowlist() {
         BootstrapReply,
         MembershipQuery,
         Data,
+        GroupData,
+        GroupReport,
         HopAccept,
         EndReceipt,
         AppResult,
@@ -381,7 +383,7 @@ fn frame_allowed_matches_semantic_allowlist() {
         ObjectChunk,
         ObjectAck,
     ];
-    assert_eq!(all_types.len(), 26);
+    assert_eq!(all_types.len(), 28);
 
     let expected = |state: MembershipState, t: FrameType| -> bool {
         match state {
@@ -422,7 +424,7 @@ fn frame_allowed_matches_semantic_allowlist() {
         assert!(MembershipState::try_from(255).is_err());
     }
     // Unknown type ids are unconstructable — TryFrom is the deny boundary.
-    for bad in [0_u8, 8, 15, 25, 52, 0xEE, 0xFF] {
+    for bad in [0_u8, 8, 15, 27, 31, 52, 0xEE, 0xFF] {
         assert!(
             FrameType::try_from(bad).is_err(),
             "type {bad} must be unknown"

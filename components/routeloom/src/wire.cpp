@@ -6,6 +6,7 @@
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/group.hpp"
 
 namespace routeloom::wire {
 namespace {
@@ -30,6 +31,8 @@ bool known_frame_type(const std::uint8_t value) noexcept {
     case FrameType::Control:
     case FrameType::TimeSync:
     case FrameType::ChannelNotice:
+    case FrameType::GroupData:
+    case FrameType::GroupReport:
     case FrameType::RouteUpdate:
     case FrameType::RouteWithdraw:
     case FrameType::SeqnoRequest:
@@ -175,7 +178,12 @@ SecurityContext link_context(const Header& header) noexcept {
 }
 
 SecurityContext end_context(const Header& header) noexcept {
-  return SecurityContext{SecurityScope::EndToEnd, header.network, header.origin,
+  // GROUP_DATA is end-protected under the group scope: the receiver is the
+  // group address, and every key holder may open it (group-delivery.md §7).
+  const SecurityScope scope = header.type == FrameType::GroupData
+                                  ? SecurityScope::Group
+                                  : SecurityScope::EndToEnd;
+  return SecurityContext{scope, header.network, header.origin,
                          header.destination, header.end_epoch};
 }
 
@@ -316,6 +324,10 @@ Status open_end(const LinkOpenedFrame& input,
   if (input.header.destination != local_node) {
     return Status::error(StatusCode::AuthorizationFailed, "end payload is not addressed to this node");
   }
+  if (input.header.type == FrameType::GroupData) {
+    // Group frames are opened with open_group(), never as unicast end data.
+    return Status::error(StatusCode::AuthorizationFailed, "group frame requires open_group");
+  }
   // Callers may build LinkOpenedFrame directly (open_link validates these, but
   // the fields are public): reject sizes that cannot fit the fixed buffers
   // before any length arithmetic or memcpy.
@@ -397,6 +409,81 @@ Status forward(const LinkOpenedFrame& input,
   return wrap_link(header,
                    ByteView{input.protected_payload.data(), input.protected_payload_size},
                    security, output);
+}
+
+Status seal_group(const PlainFrame& input, const NodeId local_node,
+                  SecurityProvider& security, LinkOpenedFrame& output) noexcept {
+  if (!security.ready()) {
+    return Status::error(StatusCode::InvalidState, "security provider is not ready");
+  }
+  if (input.header.type != FrameType::GroupData ||
+      (input.header.flags & kFlagEndProtected) == 0 ||
+      !is_group_address(input.header.destination) || local_node == kInvalidNodeId ||
+      input.header.origin != local_node || input.header.hop_remaining == UINT8_MAX ||
+      input.header.hop_remaining == 0) {
+    return Status::error(StatusCode::InvalidArgument, "not a sealable group frame");
+  }
+  if (input.payload_size > kMaxApplicationPayload) {
+    return Status::error(StatusCode::InvalidArgument, "application payload too large");
+  }
+  Header header = input.header;
+  header.payload_length = static_cast<std::uint16_t>(input.payload_size);
+  // Shaped like a frame `local_node` just received: forward() re-wraps the
+  // link layer per child and spends the extra hop, so children see exactly
+  // input.header.hop_remaining.
+  header.previous_hop = local_node;
+  header.next_hop = local_node;
+  header.hop_remaining = static_cast<std::uint8_t>(input.header.hop_remaining + 1U);
+  header.link_counter = 0;
+  auto status = validate_header(header);
+  if (!status) return status;
+  status = security.next_counter(end_context(header), header.end_counter);
+  if (!status) return status;
+  std::array<std::uint8_t, kEndAadMax> aad{};
+  std::size_t aad_size = 0;
+  status = make_end_aad(header, aad, aad_size);
+  if (!status) return status;
+  output = LinkOpenedFrame{};
+  std::array<std::uint8_t, kAeadTagSize> end_tag{};
+  status = security.seal(end_context(header), header.end_counter,
+                         ByteView{aad.data(), aad_size},
+                         ByteView{input.payload.data(), input.payload_size},
+                         MutableByteView{output.protected_payload.data(), input.payload_size},
+                         end_tag);
+  if (!status) return status;
+  std::memcpy(output.protected_payload.data() + input.payload_size, end_tag.data(),
+              end_tag.size());
+  output.protected_payload_size = input.payload_size + kAeadTagSize;
+  output.header = header;
+  return Status::success();
+}
+
+Status open_group(const LinkOpenedFrame& input, SecurityProvider& security,
+                  PlainFrame& output) noexcept {
+  if (input.header.type != FrameType::GroupData ||
+      (input.header.flags & kFlagEndProtected) == 0 ||
+      !is_group_address(input.header.destination)) {
+    return Status::error(StatusCode::AuthorizationFailed, "not a group frame");
+  }
+  if (input.header.payload_length > kMaxApplicationPayload ||
+      input.protected_payload_size > input.protected_payload.size() ||
+      input.protected_payload_size != input.header.payload_length + kAeadTagSize) {
+    return Status::error(StatusCode::ProtocolError, "protected payload length mismatch");
+  }
+  output = PlainFrame{};
+  output.header = input.header;
+  output.payload_size = input.header.payload_length;
+  std::array<std::uint8_t, kEndAadMax> aad{};
+  std::size_t aad_size = 0;
+  auto status = make_end_aad(input.header, aad, aad_size);
+  if (!status) return status;
+  std::array<std::uint8_t, kAeadTagSize> end_tag{};
+  std::memcpy(end_tag.data(), input.protected_payload.data() + input.header.payload_length,
+              end_tag.size());
+  return security.open(end_context(input.header), input.header.end_counter,
+                       ByteView{aad.data(), aad_size},
+                       ByteView{input.protected_payload.data(), input.header.payload_length},
+                       end_tag, MutableByteView{output.payload.data(), output.payload_size});
 }
 
 Status transit_fingerprint(const LinkOpenedFrame& frame,

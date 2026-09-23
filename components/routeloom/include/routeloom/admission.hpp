@@ -47,6 +47,8 @@ constexpr bool member_frame_type(const FrameType type) noexcept {
     case FrameType::Control:
     case FrameType::TimeSync:
     case FrameType::ChannelNotice:
+    case FrameType::GroupData:
+    case FrameType::GroupReport:
     case FrameType::RouteUpdate:
     case FrameType::RouteWithdraw:
     case FrameType::SeqnoRequest:

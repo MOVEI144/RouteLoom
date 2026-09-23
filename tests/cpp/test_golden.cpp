@@ -207,6 +207,22 @@ void run_valid_vector(const std::filesystem::path& path) {
           StatusCode::AuthorizationFailed);
   }
 
+  // Group frames (group-delivery.md): every group key holder opens the
+  // group end layer wherever it sits in the tree; the group address is bound
+  // by the end AAD.
+  if (plain.header.type == FrameType::GroupData) {
+    TestSecurity group_security;
+    wire::PlainFrame out{};
+    CHECK_OK(wire::open_group(opened, group_security, out));
+    CHECK(out.payload_size == payload.size());
+    CHECK(payload.empty() ||
+          std::memcmp(out.payload.data(), payload.data(), payload.size()) == 0);
+    wire::LinkOpenedFrame tampered = opened;
+    tampered.header.destination = opened.header.destination - 1;
+    TestSecurity tamper_security;
+    CHECK(!wire::open_group(tampered, tamper_security, out).ok());
+  }
+
   // Optional second hop: the relay re-wraps the link layer only.
   if (fields.count("fwd_encoded_hex") != 0U) {
     const NodeId forwarder = at("fwd_local_node");
@@ -237,6 +253,14 @@ void run_valid_vector(const std::filesystem::path& path) {
           at_next.header.destination == plain.header.destination &&
           at_next.header.message == plain.header.message &&
           at_next.header.end_counter == plain.header.end_counter);
+    if (plain.header.type == FrameType::GroupData) {
+      TestSecurity group_security;
+      wire::PlainFrame out{};
+      CHECK_OK(wire::open_group(at_next, group_security, out));
+      CHECK(out.payload_size == payload.size());
+      CHECK(payload.empty() ||
+            std::memcmp(out.payload.data(), payload.data(), payload.size()) == 0);
+    }
     if (plain.header.destination == forward_next) {
       TestSecurity end_security;
       wire::PlainFrame out{};

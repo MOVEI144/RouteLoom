@@ -135,6 +135,20 @@ Status forward(const LinkOpenedFrame& input,
                SecurityProvider& security,
                EncodedFrame& output) noexcept;
 
+// Group delivery (docs/design/sdk-v1/group-delivery.md). seal_group seals
+// the end layer of a GROUP_DATA frame ONCE under SecurityScope::Group
+// (end counter assigned here) and returns it shaped like a frame received by
+// `local_node` (previous_hop = next_hop = local_node, hop_remaining + 1), so
+// forward() re-wraps only the link layer for every child and every repair
+// round: all copies of one group message share one end ciphertext.
+Status seal_group(const PlainFrame& input, NodeId local_node, SecurityProvider& security,
+                  LinkOpenedFrame& output) noexcept;
+// Opens the group end layer of a link-opened GROUP_DATA frame. Any holder of
+// the group key may call it (no destination binding to the local node); it
+// proves membership of the sealer, never the origin's identity.
+Status open_group(const LinkOpenedFrame& input, SecurityProvider& security,
+                  PlainFrame& output) noexcept;
+
 // TransitFailure fingerprint (m1-completion 04 §4.2): SHA256 over
 // "RouteLoom/transit-fingerprint/v1" || NUL || the exact end-AAD encoding ||
 // the protected payload including its end tag. Hop-mutable fields are

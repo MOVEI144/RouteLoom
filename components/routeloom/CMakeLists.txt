@@ -15,6 +15,9 @@ set(ROUTELOOM_CORE_SOURCES
   src/discovery_scope.cpp
   src/endpoint_wire.cpp
   src/gateway.cpp
+  src/group.cpp
+  src/group_replay.cpp
+  src/group_wire.cpp
   src/kdf.cpp
   src/migration.cpp
   src/migration_wire.cpp

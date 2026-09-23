@@ -111,6 +111,11 @@ class SimNetwork {
   // sender still gets an honest TX-failure result. Null keeps flush()
   // lossless for the deterministic routing tests.
   bool (*drop_frame)(const Pending& pending) = nullptr;
+  // Silent loss (group delivery tests): when non-null and true, the sender
+  // gets an honest MAC success (the frame was acknowledged on the air) but
+  // the receiver never processes it — loss after the MAC ACK (RX queue
+  // overflow, corruption above the MAC), which link retries cannot see.
+  bool (*silent_drop)(const Pending& pending) = nullptr;
 
   // Long simulations (issue #59): sightings can be switched off so a
   // multi-minute 100-node run does not grow an unbounded vector; the
@@ -125,6 +130,9 @@ class SimNetwork {
     std::uint64_t bytes{0};
   };
   std::map<routeloom::NodeId, TxTally> route_control_tx;
+  // Every TX attempt by frame type (group delivery airtime, issue #82):
+  // delivered or not, each attempt costs air time.
+  std::map<routeloom::FrameType, TxTally> tx_by_type;
 
   // Returns the number of undelivered frames (link down, node missing, or
   // dropped by the loss hook).
@@ -140,6 +148,9 @@ class SimNetwork {
       }
       if (pending.frame.size() > 4) {
         const auto type = static_cast<routeloom::FrameType>(pending.frame[4]);
+        auto& by_type = tx_by_type[type];
+        ++by_type.frames;
+        by_type.bytes += pending.frame.size();
         if (type == routeloom::FrameType::RouteUpdate ||
             type == routeloom::FrameType::SeqnoRequest ||
             type == routeloom::FrameType::RouteRequest) {
@@ -177,6 +188,10 @@ class SimNetwork {
         nodes.at(pending.from)->note_radio_tx(obs, now);
       }
       nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
+      if (success && silent_drop != nullptr && silent_drop(pending)) {
+        ++dropped;
+        continue;
+      }
       if (success) {
         nodes.at(pending.to)->on_radio_receive(
             pending.from, routeloom::ByteView{pending.frame.data(), pending.frame.size()},
@@ -219,6 +234,24 @@ struct CapturingObserver final : routeloom::NodeObserver {
   void on_diagnostic(const char* reason, routeloom::NodeId peer, const routeloom::MessageId*) noexcept override {
     diagnostics.emplace_back(reason);
     diagnostic_peers.push_back(peer);
+  }
+  // Group delivery (group-delivery.md): the payload also lands in
+  // `messages` (the default on_group_message behaviour); the metadata is kept
+  // index-aligned in `group_messages`.
+  struct GroupReceipt {
+    routeloom::GroupMessageInfo info;
+    std::vector<std::uint8_t> payload;
+  };
+  std::vector<GroupReceipt> group_messages;
+  std::vector<routeloom::GroupDeliveryResult> group_results;
+  void on_group_message(const routeloom::GroupMessageInfo& info,
+                        routeloom::ByteView payload) noexcept override {
+    group_messages.push_back(
+        GroupReceipt{info, std::vector<std::uint8_t>(payload.data, payload.data + payload.size)});
+    on_message(info.key, info.key.origin, payload);
+  }
+  void on_group_delivery(const routeloom::GroupDeliveryResult& result) noexcept override {
+    group_results.push_back(result);
   }
 
   bool has_diag(const char* prefix) const {

@@ -110,6 +110,11 @@ enum class FrameType : std::uint8_t {
   Control = 22,
   TimeSync = 23,
   ChannelNotice = 24,
+  // Group delivery (docs/design/sdk-v1/group-delivery.md): end-protected
+  // group data travelling the gateway tree, and the link-only aggregated
+  // confirmation a child returns to its tree parent.
+  GroupData = 25,
+  GroupReport = 26,
   RouteUpdate = 32,
   RouteWithdraw = 33,
   SeqnoRequest = 34,
@@ -125,6 +130,14 @@ enum class FrameType : std::uint8_t {
 enum class SecurityScope : std::uint8_t {
   Link = 0,
   EndToEnd = 1,
+  // Group end protection (GROUP_DATA): sender = the group message's origin,
+  // receiver = the group address (group.hpp). Every node that holds the
+  // group key material may open it — it proves "a current member sealed
+  // this", never the origin's identity (sdk-v1/03 §6.5). A provider MUST
+  // key each (origin, group, epoch) separately (a per-sender subkey): the
+  // 12-byte nonce carries no sender, so independent per-sender counters
+  // under one shared key would collide (group-delivery.md §7).
+  Group = 2,
 };
 
 struct ByteView {
@@ -155,6 +168,12 @@ struct SendOptions {
   // Request durability across deep sleep: the power coordinator persists the
   // delivery into the sleep image instead of failing it at drain.
   bool persist_across_sleep{false};
+  // Per-source ordering (group-delivery.md §6): a RELIABLE delivery with this
+  // flag is not transmitted until the previous ordered delivery from this
+  // node to the same destination is Delivered or past its own deadline, so
+  // the destination's application sees them in send order. A lost
+  // predecessor delays its successors by at most the predecessor's lifetime.
+  bool ordered{false};
 };
 
 struct DeliveryResult {

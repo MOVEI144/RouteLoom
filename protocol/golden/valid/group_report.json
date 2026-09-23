@@ -1,0 +1,23 @@
+{
+  "format": "routeloom-wire-v1-golden",
+  "name": "group_report",
+  "comment": "GROUP_REPORT from child 2 to tree parent 1 (two missing ids, truncated), link protection only",
+  "type": 26,
+  "flags": 0,
+  "delivery": 0,
+  "delivery_round": 0,
+  "hop_remaining": 1,
+  "network": 1,
+  "origin": 2,
+  "destination": 1,
+  "previous_hop": 2,
+  "next_hop": 1,
+  "session": 102,
+  "sequence": 7,
+  "remaining_deadline_ms": 1000,
+  "original_lifetime_ms": 1000,
+  "link_epoch": 1,
+  "end_epoch": 1,
+  "payload_hex": "0000000000000001000000658000000000000003010200280003000502000000000000000b000000000000000c",
+  "encoded_hex": "524c02001a0000000100002d000000010000000000000002000000000000000100000000000000020000000000000001000000660000000000000007000003e8000003e80000000100000001000000000000000000000000864c4f96df3b36edf0a17e5bfdfdde51d600662bf2ae08ba3b73e7d3c3a7dc34bc79d704147c07e66009f4e6642551ef73f85b3f2d0e0fc2c0c862ee0b"
+}
