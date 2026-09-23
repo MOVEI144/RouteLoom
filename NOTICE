@@ -19,7 +19,8 @@ Third-party components
 
 This project includes or depends on the following third-party software.
 All listed licenses were verified to be compatible with distribution
-under Apache-2.0; no copyleft (GPL/LGPL/AGPL) components are used.
+under Apache-2.0; no copyleft (GPL/LGPL/AGPL) components are used
+(TF-PSA-Crypto is dual-licensed and taken under its Apache-2.0 option).
 
 Vendored in this repository
 ---------------------------
@@ -35,6 +36,61 @@ Vendored in this repository
              components/routeloom/third_party/micro-ecc/LICENSE.txt and
              must be retained in source and binary redistributions.
 
+* libedhoc — MIT License
+  Location : components/routeloom/third_party/libedhoc/ (LICENSE)
+  Copyright: (c) 2024, Kamil Kiełbasa and others
+  Upstream : https://github.com/kamil-kielbasa/libedhoc
+  Version  : v2.3.2, commit c8857b62d66be3664d1694bbe4eea37c56c05d9e (the
+             pin fixed in docs/design/host-security-readiness/
+             05-production-security.md §1)
+  Notes    : EDHOC (RFC 9528) protocol engine of the SDK v1 join/link
+             handshakes (docs/design/sdk-v1/08 P2-1). Subset: include/,
+             library/core/, library/internal/, backends/{cbor,memory,log}/;
+             upstream's PSA reference cipher suites, tests, Zephyr and CMake
+             files are not vendored. Files are unmodified (blob ids in
+             components/routeloom/third_party/VENDORED.json, checked by
+             tests/test_vendored_sources.py); RouteLoom's configuration and
+             crypto/memory/credential backend are RouteLoom code in
+             components/routeloom/src/edhoc/. The MIT notice in LICENSE must
+             accompany source and binary redistributions.
+
+* zcbor — Apache License 2.0
+  Location : components/routeloom/third_party/zcbor/ (LICENSE)
+  Copyright: Nordic Semiconductor ASA
+  Upstream : https://github.com/NordicSemiconductor/zcbor
+  Version  : 0.8.1, commit d3093b5684f62268c7f27f8a5079f166772619de (the
+             externals/zcbor submodule pin of the libedhoc commit above)
+  Notes    : CBOR runtime (include/, src/) that libedhoc's generated CBOR
+             backend is built against, compiled with ZCBOR_CANONICAL.
+             Unmodified; no NOTICE file upstream.
+
+* TF-PSA-Crypto (Mbed TLS crypto) — Apache-2.0 OR GPL-2.0-or-later,
+  used here under Apache-2.0
+  Location : components/routeloom/third_party/tf-psa-crypto/ (LICENSE)
+  Copyright: The Mbed TLS Contributors
+  Upstream : https://github.com/Mbed-TLS/TF-PSA-Crypto
+  Version  : 1.1.0, commit 29160dd877d29658279fd683b2ae57b320ddcf09 (the
+             tf-psa-crypto submodule of Mbed TLS commit
+             0fe989b6b514192783c469039edd325fd0989806, which is libedhoc's
+             externals/mbedtls pin)
+  Notes    : Only the builtin AES block cipher and CCM mode plus the
+             headers they include, configured by
+             components/routeloom/src/edhoc/tf_psa_crypto_config.h. Provides
+             the AES-CCM-16-64-128 of EDHOC cipher suite 2 in HOST builds
+             only; the ESP-IDF component does not compile it (firmware uses
+             ESP-IDF's own Mbed TLS through PSA). Unmodified.
+
+Test data
+---------
+
+* RFC 9529 (EDHOC traces) §3 and §4 values in protocol/edhoc-rfc9529/,
+  copied verbatim by tools/extract_rfc9529_vectors.py.
+  Copyright (c) 2024 IETF Trust and the persons identified as the document
+  authors. All rights reserved. Code Components extracted from the RFC are
+  under the Revised BSD License (IETF Trust Legal Provisions §4.e); the
+  license text is reproduced in protocol/edhoc-rfc9529/README.md. Public
+  test keys only — never deployment material.
+
 Build-time / linked dependencies (not vendored)
 -----------------------------------------------
 
@@ -43,7 +99,8 @@ Build-time / linked dependencies (not vendored)
              components/routeloom_espnow adapter (which REQUIRES the IDF
              builtin components esp_wifi, esp_event, esp_netif,
              esp_timer, freertos, nvs_flash and mbedtls — mbedTLS,
-             Apache-2.0, provides the PSA AES-GCM backend). Pinned to
+             Apache-2.0, provides the PSA AES-GCM backend and the PSA
+             AES-CCM hook for EDHOC). Pinned to
              tag v6.0.3 (commit 76f5dedd9950a3012fee8fb7d5586df21fc67802,
              asserted in CI). Fetched via the espressif/idf container
              image or a normal ESP-IDF install; no ESP-IDF source is

@@ -46,7 +46,9 @@ jobs:
             echo "tag: ${version}"
             echo "commit: $(git rev-parse HEAD)"
             echo "contents: portable C++ core (components/), tests/,"
-            echo "  vendored micro-ecc, protocol golden vectors, docs,"
+            echo "  vendored micro-ecc, libedhoc, zcbor and the TF-PSA-Crypto"
+            echo "  AES/CCM subset (pins in components/routeloom/third_party/"
+            echo "  VENDORED.json), protocol golden vectors, docs,"
             echo "  license texts. Excludes host/ and firmware/."
             echo "git: $(git --version)"
             echo "cmake: $(cmake --version | head -1)"
@@ -211,6 +213,22 @@ jobs:
                "description": "Vendored snapshot at components/routeloom/third_party/micro-ecc (uECC P-256)",
                "purl": "pkg:github/kmackay/micro-ecc",
                "licenses": [{"license": {"id": "BSD-2-Clause"}}]},
+          ]
+          # Vendored EDHOC sources: name, version, commit and license come
+          # from the lock file that tests/test_vendored_sources.py checks.
+          lock = json.load(open('components/routeloom/third_party/VENDORED.json'))
+          purls = {
+              "libedhoc": "pkg:github/kamil-kielbasa/libedhoc@{commit}",
+              "zcbor": "pkg:github/NordicSemiconductor/zcbor@{commit}",
+              "TF-PSA-Crypto": "pkg:github/Mbed-TLS/TF-PSA-Crypto@{commit}",
+          }
+          for v in lock["components"]:
+              components.append({
+                  "type": "library", "name": v["name"], "version": v["version"],
+                  "description": f"Vendored subset at components/routeloom/third_party/{v['directory']} (commit {v['commit']})",
+                  "purl": purls[v["name"]].format(commit=v["commit"]),
+                  "licenses": [{"expression": v["license"]}]})
+          components += [
               {"type": "framework", "name": "esp-idf", "version": "v6.0.3",
                "description": "Build-time SDK for firmware/; commit 76f5dedd9950a3012fee8fb7d5586df21fc67802; not vendored",
                "purl": "pkg:github/espressif/esp-idf@v6.0.3",
