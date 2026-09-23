@@ -215,6 +215,69 @@ class SessionInstaller {
 - 現行の`NeighborAuthenticator`（16B tag×固定3 phase）は可変長・多往復のEDHOCを表せないため、本番用に`HandshakeEngine`（`begin`/`on_message`→`Continue | Done{proof, ContextKeys, RMS} | Fail{reason}`）を追加する。`AuthenticatedPeerProof`は引き続きengineだけが発行し、cookieは既存のまま。`UnavailableAuthenticator`は本番engineが認定されるまで残す。
 - `security_profile()`がProductionを返すのは、SEC受入（[08](08-implementation-plan.md) §4）を満たしたbuildだけ。
 
+上の枠は設計時の案である。P4-1で実装したAPIは§8.1で、scope番号は案と異なる（§8.2）。
+
+### 8.1 実装したAPI（P4-1、host試験済み・実機未試験）
+
+[security.hpp](../../../components/routeloom/include/routeloom/security.hpp)、[types.hpp](../../../components/routeloom/include/routeloom/types.hpp)、[wire.hpp](../../../components/routeloom/include/routeloom/wire.hpp)、[node.hpp](../../../components/routeloom/include/routeloom/node.hpp)：
+
+```cpp
+enum class SecurityScope : std::uint8_t { Link = 0, EndToEnd = 1, Group = 2, GroupLink = 3 };
+enum class ContextState : std::uint8_t { None = 0, Establishing = 1, Ready = 2, Rekeying = 3 };
+constexpr bool context_usable(ContextState);            // Ready or Rekeying
+
+class SecurityProvider {                                // 既存のready/seal/open/next_counterは不変
+  // peer = 封をするcontextのreceiver（Link: next hop、EndToEnd: destination、Group: kBroadcastNodeId）。
+  // epochは設定値（headerに入っているNodeConfigのlink_epoch/end_epoch）を持って入り、既定実装は触らない。
+  virtual Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept;  // 既定: success
+  virtual ContextState context_state(SecurityScope scope, NodeId peer) const noexcept;     // 既定: Ready
+};
+
+constexpr std::size_t kSessionKeySize = 16, kSessionIvSize = 12;
+struct ContextKeys {                                    // 秘密を含む。engineはinstall後にsecure_clear
+  SecurityScope scope; NetworkId network; NodeId peer;
+  std::uint32_t tx_context_id;                          // 相手が選んだid（送信headerに入る）
+  std::uint32_t rx_context_id;                          // 自分が選んだid（受信で鍵を引く）
+  std::array<std::uint8_t, 16> tx_key, rx_key; std::array<std::uint8_t, 12> tx_iv, rx_iv;
+  std::array<std::uint8_t, 8> peer_cert_id; std::uint32_t peer_generation;   // 検証済み要約
+};
+Status check_context_keys(const ContextKeys&);          // Link/EndToEndのみ、peer・network・id非0
+
+class SessionInstaller {                                // 案どおり
+  virtual Status install(const ContextKeys& keys) noexcept = 0;
+  virtual void retire(SecurityScope scope, NodeId peer) noexcept = 0;
+  virtual void retire_all(NodeId peer) noexcept = 0;
+};
+
+// wire（encode_new/forward/seal_groupが内部で使う。公開はNodeと試験のため）
+SecurityContext wire::link_context(const Header&);  SecurityContext wire::end_context(const Header&);
+Status wire::stamp_link_epoch(Header&, SecurityProvider&);  Status wire::stamp_end_epoch(Header&, SecurityProvider&);
+
+struct SessionStats { std::uint32_t tx_deferred, tx_unavailable, rx_auth_required; };  // MeshNode::session_stats()
+```
+
+挙動（Providerが既定実装のままなら、すべてのbyte列・診断・統計は従来と同一）：
+
+| 箇所 | 動作 |
+|---|---|
+| `wire::encode_new` | link epoch（新規frameはend-protectedならend epochも）を`tx_epoch()`で決めてから`next_counter()`を呼ぶ。拒否されたframeはcounterを消費しない |
+| `wire::forward` | `link_epoch`引数は設定値で、`tx_epoch(Link, next_hop)`が置き換える。end層は触らない |
+| `wire::seal_group` | `tx_epoch(Group, kBroadcastNodeId)`でend epochを決めてからgroup counterを取る |
+| MeshNodeの送信 | encodeが`AuthRequired`で、`context_state`（link→新規frameのend）が`None`／`Establishing`なら、jobを経路待ちと同じく保留（`defer_selected`、期限まで）。jobごとに1回だけ`SESSION_REQUIRED`（None）または`SESSION_PENDING`（Establishing）を相手のNodeIdで出し、`tx_deferred`を数える。期限到達は`JOB_EXPIRED`ではなく`SESSION_UNAVAILABLE`で失敗し`tx_unavailable`を数える。contextが使える状態での`AuthRequired`は従来どおりの失敗 |
+| MeshNodeの受信 | open失敗の診断は従来どおりProviderのdetail。`AuthRequired`（未知context id）は`rx_auth_required`も数える |
+| `send_group` | group contextが無ければ`seal_group`の`AuthRequired`をそのまま呼出し側へ返す（sequence・origin slotは消費しない） |
+| handshakeの開始 | P4-1ではNodeは要求frameを出さない。`tx_epoch`に`AuthRequired`を返し`None`と答えたProvider（とP4-2の`HandshakeEngine`）が確立を担う。Nodeは保留するだけ |
+
+`MeshNode`の増分は8 B（RISC-V ILP32：83,160→83,168、x86_64：84,704→84,712、i386：79,044→79,056）。`TxJob`の保留flagは既存のpaddingに入り、`TxJob`の大きさは変わらない。
+
+### 8.2 実装時に解決した点（Resolved in implementation）
+
+- **scope番号**：案の`GroupLink = 2, GroupEnd = 3`は、group配送（[group-delivery](group-delivery.md) §7）が先に`SecurityScope::Group = 2`をGROUP_DATAのend保護として導入していたため採らない。値2はnonceの先頭byte・開発PSKの鍵導出・test cipherのseedに入り、Wire v2 golden vectorに現れる。したがって**案の`GroupEnd`は既存の`Group`（2）がそのまま担い**、**`GroupLink`は3**とした（C ABIは`RL_SECURITY_GROUP_LINK = 3`を追加）。`GroupLink`はまだ誰も発行せず、開発PSK Providerは`Unsupported`で拒否する（PSKから導出しない）。本番のGroup（GK由来の送信者別鍵、§6.1の`K_gend`）はP5-1で同じ値2の意味を引き継ぐ。
+- **`SecurityContext.group_epoch`**：P4-1では追加しない（GKを使うP5-1で要否を決める）。`SecurityContext`の大きさと既存の集成体初期化を変えない。
+- **C ABI**：`rl_security_vtable_t`にはstruct_sizeが無く、callbackを後ろに足すと古い呼出し側の構造体を読み越える。session callbackは追加せず（`RL_ABI_VERSION`は2のまま）、C Providerは常に設定epoch・常にReadyとして扱う。session型ProviderはC++のみで、C向けには独自struct_size付きの拡張を後で足す。
+- **ContextState**：案の4状態をそのまま採り、0を`None`にした（0初期化で「使える」と誤認しない）。期限切れ（§4.3）は`Rekeying`または`tx_epoch`の拒否で表し、別状態は設けない。
+- **handshake要求**：案の「Nodeがrate制限付きで要求」は、P4-1ではProviderが`None`を答えた時点で自ら開始する形にした（Nodeに相手ごとのtimerを持たせない＝RAMを増やさない）。rate制限はengine側（P4-2）の責務。
+
 ## 9. 失敗の扱い
 
 | 事象 | 動作 |
@@ -240,6 +303,6 @@ class SessionInstaller {
 | V1-K07 | 削除起因rekey：削除者にg+1が届かない、overlap後のgは拒否 |
 | V1-K08 | broadcast経路広告：pairwise contextの無い送信者の広告を無視 |
 | V1-K09 | GK更新でscope鍵が変わり、削除者のMember DISCOVERが無言drop |
-| V1-K10 | 開発PSK profileのgolden vectorが不変 |
+| V1-K10 | 開発PSK profileのgolden vectorが不変（P4-1で実行済み：`routeloom_session_tests`が全Wire v2 golden vector（中継の再wrapを含む）をProvider epoch経路で再現、既存のgolden試験も無変更で通過。PSK AES-GCM自体のvectorは無い） |
 | V1-K11 | AuthorityEnvelope：replay拒否、gatewayが復号できない |
 | V1-K12 | HKDF（実装済み）：RFC 5869 A.1〜A.3（このbranchで実行済み、`routeloom_kdf_tests`） |
