@@ -49,6 +49,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     }
   }
 
+  // P3-1: EAD_2/EAD_3 with the Credential item (label 65541) first.
+  for (const JoinEad label : {JoinEad::Offer, JoinEad::Request}) {
+    ByteView credential{};
+    ByteView value{};
+    if (join_ead_find_with_credential(input, label, credential, value).ok()) {
+      if (!inside(credential, input) || !inside(value, input) || credential.size == 0 ||
+          value.size == 0) {
+        std::abort();
+      }
+      CertClaims claims{};
+      (void)join_credential_check(credential, label == JoinEad::Offer ? CertType::Site
+                                                                       : CertType::Device,
+                                  ByteView{data, size < 32 ? size : 32}, claims);
+    }
+  }
+
   JoinIntent intent{};
   if (join_intent_decode(input, intent).ok()) {
     ByteBuffer<kJoinIntentSize> out{};

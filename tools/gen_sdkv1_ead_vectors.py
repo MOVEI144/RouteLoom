@@ -5,7 +5,9 @@ Independent reference encoder for the zero-touch join EDHOC External
 Authorization Data items of docs/design/sdk-v1/02-zero-touch-join.md
 §6.1/§6.2 (JoinIntent, SiteOffer, JoinRequest, JoinResult, SitePackage)
 and the RemovalNotice of 04-removal-revocation.md §6.1, as resolved in
-02 "Resolved in implementation (P2-3)" and protocol/sdkv1-golden/ead/README.md.
+02 "Resolved in implementation (P2-3)" and protocol/sdkv1-golden/ead/README.md,
+plus the Credential item (label 65541, P3-1: the RLCW1 certificate of a
+kid-referenced ID_CRED_x, ahead of SiteOffer in EAD_2 / JoinRequest in EAD_3).
 It shares no code with the C++ codec (components/routeloom/src/sdkv1_ead.cpp)
 or the Rust mirror (host/routeloom-join); all three must agree on every byte.
 
@@ -42,7 +44,8 @@ cbor_bstr, sig_structure, sign1, sign = base.cbor_bstr, base.sig_structure, base
 pubkey, seed = base.pubkey, base.seed
 
 # --- EAD labels (absolute values; the wire carries -label, i.e. critical) ------
-LABELS = {"intent": 65537, "offer": 65538, "request": 65539, "result": 65540}
+LABELS = {"intent": 65537, "offer": 65538, "request": 65539, "result": 65540,
+          "credential": 65541}
 VALUE_SIZE = {"intent": 12, "offer": 22, "request": 26}
 RESULT_HEAD, RESULT_MAX = 12, 520
 SITE_PACKAGE_SIZE = 120
@@ -604,8 +607,10 @@ def main() -> None:
     ebad("ead_padding_only", cbor_int(0) + cbor_bstr(b"\x00"), "the join item is required")
     ebad("ead_non_critical", cbor_int(LABELS["intent"]) + cbor_bstr(intent_value),
          "join items must be critical (negative label)")
-    ebad("ead_unknown_critical", cbor_int(-65541) + cbor_bstr(intent_value),
+    ebad("ead_unknown_critical", cbor_int(-65542) + cbor_bstr(intent_value),
          "unknown critical label")
+    ebad("ead_credential_in_m1", ead_item("credential", devcert) + intent_item,
+         "the Credential item rides EAD_2/EAD_3 only")
     ebad("ead_unknown_noncritical", intent_item + cbor_int(1) + cbor_bstr(b"\x00"),
          "no other item is accepted (strict)")
     ebad("ead_wrong_message", ead_item("offer", site_offer(offer)),
@@ -630,6 +635,69 @@ def main() -> None:
          "JoinResult value above 520 bytes", expected="result")
     ebad("ead_padding_text_value", cbor_int(0) + b"\x61\x00" + intent_item,
          "padding values are bstr")
+
+    # ---- Credential item (label 65541, P3-1): kid-referenced ID_CRED_x plus the
+    # full RLCW1 certificate in EAD — SiteCert in EAD_2, DevCert in EAD_3 -------------
+    offer_item = ead_item("offer", site_offer(offer))
+    request_item = ead_item("request", join_request(request))
+    site_kid, dev_kid = base.kid(sak_pub), base.kid(device_pub)
+    for name, cert, cert_type, kid_value, item, expected, pad, note in (
+            ("ead2_sitecert_offer", sitecert, "site", site_kid, offer_item, "offer", False,
+             "EAD_2: Credential(SiteCert) then SiteOffer"),
+            ("ead3_devcert_request", devcert, "device", dev_kid, request_item, "request", False,
+             "EAD_3: Credential(DevCert) then JoinRequest"),
+            ("ead3_devcert_request_padding", devcert, "device", dev_kid, request_item, "request",
+             True, "padding between and after the two items is ignored")):
+        cred_item = ead_item("credential", cert)
+        ead = (cred_item + cbor_int(0) + cbor_bstr(b"\x00" * 3) + item + cbor_int(0)) if pad \
+            else cred_item + item
+        value = site_offer(offer) if expected == "offer" else join_request(request)
+        good(name, "ead_field_credential",
+             dict(ead_hex=ead.hex(), expected=expected, credential_hex=cert.hex(),
+                  value_hex=value.hex(), cert_type=cert_type, kid_hex=kid_value.hex(),
+                  credential_item_hex=cred_item.hex(), label=LABELS["credential"], note=note),
+             field=ead, item=cred_item)
+
+    def cbad(name: str, ead: bytes, note: str, expected: str = "offer") -> None:
+        bad(name, "ead_field_credential", ead, note, expected=expected)
+
+    site_item = ead_item("credential", sitecert)
+    cbad("ead2_missing_credential", offer_item, "EAD_2 needs the SiteCert credential")
+    cbad("ead2_reversed_order", offer_item + site_item, "the Credential item comes first")
+    cbad("ead2_credential_only", site_item, "the SiteOffer item is required")
+    cbad("ead2_credential_twice", site_item + site_item + offer_item, "one Credential")
+    cbad("ead2_offer_twice", site_item + offer_item + offer_item, "one SiteOffer")
+    cbad("ead2_extra_intent", site_item + offer_item + intent_item, "no other item")
+    cbad("ead2_request_instead", site_item + request_item, "EAD_2 carries a SiteOffer")
+    cbad("ead2_credential_non_critical",
+         cbor_int(LABELS["credential"]) + cbor_bstr(sitecert) + offer_item,
+         "the Credential item is critical")
+    cbad("ead2_credential_empty", cbor_int(-LABELS["credential"]) + cbor_bstr(b"") + offer_item,
+         "a certificate is 1..256 B")
+    cbad("ead2_credential_oversize",
+         cbor_int(-LABELS["credential"]) + cbor_bstr(b"\x00" * 257) + offer_item,
+         "a certificate is at most 256 B")
+    cbad("ead2_credential_no_value", cbor_int(-LABELS["credential"]) + offer_item,
+         "the Credential item carries a value")
+    cbad("ead3_trailing_byte", ead_item("credential", devcert) + request_item + b"\xff",
+         "trailing byte", expected="request")
+
+    # join_credential_check: the certificate decodes as the right type and its
+    # cnf key hashes to the kid of the same message's ID_CRED_x.
+    def cred_bad(name: str, cert: bytes, cert_type: str, kid_value: bytes, expect: str,
+                 note: str) -> None:
+        bad(name, "credential", cert, note, expect=expect, cert_type=cert_type,
+            kid_hex=kid_value.hex())
+
+    cred_bad("credential_kid_mismatch", sitecert, "site", dev_kid, "deny",
+             "the SiteCert cnf does not hash to this kid")
+    cred_bad("credential_wrong_type", devcert, "site", dev_kid, "deny",
+             "a DevCert where the SiteCert is expected")
+    cred_bad("credential_kid_short", devcert, "device", dev_kid[:31], "deny",
+             "kid = SHA-256, 32 B")
+    cred_bad("credential_trailing", devcert + b"\x00", "device", dev_kid, "error",
+             "one canonical certificate, no trailing byte")
+    cred_bad("credential_garbage", b"\xa0" * 20, "device", dev_kid, "error", "not a COSE_Sign1")
 
     for name, data in seeds:
         (CORPUS / name).write_bytes(data)

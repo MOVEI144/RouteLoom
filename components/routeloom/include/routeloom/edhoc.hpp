@@ -28,8 +28,10 @@
 // src/edhoc/edhoc_port.c) and is reachable through native() for tests and
 // integrations that need the raw API.
 //
-// Not claimed: the RouteLoom application profile (Exporter context, EAD,
-// ContextConfirm) — that is P2-3/P4-2. Test vectors: protocol/edhoc-rfc9529/.
+// EAD: an optional EadHandler composes/processes the items of each message
+// (P3-1; the join items and their strict walkers are sdkv1_ead.hpp). Not
+// claimed: the rest of the RouteLoom application profile (Exporter context,
+// ContextConfirm) — that is P4-2. Test vectors: protocol/edhoc-rfc9529/.
 
 #include <array>
 #include <cstddef>
@@ -196,6 +198,33 @@ class CredentialProvider {
   virtual Status peer(Role role, ByteView kid, PeerCredential& out) noexcept = 0;
 };
 
+// ---------------------------------------------------------------------------
+// External Authorization Data (RFC 9528 §3.8). The zero-touch join profile
+// (sdkv1_ead.hpp) rides here. libedhoc hands a message's items to process()
+// BEFORE it authenticates the peer (message_2: step 9 before step 10;
+// message_3: step 6 before authenticate_peer), so a handler can stage the
+// certificate of the join Credential item (label 65541) for the
+// CredentialProvider to match against the kid in the same message.
+constexpr std::size_t kEadItemsMax = 3;  // CONFIG_LIBEDHOC_MAX_NR_OF_EAD_TOKENS
+
+struct EadItem {
+  std::int32_t label{0};  // negative = critical
+  // compose: owned by the handler, valid until the composing call returns;
+  // process: points into the session's arena, valid during the call only.
+  ByteView value{};
+};
+
+class EadHandler {
+ public:
+  virtual ~EadHandler() = default;
+  // `message` is 1..4. Fill up to `capacity` items for the outgoing message.
+  virtual Status compose(int message, EadItem* items, std::size_t capacity,
+                         std::size_t& count) noexcept = 0;
+  // The items received in `message`; an error aborts the session (the join
+  // profile rejects unknown critical items and any item out of place).
+  virtual Status process(int message, const EadItem* items, std::size_t count) noexcept = 0;
+};
+
 struct SessionConfig {
   Role role{Role::Initiator};
   Method method{Method::SignatureSignature};
@@ -209,6 +238,9 @@ struct SessionConfig {
   const AeadCcm* aead{nullptr};  // nullptr: builtin_aead_ccm()
   RandomFn random{nullptr};
   void* random_ctx{nullptr};
+  // Optional. nullptr keeps P2-1 behaviour: nothing is composed and libedhoc
+  // ignores received EAD — the join profile always binds a handler.
+  EadHandler* ead{nullptr};
 };
 
 // ---------------------------------------------------------------------------
