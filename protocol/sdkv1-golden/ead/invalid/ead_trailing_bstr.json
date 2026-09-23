@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "3a000100004c010049746ee20000000300004100",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_trailing_bstr",
+  "note": "a bstr without a label after the item"
+}

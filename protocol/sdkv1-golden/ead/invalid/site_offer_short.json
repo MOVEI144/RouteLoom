@@ -1,0 +1,8 @@
+{
+  "codec": "site_offer",
+  "encoded_hex": "010051730000000000420a1b2c3d0000000307d000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "site_offer_short",
+  "note": "SiteOffer is exactly 22 bytes"
+}

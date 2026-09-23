@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "004100",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_padding_only",
+  "note": "the join item is required"
+}

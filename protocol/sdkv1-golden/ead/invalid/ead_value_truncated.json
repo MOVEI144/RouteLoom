@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "3a000100004c010049746ee20000000300",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_value_truncated",
+  "note": "the bstr runs past the field"
+}

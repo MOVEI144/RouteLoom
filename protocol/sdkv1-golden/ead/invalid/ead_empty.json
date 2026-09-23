@@ -1,0 +1,9 @@
+{
+  "codec": "ead_field",
+  "encoded_hex": "",
+  "expect": "error",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_empty",
+  "note": "an EAD field with no item"
+}

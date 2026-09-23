@@ -1,0 +1,10 @@
+{
+  "codec": "ead_field",
+  "ead_hex": "003a000100004c010049746ee200000003000000581eaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expect": "ok",
+  "expected": "intent",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "ead_intent_padding_both",
+  "note": "padding on both sides",
+  "value_hex": "010049746ee2000000030000"
+}

@@ -1,0 +1,13 @@
+{
+  "codec": "removal_notice",
+  "encoded_hex": "d28443a10126a0581c01010000517300000000004200a1000000001234000000000000000f5840eba1af07ad4e6b8363a1125c19b51aa9e948943d17231ef02fd2f732c199bb7141002b1054ba1aaef2b837856b29e0dfb92aaac78b23475350f23442986d2897",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "removal_notice_generation_zero",
+  "note": "generation >= 1",
+  "own_generation": 3,
+  "own_network": 13054454845,
+  "own_node": 45317471250420276,
+  "own_site_id": 5869034739393888322,
+  "signer_pubkey_hex": "d797737d4081542dfe111a9a6cba6a52e91118f27a814f8e831e8f72d5165f9308da9652224eaf39f459098b545d520900d372da6e73cf33c4032a8264e7bae4"
+}

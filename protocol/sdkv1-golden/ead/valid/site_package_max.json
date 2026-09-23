@@ -1,0 +1,23 @@
+{
+  "authority_time_s": 18446744073709551615,
+  "channel": 14,
+  "channel_epoch": 4294967295,
+  "codec": "site_package",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "gateway0": 45317471250415617,
+  "gateway1": 45317471250415618,
+  "gateway2": 45317471250415619,
+  "gateway3": 18446744073709551614,
+  "gateway_count": 4,
+  "gk_epoch": 4294967295,
+  "gk_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "membership_revision": 4294967295,
+  "name": "site_package_max",
+  "network": 13054454845,
+  "role": 7,
+  "rs_epoch": 4294967295,
+  "site_id": 5869034739393888322,
+  "time_uncertainty_ms": 4294967295,
+  "value_hex": "010000005173000000000042000000030a1b2c3dffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff0e070400ffffffff00a100000000000100a100000000000200a1000000000003fffffffffffffffeffffffffffffffffffffffffffffffff00000000"
+}

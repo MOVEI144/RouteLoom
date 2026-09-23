@@ -1,0 +1,8 @@
+{
+  "codec": "site_offer",
+  "encoded_hex": "01005173000000000042000000000000000307d00000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "site_offer_network_zero",
+  "note": "network_low32 0 is invalid"
+}

@@ -1,0 +1,8 @@
+{
+  "codec": "join_request",
+  "encoded_hex": "010000110104000000000002010000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_request_design_30_bytes",
+  "note": "02 \u00a76.1 states 30 B but the listed fields sum to 26 B; the fields win"
+}

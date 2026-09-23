@@ -1,0 +1,23 @@
+{
+  "authority_time_s": 0,
+  "channel": 1,
+  "channel_epoch": 9,
+  "codec": "site_package",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "gateway0": 45317471250415617,
+  "gateway1": 0,
+  "gateway2": 0,
+  "gateway3": 0,
+  "gateway_count": 1,
+  "gk_epoch": 203,
+  "gk_hex": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+  "membership_revision": 0,
+  "name": "site_package_first_boot",
+  "network": 13054454845,
+  "role": 1,
+  "rs_epoch": 0,
+  "site_id": 5869034739393888322,
+  "time_uncertainty_ms": 0,
+  "value_hex": "010000005173000000000042000000030a1b2c3d00000000000000cb303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f010101000000000900a10000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+}

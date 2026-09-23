@@ -92,3 +92,7 @@ later field zero.
   `"error"` (every decoder must reject it) or `"deny"` (well-formed, but the
   signature/site/network check fails under the listed `signer_pubkey_hex`,
   `expected_site_id`, `expected_network`).
+
+Sub-directories with their own generator and README:
+[`derivations/`](derivations/README.md) (P1-4 key schedule, RLRES1) and
+[`ead/`](ead/README.md) (P2-3 join EAD items and RemovalNotice).

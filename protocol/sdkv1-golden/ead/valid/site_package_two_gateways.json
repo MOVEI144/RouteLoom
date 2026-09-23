@@ -1,0 +1,23 @@
+{
+  "authority_time_s": 1790000000,
+  "channel": 6,
+  "channel_epoch": 9,
+  "codec": "site_package",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "gateway0": 45317471250415617,
+  "gateway1": 45317471250415618,
+  "gateway2": 0,
+  "gateway3": 0,
+  "gateway_count": 2,
+  "gk_epoch": 203,
+  "gk_hex": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+  "membership_revision": 41,
+  "name": "site_package_two_gateways",
+  "network": 13054454845,
+  "role": 1,
+  "rs_epoch": 14,
+  "site_id": 5869034739393888322,
+  "time_uncertainty_ms": 1500,
+  "value_hex": "010000005173000000000042000000030a1b2c3d0000000e000000cb303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f060102000000000900a100000000000100a100000000000200000000000000000000000000000000000000006ab13b80000005dc0000002900000000"
+}

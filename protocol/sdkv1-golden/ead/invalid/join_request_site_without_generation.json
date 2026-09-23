@@ -1,0 +1,8 @@
+{
+  "codec": "join_request",
+  "encoded_hex": "0100001101040000000000020100517300000000004200000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_request_site_without_generation",
+  "note": "a last site has generation >= 1"
+}

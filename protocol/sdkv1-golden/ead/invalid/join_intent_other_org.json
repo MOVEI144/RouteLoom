@@ -1,0 +1,9 @@
+{
+  "codec": "join_intent",
+  "encoded_hex": "0100e050386e000000030000",
+  "expect": "deny",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_intent_other_org",
+  "note": "org_hint of another Site CA (the authority does not answer it)",
+  "site_ca_pubkey_hex": "4dd4f4d64c803bbacbeb82db4ae9323e4516895321fda186290ceb299b61f1c8a1f9721f3d6ecec8b0feecb288423fe0c8588e6d2982aced23fda55a75759f90"
+}

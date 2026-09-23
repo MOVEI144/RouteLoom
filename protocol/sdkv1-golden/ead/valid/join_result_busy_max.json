@@ -1,0 +1,12 @@
+{
+  "body_len": 0,
+  "codec": "join_result",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "item_hex": "3a000100034c0106000000000e1000000000",
+  "label": 65540,
+  "name": "join_result_busy_max",
+  "retry_after_s": 3600,
+  "value_hex": "0106000000000e1000000000",
+  "verdict": 6
+}

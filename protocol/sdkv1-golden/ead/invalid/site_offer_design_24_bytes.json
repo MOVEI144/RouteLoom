@@ -1,0 +1,8 @@
+{
+  "codec": "site_offer",
+  "encoded_hex": "010051730000000000420a1b2c3d0000000307d000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "site_offer_design_24_bytes",
+  "note": "02 \u00a76.1 states 24 B but the listed fields sum to 22 B; the fields win"
+}

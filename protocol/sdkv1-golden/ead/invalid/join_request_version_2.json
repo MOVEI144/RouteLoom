@@ -1,0 +1,8 @@
+{
+  "codec": "join_request",
+  "encoded_hex": "0200001101040000000000020100000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "join_request_version_2",
+  "note": "unknown version"
+}

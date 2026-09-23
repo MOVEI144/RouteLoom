@@ -1,0 +1,13 @@
+{
+  "codec": "removal_notice",
+  "encoded_hex": "d28443a10126a0581c01010000517300000000004200a1000000001234000000030000000f5840db9b7c495900f9b7967cd2fbe3aa26785b0cfc4411d45122e7ae9179bee841ad67b4d117749925a41d3f4ee6bd31102ea93a66ec4d79634ecfe19f4a780e6605",
+  "expect": "deny",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "removal_notice_other_site",
+  "note": "another site's notice",
+  "own_generation": 3,
+  "own_network": 13054454845,
+  "own_node": 45317471250420276,
+  "own_site_id": 5869034739393888323,
+  "signer_pubkey_hex": "d797737d4081542dfe111a9a6cba6a52e91118f27a814f8e831e8f72d5165f9308da9652224eaf39f459098b545d520900d372da6e73cf33c4032a8264e7bae4"
+}
