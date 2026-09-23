@@ -46,4 +46,18 @@ COMMAND_ACCEPTEDは機器受付だけ。管理確定、PC永続保存、アプ�
 
 CRC既知vector、1byte分割、COBS境界、overlength、部分timeout、grant duplicate／stale／別session、2軸不足、partial write一度課金、zero-credit相互待ちを検査する。小モデルで累積creditが通ってもUSB暗号・実driver相互運用が認定されたことにはならない。
 
+## 7. Node status（node_status_v1、EXPERIMENTAL）
+
+HelloAck capability bit 6（`0x40`、`kCapNodeStatusV1`／`CAP_NODE_STATUS_V1`）を広告するbridgeだけがHostOps `0x40`〜`0x42`を扱う。HostOps carrier自体がhost_ops_v1（bit 2）を要するため、hostはbit 2とbit 6が共に広告された時だけqueryする。bitはHello transcriptに結合され、未広告の機器へのqueryは`result=Unsupported`の空pageで返る。形式はgateway/config系と同じ `schema:u8=1 || sub:u8 || payload_len:u16 || payload`（big-endian、長さ完全一致）。
+
+| sub | 向き | payload |
+|---|---|---|
+| `0x40` NODE_STATUS_QUERY | H→G | `after:u64`（排他cursor、0=先頭）、`max_entries:u8`（1〜16）、`flags:u8`（bit0 SUBSCRIBE：このsessionのevent streamを(再)armしてからpageを取る） |
+| `0x41` NODE_STATUS_PAGE | G→H（同request id） | `result:u16`（ConfigOpsResult空間）、`flags:u8`（bit0 MORE、bit1 EVENTS_ARMED）、`count:u8`、`next_after:u64`、`event_seq:u32`、`count×entry` |
+| `0x42` NODE_EVENT | G→H（非要求、request id 0） | `sequence:u32`（arm毎に1から連続）、`kind:u8`（1 NeighborUp／2 NeighborDown／3 RouteUp／4 RouteDown／5 RouteChanged）、`reserved:u8=0`、`entry` |
+
+entry（28B）は `node:u64、flags:u8、rssi_last:i8、rssi_ewma:i16（Q8.8）、link_cost:u16、route_metric:u16、next_hop:u64、heard_age_ms:u32`。flagsはbit0 neighbor record有、bit1 active neighbor、bit2 reachable（選択済みfeasible route）、bit3 direct、bit4 RSSI有効、bit5 heard有効、bit6 telemetry stale、bit7予約0。到達不能entryのnext_hopは0、metricは`0xFFFF`＝無し。pageはnode id昇順で、decoderは順序違反・cursor不一致・予約bitを拒否する。機器は時刻を送らず経過時間（`heard_age_ms`）だけを送る。
+
+pageはMeshNodeの近隣表・経路表・telemetryから割当なしで組み立てる（最大128経路＋32近隣＝160 node）。eventは250ms毎の有界diff（1回最大4件、data queueの半分はapplication用に予約）で、拒否されたeventは同じsequenceで次回再送されるため欠落しない。session teardownでarmは解除される。共有vectorは`protocol/usb-golden/node-status`（C++ bridge replayとRust codecが同一byteを検証）。host側の扱いは[Host §9](host.md)。
+
 [Host](host.md)／[Wire](wire-protocol.md)／[電源断](crash-time-resources.md)

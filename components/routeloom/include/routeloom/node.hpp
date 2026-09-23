@@ -8,6 +8,7 @@
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/fixed_containers.hpp"
+#include "routeloom/node_status.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
 #include "routeloom/status.hpp"
@@ -555,6 +556,20 @@ class MeshNode {
                           MonotonicMs now_ms) noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
+
+  // --- Node status snapshot (node_status.hpp, node_status.cpp) --------------
+  // Read-only, allocation-free view assembled from the neighbor, route and
+  // telemetry tables. `node_status` answers one node (false when the node is
+  // neither a neighbor record nor a remembered route destination, or is this
+  // node itself). `node_status_page` fills up to `capacity` records for nodes
+  // with id > `after`, strictly ascending — a stable cursor that neither
+  // repeats nor skips a node present across pages even while tables churn —
+  // and sets `more` when further ids exist. Ages are durations against
+  // `now_ms` on the device monotonic clock.
+  bool node_status(NodeId node, MonotonicMs now_ms, NodeStatus& out) const noexcept;
+  std::size_t node_status_page(NodeId after, NodeStatus* out, std::size_t capacity,
+                               MonotonicMs now_ms, bool& more) const noexcept;
+
   const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
   bool started() const noexcept { return started_; }

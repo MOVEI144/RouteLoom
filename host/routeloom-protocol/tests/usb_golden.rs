@@ -303,3 +303,102 @@ fn tampered_session_frames_are_rejected() {
         unhex(field(&keepalive, "wire_hex"))
     );
 }
+
+/// protocol/usb-golden/node-status: the node_status_v1 scenario. Host
+/// frames must re-encode byte-exactly, every device frame must open under
+/// the session key with sequential counters, and the 0x40-0x42 inners must
+/// decode under the Rust codec with the scenario's expected contents.
+#[test]
+fn node_status_vectors_are_byte_exact() {
+    use routeloom_protocol::node_status::*;
+
+    let root = golden_dir().join("node-status");
+    let session = load(&root.join("session.json"));
+    let capability = u64_field(&session, "capability") as u32;
+    assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_NODE_STATUS_V1);
+    let transcript = Transcript {
+        host_nonce: u64_field(&session, "host_nonce"),
+        device_nonce: u64_field(&session, "device_nonce"),
+        version: 1,
+        node: u64_field(&session, "node"),
+        boot: u64_field(&session, "boot"),
+        network: u64_field(&session, "network"),
+        capability,
+        principal: field(&session, "principal").as_bytes().to_vec(),
+    };
+    let proof = derive_session_proof(
+        &unhex(field(&session, "secret_hex")),
+        &transcript.encode().unwrap(),
+    );
+    assert_eq!(proof.session_id, u64_field(&session, "session_id"));
+    assert_eq!(
+        proof.key.to_vec(),
+        unhex(field(&session, "session_key_hex"))
+    );
+
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join("frames"))
+        .expect("frames dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    let (mut d2h, mut h2d) = (0_u64, 0_u64);
+    let mut pages = Vec::new();
+    let mut events = Vec::new();
+    for path in &files {
+        let vector = load(path);
+        let name = field(&vector, "name").to_string();
+        let direction = field(&vector, "direction");
+        let wire = unhex(field(&vector, "wire_hex"));
+        let frame = decode_wire(&wire);
+        if direction == "h2d" {
+            assert_eq!(encode_frame(&frame).expect("re-encode"), wire, "{name}");
+        }
+        if frame.session == 0 {
+            continue; // handshake frames
+        }
+        let dir = if direction == "h2d" {
+            DIRECTION_HOST_TO_DEVICE
+        } else {
+            DIRECTION_DEVICE_TO_HOST
+        };
+        let (counter, inner) = open_body(&proof.key, dir, &frame).expect("valid tag");
+        let expected = if dir == DIRECTION_HOST_TO_DEVICE {
+            &mut h2d
+        } else {
+            &mut d2h
+        };
+        assert_eq!(counter, *expected, "{name}");
+        *expected += 1;
+        assert_eq!(inner, unhex(field(&vector, "inner_hex")), "{name}");
+        match node_status_sub(inner) {
+            Some(SUB_NODE_STATUS_QUERY) => {
+                let query = decode_node_status_query(inner).expect("query parses");
+                assert_eq!((query.after, query.max_entries), (0, PAGE_MAX as u8));
+            }
+            Some(SUB_NODE_STATUS_PAGE) => pages.push(decode_node_status_page(inner).unwrap()),
+            Some(SUB_NODE_EVENT) => {
+                assert_eq!(frame.request, 0, "events are unsolicited");
+                events.push(decode_node_event(inner).unwrap());
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(pages.len(), 2);
+    assert!(pages.iter().all(|p| p.ok() && p.armed() && !p.more()));
+    let first = pages[0].entries[0];
+    assert!(first.neighbor_active() && first.reachable() && first.direct());
+    assert_eq!((first.node, first.link_cost, first.route_metric), (2, 1, 1));
+    assert!(!first.heard_valid() && !first.rssi_valid());
+    assert_eq!(pages[1].event_seq, 2);
+    assert!(!pages[1].entries[0].reachable() && pages[1].entries[0].neighbor());
+    let kinds: Vec<_> = events.iter().map(|e| (e.sequence, e.kind)).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            (1, NodeEventKind::NeighborDown),
+            (2, NodeEventKind::RouteDown)
+        ]
+    );
+    assert_eq!(h2d, 4); // tx_grant, subscribe, resync, close
+}

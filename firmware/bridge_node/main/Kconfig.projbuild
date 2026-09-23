@@ -169,6 +169,11 @@ config ROUTELOOM_CAPABILITY
         EXPERIMENTAL opt-in for m1_diagnostics_v1: the build attaches the
         diagnostic sink and serves the 0x30/0x31 subcommands (local
         capabilities inline; remote telemetry only if the TARGET opted in).
+        Bit 6 (0x40) is the EXPERIMENTAL opt-in for node_status_v1: the
+        bridge serves the 0x40 paginated per-node link/route snapshot and,
+        after a host subscribes, 0x42 join/leave/route-change events;
+        cleared answers Unsupported. Rides the HostOps carrier, so it is
+        only reachable together with bit 2 (e.g. 0x47).
         The bitmap is bound into the HelloAck authentication transcript —
         a bit is only advertised when the matching endpoint is actually
         attached (dev profile; not a production identity claim).

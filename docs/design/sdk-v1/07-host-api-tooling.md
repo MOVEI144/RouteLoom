@@ -1,0 +1,169 @@
+# 07 — Host（KGuard）API・USB HostOps・事務所tooling
+
+## 1. 役割分担
+
+| 役割 | 実装場所 | 持つもの | 持たないもの |
+|---|---|---|---|
+| Site Authority | `routeloom-host` daemon内の新service | SAK（handle）、SiteCert、Device CA公開鍵、台帳、機器登録、DAMS、GK履歴、RRS1、発見済み機器表 | 業務の割当情報 |
+| KGuard | API1 client（別プロセス） | 機器↔現場の割当、画面、業務DB | 鍵・証明書の秘密 |
+| gateway firmware | ESP32 | 中継（RLD1⇄Wire⇄USB）、自分のmember鍵 | SAK、他機器のDAMS |
+
+KGuardは「参加させてよいか」を答え、RouteLoomは「その答えを暗号的に執行する」。KGuardが停止している間、新規参加はpendingになり、既存memberの通信・再参加は影響を受けない。
+
+## 2. API1 method（案）
+
+形式は既存の`API1 {"v":1,"request_id":"…","method":"…","params":{…}}`（[api1.rs](../../../host/routeloom-host/src/api1.rs)）。push通知は既存`messages.subscribe`の仕組みに`membership` streamを追加する。権限はACL（[host §4](../../spec/host.md)）で`membership.read` / `membership.decide` / `membership.admin`に分ける。
+
+| method | 権限 | 目的 |
+|---|---|---|
+| `site.status` | read | site_id、network、site_epoch、SAK fingerprint、rs_epoch、gk_epoch、member数、gateway接続状況 |
+| `join.policy.get` / `join.policy.set` | admin | `zero_touch_open`、`decision_mode`（`kguard`＝既定／`closed`）、`decision_timeout_ms`（500〜5000）、pending時の`retry_after_s`既定値 |
+| `join.requests.list` | read | 決定待ち・pendingの参加要求（上限256） |
+| `join.decide` | decide | 参加要求へのverdict |
+| `devices.discovered.list` | read | 未割当の発見済み機器（[02](02-zero-touch-join.md) §9、上限1024） |
+| `members.list` / `members.get` | read | member一覧、世代、最後の確認、confirm状態 |
+| `membership.revoke` | decide | 削除（operationを返す） |
+| `membership.cutover` | admin | site_epoch cutoverの開始（[04](04-removal-revocation.md) §7） |
+| `group_keys.status` / `group_keys.rotate` | read / admin | GK世代、staging進捗、手動更新 |
+| `operations.get` | read | 既存。revoke・rotate・cutoverの段階を返す |
+
+### 2.1 参加要求とdecision
+
+```json
+// push (stream "membership")
+{"event":"join.request","request_id":"jr-7f3a","device_id":"0x00A1000000001234",
+ "kid":"b3…(64 hex)","model":17,"hw_rev":2,"fw_version":"1.4.0","cert_serial":90211,
+ "requested_role":"endpoint","capability":["relay"],"previously_removed":false,
+ "via":{"gateway":"0x00A1000000000001","proxy":"0x00A1000000000777","authority_hops":3,"joiner_rssi_dbm":-71},
+ "deadline_ms":2000,"attempt":1}
+```
+
+```json
+// request
+{"v":1,"request_id":"k-1","method":"join.decide",
+ "params":{"join_request_id":"jr-7f3a","device_id":"0x00A1000000001234",
+           "verdict":"allow","role":"endpoint","idempotency_key":"kg-assign-5521"}}
+// response
+{"v":1,"request_id":"k-1","result":{"state":"committed","generation":3,
+ "member_cert_serial":4412,"operation_id":"op-91"}}
+```
+
+| verdict | params | 返るJoinResult |
+|---|---|---|
+| `allow` | `role`（endpoint/relay/gateway） | Allow（台帳commit後） |
+| `pending` | `retry_after_s`（30〜3600） | PendingAssignment |
+| `deny` | `reason`：`not_here` / `blocked` | DenyNotHere / DenyBlocked |
+
+- `deadline_ms`を過ぎた決定も有効：その機器の次の試行（pending ticketのRLRES1またはEDHOC）で即座に反映する。
+- 同じ`idempotency_key`の再送は同じ結果を返す。同じ要求に異なるverdictを出した場合は`Conflict`。
+- `allow`の応答`state`は`committed`（台帳commit済み）→機器が受け取ったかは`members.get`の`confirm_state`（`allowed_unconfirmed` / `active`）で分けて見せる。操作成功・台帳commit・機器への適用を別stateで返す（[host §3](../../spec/host.md)）。
+- cutover・台帳既存の承認による自動再発行では、KGuardへ`join.request`は出さず、`membership` streamへ`member.reissued`を通知する（人手の承認をやり直さない）。KGuardが割当を外していた場合に備え、`assignment.check`イベントで確認できるmodeも用意する（既定off、製品判断）。
+
+### 2.2 削除
+
+```json
+{"v":1,"request_id":"k-2","method":"membership.revoke",
+ "params":{"device_id":"0x00A1000000001234","expected_generation":3,
+           "reason":"lost","idempotency_key":"kg-rm-88"}}
+// result: {"operation_id":"op-92","state":"committed","rs_epoch":14}
+// operations.get → {"state":"distributing","reached":71,"members":96,"unknown":25,
+//                   "gk_rotation":{"from":203,"to":204,"state":"staging"}}
+```
+
+`expected_generation`が現在と違えば`Conflict`（古い画面からの誤削除を防ぐ）。段階：`accepted → committed → distributing → converged`。到達できないmemberは`unknown`として数え続け、適用済みとは言わない。
+
+### 2.3 イベント一覧（stream `membership`）
+
+`join.request`、`join.decided`、`member.confirmed`、`member.reissued`、`member.revoked`、`device.discovered`（初回・1分以上空いた再出現）、`gk.rotated`、`rrs.published`、`cutover.progress`、`authority.error`。各イベントは単調な`cursor`を持ち、既存receive APIと同じcursor・overflow規則に従う。
+
+## 3. 永続化（host）
+
+既存の`sqlite_store.rs`系のstoreに次の表を足す（名前は案）。
+
+| 表 | 内容 | 規則 |
+|---|---|---|
+| `site` | site_id、network_low32、site_epoch、SiteCert、SAK handle参照 | 1行 |
+| `devices` | node_id、kid、DevCert、状態、assignment_generation、MemberCert、DAMS（host鍵で封緘） | 台帳commitと同じtransaction |
+| `ledger` | SingleAuthorityの操作（MembershipApproval/Revocation） | 既存ledgerと同じ単調性 |
+| `rrs` | 発行したRRS1の履歴 | epoch単調 |
+| `group_keys` | g、GK（封緘）、状態、memberごとのack | 最新2世代だけ保持 |
+| `discovered` | 発見済み機器 | 1024件LRU |
+| `join_requests` | 決定待ち・pending | 256件、期限切れで削除 |
+
+crash順序：(1) `ledger`と`devices`をcommit → (2) MemberCert/JoinResultを作る → (3) 送信。(2)(3)の前に落ちても、機器の再試行で(1)から冪等に再発行する。GKは「保存してから配る」。
+
+SAKの保管：開発は権限600のファイル（既存`FileRootSigner`と同じ扱いで**本番custodyではない**）、本番はTPM/HSM等の署名境界（`SiteSigner` trait、実装は範囲外）。秘密鍵をAPI・ログ・診断へ出さない。
+
+## 4. USB HostOps（案）
+
+capability bit `kCapSiteAuthorityV1 = 1u << 6`（HelloAckのcapability digestに束縛、既存bitの意味は変えない）。
+
+| sub | 方向 | 本文 | 用途 |
+|---|---|---|---|
+| 0x40 JoinRelayUp | G→H | `gateway u64 | from_proxy u64 | hops u8 | RelayHeader＋本文` | 参加・pending再試行の上り |
+| 0x41 JoinRelayDown | H→G | `to_proxy u64 | RelayHeader＋本文` | 下り（最終はstatus=1） |
+| 0x42 JoinRelayAbort | 双方向 | `proxy u64 | relay_id u32 | reason u8` | 中継の打切り |
+| 0x43 AuthorityUp | G→H | `origin u64 | AuthorityEnvelope` | 機器→authority（[03](03-key-hierarchy.md) §5.3） |
+| 0x44 AuthorityDown | H→G | `destination u64 | AuthorityEnvelope` | authority→機器 |
+| 0x45 SiteStateSet | H→G | `site_epoch u32 | rs_epoch u32 | gk_epoch u32 | GK操作（stage/activate）` | gatewayのGK切替・RRS1配布の起点 |
+| 0x46 SiteStateReport | G→H | gatewayが観測した近隣のepoch分布・拒否counter | 収束の観測 |
+
+USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自身の参加は、USB上で同じEDHOC m1〜m4を0x40/0x41で直接運ぶ（proxy無し、`hops=0`）。KGuardのallowが必要なのは他の機器と同じ。
+
+## 5. KGuardとの典型的な流れ
+
+| 場面 | 流れ |
+|---|---|
+| 新品を設置 | 機器電源ON→`join.request`→KGuardは割当表を見て`allow`→機器Member（人手無し。割当が事前登録済みなら数秒〜十数秒、未測定） |
+| 未割当機器 | `join.request`→KGuardが`pending`→画面の「発見済み機器」に表示→担当者が割当→次の試行（≤retry_after）でallow |
+| 他現場の機器が見える | `join.request`→KGuardが`deny not_here`（中央の割当DBで他現場と分かる場合）または`pending` |
+| 取外し | `membership.revoke`→`operations.get`で収束確認 |
+| 別現場へ移設 | 元の現場で`revoke`→機器は未割当へ戻る→新しい現場の`join.request`で`allow` |
+| 停電 | 何もしない（[06](06-fast-rejoin.md)） |
+
+## 6. 事務所tooling（routeloom-provision）の変更
+
+現状の[routeloom-provision](../../../host/routeloom-provision/src/lib.rs)はRLT1（現場の信頼image）・RLC1（networkとgrant入りの機器記録）・RTM1を作る。ゼロタッチでは事務所で**現場に依存するものを作らない**。
+
+| 追加・変更 | 内容 |
+|---|---|
+| `DeviceCaSigner` trait（`RootSigner`と同じ境界） | DevCert署名。開発はファイル、本番はHSM |
+| `devcert`モジュール | RLCW1 DevCertのencode／検証（C++と共通vector） |
+| `identity`モジュール | RLI1のcodec（C++ `identity_record`と共通vector） |
+| `nvs`モジュール | `rlsec` partition用のNVS image生成（`rlident`だけ）。既存`rltrust`/`rlcred`生成は開発・bench用に残す |
+| `site-cert`コマンド | Site CAでSiteCertを発行（現場PC導入時、本部で実施） |
+| 在庫出力 | `(node_id, kid, model, cert_serial)`のJSON/CSVをKGuardへ渡す（割当の事前登録用） |
+
+事務所の手順（1台あたり）：
+
+1. 量産firmwareを書込み（保守console有効build、またはstrap）。
+2. 機器内で鍵生成（Entropy READY後、[セキュリティ §9](../../spec/security.md)）。機器は公開鍵と所持証明（nonceへの署名）をUSBで返す。
+3. 署名端末が所持証明を検証し、DevCertを発行。
+4. RLI1（NodeId、DevCert、Site CA anchor、flags）を書込み、readbackで確認。
+5. `console_locked`を立てる（量産時）。在庫記録を出力。
+
+鍵を外で作って注入する方法はtier T1未満の選択肢として残す（[04 provisioning §4.4](../sdk-completion/04-provisioning-lifecycle.md)）。事務所でnetwork id・現場鍵・channelを書く手順は無くなる。
+
+## 7. 失敗の扱い
+
+| 事象 | 動作 |
+|---|---|
+| KGuard未接続 | 参加要求はpending（`decision_timeout_ms`で）、`authority.error`は出さない。既存memberは影響なし |
+| host停止 | gatewayは0x40を送れず、proxyへ`authority_unreachable`。OFFERの`authority_reachable`を落とす |
+| USB再接続 | 新しいUSB sessionで0x45を再送し、gatewayのGK状態を一致させる |
+| 台帳・store失敗 | 参加はAuthorityBusy、revokeはエラー。成功へ変換しない |
+| 同じNodeIdで別kid | 別の機器として扱い`join.request`に`kid_conflict:true`。自動allowしない |
+
+## 8. 受入試験（planned_not_run）
+
+| ID | 内容 |
+|---|---|
+| V1-H01 | `join.request`→`join.decide(allow)`→台帳commit→`member.confirmed`の順序 |
+| V1-H02 | 期限後のdecisionが次の試行で反映 |
+| V1-H03 | idempotency：同key再送は同結果、別verdictはConflict |
+| V1-H04 | `membership.revoke`の`expected_generation`不一致はConflict |
+| V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数 |
+| V1-H06 | ACL：read権限では`join.decide`不可 |
+| V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行 |
+| V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
+| V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない |

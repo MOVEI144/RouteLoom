@@ -103,6 +103,9 @@ pub struct ApiContext<'a, S: OperationStore> {
     pub rate_limiter: &'a Mutex<AdmissionLimiter>,
     pub session: &'a Mutex<SessionInfo>,
     pub gateway_lane: &'a crate::dispatch::GatewayLane,
+    /// node_status_v1 table (read-only here): `nodes.list` / `nodes.get`
+    /// answer from it; the node lane thread is its only writer.
+    pub node_table: &'a Mutex<crate::nodes::NodeTable>,
     /// Config op registry (P5): `config.*` submits queue here and `config.get`
     /// reads outcomes. Separate operation space from messages.*/gateway.*.
     pub config_ops: &'a crate::dispatch::ConfigOps,
@@ -313,6 +316,8 @@ pub fn handle_conn<S: OperationStore>(
         "gateway.resolve" => gateway_resolve(&params, ctx).map(|r| (r, None)),
         "gateway.get" => gateway_get(&params, ctx).map(|r| (r, None)),
         "link.get" => link_get(&params, ctx).map(|r| (r, None)),
+        "nodes.list" => nodes_list(&params, ctx).map(|r| (r, None)),
+        "nodes.get" => nodes_get(&params, ctx).map(|r| (r, None)),
         "config.challenge" => config_challenge(&params, ctx).map(|r| (r, None)),
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
         "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
@@ -407,7 +412,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -1829,6 +1834,113 @@ fn link_get<S: OperationStore>(params: &Json, ctx: &ApiContext<'_, S>) -> Result
     ))
 }
 
+/// `nodes.list` page bound: 128 node objects stay well inside the 64 KiB
+/// response cap (each object is < 450 bytes).
+pub const NODES_PAGE_MAX: usize = 128;
+
+/// `nodes.list` params: `{connected?: bool, after?: "16hex", limit?:
+/// 1..=128}`. Nodes come back ascending by id; `next_after` is the cursor
+/// for the next page (null when this page completed the listing).
+/// Diagnostics-class like `link.get`: no ACL grant needed — it exposes the
+/// gateway's routing view, never payloads.
+fn nodes_list<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "connected" | "after" | "limit") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let connected = match params.get("connected") {
+        None | Some(Json::Null) => None,
+        Some(Json::Bool(value)) => Some(*value),
+        Some(_) => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "connected must be a boolean",
+            ))
+        }
+    };
+    let after = match params.get("after") {
+        None | Some(Json::Null) => 0,
+        Some(value) => value.as_str().and_then(parse_hex_u64).ok_or_else(|| {
+            ApiError::simple("INVALID_ARGUMENT", "after must be a 16-hex node id")
+        })?,
+    };
+    let limit = match params.get("limit") {
+        None => NODES_PAGE_MAX,
+        Some(value) => match value.as_u64() {
+            Some(n) if (1..=NODES_PAGE_MAX as u64).contains(&n) => n as usize,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    &format!("limit must be 1..={NODES_PAGE_MAX}"),
+                ))
+            }
+        },
+    };
+    let table = ctx.node_table.lock().expect("node table poisoned");
+    let (records, more) = table.list(after, limit, connected);
+    let nodes: Vec<String> = records
+        .iter()
+        .map(|record| crate::nodes::node_json(record, ctx.now_ms))
+        .collect();
+    let next_after = match records.last() {
+        Some(last) if more => format!("\"{:016x}\"", last.node),
+        _ => "null".to_string(),
+    };
+    Ok(format!(
+        "{{\"source\":{},\"nodes\":[{}],\"next_after\":{next_after}}}",
+        crate::nodes::source_json(&table),
+        nodes.join(","),
+    ))
+}
+
+/// `nodes.get` params: `{node:"16hex"}`. A node the gateway never reported
+/// is NOT_FOUND — the caller reads that as "no communication", never as a
+/// synthesized record.
+fn nodes_get<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if key != "node" {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let Some(node) = params
+        .get("node")
+        .and_then(Json::as_str)
+        .and_then(parse_hex_u64)
+    else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "node must be a 16-hex node id",
+        ));
+    };
+    let table = ctx.node_table.lock().expect("node table poisoned");
+    let source = crate::nodes::source_json(&table);
+    match table.get(node) {
+        Some(record) => Ok(format!(
+            "{{\"source\":{source},\"node\":{}}}",
+            crate::nodes::node_json(record, ctx.now_ms)
+        )),
+        None => Err(ApiError {
+            code: "NOT_FOUND",
+            message: "node not reported by the attached gateway".to_string(),
+            extra_fields: format!("\"node\":\"{node:016x}\",\"source\":{source}"),
+            retryable: true,
+        }),
+    }
+}
+
 fn parse_hex_u64(text: &str) -> Option<u64> {
     if text.len() != 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -2821,6 +2933,9 @@ mod tests {
         }
     }
 
+    static EMPTY_NODE_TABLE: Mutex<crate::nodes::NodeTable> =
+        Mutex::new(crate::nodes::NodeTable::empty());
+
     #[allow(clippy::too_many_arguments)]
     fn ctx_lane<'a, S: OperationStore>(
         uid: Option<u32>,
@@ -2845,6 +2960,7 @@ mod tests {
             rate_limiter: limiter,
             session,
             gateway_lane: lane,
+            node_table: &EMPTY_NODE_TABLE,
             config_ops,
             config_authority,
             subscriptions,
@@ -3028,6 +3144,166 @@ mod tests {
         assert!(response.contains("\"pc_service_destination\":false"));
         assert!(response.contains("\"storage_durable\":false"));
         assert!(response.contains("\"dispatch\":\"usb_host_ops_v1\""));
+        assert!(response.contains("\"nodes.list\":true"));
+        assert!(response.contains("\"nodes.get\":true"));
+        assert!(response.contains(
+            "\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\""
+        ));
+    }
+
+    /// nodes.list / nodes.get JSON shapes against a populated node table:
+    /// source block, ascending pagination with `next_after`, the connected
+    /// filter, NOT_FOUND for unreported nodes and param validation.
+    #[test]
+    fn nodes_list_and_get_shapes() {
+        use crate::nodes::{NodeTable, Origin};
+        use routeloom_protocol::node_status::{
+            NodeStatusEntry, FLAG_DIRECT, FLAG_HEARD_VALID, FLAG_NEIGHBOR, FLAG_NEIGHBOR_ACTIVE,
+            FLAG_REACHABLE, FLAG_RSSI_VALID, INFINITE_METRIC,
+        };
+        let acl = Acl::empty();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::test_store());
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let table = Mutex::new(NodeTable::default());
+        {
+            let mut t = table.lock().unwrap();
+            t.attach(0x0abc, 77, true, 1_000);
+            let sweep = t.begin_sweep();
+            for node in 1..=5_u64 {
+                let reachable = node != 4;
+                let entry = NodeStatusEntry {
+                    node,
+                    flags: FLAG_NEIGHBOR
+                        | FLAG_NEIGHBOR_ACTIVE
+                        | FLAG_RSSI_VALID
+                        | FLAG_HEARD_VALID
+                        | if reachable {
+                            FLAG_REACHABLE | FLAG_DIRECT
+                        } else {
+                            0
+                        },
+                    rssi_last_dbm: -50 - node as i8,
+                    rssi_ewma_q8_8: -55 * 256,
+                    link_cost: 1,
+                    route_metric: if reachable { 1 } else { INFINITE_METRIC },
+                    next_hop: if reachable { node } else { 0 },
+                    heard_age_ms: 100,
+                };
+                t.apply(&entry, Origin::Sync, Some(sweep), 2_000);
+            }
+            t.finish_sweep(sweep, 2_000);
+        }
+        let base = ctx(None, &acl, &log, &store, &limiter, 5_000);
+        let c = ApiContext {
+            node_table: &table,
+            ..base
+        };
+        // No ACL grant is needed (diagnostics class, like link.get).
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"n1\",\"method\":\"nodes.list\",\"params\":{\"limit\":3}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").expect("ok result");
+        let source = result.get("source").unwrap();
+        assert_eq!(source.get("state").and_then(Json::as_str), Some("live"));
+        assert_eq!(
+            source.get("gateway").and_then(Json::as_str),
+            Some("0000000000000abc")
+        );
+        assert_eq!(source.get("synced_ms").and_then(Json::as_u64), Some(2_000));
+        assert_eq!(
+            source.get("clock").and_then(Json::as_str),
+            Some("host_unix_ms")
+        );
+        let nodes = result.get("nodes").and_then(Json::as_array).unwrap();
+        let ids: Vec<&str> = nodes
+            .iter()
+            .map(|n| n.get("node").and_then(Json::as_str).unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            ["0000000000000001", "0000000000000002", "0000000000000003"]
+        );
+        let first = &nodes[0];
+        assert_eq!(first.get("connected").and_then(Json::as_bool), Some(true));
+        assert_eq!(first.get("hops").and_then(Json::as_u64), Some(1));
+        assert_eq!(first.get("rssi_dbm").and_then(Json::as_i64), Some(-51));
+        assert_eq!(first.get("link_cost").and_then(Json::as_u64), Some(1));
+        assert_eq!(
+            first.get("last_heard_ms").and_then(Json::as_u64),
+            Some(1_900)
+        );
+        assert_eq!(
+            first.get("heard_age_ms").and_then(Json::as_u64),
+            Some(3_100)
+        );
+        assert_eq!(
+            result.get("next_after").and_then(Json::as_str),
+            Some("0000000000000003")
+        );
+        // Second page from the cursor completes the listing (gateway 0xabc
+        // is listed too, as role "gateway").
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"n2\",\"method\":\"nodes.list\",\"params\":{\"after\":\"0000000000000003\"}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let result = parsed.get("result").unwrap();
+        let nodes = result.get("nodes").and_then(Json::as_array).unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(result.get("next_after").unwrap().is_null());
+        assert_eq!(nodes[2].get("role").and_then(Json::as_str), Some("gateway"));
+        // connected:false filter isolates the unreachable node.
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"n3\",\"method\":\"nodes.list\",\"params\":{\"connected\":false}}",
+            &c,
+        );
+        assert!(
+            response.contains("\"node\":\"0000000000000004\""),
+            "{response}"
+        );
+        assert!(!response.contains("\"node\":\"0000000000000001\""));
+        assert!(response.contains("\"hops\":null"));
+        // nodes.get: found / NOT_FOUND / bad params.
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"g1\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000002\"}}",
+            &c,
+        );
+        let parsed = routeloom_json::parse(&response).unwrap();
+        let node = parsed.get("result").and_then(|r| r.get("node")).unwrap();
+        assert_eq!(
+            node.get("next_hop").and_then(Json::as_str),
+            Some("0000000000000002")
+        );
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"g2\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000099\"}}",
+            &c,
+        );
+        assert!(response.contains("\"code\":\"NOT_FOUND\""), "{response}");
+        assert!(response.contains("\"state\":\"live\""));
+        for bad in [
+            "{\"v\":1,\"request_id\":\"b1\",\"method\":\"nodes.get\",\"params\":{\"node\":\"2\"}}",
+            "{\"v\":1,\"request_id\":\"b2\",\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000002\",\"x\":1}}",
+            "{\"v\":1,\"request_id\":\"b3\",\"method\":\"nodes.list\",\"params\":{\"limit\":0}}",
+            "{\"v\":1,\"request_id\":\"b4\",\"method\":\"nodes.list\",\"params\":{\"limit\":129}}",
+            "{\"v\":1,\"request_id\":\"b5\",\"method\":\"nodes.list\",\"params\":{\"connected\":\"yes\"}}",
+            "{\"v\":1,\"request_id\":\"b6\",\"method\":\"nodes.list\",\"params\":{\"after\":\"xyz\"}}",
+        ] {
+            assert!(
+                handle(bad.as_bytes(), &c).contains("INVALID_ARGUMENT"),
+                "{bad}"
+            );
+        }
+        // An empty table (no session yet) is an honest empty listing.
+        let empty = ctx(None, &acl, &log, &store, &limiter, 5_000);
+        let response = handle(
+            b"{\"v\":1,\"request_id\":\"e\",\"method\":\"nodes.list\"}",
+            &empty,
+        );
+        assert!(response.contains("\"state\":\"unavailable\""), "{response}");
+        assert!(response.contains("\"nodes\":[]"));
     }
 
     #[test]

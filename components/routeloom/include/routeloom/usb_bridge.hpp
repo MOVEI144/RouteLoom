@@ -81,6 +81,11 @@ struct BridgeStats {
   // while the frame waited for USB credits (04 §USB: credit starvation
   // must not deliver a stale snapshot nor lose it silently).
   std::uint64_t diagnostics_expired{0};
+  // node_status_v1: events handed to the TX queue, and events held back
+  // because the data queue was inside its application reserve (they are
+  // retried on the next monitor pass — never dropped).
+  std::uint64_t node_events{0};
+  std::uint64_t node_events_deferred{0};
 };
 
 class UsbBridge final : public UsbFrameSink, public NodeObserver,
@@ -133,6 +138,15 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // in HelloAck. Requires config_.mesh to be set; the remote-answer opt-in
   // (telemetry_remote) stays the owner's separate decision.
   Status attach_diagnostics() noexcept;
+
+  // Late node-status binding (node_status_v1): serves HostOps 0x40 paginated
+  // per-node link/route snapshots and, after a host query sets SUBSCRIBE,
+  // streams 0x42 join/leave/route-change events for that session only.
+  // Advertises CAP_NODE_STATUS_V1 in HelloAck. Requires config_.mesh.
+  Status attach_node_status() noexcept;
+  const NodeStatusMonitor& node_status_monitor() const noexcept {
+    return node_monitor_;
+  }
 
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
@@ -292,6 +306,17 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // bounded remote TelemetryQuery whose reply lands on on_diagnostic_body.
   void handle_diagnostic_request(std::uint64_t request, ByteView inner,
                                  MonotonicMs now_ms) noexcept;
+  // NodeStatus query (0x40): decode, gate on CAP_NODE_STATUS_V1, optionally
+  // (re)arm the event monitor for this session, then answer one 0x41 page.
+  void handle_node_status_query(std::uint64_t request, ByteView inner,
+                                MonotonicMs now_ms) noexcept;
+  // poll(): diff the mesh against the armed baseline at most every
+  // kNodeMonitorIntervalMs and queue bounded 0x42 events, leaving the data
+  // queue's application reserve untouched.
+  void pump_node_events(MonotonicMs now_ms) noexcept;
+  static constexpr MonotonicMs kNodeMonitorIntervalMs = 250;
+  static constexpr std::size_t kNodeEventBurst = 4;
+  static constexpr std::size_t kNodeEventQueueReserve = 4;
   // Encodes + queues a 0x31 reply under `request`.
   void send_diagnostic_reply(std::uint64_t request, ConfigOpsResult result,
                              NodeId observer, ByteView body,
@@ -490,6 +515,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // Bounded remote diagnostic queries (D1d): full -> the 0x30 request is
   // refused with Busy, never silently queued beyond the bound.
   std::array<PendingDiagnostic, kPendingDiagnosticCapacity> pending_diag_{};
+  // node_status_v1 state: the per-session event baseline (disarmed on every
+  // session teardown) and the .bss page staging for 0x41 replies.
+  NodeStatusMonitor node_monitor_{};
+  MonotonicMs node_monitor_ms_{0};
+  std::array<NodeStatus, kNodeStatusPageMax> node_page_{};
+  std::array<std::uint8_t, kGatewayInnerHeadSize + kNodeStatusPageMaxPayload>
+      node_page_wire_{};
   BridgeStats stats_{};
 };
 

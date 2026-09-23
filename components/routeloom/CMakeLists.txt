@@ -15,9 +15,11 @@ set(ROUTELOOM_CORE_SOURCES
   src/discovery_scope.cpp
   src/endpoint_wire.cpp
   src/gateway.cpp
+  src/kdf.cpp
   src/migration.cpp
   src/migration_wire.cpp
   src/node.cpp
+  src/node_status.cpp
   src/power.cpp
   src/replay.cpp
   src/routing.cpp

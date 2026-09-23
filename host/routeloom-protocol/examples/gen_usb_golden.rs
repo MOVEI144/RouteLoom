@@ -695,5 +695,346 @@ fn main() -> std::io::Result<()> {
     );
     fs::write(root.join("session.json"), session_json)?;
     println!("wrote {} steps to {}", steps.len(), frames_dir.display());
+    node_status_scenario(&root.join("node-status"))?;
+    Ok(())
+}
+
+/// Minimal session writer for the node_status_v1 scenario: tracks both
+/// direction counters so steps can be appended in wire order.
+struct SessionSteps {
+    session: u64,
+    key: [u8; 16],
+    d2h_counter: u64,
+    h2d_counter: u64,
+    steps: Vec<Step>,
+}
+
+impl SessionSteps {
+    fn sealed(
+        &mut self,
+        name: &'static str,
+        direction: &'static str,
+        note: &'static str,
+        kind: FrameKind,
+        request: u64,
+        inner: Vec<u8>,
+    ) {
+        let (dir, counter) = if direction == "h2d" {
+            let counter = self.h2d_counter;
+            self.h2d_counter += 1;
+            (DIRECTION_HOST_TO_DEVICE, counter)
+        } else {
+            let counter = self.d2h_counter;
+            self.d2h_counter += 1;
+            (DIRECTION_DEVICE_TO_HOST, counter)
+        };
+        self.steps.push(Step {
+            name,
+            direction,
+            frame: Frame {
+                kind,
+                flags: 0,
+                session: self.session,
+                request,
+                body: seal_body(&self.key, dir, counter, kind, 0, request, &inner),
+            },
+            inner,
+            note,
+        });
+    }
+}
+
+/// protocol/usb-golden/node-status: the node_status_v1 HostOps family on a
+/// device advertising CAP_NODE_STATUS_V1. The C++ replay (test_usb.cpp)
+/// drives a two-node mesh (gateway 1 with admitted neighbor 2, link cost 1,
+/// no RF observed yet) and removes neighbor 2 just before the event steps.
+/// Scenario: SUBSCRIBE query -> first page (node 2 direct) -> the monitor
+/// reports NeighborDown + RouteDown -> a resync query shows the departed
+/// neighbor record and the event sequence the device reached.
+fn node_status_scenario(root: &Path) -> std::io::Result<()> {
+    use routeloom_protocol::node_status as ns;
+
+    const CAPABILITY_NS: u32 = 0x3 | CAP_HOST_OPS_V1 | ns::CAP_NODE_STATUS_V1;
+    let frames_dir = root.join("frames");
+    fs::create_dir_all(&frames_dir)?;
+    for entry in fs::read_dir(&frames_dir)? {
+        let entry = entry?;
+        if entry.path().extension().is_some_and(|ext| ext == "json") {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    let transcript = Transcript {
+        host_nonce: HOST_NONCE,
+        device_nonce: DEVICE_NONCE,
+        version: 1,
+        node: NODE,
+        boot: BOOT,
+        network: NETWORK,
+        capability: CAPABILITY_NS,
+        principal: PRINCIPAL.to_vec(),
+    };
+    let proof = derive_session_proof(SECRET, &transcript.encode().unwrap());
+    let mut w = SessionSteps {
+        session: proof.session_id,
+        key: proof.key,
+        d2h_counter: 0,
+        h2d_counter: 0,
+        steps: Vec::new(),
+    };
+
+    let mut hello_body = Vec::new();
+    hello_body.extend_from_slice(&HOST_NONCE.to_be_bytes());
+    hello_body.extend_from_slice(&[1, 1, PRINCIPAL.len() as u8]);
+    hello_body.extend_from_slice(PRINCIPAL);
+    w.steps.push(Step {
+        name: "hello",
+        direction: "h2d",
+        frame: Frame {
+            kind: FrameKind::Hello,
+            flags: 0,
+            session: 0,
+            request: 100,
+            body: hello_body.clone(),
+        },
+        inner: hello_body,
+        note: "host opens: nonce, version range, principal",
+    });
+    let mut ack_body = Vec::new();
+    ack_body.extend_from_slice(&DEVICE_NONCE.to_be_bytes());
+    ack_body.push(1);
+    ack_body.extend_from_slice(&NODE.to_be_bytes());
+    ack_body.extend_from_slice(&BOOT.to_be_bytes());
+    ack_body.extend_from_slice(&NETWORK.to_be_bytes());
+    ack_body.extend_from_slice(&CAPABILITY_NS.to_be_bytes());
+    ack_body.extend_from_slice(&proof.hello_tag);
+    w.steps.push(Step {
+        name: "hello_ack",
+        direction: "d2h",
+        frame: Frame {
+            kind: FrameKind::HelloAck,
+            flags: 0,
+            session: 0,
+            request: 100,
+            body: ack_body.clone(),
+        },
+        inner: ack_body,
+        note: "capability advertises node_status_v1 (bit 6)",
+    });
+    w.steps.push(Step {
+        name: "auth",
+        direction: "h2d",
+        frame: Frame {
+            kind: FrameKind::Hello,
+            flags: FLAG_AUTH,
+            session: 0,
+            request: 101,
+            body: proof.auth_tag.to_vec(),
+        },
+        inner: proof.auth_tag.to_vec(),
+        note: "host proves the shared secret over the transcript",
+    });
+    let mut auth_ok_body = proof.auth_ok_tag.to_vec();
+    auth_ok_body.extend_from_slice(&proof.session_id.to_be_bytes());
+    w.steps.push(Step {
+        name: "auth_ok",
+        direction: "d2h",
+        frame: Frame {
+            kind: FrameKind::HelloAck,
+            flags: FLAG_AUTH,
+            session: 0,
+            request: 0,
+            body: auth_ok_body.clone(),
+        },
+        inner: auth_ok_body,
+        note: "device confirms; session id binds the transcript",
+    });
+    let grant = |frames: u64, bytes: u64| {
+        let mut inner = vec![CREDIT_GRANT];
+        inner.extend_from_slice(&frames.to_be_bytes());
+        inner.extend_from_slice(&bytes.to_be_bytes());
+        inner
+    };
+    w.sealed(
+        "rx_grant",
+        "d2h",
+        "initial cumulative grant for host->device sends",
+        FrameKind::Credit,
+        0,
+        grant(RX_GRANT_FRAMES, RX_GRANT_BYTES),
+    );
+    w.sealed(
+        "tx_grant",
+        "h2d",
+        "host grants device->host data sends",
+        FrameKind::Credit,
+        102,
+        grant(TX_GRANT_FRAMES, TX_GRANT_BYTES),
+    );
+
+    // Node 2 as the gateway sees it right after admission: active neighbor,
+    // direct route at the nominal link cost 1, no RF observation yet.
+    let admitted = ns::NodeStatusEntry {
+        node: PEER_NODE,
+        flags: ns::FLAG_NEIGHBOR | ns::FLAG_NEIGHBOR_ACTIVE | ns::FLAG_REACHABLE | ns::FLAG_DIRECT,
+        rssi_last_dbm: 0,
+        rssi_ewma_q8_8: 0,
+        link_cost: 1,
+        route_metric: 1,
+        next_hop: PEER_NODE,
+        heard_age_ms: 0,
+    };
+    // After remove_neighbor(2): the departed record stays listable, the
+    // route is gone.
+    let departed = ns::NodeStatusEntry {
+        node: PEER_NODE,
+        flags: ns::FLAG_NEIGHBOR,
+        link_cost: ns::INFINITE_METRIC,
+        route_metric: ns::INFINITE_METRIC,
+        next_hop: 0,
+        ..admitted
+    };
+
+    let mut consumed_frames = 0_u64;
+    let mut consumed_bytes = 0_u64;
+    let mut topup = |inner_len: usize| {
+        consumed_frames += 1;
+        consumed_bytes += (30 + 24 + inner_len) as u64;
+        grant(
+            consumed_frames + RX_GRANT_FRAMES,
+            consumed_bytes + RX_GRANT_BYTES,
+        )
+    };
+
+    let subscribe = ns::encode_node_status_query(&ns::NodeStatusQuery {
+        after: 0,
+        max_entries: ns::PAGE_MAX as u8,
+        flags: ns::QUERY_SUBSCRIBE,
+    })
+    .expect("valid query");
+    w.sealed(
+        "node_status_subscribe",
+        "h2d",
+        "host pages from the start and arms the event stream",
+        FrameKind::HostOps,
+        300,
+        subscribe.clone(),
+    );
+    w.sealed(
+        "node_status_subscribe_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(subscribe.len()),
+    );
+    w.sealed(
+        "node_status_first_page",
+        "d2h",
+        "one node: neighbor 2, direct, link cost 1; events armed",
+        FrameKind::HostOps,
+        300,
+        ns::encode_node_status_page(&ns::NodeStatusPage {
+            result: ConfigOpsResult::Ok as u16,
+            flags: ns::PAGE_ARMED,
+            next_after: PEER_NODE,
+            event_seq: 0,
+            entries: vec![admitted],
+        })
+        .expect("valid page"),
+    );
+    w.sealed(
+        "node_event_neighbor_down",
+        "d2h",
+        "neighbor 2 removed: link-level leave (unsolicited, request 0)",
+        FrameKind::HostOps,
+        0,
+        ns::encode_node_event(&ns::NodeEvent {
+            sequence: 1,
+            kind: ns::NodeEventKind::NeighborDown,
+            status: departed,
+        })
+        .expect("valid event"),
+    );
+    w.sealed(
+        "node_event_route_down",
+        "d2h",
+        "no route to node 2 remains: node left",
+        FrameKind::HostOps,
+        0,
+        ns::encode_node_event(&ns::NodeEvent {
+            sequence: 2,
+            kind: ns::NodeEventKind::RouteDown,
+            status: departed,
+        })
+        .expect("valid event"),
+    );
+    let resync = ns::encode_node_status_query(&ns::NodeStatusQuery {
+        after: 0,
+        max_entries: ns::PAGE_MAX as u8,
+        flags: 0,
+    })
+    .expect("valid query");
+    w.sealed(
+        "node_status_resync",
+        "h2d",
+        "host re-pages without re-arming",
+        FrameKind::HostOps,
+        301,
+        resync.clone(),
+    );
+    w.sealed(
+        "node_status_resync_grant",
+        "d2h",
+        "rx grant advances past the host_ops request",
+        FrameKind::Credit,
+        0,
+        topup(resync.len()),
+    );
+    w.sealed(
+        "node_status_resync_page",
+        "d2h",
+        "departed record listed; event_seq reports the 2 issued events",
+        FrameKind::HostOps,
+        301,
+        ns::encode_node_status_page(&ns::NodeStatusPage {
+            result: ConfigOpsResult::Ok as u16,
+            flags: ns::PAGE_ARMED,
+            next_after: PEER_NODE,
+            event_seq: 2,
+            entries: vec![departed],
+        })
+        .expect("valid page"),
+    );
+    w.sealed(
+        "close",
+        "h2d",
+        "host requests session close; device drains",
+        FrameKind::Credit,
+        302,
+        vec![CREDIT_CLOSE],
+    );
+
+    for (index, step) in w.steps.iter().enumerate() {
+        write_step(&frames_dir, index + 1, step)?;
+    }
+    let session_json = format!(
+        "{{\n  \"name\": \"node-status\",\n  \"secret_hex\": \"{}\",\n  \"host_nonce\": {},\n  \"device_nonce\": {},\n  \"version\": 1,\n  \"node\": {},\n  \"boot\": {},\n  \"network\": {},\n  \"capability\": {},\n  \"principal\": \"{}\",\n  \"session_id\": {},\n  \"peer_node\": {},\n  \"hello_tag_hex\": \"{}\",\n  \"auth_tag_hex\": \"{}\",\n  \"auth_ok_tag_hex\": \"{}\",\n  \"session_key_hex\": \"{}\"\n}}\n",
+        hex(SECRET),
+        HOST_NONCE,
+        DEVICE_NONCE,
+        NODE,
+        BOOT,
+        NETWORK,
+        CAPABILITY_NS,
+        std::str::from_utf8(PRINCIPAL).expect("ascii principal"),
+        proof.session_id,
+        PEER_NODE,
+        hex(&proof.hello_tag),
+        hex(&proof.auth_tag),
+        hex(&proof.auth_ok_tag),
+        hex(&proof.key),
+    );
+    fs::write(root.join("session.json"), session_json)?;
+    println!("wrote {} steps to {}", w.steps.len(), frames_dir.display());
     Ok(())
 }

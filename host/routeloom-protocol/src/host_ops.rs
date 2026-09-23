@@ -65,6 +65,9 @@ pub enum HostOpsError {
     SubcommandMismatch,
     UnknownEnum(&'static str, u8),
     CanonicalTooLarge,
+    /// Structurally complete but semantically invalid (reserved bits,
+    /// out-of-range counts, broken ordering) — names the violated rule.
+    Invalid(&'static str),
 }
 
 impl fmt::Display for HostOpsError {

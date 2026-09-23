@@ -1,0 +1,12 @@
+{
+  "name": "auth",
+  "direction": "h2d",
+  "kind": 1,
+  "flags": 1,
+  "session": 0,
+  "request": 101,
+  "inner_hex": "e916ae85810aacc7fcf210bd14053ac7",
+  "body_hex": "e916ae85810aacc7fcf210bd14053ac7",
+  "wire_hex": "07524c553101010201010101010101010101010101010102651610e916ae85810aacc7fcf210bd14053ac70468662300",
+  "note": "host proves the shared secret over the transcript"
+}

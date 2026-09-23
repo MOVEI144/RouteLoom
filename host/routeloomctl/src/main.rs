@@ -10,7 +10,7 @@ mod provision;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -233,6 +233,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "config-propose" => config_propose_command(rest)?,
         [name, rest @ ..] if name == "config-get" => config_get_command(rest)?,
         [name, id] if name == "cancel" => cancel_command(id)?,
+        [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
+        [name, rest @ ..] if name == "node-get" => node_get_command(rest)?,
+        [name] if name == "node-events" => node_events_request(),
         _ => {
             usage();
             return Err("invalid command".into());
@@ -242,15 +245,104 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream.write_all(command.as_bytes())?;
     stream.write_all(b"\n")?;
     stream.flush()?;
+    let mut reader = BufReader::new(stream);
     let mut response = String::new();
-    BufReader::new(stream).read_line(&mut response)?;
+    reader.read_line(&mut response)?;
     if response.is_empty() {
         return Err(
             io::Error::new(io::ErrorKind::UnexpectedEof, "daemon closed connection").into(),
         );
     }
     print!("{response}");
+    // Streaming verbs keep the connection open: every further line is one
+    // subscription notification, printed as it arrives.
+    if remaining.first().map(String::as_str) == Some("node-events") {
+        let stdout = io::stdout();
+        for line in reader.lines() {
+            let mut out = stdout.lock();
+            writeln!(out, "{}", line?)?;
+            out.flush()?;
+        }
+    }
     Ok(())
+}
+
+/// Build the API1 `nodes.list` request line.
+fn nodes_list_request(connected: Option<bool>, after: Option<&str>, limit: Option<u64>) -> String {
+    let mut params = Vec::new();
+    if let Some(connected) = connected {
+        params.push(format!("\"connected\":{connected}"));
+    }
+    if let Some(after) = after {
+        params.push(format!("\"after\":\"{after}\""));
+    }
+    if let Some(limit) = limit {
+        params.push(format!("\"limit\":{limit}"));
+    }
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"nodes.list\",\"params\":{{{}}}}}",
+        request_id(),
+        params.join(","),
+    )
+}
+
+/// `nodes [--connected true|false] [--after <16hex>] [--limit 1-128]`:
+/// the attached gateway's per-node link status (connected, last heard,
+/// RSSI, link cost, route) — printed verbatim.
+fn nodes_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut connected = None;
+    let mut after = None;
+    let mut limit = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--connected" => {
+                connected = Some(match opt_value(&mut args, "--connected")?.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return Err("--connected must be true or false".into()),
+                })
+            }
+            "--after" => after = Some(want_hex16("--after", opt_value(&mut args, "--after")?)?),
+            "--limit" => {
+                let value = opt_value(&mut args, "--limit")?
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|n| (1..=128).contains(n))
+                    .ok_or("--limit must be an integer 1-128")?;
+                limit = Some(value);
+            }
+            other => return Err(format!("unknown nodes option: {other}").into()),
+        }
+    }
+    Ok(nodes_list_request(connected, after.as_deref(), limit))
+}
+
+/// `node-get --node <16hex>`: one node's link status (NOT_FOUND when the
+/// gateway never reported it — "no communication").
+fn node_get_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut node = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--node" => node = Some(want_hex16("--node", opt_value(&mut args, "--node")?)?),
+            other => return Err(format!("unknown node-get option: {other}").into()),
+        }
+    }
+    let node = node.ok_or("node-get requires --node <16hex>")?;
+    Ok(format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"nodes.get\",\"params\":{{\"node\":\"{node}\"}}}}",
+        request_id()
+    ))
+}
+
+/// `node-events`: an events-stream subscription filtered to the membership
+/// kinds; the connection stays open and notifications stream to stdout.
+fn node_events_request() -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"messages.subscribe\",\"params\":{{\"stream\":\"events\",\"from\":\"latest\",\"filter\":{{\"kinds\":[\"node_joined\",\"node_left\",\"link_changed\"]}}}}}}",
+        request_id()
+    )
 }
 
 /// `receive --network <16hex> [--from earliest|latest | --cursor CUR]
@@ -1004,6 +1096,46 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn node_commands_build_api1_lines() {
+        let line = nodes_command(&args(&[])).unwrap();
+        assert!(
+            line.contains("\"method\":\"nodes.list\",\"params\":{}"),
+            "{line}"
+        );
+        let line = nodes_command(&args(&[
+            "--connected",
+            "false",
+            "--after",
+            "00000000000000AB",
+            "--limit",
+            "5",
+        ]))
+        .unwrap();
+        assert!(line.contains(
+            "\"params\":{\"connected\":false,\"after\":\"00000000000000ab\",\"limit\":5}"
+        ));
+        assert!(nodes_command(&args(&["--limit", "0"])).is_err());
+        assert!(nodes_command(&args(&["--limit", "129"])).is_err());
+        assert!(nodes_command(&args(&["--connected", "yes"])).is_err());
+        assert!(nodes_command(&args(&["--after", "12"])).is_err());
+        let line = node_get_command(&args(&["--node", "0000000000000002"])).unwrap();
+        assert!(
+            line.contains("\"method\":\"nodes.get\",\"params\":{\"node\":\"0000000000000002\"}")
+        );
+        assert!(node_get_command(&args(&[])).is_err());
+        let line = node_events_request();
+        assert!(line.contains("\"stream\":\"events\""));
+        assert!(line.contains("\"kinds\":[\"node_joined\",\"node_left\",\"link_changed\"]"));
+        // Every line is a parseable API1 envelope.
+        for line in [
+            nodes_list_request(Some(true), None, Some(128)),
+            node_events_request(),
+        ] {
+            assert!(routeloom_json::parse(line.strip_prefix("API1 ").unwrap()).is_ok());
+        }
     }
 
     #[test]

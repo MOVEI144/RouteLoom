@@ -1396,4 +1396,221 @@ Status encode_diagnostic_reply(const std::uint16_t result,
   return Status::success();
 }
 
+// --- NodeStatus family (0x40-0x42) -----------------------------------------
+
+namespace {
+
+bool node_event_kind_valid(const std::uint8_t kind) noexcept {
+  return kind >= static_cast<std::uint8_t>(NodeEventKind::NeighborUp) &&
+         kind <= static_cast<std::uint8_t>(NodeEventKind::RouteChanged);
+}
+
+Status read_entry(ByteReader& reader, NodeStatus& out) noexcept {
+  out = NodeStatus{};
+  std::uint8_t rssi = 0;
+  std::uint16_t ewma = 0;
+  Status status = reader.read_u64(out.node);
+  if (status) status = reader.read_u8(out.flags);
+  if (status) status = reader.read_u8(rssi);
+  if (status) status = reader.read_u16(ewma);
+  if (status) status = reader.read_u16(out.link_cost);
+  if (status) status = reader.read_u16(out.route_metric);
+  if (status) status = reader.read_u64(out.next_hop);
+  if (status) status = reader.read_u32(out.heard_age_ms);
+  if (!status) return status;
+  out.rssi_last_dbm = static_cast<std::int8_t>(rssi);
+  out.rssi_ewma_q8_8 = static_cast<std::int16_t>(ewma);
+  // Structural invariants: a listable id, no reserved flag bit, and the
+  // route fields agree with the reachability bit (an unreachable node has
+  // no next hop; a reachable one has a real one).
+  if (is_reserved_id(out.node) || (out.flags & ~kNodeStatusFlagsMask) != 0) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_ENTRY");
+  }
+  const bool reachable = (out.flags & kNodeStatusReachable) != 0;
+  if (reachable == is_reserved_id(out.next_hop)) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_ENTRY");
+  }
+  if (!reachable && (out.flags & kNodeStatusDirect) != 0) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_ENTRY");
+  }
+  return Status::success();
+}
+
+Status write_entry(ByteWriter& writer, const NodeStatus& status) noexcept {
+  Status result = writer.write_u64(status.node);
+  if (result) result = writer.write_u8(status.flags);
+  if (result) result = writer.write_u8(static_cast<std::uint8_t>(status.rssi_last_dbm));
+  if (result) result = writer.write_u16(static_cast<std::uint16_t>(status.rssi_ewma_q8_8));
+  if (result) result = writer.write_u16(status.link_cost);
+  if (result) result = writer.write_u16(status.route_metric);
+  if (result) result = writer.write_u64(status.reachable() ? status.next_hop : kInvalidNodeId);
+  if (result) result = writer.write_u32(status.heard_age_ms);
+  return result;
+}
+
+}  // namespace
+
+Status encode_node_status_query(const NodeStatusQuery& query, const MutableByteView out,
+                                std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::NodeStatusQuery,
+                                     static_cast<std::uint16_t>(kNodeStatusQueryPayload));
+  if (status) status = writer.write_u64(query.after);
+  if (status) status = writer.write_u8(query.max_entries);
+  if (status) status = writer.write_u8(query.flags);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_node_status_query(const ByteView inner, NodeStatusQuery& out) noexcept {
+  out = NodeStatusQuery{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::NodeStatusQuery, kNodeStatusQueryPayload,
+                               kNodeStatusQueryPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  status = reader.read_u64(out.after);
+  if (status) status = reader.read_u8(out.max_entries);
+  if (status) status = reader.read_u8(out.flags);
+  if (!status) return status;
+  // `after` may be 0 (start) but never the broadcast/all-ones id; the page
+  // size is bounded by the device's fixed page buffer.
+  if (out.after == UINT64_MAX || out.max_entries == 0 ||
+      out.max_entries > kNodeStatusPageMax ||
+      (out.flags & ~kNodeStatusQuerySubscribe) != 0) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_QUERY");
+  }
+  return Status::success();
+}
+
+Status encode_node_status_entry(const NodeStatus& status, const MutableByteView out) noexcept {
+  if (out.size < kNodeStatusEntrySize) {
+    return Status::error(StatusCode::InvalidArgument, "entry buffer");
+  }
+  ByteWriter writer(MutableByteView{out.data, kNodeStatusEntrySize});
+  return write_entry(writer, status);
+}
+
+Status decode_node_status_entry(const ByteView entry, NodeStatus& out) noexcept {
+  if (entry.size != kNodeStatusEntrySize) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_ENTRY");
+  }
+  ByteReader reader(entry);
+  return read_entry(reader, out);
+}
+
+Status encode_node_status_page(const NodeStatusPageHeader& header,
+                               const NodeStatus* const entries, const std::size_t count,
+                               const MutableByteView out, std::size_t& written) noexcept {
+  written = 0;
+  if (count > kNodeStatusPageMax || header.count != count ||
+      (count > 0 && entries == nullptr) ||
+      (header.flags & ~(kNodeStatusPageMore | kNodeStatusPageArmed)) != 0 ||
+      !config_result_valid(header.result) ||
+      (header.result != static_cast<std::uint16_t>(ConfigOpsResult::Ok) && count != 0)) {
+    return Status::error(StatusCode::InvalidArgument, "node status page");
+  }
+  for (std::size_t i = 1; i < count; ++i) {
+    if (entries[i].node <= entries[i - 1].node) {
+      return Status::error(StatusCode::InvalidArgument, "node status page order");
+    }
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::NodeStatusPage,
+      static_cast<std::uint16_t>(kNodeStatusPageFixed + count * kNodeStatusEntrySize));
+  if (status) status = writer.write_u16(header.result);
+  if (status) status = writer.write_u8(header.flags);
+  if (status) status = writer.write_u8(header.count);
+  if (status) status = writer.write_u64(header.next_after);
+  if (status) status = writer.write_u32(header.event_seq);
+  for (std::size_t i = 0; status && i < count; ++i) status = write_entry(writer, entries[i]);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_node_status_page(const ByteView inner, NodeStatusPageHeader& header,
+                               ByteView& entries) noexcept {
+  header = NodeStatusPageHeader{};
+  entries = ByteView{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::NodeStatusPage, kNodeStatusPageFixed,
+                               kNodeStatusPageMaxPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  status = reader.read_u16(header.result);
+  if (status) status = reader.read_u8(header.flags);
+  if (status) status = reader.read_u8(header.count);
+  if (status) status = reader.read_u64(header.next_after);
+  if (status) status = reader.read_u32(header.event_seq);
+  if (!status) return status;
+  if (!config_result_valid(header.result) ||
+      (header.flags & ~(kNodeStatusPageMore | kNodeStatusPageArmed)) != 0 ||
+      header.count > kNodeStatusPageMax ||
+      reader.remaining() != header.count * kNodeStatusEntrySize ||
+      (header.result != static_cast<std::uint16_t>(ConfigOpsResult::Ok) &&
+       header.count != 0)) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_PAGE");
+  }
+  NodeId previous = kInvalidNodeId;
+  for (std::size_t i = 0; i < header.count; ++i) {
+    NodeStatus entry{};
+    status = read_entry(reader, entry);
+    if (!status) return status;
+    if (i > 0 && entry.node <= previous) {
+      return Status::error(StatusCode::ProtocolError, "NODE_STATUS_ORDER");
+    }
+    previous = entry.node;
+  }
+  if (header.count > 0 && header.next_after != previous) {
+    return Status::error(StatusCode::ProtocolError, "NODE_STATUS_CURSOR");
+  }
+  entries = ByteView{payload.data + kNodeStatusPageFixed,
+                     header.count * kNodeStatusEntrySize};
+  return Status::success();
+}
+
+Status encode_node_event(const NodeEvent& event, const MutableByteView out,
+                         std::size_t& written) noexcept {
+  written = 0;
+  if (event.sequence == 0 ||
+      !node_event_kind_valid(static_cast<std::uint8_t>(event.kind))) {
+    return Status::error(StatusCode::InvalidArgument, "node event");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::NodeEvent,
+                                     static_cast<std::uint16_t>(kNodeEventPayload));
+  if (status) status = writer.write_u32(event.sequence);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(event.kind));
+  if (status) status = writer.write_u8(0);
+  if (status) status = write_entry(writer, event.status);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_node_event(const ByteView inner, NodeEvent& out) noexcept {
+  out = NodeEvent{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::NodeEvent, kNodeEventPayload,
+                               kNodeEventPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  std::uint8_t kind = 0;
+  std::uint8_t reserved = 0;
+  status = reader.read_u32(out.sequence);
+  if (status) status = reader.read_u8(kind);
+  if (status) status = reader.read_u8(reserved);
+  if (status) status = read_entry(reader, out.status);
+  if (!status) return status;
+  if (out.sequence == 0 || !node_event_kind_valid(kind) || reserved != 0) {
+    return Status::error(StatusCode::ProtocolError, "NODE_EVENT");
+  }
+  out.kind = static_cast<NodeEventKind>(kind);
+  return Status::success();
+}
+
 }  // namespace routeloom::usb

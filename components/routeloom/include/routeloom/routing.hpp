@@ -167,6 +167,15 @@ class RouteTable {
 
   std::size_t size() const noexcept;
 
+  // Read-only destination walk for the node status surface (node_status.hpp):
+  // every remembered destination — selected, lost or tombstoned. `fn` gets
+  // the destination id only; best() answers its current selection.
+  template <typename Fn>
+  void for_each_destination(Fn fn) const noexcept {
+    entries_.for_each([&](const Entry& entry) { fn(entry.destination); });
+  }
+  bool knows(NodeId destination) const noexcept { return find(destination) != nullptr; }
+
   template <typename Fn>
   void for_each_selected(Fn fn) const noexcept {
     entries_.for_each([&](const Entry& entry) {

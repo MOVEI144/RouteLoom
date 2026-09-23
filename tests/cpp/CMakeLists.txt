@@ -162,6 +162,13 @@ target_include_directories(routeloom_trust_manifest_tests PRIVATE
 target_compile_options(routeloom_trust_manifest_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_trust_manifest_tests COMMAND routeloom_trust_manifest_tests)
 
+# SDK v1 key hierarchy building block (docs/design/sdk-v1/03-key-hierarchy.md
+# §3): HKDF-SHA-256 pinned by the RFC 5869 SHA-256 test cases.
+add_executable(routeloom_kdf_tests test_kdf.cpp)
+target_link_libraries(routeloom_kdf_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_kdf_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_kdf_tests COMMAND routeloom_kdf_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)
@@ -212,3 +219,9 @@ target_link_libraries(routeloom_dedup_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_dedup_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_dedup_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_dedup_tests COMMAND routeloom_dedup_tests)
+
+add_executable(routeloom_node_status_tests test_node_status.cpp)
+target_link_libraries(routeloom_node_status_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_node_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_node_status_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_node_status_tests COMMAND routeloom_node_status_tests)

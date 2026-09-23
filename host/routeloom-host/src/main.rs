@@ -6,6 +6,7 @@ mod api1;
 mod canonical;
 mod config;
 mod dispatch;
+mod nodes;
 mod receive_log;
 mod send_store;
 mod sqlite_store;
@@ -726,6 +727,14 @@ struct State {
     /// every HOST_REGISTER so a restarted daemon is provably a different
     /// host boot to the device (05 §5.6).
     host_boot: u64,
+    /// node_status_v1 (HostOps 0x41/0x42) bodies waiting for the node
+    /// status thread — separate from `dispatch_inbox` so the page/event
+    /// stream never competes with the send lane's replies.
+    node_inbox: nodes::NodeInbox,
+    /// Per-node link/route status mirrored from the attached gateway: the
+    /// source of truth for NODES, `nodes.list`/`nodes.get` and the
+    /// node_joined/node_left/link_changed events.
+    node_table: Mutex<nodes::NodeTable>,
 }
 
 fn now_ms() -> u64 {
@@ -1135,6 +1144,18 @@ fn record_frame(state: &State, frame: &Frame, inner: &[u8], ms: u64) {
         // the dispatcher inbox keyed by our request id. Posting never
         // blocks: a full inbox drops the body and the lane re-queries or
         // the device resends inside its own ack window.
+        // node_status_v1 pages/events belong to the node lane. They are not
+        // mirrored as host_ops_rx: a resync every few seconds would flush
+        // the bounded ring — the lane publishes the transitions instead.
+        FrameKind::HostOps if nodes::owns(body) => {
+            if !state.node_inbox.post(frame.request, body.to_vec()) {
+                push_event(
+                    state,
+                    ms,
+                    "\"kind\":\"rx_drop\",\"reason\":\"node_inbox_full\"".to_string(),
+                );
+            }
+        }
         FrameKind::HostOps => {
             if routeloom_protocol::host_ops::gateway_sub(body)
                 == Some(routeloom_protocol::host_ops::SUB_GATEWAY_INGRESS)
@@ -1285,19 +1306,62 @@ fn adapter_json(state: &State) -> String {
     )
 }
 
+/// Legacy `NODES` view: the union of nodes observed in USB traffic and the
+/// node_status_v1 table. membership/reachability/rssi/hop_count come from
+/// the gateway's status report when one exists; a node the report does not
+/// cover — or any node while no capable session is live — stays
+/// "unknown"/null: absent data is never presented as observed.
 fn nodes_json(state: &State) -> String {
-    let nodes = state.nodes.lock().expect("nodes poisoned");
-    let mut out = String::from("{\"nodes\":[");
-    for (index, node) in nodes.iter().enumerate() {
+    let observed: Vec<(u64, &'static str, u64)> = state
+        .nodes
+        .lock()
+        .expect("nodes poisoned")
+        .iter()
+        .map(|node| (node.id, node.role, node.seen_ms))
+        .collect();
+    let table = state.node_table.lock().expect("node table poisoned");
+    let live = matches!(table.source(), nodes::Source::Live | nodes::Source::Syncing);
+    let mut ids: Vec<u64> = observed.iter().map(|(id, ..)| *id).collect();
+    let (records, _) = table.list(0, nodes::TABLE_CAP, None);
+    ids.extend(records.iter().map(|record| record.node));
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out = format!("{{\"source\":{},\"nodes\":[", nodes::source_json(&table));
+    for (index, id) in ids.iter().enumerate() {
         if index > 0 {
             out.push(',');
         }
-        // membership/reachability/rssi/hop_count have no source of truth in
-        // this daemon; they are emitted explicitly as unknown so the API
-        // contract distinguishes observed from absent data.
+        let seen = observed.iter().find(|(node, ..)| node == id);
+        let record = table.get(*id);
+        let role = match (record, seen) {
+            (Some(record), _) if record.gateway => "adapter",
+            (_, Some((_, role, _))) => role,
+            _ => "peer",
+        };
+        let (membership, reachability) = match record {
+            Some(record) if live || record.gateway => {
+                if record.connected {
+                    ("joined", "reachable")
+                } else {
+                    ("left", "unreachable")
+                }
+            }
+            _ => ("unknown", "unknown"),
+        };
+        let status = record.and_then(nodes::NodeRecord::live_status);
+        let rssi = status
+            .filter(|s| s.rssi_valid())
+            .map_or_else(|| "null".to_string(), |s| s.rssi_last_dbm.to_string());
+        let hops = record
+            .and_then(nodes::NodeRecord::hops)
+            .map_or_else(|| "null".to_string(), |h| h.to_string());
+        let link_cost = status
+            .filter(|s| s.neighbor_active())
+            .map_or_else(|| "null".to_string(), |s| s.link_cost.to_string());
         out.push_str(&format!(
-            "{{\"id\":{},\"role\":\"{}\",\"seen_ms\":{},\"membership\":\"unknown\",\"reachability\":\"unknown\",\"rssi_dbm\":null,\"lr250\":\"unknown\",\"hop_count\":null}}",
-            node.id, node.role, node.seen_ms,
+            "{{\"id\":{id},\"role\":\"{role}\",\"seen_ms\":{},\"membership\":\"{membership}\",\"reachability\":\"{reachability}\",\"rssi_dbm\":{rssi},\"lr250\":\"unknown\",\"hop_count\":{hops},\"last_heard_ms\":{},\"link_cost\":{link_cost}}}",
+            json_opt_u64(seen.map(|(_, _, ms)| *ms)),
+            json_opt_u64(record.and_then(|r| r.last_heard_ms)),
         ));
     }
     out.push_str("]}");
@@ -1915,6 +1979,7 @@ fn serve_client(
                 rate_limiter: &state.rate_limiter,
                 session: &state.session,
                 gateway_lane: &state.gateway_lane,
+                node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 config_authority: state.config_authority,
                 link: api1::LinkStatus {
@@ -2410,6 +2475,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dispatch_state = Arc::clone(&state);
         let dispatch_outbound = outbound_tx.clone();
         thread::spawn(move || dispatch::dispatch_loop(dispatch_state, dispatch_outbound));
+    }
+    // node_status_v1 lane: pages the gateway's per-node view into the
+    // node table and consumes its join/leave events. Idle until a session
+    // advertising CAP_NODE_STATUS_V1 authenticates; same writer queue.
+    {
+        let node_state = Arc::clone(&state);
+        let node_outbound = outbound_tx.clone();
+        thread::spawn(move || nodes::node_status_loop(node_state, node_outbound));
     }
     if let Some(device_path) = device {
         let writer_slot: Arc<Mutex<Option<File>>> = Arc::new(Mutex::new(None));
@@ -3586,5 +3659,129 @@ mod tests {
             ["--config-authority-generation".to_string(), "0".to_string()].into_iter()
         )
         .is_err());
+    }
+
+    /// node_status_v1 wiring: the lane queues a sealed 0x40 query on the
+    /// writer queue once a capable session is up, `record_frame` routes the
+    /// 0x41 reply (and 0x42 events) into the node inbox — never the
+    /// dispatcher inbox — and the next pass updates the table, the legacy
+    /// NODES view and the event ring.
+    #[test]
+    fn node_status_lane_round_trips_through_record_frame() {
+        use routeloom_protocol::node_status::{
+            decode_node_status_query, encode_node_event, encode_node_status_page, NodeEvent,
+            NodeEventKind, NodeStatusEntry, NodeStatusPage, CAP_NODE_STATUS_V1, FLAG_DIRECT,
+            FLAG_NEIGHBOR, FLAG_NEIGHBOR_ACTIVE, FLAG_REACHABLE, FLAG_RSSI_VALID, PAGE_ARMED,
+        };
+        let state = State::default();
+        {
+            let mut info = state.session.lock().unwrap();
+            info.authenticated = true;
+            info.id = Some(42);
+            info.node = Some(1);
+            info.network = Some(7);
+            info.capability = Some(0x7 | CAP_NODE_STATUS_V1);
+        }
+        // Before any report the legacy view is explicit about unknowns.
+        touch_node(&state, 2, "peer", 10);
+        assert!(nodes_json(&state).contains("\"membership\":\"unknown\""));
+
+        let (tx, rx) = mpsc::sync_channel::<Outbound>(MAX_OUTBOUND);
+        let mut lane = nodes::NodeStatusLane::default();
+        let now = now_ms();
+        nodes::node_status_once(&state, &tx, &mut lane, now);
+        let Ok(Outbound::Seal(query)) = rx.try_recv() else {
+            panic!("expected a sealed node status query");
+        };
+        assert_eq!(query.kind, FrameKind::HostOps);
+        let decoded = decode_node_status_query(&query.body).unwrap();
+        assert_eq!(decoded.after, 0);
+
+        let entry = NodeStatusEntry {
+            node: 2,
+            flags: FLAG_NEIGHBOR
+                | FLAG_NEIGHBOR_ACTIVE
+                | FLAG_REACHABLE
+                | FLAG_DIRECT
+                | FLAG_RSSI_VALID,
+            rssi_last_dbm: -64,
+            rssi_ewma_q8_8: -64 * 256,
+            link_cost: 1,
+            route_metric: 1,
+            next_hop: 2,
+            heard_age_ms: 0,
+        };
+        let page = encode_node_status_page(&NodeStatusPage {
+            result: 0,
+            flags: PAGE_ARMED,
+            next_after: 2,
+            event_seq: 0,
+            entries: vec![entry],
+        })
+        .unwrap();
+        record_frame(
+            &state,
+            &frame(FrameKind::HostOps, 0, query.request, page.clone()),
+            &page,
+            now,
+        );
+        nodes::node_status_once(&state, &tx, &mut lane, now + 1);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"membership\":\"joined\""), "{view}");
+        assert!(view.contains("\"rssi_dbm\":-64"));
+        assert!(view.contains("\"hop_count\":1"));
+        assert!(view.contains("\"state\":\"live\""));
+        {
+            let events = state.events.lock().unwrap();
+            assert!(events.iter().any(
+                |e| e.kind == "node_joined" && e.json.contains("\"node\":\"0000000000000002\"")
+            ));
+            assert!(events
+                .iter()
+                .any(|e| e.kind == "node_joined"
+                    && e.json.contains("\"reason\":\"gateway_attached\"")));
+            assert!(!events.iter().any(|e| e.kind == "host_ops_rx"));
+        }
+
+        // A device event: node 2 leaves.
+        let gone = NodeStatusEntry {
+            flags: FLAG_NEIGHBOR,
+            link_cost: u16::MAX,
+            route_metric: u16::MAX,
+            next_hop: 0,
+            ..entry
+        };
+        let body = encode_node_event(&NodeEvent {
+            sequence: 1,
+            kind: NodeEventKind::RouteDown,
+            status: gone,
+        })
+        .unwrap();
+        record_frame(
+            &state,
+            &frame(FrameKind::HostOps, 0, 0, body.clone()),
+            &body,
+            now + 2,
+        );
+        nodes::node_status_once(&state, &tx, &mut lane, now + 3);
+        assert!(nodes_json(&state).contains("\"membership\":\"left\""));
+        assert!(state
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "node_left" && e.json.contains("\"reason\":\"route_down\"")));
+
+        // Session loss: the gateway leaves too; NODES stays honest.
+        state.session.lock().unwrap().authenticated = false;
+        nodes::node_status_once(&state, &tx, &mut lane, now + 4);
+        let view = nodes_json(&state);
+        assert!(view.contains("\"state\":\"unavailable\""), "{view}");
+        assert!(state
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "node_left" && e.json.contains("\"reason\":\"gateway_lost\"")));
     }
 }
