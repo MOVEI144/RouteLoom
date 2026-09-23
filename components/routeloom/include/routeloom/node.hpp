@@ -915,7 +915,7 @@ class MeshNode {
 
   // Members are grouped 8-byte first, then 4/2/1-byte (ram-budget.md): the
   // fields of one mechanism are split across the groups, so each keeps its
-  // comment where it is declared. 160 B on ILP32 instead of 192 B.
+  // comment where it is declared. 160 B instead of 192 B (LP64 and RISC-V/Xtensa).
   struct Neighbor {
     // --- 8-byte members ---
     NodeId node{kInvalidNodeId};
@@ -1036,7 +1036,7 @@ class MeshNode {
   };
 
   // Laid out 8-byte members first, then the 4/1-byte tail (ram-budget.md):
-  // 136 B on ILP32 instead of 152 B.
+  // 136 B instead of 152 B on the RISC-V/Xtensa firmware ABIs.
   struct DedupEntry {
     MessageKey key{};
     // Admission timestamp: the base of the kDedupHardCapMs retention cap —
@@ -1083,8 +1083,8 @@ class MeshNode {
   };
   // sdk-completion/02 §2.4 budget: 152 B measured on host after the phase +
   // first_seen_ms addition (144 B before); the member order above packs it
-  // to 144 B on LP64 and 136 B on ILP32 (RISC-V/Xtensa align u64 to 8). A
-  // larger entry shrinks real capacity silently, so growth is a deliberate,
+  // to 136 B on LP64 and on RISC-V/Xtensa (which align u64 to 8). A larger
+  // entry shrinks real capacity silently, so growth is a deliberate,
   // documented change.
   static_assert(sizeof(DedupEntry) <= 176, "dedup entry size budget");
   struct Delivery {

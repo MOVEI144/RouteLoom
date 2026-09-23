@@ -6,9 +6,10 @@ menu "RouteLoom"
         help
             Compile-time capacity of the node's duplicate-suppression pool
             (docs/reference/resource-profiles.json dedup_entries). Each record
-            is about 152 bytes of static RAM inside MeshNode. Terminal pins may
-            use at most 7/8 of the pool; a relay's transit records are held
-            only for the frame's own deadline plus a short slack.
+            is 136 bytes of static RAM inside MeshNode (the budget allows 152).
+            Terminal pins may use at most 7/8 of the pool; a relay's transit
+            records are held only for the frame's own deadline plus a short
+            slack. Static RAM per role: docs/design/sdk-v1/ram-budget.md.
 
         config ROUTELOOM_DEDUP_PROFILE_LEAF
             bool "leaf-small (32 records)"

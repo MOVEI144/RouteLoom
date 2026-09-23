@@ -333,7 +333,7 @@ class RouteTable {
   };
 
   // 8-byte members first, then the 4/2/1-byte tail (ram-budget.md): 216 B
-  // per entry on ILP32 instead of 256 B.
+  // per entry instead of 256 B (LP64 and RISC-V/Xtensa).
   struct Entry {
     NodeId destination{kInvalidNodeId};
     std::array<RouteCandidate, kRouteCandidatesPerDestination> candidates{};
