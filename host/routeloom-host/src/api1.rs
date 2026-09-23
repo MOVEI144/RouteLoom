@@ -62,6 +62,9 @@ use std::time::{Duration, Instant};
 
 use crate::dispatch::ConfigOpRecord;
 
+/// Site Authority methods (SDK v1 zero-touch join, plan P3-3).
+pub(crate) mod site;
+
 use crate::SessionInfo;
 
 // contracts.json `ipc.*`: the bound names the WHOLE request line —
@@ -112,6 +115,9 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// group_delivery_v1 op table: `group.send` admits here, `group.get`
     /// reads; the group lane thread is the only driver.
     pub group_ops: &'a crate::group::GroupOps,
+    /// SDK v1 Site Authority (`--site-authority`); None = not configured,
+    /// the site methods then answer SITE_AUTHORITY_UNAVAILABLE.
+    pub site: Option<&'a crate::site::SiteService>,
     /// The daemon's configured config issuer node id — None means no
     /// authority is provisioned, so `config.propose` is refused honestly
     /// while queries still run.
@@ -327,6 +333,9 @@ pub fn handle_conn<S: OperationStore>(
         "config.get" => config_get(&params, ctx).map(|r| (r, None)),
         "group.send" => group_send(&params, ctx).map(|r| (r, None)),
         "group.get" => group_get(&params, ctx).map(|r| (r, None)),
+        method if site::SITE_METHODS.contains(&method) => site::dispatch(method, &params, ctx)
+            .unwrap_or_else(|| Err(ApiError::simple("INTERNAL", "site method table mismatch")))
+            .map(|r| (r, None)),
         method if LATER_PHASE_METHODS.contains(&method) => Err(ApiError::simple(
             "UNSUPPORTED_METHOD",
             &format!("\"{method}\" is not implemented in this phase"),
@@ -417,7 +426,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -445,6 +454,15 @@ fn capabilities<S: OperationStore>(
         ctx.acl.revision(),
         config_auth = ctx.config_authority.is_some(),
         group_capable = group_capability_json(ctx),
+        site_methods = site::SITE_METHODS
+            .iter()
+            .fold(String::new(), |mut out, m| {
+                out.push_str(",\"");
+                out.push_str(m);
+                out.push_str("\":true");
+                out
+            }),
+        site_caps = site::capability_json(ctx),
     ))
 }
 
@@ -1011,7 +1029,9 @@ fn messages_subscribe<S: OperationStore>(
                             "filter.kinds entries must be strings",
                         ));
                     };
-                    if !subscribe::EVENT_KINDS.contains(&text) {
+                    if !subscribe::EVENT_KINDS.contains(&text)
+                        && !site::SITE_EVENT_KINDS.contains(&text)
+                    {
                         return Err(ApiError::simple(
                             "INVALID_ARGUMENT",
                             &format!("unknown event kind \"{text}\""),
@@ -2364,6 +2384,10 @@ fn operations_get<S: OperationStore>(
             "operation_id must be a string",
         ));
     };
+    // Site Authority operations (`op-` tokens) live in the site ledger.
+    if let Some(answer) = site::operation_get(text, ctx) {
+        return answer;
+    }
     let Some((lineage, seq)) = canonical::parse_operation_id(text) else {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
@@ -3350,6 +3374,7 @@ mod tests {
             node_table: &EMPTY_NODE_TABLE,
             config_ops,
             group_ops: leaked_group_ops(),
+            site: None,
             config_authority,
             subscriptions,
             conn_id,

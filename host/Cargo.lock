@@ -469,9 +469,12 @@ name = "routeloom-host"
 version = "0.1.0"
 dependencies = [
  "routeloom-client",
+ "routeloom-edhoc",
+ "routeloom-join",
  "routeloom-json",
  "routeloom-peercred",
  "routeloom-protocol",
+ "routeloom-provision",
  "routeloom-tui",
  "routeloom-wire",
  "rusqlite",
