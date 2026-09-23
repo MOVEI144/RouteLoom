@@ -160,4 +160,5 @@ nav:
       - 08 — 実装計画・試験計画・未決事項: design/sdk-v1/08-implementation-plan.md
       - "100台・1 gateway向けの経路スケール設計（Issue #41）": design/sdk-v1/routing-scale.md
       - "group／ALL配送と送信元ごとの順序（KGuard）": design/sdk-v1/group-delivery.md
+      - "静的RAMの予算・role別profile・CI guard": design/sdk-v1/ram-budget.md
   - ライセンス（Apache-2.0）: https://github.com/MOVEI144/RouteLoom/blob/main/LICENSE

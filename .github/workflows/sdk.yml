@@ -282,6 +282,15 @@ jobs:
               ;;
           esac
           idf.py size > build/size-report.txt
+          # Static RAM report + headroom guard (docs/design/sdk-v1/ram-budget.md):
+          # per-cell DRAM/IRAM use goes to the job summary and the artifact;
+          # the cell fails when the internal RAM holding .bss/.data has less
+          # free space than the per-target/app floor in the tool.
+          idf.py size --format json2 --output-file build/size.json
+          python3 "$GITHUB_WORKSPACE/tools/firmware_ram_report.py" build/size.json \
+            --target '${{ matrix.target }}' --app '${{ matrix.app }}' \
+            --cell '${{ matrix.app }}-${{ matrix.target }}-${{ matrix.profile }}-${{ matrix.autonomy }}-${{ matrix.features }}' \
+            --json-out build/ram-report.json --summary "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
@@ -292,6 +301,8 @@ jobs:
             firmware/${{ matrix.app }}/build/*.elf
             firmware/${{ matrix.app }}/build/*.map
             firmware/${{ matrix.app }}/build/size-report.txt
+            firmware/${{ matrix.app }}/build/size.json
+            firmware/${{ matrix.app }}/build/ram-report.json
             firmware/${{ matrix.app }}/build/log/*
             firmware/${{ matrix.app }}/sdkconfig
           retention-days: 30

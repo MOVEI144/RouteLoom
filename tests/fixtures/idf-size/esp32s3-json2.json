@@ -1,0 +1,73 @@
+{
+    "version": "1.2",
+    "total_size": 912400,
+    "layout": [
+        {
+            "name": "Flash Code",
+            "total": 33554400,
+            "used": 610002,
+            "free": 32944398,
+            "parts": {
+                ".text": {
+                    "size": 610002
+                }
+            }
+        },
+        {
+            "name": "DIRAM",
+            "total": 341760,
+            "used": 245118,
+            "free": 96642,
+            "parts": {
+                ".bss": {
+                    "size": 170412
+                },
+                ".text": {
+                    "size": 55102
+                },
+                ".data": {
+                    "size": 19604
+                }
+            }
+        },
+        {
+            "name": "IRAM",
+            "total": 16384,
+            "used": 16383,
+            "free": 1,
+            "parts": {
+                ".text": {
+                    "size": 15356
+                },
+                ".vectors": {
+                    "size": 1027
+                }
+            }
+        },
+        {
+            "name": "Flash Data",
+            "total": 33554368,
+            "used": 223104,
+            "free": 33331264,
+            "parts": {
+                ".rodata": {
+                    "size": 222848
+                },
+                ".appdesc": {
+                    "size": 256
+                }
+            }
+        },
+        {
+            "name": "RTC FAST",
+            "total": 8192,
+            "used": 16,
+            "free": 8176,
+            "parts": {
+                ".rtc_reserved": {
+                    "size": 16
+                }
+            }
+        }
+    ]
+}
