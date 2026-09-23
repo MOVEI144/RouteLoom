@@ -104,7 +104,13 @@ if(COMMAND idf_component_register)
   target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
   target_compile_definitions(${COMPONENT_LIB} PRIVATE ${ROUTELOOM_UECC_DEFS}
     ${ROUTELOOM_EDHOC_C_DEFS})
-  target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wpedantic)
+  # -Wpedantic is C++-only here: ESP-IDF's libc wrappers (esp_libc
+  # platform_include stdio.h/time.h) use #include_next and reach C
+  # translation units as ordinary -I headers, so C -Wpedantic under ESP-IDF's
+  # -Werror rejects any vendored C file that includes <stdio.h> (libedhoc's
+  # log backend does). The host build keeps -Wpedantic on its C targets.
+  target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra
+    $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
   target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror>
     "$<$<COMPILE_LANGUAGE:C>:${ROUTELOOM_THIRD_PARTY_C_RELAX}>")
