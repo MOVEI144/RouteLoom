@@ -402,6 +402,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "routeloom-join"
+version = "0.1.0"
+dependencies = [
+ "routeloom-json",
+ "routeloom-provision",
+]
+
+[[package]]
 name = "routeloom-json"
 version = "0.1.0"
 
