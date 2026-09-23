@@ -331,3 +331,20 @@ target_include_directories(routeloom_sdkv1_blob_storage_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_blob_storage_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_blob_storage_tests COMMAND routeloom_sdkv1_blob_storage_tests)
+
+# EDHOC (docs/design/sdk-v1/08 P2-1): the vendored libedhoc with RouteLoom's
+# bounded backend — RFC 9529 §3 byte for byte and the §4 invalid messages
+# (protocol/edhoc-rfc9529, from tools/extract_rfc9529_vectors.py), the
+# method-0 RLCW1 MemberCert round trip and its failure cases, arena/key-store
+# bounds, and the size/stack report. edhoc_probe.c is C: it reads libedhoc's
+# internal key slots (C11-only header) to compare the intermediate PRKs.
+find_package(Threads REQUIRED)
+add_executable(routeloom_edhoc_tests test_edhoc.cpp edhoc_probe.c)
+target_link_libraries(routeloom_edhoc_tests PRIVATE routeloom_core routeloom_edhoc_headers
+    Threads::Threads)
+target_include_directories(routeloom_edhoc_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_edhoc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_edhoc_tests PRIVATE
+    ROUTELOOM_EDHOC_RFC9529_DIR="${CMAKE_SOURCE_DIR}/protocol/edhoc-rfc9529")
+add_test(NAME routeloom_edhoc_tests COMMAND routeloom_edhoc_tests)
