@@ -13,7 +13,7 @@ each with name/total/used/free and per-section "parts"). The raw memory map
 same numbers instead of a false pass. A report with no RAM type holding
 .bss is an error — the guard never passes by not finding its input.
 
-The guarded figure is the free space of the internal-RAM memory type that
+The guarded figure is the free space of the main internal-RAM memory type that
 holds static data (.bss/.data). On the ESP32-C3 that is "DRAM"; on the S3
 "DIRAM"; on the C5 "HP SRAM". IRAM code shares these regions on all three
 targets, so `free` is exactly the room left before dram0_0_seg overflows at
@@ -50,6 +50,8 @@ DEFAULT_MIN_FREE_BYTES = 8 * 1024
 STATIC_SECTIONS = (".bss", ".data", ".dram0.bss", ".dram0.data")
 # Memory types that are not internal RAM budget.
 NON_RAM_PREFIXES = ("flash", "external")
+# Low-power memories (RTC SLOW/FAST, LP SRAM): reported, never guarded.
+LOW_POWER_PREFIXES = ("rtc", "lp ")
 
 
 class ReportError(ValueError):
@@ -105,12 +107,20 @@ def ram_types(types: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def static_type(types: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """The internal RAM type holding .bss/.data; the tightest if several."""
+    """The main internal RAM type holding .bss/.data.
+
+    esp-idf-size abbreviates a section to its last dotted component, so the
+    RTC/LP memories' .rtc.data/.rtc.bss (RTC_DATA_ATTR, deep-sleep builds)
+    also show up as ".data"/".bss". Those low-power memories are reported
+    but never guarded; among the rest the largest type is the main SRAM
+    that dram0_0_seg lives in.
+    """
     holders = [t for t in ram_types(types)
-               if any(part in STATIC_SECTIONS and size > 0 for part, size in t["parts"].items())]
+               if not t["name"].lower().startswith(LOW_POWER_PREFIXES)
+               and any(part in STATIC_SECTIONS and size > 0 for part, size in t["parts"].items())]
     if not holders:
         raise ReportError("no internal RAM memory type holds .bss/.data in the size report")
-    return min(holders, key=lambda t: t["free"])
+    return max(holders, key=lambda t: t["total"])
 
 
 def threshold(target: str, app: str) -> int:

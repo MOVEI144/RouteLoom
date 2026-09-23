@@ -46,9 +46,26 @@ class Parse(unittest.TestCase):
         self.assertEqual(guard["static_data"], 21054)
         self.assertEqual(guard["min_free"], 8192)
         self.assertTrue(guard["passed"])
-        # Flash is never RAM budget; RTC SLOW is reported but holds no .bss.
+        # Flash is never RAM budget; RTC SLOW is reported but not guarded
+        # although its RTC_DATA_ATTR section abbreviates to ".data" and its
+        # free space (8156 B) is below the floor.
         names = [m["name"] for m in result["memory"]]
         self.assertEqual(names, ["DRAM", "RTC SLOW"])
+
+    def test_c5_guards_hp_sram_not_lp_sram(self):
+        report = {"version": "1.2", "layout": [
+            {"name": "HP SRAM", "total": 393216, "used": 250000, "free": 143216,
+             "parts": {".bss": {"size": 150000}, ".text": {"size": 80000},
+                       ".data": {"size": 20000}}},
+            {"name": "LP SRAM", "total": 16384, "used": 16000, "free": 384,
+             "parts": {".bss": {"size": 8000}, ".data": {"size": 8000}}},
+            {"name": "Flash", "total": 33554432, "used": 900000, "free": 32654432,
+             "parts": {".text": {"size": 700000}, ".rodata": {"size": 200000}}},
+        ]}
+        result = frr.evaluate(report, "esp32c5", "reference_node")
+        self.assertEqual(result["guard"]["memory_type"], "HP SRAM")
+        self.assertTrue(result["guard"]["passed"])
+        self.assertEqual([m["name"] for m in result["memory"]], ["HP SRAM", "LP SRAM"])
 
     def test_s3_json2_guards_diram_not_iram(self):
         result = frr.evaluate(load("esp32s3-json2.json"), "esp32s3", "bridge_node")

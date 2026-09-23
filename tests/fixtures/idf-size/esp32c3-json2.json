@@ -47,11 +47,17 @@
         {
             "name": "RTC SLOW",
             "total": 8192,
-            "used": 24,
-            "free": 8168,
+            "used": 36,
+            "free": 8156,
             "parts": {
                 ".rtc_reserved": {
                     "size": 24
+                },
+                ".rtc_noinit": {
+                    "size": 8
+                },
+                ".data": {
+                    "size": 4
                 }
             }
         }
