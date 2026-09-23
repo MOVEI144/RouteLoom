@@ -69,6 +69,21 @@ v1はlink／end epochを16bitとし、firmwareは起動（deep-sleep wakeを含�
 
 headerは88Bのまま、payload上限128Bも変えない。counterを48bitに狭めても1 epochあたり2.8×10^14 frameで、使い切ったcontextは同じ鍵で巻き戻さず新しいepochへ移る（`kMaxCryptoCounter`）。AEAD nonce（12B）はscope u8＋方向u8＋epoch u32＋counter u48。firmwareはepochとroute generationを32bitの永続boot sessionから直接導出する。
 
+### ROUTE_REQUEST payload（type 35、gateway-scoped routing）
+
+予約済みtype 35にpayloadを定義した（headerは不変、[設計](../design/sdk-v1/routing-scale.md)）。ROUTE_UPDATE／SEQNO_REQUESTと同じくlink保護のみの1hop frame（`hop_remaining=1`、destination＝next_hop＝受信隣接、BestEffort）で、多hopの種類はhopごとに作り直し、TTLはpayloadに持つ。固定38B、big-endian：
+
+| offset | field | 型 | 意味 |
+|---:|---|---|---|
+| 0 | kind | u8 | 1＝Neighbor（1hop pull）、2＝Discover、3＝Reply。他は拒否 |
+| 1 | ttl | u8 | 1〜10（hop上限）。Neighborは常に1 |
+| 2 | requester | u64 | transactionを始めたnode。0／broadcastは拒否 |
+| 10 | target | u64 | 経路を求める宛先。requesterと同一は拒否 |
+| 18 | request_id | u32 | requester単位のid。(requester, request_id, kind)で重複抑止 |
+| 22 | record | 16B | ROUTE_UPDATE recordと同一形式（destination u64＋generation u32＋sequence u16＋metric u16） |
+
+recordのdestinationはNeighbor／Discoverでrequester、Replyでtargetに一致しなければならない（不一致は拒否）。受信側はrecordを送信隣接を次hopとする通常の経路広告として`RouteTable::consider()`へ渡し、送信側は有限metricのrecordを出す前にFDを更新する（`mark_advertised`）。したがってROUTE_REQUESTは採用可能条件を迂回しない。golden vectorは[route_request.json](../../protocol/golden/valid/route_request.json)（C++ encoderとRust generatorのpayload一致をtest_routing_scaleで確認）。host（Rust）はこのpayloadを解釈しない。
+
 永続化するTX counter record（32B、layout 2）とreplay floor record（layout 2）も32bit epochへ移行した。v1のrecordは推測で拡張せず`IntegrityError`で拒否する（fail closed）。v1 firmwareを書き込んだ機器をv2へ更新する際はNVSを消去する。
 
 ## 8. 凍結しなくても守る接続契約

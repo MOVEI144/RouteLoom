@@ -277,6 +277,111 @@ def validate(root: Path) -> dict:
             == radio["buffers"]["espnow_body_max"]
             == 250,
         )
+        # Route refresh vs. lease (issue #41, docs/design/sdk-v1/routing-scale.md
+        # §5): a lease shorter than the refresh cycle makes routes expire
+        # before their refresh lands, i.e. chronic flapping.
+        routing = radio["routing"]
+        flat = routing["flat"]
+        scoped = routing["gateway_scoped"]
+        records = (radio["buffers"]["normal_payload_max"] - 1) // flat["record_bytes"]
+        test(
+            "route_update_records_per_frame",
+            records == flat["records_per_frame"] == 7,
+        )
+
+        def flat_pages(destinations):
+            return max(1, -(-destinations // (records - 1)))
+
+        def flat_sustains(period, lifetime, destinations):
+            return lifetime > (flat_pages(destinations) + 1) * period
+
+        flat_max = max(
+            (
+                d
+                for d in range(1, 4096)
+                if flat_sustains(
+                    flat["default_period_ms"], flat["default_lifetime_ms"], d
+                )
+            ),
+            default=0,
+        )
+        test(
+            "flat_refresh_bound_documented",
+            flat_max == flat["max_destinations_at_default"],
+            f"flat default sustains {flat_max} destinations",
+        )
+        test(
+            "scoped_lease_covers_two_refresh_cycles",
+            scoped["lifetime_ms"]
+            >= (2 * scoped["refresh_ticks"] + scoped["lease_margin_ticks"])
+            * scoped["period_ms"],
+        )
+        routing_hpp = (
+            root / "components/routeloom/include/routeloom/routing.hpp"
+        ).read_text(encoding="utf-8")
+        route_constants = {
+            name: int(value)
+            for name, value in re.findall(
+                r"constexpr std::\w+ (k\w+) = (\d+);", routing_hpp
+            )
+        }
+        test(
+            "scoped_constants_match_manifest",
+            route_constants.get("kScopedDefaultRefreshTicks") == scoped["refresh_ticks"]
+            and route_constants.get("kScopedLeaseMarginTicks")
+            == scoped["lease_margin_ticks"]
+            and route_constants.get("kScopedProductPeriodMs") == scoped["period_ms"]
+            and route_constants.get("kScopedProductLifetimeMs") == scoped["lifetime_ms"]
+            and route_constants.get("kMaxRouteGateways") == scoped["max_gateways"]
+            and route_constants.get("kRouteTombstoneDwellMs")
+            == scoped["tombstone_dwell_min_ms"]
+            and route_constants.get("kRouteUpdateRecordBytes") == flat["record_bytes"],
+            "routing.hpp constants vs radio-defaults.json routing.gateway_scoped",
+        )
+        test(
+            "scoped_lease_rule_in_code",
+            "(2ULL * refresh_ticks + kScopedLeaseMarginTicks) * period_ms" in routing_hpp
+            and "scoped_lifetime_sufficient(config_.route_advertisement_period_ms"
+            in (root / "components/routeloom/src/node.cpp").read_text(encoding="utf-8"),
+            "validate_config must enforce the same lease rule",
+        )
+        routing_cpp = (root / "components/routeloom/src/routing.cpp").read_text(
+            encoding="utf-8"
+        )
+        test(
+            # Feasibility state must outlive every lease (RFC 8966 §3.7.3).
+            "tombstone_dwell_follows_lease",
+            "now_ms + tombstone_dwell_ms_" in routing_cpp
+            and "routes_.set_tombstone_dwell(config.route_lifetime_ms)"
+            in (root / "components/routeloom/src/node.cpp").read_text(encoding="utf-8"),
+        )
+        route_request_hpp = (
+            root / "components/routeloom/include/routeloom/route_request.hpp"
+        ).read_text(encoding="utf-8")
+        record_bytes = sum(f["bytes"] for f in semantic["route_record_fields"])
+        request = semantic["route_request_payload"]
+        test(
+            "route_request_payload_contract",
+            f"kRouteRequestPayloadBytes == {scoped['route_request_payload_bytes']}"
+            in route_request_hpp
+            and sum(f["bytes"] for f in request["fields"])
+            == scoped["route_request_payload_bytes"]
+            and record_bytes == flat["record_bytes"]
+            and semantic["route_update_payload"]["max_records"] == records
+            and request["ttl_max"] == scoped["route_request_max_ttl"]
+            == radio["network"]["hop_max"],
+            "semantics.json route payloads vs route_request.hpp and radio-defaults",
+        )
+        estimate = scoped["airtime_estimate_d100"]
+        management = radio["scheduling"]["management_network_estimated_us_per_second"]
+        per_node_share = management // radio["network"]["qualification_nodes"]
+        test(
+            "scoped_airtime_estimate_within_envelope",
+            estimate["network_us_per_second"] <= management
+            and estimate["mean_node_us_per_second"] <= per_node_share
+            and estimate["leaf_node_us_per_second"] <= per_node_share,
+            "radio.md §14 envelope and per-node share",
+        )
         allow = semantic["membership_allowlist"]
         member_only = set(semantic["member_only"])
         test(

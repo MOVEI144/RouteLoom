@@ -158,4 +158,5 @@ nav:
       - 06 — 停電・再起動・中継器故障からの高速再参加: design/sdk-v1/06-fast-rejoin.md
       - 07 — Host（KGuard）API・USB HostOps・事務所tooling: design/sdk-v1/07-host-api-tooling.md
       - 08 — 実装計画・試験計画・未決事項: design/sdk-v1/08-implementation-plan.md
+      - "100台・1 gateway向けの経路スケール設計（Issue #41）": design/sdk-v1/routing-scale.md
   - ライセンス（Apache-2.0）: https://github.com/MOVEI144/RouteLoom/blob/main/LICENSE

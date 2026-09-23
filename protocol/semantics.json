@@ -147,6 +147,34 @@
     "delivery_round",
     "hop_crypto_counter"
   ],
+  "route_record_fields": [
+    {"field": "destination", "bytes": 8},
+    {"field": "origin_generation", "bytes": 4},
+    {"field": "sequence", "bytes": 2},
+    {"field": "metric", "bytes": 2}
+  ],
+  "route_update_payload": {
+    "layout": "count u8 + count x route_record",
+    "max_records": 7,
+    "first_record": "sender self record, metric 0"
+  },
+  "route_request_payload": {
+    "frame_protection": "link-only, one hop, hop_remaining 1",
+    "fields": [
+      {"field": "kind", "bytes": 1},
+      {"field": "ttl", "bytes": 1},
+      {"field": "requester", "bytes": 8},
+      {"field": "target", "bytes": 8},
+      {"field": "request_id", "bytes": 4},
+      {"field": "record", "bytes": 16}
+    ],
+    "kinds": {"NEIGHBOR": 1, "DISCOVER": 2, "REPLY": 3},
+    "ttl_max": 10,
+    "neighbor_ttl": 1,
+    "record_destination": {"NEIGHBOR": "requester", "DISCOVER": "requester", "REPLY": "target"},
+    "record_semantics": "ordinary route advertisement from the sending neighbor: feasibility applies, sender updates FD before a finite record leaves",
+    "dedup_key": ["requester", "request_id", "kind"]
+  },
   "max_espnow_body_bytes": 250,
   "max_normal_payload_bytes": 128,
   "counter_independent_of_message_id": true,
