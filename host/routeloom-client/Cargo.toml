@@ -1,0 +1,13 @@
+[package]
+name = "routeloom-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Transport-agnostic mesh facade (send / receive / membership / link status) with a RouteLoom API1 backend"
+
+[dependencies]
+# API1 responses and notifications are JSON — the workspace's one parser.
+routeloom-json = { path = "../routeloom-json" }
+
+[lints]
+workspace = true

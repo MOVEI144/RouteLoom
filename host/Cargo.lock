@@ -373,6 +373,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "routeloom-client"
+version = "0.1.0"
+dependencies = [
+ "routeloom-json",
+]
+
+[[package]]
 name = "routeloom-host"
 version = "0.1.0"
 dependencies = [
