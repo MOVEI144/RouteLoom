@@ -24,6 +24,10 @@
 //! surface, and the application's "no communication" / status-bar logic is
 //! written once against [`LinkStatus::connected`].
 //!
+//! Separately from the mesh facade, [`site::SiteAdmin`] is the KGuard side
+//! of the SDK v1 zero-touch join (join requests, verdicts, discovered
+//! devices, members, removal); the RouteLoom backend implements it too.
+//!
 //! Clock domain: every timestamp this crate returns ([`LinkStatus::
 //! last_heard_ms`], [`MembershipEvent::at_ms`]) is host wall-clock UNIX
 //! milliseconds. The RouteLoom backend derives `last_heard_ms` on the host
@@ -34,6 +38,10 @@ use std::io;
 
 #[cfg(unix)]
 pub mod api1;
+
+/// KGuard's decision surface of the SDK v1 Site Authority (zero-touch
+/// join): [`site::SiteAdmin`] and the [`site::KGuardMock`] policy.
+pub mod site;
 
 /// Device identity on the transport (RouteLoom: the 64-bit mesh node id).
 pub type NodeId = u64;

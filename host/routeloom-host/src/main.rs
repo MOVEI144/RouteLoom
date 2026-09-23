@@ -10,6 +10,7 @@ mod group;
 mod nodes;
 mod receive_log;
 mod send_store;
+mod site;
 mod sqlite_store;
 mod subscribe;
 
@@ -740,6 +741,9 @@ struct State {
     /// api1 `group.send`/`group.get` submit and read here, the group lane
     /// thread drives the device exchange and emits `group_settled`.
     group_ops: group::GroupOps,
+    /// SDK v1 Site Authority (--site-authority DIR): EDHOC Responder, member
+    /// ledger and the KGuard decision surface. None when not configured.
+    site: Option<Arc<site::SiteService>>,
 }
 
 fn now_ms() -> u64 {
@@ -2005,6 +2009,7 @@ fn serve_client(
                 node_table: &state.node_table,
                 config_ops: &state.config_ops,
                 group_ops: &state.group_ops,
+                site: state.site.as_deref(),
                 config_authority: state.config_authority,
                 link: api1::LinkStatus {
                     configured: state.device.is_some(),
@@ -2195,6 +2200,7 @@ struct DaemonArgs {
     config_authority: Option<u64>,
     config_authority_generation: u32,
     config_dev_key: Vec<u8>,
+    site_authority: Option<PathBuf>,
 }
 
 /// Parse a node/authority id argument as hexadecimal — the codebase's node
@@ -2233,6 +2239,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut config_authority = None;
     let mut config_authority_generation = 1;
     let mut config_dev_key_hex = DEFAULT_CONFIG_DEV_KEY_HEX.to_string();
+    let mut site_authority = None;
     let mut args = args;
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -2281,9 +2288,17 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     .next()
                     .ok_or("--config-dev-key-hex requires a hex key")?;
             }
+            // SDK v1 Site Authority directory (site-authority.json, sak.key,
+            // site.db — site::config). Absent = no Site Authority: the
+            // site methods answer SITE_AUTHORITY_UNAVAILABLE.
+            "--site-authority" => {
+                site_authority = Some(PathBuf::from(
+                    args.next().ok_or("--site-authority requires a directory")?,
+                ))
+            }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--site-authority DIR]"
                 );
                 process::exit(0);
             }
@@ -2307,6 +2322,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         config_authority,
         config_authority_generation,
         config_dev_key: parse_dev_key_hex(&config_dev_key_hex, "--config-dev-key-hex")?,
+        site_authority,
     })
 }
 
@@ -2461,8 +2477,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if host_boot == 0 || host_boot == u64::MAX {
         host_boot ^= 0x5A;
     }
+    // SDK v1 Site Authority: a directory that does not open (wrong SAK,
+    // store of another site, broken ledger) is a hard start error.
+    let site = match &args.site_authority {
+        Some(dir) => {
+            let authority = site::config::open_dir(dir, now_ms())
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+            eprintln!(
+                "site authority: site {:016x} network {:016x} (EXPERIMENTAL; the USB join relay is not wired yet — joins reach it only in-process)",
+                authority.site_id(),
+                authority.network()
+            );
+            Some(Arc::new(site::SiteService::new(authority)))
+        }
+        None => None,
+    };
     let state = Arc::new(State {
         device: device.clone(),
+        site,
         receive_log: Mutex::new(ReceiveLog::new(mint_id128())),
         operation_store: Mutex::new(operation_store),
         acl,
@@ -2508,6 +2540,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let node_state = Arc::clone(&state);
         let node_outbound = outbound_tx.clone();
         thread::spawn(move || nodes::node_status_loop(node_state, node_outbound));
+    }
+    // Site Authority timers (message_3 / KGuard decision deadlines); its
+    // events go to the same ring as every other lane's.
+    if let Some(site) = state.site.clone() {
+        let site_state = Arc::clone(&state);
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(100));
+            for (ms, fields) in site.tick(now_ms()) {
+                push_event(&site_state, ms, fields);
+            }
+        });
     }
     // group_delivery_v1 lane: writes 0x50/0x52 for group.send records and
     // settles them from the 0x51 answers. Idle while nothing is queued or

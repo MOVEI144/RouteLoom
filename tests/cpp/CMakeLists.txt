@@ -348,3 +348,17 @@ target_compile_options(routeloom_edhoc_tests PRIVATE -Wall -Wextra -Wpedantic -W
 target_compile_definitions(routeloom_edhoc_tests PRIVATE
     ROUTELOOM_EDHOC_RFC9529_DIR="${CMAKE_SOURCE_DIR}/protocol/edhoc-rfc9529")
 add_test(NAME routeloom_edhoc_tests COMMAND routeloom_edhoc_tests)
+
+# EDHOC interop (docs/design/sdk-v1/08 P3-3): the device-side libedhoc stack
+# replays the method-0 join transcript recorded against the Site Authority's
+# Rust EDHOC (host/routeloom-edhoc) — both directions, byte for byte. The
+# same program is the live peer of `cargo test -p routeloom-edhoc --test
+# interop` when ROUTELOOM_EDHOC_PEER points at it. The replay here is the
+# kid-only transcript: the full join transcript (certificates by value in
+# EAD_2/EAD_3, method0_join.txt) needs about 1.4 KiB of EDHOC arena and the
+# backend is built with 1280 B (protocol/edhoc-interop/README.md).
+add_executable(routeloom_edhoc_interop_peer edhoc_interop_peer.cpp)
+target_link_libraries(routeloom_edhoc_interop_peer PRIVATE routeloom_core routeloom_edhoc_headers)
+target_compile_options(routeloom_edhoc_interop_peer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_edhoc_interop_replay COMMAND routeloom_edhoc_interop_peer --replay
+    ${CMAKE_SOURCE_DIR}/protocol/edhoc-interop/method0_join_kid_only.txt)

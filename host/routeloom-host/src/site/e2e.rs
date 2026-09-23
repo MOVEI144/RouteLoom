@@ -1,0 +1,400 @@
+//! End to end through the daemon (plan P3-3 acceptance): the real API1
+//! socket (`serve_client`, peer-credential principal, ACL), the Site
+//! Authority on a SQLite store, KGuard as `routeloom_client::site::
+//! KGuardMock` driving the `SiteAdmin` facade over the socket, and a
+//! simulated device (Rust EDHOC Initiator + routeloom-join device checks)
+//! on the in-process join transport.
+//!
+//! discovered → pending → KGuard assigns → Allow verified by
+//! `join_allow_verify`; deny not_here; removal with a verified
+//! RemovalNotice; the event stream; the ACL (V1-H06); idempotency (V1-H03).
+
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::atomic::AtomicU64;
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use routeloom_client::api1::RouteLoomTransport;
+use routeloom_client::site::{Assignment, Decision, KGuardMock, RemovalReason, Role, SiteAdmin};
+use routeloom_client::TransportError;
+use routeloom_join::JoinResult;
+
+use super::store::SqliteSiteStore;
+use super::testkit::{self, Outcome, SimDevice};
+use super::transport::InProcessTransport;
+use super::SiteService;
+use crate::acl::Acl;
+use crate::{now_ms, push_event, serve_client, DeviceSession, State};
+
+struct Daemon {
+    state: Arc<State>,
+    service: Arc<SiteService>,
+    transport: Arc<InProcessTransport>,
+    socket: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    _outbound: mpsc::Receiver<crate::Outbound>,
+}
+
+impl Daemon {
+    fn start(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "routeloom-site-e2e-{tag}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // This process's uid is the socket principal; grant it the three
+        // membership permissions on the site network only.
+        let uid = std::fs::metadata(&dir).unwrap().uid();
+        let acl = Acl::parse(&format!(
+            "{{\"principals\":{{\"{uid}\":{{\"networks\":{{\"{:016x}\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"]}}}},\"7\":{{\"networks\":{{\"*\":[\"MEMBERSHIP_READ\"]}}}}}}}}",
+            testkit::NETWORK_LOW
+        ))
+        .unwrap();
+        let store = SqliteSiteStore::open(&dir.join("site.db")).unwrap();
+        let service = Arc::new(SiteService::new(testkit::authority(
+            Box::new(store),
+            now_ms(),
+        )));
+        let transport = InProcessTransport::new();
+        service.set_transport(transport.clone());
+        let state = Arc::new(State {
+            acl,
+            site: Some(Arc::clone(&service)),
+            ..State::default()
+        });
+        let socket = dir.join("api.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (outbound_tx, outbound_rx) = mpsc::sync_channel(64);
+        let accept_state = Arc::clone(&state);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                let uid = routeloom_peercred::peer_uid(&stream).ok();
+                let state = Arc::clone(&accept_state);
+                let outbound = outbound_tx.clone();
+                thread::spawn(move || {
+                    let _ = serve_client(
+                        stream,
+                        state,
+                        outbound,
+                        0,
+                        Arc::new(AtomicU64::new(1)),
+                        Arc::new(AtomicU64::new(1)),
+                        Arc::new(Mutex::new(DeviceSession::new())),
+                        uid,
+                    );
+                });
+            }
+        });
+        Self {
+            state,
+            service,
+            transport,
+            socket,
+            dir,
+            _outbound: outbound_rx,
+        }
+    }
+
+    /// The daemon's relay lane: authority events go to the ring.
+    fn ring(&self, events: super::Events) {
+        for (ms, fields) in events {
+            push_event(&self.state, ms, fields);
+        }
+    }
+
+    fn start_join(&self, device: &mut SimDevice, now: u64) -> (testkit::Exchange, Outcome) {
+        let (exchange, outcome, events) = device.start(&self.service, &self.transport, now);
+        self.ring(events);
+        (exchange, outcome)
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn raw_api1(state: &Arc<State>, uid: u32, line: &str) -> String {
+    let (client, server) = UnixStream::pair().unwrap();
+    let (tx, _rx) = mpsc::sync_channel(4);
+    let state = Arc::clone(state);
+    thread::spawn(move || {
+        let _ = serve_client(
+            server,
+            state,
+            tx,
+            0,
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(Mutex::new(DeviceSession::new())),
+            Some(uid),
+        );
+    });
+    let mut writer = client.try_clone().unwrap();
+    writer.write_all(line.as_bytes()).unwrap();
+    writer.write_all(b"\n").unwrap();
+    let mut reader = BufReader::new(client);
+    let mut response = String::new();
+    reader.read_line(&mut response).unwrap();
+    response
+}
+
+#[test]
+fn kguard_drives_the_join_over_the_api_socket() {
+    let daemon = Daemon::start("kguard");
+    let kguard_link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
+    let mut kguard = KGuardMock::default();
+    kguard.pending_retry_s = 30;
+
+    // KGuard watches the site events (join.request etc.) as they happen.
+    let stream = kguard_link.site_events().unwrap();
+    let (event_tx, event_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for event in stream {
+            if event_tx.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    let next_event = |kind: &str| loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("no {kind} event"))
+            .unwrap();
+        if event.kind == kind {
+            return event;
+        }
+    };
+
+    let status = kguard_link.site_status().unwrap();
+    assert_eq!(status.site_id, testkit::SITE);
+    assert_eq!(status.network, testkit::network());
+    assert!(status.storage_durable);
+    assert_eq!(status.members, 0);
+
+    // 1. A new, unassigned device: discovered, KGuard answers pending.
+    let t0 = now_ms();
+    let mut device = SimDevice::new(0x00A1_0000_0000_1234, 0x71);
+    let (mut exchange, outcome) = daemon.start_join(&mut device, t0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let announced = next_event("join.request");
+    assert_eq!(announced.device, Some(device.node));
+    let decided = kguard.serve_once(&kguard_link).unwrap();
+    assert_eq!(decided.len(), 1);
+    assert_eq!(decided[0].1, Decision::Pending { retry_after_s: 30 });
+    assert_eq!(decided[0].2.applied, "current_attempt");
+    let Outcome::Result(JoinResult::PendingAssignment {
+        retry_after_s: 30, ..
+    }) = device.finish(&mut exchange, &daemon.transport)
+    else {
+        panic!("expected PendingAssignment");
+    };
+    let discovered = kguard_link.discovered().unwrap();
+    assert_eq!(discovered.len(), 1);
+    assert_eq!(discovered[0].device, device.node);
+    assert_eq!(discovered[0].last_verdict, "pending");
+    assert_eq!(discovered[0].model, 17);
+
+    // 2. The operator assigns it here; the device's next attempt is allowed
+    //    and the Allow passes the device-side 02 §10.2 check (in the kit).
+    kguard.assign(device.node, Assignment::Here(Role::Endpoint));
+    let (mut exchange, outcome) = daemon.start_join(&mut device, t0 + 31_000);
+    assert!(matches!(outcome, Outcome::Waiting));
+    next_event("join.request");
+    let decided = kguard.serve_once(&kguard_link).unwrap();
+    assert_eq!(decided[0].1, Decision::Allow(Role::Endpoint));
+    let outcome = &decided[0].2;
+    assert_eq!(outcome.state, "committed");
+    assert_eq!(outcome.generation, Some(1));
+    let Outcome::Result(JoinResult::Allow { .. }) = device.finish(&mut exchange, &daemon.transport)
+    else {
+        panic!("expected Allow");
+    };
+    assert_eq!(
+        device.site.as_ref().unwrap().member.assignment_generation,
+        1
+    );
+    let member = kguard_link.member(device.node).unwrap().unwrap();
+    assert!(member.member && member.delivered);
+    assert_eq!(member.generation, 1);
+    assert_eq!(member.confirm_state.as_deref(), Some("allowed_unconfirmed"));
+    assert_eq!(kguard_link.members().unwrap().len(), 1);
+    // The same decision replayed with the same key is the same answer
+    // (V1-H03) — the request is closed now, so a new key is NOT_FOUND.
+    let replay = kguard_link
+        .decide(
+            &decided[0].0,
+            Decision::Allow(Role::Endpoint),
+            &format!("kgmock-{}-{}", decided[0].0.id, decided[0].0.attempt),
+        )
+        .unwrap();
+    assert_eq!(replay.generation, Some(1));
+    assert!(matches!(
+        kguard_link.decide(&decided[0].0, Decision::DenyBlocked, "another"),
+        Err(TransportError::Rejected { ref code, .. }) if code == "NOT_FOUND"
+    ));
+
+    // 3. A device assigned to another site: deny not_here.
+    let mut stranger = SimDevice::new(0x00A1_0000_0000_5678, 0x72);
+    kguard.assign(stranger.node, Assignment::Elsewhere);
+    let (mut exchange, outcome) = daemon.start_join(&mut stranger, t0 + 32_000);
+    assert!(matches!(outcome, Outcome::Waiting));
+    kguard.serve_once(&kguard_link).unwrap();
+    assert!(matches!(
+        stranger.finish(&mut exchange, &daemon.transport),
+        Outcome::Result(JoinResult::DenyNotHere)
+    ));
+
+    // 4. V1-H06: a read-only principal can list but not decide or remove.
+    let read_only = raw_api1(
+        &daemon.state,
+        7,
+        "API1 {\"v\":1,\"request_id\":\"r\",\"method\":\"members.list\",\"params\":{}}",
+    );
+    assert!(read_only.contains("\"ok\":true"), "{read_only}");
+    let denied = raw_api1(
+        &daemon.state,
+        7,
+        &format!(
+            "API1 {{\"v\":1,\"request_id\":\"d\",\"method\":\"membership.revoke\",\"params\":{{\"device_id\":\"{:016x}\",\"expected_generation\":1,\"reason\":\"lost\",\"idempotency_key\":\"x\"}}}}",
+            device.node
+        ),
+    );
+    assert!(denied.contains("AuthorizationFailed"), "{denied}");
+    let stranger_uid = raw_api1(
+        &daemon.state,
+        8,
+        "API1 {\"v\":1,\"request_id\":\"s\",\"method\":\"site.status\",\"params\":{}}",
+    );
+    assert!(
+        stranger_uid.contains("AuthorizationFailed"),
+        "{stranger_uid}"
+    );
+
+    // 5. Removal: a stale screen (wrong generation) is refused; the real
+    //    removal commits a new revocation set.
+    assert!(matches!(
+        kguard_link.revoke(device.node, 2, RemovalReason::Lost, "rm-0"),
+        Err(TransportError::Rejected { ref code, .. }) if code == "CONFLICT"
+    ));
+    let removed = kguard_link
+        .revoke(device.node, 1, RemovalReason::Lost, "rm-1")
+        .unwrap();
+    assert_eq!(removed.state, "committed");
+    assert_eq!(removed.rs_epoch, 1);
+    next_event("member.revoked");
+    next_event("rrs.published");
+    let op = kguard_link
+        .call(
+            "operations.get",
+            &format!("{{\"operation_id\":\"{}\"}}", removed.operation_id),
+        )
+        .unwrap();
+    assert_eq!(
+        op.get("kind").and_then(routeloom_json::Json::as_str),
+        Some("revoke")
+    );
+    // The device still holds the site state: Removed + a RemovalNotice it
+    // verifies under the SAK, then it erases (04 §6).
+    let (mut exchange, outcome) = daemon.start_join(&mut device, t0 + 60_000);
+    let outcome = match outcome {
+        Outcome::Waiting => device.finish(&mut exchange, &daemon.transport),
+        other => other,
+    };
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::Removed { .. })),
+        "{outcome:?}"
+    );
+    assert!(device.site.is_none());
+    let member = kguard_link.member(device.node).unwrap().unwrap();
+    assert!(!member.member);
+    assert_eq!(member.removal_reason.as_deref(), Some("lost"));
+    let status = kguard_link.site_status().unwrap();
+    assert_eq!((status.members, status.removed, status.rs_epoch), (0, 1, 1));
+}
+
+#[test]
+fn api_surface_validates_and_advertises() {
+    let daemon = Daemon::start("api");
+    let uid = std::fs::metadata(&daemon.dir).unwrap().uid();
+    let call = |method: &str, params: &str| {
+        raw_api1(
+            &daemon.state,
+            uid,
+            &format!(
+                "API1 {{\"v\":1,\"request_id\":\"t\",\"method\":\"{method}\",\"params\":{params}}}"
+            ),
+        )
+    };
+    let caps = call("capabilities.get", "{}");
+    assert!(caps.contains("\"join.decide\":true"), "{caps}");
+    assert!(caps.contains("\"site\":{\"configured\":true"), "{caps}");
+    assert!(caps.contains("\"join_relay\":\"not_wired\""), "{caps}");
+    routeloom_json::parse(caps.trim_end()).unwrap();
+    // Policy: admin read/write, validated ranges.
+    let policy = call(
+        "join.policy.set",
+        "{\"decision_timeout_ms\":800,\"decision_mode\":\"closed\"}",
+    );
+    assert!(policy.contains("\"decision_timeout_ms\":800"), "{policy}");
+    assert!(policy.contains("\"decision_mode\":\"closed\""), "{policy}");
+    assert!(call("join.policy.set", "{\"decision_timeout_ms\":100}").contains("INVALID_ARGUMENT"));
+    assert!(call("join.policy.set", "{\"bogus\":1}").contains("INVALID_ARGUMENT"));
+    assert!(call("join.policy.get", "{}").contains("\"pending_retry_after_s\":60"));
+    // join.decide: each verdict takes exactly its own parameter.
+    for params in [
+        "{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"00a1000000001234\",\"verdict\":\"allow\",\"role\":\"endpoint\",\"reason\":\"blocked\",\"idempotency_key\":\"k\"}",
+        "{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"00a1000000001234\",\"verdict\":\"pending\",\"retry_after_s\":5,\"idempotency_key\":\"k\"}",
+        "{\"join_request_id\":\"x\",\"device_id\":\"00a1000000001234\",\"verdict\":\"deny\",\"reason\":\"not_here\",\"idempotency_key\":\"k\"}",
+        "{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"00a1000000001234\",\"verdict\":\"deny\",\"reason\":\"not_here\",\"idempotency_key\":\"has space\"}",
+    ] {
+        assert!(call("join.decide", params).contains("INVALID_ARGUMENT"), "{params}");
+    }
+    let missing = call(
+        "join.decide",
+        "{\"join_request_id\":\"jr-0000000000000001\",\"device_id\":\"00a1000000001234\",\"verdict\":\"deny\",\"reason\":\"not_here\",\"idempotency_key\":\"k\"}",
+    );
+    assert!(missing.contains("NOT_FOUND"), "{missing}");
+    assert!(call("members.get", "{\"device_id\":\"00a1000000001234\"}").contains("NOT_FOUND"));
+    assert!(call("devices.discovered.list", "{\"limit\":0}").contains("INVALID_ARGUMENT"));
+    assert!(call(
+        "operations.get",
+        "{\"operation_id\":\"op-00000000000000ff\"}"
+    )
+    .contains("NOT_FOUND"));
+    // Site event kinds are accepted by the events subscribe filter.
+    let subscribed = call(
+        "messages.subscribe",
+        "{\"stream\":\"events\",\"from\":\"latest\",\"filter\":{\"kinds\":[\"join.request\",\"member.revoked\"]}}",
+    );
+    assert!(subscribed.contains("\"ok\":true"), "{subscribed}");
+    // A daemon without a Site Authority answers honestly.
+    let bare = Arc::new(State {
+        acl: Acl::parse(&format!(
+            "{{\"principals\":{{\"{uid}\":{{\"networks\":{{\"*\":[\"MEMBERSHIP_READ\"]}}}}}}}}"
+        ))
+        .unwrap(),
+        ..State::default()
+    });
+    let unavailable = raw_api1(
+        &bare,
+        uid,
+        "API1 {\"v\":1,\"request_id\":\"u\",\"method\":\"site.status\",\"params\":{}}",
+    );
+    assert!(
+        unavailable.contains("SITE_AUTHORITY_UNAVAILABLE"),
+        "{unavailable}"
+    );
+    let caps = raw_api1(
+        &bare,
+        uid,
+        "API1 {\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\",\"params\":{}}",
+    );
+    assert!(caps.contains("\"site\":{\"configured\":false"), "{caps}");
+}

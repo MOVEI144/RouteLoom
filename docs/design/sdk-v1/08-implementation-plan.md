@@ -22,7 +22,7 @@
 | **P3 — 搬送とSite Authority** | | | |
 | P3-1 | RLD1 body v3（ZeroTouch DISCOVER/OFFER）、BootstrapAuth phase 4〜6、1024B組立object、admission・`semantics.json`更新、fuzz | P2-3 | V1-J10, V1-J11 |
 | P3-2 | proxy中継（Wire 3/4/5/6のrelay object）、USB HostOps 0x40〜0x42、capability bit | P3-1 | V1-J02, V1-H08 |
-| P3-3 | `routeloom-host`のSite Authority service（store、EDHOC responder、台帳）、API1 `join.*`/`devices.discovered.*`/`members.*`/`site.status`、KGuard mock client | P2-1, P3-2 | V1-J03, V1-J09, V1-H01〜H07 |
+| P3-3 | `routeloom-host`のSite Authority service（store、EDHOC responder、台帳）、API1 `join.*`/`devices.discovered.*`/`members.*`/`site.status`、KGuard mock client（**このbranchで実装済み**：`--site-authority DIR`、pure RustのEDHOC responder `host/routeloom-edhoc`（RFC 9529 §3を両roleでbyte一致、libedhocとのmethod 0 join transcriptを両方向でbyte一致、[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)）、SQLite台帳（hash chain、MemberCert・DAMS・RRS1・GK・発見済み・参加要求）、判定engine、API1と`membership.revoke`、`routeloom-client::site`の`SiteAdmin`と`KGuardMock`。USB 0x40〜0x42への結線（P3-2後）、authority channel（P5）、GKの配布・更新（P5）、RRS1の配布（P6）は未実装。証明書値渡しのEAD label 65541とDAMSのExporter contextは暫定値。機器側EDHOC arena 1280Bでは証明書値渡しのmessage_2を処理できない（1440B必要）、[07 §2.4](07-host-api-tooling.md)） | P2-1, P3-2 | V1-J03, V1-J09, V1-H01〜H07 |
 | P3-4 | 機器の参加FSM、RLS1 commit、重複現場の候補表、SimNetworkで2現場 | P3-1, P1-3 | V1-J01, V1-J04〜J07, V1-J13 |
 | P3-5 | pending ticketによる安価な再試行（任意） | P1-5, P3-3 | V1-J03 |
 | **P4 — セッションengine** | | | |
@@ -43,7 +43,7 @@
 | P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
 | P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3、P4-1、P7-1（保守verbを除く）はこのbranchに含まれる。
+P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3、P3-3（USB結線を除く）、P4-1、P7-1（保守verbを除く）はこのbranchに含まれる。
 
 ## 2. 試験計画
 
@@ -59,7 +59,7 @@ P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3
 
 ## 3. 受入ID一覧
 
-参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden、P7-1の発行・PoP部分）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-1のRFC 9529 vector（§3のmethod 3／suite 2 traceと§4の不正message。method 0は同suiteのRLCW1往復で確認）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査。EDHOC encoder込みの実長はP2-1後）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
+参加 V1-J01〜J15（[02](02-zero-touch-join.md) §14）、鍵 V1-K01〜K12（[03](03-key-hierarchy.md) §10）、削除 V1-R01〜R10（[04](04-removal-revocation.md) §11）、NVS V1-N01〜N08（[05](05-nvs-state-37.md) §8）、高速再参加 V1-F01〜F08（[06](06-fast-rejoin.md) §9）、Host V1-H01〜H09（[07](07-host-api-tooling.md) §8）。V1-K12（HKDF）、V1-K10（P4-1、Wire v2 golden vectorをProvider epoch経路で再現）、P1-2のV1-J14（証明書部分）・P1-3のV1-J08（store部分）・V1-N02（slot部分）・V1-R10（RRS1部分）・V1-H09（codec golden、P7-1の発行・PoP部分）、P1-4のV1-K01（HKDF／RLRES1部分、Exporter部分はP2）・V1-F03、P1-5のV1-F02（engine単体）、P2-1のRFC 9529 vector（§3のmethod 3／suite 2 traceと§4の不正message。method 0は同suiteのRLCW1往復で確認）、P2-3のV1-J12（MemberCert・SitePackageの各field不一致を「検証不成立」とする§10.2検査のhost試験と共通vector。保存・回避の動作はP3-4）・V1-J14（EAD部分：各EAD項目長とm1が1 frameに収まること・m4の予算を静的検査。EDHOC encoder込みの実長はP2-1後）、P3-3のV1-J03・V1-J09（Site Authority側：未割当→pending→割当→次の試行でAllow、KGuard無応答→pending→後の決定が次の試行で反映。機器はRust Initiatorと`routeloom-join`の機器側検査で模擬し、実機の参加FSM（P3-4）は未実装）・V1-H01〜H04／H06／H07（host試験、H01のconfirmは受け口まで）・V1-H05（`committed`段階まで。配布はP5/P6）と、P0のV1-N04／V1-N05（host試験）・V1-N07（CIの予算model）がこのbranchで実行済み。V1-N03はhost modelのみ（HIL未実施）。他はすべてplanned_not_run。
 
 ## 4. 本番を名乗る条件
 

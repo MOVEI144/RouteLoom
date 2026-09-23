@@ -32,6 +32,9 @@ use crate::{
     NodeId, Priority, SendHandle, SendOptions, TransportError,
 };
 
+/// `SiteAdmin` (SDK v1 Site Authority) over the same socket.
+pub mod site;
+
 /// The daemon's `wait_ms` ceiling for group.send / group.get.
 pub const GROUP_WAIT_MS_MAX: u32 = 15_000;
 

@@ -1051,9 +1051,105 @@ pub fn join_ead_find(ead: &[u8], expected: JoinEad) -> Result<&[u8]> {
     found.ok_or(Error::new(Code::ProtocolError, "ead item missing"))
 }
 
+// --- EDHOC binding (P3-3, provisional) ------------------------------------------------
+//
+// libedhoc v2.3.2 (the device backend) cannot carry `ID_CRED_x = {13 (kcwt):
+// CWT}` by value, so the join references both credentials by kid
+// (`ID_CRED_x = {4: kid}`, kid = SHA-256 of the cnf COSE_Key, the RLC1 rule)
+// and ships the RLCW1 certificate itself in one more EAD item: the SiteCert
+// in EAD_2, the DevCert in EAD_3. CRED_x (what EDHOC MACs and signs) is that
+// certificate's bytes, so a substituted certificate fails Signature_2/3.
+//
+// The label below is this host's placeholder: the device side defines the
+// same item concurrently and the integrator must make the two agree (a
+// mismatch fails closed: the device refuses the unknown critical item).
+
+/// PROVISIONAL absolute EAD label of the "RLCW1 certificate by value" item
+/// (sent critical, `-65541`), next after the four join items.
+pub const JOIN_EAD_CREDENTIAL_LABEL: u32 = 65541;
+
+/// One critical credential item: `-JOIN_EAD_CREDENTIAL_LABEL || bstr(cert)`.
+/// The value must be one canonical RLCW1 certificate (<= 256 B).
+pub fn join_ead_credential_item(cert: &[u8]) -> Result<Vec<u8>> {
+    cert_decode(cert).map_err(|e| Error::new(Code::InvalidArgument, e.detail))?;
+    let mut out = Vec::with_capacity(JOIN_EAD_LABEL_SIZE + 3 + cert.len());
+    out.push(0x3A);
+    out.extend_from_slice(&(JOIN_EAD_CREDENTIAL_LABEL - 1).to_be_bytes());
+    routeloom_provision::cbor::write_bstr(&mut out, cert);
+    Ok(out)
+}
+
+/// EDHOC Exporter label of DAMS, the device–authority master secret
+/// (03 §2.1, private use).
+pub const EXPORTER_LABEL_DAMS: u64 = 32771;
+/// DAMS length (03 §2.1).
+pub const DAMS_SIZE: usize = 32;
+/// Exporter `purpose` of the authority channel (03 §2 rule 3).
+pub const EXPORTER_PURPOSE_AUTHORITY: u64 = 4;
+
+/// PROVISIONAL Exporter context for DAMS. 05 §5 fixes the shape of the
+/// RouteLoom context (a deterministic CBOR array starting `'RouteLoom', 1,
+/// purpose, network, initiator_node, responder_node, initiator_kid,
+/// responder_kid, …`) but not the join's trailing fields, so this uses its
+/// first eight members only: `["RouteLoom", 1, 4, network, node, site_id,
+/// device_kid, sak_kid]` (`responder_node = site_id`, 03 §2.2). The device
+/// side must derive DAMS with the same bytes; pin both in a shared vector
+/// before P5 uses DAMS.
+pub fn dams_exporter_context(
+    network: u64,
+    node: u64,
+    site_id: u64,
+    device_kid: &[u8; 32],
+    sak_kid: &[u8; 32],
+) -> Vec<u8> {
+    use routeloom_provision::cbor::{write_bstr, write_uint};
+    let mut out = vec![0x88, 0x69];
+    out.extend_from_slice(b"RouteLoom");
+    write_uint(&mut out, 1);
+    write_uint(&mut out, EXPORTER_PURPOSE_AUTHORITY);
+    write_uint(&mut out, network);
+    write_uint(&mut out, node);
+    write_uint(&mut out, site_id);
+    write_bstr(&mut out, device_kid);
+    write_bstr(&mut out, sak_kid);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_item_and_dams_context_shapes() {
+        use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
+        use routeloom_provision::signer::{test_keypair, FileRootSigner};
+        let (ca_secret, _) = test_keypair(0x41);
+        let (_, device_pub) = test_keypair(0x42);
+        let claims = CertClaims {
+            cert_type: CertType::Device,
+            issuer: 0x0DCA_0000_0000_0001,
+            subject: 0x00A1_0000_0000_1234,
+            pubkey: device_pub,
+            model: 17,
+            hw_rev: 2,
+            serial: 9,
+            ..CertClaims::default()
+        };
+        let signer = FileRootSigner::from_secret(claims.issuer, &ca_secret).unwrap();
+        let cert = cert_issue(&claims, &signer).unwrap();
+        let item = join_ead_credential_item(&cert).unwrap();
+        assert_eq!(&item[..5], &[0x3A, 0x00, 0x01, 0x00, 0x04]);
+        assert_eq!(item.len(), 5 + 2 + cert.len());
+        assert!(join_ead_credential_item(&[0x40]).is_err());
+        // The strict per-message parser keeps refusing a second item: the
+        // Site Authority splits the credential item off before using it.
+        let mut field = join_ead_item_encode(JoinEad::Request, &[0; JOIN_REQUEST_SIZE]).unwrap();
+        field.extend_from_slice(&item);
+        assert!(join_ead_find(&field, JoinEad::Request).is_err());
+        let context = dams_exporter_context((1 << 32) | 7, 2, 3, &[4; 32], &[5; 32]);
+        assert_eq!(&context[..11], b"\x88\x69RouteLoom");
+        assert_eq!(context.len(), 11 + 1 + 1 + 9 + 1 + 1 + 34 + 34);
+    }
 
     #[test]
     fn labels_are_outside_the_registry_and_critical() {

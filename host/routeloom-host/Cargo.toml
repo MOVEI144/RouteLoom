@@ -18,6 +18,13 @@ routeloom-wire = { path = "../routeloom-wire" }
 # SQLite public-domain; exact versions pinned in Cargo.lock. The `hooks`
 # feature is used only by tests to veto a commit (fault injection).
 rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+# SDK v1 Site Authority (docs/design/sdk-v1/07, plan P3-3): the EDHOC
+# Responder (pure Rust, byte-exact with the device's libedhoc — see
+# protocol/edhoc-interop), the join EAD codecs and the RLCW1 / RRS1 /
+# signer seam of the office tooling. No second copy of any of them.
+routeloom-edhoc = { path = "../routeloom-edhoc" }
+routeloom-join = { path = "../routeloom-join" }
+routeloom-provision = { path = "../routeloom-provision" }
 
 [dev-dependencies]
 # The TUI's parser validates that the JSON this daemon emits stays compatible

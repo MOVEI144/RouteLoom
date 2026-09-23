@@ -46,7 +46,8 @@
 
 それ以外（EDHOC統合とEADのEDHOCへの配線、AssignmentTicketの形式、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、Site Authority側tooling（`site-cert`、P7-2）、firmwareの保守verbとstoreの配線、partition変更）は**未実装**。
 | EDHOCライブラリとbounded backend（P2-1） | [edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)、vendor済みlibedhoc v2.3.2＋zcbor（[VENDORED.json](../../../components/routeloom/third_party/VENDORED.json)） | [RFC 9529](../../../protocol/edhoc-rfc9529/README.md) §3（method 3／suite 2）のmessage_1〜4・PRK・exporter・key updateがbyte一致、§4の不正messageを拒否（§4.1.2のみlibedhocが同値として受理、試験で固定）、method 0＋RLCW1 MemberCert（kid参照）の往復と改竄・偽証明書・誤鍵の拒否を[test_edhoc.cpp](../../../tests/cpp/test_edhoc.cpp)で検査。1 session 3104B（64bit host、ILP32見積約2.7KB）、heap・VLA無し。firmwareからは未呼出 |
-それ以外（EDHOCのNode／参加FSMへの統合・EAD・C3/S3実測、RLRES1のNode・carrier配線、group鍵の配布・更新、USB/API1、tooling、partition変更、`rlsec`のNVS adapter）は**未実装**。
+| Site Authority service（P3-3） | `routeloom-host`の[site/](../../../host/routeloom-host/src/site/mod.rs)（`--site-authority DIR`）、pure RustのEDHOC Responder `host/routeloom-edhoc`、`routeloom-client::site`（`SiteAdmin`、`KGuardMock`） | RFC 9529 §3を両roleでbyte一致、libedhocとのmethod 0参加transcriptを両方向でbyte一致（[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)）、判定engine・SQLite台帳・API1・削除（RRS1／RemovalNotice）をhost試験、daemonのAPI1 socket越しにKGuard mockで端から端まで。USB中継（0x40〜0x42）は未結線、GK配布・authority channelはP5（[07 §2.4](07-host-api-tooling.md)） |
+それ以外（EDHOCのNode／参加FSMへの統合・EAD・C3/S3実測、RLRES1のNode・carrier配線、group鍵の配布・更新、参加のUSB中継（API1のSite Authority面はP3-3で実装）、tooling、partition変更、`rlsec`のNVS adapter）は**未実装**。
 
 ## この設計で主張しないこと
 
