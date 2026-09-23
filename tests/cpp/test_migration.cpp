@@ -447,6 +447,9 @@ void drive_full_migration(MigrationParticipant& participant,
                           MonotonicMs now) {
   CHECK_OK(participant.prepare(blob, rig.measurements(), now));
   CHECK(participant.phase() == ParticipantPhase::Preparing);
+  // The signed plan's embedded mapping never arms the clock (issue #38):
+  // only a fresh authenticated TimeSync does — identity mapping here.
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, now + 5));
   VerifiedAuthorityPlan token{};
   const Digest256 sig = sign_commit(op, plan_hash, plan.new_epoch);
   CHECK_OK(rig.verifier_only().verify_commit(
@@ -481,6 +484,8 @@ void test_blob_alone_never_switches() {
   const ByteView blob = rig.encode(plan, buf, size);
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
   CHECK(participant.phase() == ParticipantPhase::Preparing);
+  // The plan's embedded mapping is stored but NEVER armed (issue #38).
+  CHECK(!participant.clock_valid());
   // Scheduled switch time passes with no commit: nothing moves (D5-01).
   participant.poll(plan.switch_reference_ms + 1);
   runner.poll(plan.switch_reference_ms + 1);
@@ -529,6 +534,9 @@ void test_commit_without_blob_refetches() {
   // The referenced blob completes the stored commit -> Committed -> follow.
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow + 200));
   CHECK(participant.phase() == ParticipantPhase::Committed);
+  // The timed switch waits on an authenticated clock, never on the plan's
+  // embedded mapping — arm, then the committed plan follows its schedule.
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 300));
   participant.poll(plan.switch_reference_ms + 1);
   runner.poll(plan.switch_reference_ms + 1);
   participant.poll(plan.switch_reference_ms + 2);
@@ -676,6 +684,9 @@ void test_timing_bounds() {
   MigrationAuthority verify = rig.verifier_only();
   MigrationParticipant participant(rig.participant_config, rig.storage,
                                    verify, runner, &rig.hooks);
+  // Arm once so the now-relative COMMIT-lead check below is exercised — an
+  // unarmed node skips it by design (authority time cannot be mapped).
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow));
   PlanMeasurements m = rig.measurements();
   std::array<std::uint8_t, 512> buf{};
   std::size_t size = 0;
@@ -766,6 +777,7 @@ void test_cutover_fence_and_late_callback() {
   const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 20));
   rig.port.quiesced = false;  // a TX completion is still in flight
   participant.poll(plan.switch_reference_ms + 1);
   CHECK(participant.phase() == ParticipantPhase::Switching);
@@ -803,6 +815,7 @@ void test_cutover_indeterminate_and_failed() {
     const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
     CHECK_OK(participant.note_commit_evidence(
         op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+    CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 10));
     rig.port.always_wrong_readback = true;
     participant.poll(plan.switch_reference_ms + 1);
     runner.poll(plan.switch_reference_ms + 1);
@@ -829,6 +842,7 @@ void test_cutover_indeterminate_and_failed() {
     const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
     CHECK_OK(participant.note_commit_evidence(
         op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+    CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 10));
     rig.port.set_fail_from = 1;
     participant.poll(plan.switch_reference_ms + 1);
     runner.poll(plan.switch_reference_ms + 1);
@@ -896,6 +910,64 @@ void test_helper_visit_schedule_and_budget() {
   CHECK(participant.phase() == ParticipantPhase::Stable);
 }
 
+void test_helper_visit_gap_waits_for_next_window() {
+  // A poll that lands in a period's post-dwell gap must NOT spend the
+  // index on a dead-on-arrival visit — its deadline already passed, so the
+  // runner would reject it Expired while the period's rendezvous is still
+  // consumed. The slot waits for the next period's begin instead (04 §9.2).
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  plan.recovery.helpers[0] = kSelf;  // this node IS a designated helper
+  plan.recovery.helper_count = 2;
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  drive_full_migration(participant, runner, rig, plan, blob, hash, op, kNow);
+  // Period 0's visit was issued during VERIFYING: let the runner finish it
+  // so the schedule is free for the gap checks.
+  for (MonotonicMs t = 7503; t <= 8400; t += 10) {
+    runner.poll(t);
+    participant.poll(t);
+  }
+  CHECK(participant.stats().helper_visits == 1);
+  CHECK(rig.port.committed == 6);  // the visit returned home, verified
+
+  // Gap poll: inside period 1's [dwell end, next begin) — the index is
+  // unconsumed but its dwell is over. No visit, no absence notice, and the
+  // slot stays open for the next period.
+  const std::size_t log_mark = rig.log.size();
+  participant.poll(13400);
+  runner.poll(13400);
+  CHECK(participant.stats().helper_visits == 1);
+  for (std::size_t i = log_mark; i < rig.log.size(); ++i) {
+    CHECK(rig.log[i].compare(0, 7, "helper+") != 0);
+  }
+
+  // The next period's begin issues a live visit: the deadline is in the
+  // future, so the slot produces a real rendezvous rather than an Expired
+  // rejection.
+  participant.poll(17500);
+  runner.poll(17500);
+  CHECK(participant.stats().helper_visits == 2);
+  CHECK(runner.visiting());          // off-channel dwell on old channel 1
+  CHECK(rig.port.committed == 1);
+  runner.poll(18300);                // dwell over -> verified return home
+  participant.poll(18301);           // consumes the result
+  CHECK(rig.port.committed == 6);
+
+  // Regression: a poll inside a period's dwell still issues on a fresh
+  // index.
+  participant.poll(22600);           // inside period 3's dwell [22500,23300)
+  CHECK(participant.stats().helper_visits == 3);
+}
+
 void test_verify_deadline_without_activity_recovers() {
   // 04 §10: VERIFY closes on authenticated link activity. A window that
   // expires with zero evidence is a verify FAILURE -> stranded-side
@@ -916,6 +988,7 @@ void test_verify_deadline_without_activity_recovers() {
   const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 10));
   participant.poll(plan.switch_reference_ms + 1);
   runner.poll(plan.switch_reference_ms + 1);
   participant.poll(plan.switch_reference_ms + 2);
@@ -963,6 +1036,7 @@ void test_verify_activity_after_stable_is_ignored() {
   const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 10));
   participant.poll(plan.switch_reference_ms + 1);
   runner.poll(plan.switch_reference_ms + 1);
   participant.poll(plan.switch_reference_ms + 2);
@@ -1032,9 +1106,20 @@ void test_stranded_node_recovery_via_snapshot() {
       snap_bytes, ByteView{sig.data(), sig.size()}, kNow + 5000));
   CHECK(stranded.phase() == ParticipantPhase::Committed);
   CHECK(stranded.committed_epoch() == plan.new_epoch);
+  // Snapshot adoption arms NO clock (issue #38, D5-03): the committed
+  // node waits unarmed — honestly no timed switch — until a fresh
+  // authenticated TimeSync.
+  CHECK(!stranded.clock_valid());
   stranded.poll(plan.switch_reference_ms + 1);
   runner.poll(plan.switch_reference_ms + 1);
   stranded.poll(plan.switch_reference_ms + 2);
+  CHECK(rig.port.set_calls == 0);
+  CHECK(stranded.phase() == ParticipantPhase::Committed);
+  CHECK_OK(stranded.note_clock(ClockMapping{0, 10},
+                               plan.switch_reference_ms + 3));
+  stranded.poll(plan.switch_reference_ms + 4);
+  runner.poll(plan.switch_reference_ms + 4);
+  stranded.poll(plan.switch_reference_ms + 5);
   CHECK(stranded.phase() == ParticipantPhase::Verifying);
   CHECK(rig.port.committed == 6);
 
@@ -1080,6 +1165,7 @@ void test_recovery_budget_exhaustion_required() {
   const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
   CHECK_OK(participant.note_commit_evidence(
       op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow));
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 10));
   // The cutover fails verifiably (driver always refuses): stranded on the
   // old channel with the commit held -> RECOVERING, one bounded re-follow.
   rig.port.set_always_fail = true;
@@ -1215,15 +1301,17 @@ void test_resume_missing_blob_and_active_loss() {
     rig3.storage.erase_active();
     MigrationParticipant p3r(rig3.participant_config, rig3.storage,
                              v3, r3, &rig3.hooks);
-    CHECK_OK(p3r.resume(kNow + 200000));
+    // Re-apply must happen inside the plan's signed validity window
+    // (expiry = switch + guard + 120s): resume well inside it.
+    CHECK_OK(p3r.resume(kNow + 50000));
     CHECK(p3r.phase() == ParticipantPhase::Committed);  // re-apply pending
     CHECK(p3r.committed_epoch() == plan.new_epoch);
     ClockMapping fresh{};
     fresh.uncertainty_ms = 10;
-    CHECK_OK(p3r.note_clock(fresh, kNow + 200000));
-    p3r.poll(kNow + 200001);
-    r3.poll(kNow + 200001);
-    p3r.poll(kNow + 200002);
+    CHECK_OK(p3r.note_clock(fresh, kNow + 50000));
+    p3r.poll(kNow + 50001);
+    r3.poll(kNow + 50001);
+    p3r.poll(kNow + 50002);
     CHECK(p3r.phase() == ParticipantPhase::Verifying);
     CHECK(p3r.active_epoch() == plan.new_epoch);  // idempotent, not rewound
     CHECK(rig3.port.committed == 6);
@@ -1414,6 +1502,7 @@ void test_authority_stopped() {
                                    verify, runner, &rig.hooks);
   CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
   CHECK_OK(participant.commit(token, op, kNow + 10));
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 20));
   participant.poll(plan.switch_reference_ms + 1);
   runner.poll(plan.switch_reference_ms + 1);
   participant.poll(plan.switch_reference_ms + 2);
@@ -1489,6 +1578,178 @@ void test_in_progress_excludes_concurrent_ops() {
   CHECK(participant.in_progress());
 }
 
+// --- #38: the clock is armed only by authenticated TimeSync -------------------------
+
+void test_plan_blob_never_arms_clock() {
+  // Issue #38 defect 1: the mapping inside the signed plan is the issuer's
+  // clock — adopting it armed every receiver to the AUTHORITY's offset.
+  // prepare() stores the blob only; a fresh authenticated TimeSync is the
+  // sole arming path (D5-03).
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
+  CHECK(!participant.clock_valid());  // blob stored, clock unarmed
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  // The scheduled instant passes with no authenticated clock: honestly no
+  // switch — previously the plan's mapping would have (mis)timed it.
+  participant.poll(plan.switch_reference_ms + 1);
+  runner.poll(plan.switch_reference_ms + 1);
+  participant.poll(plan.switch_reference_ms + 2);
+  CHECK(rig.port.set_calls == 0);
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  // A fresh authority TimeSync arms the clock and the committed plan
+  // follows its schedule.
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10},
+                                  plan.switch_reference_ms + 3));
+  participant.poll(plan.switch_reference_ms + 4);
+  runner.poll(plan.switch_reference_ms + 4);
+  participant.poll(plan.switch_reference_ms + 5);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  CHECK(rig.port.committed == 6);
+}
+
+void test_expired_plan_demotes_committed() {
+  // Issue #38 defect 3: plan.expiry_ms was never checked at runtime — an
+  // expired commit could still cut over. An armed node past the signed
+  // validity bound now demotes to recovery instead of switching.
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
+  CHECK_OK(participant.note_clock(ClockMapping{0, 10}, kNow + 20));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  // Past the signed expiry: no cutover — the node demotes to recovery.
+  participant.poll(plan.expiry_ms + 1);
+  runner.poll(plan.expiry_ms + 1);
+  participant.poll(plan.expiry_ms + 2);
+  CHECK(rig.port.set_calls == 0);
+  CHECK(participant.phase() == ParticipantPhase::Recovering);
+  // And once the committed helper budget lapses without rescue, the
+  // terminal recovery violation lands (04 §9.3).
+  participant.poll(plan.switch_reference_ms +
+                   migration_const::kHelperBudgetMs + 1);
+  CHECK(participant.phase() == ParticipantPhase::RecoveryRequired);
+  CHECK(participant.stats().recovery_required == 1);
+}
+
+void test_unarmed_committed_wedge_bound() {
+  // Issue #38 defect 4: an unarmed Committed node could hold a verified
+  // plan forever. The derived bound — Committed entry +
+  // (expiry - switch_reference) + guard — demotes it to scout recovery
+  // instead (04 §9.2).
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  MigrationPlan plan = rig.plan(1, 1, 6, 7500, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  CHECK_OK(participant.prepare(blob, rig.measurements(), kNow));
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  CHECK(!participant.clock_valid());
+  const MonotonicMs bound = kNow + 10 +
+                            (plan.expiry_ms - plan.switch_reference_ms) +
+                            plan.guard_ms;
+  // Inside the bound: Committed, unarmed, honestly nothing cut.
+  participant.poll(bound - 1);
+  CHECK(participant.phase() == ParticipantPhase::Committed);
+  CHECK(rig.port.set_calls == 0);
+  // Bound lapsed with no authenticated clock -> scout recovery.
+  participant.poll(bound);
+  CHECK(participant.phase() == ParticipantPhase::Recovering);
+  CHECK(rig.port.set_calls == 0);
+}
+
+void test_armed_commit_lead_and_unarmed_skip() {
+  // The COMMIT-lead feasibility check runs through the node's OWN armed
+  // mapping in the authority domain — a node whose monotonic clock sits
+  // far behind the authority's evaluates the same plan honestly. Under
+  // the old design the plan's embedded mapping WAS everyone's mapping.
+  Rig rig{};
+  rig.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner(rig.port, rig.ops);
+  MigrationAuthority verify = rig.verifier_only();
+  MigrationParticipant participant(rig.participant_config, rig.storage,
+                                   verify, runner, &rig.hooks);
+  // Authority clock 60s ahead of this node's monotonic clock.
+  CHECK_OK(participant.note_clock(ClockMapping{60000, 10}, kNow));
+  const PlanMeasurements m = rig.measurements();
+  // need = required_transfer (1s) + commit lead (5s) = 6s.
+  const MonotonicMs now_auth = kNow + 60000;  // this node maps to here
+  // Inside the lead in the AUTHORITY domain -> refused. plan.mapping
+  // (identity) would have accepted this — wrong clock, wrong answer.
+  MigrationPlan tight = rig.plan(1, 1, 6, now_auth + 5999, 1);
+  std::array<std::uint8_t, 512> buf2{};
+  std::size_t size2 = 0;
+  const ByteView tight_blob = rig.encode(tight, buf2, size2);
+  CHECK(participant.prepare(tight_blob, m, kNow).code ==
+        StatusCode::InvalidArgument);
+  CHECK(participant.phase() == ParticipantPhase::Stable);
+  // Comfortably past the lead in the AUTHORITY domain -> accepted.
+  MigrationPlan plan = rig.plan(1, 1, 6, now_auth + 30000, 1);
+  std::array<std::uint8_t, 512> buf{};
+  std::size_t size = 0;
+  const ByteView blob = rig.encode(plan, buf, size);
+  CHECK_OK(participant.prepare(blob, m, kNow));
+  // The armed node then follows the switch at its own mapped local
+  // instant: switch_local = (now_auth + 30000) - 60000.
+  const Digest256 hash = plan_digest(blob);
+  const AuthorityOperation op = rig.operation(plan, hash, Digest256{});
+  const Digest256 sig = sign_commit(op, hash, plan.new_epoch);
+  CHECK_OK(participant.note_commit_evidence(
+      op, hash, plan.new_epoch, ByteView{sig.data(), sig.size()}, kNow + 10));
+  const MonotonicMs switch_local = now_auth + 30000 - 60000;
+  participant.poll(switch_local + 1);
+  runner.poll(switch_local + 1);
+  participant.poll(switch_local + 2);
+  CHECK(participant.phase() == ParticipantPhase::Verifying);
+  CHECK(rig.port.committed == 6);
+
+  // An UNARMED node cannot compute the lead at all — the check is skipped
+  // and the stored-blob path proceeds (bounded by plan expiry instead).
+  Rig rig2{};
+  rig2.ops.visit_hard_cap_ms = 1000;
+  ChannelOperationRunner runner2(rig2.port, rig2.ops);
+  MigrationAuthority verify2 = rig2.verifier_only();
+  MigrationParticipant cold(rig2.participant_config, rig2.storage, verify2,
+                            runner2, &rig2.hooks);
+  CHECK_OK(cold.prepare(tight_blob, m, kNow));
+  CHECK(cold.phase() == ParticipantPhase::Preparing);
+}
+
 }  // namespace
 
 int main() {
@@ -1502,6 +1763,7 @@ int main() {
   test_cutover_fence_and_late_callback();
   test_cutover_indeterminate_and_failed();
   test_helper_visit_schedule_and_budget();
+  test_helper_visit_gap_waits_for_next_window();
   test_verify_deadline_without_activity_recovers();
   test_verify_activity_after_stable_is_ignored();
   test_stranded_node_recovery_via_snapshot();
@@ -1514,6 +1776,10 @@ int main() {
   test_authority_stopped();
   test_participant_cooldown_after_abort();
   test_in_progress_excludes_concurrent_ops();
+  test_plan_blob_never_arms_clock();
+  test_expired_plan_demotes_committed();
+  test_unarmed_committed_wedge_bound();
+  test_armed_commit_lead_and_unarmed_skip();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

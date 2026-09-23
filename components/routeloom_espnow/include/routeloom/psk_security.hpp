@@ -34,6 +34,11 @@ class DevelopmentPskSecurityProvider final : public SecurityProvider {
   SecurityProfile security_profile() const noexcept override {
     return SecurityProfile::Development;
   }
+  // Replay-state diagnostics: rejects caused by fingerprint-mismatched
+  // records — the u32 slot-collision signature (see ReplayGuard).
+  std::uint32_t foreign_fingerprint_rejects() const noexcept {
+    return replay_guard_.foreign_fingerprint_rejects();
+  }
   Status next_counter(const SecurityContext& context,
                       std::uint64_t& counter) noexcept override;
   Status seal(const SecurityContext& context, std::uint64_t counter,

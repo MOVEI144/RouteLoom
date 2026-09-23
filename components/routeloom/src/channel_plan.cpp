@@ -9,6 +9,12 @@ constexpr Status reject(const StatusCode code, const char* detail) noexcept {
   return Status::error(code, detail);
 }
 
+// Extra return attempts after a refused visit return: each retry is one
+// more serialized switch on top of the committed dwell, so the bound
+// extends worst-case off-home time only slightly while absorbing a
+// transient driver refusal.
+constexpr std::uint8_t kVisitReturnRetries = 2;
+
 // Integer "candidate improves worst cost by >=25%": cand*4 <= cur*3 with a
 // strict-improvement guard — equal costs (including 0/0 from zero-filled
 // reports) are never an improvement. kInfiniteRouteMetric participates
@@ -972,6 +978,7 @@ OperationToken ChannelOperationRunner::request(const RadioOperation& op,
     return issue(OperationOutcome::Rejected, StatusCode::Expired, now_ms);
   }
   active_ = op;
+  return_attempts_ = 0;
   active_token_ = OperationToken{next_token_++};
   phase_ = Phase::WaitDrain;
   const MonotonicMs budget_end = now_ms + config_.drain_budget_ms;
@@ -1059,13 +1066,18 @@ void ChannelOperationRunner::poll(const MonotonicMs now_ms) noexcept {
       const Status restored = apply_channel(home_channel_);
       if (restored.ok()) {
         record(OperationOutcome::Applied, StatusCode::Ok, now_ms);
-      } else if (restored.code != StatusCode::DriverResultUnknown) {
-        // The return was refused; the radio is known to still be off-home.
-        record(OperationOutcome::Failed, restored.code, now_ms);
-      } else {
+      } else if (restored.code == StatusCode::DriverResultUnknown) {
         record(OperationOutcome::Indeterminate,
                StatusCode::DriverResultUnknown, now_ms);
+      } else if (++return_attempts_ > kVisitReturnRetries) {
+        // The return kept being refused; the radio is known to still be
+        // off-home. FAILED semantics are unchanged — the bound only
+        // absorbs transient refusals, never hides a persistent one.
+        record(OperationOutcome::Failed, restored.code, now_ms);
       }
+      // A refused return stays in VisitDwell and retries on the next
+      // poll(s): the radio is KNOWN off-home, so going Idle at once would
+      // strand it on the visit channel with nobody asked to reconcile.
       break;
     }
   }

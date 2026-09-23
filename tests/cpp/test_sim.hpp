@@ -79,6 +79,9 @@ class SimNetwork {
     routeloom::NodeId from;
     routeloom::NodeId to;
     std::uint64_t token;
+    // Deterministic driver-service time reported at TX completion — the
+    // §14 ledger and control bucket debit it verbatim (issue #46).
+    std::uint64_t service_us{50};
     std::vector<std::uint8_t> frame;
   };
 
@@ -92,10 +95,14 @@ class SimNetwork {
 
   routeloom::Status enqueue(routeloom::NodeId from, routeloom::NodeId to,
                             std::uint64_t token, routeloom::ByteView frame) {
-    queue.push_back(Pending{from, to, token,
+    queue.push_back(Pending{from, to, token, service_us,
                             std::vector<std::uint8_t>(frame.data, frame.data + frame.size)});
     return routeloom::Status::success();
   }
+
+  // Deterministic service-time steering: every TX completes `service_us`
+  // µs after submission unless a test overrides it per-Pending (issue #46).
+  std::uint64_t service_us{50};
 
   // Optional deterministic loss hook for the property tests (issue #19):
   // when non-null, flush() consults it once per queued frame and a true
@@ -134,10 +141,13 @@ class SimNetwork {
         routeloom::RadioTxObservation obs{};
         obs.peer = pending.to;
         obs.submitted_us = static_cast<std::uint64_t>(now) * 1000u;
-        obs.completed_us = obs.submitted_us + 50u;
+        obs.completed_us = obs.submitted_us + pending.service_us;
         obs.outcome = success ? routeloom::RadioTxOutcome::Success
                               : routeloom::RadioTxOutcome::Failure;
         obs.provenance = routeloom::ObservationProvenance::LocalDriver;
+        // Echo the submission token like the real runtime's Reserved lane
+        // so the completion attributes to the in-flight job's §14 domain.
+        obs.token = pending.token;
         nodes.at(pending.from)->note_radio_tx(obs, now);
       }
       nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);

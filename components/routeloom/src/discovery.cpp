@@ -1247,8 +1247,10 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
     reject_event("PROBE_GEN_MISMATCH", neighbor.node);
     return;
   }
-  // An authenticated probe is liveness evidence: refresh the lease and reply.
+  // An authenticated probe is liveness evidence: refresh the lease, re-arm
+  // the bounded Stale re-probe budget and reply.
   neighbor.last_confirmed_ms = now_ms;
+  neighbor.stale_reprobes = 0;
   neighbor.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
 
   autonomy::NeighborResultPayload result{};
@@ -1258,8 +1260,12 @@ void NeighborDiscovery::handle_probe(Neighbor& neighbor, const ByteView payload,
   result.lease_granted_ms = config_.awake_lease_ms;
   autonomy::EncodedPayload encoded{};
   if (autonomy::neighbor_result_encode(result, encoded).ok()) {
-    port_.send_wire(neighbor.binding, neighbor.mac, FrameType::NeighborResult,
-                    encoded.view());
+    const Status sent = port_.send_wire(neighbor.binding, neighbor.mac,
+                                        FrameType::NeighborResult,
+                                        encoded.view());
+    if (!sent) {
+      ++stats_.send_failures;
+    }
   }
   // If we were stale/bound and have no outstanding probe of our own, start
   // one — bidirectional confirmation still requires our own Result.
@@ -1295,6 +1301,7 @@ void NeighborDiscovery::handle_probe_result(Neighbor& neighbor,
     return;
   }
   neighbor.probe_outstanding = 0;
+  neighbor.stale_reprobes = 0;   // verified RX re-arms the budget
   if (result.result != autonomy::NeighborResultCode::Reachable) {
     return;  // NotListening/Leaving: keep current phase, lease still runs
   }
@@ -1415,6 +1422,7 @@ void NeighborDiscovery::complete_exchange(
     // and refresh the lease instead of creating a duplicate.
     same->generation = BindingGeneration{same->generation.value + 1};
     same->probe_outstanding = 0;
+    same->stale_reprobes = 0;
     if (membership_.state() == MembershipState::Member && peer_member) {
       same->peer_member_verified = true;
       same->phase = NeighborPhase::Bound;
@@ -1457,6 +1465,8 @@ void NeighborDiscovery::complete_exchange(
   neighbor->regular_held = false;
   neighbor->last_confirmed_ms = now_ms;
   neighbor->probe_outstanding = 0;
+  neighbor->stale_reprobes = 0;
+  neighbor->next_reprobe_ms = 0;
 
   if (membership_.state() == MembershipState::Member && peer_member) {
     // Both memberships verified -> mint the binding and start the
@@ -1584,6 +1594,9 @@ Status NeighborDiscovery::emit_rld1(const MacAddress& dest, const FrameType kind
   Status status = autonomy::rld1_encode(env, encoded);
   if (!status) return status;
   status = port_.send_rld1(dest, encoded.view());
+  if (!status) {
+    ++stats_.send_failures;
+  }
   if (status.ok() && frame_digest != nullptr) {
     // The auth transcript binds the exact emitted frame bytes (02 §5.2).
     sha256(encoded.view(), *frame_digest);
@@ -1732,6 +1745,8 @@ Status NeighborDiscovery::send_scoped_discover(const MonotonicMs now_ms) noexcep
     outbound_.exchange.generation = generation;
     outbound_.exchange.offer_digest = ScopeDigest{};
     sha256(encoded.view(), outbound_.exchange.discover_digest);
+  } else {
+    ++stats_.send_failures;
   }
   return status;
 }
@@ -1840,6 +1855,8 @@ Status NeighborDiscovery::send_scoped_offer(Candidate& candidate,
     candidate.offer_pending = false;
     ++stats_.offers_tx;
     membership_.begin_authentication();
+  } else {
+    ++stats_.send_failures;
   }
   return status;
 }
@@ -1938,6 +1955,7 @@ Status NeighborDiscovery::send_probe(Neighbor& neighbor,
     ++stats_.probes_tx;
   } else {
     neighbor.probe_outstanding = 0;
+    ++stats_.send_failures;
   }
   return status;
 }
@@ -2069,6 +2087,8 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       case NeighborPhase::Suspended:
         if (now_ms >= n.suspended_until_ms) {
           n.phase = NeighborPhase::Stale;
+          n.stale_reprobes = 0;
+          n.next_reprobe_ms = now_ms;
           ++stats_.stale_expirations;
           event("STALE", n.node);
         }
@@ -2089,6 +2109,8 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
         }
         if (now_ms >= n.lease_expires_at_ms) {
           n.phase = NeighborPhase::Stale;
+          n.stale_reprobes = 0;
+          n.next_reprobe_ms = now_ms;
           ++stats_.stale_expirations;
           event("STALE", n.node);
           break;
@@ -2101,8 +2123,67 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
           send_probe(n, now_ms);
         }
         break;
+      case NeighborPhase::Stale:
+        // "Stale keeps resolving" (02 §9): a lapsed lease must not sever the
+        // re-join lane — channel migration can strand a whole neighbor set
+        // on the old channel with no way back (issue #40). A bounded
+        // unicast re-probe at stale_reprobe_ms cadence re-confirms a peer
+        // that is merely quiet; after stale_reprobe_attempts emitted probes
+        // the record parks dormant until fresh RX evidence re-arms it, so a
+        // permanently partitioned peer can never become a background storm
+        // (02 §6). A refused emission (transport busy) keeps the budget and
+        // defers to the next cadence tick instead of spinning per-poll.
+        if (n.probe_outstanding != 0 && now_ms > n.probe_deadline_ms) {
+          n.probe_outstanding = 0;
+        }
+        if (n.probe_outstanding == 0 &&
+            n.stale_reprobes < config_.stale_reprobe_attempts &&
+            now_ms >= n.next_reprobe_ms) {
+          if (send_probe(n, now_ms).ok()) {
+            ++n.stale_reprobes;
+          }
+          n.next_reprobe_ms = now_ms + config_.stale_reprobe_ms;
+        }
+        break;
       default:
         break;
+    }
+  }
+
+  // Stranded-node re-discovery (issue #40, 04 §9.2): when every usable edge
+  // is gone but resolvable Stale records survive, only a fresh RLD1
+  // exchange re-opens the lane — a migration helper dwells on the old
+  // channel on a plan clock this node cannot observe, so it re-announces
+  // on a bounded backoff until an edge returns. The unicast re-probe above
+  // gets the first probe_timeout window before broadcasts start; the
+  // schedule then doubles backoff_base -> backoff_max and holds there.
+  // begin_discovery already refuses safely while an exchange or responder
+  // authentication is in flight.
+  {
+    bool any_bound = false;
+    bool any_stale = false;
+    neighbors_.for_each([&](const Neighbor& n) {
+      any_bound = any_bound || n.phase == NeighborPhase::Bound ||
+                  n.phase == NeighborPhase::Reachable;
+      any_stale = any_stale || n.phase == NeighborPhase::Stale;
+    });
+    if (any_bound || !any_stale ||
+        membership_.state() == MembershipState::Revoked) {
+      next_rediscovery_ms_ = 0;
+      rediscovery_backoff_ms_ = 0;
+    } else if (rediscovery_backoff_ms_ == 0) {
+      // Newly stranded: arm after one probe window, then ramp.
+      rediscovery_backoff_ms_ = config_.backoff_base_ms;
+      next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
+    } else if (!outbound_.active && now_ms >= next_rediscovery_ms_) {
+      if (begin_discovery(now_ms).ok()) {
+        event("REDISCOVERY", kInvalidNodeId);
+      }
+      const std::uint32_t step = rediscovery_backoff_ms_ << 1;
+      rediscovery_backoff_ms_ = step > config_.backoff_max_ms
+                                    ? config_.backoff_max_ms
+                                    : step;
+      next_rediscovery_ms_ = now_ms + rediscovery_backoff_ms_;
     }
   }
 

@@ -738,9 +738,11 @@ fn now_ms() -> u64 {
 /// Process-monotonic milliseconds — the rewind-proof counterpart of
 /// `now_ms` used for deadline budgets (TX-I2 records it on every admitted
 /// operation so a wall-clock rewind can never stretch a TTL).
+/// `accepted_mono_ms == 0` is the "no monotonic anchor" sentinel in the
+/// operation store, so the first sub-millisecond observation clamps to 1.
 fn mono_ms() -> u64 {
     static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    BASE.get_or_init(Instant::now).elapsed().as_millis() as u64
+    BASE.get_or_init(Instant::now).elapsed().as_millis().max(1) as u64
 }
 
 /// Escapes for JSON string contexts: quotes, backslashes and every C0
@@ -2289,6 +2291,10 @@ impl Drop for ClientGuard {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Anchor the monotonic base at process start — `mono_ms` is the
+    // rewind-proof deadline axis, so it should measure daemon uptime rather
+    // than time-since-first-admitted-operation.
+    let _ = mono_ms();
     let args = parse_args().map_err(io::Error::other)?;
     let socket_path = args.socket;
     let device = args.device;
@@ -2315,6 +2321,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 path.display(),
                 receive_log::hex_lower(&store.lineage())
             );
+            // The store lineage IS the dispatcher identity on the wire —
+            // same lane hazard as the memory store below: a freshly
+            // created database means a new lineage, and a gateway still
+            // bound to a lost store's lineage rejects every dispatch
+            // verb with LaneMismatch until it reboots. First-ever boots
+            // hit this too, so the wording stays conditional.
+            if store.was_created_fresh() {
+                eprintln!(
+                    "warning: operation store created fresh (lineage {}) — if this replaces a lost or corrupt store, any gateway still bound to the old lineage rejects dispatch with LaneMismatch until it is rebooted",
+                    receive_log::hex_lower(&store.lineage())
+                );
+            }
             StoreBackend::Sqlite(Box::new(store))
         }
         None => {

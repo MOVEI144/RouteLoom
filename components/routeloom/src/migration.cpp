@@ -773,14 +773,19 @@ Status MigrationParticipant::validate_plan_feasibility(
     return reject(StatusCode::InvalidArgument, "PLAN_TRANSFER_OVER_BUDGET");
   }
   // COMMIT lead is the largest of {5s, 4*RTT_P99, delivery bound}; the
-  // switch must leave room for the transfer AND that lead.
-  const MonotonicMs switch_local =
-      map_to_local(plan.mapping, plan.switch_reference_ms);
+  // switch must leave room for the transfer AND that lead. The check runs
+  // in the AUTHORITY domain through this node's own armed mapping — the
+  // mapping inside the signed plan is issuer-side content, never the
+  // receiver's clock (04 §8). An unarmed node cannot evaluate a
+  // now-relative bound at all, so the check is skipped: the stored-blob
+  // path may still commit and arm later, and the signed expiry bounds the
+  // window either way.
   const std::uint64_t need =
       static_cast<std::uint64_t>(m.required_transfer_ms) +
       required_commit_lead_ms(m.management_rtt_p99_ms,
                               m.control_delivery_bound_ms);
-  if (switch_local < now_ms + need) {
+  if (clock_valid_ && plan.switch_reference_ms <
+                          map_to_authority(clock_mapping_, now_ms) + need) {
     return reject(StatusCode::InvalidArgument, "COMMIT_LEAD_INSUFFICIENT");
   }
   return Status::success();
@@ -859,12 +864,10 @@ Status MigrationParticipant::prepare(const ByteView plan_blob,
     pending_plan_ = plan;
     pending_hash_ = hash;
     plan_known_ = true;
-    clock_mapping_ = plan.mapping;
-    clock_valid_ = true;
     awaiting_blob_ = false;
     helper_index_ = static_cast<std::size_t>(-1);
     helper_visit_active_ = false;
-    phase_ = ParticipantPhase::Committed;
+    enter_committed(now_ms);
     ++stats_.plans_prepared;
     return Status::success();
   }
@@ -896,8 +899,6 @@ Status MigrationParticipant::prepare(const ByteView plan_blob,
   pending_plan_ = plan;
   pending_hash_ = hash;
   plan_known_ = true;
-  clock_mapping_ = plan.mapping;
-  clock_valid_ = true;
   helper_index_ = static_cast<std::size_t>(-1);
   helper_visit_active_ = false;
   prepare_deadline_ms_ = now_ms + config_.prepare_timeout_ms;
@@ -916,7 +917,6 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
                                     const AuthorityOperation& operation,
                                     const ByteView signature,
                                     const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   if (signature.size > migration_const::kMaxCommitSignature) {
     ++stats_.commit_rejects;
     return reject(StatusCode::InvalidArgument, "COMMIT_SIGNATURE_BOUND");
@@ -994,12 +994,12 @@ Status MigrationParticipant::commit(const VerifiedAuthorityPlan& verified,
   committed_epoch_ = verified.new_epoch();
   ++stats_.commits;
   if (phase_ == ParticipantPhase::Preparing) {
-    phase_ = ParticipantPhase::Committed;
+    enter_committed(now_ms);
     return Status::success();
   }
   if (plan_known_ && pending_hash_ == verified.plan_hash()) {
     // Blob already stored: follow the committed plan directly.
-    phase_ = ParticipantPhase::Committed;
+    enter_committed(now_ms);
     return Status::success();
   }
   // Commit evidence without the blob: durable record kept, the blob is
@@ -1042,7 +1042,6 @@ Status MigrationParticipant::note_clock(const ClockMapping& mapping,
 Status MigrationParticipant::adopt_snapshot(const ByteView snapshot,
                                             const ByteView signature,
                                             const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   if (phase_ == ParticipantPhase::Switching) {
     ++stats_.snapshots_rejected;
     return reject(StatusCode::InvalidState, "SNAPSHOT_DURING_CUTOVER");
@@ -1117,12 +1116,14 @@ Status MigrationParticipant::adopt_snapshot(const ByteView snapshot,
   plan_known_ = true;
   commit_plan_hash_ = snap.plan_hash;
   committed_epoch_ = plan.new_epoch;
-  clock_mapping_ = plan.mapping;
-  clock_valid_ = true;
+  // The snapshot arms NO clock: a mapping carried inside signed plan
+  // content is the issuer's clock, never a fresh authenticated sample for
+  // this node. An already-armed clock keeps its mapping; an unarmed one
+  // stays unarmed until the next TimeSync (04 §8, D5-03).
   awaiting_blob_ = false;
   helper_index_ = static_cast<std::size_t>(-1);
   helper_visit_active_ = false;
-  phase_ = ParticipantPhase::Committed;
+  enter_committed(now_ms);
   ++stats_.snapshots_accepted;
   return Status::success();
 }
@@ -1187,6 +1188,25 @@ bool MigrationParticipant::recovery_assumptions_satisfiable(
       recovery_bound_ms(hops, loss_windows, s.visit_period_ms,
                         transfer_bound_ms, margin_ms);
   return bound <= (s.window_end_ms - s.window_begin_ms);
+}
+
+void MigrationParticipant::enter_committed(const MonotonicMs now_ms) noexcept {
+  phase_ = ParticipantPhase::Committed;
+  if (clock_valid_ || !plan_known_) {
+    unarmed_committed_deadline_ms_ = 0;
+    return;
+  }
+  // Without an armed mapping the authority-domain expiry cannot be mapped
+  // to local time — but the plan's own validity span bounds how long the
+  // commit may still matter: expiry - switch_reference covers the
+  // post-switch window and guard covers the run-in before it. A node
+  // still unarmed when that span elapses could never have scheduled the
+  // switch anyway, so it demotes to scout recovery rather than wedging
+  // Committed forever (04 §9.2).
+  unarmed_committed_deadline_ms_ =
+      now_ms +
+      (pending_plan_.expiry_ms - pending_plan_.switch_reference_ms) +
+      pending_plan_.guard_ms;
 }
 
 void MigrationParticipant::enter_recovering(
@@ -1316,7 +1336,14 @@ void MigrationParticipant::poll_helper(const MonotonicMs now_ms) noexcept {
       s.window_begin_ms + index * s.visit_period_ms;
   const MonotonicMs end_auth = begin_auth + s.dwell_ms;
   if (begin_auth >= s.window_end_ms || end_auth > s.window_end_ms) return;
-  if (now_auth < begin_auth || index == helper_index_) return;
+  // A visit may only be issued inside its period's dwell: a poll in the
+  // post-dwell gap waits for the next period's begin rather than spending
+  // the index on a visit whose deadline already passed (an Expired
+  // rejection that still consumes the period's rendezvous).
+  if (now_auth < begin_auth || now_auth >= end_auth ||
+      index == helper_index_) {
+    return;
+  }
   // Notify BEFORE queueing the visit: the absence notice goes to
   // home-channel peers, and once the runner owns the radio the home
   // context is gone (the wire notice would be suppressed as off-channel).
@@ -1353,10 +1380,24 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
       }
       break;
     case ParticipantPhase::Committed:
-      // No timed switch without a valid clock; after a restart only a fresh
-      // authenticated sample or snapshot re-arms it (D5-03).
-      if (clock_valid_ && now_ms >= switch_time_local()) {
-        begin_cutover(now_ms);
+      if (clock_valid_) {
+        if (now_ms >= switch_time_local()) {
+          // The signed expiry bounds every execution path: an expired
+          // plan is never cut over — the node demotes to recovery where
+          // scout traffic can bring newer signed state (04 §6/§9).
+          if (map_to_authority(clock_mapping_, now_ms) >=
+              pending_plan_.expiry_ms) {
+            enter_recovering(false);
+          } else {
+            begin_cutover(now_ms);
+          }
+        }
+      } else if (unarmed_committed_deadline_ms_ != 0 &&
+                 now_ms >= unarmed_committed_deadline_ms_) {
+        // Unarmed Committed wedge: the derived bound on remaining plan
+        // validity lapsed with no authenticated clock — scout, never a
+        // blind timed switch (D5-03, 04 §9.2).
+        enter_recovering(false);
       }
       break;
     case ParticipantPhase::Switching: {
@@ -1402,10 +1443,14 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
     case ParticipantPhase::Recovering:
       if (recovery_retry_pending_ && plan_known_ && clock_valid_ &&
           !runner_.busy() && now_ms >= switch_time_local()) {
-        // Verified commit already held: re-follow once. A repeated failure
-        // stays Recovering until the committed budget ends — no loop.
+        // Verified commit already held: re-follow once — but only inside
+        // the signed validity window. A repeated failure stays Recovering
+        // until the committed budget ends — no loop.
         recovery_retry_pending_ = false;
-        begin_cutover(now_ms);
+        if (map_to_authority(clock_mapping_, now_ms) <
+            pending_plan_.expiry_ms) {
+          begin_cutover(now_ms);
+        }
         break;
       }
       if (plan_known_ && pending_plan_.recovery.present && clock_valid_ &&
@@ -1423,7 +1468,6 @@ void MigrationParticipant::poll(const MonotonicMs now_ms) noexcept {
 }
 
 Status MigrationParticipant::resume(const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
   // A restart loses the monotonic time mapping: the stored mapping is NEVER
   // reused. The clock stays disarmed until a fresh authenticated sample or
   // the latest signed commit state arrives (D5-03).
@@ -1517,7 +1561,7 @@ Status MigrationParticipant::resume(const MonotonicMs now_ms) noexcept {
   // Committed but never applied (or active record lost): idempotent
   // re-apply — the engine re-enters Committed and, once a fresh clock
   // re-arms, follows the same switch path (apply-on-resume, 04 §6/§8).
-  phase_ = ParticipantPhase::Committed;
+  enter_committed(now_ms);
   return Status::success();
 }
 

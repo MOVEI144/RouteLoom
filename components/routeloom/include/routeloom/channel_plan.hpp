@@ -678,6 +678,9 @@ class ChannelOperationRunner {
   OperationToken active_token_{kInvalidOperationToken};
   MonotonicMs drain_deadline_ms_{0};
   MonotonicMs visit_end_ms_{0};
+  // Bounded extra attempts to bring the radio home after a refused visit
+  // return — the radio is known still off-home while any remain.
+  std::uint8_t return_attempts_{0};
   std::uint8_t home_channel_{1};
   std::uint8_t committed_channel_{1};
   RadioGeneration generation_{};

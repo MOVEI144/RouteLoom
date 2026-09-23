@@ -28,6 +28,14 @@ struct NodeConfig {
   std::uint16_t route_generation{1};
   std::uint32_t route_advertisement_period_ms{5000};
   std::uint32_t route_lifetime_ms{15000};
+  // §14 management airtime budget gate (03-congestion.md §8, radio.md
+  // §9/§14): the pinned spec-envelope refill is an UNCALIBRATED
+  // capability, not a measured allocation — it must not gate route
+  // maintenance in the default profile. Enable only for a calibrated
+  // profile whose capacity decision covers fan-out, route-table page
+  // count and the lease refresh deadline; the gate then re-checks that
+  // bound on every deferred emission.
+  bool control_budget_gate_enabled{false};
   std::uint32_t hop_accept_timeout_ms{60};
   std::uint32_t callback_watchdog_ms{1000};
   // Per-boot incarnation stamped on this node's telemetry observations
@@ -157,8 +165,11 @@ class NullObserver final : public NodeObserver {
 class AutonomyFrameSink {
  public:
   virtual ~AutonomyFrameSink() = default;
+  // captured_ms: when the frame was captured on the node's own clock
+  // (received_us at radio enqueue); 0 = unknown, treated as now_ms.
   virtual void on_autonomy_frame(NodeId peer, FrameType type, ByteView payload,
-                                 MonotonicMs now_ms) noexcept = 0;
+                                 MonotonicMs now_ms,
+                                 MonotonicMs captured_ms = 0) noexcept = 0;
   // Verify oracle (04 §10): fires for EVERY frame that cleared link
   // authentication + network/peer identity — not just autonomy types. The
   // migration agent uses it to close VERIFY on real connectivity evidence.
@@ -722,6 +733,13 @@ class MeshNode {
     std::uint32_t sojourn_samples{0};
     MonotonicMs last_sojourn_ms{0};
     MonotonicMs sojourn_window_ms{0};
+    // Per-peer HOP_ACCEPT round-trip EWMA (radio.md §8 adaptive RTO), in ms:
+    // MAC-accept -> authenticated accept arrival, measured on live
+    // exchanges only — a BUSY deferral's wait is peer-directed, never a
+    // link measurement. hop_rtt_samples == 0 means "unmeasured": the
+    // configured initial timeout applies.
+    std::uint32_t hop_rtt_ewma_ms{0};
+    std::uint32_t hop_rtt_samples{0};
     // Evidence gate for the metric mirror (sdk-completion/03 §3.3): a window
     // containing any Unknown-resolution attempt is dirty — dirty evidence may
     // worsen link_cost but never improve it; cleared on the next window roll.
@@ -891,6 +909,10 @@ class MeshNode {
     std::uint8_t attempts{0};
     std::uint8_t max_attempts{1};
     MonotonicMs deadline_ms{0};
+    // Earliest select eligibility (radio.md §8 link-retry jitter): 0 on a
+    // first transmission — retries stamp now+jitter so re-queued jobs yield
+    // the scheduler until the decorrelation delay elapses.
+    MonotonicMs not_before_ms{0};
     wire::EncodedFrame encoded{};
     bool encoded_valid{false};
     // Scheduler metadata — assigned at admission, preserved across requeues.
@@ -941,6 +963,11 @@ class MeshNode {
     // head-of-line blocking the rest of its flow (03 §7).
     void defer_selected() noexcept;
     void clear() noexcept;
+
+    // §14 airtime domain of a scheduled job: the reserved control lane is
+    // the accepted work's own ACK budget, management class is the gated
+    // control domain, everything else is scheduled work.
+    static AirtimeDomain airtime_domain(const TxJob& job) noexcept;
 
     bool empty() const noexcept { return used_ == 0; }
     bool full() const noexcept { return used_ >= capacity(); }
@@ -1075,6 +1102,8 @@ class MeshNode {
   struct AwaitingHop {
     TxJob job{};
     MonotonicMs expires_at_ms{0};
+    // MAC-accept time of this exchange — the RTT base for the adaptive RTO.
+    MonotonicMs sent_at_ms{0};
     // An authenticated BUSY deferred this exchange: on expiry the job is
     // re-admitted against its BUSY readmission budget instead of consuming
     // an RF-loss attempt (03 §5).
@@ -1158,6 +1187,8 @@ class MeshNode {
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
+  void resolve_radio_tx_result(std::uint64_t token, bool success,
+                               MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
   void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
@@ -1170,6 +1201,15 @@ class MeshNode {
   std::size_t peer_inflight(NodeId peer) const noexcept;
   std::uint8_t peer_window(NodeId peer) const noexcept;
   std::uint32_t busy_retry_hint() const noexcept;
+  // Adaptive per-peer hop-accept timeout (radio.md §8): the configured
+  // initial value while the peer is unmeasured, then EWMA*kLinkRtoMargin
+  // inside [kLinkRtoMinMs, kLinkRtoMaxMs].
+  std::uint32_t effective_hop_timeout_ms(NodeId peer) const noexcept;
+  // Deterministic retransmission eligibility time (radio.md §8 jitter):
+  // node id decorrelates peers, a counter decorrelates successive retries;
+  // never lands past the job's own deadline.
+  MonotonicMs link_retry_not_before_ms(const TxJob& job,
+                                       MonotonicMs now_ms) noexcept;
 
   // P3 load coupling (03 §6/§7): per-neighbor observation decay, busy-TTL,
   // effective link-cost refresh and the route-switch hysteresis tick.
@@ -1299,6 +1339,28 @@ class MeshNode {
   void trigger_route_advertisement(MonotonicMs now_ms) noexcept;
   void run_triggered_advertisement(MonotonicMs now_ms) noexcept;
 
+  // §14 management airtime bucket (03-congestion.md §8 — local calibrated
+  // accounting only). control_budget_balance refills to `now_ms` and
+  // returns the signed balance: a completed management TX may run it
+  // negative, and the debt is repaid by the computed wait before the next
+  // emission is scheduled — never by queueing on debt.
+  std::int64_t control_budget_balance(MonotonicMs now_ms) noexcept;
+  // Milliseconds until the bucket covers the calibrated air-time estimate
+  // of one management frame, 0 when it already can.
+  MonotonicMs control_budget_wait_ms(MonotonicMs now_ms) noexcept;
+  // §8 capacity decision for a gated profile: true while a deferral of
+  // `wait_ms` still lets the route refresh land inside the actual lease —
+  // refresh_bound = pages*round_period + fan-out wait + jitter + margin —
+  // where the fan-out wait covers `fanout` frames at the calibrated
+  // demand and pages is the live table's record-page count. False means
+  // the budget cannot sustain route maintenance for this configuration.
+  bool control_budget_refresh_fits(MonotonicMs now_ms, MonotonicMs wait_ms,
+                                   std::size_t fanout) noexcept;
+  // Record a §14 CONTROL_BUDGET_UNSATISFIABLE breach: the saturating
+  // counter every time, the observer diagnostic once per breach episode
+  // (re-armed when an emission again fits inside the route lease).
+  void note_control_budget_unsat() noexcept;
+
   static Status encode_ack_payload(const AckKey& key,
                                    std::array<std::uint8_t, kMaxApplicationPayload>& payload,
                                    std::size_t& size) noexcept;
@@ -1416,12 +1478,29 @@ class MeshNode {
   MonotonicMs triggered_at_ms_{0};
   MonotonicMs next_triggered_ms_{0};
   std::uint32_t trigger_counter_{0};
+  // Retry-jitter decorrelation counter — same convention as
+  // trigger_counter_ (node.cpp trigger_route_advertisement).
+  std::uint32_t retry_jitter_counter_{0};
   // Node-global ordering tag stamped on emitted BUSY payloads; receivers
   // compare it per-peer to reject stale/replayed feedback (03 §5).
   std::uint32_t next_feedback_sequence_{1};
   // BUSY-side statistics; merged into congestion_stats() with the
   // scheduler's own counters.
   CongestionStats busy_stats_{};
+  // §14 ledger + control-budget state: per-domain µs totals merged into
+  // congestion_stats(). The signed token balance may run negative between
+  // emission and completion — §14 charges measured service AT completion,
+  // so a management emission scheduled with tokens in hand repays the
+  // deficit via the wait computed for the NEXT one.
+  CongestionStats budget_stats_{};
+  std::int64_t control_budget_tokens_us_{kControlBudgetCapacityUs};
+  MonotonicMs control_budget_last_ms_{0};
+  // Calibrated emission demand: EWMA (alpha 1/8) of measured control-domain
+  // driver service, seeded at the pinned max-frame cost so the first
+  // emissions gate conservatively until local service is measured.
+  std::uint32_t control_service_ewma_us_{kControlBudgetFrameCostUs};
+  std::uint64_t control_service_samples_{0};
+  bool control_budget_unsat_reported_{false};
   // Dedup capacity counters (sdk-completion/02 §2.4) — admissions, refusals,
   // forced evictions and expiry releases, all saturating u64.
   DedupStats dedup_stats_{};

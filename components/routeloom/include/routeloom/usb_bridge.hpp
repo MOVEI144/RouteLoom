@@ -105,6 +105,12 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // the node cannot exist before the bridge is constructed.
   void set_mesh(MeshNode* mesh) noexcept { config_.mesh = mesh; }
 
+  // Late nonce binding: seeds the device nonce once boot entropy is
+  // available, before the pump loop can serve a HELLO.
+  void set_device_nonce(std::uint64_t nonce) noexcept {
+    config_.device_nonce = nonce;
+  }
+
   // Late gateway binding (P3): installs the component as the node's Service
   // endpoint, enables the gateway role bound to this boot id, and wires the
   // bridge in as BOTH the HOST_RECEIVE_RAM sink (0x11/0x12 ingress) and the

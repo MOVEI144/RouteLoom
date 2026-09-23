@@ -39,6 +39,11 @@ void saturating_inc(std::uint64_t& counter) noexcept {
   if (counter != UINT64_MAX) ++counter;
 }
 
+// Saturating u64 add for the airtime ledger — same pin-on-overflow rule.
+void saturating_add(std::uint64_t& counter, const std::uint64_t delta) noexcept {
+  counter = UINT64_MAX - counter < delta ? UINT64_MAX : counter + delta;
+}
+
 // Map a scheduler admission verdict onto a BUSY reason (03 §5). The reason
 // is derived from the verdict — a BUSY that was never transmitted is never
 // reported as sent.
@@ -109,6 +114,12 @@ SchedClass MeshNode::TxScheduler::classify(const TxJob& job) noexcept {
   }
 }
 
+AirtimeDomain MeshNode::TxScheduler::airtime_domain(const TxJob& job) noexcept {
+  if (control_job(job)) return AirtimeDomain::Ack;
+  return classify(job) == SchedClass::Management ? AirtimeDomain::Control
+                                               : AirtimeDomain::Work;
+}
+
 void MeshNode::TxScheduler::flow_key(const TxJob& job, const NodeId self,
                                      NodeId& scope, NodeId& origin,
                                      NodeId& destination) noexcept {
@@ -129,8 +140,10 @@ void MeshNode::TxScheduler::flow_key(const TxJob& job, const NodeId self,
 void MeshNode::TxScheduler::charge_cost(TxJob& job) noexcept {
   // Estimated TX cost = expected encoded length in bytes. This profile is
   // single-rate, so frame length is the cost unit (03 §4: charge estimated
-  // TX cost by length/rate, not frame count).
-  std::uint64_t cost = wire::kHeaderSize + kAeadTagSize;
+  // TX cost by length/rate, not frame count). The pinned fixed cost stands
+  // for the MAC header + preamble + MAC ACK every frame occupies (radio.md
+  // §9 — body bytes alone undercharge a frame by ~70-105B of air time).
+  std::uint64_t cost = wire::kHeaderSize + kAeadTagSize + kTxFrameFixedCostBytes;
   if (job.form == JobForm::Forwarded) {
     cost += job.forwarded.protected_payload_size;
   } else {
@@ -262,12 +275,14 @@ Status MeshNode::TxScheduler::enqueue(TxJob&& job, const NodeId self,
 
 MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
                                                const MeshNode& node) noexcept {
-  (void)now_ms;
   if (selected_ != nullptr) return nullptr;
   // Reserved control lane first: a required ACK/BUSY response never waits
   // behind bulk DATA (03 §4) and is never held by the pause mask — it is
-  // exactly the control a pause must keep alive (01 §3.3).
-  if (TxJob* job = control_.pop_front()) {
+  // exactly the control a pause must keep alive (01 §3.3). A control job
+  // carrying a retry-jitter hold defers to the next select pass, same as a
+  // window-blocked flow.
+  if (control_.head != nullptr && control_.head->not_before_ms <= now_ms) {
+    TxJob* job = control_.pop_front();
     selected_ = job;
     selected_control_ = true;
     selected_flow_ = nullptr;
@@ -301,6 +316,14 @@ MeshNode::TxJob* MeshNode::TxScheduler::select(const MonotonicMs now_ms,
         if (head == nullptr) {
           // Defensive: an empty flow is never supposed to sit in the ring.
           if (!flow->overflow) flows_.release(flow);
+          continue;
+        }
+        if (head->not_before_ms > now_ms) {
+          // Link-retry jitter hold (radio.md §8): the job waits for its
+          // decorrelation delay — skipped like a window-blocked head and
+          // revisited on a later pass.
+          flow->in_rr = true;
+          (void)ring.push(flow);
           continue;
         }
         if (!node.tx_admitted_now(*head)) {
@@ -423,7 +446,8 @@ Status MeshNode::validate_config() const noexcept {
       config_.message_session == 0 || config_.route_generation == 0 ||
       config_.route_advertisement_period_ms == 0 ||
       config_.route_lifetime_ms <= config_.route_advertisement_period_ms ||
-      config_.hop_accept_timeout_ms == 0 || config_.callback_watchdog_ms == 0 ||
+      config_.hop_accept_timeout_ms < kLinkRtoMinMs ||
+      config_.callback_watchdog_ms == 0 ||
       config_.max_link_attempts == 0 || config_.max_end_to_end_rounds == 0 ||
       // rf_attempts_max is a pinned contract value (03 §5), not a tunable:
       // a config above it would silently exceed the RF-loss retry budget.
@@ -442,6 +466,9 @@ Status MeshNode::start(const MonotonicMs now_ms) noexcept {
   }
   started_ = true;
   next_route_advertisement_ms_ = now_ms;
+  // §14 control budget starts full at boot; the bucket is a spec-envelope
+  // capability, not measured capacity.
+  control_budget_last_ms_ = now_ms;
   // A development-profile provider is allowed to run but is always surfaced
   // as EXPERIMENTAL; nothing in this node claims production security status.
   if (security_.security_profile() != SecurityProfile::Production) {
@@ -518,6 +545,8 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   record->sojourn_samples = 0;
   record->last_sojourn_ms = 0;
   record->sojourn_window_ms = 0;
+  record->hop_rtt_ewma_ms = 0;
+  record->hop_rtt_samples = 0;
   record->busy_active = false;
   record->busy_since_ms = 0;
   record->last_busy_feedback_ms = 0;
@@ -1742,6 +1771,16 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
                                   const MonotonicMs now_ms) noexcept {
+  resolve_radio_tx_result(token, success, now_ms);
+  // A resolved send frees the driver's single in-flight slot at once:
+  // submit the next frame inside the same task turn — waiting for the next
+  // poll tick leaves idle airtime between back-to-back frames.
+  dispatch_next(now_ms);
+}
+
+void MeshNode::resolve_radio_tx_result(const std::uint64_t token,
+                                       const bool success,
+                                       const MonotonicMs now_ms) noexcept {
   last_clock_ms_ = now_ms;
   ++work_generation_;
   if (!physical_.active || physical_.token != token) {
@@ -1803,8 +1842,11 @@ void MeshNode::on_radio_tx_result(const std::uint64_t token, const bool success,
   // An authenticated BUSY that arrived while the frame was with the driver
   // takes effect now: the exchange is deferred, not retried as RF loss.
   awaiting->busy_deferred = busy_deferred;
+  awaiting->sent_at_ms = now_ms;
   awaiting->expires_at_ms =
-      now_ms + (busy_deferred ? busy_retry_ms : config_.hop_accept_timeout_ms);
+      now_ms + (busy_deferred
+                    ? busy_retry_ms
+                    : effective_hop_timeout_ms(awaiting->job.peer));
   if (awaiting->job.owner == JobOwner::OriginDelivery) {
     if (auto* delivery = find_delivery(awaiting->job.ack.key.id);
         delivery != nullptr && !sleep_terminal(delivery->state)) {
@@ -1927,6 +1969,9 @@ void MeshNode::retry_or_fail(TxJob& job, const char* reason,
     // Each SDK retry receives a fresh link counter. Reusing a captured frame would
     // make strict anti-replay incompatible with reliable delivery.
     job.encoded_valid = false;
+    // Link-retry decorrelation (radio.md §8): the re-queued job is not
+    // select-eligible until the jittered delay elapses.
+    job.not_before_ms = link_retry_not_before_ms(job, now_ms);
     TxJob pending = std::move(job);
     if (!scheduler_.enqueue(std::move(pending), config_.node, now_ms)) {
       fail_job(pending, "TX_QUEUE_FULL", now_ms);
@@ -1980,6 +2025,41 @@ std::uint8_t MeshNode::peer_window(const NodeId peer) const noexcept {
   return neighbor->tx_window;
 }
 
+std::uint32_t MeshNode::effective_hop_timeout_ms(
+    const NodeId peer) const noexcept {
+  const auto* neighbor = find_neighbor(peer);
+  // Unmeasured peers keep the configured initial RTO (radio.md §8); a
+  // measured peer adapts inside the clamped band. The sample count, not the
+  // EWMA value, gates adaptation — an honestly measured ~0 ms round trip
+  // still clamps to the floor.
+  if (neighbor == nullptr || neighbor->hop_rtt_samples == 0) {
+    return config_.hop_accept_timeout_ms;
+  }
+  const std::uint64_t scaled =
+      static_cast<std::uint64_t>(neighbor->hop_rtt_ewma_ms) * kLinkRtoMargin;
+  return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+      kLinkRtoMaxMs, std::max<std::uint64_t>(kLinkRtoMinMs, scaled)));
+}
+
+MonotonicMs MeshNode::link_retry_not_before_ms(
+    const TxJob& job, const MonotonicMs now_ms) noexcept {
+  const auto* neighbor = find_neighbor(job.peer);
+  const bool congested = neighbor != nullptr && neighbor->busy_active;
+  const std::uint32_t bound =
+      congested
+          ? kLinkRetryJitterCongestedMaxMs - kLinkRetryJitterCongestedMinMs + 1
+          : kLinkRetryJitterNormalMaxMs + 1;
+  // Deterministic spread, same convention as the route-advertisement jitter
+  // (~node.cpp:3834): node id decorrelates peers, the counter decorrelates
+  // successive retries — no RNG needed.
+  const std::uint32_t offset = static_cast<std::uint32_t>(
+      (config_.node * 31ULL + ++retry_jitter_counter_ * 7ULL) % bound);
+  const std::uint32_t jitter =
+      congested ? kLinkRetryJitterCongestedMinMs + offset : offset;
+  // A retry delayed past its own deadline never gets its last attempt.
+  return std::min(now_ms + jitter, job.deadline_ms);
+}
+
 bool MeshNode::tx_admitted_now(const TxJob& job) const noexcept {
   // Only jobs that enter the HOP_ACCEPT exchange consume window slots.
   // Both bounds apply BEFORE the send: the peer window and the global
@@ -2008,14 +2088,43 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
   }
   TxJob job = awaiting->job;
   const bool was_deferred = awaiting->busy_deferred;
+  const MonotonicMs sent_at_ms = awaiting->sent_at_ms;
   awaiting_hop_.release(awaiting);
   obs_hop_result(job, true, now_ms);
+  // HOP_ACCEPT round trip, MAC-accept -> authenticated accept. Only a live
+  // exchange measures the path — a BUSY deferral's wait is peer-directed
+  // and must never enter the adaptive RTO average (radio.md §8). The match
+  // key carries no attempt discriminator, so after a retransmission an
+  // accept may answer an earlier attempt and `now - sent_at_ms` would
+  // learn a too-short RTT against the wrong baseline: retransmitted
+  // exchanges resolve normally but cannot feed RTO adaptation.
+  const bool rtt_sampled = !was_deferred && job.physical_attempts <= 1 &&
+                           now_ms >= sent_at_ms;
+  const std::uint32_t rtt_ms =
+      rtt_sampled ? static_cast<std::uint32_t>(now_ms - sent_at_ms) : 0;
+  if (auto* bucket = job_bucket(job, now_ms)) {
+    ++bucket->current.hop_accepts;
+    if (rtt_sampled) {
+      ++bucket->current.hop_rtt_samples;
+      ewma_add(bucket->current.hop_rtt_us_ewma, rtt_ms * 1000u,
+               bucket->current.hop_rtt_samples);
+    }
+    bucket->current.present = true;
+    if (bucket->current.first_sample_ms == 0) {
+      bucket->current.first_sample_ms = now_ms;
+    }
+    bucket->current.last_sample_ms = now_ms;
+  }
   if (auto* neighbor = find_neighbor(peer)) {
-    // A BUSY-deferred exchange that still completes does not break the
-    // authenticated-accept streak — the accept is authoritative.
-    (void)was_deferred;
+    if (rtt_sampled) {
+      ++neighbor->hop_rtt_samples;
+      ewma_add(neighbor->hop_rtt_ewma_ms, rtt_ms,
+               neighbor->hop_rtt_samples);
+    }
     // An authenticated accept proves work gets through: it releases the
     // sustained-busy state that feeds the severe-busy repair path (03 §7).
+    // A BUSY-deferred exchange that still completes does not break the
+    // authenticated-accept streak — the accept is authoritative.
     neighbor->busy_active = false;
     neighbor->busy_since_ms = 0;
     neighbor->last_busy_feedback_ms = 0;
@@ -3596,7 +3705,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
-            now_ms);
+            now_ms, now_ms - rx_age_ms);
       } else {
         observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
                                 &frame.header.message);
@@ -3618,7 +3727,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
-            now_ms);
+            now_ms, now_ms - rx_age_ms);
       } else {
         observer_.on_diagnostic("AUTONOMY_FRAME_REJECTED", peer,
                                 &frame.header.message);
@@ -3744,6 +3853,94 @@ void MeshNode::expire_dedup(const MonotonicMs now_ms) noexcept {
   }
 }
 
+std::int64_t MeshNode::control_budget_balance(const MonotonicMs now_ms) noexcept {
+  if (now_ms > control_budget_last_ms_) {
+    // Spec-envelope refill (1000µs/s == 1µs/ms). A balance that ran
+    // negative through an over-capacity completion debit earns credit for
+    // the whole interval, so elapsed clamps to the headroom to a FULL
+    // bucket — not the capacity itself; credit beyond a full bucket is
+    // unreachable anyway. The modular subtraction keeps room correct for
+    // any negative balance.
+    const std::uint64_t room =
+        control_budget_tokens_us_ >=
+                static_cast<std::int64_t>(kControlBudgetCapacityUs)
+            ? 0
+            : static_cast<std::uint64_t>(
+                  static_cast<std::int64_t>(kControlBudgetCapacityUs)) -
+                  static_cast<std::uint64_t>(control_budget_tokens_us_);
+    const std::uint64_t elapsed = std::min<std::uint64_t>(
+        now_ms - control_budget_last_ms_, room);
+    control_budget_last_ms_ = now_ms;
+    control_budget_tokens_us_ += static_cast<std::int64_t>(
+        elapsed * kControlBudgetRefillUsPerS / 1000ULL);
+  }
+  return control_budget_tokens_us_;
+}
+
+MonotonicMs MeshNode::control_budget_wait_ms(const MonotonicMs now_ms) noexcept {
+  // Emission demand = the calibrated per-frame air time: EWMA of measured
+  // control-domain service, seeded at the pinned max-frame cost before any
+  // sample exists. This keeps the bucket honest under the spec envelope
+  // without charging a full worst-case frame the local driver never
+  // actually burns. Demand is clamped to the bucket capacity: the refill
+  // can never push the balance past one max frame's air time (§14 burst
+  // >= 1 max frame), so a single over-capacity sample — driver service
+  // including CCA backoff/retries — would otherwise defer against a
+  // balance the bucket can never reach, silently stalling all management
+  // emissions. The excess cost still arrives as the completion debit and
+  // is repaid through the wait computed for the next emission (§8: a
+  // normal route must never expire on this node's own budget wait).
+  const std::int64_t demand = std::min<std::int64_t>(
+      static_cast<std::int64_t>(control_service_ewma_us_),
+      static_cast<std::int64_t>(kControlBudgetCapacityUs));
+  const std::int64_t deficit = demand - control_budget_balance(now_ms);
+  if (deficit <= 0) return 0;
+  // deficit µs at the pinned refill rate -> ms, rounding up so the wait
+  // lands affordable rather than one tick short.
+  return (static_cast<std::uint64_t>(deficit) * 1000ULL +
+          kControlBudgetRefillUsPerS - 1ULL) /
+         kControlBudgetRefillUsPerS;
+}
+
+bool MeshNode::control_budget_refresh_fits(const MonotonicMs now_ms,
+                                           const MonotonicMs wait_ms,
+                                           const std::size_t fanout) noexcept {
+  // Fan-out draw: every neighbor's refresh pulls the same bucket, so the
+  // capacity decision prices `fanout` frames at the calibrated demand —
+  // not just this emission — when bounding the wait inside the lease.
+  const std::int64_t workload = static_cast<std::int64_t>(fanout) *
+                                std::min<std::int64_t>(
+                                    static_cast<std::int64_t>(control_service_ewma_us_),
+                                    static_cast<std::int64_t>(kControlBudgetCapacityUs));
+  const std::int64_t deficit = workload - control_budget_balance(now_ms);
+  const std::uint64_t afford_ms =
+      deficit <= 0 ? 0
+                   : (static_cast<std::uint64_t>(deficit) * 1000ULL +
+                      kControlBudgetRefillUsPerS - 1ULL) /
+                         kControlBudgetRefillUsPerS;
+  // Page count: the live route table's record pages each neighbor must
+  // cycle through (the frame carries the self record plus entries).
+  const std::uint64_t pages =
+      (static_cast<std::uint64_t>(routes_.size()) + kMaxRouteRecordsPerFrame) /
+      kMaxRouteRecordsPerFrame;
+  // 03 §8 refresh bound — pages*round_period + budget_wait + jitter +
+  // loss_margin — against the ACTUAL lease the refresh must land inside.
+  const std::uint64_t bound =
+      pages * config_.route_advertisement_period_ms +
+      std::max<std::uint64_t>(wait_ms, afford_ms) + kTriggeredJitterMs +
+      config_.route_advertisement_period_ms;
+  return config_.route_lifetime_ms > bound;
+}
+
+void MeshNode::note_control_budget_unsat() noexcept {
+  saturating_inc(budget_stats_.control_budget_unsatisfiable);
+  if (!control_budget_unsat_reported_) {
+    control_budget_unsat_reported_ = true;
+    observer_.on_diagnostic("CONTROL_BUDGET_UNSATISFIABLE", kInvalidNodeId,
+                            nullptr);
+  }
+}
+
 void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept {
   if (now_ms < next_route_advertisement_ms_ || scheduler_.full()) return;
   std::array<NodeId, kNeighborCapacity> active{};
@@ -3754,6 +3951,28 @@ void MeshNode::schedule_route_advertisements(const MonotonicMs now_ms) noexcept 
   if (count == 0) {
     next_route_advertisement_ms_ = now_ms + config_.route_advertisement_period_ms;
     return;
+  }
+  // §14 management airtime budget — calibrated profiles only. The
+  // uncalibrated default profile never applies the spec-envelope refill
+  // limit to route maintenance (radio.md §9/§14). When enabled, an
+  // emission may only schedule while the bucket covers one frame's air
+  // time; a needed deferral is allowed only while the §8 refresh bound
+  // (fan-out × demand, live page count, actual lease) still fits —
+  // otherwise the budget cannot sustain route maintenance for this
+  // configuration: the emission goes out unfunded (a normal route must
+  // never expire on this node's own budget wait) and the breach is
+  // surfaced, never queued as a normal emission.
+  if (config_.control_budget_gate_enabled) {
+    const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
+    if (wait_ms > 0) {
+      if (control_budget_refresh_fits(now_ms, wait_ms, count)) {
+        next_route_advertisement_ms_ = now_ms + wait_ms;
+        return;
+      }
+      note_control_budget_unsat();
+    } else {
+      control_budget_unsat_reported_ = false;
+    }
   }
   const NodeId peer = active[route_neighbor_cursor_ % count];
   route_neighbor_cursor_ = (route_neighbor_cursor_ + 1) % count;
@@ -3872,7 +4091,31 @@ void MeshNode::trigger_route_advertisement(const MonotonicMs now_ms) noexcept {
 
 void MeshNode::run_triggered_advertisement(const MonotonicMs now_ms) noexcept {
   if (!triggered_advertisement_ || now_ms < triggered_at_ms_) return;
+  // Same §14 gate as the periodic path — calibrated profiles only: an
+  // unaffordable burst re-arms at its token wait, but only while the §8
+  // refresh bound (fan-out × demand, page count, actual lease) can absorb
+  // it; otherwise the burst goes out unfunded and the breach surfaces.
+  if (config_.control_budget_gate_enabled) {
+    const MonotonicMs wait_ms = control_budget_wait_ms(now_ms);
+    if (wait_ms > 0) {
+      std::size_t fanout = 0;
+      neighbors_.for_each([&](const Neighbor& neighbor) {
+        if (neighbor.active) ++fanout;
+      });
+      if (control_budget_refresh_fits(now_ms, wait_ms, fanout)) {
+        triggered_at_ms_ = now_ms + wait_ms;
+        return;  // stays armed
+      }
+      note_control_budget_unsat();
+    } else {
+      control_budget_unsat_reported_ = false;
+    }
+  }
   triggered_advertisement_ = false;
+  // The gate charges affordability for ONE frame, then emits one
+  // RouteUpdate per active neighbor: a multi-neighbor burst under-charges
+  // up front, repaid as each completion debits its measured service (the
+  // charge-at-completion model the rest of §14 runs on).
   // >=50% queue watermark: triggered bursts run at half rate (03 §4).
   next_triggered_ms_ = now_ms + kTriggeredUpdateMinIntervalMs *
                                    (scheduler_.background_reduced() ? 2 : 1);
@@ -4154,6 +4397,51 @@ void MeshNode::obs_final(const Delivery& delivery, const DeliveryState state,
 void MeshNode::note_radio_tx(const RadioTxObservation& observation,
                              const MonotonicMs now_ms) noexcept {
   if (!started_ || observation.peer == kInvalidNodeId) return;
+  const std::uint64_t service_us =
+      observation.completed_us > observation.submitted_us
+          ? observation.completed_us - observation.submitted_us
+          : 0;
+  if (service_us > 0) {
+    // §14 airtime ledger: debit the measured driver service before any
+    // bucket bookkeeping — the ledger is a fixed accumulator and must
+    // record even when the bounded bucket pool cannot. A token that
+    // matches the in-flight submission attributes to that job's domain;
+    // anything else (raw lane, bootstrap, stale callback) lands in Misc.
+    AirtimeDomain domain = AirtimeDomain::Misc;
+    if (observation.token != 0 && physical_.active &&
+        observation.token == physical_.token) {
+      domain = TxScheduler::airtime_domain(physical_.job);
+    }
+    switch (domain) {
+      case AirtimeDomain::Ack:
+        saturating_add(budget_stats_.service_us_ack, service_us);
+        break;
+      case AirtimeDomain::Work:
+        saturating_add(budget_stats_.service_us_work, service_us);
+        break;
+      case AirtimeDomain::Control:
+        saturating_add(budget_stats_.service_us_control, service_us);
+        // §14 charges the gated domain at completion: measured service
+        // debits the bucket and may run it negative — the deficit is
+        // repaid through the wait computed for the next management
+        // emission, never by queueing on debt. The same sample calibrates
+        // the demand the gate charges per emission.
+        control_budget_balance(now_ms);
+        control_budget_tokens_us_ -= static_cast<std::int64_t>(service_us);
+        ++control_service_samples_;
+        ewma_add(control_service_ewma_us_,
+                 static_cast<std::uint32_t>(
+                     std::min<std::uint64_t>(service_us, UINT32_MAX)),
+                 control_service_samples_);
+        break;
+      case AirtimeDomain::Optimization:
+        saturating_add(budget_stats_.service_us_optimization, service_us);
+        break;
+      case AirtimeDomain::Misc:
+        saturating_add(budget_stats_.service_us_misc, service_us);
+        break;
+    }
+  }
   auto* bucket = observation_bucket(
       ObservationKey{observation.binding_generation,
                      ObservationDirection::Egress, observation.radio_generation,
@@ -4178,14 +4466,13 @@ void MeshNode::note_radio_tx(const RadioTxObservation& observation,
       }
       break;
   }
-  if (observation.completed_us > observation.submitted_us) {
-    const std::uint32_t service_us = static_cast<std::uint32_t>(
-        observation.completed_us - observation.submitted_us);
+  if (service_us > 0) {
+    const std::uint32_t service_us32 = static_cast<std::uint32_t>(service_us);
     ++bucket->service_samples;
     ++bucket->current.driver_samples;
-    ewma_add(bucket->driver_service_us_ewma, service_us,
+    ewma_add(bucket->driver_service_us_ewma, service_us32,
              bucket->service_samples);
-    ewma_add(bucket->current.driver_us_ewma, service_us,
+    ewma_add(bucket->current.driver_us_ewma, service_us32,
              bucket->current.driver_samples);
   }
   bucket->current.present = true;
@@ -4471,6 +4758,11 @@ Status MeshNode::build_telemetry_snapshot(
       if (bucket->current.driver_samples > 0 && bucket_fresh) {
         out.validity |= kTelemetryValidDriverEwma;
         out.driver_us_ewma = bucket->current.driver_us_ewma;
+      }
+      // Same window-freshness rule for the HOP_ACCEPT RTT EWMA (radio.md §8).
+      if (bucket->current.hop_rtt_samples > 0 && bucket_fresh) {
+        out.validity |= kTelemetryValidHopRttEwma;
+        out.hop_rtt_us_ewma = bucket->current.hop_rtt_us_ewma;
       }
       out.saturation_mask |= bucket->saturation_mask;
       if (bucket->stale || !bucket_fresh) out.validity |= kTelemetryStale;
@@ -5119,6 +5411,8 @@ void MeshNode::reset_neighbor_measurement(Neighbor& neighbor) noexcept {
   neighbor.sojourn_samples = 0;
   neighbor.last_sojourn_ms = 0;
   neighbor.sojourn_window_ms = 0;
+  neighbor.hop_rtt_ewma_ms = 0;
+  neighbor.hop_rtt_samples = 0;
   neighbor.metric_window_dirty = false;
   neighbor.metric_sources = 0;
   neighbor.last_cost_relax_ms = 0;
@@ -5314,6 +5608,7 @@ void MeshNode::note_peer_pressure(const NodeId peer, const std::uint8_t pressure
 CongestionStats MeshNode::congestion_stats() const noexcept {
   CongestionStats merged = busy_stats_;
   merged += scheduler_.stats_;
+  merged += budget_stats_;
   merged.queued = scheduler_.size();
   merged.control_queued = scheduler_.control_depth();
   merged.flows_active = scheduler_.flows_active();

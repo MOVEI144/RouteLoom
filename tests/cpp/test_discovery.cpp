@@ -149,6 +149,9 @@ class TestPort final : public DiscoveryPort {
   }
 
   std::vector<Sent> sent;
+  // When >0, the next N sends fail without delivering — the deterministic
+  // radio-refusal path for failure-accounting tests.
+  int fail_next{0};
 
  private:
   DiscMedium* medium_;
@@ -181,21 +184,25 @@ struct DiscMedium {
 // One discovery node: security, authenticator, hooks, entropy, port, engine.
 struct Unit {
   Unit(DiscMedium& medium, const NodeId id, const std::uint8_t mac_tail,
-       const NetworkId network, const std::uint32_t hint, const bool member)
+       const NetworkId network, const std::uint32_t hint, const bool member,
+       const std::uint32_t stale_reprobe_ms = 0,
+       const std::uint8_t stale_reprobe_attempts = 0)
       : mac(mac_of(mac_tail)),
         node(id),
         auth(security, 1),
         entropy(1000 + id),
         port(medium, mac),
-        engine(make_config(id, mac, network, hint), port, auth, hooks, entropy,
-               observer) {
+        engine(make_config(id, mac, network, hint, stale_reprobe_ms,
+                           stale_reprobe_attempts),
+               port, auth, hooks, entropy, observer) {
     hooks.is_member = member;
     medium.units.push_back(this);
   }
 
-  static DiscoveryConfig make_config(const NodeId id, const MacAddress& mac,
-                                     const NetworkId network,
-                                     const std::uint32_t hint) {
+  static DiscoveryConfig make_config(
+      const NodeId id, const MacAddress& mac, const NetworkId network,
+      const std::uint32_t hint, const std::uint32_t stale_reprobe_ms = 0,
+      const std::uint8_t stale_reprobe_attempts = 0) {
     DiscoveryConfig config{};
     config.node = id;
     config.mac = mac;
@@ -203,6 +210,10 @@ struct Unit {
     config.network_hint = hint;
     config.capability_bits = 1;
     config.probe_timeout_ms = 200;
+    if (stale_reprobe_ms != 0) config.stale_reprobe_ms = stale_reprobe_ms;
+    if (stale_reprobe_attempts != 0) {
+      config.stale_reprobe_attempts = stale_reprobe_attempts;
+    }
     return config;
   }
 
@@ -218,6 +229,10 @@ struct Unit {
 };
 
 Status TestPort::send_rld1(const MacAddress& dest, const ByteView encoded) noexcept {
+  if (fail_next > 0) {
+    --fail_next;
+    return Status::error(StatusCode::RadioFailure, "injected send failure");
+  }
   const FrameType kind = encoded.size > 5
                              ? static_cast<FrameType>(encoded.data[5])
                              : FrameType::Diagnostic;
@@ -230,6 +245,10 @@ Status TestPort::send_rld1(const MacAddress& dest, const ByteView encoded) noexc
 
 Status TestPort::send_wire(BindingId, const MacAddress& dest, const FrameType type,
                            const ByteView payload) noexcept {
+  if (fail_next > 0) {
+    --fail_next;
+    return Status::error(StatusCode::RadioFailure, "injected send failure");
+  }
   sent.push_back(Sent{dest, true, type, medium_->now,
                       std::vector<std::uint8_t>(payload.data,
                                                 payload.data + payload.size)});
@@ -264,9 +283,12 @@ struct DiscWorld {
   std::vector<std::unique_ptr<Unit>> units;
 
   Unit& add(const NodeId id, const std::uint8_t mac_tail, const bool member,
-            const std::uint32_t hint = 0xC0FFEE, const NetworkId network = 7) {
-    units.push_back(
-        std::make_unique<Unit>(medium, id, mac_tail, network, hint, member));
+            const std::uint32_t hint = 0xC0FFEE, const NetworkId network = 7,
+            const std::uint32_t stale_reprobe_ms = 0,
+            const std::uint8_t stale_reprobe_attempts = 0) {
+    units.push_back(std::make_unique<Unit>(medium, id, mac_tail, network,
+                                         hint, member, stale_reprobe_ms,
+                                         stale_reprobe_attempts));
     return *units.back();
   }
   void start_all() {
@@ -643,8 +665,10 @@ void test_lease_expiry() {
   NeighborPhase phase{};
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
 
-  // Silence the peer: probes go unanswered, the 30s lease lapses.
+  // Silence both lanes: probes go unanswered and the stranded re-discovery
+  // lane cannot heal the pair, so the 30s lease must visibly lapse.
   world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
   world.run(31000);
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
   CHECK(a.engine.neighbor_count() == 1);  // demoted, not deleted
@@ -991,6 +1015,10 @@ void test_suspend_revoke() {
   CHECK_OK(a.engine.suspend_peer(2, world.medium.now + 10000));
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Suspended);
   CHECK(!a.engine.data_permitted(b.mac));
+  // Silence both lanes so the Stale re-probe / re-discovery lanes cannot
+  // instantly re-confirm — the demotion itself is what this checks.
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
   world.run(11000);
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
 
@@ -1030,6 +1058,222 @@ void test_candidate_ttl() {
   CHECK(!b.engine.phase_of(mac_of(0x51), phase));
 }
 
+// Issue #40, 02 §9: a pair that lapses to mutual Stale must re-confirm and
+// return to REACHABLE — "Stale keeps resolving" — without a new exchange.
+void test_stale_reprobe_recovers() {
+  DiscWorld world;
+  // Short cadence + a headroom budget so the dropped window cannot park the
+  // records dormant before the lane is restored.
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, /*reprobe_ms=*/500,
+                      /*attempts=*/60);
+  Unit& b = world.add(2, 0xB2, true, 0xC0FFEE, 7, /*reprobe_ms=*/500,
+                      /*attempts=*/60);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+
+  // Silence both lanes: probes die, both sides lapse to Stale together.
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(31000);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Stale);
+
+  // Only the unicast lane returns (re-discovery stays cut): the bounded
+  // re-probe alone must recover the pair — nobody needed a fresh exchange.
+  world.medium.drop_wire = false;
+  const std::uint32_t auths = a.engine.stats().auths_completed;
+  world.run(1500);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(a.engine.stats().auths_completed == auths);
+  CHECK(a.engine.data_permitted(b.mac));
+}
+
+// The re-probe lane is strictly bounded (02 §6): exactly
+// stale_reprobe_attempts probes at stale_reprobe_ms spacing, then dormancy
+// until fresh RX evidence re-arms the budget.
+void test_stale_reprobe_bounded() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, /*reprobe_ms=*/500,
+                      /*attempts=*/3);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+
+  const std::size_t sent = a.port.count_wire(FrameType::NeighborProbe);
+  CHECK(sent >= 1);
+  // Cadence: the last two emitted probes were stale_reprobe_ms apart.
+  const auto times = a.port.times_of(FrameType::NeighborProbe, true);
+  CHECK(times.size() >= 2);
+  CHECK(times.back() - times[times.size() - 2] >= 500);
+  // Dormancy: a whole extra cadence window adds nothing while the lane
+  // stays dead — the attempt budget held.
+  world.run(1500);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) == sent);
+
+  // Fresh verified RX re-arms the budget: a probe from the peer answers
+  // with a Result and restarts our own bounded probe.
+  BindingGeneration gen{};
+  CHECK(a.engine.binding_generation_of(2, gen));
+  autonomy::NeighborProbePayload probe{};
+  probe.binding_generation = gen;
+  probe.probe_sequence = 77;
+  probe.sent_ms = world.medium.now;
+  probe.requested_lease_ms = 30000;
+  autonomy::EncodedPayload payload{};
+  CHECK_OK(autonomy::neighbor_probe_encode(probe, payload));
+  const std::size_t results = a.port.count_wire(FrameType::NeighborResult);
+  a.engine.on_wire_rx(b.mac, FrameType::NeighborProbe, payload.view(),
+                      world.medium.now);
+  CHECK(a.port.count_wire(FrameType::NeighborResult) == results + 1);
+  world.run(1200);
+  CHECK(a.port.count_wire(FrameType::NeighborProbe) > sent);
+}
+
+// The re-probe only ever targets resolvable records: Revoked bindings and
+// Conflict-quarantined radios are never probed (issue #40 gate, 06 §4).
+void test_stale_reprobe_never_targets_dead() {
+  {
+    // Revoked: the record survives but the dead mapping never gets a probe.
+    DiscWorld world;
+    Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, /*reprobe_ms=*/500,
+                        /*attempts=*/4);
+    Unit& b = world.add(2, 0xB2, true);
+    a.hooks.peer_members.insert(2);
+    b.hooks.peer_members.insert(1);
+    world.start_all();
+    run_exchange(world, a);
+    NeighborPhase phase{};
+    CHECK_OK(a.engine.revoke_peer(2));
+    CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Revoked);
+    const std::size_t probes = a.port.count_wire(FrameType::NeighborProbe);
+    world.run(6000);
+    CHECK(a.port.count_wire(FrameType::NeighborProbe) == probes);
+    CHECK(a.engine.phase_of(b.mac, phase) &&
+          phase == NeighborPhase::Revoked);
+  }
+  {
+    // Conflict quarantine: a disputed mapping never gets a probe either.
+    DiscWorld world;
+    Unit& a = world.add(1, 0xA1, true, 0xC0FFEE, 7, /*reprobe_ms=*/500,
+                        /*attempts=*/4);
+    Unit& b = world.add(2, 0xB2, true);
+    a.hooks.peer_members.insert(2);
+    b.hooks.peer_members.insert(1);
+    world.start_all();
+    run_exchange(world, a);
+    Unit& clone = world.add(2, 0xC3, true);
+    clone.hooks.peer_members.insert(1);
+    world.medium.block(clone.mac, b.mac);
+    world.medium.block(b.mac, clone.mac);
+    CHECK_OK(clone.engine.start(world.medium.now));
+    run_exchange(world, clone);
+    NeighborPhase phase{};
+    CHECK(a.engine.phase_of(clone.mac, phase) &&
+          phase == NeighborPhase::Conflict);
+    const auto sends_to_clone = [&a, &clone]() {
+      std::size_t n = 0;
+      for (const auto& s : a.port.sent) {
+        if (s.wire && s.dest == clone.mac) ++n;
+      }
+      return n;
+    };
+    const std::size_t before = sends_to_clone();
+    world.run(40000);   // far past the lease — the record may even expire
+    CHECK(sends_to_clone() == before);
+  }
+}
+
+// Issue #40 core: with the unicast lane dead, the stranded node's bounded
+// re-discovery backoff re-runs begin_discovery — the broadcast exchange
+// re-binds the stale pair without an operator restart (02 §9, 04 §9.2).
+void test_stranded_rediscovery_rebinds() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, true);
+  Unit& b = world.add(2, 0xB2, true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+
+  // Full partition: both lanes dead, both sides lapse to Stale.
+  world.medium.drop_wire = true;
+  world.medium.drop_rld1 = true;
+  world.run(31000);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Stale);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Stale);
+  const std::uint32_t auths = a.engine.stats().auths_completed;
+
+  // Broadcast re-discovery is live again while unicast stays dead: the
+  // armed backoff fires a bounded DISCOVER and the pair re-binds. Wire
+  // probes still cannot land, so the record holds at BOUND.
+  world.medium.drop_rld1 = false;
+  world.run(20000);
+  CHECK(a.engine.stats().auths_completed > auths);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Bound);
+  CHECK(a.observer.has("REDISCOVERY"));
+  // The stranded schedule stays bounded: consecutive DISCOVERs are spaced
+  // by at least the backoff base, never per-poll.
+  const auto discovers = a.port.times_of(FrameType::Discover, false);
+  for (std::size_t i = 1; i < discovers.size(); ++i) {
+    CHECK(discovers[i] - discovers[i - 1] >= 900);
+  }
+
+  // Restoring the unicast lane completes the bidirectional probe.
+  world.medium.drop_wire = false;
+  world.run(1500);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(b.engine.phase_of(a.mac, phase) && phase == NeighborPhase::Reachable);
+}
+
+// Port-level send refusal is counted: the RLD1 and wire lanes both bump
+// stats().send_failures, retries still complete the exchange, and the
+// refused send never counts toward offers_tx/probes_tx.
+void test_send_failure_stats() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+
+  // RLD1 lane: the responder's first OFFER fails at the port — the
+  // exchange retries and still completes, but the refusal is counted.
+  const std::uint32_t offers_before = b.engine.stats().offers_tx;
+  b.port.fail_next = 1;
+  run_exchange(world, a);
+  CHECK(b.engine.stats().send_failures == 1);
+  CHECK(a.engine.stats().send_failures == 0);
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+  CHECK(b.engine.stats().offers_tx > offers_before);
+
+  // Wire lane: with b->a blocked, a's own refresh probes are the only
+  // sends on its port — the first is refused and counted, and since the
+  // failed send cleared probe_outstanding the next poll retries (peer
+  // probes would otherwise keep resetting the refresh timer).
+  world.medium.block(b.mac, a.mac);
+  const std::uint32_t probes_before = a.engine.stats().probes_tx;
+  a.port.fail_next = 1;
+  world.run(10100);  // past idle_refresh_ms — a fires probes, port refuses 1
+  CHECK(a.engine.stats().send_failures == 1);
+  CHECK(a.engine.stats().probes_tx > probes_before);
+}
+
 }  // namespace
 
 int main() {
@@ -1052,6 +1296,11 @@ int main() {
   test_stale_finish();
   test_suspend_revoke();
   test_candidate_ttl();
+  test_stale_reprobe_recovers();
+  test_stale_reprobe_bounded();
+  test_stale_reprobe_never_targets_dead();
+  test_stranded_rediscovery_rebinds();
+  test_send_failure_stats();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d discovery checks failed\n", failures);
