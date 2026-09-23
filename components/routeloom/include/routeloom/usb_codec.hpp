@@ -97,7 +97,8 @@ Status encode_frame(FrameKind kind, std::uint16_t flags, std::uint64_t session,
 Status decode_frame(ByteView decoded, UsbFrame& out) noexcept;
 
 // Receives fully decoded frames and decode failures. `frame.body` is valid
-// only for the duration of on_frame.
+// only for the duration of on_frame, and it lives in the StreamDecoder's
+// buffer: a sink must not push() into the same decoder from inside on_frame.
 class UsbFrameSink {
  public:
   virtual ~UsbFrameSink() = default;
