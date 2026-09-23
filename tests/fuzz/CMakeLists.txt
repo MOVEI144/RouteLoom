@@ -31,6 +31,7 @@ set(ROUTELOOM_FUZZ_TARGETS
   rlres1
   sdkv1
   sdkv1_ead
+  sdkv1_join
 )
 
 foreach(target ${ROUTELOOM_FUZZ_TARGETS})
@@ -69,3 +70,11 @@ add_test(NAME fuzz_rlres1_mutation
 add_test(NAME fuzz_sdkv1_ead_mutation
          COMMAND fuzz_sdkv1_ead ${CMAKE_CURRENT_SOURCE_DIR}/corpus/sdkv1_ead
                  -runs=20000 -seed=13)
+
+# Join transport (sdk-v1 plan P3-1/P3-2): a longer deterministic mutation run
+# over the seeds tools/gen_sdkv1_join_transport_vectors.py writes (codec
+# inputs and complete RLD1 / Wire relay exchange scripts), so the canonical
+# re-encode and engine invariants run on every compiler.
+add_test(NAME fuzz_sdkv1_join_mutation
+         COMMAND fuzz_sdkv1_join ${CMAKE_CURRENT_SOURCE_DIR}/corpus/sdkv1_join
+                 -runs=20000 -seed=17)
