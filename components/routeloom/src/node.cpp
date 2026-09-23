@@ -1266,9 +1266,8 @@ Status MeshNode::queue_origin_data(Delivery& delivery, const MonotonicMs now_ms)
 Status MeshNode::queue_forward(const wire::LinkOpenedFrame& frame, const NodeId next_hop,
                                const MonotonicMs now_ms) noexcept {
   TxJob job{};
-  job.form = JobForm::Forwarded;
+  job.set_forwarded(frame);
   job.owner = JobOwner::Transit;
-  job.forwarded = frame;
   job.peer = next_hop;
   job.requires_hop_accept = true;
   job.max_attempts = config_.max_link_attempts;
@@ -1776,21 +1775,31 @@ void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected
 }
 
 Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
-  if (job.encoded_valid) return Status::success();
+  // tx_encoded_ still holds this job's sealed frame (the driver refused it
+  // and nothing else was sealed since): hand the same bytes over again.
+  if (job.encoded_tag != 0 && job.encoded_tag == tx_encoded_tag_) return Status::success();
+  job.encoded_tag = 0;
   if (now_ms >= job.deadline_ms) return Status::error(StatusCode::Expired, "JOB_EXPIRED");
   const auto remaining = static_cast<std::uint32_t>(job.deadline_ms - now_ms);
+  // Sealing overwrites the shared buffer: whichever job it held loses its
+  // encoding (tags never repeat within a job's lifetime).
+  tx_encoded_tag_ = 0;
   Status status;
   if (job.form == JobForm::Plain) {
     job.plain.header.previous_hop = config_.node;
     job.plain.header.next_hop = job.peer;
     job.plain.header.remaining_deadline_ms = std::min(job.plain.header.remaining_deadline_ms,
                                                       remaining);
-    status = wire::encode_new(job.plain, security_, job.encoded);
+    status = wire::encode_new(job.plain, security_, tx_encoded_);
   } else {
     status = wire::forward(job.forwarded, config_.node, job.peer, config_.link_epoch,
-                           remaining, security_, job.encoded);
+                           remaining, security_, tx_encoded_);
   }
-  if (status) job.encoded_valid = true;
+  if (status) {
+    if (++last_encoded_tag_ == 0) last_encoded_tag_ = 1;
+    tx_encoded_tag_ = last_encoded_tag_;
+    job.encoded_tag = last_encoded_tag_;
+  }
   return status;
 }
 
@@ -1857,9 +1866,10 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       // Group copies target a tree child chosen at round start; their
       // destination is a group address, never a unicast route.
       routed = queued->forwarded.header.destination;
-    } else if (queued->plain.header.type == FrameType::Data ||
-               queued->plain.header.type == FrameType::Service ||
-               queued->plain.header.type == FrameType::EndReceipt) {
+    } else if (queued->form == JobForm::Plain &&
+               (queued->plain.header.type == FrameType::Data ||
+                queued->plain.header.type == FrameType::Service ||
+                queued->plain.header.type == FrameType::EndReceipt)) {
       routed = queued->plain.header.destination;
     }
     if (routed != kInvalidNodeId) {
@@ -1879,7 +1889,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       }
       if (live.next_hop != queued->peer) {
         queued->peer = live.next_hop;
-        queued->encoded_valid = false;  // re-stamp next_hop at encode
+        queued->encoded_tag = 0;  // re-stamp next_hop at encode
       }
     }
     auto status = encode_job(*queued, now_ms);
@@ -1890,7 +1900,7 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       continue;
     }
     const std::uint64_t token = next_physical_token_++;
-    status = radio_.send(queued->peer, token, queued->encoded.view());
+    status = radio_.send(queued->peer, token, tx_encoded_.view());
     if (status.code == StatusCode::WouldBlock || status.code == StatusCode::Busy) {
       // The driver could not take the frame: no attempt was made. Restore
       // the job at the head of its lane and stop dispatching this pass.
@@ -1998,7 +2008,7 @@ void MeshNode::resolve_radio_tx_result(const std::uint64_t token,
       return;
     }
     observer_.on_diagnostic("HOP_WAIT_TABLE_FULL", job.peer, &job.ack.key.id);
-    job.encoded_valid = false;
+    job.encoded_tag = 0;
     TxJob pending = std::move(job);
     if (!scheduler_.enqueue(std::move(pending), config_.node, now_ms)) {
       fail_job(pending, "TX_QUEUE_FULL", now_ms);
@@ -2144,7 +2154,7 @@ void MeshNode::retry_or_fail(TxJob& job, const char* reason,
       job.physical_attempts < kCombinedPhysicalAttemptsMax) {
     // Each SDK retry receives a fresh link counter. Reusing a captured frame would
     // make strict anti-replay incompatible with reliable delivery.
-    job.encoded_valid = false;
+    job.encoded_tag = 0;
     // Link-retry decorrelation (radio.md §8): the re-queued job is not
     // select-eligible until the jittered delay elapses.
     job.not_before_ms = link_retry_not_before_ms(job, now_ms);
@@ -2176,7 +2186,7 @@ void MeshNode::readmit_after_busy(TxJob& job, const MonotonicMs now_ms) noexcept
   ++busy_stats_.busy_readmitted;
   // A fresh link counter for the re-admission — anti-replay never reuses
   // the frame captured before the deferral.
-  job.encoded_valid = false;
+  job.encoded_tag = 0;
   TxJob pending = std::move(job);
   if (!scheduler_.enqueue(std::move(pending), config_.node, now_ms)) {
     fail_job(pending, "READMIT_QUEUE_FULL", now_ms);
