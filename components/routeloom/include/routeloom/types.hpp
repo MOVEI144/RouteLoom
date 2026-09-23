@@ -24,6 +24,17 @@ constexpr std::size_t kMaxApplicationPayload = 128;
 // sized on this bound, so a longer-lived message could outlive the
 // receiver's duplicate suppression.
 constexpr std::uint32_t kMaxMessageLifetimeMs = 30000;
+// Late-result window (crash-time-resources §4, resource-profiles
+// late_result_ttl_ms): how long after a message's own expiry the terminal
+// side still answers retransmissions/queries from its stored record.
+constexpr std::uint32_t kLateResultTtlMs = 30000;
+// Terminal duplicate-suppression design value (crash-time-resources §4):
+// max lifetime + late result. Every "held from first acceptance" terminal
+// record (node dedup hard cap, APPLIED result hold, gateway receipt hold)
+// derives from this one bound instead of repeating the literal.
+constexpr std::uint32_t kTerminalRetentionMs = kMaxMessageLifetimeMs + kLateResultTtlMs;
+static_assert(kTerminalRetentionMs == 60000,
+              "crash-time-resources §4 pins the terminal retention at 60 s");
 constexpr std::size_t kMaxEspNowBody = 250;
 constexpr std::size_t kAeadTagSize = 16;
 constexpr std::uint8_t kDefaultHopLimit = 10;

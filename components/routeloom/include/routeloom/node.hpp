@@ -72,8 +72,8 @@ class RadioPort {
 using ExecutionLease = std::array<std::uint8_t, endpoint::kAppliedLeaseBytes>;
 constexpr std::size_t kAppliedUserPayloadMax = endpoint::kAppliedUserPayloadMax;
 constexpr std::size_t kAppliedResultCapacity = 8;
-constexpr std::uint32_t kAppliedResultHoldMs = 60000;
-constexpr std::uint32_t kAppliedLateResultMs = 30000;
+constexpr std::uint32_t kAppliedResultHoldMs = kTerminalRetentionMs;
+constexpr std::uint32_t kAppliedLateResultMs = kLateResultTtlMs;
 constexpr std::uint8_t kAppliedMaxEmits = 3;
 constexpr std::uint8_t kAppliedMaxQueries = 2;
 constexpr std::uint32_t kAppliedAnswerMinIntervalMs = 200;
@@ -322,17 +322,51 @@ enum class DedupPhase : std::uint8_t {
 // Retention: expires_at = min(first_seen_ms + kDedupHardCapMs,
 //                             horizon_ms + slack(phase)) where horizon is the
 // frame's own deadline at this node (remaining_deadline minus the driver-queue
-// debit). Duplicates never extend retention past the first-seen hard cap.
-constexpr std::uint32_t kDedupHardCapMs = 60000;      // first-seen cap (spec floor)
-constexpr std::uint32_t kTerminalSlackMs = 30000;     // cross-round exactly-once pin
-constexpr std::uint32_t kTransitSlackMs = 5000;       // report budget + drain margin
-// Admission bounds: terminal pins may occupy at most
+// debit, clamped to kMaxMessageLifetimeMs). Duplicates never extend retention
+// past the first-seen hard cap.
+//   Terminal — slack = late-result TTL: the pin outlives the origin's own
+//              expiry (its last possible round/resume) by 30 s, and never
+//              exceeds the 60 s design value (max lifetime + late result).
+//   others   — slack = kTransitSlackMs: a relay only suppresses duplicate
+//              forwarding while the frame can still be valid, plus the
+//              downstream TransitFailure report budget (3 s) and drain margin.
+//              A 5 s-lifetime transit record lives ~10 s, not 60 s (#39).
+constexpr std::uint32_t kDedupHardCapMs = kTerminalRetentionMs;  // first-seen cap
+constexpr std::uint32_t kTerminalSlackMs = kLateResultTtlMs;     // exactly-once pin
+constexpr std::uint32_t kTransitSlackMs = 5000;  // report budget + drain margin
+static_assert(kMaxMessageLifetimeMs + kTerminalSlackMs <= kDedupHardCapMs,
+              "a max-lifetime terminal pin must fit under the hard cap");
+static_assert(kTransitSlackMs < kTerminalSlackMs,
+              "transit duty ends before the terminal late-result window");
+
+// Pool capacity is a compile-time resource-profile constant (no dynamic
+// allocation; docs/reference/resource-profiles.json `dedup_entries`). Select
+// it for the WHOLE build — the value changes sizeof(MeshNode), so every
+// translation unit must agree: the host CMake option ROUTELOOM_DEDUP_PROFILE
+// and the ESP-IDF Kconfig choice both set it as a PUBLIC definition on the
+// core library. The default is the relay profile.
+constexpr std::size_t kDedupCapacityLeaf = 32;      // leaf-small
+constexpr std::size_t kDedupCapacityRelay = 96;     // relay-c3 (default)
+constexpr std::size_t kDedupCapacityGateway = 256;  // gateway-s3
+#ifndef ROUTELOOM_DEDUP_CAPACITY
+#define ROUTELOOM_DEDUP_CAPACITY 96
+#endif
+constexpr std::size_t kDedupCapacity = ROUTELOOM_DEDUP_CAPACITY;
+static_assert(kDedupCapacity == kDedupCapacityLeaf ||
+                  kDedupCapacity == kDedupCapacityRelay ||
+                  kDedupCapacity == kDedupCapacityGateway,
+              "ROUTELOOM_DEDUP_CAPACITY must be a resource-profile value "
+              "(32 leaf / 96 relay / 256 gateway)");
+// Admission bounds scale with the pool at the ratios of the reviewed 64-slot
+// design (8 / 24 / 16 of 64): terminal pins may occupy at most
 // kDedupCapacity - kDedupTransitReserve slots so transit/evictable traffic
 // always keeps a reserve; one previous-hop peer may hold at most
-// kDedupPerUpstreamMax non-terminal records; Evidence residency is capped.
-constexpr std::size_t kDedupTransitReserve = 8;
-constexpr std::size_t kDedupPerUpstreamMax = 24;
-constexpr std::size_t kEvidenceCap = 16;
+// kDedupPerUpstreamMax non-terminal records (at the bound it recycles its OWN
+// evictable records first); Evidence residency is capped.
+constexpr std::size_t kDedupTransitReserve = kDedupCapacity / 8;
+constexpr std::size_t kDedupPerUpstreamMax = kDedupCapacity * 3 / 8;
+constexpr std::size_t kEvidenceCap = kDedupCapacity / 4;
+constexpr std::size_t kDedupTerminalPinMax = kDedupCapacity - kDedupTransitReserve;
 
 // Saturating u64 counters in the CongestionStats idiom — a counter that would
 // exceed UINT64_MAX pins (unreachable within a boot). Surfaces every forced
@@ -559,7 +593,7 @@ class MeshNode {
   const DedupStats& dedup_stats() const noexcept { return dedup_stats_; }
   // Live dedup residency (records currently occupying the fixed pool).
   // Read-only test/diagnostic surface for the capacity invariants of
-  // sdk-completion/02 §2.5 — always <= kDedupCapacity (64) by construction.
+  // sdk-completion/02 §2.5 — always <= kDedupCapacity (profile) by construction.
   std::size_t dedup_resident() const noexcept { return dedup_.size(); }
   // Current per-peer in-flight window (1..4) used by the dispatch gate.
   std::uint8_t peer_tx_window(NodeId peer) const noexcept;
@@ -682,7 +716,6 @@ class MeshNode {
  private:
   static constexpr std::size_t kNeighborCapacity = 32;
   static constexpr std::size_t kDeliveryCapacity = 8;
-  static constexpr std::size_t kDedupCapacity = 64;
   static constexpr std::size_t kTxQueueCapacity = 32;
   static constexpr std::size_t kAwaitingHopCapacity = 8;
   static constexpr std::size_t kSeqnoSeenCapacity = 32;
@@ -1153,6 +1186,14 @@ class MeshNode {
   // then the oldest Evidence. Live/Terminal are skipped unconditionally.
   // Emits the forced-eviction diagnostic/counter; false = true overflow.
   bool evict_dedup_for_admission(MonotonicMs now_ms) noexcept;
+  // Per-upstream bound reached (#39): free one of `upstream`'s OWN non-terminal
+  // records in the same phase order (expired -> Resolved -> Evidence). Live
+  // records are never victims; false = every record it holds is Live.
+  bool evict_dedup_for_upstream(NodeId upstream, MonotonicMs now_ms) noexcept;
+  // Release a Resolved/Evidence victim with its counter + diagnostic.
+  void release_dedup_victim(DedupEntry& victim) noexcept;
+  // Terminal pins currently resident (the reserve gate's operand).
+  std::size_t count_terminal_pins() const noexcept;
   // complete_job hook for JobOwner::Transit: the forward resolved, so the
   // record's duty shrinks to re-ACK + late-report relay (Live -> Resolved).
   void resolve_dedup_for_job(const TxJob& job) noexcept;

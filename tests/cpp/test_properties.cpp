@@ -16,7 +16,7 @@
 //     successor is a STRICTLY stronger evidence class — a late END_RECEIPT
 //     promotes Failed/Expired to Delivered, or a BestEffort
 //     Delivered(TX_MAC_DONE) to Delivered(END_RECEIVED);
-//   * the dedup pool never exceeds kDedupCapacity and its accounting
+//   * the dedup pool never exceeds kDedupCapacity (profile) and its accounting
 //     stays consistent (counted releases never exceed admissions);
 //   * no delivery record exceeds the fixed table capacity;
 //   * after healing the mesh and draining past the dedup hard cap, no

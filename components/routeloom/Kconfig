@@ -1,0 +1,27 @@
+menu "RouteLoom"
+
+    choice ROUTELOOM_DEDUP_PROFILE
+        prompt "Dedup capacity profile"
+        default ROUTELOOM_DEDUP_PROFILE_RELAY
+        help
+            Compile-time capacity of the node's duplicate-suppression pool
+            (docs/reference/resource-profiles.json dedup_entries). Each record
+            is about 152 bytes of static RAM inside MeshNode. Terminal pins may
+            use at most 7/8 of the pool; a relay's transit records are held
+            only for the frame's own deadline plus a short slack.
+
+        config ROUTELOOM_DEDUP_PROFILE_LEAF
+            bool "leaf-small (32 records)"
+        config ROUTELOOM_DEDUP_PROFILE_RELAY
+            bool "relay-c3 (96 records)"
+        config ROUTELOOM_DEDUP_PROFILE_GATEWAY
+            bool "gateway-s3 (256 records)"
+    endchoice
+
+    config ROUTELOOM_DEDUP_CAPACITY
+        int
+        default 32 if ROUTELOOM_DEDUP_PROFILE_LEAF
+        default 256 if ROUTELOOM_DEDUP_PROFILE_GATEWAY
+        default 96
+
+endmenu

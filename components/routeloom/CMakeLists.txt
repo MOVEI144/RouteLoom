@@ -50,6 +50,12 @@ set(ROUTELOOM_UECC_DEFS
   uECC_SUPPORTS_secp256r1=1 uECC_SQUARE_FUNC=0 uECC_OPTIMIZATION_LEVEL=2
 )
 
+# Dedup pool capacity (docs/reference/resource-profiles.json dedup_entries,
+# issue #39) is a compile-time resource-profile constant. It changes
+# sizeof(MeshNode), so it is a PUBLIC definition: every translation unit that
+# includes the headers must see the same value. ESP-IDF selects it through the
+# component Kconfig (RouteLoom -> Dedup capacity profile); host builds through
+# ROUTELOOM_DEDUP_PROFILE. The default is the relay profile.
 if(COMMAND idf_component_register)
   idf_component_register(
     SRCS ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC}
@@ -60,7 +66,25 @@ if(COMMAND idf_component_register)
   target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Wpedantic)
   target_compile_options(${COMPONENT_LIB} PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
+  if(CONFIG_ROUTELOOM_DEDUP_CAPACITY)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC
+      ROUTELOOM_DEDUP_CAPACITY=${CONFIG_ROUTELOOM_DEDUP_CAPACITY})
+  endif()
 else()
+  set(ROUTELOOM_DEDUP_PROFILE "relay" CACHE STRING
+    "Dedup capacity resource profile: leaf (32), relay (96) or gateway (256)")
+  set_property(CACHE ROUTELOOM_DEDUP_PROFILE PROPERTY STRINGS leaf relay gateway)
+  if(ROUTELOOM_DEDUP_PROFILE STREQUAL "leaf")
+    set(ROUTELOOM_DEDUP_CAPACITY 32)
+  elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "relay")
+    set(ROUTELOOM_DEDUP_CAPACITY 96)
+  elseif(ROUTELOOM_DEDUP_PROFILE STREQUAL "gateway")
+    set(ROUTELOOM_DEDUP_CAPACITY 256)
+  else()
+    message(FATAL_ERROR
+      "ROUTELOOM_DEDUP_PROFILE must be leaf, relay or gateway "
+      "(got '${ROUTELOOM_DEDUP_PROFILE}')")
+  endif()
   add_library(routeloom_core STATIC ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC})
   target_include_directories(routeloom_core PUBLIC include)
   target_include_directories(routeloom_core PRIVATE
@@ -69,4 +93,6 @@ else()
   target_compile_definitions(routeloom_core PRIVATE ${ROUTELOOM_UECC_DEFS})
   target_compile_options(routeloom_core PRIVATE
     $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror>)
+  target_compile_definitions(routeloom_core PUBLIC
+    ROUTELOOM_DEDUP_CAPACITY=${ROUTELOOM_DEDUP_CAPACITY})
 endif()
