@@ -87,11 +87,13 @@ Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transaction�
 
 ## 7. 寿命資源の既知上限（CORE_FIXED_250 prototype、未解決）
 
-epoch／route generationの起動回数予算（旧#29/#48）はWire v2で32bit化して解消した（32bit boot sessionから直接導出、1分周期wakeでも約8,000年）。次の上限は現行実装の性質であり、設計変更（G-SEC／G-POWERで扱う）まで解消しない。配備判断の前提として明記する。数値はissueの概算で、実機計測ではない。
+epoch／route generationの起動回数予算（旧#29/#48）はWire v2で32bit化して解消した（32bit boot sessionから直接導出、1分周期wakeでも約8,000年）。次の上限は現行実装の性質であり、設計変更（G-SEC／G-POWERで扱う）まで解消しない。配備判断の前提として明記する。数値はissueの概算またはNVS形式からの計算で、実機計測ではない。
+
+NVSのentry予算は`tools/nvs_budget.py`（CIで各firmwareの`partitions.csv`と記録codecの大きさから計算）、削除・上限の安全条件は[sdk-v1/05 §9](../design/sdk-v1/05-nvs-state-37.md)にまとめた。
 
 | 資源 | 現行の上限 | 主因 | 追跡 |
 |---|---|---|---|
-| NVS entry数 | ピアごとのcounter lease／replay floor／windowキーに削除経路がない。既定24KiB NVSで累計12〜38ピアに達すると新規通信とboot session書込が失敗し得る | 鍵とcounterの削除は再ハンドシェイク設計が前提（設計Draft：[sdk-v1/05](../design/sdk-v1/05-nvs-state-37.md)、未実装） | #37 |
+| NVS entry数 | **開発PSK profileで有界化（P0、host試験済み・実機未計測）**：ピアごとのcounter lease／replay floor／windowを専用NVS partition `rlsec`（通常64KiB／bridge 128KiB）へ移し、`rlboot`等のsystem NVSを満杯にできない構造にした。TX counterは起動時に現boot sessionより古いepochのrecordを掃除（掃除した最大epochの証人`cmax`を先にcommit）。永続ピア数は上限（通常64／gateway 128、両scope各1 record、最悪20 entry/ピアで`rlsec`の使えるentryの80%以内）を持ち、超える**新規**ピアは`PEER_STATE_CAPACITY`で拒否・計数（既存ピアは継続）。TX側（(scope, 宛先)の組）は起動ごとに掃除されるので1起動内の宛先数に効く。RX floor／windowは消さないため、RX側（(scope, 送信元)の組）の上限は機器の生涯で累計した送信元に効く | RX状態の削除は再ハンドシェイク設計が前提（本番profile、[sdk-v1/05](../design/sdk-v1/05-nvs-state-37.md) §3。P4-4で開発ProviderもRAM context engineへ移行するまで、上限到達後の新規ピアは`rlreplay`/`rlcounter`の明示消去（05 §4 D2-e）まで通信不能） | #37 |
 | flash書込回数 | 下の書込予算表のとおり。旧実装は認証済み受信frameごとにreplay windowをcommitし（終端では2 commit）、持続10 frame/sで既定NVSが約1ヶ月の概算だった。§2のceiling予約後はreplay側が約1/65となり、同条件で約5年の概算。同時に活動するcontextがcache容量を越える配備では、追い出し1回ごとに最大2 commitへ戻る | fail-closedなreplay永続化、有限context cache | #30、#57 |
 | remote config | 受理1件≈7〜8 commit。rate上限（1/min＋burst1）で連続運用すると摩耗寿命は概算1〜2年。人手運用なら問題にならない（運用規則は[遠隔設定 §10](remote-management.md)） | ConfigJournalの2スロット耐電断commit | #57 |
 
@@ -105,7 +107,7 @@ flash書込予算（開発PSK Provider既定値。contextはscope・peer pair・
 | RX正常close | Provider close時 | 保持contextごとに最大1回 |
 | TX counter lease | 予約区間（256）を使い切ったとき | contextごとにcounter 256で1回 |
 | TX context追い出し | 稼働`kTxContextCapacity`＝32件＋checkpoint`kParkedLeaseCapacity`＝64件を越えて再作成したとき | checkpointが残っていれば0、溢れていれば再作成1回につき1回 |
-| 起動 | boot sessionの前進、新epochでの各TX context初回予約、相手側のfloor・ceiling | 起動1回につき1＋送信context数（相手側でpeerごと2）。Deep Sleep周期のnodeは起動回数で見積もる |
+| 起動 | boot sessionの前進、新epochでの各TX context初回予約、相手側のfloor・ceiling、`rlsec`の旧epoch TX recordの掃除（#37） | 起動1回につき1＋送信context数（相手側でpeerごと2）。掃除は証人`cmax`の更新1回（u32、1 entry）＋旧recordごとの消去（entry状態の書換えのみで新entryを消費しない）。Deep Sleep周期のnodeは起動回数で見積もる |
 | remote config | 受理1件 | 約7〜8回（rate上限1/min＋burst1） |
 
 概算：持続10 frame/sを受ける終端nodeは旧20 commit/sから約0.31 commit/s、中継nodeは旧約10 commit/sから約0.19 commit/s（RX link 1/65＋TX link 1/256）。数値は既定値からの計算で、実機のNVS page消費は未計測。
