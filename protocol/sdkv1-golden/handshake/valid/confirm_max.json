@@ -1,0 +1,10 @@
+{
+  "codec": "context_confirm",
+  "digest_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "confirm_max",
+  "profile": 1,
+  "purpose": 2,
+  "value_hex": "01020100ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

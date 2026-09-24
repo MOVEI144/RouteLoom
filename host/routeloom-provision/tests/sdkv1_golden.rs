@@ -24,10 +24,14 @@ use routeloom_provision::sdkv1::lifecycle::{
     lifecycle_record_decode, lifecycle_record_encode, LifecycleMode, LifecycleRecord,
     LIFECYCLE_SEAL_COMMITTED, REMOVAL_NOTICE_OBJECT_SIZE,
 };
+use routeloom_provision::sdkv1::local_revocation::{
+    local_revocation_record_decode, local_revocation_record_encode, LOCAL_REVOCATION_SEAL_COMMITTED,
+};
 use routeloom_provision::sdkv1::pop::{pop_aad, pop_payload_encode, pop_sign, pop_verify};
 use routeloom_provision::sdkv1::resume::{
     resume_peer_cert_id, resume_slot_decode, resume_slot_encode, ResumePurpose,
 };
+use routeloom_provision::sdkv1::resume2::{resume2_slot_decode, resume2_slot_encode};
 use routeloom_provision::sdkv1::revocation::{
     revocation_aad, revocation_issue, revocation_object_assemble, revocation_object_decode,
     revocation_object_verify, revocation_payload_decode, revocation_payload_encode,
@@ -391,6 +395,91 @@ fn check_rlp1(name: &str, doc: &Json) {
     }
 }
 
+fn check_rlp2(name: &str, doc: &Json) {
+    let record = hex(doc, "record_hex");
+    let slot = resume2_slot_decode(&record).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(slot.valid, num(doc, "state") == 1);
+    if slot.valid {
+        let purpose = if num(doc, "purpose") == 1 {
+            ResumePurpose::Link
+        } else {
+            ResumePurpose::End
+        };
+        assert_eq!(slot.purpose, purpose);
+    }
+    assert_eq!(u64::from(slot.flags), num(doc, "flags"));
+    assert_eq!(slot.peer, num(doc, "peer"));
+    assert_eq!(slot.network, num(doc, "network"));
+    assert_eq!(slot.peer_cert_id, arr::<8>(doc, "peer_cert_id_hex"));
+    assert_eq!(slot.local_cert_id, arr::<8>(doc, "local_cert_id_hex"));
+    assert_eq!(u64::from(slot.peer_generation), num(doc, "peer_generation"));
+    assert_eq!(u64::from(slot.peer_role), num(doc, "peer_role"));
+    assert_eq!(
+        u64::from(slot.created_gk_epoch),
+        num(doc, "created_gk_epoch")
+    );
+    assert_eq!(u64::from(slot.last_used_boot), num(doc, "last_used_boot"));
+    assert_eq!(u64::from(slot.reserved_uses), num(doc, "reserved_uses"));
+    assert_eq!(slot.rms, arr::<32>(doc, "rms_hex"));
+    assert_eq!(
+        resume2_slot_encode(&slot).unwrap().to_vec(),
+        record,
+        "{name}"
+    );
+}
+
+fn check_rlv1(name: &str, doc: &Json) {
+    let record = hex(doc, "record_hex");
+    let (decoded, seq) =
+        local_revocation_record_decode(&record).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(u64::from(seq), num(doc, "commit_seq"), "{name}");
+    assert_eq!(decoded.local_node, num(doc, "local_node"), "{name}");
+    assert_eq!(decoded.site_id, num(doc, "site_id"), "{name}");
+    assert_eq!(decoded.network, num(doc, "network"), "{name}");
+    assert_eq!(
+        u64::from(decoded.removed_generation),
+        num(doc, "removed_generation"),
+        "{name}"
+    );
+    assert_eq!(
+        u64::from(decoded.rs_epoch_floor),
+        num(doc, "rs_epoch_floor"),
+        "{name}"
+    );
+    assert_eq!(
+        u64::from(decoded.site_epoch_floor),
+        num(doc, "site_epoch_floor"),
+        "{name}"
+    );
+    assert_eq!(decoded.state as u64, num(doc, "state"), "{name}");
+    assert_eq!(decoded.cause as u64, num(doc, "cause"), "{name}");
+    assert_eq!(
+        decoded.evidence_digest,
+        arr::<32>(doc, "evidence_digest_hex"),
+        "{name}"
+    );
+    assert_eq!(
+        u64::from(decoded.rls_commit_seq),
+        num(doc, "rls_commit_seq"),
+        "{name}"
+    );
+    assert_eq!(
+        u64::from(decoded.boot_witness),
+        num(doc, "boot_witness"),
+        "{name}"
+    );
+    assert_eq!(
+        u64::from(decoded.holdoff_ms),
+        num(doc, "holdoff_ms"),
+        "{name}"
+    );
+    assert_eq!(
+        local_revocation_record_encode(&decoded, LOCAL_REVOCATION_SEAL_COMMITTED, seq).unwrap(),
+        record,
+        "{name}"
+    );
+}
+
 fn check_pop(name: &str, doc: &Json) {
     let node = num(doc, "node_id");
     let location = match num(doc, "key_location") {
@@ -442,6 +531,8 @@ fn sdkv1_valid_vectors_match_byte_for_byte() {
                 check_rlx1_record(name, doc);
             }
             "rlp1" => check_rlp1(name, doc),
+            "rlp2" => check_rlp2(name, doc),
+            "rlv1" => check_rlv1(name, doc),
             "pop" => check_pop(name, doc),
             other => panic!("{name}: unknown codec {other}"),
         }
@@ -496,6 +587,8 @@ fn sdkv1_invalid_vectors_are_rejected() {
             "rrs1_record" => assert!(revocation_record_decode(&bytes).is_err(), "{name}"),
             "rlx1_record" => assert!(lifecycle_record_decode(&bytes).is_err(), "{name}"),
             "rlp1" => assert!(resume_slot_decode(&bytes).is_err(), "{name}"),
+            "rlp2" => assert!(resume2_slot_decode(&bytes).is_err(), "{name}"),
+            "rlv1" => assert!(local_revocation_record_decode(&bytes).is_err(), "{name}"),
             "pop" => {
                 // Malformed objects are ProtocolError; well-formed ones for
                 // another node/challenge or with a bad signature are

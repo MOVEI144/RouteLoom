@@ -1,0 +1,12 @@
+{
+  "binding_hex": "eea2fac18daf0e1ce471a718a1d0aaa11ce1bd3a40a5f7b9b6758ce83c259221",
+  "boot_i": 7,
+  "caps_i": 50331648,
+  "codec": "session_intent",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "intent_link",
+  "profile": 1,
+  "purpose": 1,
+  "value_hex": "010101000300000000000007eea2fac18daf0e1ce471a718a1d0aaa11ce1bd3a40a5f7b9b6758ce83c259221"
+}

@@ -1,0 +1,21 @@
+{
+  "capability_hex": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "codec": "exporter_context",
+  "context_epoch": 4294967295,
+  "context_hex": "8f69526f7574654c6f6f6d01021bffffffffffffffff1bfffffffffffffffe1bfffffffffffffffd5820abababababababababababababababababababababababababababababababab5820cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd1affffffff1affffffff821affffffff1affffffff8202001affffffff015820efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+  "context_len": 172,
+  "direction": 1,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "generation_i": 4294967295,
+  "generation_r": 4294967295,
+  "kid_i_hex": "abababababababababababababababababababababababababababababababab",
+  "kid_r_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+  "name": "exporter_max",
+  "network": 18446744073709551615,
+  "node_i": 18446744073709551614,
+  "node_r": 18446744073709551613,
+  "purpose": 2,
+  "role_i": 4294967295,
+  "role_r": 4294967295
+}

@@ -289,6 +289,85 @@ void test_resume_slot_rules() {
   CHECK(std::memcmp(id.data(), digest.data(), 8) == 0);
 }
 
+void test_resume2_slot_rules() {
+  ResumeSlot2 slot{};
+  slot.valid = true;
+  slot.purpose = ResumePurpose::End;
+  slot.flags = kResumeFlagPinned;
+  slot.peer = kPeer;
+  slot.network = kNetwork;
+  slot.peer_cert_id = {1, 2, 3, 4, 5, 6, 7, 8};
+  slot.local_cert_id = {8, 7, 6, 5, 4, 3, 2, 1};
+  slot.peer_generation = 2;
+  slot.peer_role = 0b101;
+  slot.created_gk_epoch = 203;
+  slot.last_used_boot = 700;
+  slot.reserved_uses = 63;
+  slot.rms.fill(0x3C);
+  std::array<std::uint8_t, kResume2SlotBytes> bytes{};
+  CHECK_OK(resume2_slot_encode(slot, bytes));
+  ResumeSlot2 out{};
+  CHECK_OK(resume2_slot_decode(ByteView{bytes.data(), bytes.size()}, out));
+  CHECK(out.valid && out.purpose == ResumePurpose::End && out.peer == kPeer &&
+        out.reserved_uses == 63 && out.rms == slot.rms);
+  CHECK_OK(resume2_slot_encode(ResumeSlot2{}, bytes));
+  CHECK_OK(resume2_slot_decode(ByteView{bytes.data(), bytes.size()}, out));
+  CHECK(!out.valid);
+  // The old and new generations never decode as each other.
+  std::array<std::uint8_t, kResumeSlotBytes> legacy{};
+  CHECK_OK(resume_slot_encode(resume_slot(kPeer), legacy));
+  CHECK(!resume2_slot_decode(ByteView{legacy.data(), legacy.size()}, out).ok());
+  CHECK_OK(resume2_slot_encode(slot, bytes));
+  ResumeSlot legacy_out{};
+  CHECK(!resume_slot_decode(ByteView{bytes.data(), 84}, legacy_out).ok());
+  ResumeSlot2 bad = slot;
+  bad.peer_role = 0;
+  CHECK(!resume2_slot_encode(bad, bytes).ok());
+  bad = slot;
+  bad.reserved_uses = 65;
+  CHECK(!resume2_slot_encode(bad, bytes).ok());
+  bad = ResumeSlot2{};
+  bad.reserved_uses = 1;  // empty slots carry no use count
+  CHECK(!resume2_slot_encode(bad, bytes).ok());
+}
+
+void test_local_revocation_record_rules() {
+  LocalRevocationRecord record{};
+  record.state = LocalRevocationState::Blocked;
+  record.cause = LocalRevocationCause::LocalMaintenance;
+  record.local_node = kNode;
+  record.site_id = kSiteId;
+  record.network = kNetwork;
+  record.removed_generation = 5;
+  record.rs_epoch_floor = 14;
+  record.site_epoch_floor = kSiteEpoch;
+  record.evidence_digest.fill(0xA1);
+  record.rls_commit_seq = 9;
+  record.boot_witness = 4321;
+  ByteBuffer<kLocalRevocationSlotBytes> bytes{};
+  CHECK_OK(local_revocation_record_encode(record, kLocalRevocationSealCommitted, 12, bytes));
+  CHECK(bytes.size == kLocalRevocationRecordLen);
+  LocalRevocationRecord out{};
+  std::uint32_t seq = 0;
+  CHECK_OK(local_revocation_record_decode(bytes.view(), out, &seq));
+  CHECK(seq == 12 && out.state == LocalRevocationState::Blocked &&
+        out.removed_generation == 5 && out.evidence_digest == record.evidence_digest);
+  CHECK_OK(local_revocation_record_structure(bytes.view()));
+  // A pending seal reads through the classifier, never through decode.
+  ByteBuffer<kLocalRevocationSlotBytes> pending{};
+  CHECK_OK(local_revocation_record_encode(record, kSealPending, 12, pending));
+  CHECK(!local_revocation_record_decode(pending.view(), out).ok());
+  LocalRevocationRecord bad = record;
+  bad.holdoff_ms = 1;
+  CHECK(!local_revocation_record_encode(bad, kLocalRevocationSealCommitted, 12, bytes).ok());
+  bad = record;
+  bad.evidence_digest.fill(0);
+  CHECK(!local_revocation_record_encode(bad, kLocalRevocationSealCommitted, 12, bytes).ok());
+  bad = record;
+  bad.state = static_cast<LocalRevocationState>(9);
+  CHECK(!local_revocation_validate(bad).ok());
+}
+
 }  // namespace
 
 int main() {
@@ -300,6 +379,8 @@ int main() {
   test_site_record_rules();
   test_revocation_rules();
   test_resume_slot_rules();
+  test_resume2_slot_rules();
+  test_local_revocation_record_rules();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 record check(s) failed\n", failures);
     return 1;

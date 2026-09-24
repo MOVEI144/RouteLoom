@@ -22,6 +22,8 @@ zeroize = { version = "1", default-features = false }
 # The interop test builds real RLCW1 credentials and join EAD items.
 routeloom-provision = { path = "../routeloom-provision" }
 routeloom-join = { path = "../routeloom-join" }
+# The member interop test builds session EAD values and Exporter contexts.
+routeloom-keysched = { path = "../routeloom-keysched" }
 
 [lints]
 workspace = true

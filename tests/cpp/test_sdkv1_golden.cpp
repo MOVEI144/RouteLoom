@@ -443,6 +443,57 @@ void valid_rlp1(const Fields& f) {
   }
 }
 
+void valid_rlp2(const Fields& f) {
+  const auto record = hex(f, "record_hex");
+  ResumeSlot2 slot{};
+  CHECK(resume2_slot_decode(view(record), slot).ok());
+  CHECK(slot.valid == (num(f, "state") == 1));
+  if (slot.valid) CHECK(static_cast<std::uint64_t>(slot.purpose) == num(f, "purpose"));
+  CHECK(slot.flags == num(f, "flags"));
+  CHECK(slot.peer == num(f, "peer"));
+  CHECK(slot.network == num(f, "network"));
+  CHECK(slot.peer_cert_id == (hex_array<8>(f, "peer_cert_id_hex")));
+  CHECK(slot.local_cert_id == (hex_array<8>(f, "local_cert_id_hex")));
+  CHECK(slot.peer_generation == num(f, "peer_generation"));
+  CHECK(slot.peer_role == num(f, "peer_role"));
+  CHECK(slot.created_gk_epoch == num(f, "created_gk_epoch"));
+  CHECK(slot.last_used_boot == num(f, "last_used_boot"));
+  CHECK(slot.reserved_uses == num(f, "reserved_uses"));
+  CHECK(slot.rms == (hex_array<32>(f, "rms_hex")));
+  std::array<std::uint8_t, kResume2SlotBytes> encoded{};
+  CHECK(resume2_slot_encode(slot, encoded).ok());
+  CHECK(record.size() == encoded.size() && std::equal(record.begin(), record.end(), encoded.begin()));
+  if (has(f, "peer_cert_hex")) {
+    std::array<std::uint8_t, 8> id{};
+    resume_peer_cert_id(view(hex(f, "peer_cert_hex")), id);
+    CHECK(id == slot.peer_cert_id);
+  }
+}
+
+void valid_rlv1(const Fields& f) {
+  const auto record = hex(f, "record_hex");
+  LocalRevocationRecord decoded{};
+  std::uint32_t seq = 0;
+  CHECK(local_revocation_record_decode(view(record), decoded, &seq).ok());
+  CHECK(seq == num(f, "commit_seq"));
+  CHECK(decoded.local_node == num(f, "local_node"));
+  CHECK(decoded.site_id == num(f, "site_id"));
+  CHECK(decoded.network == num(f, "network"));
+  CHECK(decoded.removed_generation == num(f, "removed_generation"));
+  CHECK(decoded.rs_epoch_floor == num(f, "rs_epoch_floor"));
+  CHECK(decoded.site_epoch_floor == num(f, "site_epoch_floor"));
+  CHECK(static_cast<std::uint64_t>(decoded.state) == num(f, "state"));
+  CHECK(static_cast<std::uint64_t>(decoded.cause) == num(f, "cause"));
+  CHECK(decoded.evidence_digest == (hex_array<32>(f, "evidence_digest_hex")));
+  CHECK(decoded.rls_commit_seq == num(f, "rls_commit_seq"));
+  CHECK(decoded.boot_witness == num(f, "boot_witness"));
+  CHECK(decoded.holdoff_ms == num(f, "holdoff_ms"));
+  ByteBuffer<kLocalRevocationSlotBytes> encoded{};
+  CHECK(local_revocation_record_encode(decoded, kLocalRevocationSealCommitted, seq, encoded).ok());
+  CHECK(record.size() == encoded.size &&
+        std::equal(record.begin(), record.end(), encoded.bytes.begin()));
+}
+
 // --- invalid -------------------------------------------------------------------
 
 void invalid(const Fields& f, const std::string& codec, const std::string& expect) {
@@ -491,6 +542,12 @@ void invalid(const Fields& f, const std::string& codec, const std::string& expec
   } else if (codec == "rlp1") {
     ResumeSlot slot{};
     CHECK(!resume_slot_decode(view(bytes), slot).ok());
+  } else if (codec == "rlp2") {
+    ResumeSlot2 slot{};
+    CHECK(!resume2_slot_decode(view(bytes), slot).ok());
+  } else if (codec == "rlv1") {
+    LocalRevocationRecord record{};
+    CHECK(!local_revocation_record_decode(view(bytes), record).ok());
   } else if (codec == "pop") {
     PopClaims claims{};
     bool verified = true;
@@ -537,6 +594,10 @@ void run() {
       valid_rlx1_record(f);
     } else if (codec == "rlp1") {
       valid_rlp1(f);
+    } else if (codec == "rlp2") {
+      valid_rlp2(f);
+    } else if (codec == "rlv1") {
+      valid_rlv1(f);
     } else if (codec == "pop") {
       valid_pop(f);
     } else {
