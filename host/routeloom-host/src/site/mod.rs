@@ -47,6 +47,7 @@
 // in-process transport exercise it, so a non-test build sees it unused.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub mod authority_channel;
 pub mod config;
 pub mod records;
 pub mod store;
