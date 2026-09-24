@@ -935,6 +935,10 @@ impl SiteAuthority {
                 }
                 previously_removed = true;
             }
+            // A removed row is history, not a conflict (07 §7): the
+            // replacement key asks KGuard like any other device, marked
+            // by the node's removal.
+            Some(row) if !row.member => previously_removed = true,
             Some(_) => kid_conflict = true,
             None => {}
         }
@@ -1184,7 +1188,15 @@ impl SiteAuthority {
     fn finish_verdict(&mut self, txn: Txn, node: u64, verdict: Verdict, now_ms: u64) {
         match verdict {
             Verdict::Allow { .. } => match self.devices.get(&node).cloned() {
-                Some(row) if row.member => self.finish_allow(txn, &row, now_ms),
+                // The verdict was recorded for this key: if the row has
+                // since moved to another key the device retries instead
+                // of receiving a certificate it cannot use.
+                Some(row)
+                    if row.member
+                        && txn.device.as_ref().is_some_and(|d| d.facts.kid == row.kid) =>
+                {
+                    self.finish_allow(txn, &row, now_ms)
+                }
                 _ => self.finish_busy(txn, BUSY_RETRY_S),
             },
             Verdict::Pending { retry_after_s } => {
@@ -1539,7 +1551,14 @@ impl SiteAuthority {
         let mut approved: Option<(DeviceRow, LedgerRow, Operation)> = None;
         match request.verdict {
             Verdict::Allow { role } => {
-                if open.kid_conflict {
+                // The flag stored with the request is stale information:
+                // the conflict is judged on the membership as it is now,
+                // inside this commit. A removed row does not conflict.
+                if self
+                    .devices
+                    .get(&open.facts.node)
+                    .is_some_and(|row| row.member && row.kid != open.facts.kid)
+                {
                     return Err(SiteError::new(
                         "CONFLICT",
                         "another key holds this device id here; revoke that membership first (07 §7)",

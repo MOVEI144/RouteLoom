@@ -860,3 +860,426 @@ fn a_store_is_bound_to_its_site() {
     assert!(refused.is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #107: two join requests for one NodeId with different keys, both
+/// opened before any approval — the kid_conflict stored at request time
+/// is re-checked against the live membership at commit, so the later
+/// different-key allow is CONFLICT while the first-approved key holds
+/// the row.
+#[test]
+fn review_concurrent_different_keys_rechecks_current_membership() {
+    let (service, transport) = service();
+    let mut a = SimDevice::new(0x00A1_0000_0000_C001, 0xC1);
+    let mut b = SimDevice::new(a.node, 0xC2);
+    let (mut exchange_a, _, events_a) = a.start(&service, &transport, T0);
+    let (mut exchange_b, _, events_b) = b.start(&service, &transport, T0 + 10);
+    decide(
+        &service,
+        request_id(&events_a).unwrap(),
+        a.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "review-a",
+        T0 + 20,
+    )
+    .unwrap();
+    a.finish(&mut exchange_a, &transport);
+    let second = decide(
+        &service,
+        request_id(&events_b).unwrap(),
+        b.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "review-b",
+        T0 + 30,
+    );
+    assert!(matches!(second, Err(ref e) if e.code == "CONFLICT"));
+    // A's committed row is untouched: A's key, generation 1, serial 1.
+    let (row, _) = service.with(|auth| auth.devices[&a.node].clone());
+    assert!(row.member && row.kid == a.kid && row.generation == 1);
+    assert_eq!(row.member_cert_serial, 1);
+    // B's request stays open and undecided — a verdict can still apply
+    // once the conflict is gone (or a deny right away).
+    let (list, _) = service.with(|auth| auth.join_requests_json(T0 + 40));
+    let requests = json(&list);
+    let requests = requests.get("requests").unwrap().as_array().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].get("state").unwrap().as_str(), Some("awaiting"));
+    // The CONFLICT message's guidance works: revoke the holding
+    // membership and the still-open request can be allowed — the
+    // replacement commits at generation 2.
+    let (revoked, _) = service.with(|auth| {
+        auth.revoke(
+            KGUARD,
+            RevokeRequest {
+                device: a.node,
+                expected_generation: 1,
+                reason: RevocationReason::Replaced,
+                key: "rv".into(),
+            },
+            T0 + 50,
+        )
+    });
+    revoked.unwrap();
+    let committed = decide(
+        &service,
+        request_id(&events_b).unwrap(),
+        b.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "review-b2",
+        T0 + 60,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&committed).get("generation").unwrap().as_u64(),
+        Some(2)
+    );
+    assert!(matches!(
+        b.finish(&mut exchange_b, &transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    let (row, _) = service.with(|auth| auth.devices[&a.node].clone());
+    assert!(row.member && row.kid == b.kid && row.generation == 2);
+}
+
+/// #108: the documented recovery works — revoke the live membership and
+/// a replacement key joins without a conflict (still an explicit KGuard
+/// allow, never auto-approved); the new row is generation 2 with a fresh
+/// MemberCert while the old key's revocation floor and history stay.
+#[test]
+fn review_revoked_membership_allows_explicit_replacement_key() {
+    let (service, transport) = service();
+    let mut a = SimDevice::new(0x00A1_0000_0000_C002, 0xC3);
+    let (mut exchange, _, events) = a.start(&service, &transport, T0);
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        a.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "a",
+        T0 + 10,
+    )
+    .unwrap();
+    a.finish(&mut exchange, &transport);
+    let old_cert = service
+        .with(|auth| auth.devices[&a.node].member_cert.clone())
+        .0;
+    let (revoked, _) = service.with(|auth| {
+        auth.revoke(
+            KGUARD,
+            RevokeRequest {
+                device: a.node,
+                expected_generation: 1,
+                reason: RevocationReason::Replaced,
+                key: "rv".into(),
+            },
+            T0 + 20,
+        )
+    });
+    assert_eq!(
+        json(&revoked.unwrap()).get("state").unwrap().as_str(),
+        Some("committed")
+    );
+    // The replacement key joins on the removed row: the node's removal
+    // history shows but there is no conflict, and nothing is approved
+    // without KGuard.
+    let mut b = SimDevice::new(a.node, 0xC4);
+    let (mut exchange, outcome, events) = b.start(&service, &transport, T0 + 30_000);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let request = events
+        .iter()
+        .find(|(_, f)| f.contains("join.request"))
+        .unwrap();
+    assert!(
+        request.1.contains("\"kid_conflict\":false"),
+        "{}",
+        request.1
+    );
+    assert!(
+        request.1.contains("\"previously_removed\":true"),
+        "{}",
+        request.1
+    );
+    let committed = decide(
+        &service,
+        request_id(&events).unwrap(),
+        b.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 30_010,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&committed).get("generation").unwrap().as_u64(),
+        Some(2)
+    );
+    assert!(matches!(
+        b.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    assert_eq!(b.site.as_ref().unwrap().member.assignment_generation, 2);
+    // The row is the replacement's: new key, generation 2, a fresh
+    // MemberCert — the old cert does not come back as a new generation.
+    let (row, _) = service.with(|auth| auth.devices[&a.node].clone());
+    assert!(row.member && row.kid == b.kid && row.generation == 2);
+    assert_ne!(row.member_cert, old_cert);
+    let claims = cert_decode(&row.member_cert).unwrap();
+    assert_eq!(claims.assignment_generation, 2);
+    assert_eq!(claims.pubkey, b.pubkey);
+    // The revocation floor is kept here: the RRS still revokes this node
+    // below generation 2, for the recorded reason.
+    let rrs = service.with(|auth| auth.latest_rrs()).0.unwrap();
+    let (set, ok) = revocation_object_verify(
+        &rrs,
+        &testkit::sak().pubkey(),
+        testkit::SITE,
+        testkit::network(),
+    )
+    .unwrap();
+    assert!(ok);
+    let entry = set.entries.iter().find(|e| e.node_id == a.node).unwrap();
+    assert_eq!(entry.min_generation, 2);
+    assert_eq!(entry.reason, RevocationReason::Replaced);
+}
+
+/// #108 across a daemon restart: the removed row, the RRS and the
+/// ledger reload from SQLite, and the same replacement flow completes
+/// at generation 2.
+#[test]
+fn review_replacement_flow_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-site-replace-{}-{}",
+        std::process::id(),
+        T0
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("site.db");
+    let node = 0x00A1_0000_0000_C003;
+    {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let mut a = SimDevice::new(node, 0xC5);
+        let (mut exchange, _, events) = a.start(&service, &transport, T0);
+        decide(
+            &service,
+            request_id(&events).unwrap(),
+            node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT,
+            },
+            "a",
+            T0 + 10,
+        )
+        .unwrap();
+        a.finish(&mut exchange, &transport);
+        let (revoked, _) = service.with(|auth| {
+            auth.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Replaced,
+                    key: "rv".into(),
+                },
+                T0 + 20,
+            )
+        });
+        revoked.unwrap();
+        // dropped: the daemon stops with the removed row on disk
+    }
+    let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+    let mut b = SimDevice::new(node, 0xC6);
+    let (mut exchange, outcome, events) = b.start(&service, &transport, T0 + 30_000);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let request = events
+        .iter()
+        .find(|(_, f)| f.contains("join.request"))
+        .unwrap();
+    assert!(
+        request.1.contains("\"kid_conflict\":false"),
+        "{}",
+        request.1
+    );
+    let committed = decide(
+        &service,
+        request_id(&events).unwrap(),
+        node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 30_010,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&committed).get("generation").unwrap().as_u64(),
+        Some(2)
+    );
+    assert!(matches!(
+        b.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    let (row, _) = service.with(|auth| auth.devices[&node].clone());
+    assert!(row.member && row.kid == b.kid && row.generation == 2);
+    // The RRS floor and the ledger chain reloaded intact (open()
+    // verifies the chain); the node stays revoked below generation 2.
+    let rrs = service.with(|auth| auth.latest_rrs()).0.unwrap();
+    let (set, ok) = revocation_object_verify(
+        &rrs,
+        &testkit::sak().pubkey(),
+        testkit::SITE,
+        testkit::network(),
+    )
+    .unwrap();
+    assert!(ok);
+    assert!(set
+        .entries
+        .iter()
+        .any(|e| e.node_id == node && e.min_generation == 2));
+    drop(service);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #107 follow-through: a decision applies to the membership as it is
+/// at commit. An allow delayed past an approve+revoke cannot resurrect
+/// the old request (delivered → NOT_FOUND), a stored kid_conflict flag
+/// clears once the member is gone, and a recorded decision replays
+/// without committing anything new.
+#[test]
+fn review_late_allow_follows_the_current_membership() {
+    let (service, transport) = service();
+    let mut a = SimDevice::new(0x00A1_0000_0000_C004, 0xC7);
+    let (mut exchange, _, events) = a.start(&service, &transport, T0);
+    let id_a = request_id(&events).unwrap();
+    decide(
+        &service,
+        id_a,
+        a.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "a",
+        T0 + 10,
+    )
+    .unwrap();
+    a.finish(&mut exchange, &transport);
+    // B's request while A is a member: kid_conflict is stored and shown
+    // to KGuard, but it is not the final word.
+    let mut b = SimDevice::new(a.node, 0xC8);
+    let (mut exchange_b, outcome, events) = b.start(&service, &transport, T0 + 100);
+    assert!(matches!(outcome, Outcome::Waiting));
+    let request = events
+        .iter()
+        .find(|(_, f)| f.contains("join.request"))
+        .unwrap();
+    assert!(request.1.contains("\"kid_conflict\":true"), "{}", request.1);
+    let id_b = request_id(&events).unwrap();
+    // Revoke A; a delayed allow for the delivered old request is
+    // NOT_FOUND, not a resurrection.
+    let (revoked, _) = service.with(|auth| {
+        auth.revoke(
+            KGUARD,
+            RevokeRequest {
+                device: a.node,
+                expected_generation: 1,
+                reason: RevocationReason::Replaced,
+                key: "rv".into(),
+            },
+            T0 + 200,
+        )
+    });
+    revoked.unwrap();
+    assert_eq!(
+        decide(
+            &service,
+            id_a,
+            a.node,
+            Verdict::Allow {
+                role: ROLE_ENDPOINT
+            },
+            "a-late",
+            T0 + 210
+        )
+        .unwrap_err()
+        .code,
+        "NOT_FOUND"
+    );
+    // B's stored kid_conflict is stale — the delayed allow commits the
+    // replacement at generation 2.
+    let committed = decide(
+        &service,
+        id_b,
+        b.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "b",
+        T0 + 220,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&committed).get("generation").unwrap().as_u64(),
+        Some(2)
+    );
+    assert!(matches!(
+        b.finish(&mut exchange_b, &transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    // A decision recorded for next_attempt stays open; after the
+    // membership is revoked, replaying it returns the stored answer and
+    // commits nothing — the device stays removed.
+    let mut c = SimDevice::new(0x00A1_0000_0000_C005, 0xC9);
+    let (_, _, events) = c.start(&service, &transport, T0 + 300);
+    let id_c = request_id(&events).unwrap();
+    service.tick(T0 + 300 + 2_000); // KGuard silent → pending, request open
+    transport.take();
+    let first = decide(
+        &service,
+        id_c,
+        c.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "c",
+        T0 + 2_310,
+    )
+    .unwrap();
+    assert_eq!(
+        json(&first).get("applied").unwrap().as_str(),
+        Some("next_attempt")
+    );
+    let (revoked, _) = service.with(|auth| {
+        auth.revoke(
+            KGUARD,
+            RevokeRequest {
+                device: c.node,
+                expected_generation: 1,
+                reason: RevocationReason::Lost,
+                key: "rvc".into(),
+            },
+            T0 + 2_320,
+        )
+    });
+    revoked.unwrap();
+    let replay = decide(
+        &service,
+        id_c,
+        c.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "c",
+        T0 + 2_330,
+    )
+    .unwrap();
+    assert_eq!(replay, first);
+    let (still_removed, _) = service.with(|auth| !auth.devices[&c.node].member);
+    assert!(still_removed);
+}
