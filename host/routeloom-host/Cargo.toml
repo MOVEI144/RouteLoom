@@ -25,6 +25,10 @@ rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 routeloom-edhoc = { path = "../routeloom-edhoc" }
 routeloom-join = { path = "../routeloom-join" }
 routeloom-provision = { path = "../routeloom-provision" }
+# Authority channel (03 §5.3, G-SEC P5 PR1): RLRES1 purpose-4 responder,
+# envelope bodies and AES-GCM channel crypto — reused, never re-implemented.
+routeloom-keysched = { path = "../routeloom-keysched" }
+zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 # The TUI's parser validates that the JSON this daemon emits stays compatible

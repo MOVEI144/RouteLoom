@@ -1,6 +1,6 @@
 # 03 — 鍵階層・Wire v2 epochとの対応・SecurityProviderの変更
 
-用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
+用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
 
 ## 1. 鍵の木
 
@@ -137,7 +137,7 @@ type: 1 JoinConfirm, 2 GroupKeyUpdate, 3 GroupKeyActivate, 4 GroupKeyPull, 5 Rev
       6 RemovalNotice, 7 GrantRenew, 8 TimeSample
 ```
 
-機器→gatewayはWire Control（FrameType 22）の新subtype、128Bを超えればControlObject（kind案 5 = AuthorityEnvelope）で、機器⇄gatewayのE2E context上を運ぶ。gatewayはUSB `0x43/0x44`（[07](07-host-api-tooling.md) §4）でhostへ渡し、**中身を復号できない**。authority側のreplay窓・counterはhostのstoreが持つ。
+機器→gatewayはWire Control（FrameType 22）の新subtype、128Bを超えればControlObject（kind案 5 = AuthorityEnvelope）で、機器⇄gatewayのE2E context上を運ぶ。gatewayはUSB `0x64/0x65` fragment（＋`0x66/0x67` site-state、[07](07-host-api-tooling.md) §4）でhostへ渡し、**中身を復号できない**。authority側のreplay窓・counterはhostのstoreが持つ。body形式・GK-id・fragment形式は `protocol/sdkv1-golden/authority/` の共通vectorで凍結（G-SEC P5 PR1）。
 
 ### 5.4 sleep端末
 
