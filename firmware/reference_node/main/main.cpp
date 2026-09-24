@@ -1180,11 +1180,13 @@ extern "C" void app_main(void) {
   status = config_target.add_journal(
       routeloom::endpoint::kConfigNamespaceSdk, config_journal);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_TRUST_STORE
   // Kind-5 trust-manifest intake and the trust-status query answer from
   // the same store the TrustView verifier reads: root-signed RTM1 images
   // update the verifier's key set in-band, governed by signatures and the
   // security floor — never by transport claims.
   config_target.attach_trust_store(trust_store, config_floor);
+#endif
   runtime.node().set_config_sink(&config_target);
   // The committed config image drives the live relay gate from now on
   // (field 3 relay_allowed); attach after the sink so the gate reflects the
