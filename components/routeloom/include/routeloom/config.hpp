@@ -8,20 +8,19 @@
 //   - the schema/TLV layer: sorted typed TLV snapshots, patch -> next-
 //     snapshot merge, the §5.4 snapshot hash and the SDK ns=1/schema=1
 //     field rules,
-//   - the issuer side: canonical RCC1 construction, the durable outbox and
-//     the commit order persist -> real-SHA-256 operation_hash ->
-//     SingleAuthority commit -> readback-verified -> sign -> retransmit the
-//     SAME blob. NO_CHANGE is decided before signing and consumes no
-//     revision and no flash,
+//   (the issuer side — canonical construction, the durable outbox and the
+//   commit order — lives in the Rust host, never on the device: this unit
+//   is the target/verifier side only),
 //   - the target side: ConfigChallenge issuance (nonce128, boot
 //     incarnation, local monotonic expiry <= 30 s), the per-(Network,
 //     target, namespace) ConfigJournal phase machine
 //     IDLE->...->ACTIVE(+INTERRUPTED/QUARANTINED), CAS on
 //     expected_revision, STALE_REVISION/CONFLICT/duplicate-id semantics,
-//     dual-slot journal persistence with write->commit->readback before
-//     every phase advance, the §6.3 one-slot-loss rule, result records
-//     8x300 s, one active transaction, the 1/min+burst1 acceptance budget
-//     and the kind-3 permit reassembly bound,
+//     dual-slot journal persistence with the RLF1 floor reservation before
+//     and write->commit->readback after every phase advance, the §6.3
+//     one-slot-loss rule, result records 8x300 s, one active transaction,
+//     the 1/min+burst1 acceptance budget and the kind-3 permit
+//     reassembly bound,
 //   - the provider contract: side-effect-free validate/prepare, idempotent
 //     async apply/restore via completion tokens, readback verification,
 //     restore-failure -> QUARANTINED, no whole-board erase,
@@ -48,6 +47,7 @@
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/security.hpp"
+#include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -63,8 +63,10 @@ constexpr std::uint32_t kConfigChallengeMaxMs = 30000;    // challenge_max_ms
 constexpr std::uint32_t kConfigReassemblyTimeoutMs = 10000;  // reassembly_timeout_ms
 constexpr std::size_t kConfigPermitObjectMax = 1024;      // object_max
 constexpr std::size_t kConfigPermitEncodedMax = 774;      // permit_encoded_max
-constexpr std::size_t kConfigIssuerOutboxSlots = 4;       // issuer_outbox
-constexpr std::size_t kConfigOutboxRecordBytes = 2048;    // fits command+permit+crc
+// Recovery wire version the kind-4 intake accepts (RecoveryInfo8 field):
+// 1 = the legacy recovery command shape, 2 = RCR2. Raised with the codec,
+// never ahead of it.
+constexpr std::uint8_t kRecoveryWireVersion = 2;
 constexpr std::uint32_t kConfigAcceptPerMinute = 1;       // accepted_per_minute
 constexpr std::uint32_t kConfigAcceptBurst = 1;           // burst
 constexpr std::uint32_t kConfigAcceptWindowMs = 60000;
@@ -112,10 +114,37 @@ constexpr std::size_t kConfigPermitAadSize = sizeof(kConfigPermitDomain) + 8 + 8
 Status config_permit_aad(NetworkId network, NodeId target, std::uint16_t config_namespace,
                          ByteBuffer<kConfigPermitAadSize>& out) noexcept;
 
+// The recovery-object external_aad (04 §4.7, 06 §6.3): a domain separate
+// from the permit aad so a kind-4 recovery envelope can never verify as a
+// kind-3 permit (and vice versa) under any profile.
+inline constexpr char kConfigRecoveryDomain[] = "RouteLoom/config-recover/v2";
+constexpr std::size_t kConfigRecoveryAadSize =
+    sizeof(kConfigRecoveryDomain) + 8 + 8 + 2;
+Status config_recovery_aad(NetworkId network, NodeId target,
+                           std::uint16_t config_namespace,
+                           ByteBuffer<kConfigRecoveryAadSize>& out) noexcept;
+
 // SDK namespace=1 / schema=1 field rules (04 §4.2): field 1 diagnostics_level
 // u8 0..2, field 2 discovery_enabled bool, field 3 relay_allowed bool,
 // field 4 migration_policy u8 0..2. Unknown ids/types are rejected.
 Status config_sdk_field_validate(const endpoint::ConfigField& field) noexcept;
+
+// The SDK omitted-field defaults (04 §4.2): a snapshot that omits a field
+// means diagnostics Normal (2), discovery enabled, relay allowed and the
+// Observe migration policy — the complete default state an empty snapshot
+// denotes. Providers expand these when a recovery baseline omits fields;
+// unknown ids fail closed (no silent defaulting into an effect).
+Status config_sdk_field_default(std::uint16_t field_id, std::uint8_t& value) noexcept;
+
+// The four SDK effective values in field-id order (1 diagnostics, 2
+// discovery, 3 relay, 4 migration). Decode fills omissions with
+// config_sdk_field_default (04 §4.2) — the complete state an empty or
+// partial snapshot denotes. Providers expand recovery baselines through
+// this; unknown ids fail closed (no silent defaulting into an effect).
+struct ConfigSdkEffective {
+  std::uint8_t values[4];
+};
+Status config_sdk_effective_values(ByteView tlv, ConfigSdkEffective& out) noexcept;
 
 // Per-namespace schema validation for application namespaces. Registered
 // with the namespace; SDK ns=1 uses config_sdk_field_validate instead.
@@ -192,20 +221,37 @@ class ConfigAuthorityVerifier {
   virtual Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                                endpoint::EncodedConfigCommand& payload,
                                bool& verified) noexcept = 0;
-};
-
-// The issuer-side signing surface (production: the same #10 provider).
-// Sign only AFTER the ledger commit read back — the signature asserts
-// "issuer committed, then signed" (04 §4.3).
-class ConfigPermitSigner {
- public:
-  virtual ~ConfigPermitSigner() = default;
-  virtual bool ready() const noexcept = 0;
-  virtual SecurityProfile security_profile() const noexcept {
-    return SecurityProfile::Development;
+  // The same contract for a kind-4 recovery object (RCR2 payload, the
+  // recovery-domain external_aad — never the permit aad). Authority
+  // generation changes are root-authorized trust updates (RTM1), never
+  // recovery commands. The default refuses — a profile without a recovery
+  // envelope must fail closed, never silently accept.
+  virtual Status verify_recovery(const ConfigPermitContext& context,
+                                 ByteView object,
+                                 endpoint::EncodedRecoveryIntent& payload,
+                                 bool& verified) noexcept {
+    (void)context;
+    (void)object;
+    (void)payload;
+    verified = false;
+    return Status::error(StatusCode::Unsupported,
+                       "config recovery profile unsupported");
   }
-  virtual Status sign(const endpoint::ConfigCommand& command, ByteView canonical,
-                      ByteBuffer<kConfigPermitObjectMax>& permit) noexcept = 0;
+  // Decision-time generation policy: fixed profiles (dev, static COSE)
+  // pin to the deployed `configured_pin` — equality, never a range. The
+  // trust view instead serves any generation at or above the combined
+  // RLT1/RLF1 floor. The journal consults this at accept time; the
+  // signature verification above stays authoritative for key resolution.
+  virtual bool generation_permitted(std::uint32_t generation,
+                                    std::uint32_t configured_pin) const noexcept {
+    return generation == configured_pin;
+  }
+  // Policy epoch: the trust store's store_epoch for the trust view — the
+  // journal captures it at verify time and re-checks it before the
+  // DECIDED commit, so a rotation landing in between cannot smuggle an
+  // old-epoch verdict into a new-epoch decision. Fixed profiles return
+  // the constant 0: their policy never moves.
+  virtual std::uint32_t policy_epoch() const noexcept { return 0; }
 };
 
 // Per-namespace dual-slot journal persistence. read() fills the whole
@@ -215,15 +261,6 @@ class ConfigPermitSigner {
 class ConfigJournalStorage {
  public:
   virtual ~ConfigJournalStorage() = default;
-  virtual Status read(std::uint8_t slot, MutableByteView target) noexcept = 0;
-  virtual Status write(std::uint8_t slot, ByteView data) noexcept = 0;
-};
-
-// Issuer outbox persistence: kConfigIssuerOutboxSlots records of up to
-// kConfigOutboxRecordBytes each. Same power-loss contract.
-class ConfigOutboxStorage {
- public:
-  virtual ~ConfigOutboxStorage() = default;
   virtual Status read(std::uint8_t slot, MutableByteView target) noexcept = 0;
   virtual Status write(std::uint8_t slot, ByteView data) noexcept = 0;
 };
@@ -243,8 +280,29 @@ class ConfigProvider {
                          ByteView next_snapshot) noexcept = 0;
   virtual Status apply(std::uint16_t config_namespace, ByteView next_snapshot,
                        OperationToken& token) noexcept = 0;
+  // Idempotent re-application of a complete desired state. An empty
+  // snapshot denotes the defined initial baseline (the SDK full
+  // defaults): providers expand it, never skip it, and fail closed when
+  // their schema cannot express it.
   virtual Status restore(std::uint16_t config_namespace, ByteView snapshot,
                          OperationToken& token) noexcept = 0;
+  // Recovery capability probe (04 §4.7): whether this provider can restore
+  // `baseline` as a complete desired state AND prove it through read_active
+  // — live effects included, not just the persisted blob. Side-effect-free.
+  // A provider that cannot drive or verify some baseline value (an
+  // unconnected field it would have to change, an unknown schema) answers
+  // Unsupported so the journal refuses before consuming the authorization —
+  // never a success the readback cannot prove. The default refuses: only
+  // providers that opt in serve the recovery lane.
+  virtual Status validate_recovery(std::uint16_t config_namespace,
+                                   std::uint16_t schema,
+                                   ByteView baseline) noexcept {
+    (void)config_namespace;
+    (void)schema;
+    (void)baseline;
+    return Status::error(StatusCode::Unsupported,
+                         "config provider recovery unsupported");
+  }
   // Poll a completion token: done=true carries the terminal Status.
   virtual Status poll(OperationToken token, bool& done, Status& outcome) noexcept = 0;
   // The actually-active snapshot bytes (readback verification input).
@@ -357,7 +415,9 @@ struct ConfigJournalConfig {
   std::uint16_t schema{1};
   std::uint64_t boot_incarnation{0};               // nonzero, fresh per boot
   NodeId authorized_issuer{kInvalidNodeId};        // the single allowed authority
-  std::uint32_t authority_generation{0};           // the permitted generation
+  // The deployed generation pin for FIXED-profile verifiers (dev, static
+  // COSE). The trust view ignores it and serves the live RLT1/RLF1 floor.
+  std::uint32_t authority_generation{0};
   std::uint32_t challenge_valid_ms{kConfigChallengeMaxMs};  // <= 30 s
 };
 
@@ -382,20 +442,36 @@ struct ConfigStats {
   std::uint32_t maintenance_refusals{0};
 };
 
+// The durable record's kind (journal format 2 header byte): a recovery
+// intent and its completion carry the same phase values as a normal
+// transaction's DECIDED/ACTIVE would, but boot must resume them through
+// the recovery ceremony — never through the normal continuation.
+enum class ConfigRecordKind : std::uint8_t {
+  Standard = 0,
+  RecoveryIntent = 1,
+  RecoveryComplete = 2,
+};
+
 // One (Network, target, namespace) ConfigJournal: the phase machine, the
 // dual-slot durable record, the challenge issuer, the permit reassembly
 // bound and the result history. Not thread-safe — the Owner serializes
 // calls; provider calls never block the radio task (async tokens).
+//
+// Every durable phase advance reserves its store generation (and, for
+// decisions, its revision) in the RLF1 security floor BEFORE the journal
+// record is written; a failed journal write consumes the reservation —
+// generations are never reused. The floor is a constructor dependency:
+// without a usable floor the journal refuses privileged intake.
 class ConfigJournal {
  public:
   ConfigJournal(const ConfigJournalConfig& config, ConfigJournalStorage& storage,
-                ConfigAuthorityVerifier& verifier, EntropySource& entropy,
-                ConfigRateLimiter& rate_limiter, ConfigProvider* provider,
-                const ConfigSchemaValidator* validator,
+                SecurityFloorStore& floor, ConfigAuthorityVerifier& verifier,
+                EntropySource& entropy, ConfigRateLimiter& rate_limiter,
+                ConfigProvider* provider, const ConfigSchemaValidator* validator,
                 ConfigMaintenanceGate* gate) noexcept;
 
-  // Boot recovery: verify both slots, adopt the newest verifiable record and
-  // resolve its phase (04 §4.7 + 06 §6.3):
+  // Boot recovery: verify both slots against the security floor, adopt the
+  // newest verifiable record and resolve its phase (04 §4.7 + 06 §6.3):
   //   - record ACTIVE        -> restore the confirmed snapshot (continuation
   //                             of decided config, not a new command run),
   //   - DECIDED pre-intent   -> keep the consumed revision, mark INTERRUPTED
@@ -405,8 +481,12 @@ class ConfigJournal {
   //                             unrestorable -> QUARANTINED,
   //   - one slot lost        -> the survivor is a "known value" only:
   //                             CONFIG_STORAGE_UNCERTAIN, no update intake,
-  //   - both slots lost      -> no auto reset to revision 0; quarantine,
-  //                             explicit recovery/re-provisioning required.
+  //   - both slots lost      -> no auto reset to revision 0; quarantine —
+  //                             the floor's J/R name the next recovery, and
+  //                             explicit recovery/re-provisioning is required,
+  //   - journal newer than the floor -> the save order was violated (or the
+  //                             floor was lost and mis-seeded): stop, never
+  //                             mint from unknown counters.
   Status initialize(MonotonicMs now_ms) noexcept;
 
   // Control22 handlers. The challenge carries a fresh nonce128, this boot
@@ -419,14 +499,24 @@ class ConfigJournal {
   Status handle_status_query(const endpoint::ControlStatusQuery& query,
                              MonotonicMs now_ms,
                              endpoint::EncodedServicePayload& out) noexcept;
+  // RecoveryInfo query (subtype 7 → 8): the read-only recovery baseline —
+  // namespace/schema, the floor's J/R, impairment, the known survivor hash
+  // (or explicit unknown) and the accepted recovery version/profile.
+  // Served while impaired; refused when the floor cannot name J/R.
+  Status handle_recovery_info_query(const endpoint::RecoveryInfoQuery& query,
+                                    MonotonicMs now_ms,
+                                    endpoint::EncodedServicePayload& out) noexcept;
 
-  // Kind-3 permit object ingress (05 §5.5): manifest first, bounded chunks,
-  // 10 s reassembly, digest verified before the permit is submitted. An
-  // object ACK Ok means assembly completed — never CONFIG_ACTIVE.
+  // Object admission gate (05 §5.5): the target owns the single
+  // reassembly slot and only asks whether this journal would take an
+  // object right now. Kind-3 permits need initialized, proven storage;
+  // the kind-4 recovery lane is the ONLY intake that stays open while
+  // quarantined or uncertain — a signed recovery command is the evidence
+  // an impaired journal accepts. Stateless: no slot is reserved here,
+  // completion dispatches to submit_permit/submit_recovery by kind, and
+  // an object ACK Ok means assembly completed — never CONFIG_ACTIVE.
   Status note_object_manifest(const autonomy::ControlObjectPayload& manifest,
                               MonotonicMs now_ms) noexcept;
-  Status note_object_chunk(const autonomy::ObjectChunkPayload& chunk,
-                           MonotonicMs now_ms) noexcept;
 
   // Verify -> dedup -> admission -> validate -> PREPARED -> DECIDED ->
   // APPLY_INTENT -> apply-start. Returns the Status for the caller plus the
@@ -436,23 +526,22 @@ class ConfigJournal {
   Status submit_permit(ByteView permit, MonotonicMs now_ms, bool clock_known,
                        ConfigVerdict& verdict) noexcept;
 
+  // Verify -> dedup -> RecoveryIntent -> restore -> readback ->
+  // RecoveryComplete on a signed RCR2 command (impaired journals only):
+  // reserves the attested exact-next generation and revision, persists
+  // the intent, re-applies the signed baseline to the provider and, only
+  // after the readback proves bytes, hash and live effects, commits the
+  // completion to both slots and re-opens intake. Authority generation
+  // changes arrive as root-authorized trust updates (RTM1), never here.
+  // No unsigned entry to this ceremony exists: a fresh journal provisions
+  // through the normal first permit, and floor (re-)provisioning is the
+  // explicit provision_seed maintenance entry — never this lane.
+  Status submit_recovery(ByteView object, MonotonicMs now_ms,
+                         ConfigVerdict& verdict) noexcept;
+
   // Drives the async provider completion (APPLYING/VERIFYING/restore), the
   // reassembly timeout and result-record expiry.
   void poll(MonotonicMs now_ms) noexcept;
-
-  // Explicit operator recovery from STORAGE_UNCERTAIN or quarantine:
-  // attests a fresh store generation and re-establishes intake. The
-  // surviving "known value" (if any) is adopted under the new generation;
-  // the proven revision floor is never regressed, so pre-loss permits can
-  // never re-validate. Never invoked implicitly. When NO verifiable record
-  // survives, adopting a base would silently fabricate state — an
-  // undelegated authority decision — so recovery stays impaired unless
-  // `reprovision` explicitly attests this is a re-provisioning under a
-  // fresh trust generation (04 §4.7: total loss requires re-provisioning,
-  // never an automatic return to revision 0). The flag is unnecessary
-  // whenever a survivor exists; the survivor is adopted as-is either way.
-  Status recover(std::uint32_t new_store_generation, MonotonicMs now_ms,
-                 bool reprovision) noexcept;
 
   endpoint::ConfigPhase phase() const noexcept { return phase_; }
   std::uint64_t decision_revision() const noexcept { return decision_revision_; }
@@ -460,6 +549,9 @@ class ConfigJournal {
   const Digest256& active_hash() const noexcept { return active_hash_; }
   ByteView active_snapshot() const noexcept { return active_snapshot_.view(); }
   bool initialized() const noexcept { return initialized_; }
+  // The RLF1 floor this journal reserves from (targets also serve it to
+  // recovery queries; the reference is stable for the journal's life).
+  SecurityFloorStore& floor() noexcept { return floor_; }
   // Capability advertisement (04 §capabilities): the configured verifier's
   // wire bit when it is provisioned, 0 otherwise — an unready profile is
   // never advertised.
@@ -468,6 +560,16 @@ class ConfigJournal {
   }
   bool uncertain() const noexcept { return uncertain_; }
   bool quarantined() const noexcept { return quarantined_; }
+  // Whether an AdoptKnown recovery could bind a baseline right now: a
+  // proven Standard survivor (any phase — adopt already resolved the
+  // confirmed-active snapshot) or a completed recovery. Unproven intents
+  // and failed-recovery leftovers are never survivors.
+  bool recovery_survivor_known() const noexcept {
+    if (!has_active_) return false;
+    if (durable_.kind == ConfigRecordKind::Standard) return true;
+    return durable_.kind == ConfigRecordKind::RecoveryComplete &&
+           durable_.phase == endpoint::ConfigPhase::Active;
+  }
   // True while an operation is between DECIDED and its terminal record:
   // maintenance/other radio operations consult this for exclusivity.
   bool in_progress() const noexcept { return txn_.active; }
@@ -494,6 +596,7 @@ class ConfigJournal {
     std::uint32_t store_generation{0};
     endpoint::ConfigPhase phase{endpoint::ConfigPhase::Idle};
     endpoint::ConfigReason reason{endpoint::ConfigReason::Ok};
+    ConfigRecordKind kind{ConfigRecordKind::Standard};
     NetworkId network{0};
     NodeId target{kInvalidNodeId};
     std::uint16_t config_namespace{0};
@@ -528,6 +631,7 @@ class ConfigJournal {
     bool active{false};
     bool applying{false};   // provider.apply token outstanding
     bool restoring{false};  // provider.restore token outstanding
+    bool recovery{false};   // RCR2 ceremony: intent/complete kinds, no rollback
     bool pending_persist{false};  // terminal record write deferred by a storage fault
     bool intent_pending{false};   // APPLY_INTENT persist + apply deferred to poll()
     endpoint::ConfigPhase pending_phase{endpoint::ConfigPhase::Idle};
@@ -566,16 +670,40 @@ class ConfigJournal {
     std::uint32_t valid_for_ms{0};
   };
 
-  struct Reassembly {
-    bool active{false};
-    autonomy::ControlObjectPayload manifest{};
-    std::array<std::uint8_t, kConfigPermitObjectMax> buffer{};
-    std::array<std::uint8_t, kConfigPermitObjectMax / 8> received{};
-    std::size_t received_count{0};
-    MonotonicMs started_ms{0};
+  // A recovery authorization past every check but the commit: the
+  // verified RCR2 identity, the exact-next counters, the resolved baseline
+  // and the policy epoch the signature verified under. Only
+  // submit_recovery builds one, and only commit_recovery_intent consumes
+  // it — the wire can never reach the ceremony past this point without a
+  // fresh authorization.
+  struct VerifiedRecovery {
+    NodeId authority{kInvalidNodeId};
+    std::uint32_t authority_generation{0};
+    std::uint64_t authority_sequence{0};
+    std::array<std::uint8_t, 16> operation_id{};
+    std::uint32_t new_store_generation{0};
+    std::uint64_t new_revision{0};
+    Digest256 command_digest{};
+    Digest256 baseline_hash{};
+    ByteView baseline{};
+    std::uint32_t verify_epoch{0};
   };
 
   Status store_record(const JournalRecord& record) noexcept;
+  // Single-slot 3-phase write (pending image, commit seal, readback) with
+  // the proven-floor update — the shared leg of store_record/store_twins.
+  Status write_slot(std::uint8_t slot, const JournalRecord& record) noexcept;
+  // Identical completion bytes to both slots with readback each: a
+  // RecoveryComplete survives any single-slot loss without a generation
+  // gap, so the next boot adopts it instead of demanding a new
+  // authorization. Partial twins resume through the mirror leg.
+  Status store_twins(const JournalRecord& record) noexcept;
+  // Reserve the next store generation (and the transaction's decision
+  // revision, if higher than the floor) in the RLF1 floor BEFORE the
+  // journal record is written. On success `reserved_j` names the
+  // generation the record MUST carry; a later journal-store failure
+  // consumes it — the RAM counters follow the reservation either way.
+  Status reserve_generation(const Transaction& txn, std::uint32_t& reserved_j) noexcept;
   Status persist_phase(endpoint::ConfigPhase phase, endpoint::ConfigReason reason,
                        const Transaction& txn) noexcept;
   Status decode_slot(std::uint8_t slot, JournalRecord& record,
@@ -585,6 +713,9 @@ class ConfigJournal {
   Status start_restore(Transaction& txn, endpoint::ConfigReason reason) noexcept;
   Status finish_transaction(Transaction& txn, endpoint::ConfigPhase phase,
                             endpoint::ConfigReason reason) noexcept;
+  // Wedge the live state honestly when the floor is spent: no record can
+  // ever commit again, so intake stops and status reports quarantine.
+  void quarantine_ram() noexcept;
   Transaction& boot_txn() noexcept;  // fills boot_txn_; callers take it by ref
   Status record_result(const Transaction& txn, endpoint::ConfigPhase phase,
                        endpoint::ConfigReason reason, MonotonicMs now_ms) noexcept;
@@ -595,13 +726,34 @@ class ConfigJournal {
   Status validate_command(const endpoint::ConfigCommand& command,
                           const Digest256& digest, MonotonicMs now_ms,
                           bool clock_known, ConfigVerdict& verdict) noexcept;
-  Status reassemble_complete(MonotonicMs now_ms) noexcept;
   // The outstanding challenge carrying `nonce`, or nullptr — the permit
   // binds the nonce, so any live slot may satisfy it.
   const Challenge* find_challenge(const std::array<std::uint8_t, 16>& nonce) const noexcept;
+  // Maintenance/admission boundary (04 §4.8) shared by the permit and
+  // recovery lanes: a base→next transition that disables discovery,
+  // disables relay or changes the migration policy needs the gate's
+  // approval. An unknown base (empty view — the provider read failed on
+  // the recovery lane) treats every capability as enabled so any
+  // disabling in `next` consults the gate rather than slipping through.
+  Status check_maintenance_boundary(ByteView base_snapshot, ByteView next_snapshot,
+                                    MonotonicMs now_ms,
+                                    ConfigVerdict& verdict) noexcept;
+  // Recovery success leg shared by the live transaction and the boot
+  // resume: commits the RecoveryComplete twins and, only then, re-opens
+  // intake. The result record carries the recovery opid with the
+  // confirmed revision and hash.
+  Status finish_recovery_success(Transaction& txn) noexcept;
+  // Commits a verified recovery authorization: the acceptance budget,
+  // the epoch recheck, the floor reservation and the durable
+  // RecoveryIntent, then hands the restore to poll(). Consumes only a
+  // VerifiedRecovery — never raw wire bytes.
+  Status commit_recovery_intent(const VerifiedRecovery& recovery,
+                                ByteView signed_object, MonotonicMs now_ms,
+                                ConfigVerdict& verdict) noexcept;
 
   ConfigJournalConfig config_{};
   ConfigJournalStorage& storage_;
+  SecurityFloorStore& floor_;
   ConfigAuthorityVerifier& verifier_;
   EntropySource& entropy_;
   ConfigRateLimiter& rate_limiter_;
@@ -619,6 +771,9 @@ class ConfigJournal {
   std::uint64_t revision_floor_{0};    // highest decision revision proved this boot
   std::uint8_t active_slot_{0};
   bool has_active_{false};
+  // Both slots hold identical RecoveryComplete bytes (set at adopt): a
+  // lone complete still owes its mirror leg before intake re-opens.
+  bool complete_twins_{false};
   bool initialized_{false};
   bool uncertain_{false};
   bool quarantined_{false};
@@ -626,7 +781,6 @@ class ConfigJournal {
   std::array<Challenge, kConfigChallengeSlots> challenges_{};
   Transaction txn_{};
   Boot boot_{};
-  Reassembly reassembly_{};
   JournalRecord durable_{};          // newest persisted record (mirrors storage)
   std::array<ResultRecord, kConfigResultRecords> results_{};
   MonotonicMs last_now_ms_{0};
@@ -646,7 +800,7 @@ class ConfigJournal {
   // patch merge and the maintenance-boundary decode get their own field
   // scratch so no two live buffers ever alias.
   Transaction submit_txn_{};
-  JournalRecord record_scratch_{};  // persist_phase/recover record staging
+  JournalRecord record_scratch_{};  // persist_phase record staging
   std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> merge_a_{};
   std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> merge_b_{};
   std::array<endpoint::ConfigField, endpoint::kConfigFieldCountMax> fields_a_{};
@@ -656,123 +810,10 @@ class ConfigJournal {
   // provider read_active bytes for the restore/verify comparisons.
   Transaction boot_txn_{};
   std::array<std::uint8_t, endpoint::kConfigSnapshotMax> readback_{};
-};
-
-// --- Issuer side -------------------------------------------------------------------
-
-struct ConfigIssuerConfig {
-  NetworkId network{0};
-  NodeId authority{kInvalidNodeId};
-  // Conservative slack subtracted from the challenge's remaining lifetime
-  // so the signed apply_within_ms budget survives Host/USB wait and radio
-  // transit (04 §4.4).
-  std::uint32_t safety_margin_ms{200};
-};
-
-// A target's outstanding challenge as the issuer recorded it.
-struct IssuerChallenge {
-  bool valid{false};
-  NodeId target{kInvalidNodeId};
-  std::uint16_t config_namespace{0};
-  std::uint16_t schema{0};
-  std::uint64_t target_boot{0};
-  std::array<std::uint8_t, 16> nonce{};
-  std::uint64_t revision{0};
-  Digest256 active_hash{};
-  std::uint32_t valid_for_ms{0};
-  MonotonicMs received_ms{0};
-};
-
-struct IssuedOperation {
-  bool issued{false};
-  bool no_change{false};  // patch produced the base snapshot: nothing signed
-  std::uint8_t slot{0};
-  endpoint::EncodedConfigCommand canonical{};
-  ByteBuffer<kConfigPermitObjectMax> permit{};
-};
-
-// The Authority-side issuer (04 §4.3). Commit order is exactly:
-//   persist canonical command + outbox record -> real SHA-256
-//   operation_hash -> SingleAuthority commit -> commit/readback verified ->
-//   sign permit -> retransmit the SAME signed blob.
-// The global (generation, sequence, state_hash) serialization lives in
-// SingleAuthority; the per-target config_revision is a separate axis the
-// target checks on its own — the issuer never asks a target to replay the
-// global log.
-class ConfigIssuer {
- public:
-  ConfigIssuer(const ConfigIssuerConfig& config, SingleAuthority& ledger,
-               ConfigOutboxStorage& storage, ConfigPermitSigner& signer,
-               EntropySource& entropy) noexcept;
-
-  // Resume the durable outbox: pending records continue the commit order
-  // (the ledger's last operation_hash disambiguates whether the commit
-  // landed before the power loss); signed records are retransmittable.
-  Status initialize() noexcept;
-
-  // Build a Control22 ChallengeQuery1 body for transport to `target`.
-  Status challenge_query(NodeId target, std::uint16_t config_namespace,
-                         std::uint16_t schema,
-                         const std::array<std::uint8_t, 16>& client_nonce,
-                         endpoint::EncodedServicePayload& out) const noexcept;
-
-  // Record a received Challenge2 for (target, namespace). The remaining
-  // apply budget is measured from THIS receipt on the issuer's own clock —
-  // never from the target's or a wall clock.
-  Status note_challenge(const endpoint::ControlChallenge& challenge, NodeId target,
-                        MonotonicMs received_ms) noexcept;
-
-  // Issue a signed permit for a patch. `base_snapshot` must be the complete
-  // active snapshot bytes the issuer holds for the target; it is verified
-  // against the challenge's active_hash before signing. A no-op patch sets
-  // `no_change` and consumes neither a revision nor a flash write.
-  // `apply_budget_ms == 0` requests the whole remaining challenge budget.
-  Status propose(NodeId target, std::uint16_t config_namespace, std::uint16_t schema,
-                 ByteView base_snapshot, const endpoint::ConfigField* patch,
-                 std::uint16_t patch_count, std::uint32_t apply_budget_ms,
-                 MonotonicMs now_ms, IssuedOperation& out) noexcept;
-
-  // The same signed blob for retransmission — the outbox record is
-  // authoritative, so the bytes never change between sends.
-  Status signed_permit(std::uint8_t slot,
-                       ByteBuffer<kConfigPermitObjectMax>& out) noexcept;
-
-  // Retry entries that persisted but did not finish sign (e.g. after a
-  // power loss between outbox write and ledger commit).
-  Status resume_pending() noexcept;
-
-  std::uint8_t pending_count() const noexcept { return pending_; }
-  std::uint8_t signed_count() const noexcept { return signed_; }
-
- private:
-  struct ChallengeSlot {
-    bool used{false};
-    IssuerChallenge challenge{};
-  };
-
-  Status persist_entry(std::uint8_t slot, std::uint8_t state, ByteView canonical,
-                       ByteView permit) noexcept;
-  Status clear_entry(std::uint8_t slot) noexcept;
-  Status load_entry(std::uint8_t slot, std::uint8_t& state,
-                    endpoint::EncodedConfigCommand& canonical,
-                    ByteBuffer<kConfigPermitObjectMax>& permit) noexcept;
-  Status commit_and_sign(std::uint8_t slot, endpoint::EncodedConfigCommand& canonical,
-                         endpoint::ConfigCommand& command,
-                         ByteBuffer<kConfigPermitObjectMax>& permit) noexcept;
-  IssuerChallenge* find_challenge(NodeId target, std::uint16_t config_namespace) noexcept;
-  Status validate_patch_fields(std::uint16_t config_namespace,
-                               const endpoint::ConfigField* patch,
-                               std::uint16_t patch_count) const noexcept;
-
-  ConfigIssuerConfig config_{};
-  SingleAuthority& ledger_;
-  ConfigOutboxStorage& storage_;
-  ConfigPermitSigner& signer_;
-  EntropySource& entropy_;
-  std::array<ChallengeSlot, 4> challenges_{};
-  std::uint8_t pending_{0};
-  std::uint8_t signed_{0};
-  bool initialized_{false};
+  // Recovery-submit scratch (member .bss like the submit path): the
+  // verified RCR2 canonical and its decoded intent.
+  endpoint::EncodedRecoveryIntent recovery_canonical_{};
+  endpoint::ConfigRecoveryIntent recovery_intent_{};
 };
 
 }  // namespace routeloom

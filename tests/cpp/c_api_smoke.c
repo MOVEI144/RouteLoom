@@ -37,5 +37,20 @@ int main(void) {
     }
     if (RL_SECURITY_GROUP != 2 || RL_GROUP_PAYLOAD_MAX != 127u) return 9;
   }
+  /* ExpectedReply peer leases (issue #117): versioned vtable, attach and
+     binding-carrying RX entry. The legacy radio vtable layout is untouched. */
+  {
+    rl_reply_peer_vtable_t reply;
+    rl_reply_peer_vtable_init(&reply);
+    if (reply.struct_size != sizeof(reply) || reply.version != RL_REPLY_PEER_VERSION ||
+        reply.user != NULL || reply.acquire != NULL || reply.send_bound != NULL) {
+      return 10;
+    }
+    if (rl_attach_reply_peer(NULL, &reply) != RL_STATUS_INVALID_ARGUMENT ||
+        rl_attach_reply_peer(NULL, NULL) != RL_STATUS_INVALID_ARGUMENT) {
+      return 11;
+    }
+    rl_on_radio_receive_with_binding(NULL, 1, NULL, 0, 0, 1, 1, 0);
+  }
   return 0;
 }

@@ -16,6 +16,12 @@ ByteView dev_domain() noexcept {
       sizeof(kConfigDevPermitDomain)};
 }
 
+ByteView dev_recovery_domain() noexcept {
+  return ByteView{
+      reinterpret_cast<const std::uint8_t*>(kConfigDevRecoveryDomain),
+      sizeof(kConfigDevRecoveryDomain)};
+}
+
 }  // namespace
 
 // HMAC input = domain bytes (incl. NUL) || aad || canonical, streamed into
@@ -36,23 +42,77 @@ Status config_dev_permit_tag(
   return Status::success();
 }
 
-Status DevConfigPermitSigner::sign(
-    const endpoint::ConfigCommand& command, ByteView canonical,
-    ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
-  ByteBuffer<kConfigPermitAadSize> aad{};
-  const Status aad_ok = config_permit_aad(command.network, command.target,
-                                        command.config_namespace, aad);
+// Same construction under the recovery domain: input =
+// kConfigDevRecoveryDomain || NUL || recovery_aad || rcr2_canonical.
+Status config_dev_recovery_tag(
+    ByteView dev_key, ByteView aad, ByteView canonical,
+    std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept {
+  if (dev_key.size == 0 || aad.size != kConfigRecoveryAadSize ||
+      canonical.size < endpoint::kRcr2HeaderSize ||
+      canonical.size > endpoint::kRcr2MaxTotal) {
+    return Status::error(StatusCode::InvalidArgument, "config dev recovery tag input");
+  }
+  ScopeDigest mac{};
+  hmac_sha256(dev_key, dev_recovery_domain(), aad, canonical, mac);
+  std::memcpy(out.data(), mac.data(), kConfigDevPermitTagSize);
+  return Status::success();
+}
+
+Status DevConfigAuthorityVerifier::verify_recovery(
+    const ConfigPermitContext& context, ByteView object,
+    endpoint::EncodedRecoveryIntent& payload, bool& verified) noexcept {
+  verified = false;
+  if (dev_key_.size == 0) {
+    return Status::error(StatusCode::InvalidState, "config dev key unset");
+  }
+  // Variable RCR2 envelope: aad(46) || header+snapshot(112..624) || tag(16),
+  // within the same signed-object bound as the permit lane.
+  constexpr std::size_t kDevRecoveryObjectMin =
+      kConfigRecoveryAadSize + endpoint::kRcr2HeaderSize + kConfigDevPermitTagSize;
+  if (object.size < kDevRecoveryObjectMin ||
+      object.size > kConfigPermitObjectMax) {
+    return Status::error(StatusCode::ProtocolError, "config dev recovery size");
+  }
+  const ByteView aad{object.data, kConfigRecoveryAadSize};
+  const ByteView canonical{
+      object.data + kConfigRecoveryAadSize,
+      object.size - kConfigRecoveryAadSize - kConfigDevPermitTagSize};
+  const ByteView tag{object.data + object.size - kConfigDevPermitTagSize,
+                     kConfigDevPermitTagSize};
+
+  // Scope binding + MAC under the recovery domains — a kind-3 permit's aad
+  // and tag can never collide with this construction.
+  ByteBuffer<kConfigRecoveryAadSize> expected_aad{};
+  const Status aad_ok = config_recovery_aad(context.network, context.target,
+                                          context.config_namespace, expected_aad);
   if (!aad_ok.ok()) return aad_ok;
-  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
+  if (!constant_time_equal(aad, expected_aad.view())) {
+    return Status::success();  // foreign network/target/namespace: denied
+  }
+  std::array<std::uint8_t, kConfigDevPermitTagSize> expected_tag{};
   const Status tag_ok =
-      config_dev_permit_tag(dev_key_, aad.view(), canonical, tag);
+      config_dev_recovery_tag(dev_key_, aad, canonical, expected_tag);
   if (!tag_ok.ok()) return tag_ok;
-  ByteWriter writer(permit.writable());
-  Status status = writer.write_bytes(aad.view());
-  if (status.ok()) status = writer.write_bytes(canonical);
-  if (status.ok()) status = writer.write_bytes(ByteView{tag.data(), tag.size()});
-  if (!status.ok()) return status;
-  permit.size = writer.size();
+  if (!constant_time_equal(
+          tag, ByteView{expected_tag.data(), expected_tag.size()})) {
+    return Status::success();  // bad MAC: denied
+  }
+  // Authentic envelope: decode the RCR2 and apply the identity policy —
+  // including the generation pin: a recovery command signed under a
+  // different authority generation is not this journal's to act on.
+  const Status decoded =
+      endpoint::config_recovery_decode(canonical, recovery_intent_);
+  if (!decoded.ok()) return decoded;
+  if (recovery_intent_.network != context.network ||
+      recovery_intent_.target != context.target ||
+      recovery_intent_.config_namespace != context.config_namespace ||
+      recovery_intent_.authority != context.authorized_issuer ||
+      recovery_intent_.authority_generation != context.authority_generation) {
+    return Status::success();  // not the configured authority: denied
+  }
+  std::memcpy(payload.bytes.data(), canonical.data, canonical.size);
+  payload.size = canonical.size;
+  verified = true;
   return Status::success();
 }
 

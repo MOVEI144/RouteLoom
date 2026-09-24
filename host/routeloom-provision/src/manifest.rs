@@ -19,7 +19,7 @@ use crate::cbor;
 use crate::image::{image_body_encode, image_validate, TrustImage, TRUST_IMAGE_CONTENT_MAX};
 use crate::sha256::sha256;
 use crate::signer::RootSigner;
-use crate::{err, Code, Result};
+use crate::{err, Code, Error, Result};
 
 /// Maximum object: the shared `kAuthenticatedObjectMax` wire bound.
 pub const TRUST_MANIFEST_OBJECT_MAX: usize = 2048;
@@ -115,19 +115,24 @@ pub fn manifest_parse(object: &[u8]) -> Result<TrustManifestParts<'_>> {
 }
 
 /// Sig_structure = `84 6a "Signature1" bstr(protected) bstr(external_aad)
-/// bstr(payload)`. The AAD must be exactly the TRUST_MANIFEST_AAD_SIZE
-/// value from [`manifest_aad`] — wire-supplied context is never accepted.
-pub fn manifest_sig_structure(
+/// bstr(payload)` for the restricted COSE_Sign1 profile the trust
+/// manifest AND the RLCP1 config permit/recovery envelopes share (same
+/// tag/array/protected shape, same low-S rule — only the kid namespace
+/// and the external AAD differ). The AAD must be the profile's own
+/// expected context (36 B manifest, 45 B permit, 46 B recovery) —
+/// wire-supplied context is never accepted.
+pub fn cose_sig_structure(
     protected_bytes: &[u8],
     external_aad: &[u8],
     payload: &[u8],
 ) -> Result<Vec<u8>> {
     if protected_bytes.len() != TRUST_MANIFEST_PROTECTED_SIZE
-        || external_aad.len() != TRUST_MANIFEST_AAD_SIZE
+        || external_aad.is_empty()
+        || external_aad.len() > 64
         || payload.is_empty()
         || payload.len() > TRUST_IMAGE_CONTENT_MAX
     {
-        return err(Code::InvalidArgument, "manifest sig_structure fields");
+        return err(Code::InvalidArgument, "cose sig_structure fields");
     }
     let mut out = Vec::with_capacity(external_aad.len() + payload.len() + 32);
     out.push(0x84); // array(4)
@@ -136,6 +141,23 @@ pub fn manifest_sig_structure(
     cbor::write_bstr(&mut out, protected_bytes);
     cbor::write_bstr(&mut out, external_aad);
     cbor::write_bstr(&mut out, payload);
+    debug_assert!(out.len() <= TRUST_MANIFEST_SIG_MAX + 64);
+    Ok(out)
+}
+
+/// Sig_structure = `84 6a "Signature1" bstr(protected) bstr(external_aad)
+/// bstr(payload)`. The AAD must be exactly the TRUST_MANIFEST_AAD_SIZE
+/// value from [`manifest_aad`] — wire-supplied context is never accepted.
+pub fn manifest_sig_structure(
+    protected_bytes: &[u8],
+    external_aad: &[u8],
+    payload: &[u8],
+) -> Result<Vec<u8>> {
+    if external_aad.len() != TRUST_MANIFEST_AAD_SIZE {
+        return err(Code::InvalidArgument, "manifest sig_structure fields");
+    }
+    let out = cose_sig_structure(protected_bytes, external_aad, payload)
+        .map_err(|_| Error::new(Code::InvalidArgument, "manifest sig_structure fields"))?;
     debug_assert!(out.len() <= TRUST_MANIFEST_SIG_MAX);
     Ok(out)
 }
@@ -240,6 +262,28 @@ mod tests {
         assert_eq!(&protected[..5], &[0xA2, 0x01, 0x28, 0x04, 0x48]);
         assert_eq!(protected[5], 0x01);
         assert_eq!(protected[12], 0x08);
+    }
+
+    #[test]
+    fn cose_sig_structure_shares_the_manifest_shape() {
+        let protected = manifest_protected(0x42);
+        let aad36 = manifest_aad(7);
+        let payload = [9_u8; 64];
+        // The manifest leg is exactly the shared construction at 36 B AAD.
+        assert_eq!(
+            manifest_sig_structure(&protected, &aad36, &payload).unwrap(),
+            cose_sig_structure(&protected, &aad36, &payload).unwrap()
+        );
+        // The permit (45 B) and recovery (46 B) AADs the config issuer
+        // signs under are admitted by the shared leg, never by manifests.
+        for aad_len in [45_usize, 46] {
+            let aad = vec![0xA5_u8; aad_len];
+            let shared = cose_sig_structure(&protected, &aad, &payload).unwrap();
+            assert_eq!(&shared[13..26], &protected);
+            assert!(manifest_sig_structure(&protected, &aad, &payload).is_err());
+        }
+        assert!(cose_sig_structure(&protected, &[], &payload).is_err());
+        assert!(cose_sig_structure(&protected, &[0_u8; 65], &payload).is_err());
     }
 
     #[test]

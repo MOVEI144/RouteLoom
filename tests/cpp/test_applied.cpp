@@ -41,8 +41,10 @@ int failures = 0;
 using namespace routeloom;
 using routeloom_test::FrameSight;
 using routeloom_test::SimNetwork;
+using routeloom_test::SimReplyPort;
 using routeloom_test::TestSecurity;
 using routeloom_test::sight_frame;
+using routeloom_test::sim_rx_metadata;
 namespace ep = routeloom::endpoint;
 
 constexpr NetworkId kNet = 7;
@@ -161,6 +163,7 @@ struct World {
     std::unique_ptr<TestSecurity> sec;
     std::unique_ptr<AppliedObserver> obs;
     std::unique_ptr<TapRadio> radio;
+    std::unique_ptr<SimReplyPort> port;
     std::unique_ptr<MeshNode> node;
     std::unique_ptr<CountingSink> sink;
   };
@@ -188,8 +191,11 @@ struct World {
     b.sec = std::make_unique<TestSecurity>();
     b.obs = std::make_unique<AppliedObserver>();
     b.radio = std::make_unique<TapRadio>(net, id);
+    b.port = std::make_unique<SimReplyPort>(*b.radio, id, cfg.link_epoch);
     b.node = std::make_unique<MeshNode>(cfg, *b.radio, *b.sec, *b.obs);
+    b.node->set_reply_peer_port(b.port.get());
     net.register_node(id, b.node.get());
+    net.register_reply_port(id, b.port.get());
     return b.node.get();
   }
   MeshNode* at(NodeId id) const { return nodes.at(id).node.get(); }
@@ -205,6 +211,7 @@ struct World {
   }
   AppliedObserver* obs(NodeId id) const { return nodes.at(id).obs.get(); }
   TapRadio* radio(NodeId id) const { return nodes.at(id).radio.get(); }
+  SimReplyPort* port(NodeId id) const { return nodes.at(id).port.get(); }
   CountingSink* install_sink(NodeId id) {
     auto& b = nodes.at(id);
     b.sink = std::make_unique<CountingSink>();
@@ -943,7 +950,8 @@ void test_late_result_after_timeout() {
   CHECK_OK(ep::app_result_encode(result, enc));
   const auto frame = craft_frame(
       w.scratch, app_result_carrier(2, 1, MessageId{0xA11E, 1}), enc.view());
-  w.at(1)->on_radio_receive(2, frame.view(), RadioRxMetadata{-60}, w.now);
+  w.at(1)->on_radio_receive(2, frame.view(),
+                               sim_rx_metadata(w.port(1), 2), w.now);
   w.run(50);
 
   const auto after = a->delivery(id);
@@ -1089,7 +1097,7 @@ void test_malformed_body_refusal() {
   const std::array<std::uint8_t, 5> short_body{{1, 2, 3, 4, 5}};
   const auto frame = craft_frame(w.scratch, h, ByteView{short_body.data(),
                                                       short_body.size()});
-  b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.port(2), 1), w.now);
   w.run(200);
   CHECK(b->applied_stats().refusals_malformed == 1);
   CHECK(b->applied_stats().results_committed == 1);
@@ -1157,7 +1165,7 @@ void test_query_triggers_stored_replay() {
   CHECK_OK(ep::app_result_query_encode(query, enc));
   const auto frame = craft_frame(
       w.scratch, app_result_carrier(1, 2, MessageId{0x9E1, 1}), enc.view());
-  b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(b->applied_stats().queries_received >= 1);
   CHECK(b->applied_stats().results_emitted == 2);  // QUERY-driven emit
   w.run(500);
@@ -1194,7 +1202,7 @@ void test_result_replay_dedup_and_conflict() {
   // Same-round replay: the routed dedup suppresses it before the handler —
   // no second verdict, no second ACK even after the job queue drains (§1.5).
   a->on_radio_receive(2, ByteView{captured->data(), captured->size()},
-                      RadioRxMetadata{-60}, w.now);
+                      sim_rx_metadata(w.port(1), 2), w.now);
   w.step();  // let any queued ACK dispatch
   CHECK(a->applied_stats().results_accepted == 1);
   CHECK(w.obs(1)->applied.size() == 1);
@@ -1220,7 +1228,7 @@ void test_result_replay_dedup_and_conflict() {
     const auto f = craft_frame(
         w.scratch,
         app_result_carrier(2, 1, MessageId{0xBEEF, wire_seq}), enc.view());
-    a->on_radio_receive(2, f.view(), RadioRxMetadata{-60}, w.now);
+    a->on_radio_receive(2, f.view(), sim_rx_metadata(w.port(1), 2), w.now);
   };
   emit_result(static_cast<std::uint8_t>(ep::AppResultOutcome::Success), 7, 1);
   // The terminal path queues HopAccept + RESULT_ACK and the serial driver
@@ -1265,7 +1273,7 @@ void test_result_replay_dedup_and_conflict() {
   const auto dup_frame = craft_frame(
       w.scratch, dup, ByteView{req_body.data(), req_body.size()});
   const auto emits_before = b->applied_stats().results_emitted;
-  b->on_radio_receive(1, dup_frame.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, dup_frame.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(sink->calls == 1);
   CHECK(b->applied_stats().results_emitted == emits_before + 1);
   w.run(300);
@@ -1300,7 +1308,7 @@ void test_result_binding_rejects() {
         craft_frame(w.scratch, app_result_carrier(issuer, head.original_origin,
                                                   MessageId{0xBAD, wire_seq}),
                     enc.view());
-    a->on_radio_receive(peer, f.view(), RadioRxMetadata{-60}, w.now);
+    a->on_radio_receive(peer, f.view(), sim_rx_metadata(w.port(1), peer), w.now);
   };
 
   // (a) request_digest that does not match the stored request -> MISMATCH.
@@ -1391,14 +1399,14 @@ void test_status_answers_and_ack_validation() {
   // negative answer is rate-gated per peer (200ms).
   const MessageId unknown{101, 9090};
   const auto q1 = craft_query(unknown, 0x51, 1);
-  b->on_radio_receive(1, q1.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, q1.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(b->applied_stats().status_sent == 1);
   const auto q2 = craft_query(MessageId{101, 9091}, 0x52, 2);
-  b->on_radio_receive(1, q2.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, q2.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(b->applied_stats().status_sent == 1);  // gated
   w.now += kAppliedAnswerMinIntervalMs;
   const auto q3 = craft_query(MessageId{101, 9092}, 0x53, 3);
-  b->on_radio_receive(1, q3.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, q3.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(b->applied_stats().status_sent == 2);
 
   // The STATUSes reach the origin; they name no live delivery -> orphan.
@@ -1417,7 +1425,7 @@ void test_status_answers_and_ack_validation() {
   CHECK_OK(ep::app_result_ack_encode(ack, ack_enc));
   auto ack_frame = craft_frame(
       w.scratch, app_result_carrier(1, 2, MessageId{0xACC, 1}), ack_enc.view());
-  b->on_radio_receive(1, ack_frame.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, ack_frame.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(w.obs(2)->has_diag("APPLIED_ACK_MISMATCH"));
 
   // RESULT_ACK with the digest of the canonical RESULT body -> accepted.
@@ -1436,7 +1444,7 @@ void test_status_answers_and_ack_validation() {
   ack_frame = craft_frame(w.scratch,
                           app_result_carrier(1, 2, MessageId{0xACC, 2}),
                           ack_enc.view());
-  b->on_radio_receive(1, ack_frame.view(), RadioRxMetadata{-60}, w.now);
+  b->on_radio_receive(1, ack_frame.view(), sim_rx_metadata(w.port(2), 1), w.now);
   CHECK(b->applied_stats().result_acks == acks_before + 1);
 }
 
@@ -1492,7 +1500,7 @@ void test_status_nonce_matching() {
     const auto f = craft_frame(
         w.scratch, app_result_carrier(2, 1, MessageId{0x57A, wire_seq}),
         enc.view());
-    a->on_radio_receive(2, f.view(), RadioRxMetadata{-60}, w.now);
+    a->on_radio_receive(2, f.view(), sim_rx_metadata(w.port(1), 2), w.now);
   };
 
   // Unmatched nonce -> diagnostic, delivery keeps waiting.

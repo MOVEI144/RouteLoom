@@ -39,6 +39,8 @@ using routeloom_test::TestSecurity;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::SimWorld;
 
 // Records every SecurityContext handed to the provider so tests can assert
@@ -683,7 +685,9 @@ void test_security_profile_marker() {
   CapturingObserver prod_observer;
   SimRadio prod_radio(net, 9);
   NodeConfig prod_config{1, 9, 190};
+  SimReplyPort prod_port(prod_radio, 9, prod_config.link_epoch);
   MeshNode prod_node(prod_config, prod_radio, prod_security, prod_observer);
+  CHECK_OK(prod_node.set_reply_peer_port(&prod_port));
   CHECK_OK(prod_node.start(0));
   CHECK(!prod_observer.has_diag("SECURITY_PROFILE_EXPERIMENTAL"));
 }

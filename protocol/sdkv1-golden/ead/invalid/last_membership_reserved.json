@@ -1,0 +1,8 @@
+{
+  "codec": "last_membership",
+  "encoded_hex": "01000100000000030a1b2c3d",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "last_membership_reserved",
+  "note": "reserved bytes are zero"
+}

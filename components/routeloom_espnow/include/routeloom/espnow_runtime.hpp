@@ -16,6 +16,7 @@
 #include "routeloom/node.hpp"
 #include "routeloom/owner_pump.hpp"
 #include "routeloom/sdkv1_joiner.hpp"
+#include "routeloom/reply_peer_leases.hpp"
 
 namespace routeloom::espnow {
 
@@ -255,6 +256,22 @@ class EspNowRuntime final : public RadioPort,
   std::size_t quarantined_peers() const noexcept { return quarantined_count_; }
 
  private:
+  friend struct EspNowRuntimeTestAccess;
+  struct ReplyCallGuard {
+    explicit ReplyCallGuard(std::atomic<bool>& active) noexcept : active_(active) {
+      bool expected = false;
+      entered_ = active_.compare_exchange_strong(expected, true);
+    }
+    ~ReplyCallGuard() noexcept {
+      if (entered_) active_.store(false);
+    }
+    bool entered() const noexcept { return entered_; }
+    ReplyCallGuard(const ReplyCallGuard&) = delete;
+    ReplyCallGuard& operator=(const ReplyCallGuard&) = delete;
+   private:
+    std::atomic<bool>& active_;
+    bool entered_{false};
+  };
   enum class EventKind : std::uint8_t { Rx, Tx };
   // TX completion provenance (02-telemetry §2.2): which lane a send callback
   // belongs to. Stale/fenced completions are evidence under their ORIGINAL
@@ -277,6 +294,10 @@ class EspNowRuntime final : public RadioPort,
     std::uint64_t observed_us{0};    // rx: enqueue stamp (esp_timer); tx: completed_us
     std::uint64_t submitted_us{0};   // tx only
     BindingGeneration binding{};
+    // RX-captured binding id, resolved next to the generation above (issue
+    // #117): admission matches the full (id, generation) key, never the
+    // generation alone. Tx events leave this invalid.
+    BindingId binding_id{kInvalidBindingId};
     RadioGeneration radio_generation{};
     ChannelEpoch channel_epoch{};
     std::uint8_t channel{0};
@@ -320,6 +341,22 @@ class EspNowRuntime final : public RadioPort,
     // epoch stamped on this peer's RX/TX observations (02 §2.4). 0 until
     // the first bound record resolves it.
     BindingGeneration binding{0};
+    // Discovery binding id mirrored next to the generation (issue #117):
+    // the (id, generation) pair is the live mapping the reply-lease port
+    // rechecks every acquire/send against. Invalid until the first bound
+    // record resolves it; cleared whenever the slot is freed or reused.
+    BindingId binding_id{kInvalidBindingId};
+    // Current authenticated receive context for this mapping. Development
+    // PSK learns the peer's ordered boot epoch from RX.
+    std::uint32_t rx_context_id{0};
+    // Full or driver release deferred by a live ExpectedReply use (issue
+    // #117): the binding is already retired, the slot and its driver
+    // registration stay until the last use drains, and the next lease sync
+    // retries the release. Cleared when the slot frees or the engine
+    // record confirms Bound/Reachable on this MAC again.
+    bool release_pending{false};
+    bool binding_retired{false};
+    bool registration_failed{false};
   };
   // A driver peer held for an in-flight auth exchange — no NodeId exists yet
   // (the claimed id is unverified until the transcript verifies).
@@ -359,7 +396,8 @@ class EspNowRuntime final : public RadioPort,
   // can take its slot — Bound/Reachable and static peers are never
   // victims. Returns false when no marker is evictable.
   bool evict_driverless_marker() noexcept;
-  void release_driver_peer(const MacAddress& mac, NodeId node) noexcept;
+  Status release_driver_peer(const MacAddress& mac, NodeId node,
+                             bool transfer = false) noexcept;
   void release_autonomy_peer(Peer& peer, MonotonicMs now) noexcept;
   void reconcile_autonomy(MonotonicMs now) noexcept;
   Status send_raw(const MacAddress& mac, ByteView frame) noexcept;
@@ -380,6 +418,63 @@ class EspNowRuntime final : public RadioPort,
    private:
     EspNowRuntime& owner_;
   };
+  // --- ReplyPeerPort implementation (nested: the Owner's lease surface) --------
+  // The node's admission, ACK-awaiting TX and reply sends reserve through
+  // here; every call rechecks the captured binding against the live
+  // peer-table mapping and refuses on any drift (design-q116 §6). Runs on
+  // the poll task via node calls, so mapping snapshots take callback_lock_
+  // exactly like send()'s peer resolution; the lock is never held across
+  // the delegated send() below (it takes the lock itself).
+  class OwnerReplyPort final : public routeloom::ReplyPeerPort {
+   public:
+    explicit OwnerReplyPort(EspNowRuntime& owner) noexcept : owner_(owner) {}
+    Status observe_authenticated_rx(ReplyBinding captured) noexcept override {
+      return owner_.reply_observe_authenticated_rx(captured);
+    }
+    Status acquire(ReplyBinding captured, MonotonicMs deadline,
+                   MonotonicMs now,
+                   ReplyLeaseToken& out) noexcept override {
+      return owner_.reply_acquire(captured, deadline, now, out);
+    }
+    Status release(ReplyLeaseToken token) noexcept override {
+      return owner_.reply_release(token);
+    }
+    Status validate(ReplyLeaseToken token,
+                    MonotonicMs now) noexcept override {
+      return owner_.reply_validate(token, now);
+    }
+    Status send_reply(ReplyLeaseToken token, std::uint64_t tx_token,
+                      ByteView frame, MonotonicMs now) noexcept override {
+      return owner_.reply_send_reply(token, tx_token, frame, now);
+    }
+    Status snapshot_binding(NodeId peer,
+                            ReplyBinding& out) noexcept override {
+      return owner_.reply_snapshot_binding(peer, out);
+    }
+    Status send_bound(ReplyBinding binding, std::uint64_t tx_token,
+                      ByteView frame) noexcept override {
+      return owner_.reply_send_bound(binding, tx_token, frame);
+    }
+
+   private:
+    EspNowRuntime& owner_;
+  };
+  // Live mapping for one peer: the used slot's (id, generation) pair plus
+  // the current RX context. False when the slot is missing, unbound,
+  // driverless, or awaiting release — captures against any of those must
+  // refuse.
+  bool reply_mapping(NodeId peer, ReplyBinding& out) noexcept;
+  Status reply_context_current(NodeId peer, std::uint32_t context) noexcept;
+  Status reply_observe_authenticated_rx(ReplyBinding captured) noexcept;
+  Status reply_acquire(ReplyBinding captured, MonotonicMs deadline,
+                       MonotonicMs now, ReplyLeaseToken& out) noexcept;
+  Status reply_release(ReplyLeaseToken token) noexcept;
+  Status reply_validate(ReplyLeaseToken token, MonotonicMs now) noexcept;
+  Status reply_send_reply(ReplyLeaseToken token, std::uint64_t tx_token,
+                          ByteView frame, MonotonicMs now) noexcept;
+  Status reply_snapshot_binding(NodeId peer, ReplyBinding& out) noexcept;
+  Status reply_send_bound(ReplyBinding binding, std::uint64_t tx_token,
+                          ByteView frame) noexcept;
   static ChannelOpsConfig ops_config_for(
       const EspNowRuntimeConfig& config) noexcept;
   bool channel_tx_quiesced() const noexcept;
@@ -413,6 +508,10 @@ class EspNowRuntime final : public RadioPort,
   NodeObserver& observer_;
   MeshNode node_;
   std::array<Peer, kPeerCapacity> peers_{};
+  std::atomic<bool> reply_call_active_{false};
+  // Static development mappings occupy a disjoint Owner-local ID range.
+  // A repeated registration of the same (NodeId, MAC) retains its identity.
+  std::uint32_t next_static_binding_id_{UINT32_MAX};
   std::array<TransientPeer, kTransientPeerCapacity> transient_peers_{};
   NeighborDiscovery* discovery_{nullptr};
   BootstrapRld1Sink* bootstrap_sink_{nullptr};
@@ -504,6 +603,10 @@ class EspNowRuntime final : public RadioPort,
   bool lost_node_tx_valid_{false};
   std::uint32_t stale_tx_results_{0};
   OwnerChannelPort channel_port_;
+  // ExpectedReply lease table behind the reply port (issue #117): driven
+  // only from the Owner worker via reply_port_ — never from a callback.
+  routeloom::ExpectedReplyLeases reply_leases_;
+  OwnerReplyPort reply_port_;
   ChannelOperationRunner channel_runner_;
   MigrationFrameSink* migration_{nullptr};
   routeloom::MacAddress self_mac_{};

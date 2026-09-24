@@ -348,8 +348,19 @@ class SimAuthorityEad final : public edhoc::EadHandler {
     if (message == 3) {
       ByteView value{};
       ByteView cert{};
-      Status status = join_ead_items_check(items, count, JoinEad::Request, true, value, cert);
+      const bool recovery = (intent.profile_bits & kJoinProfileMembershipRecovery) != 0;
+      const std::size_t expected = recovery ? 3 : 2;
+      if (count != expected) return Status::error(StatusCode::ProtocolError, "ead recovery count");
+      Status status = join_ead_items_check(items, 2, JoinEad::Request, true, value, cert);
       if (!status) return status;
+      if (recovery) {
+        if (items[2].label != -static_cast<std::int32_t>(JoinEad::LastMembership)) {
+          return Status::error(StatusCode::ProtocolError, "ead recovery order");
+        }
+        NetworkId network = 0;
+        status = last_membership_decode(items[2].value, network);
+        if (!status || network == 0) return Status::error(StatusCode::ProtocolError, "ead network");
+      }
       status = join_request_decode(value, request);
       if (!status) return status;
       creds_.staged.clear();

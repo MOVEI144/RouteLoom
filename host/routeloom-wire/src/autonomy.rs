@@ -431,8 +431,14 @@ pub enum ControlObjectKind {
     /// Scope-gateway-config §5.1: end-protected routed config permits ride
     /// the same object transfer; link-only kinds 1/2 keep their path.
     ConfigPermit = 3,
-    /// Kind 4 is unassigned, kind 5 is reserved for the P5 authority
-    /// envelope. P6 (04-removal-revocation.md §4): the content is the RRS1
+    /// Signed recovery intents (RCR2) remain admissible during config
+    /// impairment while ordinary permits are refused.
+    ConfigRecovery = 4,
+    /// Signed trust-manifest (RTM1) images ride the same carrier at the
+    /// full authenticated-object cap; the target dispatches kind-5
+    /// completions to the trust store, never to a journal.
+    TrustManifest = 5,
+    /// P6 (04-removal-revocation.md §4): the content is the RRS1
     /// COSE object bytes verbatim; the manifest hash proves reassembly
     /// identity only, the SAK signature inside the object is the authority.
     RevocationSet = 6,
@@ -474,6 +480,8 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
         1 => ControlObjectKind::ChannelPlan,
         2 => ControlObjectKind::RecoverySnapshot,
         3 => ControlObjectKind::ConfigPermit,
+        4 => ControlObjectKind::ConfigRecovery,
+        5 => ControlObjectKind::TrustManifest,
         6 => ControlObjectKind::RevocationSet,
         _ => return reject(),
     };

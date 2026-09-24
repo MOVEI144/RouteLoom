@@ -74,6 +74,8 @@ using namespace routeloom;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::TestSecurity;
 
 class MemoryCounterStore final : public CounterStore {
@@ -310,6 +312,7 @@ struct PowerWorld {
   CapturingObserver observer;
   SimNetwork net;
   SimRadio radio;
+  SimReplyPort reply_port;
   FakePowerPort port;
   RecordingPowerEvents events;
   MeshNode node;
@@ -318,9 +321,11 @@ struct PowerWorld {
 
   explicit PowerWorld(MemoryPowerStorage& store,
                       const PowerConfig& power = PowerConfig{500, 50})
-      : storage(store), radio(net, kSelf),
+      : storage(store), radio(net, kSelf), reply_port(radio, kSelf, 1),
         node(make_config(), radio, security, observer),
-        coordinator(power, node, port, storage, events) {}
+        coordinator(power, node, port, storage, events) {
+    (void)node.set_reply_peer_port(&reply_port);
+  }
 
   static NodeConfig make_config() {
     NodeConfig config{};
@@ -386,7 +391,8 @@ struct PowerWorld {
     plain.payload_size = payload.size();
     wire::EncodedFrame encoded{};
     if (wire::encode_new(plain, security, encoded).ok()) {
-      node.on_radio_receive(2, encoded.view(), RadioRxMetadata{-60}, now);
+      node.on_radio_receive(2, encoded.view(), sim_rx_metadata(&reply_port, 2),
+                            now);
     }
   }
 
@@ -1090,9 +1096,13 @@ void test_completed_delivery_not_carried_over() {
   SimRadio radio_b(w.net, 2);
   NodeConfig config_b = PowerWorld::make_config();
   config_b.node = 2;
+  SimReplyPort reply_b(radio_b, 2, config_b.link_epoch);
   MeshNode b(config_b, radio_b, security_b, observer_b);
+  CHECK_OK(b.set_reply_peer_port(&reply_b));
   w.net.register_node(7, &w.node);
   w.net.register_node(2, &b);
+  w.net.register_reply_port(7, &w.reply_port);
+  w.net.register_reply_port(2, &reply_b);
   w.net.connect(7, 2);
   CHECK_OK(b.start(0));
 
@@ -1295,9 +1305,13 @@ void test_resume_reuses_original_id_dedup_once() {
   DropTypeRadio radio_b(radio_b_inner, FrameType::EndReceipt);
   NodeConfig config_b = PowerWorld::make_config();
   config_b.node = 2;
+  SimReplyPort reply_b(radio_b, 2, config_b.link_epoch);
   MeshNode b(config_b, radio_b, security_b, observer_b);
+  CHECK_OK(b.set_reply_peer_port(&reply_b));
   w.net.register_node(7, &w.node);
   w.net.register_node(2, &b);
+  w.net.register_reply_port(7, &w.reply_port);
+  w.net.register_reply_port(2, &reply_b);
   w.net.connect(7, 2);
 
   CHECK_OK(b.start(0));
@@ -1350,6 +1364,7 @@ struct ResumeDedupRig {
   CapturingObserver observer_b;
   SimRadio radio_b_inner{w.net, 2};
   DropTypeRadio radio_b{radio_b_inner, FrameType::EndReceipt};
+  SimReplyPort reply_b{radio_b, 2, make_b_config().link_epoch};
   MeshNode b{make_b_config(), radio_b, security_b, observer_b};
   MessageId id{};
 
@@ -1383,8 +1398,11 @@ struct ResumeDedupRig {
   // Deliver once to B, then sleep with the delivery still pending.
   void deliver_then_sleep() {
     w.platform_peer(2, 0xaa);
+    CHECK_OK(b.set_reply_peer_port(&reply_b));
     w.net.register_node(PowerWorld::kSelf, &w.node);
     w.net.register_node(2, &b);
+    w.net.register_reply_port(PowerWorld::kSelf, &w.reply_port);
+    w.net.register_reply_port(2, &reply_b);
     w.net.connect(PowerWorld::kSelf, 2);
     CHECK_OK(b.start(0));
     CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
@@ -1593,6 +1611,8 @@ struct GroupPowerWorld {
   HookedObserver observer_b;
   SimRadio radio_a;
   SimRadio radio_b;
+  SimReplyPort reply_a;
+  SimReplyPort reply_b;
   MeshNode a;
   MeshNode b;
   FakePowerPort port;
@@ -1601,10 +1621,16 @@ struct GroupPowerWorld {
 
   GroupPowerWorld()
       : radio_a(net, kGateway), radio_b(net, kLeaf),
+        reply_a(radio_a, kGateway, config(kGateway).link_epoch),
+        reply_b(radio_b, kLeaf, config(kLeaf).link_epoch),
         a(config(kGateway), radio_a, security_a, observer_a),
         b(config(kLeaf), radio_b, security_b, observer_b) {
+    (void)a.set_reply_peer_port(&reply_a);
+    (void)b.set_reply_peer_port(&reply_b);
     net.register_node(kGateway, &a);
     net.register_node(kLeaf, &b);
+    net.register_reply_port(kGateway, &reply_a);
+    net.register_reply_port(kLeaf, &reply_b);
     net.connect(kGateway, kLeaf);
   }
 
@@ -2579,7 +2605,9 @@ void test_tx_notice_callback_busy_quiesce_completes() {
   CHECK(callback_state == PowerState::Persisting);
   CHECK(abort_status.code == StatusCode::Busy);
   CHECK(!send_status.ok());
-  CHECK(std::strcmp(send_status.detail, "NODE_DRAINING") == 0);
+  // The quiesce holds the node's non-reentrancy guard while the diagnostic
+  // fires, so the callback's send is Busy — still refused, never queued.
+  CHECK(send_status.code == StatusCode::Busy);
   CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
   CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
                      "SLEEP_READY"));
@@ -2684,6 +2712,9 @@ struct TwoSourceWorld {
   SimRadio r1;
   SimRadio r2;
   SimRadio r3;
+  SimReplyPort p1;
+  SimReplyPort p2;
+  SimReplyPort p3;
   MeshNode n1;
   MeshNode n2;
   MeshNode n3;
@@ -2695,12 +2726,21 @@ struct TwoSourceWorld {
       : r1(net, kGw1),
         r2(net, kGw2),
         r3(net, kLeaf),
+        p1(r1, kGw1, config(kGw1).link_epoch),
+        p2(r2, kGw2, config(kGw2).link_epoch),
+        p3(r3, kLeaf, config(kLeaf).link_epoch),
         n1(config(kGw1), r1, s1, o1),
         n2(config(kGw2), r2, s2, o2),
         n3(config(kLeaf), r3, s3, o3) {
+    (void)n1.set_reply_peer_port(&p1);
+    (void)n2.set_reply_peer_port(&p2);
+    (void)n3.set_reply_peer_port(&p3);
     net.register_node(kGw1, &n1);
     net.register_node(kGw2, &n2);
     net.register_node(kLeaf, &n3);
+    net.register_reply_port(kGw1, &p1);
+    net.register_reply_port(kGw2, &p2);
+    net.register_reply_port(kLeaf, &p3);
     net.connect(kGw1, kGw2);
     net.connect(kGw2, kLeaf);
   }
@@ -2934,6 +2974,7 @@ struct MatrixWorld {
   HookedObserver observer;
   SimNetwork net;
   SimRadio radio;
+  SimReplyPort reply_port;
   FakePowerPort port;
   RecordingPowerEvents events;
   MeshNode node;
@@ -2941,8 +2982,11 @@ struct MatrixWorld {
   MonotonicMs now{0};
 
   MatrixWorld()
-      : radio(net, 7), node(make_config(), radio, security, observer),
-        coordinator(PowerConfig{500, 50}, node, port, storage, events) {}
+      : radio(net, 7), reply_port(radio, 7, make_config().link_epoch),
+        node(make_config(), radio, security, observer),
+        coordinator(PowerConfig{500, 50}, node, port, storage, events) {
+    (void)node.set_reply_peer_port(&reply_port);
+  }
 
   static NodeConfig make_config() {
     NodeConfig config{};
@@ -4813,8 +4857,11 @@ void test_evicted_origin_jobs_never_dispatch() {
   TestSecurity security_c;
   HookedObserver observer_c;
   SimRadio radio_c(w.net, 3);
+  SimReplyPort reply_c(radio_c, 3, GroupPowerWorld::config(3).link_epoch);
   MeshNode c(GroupPowerWorld::config(3), radio_c, security_c, observer_c);
+  CHECK_OK(c.set_reply_peer_port(&reply_c));
   w.net.register_node(3, &c);
+  w.net.register_reply_port(3, &reply_c);
   w.net.connect(GroupPowerWorld::kGateway, 3);
   CHECK_OK(c.start(w.now));
   CHECK_OK(w.a.add_neighbor(3, 1, w.now));
@@ -5129,11 +5176,13 @@ void test_sleep_path_uses_no_heap() {
   FixedNodeObserver observer;
   SimNetwork net;
   SimRadio radio(net, 7);
+  SimReplyPort reply_port(radio, 7, MatrixWorld::make_config().link_epoch);
   MeshNode node(MatrixWorld::make_config(), radio, security, observer);
   FakePowerPort port;
   FixedPowerEvents events;
   PowerCoordinator coordinator(PowerConfig{500, 50}, node, port, storage,
                                events);
+  (void)node.set_reply_peer_port(&reply_port);
   MonotonicMs now = 0;
   heap_probe::armed = true;
   CHECK_OK(coordinator.begin(ResetCause::ColdBoot,

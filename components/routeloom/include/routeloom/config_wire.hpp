@@ -15,11 +15,15 @@
 //     ConfigPermit transfers toward a target on behalf of the USB host and
 //     reports each outcome through ConfigHostSink.
 //
-// Frame discipline: Control (22) carries the versioned challenge/status
-// payloads (subtype 1-4); ControlObject/ObjectChunk/ObjectAck (49/50/51)
-// carry the kind-3 permit object. All are end-protected and routed — the
-// link-scoped autonomous forms of 49/50/51 (migration kinds 1/2) are a
-// separate, unchanged path.
+// Frame discipline: Control (22) carries the versioned query/reply
+// payloads (subtype 1-4 challenge/status, 5/6 trust status, 7/8 recovery
+// info); ControlObject/ObjectChunk/ObjectAck (49/50/51) carry ONE bounded
+// object reassembly at a time — kind 3 (permit), kind 4 (recovery) or
+// kind 5 (trust manifest) — dispatched by kind on completion. A stalled
+// permit assembly never blocks recovery or trust for longer than the 10 s
+// assembly bound, and while impaired kind 3 cannot reserve the slot at
+// all. All are end-protected and routed — the link-scoped autonomous
+// forms of 49/50/51 (migration kinds 1/2) are a separate, unchanged path.
 
 #include <array>
 #include <cstddef>
@@ -29,7 +33,10 @@
 #include "routeloom/config.hpp"
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
+#include "routeloom/trust_manifest.hpp"
+#include "routeloom/trust_store.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/usb_host_ops.hpp"
 #include "routeloom/wire.hpp"
@@ -79,24 +86,39 @@ class MeshConfigPort final : public ConfigWirePort {
   MeshNode& node_;
 };
 
+constexpr std::size_t kConfigTrustObjectMax =
+    autonomy::kAuthenticatedObjectMax;  // kind-5 RTM1 intake cap (2048)
+
 // --- ConfigTarget (config-bearing node) ------------------------------------
 //
 // Bounded set of ConfigJournals behind one routed endpoint. Control frames
-// are dispatched to the journal for the decoded namespace; ConfigPermit
-// object manifests/chunks drive one bounded reassembly at a time (the v1
-// manifest does not name a namespace, so object intake binds the primary —
-// first registered — journal; a permit whose decoded namespace does not
-// match is refused by that journal's own validation). Every accepted
+// are dispatched to the journal for the decoded namespace (trust status is
+// answered from the attached trust store instead); object manifests/chunks
+// drive the single bounded assembler below. Completion dispatches by kind:
+// kind 3 → the owning journal's submit_permit, kind 4 → submit_recovery,
+// kind 5 → trust_manifest_accept (never a journal). Every accepted
 // manifest/chunk is answered with an ObjectAck to the end-authenticated
 // origin: received_len + status, never a config verdict.
 class ConfigTarget final : public ConfigEndpointSink {
  public:
-  explicit ConfigTarget(ConfigWirePort& wire) noexcept : wire_(wire) {}
+  // `limiter` MUST be the same device-wide limiter the journals use: the
+  // kind-5 trust-manifest verify shares the expensive-verify budget with
+  // the permit/recovery submits (failures charged too). Caller-owned, like
+  // the wire port; both must outlive this.
+  ConfigTarget(ConfigWirePort& wire, ConfigRateLimiter& limiter) noexcept
+      : wire_(wire), limiter_(limiter) {}
 
   // Register a journal for `config_namespace` (must match the journal's own
-  // ConfigJournalConfig). Up to kMaxJournals; the FIRST registered is the
-  // object-intake journal. Journals are caller-owned and must outlive this.
+  // ConfigJournalConfig). Up to kMaxJournals. The v1 manifest does not name
+  // a namespace, so intake offers the object to the journals in
+  // registration order; a permit whose decoded namespace does not match is
+  // refused by the owning journal's own validation. Journals are
+  // caller-owned and must outlive this.
   Status add_journal(std::uint16_t config_namespace, ConfigJournal& journal) noexcept;
+  // Attach the trust-management connection kind-5 intake and the trust
+  // status query answer from. Optional: without it kind-5 manifests are
+  // refused and subtype-5 queries denied. Caller-owned; must outlive this.
+  void attach_trust_store(TrustStore& store, SecurityFloorStore& floor) noexcept;
 
   // ConfigEndpointSink
   void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
@@ -117,38 +139,55 @@ class ConfigTarget final : public ConfigEndpointSink {
   // Diagnostics surface.
   std::uint32_t control_denied() const noexcept { return control_denied_; }
   std::uint32_t object_acks() const noexcept { return object_acks_; }
-  bool object_active() const noexcept { return intake_.active; }
+  bool object_active() const noexcept { return assembly_.active; }
 
  private:
-  struct Intake {
+  // The single bounded assembler: one object at a time, keyed by the
+  // pinned (origin, kind, hash, total_len) tuple. Kind caps differ —
+  // kind 3/4 ride the 1024 B permit bound, kind 5 the full 2048 B carrier
+  // — but the buffer and bitmap are shared: a second buffer for recovery
+  // would only double the worst-case RAM for no liveness gain (a stalled
+  // assembly frees at the 10 s bound, and while impaired kind 3 cannot
+  // reserve the slot at all).
+  struct Assembly {
     bool active{false};
-    ConfigJournal* journal{nullptr};
+    autonomy::ControlObjectKind kind{autonomy::ControlObjectKind::ConfigPermit};
+    NodeId origin{kInvalidNodeId};
+    ConfigJournal* journal{nullptr};  // owner for kind 3/4; null for kind 5
     autonomy::ObjectHash hash{};
     std::uint16_t total_len{0};
     std::uint16_t received{0};
     MonotonicMs started_ms{0};
-    // Mirror of the distinct received bytes so the ObjectAck's
-    // received_len is honest even across duplicate/out-of-order chunks.
-    std::array<std::uint8_t, kConfigPermitObjectMax / 8> bitmap{};
+    std::array<std::uint8_t, kConfigTrustObjectMax> buffer{};
+    std::array<std::uint8_t, kConfigTrustObjectMax / 8> bitmap{};
   };
 
   ConfigJournal* find_journal(std::uint16_t config_namespace) noexcept;
   void handle_control(NodeId peer, const wire::PlainFrame& frame,
                       MonotonicMs now_ms) noexcept;
+  void handle_trust_status_query(NodeId origin,
+                                 const wire::PlainFrame& frame,
+                                 MonotonicMs now_ms) noexcept;
   void handle_manifest(NodeId peer, const wire::PlainFrame& frame,
                        MonotonicMs now_ms) noexcept;
   void handle_chunk(NodeId peer, const wire::PlainFrame& frame,
                     MonotonicMs now_ms) noexcept;
+  // Digest-check the completed assembly and dispatch by kind; frees the
+  // slot either way (a refused completion is not resumable).
+  void dispatch_complete(MonotonicMs now_ms) noexcept;
+  void drop_assembly() noexcept;
   void send_ack(NodeId dest, const autonomy::ObjectHash& hash,
                 std::uint16_t received_len, autonomy::ObjectAckStatus status,
                 MonotonicMs now_ms) noexcept;
-  std::uint16_t bitmap_count() const noexcept;
 
   ConfigWirePort& wire_;
+  ConfigRateLimiter& limiter_;
+  TrustStore* trust_{nullptr};
+  SecurityFloorStore* trust_floor_{nullptr};
   std::array<ConfigJournal*, config_wire_const::kMaxJournals> journals_{};
   std::array<std::uint16_t, config_wire_const::kMaxJournals> namespaces_{};
   std::size_t journal_count_{0};
-  Intake intake_{};
+  Assembly assembly_{};
   std::uint32_t control_denied_{0};
   std::uint32_t object_acks_{0};
 };
@@ -168,10 +207,9 @@ class ConfigHostSink {
                                ByteView body, MonotonicMs now_ms) noexcept = 0;
 };
 
-// One outstanding challenge or status query, plus one outstanding permit
-// transfer — the single-transaction bound the design fixes. The USB bridge
-// calls submit_*; the replies arrive on on_config_frame and are reported to
-// the host once, correlated by the original request id.
+// One outstanding query and one outstanding object transfer. The USB bridge calls
+// submit_*; the replies arrive on on_config_frame and are reported to the
+// host once, correlated by the original request id.
 class ConfigGateway final : public ConfigEndpointSink {
  public:
   ConfigGateway(ConfigWirePort& wire, ConfigHostSink& host) noexcept
@@ -188,10 +226,33 @@ class ConfigGateway final : public ConfigEndpointSink {
                           std::uint16_t config_namespace, std::uint16_t schema,
                           const std::array<std::uint8_t, 16>& client_nonce,
                           MonotonicMs now_ms) noexcept;
+  // 0x26 TrustStatus: issue a TrustStatusQuery5. `network` binds the
+  // reply: a TrustStatus naming any other network is foreign, never this
+  // query's completion.
+  Status submit_trust_status_query(std::uint64_t request, NodeId target,
+                                   NetworkId network,
+                                   const std::array<std::uint8_t, 16>& nonce,
+                                   MonotonicMs now_ms) noexcept;
+  // 0x27 RecoveryInfo: issue a RecoveryInfoQuery7 for (target, ns).
+  // `network` binds the reply like the trust query above.
+  Status submit_recovery_info_query(std::uint64_t request, NodeId target,
+                                    NetworkId network,
+                                    std::uint16_t config_namespace,
+                                    const std::array<std::uint8_t, 16>& nonce,
+                                    MonotonicMs now_ms) noexcept;
   // 0x21 ConfigPermit: transfer `permit` (the signed object, <=1024 B) to
   // `target` as a kind-3 manifest+chunk exchange; resolves on the ack.
   Status submit_permit(std::uint64_t request, NodeId target, ByteView permit,
                        MonotonicMs now_ms) noexcept;
+  // 0x24 ConfigRecover: the same manifest+chunk pump for a signed recovery
+  // object on the kind-4 lane — the reply reports under sub 0x24.
+  Status submit_recovery(std::uint64_t request, NodeId target, ByteView object,
+                         MonotonicMs now_ms) noexcept;
+  // 0x25 ConfigTrust: the same pump for a signed trust-manifest (RTM1)
+  // object (<=2048 B) on the kind-5 lane — the reply reports under sub
+  // 0x25.
+  Status submit_trust(std::uint64_t request, NodeId target, ByteView object,
+                      MonotonicMs now_ms) noexcept;
 
   // ConfigEndpointSink
   void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
@@ -202,45 +263,68 @@ class ConfigGateway final : public ConfigEndpointSink {
 
   bool query_active() const noexcept { return query_.active; }
   bool transfer_active() const noexcept { return transfer_.active; }
+  bool recovery_transfer_active() const noexcept {
+    return transfer_.active && transfer_.usb_sub == 0x24;
+  }
+  bool trust_transfer_active() const noexcept {
+    return transfer_.active && transfer_.usb_sub == 0x25;
+  }
   std::uint32_t replies_reported() const noexcept { return replies_reported_; }
 
  private:
-  enum class QueryExpect : std::uint8_t { None, Challenge = 2, Status = 4 };
+  enum class QueryExpect : std::uint8_t {
+    None,
+    Challenge = 2,
+    Status = 4,
+    TrustStatus = 6,
+    RecoveryInfo = 8,
+  };
   struct PendingQuery {
     bool active{false};
     std::uint64_t request{0};
     NodeId target{kInvalidNodeId};
-    std::uint8_t usb_sub{0};      // 0x22 status / 0x23 challenge
+    std::uint8_t usb_sub{0};  // 0x22 status / 0x23 challenge / 0x26 / 0x27
     QueryExpect expect{QueryExpect::None};
     MonotonicMs deadline_ms{0};
-    // Reply binding (05 §5.5): the client_nonce / operation_id as SENT —
-    // an end-authenticated reply that doesn't echo them is a foreign frame,
-    // never this query's completion.
+    // Reply binding (05 §5.5): the client_nonce / operation_id / query
+    // nonce as SENT — an end-authenticated reply that doesn't echo them
+    // is a foreign frame, never this query's completion. The trust and
+    // recovery queries additionally bind the full network below.
     std::array<std::uint8_t, 16> echo{};
     std::uint16_t config_namespace{0};
+    NetworkId network{0};
   };
   enum class TransferPhase : std::uint8_t { Chunks, AwaitAck };
-  struct PermitTransfer {
+  // One manifest+chunk slot with the maximum carrier buffer. Kind 3/4
+  // still enforce their 1024 B object cap at admission.
+  struct TransferSlot {
     bool active{false};
     std::uint64_t request{0};
     NodeId target{kInvalidNodeId};
     autonomy::ObjectHash hash{};
-    std::uint16_t next_offset{0};      // next byte to send (chunks phase)
+    std::uint8_t usb_sub{0};
+    std::uint16_t next_offset{0};  // next byte to send (chunks phase)
     std::uint16_t object_size{0};
     TransferPhase phase{TransferPhase::Chunks};
     MonotonicMs deadline_ms{0};
-    ByteBuffer<kConfigPermitObjectMax> object{};
+    ByteBuffer<kConfigTrustObjectMax> object{};
   };
 
   void pump_transfer(MonotonicMs now_ms) noexcept;
+  void start_transfer(std::uint64_t request,
+                      NodeId target, autonomy::ControlObjectKind kind,
+                      ByteView object, MonotonicMs now_ms,
+                      Status& out) noexcept;
   void finish_query(ConfigOpsResult result, ByteView body,
                     MonotonicMs now_ms) noexcept;
   void finish_transfer(ConfigOpsResult result, MonotonicMs now_ms) noexcept;
+  void resolve_transfer_ack(const autonomy::ObjectAckPayload& ack,
+                            MonotonicMs now_ms) noexcept;
 
   ConfigWirePort& wire_;
   ConfigHostSink& host_;
   PendingQuery query_{};
-  PermitTransfer transfer_{};
+  TransferSlot transfer_{};
   std::uint32_t replies_reported_{0};
 };
 

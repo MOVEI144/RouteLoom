@@ -330,6 +330,7 @@ void Joiner::begin_run(const JoinBootInput& boot) noexcept {
   channel_waiting_ = false;
   tune_is_refresh_ = false;
   recovery_only_ = false;
+  verify_existing_ = boot.mode == JoinBootMode::VerifyExistingMembership;
   recovery_key_ = JoinCandidateKey{};
   recovery_site_id_ = 0;
   evidence_valid_ = false;
@@ -341,6 +342,8 @@ void Joiner::begin_run(const JoinBootInput& boot) noexcept {
   backoff_deadline_ = 0;
   decided_valid_ = false;
   boot_witness_ = boot.boot_witness;
+  removal_watermark_site_id_ = boot.removal_watermark_site_id;
+  removal_watermark_generation_ = boot.removal_watermark_generation;
   last_error_ = StatusCode::Ok;
 }
 
@@ -710,6 +713,12 @@ bool Joiner::verify_adopted(const SiteRecord& site, const IdentityRecord& identi
   return true;
 }
 
+bool Joiner::below_removal_watermark(const SiteRecord& site) const noexcept {
+  return removal_watermark_site_id_ != 0 &&
+         site.site_id == removal_watermark_site_id_ &&
+         site.assignment_generation <= removal_watermark_generation_;
+}
+
 bool Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& identity) noexcept {
   if (!site_.fingerprint(site, retained_fingerprint_)) return false;
   retained_fingerprint_valid_ = true;
@@ -903,6 +912,10 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       recovery_required(JoinRecoveryReason::BootWitnessMismatch);
       return Status::success();
     }
+    if (below_removal_watermark(site)) {
+      recovery_required(JoinRecoveryReason::AssignmentRegressed);
+      return Status::success();
+    }
     if (health.quarantined || health.uncertain) {
       // Known-impaired: only this site may be re-issued, via full EDHOC.
       recovery_only_ = true;
@@ -916,6 +929,18 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       } else {
         start_scan();
       }
+      return Status::success();
+    }
+    // Recovery queries keep the old record and its floors until an authenticated
+    // verdict; they cannot adopt another site's offer or become Member here.
+    if (verify_existing_) {
+      recovery_only_ = true;
+      recovery_site_id_ = site.site_id;
+      if (!retain_membership(site, identity)) {
+        recovery_required(JoinRecoveryReason::MembershipInvalid);
+        return Status::success();
+      }
+      start_scan();
       return Status::success();
     }
     // A healthy stored member: adopt it without touching the air.
@@ -986,7 +1011,8 @@ bool Joiner::open_scan_window(const MonotonicMs now) noexcept {
       return false;
     }
     ZtDiscoverBody body{};
-    body.profile_bits = kJoinProfileRljoin1;  // P3-5 stays off: no RLRES1 bit
+    body.profile_bits = kJoinProfileRljoin1 |
+                        (recovery_only_ && evidence_valid_ ? kJoinProfileMembershipRecovery : 0u);
     body.org_hint = step.org_hint;
     body.preferred_site_hint = candidates_.preferred_hint(step.org_hint);
     candidates_.avoid_hints(step.org_hint, now, body.avoid_site_hints);
@@ -1163,7 +1189,8 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
       return Status::success();
     }
     ZtDiscoverBody body{};
-    body.profile_bits = kJoinProfileRljoin1;
+    body.profile_bits = kJoinProfileRljoin1 |
+                        (recovery_only_ && evidence_valid_ ? kJoinProfileMembershipRecovery : 0u);
     body.org_hint = attempt_key_.org_hint;
     body.preferred_site_hint = candidates_.preferred_hint(attempt_key_.org_hint);
     candidates_.avoid_hints(attempt_key_.org_hint, now, body.avoid_site_hints);
@@ -1204,6 +1231,7 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   hs.requested_role = config_.requested_role;
   hs.last_site_id = evidence_valid_ ? evidence_.site_id : 0;
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
+  hs.last_network = evidence_valid_ && recovery_only_ ? evidence_.network : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
   if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
@@ -1377,6 +1405,12 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
+  if (decided.outcome == JoinAttemptOutcome::AllowVerified && decided.record != nullptr &&
+      below_removal_watermark(*decided.record)) {
+    teardown_attempt();
+    recovery_required(JoinRecoveryReason::AssignmentRegressed);
+    return Status::success();
+  }
   decided_ = decided;
   decided_valid_ = true;
   switch (decided.outcome) {
@@ -1398,6 +1432,7 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
       JoinAction action{};
       action.kind = JoinActionKind::RemovalRequired;
       action.removal = decided.removal;
+      action.removal_object = decided.removal_object;
       action.removal_site_id = decided.removal.site_id;
       action.removal_generation = decided.removal.generation;
       if (!emit_action(action)) return Status::success();  // retry next poll
@@ -1435,6 +1470,11 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
     return Status::success();
   }
   const SiteRecord& prepared = *decided_.record;
+  if (below_removal_watermark(prepared)) {
+    teardown_attempt();
+    recovery_required(JoinRecoveryReason::AssignmentRegressed);
+    return Status::success();
+  }
   Digest256 prepared_fingerprint{};
   if (!site_.fingerprint(prepared, prepared_fingerprint)) {
     finish_attempt(JoinAttemptOutcome::MalformedResult, 0, now);
@@ -1503,7 +1543,7 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   const SiteStoreHealth after = site_.health();
   if (after.has_site && after.unsupported_mask == 0 && after.read_error_mask == 0 &&
       !after.active_load_failed && !after.quarantined && !after.uncertain &&
-      matches_expectation(site_.site()) &&
+      !below_removal_watermark(site_.site()) && matches_expectation(site_.site()) &&
       verify_adopted(site_.site(), identity_.identity())) {
     // The complete verified record was read back from a healthy pair.
     JoinAction action{};
@@ -1558,6 +1598,10 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
     }
     if (site.boot_witness > boot_witness_) {
       recovery_required(JoinRecoveryReason::BootWitnessMismatch);
+      return Status::success();
+    }
+    if (below_removal_watermark(site)) {
+      recovery_required(JoinRecoveryReason::AssignmentRegressed);
       return Status::success();
     }
     if (commit_expect_.valid && !health.quarantined && !health.uncertain &&

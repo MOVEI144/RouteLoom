@@ -185,7 +185,8 @@ Status JoinHandshake::Ead::compose(const int message, edhoc::EadItem* items,
     if (capacity < 1) return Status::error(StatusCode::NoCapacity, "ead capacity");
     JoinIntent intent{};
     intent.org_hint = o.config_.org_hint;
-    intent.profile_bits = kJoinProfileRljoin1;  // P3-5 disabled: no RLRES1 bit
+    intent.profile_bits = kJoinProfileRljoin1 |
+                          (o.config_.last_network != 0 ? kJoinProfileMembershipRecovery : 0u);
     const Status status = join_intent_encode(intent, o.intent_value_);
     if (!status) return status;
     items[count++] = edhoc::EadItem{-static_cast<std::int32_t>(JoinEad::Intent),
@@ -193,11 +194,17 @@ Status JoinHandshake::Ead::compose(const int message, edhoc::EadItem* items,
     return Status::success();
   }
   if (message == 3) {
-    if (capacity < 2) return Status::error(StatusCode::NoCapacity, "ead capacity");
+    if (capacity < (o.config_.last_network != 0 ? 3u : 2u)) {
+      return Status::error(StatusCode::NoCapacity, "ead capacity");
+    }
     items[count++] = edhoc::EadItem{-static_cast<std::int32_t>(JoinEad::Request),
                                     o.request_value_.view()};
     items[count++] = edhoc::EadItem{-static_cast<std::int32_t>(JoinEad::Credential),
                                     o.identity_->devcert.view()};
+    if (o.config_.last_network != 0) {
+      items[count++] = edhoc::EadItem{-static_cast<std::int32_t>(JoinEad::LastMembership),
+                                      o.last_membership_value_.view()};
+    }
     return Status::success();
   }
   return Status::success();
@@ -264,6 +271,11 @@ Status JoinHandshake::config_validate(const JoinHandshakeConfig& config,
       !role_executable(config.requested_role, config.capability)) {
     return Status::error(StatusCode::InvalidArgument, "join requested role");
   }
+  if (config.last_network != 0 && (config.last_site_id == 0 ||
+      static_cast<std::uint32_t>(config.last_network) != config.network_low32 ||
+      (config.last_network >> 32U) == 0)) {
+    return Status::error(StatusCode::InvalidArgument, "join last network");
+  }
   if (config.last_site_id == 0) {
     if (config.last_generation != 0) {
       return Status::error(StatusCode::InvalidArgument, "join last generation");
@@ -294,6 +306,10 @@ Status JoinHandshake::begin(const JoinHandshakeConfig& config, const IdentityRec
   }
   identity_ = &identity;
   config_ = config;
+  if (config.last_network != 0) {
+    status = last_membership_encode(config.last_network, last_membership_value_);
+    if (!status) { identity_ = nullptr; return status; }
+  }
   edhoc::SessionConfig session_config{};
   session_config.role = edhoc::Role::Initiator;
   session_config.method = edhoc::Method::SignatureSignature;
@@ -488,6 +504,14 @@ Status JoinHandshake::decide_removed(const JoinResult& result, const JoinDecideI
     out.outcome = JoinAttemptOutcome::RemovedDenied;
     return Status::success();
   }
+  // Preserve the verified COSE bytes: RLX1 boot replay must re-verify the
+  // signed proof, not trust a decoded claim or a Joiner verdict.
+  if (result.removal_notice.size != out.removal_object.size()) {
+    out.outcome = JoinAttemptOutcome::MalformedResult;
+    return Status::success();
+  }
+  std::memcpy(out.removal_object.data(), result.removal_notice.data,
+              out.removal_object.size());
   out.outcome = JoinAttemptOutcome::RemovedVerified;
   return Status::success();
 }
@@ -554,6 +578,7 @@ void JoinHandshake::end() noexcept {
   secure_clear(prepared_.gk_current.data(), prepared_.gk_current.size());
   secure_clear(intent_value_.bytes.data(), intent_value_.bytes.size());
   secure_clear(request_value_.bytes.data(), request_value_.bytes.size());
+  secure_clear(last_membership_value_.bytes.data(), last_membership_value_.bytes.size());
   prepared_ = SiteRecord{};
   site_cert_ = ByteBuffer<kRlcw1CertMax>{};
   result_ = ByteBuffer<kJoinResultMax>{};

@@ -116,6 +116,123 @@ class CBridge final : public RadioPort, public SecurityProvider, public NodeObse
   rl_observer_vtable_t observer_{};
 };
 
+// Non-reentrant guard for the C reply-port bridge: a C port function that
+// calls back into the node re-enters through here and must see Busy.
+struct BridgeGuard {
+  explicit BridgeGuard(bool& flag) noexcept : flag_(flag) { flag_ = true; }
+  ~BridgeGuard() noexcept { flag_ = false; }
+  BridgeGuard(const BridgeGuard&) = delete;
+  BridgeGuard& operator=(const BridgeGuard&) = delete;
+  bool& flag_;
+};
+
+// C++ ReplyPeerPort over a C reply-peer vtable (issue #117). A missing C
+// function reports Unsupported.
+class CReplyPeerBridge final : public ReplyPeerPort {
+ public:
+  CReplyPeerBridge() noexcept = default;
+
+  void install(const rl_reply_peer_vtable_t& vtable) noexcept { vtable_ = vtable; }
+  void clear() noexcept { vtable_ = {}; }
+
+  Status acquire(const ReplyBinding captured, const MonotonicMs deadline,
+                 const MonotonicMs now, ReplyLeaseToken& out) noexcept override {
+    if (in_call_) return Status::error(StatusCode::Busy, "reply_port reentered");
+    BridgeGuard guard(in_call_);
+    out = kInvalidReplyLeaseToken;
+    if (vtable_.acquire == nullptr) {
+      return Status::error(StatusCode::Unsupported, "reply_port.acquire missing");
+    }
+    std::uint32_t slot = 0;
+    std::uint32_t serial = 0;
+    const Status status =
+        from_c(vtable_.acquire(vtable_.user, captured.peer, captured.id.value,
+                               captured.generation.value, captured.rx_context_id,
+                               deadline, now, &slot, &serial),
+               "reply_port.acquire");
+    if (status) {
+      out.use_slot = slot;
+      out.serial = serial;
+    }
+    return status;
+  }
+
+  Status release(const ReplyLeaseToken token) noexcept override {
+    if (in_call_) return Status::error(StatusCode::Busy, "reply_port reentered");
+    BridgeGuard guard(in_call_);
+    if (vtable_.release == nullptr) {
+      return Status::error(StatusCode::Unsupported, "reply_port.release missing");
+    }
+    return from_c(vtable_.release(vtable_.user, token.use_slot, token.serial),
+                  "reply_port.release");
+  }
+
+  Status validate(const ReplyLeaseToken token,
+                  const MonotonicMs now) noexcept override {
+    if (in_call_) return Status::error(StatusCode::Busy, "reply_port reentered");
+    BridgeGuard guard(in_call_);
+    if (vtable_.validate == nullptr) {
+      return Status::error(StatusCode::Unsupported, "reply_port.validate missing");
+    }
+    return from_c(vtable_.validate(vtable_.user, token.use_slot, token.serial, now),
+                  "reply_port.validate");
+  }
+
+  Status send_reply(const ReplyLeaseToken token, const std::uint64_t tx_token,
+                    const ByteView frame,
+                    const MonotonicMs now) noexcept override {
+    if (in_call_) return Status::error(StatusCode::Busy, "reply_port reentered");
+    BridgeGuard guard(in_call_);
+    if (vtable_.send_reply == nullptr) {
+      return Status::error(StatusCode::Unsupported, "reply_port.send_reply missing");
+    }
+    return from_c(vtable_.send_reply(vtable_.user, token.use_slot, token.serial,
+                                     tx_token, frame.data, frame.size, now),
+                  "reply_port.send_reply");
+  }
+
+  Status snapshot_binding(const NodeId peer, ReplyBinding& out) noexcept override {
+    if (in_call_) return Status::error(StatusCode::Busy, "reply_port reentered");
+    BridgeGuard guard(in_call_);
+    out = ReplyBinding{};
+    if (vtable_.snapshot_binding == nullptr) {
+      return Status::error(StatusCode::Unsupported, "reply_port.snapshot missing");
+    }
+    std::uint32_t id = 0;
+    std::uint32_t generation = 0;
+    std::uint32_t rx_context = 0;
+    const Status status = from_c(vtable_.snapshot_binding(vtable_.user, peer, &id,
+                                                           &generation,
+                                                           &rx_context),
+                                 "reply_port.snapshot_binding");
+    if (status) {
+      out.peer = peer;
+      out.id = BindingId{id};
+      out.generation = BindingGeneration{generation};
+      out.rx_context_id = rx_context;
+    }
+    return status;
+  }
+
+  Status send_bound(const ReplyBinding binding, const std::uint64_t tx_token,
+                    const ByteView frame) noexcept override {
+    if (in_call_) return Status::error(StatusCode::Busy, "reply_port reentered");
+    BridgeGuard guard(in_call_);
+    if (vtable_.send_bound == nullptr) {
+      return Status::error(StatusCode::Unsupported, "reply_port.send_bound missing");
+    }
+    return from_c(vtable_.send_bound(vtable_.user, binding.peer, binding.id.value,
+                                     binding.generation.value,
+                                     binding.rx_context_id, tx_token, frame.data,
+                                     frame.size),
+                  "reply_port.send_bound");
+  }
+
+ private:
+  rl_reply_peer_vtable_t vtable_{};
+  bool in_call_{false};
+};
+
 // rl_node_config_t tail extension (routeloom.h): the base layout is frozen
 // at RL_NODE_CONFIG_SIZE_BASE bytes; the scoped-routing fields follow it and
 // are read only when the caller's struct_size covers them. A two-gateway
@@ -224,6 +341,7 @@ bool valid_header(const std::uint32_t struct_size, const std::uint32_t abi_versi
 
 struct rl_context {
   CBridge bridge;
+  CReplyPeerBridge reply_peer;
   MeshNode node;
 
   rl_context(const NodeConfig& config, const rl_radio_vtable_t& radio,
@@ -431,6 +549,52 @@ void rl_on_radio_receive(rl_context_t* context, const rl_node_id_t peer,
 void rl_on_radio_tx_result(rl_context_t* context, const uint64_t token,
                            const bool success, const rl_monotonic_ms_t now_ms) {
   if (context != nullptr) context->node.on_radio_tx_result(token, success, now_ms);
+}
+
+void rl_reply_peer_vtable_init(rl_reply_peer_vtable_t* vtable) {
+  if (vtable == nullptr) return;
+  *vtable = {};
+  vtable->struct_size = sizeof(*vtable);
+  vtable->version = RL_REPLY_PEER_VERSION;
+}
+
+rl_status_code_t rl_attach_reply_peer(rl_context_t* context,
+                                      const rl_reply_peer_vtable_t* vtable) {
+  if (context == nullptr) return RL_STATUS_INVALID_ARGUMENT;
+  if (vtable == nullptr) {
+    const Status status = context->node.set_reply_peer_port(nullptr);
+    if (!status) return to_c(status.code);
+    context->reply_peer.clear();
+    return RL_STATUS_OK;
+  }
+  // The struct is versioned precisely so a short/foreign caller is refused
+  // here instead of being read past its size.
+  if (vtable->struct_size < sizeof(*vtable) || vtable->version != RL_REPLY_PEER_VERSION) {
+    return RL_STATUS_INVALID_ARGUMENT;
+  }
+  const Status status = context->node.set_reply_peer_port(&context->reply_peer);
+  if (!status) return to_c(status.code);
+  context->reply_peer.install(*vtable);
+  return RL_STATUS_OK;
+}
+
+void rl_on_radio_receive_with_binding(rl_context_t* context, const rl_node_id_t peer,
+                                      const uint8_t* frame, const size_t frame_size,
+                                      const int8_t rssi_dbm, const uint32_t binding_id,
+                                      const uint32_t binding_generation,
+                                      const rl_monotonic_ms_t now_ms) {
+  if (context != nullptr && frame != nullptr && frame_size != 0) {
+    RadioRxMetadataV2 metadata{};
+    metadata.rssi_dbm = rssi_dbm;
+    metadata.rssi_valid = true;
+    metadata.binding = BindingId{binding_id};
+    metadata.binding_generation = BindingGeneration{binding_generation};
+    // Unattributed over the C boundary: telemetry must treat this as
+    // injected evidence, never as local-driver truth (same rule as the V1
+    // entry above).
+    metadata.provenance = ObservationProvenance::InjectedTest;
+    context->node.on_radio_receive(peer, ByteView{frame, frame_size}, metadata, now_ms);
+  }
 }
 
 const char* rl_status_code_name(const rl_status_code_t code) {

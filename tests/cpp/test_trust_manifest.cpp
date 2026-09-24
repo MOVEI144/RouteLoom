@@ -13,6 +13,7 @@
 #include "routeloom/discovery_scope.hpp"  // sha256
 #include "routeloom/trust_manifest.hpp"
 #include "routeloom/trust_store.hpp"
+#include "routeloom/trust_view.hpp"
 
 #include "test_provisioning.hpp"
 
@@ -81,6 +82,41 @@ void provisioned_store(FaultyTrustStorage& storage) {
   base.keys[0] = test_key_record(0xA17, 1, kAuth1.pub, TrustKeyStatus::Active);
   base.key_count = 1;
   CHECK_OK(store.commit_image(base));
+}
+
+class FakeFloorStore final : public SecurityFloorStorage {
+ public:
+  Status read(const MutableByteView target) noexcept override {
+    if (target.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor read");
+    }
+    if (!provisioned) return Status::error(StatusCode::NotFound, "floor missing");
+    std::memcpy(target.data, blob_.data(), kSecurityFloorBlobBytes);
+    return Status::success();
+  }
+  Status write(const ByteView data) noexcept override {
+    if (data.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor write");
+    }
+    std::memcpy(blob_.data(), data.data, data.size);
+    provisioned = true;
+    return Status::success();
+  }
+  std::array<std::uint8_t, kSecurityFloorBlobBytes> blob_{};
+  bool provisioned{false};
+};
+
+// A floor for kNetwork with no trust reservation yet (E=G=0): every new
+// epoch in these tests reserves above it.
+void seed_floor(FakeFloorStore& storage) {
+  SecurityFloorState state{};
+  state.network = kNetwork;
+  state.target = 0x30;
+  state.namespace_count = 1;
+  state.entries[0].config_namespace = 1;
+  state.entries[0].schema = 1;
+  SecurityFloorStore floor(storage);
+  CHECK_OK(floor.provision_seed(state));
 }
 
 void test_manifest_aad_and_protected() {
@@ -260,7 +296,12 @@ void test_manifest_accept_happy_path() {
 
   TrustStore store(storage);
   CHECK_OK(store.initialize());
-  CHECK_OK(trust_manifest_accept(store, object.view()));
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
   CHECK(store.store_epoch() == 2);
   CHECK(store.min_authority_generation() == 2);
 
@@ -276,17 +317,35 @@ void test_manifest_accept_replay_and_stale() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
-  CHECK_OK(store.commit_image(test_image(5, kNetwork, kRootA, kRootIdA)));
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
+  ByteBuffer<kTrustManifestObjectMax> installed{};
+  make_manifest(test_image(5, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, installed);
+  CHECK_OK(trust_manifest_accept(store, installed.view(), floor));
 
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(test_image(4, kNetwork, kRootA, kRootIdA), kRootIdA,
                 kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::Conflict);  // stale — denied before the verify
+  // Completed duplicate: same epoch, byte-identical content — success
+  // with no flash write.
+  const std::size_t writes_before = storage.write_calls;
   make_manifest(test_image(5, kNetwork, kRootA, kRootIdA), kRootIdA,
                 kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
-        StatusCode::Conflict);  // equal epoch is a replay no-op
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
+  CHECK(store.store_epoch() == 5);
+  CHECK(storage.write_calls == writes_before);
+  // Same epoch with DIFFERENT content is a fork attempt, never an update.
+  TrustImage fork = test_image(5, kNetwork, kRootA, kRootIdA);
+  fork.min_authority_generation = 9;
+  make_manifest(fork, kRootIdA, kRootA.priv, object);
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
+        StatusCode::Conflict);
   CHECK(store.store_epoch() == 5);
 }
 
@@ -295,12 +354,17 @@ void test_manifest_accept_epoch_zero() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   // A structurally decodable image with epoch 0: rejected as malformed
   // before any crypto (§4.5.1 rule 2).
   TrustImage zero_epoch = test_image(0, kNetwork, kRootA, kRootIdA);
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(zero_epoch, kRootIdA, kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::ProtocolError);
 }
 
@@ -309,10 +373,15 @@ void test_manifest_accept_wrong_network() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(test_image(2, 8, kRootA, kRootIdA), kRootIdA, kRootA.priv,
                 object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
   CHECK(store.store_epoch() == 1);
 }
@@ -322,12 +391,17 @@ void test_manifest_accept_anchor_policy() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   const TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
   ByteBuffer<kTrustManifestObjectMax> object{};
 
   // kid names no anchor in the committed image.
   make_manifest(next, 0x999, kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
 
   // kid names an anchor whose record is Disabled — fails even with a
@@ -345,10 +419,15 @@ void test_manifest_accept_anchor_policy() {
     }
     TrustStore disabled(storage2);
     CHECK_OK(disabled.initialize());
+    FakeFloorStore disabled_floor_storage;
+    seed_floor(disabled_floor_storage);
+    SecurityFloorStore disabled_floor(disabled_floor_storage);
+    CHECK_OK(disabled_floor.initialize());
+    disabled.attach_floor(&disabled_floor);
     ByteBuffer<kTrustManifestObjectMax> object2{};
     make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdB,
                   kRootB.priv, object2);
-    CHECK(trust_manifest_accept(disabled, object2.view()).code ==
+    CHECK(trust_manifest_accept(disabled, object2.view(), disabled_floor).code ==
           StatusCode::AuthorizationFailed);
   }
 }
@@ -358,18 +437,23 @@ void test_manifest_accept_bad_signature() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   const TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
   ByteBuffer<kTrustManifestObjectMax> object{};
 
   // Signed by a different private key than the named anchor holds.
   make_manifest(next, kRootIdA, kIntruder.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
 
   // Tampered signature byte.
   make_manifest(next, kRootIdA, kRootA.priv, object);
   object.bytes[object.size - 10] ^= 0x01;
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
 
   // Signature bounds: R = 0.
@@ -380,7 +464,7 @@ void test_manifest_accept_bad_signature() {
     ByteBuffer<kTrustManifestObjectMax> bad{};
     CHECK_OK(trust_manifest_assemble(content.view(), kRootIdA,
                                      ByteView{signature.data(), 64}, bad));
-    CHECK(trust_manifest_accept(store, bad.view()).code ==
+    CHECK(trust_manifest_accept(store, bad.view(), floor).code ==
           StatusCode::AuthorizationFailed);
   }
   // S = n (out of range).
@@ -393,7 +477,7 @@ void test_manifest_accept_bad_signature() {
     ByteBuffer<kTrustManifestObjectMax> bad{};
     CHECK_OK(trust_manifest_assemble(content.view(), kRootIdA,
                                      ByteView{signature.data(), 64}, bad));
-    CHECK(trust_manifest_accept(store, bad.view()).code ==
+    CHECK(trust_manifest_accept(store, bad.view(), floor).code ==
           StatusCode::AuthorizationFailed);
   }
   // High-S form of an otherwise valid signature: malleability rejected.
@@ -412,7 +496,7 @@ void test_manifest_accept_bad_signature() {
     ByteBuffer<kTrustManifestObjectMax> bad{};
     CHECK_OK(trust_manifest_assemble(parts.payload, kRootIdA,
                                      ByteView{signature.data(), 64}, bad));
-    CHECK(trust_manifest_accept(store, bad.view()).code ==
+    CHECK(trust_manifest_accept(store, bad.view(), floor).code ==
           StatusCode::AuthorizationFailed);
   }
 }
@@ -425,11 +509,16 @@ void test_manifest_accept_aad_binding() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   const TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(next, kRootIdA, kRootA.priv, object,
                 /*aad_network=*/8);  // signed for the wrong network context
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
 }
 
@@ -438,11 +527,14 @@ void test_manifest_accept_store_states() {
   const TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
   make_manifest(next, kRootIdA, kRootA.priv, object);
 
-  // Uninitialized store.
+  // Uninitialized store (the floor object is never touched — the
+  // initialized gate fires first).
   {
     FaultyTrustStorage storage;
     TrustStore store(storage);
-    CHECK(trust_manifest_accept(store, object.view()).code ==
+    FakeFloorStore floor_storage;
+    SecurityFloorStore floor(floor_storage);
+    CHECK(trust_manifest_accept(store, object.view(), floor).code ==
           StatusCode::InvalidState);
   }
   // Fresh store (first install is physical — never a manifest).
@@ -450,10 +542,16 @@ void test_manifest_accept_store_states() {
     FaultyTrustStorage storage;
     TrustStore store(storage);
     CHECK_OK(store.initialize());
-    CHECK(trust_manifest_accept(store, object.view()).code ==
+    FakeFloorStore floor_storage;
+    seed_floor(floor_storage);
+    SecurityFloorStore floor(floor_storage);
+    CHECK_OK(floor.initialize());
+    CHECK(trust_manifest_accept(store, object.view(), floor).code ==
           StatusCode::AuthorizationFailed);
   }
-  // Quarantined store: store-state gate fires before envelope parse.
+  // Quarantined store: no floor binding for these bytes, so the
+  // store-state gate fires (same-original redelivery binds and heals —
+  // covered by the resume tests).
   {
     FaultyTrustStorage storage;
     provisioned_store(storage);
@@ -462,12 +560,16 @@ void test_manifest_accept_store_states() {
     TrustStore store(storage);
     CHECK(store.initialize().code == StatusCode::IntegrityError);
     CHECK(store.quarantined());
-    CHECK(trust_manifest_accept(store, object.view()).code ==
+    FakeFloorStore floor_storage;
+    seed_floor(floor_storage);
+    SecurityFloorStore floor(floor_storage);
+    CHECK_OK(floor.initialize());
+    CHECK(trust_manifest_accept(store, object.view(), floor).code ==
           StatusCode::IntegrityError);
     // Even malformed input reports the store state first.
     const std::array<std::uint8_t, 4> junk{{0xDE, 0xAD, 0xBE, 0xEF}};
-    CHECK(trust_manifest_accept(store,
-                                ByteView{junk.data(), junk.size()})
+    CHECK(trust_manifest_accept(store, ByteView{junk.data(), junk.size()},
+                                floor)
               .code == StatusCode::IntegrityError);
   }
   // Uncertain store: intake refused until recover().
@@ -478,7 +580,11 @@ void test_manifest_accept_store_states() {
     TrustStore store(storage);
     CHECK(store.initialize().code == StatusCode::IntegrityError);
     CHECK(store.uncertain());
-    CHECK(trust_manifest_accept(store, object.view()).code ==
+    FakeFloorStore floor_storage;
+    seed_floor(floor_storage);
+    SecurityFloorStore floor(floor_storage);
+    CHECK_OK(floor.initialize());
+    CHECK(trust_manifest_accept(store, object.view(), floor).code ==
           StatusCode::RecoveryRequired);
   }
 }
@@ -496,12 +602,17 @@ void test_manifest_accept_semantic_floor() {
   }
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   CHECK(store.generation_floor() == 5);
   TrustImage regressed = test_image(2, kNetwork, kRootA, kRootIdA);
   regressed.min_authority_generation = 3;
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(regressed, kRootIdA, kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
   CHECK(store.store_epoch() == 1);
 }
@@ -514,11 +625,16 @@ void test_manifest_accept_broken_chain_refused() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   TrustImage suicidal = test_image(2, kNetwork, kRootA, kRootIdA);
   suicidal.anchors[0].status = TrustAnchorStatus::Disabled;
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(suicidal, kRootIdA, kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::InvalidArgument);
   CHECK(store.store_epoch() == 1);
 }
@@ -530,6 +646,11 @@ void test_manifest_accept_skip_ahead() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   TrustImage jump = test_image(5, kNetwork, kRootA, kRootIdA);
   Digest256 revoked{};
   revoked[0] = 0xAB;
@@ -537,7 +658,7 @@ void test_manifest_accept_skip_ahead() {
   jump.revocation_count = 1;
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(jump, kRootIdA, kRootA.priv, object);
-  CHECK_OK(trust_manifest_accept(store, object.view()));
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
   CHECK(store.store_epoch() == 5);
   CHECK(store.is_credential_revoked(revoked));
 }
@@ -549,13 +670,18 @@ void test_manifest_accept_anchor_rotation() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
 
   TrustImage e2 = test_image(2, kNetwork, kRootA, kRootIdA);
   e2.anchors[1] = test_anchor(kRootIdB, kRootB.pub, TrustAnchorStatus::Active);
   e2.anchor_count = 2;
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(e2, kRootIdA, kRootA.priv, object);
-  CHECK_OK(trust_manifest_accept(store, object.view()));
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
   CHECK(store.store_epoch() == 2);
   CHECK(store.find_anchor(kRootIdB) != nullptr);
 
@@ -563,7 +689,7 @@ void test_manifest_accept_anchor_rotation() {
   e3.store_epoch = 3;
   e3.anchors[0].status = TrustAnchorStatus::Disabled;
   make_manifest(e3, kRootIdB, kRootB.priv, object);
-  CHECK_OK(trust_manifest_accept(store, object.view()));
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
   CHECK(store.store_epoch() == 3);
   CHECK(store.find_anchor(kRootIdA)->status == TrustAnchorStatus::Disabled);
 
@@ -572,7 +698,7 @@ void test_manifest_accept_anchor_rotation() {
   e4.store_epoch = 4;
   e4.anchors[0].status = TrustAnchorStatus::Active;  // tries to re-enable
   make_manifest(e4, kRootIdA, kRootA.priv, object);
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::AuthorizationFailed);
   CHECK(store.store_epoch() == 3);
 }
@@ -584,6 +710,11 @@ void test_manifest_accept_max_size() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
 
   TrustImage maximal = test_image(2, kNetwork, kRootA, kRootIdA);
   maximal.anchors[1] =
@@ -605,7 +736,7 @@ void test_manifest_accept_max_size() {
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(maximal, kRootIdA, kRootA.priv, object);
   CHECK(object.size <= kTrustManifestObjectMax);
-  CHECK_OK(trust_manifest_accept(store, object.view()));
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
   CHECK(store.store_epoch() == 2);
   CHECK(store.image().revocation_count == kTrustRevocationMax);
 }
@@ -618,22 +749,254 @@ void test_manifest_accept_power_cut() {
   ByteBuffer<kTrustManifestObjectMax> object{};
   const TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
   make_manifest(next, kRootIdA, kRootA.priv, object);
+  // One floor across the power cut: the reservation the failed commit
+  // made is what the retry resumes.
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
   {
     TrustStore store(storage);
     CHECK_OK(store.initialize());
+    store.attach_floor(&floor);
     storage.cut_call = storage.write_calls;      // pending write of the commit
     storage.cut_bytes = 20;                      // torn body, head intact
-    CHECK(trust_manifest_accept(store, object.view()).code ==
+    CHECK(trust_manifest_accept(store, object.view(), floor).code ==
           StatusCode::StorageFailure);
     CHECK(store.store_epoch() == 1);  // in-memory state never advanced
   }
   TrustStore reboot(storage);
   CHECK_OK(reboot.initialize());
+  reboot.attach_floor(&floor);
   CHECK(reboot.store_epoch() == 1);
   CHECK(!reboot.uncertain());  // pending head is provably discardable
-  // Retry lands cleanly.
-  CHECK_OK(trust_manifest_accept(reboot, object.view()));
+  // Retry lands cleanly through the floor-bound resume: the reservation
+  // the failed commit made re-installs these exact bytes.
+  CHECK_OK(trust_manifest_accept(reboot, object.view(), floor));
   CHECK(reboot.store_epoch() == 2);
+}
+
+void test_reserved_manifest_is_the_only_resume() {
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  TrustStore store(storage);
+  CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
+  TrustView view(store);
+  view.attach_floor(&floor);
+  CHECK(view.ready());
+
+  ByteBuffer<kTrustManifestObjectMax> reserved_object{};
+  make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, reserved_object);
+  SecurityFloorState before{};
+  CHECK_OK(floor.read(before));
+  SecurityFloorState reserved = before;
+  reserved.trust_epoch_floor = 2;
+  reserved.min_authority_generation = 1;
+  sha256(reserved_object.view(), reserved.last_manifest_hash);
+  CHECK_OK(floor.advance(before, reserved));
+
+  // A cut after the floor reservation leaves an old, CRC-valid image.
+  // It must serve neither config permits nor a different root update.
+  CHECK(!view.ready());
+  CHECK(view.resolve_authority_key(0xA17, 1) == nullptr);
+  ByteBuffer<kTrustManifestObjectMax> replacement{};
+  make_manifest(test_image(3, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, replacement);
+  CHECK(!trust_manifest_accept(store, replacement.view(), floor).ok());
+  SecurityFloorState after{};
+  CHECK_OK(floor.read(after));
+  CHECK(after.trust_epoch_floor == 2);
+  CHECK(after.last_manifest_hash == reserved.last_manifest_hash);
+  CHECK(store.store_epoch() == 1);
+
+  CHECK_OK(trust_manifest_accept(store, reserved_object.view(), floor));
+  CHECK(store.store_epoch() == 2);
+  CHECK(view.usable());
+
+  // Equal payload with a corrupted signature is not the reserved original.
+  auto forged = reserved_object;
+  forged.bytes[forged.size - 1] ^= 1;
+  CHECK(!trust_manifest_accept(store, forged.view(), floor).ok());
+
+  floor_storage.provisioned = false;
+  CHECK(floor.refresh().code == StatusCode::RecoveryRequired);
+  CHECK(!view.usable() && !view.ready());
+  CHECK(view.resolve_authority_key(0xA17, 1) == nullptr);
+}
+
+void test_manifest_accept_total_loss_resume() {
+  // Both trust slots destroyed after a committed update: the ONLY way
+  // back is re-delivering the exact original the floor binds (same
+  // bytes hash + E/G). No anchor survives to verify against — the floor
+  // binding is the reinstall authorization — and any other bytes refuse.
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
+  next.keys[0] = test_key_record(0xA17, 2, kAuth1.pub, TrustKeyStatus::Active);
+  next.key_count = 1;
+  next.min_authority_generation = 2;
+  make_manifest(next, kRootIdA, kRootA.priv, object);
+  {
+    TrustStore store(storage);
+    CHECK_OK(store.initialize());
+    store.attach_floor(&floor);
+    CHECK_OK(trust_manifest_accept(store, object.view(), floor));
+    CHECK(store.store_epoch() == 2);
+  }
+  storage.corrupt(0, 100);
+  storage.corrupt(1, 100);
+  TrustStore lost(storage);
+  CHECK(lost.initialize().code == StatusCode::IntegrityError);
+  CHECK(lost.quarantined());
+  lost.attach_floor(&floor);
+  // Same original reinstalls without any surviving anchor.
+  CHECK_OK(trust_manifest_accept(lost, object.view(), floor));
+  CHECK(lost.store_epoch() == 2);
+  CHECK(lost.find_key(0xA17, 2) != nullptr);
+  CHECK(!lost.quarantined() && !lost.uncertain());
+  // Both slots carry the reinstalled twins.
+  TrustStore reboot(storage);
+  CHECK_OK(reboot.initialize());
+  CHECK(reboot.store_epoch() == 2);
+  CHECK(!reboot.uncertain());
+}
+
+void test_manifest_accept_total_loss_foreign_refused() {
+  // After total slot loss, bytes the floor does NOT bind are refused —
+  // even well-signed ones: there is no anchor base to verify against,
+  // so only the reservation authorizes.
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  {
+    TrustStore store(storage);
+    CHECK_OK(store.initialize());
+    store.attach_floor(&floor);
+    ByteBuffer<kTrustManifestObjectMax> object{};
+    make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdA,
+                  kRootA.priv, object);
+    CHECK_OK(trust_manifest_accept(store, object.view(), floor));
+  }
+  storage.corrupt(0, 100);
+  storage.corrupt(1, 100);
+  TrustStore lost(storage);
+  CHECK(lost.initialize().code == StatusCode::IntegrityError);
+  lost.attach_floor(&floor);
+  // A well-formed, well-signed epoch-3 manifest — but the floor binds
+  // only the epoch-2 original, so this is managed re-provisioning, not
+  // a resume.
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  make_manifest(test_image(3, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, object);
+  CHECK(trust_manifest_accept(lost, object.view(), floor).code ==
+        StatusCode::IntegrityError);
+  CHECK(lost.quarantined());
+}
+
+void test_manifest_accept_uncertain_heal() {
+  // One trust slot destroyed after a committed update: redelivering the
+  // same original heals the missing twin (completed-duplicate path on an
+  // uncertain store) instead of demanding a new epoch.
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, object);
+  {
+    TrustStore store(storage);
+    CHECK_OK(store.initialize());
+    store.attach_floor(&floor);
+    CHECK_OK(trust_manifest_accept(store, object.view(), floor));
+  }
+  storage.corrupt(1, 100);
+  TrustStore hurt(storage);
+  CHECK(hurt.initialize().code == StatusCode::IntegrityError);
+  CHECK(hurt.uncertain());
+  hurt.attach_floor(&floor);
+  CHECK_OK(trust_manifest_accept(hurt, object.view(), floor));
+  CHECK(hurt.store_epoch() == 2);
+  CHECK(!hurt.uncertain());
+  TrustStore reboot(storage);
+  CHECK_OK(reboot.initialize());
+  CHECK(!reboot.uncertain());
+  CHECK(reboot.store_epoch() == 2);
+}
+
+void test_manifest_accept_top_values_refused() {
+  // Epochs/generations at the u32 top value would seal the axis against
+  // the next disaster recovery — refused even when well-signed.
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  TrustStore store(storage);
+  CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  TrustImage sealed = test_image(0xFFFFFFFFU, kNetwork, kRootA, kRootIdA);
+  make_manifest(sealed, kRootIdA, kRootA.priv, object);
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
+        StatusCode::InvalidArgument);
+  TrustImage sealed_gen = test_image(2, kNetwork, kRootA, kRootIdA);
+  sealed_gen.min_authority_generation = 0xFFFFFFFFU;
+  make_manifest(sealed_gen, kRootIdA, kRootA.priv, object);
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
+        StatusCode::InvalidArgument);
+  CHECK(store.store_epoch() == 1);
+}
+
+void test_manifest_accept_below_floor() {
+  // The floor leads: an epoch at/below the floor's E, or a generation
+  // below the floor's G, is stale — even with a valid signature under a
+  // live anchor.
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  TrustStore store(storage);
+  CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
+  // Simulate a newer reservation the store has not committed (managed
+  // state, e.g. an interrupted newer update): floor E/G move first.
+  SecurityFloorState reserved{};
+  CHECK_OK(floor.read(reserved));
+  SecurityFloorState advanced = reserved;
+  advanced.trust_epoch_floor = 5;
+  advanced.min_authority_generation = 4;
+  CHECK_OK(floor.advance(reserved, advanced));
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, object);
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
+        StatusCode::Conflict);
+  TrustImage low_gen = test_image(6, kNetwork, kRootA, kRootIdA);
+  low_gen.min_authority_generation = 1;
+  make_manifest(low_gen, kRootIdA, kRootA.priv, object);
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
+        StatusCode::AuthorizationFailed);
+  CHECK(store.store_epoch() == 1);
 }
 
 void test_manifest_accept_config_off() {
@@ -643,12 +1006,17 @@ void test_manifest_accept_config_off() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   CHECK(store.find_key(0xA17, 1) != nullptr);  // active key today
   const TrustImage config_off = test_image(2, kNetwork, kRootA, kRootIdA);
   CHECK(config_off.key_count == 0);
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(config_off, kRootIdA, kRootA.priv, object);
-  CHECK_OK(trust_manifest_accept(store, object.view()));
+  CHECK_OK(trust_manifest_accept(store, object.view(), floor));
   CHECK(store.store_epoch() == 2);
   CHECK(store.find_key(0xA17, 1) == nullptr);
 }
@@ -660,6 +1028,11 @@ void test_manifest_accept_overcap_content() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   const TrustImage next = test_image(2, kNetwork, kRootA, kRootIdA);
   ByteBuffer<kTrustImageContentMax> content{};
   CHECK_OK(trust_image_body_encode(next, content));
@@ -672,7 +1045,7 @@ void test_manifest_accept_overcap_content() {
   CHECK_OK(trust_manifest_parse(object.view(), parts));
   CHECK_OK(trust_manifest_assemble(content.view(), kRootIdA,
                                    parts.signature, object));
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::ProtocolError);
 }
 
@@ -681,16 +1054,21 @@ void test_manifest_accept_malformed_object() {
   provisioned_store(storage);
   TrustStore store(storage);
   CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdA,
                 kRootA.priv, object);
   // Envelope corruption is a parse error, not a denial.
   object.bytes[0] = 0xD3;
-  CHECK(trust_manifest_accept(store, object.view()).code ==
+  CHECK(trust_manifest_accept(store, object.view(), floor).code ==
         StatusCode::ProtocolError);
   // Oversized objects never reach the parser's semantic stage.
   std::array<std::uint8_t, kTrustManifestObjectMax + 1> huge{};
-  CHECK(trust_manifest_accept(store, ByteView{huge.data(), huge.size()}).code ==
+  CHECK(trust_manifest_accept(store, ByteView{huge.data(), huge.size()}, floor).code ==
         StatusCode::ProtocolError);
 }
 
@@ -734,6 +1112,12 @@ int main() {
   test_manifest_accept_anchor_rotation();
   test_manifest_accept_max_size();
   test_manifest_accept_power_cut();
+  test_reserved_manifest_is_the_only_resume();
+  test_manifest_accept_total_loss_resume();
+  test_manifest_accept_total_loss_foreign_refused();
+  test_manifest_accept_uncertain_heal();
+  test_manifest_accept_top_values_refused();
+  test_manifest_accept_below_floor();
   test_manifest_accept_config_off();
   test_manifest_accept_overcap_content();
   test_manifest_accept_malformed_object();
