@@ -400,10 +400,25 @@ fn node_id(value: &str) -> Result<u64, DynError> {
 /// A proof-of-possession object as the device verb hands it over: raw
 /// bytes, or the same bytes as one hex line.
 fn read_object(path: &Path, max: usize) -> Result<Vec<u8>, DynError> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    use std::io::Read;
+    let limit = max
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(3))
+        .ok_or("object limit overflow")?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .take(limit as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() == limit {
+        return Err(format!("{}: larger than {max} bytes", path.display()).into());
+    }
     if let Ok(text) = std::str::from_utf8(&bytes) {
         let text = text.trim();
         if !text.is_empty() && text.len() % 2 == 0 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if text.len() / 2 > max {
+                return Err(format!("{}: larger than {max} bytes", path.display()).into());
+            }
             return Ok(hex_decode_exact(text, text.len() / 2).expect("hex checked"));
         }
     }
@@ -523,6 +538,15 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn read_object_rejects_hex_over_limit() {
+        let dir = scratch("object-bound");
+        let path = dir.join("pop.hex");
+        std::fs::write(&path, b"0001020304").unwrap();
+        assert!(read_object(&path, 4).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

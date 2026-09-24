@@ -1,26 +1,12 @@
 #include "routeloom/espnow_sdkv1_entropy.hpp"
 
 #include "bootloader_random.h"
-#include "esp_random.h"
+#include "psa/crypto.h"
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::espnow {
-namespace {
-
-constexpr unsigned char kPersonalization[] = "RouteLoom/maintenance-keygen/v1";
-
-int hardware_entropy(void*, unsigned char* output, const std::size_t length) {
-  if (output == nullptr) return -1;
-  esp_fill_random(output, length);
-  return 0;
-}
-
-}  // namespace
-
-EspMaintenanceEntropy::EspMaintenanceEntropy() noexcept { mbedtls_ctr_drbg_init(&drbg_); }
 
 EspMaintenanceEntropy::~EspMaintenanceEntropy() noexcept {
-  mbedtls_ctr_drbg_free(&drbg_);
   if (source_enabled_) bootloader_random_disable();
 }
 
@@ -28,17 +14,24 @@ Status EspMaintenanceEntropy::begin() noexcept {
   if (state_ != State::Uninitialized) {
     return Status::error(StatusCode::InvalidState, "maintenance entropy already started");
   }
-  // The bootloader turns this source off before app_main. The maintenance
-  // build owns neither RF nor ADC, so it can keep the source active for
-  // DRBG reseeds throughout the console session.
+  // The maintenance build owns neither RF nor ADC. ESP-IDF's PSA external
+  // RNG reads esp_fill_random(), which needs this continuous source pre-RF.
   bootloader_random_enable();
   source_enabled_ = true;
-  if (mbedtls_ctr_drbg_seed(&drbg_, hardware_entropy, nullptr, kPersonalization,
-                            sizeof(kPersonalization) - 1) != 0) {
+  if (psa_crypto_init() != PSA_SUCCESS) {
     state_ = State::Failed;
     bootloader_random_disable();
     source_enabled_ = false;
-    return Status::error(StatusCode::InvalidState, "maintenance entropy seed failed");
+    return Status::error(StatusCode::InvalidState, "maintenance PSA init failed");
+  }
+  std::uint8_t probe[32]{};
+  const psa_status_t probe_status = psa_generate_random(probe, sizeof(probe));
+  secure_clear(probe, sizeof(probe));
+  if (probe_status != PSA_SUCCESS) {
+    state_ = State::Failed;
+    bootloader_random_disable();
+    source_enabled_ = false;
+    return Status::error(StatusCode::InvalidState, "maintenance entropy probe failed");
   }
   state_ = State::Ready;
   return Status::success();
@@ -52,7 +45,7 @@ Status EspMaintenanceEntropy::fill(const MutableByteView out) noexcept {
     return Status::error(StatusCode::InvalidState, "maintenance entropy not ready");
   }
   if (out.size == 0) return Status::success();
-  if (mbedtls_ctr_drbg_random(&drbg_, out.data, out.size) != 0) {
+  if (psa_generate_random(out.data, out.size) != PSA_SUCCESS) {
     secure_clear(out.data, out.size);
     state_ = State::Failed;
     bootloader_random_disable();
