@@ -356,6 +356,24 @@ target_include_directories(routeloom_sdkv1_join_candidates_tests PRIVATE
 target_compile_options(routeloom_sdkv1_join_candidates_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_join_candidates_tests COMMAND routeloom_sdkv1_join_candidates_tests)
 
+# SDK v1 join FSM (plan P3-4 PR 3): the portable Joiner end to end in the
+# two-site simulator (V1-J01, V1-J04-V1-J07, V1-J13, the V1-J12 remainder,
+# the V1-J08 FSM fault matrix, re-entrancy, the #109 path, quiescence).
+add_executable(routeloom_sdkv1_joiner_tests test_sdkv1_joiner.cpp)
+target_link_libraries(routeloom_sdkv1_joiner_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_joiner_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_joiner_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_joiner_tests COMMAND routeloom_sdkv1_joiner_tests)
+
+# Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
+# test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.
+add_executable(routeloom_joiner_interop_peer joiner_interop_peer.cpp)
+target_link_libraries(routeloom_joiner_interop_peer PRIVATE routeloom_core)
+target_include_directories(routeloom_joiner_interop_peer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_joiner_interop_peer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 # Join stack gate (design P3-4 §9): every stack frame of the two P3-4 join
 # translation units stays within 512 B. GCC-only (relies on -fstack-usage).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

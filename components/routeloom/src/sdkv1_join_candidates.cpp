@@ -421,6 +421,14 @@ Status JoinCandidates::select_and_begin(const MonotonicMs now_ms, JoinAttempt& a
   return Status::success();
 }
 
+Status JoinCandidates::use_refresh_proxy(const JoinAttempt& attempt,
+                                         const MacAddress& proxy) noexcept {
+  if (!attempt_live(attempt)) return err(StatusCode::InvalidState, "join no live attempt");
+  if (!unicast_mac(proxy)) return invalid("join refresh proxy MAC");
+  attempt_.proxy = proxy;
+  return Status::success();
+}
+
 Status JoinCandidates::bind_authenticated(const JoinAttempt& attempt,
                                           const std::uint64_t site_id,
                                           const MonotonicMs now_ms,

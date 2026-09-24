@@ -5,6 +5,7 @@
 
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
+#include "routeloom/secure_clear.hpp"
 
 namespace routeloom::sdkv1 {
 namespace {
@@ -155,10 +156,12 @@ Status SealedSlotPair::initialize() noexcept {
   int valid = 0, corrupt = 0, unsupported = 0;
   for (std::uint8_t slot = 0; slot < kSlots; ++slot) {
     slot_reserved_[slot] = StatusCode::Ok;
+    slot_unreadable_[slot] = false;
     bool proven = false;
     const Status status = classify(slot, content[slot], seq[slot], proven, digest[slot]);
     if (!status) {
       unreadable[slot] = true;
+      slot_unreadable_[slot] = true;
       if (read_error.ok()) read_error = status;
       continue;
     }
@@ -397,15 +400,55 @@ Status IdentityStore::recover(const IdentityRecord& record) noexcept {
 SiteStore::SiteStore(RecordSlotStorage& storage) noexcept
     : pair_(storage, kSiteFormat, scratch_.writable(), &site_) {}
 
+void SiteStore::wipe_scratch() noexcept {
+  secure_clear(scratch_.bytes);
+  scratch_.size = 0;
+}
+
 Status SiteStore::initialize() noexcept {
+  active_load_failed_ = false;
   const Status status = pair_.initialize();
   site_ = SiteRecord{};
   if (pair_.has_active()) {
     ByteView record{};
     Status loaded = pair_.load_active(record);
     if (loaded) loaded = site_record_decode(record, site_);
-    if (!loaded) return loaded;
+    if (!loaded) {
+      active_load_failed_ = true;
+      site_ = SiteRecord{};
+      wipe_scratch();
+      return loaded;
+    }
   }
+  wipe_scratch();
+  return status;
+}
+
+SiteStoreHealth SiteStore::health() const noexcept {
+  SiteStoreHealth health{};
+  health.initialized = pair_.initialized();
+  health.has_site = has_site();
+  health.quarantined = pair_.quarantined();
+  health.uncertain = pair_.uncertain();
+  health.active_load_failed = active_load_failed_;
+  for (std::uint8_t slot = 0; slot < SealedSlotPair::kSlots; ++slot) {
+    if (pair_.slot_unsupported(slot)) {
+      health.unsupported_mask |= static_cast<std::uint8_t>(1U << slot);
+    }
+    if (pair_.slot_unreadable(slot)) {
+      health.read_error_mask |= static_cast<std::uint8_t>(1U << slot);
+    }
+  }
+  health.seq_floor = pair_.seq_floor();
+  return health;
+}
+
+Status SiteStore::fingerprint(const SiteRecord& record, Digest256& out) noexcept {
+  out.fill(0);
+  std::size_t used_len = 0;
+  const Status status = encode(record, used_len);
+  if (status) sha256(ByteView{scratch_.bytes.data(), used_len}, out);
+  wipe_scratch();
   return status;
 }
 
@@ -420,6 +463,9 @@ Status SiteStore::encode(const SiteRecord& record, std::size_t& used_len) noexce
 Status SiteStore::commit(const SiteRecord& record) noexcept {
   if (!pair_.initialized()) {
     return Status::error(StatusCode::InvalidState, "site store not initialized");
+  }
+  if (active_load_failed_) {
+    return Status::error(StatusCode::StorageFailure, "site active record unreadable");
   }
   if (record.state != SiteState::Member) {
     return Status::error(StatusCode::InvalidArgument, "site commit needs a member record");
@@ -444,6 +490,7 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
   std::size_t used_len = 0;
   Status status = encode(record, used_len);
   if (status) status = pair_.commit_prepared(used_len);
+  wipe_scratch();
   if (!status) return status;
   site_ = record;
   return Status::success();
@@ -454,12 +501,16 @@ Status SiteStore::clear() noexcept {
   std::size_t used_len = 0;
   Status status = encode(tombstone, used_len);
   if (status) status = pair_.commit_twin_prepared(used_len);
+  wipe_scratch();
   if (!status) return status;
   site_ = tombstone;
   return Status::success();
 }
 
 Status SiteStore::recover(const SiteRecord& record) noexcept {
+  if (active_load_failed_) {
+    return Status::error(StatusCode::StorageFailure, "site active record unreadable");
+  }
   if (!pair_.quarantined() && !pair_.uncertain()) {
     return Status::error(StatusCode::InvalidState, "site store not impaired");
   }
@@ -469,6 +520,7 @@ Status SiteStore::recover(const SiteRecord& record) noexcept {
   std::size_t used_len = 0;
   Status status = encode(record, used_len);
   if (status) status = pair_.commit_twin_prepared(used_len);
+  wipe_scratch();
   if (!status) return status;
   site_ = record;
   return Status::success();
