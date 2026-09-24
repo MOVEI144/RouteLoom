@@ -147,14 +147,12 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 // random RAM. The streak drives routeloom::fail_action — backoff restarts
 // first, a long deep sleep once the fault proves persistent — and is
 // cleared only on a stability proof (the runtime pump starting, the last
-// fallible step below) or on power-on.
-constexpr std::uint32_t kFailMagic = 0x524c4641;  // "RLFA"
-RTC_NOINIT_ATTR std::uint32_t s_fail_magic;
-RTC_NOINIT_ATTR std::uint32_t s_fail_streak;
+// fallible step below) or on power-on. The routeloom fail_streak_* calls
+// are its only writers.
+RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 
 [[noreturn]] void fail(const char* detail) {
-  const std::uint32_t streak = s_fail_streak;
-  s_fail_streak = streak + 1U;
+  const std::uint32_t streak = routeloom::fail_streak_consume(s_fail);
   const routeloom::FailAction action = routeloom::fail_action(streak);
   if (action.deep_sleep) {
     // Persistent fault: every further restart is one more NVS session write
@@ -188,10 +186,7 @@ routeloom::MonotonicMs monotonic_now_ms() noexcept {
 extern "C" void app_main(void) {
   // A matching magic is the only thing that distinguishes a streak that
   // survived esp_restart from power-on garbage in .rtc_noinit.
-  if (s_fail_magic != kFailMagic) {
-    s_fail_magic = kFailMagic;
-    s_fail_streak = 0;
-  }
+  routeloom::fail_streak_boot(s_fail);
   // Identity, nonce reservations, replay state and message sessions live in
   // NVS. Never erase it automatically after a version/capacity error: that
   // would silently turn a recoverable storage problem into key/counter
@@ -695,7 +690,7 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   // Boot complete — the pump loop below is the node's main loop, so a
   // later fatal is a runtime fault rather than a boot-loop streak.
-  s_fail_streak = 0;
+  routeloom::fail_streak_clear(s_fail);
 
   if (security.security_profile() != routeloom::SecurityProfile::Production) {
     ESP_LOGW(

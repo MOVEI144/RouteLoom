@@ -166,14 +166,12 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 // only on a stability proof — the runtime task starting on the always-on
 // build, an actually-entered coordinated sleep (the port's pre-sleep
 // hook) on the DEEP_SLEEP build — or on power-on, never mid-boot: a fault
-// late in the awake window must keep the count.
-constexpr std::uint32_t kFailMagic = 0x524c4641;  // "RLFA"
-RTC_NOINIT_ATTR std::uint32_t s_fail_magic;
-RTC_NOINIT_ATTR std::uint32_t s_fail_streak;
+// late in the awake window must keep the count. The routeloom
+// fail_streak_* calls are its only writers.
+RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 
 [[noreturn]] void fail(const char* detail) {
-  const std::uint32_t streak = s_fail_streak;
-  s_fail_streak = streak + 1U;
+  const std::uint32_t streak = routeloom::fail_streak_consume(s_fail);
   const routeloom::FailAction action = routeloom::fail_action(streak);
   if (action.deep_sleep) {
     // Persistent fault: every further restart is one more NVS session write
@@ -244,7 +242,9 @@ class LogPowerEvents final : public routeloom::PowerEvents {
 // re-arming the fast restart every ~40 s cycle.
 class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
  public:
-  void on_pre_sleep() noexcept override { s_fail_streak = 0; }
+  void on_pre_sleep() noexcept override {
+    routeloom::fail_streak_clear(s_fail);
+  }
 };
 
 routeloom::ResetCause classify_boot() noexcept {
@@ -520,10 +520,7 @@ class RefNodeMaintenanceGate final : public routeloom::ConfigMaintenanceGate {
 extern "C" void app_main(void) {
   // A matching magic is the only thing that distinguishes a streak that
   // survived esp_restart from power-on garbage in .rtc_noinit.
-  if (s_fail_magic != kFailMagic) {
-    s_fail_magic = kFailMagic;
-    s_fail_streak = 0;
-  }
+  routeloom::fail_streak_boot(s_fail);
   // Identity, nonce reservations, replay state and message sessions live in
   // NVS. Never erase it automatically after a version/capacity error: that
   // would silently turn a recoverable storage problem into key/counter
@@ -1179,7 +1176,7 @@ extern "C" void app_main(void) {
   status = runtime.start_task();
   if (!status) fail(status.detail);
   // Boot complete — the runtime task is the node's main loop.
-  s_fail_streak = 0;
+  routeloom::fail_streak_clear(s_fail);
 #endif
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.

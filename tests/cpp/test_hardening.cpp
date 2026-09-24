@@ -808,21 +808,24 @@ void test_fail_policy_bounds_boot_loop_writes() {
 // cycle and never escalated. The streak must be held until a coordinated
 // sleep actually enters.
 
-// Model of the flagged restart path: each cycle the boot gets as far as
-// the pump loop and dies in fail() — no coordinated sleep ever enters, so
-// the only streak writes are the mid-boot clear (the removed bug) and
-// fail()'s own retention. Returns whether the loop ever escalates to the
-// deep-sleep halt.
-bool awake_window_fault_loop_halts(const bool clear_streak_mid_boot) {
-  std::uint32_t streak = 0;
+// Replays the flagged restart path through the same FailStreak calls the
+// firmware makes: fail_streak_boot at app_main entry, a mid-boot
+// fail_streak_clear where the removed mark_started reset used to sit,
+// fail_streak_consume inside fail() when the pump dies. No coordinated
+// sleep ever enters, so nothing else may touch the count. Returns whether
+// the loop reaches the deep-sleep halt.
+bool sleep_image_fault_loop_halts(const bool clear_at_mark_started) {
+  routeloom::FailStreak streak{0, 0};  // power-on garbage -> foreign magic
   for (std::uint32_t boot = 0; boot < 2 * routeloom::kFailSleepStreakMin;
        ++boot) {
-    // ...boot, NVS open, runtime init, coordinator.begin, mark_started...
-    if (clear_streak_mid_boot) {
-      streak = 0;  // the removed reset: "boot complete" == pump reached
+    routeloom::fail_streak_boot(streak);
+    // ...NVS open, runtime init, coordinator.begin, mark_started...
+    if (clear_at_mark_started) {
+      routeloom::fail_streak_clear(streak);  // the removed reset
     }
     // ...pump: sleep image commit keeps failing -> sleep deadline -> fail()
-    if (routeloom::fail_action(streak++).deep_sleep) {
+    if (routeloom::fail_action(routeloom::fail_streak_consume(streak))
+            .deep_sleep) {
       return true;  // fail() holds; the boot never returns
     }
     // else fail() waited delay_ms and esp_restart()ed -> next iteration
@@ -831,21 +834,33 @@ bool awake_window_fault_loop_halts(const bool clear_streak_mid_boot) {
 }
 
 void test_fail_streak_held_through_late_boot_faults() {
-  CHECK(awake_window_fault_loop_halts(false));   // held: escalates
-  CHECK(!awake_window_fault_loop_halts(true));   // old clear: never does
+  // Fixed sequence — the count is held until a coordinated sleep enters:
+  // the loop must escalate to the bounded halt.
+  CHECK(sleep_image_fault_loop_halts(false));
+  // The pre-fix sequence — firmware cleared at mark_started: the same
+  // production calls never escalate, so an assertion requiring the halt
+  // would fail under the old handling.
+  CHECK(!sleep_image_fault_loop_halts(true));
 }
 
 void test_fail_streak_clears_only_on_coordinated_sleep() {
+  // Power-on garbage is not a streak: the boot load must re-arm it.
+  routeloom::FailStreak streak{0xdeadbeefU, 99};
+  routeloom::fail_streak_boot(streak);
+  CHECK(streak.magic == routeloom::kFailStreakMagic);
+  CHECK(streak.count == 0);
+
   // Mixed history: two failed boots, then one full cycle that enters a
   // coordinated sleep — the stability proof — so the count clears and a
   // later fault escalates from zero rather than a stale value.
-  std::uint32_t streak = 0;
-  (void)routeloom::fail_action(streak++);
-  (void)routeloom::fail_action(streak++);
-  CHECK(streak == 2);
-  streak = 0;  // pre-sleep hook fired: the cycle actually slept
-  CHECK(!routeloom::fail_action(streak++).deep_sleep);
-  CHECK(streak == 1);
+  (void)routeloom::fail_streak_consume(streak);
+  (void)routeloom::fail_streak_consume(streak);
+  CHECK(streak.count == 2);
+  routeloom::fail_streak_clear(streak);  // pre-sleep hook fired
+  CHECK(streak.count == 0);
+  CHECK(!routeloom::fail_action(routeloom::fail_streak_consume(streak))
+             .deep_sleep);
+  CHECK(streak.count == 1);
 }
 
 

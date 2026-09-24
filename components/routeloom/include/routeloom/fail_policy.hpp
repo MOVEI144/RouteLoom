@@ -25,7 +25,10 @@ namespace routeloom {
 // Never clear mid-boot: the round-2 bug cleared it when the pump loop
 // started, so a persistent late-boot fault (a sleep image store that
 // keeps failing, hitting "sleep deadline exceeded" ~40 s in) re-armed the
-// 500 ms restart every cycle and never escalated.
+// 500 ms restart every cycle and never escalated. The FailStreak
+// functions below are the only writers of the state — in firmware and in
+// the host regression replays alike — so the contract is exercised
+// through the same code the device runs.
 struct FailAction {
   // false: wait delay_ms, then esp_restart. true: esp_wifi_stop, arm a
   // delay_ms timer wake and esp_deep_sleep_start — the safe halt.
@@ -48,6 +51,46 @@ constexpr FailAction fail_action(const std::uint32_t streak) noexcept {
   const std::uint32_t shift =
       streak < kFailBackoffMaxShift ? streak : kFailBackoffMaxShift;
   return FailAction{/*deep_sleep=*/false, kFailBackoffBaseMs << shift};
+}
+
+// The two noinit words a firmware main persists the streak in. One struct
+// gives the pair a single .rtc_noinit placement and lets the functions
+// below be its only writers.
+struct FailStreak {
+  std::uint32_t magic;
+  std::uint32_t count;
+};
+
+// "RLFA" — a matching magic is the only thing distinguishing a streak
+// that survived esp_restart/deep-sleep wake from power-on garbage.
+constexpr std::uint32_t kFailStreakMagic = 0x524c4641;
+
+// Boot-time load, called once at the top of app_main before any fail()
+// can run: a foreign magic marks power-on garbage, so re-arm the pair and
+// start the count at zero.
+inline void fail_streak_boot(FailStreak& streak) noexcept {
+  if (streak.magic != kFailStreakMagic) {
+    streak.magic = kFailStreakMagic;
+    streak.count = 0;
+  }
+}
+
+// fail()'s consume: hand the retained count to the policy decision and
+// immediately retain count+1 for the next boot — a fatal never returns,
+// so the bump must precede the restart/sleep it selects.
+inline std::uint32_t fail_streak_consume(FailStreak& streak) noexcept {
+  const std::uint32_t count = streak.count;
+  streak.count = count + 1U;
+  return count;
+}
+
+// The only mid-run clear: a profile-defined stability proof — the runtime
+// main loop starting on always-on builds, an actually-entered coordinated
+// sleep (the power port's pre-sleep hook) on the DEEP_SLEEP build. Never
+// call this mid-boot: the awake window still runs fallible work whose
+// fail() must see the retained count (issue #34 r2).
+inline void fail_streak_clear(FailStreak& streak) noexcept {
+  streak.count = 0;
 }
 
 }  // namespace routeloom
