@@ -936,8 +936,19 @@ void MeshNode::handle_group_report(const wire::PlainFrame& frame, const NodeId p
   if (group_round_resolved(*tree)) group_finalize(*tree, now_ms);
 }
 
+bool MeshNode::group_origin_job_stale(const TxJob& job) const noexcept {
+  if (job.owner != JobOwner::Group) return false;
+  if (job.ack.key.origin != config_.node) return false;  // relay work is never stale
+  const GroupOrigin* origin = find_group_origin(job.ack.key.id);
+  return origin != nullptr && sleep_terminal(origin->state);
+}
+
 void MeshNode::group_job_done(const TxJob& job, const bool success,
                               const MonotonicMs now_ms) noexcept {
+  // A copy/report that resolved after its own origin settled (sleep
+  // disposition, expiry): it must neither revive the verdict nor finalize a
+  // round on its behalf.
+  if (group_origin_job_stale(job)) return;
   if (job.ack.accepted_type != FrameType::GroupData) return;  // reports: fire and forget
   if (!success) saturating_inc(group_stats_.copies_failed);
   GroupTree* tree = find_group_tree(job.ack.key);
@@ -1095,6 +1106,70 @@ void MeshNode::group_skip_to(GroupStream& stream, const std::uint32_t target) no
 }
 
 // --- Sleep settlement ---------------------------------------------------------------
+bool MeshNode::settle_one_sleep_group_origin(
+    const SleepWorkPolicy fallback) noexcept {
+  GroupOrigin* target = group_origins_.find(
+      [](const GroupOrigin& origin) { return !sleep_terminal(origin.state); });
+  if (target == nullptr) return false;
+  if (fallback == SleepWorkPolicy::Defer) {
+    group_origin_terminal(*target, DeliveryState::Indeterminate,
+                          "SLEEP_DEFERRED");
+  } else {
+    group_origin_terminal(*target, DeliveryState::Failed,
+                          fallback == SleepWorkPolicy::Save
+                              ? "SLEEP_GROUP_NOT_PERSISTED"
+                              : "SLEEP_DRAIN");
+  }
+  return true;
+}
+
+SleepHoldRelease MeshNode::release_one_group_hold_for_sleep() noexcept {
+  // Stable pick across streams: lowest (group_seq, source); pool order
+  // breaks remaining ties.
+  GroupHold* target = nullptr;
+  group_holds_.for_each([&](GroupHold& hold) {
+    if (target == nullptr ||
+        hold.info.group_seq < target->info.group_seq ||
+        (hold.info.group_seq == target->info.group_seq &&
+         hold.info.key.origin < target->info.key.origin)) {
+      target = &hold;
+    }
+  });
+  if (target == nullptr) return SleepHoldRelease::NonePending;
+  GroupStream* stream = group_streams_.find([&](const GroupStream& value) {
+    return value.source == target->info.key.origin &&
+           value.session == target->info.key.id.session;
+  });
+  if (stream == nullptr) {
+    // Holds only exist with a stream: keep every hold and let the sleep
+    // attempt abort instead of dropping payload silently.
+    const NodeId peer = target->info.key.origin;
+    const MessageId message = target->info.key.id;
+    observer_.on_diagnostic("GROUP_HOLD_STREAM_MISSING", peer, &message);
+    return SleepHoldRelease::StreamInvariant;
+  }
+  const std::uint32_t seq = target->info.group_seq;
+  if (stream->next_seq != 0 && seq > stream->next_seq) {
+    group_stats_.gaps_skipped += seq - stream->next_seq;
+  }
+  GroupMessageInfo info = target->info;
+  // A hold the cursor already passed (defensive — the release always takes
+  // the lowest held seq) reads as late, exactly like group_accept.
+  if (stream->next_seq != 0 && seq < stream->next_seq) info.late = true;
+  std::array<std::uint8_t, kGroupPayloadMax> payload{};
+  const std::uint8_t size = target->size;
+  std::memcpy(payload.data(), target->payload.data(), size);
+  group_holds_.release(target);
+  if (stream->next_seq == 0 || seq >= stream->next_seq) {
+    stream->next_seq = seq + 1U;
+  }
+  // Exactly one hand-off: the trailing group_drain() that group_skip_to runs
+  // is deliberately NOT run, so a callback veto stops the release here with
+  // the remaining holds kept.
+  group_deliver_app(info, ByteView{payload.data(), size});
+  return SleepHoldRelease::Released;
+}
+
 // quiesced() counts only group work that can still progress while draining:
 // a round collecting reports (the source's own tree or a relay/receiver
 // tree) may still resolve and queue its report. Queued origins and

@@ -460,7 +460,10 @@ void MeshNode::TxScheduler::clear() noexcept {
 
 MeshNode::MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
                    NodeObserver& observer) noexcept
-    : config_(config), radio_(radio), security_(security), observer_(observer) {
+    : config_(config),
+      radio_(radio),
+      security_(security),
+      observer_(observer, in_external_callback_) {
   routes_.set_self(config.node);  // improvement-hold jitter identity (03 §7)
   // Feasibility state must outlive every lease that could still carry a
   // stale advertisement to us (routing-scale.md §8, RFC 8966 §3.7.3).
@@ -1894,6 +1897,15 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
                                 &queued->ack.key.id);
         continue;
       }
+    } else if (queued->owner == JobOwner::Group &&
+               group_origin_job_stale(*queued)) {
+      // A queued retry for an already-settled group origin: same rule as
+      // above — never dispatch airtime for a verdict that already landed.
+      TxJob discarded{};
+      scheduler_.take_selected(discarded);
+      observer_.on_diagnostic("STALE_JOB_DROPPED", queued->peer,
+                              &queued->ack.key.id);
+      continue;
     }
     // Combined physical-attempt budget (03 §5): a job that already consumed
     // its six transmissions fails here instead of occupying the driver.
@@ -2102,12 +2114,14 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
     // The Service endpoint owns completion: the first authenticated
     // HOP_ACCEPT resolves the exchange; the component tracks the rest.
     if (gateway_sink_ != nullptr) {
+      ExternalCallbackScope scope(in_external_callback_);
       gateway_sink_->on_service_job_done(job.ack.key.id, true, "HOP_ACCEPTED", now_ms);
     }
     return;
   }
   if (job.owner == JobOwner::Config) {
     if (config_sink_ != nullptr) {
+      ExternalCallbackScope scope(in_external_callback_);
       config_sink_->on_config_job_done(job.ack.key.id, true, "HOP_ACCEPTED", now_ms);
     }
     return;
@@ -2124,6 +2138,12 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
   if (delivery == nullptr) return;
   if (job.plain.header.type != FrameType::Data) return;
   if (delivery->options.delivery == DeliveryClass::BestEffort) {
+    // Same stale-job rule as below: a BestEffort frame that was still in
+    // flight when its delivery settled (e.g. SLEEP_SAVED) must not overwrite
+    // the settled verdict with a late TX_MAC_DONE.
+    if (sleep_terminal(delivery->state)) {
+      return;
+    }
     set_delivery_state(*delivery, DeliveryState::Delivered, "TX_MAC_DONE");
     return;
   }
@@ -2149,12 +2169,14 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   }
   if (job.owner == JobOwner::GatewayService) {
     if (gateway_sink_ != nullptr) {
+      ExternalCallbackScope scope(in_external_callback_);
       gateway_sink_->on_service_job_done(job.ack.key.id, false, reason, now_ms);
     }
     return;
   }
   if (job.owner == JobOwner::Config) {
     if (config_sink_ != nullptr) {
+      ExternalCallbackScope scope(in_external_callback_);
       config_sink_->on_config_job_done(job.ack.key.id, false, reason, now_ms);
     }
     return;
@@ -2202,6 +2224,12 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
 
 void MeshNode::retry_or_fail(TxJob& job, const char* reason,
                              const MonotonicMs now_ms) noexcept {
+  if (group_origin_job_stale(job)) {
+    // Settled while in flight: drop instead of re-queueing — a retry must
+    // not resurrect a terminal origin verdict.
+    observer_.on_diagnostic("STALE_JOB_DROPPED", job.peer, &job.ack.key.id);
+    return;
+  }
   if (now_ms >= job.deadline_ms) {
     fail_job(job, "DEADLINE_EXPIRED", now_ms);
     return;
@@ -2707,6 +2735,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     entry->delivered = true;
     if (type == FrameType::Service) {
       if (gateway_sink_ != nullptr) {
+        ExternalCallbackScope scope(in_external_callback_);
         gateway_sink_->on_service_payload(peer, plain, now_ms);
       } else {
         observer_.on_diagnostic("SERVICE_NO_ENDPOINT", peer, &frame.header.message);
@@ -2722,6 +2751,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       // owns the terminal payload. A node without one reports it honestly —
       // the origin's retries expire into a timeout, never a false success.
       if (config_sink_ != nullptr) {
+        ExternalCallbackScope scope(in_external_callback_);
         config_sink_->on_config_frame(peer, plain, now_ms);
       } else {
         observer_.on_diagnostic("CONFIG_NO_ENDPOINT", peer, &frame.header.message);
@@ -3197,7 +3227,10 @@ void MeshNode::dispatch_applied(const wire::Header& data, const ByteView body,
                                    ByteView{body.data + endpoint::kAppliedLeaseBytes,
                                             body.size - endpoint::kAppliedLeaseBytes},
                                    data.remaining_deadline_ms};
-      applied_sink_->on_applied_request(request, reply);
+      {
+        ExternalCallbackScope scope(in_external_callback_);
+        applied_sink_->on_applied_request(request, reply);
+      }
       dispatched = true;
       ++applied_stats_.requests_dispatched;
       outcome = reply.outcome;
@@ -3870,6 +3903,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   // counts when the capture happened under the current channel/radio
   // generation — a pre-switch frame is not proof of post-switch reachability.
   if (autonomy_sink_ != nullptr && identity_current) {
+    ExternalCallbackScope scope(in_external_callback_);
     autonomy_sink_->note_link_activity(peer, now_ms);
   }
   // A link-authenticated DATA, SERVICE or END_RECEIPT without end-to-end
@@ -3972,6 +4006,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       // signature verifier before they can move any state.
       if (autonomy_sink_ != nullptr && frame.header.destination == config_.node &&
           (frame.header.flags & wire::kFlagEndProtected) == 0) {
+        ExternalCallbackScope scope(in_external_callback_);
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
@@ -3994,6 +4029,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       } else if (autonomy_sink_ != nullptr && frame.header.destination == config_.node) {
         // Link-scoped autonomous objects (migration kinds 1/2): strictly
         // 1-hop, bound to the immediate peer, never end-protected.
+        ExternalCallbackScope scope(in_external_callback_);
         autonomy_sink_->on_autonomy_frame(
             peer, frame.header.type,
             ByteView{frame.protected_payload.data(), frame.header.payload_length},
@@ -4488,9 +4524,11 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // The Service and config endpoints share the node's monotonic clock and
   // pause discipline: their retries, leases and expiries advance here.
   if (gateway_sink_ != nullptr) {
+    ExternalCallbackScope scope(in_external_callback_);
     gateway_sink_->poll(now_ms);
   }
   if (config_sink_ != nullptr) {
+    ExternalCallbackScope scope(in_external_callback_);
     config_sink_->poll(now_ms);
   }
   dispatch_next(now_ms);
@@ -5171,6 +5209,7 @@ CapabilitiesReply MeshNode::build_capabilities_reply(
   if (telemetry_remote_) reply.features |= kCapRemoteTelemetryV1;
   // Only the configured+ready verifier's bit — never every compiled profile.
   if (config_sink_ != nullptr) {
+    ExternalCallbackScope scope(in_external_callback_);
     reply.permit_profiles = config_sink_->permit_profile_bits();
   }
   reply.valid_for_ms = kCapabilitiesValidityMs;
@@ -5257,6 +5296,7 @@ void MeshNode::handle_diagnostic(const wire::PlainFrame& frame,
     case DiagnosticSubtype::TelemetrySnapshot:
     case DiagnosticSubtype::DiagnosticReject:
       if (diagnostic_sink_ != nullptr) {
+        ExternalCallbackScope scope(in_external_callback_);
         diagnostic_sink_->on_diagnostic_body(origin, body, now_ms);
       } else {
         observer_.on_diagnostic("DIAGNOSTIC_NO_ENDPOINT", peer,
@@ -5311,6 +5351,7 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
       // the body so a host can surface upstream failure evidence.
       handle_transit_failure_report(peer, report, now_ms);
       if (diagnostic_sink_ != nullptr) {
+        ExternalCallbackScope scope(in_external_callback_);
         diagnostic_sink_->on_diagnostic_body(peer, body, now_ms);
       }
     } else {
@@ -5450,6 +5491,7 @@ void MeshNode::handle_diagnostic_link(const NodeId peer,
           grant_ms != 0 && (reply.features & kCapBusyV1) != 0;
     }
     if (diagnostic_sink_ != nullptr) {
+      ExternalCallbackScope scope(in_external_callback_);
       diagnostic_sink_->on_diagnostic_body(peer, body, now_ms);
     }
     return;
