@@ -20,20 +20,21 @@
 //   - the record must be status Active (staged/retired/revoked records
 //     are inventory; they verify nothing — §4.3.1, §4.6.1) at the only
 //     defined profile/role/scope values;
-//   - the generation must satisfy the image's min_authority_generation
-//     floor — the store replaces the compile-time generation scalar as
-//     the rotation policy, so an operator-bounded overlap window (two
-//     generations Active at once) verifies by design. The journal's
-//     configured generation pin still applies downstream at decision
-//     time; this class deliberately does not re-pin
+//   - the generation must satisfy the combined RLT1/RLF1 floor (the
+//     image's min_authority_generation and the security floor's G, higher
+//     wins — the floor reservation lands before the image commit, so the
+//     floor leads across the update window). The store replaces the
+//     compile-time generation scalar as the rotation policy, so an
+//     operator-bounded overlap window (two generations Active at once)
+//     verifies by design. The journal's decision-time gate consults
+//     generation_permitted(); this class deliberately does not re-pin
 //     context.authority_generation.
 //
 // Fail-closed posture (§4.3.1, §4.7): the view verifies only under a
 // committed image that is not quarantined, not uncertain (the lost
-// sibling may have held a newer image — the store refuses commits until
-// recover(), and this consumer refuses to serve possibly-stale trust as
-// policy), and not provably stale (store_epoch below the epoch_floor a
-// damaged committed record proved). Every impairment reports !ready()
+// sibling may have held a newer image), and not below either the store's
+// proven epoch or an attached RLF1 epoch/generation reservation. An
+// unreadable attached floor also disables the view. Every impairment reports !ready()
 // and verify_permit() returns an error — never a silent verdict.
 //
 // §4.6.2's trust_epoch intake capture and §4.6.3's decision-time recheck
@@ -47,6 +48,7 @@
 
 #include "routeloom/config.hpp"
 #include "routeloom/config_cose.hpp"
+#include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/trust_store.hpp"
 #include "routeloom/types.hpp"
@@ -59,11 +61,24 @@ class TrustView final : public ConfigAuthorityVerifier {
   // the journal/ledger stores.
   explicit TrustView(const TrustStore& store) noexcept : store_(store) {}
 
+  // Bind the RLF1 floor whose G joins the image's
+  // min_authority_generation into the effective generation floor (higher
+  // wins) and bounds the image epoch. The floor must outlive the view;
+  // without it the image floor alone applies. Trust-managed deployments
+  // always attach.
+  void attach_floor(const SecurityFloorStore* floor) noexcept { floor_ = floor; }
+
+  // The generation floor in force: the image's
+  // min_authority_generation raised to the security floor's G when a
+  // floor is attached and usable.
+  std::uint32_t effective_generation_floor() const noexcept;
+
   // ready(): the store must be usable AND a verifying key must resolve —
-  // either the deployment-pinned (authority_id, generation) set via
-  // require_key(), or at least one Active config-issuer record. A valid
-  // image may deliberately hold zero active keys ("config disabled",
-  // §4.5.1 rule 5); the COSE profile bit is then honestly not advertised.
+  // either the deployment-pinned authority_id set via require_authority()
+  // (any generation at/above the effective floor), or at least one
+  // Active config-issuer record. A valid image may deliberately hold
+  // zero active keys ("config disabled", §4.5.1 rule 5); the COSE
+  // profile bit is then honestly not advertised.
   bool ready() const noexcept override;
   SecurityProfile security_profile() const noexcept override {
     return SecurityProfile::Production;
@@ -76,6 +91,12 @@ class TrustView final : public ConfigAuthorityVerifier {
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
+  // The kind-4 lane over the same trust image: an RCR2 recovery
+  // intent verifies under the generation its body names — resolved
+  // live from the committed image, not the context's pin.
+  Status verify_recovery(const ConfigPermitContext& context, ByteView object,
+                         endpoint::EncodedRecoveryIntent& payload,
+                         bool& verified) noexcept override;
 
   // §4.6.2 key-resolution primitive: the exact (authority_id, generation)
   // lookup with the active/floor policy applied — nullptr for absent,
@@ -94,15 +115,25 @@ class TrustView final : public ConfigAuthorityVerifier {
   bool is_credential_revoked(const Digest256& kid_fingerprint) const noexcept;
 
   // Optional boot-time pin (§4.4 step 5's "the required key resolves"):
-  // when set, ready() additionally requires THIS (authority_id,
-  // generation) record to resolve active. Verification itself is never
-  // narrowed by the pin — the store's record status and floor are the
-  // whole policy.
-  void require_key(std::uint64_t authority_id,
-                   std::uint32_t generation) noexcept {
+  // when set, ready() additionally requires THIS authority_id to resolve
+  // an active key at some generation at/above the effective floor — the
+  // generation itself floats with rotation, never pinned. Verification
+  // itself is never narrowed by the pin — the store's record status and
+  // floor are the whole policy.
+  void require_authority(std::uint64_t authority_id) noexcept {
     required_authority_ = authority_id;
-    required_generation_ = generation;
     required_set_ = true;
+  }
+
+  // Decision-time generation policy: any generation at/above the
+  // effective floor may verify (the signature path resolves the exact
+  // key); the fixed-profile pin argument is ignored.
+  bool generation_permitted(std::uint32_t generation,
+                            std::uint32_t configured_pin) const noexcept override;
+  // Policy epoch for the journal's decision-time recheck: the committed
+  // store epoch, live.
+  std::uint32_t policy_epoch() const noexcept override {
+    return store_.store_epoch();
   }
 
   // State surface for intake capture (§4.6.2 trust_epoch), the
@@ -116,19 +147,19 @@ class TrustView final : public ConfigAuthorityVerifier {
   bool uncertain() const noexcept { return store_.uncertain(); }
 
   // The store is fit to verify under: initialized, a committed image,
-  // not quarantined, not uncertain, and not provably stale — the active
-  // epoch covers every epoch any committed-seal record proved this boot,
-  // including CRC-failed ones (§4.3.1's recovery-floor rule).
+  // not quarantined, not uncertain, and not provably stale against the
+  // store's own record history or an attached independent floor.
   bool usable() const noexcept;
 
  private:
   const TrustStore& store_;
+  const SecurityFloorStore* floor_{nullptr};
   std::uint64_t required_authority_{0};
-  std::uint32_t required_generation_{0};
   bool required_set_{false};
-  // RCC1 decode scratch (member .bss, Owner-serialized — same pattern as
-  // CoseEsp256AuthorityVerifier::command_).
+  // RCC1/RCR2 decode scratch (member .bss, Owner-serialized — same
+  // pattern as CoseEsp256AuthorityVerifier::command_).
   endpoint::ConfigCommand command_{};
+  endpoint::ConfigRecoveryIntent recovery_intent_{};
 };
 
 }  // namespace routeloom

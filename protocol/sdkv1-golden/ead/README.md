@@ -37,9 +37,10 @@ a trailing byte is rejected.
 
 | item | message | value |
 |---|---|---|
-| JoinIntent | m1 | `ver \| flags \| org_hint u32 \| profile_bits u32 (bit0 RLJOIN1 required, bit1 RLRES1) \| reserved u16` = 12 B |
+| JoinIntent | m1 | `ver \| flags \| org_hint u32 \| profile_bits u32 (bit0 RLJOIN1 required, bit1 RLRES1, bit2 membership recovery) \| reserved u16` = 12 B |
 | SiteOffer | m2 | `ver \| flags \| site_id u64 \| network_low32 u32 \| site_epoch u32 \| decision_timeout_ms u16 (500..5000) \| reserved u16` = 22 B |
-| JoinRequest | m3 | `ver \| flags \| model u16 \| fw_version u32 \| capability u32 (bit0 sleepy, bit1 relay, bit2 gateway) \| requested_role u8 \| reserved u8 \| last_site_id u64 \| last_generation u32` = 26 B |
+| JoinRequest | m3 | `ver \| flags \| model u16 \| fw_version u32 \| capability u32 (bit0 sleepy, bit1 relay, bit2 gateway, bit3 RRS gossip, bit4 membership lifecycle) \| requested_role u8 \| reserved u8 \| last_site_id u64 \| last_generation u32` = 26 B |
+| LastMembership | recovery m3 | `ver u8 \| flags u8 = 0 \| reserved u16 = 0 \| retained RLS1 network u64` = 12 B; critical label 65542, after Credential |
 | JoinResult | m4 | `ver \| verdict u8 (1..6) \| reason u16 = 0 \| retry_after_s u32 \| body_len u16 \| reserved u16` + body, 12..520 B |
 
 `org_hint = first4(SHA-256("RouteLoom/org-hint/v1" 00 || Site CA pubkey))`,

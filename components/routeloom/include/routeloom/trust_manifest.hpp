@@ -19,11 +19,12 @@
 // envelope parse/assemble, the Sig_structure/AAD construction, and the
 // full §4.5.1 acceptance pipeline INCLUDING the P-256 verify leg (vendored
 // micro-ecc, same as the permit verifier).
-// NOT implemented (separate checklist items): the kind-4 ControlObject
-// demux / TrustManager endpoint consumer, the shared 10 s reassembly slot,
-// the consume_expensive_verify() intake gate (callers must charge it —
-// a manifest is the same P-256 cost as a permit), TrustStatus subtypes
-// 5/6, and the host RootSigner tooling.
+// Delivery: the caller reassembles the kind-5 object under the shared
+// 10 s bound on the member-only lane and charges the
+// consume_expensive_verify() intake gate BEFORE calling (a manifest is
+// the same P-256 cost as a permit). Convergence evidence is the
+// TrustStatus endpoint_wire Control subtype; the host RootSigner
+// tooling lives in routeloom-provision.
 
 #include <array>
 #include <cstddef>
@@ -31,6 +32,7 @@
 
 #include "routeloom/autonomy_wire.hpp"  // kAuthenticatedObjectMax
 #include "routeloom/config_cose.hpp"    // R/S range + low-S helpers
+#include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/trust_store.hpp"
 #include "routeloom/types.hpp"
@@ -89,27 +91,43 @@ Status trust_manifest_assemble(ByteView content, std::uint64_t root_id,
 
 // The §4.5.1 acceptance pipeline, in the design's parse order:
 //   1. restricted envelope shape, object <= kTrustManifestObjectMax;
-//   2. content-head decode: network equals the committed image's network,
-//      nonzero epoch, counts within caps, tables exactly sized;
-//   3. store_epoch strictly greater than the committed epoch (ordinal —
-//      u32 wrap is a re-provision event, never modular);
-//   4. kid names an anchor ACTIVE in the current image and the signature
-//      verifies under it (R/S range + low-S + uECC_verify);
-//   5-6. semantic floor + >=1-active-anchor retention, then the two-phase
-//      dual-slot commit with readback — inside TrustStore::commit_image.
+//   2. content-head decode: network equals the committed image's network
+//      (or the floor's, when no image is committed), nonzero epoch,
+//      counts within caps, tables exactly sized;
+//   3. completed duplicate: same epoch as the committed image with
+//      byte-identical content returns success WITHOUT a flash write;
+//   4. floor-bound re-install: when the object hash and E/G match the
+//      RLF1 reservation, the exact previously-authorized bytes install
+//      via install_reserved() — no signature is available (the anchor
+//      may be disabled or the slots lost), the floor binding IS the
+//      authorization for this reinstall, never for new bytes;
+//   5. new update: store_epoch strictly greater than the committed epoch
+//      (ordinal — u32 wrap is a re-provision event, never modular) and
+//      above the floor's E; the kid names an anchor ACTIVE in the
+//      current image and the signature verifies under it (R/S range +
+//      low-S + uECC_verify); then the RLF1 E/G/original-hash
+//      reservation lands, and finally the twin-slot commit with
+//      readback — inside TrustStore::commit_image. A reservation the
+//      store already holds for THESE bytes resumes idempotently; the
+//      same epoch with DIFFERENT bytes is a fork attempt (Conflict).
+//
+// New epochs/generations at the u32 top value are refused: they would
+// seal the axis against the next disaster recovery.
 //
 // Failure classes (§4.5.1): ProtocolError = malformed (assembly released);
-// Conflict = stale/replayed epoch; AuthorizationFailed = wrong network,
-// unknown/disabled anchor, bad signature or regressed generation floor —
-// the wire-facing reason is generic by contract; IntegrityError /
-// RecoveryRequired / InvalidState = store not in an accepting state;
-// StorageFailure = commit fault (the old image stays authoritative).
+// Conflict = stale/replayed epoch or a forked reservation;
+// AuthorizationFailed = wrong network, unknown/disabled anchor, bad
+// signature or regressed generation floor — the wire-facing reason is
+// generic by contract; IntegrityError / RecoveryRequired / InvalidState
+// = store not in an accepting state; StorageFailure = commit fault (the
+// old image stays authoritative).
 //
 // Preconditions the CALLER owns: the object arrived reassembled under the
 // shared 10 s bound on the member-only lane, and intake was charged
 // through ConfigRateLimiter::consume_expensive_verify (1-per-5 s
 // device-wide) BEFORE calling — signature verification is the expensive
 // leg and must stay bounded.
-Status trust_manifest_accept(TrustStore& store, ByteView object) noexcept;
+Status trust_manifest_accept(TrustStore& store, ByteView object,
+                             SecurityFloorStore& floor) noexcept;
 
 }  // namespace routeloom

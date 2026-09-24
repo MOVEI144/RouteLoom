@@ -23,6 +23,7 @@
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/sdkv1_pop.hpp"
 #include "routeloom/sdkv1_records.hpp"
+#include "routeloom/sdkv1_lifecycle_store.hpp"
 
 extern "C" {
 #include "uECC.h"
@@ -323,6 +324,47 @@ void valid_rrs1_record(const Fields& f) {
   CHECK(equals(stored, record));
 }
 
+void valid_rlx1_record(const Fields& f) {
+  const auto bytes = hex(f, "record_hex");
+  LifecycleRecord decoded{};
+  CHECK(lifecycle_record_decode(view(bytes), decoded).ok());
+  LifecycleRecord expected{};
+  expected.mode = static_cast<LifecycleMode>(num(f, "mode"));
+  expected.self = num(f, "self_node");
+  expected.site_id = num(f, "site_id");
+  expected.old_network = num(f, "old_network");
+  expected.generation = static_cast<std::uint32_t>(num(f, "generation"));
+  expected.rs_floor = static_cast<std::uint32_t>(num(f, "rs_floor"));
+  expected.gk_floor = static_cast<std::uint32_t>(num(f, "gk_floor"));
+  expected.boot_witness = static_cast<std::uint32_t>(num(f, "boot_witness"));
+  const auto payload = hex(f, "payload_hex");
+  CHECK(payload.size() <= expected.payload.bytes.size());
+  if (payload.size() > expected.payload.bytes.size()) return;
+  std::copy(payload.begin(), payload.end(), expected.payload.bytes.begin());
+  expected.payload.size = payload.size();
+  CHECK(decoded.mode == expected.mode && decoded.self == expected.self &&
+        decoded.site_id == expected.site_id && decoded.old_network == expected.old_network &&
+        decoded.generation == expected.generation && decoded.rs_floor == expected.rs_floor &&
+        decoded.gk_floor == expected.gk_floor && decoded.boot_witness == expected.boot_witness &&
+        decoded.payload.size == expected.payload.size &&
+        std::memcmp(decoded.payload.bytes.data(), expected.payload.bytes.data(),
+                    expected.payload.size) == 0);
+  ByteBuffer<kLifecycleSlotBytes> encoded{};
+  CHECK(lifecycle_record_encode(expected, kLifecycleSeal,
+                                static_cast<std::uint32_t>(num(f, "commit_seq")), encoded).ok());
+  CHECK(equals(encoded, bytes));
+  if (expected.mode == LifecycleMode::Removing || expected.mode == LifecycleMode::Holdoff) {
+    const std::size_t cert_len = (payload[0] << 8U) | payload[1];
+    const ByteView notice{payload.data() + 4 + cert_len, kRemovalNoticeObjectSize};
+    RemovalNotice claim{};
+    bool verified = false;
+    CHECK(removal_notice_verify(notice, hex_array<64>(f, "signer_pubkey_hex"),
+                                expected.site_id, expected.old_network, expected.self,
+                                expected.generation, claim, verified).ok());
+    CHECK(verified);
+  }
+}
+
 void valid_pop(const Fields& f) {
   const auto object = hex(f, "object_hex");
   PopClaims claims{};
@@ -494,6 +536,9 @@ void invalid(const Fields& f, const std::string& codec, const std::string& expec
     RevocationSet set{};
     ByteView object{};
     CHECK(!revocation_record_decode(view(bytes), set, object).ok());
+  } else if (codec == "rlx1_record") {
+    LifecycleRecord record{};
+    CHECK(!lifecycle_record_decode(view(bytes), record).ok());
   } else if (codec == "rlp1") {
     ResumeSlot slot{};
     CHECK(!resume_slot_decode(view(bytes), slot).ok());
@@ -528,6 +573,7 @@ void run() {
   const auto invalid_files = list_json(dir / "invalid");
   CHECK(valid_files.size() >= 17);
   CHECK(invalid_files.size() >= 80);
+  bool saw_rlx1 = false;
   for (const auto& path : valid_files) {
     const Fields f = parse_flat_json(read_file(path));
     current = path.filename().string();
@@ -543,6 +589,9 @@ void run() {
       valid_rrs1(f);
     } else if (codec == "rrs1_record") {
       valid_rrs1_record(f);
+    } else if (codec == "rlx1_record") {
+      saw_rlx1 = true;
+      valid_rlx1_record(f);
     } else if (codec == "rlp1") {
       valid_rlp1(f);
     } else if (codec == "rlp2") {
@@ -555,6 +604,7 @@ void run() {
       CHECK(!"unknown valid codec");
     }
   }
+  CHECK(saw_rlx1);
   for (const auto& path : invalid_files) {
     const Fields f = parse_flat_json(read_file(path));
     current = path.filename().string();

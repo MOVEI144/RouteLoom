@@ -304,7 +304,11 @@ fn revocation_invalid_vectors_are_rejected() {
                 assert!(rrs_notice_accepted_decode(&encoded).is_err(), "{name}");
             }
             Some("rrs_kind6_manifest") => {
-                assert!(control_object_decode(&encoded).is_err(), "{name}");
+                assert!(
+                    control_object_decode(&encoded).map_or(true, |manifest| manifest.kind
+                        != ControlObjectKind::RevocationSet),
+                    "{name}"
+                );
             }
             Some("rrs_kind6_chunk") => assert!(object_chunk_decode(&encoded).is_err(), "{name}"),
             other => panic!("{name}: unknown codec {other:?}"),

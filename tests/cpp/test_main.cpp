@@ -23,6 +23,7 @@
 #include "routeloom/routeloom.h"
 #include "routeloom/counter_store.hpp"
 #include "routeloom/node.hpp"
+#include "routeloom/reply_peer_leases.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/wire.hpp"
 
@@ -42,6 +43,8 @@ using routeloom_test::TestSecurity;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 
 class MemoryCounterStore final : public CounterStore {
  public:
@@ -123,7 +126,110 @@ struct CApiState {
   std::uint64_t counter{0};
 };
 
+// Minimal ExpectedReply Owner for the C ABI tests (issue #117): a stable
+// per-peer binding directory over the portable lease table. Static
+// single-context identity — the captured epoch is a membership check.
+struct CApiReplyPort {
+  ExpectedReplyLeases leases{};
+  std::map<std::uint64_t, ReplyBinding> directory{};
+  std::uint32_t next_id{1};
+};
+
+ReplyBinding capi_mapping(CApiReplyPort* port, std::uint64_t peer) {
+  const auto it = port->directory.find(peer);
+  if (it != port->directory.end()) return it->second;
+  BindingId id{0};
+  (void)mint_binding_id(port->next_id, id);
+  const ReplyBinding fresh{static_cast<NodeId>(peer), id, BindingGeneration{1}, 1};
+  port->directory[peer] = fresh;
+  return fresh;
+}
+
+rl_status_code_t capi_reply_acquire(void* user, rl_node_id_t peer, uint32_t binding_id,
+                                    uint32_t binding_generation, uint32_t rx_context_id,
+                                    rl_monotonic_ms_t deadline_ms, rl_monotonic_ms_t now_ms,
+                                    uint32_t* out_use_slot, uint32_t* out_use_serial) {
+  auto* port = static_cast<CApiReplyPort*>(user);
+  const ReplyBinding live = capi_mapping(port, peer);
+  if (live.id.value != binding_id || live.generation.value != binding_generation ||
+      rx_context_id == 0) {
+    return RL_STATUS_CONFLICT;
+  }
+  ReplyLeaseToken token{};
+  const Status status = port->leases.acquire(
+      ReplyBinding{static_cast<NodeId>(peer), live.id, live.generation, 1},
+      deadline_ms, now_ms, token);
+  if (!status.ok()) return RL_STATUS_NO_CAPACITY;
+  *out_use_slot = token.use_slot;
+  *out_use_serial = token.serial;
+  return RL_STATUS_OK;
+}
+rl_status_code_t capi_reply_release(void* user, uint32_t use_slot, uint32_t use_serial) {
+  auto* port = static_cast<CApiReplyPort*>(user);
+  return port->leases.release(ReplyLeaseToken{use_slot, use_serial}).ok()
+             ? RL_STATUS_OK
+             : RL_STATUS_NOT_FOUND;
+}
+rl_status_code_t capi_reply_validate(void* user, uint32_t use_slot, uint32_t use_serial,
+                                     rl_monotonic_ms_t now_ms) {
+  auto* port = static_cast<CApiReplyPort*>(user);
+  const Status status =
+      port->leases.validate(ReplyLeaseToken{use_slot, use_serial}, now_ms);
+  if (status.ok()) return RL_STATUS_OK;
+  if (status.code == StatusCode::Expired) return RL_STATUS_EXPIRED;
+  if (status.code == StatusCode::Conflict) return RL_STATUS_CONFLICT;
+  return RL_STATUS_NOT_FOUND;
+}
+rl_status_code_t capi_reply_send(void*, uint32_t, uint32_t, uint64_t, const uint8_t*,
+                                 size_t, rl_monotonic_ms_t) {
+  return RL_STATUS_OK;
+}
+rl_status_code_t capi_reply_snapshot(void* user, rl_node_id_t peer, uint32_t* out_id,
+                                     uint32_t* out_gen, uint32_t* out_ctx) {
+  if (peer == 0 || peer == kInvalidNodeId) return RL_STATUS_INVALID_ARGUMENT;
+  const ReplyBinding live =
+      capi_mapping(static_cast<CApiReplyPort*>(user), peer);
+  *out_id = live.id.value;
+  *out_gen = live.generation.value;
+  *out_ctx = live.rx_context_id;
+  return RL_STATUS_OK;
+}
+rl_status_code_t capi_reply_send_bound(void* user, rl_node_id_t peer, uint32_t id,
+                                       uint32_t gen, uint32_t, uint64_t,
+                                       const uint8_t*, size_t) {
+  const ReplyBinding live =
+      capi_mapping(static_cast<CApiReplyPort*>(user), peer);
+  return (live.id.value == id && live.generation.value == gen)
+             ? RL_STATUS_OK
+             : RL_STATUS_CONFLICT;
+}
+
+void capi_attach_reply_port(rl_context_t* context, CApiReplyPort* port) {
+  rl_reply_peer_vtable_t vtable{};
+  rl_reply_peer_vtable_init(&vtable);
+  vtable.user = port;
+  vtable.acquire = &capi_reply_acquire;
+  vtable.release = &capi_reply_release;
+  vtable.validate = &capi_reply_validate;
+  vtable.send_reply = &capi_reply_send;
+  vtable.snapshot_binding = &capi_reply_snapshot;
+  vtable.send_bound = &capi_reply_send_bound;
+  CHECK(rl_attach_reply_peer(context, &vtable) == RL_STATUS_OK);
+}
+
 rl_status_code_t capi_radio_send(void*, rl_node_id_t, uint64_t, const uint8_t*, size_t) {
+  return RL_STATUS_OK;
+}
+struct CApiDetachAttempt {
+  rl_context_t* context{nullptr};
+  rl_status_code_t result{RL_STATUS_OK};
+  bool called{false};
+};
+rl_status_code_t capi_radio_send_try_detach(void* user, rl_node_id_t, uint64_t,
+                                            const uint8_t*, size_t) {
+  auto* attempt = static_cast<CApiDetachAttempt*>(user);
+  attempt->called = true;
+  attempt->result = rl_attach_reply_peer(attempt->context, nullptr);
   return RL_STATUS_OK;
 }
 rl_status_code_t capi_radio_recover(void*) { return RL_STATUS_OK; }
@@ -170,6 +276,8 @@ void test_c_api_lifecycle() {
   CHECK(rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
                 &radio, &security, &observer, &context) == RL_STATUS_OK);
   CHECK(context != nullptr);
+  CApiReplyPort reply_port{};
+  capi_attach_reply_port(context, &reply_port);
   CHECK(rl_start(context, 0) == RL_STATUS_OK);
   CHECK(rl_add_neighbor(context, 8, 1, 0) == RL_STATUS_OK);
   rl_send_options_t options{};
@@ -179,6 +287,40 @@ void test_c_api_lifecycle() {
   CHECK(rl_send(context, 8, payload, sizeof(payload), &options, 1, &id) == RL_STATUS_OK);
   rl_poll(context, 1);
   rl_on_radio_tx_result(context, 1, true, 2);
+  rl_deinit(context);
+}
+
+void test_c_api_reply_port_detach_reentrant_busy() {
+  rl_node_config_t config{};
+  rl_node_config_init(&config);
+  config.network = 1;
+  config.node = 7;
+  config.message_session = 77;
+  CApiState state{};
+  CApiDetachAttempt attempt{};
+  const rl_radio_vtable_t radio{&attempt, capi_radio_send_try_detach,
+                                 capi_radio_recover};
+  const rl_security_vtable_t security{&state, capi_security_ready,
+                                       capi_next_counter, capi_seal, capi_open};
+  const rl_observer_vtable_t observer{};
+  std::vector<std::max_align_t> storage(
+      (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
+  rl_context_t* context = nullptr;
+  CHECK(rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
+                &radio, &security, &observer, &context) == RL_STATUS_OK);
+  attempt.context = context;
+  CApiReplyPort reply_port{};
+  capi_attach_reply_port(context, &reply_port);
+  CHECK(rl_start(context, 0) == RL_STATUS_OK);
+  CHECK(rl_add_neighbor(context, 8, 1, 0) == RL_STATUS_OK);
+  rl_send_options_t options{};
+  rl_send_options_init(&options);
+  rl_message_id_t id{};
+  const uint8_t payload[] = {1};
+  CHECK(rl_send(context, 8, payload, sizeof(payload), &options, 1, &id) == RL_STATUS_OK);
+  rl_poll(context, 1);
+  CHECK(attempt.called);
+  CHECK(attempt.result == RL_STATUS_BUSY);
   rl_deinit(context);
 }
 
@@ -192,10 +334,15 @@ struct CApiNode {
   std::vector<std::max_align_t> storage = std::vector<std::max_align_t>(
       (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
   rl_context_t* context{nullptr};
+  CApiReplyPort reply_port{};
 
   rl_status_code_t init(const rl_node_config_t& config) {
-    return rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
-                   &radio, &security, &observer, &context);
+    const rl_status_code_t status =
+        rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
+                &radio, &security, &observer, &context);
+    if (status != RL_STATUS_OK) return status;
+    capi_attach_reply_port(context, &reply_port);
+    return RL_STATUS_OK;
   }
   ~CApiNode() {
     if (context != nullptr) rl_deinit(context);
@@ -601,8 +748,15 @@ void test_three_hop_delivery() {
   NodeConfig c3{1, 3, 103};
   c1.route_advertisement_period_ms = c2.route_advertisement_period_ms = c3.route_advertisement_period_ms = 100;
   c1.route_lifetime_ms = c2.route_lifetime_ms = c3.route_lifetime_ms = 1000;
+  SimReplyPort port1(radio1, 1, c1.link_epoch), port2(radio2, 2, c2.link_epoch),
+      port3(radio3, 3, c3.link_epoch);
   MeshNode n1(c1, radio1, sec1, obs1), n2(c2, radio2, sec2, obs2), n3(c3, radio3, sec3, obs3);
+  CHECK_OK(n1.set_reply_peer_port(&port1));
+  CHECK_OK(n2.set_reply_peer_port(&port2));
+  CHECK_OK(n3.set_reply_peer_port(&port3));
   network.register_node(1, &n1); network.register_node(2, &n2); network.register_node(3, &n3);
+  network.register_reply_port(1, &port1); network.register_reply_port(2, &port2);
+  network.register_reply_port(3, &port3);
   network.connect(1, 2); network.connect(2, 3);
   CHECK_OK(n1.start(0)); CHECK_OK(n2.start(0)); CHECK_OK(n3.start(0));
   CHECK_OK(n1.add_neighbor(2, 1, 0));
@@ -627,8 +781,14 @@ void test_diamond_repair() {
   SimRadio r1(network,1), r2(network,2), r3(network,3), r4(network,4);
   NodeConfig a{1,1,201}, b{1,2,202}, c{1,3,203}, d{1,4,204};
   for (auto* cfg : {&a,&b,&c,&d}) { cfg->route_advertisement_period_ms=100; cfg->route_lifetime_ms=800; }
+  SimReplyPort p1(r1,1,a.link_epoch), p2(r2,2,b.link_epoch), p3(r3,3,c.link_epoch),
+      p4(r4,4,d.link_epoch);
   MeshNode n1(a,r1,s1,o1), n2(b,r2,s2,o2), n3(c,r3,s3,o3), n4(d,r4,s4,o4);
+  CHECK_OK(n1.set_reply_peer_port(&p1)); CHECK_OK(n2.set_reply_peer_port(&p2));
+  CHECK_OK(n3.set_reply_peer_port(&p3)); CHECK_OK(n4.set_reply_peer_port(&p4));
   network.register_node(1,&n1); network.register_node(2,&n2); network.register_node(3,&n3); network.register_node(4,&n4);
+  network.register_reply_port(1,&p1); network.register_reply_port(2,&p2);
+  network.register_reply_port(3,&p3); network.register_reply_port(4,&p4);
   for (auto edge : {std::pair<NodeId,NodeId>{1,2},{2,4},{1,3},{3,4}}) network.connect(edge.first,edge.second);
   CHECK_OK(n1.start(0)); CHECK_OK(n2.start(0)); CHECK_OK(n3.start(0)); CHECK_OK(n4.start(0));
   CHECK_OK(n1.add_neighbor(2,1,0)); CHECK_OK(n1.add_neighbor(3,2,0));
@@ -658,8 +818,11 @@ void test_delivery_terminal_eviction() {
   CapturingObserver obs;
   SimRadio radio(network, 1);
   NodeConfig cfg{1, 1, 301};
+  SimReplyPort port(radio, 1, cfg.link_epoch);
   MeshNode node(cfg, radio, sec, obs);
+  CHECK_OK(node.set_reply_peer_port(&port));
   network.register_node(1, &node);
+  network.register_reply_port(1, &port);
   CHECK_OK(node.start(0));
   const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
 
@@ -737,7 +900,9 @@ void test_tx_result_dispatch() {
   routeloom_test::FakeRadioPort radio;
   routeloom_test::OwnerPump pump;
   NodeConfig config{1, 1, 901};
+  SimReplyPort port(radio, 1, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(0));
   CHECK_OK(node.add_neighbor(2, 1, 0));
   const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
@@ -838,7 +1003,10 @@ void test_tx_result_dispatch() {
     routeloom_test::FakeRadioPort radio2;
     routeloom_test::OwnerPump pump2;
     NodeConfig config2{1, 7, 902};
+    SimReplyPort port2(radio2, 7, config2.link_epoch);
     MeshNode node2(config2, radio2, security2, observer2);
+    CHECK_OK(node2.set_reply_peer_port(&port2));
+    pump2.set_reply_port(&port2);
     CHECK_OK(node2.start(0));
     CHECK_OK(node2.add_neighbor(2, 1, 0));
     CHECK_OK(node2.add_neighbor(9, 1, 0));  // next hop for the transit forward
@@ -930,6 +1098,8 @@ void test_c_api_tx_result_owner_task() {
   CHECK(rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
                 &radio, &security, &observer, &context) == RL_STATUS_OK);
   CHECK(context != nullptr);
+  CApiReplyPort probe_reply_port{};
+  capi_attach_reply_port(context, &probe_reply_port);
   CHECK(rl_start(context, 0) == RL_STATUS_OK);
   CHECK(rl_add_neighbor(context, 8, 1, 0) == RL_STATUS_OK);
   rl_send_options_t options{};
@@ -992,6 +1162,7 @@ int main() {
   test_deadline_resume();
   test_single_authority();
   test_c_api_lifecycle();
+  test_c_api_reply_port_detach_reentrant_busy();
   test_c_api_route_profile();
   test_c_api_group();
   test_byte_io();

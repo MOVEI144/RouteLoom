@@ -69,6 +69,33 @@ struct BindingGeneration {
   }
 };
 
+// --- Checked handle issuance (issue #117, Q117-13) ----------------------------
+
+// Only the radio Owner mints these handles, and only through these helpers:
+// 0 is never issued and the counter never wraps — after UINT32_MAX the
+// caller must refuse the binding/exchange instead of reusing an old handle.
+// A failed issuance leaves both the counter and the output alone.
+constexpr bool mint_binding_id(std::uint32_t& next, BindingId& out) noexcept {
+  if (next == 0) return false;
+  out = BindingId{next};
+  ++next;  // well-defined wrap to 0: the next call then refuses
+  return true;
+}
+
+constexpr bool mint_candidate_id(std::uint32_t& next,
+                                 CandidateId& out) noexcept {
+  if (next == 0) return false;
+  out = CandidateId{next};
+  ++next;  // well-defined wrap to 0: the next call then refuses
+  return true;
+}
+
+constexpr bool bump_binding_generation(BindingGeneration& generation) noexcept {
+  if (generation.value == UINT32_MAX) return false;
+  ++generation.value;
+  return true;
+}
+
 // --- NeighborPhase -----------------------------------------------------------
 
 // Per (peer radio x exchange) connection phase. Scope: peer-radio-exchange,

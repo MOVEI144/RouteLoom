@@ -1,0 +1,8 @@
+{
+  "codec": "control_recovery_info_query",
+  "encoded_hex": "01070002000102030405060708090a0b0c0d0e0f",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "recovery_info_query_bad_namespace",
+  "note": "namespace 2 is unallocated"
+}

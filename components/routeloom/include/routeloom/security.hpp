@@ -77,6 +77,15 @@ class SecurityProvider {
                           std::uint32_t& /*epoch*/) noexcept {
     return Status::success();
   }
+  // Session owners report the current receive context independently of
+  // tx_epoch(): the peer's choice for our outgoing frames is generally not
+  // the context this node chose for its incoming frames. Development
+  // providers with ordered boot epochs can leave this Unsupported; the
+  // radio Owner then learns the peer epoch from authenticated RX.
+  virtual Status current_rx_epoch(SecurityScope /*scope*/, NodeId /*peer*/,
+                                  std::uint32_t& /*epoch*/) const noexcept {
+    return Status::error(StatusCode::Unsupported, "RX_CONTEXT_UNAVAILABLE");
+  }
   // Reports the context behind tx_epoch(). The node consults it only after
   // an AuthRequired refusal: None/Establishing defers the frame (bounded by
   // its deadline); a usable state makes the refusal an ordinary failure.

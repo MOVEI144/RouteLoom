@@ -168,8 +168,41 @@ bool join_ead_value_size_ok(const JoinEad label, const std::size_t size) noexcep
     case JoinEad::Request: return size == kJoinRequestSize;
     case JoinEad::Result: return size >= kJoinResultHeadSize && size <= kJoinResultMax;
     case JoinEad::Credential: return size >= 1 && size <= kRlcw1CertMax;
+    case JoinEad::LastMembership: return size == kLastMembershipSize;
   }
   return false;
+}
+
+// Recovery carries the retained network explicitly: the current Host epoch
+// cannot be used as the AAD for an old membership's RemovalNotice.
+Status last_membership_encode(const NetworkId network,
+                              ByteBuffer<kLastMembershipSize>& out) noexcept {
+  out.clear();
+  if (network == 0 || network == kAllOnes) {
+    return Status::error(StatusCode::InvalidArgument, "last network");
+  }
+  ByteWriter writer(out.writable());
+  Status status = writer.write_u8(kJoinEadVersion);
+  if (status) status = writer.write_u8(0);
+  if (status) status = writer.write_u16(0);
+  if (status) status = writer.write_u64(network);
+  if (status) out.size = writer.size();
+  return status;
+}
+
+Status last_membership_decode(const ByteView value, NetworkId& network) noexcept {
+  network = 0;
+  if (value.data == nullptr || value.size != kLastMembershipSize) {
+    return malformed("last membership size");
+  }
+  ByteReader reader(value);
+  Status status = read_version_flags(reader, "last membership head");
+  if (status) status = expect_zero16(reader, "last membership reserved");
+  if (status) status = reader.read_u64(network);
+  if (status) status = expect_end(reader, "last membership trailing");
+  if (status && (network == 0 || network == kAllOnes)) status = malformed("last network");
+  if (!status) network = 0;
+  return status;
 }
 
 // === JoinIntent ====================================================================

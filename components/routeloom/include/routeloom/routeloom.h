@@ -281,6 +281,41 @@ typedef struct rl_observer_vtable {
                         const rl_message_id_t* message);
 } rl_observer_vtable_t;
 
+/* ---- ExpectedReply peer leases (issue #117, design-q116 §6.4) ------------
+   Additive symbols: RL_ABI_VERSION stays 2 (the unsized rl_radio_vtable_t
+   layout above is frozen — the reply port is a separate versioned struct,
+   never a tail extension of it). Attach stores the port on the node, and
+   the RX entry carries the binding into the V2 metadata path. */
+#define RL_REPLY_PEER_VERSION 1u
+
+/* Mirrors ReplyPeerPort (reply_peer_leases.hpp). A NULL function behaves as
+   RL_STATUS_UNSUPPORTED. Tokens are (use_slot, use_serial) pairs; see the
+   C++ header for the handle contract. Callbacks must not re-enter the node:
+   the bridge reports RL_STATUS_BUSY and changes nothing while one runs. */
+typedef struct rl_reply_peer_vtable {
+  uint32_t struct_size;
+  uint32_t version;
+  void* user;
+  rl_status_code_t (*acquire)(void* user, rl_node_id_t peer, uint32_t binding_id,
+                              uint32_t binding_generation, uint32_t rx_context_id,
+                              rl_monotonic_ms_t deadline_ms, rl_monotonic_ms_t now_ms,
+                              uint32_t* out_use_slot, uint32_t* out_use_serial);
+  rl_status_code_t (*release)(void* user, uint32_t use_slot, uint32_t use_serial);
+  rl_status_code_t (*validate)(void* user, uint32_t use_slot, uint32_t use_serial,
+                               rl_monotonic_ms_t now_ms);
+  rl_status_code_t (*send_reply)(void* user, uint32_t use_slot, uint32_t use_serial,
+                                 uint64_t tx_token, const uint8_t* frame,
+                                 size_t frame_size, rl_monotonic_ms_t now_ms);
+  rl_status_code_t (*snapshot_binding)(void* user, rl_node_id_t peer,
+                                       uint32_t* out_binding_id,
+                                       uint32_t* out_binding_generation,
+                                       uint32_t* out_rx_context_id);
+  rl_status_code_t (*send_bound)(void* user, rl_node_id_t peer, uint32_t binding_id,
+                                 uint32_t binding_generation, uint32_t rx_context_id,
+                                 uint64_t tx_token, const uint8_t* frame,
+                                 size_t frame_size);
+} rl_reply_peer_vtable_t;
+
 typedef struct rl_context rl_context_t;
 
 size_t rl_context_size(void);
@@ -327,6 +362,22 @@ void rl_on_radio_receive(rl_context_t* context, rl_node_id_t peer,
    control replies keep lane priority over queued DATA) has drained. */
 void rl_on_radio_tx_result(rl_context_t* context, uint64_t token, bool success,
                            rl_monotonic_ms_t now_ms);
+/* ExpectedReply port wiring (see the block above rl_reply_peer_vtable_t).
+   rl_reply_peer_vtable_init zeroes a vtable and fills its header.
+   rl_attach_reply_peer installs the port (a NULL vtable detaches); the
+   struct is read only when struct_size covers it and version matches.
+   rl_on_radio_receive_with_binding is rl_on_radio_receive plus the
+   Owner-captured binding id/generation; its provenance is unattributed over
+   the C boundary, so telemetry treats it as injected, never as driver
+   evidence. Same owner-task contract as rl_on_radio_receive. */
+void rl_reply_peer_vtable_init(rl_reply_peer_vtable_t* vtable);
+rl_status_code_t rl_attach_reply_peer(rl_context_t* context,
+                                      const rl_reply_peer_vtable_t* vtable);
+void rl_on_radio_receive_with_binding(rl_context_t* context, rl_node_id_t peer,
+                                      const uint8_t* frame, size_t frame_size,
+                                      int8_t rssi_dbm, uint32_t binding_id,
+                                      uint32_t binding_generation,
+                                      rl_monotonic_ms_t now_ms);
 /* Effective routing profile of an initialised context: copies up to
    `capacity` configured gateway ids into `out_gateways` (may be NULL when
    capacity is 0) and returns the number configured — 0 means the flat

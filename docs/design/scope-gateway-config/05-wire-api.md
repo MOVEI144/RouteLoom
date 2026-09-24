@@ -9,8 +9,8 @@
 | RLD1 v1 | Discover1、Offer2、Auth3等 | Discover/Offer body version2。header44B・flags0 |
 | Wire Service21 | 予約型 | payload v1: Query1/Descriptor2/Submit3/Receipt4/Pending5/Reject6 |
 | Wire Control22 | 予約型 | payload v1: ChallengeQuery1/Challenge2/StatusQuery3/Status4 |
-| ControlObject49/Chunk50/Ack51 | ChannelPlan kind1、RecoverySnapshot kind2 | ConfigPermit kind3、E2E multi-hopの接続 |
-| USB HostOps19 | PR #13 schema1/sub1〜5 | Gateway 0x10〜0x13、Config 0x20〜0x23 |
+| ControlObject49/Chunk50/Ack51 | ChannelPlan kind1、RecoverySnapshot kind2 | ConfigPermit kind3、ConfigRecovery kind4、E2E multi-hopの接続 |
+| USB HostOps19 | PR #13 schema1/sub1〜5 | Gateway 0x10〜0x13、Config 0x20〜0x24 |
 
 mainの49/50/51は宛先local・link-onlyとしてautonomy_sinkへ渡す。Configには**end-protectedでルーティングする新しい入口**が必要。end保護＋manifest kind3＋正当なtransactionをConfigへ、link-only kind1/2は既存移行処理へ分類する。Chunk/Ackはmanifestで確立した `(Network, origin, destination, object_hash, protection_class)` で分類。旧処理を別意味へ変更したり、認証失敗後に別parserへfallbackしたりしない。
 
@@ -92,12 +92,18 @@ Control22 payloadは次の固定形：
 - Challenge2：同24B（sub2、client_nonceをecho）＋boot8＋challenge_nonce16＋revision8＋active_hash32＋valid_for_ms4=92B。
 - StatusQuery3：ver/sub/ns2/opid16=20B。
 - Status4：ver/sub/ns2/opid16/decision_rev8/active_rev8/phase1/reserved1/reason2/active_hash32=72B。
+- TrustStatusQuery5：ver/sub5/reserved2/nonce16=20B（trustはnamespaceなし）。
+- TrustStatus6：ver/sub6/reserved2/nonce_echo16/epoch4/generation4/network8/fingerprint32/anchor1/key1/revocation1/flags1=72B。flags v1はbit0 has-active、bit1 uncertain、bit2 quarantined。
+- RecoveryInfoQuery7：ver/sub7/ns2/nonce16=20B。
+- RecoveryInfo8：ver/sub8/ns2/schema2/nonce_echo16/network8/J4/R8/flags1/version1/profile4/snapshot_hash32=80B。flagsはbit0 impaired、bit1 uncertain、bit2 quarantined、bit3 survivor-known。
 
 phaseはIDLE0/PREPARED1/DECIDED2/APPLY_INTENT3/APPLYING4/VERIFYING5/ACTIVE6/INTERRUPTED7/QUARANTINED8。
 
 Config局所reason表：0 OK、1 IN_PROGRESS、2 STALE_REVISION、3 BASE_HASH_MISMATCH、4 INVALID_PATCH、5 DEADLINE、6 AUTHORITY_DENIED、7 UNSUPPORTED、8 CAPACITY、9 STORAGE_FAILURE、10 APPLY_INTERRUPTED、11 VERIFY_FAILED、12 RECOVERY_REQUIRED、13 MAINTENANCE_BUSY、14 NO_CHANGE、15 RESULT_EXPIRED。未知値はProtocolError。C Statusは同名の既存分類へ写像し、詳細はこのu16を保持する。新規申請拒否のphaseはIDLEでありACTIVEではない。
 
 permitは既存38B manifest(kind3)、38+nB chunk(n≤90)、37B object ACKで運ぶ。1024Bなら最大12chunk、774Bなら9chunk。全体一件・10秒reassembly、元challenge/Host期限以内。hashはCOSE全体のSHA-256。未manifest、範囲外、同offset異内容、digest不一致を拒否する。ACK Okは組立完了だけ、適用成功はStatus ACTIVEだけ。
+
+recovery object（dev: `recovery_aad || RCR2 || tag16`、COSE: COSE_Sign1）は同じmanifest/chunk/ACKをkind4で運ぶ。targetはkind3/4/5で一つのbounded assembler（2048B buffer＋bitmap、10秒期限、完了時に型別dispatch）を共有し、kind別のreassembly slotは持たない。journalのimpaired状態（quarantine/uncertain）で通常kind3 intakeが閉じていてもkind4は受理され、quarantine遷移時は進行中のkind3 assemblyを無効化する。署名domain（`RouteLoom/config-recover/v2`、dev HMACは`…-recover-dev/v2`でtag化）はkind毎に分離し、kind3形のpermitをkind4経路へ流しても受理しない。RCR2はmode（0=AdoptKnown、1=Reprovision）・新store_generation・新revision・snapshot_hash・baseline（0〜512B）を運び、RCR1との互換解釈はない。store_generation床とresult dedupでreplay/逆行を拒否する。trust-manifest（RTM1）はkind5で同じcarrierの2048B上限まで運び、完了先はtrust_manifest_accept（journalへ渡さない）。
 
 最初の1024B確保前に認証済み管理相手/対象/予算をAdmissionで確認。relayは再組立せずE2E bytesを転送する。失効・状態変更後は組立済みでも再検証する。protection-class別dispatchを追加し、旧ChannelPlan link-only経路を壊さない。
 
@@ -117,6 +123,10 @@ USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。実装済みcapabil
 | 0x21 ConfigPermit | H→G: target8＋permit bytes（payload残り1..1024。`object_len` fieldはなく長さは共通`payload_len`由来）。署名原本を転送 |
 | 0x22 ConfigStatus | G→H: target8/ControlStatus72 |
 | 0x23 ConfigChallenge | 双方向: target8/ControlQuery24またはChallenge92。request IDで形を固定 |
+| 0x24 ConfigRecover | H→G: target8＋recovery object bytes（payload残り1..1024、kind4）。署名原本を転送 |
+| 0x25 ConfigTrust | H→G: target8＋trust-manifest bytes（payload残り1..2048、kind5）。署名原本を転送、replyはresultのみ |
+| 0x26 TrustStatus | 双方向: H→Gはtarget8/network8/nonce16のquery、G→HはTrustStatus72（Ok時のみ、失敗時は空） |
+| 0x27 RecoveryInfo | 双方向: H→Gはtarget8/network8/ns2/nonce16のquery、G→HはRecoveryInfo80（Ok時のみ、失敗時は空） |
 
 USB result/outcomeは0 OK、1 BUSY、2 STALE、3 DENIED、4 UNSUPPORTED、5 INVALID、6 STORAGE、7 INDETERMINATE。IngressAck 0はReceiveLogへ実格納済みの場合だけ。receipt/digest/messagekeyの照合前に信用しない。
 
@@ -124,7 +134,7 @@ HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB ses
 
 ## 5.7 Host canonical/API
 
-既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/getを実装済みで追加し、一daemonを維持。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
+既存API1へgateway.resolve・gateway.getとconfig.challenge/status/retry/propose/get/recover/recovery_infoおよびtrust.install/statusを実装済みで追加し、一daemonを維持（世代のみのconfig.trust_updateは廃止し、世代移行は署名済みtrust-manifestのtrust.installで行う）。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
 
 Gateway canonical schema2は既存26B field形を保ち、dest_kind=1のpayload_len直前に `scope:u8/reserved:u8/token16/gateway_boot8/egress_gateway8` を加える（34B）。payload≤96で最大156B、SUBMIT固定108Bを加え264B。schema1 Node=0はそのまま、schema1の未実装Gatewayを自動変換しない。
 
@@ -132,7 +142,7 @@ egress_gatewayは送信に使うローカル出口、destinationは最終Gateway
 
 Configは別operation_class。Config operation ID16B、Host OperationId24B、wire MessageKey20Bを区別する。APIの受付とConfig Status ACTIVEを別の結果にし、全エラーを正しいJSONで返す。
 
-Host側のdurable状態はSQLiteのAuthority sequenceだけである。`config.get`のoperation recordはRAMのみで、daemon再起動は進行中opを失う。op idはboot名づけされるため、再起動前のstale tokenが別opへ解決されることはない。復帰した受付はINDETERMINATEと報告し、記録を再構成して自動再実行しない。§4.3の耐電断outbox順序はdevice issuer/target側の契約であり、Host issuerのop履歴を永続とは読まない。
+Host側はSQLiteにAuthority sequence、確定canonical、署名済み原本を同一lineageの有界outboxとして保存する。`config.get`の受付recordはRAMのみで、daemon再起動後の旧Host OperationIdは復元しない。未決着原本を容量圧力で消去せず、明示的な`config.retry`はdevice operation_idで原本を読み、現authority・generation・profile・鍵で再検証して同じbytesだけを転送する。新しいsequence予約や再署名は行わない。転送の失敗ACKとtimeoutは作用の取消しを証明しないためINDETERMINATEとし、device statusで終端を確認する。daemon再起動時の自動再実行はしない。
 
 ## 5.8 C/C++ APIと例
 

@@ -16,6 +16,8 @@
 
 raw64標本をdirection×rate×length×neighborごとに保持しない。固定統計poolのcounter/EWMA/必要な少数ringを使う。dedup数、結果保存bytes、member context数、active destination数は独立の制約。node台帳128だから128宛先の全経路を同時に保持できるとは限らない。
 
+返信受理の固定容量は各profileのRX／TX枠とは別に、Owner全体でbinding entry 3、use 8、受理transaction 8、component event 8。受理時に必要なTX枠とcontrol laneを確保し、局所仕事は最大1500msで終結する。これらをpeer数倍に増やさず、枠不足は有限retry／BUSY／計数付きdropで扱う。C3の実機RAM・stackとRF性能は受入ゲートで測定する。
+
 ## 未認証入口の具体的上限
 
 global handshake同時1、preauth総pool1536B、一object最大1024B、組立期限3000ms（活動予算が先なら中断）。新handshakeは全送信者合算1/s burst1、入力2048B/s burst512B、公開鍵等の高価な演算4回/s burst1を初期capとする。memberの管理object2048Bとは別。

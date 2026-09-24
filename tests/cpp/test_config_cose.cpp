@@ -61,6 +61,41 @@ ConfigPermitContext context() {
   return ctx;
 }
 
+// Independent RCR2 fixture (same methodology as the permit: fresh P-256
+// keypair, Python cryptography ECDSA over the exact Sig_structure bytes
+// with the recovery-domain external AAD — not produced by this code).
+// Reprovision intent, J=4/R=2, snapshot {f1:1, f3:true}.
+constexpr std::uint64_t kRecoveryAuthorityId = 0xB2D;
+constexpr std::array<std::uint8_t, 64> kRecoveryPubkey{{
+    0xe7,0xd5,0x44,0x28,0xcc,0x91,0xe3,0xc7,0xe4,0xfd,0x46,0xc3,0x74,0x72,0x54,0x04,
+    0x07,0x4f,0x8b,0x45,0x21,0x42,0x16,0xc4,0xc1,0xf5,0x5a,0xa7,0x0c,0xb0,0xa6,0x13,
+    0xad,0x2a,0x77,0xe0,0x4b,0x5c,0xc6,0x33,0x4e,0x65,0x03,0x4c,0x62,0x7c,0x81,0x9f,
+    0xd5,0xa1,0x80,0x88,0x96,0x05,0x95,0xc9,0x5f,0x7f,0xbb,0x85,0x26,0x76,0x7c,0x53}};
+
+constexpr char kRecoveryHex[] =
+    "d2844da2012804480000000000000b2da0587c52435232020100010001000000"
+    "0000000000000700000000000000c30000000000000b2d000000010000000000"
+    "00002c303132333435363738393a3b3c3d3e3f00000004000000000000000200"
+    "0c0000fbc39ede56d10cd10c15972b8a6e2e4a7b139e156957178e5ebad0639e"
+    "c7054d0001020001010003010001015840c712c3b4be4ed151a782b255a7873f"
+    "70e0783ac41ee707b08ee526c9b34b1bfd751fb365653416bd176e47ca1490aa"
+    "634a2cb6ee247b398ac798cc99a9c70871";
+
+struct RecoveryFixture {
+  CoseEsp256AuthorityVerifier verifier;
+  std::vector<std::uint8_t> object{unhex(kRecoveryHex)};
+  RecoveryFixture() {
+    verifier.provision(kRecoveryAuthorityId,
+                       ByteView{kRecoveryPubkey.data(), kRecoveryPubkey.size()});
+  }
+};
+
+ConfigPermitContext recovery_context() {
+  ConfigPermitContext ctx = context();
+  ctx.authorized_issuer = kRecoveryAuthorityId;
+  return ctx;
+}
+
 struct Fixture {
   CoseEsp256AuthorityVerifier verifier;
   std::vector<std::uint8_t> permit{unhex(kPermitHex)};
@@ -297,6 +332,65 @@ void test_cose_sig_structure_codec() {
                             ByteView{pl.data(), pl.size()}, unused).ok());
 }
 
+void test_cose_recovery_valid() {
+  RecoveryFixture f;
+  endpoint::EncodedRecoveryIntent payload{};
+  bool verified = false;
+  CHECK_OK(f.verifier.verify_recovery(
+      recovery_context(), ByteView{f.object.data(), f.object.size()},
+      payload, verified));
+  CHECK(verified);
+  endpoint::ConfigRecoveryIntent intent{};
+  CHECK_OK(endpoint::config_recovery_decode(payload.view(), intent));
+  CHECK(intent.mode == endpoint::kRcr2ModeReprovision);
+  CHECK(intent.new_store_generation == 4);
+  CHECK(intent.new_revision == 2);
+  CHECK(intent.baseline.size == 12);
+  CHECK(intent.authority == kRecoveryAuthorityId);
+  CHECK(intent.authority_generation == 1);
+
+  // Any tamper denies: the signature binds the recovery-domain AAD.
+  auto bad = f.object;
+  bad[bad.size() - 1] ^= 0x01;
+  verified = true;
+  CHECK_OK(f.verifier.verify_recovery(
+      recovery_context(), ByteView{bad.data(), bad.size()}, payload,
+      verified));
+  CHECK(!verified);
+
+  // A context pinning another generation denies (same pin as permits).
+  ConfigPermitContext ctx = recovery_context();
+  ctx.authority_generation = 2;
+  verified = true;
+  CHECK_OK(f.verifier.verify_recovery(
+      ctx, ByteView{f.object.data(), f.object.size()}, payload, verified));
+  CHECK(!verified);
+}
+
+void test_cose_lane_cross_injection() {
+  // The lanes never cross-verify: a permit object through verify_recovery
+  // and a recovery object through verify_permit are both refused — the
+  // AAD domains differ on both sides of the envelope.
+  Fixture permit;
+  RecoveryFixture recovery;
+  endpoint::EncodedRecoveryIntent rpayload{};
+  endpoint::EncodedConfigCommand ppayload{};
+  bool verified = true;
+  // Same key on both sides: only the AAD domain differs, so a valid
+  // permit envelope still denies on the recovery lane (and the short
+  // RCR2 payload fails the permit lane's parse).
+  const Status s1 = permit.verifier.verify_recovery(
+      context(), ByteView{permit.permit.data(), permit.permit.size()},
+      rpayload, verified);
+  CHECK(s1.ok() && !verified);
+  verified = true;
+  const Status s2 = recovery.verifier.verify_permit(
+      recovery_context(),
+      ByteView{recovery.object.data(), recovery.object.size()}, ppayload,
+      verified);
+  CHECK(!s2.ok() && !verified);
+}
+
 }  // namespace
 
 int main() {
@@ -308,6 +402,8 @@ int main() {
   test_cose_permit_cross_profile();
   test_cose_permit_der_signature_rejected();
   test_cose_sig_structure_codec();
+  test_cose_recovery_valid();
+  test_cose_lane_cross_injection();
   if (failures != 0) {
     std::fprintf(stderr, "%d cose checks failed\n", failures);
     return 1;

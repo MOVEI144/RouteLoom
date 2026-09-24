@@ -131,11 +131,25 @@ target_include_directories(routeloom_baseline_diff_tests PRIVATE ${CMAKE_CURRENT
 target_compile_options(routeloom_baseline_diff_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_baseline_diff_tests COMMAND routeloom_baseline_diff_tests)
 
+set(ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR "${CMAKE_SOURCE_DIR}/protocol/config-signed-golden")
+
 add_executable(routeloom_config_tests test_config.cpp)
 target_link_libraries(routeloom_config_tests PRIVATE routeloom_core)
-target_include_directories(routeloom_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# test_provisioning.hpp's P-256 helpers need the micro-ecc headers (link
+# symbols come from routeloom_core); the golden dir feeds the T07/T08
+# cross-language vectors the Rust issuer signs.
+target_include_directories(routeloom_config_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
+target_compile_definitions(routeloom_config_tests PRIVATE
+    ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR="${ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR}")
 target_compile_options(routeloom_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_tests COMMAND routeloom_config_tests)
+
+add_executable(routeloom_security_floor_tests test_security_floor.cpp)
+target_link_libraries(routeloom_security_floor_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_security_floor_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_security_floor_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_security_floor_tests COMMAND routeloom_security_floor_tests)
 
 add_executable(routeloom_cose_tests test_config_cose.cpp)
 target_link_libraries(routeloom_cose_tests PRIVATE routeloom_core)
@@ -143,9 +157,13 @@ target_include_directories(routeloom_cose_tests PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_compile_options(routeloom_cose_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_cose_tests COMMAND routeloom_cose_tests)
 
+set(ROUTELOOM_UECC_DIR ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
+
 add_executable(routeloom_config_wire_tests test_config_wire.cpp)
 target_link_libraries(routeloom_config_wire_tests PRIVATE routeloom_core)
-target_include_directories(routeloom_config_wire_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# The kind-5 tests drive real P-256 manifests through the shared fixture.
+target_include_directories(routeloom_config_wire_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_config_wire_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_wire_tests COMMAND routeloom_config_wire_tests)
 
@@ -153,7 +171,6 @@ add_test(NAME routeloom_config_wire_tests COMMAND routeloom_config_wire_tests)
 # device credential, RTM1 trust manifest. The micro-ecc include dir is added
 # so the shared fixture can drive real P-256 keypairs/signatures against the
 # vendored copy already linked into routeloom_core.
-set(ROUTELOOM_UECC_DIR ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
 
 add_executable(routeloom_trust_store_tests test_trust_store.cpp)
 target_link_libraries(routeloom_trust_store_tests PRIVATE routeloom_core)
@@ -210,6 +227,31 @@ add_executable(routeloom_rlres1_tests test_rlres1.cpp)
 target_link_libraries(routeloom_rlres1_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_rlres1_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_rlres1_tests COMMAND routeloom_rlres1_tests)
+
+add_executable(routeloom_reply_lease_tests test_reply_peer_leases.cpp)
+target_link_libraries(routeloom_reply_lease_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_reply_lease_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_reply_lease_tests COMMAND routeloom_reply_lease_tests)
+
+add_executable(routeloom_reply_admission_tests test_reply_admission.cpp)
+target_link_libraries(routeloom_reply_admission_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_reply_admission_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_reply_admission_tests COMMAND routeloom_reply_admission_tests)
+
+# Issue #117 PR B: the real ESP-NOW Owner translation unit, compiled for the
+# host against the in-tree ESP-IDF/FreeRTOS stand-ins and driven through its
+# public API. The stub directory shadows the runtime's quoted IDF includes;
+# no firmware include path is ever on a host build.
+add_executable(routeloom_espnow_runtime_tests test_espnow_runtime.cpp
+    espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+target_link_libraries(routeloom_espnow_runtime_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_runtime_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_espnow_runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
 
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
@@ -406,6 +448,8 @@ target_include_directories(routeloom_sdkv1_joiner_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_joiner_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_joiner_tests COMMAND routeloom_sdkv1_joiner_tests)
+set_tests_properties(routeloom_sdkv1_joiner_tests PROPERTIES
+  ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
 
 # The single device security Owner (G-SEC P4 §8, PR4): boot/store
 # classification, the RLD1 demux gates, staged bootstrap RX, the USB
