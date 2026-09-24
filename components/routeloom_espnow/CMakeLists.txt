@@ -2,6 +2,7 @@ idf_component_register(
   SRCS
     src/espnow_autonomy.cpp
     src/espnow_migration.cpp
+    src/espnow_sdkv1.cpp
     src/espnow_power.cpp
     src/espnow_runtime.cpp
     src/nvs_config_store.cpp
@@ -14,7 +15,7 @@ idf_component_register(
     src/psa_edhoc_aead.cpp
     src/psk_security.cpp
   INCLUDE_DIRS include
-  REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls
+  REQUIRES routeloom esp_wifi esp_event esp_netif esp_timer freertos nvs_flash mbedtls esp_driver_usb_serial_jtag
 )
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 # ESP-IDF public headers intentionally use GNU C/C++ extensions. Keep strict
