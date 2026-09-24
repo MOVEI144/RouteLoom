@@ -106,8 +106,18 @@ Status ZtJoinerLink::discover(const ZtDiscoverBody& body, const MonotonicMs now_
   Status status = zt_discover_body_encode(body, encoded);
   if (!status) return status;
   close();
-  status = entropy_.fill(MutableByteView{nonce_.data(), nonce_.size()});
-  if (!status) return status;
+  // The nonce's first four bytes are the chunk object id: a zero id
+  // collides with "no object", so redraw (at most four draws) instead of
+  // patching the bytes.
+  status = Status::error(StatusCode::InternalError, "zt discover entropy");
+  for (int draw = 0; draw < 4; ++draw) {
+    status = entropy_.fill(MutableByteView{nonce_.data(), nonce_.size()});
+    if (!status) return status;
+    if (join_rld1_object_id(nonce_) != 0) break;
+    status = Status::error(StatusCode::InternalError, "zt discover nonce");
+  }
+  if (!status || join_rld1_object_id(nonce_) == 0) return status;
+  discover_org_hint_ = body.org_hint;
   discovering_ = true;
   status = emit(kBroadcastMac, FrameType::Discover, encoded.view());
   if (status) ++stats_.discovers_tx;
@@ -132,6 +142,7 @@ Status ZtJoinerLink::connect(const ZtOfferView& offer) noexcept {
 
 void ZtJoinerLink::close() noexcept {
   discovering_ = false;
+  discover_org_hint_ = 0;
   connected_ = false;
   proxy_mac_ = MacAddress{};
   proxy_ = kInvalidNodeId;
@@ -226,7 +237,7 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         ++stats_.offers_ignored;
         return;
       }
-      if (offer.body.org_hint != config_.org_hint) {  // 02 §11 rule 1
+      if (offer.body.org_hint != discover_org_hint_) {  // 02 §11 rule 1
         ++stats_.offers_ignored;
         return;
       }

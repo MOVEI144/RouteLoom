@@ -90,6 +90,16 @@ class SealedSlotPair {
   bool has_active() const noexcept { return has_active_; }
   bool quarantined() const noexcept { return quarantined_; }
   bool uncertain() const noexcept { return uncertain_; }
+  // Per-slot classification of the last initialize(): unknown schemas and
+  // unreadable slots, so the caller can tell "known-impaired" (explicit
+  // recovery allowed) from "unknown" (never recovered over) without
+  // comparing Status details.
+  bool slot_unsupported(std::uint8_t slot) const noexcept {
+    return slot < kSlots && slot_reserved_[slot] == StatusCode::Unsupported;
+  }
+  bool slot_unreadable(std::uint8_t slot) const noexcept {
+    return slot < kSlots && slot_unreadable_[slot];
+  }
   std::uint8_t active_slot() const noexcept { return active_slot_; }
   // Sequenced: the adopted record's sequence, and the highest sequence any
   // committed record (including a CRC-failed one) proved this boot.
@@ -109,6 +119,7 @@ class SealedSlotPair {
   MutableByteView scratch_{};
   void* decode_context_{nullptr};
   std::array<StatusCode, kSlots> slot_reserved_{};
+  std::array<bool, kSlots> slot_unreadable_{};
   std::uint32_t active_seq_{0};
   std::uint32_t seq_floor_{0};
   std::uint8_t active_slot_{0};
@@ -144,10 +155,27 @@ class IdentityStore {
 };
 
 // --- RLS1: site membership (A/B alternating) ----------------------------------
+// Read-only health of the last initialize(): enough to classify the boot
+// and reconcile paths (design P3-4 §7.2) without string-matching Status.
+struct SiteStoreHealth {
+  bool initialized{false};
+  bool has_site{false};
+  bool quarantined{false};
+  bool uncertain{false};
+  std::uint8_t unsupported_mask{0};  // bit i: slot i holds an unknown schema
+  std::uint8_t read_error_mask{0};   // bit i: slot i was unreadable
+  bool active_load_failed{false};    // adopted slot could not be re-read/decoded
+  std::uint32_t seq_floor{0};
+};
+
 class SiteStore {
  public:
   explicit SiteStore(RecordSlotStorage& storage) noexcept;
   Status initialize() noexcept;
+  SiteStoreHealth health() const noexcept;
+  // Stable digest of the canonical semantic record (sequence/seal excluded).
+  // Uses this store's scratch buffer; it never reads or writes flash.
+  Status fingerprint(const SiteRecord& record, Digest256& out) noexcept;
 
   // Commit a Member record. With a Member record already adopted, the new
   // one must keep site_id, and must not regress site_epoch (network>>32;
@@ -178,10 +206,12 @@ class SiteStore {
 
  private:
   Status encode(const SiteRecord& record, std::size_t& used_len) noexcept;
+  void wipe_scratch() noexcept;
 
   ByteBuffer<kSiteSlotBytes> scratch_{};
   SealedSlotPair pair_;
   SiteRecord site_{};
+  bool active_load_failed_{false};
 };
 
 // --- RRS1: revocation set (A/B alternating) -----------------------------------

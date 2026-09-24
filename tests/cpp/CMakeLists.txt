@@ -347,6 +347,24 @@ target_include_directories(routeloom_sdkv1_join_candidates_tests PRIVATE
 target_compile_options(routeloom_sdkv1_join_candidates_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_join_candidates_tests COMMAND routeloom_sdkv1_join_candidates_tests)
 
+# SDK v1 join FSM (plan P3-4 PR 3): the portable Joiner end to end in the
+# two-site simulator (V1-J01, V1-J04-V1-J07, V1-J13, the V1-J12 remainder,
+# the V1-J08 FSM fault matrix, re-entrancy, the #109 path, quiescence).
+add_executable(routeloom_sdkv1_joiner_tests test_sdkv1_joiner.cpp)
+target_link_libraries(routeloom_sdkv1_joiner_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_joiner_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_joiner_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_joiner_tests COMMAND routeloom_sdkv1_joiner_tests)
+
+# Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
+# test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.
+add_executable(routeloom_joiner_interop_peer joiner_interop_peer.cpp)
+target_link_libraries(routeloom_joiner_interop_peer PRIVATE routeloom_core)
+target_include_directories(routeloom_joiner_interop_peer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_joiner_interop_peer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
 # Join stack gate (design P3-4 §9): every stack frame of the two P3-4 join
 # translation units stays within 512 B. GCC-only (relies on -fstack-usage).
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
@@ -383,6 +401,28 @@ target_compile_definitions(routeloom_sdkv1_revocation_tests PRIVATE
     ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 target_compile_options(routeloom_sdkv1_revocation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_revocation_tests COMMAND routeloom_sdkv1_revocation_tests)
+
+# Factory maintenance console engine (sdk-v1/07 §6, 08 P7): keygen + PoP,
+# identity-bundle sealing with readback, lock/store gating — against real
+# office bytes from protocol/sdkv1-golden/.
+add_executable(routeloom_sdkv1_maintenance_tests test_sdkv1_maintenance.cpp)
+target_link_libraries(routeloom_sdkv1_maintenance_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_maintenance_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_maintenance_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_sdkv1_maintenance_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+add_test(NAME routeloom_sdkv1_maintenance_tests COMMAND routeloom_sdkv1_maintenance_tests)
+
+add_executable(routeloom_espnow_sdkv1_entropy_tests
+    test_espnow_sdkv1_entropy.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp)
+target_link_libraries(routeloom_espnow_sdkv1_entropy_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_sdkv1_entropy_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/stubs/maintenance
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_espnow_sdkv1_entropy_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_sdkv1_entropy_tests COMMAND routeloom_espnow_sdkv1_entropy_tests)
 
 # SDK v1 stores over the key/blob storage port — the portable half of the
 # `rlsec` NVS adapter (sdk-v1/05 §5, 08 P7-1), against a fake NVS.

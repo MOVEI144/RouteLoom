@@ -249,4 +249,20 @@ config ROUTELOOM_TRUST_STORE
         ~1.5 extra pages — production deployments need an enlarged or
         dedicated NVS partition, NOT set up here.
 
+config ROUTELOOM_MAINTENANCE_CONSOLE
+    bool "Factory maintenance console on USB Serial/JTAG (SDK v1 office provisioning)"
+    default n
+    help
+        Factory provisioning build (docs/design/sdk-v1/07-host-api-tooling.md
+        §6): instead of booting the mesh and the USB bridge protocol, the
+        gateway serves the maintenance console on USB Serial/JTAG pre-RF —
+        keygen answers the office challenge with a proof of possession,
+        identity seals the office bundle into rlsec/rlident as the
+        committed RLI1 twin pair. Never enable in a field build: a
+        console-enabled device re-provisions whoever holds its USB until
+        RLI1 seals it with console_locked (which then refuses every verb).
+        The sdkv1 stores themselves (rlident/rlsite/rlrevo/rlres, 160
+        resume slots on the gateway) are wired in every build; this flag
+        only gates entering the console.
+
 endmenu

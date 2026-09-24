@@ -3,11 +3,12 @@
 
 Independent reference encoder for the byte layouts in
 docs/design/sdk-v1/02-zero-touch-join.md (§2 RLI1, §3 RLCW1, §10.3 RLS1),
-04-removal-revocation.md (§2 RRS1) and 05-nvs-state-37.md (§3.2 RLP1), as
-resolved in protocol/sdkv1-golden/README.md. It shares no code with the
-C++ codecs (components/routeloom/src/{rlcw1,sdkv1_records}.cpp) or the Rust
-mirror (host/routeloom-provision/src/sdkv1/); all three must agree on every
-byte.
+04-removal-revocation.md (§2 RRS1), 05-nvs-state-37.md (§3.2 RLP1) and
+07-host-api-tooling.md (§6 steps 2-3, the device-key proof of possession),
+as resolved in protocol/sdkv1-golden/README.md. It shares no code with the
+C++ codecs (components/routeloom/src/{rlcw1,sdkv1_records,sdkv1_pop}.cpp)
+or the Rust mirror (host/routeloom-provision/src/sdkv1/); all three must
+agree on every byte.
 
 Signatures: ECDSA P-256 / SHA-256 with the RFC 6979 deterministic nonce,
 normalized to low-S. Python's standard library has no ECDSA and the
@@ -275,6 +276,7 @@ def rls1_body(r: dict) -> bytes:
 
 
 REVOCATION_DOMAIN = b"RouteLoom/revocation-set/v1\x00"
+POP_DOMAIN = b"RouteLoom/device-key-pop/v1\x00"
 
 
 def rrs1_payload(r: dict, count_override=None, version=1, flags=0) -> bytes:
@@ -650,6 +652,79 @@ def main() -> None:
     bad("rrs1_record_garbage_object", "rrs1_record",
         sealed(b"RRS1", b"\x00" * 40, SEAL["RRS1"], seq=5),
         "stored object must parse as an RRS1 Sign1")
+
+    # ---- PoP ---------------------------------------------------------------
+    # 07 §6 steps 2-3: the device answers the office challenge with a
+    # restricted ES256 COSE_Sign1 over version | key_location | 0x0000 |
+    # node_id | challenge | pubkey (108 B), external AAD POP_DOMAIN (28 B),
+    # signed by the key being certified. The challenges below are fixed
+    # test values; the office uses a fresh CSPRNG challenge per device.
+    assert len(POP_DOMAIN) == 28
+
+    def pop_payload(node_id: int, location: int, challenge: bytes, pub: bytes,
+                    version: int = 1) -> bytes:
+        return u8(version) + u8(location) + b"\x00\x00" + u64(node_id) + challenge + pub
+
+    def pop_doc(node_id: int, location: int, challenge: bytes, secret: int) -> dict:
+        pub = pubkey(secret)
+        payload = pop_payload(node_id, location, challenge, pub)
+        structure = sig_structure(payload, POP_DOMAIN)
+        signature = sign(secret, structure)
+        return dict(node_id=node_id, key_location=location,
+                    challenge_hex=challenge.hex(), pubkey_hex=pub.hex(),
+                    payload_hex=payload.hex(), aad_hex=POP_DOMAIN.hex(),
+                    sig_structure_hex=structure.hex(),
+                    signature_hex=signature.hex(),
+                    object_hex=sign1(payload, signature).hex(),
+                    signer_secret_hex=secret.to_bytes(32, "big").hex())
+
+    pop_challenge = bytes(range(32))
+    pop = pop_doc(node, 1, pop_challenge, device)
+    assert len(bytes.fromhex(pop["object_hex"])) == 183
+    emit("valid", "pop_device_nvs", dict(pop, codec="pop", expect="ok"))
+    emit("valid", "pop_device_se",
+         dict(pop_doc(peer_node, 3, bytes([0xC3]) * 32, peer), codec="pop", expect="ok"))
+
+    pop_good = bytes.fromhex(pop["object_hex"])
+    pop_ctx = dict(expected_node_id=node, expected_challenge_hex=pop_challenge.hex())
+
+    def pop_signed(payload: bytes) -> bytes:
+        return sign1(payload, sign(device, sig_structure(payload, POP_DOMAIN)))
+
+    bad("pop_version_2", "pop",
+        pop_signed(pop_payload(node, 1, pop_challenge, device_pub, version=2)),
+        "PoP payload version must be 1", **pop_ctx)
+    bad("pop_location_none", "pop",
+        pop_signed(pop_payload(node, 0, pop_challenge, device_pub)),
+        "key location 0 proves nothing", **pop_ctx)
+    bad("pop_location_unknown", "pop",
+        pop_signed(pop_payload(node, 9, pop_challenge, device_pub)),
+        "key location must be 1..3", **pop_ctx)
+    pop_reserved = bytearray(pop_payload(node, 1, pop_challenge, device_pub))
+    pop_reserved[2] = 1
+    bad("pop_reserved_nonzero", "pop", pop_signed(bytes(pop_reserved)),
+        "reserved bytes must be zero", **pop_ctx)
+    bad("pop_truncated", "pop", pop_good[:-1], "truncated object", **pop_ctx)
+    bad("pop_trailing_byte", "pop", pop_good + b"\x00",
+        "nothing may follow the Sign1", **pop_ctx)
+    bad("pop_key_off_curve", "pop",
+        pop_signed(pop_payload(node, 1, pop_challenge, bytes(off))),
+        "the carried key must be a P-256 point", **pop_ctx)
+    pop_flipped = bytearray(pop_good)
+    pop_flipped[-1] ^= 0x01
+    bad("pop_bad_signature", "pop", bytes(pop_flipped),
+        "well-formed but the signature does not verify", expect="deny", **pop_ctx)
+    pop_rs = pop_good[-64:]
+    pop_high = pop_rs[:32] + (N - int.from_bytes(pop_rs[32:], "big")).to_bytes(32, "big")
+    bad("pop_high_s", "pop", pop_good[:-64] + pop_high,
+        "the high-S twin of a valid signature is rejected (low-S only)",
+        expect="deny", **pop_ctx)
+    bad("pop_wrong_node", "pop", pop_good,
+        "a valid PoP presented for another node", expect="deny",
+        expected_node_id=node + 1, expected_challenge_hex=pop_challenge.hex())
+    bad("pop_wrong_challenge", "pop", pop_good,
+        "a PoP replayed against another challenge", expect="deny",
+        expected_node_id=node, expected_challenge_hex=("34" * 32))
 
     # ---- RLP1 --------------------------------------------------------------
     peer_cert_id = hashlib.sha256(bytes.fromhex(peercert["cert_hex"])).digest()[:8]

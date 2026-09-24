@@ -245,6 +245,9 @@ class JoinCandidates {
   // desc, oldest last_attempt, key/MAC lexicographic.
   Status select_and_begin(MonotonicMs now_ms, JoinAttempt& attempt,
                           JoinSelect& sel) noexcept;
+  // A fresh OFFER may select another proxy on the same channel. Record the
+  // path actually connected so a later failure is charged to that MAC.
+  Status use_refresh_proxy(const JoinAttempt& attempt, const MacAddress& proxy) noexcept;
   // The live attempt (inactive when none is in flight).
   const JoinAttempt& attempt() const noexcept { return attempt_; }
 
