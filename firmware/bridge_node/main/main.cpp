@@ -690,7 +690,7 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   // Boot complete — the pump loop below is the node's main loop, so a
   // later fatal is a runtime fault rather than a boot-loop streak.
-  routeloom::fail_streak_clear(s_fail);
+  routeloom::fail_streak_runtime_started(s_fail);
 
   if (security.security_profile() != routeloom::SecurityProfile::Production) {
     ESP_LOGW(

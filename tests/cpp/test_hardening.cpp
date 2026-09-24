@@ -808,21 +808,21 @@ void test_fail_policy_bounds_boot_loop_writes() {
 // cycle and never escalated. The streak must be held until a coordinated
 // sleep actually enters.
 
-// Replays the flagged restart path through the same FailStreak calls the
-// firmware makes: fail_streak_boot at app_main entry, a mid-boot
-// fail_streak_clear where the removed mark_started reset used to sit,
-// fail_streak_consume inside fail() when the pump dies. No coordinated
-// sleep ever enters, so nothing else may touch the count. Returns whether
-// the loop reaches the deep-sleep halt.
-bool sleep_image_fault_loop_halts(const bool clear_at_mark_started) {
+// Replays the flagged restart path through the same FailStreak calls, in
+// the same order, as the DEEP_SLEEP firmware: fail_streak_boot at app_main
+// entry, fail_streak_mark_started right after runtime.mark_started(), then
+// fail_streak_consume inside fail() when the pump dies on the persistently
+// failing sleep image commit. No coordinated sleep ever enters, so the
+// pre-sleep hook never fires. Whether the count is held at mark_started is
+// decided inside fail_streak_mark_started — this replay takes no flag for
+// it. Returns whether the loop reaches the deep-sleep halt.
+bool sleep_image_fault_loop_halts() {
   routeloom::FailStreak streak{0, 0};  // power-on garbage -> foreign magic
   for (std::uint32_t boot = 0; boot < 2 * routeloom::kFailSleepStreakMin;
        ++boot) {
     routeloom::fail_streak_boot(streak);
     // ...NVS open, runtime init, coordinator.begin, mark_started...
-    if (clear_at_mark_started) {
-      routeloom::fail_streak_clear(streak);  // the removed reset
-    }
+    routeloom::fail_streak_mark_started(streak);
     // ...pump: sleep image commit keeps failing -> sleep deadline -> fail()
     if (routeloom::fail_action(routeloom::fail_streak_consume(streak))
             .deep_sleep) {
@@ -834,13 +834,10 @@ bool sleep_image_fault_loop_halts(const bool clear_at_mark_started) {
 }
 
 void test_fail_streak_held_through_late_boot_faults() {
-  // Fixed sequence — the count is held until a coordinated sleep enters:
-  // the loop must escalate to the bounded halt.
-  CHECK(sleep_image_fault_loop_halts(false));
-  // The pre-fix sequence — firmware cleared at mark_started: the same
-  // production calls never escalate, so an assertion requiring the halt
-  // would fail under the old handling.
-  CHECK(!sleep_image_fault_loop_halts(true));
+  // The count is held until a coordinated sleep enters: the loop must
+  // escalate to the bounded halt. Restoring the old decision (a clear
+  // inside fail_streak_mark_started) makes this CHECK fail.
+  CHECK(sleep_image_fault_loop_halts());
 }
 
 void test_fail_streak_clears_only_on_coordinated_sleep() {
@@ -856,7 +853,22 @@ void test_fail_streak_clears_only_on_coordinated_sleep() {
   (void)routeloom::fail_streak_consume(streak);
   (void)routeloom::fail_streak_consume(streak);
   CHECK(streak.count == 2);
-  routeloom::fail_streak_clear(streak);  // pre-sleep hook fired
+  routeloom::fail_streak_pre_sleep(streak);  // pre-sleep hook fired
+  CHECK(streak.count == 0);
+  CHECK(!routeloom::fail_action(routeloom::fail_streak_consume(streak))
+             .deep_sleep);
+  CHECK(streak.count == 1);
+}
+
+void test_fail_streak_clears_on_runtime_started() {
+  // Always-on decision: once the runtime main loop is up the boot proved
+  // stable, so reaching it clears a retained streak and a later fault
+  // escalates from zero rather than a stale value.
+  routeloom::FailStreak streak{routeloom::kFailStreakMagic, 0};
+  (void)routeloom::fail_streak_consume(streak);
+  (void)routeloom::fail_streak_consume(streak);
+  CHECK(streak.count == 2);
+  routeloom::fail_streak_runtime_started(streak);  // runtime.start() ok
   CHECK(streak.count == 0);
   CHECK(!routeloom::fail_action(routeloom::fail_streak_consume(streak))
              .deep_sleep);
@@ -1387,6 +1399,7 @@ int main() {
   test_fail_policy_bounds_boot_loop_writes();
   test_fail_streak_held_through_late_boot_faults();
   test_fail_streak_clears_only_on_coordinated_sleep();
+  test_fail_streak_clears_on_runtime_started();
   if (failures != 0) {
     std::fprintf(stderr, "%d hardening checks failed\n", failures);
     return 1;

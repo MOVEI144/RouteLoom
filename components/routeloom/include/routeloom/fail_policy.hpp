@@ -17,17 +17,21 @@ namespace routeloom {
 // flash-bounded retry rate. Pure arithmetic so the cadence contract is
 // host-testable.
 //
-// Streak retention contract (issue #34 r2): the count may clear ONLY on a
-// profile-defined stability proof — reaching the runtime main loop on
-// always-on builds, or an actually-entered coordinated sleep (the power
-// port's pre-sleep hook, fired at the point of no return inside
-// enter_sleep) on the DEEP_SLEEP build — plus the power-on magic check.
-// Never clear mid-boot: the round-2 bug cleared it when the pump loop
-// started, so a persistent late-boot fault (a sleep image store that
-// keeps failing, hitting "sleep deadline exceeded" ~40 s in) re-armed the
-// 500 ms restart every cycle and never escalated. The FailStreak
-// functions below are the only writers of the state — in firmware and in
-// the host regression replays alike — so the contract is exercised
+// Streak retention contract (issue #34 r2/r4): the hold-or-clear decision at
+// each boot lifecycle event lives in the FailStreak function named for that
+// event — not in the caller's choice of whether to call a generic clear.
+// The count may clear ONLY on a profile-defined stability proof: reaching
+// the runtime main loop on always-on builds
+// (fail_streak_runtime_started), or an actually-entered coordinated sleep
+// (fail_streak_pre_sleep, via the power port's pre-sleep hook, fired at
+// the point of no return inside enter_sleep) on the DEEP_SLEEP build —
+// plus the power-on magic check. fail_streak_mark_started deliberately
+// holds: the round-2 bug cleared when the pump loop started, so a
+// persistent late-boot fault (a sleep image store that keeps failing,
+// hitting "sleep deadline exceeded" ~40 s in) re-armed the 500 ms restart
+// every cycle and never escalated. The FailStreak functions below are the
+// only writers of the state, and firmware and the host regression replays
+// call the same functions in the same order — so the contract is exercised
 // through the same code the device runs.
 struct FailAction {
   // false: wait delay_ms, then esp_restart. true: esp_wifi_stop, arm a
@@ -84,12 +88,26 @@ inline std::uint32_t fail_streak_consume(FailStreak& streak) noexcept {
   return count;
 }
 
-// The only mid-run clear: a profile-defined stability proof — the runtime
-// main loop starting on always-on builds, an actually-entered coordinated
-// sleep (the power port's pre-sleep hook) on the DEEP_SLEEP build. Never
-// call this mid-boot: the awake window still runs fallible work whose
-// fail() must see the retained count (issue #34 r2).
-inline void fail_streak_clear(FailStreak& streak) noexcept {
+// The awake window started serving (DEEP_SLEEP build: called right after
+// runtime.mark_started()). HOLDS the count — a deliberate no-op: the pump
+// loop below still runs fallible work (drain, sleep image commit, wake
+// configuration, sleep_enter) whose fail() must see the retained count,
+// and no stability proof exists yet (issue #34 r2). Clearing here is the
+// round-2 bug; the regression replay pins this decision.
+inline void fail_streak_mark_started(FailStreak& streak) noexcept {
+  (void)streak;
+}
+
+// Always-on builds: call after runtime.start()/start_task() succeeds. The
+// node's main loop is up, so the boot proved stable and the count clears.
+inline void fail_streak_runtime_started(FailStreak& streak) noexcept {
+  streak.count = 0;
+}
+
+// DEEP_SLEEP build: call from the power port's pre-sleep hook — an
+// actually-entered coordinated sleep, the profile's only stability proof —
+// so the count clears.
+inline void fail_streak_pre_sleep(FailStreak& streak) noexcept {
   streak.count = 0;
 }
 

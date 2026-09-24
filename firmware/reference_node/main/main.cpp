@@ -243,7 +243,7 @@ class LogPowerEvents final : public routeloom::PowerEvents {
 class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
  public:
   void on_pre_sleep() noexcept override {
-    routeloom::fail_streak_clear(s_fail);
+    routeloom::fail_streak_pre_sleep(s_fail);
   }
 };
 
@@ -1131,11 +1131,12 @@ extern "C" void app_main(void) {
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
-  // The boot-fault streak is deliberately NOT cleared here: the pump loop
-  // below still runs fallible work (drain, image commit, wake
-  // configuration, sleep_enter) and fail() must see the retained count.
-  // This profile's only clear is FailStreakClearOnSleep, fired at the
-  // point of no return inside enter_sleep().
+  // The streak decision at this event is to hold: the pump loop below
+  // still runs fallible work (drain, image commit, wake configuration,
+  // sleep_enter) and fail() must see the retained count. This profile's
+  // only clear is FailStreakClearOnSleep, fired at the point of no return
+  // inside enter_sleep().
+  routeloom::fail_streak_mark_started(s_fail);
 
   routeloom::SleepRequest request{};
   request.pending_policy = routeloom::SleepWorkPolicy::Fail;
@@ -1176,7 +1177,7 @@ extern "C" void app_main(void) {
   status = runtime.start_task();
   if (!status) fail(status.detail);
   // Boot complete — the runtime task is the node's main loop.
-  routeloom::fail_streak_clear(s_fail);
+  routeloom::fail_streak_runtime_started(s_fail);
 #endif
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.
