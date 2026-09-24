@@ -296,6 +296,9 @@ constexpr std::size_t kJoinEadFieldMax = 1024;
 // item's size rule (exact for Intent/Offer/Request, 12..520 for Result).
 Status join_ead_item_encode(JoinEad label, ByteView value,
                             ByteBuffer<kJoinEadItemMax>& out) noexcept;
+// The per-item value size bound the codecs and both EAD walkers enforce
+// (Intent/Offer/Request exact, Result 12..520, Credential 1..256).
+bool join_ead_value_size_ok(JoinEad label, std::size_t size) noexcept;
 // Strict EAD field parse (see the file comment): returns the value of the
 // single `expected` item, borrowed from `ead`. `expected` is one of the four
 // message items; a Credential item is "another item" here and rejected.
@@ -328,17 +331,25 @@ Status join_ead_find_with_credential(ByteView ead, JoinEad expected, ByteView& c
 Status join_credential_check(ByteView credential, CertType type, ByteView kid,
                              CertClaims& out) noexcept;
 
-// --- DAMS (03 §2.1) — TODO(P5): not derived on the device yet ----------------------
-// The device does not export DAMS in P3-1/P3-2. The P3-3 Site Authority uses
-// EDHOC_Exporter(32771, context, 32) with a PROVISIONAL context
-// (routeloom_join::dams_exporter_context, protocol/edhoc-interop/
-// method0_join.txt): the deterministic CBOR array
+// --- DAMS exporter context (02 §10.3, 03 §2.1; P3-4) -------------------------------
+// The DAMS is the device <-> Site Authority master secret: both ends derive
+// it inside the authenticated join EDHOC session with EDHOC_Exporter label
+// keys::kExporterDams (32771) and a 32-byte output (02 §10.3 RLS1 `dams`,
+// 03 §2.1). The join profile uses its own context — the deterministic CBOR
+// array
 //   ["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]
-// When the device derives DAMS it must build exactly these bytes; pin both
-// sides in a shared vector first. The constants below are placeholders so
-// the TODO has one findable name.
-constexpr std::uint64_t kTodoDamsExporterLabel = 32771;
-constexpr std::size_t kTodoDamsSize = 32;
-constexpr std::uint64_t kTodoDamsExporterPurpose = 4;  // authority channel (03 §2 rule 3)
+// (version 1, purpose 4 = authority, each kid a 32 B bstr; every integer in
+// shortest form). This is the explicit join-profile exception to 03 §2's
+// generic exporter context; the Site Authority has emitted these exact
+// bytes since P3-3 (routeloom_join::dams_exporter_context) and the shared
+// vectors in protocol/sdkv1-golden/dams/ (tools/gen_sdkv1_dams_vectors.py)
+// pin them byte for byte. The label is keys::kExporterDams — declared in
+// key_schedule.hpp so this codec header stays free of the key schedule.
+constexpr std::uint64_t kJoinDamsExporterPurpose = 4;  // authority channel (03 §2 rule 3)
+constexpr std::size_t kJoinDamsSize = 32;
+constexpr std::size_t kJoinDamsContextMax = 108;
+Status dams_exporter_context(NetworkId network, NodeId node, std::uint64_t site_id,
+                             const Digest256& device_kid, const Digest256& sak_kid,
+                             ByteBuffer<kJoinDamsContextMax>& out) noexcept;
 
 }  // namespace routeloom::sdkv1

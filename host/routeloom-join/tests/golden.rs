@@ -12,9 +12,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use routeloom_join::{
-    join_allow_verify, join_credential_check, join_ead_find, join_ead_find_with_credential,
-    join_ead_item_encode, join_org_hint, join_site_hint, removal_notice_aad, JoinEad, JoinIntent,
-    JoinRequest, JoinResult, RemovalNotice, SiteOffer, SitePackage,
+    dams_exporter_context, join_allow_verify, join_credential_check, join_ead_find,
+    join_ead_find_with_credential, join_ead_item_encode, join_org_hint, join_site_hint,
+    removal_notice_aad, JoinEad, JoinIntent, JoinRequest, JoinResult, RemovalNotice, SiteOffer,
+    SitePackage,
 };
 use routeloom_json::Json;
 use routeloom_provision::sdkv1::cert::{cert_decode, cert_issue, CertClaims, CertType};
@@ -25,8 +26,12 @@ fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/sdkv1-golden/ead")
 }
 
-fn files(sub: &str) -> Vec<(String, Json)> {
-    let mut paths: Vec<PathBuf> = fs::read_dir(golden_dir().join(sub))
+fn dams_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/sdkv1-golden/dams")
+}
+
+fn files_in(dir: &Path, sub: &str) -> Vec<(String, Json)> {
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir.join(sub))
         .unwrap_or_else(|e| panic!("read {sub}: {e}"))
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
@@ -41,6 +46,10 @@ fn files(sub: &str) -> Vec<(String, Json)> {
             (name, doc)
         })
         .collect()
+}
+
+fn files(sub: &str) -> Vec<(String, Json)> {
+    files_in(&golden_dir(), sub)
 }
 
 fn text<'a>(doc: &'a Json, key: &str) -> &'a str {
@@ -444,5 +453,25 @@ fn sdkv1_ead_golden_vectors() {
     }
     for (name, doc) in &invalid_files {
         invalid(name, doc);
+    }
+}
+
+/// The join DAMS exporter context (02 §10.3, 03 §2.1; P3-4): the device's
+/// sdkv1_ead.cpp twin must emit these exact bytes, so the Python
+/// generator's context is pinned here for the Site Authority side.
+#[test]
+fn sdkv1_dams_golden_vectors() {
+    let valid = files_in(&dams_dir(), "valid");
+    assert!(!valid.is_empty());
+    for (name, doc) in &valid {
+        assert_eq!(text(doc, "expect"), "ok", "{name}");
+        let context = dams_exporter_context(
+            num(doc, "network"),
+            num(doc, "node_id"),
+            num(doc, "site_id"),
+            &arr::<32>(doc, "device_kid_hex"),
+            &arr::<32>(doc, "sak_kid_hex"),
+        );
+        assert_eq!(context, hex(doc, "context_hex"), "{name}");
     }
 }

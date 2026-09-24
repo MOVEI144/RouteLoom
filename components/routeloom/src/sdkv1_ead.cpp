@@ -127,16 +127,7 @@ bool join_ead_known(const std::uint64_t label) noexcept {
          label <= static_cast<std::uint32_t>(JoinEad::Result);
 }
 
-bool value_size_ok(const JoinEad label, const std::size_t size) noexcept {
-  switch (label) {
-    case JoinEad::Intent: return size == kJoinIntentSize;
-    case JoinEad::Offer: return size == kSiteOfferSize;
-    case JoinEad::Request: return size == kJoinRequestSize;
-    case JoinEad::Result: return size >= kJoinResultHeadSize && size <= kJoinResultMax;
-    case JoinEad::Credential: return size >= 1 && size <= kRlcw1CertMax;
-  }
-  return false;
-}
+
 
 bool retry_ok(const JoinVerdict verdict, const std::uint32_t retry) noexcept {
   switch (verdict) {
@@ -168,6 +159,17 @@ bool verdict_known(const std::uint8_t verdict) noexcept {
 }
 
 }  // namespace
+
+bool join_ead_value_size_ok(const JoinEad label, const std::size_t size) noexcept {
+  switch (label) {
+    case JoinEad::Intent: return size == kJoinIntentSize;
+    case JoinEad::Offer: return size == kSiteOfferSize;
+    case JoinEad::Request: return size == kJoinRequestSize;
+    case JoinEad::Result: return size >= kJoinResultHeadSize && size <= kJoinResultMax;
+    case JoinEad::Credential: return size >= 1 && size <= kRlcw1CertMax;
+  }
+  return false;
+}
 
 // === JoinIntent ====================================================================
 
@@ -767,7 +769,7 @@ Status join_allow_verify(const JoinResult& result, const CertClaims& site_cert, 
 Status join_ead_item_encode(const JoinEad label, const ByteView value,
                             ByteBuffer<kJoinEadItemMax>& out) noexcept {
   out.clear();
-  if (!value_size_ok(label, value.size) || value.data == nullptr) {
+  if (!join_ead_value_size_ok(label, value.size) || value.data == nullptr) {
     return Status::error(StatusCode::InvalidArgument, "ead value size");
   }
   const std::uint32_t argument = static_cast<std::uint32_t>(label) - 1U;  // -label
@@ -819,7 +821,7 @@ Status join_ead_find(const ByteView ead, const JoinEad expected, ByteView& value
       return malformed(negative ? "ead unexpected critical item" : "ead unexpected item");
     }
     if (found) return malformed("ead item duplicated");
-    if (!has_value || !value_size_ok(expected, item_value.size)) {
+    if (!has_value || !join_ead_value_size_ok(expected, item_value.size)) {
       return malformed("ead value size");
     }
     found = true;
@@ -865,7 +867,7 @@ Status join_ead_find_with_credential(const ByteView ead, const JoinEad expected,
       return malformed(seen == 2 ? "ead item after the credential"
                                  : "ead message item or credential out of order");
     }
-    if (!has_value || !value_size_ok(want, item_value.size)) return malformed("ead value size");
+    if (!has_value || !join_ead_value_size_ok(want, item_value.size)) return malformed("ead value size");
     if (seen == 0) {
       found_value = item_value;
     } else {
@@ -896,6 +898,64 @@ Status join_credential_check(const ByteView credential, const CertType type, con
     return Status::error(StatusCode::AuthenticationFailed, "credential does not match the kid");
   }
   out = claims;
+  return Status::success();
+}
+
+// === DAMS exporter context =========================================================
+
+namespace {
+
+// CBOR unsigned integer, shortest form — byte-identical to the Rust twin's
+// write_uint (host/routeloom-join/src/lib.rs).
+Status dams_uint(const std::uint64_t value, ByteWriter& writer) noexcept {
+  if (value < 24) return writer.write_u8(static_cast<std::uint8_t>(value));
+  Status status = Status::success();
+  if (value <= 0xFF) {
+    status = writer.write_u8(0x18);
+    if (status) status = writer.write_u8(static_cast<std::uint8_t>(value));
+  } else if (value <= 0xFFFF) {
+    status = writer.write_u8(0x19);
+    if (status) status = writer.write_u16(static_cast<std::uint16_t>(value));
+  } else if (value <= 0xFFFFFFFFULL) {
+    status = writer.write_u8(0x1A);
+    if (status) status = writer.write_u32(static_cast<std::uint32_t>(value));
+  } else {
+    status = writer.write_u8(0x1B);
+    if (status) status = writer.write_u64(value);
+  }
+  return status;
+}
+
+}  // namespace
+
+Status dams_exporter_context(const NetworkId network, const NodeId node,
+                             const std::uint64_t site_id, const Digest256& device_kid,
+                             const Digest256& sak_kid,
+                             ByteBuffer<kJoinDamsContextMax>& out) noexcept {
+  out.clear();
+  if (network == 0 || (network & 0xFFFFFFFFULL) == 0 || !id_valid(node) ||
+      !id_valid(site_id)) {
+    return Status::error(StatusCode::InvalidArgument, "dams context ids");
+  }
+  // ["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]
+  static const std::array<std::uint8_t, 9> kDamsTag{'R', 'o', 'u', 't', 'e',
+                                                  'L', 'o', 'o', 'm'};
+  ByteWriter writer(out.writable());
+  Status status = writer.write_u8(0x88);  // array(8)
+  if (status) status = writer.write_u8(0x69);  // text(9)
+  if (status) status = writer.write_bytes(ByteView{kDamsTag.data(), kDamsTag.size()});
+  if (status) status = dams_uint(1, writer);  // context version
+  if (status) status = dams_uint(kJoinDamsExporterPurpose, writer);
+  if (status) status = dams_uint(network, writer);
+  if (status) status = dams_uint(node, writer);
+  if (status) status = dams_uint(site_id, writer);
+  for (const Digest256* kid : {&device_kid, &sak_kid}) {
+    if (status) status = writer.write_u8(0x58);  // bstr(32)
+    if (status) status = writer.write_u8(0x20);
+    if (status) status = writer.write_bytes(ByteView{kid->data(), kid->size()});
+  }
+  if (!status) return status;
+  out.size = writer.size();
   return Status::success();
 }
 
