@@ -7,9 +7,10 @@
 //     build on; it does not claim to reproduce real CCA or capture effects).
 //   - OwnerPump: the firmware owner-task model — driver callbacks post
 //     events (or stage a completion on the queue-full path), the task
-//     waits through the shared owner gate (routeloom/owner_pump.hpp —
-//     staged work skips the wait, otherwise the event or the poll tick
-//     wakes it), drains staged-then-queued events, then polls.
+//     waits through the shared owner wait routine
+//     (routeloom/owner_pump.hpp — staged work skips the wait, otherwise
+//     the event or the poll tick wakes it), drains staged-then-queued
+//     events, then polls.
 //   - ScriptedEntropy: a deterministic entropy source for nonce/fuzz inputs.
 
 #include <cstdint>
@@ -146,7 +147,7 @@ class FakeRadioPort final : public routeloom::RadioPort {
 
 // Owner-task pump model — mirrors EspNowRuntime::task_entry. Driver
 // callbacks only POST events (or stage a completion when the queue is
-// full); the owner task waits through the shared owner gate
+// full); the owner task waits through the shared owner wait routine
 // (routeloom/owner_pump.hpp — staged work skips the wait, otherwise the
 // earlier of the next queued event and the periodic tick wakes it),
 // drains the staged slot and the whole queue through the node handlers,
@@ -202,21 +203,33 @@ class OwnerPump {
     return events_.size() + (staged_valid_ ? 1 : 0);
   }
 
-  // Task side: going idle at `idle_since_ms`, staged work runs NOW
-  // through the same shared gate firmware's wait_for_event runs
-  // (owner_pump.hpp) — never a local copy of the rule. Otherwise the wait
-  // returns at the earlier of the next queued event and the periodic tick,
-  // the bound the firmware wait enforces on the driver queue.
-  routeloom::MonotonicMs wake_at(routeloom::MonotonicMs idle_since_ms) const {
-    if (routeloom::owner_wait_timeout_ms(routeloom::kOwnerPollPeriodMs,
-                                         staged_valid_) == 0) {
-      return idle_since_ms;
+  // Fake driver queue: the xQueuePeek model for the shared owner wait
+  // — a wait releases at the first posted event when one lands inside
+  // the timeout, otherwise at the timeout. Only the blocking primitive
+  // is modeled here; the wait procedure itself (staged skips, else the
+  // bounded event wait) is the shared routine in owner_pump.hpp.
+  struct FakeEventQueue {
+    const std::deque<Event>& events;
+    routeloom::MonotonicMs now_ms;
+    void wait_until_posted(const routeloom::MonotonicMs timeout_ms) noexcept {
+      const routeloom::MonotonicMs deadline = now_ms + timeout_ms;
+      const routeloom::MonotonicMs next =
+          events.empty() ? UINT64_MAX : events.front().posted_ms;
+      now_ms = next <= deadline ? next : deadline;
     }
-    const routeloom::MonotonicMs next =
-        events_.empty() ? UINT64_MAX : events_.front().posted_ms;
-    const routeloom::MonotonicMs tick =
-        idle_since_ms + routeloom::kOwnerPollPeriodMs;
-    return next < tick ? next : tick;
+  };
+
+  // Task side: going idle at `idle_since_ms`, run the SAME shared wait
+  // firmware's wait_for_event runs (owner_pump.hpp) against the fake
+  // driver queue — staged work returns NOW, otherwise the wait releases
+  // at the earlier of the next posted event and the periodic tick. No
+  // local copy of the rule: a fixed-delay regression in the shared wait
+  // wakes here at the tick and fails the issue #60-3 assertions.
+  routeloom::MonotonicMs wake_at(routeloom::MonotonicMs idle_since_ms) const {
+    FakeEventQueue queue{events_, idle_since_ms};
+    routeloom::owner_wait_for_event(queue, routeloom::kOwnerPollPeriodMs,
+                                    staged_valid_);
+    return queue.now_ms;
   }
 
   // One owner pass at `now_ms`: drain the staged slot first (firmware

@@ -845,24 +845,28 @@ void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
   // full queue while poll_once is draining stages its completion AFTER
   // the pass's entry check — the queue is empty now but the node's job is
   // still unresolved. Blocking here would idle until the next tick
-  // (issue #60-3), so re-check the staging slots under the lock and let
-  // the shared owner gate skip the wait — the same judgment the host
-  // harness executes (owner_pump.hpp).
+  // (issue #60-3), so re-check the staging slots under the lock for the
+  // shared owner wait below.
   bool staged = false;
   portENTER_CRITICAL(&callback_lock_);
   staged = lost_node_tx_valid_ || lost_tx_count_ != 0;
   portEXIT_CRITICAL(&callback_lock_);
-  const MonotonicMs wait_ms = owner_wait_timeout_ms(timeout_ms, staged);
-  if (wait_ms == 0) {
-    return;
-  }
-  Event peek{};
-  // Peek, not receive: the event stays queued for poll_once's ordered
-  // drain (reserved slots -> lost completions -> queued events -> node
-  // poll). A TX completion posted while we sleep releases the wait NOW —
-  // the event wins over the periodic tick (issue #60-3). Bootstrap-queue
+  // Thin FreeRTOS binding of the shared owner wait (owner_pump.hpp — the
+  // host harness executes the same routine against a fake queue). Peek,
+  // not receive: the event stays queued for poll_once's ordered drain
+  // (reserved slots -> lost completions -> queued events -> node poll).
+  // A TX completion posted while we sleep releases the wait NOW — the
+  // event wins over the periodic tick (issue #60-3). Bootstrap-queue
   // traffic keeps its old bounded latency via the periodic timeout.
-  (void)xQueuePeek(event_queue_, &peek, pdMS_TO_TICKS(wait_ms));
+  struct QueueWait {
+    QueueHandle_t queue;
+    void wait_until_posted(const MonotonicMs wait_ms) noexcept {
+      Event peek{};
+      (void)xQueuePeek(queue, &peek, pdMS_TO_TICKS(wait_ms));
+    }
+  };
+  QueueWait wait{event_queue_};
+  owner_wait_for_event(wait, timeout_ms, staged);
 }
 
 Status EspNowRuntime::send_application(

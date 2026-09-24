@@ -9,10 +9,10 @@
 // posted mid-sleep that rides out the full period leaves idle airtime
 // between back-to-back frames: ~1-2ms of dead time on a ~6ms
 // HOP_ACCEPT-class exchange is the 25-30% throughput loss the issue
-// measured. Firmware binds the wait to the OS queue
-// (EspNowRuntime::wait_for_event); the host harness models the same wait
-// in OwnerPump — the period and the staged-skips-wait gate below are the
-// one wait judgment both sides execute.
+// measured. owner_wait_for_event below is the one wait procedure both
+// firmware (EspNowRuntime::wait_for_event) and the host harness
+// (OwnerPump::wake_at) execute: staged work skips the wait, otherwise a
+// bounded event wait where a posted event wins over the timeout.
 
 #include "types.hpp"
 
@@ -32,6 +32,29 @@ inline constexpr MonotonicMs kOwnerPollPeriodMs = 2;
 inline MonotonicMs owner_wait_timeout_ms(const MonotonicMs timeout_ms,
                                          const bool staged_pending) noexcept {
   return staged_pending ? 0 : timeout_ms;
+}
+
+// Shared owner wait (issue #60-3): staged work runs NOW, otherwise block
+// at most `timeout_ms` for a queued event — a posted event releases the
+// wait early instead of riding out the tick. `EventQueue` injects only
+// the blocking primitive and must provide:
+//
+//   void wait_until_posted(MonotonicMs timeout_ms) noexcept;
+//
+// Firmware binds it to the FreeRTOS event queue (xQueuePeek); the host
+// harness binds it to a virtual-time fake. Everything else — the staged
+// gate, the timeout bound, the event-wins ordering — lives here, so both
+// sides execute the same wait judgment. Replacing the queue wait with a
+// fixed delay reintroduces the tick tax; the host regression test pins
+// the early-wake path through this routine.
+template <typename EventQueue>
+inline void owner_wait_for_event(EventQueue& queue,
+                                 const MonotonicMs timeout_ms,
+                                 const bool staged_pending) noexcept {
+  if (owner_wait_timeout_ms(timeout_ms, staged_pending) == 0) {
+    return;
+  }
+  queue.wait_until_posted(timeout_ms);
 }
 
 }  // namespace routeloom
