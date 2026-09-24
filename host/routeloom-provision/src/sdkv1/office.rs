@@ -127,10 +127,7 @@ pub fn identity_bundle_json(plan: &IdentityPlan, devcert: &[u8]) -> Result<Strin
 /// cert_serial)` for KGuard's assignment pre-registration), as compact
 /// JSON. Derived from the DevCert, never from operator input.
 pub fn inventory_json(devcert: &[u8]) -> Result<String> {
-    let claims = cert_decode(devcert)?;
-    if claims.cert_type != CertType::Device {
-        return err(Code::InvalidArgument, "inventory needs a devcert");
-    }
+    let claims = inventory_claims(devcert)?;
     Ok(format!(
         "{{\"node_id\":\"{:016x}\",\"kid\":\"{}\",\"model\":{},\"hw_rev\":{},\"cert_serial\":{},\"device_ca_id\":\"{:016x}\"}}",
         claims.subject,
@@ -140,4 +137,32 @@ pub fn inventory_json(devcert: &[u8]) -> Result<String> {
         claims.serial,
         claims.issuer,
     ))
+}
+
+/// Formal inventory record format (P7-2): the same DevCert-derived record
+/// as [`inventory_json`], with a format marker, written to the device
+/// output directory as `inventory.json` for KGuard's assignment
+/// pre-registration. The stdout line stays byte-identical for scripts.
+pub const INVENTORY_FORMAT: &str = "routeloom-inventory-v1";
+
+/// The `inventory.json` file content for one issued DevCert.
+pub fn inventory_file_json(devcert: &[u8]) -> Result<String> {
+    let claims = inventory_claims(devcert)?;
+    Ok(format!(
+        "{{\n  \"format\": \"{INVENTORY_FORMAT}\",\n  \"node_id\": \"{:016x}\",\n  \"kid\": \"{}\",\n  \"model\": {},\n  \"hw_rev\": {},\n  \"cert_serial\": {},\n  \"device_ca_id\": \"{:016x}\"\n}}\n",
+        claims.subject,
+        hex_encode(&credential_kid(&claims.pubkey)),
+        claims.model,
+        claims.hw_rev,
+        claims.serial,
+        claims.issuer,
+    ))
+}
+
+fn inventory_claims(devcert: &[u8]) -> Result<super::cert::CertClaims> {
+    let claims = cert_decode(devcert)?;
+    if claims.cert_type != CertType::Device {
+        return err(Code::InvalidArgument, "inventory needs a devcert");
+    }
+    Ok(claims)
 }

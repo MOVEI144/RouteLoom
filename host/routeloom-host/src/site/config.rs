@@ -18,9 +18,8 @@
 //! }
 //! ```
 //!
-//! Issuing the SiteCert (`site-cert`, plan P7-2) is not implemented; a
-//! development directory is assembled with the office tooling's key files
-//! and `routeloom_provision::sdkv1::cert::cert_issue`.
+//! Issuing the SiteCert is an HQ step (`routeloomctl site-cert`, P7-2); a development directory is assembled with the office tooling's
+//! key files and that command.
 
 use std::path::Path;
 

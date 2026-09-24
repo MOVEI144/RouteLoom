@@ -163,6 +163,21 @@ jobs:
             profile: normal
             autonomy: off
             features: config_target_on
+          # maintenance_on compiles the factory maintenance-console branch
+          # (CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y, sdk-v1/07 §6 P7):
+          # pre-RF console instead of the mesh. Compile-time coverage
+          # only — the console's behavior is host-tested, and enabling it
+          # in a field build is never correct.
+          - app: reference_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: maintenance_on
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: maintenance_on
           - app: reference_node
             target: esp32c3
             profile: normal
@@ -236,6 +251,11 @@ jobs:
             # reference_node opt-in: the RCC1 permit journal endpoint.
             printf 'CONFIG_ROUTELOOM_CONFIG=y\n' >> sdkconfig
           fi
+          if [ '${{ matrix.features }}' = maintenance_on ]; then
+            # reference_node opt-in: the factory maintenance console
+            # branch instead of the mesh (sdk-v1/07 §6 P7).
+            printf 'CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y\n' >> sdkconfig
+          fi
           if [ '${{ matrix.features }}' = route_scoped ]; then
             # Gateway-scoped routing profile (issue #41); the gateway id,
             # tick and lease come from the Kconfig defaults.
@@ -275,6 +295,12 @@ jobs:
               grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig
               ;;
             *) ! grep -q '^CONFIG_ROUTELOOM_CONFIG=y' sdkconfig ;;
+          esac
+          case '${{ matrix.features }}' in
+            maintenance_on)
+              grep -q '^CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' sdkconfig
+              ;;
+            *) ! grep -q '^CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE=y' sdkconfig ;;
           esac
           case '${{ matrix.features }}' in
             route_scoped)
