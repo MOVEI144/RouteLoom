@@ -118,6 +118,7 @@ struct DeviceObserver final : ZtJoinerObserver {
   void on_message(const JoinAuthPhase phase, const std::uint8_t step,
                   const ByteView message) noexcept override {
     messages.push_back({phase, step, Bytes(message.data, message.data + message.size)});
+    if (respond) respond(messages.back());  // may re-enter the link
   }
   void on_relay_status(const RelayStatusCode status, const std::uint32_t retry) noexcept override {
     statuses.push_back({status, retry});
@@ -133,6 +134,8 @@ struct DeviceObserver final : ZtJoinerObserver {
   std::vector<Message> messages;
   std::vector<std::pair<RelayStatusCode, std::uint32_t>> statuses;
   std::vector<std::string> failures_seen;
+  // Optional hook run inside on_message (the link may be re-entered from it).
+  std::function<void(const Message&)> respond;
 };
 
 // The host side of 0x60/0x62: records what the gateway hands up.
@@ -871,6 +874,275 @@ void test_cookie_expiry() {
   CHECK(world.proxy.state() == JoinProxy::State::Idle);
 }
 
+void test_reentrant_send_in_on_message() {
+  current = "reentrant_send_in_on_message";
+  {
+    // send() inside on_message (the EDHOC answer pattern): the chunked up
+    // object must keep its retransmission state — the post-callback cleanup
+    // may only release the delivered object.
+    World world;
+    CHECK(world.connect());
+    const Bytes m1 = filler(59, 1);
+    const Bytes m2 = filler(372, 2);
+    const Bytes m3 = filler(404, 3);
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+    world.pump();
+    CHECK(world.authority.ups.size() == 1);
+    int callback_sent = 0;
+    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
+      if (m.step != 2 || callback_sent != 0) return;
+      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+      ++callback_sent;
+      CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Sending);
+    };
+    // Lose exactly the first offset-0 chunk of m3; everything else flows.
+    int dropped = 0;
+    world.drop_radio = [&dropped](const RadioFrame& frame) {
+      autonomy::Rld1Envelope env{};
+      if (frame.from != device_mac(0) || dropped != 0 ||
+          !autonomy::rld1_decode(view(frame.bytes), env) ||
+          env.kind != FrameType::BootstrapChunk ||
+          env.body[1] != join_sub(JoinAuthPhase::EdhocMessage, 3) || env.body[6] != 0 ||
+          env.body[7] != 0) {
+        return false;
+      }
+      ++dropped;
+      return true;
+    };
+    answer(world, 2, RelayState::Continue, m2);
+    world.pump();
+    world.advance(2000);
+    CHECK(callback_sent == 1 && dropped == 1);
+    CHECK(world.observers[0]->messages.size() == 1 &&
+          message_is(world.observers[0]->messages[0], 2, m2));
+    CHECK(world.authority.ups.size() == 2);
+    if (world.authority.ups.size() == 2) {
+      const RelayObject up3 = parse_up(world.authority.ups[1].object);
+      CHECK(up3.header.step == 3);
+      CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
+    }
+    CHECK(world.links[0]->stats().retransmissions > 0);
+    CHECK(world.observers[0]->failures_seen.empty());
+  }
+  {
+    // close() inside on_message: the attempt ends and the deferred cleanup
+    // leaves the closed link alone.
+    World world;
+    CHECK(world.connect());
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    int calls = 0;
+    world.observers[0]->respond = [&](const DeviceObserver::Message&) {
+      if (calls++ == 0) world.links[0]->close();
+    };
+    answer(world, 2, RelayState::Continue, filler(372, 2));
+    world.pump();
+    CHECK(calls == 1);
+    CHECK(!world.links[0]->connected());
+    CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Idle);
+    CHECK(!world.links[0]
+               ->send(JoinAuthPhase::EdhocMessage, 3, view(filler(404, 3)), world.now)
+               .ok());
+  }
+  {
+    // discover() inside on_message: a fresh attempt starts cleanly.
+    World world;
+    CHECK(world.connect());
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    ZtDiscoverBody again{};
+    again.org_hint = kOrgHint;
+    int calls = 0;
+    world.observers[0]->respond = [&](const DeviceObserver::Message&) {
+      if (calls++ == 0) CHECK(world.links[0]->discover(again, world.now).ok());
+    };
+    answer(world, 2, RelayState::Continue, filler(372, 2));
+    world.pump();
+    CHECK(calls == 1);
+    CHECK(!world.links[0]->connected());
+    CHECK(world.links[0]->stats().discovers_tx == 2);
+    CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Idle);
+  }
+  {
+    // A single-frame m2 never enters the slot; a reentrant send still has
+    // to deliver m3 end to end (with the same drop/retransmit shape).
+    World world;
+    CHECK(world.connect());
+    const Bytes m3 = filler(404, 3);
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    int calls = 0;
+    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
+      if (m.step != 2 || calls++ != 0) return;
+      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    };
+    int dropped = 0;
+    world.drop_radio = [&dropped](const RadioFrame& frame) {
+      autonomy::Rld1Envelope env{};
+      if (frame.from != device_mac(0) || dropped != 0 ||
+          !autonomy::rld1_decode(view(frame.bytes), env) ||
+          env.kind != FrameType::BootstrapChunk ||
+          env.body[1] != join_sub(JoinAuthPhase::EdhocMessage, 3) || env.body[6] != 0 ||
+          env.body[7] != 0) {
+        return false;
+      }
+      ++dropped;
+      return true;
+    };
+    answer(world, 2, RelayState::Continue, filler(80, 2));
+    world.pump();
+    world.advance(2000);
+    CHECK(calls == 1 && dropped == 1);
+    CHECK(world.authority.ups.size() == 2);
+    if (world.authority.ups.size() == 2) {
+      const RelayObject up3 = parse_up(world.authority.ups[1].object);
+      CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
+    }
+    CHECK(world.links[0]->stats().retransmissions > 0);
+  }
+}
+
+void test_down_duplicate_keeps_sending() {
+  current = "down_duplicate_keeps_sending";
+  {
+    // Chunked m2: its Complete receipt is lost once and m3's chunks are
+    // held back, so the proxy retransmits m2 while the joiner is still
+    // Sending m3. The duplicate must re-earn its Complete reply through
+    // the completed-key memory without releasing the m3 send.
+    World world;
+    CHECK(world.connect());
+    const Bytes m1 = filler(59, 1);
+    const Bytes m2 = filler(372, 2);
+    const Bytes m3 = filler(404, 3);
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+    world.pump();
+    int callback_sent = 0;
+    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
+      if (m.step != 2 || callback_sent != 0) return;
+      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+      ++callback_sent;
+      CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Sending);
+    };
+    bool receipt_dropped = false;
+    world.drop_radio = [&](const RadioFrame& frame) {
+      autonomy::Rld1Envelope env{};
+      if (!autonomy::rld1_decode(view(frame.bytes), env)) return false;
+      // The device's Complete receipt of m2 is lost once.
+      if (frame.from == device_mac(0) && env.kind == FrameType::BootstrapReply &&
+          env.body[1] == join_sub(JoinAuthPhase::EdhocMessage, 2) &&
+          env.body[8] == static_cast<std::uint8_t>(JoinReplyStatus::Complete) &&
+          !receipt_dropped) {
+        receipt_dropped = true;
+        return true;
+      }
+      // m3's chunks stay lost until the proxy's m2 retransmission went out.
+      return frame.from == device_mac(0) && env.kind == FrameType::BootstrapChunk &&
+             env.body[1] == join_sub(JoinAuthPhase::EdhocMessage, 3) &&
+             world.proxy.stats().retransmissions == 0;
+    };
+    answer(world, 2, RelayState::Continue, m2);
+    world.pump();
+    world.advance(3000);
+    CHECK(callback_sent == 1 && receipt_dropped);
+    CHECK(world.proxy.stats().retransmissions > 0);  // the m2 chunks came again
+    CHECK(world.observers[0]->messages.size() == 1 &&
+          message_is(world.observers[0]->messages[0], 2, m2));
+    CHECK(world.authority.ups.size() == 2);
+    if (world.authority.ups.size() == 2) {
+      const RelayObject up3 = parse_up(world.authority.ups[1].object);
+      CHECK(up3.header.step == 3);
+      CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
+    }
+    CHECK(world.links[0]->stats().retransmissions > 0);
+    CHECK(world.observers[0]->failures_seen.empty());
+  }
+  {
+    // Single-frame m2: no receipt exists to lose, so the duplicate is a
+    // raw replay of the captured frame — it must not re-fire on_message
+    // nor release the reentrant m3 send.
+    World world;
+    CHECK(world.connect());
+    const Bytes m3 = filler(404, 3);
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
+              .ok());
+    world.pump();
+    int calls = 0;
+    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
+      if (m.step != 2 || calls++ != 0) return;
+      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    };
+    Bytes m2_frame;
+    bool replayed = false;
+    world.drop_radio = [&](const RadioFrame& frame) {
+      autonomy::Rld1Envelope env{};
+      if (!autonomy::rld1_decode(view(frame.bytes), env)) return false;
+      if (frame.to == device_mac(0) && env.kind == FrameType::BootstrapAuth &&
+          env.body_size >= 3 &&
+          env.body[1] == static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage) &&
+          env.body[2] == 2 && m2_frame.empty()) {
+        m2_frame = frame.bytes;  // capture m2 for a link-layer replay
+        return false;
+      }
+      // m3's chunks stay lost until the replay has been injected.
+      return frame.from == device_mac(0) && env.kind == FrameType::BootstrapChunk &&
+             env.body[1] == join_sub(JoinAuthPhase::EdhocMessage, 3) && !replayed;
+    };
+    answer(world, 2, RelayState::Continue, filler(80, 2));
+    world.pump();
+    CHECK(!m2_frame.empty() && calls == 1);
+    world.links[0]->on_rld1_rx(kProxyMac, device_mac(0), view(m2_frame), world.now);
+    CHECK(world.observers[0]->messages.size() == 1);
+    CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Sending);
+    replayed = true;
+    world.advance(2000);
+    CHECK(world.authority.ups.size() == 2);
+    if (world.authority.ups.size() == 2) {
+      const RelayObject up3 = parse_up(world.authority.ups[1].object);
+      CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
+    }
+    CHECK(world.links[0]->stats().retransmissions > 0);
+    CHECK(world.observers[0]->failures_seen.empty());
+  }
+  {
+    // A whole stale object re-assembled from stray chunks (the completed
+    // key already belongs to m4) must not re-fire on_message either.
+    World world;
+    CHECK(world.connect());
+    const Bytes m1 = filler(59, 1);
+    const Bytes m2 = filler(372, 2);
+    const Bytes m3 = filler(404, 3);
+    const Bytes m4 = filler(353, 4);
+    std::vector<Bytes> m2_chunks;
+    world.drop_radio = [&m2_chunks](const RadioFrame& frame) {
+      autonomy::Rld1Envelope env{};
+      if (frame.from == kProxyMac && autonomy::rld1_decode(view(frame.bytes), env) &&
+          env.kind == FrameType::BootstrapChunk &&
+          env.body[1] == join_sub(JoinAuthPhase::EdhocMessage, 2)) {
+        m2_chunks.push_back(frame.bytes);  // tap only, nothing dropped
+      }
+      return false;
+    };
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+    world.pump();
+    answer(world, 2, RelayState::Continue, m2);
+    world.pump();
+    CHECK(m2_chunks.size() == 4);
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    world.pump();
+    answer(world, 4, RelayState::Final, m4);
+    world.pump();
+    CHECK(world.observers[0]->messages.size() == 2);
+    for (const Bytes& chunk : m2_chunks) {
+      world.links[0]->on_rld1_rx(kProxyMac, device_mac(0), view(chunk), world.now);
+    }
+    CHECK(world.observers[0]->messages.size() == 2);
+    CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Idle);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -885,6 +1157,8 @@ int main() {
   test_gateway_slots();
   test_joiner_filters();
   test_cookie_expiry();
+  test_reentrant_send_in_on_message();
+  test_down_duplicate_keeps_sending();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 join relay check(s) failed\n", failures);
     return 1;
