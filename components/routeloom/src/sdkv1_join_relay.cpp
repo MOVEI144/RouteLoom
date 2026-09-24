@@ -125,6 +125,7 @@ Status ZtJoinerLink::connect(const ZtOfferView& offer) noexcept {
   proxy_ = offer.proxy;
   network_low32_ = offer.network_low32;
   cookie_ = offer.body.cookie;
+  last_down_sub_ = 0;
   slot_.reset();
   return Status::success();
 }
@@ -136,6 +137,7 @@ void ZtJoinerLink::close() noexcept {
   proxy_ = kInvalidNodeId;
   network_low32_ = 0;
   secure_clear(cookie_);
+  last_down_sub_ = 0;
   slot_.reset();
 }
 
@@ -247,9 +249,15 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         observer_.on_relay_status(object.relay_status, object.retry_after_ms);
         return;
       }
-      // A down message answers our last up object: it was delivered.
+      // A down message answers our last up object only when it advances
+      // the exchange: a retransmitted duplicate of an earlier stage is
+      // dropped without touching the slot or the observer (single-frame
+      // objects have no receipt to re-send).
+      const std::uint8_t sub = join_sub(object.phase, object.step);
+      if (sub <= last_down_sub_) return;
       if (slot_.mode() == JoinObjectSlot::Mode::Sending) slot_.release_assembled();
       ++stats_.messages_rx;
+      last_down_sub_ = sub;
       observer_.on_message(object.phase, object.step, object.message);
       return;
     }
@@ -260,8 +268,16 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         ++stats_.frames_rejected;
         return;
       }
-      if (slot_.mode() == JoinObjectSlot::Mode::Sending) slot_.release_assembled();
-      const JoinObjectSlot::Accepted accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
+      JoinObjectSlot::Accepted accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
+      if (accepted.outcome == JoinObjectSlot::Outcome::Busy &&
+          slot_.mode() == JoinObjectSlot::Mode::Sending &&
+          join_sub(chunk.phase, chunk.step) > last_down_sub_) {
+        // Only a NEW down object displaces our Sending object (it reached
+        // the proxy): a duplicate of the delivered one re-earns its
+        // Complete reply above, a stale one stays refused.
+        slot_.release_assembled();
+        accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
+      }
       if (accepted.send_reply) send_reply(accepted.reply);
       if (accepted.outcome == JoinObjectSlot::Outcome::Conflict) ++stats_.assembly_conflicts;
       if (accepted.outcome == JoinObjectSlot::Outcome::Busy ||
@@ -276,7 +292,15 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         slot_.release_assembled();
         return;
       }
+      const std::uint8_t sub = join_sub(object.phase, object.step);
+      if (sub <= last_down_sub_) {
+        // A stale object re-assembled (older than the stage delivered
+        // last): drop it like a single-frame duplicate.
+        slot_.release_assembled();
+        return;
+      }
       ++stats_.messages_rx;
+      last_down_sub_ = sub;
       // The callback may re-enter the link (send/close/discover): release
       // the slot only while it still holds the delivered object.
       const std::uint32_t delivered = slot_.generation();

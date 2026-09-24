@@ -117,8 +117,9 @@ class ZtJoinerObserver {
   virtual ~ZtJoinerObserver() = default;
   // A well-formed OFFER for the current DISCOVER whose org_hint matches.
   virtual void on_offer(const ZtOfferView& offer) noexcept = 0;
-  // A complete down message (phase 4 steps 2/4/5, phase 5 step 2). `message`
-  // is valid only during the call and may alias the object slot, so read it
+  // A complete down message (phase 4 steps 2/4/5, phase 5 step 2), once per
+  // stage: retransmitted duplicates are filtered by the link. `message` is
+  // valid only during the call and may alias the object slot, so read it
   // before re-entering the link. send()/close()/discover() from inside the
   // callback are supported: cleanup afterwards releases only the delivered
   // object, never the state a reentrant call installed.
@@ -199,6 +200,9 @@ class ZtJoinerLink {
   NodeId proxy_{kInvalidNodeId};
   std::uint32_t network_low32_{0};
   JoinCookieBytes cookie_{};
+  // join_sub() of the newest down message handed to the observer; a frame
+  // or chunk only displaces the Sending object when it advances past it.
+  std::uint8_t last_down_sub_{0};
   JoinObjectSlot slot_{};
   ZtJoinerStats stats_{};
 };
