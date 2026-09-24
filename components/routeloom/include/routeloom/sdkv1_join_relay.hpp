@@ -121,8 +121,8 @@ class ZtJoinerObserver {
   // stage: retransmitted duplicates are filtered by the link. `message` is
   // valid only during the call and may alias the object slot, so read it
   // before re-entering the link. send()/close()/discover() from inside the
-  // callback are supported: cleanup afterwards releases only the delivered
-  // object, never the state a reentrant call installed.
+  // callback return Busy and leave the link unchanged; the Owner drives the
+  // next step after this callback returns.
   virtual void on_message(JoinAuthPhase phase, std::uint8_t step, ByteView message) noexcept = 0;
   // Unauthenticated proxy hint (02 §5.3 phase 6): wait, never a verdict.
   virtual void on_relay_status(RelayStatusCode status, std::uint32_t retry_after_ms) noexcept = 0;
@@ -159,7 +159,7 @@ class ZtJoinerLink {
 
   // The owner's MembershipState (Discovering / Authenticating); every RX and
   // TX is re-checked with zt_admit_rld1 on it.
-  void set_membership(MembershipState state) noexcept { membership_ = state; }
+  Status set_membership(MembershipState state) noexcept;
 
   // New attempt: fresh nonce, forget any proxy, broadcast one DISCOVER.
   Status discover(const ZtDiscoverBody& body, MonotonicMs now_ms) noexcept;
@@ -171,11 +171,11 @@ class ZtJoinerLink {
   Status send(JoinAuthPhase phase, std::uint8_t step, ByteView message,
               MonotonicMs now_ms) noexcept;
   // Forget the proxy and wipe the slot (attempt finished or abandoned).
-  void close() noexcept;
+  Status close() noexcept;
 
-  void on_rld1_rx(const MacAddress& source, const MacAddress& destination, ByteView frame,
-                  MonotonicMs now_ms) noexcept;
-  void poll(MonotonicMs now_ms) noexcept;
+  Status on_rld1_rx(const MacAddress& source, const MacAddress& destination, ByteView frame,
+                    MonotonicMs now_ms) noexcept;
+  Status poll(MonotonicMs now_ms) noexcept;
 
   bool connected() const noexcept { return connected_; }
   const JoinNonce& nonce() const noexcept { return nonce_; }
@@ -184,6 +184,14 @@ class ZtJoinerLink {
 
  private:
   Status emit(const MacAddress& destination, FrameType kind, ByteView body) noexcept;
+  Status discover_impl(const ZtDiscoverBody& body, MonotonicMs now_ms) noexcept;
+  Status connect_impl(const ZtOfferView& offer) noexcept;
+  Status send_impl(JoinAuthPhase phase, std::uint8_t step, ByteView message,
+                   MonotonicMs now_ms) noexcept;
+  void close_impl() noexcept;
+  void on_rld1_rx_impl(const MacAddress& source, const MacAddress& destination, ByteView frame,
+                       MonotonicMs now_ms) noexcept;
+  void poll_impl(MonotonicMs now_ms) noexcept;
   void send_reply(const JoinReply& reply) noexcept;
   void send_due_chunks(MonotonicMs now_ms) noexcept;
   bool from_proxy(const MacAddress& source, const autonomy::Rld1Envelope& env) const noexcept;
@@ -194,6 +202,10 @@ class ZtJoinerLink {
   ZtJoinerObserver& observer_;
   MembershipState membership_{MembershipState::Discovering};
   JoinNonce nonce_{};
+  // org_hint of the DISCOVER that produced `nonce_`: OFFERs answer the
+  // scan window that is open, not the constructor's single anchor, so a
+  // multi-anchor scan can rotate windows without rewiring the link.
+  std::uint32_t discover_org_hint_{0};
   bool discovering_{false};
   bool connected_{false};
   MacAddress proxy_mac_{};
@@ -205,6 +217,7 @@ class ZtJoinerLink {
   std::uint8_t last_down_sub_{0};
   JoinObjectSlot slot_{};
   ZtJoinerStats stats_{};
+  bool in_call_{false};
 };
 
 // ===================================================================================
@@ -312,6 +325,10 @@ class JoinProxy {
     std::int8_t rssi{0};
     JoinAuthPhase phase{JoinAuthPhase::EdhocMessage};
     std::uint8_t last_step{0};
+    std::uint8_t accepted_up_mask{0};
+    std::array<std::uint16_t, 2> accepted_up_totals{};
+    std::uint8_t accepted_down_step{0};
+    std::uint16_t accepted_down_total{0};
     MonotonicMs started_ms{0};
     MonotonicMs device_deadline_ms{0};  // 0 = not waiting for the device
     bool final_pending{false};          // Final object handed to the device
@@ -363,6 +380,7 @@ class JoinProxy {
   void need_gateway_epoch(MonotonicMs now_ms) noexcept;
   void send_epoch_query(MonotonicMs now_ms) noexcept;
   void handle_epoch_reply(const EpochReply& reply, MonotonicMs now_ms) noexcept;
+  bool down_expected(const RelayHeader& header) const noexcept;
   void on_relay_rx_impl(NodeId from, FrameType type, ByteView payload,
                         MonotonicMs now_ms) noexcept;
 
@@ -504,6 +522,7 @@ class JoinRelayGateway {
   Status poll(MonotonicMs now_ms) noexcept;
 
   const JoinRelayGatewayStats& stats() const noexcept { return stats_; }
+  bool configured() const noexcept { return config_valid_; }
   std::size_t slots_in_use() const noexcept;
 
  private:
@@ -580,6 +599,7 @@ class JoinRelayGateway {
   void send_up_complete(NodeId proxy, const RelayToken& token, JoinAuthPhase phase,
                         std::uint8_t step, std::uint16_t total) noexcept;
   void answer_epoch_query(NodeId proxy, const EpochQuery& query, MonotonicMs now_ms) noexcept;
+  void expire_due(MonotonicMs now_ms) noexcept;
   void on_relay_rx_impl(NodeId from, std::uint8_t hops, FrameType type, ByteView payload,
                         MonotonicMs now_ms) noexcept;
   void handle_up_single(NodeId from, std::uint8_t hops, const RelayObject& object, ByteView bytes,

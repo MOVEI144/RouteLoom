@@ -107,11 +107,18 @@ Status UsbBridge::attach_group() noexcept {
 }
 
 Status UsbBridge::attach_join_relay(sdkv1::JoinRelayGateway& gateway) noexcept {
-  join_relay_ = &gateway;
-  config_.capability |= kCapJoinRelayV2;
+  if (!gateway.configured()) return Status::error(StatusCode::InvalidArgument, "join relay gateway");
+  if (join_relay_ != nullptr && join_relay_ != &gateway) {
+    return Status::error(StatusCode::InvalidState, "join relay already attached");
+  }
   // The sink follows the session: attach now only if a session is already
   // ACTIVE, otherwise the next session attaches on activation (#116 §4.5).
-  if (state_ == SessionState::Active) return gateway.set_host_sink(this);
+  if (state_ == SessionState::Active) {
+    const Status status = gateway.set_host_sink(this);
+    if (!status) return status;
+  }
+  join_relay_ = &gateway;
+  config_.capability |= kCapJoinRelayV2;
   return Status::success();
 }
 

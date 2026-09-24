@@ -1826,6 +1826,13 @@ void test_bridge_join_relay() {
     world.feed(host.sealed(FrameKind::Credit, 91, ByteView{grant.data(), grant.size()}), now);
     world.drain(now);
     world.device_sink.frames.clear();
+    RecordingRelayPort bad_wire;
+    sdkv1::JoinRelayGatewayConfig bad_config{};
+    bad_config.node = 1;  // an unset service epoch must not advertise relay support
+    sdkv1::JoinRelayGateway bad_gateway(bad_config, bad_wire);
+    CHECK(world.bridge.attach_join_relay(bad_gateway).code == StatusCode::InvalidArgument);
+    const std::uint8_t sample = 1;
+    CHECK(world.bridge.relay_up(2, 1, ByteView{&sample, 1}).code == StatusCode::InvalidState);
     world.feed(sealed_inner(host, 92, join_down_inner(2, 77, 40)), now);
     world.drain(now);
     const auto results = host_ops_inners(host, world.device_sink, HostOpsSub::JoinRelayResult);
@@ -1861,6 +1868,10 @@ void test_bridge_join_relay() {
   {
     World world;
     RecordingRelayPort wire;
+    sdkv1::JoinRelayGatewayConfig invalid_config{};
+    invalid_config.node = 1;
+    sdkv1::JoinRelayGateway invalid_gateway(invalid_config, wire);
+    CHECK(world.bridge.attach_join_relay(invalid_gateway).code == StatusCode::InvalidArgument);
     sdkv1::JoinRelayGatewayConfig config{};
     config.node = 1;
     config.gateway_epoch = 7;

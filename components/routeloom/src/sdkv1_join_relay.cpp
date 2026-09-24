@@ -85,6 +85,12 @@ ZtJoinerLink::ZtJoinerLink(const ZtJoinerConfig& config, ZtRld1Port& port, Entro
                            ZtJoinerObserver& observer) noexcept
     : config_(config), port_(port), entropy_(entropy), observer_(observer) {}
 
+Status ZtJoinerLink::set_membership(const MembershipState state) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  membership_ = state;
+  return Status::success();
+}
+
 Status ZtJoinerLink::emit(const MacAddress& destination, const FrameType kind,
                           const ByteView body) noexcept {
   if (body.size > autonomy::kRld1MaxBody) return invalid("zt body size");
@@ -107,14 +113,33 @@ Status ZtJoinerLink::emit(const MacAddress& destination, const FrameType kind,
 }
 
 Status ZtJoinerLink::discover(const ZtDiscoverBody& body, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  in_call_ = true;
+  const Status result = discover_impl(body, now_ms);
+  in_call_ = false;
+  return result;
+}
+
+Status ZtJoinerLink::discover_impl(const ZtDiscoverBody& body,
+                                    const MonotonicMs now_ms) noexcept {
   (void)now_ms;
   if (!id_valid(config_.node)) return invalid("zt joiner node");
   ByteBuffer<kZtDiscoverBodySize> encoded{};
   Status status = zt_discover_body_encode(body, encoded);
   if (!status) return status;
-  close();
-  status = entropy_.fill(MutableByteView{nonce_.data(), nonce_.size()});
-  if (!status) return status;
+  close_impl();
+  // The nonce's first four bytes are the chunk object id: a zero id
+  // collides with "no object", so redraw (at most four draws) instead of
+  // patching the bytes.
+  status = Status::error(StatusCode::InternalError, "zt discover entropy");
+  for (int draw = 0; draw < 4; ++draw) {
+    status = entropy_.fill(MutableByteView{nonce_.data(), nonce_.size()});
+    if (!status) return status;
+    if (join_rld1_object_id(nonce_) != 0) break;
+    status = Status::error(StatusCode::InternalError, "zt discover nonce");
+  }
+  if (!status || join_rld1_object_id(nonce_) == 0) return status;
+  discover_org_hint_ = body.org_hint;
   discovering_ = true;
   status = emit(kBroadcastMac, FrameType::Discover, encoded.view());
   if (status) ++stats_.discovers_tx;
@@ -122,6 +147,14 @@ Status ZtJoinerLink::discover(const ZtDiscoverBody& body, const MonotonicMs now_
 }
 
 Status ZtJoinerLink::connect(const ZtOfferView& offer) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  in_call_ = true;
+  const Status result = connect_impl(offer);
+  in_call_ = false;
+  return result;
+}
+
+Status ZtJoinerLink::connect_impl(const ZtOfferView& offer) noexcept {
   if (!discovering_ || offer.nonce != nonce_ || !id_valid(offer.proxy) ||
       offer.network_low32 == 0) {
     return Status::error(StatusCode::InvalidState, "zt connect without a matching offer");
@@ -137,8 +170,15 @@ Status ZtJoinerLink::connect(const ZtOfferView& offer) noexcept {
   return Status::success();
 }
 
-void ZtJoinerLink::close() noexcept {
+Status ZtJoinerLink::close() noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  close_impl();
+  return Status::success();
+}
+
+void ZtJoinerLink::close_impl() noexcept {
   discovering_ = false;
+  discover_org_hint_ = 0;
   connected_ = false;
   proxy_mac_ = MacAddress{};
   proxy_ = kInvalidNodeId;
@@ -150,6 +190,15 @@ void ZtJoinerLink::close() noexcept {
 
 Status ZtJoinerLink::send(const JoinAuthPhase phase, const std::uint8_t step,
                           const ByteView message, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  in_call_ = true;
+  const Status result = send_impl(phase, step, message, now_ms);
+  in_call_ = false;
+  return result;
+}
+
+Status ZtJoinerLink::send_impl(const JoinAuthPhase phase, const std::uint8_t step,
+                               const ByteView message, const MonotonicMs now_ms) noexcept {
   if (!connected_) return Status::error(StatusCode::InvalidState, "zt send without a proxy");
   if (phase == JoinAuthPhase::RelayStatus || !join_step_valid(phase, step) ||
       join_step_flow(phase, step) == JoinFlow::Down) {
@@ -215,8 +264,17 @@ bool ZtJoinerLink::from_proxy(const MacAddress& source,
          env.capability_bits == 0;
 }
 
-void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destination,
-                              const ByteView frame, const MonotonicMs now_ms) noexcept {
+Status ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destination,
+                                const ByteView frame, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  in_call_ = true;
+  on_rld1_rx_impl(source, destination, frame, now_ms);
+  in_call_ = false;
+  return Status::success();
+}
+
+void ZtJoinerLink::on_rld1_rx_impl(const MacAddress& source, const MacAddress& destination,
+                                   const ByteView frame, const MonotonicMs now_ms) noexcept {
   autonomy::Rld1Envelope env{};
   if (!autonomy::rld1_decode(frame, env) || !zt_rld1_frame(env)) return;  // not this lane
   if (!zt_admit_rld1(membership_, AdmissionDirection::Rx, env)) {
@@ -234,7 +292,7 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         ++stats_.offers_ignored;
         return;
       }
-      if (offer.body.org_hint != config_.org_hint) {  // 02 §11 rule 1
+      if (offer.body.org_hint != discover_org_hint_) {  // 02 §11 rule 1
         ++stats_.offers_ignored;
         return;
       }
@@ -276,17 +334,27 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         ++stats_.frames_rejected;
         return;
       }
+      if (chunk.total > kJoinObjectHeadSize + kJoinMessageMax) {
+        ++stats_.frames_rejected;
+        return;
+      }
       JoinObjectSlot::Accepted accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
       if (accepted.outcome == JoinObjectSlot::Outcome::Busy &&
           slot_.mode() == JoinObjectSlot::Mode::Sending &&
-          join_sub(chunk.phase, chunk.step) > last_down_sub_) {
+          join_sub(chunk.phase, chunk.step) > last_down_sub_ && chunk.offset == 0 &&
+          chunk.data.size >= kJoinObjectHeadSize + 1 &&
+          chunk.data.data[0] == autonomy::kPayloadVersion &&
+          chunk.data.data[1] == static_cast<std::uint8_t>(chunk.phase) &&
+          chunk.data.data[2] == chunk.step && chunk.data.data[3] == 0 &&
+          chunk.data.data[4] == 0 && chunk.data.data[5] == 0) {
         // Only a NEW down object displaces our Sending object (it reached
         // the proxy): a duplicate of the delivered one re-earns its
         // Complete reply above, a stale one stays refused.
         slot_.release_assembled();
         accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
       }
-      if (accepted.send_reply) send_reply(accepted.reply);
+      if (accepted.send_reply && accepted.outcome != JoinObjectSlot::Outcome::Complete)
+        send_reply(accepted.reply);
       if (accepted.outcome == JoinObjectSlot::Outcome::Conflict) ++stats_.assembly_conflicts;
       if (accepted.outcome == JoinObjectSlot::Outcome::Busy ||
           accepted.outcome == JoinObjectSlot::Outcome::Rejected) {
@@ -297,9 +365,10 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
       if (!join_object_decode(slot_.assembled(), object) || object.phase != chunk.phase ||
           object.step != chunk.step || object.cookie_present) {
         ++stats_.frames_rejected;
-        slot_.release_assembled();
+        slot_.reset();
         return;
       }
+      send_reply(accepted.reply);
       const std::uint8_t sub = join_sub(object.phase, object.step);
       if (sub <= last_down_sub_) {
         // A stale object re-assembled (older than the stage delivered
@@ -309,11 +378,8 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
       }
       ++stats_.messages_rx;
       last_down_sub_ = sub;
-      // The callback may re-enter the link (send/close/discover): release
-      // the slot only while it still holds the delivered object.
-      const std::uint32_t delivered = slot_.generation();
       observer_.on_message(object.phase, object.step, object.message);
-      slot_.release_assembled_if(delivered);
+      slot_.release_assembled();
       return;
     }
     case FrameType::BootstrapReply: {
@@ -333,7 +399,15 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
   }
 }
 
-void ZtJoinerLink::poll(const MonotonicMs now_ms) noexcept {
+Status ZtJoinerLink::poll(const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in link callback");
+  in_call_ = true;
+  poll_impl(now_ms);
+  in_call_ = false;
+  return Status::success();
+}
+
+void ZtJoinerLink::poll_impl(const MonotonicMs now_ms) noexcept {
   if (slot_.expire(now_ms, config_.assembly_timeout_ms)) ++stats_.assembly_expired;
   if (slot_.mode() != JoinObjectSlot::Mode::Sending ||
       now_ms - slot_.last_send_ms() < config_.retransmit_ms) {
@@ -359,7 +433,13 @@ JoinProxy::JoinProxy(const JoinProxyConfig& config, ZtRld1Port& rld1, ZtRelayPor
       relay_port_(relay),
       cookie_(cookie),
       entropy_(entropy),
-      config_valid_(config.proxy_epoch != 0) {}
+      config_valid_(id_valid(config.node) && id_valid(config.gateway) &&
+                    config.node != config.gateway && config.network_low32 != 0 &&
+                    config.proxy_epoch != 0 && config.cookie_bucket_ms != 0 &&
+                    config.offer_slots != 0 && config.offer_slot_ms != 0 &&
+                    config.m1_interval_ms != 0 && config.relay_timeout_ms != 0 &&
+                    config.device_silence_ms != 0 && config.assembly_timeout_ms != 0 &&
+                    config.retransmit_ms != 0 && config.max_sends != 0) {}
 
 Status JoinProxy::set_policy(const bool zero_touch_open) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "in port callback");
@@ -499,7 +579,13 @@ void JoinProxy::handle_discover(const MacAddress& source, const MacAddress& dest
              (static_cast<std::uint32_t>(bytes[2]) << 8U) | bytes[3];
   }
   const std::uint32_t slots = config_.offer_slots == 0 ? 1 : config_.offer_slots;
-  offer->due_ms = now_ms + static_cast<MonotonicMs>(random % slots) * config_.offer_slot_ms;
+  const MonotonicMs delay = static_cast<MonotonicMs>(random % slots) * config_.offer_slot_ms;
+  if (delay > ~MonotonicMs{0} - now_ms) {
+    offers_.release(offer);
+    ++stats_.offers_suppressed;
+    return;
+  }
+  offer->due_ms = now_ms + delay;
 }
 
 void JoinProxy::send_offer(const PendingOffer& pending, const MonotonicMs now_ms) noexcept {
@@ -618,6 +704,14 @@ bool JoinProxy::admit_first(const MacAddress& source, const autonomy::Rld1Envelo
                       config_.busy_retry_after_ms);
     return false;
   }
+  if (now_ms > ~MonotonicMs{0} - config_.relay_timeout_ms ||
+      now_ms > ~MonotonicMs{0} - config_.device_silence_ms ||
+      now_ms > ~MonotonicMs{0} - config_.m1_interval_ms) {
+    ++stats_.busy_replies;
+    send_relay_status(source, env.transaction_nonce, RelayStatusCode::Busy,
+                      config_.busy_retry_after_ms);
+    return false;
+  }
   const std::uint32_t relay_id = next_relay_id_;
   if (relay_id == ~std::uint32_t{0}) {
     relay_ids_exhausted_ = true;
@@ -657,16 +751,33 @@ void JoinProxy::handle_auth(const MacAddress& source, const autonomy::Rld1Envelo
       return;
     }
     if (!admit_first(source, env, object.cookie, rssi, now_ms)) return;
+    if (relay_.last_step != 0 || slot_.mode() == JoinObjectSlot::Mode::Assembling) {
+      if (object.phase != relay_.phase) ++stats_.frames_rejected;
+      return;
+    }
   } else if (!relay_peer(source, env) || object.phase != relay_.phase) {
     ++stats_.frames_rejected;
     return;
   }
+  if (object.step == 3 && relay_.last_step != 2) {
+    ++stats_.frames_rejected;
+    return;
+  }
+  if (object.step == kJoinEdhocErrorStep &&
+      (relay_.last_step == 0 || relay_.final_pending)) {
+    ++stats_.frames_rejected;
+    return;
+  }
   relay_.rssi = rssi;
-  // Newest message wins: the device moved on, so whatever the slot held (a
-  // down object being delivered, a stale assembly) is done.
+  // Only a new valid stage proves that the previous down object arrived.
   slot_.release_assembled();
   const MutableByteView buffer = slot_.writable_buffer();
   std::memcpy(buffer.data + kRelayHeaderSize, object.message.data, object.message.size);
+  if (object.step == 1 || object.step == 3) {
+    const std::size_t stage = object.step == 1 ? 0 : 1;
+    relay_.accepted_up_mask = static_cast<std::uint8_t>(relay_.accepted_up_mask | (1U << stage));
+    relay_.accepted_up_totals[stage] = static_cast<std::uint16_t>(env.body_size);
+  }
   forward_up(object.phase, object.step, kRelayHeaderSize, object.message.size, now_ms);
   if (object.phase == JoinAuthPhase::EdhocMessage && object.step == kJoinEdhocErrorStep) {
     ++stats_.relays_aborted;  // the device ended the exchange with an EDHOC error
@@ -702,12 +813,49 @@ void JoinProxy::handle_chunk(const MacAddress& source, const autonomy::Rld1Envel
     ++stats_.frames_rejected;
     return;
   }
+  const bool tracked_stage = chunk.step == 1 || chunk.step == 3;
+  const std::size_t stage = chunk.step == 1 ? 0 : 1;
+  if (tracked_stage && (relay_.accepted_up_mask & (1U << stage)) != 0) {
+    if (relay_.accepted_up_totals[stage] == chunk.total) {
+      JoinReply complete{};
+      complete.phase = chunk.phase;
+      complete.step = chunk.step;
+      complete.id = chunk.id;
+      complete.received = chunk.total;
+      complete.status = JoinReplyStatus::Complete;
+      send_rld1_reply(complete);
+    } else {
+      ++stats_.frames_rejected;
+    }
+    return;
+  }
+  if ((chunk.step == 1 && relay_.last_step != 0) ||
+      (chunk.step == 3 && relay_.last_step != 2) ||
+      (chunk.step == kJoinEdhocErrorStep &&
+       (relay_.last_step == 0 || relay_.final_pending)) ||
+      chunk.total > kJoinObjectHeadSize +
+                        (chunk.step == 1 ? kJoinCookieSize : 0) + kJoinMessageMax) {
+    ++stats_.frames_rejected;
+    return;
+  }
+  if (slot_.mode() != JoinObjectSlot::Mode::Assembling && chunk.offset != 0) return;
+  if (chunk.step != 1 && chunk.offset == 0) {
+    const std::uint8_t* d = chunk.data.data;
+    if (chunk.data.size < kJoinObjectHeadSize + 1 || d[0] != autonomy::kPayloadVersion ||
+        d[1] != static_cast<std::uint8_t>(chunk.phase) || d[2] != chunk.step ||
+        d[3] != 0 || d[4] != 0 || d[5] != 0) {
+      ++stats_.frames_rejected;
+      return;
+    }
+  }
   relay_.rssi = rssi;
-  if (slot_.mode() == JoinObjectSlot::Mode::Sending && !relay_.slot_up) {
+  if (slot_.mode() == JoinObjectSlot::Mode::Sending && !relay_.slot_up &&
+      chunk.step != 1 && chunk.offset == 0) {
     slot_.release_assembled();  // the device answered: our down object arrived
   }
   const JoinObjectSlot::Accepted accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
-  if (accepted.send_reply) send_rld1_reply(accepted.reply);
+  if (accepted.send_reply && accepted.outcome != JoinObjectSlot::Outcome::Complete)
+    send_rld1_reply(accepted.reply);
   if (accepted.outcome == JoinObjectSlot::Outcome::Busy ||
       accepted.outcome == JoinObjectSlot::Outcome::Rejected) {
     ++stats_.frames_rejected;
@@ -718,9 +866,14 @@ void JoinProxy::handle_chunk(const MacAddress& source, const autonomy::Rld1Envel
   if (!join_object_decode(slot_.assembled(), object) || object.phase != chunk.phase ||
       object.step != chunk.step || !offset_of(slot_, object.message, offset)) {
     ++stats_.frames_rejected;
-    slot_.release_assembled();
+    slot_.reset();
     return;
   }
+  if (tracked_stage) {
+    relay_.accepted_up_mask = static_cast<std::uint8_t>(relay_.accepted_up_mask | (1U << stage));
+    relay_.accepted_up_totals[stage] = chunk.total;
+  }
+  send_rld1_reply(accepted.reply);
   forward_up(object.phase, object.step, offset, object.message.size, now_ms);
   if (object.phase == JoinAuthPhase::EdhocMessage && object.step == kJoinEdhocErrorStep) {
     ++stats_.relays_aborted;
@@ -786,6 +939,8 @@ void JoinProxy::forward_up(const JoinAuthPhase phase, const std::uint8_t step,
     if (!relay_port_.send_relay(config_.gateway, FrameType::BootstrapAuth,
                                 ByteView{buffer.data, written})) {
       ++stats_.send_failures;
+      abort_relay(RelayStatusCode::AuthorityUnreachable, false);
+      return;
     }
     slot_.release_assembled();
     relay_.slot_up = false;
@@ -810,6 +965,16 @@ Status JoinProxy::on_relay_rx(const NodeId from, const FrameType type, const Byt
   on_relay_rx_impl(from, type, payload, now_ms);
   in_call_ = false;
   return Status::success();
+}
+
+bool JoinProxy::down_expected(const RelayHeader& header) const noexcept {
+  if (header.state == RelayState::Abort) return relay_.last_step != 0;
+  if (header.step == 2) return relay_.last_step == 1;
+  if (header.phase == JoinAuthPhase::EdhocMessage && header.step == 4)
+    return relay_.last_step == 3;
+  if (header.phase == JoinAuthPhase::EdhocMessage && header.step == kJoinEdhocErrorStep)
+    return relay_.last_step != 0 && !relay_.final_pending;
+  return false;
 }
 
 void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const ByteView payload,
@@ -848,7 +1013,8 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
         return;
       }
       RelayObject object{};
-      if (!relay_single_frame_decode(type, payload, object) || !ours(object.header)) {
+      if (!relay_single_frame_decode(type, payload, object) || !ours(object.header) ||
+          !down_expected(object.header)) {
         ++stats_.frames_rejected;
         return;
       }
@@ -866,7 +1032,8 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
         return;
       }
       RelayObject object{};
-      if (!relay_single_frame_decode(type, payload, object) || !ours(object.header)) {
+      if (!relay_single_frame_decode(type, payload, object) || !ours(object.header) ||
+          !down_expected(object.header)) {
         ++stats_.frames_rejected;
         return;
       }
@@ -880,8 +1047,37 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
     case FrameType::BootstrapChunk: {
       JoinChunk chunk{};
       if (!join_chunk_decode(JoinCarrier::WireRelay, payload, chunk) || !chunk_ours(chunk) ||
-          join_step_flow(chunk.phase, chunk.step) == JoinFlow::Up) {
+          join_step_flow(chunk.phase, chunk.step) == JoinFlow::Up ||
+          chunk.total > kRelayObjectMax) {
         ++stats_.frames_rejected;
+        return;
+      }
+      if (relay_.accepted_down_step == chunk.step) {
+        if (relay_.accepted_down_total == chunk.total) {
+          JoinReply complete{};
+          complete.phase = chunk.phase;
+          complete.step = chunk.step;
+          complete.id = chunk.id;
+          complete.gateway_epoch = chunk.gateway_epoch;
+          complete.proxy_epoch = chunk.proxy_epoch;
+          complete.received = chunk.total;
+          complete.status = JoinReplyStatus::Complete;
+          send_wire_receipt(complete);
+        } else {
+          ++stats_.frames_rejected;
+        }
+        return;
+      }
+      if (chunk.offset == 0) {
+        RelayObject prefix{};
+        if (chunk.data.size < kRelayHeaderSize + 1 ||
+            !relay_object_decode(ByteView{chunk.data.data, kRelayHeaderSize + 1}, prefix) ||
+            !ours(prefix.header) || prefix.header.step != chunk.step ||
+            !down_expected(prefix.header)) {
+          ++stats_.frames_rejected;
+          return;
+        }
+      } else if (slot_.mode() != JoinObjectSlot::Mode::Assembling) {
         return;
       }
       if (relay_.slot_up && slot_.mode() == JoinObjectSlot::Mode::Sending) {
@@ -890,7 +1086,8 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
       }
       const JoinObjectSlot::Accepted accepted =
           slot_.accept(JoinCarrier::WireRelay, chunk, now_ms);
-      if (accepted.send_reply) send_wire_receipt(accepted.reply);
+      if (accepted.send_reply && accepted.outcome != JoinObjectSlot::Outcome::Complete)
+        send_wire_receipt(accepted.reply);
       if (accepted.outcome == JoinObjectSlot::Outcome::Busy ||
           accepted.outcome == JoinObjectSlot::Outcome::Rejected) {
         ++stats_.frames_rejected;
@@ -898,11 +1095,14 @@ void JoinProxy::on_relay_rx_impl(const NodeId from, const FrameType type, const 
       if (accepted.outcome != JoinObjectSlot::Outcome::Complete) return;
       RelayObject object{};
       if (!relay_object_decode(slot_.assembled(), object) || !ours(object.header) ||
-          object.header.step != chunk.step) {
+          object.header.step != chunk.step || !down_expected(object.header)) {
         ++stats_.frames_rejected;
-        slot_.release_assembled();
+        slot_.reset();
         return;
       }
+      relay_.accepted_down_step = chunk.step;
+      relay_.accepted_down_total = chunk.total;
+      send_wire_receipt(accepted.reply);
       deliver_down(object, now_ms);
       return;
     }
@@ -942,6 +1142,11 @@ void JoinProxy::deliver_down(const RelayObject& object, const MonotonicMs now_ms
     end_relay();
     return;
   }
+  if (h.state == RelayState::Continue &&
+      now_ms > ~MonotonicMs{0} - config_.device_silence_ms) {
+    abort_relay(RelayStatusCode::Aborted, true);
+    return;
+  }
   const MutableByteView buffer = slot_.writable_buffer();
   const bool in_slot = object.message.data >= buffer.data &&
                        object.message.data < buffer.data + buffer.size;
@@ -961,9 +1166,13 @@ void JoinProxy::deliver_down(const RelayObject& object, const MonotonicMs now_ms
   relay_.final_pending = h.state == RelayState::Final;
   relay_.slot_up = false;
   if (written <= autonomy::kRld1MaxBody) {
-    (void)emit_rld1(relay_.joiner_mac, relay_.nonce, FrameType::BootstrapAuth,
-                    ByteView{buffer.data, written});
+    const Status sent = emit_rld1(relay_.joiner_mac, relay_.nonce, FrameType::BootstrapAuth,
+                                  ByteView{buffer.data, written});
     slot_.release_assembled();
+    if (!sent) {
+      abort_relay(RelayStatusCode::Aborted, true);
+      return;
+    }
     if (relay_.final_pending) {
       ++stats_.relays_completed;
       end_relay();
@@ -1105,7 +1314,9 @@ void JoinProxy::send_epoch_query(const MonotonicMs now_ms) noexcept {
   std::size_t written = 0;
   if (!epoch_query_encode(query, MutableByteView{body.data(), body.size()}, written)) return;
   ++query_.sends;
-  query_.next_ms = now_ms + kEpochQueryIntervalMs;
+  query_.next_ms = now_ms > ~MonotonicMs{0} - kEpochQueryIntervalMs
+                       ? query_.deadline_ms
+                       : now_ms + kEpochQueryIntervalMs;
   if (relay_port_.send_relay(config_.gateway, FrameType::BootstrapAuth,
                              ByteView{body.data(), written})) {
     ++stats_.epoch_queries_tx;
@@ -1117,7 +1328,8 @@ void JoinProxy::send_epoch_query(const MonotonicMs now_ms) noexcept {
 void JoinProxy::handle_epoch_reply(const EpochReply& reply, const MonotonicMs now_ms) noexcept {
   // Only the outstanding query's fresh nonce is adopted; anything else is
   // a replay or a misdirected frame and is ignored (#116 §3.3).
-  if (!query_.active || reply.nonce != query_.nonce) {
+  if (!query_.active || now_ms >= query_.deadline_ms || reply.nonce != query_.nonce) {
+    if (query_.active && now_ms >= query_.deadline_ms) query_ = EpochQueryState{};
     ++stats_.frames_rejected;
     return;
   }
@@ -1193,7 +1405,10 @@ Status JoinProxy::poll(const MonotonicMs now_ms) noexcept {
 
 JoinRelayGateway::JoinRelayGateway(const JoinRelayGatewayConfig& config,
                                    ZtRelayPort& wire) noexcept
-    : config_(config), wire_(wire), config_valid_(config.gateway_epoch != 0) {}
+    : config_(config), wire_(wire),
+      config_valid_(id_valid(config.node) && config.gateway_epoch != 0 &&
+                    config.assembly_timeout_ms != 0 && config.retransmit_ms != 0 &&
+                    config.max_sends != 0) {}
 
 Status JoinRelayGateway::set_host_sink(JoinRelayHostSink* sink) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "in sink callback");
@@ -1306,6 +1521,8 @@ Status JoinRelayGateway::open_exchange(const NodeId proxy, const std::uint8_t ho
       break;
     }
   }
+  ActiveRelay* old = floor != nullptr ? live_exchange(*floor) : nullptr;
+  if (free_row == nullptr) free_row = old;
   if (free_row == nullptr) return Status::error(StatusCode::NoCapacity, "exchanges full");
   if (kRelayExchangeTimeoutMs > ~MonotonicMs{0} - now_ms) {
     return Status::error(StatusCode::TimeUncertain, "deadline overflow");
@@ -1314,9 +1531,8 @@ Status JoinRelayGateway::open_exchange(const NodeId proxy, const std::uint8_t ho
   // session (if it ever received an up object) hears Superseded, never a
   // forged ProxyAborted (#116 §4.4).
   if (floor != nullptr) {
-    if (ActiveRelay* old = live_exchange(*floor)) {
+    if (old != nullptr)
       finish_exchange(*old, RelayAbortReason::Superseded, old->host_up_delivered);
-    }
   } else {
     target->valid = true;
     target->proxy = proxy;
@@ -1528,10 +1744,13 @@ void JoinRelayGateway::answer_epoch_query(const NodeId proxy, const EpochQuery& 
   // Stateless token bucket: bursts of 4, 10 answers per second. Queries
   // consume no table row and no assembly slot (#116 §3.3).
   const MonotonicMs elapsed = now_ms - answer_refill_ms_;
-  const std::uint32_t refill = static_cast<std::uint32_t>(
-      std::min<MonotonicMs>(elapsed / 100, kEpochAnswerBurst * 10));
-  answer_budget_ = std::min<std::uint32_t>(kEpochAnswerBurst * 10, answer_budget_ + refill);
-  answer_refill_ms_ += static_cast<MonotonicMs>(refill) * 100;
+  const std::uint32_t intervals = static_cast<std::uint32_t>(
+      std::min<MonotonicMs>(elapsed / 100, kEpochAnswerBurst));
+  answer_budget_ = std::min<std::uint32_t>(kEpochAnswerBurst * 10,
+                                            answer_budget_ + intervals * 10);
+  answer_refill_ms_ = elapsed / 100 >= kEpochAnswerBurst
+                          ? now_ms - elapsed % 100
+                          : answer_refill_ms_ + static_cast<MonotonicMs>(intervals) * 100;
   if (answer_budget_ < 10) return;
   answer_budget_ -= 10;
   EpochReply reply{};
@@ -1543,6 +1762,13 @@ void JoinRelayGateway::answer_epoch_query(const NodeId proxy, const EpochQuery& 
   if (!epoch_reply_encode(reply, MutableByteView{body.data(), body.size()}, written)) return;
   if (wire_.send_relay(proxy, FrameType::BootstrapAuth, ByteView{body.data(), written})) {
     ++stats_.epoch_replies_tx;
+  }
+}
+
+void JoinRelayGateway::expire_due(const MonotonicMs now_ms) noexcept {
+  for (ActiveRelay& relay : relays_) {
+    if (relay.active && now_ms >= relay.deadline_ms)
+      finish_exchange(relay, RelayAbortReason::GatewayExpired, relay.host_up_delivered);
   }
 }
 
@@ -1581,6 +1807,7 @@ void JoinRelayGateway::on_relay_rx_impl(const NodeId from, const std::uint8_t ho
     ++stats_.frames_rejected;
     return;
   }
+  expire_due(now_ms);
   switch (type) {
     case FrameType::BootstrapAuth: {
       // An epoch query is answered statelessly; a reply here is misdirected.
@@ -1686,10 +1913,19 @@ void JoinRelayGateway::handle_up_same(ActiveRelay& relay, const std::uint8_t hop
   // proxy encodes each stage once), step 3 needs step 1 first, and an
   // EDHOC error is valid while the exchange is alive.
   if (h.step == 1) {
-    ++stats_.frames_rejected;
+    if ((relay.accepted_up_mask & 1U) != 0 || slot_for(relay) != nullptr) {
+      ++stats_.frames_rejected;
+      return;
+    }
+    RelayObject object{};
+    object.header = h;
+    object.message = ByteView{bytes.data + kRelayHeaderSize, bytes.size - kRelayHeaderSize};
+    const auto index = static_cast<std::uint8_t>(&relay - relays_.data());
+    deliver_up(relay, index, hops, object, bytes);
     return;
   }
-  if (h.step == 3 && (relay.accepted_up_mask & 1U) == 0) {
+  if (h.step == 3 && ((relay.accepted_up_mask & 1U) == 0 ||
+                      (!relay.m2_done && !(relay.down_sending && relay.down_step == 2)))) {
     ++stats_.frames_rejected;
     return;
   }
@@ -1706,6 +1942,10 @@ void JoinRelayGateway::handle_up_same(ActiveRelay& relay, const std::uint8_t hop
 void JoinRelayGateway::handle_up_chunk(const NodeId from, const std::uint8_t hops,
                                        const JoinChunk& chunk, const MonotonicMs now_ms) noexcept {
   if (chunk.gateway_epoch != config_.gateway_epoch) return;
+  if (chunk.total > kRelayObjectMax) {
+    ++stats_.frames_rejected;
+    return;
+  }
   RelayToken token{};
   token.gateway_epoch = chunk.gateway_epoch;
   token.proxy_epoch = chunk.proxy_epoch;
@@ -1729,7 +1969,10 @@ void JoinRelayGateway::handle_up_chunk(const NodeId from, const std::uint8_t hop
     ++stats_.frames_rejected;
     return;
   }
-  if (slots_in_use() >= kSlots) {
+  const bool reclaimable = floor != nullptr && order == KeyOrder::Newer &&
+                           live_exchange(*floor) != nullptr &&
+                           slot_for(*live_exchange(*floor)) != nullptr;
+  if (slots_in_use() >= kSlots && !reclaimable) {
     ++stats_.slot_busy;
     return;
   }
@@ -1751,7 +1994,7 @@ void JoinRelayGateway::handle_up_chunk(const NodeId from, const std::uint8_t hop
 void JoinRelayGateway::handle_chunk_same(const NodeId from, ActiveRelay& relay,
                                          const JoinChunk& chunk,
                                          const MonotonicMs now_ms) noexcept {
-  if (chunk.phase != relay.phase) {
+  if (chunk.phase != relay.phase || chunk.total > kRelayObjectMax) {
     ++stats_.frames_rejected;
     return;
   }
@@ -1770,7 +2013,8 @@ void JoinRelayGateway::handle_chunk_same(const NodeId from, ActiveRelay& relay,
   }
   // A new stage arrives only in order; anything else contradicts the live
   // exchange and frees nothing.
-  if (chunk.step == 3 && (relay.accepted_up_mask & 1U) == 0) {
+  if (chunk.step == 3 && ((relay.accepted_up_mask & 1U) == 0 ||
+                          (!relay.m2_done && !(relay.down_sending && relay.down_step == 2)))) {
     ++stats_.frames_rejected;
     return;
   }
@@ -1816,7 +2060,7 @@ void JoinRelayGateway::feed_assembly(const NodeId from, ActiveRelay& relay, Slot
                                      const JoinChunk& chunk, const MonotonicMs now_ms) noexcept {
   const JoinObjectSlot::Accepted accepted = slot.object.accept(JoinCarrier::WireRelay, chunk,
                                                                now_ms);
-  if (accepted.send_reply) {
+  if (accepted.send_reply && accepted.outcome != JoinObjectSlot::Outcome::Complete) {
     std::array<std::uint8_t, kWireRelayReplySize> body{};
     std::size_t written = 0;
     if (join_reply_encode(JoinCarrier::WireRelay, accepted.reply,
@@ -1846,7 +2090,7 @@ void JoinRelayGateway::feed_assembly(const NodeId from, ActiveRelay& relay, Slot
       object.header.phase != relay.phase || object.header.joiner_mac != relay.joiner_mac ||
       bytes.size != chunk.total) {
     ++stats_.frames_rejected;
-    slot.object.release_assembled();
+    free_slot(slot);
     return;
   }
   const std::uint8_t stage = up_stage_slot(object.header.step);
@@ -1854,7 +2098,7 @@ void JoinRelayGateway::feed_assembly(const NodeId from, ActiveRelay& relay, Slot
   if ((relay.accepted_up_mask & bit) != 0) {
     // Accepted while assembling (a single-frame twin won the race): this
     // copy is a duplicate, acknowledged but never re-delivered.
-    slot.object.release_assembled();
+    free_slot(slot);
     if (relay.accepted_totals[stage] == chunk.total) {
       send_up_complete(from, relay.token, chunk.phase, chunk.step, chunk.total);
     } else {
@@ -1863,12 +2107,19 @@ void JoinRelayGateway::feed_assembly(const NodeId from, ActiveRelay& relay, Slot
     return;
   }
   const auto index = static_cast<std::uint8_t>(live - relays_.data());
+  if (accepted.send_reply) {
+    std::array<std::uint8_t, kWireRelayReplySize> body{};
+    std::size_t written = 0;
+    if (join_reply_encode(JoinCarrier::WireRelay, accepted.reply,
+                          MutableByteView{body.data(), body.size()}, written)) {
+      (void)wire_.send_relay(from, FrameType::BootstrapReply, ByteView{body.data(), written});
+    }
+  }
   deliver_up(*live, index, relay.hops, object, bytes);
 }
 
 void JoinRelayGateway::handle_proxy_aborted(const NodeId from, const RelayToken& token,
                                             const RelayHeader& h) noexcept {
-  (void)h;
   ProxyFloor* floor = nullptr;
   const KeyOrder order = order_key(from, token, floor);
   if (order == KeyOrder::Older) return;
@@ -1877,6 +2128,10 @@ void JoinRelayGateway::handle_proxy_aborted(const NodeId from, const RelayToken&
     // abort finds the floor terminated and stays silent (#116 Q116-03).
     ActiveRelay* relay = live_exchange(*floor);
     if (relay == nullptr) return;
+    if (h.phase != relay->phase || h.joiner_mac != relay->joiner_mac) {
+      ++stats_.frames_rejected;
+      return;
+    }
     finish_exchange(*relay, RelayAbortReason::ProxyAborted, relay->host_up_delivered);
     return;
   }
@@ -1998,6 +2253,12 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   if (relay == nullptr || !relay_token_equal(relay->token, relay_token_of(h))) {
     return Status::error(StatusCode::Expired, "relay terminated");
   }
+  if (now_ms >= relay->deadline_ms) {
+    in_call_ = true;
+    finish_exchange(*relay, RelayAbortReason::GatewayExpired, relay->host_up_delivered);
+    in_call_ = false;
+    return Status::error(StatusCode::Expired, "relay deadline");
+  }
   if (h.phase != relay->phase || h.joiner_mac != relay->joiner_mac) {
     return Status::error(StatusCode::Conflict, "relay identity mismatch");
   }
@@ -2104,6 +2365,12 @@ Status JoinRelayGateway::host_abort(const NodeId proxy, const RelayToken token,
   if (relay == nullptr || !relay_token_equal(relay->token, token)) {
     return Status::error(StatusCode::NotFound, "relay not known");
   }
+  if (now_ms >= relay->deadline_ms) {
+    in_call_ = true;
+    finish_exchange(*relay, RelayAbortReason::GatewayExpired, relay->host_up_delivered);
+    in_call_ = false;
+    return Status::error(StatusCode::Expired, "relay deadline");
+  }
   last_now_ms_ = now_ms;
   in_call_ = true;
   // Cancel with the bound identity; the step only needs to be valid for
@@ -2134,7 +2401,7 @@ Status JoinRelayGateway::host_abort(const NodeId proxy, const RelayToken token,
     status = wire_.send_relay(proxy, relay_single_frame_type(abort.header),
                               ByteView{body.data(), written});
   }
-  if (status) finish_exchange(*relay, RelayAbortReason::HostAborted, false);
+  finish_exchange(*relay, RelayAbortReason::HostAborted, false);
   in_call_ = false;
   return status;
 }

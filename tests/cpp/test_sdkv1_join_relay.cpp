@@ -90,9 +90,11 @@ class RadioPort final : public ZtRld1Port {
  public:
   RadioPort(std::deque<RadioFrame>& air, const MacAddress& self) : air_(air), self_(self) {}
   Status send_rld1(const MacAddress& destination, const ByteView frame) noexcept override {
+    if (refuse) return Status::error(StatusCode::NoRoute, "radio unavailable");
     air_.push_back(RadioFrame{self_, destination, Bytes(frame.data, frame.data + frame.size)});
     return Status::success();
   }
+  bool refuse{false};
 
  private:
   std::deque<RadioFrame>& air_;
@@ -120,7 +122,7 @@ struct DeviceObserver final : ZtJoinerObserver {
   void on_message(const JoinAuthPhase phase, const std::uint8_t step,
                   const ByteView message) noexcept override {
     messages.push_back({phase, step, Bytes(message.data, message.data + message.size)});
-    if (respond) respond(messages.back());  // may re-enter the link
+    if (respond) respond(messages.back());
   }
   void on_relay_status(const RelayStatusCode status, const std::uint32_t retry) noexcept override {
     statuses.push_back({status, retry});
@@ -136,7 +138,7 @@ struct DeviceObserver final : ZtJoinerObserver {
   std::vector<Message> messages;
   std::vector<std::pair<RelayStatusCode, std::uint32_t>> statuses;
   std::vector<std::string> failures_seen;
-  // Optional hook run inside on_message (the link may be re-entered from it).
+  // Optional hook run inside on_message to verify the callback contract.
   std::function<void(const Message&)> respond;
 };
 
@@ -914,134 +916,24 @@ void test_cookie_expiry() {
   CHECK(world.proxy.state() == JoinProxy::State::Idle);
 }
 
-void test_reentrant_send_in_on_message() {
-  current = "reentrant_send_in_on_message";
-  {
-    // send() inside on_message (the EDHOC answer pattern): the chunked up
-    // object must keep its retransmission state — the post-callback cleanup
-    // may only release the delivered object.
-    World world;
-    CHECK(world.connect());
-    const Bytes m1 = filler(59, 1);
-    const Bytes m2 = filler(372, 2);
-    const Bytes m3 = filler(404, 3);
-    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
-    world.pump();
-    CHECK(world.authority.ups.size() == 1);
-    int callback_sent = 0;
-    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
-      if (m.step != 2 || callback_sent != 0) return;
-      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
-      ++callback_sent;
-      CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Sending);
-    };
-    // Lose exactly the first offset-0 chunk of m3; everything else flows.
-    int dropped = 0;
-    world.drop_radio = [&dropped](const RadioFrame& frame) {
-      autonomy::Rld1Envelope env{};
-      if (frame.from != device_mac(0) || dropped != 0 ||
-          !autonomy::rld1_decode(view(frame.bytes), env) ||
-          env.kind != FrameType::BootstrapChunk ||
-          env.body[1] != join_sub(JoinAuthPhase::EdhocMessage, 3) || env.body[6] != 0 ||
-          env.body[7] != 0) {
-        return false;
-      }
-      ++dropped;
-      return true;
-    };
-    answer(world, 2, RelayState::Continue, m2);
-    world.pump();
-    world.advance(2000);
-    CHECK(callback_sent == 1 && dropped == 1);
-    CHECK(world.observers[0]->messages.size() == 1 &&
-          message_is(world.observers[0]->messages[0], 2, m2));
-    CHECK(world.authority.ups.size() == 2);
-    if (world.authority.ups.size() == 2) {
-      const RelayObject up3 = parse_up(world.authority.ups[1].object);
-      CHECK(up3.header.step == 3);
-      CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
-    }
-    CHECK(world.links[0]->stats().retransmissions > 0);
-    CHECK(world.observers[0]->failures_seen.empty());
-  }
-  {
-    // close() inside on_message: the attempt ends and the deferred cleanup
-    // leaves the closed link alone.
-    World world;
-    CHECK(world.connect());
-    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
-              .ok());
-    world.pump();
-    int calls = 0;
-    world.observers[0]->respond = [&](const DeviceObserver::Message&) {
-      if (calls++ == 0) world.links[0]->close();
-    };
-    answer(world, 2, RelayState::Continue, filler(372, 2));
-    world.pump();
-    CHECK(calls == 1);
-    CHECK(!world.links[0]->connected());
-    CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Idle);
-    CHECK(!world.links[0]
-               ->send(JoinAuthPhase::EdhocMessage, 3, view(filler(404, 3)), world.now)
-               .ok());
-  }
-  {
-    // discover() inside on_message: a fresh attempt starts cleanly.
-    World world;
-    CHECK(world.connect());
-    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
-              .ok());
-    world.pump();
-    ZtDiscoverBody again{};
-    again.org_hint = kOrgHint;
-    int calls = 0;
-    world.observers[0]->respond = [&](const DeviceObserver::Message&) {
-      if (calls++ == 0) CHECK(world.links[0]->discover(again, world.now).ok());
-    };
-    answer(world, 2, RelayState::Continue, filler(372, 2));
-    world.pump();
-    CHECK(calls == 1);
-    CHECK(!world.links[0]->connected());
-    CHECK(world.links[0]->stats().discovers_tx == 2);
-    CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Idle);
-  }
-  {
-    // A single-frame m2 never enters the slot; a reentrant send still has
-    // to deliver m3 end to end (with the same drop/retransmit shape).
-    World world;
-    CHECK(world.connect());
-    const Bytes m3 = filler(404, 3);
-    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
-              .ok());
-    world.pump();
-    int calls = 0;
-    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
-      if (m.step != 2 || calls++ != 0) return;
-      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
-    };
-    int dropped = 0;
-    world.drop_radio = [&dropped](const RadioFrame& frame) {
-      autonomy::Rld1Envelope env{};
-      if (frame.from != device_mac(0) || dropped != 0 ||
-          !autonomy::rld1_decode(view(frame.bytes), env) ||
-          env.kind != FrameType::BootstrapChunk ||
-          env.body[1] != join_sub(JoinAuthPhase::EdhocMessage, 3) || env.body[6] != 0 ||
-          env.body[7] != 0) {
-        return false;
-      }
-      ++dropped;
-      return true;
-    };
-    answer(world, 2, RelayState::Continue, filler(80, 2));
-    world.pump();
-    world.advance(2000);
-    CHECK(calls == 1 && dropped == 1);
-    CHECK(world.authority.ups.size() == 2);
-    if (world.authority.ups.size() == 2) {
-      const RelayObject up3 = parse_up(world.authority.ups[1].object);
-      CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
-    }
-    CHECK(world.links[0]->stats().retransmissions > 0);
+void test_deferred_send_after_on_message() {
+  current = "deferred_send_after_on_message";
+  World world;
+  CHECK(world.connect());
+  const Bytes m1 = filler(59, 1);
+  const Bytes m2 = filler(372, 2);
+  const Bytes m3 = filler(404, 3);
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+  world.pump();
+  answer(world, 2, RelayState::Continue, m2);
+  world.pump();
+  CHECK(world.observers[0]->messages.size() == 1);
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+  world.pump();
+  CHECK(world.authority.ups.size() == 2);
+  if (world.authority.ups.size() == 2) {
+    const RelayObject up3 = parse_up(world.authority.ups[1].object);
+    CHECK(Bytes(up3.message.data, up3.message.data + up3.message.size) == m3);
   }
 }
 
@@ -1059,13 +951,6 @@ void test_down_duplicate_keeps_sending() {
     const Bytes m3 = filler(404, 3);
     CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
     world.pump();
-    int callback_sent = 0;
-    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
-      if (m.step != 2 || callback_sent != 0) return;
-      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
-      ++callback_sent;
-      CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Sending);
-    };
     bool receipt_dropped = false;
     world.drop_radio = [&](const RadioFrame& frame) {
       autonomy::Rld1Envelope env{};
@@ -1085,8 +970,10 @@ void test_down_duplicate_keeps_sending() {
     };
     answer(world, 2, RelayState::Continue, m2);
     world.pump();
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    world.pump();
     world.advance(3000);
-    CHECK(callback_sent == 1 && receipt_dropped);
+    CHECK(receipt_dropped);
     CHECK(world.proxy.stats().retransmissions > 0);  // the m2 chunks came again
     CHECK(world.observers[0]->messages.size() == 1 &&
           message_is(world.observers[0]->messages[0], 2, m2));
@@ -1102,18 +989,13 @@ void test_down_duplicate_keeps_sending() {
   {
     // Single-frame m2: no receipt exists to lose, so the duplicate is a
     // raw replay of the captured frame — it must not re-fire on_message
-    // nor release the reentrant m3 send.
+    // nor release the m3 send started after the callback.
     World world;
     CHECK(world.connect());
     const Bytes m3 = filler(404, 3);
     CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now)
               .ok());
     world.pump();
-    int calls = 0;
-    world.observers[0]->respond = [&](const DeviceObserver::Message& m) {
-      if (m.step != 2 || calls++ != 0) return;
-      CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
-    };
     Bytes m2_frame;
     bool replayed = false;
     world.drop_radio = [&](const RadioFrame& frame) {
@@ -1132,7 +1014,9 @@ void test_down_duplicate_keeps_sending() {
     };
     answer(world, 2, RelayState::Continue, filler(80, 2));
     world.pump();
-    CHECK(!m2_frame.empty() && calls == 1);
+    CHECK(!m2_frame.empty());
+    CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+    world.pump();
     world.links[0]->on_rld1_rx(kProxyMac, device_mac(0), view(m2_frame), world.now);
     CHECK(world.observers[0]->messages.size() == 1);
     CHECK(world.links[0]->slot().mode() == JoinObjectSlot::Mode::Sending);
@@ -1330,6 +1214,12 @@ void test_busy_inside_relay_abort() {
   gateway.on_relay_rx(kProxy + 1, 2, FrameType::BootstrapAuth,
                       view(up_frame(200, 1, RelayState::Continue, kProxy + 1)), 20);
   CHECK(authority.ups.size() == 2);
+  const Bytes m2_a = down_object(parse_up(authority.ups[0].object).header, 2,
+                                 RelayState::Continue, filler(20, 1));
+  const Bytes m2_b = down_object(parse_up(authority.ups[1].object).header, 2,
+                                 RelayState::Continue, filler(20, 2));
+  CHECK(gateway.host_down(kProxy, view(m2_a), 21).ok());
+  CHECK(gateway.host_down(kProxy + 1, view(m2_b), 22).ok());
   make_up(0, kProxy + 1, 200, 3);  // relay B stage 3 (partial: expires in the same pass)
   make_up(1, kProxy, 100, 3);      // relay A stage 3 (partial: expires first)
   send_chunk(kProxy, 1, 0, 30);
@@ -1364,7 +1254,7 @@ void test_busy_inside_relay_abort() {
   CHECK(handled);
   CHECK(authority.aborts.size() == 2);  // B's expiry ran after the callback
   CHECK(gateway.stats().expired == 2);
-  CHECK(gateway.stats().down_objects == 0);  // the callback changed nothing
+  CHECK(gateway.stats().down_objects == 2);  // the callback changed nothing
   CHECK(gateway.slots_in_use() == 0);
   // After the callback: the ended relays are unknown to host_abort, and a
   // freed slot takes a new operation (membership was never cleared).
@@ -1521,6 +1411,467 @@ void test_q116_stage_and_terminal_dedup() {
   CHECK(relay_token_equal(authority.aborts[0].token, relay_token_of(up_header)));
 }
 
+void test_q116_proxy_old_up_keeps_down() {
+  current = "q116_proxy_old_up_keeps_down";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  const Bytes old_m1 = world.air.front().bytes;
+  world.pump();
+  CHECK(world.authority.ups.size() == 1);
+  world.drop_radio = [](const RadioFrame& frame) {
+    autonomy::Rld1Envelope env{};
+    return frame.from == device_mac(0) && autonomy::rld1_decode(view(frame.bytes), env).ok() &&
+           env.kind == FrameType::BootstrapReply;
+  };
+  answer(world, 2, RelayState::Continue, filler(372, 2));
+  world.pump();
+  CHECK(world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending);
+  world.proxy.on_rld1_rx(device_mac(0), kProxyMac, -61, view(old_m1), world.now);
+  CHECK(world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending);
+  CHECK(world.proxy.stats().up_objects == 1);
+  CHECK(world.authority.ups.size() == 1);
+  world.drop_radio = {};
+  world.advance(1000);
+  CHECK(world.proxy.stats().retransmissions > 0);
+  CHECK(world.observers[0]->messages.size() == 1);
+}
+
+void test_q116_gateway_stage_and_abort_identity() {
+  current = "q116_gateway_stage_and_abort_identity";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  const Bytes m1 = up_frame(31, 1, RelayState::Continue);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(m1), 100);
+  CHECK(authority.ups.size() == 1);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(31, 3, RelayState::Continue)), 101);
+  CHECK(authority.ups.size() == 1);
+  RelayObject wrong_abort{};
+  wrong_abort.header = parse_up(m1).header;
+  wrong_abort.header.joiner_mac = device_mac(9);
+  wrong_abort.header.state = RelayState::Abort;
+  wrong_abort.abort.status = RelayStatusCode::Aborted;
+  Bytes encoded(kRelayHeaderSize + kRelayAbortBodySize);
+  std::size_t written = 0;
+  CHECK(relay_object_encode(wrong_abort, MutableByteView{encoded.data(), encoded.size()},
+                            written).ok());
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(encoded), 102);
+  CHECK(authority.aborts.empty());
+  const Bytes m2 = down_object(parse_up(m1).header, 2, RelayState::Continue, filler(20, 2));
+  CHECK(gateway.host_down(kProxy, view(m2), 103).ok());
+}
+
+void test_q116_invalid_complete_does_not_poison_floor() {
+  current = "q116_invalid_complete_does_not_poison_floor";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  Bytes invalid = up_frame(41, 1, RelayState::Continue);
+  invalid.resize(kRelayObjectMax + 1, 0xA5);
+  JoinObjectSlot sender;
+  CHECK(sender.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 41,
+                    kGatewayEpoch, kProxyEpoch, view(invalid), 100).ok());
+  for (std::size_t i = 0; i < sender.chunk_total(); ++i) {
+    JoinChunk chunk{};
+    CHECK(sender.chunk_at(i, chunk).ok());
+    std::array<std::uint8_t, kMaxApplicationPayload> encoded{};
+    std::size_t written = 0;
+    CHECK(join_chunk_encode(JoinCarrier::WireRelay, chunk,
+                            MutableByteView{encoded.data(), encoded.size()}, written).ok());
+    gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapChunk,
+                        ByteView{encoded.data(), written}, 100 + i);
+  }
+  CHECK(authority.ups.empty());
+  for (const WireFrame& frame : mesh) {
+    if (frame.type != FrameType::BootstrapReply) continue;
+    JoinReply reply{};
+    CHECK(join_reply_decode(JoinCarrier::WireRelay, view(frame.payload), reply).ok());
+    CHECK(reply.status != JoinReplyStatus::Complete);
+  }
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(41, 1, RelayState::Continue)), 200);
+  CHECK(authority.ups.size() == 1);
+}
+
+void test_q116_proxy_old_down_keeps_up() {
+  current = "q116_proxy_old_down_keeps_up";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  world.pump();
+  answer(world, 2, RelayState::Continue, filler(80, 2));
+  CHECK(!world.mesh.empty());
+  const WireFrame old_m2 = world.mesh.front();
+  world.pump();
+  CHECK(world.observers[0]->messages.size() == 1);
+  world.drop_wire = [](const WireFrame& frame) {
+    return frame.from == kProxy && frame.to == kGateway &&
+           frame.type == FrameType::BootstrapChunk;
+  };
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(filler(404, 3)), world.now).ok());
+  world.pump();
+  CHECK(world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending);
+  world.proxy.on_relay_rx(kGateway, old_m2.type, view(old_m2.payload), world.now);
+  CHECK(world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending);
+  CHECK(world.observers[0]->messages.size() == 1);
+  world.drop_wire = {};
+  world.advance(1000);
+  CHECK(world.authority.ups.size() == 2);
+}
+
+void test_q116_late_query_reply() {
+  current = "q116_late_query_reply";
+  World world;
+  ZtDiscoverBody body{};
+  body.org_hint = kOrgHint;
+  CHECK(world.links[0]->discover(body, world.now).ok());
+  const RadioFrame discover = world.air.front();
+  CHECK(world.proxy.on_rld1_rx(discover.from, discover.to, -50, view(discover.bytes),
+                                world.now).ok());
+  CHECK(!world.mesh.empty());
+  EpochQuery query{};
+  CHECK(epoch_query_decode(view(world.mesh.front().payload), query).ok());
+  EpochReply reply{};
+  reply.gateway_epoch = kGatewayEpoch;
+  reply.authority_ready = true;
+  reply.nonce = query.nonce;
+  std::array<std::uint8_t, kEpochReplySize> encoded{};
+  std::size_t written = 0;
+  CHECK(epoch_reply_encode(reply, MutableByteView{encoded.data(), encoded.size()}, written).ok());
+  CHECK(world.proxy.on_relay_rx(kGateway, FrameType::BootstrapAuth,
+                                ByteView{encoded.data(), written}, world.now + 2100).ok());
+  CHECK(world.proxy.stats().epoch_replies_rx == 0);
+}
+
+void test_q116_host_abort_no_route_terminates() {
+  current = "q116_host_abort_no_route_terminates";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  const Bytes m1 = up_frame(51, 1, RelayState::Continue);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(m1), 100);
+  const RelayToken token = relay_token_of(parse_up(m1).header);
+  port.refuse = true;
+  CHECK(gateway.host_abort(kProxy, token, 101).code == StatusCode::NoRoute);
+  CHECK(gateway.host_abort(kProxy, token, 102).code == StatusCode::NotFound);
+  const Bytes m2 = down_object(parse_up(m1).header, 2, RelayState::Continue, filler(20, 2));
+  CHECK(gateway.host_down(kProxy, view(m2), 103).code == StatusCode::Expired);
+}
+
+void test_q116_proxy_single_up_port_failure() {
+  current = "q116_proxy_single_up_port_failure";
+  World world;
+  CHECK(world.connect());
+  world.proxy_wire.refuse = true;
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  world.pump();
+  CHECK(world.proxy.state() == JoinProxy::State::Idle);
+  CHECK(world.authority.ups.empty());
+  CHECK(!world.observers[0]->statuses.empty());
+  if (!world.observers[0]->statuses.empty()) {
+    CHECK(world.observers[0]->statuses.back().first == RelayStatusCode::AuthorityUnreachable);
+  }
+}
+
+void test_q116_proxy_single_down_port_failure() {
+  current = "q116_proxy_single_down_port_failure";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  world.pump();
+  CHECK(world.authority.ups.size() == 1);
+  world.proxy_radio.refuse = true;
+  answer(world, 2, RelayState::Continue, filler(20, 2));
+  world.pump();
+  CHECK(world.proxy.state() == JoinProxy::State::Idle);
+  CHECK(world.authority.aborts.size() == 1);
+  if (!world.authority.aborts.empty())
+    CHECK(world.authority.aborts[0].reason == RelayAbortReason::ProxyAborted);
+}
+
+void test_q116_invalid_config() {
+  current = "q116_invalid_config";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig gateway_config{};
+  gateway_config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(gateway_config, port);
+  CHECK(gateway.set_membership(MembershipState::Member).code == StatusCode::InvalidArgument);
+  std::deque<RadioFrame> air;
+  RadioPort radio(air, kProxyMac);
+  CounterEntropy entropy(1);
+  HmacJoinCookie cookie(World::cookie_key());
+  JoinProxyConfig proxy_config = World::proxy_config();
+  proxy_config.gateway = kInvalidNodeId;
+  JoinProxy proxy(proxy_config, radio, port, cookie, entropy);
+  CHECK(proxy.set_policy(true).code == StatusCode::InvalidArgument);
+}
+
+void test_q116_deadline_without_poll() {
+  current = "q116_deadline_without_poll";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  const Bytes m1 = up_frame(61, 1, RelayState::Continue);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(m1), 100);
+  const Bytes m2 = down_object(parse_up(m1).header, 2, RelayState::Continue, filler(20, 2));
+  CHECK(gateway.host_down(kProxy, view(m2), 20100).code == StatusCode::Expired);
+  CHECK(mesh.empty());
+  CHECK(authority.aborts.size() == 1);
+  if (!authority.aborts.empty())
+    CHECK(authority.aborts[0].reason == RelayAbortReason::GatewayExpired);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(61, 3, RelayState::Continue)), 20101);
+  CHECK(authority.ups.size() == 1);
+}
+
+void test_q116_offer_deadline_overflow() {
+  current = "q116_offer_deadline_overflow";
+  World world;
+  world.now = ~MonotonicMs{0} - 10;
+  ZtDiscoverBody body{};
+  body.org_hint = kOrgHint;
+  CHECK(world.links[0]->discover(body, world.now).ok());
+  const RadioFrame discover = world.air.front();
+  CHECK(world.proxy.on_rld1_rx(discover.from, discover.to, -50, view(discover.bytes),
+                                world.now).ok());
+  CHECK(world.proxy.poll(world.now).ok());
+  CHECK(world.proxy.stats().offers_tx == 0);
+}
+
+void test_q116_joiner_link_callback_busy() {
+  current = "q116_joiner_link_callback_busy";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  world.pump();
+  int callbacks = 0;
+  world.observers[0]->respond = [&](const DeviceObserver::Message& message) {
+    if (message.step != 2) return;
+    ++callbacks;
+    const std::uint32_t before = world.links[0]->stats().objects_tx;
+    CHECK(world.links[0]
+              ->send(JoinAuthPhase::EdhocMessage, 3, view(filler(404, 3)), world.now)
+              .code == StatusCode::Busy);
+    CHECK(world.links[0]->close().code == StatusCode::Busy);
+    CHECK(world.links[0]->set_membership(MembershipState::Unprovisioned).code ==
+          StatusCode::Busy);
+    CHECK(world.links[0]->connect(world.observers[0]->offers.back()).code == StatusCode::Busy);
+    ZtDiscoverBody discover{};
+    discover.org_hint = kOrgHint;
+    CHECK(world.links[0]->discover(discover, world.now).code == StatusCode::Busy);
+    CHECK(world.links[0]->poll(world.now).code == StatusCode::Busy);
+    CHECK(world.links[0]
+              ->on_rld1_rx(kProxyMac, device_mac(0), ByteView{}, world.now)
+              .code == StatusCode::Busy);
+    CHECK(world.links[0]->stats().objects_tx == before);
+  };
+  answer(world, 2, RelayState::Continue, filler(372, 2));
+  world.pump();
+  CHECK(callbacks == 1);
+  CHECK(world.links[0]->connected());
+}
+
+void test_q116_oversized_rld1_stage_keeps_down() {
+  current = "q116_oversized_rld1_stage_keeps_down";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  world.pump();
+  world.drop_radio = [](const RadioFrame& frame) {
+    autonomy::Rld1Envelope env{};
+    return frame.from == device_mac(0) && autonomy::rld1_decode(view(frame.bytes), env).ok() &&
+           env.kind == FrameType::BootstrapReply;
+  };
+  answer(world, 2, RelayState::Continue, filler(372, 2));
+  world.pump();
+  CHECK(world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending);
+  std::array<std::uint8_t, kRld1JoinChunkData> prefix{};
+  prefix[0] = autonomy::kPayloadVersion;
+  prefix[1] = static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage);
+  prefix[2] = 3;
+  JoinChunk chunk{};
+  chunk.phase = JoinAuthPhase::EdhocMessage;
+  chunk.step = 3;
+  chunk.id = join_rld1_object_id(world.links[0]->nonce());
+  chunk.total = static_cast<std::uint16_t>(kJoinObjectHeadSize + kJoinMessageMax + 1);
+  chunk.data = ByteView{prefix.data(), prefix.size()};
+  std::array<std::uint8_t, autonomy::kRld1MaxBody> body{};
+  std::size_t size = 0;
+  CHECK(join_chunk_encode(JoinCarrier::Rld1, chunk,
+                          MutableByteView{body.data(), body.size()}, size).ok());
+  autonomy::Rld1Envelope env{};
+  env.kind = FrameType::BootstrapChunk;
+  env.claimed_node = kDevice;
+  env.transaction_nonce = world.links[0]->nonce();
+  std::memcpy(env.body.data(), body.data(), size);
+  env.body_size = size;
+  autonomy::Rld1Encoded frame{};
+  CHECK(autonomy::rld1_encode(env, frame).ok());
+  world.proxy.on_rld1_rx(device_mac(0), kProxyMac, -61, frame.view(), world.now);
+  CHECK(world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending);
+}
+
+void test_q116_supersede_with_full_active_table() {
+  current = "q116_supersede_with_full_active_table";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  for (std::size_t i = 0; i < JoinRelayGateway::kActiveRelays; ++i) {
+    const NodeId proxy = kProxy + i;
+    gateway.on_relay_rx(proxy, 2, FrameType::BootstrapAuth,
+                        view(up_frame(1, 1, RelayState::Continue, proxy)), 100 + i);
+  }
+  CHECK(authority.ups.size() == JoinRelayGateway::kActiveRelays);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(2, 1, RelayState::Continue)), 200);
+  CHECK(authority.ups.size() == JoinRelayGateway::kActiveRelays + 1);
+  CHECK(authority.aborts.size() == 1);
+  if (!authority.aborts.empty()) CHECK(authority.aborts[0].reason == RelayAbortReason::Superseded);
+}
+
+void test_q116_floor_capacity_and_gateway_restart() {
+  current = "q116_floor_capacity_and_gateway_restart";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  for (std::size_t i = 0; i < JoinRelayGateway::kProxyFloors; ++i) {
+    const NodeId proxy = kProxy + i;
+    gateway.on_relay_rx(proxy, 2, FrameType::BootstrapAuth,
+                        view(up_frame(1, 1, RelayState::Abort, proxy)), 100 + i);
+  }
+  CHECK(authority.aborts.empty());
+  const NodeId extra = kProxy + JoinRelayGateway::kProxyFloors;
+  const Bytes m1 = up_frame(1, 1, RelayState::Continue, extra);
+  gateway.on_relay_rx(extra, 2, FrameType::BootstrapAuth, view(m1), 300);
+  CHECK(authority.ups.empty());
+  config.gateway_epoch = kGatewayEpoch + 1;
+  JoinRelayGateway restarted(config, port);
+  CHECK(restarted.set_membership(MembershipState::Member).ok());
+  CHECK(restarted.set_host_sink(&authority).ok());
+  restarted.on_relay_rx(extra, 2, FrameType::BootstrapAuth, view(m1), 301);
+  CHECK(authority.ups.empty());
+  Bytes fresh = m1;
+  fresh[27] = static_cast<std::uint8_t>(kGatewayEpoch + 1);
+  restarted.on_relay_rx(extra, 2, FrameType::BootstrapAuth, view(fresh), 302);
+  CHECK(authority.ups.size() == 1);
+}
+
+void test_q116_sink_detach_terminates_exchange() {
+  current = "q116_sink_detach_terminates_exchange";
+  World world;
+  CHECK(world.connect());
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(filler(59, 1)), world.now).ok());
+  world.pump();
+  CHECK(world.authority.ups.size() == 1);
+  const Bytes old_up = world.authority.ups.front().object;
+  CHECK(world.gateway.set_host_sink(nullptr).ok());
+  world.pump();
+  CHECK(world.proxy.state() == JoinProxy::State::Idle);
+  CHECK(world.gateway.set_host_sink(&world.authority).ok());
+  world.gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(old_up), world.now);
+  CHECK(world.authority.ups.size() == 1);
+  CHECK(world.authority.aborts.empty());
+  const Bytes fresh = up_frame(2, 1, RelayState::Continue);
+  world.gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(fresh), world.now);
+  CHECK(world.authority.ups.size() == 2);
+}
+
+void test_q116_proxy_restart_token() {
+  current = "q116_proxy_restart_token";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  FakeAuthority authority;
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  CHECK(gateway.set_host_sink(&authority).ok());
+  const Bytes old_m1 = up_frame(1, 1, RelayState::Continue);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(old_m1), 100);
+  Bytes fresh_m1 = old_m1;
+  fresh_m1[19] = 9;  // the restarted proxy observes a different joiner MAC
+  fresh_m1[31] = static_cast<std::uint8_t>(kProxyEpoch + 1);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(fresh_m1), 101);
+  CHECK(authority.ups.size() == 2);
+  CHECK(authority.aborts.size() == 1);
+  if (!authority.aborts.empty()) CHECK(authority.aborts[0].reason == RelayAbortReason::Superseded);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth, view(old_m1), 102);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(1, 1, RelayState::Abort)), 103);
+  CHECK(authority.ups.size() == 2);
+  CHECK(authority.aborts.size() == 1);
+  const Bytes old_m2 = down_object(parse_up(old_m1).header, 2, RelayState::Continue,
+                                   filler(20, 2));
+  CHECK(gateway.host_down(kProxy, view(old_m2), 104).code == StatusCode::Expired);
+  const Bytes fresh_m2 = down_object(parse_up(fresh_m1).header, 2, RelayState::Continue,
+                                     filler(20, 3));
+  CHECK(gateway.host_down(kProxy, view(fresh_m2), 105).ok());
+}
+
+void test_q116_epoch_query_rate() {
+  current = "q116_epoch_query_rate";
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  config.gateway_epoch = kGatewayEpoch;
+  JoinRelayGateway gateway(config, port);
+  CHECK(gateway.set_membership(MembershipState::Member).ok());
+  EpochQuery query{};
+  query.nonce[0] = 1;
+  std::array<std::uint8_t, kEpochQuerySize> encoded{};
+  std::size_t written = 0;
+  CHECK(epoch_query_encode(query, MutableByteView{encoded.data(), encoded.size()}, written).ok());
+  for (int i = 0; i < 20; ++i)
+    gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                        ByteView{encoded.data(), written}, 1000);
+  CHECK(mesh.size() == 4);
+  CHECK(gateway.slots_in_use() == 0);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      ByteView{encoded.data(), written}, 1100);
+  CHECK(mesh.size() == 5);
+}
+
 }  // namespace
 
 void test_q116_size_budgets() {
@@ -1545,12 +1896,30 @@ int main() {
   test_gateway_slots();
   test_joiner_filters();
   test_cookie_expiry();
-  test_reentrant_send_in_on_message();
+  test_deferred_send_after_on_message();
   test_down_duplicate_keeps_sending();
   test_busy_inside_relay_up();
   test_busy_inside_relay_abort();
   test_delivery_failed_callback_busy();
   test_q116_stage_and_terminal_dedup();
+  test_q116_proxy_old_up_keeps_down();
+  test_q116_gateway_stage_and_abort_identity();
+  test_q116_invalid_complete_does_not_poison_floor();
+  test_q116_proxy_old_down_keeps_up();
+  test_q116_late_query_reply();
+  test_q116_host_abort_no_route_terminates();
+  test_q116_proxy_single_up_port_failure();
+  test_q116_proxy_single_down_port_failure();
+  test_q116_invalid_config();
+  test_q116_deadline_without_poll();
+  test_q116_offer_deadline_overflow();
+  test_q116_joiner_link_callback_busy();
+  test_q116_oversized_rld1_stage_keeps_down();
+  test_q116_supersede_with_full_active_table();
+  test_q116_floor_capacity_and_gateway_restart();
+  test_q116_sink_detach_terminates_exchange();
+  test_q116_proxy_restart_token();
+  test_q116_epoch_query_rate();
   test_q116_size_budgets();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 join relay check(s) failed\n", failures);
