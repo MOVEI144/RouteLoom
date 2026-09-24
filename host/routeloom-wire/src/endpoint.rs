@@ -1477,36 +1477,29 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
     })
 }
 
-// --- RCR1 canonical recovery command (04-remote-config §4.7, 06 §6.3) --------
+// --- RCR2 canonical recovery command (04-remote-config §4.7, 06 §6.3) --------
 //
-// Fixed 76B body carried as the signed payload of a kind-4 recovery object —
-// never an RCC1 extension and never a kind-3 permit. A single class: a store
-// recovery (new store generation + explicit reprovision attest). Authority
-// generation changes are root-authorized trust updates (RTM1), never
-// recovery commands. The Rust mirror must stay byte-identical with the C++
-// codec in endpoint_wire.cpp.
+// Fixed 112B header plus the 0–512B adopted snapshot, carried as the signed
+// payload of a kind-4 recovery object — never an RCC1 extension and never a
+// kind-3 permit. RCR2 replaces RCR1 outright: no compatibility interpretation
+// of the old magic or version exists. The Rust mirror must stay byte-identical
+// with the C++ codec in endpoint_wire.cpp.
 
-pub const RCR1_MAGIC: u32 = 0x5243_5231; // "RCR1"
-pub const RCR1_VERSION: u8 = 1;
-pub const RCR1_SIZE: usize = 76;
+pub const RCR2_MAGIC: u32 = 0x5243_5232; // "RCR2"
+pub const RCR2_VERSION: u8 = 2;
+pub const RCR2_HEADER_SIZE: usize = 112;
+pub const RCR2_MAX_TOTAL: usize = RCR2_HEADER_SIZE + CONFIG_SNAPSHOT_MAX;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum ConfigRecoveryClass {
-    /// Signed store-generation recovery for an impaired journal.
-    StoreRecover = 1,
-}
+pub const RCR2_MODE_ADOPT_KNOWN: u8 = 0;
+pub const RCR2_MODE_REPROVISION: u8 = 1;
 
-pub const RCR1_ATTEST_ADOPT: u8 = 0;
-pub const RCR1_ATTEST_REPROVISION: u8 = 1;
-
-/// Fixed-layout recovery command — no challenge/nonce binding by design
-/// (replay protection is the store-generation floor + result dedup).
+/// Recovery intent — no challenge/nonce binding by design (freshness is the
+/// floor's exact-next authorization, replay protection the floor + dedup).
+/// AdoptKnown binds the proven survivor by hash alone; Reprovision carries
+/// the complete adopted snapshot as its baseline.
 #[derive(Clone, Debug)]
-pub struct ConfigRecoveryCommand {
-    pub recovery_class: ConfigRecoveryClass,
-    /// StoreRecover: 0 adopt survivor / 1 reprovision. Generation: must be 0.
-    pub attest: u8,
+pub struct ConfigRecoveryIntent {
+    pub mode: u8,
     pub config_namespace: u16,
     pub schema: u16,
     pub network: u64,
@@ -1516,74 +1509,137 @@ pub struct ConfigRecoveryCommand {
     pub authority_generation: u32,
     pub authority_sequence: u64,
     pub operation_id: [u8; 16],
-    /// The fresh journal store generation (nonzero).
+    /// The attested exact-next store generation.
     pub new_store_generation: u32,
-    /// Reserved: always 0.
-    pub new_authority_generation: u32,
+    /// The attested exact-next decision revision.
+    pub new_revision: u64,
+    /// Domain-tagged SHA-256 of the adopted canonical snapshot.
+    pub snapshot_hash: [u8; 32],
+    /// The adopted baseline bytes (empty for AdoptKnown).
+    pub baseline: Vec<u8>,
 }
 
-fn config_recovery_check(command: &ConfigRecoveryCommand) -> Result<()> {
-    if !config_namespace_valid(command.config_namespace)
-        || command.network == 0
-        || command.target == 0
-        || command.target == BROADCAST_NODE_ID
-        || command.authority == 0
-        || command.authority == BROADCAST_NODE_ID
-        || all_zero(&command.operation_id)
+/// The adopted baseline is a complete canonical snapshot: strict ascending
+/// field ids, known TLV types with exact lengths, canonical bools, at most
+/// the field-count bound. The same shape rule as the RCC1 patch loop.
+fn rcr2_snapshot_shape_valid(snapshot: &[u8]) -> bool {
+    if snapshot.len() > CONFIG_SNAPSHOT_MAX {
+        return false;
+    }
+    let mut cursor = 0_usize;
+    let mut previous_id = 0_u16;
+    let mut count = 0_usize;
+    while cursor < snapshot.len() {
+        if count >= CONFIG_FIELD_COUNT_MAX || snapshot.len() - cursor < 5 {
+            return false;
+        }
+        let field_id =
+            u16::from_be_bytes(snapshot[cursor..cursor + 2].try_into().expect("fixed"));
+        let field_type = snapshot[cursor + 2];
+        let declared =
+            u16::from_be_bytes(snapshot[cursor + 3..cursor + 5].try_into().expect("fixed"));
+        let Some(value_len) = tlv_value_length(field_type, declared) else {
+            return false;
+        };
+        if snapshot.len() - (cursor + 5) < value_len {
+            return false;
+        }
+        if count > 0 && field_id <= previous_id {
+            return false;
+        }
+        previous_id = field_id;
+        if field_type == 1 && snapshot[cursor + 5] > 1 {
+            return false;
+        }
+        cursor += 5 + value_len;
+        count += 1;
+    }
+    true
+}
+
+fn config_recovery_check(intent: &ConfigRecoveryIntent) -> Result<()> {
+    if !config_namespace_valid(intent.config_namespace)
+        || intent.network == 0
+        || intent.target == 0
+        || intent.target == BROADCAST_NODE_ID
+        || intent.authority == 0
+        || intent.authority == BROADCAST_NODE_ID
+        || all_zero(&intent.operation_id)
     {
         return invalid("config recovery identity fields invalid");
     }
-    if command.authority_sequence == u64::MAX {
-        return invalid("config recovery authority sequence exhausted");
+    if intent.mode != RCR2_MODE_ADOPT_KNOWN && intent.mode != RCR2_MODE_REPROVISION {
+        return invalid("config recovery mode unknown");
     }
-    match command.recovery_class {
-        ConfigRecoveryClass::StoreRecover => {
-            if command.attest > RCR1_ATTEST_REPROVISION
-                || command.new_store_generation == 0
-                || command.new_authority_generation != 0
-            {
-                return invalid("config recovery store fields invalid");
-            }
-        }
+    if intent.mode == RCR2_MODE_ADOPT_KNOWN && !intent.baseline.is_empty() {
+        return invalid("config recovery adopt-known carries no snapshot");
+    }
+    if intent.new_store_generation == 0
+        || intent.new_store_generation == u32::MAX
+        || intent.new_revision == 0
+        || intent.new_revision == u64::MAX
+        || intent.authority_sequence == u64::MAX
+    {
+        return invalid("config recovery counters invalid");
+    }
+    if !rcr2_snapshot_shape_valid(&intent.baseline) {
+        return invalid("config recovery snapshot shape invalid");
     }
     Ok(())
 }
 
-pub fn config_recovery_encode(command: &ConfigRecoveryCommand, out: &mut Vec<u8>) -> Result<()> {
-    config_recovery_check(command)?;
+pub fn config_recovery_encode(intent: &ConfigRecoveryIntent, out: &mut Vec<u8>) -> Result<()> {
+    config_recovery_check(intent)?;
     out.clear();
-    out.reserve(RCR1_SIZE);
-    out.extend_from_slice(&RCR1_MAGIC.to_be_bytes());
-    out.push(RCR1_VERSION);
-    out.push(0);
-    out.push(command.recovery_class as u8);
-    out.push(command.attest);
-    out.extend_from_slice(&command.config_namespace.to_be_bytes());
-    out.extend_from_slice(&command.schema.to_be_bytes());
-    out.extend_from_slice(&command.network.to_be_bytes());
-    out.extend_from_slice(&command.target.to_be_bytes());
-    out.extend_from_slice(&command.authority.to_be_bytes());
-    out.extend_from_slice(&command.authority_generation.to_be_bytes());
-    out.extend_from_slice(&command.authority_sequence.to_be_bytes());
-    out.extend_from_slice(&command.operation_id);
-    out.extend_from_slice(&command.new_store_generation.to_be_bytes());
-    out.extend_from_slice(&command.new_authority_generation.to_be_bytes());
-    out.extend_from_slice(&0_u32.to_be_bytes());
-    debug_assert_eq!(out.len(), RCR1_SIZE);
+    out.reserve(RCR2_HEADER_SIZE + intent.baseline.len());
+    out.extend_from_slice(&RCR2_MAGIC.to_be_bytes());
+    out.push(RCR2_VERSION);
+    out.push(intent.mode);
+    out.extend_from_slice(&intent.config_namespace.to_be_bytes());
+    out.extend_from_slice(&intent.schema.to_be_bytes());
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    out.extend_from_slice(&intent.network.to_be_bytes());
+    out.extend_from_slice(&intent.target.to_be_bytes());
+    out.extend_from_slice(&intent.authority.to_be_bytes());
+    out.extend_from_slice(&intent.authority_generation.to_be_bytes());
+    out.extend_from_slice(&intent.authority_sequence.to_be_bytes());
+    out.extend_from_slice(&intent.operation_id);
+    out.extend_from_slice(&intent.new_store_generation.to_be_bytes());
+    out.extend_from_slice(&intent.new_revision.to_be_bytes());
+    out.extend_from_slice(&(intent.baseline.len() as u16).to_be_bytes());
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    out.extend_from_slice(&intent.snapshot_hash);
+    out.extend_from_slice(&intent.baseline);
+    debug_assert_eq!(out.len(), RCR2_HEADER_SIZE + intent.baseline.len());
     Ok(())
 }
 
-pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryCommand> {
-    if encoded.len() != RCR1_SIZE {
+pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryIntent> {
+    if encoded.len() > RCR2_MAX_TOTAL {
+        return reject();
+    }
+    // No compatibility interpretation of the old wire exists: anything that
+    // is not an RCR2 body is Unsupported — including an RCR1 body, which is
+    // shorter than the RCR2 header. The magic/version gate therefore runs
+    // before the size gate, mirroring the C++ codec.
+    if encoded.len() < 6 {
         return reject();
     }
     let magic = u32::from_be_bytes(encoded[0..4].try_into().expect("fixed"));
     let version = encoded[4];
-    let flags = encoded[5];
-    let class_raw = encoded[6];
-    let attest = encoded[7];
-    let config_namespace = u16::from_be_bytes(encoded[8..10].try_into().expect("fixed"));
-    let schema = u16::from_be_bytes(encoded[10..12].try_into().expect("fixed"));
+    if magic != RCR2_MAGIC || version != RCR2_VERSION {
+        return Err(WireError::new(
+            ErrorCode::Unsupported,
+            "config recovery version unsupported",
+        ));
+    }
+    if encoded.len() < RCR2_HEADER_SIZE {
+        return reject();
+    }
+    let mode = encoded[5];
+    let config_namespace = u16::from_be_bytes(encoded[6..8].try_into().expect("fixed"));
+    let schema = u16::from_be_bytes(encoded[8..10].try_into().expect("fixed"));
+    let flags = u16::from_be_bytes(encoded[10..12].try_into().expect("fixed"));
     let network = u64::from_be_bytes(encoded[12..20].try_into().expect("fixed"));
     let target = u64::from_be_bytes(encoded[20..28].try_into().expect("fixed"));
     let authority = u64::from_be_bytes(encoded[28..36].try_into().expect("fixed"));
@@ -1592,15 +1648,14 @@ pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryCommand> {
     let mut operation_id = [0_u8; 16];
     operation_id.copy_from_slice(&encoded[48..64]);
     let new_store_generation = u32::from_be_bytes(encoded[64..68].try_into().expect("fixed"));
-    let new_authority_generation = u32::from_be_bytes(encoded[68..72].try_into().expect("fixed"));
-    let reserved = u32::from_be_bytes(encoded[72..76].try_into().expect("fixed"));
-    let recovery_class = match class_raw {
-        1 => ConfigRecoveryClass::StoreRecover,
-        _ => return reject(),
-    };
-    let command = ConfigRecoveryCommand {
-        recovery_class,
-        attest,
+    let new_revision = u64::from_be_bytes(encoded[68..76].try_into().expect("fixed"));
+    let snapshot_len =
+        u16::from_be_bytes(encoded[76..78].try_into().expect("fixed")) as usize;
+    let reserved = u16::from_be_bytes(encoded[78..80].try_into().expect("fixed"));
+    let mut snapshot_hash = [0_u8; 32];
+    snapshot_hash.copy_from_slice(&encoded[80..112]);
+    let intent = ConfigRecoveryIntent {
+        mode,
         config_namespace,
         schema,
         network,
@@ -1610,17 +1665,18 @@ pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryCommand> {
         authority_sequence,
         operation_id,
         new_store_generation,
-        new_authority_generation,
+        new_revision,
+        snapshot_hash,
+        baseline: encoded[RCR2_HEADER_SIZE..].to_vec(),
     };
-    if magic != RCR1_MAGIC
-        || version != RCR1_VERSION
-        || flags != 0
+    if flags != 0
         || reserved != 0
-        || config_recovery_check(&command).is_err()
+        || encoded.len() - RCR2_HEADER_SIZE != snapshot_len
+        || config_recovery_check(&intent).is_err()
     {
         return reject();
     }
-    Ok(command)
+    Ok(intent)
 }
 
 /// Snapshot-hash input (§5.4): domain_snapshot || namespace u16 | schema u16 |

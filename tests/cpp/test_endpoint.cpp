@@ -383,28 +383,32 @@ bool encode_vector(const std::string& codec, const Fields& fields,
     out.assign(enc.bytes.begin(), enc.bytes.begin() + enc.size);
     return true;
   } else if (codec == "config_recovery") {
-    ep::ConfigRecoveryCommand command{};
-    command.config_namespace = static_cast<std::uint16_t>(at("config_namespace"));
-    command.schema = static_cast<std::uint16_t>(at("schema"));
-    command.network = at("network");
-    command.target = at("target");
-    command.authority = at("authority");
-    command.authority_generation =
+    ep::ConfigRecoveryIntent intent{};
+    intent.config_namespace = static_cast<std::uint16_t>(at("config_namespace"));
+    intent.schema = static_cast<std::uint16_t>(at("schema"));
+    intent.network = at("network");
+    intent.target = at("target");
+    intent.authority = at("authority");
+    intent.authority_generation =
         static_cast<std::uint32_t>(at("authority_generation"));
-    command.authority_sequence = at("authority_sequence");
-    command.recovery_class =
-        static_cast<ep::ConfigRecoveryClass>(at("recovery_class"));
-    command.attest = static_cast<std::uint8_t>(at("attest"));
-    command.new_store_generation =
+    intent.authority_sequence = at("authority_sequence");
+    intent.mode = static_cast<std::uint8_t>(at("mode"));
+    intent.new_store_generation =
         static_cast<std::uint32_t>(at("new_store_generation"));
-    command.new_authority_generation =
-        static_cast<std::uint32_t>(at("new_authority_generation"));
-    if (!hex_field(fields, "operation_id_hex", command.operation_id) ||
-        !present) {
+    intent.new_revision = at("new_revision");
+    std::vector<std::uint8_t> snapshot;
+    if (!hex_field(fields, "operation_id_hex", intent.operation_id) ||
+        !hex_field(fields, "snapshot_hash_hex", intent.snapshot_hash) ||
+        !hex_decode(fields.at("snapshot_hex"), snapshot) || !present) {
       return false;
     }
-    ep::EncodedRecoveryCommand enc{};
-    status = ep::config_recovery_encode(command, enc);
+    if (snapshot.size() > intent.baseline.bytes.size()) return false;
+    intent.baseline.size = snapshot.size();
+    if (!snapshot.empty()) {
+      std::memcpy(intent.baseline.bytes.data(), snapshot.data(), snapshot.size());
+    }
+    ep::EncodedRecoveryIntent enc{};
+    status = ep::config_recovery_encode(intent, enc);
     if (!status) return false;
     out.assign(enc.bytes.begin(), enc.bytes.begin() + enc.size);
     return true;
@@ -542,10 +546,10 @@ bool decode_and_reencode(const std::string& codec, const std::vector<std::uint8_
                       encoded.begin(), encoded.end());
   }
   if (codec == "config_recovery") {
-    ep::ConfigRecoveryCommand command{};
-    ep::EncodedRecoveryCommand reenc{};
-    return ep::config_recovery_decode(to_view(encoded), command).ok() &&
-           ep::config_recovery_encode(command, reenc).ok() &&
+    ep::ConfigRecoveryIntent intent{};
+    ep::EncodedRecoveryIntent reenc{};
+    return ep::config_recovery_decode(to_view(encoded), intent).ok() &&
+           ep::config_recovery_encode(intent, reenc).ok() &&
            std::equal(reenc.bytes.begin(), reenc.bytes.begin() + reenc.size,
                       encoded.begin(), encoded.end());
   }
@@ -615,7 +619,7 @@ bool decode_expect_error(const std::string& codec, const std::vector<std::uint8_
     return !ep::config_command_decode(view, p).ok();
   }
   if (codec == "config_recovery") {
-    ep::ConfigRecoveryCommand p{};
+    ep::ConfigRecoveryIntent p{};
     return !ep::config_recovery_decode(view, p).ok();
   }
   return false;
@@ -847,11 +851,84 @@ void test_reserved_node_ids() {
   CHECK(!ep::service_outcome_decode(bad.view(), out_back));
 }
 
+// RCR2 error-code mapping (the golden vectors assert ok/err only): the
+// retired RCR1 wire is Unsupported, truncations are ProtocolError, and
+// the encoder refuses unnameable counters and mode/shape mismatches.
+void test_recovery_codec() {
+  ep::ConfigRecoveryIntent intent{};
+  intent.config_namespace = 1;
+  intent.schema = 1;
+  intent.network = 7;
+  intent.target = 0x30;
+  intent.authority = 0x10;
+  intent.authority_generation = 2;
+  intent.authority_sequence = 15;
+  intent.operation_id.fill(0x35);
+  intent.mode = ep::kRcr2ModeReprovision;
+  intent.new_store_generation = 42;
+  intent.new_revision = 7;
+  const std::uint8_t field[] = {0x00, 0x01, 0x02, 0x00, 0x01, 0x02};
+  intent.baseline.size = sizeof(field);
+  std::memcpy(intent.baseline.bytes.data(), field, sizeof(field));
+  ep::EncodedRecoveryIntent encoded{};
+  CHECK_OK(ep::config_recovery_encode(intent, encoded));
+  CHECK(encoded.size == ep::kRcr2HeaderSize + sizeof(field));
+  ep::ConfigRecoveryIntent back{};
+  CHECK_OK(ep::config_recovery_decode(encoded.view(), back));
+  CHECK(back.mode == ep::kRcr2ModeReprovision);
+  CHECK(back.new_store_generation == 42);
+  CHECK(back.new_revision == 7);
+  CHECK(back.baseline.size == sizeof(field));
+
+  // The retired 76 B RCR1 body is Unsupported — never parsed, even
+  // though it is shorter than the RCR2 header.
+  std::array<std::uint8_t, 76> rcr1{};
+  rcr1[0] = 'R';
+  rcr1[1] = 'C';
+  rcr1[2] = 'R';
+  rcr1[3] = '1';
+  rcr1[4] = 1;
+  CHECK(ep::config_recovery_decode(ByteView{rcr1.data(), rcr1.size()}, back).code ==
+        StatusCode::Unsupported);
+  // Unknown magic/version on an RCR2-sized frame: Unsupported too.
+  ep::EncodedRecoveryIntent wrong_magic = encoded;
+  wrong_magic.bytes[0] = 'X';
+  CHECK(ep::config_recovery_decode(wrong_magic.view(), back).code ==
+        StatusCode::Unsupported);
+  ep::EncodedRecoveryIntent wrong_version = encoded;
+  wrong_version.bytes[4] = 1;
+  CHECK(ep::config_recovery_decode(wrong_version.view(), back).code ==
+        StatusCode::Unsupported);
+  // A truncated RCR2 body (right magic/version) is a framing error.
+  CHECK(ep::config_recovery_decode(
+            ByteView{encoded.bytes.data(), ep::kRcr2HeaderSize - 1}, back)
+            .code == StatusCode::ProtocolError);
+
+  // Encoder refusals: adopt-known with bytes, unnameable counters.
+  ep::ConfigRecoveryIntent adopt = intent;
+  adopt.mode = ep::kRcr2ModeAdoptKnown;
+  CHECK(!ep::config_recovery_encode(adopt, encoded));
+  adopt.baseline.size = 0;
+  CHECK_OK(ep::config_recovery_encode(adopt, encoded));
+  CHECK(encoded.size == ep::kRcr2HeaderSize);
+  ep::ConfigRecoveryIntent bad_counters = intent;
+  bad_counters.new_store_generation = 0;
+  CHECK(!ep::config_recovery_encode(bad_counters, encoded));
+  bad_counters.new_store_generation = UINT32_MAX;
+  CHECK(!ep::config_recovery_encode(bad_counters, encoded));
+  bad_counters.new_store_generation = 42;
+  bad_counters.new_revision = 0;
+  CHECK(!ep::config_recovery_encode(bad_counters, encoded));
+  bad_counters.new_revision = UINT64_MAX;
+  CHECK(!ep::config_recovery_encode(bad_counters, encoded));
+}
+
 }  // namespace
 
 int main() {
   test_codec_roundtrip();
   test_reserved_node_ids();
+  test_recovery_codec();
   test_endpoint_golden();
   test_trailing_byte_rejected();
 

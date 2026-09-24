@@ -441,12 +441,8 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
         "config_recovery" => {
             let mut raw = Vec::new();
             config_recovery_encode(
-                &ConfigRecoveryCommand {
-                    recovery_class: match u64_field(fields, "recovery_class") {
-                        1 => ConfigRecoveryClass::StoreRecover,
-                        other => panic!("bad recovery class {other}"),
-                    },
-                    attest: u64_field(fields, "attest") as u8,
+                &ConfigRecoveryIntent {
+                    mode: u64_field(fields, "mode") as u8,
                     config_namespace: u64_field(fields, "config_namespace") as u16,
                     schema: u64_field(fields, "schema") as u16,
                     network: u64_field(fields, "network"),
@@ -456,7 +452,9 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
                     authority_sequence: u64_field(fields, "authority_sequence"),
                     operation_id: arr16(fields, "operation_id_hex"),
                     new_store_generation: u64_field(fields, "new_store_generation") as u32,
-                    new_authority_generation: u64_field(fields, "new_authority_generation") as u32,
+                    new_revision: u64_field(fields, "new_revision"),
+                    snapshot_hash: arr32(fields, "snapshot_hash_hex"),
+                    baseline: hex_field(fields, "snapshot_hex"),
                 },
                 &mut raw,
             )

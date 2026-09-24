@@ -413,6 +413,7 @@ constexpr std::uint32_t kRcc1Magic = 0x52434331;  // "RCC1"
 constexpr std::uint8_t kRcc1Version = 1;
 constexpr std::size_t kRcc1HeaderSize = 176;
 constexpr std::size_t kConfigPatchMax = 512;
+constexpr std::size_t kConfigSnapshotMax = 512;
 constexpr std::size_t kConfigFieldCountMax = 16;
 constexpr std::size_t kConfigFieldValueMax = 96;
 constexpr std::size_t kRcc1MaxTotal = kRcc1HeaderSize + kConfigPatchMax;  // 688
@@ -463,63 +464,68 @@ Status config_command_encode(const ConfigCommand& command,
                              EncodedConfigCommand& out) noexcept;
 Status config_command_decode(ByteView encoded, ConfigCommand& out) noexcept;
 
-// --- RCR1 canonical recovery command (04 §4.7, 06 §6.3) ----------------------
-// Fixed 76B body carried as the signed payload of a kind-4 recovery object —
-// never an RCC1 extension and never a kind-3 permit. The single class,
-// StoreRecover, attests a fresh store generation for a quarantined/
-// uncertain journal (the signed RECOVER evidence §6.3 requires).
-// Authority generation changes are root-authorized trust updates (RTM1),
-// never recovery commands.
+// --- RCR2 canonical recovery command (04 §4.7, 06 §6.3) ----------------------
+// Fixed 112B header plus the 0–512B adopted snapshot, carried as the signed
+// payload of a kind-4 recovery object — never an RCC1 extension and never a
+// kind-3 permit. RCR2 replaces RCR1 outright: no compatibility interpretation
+// of the old magic or version exists, and generation-only authority updates
+// are root-authorized trust updates (RTM1), never recovery commands.
 //
-// Header layout (76B): magic "RCR1" 4 | version u8 | flags u8=0 |
-// class u8 | attest u8 | namespace u16 | schema u16 | network u64 |
-// target u64 | authority u64 | authority_generation u32 (the generation the
-// signature verifies under) | authority_sequence u64 | operation_id 16B |
-// new_store_generation u32 | new_authority_generation u32 (reserved, 0) |
-// reserved u32=0. StoreRecover carries attest 0|1 and a nonzero
-// new_store_generation; any other class value is rejected.
+// Header layout (112B): magic "RCR2" 4 | version u8=2 | mode u8 |
+// namespace u16 | schema u16 | flags u16=0 | network u64 | target u64 |
+// authority u64 | authority_generation u32 (the generation the signature
+// verifies under) | authority_sequence u64 | operation_id 16B (nonzero) |
+// new_store_generation u32 (the floor's exact next) | new_revision u64
+// (the floor's exact next decision revision) | snapshot_len u16 |
+// reserved u16=0 | snapshot_hash 32B (the domain-tagged SHA-256 of the
+// adopted canonical snapshot) | snapshot snapshot_len bytes.
+//
+// AdoptKnown carries no snapshot bytes: the signed hash must equal the
+// journal's confirmed-active survivor. Reprovision carries the complete
+// snapshot the administrator approved — including the empty snapshot when
+// the schema defines all-omitted as the complete default state (a zero
+// length never skips the provider restore or its readback).
 
-constexpr std::uint32_t kRcr1Magic = 0x52435231;  // "RCR1"
-constexpr std::uint8_t kRcr1Version = 1;
-constexpr std::size_t kRcr1Size = 76;
+constexpr std::uint32_t kRcr2Magic = 0x52435232;  // "RCR2"
+constexpr std::uint8_t kRcr2Version = 2;
+constexpr std::size_t kRcr2HeaderSize = 112;
+constexpr std::size_t kRcr2MaxTotal = kRcr2HeaderSize + kConfigSnapshotMax;  // 624
 
-enum class ConfigRecoveryClass : std::uint8_t {
-  StoreRecover = 1,  // quarantine/uncertain -> fresh store generation
-};
+// Recovery modes (04 §4.7): adopt the proven survivor, or adopt the carried
+// snapshot as an explicitly re-provisioned baseline under a new revision.
+constexpr std::uint8_t kRcr2ModeAdoptKnown = 0;
+constexpr std::uint8_t kRcr2ModeReprovision = 1;
 
-// `attest` values for ConfigRecoveryClass::StoreRecover — the signed
-// attestation recover() requires before fabricating a base when no
-// verifiable record survives (04 §4.7).
-constexpr std::uint8_t kRcr1AttestAdopt = 0;        // adopt a proven survivor only
-constexpr std::uint8_t kRcr1AttestReprovision = 1;  // attested re-provisioning
-
-struct ConfigRecoveryCommand {
-  ConfigRecoveryClass recovery_class{ConfigRecoveryClass::StoreRecover};
-  std::uint8_t attest{kRcr1AttestAdopt};
+struct ConfigRecoveryIntent {
+  std::uint8_t mode{kRcr2ModeAdoptKnown};
   std::uint16_t config_namespace{0};
   std::uint16_t schema{0};
   NetworkId network{0};
   NodeId target{kInvalidNodeId};
   NodeId authority{kInvalidNodeId};
-  // The generation the permit's signature verifies under — the journal's
+  // The generation the command's signature verifies under — the journal's
   // currently accepted generation, NOT the generation being installed.
   std::uint32_t authority_generation{0};
   std::uint64_t authority_sequence{0};
   std::array<std::uint8_t, 16> operation_id{};
-  std::uint32_t new_store_generation{0};        // the attested fresh generation
-  std::uint32_t new_authority_generation{0};    // reserved: always 0
+  std::uint32_t new_store_generation{0};  // the attested exact-next generation
+  std::uint64_t new_revision{0};          // the attested exact-next revision
+  std::array<std::uint8_t, 32> snapshot_hash{};
+  // The adopted baseline bytes (Reprovision) — empty for AdoptKnown. The
+  // codec validates the strict TLV shape; the schema rules are the
+  // journal's check against the registered validator.
+  ByteBuffer<kConfigSnapshotMax> baseline{};
 };
 
-using EncodedRecoveryCommand = ByteBuffer<kRcr1Size>;
+using EncodedRecoveryIntent = ByteBuffer<kRcr2MaxTotal>;
 
-Status config_recovery_encode(const ConfigRecoveryCommand& command,
-                              EncodedRecoveryCommand& out) noexcept;
-Status config_recovery_decode(ByteView encoded, ConfigRecoveryCommand& out) noexcept;
+Status config_recovery_encode(const ConfigRecoveryIntent& intent,
+                              EncodedRecoveryIntent& out) noexcept;
+Status config_recovery_decode(ByteView encoded, ConfigRecoveryIntent& out) noexcept;
 
 // Snapshot-hash input (§5.4): domain_snapshot || namespace u16 | schema u16 |
 // complete sorted TLV snapshot bytes. Layout helper only — SHA-256 lives in
 // the crypto phase.
-constexpr std::size_t kConfigSnapshotMax = 512;
 constexpr std::size_t kConfigSnapshotInputMax =
     sizeof(kConfigSnapshotDomain) + 2 + 2 + kConfigSnapshotMax;  // 547
 Status config_snapshot_hash_input(std::uint16_t config_namespace, std::uint16_t schema,
