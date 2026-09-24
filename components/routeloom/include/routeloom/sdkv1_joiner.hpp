@@ -298,11 +298,11 @@ class Joiner final {
   void recovery_required(JoinRecoveryReason reason) noexcept;
   void reconcile_enter(bool authorized, MonotonicMs now) noexcept;
   void wipe_expectation() noexcept;
-  bool matches_expectation(const SiteRecord& site) const noexcept;
+  bool matches_expectation(const SiteRecord& site) noexcept;
   bool recovery_match(const JoinCandidateKey& key) const noexcept;
   // Full re-verification of an adopted RLS1 before it may drive anything.
   bool verify_adopted(const SiteRecord& site, const IdentityRecord& identity) noexcept;
-  void retain_membership(const SiteRecord& site, const IdentityRecord& identity) noexcept;
+  bool retain_membership(const SiteRecord& site, const IdentityRecord& identity) noexcept;
   static MonotonicMs sat_add(MonotonicMs a, std::uint64_t delta) noexcept;
   static void sat_inc(std::uint32_t& counter) noexcept;
   static bool step_expected(JoinState state, JoinAuthPhase phase, std::uint8_t step) noexcept;
@@ -333,7 +333,6 @@ class Joiner final {
   bool tune_is_refresh_{false};
   MonotonicMs channel_deadline_{0};
   MonotonicMs window_deadline_{0};
-  std::uint32_t window_org_{0};
   RefreshPhase refresh_phase_{RefreshPhase::RateWait};
 
   JoinCandidateKey attempt_key_{};
@@ -362,8 +361,6 @@ class Joiner final {
   JoinAction action_{};
   bool action_pending_{false};
 
-  MonotonicMs t_m1_{0};
-  MonotonicMs t_m3_{0};
   MonotonicMs t2_deadline_{0};
   MonotonicMs t4_deadline_{0};
   MonotonicMs overall_deadline_{0};
@@ -373,18 +370,14 @@ class Joiner final {
 
   struct CommitExpectation {
     bool valid{false};
-    std::uint64_t site_id{0};
-    NetworkId network{0};
-    std::uint32_t generation{0};
-    std::uint32_t gk_epoch{0};
-    std::uint32_t boot_witness{0};
     std::uint32_t rs_epoch_to_fetch{0};
-    std::array<std::uint8_t, 32> dams{};
+    Digest256 fingerprint{};
   };
   CommitExpectation commit_expect_{};
+  Digest256 retained_fingerprint_{};
+  bool retained_fingerprint_valid_{false};
   bool reconcile_authorized_{false};
   MonotonicMs backoff_deadline_{0};
-  MonotonicMs backoff_wake_{kJoinNoDeadline};  // earliest eligibility, refreshed per poll
   std::uint8_t reconcile_retries_{0};
   MonotonicMs reconcile_deadline_{0};
 

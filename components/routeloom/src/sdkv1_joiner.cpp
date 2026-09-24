@@ -79,6 +79,7 @@ Joiner::Joiner(const JoinerConfig& config, IdentityStore& identity, SiteStore& s
 Joiner::~Joiner() {
   teardown_attempt();
   wipe_expectation();
+  secure_clear(retained_fingerprint_);
   secure_clear(msg_);
 }
 
@@ -211,25 +212,21 @@ void Joiner::teardown_attempt() noexcept {
   refresh_offer_ = ZtOfferView{};
   refresh_offer_valid_ = false;
   refresh_rssi_ = 0;
-  t_m1_ = 0;
-  t_m3_ = 0;
   t2_deadline_ = 0;
   t4_deadline_ = 0;
   overall_deadline_ = 0;
 }
 
 void Joiner::wipe_expectation() noexcept {
-  secure_clear(commit_expect_.dams);
+  secure_clear(commit_expect_.fingerprint);
   commit_expect_ = CommitExpectation{};
 }
 
-bool Joiner::matches_expectation(const SiteRecord& site) const noexcept {
-  return commit_expect_.valid && site.site_id == commit_expect_.site_id &&
-         site.network == commit_expect_.network &&
-         site.assignment_generation == commit_expect_.generation &&
-         site.gk_epoch_current == commit_expect_.gk_epoch &&
-         site.boot_witness == commit_expect_.boot_witness &&
-         std::memcmp(site.dams.data(), commit_expect_.dams.data(), site.dams.size()) == 0;
+bool Joiner::matches_expectation(const SiteRecord& site) noexcept {
+  if (!commit_expect_.valid) return false;
+  Digest256 actual{};
+  if (!site_.fingerprint(site, actual)) return false;
+  return actual == commit_expect_.fingerprint;
 }
 
 bool Joiner::recovery_match(const JoinCandidateKey& key) const noexcept {
@@ -347,10 +344,11 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
   recovery_site_id_ = 0;
   evidence_valid_ = false;
   retained_floor_ = 0;
+  secure_clear(retained_fingerprint_);
+  retained_fingerprint_valid_ = false;
   reconcile_retries_ = 0;
   reconcile_deadline_ = 0;
   backoff_deadline_ = 0;
-  backoff_wake_ = kJoinNoDeadline;
   decided_valid_ = false;
   boot_witness_ = boot.boot_witness;
   last_error_ = StatusCode::Ok;
@@ -375,8 +373,11 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
     new (&candidates_) JoinCandidates();
     last_now_ = 0;
     clock_uncertain_ = false;
+    last_m1_ms_ = 0;
     boot_witness_ = 0;
     retained_floor_ = 0;
+    secure_clear(retained_fingerprint_);
+    retained_fingerprint_valid_ = false;
     recovery_only_ = false;
     evidence_valid_ = false;
     last_error_ = StatusCode::Ok;
@@ -399,6 +400,8 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
   recovery_only_ = false;
   evidence_valid_ = false;
   retained_floor_ = 0;
+  secure_clear(retained_fingerprint_);
+  retained_fingerprint_valid_ = false;
   reconcile_retries_ = 0;
   set_state(JoinState::Stopped);
   return Status::success();
@@ -576,7 +579,7 @@ MonotonicMs Joiner::next_deadline() const noexcept {
     case JoinState::Reconcile:
       return reconcile_deadline_;
     case JoinState::Backoff:
-      return backoff_wake_ < backoff_deadline_ ? backoff_wake_ : backoff_deadline_;
+      return backoff_deadline_;
   }
   return kJoinNoDeadline;
 }
@@ -646,7 +649,9 @@ bool Joiner::verify_adopted(const SiteRecord& site, const IdentityRecord& identi
   return true;
 }
 
-void Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& identity) noexcept {
+bool Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& identity) noexcept {
+  if (!site_.fingerprint(site, retained_fingerprint_)) return false;
+  retained_fingerprint_valid_ = true;
   evidence_.site_id = site.site_id;
   evidence_.network = site.network;
   evidence_.node = identity.node_id;
@@ -673,11 +678,11 @@ void Joiner::retain_membership(const SiteRecord& site, const IdentityRecord& ide
     recovery_key_.site_hint = join_site_hint(site.site_id);
     recovery_key_.network_low32 = static_cast<std::uint32_t>(site.network & 0xFFFFFFFFULL);
   }
+  return true;
 }
 
 void Joiner::start_scan() noexcept {
   candidates_.scan_begin();
-  backoff_wake_ = kJoinNoDeadline;
   set_state(JoinState::ScanTune);
 }
 
@@ -819,6 +824,10 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
     recovery_required(JoinRecoveryReason::SeqExhausted);
     return Status::success();
   }
+  if (health.read_error_mask != 0 || health.active_load_failed) {
+    reconcile_enter(false, now);
+    return Status::success();
+  }
   if (health.has_site) {
     const SiteRecord& site = site_.site();
     if (!verify_adopted(site, identity)) {
@@ -835,12 +844,18 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       // Known-impaired: only this site may be re-issued, via full EDHOC.
       recovery_only_ = true;
       recovery_site_id_ = site.site_id;
-      retain_membership(site, identity);
+      if (!retain_membership(site, identity)) {
+        recovery_required(JoinRecoveryReason::MembershipInvalid);
+        return Status::success();
+      }
       start_scan();
       return Status::success();
     }
     // A healthy stored member: adopt it without touching the air.
-    retain_membership(site, identity);
+    if (!retain_membership(site, identity)) {
+      recovery_required(JoinRecoveryReason::MembershipInvalid);
+      return Status::success();
+    }
     JoinAction action{};
     action.kind = JoinActionKind::MemberReady;
     action.commit_seq = site_.commit_seq();
@@ -874,7 +889,6 @@ bool Joiner::open_scan_window(const MonotonicMs now) noexcept {
     body.preferred_site_hint = candidates_.preferred_hint(step.org_hint);
     candidates_.avoid_hints(step.org_hint, now, body.avoid_site_hints);
     if (link_.discover(body, now)) {
-      window_org_ = step.org_hint;
       window_deadline_ = sat_add(now, kJoinScanWindowMs);
       set_state(JoinState::ScanWindow);
       return true;
@@ -976,7 +990,6 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
       candidates_.note_scan_cycle_failed();
       // The deadline is set even when entropy fails (the floor holds then).
       (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-      backoff_wake_ = candidates_.next_eligible_ms(now);
       set_state(JoinState::Backoff);
       return Status::success();
     }
@@ -998,7 +1011,6 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
     return Status::success();
   }
   (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-  backoff_wake_ = candidates_.next_eligible_ms(now);
   set_state(JoinState::Backoff);
   return Status::success();
 }
@@ -1057,7 +1069,6 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
       finish_attempt(JoinAttemptOutcome::Failed, 0, now);
       return Status::success();
     }
-    window_org_ = attempt_key_.org_hint;
     window_deadline_ = sat_add(now, kJoinScanWindowMs);
     refresh_offer_valid_ = false;
     refresh_phase_ = RefreshPhase::Collect;
@@ -1070,6 +1081,13 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
+  if (!candidates_.use_refresh_proxy(attempt_, refresh_offer_.proxy_mac)) {
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
+    return Status::success();
+  }
+  attempt_.proxy = refresh_offer_.proxy_mac;
+  attempt_proxy_ = refresh_offer_.proxy_mac;
+  attempt_hops_ = refresh_offer_.body.authority_hops;
   if (!link_.connect(refresh_offer_)) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
@@ -1111,7 +1129,6 @@ Status Joiner::drive_send_m1(const MonotonicMs now) noexcept {
     return Status::success();
   }
   clear_mailbox();
-  t_m1_ = now;
   last_m1_ms_ = now;
   t2_deadline_ = sat_add(now, join_m2_deadline_ms(attempt_hops_));
   overall_deadline_ = sat_add(now, kAttemptOverallMs);
@@ -1186,7 +1203,6 @@ Status Joiner::drive_send_m3(const MonotonicMs now) noexcept {
     return Status::success();
   }
   clear_mailbox();
-  t_m3_ = now;
   std::uint32_t decision = handshake_.offer().decision_timeout_ms;
   if (decision < kDecisionMinMs) decision = kDecisionMinMs;
   if (decision > kDecisionMaxMs) decision = kDecisionMaxMs;
@@ -1231,6 +1247,11 @@ Status Joiner::drive_wait_m4(const MonotonicMs now) noexcept {
 
 Status Joiner::drive_decided(const MonotonicMs now) noexcept {
   if (action_pending_) return Status::success();
+  if (now >= overall_deadline_) {
+    sat_inc(counters_.timeouts);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
+    return Status::success();
+  }
   JoinDecideInput input{};
   input.membership = evidence_valid_ ? &evidence_ : nullptr;
   input.boot_witness = boot_witness_;
@@ -1295,6 +1316,11 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
     return Status::success();
   }
   const SiteRecord& prepared = *decided_.record;
+  Digest256 prepared_fingerprint{};
+  if (!site_.fingerprint(prepared, prepared_fingerprint)) {
+    finish_attempt(JoinAttemptOutcome::MalformedResult, 0, now);
+    return Status::success();
+  }
   Status stored;
   const SiteStoreHealth health = site_.health();
   if (health.quarantined || health.uncertain) {
@@ -1335,13 +1361,8 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   // The prepared pointer dies with the session: keep the minimal compare
   // set for the re-read below and for Reconcile.
   commit_expect_.valid = true;
-  commit_expect_.site_id = prepared.site_id;
-  commit_expect_.network = prepared.network;
-  commit_expect_.generation = prepared.assignment_generation;
-  commit_expect_.gk_epoch = prepared.gk_epoch_current;
-  commit_expect_.boot_witness = prepared.boot_witness;
   commit_expect_.rs_epoch_to_fetch = decided_.rs_epoch_to_fetch;
-  commit_expect_.dams = prepared.dams;
+  commit_expect_.fingerprint = prepared_fingerprint;
   candidates_.apply_outcome(attempt_, JoinAttemptOutcome::AllowVerified, 0, now, entropy_);
   teardown_attempt();
   if (!stored) {
@@ -1356,9 +1377,10 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   (void)site_.initialize();
   const SiteStoreHealth after = site_.health();
   if (after.has_site && after.unsupported_mask == 0 && after.read_error_mask == 0 &&
-      !after.quarantined && matches_expectation(site_.site())) {
-    // Adopted, including the uncertain-sibling case: our sequence is the
-    // floor + 1, so no unproven sibling can hold anything newer.
+      !after.active_load_failed && !after.quarantined && !after.uncertain &&
+      matches_expectation(site_.site()) &&
+      verify_adopted(site_.site(), identity_.identity())) {
+    // The complete verified record was read back from a healthy pair.
     JoinAction action{};
     action.kind = JoinActionKind::MemberReady;
     action.commit_seq = site_.commit_seq();
@@ -1379,7 +1401,7 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
   if (now < reconcile_deadline_) return Status::success();
   (void)site_.initialize();
   const SiteStoreHealth health = site_.health();
-  if (!health.initialized || health.read_error_mask != 0 ||
+  if (!health.initialized || health.read_error_mask != 0 || health.active_load_failed ||
       (health.uncertain && !health.has_site)) {
     // Unreadable or undecodable: bounded re-reads, then external recovery.
     ++reconcile_retries_;
@@ -1413,7 +1435,8 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
       recovery_required(JoinRecoveryReason::BootWitnessMismatch);
       return Status::success();
     }
-    if (commit_expect_.valid && matches_expectation(site)) {
+    if (commit_expect_.valid && !health.quarantined && !health.uncertain &&
+        matches_expectation(site)) {
       // Our write landed (the error was the readback or later): adopt it
       // without consuming another approval or writing again.
       JoinAction action{};
@@ -1429,8 +1452,18 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
     }
     if (!health.quarantined && !health.uncertain) {
       // A healthy old member survived: keep it, never guess DAMS equality.
+      Digest256 actual{};
+      if (commit_expect_.valid &&
+          (!retained_fingerprint_valid_ || !site_.fingerprint(site, actual) ||
+           actual != retained_fingerprint_)) {
+        recovery_required(JoinRecoveryReason::MembershipInvalid);
+        return Status::success();
+      }
       wipe_expectation();
-      retain_membership(site, identity);
+      if (!retain_membership(site, identity)) {
+        recovery_required(JoinRecoveryReason::MembershipInvalid);
+        return Status::success();
+      }
       JoinAction action{};
       action.kind = JoinActionKind::MemberReady;
       action.commit_seq = site_.commit_seq();
@@ -1444,7 +1477,10 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
     wipe_expectation();
     recovery_only_ = true;
     recovery_site_id_ = site.site_id;
-    retain_membership(site, identity);
+    if (!retain_membership(site, identity)) {
+      recovery_required(JoinRecoveryReason::MembershipInvalid);
+      return Status::success();
+    }
     start_scan();
     return Status::success();
   }
@@ -1456,14 +1492,12 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
     return Status::success();
   }
   (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-  backoff_wake_ = candidates_.next_eligible_ms(now);
   set_state(JoinState::Backoff);
   return Status::success();
 }
 
 Status Joiner::drive_backoff(const MonotonicMs now) noexcept {
   if (action_pending_) return Status::success();
-  backoff_wake_ = candidates_.next_eligible_ms(now);
   // No eligibility peek exists: selection and attempt start are atomic, so
   // Backoff always honors its deadline (a jittered ~1-2 s at k=0, cut by
   // the nearest pending eligibility) before the rescan.

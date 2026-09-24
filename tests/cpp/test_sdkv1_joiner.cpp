@@ -1276,6 +1276,41 @@ void test_v1_j08_readback_failure_adopts() {
   current.clear();
 }
 
+// A sealed new record cannot be adopted while its sibling is corrupt:
+// the sequence is known, but the pair remains uncertain until healed.
+void test_v1_j08_reconcile_uncertain_pair() {
+  current = "v1-j08-reconcile-uncertain";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  DeviceEnds& dev = net.device();
+  dev.site_storage.inner_.slot(1)[0] = 0x52;
+  dev.site_storage.inner_.cut_call = 2;  // first write to the second twin fails
+  dev.site_storage.inner_.cut_bytes = 0;
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().counters.store_failures >= 1; }, 30000));
+  CHECK(dev.joiner.snapshot().state == JoinState::Reconcile);
+  CHECK(dev.joiner.poll(net.now()).ok());
+  CHECK(dev.joiner.snapshot().state != JoinState::Ready);
+  CHECK(dev.joiner.snapshot().pending_action != JoinActionKind::MemberReady);
+  current.clear();
+}
+
+void test_decision_deadline_before_commit() {
+  current = "decision-deadline";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Decided; }, 30000));
+  CHECK(dev.site_storage.writes() == 0);
+  CHECK(dev.joiner.poll(net.now() + 15000).ok());
+  CHECK(dev.joiner.snapshot().state != JoinState::Commit);
+  CHECK(dev.site_storage.writes() == 0);
+  current.clear();
+}
+
 // Cuts during the twin write of a recovery re-issue: the device still
 // lands Ready with the same generation and certificate.
 void test_v1_j08_recover_cut_matrix() {
@@ -1664,6 +1699,26 @@ void test_clock_regression_recovers() {
   current.clear();
 }
 
+void test_clock_domain_restart_clears_old_m1_rate_time() {
+  current = "clock-domain-rate";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.skip_to(1'000'000);
+  net.add_site(site_a_params());
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), net.now()).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::WaitM2; }, 30000));
+  CHECK(dev.joiner.poll(0).code == StatusCode::ClockUncertain);
+  CHECK(dev.joiner.stop(0).ok());
+  net.reset_clock_and_sites();
+  net.add_site(site_a_params());
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::RefreshWindow; }, 30000));
+  CHECK(dev.joiner.next_deadline() <= net.now() + kJoinMinM1IntervalMs);
+  current.clear();
+}
+
 // The first entropy draw fails once (a scan DISCOVER nonce): the window
 // is skipped, the scan completes, the join succeeds.
 void test_entropy_shortage_degrades() {
@@ -1926,6 +1981,26 @@ void patch_site_slot(LoggingStorage& storage, std::uint8_t slot, std::size_t off
   raw[used - 1] = static_cast<std::uint8_t>(crc & 0xFFU);
 }
 
+// A readback error can leave a sealed record. Reconcile must compare every
+// prepared field: the certificate and DAMS can still match while GK differs.
+void test_reconcile_rejects_changed_prepared_gk() {
+  current = "store-reconcile-gk";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  DeviceEnds& dev = net.device();
+  dev.site_storage.fail_read_once_writes_ge = 2;
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().counters.store_failures >= 1; }, 30000));
+  CHECK(dev.joiner.snapshot().state == JoinState::Reconcile);
+  // Header 20 B, fixed fields before gk_current 32 B.
+  patch_site_slot(dev.site_storage, 0, 52, Bytes{0x7A});
+  CHECK(dev.joiner.poll(net.now()).ok());
+  CHECK(dev.joiner.snapshot().state == JoinState::RecoveryRequired);
+  CHECK(dev.joiner.snapshot().pending_action == JoinActionKind::RecoveryRequired);
+  current.clear();
+}
+
 // Valid + unknown-schema: the FSM stops for external recovery, sends
 // nothing, and never recovers over the unknown slot.
 void test_unknown_schema_stops() {
@@ -2079,6 +2154,48 @@ void test_healthy_member_boot_adopts() {
   current.clear();
 }
 
+void test_member_boot_active_reread_failure() {
+  current = "store-active-reread";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  net.restart_device(device_config(), 0xA11CE);
+  DeviceEnds& booted = net.device();
+  booted.site_storage.fail_read_call = booted.site_storage.read_calls + 3;
+  CHECK(booted.joiner.start(boot_input(), net.now()).ok());
+  CHECK(booted.joiner.poll(net.now()).ok());
+  CHECK(booted.joiner.snapshot().state == JoinState::Reconcile);
+  CHECK(booted.radio.sends == 0);
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  CHECK(net.terminal_action().kind == JoinActionKind::MemberReady);
+  CHECK(booted.radio.sends == 0);
+  current.clear();
+}
+
+void test_member_boot_unreadable_sibling() {
+  current = "store-unreadable-sibling";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  net.restart_device(device_config(), 0xB007);
+  DeviceEnds& booted = net.device();
+  booted.site_storage.fail_read_call = booted.site_storage.read_calls + 2;
+  CHECK(booted.joiner.start(boot_input(), net.now()).ok());
+  CHECK(booted.joiner.poll(net.now()).ok());
+  CHECK(booted.joiner.snapshot().state == JoinState::Reconcile);
+  CHECK(booted.radio.sends == 0);
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  CHECK(net.terminal_action().kind == JoinActionKind::MemberReady);
+  CHECK(booted.radio.sends == 0);
+  current.clear();
+}
+
 // --- V1-J05 variants -------------------------------------------------------------------------------------
 // Pending A on channel 1, allowing B on channel 11: the scan crosses the
 // channels and B binds.
@@ -2178,6 +2295,32 @@ void test_v1_j05_proxy_changeover() {
   current.clear();
 }
 
+void test_refresh_proxy_is_attempted_proxy() {
+  current = "refresh-proxy-binding";
+  SimSiteParams site = site_a_params(6, -30);
+  SimProxyParams second = site.proxies[0];
+  second.mac = MacAddress{{0x02, 0, 0, 0, 0x0A, 0x02}};
+  second.node = 0x00A1000000000A02ULL;
+  second.rssi = -60;
+  site.proxies.push_back(second);
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site);
+  DeviceEnds& dev = net.device();
+  CHECK(dev.joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::RefreshWindow; }, 30000));
+  net.site(0).set_proxy_muted(0, true);
+  CHECK(net.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::WaitM2; }, 30000));
+  MacAddress event_proxy{};
+  for (const JoinEvent& event : dev.observer.events) {
+    if (event.kind == JoinEventKind::AttemptStarted) event_proxy = event.proxy;
+  }
+  CHECK(event_proxy == second.mac);
+  CHECK(dev.radio.last_unicast_destination == event_proxy);
+  current.clear();
+}
+
 // --- Resource gate (design §9) -------------------------------------------------------------------------
 void test_joiner_size_budget() {
   current = "size";
@@ -2210,6 +2353,8 @@ int main() {
   test_v1_j08_sealed_landed_adopts();
   test_v1_j08_cut_before_m4();
   test_v1_j08_readback_failure_adopts();
+  test_v1_j08_reconcile_uncertain_pair();
+  test_decision_deadline_before_commit();
   test_v1_j08_recover_cut_matrix();
   test_reentry_refused();
   test_109_chunk_loss_recovers();
@@ -2217,6 +2362,7 @@ int main() {
   test_109_stale_m2_during_m3();
   test_quiescence_points();
   test_clock_regression_recovers();
+  test_clock_domain_restart_clears_old_m1_rate_time();
   test_entropy_shortage_degrades();
   test_time_overflow_smoke();
   test_tune_failure_skips_channel();
@@ -2227,13 +2373,17 @@ int main() {
   test_hint_flood_ignored();
   test_unreachable_proxy_never_attempted();
   test_unknown_schema_stops();
+  test_reconcile_rejects_changed_prepared_gk();
   test_seq_exhausted_stops();
   test_floor_regression_refused();
   test_cross_site_recover_forbidden();
   test_healthy_member_boot_adopts();
+  test_member_boot_active_reread_failure();
+  test_member_boot_unreadable_sibling();
   test_v1_j05_split_channels();
   test_v1_j05_split_orgs();
   test_v1_j05_proxy_changeover();
+  test_refresh_proxy_is_attempted_proxy();
   test_joiner_size_budget();
   if (failures == 0) {
     std::printf("joiner tests passed\n");

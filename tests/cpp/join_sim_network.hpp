@@ -82,6 +82,11 @@ class LoggingStorage final : public RecordSlotStorage {
  public:
   explicit LoggingStorage(const std::size_t slot_bytes) : inner_(slot_bytes) {}
   Status read(const std::uint8_t slot, const MutableByteView target) noexcept override {
+    ++read_calls;
+    if (read_calls == fail_read_call) {
+      log_.push_back(StorageOp{'r', slot, target.size, now_ms, StatusCode::StorageFailure});
+      return Status::error(StatusCode::StorageFailure, "injected read failure");
+    }
     if (fail_read_once_writes_ge >= 0 &&
         static_cast<long>(writes()) >= fail_read_once_writes_ge) {
       fail_read_once_writes_ge = -1;  // one shot: the commit readback only
@@ -113,6 +118,8 @@ class LoggingStorage final : public RecordSlotStorage {
   FaultyRecordStorage inner_;
   std::vector<StorageOp> log_;
   std::uint64_t now_ms{0};
+  std::size_t read_calls{0};
+  std::size_t fail_read_call{0};  // 1-based call, once
   // Fails the next read once `writes()` reaches the threshold (-1 = off).
   long fail_read_once_writes_ge{-1};
 };
@@ -154,6 +161,7 @@ class DeviceRadioPort final : public ZtRld1Port {
       : air_(air), self_(self), channel_(channel), now_(now), faults_(faults) {}
   Status send_rld1(const MacAddress& destination, const ByteView frame) noexcept override {
     ++sends;
+    if (!(destination == discovery_const::kBroadcastMac)) last_unicast_destination = destination;
     Bytes bytes(frame.data, frame.data + frame.size);
     if (faults_.drop_if && faults_.drop_if(RadioDir::Up, bytes)) {
       ++faults_.dropped;
@@ -167,6 +175,7 @@ class DeviceRadioPort final : public ZtRld1Port {
     return Status::success();
   }
   std::uint32_t sends{0};
+  MacAddress last_unicast_destination{};
 
  private:
   std::deque<RadioFrame>& air_;
@@ -922,6 +931,21 @@ class JoinSimNetwork {
     device_->site_storage.log_.clear();
     device_->channel = channel;
     device_->now_ms = now_;
+  }
+
+  // A soft Owner clock-domain restart keeps the Joiner instance but gives
+  // the radio side fresh peer instances and an empty event queue.
+  void reset_clock_and_sites() {
+    sites_.clear();
+    air_.clear();
+    mesh_.clear();
+    device_->air.clear();
+    air_history_.clear();
+    network_overrides_.clear();
+    rssi_map_.clear();
+    now_ = 0;
+    device_->now_ms = 0;
+    device_->channel = 0;
   }
 
   StatusCode error() const { return error_; }

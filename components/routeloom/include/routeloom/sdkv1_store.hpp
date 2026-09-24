@@ -164,6 +164,7 @@ struct SiteStoreHealth {
   bool uncertain{false};
   std::uint8_t unsupported_mask{0};  // bit i: slot i holds an unknown schema
   std::uint8_t read_error_mask{0};   // bit i: slot i was unreadable
+  bool active_load_failed{false};    // adopted slot could not be re-read/decoded
   std::uint32_t seq_floor{0};
 };
 
@@ -172,6 +173,9 @@ class SiteStore {
   explicit SiteStore(RecordSlotStorage& storage) noexcept;
   Status initialize() noexcept;
   SiteStoreHealth health() const noexcept;
+  // Stable digest of the canonical semantic record (sequence/seal excluded).
+  // Uses this store's scratch buffer; it never reads or writes flash.
+  Status fingerprint(const SiteRecord& record, Digest256& out) noexcept;
 
   // Commit a Member record. With a Member record already adopted, the new
   // one must keep site_id, and must not regress site_epoch (network>>32;
@@ -196,10 +200,12 @@ class SiteStore {
 
  private:
   Status encode(const SiteRecord& record, std::size_t& used_len) noexcept;
+  void wipe_scratch() noexcept;
 
   ByteBuffer<kSiteSlotBytes> scratch_{};
   SealedSlotPair pair_;
   SiteRecord site_{};
+  bool active_load_failed_{false};
 };
 
 // --- RRS1: revocation set (A/B alternating) -----------------------------------
