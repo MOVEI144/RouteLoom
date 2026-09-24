@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_result",
+  "encoded_hex": "02630016000000a10000000007777e57ab1e00000007000000",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_result_short",
+  "note": "22 B payload exactly"
+}

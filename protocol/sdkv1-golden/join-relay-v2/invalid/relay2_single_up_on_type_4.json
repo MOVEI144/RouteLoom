@@ -1,0 +1,9 @@
+{
+  "codec": "relay_single_frame",
+  "encoded_hex": "02017e57ab1e00a10000000007770200000012340100ba040000000700000003992bf5dc16af90ff4a6fa13a95aa7f1cbe034d38fd4f5d7787a1b0a11e762b658429a606c8a4ddae",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_single_up_on_type_4",
+  "note": "up objects ride type 3",
+  "wire_type": 4
+}

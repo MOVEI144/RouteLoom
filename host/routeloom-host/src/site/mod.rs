@@ -87,7 +87,7 @@ use records::{
 };
 use store::{Batch, DeviceRow, DocKind, GroupKeyRow, LedgerRow, SiteStore};
 use transport::{
-    AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp,
+    AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp, PHASE_EDHOC,
     STEP_EDHOC_ERROR,
 };
 
@@ -741,9 +741,10 @@ impl SiteAuthority {
         self.events.push((now_ms, fields));
     }
 
-    fn down(&mut self, key: RelayKey, step: u8, status: DownStatus, body: Vec<u8>) {
+    fn down(&mut self, key: RelayKey, phase: u8, step: u8, status: DownStatus, body: Vec<u8>) {
         self.outbox.push(Outbound::Down(RelayDown {
             key,
+            phase,
             step,
             status,
             body,
@@ -758,9 +759,12 @@ impl SiteAuthority {
 
     pub fn handle_up(&mut self, up: RelayUp, now_ms: u64) {
         self.tick(now_ms);
-        match up.step {
-            1 => self.on_message_1(up, now_ms),
-            3 => self.on_message_3(up, now_ms),
+        // This service speaks EDHOC (phase 4) only: `step` alone is
+        // ambiguous, so any other phase is never processed as an EDHOC
+        // message — it ends the relay instead (#116).
+        match (up.phase, up.step) {
+            (PHASE_EDHOC, 1) => self.on_message_1(up, now_ms),
+            (PHASE_EDHOC, 3) => self.on_message_3(up, now_ms),
             _ => {
                 // An Initiator error message or a stray step ends the relay.
                 if let Some(i) = self.txns.iter().position(|t| t.key == up.key) {
@@ -809,7 +813,13 @@ impl SiteAuthority {
                     EdhocError::WrongSelectedSuite => error_message_wrong_suite(&[SUITE_2]),
                     _ => error_message_unspecified("message_1 refused"),
                 };
-                self.down(up.key, STEP_EDHOC_ERROR, DownStatus::Final, body);
+                self.down(
+                    up.key,
+                    PHASE_EDHOC,
+                    STEP_EDHOC_ERROR,
+                    DownStatus::Final,
+                    body,
+                );
                 return;
             }
         };
@@ -820,6 +830,7 @@ impl SiteAuthority {
             self.counters.message_1_refused += 1;
             self.down(
                 up.key,
+                PHASE_EDHOC,
                 STEP_EDHOC_ERROR,
                 DownStatus::Final,
                 error_message_unspecified("message_1 refused"),
@@ -864,7 +875,7 @@ impl SiteAuthority {
                         i.profile_bits & routeloom_join::JOIN_PROFILE_MEMBERSHIP_RECOVERY != 0
                     }),
                 });
-                self.down(up.key, 2, DownStatus::Continue, message_2);
+                self.down(up.key, PHASE_EDHOC, 2, DownStatus::Continue, message_2);
             }
             Err(_) => self.abort(up.key, AbortReason::AuthorityError),
         }
@@ -951,6 +962,7 @@ impl SiteAuthority {
                 *self.counters.rejected_unverified.entry(reason).or_insert(0) += 1;
                 self.down(
                     up.key,
+                    PHASE_EDHOC,
                     STEP_EDHOC_ERROR,
                     DownStatus::Final,
                     error_message_unspecified("join refused"),
@@ -1229,7 +1241,7 @@ impl SiteAuthority {
             });
         match composed {
             Ok(message_4) => {
-                self.down(txn.key, 4, DownStatus::Final, message_4);
+                self.down(txn.key, PHASE_EDHOC, 4, DownStatus::Final, message_4);
                 true
             }
             Err(_) => {

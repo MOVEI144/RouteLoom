@@ -1,0 +1,12 @@
+{
+  "name": "auth_ok",
+  "direction": "d2h",
+  "kind": 2,
+  "flags": 1,
+  "session": 0,
+  "request": 0,
+  "inner_hex": "53922630a6f41df14fda493b02318ff1c1c31a7b20ed1203",
+  "body_hex": "53922630a6f41df14fda493b02318ff1c1c31a7b20ed1203",
+  "wire_hex": "07524c553101020201010101010101010101010101010101011e1853922630a6f41df14fda493b02318ff1c1c31a7b20ed120312a7b2a400",
+  "note": "device confirms; session id binds the transcript"
+}
