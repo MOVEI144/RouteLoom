@@ -903,7 +903,7 @@ fn removed_recovery_notice_uses_retained_network() {
                     reason: RevocationReason::Lost,
                     key: "revoke-old-network".into(),
                 },
-                T0 + 20,
+                HostTime::sync(T0 + 20),
             )
         })
         .0

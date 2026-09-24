@@ -691,7 +691,10 @@ impl World {
                             assert_eq!(durable.dams, row.dams);
                             // API timestamps use wall time, not this fixture's virtual time.
                             let forwarded_at = now_ms();
-                            assert!(delivered <= forwarded_at, "durable approval precedes the m4 send");
+                            assert!(
+                                delivered <= forwarded_at,
+                                "durable approval precedes the m4 send"
+                            );
                             self.allow_forwards.push((site, forwarded_at, delivered));
                         } else {
                             assert!(
