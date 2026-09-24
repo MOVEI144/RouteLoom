@@ -33,6 +33,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::path::Path;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::group_keys::{
     validate_group_keys, RotationCause, RotationPhase, RotationRow, TargetRow, TargetState,
@@ -88,7 +89,7 @@ impl DocKind {
 }
 
 /// One member / removed device (the `devices` table).
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct DeviceRow {
     pub node: u64,
     pub kid: [u8; 32],
@@ -114,6 +115,25 @@ pub struct DeviceRow {
     pub removal_reason: u8,
 }
 
+impl std::fmt::Debug for DeviceRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceRow")
+            .field("node", &self.node)
+            .field("member", &self.member)
+            .field("generation", &self.generation)
+            .field("role", &self.role)
+            .field("confirmed", &self.confirmed)
+            .field("dams", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for DeviceRow {
+    fn drop(&mut self) {
+        self.dams.zeroize();
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LedgerRow {
     pub seq: u64,
@@ -128,13 +148,30 @@ pub struct LedgerRow {
     pub hash: [u8; 32],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct GroupKeyRow {
     pub epoch: u32,
     pub key: [u8; 32],
     /// "active" or "staged".
     pub state: String,
     pub created_ms: u64,
+}
+
+impl std::fmt::Debug for GroupKeyRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupKeyRow")
+            .field("epoch", &self.epoch)
+            .field("key", &"<redacted>")
+            .field("state", &self.state)
+            .field("created_ms", &self.created_ms)
+            .finish()
+    }
+}
+
+impl Drop for GroupKeyRow {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
 }
 
 /// What a batch does to the single `gk_rotation` row.
@@ -290,10 +327,19 @@ fn u(value: i64) -> u64 {
     value as u64
 }
 
-fn arr32(bytes: Vec<u8>, what: &str) -> Result<[u8; 32], StoreError> {
-    bytes
-        .try_into()
-        .map_err(|_| StoreError(format!("site store: {what} is not 32 bytes")))
+fn checked_u32(value: i64, field: &str) -> Result<u32, StoreError> {
+    u32::try_from(value).map_err(|_| StoreError(format!("site store: {field} is out of range")))
+}
+
+fn arr32(mut bytes: Vec<u8>, what: &str) -> Result<[u8; 32], StoreError> {
+    if bytes.len() != 32 {
+        bytes.zeroize();
+        return Err(StoreError(format!("site store: {what} is not 32 bytes")));
+    }
+    let mut out = [0; 32];
+    out.copy_from_slice(&bytes);
+    bytes.zeroize();
+    Ok(out)
 }
 
 impl SqliteSiteStore {
@@ -334,8 +380,9 @@ impl SqliteSiteStore {
         conn.pragma_update(None, "busy_timeout", 100)?;
         conn.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
+        if fresh {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
              CREATE TABLE IF NOT EXISTS devices (
                 node INTEGER PRIMARY KEY, kid BLOB NOT NULL, dev_cert BLOB NOT NULL,
                 model INTEGER NOT NULL, hw_rev INTEGER NOT NULL, cert_serial INTEGER NOT NULL,
@@ -365,7 +412,13 @@ impl SqliteSiteStore {
              CREATE TABLE IF NOT EXISTS docs (
                 kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL,
                 PRIMARY KEY (kind, key));",
-        )?;
+            )?;
+            conn.execute(
+                "INSERT INTO meta (name, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION.to_be_bytes().to_vec()],
+            )?;
+            return Ok(Self { conn });
+        }
         let version: Option<Vec<u8>> = conn
             .query_row(
                 "SELECT value FROM meta WHERE name='schema_version'",
@@ -375,10 +428,10 @@ impl SqliteSiteStore {
             .optional()?;
         match version {
             None => {
-                conn.execute(
-                    "INSERT INTO meta (name, value) VALUES ('schema_version', ?1)",
-                    params![SCHEMA_VERSION.to_be_bytes().to_vec()],
-                )?;
+                return Err(StoreError(format!(
+                    "site store {} has no schema version",
+                    path.display()
+                )))
             }
             Some(v) if v == SCHEMA_VERSION.to_be_bytes() => {}
             Some(v) if v == SCHEMA_VERSION_1.to_be_bytes() => {
@@ -401,10 +454,23 @@ impl SqliteSiteStore {
     /// version bump never lands without the validation.
     fn migrate_1_to_2(conn: &mut Connection, path: &Path) -> Result<(), StoreError> {
         let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TABLE gk_rotation (
+                operation_id INTEGER PRIMARY KEY, from_epoch INTEGER NOT NULL,
+                to_epoch INTEGER NOT NULL, cause INTEGER NOT NULL, phase TEXT NOT NULL,
+                members_revision INTEGER NOT NULL, created_ms INTEGER NOT NULL,
+                activated_ms INTEGER NOT NULL);
+             CREATE TABLE gk_targets (
+                rotation INTEGER NOT NULL, node INTEGER NOT NULL, kid BLOB NOT NULL,
+                generation INTEGER NOT NULL, state TEXT NOT NULL,
+                confirmed_epoch INTEGER NOT NULL, confirmed_gkid BLOB,
+                last_contact_ms INTEGER, PRIMARY KEY (rotation, node));",
+        )?;
         let used: i64 = tx.query_row(
             "SELECT (SELECT COUNT(*) FROM devices) + (SELECT COUNT(*) FROM ledger)
                     + (SELECT COUNT(*) FROM group_keys)
-                    + (SELECT COUNT(*) FROM meta WHERE name = 'site_binding')",
+                    + (SELECT COUNT(*) FROM rrs) + (SELECT COUNT(*) FROM docs)
+                    + (SELECT COUNT(*) FROM meta WHERE name <> 'schema_version')",
             [],
             |row| row.get(0),
         )?;
@@ -422,7 +488,7 @@ impl SqliteSiteStore {
             for row in rows {
                 let (epoch, key, state, created) = row?;
                 keys.push(GroupKeyRow {
-                    epoch: epoch as u32,
+                    epoch: checked_u32(epoch, "gk_epoch")?,
                     key: arr32(key, "gk").map_err(|e| {
                         StoreError(format!("cannot migrate {}: {e}", path.display()))
                     })?,
@@ -575,7 +641,7 @@ impl SiteStore for SqliteSiteStore {
         for row in rows {
             let (epoch, key, state, created) = row?;
             snapshot.group_keys.push(GroupKeyRow {
-                epoch: epoch as u32,
+                epoch: checked_u32(epoch, "gk_epoch")?,
                 key: arr32(key, "gk")?,
                 state,
                 created_ms: u(created),
@@ -610,11 +676,11 @@ impl SiteStore for SqliteSiteStore {
                 .ok_or_else(|| StoreError("site store: gk_rotation phase corrupt".into()))?;
             snapshot.gk_rotation = Some(RotationRow {
                 operation_id: u(op),
-                from_epoch: from as u32,
-                to_epoch: to as u32,
+                from_epoch: checked_u32(from, "gk_rotation from_epoch")?,
+                to_epoch: checked_u32(to, "gk_rotation to_epoch")?,
                 cause,
                 phase,
-                members_revision: revision as u32,
+                members_revision: checked_u32(revision, "gk_rotation members_revision")?,
                 created_ms: u(created),
                 activated_ms: u(activated),
             });
@@ -646,9 +712,9 @@ impl SiteStore for SqliteSiteStore {
                 rotation: u(rotation),
                 node: u(node),
                 kid: arr32(kid, "gk target kid")?,
-                generation: generation as u32,
+                generation: checked_u32(generation, "gk target generation")?,
                 state,
-                confirmed_epoch: confirmed as u32,
+                confirmed_epoch: checked_u32(confirmed, "gk target confirmed_epoch")?,
                 confirmed_gkid,
                 last_contact_ms: contact.map(u),
             });
@@ -680,6 +746,7 @@ impl SiteStore for SqliteSiteStore {
             )?;
         }
         for d in &batch.devices {
+            let dams = Zeroizing::new(d.dams.to_vec());
             tx.execute(
                 "INSERT OR REPLACE INTO devices (node, kid, dev_cert, model, hw_rev, cert_serial,
                     member, generation, role, member_cert, member_cert_serial, confirmed, dams,
@@ -698,7 +765,7 @@ impl SiteStore for SqliteSiteStore {
                     d.member_cert,
                     i64::from(d.member_cert_serial),
                     d.confirmed,
-                    d.dams.to_vec(),
+                    dams.as_slice(),
                     i(d.approved_ms),
                     d.delivered_ms.map(i),
                     d.confirmed_ms.map(i),
@@ -731,9 +798,10 @@ impl SiteStore for SqliteSiteStore {
             )?;
         }
         for g in &batch.group_keys {
+            let key = Zeroizing::new(g.key.to_vec());
             tx.execute(
                 "INSERT OR REPLACE INTO group_keys (gk_epoch, gk, state, created_ms) VALUES (?1, ?2, ?3, ?4)",
-                params![i64::from(g.epoch), g.key.to_vec(), g.state, i(g.created_ms)],
+                params![i64::from(g.epoch), key.as_slice(), g.state, i(g.created_ms)],
             )?;
         }
         if let Some(below) = batch.group_keys_below {
@@ -1075,6 +1143,96 @@ mod tests {
         });
         assert!(SqliteSiteStore::open(&db).is_err());
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn review_failed_migration_leaves_the_v1_schema_unchanged() {
+        let db = v1_db("review-atomic-migration", |conn| {
+            v1_key(conn, 4, &[0; 32], "active");
+        });
+        assert!(SqliteSiteStore::open(&db).is_err());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('gk_rotation', 'gk_targets')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn review_missing_schema_version_in_used_database_is_rejected() {
+        let db = temp_path("review-missing-version");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (name TEXT PRIMARY KEY, value BLOB NOT NULL);
+             INSERT INTO meta (name, value) VALUES ('site_binding', x'01');",
+        )
+        .unwrap();
+        drop(conn);
+        std::fs::set_permissions(&db, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+        assert!(SqliteSiteStore::open(&db).is_err());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn review_v1_metadata_without_keys_does_not_migrate_as_fresh() {
+        let db = v1_db("review-meta-without-keys", |conn| {
+            conn.execute(
+                "INSERT INTO meta (name, value) VALUES ('rs_epoch', ?1)",
+                rusqlite::params![1_u32.to_be_bytes().to_vec()],
+            )
+            .unwrap();
+        });
+        assert!(SqliteSiteStore::open(&db).is_err());
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let version: Vec<u8> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE name='schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION_1.to_be_bytes());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn review_v1_negative_key_epoch_is_rejected() {
+        let db = v1_db("review-negative-epoch", |conn| {
+            conn.execute(
+                "INSERT INTO group_keys (gk_epoch, gk, state, created_ms) VALUES (-1, ?1, 'active', 7)",
+                rusqlite::params![vec![0x11_u8; 32]],
+            )
+            .unwrap();
+        });
+        assert!(SqliteSiteStore::open(&db).is_err());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn review_store_debug_redacts_group_keys_and_dams() {
+        let key = GroupKeyRow {
+            epoch: 3,
+            key: [0xA5; 32],
+            state: "active".into(),
+            created_ms: 7,
+        };
+        let mut member = DeviceRow::default();
+        member.node = 42;
+        member.dams = [0xB6; 32];
+        let snapshot = Snapshot {
+            group_keys: vec![key],
+            devices: vec![member],
+            ..Snapshot::default()
+        };
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains("165, 165"), "GK leaked through Debug");
+        assert!(!debug.contains("182, 182"), "DAMS leaked through Debug");
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

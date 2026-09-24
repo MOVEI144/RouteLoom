@@ -2,7 +2,8 @@
 //! and 07 §8 named per test). Devices are simulated with the Rust EDHOC
 //! Initiator and routeloom-join's device-side checks (testkit).
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use routeloom_join::JoinResult;
 use routeloom_provision::sdkv1::revocation::{revocation_object_verify, RevocationReason};
@@ -131,6 +132,55 @@ fn gk_service() -> (
     let gk = FakeGroupKeyTransport::new();
     service.set_group_key_transport(gk.clone());
     (service, transport, gk)
+}
+
+struct FailSecondCommit {
+    inner: Box<dyn SiteStore>,
+    calls: usize,
+}
+
+#[derive(Default)]
+struct FailJoinRequestCommit {
+    inner: MemoryStore,
+}
+
+impl SiteStore for FailJoinRequestCommit {
+    fn load(&mut self) -> Result<store::Snapshot, store::StoreError> {
+        self.inner.load()
+    }
+
+    fn commit(&mut self, batch: &Batch) -> Result<(), store::StoreError> {
+        if batch
+            .docs
+            .iter()
+            .any(|(kind, _, body)| *kind == store::DocKind::JoinRequest && body.is_some())
+        {
+            return Err(store::StoreError("join request commit failed".into()));
+        }
+        self.inner.commit(batch)
+    }
+
+    fn durable(&self) -> bool {
+        false
+    }
+}
+
+impl SiteStore for FailSecondCommit {
+    fn load(&mut self) -> Result<store::Snapshot, store::StoreError> {
+        self.inner.load()
+    }
+
+    fn commit(&mut self, batch: &Batch) -> Result<(), store::StoreError> {
+        self.calls += 1;
+        if self.calls == 2 {
+            return Err(store::StoreError("activation commit failed".into()));
+        }
+        self.inner.commit(batch)
+    }
+
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
 }
 
 fn rotate(service: &SiteService, expected: u32, key: &str, now: u64) -> Result<String, SiteError> {
@@ -306,15 +356,16 @@ fn failing_store() -> MemoryStore {
 fn member_rows(members: usize, active_epoch: u32) -> MemoryStore {
     let mut store = MemoryStore::default();
     let devices: Vec<DeviceRow> = (0..members)
-        .map(|i| DeviceRow {
-            node: 0x00A1_0000_0000_0000 + 0x1000 + i as u64,
-            kid: [((i % 251) + 1) as u8; 32],
-            member: true,
-            generation: 1,
-            role: 1,
-            dams: [((i % 251) + 1) as u8; 32],
-            approved_ms: T0,
-            ..DeviceRow::default()
+        .map(|i| {
+            let mut row = DeviceRow::default();
+            row.node = 0x00A1_0000_0000_0000 + 0x1000 + i as u64;
+            row.kid = [((i % 251) + 1) as u8; 32];
+            row.member = true;
+            row.generation = 1;
+            row.role = 1;
+            row.dams = [((i % 251) + 1) as u8; 32];
+            row.approved_ms = T0;
+            row
         })
         .collect();
     store
@@ -1836,8 +1887,9 @@ fn gk_staging_deadline_activates_with_unknowns() {
         ack_key(&service, a.node, 2, &key_a, 1, t + 2_000),
         AckOutcome::StagedRecorded
     );
-    // B's re-armed round sent its Update from the ACK's send flush.
-    assert_eq!(updates_of(&gk.take()), vec![(b.node, 2)]);
+    // B reported no epoch above active=1. The ACK flush starts its
+    // active-key repair; stage 2 waits for an active ACK.
+    assert_eq!(updates_of(&gk.take()), vec![(b.node, 1)]);
     let events = service.tick(HostTime::sync(t + 60_000));
     assert!(kinds(&events).contains(&"gk.rotated".to_string()));
     let rotated = events
@@ -2231,6 +2283,75 @@ fn gk_dams_fence_retires_old_channel() {
     );
 }
 
+struct DamsBoundTransport {
+    node: u64,
+    dams: [u8; 32],
+    sent: Mutex<Vec<GroupKeyCommand>>,
+}
+
+impl DamsBoundTransport {
+    fn take(&self) -> Vec<GroupKeyCommand> {
+        std::mem::take(&mut *self.sent.lock().unwrap())
+    }
+}
+
+impl group_keys::GroupKeyTransport for DamsBoundTransport {
+    fn channel_ready(&self, node: u64, expected_dams: &[u8; 32]) -> bool {
+        self.node == node && self.dams == *expected_dams
+    }
+
+    fn send(&self, command: GroupKeyCommand, expected_dams: Option<&[u8; 32]>) {
+        if expected_dams.is_none_or(|dams| self.node == command.node() && self.dams == *dams) {
+            self.sent.lock().unwrap().push(command);
+        }
+    }
+}
+
+#[test]
+fn review_key_handoff_rejects_retired_dams_channel() {
+    let (service, join_transport, _) = gk_service();
+    let mut member = join_member(&service, &join_transport, 0x00A1_0000_0000_D010, 0xDF, T0);
+    let (_, _, old_dams) = channel_id(&service, member.node);
+    let (outcome, _) = member.attempt(&service, &join_transport, T0 + 30_000);
+    assert!(matches!(outcome, Outcome::Result(JoinResult::Allow { .. })));
+    assert_ne!(channel_id(&service, member.node).2, old_dams);
+    let stale = Arc::new(DamsBoundTransport {
+        node: member.node,
+        dams: old_dams,
+        sent: Mutex::new(Vec::new()),
+    });
+    service.set_group_key_transport(stale.clone());
+    rotate(&service, 1, "after-reissue", T0 + 31_000).unwrap();
+    service.tick(HostTime::sync(T0 + 31_000));
+    assert!(updates_of(&stale.take()).is_empty());
+    assert_eq!(
+        pull(&service, member.node, 1, 0, 3, T0 + 32_000),
+        PullOutcome::Answered
+    );
+    assert!(updates_of(&stale.take()).is_empty());
+}
+
+#[test]
+fn review_key_handoff_requires_nonzero_member_dams() {
+    let mut store = member_rows(1, 1);
+    let mut member = store.load().unwrap().devices.remove(0);
+    member.dams = [0; 32];
+    let node = member.node;
+    store
+        .commit(&Batch {
+            devices: vec![member],
+            ..Batch::default()
+        })
+        .unwrap();
+    let service = SiteService::new(testkit::authority(Box::new(store), T0));
+    let gk = FakeGroupKeyTransport::new();
+    gk.set_ready(node, true);
+    service.set_group_key_transport(gk.clone());
+    rotate(&service, 1, "zero-dams", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    assert!(updates_of(&gk.take()).is_empty());
+}
+
 /// G-SEC P5 PR3 (§6.2): distribution holds 10 commands/s with a burst of
 /// four across a full 128-target rotation.
 #[test]
@@ -2319,6 +2440,16 @@ fn gk_pull_behind_stages_active_first() {
         vec![(b.node, 2)],
         "active first, not the staged 3"
     );
+    assert!(sent.iter().any(|command| matches!(
+        command,
+        GroupKeyCommand::Update {
+            node,
+            epoch: 2,
+            cause: RotationCause::Removal,
+            overlap_s: 10,
+            ..
+        } if *node == b.node
+    )));
     let (_, key_b2) = update_key(&sent, b.node);
     assert_eq!(
         ack_key(&service, b.node, 2, &key_b2, 1, t + 2_000),
@@ -2326,12 +2457,18 @@ fn gk_pull_behind_stages_active_first() {
     );
     let sent = gk.take();
     assert_eq!(activates_of(&sent), vec![(b.node, 2)]);
+    service.tick(HostTime::sync(t + 3_000));
+    let between = gk.take();
+    assert!(
+        !updates_of(&between).contains(&(b.node, 3)),
+        "the staged epoch must wait for the active ACK: {between:?}"
+    );
     assert_eq!(
-        ack_key(&service, b.node, 2, &key_b2, 2, t + 3_000),
+        ack_key(&service, b.node, 2, &key_b2, 2, t + 4_000),
         AckOutcome::ActiveRecorded
     );
     // Only now does B stage epoch 3.
-    service.tick(HostTime::sync(t + 4_000));
+    service.tick(HostTime::sync(t + 5_000));
     let sent = gk.take();
     assert!(updates_of(&sent).contains(&(b.node, 3)), "{sent:?}");
 }
@@ -2905,4 +3042,494 @@ fn gk_secret_rows_never_exceed_two() {
     );
     rotate(&service, 3, "m2", T0 + 100_000).unwrap();
     assert_eq!(secret_rows(&service), 2);
+}
+
+#[test]
+fn review_failed_activation_keeps_the_rotation_and_evidence() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D001, 0xD0, T0);
+    gk.set_ready(member.node, true);
+    rotate(&service, 1, "activation-fault", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    let (_, key) = update_key(&gk.take(), member.node);
+    service.with(|a| {
+        let inner = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+        a.store = Box::new(FailSecondCommit { inner, calls: 0 });
+    });
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key, 2, T0 + 2_000),
+        AckOutcome::ActiveRecorded
+    );
+    let (phase, snapshot) = service
+        .with(|a| {
+            (
+                a.gks.rotation().map(|r| r.row.phase),
+                a.store.load().unwrap(),
+            )
+        })
+        .0;
+    assert_eq!(phase, Some(group_keys::RotationPhase::Staging));
+    assert_eq!(
+        snapshot.gk_rotation.unwrap().phase,
+        group_keys::RotationPhase::Staging
+    );
+    assert_eq!(
+        gk_status(&service, T0 + 2_000)
+            .get("active")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn review_pull_uses_highest_device_epoch_for_direct_staging() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D002, 0xD1, T0);
+    gk.set_ready(member.node, true);
+    rotate(&service, 1, "first", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    let (_, key2) = update_key(&gk.take(), member.node);
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key2, 1, T0 + 2_000),
+        AckOutcome::StagedRecorded
+    );
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key2, 2, T0 + 3_000),
+        AckOutcome::ActiveRecorded
+    );
+    gk.take();
+    rotate(&service, 2, "second", T0 + 70_000).unwrap();
+    service.tick(HostTime::sync(T0 + 70_000));
+    gk.take();
+    // This device has current=1 and next=3. Since d=max(1,3)=3 is above
+    // host active=2, it must receive staged 3 directly.
+    assert_eq!(
+        pull(&service, member.node, 1, 3, 2, T0 + 71_000),
+        PullOutcome::Answered
+    );
+    service.tick(HostTime::sync(T0 + 71_000));
+    assert_eq!(updates_of(&gk.take()), vec![(member.node, 3)]);
+}
+
+#[test]
+fn review_pull_at_active_epoch_waits_for_active_ack_before_staging() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D006, 0xD5, T0);
+    gk.set_ready(member.node, true);
+    rotate(&service, 1, "first-equal", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    let (_, key2) = update_key(&gk.take(), member.node);
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key2, 1, T0 + 2_000),
+        AckOutcome::StagedRecorded
+    );
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key2, 2, T0 + 3_000),
+        AckOutcome::ActiveRecorded
+    );
+    gk.take();
+    rotate(&service, 2, "second-equal", T0 + 70_000).unwrap();
+    assert_eq!(
+        pull(&service, member.node, 2, 0, 2, T0 + 71_000),
+        PullOutcome::Answered
+    );
+    service.tick(HostTime::sync(T0 + 71_000));
+    assert_eq!(updates_of(&gk.take()), vec![(member.node, 2)]);
+}
+
+#[test]
+fn review_post_activation_pull_promotes_after_staged_ack() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D007, 0xD6, T0);
+    gk.set_ready(member.node, true);
+    rotate(&service, 1, "late-member", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 61_000));
+    gk.take();
+    assert_eq!(
+        gk_status(&service, T0 + 61_000)
+            .get("active")
+            .unwrap()
+            .as_u64(),
+        Some(2)
+    );
+    assert_eq!(
+        pull(&service, member.node, 1, 0, 2, T0 + 62_000),
+        PullOutcome::Answered
+    );
+    service.tick(HostTime::sync(T0 + 62_000));
+    let (_, key) = update_key(&gk.take(), member.node);
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key, 1, T0 + 63_000),
+        AckOutcome::StagedRecorded
+    );
+    assert_eq!(activates_of(&gk.take()), vec![(member.node, 2)]);
+}
+
+#[test]
+fn review_active_acked_target_can_repair_a_lost_key() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D008, 0xD7, T0);
+    let sleeper = join_member(&service, &transport, 0x00A1_0000_0000_D009, 0xD8, T0);
+    gk.set_ready(member.node, true);
+    gk.set_ready(sleeper.node, true);
+    rotate(&service, 1, "repair-live", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    let (_, key) = update_key(&gk.take(), member.node);
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key, 1, T0 + 2_000),
+        AckOutcome::StagedRecorded
+    );
+    service.tick(HostTime::sync(T0 + 61_000));
+    gk.take();
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key, 2, T0 + 62_000),
+        AckOutcome::ActiveRecorded
+    );
+    assert_eq!(
+        service
+            .with(|a| a.gks.target(member.node).map(|t| t.row.state))
+            .0,
+        Some(TargetState::ActiveAcked)
+    );
+    let request = member_pull(&service, member.node, 1, 0, 3);
+    let ((outcome, queued), _) = service.with(|a| {
+        let outcome = a.on_group_key_pull(request, HostTime::sync(T0 + 63_000));
+        (outcome, a.gk_outbox.len())
+    });
+    assert_eq!(outcome, PullOutcome::Answered);
+    assert_eq!(queued, 1);
+    let sent = gk.take();
+    assert_eq!(updates_of(&sent), vec![(member.node, 2)], "{sent:?}");
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key, 1, T0 + 64_000),
+        AckOutcome::Duplicate
+    );
+    assert_eq!(activates_of(&gk.take()), vec![(member.node, 2)]);
+}
+
+#[test]
+fn review_active_acked_target_repairs_host_active_before_future_stage() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D00E, 0xDD, T0);
+    let _sleeper = join_member(&service, &transport, 0x00A1_0000_0000_D00F, 0xDE, T0);
+    gk.set_ready(member.node, true);
+    rotate(&service, 1, "early-active", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    let (_, key2) = update_key(&gk.take(), member.node);
+    let key1 = service.with(|a| *a.gks.active_key().bytes()).0;
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key2, 2, T0 + 2_000),
+        AckOutcome::ActiveRecorded
+    );
+    gk.take();
+    assert_eq!(
+        pull(&service, member.node, 1, 0, 3, T0 + 3_000),
+        PullOutcome::Answered
+    );
+    assert_eq!(updates_of(&gk.take()), vec![(member.node, 1)]);
+    assert_eq!(
+        ack_key(&service, member.node, 1, &key1, 1, T0 + 4_000),
+        AckOutcome::StagedRecorded
+    );
+    assert_eq!(activates_of(&gk.take()), vec![(member.node, 1)]);
+    assert_eq!(
+        ack_key(&service, member.node, 1, &key1, 2, T0 + 5_000),
+        AckOutcome::ActiveRecorded
+    );
+    assert_eq!(updates_of(&gk.take()), vec![(member.node, 2)]);
+}
+
+#[test]
+fn review_staged_acked_target_reinstalls_key_after_pull_reports_loss() {
+    let (service, transport, gk) = gk_service();
+    let member = join_member(&service, &transport, 0x00A1_0000_0000_D00A, 0xD9, T0);
+    let _sleeper = join_member(&service, &transport, 0x00A1_0000_0000_D00B, 0xDA, T0);
+    gk.set_ready(member.node, true);
+    rotate(&service, 1, "staged-repair", T0 + 1_000).unwrap();
+    service.tick(HostTime::sync(T0 + 1_000));
+    let (_, key2) = update_key(&gk.take(), member.node);
+    assert_eq!(
+        ack_key(&service, member.node, 2, &key2, 1, T0 + 2_000),
+        AckOutcome::StagedRecorded
+    );
+    gk.take();
+    assert_eq!(
+        pull(&service, member.node, 1, 0, 3, T0 + 3_000),
+        PullOutcome::Answered
+    );
+    service.tick(HostTime::sync(T0 + 3_000));
+    let (_, key1) = update_key(&gk.take(), member.node);
+    assert_eq!(
+        ack_key(&service, member.node, 1, &key1, 1, T0 + 4_000),
+        AckOutcome::StagedRecorded
+    );
+    gk.take();
+    assert_eq!(
+        ack_key(&service, member.node, 1, &key1, 2, T0 + 5_000),
+        AckOutcome::ActiveRecorded
+    );
+    service.tick(HostTime::sync(T0 + 6_000));
+    assert_eq!(updates_of(&gk.take()), vec![(member.node, 2)]);
+}
+
+#[test]
+fn review_revoke_discards_unflushed_group_key_commands() {
+    let (service, transport, gk) = gk_service();
+    let victim = join_member(&service, &transport, 0x00A1_0000_0000_D003, 0xD2, T0);
+    let survivor = join_member(&service, &transport, 0x00A1_0000_0000_D004, 0xD3, T0);
+    gk.set_ready(victim.node, true);
+    gk.set_ready(survivor.node, true);
+    rotate(&service, 1, "before-revoke", T0 + 1_000).unwrap();
+    service
+        .with(|a| {
+            a.tick(HostTime::sync(T0 + 1_000));
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: victim.node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Removed,
+                    key: "remove-victim".into(),
+                },
+                HostTime::sync(T0 + 2_000),
+            )
+        })
+        .0
+        .unwrap();
+    assert!(
+        gk.take().is_empty(),
+        "superseded commands must never leave the queue"
+    );
+}
+
+struct PausedGroupKeyTransport {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl group_keys::GroupKeyTransport for PausedGroupKeyTransport {
+    fn channel_ready(&self, _: u64, _: &[u8; 32]) -> bool {
+        true
+    }
+
+    fn send(&self, _: GroupKeyCommand, _: Option<&[u8; 32]>) {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().unwrap();
+    }
+}
+
+#[test]
+fn review_revoke_waits_for_inflight_key_handoff() {
+    let service = Arc::new(SiteService::new(testkit::authority(
+        Box::new(member_rows(1, 1)),
+        T0,
+    )));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    service.set_group_key_transport(Arc::new(PausedGroupKeyTransport {
+        entered: entered_tx,
+        release: Mutex::new(release_rx),
+    }));
+    rotate(&service, 1, "before-handoff", T0 + 1_000).unwrap();
+    let tick_service = Arc::clone(&service);
+    let tick = std::thread::spawn(move || tick_service.tick(HostTime::sync(T0 + 1_000)));
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let victim = 0x00A1_0000_0000_0000 + 0x1000;
+    let revoke_service = Arc::clone(&service);
+    let (started_tx, started_rx) = mpsc::channel();
+    let (committed_tx, committed_rx) = mpsc::channel();
+    let revocation = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let result = revoke(&revoke_service, victim, 1, "during-handoff", T0 + 2_000);
+        committed_tx.send(result).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let early = committed_rx.recv_timeout(Duration::from_millis(500));
+    let committed_before_send = early.is_ok();
+    release_tx.send(()).unwrap();
+    tick.join().unwrap();
+    revocation.join().unwrap();
+    let result = match early {
+        Ok(result) => result,
+        Err(_) => committed_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+    };
+    result.unwrap();
+    assert!(
+        !committed_before_send,
+        "a removed member can receive an old key after revoke commits"
+    );
+}
+
+#[test]
+fn review_rejects_missing_high_water_and_partial_fresh_store() {
+    let mut partial = MemoryStore::default();
+    partial
+        .commit(&Batch {
+            meta: vec![(group_keys::META_HIGH_WATER, 9_u32.to_be_bytes().to_vec())],
+            ..Batch::default()
+        })
+        .unwrap();
+    assert!(SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(partial),
+        T0
+    )
+    .is_err());
+
+    let db = crash_db("missing-high-water");
+    drop(testkit::authority(
+        Box::new(SqliteSiteStore::open(&db).unwrap()),
+        T0,
+    ));
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM meta WHERE name='gk_epoch_high_water'", [])
+        .unwrap();
+    drop(conn);
+    let reopened = SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(SqliteSiteStore::open(&db).unwrap()),
+        T0 + 1_000,
+    );
+    assert!(
+        reopened.is_err(),
+        "a missing high-water mark permits epoch reuse"
+    );
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+#[test]
+fn review_revoke_rejects_generation_overflow() {
+    let mut store = member_rows(1, 1);
+    let mut member = store.load().unwrap().devices.remove(0);
+    member.generation = u32::MAX;
+    let node = member.node;
+    store
+        .commit(&Batch {
+            devices: vec![member],
+            ..Batch::default()
+        })
+        .unwrap();
+    let service = SiteService::new(testkit::authority(Box::new(store), T0));
+    let error = revoke(&service, node, u32::MAX, "overflow", T0 + 1_000).unwrap_err();
+    assert_eq!(error.code, "AUTHORITY_ERROR");
+    assert_eq!(
+        gk_status(&service, T0 + 1_000)
+            .get("active")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn review_open_rejects_exhausted_operation_id() {
+    let mut store = member_rows(0, 1);
+    let op = Operation {
+        id: u64::MAX,
+        kind: "rotate".into(),
+        node: 0,
+        generation: 0,
+        member_cert_serial: 0,
+        rs_epoch: 0,
+        gk_from: 1,
+        gk_to: 1,
+        created_ms: T0,
+        gk_cause: String::new(),
+        gk_end: String::new(),
+    };
+    store
+        .commit(&Batch {
+            docs: vec![(store::DocKind::Operation, h16(op.id), Some(op.doc()))],
+            ..Batch::default()
+        })
+        .unwrap();
+    assert!(SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(store),
+        T0
+    )
+    .is_err());
+}
+
+#[test]
+fn review_failed_join_request_commit_creates_no_phantom_request() {
+    let (service, transport) = service_with(Box::<FailJoinRequestCommit>::default());
+    let mut member = SimDevice::new(0x00A1_0000_0000_D00C, 0xDB);
+    let (_, outcome, events) = member.start(&service, &transport, T0);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::AuthorityBusy { .. })
+    ));
+    assert!(request_id(&events).is_none());
+    assert!(service.with(|a| a.requests.is_empty()).0);
+}
+
+#[test]
+fn review_rejects_forged_rotation_evidence_on_restart() {
+    let db = crash_db("forged-target");
+    {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let member = join_member(&service, &transport, 0x00A1_0000_0000_D005, 0xD4, T0);
+        assert_eq!(
+            json(&rotate(&service, 1, "target-rotate", T0 + 1_000).unwrap())
+                .get("to")
+                .unwrap()
+                .as_u64(),
+            Some(2)
+        );
+        assert!(service.with(|a| a.gks.target(member.node).is_some()).0);
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE gk_targets SET state='active_acked', confirmed_epoch=2, confirmed_gkid=zeroblob(32)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    let reopened = SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(SqliteSiteStore::open(&db).unwrap()),
+        T0 + 2_000,
+    );
+    assert!(
+        reopened.is_err(),
+        "a target's GK-id must match the saved key"
+    );
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
+}
+
+#[test]
+fn review_rejects_rotation_operation_cause_mismatch_on_restart() {
+    let db = crash_db("rotation-operation-cause");
+    {
+        let (service, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        rotate(&service, 1, "manual-cause", T0 + 1_000).unwrap();
+    }
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let body: String = conn
+        .query_row("SELECT body FROM docs WHERE kind='operation'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let altered = body.replace("\"gk_cause\":\"manual\"", "\"gk_cause\":\"removal\"");
+    assert_ne!(body, altered);
+    conn.execute(
+        "UPDATE docs SET body=?1 WHERE kind='operation'",
+        rusqlite::params![altered],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(SqliteSiteStore::open(&db).unwrap()),
+        T0 + 2_000,
+    )
+    .is_err());
+    let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }

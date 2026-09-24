@@ -423,11 +423,11 @@ impl FakeGroupKeyTransport {
 }
 
 impl GroupKeyTransport for FakeGroupKeyTransport {
-    fn channel_ready(&self, node: u64) -> bool {
+    fn channel_ready(&self, node: u64, _: &[u8; 32]) -> bool {
         self.ready.lock().expect("gk fake poisoned").contains(&node)
     }
 
-    fn send(&self, command: GroupKeyCommand) {
+    fn send(&self, command: GroupKeyCommand, _: Option<&[u8; 32]>) {
         self.sent.lock().expect("gk fake poisoned").push(command);
     }
 }

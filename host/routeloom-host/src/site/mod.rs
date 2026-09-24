@@ -518,6 +518,11 @@ fn ledger_hash(prev: &[u8; 32], row: &LedgerRow) -> [u8; 32] {
     sha256(&input)
 }
 
+struct QueuedGroupKeyCommand {
+    command: GroupKeyCommand,
+    expected_dams: Option<GkSecret>,
+}
+
 pub struct SiteAuthority {
     id: Identity,
     sak: Box<dyn RootSigner + Send>,
@@ -537,7 +542,7 @@ pub struct SiteAuthority {
     gks: GroupRotation,
     /// Bounded handoff to the authority transport (§2.2: 32, drained by
     /// `SiteService::with` with the lock released).
-    gk_outbox: Vec<GroupKeyCommand>,
+    gk_outbox: Vec<QueuedGroupKeyCommand>,
     /// The PR1 channel layer's send side (cloned out under the lock, sent
     /// after release). `None` until wired: commands queue and drop, and
     /// targets honestly stay unknown until then.
@@ -634,21 +639,32 @@ impl SiteAuthority {
         let next_request_id = requests
             .keys()
             .max()
-            .map_or(1, |m| m + 1)
+            .map(|m| m.checked_add(1).ok_or("request id exhausted"))
+            .transpose()?
+            .unwrap_or(1)
             .max(meta_u64(&snapshot, "next_request_id")?.unwrap_or(1));
         let mut next_op_id = operations
             .keys()
             .max()
-            .map_or(1, |m| m + 1)
+            .map(|m| m.checked_add(1).ok_or("operation id exhausted"))
+            .transpose()?
+            .unwrap_or(1)
             .max(meta_u64(&snapshot, "next_op_id")?.unwrap_or(1));
+        if next_request_id == u64::MAX || next_op_id == u64::MAX {
+            return Err("site store request or operation id exhausted".into());
+        }
         let revision = meta_u32(&snapshot, "revision")?.unwrap_or(0);
         // Group keys (§6.1): only a completely fresh database mints epoch
         // 1; anything else validates strictly and refuses to start on a
         // corrupt or contradictory key table.
-        let fresh_db = !snapshot.meta.contains_key("site_binding")
+        let fresh_db = snapshot.meta.keys().all(|name| name == "schema_version")
             && snapshot.devices.is_empty()
             && snapshot.ledger.is_empty()
-            && snapshot.group_keys.is_empty();
+            && snapshot.rrs.is_empty()
+            && snapshot.group_keys.is_empty()
+            && snapshot.gk_rotation.is_none()
+            && snapshot.gk_targets.is_empty()
+            && snapshot.docs.is_empty();
         let keys = if fresh_db {
             let key = fresh_group_key()?;
             init.group_keys.push(GroupKeyRow {
@@ -672,18 +688,15 @@ impl SiteAuthority {
         // The high-water mark never moves back (§6.1): rows may be deleted,
         // but a meta value below an issued epoch is a contradiction.
         let high_water = match meta_u32(&snapshot, META_HIGH_WATER)? {
-            Some(mark) if mark < keys.high_water => {
+            Some(mark) if mark != keys.high_water => {
                 return Err(format!(
-                    "site store {META_HIGH_WATER} {mark} is below issued epoch {}",
+                    "site store {META_HIGH_WATER} {mark} disagrees with issued epoch {}",
                     keys.high_water
                 ));
             }
             Some(mark) => mark,
-            None => {
-                init.meta
-                    .push((META_HIGH_WATER, keys.high_water.to_be_bytes().to_vec()));
-                keys.high_water
-            }
+            None if fresh_db => keys.high_water,
+            None => return Err(format!("site store {META_HIGH_WATER} is missing")),
         };
         // The 24 h anchor: recorded activations, else the active row's
         // creation (v1 never recorded activation; staging time can only
@@ -719,18 +732,51 @@ impl SiteAuthority {
         let (rotation_row, target_rows) = match snapshot.gk_rotation.clone() {
             Some(row) => {
                 Self::check_rotation_row(&row, &keys)?;
+                let op = operations
+                    .get(&row.operation_id)
+                    .ok_or("site store gk_rotation without its operation")?;
+                if !matches!(op.kind.as_str(), "rotate" | "revoke")
+                    || op.gk_from != row.from_epoch
+                    || op.gk_to != row.to_epoch
+                    || (!op.gk_cause.is_empty() && op.gk_cause != row.cause.name())
+                    || !op.gk_end.is_empty()
+                {
+                    return Err("site store gk_rotation disagrees with its operation".into());
+                }
                 if snapshot.gk_targets.len() > MEMBER_CAP {
                     return Err(format!(
                         "site store holds {} rotation targets (cap {MEMBER_CAP})",
                         snapshot.gk_targets.len()
                     ));
                 }
+                let key = match row.phase {
+                    RotationPhase::Staging => keys.staged.ok_or("staged key missing")?.1,
+                    RotationPhase::Activating | RotationPhase::CatchingUp => keys.active_key,
+                };
+                let expected_id = gk_id(id.network, row.to_epoch, &key);
                 for target in &snapshot.gk_targets {
                     if target.rotation != row.operation_id {
                         return Err("site store gk_targets row without its rotation".into());
                     }
                     if target.node == 0 {
                         return Err("site store gk_targets row with node 0".into());
+                    }
+                    if !devices.get(&target.node).is_some_and(|member| {
+                        member.member
+                            && member.kid == target.kid
+                            && member.generation == target.generation
+                    }) {
+                        return Err(
+                            "site store gk_targets identity disagrees with membership".into()
+                        );
+                    }
+                    match target.state {
+                        TargetState::Pending | TargetState::Unknown
+                            if target.confirmed_epoch == 0 && target.confirmed_gkid.is_none() => {}
+                        TargetState::StagedAcked | TargetState::ActiveAcked
+                            if target.confirmed_epoch == row.to_epoch
+                                && target.confirmed_gkid == Some(expected_id) => {}
+                        _ => return Err("site store gk_targets evidence is inconsistent".into()),
                     }
                 }
                 (Some(row), snapshot.gk_targets.clone())
@@ -860,6 +906,9 @@ impl SiteAuthority {
     /// staging keeps the staged key below activation, activating and
     /// catching_up keep the promoted key without a staged row.
     fn check_rotation_row(row: &RotationRow, keys: &ValidatedKeys) -> Result<(), String> {
+        if row.operation_id == 0 || row.from_epoch == 0 || row.from_epoch >= row.to_epoch {
+            return Err("site store gk_rotation epochs or operation id are invalid".into());
+        }
         match row.phase {
             RotationPhase::Staging => {
                 if keys.staged.map(|(epoch, _)| epoch) != Some(row.to_epoch) {
@@ -1212,17 +1261,25 @@ impl SiteAuthority {
             self.finish_busy(txn, seconds as u32);
             return;
         }
-        let deadline = now_ms + u64::from(self.policy.decision_timeout_ms);
-        let request_id = match open {
+        let deadline = now_ms.saturating_add(u64::from(self.policy.decision_timeout_ms));
+        let (request_id, request, next_request_id) = match open {
             Some((request_id, None)) => {
-                let request = self.requests.get_mut(&request_id).expect("open request");
-                request.attempt += 1;
+                let mut request = self
+                    .requests
+                    .get(&request_id)
+                    .expect("open request")
+                    .clone();
+                let Some(attempt) = request.attempt.checked_add(1) else {
+                    self.abort(txn.key, AbortReason::AuthorityError);
+                    return;
+                };
+                request.attempt = attempt;
                 request.updated_ms = now_ms;
                 request.deadline_ms = deadline;
                 request.via = txn.via;
                 request.previously_removed = previously_removed;
                 request.kid_conflict = kid_conflict;
-                request_id
+                (request_id, request, self.next_request_id)
             }
             _ => {
                 self.expire_requests(now_ms);
@@ -1231,39 +1288,39 @@ impl SiteAuthority {
                     return;
                 }
                 let request_id = self.next_request_id;
-                self.next_request_id += 1;
-                self.requests.insert(
-                    request_id,
-                    JoinRequestRec {
-                        id: request_id,
-                        facts: device.facts.clone(),
-                        previously_removed,
-                        kid_conflict,
-                        via: txn.via,
-                        attempt: 1,
-                        created_ms: now_ms,
-                        updated_ms: now_ms,
-                        deadline_ms: deadline,
-                        decision: None,
-                        decided_ms: None,
-                        decision_result: None,
-                    },
-                );
-                request_id
+                let Some(next_request_id) = request_id.checked_add(1) else {
+                    self.abort(txn.key, AbortReason::AuthorityError);
+                    return;
+                };
+                let request = JoinRequestRec {
+                    id: request_id,
+                    facts: device.facts.clone(),
+                    previously_removed,
+                    kid_conflict,
+                    via: txn.via,
+                    attempt: 1,
+                    created_ms: now_ms,
+                    updated_ms: now_ms,
+                    deadline_ms: deadline,
+                    decision: None,
+                    decided_ms: None,
+                    decision_result: None,
+                };
+                (request_id, request, next_request_id)
             }
         };
-        let request = self.requests[&request_id].clone();
         let batch = Batch {
-            meta: vec![(
-                "next_request_id",
-                self.next_request_id.to_be_bytes().to_vec(),
-            )],
+            meta: vec![("next_request_id", next_request_id.to_be_bytes().to_vec())],
             docs: vec![(DocKind::JoinRequest, h16(request_id), Some(request.doc()))],
             ..Batch::default()
         };
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
+            self.finish_busy(txn, BUSY_RETRY_S);
+            return;
         }
+        self.next_request_id = next_request_id;
+        self.requests.insert(request_id, request.clone());
         if let Some(d) = self.discovered.get_mut(&node) {
             d.last_verdict = "awaiting".into();
         }
@@ -2067,9 +2124,13 @@ impl SiteAuthority {
             .filter(|e| e.node_id != row.node)
             .cloned()
             .collect();
+        let min_generation = row
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "assignment generation exhausted"))?;
         entries.push(RevocationEntry {
             node_id: row.node,
-            min_generation: row.generation + 1,
+            min_generation,
             reason: request.reason,
         });
         entries.sort_by_key(|e| e.node_id);
@@ -2261,7 +2322,7 @@ impl SiteAuthority {
             op_id,
             from_epoch: self.gks.active_epoch(),
             to_epoch,
-            key,
+            key: GkSecret::new(key),
             deadline_mono,
             rotation_row: RotationRow {
                 operation_id: op_id,
@@ -2289,7 +2350,7 @@ impl SiteAuthority {
             .push((META_HIGH_WATER, plan.to_epoch.to_be_bytes().to_vec()));
         batch.group_keys.push(GroupKeyRow {
             epoch: plan.to_epoch,
-            key: plan.key,
+            key: *plan.key.bytes(),
             state: "staged".into(),
             created_ms: plan.rotation_row.created_ms,
         });
@@ -2314,6 +2375,9 @@ impl SiteAuthority {
     /// Publishes a committed staging plan to RAM (only after the commit).
     /// The replaced staged key is wiped with its RAM wrapper's drop.
     fn publish_staging_plan(&mut self, plan: StagedPlan, op: Operation) {
+        // A superseded command still in the handoff queue must not leave
+        // after the new rotation (or removal) has committed.
+        self.gk_outbox.clear();
         if let Some(old) = plan.superseded_op {
             if let Some(prior) = self.operations.get_mut(&old) {
                 prior.gk_end = "superseded".into();
@@ -2475,7 +2539,7 @@ impl SiteAuthority {
             let live = self.devices.get(&node).filter(|row| {
                 row.member && row.kid == target.kid && row.generation == target.generation
             });
-            if live.is_none() {
+            let Some(dams) = live.map(|row| row.dams) else {
                 // The membership moved under the target (only possible
                 // through tampering: every allow/revoke rewrites targets
                 // in its own transaction). Fail closed: no send.
@@ -2493,16 +2557,20 @@ impl SiteAuthority {
                     t.next_due_mono = time.mono_ms.saturating_add(60_000);
                 }
                 continue;
-            }
+            };
             if !self.gks.take_token(time.mono_ms) {
                 break;
             }
-            let ready = self
-                .gk_transport
-                .as_ref()
-                .is_some_and(|t| t.channel_ready(node));
+            let ready = dams != [0; 32]
+                && self
+                    .gk_transport
+                    .as_ref()
+                    .is_some_and(|t| t.channel_ready(node, &dams));
             if !ready {
-                self.gk_outbox.push(GroupKeyCommand::Wake { node });
+                self.gk_outbox.push(QueuedGroupKeyCommand {
+                    command: GroupKeyCommand::Wake { node },
+                    expected_dams: None,
+                });
                 self.gks.note_wake(node, time.mono_ms);
                 continue;
             }
@@ -2512,29 +2580,42 @@ impl SiteAuthority {
                     let Some(key) = self.key_for_epoch(epoch) else {
                         continue;
                     };
+                    let cause = if epoch == rotation.to_epoch {
+                        rotation.cause
+                    } else {
+                        RotationCause::Removal
+                    };
                     GroupKeyCommand::Update {
                         node,
                         epoch,
                         key,
-                        cause: rotation.cause,
-                        overlap_s: rotation.cause.overlap_s(),
+                        cause,
+                        overlap_s: cause.overlap_s(),
                     }
                 }
                 GkSend::Activate { epoch } => {
                     let Some(id) = self.id_for_epoch(epoch) else {
                         continue;
                     };
+                    let cause = if epoch == rotation.to_epoch {
+                        rotation.cause
+                    } else {
+                        RotationCause::Removal
+                    };
                     GroupKeyCommand::Activate {
                         node,
                         epoch,
                         gk_id: id,
-                        cause: rotation.cause,
-                        overlap_s: rotation.cause.overlap_s(),
+                        cause,
+                        overlap_s: cause.overlap_s(),
                     }
                 }
             };
-            let activate = matches!(kind, GkSend::Activate { .. });
-            self.gk_outbox.push(command);
+            let activate = matches!(kind, GkSend::Activate { epoch } if epoch == rotation.to_epoch);
+            self.gk_outbox.push(QueuedGroupKeyCommand {
+                command,
+                expected_dams: Some(GkSecret::new(dams)),
+            });
             self.gks.note_sent(node, activate, time.mono_ms);
         }
     }
@@ -2770,10 +2851,21 @@ impl SiteAuthority {
     /// handoff queue drops the answer — the member's re-pull heals it —
     /// while host-initiated rotation traffic keeps full retry state.
     fn queue_immediate(&mut self, command: GroupKeyCommand, time: HostTime) -> bool {
+        let Some(dams) = self
+            .devices
+            .get(&command.node())
+            .filter(|member| member.member && member.dams != [0; 32])
+            .map(|member| member.dams)
+        else {
+            return false;
+        };
         if self.gk_outbox.len() >= GK_OUTBOX_CAP || !self.gks.take_token(time.mono_ms) {
             return false;
         }
-        self.gk_outbox.push(command);
+        self.gk_outbox.push(QueuedGroupKeyCommand {
+            command,
+            expected_dams: Some(GkSecret::new(dams)),
+        });
         true
     }
 
@@ -2864,7 +2956,7 @@ impl SiteAuthority {
             // needs its Activate (§6.3 pull repair).
             if self.gks.target(ack.node).is_some_and(|t| t.active_first) {
                 if let Some(target) = self.gks.target_mut(ack.node) {
-                    target.active_first = false;
+                    target.active_first_staged = true;
                 }
                 self.touch_target(ack.node, time.unix_ms);
             } else {
@@ -2885,6 +2977,26 @@ impl SiteAuthority {
                 )
         });
         if duplicate {
+            let repair_needs_activate = ack.epoch == active
+                && self
+                    .gks
+                    .target(ack.node)
+                    .is_some_and(|t| t.active_first || t.force_stage_update);
+            if in_rotation {
+                if let Some(target) = self.gks.target_mut(ack.node) {
+                    if target.force_stage_update {
+                        target.force_stage_update = false;
+                        target.attempts = 0;
+                        target.next_due_mono = 0;
+                    }
+                }
+            }
+            if repair_needs_activate {
+                if let Some(target) = self.gks.target_mut(ack.node) {
+                    target.active_first_staged = true;
+                }
+                self.queue_activate(ack.node, active, time);
+            }
             return AckOutcome::Duplicate;
         }
         if self.gks.target(ack.node).is_none() {
@@ -2914,6 +3026,10 @@ impl SiteAuthority {
             target.row = row;
             target.attempts = 0;
             target.next_due_mono = 0;
+            target.force_stage_update = false;
+            if ack.epoch == active && target.active_first {
+                target.active_first_staged = true;
+            }
         }
         self.emit_member_applied(ack.node, ack.epoch, "staged", time.unix_ms);
         self.drive_rotation_edges(time);
@@ -2928,6 +3044,11 @@ impl SiteAuthority {
             t.row.state == TargetState::ActiveAcked && t.row.confirmed_epoch == ack.epoch
         });
         if duplicate {
+            if let Some(target) = self.gks.target_mut(ack.node) {
+                target.active_first = false;
+                target.active_first_staged = false;
+                target.force_stage_update = false;
+            }
             return AckOutcome::Duplicate;
         }
         let active = self.gks.active_epoch();
@@ -2941,10 +3062,12 @@ impl SiteAuthority {
             if self.gks.target(ack.node).is_some_and(|t| t.active_first) {
                 if let Some(target) = self.gks.target_mut(ack.node) {
                     target.active_first = false;
+                    target.active_first_staged = false;
                     target.attempts = 0;
                     target.next_due_mono = 0;
                 }
                 self.touch_target(ack.node, time.unix_ms);
+                self.send_due(time);
             } else {
                 self.touch_member(ack.node, time.unix_ms);
             }
@@ -2976,6 +3099,11 @@ impl SiteAuthority {
         }
         if let Some(target) = self.gks.target_mut(ack.node) {
             target.row = row;
+            target.force_stage_update = false;
+            if ack.epoch == active {
+                target.active_first = false;
+                target.active_first_staged = false;
+            }
         }
         self.emit_member_applied(ack.node, ack.epoch, "active", time.unix_ms);
         self.drive_rotation_edges(time);
@@ -3122,13 +3250,24 @@ impl SiteAuthority {
             };
         }
         self.touch_target(pull.node, time.unix_ms);
+        let staged_ahead = self
+            .gks
+            .rotation()
+            .is_some_and(|rotation| rotation.row.to_epoch > active);
         // Contact re-arms the retry round (§6.2: next contact beats the
         // minute backoff).
         if let Some(target) = self.gks.target_mut(pull.node) {
             target.attempts = 0;
             target.next_due_mono = 0;
             // Behind the host active key: converge there before staging.
-            target.active_first = pull.current < active;
+            target.active_first = heard <= active;
+            target.active_first_staged = false;
+            target.force_stage_update = heard <= active
+                && staged_ahead
+                && matches!(
+                    target.row.state,
+                    TargetState::StagedAcked | TargetState::ActiveAcked
+                );
         }
         // A converged target asking for repair gets its Update at once;
         // anything else flows through the tick's rate-limited round.
@@ -3137,19 +3276,22 @@ impl SiteAuthority {
             .target(pull.node)
             .is_some_and(|t| t.row.state == TargetState::ActiveAcked)
         {
-            let to = self.gks.rotation().expect("rotation checked").row.to_epoch;
-            let rotation = self.gks.rotation().expect("rotation checked").row.clone();
-            if let Some(key) = self.key_for_epoch(to) {
-                self.queue_immediate(
-                    GroupKeyCommand::Update {
-                        node: pull.node,
-                        epoch: to,
-                        key,
-                        cause: rotation.cause,
-                        overlap_s: rotation.cause.overlap_s(),
-                    },
-                    time,
-                );
+            if heard <= active {
+                self.queue_update_active(pull.node, time);
+            } else {
+                let rotation = self.gks.rotation().expect("rotation checked").row.clone();
+                if let Some(key) = self.key_for_epoch(rotation.to_epoch) {
+                    self.queue_immediate(
+                        GroupKeyCommand::Update {
+                            node: pull.node,
+                            epoch: rotation.to_epoch,
+                            key,
+                            cause: rotation.cause,
+                            overlap_s: rotation.cause.overlap_s(),
+                        },
+                        time,
+                    );
+                }
             }
         }
         PullOutcome::Answered
@@ -3531,6 +3673,7 @@ fn split_join_ead(
 /// outbound relay messages and GK commands to their transports and returns
 /// the events for the caller to append to the daemon's event ring.
 pub struct SiteService {
+    gk_handoff: Mutex<()>,
     authority: Mutex<SiteAuthority>,
     transport: Mutex<Option<Arc<dyn JoinTransport>>>,
 }
@@ -3540,6 +3683,7 @@ pub type Events = Vec<(u64, String)>;
 impl SiteService {
     pub fn new(authority: SiteAuthority) -> Self {
         Self {
+            gk_handoff: Mutex::new(()),
             authority: Mutex::new(authority),
             transport: Mutex::new(None),
         }
@@ -3551,6 +3695,10 @@ impl SiteService {
 
     /// Runs `f` on the authority; delivers what it queued.
     pub fn with<R>(&self, f: impl FnOnce(&mut SiteAuthority) -> R) -> (R, Events) {
+        // Serialize the state change with the GK handoff: a removal cannot
+        // commit while an earlier command to that member is still in send.
+        // The authority lock remains released during transport calls.
+        let handoff = self.gk_handoff.lock().expect("gk handoff poisoned");
         let (result, outbound, gk_outbound, gk_transport, events) = {
             let mut authority = self.authority.lock().expect("site authority poisoned");
             let result = f(&mut authority);
@@ -3562,19 +3710,23 @@ impl SiteService {
                 authority.take_events(),
             )
         };
+        // GK commands leave with the lock released; without a transport
+        // they drop (retries keep the targets due and honestly unknown).
+        if let Some(transport) = gk_transport {
+            for queued in gk_outbound {
+                transport.send(
+                    queued.command,
+                    queued.expected_dams.as_ref().map(GkSecret::bytes),
+                );
+            }
+        }
+        drop(handoff);
         if !outbound.is_empty() {
             let transport = self.transport.lock().expect("transport poisoned").clone();
             if let Some(transport) = transport {
                 for message in outbound {
                     transport.deliver(message);
                 }
-            }
-        }
-        // GK commands leave with the lock released; without a transport
-        // they drop (retries keep the targets due and honestly unknown).
-        if let Some(transport) = gk_transport {
-            for command in gk_outbound {
-                transport.send(command);
             }
         }
         (result, events)

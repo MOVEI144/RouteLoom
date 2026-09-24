@@ -598,7 +598,7 @@ struct World {
     now: u64,
     /// (site, decision) in serve order.
     decisions: Vec<(u8, Decision)>,
-    /// (site, m4 forward time, row delivered_ms): commit-before-send proof.
+    /// (site, m4 forward time, durable row delivered_ms) for Allow forwards.
     allow_forwards: Vec<(u8, u64, u64)>,
     aborts_seen: Vec<PeerAbort>,
     ups_seen: u64,
@@ -669,9 +669,19 @@ impl World {
                             .decisions
                             .iter()
                             .any(|(s, d)| *s == site && matches!(d, Decision::Allow(_)));
-                        let row = self.sites[site_idx]
+                        let (row, durable) = self.sites[site_idx]
                             .service
-                            .with(|a| a.devices.get(&DEVICE_NODE).cloned())
+                            .with(|a| {
+                                let row = a.devices.get(&DEVICE_NODE).cloned();
+                                let durable = a
+                                    .store
+                                    .load()
+                                    .expect("read committed member row")
+                                    .devices
+                                    .into_iter()
+                                    .find(|member| member.node == DEVICE_NODE);
+                                (row, durable)
+                            })
                             .0;
                         if allowed_here {
                             let row = row.expect("allow committed before its m4");
@@ -680,10 +690,9 @@ impl World {
                             let delivered = row
                                 .delivered_ms
                                 .expect("delivered_ms stored with the delivery");
-                            assert!(
-                                delivered <= self.now,
-                                "durable approval precedes the m4 send"
-                            );
+                            let durable = durable.expect("allow persisted before its m4");
+                            assert_eq!(durable.delivered_ms, Some(delivered));
+                            assert_eq!(durable.dams, row.dams);
                             self.allow_forwards.push((site, self.now, delivered));
                         } else {
                             assert!(
@@ -726,7 +735,9 @@ impl World {
             self.route_up(up);
         }
         for index in 0..2 {
-            self.sites[index].service.tick(self.now);
+            self.sites[index]
+                .service
+                .tick(super::group_keys::HostTime::sync(self.now));
             self.drain(index);
         }
         self.serve_kguard();

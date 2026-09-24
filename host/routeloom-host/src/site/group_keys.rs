@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::fill_random;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::records::ROLE_GATEWAY;
 use super::store::{DeviceRow, GroupKeyRow};
@@ -219,13 +219,13 @@ impl GkSecret {
 /// `GK-id` of §3.1: the ACK-matching identifier (not a key export).
 /// `SHA256("RouteLoom/v1/gk-id" || 0x00 || network:u64 || epoch:u32 || GK)`.
 pub fn gk_id(network: u64, epoch: u32, key: &[u8; 32]) -> [u8; 32] {
-    let mut input = Vec::with_capacity(16 + 1 + 8 + 4 + 32);
-    input.extend_from_slice(b"RouteLoom/v1/gk-id");
-    input.push(0x00);
-    input.extend_from_slice(&network.to_be_bytes());
-    input.extend_from_slice(&epoch.to_be_bytes());
-    input.extend_from_slice(key);
-    sha256(&input)
+    const PREFIX: &[u8; 19] = b"RouteLoom/v1/gk-id\0";
+    let mut input = Zeroizing::new([0_u8; 19 + 8 + 4 + 32]);
+    input[..19].copy_from_slice(PREFIX);
+    input[19..27].copy_from_slice(&network.to_be_bytes());
+    input[27..31].copy_from_slice(&epoch.to_be_bytes());
+    input[31..].copy_from_slice(key);
+    sha256(&input[..])
 }
 
 /// A fresh nonzero group key: at most four RNG draws (§6.1 forbids the old
@@ -317,14 +317,16 @@ impl std::fmt::Debug for GroupKeyCommand {
 /// trait PR1 implements). `channel_ready` runs under the authority lock, so
 /// it must be a fast non-blocking read — implementations must never call
 /// back into the authority while holding their channel table. `send` runs
-/// with the lock released (the `SiteService::with` discipline) and is
-/// best-effort: a queued command is never reach evidence.
+/// with the authority lock released, but within the service's serialized
+/// handoff. It must enqueue promptly without calling back into SiteService;
+/// key commands must match `expected_dams` to the channel's bound DAMS
+/// while selecting that channel. Wake has no channel and passes `None`.
+/// A queued command is never reach evidence.
 pub trait GroupKeyTransport: Send + Sync {
-    /// True when an established authority channel to `node` can carry a
-    /// command right now (PR1's channel table; tests use a fake set).
-    fn channel_ready(&self, node: u64) -> bool;
-    /// Best-effort send of one queued command.
-    fn send(&self, command: GroupKeyCommand);
+    /// True when the established channel to `node` has this incarnation.
+    fn channel_ready(&self, node: u64, expected_dams: &[u8; 32]) -> bool;
+    /// Best-effort send, checking the incarnation again at dispatch.
+    fn send(&self, command: GroupKeyCommand, expected_dams: Option<&[u8; 32]>);
 }
 
 /// A type 2/3 op-2 ACK as the channel layer hands it to the authority: the
@@ -595,11 +597,18 @@ pub struct GkTarget {
     pub next_due_mono: u64,
     /// An Activate went out at least once (Activating→CatchingUp edge).
     pub activate_sent: bool,
-    /// A pull showed this member behind the host active key: tick sends
+    /// A pull reported no epoch above the host active key: tick sends
     /// Update(active) before Update(to), and only stages after the active
     /// ACK (§6.3). Lost on restart; the member re-pulls, and a jumped
     /// Update(to) still converges it.
     pub active_first: bool,
+    /// The member durably staged the host's active key and now needs its
+    /// Activate before the pending rotation's staged key may be sent.
+    pub active_first_staged: bool,
+    /// A pull reported loss of an already-ACKed staged key. The saved ACK
+    /// remains durable evidence, but the key is sent again after the
+    /// active-key repair so the device can recover before activation.
+    pub force_stage_update: bool,
 }
 
 impl GkTarget {
@@ -610,6 +619,8 @@ impl GkTarget {
             next_due_mono: 0,
             activate_sent: false,
             active_first: false,
+            active_first_staged: false,
+            force_stage_update: false,
         }
     }
 }
@@ -650,7 +661,7 @@ pub struct StagedPlan {
     pub op_id: u64,
     pub from_epoch: u32,
     pub to_epoch: u32,
-    pub key: [u8; 32],
+    pub key: GkSecret,
     pub deadline_mono: u64,
     pub rotation_row: RotationRow,
     pub targets: Vec<TargetRow>,
@@ -826,7 +837,12 @@ impl GroupRotation {
         let mut due: Vec<u64> = self
             .targets
             .values()
-            .filter(|t| t.next_due_mono <= mono_ms && t.row.state != TargetState::ActiveAcked)
+            .filter(|t| {
+                t.next_due_mono <= mono_ms
+                    && (t.row.state != TargetState::ActiveAcked
+                        || t.active_first
+                        || t.force_stage_update)
+            })
             .map(|t| t.row.node)
             .collect();
         due.sort_by_key(|node| {
@@ -840,14 +856,25 @@ impl GroupRotation {
 
     /// What a due target needs. `active_first` (pull-behind, §6.3) wins
     /// over staged evidence: the member converges to the host active key
-    /// before it stages the new one. Staging never sends Activates —
-    /// staged evidence waits for the Activating commit.
+    /// before it stages the new one. Staging never sends an Activate for
+    /// the staged epoch; its evidence waits for the Activating commit.
     pub fn send_kind(&self, node: u64) -> Option<GkSend> {
         let rotation = self.rotation.as_ref()?;
         let target = self.targets.get(&node)?;
         if target.active_first {
+            return Some(if target.active_first_staged {
+                GkSend::Activate {
+                    epoch: self.active_epoch,
+                }
+            } else {
+                GkSend::Update {
+                    epoch: self.active_epoch,
+                }
+            });
+        }
+        if target.force_stage_update {
             return Some(GkSend::Update {
-                epoch: self.active_epoch,
+                epoch: rotation.row.to_epoch,
             });
         }
         match target.row.state {
@@ -917,6 +944,12 @@ impl GroupRotation {
     /// so they must not block the phase forever.
     pub fn edge(&self) -> Option<RotationEdge> {
         let rotation = self.rotation.as_ref()?;
+        // A failed activation commit leaves the rotation in Staging even
+        // if a member has already promoted the staged key implicitly.
+        // Only an active-key commit may close the rotation.
+        if rotation.row.phase == RotationPhase::Staging {
+            return None;
+        }
         if self
             .targets
             .values()
@@ -925,7 +958,6 @@ impl GroupRotation {
             return Some(RotationEdge::Converged);
         }
         match rotation.row.phase {
-            RotationPhase::Staging => None,
             RotationPhase::Activating
                 if !self
                     .targets
@@ -935,6 +967,7 @@ impl GroupRotation {
                 Some(RotationEdge::ToCatchingUp)
             }
             RotationPhase::Activating | RotationPhase::CatchingUp => None,
+            RotationPhase::Staging => None,
         }
     }
 
@@ -962,7 +995,7 @@ impl GroupRotation {
     /// Publishes a staging commit: fresh staged key, live rotation, full
     /// target set. Replaces (and wipes) any superseded staged key.
     pub fn publish_staging(&mut self, plan: StagedPlan) {
-        self.staged = Some((plan.to_epoch, GkSecret::new(plan.key)));
+        self.staged = Some((plan.to_epoch, plan.key));
         self.staged_created_ms = plan.rotation_row.created_ms;
         // The staged epoch is always exactly high-water + 1 (see
         // `next_epoch`), so publishing it advances the mark.
@@ -997,6 +1030,8 @@ impl GroupRotation {
             target.attempts = 0;
             target.next_due_mono = 0;
             target.activate_sent = false;
+            target.active_first = false;
+            target.active_first_staged = false;
         }
     }
 
@@ -1096,7 +1131,7 @@ mod tests {
             op_id: 9,
             from_epoch: 1,
             to_epoch: 2,
-            key: [2; 32],
+            key: GkSecret::new([2; 32]),
             deadline_mono: deadline,
             rotation_row: RotationRow {
                 operation_id: 9,
@@ -1278,14 +1313,10 @@ mod tests {
         ));
         let mut devices = BTreeMap::new();
         for node in [0x10, 0x20, 0x30] {
-            devices.insert(
-                node,
-                DeviceRow {
-                    node,
-                    role: if node == 0x20 { ROLE_GATEWAY } else { 1 },
-                    ..DeviceRow::default()
-                },
-            );
+            let mut device = DeviceRow::default();
+            device.node = node;
+            device.role = if node == 0x20 { ROLE_GATEWAY } else { 1 };
+            devices.insert(node, device);
         }
         assert_eq!(gks.due_targets(0, &devices), vec![0x20, 0x10, 0x30]);
     }
