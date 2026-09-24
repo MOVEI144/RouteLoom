@@ -28,7 +28,8 @@ use routeloom_provision::image::{
 use routeloom_provision::manifest::manifest_sign;
 use routeloom_provision::nvs::manufacture_nvs_set;
 use routeloom_provision::signer::{
-    hex_decode_exact, hex_encode, FileRootSigner, RootSigner, FILE_KEY_CUSTODY_WARNING,
+    hex_decode_exact, hex_encode, FileAuthoritySigner, FileRootSigner, RootSigner,
+    FILE_KEY_CUSTODY_WARNING,
 };
 use routeloom_provision::verify::{verify_manifest, Verdict};
 
@@ -38,6 +39,45 @@ type DynError = Box<dyn std::error::Error>;
 /// P-256 root pair, write the `routeloom-root-key-v1` document (mode
 /// 0600, never overwriting), print the custody warning on stderr and the
 /// public identity on stdout.
+/// `provision-authority-keygen --authority-id <16hex> --out <key.json>` —
+/// generate a dev P-256 CONFIG AUTHORITY pair for the RLCP1_COSE_ESP256
+/// permit/recovery profile, writing the
+/// `routeloom-config-authority-key-v1` document (mode 0600, never
+/// overwriting). The document is NOT a root key — neither loader
+/// accepts the other's file — and the daemon's `--config-authority`
+/// must equal `--authority-id` for the key to sign.
+pub fn provision_authority_keygen_command(args: &[String]) -> Result<(), DynError> {
+    let mut authority_id: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--authority-id" => authority_id = Some(opt_value(&mut args, "--authority-id")?),
+            "--out" => out = Some(opt_value(&mut args, "--out")?),
+            other => {
+                return Err(format!("unknown provision-authority-keygen option: {other}").into())
+            }
+        }
+    }
+    let authority_id = want_hex64(
+        "--authority-id",
+        authority_id.ok_or("provision-authority-keygen requires --authority-id <16hex>")?,
+    )?;
+    if authority_id == 0 {
+        return Err("--authority-id must be nonzero".into());
+    }
+    let out = PathBuf::from(out.ok_or("provision-authority-keygen requires --out <path>")?);
+    let signer = FileAuthoritySigner::generate(authority_id)?;
+    signer.save(&out)?;
+    eprintln!("{FILE_KEY_CUSTODY_WARNING}");
+    println!(
+        "{{\"authority_id\":\"{authority_id:016x}\",\"pubkey_hex\":\"{}\",\"key_file\":\"{}\"}}",
+        hex_encode(&signer.pubkey()),
+        out.display()
+    );
+    Ok(())
+}
+
 pub fn provision_keygen_command(args: &[String]) -> Result<(), DynError> {
     let mut root_id: Option<String> = None;
     let mut out: Option<String> = None;

@@ -7,9 +7,10 @@
 // set, the monotonic store_epoch and the min_authority_generation floor.
 //
 // Persistence is dual-slot under the same discipline as the authority
-// ledger and the config journal: seal -> write -> readback -> commit, one
-// slot alternation per accepted image, a power cut leaving a discardable
-// pending record, committed-but-CRC-failed records still bounding the
+// ledger and the config journal: seal -> write -> readback -> commit,
+// every accepted image lands in BOTH slots as a twin pair (a power cut
+// leaves a discardable pending record or a new/old split the next boot
+// orders by epoch), committed-but-CRC-failed records still bounding the
 // recovery floors, both slots lost -> quarantine, and an explicit
 // recover() as the only way back (never an implicit reset, never an
 // erase).
@@ -24,6 +25,7 @@
 #include <cstdint>
 
 #include "routeloom/authority.hpp"  // Digest256
+#include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -200,14 +202,22 @@ class TrustStore {
 
   Status initialize() noexcept;
 
+  // Bind the RLF1 floor this store's E/G counters reserve from. While
+  // attached, commit/recover/install refuse any image below the floor's
+  // E/G — the floor is the reservation ledger, this store its mirror.
+  // The floor must outlive the store; trust-managed deployments attach.
+  void attach_floor(const SecurityFloorStore* floor) noexcept { floor_ = floor; }
+
   // The single write path for accepted trust images — used by the physical
   // provisioning channel (first install) and by trust_manifest_accept()
-  // after a signature verifies. Enforces: store initialized and not
-  // quarantined/uncertain; image semantically valid; store_epoch strictly
-  // greater than the proven epoch floor (ordinal compare — u32 wrap is a
-  // re-provision event, never modular arithmetic); min_authority_generation
-  // never below the proven floor. Two-phase commit to the inactive slot
-  // with readback before the in-memory epoch moves.
+  // after a signature verifies and the RLF1 E/G reservation lands.
+  // Enforces: store initialized and not quarantined/uncertain; image
+  // semantically valid; store_epoch strictly greater than the proven
+  // epoch floor (ordinal compare — u32 wrap is a re-provision event,
+  // never modular arithmetic); min_authority_generation never below the
+  // proven floor; E/G never below the attached security floor. The image
+  // lands in BOTH slots (each two-phase with readback) so the next boot
+  // sees a verifiable twin pair instead of a new/old split.
   Status commit_image(const TrustImage& image) noexcept;
 
   // Explicit operator recovery from quarantine or storage-uncertain: the
@@ -217,6 +227,15 @@ class TrustStore {
   // in both slots so the next boot sees a verifiable twin pair. Never
   // invoked implicitly; storage errors never trigger erase or reformat.
   Status recover(const TrustImage& image) noexcept;
+
+  // Install a floor-reserved image: the trust_manifest_accept() path for
+  // re-delivering the exact RTM1 original the floor already binds
+  // (same bytes hash + E/G) after the commit was interrupted or the
+  // slots were lost. Unlike recover() this is available on any store
+  // state — the floor reservation (made only after a verified accept)
+  // is the authorization — but the epoch/floor rules still apply, so a
+  // stale or foreign image can never install.
+  Status install_reserved(const TrustImage& image) noexcept;
 
   bool initialized() const noexcept { return initialized_; }
   bool has_active() const noexcept { return has_active_; }
@@ -275,8 +294,12 @@ class TrustStore {
                      bool& committed_fields) noexcept;
   Status store_image(std::uint8_t slot, const TrustImage& image,
                      Digest256* fingerprint) noexcept;
+  // The attached floor's E/G must not exceed the candidate's — the
+  // store never commits below its reservation ledger.
+  Status check_floor(const TrustImage& image) const noexcept;
 
   TrustStoreStorage& storage_;
+  const SecurityFloorStore* floor_{nullptr};
   TrustImage image_{};
   Digest256 fingerprint_{};
   // Per-slot committed-image digests, computed at decode so adoption never

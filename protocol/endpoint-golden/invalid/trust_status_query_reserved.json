@@ -1,0 +1,8 @@
+{
+  "codec": "control_trust_status_query",
+  "encoded_hex": "01050001000102030405060708090a0b0c0d0e0f",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "trust_status_query_reserved",
+  "note": "reserved u16 must be zero"
+}

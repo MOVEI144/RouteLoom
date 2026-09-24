@@ -664,6 +664,24 @@ Status TrustStore::store_image(const std::uint8_t slot, const TrustImage& image,
   return Status::success();
 }
 
+Status TrustStore::check_floor(const TrustImage& image) const noexcept {
+  if (floor_ == nullptr) return Status::success();
+  SecurityFloorState state{};
+  const Status status = floor_->read(state);
+  if (!status.ok()) return status;
+  // The store mirrors its reservation ledger: below-floor images are
+  // stale reservations or foreign epochs, never installable.
+  if (image.store_epoch < state.trust_epoch_floor) {
+    return Status::error(StatusCode::Conflict,
+                         "trust image below security floor epoch");
+  }
+  if (image.min_authority_generation < state.min_authority_generation) {
+    return Status::error(StatusCode::AuthorizationFailed,
+                         "trust image below security floor generation");
+  }
+  return Status::success();
+}
+
 Status TrustStore::commit_image(const TrustImage& image) noexcept {
   if (!initialized_) {
     return Status::error(StatusCode::InvalidState, "trust store not initialized");
@@ -691,47 +709,60 @@ Status TrustStore::commit_image(const TrustImage& image) noexcept {
     return Status::error(StatusCode::AuthorizationFailed,
                         "authority generation floor regressed");
   }
-  const std::uint8_t target =
+  const Status floored = check_floor(image);
+  if (!floored) return floored;
+  // Twin commit: the inactive slot first (still guarded by its
+  // reservation), then the previously-active slot — the next boot sees
+  // either a twin pair or a new/old split it orders by epoch, never a
+  // lone new image beside unproven garbage.
+  const std::uint8_t first =
       has_active_ ? static_cast<std::uint8_t>(active_slot_ ^ 1U) : 0;
-  if (slot_reserved_[target] != StatusCode::Ok) {
-    return Status::error(slot_reserved_[target],
-                        "trust store slot owned by other data");
+  const std::uint8_t second = static_cast<std::uint8_t>(first ^ 1U);
+  if (slot_reserved_[first] != StatusCode::Ok ||
+      slot_reserved_[second] != StatusCode::Ok) {
+    const StatusCode code = slot_reserved_[first] != StatusCode::Ok
+                                ? slot_reserved_[first]
+                                : slot_reserved_[second];
+    return Status::error(code, "trust store slot owned by other data");
   }
-  const Status stored = store_image(target, image, &fingerprint_);
+  Status stored = store_image(first, image, &fingerprint_);
   if (!stored) return stored;
+  stored = store_image(second, image, nullptr);
+  if (!stored) return stored;
+  slot_reserved_[0] = StatusCode::Ok;
+  slot_reserved_[1] = StatusCode::Ok;
   image_ = image;
   epoch_floor_ = image.store_epoch;
   if (image.min_authority_generation > generation_floor_) {
     generation_floor_ = image.min_authority_generation;
   }
-  active_slot_ = target;
+  active_slot_ = first;
   has_active_ = true;
   return Status::success();
 }
 
-Status TrustStore::recover(const TrustImage& image) noexcept {
+Status TrustStore::install_reserved(const TrustImage& image) noexcept {
   if (!initialized_) {
     return Status::error(StatusCode::InvalidState, "trust store not initialized");
   }
-  if (!quarantined_ && !uncertain_) {
-    return Status::error(StatusCode::InvalidState, "trust store not impaired");
-  }
   const Status valid = trust_image_validate(image);
   if (!valid) return valid;
-  // The operator attests a fresh image; its epoch must clear EVERY epoch a
-  // committed record proved this boot (including CRC-failed ones) or a
-  // pre-loss image could replay — the attestation is the safety mechanism.
-  if (image.store_epoch <= epoch_floor_) {
+  // The caller proves these are the exact reserved bytes (floor hash
+  // binding or completed-duplicate compare), so reinstalling AT the
+  // proven epoch is the resume — only a strictly older epoch replays a
+  // pre-loss image and refuses. (recover() below keeps the strict rule:
+  // an operator attestation carries no exact-bytes proof, so the same
+  // epoch there would fork it.)
+  if (image.store_epoch < epoch_floor_) {
     return Status::error(StatusCode::InvalidArgument,
-                        "recovery epoch must exceed the proven floor");
+                        "reserved epoch below the proven floor");
   }
   if (image.min_authority_generation < generation_floor_) {
     return Status::error(StatusCode::AuthorizationFailed,
                         "authority generation floor regressed");
   }
-  // The identical image goes to both slots: the next boot then sees two
-  // verifiable identical records rather than a valid sibling of
-  // unverifiable data (the ledger/journal recovery pattern).
+  const Status floored = check_floor(image);
+  if (!floored) return floored;
   Status status = store_image(0, image, &fingerprint_);
   if (!status) return status;
   status = store_image(1, image, nullptr);
@@ -748,6 +779,25 @@ Status TrustStore::recover(const TrustImage& image) noexcept {
   quarantined_ = false;
   uncertain_ = false;
   return Status::success();
+}
+
+Status TrustStore::recover(const TrustImage& image) noexcept {
+  if (!initialized_) {
+    return Status::error(StatusCode::InvalidState, "trust store not initialized");
+  }
+  if (!quarantined_ && !uncertain_) {
+    return Status::error(StatusCode::InvalidState, "trust store not impaired");
+  }
+  // The operator attests a fresh image on an impaired store. Unlike the
+  // floor-bound resume there is no exact-bytes proof, so the SAME epoch
+  // would fork history: the attested epoch must clear every epoch any
+  // committed (or committed-but-CRC-damaged) record proved this boot.
+  if (image.store_epoch <= epoch_floor_) {
+    return Status::error(StatusCode::InvalidArgument,
+                        "recovery epoch must exceed the proven floor");
+  }
+  // The generation, floor and twin-write rules are install_reserved()'s.
+  return install_reserved(image);
 }
 
 const TrustAnchor* TrustStore::find_anchor(const std::uint64_t root_id) const noexcept {

@@ -1,0 +1,8 @@
+{
+  "codec": "control_trust_status",
+  "encoded_hex": "01060000000102030405060708090a0b0c0d0e0f00000002000000020000000000000007000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f010200",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "trust_status_truncated",
+  "note": "71 bytes is not the TrustStatus body"
+}

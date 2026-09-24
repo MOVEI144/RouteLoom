@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use crate::config::{
     config_dev_key, ConfigIssuer, ConfigLane, ConfigOutcome, ConfigRequest, ConfigStep,
+    ISSUE_PROFILE_COSE,
 };
 use crate::send_store::{
     mint_id128, ConfigAuthorityLedger, DispatchState, OperationStore, PrepareOutcome,
@@ -755,10 +756,11 @@ impl Dispatcher {
     }
 
     /// Submit one queued api request to the lane. Gates on the device's
-    /// config capability and, for Propose, on a configured authority — a
-    /// refusal is an honest terminal outcome, never a fabricated result. The
-    /// SingleAuthority commit order allocates + durably commits the sequence
-    /// BEFORE the lane signs, so a crash can gap but never reuse one.
+    /// config capability and, for the signing requests, on a configured
+    /// authority — a refusal is an honest terminal outcome, never a
+    /// fabricated result. The SingleAuthority commit order (reserve →
+    /// bind → sign → store) runs inside the lane just before each
+    /// transfer emits, so a crash can gap but never reuse a sequence.
     fn config_submit<L: ConfigAuthorityLedger>(
         &mut self,
         ledger: &mut L,
@@ -782,35 +784,35 @@ impl Dispatcher {
                 .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Busy)));
             return;
         }
-        if let ConfigRequest::Propose { .. } = request {
-            // A signed permit needs a configured authority, a live mesh
-            // network to bind into the AAD, and an issuer that actually holds
-            // a signing key — none of these is client-supplied.
+        if let ConfigRequest::Propose { .. }
+        | ConfigRequest::Recover { .. }
+        | ConfigRequest::Retry { .. } = request
+        {
+            // New issuance and saved-original retry both require the live
+            // authority identity and selected profile key.
             if cfg.authority == 0 || link.network == 0 || !cfg.lane.issuer_ready() {
                 self.config_done
                     .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));
                 return;
             }
-            let Ok(sequence) = ledger.config_authority_next() else {
-                // The durable sequence could not be committed: the issuance
-                // cannot be proven, so report Indeterminate, never a seq we
-                // did not durably own. No operation_id was minted yet —
-                // the failure precedes issuance, so none is carried.
-                self.config_done
-                    .push((op_id, ConfigOutcome::Indeterminate(None)));
-                return;
-            };
             cfg.lane.set_issuer_identity(link.network, cfg.authority);
-            cfg.lane.set_authority(cfg.generation, sequence);
+            cfg.lane.set_authority(cfg.generation);
         }
-        let step = cfg.lane.submit(request, now);
+        let step = cfg.lane.submit(ledger, request, now);
         self.drive_config_step(step, op_id);
     }
 
     /// Route one inbox body to the lane when it answers the in-flight config
     /// wire request. Returns true when consumed (so `handle_reply` does not
-    /// fall through to "unmatched").
-    fn config_reply(&mut self, request: u64, inner: &[u8], now: u64) -> bool {
+    /// fall through to "unmatched"). The lane commits the permit issuance
+    /// through `ledger` when the challenge reply lands.
+    fn config_reply<L: ConfigAuthorityLedger>(
+        &mut self,
+        ledger: &mut L,
+        request: u64,
+        inner: &[u8],
+        now: u64,
+    ) -> bool {
         let pending = match self.config.as_ref().and_then(|c| c.pending) {
             Some(p) if p.wire == request => p,
             _ => return false,
@@ -818,7 +820,7 @@ impl Dispatcher {
         let step = {
             let cfg = self.config.as_mut().expect("checked above");
             cfg.pending = None;
-            cfg.lane.on_reply(pending.lane, inner, now)
+            cfg.lane.on_reply(ledger, pending.lane, inner, now)
         };
         self.drive_config_step(step, pending.op_id);
         true
@@ -1646,7 +1648,7 @@ impl Dispatcher {
     }
 
     /// One host-ops inner body from the inbox.
-    pub fn handle_reply<S: OperationStore>(
+    pub fn handle_reply<S: OperationStore + ConfigAuthorityLedger>(
         &mut self,
         store: &mut S,
         request: u64,
@@ -1660,7 +1662,7 @@ impl Dispatcher {
         // Config replies land in the same inbox keyed by the dispatcher's
         // wire request id — route them to the lane before the generic
         // pending lookup, which does not own them.
-        if self.config_reply(request, inner, now) {
+        if self.config_reply(store, request, inner, now) {
             return;
         }
         let Some(pending) = self.pending.remove(&request) else {
@@ -2606,27 +2608,44 @@ fn fill_config_entropy(buf: &mut [u8]) {
     }
 }
 
-/// Build the config lane for the dispatch thread: the dev-profile issuer
-/// derived from the link development secret (domain-separated — never the
-/// raw PSK), the daemon's configured authority/generation, and real entropy.
-/// An unset authority yields a lane that can answer queries but refuses
-/// every Propose honestly.
+/// Build the config lane for the dispatch thread: the issuer under the
+/// daemon's configured profile — dev HMAC derived from the link
+/// development secret (domain-separated — never the raw PSK), or COSE
+/// under the loaded authority key — plus the configured
+/// authority/generation and real entropy. An unset authority yields a
+/// lane that can answer queries but refuses every issuance honestly.
 fn config_lane_for(state: &State) -> ConfigLane {
     // The permit master must equal the target's own key material — the
     // firmware verifier derives identically from ROUTELOOM_DEVELOPMENT_KEY_HEX,
     // so a mismatched master signs permits the device can only deny.
     let dev_key = config_dev_key(&state.config_dev_key);
     let authority = state.config_authority.unwrap_or(0);
-    let issuer = ConfigIssuer::new(
+    let mut issuer = ConfigIssuer::new(
         dev_key.to_vec(),
         /*network=*/ 0, // rebound to the live session network per propose
         authority,
         CONFIG_SAFETY_MARGIN_MS,
     );
+    issuer.set_profile(state.config_profile);
+    if state.config_profile == ISSUE_PROFILE_COSE {
+        match state
+            .config_authority_key
+            .as_ref()
+            .map(|path| routeloom_provision::signer::FileAuthoritySigner::load(path))
+        {
+            Some(Ok(signer)) if signer.authority_id() == authority => {
+                issuer.set_cose_signer(signer);
+            }
+            _ => {
+                // Validated at startup; a key that vanished since leaves
+                // the lane keyless — every issuance refuses honestly.
+                eprintln!("config authority key unloadable; COSE issuance refuses");
+            }
+        }
+    }
     ConfigLane::new(
         issuer,
         state.config_authority_generation,
-        /*authority_sequence=*/ 0, // fed from the durable ledger per propose
         Box::new(fill_config_entropy),
     )
 }
@@ -2670,8 +2689,9 @@ mod tests {
     };
     use routeloom_wire::autonomy::EncodedPayload;
     use routeloom_wire::endpoint::{
-        control_challenge_encode, control_status_encode, ConfigField, ConfigFieldType, ConfigPhase,
-        ConfigReason, ControlChallenge, ControlStatus,
+        control_challenge_encode, control_status_encode, recovery_info_encode, ConfigField,
+        ConfigFieldType, ConfigPhase, ConfigReason, ControlChallenge, ControlStatus, RecoveryInfo,
+        RCR2_VERSION, RECOVERY_INFO_FLAG_IMPAIRED, RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
     };
 
     const UID: u32 = 501;
@@ -4933,7 +4953,6 @@ mod tests {
         ConfigLane::new(
             issuer,
             1,
-            0,
             Box::new(move |out: &mut [u8]| {
                 counter = counter.wrapping_add(1);
                 for b in out.iter_mut() {
@@ -5036,6 +5055,19 @@ mod tests {
         }
     }
 
+    fn recover_request() -> ConfigRequest {
+        ConfigRequest::Recover {
+            target: 0x99,
+            config_namespace: 1,
+            schema: 1,
+            mode: 0,
+            new_store_generation: 4,
+            new_revision: 8,
+            snapshot_hash: [0xAB; 32],
+            baseline: Vec::new(),
+        }
+    }
+
     #[test]
     fn config_lane_round_trip_through_the_dispatcher() {
         let mut dispatcher = Dispatcher::new([9; 16]);
@@ -5125,6 +5157,62 @@ mod tests {
         assert_eq!(
             no_auth.take_config_done(),
             vec![(23, ConfigOutcome::Challenged(ch))]
+        );
+    }
+
+    #[test]
+    fn config_recover_submit_is_gated_and_memory_honest() {
+        // A Recover submit passes the same dispatch gates as Propose
+        // (capability, authority, liveness) and then refuses on a
+        // memory-only store — recovery issuance needs the durable
+        // outbox, and the refusal carries no fabricated bytes.
+        let mut dispatcher = Dispatcher::new([9; 16]);
+        dispatcher.attach_config(test_config_lane(), 0x42, 1);
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        dispatcher.config_submit(&mut store, &link(), 31, recover_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_RECOVERY_INFO);
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_RECOVERY_INFO))
+            .unwrap();
+        let query = host_ops::decode_config_recovery_info(&emit.body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: NET,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1,
+            snapshot_hash: [0xAB; 32],
+        };
+        let mut encoded = EncodedPayload::default();
+        recovery_info_encode(&info, &mut encoded).unwrap();
+        let reply = host_ops::encode_config_reply(
+            host_ops::SUB_CONFIG_RECOVERY_INFO,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Ok as u16,
+                target: 0x99,
+                body: encoded.view().to_vec(),
+            },
+        )
+        .unwrap();
+        dispatcher.handle_reply(&mut store, wire, &reply, 1_050);
+        assert_eq!(
+            dispatcher.take_config_done(),
+            vec![(31, ConfigOutcome::Refused(ConfigOpsResult::Unsupported))]
+        );
+        assert!(!dispatcher.config_busy());
+        // No authority configured: Denied before the lane runs.
+        let mut no_auth = Dispatcher::new([9; 16]);
+        no_auth.attach_config(test_config_lane(), 0, 1);
+        no_auth.config_submit(&mut store, &link(), 32, recover_request(), 1_000);
+        assert_eq!(
+            no_auth.take_config_done(),
+            vec![(32, ConfigOutcome::Refused(ConfigOpsResult::Denied))]
         );
     }
 

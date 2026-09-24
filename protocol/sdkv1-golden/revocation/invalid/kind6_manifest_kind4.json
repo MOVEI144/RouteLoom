@@ -4,5 +4,5 @@
   "expect": "error",
   "format": "routeloom-sdkv1-revocation-golden-v1",
   "name": "kind6_manifest_kind4",
-  "note": "kind 4 unassigned"
+  "note": "kind 4 carries config recovery, not revocation sets"
 }

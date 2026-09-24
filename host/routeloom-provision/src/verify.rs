@@ -188,25 +188,10 @@ fn run_pipeline(
     Ok(candidate)
 }
 
-/// ECDSA P-256/SHA-256 verify — the host stand-in for `uECC_verify` over
-/// the already-computed Sig_structure digest. R || S raw signature, X || Y
-/// public key.
+/// The manifest leg of the shared P-256 verifier in `signer` — the host
+/// stand-in for `uECC_verify` over the Sig_structure digest.
 fn verify_p256(pubkey: &[u8; 64], digest: &[u8; 32], signature: &[u8; 64]) -> bool {
-    use p256::ecdsa::signature::hazmat::PrehashVerifier;
-    use p256::ecdsa::{Signature, VerifyingKey};
-
-    let mut sec1 = [0_u8; 65];
-    sec1[0] = 0x04;
-    sec1[1..].copy_from_slice(pubkey);
-    let Ok(key) = VerifyingKey::from_sec1_bytes(&sec1) else {
-        return false;
-    };
-    let Ok(signature) = Signature::from_slice(signature) else {
-        return false;
-    };
-    // The device hashes the Sig_structure once and verifies the digest —
-    // verify_prehash, not the message path, keeps the semantics identical.
-    key.verify_prehash(digest, &signature).is_ok()
+    crate::signer::ecdsa_p256_verify(pubkey, digest, signature)
 }
 
 #[cfg(test)]

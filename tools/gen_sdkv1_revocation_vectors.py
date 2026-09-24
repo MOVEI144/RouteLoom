@@ -302,9 +302,10 @@ def main() -> None:
         "manifest subtype is 1")
     bad("kind6_manifest_kind5", "rrs_kind6_manifest",
         good_manifest[:2] + b"\x05" + good_manifest[3:],
-        "kind 5 is the reserved P5 envelope, never a manifest here")
+        "kind 5 carries trust manifests, not revocation sets")
     bad("kind6_manifest_kind4", "rrs_kind6_manifest",
-        good_manifest[:2] + b"\x04" + good_manifest[3:], "kind 4 unassigned")
+        good_manifest[:2] + b"\x04" + good_manifest[3:],
+        "kind 4 carries config recovery, not revocation sets")
     bad("kind6_manifest_flags_nonzero", "rrs_kind6_manifest",
         good_manifest[:3] + b"\x01" + good_manifest[4:], "flags stay zero")
     bad("kind6_manifest_total_len_zero", "rrs_kind6_manifest",

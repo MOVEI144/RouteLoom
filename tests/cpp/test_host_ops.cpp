@@ -18,7 +18,10 @@
 #include <set>
 #include <vector>
 
+#include "routeloom/autonomy_wire.hpp"
 #include "routeloom/byte_io.hpp"
+#include "routeloom/discovery_scope.hpp"
+#include "routeloom/endpoint_wire.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/usb_bridge.hpp"
 #include "routeloom/usb_codec.hpp"
@@ -32,6 +35,7 @@ namespace {
 
 int failures = 0;
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, #expr); ++failures; } } while (false)
+#define CHECK_OK(expr) do { const auto _status = (expr); if (!_status.ok()) { std::fprintf(stderr, "STATUS failed %s:%d: %s (%s)\n", __FILE__, __LINE__, #expr, _status.detail); ++failures; } } while (false)
 
 using namespace routeloom;
 using namespace routeloom::usb;
@@ -3314,6 +3318,390 @@ void test_bridge_group_refusals() {
   }
 }
 
+// 0x25/0x26/0x27 codecs: trust-manifest transfer at the 2048 B ceiling,
+// the two read-only mesh queries, and the reply body rules per sub.
+void test_config_trust_codecs() {
+  // 0x25 round-trips at 1 B, 1024 B (the old ceiling — still legal) and
+  // the 2048 B kind-5 maximum.
+  for (const std::size_t size : {std::size_t{1}, std::size_t{1024},
+                                 kConfigTrustMax}) {
+    std::vector<std::uint8_t> object(size, 0x5A);
+    ConfigTrustRequest req{};
+    req.target = 0x1234;
+    req.object = ByteView{object.data(), object.size()};
+    std::array<std::uint8_t, kGatewayInnerHeadSize + 8 + kConfigTrustMax> out{};
+    std::size_t written = 0;
+    CHECK(encode_config_trust(req, MutableByteView{out.data(), out.size()},
+                              written));
+    CHECK(written == kGatewayInnerHeadSize + 8 + size);
+    ConfigTrustRequest decoded{};
+    CHECK(decode_config_trust(ByteView{out.data(), written}, decoded));
+    CHECK(decoded.target == req.target);
+    CHECK(decoded.object.size == size);
+    CHECK(std::memcmp(decoded.object.data, object.data(), size) == 0);
+  }
+  // Empty and oversized objects refuse at encode time.
+  {
+    std::array<std::uint8_t, kGatewayInnerHeadSize + 8 + kConfigTrustMax> out{};
+    std::size_t written = 0;
+    ConfigTrustRequest req{};
+    req.target = 0x1234;
+    CHECK(!encode_config_trust(req, MutableByteView{out.data(), out.size()},
+                               written));
+    std::vector<std::uint8_t> big(kConfigTrustMax + 1, 0x5A);
+    req.object = ByteView{big.data(), big.size()};
+    CHECK(!encode_config_trust(req, MutableByteView{out.data(), out.size()},
+                               written));
+  }
+  // Truncation, wrong sub and trailing garbage refuse at decode time.
+  {
+    std::array<std::uint8_t, 64> object{};
+    object.fill(0xA1);
+    ConfigTrustRequest req{};
+    req.target = 0x1234;
+    req.object = ByteView{object.data(), object.size()};
+    std::array<std::uint8_t, 128> out{};
+    std::size_t written = 0;
+    CHECK(encode_config_trust(req, MutableByteView{out.data(), out.size()},
+                              written));
+    ConfigTrustRequest bad{};
+    CHECK(!decode_config_trust(ByteView{out.data(), written - 1}, bad));
+    ConfigPermitRequest wrong_lane{};
+    CHECK(!decode_config_permit(ByteView{out.data(), written}, wrong_lane));
+    std::array<std::uint8_t, 129> trailed{};
+    std::memcpy(trailed.data(), out.data(), written);
+    CHECK(!decode_config_trust(ByteView{trailed.data(), written + 1}, bad));
+  }
+
+  // 0x26/0x27 fixed-size queries round-trip; any length lie refuses.
+  {
+    TrustStatusRequest req{};
+    req.target = 0x1234;
+    req.network = 0x0102030405060708ULL;
+    req.nonce.fill(0x77);
+    std::array<std::uint8_t, 64> out{};
+    std::size_t written = 0;
+    CHECK(encode_trust_status(req, MutableByteView{out.data(), out.size()},
+                              written));
+    CHECK(written == kGatewayInnerHeadSize + kTrustStatusRequestPayload);
+    TrustStatusRequest decoded{};
+    CHECK(decode_trust_status(ByteView{out.data(), written}, decoded));
+    CHECK(decoded.target == req.target);
+    CHECK(decoded.network == req.network);
+    CHECK(decoded.nonce == req.nonce);
+    TrustStatusRequest bad{};
+    CHECK(!decode_trust_status(ByteView{out.data(), written - 1}, bad));
+
+    RecoveryInfoRequest info{};
+    info.target = 0x1234;
+    info.network = 0x0102030405060708ULL;
+    info.config_namespace = 1;
+    info.nonce.fill(0x88);
+    CHECK(encode_recovery_info(info, MutableByteView{out.data(), out.size()},
+                               written));
+    CHECK(written == kGatewayInnerHeadSize + kRecoveryInfoRequestPayload);
+    RecoveryInfoRequest info_decoded{};
+    CHECK(decode_recovery_info(ByteView{out.data(), written}, info_decoded));
+    CHECK(info_decoded.target == info.target);
+    CHECK(info_decoded.network == info.network);
+    CHECK(info_decoded.config_namespace == 1);
+    CHECK(info_decoded.nonce == info.nonce);
+    RecoveryInfoRequest info_bad{};
+    CHECK(!decode_recovery_info(ByteView{out.data(), written - 1}, info_bad));
+    // The two queries are different subs — never cross-decoded.
+    CHECK(!decode_trust_status(ByteView{out.data(), written}, bad));
+  }
+
+  // Reply bodies: 0x25 is result-only; 0x26 takes {0, 72}; 0x27 takes
+  // {0, 80}. Anything else refuses on both encode and decode.
+  {
+    std::array<std::uint8_t, 128> out{};
+    std::size_t written = 0;
+    ConfigReply reply{};
+    reply.result = static_cast<std::uint16_t>(ConfigOpsResult::Ok);
+    reply.target = 0x1234;
+    CHECK(encode_config_reply(HostOpsSub::ConfigTrust, reply,
+                              MutableByteView{out.data(), out.size()},
+                              written));
+    std::array<std::uint8_t, 1> one{0xFF};
+    reply.body = ByteView{one.data(), one.size()};
+    CHECK(!encode_config_reply(HostOpsSub::ConfigTrust, reply,
+                               MutableByteView{out.data(), out.size()},
+                               written));
+    std::array<std::uint8_t, kTrustStatusBodySize> trust_body{};
+    reply.body = ByteView{trust_body.data(), trust_body.size()};
+    CHECK(encode_config_reply(HostOpsSub::TrustStatus, reply,
+                              MutableByteView{out.data(), out.size()},
+                              written));
+    ConfigReply decoded{};
+    CHECK(decode_config_reply(ByteView{out.data(), written},
+                              HostOpsSub::TrustStatus, decoded));
+    CHECK(decoded.body.size == kTrustStatusBodySize);
+    CHECK(!encode_config_reply(HostOpsSub::RecoveryInfo, reply,
+                               MutableByteView{out.data(), out.size()},
+                               written));
+    std::array<std::uint8_t, kRecoveryInfoBodySize> info_body{};
+    reply.body = ByteView{info_body.data(), info_body.size()};
+    CHECK(encode_config_reply(HostOpsSub::RecoveryInfo, reply,
+                              MutableByteView{out.data(), out.size()},
+                              written));
+    CHECK(decode_config_reply(ByteView{out.data(), written},
+                              HostOpsSub::RecoveryInfo, decoded));
+    CHECK(decoded.body.size == kRecoveryInfoBodySize);
+    CHECK(!encode_config_reply(HostOpsSub::TrustStatus, reply,
+                               MutableByteView{out.data(), out.size()},
+                               written));
+    CHECK(!encode_config_reply(HostOpsSub::ConfigTrust, reply,
+                               MutableByteView{out.data(), out.size()},
+                               written));
+  }
+}
+
+// Black-holes mesh sends: the dispatch test below proves the USB<->gateway
+// mapping, gating and reply framing — the mesh round-trip itself is the
+// wire tests' job.
+class BlackholeConfigPort final : public ConfigWirePort {
+ public:
+  Status config_send(const NodeId, const FrameType, const ByteView,
+                     const MonotonicMs) noexcept override {
+    ++sent;
+    return Status::success();
+  }
+  int sent{0};
+};
+
+// Bridge dispatch for 0x25/0x26/0x27 through a real UsbBridge: malformed
+// inners error, missing capability/attachment answers Unsupported,
+// admitted work reports asynchronously under its own sub with the real
+// endpoint reply body.
+void test_bridge_config_trust_dispatch() {
+  bool got_error = false;
+  std::uint16_t error_code = 0;
+
+  // No gateway attached: every new op answers Unsupported, synchronously.
+  {
+    World world(0x3 | kCapHostOpsV1 | kCapConfigEndpointV1);
+    HostDriver host;
+    MonotonicMs now = 1000;
+    CHECK(host_handshake(world, host, now, 0x1111, 10) != 0);
+    std::array<std::uint8_t, 64> object{};
+    object.fill(0x5A);
+    ConfigTrustRequest req{};
+    req.target = 2;
+    req.object = ByteView{object.data(), object.size()};
+    std::array<std::uint8_t, 128> inner{};
+    std::size_t written = 0;
+    CHECK(encode_config_trust(req, MutableByteView{inner.data(), inner.size()},
+                              written));
+    const auto answer =
+        transact(world, host, now, 60, ByteView{inner.data(), written},
+                 got_error, error_code);
+    CHECK(!got_error && !answer.empty());
+    ConfigReply reply{};
+    CHECK(decode_config_reply(ByteView{answer.data(), answer.size()},
+                              HostOpsSub::ConfigTrust, reply));
+    CHECK(reply.result ==
+          static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
+    // A truncated inner never reaches the gateway: protocol error.
+    const auto malformed =
+        transact(world, host, now, 61, ByteView{inner.data(), written - 1},
+                 got_error, error_code);
+    CHECK(got_error && malformed.empty());
+  }
+
+  // Gateway attached: admitted work reports asynchronously.
+  World world(0x3 | kCapHostOpsV1 | kCapConfigEndpointV1);
+  HostDriver host;
+  MonotonicMs now = 2000;
+  CHECK(host_handshake(world, host, now, 0x2222, 10) != 0);
+  BlackholeConfigPort port;
+  ConfigGateway gateway(port, world.bridge);
+  CHECK_OK(world.bridge.attach_config(gateway));
+
+  // 0x25 admitted (no immediate answer — the slot owns it), then the
+  // forged mesh ack resolves it under 0x25, result-only.
+  std::array<std::uint8_t, 300> trust_object{};
+  trust_object.fill(0xC3);
+  {
+    ConfigTrustRequest req{};
+    req.target = 2;
+    req.object = ByteView{trust_object.data(), trust_object.size()};
+    std::array<std::uint8_t, 512> inner{};
+    std::size_t written = 0;
+    CHECK(encode_config_trust(req, MutableByteView{inner.data(), inner.size()},
+                              written));
+    const auto answer =
+        transact(world, host, now, 62, ByteView{inner.data(), written},
+                 got_error, error_code);
+    CHECK(!got_error && answer.empty());
+    CHECK(gateway.trust_transfer_active());
+    autonomy::ObjectAckPayload ack{};
+    sha256(ByteView{trust_object.data(), trust_object.size()}, ack.object_hash);
+    ack.received_len = static_cast<std::uint16_t>(trust_object.size());
+    ack.status = autonomy::ObjectAckStatus::Ok;
+    autonomy::EncodedPayload enc{};
+    CHECK_OK(autonomy::object_ack_encode(ack, enc));
+    wire::PlainFrame frame{};
+    frame.header.type = FrameType::ObjectAck;
+    frame.header.origin = 2;
+    frame.payload_size = enc.size;
+    std::memcpy(frame.payload.data(), enc.bytes.data(), enc.size);
+    gateway.on_config_frame(2, frame, now);
+    world.drain(now);
+    const auto replies = collect_host_ops(world, host);
+    const DeviceFrame* trust_reply =
+        find_sub(replies, static_cast<std::uint8_t>(HostOpsSub::ConfigTrust));
+    CHECK(trust_reply != nullptr);
+    CHECK(trust_reply->request == 62);
+    ConfigReply reply{};
+    CHECK(decode_config_reply(
+        ByteView{trust_reply->body.data(), trust_reply->body.size()},
+        HostOpsSub::ConfigTrust, reply));
+    CHECK(reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    CHECK(reply.body.size == 0);
+  }
+
+  // 0x26 admitted, then answered with the real 72 B TrustStatus body.
+  const std::array<std::uint8_t, 16> nonce = {7, 7, 7, 7, 1, 2, 3, 4,
+                                              5, 6, 7, 8, 9, 10, 11, 12};
+  {
+    TrustStatusRequest req{};
+    req.target = 2;
+    req.network = 7;
+    req.nonce = nonce;
+    std::array<std::uint8_t, 64> inner{};
+    std::size_t written = 0;
+    CHECK(encode_trust_status(req, MutableByteView{inner.data(), inner.size()},
+                              written));
+    const auto answer =
+        transact(world, host, now, 63, ByteView{inner.data(), written},
+                 got_error, error_code);
+    CHECK(!got_error && answer.empty());
+    CHECK(gateway.query_active());
+    // A second query while one is outstanding refuses Busy, under 0x26.
+    const auto busy =
+        transact(world, host, now, 64, ByteView{inner.data(), written},
+                 got_error, error_code);
+    CHECK(!got_error && !busy.empty());
+    ConfigReply busy_reply{};
+    CHECK(decode_config_reply(ByteView{busy.data(), busy.size()},
+                              HostOpsSub::TrustStatus, busy_reply));
+    CHECK(busy_reply.result ==
+          static_cast<std::uint16_t>(ConfigOpsResult::Busy));
+    endpoint::TrustStatus status{};
+    status.nonce_echo = nonce;
+    status.network = 7;
+    status.store_epoch = 2;
+    status.flags = endpoint::kTrustStatusFlagHasActive;
+    endpoint::EncodedServicePayload enc{};
+    CHECK_OK(endpoint::trust_status_encode(status, enc));
+    wire::PlainFrame frame{};
+    frame.header.type = FrameType::Control;
+    frame.header.origin = 2;
+    frame.payload_size = enc.size;
+    std::memcpy(frame.payload.data(), enc.bytes.data(), enc.size);
+    gateway.on_config_frame(2, frame, now);
+    world.drain(now);
+    const auto replies = collect_host_ops(world, host);
+    const DeviceFrame* status_reply =
+        find_sub(replies, static_cast<std::uint8_t>(HostOpsSub::TrustStatus));
+    CHECK(status_reply != nullptr);
+    CHECK(status_reply->request == 63);
+    ConfigReply reply{};
+    CHECK(decode_config_reply(
+        ByteView{status_reply->body.data(), status_reply->body.size()},
+        HostOpsSub::TrustStatus, reply));
+    CHECK(reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    endpoint::TrustStatus decoded{};
+    CHECK_OK(endpoint::trust_status_decode(reply.body, decoded));
+    CHECK(decoded.store_epoch == 2);
+  }
+
+  // 0x27 admitted, then answered with the real 80 B RecoveryInfo body.
+  {
+    RecoveryInfoRequest req{};
+    req.target = 2;
+    req.network = 7;
+    req.config_namespace = 1;
+    req.nonce = nonce;
+    std::array<std::uint8_t, 64> inner{};
+    std::size_t written = 0;
+    CHECK(encode_recovery_info(req, MutableByteView{inner.data(), inner.size()},
+                               written));
+    const auto answer =
+        transact(world, host, now, 65, ByteView{inner.data(), written},
+                 got_error, error_code);
+    CHECK(!got_error && answer.empty());
+    CHECK(gateway.query_active());
+    endpoint::RecoveryInfo info{};
+    info.config_namespace = 1;
+    info.schema = 1;
+    info.nonce_echo = nonce;
+    info.network = 7;
+    info.store_floor = 3;
+    info.decision_floor = 1;
+    info.flags = endpoint::kRecoveryInfoFlagSurvivorKnown;
+    info.recovery_version = 1;
+    info.profile_bits = 1;
+    endpoint::EncodedServicePayload enc{};
+    CHECK_OK(endpoint::recovery_info_encode(info, enc));
+    wire::PlainFrame frame{};
+    frame.header.type = FrameType::Control;
+    frame.header.origin = 2;
+    frame.payload_size = enc.size;
+    std::memcpy(frame.payload.data(), enc.bytes.data(), enc.size);
+    gateway.on_config_frame(2, frame, now);
+    world.drain(now);
+    const auto replies = collect_host_ops(world, host);
+    const DeviceFrame* info_reply =
+        find_sub(replies, static_cast<std::uint8_t>(HostOpsSub::RecoveryInfo));
+    CHECK(info_reply != nullptr);
+    CHECK(info_reply->request == 65);
+    ConfigReply reply{};
+    CHECK(decode_config_reply(
+        ByteView{info_reply->body.data(), info_reply->body.size()},
+        HostOpsSub::RecoveryInfo, reply));
+    CHECK(reply.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok));
+    endpoint::RecoveryInfo decoded{};
+    CHECK_OK(endpoint::recovery_info_decode(reply.body, decoded));
+    CHECK(decoded.store_floor == 3 && decoded.decision_floor == 1);
+  }
+}
+
+// The sub registry: every HostOpsSub value is distinct — a renumbering
+// collision (notably in the 0x20-0x27 config family) fails here, not on
+// the wire.
+void test_host_ops_sub_registry() {
+  constexpr HostOpsSub kSubs[] = {
+      HostOpsSub::Submit,           HostOpsSub::QueryDispatch,
+      HostOpsSub::RetireThrough,    HostOpsSub::Skip,
+      HostOpsSub::TimeSample,       HostOpsSub::HostRegister,
+      HostOpsSub::GatewayIngress,   HostOpsSub::GatewayIngressAck,
+      HostOpsSub::HostUnregister,   HostOpsSub::ConfigQuery,
+      HostOpsSub::ConfigPermit,     HostOpsSub::ConfigStatus,
+      HostOpsSub::ConfigChallenge,  HostOpsSub::ConfigRecover,
+      HostOpsSub::ConfigTrust,      HostOpsSub::TrustStatus,
+      HostOpsSub::RecoveryInfo,     HostOpsSub::DiagnosticRequest,
+      HostOpsSub::DiagnosticResponse, HostOpsSub::NodeStatusQuery,
+      HostOpsSub::NodeStatusPage,   HostOpsSub::NodeEvent,
+      HostOpsSub::GroupSend,        HostOpsSub::GroupStatus,
+      HostOpsSub::GroupQuery,       HostOpsSub::JoinRelayUp,
+      HostOpsSub::JoinRelayDown,    HostOpsSub::JoinRelayAbort,
+      HostOpsSub::JoinRelayResult,
+      HostOpsSub::AuthorityUp,      HostOpsSub::AuthorityDown,
+      HostOpsSub::SiteStateSet,     HostOpsSub::SiteStateReport,
+  };
+  for (std::size_t i = 0; i < sizeof(kSubs) / sizeof(kSubs[0]); ++i) {
+    for (std::size_t j = i + 1; j < sizeof(kSubs) / sizeof(kSubs[0]); ++j) {
+      CHECK(kSubs[i] != kSubs[j]);
+    }
+  }
+  // The config family this change extends, pinned.
+  CHECK(static_cast<std::uint8_t>(HostOpsSub::ConfigTrust) == 0x25);
+  CHECK(static_cast<std::uint8_t>(HostOpsSub::TrustStatus) == 0x26);
+  CHECK(static_cast<std::uint8_t>(HostOpsSub::RecoveryInfo) == 0x27);
+}
+
 }  // namespace
 
 // Authority channel USB codecs (0x64-0x67, G-SEC P5 PR1): fragments and
@@ -3638,6 +4026,9 @@ int main() {
   test_group_ops_codecs();
   test_bridge_group_send_and_final();
   test_bridge_group_refusals();
+  test_config_trust_codecs();
+  test_host_ops_sub_registry();
+  test_bridge_config_trust_dispatch();
   test_authority_usb_codecs();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);

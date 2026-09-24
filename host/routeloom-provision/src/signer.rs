@@ -71,6 +71,12 @@ pub const FILE_KEY_CUSTODY_WARNING: &str = "warning: development key custody —
 
 /// The dev root-key file format marker (JSON document).
 pub const ROOT_KEY_FORMAT: &str = "routeloom-root-key-v1";
+/// The dev CONFIG AUTHORITY key file format marker — distinct from the
+/// root marker AND the id field (`authority_id`, not `root_id`) so a root
+/// key file never loads as an authority key and vice versa. The config
+/// issuer (§7.2) only ever loads this format; root custody never flows
+/// into permit/recovery signing through a shared loader.
+pub const AUTHORITY_KEY_FORMAT: &str = "routeloom-config-authority-key-v1";
 
 /// Who signs a trust manifest: the tooling boundary §4.4 step 1 names.
 /// `sign` takes the CBOR Sig_structure bytes (the manifest module builds
@@ -316,6 +322,43 @@ pub(crate) fn read_key_document(
     Ok((id, secret))
 }
 
+/// RFC 6979 deterministic ECDSA over `message` (the caller hashes with
+/// SHA-256 first when the profile signs a digest — `SigningKey::sign` runs
+/// the same hash internally, so both spellings share this body), S
+/// normalized to the low-S canonical form every device verifier requires.
+/// Shared by the root and authority file signers: one signing rule, two
+/// key records that never interchange.
+fn ecdsa_sign_low_s(signing_key: &SigningKey, message: &[u8]) -> [u8; 64] {
+    let signature: Signature = signing_key.sign(message);
+    let signature = signature.normalize_s().unwrap_or(signature);
+    let bytes = signature.to_bytes();
+    let mut out = [0_u8; 64];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+/// ECDSA P-256/SHA-256 verify — the host stand-in for `uECC_verify` over
+/// the already-computed Sig_structure digest. R || S raw signature, X || Y
+/// public key. The config issuer self-checks every COSE envelope with this
+/// before it may leave the host.
+pub fn ecdsa_p256_verify(pubkey: &[u8; 64], digest: &[u8; 32], signature: &[u8; 64]) -> bool {
+    use p256::ecdsa::signature::hazmat::PrehashVerifier;
+    use p256::ecdsa::VerifyingKey;
+
+    let mut sec1 = [0_u8; 65];
+    sec1[0] = 0x04;
+    sec1[1..].copy_from_slice(pubkey);
+    let Ok(key) = VerifyingKey::from_sec1_bytes(&sec1) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(signature) else {
+        return false;
+    };
+    // The device hashes the Sig_structure once and verifies the digest —
+    // verify_prehash, not the message path, keeps the semantics identical.
+    key.verify_prehash(digest, &signature).is_ok()
+}
+
 impl RootSigner for FileRootSigner {
     fn root_id(&self) -> u64 {
         self.root_id
@@ -328,12 +371,82 @@ impl RootSigner for FileRootSigner {
     /// digest the device computes before `uECC_verify` — with S normalized
     /// to the low-S canonical form the RTM1 envelope requires.
     fn sign(&self, sig_structure: &[u8]) -> Result<[u8; 64]> {
-        let signature: Signature = self.signing_key.sign(sig_structure);
-        let signature = signature.normalize_s().unwrap_or(signature);
-        let bytes = signature.to_bytes();
-        let mut out = [0_u8; 64];
-        out.copy_from_slice(&bytes);
-        Ok(out)
+        Ok(ecdsa_sign_low_s(&self.signing_key, sig_structure))
+    }
+}
+
+/// Development file-backed CONFIG AUTHORITY signer: the RLCP1_COSE_ESP256
+/// permit/recovery issuance key. Deliberately NOT a `RootSigner` — the
+/// authority id must never be readable as a root permission — with its own
+/// key-document format so root and authority custody cannot cross by file
+/// confusion. Same file integrity rule as the root signer: the pubkey is
+/// recomputed from the secret at load.
+pub struct FileAuthoritySigner {
+    authority_id: u64,
+    signing_key: SigningKey,
+    pubkey: [u8; 64],
+}
+
+impl FileAuthoritySigner {
+    /// Construct from explicit key material (tests/golden vectors).
+    pub fn from_secret(authority_id: u64, secret: &[u8; 32]) -> Result<Self> {
+        if authority_id == 0 {
+            return err(Code::InvalidArgument, "authority id zero");
+        }
+        let pubkey = pubkey_from_secret(secret)
+            .ok_or(Error::new(Code::InvalidArgument, "authority secret range"))?;
+        let signing_key = SigningKey::from_slice(secret)
+            .map_err(|_| Error::new(Code::InvalidArgument, "authority secret range"))?;
+        Ok(Self {
+            authority_id,
+            signing_key,
+            pubkey,
+        })
+    }
+
+    /// Generate a fresh dev authority pair under `authority_id`.
+    pub fn generate(authority_id: u64) -> Result<Self> {
+        let (secret, _) = generate_keypair()?;
+        Self::from_secret(authority_id, &secret)
+    }
+
+    /// Serialize the dev key document (same custody liability as root keys).
+    pub fn to_json(&self) -> String {
+        key_document_json(
+            AUTHORITY_KEY_FORMAT,
+            "authority_id",
+            self.authority_id,
+            &self.signing_key.to_bytes().into(),
+            &self.pubkey,
+        )
+    }
+
+    /// Write the key file with mode 0600, refusing to overwrite.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        write_private_file(path, self.to_json().as_bytes())
+    }
+
+    /// Load a dev authority key: same 0600 + recomputation rules as root
+    /// keys, but only the authority document format is accepted.
+    pub fn load(path: &Path) -> Result<Self> {
+        let (authority_id, secret) = read_key_document(path, AUTHORITY_KEY_FORMAT, "authority_id")?;
+        Self::from_secret(authority_id, &secret)
+    }
+
+    /// The administrative id the permit/recovery protected-header kid names.
+    pub fn authority_id(&self) -> u64 {
+        self.authority_id
+    }
+
+    /// X || Y public half (64 bytes) — the provisioned verifier material.
+    pub fn pubkey(&self) -> [u8; 64] {
+        self.pubkey
+    }
+
+    /// RFC 6979 deterministic ECDSA over the Sig_structure bytes, low-S —
+    /// the same rule as root signing, over the permit/recovery structure.
+    pub fn sign(&self, sig_structure: &[u8]) -> [u8; 64] {
+        ecdsa_sign_low_s(&self.signing_key, sig_structure)
     }
 }
 
@@ -442,6 +555,47 @@ mod tests {
             err.code == Code::IntegrityError || err.code == Code::ProtocolError,
             "unexpected {err}"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn authority_key_never_loads_a_root_document() {
+        let dir =
+            std::env::temp_dir().join(format!("rl-prov-test-{}-{}", std::process::id(), "authkey"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (secret, _) = test_keypair(0x33);
+        let root = FileRootSigner::from_secret(0x100, &secret).unwrap();
+        let root_path = dir.join("root.key");
+        root.save(&root_path).unwrap();
+        // Same key material, wrong document: the authority loader refuses.
+        assert!(FileAuthoritySigner::load(&root_path).is_err());
+        let auth = FileAuthoritySigner::from_secret(0x42, &secret).unwrap();
+        let auth_path = dir.join("auth.key");
+        auth.save(&auth_path).unwrap();
+        // And the reverse: a root loader refuses the authority document.
+        assert!(FileRootSigner::load(&auth_path).is_err());
+        let loaded = FileAuthoritySigner::load(&auth_path).unwrap();
+        assert_eq!(loaded.authority_id(), 0x42);
+        assert_eq!(loaded.pubkey(), auth.pubkey());
+        // Same deterministic low-S rule as root signing, over the same
+        // bytes — the key records differ, the signature rule does not.
+        assert_eq!(
+            loaded.sign(b"sig-structure"),
+            root.sign(b"sig-structure").unwrap()
+        );
+        // The shared verifier accepts the authority signature over the
+        // digest both sides compute.
+        let digest = crate::sha256::sha256(b"sig-structure");
+        assert!(ecdsa_p256_verify(
+            &loaded.pubkey(),
+            &digest,
+            &loaded.sign(b"sig-structure")
+        ));
+        assert!(!ecdsa_p256_verify(
+            &loaded.pubkey(),
+            &crate::sha256::sha256(b"other"),
+            &loaded.sign(b"sig-structure")
+        ));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

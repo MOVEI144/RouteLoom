@@ -1,0 +1,8 @@
+{
+  "codec": "control_recovery_info",
+  "encoded_hex": "010800010001000102030405060708090a0b0c0d0e0f0000000000000007000000030000000000000001100100000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "recovery_info_bad_flags",
+  "note": "flag bit 4 is unassigned"
+}

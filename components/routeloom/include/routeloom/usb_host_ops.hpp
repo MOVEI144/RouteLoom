@@ -115,6 +115,10 @@ enum class HostOpsSub : std::uint8_t {
   ConfigPermit = 0x21,      // H→G request: permit transfer -> async 0x21 reply
   ConfigStatus = 0x22,      // G→H reply: ControlStatus for a 0x20 query
   ConfigChallenge = 0x23,   // H→G query / G→H reply: ControlChallenge exchange
+  ConfigRecover = 0x24,     // H→G request: kind-4 recovery object -> async 0x24 reply
+  ConfigTrust = 0x25,       // H→G request: kind-5 trust object -> async 0x25 reply
+  TrustStatus = 0x26,       // H→G query / G→H reply: TrustStatus exchange
+  RecoveryInfo = 0x27,      // H→G query / G→H reply: RecoveryInfo exchange
   DiagnosticRequest = 0x30, // H→G request: observer:u64 || diagnostic body
   DiagnosticResponse = 0x31,// G→H reply: result/observer/body_len || body
   NodeStatusQuery = 0x40,   // H→G request: after/max/flags -> 0x41 page
@@ -712,13 +716,14 @@ Status decode_host_unregister_response(ByteView inner,
 // --- Config endpoint subcommands (scope-gateway-config/05-wire-api.md §5.6,
 // P5) ---------------------------------------------------------------------
 //
-// These four share the gateway family's inner common form — schema:u8=1,
+// These share the gateway family's inner common form — schema:u8=1,
 // sub:u8, payload_len:u16, payload — but the request/reply relationship is
 // ASYNC over the mesh: the device forwards the query/transfer, then reports
 // once under the same frame-level request id. 0x20's reply is the separate
-// 0x22 ConfigStatus subcommand; 0x21 and 0x23 answer under their own sub.
-// Every reply carries a u16 ConfigOpsResult first: Ok only means the mesh
-// step was proven (a query answer or an assembled permit object) — never a
+// 0x22 ConfigStatus subcommand; 0x21/0x23/0x24/0x25/0x26/0x27 answer under
+// their own sub. Every reply carries a u16 ConfigOpsResult first: Ok only
+// means the mesh step was proven (a query answer or an assembled object) —
+// never a
 // config verdict.
 //
 // 0x20 CONFIG_QUERY (H→G): target:u64, config_namespace:u16, operation_id:16.
@@ -750,19 +755,67 @@ struct ConfigPermitRequest {
 // object ceiling (config_wire / autonomy object budget).
 constexpr std::size_t kConfigPermitMax = 1024;
 
-// Shared reply shape for 0x21/0x22/0x23: result:u16, target:u64, then an
-// optional body — the raw ControlStatus (72 B) for a 0x22 reply or the raw
-// ControlChallenge (92 B) for a 0x23 reply on Ok; empty on any failure and
-// always for the 0x21 reply. The host decodes the body with the endpoint
+// 0x24 CONFIG_RECOVER (H→G): target:u64, recovery object bytes
+//   (1..kConfigPermitMax). Identical request layout to 0x21 — the signed
+//   kind-4 object is opaque to the bridge — but routed to the dedicated
+//   recovery lane and answered under 0x24 (result only, no body). The
+//   recovery object is never accepted on the 0x21 permit path.
+struct ConfigRecoverRequest {
+  NodeId target{kInvalidNodeId};
+  ByteView object{};  // borrows the decoded body (decode) or caller bytes
+};
+
+// 0x25 CONFIG_TRUST (H→G): target:u64, trust-manifest object bytes
+//   (1..kConfigTrustMax). Same layout as 0x21/0x24 — the signed kind-5
+//   object is opaque to the bridge — routed to the trust slot and answered
+//   under 0x25 (result only, no body).
+struct ConfigTrustRequest {
+  NodeId target{kInvalidNodeId};
+  ByteView object{};  // borrows the decoded body (decode) or caller bytes
+};
+// The RTM1 object bound: the full kind-5 carrier ceiling (2048), not the
+// 1024 permit bound. The bridge asserts the largest request still fits one
+// decoded USB frame body (see usb_bridge.hpp).
+constexpr std::size_t kConfigTrustMax = 2048;
+
+// 0x26 TRUST_STATUS (H→G query): target:u64, network:u64, nonce:16.
+//   Async reply -> 0x26 TRUST_STATUS (the raw TrustStatus, 72 B, on Ok;
+//   empty on any failure). The network binds the mesh reply: a TrustStatus
+//   naming any other network never completes this query.
+struct TrustStatusRequest {
+  NodeId target{kInvalidNodeId};
+  NetworkId network{0};
+  std::array<std::uint8_t, 16> nonce{};
+};
+constexpr std::size_t kTrustStatusRequestPayload = 32;
+
+// 0x27 RECOVERY_INFO (H→G query): target:u64, network:u64,
+//   config_namespace:u16, nonce:16. Async reply -> 0x27 RECOVERY_INFO
+//   (the raw RecoveryInfo, 80 B, on Ok; empty on any failure).
+struct RecoveryInfoRequest {
+  NodeId target{kInvalidNodeId};
+  NetworkId network{0};
+  std::uint16_t config_namespace{0};
+  std::array<std::uint8_t, 16> nonce{};
+};
+constexpr std::size_t kRecoveryInfoRequestPayload = 34;
+
+// Shared reply shape for 0x21/0x22/0x23/0x25/0x26/0x27: result:u16,
+// target:u64, then an optional body — the raw endpoint reply (72 B
+// ControlStatus / 92 B ControlChallenge / 72 B TrustStatus / 80 B
+// RecoveryInfo) on Ok; empty on any failure and always for the 0x21/0x24/
+// 0x25 transfer replies. The host decodes the body with the endpoint
 // codec; the device forwards it verbatim.
 struct ConfigReply {
   std::uint16_t result{0};  // ConfigOpsResult
   NodeId target{kInvalidNodeId};
-  ByteView body{};  // 0 / 72 / 92 bytes depending on sub+result
+  ByteView body{};  // 0 / 72 / 80 / 92 bytes depending on sub+result
 };
 constexpr std::size_t kConfigReplyFixedPayload = 10;   // result + target
 constexpr std::size_t kConfigStatusBodySize = 72;      // endpoint::ControlStatus
 constexpr std::size_t kConfigChallengeBodySize = 92;   // endpoint::ControlChallenge
+constexpr std::size_t kTrustStatusBodySize = 72;       // endpoint::TrustStatus
+constexpr std::size_t kRecoveryInfoBodySize = 80;      // endpoint::RecoveryInfo
 
 Status decode_config_query(ByteView inner, ConfigQueryRequest& out) noexcept;
 Status encode_config_query(const ConfigQueryRequest& request, MutableByteView out,
@@ -773,8 +826,21 @@ Status encode_config_challenge(const ConfigChallengeRequest& request,
 Status decode_config_permit(ByteView inner, ConfigPermitRequest& out) noexcept;
 Status encode_config_permit(const ConfigPermitRequest& request, MutableByteView out,
                             std::size_t& written) noexcept;
-// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge; the body
-// length the codec accepts is derived from it (0 for 0x21; 0-or-fixed for
+Status decode_config_recover(ByteView inner, ConfigRecoverRequest& out) noexcept;
+Status encode_config_recover(const ConfigRecoverRequest& request,
+                             MutableByteView out, std::size_t& written) noexcept;
+Status decode_config_trust(ByteView inner, ConfigTrustRequest& out) noexcept;
+Status encode_config_trust(const ConfigTrustRequest& request,
+                           MutableByteView out, std::size_t& written) noexcept;
+Status decode_trust_status(ByteView inner, TrustStatusRequest& out) noexcept;
+Status encode_trust_status(const TrustStatusRequest& request,
+                           MutableByteView out, std::size_t& written) noexcept;
+Status decode_recovery_info(ByteView inner, RecoveryInfoRequest& out) noexcept;
+Status encode_recovery_info(const RecoveryInfoRequest& request,
+                            MutableByteView out, std::size_t& written) noexcept;
+// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge/
+// ConfigRecover/ConfigTrust/TrustStatus/RecoveryInfo; the body length the
+// codec accepts is derived from it (0 for 0x21/0x24/0x25; 0-or-fixed for
 // the query replies).
 Status encode_config_reply(HostOpsSub sub, const ConfigReply& reply,
                            MutableByteView out, std::size_t& written) noexcept;

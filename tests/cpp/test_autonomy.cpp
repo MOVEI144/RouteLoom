@@ -890,10 +890,14 @@ void test_control_object_kind_revocation_set() {
   CHECK_OK(autonomy::control_object_decode(enc.view(), decoded));
   CHECK(static_cast<std::uint8_t>(decoded.kind) == 6);
   CHECK(decoded.total_len == 616);
-  // Kinds 4 and 5 are still refused.
+  // Config recovery and trust share the carrier with revocation.
   raw[2] = 4;
-  CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK(manifest.kind == autonomy::ControlObjectKind::ConfigRecovery);
   raw[2] = 5;
+  CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK(manifest.kind == autonomy::ControlObjectKind::TrustManifest);
+  raw[2] = 7;
   CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
 }
 

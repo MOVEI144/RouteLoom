@@ -750,6 +750,218 @@ Status control_status_decode(const ByteView encoded, ControlStatus& out) noexcep
   return Status::success();
 }
 
+Status trust_status_query_encode(const TrustStatusQuery& payload,
+                                 EncodedServicePayload& out) noexcept {
+  if (all_zero(ByteView{payload.nonce.data(), payload.nonce.size()})) {
+    return invalid("trust query nonce must be nonzero");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(5));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce.data(), payload.nonce.size()}));
+#undef RL_WRITE
+  if (writer.size() != kTrustStatusQuerySize) {
+    return Status::error(StatusCode::InternalError, "trust query size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status trust_status_query_decode(const ByteView encoded, TrustStatusQuery& out) noexcept {
+  if (encoded.size != kTrustStatusQuerySize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+  std::uint16_t reserved = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 5));
+  RL_READ(reader.read_u16(reserved));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce.data(), out.nonce.size()}));
+#undef RL_READ
+  if (reserved != 0 ||
+      all_zero(ByteView{out.nonce.data(), out.nonce.size()})) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status trust_status_encode(const TrustStatus& payload,
+                           EncodedServicePayload& out) noexcept {
+  if (all_zero(ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()})) {
+    return invalid("trust status nonce echo must be nonzero");
+  }
+  if ((payload.flags & ~kTrustStatusFlagMask) != 0) {
+    return invalid("trust status flags out of range");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(6));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()}));
+  RL_WRITE(writer.write_u32(payload.store_epoch));
+  RL_WRITE(writer.write_u32(payload.min_authority_generation));
+  RL_WRITE(writer.write_u64(payload.network));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.image_fingerprint.data(), payload.image_fingerprint.size()}));
+  RL_WRITE(writer.write_u8(payload.anchor_count));
+  RL_WRITE(writer.write_u8(payload.key_count));
+  RL_WRITE(writer.write_u8(payload.revocation_count));
+  RL_WRITE(writer.write_u8(payload.flags));
+#undef RL_WRITE
+  if (writer.size() != kTrustStatusSize) {
+    return Status::error(StatusCode::InternalError, "trust status size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status trust_status_decode(const ByteView encoded, TrustStatus& out) noexcept {
+  if (encoded.size != kTrustStatusSize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+  std::uint16_t reserved = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 6));
+  RL_READ(reader.read_u16(reserved));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce_echo.data(), out.nonce_echo.size()}));
+  RL_READ(reader.read_u32(out.store_epoch));
+  RL_READ(reader.read_u32(out.min_authority_generation));
+  RL_READ(reader.read_u64(out.network));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.image_fingerprint.data(), out.image_fingerprint.size()}));
+  RL_READ(reader.read_u8(out.anchor_count));
+  RL_READ(reader.read_u8(out.key_count));
+  RL_READ(reader.read_u8(out.revocation_count));
+  RL_READ(reader.read_u8(out.flags));
+#undef RL_READ
+  if (reserved != 0 ||
+      all_zero(ByteView{out.nonce_echo.data(), out.nonce_echo.size()}) ||
+      (out.flags & ~kTrustStatusFlagMask) != 0) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status recovery_info_query_encode(const RecoveryInfoQuery& payload,
+                                  EncodedServicePayload& out) noexcept {
+  if (!config_namespace_valid(payload.config_namespace)) {
+    return invalid("control namespace is not registered");
+  }
+  if (all_zero(ByteView{payload.nonce.data(), payload.nonce.size()})) {
+    return invalid("recovery query nonce must be nonzero");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(7));
+  RL_WRITE(writer.write_u16(payload.config_namespace));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce.data(), payload.nonce.size()}));
+#undef RL_WRITE
+  if (writer.size() != kRecoveryInfoQuerySize) {
+    return Status::error(StatusCode::InternalError, "recovery query size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status recovery_info_query_decode(const ByteView encoded, RecoveryInfoQuery& out) noexcept {
+  if (encoded.size != kRecoveryInfoQuerySize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 7));
+  RL_READ(reader.read_u16(out.config_namespace));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce.data(), out.nonce.size()}));
+#undef RL_READ
+  if (!config_namespace_valid(out.config_namespace) ||
+      all_zero(ByteView{out.nonce.data(), out.nonce.size()})) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status recovery_info_encode(const RecoveryInfo& payload,
+                            EncodedServicePayload& out) noexcept {
+  if (!config_namespace_valid(payload.config_namespace)) {
+    return invalid("control namespace is not registered");
+  }
+  if (all_zero(ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()})) {
+    return invalid("recovery info nonce echo must be nonzero");
+  }
+  if ((payload.flags & ~kRecoveryInfoFlagMask) != 0) {
+    return invalid("recovery info flags out of range");
+  }
+  if (payload.recovery_version == 0) {
+    return invalid("recovery info version must be nonzero");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(8));
+  RL_WRITE(writer.write_u16(payload.config_namespace));
+  RL_WRITE(writer.write_u16(payload.schema));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()}));
+  RL_WRITE(writer.write_u64(payload.network));
+  RL_WRITE(writer.write_u32(payload.store_floor));
+  RL_WRITE(writer.write_u64(payload.decision_floor));
+  RL_WRITE(writer.write_u8(payload.flags));
+  RL_WRITE(writer.write_u8(payload.recovery_version));
+  RL_WRITE(writer.write_u32(payload.profile_bits));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.snapshot_hash.data(), payload.snapshot_hash.size()}));
+#undef RL_WRITE
+  if (writer.size() != kRecoveryInfoSize) {
+    return Status::error(StatusCode::InternalError, "recovery info size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status recovery_info_decode(const ByteView encoded, RecoveryInfo& out) noexcept {
+  if (encoded.size != kRecoveryInfoSize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 8));
+  RL_READ(reader.read_u16(out.config_namespace));
+  RL_READ(reader.read_u16(out.schema));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce_echo.data(), out.nonce_echo.size()}));
+  RL_READ(reader.read_u64(out.network));
+  RL_READ(reader.read_u32(out.store_floor));
+  RL_READ(reader.read_u64(out.decision_floor));
+  RL_READ(reader.read_u8(out.flags));
+  RL_READ(reader.read_u8(out.recovery_version));
+  RL_READ(reader.read_u32(out.profile_bits));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.snapshot_hash.data(), out.snapshot_hash.size()}));
+#undef RL_READ
+  if (!config_namespace_valid(out.config_namespace) ||
+      all_zero(ByteView{out.nonce_echo.data(), out.nonce_echo.size()}) ||
+      (out.flags & ~kRecoveryInfoFlagMask) != 0 ||
+      out.recovery_version == 0) {
+    return reject();
+  }
+  return Status::success();
+}
+
 // --- RCC1 canonical config command ----------------------------------------------
 
 Status config_command_encode(const ConfigCommand& command,
@@ -767,8 +979,13 @@ Status config_command_encode(const ConfigCommand& command,
       all_zero(ByteView{command.challenge_nonce.data(), command.challenge_nonce.size()})) {
     return invalid("config command identity/nonce fields must be nonzero");
   }
+  // The u64 axis reserves its top value: next == MAX can never be a
+  // decision (nothing could follow it), and the authority sequence shares
+  // the same reservation so both counters fail closed at the bound.
   if (command.expected_revision == UINT64_MAX ||
-      command.next_revision != command.expected_revision + 1) {
+      command.next_revision != command.expected_revision + 1 ||
+      command.next_revision == UINT64_MAX ||
+      command.authority_sequence == UINT64_MAX) {
     return invalid("config revision must satisfy next = expected + 1");
   }
   if (command.field_count == 0 || command.field_count > kConfigFieldCountMax) {
@@ -886,6 +1103,7 @@ Status config_command_decode(const ByteView encoded, ConfigCommand& out) noexcep
       reader.remaining() != patch_len ||
       out.expected_revision == UINT64_MAX ||
       out.next_revision != out.expected_revision + 1 ||
+      out.next_revision == UINT64_MAX || out.authority_sequence == UINT64_MAX ||
       out.network == 0 || out.target == kInvalidNodeId ||
       out.target == kBroadcastNodeId || out.authority == kInvalidNodeId ||
       out.authority == kBroadcastNodeId || out.target_boot == 0 ||
@@ -923,6 +1141,185 @@ Status config_command_decode(const ByteView encoded, ConfigCommand& out) noexcep
   }
   if (reader.remaining() != 0) return reject();
   out.field_count = field_count;
+  return Status::success();
+}
+
+namespace {
+
+// The adopted baseline is a complete canonical snapshot: strict ascending
+// field ids, known TLV types with exact lengths, canonical bools, at most
+// the field-count bound. The same shape rule as the RCC1 patch loop — the
+// schema values themselves are the journal's check, not the codec's.
+bool rcr2_snapshot_shape_valid(const ByteView snapshot) noexcept {
+  if (snapshot.size > kConfigSnapshotMax ||
+      (snapshot.size > 0 && snapshot.data == nullptr)) {
+    return false;
+  }
+  ByteReader reader(snapshot);
+  std::uint16_t previous_id = 0;
+  std::uint16_t count = 0;
+  while (reader.remaining() > 0) {
+    if (count >= kConfigFieldCountMax || reader.remaining() < 5) return false;
+    std::uint16_t field_id = 0;
+    std::uint8_t type = 0;
+    std::uint16_t declared = 0;
+    Status status = reader.read_u16(field_id);
+    if (status) status = reader.read_u8(type);
+    if (status) status = reader.read_u16(declared);
+    if (!status) return false;
+    const std::size_t value_len = tlv_value_length(type, declared);
+    if (value_len == static_cast<std::size_t>(-1) ||
+        reader.remaining() < value_len) {
+      return false;
+    }
+    if (count > 0 && field_id <= previous_id) return false;
+    previous_id = field_id;
+    std::uint8_t value[kConfigFieldValueMax] = {0};
+    status = reader.read_bytes(MutableByteView{value, value_len});
+    if (!status) return false;
+    if (type == 1 && value[0] > 1) return false;  // canonical bool
+    ++count;
+  }
+  return true;
+}
+
+}  // namespace
+
+Status config_recovery_encode(const ConfigRecoveryIntent& intent,
+                              EncodedRecoveryIntent& out) noexcept {
+  // target/authority are logical unicast node ids (same reservation rule as
+  // RCC1); the operation id must be nonzero so dedup can never collide with
+  // an unset record.
+  if (!config_namespace_valid(intent.config_namespace) ||
+      intent.network == 0 || intent.target == kInvalidNodeId ||
+      intent.target == kBroadcastNodeId || intent.authority == kInvalidNodeId ||
+      intent.authority == kBroadcastNodeId ||
+      all_zero(ByteView{intent.operation_id.data(), intent.operation_id.size()})) {
+    return invalid("config recovery identity fields invalid");
+  }
+  if (intent.mode != kRcr2ModeAdoptKnown && intent.mode != kRcr2ModeReprovision) {
+    return invalid("config recovery mode unknown");
+  }
+  // AdoptKnown names the survivor by hash alone — bytes would be a second,
+  // competing baseline. Reprovision always carries the complete snapshot.
+  if (intent.mode == kRcr2ModeAdoptKnown && intent.baseline.size != 0) {
+    return invalid("config recovery adopt-known carries no snapshot");
+  }
+  // The u32 generation axis reserves both ends (§7.3): 0 was never issued
+  // and UINT32_MAX leaves no headroom for the intent+complete pair, so
+  // neither side may name them. The revision shares the u64 top-value
+  // reservation with RCC1, and revision 0 never follows a floor.
+  if (intent.new_store_generation == 0 ||
+      intent.new_store_generation == UINT32_MAX || intent.new_revision == 0 ||
+      intent.new_revision == UINT64_MAX ||
+      intent.authority_sequence == UINT64_MAX) {
+    return invalid("config recovery counters invalid");
+  }
+  if (intent.baseline.size > kConfigSnapshotMax ||
+      !rcr2_snapshot_shape_valid(intent.baseline.view())) {
+    return invalid("config recovery snapshot shape invalid");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u32(kRcr2Magic));
+  RL_WRITE(writer.write_u8(kRcr2Version));
+  RL_WRITE(writer.write_u8(intent.mode));
+  RL_WRITE(writer.write_u16(intent.config_namespace));
+  RL_WRITE(writer.write_u16(intent.schema));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_u64(intent.network));
+  RL_WRITE(writer.write_u64(intent.target));
+  RL_WRITE(writer.write_u64(intent.authority));
+  RL_WRITE(writer.write_u32(intent.authority_generation));
+  RL_WRITE(writer.write_u64(intent.authority_sequence));
+  RL_WRITE(writer.write_bytes(
+      ByteView{intent.operation_id.data(), intent.operation_id.size()}));
+  RL_WRITE(writer.write_u32(intent.new_store_generation));
+  RL_WRITE(writer.write_u64(intent.new_revision));
+  RL_WRITE(writer.write_u16(static_cast<std::uint16_t>(intent.baseline.size)));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_bytes(
+      ByteView{intent.snapshot_hash.data(), intent.snapshot_hash.size()}));
+  RL_WRITE(writer.write_bytes(intent.baseline.view()));
+#undef RL_WRITE
+  if (writer.size() != kRcr2HeaderSize + intent.baseline.size) {
+    return Status::error(StatusCode::InternalError, "config recovery size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status config_recovery_decode(const ByteView encoded,
+                              ConfigRecoveryIntent& out) noexcept {
+  out = ConfigRecoveryIntent{};
+  // No compatibility interpretation of the old wire exists: anything that
+  // is not an RCR2 body is Unsupported — including an RCR1 body, which is
+  // shorter than the RCR2 header and so never reaches the field checks.
+  // The magic/version gate therefore runs before the size gate.
+  if (encoded.size > kRcr2MaxTotal ||
+      (encoded.size > 0 && encoded.data == nullptr)) {
+    return reject();
+  }
+  ByteReader reader(encoded);
+  Status status;
+  std::uint32_t magic = 0;
+  std::uint8_t version = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(reader.read_u32(magic));
+  RL_READ(reader.read_u8(version));
+#undef RL_READ
+  if (magic != kRcr2Magic || version != kRcr2Version) {
+    return Status::error(StatusCode::Unsupported, "config recovery version unsupported");
+  }
+  if (encoded.size < kRcr2HeaderSize) {
+    return reject();
+  }
+  std::uint16_t flags = 0;
+  std::uint16_t snapshot_len = 0;
+  std::uint16_t reserved = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(reader.read_u8(out.mode));
+  RL_READ(reader.read_u16(out.config_namespace));
+  RL_READ(reader.read_u16(out.schema));
+  RL_READ(reader.read_u16(flags));
+  RL_READ(reader.read_u64(out.network));
+  RL_READ(reader.read_u64(out.target));
+  RL_READ(reader.read_u64(out.authority));
+  RL_READ(reader.read_u32(out.authority_generation));
+  RL_READ(reader.read_u64(out.authority_sequence));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.operation_id.data(), out.operation_id.size()}));
+  RL_READ(reader.read_u32(out.new_store_generation));
+  RL_READ(reader.read_u64(out.new_revision));
+  RL_READ(reader.read_u16(snapshot_len));
+  RL_READ(reader.read_u16(reserved));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.snapshot_hash.data(), out.snapshot_hash.size()}));
+#undef RL_READ
+  if (flags != 0 || reserved != 0 || reader.remaining() != snapshot_len ||
+      (out.mode != kRcr2ModeAdoptKnown && out.mode != kRcr2ModeReprovision) ||
+      (out.mode == kRcr2ModeAdoptKnown && snapshot_len != 0) ||
+      !config_namespace_valid(out.config_namespace) ||
+      out.network == 0 || out.target == kInvalidNodeId ||
+      out.target == kBroadcastNodeId || out.authority == kInvalidNodeId ||
+      out.authority == kBroadcastNodeId ||
+      all_zero(ByteView{out.operation_id.data(), out.operation_id.size()}) ||
+      out.new_store_generation == 0 ||
+      out.new_store_generation == UINT32_MAX || out.new_revision == 0 ||
+      out.new_revision == UINT64_MAX || out.authority_sequence == UINT64_MAX) {
+    return reject();
+  }
+  if (snapshot_len > 0) {
+    status = reader.read_bytes(
+        MutableByteView{out.baseline.bytes.data(), snapshot_len});
+    if (!status) return status;
+    out.baseline.size = snapshot_len;
+  }
+  if (!rcr2_snapshot_shape_valid(out.baseline.view())) {
+    return reject();
+  }
   return Status::success();
 }
 

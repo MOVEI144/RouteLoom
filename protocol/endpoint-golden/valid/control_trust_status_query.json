@@ -1,0 +1,8 @@
+{
+  "codec": "control_trust_status_query",
+  "encoded_hex": "01050000000102030405060708090a0b0c0d0e0f",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_trust_status_query",
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f"
+}

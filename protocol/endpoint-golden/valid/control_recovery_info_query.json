@@ -1,0 +1,9 @@
+{
+  "codec": "control_recovery_info_query",
+  "config_namespace": 1,
+  "encoded_hex": "01070001000102030405060708090a0b0c0d0e0f",
+  "expect": "ok",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "control_recovery_info_query",
+  "nonce_hex": "000102030405060708090a0b0c0d0e0f"
+}
