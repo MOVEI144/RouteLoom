@@ -356,7 +356,7 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 
 ## 11. 重なり合う現場（R4）
 
-候補表（RAM、最大8現場）：観測keyは`(org_hint, site_hint, network_low32)`で、hintは探索keyであり認証済みの現場IDではない。認証はm2で初めて`site_id`に結び付き、hint衝突が認証で判明した場合だけ同じkeyを2レコードに分ける（満杯ならその試行を中止）。各現場はproxy証拠を最大2件（MAC・node・channel・RSSI・authority_hops・到達/busy flag・last_seen）持ち、60秒観測がなければ証拠は失効する（policyの期限は消えない）。回避表は同じレコードの別viewで、状態は`untried/transient/pending(retry_at)/busy(retry_at)/avoid(until)`、失敗回数・最終試行・preferred flagを持つ。1レコード≤160B、合計1280B。新規追加は空き→期限の切れた古いuntried/transientの順で置換し、選択中・未満了のavoid/pending/busyはevictしない。全8件が保護対象なら新候補をdropしてNoCapacityを数える（無制限リストやNVS overflowは作らない）。
+候補表（RAM、最大8現場）：観測keyは`(org_hint, site_hint, network_low32)`で、hintは探索keyであり認証済みの現場IDではない。認証はm2で初めて`site_id`に結び付き、hint衝突が認証で判明した場合だけ同じkeyを2レコードに分ける（満杯ならその試行を中止）。各現場はproxy証拠を最大2件（MAC・node・channel・RSSI・authority_hops・到達/busy flag・last_seen）持ち、60秒観測がなければ証拠は失効する（policyの期限は消えない）。回避表は同じレコードの別viewで、状態は`untried/transient/pending(retry_at)/busy(retry_at)/avoid(until)`、失敗回数・最終試行・preferred flagを持つ。1レコード≤160B、合計1280B。新規追加は空き→holdの期限が切れた古いレコード（policyによらない）の順で置換し、選択中・未満了のholdを持つレコードはevictしない。全8件が保護対象なら新候補をdropしてNoCapacityを数える（無制限リストやNVS overflowは作らない）。
 
 選択規則：
 
@@ -364,7 +364,7 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 2. 状態が適格（untried、またはretry_at/until経過）かつ新しい到達可能なproxy証拠のある現場だけを対象。認証済みsite_idが同じ複数レコードは遅い方の適格化時刻に統合する。
 3. preferred（直前に所属していた現場、RAMで保持）を優先、次にuntried、authority_hops昇順（不明=255は末尾）、RSSI降順、最終試行が古い順、key/MACの辞書順。
 4. 同じ現場への連続試行は`retry_after`を守る。pendingの現場があっても他の適格現場を順に試す（割当先がpending側でない限り、いずれallowに当たる）。timeout/経路消失/EDHOC errorは`transient`として`min(600s,1s×2^k)`（k≤10飽和）に`base〜base+base/4`の一様乱数を足して遅らせ、別proxy/現場を先に試す。OFFERが届いただけでは保留を解除しない。
-5. avoid（DenyNotHere 6時間、DenyBlocked 24時間、m2 SiteCert/署名不正と認証済み不正Allowも24時間）の現場はDISCOVERの`avoid_site_hint`（最大2件、期限の遅い順・同値ならhint順。preferredと同じhint、衝突が判明しているhintは入れない）に入れてOFFER自体を抑制。
+5. avoid（DenyNotHere 6時間、DenyBlocked 24時間、m2 SiteCert/署名不正と認証済み不正Allowも24時間）の現場はDISCOVERの`avoid_site_hint`（最大2件、期限の遅い順・同値ならhint順。preferredと同じhint、衝突が判明しているhint（別keyの同名hintも、認証で分岐した別site_idの同名hintも）は入れない）に入れてOFFER自体を抑制。
 6. 候補表は再起動で消える（NVSに書かない：摩耗と、誤った回避の固定化を避ける）。再起動直後の再試行はauthority側のrate制限で抑える。
 
 **なぜ隣の現場に入らないか**：(a) allowは割当先のKGuardだけが返す。(b) 参加後のlinkはMemberCertの相互検証を要し、別現場のMemberCertは別SAK署名・別networkなので検証に失敗する。(c) Member class discoveryのscope鍵は自現場のGKから導出され、他現場のDISCOVER/OFFERはscope MACで無言dropされる。(d) 参加後はZeroTouch classを送らない。焼き込み鍵による分離には依存しない。残る前提はKGuardの割当一意性（A1）で、A2ではこれも機器側で検証する（[01](01-overview-threat-model.md) §5）。

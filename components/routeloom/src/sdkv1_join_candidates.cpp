@@ -23,8 +23,11 @@ bool avoid_policy(const JoinCandidatePolicy p) noexcept {
   return p == JoinCandidatePolicy::AvoidNotHere || p == JoinCandidatePolicy::AvoidBlocked;
 }
 
-// Proxy quality: hops asc (255 unknown last), RSSI desc, MAC lex asc.
-bool proxy_better(const JoinCandidateProxy& a, const JoinCandidateProxy& b) noexcept {
+// Proxy rank: hops asc (255 unknown last), RSSI desc, MAC lex asc. One
+// definition serves stored proxies and fresh observations alike, so a later
+// rank change cannot land in one copy and miss the other.
+template <typename A, typename B>
+bool proxy_better(const A& a, const B& b) noexcept {
   if (a.authority_hops != b.authority_hops) return a.authority_hops < b.authority_hops;
   if (a.rssi != b.rssi) return a.rssi > b.rssi;
   for (std::size_t i = 0; i < a.mac.size(); ++i) {
@@ -33,13 +36,11 @@ bool proxy_better(const JoinCandidateProxy& a, const JoinCandidateProxy& b) noex
   return false;
 }
 
-bool obs_better(const JoinProxyObservation& a, const JoinCandidateProxy& b) noexcept {
-  if (a.authority_hops != b.authority_hops) return a.authority_hops < b.authority_hops;
-  if (a.rssi != b.rssi) return a.rssi > b.rssi;
-  for (std::size_t i = 0; i < a.mac.size(); ++i) {
-    if (a.mac[i] != b.mac[i]) return a.mac[i] < b.mac[i];
-  }
-  return false;
+// A saturated deadline (UINT64_MAX, the kJoinNoDeadline sentinel) never
+// arrives: sat_add can only produce it on overflow, so a hold that computed
+// it stays in force instead of releasing at the clock's maximum.
+bool hold_active(const MonotonicMs eligible_at, const MonotonicMs now) noexcept {
+  return eligible_at == kJoinNoDeadline || eligible_at > now;
 }
 
 std::uint32_t get_u32(const std::uint8_t* p) noexcept {
@@ -168,7 +169,7 @@ bool JoinCandidates::proxy_fresh(const JoinCandidateProxy& p, const MonotonicMs 
 
 bool JoinCandidates::proxy_usable(const JoinCandidateProxy& p, const MonotonicMs now) noexcept {
   return proxy_fresh(p, now) && p.authority_reachable && !p.proxy_busy &&
-         p.suppressed_until_ms <= now;
+         !hold_active(p.suppressed_until_ms, now);
 }
 
 const JoinCandidateProxy* JoinCandidates::best_proxy(const JoinCandidate& record,
@@ -225,28 +226,18 @@ MonotonicMs JoinCandidates::effective_eligible_at(const JoinCandidate& record) c
   return eff;
 }
 
-JoinCandidate* JoinCandidates::find_mutable(const JoinCandidateKey& key,
-                                            const std::uint64_t site_id,
-                                            const bool authenticated) noexcept {
-  for (auto& r : records_) {
-    if (r.occupied && r.key == key && r.site_id_authenticated == authenticated &&
-        (!authenticated || r.site_id == site_id)) {
-      return &r;
-    }
-  }
-  return nullptr;
-}
-
-// Empty slot first, else the stalest unprotected untried/transient record;
-// never evict a record mid-attempt or under an unexpired hold (§5.1 rule 3).
-JoinCandidate* JoinCandidates::acquire(const MonotonicMs now_ms, bool& evicted) noexcept {
+// Empty slot first, else the stalest record whose hold expired; never take
+// a record mid-attempt or under an unexpired hold. Any policy whose hold
+// expired is replaceable — an expired avoid kept its site out for the full
+// term already, and pinning it forever would wedge the table (§5.1 rule 3).
+JoinCandidate* JoinCandidates::acquire(const MonotonicMs now_ms, bool& evicted,
+                                       const JoinCandidate* exclude) noexcept {
   evicted = false;
   JoinCandidate* victim = nullptr;
   for (auto& r : records_) {
     if (!r.occupied) return &r;
-    const bool evictable =
-        !r.selected && r.eligible_at_ms <= now_ms &&
-        (r.policy == JoinCandidatePolicy::Untried || r.policy == JoinCandidatePolicy::Transient);
+    if (&r == exclude) continue;
+    const bool evictable = !r.selected && !hold_active(r.eligible_at_ms, now_ms);
     if (evictable && (victim == nullptr || r.last_seen_ms < victim->last_seen_ms)) victim = &r;
   }
   if (victim != nullptr) {
@@ -290,7 +281,7 @@ void JoinCandidates::upsert_proxy(JoinCandidate& record, const JoinProxyObservat
   JoinCandidateProxy* slot = nullptr;
   if (stale != nullptr) {
     slot = stale;
-  } else if (worst != nullptr && obs_better(o, *worst)) {
+  } else if (worst != nullptr && proxy_better(o, *worst)) {
     slot = worst;
   }
   if (slot == nullptr) return;
@@ -364,10 +355,12 @@ Status JoinCandidates::bind_authenticated(const JoinCandidateKey& key,
   JoinCandidate* target = unbound;
   if (target == nullptr && colliding != nullptr) {
     // Hint collision resolved by authentication: the key stays on the old
-    // record; the newly proven site_id needs a second record (§5.2). Full
-    // table -> the attempt aborts rather than conflating two sites.
+    // record; the newly proven site_id needs a second record (§5.2). The
+    // branch source is excluded from replacement — evicting it would wipe
+    // the site the copy is taken from. Full table -> the attempt aborts
+    // rather than conflating two sites.
     bool evicted = false;
-    target = acquire(now_ms, evicted);
+    target = acquire(now_ms, evicted, colliding);
     if (target == nullptr) {
       ++stats_.auth_split_failed;
       ++stats_.dropped_no_capacity;
@@ -378,11 +371,16 @@ Status JoinCandidates::bind_authenticated(const JoinCandidateKey& key,
     target->site_id_authenticated = false;
     target->policy = JoinCandidatePolicy::Untried;
     target->eligible_at_ms = 0;
-    target->last_attempt_ms = 0;
     target->failures = 0;
     target->preferred = false;
-    target->selected = false;
-    target->attempted_proxy = -1;
+    // The in-flight attempt now belongs to the newly proven site: move the
+    // selected flag, the proxy choice and its timestamp. The source drops
+    // back to idle — keeping its own policy — and is evictable again.
+    target->selected = colliding->selected;
+    target->attempted_proxy = colliding->attempted_proxy;
+    target->last_attempt_ms = colliding->last_attempt_ms;
+    colliding->selected = false;
+    colliding->attempted_proxy = -1;
     ++stats_.auth_splits;
     if (evicted) ++stats_.evicted;
   } else if (target == nullptr) {
@@ -502,7 +500,7 @@ Status JoinCandidates::select(const MonotonicMs now_ms, JoinSelect& out) noexcep
   const JoinCandidate* best_c = nullptr;
   const JoinCandidateProxy* best_p = nullptr;
   for (const auto& r : records_) {
-    if (!r.occupied || effective_eligible_at(r) > now_ms) continue;
+    if (!r.occupied || hold_active(effective_eligible_at(r), now_ms)) continue;
     const JoinCandidateProxy* p = best_proxy(r, now_ms);
     if (p == nullptr) continue;
     if (best_c == nullptr || better(r, *p, *best_c, *best_p)) {
@@ -562,7 +560,7 @@ std::size_t JoinCandidates::avoid_hints(const std::uint32_t org_hint, const Mono
   std::array<Entry, kJoinCandidateMax> entries{};
   std::size_t n = 0;
   for (const auto& r : records_) {
-    if (!r.occupied || !avoid_policy(r.policy) || r.eligible_at_ms <= now_ms ||
+    if (!r.occupied || !avoid_policy(r.policy) || !hold_active(r.eligible_at_ms, now_ms) ||
         r.key.org_hint != org_hint || r.key.site_hint == 0) {
       continue;
     }
@@ -570,11 +568,19 @@ std::size_t JoinCandidates::avoid_hints(const std::uint32_t org_hint, const Mono
     if (h == preferred_site_hint_ && org_hint == preferred_org_hint_) continue;
     bool ambiguous = false;
     for (const auto& o : records_) {
-      // The same key (e.g. an authenticated split) is the same observation;
-      // a different key in the SAME org carrying the same hint makes the
-      // value unresolvable inside that org's DISCOVER namespace.
-      if (o.occupied && !(o.key == r.key) && o.key.org_hint == org_hint &&
-          o.key.site_hint == h) {
+      if (&o == &r || !o.occupied || o.key.org_hint != org_hint || o.key.site_hint != h) {
+        continue;
+      }
+      if (o.key == r.key) {
+        // Same observation key: ambiguous only when authentication proved
+        // two DIFFERENT sites behind it (a split) — sending the hint would
+        // suppress the other, possibly eligible, site as well.
+        if (r.site_id_authenticated && o.site_id_authenticated && o.site_id != r.site_id) {
+          ambiguous = true;
+        }
+      } else {
+        // A different key in the SAME org carrying the same hint makes the
+        // value unresolvable inside that org's DISCOVER namespace.
         ambiguous = true;
       }
     }

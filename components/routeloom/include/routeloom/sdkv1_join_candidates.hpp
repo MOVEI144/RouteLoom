@@ -213,8 +213,10 @@ class JoinCandidates {
   // --- authentication ---
   // After m2 authenticated: bind site_id to the record at `key`. If the key
   // is already bound to a DIFFERENT site_id (hint collision), split into a
-  // second record sharing the key; refuses when no slot can be made
-  // (design §5.2: full table aborts the attempt rather than conflating).
+  // second record sharing the key; the in-flight attempt state (selected,
+  // proxy choice) moves to the new record and the source drops back to idle.
+  // Refuses when no slot can be made (design §5.2: full table aborts the
+  // attempt rather than conflating).
   Status bind_authenticated(const JoinCandidateKey& key, std::uint64_t site_id,
                             MonotonicMs now_ms, JoinCandidate*& record) noexcept;
 
@@ -257,8 +259,10 @@ class JoinCandidates {
 
   // --- DISCOVER avoid hints ---
   // Up to 2 nonzero distinct hints of unexpired avoid records for `org_hint`,
-  // latest expiry first then hint order; the preferred site's hint and hints
-  // colliding with another record's key are excluded (design §5.2).
+  // latest expiry first then hint order; the preferred site's hint, hints
+  // colliding with another record's key, and hints shared with a different
+  // authenticated site_id (a split: the hint cannot name one site without
+  // suppressing the other) are excluded (design §5.2).
   std::size_t avoid_hints(std::uint32_t org_hint, MonotonicMs now_ms,
                           std::array<std::uint32_t, kZtAvoidHints>& out) noexcept;
 
@@ -278,9 +282,8 @@ class JoinCandidates {
 
  private:
   bool clock_ok(MonotonicMs now_ms) noexcept;
-  JoinCandidate* acquire(MonotonicMs now_ms, bool& evicted) noexcept;
-  JoinCandidate* find_mutable(const JoinCandidateKey& key, std::uint64_t site_id,
-                              bool authenticated) noexcept;
+  JoinCandidate* acquire(MonotonicMs now_ms, bool& evicted,
+                         const JoinCandidate* exclude = nullptr) noexcept;
   void upsert_proxy(JoinCandidate& record, const JoinProxyObservation& proxy,
                     MonotonicMs now_ms) noexcept;
   MonotonicMs effective_eligible_at(const JoinCandidate& record) const noexcept;

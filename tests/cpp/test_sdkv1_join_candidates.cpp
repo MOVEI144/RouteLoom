@@ -675,6 +675,160 @@ void bounds() {
   CHECK(sizeof(JoinCandidates) <= 8 * kJoinCandidateRecordMax + 256);
 }
 
+void split_excludes_branch_source() {
+  // A full table whose branch source is the stalest record: the split must
+  // take any slot BUT the source — success with an unoccupied record and a
+  // table that shrank 8->7 loses the authenticated site.
+  JoinCandidates t;
+  for (std::uint32_t i = 1; i <= 8; ++i) {
+    CHECK(offer(t, 7, i, 0xA5, static_cast<std::uint8_t>(i), -50, 1, 1000 + i) ==
+          JoinObserve::Inserted);
+  }
+  JoinCandidate* source = nullptr;
+  CHECK(t.bind_authenticated(key(7, 1, 0xA5), 0xAAAA, 1100, source).ok());
+  CHECK(source != nullptr);
+  JoinCandidate* split = nullptr;
+  CHECK(t.bind_authenticated(key(7, 1, 0xA5), 0xBBBB, 1200, split).ok());
+  CHECK(split != nullptr);
+  if (split != nullptr) {
+    CHECK(split->occupied);
+    CHECK(split->site_id == 0xBBBB && split->site_id_authenticated);
+    CHECK(split->policy == JoinCandidatePolicy::Untried);
+    CHECK(split->proxies[0].present);  // key-level evidence copied, not lost
+  }
+  CHECK(t.size() == 8);  // a victim was replaced — the table never shrinks
+  CHECK(t.stats().evicted == 1);
+  // The victim is the stalest record that is NOT the source.
+  CHECK(t.find(key(7, 2, 0xA5)) == nullptr);
+  const JoinCandidate* kept = t.find(key(7, 1, 0xA5));
+  CHECK(kept != nullptr);
+  if (kept != nullptr) {
+    CHECK(kept->site_id_authenticated && kept->site_id == 0xAAAA);
+    CHECK(kept != split);
+  }
+}
+
+void split_moves_attempt_state() {
+  // The in-flight attempt (selected + proxy choice) belongs to the newly
+  // proven site after a split; the source must not keep `selected` forever
+  // (a stuck selected flag makes the source unevictable).
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(offer(t, 7, 42, 0xA5, 1, -50, 0, 1000) == JoinObserve::Inserted);
+  JoinCandidate* source = nullptr;
+  CHECK(t.bind_authenticated(k, 0xAAAA, 1100, source).ok());
+  CHECK(source != nullptr);
+  if (source == nullptr) return;
+  t.mark_attempt(*source, 0, 1200);
+  CHECK(source->selected);
+  JoinCandidate* split = nullptr;
+  CHECK(t.bind_authenticated(k, 0xBBBB, 1300, split).ok());
+  CHECK(split != nullptr);
+  if (split != nullptr) {
+    CHECK(split->selected);
+    CHECK(split->attempted_proxy == 0);
+    CHECK(split->last_attempt_ms == 1200);
+  }
+  CHECK(!source->selected);
+  CHECK(source->attempted_proxy == -1);
+  // The released source is evictable again: fill the table, then the 9th
+  // key replaces the stalest record — the source observed at t=1000.
+  for (std::uint32_t i = 1; i <= 6; ++i) {
+    CHECK(offer(t, 7, 100 + i, 0xA5, static_cast<std::uint8_t>(10 + i), -60, 1,
+                2000 + i) == JoinObserve::Inserted);
+  }
+  CHECK(t.size() == 8);
+  CHECK(offer(t, 7, 200, 0xA5, 20, -20, 0, 3000) == JoinObserve::Evicted);
+  CHECK(!source->occupied || !(source->key == k));  // source slot reused
+}
+
+void avoid_hint_split_collision() {
+  // A is avoid-blocked for 24 h; the same hint splits to an eligible B.
+  // The hint is unresolvable — it must stay off DISCOVER, while B itself
+  // remains selectable.
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(offer(t, 7, 42, 0xA5, 1, -50, 0, 1000) == JoinObserve::Inserted);
+  JoinCandidate* a = nullptr;
+  CHECK(t.bind_authenticated(k, 0xAAAA, 1100, a).ok());
+  CHECK(a != nullptr);
+  if (a == nullptr) return;
+  CHECK(t.apply_outcome(*a, JoinAttemptOutcome::DenyBlocked, 0, 1200, entropy).ok());
+  JoinCandidate* b = nullptr;
+  CHECK(t.bind_authenticated(k, 0xBBBB, 1300, b).ok());
+  CHECK(b != nullptr);
+  std::array<std::uint32_t, kZtAvoidHints> hints{};
+  CHECK(t.avoid_hints(7, 1400, hints) == 0);  // hint 42 suppressed, not sent
+  // B is a different authenticated site: eligible despite A's hold.
+  const JoinSelect s = pick(t, 1400);
+  CHECK(s.candidate == b);
+}
+
+void expired_policy_evictable() {
+  // Eight DenyBlocked records: the 9th site is dropped while every hold is
+  // unexpired, then replaces the stalest record exactly at expiry and after.
+  JoinCandidates t;
+  for (std::uint32_t i = 1; i <= 8; ++i) {
+    CHECK(offer(t, 7, i, 0xA5, static_cast<std::uint8_t>(i), -50, 1, 1000 + i) ==
+          JoinObserve::Inserted);
+  }
+  for (std::uint32_t i = 1; i <= 8; ++i) {
+    JoinCandidate* r = record_of(t, key(7, i, 0xA5));
+    CHECK(r != nullptr);
+    if (r != nullptr) {
+      CHECK(t.apply_outcome(*r, JoinAttemptOutcome::DenyBlocked, 0, 1100, entropy).ok());
+    }
+  }
+  const MonotonicMs expiry = 1100 + kJoinAvoidBlockedMs;
+  CHECK(offer(t, 7, 9, 0xA5, 9, -20, 0, expiry - 1) == JoinObserve::NoCapacity);
+  CHECK(t.size() == 8);
+  CHECK(offer(t, 7, 9, 0xA5, 9, -20, 0, expiry) == JoinObserve::Evicted);
+  CHECK(t.size() == 8);
+  CHECK(t.find(key(7, 1, 0xA5)) == nullptr);  // stalest observation replaced
+  CHECK(t.find(key(7, 9, 0xA5)) != nullptr);
+  CHECK(offer(t, 7, 10, 0xA5, 10, -20, 0, expiry + 1000) == JoinObserve::Evicted);
+  CHECK(t.find(key(7, 10, 0xA5)) != nullptr);
+  // Expired pending/busy holds release their records the same way.
+  JoinCandidates t2;
+  for (std::uint32_t i = 1; i <= 8; ++i) {
+    CHECK(offer(t2, 7, i, 0xA5, static_cast<std::uint8_t>(i), -50, 1, 1000 + i) ==
+          JoinObserve::Inserted);
+  }
+  for (std::uint32_t i = 1; i <= 8; ++i) {
+    JoinCandidate* r = record_of(t2, key(7, i, 0xA5));
+    CHECK(r != nullptr);
+    if (r != nullptr) {
+      CHECK(t2.apply_outcome(*r, JoinAttemptOutcome::PendingAssignment, 60, 1100, entropy)
+                .ok());
+    }
+  }
+  CHECK(offer(t2, 7, 9, 0xA5, 9, -20, 0, 1100 + 60000) == JoinObserve::Evicted);
+}
+
+void saturated_hold_never_expires() {
+  // A 24 h hold set at MAX-1000 saturates its deadline to UINT64_MAX; the
+  // saturated hold must never read as "arrived" — not for selection,
+  // replacement, or the avoid wire set.
+  const MonotonicMs kMax = ~MonotonicMs{0};
+  const MonotonicMs t0 = kMax - 1000;
+  JoinCandidates t;
+  for (std::uint32_t i = 1; i <= 8; ++i) {
+    CHECK(offer(t, 7, i, 0xA5, static_cast<std::uint8_t>(i), -50, 1, t0) ==
+          JoinObserve::Inserted);
+    JoinCandidate* r = record_of(t, key(7, i, 0xA5));
+    CHECK(r != nullptr);
+    if (r != nullptr) {
+      CHECK(t.apply_outcome(*r, JoinAttemptOutcome::DenyBlocked, 0, t0, entropy).ok());
+      CHECK(r->eligible_at_ms == kMax);
+    }
+  }
+  CHECK(pick(t, kMax).candidate == nullptr);  // still held, not selectable
+  CHECK(offer(t, 7, 9, 0xA5, 9, -20, 0, kMax) == JoinObserve::NoCapacity);
+  CHECK(t.size() == 8);
+  std::array<std::uint32_t, kZtAvoidHints> hints{};
+  CHECK(t.avoid_hints(7, kMax, hints) == 2);  // saturated avoids stay on wire
+}
+
 }  // namespace
 
 int main() {
@@ -702,6 +856,11 @@ int main() {
       {"scan_cursor", scan_cursor},
       {"deadline_helpers", deadline_helpers},
       {"bounds", bounds},
+      {"split_excludes_branch_source", split_excludes_branch_source},
+      {"split_moves_attempt_state", split_moves_attempt_state},
+      {"avoid_hint_split_collision", avoid_hint_split_collision},
+      {"expired_policy_evictable", expired_policy_evictable},
+      {"saturated_hold_never_expires", saturated_hold_never_expires},
   };
   for (const auto& c : cases) {
     current = c.name;
