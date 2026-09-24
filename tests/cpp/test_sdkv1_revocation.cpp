@@ -2129,6 +2129,28 @@ void test_removal_failure_after_intent_reboots_closed() {
   CHECK(f.identity_storage.slot(0) == id0 && f.identity_storage.slot(1) == id1);
 }
 
+void test_reassigned_member_can_be_removed_again() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto first = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(first.view()), 100));
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 600124));
+  CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+
+  CHECK_OK(f.site.commit(site_for(kNode, 2, 14)));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 600125));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK_OK(f.site.commit(site_for(kNode, 3, 14)));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 600126));
+  CHECK(f.snap().phase == LifecyclePhase::BootGate);
+  const auto second = signed_removal_notice(3, 15);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(second.view()), 600127));
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  CHECK(f.journal.record().generation == 3);
+}
+
 }  // namespace
 
 int main() {
@@ -2139,6 +2161,7 @@ int main() {
   test_removal_ack_queues_after_intent_without_delaying_erasure();
   test_removal_notice_intent();
   test_removal_failure_after_intent_reboots_closed();
+  test_reassigned_member_can_be_removed_again();
   test_removal_journal_powercuts();
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();

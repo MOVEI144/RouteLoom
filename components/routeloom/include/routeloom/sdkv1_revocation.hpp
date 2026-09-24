@@ -631,6 +631,7 @@ class MembershipLifecycle final {
   Status on_removal(ByteView notice, MonotonicMs now_ms) noexcept;
   Status removal_poll(MonotonicMs now_ms) noexcept;
   bool removal_proof_valid(const LifecycleRecord& record) noexcept;
+  bool reassigned_after_removal() const noexcept;
 
   LifecycleBlockReason adopt_stores() noexcept;
   Status begin_apply(ByteView object, CandidateSource source, NodeId peer,

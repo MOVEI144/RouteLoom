@@ -395,7 +395,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel 2 --target routeloom_joiner_interop_peer
           test -x build/tests/cpp/routeloom_joiner_interop_peer
       - name: Rust toolchain
@@ -406,6 +406,7 @@ jobs:
         working-directory: host
         env:
           ROUTELOOM_JOINER_PEER: ${{ github.workspace }}/build/tests/cpp/routeloom_joiner_interop_peer
+          UBSAN_OPTIONS: halt_on_error=1
         run: cargo test -p routeloom-host --bins site::joiner_interop
   fuzz:
     runs-on: ubuntu-latest

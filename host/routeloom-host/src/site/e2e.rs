@@ -8,6 +8,8 @@
 //! discovered → pending → KGuard assigns → Allow verified by
 //! `join_allow_verify`; deny not_here; removal with a verified
 //! RemovalNotice; the event stream; the ACL (V1-H06); idempotency (V1-H03).
+//! G-SEC P5 adds the `group_keys.*` API over the same socket (status,
+//! rotate, ACL, events).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::MetadataExt;
@@ -397,4 +399,141 @@ fn api_surface_validates_and_advertises() {
         "API1 {\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\",\"params\":{}}",
     );
     assert!(caps.contains("\"site\":{\"configured\":false"), "{caps}");
+}
+
+/// G-SEC P5 PR3 (§6.4): `group_keys.*` over the API1 socket — the typed
+/// client facade, the MEMBERSHIP_READ/ADMIN split, parameter validation,
+/// and the rotation events on the stream.
+#[test]
+fn group_keys_api_over_the_socket() {
+    let daemon = Daemon::start("gk");
+    let link = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
+    let kguard = KGuardMock::default();
+    let stream = link.site_events().unwrap();
+    let (event_tx, event_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for event in stream {
+            if event_tx.send(event).is_err() {
+                return;
+            }
+        }
+    });
+    let next_event = |kind: &str| loop {
+        let event = event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("no {kind} event"))
+            .unwrap();
+        if event.kind == kind {
+            return event;
+        }
+    };
+
+    // One member, so the rotation has a target.
+    let t0 = now_ms();
+    let mut device = SimDevice::new(0x00A1_0000_0000_4321, 0x73);
+    kguard.assign(device.node, Assignment::Here(Role::Endpoint));
+    let (mut exchange, outcome) = daemon.start_join(&mut device, t0);
+    assert!(matches!(outcome, Outcome::Waiting));
+    next_event("join.request");
+    let decided = kguard.serve_once(&link).unwrap();
+    assert_eq!(decided[0].1, Decision::Allow(Role::Endpoint));
+    let Outcome::Result(JoinResult::Allow { .. }) = device.finish(&mut exchange, &daemon.transport)
+    else {
+        panic!("expected Allow");
+    };
+
+    // Status before any rotation: stable, epoch 1, no secrets on the wire.
+    let status = link.group_key_status().unwrap();
+    assert_eq!(status.active, 1);
+    assert_eq!(status.staged, None);
+    assert_eq!(status.phase, "stable");
+    assert_eq!(status.targets, 0);
+    assert_eq!(status.unknown, 0);
+    assert_eq!(status.last_rotation, None);
+    assert!(status.next_due_ms.is_some());
+
+    // A manual rotation commits and announces itself.
+    let rotated = link.rotate_group_key(1, "e2e-rotate-1").unwrap();
+    assert_eq!(rotated.state, "committed");
+    assert_eq!((rotated.from_epoch, rotated.to_epoch), (1, 2));
+    assert_eq!(rotated.targets, 1);
+    next_event("gk.staged");
+    let status = link.group_key_status().unwrap();
+    assert_eq!(status.phase, "staging");
+    assert_eq!(status.staged, Some(2));
+    assert_eq!(status.cause.as_deref(), Some("manual"));
+    assert_eq!(status.targets, 1);
+    let op = link
+        .call(
+            "operations.get",
+            &format!("{{\"operation_id\":\"{}\"}}", rotated.operation_id),
+        )
+        .unwrap();
+    assert_eq!(
+        op.get("kind").and_then(routeloom_json::Json::as_str),
+        Some("rotate")
+    );
+    assert_eq!(
+        op.get("state").and_then(routeloom_json::Json::as_str),
+        Some("distributing")
+    );
+
+    // Validation before anything else: unknown params, bad epoch, no key.
+    let uid = std::fs::metadata(&daemon.dir).unwrap().uid();
+    let call = |method: &str, params: &str| {
+        raw_api1(
+            &daemon.state,
+            uid,
+            &format!(
+                "API1 {{\"v\":1,\"request_id\":\"g\", \"method\":\"{method}\",\"params\":{params}}}"
+            ),
+        )
+    };
+    assert!(call(
+        "group_keys.rotate",
+        "{\"expected_active_epoch\":2,\"idempotency_key\":\"k\",\"cause\":\"removal\"}"
+    )
+    .contains("INVALID_ARGUMENT"));
+    assert!(call(
+        "group_keys.rotate",
+        "{\"expected_active_epoch\":0,\"idempotency_key\":\"k\"}"
+    )
+    .contains("INVALID_ARGUMENT"));
+    assert!(call("group_keys.rotate", "{\"expected_active_epoch\":2}").contains("INVALID_ARGUMENT"));
+    assert!(call("group_keys.status", "{\"x\":1}").contains("INVALID_ARGUMENT"));
+    // A stale screen conflicts instead of staging (active is still 1,
+    // but a rotation is already distributing under another key).
+    let stale = call(
+        "group_keys.rotate",
+        "{\"expected_active_epoch\":9,\"idempotency_key\":\"stale\"}",
+    );
+    assert!(stale.contains("CONFLICT"), "{stale}");
+    let busy = call(
+        "group_keys.rotate",
+        "{\"expected_active_epoch\":1,\"idempotency_key\":\"other\"}",
+    );
+    assert!(busy.contains("BUSY"), "{busy}");
+
+    // The ACL split: uid 7 reads but never rotates.
+    let read = raw_api1(
+        &daemon.state,
+        7,
+        "API1 {\"v\":1,\"request_id\":\"r\",\"method\":\"group_keys.status\",\"params\":{}}",
+    );
+    assert!(read.contains("\"ok\":true"), "{read}");
+    assert!(read.contains("\"phase\":\"staging\""), "{read}");
+    let denied = raw_api1(
+        &daemon.state,
+        7,
+        "API1 {\"v\":1,\"request_id\":\"d\",\"method\":\"group_keys.rotate\",\"params\":{\"expected_active_epoch\":1,\"idempotency_key\":\"x\"}}",
+    );
+    assert!(denied.contains("AuthorizationFailed"), "{denied}");
+
+    // Revoking the member supersedes with a fresh epoch (announced too).
+    let removed = link
+        .revoke(device.node, 1, RemovalReason::Lost, "e2e-rm-1")
+        .unwrap();
+    assert_eq!(removed.state, "committed");
+    next_event("member.revoked");
+    next_event("gk.staged");
 }

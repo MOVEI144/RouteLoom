@@ -1388,13 +1388,14 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         const SiteStoreHealth health = site_.health();
         if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
             identity_.identity().node_id != config_.self || record.self != config_.self ||
-            !health.initialized || health.has_site || health.quarantined ||
+            !health.initialized || health.quarantined ||
             health.uncertain || health.unsupported_mask != 0 ||
             health.read_error_mask != 0 || health.active_load_failed ||
-            !revocations_.clean_empty()) {
+            (health.has_site ? !reassigned_after_removal() : !revocations_.clean_empty())) {
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
+        if (health.has_site) return adopt_and_enter(now_ms);
         phase_ = LifecyclePhase::UnassignedReady;
         emit_action(LifecycleActionTag::RestartUnassigned, LifecycleActionReason::None);
         return Status::success();
@@ -1436,8 +1437,16 @@ Status MembershipLifecycle::on_poll(const MonotonicMs now_ms) noexcept {
 Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
                                             const MonotonicMs now_ms) noexcept {
   if (phase_ == LifecyclePhase::Stopped || phase_ == LifecyclePhase::Removing ||
-      phase_ == LifecyclePhase::Holdoff || phase_ == LifecyclePhase::UnassignedReady) {
+      phase_ == LifecyclePhase::Holdoff) {
     return Status::error(StatusCode::InvalidState, "lifecycle not accepting member");
+  }
+  if (phase_ == LifecyclePhase::UnassignedReady) {
+    if (!reassigned_after_removal()) {
+      return Status::error(StatusCode::InvalidState, "reassignment below removal watermark");
+    }
+    rs_to_fetch_ = ready.rs_epoch_to_fetch;
+    phase_ = LifecyclePhase::BootGate;
+    return adopt_and_enter(now_ms);
   }
   if (phase_ == LifecyclePhase::ApplyingRrs) {
     // Do not disturb the running apply; the Floor step re-checks the RLS1
@@ -1613,6 +1622,23 @@ Status MembershipLifecycle::on_recovery(const LifecycleJoinRecovery& recovery,
     notify(LifecycleEventKind::RecoveryFinished, 0, adopted_.rs_epoch, 0, now_ms);
   }
   return Status::success();
+}
+
+bool MembershipLifecycle::reassigned_after_removal() const noexcept {
+  if (journal_ == nullptr || !journal_->has_record() ||
+      journal_->record().mode != LifecycleMode::UnassignedReady || !site_.has_site()) return false;
+  const SiteStoreHealth health = site_.health();
+  if (!health.initialized || health.quarantined || health.uncertain ||
+      health.unsupported_mask != 0 || health.read_error_mask != 0 ||
+      health.active_load_failed) return false;
+  const LifecycleRecord& previous = journal_->record();
+  const SiteRecord& current = site_.site();
+  if (previous.self != config_.self) return false;
+  if (current.site_id != previous.site_id) return true;
+  return current.assignment_generation > previous.generation &&
+         static_cast<std::uint32_t>(current.network) ==
+             static_cast<std::uint32_t>(previous.old_network) &&
+         (current.network >> 32U) >= (previous.old_network >> 32U);
 }
 
 bool MembershipLifecycle::removal_proof_valid(const LifecycleRecord& record) noexcept {

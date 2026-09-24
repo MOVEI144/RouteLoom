@@ -722,6 +722,13 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     observer_.on_diagnostic("GROUP_FRAME_REJECTED", peer, &header.message);
     return;
   }
+  // A cached tree or seen bit is not evidence that a retired GK is still
+  // authorized. Check before either short-circuit can forward a repair.
+  if (!security_.accepts_group_epoch(header.end_epoch)) {
+    saturating_inc(group_stats_.rejected);
+    observer_.on_diagnostic("GROUP_KEY_RETIRED", peer, &header.message);
+    return;
+  }
   const MessageKey key{header.origin, header.message};
   const std::uint8_t round = static_cast<std::uint8_t>(header.delivery_round & kGroupRoundMask);
   const bool refresh = (header.delivery_round & kGroupRoundRefresh) != 0;
@@ -830,7 +837,7 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     info.group_seq = seq;
     info.priority = head.priority;
     info.ordered = head.ordered;
-    group_accept(*stream, info, app, member, remaining, now_ms);
+    group_accept(*stream, info, app, member, remaining, now_ms, header.end_epoch);
   }
 
   GroupTree* tree = allocate_group_tree(now_ms);
@@ -938,7 +945,10 @@ void MeshNode::handle_group_report(const wire::PlainFrame& frame, const NodeId p
 
 bool MeshNode::group_origin_job_stale(const TxJob& job) const noexcept {
   if (job.owner != JobOwner::Group) return false;
-  if (job.ack.key.origin != config_.node) return false;  // relay work is never stale
+  if (job.ack.accepted_type == FrameType::GroupData &&
+      job.form == JobForm::Forwarded &&
+      !security_.accepts_group_epoch(job.forwarded.header.end_epoch)) return true;
+  if (job.ack.key.origin != config_.node) return false;
   // Eviction only releases terminal records (send_group reclaims settled
   // history oldest-first), so a missing self-origin record means the origin
   // settled and its history was evicted: the leftover job is stale either
@@ -981,7 +991,8 @@ void MeshNode::group_deliver_app(const GroupMessageInfo& info, const ByteView ap
 void MeshNode::group_accept(GroupStream& stream, const GroupMessageInfo& info,
                             const ByteView app, const bool member,
                             const std::uint32_t remaining_ms,
-                            const MonotonicMs now_ms) noexcept {
+                            const MonotonicMs now_ms,
+                            const std::uint32_t gk_epoch) noexcept {
   const std::uint32_t seq = info.group_seq;
   if (stream.next_seq == 0) stream.next_seq = seq;  // first message of this session
   // Keep the cursor inside the duplicate window: anything older than the
@@ -1055,6 +1066,7 @@ void MeshNode::group_accept(GroupStream& stream, const GroupMessageInfo& info,
   }
   saturating_inc(group_stats_.held);
   hold->info = info;
+  hold->gk_epoch = gk_epoch;
   hold->release_at_ms = now_ms + std::min(remaining_ms, kGroupOrderMaxHoldMs);
   hold->size = static_cast<std::uint8_t>(std::min(app.size, hold->payload.size()));
   if (hold->size > 0) std::memcpy(hold->payload.data(), app.data, hold->size);
@@ -1069,11 +1081,12 @@ void MeshNode::group_drain(GroupStream& stream) noexcept {
     });
     if (hold != nullptr) {
       const GroupMessageInfo info = hold->info;
+      const bool live = security_.accepts_group_epoch(hold->gk_epoch);
       std::array<std::uint8_t, kGroupPayloadMax> payload{};
       const std::uint8_t size = hold->size;
       std::memcpy(payload.data(), hold->payload.data(), size);
       group_holds_.release(hold);
-      group_deliver_app(info, ByteView{payload.data(), size});
+      if (live) group_deliver_app(info, ByteView{payload.data(), size});
     }
     ++stream.next_seq;
   }
@@ -1095,12 +1108,13 @@ void MeshNode::group_skip_to(GroupStream& stream, const std::uint32_t target) no
       group_stats_.gaps_skipped += lowest->info.group_seq - stream.next_seq;
     }
     const GroupMessageInfo info = lowest->info;
+    const bool live = security_.accepts_group_epoch(lowest->gk_epoch);
     std::array<std::uint8_t, kGroupPayloadMax> payload{};
     const std::uint8_t size = lowest->size;
     std::memcpy(payload.data(), lowest->payload.data(), size);
     group_holds_.release(lowest);
     stream.next_seq = info.group_seq + 1U;
-    group_deliver_app(info, ByteView{payload.data(), size});
+    if (live) group_deliver_app(info, ByteView{payload.data(), size});
   }
   if (stream.next_seq != 0 && target > stream.next_seq) {
     group_stats_.gaps_skipped += target - stream.next_seq;
@@ -1157,6 +1171,7 @@ SleepHoldRelease MeshNode::release_one_group_hold_for_sleep() noexcept {
     group_stats_.gaps_skipped += seq - stream->next_seq;
   }
   GroupMessageInfo info = target->info;
+  const std::uint32_t gk_epoch = target->gk_epoch;
   // A hold the cursor already passed (defensive — the release always takes
   // the lowest held seq) reads as late, exactly like group_accept.
   if (stream->next_seq != 0 && seq < stream->next_seq) info.late = true;
@@ -1169,7 +1184,8 @@ SleepHoldRelease MeshNode::release_one_group_hold_for_sleep() noexcept {
   }
   // Exactly one hand-off: the trailing group_drain() that group_skip_to runs
   // is deliberately NOT run, so this call releases exactly one message.
-  group_deliver_app(info, ByteView{payload.data(), size});
+  if (security_.accepts_group_epoch(gk_epoch))
+    group_deliver_app(info, ByteView{payload.data(), size});
   return SleepHoldRelease::Released;
 }
 
@@ -1221,6 +1237,10 @@ void MeshNode::process_group(const MonotonicMs now_ms) noexcept {
   // Source: round deadlines, repair rounds, expiry, admission.
   group_origins_.for_each([&](GroupOrigin& origin) {
     if (sleep_terminal(origin.state)) return;
+    if (origin.admitted && !security_.accepts_group_epoch(origin.sealed.header.end_epoch)) {
+      group_origin_terminal(origin, DeliveryState::Failed, "GROUP_KEY_RETIRED");
+      return;
+    }
     if (origin.tree.collecting && now_ms >= origin.tree.deadline_ms) {
       group_finalize(origin.tree, now_ms);
     }
