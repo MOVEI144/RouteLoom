@@ -20,7 +20,7 @@ SDK callback（`NodeObserver`、`PowerEvents`）の実行中はcoordinatorのmut
 
 - coordinatorは単一owner APIであり、callback内から `begin` / `wake` / `poll` を再帰駆動しない。callback中のmutating操作は記録も遅延実行もせず `Busy` で拒否する。
 - callbackが観測する `state()` とdrain maskはcallback中は変わらない。精算・hold放出・teardown・sleep entryはcallbackを挟んでも中断されない：abortは精算の途中には入らず、前か後にだけ入る。
-- 精算は2 phase：phase 1は候補（candidate）の計画とcommitだけで配送状態を変えず（durable所有権は確定しない）、phase 2でticket発行前に1件ずつ所有権を確定して通知し、 `READY_TO_SLEEP` へ進む。commit済みsnapshotはabortで消さず、NVS crash境界は変えない。候補が足りない時は未通知のcarryを優先し、入り切らない新規分は `SLEEP_PERSIST_FULL` で明示失敗させる。
+- 精算は2 phase：phase 1は候補（candidate）の計画とcommitだけで配送状態を変えず（durable所有権は確定しない）、phase 2でticket発行前に1件ずつ所有権を確定して通知し、 `READY_TO_SLEEP` へ進む。2スロット更新では先行書込みに既存carryと収まる新規候補を残し、後続書込みで最終候補を記録する。commit済みsnapshotはabortで消さず、NVS crash境界は変えない。候補が足りない時は未通知のcarryを優先し、入り切らない新規分は `SLEEP_PERSIST_FULL` で明示失敗させる。
 - ticketは `READY_TO_SLEEP` 到達後に `ticket()` で取得する。quiesce時点でdriverに残る物理TXは結果不明のまま `SLEEP_TX_INFLIGHT` として診断に記録し（成功の捏造なし）、発行後の送信（拒否を含む）・RX・GPIO・config変更・radio resetはticketを無効化する。`sleep_enter()` はticketを複写し、entry通知の完了後にplatform引渡し直前で再検証する。1 ticketの消費は最大1回のplatform呼出し。
 - GroupはRAMのみでsleep image対象外：収集中roundの完了を待ち、commit成功後に未決着originをpolicy別に終端し、ORDERED holdを1件ずつ放出する（[group-delivery §10](../design/sdk-v1/group-delivery.md)）。repair roundはdrain中に開始せず `kRetryRounds` で止まる。
 

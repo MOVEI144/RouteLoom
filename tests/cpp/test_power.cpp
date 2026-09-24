@@ -4128,6 +4128,146 @@ void test_phase1_faults_keep_work_live() {
   }
 }
 
+void test_failed_second_commit_keeps_unnotified_expired_carry() {
+  MemoryPowerStorage storage;
+  MessageId carried{};
+  {
+    PowerWorld w(storage);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    carried = queue_pending(w, 99, true, 1000);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK_OK(w.coordinator.sleep_abort("RETRY"));
+    w.now += 2000;
+    storage.fail_after_writes(1);
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::Running));
+    CHECK(w.events.pending_with(StatusCode::Expired) == 0);
+  }
+  PowerWorld recovered(storage);
+  CHECK_OK(recovered.coordinator.begin(ResetCause::OtherReset,
+                                       ElapsedInterval{0, 0, true}, recovered.now));
+  CHECK(pending_results_for(recovered.events, carried, StatusCode::Expired) == 1);
+}
+
+void test_failed_second_refresh_keeps_unnotified_expired_carry() {
+  MemoryPowerStorage storage;
+  MessageId carried{};
+  {
+    PowerWorld w(storage);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    carried = queue_pending(w, 99, true, 1000);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    const SleepTicket ticket = w.coordinator.ticket();
+    w.now += 2000;
+    storage.fail_after_writes(1);
+    CHECK(!w.coordinator.sleep_enter(ticket, w.now).ok());
+    CHECK(w.coordinator.state() == PowerState::Running);
+    CHECK(w.events.pending_with(StatusCode::Expired) == 0);
+  }
+  PowerWorld recovered(storage);
+  CHECK_OK(recovered.coordinator.begin(ResetCause::OtherReset,
+                                       ElapsedInterval{0, 0, true}, recovered.now));
+  CHECK(pending_results_for(recovered.events, carried, StatusCode::Expired) == 1);
+}
+
+void test_failed_second_commit_keeps_old_same_id_carry() {
+  MemoryPowerStorage storage;
+  MessageId carried{};
+  const std::array<std::uint8_t, 4> old_body{{'O', 'L', 'D', '!'}};
+  const std::array<std::uint8_t, 4> new_body{{'N', 'E', 'W', '!'}};
+  SendOptions durable{};
+  durable.persist_across_sleep = true;
+  durable.lifetime_ms = 20000;
+  {
+    GroupPowerWorld w;
+    w.converge();
+    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                                 w.events);
+    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+    CHECK_OK(w.a.send(9, ByteView{old_body.data(), old_body.size()}, durable,
+                      w.now, carried));
+    SleepRequest request{};
+    CHECK_OK(coordinator.sleep_prepare(request, w.now));
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  }
+  {
+    GroupPowerWorld w;
+    w.converge();
+    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                                 w.events);
+    for (std::size_t i = 0; i < MeshNode::delivery_capacity(); ++i) {
+      MessageId id{};
+      CHECK_OK(w.a.send(90 + static_cast<NodeId>(i),
+                        ByteView{new_body.data(), new_body.size()}, durable,
+                        w.now, id));
+    }
+    CHECK_OK(coordinator.begin(ResetCause::DeepSleepWake,
+                               ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::AlreadyExists) == 1);
+    SleepRequest save{};
+    save.pending_policy = SleepWorkPolicy::Save;
+    storage.fail_after_writes(1);
+    CHECK_OK(coordinator.sleep_prepare(save, w.now));
+    CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+    CHECK(!sleep_verdict_terminal(w.a.delivery(carried).state));
+  }
+  GroupPowerWorld recovered;
+  recovered.converge();
+  FakePowerPort port;
+  RecordingPowerEvents events;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, recovered.a, port,
+                               storage, events);
+  CHECK_OK(coordinator.begin(ResetCause::OtherReset,
+                             ElapsedInterval{0, 0, true}, recovered.now));
+  CHECK(pending_results_for(events, carried, StatusCode::Ok) == 1);
+  std::size_t old_copies = 0;
+  recovered.a.for_each_delivery([&](const DeliverySnapshot& snapshot) {
+    if (snapshot.id != carried) return;
+    CHECK(snapshot.payload.size == old_body.size());
+    CHECK(std::memcmp(snapshot.payload.data, old_body.data(), old_body.size()) == 0);
+    ++old_copies;
+  });
+  CHECK(old_copies == 1);
+}
+
+void test_failed_second_commit_keeps_reinjected_durable_work() {
+  MemoryPowerStorage storage;
+  MessageId pending{};
+  {
+    PowerWorld w(storage);
+    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    pending = queue_pending(w, 99, true, 20000);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  }
+  {
+    PowerWorld w(storage);
+    CHECK_OK(w.coordinator.begin(ResetCause::DeepSleepWake,
+                                 ElapsedInterval{0, 0, true}, w.now));
+    CHECK(pending_results_for(w.events, pending, StatusCode::Ok) == 1);
+    CHECK(!sleep_verdict_terminal(w.node.delivery(pending).state));
+    storage.fail_after_writes(1);
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+    CHECK(w.pump_until(PowerState::Running));
+  }
+  PowerWorld recovered(storage);
+  CHECK_OK(recovered.coordinator.begin(ResetCause::OtherReset,
+                                       ElapsedInterval{0, 0, true}, recovered.now));
+  CHECK(pending_results_for(recovered.events, pending, StatusCode::Ok) == 1);
+}
+
 void test_retry_policy_matrix_after_outside_abort() {
   // Save settles two records; the READY attempt is aborted from OUTSIDE
   // (carry 2 kept, nothing live). A fresh non-durable delivery is queued
@@ -5177,6 +5317,10 @@ int main() {
   test_enter_notify_busy_matrix();
   test_enter_stage_faults_abort_cleanly();
   test_phase1_faults_keep_work_live();
+  test_failed_second_commit_keeps_unnotified_expired_carry();
+  test_failed_second_refresh_keeps_unnotified_expired_carry();
+  test_failed_second_commit_keeps_old_same_id_carry();
+  test_failed_second_commit_keeps_reinjected_durable_work();
   test_retry_policy_matrix_after_outside_abort();
   test_carry_overflow_keeps_carry_fails_fresh();
   test_carry_settlement_callback_busy_restores_on_new_node();

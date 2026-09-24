@@ -587,7 +587,7 @@ class MeshNode {
 
   // Synchronous admission attempts; never buffered by PowerCoordinator.
   // While the sleep drain mask is active they return NODE_DRAINING,
-  // including after a callback queued sleep_abort(). Retry from
+  // including during callbacks that Busy-reject sleep_abort(). Retry from
   // application-owned storage after RUNNING is observed. Refused attempts
   // invalidate an already-issued sleep ticket.
   Status send(NodeId destination, ByteView payload, const SendOptions& options,

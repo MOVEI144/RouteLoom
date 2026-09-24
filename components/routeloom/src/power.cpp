@@ -357,14 +357,19 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
     PowerImage refresh = image_;
     for (auto& record : refresh.pending) record.used = false;
     for (std::size_t i = 0; i < carry_.size(); ++i) {
-      if (!carry_[i].used || expired_mask[i]) continue;
+      if (!carry_[i].used) continue;
       refresh.pending[i] = carry_[i];
       refresh.pending[i].stored_remaining_ms = refreshed[i];
     }
-    // Write the refreshed image to BOTH slots: if a power cut tears one
-    // commit, the other still carries the corrected lifetimes rather than an
-    // older image whose longer budgets would resurrect expired work.
+    // The first slot retains every carried record, including those whose
+    // lifetime reached zero. If the final image does not land, reboot still
+    // reports their expiry.
     for (std::uint8_t copy = 0; copy < kPowerImageSlots; ++copy) {
+      if (copy != 0) {
+        for (std::size_t i = 0; i < carry_.size(); ++i) {
+          if (expired_mask[i]) refresh.pending[i].used = false;
+        }
+      }
       if (!next_image_sequence(refresh.sequence)) {
         ticket_ = SleepTicket{};
         sleep_image_armed_ = false;
@@ -535,7 +540,7 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
   // Phase 1: plan and commit WITHOUT changing delivery state or notifying.
   // A failure here aborts with live work, carry set and holds untouched.
   plan_sleep_image(now_ms);
-  const auto status = persist_image();
+  const auto status = persist_image(now_ms);
   if (!status) {
     abort_to_running(status.detail);
     return;
@@ -751,7 +756,7 @@ bool PowerCoordinator::sleep_books_consistent() const noexcept {
   return true;
 }
 
-Status PowerCoordinator::persist_image() noexcept {
+Status PowerCoordinator::persist_image(const MonotonicMs now_ms) noexcept {
   // Durable commit only: capture the platform cache and write the image.
   // Radio quiesce, the ticket and the READY_TO_SLEEP transition belong to
   // the settlement chain AFTER the dispositions — issuing them here would
@@ -766,21 +771,51 @@ Status PowerCoordinator::persist_image() noexcept {
   image_.config_revision = node_.config_revision();
   auto status = port_.capture_cache(image_);
   if (!status) return status;
-  // An older slot may still hold pending records: the untouched slot keeps
-  // the previous image, whose copies carry longer, pre-decay budgets. Write
-  // both slots so a torn commit cannot resurrect them.
+  // An older slot may still hold pending records. When two writes are needed,
+  // the first keeps every carried record (with its current remaining life):
+  // if the final image does not land, reboot must not lose a carry whose
+  // expiry or same-id replacement phase 2 never reported. The final
+  // candidate lands only in the second slot, after the retained set is
+  // safely staged.
   const bool dual_write = disk_pending_possible_;
-  status = commit_image(image_);
-  if (!status) return status;
   if (dual_write) {
+    PowerImage staged = image_;
+    for (auto& record : staged.pending) record = PendingDeliveryRecord{};
+    for (std::size_t i = 0; i < carry_.size(); ++i) {
+      if (!carry_[i].used) continue;
+      staged.pending[i] = carry_[i];
+      staged.pending[i].stored_remaining_ms =
+          carry_[i].expires_at_ms > now_ms
+              ? static_cast<std::uint32_t>(carry_[i].expires_at_ms - now_ms)
+              : 0;
+    }
+    // Keep fresh candidate records in the room left by carry. A record
+    // successfully re-injected on wake is live rather than carried, but its
+    // durable copy must not disappear if the final write fails.
+    for (const auto& candidate : image_.pending) {
+      if (!candidate.used) continue;
+      bool present = false;
+      for (const auto& record : staged.pending) {
+        present = present ||
+                  (record.used && record.original_id == candidate.original_id);
+      }
+      if (present) continue;
+      for (auto& record : staged.pending) {
+        if (record.used) continue;
+        record = candidate;
+        break;
+      }
+    }
+    status = commit_image(staged);
+    if (!status) return status;
     if (!next_image_sequence(image_.sequence)) {
       disk_pending_possible_ = true;
       return Status::error(StatusCode::CounterExhausted,
                            "SLEEP_SEQUENCE_EXHAUSTED");
     }
-    status = commit_image(image_);
-    if (!status) return status;
   }
+  status = commit_image(image_);
+  if (!status) return status;
   disk_pending_possible_ = has_pending(image_);
   return Status::success();
 }

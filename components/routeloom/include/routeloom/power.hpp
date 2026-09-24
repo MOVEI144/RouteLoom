@@ -295,7 +295,7 @@ class PowerCoordinator {
   // Pre-ticket books check: no un-notified carry plans, every carried id in
   // the candidate, every fresh candidate record claimed.
   bool sleep_books_consistent() const noexcept;
-  Status persist_image() noexcept;
+  Status persist_image(MonotonicMs now_ms) noexcept;
   // Runs one sleep entry for an already-accepted ticket copy.
   Status run_enter(const SleepTicket& ticket, MonotonicMs now_ms) noexcept;
   // Shared entry validator for the receipt, execution-start, post-notify and
