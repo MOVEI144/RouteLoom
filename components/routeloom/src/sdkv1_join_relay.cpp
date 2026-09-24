@@ -1042,6 +1042,19 @@ void JoinRelayGateway::free_slot(Slot& slot) noexcept {
   slot.hops = 0;
 }
 
+void JoinRelayGateway::abort_slot(Slot& slot, const RelayAbortReason reason) noexcept {
+  const NodeId proxy = slot.proxy;
+  const std::uint32_t relay_id = slot.relay_id;
+  // The callback may re-enter the gateway (a host_down re-opens this
+  // relay, possibly in this very slot; a host_abort clears it): tear
+  // down only while the slot still holds the occupant it reported.
+  const std::uint32_t occupant = slot.object.generation();
+  if (sink_ != nullptr) (void)sink_->relay_abort(proxy, relay_id, reason);
+  if (slot.object.generation() != occupant) return;
+  forget(proxy, relay_id);
+  free_slot(slot);
+}
+
 void JoinRelayGateway::remember(const NodeId proxy, const RelayHeader& header,
                                 const MonotonicMs now_ms) noexcept {
   Recent* target = nullptr;
@@ -1105,6 +1118,8 @@ void JoinRelayGateway::deliver_up(const NodeId proxy, const std::uint8_t hops,
   const RelayHeader& h = object.header;
   if (h.state == RelayState::Abort) {
     ++stats_.proxy_aborts;
+    // Forget before the call: the relay is already over, so a reentrant
+    // host_abort is NotFound and a reentrant host_down starts fresh.
     forget(proxy, h.relay_id);
     if (sink_ != nullptr) (void)sink_->relay_abort(proxy, h.relay_id, RelayAbortReason::ProxyAborted);
     return;
@@ -1183,10 +1198,14 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
         slot->object.release_assembled();
         return;
       }
+      // The sink callback inside deliver_up may re-enter the gateway (a
+      // host_down for this relay installs a Sending object, possibly in
+      // this very slot): release only the object that was delivered.
+      const std::uint32_t delivered = slot->object.generation();
       deliver_up(from, hops, object, bytes, now_ms);
       // Keep only the completed key (Repeat of a lost receipt); the slot is
       // reclaimable from now on.
-      slot->object.release_assembled();
+      slot->object.release_assembled_if(delivered);
       return;
     }
     case FrameType::BootstrapReply: {
@@ -1325,11 +1344,7 @@ void JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
     if (!slot.active) continue;
     if (slot.object.expire(now_ms, config_.assembly_timeout_ms)) {
       ++stats_.expired;
-      if (sink_ != nullptr) {
-        (void)sink_->relay_abort(slot.proxy, slot.relay_id, RelayAbortReason::GatewayExpired);
-      }
-      forget(slot.proxy, slot.relay_id);
-      free_slot(slot);
+      abort_slot(slot, RelayAbortReason::GatewayExpired);
       continue;
     }
     if (!slot.down || slot.object.mode() != JoinObjectSlot::Mode::Sending ||
@@ -1338,11 +1353,7 @@ void JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
     }
     if (slot.object.sends() >= config_.max_sends) {
       ++stats_.delivery_failed;
-      if (sink_ != nullptr) {
-        (void)sink_->relay_abort(slot.proxy, slot.relay_id, RelayAbortReason::DeliveryFailed);
-      }
-      forget(slot.proxy, slot.relay_id);
-      free_slot(slot);
+      abort_slot(slot, RelayAbortReason::DeliveryFailed);
       continue;
     }
     ++stats_.retransmissions;

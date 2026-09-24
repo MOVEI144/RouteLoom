@@ -361,8 +361,17 @@ class JoinRelayHostSink {
  public:
   virtual ~JoinRelayHostSink() = default;
   // A complete up relay object (RelayHeader dir=up + message) from `proxy`,
-  // `hops` mesh hops away. The sink copies it before returning.
+  // `hops` mesh hops away. `object` is valid only during the call and may
+  // alias a gateway slot, so copy it before re-entering the gateway.
+  // host_down()/host_abort() from inside the callback are supported:
+  // cleanup afterwards releases only the delivered object, never the
+  // state a reentrant call installed.
   virtual Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept = 0;
+  // The relay ended at the gateway. Re-entering the gateway
+  // (host_down()/host_abort()) is supported: for ProxyAborted the relay
+  // is forgotten before the call, for the other reasons its recent entry
+  // and slot are released only while the callback left them untouched —
+  // a new operation for the same (proxy, relay_id) survives.
   virtual Status relay_abort(NodeId proxy, std::uint32_t relay_id,
                              RelayAbortReason reason) noexcept = 0;
 };
@@ -441,6 +450,9 @@ class JoinRelayGateway {
   Slot* find(NodeId proxy, std::uint32_t relay_id) noexcept;
   Slot* allocate(NodeId proxy, std::uint32_t relay_id) noexcept;
   void free_slot(Slot& slot) noexcept;
+  // relay_abort + the slot's tear-down; the tear-down is skipped when the
+  // callback re-entered the gateway and the occupant it named is gone.
+  void abort_slot(Slot& slot, RelayAbortReason reason) noexcept;
   void remember(NodeId proxy, const RelayHeader& header, MonotonicMs now_ms) noexcept;
   void forget(NodeId proxy, std::uint32_t relay_id) noexcept;
   void deliver_up(NodeId proxy, std::uint8_t hops, const RelayObject& object, ByteView bytes,
