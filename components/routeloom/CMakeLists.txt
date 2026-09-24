@@ -46,6 +46,8 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_handshake.cpp
   src/sdkv1_session_wire.cpp
   src/sdkv1_store.cpp
+  src/sdkv1_group_keys.cpp
+  src/sdkv1_group_security.cpp
   src/session_bank.cpp
   src/status.cpp
   src/telemetry.cpp

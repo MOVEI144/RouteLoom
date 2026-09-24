@@ -1,0 +1,252 @@
+#include "routeloom/sdkv1_group_security.hpp"
+
+#include <cstring>
+
+#include "routeloom/group.hpp"
+#include "routeloom/secure_clear.hpp"
+
+namespace routeloom::sdkv1 {
+namespace {
+bool group_scope(const SecurityScope scope) noexcept {
+  return scope == SecurityScope::Group || scope == SecurityScope::GroupLink;
+}
+std::uint32_t gk_epoch(const SecurityContext& c) noexcept {
+  return c.scope == SecurityScope::Group ? c.epoch : c.group_epoch;
+}
+std::uint32_t sender_boot(const SecurityContext& c) noexcept {
+  return c.scope == SecurityScope::Group ? c.sender_boot : c.epoch;
+}
+}  // namespace
+
+GroupSecurityProvider::~GroupSecurityProvider() {
+  secure_clear(link_rx_.data(), sizeof(link_rx_));
+  secure_clear(end_rx_.data(), sizeof(end_rx_));
+  secure_clear(staging_);
+}
+
+Status GroupSecurityProvider::tx_epoch(const SecurityScope scope, const NodeId peer,
+                                        std::uint32_t& epoch) noexcept {
+  if (!group_scope(scope)) return pairwise_.tx_epoch(scope, peer, epoch);
+  if (in_call_) return Status::error(StatusCode::Busy, "group provider re-entry");
+  if (scope != SecurityScope::Group || peer != kBroadcastNodeId || !keys_.tx_ready())
+    return Status::error(StatusCode::AuthRequired, "group TX unavailable");
+  epoch = keys_.current();
+  return Status::success();
+}
+
+ContextState GroupSecurityProvider::context_state(const SecurityScope scope,
+                                                    const NodeId peer) const noexcept {
+  if (!group_scope(scope)) return pairwise_.context_state(scope, peer);
+  return keys_.tx_ready() ? ContextState::Ready : ContextState::None;
+}
+
+Status GroupSecurityProvider::tx_group_link_epochs(std::uint32_t& boot,
+                                                     std::uint32_t& g) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "group provider re-entry");
+  if (!keys_.tx_ready()) return Status::error(StatusCode::AuthRequired, "group TX unavailable");
+  boot = keys_.boot();
+  g = keys_.current();
+  return Status::success();
+}
+
+bool GroupSecurityProvider::allowed_sender(const SecurityContext& c) const noexcept {
+  if (c.scope != SecurityScope::Group) return true;
+  const SiteRecord& site = keys_.store_.site();
+  for (std::size_t i = 0; i < site.gateway_count; ++i) {
+    if (site.gateways[i] == c.sender) return true;
+  }
+  return false;
+}
+
+Status GroupSecurityProvider::material(const SecurityContext& c, keys::TrafficKey& out,
+                                        const bool transmit) noexcept {
+  if (c.network == 0 || c.network != static_cast<std::uint32_t>(keys_.network()) ||
+      c.sender == kInvalidNodeId || c.sender == kBroadcastNodeId ||
+      c.receiver != kBroadcastNodeId || sender_boot(c) == 0 || gk_epoch(c) == 0 ||
+      (transmit && (c.sender != self_ || !keys_.tx_ready() ||
+                    gk_epoch(c) != keys_.current() || sender_boot(c) != keys_.boot()))) {
+    return Status::error(StatusCode::AuthorizationFailed, "group context binding");
+  }
+  if (c.scope == SecurityScope::Group &&
+      (!is_group_address(c.group_id) || c.group_epoch != 0 || !allowed_sender(c))) {
+    return Status::error(StatusCode::AuthorizationFailed, "group end binding");
+  }
+  if (c.scope == SecurityScope::GroupLink && (c.sender_boot || c.group_id)) {
+    return Status::error(StatusCode::AuthorizationFailed, "group link binding");
+  }
+  ScopeDigest prk{};
+  Status status = keys_.derive(gk_epoch(c), prk);
+  if (status) {
+    status = c.scope == SecurityScope::Group
+                 ? keys::group_end_key(prk, c.epoch, c.group_id, c.sender,
+                                       c.sender_boot, out)
+                 : keys::group_bcast_key(prk, c.group_epoch, c.sender, c.epoch, out);
+  }
+  secure_clear(prk);
+  return status;
+}
+
+GroupReplaySender* GroupSecurityProvider::sender(const SecurityContext& c) noexcept {
+  if (c.scope == SecurityScope::Group) {
+    for (auto& s : end_rx_) if (s.sender == c.sender) return &s;
+  } else {
+    for (auto& s : link_rx_) if (s.sender == c.sender) return &s;
+  }
+  return nullptr;
+}
+
+GroupReplaySender* GroupSecurityProvider::free_sender(const SecurityScope scope) noexcept {
+  if (scope == SecurityScope::Group) {
+    for (auto& s : end_rx_) if (s.sender == 0) return &s;
+  } else {
+    for (auto& s : link_rx_) if (s.sender == 0) return &s;
+  }
+  return nullptr;  // never evict an authenticated sender: its boot floor matters
+}
+
+bool GroupSecurityProvider::replay_ok(const GroupReplaySender& s, const std::uint32_t epoch,
+                                       const std::uint32_t boot,
+                                       const std::uint64_t counter) noexcept {
+  if (boot < s.boot) return false;
+  if (boot > s.boot) return true;
+  for (const auto& bank : s.banks) {
+    if (bank.epoch != epoch) continue;
+    if (counter > bank.max) return true;
+    const std::uint64_t distance = bank.max - counter;
+    return distance < 64 && (bank.bitmap & (std::uint64_t{1} << distance)) == 0;
+  }
+  return true;
+}
+
+void GroupSecurityProvider::replay_commit(GroupReplaySender& s, const NodeId peer,
+                                          const std::uint32_t epoch, const std::uint32_t boot,
+                                          const std::uint64_t counter) noexcept {
+  if (boot > s.boot || s.sender == 0) {
+    s.banks[0] = {};
+    s.banks[1] = {};
+    s.boot = boot;
+  }
+  s.sender = peer;
+  GroupReplayBank* bank = nullptr;
+  for (auto& b : s.banks) if (b.epoch == epoch) bank = &b;
+  if (bank == nullptr) {
+    // Never let a delayed retired epoch evict the current bank. Both live
+    // epochs fit; a retired bank is the only replacement candidate.
+    bank = !keys_.accepts(s.banks[0].epoch) ? &s.banks[0] : &s.banks[1];
+    *bank = {};
+    bank->epoch = epoch;
+  }
+  if (counter > bank->max) {
+    const std::uint64_t delta = counter - bank->max;
+    bank->bitmap = (delta >= 64 ? 0 : bank->bitmap << delta) | 1;
+    bank->max = counter;
+  } else {
+    bank->bitmap |= std::uint64_t{1} << (bank->max - counter);
+  }
+}
+
+Status GroupSecurityProvider::next_counter(const SecurityContext& c,
+                                            std::uint64_t& counter) noexcept {
+  if (!group_scope(c.scope)) return pairwise_.next_counter(c, counter);
+  if (in_call_) return Status::error(StatusCode::Busy, "group provider re-entry");
+  keys::TrafficKey material_key{};
+  Status status = material(c, material_key, true);
+  keys::clear(material_key);
+  if (!status) return status;
+  auto& next = c.scope == SecurityScope::Group ? end_tx_ : link_tx_;
+  if (next > kMaxCryptoCounter) return Status::error(StatusCode::RecoveryRequired, "group counter exhausted");
+  counter = next++;  // consumed even if seal/transport later fails
+  return Status::success();
+}
+
+Status GroupSecurityProvider::seal(const SecurityContext& c, const std::uint64_t counter,
+                                   const ByteView aad, const ByteView plaintext,
+                                   const MutableByteView ciphertext,
+                                   std::array<std::uint8_t, kAeadTagSize>& tag) noexcept {
+  if (!group_scope(c.scope)) return pairwise_.seal(c, counter, aad, plaintext, ciphertext, tag);
+  if (in_call_) return Status::error(StatusCode::Busy, "group provider re-entry");
+  const bool end = c.scope == SecurityScope::Group;
+  if (counter >= (end ? end_tx_ : link_tx_) ||
+      (end ? end_has_sealed_ && counter <= end_sealed_ :
+             link_has_sealed_ && counter <= link_sealed_) ||
+      counter > kMaxCryptoCounter || ciphertext.size != plaintext.size ||
+      plaintext.size + kAeadTagSize > staging_.size() || !aead_.seal) {
+    return Status::error(StatusCode::InvalidArgument, "group seal bounds");
+  }
+  in_call_ = true;
+  // A failed seal also burns the counter: no second plaintext can use the
+  // same key/nonce even if the backend wrote partial ciphertext.
+  if (end) { end_sealed_ = counter; end_has_sealed_ = true; }
+  else { link_sealed_ = counter; link_has_sealed_ = true; }
+  keys::TrafficKey key{};
+  keys::AeadNonce nonce{};
+  Status status = material(c, key, true);
+  if (status) status = keys::aead_nonce(key.iv, counter, nonce);
+  if (status && !aead_.seal(aead_.ctx, key.key.data(), nonce.data(), aad, plaintext,
+                            staging_.data())) {
+    status = Status::error(StatusCode::IntegrityError, "group seal failed");
+  }
+  if (status) {
+    std::memcpy(ciphertext.data, staging_.data(), plaintext.size);
+    std::memcpy(tag.data(), staging_.data() + plaintext.size, tag.size());
+  }
+  secure_clear(staging_);
+  keys::clear(key);
+  secure_clear(nonce);
+  in_call_ = false;
+  return status;
+}
+
+Status GroupSecurityProvider::open(const SecurityContext& c, const std::uint64_t counter,
+                                   const ByteView aad, const ByteView ciphertext,
+                                   const std::array<std::uint8_t, kAeadTagSize>& tag,
+                                   const MutableByteView plaintext) noexcept {
+  if (!group_scope(c.scope)) return pairwise_.open(c, counter, aad, ciphertext, tag, plaintext);
+  if (in_call_) return Status::error(StatusCode::Busy, "group provider re-entry");
+  if (counter > kMaxCryptoCounter || plaintext.size != ciphertext.size ||
+      ciphertext.size + kAeadTagSize > staging_.size() || !aead_.open) {
+    return Status::error(StatusCode::ProtocolError, "group open bounds");
+  }
+  in_call_ = true;
+  keys::TrafficKey key{};
+  keys::AeadNonce nonce{};
+  Status status = material(c, key, false);
+  GroupReplaySender* entry = sender(c);
+  if (status && entry && !replay_ok(*entry, gk_epoch(c), sender_boot(c), counter)) {
+    status = Status::error(StatusCode::Conflict, "group replay");
+  }
+  if (status && !entry && !(entry = free_sender(c.scope))) {
+    status = Status::error(StatusCode::NoCapacity, "group sender table full");
+  }
+  if (status) status = keys::aead_nonce(key.iv, counter, nonce);
+  if (status) {
+    std::memcpy(staging_.data(), ciphertext.data, ciphertext.size);
+    std::memcpy(staging_.data() + ciphertext.size, tag.data(), tag.size());
+    if (!aead_.open(aead_.ctx, key.key.data(), nonce.data(), aad,
+                    ByteView{staging_.data(), ciphertext.size + tag.size()}, staging_.data())) {
+      status = Status::error(StatusCode::AuthorizationFailed, "group tag invalid");
+    }
+  }
+  const bool next_end = status && c.scope == SecurityScope::Group &&
+                        gk_epoch(c) == keys_.store_.site().gk_epoch_next;
+  if (status && !next_end) {
+    std::memcpy(plaintext.data, staging_.data(), ciphertext.size);
+    replay_commit(*entry, c.sender, gk_epoch(c), sender_boot(c), counter);
+  }
+  secure_clear(staging_);
+  keys::clear(key);
+  secure_clear(nonce);
+  in_call_ = false;
+  // Do not deliver, replay-commit or forward a next-GK frame before the
+  // Owner's next Tick durably promotes. The sender's repair can resend it.
+  if (next_end) {
+    GroupKeyState::Input event{};
+    event.op = GroupKeyState::Op::AuthenticatedNext;
+    event.epoch = gk_epoch(c);
+    status = keys_.advance(event, 0);
+    return status ? Status::error(StatusCode::Busy, "group promotion pending") : status;
+  }
+  return status;
+}
+
+}  // namespace routeloom::sdkv1

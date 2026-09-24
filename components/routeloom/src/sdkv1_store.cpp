@@ -154,6 +154,7 @@ Status SealedSlotPair::initialize() noexcept {
   has_active_ = false;
   quarantined_ = false;
   uncertain_ = false;
+  stale_sibling_ = false;
   active_seq_ = 0;
   seq_floor_ = 0;
   active_slot_ = 0;
@@ -213,6 +214,7 @@ Status SealedSlotPair::initialize() noexcept {
   }
   if (valid == 2) {
     if (format_.sequenced && seq[0] != seq[1]) {
+      stale_sibling_ = true;
       adopt(seq[1] > seq[0] ? 1 : 0);
       return Status::success();
     }
@@ -356,6 +358,7 @@ Status SealedSlotPair::commit_twin_prepared(const std::size_t used_len) noexcept
   has_active_ = true;
   quarantined_ = false;
   uncertain_ = false;
+  stale_sibling_ = false;
   return Status::success();
 }
 
@@ -420,6 +423,7 @@ void SiteStore::wipe_scratch() noexcept {
 
 Status SiteStore::initialize() noexcept {
   active_load_failed_ = false;
+  scrub_needed_ = false;
   const Status status = pair_.initialize();
   site_ = SiteRecord{};
   if (pair_.has_active()) {
@@ -433,6 +437,9 @@ Status SiteStore::initialize() noexcept {
       return loaded;
     }
   }
+  // A completed promotion has no next key. A newer active-only record
+  // beside a stale sibling may be a promotion interrupted before scrub.
+  scrub_needed_ = pair_.stale_sibling() && has_site() && site_.gk_epoch_next == 0;
   wipe_scratch();
   return status;
 }
@@ -493,6 +500,18 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
     if (new_epoch < old_epoch || (new_epoch == old_epoch && record.network != current.network)) {
       return Status::error(StatusCode::Conflict, "site epoch regressed");
     }
+    const std::uint32_t old_high = current.gk_epoch_next != 0 ? current.gk_epoch_next
+                                                                  : current.gk_epoch_current;
+    const std::uint32_t new_high = record.gk_epoch_next != 0 ? record.gk_epoch_next
+                                                                : record.gk_epoch_current;
+    if (record.network == current.network &&
+        (new_high < old_high ||
+         (record.gk_epoch_current == current.gk_epoch_current &&
+          record.gk_current != current.gk_current) ||
+         (record.gk_epoch_next != 0 && record.gk_epoch_next == current.gk_epoch_next &&
+          record.gk_next != current.gk_next))) {
+      return Status::error(StatusCode::Conflict, "group key floor or identity changed");
+    }
     if (record.assignment_generation < current.assignment_generation ||
         record.gk_epoch_current < current.gk_epoch_current ||
         record.rs_epoch_floor < current.rs_epoch_floor ||
@@ -507,6 +526,71 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
   if (!status) return status;
   site_ = record;
   return Status::success();
+}
+
+Status SiteStore::stage_group_key(const std::uint32_t epoch,
+                                  const std::array<std::uint8_t, 32>& key) noexcept {
+  if (!has_site() || scrub_needed_ || pair_.uncertain() || pair_.quarantined()) {
+    return Status::error(StatusCode::RecoveryRequired, "group store not ready");
+  }
+  if (epoch == site_.gk_epoch_current && key == site_.gk_current) return Status::success();
+  if (epoch == site_.gk_epoch_next && key == site_.gk_next) return Status::success();
+  const std::uint32_t high = site_.gk_epoch_next ? site_.gk_epoch_next : site_.gk_epoch_current;
+  if (epoch <= high) return Status::error(StatusCode::Conflict, "group epoch not new");
+  SiteRecord candidate = site_;
+  candidate.gk_epoch_next = epoch;
+  candidate.gk_next = key;
+  const Status status = commit(candidate);
+  secure_clear(&candidate, sizeof(candidate));
+  return status;
+}
+
+Status SiteStore::activate_group_key(const std::uint32_t epoch,
+                                     const std::uint32_t boot_witness) noexcept {
+  if (!has_site() || scrub_needed_ || pair_.uncertain() || pair_.quarantined()) {
+    return Status::error(StatusCode::RecoveryRequired, "group store not ready");
+  }
+  if (epoch == site_.gk_epoch_current && site_.gk_epoch_next == 0 &&
+      boot_witness <= site_.boot_witness) return Status::success();
+  if (epoch != site_.gk_epoch_next || boot_witness < site_.boot_witness) {
+    return Status::error(StatusCode::Conflict, "group activation mismatch");
+  }
+  SiteRecord candidate = site_;
+  candidate.gk_epoch_current = epoch;
+  candidate.gk_current = candidate.gk_next;
+  candidate.gk_epoch_next = 0;
+  secure_clear(candidate.gk_next);
+  candidate.boot_witness = boot_witness;
+  std::size_t length = 0;
+  Status status = encode(candidate, length);
+  if (status) status = pair_.commit_twin_prepared(length);
+  wipe_scratch();
+  if (status) {
+    site_ = candidate;
+    scrub_needed_ = false;
+  } else {
+    // The first twin write may already have committed. No group use until
+    // initialize() re-reads both slots and finish_group_scrub() completes.
+    scrub_needed_ = true;
+  }
+  secure_clear(&candidate, sizeof(candidate));
+  return status;
+}
+
+Status SiteStore::finish_group_scrub() noexcept {
+  if (!scrub_needed_) return Status::success();
+  const SiteStoreHealth h = health();
+  if (!h.has_site || h.quarantined || h.uncertain || h.unsupported_mask ||
+      h.read_error_mask || h.active_load_failed || !pair_.stale_sibling() ||
+      site_.gk_epoch_next != 0 || h.seq_floor != commit_seq()) {
+    return Status::error(StatusCode::RecoveryRequired, "group scrub floor unproven");
+  }
+  std::size_t length = 0;
+  Status status = encode(site_, length);
+  if (status) status = pair_.commit_twin_prepared(length);
+  wipe_scratch();
+  if (status) scrub_needed_ = false;
+  return status;
 }
 
 Status SiteStore::clear() noexcept {

@@ -105,6 +105,7 @@ class SealedSlotPair {
   // committed record (including a CRC-failed one) proved this boot.
   std::uint32_t active_seq() const noexcept { return has_active_ ? active_seq_ : 0; }
   std::uint32_t seq_floor() const noexcept { return seq_floor_; }
+  bool stale_sibling() const noexcept { return stale_sibling_; }
 
  private:
   enum class SlotContent : std::uint8_t { Empty, Pending, Corrupt, Unsupported, Valid };
@@ -127,6 +128,7 @@ class SealedSlotPair {
   bool initialized_{false};
   bool quarantined_{false};
   bool uncertain_{false};
+  bool stale_sibling_{false};
 };
 
 const SealedRecordFormat& identity_record_format() noexcept;
@@ -185,6 +187,12 @@ class SiteStore {
   // assignment_generation, gk_epoch_current, rs_epoch_floor or
   // boot_witness (Conflict otherwise).
   Status commit(const SiteRecord& record) noexcept;
+  // GK transitions are the only way to replace GK on an assigned site.
+  Status stage_group_key(std::uint32_t epoch, const std::array<std::uint8_t, 32>& key) noexcept;
+  Status activate_group_key(std::uint32_t epoch, std::uint32_t boot_witness) noexcept;
+  // After a cut between twin writes, the sibling can still hold a retired GK.
+  bool group_scrub_needed() const noexcept { return scrub_needed_; }
+  Status finish_group_scrub() noexcept;
   // Removal (04 §6.4): write the cleared tombstone to both slots so no
   // GK/DAMS copy survives. Allowed in any initialized state.
   Status clear() noexcept;
@@ -209,6 +217,7 @@ class SiteStore {
   SealedSlotPair pair_;
   SiteRecord site_{};
   bool active_load_failed_{false};
+  bool scrub_needed_{false};
 };
 
 // --- RRS1: revocation set (A/B alternating) -----------------------------------

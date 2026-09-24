@@ -1,6 +1,6 @@
 # 03 — 鍵階層・Wire v2 epochとの対応・SecurityProviderの変更
 
-用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
+用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。機器GKの保存・GroupEnd/Member scopeのportable部品は `sdkv1_group_keys` / `sdkv1_group_security` に実装したが、mesh Ownerとの結線・Host配布は別PRであり本番出荷認定ではない。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
 
 ## 1. 鍵の木
 
@@ -180,7 +180,7 @@ Site Authorityの状態機械：
 | ACTIVATING | 全ack、または期限（定期60秒／削除時30秒） | gatewayにg+1での送信開始を指示（USB）。gatewayのbroadcastがg+1になる |
 | STABLE(g+1) | — | 未ackのmemberは次の接触でpullする |
 
-member側：g+1を受けたらRLS1の`gk_next`へcommit（STAGED）。**有効なg+1のframeを初めて受けた時**、または`GroupKeyActivate`を受けた時に送信をg+1へ切替え（暗黙activation）、gの受信を60秒（削除起因は10秒）だけ許してから消す。`end_epoch`が自分の知らない新しいgのframeを受けたら、authority channelで`GroupKeyPull`（1分に1回まで）。GK更新のNVS書込みは1回の更新あたりRLS1 commit 2回。
+member側：検証済み更新をRLS1の`gk_next`へcommit/readbackしてからACK可能（STAGED）。**有効なg+1のGroupEnd frameを初めて受けた時**はpromotionを予約し、その受信呼出しでは業務配送しない。Ownerの次のTickで両slotをtwin commit/readbackしてから送信を切替える（暗黙activation）。当該frameは再送/repairで再受信する。認証済み`GroupKeyActivate`でも同じtwin commitを行う。gの受信は定期60秒、削除起因10秒までで、cold bootではpreviousを復活させない。`end_epoch`が自分の知らない新しいgのframeを受けたら、authority channelで`GroupKeyPull`（1分に1回まで）。GK更新のNVS書込みは1回の更新あたりRLS1 commit 2回。
 
 ### 6.4 削除時のrekey
 

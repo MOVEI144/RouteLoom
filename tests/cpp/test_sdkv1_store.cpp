@@ -15,7 +15,11 @@
 #include <cstdio>
 #include <functional>
 
+#include "routeloom/group.hpp"
 #include "routeloom/key_schedule.hpp"
+#include "routeloom/secure_clear.hpp"
+#include "routeloom/sdkv1_group_keys.hpp"
+#include "routeloom/sdkv1_group_security.hpp"
 #include "routeloom/sdkv1_membership.hpp"
 
 #include "test_sdkv1.hpp"
@@ -312,6 +316,251 @@ void site_sweep(const char* label, const std::size_t writes,
       }
     }
   }
+}
+
+void test_group_key_durable_rotation() {
+  FaultyRecordStorage storage(kSiteSlotBytes);
+  SiteStore store(storage);
+  CHECK_OK(store.initialize());
+  const SiteRecord base = site_record();
+  CHECK_OK(store.commit(base));
+  keys::Secret next{};
+  next.fill(0xA5);
+  CHECK_OK(store.stage_group_key(base.gk_epoch_current + 2, next));
+  CHECK(store.site().gk_epoch_next == base.gk_epoch_current + 2);
+  CHECK(store.stage_group_key(base.gk_epoch_current + 2, next).ok());
+  next[0] ^= 1;
+  CHECK(store.stage_group_key(base.gk_epoch_current + 2, next).code == StatusCode::Conflict);
+  CHECK(store.stage_group_key(base.gk_epoch_current + 1, next).code == StatusCode::Conflict);
+  next[0] ^= 1;
+  CHECK_OK(store.activate_group_key(base.gk_epoch_current + 2, base.boot_witness));
+  CHECK(storage.slot(0) == storage.slot(1));  // no retired GK in either logical slot
+  CHECK(store.site().gk_epoch_next == 0);
+  SiteStore reboot(storage);
+  CHECK_OK(reboot.initialize());
+  CHECK(!reboot.group_scrub_needed());
+  SiteRecord forged = reboot.site();
+  forged.gk_current[0] ^= 1;
+  CHECK(reboot.commit(forged).code == StatusCode::Conflict);
+  forged = reboot.site();
+  forged.gk_epoch_next = base.gk_epoch_current + 1;
+  forged.gk_next = next;
+  CHECK(reboot.commit(forged).code == StatusCode::Conflict);
+}
+
+void test_group_state_and_crypto() {
+  FaultyRecordStorage storage(kSiteSlotBytes);
+  SiteStore store(storage);
+  CHECK_OK(store.initialize());
+  const SiteRecord site = site_record();
+  CHECK_OK(store.commit(site));
+  sdkv1::GroupKeyState missing_boot(store);
+  sdkv1::GroupKeyState::Input no_boot{};
+  no_boot.op = sdkv1::GroupKeyState::Op::Start;
+  no_boot.boot = 0;
+  CHECK_OK(missing_boot.advance(no_boot, 99));
+  CHECK(!missing_boot.tx_ready());  // lost rlboot cannot be guessed from witness
+  sdkv1::GroupKeyState state(store);
+  sdkv1::GroupKeyState::Input input{};
+  input.op = sdkv1::GroupKeyState::Op::Start;
+  input.boot = site.boot_witness + 1;
+  CHECK_OK(state.advance(input, 100));
+  CHECK(state.tx_ready());
+  const ScopeRef scope{1};
+  sdkv1::GkMemberScopeProvider discovery(state, scope);
+  std::uint32_t generation = 0;
+  CHECK(discovery.current_generation(scope, generation));
+  CHECK(generation == site.gk_epoch_current);
+  ScopeTag old_tag{}, next_tag{};
+  const std::uint8_t message[] = {1, 2, 3};
+  CHECK_OK(discovery.scope_tag(scope, generation, ByteView{message, 3}, old_tag));
+  input = {};
+  input.op = sdkv1::GroupKeyState::Op::Stage;
+  input.epoch = generation + 2;  // missed an entire rotation: skip is legal
+  input.key.fill(0xA5);
+  input.generation = site.assignment_generation;
+  input.overlap_s = 10;
+  CHECK_OK(state.advance(input, 101));
+  CHECK(state.current() == generation);
+  CHECK(discovery.accepted_generation(scope, generation + 2, 102));
+  CHECK_OK(discovery.scope_tag(scope, generation + 2, ByteView{message, 3}, next_tag));
+  CHECK(old_tag != next_tag);
+  CHECK(state.current() == generation);  // scope verification cannot activate
+  input = {};
+  input.op = sdkv1::GroupKeyState::Op::AuthenticatedNext;
+  input.epoch = generation + 2;
+  const auto writes = storage.write_calls;
+  CHECK_OK(state.advance(input, 105));
+  CHECK(storage.write_calls == writes);  // AEAD callback cannot write flash
+  input = {};
+  input.op = sdkv1::GroupKeyState::Op::Tick;
+  CHECK_OK(state.advance(input, 106));
+  CHECK(state.current() == generation + 2);
+  CHECK(storage.write_calls == writes + 4);  // twin pending/sealed x2
+  CHECK(discovery.accepted_generation(scope, generation, 107));
+  CHECK_OK(state.advance(input, 10107));
+  CHECK(!state.accepts(generation));
+  CHECK(!discovery.accepted_generation(scope, generation, 10108));
+  CHECK(storage.slot(0) == storage.slot(1));
+
+  // Crash between the first and second twin seals: reboot may adopt the
+  // promoted key, but it cannot transmit until the old sibling is scrubbed.
+  FaultyRecordStorage cut(kSiteSlotBytes);
+  SiteStore before(cut);
+  CHECK_OK(before.initialize());
+  CHECK_OK(before.commit(site));
+  keys::Secret key{};
+  key.fill(0xBB);
+  CHECK_OK(before.stage_group_key(generation + 1, key));
+  cut.cut_call = cut.write_calls + 2;
+  cut.cut_bytes = 0;
+  CHECK(before.activate_group_key(generation + 1, site.boot_witness).code ==
+        StatusCode::StorageFailure);
+  cut.disarm();
+  SiteStore reboot(cut);
+  CHECK_OK(reboot.initialize());
+  CHECK(reboot.group_scrub_needed());
+  sdkv1::GroupKeyState booted(reboot);
+  input = {};
+  input.op = sdkv1::GroupKeyState::Op::Start;
+  input.boot = site.boot_witness + 2;
+  CHECK_OK(booted.advance(input, 200));
+  CHECK(!reboot.group_scrub_needed());
+  CHECK(reboot.site().gk_epoch_current == generation + 1);
+  CHECK(cut.slot(0) == cut.slot(1));
+}
+
+class NoPairwise final : public SecurityProvider {
+ public:
+  bool ready() const noexcept override { return true; }
+  Status next_counter(const SecurityContext&, std::uint64_t&) noexcept override {
+    return Status::error(StatusCode::Unsupported, "no pairwise");
+  }
+  Status seal(const SecurityContext&, std::uint64_t, ByteView, ByteView, MutableByteView,
+              std::array<std::uint8_t, kAeadTagSize>&) noexcept override {
+    return Status::error(StatusCode::Unsupported, "no pairwise");
+  }
+  Status open(const SecurityContext&, std::uint64_t, ByteView, ByteView,
+              const std::array<std::uint8_t, kAeadTagSize>&, MutableByteView) noexcept override {
+    return Status::error(StatusCode::Unsupported, "no pairwise");
+  }
+};
+
+void test_group_gcm_replay() {
+  FaultyRecordStorage storage(kSiteSlotBytes);
+  SiteStore store(storage);
+  CHECK_OK(store.initialize());
+  const SiteRecord site = site_record();
+  CHECK_OK(store.commit(site));
+  sdkv1::GroupKeyState keys(store);
+  sdkv1::GroupKeyState::Input in{};
+  in.op = sdkv1::GroupKeyState::Op::Start;
+  in.boot = site.boot_witness + 1;
+  CHECK_OK(keys.advance(in, 100));
+  NoPairwise pairwise;
+  const AeadGcm* aead = builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  sdkv1::GroupSecurityProvider sender(keys, pairwise, *aead, site.gateways[0]);
+  sdkv1::GroupSecurityProvider receiver(keys, pairwise, *aead, site.gateways[0]);
+  SecurityContext c{SecurityScope::Group, static_cast<std::uint32_t>(site.network),
+                    site.gateways[0], kBroadcastNodeId, site.gk_epoch_current,
+                    0, site.boot_witness + 1, group_address(1)};
+  std::uint64_t counter = 99;
+  CHECK_OK(sender.next_counter(c, counter));
+  CHECK(counter == 0);
+  std::array<std::uint8_t, 3> plain{{1, 2, 3}}, cipher{}, opened{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  const std::uint8_t aad[] = {42};
+  CHECK_OK(sender.seal(c, counter, ByteView{aad, 1}, ByteView{plain.data(), plain.size()},
+                       MutableByteView{cipher.data(), cipher.size()}, tag));
+  auto bad = tag;
+  bad[0] ^= 1;
+  CHECK(!receiver.open(c, counter, ByteView{aad, 1}, ByteView{cipher.data(), cipher.size()},
+                       bad, MutableByteView{opened.data(), opened.size()}).ok());
+  CHECK(opened[0] == 0 && opened[1] == 0 && opened[2] == 0);
+  CHECK_OK(receiver.open(c, counter, ByteView{aad, 1}, ByteView{cipher.data(), cipher.size()},
+                         tag, MutableByteView{opened.data(), opened.size()}));
+  CHECK(opened == plain);
+  CHECK(!receiver.open(c, counter, ByteView{aad, 1}, ByteView{cipher.data(), cipher.size()},
+                       tag, MutableByteView{opened.data(), opened.size()}).ok());
+  c.group_id = group_address(2);
+  CHECK_OK(sender.next_counter(c, counter));
+  CHECK(counter == 1);  // all group destinations share a counter
+  c.network ^= NetworkId{1} << 32;  // provider only receives low32 wire id
+  CHECK(!sender.next_counter(c, counter).ok());
+  c.network = static_cast<std::uint32_t>(site.network);
+
+  in = {};
+  in.op = sdkv1::GroupKeyState::Op::Stage;
+  in.generation = site.assignment_generation;
+  in.epoch = site.gk_epoch_current + 1;
+  in.key.fill(0xA5);
+  in.overlap_s = 10;
+  CHECK_OK(keys.advance(in, 101));
+  // An insider can send under a staged GK. A verified tag schedules the
+  // promotion, but cannot reach application plaintext before twin commit.
+  NoPairwise no_session;
+  sdkv1::GroupSecurityProvider staged_tx(keys, no_session, *aead, site.gateways[0]);
+  SecurityContext future = c;
+  future.group_id = group_address(1);
+  future.epoch = site.gk_epoch_current + 1;
+  CHECK(!staged_tx.next_counter(future, counter).ok());  // no early TX
+  // Derive a staged frame independently from the frozen KDF, not via TX.
+  ScopeDigest prk{};
+  keys::TrafficKey traffic{};
+  keys::group_prk(site.network, store.site().gk_next, prk);
+  CHECK_OK(keys::group_end_key(prk, future.epoch, future.group_id,
+                                future.sender, future.sender_boot, traffic));
+  keys::AeadNonce nonce{};
+  CHECK_OK(keys::aead_nonce(traffic.iv, 9, nonce));
+  std::array<std::uint8_t, 3 + kAeadTagSize> sealed{};
+  CHECK(aead->seal(aead->ctx, traffic.key.data(), nonce.data(), ByteView{aad, 1},
+                   ByteView{plain.data(), plain.size()}, sealed.data()));
+  std::memcpy(tag.data(), sealed.data() + 3, tag.size());
+  opened.fill(0);
+  const auto writes = storage.write_calls;
+  CHECK(receiver.open(future, 9, ByteView{aad, 1}, ByteView{sealed.data(), 3}, tag,
+                      MutableByteView{opened.data(), opened.size()}).code == StatusCode::Busy);
+  CHECK(opened[0] == 0 && storage.write_calls == writes && keys.promotion_pending());
+  in = {};
+  in.op = sdkv1::GroupKeyState::Op::Tick;
+  CHECK_OK(keys.advance(in, 102));
+  CHECK(storage.write_calls == writes + 4);
+  CHECK_OK(receiver.open(future, 9, ByteView{aad, 1}, ByteView{sealed.data(), 3}, tag,
+                         MutableByteView{opened.data(), opened.size()}));
+  CHECK(opened == plain);
+  keys::clear(traffic);
+  secure_clear(prk);
+
+  // GroupLink is bounded by sender, not destination or route count. An
+  // unknown 129th peer cannot evict a known sender's boot/replay floor.
+  SecurityContext link{SecurityScope::GroupLink, c.network, 0x100,
+                       kBroadcastNodeId, keys.boot(), keys.current(), 0, 0};
+  keys::group_prk(site.network, store.site().gk_current, prk);
+  for (std::size_t i = 0; i < 129; ++i) {
+    link.sender = 0x100 + i;
+    CHECK_OK(keys::group_bcast_key(prk, link.group_epoch, link.sender, link.epoch, traffic));
+    CHECK_OK(keys::aead_nonce(traffic.iv, 0, nonce));
+    CHECK(aead->seal(aead->ctx, traffic.key.data(), nonce.data(), ByteView{aad, 1},
+                     ByteView{plain.data(), plain.size()}, sealed.data()));
+    std::memcpy(tag.data(), sealed.data() + 3, tag.size());
+    const Status result = receiver.open(link, 0, ByteView{aad, 1},
+                                        ByteView{sealed.data(), 3}, tag,
+                                        MutableByteView{opened.data(), opened.size()});
+    CHECK(i < 128 ? result.ok() : result.code == StatusCode::NoCapacity);
+    keys::clear(traffic);
+  }
+  link.sender = 0x100;
+  CHECK_OK(keys::group_bcast_key(prk, link.group_epoch, link.sender, link.epoch, traffic));
+  CHECK_OK(keys::aead_nonce(traffic.iv, 1, nonce));
+  CHECK(aead->seal(aead->ctx, traffic.key.data(), nonce.data(), ByteView{aad, 1},
+                   ByteView{plain.data(), plain.size()}, sealed.data()));
+  std::memcpy(tag.data(), sealed.data() + 3, tag.size());
+  CHECK_OK(receiver.open(link, 1, ByteView{aad, 1}, ByteView{sealed.data(), 3}, tag,
+                         MutableByteView{opened.data(), opened.size()}));
+  keys::clear(traffic);
+  secure_clear(prk);
 }
 
 void test_site_power_cuts() {
@@ -1110,6 +1359,9 @@ int main() {
   test_identity_power_cuts();
   test_identity_divergent_twins_quarantine();
   test_site_monotonicity();
+  test_group_key_durable_rotation();
+  test_group_state_and_crypto();
+  test_group_gcm_replay();
   test_site_power_cuts();
   test_site_recover_power_cuts();
   test_site_floors_and_faults();
