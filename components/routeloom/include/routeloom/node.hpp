@@ -1834,8 +1834,13 @@ class MeshNode {
   const GroupOrigin* find_group_origin(const MessageId& id) const noexcept;
   GroupOrigin* origin_of(const GroupTree& tree) noexcept;
   GroupTree* allocate_group_tree(MonotonicMs now_ms) noexcept;
-  GroupStream* group_stream(NodeId source, std::uint32_t session, bool& stale,
-                            MonotonicMs now_ms) noexcept;
+  // Read-only stream lookup for a (source, session) candidate: no state is
+  // touched, so an unauthenticated frame cannot move the stream (issue
+  // #106). The commit runs only after the Group end layer verifies.
+  GroupStream* group_stream_candidate(NodeId source, std::uint32_t session,
+                                      bool& stale) noexcept;
+  GroupStream* group_stream_commit(GroupStream* candidate, NodeId source,
+                                   std::uint32_t session) noexcept;
   static bool group_seen(const GroupStream& stream, std::uint32_t seq) noexcept;
   static void group_mark_seen(GroupStream& stream, std::uint32_t seq) noexcept;
   void group_begin_round(GroupTree& tree, const wire::LinkOpenedFrame& frame,
