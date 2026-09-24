@@ -9,17 +9,29 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "routeloom/authority.hpp"
 #include "routeloom/config.hpp"
+#include "routeloom/config_cose.hpp"
 #include "routeloom/config_dev.hpp"
 #include "routeloom/config_wire.hpp"
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/trust_manifest.hpp"
+#include "routeloom/trust_store.hpp"
+#include "routeloom/trust_view.hpp"
 #include "routeloom/wire.hpp"
+#include "test_ledger.hpp"
+#include "test_provisioning.hpp"
 
 namespace {
 
@@ -528,6 +540,7 @@ struct TargetRig {
   FakeFloorStore floor_storage{};
   FakeVerifier verifier{};
   DevConfigAuthorityVerifier dev_verifier{ByteView{kDevKeyBytes, sizeof(kDevKeyBytes)}};
+  CoseEsp256AuthorityVerifier cose_verifier{};
   CountingEntropy entropy{};
   ConfigRateLimiter rate{};
   FakeProvider provider{};
@@ -537,8 +550,10 @@ struct TargetRig {
   std::unique_ptr<ConfigJournal> journal{};
 
   explicit TargetRig(const std::uint64_t boot = kBoot, const bool with_gate = true,
-                     const bool with_dev = false)
-      : gate_installed_(with_gate), dev_installed_(with_dev) {
+                     const bool with_dev = false, const bool with_cose = false)
+      : gate_installed_(with_gate),
+        dev_installed_(with_dev),
+        cose_installed_(with_cose) {
     config.network = kNet;
     config.target = kTarget;
     config.config_namespace = endpoint::kConfigNamespaceSdk;
@@ -553,9 +568,7 @@ struct TargetRig {
                config.config_namespace, config.schema, 0, 0);
     floor = std::make_unique<SecurityFloorStore>(floor_storage);
     CHECK_OK(floor->initialize());
-    ConfigAuthorityVerifier& active_verifier =
-        with_dev ? static_cast<ConfigAuthorityVerifier&>(dev_verifier)
-                 : static_cast<ConfigAuthorityVerifier&>(verifier);
+    ConfigAuthorityVerifier& active_verifier = select_verifier(with_dev, with_cose);
     journal = std::make_unique<ConfigJournal>(
         config, storage, *floor, active_verifier, entropy, rate, &provider, nullptr,
         with_gate ? &gate : nullptr);
@@ -566,8 +579,7 @@ struct TargetRig {
     floor = std::make_unique<SecurityFloorStore>(floor_storage);
     floor_status_ = floor->initialize();
     ConfigAuthorityVerifier& active_verifier =
-        dev_installed_ ? static_cast<ConfigAuthorityVerifier&>(dev_verifier)
-                       : static_cast<ConfigAuthorityVerifier&>(verifier);
+        select_verifier(dev_installed_, cose_installed_);
     journal = std::make_unique<ConfigJournal>(
         config, storage, *floor, active_verifier, entropy, rate, &provider, nullptr,
         gate_installed_ ? &gate : nullptr);
@@ -592,6 +604,16 @@ struct TargetRig {
   }
   bool gate_installed_{true};
   bool dev_installed_{false};
+  bool cose_installed_{false};
+
+ private:
+  ConfigAuthorityVerifier& select_verifier(const bool with_dev, const bool with_cose) {
+    if (with_cose) return cose_verifier;
+    if (with_dev) return dev_verifier;
+    return verifier;
+  }
+
+ public:
   Status boot_status_ = Status::success();
   Status floor_status_ = Status::success();
 };
@@ -4095,6 +4117,1037 @@ void test_recovery_unsupported_baseline() {
   CHECK(rig.journal->phase() == ConfigPhase::Active);
 }
 
+// --- Signed golden vectors: Rust-issued objects through C++ verifiers ---------
+// The checked-in objects under protocol/config-signed-golden are the
+// cross-language contract (§9.1: the main interop proof is the Rust
+// issuer's signatures verifying under C++ micro-ecc/TrustView). The Rust
+// suite re-issues every vector byte-identically; here the SAME bytes are
+// decoded and verified through the production Dev/COSE/TrustView
+// verifiers, and the two reprovision objects run the full recovery
+// ceremony on a real ConfigJournal. Every asserted field below is a
+// fixture pinned by the Rust issuer (authority 0x42, generation 1,
+// network 0xAAAA, target 0x99) — a mismatch is a wire break, not drift.
+
+struct SignedGolden {
+  std::string name;
+  std::string profile;
+  std::uint8_t kind{0};
+  std::uint8_t mode{0};
+  std::uint64_t authority{0};
+  std::uint32_t authority_generation{0};
+  std::uint64_t authority_sequence{0};
+  std::array<std::uint8_t, 16> operation_id{};
+  std::array<std::uint8_t, 32> dev_key{};
+  std::vector<std::uint8_t> canonical;
+  std::vector<std::uint8_t> object;
+};
+
+// The vectors are flat one-key-per-line JSON (quoted strings or bare
+// numbers), the same shape the endpoint-vector reader takes.
+std::map<std::string, std::string> read_flat_json(const std::string& path) {
+  std::map<std::string, std::string> out;
+  std::ifstream file(path);
+  CHECK(file.good());
+  std::string line;
+  while (std::getline(file, line)) {
+    const std::size_t key_begin = line.find('"');
+    if (key_begin == std::string::npos) continue;
+    const std::size_t key_end = line.find('"', key_begin + 1);
+    if (key_end == std::string::npos) continue;
+    const std::size_t colon = line.find(':', key_end + 1);
+    if (colon == std::string::npos) continue;
+    std::size_t value_begin = line.find_first_not_of(" \t", colon + 1);
+    if (value_begin == std::string::npos) continue;
+    std::string value;
+    if (line[value_begin] == '"') {
+      const std::size_t value_end = line.find('"', value_begin + 1);
+      if (value_end == std::string::npos) continue;
+      value = line.substr(value_begin + 1, value_end - value_begin - 1);
+    } else {
+      const std::size_t value_end = line.find_first_of(", \t}", value_begin);
+      value = line.substr(value_begin, value_end - value_begin);
+    }
+    out.emplace(line.substr(key_begin + 1, key_end - key_begin - 1), value);
+  }
+  return out;
+}
+
+std::uint8_t golden_nibble(const char c) {
+  if (c >= '0' && c <= '9') return static_cast<std::uint8_t>(c - '0');
+  if (c >= 'a' && c <= 'f') return static_cast<std::uint8_t>(c - 'a' + 10);
+  return static_cast<std::uint8_t>(c - 'A' + 10);
+}
+
+std::vector<std::uint8_t> golden_unhex(const std::string& hex) {
+  CHECK(hex.size() % 2 == 0);
+  std::vector<std::uint8_t> out(hex.size() / 2);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<std::uint8_t>(golden_nibble(hex[2 * i]) * 16 +
+                                        golden_nibble(hex[2 * i + 1]));
+  }
+  return out;
+}
+
+SignedGolden load_signed_golden(const char* name) {
+  const std::string path =
+      std::string(ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR) + "/" + name + ".json";
+  const std::map<std::string, std::string> json = read_flat_json(path);
+  SignedGolden golden;
+  golden.name = json.at("name");
+  golden.profile = json.at("profile");
+  golden.kind = static_cast<std::uint8_t>(std::stoul(json.at("kind")));
+  golden.mode = static_cast<std::uint8_t>(std::stoul(json.at("mode")));
+  golden.authority = std::stoull(json.at("authority"));
+  golden.authority_generation =
+      static_cast<std::uint32_t>(std::stoul(json.at("authority_generation")));
+  golden.authority_sequence = std::stoull(json.at("authority_sequence"));
+  CHECK(json.at("network") == "43690");  // 0xAAAA, pinned by the issuer
+  CHECK(json.at("target") == "153");     // 0x99
+  CHECK(json.at("config_namespace") == "1");
+  CHECK(json.at("schema") == "1");
+  CHECK(json.at("codec") == "config_signed_object");
+  CHECK(json.at("expect") == "ok");
+  const std::vector<std::uint8_t> opid = golden_unhex(json.at("operation_id_hex"));
+  CHECK(opid.size() == golden.operation_id.size());
+  std::memcpy(golden.operation_id.data(), opid.data(), opid.size());
+  const std::vector<std::uint8_t> key = golden_unhex(json.at("dev_key_hex"));
+  CHECK(key.size() == golden.dev_key.size());
+  std::memcpy(golden.dev_key.data(), key.data(), key.size());
+  golden.canonical = golden_unhex(json.at("canonical_hex"));
+  golden.object = golden_unhex(json.at("object_hex"));
+  return golden;
+}
+
+ConfigPermitContext golden_context() {
+  ConfigPermitContext context{};
+  context.network = 0xAAAA;
+  context.target = 0x99;
+  context.config_namespace = 1;
+  context.authorized_issuer = 0x42;
+  context.authority_generation = 1;
+  return context;
+}
+
+// The Rust test COSE authority key (config.rs cose_signer(): authority
+// 0x42, scalar [0x5E; 32]); the public half is derived here with the
+// same micro-ecc the verifier runs — no key bytes are pinned twice.
+routeloom_test::TestKeyPair golden_cose_key() {
+  return routeloom_test::test_keypair(0x5E);
+}
+
+void check_golden_permit_fields(const SignedGolden& golden,
+                                const std::uint8_t opid_tag) {
+  CHECK(golden.kind == 3);
+  CHECK(golden.profile == "dev-hmac-sha256-16" ||
+        golden.profile == "rlcp1-cose-esp256");
+  CHECK(golden.authority == 0x42);
+  CHECK(golden.authority_generation == 1);
+  CHECK(golden.authority_sequence == 9);
+  std::array<std::uint8_t, 16> expect_opid{};
+  expect_opid.fill(opid_tag);
+  CHECK(golden.operation_id == expect_opid);
+  // The fixture behind the vector: challenge (boot 7, nonce [D2; 16],
+  // revision 4 over {f1:u8=1}) noted at t=1000, proposed at t=1100 with
+  // patch {f1:u8=2} and the whole remaining budget (30000-100-100).
+  endpoint::ConfigCommand command{};
+  CHECK_OK(endpoint::config_command_decode(
+      ByteView{golden.canonical.data(), golden.canonical.size()}, command));
+  CHECK(command.config_namespace == 1);
+  CHECK(command.schema == 1);
+  CHECK(command.network == 0xAAAA);
+  CHECK(command.target == 0x99);
+  CHECK(command.authority == 0x42);
+  CHECK(command.authority_generation == 1);
+  CHECK(command.authority_sequence == 9);
+  CHECK(command.operation_id == expect_opid);
+  CHECK(command.expected_revision == 4);
+  CHECK(command.next_revision == 5);
+  CHECK(command.target_boot == 7);
+  std::array<std::uint8_t, 16> expect_nonce{};
+  expect_nonce.fill(0xD2);
+  CHECK(command.challenge_nonce == expect_nonce);
+  CHECK(command.apply_within_ms == 29800);
+  CHECK(command.field_count == 1);
+  CHECK(command.fields[0].field_id == 1);
+  CHECK(command.fields[0].type == endpoint::ConfigFieldType::U8);
+  CHECK(command.fields[0].value_size == 1);
+  CHECK(command.fields[0].value[0] == 2);
+}
+
+void check_golden_recovery_fields(const SignedGolden& golden,
+                                  const std::uint8_t opid_tag) {
+  CHECK(golden.kind == 4);
+  CHECK(golden.profile == "dev-hmac-sha256-16" ||
+        golden.profile == "rlcp1-cose-esp256");
+  CHECK(golden.authority == 0x42);
+  CHECK(golden.authority_generation == 1);
+  std::array<std::uint8_t, 16> expect_opid{};
+  expect_opid.fill(opid_tag);
+  CHECK(golden.operation_id == expect_opid);
+  // Both recovery vectors attest the exact-next floor (J=4, R=8); adopt
+  // binds the proven survivor [AB; 32] by hash alone, reprovision
+  // carries {f1:u8=2} (raw TLV 00 01 02 00 01 02).
+  endpoint::ConfigRecoveryIntent intent{};
+  CHECK_OK(endpoint::config_recovery_decode(
+      ByteView{golden.canonical.data(), golden.canonical.size()}, intent));
+  CHECK(intent.config_namespace == 1);
+  CHECK(intent.schema == 1);
+  CHECK(intent.network == 0xAAAA);
+  CHECK(intent.target == 0x99);
+  CHECK(intent.authority == 0x42);
+  CHECK(intent.authority_generation == 1);
+  CHECK(intent.new_store_generation == 4);
+  CHECK(intent.new_revision == 8);
+  if (golden.mode == endpoint::kRcr2ModeAdoptKnown) {
+    CHECK(golden.authority_sequence == 10);
+    CHECK(intent.authority_sequence == 10);
+    CHECK(intent.mode == endpoint::kRcr2ModeAdoptKnown);
+    CHECK(intent.baseline.size == 0);
+    std::array<std::uint8_t, 32> expect_hash{};
+    expect_hash.fill(0xAB);
+    CHECK(intent.snapshot_hash == expect_hash);
+  } else {
+    CHECK(golden.mode == endpoint::kRcr2ModeReprovision);
+    CHECK(golden.authority_sequence == 11);
+    CHECK(intent.authority_sequence == 11);
+    CHECK(intent.mode == endpoint::kRcr2ModeReprovision);
+    const std::uint8_t expect_baseline[] = {0x00, 0x01, 0x02, 0x00, 0x01, 0x02};
+    CHECK(intent.baseline.size == sizeof(expect_baseline));
+    CHECK(std::memcmp(intent.baseline.bytes.data(), expect_baseline,
+                      sizeof(expect_baseline)) == 0);
+    // The signed hash is the baseline's own domain hash — recomputed
+    // here by the C++ production hasher, so this CHECK compares the two
+    // languages' hashes over the same bytes.
+    Digest256 expect_hash{};
+    CHECK_OK(config_snapshot_hash(1, 1, intent.baseline.view(), expect_hash));
+    CHECK(intent.snapshot_hash == expect_hash);
+  }
+}
+
+// T07/T08 consume leg: every Rust-signed vector decodes to its pinned
+// fixture and verifies under the matching production verifier — dev
+// HMAC, static COSE, and a TrustView resolving the COSE key from a live
+// store. The verified payload must equal the canonical byte for byte.
+void test_signed_golden_verify() {
+  const ConfigPermitContext context = golden_context();
+  const routeloom_test::TestKeyPair cose_key = golden_cose_key();
+
+  const SignedGolden dev_permit = load_signed_golden("dev_permit");
+  const SignedGolden cose_permit = load_signed_golden("cose_permit");
+  check_golden_permit_fields(dev_permit, 0x51);
+  check_golden_permit_fields(cose_permit, 0x54);
+
+  const SignedGolden dev_adopt = load_signed_golden("dev_recovery_adopt");
+  const SignedGolden cose_adopt = load_signed_golden("cose_recovery_adopt");
+  check_golden_recovery_fields(dev_adopt, 0x52);
+  check_golden_recovery_fields(cose_adopt, 0x55);
+
+  const SignedGolden dev_reprovision =
+      load_signed_golden("dev_recovery_reprovision");
+  const SignedGolden cose_reprovision =
+      load_signed_golden("cose_recovery_reprovision");
+  check_golden_recovery_fields(dev_reprovision, 0x53);
+  check_golden_recovery_fields(cose_reprovision, 0x56);
+
+  // Same issuer inputs under both profiles bind the same hashes.
+  endpoint::ConfigCommand dev_command{}, cose_command{};
+  CHECK_OK(endpoint::config_command_decode(
+      ByteView{dev_permit.canonical.data(), dev_permit.canonical.size()},
+      dev_command));
+  CHECK_OK(endpoint::config_command_decode(
+      ByteView{cose_permit.canonical.data(), cose_permit.canonical.size()},
+      cose_command));
+  CHECK(dev_command.base_snapshot_hash == cose_command.base_snapshot_hash);
+  CHECK(dev_command.next_snapshot_hash == cose_command.next_snapshot_hash);
+  endpoint::ConfigRecoveryIntent dev_intent{}, cose_intent{};
+  CHECK_OK(endpoint::config_recovery_decode(
+      ByteView{dev_reprovision.canonical.data(), dev_reprovision.canonical.size()},
+      dev_intent));
+  CHECK_OK(endpoint::config_recovery_decode(
+      ByteView{cose_reprovision.canonical.data(), cose_reprovision.canonical.size()},
+      cose_intent));
+  CHECK(dev_intent.snapshot_hash == cose_intent.snapshot_hash);
+
+  // Dev profile through the production HMAC verifier.
+  DevConfigAuthorityVerifier dev_verifier(
+      ByteView{dev_permit.dev_key.data(), dev_permit.dev_key.size()});
+  endpoint::EncodedConfigCommand permit_payload{};
+  bool verified = false;
+  CHECK_OK(dev_verifier.verify_permit(
+      context, ByteView{dev_permit.object.data(), dev_permit.object.size()},
+      permit_payload, verified));
+  CHECK(verified);
+  CHECK(permit_payload.size == dev_permit.canonical.size());
+  CHECK(std::memcmp(permit_payload.bytes.data(), dev_permit.canonical.data(),
+                    permit_payload.size) == 0);
+  endpoint::EncodedRecoveryIntent recovery_payload{};
+  for (const SignedGolden* golden : {&dev_adopt, &dev_reprovision}) {
+    verified = false;
+    recovery_payload.clear();
+    CHECK_OK(dev_verifier.verify_recovery(
+        context, ByteView{golden->object.data(), golden->object.size()},
+        recovery_payload, verified));
+    CHECK(verified);
+    CHECK(recovery_payload.size == golden->canonical.size());
+    CHECK(std::memcmp(recovery_payload.bytes.data(), golden->canonical.data(),
+                      recovery_payload.size) == 0);
+  }
+
+  // COSE profile through the static production verifier.
+  CoseEsp256AuthorityVerifier cose_verifier;
+  cose_verifier.provision(
+      0x42, ByteView{cose_key.pub.data(), cose_key.pub.size()});
+  CHECK(cose_verifier.ready());
+  verified = false;
+  permit_payload.clear();
+  CHECK_OK(cose_verifier.verify_permit(
+      context, ByteView{cose_permit.object.data(), cose_permit.object.size()},
+      permit_payload, verified));
+  CHECK(verified);
+  CHECK(permit_payload.size == cose_permit.canonical.size());
+  CHECK(std::memcmp(permit_payload.bytes.data(), cose_permit.canonical.data(),
+                    permit_payload.size) == 0);
+  for (const SignedGolden* golden : {&cose_adopt, &cose_reprovision}) {
+    verified = false;
+    recovery_payload.clear();
+    CHECK_OK(cose_verifier.verify_recovery(
+        context, ByteView{golden->object.data(), golden->object.size()},
+        recovery_payload, verified));
+    CHECK(verified);
+    CHECK(recovery_payload.size == golden->canonical.size());
+    CHECK(std::memcmp(recovery_payload.bytes.data(), golden->canonical.data(),
+                      recovery_payload.size) == 0);
+  }
+
+  // And through a TrustView resolving the same key live from a store —
+  // the §9.1 Rust-signer-to-TrustView leg. (The manifest delivery path
+  // itself is T02's; here the store is the key-resolution vehicle.)
+  routeloom_test::FaultyTrustStorage trust_storage;
+  TrustStore trust_store(trust_storage);
+  CHECK_OK(trust_store.initialize());
+  TrustImage image = routeloom_test::test_image(
+      1, 0xAAAA, routeloom_test::test_keypair(0x11), 0x100);
+  image.keys[0] = routeloom_test::test_key_record(
+      0x42, 1, cose_key.pub, TrustKeyStatus::Active);
+  image.key_count = 1;
+  CHECK_OK(trust_store.commit_image(image));
+  TrustView view(trust_store);
+  CHECK(view.ready());
+  verified = false;
+  permit_payload.clear();
+  CHECK_OK(view.verify_permit(
+      context, ByteView{cose_permit.object.data(), cose_permit.object.size()},
+      permit_payload, verified));
+  CHECK(verified);
+  CHECK(permit_payload.size == cose_permit.canonical.size());
+  for (const SignedGolden* golden : {&cose_adopt, &cose_reprovision}) {
+    verified = false;
+    recovery_payload.clear();
+    CHECK_OK(view.verify_recovery(
+        context, ByteView{golden->object.data(), golden->object.size()},
+        recovery_payload, verified));
+    CHECK(verified);
+    CHECK(recovery_payload.size == golden->canonical.size());
+    CHECK(std::memcmp(recovery_payload.bytes.data(), golden->canonical.data(),
+                      recovery_payload.size) == 0);
+  }
+}
+
+// Deliver one Rust-signed reprovision vector through a real ConfigJournal:
+// the rig is retargeted at the golden context (the envelopes bind
+// 0xAAAA/0x99/0x42/gen-1), seeded into the post-loss state the vectors
+// attest (floor J=3/R=7, old 6 B provider snapshot, both slots
+// destroyed), then must recover to Active on {f1:u8=2} and stay there
+// across a reboot.
+void golden_reprovision_delivery(const SignedGolden& golden, const bool with_cose,
+                                 const routeloom_test::TestKeyPair& cose_key) {
+  TargetRig rig(kBoot, true, !with_cose, with_cose);
+  if (with_cose) {
+    rig.cose_verifier.provision(
+        0x42, ByteView{cose_key.pub.data(), cose_key.pub.size()});
+  } else {
+    rig.dev_verifier = DevConfigAuthorityVerifier(
+        ByteView{golden.dev_key.data(), golden.dev_key.size()});
+  }
+  rig.config.network = 0xAAAA;
+  rig.config.target = 0x99;
+  rig.config.authorized_issuer = 0x42;
+  rig.config.authority_generation = 1;
+  MonotonicMs now_ms = 1000;
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 3, 7);
+  const ConfigField old_fields[] = {sdk_u8(1, 1)};
+  const auto old_snapshot = snapshot_of(old_fields, 1);
+  rig.provider.seed(old_snapshot.view());
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->quarantined());
+
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(
+      ByteView{golden.object.data(), golden.object.size()}, now_ms, verdict));
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  CHECK(rig.journal->quarantined());  // isolated until the readback proves it
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(!rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 8);
+  CHECK(rig.journal->active_revision() == 8);
+  // The attested reservation (J=4/R=8) plus the completion record (J=5).
+  CHECK(rig.floor_j() == 5);
+  CHECK(rig.floor_r() == 8);
+  const std::uint8_t expect_baseline[] = {0x00, 0x01, 0x02, 0x00, 0x01, 0x02};
+  const ByteView active = rig.journal->active_snapshot();
+  CHECK(active.size == sizeof(expect_baseline));
+  CHECK(std::memcmp(active.data, expect_baseline, sizeof(expect_baseline)) == 0);
+  Digest256 expect_hash{};
+  CHECK_OK(config_snapshot_hash(rig.config.config_namespace, rig.config.schema,
+                                active, expect_hash));
+  CHECK(rig.journal->active_hash() == expect_hash);
+  CHECK(rig.provider.active_.size == sizeof(expect_baseline));
+  CHECK(std::memcmp(rig.provider.active_.bytes.data(), expect_baseline,
+                    sizeof(expect_baseline)) == 0);
+  CHECK(rig.provider.live_.size == sizeof(expect_baseline));
+  CHECK(std::memcmp(rig.provider.live_.bytes.data(), expect_baseline,
+                    sizeof(expect_baseline)) == 0);
+
+  // The recovery survives a reboot: same storage, fresh RAM, still Active
+  // on the reprovisioned baseline.
+  rig.boot(now_ms += 1000);
+  CHECK_OK(rig.boot_status_);
+  CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->active_revision() == 8);
+  const ByteView durable = rig.journal->active_snapshot();
+  CHECK(durable.size == sizeof(expect_baseline));
+  CHECK(std::memcmp(durable.data, expect_baseline, sizeof(expect_baseline)) == 0);
+  CHECK(rig.journal->active_hash() == expect_hash);
+}
+
+void test_signed_golden_delivery() {
+  const routeloom_test::TestKeyPair cose_key = golden_cose_key();
+  golden_reprovision_delivery(load_signed_golden("dev_recovery_reprovision"),
+                              false, cose_key);
+  golden_reprovision_delivery(load_signed_golden("cose_recovery_reprovision"),
+                              true, cose_key);
+}
+
+// --- T06: disaster generation migration ---------------------------------------
+// The real SingleAuthority ledger is destroyed and rebuilt, quarantines,
+// refuses the old generation, and recovers under a new one; the
+// post-recover (generation, sequence) state feeds every later issuance —
+// no test-side pin is ever swapped (§9.2 T06). The existing target, a
+// TrustView deployment still holding only the old key, rejects the new
+// generation until a signed root RTM1 lands; after the update plus a
+// restart it accepts the new generation and rejects the old key. All
+// crypto is real: ledger state machine, P-256 envelopes, trust-store
+// commits, journal, floor and provider.
+
+const routeloom_test::TestKeyPair kT06Root = routeloom_test::test_keypair(0x11);
+const routeloom_test::TestKeyPair kT06AuthG = routeloom_test::test_keypair(0x33);
+const routeloom_test::TestKeyPair kT06AuthGPrime = routeloom_test::test_keypair(0x34);
+
+std::array<std::uint8_t, 16> t06_opid(const std::uint8_t tag) {
+  std::array<std::uint8_t, 16> opid{};
+  opid.fill(0x60);
+  opid[0] = 0x61;
+  opid[1] = tag;
+  return opid;
+}
+
+// The COSE envelope both T06 lanes share (mirrors make_permit in the
+// trust-view tests): byte-exact protected header {1:-9, 4:bstr8(kid)},
+// Sig_structure over the lane's own AAD, deterministic low-S ECDSA.
+Status t06_cose_sign(const ByteView canonical, const ByteView aad,
+                     const std::uint64_t kid,
+                     const std::array<std::uint8_t, 32>& priv,
+                     ByteBuffer<kConfigPermitObjectMax>& out) {
+  out.clear();
+  ByteBuffer<13> protected_bytes{};
+  ByteWriter prot(protected_bytes.writable());
+  Status status = prot.write_u8(0xA2);  // map(2)
+  if (status) status = prot.write_u8(0x01);
+  if (status) status = prot.write_u8(0x28);  // -9 (ESP256)
+  if (status) status = prot.write_u8(0x04);
+  if (status) status = prot.write_u8(0x48);  // bstr(8)
+  if (status) status = prot.write_u64(kid);
+  if (!status) return status;
+  protected_bytes.size = prot.size();
+  ByteBuffer<kCosePermitMax + 64> sig_structure{};
+  status = cose_sig_structure(protected_bytes.view(), aad, canonical,
+                              sig_structure);
+  if (!status) return status;
+  ScopeDigest digest{};
+  sha256(sig_structure.view(), digest);
+  std::array<std::uint8_t, 64> signature{};
+  if (!routeloom_test::sign_digest_low_s(priv, digest, signature)) {
+    return Status::error(StatusCode::InternalError, "t06 sign failed");
+  }
+  ByteWriter writer(out.writable());
+  status = writer.write_u8(0xD2);  // tag 18
+  if (status) status = writer.write_u8(0x84);  // array(4)
+  if (status) {
+    status = routeloom_test::cbor_put_bstr(writer, protected_bytes.view());
+  }
+  if (status) status = writer.write_u8(0xA0);  // empty unprotected map
+  if (status) status = routeloom_test::cbor_put_bstr(writer, canonical);
+  if (status) {
+    status = routeloom_test::cbor_put_bstr(
+        writer, ByteView{signature.data(), signature.size()});
+  }
+  if (!status) return status;
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status t06_make_permit(const ConfigCommand& command,
+                       const std::array<std::uint8_t, 32>& priv,
+                       ByteBuffer<kConfigPermitObjectMax>& out) {
+  endpoint::EncodedConfigCommand canonical{};
+  Status status = endpoint::config_command_encode(command, canonical);
+  if (!status) return status;
+  ByteBuffer<kConfigPermitAadSize> aad{};
+  status = config_permit_aad(command.network, command.target,
+                             command.config_namespace, aad);
+  if (!status) return status;
+  return t06_cose_sign(canonical.view(), aad.view(), command.authority, priv,
+                       out);
+}
+
+Status t06_make_recovery(const endpoint::ConfigRecoveryIntent& intent,
+                         const std::array<std::uint8_t, 32>& priv,
+                         ByteBuffer<kConfigPermitObjectMax>& out) {
+  endpoint::EncodedRecoveryIntent canonical{};
+  Status status = endpoint::config_recovery_encode(intent, canonical);
+  if (!status) return status;
+  ByteBuffer<kConfigRecoveryAadSize> aad{};
+  status = config_recovery_aad(intent.network, intent.target,
+                               intent.config_namespace, aad);
+  if (!status) return status;
+  return t06_cose_sign(canonical.view(), aad.view(), intent.authority, priv,
+                       out);
+}
+
+// The RootSigner path (mirrors make_manifest in the trust-manifest
+// tests): RLT1 body, committed-network AAD, assembled manifest.
+void t06_make_manifest(const TrustImage& image, const std::uint64_t root_id,
+                       const std::array<std::uint8_t, 32>& priv,
+                       ByteBuffer<kTrustManifestObjectMax>& out) {
+  ByteBuffer<kTrustImageContentMax> content{};
+  CHECK_OK(trust_image_body_encode(image, content));
+  ByteBuffer<kTrustManifestProtectedSize> protected_bytes{};
+  CHECK_OK(trust_manifest_protected(root_id, protected_bytes));
+  ByteBuffer<kTrustManifestAadSize> aad{};
+  CHECK_OK(trust_manifest_aad(image.network, aad));
+  ByteBuffer<kTrustManifestSigMax> sig_structure{};
+  CHECK_OK(trust_manifest_sig_structure(protected_bytes.view(), aad.view(),
+                                        content.view(), sig_structure));
+  ScopeDigest digest{};
+  sha256(sig_structure.view(), digest);
+  std::array<std::uint8_t, 64> signature{};
+  CHECK(routeloom_test::sign_digest_low_s(priv, digest, signature));
+  CHECK_OK(trust_manifest_assemble(content.view(), root_id,
+                                   ByteView{signature.data(), signature.size()},
+                                   out));
+}
+
+// A TrustView-backed target: real SecurityFloorStore, TrustStore,
+// TrustView (floor-attached, as trust-managed deployments run) and
+// ConfigJournal over storage fakes. restart() destroys every RAM object
+// and rebuilds from the same storages — nothing re-seeded, never
+// re-pinned (the configured generation pin is set once at deployment).
+struct T06Target {
+  ConfigJournalConfig config{};
+  FakeJournalStorage storage{};
+  FakeFloorStore floor_storage{};
+  routeloom_test::FaultyTrustStorage trust_storage{};
+  CountingEntropy entropy{};
+  ConfigRateLimiter rate{};
+  FakeProvider provider{};
+  FakeMaintenanceGate gate{};
+  std::unique_ptr<SecurityFloorStore> floor;
+  std::unique_ptr<TrustStore> trust;
+  std::unique_ptr<TrustView> view;
+  std::unique_ptr<ConfigJournal> journal{};
+  Status boot_status_ = Status::success();
+
+  T06Target() {
+    config.network = kNet;
+    config.target = kTarget;
+    config.config_namespace = endpoint::kConfigNamespaceSdk;
+    config.schema = 1;
+    config.boot_incarnation = kBoot;
+    config.authorized_issuer = kAuthority;
+    config.authority_generation = 1;
+    config.challenge_valid_ms = kConfigChallengeMaxMs;
+    seed_floor(floor_storage, config.network, config.target,
+               config.config_namespace, config.schema, 0, 0);
+    build(1000);
+  }
+  void build(const MonotonicMs now_ms) {
+    floor = std::make_unique<SecurityFloorStore>(floor_storage);
+    CHECK_OK(floor->initialize());
+    trust = std::make_unique<TrustStore>(trust_storage);
+    CHECK_OK(trust->initialize());
+    view = std::make_unique<TrustView>(*trust);
+    view->attach_floor(floor.get());
+    journal = std::make_unique<ConfigJournal>(config, storage, *floor, *view,
+                                              entropy, rate, &provider, nullptr,
+                                              &gate);
+    boot_status_ = journal->initialize(now_ms);
+  }
+  void restart(const MonotonicMs now_ms) {
+    journal.reset();
+    view.reset();
+    trust.reset();
+    floor.reset();
+    build(now_ms);
+  }
+  std::uint32_t floor_j() {
+    SecurityFloorState state{};
+    CHECK_OK(floor->read(state));
+    const SecurityFloorEntry* entry =
+        SecurityFloorStore::entry_for(state, config.config_namespace);
+    CHECK(entry != nullptr);
+    return entry->store_floor;
+  }
+  std::uint64_t floor_r() {
+    SecurityFloorState state{};
+    CHECK_OK(floor->read(state));
+    const SecurityFloorEntry* entry =
+        SecurityFloorStore::entry_for(state, config.config_namespace);
+    CHECK(entry != nullptr);
+    return entry->decision_floor;
+  }
+  void drain(MonotonicMs& now_ms, const int polls = 8) {
+    for (int i = 0; i < polls; ++i) journal->poll(now_ms += 10);
+  }
+};
+
+void t06_provision_trust(T06Target& target) {
+  TrustImage image =
+      routeloom_test::test_image(1, kNet, kT06Root, 0x100);
+  image.keys[0] = routeloom_test::test_key_record(
+      kAuthority, 1, kT06AuthG.pub, TrustKeyStatus::Active);
+  image.key_count = 1;
+  CHECK_OK(target.trust->commit_image(image));
+}
+
+// Intake is limited to one P-256 verify start per 5 s and two accepts
+// per 60 s device-wide; the ceremony spans realistic time so every
+// submit is admitted. Challenges are queried fresh at each step, so the
+// jumps never expire one.
+void t06_expiry_gap(MonotonicMs& now_ms) { now_ms += 61000; }
+
+Digest256 t06_digest(const ByteView bytes) {
+  ScopeDigest digest{};
+  sha256(bytes, digest);
+  Digest256 out{};
+  std::memcpy(out.data(), digest.data(), out.size());
+  return out;
+}
+
+// Reserve one ledger operation binding the approved content bytes; the
+// returned (generation, sequence) is what the signed object must bind.
+// The commit lands after signing, binding the finished envelope.
+AuthorityOperation t06_issue_op(SingleAuthority& authority,
+                                const ByteView content) {
+  AuthorityOperation op{};
+  CHECK_OK(authority.build_operation(AuthorityOperationKind::RemoteConfig,
+                                     t06_digest(content), op));
+  return op;
+}
+
+void t06_commit_op(SingleAuthority& authority, const AuthorityOperation& op,
+                   const ByteView envelope) {
+  CHECK_OK(authority.apply_remote_config(op, t06_digest(envelope), true));
+}
+
+// Challenge -> ledger-built command -> COSE sign -> ledger commit ->
+// submit. The command's (generation, sequence) always come from the
+// live ledger handover, never from a test constant.
+Status t06_drive_permit(T06Target& target, SingleAuthority& authority,
+                        const ConfigField* patch, const std::uint16_t patch_count,
+                        const std::array<std::uint8_t, 32>& auth_priv,
+                        const std::uint64_t expected_revision,
+                        const ByteView base_snapshot, MonotonicMs& now_ms,
+                        ConfigVerdict& verdict, const std::uint8_t opid_tag,
+                        ConfigCommand* command_out = nullptr) {
+  endpoint::ControlChallengeQuery query{};
+  query.config_namespace = target.config.config_namespace;
+  query.schema = target.config.schema;
+  query.client_nonce = {9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 2, 3, 4, opid_tag, 6};
+  endpoint::EncodedServicePayload encoded{};
+  Status status =
+      target.journal->handle_challenge_query(query, now_ms, encoded);
+  if (!status) return status;
+  endpoint::ControlChallenge challenge{};
+  status = endpoint::control_challenge_decode(encoded.view(), challenge);
+  if (!status) return status;
+  ByteBuffer<endpoint::kConfigSnapshotMax> next{};
+  bool changed = false;
+  status = config_patch_apply(base_snapshot, patch, patch_count, next, changed);
+  if (!status) return status;
+  Digest256 base_hash{}, next_hash{};
+  status = config_snapshot_hash(target.config.config_namespace,
+                                target.config.schema, base_snapshot, base_hash);
+  if (!status) return status;
+  status = config_snapshot_hash(target.config.config_namespace,
+                                target.config.schema, next.view(), next_hash);
+  if (!status) return status;
+  ByteBuffer<endpoint::kConfigSnapshotMax> patch_tlv{};
+  status = config_tlv_encode(patch, patch_count, patch_tlv);
+  if (!status) return status;
+  const AuthorityOperation op = t06_issue_op(authority, patch_tlv.view());
+
+  ConfigCommand command{};
+  command.config_namespace = target.config.config_namespace;
+  command.schema = target.config.schema;
+  command.network = target.config.network;
+  command.target = target.config.target;
+  command.authority = target.config.authorized_issuer;
+  command.authority_generation = op.generation;
+  command.authority_sequence = op.sequence;
+  command.operation_id = t06_opid(opid_tag);
+  command.expected_revision = expected_revision;
+  command.next_revision = expected_revision + 1;
+  command.base_snapshot_hash = base_hash;
+  command.next_snapshot_hash = next_hash;
+  command.target_boot = target.config.boot_incarnation;
+  command.challenge_nonce = challenge.challenge_nonce;
+  command.apply_within_ms = challenge.valid_for_ms;
+  command.field_count = patch_count;
+  for (std::uint16_t i = 0; i < patch_count; ++i) command.fields[i] = patch[i];
+  if (command_out != nullptr) *command_out = command;
+
+  ByteBuffer<kConfigPermitObjectMax> permit{};
+  status = t06_make_permit(command, auth_priv, permit);
+  if (!status) return status;
+  t06_commit_op(authority, op, permit.view());
+  return target.journal->submit_permit(permit.view(), now_ms, true, verdict);
+}
+
+// T06 core: the authority ledger's real disaster — both slots
+// destroyed, rebuild quarantines, old-generation issuance refuses,
+// operator recover(2) — then the existing target migrates: it rejects
+// the new generation while un-updated, takes the signed root RTM1, and
+// after a restart accepts the new generation and rejects the old key.
+// The journal's configured pin is never touched after deployment.
+void test_t06_disaster_generation_migration() {
+  routeloom_test::FaultyLedgerStorage ledger_storage;
+  SingleAuthority authority(kNet, kAuthority, ledger_storage);
+  CHECK_OK(authority.initialize());
+  for (std::uint64_t seq = 1; seq <= 2; ++seq) {
+    AuthorityOperation history{};
+    Digest256 content{};
+    content[0] = static_cast<std::uint8_t>(seq);
+    CHECK_OK(authority.build_operation(AuthorityOperationKind::RemoteConfig,
+                                       content, history));
+    CHECK(history.generation == 1);
+    CHECK(history.sequence == seq);
+    Digest256 state{};
+    state[0] = static_cast<std::uint8_t>(0xA0 + seq);
+    CHECK_OK(authority.apply_remote_config(history, state, true));
+  }
+
+  T06Target target;
+  MonotonicMs now_ms = 10000;
+  CHECK_OK(target.boot_status_);
+  t06_provision_trust(target);
+  CHECK(target.trust->store_epoch() == 1);
+  CHECK(target.view->ready());
+
+  // Pre-disaster: a gen-1 permit applies end to end (ledger seq 3).
+  const ConfigField patch1[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  ConfigCommand issued{};
+  CHECK_OK(t06_drive_permit(target, authority, patch1, 1, kT06AuthG.priv, 0,
+                            ByteView{}, now_ms, verdict, 1, &issued));
+  CHECK(issued.authority_generation == 1);
+  CHECK(issued.authority_sequence == 3);
+  target.drain(now_ms);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == 1);
+  const ConfigField expect1_fields[] = {sdk_u8(1, 1)};
+  const auto expect1 = snapshot_of(expect1_fields, 1);
+  CHECK(target.journal->active_snapshot().size == expect1.size);
+  CHECK(std::memcmp(target.journal->active_snapshot().data,
+                    expect1.bytes.data(), expect1.size) == 0);
+
+  t06_expiry_gap(now_ms);
+  // DISASTER: both ledger slots destroyed; the rebuild quarantines and
+  // old-generation issuance refuses — nothing silently resets to 0.
+  ledger_storage.fill(0, 0xEE);
+  ledger_storage.fill(1, 0xEE);
+  SingleAuthority rebuilt(kNet, kAuthority, ledger_storage);
+  CHECK(rebuilt.initialize().code == StatusCode::IntegrityError);
+  CHECK(rebuilt.quarantined());
+  AuthorityOperation blocked{};
+  Digest256 blocked_content{};
+  CHECK(rebuilt.build_operation(AuthorityOperationKind::RemoteConfig,
+                                blocked_content, blocked)
+            .code == StatusCode::IntegrityError);
+  // Explicit operator recovery under the new generation. The RTM1 needs
+  // no commit from the destroyed ledger — the root signs the rotation.
+  CHECK_OK(rebuilt.recover(2));
+  CHECK(!rebuilt.quarantined());
+  CHECK(rebuilt.state().generation == 2);
+  CHECK(rebuilt.state().applied_sequence == 0);
+
+  // The un-updated target rejects the new generation: the ledger-handed
+  // (gen 2, seq 1) signs fine, but the target resolves no key for it.
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  ConfigCommand gprime{};
+  CHECK(t06_drive_permit(target, rebuilt, patch2, 1, kT06AuthGPrime.priv, 1,
+                         target.journal->active_snapshot(), now_ms, verdict, 2,
+                         &gprime)
+            .code == StatusCode::AuthenticationFailed);
+  CHECK(gprime.authority_generation == 2);
+  CHECK(gprime.authority_sequence == 1);
+  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == 1);
+
+  t06_expiry_gap(now_ms);
+  // Root rotation lands: epoch 2 retires the old key, activates the new
+  // one and raises the generation floor — through the real manifest
+  // path against the shared RLF1 floor.
+  TrustImage rotated = routeloom_test::test_image(2, kNet, kT06Root, 0x100);
+  rotated.min_authority_generation = 2;
+  rotated.keys[0] = routeloom_test::test_key_record(
+      kAuthority, 1, kT06AuthG.pub, TrustKeyStatus::Retired);
+  rotated.keys[1] = routeloom_test::test_key_record(
+      kAuthority, 2, kT06AuthGPrime.pub, TrustKeyStatus::Active);
+  rotated.key_count = 2;
+  ByteBuffer<kTrustManifestObjectMax> manifest{};
+  t06_make_manifest(rotated, 0x100, kT06Root.priv, manifest);
+  CHECK_OK(
+      trust_manifest_accept(*target.trust, manifest.view(), *target.floor));
+  CHECK(target.trust->store_epoch() == 2);
+
+  // Restart: all RAM destroyed, rebuilt from storage. The journal is
+  // still Active on the old revision, trust is at epoch 2, and the
+  // deployed pin is untouched — the floor decides now. The boot restore
+  // re-proves the provider before intake re-opens.
+  target.restart(now_ms += 1000);
+  CHECK_OK(target.boot_status_);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == 1);
+  CHECK(target.config.authority_generation == 1);
+  CHECK(target.view->effective_generation_floor() == 2);
+  target.drain(now_ms);
+
+  t06_expiry_gap(now_ms);
+  // The new generation applies after update + restart (ledger seq 2 —
+  // the rejected attempt's sequence stayed spent, never reused).
+  ConfigCommand gprime2{};
+  CHECK_OK(t06_drive_permit(target, rebuilt, patch2, 1, kT06AuthGPrime.priv, 1,
+                            target.journal->active_snapshot(), now_ms, verdict,
+                            3, &gprime2));
+  CHECK(gprime2.authority_generation == 2);
+  CHECK(gprime2.authority_sequence == 2);
+  target.drain(now_ms);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == 2);
+  const ConfigField expect2_fields[] = {sdk_u8(1, 2)};
+  const auto expect2 = snapshot_of(expect2_fields, 1);
+  CHECK(target.journal->active_snapshot().size == expect2.size);
+  CHECK(std::memcmp(target.journal->active_snapshot().data,
+                    expect2.bytes.data(), expect2.size) == 0);
+
+  t06_expiry_gap(now_ms);
+  // The old key is dead: a correctly-bound gen-1 leftover — fresh
+  // challenge, fresh opid, only the generation/key stale — is rejected
+  // at signature resolution, before any CAS check could run.
+  endpoint::ControlChallengeQuery query{};
+  query.config_namespace = target.config.config_namespace;
+  query.schema = target.config.schema;
+  query.client_nonce = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK_OK(target.journal->handle_challenge_query(query, now_ms, encoded));
+  endpoint::ControlChallenge challenge{};
+  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), challenge));
+  const ConfigField patch_old[] = {sdk_u8(1, 0)};
+  ByteBuffer<endpoint::kConfigSnapshotMax> next{};
+  bool changed = false;
+  CHECK_OK(config_patch_apply(target.journal->active_snapshot(), patch_old, 1,
+                              next, changed));
+  CHECK(changed);
+  Digest256 base_hash{}, next_hash{};
+  CHECK_OK(config_snapshot_hash(target.config.config_namespace,
+                                target.config.schema,
+                                target.journal->active_snapshot(), base_hash));
+  CHECK_OK(config_snapshot_hash(target.config.config_namespace,
+                                target.config.schema, next.view(), next_hash));
+  ConfigCommand leftover{};
+  leftover.config_namespace = target.config.config_namespace;
+  leftover.schema = target.config.schema;
+  leftover.network = target.config.network;
+  leftover.target = target.config.target;
+  leftover.authority = target.config.authorized_issuer;
+  leftover.authority_generation = 1;
+  leftover.authority_sequence = 3;  // the pre-disaster permit's values
+  leftover.operation_id = t06_opid(4);
+  leftover.expected_revision = 2;
+  leftover.next_revision = 3;
+  leftover.base_snapshot_hash = base_hash;
+  leftover.next_snapshot_hash = next_hash;
+  leftover.target_boot = target.config.boot_incarnation;
+  leftover.challenge_nonce = challenge.challenge_nonce;
+  leftover.apply_within_ms = challenge.valid_for_ms;
+  leftover.field_count = 1;
+  leftover.fields[0] = patch_old[0];
+  ByteBuffer<kConfigPermitObjectMax> leftover_permit{};
+  CHECK_OK(t06_make_permit(leftover, kT06AuthG.priv, leftover_permit));
+  CHECK(target.journal->submit_permit(leftover_permit.view(), now_ms, true,
+                                      verdict)
+            .code == StatusCode::AuthenticationFailed);
+  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
+  CHECK(target.journal->decision_revision() == 2);
+}
+
+// T06 double-loss variant: the target journal is fully destroyed in the
+// same disaster. Recovery runs RTM1 -> RCR2 -> RCC1 in order: the
+// rotation first (the recovery verifies under the new key), then a
+// reprovision carrying the operator baseline at the RecoveryInfo's
+// advertised exact-next, then the normal lane proves the generation.
+void test_t06_double_loss_rtm1_rcr2_rcc1() {
+  routeloom_test::FaultyLedgerStorage ledger_storage;
+  SingleAuthority authority(kNet, kAuthority, ledger_storage);
+  CHECK_OK(authority.initialize());
+  for (std::uint64_t seq = 1; seq <= 2; ++seq) {
+    AuthorityOperation history{};
+    Digest256 content{};
+    content[0] = static_cast<std::uint8_t>(seq);
+    CHECK_OK(authority.build_operation(AuthorityOperationKind::RemoteConfig,
+                                       content, history));
+    Digest256 state{};
+    state[0] = static_cast<std::uint8_t>(0xA0 + seq);
+    CHECK_OK(authority.apply_remote_config(history, state, true));
+  }
+
+  T06Target target;
+  MonotonicMs now_ms = 20000;
+  CHECK_OK(target.boot_status_);
+  t06_provision_trust(target);
+  const ConfigField patch1[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(t06_drive_permit(target, authority, patch1, 1, kT06AuthG.priv, 0,
+                            ByteView{}, now_ms, verdict, 5));
+  target.drain(now_ms);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == 1);
+
+  t06_expiry_gap(now_ms);
+  // DOUBLE DISASTER: journal slots and ledger slots all destroyed. The
+  // floor, the trust image and the provider backing survive — each on
+  // its own store.
+  target.storage.fill(0, 0xEE);
+  target.storage.fill(1, 0xEE);
+  ledger_storage.fill(0, 0xEE);
+  ledger_storage.fill(1, 0xEE);
+  target.restart(now_ms);
+  CHECK(target.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(target.journal->quarantined());
+  CHECK(target.trust->store_epoch() == 1);  // rotation not yet delivered
+  SingleAuthority rebuilt(kNet, kAuthority, ledger_storage);
+  CHECK(rebuilt.initialize().code == StatusCode::IntegrityError);
+  CHECK(rebuilt.quarantined());
+  CHECK_OK(rebuilt.recover(2));
+  CHECK(rebuilt.state().generation == 2);
+
+  // RTM1 first: epoch 2 activates the key the recovery verifies under.
+  TrustImage rotated = routeloom_test::test_image(2, kNet, kT06Root, 0x100);
+  rotated.min_authority_generation = 2;
+  rotated.keys[0] = routeloom_test::test_key_record(
+      kAuthority, 1, kT06AuthG.pub, TrustKeyStatus::Retired);
+  rotated.keys[1] = routeloom_test::test_key_record(
+      kAuthority, 2, kT06AuthGPrime.pub, TrustKeyStatus::Active);
+  rotated.key_count = 2;
+  ByteBuffer<kTrustManifestObjectMax> manifest{};
+  t06_make_manifest(rotated, 0x100, kT06Root.priv, manifest);
+  CHECK_OK(
+      trust_manifest_accept(*target.trust, manifest.view(), *target.floor));
+  CHECK(target.trust->store_epoch() == 2);
+
+  // The operator reads RecoveryInfo: it reports the current floors,
+  // and the recovery must name one past each (the floor's exact next).
+  endpoint::RecoveryInfoQuery info_query{};
+  info_query.config_namespace = target.config.config_namespace;
+  info_query.nonce.fill(0x71);
+  endpoint::EncodedServicePayload info_reply{};
+  CHECK_OK(target.journal->handle_recovery_info_query(info_query, now_ms,
+                                                      info_reply));
+  endpoint::RecoveryInfo info{};
+  CHECK_OK(endpoint::recovery_info_decode(info_reply.view(), info));
+  CHECK(info.nonce_echo == info_query.nonce);
+  CHECK(info.store_floor == target.floor_j());
+  CHECK(info.decision_floor == target.floor_r());
+  const std::uint32_t exact_j = info.store_floor + 1;
+  const std::uint64_t exact_r = info.decision_floor + 1;
+
+  // RCR2 reprovision under the recovered ledger state.
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2), sdk_bool(2, true)};
+  const auto baseline = snapshot_of(baseline_fields, 2);
+  const AuthorityOperation rop = t06_issue_op(rebuilt, baseline.view());
+  CHECK(rop.generation == 2);
+  CHECK(rop.sequence == 1);
+  endpoint::ConfigRecoveryIntent intent{};
+  intent.mode = endpoint::kRcr2ModeReprovision;
+  intent.config_namespace = target.config.config_namespace;
+  intent.schema = target.config.schema;
+  intent.network = target.config.network;
+  intent.target = target.config.target;
+  intent.authority = target.config.authorized_issuer;
+  intent.authority_generation = rop.generation;
+  intent.authority_sequence = rop.sequence;
+  intent.operation_id = t06_opid(6);
+  intent.new_store_generation = exact_j;
+  intent.new_revision = exact_r;
+  CHECK_OK(config_snapshot_hash(target.config.config_namespace,
+                                target.config.schema, baseline.view(),
+                                intent.snapshot_hash));
+  intent.baseline.size = baseline.size;
+  std::memcpy(intent.baseline.bytes.data(), baseline.bytes.data(),
+              baseline.size);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  CHECK_OK(t06_make_recovery(intent, kT06AuthGPrime.priv, object));
+  t06_commit_op(rebuilt, rop, object.view());
+  CHECK_OK(target.journal->submit_recovery(object.view(), now_ms, verdict));
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  CHECK(target.journal->quarantined());
+  target.drain(now_ms);
+  CHECK(!target.journal->quarantined());
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == exact_r);
+  CHECK(target.journal->active_snapshot().size == baseline.size);
+  CHECK(std::memcmp(target.journal->active_snapshot().data,
+                    baseline.bytes.data(), baseline.size) == 0);
+
+  // Durability across a restart, then the normal lane proves the new
+  // generation on top of the recovered baseline.
+  target.restart(now_ms += 1000);
+  CHECK_OK(target.boot_status_);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == exact_r);
+  target.drain(now_ms);
+  t06_expiry_gap(now_ms);
+  const ConfigField patch3[] = {sdk_bool(3, true)};
+  ConfigCommand proved{};
+  CHECK_OK(t06_drive_permit(target, rebuilt, patch3, 1, kT06AuthGPrime.priv,
+                            exact_r,
+                            target.journal->active_snapshot(), now_ms, verdict,
+                            7, &proved));
+  CHECK(proved.authority_generation == 2);
+  CHECK(proved.authority_sequence == 2);
+  target.drain(now_ms);
+  CHECK(target.journal->phase() == ConfigPhase::Active);
+  CHECK(target.journal->decision_revision() == exact_r + 1);
+}
+
 int main() {
   // Schema / TLV / hash layer.
   test_tlv_layer();
@@ -4176,6 +5229,10 @@ int main() {
   test_factory_gate_stale_provider();
   test_factory_gate_unreadable_provider();
   test_recovery_unsupported_baseline();
+  test_signed_golden_verify();
+  test_signed_golden_delivery();
+  test_t06_disaster_generation_migration();
+  test_t06_double_loss_rtm1_rcr2_rcc1();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

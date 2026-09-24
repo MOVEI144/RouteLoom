@@ -336,7 +336,6 @@ pub fn handle_conn<S: OperationStore>(
         "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
         "config.recover" => config_recover(&params, ctx).map(|r| (r, None)),
         "config.recovery_info" => config_recovery_info(&params, ctx).map(|r| (r, None)),
-        "config.trust_update" => config_trust_update(&params, ctx).map(|r| (r, None)),
         "trust.install" => trust_install(&params, ctx).map(|r| (r, None)),
         "trust.status" => trust_status(&params, ctx).map(|r| (r, None)),
         "config.get" => config_get(&params, ctx).map(|r| (r, None)),
@@ -2655,8 +2654,6 @@ fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
 }
 
 /// A u32 field — same number-or-string parsing rule as `u16_field`.
-/// Unused until RCR2 issuance reparses generation fields.
-#[allow(dead_code)]
 fn u32_field(value: Option<&Json>, name: &str) -> Result<u32, ApiError> {
     let invalid = || {
         ApiError::simple(
@@ -2909,9 +2906,10 @@ fn config_propose<S: OperationStore>(
 /// status. `mode` is `adopt-known` (bind the proven survivor by
 /// `snapshot_hash`, no `baseline`) or `reprovision` (carry the complete
 /// `baseline` TLV to re-apply). (`new_store_generation`, `new_revision`)
-/// must name the floor's exact next — read them from
-/// `config.recovery_info` first; a skewed pair is refused by the target,
-/// never coerced. Requires a configured authority AND PERM_CONFIG.
+/// must name the floor's exact next — read the current floors from
+/// `config.recovery_info` first and add one to each; a skewed pair is
+/// refused by the target, never coerced. Requires a configured
+/// authority AND PERM_CONFIG.
 fn config_recover<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -3128,22 +3126,6 @@ fn trust_status<S: OperationStore>(
         network,
         target,
     )
-}
-
-/// `config.trust_update`: REMOVED. The generation-only recovery command
-/// is retired: authority generation changes are root-authorized trust
-/// updates (a signed trust manifest delivered via `trust.install`), never
-/// a recovery lane message. The method name stays registered so old
-/// callers get this explicit error instead of a silent semantic change
-/// or an unknown-method mystery.
-fn config_trust_update<S: OperationStore>(
-    _params: &Json,
-    _ctx: &ApiContext<'_, S>,
-) -> Result<String, ApiError> {
-    Err(ApiError::simple(
-        "CONFIG_TRUST_UPDATE_REMOVED",
-        "config.trust_update is removed: root updates are trust.install of a signed trust manifest",
-    ))
 }
 
 /// `config.get` params: `{config_op}`. Reads one config op's record — the

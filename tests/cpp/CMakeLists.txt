@@ -129,9 +129,17 @@ target_include_directories(routeloom_baseline_diff_tests PRIVATE ${CMAKE_CURRENT
 target_compile_options(routeloom_baseline_diff_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_baseline_diff_tests COMMAND routeloom_baseline_diff_tests)
 
+set(ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR "${CMAKE_SOURCE_DIR}/protocol/config-signed-golden")
+
 add_executable(routeloom_config_tests test_config.cpp)
 target_link_libraries(routeloom_config_tests PRIVATE routeloom_core)
-target_include_directories(routeloom_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# test_provisioning.hpp's P-256 helpers need the micro-ecc headers (link
+# symbols come from routeloom_core); the golden dir feeds the T07/T08
+# cross-language vectors the Rust issuer signs.
+target_include_directories(routeloom_config_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
+target_compile_definitions(routeloom_config_tests PRIVATE
+    ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR="${ROUTELOOM_CONFIG_SIGNED_GOLDEN_DIR}")
 target_compile_options(routeloom_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_tests COMMAND routeloom_config_tests)
 

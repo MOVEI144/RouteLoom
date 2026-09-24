@@ -331,11 +331,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "config-recovery-info" => config_recovery_info_command(rest)?,
         [name, rest @ ..] if name == "trust-install" => trust_install_command(rest)?,
         [name, rest @ ..] if name == "trust-status" => trust_status_command(rest)?,
-        [name, ..] if name == "config-trust-update" => {
-            return Err("config-trust-update is removed: \
-                 root updates are trust-install of a signed trust manifest"
-                .into());
-        }
         [name, rest @ ..] if name == "config-get" => config_get_command(rest)?,
         [name, id] if name == "cancel" => cancel_command(id)?,
         [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
@@ -1261,7 +1256,8 @@ fn config_recover_command(args: &[String]) -> Result<String, Box<dyn std::error:
 /// `config-recovery-info --network <16hex> --target <16hex>
 /// --config-namespace <u16>`: reads the target's RecoveryInfo — the floor
 /// readings and survivor/testimony hashes the RCR2 baseline binds. Run
-/// this before `config-recover` to name the floor's exact next.
+/// this before `config-recover`: the recovery must name one past each
+/// reported floor (the floor's exact next).
 fn config_recovery_info_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
     let mut network: Option<String> = None;
     let mut target: Option<String> = None;

@@ -377,11 +377,11 @@ Status recovery_info_query_decode(ByteView encoded, RecoveryInfoQuery& out) noex
 // RecoveryInfo8 (80B): ver/sub8 | ns u16 | schema u16 | nonce_echo 16B |
 // network u64 | store floor J u32 | decision floor R u64 | flags u8 |
 // recovery_version u8 | profile_bits u32 | snapshot_hash 32B. Read-only:
-// J/R name the exact-next generation and revision a recovery must carry,
-// the hash names the known survivor baseline (or explicit unknown), and
-// the version/profile name what the target accepts. Advisory only — the
-// target re-checks the floor at accept time, and nothing here authorizes
-// skipping the signature.
+// J/R report the CURRENT floors — a recovery must carry one past each
+// (the floor's exact next), the hash names the known survivor baseline
+// (or explicit unknown), and the version/profile name what the target
+// accepts. Advisory only — the target re-checks the floor at accept
+// time, and nothing here authorizes skipping the signature.
 constexpr std::uint8_t kRecoveryInfoFlagImpaired = 0x01;
 constexpr std::uint8_t kRecoveryInfoFlagUncertain = 0x02;
 constexpr std::uint8_t kRecoveryInfoFlagQuarantined = 0x04;

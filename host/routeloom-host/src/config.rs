@@ -36,6 +36,7 @@ use routeloom_wire::endpoint::{
     config_snapshot_hash_input, config_tlv_decode, control_challenge_decode, control_status_decode,
     recovery_info_decode, trust_status_decode, ConfigCommand, ConfigField, ConfigRecoveryIntent,
     ControlChallenge, ControlStatus, RecoveryInfo, TrustStatus, RCR2_MAX_TOTAL,
+    RCR2_MODE_REPROVISION,
 };
 
 use crate::canonical::sha256;
@@ -688,7 +689,9 @@ impl ConfigIssuer {
     /// the operator-chosen mode plus the exact-next (J, R) the target's
     /// RecoveryInfo advertised and the adopted baseline. AdoptKnown binds
     /// the proven survivor by hash alone and carries no snapshot;
-    /// Reprovision carries the complete baseline to re-apply. The output
+    /// Reprovision carries the complete baseline to re-apply, and its
+    /// `snapshot_hash` must equal the baseline's domain hash — the
+    /// device enforces the same equality before restoring. The output
     /// is UNSIGNED: the lane commits it, then signs.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_recovery(
@@ -699,12 +702,23 @@ impl ConfigIssuer {
         mode: u8,
         new_store_generation: u32,
         new_revision: u64,
-        snapshot_hash: [u8; 32],
+        adopted_snapshot_hash: [u8; 32],
         baseline: &[u8],
         authority_generation: u32,
         authority_sequence: u64,
         operation_id: [u8; 16],
     ) -> Result<(ConfigRecoveryIntent, Vec<u8>), ConfigError> {
+        if mode == RCR2_MODE_REPROVISION {
+            // The carried baseline IS the adopted snapshot: the signed
+            // hash must be its domain hash, or the device must refuse
+            // the object after a wasted reservation, signature and
+            // transfer. Refusing here keeps the mismatch pre-reserve.
+            let actual = snapshot_hash(config_namespace, schema, baseline)
+                .map_err(|_| ConfigError::InvalidArgument)?;
+            if actual != adopted_snapshot_hash {
+                return Err(ConfigError::InvalidArgument);
+            }
+        }
         let intent = ConfigRecoveryIntent {
             mode,
             config_namespace,
@@ -717,7 +731,7 @@ impl ConfigIssuer {
             operation_id,
             new_store_generation,
             new_revision,
-            snapshot_hash,
+            snapshot_hash: adopted_snapshot_hash,
             baseline: baseline.to_vec(),
         };
         let mut canonical = Vec::new();
@@ -2127,6 +2141,7 @@ mod tests {
     use routeloom_wire::autonomy::EncodedPayload;
     use routeloom_wire::endpoint::{
         control_challenge_encode, control_status_encode, ConfigPhase, ConfigReason,
+        RCR2_MODE_REPROVISION,
     };
 
     fn lane_entropy() -> EntropyFn {
@@ -2844,10 +2859,13 @@ mod tests {
         }
         assert!(big.len() > 512);
         for (mode, baseline) in [(0_u8, Vec::new()), (1, snapshot)] {
+            let hash = if mode == RCR2_MODE_REPROVISION {
+                snapshot_hash(1, 1, &baseline).unwrap()
+            } else {
+                [0xAB; 32]
+            };
             let (intent, canonical) = issuer
-                .prepare_recovery(
-                    0x99, 1, 1, mode, 4, 8, [0xAB; 32], &baseline, 1, 15, [7; 16],
-                )
+                .prepare_recovery(0x99, 1, 1, mode, 4, 8, hash, &baseline, 1, 15, [7; 16])
                 .unwrap();
             assert_eq!(intent.mode, mode);
             let issued = issuer.sign_recovery(&intent, &canonical, 15).unwrap();
@@ -3017,6 +3035,20 @@ mod tests {
                 new_revision: 8,
                 snapshot_hash: [0xAB; 32],
                 baseline: vec![1; 513],
+            },
+            // A reprovision whose hash is not the carried baseline's
+            // refuses too: signing it would waste a reservation, a
+            // signature and a transfer on an object the device must
+            // reject at restore time.
+            ConfigRequest::Recover {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+                mode: 1,
+                new_store_generation: 4,
+                new_revision: 8,
+                snapshot_hash: [0xAB; 32],
+                baseline: golden_baseline(),
             },
         ] {
             let mut commit = CountingCommit::fresh();
@@ -3189,10 +3221,9 @@ mod tests {
         assert_cose_envelope(&permit.object, &permit.canonical, 0x42, ISSUE_KIND_PERMIT);
         // A recovery intent signs under its own AAD.
         let baseline = config_tlv_encode(&[field(2, ConfigFieldType::U8, &[3])]).unwrap();
+        let hash = snapshot_hash(1, 1, &baseline).unwrap();
         let (intent, canonical) = issuer
-            .prepare_recovery(
-                0x99, 1, 1, 1, 4, 8, [0xAB; 32], &baseline, 1, 10, [0x6B; 16],
-            )
+            .prepare_recovery(0x99, 1, 1, 1, 4, 8, hash, &baseline, 1, 10, [0x6B; 16])
             .unwrap();
         let recovery = issuer.sign_recovery(&intent, &canonical, 10).unwrap();
         assert_eq!(recovery.profile, ISSUE_PROFILE_COSE);
@@ -3303,6 +3334,199 @@ mod tests {
     }
 
     #[test]
+    fn recover_lane_drives_cose_trip_to_a_cose_target() {
+        // The §9.3 linkage: the same full RCR2 trip as the dev case,
+        // but issued under the COSE profile — the transfer carries a
+        // tag-18 COSE_Sign1 envelope (never aad || RCR2 || tag16), and
+        // the stored original is byte-identical to it.
+        let (_db, mut commit) = TempDb::open("recover-trip-cose");
+        let mut lane = ConfigLane::new(
+            {
+                let mut issuer = ConfigIssuer::new(DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+                issuer.set_profile(ISSUE_PROFILE_COSE);
+                issuer.set_cose_signer(cose_signer());
+                issuer
+            },
+            1,
+            lane_entropy(),
+        );
+        let (req1, body1) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        assert_eq!(body1[1], SUB_CONFIG_RECOVER);
+        let transfer = host_ops::decode_config_recover(&body1).unwrap();
+        assert_eq!(transfer.target, 0x99);
+        assert_eq!(&transfer.object[..2], &[0xD2, 0x84]);
+        let (req2, body2) = emit(lane.on_reply(
+            &mut commit,
+            req1,
+            &transfer_ack(SUB_CONFIG_RECOVER, 0x99),
+            1_100,
+        ));
+        assert_eq!(body2[1], host_ops::SUB_CONFIG_QUERY);
+        let op = host_ops::decode_config_query(&body2).unwrap().operation_id;
+        let outcome = done(lane.on_reply(
+            &mut commit,
+            req2,
+            &status_reply(0x99, &control_status(op)),
+            1_200,
+        ));
+        assert_eq!(outcome, ConfigOutcome::Statused(control_status(op)));
+        assert!(!lane.busy());
+        let (canonical, signed) = commit.issue_original(&op).expect("stored original");
+        assert_eq!(signed, transfer.object);
+        let intent = routeloom_wire::endpoint::config_recovery_decode(&canonical).unwrap();
+        assert_eq!(intent.mode, 0);
+        assert_eq!(intent.new_store_generation, 4);
+        assert_eq!(intent.new_revision, 8);
+        assert_eq!(intent.authority_generation, 1);
+        assert_eq!(intent.authority_sequence, 1);
+        assert_eq!(intent.snapshot_hash, [0xAB; 32]);
+    }
+
+    /// A ledger that refuses every commit: the authority store stopped
+    /// or faulted mid-disaster.
+    struct RefusingLedger;
+
+    impl crate::send_store::ConfigAuthorityLedger for RefusingLedger {
+        fn issue_reserve(
+            &mut self,
+            _identity: &crate::send_store::IssueIdentity,
+        ) -> Result<u64, crate::send_store::IssueRefusal> {
+            Err(crate::send_store::IssueRefusal::Unprovable)
+        }
+
+        fn issue_bind(
+            &mut self,
+            _op_id: &[u8; 16],
+            _canonical: &[u8],
+        ) -> Result<(), crate::send_store::IssueRefusal> {
+            Err(crate::send_store::IssueRefusal::Unprovable)
+        }
+
+        fn issue_signed(
+            &mut self,
+            _op_id: &[u8; 16],
+            _signed: &[u8],
+        ) -> Result<(), crate::send_store::IssueRefusal> {
+            Err(crate::send_store::IssueRefusal::Unprovable)
+        }
+
+        fn issue_original(&mut self, _op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
+            None
+        }
+    }
+
+    #[test]
+    fn trust_install_transfers_while_the_ledger_is_stopped() {
+        // The §9.3 linkage: root delivery takes no ledger at all, so a
+        // stopped authority store must not block the rotation a
+        // disaster recovery depends on.
+        let mut lane = make_lane();
+        let mut commit = RefusingLedger;
+        let manifest = test_manifest();
+        let (req1, body1) = emit(lane.submit(
+            &mut commit,
+            ConfigRequest::TrustInstall {
+                target: 0x99,
+                network: 0xAAAA,
+                manifest: manifest.clone(),
+            },
+            1_000,
+        ));
+        assert_eq!(body1[1], SUB_CONFIG_TRUST);
+        let transfer = host_ops::decode_config_trust(&body1).unwrap();
+        assert_eq!(transfer.manifest, manifest);
+        let (req2, body2) = emit(lane.on_reply(
+            &mut commit,
+            req1,
+            &transfer_ack(SUB_CONFIG_TRUST, 0x99),
+            1_100,
+        ));
+        assert_eq!(body2[1], SUB_CONFIG_TRUST_STATUS);
+        let query = host_ops::decode_config_trust_status(&body2).unwrap();
+        let status = TrustStatus {
+            nonce_echo: query.nonce,
+            store_epoch: 2,
+            min_authority_generation: 2,
+            network: 0xAAAA,
+            image_fingerprint: [0xF1; 32],
+            anchor_count: 1,
+            key_count: 2,
+            revocation_count: 0,
+            flags: 0,
+        };
+        let outcome =
+            done(lane.on_reply(&mut commit, req2, &trust_status_reply(0x99, &status), 1_200));
+        assert_eq!(outcome, ConfigOutcome::TrustStatus(status));
+        assert!(!lane.busy());
+    }
+
+    #[test]
+    fn lane_rebinds_issuance_to_the_recovered_generation() {
+        // The host half of T06: after the authority disaster the
+        // operator applies the recovered ledger's generation to the
+        // lane (the same seam dispatch drives per issuance) over a
+        // reprovisioned store lineage, and later objects bind the new
+        // generation — while the old lineage refuses to rotate.
+        let mut lane = make_lane();
+        let (_db, mut commit) = TempDb::open("gen-rebind-1");
+        let (req1, body1) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        assert_eq!(body1[1], SUB_CONFIG_RECOVER);
+        let (req2, body2) = emit(lane.on_reply(
+            &mut commit,
+            req1,
+            &transfer_ack(SUB_CONFIG_RECOVER, 0x99),
+            1_100,
+        ));
+        let op1 = host_ops::decode_config_query(&body2).unwrap().operation_id;
+        let outcome = done(lane.on_reply(
+            &mut commit,
+            req2,
+            &status_reply(0x99, &control_status(op1)),
+            1_200,
+        ));
+        assert_eq!(outcome, ConfigOutcome::Statused(control_status(op1)));
+        let (canonical1, _) = commit.issue_original(&op1).expect("first original");
+        let first = routeloom_wire::endpoint::config_recovery_decode(&canonical1).unwrap();
+        assert_eq!(first.authority_generation, 1);
+        assert_eq!(first.authority_sequence, 1);
+
+        // Disaster + recovery: the new generation over a fresh lineage.
+        lane.set_authority(2);
+        let (_db2, mut commit2) = TempDb::open("gen-rebind-2");
+        let (req3, body3) = emit(lane.submit(&mut commit2, recover_request(), 2_000));
+        assert_eq!(body3[1], SUB_CONFIG_RECOVER);
+        let (req4, body4) = emit(lane.on_reply(
+            &mut commit2,
+            req3,
+            &transfer_ack(SUB_CONFIG_RECOVER, 0x99),
+            2_100,
+        ));
+        let op2 = host_ops::decode_config_query(&body4).unwrap().operation_id;
+        assert_ne!(op1, op2);
+        let outcome = done(lane.on_reply(
+            &mut commit2,
+            req4,
+            &status_reply(0x99, &control_status(op2)),
+            2_200,
+        ));
+        assert_eq!(outcome, ConfigOutcome::Statused(control_status(op2)));
+        let (canonical2, _) = commit2.issue_original(&op2).expect("second original");
+        let second = routeloom_wire::endpoint::config_recovery_decode(&canonical2).unwrap();
+        assert_eq!(second.authority_generation, 2);
+        assert_eq!(second.authority_sequence, 1);
+
+        // The old lineage pins generation 1: issuing the recovered
+        // generation against it refuses instead of rotating in place.
+        let mut lane2 = make_lane();
+        lane2.set_authority(2);
+        assert_eq!(
+            done(lane2.submit(&mut commit, recover_request(), 3_000)),
+            ConfigOutcome::Refused(ConfigOpsResult::Denied)
+        );
+        assert!(!lane2.busy());
+    }
+
+    #[test]
     fn trust_queries_bind_nonce_network_and_namespace() {
         let mut lane = make_lane();
         let mut commit = crate::send_store::MemoryOperationStore::new([0xC0; 16]);
@@ -3390,6 +3614,233 @@ mod tests {
             ConfigOutcome::RecoveryInfo(info)
         );
         assert!(!lane.busy());
+    }
+
+    /// Fixed issuance inputs for the signed golden vectors: every byte
+    /// the envelope binds is pinned here, so re-signing reproduces the
+    /// checked-in objects bit-for-bit (dev HMAC and RFC-6979 COSE are
+    /// both deterministic). The C++ suite verifies the same objects
+    /// through the production Dev/COSE verifiers — the cross-language
+    /// interop proof for the RCR2/RCC1 envelopes.
+    struct GoldenCase {
+        name: &'static str,
+        profile: &'static str,
+        kind: u8,
+        mode: u8,
+        op_id: [u8; 16],
+        sequence: u64,
+        reprovision: bool,
+    }
+
+    const GOLDEN_CASES: [GoldenCase; 6] = [
+        GoldenCase {
+            name: "dev_permit",
+            profile: "dev-hmac-sha256-16",
+            kind: ISSUE_KIND_PERMIT,
+            mode: 0,
+            op_id: [0x51; 16],
+            sequence: 9,
+            reprovision: false,
+        },
+        GoldenCase {
+            name: "dev_recovery_adopt",
+            profile: "dev-hmac-sha256-16",
+            kind: ISSUE_KIND_RECOVERY,
+            mode: 0,
+            op_id: [0x52; 16],
+            sequence: 10,
+            reprovision: false,
+        },
+        GoldenCase {
+            name: "dev_recovery_reprovision",
+            profile: "dev-hmac-sha256-16",
+            kind: ISSUE_KIND_RECOVERY,
+            mode: 1,
+            op_id: [0x53; 16],
+            sequence: 11,
+            reprovision: true,
+        },
+        GoldenCase {
+            name: "cose_permit",
+            profile: "rlcp1-cose-esp256",
+            kind: ISSUE_KIND_PERMIT,
+            mode: 0,
+            op_id: [0x54; 16],
+            sequence: 9,
+            reprovision: false,
+        },
+        GoldenCase {
+            name: "cose_recovery_adopt",
+            profile: "rlcp1-cose-esp256",
+            kind: ISSUE_KIND_RECOVERY,
+            mode: 0,
+            op_id: [0x55; 16],
+            sequence: 10,
+            reprovision: false,
+        },
+        GoldenCase {
+            name: "cose_recovery_reprovision",
+            profile: "rlcp1-cose-esp256",
+            kind: ISSUE_KIND_RECOVERY,
+            mode: 1,
+            op_id: [0x56; 16],
+            sequence: 11,
+            reprovision: true,
+        },
+    ];
+
+    const GOLDEN_DEV_KEY: [u8; 32] = [0x45; 32];
+
+    fn golden_baseline() -> Vec<u8> {
+        // {f1:u8=2} through the same encoder the lane uses — inside the
+        // SDK schema (f1 allows 0..=2) so a real journal can deliver
+        // the vector instead of refusing it at restore time.
+        config_tlv_encode(&[field(1, ConfigFieldType::U8, &[2])]).unwrap()
+    }
+
+    fn golden_issuer(profile: u8) -> ConfigIssuer {
+        let mut issuer = ConfigIssuer::new(GOLDEN_DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+        if profile == ISSUE_PROFILE_COSE {
+            issuer.set_profile(ISSUE_PROFILE_COSE);
+            issuer.set_cose_signer(cose_signer());
+        }
+        issuer
+    }
+
+    fn golden_issue(case: &GoldenCase) -> (Vec<u8>, Vec<u8>) {
+        // Match the full profile name: "rlcp1-cose-esp256" does not
+        // start with "cose", and a prefix test here silently signs the
+        // COSE vectors with the dev key under a COSE label.
+        let profile = if case.profile == "rlcp1-cose-esp256" {
+            ISSUE_PROFILE_COSE
+        } else {
+            ISSUE_PROFILE_DEV
+        };
+        let mut issuer = golden_issuer(profile);
+        if case.kind == ISSUE_KIND_PERMIT {
+            let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
+            let ch = challenge(1, 1, &base, 4);
+            issuer.note_challenge(&ch, 0x99, 1_000).unwrap();
+            let draft = match issuer
+                .prepare_propose(
+                    0x99,
+                    1,
+                    1,
+                    &base,
+                    &[field(1, ConfigFieldType::U8, &[2])],
+                    0,
+                    1_100,
+                    1,
+                    case.sequence,
+                    case.op_id,
+                )
+                .unwrap()
+            {
+                ProposeOutcome::Draft(draft) => draft,
+                ProposeOutcome::NoChange => panic!("golden must draft"),
+            };
+            let issued = issuer.sign_permit(&draft, case.sequence).unwrap();
+            assert_eq!(issued.operation_id, case.op_id);
+            (issued.canonical, issued.object)
+        } else {
+            let baseline = if case.reprovision {
+                golden_baseline()
+            } else {
+                Vec::new()
+            };
+            // Adopt binds the external survivor by its (pinned) hash; a
+            // reprovision binds the carried baseline's own domain hash —
+            // a placeholder here signs an object no device may deliver.
+            let hash = if case.reprovision {
+                snapshot_hash(1, 1, &baseline).unwrap()
+            } else {
+                [0xAB; 32]
+            };
+            let (intent, canonical) = issuer
+                .prepare_recovery(
+                    0x99,
+                    1,
+                    1,
+                    case.mode,
+                    4,
+                    8,
+                    hash,
+                    &baseline,
+                    1,
+                    case.sequence,
+                    case.op_id,
+                )
+                .unwrap();
+            let issued = issuer
+                .sign_recovery(&intent, &canonical, case.sequence)
+                .unwrap();
+            assert_eq!(issued.operation_id, case.op_id);
+            (issued.canonical, issued.object)
+        }
+    }
+
+    fn golden_json(case: &GoldenCase, canonical: &[u8], object: &[u8]) -> String {
+        let profile = if case.profile.starts_with("cose") {
+            ISSUE_PROFILE_COSE
+        } else {
+            ISSUE_PROFILE_DEV
+        };
+        let key_field = if profile == ISSUE_PROFILE_COSE {
+            format!(
+                "\"authority_pubkey_hex\":\"{}\"",
+                hex_lower(&cose_signer().pubkey())
+            )
+        } else {
+            format!("\"dev_key_hex\":\"{}\"", hex_lower(&GOLDEN_DEV_KEY))
+        };
+        format!(
+            "{{\n  \"authority\":66,\n  \"authority_generation\":1,\n  \"authority_sequence\":{},\
+             \n  \"canonical_hex\":\"{}\",\n  \"codec\":\"config_signed_object\",\n  \
+             \"config_namespace\":1,\n  \"expect\":\"ok\",\n  \"format\":\"routeloom-config-signed-v1-golden\",\
+             \n  \"kind\":{},\n  \"mode\":{},\n  \"name\":\"{}\",\n  \"network\":43690,\
+             \n  \"object_hex\":\"{}\",\n  \"operation_id_hex\":\"{}\",\n  \"profile\":\"{}\",\
+             \n  \"schema\":1,\n  \"target\":153,\n  {}\n}}\n",
+            case.sequence,
+            hex_lower(canonical),
+            case.kind,
+            case.mode,
+            case.name,
+            hex_lower(object),
+            hex_lower(&case.op_id),
+            case.profile,
+            key_field
+        )
+    }
+
+    #[test]
+    fn signed_golden_vectors_match() {
+        // The checked-in objects under protocol/config-signed-golden are
+        // the cross-language contract: this test re-issues every vector
+        // from fixed inputs and requires byte-identical output, while
+        // the C++ suite verifies the same bytes through the production
+        // Dev/COSE verifiers. Refresh with ROUTELOOM_WRITE_GOLDEN=1 and
+        // review the diff — a changed byte is a wire break.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../protocol/config-signed-golden");
+        let write = std::env::var("ROUTELOOM_WRITE_GOLDEN").as_deref() == Ok("1");
+        if write {
+            std::fs::create_dir_all(&dir).unwrap();
+        }
+        for case in &GOLDEN_CASES {
+            let (canonical, object) = golden_issue(case);
+            let rendered = golden_json(case, &canonical, &object);
+            let path = dir.join(format!("{}.json", case.name));
+            if write {
+                std::fs::write(&path, &rendered).unwrap();
+                continue;
+            }
+            let checked_in = std::fs::read_to_string(&path).expect("golden vector checked in");
+            assert_eq!(
+                rendered, checked_in,
+                "golden {} drifted — re-sign mismatch",
+                case.name
+            );
+        }
     }
 
     /// Structural + cryptographic assertions for one COSE envelope: the
