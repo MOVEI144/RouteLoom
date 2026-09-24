@@ -132,7 +132,7 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 
 **イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`gk.rotated`・`cutover.progress`は対応する機能（P5・P6-2）が無いので出さない。
 
-**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かず同じMemberCertを再発行（`member.reissued`）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（先に既存membershipをrevokeする）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定し、revoke済みの行は競合にしない（別kidの参加は`previously_removed:true`の要求で、明示allowがgenerationを進めて置換する）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyなら保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
+**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かず同じMemberCertを再発行（`member.reissued`）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（先に既存membershipをrevokeする）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定し、revoke済みの行は競合にしない（別kidの参加は`previously_removed:true`の要求で、明示allowがgenerationを進めて置換する）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyならidempotency記録の保持範囲（最新1,024件）内で保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。別keyへの成功応答もそのkeyのidempotency記録として残る。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
 
 **永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由）、`ledger`（approve/revokeのSHA-256 hash chain。起動時に検証し、切れていれば拒否）、`rrs`（発行した全RRS1）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertを発行する`site-cert`（P7-2）は未実装。
 
@@ -250,7 +250,7 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 | USB再接続 | 新しいUSB sessionで0x45を再送し、gatewayのGK状態を一致させる |
 | 台帳・store失敗 | 参加はAuthorityBusy、revokeはエラー。成功へ変換しない |
 | 同じNodeIdで別kid（有効なmembership） | 別の機器として扱い`join.request`に`kid_conflict:true`。自動allowしない。revoke済みの行は競合にせず、明示allowで置換できる |
-| 決定済み要求への別key再allow | 承認した(kid, generation)がmemberとして有効なら保存済み応答、失効・置換済みならCONFLICT。同一idempotency keyの再送は常に保存済み応答 |
+| 決定済み要求への別key再allow | 承認した(kid, generation)がmemberとして有効なら保存済み応答（そのkeyにも記録）、失効・置換済みならCONFLICT。同一idempotency keyの再送は記録の保持範囲（最新1,024件）内で保存済み応答 |
 
 ## 8. 受入試験（planned_not_run）
 

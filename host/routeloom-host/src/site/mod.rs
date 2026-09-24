@@ -1551,6 +1551,16 @@ impl SiteAuthority {
                             "the membership this request committed is no longer live (removed or replaced)",
                         ));
                     }
+                    // The answer this caller receives is also stored under
+                    // its key, so its own resends replay under the
+                    // idempotency contract even after the state moves on.
+                    let mut batch = Batch::default();
+                    self.decision_doc(&mut batch, principal, &request.key, digest, result, now_ms);
+                    if let Err(error) = self.store.commit(&batch) {
+                        self.store_error(now_ms, &error);
+                        return Err(store_failure(&error));
+                    }
+                    self.remember_decision(principal, &request.key, digest, result, now_ms);
                     return Ok(result.clone());
                 }
             }

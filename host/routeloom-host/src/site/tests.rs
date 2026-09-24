@@ -1296,8 +1296,22 @@ fn review_late_allow_follows_the_current_membership() {
     )
     .unwrap();
     assert_eq!(replay, first);
-    // …but a new key asks again and is checked against the current row:
-    // CONFLICT, nothing committed, the device stays removed.
+    // …and so does a different key that already received the committed
+    // answer — it was recorded under its own key at the live replay…
+    let recorded = decide(
+        &service,
+        id_c,
+        c.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "c2",
+        T0 + 2_335,
+    )
+    .unwrap();
+    assert_eq!(recorded, first);
+    // …but an unrecorded key asks again and is checked against the
+    // current row: CONFLICT, nothing committed, the device stays removed.
     let stale = decide(
         &service,
         id_c,
