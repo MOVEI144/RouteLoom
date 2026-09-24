@@ -298,10 +298,24 @@ rl_status_code_t rl_send(rl_context_t* context, rl_node_id_t destination,
 rl_status_code_t rl_cancel(rl_context_t* context, rl_message_id_t id);
 rl_status_code_t rl_get_delivery(rl_context_t* context, rl_message_id_t id,
                                  rl_delivery_result_t* out_result);
+/* Owner-task contract (issue #60-3): rl_poll, rl_on_radio_receive and
+   rl_on_radio_tx_result must run on the node's single owner task — the
+   same context that calls rl_poll. Radio driver TX/RX callbacks are NOT
+   the owner task: a callback must only capture/stage the event, hand it
+   to the owner task (queue, notification, etc.), and return. The owner
+   task drains staged events — invoking these handlers — and then calls
+   rl_poll, which is where the next frame is submitted. Calling
+   rl_on_radio_tx_result from inside a driver completion callback is
+   unsupported: the completion would be resolved on the driver's context
+   and any future dispatch there would re-enter a non-reentrant radio
+   driver through vtable send(). */
 void rl_poll(rl_context_t* context, rl_monotonic_ms_t now_ms);
 void rl_on_radio_receive(rl_context_t* context, rl_node_id_t peer,
                          const uint8_t* frame, size_t frame_size, int8_t rssi_dbm,
                          rl_monotonic_ms_t now_ms);
+/* Resolves the in-flight send only — the next submission comes from the
+   following rl_poll, after every staged event (including RX, whose
+   control replies keep lane priority over queued DATA) has drained. */
 void rl_on_radio_tx_result(rl_context_t* context, uint64_t token, bool success,
                            rl_monotonic_ms_t now_ms);
 /* Effective routing profile of an initialised context: copies up to
