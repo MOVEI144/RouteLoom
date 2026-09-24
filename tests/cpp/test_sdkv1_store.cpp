@@ -748,11 +748,16 @@ void test_revocation_accept() {
   garbage.bytes[0] = 0xD3;
   CHECK(store.accept(garbage.view(), sak().pub, kSiteId, kNetwork).code ==
         StatusCode::ProtocolError);
-  // Same-network compression is refused: only verified cutover starts a new history.
+  // Raising the floor within the same network does not authorize dropping
+  // entries; a replacement that retains them remains valid.
   const auto dropped = revocation_object(revocation_set(16, 0, kSiteEpoch));
-  CHECK(store.accept(dropped.view(), sak().pub, kSiteId, kNetwork).code == StatusCode::Conflict);
+  CHECK(store.accept(dropped.view(), sak().pub, kSiteId, kNetwork).code ==
+        StatusCode::Conflict);
   const auto retained = revocation_object(revocation_set(16, 2, kSiteEpoch));
   CHECK_OK(store.accept(retained.view(), sak().pub, kSiteId, kNetwork));
+  CHECK(store.set().count == 2 && store.rejects(kNode, 3, kSiteEpoch - 1));
+  // A new-network set — the cutover adoption shape, where the caller's RLS1
+  // expectation moved first — starts its own history.
   const NetworkId next_network =
       (static_cast<NetworkId>(kSiteEpoch + 1) << 32U) | kNetworkLow;
   const auto next_set =

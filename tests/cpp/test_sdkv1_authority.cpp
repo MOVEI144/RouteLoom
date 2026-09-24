@@ -511,6 +511,10 @@ struct FakeEnv final : rlres1::Environment {
     return true;  // initiator never spends a responder slot
   }
 
+  bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
+    return false;
+  }
+
   bool revoked(NodeId, std::uint32_t) noexcept override { return false; }
 
   bool allocate_context_id(rlres1::Purpose, NodeId, std::uint32_t& cid) noexcept override {
@@ -581,6 +585,10 @@ struct FakeAuthorityEnv final : rlres1::Environment {
   }
   bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
     return true;  // fake authority has a verified, unexpired DAMS
+  }
+
+  bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
+    return true;
   }
 
   bool revoked(NodeId, std::uint32_t) noexcept override { return false; }
