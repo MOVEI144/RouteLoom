@@ -136,6 +136,16 @@ Status config_sdk_field_validate(const endpoint::ConfigField& field) noexcept;
 // unknown ids fail closed (no silent defaulting into an effect).
 Status config_sdk_field_default(std::uint16_t field_id, std::uint8_t& value) noexcept;
 
+// The four SDK effective values in field-id order (1 diagnostics, 2
+// discovery, 3 relay, 4 migration). Decode fills omissions with
+// config_sdk_field_default (04 §4.2) — the complete state an empty or
+// partial snapshot denotes. Providers expand recovery baselines through
+// this; unknown ids fail closed (no silent defaulting into an effect).
+struct ConfigSdkEffective {
+  std::uint8_t values[4];
+};
+Status config_sdk_effective_values(ByteView tlv, ConfigSdkEffective& out) noexcept;
+
 // Per-namespace schema validation for application namespaces. Registered
 // with the namespace; SDK ns=1 uses config_sdk_field_validate instead.
 class ConfigSchemaValidator {
@@ -270,6 +280,10 @@ class ConfigProvider {
                          ByteView next_snapshot) noexcept = 0;
   virtual Status apply(std::uint16_t config_namespace, ByteView next_snapshot,
                        OperationToken& token) noexcept = 0;
+  // Idempotent re-application of a complete desired state. An empty
+  // snapshot denotes the defined initial baseline (the SDK full
+  // defaults): providers expand it, never skip it, and fail closed when
+  // their schema cannot express it.
   virtual Status restore(std::uint16_t config_namespace, ByteView snapshot,
                          OperationToken& token) noexcept = 0;
   // Recovery capability probe (04 §4.7): whether this provider can restore

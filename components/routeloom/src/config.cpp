@@ -340,6 +340,27 @@ Status config_sdk_field_default(const std::uint16_t field_id,
   }
 }
 
+Status config_sdk_effective_values(const ByteView tlv, ConfigSdkEffective& out) noexcept {
+  for (std::uint16_t id = 1; id <= 4; ++id) {
+    const Status status = config_sdk_field_default(id, out.values[id - 1]);
+    if (!status) return status;
+  }
+  // The SDK schema has exactly four known fields: decode capacity 4 is
+  // semantically exact — any fifth field is a duplicate, unsorted, or an
+  // unknown id, all of which fail closed.
+  ConfigField fields[4]{};
+  std::uint16_t count = 0;
+  Status status = config_tlv_decode(tlv, fields, 4, count);
+  if (!status) return status;
+  for (std::uint16_t i = 0; i < count; ++i) {
+    status = config_sdk_field_validate(fields[i]);
+    if (!status) return status;
+    // Validated above: only ids 1..4 reach here.
+    out.values[fields[i].field_id - 1] = fields[i].value[0];
+  }
+  return Status::success();
+}
+
 ConfigNamespaceTable::ConfigNamespaceTable() noexcept {
   entries_[0] = ConfigNamespaceEntry{};
   size_ = 1;
@@ -1066,6 +1087,31 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
   if (floor_j > 0 || floor_r > 0) {
     return quarantine(StatusCode::RecoveryRequired,
                       "config journal lost: security floor holds the counters");
+  }
+  if (provider_ != nullptr) {
+    // Factory gate (04 §4.2): a provisioned-zero floor with no journal
+    // history must not adopt a stranger's provider blob as the first
+    // update's base — never declare an empty initial snapshot while
+    // provider state remains. A non-empty image restores the defined
+    // initial baseline (empty: the provider expands its own defaults)
+    // behind the standard boot-restore gate, so intake opens only after
+    // the readback proves it. An unreadable provider fails closed:
+    // privileged intake stops until managed re-provisioning.
+    auto& probe = readback_;
+    probe.fill(0);
+    std::size_t probe_size = 0;
+    const Status provider_read = provider_->read_active(
+        config_.config_namespace, MutableByteView{probe.data(), probe.size()},
+        probe_size);
+    if (!provider_read) {
+      return Status::error(StatusCode::RecoveryRequired,
+                           "config provider unreadable: managed reprovisioning required");
+    }
+    if (probe_size > 0) {
+      boot_.restore_snapshot.clear();
+      boot_.restore_pending = true;
+      boot_.resolve = false;
+    }
   }
   active_snapshot_.clear();
   Status status = config_snapshot_hash(config_.config_namespace, config_.schema,

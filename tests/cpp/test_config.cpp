@@ -3973,6 +3973,128 @@ void test_power_floor_unreadable() {
 // initialization fails, all intake refuses, managed re-provisioning
 // recovers. No duplicate here.
 
+// SDK effective values (04 §4.2): omissions fill with the schema defaults;
+// unknown ids fail closed — no silent defaulting into an effect.
+void test_sdk_effective_values() {
+  ConfigSdkEffective eff{};
+  CHECK_OK(config_sdk_effective_values(ByteView{}, eff));
+  CHECK(eff.values[0] == 2 && eff.values[1] == 1 && eff.values[2] == 1 &&
+        eff.values[3] == 0);
+  const ConfigField partial[] = {sdk_u8(1, 0)};
+  const auto partial_snap = snapshot_of(partial, 1);
+  CHECK_OK(config_sdk_effective_values(partial_snap.view(), eff));
+  CHECK(eff.values[0] == 0 && eff.values[1] == 1 && eff.values[2] == 1 &&
+        eff.values[3] == 0);
+  const ConfigField full[] = {sdk_u8(1, 0), sdk_bool(2, false),
+                              sdk_bool(3, false), sdk_u8(4, 2)};
+  const auto full_snap = snapshot_of(full, 4);
+  CHECK_OK(config_sdk_effective_values(full_snap.view(), eff));
+  CHECK(eff.values[0] == 0 && eff.values[1] == 0 && eff.values[2] == 0 &&
+        eff.values[3] == 2);
+  const ConfigField unknown[] = {sdk_u8(5, 0)};
+  const auto unknown_snap = snapshot_of(unknown, 1);
+  CHECK(config_sdk_effective_values(unknown_snap.view(), eff).code ==
+        StatusCode::Unsupported);
+  const ConfigField bad_range[] = {sdk_u8(1, 3)};
+  const auto bad_range_snap = snapshot_of(bad_range, 1);
+  CHECK(config_sdk_effective_values(bad_range_snap.view(), eff).code ==
+        StatusCode::InvalidArgument);
+  ConfigField wrong_type = sdk_bool(2, true);
+  wrong_type.type = ConfigFieldType::U8;
+  const auto wrong_type_snap = snapshot_of(&wrong_type, 1);
+  CHECK(config_sdk_effective_values(wrong_type_snap.view(), eff).code ==
+        StatusCode::InvalidArgument);
+  // Wire-order violations fail at decode, before any defaulting.
+  const std::uint8_t unsorted[] = {0x02, 0x00, 0x01, 0x01, 0x00, 0x00,
+                                   0x01, 0x00, 0x02, 0x01, 0x00, 0x02};
+  CHECK(config_sdk_effective_values(ByteView{unsorted, sizeof(unsorted)}, eff)
+            .code == StatusCode::ProtocolError);
+  const std::uint8_t duplicate[] = {0x01, 0x00, 0x02, 0x01, 0x00, 0x02,
+                                    0x01, 0x00, 0x02, 0x01, 0x00, 0x01};
+  CHECK(config_sdk_effective_values(ByteView{duplicate, sizeof(duplicate)}, eff)
+            .code == StatusCode::ProtocolError);
+  const std::uint8_t truncated[] = {0x01, 0x00, 0x02, 0x01, 0x00};
+  CHECK(config_sdk_effective_values(ByteView{truncated, sizeof(truncated)}, eff)
+            .code == StatusCode::ProtocolError);
+}
+
+// Factory gate (04 §4.2): a provisioned-zero floor with no journal history
+// and a stranger's provider blob restores the initial baseline behind the
+// boot gate instead of adopting the blob — intake opens only after the
+// readback proves it, and nothing is ever decided for the repair.
+void test_factory_gate_stale_provider() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  const ConfigField stale_fields[] = {sdk_u8(1, 0)};
+  const auto stale = snapshot_of(stale_fields, 1);
+  rig.provider.seed(stale.view());
+  rig.boot(now_ms);
+  CHECK_OK(rig.boot_status_);
+  ConfigVerdict verdict{};
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  CHECK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict).code ==
+        StatusCode::Busy);
+  CHECK(rig.provider.restore_calls == 0);  // restore starts in maintenance
+  drain(rig, now_ms);
+  CHECK(rig.provider.restore_calls == 1);
+  CHECK(rig.provider.active_.size == 0);  // initial baseline restored
+  CHECK(rig.floor_j() == 0);
+  CHECK(rig.floor_r() == 0);
+  CHECK(rig.journal->phase() == ConfigPhase::Idle);  // repair decides nothing
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
+// Factory gate, unreadable provider: privileged intake stops until managed
+// re-provisioning — the journal never opens on unknown provider state.
+void test_factory_gate_unreadable_provider() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  rig.provider.fail_reads = 1;  // the factory probe read fails
+  rig.boot(now_ms);
+  CHECK(rig.boot_status_.code == StatusCode::RecoveryRequired);
+  CHECK(!rig.journal->initialized());
+  endpoint::ControlChallengeQuery query{};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK(rig.journal->handle_challenge_query(query, now_ms, encoded).code ==
+        StatusCode::InvalidState);
+  // Managed re-provisioning: a readable provider opens the journal again.
+  rig.boot(now_ms += 10);
+  CHECK_OK(rig.boot_status_);
+  ConfigVerdict verdict{};
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+}
+
+// Capability refusal (§5.5): validate_recovery answers Unsupported before
+// the floor reservation — the journal stays quarantined, the counters are
+// unconsumed, and the SAME authorization lands once the provider can prove it.
+void test_recovery_unsupported_baseline() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  rig.provider.validate_recovery_result =
+      Status::error(StatusCode::Unsupported, "unverified field change");
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 22, object);
+  ConfigVerdict verdict{};
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::Unsupported);
+  CHECK(rig.provider.validate_recovery_calls == 1);
+  CHECK(rig.journal->quarantined());
+  CHECK(rig.floor_j() == 3);  // unconsumed: the authorization survives
+  CHECK(rig.floor_r() == 1);
+  rig.provider.validate_recovery_result = Status::success();
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
 int main() {
   // Schema / TLV / hash layer.
   test_tlv_layer();
@@ -3981,6 +4103,7 @@ int main() {
   test_namespace_table();
   test_rate_limiter();
   test_sdk_field_rules();
+  test_sdk_effective_values();
   // C01-C14.
   test_c01_basic_flow();
   test_c02_cas_conflict();
@@ -4050,6 +4173,9 @@ int main() {
   test_power_lone_complete_mirror();
   test_power_twins_no_reply();
   test_power_floor_unreadable();
+  test_factory_gate_stale_provider();
+  test_factory_gate_unreadable_provider();
+  test_recovery_unsupported_baseline();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;
