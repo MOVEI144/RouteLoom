@@ -19,6 +19,7 @@
 
 #include "routeloom/counter_store.hpp"
 #include "routeloom/crc32.hpp"
+#include "routeloom/fail_policy.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/replay.hpp"
 #include "routeloom/secure_clear.hpp"
@@ -758,6 +759,47 @@ void test_secure_clear() {
   routeloom::secure_clear(nullptr, 0);  // null + zero size is a no-op
 }
 
+// Boot-fault escalation (issue #34): a fatal during boot first ran a silent
+// infinite vTaskDelay loop — dead until the next power cycle — and then a
+// plain esp_restart loop, which commits one NVS session write per iteration
+// forever under a persistent fault. The shared streak policy bounds the
+// cadence: exponential backoff capped at 32 s, then one retry per long
+// deep sleep.
+void test_fail_policy_backoff_schedule() {
+  CHECK(!routeloom::fail_action(0).deep_sleep);
+  CHECK(routeloom::fail_action(0).delay_ms == 500);
+  CHECK(routeloom::fail_action(1).delay_ms == 1000);
+  CHECK(routeloom::fail_action(5).delay_ms == 16000);
+  CHECK(routeloom::fail_action(6).delay_ms == 32000);
+  CHECK(routeloom::fail_action(7).delay_ms == 32000);  // capped, still restart
+  // Below the streak cap every action is a restart; at/over it the node
+  // must stop restarting and deep sleep instead.
+  CHECK(!routeloom::fail_action(routeloom::kFailSleepStreakMin - 1)
+             .deep_sleep);
+  CHECK(routeloom::fail_action(routeloom::kFailSleepStreakMin).deep_sleep);
+  CHECK(routeloom::fail_action(routeloom::kFailSleepStreakMin).delay_ms ==
+        routeloom::kFailSleepMs);
+  CHECK(routeloom::fail_action(1000000).deep_sleep);
+}
+
+void test_fail_policy_bounds_boot_loop_writes() {
+  // The issue's scenario, arithmetically: NVS init fails on every boot and
+  // each boot commits one session write. Under the policy the first
+  // kFailSleepStreakMin boots cost only their backoff; every further boot
+  // costs a full deep sleep — so the number of boots per day is bounded
+  // instead of one write per uncapped restart iteration.
+  std::uint64_t elapsed_ms = 0;
+  std::uint64_t boots = 0;
+  std::uint32_t streak = 0;
+  constexpr std::uint64_t kDayMs = 24ULL * 60 * 60 * 1000;
+  while (elapsed_ms < kDayMs) {
+    ++boots;
+    elapsed_ms += routeloom::fail_action(streak++).delay_ms;
+  }
+  CHECK(boots <= routeloom::kFailSleepStreakMin +
+                     kDayMs / routeloom::kFailSleepMs + 1);
+}
+
 
 // Issue #29/#48 (Wire v2): epochs are 32-bit, so a node that has booted more
 // than 65,535 times keeps working. v1 wrapped the u16 epoch 0xFFFF -> 1,
@@ -1278,6 +1320,8 @@ int main() {
   test_security_profile_marker();
   test_plaintext_data_rejected();
   test_secure_clear();
+  test_fail_policy_backoff_schedule();
+  test_fail_policy_bounds_boot_loop_writes();
   if (failures != 0) {
     std::fprintf(stderr, "%d hardening checks failed\n", failures);
     return 1;
