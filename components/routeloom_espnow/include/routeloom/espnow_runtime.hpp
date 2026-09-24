@@ -94,8 +94,11 @@ class EspNowRuntime final : public RadioPort,
   // kOwnerPollPeriodMs between poll_once() passes: a TX completion or RX
   // frame posted mid-sleep wakes the task NOW instead of riding out the
   // poll period — the TX-complete -> next-submit path keeps no tick tax
-  // (issue #60-3). Thin peek: the event stays queued for poll_once's
-  // ordered drain (reserved completions still run first).
+  // (issue #60-3). Completions staged outside the queue (queue-full TX
+  // callbacks that landed after the pass's entry check) skip the wait via
+  // the shared owner gate — an empty queue must not idle a resolvable
+  // job. Thin peek: the event stays queued for poll_once's ordered drain
+  // (reserved completions still run first).
   void wait_for_event(MonotonicMs timeout_ms) noexcept;
 
   // Attach the autonomy stack: `engine` must be constructed with this

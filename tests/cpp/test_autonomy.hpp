@@ -6,8 +6,10 @@
 //     survey channel cannot receive on its home channel — the model D5 tests
 //     build on; it does not claim to reproduce real CCA or capture effects).
 //   - OwnerPump: the firmware owner-task model — driver callbacks post
-//     events, the task wakes on the event or the poll tick (whichever is
-//     first, routeloom/owner_pump.hpp), drains the queue, then polls.
+//     events (or stage a completion on the queue-full path), the task
+//     waits through the shared owner gate (routeloom/owner_pump.hpp —
+//     staged work skips the wait, otherwise the event or the poll tick
+//     wakes it), drains staged-then-queued events, then polls.
 //   - ScriptedEntropy: a deterministic entropy source for nonce/fuzz inputs.
 
 #include <cstdint>
@@ -143,11 +145,13 @@ class FakeRadioPort final : public routeloom::RadioPort {
 };
 
 // Owner-task pump model — mirrors EspNowRuntime::task_entry. Driver
-// callbacks only POST events; the owner task sleeps in wait_for_event,
-// wakes at the earlier of the next queued event and the periodic tick
-// (routeloom/owner_pump.hpp), drains the whole queue through the node
-// handlers, then polls — the ordering poll_once uses, so control replies
-// raised by inbound frames keep their lane over queued DATA (issue #60-3).
+// callbacks only POST events (or stage a completion when the queue is
+// full); the owner task waits through the shared owner gate
+// (routeloom/owner_pump.hpp — staged work skips the wait, otherwise the
+// earlier of the next queued event and the periodic tick wakes it),
+// drains the staged slot and the whole queue through the node handlers,
+// then polls — the ordering poll_once uses, so control replies raised by
+// inbound frames keep their lane over queued DATA (issue #60-3).
 class OwnerPump {
  public:
   struct Event {
@@ -182,21 +186,49 @@ class OwnerPump {
     event.frame = std::move(frame);
     events_.push_back(std::move(event));
   }
-  std::size_t pending() const { return events_.size(); }
-
-  // Task side: going idle at `idle_since_ms`, the wait returns at the
-  // earlier of the next queued event and the periodic tick — the bound
-  // EspNowRuntime::wait_for_event enforces on the driver queue.
-  routeloom::MonotonicMs wake_at(routeloom::MonotonicMs idle_since_ms) const {
-    const routeloom::MonotonicMs next =
-        events_.empty() ? UINT64_MAX : events_.front().posted_ms;
-    return routeloom::owner_wake_at(idle_since_ms, next);
+  // Queue-full path twin: firmware's TX callback stages a completion into
+  // lost_node_tx_ when the driver queue is full — AFTER the pass's entry
+  // check — while the queue itself drains empty. run_once drains the slot
+  // first (firmware order) and the wait must skip through the shared gate.
+  void post_staged_tx_result(std::uint64_t token, bool success,
+                             routeloom::MonotonicMs posted_ms) {
+    staged_.kind = Event::Kind::TxResult;
+    staged_.posted_ms = posted_ms;
+    staged_.token = token;
+    staged_.success = success;
+    staged_valid_ = true;
+  }
+  std::size_t pending() const {
+    return events_.size() + (staged_valid_ ? 1 : 0);
   }
 
-  // One owner pass at `now_ms`: drain every event the driver posted up to
-  // now (a real queue only holds what already arrived), then poll —
-  // poll_once's order (all completions and RX before the next dispatch).
+  // Task side: going idle at `idle_since_ms`, staged work runs NOW
+  // through the same shared gate firmware's wait_for_event runs
+  // (owner_pump.hpp) — never a local copy of the rule. Otherwise the wait
+  // returns at the earlier of the next queued event and the periodic tick,
+  // the bound the firmware wait enforces on the driver queue.
+  routeloom::MonotonicMs wake_at(routeloom::MonotonicMs idle_since_ms) const {
+    if (routeloom::owner_wait_timeout_ms(routeloom::kOwnerPollPeriodMs,
+                                         staged_valid_) == 0) {
+      return idle_since_ms;
+    }
+    const routeloom::MonotonicMs next =
+        events_.empty() ? UINT64_MAX : events_.front().posted_ms;
+    const routeloom::MonotonicMs tick =
+        idle_since_ms + routeloom::kOwnerPollPeriodMs;
+    return next < tick ? next : tick;
+  }
+
+  // One owner pass at `now_ms`: drain the staged slot first (firmware
+  // order — the reserved completion resolves the node's outstanding job),
+  // then every event the driver posted up to now (a real queue only holds
+  // what already arrived), then poll — all completions and RX before the
+  // next dispatch.
   void run_once(routeloom::MonotonicMs now_ms, routeloom::MeshNode& node) {
+    if (staged_valid_) {
+      staged_valid_ = false;
+      node.on_radio_tx_result(staged_.token, staged_.success, now_ms);
+    }
     while (!events_.empty() && events_.front().posted_ms <= now_ms) {
       const Event event = std::move(events_.front());
       events_.pop_front();
@@ -214,6 +246,8 @@ class OwnerPump {
 
  private:
   std::deque<Event> events_;
+  Event staged_{};
+  bool staged_valid_{false};
 };
 
 // Deterministic entropy for tests (splitmix64). Can be scripted to fail so

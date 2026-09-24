@@ -679,11 +679,12 @@ wire::EncodedFrame craft_transit_frame(TestSecurity& cipher, NodeId prev,
 
 void test_tx_result_dispatch() {
   // Issue #60-3: a driver TX completion is staged, not handled inline —
-  // the owner task wakes on the event (owner_pump.hpp's owner_wake_at,
-  // bound by EspNowRuntime::wait_for_event on the firmware queue), drains
-  // every staged event, and the following poll() submits the next frame.
-  // FakeRadioPort stamps each submission; OwnerPump models the firmware
-  // loop end to end: post -> wait -> drain -> poll.
+  // the owner task wakes on the event (EspNowRuntime::wait_for_event on
+  // the firmware queue), drains every staged event, and the following
+  // poll() submits the next frame. FakeRadioPort stamps each submission;
+  // OwnerPump models the firmware loop end to end — post -> wait -> drain
+  // -> poll — running the same shared wait gate as firmware
+  // (owner_pump.hpp).
   TestSecurity security;
   CapturingObserver observer;
   routeloom_test::FakeRadioPort radio;
@@ -715,8 +716,10 @@ void test_tx_result_dispatch() {
   radio.now_ms = 0;
   pump.run_once(0, node);
   CHECK(radio.sent.size() == 1);  // the boot advertisement is in flight
-  // With nothing staged, the wait still bounds idle at one poll period.
-  CHECK(owner_wake_at(0, UINT64_MAX) == kOwnerPollPeriodMs);
+  // With nothing staged, the wait still bounds idle at one poll period —
+  // the shared gate both sides execute (owner_pump.hpp).
+  CHECK(owner_wait_timeout_ms(kOwnerPollPeriodMs, false) == kOwnerPollPeriodMs);
+  CHECK(owner_wait_timeout_ms(kOwnerPollPeriodMs, true) == 0);
   constexpr MonotonicMs kCompletedAt = 1;
   pump.post_tx_result(radio.sent.back().token, true, kCompletedAt);
   CHECK(pump.wake_at(0) == kCompletedAt);  // the event beats the tick
@@ -758,6 +761,21 @@ void test_tx_result_dispatch() {
     pump.run_once(radio.now_ms, node);
     CHECK(radio.sent.size() == 5 && radio.sent.back().at_ms == 5);
   }
+
+  // --- staged completion skips the wait ------------------------------------
+  // Review P2: the completion lands on a full driver queue AFTER the
+  // pass's entry check, so it is staged outside the queue
+  // (firmware: lost_node_tx_; here: post_staged_tx_result) while the
+  // queue itself drains empty. The wait must still return immediately —
+  // an empty queue must not idle a resolvable job — and the next pass
+  // submits with no gap. wait_for_event runs this same gate on the
+  // firmware side (owner_pump.hpp).
+  pump.post_staged_tx_result(radio.sent.back().token, true, 5);
+  radio.now_ms = pump.wake_at(5);
+  CHECK(radio.now_ms == 5);  // staged work never sleeps out the tick
+  pump.run_once(radio.now_ms, node);
+  CHECK(radio.sent.size() == 6);
+  CHECK(radio.sent.back().at_ms == 5);  // resolved + redispatched, no gap
 
   // --- mixed TX/RX drain order --------------------------------------------
   // A TX completion and an inbound transit DATA (which owes a HOP_ACCEPT)
