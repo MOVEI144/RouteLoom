@@ -40,6 +40,7 @@
 #include <cstdint>
 
 #include "routeloom/sdkv1_store.hpp"
+#include "routeloom/sdkv1_lifecycle_store.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -51,6 +52,7 @@ inline constexpr char kIdentityNamespace[] = "rlident";
 inline constexpr char kSiteNamespace[] = "rlsite";
 inline constexpr char kRevocationNamespace[] = "rlrevo";
 inline constexpr char kResumeNamespace[] = "rlres";
+inline constexpr char kLifecycleNamespace[] = "rlmaint";
 
 inline constexpr char kIdentityKey0[] = "i0";
 inline constexpr char kIdentityKey1[] = "i1";
@@ -58,6 +60,8 @@ inline constexpr char kSiteKey0[] = "s0";
 inline constexpr char kSiteKey1[] = "s1";
 inline constexpr char kRevocationKey0[] = "r0";
 inline constexpr char kRevocationKey1[] = "r1";
+inline constexpr char kLifecycleKey0[] = "x0";
+inline constexpr char kLifecycleKey1[] = "x1";
 
 // Resume-cache slot counts (05 §3.2 / §5.1): a node keeps 16 slots, a
 // gateway 160. Key names are fixed per slot so NVS usage never grows with
@@ -107,6 +111,7 @@ class BlobRecordSlotStorage final : public RecordSlotStorage {
   static BlobRecordSlotStorage identity(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage site(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage revocation(BlobNamespace& blobs) noexcept;
+  static BlobRecordSlotStorage lifecycle(BlobNamespace& blobs) noexcept;
 
  private:
   BlobNamespace& blobs_;

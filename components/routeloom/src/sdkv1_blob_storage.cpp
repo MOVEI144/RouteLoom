@@ -87,6 +87,10 @@ BlobRecordSlotStorage BlobRecordSlotStorage::revocation(BlobNamespace& blobs) no
   return BlobRecordSlotStorage(blobs, kRevocationKey0, kRevocationKey1, kRevocationSlotBytes);
 }
 
+BlobRecordSlotStorage BlobRecordSlotStorage::lifecycle(BlobNamespace& blobs) noexcept {
+  return BlobRecordSlotStorage(blobs, kLifecycleKey0, kLifecycleKey1, kLifecycleSlotBytes);
+}
+
 // --- BlobResumeSlotStorage -------------------------------------------------------
 
 Status BlobResumeSlotStorage::slot_key(const std::size_t index, const std::size_t slot_count,

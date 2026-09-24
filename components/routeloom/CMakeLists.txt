@@ -43,6 +43,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_pop.cpp
   src/sdkv1_records.cpp
   src/sdkv1_revocation.cpp
+  src/sdkv1_lifecycle_store.cpp
   src/sdkv1_store.cpp
   src/status.cpp
   src/telemetry.cpp

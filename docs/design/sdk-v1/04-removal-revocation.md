@@ -134,8 +134,8 @@ SAK侵害または計画交換では、Site CA（オフライン）が署名す�
 | V1-R02 | 近隣がRRS1受理→即context破棄・再開slot消去・経路撤回 | P6-1 PR Aで機器sim試験（`test_sdkv1_revocation.cpp`）。実P4 adapterは未接続のためfake port |
 | V1-R03 | gossip：authorityから遠いmemberへhop数に比例して伝播 | P6-1 PR Aで3-node line・100-node line・partition/merge sim試験（同上）。損失・重複・reorder・silent peer・32枠圧力の系統的fault注入は残課題 |
 | V1-R04 | 旧世代MemberCertでのlink/E2E確立拒否、再割当（世代+1）後は受理 | P6-1 PR Aでfloor/last-good・限定再認証の単体試験（同上＋`test_discovery.cpp`）。実EDHOC E2EはP4接続後 |
-| V1-R05 | 削除者はRemovalNoticeを検証して現場状態を消去、RLI1は保持 | planned_not_run（P6-1 PR B） |
-| V1-R06 | 偽`REVOKED` hint・未署名通知・他現場SAK署名では何も消さない | planned_not_run（P6-1 PR B） |
+| V1-R05 | 削除者はRemovalNoticeを検証して現場状態を消去、RLI1は保持 | PR B portable fake-port試験：RLX1 intent→逐次消去→holdoff→未割当action、RLI1不変、journalのbyte境界電断。実P4/P5/ESP trust adapterと統合電断試験は未接続 |
+| V1-R06 | 偽`REVOKED` hint・未署名通知・他現場SAK署名では何も消さない | PR B portableでは改竄署名の非消去のみ確認。hint/異現場の結線試験は未実施 |
 | V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | planned_not_run（P6-1 PR B） |
 | V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） | planned_not_run（P6-2） |
 | V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 | P6-1 PR Aでpartition/merge sim試験（`test_sdkv1_revocation.cpp`）。HILはP8へ引継ぎ |

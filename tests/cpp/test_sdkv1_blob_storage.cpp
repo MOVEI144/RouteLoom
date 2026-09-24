@@ -156,6 +156,7 @@ void test_record_storage_mapping() {
   auto identity = BlobRecordSlotStorage::identity(nvs);
   auto site = BlobRecordSlotStorage::site(nvs);
   auto revocation = BlobRecordSlotStorage::revocation(nvs);
+  auto lifecycle = BlobRecordSlotStorage::lifecycle(nvs);
   const std::uint8_t data[3] = {7, 8, 9};
   CHECK_OK(identity.write(0, ByteView{data, 3}));
   CHECK_OK(identity.write(1, ByteView{data, 2}));
@@ -163,11 +164,14 @@ void test_record_storage_mapping() {
   CHECK_OK(site.write(1, ByteView{data, 1}));
   CHECK_OK(revocation.write(0, ByteView{data, 1}));
   CHECK_OK(revocation.write(1, ByteView{data, 1}));
+  CHECK_OK(lifecycle.write(0, ByteView{data, 3}));
+  CHECK_OK(lifecycle.write(1, ByteView{data, 2}));
   // Exactly data.size bytes per blob (never slot-padded), fixed key names.
-  CHECK(nvs.blobs.size() == 6);
+  CHECK(nvs.blobs.size() == 8);
   CHECK(nvs.blobs["i0"].size() == 3 && nvs.blobs["i1"].size() == 2);
   CHECK(nvs.blobs.count("s0") == 1 && nvs.blobs.count("s1") == 1);
   CHECK(nvs.blobs.count("r0") == 1 && nvs.blobs.count("r1") == 1);
+  CHECK(nvs.blobs["x0"].size() == 3 && nvs.blobs["x1"].size() == 2);
   // Slot views must be the store's slot size; slot index 0/1 only.
   std::vector<std::uint8_t> view(kIdentitySlotBytes);
   CHECK_OK(identity.read(0, MutableByteView{view.data(), view.size()}));
@@ -178,6 +182,11 @@ void test_record_storage_mapping() {
         StatusCode::InvalidArgument);
   CHECK(revocation.read(0, MutableByteView{view.data(), view.size()}).code ==
         StatusCode::InvalidArgument);
+  CHECK(lifecycle.read(0, MutableByteView{view.data(), view.size()}).code ==
+        StatusCode::InvalidArgument);
+  std::vector<std::uint8_t> lifecycle_view(kLifecycleSlotBytes);
+  CHECK_OK(lifecycle.read(1, MutableByteView{lifecycle_view.data(), lifecycle_view.size()}));
+  CHECK(lifecycle_view[0] == 7 && lifecycle_view[1] == 8 && lifecycle_view[2] == 0xFF);
   std::vector<std::uint8_t> big(kRevocationSlotBytes + 1, 1);
   CHECK(revocation.write(0, ByteView{big.data(), big.size()}).code ==
         StatusCode::InvalidArgument);

@@ -31,6 +31,7 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/sdkv1_records.hpp"
+#include "routeloom/sdkv1_lifecycle_store.hpp"
 #include "routeloom/sdkv1_revocation.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/wire.hpp"
@@ -102,6 +103,18 @@ struct FakeRuntimePort final : public LifecycleRuntimePort {
   };
   std::vector<Enforced> calls;
   bool refuse{false};
+  bool trust_erased{false};
+  bool runtime_erased{false};
+  Status remove_member_runtime() noexcept override {
+    if (refuse) return Status::error(StatusCode::StorageFailure, "runtime removal failed");
+    runtime_erased = true;
+    return Status::success();
+  }
+  Status erase_site_trust() noexcept override {
+    if (refuse) return Status::error(StatusCode::StorageFailure, "site trust removal failed");
+    trust_erased = true;
+    return Status::success();
+  }
   RevocationStore* revocations{nullptr};  // observed stores (order proof)
   SiteStore* site{nullptr};
   Status enforce_revocation(const RevocationSet& set, const std::uint32_t site_epoch,
@@ -195,6 +208,8 @@ struct NodeFixture {
   FaultyRecordStorage site_storage{kSiteSlotBytes};
   FaultyRecordStorage rrs_storage{kRevocationSlotBytes};
   FaultyResumeStorage resume_storage{16};
+  FaultyRecordStorage journal_storage{kLifecycleSlotBytes};
+  LifecycleStore journal{journal_storage};
   IdentityStore identity{identity_storage};
   SiteStore site{site_storage};
   RevocationStore revocations{rrs_storage};
@@ -207,7 +222,8 @@ struct NodeFixture {
   FakeObjectSink sink{};
   LifecyclePorts ports{authority, peer, runtime, entropy, sink, &observer};
   LifecycleConfig config{};
-  MembershipLifecycle lifecycle{config, identity, site, revocations, resume, ports};
+  MembershipLifecycle lifecycle{config, identity, site, revocations, resume, ports,
+                                default_es256_verifier(), &journal};
 
   explicit NodeFixture(const NodeId node = kNode,
                        const std::uint32_t features = kCapRrsGossipV1 |
@@ -218,7 +234,8 @@ struct NodeFixture {
     // Rebuild the lifecycle with the configured self id (refs stay valid).
     lifecycle.~MembershipLifecycle();
     new (&lifecycle)
-        MembershipLifecycle(config, identity, site, revocations, resume, ports);
+        MembershipLifecycle(config, identity, site, revocations, resume, ports,
+                            default_es256_verifier(), &journal);
     runtime.revocations = &revocations;
     runtime.site = &site;
   }
@@ -228,6 +245,7 @@ struct NodeFixture {
   // unexpected failure.
   bool provision(const std::uint32_t generation, const std::uint32_t rrs_epoch,
                  const std::uint8_t rrs_count = 2, const std::uint32_t floor = 14) {
+    if (!journal.initialize()) return false;
     if (!identity.initialize()) return false;
     if (!identity.commit(identity_for(config.self))) return false;
     if (!site.initialize()) return false;
@@ -1862,9 +1880,139 @@ void test_revocation_wire_vectors() {
   vector_current.clear();
 }
 
+// V1-R05/R06: no unverified hint may start erasure; a valid signed notice
+// must leave a durable Removing intent before any site secret is deleted.
+void test_removal_notice_intent() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  ByteBuffer<kRemovalNoticePayloadSize> payload{};
+  const RemovalNotice notice{RevocationReason::Removed, kSiteId, kNode, 2, 14};
+  CHECK_OK(removal_notice_payload_encode(notice, payload));
+  ByteBuffer<kRemovalNoticeAadSize> aad{};
+  CHECK_OK(removal_notice_aad(kNetwork, aad));
+  Es256Signature sig{};
+  sign_payload(sak(), payload.view(), aad.view(), sig);
+  ByteBuffer<kRemovalNoticeObjectSize> signed_notice{};
+  CHECK_OK(removal_notice_assemble(payload.view(), ByteView{sig.data(), sig.size()}, signed_notice));
+  auto bad = signed_notice;
+  bad.bytes[bad.size - 1] ^= 1;
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6, bad.view()), 100));
+  CHECK(f.site.has_site());
+  CHECK(!f.journal.has_record());
+  ByteBuffer<kRemovalNoticeAadSize> other_aad{};
+  CHECK_OK(removal_notice_aad(kNetwork + 1, other_aad));
+  Es256Signature wrong_sig{};
+  sign_payload(sak(), payload.view(), other_aad.view(), wrong_sig);
+  ByteBuffer<kRemovalNoticeObjectSize> wrong_aad{};
+  CHECK_OK(removal_notice_assemble(payload.view(), ByteView{wrong_sig.data(), wrong_sig.size()}, wrong_aad));
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6, wrong_aad.view()), 100));
+  CHECK(f.site.has_site() && !f.journal.has_record());
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6,
+                                                 signed_notice.view()), 101));
+  CHECK(f.journal.has_record());
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
+  CHECK(f.site.has_site());
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 200 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK(f.runtime.runtime_erased && f.runtime.trust_erased);
+  CHECK(!f.site.has_site() && !f.revocations.has_set());
+  CHECK(f.identity.has_identity());  // RLI1 and the boot witness remain
+  CHECK(f.journal.record().mode == LifecycleMode::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6,
+                                                 signed_notice.view()), 500));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 1000));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 600999));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 601000));
+  CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+  CHECK(f.journal.record().mode == LifecycleMode::UnassignedReady);
+  CHECK(f.journal.record().payload.size == 0);
+  LifecycleAction action{};
+  CHECK_OK(f.lifecycle.take_action(action));
+  CHECK(action.tag == LifecycleActionTag::RestartUnassigned);
+}
+
+void test_removal_journal_powercuts() {
+  NodeFixture fixture{};
+  CHECK(fixture.provision(2, 14));
+  ByteBuffer<kRemovalNoticePayloadSize> payload{};
+  CHECK_OK(removal_notice_payload_encode(
+      RemovalNotice{RevocationReason::Removed, kSiteId, kNode, 2, 14}, payload));
+  ByteBuffer<kRemovalNoticeAadSize> aad{};
+  CHECK_OK(removal_notice_aad(kNetwork, aad));
+  Es256Signature signature{};
+  sign_payload(sak(), payload.view(), aad.view(), signature);
+  ByteBuffer<kRemovalNoticeObjectSize> object{};
+  CHECK_OK(removal_notice_assemble(payload.view(), ByteView{signature.data(), signature.size()}, object));
+  CHECK_OK(fixture.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6, object.view()), 1));
+  const LifecycleRecord intent = fixture.journal.record();
+  ByteBuffer<kLifecycleSlotBytes> encoded{};
+  CHECK_OK(lifecycle_record_encode(intent, kLifecycleSeal, 1, encoded));
+  for (std::size_t byte = 0; byte <= encoded.size; ++byte) {
+    FaultyRecordStorage storage{kLifecycleSlotBytes};
+    LifecycleStore store{storage};
+    CHECK_OK(store.initialize());
+    storage.cut_call = 0;
+    storage.cut_bytes = byte;
+    CHECK(!store.begin_removal(intent));
+    LifecycleStore cold{storage};
+    (void)cold.initialize();
+    CHECK(!cold.has_record() || cold.record().mode == LifecycleMode::Removing);
+    // Without a durable intent, the only permitted outcome is unchanged
+    // membership. No tombstone is written until a verified readback.
+    CHECK(fixture.site.has_site());
+  }
+  for (std::size_t byte = 0; byte <= encoded.size; ++byte) {
+    FaultyRecordStorage storage{kLifecycleSlotBytes};
+    LifecycleStore store{storage};
+    CHECK_OK(store.initialize());
+    CHECK_OK(store.begin_removal(intent));
+    storage.cut_call = storage.write_calls;
+    storage.cut_bytes = byte;
+    CHECK(!store.holdoff());
+    LifecycleStore cold{storage};
+    (void)cold.initialize();
+    CHECK(cold.has_record());
+    CHECK(cold.record().mode == LifecycleMode::Removing ||
+          cold.record().mode == LifecycleMode::Holdoff);
+  }
+}
+
+void test_removal_failure_after_intent_reboots_closed() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto id0 = f.identity_storage.slot(0);
+  const auto id1 = f.identity_storage.slot(1);
+  ByteBuffer<kRemovalNoticePayloadSize> payload{};
+  CHECK_OK(removal_notice_payload_encode(
+      RemovalNotice{RevocationReason::Removed, kSiteId, kNode, 2, 14}, payload));
+  ByteBuffer<kRemovalNoticeAadSize> aad{};
+  CHECK_OK(removal_notice_aad(kNetwork, aad));
+  Es256Signature sig{};
+  sign_payload(sak(), payload.view(), aad.view(), sig);
+  ByteBuffer<kRemovalNoticeObjectSize> notice{};
+  CHECK_OK(removal_notice_assemble(payload.view(), ByteView{sig.data(), sig.size()}, notice));
+  f.runtime.refuse = true;
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6, notice.view()), 100));
+  for (int i = 0; i < 3; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.site.has_site());
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 1000));
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  f.runtime.refuse = false;
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 1001 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK(f.identity_storage.slot(0) == id0 && f.identity_storage.slot(1) == id1);
+}
+
 }  // namespace
 
 int main() {
+  test_removal_notice_intent();
+  test_removal_failure_after_intent_reboots_closed();
+  test_removal_journal_powercuts();
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();
   test_boot_adoption();
