@@ -116,6 +116,58 @@ void test_three_bindings_shared_per_key() {
   CHECK(leases.check_invariants());
 }
 
+void test_probe_acquire_agrees_with_acquire() {
+  // The read-only probe must return acquire's verdict without spending
+  // anything: empty table, shared key, full bindings, full uses, retired
+  // key, changed identity, dead clock — then the real acquire agrees.
+  ExpectedReplyLeases leases{};
+  CHECK_OK(leases.probe_acquire(binding(kPeerA, 1, 1), 1500, 0));
+  CHECK(leases.live_entry_count() == 0);
+  CHECK(leases.live_use_count() == 0);
+  ReplyLeaseToken a{};
+  CHECK_OK(leases.acquire(binding(kPeerA, 1, 1), 1500, 0, a));
+  CHECK_OK(leases.probe_acquire(binding(kPeerA, 1, 1), 1500, 0));
+  ReplyLeaseToken b{}, c{};
+  CHECK_OK(leases.acquire(binding(kPeerB, 2, 1), 1500, 0, b));
+  CHECK_OK(leases.acquire(binding(kPeerC, 3, 1), 1500, 0, c));
+  CHECK_CODE(leases.probe_acquire(binding(kPeerD, 4, 1), 1500, 0),
+             StatusCode::NoCapacity);
+  ReplyLeaseToken d{};
+  CHECK_CODE(leases.acquire(binding(kPeerD, 4, 1), 1500, 0, d),
+             StatusCode::NoCapacity);
+  CHECK_CODE(leases.probe_acquire(binding(kPeerA, 1, 2), 1500, 0),
+             StatusCode::NoCapacity);
+  CHECK_CODE(leases.probe_acquire(binding(kPeerD, 1, 1), 1500, 0),
+             StatusCode::Conflict);
+  CHECK_CODE(leases.probe_acquire(binding(kPeerA, 0, 1), 1500, 0),
+             StatusCode::InvalidArgument);
+  CHECK_CODE(leases.probe_acquire(binding(kPeerA, 1, 1), 0, 0),
+             StatusCode::InvalidArgument);
+  CHECK(leases.check_invariants());
+  // Retired keys conflict in both.
+  CHECK_OK(leases.invalidate_binding(BindingId{2}));
+  CHECK_CODE(leases.probe_acquire(binding(kPeerB, 2, 1), 1500, 0),
+             StatusCode::Conflict);
+  CHECK(leases.live_entry_count() == 3);
+  CHECK(leases.live_use_count() == 3);
+  CHECK_OK(leases.release(a));
+  CHECK_OK(leases.release(b));
+  CHECK_OK(leases.release(c));
+  CHECK(leases.check_invariants());
+  // Eight live uses refuse a ninth in both.
+  ReplyLeaseToken uses[8]{};
+  for (int i = 0; i < 8; ++i) {
+    CHECK_OK(leases.acquire(binding(kPeerA, 1, 1), 1500, 0, uses[i]));
+  }
+  CHECK_CODE(leases.probe_acquire(binding(kPeerA, 1, 1), 1500, 0),
+             StatusCode::NoCapacity);
+  ReplyLeaseToken ninth{};
+  CHECK_CODE(leases.acquire(binding(kPeerA, 1, 1), 1500, 0, ninth),
+             StatusCode::NoCapacity);
+  for (int i = 0; i < 8; ++i) CHECK_OK(leases.release(uses[i]));
+  CHECK(leases.check_invariants());
+}
+
 void test_eight_uses_then_refused() {
   ExpectedReplyLeases leases{};
   std::array<ReplyLeaseToken, routeloom::kReplyLeaseUsesMax> uses{};
@@ -1068,6 +1120,7 @@ void test_sizes() {
 
 int main() {
   test_three_bindings_shared_per_key();
+  test_probe_acquire_agrees_with_acquire();
   test_eight_uses_then_refused();
   test_keys_split_by_id_and_generation();
   test_same_key_cannot_change_peer_or_rx_context();

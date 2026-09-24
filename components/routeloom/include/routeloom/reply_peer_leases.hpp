@@ -157,6 +157,15 @@ class ExpectedReplyLeases {
   // NoCapacity (3 bindings or 8 uses already live).
   Status acquire(ReplyBinding captured, MonotonicMs deadline, MonotonicMs now,
                  ReplyLeaseToken& out) noexcept;
+  // Read-only twin of acquire's admission checks: reports the verdict an
+  // acquire with the same arguments would return, without spending a slot,
+  // parking an exhausted serial, or advancing the clock anchor. Lets a
+  // caller probe the lease before mutating sibling state (dedup victim,
+  // applied record) so a refused admission rolls back to zero effect.
+  // Verdicts agree while no acquire/release/invalidate lands between the
+  // probe and the acquire — the single-threaded Owner guarantees that.
+  Status probe_acquire(ReplyBinding captured, MonotonicMs deadline,
+                       MonotonicMs now) const noexcept;
   // Drop the named use; the entry frees once its last use is gone.
   // NotFound for an unknown slot or a rotated serial; Busy on re-entry.
   Status release(ReplyLeaseToken token) noexcept;

@@ -61,6 +61,8 @@ using namespace routeloom;
 using routeloom_test::FrameSight;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 
 // xorshift64 — same generator as routeloom_fuzz::Rng so a seed means the
 // same op stream here as it does in the corpus mutator.
@@ -357,6 +359,7 @@ struct PropWorld {
   SimNetwork net;
   std::map<NodeId, std::unique_ptr<routeloom_test::TestSecurity>> security;
   std::map<NodeId, std::unique_ptr<SimRadio>> radios;
+  std::map<NodeId, std::unique_ptr<SimReplyPort>> reply_ports;
   std::map<NodeId, std::unique_ptr<MeshNode>> nodes;
   std::map<NodeId, PropObserver*> observers;
   std::deque<std::unique_ptr<PropObserver>> observer_store;
@@ -381,9 +384,13 @@ struct PropWorld {
     observer_store.emplace_back(obs);
     observers[id] = obs;
     radios[id] = std::make_unique<SimRadio>(net, id);
+    reply_ports[id] =
+        std::make_unique<SimReplyPort>(*radios[id], id, config.link_epoch);
     nodes[id] =
         std::make_unique<MeshNode>(config, *radios[id], *security[id], *obs);
+    nodes[id]->set_reply_peer_port(reply_ports[id].get());
     net.register_node(id, nodes[id].get());
+    net.register_reply_port(id, reply_ports[id].get());
     return nodes[id].get();
   }
 
@@ -417,6 +424,7 @@ struct PropWorld {
     }
     net.unregister_node(id);
     nodes.erase(id);
+    reply_ports.erase(id);
     radios.erase(id);
     security.erase(id);
     observers.erase(id);

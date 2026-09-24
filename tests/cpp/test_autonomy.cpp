@@ -36,6 +36,7 @@ int failures = 0;
 using namespace routeloom;
 using routeloom::autonomy::EncodedPayload;
 using routeloom_test::FakeRadioPort;
+using routeloom_test::SimReplyPort;
 using routeloom_test::ScriptedEntropy;
 
 #ifndef ROUTELOOM_AUTONOMY_GOLDEN_DIR
@@ -808,7 +809,9 @@ void test_fake_radio() {
   config.message_session = 7;
   config.route_advertisement_period_ms = 100;
   config.route_lifetime_ms = 1000;
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(0));
 
   // Scripted driver-level rejection is returned immediately and recorded.

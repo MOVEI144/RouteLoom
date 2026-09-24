@@ -202,6 +202,26 @@ target_link_libraries(routeloom_reply_lease_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_reply_lease_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_reply_lease_tests COMMAND routeloom_reply_lease_tests)
 
+add_executable(routeloom_reply_admission_tests test_reply_admission.cpp)
+target_link_libraries(routeloom_reply_admission_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_reply_admission_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_reply_admission_tests COMMAND routeloom_reply_admission_tests)
+
+# Issue #117 PR B: the real ESP-NOW Owner translation unit, compiled for the
+# host against the in-tree ESP-IDF/FreeRTOS stand-ins and driven through its
+# public API. The stub directory shadows the runtime's quoted IDF includes;
+# no firmware include path is ever on a host build.
+add_executable(routeloom_espnow_runtime_tests test_espnow_runtime.cpp
+    espnow_idf_stubs/idf_stubs.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_runtime.cpp)
+target_link_libraries(routeloom_espnow_runtime_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_runtime_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/espnow_idf_stubs
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_espnow_runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_runtime_tests COMMAND routeloom_espnow_runtime_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)

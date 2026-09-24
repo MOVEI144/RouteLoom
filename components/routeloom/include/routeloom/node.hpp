@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <new>
 #include <type_traits>
+#include <utility>
 
 #include "routeloom/congestion.hpp"
 #include "routeloom/endpoint_wire.hpp"
@@ -417,6 +418,79 @@ class DiagnosticSink {
                                   MonotonicMs now_ms) noexcept = 0;
 };
 
+// --- ExpectedReply admission transactions (issue #117, design-q116 §7-§8) ---
+// One transaction per accepted receive: it owns one Owner lease use and every
+// local work item the admission created (ACK/forward/receipt jobs, component
+// event). Local work ends at min(frame budget, admission + 1500 ms); the
+// wire budget a forward carries is unaffected (encode keeps the job's own
+// deadline). Handles are slot + strictly increasing serial so a stale handle
+// can never finish another transaction's work.
+constexpr std::size_t kAdmissionTransactionsMax = 8;
+
+struct TxnHandle {
+  std::uint32_t slot{0};
+  std::uint32_t serial{0};
+
+  friend constexpr bool operator==(const TxnHandle& a,
+                                   const TxnHandle& b) noexcept {
+    return a.slot == b.slot && a.serial == b.serial;
+  }
+  friend constexpr bool operator!=(const TxnHandle& a,
+                                   const TxnHandle& b) noexcept {
+    return !(a == b);
+  }
+};
+constexpr TxnHandle kInvalidTxnHandle{0xFFFFFFFFu, 0};
+
+// Deferred component deliveries (design-q116 §8.3): the node never calls the
+// Service/config components synchronously. Payloads and job completions wait
+// here for the Owner, which takes them after the node call returned and
+// hands them to the component as ordinary outside calls.
+constexpr std::size_t kComponentEventsMax = 8;
+
+enum class ComponentEventTarget : std::uint8_t {
+  ServicePayload = 0,  // GatewayServiceSink::on_service_payload
+  ConfigFrame = 1,     // ConfigEndpointSink::on_config_frame
+  ServiceJobDone = 2,  // GatewayServiceSink::on_service_job_done
+  ConfigJobDone = 3,   // ConfigEndpointSink::on_config_job_done
+};
+
+struct ComponentEventHandle {
+  std::uint32_t slot{0};
+  std::uint32_t serial{0};
+
+  friend constexpr bool operator==(const ComponentEventHandle& a,
+                                   const ComponentEventHandle& b) noexcept {
+    return a.slot == b.slot && a.serial == b.serial;
+  }
+  friend constexpr bool operator!=(const ComponentEventHandle& a,
+                                   const ComponentEventHandle& b) noexcept {
+    return !(a == b);
+  }
+};
+constexpr ComponentEventHandle kInvalidComponentEventHandle{0xFFFFFFFFu, 0};
+
+struct ComponentEvent {
+  ComponentEventHandle handle{kInvalidComponentEventHandle};
+  ComponentEventTarget target{ComponentEventTarget::ServicePayload};
+  NodeId peer{kInvalidNodeId};  // payload events: authenticated previous hop
+  TxnHandle txn{kInvalidTxnHandle};  // owning transaction, if any
+  MonotonicMs deadline_ms{0};       // the transaction's deadline; the Owner
+                                    // starts no new payload work past it
+  wire::PlainFrame frame{};         // payload events: verified terminal frame
+  MessageId job_id{};               // completion events: the job's MessageId
+  bool job_accepted{false};         // completion events: HOP_ACCEPT vs failure
+  const char* job_reason{nullptr};  // completion events: static reason string
+};
+
+// A receive's captured reply identity: the Owner's RX binding evidence plus
+// the link-authenticated epoch. Admission passes it to the lease port, which
+// rechecks it against the live mapping — equality only.
+struct RxBinding {
+  ReplyBinding binding{};
+  bool valid{false};
+};
+
 // Pause contract (01-integration.md §3.3): narrower than blanket draining.
 // A PauseReason names WHY traffic is held; the mask selects WHICH traffic is
 // held so the control needed to coordinate a survey/cutover keeps flowing —
@@ -588,6 +662,11 @@ struct SessionStats {
 
 class MeshNode {
  public:
+  // Non-reentrant facade (issue #117, design-q116 §2): every mutating call
+  // below first checks the in-call guard — a call issued while another node
+  // call is active (observer/sink/radio callback re-entry) returns Busy
+  // with zero observable change. Internal paths never call these guarded
+  // entries; read-only snapshots stay available during a call.
   MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider& security,
            NodeObserver& observer) noexcept;
 
@@ -618,28 +697,30 @@ class MeshNode {
   ExecutionLease applied_lease() const noexcept;
   // Install/clear the application endpoint (nullptr disables — inbound
   // APPLIED requests then commit a NoEndpoint refusal RESULT).
-  void set_applied_sink(AppliedEndpointSink* sink) noexcept { applied_sink_ = sink; }
+  Status set_applied_sink(AppliedEndpointSink* sink) noexcept;
   // The stored RESULT view for a delivery: false when none was verified.
   bool applied_result(const MessageId& id, AppliedResultView& out) const noexcept;
   const AppliedStats& applied_stats() const noexcept { return applied_stats_; }
   Status cancel(const MessageId& id) noexcept;
   DeliveryResult delivery(const MessageId& id) const noexcept;
 
-  void poll(MonotonicMs now_ms) noexcept;
-  void on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
-                        MonotonicMs now_ms) noexcept;
+  Status poll(MonotonicMs now_ms) noexcept;
+  Status on_radio_receive(NodeId peer, ByteView frame, const RadioRxMetadata& metadata,
+                          MonotonicMs now_ms) noexcept;
   // M1 telemetry entry point (m1-completion/02-telemetry.md §2.3): same
   // receive path, plus bounded RF observation. The V1 overload forwards with
   // InjectedTest provenance — only the production adapter supplies
-  // LocalDriver evidence.
-  void on_radio_receive(NodeId peer, ByteView frame,
-                        const RadioRxMetadataV2& metadata,
-                        MonotonicMs now_ms) noexcept;
+  // LocalDriver evidence. Binding-less V1 input never earns a HOP_ACCEPT or
+  // an application/component dispatch (issue #117): replies need the RX
+  // binding evidence only the V2 entry carries.
+  Status on_radio_receive(NodeId peer, ByteView frame,
+                          const RadioRxMetadataV2& metadata,
+                          MonotonicMs now_ms) noexcept;
   // Completion observation for one submitted TX attempt (02 §2.2/§2.3). The
   // Owner calls this exactly once per submission, including unknown outcomes;
   // callback-absent fencing is the Owner's job — this records what arrived.
-  void note_radio_tx(const RadioTxObservation& observation,
-                     MonotonicMs now_ms) noexcept;
+  Status note_radio_tx(const RadioTxObservation& observation,
+                       MonotonicMs now_ms) noexcept;
   // Submission identity the runtime froze for `token` (02 §2.3): the node
   // stamps this key onto the job at dispatch so submit/complete accounting
   // share one immutable identity — never re-guessed from a live summary.
@@ -657,20 +738,17 @@ class MeshNode {
   // rebind/switch must retire the peer's stale summary, not refresh it.
   // The metric mirror resets with it (sdk-completion/03 §3.7): evidence
   // measured under a previous link identity is unattributable to this one.
-  void note_peer_stale(NodeId peer) noexcept {
-    telemetry_peers_.mark_stale(peer);
-    if (Neighbor* neighbor = find_neighbor(peer)) {
-      reset_neighbor_measurement(*neighbor);
-    }
-  }
+  Status note_peer_stale(NodeId peer) noexcept;
   std::uint64_t telemetry_event_drops() const noexcept { return telemetry_event_drops_; }
   // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
-  void set_autonomy_sink(AutonomyFrameSink* sink) noexcept { autonomy_sink_ = sink; }
+  Status set_autonomy_sink(AutonomyFrameSink* sink) noexcept;
   // Install/clear the Service=21 endpoint (GatewayDelivery wiring, nullptr
   // disables). With no sink, inbound Service frames are still dedup'd/
   // hop-ACKed/forwarded but terminate as SERVICE_NO_ENDPOINT — the origin's
   // retries expire into an honest timeout, never a DATA-style success.
-  void set_gateway_sink(GatewayServiceSink* sink) noexcept { gateway_sink_ = sink; }
+  // Busy while that endpoint's deferred events are still queued or taken.
+  Status set_gateway_sink(GatewayServiceSink* sink) noexcept;
+  GatewayServiceSink* gateway_sink() const noexcept { return gateway_sink_; }
   // Owner-side relay gate (01-forwarding §policy): runtime config and drain
   // requests write this; effective transit permission additionally requires
   // a live binding context. Reads expose configured vs effective separately.
@@ -678,7 +756,7 @@ class MeshNode {
   // update on the next maintenance tick is too late — neighbors keep
   // sending us work we will refuse). Accepted in-flight work still drains
   // on its own deadlines.
-  void set_relay_enabled(bool enabled) noexcept;
+  Status set_relay_enabled(bool enabled) noexcept;
   bool relay_enabled() const noexcept { return relay_enabled_; }
   // Effective transit permission for NEW admissions. Accepted transit
   // already queued keeps its original deadline — this only gates new work.
@@ -696,7 +774,7 @@ class MeshNode {
   }
   // Remote Diagnostic (48) telemetry queries are opt-in — answering is
   // disabled unless the owner enables it (02 §4.2 note).
-  void set_telemetry_remote(bool enabled) noexcept { telemetry_remote_ = enabled; }
+  Status set_telemetry_remote(bool enabled) noexcept;
   bool telemetry_remote() const noexcept { return telemetry_remote_; }
   // Queue an end-protected Service=21 payload for `destination` with a
   // bounded hop-accept exchange per hop. send_service allocates a fresh
@@ -718,13 +796,23 @@ class MeshNode {
   // ConfigGateway on a bridge; nullptr disables). With no sink, inbound
   // end-protected config frames are still dedup'd/hop-ACKed/forwarded but
   // terminate as CONFIG_NO_ENDPOINT — retries expire into an honest timeout.
-  void set_config_sink(ConfigEndpointSink* sink) noexcept { config_sink_ = sink; }
+  // Busy while that endpoint's deferred events are still queued or taken.
+  Status set_config_sink(ConfigEndpointSink* sink) noexcept;
+  ConfigEndpointSink* config_sink() const noexcept { return config_sink_; }
   // Install/clear the end-protected Diagnostic (48) terminal sink — the
   // surface remote TelemetrySnapshot/Reject bodies arrive on (02 §4.2).
-  void set_diagnostic_sink(DiagnosticSink* sink) noexcept { diagnostic_sink_ = sink; }
+  Status set_diagnostic_sink(DiagnosticSink* sink) noexcept;
   // Install/clear the Owner's ExpectedReply lease port. Nullptr means the
-  // Owner cannot reserve a protected reply binding.
-  void set_reply_peer_port(ReplyPeerPort* port) noexcept { reply_peer_port_ = port; }
+  // Owner cannot reserve a protected reply binding — start() refuses without
+  // one, and swapping it while transactions are live is Busy.
+  Status set_reply_peer_port(ReplyPeerPort* port) noexcept {
+    if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+    if (txn_in_flight() != 0) {
+      return Status::error(StatusCode::Busy, "transactions live");
+    }
+    reply_peer_port_ = port;
+    return Status::success();
+  }
   ReplyPeerPort* reply_peer_port() const noexcept { return reply_peer_port_; }
   // Issue an end-protected TelemetryQuery toward `observer` over the routed
   // lane (02 §4.2). Returns the wire submission status; the request's own
@@ -770,8 +858,22 @@ class MeshNode {
   // drain, so control replies queued by inbound traffic keep the control
   // lane's priority over queued DATA, and this call can never re-enter
   // radio_ from inside a driver callback.
-  void on_radio_tx_result(std::uint64_t token, bool success,
-                          MonotonicMs now_ms) noexcept;
+  Status on_radio_tx_result(std::uint64_t token, bool success,
+                            MonotonicMs now_ms) noexcept;
+  // Owner-side component drive (issue #117, design-q116 §8.3): after a node
+  // call returned, the Owner takes up to kComponentEventsMax pending events
+  // and hands each to its component as an ordinary outside call, then
+  // completes it. Taken events still occupy their slot and their
+  // transaction's work reference — taking alone never quiesces. NotFound
+  // when the queue is empty (take) or the handle is unknown/already
+  // completed (complete); a completed-then-expired payload still completes,
+  // the Owner checks deadline_ms before starting new payload work.
+  Status take_component_event(ComponentEvent& out) noexcept;
+  Status complete_component_event(ComponentEventHandle handle) noexcept;
+  std::size_t component_events_pending() const noexcept;
+  // Live admission transactions (tests/diagnostics): entries holding a
+  // lease use, including Closing ones draining their last work.
+  std::size_t txn_in_flight() const noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
 
@@ -849,7 +951,7 @@ class MeshNode {
   // pause with pause::kSleepDrainMask; composable with a set_pause mask.
   // Owned by the PowerCoordinator: the application must not call this from a
   // callback to reopen admission behind the coordinator's back.
-  void set_draining(bool draining) noexcept { sleep_draining_ = draining; }
+  Status set_draining(bool draining) noexcept;
   bool draining() const noexcept { return sleep_draining_; }
   // True while an application callback (NodeObserver or an extended sink)
   // runs on this node. The PowerCoordinator rejects mutating operations
@@ -897,7 +999,7 @@ class MeshNode {
   // Marks a peer as implementing the Busy(20) feedback payload. Until
   // capability negotiation lands, BUSY replies are emitted only to peers
   // marked here or proven by a valid received BUSY (03 §5, scenario D4-09).
-  void set_peer_busy_capable(NodeId peer, bool capable) noexcept;
+  Status set_peer_busy_capable(NodeId peer, bool capable) noexcept;
   // Whether a live (unexpired) capability grant marks this peer as
   // Busy(20)-capable right now — read-only mirror of the gate at 03 §5.
   bool peer_busy_capable(NodeId peer, MonotonicMs now_ms) const noexcept;
@@ -914,9 +1016,9 @@ class MeshNode {
   // inside its TTL; feeds ONLY the local busy/queue picture — a peer
   // self-report is a hint, never added to a route metric and never able
   // to admit an infeasible route (03 §6.2, D4-02).
-  void note_peer_pressure(NodeId peer, std::uint8_t pressure,
-                          std::uint32_t feedback_sequence,
-                          MonotonicMs now_ms) noexcept;
+  Status note_peer_pressure(NodeId peer, std::uint8_t pressure,
+                            std::uint32_t feedback_sequence,
+                            MonotonicMs now_ms) noexcept;
   // Bounded observation aggregates (03 §3): EWMA + counters per key, never
   // raw samples. The global buckets feed diagnostics; the per-neighbor
   // mirrors drive the P3 route-metric coupling (03 §6).
@@ -1023,15 +1125,22 @@ class MeshNode {
   // the diagnostic must not borrow the live job the teardown destroys);
   // the teardown then drops all queued/in-flight radio work. A frame
   // already handed to the driver is reported unknown, never as sent.
-  void quiesce_for_sleep() noexcept {
+  // Admission transactions terminate first so no lease use survives into
+  // the image and no taken component event dangles past teardown.
+  Status quiesce_for_sleep() noexcept {
+    if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+    NodeGuard guard(in_call_);
     if (physical_.active) {
       const NodeId peer = physical_.job.peer;
       const MessageId message = physical_.job.ack.key.id;
       observer_.on_diagnostic("SLEEP_TX_INFLIGHT", peer, &message);
     }
+    terminate_all_txn_work();
+    component_jobs_outstanding_ = 0;
     physical_ = PhysicalInflight{};
     scheduler_.clear();
     awaiting_hop_.clear();
+    return Status::success();
   }
 
  private:
@@ -1402,6 +1511,20 @@ class MeshNode {
     // Held for a provider-owned session (sdk-v1/03 §9): the deferral was
     // counted and diagnosed once; cleared when the job encodes.
     bool session_deferred{false};
+    // Owning admission transaction (issue #117): invalid for origin work.
+    // The transaction's deadline bounds local dispatch/retry/expiry; the
+    // wire budget still derives from deadline_ms. Exactly one terminal site
+    // (complete/fail/drop/quiesce) finishes each transaction job's work.
+    TxnHandle txn{kInvalidTxnHandle};
+    // Submitted binding for ACK-awaiting TX (design-q116 §6.2): frozen from
+    // the Owner at dispatch, matched against the authenticated RX binding
+    // before a HOP_ACCEPT/BUSY may resolve the exchange — a rebind between
+    // submit and accept must not misattribute the accept. The peer is
+    // job.peer; only the mapping identity is pinned here.
+    BindingId submitted_binding{kInvalidBindingId};
+    BindingGeneration submitted_generation{};
+    std::uint32_t submitted_rx_context{0};
+    bool submitted_binding_set{false};
 
     void set_forwarded(const wire::LinkOpenedFrame& frame) noexcept {
       form = JobForm::Forwarded;
@@ -1441,6 +1564,27 @@ class MeshNode {
     // route re-check holds it (bounded by its original deadline) without
     // head-of-line blocking the rest of its flow (03 §7).
     void defer_selected() noexcept;
+    // Remove the first queued job matching `pred` into `out` (issue #117:
+    // transaction close and sleep quiesce terminate unstarted work instead
+    // of abandoning its lease reference). The job being dispatched is never
+    // a candidate. Drained flows stay ring-linked; select() already treats
+    // an empty ring flow as releasable. False when nothing matched.
+    template <typename Pred>
+    bool drop_one_if(Pred&& pred, TxJob& out) noexcept {
+      TxJob* victim = nullptr;
+      pool_.for_each([&](TxJob& job) {
+        if (victim == nullptr && &job != selected_ && pred(job)) victim = &job;
+      });
+      if (victim == nullptr) {
+        out = TxJob{};
+        return false;
+      }
+      unlink(victim);
+      out = std::move(*victim);
+      pool_.release(victim);
+      --used_;
+      return true;
+    }
     void clear() noexcept;
 
     // §14 airtime domain of a scheduled job: the reserved control lane is
@@ -1528,6 +1672,9 @@ class MeshNode {
     };
 
     static bool control_job(const TxJob& job) noexcept;
+    // Unlink one queued job from its lane (drop_one_if helper): the job is
+    // known queued, so exactly one list holds it.
+    void unlink(TxJob* job) noexcept;
     static SchedClass classify(const TxJob& job) noexcept;
     static void flow_key(const TxJob& job, NodeId self, NodeId& scope,
                          NodeId& origin, NodeId& destination) noexcept;
@@ -1657,18 +1804,25 @@ class MeshNode {
                           const SendOptions& options, MonotonicMs now_ms,
                           MessageId& out) noexcept;
   Status queue_origin_data(Delivery& delivery, MonotonicMs now_ms) noexcept;
+  // Admission work items (issue #117): each carries its transaction handle
+  // and joins the transaction's work references on success. Every queue_*
+  // below runs only after the admission probes proved it infallible.
   Status queue_forward(const wire::LinkOpenedFrame& frame, NodeId next_hop,
-                       MonotonicMs now_ms) noexcept;
-  Status queue_hop_accept(const wire::Header& accepted, MonotonicMs now_ms) noexcept;
-  Status queue_end_receipt(const wire::Header& data, MonotonicMs now_ms) noexcept;
+                       TxnHandle txn, MonotonicMs now_ms) noexcept;
+  Status queue_hop_accept(const wire::Header& accepted, TxnHandle txn,
+                          MonotonicMs now_ms) noexcept;
+  Status queue_end_receipt(const wire::Header& data, TxnHandle txn,
+                           MonotonicMs now_ms) noexcept;
   // BUSY emission (03 §5): pre-admission refusal for a NEW authenticated
   // inbound DATA — never for already HOP_ACCEPT-ed work. Emits only when the
   // peer is busy-capable and a reply slot is affordable; otherwise drops and
   // counts busy_send_failed so the sender's timeout path stays honest.
   Status queue_busy(NodeId peer, const wire::Header& rejected,
-                    std::uint8_t reason, MonotonicMs now_ms) noexcept;
+                    std::uint8_t reason, TxnHandle txn,
+                    MonotonicMs now_ms) noexcept;
   void emit_busy_or_drop(NodeId peer, const wire::Header& rejected,
-                         std::uint8_t reason, MonotonicMs now_ms) noexcept;
+                         std::uint8_t reason, const RxBinding& rx,
+                         MonotonicMs now_ms) noexcept;
   TxJob link_control_job(FrameType type, NodeId neighbor, std::uint32_t lifetime_ms,
                          MonotonicMs now_ms) noexcept;
   Status queue_route_update(NodeId neighbor, MonotonicMs now_ms) noexcept;
@@ -1681,6 +1835,11 @@ class MeshNode {
                          NodeId destination, ByteView payload, std::uint8_t round,
                          std::uint32_t lifetime_ms, Priority priority,
                          MonotonicMs now_ms) noexcept;
+  // Unguarded send_service body shared by the guarded public overloads —
+  // internal paths never call the guarded entries.
+  Status send_service_impl(NodeId destination, ByteView payload,
+                           std::uint32_t lifetime_ms, Priority priority,
+                           MonotonicMs now_ms, MessageId& id) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   // True when an AuthRequired encode refusal is a missing/pending session
@@ -1711,6 +1870,123 @@ class MeshNode {
   MonotonicMs link_retry_not_before_ms(const TxJob& job,
                                        MonotonicMs now_ms) noexcept;
 
+  // --- ExpectedReply admission machinery (issue #117) ----------------------
+  struct NodeGuard {
+    explicit NodeGuard(bool& flag) noexcept : flag_(flag) { flag_ = true; }
+    ~NodeGuard() noexcept { flag_ = false; }
+    NodeGuard(const NodeGuard&) = delete;
+    NodeGuard& operator=(const NodeGuard&) = delete;
+    bool& flag_;
+  };
+
+  // One admission transaction: a lease use plus the work references of the
+  // jobs/events the admission created. Committed at admission; Closing once
+  // expired or revoked, draining until the last work finishes.
+  enum class TxnState : std::uint8_t { Free, Committed, Closing };
+  struct TxnSlot {
+    ReplyLeaseToken use{kInvalidReplyLeaseToken};
+    MonotonicMs deadline_ms{0};
+    std::uint8_t work_refs{0};
+    TxnState state{TxnState::Free};
+    std::uint32_t serial{0};  // last issued; 0 = never issued
+    bool retired{false};      // serial exhausted: never reused in this boot
+  };
+
+  // Deferred component delivery slot: Queued waits for the Owner's take,
+  // Taken waits for its complete. Both hold the transaction reference.
+  enum class EventState : std::uint8_t { Free, Queued, Taken };
+  struct EventSlot {
+    ComponentEvent event{};
+    EventState state{EventState::Free};
+    std::uint32_t serial{0};  // last issued; 0 = never issued
+    bool retired{false};
+  };
+
+  // All-or-nothing admission reservation (design-q116 §8.1): probes first
+  // (scheduler, dedup class, transaction, lease, ACK lane, applied,
+  // component event), then lease + transaction + records, then the proved
+  // infallible enqueues, then commit publishes dedup links, events and the
+  // application dispatch. The destructor rolls an uncommitted reservation
+  // back in reverse order; committed work terminates through finish_work.
+  struct AdmissionReservation {
+    MeshNode* node{nullptr};
+    TxnHandle txn{kInvalidTxnHandle};
+    ReplyLeaseToken use{kInvalidReplyLeaseToken};
+    DedupEntry* dedup{nullptr};
+    AppliedRecord* applied{nullptr};
+    bool applied_new{false};
+    bool committed{false};
+    ~AdmissionReservation() noexcept;
+    AdmissionReservation() noexcept = default;
+    AdmissionReservation(const AdmissionReservation&) = delete;
+    AdmissionReservation& operator=(const AdmissionReservation&) = delete;
+  };
+
+  // Capture the receive's reply identity from RX metadata + the
+  // link-authenticated header. Invalid without a port, a binding, or an
+  // epoch — such input earns no reply and no dispatch.
+  RxBinding capture_rx_binding(NodeId peer,
+                               const RadioRxMetadataV2* metadata,
+                               std::uint32_t link_epoch) const noexcept;
+  // Admission transaction deadline: min(frame budget, now + 1500 ms).
+  // Refuses (Ok == false) when the frame budget is already spent or the
+  // 1500 ms horizon is unrepresentable.
+  bool txn_deadline_for(std::uint32_t remaining_deadline_ms,
+                        MonotonicMs now_ms, MonotonicMs& out) const noexcept;
+  bool txn_slot_available() const noexcept;
+  Status begin_txn(ReplyLeaseToken use, MonotonicMs deadline_ms,
+                   TxnHandle& out) noexcept;
+  // Finish one work item of a transaction; the last finish releases the
+  // lease use and recycles the slot. Stale handles are a silent no-op.
+  void finish_txn_work(TxnHandle handle) noexcept;
+  // Join a successfully queued job to its transaction's work references.
+  // Stale handles are a silent no-op.
+  void join_txn(TxnHandle handle) noexcept;
+  const TxnSlot* resolve_txn(TxnHandle handle) const noexcept;
+  // Effective local deadline of a job: min(job deadline, transaction
+  // deadline). Dispatch/retry/expiry use this; encode keeps the job's own
+  // deadline for the wire budget.
+  MonotonicMs work_deadline(const TxJob& job) const noexcept;
+  // True when an applied record could be allocated now (free slot, expired
+  // reclaimable, or an ACKed record) — the probe before the mutating call.
+  bool applied_slot_available(MonotonicMs now_ms) noexcept;
+  bool component_event_available() const noexcept;
+  // Payload probe: room for one more event beyond the completions already
+  // held by outstanding component-origin jobs.
+  bool component_payload_event_available() const noexcept;
+  bool component_target_pending(ComponentEventTarget target) const noexcept;
+  // Publish a payload/completion event for the Owner's outside drive; joins
+  // the transaction's work references. Runs only after the availability
+  // probe proved it infallible.
+  void publish_component_event(ComponentEventTarget target, NodeId peer,
+                               TxnHandle txn, MonotonicMs deadline_ms,
+                               const wire::PlainFrame* frame,
+                               const MessageId* job_id, bool job_accepted,
+                               const char* job_reason) noexcept;
+  // Poll-order transaction close (design-q116 §7.2): expired/revoked entries
+  // go Closing, unstarted jobs and untaken events terminate, zero-reference
+  // entries release their lease use. A regressed clock suspends the sweep.
+  void sweep_transactions(MonotonicMs now_ms) noexcept;
+  // Sleep quiesce: silently finish every transaction work item and release
+  // every use — accepted radio work never survives into the image.
+  void terminate_all_txn_work() noexcept;
+  // Standalone short reply (BUSY/refusal/re-ACK/receipt/diagnostic/app):
+  // one transaction + one lease use on the peer's snapshot binding plus the
+  // scheduler slot the emission needs. Best-effort: failure counts at the
+  // call site and sends nothing.
+  Status reserve_short_reply(NodeId peer, bool needs_control_slot,
+                             std::size_t pool_slots, MonotonicMs now_ms,
+                             AdmissionReservation& out) noexcept;
+  // Same, on RX evidence instead of a fresh snapshot: the lease is acquired
+  // on the receive's captured binding. Refuses without valid evidence.
+  Status reserve_rx_reply(const RxBinding& rx, bool needs_control_slot,
+                          std::size_t pool_slots, MonotonicMs now_ms,
+                          AdmissionReservation& out) noexcept;
+  // Refuse admission for binding-less input: no HOP_ACCEPT, no dispatch —
+  // the unsent reply is counted where BUSY drops land.
+  void refuse_without_binding(NodeId peer, const wire::Header& header,
+                              const char* reason, MonotonicMs now_ms) noexcept;
+
   // P3 load coupling (03 §6/§7): per-neighbor observation decay, busy-TTL,
   // effective link-cost refresh and the route-switch hysteresis tick.
   void refresh_neighbor_load(MonotonicMs now_ms) noexcept;
@@ -1739,9 +2015,9 @@ class MeshNode {
                  MonotonicMs now_ms) noexcept;
 
   void handle_hop_accept(const wire::PlainFrame& frame, NodeId peer,
-                         MonotonicMs now_ms) noexcept;
+                         const RxBinding& rx, MonotonicMs now_ms) noexcept;
   void handle_data(const wire::LinkOpenedFrame& frame, NodeId peer,
-                   MonotonicMs now_ms) noexcept;
+                   const RxBinding& rx, MonotonicMs now_ms) noexcept;
   // End-protected routed traffic (Service 21, Control 22 and the
   // ConfigPermit object types 49/50/51): transit forwards untouched (dedup
   // + forward + hop ACK keyed on the frame's own type), terminal hands the
@@ -1750,7 +2026,7 @@ class MeshNode {
   // emits END_RECEIPT. The link-scoped autonomy forms of 49/50/51 keep
   // their separate destination==self path and never reach here.
   void handle_routed(const wire::LinkOpenedFrame& frame, NodeId peer,
-                     MonotonicMs now_ms) noexcept;
+                     const RxBinding& rx, MonotonicMs now_ms) noexcept;
   // End-protected Diagnostic (48) terminal handling (02-telemetry §4.2):
   // subtype dispatch on the verified body — TelemetryQuery answers with a
   // bounded snapshot or an honest DiagnosticReject; Snapshot/Reject surface
@@ -1761,11 +2037,13 @@ class MeshNode {
   // TransitFailure): surfaced to the diagnostic sink; never answered on a
   // new route.
   void handle_diagnostic_link(NodeId peer, const wire::LinkOpenedFrame& frame,
+                              const RxBinding& rx,
                               MonotonicMs now_ms) noexcept;
   // Emit one bounded link-only TransitFailure toward `upstream` (hop-1,
-  // BestEffort, never hop-ACKed — a report must not spawn reports).
-  void emit_transit_failure(NodeId upstream, const TransitFailure& report,
-                            MonotonicMs now_ms) noexcept;
+  // BestEffort, never hop-ACKed — a report must not spawn reports). The
+  // caller holds the short reply reservation; Ok joins the transaction.
+  Status emit_transit_failure(NodeId upstream, const TransitFailure& report,
+                              TxnHandle txn, MonotonicMs now_ms) noexcept;
   // fail_job hook for JobOwner::Transit: find the retained transit record
   // for job.ack and report the post-acceptance failure to its upstream.
   void report_transit_failure(const TxJob& job, const char* reason,
@@ -1777,20 +2055,27 @@ class MeshNode {
   // Refused-before-acceptance report (relay gate): no retained record, the
   // fingerprint is computed from the received frame on the spot.
   void emit_transit_refusal(const wire::LinkOpenedFrame& frame,
-                            TransitFailureReason reason,
+                            TransitFailureReason reason, const RxBinding& rx,
                             MonotonicMs now_ms) noexcept;
   void handle_transit_failure_report(NodeId peer,
                                      const TransitFailure& report,
                                      MonotonicMs now_ms) noexcept;
   void replay_retained_failure(DedupEntry& duplicate, FrameType type,
+                               const RxBinding& rx,
                                MonotonicMs now_ms) noexcept;
   Status queue_diagnostic_reply(NodeId destination, ByteView body,
                                 std::uint32_t lifetime_ms,
                                 MonotonicMs now_ms) noexcept;
+  // Unguarded snapshot body for the internal diagnostic handler, which
+  // already runs under the node's call guard.
+  Status build_telemetry_snapshot_impl(const TelemetryQuery& query,
+                                       MonotonicMs now_ms,
+                                       TelemetrySnapshot& out,
+                                       DiagnosticRejectReason& reason) noexcept;
   void handle_busy(const wire::LinkOpenedFrame& frame, NodeId peer,
-                   MonotonicMs now_ms) noexcept;
+                   const RxBinding& rx, MonotonicMs now_ms) noexcept;
   void handle_end_receipt(const wire::LinkOpenedFrame& frame, NodeId peer,
-                          MonotonicMs now_ms) noexcept;
+                          const RxBinding& rx, MonotonicMs now_ms) noexcept;
   // APPLIED (sdk-completion/01): terminal-side dispatch stores the verdict in
   // an AppliedRecord then emits RESULT; the origin side validates RESULT/
   // STATUS against the delivery and QUERY/RESULT_ACK against the record pool.
@@ -2099,6 +2384,19 @@ class MeshNode {
   ConfigEndpointSink* config_sink_{nullptr};
   DiagnosticSink* diagnostic_sink_{nullptr};
   ReplyPeerPort* reply_peer_port_{nullptr};
+  // Non-reentrancy guard (issue #117): set for the whole duration of every
+  // public mutating call; nested calls return Busy. The synchronous radio
+  // submit handshake (note_tx_submit_identity, issued by RadioPort::send
+  // during dispatch) is the single exempt entry — it only fills the pending
+  // submit-identity slot the same dispatch consumes.
+  bool in_call_{false};
+  // Admission transactions and deferred component events (issue #117).
+  std::array<TxnSlot, kAdmissionTransactionsMax> txn_slots_{};
+  std::array<EventSlot, kComponentEventsMax> event_slots_{};
+  // Component-origin jobs (Service/config) queued or in flight: each holds
+  // one completion event slot from its send, so payload admissions must
+  // leave room for their completions (design-q116 §8.3).
+  std::size_t component_jobs_outstanding_{0};
   // Seen-table for inbound TransitFailure reports (dedup on
   // reference+phase+reason — a different report_id must not restart work).
   struct TransitFailureSeen {

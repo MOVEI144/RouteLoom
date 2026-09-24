@@ -39,6 +39,8 @@ using routeloom_test::TestSecurity;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 
 #ifndef ROUTELOOM_USB_GOLDEN_DIR
 #define ROUTELOOM_USB_GOLDEN_DIR "protocol/usb-golden"
@@ -524,6 +526,7 @@ struct World {
   TestSecurity sec1, sec2;
   CapturingObserver obs2;
   SimRadio r1, r2;
+  SimReplyPort p1, p2;
   MeshNode n1, n2;
   CollectSink device_sink;
   StreamDecoder device_decoder;
@@ -531,12 +534,18 @@ struct World {
   explicit World(bool scoped = false)
       : bridge(config(), stream),
         r1(net, 1), r2(net, 2),
+        p1(r1, 1, node_config(1, 7001, scoped).link_epoch),
+        p2(r2, 2, node_config(2, 2002, scoped).link_epoch),
         n1(node_config(1, 7001, scoped), r1, sec1, bridge),
         n2(node_config(2, 2002, scoped), r2, sec2, obs2),
         device_decoder(device_sink) {
+    (void)n1.set_reply_peer_port(&p1);
+    (void)n2.set_reply_peer_port(&p2);
     bridge.set_mesh(&n1);
     net.register_node(1, &n1);
     net.register_node(2, &n2);
+    net.register_reply_port(1, &p1);
+    net.register_reply_port(2, &p2);
     net.connect(1, 2);
     n1.start(0);
     n2.start(0);

@@ -38,6 +38,8 @@ using routeloom_test::TestSecurity;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::SimWorld;
 using routeloom_test::FrameSight;
 
@@ -71,6 +73,7 @@ struct Harness {
   std::map<NodeId, std::unique_ptr<TestSecurity>> sec;
   std::map<NodeId, std::unique_ptr<CapturingObserver>> obs;
   std::map<NodeId, std::unique_ptr<SimRadio>> radio;
+  std::map<NodeId, std::unique_ptr<SimReplyPort>> ports;
   std::map<NodeId, std::unique_ptr<MeshNode>> node;
   MonotonicMs now{0};
 
@@ -89,8 +92,11 @@ struct Harness {
     sec[id] = std::make_unique<TestSecurity>();
     obs[id] = std::make_unique<CapturingObserver>();
     radio[id] = std::make_unique<SimRadio>(net, id);
+    ports[id] = std::make_unique<SimReplyPort>(*radio[id], id, cfg.link_epoch);
     node[id] = std::make_unique<MeshNode>(cfg, *radio[id], *sec[id], *obs[id]);
+    node[id]->set_reply_peer_port(ports[id].get());
     net.register_node(id, node[id].get());
+    net.register_reply_port(id, ports[id].get());
     (void)node[id]->start(now);
     return node[id].get();
   }
@@ -238,7 +244,8 @@ wire::EncodedFrame craft_receipt(TestSecurity& cipher, NodeId emitter,
 
 void inject(Harness& h, NodeId receiver, NodeId peer,
             const wire::EncodedFrame& frame) {
-  h.at(receiver)->on_radio_receive(peer, frame.view(), RadioRxMetadata{-60},
+  h.at(receiver)->on_radio_receive(peer, frame.view(),
+                                   sim_rx_metadata(h.ports.at(receiver).get(), peer),
                                    h.now);
 }
 
@@ -268,11 +275,6 @@ bool drop_data_frames(const SimNetwork::Pending& p) {
   return routeloom_test::sight_frame(
              ByteView{p.frame.data(), p.frame.size()}, s) &&
          s.type == FrameType::Data;
-}
-
-bool hold_data_frames(const NodeId from, const NodeId to, const ByteView frame) {
-  return from == 1 && to == 2 && frame.size > 4 &&
-         frame.data[4] == static_cast<std::uint8_t>(FrameType::Data);
 }
 
 // Drive a transit admission to post-acceptance failure (Evidence): the
@@ -310,21 +312,6 @@ void drive_evidence(Harness& h, NodeId relay, NodeId upstream,
 void step_until_sight(Harness& h, NodeId id, FrameType type, NodeId to,
                       std::size_t want) {
   for (int k = 0; k < 10 && h.sights(type, id, to) < want; ++k) h.step(id);
-}
-
-// Park `count` Live transit records at `relay`: each forward (from its own
-// phantom upstream 130+i) is dispatched toward the never-polled `downstream`
-// and waits in awaiting_hop_; beyond the 8-slot hop-wait table the forward
-// is deferred without consuming its budget (issue #50) — still Live. With a
-// 60 s hop timeout none of them resolves during a test.
-void park_live(Harness& h, NodeId relay, NodeId downstream, std::size_t count) {
-  for (std::uint64_t i = 0; i < count; ++i) {
-    const NodeId p = 130 + static_cast<NodeId>(i);
-    inject(h, relay, p,
-           craft_transit(h.cipher, p, relay, 620 + i, downstream, 31 + i));
-    h.step(relay);  // HOP_ACCEPT out (dropped at the phantom)
-    h.step(relay);  // forward on the air -> parked (or deferred), stays Live
-  }
 }
 
 // ------------------------------------------------------------- tests
@@ -404,86 +391,78 @@ void test_eviction_order() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);  // live work never times out
   (void)h.add(2);                                  // X: live downstream
-  (void)h.add(5);                                  // U: real upstream for reports
   h.link(1, 2);
-  h.link(1, 5);
-  const NodeId up = 5;
 
   // 4 Resolved records (completed R -> X exchanges from phantom upstreams).
+  // Long deadlines: retention must outlast the evidence fills' window rolls.
   for (std::uint64_t i = 0; i < 4; ++i) {
     const NodeId p = 100 + static_cast<NodeId>(i);
-    inject(h, 1, p, craft_transit(h.cipher, p, 1, 600 + i, 2, 1 + i));
+    inject(h, 1, p, craft_transit(h.cipher, p, 1, 600 + i, 2, 1 + i, 0, 30000));
     drive_resolved(h, 1, 2, 1 + i);
   }
   CHECK(r->dedup_stats().admitted_transit == 4);
 
-  // 4 Evidence records: forwards toward X are dropped on the air
-  // (deterministic RF loss), exhaust the attempt budget -> post-acceptance
-  // failure -> Evidence + a TransitFailure report toward the real upstream.
-  // The report sight confirms the evidence phase; the 1 s/peer diag window
-  // is rolled between fills so every report is emitted, not counted-dropped.
-  for (std::uint64_t i = 0; i < 4; ++i) {
-    drive_evidence(h, 1, up, 2,
-                   craft_transit(h.cipher, up, 1, 610 + i, 2, 21 + i));
+  // 12 Evidence records: forwards toward X are dropped on the air (MAC
+  // failure twice), exhaust the attempt budget -> post-acceptance failure
+  // -> Evidence. The 1 s roll expires the previous fill's 500 ms route
+  // hold (distinct phantom upstreams need no report-window roll); the
+  // reports toward phantoms have no sights — the eviction order below is
+  // the proof of the phase.
+  for (std::uint64_t i = 0; i < 12; ++i) {
+    const NodeId p = 60 + static_cast<NodeId>(i);
+    drive_evidence(h, 1, p, 2,
+                   craft_transit(h.cipher, p, 1, 610 + i, 2, 21 + i, 0, 30000));
     h.now += 1001;
   }
-  CHECK(r->dedup_stats().admitted_transit == 8);
+  CHECK(r->dedup_stats().admitted_transit == 16);
 
-  // kCap - 16 terminal pins (inside the pin bound), then 8 uncompleted
-  // forwards parked in awaiting_hop_ (live records, scheduler drained) ->
-  // pool full. The route to X was invalidated+held by the evidence fills'
-  // drops — it has expired by now, but the candidate needs re-seeding.
+  // kCap - 16 terminal pins (inside the pin bound) -> pool full with zero
+  // live transactions: every fill above already closed its own. (Each pin's
+  // END_RECEIPT skips for want of a return route to its phantom origin, so
+  // the scheduler never clogs.)
   static_assert(kCap - 16 <= kPins, "fill stays inside the pin bound");
   for (std::uint64_t i = 0; i < kCap - 16; ++i) {
     inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
     h.step(1);
   }
-  (void)r->add_neighbor(2, 1, h.now);
-  for (std::uint64_t i = 0; i < kHopWait; ++i) {
-    const NodeId p = 130 + static_cast<NodeId>(i);
-    inject(h, 1, p, craft_transit(h.cipher, p, 1, 620 + i, 2, 31 + i));
-    h.step(1);  // HOP_ACCEPT out (dropped at the phantom)
-    h.step(1);  // forward delivered to X -> parks in awaiting, stays Live
-  }
   const DedupStats& stats = r->dedup_stats();
   CHECK(stats.admitted_terminal + stats.admitted_transit == kCap);
 
-  // Probes are transit admissions left undispatched: each forces exactly one
-  // eviction while itself staying Live.
+  // R-phase probes each evict the earliest-expiry Resolved record, then
+  // are driven to failure so their transactions recycle and the pool
+  // stays full for the next probe. The roll expires the route hold again.
   std::uint64_t prev_res = stats.evicted_resolved;
   std::uint64_t prev_ev = stats.evicted_evidence;
-  h.net.block_send = hold_data_frames;
   for (std::uint64_t i = 0; i < 4; ++i) {
     const NodeId p = 140 + static_cast<NodeId>(i);
-    inject(h, 1, p, craft_transit(h.cipher, p, 1, 700 + i, 2, 41 + i));
+    drive_evidence(h, 1, p, 2, craft_transit(h.cipher, p, 1, 700 + i, 2, 41 + i));
     CHECK(stats.evicted_resolved == prev_res + 1);   // earliest-expiry Resolved
     CHECK(stats.evicted_evidence == prev_ev);        // Evidence untouched
     prev_res = stats.evicted_resolved;
+    h.now += 1001;
   }
+  // E-phase probes are transit admissions left undispatched (no steps, so
+  // no dispatch): each evicts the oldest Evidence record while itself
+  // staying Live. Two shared phantom upstreams keep the live binding
+  // count inside the 3-binding budget.
   for (std::uint64_t i = 0; i < 4; ++i) {
-    const NodeId p = 150 + static_cast<NodeId>(i);
+    const NodeId p = 150 + static_cast<NodeId>(i % 2);
     inject(h, 1, p, craft_transit(h.cipher, p, 1, 710 + i, 2, 51 + i));
     CHECK(stats.evicted_resolved == prev_res);       // no Resolved left
     CHECK(stats.evicted_evidence == prev_ev + 1);    // Evidence next
     prev_ev = stats.evicted_evidence;
   }
-  h.step(1);  // clear the required ACK lane before probing all-Live overflow
-  // All evictable records gone: pool = 48 Terminal + 16 Live. Honest refusal
-  // — Live and Terminal records are never eviction victims.
-  const NodeId p_last = 160;
-  inject(h, 1, p_last, craft_transit(h.cipher, p_last, 1, 720, 2, 61));
-  CHECK(stats.refused_pool_full == 1);
 
   // Diagnostic ordering mirrors the eviction order.
   const long first_res = diag_index(h.observer(1), "DEDUP_EVICTED_RESOLVED");
   const long first_ev = diag_index(h.observer(1), "DEDUP_EVICTED_EVIDENCE");
-  const long first_ovf = diag_index(h.observer(1), "DEDUP_OVERFLOW");
-  CHECK(first_res >= 0 && first_ev > first_res && first_ovf > first_ev);
+  CHECK(first_res >= 0 && first_ev > first_res);
 }
 
-// §2.5/§2.10 refusal on an all-Live/Terminal pool: BUSY toward a busy-capable
-// peer, a counted drop toward a legacy peer, and dedup still working at
-// capacity (a re-received terminal frame suppresses — on_message unchanged).
+// §2.5/§2.10 refusal at lease capacity (issue #117): with all 8
+// transactions live, a transit probe is refused with a diagnosed, counted
+// drop — uniform across busy-capable and legacy peers, since the BUSY
+// itself is unaffordable (Q117-14). Dedup still suppresses at capacity.
 void test_full_pool_honest_refusal() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
@@ -497,38 +476,41 @@ void test_full_pool_honest_refusal() {
     inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
     h.step(1);
   }
-  park_live(h, 1, 2, kReserve);
-  CHECK(r->dedup_stats().admitted_terminal == kPins);
-  CHECK(r->dedup_stats().admitted_transit == kReserve);
-
-  // Busy-capable upstream: refusal emits a real BUSY through the control lane.
-  const std::size_t sights_before = h.net.sights.size();
-  inject(h, 1, 3, craft_transit(h.cipher, 3, 1, 700, 2, 41));
-  CHECK(r->dedup_stats().refused_pool_full == 1);
-  CHECK(r->congestion_stats().busy_sent == 1);
-  h.step(1);
-  bool busy_seen = false;
-  for (std::size_t i = sights_before; i < h.net.sights.size(); ++i) {
-    if (h.net.sights[i].type == FrameType::Busy && h.net.sights[i].from == 1 &&
-        h.net.sights[i].to == 3) {
-      busy_seen = true;
-    }
+  // 8 parked Lives hold all 8 transactions (two shared phantom upstreams
+  // stay inside the 3-binding budget).
+  for (std::uint64_t i = 0; i < 8; ++i) {
+    const NodeId p = 130 + static_cast<NodeId>(i % 2);
+    inject(h, 1, p, craft_transit(h.cipher, p, 1, 620 + i, 2, 31 + i));
+    h.step(1);  // HOP_ACCEPT out (dropped at the phantom)
+    h.step(1);  // forward delivered to X -> parks in awaiting, stays Live
   }
-  CHECK(busy_seen);
-  CHECK(h.observer(1)->has_diag("DEDUP_OVERFLOW"));
+  CHECK(r->dedup_stats().admitted_terminal == kPins);
+  CHECK(r->dedup_stats().admitted_transit == 8);
 
-  // Legacy (phantom) upstream: counted drop, no BUSY emitted.
-  const NodeId legacy = 170;
-  const auto sent_before = r->congestion_stats().busy_sent;
+  // Busy-capable upstream: diagnosed refusal, counted drop, no BUSY.
+  const std::size_t sights_before = h.net.sights.size();
   const auto failed_before = r->congestion_stats().busy_send_failed;
-  inject(h, 1, legacy, craft_transit(h.cipher, legacy, 1, 701, 2, 42));
-  CHECK(r->dedup_stats().refused_pool_full == 2);
-  CHECK(r->congestion_stats().busy_sent == sent_before);
+  inject(h, 1, 3, craft_transit(h.cipher, 3, 1, 700, 2, 41));
+  CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
+  CHECK(r->congestion_stats().busy_sent == 0);
   CHECK(r->congestion_stats().busy_send_failed == failed_before + 1);
+  h.step(1);
+  for (std::size_t i = sights_before; i < h.net.sights.size(); ++i) {
+    CHECK(!(h.net.sights[i].type == FrameType::Busy &&
+            h.net.sights[i].from == 1));
+  }
+
+  // Legacy (phantom) upstream: the same uniform counted drop.
+  const NodeId legacy = 170;
+  const auto failed_before2 = r->congestion_stats().busy_send_failed;
+  inject(h, 1, legacy, craft_transit(h.cipher, legacy, 1, 701, 2, 42));
+  CHECK(r->congestion_stats().busy_sent == 0);
+  CHECK(r->congestion_stats().busy_send_failed == failed_before2 + 1);
 
   // Dedup still answers at capacity: the pinned terminal record suppresses a
   // re-received copy — no second admission, no second on_message — and the
   // same key on a NEW round is still suppressed by the round-agnostic pin.
+  // (The duplicate's re-ACK is unaffordable too, so it drops silently.)
   const std::size_t msgs_before = h.observer(1)->messages.size();
   inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000, 100));
   inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000, 100, /*round=*/1));
@@ -558,16 +540,25 @@ void test_terminal_reserve() {
   CHECK(h.observer(1)->has_diag("DEDUP_TERMINAL_RESERVE"));
   CHECK(h.observer(1)->messages.size() == kPins);
 
-  // Transit traffic still admits into the reserve.
-  park_live(h, 1, 2, kReserve);
-  CHECK(r->dedup_stats().admitted_transit == kReserve);
+  // Transit traffic still admits into the reserve — up to the 8 live
+  // transactions (two shared phantom upstreams stay in the binding budget).
+  for (std::uint64_t i = 0; i < 8; ++i) {
+    const NodeId p = 130 + static_cast<NodeId>(i % 2);
+    inject(h, 1, p, craft_transit(h.cipher, p, 1, 620 + i, 2, 31 + i));
+    h.step(1);  // HOP_ACCEPT out (dropped at the phantom)
+    h.step(1);  // forward delivered to X -> parks in awaiting, stays Live
+  }
+  CHECK(r->dedup_stats().admitted_transit == 8);
 
-  // Pool now full of Live + Terminal only: transit honestly refuses too.
+  // With all transactions live, transit honestly refuses (counted drop).
   const NodeId p_last = 160;
   inject(h, 1, p_last, craft_transit(h.cipher, p_last, 1, 720, 2, 61));
-  CHECK(r->dedup_stats().refused_pool_full == 1);
-  CHECK(h.observer(1)->has_diag("DEDUP_OVERFLOW"));
-  // And the reserve still refuses terminals.
+  CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
+
+  // Free one transaction by letting X accept a parked forward, and the
+  // reserve still refuses terminals (pins are maxed, pool has room).
+  h.step(2);  // X dispatches its queued HOP_ACCEPT for a parked forward
+  h.step(1);  // the accept lands: one forward resolves, its slot frees
   inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9998, 901));
   CHECK(r->dedup_stats().refused_terminal_reserve == 2);
 }
@@ -795,20 +786,20 @@ void test_evicted_resolved_reforward() {
   inject(h, 1, p, craft_transit(h.cipher, p, 1, 601, 2, 2));
   drive_resolved(h, 1, 2, 2);
 
-  // Fill to capacity: kPins terminal pins (the reserve bound), then 6
+  // Fill to capacity: kPins terminal pins (the reserve bound), then 2
   // forwards parked in awaiting_hop_ toward node 4 (never polled -> they
   // stay Live and unevictable), then Resolved exchanges up to a full pool.
-  // Two awaiting slots stay free for the probe's and the dup's forwards (a
-  // full table would force retry storms and extra sights).
-  constexpr std::size_t kLive = 6;
+  // The parks share one phantom upstream: the probe (a second upstream)
+  // and the dup (a third) must all fit the live 3-binding budget, and
+  // their forwards share the 8-slot hop-wait table with the parks.
+  constexpr std::size_t kLive = 2;
   constexpr std::size_t kLateResolved = kCap - kPins - kLive - 2;
   for (std::uint64_t i = 0; i < kPins; ++i) {
     inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
     h.step(1);
   }
   for (std::uint64_t i = 0; i < kLive; ++i) {
-    const NodeId q = 130 + static_cast<NodeId>(i);
-    inject(h, 1, q, craft_transit(h.cipher, q, 1, 620 + i, 4, 31 + i));
+    inject(h, 1, 130, craft_transit(h.cipher, 130, 1, 620 + i, 4, 31 + i));
     step_until_sight(h, 1, FrameType::Data, 4, i + 1);
   }
   for (std::uint64_t i = 0; i < kLateResolved; ++i) {
@@ -821,8 +812,9 @@ void test_evicted_resolved_reforward() {
   CHECK(x->dedup_stats().admitted_terminal == 2 + kLateResolved);
   CHECK(h.observer(2)->messages.size() == 2 + kLateResolved);
 
-  // The probe evicts R1 — the earliest-expiry Resolved record.
-  const NodeId probe = 160;
+  // The probe evicts R1 — the earliest-expiry Resolved record. Its fresh
+  // phantom upstream is the second live binding (parks hold the first).
+  const NodeId probe = 131;
   inject(h, 1, probe, craft_transit(h.cipher, probe, 1, 700, 4, 41));
   CHECK(r->dedup_stats().evicted_resolved == 1);
   CHECK(h.observer(1)->has_diag("DEDUP_EVICTED_RESOLVED"));
@@ -928,52 +920,54 @@ void test_expired_reclaim_beats_eviction() {
   (void)h.add(2);
   h.link(1, 2);
 
-  // Pool composition (pins stay under kPins): 9 Resolved
-  // records with a 500 ms deadline (expiry ~= first_seen + 5500), then kCap-17
-  // terminal pins (expiry ~= +30500), then 8 forwards parked in
-  // awaiting_hop_ with an 8 s deadline (expiry ~= +13000 — ALIVE at the
-  // probe point). Total 9 + (kCap-17) + 8 = kCap; exactly the nine Resolved
+  // Pool composition (pins stay under kPins): 8 Resolved records with a
+  // 500 ms deadline (expiry ~= first_seen + 5500), then kCap-16 terminal
+  // pins (expiry ~= +30500), then 8 fresh Resolved records with a long
+  // deadline (alive past the probe point). Total 8 + (kCap-16) + 8 = kCap
+  // with zero live transactions; exactly the eight short-deadline Resolved
   // records expire in the next advance.
-  for (std::uint64_t i = 0; i < 9; ++i) {
+  for (std::uint64_t i = 0; i < 8; ++i) {
     const NodeId p = 100 + static_cast<NodeId>(i);
     inject(h, 1, p, craft_transit(h.cipher, p, 1, 600 + i, 2, 1 + i, 0, 500));
     drive_resolved(h, 1, 2, 1 + i);
   }
-  static_assert(kCap - 17 <= kPins, "fill stays inside the pin bound");
-  for (std::uint64_t i = 0; i < kCap - 17; ++i) {
+  static_assert(kCap - 16 <= kPins, "fill stays inside the pin bound");
+  for (std::uint64_t i = 0; i < kCap - 16; ++i) {
     inject(h, 1, 50,
            craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i, 0, 500));
     h.step(1);
   }
   for (std::uint64_t i = 0; i < 8; ++i) {
-    const NodeId p = 120 + static_cast<NodeId>(i);
+    const NodeId p = 110 + static_cast<NodeId>(i);
     inject(h, 1, p,
-           craft_transit(h.cipher, p, 1, 620 + i, 2, 21 + i, 0, 8000));
-    step_until_sight(h, 1, FrameType::Data, 2, 10 + i);
+           craft_transit(h.cipher, p, 1, 620 + i, 2, 21 + i, 0, 30000));
+    drive_resolved(h, 1, 2, 21 + i);
   }
   CHECK(r->dedup_stats().admitted_terminal +
             r->dedup_stats().admitted_transit == kCap);
 
-  // Advance past the Resolved expiry (+5500) but inside the terminal slack
-  // (+30500) and the live records' expiry (+13000): nine records are
-  // dead-but-resident. The first eight probes reclaim on admission; the
-  // ninth expires when the required ACK lane is drained.
+  // Advance past the short Resolved expiry (+5500) but inside the terminal
+  // slack (+30500) and the fresh records' horizon: eight records are
+  // dead-but-resident, and no poll runs before the probes, so no sweep
+  // eats them first. Each probe's admission reclaims exactly one expired
+  // record (a counted expiry release, never a forced eviction) while the
+  // probe itself stays Live and undispatched. Two shared phantom upstreams
+  // keep the live binding count inside the 3-binding budget.
   h.now += 5600;
-  h.net.block_send = hold_data_frames;
-  for (std::uint64_t i = 0; i < 9; ++i) {
-    const NodeId p = 140 + static_cast<NodeId>(i);
+  for (std::uint64_t i = 0; i < 8; ++i) {
+    const NodeId p = 140 + static_cast<NodeId>(i % 2);
     inject(h, 1, p, craft_transit(h.cipher, p, 1, 700 + i, 2, 51 + i));
     CHECK(r->dedup_stats().expired == i + 1);
     CHECK(r->dedup_stats().evicted_resolved == 0);
     CHECK(r->dedup_stats().evicted_evidence == 0);
-    if (i == 7) h.step(1);  // the ninth expired record also sweeps here
   }
-  // Pool = (kCap-17) Terminal + 8 parked Live + 9 Live probes: the next probe
-  // honestly refuses — nothing safe to reclaim or evict remains.
+  // All 8 transactions live now: the next probe honestly refuses with a
+  // diagnosed, counted drop — the expired-reclaim path never runs, since
+  // nothing expired remains anyway.
   const NodeId p_last = 160;
   inject(h, 1, p_last, craft_transit(h.cipher, p_last, 1, 720, 2, 61));
-  CHECK(r->dedup_stats().refused_pool_full == 1);
-  CHECK(h.observer(1)->has_diag("DEDUP_OVERFLOW"));
+  CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
+  CHECK(r->dedup_stats().expired == 8);
 }
 
 // §2.6 cross-round pin: an END_RECEIPT-loss retry arrives on round+1 — the

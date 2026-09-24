@@ -37,6 +37,8 @@ int failures = 0;
 using namespace routeloom;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 
 constexpr NetworkId kNet = 7;
 const std::uint8_t kPayload[] = "telemetry-test";
@@ -363,9 +365,10 @@ struct NodeFixture {
   routeloom_test::CapturingObserver observer;
   SimNetwork net;
   SimRadio radio;
+  SimReplyPort port;
   std::unique_ptr<MeshNode> node;
 
-  NodeFixture() : radio(net, 1) {
+  NodeFixture() : radio(net, 1), port(radio, 1, 1) {
     NodeConfig cfg{};
     cfg.network = kNet;
     cfg.node = 1;
@@ -374,7 +377,9 @@ struct NodeFixture {
     cfg.route_advertisement_period_ms = 30000;
     cfg.route_lifetime_ms = 60000;
     node = std::make_unique<MeshNode>(cfg, radio, cipher, observer);
+    CHECK_OK(node->set_reply_peer_port(&port));
     net.register_node(1, node.get());
+    net.register_reply_port(1, &port);
     CHECK_OK(node->start(0));
   }
 };
@@ -533,13 +538,16 @@ void test_node_remote_query_snapshot() {
   CHECK(snap.request_id == 0xCAFE);
   CHECK(snap.observer == 2 && snap.peer == 1);
   CHECK((snap.validity & kTelemetryValidRssi) != 0);
-  // The query's own arrival refreshes the summary via the sim's V1 path —
-  // and its zeroed generations mismatch the seeded V2 identity, so the
-  // record restarts (stale identity never merges into a fresh window).
+  // Later arrivals carry the sim Owner's live binding snapshot, which
+  // mismatches the hand-seeded V2 identity, so the record restarts (stale
+  // identity never merges into a fresh window).
   CHECK((snap.validity & kTelemetrySourceInjectedTest) != 0);
-  // Route ads and the query itself all arrive via V1 with rssi -60.
+  // Route ads and the query itself all arrive via the sim path with rssi
+  // -60; the binding is the live minted identity, radio stays unmodeled.
   CHECK(snap.rssi_samples >= 1 && snap.rssi_last == -60);
-  CHECK(snap.binding.value == 0 && snap.radio.value == 0);
+  ReplyBinding live{};
+  CHECK_OK(world.net.reply_port(2)->snapshot_binding(1, live));
+  CHECK(snap.binding.value == live.id.value && snap.radio.value == 0);
 }
 
 // Remote answering is opt-in: a node with telemetry_remote off answers an

@@ -143,6 +143,71 @@ Status ExpectedReplyLeases::acquire(const ReplyBinding captured,
   return Status::success();
 }
 
+Status ExpectedReplyLeases::probe_acquire(const ReplyBinding captured,
+                                           const MonotonicMs deadline,
+                                           const MonotonicMs now) const noexcept {
+  // Same check sequence as acquire; no mutation, no clock anchor advance.
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant probe");
+  if (now < last_now_) {
+    return Status::error(StatusCode::TimeUncertain, "clock regressed");
+  }
+  if (captured.peer == kInvalidNodeId || captured.id == kInvalidBindingId ||
+      captured.generation == BindingGeneration{0} ||
+      captured.rx_context_id == 0) {
+    return Status::error(StatusCode::InvalidArgument, "zero identity field");
+  }
+  if (deadline <= now) {
+    return Status::error(StatusCode::InvalidArgument, "deadline already passed");
+  }
+  if (now > UINT64_MAX - kReplyLeaseTtlMs) {
+    return Status::error(StatusCode::CounterExhausted, "ttl unrepresentable");
+  }
+  const Entry* entry = find_entry(captured.id, captured.generation);
+  if (entry != nullptr && entry->retired) {
+    return Status::error(StatusCode::Conflict, "binding retired");
+  }
+  if (entry != nullptr && entry->binding != captured) {
+    return Status::error(StatusCode::Conflict, "binding identity changed");
+  }
+  if (entry == nullptr) {
+    bool free_entry = false;
+    for (const auto& candidate : entries_) {
+      if (!candidate.used) {
+        free_entry = true;
+        break;
+      }
+    }
+    if (!free_entry) {
+      return Status::error(StatusCode::NoCapacity, "3 reply bindings live");
+    }
+  }
+  bool retired_seen = false;
+  bool free_use = false;
+  for (const auto& use : uses_) {
+    if (use.used) continue;
+    if (use.retired) {
+      retired_seen = true;
+      continue;
+    }
+    std::uint32_t ignored = 0;
+    if (!next_use_serial(use.serial, ignored)) {
+      retired_seen = true;  // acquire would park this slot; probe must not
+      continue;
+    }
+    free_use = true;
+    break;
+  }
+  if (!free_use) {
+    return Status::error(retired_seen ? StatusCode::CounterExhausted
+                                      : StatusCode::NoCapacity,
+                         retired_seen ? "use serials exhausted" : "8 uses live");
+  }
+  if (entry != nullptr && entry->refcount == UINT16_MAX) {
+    return Status::error(StatusCode::InternalError, "entry refcount saturated");
+  }
+  return Status::success();
+}
+
 Status ExpectedReplyLeases::release(const ReplyLeaseToken token) noexcept {
   if (in_call_) return Status::error(StatusCode::Busy, "reentrant release");
   Guard guard(in_call_);

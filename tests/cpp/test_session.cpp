@@ -48,6 +48,8 @@ using namespace routeloom;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::TestSecurity;
 
 constexpr NetworkId kNet = 1;
@@ -258,6 +260,8 @@ struct Pair {
   CapturingObserver obs_b;
   SimRadio radio_a{net, 1};
   SimRadio radio_b{net, 2};
+  SimReplyPort port_a{radio_a, 1, node_config(1).link_epoch};
+  SimReplyPort port_b{radio_b, 2, node_config(2).link_epoch};
   std::unique_ptr<MeshNode> a;
   std::unique_ptr<MeshNode> b;
   std::vector<AirFrame> air;
@@ -266,8 +270,12 @@ struct Pair {
   Pair() {
     a = std::make_unique<MeshNode>(node_config(1), radio_a, sec_a, obs_a);
     b = std::make_unique<MeshNode>(node_config(2), radio_b, sec_b, obs_b);
+    CHECK_OK(a->set_reply_peer_port(&port_a));
+    CHECK_OK(b->set_reply_peer_port(&port_b));
     net.register_node(1, a.get());
     net.register_node(2, b.get());
+    net.register_reply_port(1, &port_a);
+    net.register_reply_port(2, &port_b);
     net.drop_frame = &capture_frame;
     net.connect(1, 2);
     CHECK_OK(a->start(now));

@@ -34,6 +34,8 @@ using routeloom_test::TestSecurity;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::FrameSight;
 
 constexpr NetworkId kNet = 7;
@@ -52,6 +54,7 @@ struct Harness {
   std::map<NodeId, std::unique_ptr<TestSecurity>> sec;
   std::map<NodeId, std::unique_ptr<CapturingObserver>> obs;
   std::map<NodeId, std::unique_ptr<SimRadio>> radio;
+  std::map<NodeId, std::unique_ptr<SimReplyPort>> ports;
   std::map<NodeId, std::unique_ptr<MeshNode>> node;
   MonotonicMs now{0};
 
@@ -72,8 +75,11 @@ struct Harness {
     sec[id] = std::make_unique<TestSecurity>();
     obs[id] = std::make_unique<CapturingObserver>();
     radio[id] = std::make_unique<SimRadio>(net, id);
+    ports[id] = std::make_unique<SimReplyPort>(*radio[id], id, cfg.link_epoch);
     node[id] = std::make_unique<MeshNode>(cfg, *radio[id], *sec[id], *obs[id]);
+    node[id]->set_reply_peer_port(ports[id].get());
     net.register_node(id, node[id].get());
+    net.register_reply_port(id, ports[id].get());
     (void)node[id]->start(now);
     return node[id].get();
   }
@@ -196,7 +202,9 @@ wire::EncodedFrame craft_transit(TestSecurity& cipher, NodeId prev, NodeId relay
 
 void inject(Harness& h, NodeId receiver, NodeId peer,
             const wire::EncodedFrame& frame) {
-  h.at(receiver)->on_radio_receive(peer, frame.view(), RadioRxMetadata{-60}, h.now);
+  h.at(receiver)->on_radio_receive(peer, frame.view(),
+                                   sim_rx_metadata(h.ports.at(receiver).get(), peer),
+                                   h.now);
 }
 
 // Step `id` until `expected` DATA transmissions of `seq` have been observed.
@@ -375,10 +383,10 @@ void test_physical_token_never_wraps() {
   CHECK(issued == 7 && next == 0);
 }
 
-// D4-04: bounded capacity — the per-origin cap rejects spoofed-flood
-// admissions and the flow descriptor table stays bounded. The origin cap is
-// exercised through crafted transit forwards (delivery slots are 8, below
-// the 12-job origin cap, so self-sends cannot reach it).
+// D4-04: bounded capacity — a spoofed flood from one origin stops at the
+// 8-transaction admission bound and the flow descriptor table stays
+// bounded. The legacy 12-job origin/scope caps sit above the lease bound,
+// so the transaction budget is what trips first (issue #117).
 // flow_overflow_merged is a by-construction fallback: descriptors are
 // released with their last job, so live flows can never outnumber live jobs.
 void test_flow_caps() {
@@ -391,28 +399,28 @@ void test_flow_caps() {
   h.link(1, 4);
   h.link(1, 6);
 
-  // 14 forwards claiming the SAME origin, alternating two sender scopes so
-  // the per-origin cap (not the per-scope cap) is what trips. Each step
-  // drains the accept AND sends the next queued job inside the same
-  // flush — flush() polls the sender once every event is drained, and
-  // that poll dispatches the next job — the peer window holds 2 forwards
-  // in flight, so 14 admissions leave 12 pooled against the cap.
-  for (std::uint64_t i = 1; i <= 14; ++i) {
+  // 8 forwards claiming the SAME origin fill the transaction budget,
+  // alternating two sender scopes. Each step drains the accept AND sends
+  // the next queued job inside the same flush — the peer window holds 2
+  // forwards in flight while the rest pool against the lease bound.
+  for (std::uint64_t i = 1; i <= 8; ++i) {
     const NodeId peer = (i % 2 == 0) ? 3 : 4;
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, i));
     h.step(1);  // drains the accept; the forward job accumulates
     ++h.now;
   }
   const NodeId peer = 3;
-  inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, 15));
+  inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, 9));
   CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
-  CHECK(a->congestion_stats().busy_send_failed >= 1);  // legacy peer: counted drop
+  CHECK(a->congestion_stats().busy_send_failed >= 1);  // no reply slot: counted drop
   CHECK(a->congestion_stats().flows_active <= kFlowDescriptorsMax);
   CHECK(a->congestion_stats().flow_overflow_merged == 0);
 }
 
-// D4-03/D4-08: BUSY emission on a real admission failure (per-sender scope
-// cap) and dispatch of the Busy(20) frame back to the rejected peer.
+// D4-03/D4-08 (issue #117 regime): BUSY emission on a real admission
+// failure and dispatch of the Busy(20) frame back to the rejected peer —
+// then the lease-saturation degradation (Q117-14): when no reply slot is
+// affordable the refusal is a counted local drop, never a fabricated BUSY.
 void test_busy_emission() {
   Harness h;
   MeshNode* p = h.add(3);
@@ -422,18 +430,20 @@ void test_busy_emission() {
   h.link(2, 4);
   b->set_peer_busy_capable(3, true);
 
-  // 14 transit DATA from P with distinct origins fill the per-scope cap.
-  // Each step drains the accept AND sends the next queued job inside the
-  // same flush (flush() polls the sender once every event is drained,
-  // and that poll dispatches the next job) — the peer window holds 2
-  // forwards in flight, so 14 admissions leave 12 pooled against the cap.
-  for (std::uint64_t i = 1; i <= 14; ++i) {
-    inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
-    h.step(2);  // drains the HOP_ACCEPT so the control lane stays usable
-    ++h.now;
-  }
+  // Part 1: a terminal DATA whose driver-queue time already spent its
+  // forwarding budget is refused pre-acceptance — with a free reply slot
+  // the sender gets honest backpressure BUSY on its own short reservation.
+  h.now = 1000;
+  wire::Header spent = mk_header(FrameType::Data, 7, 2, 3, 2,
+                                 MessageId{42, 1}, wire::kFlagEndProtected);
+  spent.remaining_deadline_ms = 100;  // rx_age 200 already consumed it
+  const wire::EncodedFrame spent_frame =
+      craft_frame(h.cipher, spent, payload_view());
+  RadioRxMetadataV2 spent_meta =
+      sim_rx_metadata(h.ports.at(2).get(), 3);
+  spent_meta.received_us = 800000;  // captured at t=800, now t=1000
   const std::size_t sights_before = h.net.sights.size();
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
+  b->on_radio_receive(3, spent_frame.view(), spent_meta, h.now);
   CHECK(b->congestion_stats().busy_sent == 1);
 
   h.step(2);  // BUSY leaves via the reserved control lane
@@ -448,6 +458,26 @@ void test_busy_emission() {
   CHECK(p->congestion_stats().busy_received == 1);
   // The BUSY references a job P never really sent — unmatched, never acted on.
   CHECK(p->congestion_stats().busy_unmatched == 1);
+
+  // Part 2: 8 transit admissions fill the transaction budget; the 9th is
+  // refused with a counted drop — the BUSY itself is unaffordable.
+  for (std::uint64_t i = 1; i <= 8; ++i) {
+    inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
+    h.step(2);  // drains the HOP_ACCEPT so the control lane stays usable
+    ++h.now;
+  }
+  const std::size_t sights_before2 = h.net.sights.size();
+  const std::uint64_t failed_before =
+      b->congestion_stats().busy_send_failed;
+  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 9));
+  CHECK(b->congestion_stats().busy_sent == 1);  // unchanged: nothing emitted
+  CHECK(b->congestion_stats().busy_send_failed == failed_before + 1);
+  CHECK(h.observer(2)->has_diag("TRANSIT_ADMISSION_DENIED"));
+  h.step(2);
+  for (std::size_t i = sights_before2; i < h.net.sights.size(); ++i) {
+    CHECK(!(h.net.sights[i].type == FrameType::Busy &&
+            h.net.sights[i].from == 2));
+  }
 }
 
 // D4-09: a peer that has not proven BUSY capability gets the legacy silent
@@ -705,10 +735,14 @@ void test_attempt_budgets() {
   CHECK(a2->delivery(d2).state == DeliveryState::Failed);
 }
 
-// D4-04: queue watermarks — at >=80% pool occupancy new bulk admissions are
-// explicitly rejected while higher classes are still admitted. The pool is
-// filled with crafted transit forwards (delivery slots cap self-sends at 8).
-void test_watermarks() {
+// D4-04 (issue #117 regime): the lease-bound pool — 8 transit admissions
+// (forward + accept each) plus self-origin traffic fill the pool, and
+// every further admission is explicitly refused with zero queue effect.
+// The 8 queued HOP_ACCEPTs carry self origin, so the 12-job self-origin
+// cap binds after 4 more origin jobs: the pool tops out at 20/32 and the
+// legacy 80% bulk-stop watermark survives only against group floods,
+// which carry foreign origin outside the lease budget.
+void test_lease_bound_pool() {
   Harness h;
   MeshNode* a = h.add(1);
   (void)h.add(3);
@@ -720,31 +754,33 @@ void test_watermarks() {
   h.link(1, 5);
   h.link(1, 6);
 
-  // 29 forwards accumulate; each step drains that frame's control-lane
-  // accept AND sends the next queued job inside the same flush — the peer
-  // window holds 2 forwards in flight (the boot advertisement is drained
-  // too), leaving 27 pooled. Cycling three sender scopes keeps every cap
-  // below its bound.
-  for (std::uint64_t i = 1; i <= 29; ++i) {
+  // 8 transit admissions, undispatched: 8 forwards + 8 control-lane
+  // accepts pool while the transaction budget fills. Cycling three sender
+  // scopes keeps every legacy per-scope count below its bound.
+  for (std::uint64_t i = 1; i <= 8; ++i) {
     const NodeId peer = 3 + (i % 3);
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 5000 + i, 6, i));
-    h.step(1);
-    ++h.now;
   }
-  // 27 pooled forwards = 27/32 (84%) — the bulk-stop watermark is active.
-  CHECK(a->congestion_stats().queued == 27);
+  // 4 origin DATA reach the self-origin cap (8 accepts + 4 sends = 12):
+  // 16 + 4 = 20 pooled, the DATA maximum under the lease budget.
+  for (int i = 0; i < 4; ++i) {
+    MessageId id{};
+    CHECK_OK(a->send(6, payload_view(), SendOptions{}, h.now, id));
+  }
+  CHECK(a->congestion_stats().queued == 20);
 
-  SendOptions bulk{};
-  bulk.delivery = DeliveryClass::BestEffort;
-  bulk.priority = Priority::Bulk;
-  MessageId id{};
-  const auto refused = a->send(6, payload_view(), bulk, h.now, id);
-  CHECK(!refused.ok());  // explicit rejection, not a silent queue
-  CHECK(a->congestion_stats().bulk_suspended >= 1);
-
-  // Non-bulk admission still works at the watermark (normal-class forward).
+  // A 5th origin send is origin-capped — explicit rejection, no queue.
+  {
+    MessageId id{};
+    const auto refused = a->send(6, payload_view(), SendOptions{}, h.now, id);
+    CHECK(!refused.ok());
+    CHECK(refused.code == StatusCode::Congested);
+  }
+  // A 9th transit admission finds the transaction budget spent: diagnosed
+  // refusal with zero queue effect — no forward, no accept, no dedup.
   inject(h, 1, 3, craft_transit(h.cipher, 3, 1, 7777, 6, 99));
-  CHECK(a->congestion_stats().queued == 29);  // accept + forward admitted
+  CHECK(h.observer(1)->has_diag("TRANSIT_ADMISSION_DENIED"));
+  CHECK(a->congestion_stats().queued == 20);
 }
 
 // D4-10: BUSY never cancels accepted work. A deferred exchange that still
@@ -912,6 +948,14 @@ void test_adaptive_hop_timeout_shrinks() {
   (void)h.add(2);   // never polled: only our scripted accepts land
   h.link(1, 2);
 
+  // Seed the peer summary with the live binding first: submits stamp the
+  // summary identity, so all three exchanges must share it to land in one
+  // observation bucket (02 §2.3).
+  auto seed = busy_for(MessageId{1, 1}, 1, 0, 50, 1);
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, seed, 90));
+  ReplyBinding live{};
+  CHECK_OK(h.ports.at(1)->snapshot_binding(2, live));
+
   // Three ~10 ms accepts seed the per-peer EWMA (first sample seeds it).
   for (int s = 0; s < 3; ++s) {
     MessageId m{};
@@ -924,7 +968,7 @@ void test_adaptive_hop_timeout_shrinks() {
   // The previously dead window fields are now populated by the accept path
   // (the small DATA frame lands in frame-length class 2 once the #46
   // fixed per-frame charge is included).
-  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+  const ObservationKey key{live.generation, ObservationDirection::Egress,
                            RadioGeneration{0}, ChannelEpoch{0}, 2, 2};
   const ObservationBucket* bucket = a->telemetry_bucket(key);
   CHECK(bucket != nullptr);
@@ -987,7 +1031,13 @@ void test_adaptive_hop_timeout_expands_and_caps() {
   (void)h2.add(3);
   h2.link(1, 2);
   h2.link(1, 3);
-  const ObservationKey key{BindingGeneration{0}, ObservationDirection::Egress,
+  // Seed the downstream summary with the live binding first so every
+  // forward stamps the same observation identity (02 §2.3).
+  auto seed2 = busy_for(MessageId{1, 1}, 1, 0, 50, 1);
+  inject(h2, 1, 3, craft_busy(h2.cipher, 3, 1, seed2, 90));
+  ReplyBinding live2{};
+  CHECK_OK(h2.ports.at(1)->snapshot_binding(3, live2));
+  const ObservationKey key{live2.generation, ObservationDirection::Egress,
                            RadioGeneration{0}, ChannelEpoch{0}, 2, 3};
   for (int s = 0; s < 14; ++s) {
     const ObservationBucket* b = a2->telemetry_bucket(key);
@@ -1079,6 +1129,11 @@ void test_telemetry_hop_rtt_validity_bit() {
   (void)h.add(2);
   h.link(1, 2);
 
+  // Seed the peer summary first so the submit stamps the same identity
+  // the snapshot query resolves (02 §2.3/§2.4).
+  auto seed = busy_for(MessageId{1, 1}, 1, 0, 50, 1);
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, seed, 90));
+
   MessageId m{};
   CHECK_OK(a->send(2, payload_view(), SendOptions{}, h.now, m));
   drive_tx(h, 1, m.sequence, 1);
@@ -1166,13 +1221,17 @@ void test_hop_timeout_config_floor() {
   TestSecurity cipher;
   CapturingObserver observer;
   SimRadio radio(net, 1);
+  SimReplyPort port(radio, 1, cfg.link_epoch);
+  net.register_reply_port(1, &port);
 
   cfg.hop_accept_timeout_ms = kLinkRtoMinMs - 1;
   MeshNode low(cfg, radio, cipher, observer);
+  (void)low.set_reply_peer_port(&port);
   CHECK(low.start(0).code == StatusCode::InvalidArgument);
 
   cfg.hop_accept_timeout_ms = kLinkRtoMinMs;
   MeshNode floor(cfg, radio, cipher, observer);
+  (void)floor.set_reply_peer_port(&port);
   CHECK_OK(floor.start(0));
 }
 
@@ -1508,7 +1567,7 @@ int main() {
   test_peer_window_shrink_grow();
   test_awaiting_full_defers_without_attempts();
   test_attempt_budgets();
-  test_watermarks();
+  test_lease_bound_pool();
   test_busy_never_cancels();
   test_observation_buckets();
   test_adaptive_hop_timeout_shrinks();
