@@ -204,10 +204,11 @@ class OwnerPump {
   }
 
   // Fake driver queue: the xQueuePeek model for the shared owner wait
-  // — a wait releases at the first posted event when one lands inside
-  // the timeout, otherwise at the timeout. Only the blocking primitive
-  // is modeled here; the wait procedure itself (staged skips, else the
-  // bounded event wait) is the shared routine in owner_pump.hpp.
+  // — an already-queued event releases the wait at the wait start, an
+  // event posted inside the timeout releases it at the post time,
+  // otherwise at the timeout. Only the blocking primitive is modeled
+  // here; the wait procedure itself (staged skips, else the bounded
+  // event wait) is the shared routine in owner_pump.hpp.
   struct FakeEventQueue {
     const std::deque<Event>& events;
     routeloom::MonotonicMs now_ms;
@@ -215,6 +216,12 @@ class OwnerPump {
       const routeloom::MonotonicMs deadline = now_ms + timeout_ms;
       const routeloom::MonotonicMs next =
           events.empty() ? UINT64_MAX : events.front().posted_ms;
+      // An event posted before the wait started is already queued:
+      // xQueuePeek returns immediately at the wait start — never rewind
+      // to the post time (that would under-measure submit gaps).
+      if (next <= now_ms) {
+        return;
+      }
       now_ms = next <= deadline ? next : deadline;
     }
   };

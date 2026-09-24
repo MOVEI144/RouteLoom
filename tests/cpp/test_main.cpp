@@ -832,6 +832,17 @@ void test_tx_result_dispatch() {
     CHECK(sight_of(radio2.sent[sent_before + 1], second));
     CHECK(second.type == FrameType::Data);
   }
+
+  // --- already-queued event never rewinds the clock -------------------------
+  // The completion lands at t=1 while the owner is still busy, so the
+  // wait starts at t=2 with the event already queued. Firmware's
+  // xQueuePeek returns immediately at t=2 — the wake must not rewind to
+  // the t=1 post time and under-measure the submit gap.
+  {
+    routeloom_test::OwnerPump pump3;
+    pump3.post_tx_result(7, true, 1);
+    CHECK(pump3.wake_at(2) == 2);
+  }
 }
 
 // Issue #60-3 over the public C ABI: rl_on_radio_tx_result resolves the
