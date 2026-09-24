@@ -937,8 +937,6 @@ void test_reserve_hook() {
 // P4 §6.2: epochs advance monotonically within a site.
 void test_epoch_regression() {
   Engine e;
-  Output o;
-  TestEnv env;
   CHECK(e.configure(Local{kA, kNetwork, kSite, epochs(3, 12)}, Limits{}).ok());
   CHECK(e.update_epochs(epochs(4, 12)).ok());
   CHECK(e.update_epochs(epochs(4, 13)).ok());
