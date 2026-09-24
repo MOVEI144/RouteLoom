@@ -250,6 +250,19 @@
     "usb": {
       "capability_bit": 8,
       "subcommands": {"JOIN_RELAY_UP": 96, "JOIN_RELAY_DOWN": 97, "JOIN_RELAY_ABORT": 98, "JOIN_RELAY_RESULT": 99}
+    },
+    "relay_v2": {
+      "status": "EXPERIMENTAL codecs + portable engines (sdk-v1 P3-2 #116); RLD1 bytes unchanged; no v1 fallback",
+      "relay_header_bytes": 32,
+      "relay_object_max_bytes": 992,
+      "relay_token": "gateway_epoch u32 (nonzero) | proxy_epoch u32 (nonzero) | relay_id u32 (nonzero); ordered by (proxy_epoch, relay_id) once the gateway epoch matches",
+      "wire_chunk": "ver=2 | sub | relay_id u32 | offset u16 | total u16 | gateway_epoch u32 | proxy_epoch u32 | data (18 B header, 110 B grid)",
+      "wire_chunk_header_bytes": 18,
+      "wire_reply_bytes": 18,
+      "epoch_query_bytes": 24,
+      "epoch_reply_bytes": 24,
+      "relay_book": {"floors": 128, "active": 8, "no_lru_evict": true},
+      "usb": {"capability_bit": 9, "inner_schema": 2}
     }
   },
   "max_espnow_body_bytes": 250,

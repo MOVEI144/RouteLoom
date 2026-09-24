@@ -139,6 +139,8 @@ phase本文が112B（=116−4）を超えるときは既存BootstrapChunk（type
 
 **未配線**：RLD1 frameの振分け（`zt_rld1_frame`で判別しtransaction nonceで担当engineへ）とrelay portのMeshNode routed Wire（FrameType 3〜6、hopごとのlink保護、`kFlagEndProtected`無し）への接続、firmwareでのengine配置は後続（P3-4／Owner）。参加FSM（候補表・verdict処理・RLS1 commit）はP3-4。
 
+**Wire relay v2（P3-2 #116）**：再起動したproxy／gatewayの古い入力が新しい交換を汚さないよう、Wire relay carrierだけをv2化した（RLD1のbyte列は不変、[§7.5](#75-wire-relay-v2p3-2-116)）。chunkは`ver=2|sub|relay_id u32|offset u16|total u16|gateway_epoch u32|proxy_epoch u32`＋data（header 18B、格子110B）、replyは`ver=2|sub|relay_id u32|received u16|status u8|reserved|gateway_epoch u32|proxy_epoch u32`の18B。両epochはWire上つねに非0で、chunk／replyは同じtoken・phase・stepのSending objectにだけ適用する（古いepochのProgress／Complete／Abortedを現在のslotに適用しない）。gatewayのservice epochはproxyがFrameType 3上の24B Query（`ver=2|kind=3|flags=0|reserved|u32 0|nonce 16B`）／Reply（`ver=2|kind=4|flags bit0 authority_ready|reserved|gateway_epoch|nonce echo`）で学ぶ（byte 1のkind 3／4でrelay objectのdir 1／2と区別）。独立Python生成器`tools/gen_sdkv1_join_relay_v2_vectors.py`の共通vector（[`protocol/sdkv1-golden/join-relay-v2/`](../../../protocol/sdkv1-golden/join-relay-v2/README.md)、38 valid／91 invalid）でC++とRustのcodecがbyte一致する。
+
 ## 6. EDHOCメッセージの中身と長さ
 
 | msg | 方向 | 中身 | 見積もり長 | 機器側hopのRLD1 frame |
@@ -217,8 +219,10 @@ scope鍵（Member class）はGKから導出する（[03](03-key-hierarchy.md) §
 
 ### 7.1 Wire上の中継object（proxy⇄gateway、member間link）
 
+以下はv1の形式（P3-2当初）。現行のv2形式（32B header＋両service epoch）は§7.5。v1 vectorは歴史資料として残し、v2入口では拒否する。
+
 ```text
-RelayHeader（24B）:
+RelayHeader（24B、v1）:
  0 u8  ver = 1 | 1 u8 dir (1 up, 2 down)
  2 u32 relay_id（proxyが選ぶ、proxy内で一意）
  6 u64 proxy NodeId
@@ -273,6 +277,27 @@ Wire中継はmember間のlink保護（hopごと）で運び、`kFlagEndProtected
 | `0x63` JOIN_RELAY_RESULT | G→H（0x61/0x62のrequest id） | `result u16 \| proxy u64 \| relay_id u32`（ConfigOpsResult：Ok＝Wire laneへ渡した〔機器への配送ではない〕、Unsupported＝未attach、Busy＝slot無し、Denied＝gatewayがMemberでない、Invalid＝不整合・未知relay、NoRoute、Indeterminate） |
 
 形式不正（長さ・schema・relay objectの不正）はHostOps共通どおりError frame（ProtocolError）で、0x60/0x63をhostが送ればdirection違反。gateway自身の参加（hops＝0、proxy無し）は未実装。
+
+### 7.5 Wire relay v2（P3-2 #116）
+
+#116（Complete消失後の上り再送、終端記録のeviction、proxy再起動とrelay_id再利用）への対応として、Wire relay carrierとUSB参加中継をv2化した。RLD1（機器⇄proxy）のbyte列は変えない。v1へのfallbackは無く、schema 1のjoin frame・ver 1のrelay objectは拒否する。
+
+```text
+RelayHeader v2（32B）:
+ 0 u8  ver = 2 | 1 u8 dir (1 up, 2 down)
+ 2 u32 relay_id（非0。proxy_epoch内では単調増加、proxy再起動でepoch更新＋再利用可）
+ 6 u64 proxy NodeId
+14 6B  joiner MAC（proxyが観測したMAC）
+20 u8  step | 21 u8 status (down: 0 継続, 1 最終, 2 中止)
+22 i8  joiner_rssi_dbm (upのみ≤0、downは0) | 23 u8 phase (4 EDHOC、5 RLRES1)
+24 u32 gateway_epoch（非0）| 28 u32 proxy_epoch（非0）
+続いて EDHOC message（またはRLRES1本文）1〜960B、または中止5B。object上限992B。
+```
+
+- **RelayToken**：`(gateway_epoch, proxy_epoch, relay_id)`の3つ組が交換の正本key。chunk／reply（§5.4、18B）、USBの0x61／0x62／0x63、hostの`RelayKey`がすべて同じ完全tokenを持つ。比較はgateway_epoch一致の上で`(proxy_epoch, relay_id)`の整数順序（epochが新しければidは小さくてよい）。
+- **gateway RelayBook**：proxyごとのfloor 128件（終端記録を保持し、LRUで捨てない。満杯の新規は拒否→保守的なservice epoch更新で回復）とactive交換 8件。段階記録（`accepted_up_mask`＋受理済みtotal）はslotの解放・再割当から独立し、Complete消失後の上り再送を抑止する。終端は共通`finish(reason)`で、同じkeyの二重通知はしない。proxyはepoch（再起動で更新、device silence 5秒・retry 500ms×最大4 sendsは維持）とQuery nonce表（最大4送信）を持つ。
+- **USB（schema 2、capability bit 9）**：族は0x60〜0x63のまま、inner schemaを2に上げ、`kCapJoinRelayV2`（bit 9）で広告する。`0x62`は`proxy u64｜relay_id u32｜gateway_epoch u32｜proxy_epoch u32｜reason u8`（reason 1 proxy_aborted、2 gateway_expired、3 delivery_failed、4 host_aborted、5 superseded）、`0x63`は`result u16｜proxy u64｜relay_id u32｜gateway_epoch u32｜proxy_epoch u32`（ConfigOpsResult。Okは完全な非0 tokenを必ず持つ）。callbackからの再入はBusyで拒否し状態を変えない。
+- **vector**：共通vectorはrelay object・chunk・reply・Query／Replyが`protocol/sdkv1-golden/join-relay-v2/`、USBが`protocol/usb-golden/join-relay-v2/`（codec 16 valid／27 invalid＋20 step session、[README](../../../protocol/usb-golden/join-relay-v2/README.md)）。旧Wire v1 vectorは`join-transport/v1-history/`へ移し、v2 codecの負例にする。
 
 ## 8. Site Authorityの処理とKGuard
 
@@ -389,6 +414,7 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | 資源 | 上限（案） | 根拠 |
 |---|---|---|
 | proxy同時中継 | 1件（preauthと共有） | [06 admission §3.2](../autonomous-mesh/06-membership-admission.md) |
+| gateway RelayBook（v2、#116） | floor 128件＋active 8件。終端記録はLRUで捨てず、満杯の新規は拒否→service epoch更新で回復 | §7.5 |
 | proxyの新規m1受付 | 2秒に1件 | [05本番認証 §8](../host-security-readiness/05-production-security.md)の高コスト認証1件/2秒 |
 | authority同時参加 | 4件 | host側。KGuard待ちを含む |
 | authorityの機器ごと再試行 | pending中は`retry_after`未満の再試行をBusyで返す | flood抑制 |
@@ -415,5 +441,8 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | V1-J13 | m1/m3の再送攻撃：新しいephemeralにより失敗 | host |
 | V1-J14 | m1〜m4の実長がこの表の予算内（共通vector） | golden |
 | V1-J15 | C3/S3で参加時間とECC処理時間を実測 | HIL |
+| Q116 | #116 relay v2回帰：二重通知・下りslot消失の消滅、終端後の旧入力の無作用、proxy／gateway再起動とfloor満杯での新交換の保護、完全tokenのHost／USB受け渡し | host sim |
 
 **このbranchで実行したもの（host、P2-3・P3-1・P3-2）**：V1-J12（P2-3、検査部分）、V1-J14（EAD部分〔P2-3〕とEDHOC encoder込みの実長〔P3-1、§6〕）、V1-J02（`JoinProxy`→`JoinRelayGateway`の中継をhop数3として通し、最終objectでproxy slotが解放される。Wire routingはportで模擬しMeshNodeは通さない）、V1-J10（authority到達不可ではOFFER無し、hostが無いgatewayはauthority_unreachable、authorityのbusy中止、relay中の別機器：いずれも機器へはhintだけで状態は変えない）、V1-J11のうちproxy側（同時6機器のDISCOVERで保留OFFER 4件、m1は1件だけ中継し他はbusy、cookie無しのm1は組立てmemoryも使わず拒否、2秒budget。memberのDATA維持はMeshNode配線後）。いずれも`tests/cpp/test_sdkv1_join_relay.cpp`と`test_sdkv1_join_transport.cpp`。
+
+**このbranchで実行したもの（host、P3-2 #116、Q116）**：v2共通vectorのdecode・再encode・chunk再生成・逆順組立て（`test_sdkv1_join_transport.cpp`、Rust `join_relay_golden.rs`）、段階記録と終端記録のdedup回帰（`test_q116_stage_and_terminal_dedup`、Q116-01／Q116-03。修正前は失敗・修正後は成功を確認）、Final送信中のhost_abortとWire abort（Q116-04相当。`test_host_abort_and_revocation`と20 stepのUSB session再生）、callback再入のBusy（`test_busy_inside_relay_*`、`test_reentrant_send_in_on_message`）、timeout・flood・rate・重複下りの既存回帰、USB 0x60〜0x63 schema 2のcodecとsession（`test_usb.cpp`、Rust `usb_golden.rs`）、`fuzz_sdkv1_join`のcorpus＋mutation。Q116-02／05／07／08／10／11の各条件は同suite内の対応するunit・vector・engine試験で扱う。

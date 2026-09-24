@@ -1761,7 +1761,7 @@ void test_golden_group_ops() {
   CHECK(world.bridge.state() == SessionState::Disconnected);
 }
 
-// --- join_relay_v1 (SDK v1 zero-touch join, 02 §7.2/§7.4) ----------------------
+// --- join_relay_v2 (SDK v1 zero-touch join, 02 §7.2/§7.4, #116) ----------------
 
 struct RecordedWire {
   NodeId to{kInvalidNodeId};
@@ -1793,6 +1793,8 @@ std::vector<std::uint8_t> join_down_inner(const NodeId proxy, const std::uint32_
   object.header.proxy = proxy;
   object.header.joiner_mac = MacAddress{{2, 0, 0, 0, 0x12, 0x34}};
   object.header.step = 2;
+  object.header.gateway_epoch = 7;
+  object.header.proxy_epoch = 3;
   std::vector<std::uint8_t> message(message_size, 0x5A);
   object.message = ByteView{message.data(), message.size()};
   std::vector<std::uint8_t> bytes(sdkv1::kJoinObjectMax);
@@ -1835,12 +1837,14 @@ void test_bridge_join_relay() {
       CHECK(results[0].request == 92);
       CHECK(result.result == static_cast<std::uint16_t>(ConfigOpsResult::Unsupported));
       CHECK(result.proxy == 2 && result.relay_id == 77);
+      CHECK(result.gateway_epoch == 7 && result.proxy_epoch == 3);
     }
     std::uint64_t request = 93;
     for (const std::vector<std::uint8_t>& bad :
-         {std::vector<std::uint8_t>{1, 0x61, 0, 1, 0},             // truncated
-          std::vector<std::uint8_t>{1, 0x60, 0, 0},                // device -> host only
-          std::vector<std::uint8_t>{1, 0x63, 0, 0}}) {             // device -> host only
+         {std::vector<std::uint8_t>{2, 0x61, 0, 1, 0},             // truncated
+          std::vector<std::uint8_t>{1, 0x61, 0, 1, 0},             // schema 1 join rejected
+          std::vector<std::uint8_t>{2, 0x60, 0, 0},                // device -> host only
+          std::vector<std::uint8_t>{2, 0x63, 0, 0}}) {             // device -> host only
       world.device_sink.frames.clear();
       now += 500;  // control-frame token bucket (Error frames are rate limited)
       world.feed(sealed_inner(host, request++, bad), now);
@@ -1859,6 +1863,7 @@ void test_bridge_join_relay() {
     RecordingRelayPort wire;
     sdkv1::JoinRelayGatewayConfig config{};
     config.node = 1;
+    config.gateway_epoch = 7;
     sdkv1::JoinRelayGateway gateway(config, wire);
     gateway.set_membership(MembershipState::Member);
     CHECK_OK(world.bridge.attach_join_relay(gateway));
@@ -1869,6 +1874,8 @@ void test_bridge_join_relay() {
     up.header.proxy = 2;
     up.header.joiner_mac = MacAddress{{2, 0, 0, 0, 0x12, 0x34}};
     up.header.joiner_rssi_dbm = -50;
+    up.header.gateway_epoch = 7;
+    up.header.proxy_epoch = 3;
     up.message = ByteView{message, 3};
     std::array<std::uint8_t, 64> bytes{};
     std::size_t written = 0;
@@ -1886,24 +1893,47 @@ void test_bridge_join_relay() {
   }
 }
 
-// protocol/usb-golden/join-relay: the join_relay_v1 family replayed through a
-// real UsbBridge with an attached JoinRelayGateway. The proxy's Wire frames
-// are injected right before the device steps they cause; the gateway's own
-// Wire output toward the proxy is checked against the host's objects.
+// protocol/usb-golden/join-relay-v2: the join_relay_v2 family replayed
+// through a real UsbBridge with an attached JoinRelayGateway. The proxy's
+// Wire frames are injected right before the device steps they cause; the
+// gateway's own Wire output toward the proxy is checked against the host's
+// objects.
 void test_golden_join_relay() {
   const std::filesystem::path root =
-      std::filesystem::path(ROUTELOOM_USB_GOLDEN_DIR) / "join-relay";
+      std::filesystem::path(ROUTELOOM_USB_GOLDEN_DIR) / "join-relay-v2";
   const Fields session = parse_flat_json(read_file(root / "session.json"));
   CHECK(!session.empty());
-  const std::uint32_t capability = 0x3 | kCapHostOpsV1 | kCapJoinRelayV1;
+  const std::uint32_t capability = 0x3 | kCapHostOpsV1 | kCapJoinRelayV2;
   CHECK(field_u64(session, "capability") == capability);
   const SessionProof proof = golden_proof(capability);
   CHECK(proof.session_id == field_u64(session, "session_id"));
 
   World world;
   RecordingRelayPort wire;
+  // The gateway epoch is read from the scenario's own m1 up object, so the
+  // test never hardcodes the generator's token.
+  std::uint32_t gateway_epoch = 0;
+  {
+    std::vector<std::filesystem::path> scan;
+    for (const auto& entry : std::filesystem::directory_iterator(root / "frames")) {
+      if (entry.path().extension() == ".json") scan.push_back(entry.path());
+    }
+    for (const auto& path : scan) {
+      const Fields vector = parse_flat_json(read_file(path));
+      if (vector.count("name") == 0 || vector.at("name") != "join_relay_up_m1") continue;
+      std::vector<std::uint8_t> inner;
+      CHECK(hex_decode(vector.at("inner_hex"), inner));
+      JoinRelayUp up{};
+      CHECK_OK(decode_join_relay_up(ByteView{inner.data(), inner.size()}, up));
+      sdkv1::RelayObject object{};
+      CHECK_OK(sdkv1::relay_object_decode(up.object, object));
+      gateway_epoch = object.header.gateway_epoch;
+    }
+  }
+  CHECK(gateway_epoch != 0);
   sdkv1::JoinRelayGatewayConfig config{};
   config.node = 1;
+  config.gateway_epoch = gateway_epoch;
   sdkv1::JoinRelayGateway gateway(config, wire);
   gateway.set_membership(MembershipState::Member);
   CHECK_OK(world.bridge.attach_join_relay(gateway));
@@ -1922,6 +1952,7 @@ void test_golden_join_relay() {
     out.assign(up.object.data, up.object.data + up.object.size);
   };
   std::vector<std::uint8_t> m1_object;
+  std::vector<std::uint8_t> m1_r2_object;
   std::vector<std::vector<std::uint8_t>> down_objects;
   std::vector<std::uint8_t> expected_out;
   std::vector<std::uint8_t> produced;
@@ -1938,6 +1969,10 @@ void test_golden_join_relay() {
         up_object(inner, m1_object);
         gateway.on_relay_rx(2, 3, FrameType::BootstrapAuth,
                             ByteView{m1_object.data(), m1_object.size()}, now);
+      } else if (name == "join_relay_up_m1_r2") {
+        up_object(inner, m1_r2_object);
+        gateway.on_relay_rx(2, 3, FrameType::BootstrapAuth,
+                            ByteView{m1_r2_object.data(), m1_r2_object.size()}, now);
       } else if (name == "join_relay_up_m3") {
         std::vector<std::uint8_t> object;
         up_object(inner, object);
@@ -1946,6 +1981,7 @@ void test_golden_join_relay() {
         sdkv1::JoinObjectSlot sender{};
         CHECK_OK(sender.load(sdkv1::JoinCarrier::WireRelay, decoded.header.phase,
                              decoded.header.step, decoded.header.relay_id,
+                             decoded.header.gateway_epoch, decoded.header.proxy_epoch,
                              ByteView{object.data(), object.size()}, now));
         CHECK(sender.chunk_total() == 4);
         for (std::size_t i = 0; i < sender.chunk_total(); ++i) {
@@ -1960,14 +1996,17 @@ void test_golden_join_relay() {
       } else if (name == "join_relay_proxy_abort") {
         JoinRelayAbort notice{};
         CHECK_OK(decode_join_relay_abort(ByteView{inner.data(), inner.size()}, notice));
+        CHECK(!m1_r2_object.empty());
         sdkv1::RelayObject m1{};
-        CHECK_OK(sdkv1::relay_object_decode(ByteView{m1_object.data(), m1_object.size()}, m1));
+        CHECK_OK(sdkv1::relay_object_decode(ByteView{m1_r2_object.data(), m1_r2_object.size()}, m1));
         sdkv1::RelayObject abort{};
         abort.header = m1.header;
         abort.header.relay_id = notice.relay_id;
+        abort.header.gateway_epoch = notice.gateway_epoch;
+        abort.header.proxy_epoch = notice.proxy_epoch;
         abort.header.state = sdkv1::RelayState::Abort;
         abort.abort.status = sdkv1::RelayStatusCode::Aborted;
-        std::array<std::uint8_t, 32> bytes{};
+        std::array<std::uint8_t, 64> bytes{};
         std::size_t size = 0;
         CHECK_OK(sdkv1::relay_object_encode(abort, MutableByteView{bytes.data(), bytes.size()}, size));
         gateway.on_relay_rx(2, 3, FrameType::BootstrapAuth, ByteView{bytes.data(), size}, now);
@@ -1999,15 +2038,32 @@ void test_golden_join_relay() {
     }
   }
   // The gateway's Wire side: 4 chunks for m2 to proxy 2, receipts for the 4
-  // m3 chunks, 4 chunks for m4 — each down object reassembles to the host's.
+  // m3 chunks, 4 chunks for m4 — each down object reassembles to the host's —
+  // then one abort object: the host_abort lands while m4 is still
+  // SendingFinal, so the live relay is finished with a Wire abort (#116 §4.4).
   CHECK(down_objects.size() == 2);
+  sdkv1::RelayObject m1_check{};
+  CHECK_OK(sdkv1::relay_object_decode(ByteView{m1_object.data(), m1_object.size()}, m1_check));
   std::size_t down_index = 0;
   sdkv1::JoinObjectSlot receiver{};
   std::size_t receipts = 0;
+  std::size_t wire_aborts = 0;
   for (const RecordedWire& frame : wire.frames) {
     CHECK(frame.to == 2);
     if (frame.type == FrameType::BootstrapReply) {
       ++receipts;
+      continue;
+    }
+    if (frame.type == FrameType::MembershipResult) {
+      sdkv1::RelayObject abort{};
+      CHECK_OK(sdkv1::relay_object_decode(
+          ByteView{frame.payload.data(), frame.payload.size()}, abort));
+      CHECK(abort.header.dir == sdkv1::RelayDirection::Down);
+      CHECK(abort.header.state == sdkv1::RelayState::Abort);
+      CHECK(abort.abort.status == sdkv1::RelayStatusCode::Aborted);
+      CHECK(sdkv1::relay_token_equal(sdkv1::relay_token_of(abort.header),
+                                     sdkv1::relay_token_of(m1_check.header)));
+      ++wire_aborts;
       continue;
     }
     CHECK(frame.type == FrameType::BootstrapChunk);
@@ -2025,11 +2081,107 @@ void test_golden_join_relay() {
   }
   CHECK(down_index == 2);
   CHECK(receipts == 4);
-  CHECK(gateway.stats().up_objects == 2 && gateway.stats().down_objects == 2);
+  CHECK(wire_aborts == 1);
+  CHECK(gateway.stats().up_objects == 3 && gateway.stats().down_objects == 2);
+  CHECK(gateway.stats().host_aborts == 1);
   CHECK(gateway.stats().proxy_aborts == 1);
   CHECK(world.bridge.stats().rx_errors == 0);
   CHECK(world.bridge.stats().auth_failures == 0);
   CHECK(world.bridge.state() == SessionState::Disconnected);
+}
+
+// protocol/usb-golden/join-relay-v2/{valid,invalid}: the 0x60-0x63 inners
+// (schema 2, generated by tools/gen_sdkv1_join_relay_v2_vectors.py) decode
+// to the listed fields and re-encode byte-for-byte; invalid inners are
+// refused.
+void test_golden_join_relay_codec() {
+  const std::filesystem::path root =
+      std::filesystem::path(ROUTELOOM_USB_GOLDEN_DIR) / "join-relay-v2";
+  std::vector<std::filesystem::path> valid;
+  for (const auto& entry : std::filesystem::directory_iterator(root / "valid")) {
+    if (entry.path().extension() == ".json") valid.push_back(entry.path());
+  }
+  std::vector<std::filesystem::path> invalid;
+  for (const auto& entry : std::filesystem::directory_iterator(root / "invalid")) {
+    if (entry.path().extension() == ".json") invalid.push_back(entry.path());
+  }
+  std::sort(valid.begin(), valid.end());
+  std::sort(invalid.begin(), invalid.end());
+  CHECK(valid.size() >= 12);
+  CHECK(invalid.size() >= 20);
+  for (const auto& path : valid) {
+    const Fields f = parse_flat_json(read_file(path));
+    std::vector<std::uint8_t> inner;
+    CHECK(hex_decode(f.at("inner_hex"), inner));
+    const std::string& codec = f.at("codec");
+    std::vector<std::uint8_t> out(2048);
+    std::size_t written = 0;
+    if (codec == "join_usb_up") {
+      JoinRelayUp up{};
+      CHECK_OK(decode_join_relay_up(ByteView{inner.data(), inner.size()}, up));
+      CHECK(up.gateway == field_u64(f, "gateway"));
+      CHECK(up.from_proxy == field_u64(f, "from_proxy"));
+      CHECK(up.hops == field_u64(f, "hops"));
+      std::vector<std::uint8_t> object;
+      CHECK(hex_decode(f.at("object_hex"), object));
+      CHECK(std::vector<std::uint8_t>(up.object.data, up.object.data + up.object.size) == object);
+      CHECK_OK(encode_join_relay_up(up, MutableByteView{out.data(), out.size()}, written));
+    } else if (codec == "join_usb_down") {
+      JoinRelayDown down{};
+      CHECK_OK(decode_join_relay_down(ByteView{inner.data(), inner.size()}, down));
+      CHECK(down.to_proxy == field_u64(f, "to_proxy"));
+      std::vector<std::uint8_t> object;
+      CHECK(hex_decode(f.at("object_hex"), object));
+      CHECK(std::vector<std::uint8_t>(down.object.data, down.object.data + down.object.size) ==
+            object);
+      CHECK_OK(encode_join_relay_down(down, MutableByteView{out.data(), out.size()}, written));
+    } else if (codec == "join_usb_abort") {
+      JoinRelayAbort abort{};
+      CHECK_OK(decode_join_relay_abort(ByteView{inner.data(), inner.size()}, abort));
+      CHECK(abort.proxy == field_u64(f, "proxy"));
+      CHECK(abort.relay_id == field_u64(f, "relay_id"));
+      CHECK(abort.gateway_epoch == field_u64(f, "gateway_epoch"));
+      CHECK(abort.proxy_epoch == field_u64(f, "proxy_epoch"));
+      CHECK(abort.reason == field_u64(f, "reason"));
+      CHECK_OK(encode_join_relay_abort(abort, MutableByteView{out.data(), out.size()}, written));
+    } else if (codec == "join_usb_result") {
+      JoinRelayResult result{};
+      CHECK_OK(decode_join_relay_result(ByteView{inner.data(), inner.size()}, result));
+      CHECK(result.result == field_u64(f, "result"));
+      CHECK(result.proxy == field_u64(f, "proxy"));
+      CHECK(result.relay_id == field_u64(f, "relay_id"));
+      CHECK(result.gateway_epoch == field_u64(f, "gateway_epoch"));
+      CHECK(result.proxy_epoch == field_u64(f, "proxy_epoch"));
+      CHECK_OK(
+          encode_join_relay_result(result, MutableByteView{out.data(), out.size()}, written));
+    } else {
+      CHECK(!"unknown usb join codec");
+      continue;
+    }
+    CHECK(std::vector<std::uint8_t>(out.data(), out.data() + written) == inner);
+  }
+  for (const auto& path : invalid) {
+    const Fields f = parse_flat_json(read_file(path));
+    std::vector<std::uint8_t> encoded;
+    CHECK(hex_decode(f.at("encoded_hex"), encoded));
+    const ByteView input{encoded.data(), encoded.size()};
+    const std::string& codec = f.at("codec");
+    if (codec == "join_usb_up") {
+      JoinRelayUp up{};
+      CHECK(!decode_join_relay_up(input, up).ok());
+    } else if (codec == "join_usb_down") {
+      JoinRelayDown down{};
+      CHECK(!decode_join_relay_down(input, down).ok());
+    } else if (codec == "join_usb_abort") {
+      JoinRelayAbort abort{};
+      CHECK(!decode_join_relay_abort(input, abort).ok());
+    } else if (codec == "join_usb_result") {
+      JoinRelayResult result{};
+      CHECK(!decode_join_relay_result(input, result).ok());
+    } else {
+      CHECK(!"unknown usb join codec");
+    }
+  }
 }
 
 }  // namespace
@@ -2057,6 +2209,7 @@ int main() {
   test_golden_group_ops();
   test_bridge_join_relay();
   test_golden_join_relay();
+  test_golden_join_relay_codec();
   if (failures != 0) {
     std::fprintf(stderr, "%d usb checks failed\n", failures);
     return 1;
