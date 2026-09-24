@@ -54,9 +54,16 @@ Status join_ead_items_check(const edhoc::EadItem* items, const std::size_t count
                             ByteView& value, ByteView& credential) noexcept {
   value = ByteView{};
   credential = ByteView{};
+  // Fail closed on an inconsistent (pointer, count): the session hands at
+  // most kEadItemsMax tokens, and every value examined below needs storage.
+  if (count > edhoc::kEadItemsMax) return malformed("ead too many items");
+  if (count != 0 && items == nullptr) return malformed("ead null items");
   bool seen_value = false;
   bool seen_credential = false;
   for (std::size_t i = 0; i < count; ++i) {
+    if (items[i].value.size != 0 && items[i].value.data == nullptr) {
+      return malformed("ead null value");
+    }
     const std::int32_t label = items[i].label;
     if (label == 0) continue;  // padding (RFC 9528 §3.8.1)
     if (label > 0) return malformed("ead non-critical item");
@@ -98,23 +105,25 @@ Status join_membership_verify(const SiteRecord& site, const IdentityRecord& iden
   Status status = site_validate(site);
   if (!status) return status;
   if (site.state != SiteState::Member) return Status::success();  // cleared: not a membership
+  // Two claims buffers for three checks: `scratch` holds the MemberCert for
+  // the binding check and is then reused — first for the anchored chain
+  // output (only `ok` is read back), then for the signature output — so the
+  // frame stays within the 512 B design budget.
   CertClaims site_claims{};
-  CertClaims member{};
+  CertClaims scratch{};
   status = cert_decode(site.site_cert.view(), site_claims);
-  if (status) status = cert_decode(site.member_cert.view(), member);
+  if (status) status = cert_decode(site.member_cert.view(), scratch);
   if (!status) return status;
   // Binding to this device (02 §10.2 step 2): a record that does not name
   // us parses but does not verify — deny, not a malformed record.
-  if (!member_cert_matches(member, site_claims, identity.node_id, identity.pubkey).ok()) {
+  if (!member_cert_matches(scratch, site_claims, identity.node_id, identity.pubkey).ok()) {
     return Status::success();
   }
-  CertClaims anchored{};
   bool ok = false;
-  status = identity_verify_site_cert(identity, site.site_cert.view(), anchored, ok, verifier);
+  status = identity_verify_site_cert(identity, site.site_cert.view(), scratch, ok, verifier);
   if (!status) return status;
   if (!ok) return Status::success();
-  CertClaims checked{};
-  return cert_verify(site.member_cert.view(), site_claims.pubkey, checked, verified, verifier);
+  return cert_verify(site.member_cert.view(), site_claims.pubkey, scratch, verified, verifier);
 }
 
 // === CredentialProvider ======================================================
@@ -308,7 +317,12 @@ Status JoinHandshake::process_m2(const ByteView message) noexcept {
   Status status = session_.process_message_2(message);
   if (!status) {
     ++stats_.m2_failures;
-    outcome_ = JoinAttemptOutcome::AuthenticationFailed;
+    // Only credential and signature failures avoid the site for 24 h; a
+    // decode or transport failure is transient — the peer proved nothing,
+    // hostile or otherwise, and must not poison the candidate table.
+    outcome_ = status.code == StatusCode::AuthenticationFailed
+                   ? JoinAttemptOutcome::AuthenticationFailed
+                   : JoinAttemptOutcome::Failed;
     return status;
   }
   // Authenticated now: the offer must agree with the certified site AND
@@ -517,6 +531,7 @@ void JoinHandshake::end() noexcept {
   secure_clear(site_cert_.bytes.data(), site_cert_.bytes.size());
   secure_clear(result_.bytes.data(), result_.bytes.size());
   secure_clear(prepared_.dams.data(), prepared_.dams.size());
+  secure_clear(prepared_.gk_current.data(), prepared_.gk_current.size());
   secure_clear(intent_value_.bytes.data(), intent_value_.bytes.size());
   secure_clear(request_value_.bytes.data(), request_value_.bytes.size());
   prepared_ = SiteRecord{};

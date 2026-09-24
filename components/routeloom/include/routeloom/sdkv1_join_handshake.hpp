@@ -17,8 +17,9 @@
 //                              classified by removal_notice_verify.
 //   a failure class          — MalformedResult (authenticated m4 but an
 //                              invalid JoinResult or Allow),
-//                              AuthenticationFailed (m2), Failed (m4 or a
-//                              local/transport cause).
+//                              AuthenticationFailed (m2 credential or
+//                              responder-signature failure), Failed (m2
+//                              decode/transport, m4, or a local cause).
 //
 // Scope: no radio, no NVS, no store, no candidate selection — the caller
 // ships the composed bytes, feeds the received messages and maps the
@@ -80,8 +81,8 @@ enum class JoinAttemptOutcome : std::uint8_t {
   RemovedDenied,          // notice failed verification -> 24 h avoidance
   RemovedNoMembership,    // Removed but no membership evidence -> 600 s suppress
   MalformedResult,        // authenticated m4, invalid result/Allow -> 24 h
-  AuthenticationFailed,   // m2 authentication failure -> 24 h on the observed key
-  Failed,                 // local/transport/m4 failure -> transient retry
+  AuthenticationFailed,   // m2 credential/signature failure -> 24 h on the key
+  Failed,                 // m2 decode/transport, m4, local failure -> transient
 };
 
 // The stored-membership evidence a Removed verdict is tested against (02 §8):
@@ -132,6 +133,9 @@ struct JoinAttemptStats {
 // then at most one Credential item, critical labels only, bounded value sizes,
 // nothing else. `need_credential` requires the Credential item (EAD_2); with it
 // false a Credential item is rejected like any other extra item (EAD_4).
+// Inconsistent (pointer, count) input fails closed: more than
+// edhoc::kEadItemsMax items, null item storage with a nonzero count, and
+// null value storage with a nonzero size are all refused outright.
 Status join_ead_items_check(const edhoc::EadItem* items, std::size_t count, JoinEad expected,
                             bool need_credential, ByteView& value,
                             ByteView& credential) noexcept;
@@ -166,7 +170,9 @@ class JoinHandshake final {
   Status compose_m1(MutableByteView out, std::size_t& length) noexcept;
   // m2 from the transport. Success = the responder is authenticated AND the
   // SiteOffer matches the SiteCert AND the observed candidate hints — only
-  // then do offer()/site_claims()/site_cert() become meaningful.
+  // then do offer()/site_claims()/site_cert() become meaningful. On failure
+  // the outcome is AuthenticationFailed for credential/signature failures
+  // and Failed for decode/transport failures.
   Status process_m2(ByteView message) noexcept;
   // m3 with JoinRequest + the DevCert Credential item.
   Status compose_m3(MutableByteView out, std::size_t& length) noexcept;

@@ -19,6 +19,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "routeloom/edhoc.hpp"
@@ -179,8 +180,11 @@ class AuthorityEad final : public edhoc::EadHandler {
 
 struct Authority {
   Authority(const ByteBuffer<kRlcw1CertMax>& site_cert, const Digest256& sak_kid,
-            std::uint64_t rng_seed)
-      : entropy(rng_seed), creds(site_cert, sak_kid, sak().priv), ead(creds) {
+            std::uint64_t rng_seed,
+            const std::array<std::uint8_t, 32>* sign_priv = nullptr)
+      : entropy(rng_seed),
+        creds(site_cert, sak_kid, sign_priv != nullptr ? *sign_priv : sak().priv),
+        ead(creds) {
     edhoc::SessionConfig config{};
     config.role = edhoc::Role::Responder;
     config.method = edhoc::Method::SignatureSignature;
@@ -212,8 +216,10 @@ ByteView view(const Bytes& bytes) { return ByteView{bytes.data(), bytes.size()};
 // Runs m1..m4 between the device handshake and the authority. `tamper`
 // bit-flips the last byte of message N (1..4). Returns the stage reached:
 // 0 m1 never composed/processed, 1 m2 failed on the device, 2 m3 failed,
-// 3 m4 failed, 4 done.
-int exchange(JoinHandshake& hs, Authority& auth, Transcript& t, const int tamper = 0) {
+// 3 m4 failed, 4 done. `m2_status` (when set) receives the device's m2
+// Status so tests can pin the failure classification, not just the stage.
+int exchange(JoinHandshake& hs, Authority& auth, Transcript& t, const int tamper = 0,
+             Status* m2_status = nullptr) {
   std::array<std::uint8_t, kJoinMessageMax> buffer{};
   std::size_t length = 0;
   const auto flip = [&](Bytes& m, const int which) {
@@ -227,7 +233,9 @@ int exchange(JoinHandshake& hs, Authority& auth, Transcript& t, const int tamper
     return 0;
   t.m2.assign(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(length));
   flip(t.m2, 2);
-  if (!hs.process_m2(view(t.m2))) return 1;
+  const Status m2 = hs.process_m2(view(t.m2));
+  if (m2_status != nullptr) *m2_status = m2;
+  if (!m2) return 1;
   if (!hs.compose_m3(MutableByteView{buffer.data(), buffer.size()}, length)) return 2;
   t.m3.assign(buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(length));
   flip(t.m3, 3);
@@ -862,17 +870,18 @@ void test_m2_failures() {
     TestEntropy entropy(0xF1);
     CHECK(hs.begin(fx.config, fx.identity, entropy).ok());
     Transcript t;
-    const int stage = exchange(hs, authority, t);
-    return std::pair{hs.outcome() == JoinAttemptOutcome::AuthenticationFailed && stage == 1,
-                     authority.creds.staged.size};
+    Status m2_status = Status::success();
+    const int stage = exchange(hs, authority, t, 0, &m2_status);
+    return std::tuple{stage, hs.outcome(), m2_status.code, authority.creds.staged.size};
   };
 
   // Wrong CA: claims identical, signed by the Device CA instead of the Site CA.
   current = "m2 wrong ca";
   const auto wrong_ca = issue(sitecert_claims(), device_ca());
   {
-    const auto [rejected, staged] = run_m2(&wrong_ca);
-    CHECK(rejected);
+    const auto [stage, outcome, code, staged] = run_m2(&wrong_ca);
+    CHECK(stage == 1 && outcome == JoinAttemptOutcome::AuthenticationFailed);
+    CHECK(code == StatusCode::AuthenticationFailed);
     CHECK(staged == 0);  // no DevCert ever left the device (02 §12 row 2)
   }
   // Kid mismatch: the cert's cnf does not hash to ID_CRED_R's kid.
@@ -881,22 +890,27 @@ void test_m2_failures() {
   claims.pubkey = other_key().pub;
   const auto wrong_cnf = issue(claims, site_ca());
   {
-    const auto [rejected, staged] = run_m2(&wrong_cnf);
-    CHECK(rejected);
+    const auto [stage, outcome, code, staged] = run_m2(&wrong_cnf);
+    CHECK(stage == 1 && outcome == JoinAttemptOutcome::AuthenticationFailed);
+    CHECK(code == StatusCode::AuthenticationFailed);
     CHECK(staged == 0);
   }
   // Wrong cert type: a DevCert where the SiteCert is expected.
   current = "m2 wrong type";
   {
-    const auto [rejected, staged] = run_m2(&fx.identity.devcert);
-    CHECK(rejected);
+    const auto [stage, outcome, code, staged] = run_m2(&fx.identity.devcert);
+    CHECK(stage == 1 && outcome == JoinAttemptOutcome::AuthenticationFailed);
+    CHECK(code == StatusCode::AuthenticationFailed);
     CHECK(staged == 0);
   }
-  // No credential item at all.
+  // No credential item at all: the profile item is missing, so the session
+  // reports a protocol error and no credential is ever presented for
+  // verification — transient, but still no m3 and no DevCert out.
   current = "m2 no credential";
   {
-    const auto [rejected, staged] = run_m2(nullptr);
-    CHECK(rejected);
+    const auto [stage, outcome, code, staged] = run_m2(nullptr);
+    CHECK(stage == 1 && outcome == JoinAttemptOutcome::Failed);
+    CHECK(code == StatusCode::ProtocolError);
     CHECK(staged == 0);
   }
   // SiteOffer does not match the certified site: the m2 authenticates the
@@ -1057,6 +1071,129 @@ void test_key_location_and_entropy() {
   current.clear();
 }
 
+void test_m2_classification() {
+  JoinFixture fx;
+  // One garbage byte: a transport/decode failure, never an authentication
+  // failure — the candidate side must retry transiently, not avoid 24 h.
+  current = "m2 garbage transient";
+  {
+    JoinHandshake hs;
+    TestEntropy entropy(0xF11);
+    CHECK(hs.begin(fx.config, fx.identity, entropy).ok());
+    std::array<std::uint8_t, kJoinMessageMax> buffer{};
+    std::size_t length = 0;
+    CHECK(hs.compose_m1(MutableByteView{buffer.data(), buffer.size()}, length).ok());
+    const std::uint8_t garbage = 0xFF;
+    const Status st = hs.process_m2(ByteView{&garbage, 1});
+    CHECK(st.code == StatusCode::ProtocolError);
+    CHECK(hs.outcome() == JoinAttemptOutcome::Failed);
+    CHECK(hs.stats().m2_failures == 1);
+    CHECK(!hs.m2_authenticated());
+    CHECK(hs.compose_m3(MutableByteView{buffer.data(), buffer.size()}, length).code ==
+          StatusCode::InvalidState);  // no m3 after a failed m2
+  }
+  // A responder signature that does not verify under the SAK: the message
+  // decrypts and the EAD stages fine, but EDHOC authentication fails —
+  // still AuthenticationFailed, still no DevCert off the device.
+  current = "m2 tampered responder signature";
+  {
+    Authority authority(fx.sitecert, fx.sak_kid, 0xA7, &other_key().priv);
+    authority.ead.credential_cert = &fx.sitecert;
+    JoinHandshake hs;
+    TestEntropy entropy(0xF13);
+    CHECK(hs.begin(fx.config, fx.identity, entropy).ok());
+    Transcript t;
+    Status m2_status = Status::success();
+    CHECK(exchange(hs, authority, t, 0, &m2_status) == 1);
+    CHECK(m2_status.code == StatusCode::AuthenticationFailed);
+    CHECK(hs.outcome() == JoinAttemptOutcome::AuthenticationFailed);
+    CHECK(!hs.m2_authenticated());
+    CHECK(authority.creds.staged.size == 0);
+  }
+  current.clear();
+}
+
+void test_wipe_on_end() {
+  // After Allow, end() wipes every prepared secret with the clearing
+  // primitive: the DAMS and the group key alike.
+  current = "wipe on end";
+  JoinFixture fx;
+  Authority authority(fx.sitecert, fx.sak_kid, 0x71);
+  authority.ead.credential_cert = &fx.sitecert;
+  fx.result(JoinVerdict::Allow, authority.ead.result_value);
+  JoinHandshake hs;
+  TestEntropy entropy(0xA19);
+  CHECK(hs.begin(fx.config, fx.identity, entropy).ok());
+  Transcript t;
+  CHECK(exchange(hs, authority, t) == 4);
+  JoinDecideInput input{};
+  JoinDecided decided{};
+  CHECK(hs.decide(input, decided).ok());
+  CHECK(decided.outcome == JoinAttemptOutcome::AllowVerified);
+  const SiteRecord* record = decided.record;
+  CHECK(record != nullptr);
+  if (record == nullptr) {
+    current.clear();
+    return;
+  }
+  CHECK(!all_zero(ByteView{record->dams.data(), record->dams.size()}));
+  CHECK(!all_zero(ByteView{record->gk_current.data(), record->gk_current.size()}));
+  hs.end();
+  CHECK(all_zero(ByteView{record->dams.data(), record->dams.size()}));
+  CHECK(all_zero(ByteView{record->gk_current.data(), record->gk_current.size()}));
+  current.clear();
+}
+
+void test_ead_items_bounds() {
+  // The public token check fails closed on inconsistent (pointer, count)
+  // input: the session's 3-token ceiling, null item storage, and null value
+  // storage with a nonzero size are all refused outright.
+  current = "ead items bounds";
+  JoinFixture fx;
+  ByteBuffer<kSiteOfferSize> offer_value{};
+  SiteOffer offer{};
+  offer.site_id = kSiteId;
+  offer.network_low32 = kNetworkLow;
+  offer.site_epoch = kSiteEpoch;
+  CHECK(site_offer_encode(offer, offer_value).ok());
+  ByteView value{};
+  ByteView credential{};
+  {
+    edhoc::EadItem items[4] = {
+        {-static_cast<std::int32_t>(JoinEad::Offer), offer_value.view()},
+        {-static_cast<std::int32_t>(JoinEad::Credential), fx.sitecert.view()},
+        {0, ByteView{}},
+        {0, ByteView{}},
+    };
+    // Four items are over the ceiling even though the extras are padding
+    // the walker would otherwise skip...
+    CHECK(!join_ead_items_check(items, 4, JoinEad::Offer, true, value, credential).ok());
+    // ... while value + credential + one padding is accepted.
+    CHECK(join_ead_items_check(items, 3, JoinEad::Offer, true, value, credential).ok());
+    CHECK(value.size == kSiteOfferSize && credential.size == fx.sitecert.size);
+  }
+  // Null value storage with a nonzero size is rejected on the value...
+  {
+    edhoc::EadItem items[2] = {
+        {-static_cast<std::int32_t>(JoinEad::Offer), ByteView{nullptr, kSiteOfferSize}},
+        {-static_cast<std::int32_t>(JoinEad::Credential), fx.sitecert.view()},
+    };
+    CHECK(!join_ead_items_check(items, 2, JoinEad::Offer, true, value, credential).ok());
+  }
+  // ... and on the credential.
+  {
+    edhoc::EadItem items[2] = {
+        {-static_cast<std::int32_t>(JoinEad::Offer), offer_value.view()},
+        {-static_cast<std::int32_t>(JoinEad::Credential), ByteView{nullptr, 64}},
+    };
+    CHECK(!join_ead_items_check(items, 2, JoinEad::Offer, true, value, credential).ok());
+  }
+  // Null item storage with a nonzero count never reads out of bounds.
+  CHECK(!join_ead_items_check(nullptr, 1, JoinEad::Offer, true, value, credential).ok());
+  CHECK(!join_ead_items_check(nullptr, 3, JoinEad::Offer, true, value, credential).ok());
+  current.clear();
+}
+
 void test_membership_verify() {
   current = "membership verify";
   JoinFixture fx;
@@ -1095,9 +1232,12 @@ int main() {
   test_allow_denials();
   test_strict_assignment_fails_closed();
   test_m2_failures();
+  test_m2_classification();
   test_m4_failures();
   test_key_location_and_entropy();
   test_membership_verify();
+  test_wipe_on_end();
+  test_ead_items_bounds();
   if (failures != 0) {
     std::fprintf(stderr, "%d join handshake check(s) failed\n", failures);
     return 1;

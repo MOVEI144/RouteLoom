@@ -347,6 +347,17 @@ target_include_directories(routeloom_sdkv1_join_candidates_tests PRIVATE
 target_compile_options(routeloom_sdkv1_join_candidates_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_join_candidates_tests COMMAND routeloom_sdkv1_join_candidates_tests)
 
+# Join stack gate (design P3-4 §9): every stack frame of the two P3-4 join
+# translation units stays within 512 B. GCC-only (relies on -fstack-usage).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_FOUND)
+    add_test(NAME routeloom_join_stack_gate
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/check_join_stack.py
+        --cxx ${CMAKE_CXX_COMPILER} --root ${CMAKE_SOURCE_DIR})
+  endif()
+endif()
+
 add_executable(routeloom_sdkv1_records_tests test_sdkv1_records.cpp)
 target_link_libraries(routeloom_sdkv1_records_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_records_tests PRIVATE
