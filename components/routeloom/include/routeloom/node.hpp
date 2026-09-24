@@ -265,10 +265,10 @@ struct AppliedStats {
 
 // Callbacks run synchronously on the node's owner execution context and must
 // return in bounded time. View/result arguments are borrowed for the call
-// only — never retained. A callback may register PowerCoordinator requests
-// (sleep_abort/prepare/enter, notify_app_event); the coordinator applies them
-// at its own safe points, never re-entrantly inside the callback. Do not
-// recursively drive poll()/on_radio_receive()/on_radio_tx_result() from here.
+// only — never retained. A callback must not re-enter the PowerCoordinator:
+// its mutating calls return Busy and change nothing while a callback runs —
+// call them after the callback returns. Do not recursively drive
+// poll()/on_radio_receive()/on_radio_tx_result() from here.
 class NodeObserver {
  public:
   virtual ~NodeObserver() = default;
@@ -830,8 +830,8 @@ class MeshNode {
   void set_draining(bool draining) noexcept { sleep_draining_ = draining; }
   bool draining() const noexcept { return sleep_draining_; }
   // True while an application callback (NodeObserver or an extended sink)
-  // runs on this node. The PowerCoordinator treats operations issued under
-  // this flag as deferred requests, applied at its own safe points.
+  // runs on this node. The PowerCoordinator rejects mutating operations
+  // issued under this flag with Busy.
   bool in_external_callback() const noexcept { return in_external_callback_; }
   // Pause contract (01 §3.3): hold only the masked traffic categories so
   // migration/survey-critical control is not deadlocked by a blanket drain.
@@ -948,17 +948,17 @@ class MeshNode {
 
   // Phase 2 — only after the durable image commit succeeded. Each call
   // settles ONE non-terminal delivery / group origin (pool order) and fires
-  // at most one application notification. The coordinator loops these with a
-  // safe point after every item, so a callback veto stops the settlement
-  // item-by-item: remaining and newly queued work belongs to the next
-  // attempt, never to this one. A delivery that was eligible but not saved
-  // fails explicitly — durable work is never dropped silently. Origins end in
-  // an explicit terminal state the application sees through on_group_delivery
-  // (Save cannot apply — groups are never persisted — so it fails honestly).
-  // `claim_saved` moves durable ownership of a saved id to the coordinator
-  // and runs BEFORE the SLEEP_SAVED notification; false settles the item
-  // under the fallback instead. Ordered holds are released one message per
-  // call by release_one_group_hold_for_sleep().
+  // at most one application notification; the coordinator loops these until
+  // none remain. Callbacks from the notifications cannot re-enter the
+  // coordinator, so the settlement always runs to completion. A delivery
+  // that was eligible but not saved fails explicitly — durable work is
+  // never dropped silently. Origins end in an explicit terminal state the
+  // application sees through on_group_delivery (Save cannot apply — groups
+  // are never persisted — so it fails honestly). `claim_saved` moves
+  // durable ownership of a saved id to the coordinator and runs BEFORE the
+  // SLEEP_SAVED notification; false settles the item under the fallback
+  // instead. Ordered holds are released one message per call by
+  // release_one_group_hold_for_sleep().
   template <typename ClaimSavedFn>
   bool settle_one_sleep_delivery(SleepWorkPolicy fallback,
                                  ClaimSavedFn&& claim_saved) noexcept {
@@ -982,10 +982,10 @@ class MeshNode {
   // source) hold across streams, with the stream cursor advanced to it and
   // the skipped gap counted under the usual rules. Exactly one
   // on_group_message fires per Released call; the trailing group_drain()
-  // that group_skip_to runs is deliberately NOT run, so a callback veto
-  // stops the release with the remaining holds kept. A hold whose (source,
-  // session) stream is gone is kept and reported as StreamInvariant — the
-  // sleep attempt must abort, never drop payload silently.
+  // that group_skip_to runs is deliberately NOT run, so each call hands
+  // over exactly one message. A hold whose (source, session) stream is
+  // gone is kept and reported as StreamInvariant — the sleep attempt must
+  // abort, never drop payload silently.
   SleepHoldRelease release_one_group_hold_for_sleep() noexcept;
 
   // Re-injects a persisted delivery under its ORIGINAL logical message id so
@@ -996,20 +996,17 @@ class MeshNode {
   Status resume_delivery(const MessageId& id, NodeId destination, ByteView payload,
                          const SendOptions& options, MonotonicMs now_ms) noexcept;
 
-  // Sleep teardown, split so the coordinator can run a safe point between
-  // the last notification and the destructive step. The notice reports a
-  // frame still with the driver (metadata copied out — the diagnostic must
-  // not borrow the live job the teardown destroys); the teardown is
-  // callback-free and drops all queued/in-flight radio work. A frame already
-  // handed to the driver is reported unknown, never as sent.
-  void quiesce_notice_for_sleep() noexcept {
+  // Sleep teardown, called once per attempt after the dispositions. The
+  // notice reports a frame still with the driver (metadata copied out —
+  // the diagnostic must not borrow the live job the teardown destroys);
+  // the teardown then drops all queued/in-flight radio work. A frame
+  // already handed to the driver is reported unknown, never as sent.
+  void quiesce_for_sleep() noexcept {
     if (physical_.active) {
       const NodeId peer = physical_.job.peer;
       const MessageId message = physical_.job.ack.key.id;
       observer_.on_diagnostic("SLEEP_TX_INFLIGHT", peer, &message);
     }
-  }
-  void quiesce_teardown_for_sleep() noexcept {
     physical_ = PhysicalInflight{};
     scheduler_.clear();
     awaiting_hop_.clear();
@@ -1018,8 +1015,8 @@ class MeshNode {
  private:
   // Marks one MeshNode as "inside an application callback". Every
   // NodeObserver notification runs inside one (via ObserverForwarder), and so
-  // does every extended-sink call, so re-entrant coordinator operations can
-  // tell they were issued from application code. Nesting saves/restores.
+  // does every extended-sink call, so the PowerCoordinator can Busy-reject
+  // operations issued from application code. Nesting saves/restores.
   struct ExternalCallbackScope {
     explicit ExternalCallbackScope(bool& flag) noexcept
         : flag_(flag), saved_(flag) {

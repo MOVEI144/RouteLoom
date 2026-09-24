@@ -1893,8 +1893,10 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       if (delivery == nullptr || sleep_terminal(delivery->state)) {
         TxJob discarded{};
         scheduler_.take_selected(discarded);
-        observer_.on_diagnostic("STALE_JOB_DROPPED", queued->peer,
-                                &queued->ack.key.id);
+        // The slot `queued` points at is released above: diagnose from the
+        // taken job, not the dead slot.
+        observer_.on_diagnostic("STALE_JOB_DROPPED", discarded.peer,
+                                &discarded.ack.key.id);
         continue;
       }
     } else if (queued->owner == JobOwner::Group &&
@@ -1903,8 +1905,8 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       // above — never dispatch airtime for a verdict that already landed.
       TxJob discarded{};
       scheduler_.take_selected(discarded);
-      observer_.on_diagnostic("STALE_JOB_DROPPED", queued->peer,
-                              &queued->ack.key.id);
+      observer_.on_diagnostic("STALE_JOB_DROPPED", discarded.peer,
+                              &discarded.ack.key.id);
       continue;
     }
     // Combined physical-attempt budget (03 §5): a job that already consumed

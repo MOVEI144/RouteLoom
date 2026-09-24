@@ -1910,13 +1910,13 @@ void test_group_sleep_commit_failure_keeps_state() {
   CHECK(w.observer_b.group_messages.size() == 2);
 }
 
-void test_group_settled_callback_abort_new_send() {
-  // Inside the SLEEP_DRAIN terminal event the app vetoes the sleep and sends
-  // again: the abort is ACCEPTED (queued, applied at the safe point — no
-  // ticket, no READY transition), but the callback runs while the drain is
-  // still active, so the send is refused with NODE_DRAINING and creates no
-  // origin. The app resends after RUNNING is observed (#110: an accepted
-  // abort never reopens admission inside its own callback).
+void test_group_settled_callback_abort_busy_send_refused() {
+  // Inside the SLEEP_DRAIN terminal event the app tries to veto the sleep
+  // and sends again: the abort is Busy (no re-entry from callbacks), so
+  // the settlement runs on to READY_TO_SLEEP, and the send is refused with
+  // NODE_DRAINING and creates no origin. The app aborts after observing
+  // READY and resends after RUNNING (#110: an abort never reopens
+  // admission inside its own callback because it never runs there).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -1948,17 +1948,21 @@ void test_group_settled_callback_abort_new_send() {
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
   CHECK(callback_state == PowerState::Persisting);
-  CHECK(abort_status.ok());
-  CHECK(std::strcmp(abort_status.detail, "POWER_REQUEST_QUEUED") == 0);
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(std::strcmp(abort_status.detail, "POWER_IN_CALLBACK") == 0);
   CHECK(!send_status.ok());
   CHECK(std::strcmp(send_status.detail, "NODE_DRAINING") == 0);
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
-  // The refused send created nothing resendable: the app sends afresh after
-  // RUNNING and the new origin runs to Delivered once reports flow again.
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
+  // The refused send created nothing: the app aborts from outside, then
+  // sends afresh after RUNNING, and the new origin runs to Delivered once
+  // reports flow again.
   CHECK(w.a.group_delivery(new_id).state == DeliveryState::Empty);
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
   w.net.drop_frame = nullptr;
   MessageId retry{};
   CHECK_OK(w.a.send_group(kGroupAll, ByteView{again.data(), again.size()},
@@ -1968,11 +1972,11 @@ void test_group_settled_callback_abort_new_send() {
   CHECK(done.state == DeliveryState::Delivered);
 }
 
-void test_unicast_disposition_callback_abort_new_send() {
-  // Same reentrancy through the unicast disposition: the abort inside
-  // on_delivery is accepted, the send inside the same callback is refused
-  // with NODE_DRAINING (admission reopens only after RUNNING), and the
-  // resend from outside completes (#110, unicast leg of the test above).
+void test_unicast_disposition_callback_abort_busy_send_refused() {
+  // Same ban through the unicast disposition: the abort inside on_delivery
+  // is Busy (the settlement completes to READY_TO_SLEEP), the send inside
+  // the same callback is refused with NODE_DRAINING, and the abort + resend
+  // from outside complete (#110, unicast leg of the test above).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2001,13 +2005,15 @@ void test_unicast_disposition_callback_abort_new_send() {
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(abort_status.ok());
-  CHECK(std::strcmp(abort_status.detail, "POWER_REQUEST_QUEUED") == 0);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(std::strcmp(abort_status.detail, "POWER_IN_CALLBACK") == 0);
   CHECK(!send_status.ok());
   CHECK(std::strcmp(send_status.detail, "NODE_DRAINING") == 0);
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
   MessageId retry{};
   CHECK_OK(w.a.send(GroupPowerWorld::kLeaf,
                     ByteView{payload.data(), payload.size()},
@@ -2067,12 +2073,13 @@ void test_disposition_callback_send_refused() {
   CHECK(std::strcmp(group_status.detail, "NODE_DRAINING") == 0);
 }
 
-void test_settlement_abort_reprepare_stops_old_policy() {
-  // A settlement callback that aborts AND re-prepares ends the old attempt
-  // outright: the second group origin settles under the NEW attempt's Defer
-  // policy, never under the stale Fail one (#110 review: the callback's
-  // abort ends the old attempt at the safe point and its prepare starts a
-  // new attempt on the next poll).
+void test_callback_abort_prepare_abort_busy_outside_works() {
+  // abort->prepare->abort from a settlement callback are all Busy — no
+  // request is recorded, so the attempt is never cancelled and settles
+  // BOTH origins under the ORIGINAL Fail policy, reaching READY_TO_SLEEP
+  // with a valid ticket. After the callback, the same calls work: an
+  // outside abort lands in RUNNING, and a new send + Defer prepare
+  // settles under the new policy (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2086,55 +2093,49 @@ void test_settlement_abort_reprepare_stops_old_policy() {
   const MessageId id1 = w.send_all(w.a, options);  // seq 1
   const MessageId id2 = w.send_all(w.a, options);  // seq 2
 
-  Status abort_status = Status::error(StatusCode::InternalError, "not run");
-  Status prepare_status = Status::error(StatusCode::InternalError, "not run");
+  std::vector<StatusCode> got;
   w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
-    if (result.state != DeliveryState::Failed ||
-        std::strcmp(result.reason, "SLEEP_DRAIN") != 0 ||
-        abort_status.code != StatusCode::InternalError) {
+    if (!got.empty() || result.state != DeliveryState::Failed ||
+        std::strcmp(result.reason, "SLEEP_DRAIN") != 0) {
       return;  // act once, on the first settled origin
     }
-    abort_status = coordinator.sleep_abort("APP_VETO");
+    got.push_back(coordinator.sleep_abort("FIRST").code);
     SleepRequest retry{};
     retry.pending_policy = SleepWorkPolicy::Defer;
-    prepare_status = coordinator.sleep_prepare(retry, w.now);
+    got.push_back(coordinator.sleep_prepare(retry, w.now).code);
+    got.push_back(coordinator.sleep_abort("SECOND").code);
   };
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  // Inspect the aborting poll itself: when it returns the old attempt is
-  // over (RUNNING), origin 2 is still live, and the new attempt has not
-  // committed anything yet — its prepare starts on a LATER outer poll.
-  bool aborted = false;
-  for (int i = 0; i < 400 && !aborted; ++i) {
-    coordinator.poll(w.now);
-    w.b.poll(w.now);
-    w.net.flush(w.now);
-    w.now += 5;
-    aborted = abort_status.code != StatusCode::InternalError &&
-              coordinator.state() == PowerState::Running;
-  }
-  CHECK(aborted);
-  CHECK(abort_status.ok());
-  CHECK(prepare_status.ok());
-  CHECK(storage.write_calls == 1);  // the old attempt's commit only
-  CHECK(w.observer_a.group_results.size() == 1);
-  CHECK(sleep_verdict_terminal(w.a.group_delivery(id1).state));
-  CHECK(!sleep_verdict_terminal(w.a.group_delivery(id2).state));
   CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-  // Origin 1 settled under the old Fail attempt; origin 2 belongs to the
-  // new Defer attempt — the stale Fail settlement must not resume for it.
-  CHECK(w.observer_a.group_results.size() == 2);
-  CHECK(w.observer_a.group_results[0].state == DeliveryState::Failed);
-  CHECK(std::strcmp(w.observer_a.group_results[0].reason, "SLEEP_DRAIN") == 0);
-  CHECK(w.observer_a.group_results[1].state == DeliveryState::Indeterminate);
-  CHECK(std::strcmp(w.observer_a.group_results[1].reason, "SLEEP_DEFERRED") == 0);
+  CHECK(got.size() == 3);
+  for (const StatusCode code : got) {
+    CHECK(code == StatusCode::Busy);
+  }
+  // Both origins settled under the undisturbed Fail attempt.
+  CHECK(w.a.group_delivery(id1).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(id1).reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.a.group_delivery(id2).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(id2).reason, "SLEEP_DRAIN") == 0);
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
+  // Outside the callback the same calls work: abort, resend, reprepare.
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
+  const MessageId id3 = w.send_all(w.a, options);  // seq 3
+  SleepRequest retry{};
+  retry.pending_policy = SleepWorkPolicy::Defer;
+  CHECK_OK(coordinator.sleep_prepare(retry, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(w.a.group_delivery(id3).state == DeliveryState::Indeterminate);
+  CHECK(std::strcmp(w.a.group_delivery(id3).reason, "SLEEP_DEFERRED") == 0);
 }
 
-void test_poll_delivery_callback_abort_stops_drain() {
-  // A delivery callback fired by node_.poll() mid-drain can veto the sleep:
-  // the same poll must not roll into finish_drain and reach READY_TO_SLEEP
-  // with a live ticket (#110 review, GROUP_INCOMPLETE repro).
+void test_poll_delivery_callback_abort_busy_drain_continues() {
+  // A delivery callback fired by node_.poll() mid-drain (GROUP_INCOMPLETE
+  // expiry) cannot veto the sleep: the abort is Busy, the same poll rolls
+  // into the settlement and reaches READY_TO_SLEEP, and an outside abort
+  // afterwards still works (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2159,17 +2160,20 @@ void test_poll_delivery_callback_abort_stops_drain() {
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(abort_status.ok());
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
   CHECK(!coordinator.ticket().issued);
 }
 
-void test_settlement_callback_app_event_invalidates_ticket() {
-  // App activity signalled inside a settlement callback must invalidate the
-  // sleep exactly like late activity in READY_TO_SLEEP: no ticket is
-  // issued and the attempt aborts to RUNNING (#110 review).
+void test_settlement_callback_app_event_busy_ticket_survives() {
+  // App activity signalled inside a settlement callback is Busy — the
+  // ticket is still issued honestly. Activity signalled from OUTSIDE
+  // afterwards aborts to RUNNING at once with SLEEP_TICKET_INVALID (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2182,28 +2186,34 @@ void test_settlement_callback_app_event_invalidates_ticket() {
   GroupSendOptions options{};
   w.send_all(w.a, options);
 
+  Status event_status = Status::error(StatusCode::InternalError, "not run");
   w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
     if (result.state == DeliveryState::Failed &&
         std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-      coordinator.notify_app_event();
+      event_status = coordinator.notify_app_event();
     }
   };
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
-  CHECK(!coordinator.ticket().issued);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(event_status.code == StatusCode::Busy);
+  CHECK(std::strcmp(event_status.detail, "POWER_IN_CALLBACK") == 0);
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
+  CHECK(!w.events.has_diag("SLEEP_TICKET_INVALID"));
+  CHECK_OK(coordinator.notify_app_event());
+  CHECK(coordinator.state() == PowerState::Running);
   CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
 }
 
-void test_ready_transition_callback_abort_not_overwritten() {
+void test_ready_transition_callback_abort_busy_ticket_survives() {
   // The SLEEP_READY transition notification is an app callback: the state is
-  // already READY when it runs (post-state notification), an abort inside it
-  // is accepted, and the same outer call then lands in RUNNING with the
-  // ticket invalidated and no platform enter. ReadyToSleep→Running is the
-  // honest history here — not a stale assignment (#110 review).
+  // already READY when it runs (post-state notification), and an abort
+  // inside it is Busy — the machine stays READY with a valid ticket. An
+  // outside abort then lands in RUNNING with SLEEP_ABORTED history and no
+  // platform enter (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2225,21 +2235,20 @@ void test_ready_transition_callback_abort_not_overwritten() {
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
   CHECK(callback_state == PowerState::ReadyToSleep);
-  CHECK(abort_status.ok());
-  CHECK(std::strcmp(abort_status.detail, "POWER_REQUEST_QUEUED") == 0);
-  CHECK(coordinator.state() == PowerState::Running);
-  CHECK(!coordinator.ticket().issued);
-  CHECK(!coordinator.ticket_valid(coordinator.ticket()));
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(std::strcmp(abort_status.detail, "POWER_IN_CALLBACK") == 0);
+  CHECK(coordinator.state() == PowerState::ReadyToSleep);
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
   CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
                      "SLEEP_READY"));
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(!coordinator.ticket().issued);
   CHECK(w.events.saw(PowerState::ReadyToSleep, PowerState::Running,
                      "SLEEP_ABORTED"));
   CHECK(w.port.sleep_calls == 0);
-  // The explicit abort reason wins over the activity veto: no
-  // SLEEP_TICKET_INVALID diagnostic for an explicit APP_VETO abort.
-  CHECK(!w.events.has_diag("SLEEP_TICKET_INVALID"));
 }
 
 // Drives one group message to GROUP_REPAIR_PENDING with every report lost:
@@ -2296,10 +2305,11 @@ void test_group_repair_not_waited_by_drain() {
   }
 }
 
-void test_poll_unicast_callback_abort_stops_drain() {
-  // Unicast leg of the GROUP_INCOMPLETE abort test: a normal expiry event
-  // fired by node_.poll() mid-drain vetoes the sleep, and the same poll
-  // must not roll into the settlement (#110 R2-2).
+void test_poll_unicast_callback_abort_busy_drain_continues() {
+  // Unicast leg of the mid-drain expiry test: the abort from the
+  // node_.poll() expiry event is Busy, the same poll rolls into the
+  // settlement and reaches READY_TO_SLEEP, and an outside abort afterwards
+  // still works (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2324,26 +2334,19 @@ void test_poll_unicast_callback_abort_stops_drain() {
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  bool aborted = false;
-  for (int i = 0; i < 400 && !aborted; ++i) {
-    coordinator.poll(w.now);
-    w.b.poll(w.now);
-    w.net.flush(w.now);
-    w.now += 5;
-    aborted = abort_status.code != StatusCode::InternalError &&
-              coordinator.state() == PowerState::Running;
-  }
-  CHECK(aborted);
-  CHECK(abort_status.ok());
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
-  CHECK(!coordinator.ticket().issued);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
 }
 
-void test_unicast_settlement_callback_app_event_vetoes() {
-  // Unicast leg of the settlement app-event veto: activity signalled from a
-  // SLEEP_DRAIN on_delivery aborts before the ticket, with the
-  // SLEEP_TICKET_INVALID diagnostic (#110 R2-3).
+void test_unicast_settlement_callback_app_event_busy() {
+  // Unicast leg of the settlement app-event test: activity signalled from
+  // a SLEEP_DRAIN on_delivery is Busy — the ticket is still issued — and
+  // activity from OUTSIDE afterwards aborts at once (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2357,22 +2360,23 @@ void test_unicast_settlement_callback_app_event_vetoes() {
   CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
                     send_options, w.now, id));
 
-  bool vetoed = false;
+  Status event_status = Status::error(StatusCode::InternalError, "not run");
   w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
     if (result.state == DeliveryState::Failed &&
         std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-      vetoed = true;
-      coordinator.notify_app_event();
+      event_status = coordinator.notify_app_event();
     }
   };
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(vetoed);
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
-  CHECK(!coordinator.ticket().issued);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(event_status.code == StatusCode::Busy);
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK(!w.events.has_diag("SLEEP_TICKET_INVALID"));
+  CHECK_OK(coordinator.notify_app_event());
+  CHECK(coordinator.state() == PowerState::Running);
   CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
 }
 
@@ -2386,92 +2390,74 @@ std::size_t pending_results_for(const RecordingPowerEvents& events,
   return count;
 }
 
-void test_save_abort_fail_carries_only_settled() {
-  // Save persists two non-durable unicasts; the first SLEEP_SAVED
-  // notification aborts the attempt. Only the settled record is carried:
-  // the unsettled one settles under the NEXT attempt's Fail policy (after
-  // its commit), and a fresh node waking from the same storage re-injects
-  // the carried record only — never the failed one (#110 R3-1). Two
-  // variants: the retry is requested inside the aborting callback, or from
-  // outside afterwards.
-  for (int variant = 0; variant < 2; ++variant) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    const std::array<std::uint8_t, 3> payload{{'a', 'b', 'c'}};
-    MessageId id_a{}, id_b{};
-    SendOptions send_options{};
-    send_options.lifetime_ms = 20000;
-    CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
-                      send_options, w.now, id_a));
-    CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
-                      send_options, w.now, id_b));
+void test_save_outside_abort_retry_fail() {
+  // A Save attempt aborted from OUTSIDE during the drain (before the
+  // settlement) commits nothing: both deliveries stay live. The Fail retry
+  // fails both after its own commit, and a fresh node waking from the same
+  // storage re-injects nothing. Slot hygiene: corrupting the newest slot
+  // still restores nothing — the retry dual-wrote its candidate (#110).
+  // (A mid-settlement abort is impossible: callbacks are Busy, so the
+  // settlement always completes.)
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  const std::array<std::uint8_t, 3> payload{{'a', 'b', 'c'}};
+  MessageId id_a{}, id_b{};
+  SendOptions send_options{};
+  send_options.lifetime_ms = 20000;
+  CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
+                    send_options, w.now, id_a));
+  CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
+                    send_options, w.now, id_b));
 
-    bool aborted = false;
-    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (aborted || result.state != DeliveryState::Indeterminate ||
-          std::strcmp(result.reason, "SLEEP_SAVED") != 0) {
-        return;  // act once, on the first settled record
-      }
-      aborted = true;
-      CHECK_OK(coordinator.sleep_abort("APP_VETO"));
-      if (variant == 0) {
-        SleepRequest retry{};
-        retry.pending_policy = SleepWorkPolicy::Fail;
-        CHECK_OK(coordinator.sleep_prepare(retry, w.now));
-      }
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Save;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    if (variant == 1) {
-      CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-      SleepRequest retry{};
-      retry.pending_policy = SleepWorkPolicy::Fail;
-      CHECK_OK(coordinator.sleep_prepare(retry, w.now));
-    }
-    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-    // A settled under Save; B failed under the Fail retry, after its own
-    // commit — not under the stale Save candidate.
-    CHECK(w.a.delivery(id_a).state == DeliveryState::Indeterminate);
-    CHECK(std::strcmp(w.a.delivery(id_a).reason, "SLEEP_SAVED") == 0);
-    CHECK(w.a.delivery(id_b).state == DeliveryState::Failed);
-    CHECK(std::strcmp(w.a.delivery(id_b).reason, "SLEEP_DRAIN") == 0);
-    CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Save;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(coordinator.state() == PowerState::Draining);
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(storage.write_calls == 0);  // aborted before the settlement commit
+  CHECK(!sleep_verdict_terminal(w.a.delivery(id_a).state));
+  CHECK(!sleep_verdict_terminal(w.a.delivery(id_b).state));
 
-    // A fresh node on the same storage re-injects A — and only A.
-    GroupPowerWorld fresh;
-    FakePowerPort fresh_port;
-    RecordingPowerEvents fresh_events;
-    PowerCoordinator woken(PowerConfig{500, 50}, fresh.a, fresh_port, storage,
-                           fresh_events);
-    CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
-                         ElapsedInterval{100, 200, true}, fresh.now));
-    CHECK(pending_results_for(fresh_events, id_a, StatusCode::Ok) == 1);
-    CHECK(pending_results_for(fresh_events, id_b, StatusCode::Ok) == 0);
-    CHECK(fresh_events.pending_results.size() == 1);
+  SleepRequest retry{};
+  retry.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(retry, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(w.a.delivery(id_a).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.delivery(id_a).reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.a.delivery(id_b).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.delivery(id_b).reason, "SLEEP_DRAIN") == 0);
+  CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
 
-    // Slot hygiene: even when the newest slot is lost, the fallback slot
-    // restores A only — the old Save candidate's B is gone from BOTH slots
-    // (the retry dual-wrote its candidate).
-    storage.corrupt(static_cast<std::uint8_t>(storage.last_slot), 10);
-    GroupPowerWorld fallback;
-    FakePowerPort fallback_port;
-    RecordingPowerEvents fallback_events;
-    PowerCoordinator woken2(PowerConfig{500, 50}, fallback.a, fallback_port,
-                            storage, fallback_events);
-    CHECK_OK(woken2.begin(ResetCause::DeepSleepWake,
-                          ElapsedInterval{100, 200, true}, fallback.now));
-    CHECK(pending_results_for(fallback_events, id_a, StatusCode::Ok) == 1);
-    CHECK(pending_results_for(fallback_events, id_b, StatusCode::Ok) == 0);
-  }
+  // A fresh node on the same storage re-injects nothing.
+  GroupPowerWorld fresh;
+  FakePowerPort fresh_port;
+  RecordingPowerEvents fresh_events;
+  PowerCoordinator woken(PowerConfig{500, 50}, fresh.a, fresh_port, storage,
+                         fresh_events);
+  CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
+                       ElapsedInterval{100, 200, true}, fresh.now));
+  CHECK(fresh_events.pending_results.empty());
+
+  // Slot hygiene: even when the newest slot is lost, the fallback slot
+  // restores nothing either.
+  storage.corrupt(static_cast<std::uint8_t>(storage.last_slot), 10);
+  GroupPowerWorld fallback;
+  FakePowerPort fallback_port;
+  RecordingPowerEvents fallback_events;
+  PowerCoordinator woken2(PowerConfig{500, 50}, fallback.a, fallback_port,
+                          storage, fallback_events);
+  CHECK_OK(woken2.begin(ResetCause::DeepSleepWake,
+                        ElapsedInterval{100, 200, true}, fallback.now));
+  CHECK(fallback_events.pending_results.empty());
 }
 
-void test_save_abort_fail_durable_saved_again() {
+void test_save_outside_abort_durable_saved_again() {
   // Companion of the test above: when B is individually durable, the Fail
   // retry still saves it — an individual durable mark outranks the
   // fallback, so this is specified behavior, not a ghost re-injection.
@@ -2493,24 +2479,17 @@ void test_save_abort_fail_durable_saved_again() {
   CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
                     w.now, id_b));
 
-  bool aborted = false;
-  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-    if (aborted || result.state != DeliveryState::Indeterminate ||
-        std::strcmp(result.reason, "SLEEP_SAVED") != 0) {
-      return;
-    }
-    aborted = true;
-    CHECK_OK(coordinator.sleep_abort("APP_VETO"));
-  };
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Save;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
   SleepRequest retry{};
   retry.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(retry, w.now));
   CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-  CHECK(std::strcmp(w.a.delivery(id_a).reason, "SLEEP_SAVED") == 0);
+  CHECK(w.a.delivery(id_a).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.delivery(id_a).reason, "SLEEP_DRAIN") == 0);
   CHECK(w.a.delivery(id_b).state == DeliveryState::Indeterminate);
   CHECK(std::strcmp(w.a.delivery(id_b).reason, "SLEEP_SAVED") == 0);
   CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
@@ -2522,7 +2501,7 @@ void test_save_abort_fail_durable_saved_again() {
                          fresh_events);
   CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
                        ElapsedInterval{100, 200, true}, fresh.now));
-  CHECK(pending_results_for(fresh_events, id_a, StatusCode::Ok) == 1);
+  CHECK(pending_results_for(fresh_events, id_a, StatusCode::Ok) == 0);
   CHECK(pending_results_for(fresh_events, id_b, StatusCode::Ok) == 1);
 }
 
@@ -2545,12 +2524,12 @@ struct ServiceSinkDouble final : GatewayServiceSink {
   const char* last_reason{""};
 };
 
-void test_tx_notice_abort_keeps_queues() {
+void test_tx_notice_callback_busy_quiesce_completes() {
   // A service job is stuck in physical TX at the drain deadline. The
-  // SLEEP_TX_INFLIGHT diagnostic fires; its callback aborts and sends. The
-  // send is refused (draining), and the safe point after the notice aborts
-  // WITHOUT the blanket clear, radio quiesce or ticket: the job survives
-  // with its id and completes normally after RUNNING (#110 R3-2).
+  // SLEEP_TX_INFLIGHT diagnostic fires; its callback's abort is Busy and
+  // its send is refused — the quiesce then completes honestly (radio
+  // quiesced, ticket issued): the stuck frame was reported unknown and is
+  // dropped by the teardown, never reported as sent (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2590,45 +2569,42 @@ void test_tx_notice_abort_keeps_queues() {
   SleepRequest request{};
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
   // Drive WITHOUT flushing the network: the physical TX result never lands
-  // until the abort is over.
-  bool aborted = false;
-  for (int i = 0; i < 400 && !aborted; ++i) {
+  // before the quiesce.
+  for (int i = 0; i < 400 && !noticed; ++i) {
     coordinator.poll(w.now);
     w.b.poll(w.now);
     w.now += 5;
-    aborted = abort_status.code != StatusCode::InternalError &&
-              coordinator.state() == PowerState::Running;
   }
   CHECK(noticed);
-  CHECK(aborted);
   CHECK(callback_state == PowerState::Persisting);
-  CHECK(abort_status.ok());
+  CHECK(abort_status.code == StatusCode::Busy);
   CHECK(!send_status.ok());
   CHECK(std::strcmp(send_status.detail, "NODE_DRAINING") == 0);
-  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                      "SLEEP_READY"));
-  CHECK(!coordinator.ticket().issued);
-  CHECK(w.port.quiesce_calls == 0);  // never reached radio quiesce
-  // The job was never cleared: its TX result resolves normally (no
-  // STALE_TX_CALLBACK) and the exchange completes under its own id.
-  for (int i = 0; i < 200 && sink.calls == 0; ++i) {
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                     "SLEEP_READY"));
+  CHECK(coordinator.ticket_valid(coordinator.ticket()));
+  CHECK(w.port.quiesce_calls == 1);
+  // The stuck job was dropped by the teardown: its late TX result resolves
+  // to nothing (STALE_TX_CALLBACK), and the exchange never completes.
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  for (int i = 0; i < 200; ++i) {
     w.a.poll(w.now);
     w.b.poll(w.now);
     w.net.flush(w.now);
     w.now += 5;
   }
-  CHECK(sink.calls == 1);
-  CHECK(sink.last_ok);
-  CHECK(sink.last_id == service_id);
-  CHECK(!w.observer_a.has_diag("STALE_TX_CALLBACK"));
+  CHECK(sink.calls == 0);
+  CHECK(w.observer_a.has_diag("STALE_TX_CALLBACK"));
+  (void)service_id;
 }
 
-void test_sleep_hold_release_abort_keeps_rest() {
-  // ORDERED seq 2 is lost; seq 3 AND 4 are held. The sleep release hands seq
-  // 3 to the app and its callback aborts: the same outer call stops there —
-  // {1, 3} delivered, one hold left, cursor at 4, the seq-2 gap counted
-  // once, no callback for 4 yet. A later attempt delivers 4 exactly once
-  // (#110 R3-3: one message per release, no trailing drain).
+void test_sleep_hold_release_callback_busy_releases_all() {
+  // ORDERED seq 2 is lost; seq 3 AND 4 are held. The sleep release hands
+  // both to the app: the abort from the seq-3 callback is Busy, so the
+  // release continues — {1, 3, 4} delivered exactly once, no holds left,
+  // cursor at 5, the seq-2 gap counted once — and the attempt reaches
+  // READY_TO_SLEEP (#110: one message per release, no trailing drain).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -2669,41 +2645,26 @@ void test_sleep_hold_release_abort_keeps_rest() {
   };
   SleepRequest request{};
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  bool aborted = false;
-  for (int i = 0; i < 400 && !aborted; ++i) {
-    coordinator.poll(w.now);
-    w.a.poll(w.now);
-    w.net.flush(w.now);
-    w.now += 5;
-    aborted = abort_status.code != StatusCode::InternalError &&
-              coordinator.state() == PowerState::Running;
-  }
-  CHECK(aborted);
-  CHECK(abort_status.ok());
-  // The aborting outer call released exactly one message.
-  CHECK(w.observer_b.group_messages.size() == 2);
-  if (w.observer_b.group_messages.size() == 2) {
+  CHECK(w.run_until(coordinator, w.a, PowerState::ReadyToSleep));
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(w.observer_b.group_messages.size() == 3);
+  if (w.observer_b.group_messages.size() == 3) {
     CHECK(w.observer_b.group_messages[0].info.group_seq == 1);
     CHECK(w.observer_b.group_messages[1].info.group_seq == 3);
     CHECK(!w.observer_b.group_messages[1].info.late);
+    CHECK(w.observer_b.group_messages[2].info.group_seq == 4);
+    CHECK(!w.observer_b.group_messages[2].info.late);
   }
-  CHECK(w.b.group_holds_in_use() == 1);
+  CHECK(w.b.group_holds_in_use() == 0);
   std::uint32_t next_seq = 0;
   w.b.for_each_group_stream([&](const GroupStreamSnapshot& stream) {
     if (stream.source == GroupPowerWorld::kGateway) next_seq = stream.next_seq;
   });
-  CHECK(next_seq == 4);
+  CHECK(next_seq == 5);
   CHECK(w.b.group_stats().gaps_skipped == 1);
-  // A later attempt delivers the kept hold exactly once.
-  CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.a, PowerState::ReadyToSleep));
-  CHECK(w.b.group_holds_in_use() == 0);
-  CHECK(w.observer_b.group_messages.size() == 3);
-  if (w.observer_b.group_messages.size() == 3) {
-    CHECK(w.observer_b.group_messages[2].info.group_seq == 4);
-    CHECK(!w.observer_b.group_messages[2].info.late);
-  }
-  CHECK(w.b.group_stats().gaps_skipped == 1);
+  // An outside abort afterwards still works.
+  CHECK_OK(coordinator.sleep_abort("APP_VETO"));
+  CHECK(coordinator.state() == PowerState::Running);
 }
 
 // Three-node rig for the multi-stream sleep-hold test: gateways 1 and 2
@@ -2800,12 +2761,13 @@ struct TwoSourceWorld {
   }
 };
 
-void test_sleep_hold_release_abort_multi_stream() {
+void test_sleep_hold_release_callback_busy_multi_stream() {
   // Two sources, one sleeper: the leaf holds one ORDERED message per stream
-  // (both seq 3, both missing seq 2). The first release takes the lowest
-  // (seq, source) — source 1 — and its callback aborts: the other stream's
-  // hold and cursor stay untouched, and a later attempt delivers it (#110
-  // R3-3, stable cross-stream order).
+  // (both seq 3, both missing seq 2). The release takes the lowest (seq,
+  // source) first — source 1 — and its callback's abort is Busy, so the
+  // other stream's hold releases next in the same attempt: both delivered
+  // exactly once, in stable cross-stream order, and the attempt reaches
+  // READY_TO_SLEEP (#110).
   MemoryPowerStorage storage;
   TwoSourceWorld w;
   w.converge();
@@ -2837,33 +2799,23 @@ void test_sleep_hold_release_abort_multi_stream() {
   CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
                                ElapsedInterval{0, 0, false}, w.now));
   Status abort_status = Status::error(StatusCode::InternalError, "not run");
-  w.o3.on_group_message_fn = [&](const GroupMessageInfo& info, ByteView) {
+  w.o3.on_group_message_fn = [&](const GroupMessageInfo&, ByteView) {
     if (abort_status.code == StatusCode::InternalError) {
       abort_status = coordinator.sleep_abort("APP_VETO");
     }
-    (void)info;
   };
   SleepRequest request{};
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  bool aborted = false;
-  for (int i = 0; i < 400 && !aborted; ++i) {
-    coordinator.poll(w.now);
-    w.n1.poll(w.now);
-    w.n2.poll(w.now);
-    w.net.flush(w.now);
-    w.now += 5;
-    aborted = abort_status.code != StatusCode::InternalError &&
-              coordinator.state() == PowerState::Running;
-  }
-  CHECK(aborted);
-  CHECK(abort_status.ok());
-  // Exactly one release happened, from the lowest (seq, source) stream.
-  CHECK(w.o3.group_messages.size() == 3);
-  if (w.o3.group_messages.size() == 3) {
+  CHECK(w.run_until(coordinator, PowerState::ReadyToSleep));
+  CHECK(abort_status.code == StatusCode::Busy);
+  CHECK(w.o3.group_messages.size() == 4);
+  if (w.o3.group_messages.size() == 4) {
     CHECK(w.o3.group_messages[2].info.key.origin == TwoSourceWorld::kGw1);
     CHECK(w.o3.group_messages[2].info.group_seq == 3);
+    CHECK(w.o3.group_messages[3].info.key.origin == TwoSourceWorld::kGw2);
+    CHECK(w.o3.group_messages[3].info.group_seq == 3);
   }
-  CHECK(w.n3.group_holds_in_use() == 1);
+  CHECK(w.n3.group_holds_in_use() == 0);
   std::uint32_t next1 = 0;
   std::uint32_t next2 = 0;
   w.n3.for_each_group_stream([&](const GroupStreamSnapshot& stream) {
@@ -2871,23 +2823,14 @@ void test_sleep_hold_release_abort_multi_stream() {
     if (stream.source == TwoSourceWorld::kGw2) next2 = stream.next_seq;
   });
   CHECK(next1 == 4);
-  CHECK(next2 == 2);  // untouched stream keeps its cursor
-  // A later attempt delivers the kept hold exactly once.
-  CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, PowerState::ReadyToSleep));
-  CHECK(w.n3.group_holds_in_use() == 0);
-  CHECK(w.o3.group_messages.size() == 4);
-  if (w.o3.group_messages.size() == 4) {
-    CHECK(w.o3.group_messages[3].info.key.origin == TwoSourceWorld::kGw2);
-    CHECK(w.o3.group_messages[3].info.group_seq == 3);
-  }
+  CHECK(next2 == 4);
 }
 
-void test_carry_expired_callback_app_event_vetoes() {
+void test_carry_expired_callback_app_event_busy() {
   // A retained record expires while awake. At the next sleep its Expired
   // result is notified AFTER the phase-1 commit; activity signalled from
-  // that callback vetoes the attempt before any ticket, and the consumed
-  // Expired is never re-notified nor re-injected (#110 R3-4).
+  // that callback is Busy — the attempt still completes to READY — and
+  // the consumed Expired is never re-notified nor re-injected (#110).
   MemoryPowerStorage storage;
   {
     PowerWorld w(storage);
@@ -2915,29 +2858,26 @@ void test_carry_expired_callback_app_event_vetoes() {
     w.now += 5000;  // stay awake past the retained record's remaining budget
     const std::size_t writes_before_prepare = storage.write_calls;
     std::size_t writes_at_notify = 0;
-    bool vetoed = false;
+    Status event_status = Status::error(StatusCode::InternalError, "not run");
     w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
                                         StatusCode code) {
-      if (code == StatusCode::Expired && !vetoed) {
-        vetoed = true;
+      if (code == StatusCode::Expired &&
+          event_status.code == StatusCode::InternalError) {
         writes_at_notify = storage.write_calls;
-        w.coordinator.notify_app_event();
+        event_status = w.coordinator.notify_app_event();
       }
     };
     SleepRequest request{};
     CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-    CHECK(w.pump_until(PowerState::Running));
-    CHECK(vetoed);
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK(event_status.code == StatusCode::Busy);
     // The notification moved past the commit: the image landed first.
     CHECK(writes_at_notify > writes_before_prepare);
-    CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                        "SLEEP_READY"));
-    CHECK(!w.coordinator.ticket().issued);
-    CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
+    CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                       "SLEEP_READY"));
+    CHECK(w.coordinator.ticket_valid(w.coordinator.ticket()));
+    CHECK(!w.events.has_diag("SLEEP_TICKET_INVALID"));
     // The consumed Expired is gone for good: no duplicate, no re-injection.
-    w.events.on_pending_result_fn = nullptr;
-    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-    CHECK(w.pump_until(PowerState::ReadyToSleep));
     CHECK(w.events.pending_with(StatusCode::Expired) == 1);
     CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
     CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
@@ -2946,11 +2886,11 @@ void test_carry_expired_callback_app_event_vetoes() {
   }
 }
 
-void test_enter_expired_callback_app_event_vetoes() {
+void test_enter_expired_callback_app_event_busy() {
   // A durable pending expires while its ticket waits. sleep_enter refreshes
   // and commits first, then notifies Expired; activity from that callback
-  // vetoes the entry — the platform handoff never runs — and the consumed
-  // record is never re-injected (#110 R3-5).
+  // is Busy — the entry COMPLETES, the platform handoff runs — and the
+  // consumed record is never re-injected (#110).
   MemoryPowerStorage storage;
   PowerWorld w(storage);
   w.platform_peer(2, 0xaa);
@@ -2964,170 +2904,27 @@ void test_enter_expired_callback_app_event_vetoes() {
   const SleepTicket ticket = w.coordinator.ticket();
   w.now += 10010;  // hold the ticket past the pending's 5000 ms lifetime
   const std::size_t writes_before_enter = storage.write_calls;
-  bool vetoed = false;
+  Status event_status = Status::error(StatusCode::InternalError, "not run");
   w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
                                       StatusCode code) {
-    if (code == StatusCode::Expired && !vetoed) {
-      vetoed = true;
-      w.coordinator.notify_app_event();
+    if (code == StatusCode::Expired &&
+        event_status.code == StatusCode::InternalError) {
+      event_status = w.coordinator.notify_app_event();
     }
   };
-  CHECK(w.coordinator.sleep_enter(ticket, w.now).code ==
-        StatusCode::InvalidState);
-  CHECK(vetoed);
-  // The refresh landed before the vetoing notification (dual slot update).
+  CHECK_OK(w.coordinator.sleep_enter(ticket, w.now));
+  CHECK(event_status.code == StatusCode::Busy);
+  // The refresh landed before the notification (dual slot update).
   CHECK(storage.write_calls == writes_before_enter + 2);
-  CHECK(w.coordinator.state() == PowerState::Running);
-  CHECK(!w.coordinator.ticket_valid(ticket));
-  CHECK(w.port.wakecfg_calls == 0);
-  CHECK(w.port.sleep_calls == 0);
+  CHECK(w.coordinator.state() == PowerState::Sleeping);
+  CHECK(w.port.wakecfg_calls == 1);
+  CHECK(w.port.sleep_calls == 1);
   CHECK(w.events.pending_with(StatusCode::Expired) == 1);
-  // The consumed record stays gone: a clean retry re-injects nothing.
-  w.events.on_pending_result_fn = nullptr;
-  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-  CHECK(w.pump_until(PowerState::ReadyToSleep));
-  CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  // The consumed record stays gone: the wake re-injects nothing.
   CHECK_OK(w.coordinator.wake(ResetCause::DeepSleepWake,
                               ElapsedInterval{0, 0, true}, w.now));
   CHECK(w.events.pending_with(StatusCode::Ok) == 0);
   CHECK(w.events.pending_with(StatusCode::Expired) == 1);
-}
-
-// --- Section 9.3: callback x operation contract matrix -----------------------
-// The model below is transcribed from the design text (deferred-request
-// rules): the test drives the REAL coordinator through every op sequence of
-// length 1..3 in five lifecycle states and compares each op result plus the
-// settled end state against the model. Mesh tests elsewhere assert the same
-// rules end-to-end; this one proves them exhaustively.
-
-enum class ModelOp : std::uint8_t {
-  Abort = 0,
-  Prepare,
-  AppEvent,
-  Send,
-  SendGroup,
-  Enter,
-};
-
-enum class ModelState : std::uint8_t {
-  Running = 0,
-  Draining,
-  Persisting,
-  Ready,
-  Entering,
-};
-
-struct ModelBox {
-  bool abort{false};
-  bool app{false};
-  bool prepare{false};
-  bool enter{false};
-  std::uint64_t seq{0};
-  std::uint64_t abort_seq{0};
-  std::uint64_t prepare_seq{0};
-  bool ticket_broken{false};  // a send bumped the work generation
-};
-
-bool model_active(ModelState state) {
-  return state == ModelState::Draining || state == ModelState::Persisting ||
-         state == ModelState::Ready || state == ModelState::Entering;
-}
-
-bool model_draining(ModelState state) { return model_active(state); }
-
-struct ModelOpResult {
-  bool has_result{false};  // app_event is void
-  StatusCode code{StatusCode::Ok};
-  const char* detail{""};
-};
-
-ModelOpResult model_apply(ModelBox& box, ModelState state, ModelOp op) {
-  switch (op) {
-    case ModelOp::Abort:
-      if (model_active(state) || box.prepare) {
-        box.abort = true;
-        box.abort_seq = ++box.seq;  // last-wins
-        return {true, StatusCode::Ok, "POWER_REQUEST_QUEUED"};
-      }
-      return {true, StatusCode::InvalidState, "no sleep in progress"};
-    case ModelOp::Prepare:
-      if (box.app) {
-        return {true, StatusCode::Busy, "POWER_ACTIVITY_PENDING"};
-      }
-      if (box.prepare) {
-        return {true, StatusCode::Busy, "POWER_REQUEST_PENDING"};
-      }
-      if (state != ModelState::Running &&
-          !(box.abort && model_active(state))) {
-        return {true, StatusCode::InvalidState, "not running"};
-      }
-      box.prepare = true;
-      box.prepare_seq = ++box.seq;
-      return {true, StatusCode::Ok, "POWER_REQUEST_QUEUED"};
-    case ModelOp::AppEvent:
-      box.app = true;
-      return {false, StatusCode::Ok, ""};
-    case ModelOp::Send:
-      box.ticket_broken = true;
-      if (model_draining(state)) {
-        return {true, StatusCode::InvalidState, "NODE_DRAINING"};
-      }
-      return {true, StatusCode::Ok, "ok"};
-    case ModelOp::SendGroup:
-      box.ticket_broken = true;
-      if (model_draining(state)) {
-        return {true, StatusCode::InvalidState, "NODE_DRAINING"};
-      }
-      // The matrix rig is flat-profiled: outside the drain the gateway
-      // check (not the pause) rejects group sends.
-      return {true, StatusCode::Unsupported,
-              "GROUP_REQUIRES_GATEWAY_SCOPED"};
-    case ModelOp::Enter:
-      if (box.enter || state == ModelState::Entering) {
-        return {true, StatusCode::Busy, "SLEEP_ENTER_IN_PROGRESS"};
-      }
-      if (state != ModelState::Ready) {
-        return {true, StatusCode::InvalidState, "not ready to sleep"};
-      }
-      if (box.abort || box.app || box.ticket_broken) {
-        return {true, StatusCode::InvalidState, "SLEEP_TICKET_INVALID"};
-      }
-      box.enter = true;
-      return {true, StatusCode::Ok, "POWER_REQUEST_QUEUED"};
-  }
-  return {true, StatusCode::InternalError, "unreachable"};
-}
-
-PowerState model_end_state(ModelState state, const ModelBox& box) {
-  const bool veto = box.abort || box.app;
-  const bool prepare_survives =
-      box.prepare && !box.app &&
-      !(box.abort && box.prepare_seq < box.abort_seq);
-  const bool enter_survives = box.enter && !veto;
-  // Counter-only veto (no latch): a refused send during the READY wait or
-  // the SLEEP_ENTER handoff breaks the issued ticket's generation.
-  const bool counter_veto =
-      box.ticket_broken &&
-      (state == ModelState::Ready || state == ModelState::Entering);
-  if (state == ModelState::Entering) {
-    return (veto || counter_veto) ? PowerState::Running : PowerState::Sleeping;
-  }
-  if (prepare_survives) return PowerState::ReadyToSleep;  // next attempt runs
-  if (enter_survives) {
-    return counter_veto ? PowerState::Running : PowerState::Sleeping;
-  }
-  if (veto || counter_veto) return PowerState::Running;
-  switch (state) {
-    case ModelState::Running:
-      return PowerState::Running;
-    case ModelState::Draining:
-    case ModelState::Persisting:
-    case ModelState::Ready:
-      return PowerState::ReadyToSleep;
-    case ModelState::Entering:
-      break;
-  }
-  return PowerState::Running;  // unreachable
 }
 
 // Flat-profiled single-node world with hookable observers for the matrix.
@@ -3175,578 +2972,456 @@ struct MatrixWorld {
   }
 };
 
-void test_callback_operation_matrix_model() {
-  // All 6 + 36 + 216 op sequences in five lifecycle states. Each scenario:
-  // fresh world, hook runs the sequence inside ONE callback, then compare
-  // per-op results, in-callback state freeze, and the settled end state.
-  const ModelOp ops[] = {ModelOp::Abort,  ModelOp::Prepare, ModelOp::AppEvent,
-                         ModelOp::Send,   ModelOp::SendGroup, ModelOp::Enter};
-  const ModelState states[] = {
-      ModelState::Running, ModelState::Draining, ModelState::Persisting,
-      ModelState::Ready, ModelState::Entering};
-  const std::array<std::uint8_t, 3> payload{{'m', 'a', 't'}};
-  std::size_t scenarios = 0;
-  for (const ModelState state : states) {
-    for (std::size_t len = 1; len <= 3; ++len) {
-      const std::size_t count =
-          len == 1 ? 6 : (len == 2 ? 36 : 216);
-      for (std::size_t n = 0; n < count; ++n) {
-        std::array<ModelOp, 3> sequence{};
-        std::size_t rest = n;
-        for (std::size_t i = 0; i < len; ++i) {
-          sequence[i] = ops[rest % 6];
-          rest /= 6;
-        }
-        MatrixWorld w;
-        CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
-                                     ElapsedInterval{0, 0, false}, w.now));
-        w.pump(60);
-        // Scenario hook: runs the sequence exactly once, inside the
-        // lifecycle callback for `state`.
-        int hook_runs = 0;
-        SleepTicket captured{};
-        PowerState frozen = PowerState::Running;
-        bool frozen_draining = false;
-        std::vector<ModelOpResult> got;
-        auto run_sequence = [&]() {
-          if (hook_runs > 0) return;  // once: ignore nested notifications
-          ++hook_runs;
-          captured = w.coordinator.ticket();
-          frozen = w.coordinator.state();
-          frozen_draining = w.node.draining();
-          for (std::size_t i = 0; i < len; ++i) {
-            switch (sequence[i]) {
-              case ModelOp::Abort: {
-                const Status s = w.coordinator.sleep_abort("MODEL");
-                got.push_back({true, s.code, s.detail});
-                break;
-              }
-              case ModelOp::Prepare: {
-                SleepRequest request{};
-                const Status s = w.coordinator.sleep_prepare(request, w.now);
-                got.push_back({true, s.code, s.detail});
-                break;
-              }
-              case ModelOp::AppEvent:
-                w.coordinator.notify_app_event();
-                got.push_back({false, StatusCode::Ok, ""});
-                break;
-              case ModelOp::Send: {
-                MessageId id{};
-                SendOptions send_options{};
-                const Status s =
-                    w.node.send(9, ByteView{payload.data(), payload.size()},
-                                send_options, w.now, id);
-                got.push_back({true, s.code, s.detail});
-                break;
-              }
-              case ModelOp::SendGroup: {
-                MessageId id{};
-                GroupSendOptions group_options{};
-                const Status s = w.node.send_group(
-                    kGroupAll, ByteView{payload.data(), payload.size()},
-                    group_options, w.now, id);
-                got.push_back({true, s.code, s.detail});
-                break;
-              }
-              case ModelOp::Enter: {
-                const Status s = w.coordinator.sleep_enter(captured, w.now);
-                got.push_back({true, s.code, s.detail});
-                break;
-              }
-            }
-          }
-        };
-        switch (state) {
-          case ModelState::Running: {
-            MessageId id{};
-            SendOptions send_options{};
-            send_options.lifetime_ms = 5;  // expires on the next poll
-            CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
-                                 send_options, w.now, id));
-            w.observer.on_delivery_fn = [&, id](const DeliveryResult& result) {
-              if (result.id == id && sleep_verdict_terminal(result.state)) {
-                run_sequence();
-              }
-            };
-            for (int i = 0; i < 100 && hook_runs == 0; ++i) {
-              w.coordinator.poll(w.now);
-              w.net.flush(w.now);
-              w.now += 5;
-            }
-            break;
-          }
-          case ModelState::Draining: {
-            MessageId id{};
-            SendOptions send_options{};
-            send_options.lifetime_ms = 5;
-            CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
-                                 send_options, w.now, id));
-            // Past the lifetime already: the first drain poll expires the
-            // delivery inside node_.poll() instead of settling it.
-            w.now += 10;
-            SleepRequest request{};
-            CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-            w.observer.on_delivery_fn = [&, id](const DeliveryResult& result) {
-              if (result.id == id && sleep_verdict_terminal(result.state)) {
-                run_sequence();
-              }
-            };
-            for (int i = 0; i < 100 && hook_runs == 0; ++i) {
-              w.coordinator.poll(w.now);
-              w.net.flush(w.now);
-              w.now += 5;
-            }
-            break;
-          }
-          case ModelState::Persisting: {
-            MessageId id{};
-            SendOptions send_options{};
-            send_options.lifetime_ms = 5000;
-            CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
-                                 send_options, w.now, id));
-            SleepRequest request{};
-            CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-            w.observer.on_delivery_fn = [&](const DeliveryResult& result) {
-              if (result.state == DeliveryState::Failed &&
-                  std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-                run_sequence();
-              }
-            };
-            for (int i = 0; i < 200 && hook_runs == 0; ++i) {
-              w.coordinator.poll(w.now);
-              w.net.flush(w.now);
-              w.now += 5;
-            }
-            break;
-          }
-          case ModelState::Ready: {
-            SleepRequest request{};
-            CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-            w.events.on_transition_fn = [&](PowerState from, PowerState to,
-                                            const char* reason) {
-              if (from == PowerState::Persisting &&
-                  to == PowerState::ReadyToSleep &&
-                  std::strcmp(reason, "SLEEP_READY") == 0) {
-                run_sequence();
-              }
-            };
-            for (int i = 0; i < 200 && hook_runs == 0; ++i) {
-              w.coordinator.poll(w.now);
-              w.net.flush(w.now);
-              w.now += 5;
-            }
-            w.events.on_transition_fn = nullptr;
-            break;
-          }
-          case ModelState::Entering: {
-            SleepRequest request{};
-            CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-            CHECK(w.pump_until(PowerState::ReadyToSleep));
-            const SleepTicket ticket = w.coordinator.ticket();
-            w.events.on_transition_fn = [&](PowerState from, PowerState to,
-                                            const char* reason) {
-              if (to == PowerState::Sleeping &&
-                  std::strcmp(reason, "SLEEP_ENTER") == 0) {
-                (void)from;
-                run_sequence();
-              }
-            };
-            (void)w.coordinator.sleep_enter(ticket, w.now);
-            w.events.on_transition_fn = nullptr;
-            break;
-          }
-        }
-        if (hook_runs != 1) {
-          CHECK(hook_runs == 1);  // setup must fire the hook exactly once
-          continue;
-        }
-        // Compare against the model transcribed from the design text.
-        ModelBox box;
-        for (std::size_t i = 0; i < len; ++i) {
-          const ModelOpResult want = model_apply(box, state, sequence[i]);
-          const ModelOpResult& actual = got[i];
-          if (want.has_result != actual.has_result ||
-              (want.has_result &&
-               (want.code != actual.code ||
-                std::strcmp(want.detail, actual.detail) != 0))) {
-            std::fprintf(stderr,
-                         "matrix mismatch: state=%d len=%zu n=%zu op=%zu "
-                         "want=(%d,'%s') got=(%d,'%s')\n",
-                         static_cast<int>(state), len, n, i,
-                         static_cast<int>(want.code), want.detail,
-                         static_cast<int>(actual.code), actual.detail);
-            CHECK(want.code == actual.code);
-            CHECK(std::strcmp(want.detail, actual.detail) == 0);
-          }
-        }
-        // The callback never moves the machine synchronously.
-        {
-          const PowerState want_state =
-              state == ModelState::Entering ? PowerState::Sleeping
-              : state == ModelState::Ready ? PowerState::ReadyToSleep
-              : state == ModelState::Persisting ? PowerState::Persisting
-              : state == ModelState::Draining   ? PowerState::Draining
-                                                : PowerState::Running;
-          if (frozen != want_state) {
-            std::fprintf(stderr,
-                         "matrix frozen mismatch: state=%d len=%zu n=%zu "
-                         "frozen=%d want=%d\n",
-                         static_cast<int>(state), len, n,
-                         static_cast<int>(frozen), static_cast<int>(want_state));
-          }
-          CHECK(frozen == want_state);
-          CHECK(frozen_draining == model_draining(state));
-        }
-        // The settled end state matches the model too.
-        const PowerState want_end = model_end_state(state, box);
-        CHECK(w.pump_until(want_end, 200));
-        ++scenarios;
-      }
-    }
-  }
-  CHECK(scenarios == 5 * (6 + 36 + 216));
-}
+// --- Section 9.3: the callback re-entry ban -----------------------------------
+// Every application callback the coordinator issues — through PowerEvents
+// or through the node — Busy-rejects every mutating coordinator call and
+// freezes the machine: no state, mask, ticket, storage or radio effect,
+// and poll() is a silent no-op. One table crosses every callback family
+// with every mutating op; each cell then verifies the natural completion
+// (the callback changed nothing, so the attempt always continues to its
+// undisturbed end).
 
-// --- Section 9.3 (families): one op per remaining callback family ------------
-// The matrix above covers on_delivery/on_transition exhaustively; the tables
-// here pin every other family (single ops) at representative points:
-// group delivery/message, pending_result, TX notice, normal message, power
-// diagnostic, applied result, the applied extended sink, and the restore
-// notifications inside begin()/wake().
-
-struct FamilyCell {
-  ModelOp op;
-  StatusCode code;
-  const char* detail;
-  bool vetoes;  // the settled end state is RUNNING (else READY_TO_SLEEP)
+enum class BanOp : std::uint8_t {
+  Abort = 0,
+  Prepare,
+  AppEvent,
+  RadioReset,
+  Enter,
+  Wake,
+  Begin,
 };
 
-// PERSISTING settlement families (group origin, hold release, carry
-// expiry, TX notice): identical submit rules, shared expectation table.
-const FamilyCell kPersistingCells[] = {
-    {ModelOp::Abort, StatusCode::Ok, "POWER_REQUEST_QUEUED", true},
-    {ModelOp::Prepare, StatusCode::InvalidState, "not running", false},
-    {ModelOp::AppEvent, StatusCode::Ok, "", true},
-    {ModelOp::Send, StatusCode::InvalidState, "NODE_DRAINING", false},
-    {ModelOp::SendGroup, StatusCode::InvalidState, "NODE_DRAINING", false},
-    {ModelOp::Enter, StatusCode::InvalidState, "not ready to sleep", false},
+const BanOp kBanOps[] = {
+    BanOp::Abort,   BanOp::Prepare, BanOp::AppEvent, BanOp::RadioReset,
+    BanOp::Enter,   BanOp::Wake,    BanOp::Begin,
 };
 
-// RUNNING families on the gateway rig (group sends admitted): no attempt is
-// active, so abort/enter are refused while prepare is queued for the next
-// poll. begin()/wake() restore notifications use the RESUMING variant,
-// where a prepare cannot even queue.
-const FamilyCell kRunningCells[] = {
-    {ModelOp::Abort, StatusCode::InvalidState, "no sleep in progress", false},
-    {ModelOp::Prepare, StatusCode::Ok, "POWER_REQUEST_QUEUED", false},
-    {ModelOp::AppEvent, StatusCode::Ok, "", false},
-    {ModelOp::Send, StatusCode::Ok, "ok", false},
-    {ModelOp::SendGroup, StatusCode::Ok, "ok", false},
-    {ModelOp::Enter, StatusCode::InvalidState, "not ready to sleep", false},
-};
-
-const FamilyCell kResumingCells[] = {
-    {ModelOp::Abort, StatusCode::InvalidState, "no sleep in progress", false},
-    {ModelOp::Prepare, StatusCode::InvalidState, "not running", false},
-    {ModelOp::AppEvent, StatusCode::Ok, "", false},
-    {ModelOp::Send, StatusCode::Ok, "ok", false},
-    {ModelOp::SendGroup, StatusCode::Ok, "ok", false},
-    {ModelOp::Enter, StatusCode::InvalidState, "not ready to sleep", false},
-};
-
-Status run_family_op(ModelOp op, PowerCoordinator& coordinator, MeshNode& node,
-                     MonotonicMs now) {
-  static const std::array<std::uint8_t, 3> payload{{'f', 'a', 'm'}};
+Status run_ban_op(BanOp op, PowerCoordinator& coordinator, MonotonicMs now) {
   switch (op) {
-    case ModelOp::Abort:
-      return coordinator.sleep_abort("FAMILY");
-    case ModelOp::Prepare: {
+    case BanOp::Abort:
+      return coordinator.sleep_abort("BAN");
+    case BanOp::Prepare: {
       SleepRequest request{};
       return coordinator.sleep_prepare(request, now);
     }
-    case ModelOp::AppEvent:
-      coordinator.notify_app_event();
-      return Status::success();
-    case ModelOp::Send: {
-      MessageId id{};
-      SendOptions send_options{};
-      return node.send(9, ByteView{payload.data(), payload.size()},
-                       send_options, now, id);
-    }
-    case ModelOp::SendGroup: {
-      MessageId id{};
-      GroupSendOptions group_options{};
-      return node.send_group(kGroupAll, ByteView{payload.data(), payload.size()},
-                             group_options, now, id);
-    }
-    case ModelOp::Enter:
+    case BanOp::AppEvent:
+      return coordinator.notify_app_event();
+    case BanOp::RadioReset:
+      return coordinator.notify_radio_reset();
+    case BanOp::Enter:
       return coordinator.sleep_enter(coordinator.ticket(), now);
+    case BanOp::Wake:
+      return coordinator.wake(ResetCause::DeepSleepWake,
+                              ElapsedInterval{0, 0, false}, now);
+    case BanOp::Begin:
+      return coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, now);
   }
   return Status::error(StatusCode::InternalError, "unreachable");
 }
 
-void test_family_group_delivery_ops() {
-  for (const FamilyCell& cell : kPersistingCells) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    drop_all_reports();
-    w.net.drop_frame = group_loss_hook;
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    GroupSendOptions options{};
-    w.send_all(w.a, options);
-    Status got = Status::error(StatusCode::InternalError, "not run");
-    bool ran = false;
-    w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
-      if (!ran && result.state == DeliveryState::Failed &&
-          std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-        ran = true;
-        CHECK(coordinator.state() == PowerState::Persisting);
-        got = run_family_op(cell.op, coordinator, w.a, w.now);
-      }
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b,
-                      cell.vetoes ? PowerState::Running
-                                  : PowerState::ReadyToSleep));
-    CHECK(ran);
-    if (cell.op != ModelOp::AppEvent) {
-      CHECK(got.code == cell.code);
-      CHECK(std::strcmp(got.detail, cell.detail) == 0);
-    }
-    if (cell.op == ModelOp::AppEvent) {
-      CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
-    }
-  }
+// Machine state observable from inside a callback: the ban requires every
+// mutating call to leave all of it untouched.
+struct BanFreeze {
+  PowerState state{PowerState::Running};
+  bool draining{false};
+  bool ticket_issued{false};
+  std::size_t transitions{0};
+  std::size_t write_calls{0};
+  int quiesce_calls{0};
+  int wakecfg_calls{0};
+  int sleep_calls{0};
+};
+
+BanFreeze capture_freeze(PowerCoordinator& coordinator, const MeshNode& node,
+                         const RecordingPowerEvents& events,
+                         const MemoryPowerStorage& storage,
+                         const FakePowerPort& port) {
+  return BanFreeze{coordinator.state(),
+                   node.draining(),
+                   coordinator.ticket().issued,
+                   events.transitions.size(),
+                   storage.write_calls,
+                   port.quiesce_calls,
+                   port.wakecfg_calls,
+                   port.sleep_calls};
 }
 
-void test_family_group_message_ops() {
-  for (const FamilyCell& cell : kPersistingCells) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    GroupSendOptions options{};
-    options.ordered = true;
-    options.lifetime_ms = 10000;
-    w.send_all(w.a, options);
-    w.run(60);
-    g_drop_type = FrameType::GroupData;
-    g_drop_to = GroupPowerWorld::kLeaf;
-    g_drop_sequence = kGroupSequenceFlag | 2;
-    w.net.drop_frame = group_loss_hook;
-    w.send_all(w.a, options);
-    GroupSendOptions urgent = options;
-    urgent.priority = Priority::Urgent;
-    w.send_all(w.a, urgent);
-    w.run(200);
-    CHECK(w.b.group_holds_in_use() == 1);
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.b, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    Status got = Status::error(StatusCode::InternalError, "not run");
-    bool ran = false;
-    w.observer_b.on_group_message_fn = [&](const GroupMessageInfo& info,
-                                           ByteView) {
-      if (!ran && info.group_seq == 3) {
-        ran = true;
-        CHECK(coordinator.state() == PowerState::Persisting);
-        got = run_family_op(cell.op, coordinator, w.b, w.now);
-      }
-    };
-    SleepRequest request{};
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.a,
-                      cell.vetoes ? PowerState::Running
-                                  : PowerState::ReadyToSleep));
-    CHECK(ran);
-    if (cell.op != ModelOp::AppEvent) {
-      CHECK(got.code == cell.code);
-      CHECK(std::strcmp(got.detail, cell.detail) == 0);
-    }
-    if (cell.op == ModelOp::AppEvent) {
-      CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
-    }
-  }
+bool same_freeze(const BanFreeze& a, const BanFreeze& b) {
+  return a.state == b.state && a.draining == b.draining &&
+         a.ticket_issued == b.ticket_issued &&
+         a.transitions == b.transitions && a.write_calls == b.write_calls &&
+         a.quiesce_calls == b.quiesce_calls &&
+         a.wakecfg_calls == b.wakecfg_calls &&
+         a.sleep_calls == b.sleep_calls;
 }
 
-void test_family_pending_result_ops() {
-  for (const FamilyCell& cell : kPersistingCells) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    // Build a carry set, then let it expire: save one durable record and
-    // abort before anything else settles.
-    const std::array<std::uint8_t, 3> payload{{'c', 'a', 'r'}};
-    MessageId id{};
-    SendOptions durable{};
-    durable.persist_across_sleep = true;
-    durable.lifetime_ms = 1000;
-    CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
-                      w.now, id));
-    bool saved = false;
-    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (!saved && result.state == DeliveryState::Indeterminate) {
-        saved = true;
-        CHECK_OK(coordinator.sleep_abort("CARRY"));
-      }
-    };
-    SleepRequest save{};
-    save.pending_policy = SleepWorkPolicy::Save;
-    CHECK_OK(coordinator.sleep_prepare(save, w.now));
-    CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-    CHECK(saved);
-    w.observer_a.on_delivery_fn = nullptr;
-    w.run(2000);  // the carried record's budget lapses while awake
-    Status got = Status::error(StatusCode::InternalError, "not run");
-    bool ran = false;
-    w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
-                                        StatusCode code) {
-      if (!ran && code == StatusCode::Expired) {
-        ran = true;
-        CHECK(coordinator.state() == PowerState::Persisting);
-        got = run_family_op(cell.op, coordinator, w.a, w.now);
-      }
-    };
-    SleepRequest retry{};
-    retry.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(retry, w.now));
-    CHECK(w.run_until(coordinator, w.b,
-                      cell.vetoes ? PowerState::Running
-                                  : PowerState::ReadyToSleep));
-    CHECK(ran);
-    if (cell.op != ModelOp::AppEvent) {
-      CHECK(got.code == cell.code);
-      CHECK(std::strcmp(got.detail, cell.detail) == 0);
+struct BanProbe {
+  BanOp op;
+  const char* family;
+  bool ran{false};
+  // Runs inside the callback: the machine must already sit at the
+  // family's undisturbed point, the op must be Busy and change nothing,
+  // and the poll() afterwards must be a silent no-op too.
+  void fire(PowerCoordinator& coordinator, MeshNode& node,
+            RecordingPowerEvents& events, MemoryPowerStorage& storage,
+            FakePowerPort& port, MonotonicMs now, PowerState want_state,
+            bool want_draining, bool want_ticket) {
+    if (ran) return;
+    ran = true;
+    if (coordinator.state() != want_state ||
+        node.draining() != want_draining ||
+        coordinator.ticket().issued != want_ticket) {
+      std::fprintf(stderr,
+                   "ban frozen mismatch: family=%s op=%d state=%d/%d "
+                   "draining=%d/%d ticket=%d/%d\n",
+                   family, static_cast<int>(op),
+                   static_cast<int>(coordinator.state()),
+                   static_cast<int>(want_state), node.draining() ? 1 : 0,
+                   want_draining ? 1 : 0,
+                   coordinator.ticket().issued ? 1 : 0,
+                   want_ticket ? 1 : 0);
     }
-    if (cell.op == ModelOp::AppEvent) {
-      CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
+    CHECK(coordinator.state() == want_state);
+    CHECK(node.draining() == want_draining);
+    CHECK(coordinator.ticket().issued == want_ticket);
+    const BanFreeze before =
+        capture_freeze(coordinator, node, events, storage, port);
+    const Status got = run_ban_op(op, coordinator, now);
+    if (got.code != StatusCode::Busy ||
+        std::strcmp(got.detail, "POWER_IN_CALLBACK") != 0) {
+      std::fprintf(stderr, "ban mismatch: family=%s op=%d got=(%d,'%s')\n",
+                   family, static_cast<int>(op), static_cast<int>(got.code),
+                   got.detail);
     }
+    CHECK(got.code == StatusCode::Busy);
+    CHECK(std::strcmp(got.detail, "POWER_IN_CALLBACK") == 0);
+    coordinator.poll(now);  // silent no-op inside the callback
+    CHECK(same_freeze(before, capture_freeze(coordinator, node, events,
+                                             storage, port)));
   }
+};
+
+void ban_family_settle_delivery(BanOp op) {
+  MatrixWorld w;
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  const std::array<std::uint8_t, 3> payload{{'b', 'a', 'n'}};
+  MessageId id{};
+  SendOptions send_options{};
+  send_options.lifetime_ms = 5000;
+  CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
+                       send_options, w.now, id));
+  BanProbe probe{op, "settle_delivery"};
+  w.observer.on_delivery_fn = [&](const DeliveryResult& result) {
+    if (result.state == DeliveryState::Failed &&
+        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
+      probe.fire(w.coordinator, w.node, w.events, w.storage, w.port, w.now,
+                 PowerState::Persisting, true, false);
+    }
+  };
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK(probe.ran);
 }
 
-void test_family_tx_notice_ops() {
-  for (const FamilyCell& cell : kPersistingCells) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    // A frame stuck in physical TX at the drain deadline raises the notice.
-    const std::array<std::uint8_t, 3> payload{{'t', 'x', '!'}};
-    MessageId id{};
-    SendOptions send_options{};
-    send_options.delivery = DeliveryClass::BestEffort;  // single TX attempt
-    CHECK_OK(w.a.send(GroupPowerWorld::kLeaf,
-                      ByteView{payload.data(), payload.size()}, send_options,
-                      w.now, id));
-    w.a.poll(w.now);  // dispatch into physical; no flush, so no TX result
-    Status got = Status::error(StatusCode::InternalError, "not run");
-    bool ran = false;
-    w.observer_a.on_diag_fn = [&](const char* reason, NodeId,
-                                  const MessageId*) {
-      if (!ran && std::strcmp(reason, "SLEEP_TX_INFLIGHT") == 0) {
-        ran = true;
-        CHECK(coordinator.state() == PowerState::Persisting);
-        got = run_family_op(cell.op, coordinator, w.a, w.now);
-      }
-    };
-    SleepRequest request{};
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    // No flush until the notice ran: the TX result must not land first.
-    for (int i = 0; i < 400 && !ran; ++i) {
-      coordinator.poll(w.now);
-      w.b.poll(w.now);
-      w.now += 5;
+void ban_family_settle_group(BanOp op) {
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  w.send_all(w.a, options);
+  BanProbe probe{op, "settle_group"};
+  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
+    if (result.state == DeliveryState::Failed &&
+        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
+      probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+                 PowerState::Persisting, true, false);
     }
-    CHECK(ran);
-    if (cell.op != ModelOp::AppEvent) {
-      CHECK(got.code == cell.code);
-      CHECK(std::strcmp(got.detail, cell.detail) == 0);
-    }
-    CHECK(w.run_until(coordinator, w.b,
-                      cell.vetoes ? PowerState::Running
-                                  : PowerState::ReadyToSleep));
-  }
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(probe.ran);
 }
 
-void test_family_normal_message_ops() {
-  // Normal on_message delivery in RUNNING and mid-drain: the same submit
-  // rules, different admission. (Gateway-scoped rig: group sends outside
-  // the drain are admitted here, unlike the flat matrix rig.)
-  for (bool draining : {false, true}) {
-    for (const FamilyCell& cell :
-         draining ? std::vector<FamilyCell>(std::begin(kPersistingCells),
-                                            std::end(kPersistingCells))
-                  : std::vector<FamilyCell>(std::begin(kRunningCells),
-                                            std::end(kRunningCells))) {
-      MemoryPowerStorage storage;
-      GroupPowerWorld w;
-      w.converge();
-      PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                   w.events);
-      CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                   ElapsedInterval{0, 0, false}, w.now));
-      if (draining) {
-        // A collecting group round holds the drain open until the trigger
-        // message arrives mid-drain (a quiet node would settle first).
-        drop_all_reports();
-        w.net.drop_frame = group_loss_hook;
-        GroupSendOptions options{};
-        w.send_all(w.a, options);
-        SleepRequest request{};
-        CHECK_OK(coordinator.sleep_prepare(request, w.now));
-      }
-      Status got = Status::error(StatusCode::InternalError, "not run");
-      bool ran = false;
-      w.observer_a.on_message_fn = [&](const MessageKey&, NodeId, ByteView) {
-        if (ran) return;
-        ran = true;
-        CHECK(coordinator.state() ==
-              (draining ? PowerState::Draining : PowerState::Running));
-        got = run_family_op(cell.op, coordinator, w.a, w.now);
-      };
-      const std::array<std::uint8_t, 3> payload{{'h', 'i', '!'}};
-      MessageId id{};
-      SendOptions send_options{};
-      CHECK_OK(w.b.send(GroupPowerWorld::kGateway,
-                        ByteView{payload.data(), payload.size()}, send_options,
-                        w.now, id));
-      for (int i = 0; i < 400 && !ran; ++i) {
-        coordinator.poll(w.now);
-        w.b.poll(w.now);
-        w.net.flush(w.now);
-        w.now += 5;
-      }
-      CHECK(ran);
-      if (cell.op != ModelOp::AppEvent) {
-        CHECK(got.code == cell.code);
-        CHECK(std::strcmp(got.detail, cell.detail) == 0);
-      }
-      // Drain the aftermath: a queued prepare starts the next poll and the
-      // quiet attempt reaches READY; anything else settles per the veto.
-      if (!draining && cell.op == ModelOp::Prepare) {
-        CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-      } else {
-        CHECK(w.run_until(coordinator, w.b,
-                          cell.vetoes ? PowerState::Running
-                                      : (draining ? PowerState::ReadyToSleep
-                                                  : PowerState::Running)));
-      }
+void ban_family_hold_release(BanOp op) {
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  GroupSendOptions options{};
+  options.ordered = true;
+  options.lifetime_ms = 10000;
+  w.send_all(w.a, options);
+  w.run(60);
+  g_drop_type = FrameType::GroupData;
+  g_drop_to = GroupPowerWorld::kLeaf;
+  g_drop_sequence = kGroupSequenceFlag | 2;
+  w.net.drop_frame = group_loss_hook;
+  w.send_all(w.a, options);
+  GroupSendOptions urgent = options;
+  urgent.priority = Priority::Urgent;
+  w.send_all(w.a, urgent);
+  w.run(200);
+  CHECK(w.b.group_holds_in_use() == 1);
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.b, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  BanProbe probe{op, "hold_release"};
+  w.observer_b.on_group_message_fn = [&](const GroupMessageInfo& info,
+                                         ByteView) {
+    if (info.group_seq == 3) {
+      probe.fire(coordinator, w.b, w.events, storage, w.port, w.now,
+                 PowerState::Persisting, true, false);
     }
+  };
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.a, PowerState::ReadyToSleep));
+  CHECK(probe.ran);
+}
+
+void ban_family_carry_expired(BanOp op) {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  (void)queue_pending(w, 2, true, 1000);
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK_OK(w.coordinator.sleep_abort("BAN_SETUP"));
+  w.now += 2000;  // the carried record's budget lapses while awake
+  BanProbe probe{op, "carry_expired"};
+  w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
+                                      StatusCode code) {
+    if (code == StatusCode::Expired) {
+      probe.fire(w.coordinator, w.node, w.events, w.storage, w.port, w.now,
+                 PowerState::Persisting, true, false);
+    }
+  };
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK(probe.ran);
+}
+
+void ban_family_tx_notice(BanOp op) {
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  // A frame stuck in physical TX at the drain deadline raises the notice.
+  const std::array<std::uint8_t, 3> payload{{'t', 'x', '!'}};
+  MessageId id{};
+  SendOptions send_options{};
+  send_options.delivery = DeliveryClass::BestEffort;  // single TX attempt
+  CHECK_OK(w.a.send(GroupPowerWorld::kLeaf,
+                    ByteView{payload.data(), payload.size()}, send_options,
+                    w.now, id));
+  w.a.poll(w.now);  // dispatch into physical; no flush, so no TX result
+  BanProbe probe{op, "tx_notice"};
+  w.observer_a.on_diag_fn = [&](const char* reason, NodeId,
+                                const MessageId*) {
+    if (std::strcmp(reason, "SLEEP_TX_INFLIGHT") == 0) {
+      probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+                 PowerState::Persisting, true, false);
+    }
+  };
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  // No flush until the notice ran: the TX result must not land first.
+  for (int i = 0; i < 400 && !probe.ran; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.now += 5;
   }
+  CHECK(probe.ran);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+}
+
+void ban_family_message_running(BanOp op) {
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  BanProbe probe{op, "message_running"};
+  w.observer_a.on_message_fn = [&](const MessageKey&, NodeId, ByteView) {
+    probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+               PowerState::Running, false, false);
+  };
+  const std::array<std::uint8_t, 3> payload{{'h', 'i', '!'}};
+  MessageId id{};
+  SendOptions send_options{};
+  CHECK_OK(w.b.send(GroupPowerWorld::kGateway,
+                    ByteView{payload.data(), payload.size()}, send_options,
+                    w.now, id));
+  for (int i = 0; i < 400 && !probe.ran; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(probe.ran);
+  // Aftermath: nothing was queued — no attempt starts.
+  for (int i = 0; i < 20; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(!w.events.saw(PowerState::Running, PowerState::Draining,
+                      "SLEEP_PREPARE"));
+}
+
+void ban_family_message_draining(BanOp op) {
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  // A collecting group round holds the drain open until the trigger
+  // message arrives mid-drain (a quiet node would settle first).
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  GroupSendOptions options{};
+  w.send_all(w.a, options);
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  BanProbe probe{op, "message_draining"};
+  w.observer_a.on_message_fn = [&](const MessageKey&, NodeId, ByteView) {
+    probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+               PowerState::Draining, true, false);
+  };
+  const std::array<std::uint8_t, 3> payload{{'h', 'i', '!'}};
+  MessageId id{};
+  SendOptions send_options{};
+  CHECK_OK(w.b.send(GroupPowerWorld::kGateway,
+                    ByteView{payload.data(), payload.size()}, send_options,
+                    w.now, id));
+  for (int i = 0; i < 400 && !probe.ran; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(probe.ran);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+}
+
+void ban_family_transition_ready(BanOp op) {
+  MatrixWorld w;
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  BanProbe probe{op, "transition_ready"};
+  w.events.on_transition_fn = [&](PowerState from, PowerState to,
+                                  const char* reason) {
+    if (from == PowerState::Persisting && to == PowerState::ReadyToSleep &&
+        std::strcmp(reason, "SLEEP_READY") == 0) {
+      probe.fire(w.coordinator, w.node, w.events, w.storage, w.port, w.now,
+                 PowerState::ReadyToSleep, true, true);
+    }
+  };
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK(probe.ran);
+  CHECK(w.coordinator.ticket_valid(w.coordinator.ticket()));
+}
+
+void ban_family_transition_enter(BanOp op) {
+  MatrixWorld w;
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  const SleepTicket ticket = w.coordinator.ticket();
+  BanProbe probe{op, "transition_enter"};
+  w.events.on_transition_fn = [&](PowerState, PowerState to,
+                                  const char* reason) {
+    if (to == PowerState::Sleeping &&
+        std::strcmp(reason, "SLEEP_ENTER") == 0) {
+      probe.fire(w.coordinator, w.node, w.events, w.storage, w.port, w.now,
+                 PowerState::Sleeping, true, true);
+    }
+  };
+  CHECK_OK(w.coordinator.sleep_enter(ticket, w.now));
+  CHECK(probe.ran);
+  CHECK(w.coordinator.state() == PowerState::Sleeping);
+  CHECK(w.port.sleep_calls == 1);
+}
+
+void ban_family_enter_expired(BanOp op) {
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  w.platform_peer(2, 0xaa);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  (void)queue_pending(w, 2, true, 5000);
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  const SleepTicket ticket = w.coordinator.ticket();
+  w.now += 10010;  // the pending expires during the READY wait
+  BanProbe probe{op, "enter_expired"};
+  w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
+                                      StatusCode code) {
+    if (code == StatusCode::Expired) {
+      probe.fire(w.coordinator, w.node, w.events, w.storage, w.port, w.now,
+                 PowerState::ReadyToSleep, true, true);
+    }
+  };
+  CHECK_OK(w.coordinator.sleep_enter(ticket, w.now));
+  CHECK(probe.ran);
+  CHECK(w.coordinator.state() == PowerState::Sleeping);
+  CHECK(w.port.sleep_calls == 1);
+}
+
+void ban_family_power_diagnostic(BanOp op) {
+  // PowerEvents::on_diagnostic fires in RUNNING — abort_to_running tears
+  // down first and notifies last.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  BanProbe probe{op, "power_diagnostic"};
+  w.events.on_diagnostic_fn = [&](const char* reason) {
+    if (std::strcmp(reason, "BAN_DIAG") == 0) {
+      probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+                 PowerState::Running, false, false);
+    }
+  };
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK_OK(coordinator.sleep_abort("BAN_DIAG"));
+  CHECK(probe.ran);
+  CHECK(coordinator.state() == PowerState::Running);
 }
 
 struct AppliedSinkHook final : AppliedEndpointSink {
@@ -3760,218 +3435,254 @@ struct AppliedSinkHook final : AppliedEndpointSink {
   }
 };
 
-void test_family_power_diagnostic_ops() {
-  // PowerEvents::on_diagnostic fires in RUNNING — abort_to_running tears
-  // down first and notifies last. Abort from a settlement callback, then
-  // run the op table inside the abort diagnostic: acceptance only, the
-  // machine is already RUNNING and stays there (a queued prepare starts
-  // the next poll and reaches READY on the quiet node).
-  for (const FamilyCell& cell : kRunningCells) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    const std::array<std::uint8_t, 3> payload{{'p', 'd', '!'}};
-    MessageId id{};
-    SendOptions send_options{};
-    send_options.lifetime_ms = 20000;
-    CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
-                      send_options, w.now, id));
-    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (result.state == DeliveryState::Failed &&
-          std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-        CHECK_OK(coordinator.sleep_abort("FAMILY_DIAG"));
-      }
-    };
-    Status got = Status::error(StatusCode::InternalError, "not run");
-    bool ran = false;
-    PowerState frozen = PowerState::Draining;
-    bool frozen_draining = true;
-    bool frozen_ticket = true;
-    w.events.on_diagnostic_fn = [&](const char* reason) {
-      if (!ran && std::strcmp(reason, "FAMILY_DIAG") == 0) {
-        ran = true;
-        frozen = coordinator.state();
-        frozen_draining = w.a.draining();
-        frozen_ticket = coordinator.ticket().issued;
-        got = run_family_op(cell.op, coordinator, w.a, w.now);
-      }
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b,
-                      cell.op == ModelOp::Prepare ? PowerState::ReadyToSleep
-                                                  : PowerState::Running));
-    CHECK(ran);
-    CHECK(frozen == PowerState::Running);
-    CHECK(!frozen_draining);
-    CHECK(!frozen_ticket);
-    if (cell.op != ModelOp::AppEvent) {
-      CHECK(got.code == cell.code);
-      CHECK(std::strcmp(got.detail, cell.detail) == 0);
-    }
-  }
-}
-
-void test_family_applied_and_sink_ops() {
-  // NodeObserver::on_applied_result (origin side) and the extended
-  // AppliedEndpointSink (terminal side): one applied exchange fires each
-  // exactly once with the coordinator begun but idle, so the op table
-  // runs under the node-callback flag alone — acceptance only, no
-  // immediate effect (a queued prepare still reaches READY afterwards).
-  for (bool sink_side : {false, true}) {
-    for (const FamilyCell& cell : kRunningCells) {
-      MemoryPowerStorage storage;
-      GroupPowerWorld w;
-      w.converge();
-      AppliedSinkHook sink;
-      MeshNode& origin = sink_side ? w.b : w.a;
-      MeshNode& terminal = sink_side ? w.a : w.b;
-      HookedObserver& origin_obs = sink_side ? w.observer_b : w.observer_a;
-      terminal.set_applied_sink(&sink);
-      PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                   w.events);
-      CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                   ElapsedInterval{0, 0, false}, w.now));
-      Status got = Status::error(StatusCode::InternalError, "not run");
-      bool ran = false;
-      PowerState frozen = PowerState::Draining;
-      bool frozen_draining = true;
-      bool frozen_ticket = true;
-      const auto fire = [&]() {
-        if (ran) return;
-        ran = true;
-        frozen = coordinator.state();
-        frozen_draining = w.a.draining();
-        frozen_ticket = coordinator.ticket().issued;
-        got = run_family_op(cell.op, coordinator, w.a, w.now);
+void ban_family_applied_result(BanOp op) {
+  // NodeObserver::on_applied_result (origin side): one applied exchange
+  // fires it exactly once with the coordinator begun but idle, so the op
+  // runs under the node-callback flag alone.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  AppliedSinkHook sink;
+  w.b.set_applied_sink(&sink);
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  BanProbe probe{op, "applied_result"};
+  w.observer_a.on_applied_result_fn =
+      [&](const MessageKey&, const AppliedResultView&) {
+        probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+                   PowerState::Running, false, false);
       };
-      if (sink_side) {
-        sink.on_request_fn = fire;
-      } else {
-        origin_obs.on_applied_result_fn =
-            [&](const MessageKey&, const AppliedResultView&) { fire(); };
-      }
-      const std::array<std::uint8_t, 4> payload{{0x61, 0x62, 0x63, 0x64}};
-      MessageId id{};
-      SendOptions applied{};
-      applied.delivery = DeliveryClass::Applied;
-      applied.lifetime_ms = 10000;
-      CHECK_OK(origin.send_applied(sink_side ? GroupPowerWorld::kGateway
-                                             : GroupPowerWorld::kLeaf,
-                                   ByteView{payload.data(), payload.size()},
-                                   terminal.applied_lease(), applied, w.now,
-                                   id));
-      // Direct node drive: the coordinator stays idle, so only the
-      // node-callback flag marks the re-entrant request as deferred.
-      for (int i = 0; i < 400 && !ran; ++i) {
-        w.a.poll(w.now);
-        w.b.poll(w.now);
-        w.net.flush(w.now);
-        w.now += 5;
-      }
-      CHECK(ran);
-      CHECK(frozen == PowerState::Running);
-      CHECK(!frozen_draining);
-      CHECK(!frozen_ticket);
-      if (cell.op != ModelOp::AppEvent) {
-        CHECK(got.code == cell.code);
-        CHECK(std::strcmp(got.detail, cell.detail) == 0);
-      }
-      CHECK(w.run_until(coordinator, w.b,
-                        cell.op == ModelOp::Prepare ? PowerState::ReadyToSleep
-                                                  : PowerState::Running));
-    }
+  const std::array<std::uint8_t, 4> payload{{0x61, 0x62, 0x63, 0x64}};
+  MessageId id{};
+  SendOptions applied{};
+  applied.delivery = DeliveryClass::Applied;
+  applied.lifetime_ms = 10000;
+  CHECK_OK(w.a.send_applied(GroupPowerWorld::kLeaf,
+                            ByteView{payload.data(), payload.size()},
+                            w.b.applied_lease(), applied, w.now, id));
+  // Direct node drive: the coordinator stays idle, so only the
+  // node-callback flag marks the call.
+  for (int i = 0; i < 400 && !probe.ran; ++i) {
+    w.a.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
   }
+  CHECK(probe.ran);
+  for (int i = 0; i < 20; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(!w.events.saw(PowerState::Running, PowerState::Draining,
+                      "SLEEP_PREPARE"));
 }
 
-void test_family_begin_wake_ops() {
-  // on_pending_result during restore — once via begin() on a fresh
-  // instance, once via wake() after a real enter: the op table runs in
-  // RESUMING with the node started and undrained; begin()/wake() then
-  // completes to RUNNING in the same call.
-  for (bool via_wake : {false, true}) {
-    for (const FamilyCell& cell : kResumingCells) {
-      MemoryPowerStorage storage;
-      GroupPowerWorld w;
-      w.converge();
-      PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                   w.events);
-      CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                   ElapsedInterval{0, 0, false}, w.now));
-      const std::array<std::uint8_t, 3> payload{{'b', 'w', '!'}};
-      MessageId id{};
-      SendOptions durable{};
-      durable.persist_across_sleep = true;
-      durable.lifetime_ms = 20000;
-      CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
-                        w.now, id));
-      SleepRequest save{};
-      save.pending_policy = SleepWorkPolicy::Save;
-      CHECK_OK(coordinator.sleep_prepare(save, w.now));
-      CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-      Status got = Status::error(StatusCode::InternalError, "not run");
-      bool ran = false;
-      PowerState frozen = PowerState::Running;
-      bool frozen_draining = true;
-      bool frozen_ticket = true;
-      if (!via_wake) {
-        GroupPowerWorld fresh;
-        fresh.converge();
-        FakePowerPort fresh_port;
-        RecordingPowerEvents fresh_events;
-        PowerCoordinator woken(PowerConfig{500, 50}, fresh.a, fresh_port,
-                               storage, fresh_events);
-        fresh_events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
-                                                StatusCode) {
-          if (ran) return;
-          ran = true;
-          frozen = woken.state();
-          frozen_draining = fresh.a.draining();
-          frozen_ticket = woken.ticket().issued;
-          got = run_family_op(cell.op, woken, fresh.a, fresh.now);
-        };
-        CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
-                             ElapsedInterval{100, 200, true}, fresh.now));
-        CHECK(ran);
-        CHECK(woken.state() == PowerState::Running);
-      } else {
-        w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
-                                            StatusCode) {
-          if (ran) return;
-          ran = true;
-          frozen = coordinator.state();
-          frozen_draining = w.a.draining();
-          frozen_ticket = coordinator.ticket().issued;
-          got = run_family_op(cell.op, coordinator, w.a, w.now);
-        };
-        CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
-        CHECK_OK(coordinator.wake(ResetCause::DeepSleepWake,
-                                  ElapsedInterval{100, 200, true}, w.now));
-        CHECK(ran);
-        CHECK(coordinator.state() == PowerState::Running);
-      }
-      CHECK(frozen == PowerState::Resuming);
-      CHECK(!frozen_draining);
-      CHECK(!frozen_ticket);
-      if (cell.op != ModelOp::AppEvent) {
-        CHECK(got.code == cell.code);
-        CHECK(std::strcmp(got.detail, cell.detail) == 0);
-      }
-    }
+void ban_family_applied_sink(BanOp op) {
+  // The extended AppliedEndpointSink (terminal side): same idle-coordinator
+  // shape as the result side above.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  AppliedSinkHook sink;
+  w.a.set_applied_sink(&sink);
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  BanProbe probe{op, "applied_sink"};
+  sink.on_request_fn = [&]() {
+    probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+               PowerState::Running, false, false);
+  };
+  const std::array<std::uint8_t, 4> payload{{0x61, 0x62, 0x63, 0x64}};
+  MessageId id{};
+  SendOptions applied{};
+  applied.delivery = DeliveryClass::Applied;
+  applied.lifetime_ms = 10000;
+  CHECK_OK(w.b.send_applied(GroupPowerWorld::kGateway,
+                            ByteView{payload.data(), payload.size()},
+                            w.a.applied_lease(), applied, w.now, id));
+  for (int i = 0; i < 400 && !probe.ran; ++i) {
+    w.a.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
   }
+  CHECK(probe.ran);
+  for (int i = 0; i < 20; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(!w.events.saw(PowerState::Running, PowerState::Draining,
+                      "SLEEP_PREPARE"));
 }
 
-// --- Section 9.3 (boundaries): radio, recursive drive, node-flag deferral ---
+std::size_t count_prepares(const RecordingPowerEvents& events) {
+  std::size_t count = 0;
+  for (const auto& t : events.transitions) {
+    if (t.from == PowerState::Running && t.to == PowerState::Draining) ++count;
+  }
+  return count;
+}
 
-void test_callback_radio_reset_vetoes() {
-  // A radio reset signalled from a settlement callback vetoes like app
-  // activity; one signalled outside latches until the next poll, blocking a
-  // new prepare meanwhile (#110: sticky invalidation requests).
+void ban_family_restore_begin(BanOp op) {
+  // on_pending_result during restore via begin() on a fresh instance: the
+  // op runs in RESUMING, and begin() then completes to RUNNING.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  const std::array<std::uint8_t, 3> payload{{'b', 'w', '!'}};
+  MessageId id{};
+  SendOptions durable{};
+  durable.persist_across_sleep = true;
+  durable.lifetime_ms = 20000;
+  CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
+                    w.now, id));
+  SleepRequest save{};
+  save.pending_policy = SleepWorkPolicy::Save;
+  CHECK_OK(coordinator.sleep_prepare(save, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  GroupPowerWorld fresh;
+  fresh.converge();
+  FakePowerPort fresh_port;
+  RecordingPowerEvents fresh_events;
+  PowerCoordinator woken(PowerConfig{500, 50}, fresh.a, fresh_port, storage,
+                         fresh_events);
+  BanProbe probe{op, "restore_begin"};
+  fresh_events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
+                                          StatusCode) {
+    probe.fire(woken, fresh.a, fresh_events, storage, fresh_port, fresh.now,
+               PowerState::Resuming, false, false);
+  };
+  CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
+                       ElapsedInterval{100, 200, true}, fresh.now));
+  CHECK(probe.ran);
+  CHECK(woken.state() == PowerState::Running);
+  for (int i = 0; i < 20; ++i) {
+    woken.poll(fresh.now);
+    fresh.b.poll(fresh.now);
+    fresh.net.flush(fresh.now);
+    fresh.now += 5;
+  }
+  CHECK(woken.state() == PowerState::Running);
+  CHECK(count_prepares(fresh_events) == 0);  // nothing queued by the op
+}
+
+void ban_family_restore_wake(BanOp op) {
+  // on_pending_result during restore via wake() after a real enter.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  const std::array<std::uint8_t, 3> payload{{'b', 'w', '!'}};
+  MessageId id{};
+  SendOptions durable{};
+  durable.persist_across_sleep = true;
+  durable.lifetime_ms = 20000;
+  CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
+                    w.now, id));
+  SleepRequest save{};
+  save.pending_policy = SleepWorkPolicy::Save;
+  CHECK_OK(coordinator.sleep_prepare(save, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  BanProbe probe{op, "restore_wake"};
+  w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
+                                      StatusCode) {
+    probe.fire(coordinator, w.a, w.events, storage, w.port, w.now,
+               PowerState::Resuming, false, false);
+  };
+  CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  CHECK_OK(coordinator.wake(ResetCause::DeepSleepWake,
+                            ElapsedInterval{100, 200, true}, w.now));
+  CHECK(probe.ran);
+  CHECK(coordinator.state() == PowerState::Running);
+  for (int i = 0; i < 20; ++i) {
+    coordinator.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(coordinator.state() == PowerState::Running);
+  // The setup's single prepare; the op queued nothing behind it.
+  CHECK(count_prepares(w.events) == 1);
+}
+
+void ban_family_delivery_running_direct(BanOp op) {
+  // The node-flag ban path (coordinator idle, no worker on the stack):
+  // driving node_.poll() directly, every op from the expiry callback is
+  // Busy, and the next coordinator polls start no attempt.
+  MatrixWorld w;
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  const std::array<std::uint8_t, 3> payload{{'d', 'r', '!'}};
+  MessageId id{};
+  SendOptions send_options{};
+  send_options.lifetime_ms = 5;
+  CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
+                       send_options, w.now, id));
+  BanProbe probe{op, "delivery_running_direct"};
+  w.observer.on_delivery_fn = [&](const DeliveryResult& result) {
+    if (result.id == id && sleep_verdict_terminal(result.state)) {
+      probe.fire(w.coordinator, w.node, w.events, w.storage, w.port, w.now,
+                 PowerState::Running, false, false);
+    }
+  };
+  w.now += 10;
+  w.node.poll(w.now);  // direct drive: coordinator idle throughout
+  CHECK(probe.ran);
+  w.pump(20);
+  CHECK(w.coordinator.state() == PowerState::Running);
+  CHECK(!w.events.saw(PowerState::Running, PowerState::Draining,
+                      "SLEEP_PREPARE"));
+}
+
+void test_callback_busy_matrix() {
+  std::size_t cells = 0;
+  for (const BanOp op : kBanOps) {
+    ban_family_settle_delivery(op);
+    ban_family_settle_group(op);
+    ban_family_hold_release(op);
+    ban_family_carry_expired(op);
+    ban_family_tx_notice(op);
+    ban_family_message_running(op);
+    ban_family_message_draining(op);
+    ban_family_transition_ready(op);
+    ban_family_transition_enter(op);
+    ban_family_enter_expired(op);
+    ban_family_power_diagnostic(op);
+    ban_family_applied_result(op);
+    ban_family_applied_sink(op);
+    ban_family_restore_begin(op);
+    ban_family_restore_wake(op);
+    ban_family_delivery_running_direct(op);
+    cells += 16;
+  }
+  CHECK(cells == 7 * 16);
+}
+
+// --- Section 9.3 (boundaries): radio reset, recursive drive, node-flag ban ---
+
+void test_callback_radio_reset_busy_outside_aborts() {
+  // A radio reset signalled from a settlement callback is Busy — the
+  // attempt completes to READY. One signalled from OUTSIDE aborts an
+  // active attempt at once; without an attempt only the generation moves
+  // and a prepare works immediately (#110: no latch, no Busy window).
   {
     MemoryPowerStorage storage;
     GroupPowerWorld w;
@@ -3985,35 +3696,33 @@ void test_callback_radio_reset_vetoes() {
     SendOptions send_options{};
     CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
                       send_options, w.now, id));
-    bool vetoed = false;
+    Status reset_status = Status::error(StatusCode::InternalError, "not run");
     w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
       if (result.state == DeliveryState::Failed &&
           std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-        vetoed = true;
-        coordinator.notify_radio_reset();
+        reset_status = coordinator.notify_radio_reset();
       }
     };
     SleepRequest request{};
     CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-    CHECK(vetoed);
-    CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
-                        "SLEEP_READY"));
-    CHECK(!coordinator.ticket().issued);
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    CHECK(reset_status.code == StatusCode::Busy);
+    CHECK(w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                       "SLEEP_READY"));
+    CHECK(coordinator.ticket_valid(coordinator.ticket()));
+    CHECK_OK(coordinator.notify_radio_reset());
+    CHECK(coordinator.state() == PowerState::Running);
     CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
   }
   {
-    // Outside latch: prepare is Busy until a poll consumes the request.
+    // No attempt: the generation moves, and a prepare works at once.
     MemoryPowerStorage storage;
     PowerWorld w(storage);
     CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
                                  ElapsedInterval{0, 0, false}, w.now));
     w.pump(60);
-    w.coordinator.notify_radio_reset();
+    CHECK_OK(w.coordinator.notify_radio_reset());
     SleepRequest request{};
-    CHECK(w.coordinator.sleep_prepare(request, w.now).code ==
-          StatusCode::Busy);
-    w.pump(10);
     CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
     CHECK(w.pump_until(PowerState::ReadyToSleep));
   }
@@ -4057,197 +3766,19 @@ void test_recursive_coordinator_drive_rejected() {
   CHECK(ran);
   CHECK(poll_state == PowerState::Persisting);
   CHECK(begin_status.code == StatusCode::Busy);
-  CHECK(std::strcmp(begin_status.detail, "POWER_REENTRANT_DRIVE") == 0);
+  CHECK(std::strcmp(begin_status.detail, "POWER_IN_CALLBACK") == 0);
   CHECK(wake_status.code == StatusCode::Busy);
-  CHECK(std::strcmp(wake_status.detail, "POWER_REENTRANT_DRIVE") == 0);
-}
-
-void test_node_callback_defers_without_driving() {
-  // The node-flag deferral path (coordinator idle, no worker on the stack):
-  // driving node_.poll() directly, a callback's prepare is queued, a later
-  // abort in the same callback cancels it, and the next coordinator poll
-  // consumes both without starting an attempt.
-  MemoryPowerStorage storage;
-  MatrixWorld w;
-  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
-                               ElapsedInterval{0, 0, false}, w.now));
-  w.pump(60);
-  const std::array<std::uint8_t, 3> payload{{'d', 'e', 'f'}};
-  MessageId id{};
-  SendOptions send_options{};
-  send_options.lifetime_ms = 5;
-  CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
-                       send_options, w.now, id));
-  Status prepare_status = Status::error(StatusCode::InternalError, "not run");
-  Status abort_status = Status::error(StatusCode::InternalError, "not run");
-  w.observer.on_delivery_fn = [&](const DeliveryResult& result) {
-    if (result.id == id && sleep_verdict_terminal(result.state)) {
-      SleepRequest request{};
-      prepare_status = w.coordinator.sleep_prepare(request, w.now);
-      abort_status = w.coordinator.sleep_abort("NODE_FLAG");
-    }
-  };
-  w.now += 10;
-  w.node.poll(w.now);  // direct drive: coordinator idle throughout
-  CHECK(prepare_status.ok());
-  CHECK(std::strcmp(prepare_status.detail, "POWER_REQUEST_QUEUED") == 0);
-  CHECK(abort_status.ok());
-  CHECK(w.coordinator.state() == PowerState::Running);
-  // Next poll: the abort cancels the unstarted prepare; no attempt starts.
-  w.coordinator.poll(w.now);
-  CHECK(w.coordinator.state() == PowerState::Running);
-  CHECK(!w.events.saw(PowerState::Running, PowerState::Draining,
-                      "SLEEP_PREPARE"));
-}
-
-// --- Section 9.3 (group sequences): listed op sequences at group points ----
-struct GroupSequence {
-  const char* name;
-  std::array<ModelOp, 3> ops;
-  std::size_t len;
-  std::array<StatusCode, 3> codes;
-  PowerState end;
-};
-
-const GroupSequence kGroupSequences[] = {
-    {"abort->prepare",
-     {ModelOp::Abort, ModelOp::Prepare, ModelOp::Abort},
-     2,
-     {StatusCode::Ok, StatusCode::Ok, StatusCode::Ok},
-     PowerState::ReadyToSleep},  // old attempt ends; the new one runs
-    {"prepare->abort",
-     {ModelOp::Prepare, ModelOp::Abort, ModelOp::Abort},
-     2,
-     {StatusCode::InvalidState, StatusCode::Ok, StatusCode::Ok},
-     PowerState::Running},
-    {"abort->prepare->abort",
-     {ModelOp::Abort, ModelOp::Prepare, ModelOp::Abort},
-     3,
-     {StatusCode::Ok, StatusCode::Ok, StatusCode::Ok},
-     PowerState::Running},  // the second abort cancels the new prepare too
-    {"prepare->app_event",
-     {ModelOp::Prepare, ModelOp::AppEvent, ModelOp::Abort},
-     2,
-     {StatusCode::InvalidState, StatusCode::Ok, StatusCode::Ok},
-     PowerState::Running},
-    {"app_event->prepare",
-     {ModelOp::AppEvent, ModelOp::Prepare, ModelOp::Abort},
-     2,
-     {StatusCode::Ok, StatusCode::Busy, StatusCode::Ok},
-     PowerState::Running},  // the later prepare is refused while veto stands
-    {"abort->enter",
-     {ModelOp::Abort, ModelOp::Enter, ModelOp::Abort},
-     2,
-     {StatusCode::Ok, StatusCode::InvalidState, StatusCode::Ok},
-     PowerState::Running},
-    {"enter->abort",
-     {ModelOp::Enter, ModelOp::Abort, ModelOp::Abort},
-     2,
-     {StatusCode::InvalidState, StatusCode::Ok, StatusCode::Ok},
-     PowerState::Running},
-    {"prepare->enter",
-     {ModelOp::Prepare, ModelOp::Enter, ModelOp::Abort},
-     2,
-     {StatusCode::InvalidState, StatusCode::InvalidState, StatusCode::Ok},
-     PowerState::ReadyToSleep},  // both refused; the attempt continues
-};
-
-void test_group_origin_sequences() {
-  for (const GroupSequence& seq : kGroupSequences) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    drop_all_reports();
-    w.net.drop_frame = group_loss_hook;
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    GroupSendOptions options{};
-    w.send_all(w.a, options);
-    std::vector<StatusCode> got;
-    bool ran = false;
-    w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
-      if (!ran && result.state == DeliveryState::Failed &&
-          std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-        ran = true;
-        for (std::size_t i = 0; i < seq.len; ++i) {
-          got.push_back(run_family_op(seq.ops[i], coordinator, w.a, w.now).code);
-        }
-      }
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b, seq.end));
-    CHECK(ran);
-    CHECK(got.size() == seq.len);
-    for (std::size_t i = 0; i < seq.len && i < got.size(); ++i) {
-      if (got[i] != seq.codes[i]) {
-        std::fprintf(stderr, "group sequence %s op %zu: want %d got %d\n",
-                     seq.name, i, static_cast<int>(seq.codes[i]),
-                     static_cast<int>(got[i]));
-      }
-      CHECK(got[i] == seq.codes[i]);
-    }
-    (void)seq.name;
-  }
-}
-
-void test_hold_release_sequences() {
-  for (const GroupSequence& seq : kGroupSequences) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    GroupSendOptions options{};
-    options.ordered = true;
-    options.lifetime_ms = 10000;
-    w.send_all(w.a, options);
-    w.run(60);
-    g_drop_type = FrameType::GroupData;
-    g_drop_to = GroupPowerWorld::kLeaf;
-    g_drop_sequence = kGroupSequenceFlag | 2;
-    w.net.drop_frame = group_loss_hook;
-    w.send_all(w.a, options);
-    GroupSendOptions urgent = options;
-    urgent.priority = Priority::Urgent;
-    w.send_all(w.a, urgent);
-    w.run(200);
-    CHECK(w.b.group_holds_in_use() == 1);
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.b, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    std::vector<StatusCode> got;
-    bool ran = false;
-    w.observer_b.on_group_message_fn = [&](const GroupMessageInfo& info,
-                                           ByteView) {
-      if (!ran && info.group_seq == 3) {
-        ran = true;
-        for (std::size_t i = 0; i < seq.len; ++i) {
-          got.push_back(
-              run_family_op(seq.ops[i], coordinator, w.b, w.now).code);
-        }
-      }
-    };
-    SleepRequest request{};
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.a, seq.end));
-    CHECK(ran);
-    CHECK(got.size() == seq.len);
-    for (std::size_t i = 0; i < seq.len && i < got.size(); ++i) {
-      CHECK(got[i] == seq.codes[i]);
-    }
-  }
+  CHECK(std::strcmp(wake_status.detail, "POWER_IN_CALLBACK") == 0);
 }
 
 // --- Section 9.4 (invariants) -------------------------------------------------
 
-void test_callback_requests_have_no_immediate_effect() {
-  // Inside a settlement callback the app fires abort, prepare, enter, an
-  // activity event and both sends: NONE of it moves the machine, the drain
-  // mask, the ticket, storage, or the radio synchronously — no nested
-  // worker starts from the callback (or its scope exit).
+void test_callback_busy_freezes_machine() {
+  // Inside a settlement callback the app fires abort, prepare, enter, wake,
+  // begin, both notify calls and a poll: every mutating call is Busy and
+  // the poll is a no-op — the machine, drain mask, ticket, transitions,
+  // storage and the radio are untouched — and the attempt then completes
+  // to READY_TO_SLEEP (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -4275,21 +3806,21 @@ void test_callback_requests_have_no_immediate_effect() {
     const int quiesce = w.port.quiesce_calls;
     const int wakecfg = w.port.wakecfg_calls;
     const int sleeps = w.port.sleep_calls;
-    CHECK_OK(coordinator.sleep_abort("TRACE"));
+    CHECK(coordinator.sleep_abort("TRACE").code == StatusCode::Busy);
     SleepRequest request{};
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(!coordinator.sleep_enter(coordinator.ticket(), w.now).ok());
-    coordinator.notify_app_event();
-    MessageId ignored{};
-    CHECK(!w.a.send(GroupPowerWorld::kLeaf,
-                    ByteView{payload.data(), payload.size()}, send_options,
-                    w.now, ignored)
-               .ok());
-    GroupSendOptions group_options{};
-    CHECK(!w.a.send_group(kGroupAll, ByteView{payload.data(), payload.size()},
-                          group_options, w.now, ignored)
-               .ok());
-    // Nothing moved: acceptance only, applied at the safe point.
+    CHECK(coordinator.sleep_prepare(request, w.now).code == StatusCode::Busy);
+    CHECK(coordinator.sleep_enter(coordinator.ticket(), w.now).code ==
+          StatusCode::Busy);
+    CHECK(coordinator.wake(ResetCause::DeepSleepWake,
+                           ElapsedInterval{0, 0, false}, w.now)
+              .code == StatusCode::Busy);
+    CHECK(coordinator.begin(ResetCause::ColdBoot, ElapsedInterval{0, 0, false},
+                            w.now)
+              .code == StatusCode::Busy);
+    CHECK(coordinator.notify_app_event().code == StatusCode::Busy);
+    CHECK(coordinator.notify_radio_reset().code == StatusCode::Busy);
+    coordinator.poll(w.now);  // silent no-op
+    // Nothing moved: every call above was refused outright.
     CHECK(coordinator.state() == before);
     CHECK(w.a.draining() == draining);
     CHECK(coordinator.ticket().issued == issued);
@@ -4301,145 +3832,8 @@ void test_callback_requests_have_no_immediate_effect() {
   };
   SleepRequest request{};
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
   CHECK(ran);
-}
-
-void test_settlement_stops_at_cancelled_item() {
-  // Each lane settles item-by-item: aborting at the k-th settlement
-  // callback settles exactly k+1 items under the old policy and leaves the
-  // rest live — never settled, never notified (#110: stop granularity).
-  for (int cancel_at = 0; cancel_at < 3; ++cancel_at) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    const std::array<std::uint8_t, 3> payload{{'g', 'r', 'n'}};
-    std::array<MessageId, 3> ids{};
-    SendOptions send_options{};
-    for (auto& id : ids) {
-      CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
-                        send_options, w.now, id));
-    }
-    int seen = 0;
-    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (result.state == DeliveryState::Failed &&
-          std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-        if (seen++ == cancel_at) {
-          CHECK_OK(coordinator.sleep_abort("STOP"));
-        }
-      }
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-    int settled = 0;
-    int live = 0;
-    for (const auto& id : ids) {
-      const auto outcome = w.a.delivery(id);
-      if (outcome.state == DeliveryState::Failed &&
-          std::strcmp(outcome.reason, "SLEEP_DRAIN") == 0) {
-        ++settled;
-      } else if (!sleep_verdict_terminal(outcome.state)) {
-        ++live;
-      }
-    }
-    CHECK(settled == cancel_at + 1);
-    CHECK(live == 2 - cancel_at);
-  }
-  for (int cancel_at = 0; cancel_at < 3; ++cancel_at) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    drop_all_reports();
-    w.net.drop_frame = group_loss_hook;
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    GroupSendOptions options{};
-    GroupSendOptions urgent = options;
-    urgent.priority = Priority::Urgent;  // may take the last origin slot
-    std::array<MessageId, 3> ids{};
-    ids[0] = w.send_all(w.a, options);
-    ids[1] = w.send_all(w.a, options);
-    ids[2] = w.send_all(w.a, urgent);
-    int seen = 0;
-    w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
-      if (result.state == DeliveryState::Failed &&
-          std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-        if (seen++ == cancel_at) {
-          CHECK_OK(coordinator.sleep_abort("STOP"));
-        }
-      }
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-    int settled = 0;
-    int live = 0;
-    for (const auto& id : ids) {
-      const auto outcome = w.a.group_delivery(id);
-      if (outcome.state == DeliveryState::Failed &&
-          std::strcmp(outcome.reason, "SLEEP_DRAIN") == 0) {
-        ++settled;
-      } else if (!sleep_verdict_terminal(outcome.state)) {
-        ++live;
-      }
-    }
-    CHECK(settled == cancel_at + 1);
-    CHECK(live == 2 - cancel_at);
-  }
-  for (int cancel_at = 0; cancel_at < 2; ++cancel_at) {
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    GroupSendOptions options{};
-    options.ordered = true;
-    options.lifetime_ms = 10000;
-    const MessageId first = w.send_all(w.a, options);
-    for (int i = 0;
-         i < 200 && w.a.group_delivery(first).state != DeliveryState::Delivered;
-         ++i) {
-      w.run(50);
-    }
-    g_drop_type = FrameType::GroupData;
-    g_drop_to = GroupPowerWorld::kLeaf;
-    g_drop_sequence = kGroupSequenceFlag | 2;
-    w.net.drop_frame = group_loss_hook;
-    w.send_all(w.a, options);
-    w.send_all(w.a, options);
-    GroupSendOptions urgent = options;
-    urgent.priority = Priority::Urgent;
-    w.send_all(w.a, urgent);
-    w.run(200);
-    CHECK(w.b.group_holds_in_use() == 2);
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.b, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    int seen = 0;
-    w.observer_b.on_group_message_fn = [&](const GroupMessageInfo& info,
-                                           ByteView) {
-      if (info.group_seq >= 3 && seen++ == cancel_at) {
-        CHECK_OK(coordinator.sleep_abort("STOP"));
-      }
-    };
-    SleepRequest request{};
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.a, PowerState::Running));
-    CHECK(w.b.group_holds_in_use() == static_cast<std::size_t>(1 - cancel_at));
-    std::size_t released = 0;
-    for (const auto& receipt : w.observer_b.group_messages) {
-      if (receipt.info.group_seq >= 3) ++released;
-    }
-    CHECK(released == static_cast<std::size_t>(cancel_at + 1));
-  }
 }
 
 void test_late_activity_invalidates_waiting_ticket() {
@@ -4490,23 +3884,38 @@ void test_late_activity_invalidates_waiting_ticket() {
   }
 }
 
-void test_enter_notify_op_matrix() {
-  // Entry notifications x single ops: Expired (refresh) and SLEEP_ENTER
-  // callbacks each run one op; vetoes cancel the handoff (0 platform
-  // enters), refusals let it complete (exactly 1).
+void test_enter_notify_busy_matrix() {
+  // Entry notifications x single ops: the Expired (refresh) and SLEEP_ENTER
+  // callbacks each run one op. Coordinator ops are Busy and the handoff
+  // completes (exactly 1 platform enter); a refused send still retires the
+  // ticket's generation, so a send from either callback aborts the entry
+  // with no platform enter (#110).
+  enum class EnterOp : std::uint8_t {
+    Abort,
+    Prepare,
+    AppEvent,
+    RadioReset,
+    Send,
+    SendGroup,
+    Enter,
+    Wake,
+    Begin,
+  };
   struct Cell {
-    ModelOp op;
+    EnterOp op;
     StatusCode code;
-    bool vetoes;  // end state RUNNING with no platform enter (else SLEEPING)
+    bool breaks_ticket;  // end state RUNNING, no platform enter (else SLEEPING)
   };
   const Cell kCells[] = {
-      {ModelOp::Abort, StatusCode::Ok, true},
-      {ModelOp::Prepare, StatusCode::InvalidState, false},
-      {ModelOp::AppEvent, StatusCode::Ok, true},
-      // Radio reset behaves like app activity; covered once here.
-      {ModelOp::Send, StatusCode::InvalidState, true},
-      {ModelOp::SendGroup, StatusCode::InvalidState, true},
-      {ModelOp::Enter, StatusCode::Busy, false},
+      {EnterOp::Abort, StatusCode::Busy, false},
+      {EnterOp::Prepare, StatusCode::Busy, false},
+      {EnterOp::AppEvent, StatusCode::Busy, false},
+      {EnterOp::RadioReset, StatusCode::Busy, false},
+      {EnterOp::Send, StatusCode::InvalidState, true},
+      {EnterOp::SendGroup, StatusCode::InvalidState, true},
+      {EnterOp::Enter, StatusCode::Busy, false},
+      {EnterOp::Wake, StatusCode::Busy, false},
+      {EnterOp::Begin, StatusCode::Busy, false},
   };
   for (int point = 0; point < 2; ++point) {
     for (const Cell& cell : kCells) {
@@ -4527,20 +3936,21 @@ void test_enter_notify_op_matrix() {
         if (ran) return;
         ran = true;
         switch (cell.op) {
-          case ModelOp::Abort:
+          case EnterOp::Abort:
             got = w.coordinator.sleep_abort("ENTER_MATRIX");
             break;
-          case ModelOp::Prepare: {
+          case EnterOp::Prepare: {
             SleepRequest retry{};
             got = w.coordinator.sleep_prepare(retry, w.now);
             break;
           }
-          case ModelOp::AppEvent:
-            w.coordinator.notify_app_event();
-            w.coordinator.notify_radio_reset();  // same sticky veto class
-            got = Status::success();
+          case EnterOp::AppEvent:
+            got = w.coordinator.notify_app_event();
             break;
-          case ModelOp::Send: {
+          case EnterOp::RadioReset:
+            got = w.coordinator.notify_radio_reset();
+            break;
+          case EnterOp::Send: {
             MessageId id{};
             SendOptions send_options{};
             const std::array<std::uint8_t, 3> payload{{'e', 'n', '!'}};
@@ -4548,7 +3958,7 @@ void test_enter_notify_op_matrix() {
                               send_options, w.now, id);
             break;
           }
-          case ModelOp::SendGroup: {
+          case EnterOp::SendGroup: {
             MessageId id{};
             GroupSendOptions group_options{};
             const std::array<std::uint8_t, 3> payload{{'e', 'n', '!'}};
@@ -4557,8 +3967,16 @@ void test_enter_notify_op_matrix() {
                                     group_options, w.now, id);
             break;
           }
-          case ModelOp::Enter:
+          case EnterOp::Enter:
             got = w.coordinator.sleep_enter(ticket, w.now);
+            break;
+          case EnterOp::Wake:
+            got = w.coordinator.wake(ResetCause::DeepSleepWake,
+                                     ElapsedInterval{0, 0, false}, w.now);
+            break;
+          case EnterOp::Begin:
+            got = w.coordinator.begin(ResetCause::ColdBoot,
+                                      ElapsedInterval{0, 0, false}, w.now);
             break;
         }
       };
@@ -4580,7 +3998,11 @@ void test_enter_notify_op_matrix() {
       const Status entered = w.coordinator.sleep_enter(ticket, w.now);
       CHECK(ran);
       CHECK(got.code == cell.code);
-      if (cell.vetoes) {
+      if (cell.code == StatusCode::Busy) {
+        CHECK(std::strcmp(got.detail, "POWER_IN_CALLBACK") == 0);
+      }
+      if (cell.breaks_ticket) {
+        CHECK(std::strcmp(got.detail, "NODE_DRAINING") == 0);
         CHECK(entered.code == StatusCode::InvalidState);
         CHECK(w.coordinator.state() == PowerState::Running);
         CHECK(!w.coordinator.ticket_valid(ticket));
@@ -4706,79 +4128,70 @@ void test_phase1_faults_keep_work_live() {
   }
 }
 
-void test_partial_carry_policy_matrix() {
-  // Save settles two records; the attempt aborts after the first (carry 1)
-  // or the second (carry 2). The retry runs under Fail/Save/Defer: the
-  // unsettled record settles under the NEW policy only, and the wake
-  // restores exactly the carried set (#110: partial-carry matrix).
+void test_retry_policy_matrix_after_outside_abort() {
+  // Save settles two records; the READY attempt is aborted from OUTSIDE
+  // (carry 2 kept, nothing live). A fresh non-durable delivery is queued
+  // and the retry runs under Fail/Save/Defer: the live record settles
+  // under the NEW policy only, and the wake restores the carried set plus
+  // the retry's save, if any (#110: retry-policy matrix).
   const SleepWorkPolicy kPolicies[] = {SleepWorkPolicy::Fail,
                                        SleepWorkPolicy::Save,
                                        SleepWorkPolicy::Defer};
   for (const SleepWorkPolicy retry_policy : kPolicies) {
-    for (int abort_after = 1; abort_after <= 2; ++abort_after) {
-      MemoryPowerStorage storage;
-      GroupPowerWorld w;
-      w.converge();
-      PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                   w.events);
-      CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                   ElapsedInterval{0, 0, false}, w.now));
-      const std::array<std::uint8_t, 3> payload{{'p', 'c', '!'}};
-      std::array<MessageId, 2> ids{};
-      SendOptions send_options{};
-      send_options.lifetime_ms = 20000;
-      for (auto& id : ids) {
-        CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
-                          send_options, w.now, id));
-      }
-      int saved = 0;
-      bool fired = false;
-      w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-        if (fired) return;  // count the first attempt's saves only
-        if (result.state == DeliveryState::Indeterminate &&
-            std::strcmp(result.reason, "SLEEP_SAVED") == 0 &&
-            ++saved == abort_after) {
-          fired = true;
-          CHECK_OK(coordinator.sleep_abort("PARTIAL"));
-          SleepRequest retry{};
-          retry.pending_policy = retry_policy;
-          CHECK_OK(coordinator.sleep_prepare(retry, w.now));
-        }
-      };
-      SleepRequest request{};
-      request.pending_policy = SleepWorkPolicy::Save;
-      CHECK_OK(coordinator.sleep_prepare(request, w.now));
-      CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-      CHECK(saved == abort_after);
-      if (abort_after == 1) {
-        // The unsettled record belongs to the retry's policy alone.
-        const auto outcome = w.a.delivery(ids[1]);
-        if (retry_policy == SleepWorkPolicy::Fail) {
-          CHECK(outcome.state == DeliveryState::Failed);
-          CHECK(std::strcmp(outcome.reason, "SLEEP_DRAIN") == 0);
-        } else if (retry_policy == SleepWorkPolicy::Save) {
-          CHECK(outcome.state == DeliveryState::Indeterminate);
-          CHECK(std::strcmp(outcome.reason, "SLEEP_SAVED") == 0);
-        } else {
-          CHECK(outcome.state == DeliveryState::Indeterminate);
-          CHECK(std::strcmp(outcome.reason, "SLEEP_DEFERRED") == 0);
-        }
-      }
-      CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
-      GroupPowerWorld fresh;
-      FakePowerPort fresh_port;
-      RecordingPowerEvents fresh_events;
-      PowerCoordinator woken(PowerConfig{500, 50}, fresh.a, fresh_port,
-                             storage, fresh_events);
-      CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
-                           ElapsedInterval{100, 200, true}, fresh.now));
-      const std::size_t want =
-          abort_after == 2 ? 2 : (retry_policy == SleepWorkPolicy::Save ? 2
-                                : retry_policy == SleepWorkPolicy::Fail ? 1
-                                                                        : 1);
-      CHECK(fresh_events.pending_with(StatusCode::Ok) == want);
-      CHECK(pending_results_for(fresh_events, ids[0], StatusCode::Ok) == 1);
+    MemoryPowerStorage storage;
+    GroupPowerWorld w;
+    w.converge();
+    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                                 w.events);
+    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    const std::array<std::uint8_t, 3> payload{{'p', 'c', '!'}};
+    std::array<MessageId, 2> ids{};
+    SendOptions send_options{};
+    send_options.lifetime_ms = 20000;
+    for (auto& id : ids) {
+      CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
+                        send_options, w.now, id));
     }
+    SleepRequest request{};
+    request.pending_policy = SleepWorkPolicy::Save;
+    CHECK_OK(coordinator.sleep_prepare(request, w.now));
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    CHECK_OK(coordinator.sleep_abort("PARTIAL"));
+    CHECK(coordinator.state() == PowerState::Running);
+    MessageId live{};
+    CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
+                      send_options, w.now, live));
+    SleepRequest retry{};
+    retry.pending_policy = retry_policy;
+    CHECK_OK(coordinator.sleep_prepare(retry, w.now));
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    // The live record belongs to the retry's policy alone.
+    const auto outcome = w.a.delivery(live);
+    if (retry_policy == SleepWorkPolicy::Fail) {
+      CHECK(outcome.state == DeliveryState::Failed);
+      CHECK(std::strcmp(outcome.reason, "SLEEP_DRAIN") == 0);
+    } else if (retry_policy == SleepWorkPolicy::Save) {
+      CHECK(outcome.state == DeliveryState::Indeterminate);
+      CHECK(std::strcmp(outcome.reason, "SLEEP_SAVED") == 0);
+    } else {
+      CHECK(outcome.state == DeliveryState::Indeterminate);
+      CHECK(std::strcmp(outcome.reason, "SLEEP_DEFERRED") == 0);
+    }
+    CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+    GroupPowerWorld fresh;
+    FakePowerPort fresh_port;
+    RecordingPowerEvents fresh_events;
+    PowerCoordinator woken(PowerConfig{500, 50}, fresh.a, fresh_port,
+                           storage, fresh_events);
+    CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
+                         ElapsedInterval{100, 200, true}, fresh.now));
+    const std::size_t want = retry_policy == SleepWorkPolicy::Save ? 3 : 2;
+    CHECK(fresh_events.pending_with(StatusCode::Ok) == want);
+    CHECK(pending_results_for(fresh_events, ids[0], StatusCode::Ok) == 1);
+    CHECK(pending_results_for(fresh_events, ids[1], StatusCode::Ok) == 1);
+    CHECK(pending_results_for(fresh_events, live, StatusCode::Ok) ==
+          (retry_policy == SleepWorkPolicy::Save ? 1 : 0));
   }
 }
 
@@ -4803,19 +4216,17 @@ void test_carry_overflow_keeps_carry_fails_fresh() {
     CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
                       w.now, id));
   }
-  int saved = 0;
-  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-    if (result.state == DeliveryState::Indeterminate &&
-        std::strcmp(result.reason, "SLEEP_SAVED") == 0 && ++saved == 2) {
-      CHECK_OK(coordinator.sleep_abort("CARRY2"));
-    }
-  };
+  // Build the carry set with a completed attempt, aborted from OUTSIDE
+  // in READY (a mid-settlement abort is impossible now).
   SleepRequest save{};
   save.pending_policy = SleepWorkPolicy::Save;
   CHECK_OK(coordinator.sleep_prepare(save, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(saved == 2);
-  w.observer_a.on_delivery_fn = nullptr;
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  for (const auto& id : carried) {
+    CHECK(std::strcmp(w.a.delivery(id).reason, "SLEEP_SAVED") == 0);
+  }
+  CHECK_OK(coordinator.sleep_abort("CARRY2"));
+  CHECK(coordinator.state() == PowerState::Running);
   std::array<MessageId, 3> fresh_ids{};
   for (auto& id : fresh_ids) {
     CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
@@ -4846,10 +4257,13 @@ void test_carry_overflow_keeps_carry_fails_fresh() {
   CHECK(pending_results_for(fresh_events, carried[1], StatusCode::Ok) == 1);
 }
 
-void test_carry_abort_mid_settlement_restores_on_new_node() {
-  // Carry 2 + fresh 4 over the 4-slot candidate: aborting mid-settlement
-  // must not lose the un-notified durable carry — a NEW node restarting
-  // from the same storage still restores both carried records (#110).
+void test_carry_settlement_callback_busy_restores_on_new_node() {
+  // Carry 2 + fresh 4 over the 4-slot candidate: an abort from the
+  // settlement callback is Busy — nothing is recorded — so the settlement
+  // completes instead of stranding un-notified carry: both carried
+  // records stay carried, two fresh records are saved, two fail
+  // SLEEP_PERSIST_FULL, and the ticket is issued. A NEW node restarting
+  // from the same storage restores exactly the committed four (#110).
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -4866,42 +4280,36 @@ void test_carry_abort_mid_settlement_restores_on_new_node() {
     CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
                       w.now, id));
   }
-  int saved = 0;
-  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-    if (result.state == DeliveryState::Indeterminate &&
-        std::strcmp(result.reason, "SLEEP_SAVED") == 0 && ++saved == 2) {
-      CHECK_OK(coordinator.sleep_abort("CARRY2"));
-    }
-  };
   SleepRequest save{};
   save.pending_policy = SleepWorkPolicy::Save;
   CHECK_OK(coordinator.sleep_prepare(save, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(saved == 2);
-  w.observer_a.on_delivery_fn = nullptr;
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK_OK(coordinator.sleep_abort("CARRY2"));
+  CHECK(coordinator.state() == PowerState::Running);
   std::array<MessageId, 4> fresh_ids{};
   for (auto& id : fresh_ids) {
     CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
                       w.now, id));
   }
-  (void)fresh_ids;
-  bool aborted = false;
+  Status abort_status = Status::error(StatusCode::InternalError, "not run");
   w.observer_a.on_delivery_fn = [&](const DeliveryResult&) {
-    if (!aborted) {
-      aborted = true;
-      CHECK_OK(coordinator.sleep_abort("MID_SETTLEMENT"));
-    }
-  };
-  w.events.on_pending_result_fn = [&](const PendingDeliveryRecord&,
-                                      StatusCode) {
-    if (!aborted) {
-      aborted = true;
-      CHECK_OK(coordinator.sleep_abort("MID_SETTLEMENT"));
+    if (abort_status.code == StatusCode::InternalError) {
+      abort_status = coordinator.sleep_abort("MID_SETTLEMENT");
     }
   };
   CHECK_OK(coordinator.sleep_prepare(save, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(aborted);
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(abort_status.code == StatusCode::Busy);
+  std::size_t saved_count = 0;
+  std::size_t persist_full = 0;
+  for (const auto& id : fresh_ids) {
+    const char* reason = w.a.delivery(id).reason;
+    saved_count += std::strcmp(reason, "SLEEP_SAVED") == 0 ? 1U : 0U;
+    persist_full += std::strcmp(reason, "SLEEP_PERSIST_FULL") == 0 ? 1U : 0U;
+  }
+  CHECK(saved_count == 2);
+  CHECK(persist_full == 2);
+  CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
   GroupPowerWorld fresh;
   FakePowerPort fresh_port;
   RecordingPowerEvents fresh_events;
@@ -4992,6 +4400,99 @@ void test_carry_same_id_replaced_by_fresh() {
   }
 }
 
+void test_carry_same_id_callback_busy_restores_new() {
+  // A retained OLD record shares its logical id with a live durable NEW
+  // delivery. An abort from the fresh settlement callback is Busy — the
+  // settlement completes, the fresh record supersedes the carry in place,
+  // and after the entry a NEW node restores NEW (not OLD), exactly once
+  // (#110: same-id ownership transfers at settlement, never at commit).
+  MemoryPowerStorage storage;
+  MessageId retained{};
+  {
+    // Incarnation 1: persist one durable record with the OLD body.
+    GroupPowerWorld w;
+    w.converge();
+    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                                 w.events);
+    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                                 ElapsedInterval{0, 0, false}, w.now));
+    const std::array<std::uint8_t, 4> old_body{{'O', 'L', 'D', '!'}};
+    SendOptions durable{};
+    durable.persist_across_sleep = true;
+    durable.lifetime_ms = 20000;
+    CHECK_OK(w.a.send(9, ByteView{old_body.data(), old_body.size()}, durable,
+                      w.now, retained));
+    SleepRequest request{};
+    CHECK_OK(coordinator.sleep_prepare(request, w.now));
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  }
+  {
+    // Incarnation 2 on the same storage: the table fills up (the first
+    // live id collides with the retained one) so the restore retains OLD
+    // and reports AlreadyExists.
+    GroupPowerWorld w;
+    w.converge();
+    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                                 w.events);
+    const std::array<std::uint8_t, 4> new_body{{'N', 'E', 'W', '!'}};
+    SendOptions durable{};
+    durable.persist_across_sleep = true;
+    durable.lifetime_ms = 20000;
+    for (std::size_t i = 0; i < MeshNode::delivery_capacity(); ++i) {
+      MessageId id{};
+      CHECK_OK(w.a.send(90 + static_cast<NodeId>(i),
+                        ByteView{new_body.data(), new_body.size()}, durable,
+                        w.now, id));
+    }
+    CHECK_OK(coordinator.begin(ResetCause::DeepSleepWake,
+                               ElapsedInterval{0, 0, true}, w.now));
+    CHECK(w.events.pending_with(StatusCode::AlreadyExists) == 1);
+    Status abort_status = Status::error(StatusCode::InternalError, "not run");
+    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
+      if (abort_status.code == StatusCode::InternalError &&
+          result.state == DeliveryState::Indeterminate) {
+        abort_status = coordinator.sleep_abort("SAME_ID");
+      }
+    };
+    SleepRequest save{};
+    save.pending_policy = SleepWorkPolicy::Save;
+    CHECK_OK(coordinator.sleep_prepare(save, w.now));
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    CHECK(abort_status.code == StatusCode::Busy);
+    CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  }
+  {
+    // Incarnation 3: the superseded OLD body is gone — the restored
+    // record for the shared id carries NEW, exactly once.
+    GroupPowerWorld w;
+    w.converge();
+    FakePowerPort fresh_port;
+    RecordingPowerEvents fresh_events;
+    PowerCoordinator woken(PowerConfig{500, 50}, w.a, fresh_port, storage,
+                           fresh_events);
+    CHECK_OK(woken.begin(ResetCause::DeepSleepWake,
+                         ElapsedInterval{100, 200, true}, w.now));
+    CHECK(fresh_events.pending_with(StatusCode::Ok) == 4);
+    CHECK(pending_results_for(fresh_events, retained, StatusCode::Ok) == 1);
+    const std::array<std::uint8_t, 4> new_body{{'N', 'E', 'W', '!'}};
+    const std::array<std::uint8_t, 4> old_body{{'O', 'L', 'D', '!'}};
+    std::size_t shared = 0;
+    w.a.for_each_delivery([&](const DeliverySnapshot& snapshot) {
+      if (snapshot.id == retained &&
+          snapshot.payload.size == new_body.size() &&
+          std::memcmp(snapshot.payload.data, new_body.data(),
+                      new_body.size()) == 0) {
+        ++shared;
+      }
+      CHECK(!(snapshot.payload.size == old_body.size() &&
+              std::memcmp(snapshot.payload.data, old_body.data(),
+                          old_body.size()) == 0));
+    });
+    CHECK(shared == 1);
+  }
+}
+
 void test_carry_survives_history_eviction() {
   // The carry set is independent of delivery history: evicting a
   // SLEEP_SAVED record's terminal entry (DELIVERY_HISTORY_EVICTED) does
@@ -5010,19 +4511,13 @@ void test_carry_survives_history_eviction() {
   durable.lifetime_ms = 20000;
   CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
                     w.now, id));
-  bool saved = false;
-  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-    if (!saved && result.state == DeliveryState::Indeterminate) {
-      saved = true;
-      CHECK_OK(coordinator.sleep_abort("EVICT"));
-    }
-  };
   SleepRequest save{};
   save.pending_policy = SleepWorkPolicy::Save;
   CHECK_OK(coordinator.sleep_prepare(save, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(saved);
-  w.observer_a.on_delivery_fn = nullptr;
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(std::strcmp(w.a.delivery(id).reason, "SLEEP_SAVED") == 0);
+  CHECK_OK(coordinator.sleep_abort("EVICT"));
+  CHECK(coordinator.state() == PowerState::Running);
   // Fill the table past capacity with short-lived work: the SAVED entry is
   // evicted as terminal history, then everything expires.
   SendOptions churn{};
@@ -5048,11 +4543,10 @@ void test_carry_survives_history_eviction() {
   CHECK(pending_results_for(fresh_events, id, StatusCode::Ok) == 1);
 }
 
-void test_retry_after_empty_carry_commit() {
-  // The first attempt commits a candidate but settles nothing saved (its
-  // only settlement fails first, aborting with carry 0): the retry plans
-  // from live + carry alone — the stale on-disk candidate never leaks in —
-  // and the wake restores exactly the retry's set.
+void test_retry_after_outside_abort_plans_live_only() {
+  // The first attempt is aborted from OUTSIDE during the drain: it commits
+  // nothing, so the retry plans from live work alone — no stale on-disk
+  // candidate can leak in — and the wake restores exactly the retry's set.
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -5065,30 +4559,25 @@ void test_retry_after_empty_carry_commit() {
   SendOptions plain{};
   plain.lifetime_ms = 20000;
   CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, plain, w.now,
-                    id_b));  // first in pool order: fails, aborts, carry stays 0
+                    id_b));
   MessageId id_a{};
   SendOptions durable = plain;
   durable.persist_across_sleep = true;
   CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()}, durable,
                     w.now, id_a));
-  bool aborted = false;
-  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-    if (!aborted && result.state == DeliveryState::Failed &&
-        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-      aborted = true;
-      CHECK_OK(coordinator.sleep_abort("EMPTY_CARRY"));
-    }
-  };
   SleepRequest fail{};
   fail.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(fail, w.now));
-  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-  CHECK(aborted);
-  CHECK(w.a.delivery(id_b).state == DeliveryState::Failed);
+  CHECK(coordinator.state() == PowerState::Draining);
+  CHECK_OK(coordinator.sleep_abort("EMPTY_CARRY"));
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(storage.write_calls == 0);
+  CHECK(!sleep_verdict_terminal(w.a.delivery(id_b).state));
   CHECK(!sleep_verdict_terminal(w.a.delivery(id_a).state));
   SleepRequest retry{};
   CHECK_OK(coordinator.sleep_prepare(retry, w.now));
   CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(w.a.delivery(id_b).state == DeliveryState::Failed);
   CHECK(std::strcmp(w.a.delivery(id_a).reason, "SLEEP_SAVED") == 0);
   CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
   GroupPowerWorld fresh;
@@ -5103,14 +4592,13 @@ void test_retry_after_empty_carry_commit() {
 }
 
 void test_settled_verdicts_survive_stale_jobs() {
-  // A BestEffort unicast stuck in physical TX and a group origin with a
-  // queued copy settle (SLEEP_DRAIN); the abort lands in the next origin's
-  // settlement. Late TX results and the queued group retry must not revive
-  // either verdict via the job paths — while the unsettled origin runs on
-  // to GROUP_COMPLETE (#110: terminal-owner rule). Note: a verified peer
-  // end receipt still promotes a settled unicast (pre-existing deliberate
-  // promotion semantic, out of this issue's scope); the stale TX_MAC_DONE
-  // completion it replaces must never fire.
+  // A BestEffort unicast stuck in physical TX and two group origins settle
+  // (SLEEP_DRAIN); the attempt completes to READY and is aborted from
+  // OUTSIDE. Late TX results and late group traffic must not revive any
+  // verdict via the job paths (#110: terminal-owner rule). Note: a
+  // verified peer end receipt still promotes a settled unicast
+  // (pre-existing deliberate promotion semantic, out of this issue's
+  // scope); the stale TX_MAC_DONE completion it replaces must never fire.
   MemoryPowerStorage storage;
   GroupPowerWorld w;
   w.converge();
@@ -5130,34 +4618,29 @@ void test_settled_verdicts_survive_stale_jobs() {
   GroupSendOptions options{};
   const MessageId origin1 = w.send_all(w.a, options);
   const MessageId origin2 = w.send_all(w.a, options);
-  int settled_origins = 0;
-  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
-    if (result.state == DeliveryState::Failed &&
-        std::strcmp(result.reason, "SLEEP_DRAIN") == 0 &&
-        ++settled_origins == 1) {
-      CHECK_OK(coordinator.sleep_abort("STALE"));
-    }
-  };
   SleepRequest request{};
   request.pending_policy = SleepWorkPolicy::Fail;
   CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  // No flush until the abort landed: every TX result arrives late.
-  bool aborted = false;
-  for (int i = 0; i < 400 && !aborted; ++i) {
+  // No flush until READY: every TX result arrives late.
+  for (int i = 0; i < 400 && coordinator.state() != PowerState::ReadyToSleep;
+       ++i) {
     coordinator.poll(w.now);
     w.b.poll(w.now);
     w.now += 5;
-    aborted = settled_origins == 1 &&
-              coordinator.state() == PowerState::Running;
   }
-  CHECK(aborted);
-  CHECK(!sleep_verdict_terminal(w.a.group_delivery(origin2).state));
-  // Old results land now: stale job completions dropped, group verdict
-  // frozen, no TX_MAC_DONE resurrection of the settled unicast.
+  CHECK(coordinator.state() == PowerState::ReadyToSleep);
+  CHECK(w.a.delivery(uni).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.delivery(uni).reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.a.group_delivery(origin1).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(origin1).reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.a.group_delivery(origin2).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(origin2).reason, "SLEEP_DRAIN") == 0);
+  CHECK_OK(coordinator.sleep_abort("STALE"));
+  // Old results land now: the torn-down physical job resolves to nothing,
+  // group verdicts stay frozen, no TX_MAC_DONE resurrection of the
+  // settled unicast.
   w.net.drop_frame = nullptr;
-  for (int i = 0; i < 400 &&
-                  w.a.group_delivery(origin2).state != DeliveryState::Delivered;
-       ++i) {
+  for (int i = 0; i < 400; ++i) {
     w.a.poll(w.now);
     w.b.poll(w.now);
     w.net.flush(w.now);
@@ -5168,23 +4651,23 @@ void test_settled_verdicts_survive_stale_jobs() {
       CHECK(std::strcmp(event.reason, "TX_MAC_DONE") != 0);
     }
   }
-  const auto origin1_outcome = w.a.group_delivery(origin1);
-  CHECK(origin1_outcome.state == DeliveryState::Failed);
-  CHECK(std::strcmp(origin1_outcome.reason, "SLEEP_DRAIN") == 0);
-  CHECK(w.observer_a.has_diag("STALE_JOB_DROPPED"));
-  const auto origin2_outcome = w.a.group_delivery(origin2);
-  CHECK(origin2_outcome.state == DeliveryState::Delivered);
-  CHECK(std::strcmp(origin2_outcome.reason, "GROUP_COMPLETE") == 0);
+  CHECK(w.a.group_delivery(origin1).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(origin1).reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.a.group_delivery(origin2).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(origin2).reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.observer_a.has_diag("STALE_TX_CALLBACK"));
 }
 
 void test_evicted_origin_jobs_never_dispatch() {
-  // A SLEEP_DRAIN-settled origin whose record is later evicted by new
-  // sends: its leftover queued jobs must still count as stale — never
-  // dispatched or retried — so the Failed-notified body never reaches a
-  // receiver (#110: eviction must not resurrect a terminal origin). Two
-  // leaves: one old copy is physical-in-flight while the other is still
-  // queued when the abort freezes the queues.
-  MemoryPowerStorage storage;
+  // An origin whose record is evicted while its copies are still queued:
+  // the leftovers count as stale at dispatch — never dispatched or
+  // retried — so the evicted body never reaches a receiver (#110:
+  // eviction must not resurrect the origin). Two leaves: the first copy
+  // occupies the single physical slot (no flush, so no TX result), which
+  // holds the second copy queued while the origin expires; the expired
+  // record is then evicted synchronously, before any dispatch can run.
+  // The STALE_JOB_DROPPED diagnostic carries the taken job's peer and
+  // MessageId, never zeros.
   GroupPowerWorld w;
   w.converge();
   TestSecurity security_c;
@@ -5204,45 +4687,37 @@ void test_evicted_origin_jobs_never_dispatch() {
     w.now += 50;
   }
   CHECK(w.a.scoped_child(3));
-  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                               w.events);
-  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                               ElapsedInterval{0, 0, false}, w.now));
   const std::array<std::uint8_t, 3> payload{{'o', 'l', 'd'}};
   GroupSendOptions options{};
-  options.lifetime_ms = 10000;
+  // Expires while the driver is stuck; the 1000 ms callback watchdog must
+  // not fire first, or the hold would release early.
+  options.lifetime_ms = 300;
   MessageId old_id{};
   CHECK_OK(w.a.send_group(kGroupAll, ByteView{payload.data(), payload.size()},
                           options, w.now, old_id));
   CHECK(w.a.group_stats().copies_queued == 2);  // one copy per leaf
   // Silence the old frame everywhere until the eviction purge below:
-  // pre-abort airtime is legitimate, but none of it may reach an app.
+  // setup airtime is legitimate, but none of it may reach an app.
   g_drop_type = FrameType::GroupData;
   g_drop_to = kInvalidNodeId;
   g_drop_sequence = old_id.sequence;
   w.net.silent_drop = group_loss_hook;
-  bool aborted = false;
-  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
-    if (!aborted && result.state == DeliveryState::Failed &&
-        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
-      aborted = true;
-      CHECK_OK(coordinator.sleep_abort("EVICTED_ORIGIN"));
-    }
-  };
-  SleepRequest request{};
-  request.pending_policy = SleepWorkPolicy::Fail;
-  CHECK_OK(coordinator.sleep_prepare(request, w.now));
-  // No flush until the abort landed: leftover jobs freeze in the queues.
-  for (int i = 0; i < 400 && !aborted; ++i) {
-    coordinator.poll(w.now);
+  w.a.poll(w.now);  // first copy into physical; no flush, so no TX result
+  // Let the origin expire with the driver stuck: the expiry marks it
+  // GROUP_INCOMPLETE while dispatch stays blocked on the physical slot,
+  // so the leftover copy is still queued afterwards.
+  for (int i = 0; i < 400 &&
+                  !sleep_verdict_terminal(w.a.group_delivery(old_id).state);
+       ++i) {
+    w.a.poll(w.now);
     w.b.poll(w.now);
     c.poll(w.now);
     w.now += 5;
   }
-  CHECK(aborted);
-  CHECK(coordinator.state() == PowerState::Running);
-  w.observer_a.on_group_fn = nullptr;
-  // Evict the settled record synchronously — no polls between the abort
+  CHECK(w.a.group_delivery(old_id).state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.a.group_delivery(old_id).reason, "GROUP_INCOMPLETE") ==
+        0);
+  // Evict the terminal record synchronously — no polls between the expiry
   // and the eviction, so the leftover copy is still queued.
   GroupSendOptions urgent{};
   urgent.priority = Priority::Urgent;
@@ -5254,13 +4729,25 @@ void test_evicted_origin_jobs_never_dispatch() {
                             urgent, w.now, id));
   }
   CHECK(std::strcmp(w.a.group_delivery(old_id).reason, "NOT_FOUND") == 0);
-  // Purge pre-abort airtime while the silence still holds, then open the
+  // Other origins may drop their own stale retries below; only the old
+  // copy's diagnostic must carry its peer and id.
+  bool matched_old = false;
+  NodeId stale_peer = kInvalidNodeId;
+  w.observer_a.on_diag_fn = [&](const char* reason, NodeId peer,
+                                const MessageId* message) {
+    if (std::strcmp(reason, "STALE_JOB_DROPPED") == 0 && message != nullptr &&
+        *message == old_id) {
+      matched_old = true;
+      stale_peer = peer;
+    }
+  };
+  // Purge setup airtime while the silence still holds, then open the
   // lane: only post-eviction transmissions could reach a leaf now.
   w.net.flush(w.now);
   w.net.silent_drop = nullptr;
   drop_all_reports();
   for (int i = 0; i < 100; ++i) {
-    coordinator.poll(w.now);
+    w.a.poll(w.now);
     w.b.poll(w.now);
     c.poll(w.now);
     w.net.flush(w.now);
@@ -5273,14 +4760,56 @@ void test_evicted_origin_jobs_never_dispatch() {
     CHECK(!(receipt.info.key.id == old_id));
   }
   CHECK(w.observer_a.has_diag("STALE_JOB_DROPPED"));
+  CHECK(matched_old);
+  CHECK(stale_peer == GroupPowerWorld::kLeaf || stale_peer == 3);
 }
 
-void test_request_storm_stays_bounded() {
-  // Abort/prepare storms from every callback: the one-slot box absorbs
-  // duplicates (first wins, rest Busy), repeated abort/prepare cycles stay
-  // consistent, and a quiet attempt still reaches READY afterwards.
+void test_stale_unicast_drop_reports_taken_job() {
+  // A queued unicast retry for a cancelled (terminal) delivery is dropped
+  // at dispatch — never sent — and the STALE_JOB_DROPPED diagnostic
+  // carries the taken job's peer and MessageId, never zeros (unicast leg
+  // of the evicted-origin diagnostic contract above).
+  GroupPowerWorld w;
+  w.converge();
+  const std::array<std::uint8_t, 3> payload{{'s', 't', '!'}};
+  MessageId id{};
+  SendOptions send_options{};
+  CHECK_OK(w.a.send(GroupPowerWorld::kLeaf,
+                    ByteView{payload.data(), payload.size()}, send_options,
+                    w.now, id));
+  CHECK_OK(w.a.cancel(id));  // terminal; the queued job stays behind
+  NodeId stale_peer = kInvalidNodeId;
+  MessageId stale_id{};
+  bool stale_has_id = false;
+  w.observer_a.on_diag_fn = [&](const char* reason, NodeId peer,
+                                const MessageId* message) {
+    if (std::strcmp(reason, "STALE_JOB_DROPPED") == 0) {
+      stale_peer = peer;
+      stale_has_id = message != nullptr;
+      if (message != nullptr) stale_id = *message;
+    }
+  };
+  for (int i = 0; i < 20; ++i) {
+    w.a.poll(w.now);
+    w.b.poll(w.now);
+    w.net.flush(w.now);
+    w.now += 5;
+  }
+  CHECK(w.observer_a.has_diag("STALE_JOB_DROPPED"));
+  CHECK(stale_peer == GroupPowerWorld::kLeaf);
+  CHECK(stale_has_id);
+  CHECK(stale_id == id);
+  for (const auto& message : w.observer_b.messages) {
+    CHECK(!(message.key.id == id));
+  }
+}
+
+void test_callback_storm_all_busy() {
+  // Storms from every callback: each call is Busy and changes nothing —
+  // no box to wedge, no history to bound. Afterwards a quiet attempt
+  // still reaches READY.
   {
-    // Five expiries in one poll, each preparing: one queued, four Busy.
+    // Five expiries in one poll, each preparing: all Busy, no attempt.
     MemoryPowerStorage storage;
     MatrixWorld w;
     CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
@@ -5303,208 +4832,76 @@ void test_request_storm_stays_bounded() {
     w.now += 10;
     w.coordinator.poll(w.now);
     CHECK(got.size() == 5);
-    CHECK(got[0] == StatusCode::Ok);
-    for (std::size_t i = 1; i < got.size(); ++i) {
-      CHECK(got[i] == StatusCode::Busy);
+    for (const StatusCode code : got) {
+      CHECK(code == StatusCode::Busy);
     }
-    // Exactly one attempt starts from the storm and runs to READY.
+    // Nothing started from the storm; a quiet prepare runs to READY.
+    CHECK(w.coordinator.state() == PowerState::Running);
+    CHECK(!w.events.saw(PowerState::Running, PowerState::Draining,
+                        "SLEEP_PREPARE"));
+    SleepRequest request{};
+    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
     CHECK(w.pump_until(PowerState::ReadyToSleep));
-    std::size_t prepares = 0;
-    for (const auto& t : w.events.transitions) {
-      if (t.from == PowerState::Running && t.to == PowerState::Draining) {
-        ++prepares;
-      }
-    }
-    CHECK(prepares == 1);
   }
   {
-    // Abort/prepare storm from every PREPARE transition: three forced
-    // cycles, then the last queued prepare runs to READY. Afterwards an
-    // activity storm (100 merged vetoes) absorbs cleanly and a quiet run
-    // still reaches READY — the box never wedges, history stays bounded.
+    // Abort/prepare storm from the PREPARE transition: all Busy, so the
+    // single outside prepare runs to READY undisturbed. Afterwards an
+    // activity storm (100 outside signals) aborts the READY attempt on
+    // the first signal and a quiet run still reaches READY.
     MemoryPowerStorage storage;
     MatrixWorld w;
     CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
                                  ElapsedInterval{0, 0, false}, w.now));
     w.pump(60);
-    int cycles = 0;
+    int storms = 0;
     w.events.on_transition_fn = [&](PowerState from, PowerState to,
                                     const char*) {
-      if (from == PowerState::Running && to == PowerState::Draining &&
-          cycles < 3) {
-        ++cycles;
-        CHECK_OK(w.coordinator.sleep_abort("STORM"));
+      if (from == PowerState::Running && to == PowerState::Draining) {
+        ++storms;
+        CHECK(w.coordinator.sleep_abort("STORM").code == StatusCode::Busy);
         SleepRequest retry{};
-        CHECK_OK(w.coordinator.sleep_prepare(retry, w.now));
+        CHECK(w.coordinator.sleep_prepare(retry, w.now).code ==
+              StatusCode::Busy);
       }
     };
     SleepRequest request{};
     CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-    CHECK(w.pump_until(PowerState::ReadyToSleep, 900));
-    CHECK(cycles == 3);
+    CHECK(w.pump_until(PowerState::ReadyToSleep));
+    CHECK(storms == 1);  // the one outside prepare; nothing re-armed it
     w.events.on_transition_fn = nullptr;
     for (int i = 0; i < 100; ++i) {
-      w.coordinator.notify_app_event();
-      w.coordinator.notify_radio_reset();
+      CHECK_OK(w.coordinator.notify_app_event());
+      CHECK_OK(w.coordinator.notify_radio_reset());
     }
-    CHECK(w.pump_until(PowerState::Running));
+    CHECK(w.coordinator.state() == PowerState::Running);
     CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
     CHECK(w.pump_until(PowerState::ReadyToSleep));
     CHECK(w.events.transitions.size() < 60);
   }
 }
 
-void test_callback_arguments_copied_at_receipt() {
-  // Stack-owned submit arguments are value-copied at receipt: overwriting
-  // the caller's buffers afterwards cannot change the queued request.
-  {
-    // Prepare request: queued as Defer, caller buffer flipped to Fail.
-    MemoryPowerStorage storage;
-    GroupPowerWorld w;
-    w.converge();
-    PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
-                                 w.events);
-    CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    const std::array<std::uint8_t, 3> payload{{'c', 'p', '!'}};
-    std::array<MessageId, 2> ids{};
-    SendOptions send_options{};
-    for (auto& id : ids) {
-      CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
-                        send_options, w.now, id));
-    }
-    bool ran = false;
-    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (ran || result.state != DeliveryState::Failed ||
-          std::strcmp(result.reason, "SLEEP_DRAIN") != 0) {
-        return;
-      }
-      ran = true;
-      CHECK_OK(coordinator.sleep_abort("COPY"));
-      SleepRequest retry{};  // stack-owned: Defer at submit time...
-      retry.pending_policy = SleepWorkPolicy::Defer;
-      CHECK_OK(coordinator.sleep_prepare(retry, w.now));
-      retry.pending_policy = SleepWorkPolicy::Fail;  // ...Fail afterwards
-    };
-    SleepRequest request{};
-    request.pending_policy = SleepWorkPolicy::Fail;
-    CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
-    CHECK(ran);
-    // The queued Defer won: the survivor is deferred, not drained.
-    CHECK(w.a.delivery(ids[1]).state == DeliveryState::Indeterminate);
-    CHECK(std::strcmp(w.a.delivery(ids[1]).reason, "SLEEP_DEFERRED") == 0);
-  }
-  {
-    // Enter ticket: queued from a stack copy, caller copy corrupted after.
-    MemoryPowerStorage storage;
-    PowerWorld w(storage);
-    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    w.pump(60);
-    SleepRequest request{};
-    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-    CHECK(w.pump_until(PowerState::ReadyToSleep));
-    // A second ticket issue is impossible here; queue the enter from the
-    // SLEEP_READY retry path instead: abort from outside, re-prepare, and
-    // queue the enter from the new SLEEP_READY notification with a stack
-    // ticket that is corrupted right after the call.
-    CHECK_OK(w.coordinator.sleep_abort("COPY2"));
-    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-    bool ran = false;
-    w.events.on_transition_fn = [&](PowerState from, PowerState to,
-                                    const char* reason) {
-      if (ran || from != PowerState::Persisting ||
-          to != PowerState::ReadyToSleep ||
-          std::strcmp(reason, "SLEEP_READY") != 0) {
-        return;
-      }
-      ran = true;
-      SleepTicket stack = w.coordinator.ticket();
-      CHECK_OK(w.coordinator.sleep_enter(stack, w.now));
-      stack.id = 999;  // corrupt the caller's buffer after receipt
-      stack.issued = false;
-    };
-    CHECK(w.pump_until(PowerState::Sleeping, 600));
-    CHECK(ran);
-    CHECK(w.port.sleep_calls == 1);
-  }
-  {
-    // Abort reasons: receipt-time bytes, bounded, always NUL-terminated.
-    auto reason_case = [&](const char* submit, const char* want) {
-      MemoryPowerStorage storage;
-      MatrixWorld w;
-      CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
-                                   ElapsedInterval{0, 0, false}, w.now));
-      w.pump(60);
-      const std::array<std::uint8_t, 3> payload{{'r', 's', '!'}};
-      MessageId id{};
-      SendOptions send_options{};
-      send_options.lifetime_ms = 5000;
-      CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
-                           send_options, w.now, id));
-      bool ran = false;
-      w.observer.on_delivery_fn = [&](const DeliveryResult& result) {
-        if (ran || result.state != DeliveryState::Failed ||
-            std::strcmp(result.reason, "SLEEP_DRAIN") != 0) {
-          return;
-        }
-        ran = true;
-        CHECK_OK(w.coordinator.sleep_abort(submit));
-      };
-      SleepRequest request{};
-      CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-      CHECK(w.pump_until(PowerState::Running));
-      CHECK(ran);
-      CHECK(w.events.has_diag(want));
-    };
-    reason_case(nullptr, "SLEEP_ABORT_REQUEST");
-    const std::string r63(63, 'A');
-    reason_case(r63.c_str(), r63.c_str());  // fits exactly
-    const std::string r64(64, 'B');
-    const std::string r63b(63, 'B');
-    reason_case(r64.c_str(), r63b.c_str());  // truncated to 63 + NUL
-    const std::string rlong(100, 'C');
-    const std::string r63c(63, 'C');
-    reason_case(rlong.c_str(), r63c.c_str());
-    // Overwrite-after-submit: the queued bytes win, not the later ones.
-    MemoryPowerStorage storage;
-    MatrixWorld w;
-    CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
-                                 ElapsedInterval{0, 0, false}, w.now));
-    w.pump(60);
-    const std::array<std::uint8_t, 3> payload{{'r', 's', '!'}};
-    MessageId id{};
-    SendOptions send_options{};
-    send_options.lifetime_ms = 5000;
-    CHECK_OK(w.node.send(9, ByteView{payload.data(), payload.size()},
-                         send_options, w.now, id));
-    bool ran = false;
-    w.observer.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (ran || result.state != DeliveryState::Failed ||
-          std::strcmp(result.reason, "SLEEP_DRAIN") != 0) {
-        return;
-      }
-      ran = true;
-      char reason[64];
-      std::memset(reason, 'Q', sizeof(reason) - 1);
-      reason[sizeof(reason) - 1] = '\0';
-      CHECK_OK(w.coordinator.sleep_abort(reason));
-      std::memset(reason, 'Z', sizeof(reason) - 1);  // overwrite after
-    };
-    SleepRequest request{};
-    CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
-    CHECK(w.pump_until(PowerState::Running));
-    CHECK(ran);
-    CHECK(w.events.has_diag(std::string(63, 'Q').c_str()));
-    CHECK(!w.events.has_diag("ZZZ"));
-  }
+void test_enter_copies_aliased_ticket() {
+  // sleep_enter value-copies its ticket at receipt: passing
+  // coordinator.ticket() itself — a reference to the live member — works,
+  // because the submitted copy cannot be corrupted by later calls.
+  MemoryPowerStorage storage;
+  PowerWorld w(storage);
+  CHECK_OK(w.coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  w.pump(60);
+  SleepRequest request{};
+  CHECK_OK(w.coordinator.sleep_prepare(request, w.now));
+  CHECK(w.pump_until(PowerState::ReadyToSleep));
+  CHECK_OK(w.coordinator.sleep_enter(w.coordinator.ticket(), w.now));
+  CHECK(w.coordinator.state() == PowerState::Sleeping);
+  CHECK(w.port.sleep_calls == 1);
 }
 
 void test_abort_never_erases_committed_snapshot() {
-  // Aborting mid-settlement is RAM-only: a power cut right after still
-  // conservatively restores the COMMITTED candidate (both records) on a
-  // fresh incarnation. No durable-cancel claim exists — and none is made.
+  // Aborting a READY attempt from OUTSIDE is RAM-only: a power cut right
+  // after still conservatively restores the COMMITTED candidate (both
+  // records) on a fresh incarnation. No durable-cancel claim exists —
+  // and none is made.
   MemoryPowerStorage storage;
   MessageId id_a{};
   MessageId id_b{};
@@ -5522,22 +4919,16 @@ void test_abort_never_erases_committed_snapshot() {
                       send_options, w.now, id_a));
     CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
                       send_options, w.now, id_b));
-    bool aborted = false;
-    w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
-      if (!aborted && result.state == DeliveryState::Indeterminate) {
-        aborted = true;
-        CHECK_OK(coordinator.sleep_abort("CUT"));
-      }
-    };
     SleepRequest request{};
     request.pending_policy = SleepWorkPolicy::Save;
     CHECK_OK(coordinator.sleep_prepare(request, w.now));
-    CHECK(w.run_until(coordinator, w.b, PowerState::Running));
-    CHECK(aborted);
+    CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+    CHECK_OK(coordinator.sleep_abort("CUT"));
+    CHECK(coordinator.state() == PowerState::Running);
   }
   {
     // Fresh incarnation, same storage: the committed {A, B} candidate is
-    // restored wholesale — the RAM-only settlement is simply gone.
+    // restored wholesale.
     GroupPowerWorld w;
     w.converge();
     FakePowerPort fresh_port;
@@ -5682,12 +5073,8 @@ static_assert(noexcept(std::declval<MeshNode&>().settle_one_sleep_group_origin(
 static_assert(
     noexcept(std::declval<MeshNode&>().release_one_group_hold_for_sleep()),
     "release_one_group_hold_for_sleep is noexcept");
-static_assert(
-    noexcept(std::declval<MeshNode&>().quiesce_notice_for_sleep()),
-    "quiesce_notice_for_sleep is noexcept");
-static_assert(
-    noexcept(std::declval<MeshNode&>().quiesce_teardown_for_sleep()),
-    "quiesce_teardown_for_sleep is noexcept");
+static_assert(noexcept(std::declval<MeshNode&>().quiesce_for_sleep()),
+              "quiesce_for_sleep is noexcept");
 static_assert(noexcept(std::declval<MeshNode&>().resume_delivery(
                   MessageId{}, NodeId{}, ByteView{}, SendOptions{},
                   MonotonicMs{})),
@@ -5765,53 +5152,43 @@ int main() {
   test_group_sleep_policy_defer();
   test_group_ordered_hold_released_for_sleep();
   test_group_sleep_commit_failure_keeps_state();
-  test_group_settled_callback_abort_new_send();
-  test_unicast_disposition_callback_abort_new_send();
+  test_group_settled_callback_abort_busy_send_refused();
+  test_unicast_disposition_callback_abort_busy_send_refused();
   test_disposition_callback_send_refused();
-  test_settlement_abort_reprepare_stops_old_policy();
-  test_poll_delivery_callback_abort_stops_drain();
-  test_settlement_callback_app_event_invalidates_ticket();
-  test_ready_transition_callback_abort_not_overwritten();
+  test_callback_abort_prepare_abort_busy_outside_works();
+  test_poll_delivery_callback_abort_busy_drain_continues();
+  test_settlement_callback_app_event_busy_ticket_survives();
+  test_ready_transition_callback_abort_busy_ticket_survives();
   test_group_repair_not_waited_by_drain();
-  test_poll_unicast_callback_abort_stops_drain();
-  test_unicast_settlement_callback_app_event_vetoes();
-  test_save_abort_fail_carries_only_settled();
-  test_save_abort_fail_durable_saved_again();
-  test_tx_notice_abort_keeps_queues();
-  test_sleep_hold_release_abort_keeps_rest();
-  test_sleep_hold_release_abort_multi_stream();
-  test_carry_expired_callback_app_event_vetoes();
-  test_enter_expired_callback_app_event_vetoes();
-  test_callback_operation_matrix_model();
-  test_family_group_delivery_ops();
-  test_family_group_message_ops();
-  test_family_pending_result_ops();
-  test_family_tx_notice_ops();
-  test_family_normal_message_ops();
-  test_family_power_diagnostic_ops();
-  test_family_applied_and_sink_ops();
-  test_family_begin_wake_ops();
-  test_callback_radio_reset_vetoes();
+  test_poll_unicast_callback_abort_busy_drain_continues();
+  test_unicast_settlement_callback_app_event_busy();
+  test_save_outside_abort_retry_fail();
+  test_save_outside_abort_durable_saved_again();
+  test_tx_notice_callback_busy_quiesce_completes();
+  test_sleep_hold_release_callback_busy_releases_all();
+  test_sleep_hold_release_callback_busy_multi_stream();
+  test_carry_expired_callback_app_event_busy();
+  test_enter_expired_callback_app_event_busy();
+  test_callback_busy_matrix();
+  test_callback_radio_reset_busy_outside_aborts();
   test_recursive_coordinator_drive_rejected();
-  test_node_callback_defers_without_driving();
-  test_group_origin_sequences();
-  test_hold_release_sequences();
-  test_callback_requests_have_no_immediate_effect();
-  test_settlement_stops_at_cancelled_item();
+  test_callback_busy_freezes_machine();
   test_late_activity_invalidates_waiting_ticket();
-  test_enter_notify_op_matrix();
+  test_enter_notify_busy_matrix();
   test_enter_stage_faults_abort_cleanly();
   test_phase1_faults_keep_work_live();
-  test_partial_carry_policy_matrix();
+  test_retry_policy_matrix_after_outside_abort();
   test_carry_overflow_keeps_carry_fails_fresh();
-  test_carry_abort_mid_settlement_restores_on_new_node();
+  test_carry_settlement_callback_busy_restores_on_new_node();
   test_carry_same_id_replaced_by_fresh();
+  test_carry_same_id_callback_busy_restores_new();
   test_carry_survives_history_eviction();
-  test_retry_after_empty_carry_commit();
+  test_retry_after_outside_abort_plans_live_only();
   test_settled_verdicts_survive_stale_jobs();
   test_evicted_origin_jobs_never_dispatch();
-  test_request_storm_stays_bounded();
-  test_callback_arguments_copied_at_receipt();
+  test_stale_unicast_drop_reports_taken_job();
+  test_callback_storm_all_busy();
+  test_enter_copies_aliased_ticket();
   test_abort_never_erases_committed_snapshot();
   test_sleep_path_uses_no_heap();
   if (failures == 0) {

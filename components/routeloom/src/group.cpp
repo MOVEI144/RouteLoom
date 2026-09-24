@@ -1168,8 +1168,7 @@ SleepHoldRelease MeshNode::release_one_group_hold_for_sleep() noexcept {
     stream->next_seq = seq + 1U;
   }
   // Exactly one hand-off: the trailing group_drain() that group_skip_to runs
-  // is deliberately NOT run, so a callback veto stops the release here with
-  // the remaining holds kept.
+  // is deliberately NOT run, so this call releases exactly one message.
   group_deliver_app(info, ByteView{payload.data(), size});
   return SleepHoldRelease::Released;
 }

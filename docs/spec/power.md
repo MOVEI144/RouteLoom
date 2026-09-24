@@ -14,14 +14,13 @@ v1で認定する形はALWAYS_RXとDEEP_SLEEP_REPORT。同期した短い受信�
 
 推奨APIはsleep_prepare→app最終確認→sleep_enterの二段階。prepareは受付結果（Status）を返すだけで、ticketはREADY_TO_SLEEP到達後に `ticket()` で取得する。ticketは発行時のradio世代・設定改訂・pending世代を束縛する。発行後の `send()`（拒否された送信を含む）はticketを無効化する。prepare後に新仕事が入ったままsleepしない。
 
-SDK callback（`NodeObserver`、`PowerEvents`）内からの操作は即時実行ではなく有界要求として登録され、coordinatorの安全点（work単位の復帰直後）で適用される。callback内の受付（`Ok` / `POWER_REQUEST_QUEUED`）は完了を意味しない。callback内で受理されたabortはそのcallback内の `send` / `send_group` を `NODE_DRAINING` のままにし、admissionはRUNNING復帰後に開く。deferされたprepare/enterは次の外側 `poll()` 入口でのみ開始する。abort後の再prepareは新試行であり、旧試行の精算・ticket発行・遷移を再開しない。abortは既精算のverdictとcommit済みsnapshotを消さない。
+SDK callback（`NodeObserver`、`PowerEvents`）の実行中はcoordinatorのmutating API（`sleep_abort` / `sleep_prepare` / `notify_app_event` / `notify_radio_reset` / `sleep_enter` / `wake` / `begin`）を `Busy` で拒否し、状態を一切変えない（`poll()` は無言のno-op）。アプリはcallbackから戻った後に呼び直す。node側の `send()` / `send_group()` はdrain中も従来どおりpause（`NODE_DRAINING`）で拒否されるだけで、coordinator経由の呼び直し規則の対象外である。abortは既精算のverdictとcommit済みsnapshotを消さない。
 
 ### 2.1 callback再入契約
 
-- coordinatorは単一owner APIであり、callback内から `begin` / `wake` / `poll` を再帰駆動しない。callback中の要求は固定欄（prepare 1・enter 1・abort理由 1・activity latch 1）へ正規化され、再入のたびにheapを使わず上書き記録する。
-- 競合規則：abort→prepareは新試行を次pollで開始、abort→sendは拒否（再送はアプリ責任）、再prepare中の再prepareは `Busy`、enter要求は受理後にveto可能。callbackが観測する `state()` とdrain maskは安全点まで変わらない。
-- 安全点はwork単位の復帰直後：通常Node handlerは完走、sleep精算は1項目、ORDERED hold強制放出は本文1件ごとに中断点を置く。abort/activityは次のsleep処分・強制放出・teardown・sleep entryより前に適用する。
-- 精算は2 phase：phase 1は候補（candidate）の計画とcommitだけで配送状態を変えず（durable所有権は確定しない）、phase 2でticket発行前に1件ずつ所有権を確定して通知し、 `READY_TO_SLEEP` へ進む。abortは未確定の残りを破棄し、確定済みだけを次試行へcarryする。commit済みsnapshotはabortで消さず、NVS crash境界は変えない。候補が足りない時は未通知のcarryを優先し、入り切らない新規分は `SLEEP_PERSIST_FULL` で明示失敗させる。
+- coordinatorは単一owner APIであり、callback内から `begin` / `wake` / `poll` を再帰駆動しない。callback中のmutating操作は記録も遅延実行もせず `Busy` で拒否する。
+- callbackが観測する `state()` とdrain maskはcallback中は変わらない。精算・hold放出・teardown・sleep entryはcallbackを挟んでも中断されない：abortは精算の途中には入らず、前か後にだけ入る。
+- 精算は2 phase：phase 1は候補（candidate）の計画とcommitだけで配送状態を変えず（durable所有権は確定しない）、phase 2でticket発行前に1件ずつ所有権を確定して通知し、 `READY_TO_SLEEP` へ進む。commit済みsnapshotはabortで消さず、NVS crash境界は変えない。候補が足りない時は未通知のcarryを優先し、入り切らない新規分は `SLEEP_PERSIST_FULL` で明示失敗させる。
 - ticketは `READY_TO_SLEEP` 到達後に `ticket()` で取得する。quiesce時点でdriverに残る物理TXは結果不明のまま `SLEEP_TX_INFLIGHT` として診断に記録し（成功の捏造なし）、発行後の送信（拒否を含む）・RX・GPIO・config変更・radio resetはticketを無効化する。`sleep_enter()` はticketを複写し、entry通知の完了後にplatform引渡し直前で再検証する。1 ticketの消費は最大1回のplatform呼出し。
 - GroupはRAMのみでsleep image対象外：収集中roundの完了を待ち、commit成功後に未決着originをpolicy別に終端し、ORDERED holdを1件ずつ放出する（[group-delivery §10](../design/sdk-v1/group-delivery.md)）。repair roundはdrain中に開始せず `kRetryRounds` で止まる。
 
@@ -77,6 +76,6 @@ wake性能はwarm RTC/context resume、cold同相手、new peer auth、channel r
 
 Portable `PowerCoordinator`（`components/routeloom/include/routeloom/power.hpp`）が§2の二段階手順を実装する。状態はRUNNING→DRAINING→PERSISTING→READY_TO_SLEEP→SLEEPING→RESUMING→RUNNINGに限定し、遷移は全て明示でbounded。`SleepTicket`はradio世代・config revision・pending仕事世代・アプリイベント世代に結び付き、新規TX・RX・アプリイベント・config変更・radio resetで無効化される。SLEEPINGへはREADY_TO_SLEEPかつ有効ticketからのみ入る。
 
-§3の未完了メッセージはFail／Save／Deferの契約へ移し、保存はCRC付き2スロットの電源imageへ入る。§5の復帰はcold bootとdeep-sleep wakeを別入力として起動処理を通り、保存peer→bounded確認窓→失敗時のみ限定discoveryの順で進む。経過時間が不明なdurable pendingは`TIME_UNCERTAIN`で止め、自動再送しない。host model試験で全遷移、ticket無効化、各policy、電源断を跨ぐcounter非後退、cold/resume分離を確認した。callback×操作の網羅（要求正規化モデルとの比較、全callback family、enter前後を含む境界）と、carry/候補の不変条件・部分carry・段階別fault・要求storm・arg寿命・heap不使用も回帰試験する。
+§3の未完了メッセージはFail／Save／Deferの契約へ移し、保存はCRC付き2スロットの電源imageへ入る。§5の復帰はcold bootとdeep-sleep wakeを別入力として起動処理を通り、保存peer→bounded確認窓→失敗時のみ限定discoveryの順で進む。経過時間が不明なdurable pendingは`TIME_UNCERTAIN`で止め、自動再送しない。host model試験で全遷移、ticket無効化、各policy、電源断を跨ぐcounter非後退、cold/resume分離を確認した。全callback family×全mutating操作の再入禁止表（Busyと状態凍結、enter前後を含む）と、carry/候補の不変条件・段階別fault・storm・arg寿命・heap不使用も回帰試験する。
 
 ESP-NOW側は`EspNowPowerPort`とNVS image adapterを実装し、reference firmwareは`ROUTELOOM_DEEP_SLEEP`選択時のみ`esp_deep_sleep_start`経路・RTC marker・wake原因分類を配線する（build-tested）。`enter_sleep`はdeep sleep突入直前に`esp_wifi_stop()`を実施し、`esp_deep_sleep_start`が復帰した場合のみ`esp_wifi_start()`でabort経路のradioを復帰させる（issue #34）。bounded discoveryはESP-NOW adapterが現状UNSUPPORTEDを返す。実機の消費電流、wake timing、RTC経過時間、RF挙動は未試験であり、本節をHIL証拠として扱わない。

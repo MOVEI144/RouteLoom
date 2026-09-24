@@ -16,11 +16,15 @@ namespace routeloom {
 // coordinator never skips DRAINING or PERSISTING on the way to SLEEPING.
 enum class PowerState : std::uint8_t {
   Running = 0,
-  Draining,       // background work stopped, in-flight TX settling
-  Persisting,     // sleep image being committed to durable storage
-  ReadyToSleep,   // image committed, radio quiesced, ticket issued
-  Sleeping,       // enter_sleep accepted (real deep sleep does not return)
-  Resuming,       // restore path after boot/wake, waiting for peer confirm
+  Draining,      // background work stopped, in-flight TX settling
+  Persisting,    // sleep image being committed to durable storage
+  ReadyToSleep,  // image committed, radio quiesced, ticket issued
+  // Platform handoff in progress, or accepted: the SLEEP_ENTER transition
+  // runs before configure_wake()/enter_sleep(), so an app that sees
+  // SLEEPING must not assume the platform already sleeps — a failed wake
+  // setup still aborts back to RUNNING from here.
+  Sleeping,
+  Resuming,  // restore path after boot/wake, waiting for peer confirm
 };
 
 // Boot classification input. Cold boot and deep-sleep resume are distinct
@@ -177,33 +181,6 @@ struct SleepRequest {
 const char* power_state_name(PowerState state) noexcept;
 const char* resume_outcome_name(ResumeOutcome outcome) noexcept;
 
-// Deferred sleep request box. Operations issued from an application
-// callback (or while a coordinator worker runs) are recorded here as
-// plain values — acceptance, never execution — and applied at coordinator
-// safe points. One prepare, one enter, one abort reason, one sticky latch
-// each for app activity and radio reset; no queue can overflow.
-struct DeferredPowerRequests {
-  bool abort{false};
-  bool app_event{false};
-  bool radio_reset{false};
-  bool prepare{false};
-  bool enter{false};
-  // First abort reason wins (NUL-terminated). prepare_after_abort records
-  // whether the queued prepare was accepted after the queued abort: an
-  // abort cancels an older prepare, while a newer one belongs to the next
-  // poll and survives it.
-  std::array<char, 64> abort_reason{};
-  bool prepare_after_abort{false};
-  SleepRequest prepare_value{};
-  MonotonicMs prepare_requested_at{0};
-  SleepTicket enter_value{};
-  MonotonicMs enter_requested_at{0};
-  // Deferred positive requests start at a later outer poll() only, never
-  // chained inside the poll that accepted them.
-  std::uint64_t prepare_not_before_poll{0};
-  std::uint64_t enter_not_before_poll{0};
-};
-
 // Phase-1 plan for one carry slot: what the settlement must do with it.
 enum class CarryPlanKind : std::uint8_t {
   Unused = 0,  // carry slot free
@@ -219,13 +196,13 @@ class PowerCoordinator {
                    PowerStorage& storage, PowerEvents& events) noexcept;
 
   // Single-owner API; not an ISR or concurrent-thread interface.
-  // Calls made from SDK application callbacks enqueue bounded requests only.
-  // Ok in a callback means accepted, not completed; state() and the drain
-  // mask do not change until a coordinator safe point.
-  // Deferred prepare/enter requests start at a subsequent outer poll().
-  // Abort/activity is applied after the current work unit and before the
-  // next sleep disposition, forced hold release, teardown, or sleep entry.
-  // Do not recursively drive begin(), wake(), or poll() from callbacks.
+  // No re-entry from application callbacks: while a callback issued
+  // through PowerEvents — or through NodeObserver / an extended sink on
+  // this coordinator's node — runs, every mutating call below returns
+  // Busy and changes nothing; poll() is a silent no-op there. Call them
+  // after the callback returns. The node side is unaffected: send() and
+  // send_group() stay callable and are refused by the drain pause while
+  // draining (a refused send still retires the ticket's generation).
 
   // Boot classification; call exactly once before polling. `elapsed` is the
   // trusted slept-time interval from the platform clock; known=false parks
@@ -236,16 +213,16 @@ class PowerCoordinator {
   // Two-phase sleep: prepare stops new work and starts the bounded drain;
   // when the image is persisted and the radio quiesced a ticket is issued.
   Status sleep_prepare(const SleepRequest& request, MonotonicMs now_ms) noexcept;
-  // Already-settled results remain settled. Unsettled live work and
-  // unreleased holds remain live. Only records whose durable ownership was
-  // finalized are carried into a later sleep attempt. An accepted abort does
-  // not reopen send admission inside the callback. A later prepare in that
-  // callback requests a new attempt on the next poll. Abort does not durably
-  // erase an already-written recovery snapshot.
+  // Settles nothing by itself: already-settled results stay settled, live
+  // work and unreleased holds stay live, and only records whose durable
+  // ownership was finalized are carried into a later attempt. An abort in
+  // READY_TO_SLEEP keeps the committed image: it aborts the entry, it does
+  // not erase the recovery snapshot. Abort never runs mid-settlement —
+  // settlement always completes, so an abort lands before it or after it.
   Status sleep_abort(const char* reason) noexcept;
-  // Only the current valid ticket may be submitted. The ticket is copied and
-  // revalidated after all entry notifications and immediately before the
-  // platform handoff. A queued request may be vetoed before execution. At
+  // Only the current valid ticket may be submitted. The ticket is copied at
+  // receipt (callers may alias ticket() itself) and revalidated after the
+  // entry notifications and immediately before the platform handoff. At
   // most one platform enter call consumes a ticket.
   Status sleep_enter(const SleepTicket& ticket, MonotonicMs now_ms) noexcept;
   // In-process model of a wake from deep sleep (real hardware re-enters via
@@ -255,18 +232,13 @@ class PowerCoordinator {
 
   void poll(MonotonicMs now_ms) noexcept;
 
-  // Application events (GPIO, sensor work, host request) invalidate tickets.
-  // The invalidation request makes ticket_valid() false at once; the state
-  // change waits for a safe point. While one is unprocessed, a new prepare
-  // is Busy.
-  void notify_app_event() noexcept {
-    ++app_events_;
-    pending_.app_event = true;
-  }
-  // External radio resets (driver recovery) invalidate tickets, same
-  // sticky-request rule as notify_app_event; the generation bump itself
-  // applies at the safe point.
-  void notify_radio_reset() noexcept { pending_.radio_reset = true; }
+  // Application events (GPIO, sensor work, host request) invalidate tickets
+  // and abort an active sleep attempt at once; without an attempt only the
+  // generation moves. Busy inside an application callback, like the calls
+  // above — the event is then the caller's to re-signal after returning.
+  Status notify_app_event() noexcept;
+  // External radio resets (driver recovery) invalidate tickets the same way.
+  Status notify_radio_reset() noexcept;
 
   PowerState state() const noexcept { return state_; }
   ResetCause reset_cause() const noexcept { return cause_; }
@@ -275,34 +247,31 @@ class PowerCoordinator {
   bool ticket_valid(const SleepTicket& ticket) const noexcept;
 
  private:
-  // Marks one coordinator worker on the stack: submit calls made under it
-  // defer instead of executing. Nesting saves/restores.
-  struct WorkerScope {
-    explicit WorkerScope(bool& flag) noexcept : flag_(flag), saved_(flag) {
+  // Marks one PowerEvents notification on the stack: mutating calls made
+  // under it are Busy-rejected instead of executing. Nesting saves/restores.
+  struct CallbackScope {
+    explicit CallbackScope(bool& flag) noexcept : flag_(flag), saved_(flag) {
       flag_ = true;
     }
-    ~WorkerScope() noexcept { flag_ = saved_; }
-    WorkerScope(const WorkerScope&) = delete;
-    WorkerScope& operator=(const WorkerScope&) = delete;
+    ~CallbackScope() noexcept { flag_ = saved_; }
+    CallbackScope(const CallbackScope&) = delete;
+    CallbackScope& operator=(const CallbackScope&) = delete;
 
    private:
     bool& flag_;
     bool saved_;
   };
-  // True for operations that must defer: inside a coordinator worker or
-  // inside a node application callback. PowerEvents notifications need no
-  // separate flag: they always run inside a coordinator worker (driving_).
-  bool deferred() const noexcept {
-    return driving_ || node_.in_external_callback();
+  // True while an application callback issued through this coordinator
+  // (PowerEvents) or its node (NodeObserver / extended sink) runs — whether
+  // or not the coordinator drives the node at the time.
+  bool in_callback() const noexcept {
+    return in_callback_ || node_.in_external_callback();
   }
   // A sleep attempt owns the machine: draining, settling, waiting for entry,
   // or inside the sleep-entry handoff.
   bool sleep_attempt_active() const noexcept {
     return state_ == PowerState::Draining || state_ == PowerState::Persisting ||
            state_ == PowerState::ReadyToSleep || entering_;
-  }
-  bool veto_pending() const noexcept {
-    return pending_.abort || pending_.app_event || pending_.radio_reset;
   }
 
   void notify_transition(PowerState from, PowerState to,
@@ -313,10 +282,7 @@ class PowerCoordinator {
   void transition(PowerState next, const char* reason) noexcept;
   std::uint32_t pending_generation() const noexcept;
   void issue_ticket() noexcept;
-  // Applies deferred abort/activity/radio-reset requests. Returns true when
-  // the caller's worker chain must stop: a veto ended an active attempt.
-  bool service_requests_at_safe_point() noexcept;
-  // Starts one attempt: drain mask, deadline, activity baseline, DRAINING.
+  // Starts one attempt: drain mask, deadline, DRAINING.
   void start_prepare(const SleepRequest& request, MonotonicMs start_at) noexcept;
   // Runs the PERSISTING settlement chain to READY_TO_SLEEP (or an abort).
   void settle_current_attempt(MonotonicMs now_ms) noexcept;
@@ -374,11 +340,8 @@ class PowerCoordinator {
   // Carry slot each candidate record is claimed into (0xFF = none).
   std::array<std::uint8_t, kPowerPendingCapacity> save_target_{};
   std::uint8_t saved_live_mask_{0};  // candidate slots claimed so far
-  DeferredPowerRequests pending_{};
-  std::uint64_t poll_serial_{0};  // outer poll() count, never wraps
-  bool driving_{false};           // a coordinator worker runs on this stack
-  bool entry_request_active_{false};  // an enter (refresh included) executes
-  bool entering_{false};  // SLEEP_ENTER handoff in progress; still vetoable
+  bool in_callback_{false};  // a PowerEvents notification runs on this stack
+  bool entering_{false};     // SLEEP_ENTER handoff in progress
   std::uint32_t image_sequence_{0};  // newest committed image sequence
   std::uint32_t next_ticket_id_{1};
   std::uint32_t radio_generation_{0};

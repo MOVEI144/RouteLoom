@@ -191,15 +191,18 @@ PowerCoordinator::PowerCoordinator(const PowerConfig& config, MeshNode& node,
 void PowerCoordinator::notify_transition(const PowerState from,
                                          const PowerState to,
                                          const char* reason) noexcept {
+  CallbackScope callback(in_callback_);
   events_.on_transition(from, to, reason);
 }
 
 void PowerCoordinator::notify_pending_result(
     const PendingDeliveryRecord& record, const StatusCode result) noexcept {
+  CallbackScope callback(in_callback_);
   events_.on_pending_result(record, result);
 }
 
 void PowerCoordinator::notify_diagnostic(const char* reason) noexcept {
+  CallbackScope callback(in_callback_);
   events_.on_diagnostic(reason);
 }
 
@@ -209,8 +212,8 @@ void PowerCoordinator::transition(const PowerState next,
   const PowerState from = state_;
   // Post-state notification: the new state is fully in effect (mask and
   // ticket updates included) before the application runs, so a callback
-  // observes `to` from state(). Re-entrant operations defer to the request
-  // box — nothing overwrites this assignment behind the notification.
+  // observes `to` from state(). Mutating calls from the callback are Busy —
+  // nothing overwrites this assignment behind the notification.
   state_ = next;
   notify_transition(from, next, reason);
 }
@@ -220,9 +223,6 @@ std::uint32_t PowerCoordinator::pending_generation() const noexcept {
 }
 
 bool PowerCoordinator::ticket_valid(const SleepTicket& ticket) const noexcept {
-  // An unprocessed abort/activity/radio-reset request already vetoes the
-  // ticket, before its state change is applied at the safe point.
-  if (veto_pending()) return false;
   return ticket.issued && ticket_.issued && ticket.id == ticket_.id &&
          ticket.radio_generation == radio_generation_ &&
          ticket.config_revision == node_.config_revision() &&
@@ -237,107 +237,62 @@ void PowerCoordinator::issue_ticket() noexcept {
 Status PowerCoordinator::begin(const ResetCause cause,
                                const ElapsedInterval elapsed,
                                const MonotonicMs now_ms) noexcept {
-  if (deferred()) {
-    return Status::error(StatusCode::Busy, "POWER_REENTRANT_DRIVE");
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
   }
   if (begun_) {
     return Status::error(StatusCode::AlreadyExists, "coordinator already begun");
   }
-  WorkerScope drive(driving_);
   begun_ = true;
   cause_ = cause;
   transition(PowerState::Resuming,
              cause == ResetCause::DeepSleepWake ? "WAKE_DEEP_SLEEP" : "BOOT");
-  service_requests_at_safe_point();
   resume_flow(cause, elapsed, now_ms);
-  service_requests_at_safe_point();
   return Status::success();
 }
 
 Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
                                        const MonotonicMs now_ms) noexcept {
-  const bool from_callback = deferred();
-  const bool abort_pending =
-      pending_.abort && sleep_attempt_active();
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
   if (!begun_ || !node_.started()) {
     return Status::error(StatusCode::InvalidState, "not running");
   }
-  // Retryable refusals first: while an activity veto stands unprocessed, or
-  // a prepare is already queued, the actionable answer is Busy — even where
-  // the state alone would also refuse. The veto resolves at the safe point
-  // (possibly to RUNNING, where a retry succeeds); "not running" would tell
-  // the application to give up instead of retrying.
-  if (pending_.app_event || pending_.radio_reset) {
-    return Status::error(StatusCode::Busy, "POWER_ACTIVITY_PENDING");
-  }
-  if (pending_.prepare) {
-    return Status::error(StatusCode::Busy, "POWER_REQUEST_PENDING");
-  }
-  if (state_ != PowerState::Running && !abort_pending) {
+  if (state_ != PowerState::Running) {
     return Status::error(StatusCode::InvalidState, "not running");
   }
-  if (poll_serial_ == UINT64_MAX || image_sequence_ == UINT32_MAX) {
+  if (image_sequence_ == UINT32_MAX) {
     return Status::error(StatusCode::CounterExhausted,
                          "SLEEP_SEQUENCE_EXHAUSTED");
-  }
-  if (from_callback) {
-    pending_.prepare = true;
-    pending_.prepare_after_abort = pending_.abort;
-    pending_.prepare_value = request;
-    pending_.prepare_requested_at = now_ms;
-    pending_.prepare_not_before_poll = poll_serial_ + 1;
-    return Status{StatusCode::Ok, "POWER_REQUEST_QUEUED"};
-  }
-  WorkerScope drive(driving_);
-  // An unprocessed veto (only reachable through a missed safe point — every
-  // worker end services) resolves before a new attempt may start.
-  service_requests_at_safe_point();
-  if (veto_pending()) {
-    return Status::error(StatusCode::Busy, "POWER_ACTIVITY_PENDING");
-  }
-  if (pending_.prepare) {
-    return Status::error(StatusCode::Busy, "POWER_REQUEST_PENDING");
   }
   start_prepare(request, now_ms);
   return Status::success();
 }
 
 Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
-  if (!sleep_attempt_active() && !pending_.prepare) {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  if (!sleep_attempt_active()) {
     return Status::error(StatusCode::InvalidState, "no sleep in progress");
   }
   if (reason == nullptr) reason = "SLEEP_ABORT_REQUEST";
-  if (deferred()) {
-    if (!pending_.abort) {
-      // First reason wins; bounded copy, always NUL-terminated.
-      std::size_t len = 0;
-      while (len + 1 < pending_.abort_reason.size() && reason[len] != '\0') {
-        pending_.abort_reason[len] = reason[len];
-        ++len;
-      }
-      pending_.abort_reason[len] = '\0';
-      pending_.abort = true;
-    }
-    return Status{StatusCode::Ok, "POWER_REQUEST_QUEUED"};
-  }
-  WorkerScope drive(driving_);
-  // An abort subsumes every veto and cancels an unstarted prepare outright:
-  // an outside abort is always "now", so nothing pending can be newer.
-  pending_.prepare = false;
-  pending_.prepare_after_abort = false;
+  // Immediate: the reason is consumed synchronously by the notification
+  // below, never retained, so no copy is needed.
   abort_to_running(reason);
   return Status::success();
 }
 
 Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
                                      const MonotonicMs now_ms) noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
   // Value-copy the ticket at receipt: callers may alias ticket() itself,
   // which later calls invalidate — the copy below stays intact.
   const SleepTicket submitted = ticket;
-  if (pending_.enter || entry_request_active_) {
-    return Status::error(StatusCode::Busy, "SLEEP_ENTER_IN_PROGRESS");
-  }
-  // Receipt gate: READY, armed image, current ticket, no unprocessed veto.
+  // Receipt gate: READY, armed image, current ticket.
   // A rejection here changes nothing — a bogus ticket alone never consumes
   // or destroys the outstanding one.
   if (!validate_enter(submitted, false)) {
@@ -349,18 +304,6 @@ Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
     }
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
-  if (deferred()) {
-    if (poll_serial_ == UINT64_MAX) {
-      return Status::error(StatusCode::CounterExhausted,
-                           "SLEEP_SEQUENCE_EXHAUSTED");
-    }
-    pending_.enter = true;
-    pending_.enter_value = submitted;
-    pending_.enter_requested_at = now_ms;
-    pending_.enter_not_before_poll = poll_serial_ + 1;
-    return Status{StatusCode::Ok, "POWER_REQUEST_QUEUED"};
-  }
-  WorkerScope drive(driving_);
   return run_enter(submitted, now_ms);
 }
 
@@ -375,7 +318,6 @@ bool PowerCoordinator::validate_enter(const SleepTicket& ticket,
   if (ticket.radio_generation != radio_generation_) return false;
   if (ticket.config_revision != node_.config_revision()) return false;
   if (ticket.pending_generation != pending_generation()) return false;
-  if (veto_pending()) return false;
   if (!image_valid_ || !sleep_image_armed_) return false;
   for (const auto plan : carry_plan_) {
     if (plan == CarryPlanKind::Expired) {
@@ -388,11 +330,9 @@ bool PowerCoordinator::validate_enter(const SleepTicket& ticket,
 
 Status PowerCoordinator::run_enter(const SleepTicket& ticket,
                                    const MonotonicMs now_ms) noexcept {
-  entry_request_active_ = true;
   // Execution-start gate: the ticket was valid at receipt; re-check before
-  // touching anything (a deferred request waited a whole poll since).
+  // touching anything.
   if (!validate_enter(ticket, false)) {
-    entry_request_active_ = false;
     abort_to_running("SLEEP_TICKET_INVALID");
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
@@ -426,7 +366,6 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
     // older image whose longer budgets would resurrect expired work.
     for (std::uint8_t copy = 0; copy < kPowerImageSlots; ++copy) {
       if (!next_image_sequence(refresh.sequence)) {
-        entry_request_active_ = false;
         ticket_ = SleepTicket{};
         sleep_image_armed_ = false;
         disk_pending_possible_ = true;
@@ -438,7 +377,6 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
       if (!commit) {
         // Abort instead of sleeping on a stale image, with no new Expired
         // notification: the refresh never landed, so nothing terminated.
-        entry_request_active_ = false;
         ticket_ = SleepTicket{};
         sleep_image_armed_ = false;
         abort_to_running(commit.detail);
@@ -452,44 +390,32 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
       }
     }
   }
-  // Terminate what the refresh dropped, one record per safe point.
+  // Terminate what the refresh dropped. The notifications below are app
+  // callbacks: a refused send from one still retires the ticket's
+  // generation, so the entry revalidates before the handoff.
   for (std::size_t i = 0; i < carry_.size(); ++i) {
     if (!carry_[i].used || !expired_mask[i]) continue;
     const PendingDeliveryRecord record = carry_[i];
     carry_[i].used = false;
     carry_plan_[i] = CarryPlanKind::Unused;
     notify_pending_result(record, StatusCode::Expired);
-    if (service_requests_at_safe_point()) {
-      entry_request_active_ = false;
-      return Status::error(StatusCode::InvalidState, "SLEEP_ABORTED");
-    }
   }
-  // The expiry notifications above are app callbacks: revalidate before the
-  // handoff — a veto there must stop the entry, not ride into sleep.
   if (!validate_enter(ticket, false)) {
-    entry_request_active_ = false;
     abort_to_running("SLEEP_TICKET_INVALID");
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   // Handoff begins. SLEEP_ENTER reports "platform handoff in progress", not
-  // proof of physical sleep: still vetoable until the port call below.
+  // proof of physical sleep: a failed wake setup still aborts from here.
   entering_ = true;
   transition(PowerState::Sleeping, "SLEEP_ENTER");
-  if (service_requests_at_safe_point()) {
-    entering_ = false;
-    entry_request_active_ = false;
-    return Status::error(StatusCode::InvalidState, "SLEEP_ABORTED");
-  }
   if (!validate_enter(ticket, true)) {
     entering_ = false;
-    entry_request_active_ = false;
     abort_to_running("SLEEP_TICKET_INVALID");
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   auto status = port_.configure_wake(request_.wake);
   if (!status) {
     entering_ = false;
-    entry_request_active_ = false;
     abort_to_running("SLEEP_ENTER_FAILED");
     return status;
   }
@@ -497,7 +423,6 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
   // between them: nothing can invalidate the ticket in this gap.
   if (!validate_enter(ticket, true)) {
     entering_ = false;
-    entry_request_active_ = false;
     abort_to_running("SLEEP_TICKET_INVALID");
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
@@ -505,7 +430,6 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
   sleep_image_armed_ = false;
   status = port_.enter_sleep();
   entering_ = false;
-  entry_request_active_ = false;
   if (!status) {
     abort_to_running("SLEEP_ENTER_FAILED");
     return status;
@@ -516,61 +440,50 @@ Status PowerCoordinator::run_enter(const SleepTicket& ticket,
 Status PowerCoordinator::wake(const ResetCause cause,
                               const ElapsedInterval elapsed,
                               const MonotonicMs now_ms) noexcept {
-  if (deferred()) {
-    return Status::error(StatusCode::Busy, "POWER_REENTRANT_DRIVE");
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
   }
   if (state_ != PowerState::Sleeping) {
     return Status::error(StatusCode::InvalidState, "not sleeping");
   }
-  WorkerScope drive(driving_);
   cause_ = cause;
   transition(PowerState::Resuming, "WAKE");
-  service_requests_at_safe_point();
   resume_flow(cause, elapsed, now_ms);
-  service_requests_at_safe_point();
+  return Status::success();
+}
+
+Status PowerCoordinator::notify_app_event() noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  ++app_events_;
+  if (sleep_attempt_active()) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+  }
+  return Status::success();
+}
+
+Status PowerCoordinator::notify_radio_reset() noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  ++radio_generation_;
+  if (sleep_attempt_active()) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+  }
   return Status::success();
 }
 
 void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
-  // Re-entrant drive is a silent no-op: no side effects, no diagnostic.
-  if (deferred()) return;
-  WorkerScope drive(driving_);
-  if (poll_serial_ != UINT64_MAX) ++poll_serial_;
-  // Entry safe point: vetoes first, so an abort applied here can never be
-  // mistaken for work the poll below is about to start.
-  service_requests_at_safe_point();
-  // Deferred positive requests start at the poll entry only — never chained
-  // inside the poll that accepted them.
-  if (pending_.prepare &&
-      pending_.prepare_not_before_poll <= poll_serial_ &&
-      state_ == PowerState::Running && !veto_pending()) {
-    const SleepRequest request = pending_.prepare_value;
-    const MonotonicMs requested_at = pending_.prepare_requested_at;
-    pending_.prepare = false;
-    pending_.prepare_after_abort = false;
-    start_prepare(request, requested_at > now_ms ? requested_at : now_ms);
-  }
-  if (pending_.enter && pending_.enter_not_before_poll <= poll_serial_) {
-    const SleepTicket ticket = pending_.enter_value;
-    const MonotonicMs requested_at = pending_.enter_requested_at;
-    pending_.enter = false;
-    if (state_ == PowerState::ReadyToSleep) {
-      // A veto between receipt and now aborts inside run_enter; the request
-      // itself is already consumed.
-      (void)run_enter(ticket, requested_at > now_ms ? requested_at : now_ms);
-    }
-    // Else: a veto cancelled the entry's attempt at the service above (any
-    // survivor would still be READY) — the request simply drops.
-  }
+  // Re-entrant drive from a callback is a silent no-op: no side effects, no
+  // diagnostic.
+  if (in_callback()) return;
   switch (state_) {
     case PowerState::Running:
       node_.poll(now_ms);
       break;
     case PowerState::Draining: {
       node_.poll(now_ms);
-      // A veto inside the node poll ends the attempt here: the same poll
-      // must not roll into the settlement on the old attempt's behalf.
-      if (service_requests_at_safe_point()) break;
       if (node_.quiesced() || now_ms >= drain_deadline_ms_) {
         settle_current_attempt(now_ms);
       }
@@ -585,7 +498,6 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
       break;
     case PowerState::Resuming:
       node_.poll(now_ms);
-      if (service_requests_at_safe_point()) break;
       // Only inbound peer traffic confirms a fast resume: a failed TX
       // callback or an app send must not count as peers answering.
       if (node_.rx_generation() != confirm_baseline_) {
@@ -606,49 +518,6 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
     case PowerState::Sleeping:
       break;
   }
-  // Trailing safe point: consume vetoes latched by this poll's last
-  // notifications (e.g. activity signalled from RESUME_CONFIRMED). Positive
-  // requests are never started here — the next poll entry owns that.
-  service_requests_at_safe_point();
-}
-
-bool PowerCoordinator::service_requests_at_safe_point() noexcept {
-  if (!veto_pending()) return false;
-  // Radio generation applies here (ticket_valid was already false via the
-  // latch). Like activity, a reset cancels unstarted positive requests —
-  // they necessarily predate it, since later submits are refused while a
-  // latch stands.
-  if (pending_.radio_reset) {
-    ++radio_generation_;
-    pending_.radio_reset = false;
-    pending_.prepare = false;
-    pending_.prepare_after_abort = false;
-    pending_.enter = false;
-  }
-  if (pending_.app_event) {
-    pending_.app_event = false;
-    pending_.prepare = false;
-    pending_.prepare_after_abort = false;
-    pending_.enter = false;
-  }
-  const char* reason = nullptr;
-  if (pending_.abort) {
-    reason = pending_.abort_reason.data();
-    // An abort cancels an OLDER pending prepare; a prepare accepted after
-    // the abort belongs to the next poll and survives it. A coexisting
-    // enter always predates the abort (abort-pending enters are refused).
-    if (pending_.prepare && !pending_.prepare_after_abort) {
-      pending_.prepare = false;
-    }
-    pending_.prepare_after_abort = false;
-    pending_.enter = false;
-    pending_.abort = false;
-  }
-  if (!sleep_attempt_active()) return false;  // latches consumed; no attempt ends
-  // An explicit abort reason wins over the activity veto; either way the
-  // attempt is over and the caller's chain must stop.
-  abort_to_running(reason != nullptr ? reason : "SLEEP_TICKET_INVALID");
-  return true;
 }
 
 void PowerCoordinator::start_prepare(const SleepRequest& request,
@@ -656,19 +525,13 @@ void PowerCoordinator::start_prepare(const SleepRequest& request,
   request_ = request;
   node_.set_draining(true);
   drain_deadline_ms_ = start_at + config_.drain_timeout_ms;
-  // Activity baseline for the attempt: no unprocessed veto may exist here
-  // (the submit checks and the poll-entry service guarantee it). Anything
-  // signalled from the SLEEP_PREPARE notification on vetoes this attempt
-  // instead of joining its baseline.
   sleep_image_armed_ = false;
   transition(PowerState::Draining, "SLEEP_PREPARE");
-  service_requests_at_safe_point();
 }
 
 void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept {
   transition(PowerState::Persisting,
              node_.quiesced() ? "DRAIN_SETTLED" : "DRAIN_DEADLINE");
-  if (service_requests_at_safe_point()) return;
   // Phase 1: plan and commit WITHOUT changing delivery state or notifying.
   // A failure here aborts with live work, carry set and holds untouched.
   plan_sleep_image(now_ms);
@@ -677,10 +540,10 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
     abort_to_running(status.detail);
     return;
   }
-  // Phase 2: the image is durable — only now settle, one item per safe
-  // point. Every callback this runs still sees PERSISTING with the node
-  // draining: send()/send_group() are refused by the drain pause, and a
-  // veto lands in RUNNING instead of racing a ticket that does not exist.
+  // Phase 2: the image is durable — only now settle. Every callback below
+  // still sees PERSISTING with the node draining: send()/send_group() are
+  // refused by the drain pause, and coordinator calls are Busy, so the
+  // settlement always runs to completion — no abort can land mid-way.
   for (std::size_t i = 0; i < carry_.size(); ++i) {
     if (carry_plan_[i] != CarryPlanKind::Expired) {
       continue;
@@ -689,15 +552,12 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
     carry_[i].used = false;
     carry_plan_[i] = CarryPlanKind::Unused;
     notify_pending_result(record, StatusCode::Expired);
-    if (service_requests_at_safe_point()) return;
   }
   while (node_.settle_one_sleep_delivery(
       request_.pending_policy,
       [&](const MessageId& id) { return claim_saved(id); })) {
-    if (service_requests_at_safe_point()) return;
   }
   while (node_.settle_one_sleep_group_origin(request_.pending_policy)) {
-    if (service_requests_at_safe_point()) return;
   }
   while (true) {
     const SleepHoldRelease released = node_.release_one_group_hold_for_sleep();
@@ -707,13 +567,8 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
       abort_to_running("GROUP_HOLD_STREAM_MISSING");
       return;
     }
-    if (service_requests_at_safe_point()) return;
   }
-  // The diagnostic and the destructive step are split by a safe point: a
-  // veto in the notice must not see its queues cleared behind it.
-  node_.quiesce_notice_for_sleep();
-  if (service_requests_at_safe_point()) return;
-  node_.quiesce_teardown_for_sleep();
+  node_.quiesce_for_sleep();
   const auto radio = port_.quiesce_radio();
   if (!radio) {
     abort_to_running(radio.detail);
@@ -721,15 +576,11 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
   }
   radio_quiesced_ = true;
   ++radio_generation_;
-  // Pre-ticket gate: a veto latched after the last safe point aborts the
-  // sleep exactly like late activity in READY_TO_SLEEP — a ticket issued
-  // now would bake the event in and be born valid. Refused sends are NOT
-  // vetoed here: their work_generation bump is already covered by the
-  // deterministic NODE_DRAINING error returned to the caller.
-  if (veto_pending()) {
-    abort_to_running("SLEEP_TICKET_INVALID");
-    return;
-  }
+  // Pre-ticket gate: leftover plans or unclaimed records mean the commit
+  // and the settlement disagree — abort instead of issuing a ticket on
+  // half-settled books. Refused sends need no gate here: their
+  // work_generation bump is baked into the freshly issued ticket, and the
+  // caller already saw the deterministic NODE_DRAINING error.
   if (!sleep_books_consistent()) {
     abort_to_running("SLEEP_BOOKS_INCONSISTENT");
     return;
@@ -737,10 +588,6 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
   issue_ticket();
   sleep_image_armed_ = true;
   transition(PowerState::ReadyToSleep, "SLEEP_READY");
-  // A veto inside SLEEP_READY lands in RUNNING within this same outer call
-  // (ReadyToSleep -> Running is the honest history); a queued enter still
-  // waits for the next poll.
-  service_requests_at_safe_point();
 }
 
 void PowerCoordinator::plan_sleep_image(const MonotonicMs now_ms) noexcept {
@@ -752,12 +599,12 @@ void PowerCoordinator::plan_sleep_image(const MonotonicMs now_ms) noexcept {
   image_.network = node_.config().network;
   image_.node = node_.config().node;
   // Carry first: an un-notified durable carry is NEVER evicted from the
-  // candidate by fresh work. Phase 1 commits both NVS slots, so a carry
-  // left out of the candidate would be unrecoverable after a mid-
-  // settlement abort on a NEW instance; fresh overflow instead fails its
-  // live delivery loudly (SLEEP_PERSIST_FULL) in phase 2. A carry that
-  // outlived its deadline while awake terminates loudly in phase 2. The
-  // carry set fits the candidate by construction (same capacity).
+  // candidate by fresh work. Settlement always runs to completion, so a
+  // carry left out of the candidate would be dropped, never retried —
+  // fresh overflow instead fails its live delivery loudly
+  // (SLEEP_PERSIST_FULL) in phase 2. A carry that outlived its deadline
+  // while awake terminates loudly in phase 2. The carry set fits the
+  // candidate by construction (same capacity).
   std::array<std::uint8_t, kPowerPendingCapacity> carry_slot{};
   carry_slot.fill(0xFF);
   for (std::size_t j = 0; j < carry_.size(); ++j) {
@@ -1148,16 +995,8 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
 }
 
 void PowerCoordinator::abort_to_running(const char* reason) noexcept {
-  // All teardown first, notifications last: a re-entrant operation inside
-  // the notifications below finds an already-finished abort and can only
-  // queue fresh requests — never re-run this worker.
-  pending_.abort = false;
-  pending_.app_event = false;
-  if (pending_.radio_reset) {
-    ++radio_generation_;
-    pending_.radio_reset = false;
-  }
-  pending_.enter = false;  // an abort ends the attempt the enter belonged to
+  // All teardown first, notifications last: a mutating call inside the
+  // notifications below is Busy — it can never re-run this worker.
   ticket_ = SleepTicket{};
   sleep_image_armed_ = false;
   Status radio_status = Status::success();
