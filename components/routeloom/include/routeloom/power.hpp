@@ -188,13 +188,14 @@ struct DeferredPowerRequests {
   bool radio_reset{false};
   bool prepare{false};
   bool enter{false};
-  // First abort reason wins (NUL-terminated); the sequence is last-wins so a
-  // second abort still cancels a prepare accepted after the first one.
+  // First abort reason wins (NUL-terminated). prepare_after_abort records
+  // whether the queued prepare was accepted after the queued abort: an
+  // abort cancels an older prepare, while a newer one belongs to the next
+  // poll and survives it.
   std::array<char, 64> abort_reason{};
-  std::uint64_t abort_seq{0};
+  bool prepare_after_abort{false};
   SleepRequest prepare_value{};
   MonotonicMs prepare_requested_at{0};
-  std::uint64_t prepare_seq{0};
   SleepTicket enter_value{};
   MonotonicMs enter_requested_at{0};
   // Deferred positive requests start at a later outer poll() only, never
@@ -209,18 +210,7 @@ enum class CarryPlanKind : std::uint8_t {
   Keep,        // placed into the candidate; stays carried
   CoveredByFresh,  // superseded by a fresh snapshot record of the same id;
                    // replaced in place when that record is claimed
-  Expired,     // deadline passed while awake: notify once, then drop
-  NoCapacity,  // no candidate room: notify once, then drop
-};
-
-enum class CandidateSource : std::uint8_t {
-  Unused = 0,
-  Carry,  // copy of carry_[source_slot]
-  Live,   // fresh snapshot record, claimed at settlement
-};
-struct CandidateOrigin {
-  CandidateSource source{CandidateSource::Unused};
-  std::uint8_t source_slot{0};
+  Expired,  // deadline passed while awake: notify once, then drop
 };
 
 class PowerCoordinator {
@@ -272,7 +262,6 @@ class PowerCoordinator {
   void notify_app_event() noexcept {
     ++app_events_;
     pending_.app_event = true;
-    if (sleep_attempt_active()) attempt_activity_veto_ = true;
   }
   // External radio resets (driver recovery) invalidate tickets, same
   // sticky-request rule as notify_app_event; the generation bump itself
@@ -300,24 +289,11 @@ class PowerCoordinator {
     bool& flag_;
     bool saved_;
   };
-  // Marks one PowerEvents notification on the stack.
-  struct CallbackScope {
-    explicit CallbackScope(bool& flag) noexcept : flag_(flag), saved_(flag) {
-      flag_ = true;
-    }
-    ~CallbackScope() noexcept { flag_ = saved_; }
-    CallbackScope(const CallbackScope&) = delete;
-    CallbackScope& operator=(const CallbackScope&) = delete;
-
-   private:
-    bool& flag_;
-    bool saved_;
-  };
-
-  // True for operations that must defer: inside a coordinator worker, inside
-  // a PowerEvents notification, or inside a node application callback.
+  // True for operations that must defer: inside a coordinator worker or
+  // inside a node application callback. PowerEvents notifications need no
+  // separate flag: they always run inside a coordinator worker (driving_).
   bool deferred() const noexcept {
-    return driving_ || in_callback_ || node_.in_external_callback();
+    return driving_ || node_.in_external_callback();
   }
   // A sleep attempt owns the machine: draining, settling, waiting for entry,
   // or inside the sleep-entry handoff.
@@ -344,8 +320,8 @@ class PowerCoordinator {
   void start_prepare(const SleepRequest& request, MonotonicMs start_at) noexcept;
   // Runs the PERSISTING settlement chain to READY_TO_SLEEP (or an abort).
   void settle_current_attempt(MonotonicMs now_ms) noexcept;
-  // Phase 1 plan: fresh snapshot plus carry placement into the candidate,
-  // callback-free. Rebuilds candidate_origin_/carry_plan_/save targets.
+  // Phase 1 plan: carry placement plus fresh snapshot into the candidate,
+  // callback-free. Rebuilds the candidate/carry plans/save targets.
   void plan_sleep_image(MonotonicMs now_ms) noexcept;
   // Moves one saved id from the candidate into the carry set. Runs before
   // the SLEEP_SAVED notification; false settles the item as unsaved.
@@ -392,20 +368,17 @@ class PowerCoordinator {
   // durable ownership this attempt finalized. Independent of the candidate.
   std::array<PendingDeliveryRecord, kPowerPendingCapacity> carry_{};
   std::array<CarryPlanKind, kPowerPendingCapacity> carry_plan_{};
-  std::array<CandidateOrigin, kPowerPendingCapacity> candidate_origin_{};
+  // Candidate slots holding a fresh snapshot record (the rest hold carry
+  // copies): only fresh slots are claimed at settlement.
+  std::uint8_t fresh_live_mask_{0};
   // Carry slot each candidate record is claimed into (0xFF = none).
   std::array<std::uint8_t, kPowerPendingCapacity> save_target_{};
   std::uint8_t saved_live_mask_{0};  // candidate slots claimed so far
   DeferredPowerRequests pending_{};
-  std::uint64_t request_seq_{0};  // deferred-request order stamp, never wraps
   std::uint64_t poll_serial_{0};  // outer poll() count, never wraps
   bool driving_{false};           // a coordinator worker runs on this stack
-  bool in_callback_{false};       // a PowerEvents notification is in flight
   bool entry_request_active_{false};  // an enter (refresh included) executes
   bool entering_{false};  // SLEEP_ENTER handoff in progress; still vetoable
-  // Sticky activity veto for the current attempt: redundant with the latch
-  // so a missed baseline can never clear a veto the ticket gate must see.
-  bool attempt_activity_veto_{false};
   std::uint32_t image_sequence_{0};  // newest committed image sequence
   std::uint32_t next_ticket_id_{1};
   std::uint32_t radio_generation_{0};

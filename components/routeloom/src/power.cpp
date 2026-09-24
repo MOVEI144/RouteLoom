@@ -191,18 +191,15 @@ PowerCoordinator::PowerCoordinator(const PowerConfig& config, MeshNode& node,
 void PowerCoordinator::notify_transition(const PowerState from,
                                          const PowerState to,
                                          const char* reason) noexcept {
-  CallbackScope scope(in_callback_);
   events_.on_transition(from, to, reason);
 }
 
 void PowerCoordinator::notify_pending_result(
     const PendingDeliveryRecord& record, const StatusCode result) noexcept {
-  CallbackScope scope(in_callback_);
   events_.on_pending_result(record, result);
 }
 
 void PowerCoordinator::notify_diagnostic(const char* reason) noexcept {
-  CallbackScope scope(in_callback_);
   events_.on_diagnostic(reason);
 }
 
@@ -284,14 +281,10 @@ Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
                          "SLEEP_SEQUENCE_EXHAUSTED");
   }
   if (from_callback) {
-    if (request_seq_ == UINT64_MAX) {
-      return Status::error(StatusCode::CounterExhausted,
-                           "SLEEP_SEQUENCE_EXHAUSTED");
-    }
     pending_.prepare = true;
+    pending_.prepare_after_abort = pending_.abort;
     pending_.prepare_value = request;
     pending_.prepare_requested_at = now_ms;
-    pending_.prepare_seq = ++request_seq_;
     pending_.prepare_not_before_poll = poll_serial_ + 1;
     return Status{StatusCode::Ok, "POWER_REQUEST_QUEUED"};
   }
@@ -315,10 +308,6 @@ Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
   }
   if (reason == nullptr) reason = "SLEEP_ABORT_REQUEST";
   if (deferred()) {
-    if (request_seq_ == UINT64_MAX) {
-      return Status::error(StatusCode::CounterExhausted,
-                           "SLEEP_SEQUENCE_EXHAUSTED");
-    }
     if (!pending_.abort) {
       // First reason wins; bounded copy, always NUL-terminated.
       std::size_t len = 0;
@@ -329,14 +318,13 @@ Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
       pending_.abort_reason[len] = '\0';
       pending_.abort = true;
     }
-    pending_.abort_seq = ++request_seq_;  // last-wins: still cancels a newer
-                                          // prepare accepted after an older abort
     return Status{StatusCode::Ok, "POWER_REQUEST_QUEUED"};
   }
   WorkerScope drive(driving_);
   // An abort subsumes every veto and cancels an unstarted prepare outright:
   // an outside abort is always "now", so nothing pending can be newer.
   pending_.prepare = false;
+  pending_.prepare_after_abort = false;
   abort_to_running(reason);
   return Status::success();
 }
@@ -362,7 +350,7 @@ Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
   if (deferred()) {
-    if (request_seq_ == UINT64_MAX || poll_serial_ == UINT64_MAX) {
+    if (poll_serial_ == UINT64_MAX) {
       return Status::error(StatusCode::CounterExhausted,
                            "SLEEP_SEQUENCE_EXHAUSTED");
     }
@@ -387,10 +375,10 @@ bool PowerCoordinator::validate_enter(const SleepTicket& ticket,
   if (ticket.radio_generation != radio_generation_) return false;
   if (ticket.config_revision != node_.config_revision()) return false;
   if (ticket.pending_generation != pending_generation()) return false;
-  if (veto_pending() || attempt_activity_veto_) return false;
+  if (veto_pending()) return false;
   if (!image_valid_ || !sleep_image_armed_) return false;
   for (const auto plan : carry_plan_) {
-    if (plan == CarryPlanKind::Expired || plan == CarryPlanKind::NoCapacity) {
+    if (plan == CarryPlanKind::Expired) {
       return false;  // un-notified carry plan: settlement did not finish
     }
   }
@@ -559,6 +547,7 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
     const SleepRequest request = pending_.prepare_value;
     const MonotonicMs requested_at = pending_.prepare_requested_at;
     pending_.prepare = false;
+    pending_.prepare_after_abort = false;
     start_prepare(request, requested_at > now_ms ? requested_at : now_ms);
   }
   if (pending_.enter && pending_.enter_not_before_poll <= poll_serial_) {
@@ -633,12 +622,13 @@ bool PowerCoordinator::service_requests_at_safe_point() noexcept {
     ++radio_generation_;
     pending_.radio_reset = false;
     pending_.prepare = false;
+    pending_.prepare_after_abort = false;
     pending_.enter = false;
   }
   if (pending_.app_event) {
     pending_.app_event = false;
-    if (sleep_attempt_active()) attempt_activity_veto_ = true;
     pending_.prepare = false;
+    pending_.prepare_after_abort = false;
     pending_.enter = false;
   }
   const char* reason = nullptr;
@@ -647,9 +637,10 @@ bool PowerCoordinator::service_requests_at_safe_point() noexcept {
     // An abort cancels an OLDER pending prepare; a prepare accepted after
     // the abort belongs to the next poll and survives it. A coexisting
     // enter always predates the abort (abort-pending enters are refused).
-    if (pending_.prepare && pending_.prepare_seq < pending_.abort_seq) {
+    if (pending_.prepare && !pending_.prepare_after_abort) {
       pending_.prepare = false;
     }
+    pending_.prepare_after_abort = false;
     pending_.enter = false;
     pending_.abort = false;
   }
@@ -666,10 +657,9 @@ void PowerCoordinator::start_prepare(const SleepRequest& request,
   node_.set_draining(true);
   drain_deadline_ms_ = start_at + config_.drain_timeout_ms;
   // Activity baseline for the attempt: no unprocessed veto may exist here
-  // (the submit checks and the poll-entry service guarantee it), and the
-  // sticky flag restarts. Anything signalled from the SLEEP_PREPARE
-  // notification on vetoes this attempt instead of joining its baseline.
-  attempt_activity_veto_ = false;
+  // (the submit checks and the poll-entry service guarantee it). Anything
+  // signalled from the SLEEP_PREPARE notification on vetoes this attempt
+  // instead of joining its baseline.
   sleep_image_armed_ = false;
   transition(PowerState::Draining, "SLEEP_PREPARE");
   service_requests_at_safe_point();
@@ -692,16 +682,13 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
   // draining: send()/send_group() are refused by the drain pause, and a
   // veto lands in RUNNING instead of racing a ticket that does not exist.
   for (std::size_t i = 0; i < carry_.size(); ++i) {
-    const CarryPlanKind plan = carry_plan_[i];
-    if (plan != CarryPlanKind::Expired && plan != CarryPlanKind::NoCapacity) {
+    if (carry_plan_[i] != CarryPlanKind::Expired) {
       continue;
     }
     const PendingDeliveryRecord record = carry_[i];
     carry_[i].used = false;
     carry_plan_[i] = CarryPlanKind::Unused;
-    notify_pending_result(record, plan == CarryPlanKind::Expired
-                                     ? StatusCode::Expired
-                                     : StatusCode::NoCapacity);
+    notify_pending_result(record, StatusCode::Expired);
     if (service_requests_at_safe_point()) return;
   }
   while (node_.settle_one_sleep_delivery(
@@ -734,12 +721,12 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
   }
   radio_quiesced_ = true;
   ++radio_generation_;
-  // Pre-ticket gate: activity vetoes the sleep exactly like late activity
-  // in READY_TO_SLEEP — a ticket issued now would bake the event in and be
-  // born valid. Refused sends are NOT vetoed here: their work_generation
-  // bump is already covered by the deterministic NODE_DRAINING error
-  // returned to the caller.
-  if (veto_pending() || attempt_activity_veto_) {
+  // Pre-ticket gate: a veto latched after the last safe point aborts the
+  // sleep exactly like late activity in READY_TO_SLEEP — a ticket issued
+  // now would bake the event in and be born valid. Refused sends are NOT
+  // vetoed here: their work_generation bump is already covered by the
+  // deterministic NODE_DRAINING error returned to the caller.
+  if (veto_pending()) {
     abort_to_running("SLEEP_TICKET_INVALID");
     return;
   }
@@ -758,100 +745,106 @@ void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept
 
 void PowerCoordinator::plan_sleep_image(const MonotonicMs now_ms) noexcept {
   for (auto& record : image_.pending) record = PendingDeliveryRecord{};
-  for (auto& origin : candidate_origin_) origin = CandidateOrigin{};
+  fresh_live_mask_ = 0;
   for (auto& plan : carry_plan_) plan = CarryPlanKind::Unused;
   save_target_.fill(0xFF);
   saved_live_mask_ = 0;
   image_.network = node_.config().network;
   image_.node = node_.config().node;
-  // Fresh snapshot first (existing priority): durable work, or every live
-  // delivery under Save. Expired live work is never persisted.
-  node_.snapshot_for_sleep(request_.pending_policy,
-                           [&](const DeliverySnapshot& snapshot) {
-                             if (snapshot.expires_at_ms <= now_ms) return false;
-                             for (auto& record : image_.pending) {
-                               if (record.used) continue;
-                               record.used = true;
-                               record.original_id = snapshot.id;
-                               record.destination = snapshot.destination;
-                               record.delivery = snapshot.options.delivery;
-                               record.priority = snapshot.options.priority;
-                               record.hop_limit = snapshot.options.hop_limit;
-                               record.expires_at_ms = snapshot.expires_at_ms;
-                               record.stored_remaining_ms = static_cast<std::uint32_t>(
-                                   snapshot.expires_at_ms - now_ms);
-                               record.payload_size = static_cast<std::uint8_t>(
-                                   snapshot.payload.size);
-                               if (snapshot.payload.size != 0) {
-                                 std::memcpy(record.payload.data(), snapshot.payload.data,
-                                             snapshot.payload.size);
-                               }
-                               return true;
-                             }
-                             return false;
-                           });
-  for (std::size_t i = 0; i < image_.pending.size(); ++i) {
-    if (image_.pending[i].used) candidate_origin_[i].source = CandidateSource::Live;
-  }
-  // Carry placement into the remaining room. A record the snapshot
-  // re-persisted under the same logical id is superseded by it; one that
-  // outlived its deadline while awake terminates loudly in phase 2; one
-  // that cannot fit reports NoCapacity rather than vanishing silently.
+  // Carry first: an un-notified durable carry is NEVER evicted from the
+  // candidate by fresh work. Phase 1 commits both NVS slots, so a carry
+  // left out of the candidate would be unrecoverable after a mid-
+  // settlement abort on a NEW instance; fresh overflow instead fails its
+  // live delivery loudly (SLEEP_PERSIST_FULL) in phase 2. A carry that
+  // outlived its deadline while awake terminates loudly in phase 2. The
+  // carry set fits the candidate by construction (same capacity).
+  std::array<std::uint8_t, kPowerPendingCapacity> carry_slot{};
+  carry_slot.fill(0xFF);
   for (std::size_t j = 0; j < carry_.size(); ++j) {
     if (!carry_[j].used) continue;
-    bool covered = false;
-    for (const auto& fresh : image_.pending) {
-      if (fresh.used && fresh.original_id == carry_[j].original_id) {
-        covered = true;
-        break;
-      }
-    }
-    // Note: only PLACED fresh records cover: an eligible live delivery that
-    // found the candidate full does not supersede its carry namesake.
-    if (covered) {
-      carry_plan_[j] = CarryPlanKind::CoveredByFresh;
-      continue;
-    }
     if (carry_[j].expires_at_ms <= now_ms) {
       carry_plan_[j] = CarryPlanKind::Expired;
       continue;
     }
-    bool placed = false;
     for (std::size_t i = 0; i < image_.pending.size(); ++i) {
       if (image_.pending[i].used) continue;
       image_.pending[i] = carry_[j];
       image_.pending[i].stored_remaining_ms =
           static_cast<std::uint32_t>(carry_[j].expires_at_ms - now_ms);
-      candidate_origin_[i].source = CandidateSource::Carry;
-      candidate_origin_[i].source_slot = static_cast<std::uint8_t>(j);
-      placed = true;
+      carry_slot[i] = static_cast<std::uint8_t>(j);
       break;
     }
-    carry_plan_[j] = placed ? CarryPlanKind::Keep : CarryPlanKind::NoCapacity;
+    carry_plan_[j] = CarryPlanKind::Keep;
   }
-  // Claim targets: a fresh record that supersedes a carry record replaces it
-  // in place (no extra slot); every other fresh record takes a free carry
-  // slot. Fresh-placed + Keep <= capacity by construction above. Expired and
-  // NoCapacity slots count as free here: phase 2 consumes them before the
-  // first claim runs, so they are available when the claims land. A missing
-  // slot (impossible by the counting above) defensively settles as unsaved.
+  const auto fill_slot = [&](const std::size_t i,
+                               const DeliverySnapshot& snapshot) noexcept {
+    PendingDeliveryRecord& record = image_.pending[i];
+    record.used = true;
+    record.original_id = snapshot.id;
+    record.destination = snapshot.destination;
+    record.delivery = snapshot.options.delivery;
+    record.priority = snapshot.options.priority;
+    record.hop_limit = snapshot.options.hop_limit;
+    record.expires_at_ms = snapshot.expires_at_ms;
+    record.stored_remaining_ms =
+        static_cast<std::uint32_t>(snapshot.expires_at_ms - now_ms);
+    record.payload_size = static_cast<std::uint8_t>(snapshot.payload.size);
+    if (snapshot.payload.size != 0) {
+      std::memcpy(record.payload.data(), snapshot.payload.data,
+                  snapshot.payload.size);
+    }
+    fresh_live_mask_ = static_cast<std::uint8_t>(
+        fresh_live_mask_ | static_cast<std::uint8_t>(1U << i));
+  };
+  // Fresh snapshot into the remaining room: durable work, or every live
+  // delivery under Save. Expired live work is never persisted. A fresh
+  // record that re-persists a carried id supersedes its namesake in place
+  // (no extra slot); one that finds the candidate full is simply not
+  // placed — phase 2 fails it as SLEEP_PERSIST_FULL, never silently.
+  node_.snapshot_for_sleep(request_.pending_policy,
+                           [&](const DeliverySnapshot& snapshot) {
+                             if (snapshot.expires_at_ms <= now_ms) return false;
+                             for (std::size_t i = 0; i < image_.pending.size();
+                                  ++i) {
+                               if (!image_.pending[i].used) continue;
+                               if ((fresh_live_mask_ &
+                                    static_cast<std::uint8_t>(1U << i)) != 0) {
+                                 continue;
+                               }
+                               if (!(image_.pending[i].original_id ==
+                                     snapshot.id)) {
+                                 continue;
+                               }
+                               fill_slot(i, snapshot);
+                               const std::uint8_t target = carry_slot[i];
+                               if (target < carry_.size()) {
+                                 carry_plan_[target] =
+                                     CarryPlanKind::CoveredByFresh;
+                                 save_target_[i] = target;
+                               }
+                               return true;
+                             }
+                             for (std::size_t i = 0; i < image_.pending.size();
+                                  ++i) {
+                               if (image_.pending[i].used) continue;
+                               fill_slot(i, snapshot);
+                               return true;
+                             }
+                             return false;
+                           });
+  // Claim targets: every other fresh record takes a free carry slot.
+  // Fresh-placed + Keep <= capacity by construction above. Expired slots
+  // count as free here: phase 2 consumes them before the first claim runs,
+  // so they are available when the claims land. A missing slot (impossible
+  // by the counting above) defensively settles as unsaved.
   for (std::size_t i = 0; i < image_.pending.size(); ++i) {
-    if (!image_.pending[i].used ||
-        candidate_origin_[i].source != CandidateSource::Live) {
+    if ((fresh_live_mask_ & static_cast<std::uint8_t>(1U << i)) == 0 ||
+        save_target_[i] != 0xFF) {
       continue;
     }
     for (std::size_t j = 0; j < carry_.size(); ++j) {
-      if (carry_plan_[j] == CarryPlanKind::CoveredByFresh && carry_[j].used &&
-          carry_[j].original_id == image_.pending[i].original_id) {
-        save_target_[i] = static_cast<std::uint8_t>(j);
-        break;
-      }
-    }
-    if (save_target_[i] != 0xFF) continue;
-    for (std::size_t j = 0; j < carry_.size(); ++j) {
       const bool reusable =
-          !carry_[j].used || carry_plan_[j] == CarryPlanKind::Expired ||
-          carry_plan_[j] == CarryPlanKind::NoCapacity;
+          !carry_[j].used || carry_plan_[j] == CarryPlanKind::Expired;
       if (!reusable) continue;
       bool taken = false;
       for (const auto target : save_target_) taken = taken || target == j;
@@ -866,7 +859,7 @@ void PowerCoordinator::plan_sleep_image(const MonotonicMs now_ms) noexcept {
 bool PowerCoordinator::claim_saved(const MessageId& id) noexcept {
   for (std::size_t i = 0; i < image_.pending.size(); ++i) {
     if (!image_.pending[i].used ||
-        candidate_origin_[i].source != CandidateSource::Live ||
+        (fresh_live_mask_ & static_cast<std::uint8_t>(1U << i)) == 0 ||
         !(image_.pending[i].original_id == id)) {
       continue;
     }
@@ -875,8 +868,8 @@ bool PowerCoordinator::claim_saved(const MessageId& id) noexcept {
     carry_[target] = image_.pending[i];
     carry_[target].used = true;
     // The target was a CoveredByFresh slot (replaced in place), a free
-    // slot, or an Expired/NoCapacity slot phase 2 already consumed: in all
-    // cases it now holds a live carried record.
+    // slot, or an Expired slot phase 2 already consumed: in all cases it
+    // now holds a live carried record.
     carry_plan_[target] = CarryPlanKind::Keep;
     saved_live_mask_ = static_cast<std::uint8_t>(
         saved_live_mask_ | static_cast<std::uint8_t>(1U << i));
@@ -887,7 +880,7 @@ bool PowerCoordinator::claim_saved(const MessageId& id) noexcept {
 
 bool PowerCoordinator::sleep_books_consistent() const noexcept {
   for (const auto plan : carry_plan_) {
-    if (plan == CarryPlanKind::Expired || plan == CarryPlanKind::NoCapacity) {
+    if (plan == CarryPlanKind::Expired) {
       return false;
     }
   }
@@ -903,7 +896,7 @@ bool PowerCoordinator::sleep_books_consistent() const noexcept {
     if (!in_candidate) return false;
   }
   for (std::size_t i = 0; i < image_.pending.size(); ++i) {
-    if (candidate_origin_[i].source == CandidateSource::Live &&
+    if ((fresh_live_mask_ & static_cast<std::uint8_t>(1U << i)) != 0 &&
         (saved_live_mask_ & static_cast<std::uint8_t>(1U << i)) == 0) {
       return false;
     }
@@ -1022,7 +1015,6 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
   radio_quiesced_ = false;
   image_valid_ = false;
   sleep_image_armed_ = false;
-  attempt_activity_veto_ = false;
   for (auto& record : carry_) record = PendingDeliveryRecord{};
   for (auto& plan : carry_plan_) plan = CarryPlanKind::Unused;
 
@@ -1166,7 +1158,6 @@ void PowerCoordinator::abort_to_running(const char* reason) noexcept {
     pending_.radio_reset = false;
   }
   pending_.enter = false;  // an abort ends the attempt the enter belonged to
-  attempt_activity_veto_ = false;
   ticket_ = SleepTicket{};
   sleep_image_armed_ = false;
   Status radio_status = Status::success();

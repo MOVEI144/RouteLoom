@@ -939,8 +939,12 @@ void MeshNode::handle_group_report(const wire::PlainFrame& frame, const NodeId p
 bool MeshNode::group_origin_job_stale(const TxJob& job) const noexcept {
   if (job.owner != JobOwner::Group) return false;
   if (job.ack.key.origin != config_.node) return false;  // relay work is never stale
+  // Eviction only releases terminal records (send_group reclaims settled
+  // history oldest-first), so a missing self-origin record means the origin
+  // settled and its history was evicted: the leftover job is stale either
+  // way — dispatching or retrying it would resurrect a terminal verdict.
   const GroupOrigin* origin = find_group_origin(job.ack.key.id);
-  return origin != nullptr && sleep_terminal(origin->state);
+  return origin == nullptr || sleep_terminal(origin->state);
 }
 
 void MeshNode::group_job_done(const TxJob& job, const bool success,

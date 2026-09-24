@@ -12,7 +12,7 @@ v1で認定する形はALWAYS_RXとDEEP_SLEEP_REPORT。同期した短い受信�
 
 アプリはGPIOイベントの意味、センサーを切ってよい時、timer、未完了処理を指定する。SDKは通信停止と再開に必要な処理をまとめるが、センサー処理中に勝手にesp_deep_sleep_startを呼ばない。
 
-推奨APIはsleep_prepare→app最終確認→sleep_enterの二段階。prepareが返したticketは発行時のradio世代・設定改訂・pending世代を束縛する。発行後の `send()`（拒否された送信を含む）はticketを無効化する。prepare後に新仕事が入ったままsleepしない。
+推奨APIはsleep_prepare→app最終確認→sleep_enterの二段階。prepareは受付結果（Status）を返すだけで、ticketはREADY_TO_SLEEP到達後に `ticket()` で取得する。ticketは発行時のradio世代・設定改訂・pending世代を束縛する。発行後の `send()`（拒否された送信を含む）はticketを無効化する。prepare後に新仕事が入ったままsleepしない。
 
 SDK callback（`NodeObserver`、`PowerEvents`）内からの操作は即時実行ではなく有界要求として登録され、coordinatorの安全点（work単位の復帰直後）で適用される。callback内の受付（`Ok` / `POWER_REQUEST_QUEUED`）は完了を意味しない。callback内で受理されたabortはそのcallback内の `send` / `send_group` を `NODE_DRAINING` のままにし、admissionはRUNNING復帰後に開く。deferされたprepare/enterは次の外側 `poll()` 入口でのみ開始する。abort後の再prepareは新試行であり、旧試行の精算・ticket発行・遷移を再開しない。abortは既精算のverdictとcommit済みsnapshotを消さない。
 
@@ -21,8 +21,8 @@ SDK callback（`NodeObserver`、`PowerEvents`）内からの操作は即時実�
 - coordinatorは単一owner APIであり、callback内から `begin` / `wake` / `poll` を再帰駆動しない。callback中の要求は固定欄（prepare 1・enter 1・abort理由 1・activity latch 1）へ正規化され、再入のたびにheapを使わず上書き記録する。
 - 競合規則：abort→prepareは新試行を次pollで開始、abort→sendは拒否（再送はアプリ責任）、再prepare中の再prepareは `Busy`、enter要求は受理後にveto可能。callbackが観測する `state()` とdrain maskは安全点まで変わらない。
 - 安全点はwork単位の復帰直後：通常Node handlerは完走、sleep精算は1項目、ORDERED hold強制放出は本文1件ごとに中断点を置く。abort/activityは次のsleep処分・強制放出・teardown・sleep entryより前に適用する。
-- 精算は2 phase：phase 1でdurable所有権を確定したrecordだけが候補（candidate）となり、phase 2でticket発行前に `READY_TO_SLEEP` へ進む。abortは未確定の残りを破棄し、確定済みだけを次試行へcarryする。commit済みsnapshotはabortで消さず、NVS crash境界は変えない。
-- ticketは `READY_TO_SLEEP` 到達後に `ticket()` で取得する。発行前の拒否TXは `SLEEP_TX_INFLIGHT` を記録し、発行後の送信（拒否を含む）・RX・GPIO・config変更・radio resetはticketを無効化する。`sleep_enter()` はticketを複写し、entry通知の完了後にplatform引渡し直前で再検証する。1 ticketの消費は最大1回のplatform呼出し。
+- 精算は2 phase：phase 1は候補（candidate）の計画とcommitだけで配送状態を変えず（durable所有権は確定しない）、phase 2でticket発行前に1件ずつ所有権を確定して通知し、 `READY_TO_SLEEP` へ進む。abortは未確定の残りを破棄し、確定済みだけを次試行へcarryする。commit済みsnapshotはabortで消さず、NVS crash境界は変えない。候補が足りない時は未通知のcarryを優先し、入り切らない新規分は `SLEEP_PERSIST_FULL` で明示失敗させる。
+- ticketは `READY_TO_SLEEP` 到達後に `ticket()` で取得する。quiesce時点でdriverに残る物理TXは結果不明のまま `SLEEP_TX_INFLIGHT` として診断に記録し（成功の捏造なし）、発行後の送信（拒否を含む）・RX・GPIO・config変更・radio resetはticketを無効化する。`sleep_enter()` はticketを複写し、entry通知の完了後にplatform引渡し直前で再検証する。1 ticketの消費は最大1回のplatform呼出し。
 - GroupはRAMのみでsleep image対象外：収集中roundの完了を待ち、commit成功後に未決着originをpolicy別に終端し、ORDERED holdを1件ずつ放出する（[group-delivery §10](../design/sdk-v1/group-delivery.md)）。repair roundはdrain中に開始せず `kRetryRounds` で止まる。
 
 ## 3. sleep手順
