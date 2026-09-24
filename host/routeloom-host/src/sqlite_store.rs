@@ -3020,6 +3020,30 @@ mod tests {
         let db = TestDb::new("issue-v2-outbox");
         let store = db.open();
         store.conn.execute("DROP TABLE config_outbox", []).unwrap();
+        let v2_outbox = CONFIG_OUTBOX_SQL.replace(", terminal INTEGER NOT NULL DEFAULT 0", "");
+        store.conn.execute_batch(&v2_outbox).unwrap();
+        let first = issue(1, crate::send_store::ISSUE_KIND_PERMIT);
+        store
+            .conn
+            .execute(
+                "INSERT INTO config_outbox(opid, kind, target, ns, profile, authority, \
+                 generation, network, sequence, canonical, signed) \
+                 VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    first.op_id.to_vec(),
+                    first.kind,
+                    u64_blob(first.target),
+                    first.namespace,
+                    first.profile,
+                    u64_blob(first.authority),
+                    first.generation,
+                    u64_blob(first.network),
+                    u64_blob(1),
+                    b"canon-1",
+                    b"signed-1",
+                ],
+            )
+            .unwrap();
         store
             .conn
             .execute(
@@ -3027,14 +3051,20 @@ mod tests {
                 params![2u32.to_be_bytes().to_vec()],
             )
             .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO meta(key, value) VALUES('config_auth_seq', ?1)",
+                params![u64_blob(2)],
+            )
+            .unwrap();
         drop(store);
         let mut migrated = db.open();
+        assert_eq!(migrated.issue_reserve_tx(&first), Ok(1));
         assert_eq!(
-            migrated.issue_reserve_tx(&issue(1, crate::send_store::ISSUE_KIND_PERMIT)),
-            Ok(1)
+            migrated.issue_original_row(&[1; 16]),
+            Some((b"canon-1".to_vec(), b"signed-1".to_vec()))
         );
-        migrated.issue_bind_tx(&[1; 16], b"canon-1").unwrap();
-        migrated.issue_signed_tx(&[1; 16], b"signed-1").unwrap();
         for op in 2..=crate::send_store::ISSUE_OUTBOX_CAP as u8 {
             migrated
                 .issue_reserve_tx(&issue(op, crate::send_store::ISSUE_KIND_PERMIT))

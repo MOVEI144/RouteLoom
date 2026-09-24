@@ -784,11 +784,12 @@ impl Dispatcher {
                 .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Busy)));
             return;
         }
-        if let ConfigRequest::Propose { .. } | ConfigRequest::Recover { .. } = request {
-            // A signed object needs a configured authority, a live mesh
-            // network to bind into the AAD, and an issuer that actually
-            // holds the selected profile's signing key — none of these is
-            // client-supplied. All three refuse before any reservation.
+        if let ConfigRequest::Propose { .. }
+        | ConfigRequest::Recover { .. }
+        | ConfigRequest::Retry { .. } = request
+        {
+            // New issuance and saved-original retry both require the live
+            // authority identity and selected profile key.
             if cfg.authority == 0 || link.network == 0 || !cfg.lane.issuer_ready() {
                 self.config_done
                     .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));

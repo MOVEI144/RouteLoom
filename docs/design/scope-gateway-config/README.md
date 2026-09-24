@@ -69,6 +69,7 @@ routeloomctl gateway-get --id <opid>
 routeloomctl config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>
 routeloomctl config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]
 routeloomctl config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>
+routeloomctl config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>
 routeloomctl config-get --id <cfg-opid>
 ```
 

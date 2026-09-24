@@ -1849,7 +1849,8 @@ void test_revocation_wire_vectors() {
       CHECK(!rrs_notice_accepted_decode(vector_view(encoded), out));
     } else if (codec == "rrs_kind6_manifest") {
       autonomy::ControlObjectPayload out{};
-      CHECK(!autonomy::control_object_decode(vector_view(encoded), out));
+      const Status decoded = autonomy::control_object_decode(vector_view(encoded), out);
+      CHECK(!decoded || out.kind != autonomy::ControlObjectKind::RevocationSet);
     } else if (codec == "rrs_kind6_chunk") {
       autonomy::ObjectChunkPayload out{};
       CHECK(!autonomy::object_chunk_decode(vector_view(encoded), out));

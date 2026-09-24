@@ -28,7 +28,7 @@ use routeloom_protocol::host_ops::{
     SUB_CONFIG_RECOVERY_INFO, SUB_CONFIG_STATUS, SUB_CONFIG_TRUST, SUB_CONFIG_TRUST_STATUS,
 };
 use routeloom_provision::manifest::{
-    cose_sig_structure, manifest_assemble, manifest_protected, COSE_SIGNATURE_SIZE,
+    cose_sig_structure, manifest_assemble, manifest_parse, manifest_protected, COSE_SIGNATURE_SIZE,
 };
 use routeloom_provision::signer::{ecdsa_p256_verify, signature_range_check, FileAuthoritySigner};
 use routeloom_wire::endpoint::{
@@ -134,7 +134,6 @@ pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     sha256(&outer)
 }
 
-#[cfg(test)]
 fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -837,7 +836,7 @@ pub const CONFIG_PERMIT_TIMEOUT_MS: u64 = 15_000;
 /// A client request the lane drives. `Propose` reads target capability,
 /// then challenge -> commit -> sign -> permit -> status. `Recover` reads
 /// target capability and floors, then commit -> sign -> recovery transfer
-/// -> status; the others are single queries.
+/// -> status. `Retry` transfers only a stored signed original.
 #[derive(Clone, Debug)]
 pub enum ConfigRequest {
     /// Issue a ChallengeQuery and report the ControlChallenge body.
@@ -849,6 +848,13 @@ pub enum ConfigRequest {
     /// Issue a StatusQuery for `operation_id` and report the ControlStatus
     /// body — the real verdict of the config operation that id names.
     Status {
+        target: u64,
+        config_namespace: u16,
+        operation_id: [u8; 16],
+    },
+    /// Resend the signed original held under `operation_id`; no reservation
+    /// or signing occurs. The live issuer identity/profile must still match.
+    Retry {
         target: u64,
         config_namespace: u16,
         operation_id: [u8; 16],
@@ -1117,7 +1123,7 @@ impl ConfigLane {
     /// Both commit and sign only after the corresponding reply lands.
     pub fn submit<C: ConfigAuthorityLedger>(
         &mut self,
-        _commit: &mut C,
+        commit: &mut C,
         request: ConfigRequest,
         now_ms: u64,
     ) -> ConfigStep {
@@ -1135,6 +1141,11 @@ impl ConfigLane {
                 config_namespace,
                 operation_id,
             } => self.emit_status(target, config_namespace, operation_id, now_ms),
+            ConfigRequest::Retry {
+                target,
+                config_namespace,
+                operation_id,
+            } => self.submit_retry(commit, target, config_namespace, operation_id, now_ms),
             ConfigRequest::Propose {
                 target,
                 config_namespace,
@@ -1270,6 +1281,134 @@ impl ConfigLane {
             self.clear_issue();
         }
         step
+    }
+
+    fn saved_signature_matches(
+        &self,
+        kind: u8,
+        canonical: &[u8],
+        signed: &[u8],
+        target: u64,
+        namespace: u16,
+    ) -> bool {
+        if canonical.is_empty() || signed.len() > CONFIG_PERMIT_OBJECT_MAX {
+            return false;
+        }
+        let (network, authority) = self.issuer.identity();
+        if self.issuer.profile() == ISSUE_PROFILE_DEV {
+            let (aad, tag) = if kind == ISSUE_KIND_PERMIT {
+                let Ok(aad) = config_permit_aad(network, target, namespace) else {
+                    return false;
+                };
+                let Ok(tag) = config_dev_permit_tag(&self.issuer.dev_key, &aad, canonical) else {
+                    return false;
+                };
+                (aad.to_vec(), tag)
+            } else {
+                let Ok(aad) = config_recovery_aad(network, target, namespace) else {
+                    return false;
+                };
+                let Ok(tag) = config_dev_recovery_tag(&self.issuer.dev_key, &aad, canonical) else {
+                    return false;
+                };
+                (aad.to_vec(), tag)
+            };
+            signed.len() == aad.len() + canonical.len() + tag.len()
+                && constant_time_equal(&signed[..aad.len()], &aad)
+                && constant_time_equal(&signed[aad.len()..aad.len() + canonical.len()], canonical)
+                && constant_time_equal(&signed[aad.len() + canonical.len()..], &tag)
+        } else if self.issuer.profile() == ISSUE_PROFILE_COSE {
+            let Some(signer) = self.issuer.cose.as_ref() else {
+                return false;
+            };
+            let Ok(parts) = manifest_parse(signed) else {
+                return false;
+            };
+            if parts.root_id != authority || parts.payload != canonical {
+                return false;
+            }
+            let aad = if kind == ISSUE_KIND_PERMIT {
+                config_permit_aad(network, target, namespace).map(|aad| aad.to_vec())
+            } else {
+                config_recovery_aad(network, target, namespace).map(|aad| aad.to_vec())
+            };
+            let Ok(aad) = aad else { return false };
+            let Ok(to_verify) = cose_sig_structure(parts.protected_bytes, &aad, canonical) else {
+                return false;
+            };
+            let Ok(signature) = <[u8; COSE_SIGNATURE_SIZE]>::try_from(parts.signature) else {
+                return false;
+            };
+            signature_range_check(&signature).is_ok()
+                && ecdsa_p256_verify(&signer.pubkey(), &sha256(&to_verify), &signature)
+        } else {
+            false
+        }
+    }
+
+    fn submit_retry<C: ConfigAuthorityLedger>(
+        &mut self,
+        commit: &mut C,
+        target: u64,
+        config_namespace: u16,
+        operation_id: [u8; 16],
+        now_ms: u64,
+    ) -> ConfigStep {
+        if !self.issuer.ready() {
+            return ConfigStep::Done(ConfigOutcome::RefusedProfile);
+        }
+        let Some((canonical, signed)) = commit.issue_original(&operation_id) else {
+            return ConfigStep::Done(ConfigOutcome::RefusedStale);
+        };
+        let (network, authority) = self.issuer.identity();
+        let (kind, original_network, original_target, namespace, issuer, generation, op_id) =
+            if let Ok(command) = routeloom_wire::endpoint::config_command_decode(&canonical) {
+                (
+                    ISSUE_KIND_PERMIT,
+                    command.network,
+                    command.target,
+                    command.config_namespace,
+                    command.authority,
+                    command.authority_generation,
+                    command.operation_id,
+                )
+            } else if let Ok(intent) = routeloom_wire::endpoint::config_recovery_decode(&canonical)
+            {
+                (
+                    ISSUE_KIND_RECOVERY,
+                    intent.network,
+                    intent.target,
+                    intent.config_namespace,
+                    intent.authority,
+                    intent.authority_generation,
+                    intent.operation_id,
+                )
+            } else {
+                return ConfigStep::Done(ConfigOutcome::Indeterminate(None));
+            };
+        if original_network != network
+            || original_target != target
+            || namespace != config_namespace
+            || issuer != authority
+            || generation != self.authority_generation
+            || op_id != operation_id
+        {
+            return ConfigStep::Done(ConfigOutcome::RefusedStale);
+        }
+        if !self.saved_signature_matches(kind, &canonical, &signed, target, config_namespace) {
+            return ConfigStep::Done(ConfigOutcome::RefusedProfile);
+        }
+        self.pending = Some(PendingStatus {
+            target,
+            config_namespace,
+            operation_id,
+        });
+        let sub = if kind == ISSUE_KIND_RECOVERY {
+            SUB_CONFIG_RECOVER
+        } else {
+            SUB_CONFIG_PERMIT
+        };
+        self.emit_transfer(sub, target, config_namespace, signed, now_ms)
     }
 
     /// The Recover submit: pure input/profile checks, then reserve,
@@ -1858,6 +1997,11 @@ impl ConfigLane {
             } else {
                 self.pending_op_id()
             };
+            // A failed target ACK does not prove the signed object's
+            // effects were rolled back after the receiver began work.
+            if result == ConfigOpsResult::Denied {
+                return ConfigStep::Done(ConfigOutcome::Indeterminate(operation_id));
+            }
             return ConfigStep::Done(map_refusal(result, operation_id));
         }
         if sub == SUB_CONFIG_TRUST {
@@ -3298,14 +3442,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            done(lane.on_reply(&mut commit, request, &denied, 1_100)),
-            ConfigOutcome::Refused(ConfigOpsResult::Denied)
-        );
         let canonical = dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 1, &signed).unwrap();
         let op_id = routeloom_wire::endpoint::config_recovery_decode(&canonical)
             .unwrap()
             .operation_id;
+        assert_eq!(
+            done(lane.on_reply(&mut commit, request, &denied, 1_100)),
+            ConfigOutcome::Indeterminate(Some(op_id))
+        );
         assert_eq!(commit.issue_original(&op_id), Some((canonical, signed)));
         for id in 1..64_u8 {
             let mut filler = [0_u8; 16];
@@ -3339,6 +3483,77 @@ mod tests {
                 network: 0xAAAA,
             }),
             Err(crate::send_store::IssueRefusal::Capacity)
+        );
+    }
+
+    #[test]
+    fn retry_uses_only_the_saved_signed_original() {
+        let (db, mut commit) = TempDb::open("recover-retry-original");
+        let mut lane = make_lane();
+        let (_request, body) = start_recovery_transfer(&mut lane, &mut commit, 1_000);
+        let signed = host_ops::decode_config_recover(&body).unwrap().object;
+        let canonical = dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 1, &signed).unwrap();
+        let op_id = routeloom_wire::endpoint::config_recovery_decode(&canonical)
+            .unwrap()
+            .operation_id;
+        drop(commit);
+        let mut commit = crate::sqlite_store::SqliteOperationStore::open(&db.path).unwrap();
+        let mut restarted = make_lane();
+        let (_retry_request, retry_body) = emit(restarted.submit(
+            &mut commit,
+            ConfigRequest::Retry {
+                target: 0x99,
+                config_namespace: 1,
+                operation_id: op_id,
+            },
+            2_000,
+        ));
+        assert_eq!(retry_body[1], SUB_CONFIG_RECOVER);
+        assert_eq!(
+            host_ops::decode_config_recover(&retry_body).unwrap().object,
+            signed
+        );
+        let mut changed_profile = make_lane();
+        changed_profile.issuer.set_profile(ISSUE_PROFILE_COSE);
+        changed_profile.issuer.set_cose_signer(cose_signer());
+        assert_eq!(
+            done(changed_profile.submit(
+                &mut commit,
+                ConfigRequest::Retry {
+                    target: 0x99,
+                    config_namespace: 1,
+                    operation_id: op_id,
+                },
+                2_100,
+            )),
+            ConfigOutcome::RefusedProfile
+        );
+        let mut changed_generation = make_lane();
+        changed_generation.set_authority(2);
+        assert_eq!(
+            done(changed_generation.submit(
+                &mut commit,
+                ConfigRequest::Retry {
+                    target: 0x99,
+                    config_namespace: 1,
+                    operation_id: op_id,
+                },
+                2_200,
+            )),
+            ConfigOutcome::RefusedStale
+        );
+        assert_eq!(
+            commit.issue_reserve(&IssueIdentity {
+                kind: ISSUE_KIND_PERMIT,
+                op_id: [0xFE; 16],
+                target: 0x99,
+                namespace: 1,
+                profile: ISSUE_PROFILE_DEV,
+                authority: 0x42,
+                generation: 1,
+                network: 0xAAAA,
+            }),
+            Ok(2)
         );
     }
 
@@ -3381,6 +3596,21 @@ mod tests {
         let command = routeloom_wire::endpoint::config_command_decode(&canonical).unwrap();
         assert_eq!(command.authority_sequence, 1);
         assert_eq!(command.operation_id, op);
+        let mut retry_lane = make_lane();
+        let (_, retry_body) = emit(retry_lane.submit(
+            &mut commit,
+            ConfigRequest::Retry {
+                target: 0x99,
+                config_namespace: 1,
+                operation_id: op,
+            },
+            1_250,
+        ));
+        assert_eq!(retry_body[1], SUB_CONFIG_PERMIT);
+        assert_eq!(
+            host_ops::decode_config_permit(&retry_body).unwrap().permit,
+            transfer.permit
+        );
         // A second issuance advances — never reuses — the sequence.
         lane.on_reply(
             &mut commit,
@@ -3777,6 +4007,28 @@ mod tests {
             done(lane.on_reply(&mut commit, req2, &trust_status_reply(0x99, &status), 1_200));
         assert_eq!(outcome, ConfigOutcome::TrustStatus(status));
         assert!(!lane.busy());
+        let (request, _) = emit(lane.submit(
+            &mut commit,
+            ConfigRequest::TrustInstall {
+                target: 0x99,
+                network: 0xAAAA,
+                manifest,
+            },
+            2_000,
+        ));
+        let denied = host_ops::encode_config_reply(
+            SUB_CONFIG_TRUST,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Denied as u16,
+                target: 0x99,
+                body: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            done(lane.on_reply(&mut commit, request, &denied, 2_100)),
+            ConfigOutcome::Indeterminate(None)
+        );
     }
 
     #[test]
@@ -3826,6 +4078,42 @@ mod tests {
         assert_eq!(intent.authority_generation, 1);
         assert_eq!(intent.authority_sequence, 1);
         assert_eq!(intent.snapshot_hash, [0xAB; 32]);
+        let mut retry_issuer = ConfigIssuer::new(DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+        retry_issuer.set_profile(ISSUE_PROFILE_COSE);
+        retry_issuer.set_cose_signer(cose_signer());
+        let mut retry = ConfigLane::new(retry_issuer, 1, lane_entropy());
+        let (_, retry_body) = emit(retry.submit(
+            &mut commit,
+            ConfigRequest::Retry {
+                target: 0x99,
+                config_namespace: 1,
+                operation_id: op,
+            },
+            2_000,
+        ));
+        assert_eq!(
+            host_ops::decode_config_recover(&retry_body).unwrap().object,
+            transfer.object
+        );
+        let mut changed_key_issuer = ConfigIssuer::new(DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+        changed_key_issuer.set_profile(ISSUE_PROFILE_COSE);
+        changed_key_issuer.set_cose_signer(
+            routeloom_provision::signer::FileAuthoritySigner::from_secret(0x42, &[0x6E; 32])
+                .unwrap(),
+        );
+        let mut changed_key = ConfigLane::new(changed_key_issuer, 1, lane_entropy());
+        assert_eq!(
+            done(changed_key.submit(
+                &mut commit,
+                ConfigRequest::Retry {
+                    target: 0x99,
+                    config_namespace: 1,
+                    operation_id: op,
+                },
+                2_100,
+            )),
+            ConfigOutcome::RefusedProfile
+        );
     }
 
     /// A ledger that refuses every commit: the authority store stopped

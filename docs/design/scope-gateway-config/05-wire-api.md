@@ -134,7 +134,7 @@ HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB ses
 
 ## 5.7 Host canonical/API
 
-既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/get/recover/recovery_infoおよびtrust.install/statusを実装済みで追加し、一daemonを維持（世代のみのconfig.trust_updateは廃止し、世代移行は署名済みtrust-manifestのtrust.installで行う）。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
+既存API1へgateway.resolve・gateway.getとconfig.challenge/status/retry/propose/get/recover/recovery_infoおよびtrust.install/statusを実装済みで追加し、一daemonを維持（世代のみのconfig.trust_updateは廃止し、世代移行は署名済みtrust-manifestのtrust.installで行う）。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
 
 Gateway canonical schema2は既存26B field形を保ち、dest_kind=1のpayload_len直前に `scope:u8/reserved:u8/token16/gateway_boot8/egress_gateway8` を加える（34B）。payload≤96で最大156B、SUBMIT固定108Bを加え264B。schema1 Node=0はそのまま、schema1の未実装Gatewayを自動変換しない。
 
@@ -142,7 +142,7 @@ egress_gatewayは送信に使うローカル出口、destinationは最終Gateway
 
 Configは別operation_class。Config operation ID16B、Host OperationId24B、wire MessageKey20Bを区別する。APIの受付とConfig Status ACTIVEを別の結果にし、全エラーを正しいJSONで返す。
 
-Host側のdurable状態はSQLiteのAuthority sequenceだけである。`config.get`のoperation recordはRAMのみで、daemon再起動は進行中opを失う。op idはboot名づけされるため、再起動前のstale tokenが別opへ解決されることはない。復帰した受付はINDETERMINATEと報告し、記録を再構成して自動再実行しない。§4.3の耐電断outbox順序はdevice issuer/target側の契約であり、Host issuerのop履歴を永続とは読まない。
+Host側はSQLiteにAuthority sequence、確定canonical、署名済み原本を同一lineageの有界outboxとして保存する。`config.get`の受付recordはRAMのみで、daemon再起動後の旧Host OperationIdは復元しない。未決着原本を容量圧力で消去せず、明示的な`config.retry`はdevice operation_idで原本を読み、現authority・generation・profile・鍵で再検証して同じbytesだけを転送する。新しいsequence予約や再署名は行わない。転送の失敗ACKとtimeoutは作用の取消しを証明しないためINDETERMINATEとし、device statusで終端を確認する。daemon再起動時の自動再実行はしない。
 
 ## 5.8 C/C++ APIと例
 

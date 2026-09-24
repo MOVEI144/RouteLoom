@@ -333,6 +333,7 @@ pub fn handle_conn<S: OperationStore>(
         "nodes.get" => nodes_get(&params, ctx).map(|r| (r, None)),
         "config.challenge" => config_challenge(&params, ctx).map(|r| (r, None)),
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
+        "config.retry" => config_retry(&params, ctx).map(|r| (r, None)),
         "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
         "config.recover" => config_recover(&params, ctx).map(|r| (r, None)),
         "config.recovery_info" => config_recovery_info(&params, ctx).map(|r| (r, None)),
@@ -434,7 +435,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.retry\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -2773,6 +2774,23 @@ fn config_status<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
 ) -> Result<String, ApiError> {
+    config_status_or_retry(params, ctx, false)
+}
+
+/// `config.retry` resends only the signed original held in the authority
+/// outbox under the device operation id. It spends no new sequence.
+fn config_retry<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    config_status_or_retry(params, ctx, true)
+}
+
+fn config_status_or_retry<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+    retry: bool,
+) -> Result<String, ApiError> {
     for (key, _) in params.object_entries() {
         if !matches!(
             key.as_str(),
@@ -2801,15 +2819,32 @@ fn config_status<S: OperationStore>(
     if !config_permit(ctx, network) {
         return Err(config_denied());
     }
-    let request = ConfigRequest::Status {
-        target,
-        config_namespace,
-        operation_id,
+    if retry && ctx.config_authority.is_none() {
+        return Err(ApiError::simple(
+            "CONFIG_NO_AUTHORITY",
+            "no config authority configured; saved-original retry is unavailable",
+        ));
+    }
+    let request = if retry {
+        ConfigRequest::Retry {
+            target,
+            config_namespace,
+            operation_id,
+        }
+    } else {
+        ConfigRequest::Status {
+            target,
+            config_namespace,
+            operation_id,
+        }
     };
     config_submit_op(
         ctx,
         request,
-        format!("status ns={config_namespace} op={op_text}"),
+        format!(
+            "{} ns={config_namespace} op={op_text}",
+            if retry { "retry" } else { "status" }
+        ),
         network,
         target,
     )
@@ -3874,6 +3909,7 @@ mod tests {
         // The config/trust verbs are registered and the profile reflects
         // the daemon's selected issuance profile (dev here).
         assert!(response.contains("\"config.propose\":true"));
+        assert!(response.contains("\"config.retry\":true"));
         assert!(response.contains("\"config.recover\":true"));
         assert!(response.contains("\"config.recovery_info\":true"));
         assert!(response.contains("\"trust.install\":true"));
@@ -5975,6 +6011,7 @@ mod tests {
         for (method, params) in [
             ("config.challenge", CFG_CHALLENGE_PARAMS.to_string()),
             ("config.status", CFG_STATUS_PARAMS.to_string()),
+            ("config.retry", CFG_STATUS_PARAMS.to_string()),
             ("config.propose", CFG_PROPOSE_PARAMS.to_string()),
             ("config.recover", CFG_RECOVER_PARAMS.to_string()),
             ("config.recovery_info", CFG_RECOVERY_INFO_PARAMS.to_string()),
@@ -6130,6 +6167,13 @@ mod tests {
             &no_auth,
         );
         assert_error_schema(&response, "CONFIG_NO_AUTHORITY");
+        let retry = handle(cfg_req("config.retry", CFG_STATUS_PARAMS).as_bytes(), &c);
+        assert!(retry.contains("\"state\":\"PENDING\""), "{retry}");
+        let retry = handle(
+            cfg_req("config.retry", CFG_STATUS_PARAMS).as_bytes(),
+            &no_auth,
+        );
+        assert_error_schema(&retry, "CONFIG_NO_AUTHORITY");
     }
 
     #[test]

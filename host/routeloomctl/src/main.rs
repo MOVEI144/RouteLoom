@@ -11,7 +11,7 @@ mod provision_office;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -139,8 +139,18 @@ fn config_challenge_request(network: &str, target: &str, ns: u16, schema: u16) -
 /// id the verdict is read for — the status verb returns the real phase/reason,
 /// never a claimed one.
 fn config_status_request(network: &str, target: &str, ns: u16, operation_id: &str) -> String {
+    config_operation_request("config.status", network, target, ns, operation_id)
+}
+
+fn config_operation_request(
+    method: &str,
+    network: &str,
+    target: &str,
+    ns: u16,
+    operation_id: &str,
+) -> String {
     format!(
-        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.status\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"operation_id\":\"{operation_id}\"}}}}",
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"{method}\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"operation_id\":\"{operation_id}\"}}}}",
         request_id(),
     )
 }
@@ -326,6 +336,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "operation-get-by-key" => operation_get_by_key_command(rest)?,
         [name, rest @ ..] if name == "config-challenge" => config_challenge_command(rest)?,
         [name, rest @ ..] if name == "config-status" => config_status_command(rest)?,
+        [name, rest @ ..] if name == "config-retry" => config_retry_command(rest)?,
         [name, rest @ ..] if name == "config-propose" => config_propose_command(rest)?,
         [name, rest @ ..] if name == "config-recover" => config_recover_command(rest)?,
         [name, rest @ ..] if name == "config-recovery-info" => config_recovery_info_command(rest)?,
@@ -1028,6 +1039,22 @@ fn config_challenge_command(args: &[String]) -> Result<String, Box<dyn std::erro
 /// --operation-id <32hex>`. Reads the real phase/reason verdict of the config
 /// operation `operation_id` names — never a claimed one.
 fn config_status_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    config_status_or_retry_command(args, false)
+}
+
+fn config_retry_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    config_status_or_retry_command(args, true)
+}
+
+fn config_status_or_retry_command(
+    args: &[String],
+    retry: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let name = if retry {
+        "config-retry"
+    } else {
+        "config-status"
+    };
     let mut network: Option<String> = None;
     let mut target: Option<String> = None;
     let mut ns: Option<u16> = None;
@@ -1044,28 +1071,28 @@ fn config_status_command(args: &[String]) -> Result<String, Box<dyn std::error::
                 )?)
             }
             "--operation-id" => operation_id = Some(opt_value(&mut args, "--operation-id")?),
-            other => return Err(format!("unknown config-status option: {other}").into()),
+            other => return Err(format!("unknown {name} option: {other}").into()),
         }
     }
     let network = want_hex16(
         "--network",
-        network.ok_or("config-status requires --network <16hex>")?,
+        network.ok_or(format!("{name} requires --network <16hex>"))?,
     )?;
     let target = want_hex16(
         "--target",
-        target.ok_or("config-status requires --target <16hex>")?,
+        target.ok_or(format!("{name} requires --target <16hex>"))?,
     )?;
-    let ns = ns.ok_or("config-status requires --config-namespace <u16>")?;
-    let operation_id = operation_id.ok_or("config-status requires --operation-id <32hex>")?;
+    let ns = ns.ok_or(format!("{name} requires --config-namespace <u16>"))?;
+    let operation_id = operation_id.ok_or(format!("{name} requires --operation-id <32hex>"))?;
     if !is_hex(&operation_id, 32) {
         return Err("--operation-id must be a 32-hex operation id".into());
     }
-    Ok(config_status_request(
-        &network,
-        &target,
-        ns,
-        &operation_id.to_ascii_lowercase(),
-    ))
+    let operation_id = operation_id.to_ascii_lowercase();
+    Ok(if retry {
+        config_operation_request("config.retry", &network, &target, ns, &operation_id)
+    } else {
+        config_status_request(&network, &target, ns, &operation_id)
+    })
 }
 
 /// `config-propose --network <16hex> --target <16hex> --config-namespace
@@ -2017,6 +2044,19 @@ mod tests {
             line.contains("\"operation_id\":\"00112233445566778899aabbccddeeff\""),
             "{line}"
         );
+        let retry = config_retry_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--operation-id",
+            "00112233445566778899AABBCCDDEEFF",
+        ]))
+        .unwrap();
+        assert!(retry.contains("\"method\":\"config.retry\""), "{retry}");
+        assert!(retry.contains("\"operation_id\":\"00112233445566778899aabbccddeeff\""));
         assert!(config_status_command(&args(&[
             "--network",
             "0000000000000001",
