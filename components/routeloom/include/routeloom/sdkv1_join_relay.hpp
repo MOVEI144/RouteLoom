@@ -361,11 +361,14 @@ class JoinRelayHostSink {
  public:
   virtual ~JoinRelayHostSink() = default;
   // A complete up relay object (RelayHeader dir=up + message) from `proxy`,
-  // `hops` mesh hops away. `object` is valid only during the call and may
-  // alias a gateway slot, so copy it before re-entering the gateway.
+  // `hops` mesh hops away, once per stage: retransmitted duplicates are
+  // filtered by the gateway. `object` is valid only during the call and
+  // may alias a gateway slot, so copy it before re-entering the gateway.
   // host_down()/host_abort() from inside the callback are supported:
   // cleanup afterwards releases only the delivered object, never the
-  // state a reentrant call installed.
+  // state a reentrant call installed. Returning an error aborts the
+  // relay with authority_unreachable — unless the callback installed a
+  // new operation for it, which then owns the relay's bookkeeping.
   virtual Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept = 0;
   // The relay ended at the gateway. Re-entering the gateway
   // (host_down()/host_abort()) is supported: for ProxyAborted the relay
@@ -444,19 +447,32 @@ class JoinRelayGateway {
     MacAddress joiner_mac{};
     JoinAuthPhase phase{JoinAuthPhase::EdhocMessage};
     std::uint8_t step{1};
+    // join_sub() of the newest up object handed to the host on this
+    // relay: only an up stage past it may displace a down send.
+    std::uint8_t up_sub{0};
+    // Bumped on every remember() and preserved across forget(): with the
+    // entry's address it names the writer, so a callback that rewrote
+    // (or removed and recreated) the entry is told apart from no reentry.
+    std::uint32_t epoch{0};
     MonotonicMs seen_ms{0};
   };
 
   Slot* find(NodeId proxy, std::uint32_t relay_id) noexcept;
   Slot* allocate(NodeId proxy, std::uint32_t relay_id) noexcept;
   void free_slot(Slot& slot) noexcept;
-  // relay_abort + the slot's tear-down; the tear-down is skipped when the
-  // callback re-entered the gateway and the occupant it named is gone.
+  Recent* find_recent(NodeId proxy, std::uint32_t relay_id) noexcept;
+  const Recent* find_recent(NodeId proxy, std::uint32_t relay_id) const noexcept;
+  // relay_abort + the tear-down of what the callback left untouched: the
+  // recent entry while it is still the reported one, the slot while it
+  // still holds the reported occupant.
   void abort_slot(Slot& slot, RelayAbortReason reason) noexcept;
   void remember(NodeId proxy, const RelayHeader& header, MonotonicMs now_ms) noexcept;
   void forget(NodeId proxy, std::uint32_t relay_id) noexcept;
+  // join_sub() of the newest up object delivered for this relay (0 none).
+  std::uint8_t last_up_sub(NodeId proxy, std::uint32_t relay_id) const noexcept;
   void deliver_up(NodeId proxy, std::uint8_t hops, const RelayObject& object, ByteView bytes,
                   MonotonicMs now_ms) noexcept;
+  void send_reply(NodeId to, const JoinReply& reply) noexcept;
   Status send_due_chunks(Slot& slot, MonotonicMs now_ms) noexcept;
   void send_down_abort(NodeId proxy, const RelayHeader& up, RelayStatusCode status,
                        std::uint32_t retry_after_ms) noexcept;

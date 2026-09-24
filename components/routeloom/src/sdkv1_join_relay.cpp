@@ -1042,28 +1042,43 @@ void JoinRelayGateway::free_slot(Slot& slot) noexcept {
   slot.hops = 0;
 }
 
+JoinRelayGateway::Recent* JoinRelayGateway::find_recent(
+    const NodeId proxy, const std::uint32_t relay_id) noexcept {
+  for (Recent& recent : recent_) {
+    if (recent.valid && recent.proxy == proxy && recent.relay_id == relay_id) return &recent;
+  }
+  return nullptr;
+}
+
+const JoinRelayGateway::Recent* JoinRelayGateway::find_recent(
+    const NodeId proxy, const std::uint32_t relay_id) const noexcept {
+  for (const Recent& recent : recent_) {
+    if (recent.valid && recent.proxy == proxy && recent.relay_id == relay_id) return &recent;
+  }
+  return nullptr;
+}
+
 void JoinRelayGateway::abort_slot(Slot& slot, const RelayAbortReason reason) noexcept {
   const NodeId proxy = slot.proxy;
   const std::uint32_t relay_id = slot.relay_id;
-  // The callback may re-enter the gateway (a host_down re-opens this
-  // relay, possibly in this very slot; a host_abort clears it): tear
-  // down only while the slot still holds the occupant it reported.
+  // The callback may re-enter the gateway (a host_down re-opens this or
+  // another relay, possibly in this very slot; a host_abort clears it):
+  // drop the recent entry only while it is still the reported one, and
+  // the slot only while it still holds the reported occupant.
+  const Recent* written = find_recent(proxy, relay_id);
+  const std::uint32_t epoch = written != nullptr ? written->epoch : 0;
   const std::uint32_t occupant = slot.object.generation();
   if (sink_ != nullptr) (void)sink_->relay_abort(proxy, relay_id, reason);
-  if (slot.object.generation() != occupant) return;
-  forget(proxy, relay_id);
-  free_slot(slot);
+  const Recent* current = find_recent(proxy, relay_id);
+  if (current == written && (current == nullptr || current->epoch == epoch)) {
+    forget(proxy, relay_id);
+  }
+  if (slot.object.generation() == occupant) free_slot(slot);
 }
 
 void JoinRelayGateway::remember(const NodeId proxy, const RelayHeader& header,
                                 const MonotonicMs now_ms) noexcept {
-  Recent* target = nullptr;
-  for (Recent& recent : recent_) {
-    if (recent.valid && recent.proxy == proxy && recent.relay_id == header.relay_id) {
-      target = &recent;
-      break;
-    }
-  }
+  Recent* target = find_recent(proxy, header.relay_id);
   if (target == nullptr) {
     for (Recent& recent : recent_) {
       if (!recent.valid) {
@@ -1084,12 +1099,32 @@ void JoinRelayGateway::remember(const NodeId proxy, const RelayHeader& header,
   target->joiner_mac = header.joiner_mac;
   target->phase = header.phase;
   target->step = header.step;
+  if (header.dir == RelayDirection::Up) target->up_sub = join_sub(header.phase, header.step);
+  ++target->epoch;
   target->seen_ms = now_ms;
 }
 
 void JoinRelayGateway::forget(const NodeId proxy, const std::uint32_t relay_id) noexcept {
-  for (Recent& recent : recent_) {
-    if (recent.valid && recent.proxy == proxy && recent.relay_id == relay_id) recent = Recent{};
+  if (Recent* entry = find_recent(proxy, relay_id)) {
+    // The epoch survives the clear: an entry re-created at this slot
+    // can never collide with the writer the callbacks were told about.
+    const std::uint32_t epoch = entry->epoch;
+    *entry = Recent{};
+    entry->epoch = epoch;
+  }
+}
+
+std::uint8_t JoinRelayGateway::last_up_sub(const NodeId proxy,
+                                           const std::uint32_t relay_id) const noexcept {
+  const Recent* entry = find_recent(proxy, relay_id);
+  return entry != nullptr ? entry->up_sub : 0;
+}
+
+void JoinRelayGateway::send_reply(const NodeId to, const JoinReply& reply) noexcept {
+  std::array<std::uint8_t, kJoinReplySize> body{};
+  std::size_t written = 0;
+  if (join_reply_encode(reply, MutableByteView{body.data(), body.size()}, written)) {
+    (void)wire_.send_relay(to, FrameType::BootstrapReply, ByteView{body.data(), written});
   }
 }
 
@@ -1126,11 +1161,20 @@ void JoinRelayGateway::deliver_up(const NodeId proxy, const std::uint8_t hops,
   }
   remember(proxy, h, now_ms);
   ++stats_.up_objects;
+  const Recent* written = find_recent(proxy, h.relay_id);
+  const std::uint32_t epoch = written != nullptr ? written->epoch : 0;
   if (sink_ == nullptr || !sink_->relay_up(proxy, hops, bytes)) {
     // 07 §7: no host -> the proxy tells the device authority_unreachable.
     ++stats_.host_unavailable;
-    send_down_abort(proxy, h, RelayStatusCode::AuthorityUnreachable, config_.unreachable_retry_ms);
-    forget(proxy, h.relay_id);
+    // A callback that re-entered for this relay (a fresh host_down, a
+    // host_abort) already installed or cleared the bookkeeping — the
+    // abort and the forget would only tear down what it started.
+    const Recent* current = find_recent(proxy, h.relay_id);
+    if (current == written && (current == nullptr || current->epoch == epoch)) {
+      send_down_abort(proxy, h, RelayStatusCode::AuthorityUnreachable,
+                      config_.unreachable_retry_ms);
+      forget(proxy, h.relay_id);
+    }
   }
 }
 
@@ -1150,6 +1194,15 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
         ++stats_.frames_rejected;
         return;
       }
+      // A duplicate of an up stage already handed to the host is dropped
+      // without touching the slot: only a NEW up stage ends a down
+      // object we are still sending (single frames have no receipt).
+      if (object.header.state == RelayState::Continue &&
+          join_sub(object.header.phase, object.header.step) <=
+              last_up_sub(from, object.header.relay_id)) {
+        ++stats_.frames_rejected;
+        return;
+      }
       // The proxy moved on: a down object we were still sending arrived, and
       // a stale partial up assembly of this relay is obsolete.
       if (Slot* slot = find(from, object.header.relay_id)) free_slot(*slot);
@@ -1164,6 +1217,24 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
         return;
       }
       Slot* slot = find(from, chunk.id);
+      if (slot != nullptr && slot->down &&
+          slot->object.mode() == JoinObjectSlot::Mode::Sending) {
+        // Only a NEW up stage displaces our down object (it reached the
+        // device): a retransmitted duplicate of the delivered one
+        // re-earns its Complete reply through the completed-key memory
+        // kept in this slot, a stale one stays refused.
+        const JoinObjectSlot::Accepted probe =
+            slot->object.accept(JoinCarrier::WireRelay, chunk, now_ms);
+        if (probe.outcome == JoinObjectSlot::Outcome::Repeat) {
+          send_reply(from, probe.reply);
+          return;
+        }
+        if (probe.outcome != JoinObjectSlot::Outcome::Busy ||
+            join_sub(chunk.phase, chunk.step) <= last_up_sub(from, chunk.id)) {
+          ++stats_.frames_rejected;
+          return;
+        }
+      }
       if (slot != nullptr && slot->down) {
         free_slot(*slot);  // implicit receipt of our down object
         slot = nullptr;
@@ -1176,14 +1247,7 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
       slot->hops = hops;
       const JoinObjectSlot::Accepted accepted =
           slot->object.accept(JoinCarrier::WireRelay, chunk, now_ms);
-      if (accepted.send_reply) {
-        std::array<std::uint8_t, kJoinReplySize> body{};
-        std::size_t written = 0;
-        if (join_reply_encode(accepted.reply, MutableByteView{body.data(), body.size()},
-                              written)) {
-          (void)wire_.send_relay(from, FrameType::BootstrapReply, ByteView{body.data(), written});
-        }
-      }
+      if (accepted.send_reply) send_reply(from, accepted.reply);
       if (accepted.outcome == JoinObjectSlot::Outcome::Busy ||
           accepted.outcome == JoinObjectSlot::Outcome::Rejected) {
         ++stats_.frames_rejected;
@@ -1195,6 +1259,15 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
           object.header.proxy != from || object.header.relay_id != chunk.id ||
           object.header.phase != chunk.phase || object.header.step != chunk.step) {
         ++stats_.frames_rejected;
+        slot->object.release_assembled();
+        return;
+      }
+      if (object.header.state == RelayState::Continue &&
+          join_sub(object.header.phase, object.header.step) <=
+              last_up_sub(from, chunk.id)) {
+        // A stale object re-assembled (not newer than the stage
+        // delivered last): its Complete reply already went out above —
+        // drop it like a single-frame duplicate.
         slot->object.release_assembled();
         return;
       }
@@ -1278,14 +1351,20 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
   } else {
     Slot* slot = find(to_proxy, h.relay_id);
     if (slot != nullptr) {
-      free_slot(*slot);  // the host answered: any partial up object is moot
+      // The host answered: any partial up object is moot — but the
+      // completed-key memory stays, so retransmitted up chunks re-earn
+      // their Complete reply instead of displacing this send.
+      slot->object.release_assembled();
+      slot->down = true;
+      slot->hops = 0;
+    } else {
+      slot = allocate(to_proxy, h.relay_id);
+      if (slot == nullptr) {
+        ++stats_.slot_busy;
+        return Status::error(StatusCode::NoCapacity, "no relay slot");
+      }
+      slot->down = true;
     }
-    slot = allocate(to_proxy, h.relay_id);
-    if (slot == nullptr) {
-      ++stats_.slot_busy;
-      return Status::error(StatusCode::NoCapacity, "no relay slot");
-    }
-    slot->down = true;
     status = slot->object.load(JoinCarrier::WireRelay, h.phase, h.step, h.relay_id, object,
                                now_ms);
     if (status) status = send_due_chunks(*slot, now_ms);
@@ -1309,10 +1388,7 @@ Status JoinRelayGateway::host_abort(const NodeId proxy, const std::uint32_t rela
   if (membership_ != MembershipState::Member) {
     return Status::error(StatusCode::InvalidState, "gateway is not a member");
   }
-  const Recent* known = nullptr;
-  for (const Recent& recent : recent_) {
-    if (recent.valid && recent.proxy == proxy && recent.relay_id == relay_id) known = &recent;
-  }
+  const Recent* known = find_recent(proxy, relay_id);
   if (known == nullptr) return Status::error(StatusCode::NotFound, "relay not known");
   RelayHeader header{};
   header.dir = RelayDirection::Down;

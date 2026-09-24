@@ -144,6 +144,10 @@ struct FakeAuthority final : JoinRelayHostSink {
     if (refuse) return Status::error(StatusCode::NoCapacity, "host queue full");
     ups.push_back({proxy, hops, Bytes(object.data, object.data + object.size)});
     if (on_up) on_up(ups.back());  // may re-enter the gateway
+    if (fail_once) {
+      fail_once = false;  // refuse after any reentry the hook installed
+      return Status::error(StatusCode::NoCapacity, "host queue full");
+    }
     return Status::success();
   }
   Status relay_abort(const NodeId proxy, const std::uint32_t relay_id,
@@ -165,6 +169,8 @@ struct FakeAuthority final : JoinRelayHostSink {
   std::vector<Up> ups;
   std::vector<Abort> aborts;
   bool refuse{false};
+  // Refuse the next relay_up AFTER its hook ran (reentry + error).
+  bool fail_once{false};
   // Optional hooks run inside the callbacks (the gateway may be re-entered
   // from them; the recorded copy stays valid).
   std::function<void(const Up&)> on_up;
@@ -1263,6 +1269,167 @@ void test_reentrant_in_proxy_aborted() {
   CHECK(world.gateway.slots_in_use() == 1);  // the reentrant op survives
 }
 
+void test_up_retransmit_keeps_reentrant_down() {
+  current = "up_retransmit_keeps_reentrant_down";
+  // The up object's receipts and the first down chunks are lost: the
+  // proxy's up retransmission must re-earn a Complete reply through the
+  // completed-key memory, not release the down send installed inside
+  // relay_up nor hand the host a duplicate up object.
+  World world;
+  CHECK(world.connect());
+  const Bytes m1 = filler(300, 1);  // chunked up to the gateway
+  const Bytes m2 = filler(372, 2);  // chunked down to the proxy
+  int answered = 0;
+  world.authority.on_up = [&](const FakeAuthority::Up& up) {
+    if (answered++ != 0) return;
+    const RelayObject object = parse_up(up.object);
+    const Bytes down = down_object(object.header, 2, RelayState::Continue, m2);
+    CHECK(world.gateway.host_down(kProxy, view(down), world.now).ok());
+  };
+  bool receipt_dropped = false;
+  world.drop_wire = [&receipt_dropped, &world](const WireFrame& frame) {
+    const bool m1_reply = frame.from == kGateway && frame.to == kProxy &&
+                          frame.type == FrameType::BootstrapReply &&
+                          frame.payload[1] == join_sub(JoinAuthPhase::EdhocMessage, 1);
+    if (m1_reply) {
+      // Every Progress receipt and the first Complete are lost: the
+      // proxy retransmits all of m1's chunks; a later Complete passes.
+      const bool complete =
+          frame.payload[8] == static_cast<std::uint8_t>(JoinReplyStatus::Complete);
+      if (!complete || !receipt_dropped) {
+        receipt_dropped = receipt_dropped || complete;
+        return true;
+      }
+      return false;
+    }
+    // The down object's chunks stay lost while the proxy's up send is
+    // still unacknowledged.
+    return frame.from == kGateway && frame.to == kProxy &&
+           frame.type == FrameType::BootstrapChunk &&
+           frame.payload[1] == join_sub(JoinAuthPhase::EdhocMessage, 2) &&
+           world.proxy.slot().mode() == JoinObjectSlot::Mode::Sending;
+  };
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+  world.pump();
+  world.advance(3000);
+  CHECK(answered == 1 && receipt_dropped);
+  CHECK(world.proxy.stats().retransmissions > 0);  // the m1 chunks came again
+  CHECK(world.authority.ups.size() == 1);          // no duplicate relay_up
+  CHECK(world.observers[0]->messages.size() == 1 &&
+        message_is(world.observers[0]->messages[0], 2, m2));
+  CHECK(world.authority.aborts.empty());
+}
+
+void test_expired_slot_steal_drops_old_recent() {
+  current = "expired_slot_steal_drops_old_recent";
+  // Both slots busy: the expired up assembly of relay A is reclaimed by
+  // a host_down for relay C inside relay_abort. The slot legitimately
+  // belongs to C now, but the ended relay A's recent entry must still be
+  // dropped — otherwise a later host_abort(A) wrongly succeeds.
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  JoinRelayGateway gateway(config, port);
+  gateway.set_membership(MembershipState::Member);
+  FakeAuthority authority;
+  gateway.set_host_sink(&authority);
+  std::vector<Bytes> objects;
+  std::vector<JoinObjectSlot> senders(3);
+  const auto make_up = [&](const std::size_t i, const std::uint32_t relay_id,
+                           const std::uint8_t step) {
+    RelayObject object{};
+    object.header.relay_id = relay_id;
+    object.header.proxy = kProxy;
+    object.header.joiner_mac = device_mac(0);
+    object.header.step = step;
+    object.header.joiner_rssi_dbm = -40;
+    const Bytes message = filler(300, static_cast<std::uint8_t>(i));
+    object.message = view(message);
+    Bytes encoded(kJoinObjectMax);
+    std::size_t written = 0;
+    CHECK(relay_object_encode(object, MutableByteView{encoded.data(), encoded.size()}, written)
+              .ok());
+    encoded.resize(written);
+    objects.push_back(encoded);
+    CHECK(senders[i]
+              .load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, step, relay_id,
+                    view(objects.back()), 0)
+              .ok());
+  };
+  const auto send_chunk = [&](const std::size_t i, const std::size_t c,
+                              const MonotonicMs now) {
+    JoinChunk chunk{};
+    CHECK(senders[i].chunk_at(c, chunk).ok());
+    std::array<std::uint8_t, kMaxApplicationPayload> body{};
+    std::size_t size = 0;
+    CHECK(join_chunk_encode(JoinCarrier::WireRelay, chunk, MutableByteView{body.data(), body.size()},
+                            size)
+              .ok());
+    gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapChunk, ByteView{body.data(), size}, now);
+  };
+  make_up(0, 100, 1);  // relay A stage 1 (complete: its recent entry exists)
+  make_up(1, 200, 1);  // relay B stage 1 (partial: pins the other slot)
+  make_up(2, 100, 3);  // relay A stage 3 (partial: will expire)
+  for (std::size_t c = 0; c < senders[0].chunk_total(); ++c) send_chunk(0, c, 10);
+  CHECK(authority.ups.size() == 1 && authority.ups[0].object == objects[0]);
+  send_chunk(2, 0, 20);
+  send_chunk(1, 0, 2000);
+  CHECK(gateway.slots_in_use() == 2);
+  int reentered = 0;
+  authority.on_abort = [&](const FakeAuthority::Abort& abort) {
+    if (abort.reason != RelayAbortReason::GatewayExpired || reentered++ != 0) return;
+    CHECK(abort.proxy == kProxy && abort.relay_id == 100);
+    RelayHeader header{};
+    header.relay_id = 300;
+    header.proxy = kProxy;
+    header.joiner_mac = device_mac(0);
+    const Bytes down = down_object(header, 2, RelayState::Continue, filler(300, 9));
+    CHECK(gateway.host_down(kProxy, view(down), 3020).ok());
+  };
+  gateway.poll(3020);  // relay A's stage-3 assembly expired; B is too young
+  CHECK(reentered == 1);
+  CHECK(authority.aborts.size() == 1);
+  CHECK(gateway.stats().down_objects == 1);
+  CHECK(gateway.slots_in_use() == 2);  // relay C's send + relay B's assembly
+  // The ended relay A is forgotten (NotFound); the reentrant relay C keeps
+  // its recent entry (Ok).
+  CHECK(gateway.host_abort(kProxy, 100, 3021).code == StatusCode::NotFound);
+  CHECK(gateway.host_abort(kProxy, 300, 3021).ok());
+}
+
+void test_relay_up_refusal_keeps_reentrant_down() {
+  current = "relay_up_refusal_keeps_reentrant_down";
+  // relay_up answers its own up object with host_down() and then reports
+  // a failure: the operation installed inside the callback owns the
+  // relay now — no authority_unreachable abort, no forgotten entry.
+  World world;
+  CHECK(world.connect());
+  const Bytes m1 = filler(300, 1);
+  const Bytes m2 = filler(372, 2);
+  int answered = 0;
+  std::uint32_t relay_id = 0;
+  world.authority.on_up = [&](const FakeAuthority::Up& up) {
+    if (answered++ != 0) return;
+    const RelayObject object = parse_up(up.object);
+    relay_id = object.header.relay_id;
+    const Bytes down = down_object(object.header, 2, RelayState::Continue, m2);
+    CHECK(world.gateway.host_down(kProxy, view(down), world.now).ok());
+    world.authority.fail_once = true;  // refuse after having answered
+  };
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+  world.pump();
+  world.advance(3000);
+  CHECK(answered == 1 && relay_id != 0);
+  CHECK(world.authority.ups.size() == 1);
+  CHECK(world.gateway.stats().host_unavailable == 1);
+  CHECK(world.observers[0]->messages.size() == 1 &&
+        message_is(world.observers[0]->messages[0], 2, m2));
+  CHECK(world.observers[0]->statuses.empty());  // no authority_unreachable hint
+  CHECK(world.authority.aborts.empty());
+  CHECK(world.gateway.host_abort(kProxy, relay_id, world.now).ok());
+}
+
 }  // namespace
 
 int main() {
@@ -1282,6 +1449,9 @@ int main() {
   test_reentrant_host_down_in_relay_up();
   test_reentrant_host_down_in_relay_abort();
   test_reentrant_in_proxy_aborted();
+  test_up_retransmit_keeps_reentrant_down();
+  test_expired_slot_steal_drops_old_recent();
+  test_relay_up_refusal_keeps_reentrant_down();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 join relay check(s) failed\n", failures);
     return 1;
