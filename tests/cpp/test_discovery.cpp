@@ -1419,6 +1419,32 @@ void test_retry_backoff_draw_double_cap() {
   }
 }
 
+// backoff_max_ms is a hard ceiling on the wait, not only the doubling
+// limit: a cap below the initial draw range must bound the FIRST retry
+// too. Config 600ms cap + [500,2000] draw range, forced draw at the top of
+// the range — every retry gap must sit at window + 600ms, never ~2s.
+void test_retry_backoff_draw_clamped_to_cap() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true, 0xC0FFEE, 7,
+                      /*stale_reprobe_ms=*/0, /*stale_reprobe_attempts=*/0,
+                      /*jitter_max_ms=*/0, /*backoff_max_ms=*/600);
+  world.start_all();
+  CHECK_OK(a.engine.begin_discovery(0));
+  // Force the first retry draw (u64 #3 after the 16B attempt nonce) to the
+  // top of the range: 500 + 1500 % 1501 = 2000, above the 600ms cap.
+  a.entropy.force_next(1500);
+
+  world.run(10000);
+  const auto times = a.port.times_of(FrameType::Discover, false);
+  CHECK(times.size() == 5);  // max_attempts, then DISCOVERY_FAILED
+  CHECK(a.observer.has("DISCOVERY_FAILED"));
+  for (std::size_t i = 1; i < times.size(); ++i) {
+    const std::uint64_t gap = times[i] - times[i - 1];
+    const std::uint64_t expect = 165 + 600;  // window + poll + clamped wait
+    CHECK(gap >= expect && gap <= expect + 4);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1449,6 +1475,7 @@ int main() {
   test_forget_revoked_peer();
   test_cold_start_jitter();
   test_retry_backoff_draw_double_cap();
+  test_retry_backoff_draw_clamped_to_cap();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d discovery checks failed\n", failures);

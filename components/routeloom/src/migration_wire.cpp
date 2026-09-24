@@ -278,7 +278,14 @@ Status signed_snapshot_unwrap(const ByteView object,
 PlanExchange::PlanExchange(const PlanExchangeConfig& config,
                            MigrationWirePort& wire,
                            MigrationObjectSink& sink) noexcept
-    : config_(config), wire_(wire), sink_(sink) {}
+    : config_(config), wire_(wire), sink_(sink) {
+  // The reassembly window is a wire-protocol contract (wire-protocol.md §6),
+  // not a free knob: a larger configured value would let one transfer hold
+  // a bounded assembly slot past the documented 10s bound.
+  if (config_.inbound_expiry_ms > migration_wire_const::kInboundExpiryMs) {
+    config_.inbound_expiry_ms = migration_wire_const::kInboundExpiryMs;
+  }
+}
 
 PlanExchange::Inbound* PlanExchange::find_inbound(
     const NodeId peer, const autonomy::ObjectHash& hash) noexcept {

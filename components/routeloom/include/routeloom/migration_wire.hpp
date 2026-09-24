@@ -207,6 +207,7 @@ enum class ExchangeChannel : std::uint8_t {
 struct PlanExchangeConfig {
   std::uint32_t ack_timeout_ms{migration_wire_const::kAckTimeoutMs};
   std::uint8_t send_attempts_max{migration_wire_const::kSendAttemptsMax};
+  // Clamped to kInboundExpiryMs in the ctor — the wire-protocol §6 bound.
   std::uint32_t inbound_expiry_ms{migration_wire_const::kInboundExpiryMs};
 };
 

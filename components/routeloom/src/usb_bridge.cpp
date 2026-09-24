@@ -460,16 +460,24 @@ void UsbBridge::handle_credit(const std::uint64_t request, const ByteView inner,
       }
       const std::uint64_t frames = read_u64(inner.data + 1);
       const std::uint64_t bytes = read_u64(inner.data + 9);
+      const std::uint64_t grant_frames_before = tx_credit_.grant_frames();
+      const std::uint64_t grant_bytes_before = tx_credit_.grant_bytes();
       const Status status = tx_credit_.update(proof_.session_id, frames, bytes);
       if (!status) {
         ++stats_.credit_denied;
         send_error(UsbErrorCode::ProtocolError, request, status.detail, now_ms);
         return;
       }
-      // Fresh permission: clear the zero-credit recovery ladder.
-      credit_queries_ = 0;
-      connection_stalled_ = false;
-      stall_reported_ = false;
+      // Fresh permission clears the zero-credit recovery ladder — but only
+      // when the notice actually raised a grant ceiling. Stale/duplicate
+      // cumulative notices (absorbed by update) grant nothing new, so they
+      // must not reset the 500ms-spaced query count or a declared stall.
+      if (tx_credit_.grant_frames() > grant_frames_before ||
+          tx_credit_.grant_bytes() > grant_bytes_before) {
+        credit_queries_ = 0;
+        connection_stalled_ = false;
+        stall_reported_ = false;
+      }
       break;
     }
     case kCreditQuery: {

@@ -1664,6 +1664,50 @@ void test_exchange_absolute_reassembly_deadline() {
   CHECK(pair.sink_b.objects.size() == 1);
 }
 
+void test_exchange_inbound_expiry_capped_at_contract() {
+  // inbound_expiry_ms is a public knob, but the 10s window is a
+  // wire-protocol §6 contract: configuring 15s must not let a transfer
+  // hold an assembly slot past the documented bound.
+  FakeWirePort wire{kSelf};
+  CollectingSink sink;
+  PlanExchangeConfig cfg{};
+  cfg.inbound_expiry_ms = 15000;
+  PlanExchange ex{cfg, wire, sink};
+
+  std::array<std::uint8_t, 100> content{};
+  for (std::size_t i = 0; i < content.size(); ++i) {
+    content[i] = static_cast<std::uint8_t>(i * 3);
+  }
+  autonomy::ControlObjectPayload manifest{};
+  manifest.total_len = static_cast<std::uint16_t>(content.size());
+  manifest.object_hash =
+      plan_digest(ByteView{content.data(), content.size()});
+  ex.on_manifest(kAuthority, manifest, kNow);
+
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.object_hash = manifest.object_hash;
+  chunk.offset = 0;
+  std::memcpy(chunk.data.data(), content.data(), 10);
+  chunk.data_size = 10;
+  ex.on_chunk(kAuthority, chunk, kNow);
+
+  // 12s after the first manifest: inside the configured 15s but past the
+  // 10s contract bound — the chunk is refused like an unknown object.
+  chunk.offset = 10;
+  std::memcpy(chunk.data.data(), content.data() + 10, 10);
+  ex.on_chunk(kAuthority, chunk, kNow + 12000);
+  CHECK(!wire.sent.empty());
+  const Captured& acked = wire.sent.back();
+  autonomy::EncodedPayload payload{};
+  std::memcpy(payload.bytes.data(), acked.data.data(), acked.size);
+  payload.size = acked.size;
+  autonomy::ObjectAckPayload ack{};
+  CHECK_OK(object_ack_decode(payload.view(), ack));
+  CHECK(ack.status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(ack.received_len == 0);
+  CHECK(sink.objects.empty());
+}
+
 void test_exchange_channel_gating() {
   ExchangePair pair{};
   // Distinct payloads — publish dedups on the object hash, so identical
@@ -1775,6 +1819,7 @@ int main() {
   test_exchange_forged_content();
   test_exchange_bounded_and_expiry();
   test_exchange_absolute_reassembly_deadline();
+  test_exchange_inbound_expiry_capped_at_contract();
   test_exchange_channel_gating();
   test_exchange_ack_timeout_bounded();
   test_exchange_duplicate_delivery();

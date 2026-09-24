@@ -18,6 +18,11 @@ EXPECTED_IDF_COMMIT = "76f5dedd9950a3012fee8fb7d5586df21fc67802"
 # budget, never shrink the record (static_assert ceiling in node.hpp: 176 B).
 DEDUP_ENTRY_BYTES = 152
 
+# ESP-NOW link overhead per transmitted frame (preamble-independent fixed
+# header/trailer cost) — a radio-physical constant of the LR250 profile,
+# not a tuneable contract (issue #47 premises).
+ESPNOW_MAC_OVERHEAD_BYTES = 43
+
 # Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
 # FrameType in components/routeloom/include/routeloom/types.hpp.
 EXPECTED_FRAME_IDS = {
@@ -121,6 +126,61 @@ def validate(root: Path) -> dict:
         preamble_range = floor_model["lr_preamble_ms"]
         preamble = floor_model["lr_preamble_model_ms"]
         wire = floor_model["frame_wire_bytes"]
+        # The premises are pinned to independent sources so a coordinated
+        # edit that keeps the JSON internally consistent still fails:
+        # bit time derives from the 250kbps contract (8e6 us/Mbit / rate),
+        # the ESP-NOW MAC overhead is a fixed radio-physical constant, and
+        # the wire byte lengths must match the Wire v1 layouts in code.
+        test(
+            "latency_bit_time_from_250kbps_contract",
+            floor_model["us_per_byte"] * radio["radio"]["control_rate_kbps"]
+            == 8000,
+        )
+        test(
+            "latency_mac_overhead_is_espnow_constant",
+            floor_model["espnow_mac_overhead_bytes"]
+            == ESPNOW_MAC_OVERHEAD_BYTES,
+        )
+        wire_hpp = (
+            root / "components/routeloom/include/routeloom/wire.hpp"
+        ).read_text(encoding="utf-8")
+        types_hpp = (
+            root / "components/routeloom/include/routeloom/types.hpp"
+        ).read_text(encoding="utf-8")
+        node_cpp = (
+            root / "components/routeloom/src/node.cpp"
+        ).read_text(encoding="utf-8")
+
+        def payload_bytes(function_name):
+            body = node_cpp.split(
+                f"Status MeshNode::{function_name}(", 1
+            )[1].split("#undef RL_WRITE", 1)[0]
+            return sum(
+                int(width) // 8
+                for width in re.findall(r"writer\.write_u(\d+)\(", body)
+            )
+
+        header_bytes = int(
+            re.search(r"kHeaderSize = (\d+);", wire_hpp).group(1)
+        )
+        tag_bytes = int(
+            re.search(r"kAeadTagSize = (\d+);", types_hpp).group(1)
+        )
+        # End-to-end frames carry link + end AAD tags (2); the one-hop
+        # HOP_ACCEPT is link-only (1). Plaintext sizes come from the actual
+        # payload encoders in node.cpp.
+        expected_wire = {
+            "data_64b_payload": header_bytes + 64 + 2 * tag_bytes,
+            "hop_accept": header_bytes + payload_bytes("encode_ack_payload")
+            + tag_bytes,
+            "end_receipt": header_bytes
+            + payload_bytes("encode_receipt_payload") + 2 * tag_bytes,
+        }
+        test(
+            "latency_wire_lengths_match_wire_layout",
+            wire == expected_wire,
+            f"wire layout derives {expected_wire}",
+        )
 
         def airtime_ms(wire_bytes):
             return preamble + (

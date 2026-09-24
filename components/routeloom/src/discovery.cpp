@@ -2573,6 +2573,9 @@ bool NeighborDiscovery::draw_retry_backoff(std::uint32_t& out_ms) noexcept {
       config_.backoff_min_ms + 1;
   out_ms = config_.backoff_min_ms +
            static_cast<std::uint32_t>(roll % span);
+  // The cap is a hard ceiling on the wait, not just the doubling limit:
+  // a cap below the initial draw range must still bound the first retry.
+  if (out_ms > config_.backoff_max_ms) out_ms = config_.backoff_max_ms;
   return true;
 }
 

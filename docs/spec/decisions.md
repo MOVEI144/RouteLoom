@@ -25,7 +25,7 @@
 
 [radio-defaults.json](../reference/radio-defaults.json)と対応仕様を同時管理する。統合版では探索／survey訪問上限200ms、Deep Sleep型無線活動予算2000ms、停止予約100msを採る。時間の短いbudgetでは探索回数を減らし、2周を常に完遂すると解釈しない。
 
-性能目標と操作timeoutを区別する。1000ms callback watchdogは正常送信を1秒待たせることではない。1hop20ms目標、LINK RTO60ms初期、channel準備30秒は別の起点と仕事。
+性能目標と操作timeoutを区別する。1000ms callback watchdogは正常送信を1秒待たせることではない。1hop35ms目標（改訂1.1、LR250理論下限28ms以上）、LINK RTO60ms初期、channel準備30秒は別の起点と仕事。
 
 ## 未確定を隠さない
 
