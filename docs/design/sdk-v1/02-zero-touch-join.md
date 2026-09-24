@@ -137,7 +137,7 @@ phase本文が112B（=116−4）を超えるときは既存BootstrapChunk（type
 - **admission**（`zt_admit_rld1`）：Member以外でDiscovering/Authenticatingの機器が**joiner**、Memberが**proxy**。joinerはDISCOVER v3送信・OFFER v3受信（Discovering/Authenticating）、交換frameはAuthenticatingだけで上り送信・下り（とRelayStatus）受信。proxyは逆。chunkは中身のstepの向き、replyはその逆向き。その他の状態（Unprovisioned・AuthorizedPendingCommit・Revoked）はこのlaneを使えない。既存のmembership allowlistの範囲内（`protocol/semantics.json`の`zero_touch_join`）。
 - **proxyの資源**（§13）：同時relay 1件、新規m1は2秒に1件（超過はRelayStatus busy＋待ち時間）、保留OFFER 4件、relay 20秒、機器無応答5秒（下りobjectを渡した後だけ数える）、送信は初回＋再送3回。gatewayは分割object用slot 2件（単一frameのobjectはslot不要）、直近relay 8件を記録。
 
-**未配線**：RLD1 frameの振分け（`zt_rld1_frame`で判別しtransaction nonceで担当engineへ）とrelay portのMeshNode routed Wire（FrameType 3〜6、hopごとのlink保護、`kFlagEndProtected`無し）への接続、firmwareでのengine配置は後続（P3-4／Owner）。参加FSM（候補表・verdict処理・RLS1 commit）はP3-4。
+**未配線**：RLD1 frameの振分け（`zt_rld1_frame`で判別しtransaction nonceで担当engineへ）とrelay portのMeshNode routed Wire（FrameType 3〜6、hopごとのlink保護、`kFlagEndProtected`無し）への接続、firmwareでのengine配置はP4-2／Owner。参加FSM（候補表・verdict処理・RLS1 commit）はP3-4のportable coreとhost試験で実装済み（§10.4）。
 
 ## 6. EDHOCメッセージの中身と長さ
 
@@ -314,8 +314,9 @@ m3を検証できた未割当機器は、verdictに関係なくhostの**発見�
 | ZT_SELECT | Discovering | 候補表（§11）更新 | 適格な現場を1つ選ぶ | →ZT_HANDSHAKE |
 | ZT_HANDSHAKE | Authenticating | m1送信 | m2でSiteCert/署名検証（失敗→中止、身元は未送信）、m3送信 | m4受信→判定、期限切れ→ZT_BACKOFF |
 | ZT_DECIDED | Authenticating | m4受信 | verdict処理（§6.1） | Allow→ZT_COMMIT、他→候補表更新→ZT_SELECT/ZT_BACKOFF |
-| ZT_COMMIT | AuthorizedPendingCommit | Allow | §10.2の検証→RLS1 commit（seal/readback） | 成功→MEMBER_BRINGUP、失敗→RAM破棄しZT_BACKOFF |
-| MEMBER_BRINGUP | Member | RLS1 commit済み | Member scopeで近隣とlink（[06](06-fast-rejoin.md)）、JoinConfirm | 通常運転 |
+| ZT_COMMIT | AuthorizedPendingCommit | 検証済みAllow | RLS1 commit（seal/readback）と再検証 | 成功→MemberReady。write/readback失敗→ZT_RECONCILE |
+| ZT_RECONCILE | AuthorizedPendingCommitまたはDiscovering | store読出し・commit結果が不明 | 両slotを再分類し、完全な検証済み所属だけを採用。読出し故障は5秒間隔で最大3回 | 正常record→MemberReady、未所属→再試行、未知schema／継続故障→RecoveryRequired |
+| MEMBER_BRINGUP | Member | RLS1採用とMemberReady | OwnerがMember scopeのlink（[06](06-fast-rejoin.md)）とJoinConfirmを開始 | 通常運転 |
 | ZT_BACKOFF | Discovering | 失敗・全現場不適格 | 乱数backoff 1s→最大600s。次走査は`min(backoff,最短の適格化期限)`で、6/24h回避中でも最大600秒ごとに未知現場を探索する（回避現場自体は試行しない） | →ZT_SCAN |
 
 時間上限：走査はchannel最大3×有効Site CA hint最大3×320ms（最大9窓、1窓につきDISCOVER 1回、重複hintはまとめる）。m1→m2は`2s＋0.3s×authority_hops`（最大6秒、到達不明は6秒）、m3→m4はそれ＋decision上限（合計最大10秒）、1回の試行全体は15秒以内。新しいm1の間隔は機器全体で2秒以上。RLD1の組立ては既存どおり1件・3秒。
@@ -326,7 +327,7 @@ m3を検証できた未割当機器は、verdictに関係なくhostの**発見�
 2. MemberCertの`sub`＝自分のnode_id、cnf公開鍵＝自分の公開鍵、`iss`＝SiteCertの`sub`（site_id）。
 3. MemberCertの`network`＝SitePackageの`network`、上位32bit＝`site_epoch`＝SiteCertのsite_epoch、下位32bit＝SiteCertのnetwork_low32。
 4. `assignment_generation`≥1、roleは既知bitのみ。
-5. A2 modeなら AssignmentTicket（割当検証鍵の署名、`[node, site_id, generation]`）が有効で2・3と一致。
+5. A2 modeなら AssignmentTicket（割当検証鍵の署名、`[node, site_id, generation]`）が有効で2・3と一致。ticket形式未確定のP3-4ではA2はfail closed。
 6. SitePackageの長さ・予約0・gateway_count範囲。
 
 どれかが不一致なら何も保存せず、その現場をDenyBlocked相当で24時間回避する（Site Authorityの不具合か攻撃なので自動再試行を急がない）。
@@ -354,6 +355,10 @@ len-4 u32 crc32
 
 commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id）とするepoch 1の最小image」としてローカルに作れる（SiteCertがSite CA経由で認証済みのため）。以後の完全imageはSAK署名のRTM1で届く。これは[04 provisioning §4.4](../sdk-completion/04-provisioning-lifecycle.md)の「最初の信頼は物理経路だけ」を**変更する**点で、最初の物理信頼をSite CA anchor（事務所）へ移し、現場の信頼はその連鎖から得る。この変更は同文書の改訂としてレビューに回す。
 
+### 10.4 portable Joinerの実装範囲（P3-4）
+
+`sdkv1_joiner.hpp`の`Joiner`が上表を`ZtJoinerLink`、`JoinHandshake`、`JoinCandidates`に接続する。Allowの全検査とDAMS導出は`JoinHandshake`が行い、Joinerは検証済み候補だけを`SiteStore`へcommitする。commit後は完全なrecordの指紋・署名・RLI1結合とslot healthを再確認し、結果不明ならReconcileで再読出しする。callback再入はBusyで拒否する。`MemberReady`はOwnerへの採用通知であり、Joiner自体はMember scopeやJoinConfirmを開かない。二現場のC++ simulatorと、C++ peerをRust実Site Authority／KGuard／API1へ接続するlive E2Eでhost検証済み。MeshNode／firmware、USB daemon、本番radio、HILは未接続・未実施。
+
 ## 11. 重なり合う現場（R4）
 
 候補表（RAM、最大8現場）：観測keyは`(org_hint, site_hint, network_low32)`で、hintは探索keyであり認証済みの現場IDではない。認証はm2で初めて`site_id`に結び付き、hint衝突が認証で判明した場合だけ同じkeyを2レコードに分ける（満杯ならその試行を中止）。各現場はproxy証拠を最大2件（MAC・node・channel・RSSI・authority_hops・到達/busy flag・last_seen）持ち、60秒観測がなければ証拠は失効する（policyの期限は消えない）。回避表は同じレコードの別viewで、状態は`untried/transient/pending(retry_at)/busy(retry_at)/avoid(until)`、失敗回数・最終試行・preferred flagを持つ。1レコード≤160B、合計1280B。新規追加は空き→holdの期限が切れた古いレコード（policyによらない）の順で置換し、選択中・未満了のholdを持つレコードはevictしない。全8件が保護対象なら新候補をdropしてNoCapacityを数える（無制限リストやNVS overflowは作らない）。
@@ -368,6 +373,7 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 6. 候補表は再起動で消える（NVSに書かない：摩耗と、誤った回避の固定化を避ける）。再起動直後の再試行はauthority側のrate制限で抑える。
 
 **なぜ隣の現場に入らないか**：(a) allowは割当先のKGuardだけが返す。(b) 参加後のlinkはMemberCertの相互検証を要し、別現場のMemberCertは別SAK署名・別networkなので検証に失敗する。(c) Member class discoveryのscope鍵は自現場のGKから導出され、他現場のDISCOVER/OFFERはscope MACで無言dropされる。(d) 参加後はZeroTouch classを送らない。焼き込み鍵による分離には依存しない。残る前提はKGuardの割当一意性（A1）で、A2ではこれも機器側で検証する（[01](01-overview-threat-model.md) §5）。
+P3-4のJoinerはA1を実装する。A2はticket形式が確定するまでfail closedで、安価なRLRES1再試行（P3-5）も無効。pending期限後は新しいnonce・Session・ephemeralを使うfull EDHOCで再試行する。
 
 ## 12. 失敗の扱い
 
@@ -396,7 +402,7 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | 機器側RAM | 組立1件1024B（`ZtJoinerLink`のobject slot）＋EDHOC session（ILP32見積約3.5KB：libedhoc context 576B・作業arena 2048B・key store等。P2-1のhost計測にP3-1のEAD込み参加交換の実測（arena最大1440B）を反映、C3実測はP2-2）。proxyはobject slot 1件、gatewayは2件 | libedhocのbounded backend（05 §8、[edhoc.hpp](../../../components/routeloom/include/routeloom/edhoc.hpp)） |
 | memberのDATA | bootstrap queueと分離 | 既存方針 |
 
-## 14. 受入試験（下の注記以外はplanned_not_run）
+## 14. 受入試験（実測範囲は末尾に記載）
 
 | ID | 内容 | 層 |
 |---|---|---|
@@ -417,3 +423,5 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 | V1-J15 | C3/S3で参加時間とECC処理時間を実測 | HIL |
 
 **このbranchで実行したもの（host、P2-3・P3-1・P3-2）**：V1-J12（P2-3、検査部分）、V1-J14（EAD部分〔P2-3〕とEDHOC encoder込みの実長〔P3-1、§6〕）、V1-J02（`JoinProxy`→`JoinRelayGateway`の中継をhop数3として通し、最終objectでproxy slotが解放される。Wire routingはportで模擬しMeshNodeは通さない）、V1-J10（authority到達不可ではOFFER無し、hostが無いgatewayはauthority_unreachable、authorityのbusy中止、relay中の別機器：いずれも機器へはhintだけで状態は変えない）、V1-J11のうちproxy側（同時6機器のDISCOVERで保留OFFER 4件、m1は1件だけ中継し他はbusy、cookie無しのm1は組立てmemoryも使わず拒否、2秒budget。memberのDATA維持はMeshNode配線後）。いずれも`tests/cpp/test_sdkv1_join_relay.cpp`と`test_sdkv1_join_transport.cpp`。
+
+**P3-4でhost実行したもの**：V1-J01、J04〜J07、J13、J12の保存0／24時間回避、J08のJoiner電断行列、J03/J09のJoiner側pending再試行を`test_sdkv1_joiner.cpp`の二現場simulatorで検証。Rust実Site Authorityに接続する`site::joiner_interop`は正常Allow、AからBへのDenyNotHere後の参加、pending→Allow、flash imageのみ引継ぐ再起動の4件を検証。J05のHIL部分、Member DATA維持、firmware／USB配線、JoinConfirm、実機処理時間は未実施。

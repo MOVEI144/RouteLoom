@@ -86,6 +86,27 @@ def end_aad_layout(wire_source: str) -> list:
     return layout
 
 
+def maintenance_rx_covers_bundle(header: str, glue: str) -> bool:
+    bundle_match = re.search(r"kMaintenanceBundleMax = (\d+);", header)
+    line_match = re.search(
+        r"kMaintenanceLineMax = (\d+) \+ (\d+) \* kMaintenanceBundleMax;",
+        header,
+    )
+    rx_match = re.search(r"config\.rx_buffer_size = ([^;]+);", glue)
+    if not bundle_match or not line_match or not rx_match:
+        return False
+    line_max = int(line_match[1]) + int(line_match[2]) * int(bundle_match[1])
+    expression = rx_match[1].strip()
+    if expression.isdecimal():
+        rx_bytes = int(expression)
+    else:
+        offset = re.fullmatch(r"sdkv1::kMaintenanceLineMax \+ (\d+)", expression)
+        if not offset:
+            return False
+        rx_bytes = line_max + int(offset[1])
+    return rx_bytes >= line_max + 1  # the newline follows the longest line
+
+
 def validate(root: Path) -> dict:
     checks = []
 
@@ -697,6 +718,40 @@ def validate(root: Path) -> dict:
                 for board in boards["boards"]
             ),
         )
+        for app in ("reference_node", "bridge_node"):
+            firmware = (
+                root / f"firmware/{app}/main/main.cpp"
+            ).read_text(encoding="utf-8")
+            partition = firmware.index("nvs_flash_init_partition(")
+            console = firmware.index("run_maintenance_console(sdkv1_stores)")
+            peer_capacity = firmware.index("nvs_partition_peer_capacity(")
+            security = firmware.index("security.initialize(")
+            test(
+                f"{app}_maintenance_before_mesh_security",
+                partition < console < peer_capacity < security,
+                "factory console needs rlsec, not the development mesh security state",
+            )
+        workflow = (root / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
+        test(
+            "maintenance_usb_rx_covers_identity_bundle",
+            maintenance_rx_covers_bundle(
+                (root / "components/routeloom/include/routeloom/sdkv1_maintenance.hpp")
+                .read_text(encoding="utf-8"),
+                (root / "components/routeloom_espnow/src/espnow_sdkv1.cpp")
+                .read_text(encoding="utf-8"),
+            ),
+            "USB RX must hold the largest hex-encoded identity bundle and newline",
+        )
+        for app in ("reference_node", "bridge_node"):
+            test(
+                f"{app}_maintenance_build_cell",
+                re.search(
+                    rf"- app: {app}\s+target: esp32c3\s+profile: normal"
+                    rf"\s+autonomy: off\s+features: maintenance_on",
+                    workflow,
+                ) is not None,
+                "each factory console branch must compile in the fixed-IDF matrix",
+            )
         for board in boards["boards"]:
             if "gpio_d0_to_d10" not in board:
                 test(

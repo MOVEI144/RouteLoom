@@ -170,6 +170,30 @@ bool es256_signature_canonical(const ByteView signature) noexcept {
          cose_be32_cmp(s, kSecp256r1HalfOrder) <= 0;
 }
 
+bool p256_scalar_valid(const ByteView scalar) noexcept {
+  if (scalar.data == nullptr || scalar.size != 32) return false;
+  std::array<std::uint8_t, 32> value{};
+  std::memcpy(value.data(), scalar.data, 32);
+  return !cose_be32_is_zero(value) && cose_be32_cmp(value, kSecp256r1Order) < 0;
+}
+
+void es256_signature_normalize_low_s(Es256Signature& signature) noexcept {
+  std::array<std::uint8_t, 32> s{};
+  std::memcpy(s.data(), signature.data() + 32, 32);
+  if (cose_be32_is_zero(s) || cose_be32_cmp(s, kSecp256r1Order) >= 0 ||
+      cose_be32_cmp(s, kSecp256r1HalfOrder) <= 0) {
+    return;
+  }
+  // s is in (n/2, n): n - s is the low-S twin of the same signature.
+  std::uint16_t borrow = 0;
+  for (std::size_t i = 32; i-- > 0;) {
+    const std::uint16_t diff = static_cast<std::uint16_t>(kSecp256r1Order[i]) -
+                               static_cast<std::uint16_t>(s[i]) - borrow;
+    signature[i + 32] = static_cast<std::uint8_t>(diff & 0xFFU);
+    borrow = (diff >> 8) & 1U;
+  }
+}
+
 Status cert_claims_validate(const CertClaims& claims) noexcept {
   if (!id_valid(claims.issuer) || !id_valid(claims.subject)) {
     return Status::error(StatusCode::InvalidArgument, "cert issuer/subject");

@@ -1067,6 +1067,42 @@ void test_ram_footprint() {
         sizeof(LocalRevocationRecord) + kLocalRevocationSlotBytes + 128);
 }
 
+bool contains_secret(const SiteStore& store, const std::array<std::uint8_t, 32>& secret) {
+  const auto* bytes = reinterpret_cast<const std::uint8_t*>(&store);
+  for (std::size_t i = 0; i + secret.size() <= sizeof(store); ++i) {
+    if (std::memcmp(bytes + i, secret.data(), secret.size()) == 0) return true;
+  }
+  return false;
+}
+
+void test_site_scratch_does_not_retain_uncommitted_keys() {
+  FaultyRecordStorage storage(kSiteSlotBytes);
+  SiteStore store(storage);
+  CHECK_OK(store.initialize());
+  const SiteRecord candidate = site_record();
+  Digest256 digest{};
+  CHECK_OK(store.fingerprint(candidate, digest));
+  CHECK(!contains_secret(store, candidate.gk_current));
+  storage.cut_call = 0;
+  storage.cut_bytes = 0;
+  CHECK(!store.commit(candidate).ok());
+  CHECK(!store.has_site());
+  CHECK(!contains_secret(store, candidate.gk_current));
+}
+
+void test_site_commit_refuses_failed_active_load() {
+  FaultyRecordStorage storage(kSiteSlotBytes);
+  SiteStore store(storage);
+  CHECK_OK(store.initialize());
+  CHECK_OK(store.commit(site_record()));
+  storage.fail_read_call = storage.read_calls + 3;
+  CHECK(store.initialize().code == StatusCode::StorageFailure);
+  CHECK(store.health().active_load_failed);
+  const std::size_t writes = storage.write_calls;
+  CHECK(store.commit(site_record(4, 204)).code == StatusCode::StorageFailure);
+  CHECK(storage.write_calls == writes);
+}
+
 }  // namespace
 
 int main() {
@@ -1089,6 +1125,8 @@ int main() {
   test_local_revocation_basic();
   test_local_revocation_power_cuts();
   test_ram_footprint();
+  test_site_scratch_does_not_retain_uncommitted_keys();
+  test_site_commit_refuses_failed_active_load();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 store check(s) failed\n", failures);
     return 1;
