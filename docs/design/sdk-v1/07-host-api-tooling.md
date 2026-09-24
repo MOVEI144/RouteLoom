@@ -145,9 +145,9 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 
 **永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由）、`ledger`（approve/revokeのSHA-256 hash chain。起動時に検証し、切れていれば拒否）、`rrs`（発行した全RRS1）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertは`routeloomctl site-cert`（P7-2）で本部のSite CA鍵から発行する。
 
-**GKの境界（P5）**：初回起動時にGK epoch 1を生成してSitePackageに載せる。削除時は次のGKを`staged`で作るだけで、配布・activation・24時間周期の更新はP5。stagedは新規参加者にも渡さない（全memberに配るまでactivateしない）。
+**GKの境界（P5）**：初回起動時にGK epoch 1を生成してSitePackageに載せる。削除時と24時間周期の更新では次のGKを`staged`で作り、Host側の配布・durable ACK記録・activationを進める（P5 PR3）。stagedは新規参加者にも渡さない。機器・USBへの結線はP5 PR2／PR4に残る。
 
-**transport**：`site::transport::JoinTransport`（`RelayUp`＝0x40の中身、`Outbound::Down`＝0x41、`Outbound::Abort`＝0x42、step 1〜4＝EDHOC message、5＝EDHOC error、status 0継続／1最終）とin-process実装。USBへの結線（HostOps codec・capability bit）は並行作業（P3-2）の後に統合者が`UsbJoinRelay`経由で行う。authority channel（JoinConfirm→`member_confirmed`）の受け口はあるが、P5までmemberは`allowed_unconfirmed`のまま。
+**transport**：`site::transport::JoinTransport`（`RelayUp`＝0x40の中身、`Outbound::Down`＝0x41、`Outbound::Abort`＝0x42、step 1〜4＝EDHOC message、5＝EDHOC error、status 0継続／1最終）とin-process実装。USBへの結線（HostOps codec・capability bit）は並行作業（P3-2）の後に統合者が`UsbJoinRelay`経由で行う。authority channelのportable実装はP5 PR1で完了したが、JoinConfirm→`member_confirmed`のHost結線はP5 PR4に残るため、memberは現時点で`allowed_unconfirmed`のまま。
 
 **試験**：`cargo test -p routeloom-edhoc`（RFC 9529、method 0、interop replay）、`cargo test -p routeloom-host site::`（状態機械、SQLite、再起動後の同一MemberCert再発行、削除とRRS1／RemovalNoticeの検証、admission上限、store故障、API面）、daemonのAPI1 socket経由で`KGuardMock`が`SiteAdmin`を操作する端から端までの試験（未割当→pending→割当→Allowを`join_allow_verify`で検証、deny not_here、ACL、idempotency、削除）。
 
