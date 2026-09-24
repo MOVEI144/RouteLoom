@@ -1,0 +1,8 @@
+{
+  "codec": "end_sub",
+  "encoded_hex": "e1",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "end_sub_phase6",
+  "note": "phase is 4 or 5"
+}

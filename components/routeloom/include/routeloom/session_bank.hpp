@@ -185,6 +185,16 @@ class SessionBank {
   // Establishment demand for the Owner: idempotent per (scope, peer).
   bool take_demand(SessionDemand& out) noexcept;
   bool demand_pending(SecurityScope scope, NodeId peer) const noexcept;
+  // Re-records a demand the Owner popped but could not act on yet (the
+  // demand driver's push-back when its link staging is full). Same
+  // idempotent path tx_epoch uses; a full table keeps refusing until the
+  // application retries. Refuses on an unconfigured bank like tx_epoch.
+  void note_demand(SecurityScope scope, NodeId peer) noexcept {
+    if (reentered() || !configured_) return;
+    if (scope != SecurityScope::Link && scope != SecurityScope::EndToEnd) return;
+    if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return;
+    record_demand(scope, peer);
+  }
 
   // A nonzero RX id unique across live/overlap contexts (the handshake
   // engine additionally keeps its in-flight ids out); 8 draws max.

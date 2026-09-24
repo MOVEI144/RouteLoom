@@ -22,8 +22,10 @@
 #include <string>
 #include <vector>
 
+#include "routeloom/bootstrap_transport.hpp"
 #include "routeloom/kdf.hpp"
 #include "routeloom/key_schedule.hpp"
+#include "routeloom/sdkv1_join_transport.hpp"
 #include "routeloom/sdkv1_session_wire.hpp"
 
 #ifndef ROUTELOOM_SDKV1_GOLDEN_DIR
@@ -309,11 +311,55 @@ void check_invalid(const Fields& fields) {
   } else if (codec_it->second == "context_confirm") {
     ContextConfirm confirm{};
     CHECK(!context_confirm_decode(view, confirm).ok());
+  } else if (codec_it->second == "end_object") {
+    EndObject object{};
+    CHECK(!end_object_decode(view, object).ok());
+  } else if (codec_it->second == "end_sub") {
+    CHECK(encoded.size() == 1);
+    if (encoded.size() == 1) {
+      ObjectLane lane{};
+      JoinAuthPhase phase{};
+      std::uint8_t step = 0;
+      CHECK(!object_sub_decode(encoded[0], lane, phase, step));
+    }
   } else {
     std::fprintf(stderr, "[%s] unknown invalid codec %s\n", current.c_str(),
                  codec_it->second.c_str());
     ++failures;
   }
+}
+
+void check_end_object(const Fields& fields, const Fields* base) {
+  const auto encoded = hex(fields, "object_hex");
+  EndObject object{};
+  CHECK(end_object_decode(ByteView{encoded.data(), encoded.size()}, object).ok());
+  CHECK(object.phase == static_cast<JoinAuthPhase>(num(fields, "phase")));
+  CHECK(object.step == num(fields, "step"));
+  CHECK(object.exchange_id == num(fields, "exchange_id"));
+  CHECK(object.profile == num(fields, "profile"));
+  const auto message = hex(fields, "message_hex");
+  CHECK(object.message.size == message.size());
+  CHECK(std::equal(message.begin(), message.end(), object.message.data));
+  std::array<std::uint8_t, kEndObjectMax> out{};
+  std::size_t written = 0;
+  CHECK(end_object_encode(object, MutableByteView{out.data(), out.size()}, written).ok());
+  CHECK(bytes_equal(out.data(), written, encoded));
+  if (base != nullptr) {
+    const auto base_encoded = hex(*base, "object_hex");
+    CHECK(encoded != base_encoded);
+  }
+}
+
+void check_end_sub(const Fields& fields) {
+  ObjectLane lane{};
+  JoinAuthPhase phase{};
+  std::uint8_t step = 0;
+  CHECK(object_sub_decode(static_cast<std::uint8_t>(num(fields, "sub")), lane, phase, step));
+  CHECK(lane == ObjectLane::EndSession);
+  CHECK(phase == static_cast<JoinAuthPhase>(num(fields, "phase")));
+  CHECK(step == num(fields, "step"));
+  const auto lane_it = fields.find("lane");
+  CHECK(lane_it != fields.end() && lane_it->second == "end");
 }
 
 }  // namespace
@@ -387,6 +433,16 @@ int main() {
       check_contexts_digest(fields);
     } else if (codec->second == "exporter_output") {
       check_exporter_output(fields);
+    } else if (codec->second == "end_object") {
+      const Fields* base = nullptr;
+      const auto differs = fields.find("differs_from");
+      if (differs != fields.end()) {
+        const auto base_it = valid.find(differs->second);
+        if (base_it != valid.end()) base = &base_it->second;
+      }
+      check_end_object(fields, base);
+    } else if (codec->second == "end_sub") {
+      check_end_sub(fields);
     } else {
       std::fprintf(stderr, "[%s] unknown codec %s\n", current.c_str(), codec->second.c_str());
       ++failures;

@@ -118,7 +118,8 @@ class CBridge final : public RadioPort, public SecurityProvider, public NodeObse
 
 // rl_node_config_t tail extension (routeloom.h): the base layout is frozen
 // at RL_NODE_CONFIG_SIZE_BASE bytes; the scoped-routing fields follow it and
-// are read only when the caller's struct_size covers the whole struct.
+// are read only when the caller's struct_size covers them. A two-gateway
+// header (RL_NODE_CONFIG_SIZE_GATEWAY2) keeps working with its own limit.
 static_assert(offsetof(rl_node_config_t, route_gateway_count) == RL_NODE_CONFIG_SIZE_BASE,
               "rl_node_config_t base layout must stay frozen");
 static_assert(offsetof(rl_node_config_t, route_gateways) == RL_NODE_CONFIG_SIZE_BASE + 8,
@@ -126,6 +127,8 @@ static_assert(offsetof(rl_node_config_t, route_gateways) == RL_NODE_CONFIG_SIZE_
 static_assert(sizeof(rl_node_config_t) ==
                   RL_NODE_CONFIG_SIZE_BASE + 8 + 8 * RL_MAX_ROUTE_GATEWAYS,
               "rl_node_config_t size");
+static_assert(RL_NODE_CONFIG_SIZE_GATEWAY2 == RL_NODE_CONFIG_SIZE_BASE + 8 + 2 * 8,
+              "two-gateway header size");
 static_assert(RL_MAX_ROUTE_GATEWAYS == kMaxRouteGateways,
               "C gateway capacity must mirror kMaxRouteGateways");
 
@@ -133,13 +136,22 @@ bool extended_config(const rl_node_config_t& input) noexcept {
   return input.struct_size >= sizeof(rl_node_config_t);
 }
 
-// Shape checks the C boundary owns (routeloom.h): a count within capacity,
-// no zero id (it would silently shrink the list) and no duplicate. The lease
-// rule and reserved ids stay with MeshNode::validate_config() at start.
+bool gateway2_config(const rl_node_config_t& input) noexcept {
+  return input.struct_size == RL_NODE_CONFIG_SIZE_GATEWAY2;
+}
+
+// Shape checks the C boundary owns (routeloom.h): a count within the
+// struct_size-covered capacity, no zero id (it would silently shrink the
+// list) and no duplicate. A two-gateway caller asking for three gateways
+// is refused — never truncated. The lease rule and reserved ids stay with
+// MeshNode::validate_config() at start.
 bool valid_config(const rl_node_config_t& input) noexcept {
   if (input.abi_version != RL_ABI_VERSION) return false;
-  if (!extended_config(input)) return input.struct_size == RL_NODE_CONFIG_SIZE_BASE;
-  if (input.route_gateway_count > RL_MAX_ROUTE_GATEWAYS) return false;
+  if (!extended_config(input) && !gateway2_config(input)) {
+    return input.struct_size == RL_NODE_CONFIG_SIZE_BASE;
+  }
+  const std::size_t capacity = extended_config(input) ? RL_MAX_ROUTE_GATEWAYS : 2;
+  if (input.route_gateway_count > capacity) return false;
   for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
     if (input.route_gateways[i] == kInvalidNodeId) return false;
     for (std::size_t j = 0; j < i; ++j) {
@@ -164,7 +176,8 @@ NodeConfig convert_config(const rl_node_config_t& input) noexcept {
   output.callback_watchdog_ms = input.callback_watchdog_ms;
   output.max_link_attempts = input.max_link_attempts;
   output.max_end_to_end_rounds = input.max_end_to_end_rounds;
-  if (extended_config(input)) {
+  if (extended_config(input) || gateway2_config(input)) {
+    // valid_config already limited the count to the covered capacity.
     for (std::size_t i = 0; i < input.route_gateway_count; ++i) {
       output.route_gateways[i] = input.route_gateways[i];
     }

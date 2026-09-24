@@ -13,5 +13,8 @@ hkdf = "0.12"
 hmac = "0.12"
 sha2 = { version = "0.10", default-features = false }
 
+[dev-dependencies]
+routeloom-protocol = { path = "../routeloom-protocol" }
+
 [lints]
 workspace = true

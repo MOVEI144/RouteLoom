@@ -1,6 +1,7 @@
 set(ROUTELOOM_CORE_SOURCES
   src/authority.cpp
   src/autonomy_wire.cpp
+  src/bootstrap_transport.cpp
   src/byte_io.cpp
   src/channel_plan.cpp
   src/config.cpp

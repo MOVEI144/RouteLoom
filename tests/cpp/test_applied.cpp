@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -167,6 +168,8 @@ struct World {
   std::map<NodeId, Bundle> nodes;
   MonotonicMs now{0};
   TestSecurity scratch;  // interchangeable cipher for crafting/cracking frames
+  // Optional per-world config hook applied to every node added afterwards.
+  std::function<void(NodeConfig&)> configure;
 
   MeshNode* add(NodeId id, std::uint32_t hop_timeout_ms = 60) {
     NodeConfig cfg{};
@@ -174,6 +177,7 @@ struct World {
     cfg.node = id;
     cfg.message_session = 100 + static_cast<std::uint32_t>(id);
     cfg.boot_incarnation = 0xB000 + static_cast<std::uint32_t>(id);
+    if (configure) configure(cfg);
     cfg.route_generation = 1;
     cfg.route_advertisement_period_ms = 100;
     cfg.route_lifetime_ms = 15000;
@@ -189,6 +193,16 @@ struct World {
     return b.node.get();
   }
   MeshNode* at(NodeId id) const { return nodes.at(id).node.get(); }
+  // Simulates a reboot of `id`: the radio links stay, the node (with its
+  // neighbor table and APPLIED records) is rebuilt, started, and the
+  // configure hook applies to the fresh NodeConfig, so the test sets the
+  // new boot token there. The caller re-links afterwards.
+  void reboot(NodeId id) {
+    net.unregister_node(id);
+    nodes.erase(id);
+    MeshNode* node = add(id);
+    CHECK_OK(node->start(now));
+  }
   AppliedObserver* obs(NodeId id) const { return nodes.at(id).obs.get(); }
   TapRadio* radio(NodeId id) const { return nodes.at(id).radio.get(); }
   CountingSink* install_sink(NodeId id) {
@@ -577,19 +591,21 @@ void test_digests() {
 
 void test_lease_layout() {
   World w;
+  // Wire v2 (P4 §9.1): message_session u32 | boot_session u32 |
+  // boot_incarnation u64. An explicit boot token rides the second field.
+  w.configure = [](NodeConfig& config) { config.boot_session = 77; };
   MeshNode* node = w.add(2);
-  // Wire v2: message_session u32 | end_epoch u32 | boot_incarnation u64.
   const ExecutionLease lease = node->applied_lease();
   ByteReader reader(ByteView{lease.data(), lease.size()});
   std::uint32_t session = 0;
-  std::uint32_t epoch = 0;
+  std::uint32_t boot_token = 0;
   std::uint64_t boot = 0;
   CHECK_OK(reader.read_u32(session));
-  CHECK_OK(reader.read_u32(epoch));
+  CHECK_OK(reader.read_u32(boot_token));
   CHECK_OK(reader.read_u64(boot));
   CHECK(reader.remaining() == 0);
   CHECK(session == 102);
-  CHECK(epoch == 1);
+  CHECK(boot_token == 77);
   CHECK(boot == 0xB002);
   // The nonzero message session guarantees a computed lease is never all-zero.
   bool nonzero = false;
@@ -598,6 +614,73 @@ void test_lease_layout() {
   // A different boot incarnation produces a different lease.
   w.add(3);
   CHECK(w.at(3)->applied_lease() != lease);
+  // Compat init: an unset boot_session rides message_session (never end_epoch).
+  World plain;
+  MeshNode* legacy = plain.add(2);
+  CHECK(legacy->config().boot_session == 102);
+  const ExecutionLease compat_lease = legacy->applied_lease();
+  ByteReader compat(ByteView{compat_lease.data(), endpoint::kAppliedLeaseBytes});
+  CHECK_OK(compat.read_u32(session));
+  CHECK_OK(compat.read_u32(boot_token));
+  CHECK(session == 102);
+  CHECK(boot_token == 102);
+}
+
+MessageId applied_exchange(World& w, std::uint32_t lifetime_ms, std::uint8_t hop_limit,
+                           const ExecutionLease* lease);
+
+void test_lease_rekey_stable_reboot_changes() {
+  // P4-A01: the APPLIED lease tracks the destination's boot, not its E2E
+  // crypto epoch — a rekey leaves it unchanged, a reboot changes it, and
+  // a pre-reboot lease refuses without running the app.
+  World w;
+  w.configure = [](NodeConfig& config) {
+    config.boot_session = 77;
+    config.end_epoch = 1;
+  };
+  MeshNode* a = w.add(1);
+  MeshNode* b = w.add(2);
+  w.start_all();
+  w.link(1, 2);
+  w.install_sink(2);
+  const ExecutionLease before = b->applied_lease();
+  const MessageId first = applied_exchange(w, 5000, 1, nullptr);
+  w.run(500);
+  CHECK(a->delivery(first).state == DeliveryState::Delivered);
+  // "Rekey": same boot token, new end epoch — the lease is unchanged and
+  // the old lease still applies.
+  w.configure = [](NodeConfig& config) {
+    config.boot_session = 77;
+    config.end_epoch = 9;
+  };
+  w.reboot(2);
+  w.link(1, 2);
+  w.install_sink(2);
+  w.run(500);
+  CHECK(w.at(2)->applied_lease() == before);
+  MessageId id2{};
+  CHECK_OK(
+      a->send_applied(2, user_payload(), before, applied_options(), w.now, id2));
+  w.run(500);
+  CHECK(a->delivery(id2).state == DeliveryState::Delivered);
+  // "Reboot": new boot token — the lease changes and the pre-reboot lease
+  // refuses without running the app.
+  w.configure = [](NodeConfig& config) {
+    config.boot_session = 78;
+    config.end_epoch = 9;
+  };
+  w.reboot(2);
+  w.link(1, 2);
+  CountingSink* sink = w.install_sink(2);
+  w.run(500);
+  CHECK(w.at(2)->applied_lease() != before);
+  MessageId id3{};
+  CHECK_OK(
+      a->send_applied(2, user_payload(), before, applied_options(), w.now, id3));
+  w.run(500);
+  CHECK(a->delivery(id3).state == DeliveryState::Failed);
+  CHECK(sink->calls == 0);
+  CHECK(w.at(2)->applied_stats().refusals_stale_lease == 1);
 }
 
 void test_send_applied_validation() {
@@ -1577,6 +1660,7 @@ int main() {
   test_query_status_ack_codecs();
   test_digests();
   test_lease_layout();
+  test_lease_rekey_stable_reboot_changes();
   test_send_applied_validation();
   test_happy_path();
   test_end_receipt_alone_never_promotes();

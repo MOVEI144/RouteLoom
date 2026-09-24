@@ -1,0 +1,8 @@
+{
+  "codec": "end_sub",
+  "encoded_hex": "c5",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "end_sub_edhoc_step5",
+  "note": "member EDHOC has no step 5"
+}

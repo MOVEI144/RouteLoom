@@ -15,6 +15,9 @@ use routeloom_keysched::session::{
     LinkCarrier, SessionIntent, SessionState, EXPORTER_CONTEXT_MAX,
 };
 use routeloom_keysched::{hkdf_expand, resume_binding_link};
+use routeloom_protocol::bootstrap::{
+    end_object_decode, end_object_encode, object_sub_decode, EndObject,
+};
 
 type Fields = BTreeMap<String, String>;
 
@@ -244,12 +247,50 @@ fn check_exporter_output(f: &Fields) {
     assert_eq!(out, hex(f, "output_hex"));
 }
 
+fn check_end_object(f: &Fields, all: &BTreeMap<String, Fields>) {
+    let object = end_object_decode(&hex(f, "object_hex")).expect("decode end object");
+    assert_eq!(object.phase, int8(f, "phase"));
+    assert_eq!(object.step, int8(f, "step"));
+    assert_eq!(object.exchange_id, int32(f, "exchange_id"));
+    assert_eq!(object.profile, int8(f, "profile"));
+    assert_eq!(object.message, hex(f, "message_hex"));
+    let expect = EndObject {
+        phase: int8(f, "phase"),
+        step: int8(f, "step"),
+        exchange_id: int32(f, "exchange_id"),
+        profile: int8(f, "profile"),
+        message: hex(f, "message_hex"),
+    };
+    assert_eq!(object, expect);
+    assert_eq!(
+        end_object_encode(&expect).expect("encode end object"),
+        hex(f, "object_hex")
+    );
+    if let Some(base) = f.get("differs_from").map(|name| &all[name]) {
+        assert_ne!(hex(f, "object_hex"), hex(base, "object_hex"));
+    }
+}
+
+fn check_end_sub(f: &Fields) {
+    let (lane, phase, step) =
+        object_sub_decode(u8::try_from(int(f, "sub")).expect("u8 sub")).expect("decode end sub");
+    assert!(lane);
+    assert_eq!(phase, int8(f, "phase"));
+    assert_eq!(step, int8(f, "step"));
+    assert_eq!(f["lane"], "end");
+}
+
 fn check_invalid(f: &Fields) {
     let encoded = hex(f, "encoded_hex");
     match f["codec"].as_str() {
         "session_intent" => assert!(SessionIntent::decode(&encoded).is_err()),
         "session_state" => assert!(SessionState::decode(&encoded).is_err()),
         "context_confirm" => assert!(ContextConfirm::decode(&encoded).is_err()),
+        "end_object" => assert!(end_object_decode(&encoded).is_err()),
+        "end_sub" => {
+            assert_eq!(encoded.len(), 1);
+            assert!(object_sub_decode(encoded[0]).is_err());
+        }
         codec => panic!("unknown invalid codec {codec}"),
     }
 }
@@ -279,6 +320,8 @@ fn handshake_vectors_agree() {
             "exporter_context" => check_exporter_context(f, &all),
             "contexts_digest" => check_contexts_digest(f),
             "exporter_output" => check_exporter_output(f),
+            "end_object" => check_end_object(f, &all),
+            "end_sub" => check_end_sub(f),
             codec => panic!("{name}: unknown codec {codec}"),
         }
     }

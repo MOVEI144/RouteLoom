@@ -21,10 +21,21 @@
 
 namespace routeloom {
 
+namespace sdkv1 {
+class BootstrapSink;
+struct BootstrapMeta;
+}  // namespace sdkv1
+
 struct NodeConfig {
   NetworkId network{0};
   NodeId node{kInvalidNodeId};
   std::uint32_t message_session{0};
+  // Durable boot token (G-SEC P4 §9.1): the rlboot value stamped as the
+  // second ExecutionLease field. 0 selects the compat init — the MeshNode
+  // constructor substitutes message_session in that one place. Callers
+  // behind a session-type provider must pass an explicit nonzero value
+  // (the Owner refuses 0 there); end_epoch is never the fallback.
+  std::uint32_t boot_session{0};
   std::uint32_t link_epoch{1};
   std::uint32_t end_epoch{1};
   // Origin generation for this node's own route source. Must be persisted
@@ -744,6 +755,27 @@ class MeshNode {
   Status send_typed(FrameType type, NodeId destination, ByteView payload,
                     std::uint32_t lifetime_ms, MonotonicMs now_ms,
                     MessageId& id) noexcept;
+  // Routed bootstrap send (G-SEC P4 §7.4, types 3..6): the join-relay and
+  // member end-session lane. Unlike the config lane above, frames are
+  // link-protected per hop only — never end-protected — so a relay can
+  // forward them while holding no end session. Bounded to
+  // kBootstrapJobsMax live jobs and kBootstrapJobsPerPeer per next hop so
+  // pre-authentication traffic can never starve DATA/ACK; excess refuses
+  // with NoCapacity (the Owner retries on its own handshake deadline).
+  Status send_bootstrap(NodeId destination, FrameType type, ByteView payload,
+                        std::uint32_t lifetime_ms, MonotonicMs now_ms,
+                        MessageId& id) noexcept;
+  // Install/clear the bootstrap terminal sink (the Owner's handshake
+  // demux; nullptr disables). With no sink, inbound bootstrap frames are
+  // still dedup'd/hop-ACKed/forwarded but terminate as
+  // BOOTSTRAP_NO_ENDPOINT — the origin's retries expire into a timeout.
+  void set_bootstrap_sink(sdkv1::BootstrapSink* sink) noexcept { bootstrap_sink_ = sink; }
+  // Adopted local MemberCert role bits (rlcw1 kMemberRole*, P4 §7.4):
+  // bootstrap transit additionally requires the Relay or Gateway bit —
+  // a bare Endpoint never forwards handshake traffic. 0 (unset) forwards
+  // nothing; relay_enabled() still gates all transit.
+  void set_local_role(std::uint32_t role) noexcept { local_role_ = role; }
+  std::uint32_t local_role() const noexcept { return local_role_; }
   // Free TX-pool slots: the Service endpoint needs this to make the
   // atomic admission reservation (pending + dedup + reply budget) the
   // contract demands before accepting work (03 §3.4).
@@ -1085,6 +1117,11 @@ class MeshNode {
   static constexpr std::size_t kDeliveryCapacity = 8;
   static constexpr std::size_t kTxQueueCapacity = 32;
   static constexpr std::size_t kAwaitingHopCapacity = 8;
+  // Routed bootstrap lane (G-SEC P4 §7.4): at most 8 live origin jobs, 2
+  // per next hop — handshake traffic keeps a bounded slice of the pool
+  // and can never crowd out the DATA/ACK reservation.
+  static constexpr std::size_t kBootstrapJobsMax = 8;
+  static constexpr std::size_t kBootstrapJobsPerPeer = 2;
   static constexpr std::size_t kSeqnoSeenCapacity = 32;
   static constexpr std::size_t kSeqnoStateCapacity = 32;
   static constexpr std::uint32_t kNoFeedbackSeq = 0xFFFFFFFFu;
@@ -1319,7 +1356,7 @@ class MeshNode {
   enum class JobForm : std::uint8_t { Plain, Forwarded };
   enum class JobOwner : std::uint8_t { None, OriginDelivery, Transit,
                                        GatewayService, Config, Diagnostic,
-                                       Applied, Group };
+                                       Applied, Group, Bootstrap };
 
   // Records below are laid out largest-alignment first: MeshNode is a static
   // object in firmware and every byte of padding is .bss on the DRAM-bound
@@ -1442,6 +1479,16 @@ class MeshNode {
       std::size_t n = 0;
       pool_.for_each([&](const TxJob& job) {
         if (job.owner == owner) ++n;
+      });
+      return n;
+    }
+    // Live jobs of one owner class toward one next-hop peer — the
+    // bootstrap lane's per-peer cap is computed, never bookkept, so no
+    // completion path can leak it.
+    std::size_t count_owner_peer(JobOwner owner, NodeId peer) const noexcept {
+      std::size_t n = 0;
+      pool_.for_each([&](const TxJob& job) {
+        if (job.owner == owner && job.peer == peer) ++n;
       });
       return n;
     }
@@ -1657,12 +1704,14 @@ class MeshNode {
   Status queue_seqno_request(NodeId peer, NodeId requester, NodeId destination,
                              RouteSequence requested_sequence, std::uint32_t request_id,
                              std::uint8_t ttl, MonotonicMs now_ms) noexcept;
-  // Shared enqueue for send_service/resend_service/send_typed: a Plain
-  // end-protected routed job of `type` owned by `owner`, hop-accept required.
+  // Shared enqueue for send_service/resend_service/send_typed/
+  // send_bootstrap: a Plain routed job of `type` owned by `owner`,
+  // hop-accept required. `end_protected` is false only for the bootstrap
+  // lane (link-only per-hop protection, P4 §7.4).
   Status queue_typed_job(FrameType type, JobOwner owner, const MessageId& id,
                          NodeId destination, ByteView payload, std::uint8_t round,
                          std::uint32_t lifetime_ms, Priority priority,
-                         MonotonicMs now_ms) noexcept;
+                         MonotonicMs now_ms, bool end_protected = true) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   // True when an AuthRequired encode refusal is a missing/pending session
@@ -1733,6 +1782,14 @@ class MeshNode {
   // their separate destination==self path and never reach here.
   void handle_routed(const wire::LinkOpenedFrame& frame, NodeId peer,
                      MonotonicMs now_ms) noexcept;
+  // Routed bootstrap terminal/transit (G-SEC P4 §7.4, types 3..6): the
+  // link-only sibling of handle_routed. Terminal frames deliver the
+  // link-opened payload to the bootstrap sink with the previous hop's
+  // authentication fact kept separate from the unverified origin claim;
+  // transit additionally requires a Relay/Gateway local role. Never
+  // enters the DATA path and never emits END_RECEIPT.
+  void handle_bootstrap(const wire::LinkOpenedFrame& frame, NodeId peer,
+                        MonotonicMs now_ms) noexcept;
   // End-protected Diagnostic (48) terminal handling (02-telemetry §4.2):
   // subtype dispatch on the verified body — TelemetryQuery answers with a
   // bounded snapshot or an honest DiagnosticReject; Snapshot/Reject surface
@@ -2080,6 +2137,8 @@ class MeshNode {
   GatewayServiceSink* gateway_sink_{nullptr};
   ConfigEndpointSink* config_sink_{nullptr};
   DiagnosticSink* diagnostic_sink_{nullptr};
+  sdkv1::BootstrapSink* bootstrap_sink_{nullptr};
+  std::uint32_t local_role_{0};
   // Seen-table for inbound TransitFailure reports (dedup on
   // reference+phase+reason — a different report_id must not restart work).
   struct TransitFailureSeen {

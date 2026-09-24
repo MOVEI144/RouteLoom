@@ -344,6 +344,46 @@ void test_c_api_route_profile() {
     CHECK(rl_add_neighbor(node.context, 1, 1, 0) == RL_STATUS_OK);
     rl_poll(node.context, 10000);
   }
+  // Four gateways (P4: the RLS1 list size), preference order kept.
+  {
+    static_assert(RL_MAX_ROUTE_GATEWAYS == 4, "P4 gateway capacity");
+    rl_node_config_t config = capi_scoped_base();
+    config.route_gateway_count = 4;
+    config.route_gateways[0] = 1;
+    config.route_gateways[1] = 9;
+    config.route_gateways[2] = 17;
+    config.route_gateways[3] = 25;
+    config.route_advertisement_period_ms = kScopedProductPeriodMs;
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    CApiNode node;
+    CHECK(node.init(config) == RL_STATUS_OK);
+    std::array<rl_node_id_t, RL_MAX_ROUTE_GATEWAYS> out{};
+    CHECK(rl_route_gateways(node.context, out.data(), out.size()) == 4);
+    CHECK(out[0] == 1 && out[1] == 9 && out[2] == 17 && out[3] == 25);
+    CHECK(rl_start(node.context, 0) == RL_STATUS_OK);
+  }
+  // Two-gateway callers keep working with their own limit: count 2 at the
+  // old struct size is honored, count 3 is refused — never truncated.
+  {
+    rl_node_config_t config = capi_scoped_base();
+    config.route_advertisement_period_ms = kScopedProductPeriodMs;
+    config.route_lifetime_ms = kScopedProductLifetimeMs;
+    config.route_gateway_count = 2;
+    config.route_gateways[0] = 1;
+    config.route_gateways[1] = 9;
+    config.struct_size = RL_NODE_CONFIG_SIZE_GATEWAY2;
+    CApiNode legacy;
+    CHECK(legacy.init(config) == RL_STATUS_OK);
+    std::array<rl_node_id_t, RL_MAX_ROUTE_GATEWAYS> out{};
+    CHECK(rl_route_gateways(legacy.context, out.data(), out.size()) == 2);
+    CHECK(out[0] == 1 && out[1] == 9);
+    CHECK(rl_start(legacy.context, 0) == RL_STATUS_OK);
+    config.route_gateway_count = 3;
+    config.route_gateways[2] = 17;
+    CApiNode truncated;
+    CHECK(truncated.init(config) == RL_STATUS_INVALID_ARGUMENT);
+    CHECK(truncated.context == nullptr);
+  }
   // Shape errors are refused at rl_init: count over capacity, a zero id
   // inside the count, a duplicate id.
   {

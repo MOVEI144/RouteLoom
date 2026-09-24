@@ -492,10 +492,12 @@ Status app_result_status_decode(ByteView encoded, AppResultStatus& out) noexcept
 
 // APPLIED request body shape inside an end-protected DATA frame:
 // execution_lease 16B || user payload (0..kAppliedUserPayloadMax).
-// Lease (Wire v2): message_session u32 | end_epoch u32 | boot_incarnation u64.
-// message_session is never zero (NodeConfig validation), so a computed lease
-// is never all-zero and an all-zero lease on the wire is unambiguously "no
-// assertion" and refuses.
+// Lease (Wire v2, P4 §9.1): message_session u32 | boot_session u32 |
+// boot_incarnation u64. The second field tracks the destination's durable
+// boot token — an E2E rekey or route change leaves the lease unchanged, a
+// destination reboot changes it. message_session is never zero (NodeConfig
+// validation), so a computed lease is never all-zero and an all-zero lease
+// on the wire is unambiguously "no assertion" and refuses.
 constexpr std::size_t kAppliedLeaseBytes = 16;
 constexpr std::size_t kAppliedUserPayloadMax = kMaxApplicationPayload - kAppliedLeaseBytes;  // 112
 

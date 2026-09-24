@@ -50,7 +50,8 @@ constexpr std::size_t kBusyLinkCapacity = 32;
 // Up to this many gateway destinations may be configured per site. Every node
 // keeps a proactive route to each of them; other destinations are learned
 // only along the gateway tree (upward) or on demand (ROUTE_REQUEST).
-constexpr std::size_t kMaxRouteGateways = 2;
+// Four since G-SEC P4 PR3, matching the RLS1 gateway list.
+constexpr std::size_t kMaxRouteGateways = 4;
 // ROUTE_UPDATE framing (Wire v2): count(1) + N x 16-byte records inside the
 // 128-byte payload -> N <= 7; the sender's self record always takes one slot.
 constexpr std::size_t kRouteUpdateRecordBytes = 16;

@@ -1,0 +1,8 @@
+{
+  "codec": "end_object",
+  "encoded_hex": "020401001234567802010020202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "end_object_bad_version",
+  "note": "ver must be 1"
+}

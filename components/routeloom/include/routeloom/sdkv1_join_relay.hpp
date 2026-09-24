@@ -267,7 +267,10 @@ class JoinProxy {
 
   void on_rld1_rx(const MacAddress& source, const MacAddress& destination,
                   std::int8_t rssi_dbm, ByteView frame, MonotonicMs now_ms) noexcept;
-  // `from` is the verified mesh origin of a routed relay frame.
+  // `from` is the routed frame's origin claim as received over a
+  // link-authenticated previous hop — hop authentication, NOT origin
+  // authentication. Only the terminal EDHOC/resume verification proves the
+  // origin (P4 §7.4); a relaying member can forge it.
   void on_relay_rx(NodeId from, FrameType type, ByteView payload, MonotonicMs now_ms) noexcept;
   void poll(MonotonicMs now_ms) noexcept;
 
@@ -416,7 +419,9 @@ class JoinRelayGateway {
   }
   void set_membership(MembershipState state) noexcept;
 
-  // Wire RX: `from` is the verified mesh origin, `hops` its distance.
+  // Wire RX: `from` is the origin claim of a link-authenticated routed
+  // frame (see JoinProxy::on_relay_rx — not a proven origin), `hops` its
+  // distance.
   void on_relay_rx(NodeId from, std::uint8_t hops, FrameType type, ByteView payload,
                    MonotonicMs now_ms) noexcept;
   // USB 0x61: deliver a down relay object to `to_proxy`. Ok = accepted for

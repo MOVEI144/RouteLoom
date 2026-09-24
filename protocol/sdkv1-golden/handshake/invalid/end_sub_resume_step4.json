@@ -1,0 +1,8 @@
+{
+  "codec": "end_sub",
+  "encoded_hex": "d4",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "end_sub_resume_step4",
+  "note": "RLRES1 has no step 4"
+}

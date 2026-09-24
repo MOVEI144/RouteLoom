@@ -217,6 +217,25 @@ constexpr std::uint8_t join_sub(const JoinAuthPhase phase, const std::uint8_t st
   return static_cast<std::uint8_t>((static_cast<std::uint8_t>(phase) << 4U) | step);
 }
 bool join_sub_decode(std::uint8_t sub, JoinAuthPhase& phase, std::uint8_t& step) noexcept;
+
+// Object lane (G-SEC P4 §7.3): join-relay objects and member end-session
+// objects share the Wire chunk/reply carriers (FrameTypes 5/6) but never an
+// assembly. The lane bit lives in the sub byte, so the slot's (carrier,
+// sub, id) key already separates the lanes and join golden bytes stay
+// identical. End chunks never ride RLD1.
+enum class ObjectLane : std::uint8_t { JoinRelay = 0, EndSession = 1 };
+// end_sub = 0x80 | (phase << 4) | step, phases 4/5 only: 0xC1..0xC4 and
+// 0xD1..0xD3. Member EDHOC has no step-5 error object.
+constexpr std::uint8_t kEndSubLaneBit = 0x80;
+constexpr std::uint8_t end_sub(const JoinAuthPhase phase, const std::uint8_t step) noexcept {
+  return static_cast<std::uint8_t>(kEndSubLaneBit | join_sub(phase, step));
+}
+constexpr std::uint8_t object_sub(const ObjectLane lane, const JoinAuthPhase phase,
+                                  const std::uint8_t step) noexcept {
+  return lane == ObjectLane::EndSession ? end_sub(phase, step) : join_sub(phase, step);
+}
+bool object_sub_decode(std::uint8_t sub, ObjectLane& lane, JoinAuthPhase& phase,
+                       std::uint8_t& step) noexcept;
 // RLD1: the chunk id is the first four transaction-nonce bytes (big-endian).
 std::uint32_t join_rld1_object_id(const JoinNonce& nonce) noexcept;
 
@@ -231,6 +250,7 @@ struct JoinChunk {
   std::uint16_t offset{0};
   std::uint16_t total{0};
   ByteView data{};
+  ObjectLane lane{ObjectLane::JoinRelay};
 };
 
 // Reply: 0 u8 ver = 1 | 1 u8 sub | 2 u32 id | 6 u16 received | 8 u8 status |
@@ -248,6 +268,7 @@ struct JoinReply {
   std::uint32_t id{0};
   std::uint16_t received{0};
   JoinReplyStatus status{JoinReplyStatus::Progress};
+  ObjectLane lane{ObjectLane::JoinRelay};
 };
 
 Status join_chunk_encode(JoinCarrier carrier, const JoinChunk& chunk, MutableByteView out,
@@ -300,6 +321,7 @@ class JoinObjectSlot {
   JoinAuthPhase phase() const noexcept { return phase_; }
   std::uint8_t step() const noexcept { return step_; }
   std::uint32_t id() const noexcept { return id_; }
+  ObjectLane lane() const noexcept { return lane_; }
   // Wipes the buffer and returns to Idle in any mode, keeping the key of
   // the object completed last for Repeat detection (the owner consumed or
   // converted the object).
@@ -315,11 +337,15 @@ class JoinObjectSlot {
   // --- outbound
   // Copies `object` (> the carrier's single-frame limit, <= 1024 B) and
   // marks every chunk due. The caller emits chunk_at(i) for due chunks.
+  // `lane` selects the chunk sub namespace (P4 §7.3); the default keeps the
+  // join-relay 0x41..0x53 bytes. End objects never load on Rld1.
   Status load(JoinCarrier carrier, JoinAuthPhase phase, std::uint8_t step, std::uint32_t id,
-              ByteView object, MonotonicMs now_ms) noexcept;
+              ByteView object, MonotonicMs now_ms,
+              ObjectLane lane = ObjectLane::JoinRelay) noexcept;
   // In-place variant: the object was built in writable_buffer() already.
   Status load_in_place(JoinCarrier carrier, JoinAuthPhase phase, std::uint8_t step,
-                       std::uint32_t id, std::size_t size, MonotonicMs now_ms) noexcept;
+                       std::uint32_t id, std::size_t size, MonotonicMs now_ms,
+                       ObjectLane lane = ObjectLane::JoinRelay) noexcept;
   MutableByteView writable_buffer() noexcept { return MutableByteView{data_.data(), data_.size()}; }
   std::size_t chunk_total() const noexcept;
   Status chunk_at(std::size_t index, JoinChunk& out) const noexcept;
@@ -347,6 +373,7 @@ class JoinObjectSlot {
   std::array<std::uint8_t, kJoinObjectMax> data_{};
   Mode mode_{Mode::Idle};
   JoinCarrier carrier_{JoinCarrier::Rld1};
+  ObjectLane lane_{ObjectLane::JoinRelay};
   JoinAuthPhase phase_{JoinAuthPhase::EdhocMessage};
   std::uint8_t step_{0};
   std::uint32_t id_{0};

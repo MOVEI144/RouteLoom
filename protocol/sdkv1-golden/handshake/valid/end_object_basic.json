@@ -1,0 +1,13 @@
+{
+  "codec": "end_object",
+  "exchange_id": 305419896,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "message_hex": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "name": "end_object_basic",
+  "object_hex": "010401001234567802010020202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+  "phase": 4,
+  "profile": 1,
+  "purpose": 2,
+  "step": 1
+}

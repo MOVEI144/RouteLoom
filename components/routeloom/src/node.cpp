@@ -7,8 +7,10 @@
 #include <limits>
 
 #include "routeloom/autonomy_wire.hpp"
+#include "routeloom/bootstrap_transport.hpp"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/rlcw1.hpp"
 
 namespace routeloom {
 namespace {
@@ -464,6 +466,10 @@ MeshNode::MeshNode(const NodeConfig& config, RadioPort& radio, SecurityProvider&
       radio_(radio),
       security_(security),
       observer_(observer, in_external_callback_) {
+  // The one compat init for the APPLIED boot lease (P4 §9.1): an unset
+  // boot_session rides message_session. Session-type providers must pass
+  // an explicit nonzero value — the Owner refuses 0 there.
+  if (config_.boot_session == 0) config_.boot_session = config_.message_session;
   routes_.set_self(config.node);  // improvement-hold jitter identity (03 §7)
   // Feasibility state must outlive every lease that could still carry a
   // stale advertisement to us (routing-scale.md §8, RFC 8966 §3.7.3).
@@ -1019,13 +1025,16 @@ Status MeshNode::send_applied(const NodeId destination, const ByteView payload,
 }
 
 ExecutionLease MeshNode::applied_lease() const noexcept {
-  // message_session u32 | end_epoch u32 | boot_incarnation u64 — the session
-  // is validated nonzero, so a computed lease is never all-zero and all-zero
-  // on the wire is always "no assertion" and refuses (01 §1.2).
+  // message_session u32 | boot_session u32 | boot_incarnation u64 (P4 §9.1):
+  // the lease tracks the destination's boot, not its E2E crypto epoch — an
+  // E2E rekey or route change leaves it unchanged, a destination reboot
+  // changes it. The session is validated nonzero, so a computed lease is
+  // never all-zero and all-zero on the wire is always "no assertion" and
+  // refuses (01 §1.2).
   ExecutionLease lease{};
   ByteWriter writer(MutableByteView{lease.data(), lease.size()});
   (void)writer.write_u32(config_.message_session);
-  (void)writer.write_u32(config_.end_epoch);
+  (void)writer.write_u32(config_.boot_session);
   (void)writer.write_u64(config_.boot_incarnation);
   return lease;
 }
@@ -1317,6 +1326,10 @@ Status MeshNode::decode_ack_payload(const ByteView payload, AckKey& key) noexcep
 #undef RL_READ
   const bool known_type = type == static_cast<std::uint8_t>(FrameType::Data) ||
       type == static_cast<std::uint8_t>(FrameType::EndReceipt) ||
+      type == static_cast<std::uint8_t>(FrameType::BootstrapAuth) ||
+      type == static_cast<std::uint8_t>(FrameType::MembershipResult) ||
+      type == static_cast<std::uint8_t>(FrameType::BootstrapChunk) ||
+      type == static_cast<std::uint8_t>(FrameType::BootstrapReply) ||
       type == static_cast<std::uint8_t>(FrameType::Service) ||
       type == static_cast<std::uint8_t>(FrameType::Control) ||
       type == static_cast<std::uint8_t>(FrameType::ControlObject) ||
@@ -1651,12 +1664,52 @@ Status MeshNode::send_typed(const FrameType type, const NodeId destination,
                          /*round=*/0, lifetime_ms, Priority::Normal, now_ms);
 }
 
+Status MeshNode::send_bootstrap(const NodeId destination, const FrameType type,
+                                const ByteView payload, const std::uint32_t lifetime_ms,
+                                const MonotonicMs now_ms, MessageId& id) noexcept {
+  last_clock_ms_ = now_ms;
+  if (!started_) return Status::error(StatusCode::InvalidState, "node is not started");
+  ++work_generation_;
+  if (paused(pause::kAppAdmission)) {
+    return Status::error(StatusCode::InvalidState,
+                         sleep_draining_ ? "NODE_DRAINING" : "NODE_PAUSED");
+  }
+  const bool bootstrap_type = type == FrameType::BootstrapAuth ||
+      type == FrameType::MembershipResult || type == FrameType::BootstrapChunk ||
+      type == FrameType::BootstrapReply;
+  if (!bootstrap_type || destination == kInvalidNodeId || destination == config_.node ||
+      reserved_node_id(destination) || payload.size > kMaxApplicationPayload ||
+      (payload.size > 0 && payload.data == nullptr) || lifetime_ms == 0 ||
+      lifetime_ms > kMaxMessageLifetimeMs) {
+    return Status::error(StatusCode::InvalidArgument, "invalid bootstrap send");
+  }
+  // The lane's own slice of the pool, computed live (P4 §7.4): 8 jobs
+  // total, 2 per next hop. The route lookup below names the peer, so the
+  // per-peer check runs against the resolved next hop, not the destination.
+  if (scheduler_.count_owner(JobOwner::Bootstrap) >= kBootstrapJobsMax) {
+    return Status::error(StatusCode::NoCapacity, "BOOTSTRAP_LANE_FULL");
+  }
+  const auto route = routes_.best(destination);
+  if (!route.valid || find_neighbor(route.next_hop) == nullptr) {
+    request_route_discovery(destination, now_ms);  // scoped profile only
+    return Status::error(StatusCode::NoRoute, "NO_ROUTE");
+  }
+  if (scheduler_.count_owner_peer(JobOwner::Bootstrap, route.next_hop) >=
+      kBootstrapJobsPerPeer) {
+    return Status::error(StatusCode::NoCapacity, "BOOTSTRAP_PEER_FULL");
+  }
+  id = MessageId{config_.message_session, next_message_sequence_++};
+  return queue_typed_job(type, JobOwner::Bootstrap, id, destination, payload,
+                         /*round=*/0, lifetime_ms, Priority::Normal, now_ms,
+                         /*end_protected=*/false);
+}
+
 Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
                                  const MessageId& id, const NodeId destination,
                                  const ByteView payload, const std::uint8_t round,
                                  const std::uint32_t lifetime_ms,
                                  const Priority priority,
-                                 const MonotonicMs now_ms) noexcept {
+                                 const MonotonicMs now_ms, const bool end_protected) noexcept {
   const auto route = routes_.best(destination);
   if (!route.valid || find_neighbor(route.next_hop) == nullptr) {
     request_route_discovery(destination, now_ms);  // scoped profile only
@@ -1674,8 +1727,10 @@ Status MeshNode::queue_typed_job(const FrameType type, const JobOwner owner,
   job.ack = AckKey{type, MessageKey{config_.node, id}, round};
   job.plain.header.type = type;
   // §5.3: every Service payload is link AND end protected — the plaintext
-  // path does not exist for this type (receivers drop it).
-  job.plain.header.flags = wire::kFlagEndProtected;
+  // path does not exist for this type (receivers drop it). Only the
+  // bootstrap lane (P4 §7.4) sends link-only, so a relay forwards it
+  // while holding no end session.
+  job.plain.header.flags = end_protected ? wire::kFlagEndProtected : 0;
   job.plain.header.delivery = DeliveryClass::Reliable;
   job.plain.header.delivery_round = round;
   job.plain.header.hop_remaining = kDefaultHopLimit;
@@ -2810,6 +2865,164 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   }
 }
 
+void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId peer,
+                                const MonotonicMs now_ms) noexcept {
+  // The routed bootstrap lane (G-SEC P4 §7.4): join-relay and member
+  // end-session objects, link-authenticated per hop, never end-protected.
+  // receive_impl only routes link-only frames here; the origin below is an
+  // unverified CLAIM carried over an authenticated previous hop.
+  const MessageKey key{frame.header.origin, frame.header.message};
+  const FrameType type = frame.header.type;
+  if (reserved_node_id(frame.header.destination)) {
+    observer_.on_diagnostic("BOOTSTRAP_SCOPE_REJECTED", peer, &frame.header.message);
+    return;
+  }
+
+  // Frame-level dedup, keyed on the origin's MessageId like the routed
+  // lane: a same-round retry re-ACKs, a conflicting re-submission refuses.
+  if (auto* duplicate = find_dedup(key, type, frame.header.delivery_round)) {
+    if (duplicate->forwarded) {
+      TransitFailureReason conflict = TransitFailureReason::DuplicatePath;
+      bool conflicted = false;
+      if (frame.header.destination != duplicate->ref_destination) {
+        conflicted = true;
+        conflict = TransitFailureReason::MessageConflict;
+      } else if (frame.header.previous_hop != duplicate->upstream_peer) {
+        conflicted = true;
+      }
+      if (!conflicted && duplicate->has_fingerprint) {
+        std::array<std::uint8_t, 32> incoming{};
+        conflicted = wire::transit_fingerprint(frame, incoming).ok() &&
+                     incoming != duplicate->fingerprint;
+        if (conflicted) conflict = TransitFailureReason::MessageConflict;
+      }
+      if (conflicted) {
+        emit_transit_refusal(frame, conflict, now_ms);
+        observer_.on_diagnostic("BOOTSTRAP_DEDUP_CONFLICT", peer, &frame.header.message);
+        return;
+      }
+    }
+    if (duplicate->failure_reported) {
+      replay_retained_failure(*duplicate, type, now_ms);
+      return;
+    }
+    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
+    return;
+  }
+
+  if (frame.header.destination == config_.node) {
+    if (frame.header.payload_length > kMaxApplicationPayload) {
+      observer_.on_diagnostic("BOOTSTRAP_PAYLOAD_REJECTED", peer, &frame.header.message);
+      return;
+    }
+    if (scheduler_.free_slots() < 1) {
+      ++busy_stats_.busy_send_failed;
+      observer_.on_diagnostic("BOOTSTRAP_NO_ACK_SLOT", peer, &frame.header.message);
+      return;
+    }
+    auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
+                                 DedupPhase::Resolved, peer,
+                                 frame.header.remaining_deadline_ms, now_ms);
+    if (entry == nullptr) {
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+      return;
+    }
+    if (!queue_hop_accept(frame.header, now_ms)) {
+      dedup_.release(entry);
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+      return;
+    }
+    entry->delivered = true;
+    if (bootstrap_sink_ != nullptr) {
+      sdkv1::BootstrapMeta meta{};
+      meta.origin = frame.header.origin;
+      meta.destination = frame.header.destination;
+      meta.id = frame.header.message;
+      meta.previous_hop = peer;
+      meta.hop_remaining = frame.header.hop_remaining;
+      meta.remaining_deadline_ms = frame.header.remaining_deadline_ms;
+      ExternalCallbackScope scope(in_external_callback_);
+      (void)bootstrap_sink_->on_frame(
+          meta, type,
+          ByteView{frame.protected_payload.data(), frame.header.payload_length}, now_ms);
+    } else {
+      observer_.on_diagnostic("BOOTSTRAP_NO_ENDPOINT", peer, &frame.header.message);
+    }
+    return;
+  }
+
+  // Transit: the relay holds no end session — it forwards the still
+  // link-protected bytes untouched and never interprets the payload.
+  if (!transit_permitted()) {
+    ++transit_refused_;
+    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, now_ms);
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_RELAY_DISABLED", peer,
+                            &frame.header.message);
+    return;
+  }
+  // A bare Endpoint never forwards handshake traffic (P4 §7.4): only an
+  // adopted Relay or Gateway role does.
+  if ((local_role_ & (sdkv1::kMemberRoleRelay | sdkv1::kMemberRoleGateway)) == 0) {
+    ++transit_refused_;
+    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, now_ms);
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_ROLE", peer, &frame.header.message);
+    return;
+  }
+  // No inbound TTL check here: like the routed lane, the hop budget is
+  // enforced once, at forward emission (wire::forward refuses hops <= 1
+  // for every lane) — an inbound hops==0 transit frame is unemittable by
+  // any honest encoder, so a second check would be unreachable.
+  if (frame.header.remaining_deadline_ms <= rx_age_ms_) {
+    ++transit_refused_;
+    emit_transit_refusal(frame, TransitFailureReason::Deadline, now_ms);
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_DEADLINE_SPENT", peer,
+                            &frame.header.message);
+    return;
+  }
+  const auto route = routes_.best(frame.header.destination);
+  if (!route.valid || route.next_hop == peer) {
+    emit_transit_refusal(frame, TransitFailureReason::NoRoute, now_ms);
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_NO_ROUTE", peer, &frame.header.message);
+    return;
+  }
+  const AdmitVerdict admit =
+      scheduler_.check(config_.node, /*scope=*/peer, frame.header.origin, 2);
+  if (admit != AdmitVerdict::Admitted) {
+    emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), now_ms);
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_DENIED", peer, &frame.header.message);
+    return;
+  }
+  auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
+                               DedupPhase::Live, peer,
+                               frame.header.remaining_deadline_ms, now_ms);
+  if (entry == nullptr) {
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+    return;
+  }
+  if (!queue_forward(frame, route.next_hop, now_ms)) {
+    dedup_.release(entry);
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_RESERVATION_FAILED", peer,
+                            &frame.header.message);
+    return;
+  }
+  entry->forwarded = true;
+  entry->upstream_peer = frame.header.previous_hop;
+  entry->downstream_peer = route.next_hop;
+  entry->ref_destination = frame.header.destination;
+  entry->has_fingerprint =
+      wire::transit_fingerprint(frame, entry->fingerprint).ok();
+  if (!queue_hop_accept(frame.header, now_ms)) {
+    // The forward stays committed; the sender's retry dedups and re-ACKs.
+    observer_.on_diagnostic("BOOTSTRAP_TRANSIT_ACK_FULL", peer, &frame.header.message);
+    return;
+  }
+}
+
 void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer,
                            const MonotonicMs now_ms) noexcept {
   // BUSY is link-scoped feedback to the previous hop only: it must be
@@ -3918,6 +4131,20 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   switch (frame.header.type) {
     case FrameType::Data:
       handle_data(frame, peer, now_ms);
+      break;
+    case FrameType::BootstrapAuth:
+    case FrameType::MembershipResult:
+    case FrameType::BootstrapChunk:
+    case FrameType::BootstrapReply:
+      // Routed bootstrap (P4 §7.4): link-only by construction — an
+      // end-protected frame on this lane is a scope violation, never a
+      // decodable alternative.
+      if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+        observer_.on_diagnostic("BOOTSTRAP_SCOPE_REJECTED", peer,
+                                &frame.header.message);
+      } else {
+        handle_bootstrap(frame, peer, now_ms);
+      }
       break;
     case FrameType::Service:
       handle_routed(frame, peer, now_ms);
