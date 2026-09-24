@@ -136,13 +136,6 @@ class SimNetwork {
   // delivered or not, each attempt costs air time.
   std::map<routeloom::FrameType, TxTally> tx_by_type;
 
-  // Set when the last flush() hit the dequeue bound with frames still
-  // queued; cleared on entry. A partial drain aborts inside flush() so a
-  // scenario that overflows the bound fails loudly instead of asserting
-  // over undelivered frames — scenarios size their traffic so one
-  // flush() always drains the queue, keeping this false.
-  bool flush_truncated{false};
-
   // Returns the number of undelivered frames (link down, node missing, or
   // dropped by the loss hook).
   //
@@ -160,12 +153,11 @@ class SimNetwork {
   // iterations cost nothing — so chained traffic keeps the historic
   // 10,000-frame budget. When the bound stops the drain with frames
   // still queued, flush() aborts instead of returning the partial drain
-  // silently — flush_truncated records it for the post-mortem.
+  // silently.
   std::size_t flush(routeloom::MonotonicMs now) {
     std::size_t dropped = 0;
     constexpr std::size_t kFlushLimit = 10000;
     std::size_t processed = 0;
-    flush_truncated = false;
     while (!queue.empty() && processed < kFlushLimit) {
       std::set<routeloom::NodeId> woken;
       while (!queue.empty() && processed < kFlushLimit) {
@@ -236,8 +228,7 @@ class SimNetwork {
         if (nodes.count(id) != 0) nodes.at(id)->poll(now);
       }
     }
-    flush_truncated = !queue.empty();
-    if (flush_truncated) {
+    if (!queue.empty()) {
       // The dequeue bound stopped the drain with frames still queued: the
       // undelivered remainder would silently skew every assertion after
       // this flush, so fail here rather than return a partial drain.
