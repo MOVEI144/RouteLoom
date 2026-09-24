@@ -436,6 +436,10 @@ pub enum ControlObjectKind {
     /// impaired journal can receive recovery evidence while refusing
     /// normal permits.
     ConfigRecovery = 4,
+    /// Signed trust-manifest (RTM1) images ride the same carrier at the
+    /// full authenticated-object cap; the target dispatches kind-5
+    /// completions to the trust store, never to a journal.
+    TrustManifest = 5,
 }
 
 #[derive(Clone, Debug)]
@@ -475,6 +479,7 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
         2 => ControlObjectKind::RecoverySnapshot,
         3 => ControlObjectKind::ConfigPermit,
         4 => ControlObjectKind::ConfigRecovery,
+        5 => ControlObjectKind::TrustManifest,
         _ => return reject(),
     };
     let total_len = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));

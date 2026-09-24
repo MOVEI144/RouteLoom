@@ -1,0 +1,16 @@
+{
+  "anchor_count": 1,
+  "codec": "control_trust_status",
+  "encoded_hex": "01060000000102030405060708090a0b0c0d0e0f00000002000000020000000000000007000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f01020001",
+  "expect": "ok",
+  "flags": 1,
+  "format": "routeloom-endpoint-v1-golden",
+  "image_fingerprint_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "key_count": 2,
+  "min_authority_generation": 2,
+  "name": "control_trust_status",
+  "network": 7,
+  "nonce_echo_hex": "000102030405060708090a0b0c0d0e0f",
+  "revocation_count": 0,
+  "store_epoch": 2
+}

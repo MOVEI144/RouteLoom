@@ -315,6 +315,45 @@ bool encode_vector(const std::string& codec, const Fields& fields,
     if (!hex_field(fields, "operation_id_hex", p.operation_id) ||
         !hex_field(fields, "active_hash_hex", p.active_hash)) return false;
     status = ep::control_status_encode(p, payload);
+  } else if (codec == "control_trust_status_query") {
+    ep::TrustStatusQuery p{};
+    if (!hex_field(fields, "nonce_hex", p.nonce)) return false;
+    status = ep::trust_status_query_encode(p, payload);
+  } else if (codec == "control_trust_status") {
+    ep::TrustStatus p{};
+    p.store_epoch = static_cast<std::uint32_t>(at("store_epoch"));
+    p.min_authority_generation =
+        static_cast<std::uint32_t>(at("min_authority_generation"));
+    p.network = at("network");
+    p.anchor_count = static_cast<std::uint8_t>(at("anchor_count"));
+    p.key_count = static_cast<std::uint8_t>(at("key_count"));
+    p.revocation_count = static_cast<std::uint8_t>(at("revocation_count"));
+    p.flags = static_cast<std::uint8_t>(at("flags"));
+    if (!hex_field(fields, "nonce_echo_hex", p.nonce_echo) ||
+        !hex_field(fields, "image_fingerprint_hex", p.image_fingerprint)) {
+      return false;
+    }
+    status = ep::trust_status_encode(p, payload);
+  } else if (codec == "control_recovery_info_query") {
+    ep::RecoveryInfoQuery p{};
+    p.config_namespace = static_cast<std::uint16_t>(at("config_namespace"));
+    if (!hex_field(fields, "nonce_hex", p.nonce)) return false;
+    status = ep::recovery_info_query_encode(p, payload);
+  } else if (codec == "control_recovery_info") {
+    ep::RecoveryInfo p{};
+    p.config_namespace = static_cast<std::uint16_t>(at("config_namespace"));
+    p.schema = static_cast<std::uint16_t>(at("schema"));
+    p.network = at("network");
+    p.store_floor = static_cast<std::uint32_t>(at("store_floor"));
+    p.decision_floor = at("decision_floor");
+    p.flags = static_cast<std::uint8_t>(at("flags"));
+    p.recovery_version = static_cast<std::uint8_t>(at("recovery_version"));
+    p.profile_bits = static_cast<std::uint32_t>(at("profile_bits"));
+    if (!hex_field(fields, "nonce_echo_hex", p.nonce_echo) ||
+        !hex_field(fields, "snapshot_hash_hex", p.snapshot_hash)) {
+      return false;
+    }
+    status = ep::recovery_info_encode(p, payload);
   } else if (codec == "config_command") {
     ep::ConfigCommand command{};
     command.config_namespace = static_cast<std::uint16_t>(at("config_namespace"));
@@ -466,6 +505,34 @@ bool decode_and_reencode(const std::string& codec, const std::vector<std::uint8_
            std::equal(out.bytes.begin(), out.bytes.begin() + out.size,
                       encoded.begin(), encoded.end());
   }
+  if (codec == "control_trust_status_query") {
+    ep::TrustStatusQuery p{};
+    return ep::trust_status_query_decode(to_view(encoded), p).ok() &&
+           ep::trust_status_query_encode(p, out).ok() &&
+           std::equal(out.bytes.begin(), out.bytes.begin() + out.size,
+                      encoded.begin(), encoded.end());
+  }
+  if (codec == "control_trust_status") {
+    ep::TrustStatus p{};
+    return ep::trust_status_decode(to_view(encoded), p).ok() &&
+           ep::trust_status_encode(p, out).ok() &&
+           std::equal(out.bytes.begin(), out.bytes.begin() + out.size,
+                      encoded.begin(), encoded.end());
+  }
+  if (codec == "control_recovery_info_query") {
+    ep::RecoveryInfoQuery p{};
+    return ep::recovery_info_query_decode(to_view(encoded), p).ok() &&
+           ep::recovery_info_query_encode(p, out).ok() &&
+           std::equal(out.bytes.begin(), out.bytes.begin() + out.size,
+                      encoded.begin(), encoded.end());
+  }
+  if (codec == "control_recovery_info") {
+    ep::RecoveryInfo p{};
+    return ep::recovery_info_decode(to_view(encoded), p).ok() &&
+           ep::recovery_info_encode(p, out).ok() &&
+           std::equal(out.bytes.begin(), out.bytes.begin() + out.size,
+                      encoded.begin(), encoded.end());
+  }
   if (codec == "config_command") {
     ep::ConfigCommand command{};
     ep::EncodedConfigCommand reenc{};
@@ -526,6 +593,22 @@ bool decode_expect_error(const std::string& codec, const std::vector<std::uint8_
   if (codec == "control_status") {
     ep::ControlStatus p{};
     return !ep::control_status_decode(view, p).ok();
+  }
+  if (codec == "control_trust_status_query") {
+    ep::TrustStatusQuery p{};
+    return !ep::trust_status_query_decode(view, p).ok();
+  }
+  if (codec == "control_trust_status") {
+    ep::TrustStatus p{};
+    return !ep::trust_status_decode(view, p).ok();
+  }
+  if (codec == "control_recovery_info_query") {
+    ep::RecoveryInfoQuery p{};
+    return !ep::recovery_info_query_decode(view, p).ok();
+  }
+  if (codec == "control_recovery_info") {
+    ep::RecoveryInfo p{};
+    return !ep::recovery_info_decode(view, p).ok();
   }
   if (codec == "config_command") {
     ep::ConfigCommand p{};

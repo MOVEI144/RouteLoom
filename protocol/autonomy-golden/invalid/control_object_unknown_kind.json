@@ -1,8 +1,8 @@
 {
   "codec": "control_object",
-  "encoded_hex": "010105000200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "encoded_hex": "010106000200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
   "expect": "error",
   "format": "routeloom-autonomy-v1-golden",
   "name": "control_object_unknown_kind",
-  "note": "object kind 5 is unassigned"
+  "note": "object kind 6 is unassigned"
 }

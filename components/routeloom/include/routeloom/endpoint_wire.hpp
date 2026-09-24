@@ -326,6 +326,84 @@ constexpr std::size_t kControlStatusSize = 72;
 Status control_status_encode(const ControlStatus& payload, EncodedServicePayload& out) noexcept;
 Status control_status_decode(ByteView encoded, ControlStatus& out) noexcept;
 
+// TrustStatusQuery5 (20B): ver/sub5 | reserved u16=0 | nonce 16B. Device
+// global (trust has no namespace); the reply echoes the nonce.
+struct TrustStatusQuery {
+  std::array<std::uint8_t, 16> nonce{};
+};
+constexpr std::size_t kTrustStatusQuerySize = 20;
+Status trust_status_query_encode(const TrustStatusQuery& payload,
+                                 EncodedServicePayload& out) noexcept;
+Status trust_status_query_decode(ByteView encoded, TrustStatusQuery& out) noexcept;
+
+// TrustStatus6 (72B): ver/sub6 | reserved u16=0 | nonce_echo 16B |
+// store_epoch u32 | min_authority_generation u32 | network u64 |
+// image_fingerprint 32B | anchor_count u8 | key_count u8 |
+// revocation_count u8 | flags u8. Public fields only — never keys, never
+// grant bytes (04-provisioning-lifecycle §4.3.4). Receipt evidence is the
+// epoch, the generation floor, the fingerprint and the impairment flags;
+// an ObjectAck alone never proves fleet convergence.
+constexpr std::uint8_t kTrustStatusFlagHasActive = 0x01;
+constexpr std::uint8_t kTrustStatusFlagUncertain = 0x02;
+constexpr std::uint8_t kTrustStatusFlagQuarantined = 0x04;
+constexpr std::uint8_t kTrustStatusFlagMask = 0x07;
+struct TrustStatus {
+  std::array<std::uint8_t, 16> nonce_echo{};
+  std::uint32_t store_epoch{0};
+  std::uint32_t min_authority_generation{0};
+  NetworkId network{0};
+  std::array<std::uint8_t, 32> image_fingerprint{};
+  std::uint8_t anchor_count{0};
+  std::uint8_t key_count{0};
+  std::uint8_t revocation_count{0};
+  std::uint8_t flags{0};
+};
+constexpr std::size_t kTrustStatusSize = 72;
+Status trust_status_encode(const TrustStatus& payload,
+                           EncodedServicePayload& out) noexcept;
+Status trust_status_decode(ByteView encoded, TrustStatus& out) noexcept;
+
+// RecoveryInfoQuery7 (20B): ver/sub7 | ns u16 | nonce 16B. Selects the
+// journal; the reply echoes the nonce.
+struct RecoveryInfoQuery {
+  std::uint16_t config_namespace{0};
+  std::array<std::uint8_t, 16> nonce{};
+};
+constexpr std::size_t kRecoveryInfoQuerySize = 20;
+Status recovery_info_query_encode(const RecoveryInfoQuery& payload,
+                                  EncodedServicePayload& out) noexcept;
+Status recovery_info_query_decode(ByteView encoded, RecoveryInfoQuery& out) noexcept;
+
+// RecoveryInfo8 (80B): ver/sub8 | ns u16 | schema u16 | nonce_echo 16B |
+// network u64 | store floor J u32 | decision floor R u64 | flags u8 |
+// recovery_version u8 | profile_bits u32 | snapshot_hash 32B. Read-only:
+// J/R name the exact-next generation and revision a recovery must carry,
+// the hash names the known survivor baseline (or explicit unknown), and
+// the version/profile name what the target accepts. Advisory only — the
+// target re-checks the floor at accept time, and nothing here authorizes
+// skipping the signature.
+constexpr std::uint8_t kRecoveryInfoFlagImpaired = 0x01;
+constexpr std::uint8_t kRecoveryInfoFlagUncertain = 0x02;
+constexpr std::uint8_t kRecoveryInfoFlagQuarantined = 0x04;
+constexpr std::uint8_t kRecoveryInfoFlagSurvivorKnown = 0x08;
+constexpr std::uint8_t kRecoveryInfoFlagMask = 0x0F;
+struct RecoveryInfo {
+  std::uint16_t config_namespace{0};
+  std::uint16_t schema{0};
+  std::array<std::uint8_t, 16> nonce_echo{};
+  NetworkId network{0};
+  std::uint32_t store_floor{0};
+  std::uint64_t decision_floor{0};
+  std::uint8_t flags{0};
+  std::uint8_t recovery_version{0};
+  std::uint32_t profile_bits{0};
+  std::array<std::uint8_t, 32> snapshot_hash{};
+};
+constexpr std::size_t kRecoveryInfoSize = 80;
+Status recovery_info_encode(const RecoveryInfo& payload,
+                            EncodedServicePayload& out) noexcept;
+Status recovery_info_decode(ByteView encoded, RecoveryInfo& out) noexcept;
+
 // --- RCC1 canonical config command (§5.4) ------------------------------------
 // 176B fixed header + sorted TLV patch (max 512B) = max 688B. Carried as the
 // COSE_Sign1 payload inside manifest kind 3 objects — this codec covers the

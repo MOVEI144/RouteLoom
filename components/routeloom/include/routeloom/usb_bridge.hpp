@@ -312,10 +312,11 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                        MonotonicMs now_ms) noexcept;
   void handle_ops_time_sample(std::uint64_t request, ByteView inner,
                               MonotonicMs now_ms) noexcept;
-  // Config endpoint requests (0x20/0x21/0x23): decode, gate on
-  // CAP_CONFIG_ENDPOINT_V1 + an attached component, then hand to
-  // ConfigGateway. Synchronous refusals answer immediately with the mapped
-  // ConfigOpsResult; admitted work reports asynchronously on on_config_reply.
+  // Config endpoint requests (0x20/0x21/0x23/0x24/0x25/0x26/0x27):
+  // decode, gate on CAP_CONFIG_ENDPOINT_V1 + an attached component, then
+  // hand to ConfigGateway. Synchronous refusals answer immediately with the
+  // mapped ConfigOpsResult; admitted work reports asynchronously on
+  // on_config_reply.
   void handle_config_query(std::uint64_t request, ByteView inner,
                            MonotonicMs now_ms) noexcept;
   void handle_config_challenge(std::uint64_t request, ByteView inner,
@@ -326,9 +327,20 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // dedicated lane, same async result-only reply shape as 0x21.
   void handle_config_recover(std::uint64_t request, ByteView inner,
                              MonotonicMs now_ms) noexcept;
+  // 0x25 ConfigTrust: the signed kind-5 trust-manifest object toward a
+  // target — dedicated lane, same async result-only reply shape as 0x21.
+  void handle_config_trust(std::uint64_t request, ByteView inner,
+                           MonotonicMs now_ms) noexcept;
+  // 0x26 TrustStatus / 0x27 RecoveryInfo: read-only mesh queries answered
+  // under their own sub with the raw endpoint reply body on Ok.
+  void handle_trust_status(std::uint64_t request, ByteView inner,
+                           MonotonicMs now_ms) noexcept;
+  void handle_recovery_info(std::uint64_t request, ByteView inner,
+                            MonotonicMs now_ms) noexcept;
   // Maps a synchronous submit_* Status to the wire result code.
   static ConfigOpsResult config_result_for(const Status& status) noexcept;
-  // Encodes + queues a 0x21/0x22/0x23/0x24 reply under `request`.
+  // Encodes + queues a config reply under `request` (0x21/0x22/0x23/0x24/
+  // 0x25/0x26/0x27).
   void send_config_reply(std::uint64_t request, std::uint8_t sub,
                          ConfigOpsResult result, NodeId target, ByteView body,
                          MonotonicMs now_ms) noexcept;
@@ -575,6 +587,16 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // The encoded page reply is staged in tx_body_ (see above).
   static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kNodeStatusPageMaxPayload,
                 "node-status page staging");
+  // The largest 0x25 trust-manifest request (2048 B object) fits one
+  // decoded USB frame body; the largest config reply (92 B challenge
+  // body — the 72/80 B trust/recovery bodies fit inside it) fits one
+  // TxItem inner.
+  static_assert(kGatewayInnerHeadSize + 8 + kConfigTrustMax <= kMaxBodySize,
+                "0x25 request fits one USB frame");
+  static_assert(kGatewayInnerHeadSize + kConfigReplyFixedPayload +
+                    kConfigChallengeBodySize <=
+                kMaxTxInner,
+                "config reply fits one TxItem");
   // group_delivery_v1: admitted 0x50 sends awaiting their FINAL 0x51. The
   // node never holds more than kGroupOriginCapacity unsettled group
   // messages, so this bound cannot refuse a correlation the node admitted.

@@ -122,14 +122,14 @@ supplied from the device's own committed store, never from transport claims. Che
 
 Maximum signed content 1664 B + 86 B COSE overhead ≈ **1750 B object**, under the existing `kAuthenticatedObjectMax` 2048 — 20 chunks of 90 B on the kind-3 carrier family.
 
-### 4.3.4 Wire-carrier and registry proposals (all pending registration)
+### 4.3.4 Wire-carrier and registry (registered)
 
-| Item | Proposal | Notes |
+| Item | Registration | Notes |
 |---|---|---|
-| `ControlObjectKind::TrustManifest = 4` | end-protected, routed, same manifest/chunk/ack carrier as permits | link-scoped kinds 1/2 unaffected; the object cap is the existing 2048 |
+| `ControlObjectKind::TrustManifest = 5` | end-protected, routed, same manifest/chunk/ack carrier as permits | kind 4 is the recovery lane; link-scoped kinds 1/2 unaffected; the object cap is the existing 2048 |
 | Control subtype 5 `TrustStatusQuery` | `ver\|sub5\|reserved u16=0\|nonce 16 B` = 20 B | end-authenticated origin only |
-| Control subtype 6 `TrustStatus` | `ver\|sub6\|reserved u16\|nonce_echo 16 B\|store_epoch u32\|min_authority_generation u32\|network u64\|image_fingerprint 32 B\|anchor_count/key_count/revocation_count u8×3\|flags u8\|reserved` ≈ 72 B | fingerprint = SHA-256 over the committed image; **public fields only — never keys, never grant bytes** |
-| Dispatch | `ConfigTarget::handle_manifest` currently rejects `kind != ConfigPermit` (config_wire.cpp:136); proposal: demux kind 4 to an attached `TrustManager` sharing the SAME single-intake slot and the SAME 10 s reassembly bound — manifest and permit can never assemble concurrently, preserving the device-global object bound. Note the cap differs: kind 4 may use the full `kAuthenticatedObjectMax` 2048, not the permit's 1024 | ObjectAck semantics unchanged: acknowledges assembly, never authorization |
+| Control subtype 6 `TrustStatus` | `ver\|sub6\|reserved u16\|nonce_echo 16 B\|store_epoch u32\|min_authority_generation u32\|network u64\|image_fingerprint 32 B\|anchor_count/key_count/revocation_count u8×3\|flags u8` = 72 B | fingerprint = SHA-256 over the committed image; **public fields only — never keys, never grant bytes**. Flags v1: bit 0 has-active, bit 1 uncertain, bit 2 quarantined |
+| Dispatch | `ConfigTarget` owns ONE bounded assembler shared by kinds 3/4/5 with the SAME 10 s reassembly bound — manifest, permit and recovery can never assemble concurrently, preserving the device-global object bound. Completion dispatches by kind: kind 3 → `submit_permit`, kind 4 → `submit_recovery`, kind 5 → `trust_manifest_accept` (never a journal). Caps differ: kind 5 may use the full `kAuthenticatedObjectMax` 2048, kind 3/4 the permit's 1024 | ObjectAck semantics unchanged: acknowledges assembly, never authorization |
 | Rate limiting | manifest signature verification consumes `consume_expensive_verify()` — the existing 1-per-5 s device-wide gate | a manifest is the same P-256 cost as a permit |
 
 ### 4.3.5 Optional extension sections
@@ -333,7 +333,7 @@ Portable core (`components/routeloom`):
 - [ ] `trust_manifest.hpp/.cpp`: `RTM1` content codec + manifest COSE profile (shared restricted parser; distinct AAD domain; anchor-sourced kid), acceptance pipeline per §4.5.1.
 - [ ] `device_credential.hpp/.cpp`: `RLC1` codec, kid/keypair consistency checks, `generation_base_session` handling.
 - [ ] `TrustView` interface + store-backed resolution in `CoseEsp256AuthorityVerifier` (retain a static one-record view for tests/dev); `ConfigPermitContext` gains `trust_epoch`; journal decision-time recheck (§4.6.3); `permit_profile_bits()` provenance gating.
-- [ ] `TrustManager` endpoint consumer for kind-4 objects + `ConfigTarget` demux; Control subtype 5/6 codecs (proposed registrations).
+- [x] Kind-5 dispatch to `trust_manifest_accept` in the `ConfigTarget` single assembler; Control subtype 5/6 codecs (registered); HostOps 0x25 transfer + 0x26 query.
 - [ ] Boot-path epoch-exhaustion check (`REPROVISION_REQUIRED` instead of silent wrap).
 
 ESP-NOW layer (`components/routeloom_espnow`) + firmware:

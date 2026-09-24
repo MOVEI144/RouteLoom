@@ -639,6 +639,15 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::ConfigRecover:
       handle_config_recover(request, inner, now_ms);
       break;
+    case HostOpsSub::ConfigTrust:
+      handle_config_trust(request, inner, now_ms);
+      break;
+    case HostOpsSub::TrustStatus:
+      handle_trust_status(request, inner, now_ms);
+      break;
+    case HostOpsSub::RecoveryInfo:
+      handle_recovery_info(request, inner, now_ms);
+      break;
     case HostOpsSub::ConfigStatus:
       // 0x22 is device→host only (the async reply to a 0x20 query): a host
       // issuing one is a protocol violation, never a request to answer.
@@ -1362,6 +1371,87 @@ void UsbBridge::handle_config_recover(const std::uint64_t request,
                       now_ms);
   }
   // Admitted: the ack resolves asynchronously on on_config_reply (0x24).
+}
+
+void UsbBridge::handle_config_trust(const std::uint64_t request,
+                                    const ByteView inner,
+                                    const MonotonicMs now_ms) noexcept {
+  ConfigTrustRequest trust{};
+  if (!decode_config_trust(inner, trust)) {
+    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_TRUST_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigTrust),
+                      ConfigOpsResult::Unsupported, trust.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  // The dedicated kind-5 lane — never routed through submit_permit.
+  const Status status = config_gateway_->submit_trust(
+      request, trust.target, trust.object, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigTrust),
+                      config_result_for(status), trust.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the ack resolves asynchronously on on_config_reply (0x25).
+}
+
+void UsbBridge::handle_trust_status(const std::uint64_t request,
+                                    const ByteView inner,
+                                    const MonotonicMs now_ms) noexcept {
+  TrustStatusRequest query{};
+  if (!decode_trust_status(inner, query)) {
+    send_error(UsbErrorCode::ProtocolError, request, "TRUST_STATUS_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::TrustStatus),
+                      ConfigOpsResult::Unsupported, query.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status = config_gateway_->submit_trust_status_query(
+      request, query.target, query.network, query.nonce, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::TrustStatus),
+                      config_result_for(status), query.target, ByteView{}, now_ms);
+  }
+  // Admitted: the answer lands asynchronously on on_config_reply (0x26).
+}
+
+void UsbBridge::handle_recovery_info(const std::uint64_t request,
+                                     const ByteView inner,
+                                     const MonotonicMs now_ms) noexcept {
+  RecoveryInfoRequest query{};
+  if (!decode_recovery_info(inner, query)) {
+    send_error(UsbErrorCode::ProtocolError, request, "RECOVERY_INFO_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request,
+                      static_cast<std::uint8_t>(HostOpsSub::RecoveryInfo),
+                      ConfigOpsResult::Unsupported, query.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  const Status status = config_gateway_->submit_recovery_info_query(
+      request, query.target, query.network, query.config_namespace,
+      query.nonce, now_ms);
+  if (!status) {
+    send_config_reply(request,
+                      static_cast<std::uint8_t>(HostOpsSub::RecoveryInfo),
+                      config_result_for(status), query.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the answer lands asynchronously on on_config_reply (0x27).
 }
 
 void UsbBridge::send_receipt(const DispatchReceipt& receipt,

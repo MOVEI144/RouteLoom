@@ -14,9 +14,11 @@
 
 #include "routeloom/authority.hpp"
 #include "routeloom/config.hpp"
+#include "routeloom/config_wire.hpp"
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/wire.hpp"
 
 namespace {
 
@@ -1379,6 +1381,107 @@ void test_c09_slot_corruption() {
   }
 }
 
+// --- Target-driven object intake -----------------------------------------------------
+// Assembly lives in ConfigTarget now: these tests feed manifest/chunk frames
+// through a real target bound to the rig's journal and observe the ObjectAck
+// stream (Ok = dispatched, Failed = refused) plus the journal's own state.
+// The journal's note_*_manifest gates are still asserted directly.
+
+// Captures everything a ConfigTarget sends: ObjectAcks (intake) and Control
+// replies (queries).
+class AckPort final : public ConfigWirePort {
+ public:
+  Status config_send(const NodeId, const FrameType type, const ByteView payload,
+                     const MonotonicMs) noexcept override {
+    ++sent;
+    if (type == FrameType::ObjectAck) {
+      autonomy::ObjectAckPayload ack{};
+      if (autonomy::object_ack_decode(payload, ack)) {
+        ++acks;
+        last_status = ack.status;
+        last_received = ack.received_len;
+      }
+    }
+    return Status::success();
+  }
+  int sent{0};
+  int acks{0};
+  autonomy::ObjectAckStatus last_status{autonomy::ObjectAckStatus::Ok};
+  std::uint16_t last_received{0};
+};
+
+wire::PlainFrame object_frame(const NodeId origin, const FrameType type,
+                              const ByteView payload) {
+  wire::PlainFrame frame{};
+  frame.header.type = type;
+  frame.header.origin = origin;
+  frame.header.destination = kTarget;
+  frame.payload_size = payload.size;
+  std::memcpy(frame.payload.data(), payload.data, payload.size);
+  return frame;
+}
+
+void send_manifest(ConfigTarget& target, const NodeId origin,
+                   const autonomy::ControlObjectPayload& manifest,
+                   const MonotonicMs now_ms) {
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(origin,
+                         object_frame(origin, FrameType::ControlObject,
+                                      encoded.view()),
+                         now_ms);
+}
+
+void send_chunk(ConfigTarget& target, const NodeId origin,
+                const autonomy::ObjectChunkPayload& chunk,
+                const MonotonicMs now_ms) {
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::object_chunk_encode(chunk, encoded));
+  target.on_config_frame(origin,
+                         object_frame(origin, FrameType::ObjectChunk,
+                                      encoded.view()),
+                         now_ms);
+}
+
+// Deliver `object` as `kind` in chunk_size pieces; returns the terminal ack.
+// `hash_override` names a different manifest digest (corruption tests).
+autonomy::ObjectAckStatus deliver_object(
+    ConfigTarget& target, AckPort& port, const NodeId origin,
+    const autonomy::ControlObjectKind kind, const ByteView object,
+    const std::uint16_t chunk_size, MonotonicMs& t,
+    const ByteView hash_override = ByteView{}) {
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = kind;
+  manifest.total_len = static_cast<std::uint16_t>(object.size);
+  if (hash_override.size == manifest.object_hash.size()) {
+    std::memcpy(manifest.object_hash.data(), hash_override.data,
+                hash_override.size);
+  } else {
+    sha256(object, manifest.object_hash);
+  }
+  send_manifest(target, origin, manifest, t);
+  if (port.last_status == autonomy::ObjectAckStatus::Failed) {
+    return port.last_status;
+  }
+  for (std::uint16_t offset = 0; offset < object.size;
+       offset = static_cast<std::uint16_t>(offset + chunk_size)) {
+    autonomy::ObjectChunkPayload chunk{};
+    std::memcpy(chunk.object_hash.data(), manifest.object_hash.data(),
+                manifest.object_hash.size());
+    chunk.offset = offset;
+    chunk.data_size = static_cast<std::uint16_t>(object.size - offset < chunk_size
+                                                     ? object.size - offset
+                                                     : chunk_size);
+    std::memcpy(chunk.data.data(), object.data + offset, chunk.data_size);
+    t += 10;
+    send_chunk(target, origin, chunk, t);
+    if (port.last_status == autonomy::ObjectAckStatus::Failed) {
+      return port.last_status;
+    }
+  }
+  return port.last_status;
+}
+
 // --- C10: object reassembly corruption ---------------------------------------------------
 
 void test_c10_reassembly() {
@@ -1391,50 +1494,9 @@ void test_c10_reassembly() {
   CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
   drain(rig, now_ms);
   const ByteBuffer<kConfigPermitObjectMax> permit = last_permit_;
-
-  const auto send_chunks = [&](TargetRig& r, const ByteBuffer<kConfigPermitObjectMax>& obj,
-                               const std::uint16_t chunk_size, MonotonicMs& t) {
-    autonomy::ControlObjectPayload manifest{};
-    manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
-    manifest.total_len = static_cast<std::uint16_t>(obj.size);
-    sha256(obj.view(), manifest.object_hash);
-    Status last = r.journal->note_object_manifest(manifest, t);
-    for (std::uint16_t offset = 0; offset < obj.size && last.ok();
-         offset = static_cast<std::uint16_t>(offset + chunk_size)) {
-      autonomy::ObjectChunkPayload chunk{};
-      chunk.object_hash = manifest.object_hash;
-      chunk.offset = offset;
-      chunk.data_size = static_cast<std::uint16_t>(
-          obj.size - offset < chunk_size ? obj.size - offset : chunk_size);
-      std::memcpy(chunk.data.data(), obj.bytes.data() + offset, chunk.data_size);
-      t += 10;
-      last = r.journal->note_object_chunk(chunk, t);
-    }
-    return last;
-  };
-  // Same flow but the manifest digest is taken from a DIFFERENT object —
-  // used to deliver corrupted bytes under an honest manifest.
-  auto send_chunks_as = [&](TargetRig& r, const ByteBuffer<kConfigPermitObjectMax>& obj,
-                            const ByteBuffer<kConfigPermitObjectMax>& hashed,
-                            const std::uint16_t chunk_size, MonotonicMs& t) {
-    autonomy::ControlObjectPayload manifest{};
-    manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
-    manifest.total_len = static_cast<std::uint16_t>(obj.size);
-    sha256(hashed.view(), manifest.object_hash);
-    Status last = r.journal->note_object_manifest(manifest, t);
-    for (std::uint16_t offset = 0; offset < obj.size && last.ok();
-         offset = static_cast<std::uint16_t>(offset + chunk_size)) {
-      autonomy::ObjectChunkPayload chunk{};
-      chunk.object_hash = manifest.object_hash;
-      chunk.offset = offset;
-      chunk.data_size = static_cast<std::uint16_t>(
-          obj.size - offset < chunk_size ? obj.size - offset : chunk_size);
-      std::memcpy(chunk.data.data(), obj.bytes.data() + offset, chunk.data_size);
-      t += 10;
-      last = r.journal->note_object_chunk(chunk, t);
-    }
-    return last;
-  };
+  AckPort port;
+  ConfigTarget target(port, rig.rate);
+  CHECK_OK(target.add_journal(1, *rig.journal));
 
   // A complete, intact object submits the permit and applies — here the
   // permit is rebound to rig's freshly issued challenge.
@@ -1465,7 +1527,10 @@ void test_c10_reassembly() {
     command.field_count = 1;
     ByteBuffer<kConfigPermitObjectMax> signed_permit{};
     build_permit(signer_, command, signed_permit);
-    CHECK_OK(send_chunks(rig, signed_permit, 64, now_ms));
+    CHECK(deliver_object(target, port, kAuthority,
+                         autonomy::ControlObjectKind::ConfigPermit,
+                         signed_permit.view(), 64,
+                         now_ms) == autonomy::ObjectAckStatus::Ok);
     drain(rig, now_ms);
     CHECK(rig.journal->phase() == ConfigPhase::Active);
     CHECK(rig.journal->decision_revision() == 2);
@@ -1476,13 +1541,21 @@ void test_c10_reassembly() {
     TargetRig rig3;
     MonotonicMs t = 5000;
     CHECK_OK(rig3.journal->initialize(t));
+    AckPort port3;
+    ConfigTarget target3(port3, rig3.rate);
+    CHECK_OK(target3.add_journal(1, *rig3.journal));
     ByteBuffer<kConfigPermitObjectMax> bad = permit;
     bad.bytes[50] ^= 0xFFU;
     // Honest manifest (digest of the ORIGINAL bytes) + corrupted content:
-    // the reassembly digest check must reject the object before submit.
-    CHECK(send_chunks_as(rig3, bad, permit, 64, t).code ==
-          StatusCode::IntegrityError);
-    CHECK(rig3.journal->stats().reassembly_rejects == 1);
+    // the assembly digest check must reject the object before submit.
+    Digest256 honest{};
+    sha256(permit.view(), honest);
+    CHECK(deliver_object(target3, port3, kAuthority,
+                         autonomy::ControlObjectKind::ConfigPermit, bad.view(),
+                         64, t,
+                         ByteView{honest.data(),
+                                  honest.size()}) == autonomy::ObjectAckStatus::Failed);
+    CHECK(!target3.object_active());
     CHECK(rig3.journal->decision_revision() == 0);
   }
 
@@ -1491,28 +1564,41 @@ void test_c10_reassembly() {
     TargetRig rig3;
     MonotonicMs t = 5000;
     CHECK_OK(rig3.journal->initialize(t));
+    AckPort port3;
+    ConfigTarget target3(port3, rig3.rate);
+    CHECK_OK(target3.add_journal(1, *rig3.journal));
     autonomy::ControlObjectPayload manifest{};
     manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
     manifest.total_len = static_cast<std::uint16_t>(permit.size);
     sha256(permit.view(), manifest.object_hash);
-    CHECK_OK(rig3.journal->note_object_manifest(manifest, t));
+    send_manifest(target3, kAuthority, manifest, t);
+    CHECK(port3.last_status == autonomy::ObjectAckStatus::Incomplete);
     autonomy::ObjectChunkPayload chunk{};
     chunk.object_hash = manifest.object_hash;
     chunk.offset = 0;
     chunk.data_size = 32;
     std::memcpy(chunk.data.data(), permit.bytes.data(), 32);
-    CHECK_OK(rig3.journal->note_object_chunk(chunk, t));
+    send_chunk(target3, kAuthority, chunk, t);
+    CHECK(port3.last_status == autonomy::ObjectAckStatus::Incomplete);
     chunk.data[10] ^= 0xFFU;  // same offset, different bytes
-    CHECK(rig3.journal->note_object_chunk(chunk, t + 10).code == StatusCode::Conflict);
+    send_chunk(target3, kAuthority, chunk, t + 10);
+    CHECK(port3.last_status == autonomy::ObjectAckStatus::Failed);
+    CHECK(!target3.object_active());
   }
 
-  // Missing manifest -> chunk is an error; oversized object -> rejected.
+  // Missing manifest -> chunk denied; the journal gate still refuses a
+  // wrong kind and an oversized object directly.
   {
     TargetRig rig3;
     MonotonicMs t = 5000;
     CHECK_OK(rig3.journal->initialize(t));
+    AckPort port3;
+    ConfigTarget target3(port3, rig3.rate);
+    CHECK_OK(target3.add_journal(1, *rig3.journal));
     autonomy::ObjectChunkPayload chunk{};
-    CHECK(rig3.journal->note_object_chunk(chunk, t).code == StatusCode::InvalidState);
+    send_chunk(target3, kAuthority, chunk, t);
+    CHECK(target3.control_denied() == 1);
+    CHECK(port3.acks == 0);  // denied, never acked
     autonomy::ControlObjectPayload manifest{};
     manifest.kind = autonomy::ControlObjectKind::ChannelPlan;  // wrong kind
     manifest.total_len = 64;
@@ -1525,24 +1611,29 @@ void test_c10_reassembly() {
           StatusCode::ProtocolError);
   }
 
-  // Reassembly timeout: a chunk arriving past 10 s resets the assembly.
+  // Reassembly timeout: a chunk arriving past 10 s fails the assembly.
   {
     TargetRig rig3;
     MonotonicMs t = 5000;
     CHECK_OK(rig3.journal->initialize(t));
+    AckPort port3;
+    ConfigTarget target3(port3, rig3.rate);
+    CHECK_OK(target3.add_journal(1, *rig3.journal));
     autonomy::ControlObjectPayload manifest{};
     manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
     manifest.total_len = static_cast<std::uint16_t>(permit.size);
     sha256(permit.view(), manifest.object_hash);
-    CHECK_OK(rig3.journal->note_object_manifest(manifest, t));
+    send_manifest(target3, kAuthority, manifest, t);
     autonomy::ObjectChunkPayload chunk{};
     chunk.object_hash = manifest.object_hash;
     chunk.offset = 0;
     chunk.data_size = 32;
     std::memcpy(chunk.data.data(), permit.bytes.data(), 32);
-    CHECK_OK(rig3.journal->note_object_chunk(chunk, t + 10));
-    CHECK(rig3.journal->note_object_chunk(chunk, t + kConfigReassemblyTimeoutMs + 1)
-              .code == StatusCode::Expired);
+    send_chunk(target3, kAuthority, chunk, t + 10);
+    CHECK(port3.last_status == autonomy::ObjectAckStatus::Incomplete);
+    send_chunk(target3, kAuthority, chunk, t + kConfigReassemblyTimeoutMs + 1);
+    CHECK(port3.last_status == autonomy::ObjectAckStatus::Failed);
+    CHECK(!target3.object_active());
   }
 }
 
@@ -2148,9 +2239,17 @@ void test_uncertain_intake_refused() {
   manifest.object_hash[0] = 1;
   CHECK(rig.journal->note_object_manifest(manifest, now_ms).code ==
         StatusCode::RecoveryRequired);
+  // The target cannot reserve kind 3 on the impaired journal either: the
+  // manifest is Failed-acked, and a chunk for nothing is denied.
+  AckPort port;
+  ConfigTarget target(port, rig.rate);
+  CHECK_OK(target.add_journal(1, *rig.journal));
+  send_manifest(target, kAuthority, manifest, now_ms);
+  CHECK(port.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(!target.object_active());
   autonomy::ObjectChunkPayload chunk{};
-  CHECK(rig.journal->note_object_chunk(chunk, now_ms).code ==
-        StatusCode::RecoveryRequired);
+  send_chunk(target, kAuthority, chunk, now_ms);
+  CHECK(target.control_denied() == 1);
 }
 
 // A committed-seal record that fails structural validation is noise: it
@@ -2232,19 +2331,82 @@ void test_revision_pair_contract() {
 }
 
 // A duplicate manifest with a different total_len contradicts the
-// assembly in progress — a protocol conflict, never re-ACKed.
+// assembly in progress — Failed-acked, never re-ACKed as progress.
 void test_manifest_length_conflict() {
   TargetRig rig;
   MonotonicMs t = 1000;
   CHECK_OK(rig.journal->initialize(t));
+  AckPort port;
+  ConfigTarget target(port, rig.rate);
+  CHECK_OK(target.add_journal(1, *rig.journal));
   autonomy::ControlObjectPayload manifest{};
   manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
   manifest.total_len = 64;
   manifest.object_hash[0] = 0xAB;
-  CHECK_OK(rig.journal->note_object_manifest(manifest, t));
+  send_manifest(target, kAuthority, manifest, t);
+  CHECK(port.last_status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(target.object_active());
   manifest.total_len = 128;  // same object hash, different declared length
-  CHECK(rig.journal->note_object_manifest(manifest, t).code ==
-        StatusCode::Conflict);
+  send_manifest(target, kAuthority, manifest, t);
+  CHECK(port.last_status == autonomy::ObjectAckStatus::Failed);
+  // The live assembly survives the contradiction — only its own bytes
+  // complete or poison it.
+  CHECK(target.object_active());
+}
+
+// A journal that becomes impaired invalidates an in-progress NORMAL permit
+// assembly (the submit it feeds could never succeed), while a kind-4
+// assembly on the same target stays servable.
+void test_quarantine_invalidates_permit_assembly() {
+  TargetRig rig;
+  MonotonicMs t = 1000;
+  CHECK_OK(rig.journal->initialize(t));
+  AckPort port;
+  ConfigTarget target(port, rig.rate);
+  CHECK_OK(target.add_journal(1, *rig.journal));
+
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = 64;
+  manifest.object_hash[0] = 0xAB;
+  send_manifest(target, kAuthority, manifest, t);
+  CHECK(port.last_status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(target.object_active());
+
+  // Spend the live floor's store axis (no reboot): the next submit finds
+  // no nameable generation — CounterExhausted — and the live state wedges
+  // into quarantine.
+  SecurityFloorState current{};
+  CHECK_OK(rig.floor->read(current));
+  SecurityFloorState spent = current;
+  spent.entries[0].store_floor = 0xFFFFFFFFU;
+  CHECK_OK(rig.floor->advance(current, spent));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK(drive_update(rig, patch, 1, t += 10, 0, ByteView{}, verdict).code ==
+        StatusCode::CounterExhausted);
+  CHECK(rig.journal->quarantined());
+
+  // The target's poll drops the doomed permit assembly; a chunk for it is
+  // denied and a fresh kind-3 manifest cannot reserve.
+  target.poll(t += 10);
+  CHECK(!target.object_active());
+  autonomy::ObjectChunkPayload chunk{};
+  std::memcpy(chunk.object_hash.data(), manifest.object_hash.data(),
+              manifest.object_hash.size());
+  send_chunk(target, kAuthority, chunk, t);
+  CHECK(target.control_denied() == 1);
+  send_manifest(target, kAuthority, manifest, t);
+  CHECK(port.last_status == autonomy::ObjectAckStatus::Failed);
+
+  // Kind 4 on the same impaired journal still reserves: recovery stays
+  // reachable while normal intake is shut.
+  manifest.kind = autonomy::ControlObjectKind::ConfigRecovery;
+  send_manifest(target, kAuthority, manifest, t);
+  CHECK(port.last_status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(target.object_active());
+  target.poll(t += 10);  // impairment does not drop kind-4 assemblies
+  CHECK(target.object_active());
 }
 
 // RESULT_EXPIRED is the wire answer — the Status4 response is emitted,
@@ -2316,27 +2478,14 @@ void build_recovery(FakePermitSigner& signer, const TargetRig& rig,
   CHECK_OK(signer.sign_recovery(command, canonical.view(), object));
 }
 
-// Feed `object` through the kind-4 manifest/chunk lane in `chunk_size` pieces.
-Status send_recovery_chunks(TargetRig& rig,
-                            const ByteBuffer<kConfigPermitObjectMax>& object,
-                            const std::uint16_t chunk_size, MonotonicMs& t) {
-  autonomy::ControlObjectPayload manifest{};
-  manifest.kind = autonomy::ControlObjectKind::ConfigRecovery;
-  manifest.total_len = static_cast<std::uint16_t>(object.size);
-  sha256(object.view(), manifest.object_hash);
-  Status last = rig.journal->note_recovery_manifest(manifest, t);
-  for (std::uint16_t offset = 0; offset < object.size && last.ok();
-       offset = static_cast<std::uint16_t>(offset + chunk_size)) {
-    autonomy::ObjectChunkPayload chunk{};
-    chunk.object_hash = manifest.object_hash;
-    chunk.offset = offset;
-    chunk.data_size = static_cast<std::uint16_t>(
-        object.size - offset < chunk_size ? object.size - offset : chunk_size);
-    std::memcpy(chunk.data.data(), object.bytes.data() + offset, chunk.data_size);
-    t += 10;
-    last = rig.journal->note_recovery_chunk(chunk, t);
-  }
-  return last;
+// Feed `object` through the kind-4 intake in `chunk_size` pieces.
+autonomy::ObjectAckStatus send_recovery_chunks(
+    ConfigTarget& target, AckPort& port,
+    const ByteBuffer<kConfigPermitObjectMax>& object,
+    const std::uint16_t chunk_size, MonotonicMs& t) {
+  return deliver_object(target, port, kAuthority,
+                        autonomy::ControlObjectKind::ConfigRecovery,
+                        object.view(), chunk_size, t);
 }
 
 // R01: both journal slots lost -> quarantine -> a signed StoreRecover object
@@ -2528,7 +2677,12 @@ void test_r07_recovery_lane_reassembly() {
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
                  endpoint::kRcr1AttestReprovision, 1, 0, 12,
                  rig.config.authority_generation, object);
-  CHECK_OK(send_recovery_chunks(rig, object, 32, now_ms));
+  AckPort port;
+  ConfigTarget target(port, rig.rate);
+  CHECK_OK(target.add_journal(1, *rig.journal));
+  CHECK(send_recovery_chunks(target, port, object, 32, now_ms) ==
+        autonomy::ObjectAckStatus::Ok);
+  CHECK(!target.object_active());
   CHECK(!rig.journal->quarantined());
 
   // Kind-4 manifest discipline on a fresh impaired journal: wrong-kind and
@@ -2538,6 +2692,9 @@ void test_r07_recovery_lane_reassembly() {
   rig2.storage.fill(0, 0xEE);
   rig2.storage.fill(1, 0xEE);
   rig2.boot(t);
+  AckPort port2;
+  ConfigTarget target2(port2, rig2.rate);
+  CHECK_OK(target2.add_journal(1, *rig2.journal));
   autonomy::ControlObjectPayload manifest{};
   manifest.kind = autonomy::ControlObjectKind::ConfigPermit;  // wrong lane kind
   manifest.total_len = 64;
@@ -2553,7 +2710,8 @@ void test_r07_recovery_lane_reassembly() {
   // submit_recovery ever sees the object.
   manifest.total_len = static_cast<std::uint16_t>(object.size);
   sha256(object.view(), manifest.object_hash);
-  CHECK_OK(rig2.journal->note_recovery_manifest(manifest, t));
+  send_manifest(target2, kAuthority, manifest, t);
+  CHECK(port2.last_status == autonomy::ObjectAckStatus::Incomplete);
   autonomy::ObjectChunkPayload chunk{};
   chunk.object_hash = manifest.object_hash;
   chunk.offset = 0;
@@ -2561,18 +2719,132 @@ void test_r07_recovery_lane_reassembly() {
   std::memcpy(chunk.data.data(), object.bytes.data(), 64);
   chunk.data[10] ^= 0xFFU;  // corrupted under an honest manifest
   t += 10;
-  CHECK_OK(rig2.journal->note_recovery_chunk(chunk, t));
+  send_chunk(target2, kAuthority, chunk, t);
+  CHECK(port2.last_status == autonomy::ObjectAckStatus::Incomplete);
   chunk.offset = 64;
   chunk.data_size = static_cast<std::uint16_t>(object.size - 64);
   std::memcpy(chunk.data.data(), object.bytes.data() + 64, chunk.data_size);
   t += 10;
-  CHECK(rig2.journal->note_recovery_chunk(chunk, t).code ==
-        StatusCode::IntegrityError);
+  send_chunk(target2, kAuthority, chunk, t);
+  CHECK(port2.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(!target2.object_active());
   CHECK(rig2.journal->quarantined());
 
   // The kind-3 lane stays shut through all of it (quarantine -> InvalidState).
   CHECK(rig2.journal->note_object_manifest(manifest, t).code ==
         StatusCode::InvalidState);
+}
+
+// --- RecoveryInfo (subtype 7/8): the read-only recovery baseline ----------------
+
+void test_recovery_info_healthy() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+
+  endpoint::RecoveryInfoQuery query{};
+  query.config_namespace = 1;
+  query.nonce = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK_OK(rig.journal->handle_recovery_info_query(query, now_ms, encoded));
+  endpoint::RecoveryInfo info{};
+  CHECK_OK(endpoint::recovery_info_decode(encoded.view(), info));
+  CHECK(info.config_namespace == 1);
+  CHECK(info.schema == 1);
+  CHECK(info.nonce_echo == query.nonce);
+  CHECK(info.network == kNet);
+  // One update persists three records (DECIDED/INTENT/ACTIVE) under one
+  // decision: the reply names the floor's exact-next authority, not the
+  // journal's memory of it.
+  CHECK(info.store_floor == rig.floor_j());
+  CHECK(info.decision_floor == rig.floor_r());
+  CHECK(info.store_floor == 3 && info.decision_floor == 1);
+  CHECK(info.flags == endpoint::kRecoveryInfoFlagSurvivorKnown);
+  CHECK(info.snapshot_hash == rig.journal->active_hash());
+  CHECK(info.recovery_version == kRecoveryWireVersion);
+  CHECK(info.profile_bits == 0);  // FakeVerifier advertises no profile bit
+
+  // Namespace mismatch and uninitialized journals refuse.
+  query.config_namespace = 0x8000;
+  CHECK(rig.journal->handle_recovery_info_query(query, now_ms, encoded).code ==
+        StatusCode::Unsupported);
+  TargetRig fresh;
+  query.config_namespace = 1;
+  CHECK(fresh.journal->handle_recovery_info_query(query, now_ms, encoded).code ==
+        StatusCode::InvalidState);
+}
+
+void test_recovery_info_impaired() {
+  // Quarantined, no survivor: impairment is explicit, the baseline is
+  // explicit unknown — but J/R still serve (the floor is a separate
+  // store and it is alive).
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms += 10);
+  CHECK(rig.journal->quarantined());
+
+  endpoint::RecoveryInfoQuery query{};
+  query.config_namespace = 1;
+  query.nonce = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK_OK(rig.journal->handle_recovery_info_query(query, now_ms, encoded));
+  endpoint::RecoveryInfo info{};
+  CHECK_OK(endpoint::recovery_info_decode(encoded.view(), info));
+  CHECK(info.flags == (endpoint::kRecoveryInfoFlagImpaired |
+                       endpoint::kRecoveryInfoFlagQuarantined));
+  CHECK(info.store_floor == 3 && info.decision_floor == 1);
+  Digest256 zero{};
+  CHECK(info.snapshot_hash == zero);  // explicit unknown, never a guess
+  CHECK(info.recovery_version == kRecoveryWireVersion);
+
+  // Uncertain with a known-value survivor: the hash serves with the
+  // impairment flags — the accept path (not this advisory reply) decides
+  // whether the survivor is adoptable.
+  TargetRig rig2;
+  now_ms = 2000;
+  CHECK_OK(rig2.journal->initialize(now_ms));
+  CHECK_OK(drive_update(rig2, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig2, now_ms);
+  rig2.storage.corrupt(1, 200);  // lose the non-ACTIVE sibling
+  rig2.boot(now_ms += 10);
+  CHECK(rig2.journal->uncertain());
+  CHECK_OK(rig2.journal->handle_recovery_info_query(query, now_ms, encoded));
+  CHECK_OK(endpoint::recovery_info_decode(encoded.view(), info));
+  CHECK(info.flags == (endpoint::kRecoveryInfoFlagImpaired |
+                       endpoint::kRecoveryInfoFlagUncertain |
+                       endpoint::kRecoveryInfoFlagSurvivorKnown));
+  CHECK(info.snapshot_hash == rig2.journal->active_hash());
+}
+
+void test_recovery_info_floor_dead() {
+  // The floor cannot name J/R (a failed commit left it unusable): the
+  // journal refuses rather than report zeros the host would sign against.
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  rig.floor_storage.fail_writes = true;
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK(!drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict).ok());
+  rig.floor_storage.fail_writes = false;
+
+  endpoint::RecoveryInfoQuery query{};
+  query.config_namespace = 1;
+  query.nonce = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK(rig.journal->handle_recovery_info_query(query, now_ms, encoded).code ==
+        StatusCode::RecoveryRequired);
 }
 
 // --- F-series: the RLF1 security floor -----------------------------------------
@@ -2901,6 +3173,7 @@ int main() {
   test_fresh_vs_impaired();
   test_revision_pair_contract();
   test_manifest_length_conflict();
+  test_quarantine_invalidates_permit_assembly();
   test_status_result_expired();
   // Issue #51: dedicated kind-4 recovery lane.
   test_r01_quarantine_store_recovery();
@@ -2908,6 +3181,9 @@ int main() {
   test_r03_recovery_rejections();
   test_r04_recovery_replay_floor();
   test_r07_recovery_lane_reassembly();
+  test_recovery_info_healthy();
+  test_recovery_info_impaired();
+  test_recovery_info_floor_dead();
   // RLF1 security floor.
   test_floor_reserve_on_commit();
   test_floor_gap_consumed();

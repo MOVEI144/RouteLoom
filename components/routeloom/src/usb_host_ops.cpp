@@ -1171,7 +1171,7 @@ Status decode_host_unregister_response(const ByteView inner,
   return Status::success();
 }
 
-// --- Config endpoint subcommands (0x20-0x23) --------------------------------
+// --- Config endpoint subcommands (0x20-0x27) --------------------------------
 namespace {
 
 bool config_result_valid(const std::uint16_t result) noexcept {
@@ -1189,18 +1189,23 @@ bool config_result_valid(const std::uint16_t result) noexcept {
   return false;
 }
 
-// The body length a 0x21/0x22/0x23/0x24 reply may carry, by subcommand.
-// The object replies are result-only; the query replies carry the fixed
-// endpoint body on Ok and none on failure — so {0, N} is the legal set.
+// The body length a config reply may carry, by subcommand. The object
+// replies are result-only; the query replies carry the fixed endpoint
+// body on Ok and none on failure — so {0, N} is the legal set.
 bool config_reply_body_valid(const HostOpsSub sub, const std::size_t body_size) noexcept {
   switch (sub) {
     case HostOpsSub::ConfigPermit:
     case HostOpsSub::ConfigRecover:
+    case HostOpsSub::ConfigTrust:
       return body_size == 0;
     case HostOpsSub::ConfigStatus:
       return body_size == 0 || body_size == kConfigStatusBodySize;
     case HostOpsSub::ConfigChallenge:
       return body_size == 0 || body_size == kConfigChallengeBodySize;
+    case HostOpsSub::TrustStatus:
+      return body_size == 0 || body_size == kTrustStatusBodySize;
+    case HostOpsSub::RecoveryInfo:
+      return body_size == 0 || body_size == kRecoveryInfoBodySize;
     default:
       return false;
   }
@@ -1344,6 +1349,112 @@ Status encode_config_recover(const ConfigRecoverRequest& request,
       static_cast<std::uint16_t>(8 + request.object.size));
   if (status) status = writer.write_u64(request.target);
   if (status) status = writer.write_bytes(request.object);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_config_trust(const ByteView inner, ConfigTrustRequest& out) noexcept {
+  out = ConfigTrustRequest{};
+  ByteView payload{};
+  // Same layout as 0x21/0x24, at the kind-5 ceiling: target:u64 (8) +
+  // object (1..kConfigTrustMax).
+  const Status status =
+      gateway_body(inner, HostOpsSub::ConfigTrust, 8 + 1, 8 + kConfigTrustMax,
+                   payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (!read) return read;
+  out.object = ByteView{payload.data + reader.consumed(), reader.remaining()};
+  return Status::success();
+}
+
+Status encode_config_trust(const ConfigTrustRequest& request,
+                           const MutableByteView out,
+                           std::size_t& written) noexcept {
+  written = 0;
+  if (request.object.size == 0 || request.object.size > kConfigTrustMax) {
+    return Status::error(StatusCode::InvalidArgument, "config trust size");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::ConfigTrust,
+      static_cast<std::uint16_t>(8 + request.object.size));
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_bytes(request.object);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_trust_status(const ByteView inner, TrustStatusRequest& out) noexcept {
+  out = TrustStatusRequest{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::TrustStatus, kTrustStatusRequestPayload,
+                   kTrustStatusRequestPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (read) read = reader.read_u64(out.network);
+  if (read) {
+    read = reader.read_bytes(
+        MutableByteView{out.nonce.data(), out.nonce.size()});
+  }
+  return read;
+}
+
+Status encode_trust_status(const TrustStatusRequest& request,
+                           const MutableByteView out,
+                           std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::TrustStatus,
+                                     kTrustStatusRequestPayload);
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_u64(request.network);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{request.nonce.data(), request.nonce.size()});
+  }
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_recovery_info(const ByteView inner, RecoveryInfoRequest& out) noexcept {
+  out = RecoveryInfoRequest{};
+  ByteView payload{};
+  const Status status =
+      gateway_body(inner, HostOpsSub::RecoveryInfo, kRecoveryInfoRequestPayload,
+                   kRecoveryInfoRequestPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (read) read = reader.read_u64(out.network);
+  if (read) read = reader.read_u16(out.config_namespace);
+  if (read) {
+    read = reader.read_bytes(
+        MutableByteView{out.nonce.data(), out.nonce.size()});
+  }
+  return read;
+}
+
+Status encode_recovery_info(const RecoveryInfoRequest& request,
+                            const MutableByteView out,
+                            std::size_t& written) noexcept {
+  written = 0;
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::RecoveryInfo,
+                                     kRecoveryInfoRequestPayload);
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_u64(request.network);
+  if (status) status = writer.write_u16(request.config_namespace);
+  if (status) {
+    status = writer.write_bytes(
+        ByteView{request.nonce.data(), request.nonce.size()});
+  }
   if (!status) return status;
   written = writer.size();
   return Status::success();

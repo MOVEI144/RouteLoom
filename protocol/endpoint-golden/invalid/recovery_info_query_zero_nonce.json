@@ -1,0 +1,8 @@
+{
+  "codec": "control_recovery_info_query",
+  "encoded_hex": "0107000100000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "recovery_info_query_zero_nonce",
+  "note": "query nonce must be nonzero"
+}

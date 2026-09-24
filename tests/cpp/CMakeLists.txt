@@ -147,9 +147,13 @@ target_include_directories(routeloom_cose_tests PRIVATE ${CMAKE_CURRENT_SOURCE_D
 target_compile_options(routeloom_cose_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_cose_tests COMMAND routeloom_cose_tests)
 
+set(ROUTELOOM_UECC_DIR ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
+
 add_executable(routeloom_config_wire_tests test_config_wire.cpp)
 target_link_libraries(routeloom_config_wire_tests PRIVATE routeloom_core)
-target_include_directories(routeloom_config_wire_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# The kind-5 tests drive real P-256 manifests through the shared fixture.
+target_include_directories(routeloom_config_wire_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_config_wire_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_wire_tests COMMAND routeloom_config_wire_tests)
 
@@ -157,7 +161,6 @@ add_test(NAME routeloom_config_wire_tests COMMAND routeloom_config_wire_tests)
 # device credential, RTM1 trust manifest. The micro-ecc include dir is added
 # so the shared fixture can drive real P-256 keypairs/signatures against the
 # vendored copy already linked into routeloom_core.
-set(ROUTELOOM_UECC_DIR ${CMAKE_SOURCE_DIR}/components/routeloom/third_party/micro-ecc)
 
 add_executable(routeloom_trust_store_tests test_trust_store.cpp)
 target_link_libraries(routeloom_trust_store_tests PRIVATE routeloom_core)

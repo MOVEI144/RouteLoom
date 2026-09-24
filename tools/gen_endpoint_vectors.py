@@ -111,6 +111,30 @@ def control_status(ns, opid, decision_rev, active_rev, phase, reason,
             active_hash)
 
 
+def trust_status_query(nonce, reserved=0):
+    return u8(1) + u8(5) + u16(reserved) + nonce
+
+
+def trust_status(nonce_echo, store_epoch, min_gen, network, fingerprint,
+                 anchor_count, key_count, revocation_count, flags,
+                 reserved=0):
+    return (u8(1) + u8(6) + u16(reserved) + nonce_echo +
+            u32(store_epoch) + u32(min_gen) + u64(network) + fingerprint +
+            u8(anchor_count) + u8(key_count) + u8(revocation_count) +
+            u8(flags))
+
+
+def recovery_info_query(ns, nonce):
+    return u8(1) + u8(7) + u16(ns) + nonce
+
+
+def recovery_info(ns, schema, nonce_echo, network, store_floor, decision_floor,
+                  flags, version, profile_bits, snapshot_hash):
+    return (u8(1) + u8(8) + u16(ns) + u16(schema) + nonce_echo + u64(network) +
+            u32(store_floor) + u64(decision_floor) + u8(flags) + u8(version) +
+            u32(profile_bits) + snapshot_hash)
+
+
 # --- RCC1 ---------------------------------------------------------------------
 
 def rcr1(ns, schema, recovery_class, attest, network, target, authority,
@@ -264,6 +288,22 @@ def main():
         config_namespace=1, operation_id_hex=opid.hex(), decision_revision=8,
         active_revision=8, phase=6, reason=0, active_hash_hex=digest32.hex()),
         control_status(1, opid, 8, 8, 6, 0, digest32)))
+    valid.append(("control_trust_status_query", "control_trust_status_query", dict(
+        nonce_hex=nonce.hex()),
+        trust_status_query(nonce)))
+    valid.append(("control_trust_status", "control_trust_status", dict(
+        nonce_echo_hex=nonce.hex(), store_epoch=2, min_authority_generation=2,
+        network=7, image_fingerprint_hex=digest32.hex(), anchor_count=1,
+        key_count=2, revocation_count=0, flags=1),
+        trust_status(nonce, 2, 2, 7, digest32, 1, 2, 0, 1)))
+    valid.append(("control_recovery_info_query", "control_recovery_info_query", dict(
+        config_namespace=1, nonce_hex=nonce.hex()),
+        recovery_info_query(1, nonce)))
+    valid.append(("control_recovery_info", "control_recovery_info", dict(
+        config_namespace=1, schema=1, nonce_echo_hex=nonce.hex(), network=7,
+        store_floor=3, decision_floor=1, flags=0x08, recovery_version=1,
+        profile_bits=1, snapshot_hash_hex=digest32.hex()),
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x08, 1, 1, digest32)))
 
     # RCC1 — the design config-example is pinned verbatim.
     valid.append(("config_command", "config_command", dict(
@@ -423,6 +463,32 @@ def main():
     bad("control_status_reserved", "control_status",
         control_status(1, opid, 8, 8, 6, 0, digest32, reserved=1),
         "reserved byte must be zero")
+    bad("trust_status_query_reserved", "control_trust_status_query",
+        trust_status_query(nonce, reserved=1), "reserved u16 must be zero")
+    bad("trust_status_query_zero_nonce", "control_trust_status_query",
+        trust_status_query(bytes(16)), "query nonce must be nonzero")
+    bad("trust_status_bad_flags", "control_trust_status",
+        trust_status(nonce, 2, 2, 7, digest32, 1, 2, 0, 0x08),
+        "flag bit 3 is unassigned")
+    bad("trust_status_zero_echo", "control_trust_status",
+        trust_status(bytes(16), 2, 2, 7, digest32, 1, 2, 0, 1),
+        "nonce echo must be nonzero")
+    bad("trust_status_truncated", "control_trust_status",
+        trust_status(nonce, 2, 2, 7, digest32, 1, 2, 0, 1)[:-1],
+        "71 bytes is not the TrustStatus body")
+    bad("recovery_info_query_bad_namespace", "control_recovery_info_query",
+        recovery_info_query(2, nonce), "namespace 2 is unallocated")
+    bad("recovery_info_query_zero_nonce", "control_recovery_info_query",
+        recovery_info_query(1, bytes(16)), "query nonce must be nonzero")
+    bad("recovery_info_bad_flags", "control_recovery_info",
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x10, 1, 1, digest32),
+        "flag bit 4 is unassigned")
+    bad("recovery_info_zero_version", "control_recovery_info",
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x08, 0, 1, digest32),
+        "recovery version must be nonzero")
+    bad("recovery_info_trailing", "control_recovery_info",
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x08, 1, 1, digest32) + b"\x00",
+        "fixed-size reply with a trailing byte")
 
     good_patch = tlv(1, 2, b"\x01") + tlv(3, 1, b"\x00")
     base = dict(ns=1, schema=1, field_count=2, network=1, target=0x30,

@@ -624,6 +624,10 @@ pub const CONTROL_CHALLENGE_QUERY_SIZE: usize = 24;
 pub const CONTROL_CHALLENGE_SIZE: usize = 92;
 pub const CONTROL_STATUS_QUERY_SIZE: usize = 20;
 pub const CONTROL_STATUS_SIZE: usize = 72;
+pub const TRUST_STATUS_QUERY_SIZE: usize = 20;
+pub const TRUST_STATUS_SIZE: usize = 72;
+pub const RECOVERY_INFO_QUERY_SIZE: usize = 20;
+pub const RECOVERY_INFO_SIZE: usize = 80;
 
 pub fn config_namespace_valid(value: u16) -> bool {
     value == CONFIG_NAMESPACE_SDK
@@ -935,6 +939,253 @@ pub fn control_status_decode(encoded: &[u8]) -> Result<ControlStatus> {
         phase,
         reason,
         active_hash,
+    })
+}
+
+/// TrustStatusQuery5 (20B): ver/sub5 | reserved u16=0 | nonce 16B.
+/// Device global (trust has no namespace); the reply echoes the nonce.
+#[derive(Clone, Debug)]
+pub struct TrustStatusQuery {
+    pub nonce: [u8; 16],
+}
+
+pub fn trust_status_query_encode(
+    payload: &TrustStatusQuery,
+    out: &mut EncodedPayload,
+) -> Result<()> {
+    if all_zero(&payload.nonce) {
+        return invalid("trust query nonce must be nonzero");
+    }
+    let mut raw = Vec::with_capacity(TRUST_STATUS_QUERY_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(5);
+    raw.extend_from_slice(&0_u16.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce);
+    debug_assert_eq!(raw.len(), TRUST_STATUS_QUERY_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn trust_status_query_decode(encoded: &[u8]) -> Result<TrustStatusQuery> {
+    if encoded.len() != TRUST_STATUS_QUERY_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 5)?;
+    let reserved = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let mut nonce = [0_u8; 16];
+    nonce.copy_from_slice(&encoded[4..20]);
+    if reserved != 0 || all_zero(&nonce) {
+        return reject();
+    }
+    Ok(TrustStatusQuery { nonce })
+}
+
+pub const TRUST_STATUS_FLAG_HAS_ACTIVE: u8 = 0x01;
+pub const TRUST_STATUS_FLAG_UNCERTAIN: u8 = 0x02;
+pub const TRUST_STATUS_FLAG_QUARANTINED: u8 = 0x04;
+const TRUST_STATUS_FLAG_MASK: u8 = 0x07;
+
+/// TrustStatus6 (72B): ver/sub6 | reserved u16=0 | nonce_echo 16B |
+/// store_epoch u32 | min_authority_generation u32 | network u64 |
+/// image_fingerprint 32B | anchor/key/revocation counts u8 | flags u8.
+/// Public fields only — never keys, never grant bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustStatus {
+    pub nonce_echo: [u8; 16],
+    pub store_epoch: u32,
+    pub min_authority_generation: u32,
+    pub network: u64,
+    pub image_fingerprint: [u8; 32],
+    pub anchor_count: u8,
+    pub key_count: u8,
+    pub revocation_count: u8,
+    pub flags: u8,
+}
+
+pub fn trust_status_encode(payload: &TrustStatus, out: &mut EncodedPayload) -> Result<()> {
+    if all_zero(&payload.nonce_echo) {
+        return invalid("trust status nonce echo must be nonzero");
+    }
+    if payload.flags & !TRUST_STATUS_FLAG_MASK != 0 {
+        return invalid("trust status flags out of range");
+    }
+    let mut raw = Vec::with_capacity(TRUST_STATUS_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(6);
+    raw.extend_from_slice(&0_u16.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce_echo);
+    raw.extend_from_slice(&payload.store_epoch.to_be_bytes());
+    raw.extend_from_slice(&payload.min_authority_generation.to_be_bytes());
+    raw.extend_from_slice(&payload.network.to_be_bytes());
+    raw.extend_from_slice(&payload.image_fingerprint);
+    raw.push(payload.anchor_count);
+    raw.push(payload.key_count);
+    raw.push(payload.revocation_count);
+    raw.push(payload.flags);
+    debug_assert_eq!(raw.len(), TRUST_STATUS_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn trust_status_decode(encoded: &[u8]) -> Result<TrustStatus> {
+    if encoded.len() != TRUST_STATUS_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 6)?;
+    let reserved = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let mut nonce_echo = [0_u8; 16];
+    nonce_echo.copy_from_slice(&encoded[4..20]);
+    let mut image_fingerprint = [0_u8; 32];
+    image_fingerprint.copy_from_slice(&encoded[36..68]);
+    let flags = encoded[71];
+    if reserved != 0 || all_zero(&nonce_echo) || flags & !TRUST_STATUS_FLAG_MASK != 0 {
+        return reject();
+    }
+    Ok(TrustStatus {
+        nonce_echo,
+        store_epoch: u32::from_be_bytes(encoded[20..24].try_into().expect("fixed")),
+        min_authority_generation: u32::from_be_bytes(encoded[24..28].try_into().expect("fixed")),
+        network: u64::from_be_bytes(encoded[28..36].try_into().expect("fixed")),
+        image_fingerprint,
+        anchor_count: encoded[68],
+        key_count: encoded[69],
+        revocation_count: encoded[70],
+        flags,
+    })
+}
+
+/// RecoveryInfoQuery7 (20B): ver/sub7 | ns u16 | nonce 16B. Selects the
+/// journal; the reply echoes the nonce.
+#[derive(Clone, Debug)]
+pub struct RecoveryInfoQuery {
+    pub config_namespace: u16,
+    pub nonce: [u8; 16],
+}
+
+pub fn recovery_info_query_encode(
+    payload: &RecoveryInfoQuery,
+    out: &mut EncodedPayload,
+) -> Result<()> {
+    if !config_namespace_valid(payload.config_namespace) {
+        return invalid("control namespace is not registered");
+    }
+    if all_zero(&payload.nonce) {
+        return invalid("recovery query nonce must be nonzero");
+    }
+    let mut raw = Vec::with_capacity(RECOVERY_INFO_QUERY_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(7);
+    raw.extend_from_slice(&payload.config_namespace.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce);
+    debug_assert_eq!(raw.len(), RECOVERY_INFO_QUERY_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn recovery_info_query_decode(encoded: &[u8]) -> Result<RecoveryInfoQuery> {
+    if encoded.len() != RECOVERY_INFO_QUERY_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 7)?;
+    let config_namespace = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let mut nonce = [0_u8; 16];
+    nonce.copy_from_slice(&encoded[4..20]);
+    if !config_namespace_valid(config_namespace) || all_zero(&nonce) {
+        return reject();
+    }
+    Ok(RecoveryInfoQuery {
+        config_namespace,
+        nonce,
+    })
+}
+
+pub const RECOVERY_INFO_FLAG_IMPAIRED: u8 = 0x01;
+pub const RECOVERY_INFO_FLAG_UNCERTAIN: u8 = 0x02;
+pub const RECOVERY_INFO_FLAG_QUARANTINED: u8 = 0x04;
+pub const RECOVERY_INFO_FLAG_SURVIVOR_KNOWN: u8 = 0x08;
+const RECOVERY_INFO_FLAG_MASK: u8 = 0x0F;
+
+/// RecoveryInfo8 (80B): ver/sub8 | ns u16 | schema u16 | nonce_echo 16B |
+/// network u64 | store floor J u32 | decision floor R u64 | flags u8 |
+/// recovery_version u8 | profile_bits u32 | snapshot_hash 32B. Read-only
+/// and advisory: J/R name the exact-next recovery, the hash names the
+/// known survivor baseline (or explicit unknown).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryInfo {
+    pub config_namespace: u16,
+    pub schema: u16,
+    pub nonce_echo: [u8; 16],
+    pub network: u64,
+    pub store_floor: u32,
+    pub decision_floor: u64,
+    pub flags: u8,
+    pub recovery_version: u8,
+    pub profile_bits: u32,
+    pub snapshot_hash: [u8; 32],
+}
+
+pub fn recovery_info_encode(payload: &RecoveryInfo, out: &mut EncodedPayload) -> Result<()> {
+    if !config_namespace_valid(payload.config_namespace) {
+        return invalid("control namespace is not registered");
+    }
+    if all_zero(&payload.nonce_echo) {
+        return invalid("recovery info nonce echo must be nonzero");
+    }
+    if payload.flags & !RECOVERY_INFO_FLAG_MASK != 0 {
+        return invalid("recovery info flags out of range");
+    }
+    if payload.recovery_version == 0 {
+        return invalid("recovery info version must be nonzero");
+    }
+    let mut raw = Vec::with_capacity(RECOVERY_INFO_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(8);
+    raw.extend_from_slice(&payload.config_namespace.to_be_bytes());
+    raw.extend_from_slice(&payload.schema.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce_echo);
+    raw.extend_from_slice(&payload.network.to_be_bytes());
+    raw.extend_from_slice(&payload.store_floor.to_be_bytes());
+    raw.extend_from_slice(&payload.decision_floor.to_be_bytes());
+    raw.push(payload.flags);
+    raw.push(payload.recovery_version);
+    raw.extend_from_slice(&payload.profile_bits.to_be_bytes());
+    raw.extend_from_slice(&payload.snapshot_hash);
+    debug_assert_eq!(raw.len(), RECOVERY_INFO_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn recovery_info_decode(encoded: &[u8]) -> Result<RecoveryInfo> {
+    if encoded.len() != RECOVERY_INFO_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 8)?;
+    let config_namespace = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let schema = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));
+    let mut nonce_echo = [0_u8; 16];
+    nonce_echo.copy_from_slice(&encoded[6..22]);
+    let flags = encoded[42];
+    let recovery_version = encoded[43];
+    let mut snapshot_hash = [0_u8; 32];
+    snapshot_hash.copy_from_slice(&encoded[48..80]);
+    if !config_namespace_valid(config_namespace)
+        || all_zero(&nonce_echo)
+        || flags & !RECOVERY_INFO_FLAG_MASK != 0
+        || recovery_version == 0
+    {
+        return reject();
+    }
+    Ok(RecoveryInfo {
+        config_namespace,
+        schema,
+        nonce_echo,
+        network: u64::from_be_bytes(encoded[22..30].try_into().expect("fixed")),
+        store_floor: u32::from_be_bytes(encoded[30..34].try_into().expect("fixed")),
+        decision_floor: u64::from_be_bytes(encoded[34..42].try_into().expect("fixed")),
+        flags,
+        recovery_version,
+        profile_bits: u32::from_be_bytes(encoded[44..48].try_into().expect("fixed")),
+        snapshot_hash,
     })
 }
 

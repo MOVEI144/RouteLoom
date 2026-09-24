@@ -1,0 +1,8 @@
+{
+  "codec": "control_trust_status",
+  "encoded_hex": "010600000000000000000000000000000000000000000002000000020000000000000007000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f01020001",
+  "expect": "error",
+  "format": "routeloom-endpoint-v1-golden",
+  "name": "trust_status_zero_echo",
+  "note": "nonce echo must be nonzero"
+}

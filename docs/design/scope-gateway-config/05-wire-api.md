@@ -92,6 +92,10 @@ Control22 payloadは次の固定形：
 - Challenge2：同24B（sub2、client_nonceをecho）＋boot8＋challenge_nonce16＋revision8＋active_hash32＋valid_for_ms4=92B。
 - StatusQuery3：ver/sub/ns2/opid16=20B。
 - Status4：ver/sub/ns2/opid16/decision_rev8/active_rev8/phase1/reserved1/reason2/active_hash32=72B。
+- TrustStatusQuery5：ver/sub5/reserved2/nonce16=20B（trustはnamespaceなし）。
+- TrustStatus6：ver/sub6/reserved2/nonce_echo16/epoch4/generation4/network8/fingerprint32/anchor1/key1/revocation1/flags1=72B。flags v1はbit0 has-active、bit1 uncertain、bit2 quarantined。
+- RecoveryInfoQuery7：ver/sub7/ns2/nonce16=20B。
+- RecoveryInfo8：ver/sub8/ns2/schema2/nonce_echo16/network8/J4/R8/flags1/version1/profile4/snapshot_hash32=80B。flagsはbit0 impaired、bit1 uncertain、bit2 quarantined、bit3 survivor-known。
 
 phaseはIDLE0/PREPARED1/DECIDED2/APPLY_INTENT3/APPLYING4/VERIFYING5/ACTIVE6/INTERRUPTED7/QUARANTINED8。
 
@@ -99,7 +103,7 @@ Config局所reason表：0 OK、1 IN_PROGRESS、2 STALE_REVISION、3 BASE_HASH_MI
 
 permitは既存38B manifest(kind3)、38+nB chunk(n≤90)、37B object ACKで運ぶ。1024Bなら最大12chunk、774Bなら9chunk。全体一件・10秒reassembly、元challenge/Host期限以内。hashはCOSE全体のSHA-256。未manifest、範囲外、同offset異内容、digest不一致を拒否する。ACK Okは組立完了だけ、適用成功はStatus ACTIVEだけ。
 
-recovery object（`recovery_aad || RCR1 76B || tag16`）は同じmanifest/chunk/ACKをkind4の専用laneで運ぶ。journalのimpaired状態（quarantine/uncertain）で通常kind3 intakeが閉じていても受理され、独自のreassembly slot・署名domain（`RouteLoom/config-recover/v1`、devは`…-dev/v1`）を持つ。kind3形のpermitをkind4経路へ流しても受理しない。RCR1はrecovery_class（1=StoreRecover、2=AuthorityGeneration）・attest・新旧generation・operation_idを固定fieldで運び、reservedは0。store_generation床とresult dedupでreplay/逆行を拒否する。
+recovery object（`recovery_aad || RCR1 76B || tag16`）は同じmanifest/chunk/ACKをkind4で運ぶ。targetはkind3/4/5で一つのbounded assembler（2048B buffer＋bitmap、10秒期限、完了時に型別dispatch）を共有し、kind別のreassembly slotは持たない。journalのimpaired状態（quarantine/uncertain）で通常kind3 intakeが閉じていてもkind4は受理され、quarantine遷移時は進行中のkind3 assemblyを無効化する。署名domain（`RouteLoom/config-recover/v1`、devは`…-dev/v1`）はkind毎に分離し、kind3形のpermitをkind4経路へ流しても受理しない。RCR1はrecovery_class（1=StoreRecover、2=AuthorityGeneration）・attest・新旧generation・operation_idを固定fieldで運び、reservedは0。store_generation床とresult dedupでreplay/逆行を拒否する。trust-manifest（RTM1）はkind5で同じcarrierの2048B上限まで運び、完了先はtrust_manifest_accept（journalへ渡さない）。
 
 最初の1024B確保前に認証済み管理相手/対象/予算をAdmissionで確認。relayは再組立せずE2E bytesを転送する。失効・状態変更後は組立済みでも再検証する。protection-class別dispatchを追加し、旧ChannelPlan link-only経路を壊さない。
 
@@ -119,7 +123,10 @@ USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。実装済みcapabil
 | 0x21 ConfigPermit | H→G: target8＋permit bytes（payload残り1..1024。`object_len` fieldはなく長さは共通`payload_len`由来）。署名原本を転送 |
 | 0x22 ConfigStatus | G→H: target8/ControlStatus72 |
 | 0x23 ConfigChallenge | 双方向: target8/ControlQuery24またはChallenge92。request IDで形を固定 |
-| 0x24 ConfigRecover | H→G: target8＋recovery object bytes（payload残り1..1024、kind4 lane）。署名原本を転送 |
+| 0x24 ConfigRecover | H→G: target8＋recovery object bytes（payload残り1..1024、kind4）。署名原本を転送 |
+| 0x25 ConfigTrust | H→G: target8＋trust-manifest bytes（payload残り1..2048、kind5）。署名原本を転送、replyはresultのみ |
+| 0x26 TrustStatus | 双方向: H→Gはtarget8/network8/nonce16のquery、G→HはTrustStatus72（Ok時のみ、失敗時は空） |
+| 0x27 RecoveryInfo | 双方向: H→Gはtarget8/network8/ns2/nonce16のquery、G→HはRecoveryInfo80（Ok時のみ、失敗時は空） |
 
 USB result/outcomeは0 OK、1 BUSY、2 STALE、3 DENIED、4 UNSUPPORTED、5 INVALID、6 STORAGE、7 INDETERMINATE。IngressAck 0はReceiveLogへ実格納済みの場合だけ。receipt/digest/messagekeyの照合前に信用しない。
 

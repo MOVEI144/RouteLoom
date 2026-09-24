@@ -63,6 +63,10 @@ constexpr std::uint32_t kConfigChallengeMaxMs = 30000;    // challenge_max_ms
 constexpr std::uint32_t kConfigReassemblyTimeoutMs = 10000;  // reassembly_timeout_ms
 constexpr std::size_t kConfigPermitObjectMax = 1024;      // object_max
 constexpr std::size_t kConfigPermitEncodedMax = 774;      // permit_encoded_max
+// Recovery wire version the kind-4 intake accepts (RecoveryInfo8 field):
+// 1 = the legacy recovery command shape, 2 = RCR2. Raised with the codec,
+// never ahead of it.
+constexpr std::uint8_t kRecoveryWireVersion = 1;
 constexpr std::uint32_t kConfigAcceptPerMinute = 1;       // accepted_per_minute
 constexpr std::uint32_t kConfigAcceptBurst = 1;           // burst
 constexpr std::uint32_t kConfigAcceptWindowMs = 60000;
@@ -457,14 +461,21 @@ class ConfigJournal {
   Status handle_status_query(const endpoint::ControlStatusQuery& query,
                              MonotonicMs now_ms,
                              endpoint::EncodedServicePayload& out) noexcept;
+  // RecoveryInfo query (subtype 7 → 8): the read-only recovery baseline —
+  // namespace/schema, the floor's J/R, impairment, the known survivor hash
+  // (or explicit unknown) and the accepted recovery version/profile.
+  // Served while impaired; refused when the floor cannot name J/R.
+  Status handle_recovery_info_query(const endpoint::RecoveryInfoQuery& query,
+                                    MonotonicMs now_ms,
+                                    endpoint::EncodedServicePayload& out) noexcept;
 
-  // Kind-3 permit object ingress (05 §5.5): manifest first, bounded chunks,
-  // 10 s reassembly, digest verified before the permit is submitted. An
-  // object ACK Ok means assembly completed — never CONFIG_ACTIVE.
+  // Kind-3 permit object admission gate (05 §5.5): the target owns the
+  // single reassembly slot and only asks whether this journal would take
+  // a permit right now — initialized, storage proven, manifest well
+  // shaped. Stateless: no slot is reserved here, and an object ACK Ok
+  // means assembly completed — never CONFIG_ACTIVE.
   Status note_object_manifest(const autonomy::ControlObjectPayload& manifest,
                               MonotonicMs now_ms) noexcept;
-  Status note_object_chunk(const autonomy::ObjectChunkPayload& chunk,
-                           MonotonicMs now_ms) noexcept;
 
   // Verify -> dedup -> admission -> validate -> PREPARED -> DECIDED ->
   // APPLY_INTENT -> apply-start. Returns the Status for the caller plus the
@@ -474,16 +485,13 @@ class ConfigJournal {
   Status submit_permit(ByteView permit, MonotonicMs now_ms, bool clock_known,
                        ConfigVerdict& verdict) noexcept;
 
-  // The dedicated kind-4 recovery lane (04 §4.7, 06 §6.3): the ONLY intake
-  // that stays open while the journal is quarantined or uncertain — a
-  // signed recovery command is the evidence an impaired journal accepts.
-  // Same manifest/chunk/10 s reassembly/digest discipline as kind-3, on a
-  // separate slot; completion dispatches to submit_recovery, never
-  // submit_permit.
+  // The kind-4 recovery admission gate (04 §4.7, 06 §6.3): the ONLY
+  // intake that stays open while the journal is quarantined or uncertain
+  // — a signed recovery command is the evidence an impaired journal
+  // accepts. The target assembles the bytes in its single slot and
+  // dispatches completion to submit_recovery, never submit_permit.
   Status note_recovery_manifest(const autonomy::ControlObjectPayload& manifest,
                                 MonotonicMs now_ms) noexcept;
-  Status note_recovery_chunk(const autonomy::ObjectChunkPayload& chunk,
-                             MonotonicMs now_ms) noexcept;
 
   // Verify -> dedup -> dispatch on a signed RCR1 StoreRecover command
   // (impaired journals only): attests a fresh store generation and runs
@@ -628,15 +636,6 @@ class ConfigJournal {
     std::uint32_t valid_for_ms{0};
   };
 
-  struct Reassembly {
-    bool active{false};
-    autonomy::ControlObjectPayload manifest{};
-    std::array<std::uint8_t, kConfigPermitObjectMax> buffer{};
-    std::array<std::uint8_t, kConfigPermitObjectMax / 8> received{};
-    std::size_t received_count{0};
-    MonotonicMs started_ms{0};
-  };
-
   Status store_record(const JournalRecord& record) noexcept;
   // Reserve the next store generation (and the transaction's decision
   // revision, if higher than the floor) in the RLF1 floor BEFORE the
@@ -666,9 +665,6 @@ class ConfigJournal {
   Status validate_command(const endpoint::ConfigCommand& command,
                           const Digest256& digest, MonotonicMs now_ms,
                           bool clock_known, ConfigVerdict& verdict) noexcept;
-  Status reassemble_complete(MonotonicMs now_ms) noexcept;
-  // The recovery lane's own completion path.
-  Status recovery_reassemble_complete(MonotonicMs now_ms) noexcept;
   // Result-record write for the recovery lane (same dedup table as permit
   // outcomes so a replayed recovery answers with its verdict).
   Status record_recovery_result(const endpoint::ConfigRecoveryCommand& command,
@@ -706,8 +702,6 @@ class ConfigJournal {
   std::array<Challenge, kConfigChallengeSlots> challenges_{};
   Transaction txn_{};
   Boot boot_{};
-  Reassembly reassembly_{};
-  Reassembly recovery_reassembly_{};  // kind-4 lane — stays open impaired
   JournalRecord durable_{};          // newest persisted record (mirrors storage)
   std::array<ResultRecord, kConfigResultRecords> results_{};
   MonotonicMs last_now_ms_{0};

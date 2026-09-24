@@ -1076,8 +1076,8 @@ extern "C" void app_main(void) {
     //
     // Recovery is deliberately NOT implicit: §6.3 requires authorized
     // recovery evidence from the authority. The impaired journal still
-    // answers kind-4 recovery objects through config_target's dedicated
-    // lane (a signed RCR1 store-recovery naming the floor's next
+    // answers kind-4 recovery objects through config_target's single
+    // assembler (a signed RCR1 store-recovery naming the floor's next
     // generation), so an authorized routeloomctl `config-recover` reaches
     // it over the mesh; the imperative ConfigJournal::recover() stays an
     // explicit operator/host call (exercised by tests).
@@ -1087,10 +1087,15 @@ extern "C" void app_main(void) {
              status.detail);
   }
   static routeloom::MeshConfigPort config_port(runtime.node());
-  static routeloom::ConfigTarget config_target(config_port);
+  static routeloom::ConfigTarget config_target(config_port, config_limiter);
   status = config_target.add_journal(
       routeloom::endpoint::kConfigNamespaceSdk, config_journal);
   if (!status) fail(status.detail);
+  // Kind-5 trust-manifest intake and the trust-status query answer from
+  // the same store the TrustView verifier reads: root-signed RTM1 images
+  // update the verifier's key set in-band, governed by signatures and the
+  // security floor — never by transport claims.
+  config_target.attach_trust_store(trust_store, config_floor);
   runtime.node().set_config_sink(&config_target);
   // The committed config image drives the live relay gate from now on
   // (field 3 relay_allowed); attach after the sink so the gate reflects the

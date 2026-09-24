@@ -1153,6 +1153,58 @@ Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& qu
   return Status::error(StatusCode::NotFound, "config operation unknown");
 }
 
+Status ConfigJournal::handle_recovery_info_query(
+    const endpoint::RecoveryInfoQuery& query, const MonotonicMs now_ms,
+    endpoint::EncodedServicePayload& out) noexcept {
+  last_now_ms_ = now_ms;
+  if (!initialized_) {
+    return Status::error(StatusCode::InvalidState, "config journal not initialized");
+  }
+  if (query.config_namespace != config_.config_namespace) {
+    return Status::error(StatusCode::Unsupported, "config recovery namespace mismatch");
+  }
+  // J/R come from the floor — the exact-next authority a recovery must
+  // name. Without a usable floor for this identity and namespace there
+  // is no honest baseline to serve: refuse rather than report zeros the
+  // host would sign against.
+  SecurityFloorState floor_state{};
+  Status floor_status = floor_.read(floor_state);
+  if (!floor_status.ok()) return floor_status;
+  if (floor_state.network != config_.network ||
+      floor_state.target != config_.target) {
+    return Status::error(StatusCode::Conflict,
+                         "config security floor identity mismatch");
+  }
+  const SecurityFloorEntry* floor_entry = SecurityFloorStore::entry_for(
+      floor_state, config_.config_namespace);
+  if (floor_entry == nullptr) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "config security floor has no namespace entry");
+  }
+  endpoint::RecoveryInfo info{};
+  info.config_namespace = config_.config_namespace;
+  info.schema = config_.schema;
+  info.nonce_echo = query.nonce;
+  info.network = config_.network;
+  info.store_floor = floor_entry->store_floor;
+  info.decision_floor = floor_entry->decision_floor;
+  if (uncertain_ || quarantined_) {
+    info.flags |= endpoint::kRecoveryInfoFlagImpaired;
+  }
+  if (uncertain_) info.flags |= endpoint::kRecoveryInfoFlagUncertain;
+  if (quarantined_) info.flags |= endpoint::kRecoveryInfoFlagQuarantined;
+  // The adopted survivor's confirmed snapshot hash — the baseline an
+  // AdoptKnown recovery binds to. No adopted record means no baseline:
+  // explicit unknown (flag clear, hash zero), never a guess.
+  if (has_active_) {
+    info.flags |= endpoint::kRecoveryInfoFlagSurvivorKnown;
+    info.snapshot_hash = active_hash_;
+  }
+  info.recovery_version = kRecoveryWireVersion;
+  info.profile_bits = permit_profile_bits();
+  return endpoint::recovery_info_encode(info, out);
+}
+
 Status ConfigJournal::note_object_manifest(
     const autonomy::ControlObjectPayload& manifest, const MonotonicMs now_ms) noexcept {
   last_now_ms_ = now_ms;
@@ -1171,93 +1223,10 @@ Status ConfigJournal::note_object_manifest(
     ++stats_.reassembly_rejects;
     return Status::error(StatusCode::ProtocolError, "config manifest invalid");
   }
-  if (reassembly_.active) {
-    if (reassembly_.manifest.object_hash == manifest.object_hash) {
-      if (reassembly_.manifest.total_len == manifest.total_len) {
-        return Status::success();  // same manifest re-delivered: idempotent
-      }
-      // Same object hash with a different declared length contradicts the
-      // assembly in progress — a protocol violation, never re-ACKed.
-      ++stats_.reassembly_rejects;
-      return Status::error(StatusCode::Conflict, "config manifest length conflict");
-    }
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::Busy, "config reassembly busy");
-  }
-  reassembly_.active = true;
-  reassembly_.manifest = manifest;
-  reassembly_.received.fill(0);
-  reassembly_.received_count = 0;
-  reassembly_.started_ms = now_ms;
+  // Admission only — the target owns the single reassembly slot and
+  // tracks busy/duplicate manifests there. Completion arrives through
+  // submit_permit(), which re-checks everything that matters.
   return Status::success();
-}
-
-Status ConfigJournal::note_object_chunk(const autonomy::ObjectChunkPayload& chunk,
-                                        const MonotonicMs now_ms) noexcept {
-  last_now_ms_ = now_ms;
-  if (uncertain_ || quarantined_) {
-    // Same gate as the manifest path: no intake while storage is unproven.
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::RecoveryRequired,
-                        "config journal storage uncertain");
-  }
-  if (!reassembly_.active) {
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::InvalidState, "config chunk without manifest");
-  }
-  if (now_ms - reassembly_.started_ms > kConfigReassemblyTimeoutMs) {
-    reassembly_.active = false;
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::Expired, "config reassembly timed out");
-  }
-  if (chunk.object_hash != reassembly_.manifest.object_hash || chunk.data_size == 0 ||
-      static_cast<std::uint32_t>(chunk.offset) + chunk.data_size >
-          reassembly_.manifest.total_len) {
-    reassembly_.active = false;  // conflicting bytes poison the assembly
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::ProtocolError, "config chunk out of bounds");
-  }
-  for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
-    const std::uint16_t at = static_cast<std::uint16_t>(chunk.offset + i);
-    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
-    if ((reassembly_.received[at >> 3U] & mask) != 0) {
-      if (reassembly_.buffer[at] != chunk.data[i]) {
-        // Same offset, different bytes — reject the whole assembly (05 §5.5).
-        reassembly_.active = false;
-        ++stats_.reassembly_rejects;
-        return Status::error(StatusCode::Conflict, "config chunk content conflict");
-      }
-      continue;
-    }
-    reassembly_.received[at >> 3U] = static_cast<std::uint8_t>(
-        reassembly_.received[at >> 3U] | mask);
-    reassembly_.buffer[at] = chunk.data[i];
-    ++reassembly_.received_count;
-  }
-  if (reassembly_.received_count < reassembly_.manifest.total_len) {
-    return Status::success();  // still assembling; ACK Ok = assembly only
-  }
-  return reassemble_complete(now_ms);
-}
-
-Status ConfigJournal::reassemble_complete(const MonotonicMs now_ms) noexcept {
-  const std::uint16_t total = reassembly_.manifest.total_len;
-  Digest256 digest{};
-  sha256(ByteView{reassembly_.buffer.data(), total}, digest);
-  if (!constant_time_equal(ByteView{digest.data(), digest.size()},
-                           ByteView{reassembly_.manifest.object_hash.data(),
-                                    reassembly_.manifest.object_hash.size()})) {
-    reassembly_.active = false;
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::IntegrityError, "config object digest mismatch");
-  }
-  const ByteView permit{reassembly_.buffer.data(), total};
-  reassembly_.active = false;
-  ConfigVerdict verdict{};
-  // Assembly is done; whether the permit applies is the journal's decision.
-  const Status status = submit_permit(permit, now_ms, true, verdict);
-  static_cast<void>(verdict);
-  return status;
 }
 
 Status ConfigJournal::note_recovery_manifest(
@@ -1275,90 +1244,10 @@ Status ConfigJournal::note_recovery_manifest(
     ++stats_.reassembly_rejects;
     return Status::error(StatusCode::ProtocolError, "config recovery manifest invalid");
   }
-  if (recovery_reassembly_.active) {
-    if (recovery_reassembly_.manifest.object_hash == manifest.object_hash) {
-      if (recovery_reassembly_.manifest.total_len == manifest.total_len) {
-        return Status::success();  // same manifest re-delivered: idempotent
-      }
-      ++stats_.reassembly_rejects;
-      return Status::error(StatusCode::Conflict, "config recovery manifest conflict");
-    }
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::Busy, "config recovery reassembly busy");
-  }
-  recovery_reassembly_.active = true;
-  recovery_reassembly_.manifest = manifest;
-  recovery_reassembly_.received.fill(0);
-  recovery_reassembly_.received_count = 0;
-  recovery_reassembly_.started_ms = now_ms;
+  // Admission only — the target owns the single reassembly slot and
+  // tracks busy/duplicate manifests there. Completion arrives through
+  // submit_recovery(), which re-checks everything that matters.
   return Status::success();
-}
-
-Status ConfigJournal::note_recovery_chunk(const autonomy::ObjectChunkPayload& chunk,
-                                          const MonotonicMs now_ms) noexcept {
-  last_now_ms_ = now_ms;
-  if (!recovery_reassembly_.active) {
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::InvalidState,
-                        "config recovery chunk without manifest");
-  }
-  if (now_ms - recovery_reassembly_.started_ms > kConfigReassemblyTimeoutMs) {
-    recovery_reassembly_.active = false;
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::Expired, "config recovery reassembly timed out");
-  }
-  if (chunk.object_hash != recovery_reassembly_.manifest.object_hash ||
-      chunk.data_size == 0 ||
-      static_cast<std::uint32_t>(chunk.offset) + chunk.data_size >
-          recovery_reassembly_.manifest.total_len) {
-    recovery_reassembly_.active = false;  // conflicting bytes poison the assembly
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::ProtocolError, "config recovery chunk out of bounds");
-  }
-  for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
-    const std::uint16_t at = static_cast<std::uint16_t>(chunk.offset + i);
-    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
-    if ((recovery_reassembly_.received[at >> 3U] & mask) != 0) {
-      if (recovery_reassembly_.buffer[at] != chunk.data[i]) {
-        recovery_reassembly_.active = false;
-        ++stats_.reassembly_rejects;
-        return Status::error(StatusCode::Conflict,
-                            "config recovery chunk content conflict");
-      }
-      continue;
-    }
-    recovery_reassembly_.received[at >> 3U] = static_cast<std::uint8_t>(
-        recovery_reassembly_.received[at >> 3U] | mask);
-    recovery_reassembly_.buffer[at] = chunk.data[i];
-    ++recovery_reassembly_.received_count;
-  }
-  if (recovery_reassembly_.received_count < recovery_reassembly_.manifest.total_len) {
-    return Status::success();  // still assembling; ACK Ok = assembly only
-  }
-  return recovery_reassemble_complete(now_ms);
-}
-
-Status ConfigJournal::recovery_reassemble_complete(const MonotonicMs now_ms) noexcept {
-  const std::uint16_t total = recovery_reassembly_.manifest.total_len;
-  Digest256 digest{};
-  sha256(ByteView{recovery_reassembly_.buffer.data(), total}, digest);
-  if (!constant_time_equal(
-          ByteView{digest.data(), digest.size()},
-          ByteView{recovery_reassembly_.manifest.object_hash.data(),
-                   recovery_reassembly_.manifest.object_hash.size()})) {
-    recovery_reassembly_.active = false;
-    ++stats_.reassembly_rejects;
-    return Status::error(StatusCode::IntegrityError,
-                        "config recovery object digest mismatch");
-  }
-  const ByteView object{recovery_reassembly_.buffer.data(), total};
-  recovery_reassembly_.active = false;
-  ConfigVerdict verdict{};
-  // Assembly is done; whether the recovery command applies is the
-  // journal's decision — the ObjectAck Ok meant transport only.
-  const Status status = submit_recovery(object, now_ms, verdict);
-  static_cast<void>(verdict);
-  return status;
 }
 
 Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs now_ms,
@@ -1947,16 +1836,6 @@ void ConfigJournal::quarantine_ram() noexcept {
 
 void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
   last_now_ms_ = now_ms;
-  if (reassembly_.active &&
-      now_ms - reassembly_.started_ms > kConfigReassemblyTimeoutMs) {
-    reassembly_.active = false;
-    ++stats_.reassembly_rejects;
-  }
-  if (recovery_reassembly_.active &&
-      now_ms - recovery_reassembly_.started_ms > kConfigReassemblyTimeoutMs) {
-    recovery_reassembly_.active = false;
-    ++stats_.reassembly_rejects;
-  }
   // Deferred terminal persist retry (storage fault at finish_transaction).
   if (txn_.active && txn_.pending_persist) {
     const ConfigPhase phase = txn_.pending_phase;
@@ -2237,8 +2116,6 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   phase_ = record.phase;
   txn_ = Transaction{};
   boot_ = Boot{};
-  reassembly_.active = false;
-  recovery_reassembly_.active = false;
   const Status adopted = adopt_record(record);
   if (!adopted) return adopted;
   // The adopted survivor's provider state must be re-issued for THIS boot:

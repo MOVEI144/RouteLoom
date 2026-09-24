@@ -354,6 +354,64 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
             .expect("control_status encode");
             out.view().to_vec()
         }
+        "control_trust_status_query" => {
+            trust_status_query_encode(
+                &TrustStatusQuery {
+                    nonce: arr16(fields, "nonce_hex"),
+                },
+                &mut out,
+            )
+            .expect("control_trust_status_query encode");
+            out.view().to_vec()
+        }
+        "control_trust_status" => {
+            trust_status_encode(
+                &TrustStatus {
+                    nonce_echo: arr16(fields, "nonce_echo_hex"),
+                    store_epoch: u64_field(fields, "store_epoch") as u32,
+                    min_authority_generation: u64_field(fields, "min_authority_generation") as u32,
+                    network: u64_field(fields, "network"),
+                    image_fingerprint: arr32(fields, "image_fingerprint_hex"),
+                    anchor_count: u64_field(fields, "anchor_count") as u8,
+                    key_count: u64_field(fields, "key_count") as u8,
+                    revocation_count: u64_field(fields, "revocation_count") as u8,
+                    flags: u64_field(fields, "flags") as u8,
+                },
+                &mut out,
+            )
+            .expect("control_trust_status encode");
+            out.view().to_vec()
+        }
+        "control_recovery_info_query" => {
+            recovery_info_query_encode(
+                &RecoveryInfoQuery {
+                    config_namespace: u64_field(fields, "config_namespace") as u16,
+                    nonce: arr16(fields, "nonce_hex"),
+                },
+                &mut out,
+            )
+            .expect("control_recovery_info_query encode");
+            out.view().to_vec()
+        }
+        "control_recovery_info" => {
+            recovery_info_encode(
+                &RecoveryInfo {
+                    config_namespace: u64_field(fields, "config_namespace") as u16,
+                    schema: u64_field(fields, "schema") as u16,
+                    nonce_echo: arr16(fields, "nonce_echo_hex"),
+                    network: u64_field(fields, "network"),
+                    store_floor: u64_field(fields, "store_floor") as u32,
+                    decision_floor: u64_field(fields, "decision_floor"),
+                    flags: u64_field(fields, "flags") as u8,
+                    recovery_version: u64_field(fields, "recovery_version") as u8,
+                    profile_bits: u64_field(fields, "profile_bits") as u32,
+                    snapshot_hash: arr32(fields, "snapshot_hash_hex"),
+                },
+                &mut out,
+            )
+            .expect("control_recovery_info encode");
+            out.view().to_vec()
+        }
         "config_command" => {
             let mut raw = Vec::new();
             config_command_encode(
@@ -445,6 +503,18 @@ fn decode_vector(codec: &str, encoded: &[u8]) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| e.to_string()),
         "control_status" => control_status_decode(encoded)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        "control_trust_status_query" => trust_status_query_decode(encoded)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        "control_trust_status" => trust_status_decode(encoded)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        "control_recovery_info_query" => recovery_info_query_decode(encoded)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        "control_recovery_info" => recovery_info_decode(encoded)
             .map(|_| ())
             .map_err(|e| e.to_string()),
         "config_command" => config_command_decode(encoded)

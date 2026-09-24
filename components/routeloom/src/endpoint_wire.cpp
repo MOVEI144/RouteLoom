@@ -750,6 +750,218 @@ Status control_status_decode(const ByteView encoded, ControlStatus& out) noexcep
   return Status::success();
 }
 
+Status trust_status_query_encode(const TrustStatusQuery& payload,
+                                 EncodedServicePayload& out) noexcept {
+  if (all_zero(ByteView{payload.nonce.data(), payload.nonce.size()})) {
+    return invalid("trust query nonce must be nonzero");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(5));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce.data(), payload.nonce.size()}));
+#undef RL_WRITE
+  if (writer.size() != kTrustStatusQuerySize) {
+    return Status::error(StatusCode::InternalError, "trust query size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status trust_status_query_decode(const ByteView encoded, TrustStatusQuery& out) noexcept {
+  if (encoded.size != kTrustStatusQuerySize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+  std::uint16_t reserved = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 5));
+  RL_READ(reader.read_u16(reserved));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce.data(), out.nonce.size()}));
+#undef RL_READ
+  if (reserved != 0 ||
+      all_zero(ByteView{out.nonce.data(), out.nonce.size()})) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status trust_status_encode(const TrustStatus& payload,
+                           EncodedServicePayload& out) noexcept {
+  if (all_zero(ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()})) {
+    return invalid("trust status nonce echo must be nonzero");
+  }
+  if ((payload.flags & ~kTrustStatusFlagMask) != 0) {
+    return invalid("trust status flags out of range");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(6));
+  RL_WRITE(writer.write_u16(0));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()}));
+  RL_WRITE(writer.write_u32(payload.store_epoch));
+  RL_WRITE(writer.write_u32(payload.min_authority_generation));
+  RL_WRITE(writer.write_u64(payload.network));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.image_fingerprint.data(), payload.image_fingerprint.size()}));
+  RL_WRITE(writer.write_u8(payload.anchor_count));
+  RL_WRITE(writer.write_u8(payload.key_count));
+  RL_WRITE(writer.write_u8(payload.revocation_count));
+  RL_WRITE(writer.write_u8(payload.flags));
+#undef RL_WRITE
+  if (writer.size() != kTrustStatusSize) {
+    return Status::error(StatusCode::InternalError, "trust status size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status trust_status_decode(const ByteView encoded, TrustStatus& out) noexcept {
+  if (encoded.size != kTrustStatusSize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+  std::uint16_t reserved = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 6));
+  RL_READ(reader.read_u16(reserved));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce_echo.data(), out.nonce_echo.size()}));
+  RL_READ(reader.read_u32(out.store_epoch));
+  RL_READ(reader.read_u32(out.min_authority_generation));
+  RL_READ(reader.read_u64(out.network));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.image_fingerprint.data(), out.image_fingerprint.size()}));
+  RL_READ(reader.read_u8(out.anchor_count));
+  RL_READ(reader.read_u8(out.key_count));
+  RL_READ(reader.read_u8(out.revocation_count));
+  RL_READ(reader.read_u8(out.flags));
+#undef RL_READ
+  if (reserved != 0 ||
+      all_zero(ByteView{out.nonce_echo.data(), out.nonce_echo.size()}) ||
+      (out.flags & ~kTrustStatusFlagMask) != 0) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status recovery_info_query_encode(const RecoveryInfoQuery& payload,
+                                  EncodedServicePayload& out) noexcept {
+  if (!config_namespace_valid(payload.config_namespace)) {
+    return invalid("control namespace is not registered");
+  }
+  if (all_zero(ByteView{payload.nonce.data(), payload.nonce.size()})) {
+    return invalid("recovery query nonce must be nonzero");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(7));
+  RL_WRITE(writer.write_u16(payload.config_namespace));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce.data(), payload.nonce.size()}));
+#undef RL_WRITE
+  if (writer.size() != kRecoveryInfoQuerySize) {
+    return Status::error(StatusCode::InternalError, "recovery query size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status recovery_info_query_decode(const ByteView encoded, RecoveryInfoQuery& out) noexcept {
+  if (encoded.size != kRecoveryInfoQuerySize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 7));
+  RL_READ(reader.read_u16(out.config_namespace));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce.data(), out.nonce.size()}));
+#undef RL_READ
+  if (!config_namespace_valid(out.config_namespace) ||
+      all_zero(ByteView{out.nonce.data(), out.nonce.size()})) {
+    return reject();
+  }
+  return Status::success();
+}
+
+Status recovery_info_encode(const RecoveryInfo& payload,
+                            EncodedServicePayload& out) noexcept {
+  if (!config_namespace_valid(payload.config_namespace)) {
+    return invalid("control namespace is not registered");
+  }
+  if (all_zero(ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()})) {
+    return invalid("recovery info nonce echo must be nonzero");
+  }
+  if ((payload.flags & ~kRecoveryInfoFlagMask) != 0) {
+    return invalid("recovery info flags out of range");
+  }
+  if (payload.recovery_version == 0) {
+    return invalid("recovery info version must be nonzero");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u8(kControlPayloadVersion));
+  RL_WRITE(writer.write_u8(8));
+  RL_WRITE(writer.write_u16(payload.config_namespace));
+  RL_WRITE(writer.write_u16(payload.schema));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.nonce_echo.data(), payload.nonce_echo.size()}));
+  RL_WRITE(writer.write_u64(payload.network));
+  RL_WRITE(writer.write_u32(payload.store_floor));
+  RL_WRITE(writer.write_u64(payload.decision_floor));
+  RL_WRITE(writer.write_u8(payload.flags));
+  RL_WRITE(writer.write_u8(payload.recovery_version));
+  RL_WRITE(writer.write_u32(payload.profile_bits));
+  RL_WRITE(writer.write_bytes(
+      ByteView{payload.snapshot_hash.data(), payload.snapshot_hash.size()}));
+#undef RL_WRITE
+  if (writer.size() != kRecoveryInfoSize) {
+    return Status::error(StatusCode::InternalError, "recovery info size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status recovery_info_decode(const ByteView encoded, RecoveryInfo& out) noexcept {
+  if (encoded.size != kRecoveryInfoSize) return reject();
+  ByteReader reader(encoded);
+  Status status;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(control_preamble_read(reader, 8));
+  RL_READ(reader.read_u16(out.config_namespace));
+  RL_READ(reader.read_u16(out.schema));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.nonce_echo.data(), out.nonce_echo.size()}));
+  RL_READ(reader.read_u64(out.network));
+  RL_READ(reader.read_u32(out.store_floor));
+  RL_READ(reader.read_u64(out.decision_floor));
+  RL_READ(reader.read_u8(out.flags));
+  RL_READ(reader.read_u8(out.recovery_version));
+  RL_READ(reader.read_u32(out.profile_bits));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.snapshot_hash.data(), out.snapshot_hash.size()}));
+#undef RL_READ
+  if (!config_namespace_valid(out.config_namespace) ||
+      all_zero(ByteView{out.nonce_echo.data(), out.nonce_echo.size()}) ||
+      (out.flags & ~kRecoveryInfoFlagMask) != 0 ||
+      out.recovery_version == 0) {
+    return reject();
+  }
+  return Status::success();
+}
+
 // --- RCC1 canonical config command ----------------------------------------------
 
 Status config_command_encode(const ConfigCommand& command,

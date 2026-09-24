@@ -199,6 +199,11 @@ enum class ControlObjectKind : std::uint8_t {
   // transfer (04 §4.7, 06 §6.3): separate from kind-3 intake so an impaired
   // journal can receive recovery evidence while refusing normal permits.
   ConfigRecovery = 4,
+  // Signed trust-manifest (RTM1) images ride the same carrier at the full
+  // kAuthenticatedObjectMax cap (04-provisioning-lifecycle §4.3.4): the
+  // target's single assembler dispatches kind-5 completions to
+  // trust_manifest_accept(), never to a journal.
+  TrustManifest = 5,
 };
 using ObjectHash = std::array<std::uint8_t, 32>;
 // Manifest layout (38B): version u8 | subtype u8 | kind u8 | flags u8 (=0) |
