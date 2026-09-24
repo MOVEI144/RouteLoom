@@ -25,6 +25,7 @@
 #include "routeloom/group.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/node_status.hpp"
+#include "routeloom/sdkv1_authority.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
@@ -86,6 +87,13 @@ constexpr std::uint32_t kCapGroupDeliveryV1 = 1u << 7;
 constexpr std::uint32_t kCapJoinRelayV1 = 1u << 8;
 constexpr std::uint32_t kCapJoinRelayV2 = 1u << 9;
 
+// authority_channel_v1 (G-SEC P5): the gateway relays authority-channel
+// carriers between member devices and the host's Site Authority — HostOps
+// 0x64-0x67. Defined here so both codecs share it; NOT advertised in
+// HelloAck until the bridge owner attaches the authority lane (PR4 wires
+// attach_authority and the capability bit together).
+constexpr std::uint32_t kCapAuthorityChannelV1 = 1u << 9;
+
 constexpr std::uint8_t kHostOpsSchema = 1;
 // The join relay family's own inner schema (#116 §5.2): only 0x60-0x63
 // speak it; every other family stays on schema 1.
@@ -119,6 +127,10 @@ enum class HostOpsSub : std::uint8_t {
   JoinRelayDown = 0x61,     // H→G request: relay object toward a proxy -> 0x63
   JoinRelayAbort = 0x62,    // H→G request -> 0x63, or G→H unsolicited notice
   JoinRelayResult = 0x63,   // G→H reply to 0x61/0x62: result/proxy/relay_id
+  AuthorityUp = 0x64,       // G→H unsolicited (request 0): carrier fragment
+  AuthorityDown = 0x65,     // H→G request: carrier fragment toward a device
+  SiteStateSet = 0x66,      // H→G request: WakeLocal/QueryLocal -> 0x67
+  SiteStateReport = 0x67,   // G→H reply to 0x65/0x66 (request id echoed)
 };
 
 // Typed outcome carried inside every host_ops response. Malformed inner
@@ -1028,5 +1040,98 @@ Status decode_join_relay_abort(ByteView inner, JoinRelayAbort& out) noexcept;
 Status encode_join_relay_result(const JoinRelayResult& result, MutableByteView out,
                                 std::size_t& written) noexcept;
 Status decode_join_relay_result(ByteView inner, JoinRelayResult& out) noexcept;
+
+// ---------------------------------------------------------------------------
+// Authority channel HostOps family (authority_channel_v1, G-SEC P5 design
+// §3.3). Same inner common form: schema:u8=1, sub:u8, payload_len:u16,
+// payload; big-endian, exact length. The gateway relays opaque carrier
+// bytes without decrypting them; 0x67 results are transport receipts, never
+// authority-decrypt or key-apply evidence.
+//
+// 0x64 AUTHORITY_UP (G→H, unsolicited, request id 0): one Fragment of a
+//   carrier from `device` (the mesh-verified origin, or the gateway itself
+//   for its own channel). hops 0..16; hops 0 only when device == gateway.
+// 0x65 AUTHORITY_DOWN (H→G): one Fragment toward `device`, or the gateway's
+//   own AuthorityClient when device == gateway. hops is always 0. Answered
+//   by 0x67.
+// 0x66 SITE_STATE_SET (H→G), payload 16 B: v:u8=1, action:u8 (1 WakeLocal,
+//   2 QueryLocal), reserved:u16=0, site_epoch:u32, rs_epoch_hint:u32,
+//   gk_epoch_hint:u32. Carries no keys and no install orders. Answered
+//   by 0x67.
+// 0x67 SITE_STATE_REPORT (G→H, under the 0x65/0x66 request id), payload
+//   28 B: v:u8=1, result:u8 (0 fragment queued, 1 object queued, 2 busy,
+//   3 unreachable, 4 unsupported, 5 conflict, 6 timeout), flags:u16 (bit0
+//   local-state-valid only), device:u64, transfer_id:u32, received_len:u16,
+//   reserved:u16=0, local_current:u32, local_next:u32.
+//
+// Fragment (20 B + data): device:u64, transfer_id:u32 (nonzero transport
+// token; R1/R2/R3 reuse it as the exchange id), kind:u8 (the
+// AuthorityCarrierKind 1..5), hops:u8, total:u16, offset:u16, length:u16,
+// data[length]. kind fixes total exactly (R1 60, R2 52/12, R3 16, Wake 8)
+// except Envelope (28..2048); offset rides the 960-byte grid; length is at
+// most 960 and middle fragments are full. With the inner head every
+// fragment fits the 1024-byte USB queue slot.
+constexpr std::size_t kAuthorityFragmentHead = 20;
+constexpr std::size_t kAuthorityFragmentDataMax = 960;
+constexpr std::size_t kAuthorityFragmentTotalMax = 2048;
+constexpr std::size_t kAuthorityFragmentMax = kAuthorityFragmentHead + kAuthorityFragmentDataMax;
+constexpr std::uint8_t kAuthorityHopsMax = 16;
+constexpr std::size_t kSiteStateSetPayload = 16;
+constexpr std::size_t kSiteStateReportPayload = 28;
+
+enum class SiteStateAction : std::uint8_t {
+  WakeLocal = 1,
+  QueryLocal = 2,
+};
+
+enum class SiteStateResult : std::uint8_t {
+  FragmentQueued = 0,
+  ObjectQueued = 1,
+  Busy = 2,
+  Unreachable = 3,
+  Unsupported = 4,
+  Conflict = 5,
+  Timeout = 6,
+};
+
+struct AuthorityFragment {
+  NodeId device{kInvalidNodeId};
+  std::uint32_t transfer_id{0};
+  sdkv1::AuthorityCarrierKind kind{sdkv1::AuthorityCarrierKind::Envelope};
+  std::uint8_t hops{0};
+  std::uint16_t total{0};
+  std::uint16_t offset{0};
+  ByteView data{};  // borrows `inner` (decode) or caller bytes (encode)
+};
+
+struct SiteStateSet {
+  SiteStateAction action{SiteStateAction::WakeLocal};
+  std::uint32_t site_epoch{0};
+  std::uint32_t rs_epoch_hint{0};
+  std::uint32_t gk_epoch_hint{0};
+};
+
+struct SiteStateReport {
+  SiteStateResult result{SiteStateResult::FragmentQueued};
+  bool local_state_valid{false};
+  NodeId device{kInvalidNodeId};
+  std::uint32_t transfer_id{0};
+  std::uint16_t received_len{0};
+  std::uint32_t local_current{0};
+  std::uint32_t local_next{0};
+};
+
+Status encode_authority_up(const AuthorityFragment& fragment, MutableByteView out,
+                           std::size_t& written) noexcept;
+Status decode_authority_up(ByteView inner, AuthorityFragment& out) noexcept;
+Status encode_authority_down(const AuthorityFragment& fragment, MutableByteView out,
+                             std::size_t& written) noexcept;
+Status decode_authority_down(ByteView inner, AuthorityFragment& out) noexcept;
+Status encode_site_state_set(const SiteStateSet& set, MutableByteView out,
+                             std::size_t& written) noexcept;
+Status decode_site_state_set(ByteView inner, SiteStateSet& out) noexcept;
+Status encode_site_state_report(const SiteStateReport& report, MutableByteView out,
+                                std::size_t& written) noexcept;
+Status decode_site_state_report(ByteView inner, SiteStateReport& out) noexcept;
 
 }  // namespace routeloom::usb

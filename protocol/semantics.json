@@ -265,6 +265,17 @@
       "usb": {"capability_bit": 9, "inner_schema": 2}
     }
   },
+  "authority_channel": {
+    "status": "EXPERIMENTAL codecs + endpoint/responder state machines (sdk-v1 G-SEC P5 PR1); not wired into firmware or the daemon",
+    "envelope": {"version": 1, "types": {"JOIN_CONFIRM": 1, "GROUP_KEY_UPDATE": 2, "GROUP_KEY_ACTIVATE": 3, "GROUP_KEY_PULL": 4}, "header_bytes": 12, "min_bytes": 28, "max_bytes": 2048, "aead": "AES-GCM-128", "gk_id_label": "RouteLoom/v1/gk-id"},
+    "carrier_kinds": {"R1": 1, "R2": 2, "R3": 3, "ENVELOPE": 4, "WAKE": 5},
+    "fragment": {"header_bytes": 20, "data_max": 960, "grid": 960, "hops_max": 16},
+    "usb": {
+      "capability_bit": 9,
+      "advertised": false,
+      "subcommands": {"AUTHORITY_UP": 100, "AUTHORITY_DOWN": 101, "SITE_STATE_SET": 102, "SITE_STATE_REPORT": 103}
+    }
+  },
   "max_espnow_body_bytes": 250,
   "max_normal_payload_bytes": 128,
   "counter_independent_of_message_id": true,

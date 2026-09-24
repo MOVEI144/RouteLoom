@@ -47,7 +47,7 @@ jobs:
             echo "commit: $(git rev-parse HEAD)"
             echo "contents: portable C++ core (components/), tests/,"
             echo "  vendored micro-ecc, libedhoc, zcbor and the TF-PSA-Crypto"
-            echo "  AES/CCM subset (pins in components/routeloom/third_party/"
+            echo "  AES/CCM/GCM subset (pins in components/routeloom/third_party/"
             echo "  VENDORED.json), protocol golden vectors, docs,"
             echo "  license texts. Excludes host/ and firmware/."
             echo "git: $(git --version)"

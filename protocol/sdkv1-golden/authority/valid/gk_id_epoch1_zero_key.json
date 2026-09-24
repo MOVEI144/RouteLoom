@@ -1,0 +1,10 @@
+{
+  "codec": "gk_id",
+  "epoch": 1,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "gk_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "gk_id_hex": "1b0eecc47d88b4404b33515cb6078812319b3c7957b80337aaaf75e62d4b6584",
+  "name": "gk_id_epoch1_zero_key",
+  "network": 30233267213
+}

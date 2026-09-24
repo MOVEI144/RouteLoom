@@ -41,6 +41,9 @@ inline constexpr char kLabelResumeR2[] = "RouteLoom/v1/R2";
 inline constexpr char kLabelResumeR3[] = "RouteLoom/v1/R3";
 inline constexpr char kLabelResumeConfirm[] = "RouteLoom/v1/resume-confirm";
 inline constexpr char kLabelResumeKey[] = "RouteLoom/v1/resume-key";
+// Authority channel (03 §5.3, G-SEC P5): GK-id binds (network, epoch, GK)
+// for ACK key confirmation. Never a raw-GK export.
+inline constexpr char kLabelGkId[] = "RouteLoom/v1/gk-id";
 
 // EDHOC Exporter labels (private use, 03 §2.1). Consumed by P2; listed here so
 // the whole RouteLoom label space is frozen in one place.

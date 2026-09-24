@@ -1,0 +1,10 @@
+{
+  "codec": "gk_id",
+  "epoch": 11,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "gk_hex": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "gk_id_hex": "d873eccd12f184617fe3dc2644e7d15dbea1573d62d63bfc0204b1b36c199055",
+  "name": "gk_id_epoch11",
+  "network": 30233267213
+}

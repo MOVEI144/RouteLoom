@@ -431,6 +431,11 @@ pub enum ControlObjectKind {
     /// Scope-gateway-config §5.1: end-protected routed config permits ride
     /// the same object transfer; link-only kinds 1/2 keep their path.
     ConfigPermit = 3,
+    /// Kind 4 is unassigned, kind 5 is reserved for the P5 authority
+    /// envelope. P6 (04-removal-revocation.md §4): the content is the RRS1
+    /// COSE object bytes verbatim; the manifest hash proves reassembly
+    /// identity only, the SAK signature inside the object is the authority.
+    RevocationSet = 6,
 }
 
 #[derive(Clone, Debug)]
@@ -469,6 +474,7 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
         1 => ControlObjectKind::ChannelPlan,
         2 => ControlObjectKind::RecoverySnapshot,
         3 => ControlObjectKind::ConfigPermit,
+        6 => ControlObjectKind::RevocationSet,
         _ => return reject(),
     };
     let total_len = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));

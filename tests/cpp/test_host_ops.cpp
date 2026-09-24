@@ -4,11 +4,16 @@
 // UsbBridge integration (receipts, reconnect persistence, mesh-outcome
 // mapping, capability gating).
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
 #include <string>
 #include <set>
 #include <vector>
@@ -3311,6 +3316,286 @@ void test_bridge_group_refusals() {
 
 }  // namespace
 
+// Authority channel USB codecs (0x64-0x67, G-SEC P5 PR1): fragments and
+// site-state bodies byte-exact against protocol/sdkv1-golden/authority/,
+// plus the kind/total/grid rules the goldens only sample.
+using AuthorityFields = std::map<std::string, std::string>;
+
+AuthorityFields authority_parse_flat_json(const std::string& text) {
+  AuthorityFields fields;
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    const std::size_t key_begin = text.find('"', pos);
+    if (key_begin == std::string::npos) break;
+    const std::size_t key_end = text.find('"', key_begin + 1);
+    if (key_end == std::string::npos) break;
+    const std::size_t colon = text.find(':', key_end + 1);
+    if (colon == std::string::npos) break;
+    std::size_t cursor = colon + 1;
+    while (cursor < text.size() && std::isspace(static_cast<unsigned char>(text[cursor]))) ++cursor;
+    std::string value;
+    if (cursor < text.size() && text[cursor] == '"') {
+      const std::size_t value_end = text.find('"', cursor + 1);
+      if (value_end == std::string::npos) break;
+      value = text.substr(cursor + 1, value_end - cursor - 1);
+      pos = value_end + 1;
+    } else {
+      std::size_t value_end = cursor;
+      while (value_end < text.size() && std::isdigit(static_cast<unsigned char>(text[value_end]))) {
+        ++value_end;
+      }
+      value = text.substr(cursor, value_end - cursor);
+      pos = value_end;
+    }
+    fields[text.substr(key_begin + 1, key_end - key_begin - 1)] = value;
+  }
+  return fields;
+}
+
+std::vector<std::uint8_t> authority_hex(const AuthorityFields& f, const char* key) {
+  std::vector<std::uint8_t> out;
+  const auto it = f.find(key);
+  if (it == f.end() || it->second.size() % 2 != 0) {
+    std::fprintf(stderr, "missing/odd hex field %s\n", key);
+    ++failures;
+    return out;
+  }
+  for (std::size_t i = 0; i < it->second.size(); i += 2) {
+    out.push_back(static_cast<std::uint8_t>(std::stoul(it->second.substr(i, 2), nullptr, 16)));
+  }
+  return out;
+}
+
+std::uint64_t authority_u64(const AuthorityFields& f, const char* key) {
+  const auto it = f.find(key);
+  if (it == f.end() || it->second.empty()) {
+    std::fprintf(stderr, "missing integer field %s\n", key);
+    ++failures;
+    return 0;
+  }
+  return std::strtoull(it->second.c_str(), nullptr, 10);
+}
+
+void test_authority_usb_codecs() {
+#ifndef ROUTELOOM_SDKV1_GOLDEN_DIR
+  CHECK(false);  // the authority cases need the golden directory
+  return;
+#else
+  const auto dir = std::filesystem::path(ROUTELOOM_SDKV1_GOLDEN_DIR) / "authority";
+  int fragments = 0;
+  int sets = 0;
+  int reports = 0;
+  for (const char* sub : {"valid", "invalid"}) {
+    std::vector<std::filesystem::path> files;
+    for (const auto& e : std::filesystem::directory_iterator(dir / sub)) {
+      if (e.path().extension() == ".json") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    for (const auto& path : files) {
+      std::ifstream file(path);
+      std::stringstream buffer;
+      buffer << file.rdbuf();
+      const AuthorityFields f = authority_parse_flat_json(buffer.str());
+      const auto codec = f.find("codec");
+      if (codec == f.end()) continue;
+      if (codec->second == "authority_fragment" && f.at("expect") == "ok") continue;  // below
+      if (codec->second != "authority_fragment" && codec->second != "site_state_set" &&
+          codec->second != "site_state_report") {
+        continue;
+      }
+      const std::vector<std::uint8_t> inner = authority_hex(f, "inner_hex");
+      if (codec->second == "authority_fragment") {
+        // Invalid fragment (or a site-state negative, same codec tag).
+        AuthorityFragment up{};
+        AuthorityFragment down{};
+        const bool name_is_set = f.at("name").find("site_state") != std::string::npos;
+        if (name_is_set) continue;  // handled with the site-state negatives
+        CHECK(!decode_authority_up(ByteView{inner.data(), inner.size()}, up));
+        CHECK(!decode_authority_down(ByteView{inner.data(), inner.size()}, down));
+        ++fragments;
+      } else if (codec->second == "site_state_set" && f.at("expect") == "ok") {
+        SiteStateSet set{};
+        CHECK(decode_site_state_set(ByteView{inner.data(), inner.size()}, set));
+        CHECK(static_cast<int>(set.action) == static_cast<int>(authority_u64(f, "action")));
+        CHECK(set.site_epoch == authority_u64(f, "site_epoch"));
+        std::array<std::uint8_t, 64> encoded{};
+        std::size_t written = 0;
+        CHECK(encode_site_state_set(set, MutableByteView{encoded.data(), encoded.size()},
+                                    written));
+        CHECK(written == inner.size() &&
+              std::memcmp(encoded.data(), inner.data(), inner.size()) == 0);
+        ++sets;
+      } else if (codec->second == "site_state_report" && f.at("expect") == "ok") {
+        SiteStateReport report{};
+        CHECK(decode_site_state_report(ByteView{inner.data(), inner.size()}, report));
+        CHECK(static_cast<int>(report.result) == static_cast<int>(authority_u64(f, "result")));
+        CHECK(report.local_state_valid == (authority_u64(f, "flags") == 1));
+        CHECK(report.device == authority_u64(f, "device"));
+        CHECK(report.received_len == authority_u64(f, "received_len"));
+        std::array<std::uint8_t, 64> encoded{};
+        std::size_t written = 0;
+        CHECK(encode_site_state_report(report, MutableByteView{encoded.data(), encoded.size()},
+                                       written));
+        CHECK(written == inner.size() &&
+              std::memcmp(encoded.data(), inner.data(), inner.size()) == 0);
+        ++reports;
+      }
+    }
+  }
+  // Valid fragments, split by subcommand, with field checks and re-encode.
+  for (const char* sub : {"valid"}) {
+    std::vector<std::filesystem::path> files;
+    for (const auto& e : std::filesystem::directory_iterator(dir / sub)) {
+      if (e.path().extension() == ".json") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    for (const auto& path : files) {
+      std::ifstream file(path);
+      std::stringstream buffer;
+      buffer << file.rdbuf();
+      const AuthorityFields f = authority_parse_flat_json(buffer.str());
+      const auto codec = f.find("codec");
+      if (codec == f.end() || codec->second != "authority_fragment" ||
+          f.at("expect") != "ok") {
+        continue;
+      }
+      const std::vector<std::uint8_t> inner = authority_hex(f, "inner_hex");
+      const int sub_cmd = static_cast<int>(authority_u64(f, "sub"));
+      AuthorityFragment fragment{};
+      const bool up = (sub_cmd == 0x64);
+      if (up) {
+        CHECK(decode_authority_up(ByteView{inner.data(), inner.size()}, fragment));
+      } else {
+        CHECK(decode_authority_down(ByteView{inner.data(), inner.size()}, fragment));
+      }
+      CHECK(fragment.device == authority_u64(f, "device"));
+      CHECK(fragment.transfer_id == authority_u64(f, "transfer_id"));
+      CHECK(static_cast<int>(fragment.kind) == static_cast<int>(authority_u64(f, "kind")));
+      CHECK(fragment.hops == authority_u64(f, "hops"));
+      CHECK(fragment.total == authority_u64(f, "total"));
+      CHECK(fragment.offset == authority_u64(f, "offset"));
+      CHECK(fragment.data.size == authority_u64(f, "length"));
+      std::array<std::uint8_t, 1100> encoded{};
+      std::size_t written = 0;
+      if (up) {
+        CHECK(encode_authority_up(fragment, MutableByteView{encoded.data(), encoded.size()},
+                                  written));
+      } else {
+        CHECK(encode_authority_down(fragment, MutableByteView{encoded.data(), encoded.size()},
+                                    written));
+      }
+      CHECK(written == inner.size() &&
+            std::memcmp(encoded.data(), inner.data(), inner.size()) == 0);
+      ++fragments;
+    }
+  }
+  CHECK(fragments == 26);
+  CHECK(sets == 2);
+  CHECK(reports == 1);
+  // Site-state negatives: bad action/result/flags/reserved.
+  {
+    const std::vector<std::filesystem::path> files = [&]() {
+      std::vector<std::filesystem::path> out;
+      for (const auto& e : std::filesystem::directory_iterator(dir / "invalid")) {
+        if (e.path().extension() == ".json") out.push_back(e.path());
+      }
+      return out;
+    }();
+    int negatives = 0;
+    for (const auto& path : files) {
+      std::ifstream file(path);
+      std::stringstream buffer;
+      buffer << file.rdbuf();
+      const AuthorityFields f = authority_parse_flat_json(buffer.str());
+      if (f.at("name").find("site_state") == std::string::npos) continue;
+      const std::vector<std::uint8_t> inner = authority_hex(f, "inner_hex");
+      if (f.at("name").find("site_state_set") != std::string::npos) {
+        SiteStateSet set{};
+        CHECK(!decode_site_state_set(ByteView{inner.data(), inner.size()}, set));
+      } else {
+        SiteStateReport report{};
+        CHECK(!decode_site_state_report(ByteView{inner.data(), inner.size()}, report));
+      }
+      ++negatives;
+    }
+    CHECK(negatives == 4);
+  }
+#endif
+  // Kind/total rules beyond the golden sample.
+  {
+    std::array<std::uint8_t, 1100> scratch{};
+    std::array<std::uint8_t, 1100> encoded{};
+    for (std::size_t i = 0; i < scratch.size(); ++i) {
+      scratch[i] = static_cast<std::uint8_t>(i & 0xFF);
+    }
+    auto try_decode = [&](int kind, std::uint16_t total, std::uint16_t offset,
+                          std::uint16_t length) {
+      AuthorityFragment fragment{};
+      fragment.device = 0x101;
+      fragment.transfer_id = 7;
+      fragment.kind = static_cast<sdkv1::AuthorityCarrierKind>(kind);
+      fragment.hops = 1;
+      fragment.total = total;
+      fragment.offset = offset;
+      fragment.data = ByteView{scratch.data(), length};
+      std::size_t written = 0;
+      if (!encode_authority_up(fragment, MutableByteView{encoded.data(), encoded.size()},
+                               written)) {
+        return false;
+      }
+      AuthorityFragment back{};
+      return static_cast<bool>(
+          decode_authority_up(ByteView{encoded.data(), written}, back));
+    };
+    CHECK(try_decode(1, 60, 0, 60));    // R1 exact
+    CHECK(!try_decode(1, 61, 0, 61));   // R1 overlong
+    CHECK(try_decode(2, 52, 0, 52));    // R2 ok
+    CHECK(try_decode(2, 12, 0, 12));    // R2 hint
+    CHECK(!try_decode(2, 50, 0, 50));   // R2 neither
+    CHECK(try_decode(3, 16, 0, 16));    // R3 exact
+    CHECK(!try_decode(3, 15, 0, 15));   // R3 short
+    CHECK(try_decode(4, 28, 0, 28));    // smallest envelope
+    CHECK(!try_decode(4, 27, 0, 27));   // below the header+tag floor
+    CHECK(try_decode(4, 2048, 1920, 128));  // last of three full fragments
+    CHECK(try_decode(5, 8, 0, 8));      // Wake exact
+    CHECK(!try_decode(5, 9, 0, 9));     // Wake overlong
+    CHECK(!try_decode(6, 60, 0, 60));   // unknown kind
+    CHECK(!try_decode(4, 1920, 0, 900));  // short middle fragment
+    CHECK(try_decode(4, 1920, 960, 960));   // full middle: accepted
+    // A down fragment must carry hops 0; up allows the 0..16 range.
+    AuthorityFragment down{};
+    down.device = 0x101;
+    down.transfer_id = 7;
+    down.kind = sdkv1::AuthorityCarrierKind::R3;
+    down.hops = 0;
+    down.total = 16;
+    down.offset = 0;
+    down.data = ByteView{scratch.data(), 16};
+    std::size_t written = 0;
+    CHECK(encode_authority_down(down, MutableByteView{encoded.data(), encoded.size()}, written));
+    down.hops = 1;
+    CHECK(!encode_authority_down(down, MutableByteView{encoded.data(), encoded.size()}, written));
+    // Zero/invalid endpoints never encode.
+    down.hops = 0;
+    down.device = kInvalidNodeId;
+    CHECK(!encode_authority_down(down, MutableByteView{encoded.data(), encoded.size()}, written));
+    down.device = 0x101;
+    down.transfer_id = 0;
+    CHECK(!encode_authority_down(down, MutableByteView{encoded.data(), encoded.size()}, written));
+    // The largest legal fragment still fits the 1024-byte USB queue slot.
+    AuthorityFragment big{};
+    big.device = 0x101;
+    big.transfer_id = 9;
+    big.kind = sdkv1::AuthorityCarrierKind::Envelope;
+    big.hops = 16;
+    big.total = 2048;
+    big.offset = 0;
+    big.data = ByteView{scratch.data(), 960};
+    CHECK(encode_authority_up(big, MutableByteView{encoded.data(), encoded.size()}, written));
+    CHECK(written <= 1024);
+  }
+}
+
 int main() {
   test_boot_lease();
   test_submit_codec();
@@ -3353,6 +3638,7 @@ int main() {
   test_group_ops_codecs();
   test_bridge_group_send_and_final();
   test_bridge_group_refusals();
+  test_authority_usb_codecs();
   if (failures != 0) {
     std::fprintf(stderr, "%d host-ops checks failed\n", failures);
     return 1;

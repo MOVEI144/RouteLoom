@@ -112,14 +112,15 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
  "verdict":"allow","role":"endpoint","generation":1,"member_cert_serial":1,
  "operation_id":"op-0000000000000001","applied":"current_attempt"}
 // join.decide pending / deny → "state":"recorded"（"applied":"next_attempt"は期限後の決定）
-// membership.revoke
+// membership.revoke（直後の応答は"distribution":"pending"のまま。詳細はoperations.get）
 {"operation_id":"op-0000000000000002","state":"committed","device_id":"00a1000000001234",
  "generation":1,"rs_epoch":1,"gk_rotation":{"from":1,"to":2,"state":"staged"},
- "distribution":"not_implemented"}
-// operations.get op-…2
+ "distribution":"pending"}
+// operations.get op-…2（P6-1：snapshotの適用状況を返す）
 {"operation_id":"op-0000000000000002","kind":"revoke","device_id":"00a1000000001234","generation":1,
- "state":"committed","rs_epoch":1,
- "distribution":{"state":"not_implemented","reached":null,"members":0,"unknown":0},
+ "state":"distributing","rs_epoch":1,
+ "distribution":{"state":"distributing","applied":71,"retired":0,"unknown":25,"total":96,
+  "reached":71,"members":96},
  "gk_rotation":{"from":1,"to":2,"state":"staged"},"created_ms":1790000000030}
 // members.get
 {"member":{"device_id":"00a1000000001234","kid":"b3…","state":"member","generation":1,"role":"endpoint",
@@ -129,6 +130,8 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 ```
 
 エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`不一致・削除済みへのrevokeは`CONFLICT`、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
+
+**配布の進捗（P6-1 PR Aで実装）**：revokeの`operations.get`はcommit時のmember snapshotに対する適用状況を返す。top-level `state`は`committed`（配布開始前）→`distributing`（送信開始後）→`converged`（snapshotの`unknown`が0）。`distribution` objectは`state`（`pending`/`distributing`/`converged`、P6-1以前のoperationは`unknown`）、`applied`（context拘束つきApplied ACK済み）、`retired`（後続revokeで対象外になった割当）、`unknown`、`total`（`applied+retired+unknown`）、互換field `reached=applied`・`members=total`。送信・link ACK・ObjectAckは適用人数に含めない。**`converged`はRRS執行のsnapshot収束であり、本人の消去（`notice`、PR B）やGK更新完了（`gk_rotation`、PR D）とは別**——CLI（`operation-get`の素通し表示）・client（`routeloom_client::site::OperationProgress`）・TUI（Events tab）はいずれも`unknown`/nullを成功表示へ潰さない。配布transportはfake port（`set_rrs_transport`未設定時は送信が起きないので`pending`のまま進まず、`capabilities.get`の`distribution`は`rrs_no_transport`）：P4/P5の実adapterが入るまでproductionでは有効化しない。
 
 **イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`gk.rotated`・`cutover.progress`は対応する機能（P5・P6-2）が無いので出さない。
 
@@ -176,7 +179,7 @@ capability bit `kCapSiteAuthorityV1 = 1u << 6`（HelloAckのcapability digestに
 
 USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自身の参加は、USB上で同じEDHOC m1〜m4を0x40/0x41で直接運ぶ（proxy無し、`hops=0`）。KGuardのallowが必要なのは他の機器と同じ。
 
-**Resolved in implementation（P3-2）**：上の表のbit 6と0x40〜0x42はnode_status_v1が、0x50〜0x52とbit 7はgroup_delivery_v1が既に使っているため、参加中継は**capability bit 8（`kCapJoinRelayV1`）とHostOps 0x60 JOIN_RELAY_UP／0x61 JOIN_RELAY_DOWN／0x62 JOIN_RELAY_ABORT／0x63 JOIN_RELAY_RESULT**（0x61/0x62への応答）として実装した（形式は[02 §7.4](02-zero-touch-join.md)、共通vector `protocol/usb-golden/join-relay`、Rust `routeloom-protocol::join_relay`）。表の0x43〜0x46（P5）も同じsite-authority族の0x64〜0x67に置くことを推奨する（未実装）。bitは中継だけを表し、P5の機能は別bitで広告する。gateway自身の参加（`hops=0`）は未実装。
+**Resolved in implementation（P3-2）**：上の表のbit 6と0x40〜0x42はnode_status_v1が、0x50〜0x52とbit 7はgroup_delivery_v1が既に使っているため、参加中継は**capability bit 8（`kCapJoinRelayV1`）とHostOps 0x60 JOIN_RELAY_UP／0x61 JOIN_RELAY_DOWN／0x62 JOIN_RELAY_ABORT／0x63 JOIN_RELAY_RESULT**（0x61/0x62への応答）として実装した（形式は[02 §7.4](02-zero-touch-join.md)、共通vector `protocol/usb-golden/join-relay`、Rust `routeloom-protocol::join_relay`）。表の0x43〜0x46（P5）は同じsite-authority族の0x64 AUTHORITY_UP／0x65 AUTHORITY_DOWN／0x66 SITE_STATE_SET／0x67 SITE_STATE_REPORTとして実装した（G-SEC P5 PR1：capability bit 9 `kCapAuthorityChannelV1`、**未広告**。形式はP5設計書 §3.3、共通vector `protocol/sdkv1-golden/authority/`、C++ `sdkv1_authority.hpp`＋`usb_host_ops.hpp`、Rust `routeloom-keysched::authority`＋`routeloom-protocol::{authority,host_ops}`）。bitは中継だけを表し、P5の機能は別bitで広告する。gateway自身の参加（`hops=0`）は未実装。
 
 **Resolved in implementation（P3-2 #116）**：参加中継をv2化した（形式は[02 §7.5](02-zero-touch-join.md#75-wire-relay-v2p3-2-116)）。族は0x60〜0x63のままinner schemaを**2**に上げ、**capability bit 9（`kCapJoinRelayV2`）**で広告する。0x62／0x63は完全なRelayToken（両epoch付き）を運び、Okの0x63は完全な非0 tokenを必ず持つ。共通vectorは`protocol/usb-golden/join-relay-v2/`（codec＋20 step session、[README](../../../protocol/usb-golden/join-relay-v2/README.md)）で、C++ bridgeの再生とRustの復号がbyte一致する。hostの`RelayKey`は両epochを追加し、`RelayUp／Down`はphaseを明示する（P3-3のSiteServiceはphase 4だけ受理）。v1（bit 8・schema 1）へのfallbackは無い。
 
@@ -262,7 +265,7 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 |---|---|
 | KGuard未接続 | 参加要求はpending（`decision_timeout_ms`で）、`authority.error`は出さない。既存memberは影響なし |
 | host停止 | gatewayは0x40を送れず、proxyへ`authority_unreachable`。OFFERの`authority_reachable`を落とす |
-| USB再接続 | 新しいUSB sessionで0x45を再送し、gatewayのGK状態を一致させる |
+| USB再接続 | 新しいUSB sessionで0x66を再送し、gatewayのGK状態を一致させる |
 | 台帳・store失敗 | 参加はAuthorityBusy、revokeはエラー。成功へ変換しない |
 | 同じNodeIdで別kid（有効なmembership） | 別の機器として扱い`join.request`に`kid_conflict:true`。自動allowしない。revoke済みの行は競合にせず、明示allowで置換できる |
 | 決定済み要求への別key再allow | 承認した(kid, generation)がmemberとして有効なら保存済み応答（そのkeyにも記録）、失効・置換済みならCONFLICT。同一idempotency keyの再送は記録の保持範囲（最新1,024件）内で保存済み応答 |

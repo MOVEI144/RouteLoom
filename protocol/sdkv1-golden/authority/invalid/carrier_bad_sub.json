@@ -1,0 +1,9 @@
+{
+  "codec": "authority_carrier",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "head_hex": "0106010000000001",
+  "name": "carrier_bad_sub",
+  "note": "subtype 6 is not the authority carrier",
+  "reason": "bad_subtype"
+}

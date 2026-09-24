@@ -22,7 +22,7 @@
 | **P3 — 搬送とSite Authority** | | | |
 | P3-1 | RLD1 body v3（ZeroTouch DISCOVER/OFFER）、BootstrapAuth phase 4〜6、1024B組立object、admission・`semantics.json`更新、fuzz（**このbranchで実装済み**：[sdkv1_join_transport.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_transport.hpp)のcodec・有界object slot・admissionと機器端`ZtJoinerLink`、独立Python生成器`tools/gen_sdkv1_join_transport_vectors.py`の[共通vector](../../../protocol/sdkv1-golden/join-transport/README.md)、`fuzz_sdkv1_join`。証明書はkid参照＋Credential EAD（label 65541）、`edhoc::Session`のEAD hookでm1〜m4の実長を確認。firmware・MeshNode未配線。決めた細部は[02 §3・§5.4・§6](02-zero-touch-join.md)） | P2-3 | V1-J10, V1-J11 |
 | P3-2 | proxy中継（Wire 3/4/5/6のrelay object）、USB HostOps 0x40〜0x42、capability bit（**このbranchで実装済み**：`JoinProxy`・`JoinRelayGateway`（[sdkv1_join_relay.hpp](../../../components/routeloom/include/routeloom/sdkv1_join_relay.hpp)）、`UsbBridge::attach_join_relay`、Rust `routeloom-protocol::join_relay`、共通vector `protocol/usb-golden/join-relay`。USBは衝突回避で**0x60〜0x63・capability bit 8**（0x40〜0x42／bit 6はnode_status_v1、[02 §7.4](02-zero-touch-join.md)）。#116でWire relayとUSB参加中継を**v2**化（32B header＋両service epoch、18B chunk／reply、24B Query／Reply、RelayBook floor 128＋active 8、USB schema 2・capability bit 9、共通vector `protocol/sdkv1-golden/join-relay-v2`＋`protocol/usb-golden/join-relay-v2`、[02 §7.5](02-zero-touch-join.md)、[07 §4](07-host-api-tooling.md)）。relay portのMeshNode接続とgateway自身の参加は未実装） | P3-1 | V1-J02, V1-H08 |
-| P3-3 | `routeloom-host`のSite Authority service（store、EDHOC responder、台帳）、API1 `join.*`/`devices.discovered.*`/`members.*`/`site.status`、KGuard mock client（**このbranchで実装済み**：`--site-authority DIR`、pure RustのEDHOC responder `host/routeloom-edhoc`（RFC 9529 §3を両roleでbyte一致、libedhocとのmethod 0 join transcriptを両方向でbyte一致、[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)）、SQLite台帳（hash chain、MemberCert・DAMS・RRS1・GK・発見済み・参加要求）、判定engine、API1と`membership.revoke`、`routeloom-client::site`の`SiteAdmin`と`KGuardMock`。USB 0x60〜0x63への結線、authority channel（P5）、GKの配布・更新（P5）、RRS1の配布（P6）は未実装。証明書値渡しのEAD label 65541（P3-1で凍結）とDAMSのExporter context（P3-4で凍結）。機器側EDHOC arenaは2048Bに引き上げ済み（[07 §2.4](07-host-api-tooling.md)）） | P2-1, P3-2 | V1-J03, V1-J09, V1-H01〜H07 |
+| P3-3 | `routeloom-host`のSite Authority service（store、EDHOC responder、台帳）、API1 `join.*`/`devices.discovered.*`/`members.*`/`site.status`、KGuard mock client（**このbranchで実装済み**：`--site-authority DIR`、pure RustのEDHOC responder `host/routeloom-edhoc`（RFC 9529 §3を両roleでbyte一致、libedhocとのmethod 0 join transcriptを両方向でbyte一致、[protocol/edhoc-interop](../../../protocol/edhoc-interop/README.md)）、SQLite台帳（hash chain、MemberCert・DAMS・RRS1・GK・発見済み・参加要求）、判定engine、API1と`membership.revoke`、`routeloom-client::site`の`SiteAdmin`と`KGuardMock`。USB 0x60〜0x63への結線と、P5 PR 1で実装したauthority channel／GK機構のSite Authorityへの接続、P6 PR Aで実装したRRS1配布機構の実搬送への接続は未実装。証明書値渡しのEAD label 65541（P3-1で凍結）とDAMSのExporter context（P3-4で凍結）。機器側EDHOC arenaは2048Bに引き上げ済み（[07 §2.4](07-host-api-tooling.md)）） | P2-1, P3-2 | V1-J03, V1-J09, V1-H01〜H07 |
 | P3-4 | 機器のportable `Joiner` FSM、RLS1の耐久commit／Reconcile、重複現場の候補表を実装済み。二現場C++ simulator 53件とRust実Site Authorityへのlive E2E 4件でhost検証済み。MeshNode／firmware／USB daemon配線とHILはP4-2／P8-1へ残す。P3-5（RLRES1 ticket再試行）は無効、A2はfail closed（[02 §10.4](02-zero-touch-join.md)） | P3-1, P1-3 | V1-J01, V1-J04〜J07, V1-J13 |
 | P3-5 | pending ticketによる安価な再試行（任意） | P1-5, P3-3 | V1-J03 |
 | **P4 — セッションengine** | | | |
@@ -31,19 +31,19 @@
 | P4-3 | E2E EDHOC/RLRES1（routed bootstrap）、gatewayの対称鍵枠、APPLIED leaseをboot sessionへ | P4-2 | V1-F05, V1-F07 |
 | P4-4 | 開発ProviderをRAM context engineへ移行（RLRES1のRMS＝開発PSK）、旧`c*`/`f*`/`r*`を消す保守verb | P4-2 | V1-N01, V1-K10（更新） |
 | **P5 — group鍵** | | | |
-| P5-1 | authority channel（AuthorityEnvelope、USB 0x43〜0x45〔0x64〜0x67を推奨、02 §7.4〕）、GK保存・配布・更新・pull、GroupLink/GroupEnd、Member scope鍵をGKから導出 | P3-3, P4-3 | V1-K05〜K07, V1-K09, V1-K11 |
+| P5-1 | authority channel（AuthorityEnvelope、USB 0x64〜0x67）、GK保存・配布・更新・pull、GroupLink/GroupEnd、Member scope鍵をGKから導出（**PR 1でportable endpoint codec／有界client、Rust responder／鍵導出、USB HostOps codecと共通vectorを実装・host試験済み**。実搬送とSite Authorityへの配線は後続） | P3-3, P4-3 | V1-K05〜K07, V1-K09, V1-K11 |
 | P5-2 | broadcast経路広告（opt-in capability）。group delivery設計と同時にレビュー | P5-1 | V1-K08 |
 | **P6 — 削除** | | | |
-| P6-1 | RRS1の発行・gossip・執行、RemovalNotice、`membership.revoke`と段階表示 | P5-1 | V1-R01〜R07, V1-R09, V1-R10 |
+| P6-1 | RRS1の発行・gossip・執行、RemovalNotice、`membership.revoke`と段階表示（**PR Aでportable lifecycle／gossip／peer enforcementとRust配布状態・APIを実装・host試験済み**。実搬送への接続は後続） | P5-1 | V1-R01〜R07, V1-R09, V1-R10 |
 | P6-2 | site_epoch cutoverとGrantRenew | P6-1 | V1-R08 |
 | **P7 — 事務所tooling** | | | |
-| P7-1 | routeloom-provision：`DeviceCaSigner`、devcert、identity、`rlsec` NVS image。firmwareの保守verb（機器内鍵生成＋所持証明）（**このbranchで実装済み**：`sdkv1::{devca,pop,office,rlsec}`と`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、所持証明の検証、`nvs_partition_gen`用CSV。`rlsec`のNVS adapter（`sdkv1_blob_storage`＋ESP-IDF `nvs_sdkv1_store`）は4 storeともfirmwareに配線済み（[07 §6.2](07-host-api-tooling.md)）。firmwareの保守verb（USB consoleの`keygen`／`identity`、portable engine＋PoPのC++ codec・共通vector）はP7の残りで実装、[07 §6.1〜6.2](07-host-api-tooling.md)） | P1-2, P1-3 | V1-H09 |
+| P7-1 | routeloom-provision：`DeviceCaSigner`、devcert、identity、`rlsec` NVS image。firmwareの保守verb（機器内鍵生成＋所持証明）（**このbranchで実装済み**：`sdkv1::{devca,pop,office,rlsec}`と`routeloomctl provision-devca-keygen／pop-challenge／devcert／identity`、所持証明の検証、`nvs_partition_gen`用CSV。`rlsec`のNVS adapter（`sdkv1_blob_storage`＋ESP-IDF `nvs_sdkv1_store`）は4 storeともfirmwareに配線済み（[07 §6.2](07-host-api-tooling.md)）。firmwareの保守verb（USB consoleの`keygen`／`identity`、portable engine＋PoPのC++ codec・共通vector）も実装・host試験済みで実機未試験、[07 §6.1〜6.2](07-host-api-tooling.md)） | P1-2, P1-3 | V1-H09 |
 | P7-2 | `site-cert`コマンド、在庫出力（**このbranchで実装済み**：`sdkv1::siteca`と`routeloomctl provision-siteca-keygen／site-cert`、正式な在庫出力`inventory.json`。[07 §6.2](07-host-api-tooling.md)） | P7-1 | V1-H09 |
 | **P8 — 認定** | | | |
 | P8-1 | HIL：2現場（2 host）の重複配置、6台以上の一斉復電、削除のgossip、電源断行列 | 全部 | V1-J05, V1-F06, V1-N08, V1-R09 |
 | P8-2 | RouteLoom独自部分（RLRES1、EADの束縛、group鍵の使い方、RRS1、context id対応）の独立レビュー | P1〜P6 | — |
 
-P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3、P3-1、P3-2（firmware・MeshNode配線を除く）、P3-3（USB結線を除く）、P4-1、P7-1、P7-2はこのbranchに含まれる。
+P0は他と独立して先に出せる。P0-1／P0-2とP1-1〜P1-5、P2-1、P2-3、P3-1、P3-2（firmware・MeshNode配線を除く）、P3-3（USB結線を除く）、P4-1、P5 PR 1、P6 PR A、P7-1、P7-2は統合済み。
 
 ## 2. 試験計画
 
