@@ -37,6 +37,8 @@ using routeloom_test::TestSecurity;
 using routeloom_test::CapturingObserver;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::SimWorld;
 using routeloom_test::FrameSight;
 
@@ -59,6 +61,7 @@ struct Harness {
   std::map<NodeId, std::unique_ptr<TestSecurity>> sec;
   std::map<NodeId, std::unique_ptr<CapturingObserver>> obs;
   std::map<NodeId, std::unique_ptr<SimRadio>> radio;
+  std::map<NodeId, std::unique_ptr<SimReplyPort>> ports;
   std::map<NodeId, std::unique_ptr<MeshNode>> node;
   MonotonicMs now{0};
 
@@ -76,8 +79,11 @@ struct Harness {
     sec[id] = std::make_unique<TestSecurity>();
     obs[id] = std::make_unique<CapturingObserver>();
     radio[id] = std::make_unique<SimRadio>(net, id);
+    ports[id] = std::make_unique<SimReplyPort>(*radio[id], id, cfg.link_epoch);
     node[id] = std::make_unique<MeshNode>(cfg, *radio[id], *sec[id], *obs[id]);
+    node[id]->set_reply_peer_port(ports[id].get());
     net.register_node(id, node[id].get());
+    net.register_reply_port(id, ports[id].get());
     (void)node[id]->start(now);
     return node[id].get();
   }
@@ -142,7 +148,8 @@ wire::EncodedFrame craft_transit(TestSecurity& cipher, NodeId prev, NodeId relay
 
 void inject(Harness& h, NodeId receiver, NodeId peer,
             const wire::EncodedFrame& frame) {
-  h.at(receiver)->on_radio_receive(peer, frame.view(), RadioRxMetadata{-60},
+  h.at(receiver)->on_radio_receive(peer, frame.view(),
+                                   sim_rx_metadata(h.ports.at(receiver).get(), peer),
                                    h.now);
 }
 
@@ -491,10 +498,16 @@ void test_exchange_ratio_cost() {
   NodeConfig c2 = c1;
   c2.node = 2;
   c2.message_session = 102;
+  SimReplyPort port1(radio1, 1, c1.link_epoch);
+  SimReplyPort port2(radio2, 2, c2.link_epoch);
   MeshNode a(c1, radio1, sec1, obs1);
   MeshNode b(c2, radio2, sec2, obs2);
+  (void)a.set_reply_peer_port(&port1);
+  (void)b.set_reply_peer_port(&port2);
   net.register_node(1, &a);
   net.register_node(2, &b);
+  net.register_reply_port(1, &port1);
+  net.register_reply_port(2, &port2);
   net.connect(1, 2);
   MonotonicMs now = 0;
   a.start(now);
@@ -646,7 +659,8 @@ void test_sustained_busy_switches_route() {
     auto frame = craft_busy(cipher, busy_peer, 1, hint, i);
     w.at(1)->on_radio_receive(busy_peer,
                               ByteView{frame.bytes.data(), frame.size},
-                              RadioRxMetadata{-60}, w.now);
+                              sim_rx_metadata(w.net.reply_port(1), busy_peer),
+                              w.now);
     if (i == 4) {   // ~1.6s sustained — below the severe threshold
       MessageId m{};
       CHECK_OK(a->send(4, payload_view(), opts, w.now, m));
@@ -673,7 +687,8 @@ void test_sustained_busy_switches_route() {
   auto stale_frame = craft_busy(cipher, busy_peer, 1, stale, 100);
   w.at(1)->on_radio_receive(busy_peer,
                             ByteView{stale_frame.bytes.data(), stale_frame.size},
-                            RadioRxMetadata{-60}, w.now);
+                            sim_rx_metadata(w.net.reply_port(1), busy_peer),
+                            w.now);
   CHECK(a->congestion_stats().busy_stale == stale_before + 1);
   w.run(3500);
   CHECK(a->peer_busy_since(busy_peer) == 0);

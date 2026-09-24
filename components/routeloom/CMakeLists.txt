@@ -27,6 +27,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/peer_state.cpp
   src/power.cpp
   src/replay.cpp
+  src/reply_peer_leases.cpp
   src/rlcw1.cpp
   src/rlres1.cpp
   src/route_scale.cpp
