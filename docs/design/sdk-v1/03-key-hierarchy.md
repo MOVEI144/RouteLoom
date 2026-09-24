@@ -46,6 +46,8 @@ Site Authority ── GK_g（32B乱数、authority channelで配布、RLS1）
 | 32771 | DAMS | 32B | join exchangeのみ（本書で追加） |
 | 32772 | pending再試行秘密 | 32B | join pendingのticket再試行（本書で追加） |
 
+**join DAMSのcontext（P3-4で凍結の例外）**：§2.2の一般context形式とは別に、join EDHOC sessionのDAMSは専用の決定的CBOR配列`["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]`（version 1、purpose 4＝authority、各kidは32B bstr）をcontextとする。P3-3のSite Authorityが使っていた形をそのまま凍結したもので、`sdkv1_ead.hpp`の`dams_exporter_context`と`routeloom_join::dams_exporter_context`が`protocol/sdkv1-golden/dams/`のvectorでbyte一致する。
+
 ### 2.2 HKDFのinfo形式（RouteLoom独自、P1-4で凍結）
 
 `info = ASCII label || 0x00 || 固定幅BE fields`。labelはすべて`"RouteLoom/v1/<名前>"`。28B出力は`key16 || iv12`。この表は[key_schedule.hpp](../../../components/routeloom/include/routeloom/key_schedule.hpp)（C++）と`host/routeloom-keysched`（Rust）が実装し、独立したPython生成器`tools/gen_sdkv1_derivation_vectors.py`の出力`protocol/sdkv1-golden/derivations/`にbyte一致することをCIで検査する。変更はprotocol変更であり、vectorの再生成を伴う。

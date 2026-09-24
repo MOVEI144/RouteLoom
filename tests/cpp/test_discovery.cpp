@@ -186,14 +186,17 @@ struct Unit {
   Unit(DiscMedium& medium, const NodeId id, const std::uint8_t mac_tail,
        const NetworkId network, const std::uint32_t hint, const bool member,
        const std::uint32_t stale_reprobe_ms = 0,
-       const std::uint8_t stale_reprobe_attempts = 0)
+       const std::uint8_t stale_reprobe_attempts = 0,
+       const std::uint32_t jitter_max_ms = 0,
+       const std::uint32_t backoff_max_ms = 0)
       : mac(mac_of(mac_tail)),
         node(id),
         auth(security, 1),
         entropy(1000 + id),
         port(medium, mac),
         engine(make_config(id, mac, network, hint, stale_reprobe_ms,
-                           stale_reprobe_attempts),
+                           stale_reprobe_attempts, jitter_max_ms,
+                           backoff_max_ms),
                port, auth, hooks, entropy, observer) {
     hooks.is_member = member;
     medium.units.push_back(this);
@@ -202,7 +205,9 @@ struct Unit {
   static DiscoveryConfig make_config(
       const NodeId id, const MacAddress& mac, const NetworkId network,
       const std::uint32_t hint, const std::uint32_t stale_reprobe_ms = 0,
-      const std::uint8_t stale_reprobe_attempts = 0) {
+      const std::uint8_t stale_reprobe_attempts = 0,
+      const std::uint32_t jitter_max_ms = 0,
+      const std::uint32_t backoff_max_ms = 0) {
     DiscoveryConfig config{};
     config.node = id;
     config.mac = mac;
@@ -210,6 +215,11 @@ struct Unit {
     config.network_hint = hint;
     config.capability_bits = 1;
     config.probe_timeout_ms = 200;
+    // Deterministic harness: the requester DISCOVER must leave on the
+    // begin_discovery call, not a cold-start jitter draw (radio.md §13
+    // jitter is covered by its own test).
+    config.cold_start_jitter_max_ms = jitter_max_ms;
+    if (backoff_max_ms != 0) config.backoff_max_ms = backoff_max_ms;
     if (stale_reprobe_ms != 0) config.stale_reprobe_ms = stale_reprobe_ms;
     if (stale_reprobe_attempts != 0) {
       config.stale_reprobe_attempts = stale_reprobe_attempts;
@@ -285,10 +295,12 @@ struct DiscWorld {
   Unit& add(const NodeId id, const std::uint8_t mac_tail, const bool member,
             const std::uint32_t hint = 0xC0FFEE, const NetworkId network = 7,
             const std::uint32_t stale_reprobe_ms = 0,
-            const std::uint8_t stale_reprobe_attempts = 0) {
-    units.push_back(std::make_unique<Unit>(medium, id, mac_tail, network,
-                                         hint, member, stale_reprobe_ms,
-                                         stale_reprobe_attempts));
+            const std::uint8_t stale_reprobe_attempts = 0,
+            const std::uint32_t jitter_max_ms = 0,
+            const std::uint32_t backoff_max_ms = 0) {
+    units.push_back(std::make_unique<Unit>(
+        medium, id, mac_tail, network, hint, member, stale_reprobe_ms,
+        stale_reprobe_attempts, jitter_max_ms, backoff_max_ms));
     return *units.back();
   }
   void start_all() {
@@ -1227,10 +1239,11 @@ void test_stranded_rediscovery_rebinds() {
   CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Bound);
   CHECK(a.observer.has("REDISCOVERY"));
   // The stranded schedule stays bounded: consecutive DISCOVERs are spaced
-  // by at least the backoff base, never per-poll.
+  // by at least the drawn retry floor (>=500ms per radio.md §7/§13), never
+  // per-poll.
   const auto discovers = a.port.times_of(FrameType::Discover, false);
   for (std::size_t i = 1; i < discovers.size(); ++i) {
-    CHECK(discovers[i] - discovers[i - 1] >= 900);
+    CHECK(discovers[i] - discovers[i - 1] >= 450);
   }
 
   // Restoring the unicast lane completes the bidirectional probe.
@@ -1318,6 +1331,120 @@ void test_forget_revoked_peer() {
   CHECK(a.engine.data_permitted(b.mac));
 }
 
+// radio.md §13 / radio-defaults.json discovery: the requester's first
+// DISCOVER spreads by a uniform [0, cold_start_jitter_max_ms) draw. The
+// harness replays the deterministic entropy stream to predict the draw:
+// begin_discovery fills the 16B nonce (2 u64 draws) before the jitter u64.
+void test_cold_start_jitter() {
+  // Contract-pinned defaults.
+  CHECK(DiscoveryConfig{}.cold_start_jitter_max_ms == 1000);
+  CHECK(DiscoveryConfig{}.backoff_min_ms == 500);
+  CHECK(DiscoveryConfig{}.backoff_initial_max_ms == 2000);
+  CHECK(DiscoveryConfig{}.backoff_max_ms == 60000);
+
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true, 0xC0FFEE, 7,
+                      /*stale_reprobe_ms=*/0, /*stale_reprobe_attempts=*/0,
+                      /*jitter_max_ms=*/1000);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+
+  routeloom_test::ScriptedEntropy replay(1000 + 1);
+  (void)replay.next_u64();
+  (void)replay.next_u64();
+  const std::uint32_t jitter =
+      static_cast<std::uint32_t>(replay.next_u64() % 1000);
+
+  CHECK_OK(a.engine.begin_discovery(0));
+  const auto early = a.port.times_of(FrameType::Discover, false);
+  if (jitter > 0) {
+    CHECK(early.empty());  // deferred — no lock-step broadcast
+  } else {
+    CHECK(early.size() == 1 && early.front() == 0);
+  }
+  world.run(3000);
+  const auto times = a.port.times_of(FrameType::Discover, false);
+  CHECK(!times.empty());
+  if (!times.empty() && jitter > 0) {
+    // First poll at or after the drawn deadline (5ms granularity).
+    CHECK(times.front() >= jitter && times.front() - jitter <= 4);
+  }
+  // The deferred exchange still completes the full handshake.
+  CHECK(a.engine.stats().auths_completed == 1);
+  CHECK(b.engine.stats().auths_completed == 1);
+}
+
+// radio.md §7/§13 / radio-defaults.json discovery.powered_retry_*: the first
+// retry waits a uniform [500, 2000] draw, each later failure doubles it, and
+// the wait clamps at backoff_max_ms — never a fixed base or per-poll storm.
+void test_retry_backoff_draw_double_cap() {
+  DiscWorld world;
+  // Cap override makes the doubling->clamp transition observable inside one
+  // attempt budget; defaults are pinned in test_cold_start_jitter.
+  Unit& a = world.add(1, 0xA1, /*member=*/true, 0xC0FFEE, 7,
+                      /*stale_reprobe_ms=*/0, /*stale_reprobe_attempts=*/0,
+                      /*jitter_max_ms=*/0, /*backoff_max_ms=*/3000);
+  world.start_all();
+  CHECK_OK(a.engine.begin_discovery(0));
+
+  // No responders: every attempt fails at its offer-window deadline.
+  // Entropy stream: 16B nonce (2 draws) then one u64 per retry draw; the
+  // deferred resend refills the nonce (2 draws) before each emission.
+  routeloom_test::ScriptedEntropy replay(1000 + 1);
+  (void)replay.next_u64();
+  (void)replay.next_u64();
+  const std::uint32_t draw =
+      500 + static_cast<std::uint32_t>(replay.next_u64() % 1501);
+  CHECK(draw >= 500 && draw <= 2000);
+
+  world.run(40000);
+  const auto times = a.port.times_of(FrameType::Discover, false);
+  CHECK(times.size() == 5);  // max_attempts, then DISCOVERY_FAILED
+  CHECK(a.observer.has("DISCOVERY_FAILED"));
+  if (times.size() == 5) {
+    // Each gap is the offer window (160ms) + one poll step past it (5ms) +
+    // the backoff + <=4ms of send-poll rounding.
+    const std::uint32_t waits[4] = {draw, std::min(2 * draw, 3000u),
+                                    std::min(4 * draw, 3000u),
+                                    std::min(8 * draw, 3000u)};
+    for (std::size_t i = 1; i < times.size(); ++i) {
+      const std::uint64_t gap = times[i] - times[i - 1];
+      const std::uint64_t expect = 165 + waits[i - 1];
+      CHECK(gap >= expect && gap <= expect + 4);
+    }
+    // With draw>375 the fourth wait clamps at the 3000ms cap.
+    if (8 * draw > 3000) CHECK(waits[3] == 3000);
+  }
+}
+
+// backoff_max_ms is a hard ceiling on the wait, not only the doubling
+// limit: a cap below the initial draw range must bound the FIRST retry
+// too. Config 600ms cap + [500,2000] draw range, forced draw at the top of
+// the range — every retry gap must sit at window + 600ms, never ~2s.
+void test_retry_backoff_draw_clamped_to_cap() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true, 0xC0FFEE, 7,
+                      /*stale_reprobe_ms=*/0, /*stale_reprobe_attempts=*/0,
+                      /*jitter_max_ms=*/0, /*backoff_max_ms=*/600);
+  world.start_all();
+  CHECK_OK(a.engine.begin_discovery(0));
+  // Force the first retry draw (u64 #3 after the 16B attempt nonce) to the
+  // top of the range: 500 + 1500 % 1501 = 2000, above the 600ms cap.
+  a.entropy.force_next(1500);
+
+  world.run(10000);
+  const auto times = a.port.times_of(FrameType::Discover, false);
+  CHECK(times.size() == 5);  // max_attempts, then DISCOVERY_FAILED
+  CHECK(a.observer.has("DISCOVERY_FAILED"));
+  for (std::size_t i = 1; i < times.size(); ++i) {
+    const std::uint64_t gap = times[i] - times[i - 1];
+    const std::uint64_t expect = 165 + 600;  // window + poll + clamped wait
+    CHECK(gap >= expect && gap <= expect + 4);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1346,6 +1473,9 @@ int main() {
   test_stranded_rediscovery_rebinds();
   test_send_failure_stats();
   test_forget_revoked_peer();
+  test_cold_start_jitter();
+  test_retry_backoff_draw_double_cap();
+  test_retry_backoff_draw_clamped_to_cap();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d discovery checks failed\n", failures);

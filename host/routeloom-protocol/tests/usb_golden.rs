@@ -6,7 +6,9 @@
 
 use routeloom_protocol::dev_session::*;
 use routeloom_protocol::host_ops::*;
-use routeloom_protocol::{encode_frame, Frame, StreamDecoder, MAX_DECODED_FRAME};
+use routeloom_protocol::{
+    encode_frame, CumulativeCredit, Frame, FrameKind, StreamDecoder, MAX_DECODED_FRAME,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -145,6 +147,9 @@ fn usb_session_vectors_are_byte_exact() {
     let mut d2h_counter = 0_u64;
     let mut h2d_counter = 0_u64;
     let mut saw_auth_ok = false;
+    // Replay the host's cumulative device->host grant notices through the
+    // shared credit model: stale/zero/mixed notices must absorb silently.
+    let mut tx_credit = CumulativeCredit::new(proof.session_id);
     for path in &frame_files {
         let vector = load(path);
         let name = field(&vector, "name").to_string();
@@ -213,6 +218,19 @@ fn usb_session_vectors_are_byte_exact() {
                 assert_eq!(counter, *expected, "{name} counter must be sequential");
                 *expected += 1;
                 assert_eq!(inner, unhex(field(&vector, "inner_hex")), "{name}");
+                // Host->device CREDIT_GRANT notices feed the shared credit
+                // model exactly as the device bridge applies them.
+                if direction == DIRECTION_HOST_TO_DEVICE
+                    && frame.kind == FrameKind::Credit
+                    && inner.len() == 17
+                    && inner[0] == CREDIT_GRANT
+                {
+                    let frames = u64::from_be_bytes(inner[1..9].try_into().unwrap());
+                    let bytes = u64::from_be_bytes(inner[9..17].try_into().unwrap());
+                    tx_credit
+                        .update(proof.session_id, frames, bytes)
+                        .unwrap_or_else(|_| panic!("{name}: grant notice must absorb"));
+                }
                 // Host-ops inners must parse under the shared codec with the
                 // scenario's expected outcomes.
                 match name.as_str() {
@@ -254,9 +272,11 @@ fn usb_session_vectors_are_byte_exact() {
     }
     assert!(saw_auth_ok);
     // The scenario exercises both directions of the protected channel:
-    // tx_grant, data_to_mesh, 7 host_ops requests, keepalive, close.
+    // tx_grant + 3 stale-grant notices, data_to_mesh, 7 host_ops requests,
+    // keepalive, close. Per-axis max leaves the grant at (20, 65536).
+    assert_eq!(tx_credit.available(), (20, 65536));
     assert!(d2h_counter >= 5);
-    assert_eq!(h2d_counter, 11);
+    assert_eq!(h2d_counter, 14);
 }
 
 #[test]

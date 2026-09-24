@@ -60,7 +60,11 @@ constexpr std::size_t kCommitEvidenceBodyMax =
 constexpr std::size_t kCommitEvidenceObjectMax = 1 + kCommitEvidenceBodyMax;
 constexpr std::uint32_t kAckTimeoutMs = 2000;
 constexpr std::uint8_t kSendAttemptsMax = 3;
-constexpr std::uint32_t kInboundExpiryMs = 15000;
+// Inbound control-object reassembly expires after 10s: the wire-protocol
+// management-object contract (docs/spec/wire-protocol.md §6) and
+// docs/reference/radio-defaults.json `control_reassembly_timeout_ms` pin
+// this value for the shared 2048B object exchange.
+constexpr std::uint32_t kInboundExpiryMs = 10000;
 constexpr std::uint32_t kPendingTtlMs = 60000;
 constexpr std::size_t kPumpFramesPerPoll = 4;
 constexpr std::uint32_t kDefaultTimesyncPeriodMs = 5000;
@@ -203,6 +207,7 @@ enum class ExchangeChannel : std::uint8_t {
 struct PlanExchangeConfig {
   std::uint32_t ack_timeout_ms{migration_wire_const::kAckTimeoutMs};
   std::uint8_t send_attempts_max{migration_wire_const::kSendAttemptsMax};
+  // Clamped to kInboundExpiryMs in the ctor — the wire-protocol §6 bound.
   std::uint32_t inbound_expiry_ms{migration_wire_const::kInboundExpiryMs};
 };
 

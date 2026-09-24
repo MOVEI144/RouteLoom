@@ -1,4 +1,5 @@
 #include <array>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,12 @@
 #include <string>
 #include <tuple>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "routeloom/admission.hpp"
 #include "routeloom/authority.hpp"
@@ -19,6 +26,7 @@
 #include "routeloom/routing.hpp"
 #include "routeloom/wire.hpp"
 
+#include "test_autonomy.hpp"
 #include "test_ledger.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
@@ -646,6 +654,297 @@ void test_delivery_terminal_eviction() {
   }
 }
 
+// End-protected transit DATA `prev` -> `relay` bound for `destination` —
+// the kind of inbound frame whose receive queues a HOP_ACCEPT on the
+// control lane (same construction as test_congestion's craft_transit).
+wire::EncodedFrame craft_transit_frame(TestSecurity& cipher, NodeId prev,
+                                       NodeId relay, NodeId origin,
+                                       NodeId destination, std::uint64_t seq,
+                                       ByteView payload) {
+  wire::PlainFrame plain{};
+  wire::Header& h = plain.header;
+  h.type = FrameType::Data;
+  h.flags = wire::kFlagEndProtected;
+  h.delivery = DeliveryClass::Reliable;
+  h.hop_remaining = kDefaultHopLimit;
+  h.network = 1;
+  h.origin = origin;
+  h.destination = destination;
+  h.previous_hop = prev;
+  h.next_hop = relay;
+  h.message = MessageId{42, seq};
+  h.remaining_deadline_ms = 5000;
+  h.original_lifetime_ms = 5000;
+  h.link_epoch = 1;
+  h.end_epoch = 1;
+  plain.payload_size = payload.size;
+  std::memcpy(plain.payload.data(), payload.data, payload.size);
+  wire::EncodedFrame out{};
+  CHECK_OK(wire::encode_new(plain, cipher, out));
+  return out;
+}
+
+void test_tx_result_dispatch() {
+  // Issue #60-3: a driver TX completion is staged, not handled inline —
+  // the owner task wakes on the event (EspNowRuntime::wait_for_event on
+  // the firmware queue), drains every staged event, and the following
+  // poll() submits the next frame. FakeRadioPort stamps each submission;
+  // OwnerPump models the firmware loop end to end — post -> wait -> drain
+  // -> poll — running the same shared wait gate as firmware
+  // (owner_pump.hpp).
+  TestSecurity security;
+  CapturingObserver observer;
+  routeloom_test::FakeRadioPort radio;
+  routeloom_test::OwnerPump pump;
+  NodeConfig config{1, 1, 901};
+  MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.start(0));
+  CHECK_OK(node.add_neighbor(2, 1, 0));
+  const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
+  const ByteView body{payload.data(), payload.size()};
+  const auto sight_of = [](const routeloom_test::FakeRadioPort::SentFrame& f,
+                           routeloom_test::FrameSight& sight) {
+    return routeloom_test::sight_frame(
+        ByteView{f.bytes.data(), f.bytes.size()}, sight);
+  };
+
+  // --- callback -> next-submit latency ------------------------------------
+  // Three queued sends, one pass at t=0 puts the first frame in the
+  // driver, then the owner task sleeps. A completion posted mid-sleep at
+  // t=1 wakes the task AT t=1 — not the 2 ms tick the fixed vTaskDelay
+  // loop waited out — and the drained pass submits the next frame with no
+  // tick tax, so the queue drains at the callback rate.
+  SendOptions best{};
+  best.delivery = DeliveryClass::BestEffort;
+  for (int i = 0; i < 3; ++i) {
+    MessageId id{};
+    CHECK_OK(node.send(2, body, best, 0, id));
+  }
+  radio.now_ms = 0;
+  pump.run_once(0, node);
+  CHECK(radio.sent.size() == 1);  // the boot advertisement is in flight
+  // With nothing staged, the wait still bounds idle at one poll period —
+  // the shared gate both sides execute (owner_pump.hpp).
+  CHECK(owner_wait_timeout_ms(kOwnerPollPeriodMs, false) == kOwnerPollPeriodMs);
+  CHECK(owner_wait_timeout_ms(kOwnerPollPeriodMs, true) == 0);
+  constexpr MonotonicMs kCompletedAt = 1;
+  pump.post_tx_result(radio.sent.back().token, true, kCompletedAt);
+  CHECK(pump.wake_at(0) == kCompletedAt);  // the event beats the tick
+  radio.now_ms = pump.wake_at(0);
+  pump.run_once(radio.now_ms, node);
+  CHECK(radio.sent.size() == 2);
+  CHECK(radio.sent.back().at_ms == kCompletedAt);  // submitted on the wake —
+                                                   // 0 ms of idle airtime
+  // Two more completions at t=1 chain the remaining sends at the same
+  // instant — the fixed-tick loop would have paid a tick per frame.
+  for (int i = 0; i < 2; ++i) {
+    pump.post_tx_result(radio.sent.back().token, true, kCompletedAt);
+    pump.run_once(kCompletedAt, node);
+  }
+  CHECK(radio.sent.size() == 4);
+  CHECK(radio.sent.back().at_ms == kCompletedAt);
+  routeloom_test::FrameSight sight{};
+  CHECK(sight_of(radio.sent.back(), sight) && sight.type == FrameType::Data);
+
+  // The pause mask still gates the pump's dispatch: a staged completion
+  // frees nothing while kDataDispatch is held.
+  {
+    MessageId paused_a{}, paused_b{};
+    CHECK_OK(node.send(2, body, best, 4, paused_a));
+    CHECK_OK(node.send(2, body, best, 4, paused_b));
+    CHECK_OK(node.set_pause(PauseReason::SurveyVisit, pause::kDataDispatch));
+    pump.post_tx_result(radio.sent.back().token, true, 4);
+    // Idle since t=1: the tick (t=3) beats the event's t=4 post — the task
+    // wakes, finds nothing staged, and sleeps again until the event lands.
+    radio.now_ms = pump.wake_at(1);
+    CHECK(radio.now_ms == 3);
+    pump.run_once(radio.now_ms, node);
+    radio.now_ms = pump.wake_at(radio.now_ms);
+    CHECK(radio.now_ms == 4);
+    pump.run_once(radio.now_ms, node);  // resolved, nothing dispatched
+    CHECK(radio.sent.size() == 4);
+    CHECK_OK(node.clear_pause(PauseReason::SurveyVisit));
+    radio.now_ms = 5;
+    pump.run_once(radio.now_ms, node);
+    CHECK(radio.sent.size() == 5 && radio.sent.back().at_ms == 5);
+  }
+
+  // --- staged completion skips the wait ------------------------------------
+  // The completion lands on a full driver queue AFTER the pass's entry
+  // check, so it is staged outside the queue (firmware: lost_node_tx_;
+  // here: post_staged_tx_result) while the queue itself drains empty.
+  // The wait still returns immediately — an empty queue must not idle a
+  // resolvable job — and the next pass submits with no gap.
+  // wait_for_event runs this same gate on the firmware side
+  // (owner_pump.hpp).
+  pump.post_staged_tx_result(radio.sent.back().token, true, 5);
+  radio.now_ms = pump.wake_at(5);
+  CHECK(radio.now_ms == 5);  // staged work never sleeps out the tick
+  pump.run_once(radio.now_ms, node);
+  CHECK(radio.sent.size() == 6);
+  CHECK(radio.sent.back().at_ms == 5);  // resolved + redispatched, no gap
+
+  // --- mixed TX/RX drain order --------------------------------------------
+  // A TX completion and an inbound transit DATA (which owes a HOP_ACCEPT)
+  // are both staged while the owner sleeps. The pass must drain BOTH and
+  // only then let poll() dispatch: the accept takes the control lane
+  // ahead of the queued DATA. Dispatching inside on_radio_tx_result
+  // would put the DATA on the air before the RX was even decoded, so a
+  // completion resolves the in-flight attempt only and the next
+  // submission always comes from poll() after the drain.
+  {
+    TestSecurity security2;
+    CapturingObserver observer2;
+    routeloom_test::FakeRadioPort radio2;
+    routeloom_test::OwnerPump pump2;
+    NodeConfig config2{1, 7, 902};
+    MeshNode node2(config2, radio2, security2, observer2);
+    CHECK_OK(node2.start(0));
+    CHECK_OK(node2.add_neighbor(2, 1, 0));
+    CHECK_OK(node2.add_neighbor(9, 1, 0));  // next hop for the transit forward
+    MessageId q1{}, q2{};
+    CHECK_OK(node2.send(2, body, best, 0, q1));
+    CHECK_OK(node2.send(2, body, best, 0, q2));
+    radio2.now_ms = 0;
+    pump2.run_once(0, node2);  // boot ad in flight; resolve it so DATA can go
+    pump2.post_tx_result(radio2.sent.back().token, true, 1);
+    radio2.now_ms = pump2.wake_at(0);
+    CHECK(radio2.now_ms == 1);
+    pump2.run_once(radio2.now_ms, node2);  // DATA #1 is with the driver now
+    CHECK(radio2.sent.back().at_ms == 1);
+    const std::size_t sent_before = radio2.sent.size();
+    // Both events land while the owner sleeps: completion first, then RX.
+    pump2.post_tx_result(radio2.sent.back().token, true, 2);
+    const wire::EncodedFrame inbound = craft_transit_frame(
+        security2, /*prev=*/2, /*relay=*/7, /*origin=*/2, /*destination=*/9,
+        /*seq=*/9001, body);
+    pump2.post_rx(2,
+                  std::vector<std::uint8_t>(
+                      inbound.view().data,
+                      inbound.view().data + inbound.view().size),
+                  -55, 2);
+    radio2.now_ms = pump2.wake_at(1);
+    CHECK(radio2.now_ms == 2);
+    pump2.run_once(radio2.now_ms, node2);
+    // First post-drain submission is the HOP_ACCEPT, not the queued DATA.
+    CHECK(radio2.sent.size() > sent_before);
+    routeloom_test::FrameSight first{};
+    CHECK(sight_of(radio2.sent[sent_before], first));
+    CHECK(first.type == FrameType::HopAccept);
+    // The queued DATA follows once the accept's own completion arrives.
+    pump2.post_tx_result(radio2.sent.back().token, true, 3);
+    radio2.now_ms = 3;
+    pump2.run_once(radio2.now_ms, node2);
+    CHECK(radio2.sent.size() > sent_before + 1);
+    routeloom_test::FrameSight second{};
+    CHECK(sight_of(radio2.sent[sent_before + 1], second));
+    CHECK(second.type == FrameType::Data);
+  }
+
+  // --- already-queued event never rewinds the clock -------------------------
+  // The completion lands at t=1 while the owner is still busy, so the
+  // wait starts at t=2 with the event already queued. Firmware's
+  // xQueuePeek returns immediately at t=2 — the wake must not rewind to
+  // the t=1 post time and under-measure the submit gap.
+  {
+    routeloom_test::OwnerPump pump3;
+    pump3.post_tx_result(7, true, 1);
+    CHECK(pump3.wake_at(2) == 2);
+  }
+}
+
+// Issue #60-3 over the public C ABI: rl_on_radio_tx_result resolves the
+// in-flight attempt ONLY — the next submission always comes from the
+// owner task's rl_poll, after any same-cycle RX/control work. A driver
+// completion callback that invoked the handler inline can therefore never
+// re-enter the driver's own send() — the staged hand-off the header now
+// documents is the supported path.
+struct CApiTxProbe {
+  CApiState security{};
+  int send_calls{0};
+  std::uint64_t last_token{0};
+};
+
+rl_status_code_t capi_probe_send(void* user, rl_node_id_t, uint64_t token,
+                                 const uint8_t*, size_t) {
+  auto* probe = static_cast<CApiTxProbe*>(user);
+  ++probe->send_calls;
+  probe->last_token = token;
+  return RL_STATUS_OK;
+}
+
+void test_c_api_tx_result_owner_task() {
+  CApiTxProbe probe{};
+  rl_node_config_t config{};
+  rl_node_config_init(&config);
+  config.network = 1;
+  config.node = 7;
+  config.message_session = 77;
+  const rl_radio_vtable_t radio{&probe, capi_probe_send, capi_radio_recover};
+  const rl_security_vtable_t security{&probe.security, capi_security_ready,
+                                      capi_next_counter, capi_seal, capi_open};
+  const rl_observer_vtable_t observer{};
+  std::vector<std::max_align_t> storage(
+      (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
+  rl_context_t* context = nullptr;
+  CHECK(rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
+                &radio, &security, &observer, &context) == RL_STATUS_OK);
+  CHECK(context != nullptr);
+  CHECK(rl_start(context, 0) == RL_STATUS_OK);
+  CHECK(rl_add_neighbor(context, 8, 1, 0) == RL_STATUS_OK);
+  rl_send_options_t options{};
+  rl_send_options_init(&options);
+  options.delivery = RL_DELIVERY_BEST_EFFORT;
+  const uint8_t payload[] = {1, 2};
+  for (int i = 0; i < 3; ++i) {
+    rl_message_id_t id{};
+    CHECK(rl_send(context, 8, payload, sizeof(payload), &options, 0, &id) ==
+          RL_STATUS_OK);
+  }
+  // Owner pump on the C ABI: each pass submits at most one frame, and only
+  // rl_poll submits — the completion handed to the owner task resolves the
+  // attempt without ever calling back into the driver.
+  int submitted = 0;
+  for (rl_monotonic_ms_t now = 0; now < 8 && submitted < 3; ++now) {
+    rl_poll(context, now);
+    if (probe.send_calls > submitted) {
+      submitted = probe.send_calls;
+      const int before = probe.send_calls;
+      rl_on_radio_tx_result(context, probe.last_token, true, now);
+      CHECK(probe.send_calls == before);
+    }
+  }
+  CHECK(submitted >= 3);
+  rl_deinit(context);
+}
+
+void test_sim_flush_truncation_aborts() {
+#ifdef _WIN32
+  return;  // the death check needs fork(); POSIX CI covers it
+#else
+  // A flush() that hits the dequeue bound with frames still queued must
+  // fail the test, not return a partial drain — the child overflows the
+  // bound with senderless frames (no nodes registered, so every dequeue
+  // drops without touching a MeshNode) and the parent expects SIGABRT.
+  const pid_t pid = fork();
+  CHECK(pid >= 0);
+  if (pid < 0) return;
+  if (pid == 0) {
+    SimNetwork net;
+    const std::uint8_t byte = 0;
+    const ByteView view{&byte, 1};
+    for (int i = 0; i < 10001; ++i) {
+      net.enqueue(1, 2, static_cast<std::uint64_t>(i), view);
+    }
+    net.flush(0);
+    _exit(42);  // returned past the bound: the check did not fire
+  }
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid);
+  CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -663,6 +962,9 @@ int main() {
   test_three_hop_delivery();
   test_diamond_repair();
   test_delivery_terminal_eviction();
+  test_tx_result_dispatch();
+  test_c_api_tx_result_owner_task();
+  test_sim_flush_truncation_aborts();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

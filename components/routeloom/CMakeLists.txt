@@ -33,6 +33,8 @@ set(ROUTELOOM_CORE_SOURCES
   src/routing.cpp
   src/sdkv1_blob_storage.cpp
   src/sdkv1_ead.cpp
+  src/sdkv1_join_candidates.cpp
+  src/sdkv1_join_handshake.cpp
   src/sdkv1_join_relay.cpp
   src/sdkv1_join_transport.cpp
   src/sdkv1_maintenance.cpp

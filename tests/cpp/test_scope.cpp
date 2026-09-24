@@ -301,6 +301,9 @@ struct ScopeUnit {
     config.network_hint = hint;
     config.capability_bits = 1;
     config.probe_timeout_ms = 200;
+    // Cold-start jitter would defer the first DISCOVER — these tests drive
+    // exchanges synchronously, so the boot draw is pinned to zero.
+    config.cold_start_jitter_max_ms = 0;
     config.scope_mode = mode;
     config.scope_provider = provider;
     config.scope = scope;

@@ -138,9 +138,10 @@ class StreamDecoder {
 
 // Session-direction cumulative grant accounting (spec section 3). Mirrors
 // CumulativeCredit in host/routeloom-protocol: a grant is a cumulative
-// ceiling, not a delta; max wins; duplicates never add; regression is
-// rejected. Consume once per frame before the first byte of its write;
-// partial-write continuation must not re-charge.
+// ceiling, not a delta; max wins per axis; duplicates and stale (reordered,
+// smaller) notices never add and never shrink the allowance. Consume once
+// per frame before the first byte of its write; partial-write continuation
+// must not re-charge.
 class CumulativeCredit {
  public:
   CumulativeCredit() noexcept = default;
@@ -151,16 +152,17 @@ class CumulativeCredit {
     grant_frames_ = grant_bytes_ = consumed_frames_ = consumed_bytes_ = 0;
   }
 
+  // Adopt a cumulative grant notice (usb-protocol.md §3: 認証済み同session
+  // 通知は各grantのmaxを採用). A stale or partially-stale notice is absorbed
+  // silently — it must not error, since in-order delivery of cumulative
+  // grants is not guaranteed over the serial link.
   Status update(std::uint64_t session, std::uint64_t grant_frames,
                 std::uint64_t grant_bytes) noexcept {
     if (session != session_) {
       return Status::error(StatusCode::ProtocolError, "CREDIT_SESSION_MISMATCH");
     }
-    if (grant_frames < grant_frames_ || grant_bytes < grant_bytes_) {
-      return Status::error(StatusCode::ProtocolError, "CREDIT_REGRESSION");
-    }
-    grant_frames_ = grant_frames;
-    grant_bytes_ = grant_bytes;
+    if (grant_frames > grant_frames_) grant_frames_ = grant_frames;
+    if (grant_bytes > grant_bytes_) grant_bytes_ = grant_bytes;
     return Status::success();
   }
 

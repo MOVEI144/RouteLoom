@@ -466,10 +466,9 @@ void UsbBridge::handle_credit(const std::uint64_t request, const ByteView inner,
         send_error(UsbErrorCode::ProtocolError, request, status.detail, now_ms);
         return;
       }
-      // Fresh permission: clear the zero-credit recovery ladder.
-      credit_queries_ = 0;
-      connection_stalled_ = false;
-      stall_reported_ = false;
+      // Grants never clear the zero-credit recovery ladder here — it is
+      // released only when a pending frame actually consumes credit in the
+      // pump. A single-axis or below-threshold grant still cannot send.
       break;
     }
     case kCreditQuery: {
@@ -1920,6 +1919,12 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
         note_credit_stall(now_ms);
         return;
       }
+      // A pending frame actually consumed credit — forward progress resumed.
+      // Clear the zero-credit recovery ladder. Grant notices alone must not
+      // clear it: a single-axis or below-threshold grant still cannot send.
+      credit_queries_ = 0;
+      connection_stalled_ = false;
+      stall_reported_ = false;
     }
     std::size_t wire_size = 0;
     const Status status =

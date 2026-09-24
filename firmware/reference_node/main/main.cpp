@@ -11,6 +11,7 @@
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -41,6 +42,7 @@
 #include "routeloom/espnow_power.hpp"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
+#include "routeloom/fail_policy.hpp"
 #include "routeloom/nvs_counter_store.hpp"
 #include "routeloom/power.hpp"
 #include "routeloom/psk_security.hpp"
@@ -157,24 +159,44 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 }
 
 // .rtc_noinit is the only RAM the boot path never re-initializes, so it is
-// what actually survives esp_restart (.rtc.data is re-copied from the image
-// on every non-deep-sleep reset). Power-on leaves it garbage, so a magic
-// word tells a real streak from random RAM. The streak bounds a persistent
-// fault's restart cadence (exponential backoff capped below) and is cleared
-// once a boot completes or on power-on.
-constexpr std::uint32_t kFailMagic = 0x524c4641;  // "RLFA"
-RTC_NOINIT_ATTR std::uint32_t s_fail_magic;
-RTC_NOINIT_ATTR std::uint32_t s_fail_streak;
+// what actually survives esp_restart and the deep-sleep wake used below
+// (.rtc.data is re-copied from the image on every non-deep-sleep reset).
+// Power-on leaves it garbage, so a magic word tells a real streak from
+// random RAM. The streak drives routeloom::fail_action — backoff restarts
+// first, a long deep sleep once the fault proves persistent. It clears
+// only on a stability proof — the runtime task starting on the always-on
+// build, an actually-entered coordinated sleep (the port's pre-sleep
+// hook) on the DEEP_SLEEP build — or on power-on, never mid-boot: a fault
+// late in the awake window must keep the count. The routeloom
+// fail_streak_* calls are its only writers.
+RTC_NOINIT_ATTR routeloom::FailStreak s_fail;
 
 [[noreturn]] void fail(const char* detail) {
-  const std::uint32_t streak = s_fail_streak;
-  s_fail_streak = streak + 1U;
-  const std::uint32_t shift = streak < 6U ? streak : 6U;
-  const std::uint32_t backoff_ms = 500U << shift;
+  const std::uint32_t streak = routeloom::fail_streak_consume(s_fail);
+  const routeloom::FailAction action = routeloom::fail_action(streak);
+  if (action.deep_sleep) {
+    // Persistent fault: every further restart is one more NVS session write
+    // with no recovery evidence. Stop the radio first — sleeping with the
+    // Wi-Fi driver live is the contract violation enter_sleep() guards
+    // against — then halt at deep-sleep current; the streak survives in
+    // .rtc_noinit so each timer wake keeps the same bounded cadence. The
+    // marker stays clear: this is a fault halt, not a coordinated sleep,
+    // so the DEEP_SLEEP profile's classify_boot() reports the wake as
+    // OtherReset rather than a resume.
+    const bool wake_armed = esp_sleep_enable_timer_wakeup(
+        static_cast<std::uint64_t>(action.delay_ms) * 1000ULL) == ESP_OK;
+    ESP_LOGE(kTag, "fatal: %s (streak=%lu, deep sleep %lu ms%s)", detail,
+             static_cast<unsigned long>(streak + 1U),
+             static_cast<unsigned long>(action.delay_ms),
+             wake_armed ? "" : "; wake timer arm FAILED");
+    (void)esp_wifi_stop();
+    vTaskDelay(pdMS_TO_TICKS(100));  // let the fatal line reach the UART
+    esp_deep_sleep_start();
+  }
   ESP_LOGE(kTag, "fatal: %s (streak=%lu, restart in %lu ms)", detail,
            static_cast<unsigned long>(streak + 1U),
-           static_cast<unsigned long>(backoff_ms));
-  vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+           static_cast<unsigned long>(action.delay_ms));
+  vTaskDelay(pdMS_TO_TICKS(action.delay_ms));
   esp_restart();
 }
 
@@ -209,6 +231,20 @@ class LogPowerEvents final : public routeloom::PowerEvents {
   }
   void on_diagnostic(const char* reason) noexcept override {
     ESP_LOGW(kTag, "power diagnostic: %s", reason);
+  }
+};
+
+// The boot-fault streak's only stability proof in this profile: an
+// actually-entered coordinated sleep. The port fires the hook after the
+// Wi-Fi driver is stopped, immediately before esp_deep_sleep_start() —
+// every fallible step of the awake window (boot, drain, image commit,
+// wake configuration) is already behind it, so a persistent late-boot
+// fault keeps the count and escalates to the bounded halt instead of
+// re-arming the fast restart every ~40 s cycle.
+class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
+ public:
+  void on_pre_sleep() noexcept override {
+    routeloom::fail_streak_pre_sleep(s_fail);
   }
 };
 
@@ -485,10 +521,7 @@ class RefNodeMaintenanceGate final : public routeloom::ConfigMaintenanceGate {
 extern "C" void app_main(void) {
   // A matching magic is the only thing that distinguishes a streak that
   // survived esp_restart from power-on garbage in .rtc_noinit.
-  if (s_fail_magic != kFailMagic) {
-    s_fail_magic = kFailMagic;
-    s_fail_streak = 0;
-  }
+  routeloom::fail_streak_boot(s_fail);
   // Identity, nonce reservations, replay state and message sessions live in
   // NVS. Never erase it automatically after a version/capacity error: that
   // would silently turn a recoverable storage problem into key/counter
@@ -1007,7 +1040,7 @@ extern "C" void app_main(void) {
     if (!config_verifier.ready()) {
       fail("COSE authority key is not a valid P-256 point");
     }
-    std::fill(pubkey.begin(), pubkey.end(), 0);
+    routeloom::secure_clear(pubkey);
   }
   ESP_LOGW(kTag, "config profile: RLCP1_COSE_ESP256 (asymmetric permit)");
 #else
@@ -1116,6 +1149,8 @@ extern "C" void app_main(void) {
   static NvsSleepStorage sleep_storage(sleep_store);
   static EspNowPowerPort power_port(runtime);
   static LogPowerEvents power_events;
+  static FailStreakClearOnSleep streak_clear;
+  power_port.set_pre_sleep_hook(&streak_clear);
   routeloom::PowerConfig power_config{};
   static routeloom::PowerCoordinator coordinator(
       power_config, runtime.node(), power_port, sleep_storage, power_events);
@@ -1127,9 +1162,12 @@ extern "C" void app_main(void) {
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
-  // Boot complete — the pump loop below is the node's main loop, so a
-  // later fatal is a runtime fault rather than a boot-loop streak.
-  s_fail_streak = 0;
+  // The streak decision at this event is to hold: the pump loop below
+  // still runs fallible work (drain, image commit, wake configuration,
+  // sleep_enter) and fail() must see the retained count. This profile's
+  // only clear is FailStreakClearOnSleep, fired at the point of no return
+  // inside enter_sleep().
+  routeloom::fail_streak_mark_started(s_fail);
 
   routeloom::SleepRequest request{};
   request.pending_policy = routeloom::SleepWorkPolicy::Fail;
@@ -1161,7 +1199,7 @@ extern "C" void app_main(void) {
       s_sleep_marker = 0;
       if (!status) fail(status.detail);
     }
-    vTaskDelay(pdMS_TO_TICKS(2));
+    runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
   }
   if (coordinator.state() != routeloom::PowerState::Sleeping) {
     fail("sleep deadline exceeded");
@@ -1170,7 +1208,7 @@ extern "C" void app_main(void) {
   status = runtime.start_task();
   if (!status) fail(status.detail);
   // Boot complete — the runtime task is the node's main loop.
-  s_fail_streak = 0;
+  routeloom::fail_streak_runtime_started(s_fail);
 #endif
   // The development PSK profile is pinned to SecurityProfile::Development;
   // this firmware can never report itself as production-secure.

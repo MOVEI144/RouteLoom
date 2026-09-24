@@ -102,6 +102,7 @@ jobs:
           python3 tools/gen_sdkv1_derivation_vectors.py
           python3 tools/gen_sdkv1_vectors.py
           python3 tools/gen_sdkv1_ead_vectors.py
+          python3 tools/gen_sdkv1_dams_vectors.py
           python3 tools/gen_sdkv1_join_transport_vectors.py
           git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join
           # git diff ignores untracked files: a generator that starts

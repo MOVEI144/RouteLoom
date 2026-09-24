@@ -16,24 +16,23 @@ The inputs are the SDK v1 join profile: an RLCW1 DevCert (test Device CA)
 and SiteCert (test Site CA) referenced by `kid` (SHA-256 of the cnf
 COSE_Key), EAD_1 JoinIntent, EAD_2 SiteOffer, EAD_3 JoinRequest, EAD_4
 JoinResult (Allow with a MemberCert and SitePackage), fixed ephemeral keys,
-and the DAMS Exporter output (label 32771, the provisional context of
+and the DAMS Exporter output (label 32771, the pinned context of
 `routeloom_join::dams_exporter_context`). Both ES256 implementations are
 deterministic (micro-ecc HMAC-DRBG nonce, RustCrypto RFC 6979), so every
 message is reproducible byte for byte.
 
 | file | EAD_2 / EAD_3 | libedhoc arena high water (Initiator / Responder) |
 |---|---|---|
-| [method0_join.txt](method0_join.txt) | join item **+ the certificate by value** (label `-65541`, provisional) | 1408 B / 1440 B |
+| [method0_join.txt](method0_join.txt) | join item **+ the certificate by value** (label `-65541`, pinned) | 1408 B / 1440 B |
 | [method0_join_kid_only.txt](method0_join_kid_only.txt) | join item only | 808 B / 840 B |
 
-**Finding for the device side.** The backend's EDHOC arena is 1280 B
-(`ROUTELOOM_EDHOC_ARENA_BYTES`). With the certificate carried by value — the
-resolution of the kcwt gap (02 §3) — libedhoc fails `process_message_2`
-(Initiator) and `process_message_3` (Responder) with
-`EDHOC_ERROR_NOT_ENOUGH_MEMORY` (-106). The same exchange passes byte for
-byte with a larger arena (measured with 8 KiB: 1440 B used), so the arena
-must grow to at least ~1.5 KiB before the device runs the join. That is a
-device-side change (P3-1/P2-2) and is not made here.
+**Finding for the device side (resolved in P3-1).** The backend's EDHOC
+arena was 1280 B (`ROUTELOOM_EDHOC_ARENA_BYTES`). With the certificate
+carried by value — the resolution of the kcwt gap (02 §3) — libedhoc failed
+`process_message_2` (Initiator) and `process_message_3` (Responder) with
+`EDHOC_ERROR_NOT_ENOUGH_MEMORY` (-106). The arena is 2048 B now, so both
+transcripts replay byte for byte on the device stack as well
+(`routeloom_edhoc_interop_replay*`).
 
 ## Who checks what
 

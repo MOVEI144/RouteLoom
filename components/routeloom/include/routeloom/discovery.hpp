@@ -46,7 +46,10 @@ constexpr std::size_t kTransientPeerSlots = 3;      // peer_partition.transient
 constexpr std::size_t kRegularPinsMax = 12;         // regular_pins_max
 constexpr std::size_t kReassemblySlots = 4;         // bootstrap_rx_slots
 constexpr std::size_t kBootstrapObjectMax = autonomy::kBootstrapObjectMax;  // 1024
-constexpr std::uint32_t kOfferSlots = 32;           // offer_slots
+// OFFER response-time spread: radio-defaults.json discovery.offer_slots x
+// offer_slot_ms = 160ms must stay under the 200ms channel dwell
+// (radio.md §7/§13 name the same 16 slots; check_docs.py offer_window).
+constexpr std::uint32_t kOfferSlots = 16;           // offer_slots
 constexpr std::uint32_t kOfferSlotMs = 10;          // offer_slot_ms
 constexpr MacAddress kBroadcastMac{{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
 }  // namespace discovery_const
@@ -331,10 +334,18 @@ struct DiscoveryConfig {
   std::uint32_t cookie_bucket_ms{2000};       // cookie time bucket
   std::uint32_t auth_timeout_ms{5000};        // bound on one exchange
   std::uint32_t offer_window_ms{discovery_const::kOfferSlots *
-                                discovery_const::kOfferSlotMs};  // 32 x 10ms = 320ms
+                                discovery_const::kOfferSlotMs};  // 16 x 10ms = 160ms
   std::uint32_t handshake_start_interval_ms{1000};  // 1/s, burst 1
-  std::uint32_t backoff_base_ms{1000};
-  std::uint32_t backoff_max_ms{16000};
+  // Requester re-discovery cadence (radio.md §7/§13,
+  // radio-defaults.json discovery.retry_*): a powered node's re-search
+  // starts from a uniform draw in [backoff_min_ms, backoff_initial_max_ms]
+  // and doubles toward backoff_max_ms. begin_discovery additionally
+  // defers the first DISCOVER of a fresh exchange by a uniform
+  // [0, cold_start_jitter_max_ms) so simultaneous boots decorrelate.
+  std::uint32_t cold_start_jitter_max_ms{1000};
+  std::uint32_t backoff_min_ms{500};
+  std::uint32_t backoff_initial_max_ms{2000};
+  std::uint32_t backoff_max_ms{60000};
   std::uint32_t probe_timeout_ms{2000};       // unanswered probe retry bound
   std::uint8_t max_attempts{5};
   // Stale re-confirmation (02 §9): a lapsed-lease record keeps resolving,
@@ -537,6 +548,10 @@ class NeighborDiscovery {
     MonotonicMs stage_deadline_ms{0};
     MonotonicMs discover_due_ms{0};
     std::uint8_t attempts{0};
+    // Next retry wait: drawn uniformly in [backoff_min_ms,
+    // backoff_initial_max_ms] on the first failure, then doubled toward
+    // backoff_max_ms (radio.md §7/§13). 0 = not yet drawn.
+    std::uint32_t retry_backoff_ms{0};
     bool transient_held{false};
     bool have_offer{false};
     // Scope context of the CURRENT attempt (02 §2.4): legacy attempts carry
@@ -680,6 +695,9 @@ class NeighborDiscovery {
   bool reserve_regular(Neighbor& neighbor) noexcept;
 
   bool next_u64(std::uint64_t& out) noexcept;  // false = entropy unavailable
+  // Uniform draw in [backoff_min_ms, backoff_initial_max_ms] for the first
+  // retry wait (radio.md §7/§13). False when entropy is unavailable.
+  bool draw_retry_backoff(std::uint32_t& out_ms) noexcept;
   std::uint32_t recent_discovers(MonotonicMs now_ms) const noexcept;
   void event(const char* reason, NodeId peer) noexcept {
     observer_.on_discovery_event(reason, peer);
@@ -737,8 +755,9 @@ class NeighborDiscovery {
   std::uint32_t next_probe_sequence_{1};
   MonotonicMs next_handshake_ms_{0};   // 1/s burst-1 token bucket
   // Stranded-node re-discovery (04 §9.2): armed when the last usable edge
-  // is gone but resolvable Stale records survive; backoff doubles
-  // backoff_base -> backoff_max between bounded begin_discovery runs.
+  // is gone but resolvable Stale records survive; backoff doubles from a
+  // [backoff_min, backoff_initial_max] draw to backoff_max between bounded
+  // begin_discovery runs (radio.md §7/§13).
   MonotonicMs next_rediscovery_ms_{0};
   std::uint32_t rediscovery_backoff_ms_{0};
   std::size_t transient_used_{0};
