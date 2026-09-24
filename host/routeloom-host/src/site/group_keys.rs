@@ -313,8 +313,10 @@ impl std::fmt::Debug for GroupKeyCommand {
     }
 }
 
-/// Sends GK commands on the authority channel (design §6.2; the transport
-/// trait PR1 implements). `channel_ready` runs under the authority lock, so
+/// Sends GK commands through an adapter to the authority channel (design
+/// §6.2). The channel's outbound carrier uses `AuthorityTransport`; this
+/// interface also checks the member's DAMS before selecting a command.
+/// `channel_ready` runs under the authority lock, so
 /// it must be a fast non-blocking read — implementations must never call
 /// back into the authority while holding their channel table. `send` runs
 /// with the authority lock released, but within the service's serialized

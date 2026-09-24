@@ -1,9 +1,11 @@
 //! `routeloomctl provision-devca-keygen | provision-pop-challenge |
-//! provision-devcert | provision-identity` — the SDK v1 office tooling of
-//! docs/design/sdk-v1/07 §6 (08 P7-1). Local operations like the other
-//! `provision-*` verbs: they never open the daemon socket and write only
-//! site-independent material (NodeId, device key, DevCert, Site CA
-//! anchors) — never a network id, site key or channel.
+//! provision-devcert | provision-identity | provision-siteca-keygen |
+//! site-cert` — the SDK v1 office tooling of docs/design/sdk-v1/07 §6 (08
+//! P7-1, P7-2). Local operations like the other `provision-*` verbs: they
+//! never open the daemon socket and write only site-independent material
+//! (NodeId, device key, DevCert, Site CA anchors) — never a network id,
+//! site key or channel. `site-cert` (HQ, when the site PC is set up) is the
+//! one site-bound exception: it binds a site_id to the site's SAK.
 //!
 //! Two key paths:
 //! - device-generated (default, 07 §6 steps 2-3): `provision-pop-challenge`
@@ -33,12 +35,16 @@ use routeloom_provision::sdkv1::identity::{
     identity_record_encode, AnchorKind, AnchorStatus, IdentityAnchor, IDENTITY_SEAL_COMMITTED,
 };
 use routeloom_provision::sdkv1::office::{
-    identity_build_injected, identity_bundle_json, inventory_json, IdentityPlan,
+    identity_build_injected, identity_bundle_json, inventory_file_json, inventory_json,
+    IdentityPlan,
 };
 use routeloom_provision::sdkv1::pop::{
     pop_challenge, pop_sign, pop_verify, POP_CHALLENGE_SIZE, POP_OBJECT_SIZE,
 };
 use routeloom_provision::sdkv1::rlsec::{rlsec_identity_readback, rlsec_identity_set};
+use routeloom_provision::sdkv1::siteca::{
+    sitecert_issue, FileSiteCaSigner, SiteCaSigner, SiteCertProfile, SITE_CA_CUSTODY_WARNING,
+};
 use routeloom_provision::signer::{
     generate_keypair, hex_decode_exact, hex_encode, write_private_file,
 };
@@ -75,7 +81,7 @@ pub fn provision_devca_keygen_command(args: &[String]) -> Result<(), DynError> {
     println!(
         "{{\"device_ca_id\":\"{id:016x}\",\"pubkey_hex\":\"{}\",\"key_file\":\"{}\"}}",
         hex_encode(&signer.pubkey()),
-        out.display()
+        json_path(&out)
     );
     Ok(())
 }
@@ -102,8 +108,9 @@ pub fn provision_pop_challenge_command(args: &[String]) -> Result<(), DynError> 
 /// `provision-devcert --ca-key <devca.key> --spec <identity-spec.json>
 /// --node <16hex> --serial <u32> --challenge <64hex> --pop <file>
 /// --out-dir <dir>` — verify the device's proof of possession for exactly
-/// this node and challenge, issue the DevCert, and write `devcert.cwt` and
-/// `identity-bundle.json` (no secret). Prints the inventory line.
+/// this node and challenge, issue the DevCert, and write `devcert.cwt`,
+/// `identity-bundle.json` (no secret) and `inventory.json`. Prints the
+/// inventory line.
 pub fn provision_devcert_command(args: &[String]) -> Result<(), DynError> {
     let mut opts = OfficeOptions::parse("provision-devcert", args, &["--challenge", "--pop"])?;
     let challenge_hex = opts.take("--challenge")?;
@@ -125,6 +132,10 @@ pub fn provision_devcert_command(args: &[String]) -> Result<(), DynError> {
         &opts.out_dir.join("identity-bundle.json"),
         bundle.as_bytes(),
     )?;
+    write_new(
+        &opts.out_dir.join("inventory.json"),
+        inventory_file_json(&devcert)?.as_bytes(),
+    )?;
     println!("{}", inventory_json(&devcert)?);
     Ok(())
 }
@@ -134,7 +145,8 @@ pub fn provision_devcert_command(args: &[String]) -> Result<(), DynError> {
 /// generated here, proof of possession made and checked like a device's,
 /// DevCert issued, RLI1 built and read back, and the `rlsec` NVS set
 /// written (`rlsec-nvs.csv` for `nvs_partition_gen.py`, the blob files and
-/// the `rlsec-set.json` descriptor). Prints the inventory line.
+/// the `rlsec-set.json` descriptor), plus `inventory.json`. Prints the
+/// inventory line.
 pub fn provision_identity_command(args: &[String]) -> Result<(), DynError> {
     let opts = OfficeOptions::parse("provision-identity", args, &[])?;
     eprintln!("{DEVICE_CA_CUSTODY_WARNING}");
@@ -158,6 +170,10 @@ pub fn provision_identity_command(args: &[String]) -> Result<(), DynError> {
             .create(&opts.out_dir)?;
     }
     write_new(&opts.out_dir.join("devcert.cwt"), &devcert)?;
+    write_new(
+        &opts.out_dir.join("inventory.json"),
+        inventory_file_json(&devcert)?.as_bytes(),
+    )?;
     write_private_file(
         &opts.out_dir.join("identity.rli1"),
         &identity_record_encode(&record, IDENTITY_SEAL_COMMITTED)?,
@@ -175,6 +191,121 @@ pub fn provision_identity_command(args: &[String]) -> Result<(), DynError> {
     )?;
     eprintln!("{INJECTED_KEY_WARNING}");
     println!("{}", inventory_json(&devcert)?);
+    Ok(())
+}
+
+/// `provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>`.
+pub fn provision_siteca_keygen_command(args: &[String]) -> Result<(), DynError> {
+    let mut id: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--site-ca-id" => id = Some(opt_value(&mut args, "--site-ca-id")?),
+            "--out" => out = Some(opt_value(&mut args, "--out")?),
+            other => return Err(format!("unknown provision-siteca-keygen option: {other}").into()),
+        }
+    }
+    let id = hex64(
+        "--site-ca-id",
+        &id.ok_or("provision-siteca-keygen requires --site-ca-id <16hex>")?,
+    )?;
+    if id == 0 || id == u64::MAX {
+        return Err("--site-ca-id must not be 0 or all-ones".into());
+    }
+    let out = PathBuf::from(out.ok_or("provision-siteca-keygen requires --out <path>")?);
+    let signer = FileSiteCaSigner::generate(id)?;
+    signer.save(&out)?;
+    eprintln!("{SITE_CA_CUSTODY_WARNING}");
+    println!(
+        "{{\"site_ca_id\":\"{id:016x}\",\"pubkey_hex\":\"{}\",\"key_file\":\"{}\"}}",
+        hex_encode(&signer.pubkey()),
+        json_path(&out)
+    );
+    Ok(())
+}
+
+/// `site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex>
+/// --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out
+/// <sitecert.cwt>` — HQ issues the SiteCert binding the site to its SAK
+/// (07 §6, P7-2). The SAK public half comes from the site PC out of band;
+/// the Site Authority refuses to start on a mismatch, so a wrong key here
+/// is useless rather than dangerous. Never overwrites the output.
+pub fn site_cert_command(args: &[String]) -> Result<(), DynError> {
+    let mut ca_key: Option<String> = None;
+    let mut site_id: Option<String> = None;
+    let mut sak_pubkey: Option<String> = None;
+    let mut network_low32: Option<String> = None;
+    let mut site_epoch: Option<String> = None;
+    let mut serial: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--ca-key" => ca_key = Some(opt_value(&mut args, "--ca-key")?),
+            "--site-id" => site_id = Some(opt_value(&mut args, "--site-id")?),
+            "--sak-pubkey" => sak_pubkey = Some(opt_value(&mut args, "--sak-pubkey")?),
+            "--network-low32" => network_low32 = Some(opt_value(&mut args, "--network-low32")?),
+            "--site-epoch" => site_epoch = Some(opt_value(&mut args, "--site-epoch")?),
+            "--serial" => serial = Some(opt_value(&mut args, "--serial")?),
+            "--out" => out = Some(opt_value(&mut args, "--out")?),
+            other => return Err(format!("unknown site-cert option: {other}").into()),
+        }
+    }
+    let site_id = hex64(
+        "--site-id",
+        &site_id.ok_or("site-cert requires --site-id <16hex>")?,
+    )?;
+    if site_id == 0 || site_id == u64::MAX {
+        return Err("--site-id must not be 0 or all-ones".into());
+    }
+    let sak_pubkey: [u8; 64] = hex_decode_exact(
+        &sak_pubkey.ok_or("site-cert requires --sak-pubkey <128hex>")?,
+        64,
+    )
+    .ok_or("--sak-pubkey must be 128 hex")?
+    .try_into()
+    .expect("64 bytes");
+    let low32_text = network_low32.ok_or("site-cert requires --network-low32 <8hex>")?;
+    if !is_hex(&low32_text, 8) {
+        return Err("--network-low32 must be 8 hex".into());
+    }
+    let network_low32 = u32::from_str_radix(&low32_text, 16).expect("8 hex");
+    if network_low32 == 0 {
+        return Err("--network-low32 must be nonzero".into());
+    }
+    let site_epoch: u32 = site_epoch
+        .ok_or("site-cert requires --site-epoch <u32>")?
+        .parse()
+        .map_err(|_| "--site-epoch must be a u32")?;
+    let serial: u32 = serial
+        .ok_or("site-cert requires --serial <u32>")?
+        .parse()
+        .map_err(|_| "--serial must be a u32")?;
+    let out = PathBuf::from(out.ok_or("site-cert requires --out <path>")?);
+    eprintln!("{SITE_CA_CUSTODY_WARNING}");
+    let signer = FileSiteCaSigner::load(
+        &ca_key
+            .map(PathBuf::from)
+            .ok_or("site-cert requires --ca-key <file>")?,
+    )?;
+    let cert = sitecert_issue(
+        &signer,
+        site_id,
+        &sak_pubkey,
+        &SiteCertProfile {
+            network_low32,
+            site_epoch,
+            serial,
+        },
+    )
+    .map_err(|e| format!("site-cert refused: {e}"))?;
+    write_new(&out, &cert)?;
+    let network = (u64::from(site_epoch) << 32) | u64::from(network_low32);
+    println!(
+        "{{\"site_id\":\"{site_id:016x}\",\"network\":\"{network:016x}\",\"site_epoch\":{site_epoch},\"serial\":{serial},\"cert_file\":\"{}\"}}",
+        json_path(&out)
+    );
     Ok(())
 }
 
@@ -247,6 +378,10 @@ fn read_json(path: &Path) -> Result<Json, DynError> {
     Ok(routeloom_json::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?)
 }
 
+fn json_path(path: &Path) -> String {
+    routeloom_json::escape_string(&path.to_string_lossy())
+}
+
 fn hex64(flag: &str, value: &str) -> Result<u64, DynError> {
     if !is_hex(value, 16) {
         return Err(format!("{flag} must be a 16-hex id").into());
@@ -265,10 +400,25 @@ fn node_id(value: &str) -> Result<u64, DynError> {
 /// A proof-of-possession object as the device verb hands it over: raw
 /// bytes, or the same bytes as one hex line.
 fn read_object(path: &Path, max: usize) -> Result<Vec<u8>, DynError> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    use std::io::Read;
+    let limit = max
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(3))
+        .ok_or("object limit overflow")?;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .take(limit as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() == limit {
+        return Err(format!("{}: larger than {max} bytes", path.display()).into());
+    }
     if let Ok(text) = std::str::from_utf8(&bytes) {
         let text = text.trim();
         if !text.is_empty() && text.len() % 2 == 0 && text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            if text.len() / 2 > max {
+                return Err(format!("{}: larger than {max} bytes", path.display()).into());
+            }
             return Ok(hex_decode_exact(text, text.len() / 2).expect("hex checked"));
         }
     }
@@ -391,6 +541,15 @@ mod tests {
     }
 
     #[test]
+    fn read_object_rejects_hex_over_limit() {
+        let dir = scratch("object-bound");
+        let path = dir.join("pop.hex");
+        std::fs::write(&path, b"0001020304").unwrap();
+        assert!(read_object(&path, 4).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn spec_parsing() {
         let doc = routeloom_json::parse(&spec_text()).unwrap();
         let (profile, plan) = identity_spec(&doc, 0x1234, 9).unwrap();
@@ -442,6 +601,7 @@ mod tests {
         for name in [
             "devcert.cwt",
             "identity.rli1",
+            "inventory.json",
             "rlident_i0.bin",
             "rlident_i1.bin",
             "rlsec-nvs.csv",
@@ -526,6 +686,132 @@ mod tests {
         let bundle = std::fs::read_to_string(out.join("identity-bundle.json")).unwrap();
         assert!(bundle.contains("routeloom-identity-bundle-v1"));
         assert!(!bundle.contains(&hex_encode(&device_secret)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn siteca_keygen_and_site_cert_flow() {
+        use routeloom_provision::sdkv1::siteca::{sitecert_verify, FileSiteCaSigner};
+        use routeloom_provision::signer::test_keypair;
+
+        let dir = scratch("sitecert");
+        let key = dir.join("siteca.key");
+        provision_siteca_keygen_command(&args(&[
+            "--site-ca-id",
+            "05ca000000000001",
+            "--out",
+            key.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let ca = FileSiteCaSigner::load(&key).unwrap();
+        assert!(provision_siteca_keygen_command(&args(&[
+            "--site-ca-id",
+            "05ca000000000001",
+            "--out",
+            key.to_str().unwrap(),
+        ]))
+        .is_err());
+
+        let (_, sak_pub) = test_keypair(0x53);
+        let sak_hex = hex_encode(&sak_pub);
+        let out = dir.join("sitecert.cwt");
+        let good = args(&[
+            "--ca-key",
+            key.to_str().unwrap(),
+            "--site-id",
+            "5173000000000042",
+            "--sak-pubkey",
+            &sak_hex,
+            "--network-low32",
+            "0a1b2c3d",
+            "--site-epoch",
+            "3",
+            "--serial",
+            "7",
+            "--out",
+            out.to_str().unwrap(),
+        ]);
+        site_cert_command(&good).unwrap();
+        let cert = std::fs::read(&out).unwrap();
+        let claims = sitecert_verify(&cert, 0x05CA_0000_0000_0001, &ca.pubkey()).unwrap();
+        assert_eq!(claims.subject, 0x5173_0000_0000_0042);
+        assert_eq!(claims.network_low32, 0x0A1B_2C3D);
+        // Never overwrite; bad inputs mint nothing.
+        assert!(site_cert_command(&good).is_err());
+        let zero_pubkey = "00".repeat(64);
+        for (flag, value) in [
+            ("--sak-pubkey", zero_pubkey.as_str()),
+            ("--sak-pubkey", "zz"),
+            ("--network-low32", "00000000"),
+            ("--network-low32", "0a1b2c3"),
+            ("--site-id", "0000000000000000"),
+            ("--site-epoch", "4294967296"),
+            ("--serial", "nope"),
+        ] {
+            let mut argv = good.clone();
+            let at = argv.iter().position(|part| part == flag).unwrap() + 1;
+            argv[at] = value.to_string();
+            let _ = std::fs::remove_file(&out);
+            assert!(site_cert_command(&argv).is_err(), "{flag}={value}");
+            assert!(!out.exists());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn inventory_file_lands_next_to_the_bundle() {
+        let dir = scratch("inventory");
+        let key = dir.join("devca.key");
+        FileDeviceCaSigner::from_secret(0x0DCA_0000_0000_0001, &[0x51; 32])
+            .unwrap()
+            .save(&key)
+            .unwrap();
+        let spec = dir.join("spec.json");
+        std::fs::write(&spec, spec_text()).unwrap();
+        let out = dir.join("devgen");
+        let challenge = "5a".repeat(32);
+        let (device_secret, _) = test_keypair(0x54);
+        let pop = pop_sign(
+            &device_secret,
+            0x00A1_0000_0000_1234,
+            KeyLocation::NvsPlaintext,
+            &[0x5A; 32],
+        )
+        .unwrap();
+        let pop_path = dir.join("pop.bin");
+        std::fs::write(&pop_path, pop).unwrap();
+        provision_devcert_command(&args(&[
+            "--ca-key",
+            key.to_str().unwrap(),
+            "--spec",
+            spec.to_str().unwrap(),
+            "--node",
+            "00a1000000001234",
+            "--serial",
+            "90211",
+            "--challenge",
+            &challenge,
+            "--pop",
+            pop_path.to_str().unwrap(),
+            "--out-dir",
+            out.to_str().unwrap(),
+        ]))
+        .unwrap();
+        let record =
+            routeloom_json::parse(&std::fs::read_to_string(out.join("inventory.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            record.get("format").and_then(|v| v.as_str()),
+            Some("routeloom-inventory-v1")
+        );
+        assert_eq!(
+            record.get("node_id").and_then(|v| v.as_str()),
+            Some("00a1000000001234")
+        );
+        assert_eq!(
+            record.get("cert_serial").and_then(|v| v.as_u64()),
+            Some(90211)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

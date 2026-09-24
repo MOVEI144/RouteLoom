@@ -49,6 +49,7 @@
 // in-process transport exercise it, so a non-test build sees it unused.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub mod authority_channel;
 pub mod config;
 pub mod group_keys;
 pub mod records;
@@ -3619,7 +3620,7 @@ impl SiteAuthority {
             .map(|(_, o)| o)
     }
 
-    /// Attaches the GK transport (PR1's authority channel): the tick
+    /// Attaches the GK command adapter to the authority channel: the tick
     /// consults its `channel_ready` under the lock, and `SiteService::with`
     /// clones it out to send with the lock released.
     pub fn set_group_key_transport(&mut self, transport: Arc<dyn GroupKeyTransport>) {
