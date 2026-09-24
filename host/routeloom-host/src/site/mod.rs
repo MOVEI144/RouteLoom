@@ -2253,6 +2253,8 @@ impl SiteService {
 #[cfg(test)]
 mod e2e;
 #[cfg(test)]
+mod joiner_interop;
+#[cfg(test)]
 pub(crate) mod testkit;
 #[cfg(test)]
 mod tests;
