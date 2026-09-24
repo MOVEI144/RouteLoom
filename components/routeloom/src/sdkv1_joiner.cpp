@@ -478,7 +478,7 @@ Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
         return Status::success();
       }
       JoinReply reply{};
-      if (!join_reply_decode(body, reply)) {
+      if (!join_reply_decode(JoinCarrier::Rld1, body, reply)) {
         sat_inc(counters_.rx_dropped);
         return Status::success();
       }

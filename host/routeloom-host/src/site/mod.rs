@@ -95,7 +95,7 @@ use records::{
 };
 use store::{Batch, DeviceRow, DocKind, GroupKeyRow, LedgerRow, RotationWrite, SiteStore};
 use transport::{
-    AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp,
+    AbortReason, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp, PHASE_EDHOC,
     STEP_EDHOC_ERROR,
 };
 
@@ -1043,9 +1043,10 @@ impl SiteAuthority {
         self.events.push((now_ms, fields));
     }
 
-    fn down(&mut self, key: RelayKey, step: u8, status: DownStatus, body: Vec<u8>) {
+    fn down(&mut self, key: RelayKey, phase: u8, step: u8, status: DownStatus, body: Vec<u8>) {
         self.outbox.push(Outbound::Down(RelayDown {
             key,
+            phase,
             step,
             status,
             body,
@@ -1062,9 +1063,12 @@ impl SiteAuthority {
         // Joins only: the GK lifecycle runs on the timer's HostTime (wall
         // milliseconds must never pose as the monotonic axis).
         self.tick_joins(now_ms);
-        match up.step {
-            1 => self.on_message_1(up, now_ms),
-            3 => self.on_message_3(up, now_ms),
+        // This service speaks EDHOC (phase 4) only: `step` alone is
+        // ambiguous, so any other phase is never processed as an EDHOC
+        // message — it ends the relay instead (#116).
+        match (up.phase, up.step) {
+            (PHASE_EDHOC, 1) => self.on_message_1(up, now_ms),
+            (PHASE_EDHOC, 3) => self.on_message_3(up, now_ms),
             _ => {
                 // An Initiator error message or a stray step ends the relay.
                 if let Some(i) = self.txns.iter().position(|t| t.key == up.key) {
@@ -1113,7 +1117,13 @@ impl SiteAuthority {
                     EdhocError::WrongSelectedSuite => error_message_wrong_suite(&[SUITE_2]),
                     _ => error_message_unspecified("message_1 refused"),
                 };
-                self.down(up.key, STEP_EDHOC_ERROR, DownStatus::Final, body);
+                self.down(
+                    up.key,
+                    PHASE_EDHOC,
+                    STEP_EDHOC_ERROR,
+                    DownStatus::Final,
+                    body,
+                );
                 return;
             }
         };
@@ -1125,6 +1135,7 @@ impl SiteAuthority {
             self.counters.message_1_refused += 1;
             self.down(
                 up.key,
+                PHASE_EDHOC,
                 STEP_EDHOC_ERROR,
                 DownStatus::Final,
                 error_message_unspecified("message_1 refused"),
@@ -1166,7 +1177,7 @@ impl SiteAuthority {
                     responder,
                     device: None,
                 });
-                self.down(up.key, 2, DownStatus::Continue, message_2);
+                self.down(up.key, PHASE_EDHOC, 2, DownStatus::Continue, message_2);
             }
             Err(_) => self.abort(up.key, AbortReason::AuthorityError),
         }
@@ -1240,6 +1251,7 @@ impl SiteAuthority {
                 *self.counters.rejected_unverified.entry(reason).or_insert(0) += 1;
                 self.down(
                     up.key,
+                    PHASE_EDHOC,
                     STEP_EDHOC_ERROR,
                     DownStatus::Final,
                     error_message_unspecified("join refused"),
@@ -1521,7 +1533,7 @@ impl SiteAuthority {
             });
         match composed {
             Ok(message_4) => {
-                self.down(txn.key, 4, DownStatus::Final, message_4);
+                self.down(txn.key, PHASE_EDHOC, 4, DownStatus::Final, message_4);
                 true
             }
             Err(_) => {
@@ -3068,13 +3080,31 @@ impl SiteAuthority {
                 );
                 // Busy keeps its attempts and retries soon; anything else
                 // restarts the target at Update after a minute round.
-                if let Some(target) = self.gks.target_mut(ack.node) {
+                if self
+                    .gks
+                    .rotation()
+                    .is_some_and(|r| r.row.to_epoch == ack.epoch)
+                {
                     if result == 3 {
-                        target.next_due_mono = time.mono_ms.saturating_add(backoff_ms);
-                    } else {
-                        target.row.state = TargetState::Unknown;
-                        target.attempts = 0;
-                        target.next_due_mono = time.mono_ms.saturating_add(backoff_ms);
+                        if let Some(target) = self.gks.target_mut(ack.node) {
+                            target.next_due_mono = time.mono_ms.saturating_add(backoff_ms);
+                        }
+                    } else if let Some(mut row) = self.gks.target(ack.node).map(|t| t.row.clone()) {
+                        row.state = TargetState::Unknown;
+                        row.confirmed_epoch = 0;
+                        row.confirmed_gkid = None;
+                        if let Err(error) = self.store.commit(&Batch {
+                            gk_targets: vec![row.clone()],
+                            ..Batch::default()
+                        }) {
+                            self.store_error(time.unix_ms, &error);
+                            return AckOutcome::Stale { reason: "store" };
+                        }
+                        if let Some(target) = self.gks.target_mut(ack.node) {
+                            target.row = row;
+                            target.attempts = 0;
+                            target.next_due_mono = time.mono_ms.saturating_add(backoff_ms);
+                        }
                     }
                 }
                 AckOutcome::Stale { reason }

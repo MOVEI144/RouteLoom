@@ -1,0 +1,17 @@
+{
+  "carrier": "wire",
+  "codec": "join_chunk",
+  "data_hex": "e235",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "gateway_epoch": 7,
+  "id": 2119674654,
+  "name": "relay2_chunk_max_9",
+  "note": "992 B object: first/last of 10 chunks",
+  "offset": 990,
+  "payload_hex": "02417e57ab1e03de03e00000000700000003e235",
+  "phase": 4,
+  "proxy_epoch": 3,
+  "step": 1,
+  "total": 992
+}

@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_down",
+  "encoded_hex": "02610063000000000000000002027e57ab1e00a1000000000777020000001234020000040000000700000003cacca66b50863d4c669978d9a7c5fa46718c9f1c96b5f2ccbb051f108717e6670ec781000aba5a1187b1001523a792f587c435695dc9fde51210f9",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_down_proxy_zero",
+  "note": "to_proxy NodeId valid"
+}

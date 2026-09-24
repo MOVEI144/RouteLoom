@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_up",
+  "encoded_hex": "0160006c00a100000000000100a10000000007770302017e57ab1e00a10000000007770200000012340100b90400000007000000031bb9c700449bf3897639711a006b9a1c3194724517f274a0faf1d2ccae71cb00ef55b80b159d40d5464a0ba9080c2190abfc7ddf44dc94f7f5380c",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_schema_1_up",
+  "note": "schema 1 join frames are rejected, never upgraded"
+}

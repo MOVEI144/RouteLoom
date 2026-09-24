@@ -1,0 +1,8 @@
+{
+  "codec": "relay_object",
+  "encoded_hex": "02017e57ab1e00a10000000007770200000012340400ba050000000700000003992bf5dc16af90ff4a6fa13a95aa7f1cbe034d38fd4f5d7787a1b0a11e762b658429a606c8a4ddae",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_resume_step_4",
+  "note": "RLRES1 steps 1..3"
+}

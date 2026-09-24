@@ -287,7 +287,7 @@ static bool str_encode(zcbor_state_t *state,
 	if (!str_start_encode(state, input, major_type)) {
 		ZCBOR_FAIL();
 	}
-	if (input->len != 0 && state->payload_mut != input->value) {
+	if (state->payload_mut != input->value) {
 		/* Use memmove since string might be encoded into the same space
 		 * because of bstrx_cbor_start_encode/bstrx_cbor_end_encode. */
 		memmove(state->payload_mut, input->value, input->len);

@@ -643,7 +643,7 @@ class SimHostSink final : public JoinRelayHostSink {
     inbox_.push_back(SimUp{proxy, hops, Bytes(object.data, object.data + object.size)});
     return Status::success();
   }
-  Status relay_abort(const NodeId, const std::uint32_t, const RelayAbortReason) noexcept override {
+  Status relay_abort(const NodeId, const RelayToken, const RelayAbortReason) noexcept override {
     ++aborts;
     return Status::success();
   }
@@ -728,6 +728,8 @@ class SimSite {
       RelayObject out{};
       out.header.dir = RelayDirection::Down;
       out.header.relay_id = object.header.relay_id;
+      out.header.gateway_epoch = object.header.gateway_epoch;
+      out.header.proxy_epoch = object.header.proxy_epoch;
       out.header.proxy = up.proxy;
       out.header.joiner_mac = object.header.joiner_mac;
       out.header.phase = JoinAuthPhase::EdhocMessage;
@@ -777,6 +779,7 @@ class SimSite {
   static JoinRelayGatewayConfig gateway_config(const SimSiteParams& params) {
     JoinRelayGatewayConfig config{};
     config.node = params.gateway;
+    config.gateway_epoch = 7;
     return config;
   }
   static JoinProxyConfig proxy_config(const SimProxyParams& proxy, const SimSiteParams& site) {
@@ -787,6 +790,7 @@ class SimSite {
     config.org_hint = join_org_hint(site.site_ca->pub);
     config.site_hint = join_site_hint(site.site_id);
     config.gateway = site.gateway;
+    config.proxy_epoch = 3;
     return config;
   }
 
@@ -989,6 +993,7 @@ class JoinSimNetwork {
     JoinObjectSlot slot;
     if (!slot.load(JoinCarrier::Rld1, JoinAuthPhase::EdhocMessage, step,
                    join_rld1_object_id(last_device_nonce()),
+                   0, 0,
                    ByteView{encoded.bytes.data(), written}, now_)) {
       return false;
     }

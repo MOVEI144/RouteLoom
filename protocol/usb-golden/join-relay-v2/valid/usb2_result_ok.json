@@ -1,0 +1,13 @@
+{
+  "codec": "join_usb_result",
+  "expect": "ok",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "gateway_epoch": 7,
+  "inner_hex": "02630016000000a10000000007777e57ab1e0000000700000003",
+  "name": "usb2_result_ok",
+  "note": "Ok carries the complete token",
+  "proxy": 45317471250417527,
+  "proxy_epoch": 3,
+  "relay_id": 2119674654,
+  "result": 0
+}

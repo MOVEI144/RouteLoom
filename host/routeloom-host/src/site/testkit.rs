@@ -158,6 +158,7 @@ impl SimDevice {
         RelayUp {
             key,
             hops: 2,
+            phase: super::transport::PHASE_EDHOC,
             step,
             joiner_rssi_dbm: -60,
             body,
@@ -247,6 +248,8 @@ impl SimDevice {
         let key = RelayKey {
             gateway: GATEWAY,
             proxy: 0x00A1_0000_0000_0777,
+            gateway_epoch: 7,
+            proxy_epoch: 3,
             relay_id: self.relay,
             joiner_mac: self.mac,
         };

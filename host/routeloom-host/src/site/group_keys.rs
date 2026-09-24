@@ -17,8 +17,8 @@
 //! activates at the first tick), and a rotation that is merely due starts
 //! exactly once.
 //!
-//! Commands leave through [`GroupKeyTransport`], the seam PR1's authority
-//! channel implements (PR4 wires it to USB). Delivery is best-effort: only
+//! Commands leave through [`GroupKeyTransport`]; the PR4 adapter will map
+//! them to PR1's authority channel and USB. Delivery is best-effort: only
 //! a durable device ACK (`result == 0`) is convergence evidence, never a
 //! queued or sent command.
 

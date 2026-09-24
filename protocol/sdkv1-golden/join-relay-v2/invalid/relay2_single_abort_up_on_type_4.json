@@ -1,0 +1,9 @@
+{
+  "codec": "relay_single_frame",
+  "encoded_hex": "02017e57ab1e00a10000000007770200000012340102ba0400000007000000030400000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_single_abort_up_on_type_4",
+  "note": "an up abort rides type 3",
+  "wire_type": 4
+}

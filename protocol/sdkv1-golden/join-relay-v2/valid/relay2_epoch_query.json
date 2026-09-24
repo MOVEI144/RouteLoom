@@ -1,0 +1,9 @@
+{
+  "codec": "epoch_query",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_epoch_query",
+  "nonce_hex": "404142434445464748494a4b4c4d4e4f",
+  "note": "proxy asks for the gateway epoch",
+  "payload_hex": "0203000000000000404142434445464748494a4b4c4d4e4f"
+}

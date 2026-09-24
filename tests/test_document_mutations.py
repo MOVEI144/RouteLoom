@@ -10,17 +10,17 @@ sys.path.insert(0,str(ROOT/'tools'))
 from check_review_contracts import validate
 from check_docs import run as docs_run
 
+def test_copy_filter(directory, names):
+    return shutil.ignore_patterns('.git','__pycache__','validation','build','build-*','target')(directory, names)
+
 class MutationTests(unittest.TestCase):
+    def test_copy_excludes_generated_artifacts(self):
+        self.assertIn('target', test_copy_filter('host', ['target', 'Cargo.toml']))
+        self.assertIn('build-rf', test_copy_filter('.', ['build-rf', 'docs']))
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory()
         self.root=Path(self.temp.name)/'repo'
-        shutil.copytree(
-            ROOT,
-            self.root,
-            ignore=shutil.ignore_patterns(
-                '.git', '__pycache__', 'validation', 'build', 'build-*', 'target'
-            ),
-        )
+        shutil.copytree(ROOT,self.root,ignore=test_copy_filter)
     def tearDown(self): self.temp.cleanup()
     def test_build_artifacts_not_copied(self):
         self.assertFalse((self.root/'build-rf').exists())

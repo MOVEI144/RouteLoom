@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_up",
+  "encoded_hex": "0260001100a100000000000100a100000000077703",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_up_empty_object",
+  "note": "an object is never empty"
+}

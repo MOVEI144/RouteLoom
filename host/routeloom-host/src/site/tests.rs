@@ -943,15 +943,51 @@ fn admission_is_bounded() {
             key: RelayKey {
                 gateway: 1,
                 proxy: 2,
+                gateway_epoch: 7,
+                proxy_epoch: 3,
                 relay_id: 3,
                 joiner_mac: [9; 6],
             },
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 3,
             joiner_rssi_dbm: 0,
             body: vec![0x40],
         },
         T0 + 6_000,
+    );
+    assert!(matches!(
+        transport.take().as_slice(),
+        [transport::Outbound::Abort {
+            reason: AbortReason::UnknownRelay,
+            ..
+        }]
+    ));
+}
+
+/// #116: the EDHOC service accepts phase 4 only — a phase-5 step 1 is not
+/// an EDHOC m1 and ends the relay instead of opening a session.
+#[test]
+fn non_edhoc_phase_is_never_an_edhoc_message() {
+    let (service, transport) = service();
+    let key = RelayKey {
+        gateway: 1,
+        proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
+        relay_id: 3,
+        joiner_mac: [7; 6],
+    };
+    service.handle_up(
+        RelayUp {
+            key,
+            hops: 0,
+            phase: super::transport::PHASE_RESUME,
+            step: 1,
+            joiner_rssi_dbm: 0,
+            body: vec![0x40],
+        },
+        T0,
     );
     assert!(matches!(
         transport.take().as_slice(),
@@ -1097,6 +1133,8 @@ fn message_1_refusals_answer_edhoc_errors() {
     let key = RelayKey {
         gateway: 1,
         proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
         relay_id: 3,
         joiner_mac: [1; 6],
     };
@@ -1113,6 +1151,7 @@ fn message_1_refusals_answer_edhoc_errors() {
         RelayUp {
             key,
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 1,
             joiner_rssi_dbm: 0,
             body: m1,
@@ -1143,6 +1182,7 @@ fn message_1_refusals_answer_edhoc_errors() {
         RelayUp {
             key,
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 1,
             joiner_rssi_dbm: 0,
             body: m1,
@@ -2653,6 +2693,52 @@ fn gk_stale_ack_matrix() {
     );
 }
 
+#[test]
+fn failed_key_ack_does_not_restore_obsolete_staging_evidence() {
+    let db = crash_db("failed-key-ack");
+    let node = 0x00A1_0000_0000_AF11;
+    {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let gk = FakeGroupKeyTransport::new();
+        service.set_group_key_transport(gk.clone());
+        let a = join_member(&service, &transport, node, 0xD1, T0);
+        let b = join_member(&service, &transport, node + 1, 0xD2, T0 + 500);
+        gk.set_ready(a.node, true);
+        gk.set_ready(b.node, true);
+        rotate(&service, 1, "failed-key-ack", T0 + 1_000).unwrap();
+        service.tick(HostTime::sync(T0 + 1_000));
+        let (_, key) = update_key(&gk.take(), a.node);
+        assert_eq!(
+            ack_key(&service, a.node, 2, &key, 1, T0 + 2_000),
+            AckOutcome::StagedRecorded
+        );
+        let failed = member_ack(&service, a.node, 2, &key, 1, 0);
+        assert_eq!(
+            service
+                .with(|authority| authority.on_group_key_ack(failed, HostTime::sync(T0 + 3_000)))
+                .0,
+            AckOutcome::Stale {
+                reason: "ack_conflict"
+            }
+        );
+        assert_eq!(
+            gk_status(&service, T0 + 3_000)
+                .get("staged_ack")
+                .unwrap()
+                .as_u64(),
+            Some(0)
+        );
+    }
+    let (service, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+    assert_eq!(
+        gk_status(&service, T0 + 4_000)
+            .get("staged_ack")
+            .unwrap()
+            .as_u64(),
+        Some(0)
+    );
+}
+
 /// G-SEC P5 PR3 (§6.1/§6.2): a store fault changes nothing and queues
 /// nothing — every GK commit fails closed.
 #[test]
@@ -2682,6 +2768,19 @@ fn gk_store_fault_changes_nothing() {
         ack_key(&service, a.node, 2, &key, 1, T0 + 3_000),
         AckOutcome::StagedRecorded
     );
+    let conflict = member_ack(&service, a.node, 2, &key, 1, 0);
+    let (outcome, _) = service.with(|a| {
+        let live = std::mem::replace(&mut a.store, Box::new(failing_store()));
+        let outcome = a.on_group_key_ack(conflict, HostTime::sync(T0 + 3_500));
+        a.store = live;
+        outcome
+    });
+    assert_eq!(outcome, AckOutcome::Stale { reason: "store" });
+    let node = a.node;
+    assert_eq!(
+        service.with(|a| a.gks.target(node).unwrap().row.state).0,
+        TargetState::StagedAcked
+    );
     gk.take();
     assert_eq!(
         ack_key(&service, a.node, 2, &key, 2, T0 + 4_000),
@@ -2699,7 +2798,7 @@ fn gk_store_fault_changes_nothing() {
     );
     assert!(gk.take().is_empty(), "outbound is zero");
     let failures = service.with(|a| a.counters.store_failures).0;
-    assert_eq!(failures, 2);
+    assert_eq!(failures, 3);
 }
 
 /// G-SEC P5 PR3 (§3.1): JoinConfirm resolution is typed — duplicates ACK
