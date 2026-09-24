@@ -77,7 +77,7 @@ APPLIED provider failoverは既定false。変更を許すのはshared idempotenc
 
 物理Wi-Fi callbackの受信bufferはまだSDK配送受理ではない。未認証frameはcheap parse→global ingress quota→cookie/transaction→bounded assembly→暗号確認→member admissionの順。cookieだけでは機器認証ではない。
 
-Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transactionで追加保護されるPeerを含めnonbroadcast19を越えない。reply lease同時3、link transaction寿命1500msを初期上限とする（CORE_FIXED_250実装では未実装：`PeerLeasePurpose::ExpectedReply`は宣言のみで、reply lease数とtransaction寿命は強制されていない。issue #55）。ただし物理TX不明中のPeerをtimeoutだけで削除しない。TX隔離・driver停止の安全確認が先。
+Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transactionで追加保護されるPeerを含めnonbroadcast19を越えない。reply lease同時3、link transaction寿命1500msを初期上限とする（CORE_FIXED_250実装では未実装：`PeerLeasePurpose::ExpectedReply`は宣言のみで、reply lease数とtransaction寿命は強制されていない。issue #117）。ただし物理TX不明中のPeerをtimeoutだけで削除しない。TX隔離・driver停止の安全確認が先。
 
 予約不能なら通常はBUSYを返すが、reply容量自体が無ければBUSY送信も保証しない。drop理由をローカル記録し、相手側は既存の有限retryで回復する。全接続へbroadcast BUSYを散布しない。
 

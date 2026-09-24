@@ -19,7 +19,8 @@ def sections(root: Path):
         pins.append('| '+label+' | '+' | '.join(str(b['gpio_d0_to_d10'][i]) for b in boards)+' |')
     yield 'docs/hardware/README.md','pins','\n'.join(pins)
     targets = radio['performance_targets_ms']
-    perf = ['| 指標 | 目標 |','|---|---|']
+    floors = radio['latency_floor']['floor_ms']
+    perf = ['| 指標 | 目標 | LR250理論下限 |','|---|---|---:|']
     for key,title,condition in [
         ('reliable_1hop_p95','1hop RELIABLE','、send→END_RECEIPT'),
         ('reliable_5hop_p95','5hop RELIABLE',''),
@@ -30,7 +31,8 @@ def sections(root: Path):
         ('preapproved_join_p95','自動承認済み同channel Join','を目標、単独入場'),
         ('cold_join_p95','cold Join','を目標、単独入場・常時受信入口あり'),
         ('cutover_gap_p95','切替そのものの空白','を目標、認定された移行拡張・準備済み群')]:
-        perf.append(f'| {title} | P95 {targets[key]}ms以内{condition} |')
+        floor = f'{floors[key]}ms' if key in floors else '—'
+        perf.append(f'| {title} | P95 {targets[key]}ms以内{condition} | {floor} |')
     yield 'docs/spec/acceptance.md','performance','\n'.join(perf)
     resources = load('docs/reference/resource-profiles.json')['profiles']
     lines=['| Profile | RX / TX | Active destinations | Dedup | SDK概算 / 上限 (bytes) | 実測 |','|---|---:|---:|---:|---:|---|']

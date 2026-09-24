@@ -133,7 +133,8 @@ def validate(c: dict) -> tuple[list[str], dict]:
         require("hil-not-run", hil["new_cases_executed"] == 0 and hil["new_measurements"] is None)
         require("preserve-smoke", hil["existing_c3_manual_smoke"] == "preserved_as_reported_not_reexecuted")
         require("soak-counts", cap["host_rate_per_minute"] * 60 * 24 == hil["host_24h_operations"] and cap["host_rate_per_minute"] * 60 * 72 == hil["host_72h_operations"])
-        require("legacy-targets", hil["legacy_latency_target_ms"] == {"1hop_p95": 20, "5hop_p95": 100, "10hop_p95": 250, "warm_resume_p95": 500})
+        require("latency-targets", hil["latency_target_ms"] == {"1hop_p95": 35, "5hop_p95": 250, "10hop_p95": 500, "warm_resume_p95": 500})
+        require("legacy-targets-history", hil["legacy_latency_target_ms"] == {"1hop_p95": 20, "5hop_p95": 100, "10hop_p95": 250, "warm_resume_p95": 500, "note": "pre-#47 acceptance targets, history only, superseded by latency_target_ms"})
         metrics = {"host_record_requirement": needed, "gateway_window_requirement": gateway_needed, "host_storage_budget_bytes": storage,
                    "wire_normal_max": w["header_bytes"] + 128 + 32, "wire_app_result_max": w["header_bytes"] + w["applied_result_fixed_bytes"] + app["result_max_bytes"] + 32,
                    "usb_submit_max": w["usb_submit_fixed_bytes"] + CANONICAL.size + 128}
@@ -213,7 +214,8 @@ def run(root: Path) -> dict:
         (("capacity", "retire_only_contiguous_prefix"), False), (("capacity", "host_records"), 3000),
         (("ipc", "principal_from_client_input"), True), (("security", "libedhoc_commit"), "0"*40),
         (("security", "bootstrap_object_max_bytes"), 2048), (("applied", "ack_of_result_ack"), True),
-        (("qualified_by_this_pr",), True), (("hil", "legacy_latency_target_ms", "1hop_p95"), 2),
+        (("qualified_by_this_pr",), True), (("hil", "latency_target_ms", "1hop_p95"), 2),
+        (("hil", "legacy_latency_target_ms", "1hop_p95"), 2),
     ]
     detected = []
     for keys, value in mutation_values:

@@ -99,6 +99,25 @@ class USBTests(unittest.TestCase):
     def test_stale_grant_ignored(self):
         c=Credit('s'); c.grant('s',4,400,True); c.grant('s',1,100,True)
         self.assertEqual((c.grant_frames,c.grant_bytes),(4,400))
+    def test_golden_stale_grants_replay(self):
+        # protocol/usb-golden: the C++ bridge and Rust codec replay the same
+        # tx_grant/tx_grant_stale/tx_grant_zero/tx_grant_mixed notices — the
+        # contract model must agree on the per-axis-max outcome (20, 65536).
+        frames_dir=ROOT/'protocol/usb-golden/frames'
+        vectors=sorted(frames_dir.glob('*.json'))
+        self.assertGreaterEqual(len(vectors),10)
+        c=Credit('dev-session')
+        grants=0
+        for path in vectors:
+            v=json.loads(path.read_text())
+            inner=bytes.fromhex(v.get('inner_hex',''))
+            if v['direction']=='h2d' and v['kind']==32 and len(inner)==17 and inner[0]==0:
+                frames=int.from_bytes(inner[1:9],'big')
+                octets=int.from_bytes(inner[9:17],'big')
+                c.grant('dev-session',frames,octets,True)
+                grants+=1
+        self.assertEqual(grants,4)  # tx_grant + stale + zero + mixed
+        self.assertEqual((c.grant_frames,c.grant_bytes),(20,65536))
     def test_session_change_blocks_old_credit(self):
         c=Credit('new')
         with self.assertRaises(ContractError): c.grant('old',4,400,True)
