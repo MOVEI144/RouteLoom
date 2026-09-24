@@ -32,6 +32,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/rlres1.cpp
   src/route_scale.cpp
   src/routing.cpp
+  src/sdkv1_authority.cpp
   src/sdkv1_blob_storage.cpp
   src/sdkv1_ead.cpp
   src/sdkv1_join_candidates.cpp
@@ -46,7 +47,10 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_handshake.cpp
   src/sdkv1_security_coordinator.cpp
   src/sdkv1_session_wire.cpp
+  src/sdkv1_revocation.cpp
   src/sdkv1_store.cpp
+  src/sdkv1_group_keys.cpp
+  src/sdkv1_group_security.cpp
   src/session_bank.cpp
   src/status.cpp
   src/telemetry.cpp
@@ -105,9 +109,10 @@ set(ROUTELOOM_THIRD_PARTY_C_RELAX
 # ROUTELOOM_DEDUP_PROFILE. The default is the relay profile.
 if(COMMAND idf_component_register)
   # ESP-IDF: libedhoc + zcbor + the glue, without the host-only TF-PSA-Crypto
-  # AES/CCM subset (its mbedtls_* symbols would duplicate ESP-IDF's own Mbed
-  # TLS); builtin_aead_ccm() is nullptr here and the adapter passes a PSA
-  # AeadCcm (routeloom_espnow, psa_edhoc_aead.hpp).
+  # AES/CCM/GCM subset (its mbedtls_* symbols would duplicate ESP-IDF's own
+  # Mbed TLS); builtin_aead_ccm()/builtin_aead_gcm() are nullptr here and the
+  # adapter passes PSA implementations (routeloom_espnow, psa_edhoc_aead.hpp
+  # and psa_aead_gcm.hpp).
   idf_component_register(
     SRCS ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC}
          ${ROUTELOOM_LIBEDHOC_SRC} ${ROUTELOOM_ZCBOR_SRC} ${ROUTELOOM_EDHOC_GLUE_SRC}
@@ -159,6 +164,13 @@ else()
     ${ROUTELOOM_EDHOC_C_DEFS} ${ROUTELOOM_TFPSA_DEFS})
   target_compile_options(routeloom_edhoc_third_party PRIVATE
     ${ROUTELOOM_THIRD_PARTY_C_RELAX})
+  # zcbor dispatches generated encoders and decoders through generic callback
+  # types. Clang's function sanitizer rejects those calls even though the ABI
+  # matches; keep every other sanitizer enabled for these sources.
+  if(ROUTELOOM_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(${ROUTELOOM_ZCBOR_SRC}
+      PROPERTIES COMPILE_OPTIONS "-fno-sanitize=function")
+  endif()
 
   # libedhoc's headers for the glue and for tests that drive the raw API.
   add_library(routeloom_edhoc_headers INTERFACE)

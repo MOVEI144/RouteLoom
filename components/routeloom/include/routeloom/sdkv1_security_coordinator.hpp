@@ -74,8 +74,9 @@ class CoordinatorUsbPort {
   // Gateway relay up to the Site Authority (0x60). Valid during the call.
   virtual Status send_relay_up_to_host(NodeId proxy, std::uint8_t hops,
                                        ByteView object) noexcept = 0;
-  // Gateway relay end to the Site Authority (0x62): explicit USB reason.
-  virtual Status send_relay_abort_to_host(NodeId proxy, std::uint32_t relay_id,
+  // Gateway relay end to the Site Authority (0x62): the full #116
+  // token plus the explicit USB reason.
+  virtual Status send_relay_abort_to_host(NodeId proxy, RelayToken token,
                                           RelayAbortReason reason) noexcept = 0;
   // No 0x63 here: every Usb*Down step returns queue admission
   // synchronously and the USB bridge maps it to the 0x63 verdict.
@@ -117,6 +118,9 @@ struct CoordinatorEvent {
   NodeId usb_proxy{kInvalidNodeId};
   ByteView usb_object{};
   std::uint32_t usb_relay_id{0};
+  // #116 token epochs for UsbRelayAbort (the 0x62 names the full token).
+  std::uint32_t usb_gateway_epoch{0};
+  std::uint32_t usb_proxy_epoch{0};
   std::uint8_t usb_reason{0};
   // ChannelReady:
   std::uint32_t channel_token{0};
@@ -296,7 +300,7 @@ class SecurityCoordinator final : public BootstrapSink,
   bool check(const SiteRecord& prepared, MonotonicMs now) noexcept override;
   // JoinRelayHostSink (gateway context): forwards to the USB port.
   Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept override;
-  Status relay_abort(NodeId proxy, std::uint32_t relay_id,
+  Status relay_abort(NodeId proxy, RelayToken token,
                      RelayAbortReason reason) noexcept override;
   // ZtRelayPort (proxy/gateway context): routed mesh TX; a relay addressed
   // to self loops back into the local gateway without touching the radio.
@@ -441,8 +445,9 @@ class SecurityCoordinator final : public BootstrapSink,
     MemberEngine(ResumeSlotStorage2& resume, GatewaySessionBank& bank,
                  BankSessionSink<32, 128>& sink, HandshakeMembershipView& membership,
                  SessionCredentialVerifier& verifier, EntropySource& entropy, ZtRld1Port& rld1,
-                 ZtRelayPort& relay, JoinCookieSealer& sealer, NodeId node,
-                 MacAddress mac) noexcept;
+                 ZtRelayPort& relay, JoinCookieSealer& sealer,
+                 const JoinProxyConfig& proxy_config,
+                 const JoinRelayGatewayConfig& gateway_config) noexcept;
   };
 
   // Tagged by mode_: joiner iff ZeroTouch, member iff Member, neither

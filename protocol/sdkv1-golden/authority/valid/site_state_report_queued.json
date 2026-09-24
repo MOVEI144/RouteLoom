@@ -1,0 +1,14 @@
+{
+  "codec": "site_state_report",
+  "device": 257,
+  "expect": "ok",
+  "flags": 1,
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "inner_hex": "0167001c01010001000000000000010100c0ffee080000000000000a0000000b",
+  "local_current": 10,
+  "local_next": 11,
+  "name": "site_state_report_queued",
+  "received_len": 2048,
+  "result": 1,
+  "transfer_id": 12648430
+}

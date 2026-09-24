@@ -91,6 +91,19 @@ bool epochs_compatible(const HandshakeLocal& local, const std::uint32_t site_epo
   return true;
 }
 
+Status resume_slot_identity(const ResumeSlot2& slot, ScopeDigest& out) noexcept {
+  ResumeSlot2 stable = slot;
+  stable.flags = 0;
+  stable.last_used_boot = 0;
+  stable.reserved_uses = 0;
+  std::array<std::uint8_t, kResume2SlotBytes> encoded{};
+  const Status status = resume2_slot_encode(stable, encoded);
+  if (status) sha256(ByteView{encoded.data(), encoded.size()}, out);
+  secure_clear(stable.rms);
+  secure_clear(encoded);
+  return status;
+}
+
 }  // namespace
 
 // --- MemberCookie ---------------------------------------------------------------
@@ -189,10 +202,10 @@ Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
     return Status::error(StatusCode::InvalidState, "handshake cookie not configured");
   }
   cancel_all_internal();
+  rlres1_configured_ = false;
   staged_ = StagedEstablished{};
   has_pending_ = false;
   pending_ = HandshakeResult{};
-  next_token_ = 1;
   last_tick_ = now;
   ecc_primed_ = false;
   const Status local = refresh_local();
@@ -204,20 +217,41 @@ Status HandshakeEngine::configure(const MonotonicMs now) noexcept {
 Status HandshakeEngine::refresh_local() noexcept {
   HandshakeLocal fresh{};
   if (!membership_.local(fresh)) {
-    local_set_ = false;
+    cancel_all_internal();
+    rlres1_configured_ = false;
     return Status::error(StatusCode::InvalidState, "handshake local evidence missing");
   }
   if (!id_usable(fresh.self) || fresh.network == 0 || fresh.site_id == 0 || fresh.role == 0 ||
       fresh.generation == 0) {
-    local_set_ = false;
+    cancel_all_internal();
+    rlres1_configured_ = false;
     return Status::error(StatusCode::InvalidState, "handshake local view invalid");
   }
-  const bool moved =
+  if (local_set_ && fresh.site_id == local_.site_id &&
+      (fresh.site_epoch < local_.site_epoch || fresh.rs_epoch < local_.rs_epoch ||
+       fresh.gk_epoch < local_.gk_epoch || fresh.generation < local_.generation ||
+       fresh.boot < local_.boot ||
+       (fresh.site_epoch == local_.site_epoch && fresh.network != local_.network))) {
+    cancel_all_internal();
+    rlres1_configured_ = false;
+    return Status::error(StatusCode::Conflict, "handshake local evidence regressed");
+  }
+  const bool changed =
       local_set_ && (fresh.network != local_.network || fresh.site_id != local_.site_id ||
-                     fresh.self != local_.self);
+                     fresh.self != local_.self || fresh.site_epoch != local_.site_epoch ||
+                     fresh.rs_epoch != local_.rs_epoch || fresh.gk_epoch != local_.gk_epoch ||
+                     fresh.generation != local_.generation || fresh.role != local_.role ||
+                     fresh.caps != local_.caps || fresh.boot != local_.boot ||
+                     fresh.local_cert_id != local_.local_cert_id);
+  if (changed) {
+    // An in-flight proof and every queued result belong to the old local
+    // evidence. The caller retries after the new view has been adopted.
+    cancel_all_internal();
+    rlres1_configured_ = false;
+  }
   local_ = fresh;
   local_set_ = true;
-  if (moved || !rlres1_configured_) {
+  if (!rlres1_configured_) {
     // A new site/network/self ends every exchange: the old bindings are
     // meaningless and the old keys must not install.
     cancel_all_internal();
@@ -245,7 +279,8 @@ Status HandshakeEngine::refresh_local() noexcept {
       return updated;
     }
   }
-  return Status::success();
+  return changed ? Status::error(StatusCode::Conflict, "handshake local evidence changed")
+                 : Status::success();
 }
 
 bool HandshakeEngine::quiescent() const noexcept {
@@ -500,6 +535,11 @@ bool HandshakeEngine::find_slot(const rlres1::Purpose purpose, const rlres1::Res
   // The slot must belong to OUR current credential: a stale cache from a
   // superseded local key never resumes (P4 §5.5).
   if (found.local_cert_id != local_.local_cert_id) return false;
+  ResumeBinding binding{};
+  binding.slot_index = index;
+  if (!resume_slot_identity(found, binding.identity)) return false;
+  binding.valid = true;
+  resume_lookup_ = binding;
   out.purpose = purpose;
   out.peer = found.peer;
   out.network = found.network;
@@ -625,6 +665,13 @@ void HandshakeEngine::cancel_all_internal() noexcept {
   }
   end_edhoc_flight();
   rlres1_.clear_all();
+  resume_lookup_ = ResumeBinding{};
+  pending_ = HandshakeResult{};
+  has_pending_ = false;
+  staged_ = StagedEstablished{};
+  pending_commit_tx_ = 0;
+  pending_commit_rx_ = 0;
+  pending_commit_proof_ = AuthenticatedPeerProof{};
 }
 
 Status HandshakeEngine::emit_send(CarrierRecord& record, const std::uint8_t phase,
@@ -650,6 +697,7 @@ Status HandshakeEngine::emit_send(CarrierRecord& record, const std::uint8_t phas
 }
 
 Status HandshakeEngine::emit_failed(CarrierRecord& record, const StatusCode failure) noexcept {
+  if (!record.used) return Status::success();
   const std::uint32_t token = record.token;
   const SecurityScope scope = record.scope;
   const NodeId peer = record.peer;
@@ -776,6 +824,7 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
   seed.role = HandshakeRole::Initiator;
   seed.reason = req.reason;
   seed.token = next_token_++;
+  seed.elevation_token = req.elevation_token;
   seed.deadline = now + kLinkTimeoutMs;
   bool resume_offered = false;
   if (req.scope == SecurityScope::Link) {
@@ -824,7 +873,7 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
           return Status::error(StatusCode::Busy, "handshake table full");
         }
         *record = seed;
-        return begin_resume(*record, slot, now);
+        return begin_resume(*record, slot, index, now);
       }
     }
   }
@@ -840,7 +889,15 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
 }
 
 Status HandshakeEngine::begin_resume(CarrierRecord& record, const ResumeSlot2& slot,
+                                     const std::size_t slot_index,
                                      const MonotonicMs now) noexcept {
+  record.resume.slot_index = slot_index;
+  const Status identity = resume_slot_identity(slot, record.resume.identity);
+  if (!identity) {
+    drop_record(record);
+    return identity;
+  }
+  record.resume.valid = true;
   rlres1::BeginRequest begin{};
   begin.slot.purpose = to_keys_purpose(record.scope);
   begin.slot.peer = slot.peer;
@@ -1133,6 +1190,7 @@ Status HandshakeEngine::verify_cookie_and_allocate(const HandshakeRx& rx, const 
   fresh->role = HandshakeRole::Responder;
   fresh->reason = HandshakeReason::Initial;
   fresh->token = next_token_++;
+  fresh->elevation_token = rx.elevation_token;
   fresh->deadline = now + kLinkTimeoutMs;
   if (rx.scope == SecurityScope::Link) {
     fresh->mac_i = rx.src_mac;
@@ -1520,13 +1578,16 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
       carrier.hops = 0;
     }
     rlres1::Output out{};
+    resume_lookup_ = ResumeBinding{};
     rlres1_.on_r1(message, carrier, rx.claimed_peer, now, *this, out);
     if (out.action == rlres1::Action::Send && out.message_size == rlres1::kR2Size) {
-      if (out.message_size > fresh->last_tx.size() || message.size != rlres1::kR1BaseSize) {
+      if (!resume_lookup_.valid || out.message_size > fresh->last_tx.size() ||
+          message.size != rlres1::kR1BaseSize) {
         drop_record(*fresh);
         secure_clear(out.message);
         return Status::success();
       }
+      fresh->resume = resume_lookup_;
       std::memcpy(fresh->last_tx.data(), out.message.data(), out.message_size);
       fresh->last_tx_size = out.message_size;
       fresh->last_phase = 5;
@@ -1881,7 +1942,7 @@ Status HandshakeEngine::mint_proof(CarrierRecord& record, AuthenticatedPeerProof
   proof = AuthenticatedPeerProof{};
   if (record.scope != SecurityScope::Link) return Status::success();  // end: no discovery proof
   const MacAddress& peer_mac = record.role == HandshakeRole::Initiator ? record.mac_r : record.mac_i;
-  std::array<std::uint8_t, 64> input{};
+  std::array<std::uint8_t, 96> input{};
   std::size_t at = 0;
   const auto put = [&](const void* data, const std::size_t size) {
     if (at + size > input.size()) return;
@@ -1891,6 +1952,8 @@ Status HandshakeEngine::mint_proof(CarrierRecord& record, AuthenticatedPeerProof
   put(kProofLabel, sizeof(kProofLabel));
   std::uint8_t token_be[4];
   put_u32_be(token_be, record.token);
+  put(token_be, 4);
+  put_u32_be(token_be, record.elevation_token);
   put(token_be, 4);
   const std::uint8_t scope_byte = static_cast<std::uint8_t>(record.scope);
   put(&scope_byte, 1);
@@ -1902,11 +1965,15 @@ Status HandshakeEngine::mint_proof(CarrierRecord& record, AuthenticatedPeerProof
     be[i] = static_cast<std::uint8_t>(local_.network >> (56U - 8U * i));
   }
   put(be, 8);
+  ScopeDigest carrier_digest{};
+  keys::link_carrier_digest(record.carrier, carrier_digest);
+  put(carrier_digest.data(), carrier_digest.size());
   ScopeDigest digest{};
   sha256(ByteView{input.data(), at}, digest);
   AuthTag evidence{};
   std::memcpy(evidence.data(), digest.data(), evidence.size());
-  proof = AuthenticatedPeerProof(record.peer, peer_mac, local_.network, evidence);
+  proof = AuthenticatedPeerProof(record.peer, peer_mac, local_.network, evidence,
+                                record.elevation_token, carrier_digest);
   return Status::success();
 }
 
@@ -2007,15 +2074,17 @@ Status HandshakeEngine::resume_commit(CarrierRecord& record,
   pending_commit_tx_ = 0;
   pending_commit_rx_ = 0;
   pending_commit_proof_ = AuthenticatedPeerProof{};
-  ResumeContext context{};
-  context.network = local_.network;
-  context.gk_epoch = local_.gk_epoch;
-  context.revocations = nullptr;
   ResumeSlot2 slot{};
-  std::size_t index = 0;
-  if (!cache_.find_by_peer(to_resume_purpose(record.scope), established.peer, context, slot, index)
-           .ok()) {
+  bool intact = false;
+  if (!record.resume.valid ||
+      !cache_.read_at(record.resume.slot_index, slot, intact).ok() || !intact || !slot.valid ||
+      slot.purpose != to_resume_purpose(record.scope) || slot.peer != record.peer ||
+      slot.peer != established.peer) {
     return Status::error(StatusCode::AuthenticationFailed, "session resume slot gone");
+  }
+  ScopeDigest identity{};
+  if (!resume_slot_identity(slot, identity) || identity != record.resume.identity) {
+    return Status::error(StatusCode::AuthenticationFailed, "session resume slot changed");
   }
   if (slot.local_cert_id != local_.local_cert_id) {
     return Status::error(StatusCode::AuthenticationFailed, "session resume credential");
@@ -2171,6 +2240,9 @@ Status HandshakeEngine::take_result(HandshakeResult& out) noexcept {
   if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
   const EnterGuard guard(entered_);
   out = HandshakeResult{};
+  if (!configured_) return Status::error(StatusCode::InvalidState, "handshake not configured");
+  const Status local = refresh_local();
+  if (!local) return local;
   if (has_pending_) {
     out = pending_;
     pending_ = HandshakeResult{};

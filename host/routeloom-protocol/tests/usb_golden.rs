@@ -517,17 +517,18 @@ fn group_ops_vectors_are_byte_exact() {
     assert_eq!(h2d, 4); // tx_grant, send, query, close
 }
 
-/// protocol/usb-golden/join-relay: the join_relay_v1 scenario (SDK v1
-/// zero-touch join). Same discipline; the 0x60-0x63 inners decode under the
-/// Rust codec, the relay objects parse, and each 0x63 answers its request.
+/// protocol/usb-golden/join-relay-v2: the join_relay_v2 scenario (SDK v1
+/// zero-touch join, #116). Same discipline; the 0x60-0x63 inners decode
+/// under the Rust codec, the relay objects parse, and each 0x63 answers its
+/// request.
 #[test]
 fn join_relay_vectors_are_byte_exact() {
     use routeloom_protocol::join_relay::*;
 
-    let root = golden_dir().join("join-relay");
+    let root = golden_dir().join("join-relay-v2");
     let session = load(&root.join("session.json"));
     let capability = u64_field(&session, "capability") as u32;
-    assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_JOIN_RELAY_V1);
+    assert_eq!(capability, 0x3 | CAP_HOST_OPS_V1 | CAP_JOIN_RELAY_V2);
     let transcript = Transcript {
         host_nonce: u64_field(&session, "host_nonce"),
         device_nonce: u64_field(&session, "device_nonce"),
@@ -603,13 +604,21 @@ fn join_relay_vectors_are_byte_exact() {
             _ => {}
         }
     }
-    assert_eq!(ups.len(), 2);
+    assert_eq!(ups.len(), 3);
     let m1 = ups[0].relay_object().unwrap();
     let m3 = ups[1].relay_object().unwrap();
+    let m1_r2 = ups[2].relay_object().unwrap();
     assert_eq!((ups[0].gateway, ups[0].from_proxy, ups[0].hops), (1, 2, 3));
     assert_eq!((m1.header.step, m3.header.step), (1, 3));
     assert_eq!(m1.header.relay_id, m3.header.relay_id);
     assert_eq!(m1.header.joiner_rssi_dbm, -71);
+    assert!(m1.header.token().valid());
+    assert_eq!(m1_r2.header.step, 1);
+    assert_eq!(m1_r2.header.relay_id, m1.header.relay_id + 1);
+    assert_eq!(
+        m1_r2.header.token().gateway_epoch,
+        m1.header.token().gateway_epoch
+    );
     assert_eq!(downs.len(), 2);
     let m4 = RelayObject::decode(&downs[1].1.object).unwrap();
     assert_eq!(m4.header.state, RelayState::Final);
@@ -617,15 +626,119 @@ fn join_relay_vectors_are_byte_exact() {
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].0, downs[0].0);
     assert_eq!(results[1].0, downs[1].0);
-    assert!(results[..2]
+    // m2/m4 downs are handed to the Wire lane (Ok), and the abort lands
+    // while the final down is still SendingFinal, so it finishes a live
+    // relay (Ok, #116 Q116-04) instead of refusing an unknown one.
+    assert!(results
         .iter()
-        .all(|(_, r)| r.result == ConfigOpsResult::Ok && r.relay_id == m1.header.relay_id));
-    assert_eq!(results[2].1.result, ConfigOpsResult::Invalid);
+        .all(|(_, r)| r.result == ConfigOpsResult::Ok && r.token() == m1.header.token()));
     assert_eq!(aborts.len(), 2);
     assert_eq!(aborts[0].0, "h2d");
     assert_eq!(aborts[0].1, results[2].0);
     assert_eq!(aborts[0].2.reason, RelayAbortReason::HostAborted);
+    assert_eq!(aborts[0].2.token(), m1.header.token());
     assert_eq!((aborts[1].0.as_str(), aborts[1].1), ("d2h", 0));
     assert_eq!(aborts[1].2.reason, RelayAbortReason::ProxyAborted);
+    assert_eq!(aborts[1].2.token(), m1_r2.header.token());
     assert_eq!(h2d, 5); // tx_grant, down m2, down m4, abort, close
+}
+
+/// protocol/usb-golden/join-relay-v2/{valid,invalid}: the 0x60-0x63 inners
+/// (schema 2) decode to the listed fields and re-encode byte-for-byte;
+/// invalid inners are refused.
+#[test]
+fn join_relay_codec_vectors_are_byte_exact() {
+    use routeloom_protocol::join_relay::*;
+
+    let root = golden_dir().join("join-relay-v2");
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join("valid"))
+        .expect("valid dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 12, "usb join valid: {}", files.len());
+    for path in &files {
+        let vector = load(path);
+        let name = field(&vector, "name").to_string();
+        let inner = unhex(field(&vector, "inner_hex"));
+        match field(&vector, "codec") {
+            "join_usb_up" => {
+                let up = decode_join_relay_up(&inner).unwrap();
+                assert_eq!(up.gateway, u64_field(&vector, "gateway"), "{name}");
+                assert_eq!(up.from_proxy, u64_field(&vector, "from_proxy"), "{name}");
+                assert_eq!(u64::from(up.hops), u64_field(&vector, "hops"), "{name}");
+                assert_eq!(up.object, unhex(field(&vector, "object_hex")), "{name}");
+                assert_eq!(encode_join_relay_up(&up).unwrap(), inner, "{name}");
+            }
+            "join_usb_down" => {
+                let down = decode_join_relay_down(&inner).unwrap();
+                assert_eq!(down.to_proxy, u64_field(&vector, "to_proxy"), "{name}");
+                assert_eq!(down.object, unhex(field(&vector, "object_hex")), "{name}");
+                assert_eq!(encode_join_relay_down(&down).unwrap(), inner, "{name}");
+            }
+            "join_usb_abort" => {
+                let abort = decode_join_relay_abort(&inner).unwrap();
+                assert_eq!(abort.proxy, u64_field(&vector, "proxy"), "{name}");
+                assert_eq!(
+                    u64::from(abort.relay_id),
+                    u64_field(&vector, "relay_id"),
+                    "{name}"
+                );
+                assert_eq!(
+                    u64::from(abort.gateway_epoch),
+                    u64_field(&vector, "gateway_epoch"),
+                    "{name}"
+                );
+                assert_eq!(
+                    u64::from(abort.proxy_epoch),
+                    u64_field(&vector, "proxy_epoch"),
+                    "{name}"
+                );
+                assert_eq!(abort.reason as u64, u64_field(&vector, "reason"), "{name}");
+                assert_eq!(encode_join_relay_abort(&abort).unwrap(), inner, "{name}");
+            }
+            "join_usb_result" => {
+                let result = decode_join_relay_result(&inner).unwrap();
+                assert_eq!(result.result as u64, u64_field(&vector, "result"), "{name}");
+                assert_eq!(result.proxy, u64_field(&vector, "proxy"), "{name}");
+                assert_eq!(
+                    u64::from(result.relay_id),
+                    u64_field(&vector, "relay_id"),
+                    "{name}"
+                );
+                assert_eq!(
+                    u64::from(result.gateway_epoch),
+                    u64_field(&vector, "gateway_epoch"),
+                    "{name}"
+                );
+                assert_eq!(
+                    u64::from(result.proxy_epoch),
+                    u64_field(&vector, "proxy_epoch"),
+                    "{name}"
+                );
+                assert_eq!(encode_join_relay_result(&result).unwrap(), inner, "{name}");
+            }
+            codec => panic!("{name}: unknown usb join codec {codec}"),
+        }
+    }
+    let mut files: Vec<PathBuf> = fs::read_dir(root.join("invalid"))
+        .expect("invalid dir")
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+    assert!(files.len() >= 20, "usb join invalid: {}", files.len());
+    for path in &files {
+        let vector = load(path);
+        let name = field(&vector, "name").to_string();
+        let bytes = unhex(field(&vector, "encoded_hex"));
+        match field(&vector, "codec") {
+            "join_usb_up" => assert!(decode_join_relay_up(&bytes).is_err(), "{name}"),
+            "join_usb_down" => assert!(decode_join_relay_down(&bytes).is_err(), "{name}"),
+            "join_usb_abort" => assert!(decode_join_relay_abort(&bytes).is_err(), "{name}"),
+            "join_usb_result" => assert!(decode_join_relay_result(&bytes).is_err(), "{name}"),
+            codec => panic!("{name}: unknown usb join codec {codec}"),
+        }
+    }
 }

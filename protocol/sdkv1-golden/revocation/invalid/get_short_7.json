@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_get",
+  "encoded_hex": "01020000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "get_short_7",
+  "note": "8 B exact"
+}

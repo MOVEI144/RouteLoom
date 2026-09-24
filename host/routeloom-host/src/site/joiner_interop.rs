@@ -11,10 +11,9 @@
 //! production Rust code. USB daemon wiring, MeshNode and real radio are
 //! out of scope, exactly like the C++ two-site simulator.
 //!
-//! The peer path comes from `ROUTELOOM_JOINER_PEER` and a missing
-//! executable is a hard failure, never a skip (§10.2 item 6); the
-//! `joiner-interop` CI job builds the peer first and the general `rust`
-//! job filters this module out.
+//! The peer path comes from `ROUTELOOM_JOINER_PEER` or the CMake build
+//! next to this workspace. A missing executable is a hard failure, never
+//! a skip (§10.2 item 6).
 //!
 //! Time: the test owns one virtual clock (`t0` = real `now_ms` at start,
 //! so API1's real-time stamps stay near the authority's virtual stamps).
@@ -41,8 +40,7 @@ use std::thread;
 use routeloom_client::api1::RouteLoomTransport;
 use routeloom_client::site::{Assignment, Decision, KGuardMock, Role, SiteAdmin};
 use routeloom_protocol::join_relay::{
-    RelayBody, RelayDirection, RelayHeader, RelayObject, RelayState, RelayStatusCode, PHASE_EDHOC,
-    RELAY_OBJECT_MAX,
+    RelayBody, RelayDirection, RelayHeader, RelayObject, RelayState, PHASE_EDHOC, RELAY_OBJECT_MAX,
 };
 use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
 use routeloom_provision::sha256::sha256;
@@ -50,7 +48,7 @@ use routeloom_provision::signer::{test_keypair, FileRootSigner, RootSigner};
 
 use super::store::SqliteSiteStore;
 use super::testkit;
-use super::transport::{AbortReason, DownStatus, InProcessTransport, Outbound, RelayKey, RelayUp};
+use super::transport::{DownStatus, InProcessTransport, Outbound, RelayKey, RelayUp};
 use super::{SiteAuthority, SiteService, SiteSetup};
 use crate::acl::Acl;
 use crate::{now_ms, serve_client, DeviceSession, State};
@@ -160,6 +158,8 @@ struct PeerAbort {
     site: u8,
     proxy: u64,
     relay_id: u32,
+    gateway_epoch: u32,
+    proxy_epoch: u32,
     reason: u8,
 }
 
@@ -231,8 +231,20 @@ impl Drop for Peer {
 
 impl Peer {
     fn spawn(t0: u64, seed: u64, flash: Option<&std::path::Path>) -> Self {
-        let path = std::env::var("ROUTELOOM_JOINER_PEER")
-            .expect("ROUTELOOM_JOINER_PEER must name routeloom_joiner_interop_peer");
+        let path = std::env::var_os("ROUTELOOM_JOINER_PEER")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()?
+                    .parent()?;
+                ["build-rf", "build"].into_iter().find_map(|dir| {
+                    let candidate = root
+                        .join(dir)
+                        .join("tests/cpp/routeloom_joiner_interop_peer");
+                    candidate.is_file().then_some(candidate)
+                })
+            })
+            .expect("build routeloom_joiner_interop_peer or set ROUTELOOM_JOINER_PEER");
         let keys = device_keys();
         let site_ca_pub = test_keypair(0x61).1;
         let mut command = Command::new(&path);
@@ -361,10 +373,14 @@ impl Peer {
                     pos += 1;
                     let proxy = get_u64(&payload, &mut pos);
                     let relay_id = get_u32(&payload, &mut pos);
+                    let gateway_epoch = get_u32(&payload, &mut pos);
+                    let proxy_epoch = get_u32(&payload, &mut pos);
                     tick.aborts.push(PeerAbort {
                         site,
                         proxy,
                         relay_id,
+                        gateway_epoch,
+                        proxy_epoch,
                         reason: payload[pos],
                     });
                 }
@@ -411,6 +427,15 @@ impl Peer {
         let mut command = vec![b'W', site];
         command.extend_from_slice(&to_proxy.to_le_bytes());
         command.extend_from_slice(object);
+        self.send(&command);
+    }
+
+    fn send_abort(&mut self, site: u8, key: &RelayKey) {
+        let mut command = vec![b'B', site];
+        command.extend_from_slice(&key.proxy.to_le_bytes());
+        command.extend_from_slice(&key.relay_id.to_le_bytes());
+        command.extend_from_slice(&key.gateway_epoch.to_le_bytes());
+        command.extend_from_slice(&key.proxy_epoch.to_le_bytes());
         self.send(&command);
     }
 
@@ -536,18 +561,6 @@ impl InteropSite {
 
 // --- Driver --------------------------------------------------------------------
 
-/// Host abort → relay abort, mapped by meaning (§10.2 item 4). The two
-/// enums share no values: `Busy` is the only retryable hint, everything
-/// else ends the relay, and an unreachable authority must read as such
-/// on the device — never as `Busy`.
-fn map_abort(reason: AbortReason) -> (RelayStatusCode, u32) {
-    match reason {
-        AbortReason::Busy => (RelayStatusCode::Busy, 1000),
-        AbortReason::UnknownRelay | AbortReason::Timeout => (RelayStatusCode::Aborted, 0),
-        AbortReason::AuthorityError => (RelayStatusCode::AuthorityUnreachable, 0),
-    }
-}
-
 fn down_object(key: &RelayKey, step: u8, status: DownStatus, body: Vec<u8>) -> Vec<u8> {
     RelayObject {
         header: RelayHeader {
@@ -563,33 +576,13 @@ fn down_object(key: &RelayKey, step: u8, status: DownStatus, body: Vec<u8>) -> V
                 RelayState::Continue
             },
             joiner_rssi_dbm: 0,
+            gateway_epoch: key.gateway_epoch,
+            proxy_epoch: key.proxy_epoch,
         },
         body: RelayBody::Message(body),
     }
     .encode()
     .expect("down object encodes")
-}
-
-fn abort_object(key: &RelayKey, reason: AbortReason) -> Vec<u8> {
-    let (status, retry_after_ms) = map_abort(reason);
-    RelayObject {
-        header: RelayHeader {
-            dir: RelayDirection::Down,
-            relay_id: key.relay_id,
-            proxy: key.proxy,
-            joiner_mac: key.joiner_mac,
-            phase: PHASE_EDHOC,
-            step: 2,
-            state: RelayState::Abort,
-            joiner_rssi_dbm: 0,
-        },
-        body: RelayBody::Abort {
-            status,
-            retry_after_ms,
-        },
-    }
-    .encode()
-    .expect("abort object encodes")
 }
 
 struct World {
@@ -598,7 +591,7 @@ struct World {
     now: u64,
     /// (site, decision) in serve order.
     decisions: Vec<(u8, Decision)>,
-    /// (site, m4 forward time, row delivered_ms): commit-before-send proof.
+    /// (site, m4 forward time, durable row delivered_ms) for Allow forwards.
     allow_forwards: Vec<(u8, u64, u64)>,
     aborts_seen: Vec<PeerAbort>,
     ups_seen: u64,
@@ -643,9 +636,12 @@ impl World {
                 gateway: self.sites[site_idx].gateway,
                 proxy: object.header.proxy,
                 relay_id: object.header.relay_id,
+                gateway_epoch: object.header.gateway_epoch,
+                proxy_epoch: object.header.proxy_epoch,
                 joiner_mac: object.header.joiner_mac,
             },
             hops: up.hops,
+            phase: object.header.phase,
             step: object.header.step,
             joiner_rssi_dbm: object.header.joiner_rssi_dbm,
             body,
@@ -669,9 +665,19 @@ impl World {
                             .decisions
                             .iter()
                             .any(|(s, d)| *s == site && matches!(d, Decision::Allow(_)));
-                        let row = self.sites[site_idx]
+                        let (row, durable) = self.sites[site_idx]
                             .service
-                            .with(|a| a.devices.get(&DEVICE_NODE).cloned())
+                            .with(|a| {
+                                let row = a.devices.get(&DEVICE_NODE).cloned();
+                                let durable = a
+                                    .store
+                                    .load()
+                                    .expect("read committed member row")
+                                    .devices
+                                    .into_iter()
+                                    .find(|member| member.node == DEVICE_NODE);
+                                (row, durable)
+                            })
                             .0;
                         if allowed_here {
                             let row = row.expect("allow committed before its m4");
@@ -680,10 +686,9 @@ impl World {
                             let delivered = row
                                 .delivered_ms
                                 .expect("delivered_ms stored with the delivery");
-                            assert!(
-                                delivered <= self.now,
-                                "durable approval precedes the m4 send"
-                            );
+                            let durable = durable.expect("allow persisted before its m4");
+                            assert_eq!(durable.delivered_ms, Some(delivered));
+                            assert_eq!(durable.dams, row.dams);
                             self.allow_forwards.push((site, self.now, delivered));
                         } else {
                             assert!(
@@ -695,9 +700,8 @@ impl World {
                     let bytes = down_object(&down.key, down.step, down.status, down.body.clone());
                     self.peer.send_down(site, down.key.proxy, &bytes);
                 }
-                Outbound::Abort { key, reason } => {
-                    let bytes = abort_object(&key, reason);
-                    self.peer.send_down(site, key.proxy, &bytes);
+                Outbound::Abort { key, reason: _ } => {
+                    self.peer.send_abort(site, &key);
                 }
             }
         }
@@ -726,7 +730,9 @@ impl World {
             self.route_up(up);
         }
         for index in 0..2 {
-            self.sites[index].service.tick(self.now);
+            self.sites[index]
+                .service
+                .tick(super::group_keys::HostTime::sync(self.now));
             self.drain(index);
         }
         self.serve_kguard();
@@ -735,6 +741,8 @@ impl World {
                 site: abort.site,
                 proxy: abort.proxy,
                 relay_id: abort.relay_id,
+                gateway_epoch: abort.gateway_epoch,
+                proxy_epoch: abort.proxy_epoch,
                 reason: abort.reason,
             });
         }

@@ -36,6 +36,8 @@ add_executable(routeloom_host_ops_tests test_host_ops.cpp)
 target_link_libraries(routeloom_host_ops_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_host_ops_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_host_ops_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_host_ops_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 add_test(NAME routeloom_host_ops_tests COMMAND routeloom_host_ops_tests)
 
 add_executable(routeloom_usb_tests test_usb.cpp)
@@ -190,6 +192,18 @@ target_compile_options(routeloom_key_schedule_tests PRIVATE -Wall -Wextra -Wpeda
 target_compile_definitions(routeloom_key_schedule_tests PRIVATE
     ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 add_test(NAME routeloom_key_schedule_tests COMMAND routeloom_key_schedule_tests)
+
+# Authority channel, device side (G-SEC P5 PR1, V1-K11 crypto/endpoint part):
+# body codecs, GK-id and sealed envelopes byte-exact against
+# protocol/sdkv1-golden/authority (tools/gen_sdkv1_authority_vectors.py),
+# plus a live client round-trip against an in-test fake authority.
+add_executable(routeloom_sdkv1_authority_tests test_sdkv1_authority.cpp)
+target_link_libraries(routeloom_sdkv1_authority_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_authority_tests PRIVATE ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_authority_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_sdkv1_authority_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+add_test(NAME routeloom_sdkv1_authority_tests COMMAND routeloom_sdkv1_authority_tests)
 
 # RLRES1 resume state machine and its attack suite (plan P1-5, V1-F02).
 add_executable(routeloom_rlres1_tests test_rlres1.cpp)
@@ -461,6 +475,18 @@ target_include_directories(routeloom_sdkv1_membership_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_membership_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_membership_tests COMMAND routeloom_sdkv1_membership_tests)
+# P6 revocation lifecycle, PR A (docs/design/sdk-v1/04 §2-§5, plan P6-1):
+# RRS1 acceptance/enforcement/gossip and the traffic gate through fake
+# ports (production P4/P5 adapters land later; see sdkv1_revocation.hpp).
+add_executable(routeloom_sdkv1_revocation_tests test_sdkv1_revocation.cpp)
+target_link_libraries(routeloom_sdkv1_revocation_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_revocation_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_definitions(routeloom_sdkv1_revocation_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+target_compile_options(routeloom_sdkv1_revocation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_revocation_tests COMMAND routeloom_sdkv1_revocation_tests)
+
 # Factory maintenance console engine (sdk-v1/07 §6, 08 P7): keygen + PoP,
 # identity-bundle sealing with readback, lock/store gating — against real
 # office bytes from protocol/sdkv1-golden/.

@@ -12,6 +12,12 @@ rust-version.workspace = true
 hkdf = "0.12"
 hmac = "0.12"
 sha2 = { version = "0.10", default-features = false }
+# Authority channel (03 §5.3, G-SEC P5 PR1): AES-GCM-128 seal/open for the
+# AuthorityEnvelope, detached in-place API (no alloc feature needed), and
+# `zeroize` (already in the lockfile through routeloom-edhoc) for
+# scratch/secret wiping. Pure Rust, no unsafe (the workspace forbids it).
+aes-gcm = { version = "0.10", default-features = false, features = ["aes"] }
+zeroize = { version = "1", default-features = false }
 
 [dev-dependencies]
 routeloom-protocol = { path = "../routeloom-protocol" }

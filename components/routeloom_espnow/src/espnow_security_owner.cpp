@@ -213,13 +213,13 @@ Status EspNowSecurityOwner::join_down(const NodeId to_proxy, const sdkv1::RelayO
   return coordinator().step(down);
 }
 
-Status EspNowSecurityOwner::join_abort(const NodeId proxy, const std::uint32_t relay_id,
+Status EspNowSecurityOwner::join_abort(const NodeId proxy, const sdkv1::RelayToken token,
                                        const std::uint8_t reason,
                                        const MonotonicMs now_ms) noexcept {
   if (!booted_) return Status::error(StatusCode::InvalidState, "owner not booted");
   const NodeId self =
       adopted_node_ != kInvalidNodeId ? adopted_node_ : config_.local_node;
-  if (proxy == self && relay_id != 0 && relay_id == local_join_relay_id_) {
+  if (proxy == self && token.relay_id != 0 && token.relay_id == local_join_relay_id_) {
     // The host is aborting our own LocalJoin attempt.
     local_join_relay_id_ = 0;
     sdkv1::CoordinatorEvent abort{};
@@ -232,7 +232,9 @@ Status EspNowSecurityOwner::join_abort(const NodeId proxy, const std::uint32_t r
   abort.kind = sdkv1::CoordinatorEventKind::UsbRelayAbort;
   abort.now = now_ms;
   abort.usb_proxy = proxy;
-  abort.usb_relay_id = relay_id;
+  abort.usb_relay_id = token.relay_id;
+  abort.usb_gateway_epoch = token.gateway_epoch;
+  abort.usb_proxy_epoch = token.proxy_epoch;
   abort.usb_reason = reason;
   return coordinator().step(abort);
 }
@@ -305,12 +307,12 @@ Status EspNowSecurityOwner::send_relay_up_to_host(const NodeId proxy, const std:
 }
 
 Status EspNowSecurityOwner::send_relay_abort_to_host(
-    const NodeId proxy, const std::uint32_t relay_id,
+    const NodeId proxy, const sdkv1::RelayToken token,
     const sdkv1::RelayAbortReason reason) noexcept {
   if (bridge_ == nullptr) {
     return Status::error(StatusCode::InvalidState, "usb not attached");
   }
-  return bridge_->relay_abort(proxy, relay_id, reason);
+  return bridge_->relay_abort(proxy, token, reason);
 }
 
 SecurityProfile EspNowSecurityOwner::security_profile() const noexcept {

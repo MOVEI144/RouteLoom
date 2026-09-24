@@ -14,11 +14,13 @@
 //! | [`SiteAdmin::discovered`] | `devices.discovered.list` (all pages) |
 //! | [`SiteAdmin::members`] / [`SiteAdmin::member`] | `members.list` / `members.get` |
 //! | [`SiteAdmin::revoke`] | `membership.revoke` |
+//! | [`SiteAdmin::group_key_status`] | `group_keys.status` |
+//! | [`SiteAdmin::rotate_group_key`] | `group_keys.rotate` |
 //! | [`SiteAdmin::site_events`] | `messages.subscribe {stream:"events", filter.kinds: SITE_EVENT_KINDS}` |
 //!
 //! Grants (routeloom-host `--api-acl-file`, on the site's wire network):
 //! `MEMBERSHIP_READ` for reads and events, `MEMBERSHIP_DECIDE` for
-//! `decide` / `revoke`.
+//! `decide` / `revoke`, `MEMBERSHIP_ADMIN` for `rotate_group_key`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -26,7 +28,7 @@ use std::sync::Mutex;
 use crate::{NodeId, TransportError};
 
 /// Event kinds the Site Authority emits (07 §2.3 as implemented).
-pub const SITE_EVENT_KINDS: [&str; 10] = [
+pub const SITE_EVENT_KINDS: [&str; 12] = [
     "join.request",
     "join.decided",
     "device.discovered",
@@ -36,6 +38,8 @@ pub const SITE_EVENT_KINDS: [&str; 10] = [
     "member.removal_notified",
     "rrs.published",
     "gk.staged",
+    "gk.rotated",
+    "gk.member_applied",
     "authority.error",
 ];
 
@@ -197,6 +201,75 @@ pub struct RevokeOutcome {
     pub rs_epoch: u32,
 }
 
+/// The last converged rotation (07 §2.2 `group_keys.status`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastRotation {
+    pub from_epoch: u32,
+    pub to_epoch: u32,
+    pub cause: String,
+    pub activated_ms: u64,
+}
+
+/// Group-key lifecycle state (07 §2.2 `group_keys.status`): phases, causes
+/// and counts only — never secrets, GK-id arrays or DAMS.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupKeyStatus {
+    pub active: u32,
+    pub staged: Option<u32>,
+    /// `stable` / `staging` / `activating` / `catching_up`.
+    pub phase: String,
+    pub cause: Option<String>,
+    pub targets: u32,
+    pub staged_ack: u32,
+    pub active_ack: u32,
+    pub unknown: u32,
+    pub last_rotation: Option<LastRotation>,
+    pub next_due_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RotateOutcome {
+    pub operation_id: String,
+    /// `committed` — the staged key exists; distribution to the mesh is
+    /// reported separately (`operations.get`, `group_keys.status`).
+    pub state: String,
+    pub from_epoch: u32,
+    pub to_epoch: u32,
+    pub targets: u32,
+}
+
+/// RRS1 distribution progress of a revoke operation (P6-1):
+/// `pending` (committed, nothing sent), `distributing`, `converged`, or
+/// `unknown` (pre-P6-1 operation, or a target without an Applied ACK).
+/// Nothing counts as applied/retired without evidence.
+///
+/// `converged` means the RRS-enforcement snapshot has no `unknown`
+/// recipient left. It is neither the target's erase confirmation nor
+/// GK-rotation completion — display it as RRS convergence only, and
+/// never collapse `unknown > 0` (or a missing view) into success.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DistributionProgress {
+    pub state: String,
+    pub applied: u64,
+    pub retired: u64,
+    pub unknown: u64,
+    pub total: u64,
+}
+
+/// A revoke operation with its distribution progress.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperationProgress {
+    pub operation_id: String,
+    pub kind: String,
+    /// `committed`, `distributing`, or `converged` (V1-R01). `converged`
+    /// is RRS snapshot convergence only — not target erase, not GK done.
+    pub state: String,
+    pub device: NodeId,
+    pub generation: u32,
+    pub rs_epoch: u32,
+    pub distribution: DistributionProgress,
+}
+
 /// One Site Authority event (the raw JSON is kept for fields this type
 /// does not model).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,6 +309,19 @@ pub trait SiteAdmin: Send + Sync {
         reason: RemovalReason,
         idempotency_key: &str,
     ) -> Result<RevokeOutcome, TransportError>;
+    fn group_key_status(&self) -> Result<GroupKeyStatus, TransportError>;
+    /// Starts a manual rotation. `expected_active_epoch` guards against
+    /// acting on a stale screen (`CONFLICT` when it moved on); while a
+    /// rotation distributes the call is `BUSY` (retryable).
+    fn rotate_group_key(
+        &self,
+        expected_active_epoch: u32,
+        idempotency_key: &str,
+    ) -> Result<RotateOutcome, TransportError>;
+    /// Reads back a revoke operation with its RRS1 distribution progress
+    /// (`operations.get`). `None` when the id is unknown.
+    fn operation(&self, operation_id: &str) -> Result<Option<OperationProgress>, TransportError>;
+
     fn site_events(&self) -> Result<SiteEventStream, TransportError>;
 }
 

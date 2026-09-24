@@ -1619,7 +1619,8 @@ Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
 }
 
 Status NeighborDiscovery::begin_member_handshake(
-    const NodeId peer, const MacAddress& peer_mac, const MonotonicMs now_ms,
+    const NodeId peer, const MacAddress& peer_mac, const ScopeDigest& carrier_digest,
+    const MonotonicMs now_ms,
     std::uint32_t& token) noexcept {
   token = kMemberHandshakeNone;
   if (peer == kInvalidNodeId || peer == kBroadcastNodeId || peer == 0) {
@@ -1630,6 +1631,9 @@ Status NeighborDiscovery::begin_member_handshake(
     if (byte != 0) mac_zero = false;
   }
   if (mac_zero) return Status::error(StatusCode::InvalidArgument, "member peer mac");
+  bool digest_zero = true;
+  for (const auto byte : carrier_digest) digest_zero &= byte == 0;
+  if (digest_zero) return Status::error(StatusCode::InvalidArgument, "member carrier digest");
   sweep_member_pendings(now_ms);
   // Reservation-time MAC conflict: the completion tail re-checks against
   // the freshest table, but a start that already contradicts a known
@@ -1681,22 +1685,17 @@ Status NeighborDiscovery::begin_member_handshake(
       return Status::error(StatusCode::PeerCapacity, "member table full");
     }
   }
-  // Mint a token no live reservation holds; the counter never rests on 0.
+  // A consumed token is never reused while this discovery instance lives.
   std::uint32_t fresh = next_member_token_;
-  if (fresh == kMemberHandshakeNone) fresh = 1;
-  for (std::size_t guard = 0; guard <= kMemberHandshakePendings; ++guard) {
-    bool taken = false;
-    for (const auto& pending : member_pendings_) {
-      if (pending.used && pending.token == fresh) taken = true;
-    }
-    if (!taken) break;
-    fresh = (fresh == 0xFFFFFFFFU) ? 1 : fresh + 1;
+  if (fresh == kMemberHandshakeNone) {
+    return Status::error(StatusCode::CounterExhausted, "member token exhausted");
   }
-  next_member_token_ = (fresh == 0xFFFFFFFFU) ? 1 : fresh + 1;
+  next_member_token_ = fresh == 0xFFFFFFFFU ? kMemberHandshakeNone : fresh + 1;
   slot->used = true;
   slot->token = fresh;
   slot->peer = peer;
   slot->mac = peer_mac;
+  slot->carrier_digest = carrier_digest;
   slot->expires_at_ms = now_ms + config_.candidate_ttl_ms;
   token = fresh;
   return Status::success();
@@ -1718,8 +1717,11 @@ Status NeighborDiscovery::complete_handshake(const std::uint32_t token,
   }
   const MacAddress peer_mac = slot->mac;
   const NodeId peer_node = slot->peer;
+  const ScopeDigest carrier_digest = slot->carrier_digest;
   *slot = MemberPending{};  // single-use: consumed before elevation runs
-  if (!proof.valid() || proof.peer() != peer_node || !mac_equal(proof.mac(), peer_mac) ||
+  if (!proof.valid() || proof.elevation_token() != token ||
+      proof.carrier_digest() != carrier_digest || proof.peer() != peer_node ||
+      !mac_equal(proof.mac(), peer_mac) ||
       proof.network() != config_.network) {
     ++stats_.auth_tag_rejects;
     reject_event("AUTH_FAILED", peer_node);
@@ -2578,6 +2580,30 @@ Status NeighborDiscovery::revoke_peer(const NodeId peer) noexcept {
     --pins_used_;
   }
   event("REVOKED", peer);
+  return Status::success();
+}
+
+Status NeighborDiscovery::reauth_revoked(const NodeId peer,
+                                            const MonotonicMs now_ms) noexcept {
+  constexpr MonotonicMs kReauthCooldownMs = 60000;
+  bool revoked = false;
+  bool cooling = false;
+  neighbors_.for_each([&](const Neighbor& n) {
+    if (n.node != peer || n.phase != NeighborPhase::Revoked) return;
+    revoked = true;
+    // Underflow-safe: an attempt is recent only when now is at/past it
+    // and inside the minute.
+    if (now_ms >= n.last_reauth_attempt_ms &&
+        now_ms - n.last_reauth_attempt_ms < kReauthCooldownMs) {
+      cooling = true;
+    }
+  });
+  if (!revoked) return Status::error(StatusCode::NotFound, "peer not revoked");
+  if (cooling) return Status::error(StatusCode::Busy, "reauth cooldown");
+  neighbors_.for_each([&](Neighbor& n) {
+    if (n.node == peer && n.phase == NeighborPhase::Revoked) n.last_reauth_attempt_ms = now_ms;
+  });
+  event("REAUTH_ADMITTED", peer);
   return Status::success();
 }
 

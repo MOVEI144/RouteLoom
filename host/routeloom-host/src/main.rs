@@ -748,7 +748,7 @@ struct State {
     /// lane — separate from `dispatch_inbox` so relay traffic never
     /// competes with the send lane's replies. Posted only for
     /// session-verified bodies; the lane additionally gates on the
-    /// gateway's CAP_JOIN_RELAY_V1 bit before touching the authority.
+    /// gateway's CAP_JOIN_RELAY_V2 bit before touching the authority.
     site_inbox: site::usb::SiteInbox,
 }
 

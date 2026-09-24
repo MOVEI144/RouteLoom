@@ -193,7 +193,7 @@ JSONの例は[07 §2.4](../design/sdk-v1/07-host-api-tooling.md)。idempotency�
 
 **event**（`stream:"events"`、`filter.kinds`で選択）：`join.request`、`join.decided`、`device.discovered`、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`、`site.session_drop`。
 
-**参加の中継**：機器のEDHOC messageはproxy→gateway→USB HostOps 0x60/0x61/0x62（[02 §7](../design/sdk-v1/02-zero-touch-join.md)、応答は0x63）でsite laneに届く。laneは認証済みsession＋CAP_JOIN_RELAY_V1（bit 8）のgatewayにだけ中継を開き、phase 4だけSite Authorityへ渡す（phase 5はP3-5未対応として0x62で拒否）。Authorityの応答は有界queue（8件・1件≤1005 B・TTL 20 s）経由で0x61/0x62として送り、受付失敗は試行を失敗終了する。結線状態は`capabilities.get`の`site.join_relay:"ready|not_ready"`。
+**参加の中継**：機器のEDHOC messageはproxy→gateway→USB HostOps 0x60/0x61/0x62（[02 §7](../design/sdk-v1/02-zero-touch-join.md)、応答は0x63）でsite laneに届く。laneは認証済みsession＋CAP_JOIN_RELAY_V2（bit 9；bit 8はv1 historyで不受理）のgatewayにだけ中継を開き、phase 4だけSite Authorityへ渡す（phase 5はP3-5未対応として0x62で拒否）。Authorityの応答は有界queue（8件・1件≤1005 B・TTL 20 s）経由で送り（downは0x61、中止はfull token付き0x62のみ）、受付失敗は試行を失敗終了する。結線状態は`capabilities.get`の`site.join_relay:"ready|not_ready"`。
 
 **アプリ向け（`routeloom-client`）**：`site::SiteAdmin` trait（`site_status`、`join_requests`、`decide`、`discovered`、`members`／`member`、`revoke`、`site_events`）をRouteLoomTransportが実装する。`site::KGuardMock`は割当表（ここ→allow、他現場→deny not_here、禁止→deny blocked、未知→pending）で未決定の要求に答える試験用の実装。
 

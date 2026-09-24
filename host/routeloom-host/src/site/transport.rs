@@ -1,24 +1,29 @@
 //! Where join messages come from and go to (docs/design/sdk-v1/02 §7,
 //! 07 §4). The Site Authority never touches USB: a gateway adapter turns
 //! HostOps 0x60 JoinRelayUp into [`RelayUp`], and the authority's
-//! [`Outbound`] items into 0x61 JoinRelayDown / abort bodies
+//! [`Outbound`] items into 0x61 JoinRelayDown / 0x62 JoinRelayAbort
 //! (`routeloom-protocol::join_relay`, the byte-level codec shared with the
 //! device's `UsbBridge::attach_join_relay`).
+//!
+//! Expected shapes (02 §7.1/§7.2 as resolved in §7.4 and hardened by #116;
+//! byte layouts are owned by the USB codec, not by this module):
 //!
 //! ```text
 //! 0x60 JoinRelayUp   (G→H): gateway u64 | from_proxy u64 | hops u8 | RelayHeader(dir=1) | body
 //! 0x61 JoinRelayDown (H→G): to_proxy u64 | RelayHeader(dir=2, status) | body
-//! 0x62 JoinRelayAbort (both): proxy u64 | relay_id u32 | reason u8
-//! 0x63 JoinRelayResult (G→H): result u16 | proxy u64 | relay_id u32
-//! RelayHeader (24 B): ver=1 | dir | relay_id u32 | proxy u64 | joiner MAC 6B |
-//!                     step u8 | state u8 | joiner_rssi_dbm i8 | phase u8
+//! 0x62 JoinRelayAbort (both): proxy u64 | relay_id u32 | gateway_epoch u32 | proxy_epoch u32 | reason u8
+//! 0x63 JoinRelayResult (G→H): result u16 | proxy u64 | relay_id u32 |
+//!                             gateway_epoch u32 | proxy_epoch u32
+//! RelayHeader (32 B): ver=2 | dir | relay_id u32 | proxy u64 | joiner MAC 6B |
+//!                     step u8 | status u8 | joiner_rssi_dbm i8 | phase u8 |
+//!                     gateway_epoch u32 | proxy_epoch u32
 //! ```
 //!
-//! `step` is the EDHOC message number 1..4, or 5 for an EDHOC error
-//! message; `state` on the way down is 0 continue, 1 final (the proxy
-//! frees its slot) or 2 abort (the body is a status hint, never a
-//! message). A gateway joining over its own USB link uses
-//! `proxy = gateway`, `hops = 0` (07 §4).
+//! `phase` names the exchange (4 EDHOC, 5 RLRES1) because `step` alone is
+//! ambiguous; `step` is the EDHOC message number 1..4, or 5 for an EDHOC
+//! error message; `status` on the way down is 0 continue or 1 final (the
+//! proxy frees its slot); aborting is a 0x62 JoinRelayAbort. A gateway
+//! joining over its own USB link uses `proxy = gateway`, `hops = 0` (07 §4).
 //!
 //! The binding to real USB frames is [`super::usb::UsbSiteAdapter`]:
 //! `deliver` admits one encoded frame into its bounded down queue (8
@@ -27,8 +32,9 @@
 
 use std::sync::{Arc, Mutex};
 
-/// Down-link status of a relayed message, sent as the RelayHeader state
-/// of a 0x61 JoinRelayDown with a message body.
+/// Down-link status of a relayed message. (RelayHeader status 2,
+/// "aborted", is never sent as a JoinRelayDown here: an abort is an
+/// [`Outbound::Abort`], i.e. 0x62 JoinRelayAbort.)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum DownStatus {
@@ -36,13 +42,18 @@ pub enum DownStatus {
     Final = 1,
 }
 
+/// `phase` of an EDHOC exchange on the relay.
+pub const PHASE_EDHOC: u8 = 4;
+/// `phase` of an RLRES1 exchange on the relay.
+pub const PHASE_RESUME: u8 = 5;
+
 /// `step` of an EDHOC error message on the relay.
 pub const STEP_EDHOC_ERROR: u8 = 5;
 
 /// Why the authority ended a relay without an answer. Provisional and
 /// host-local: these values are NEVER cast to USB bytes — the USB
-/// adapter maps each variant explicitly onto a 0x61 status-2 body (or a
-/// 0x62 reason); see `super::usb` for the table.
+/// adapter maps each variant explicitly onto a 0x62 reason; see
+/// `super::usb` for the table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum AbortReason {
@@ -58,15 +69,17 @@ pub enum AbortReason {
     AuthorityError = 4,
 }
 
-/// Identifies one relayed exchange: the proxy's relay slot and the MAC it
-/// observed (02 §7.1). Unauthenticated routing data, never evidence. The
-/// USB adapter binds `gateway` to the authenticated session's gateway
-/// identity — a RelayKey never carries a gateway the session did not
-/// prove.
+/// Identifies one relayed exchange: both service epochs, the proxy's
+/// relay slot within its epoch, and the MAC it observed (02 §7.1, #116).
+/// Unauthenticated routing data, never evidence. The USB adapter binds
+/// `gateway` to the authenticated session's gateway identity — a RelayKey
+/// never carries a gateway the session did not prove.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct RelayKey {
     pub gateway: u64,
     pub proxy: u64,
+    pub gateway_epoch: u32,
+    pub proxy_epoch: u32,
     pub relay_id: u32,
     pub joiner_mac: [u8; 6],
 }
@@ -78,6 +91,8 @@ pub struct RelayUp {
     pub key: RelayKey,
     /// Proxy → gateway hops as the gateway reported (display only).
     pub hops: u8,
+    /// BootstrapAuth phase: 4 EDHOC, 5 RLRES1 (never inferred from `step`).
+    pub phase: u8,
     pub step: u8,
     /// Proxy-observed RSSI of the joiner (display only, unauthenticated).
     pub joiner_rssi_dbm: i8,
@@ -88,6 +103,8 @@ pub struct RelayUp {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayDown {
     pub key: RelayKey,
+    /// Echoes the inbound exchange's phase.
+    pub phase: u8,
     pub step: u8,
     pub status: DownStatus,
     pub body: Vec<u8>,
@@ -96,9 +113,7 @@ pub struct RelayDown {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outbound {
     Down(RelayDown),
-    /// Encode as a 0x61 status-2 Abort body (preferred: it still carries
-    /// the status hint to the proxy) or a 0x62 JoinRelayAbort with an
-    /// explicitly mapped reason.
+    /// Encode as 0x62 JoinRelayAbort (the key carries the full token).
     Abort {
         key: RelayKey,
         reason: AbortReason,
@@ -172,6 +187,8 @@ mod tests {
         RelayKey {
             gateway: 1,
             proxy: 2,
+            gateway_epoch: 7,
+            proxy_epoch: 3,
             relay_id: 3,
             joiner_mac: [2, 0, 0, 0, 0, 3],
         }
@@ -180,6 +197,7 @@ mod tests {
     fn down(key: RelayKey) -> Outbound {
         Outbound::Down(RelayDown {
             key,
+            phase: PHASE_EDHOC,
             step: 2,
             status: DownStatus::Continue,
             body: vec![0x40],

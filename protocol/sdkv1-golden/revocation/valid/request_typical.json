@@ -1,0 +1,10 @@
+{
+  "body_hex": "0162000000030000000d",
+  "codec": "rrs_request",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "have_rs_epoch": 13,
+  "name": "request_typical",
+  "note": "pull our rs 13 against the peer's newer advertisement",
+  "site_epoch": 3
+}

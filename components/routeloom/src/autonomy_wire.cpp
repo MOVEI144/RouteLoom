@@ -309,7 +309,8 @@ Status control_object_decode(const ByteView encoded, ControlObjectPayload& out) 
   if (flags != 0 ||
       (kind != static_cast<std::uint8_t>(ControlObjectKind::ChannelPlan) &&
        kind != static_cast<std::uint8_t>(ControlObjectKind::RecoverySnapshot) &&
-       kind != static_cast<std::uint8_t>(ControlObjectKind::ConfigPermit)) ||
+       kind != static_cast<std::uint8_t>(ControlObjectKind::ConfigPermit) &&
+       kind != static_cast<std::uint8_t>(ControlObjectKind::RevocationSet)) ||
       out.total_len == 0 || out.total_len > kAuthenticatedObjectMax) {
     return prelude_error();
   }

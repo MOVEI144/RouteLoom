@@ -40,9 +40,15 @@ constexpr std::uint32_t kGk = 203;
 struct TestRandom {
   std::uint64_t state{0x123456789ABCDEFULL};
   bool exhausted{false};
+  NodeSessionBank* reenter_bank{nullptr};
+  bool reenter_saw_busy{false};
   static bool fill(void* ctx, std::uint8_t* out, const std::size_t size) noexcept {
     auto& self = *static_cast<TestRandom*>(ctx);
     if (self.exhausted) return false;
+    if (self.reenter_bank != nullptr) {
+      self.reenter_saw_busy =
+          self.reenter_bank->retire(SecurityScope::Link, kPeer).code == StatusCode::Busy;
+    }
     for (std::size_t i = 0; i < size; ++i) {
       self.state = self.state * 6364136223846793005ULL + 1442695040888963407ULL;
       out[i] = static_cast<std::uint8_t>(self.state >> 56U);
@@ -456,9 +462,20 @@ void suite_install_retire(const AeadGcm& port) {
   InstallAttestation att{};
   att.created_gk_epoch = kGk;
   CHECK(fix.bank.install_verified(same, att).code == StatusCode::Conflict);
+  // A changed wire id does not make the same TX key/IV a new nonce domain.
+  ContextKeys reused_tx = same;
+  reused_tx.tx_context_id = 0x1112;
+  reused_tx.rx_context_id = 0x2223;
+  CHECK(fix.bank.install_verified(reused_tx, att).code == StatusCode::Conflict);
+  reused_tx.peer = kPeer + 1;
+  CHECK(fix.bank.install_verified(reused_tx, att).code == StatusCode::Conflict);
   std::uint64_t again = 0;
   CHECK_OK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeer, 0x1111), again));
   CHECK(again == counter + 1);  // not rewound to 0
+  CHECK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeer, 0x9999), again)
+            .code == StatusCode::InvalidArgument);
+  CHECK_OK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeer, 0x1111), again));
+  CHECK(again == counter + 2);
   // An RX id live anywhere else collides.
   ContextKeys clash = same;
   clash.peer = kPeer + 1;
@@ -532,6 +549,17 @@ void suite_overlap(const AeadGcm& port) {
                               ByteView{aad, sizeof(aad)}, ByteView{cipher.data(), cipher.size()},
                               tag, MutableByteView{opened.data(), opened.size()}));
   CHECK((opened == std::array<std::uint8_t, 2>{0x08, 0x09}));
+  // An old RX key must stop at its GK lifetime even during the overlap.
+  std::uint64_t next_counter = 0;
+  CHECK_OK(fix.bank.next_counter(seal_context(SecurityScope::Link, kPeer, 0x1111), next_counter));
+  CHECK_OK(fix.bank.seal(seal_context(SecurityScope::Link, kPeer, 0x1111), next_counter,
+                         ByteView{aad, sizeof(aad)}, ByteView{plain, sizeof(plain)},
+                         MutableByteView{cipher.data(), cipher.size()}, tag));
+  CHECK_OK(peer_fix.bank.set_gk_epoch(kGk + 2));
+  CHECK(peer_fix.bank.open(open_context(SecurityScope::Link, kSelf, 0x1111, kPeer), next_counter,
+                           ByteView{aad, sizeof(aad)}, ByteView{cipher.data(), cipher.size()},
+                           tag, MutableByteView{opened.data(), opened.size()})
+            .code == StatusCode::AuthRequired);
   // ...until the 60 s overlap lapses.
   CHECK_OK(peer_fix.bank.tick(1000 + 60 * 1000));
   CHECK(peer_fix.bank.open(open_context(SecurityScope::Link, kSelf, 0x1111, kPeer), counter + 1,
@@ -562,6 +590,7 @@ void suite_lifetime(const AeadGcm& port) {
   CHECK(fix.bank.has_usable(SecurityScope::Link, kPeer));
   CHECK_OK(fix.bank.set_gk_epoch(kGk + 2));
   CHECK(!fix.bank.has_usable(SecurityScope::Link, kPeer));
+  CHECK(fix.bank.live_count(SecurityScope::Link) == 0);
   // A site change wipes everything, including demands.
   typename Bank::LocalView next{};
   next.self = kSelf;
@@ -716,6 +745,12 @@ void suite_reentry() {
   // Queries stay readable under re-entry pressure (side-effect-free).
   CHECK(fix.bank.context_state(SecurityScope::Link, kPeer) == ContextState::Ready);
   CHECK(fix.bank.live_count(SecurityScope::Link) == 1);
+  // Entropy is also an external callback and cannot retire a live key.
+  fix.random.reenter_bank = &fix.bank;
+  std::uint32_t id = 0;
+  CHECK_OK(fix.bank.allocate_context_id(id));
+  CHECK(fix.random.reenter_saw_busy);
+  CHECK(fix.bank.live_count(SecurityScope::Link) == 1);
 }
 
 void suite_provider_wiring() {
@@ -759,10 +794,10 @@ void suite_gateway_capacity(const AeadGcm& port) {
   extra.peer = 9999;
   extra.tx_context_id = 0x30000;
   extra.rx_context_id = 0x40000;
-  extra.tx_key.fill(1);
-  extra.rx_key.fill(2);
-  extra.tx_iv.fill(3);
-  extra.rx_iv.fill(4);
+  extra.tx_key.fill(0xF1);
+  extra.rx_key.fill(0xF2);
+  extra.tx_iv.fill(0xF3);
+  extra.rx_iv.fill(0xF4);
   InstallAttestation att{};
   att.created_gk_epoch = kGk;
   CHECK(fix.bank.install_verified(extra, att).code == StatusCode::NoCapacity);

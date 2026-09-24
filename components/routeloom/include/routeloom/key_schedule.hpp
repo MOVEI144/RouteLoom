@@ -46,6 +46,9 @@ inline constexpr char kLabelLinkCarrier[] = "RouteLoom/v1/link-carrier";
 inline constexpr char kLabelEndCarrier[] = "RouteLoom/v1/end-carrier";
 inline constexpr char kLabelSessionProfile[] = "RouteLoom/v1/session-profile";
 inline constexpr char kLabelContextConfirm[] = "RouteLoom/v1/context-confirm";
+// Authority channel (03 §5.3, G-SEC P5): GK-id binds (network, epoch, GK)
+// for ACK key confirmation. Never a raw-GK export.
+inline constexpr char kLabelGkId[] = "RouteLoom/v1/gk-id";
 
 // EDHOC Exporter labels (private use, 03 §2.1). Consumed by P2; listed here so
 // the whole RouteLoom label space is frozen in one place.

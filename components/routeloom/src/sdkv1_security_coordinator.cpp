@@ -5,6 +5,7 @@
 
 #include "routeloom/discovery_scope.hpp"  // hmac_sha256
 #include "routeloom/rlcw1.hpp"
+#include "routeloom/sdkv1_ead.hpp"  // join_org_hint/join_site_hint
 #include "routeloom/sdkv1_session_wire.hpp"  // own RLD1 capability word
 #include "routeloom/secure_clear.hpp"
 
@@ -51,23 +52,12 @@ SecurityCoordinator::MemberEngine::MemberEngine(
     ResumeSlotStorage2& resume, GatewaySessionBank& bank, BankSessionSink<32, 128>& sink,
     HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
     EntropySource& entropy, ZtRld1Port& rld1, ZtRelayPort& relay, JoinCookieSealer& sealer,
-    const NodeId node, const MacAddress mac) noexcept
+    const JoinProxyConfig& proxy_config, const JoinRelayGatewayConfig& gateway_config) noexcept
     : resume_cache(resume, kResume2NodeLinkQuota, kResume2NodeEndQuota),
       engine(resume_cache, sink, member_cookie, membership, verifier, &entropy_fill, &entropy),
       demands(bank, engine),
-      proxy([&] {
-        JoinProxyConfig config{};
-        config.node = node;
-        config.mac = mac;
-        return config;
-      }(),
-            rld1, relay, sealer, entropy),
-      gateway([&] {
-        JoinRelayGatewayConfig config{};
-        config.node = node;
-        return config;
-      }(),
-              relay) {}
+      proxy(proxy_config, rld1, relay, sealer, entropy),
+      gateway(gateway_config, relay) {}
 
 void SecurityCoordinator::destroy_workspace() noexcept {
   if (mode_ == CoordinatorMode::ZeroTouch) {
@@ -90,9 +80,48 @@ void SecurityCoordinator::create_joiner() noexcept {
 }
 
 void SecurityCoordinator::create_member() noexcept {
+  // Relay service identities (#116 §3.2): both incarnations are the
+  // adopted rlboot witness — committed durable, nonzero, distinct per
+  // boot. The hints come from the adopted stores (OFFERs must name this
+  // site or joiners filter them out); a missing SiteCA anchor fails the
+  // proxy closed (org_hint 0 → invalid) rather than naming another site.
+  JoinProxyConfig proxy_config{};
+  proxy_config.node = adopted_.node;
+  proxy_config.mac = deps_.local_mac;
+  proxy_config.network_low32 = static_cast<std::uint32_t>(adopted_.network);
+  proxy_config.site_hint = join_site_hint(deps_.site->site().site_id);
+  const IdentityRecord& identity = deps_.identity->identity();
+  for (std::uint8_t i = 0; i < identity.anchor_count; ++i) {
+    const IdentityAnchor& anchor = identity.anchors[i];
+    if (anchor.kind == AnchorKind::SiteCa && anchor.status == AnchorStatus::Active) {
+      proxy_config.org_hint = join_org_hint(anchor.pubkey);
+      break;
+    }
+  }
+  proxy_config.proxy_epoch = adopted_.boot_session;
+  proxy_config.gateway = kInvalidNodeId;
+  for (std::size_t i = 0; i < adopted_.route_gateway_count; ++i) {
+    const NodeId candidate = adopted_.route_gateways[i];
+    if (candidate != kInvalidNodeId && candidate != kBroadcastNodeId &&
+        candidate != adopted_.node) {
+      proxy_config.gateway = candidate;
+      break;
+    }
+  }
+  if (proxy_config.gateway == kInvalidNodeId || proxy_config.gateway == kBroadcastNodeId) {
+    // No remote gateway (lone gateway site, or an empty list): relay to
+    // the co-located engine through the direction-demuxed loopback. The
+    // local engine answers unreachable_retry when hostless — the standard
+    // #116 mechanism, and proxy diversity routes joins around us.
+    proxy_config.gateway = adopted_.node;
+    proxy_config.colocated_gateway = true;
+  }
+  JoinRelayGatewayConfig gateway_config{};
+  gateway_config.node = adopted_.node;
+  gateway_config.gateway_epoch = adopted_.boot_session;
   new (&ws_.member) MemberEngine(*deps_.resume_storage, bank_, bank_sink_, *this, *deps_.verifier,
                                  *deps_.entropy, *deps_.rld1, *this, *deps_.proxy_sealer,
-                                 deps_.local_node, deps_.local_mac);
+                                 proxy_config, gateway_config);
   ws_.member.gateway.set_host_sink(this);
 }
 
@@ -328,8 +357,10 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     if (start.initiator) {
       // Pair with discovery's reservation, then request the exchange.
       std::uint32_t token = NeighborDiscovery::kMemberHandshakeNone;
+      ScopeDigest carrier_digest{};
+      keys::link_carrier_digest(entry->carrier, carrier_digest);
       if (!deps_.discovery
-               ->begin_member_handshake(start.peer, start.peer_mac, now, token)
+               ->begin_member_handshake(start.peer, start.peer_mac, carrier_digest, now, token)
                .ok()) {
         entry->used = false;
         continue;
@@ -567,7 +598,8 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
   // else on this leg drops.
   if (env.kind == FrameType::BootstrapReply) {
     JoinReply reply{};
-    if (!join_reply_decode(body, reply).ok() || reply.lane != ObjectLane::JoinRelay) {
+    if (!join_reply_decode(JoinCarrier::Rld1, body, reply).ok() ||
+        reply.lane != ObjectLane::JoinRelay) {
       sat_inc(counters_.demux_drops);
       return Status::success();
     }
@@ -586,7 +618,8 @@ Status SecurityCoordinator::demux_member_frame(const autonomy::Rld1Envelope& env
     if (accepted.send_reply) {
       std::array<std::uint8_t, kJoinReplySize> body{};
       std::size_t written = 0;
-      if (join_reply_encode(accepted.reply, MutableByteView{body.data(), body.size()}, written)
+      if (join_reply_encode(JoinCarrier::Rld1, accepted.reply,
+                              MutableByteView{body.data(), body.size()}, written)
               .ok() &&
           written <= autonomy::kRld1MaxBody) {
         autonomy::Rld1Envelope reply_env{};
@@ -713,7 +746,11 @@ void SecurityCoordinator::drain_demands(const MonotonicMs now) noexcept {
     if (leg->discovery_token == NeighborDiscovery::kMemberHandshakeNone &&
         deps_.discovery != nullptr) {
       std::uint32_t token = NeighborDiscovery::kMemberHandshakeNone;
-      if (deps_.discovery->begin_member_handshake(demand.peer, leg->mac, now, token).ok()) {
+      ScopeDigest carrier_digest{};
+      keys::link_carrier_digest(leg->carrier, carrier_digest);
+      if (deps_.discovery
+              ->begin_member_handshake(demand.peer, leg->mac, carrier_digest, now, token)
+              .ok()) {
         leg->discovery_token = token;
       }
     }
@@ -836,7 +873,7 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
   const bool same = slot.mode() == JoinObjectSlot::Mode::Sending &&
                     slot.phase() == object.phase && slot.step() == object.step &&
                     slot.id() == leg->object_id && slot.lane() == ObjectLane::JoinRelay;
-  if (!same && !slot.load(JoinCarrier::Rld1, object.phase, object.step, leg->object_id,
+  if (!same && !slot.load(JoinCarrier::Rld1, object.phase, object.step, leg->object_id, 0, 0,
                            ByteView{full.data(), full_size}, now)
                     .ok()) {
     return Status::error(StatusCode::ProtocolError, "link tx load");
@@ -920,7 +957,7 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
   const bool same = slot.mode() == JoinObjectSlot::Mode::Sending &&
                     slot.phase() == object.phase && slot.step() == object.step &&
                     slot.id() == exchange && slot.lane() == ObjectLane::EndSession;
-  if (!same && !slot.load(JoinCarrier::WireRelay, object.phase, object.step, exchange,
+  if (!same && !slot.load(JoinCarrier::WireRelay, object.phase, object.step, exchange, 0, 0,
                            ByteView{encoded.data(), encoded_size}, now, ObjectLane::EndSession)
                     .ok()) {
     return Status::error(StatusCode::ProtocolError, "end tx load");
@@ -1031,7 +1068,7 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
           handle_end_chunk(frame.meta, payload, now);
         } else {
           JoinReply reply{};
-          if (join_reply_decode(payload, reply).ok() &&
+          if (join_reply_decode(JoinCarrier::WireRelay, payload, reply).ok() &&
               reply.lane == ObjectLane::EndSession) {
             (void)member().end_tx.on_reply(reply, now);
           } else {
@@ -1089,10 +1126,11 @@ void SecurityCoordinator::handle_end_chunk(const BootstrapMeta& meta, ByteView p
   }
   const JoinObjectSlot::Accepted accepted = member().end_rx.accept(JoinCarrier::WireRelay, chunk, now);
   if (accepted.send_reply) {
-    std::array<std::uint8_t, kJoinReplySize> body{};
+    std::array<std::uint8_t, kWireRelayReplySize> body{};
     std::size_t written = 0;
     MessageId id{};
-    if (join_reply_encode(accepted.reply, MutableByteView{body.data(), body.size()}, written)
+    if (join_reply_encode(JoinCarrier::WireRelay, accepted.reply,
+                          MutableByteView{body.data(), body.size()}, written)
             .ok()) {
       (void)deps_.mesh->send_bootstrap(meta.origin, FrameType::BootstrapReply,
                                        ByteView{body.data(), written},
@@ -1134,9 +1172,9 @@ Status SecurityCoordinator::relay_up(const NodeId proxy, const std::uint8_t hops
   return deps_.usb->send_relay_up_to_host(proxy, hops, object);
 }
 
-Status SecurityCoordinator::relay_abort(const NodeId proxy, const std::uint32_t relay_id,
+Status SecurityCoordinator::relay_abort(const NodeId proxy, const RelayToken token,
                                         const RelayAbortReason reason) noexcept {
-  return deps_.usb->send_relay_abort_to_host(proxy, relay_id, reason);
+  return deps_.usb->send_relay_abort_to_host(proxy, token, reason);
 }
 
 Status SecurityCoordinator::send_relay(const NodeId destination, const FrameType type,
@@ -1247,8 +1285,7 @@ Status SecurityCoordinator::on_usb(const CoordinatorEvent& event) noexcept {
     }
     case CoordinatorEventKind::UsbRelayAbort: {
       // USB 0x62 (only HostAborted arrives from the host; anything else
-      // the adapter already refused). Unknown relays answer NotFound —
-      // the host then aborts via 0x61 with an Abort header.
+      // the adapter already refused). Unknown tokens answer NotFound.
       if (mode_ != CoordinatorMode::Member || !member().gateway_active) {
         sat_inc(counters_.usb_drops);
         return Status::error(StatusCode::InvalidState, "no gateway here");
@@ -1257,8 +1294,11 @@ Status SecurityCoordinator::on_usb(const CoordinatorEvent& event) noexcept {
         sat_inc(counters_.usb_drops);
         return Status::error(StatusCode::InvalidArgument, "host abort reason");
       }
-      const Status aborted =
-          member().gateway.host_abort(event.usb_proxy, event.usb_relay_id, event.now);
+      RelayToken token{};
+      token.gateway_epoch = event.usb_gateway_epoch;
+      token.proxy_epoch = event.usb_proxy_epoch;
+      token.relay_id = event.usb_relay_id;
+      const Status aborted = member().gateway.host_abort(event.usb_proxy, token, event.now);
       if (!aborted.ok()) sat_inc(counters_.usb_drops);
       return aborted;
     }

@@ -122,9 +122,9 @@ class FakeUsb final : public CoordinatorUsbPort {
     relay_ups.push_back({proxy, hops, object.size});
     return Status::success();
   }
-  Status send_relay_abort_to_host(const NodeId proxy, const std::uint32_t relay_id,
+  Status send_relay_abort_to_host(const NodeId proxy, const RelayToken token,
                                   const RelayAbortReason reason) noexcept override {
-    relay_aborts.push_back({proxy, relay_id, reason});
+    relay_aborts.push_back({proxy, token, reason});
     return Status::success();
   }
   struct Up {
@@ -139,7 +139,7 @@ class FakeUsb final : public CoordinatorUsbPort {
   };
   struct Abort {
     NodeId proxy{kInvalidNodeId};
-    std::uint32_t relay_id{0};
+    RelayToken token{};
     RelayAbortReason reason{RelayAbortReason::HostAborted};
   };
   std::vector<Up> local_ups{};
@@ -247,7 +247,7 @@ struct Fixture {
     d.mesh = &mesh;
     d.usb = &usb;
     d.verifier = &verifier;
-    d.bank_aead = AeadGcm{&fake_seal, &fake_open, nullptr};
+    d.bank_aead = sdkv1::AeadGcm{&fake_seal, &fake_open, nullptr};
     d.proxy_sealer = &sealer;
     d.local_mac = kMac;
     d.local_node = kNode;

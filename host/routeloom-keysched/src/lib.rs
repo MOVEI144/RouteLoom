@@ -17,6 +17,7 @@
 //! resume state machine (the Site Authority's responder arrives with P5).
 //! RouteLoom's own constructions are unreviewed until plan P8-2.
 
+pub mod authority;
 pub mod rlres1;
 pub mod session;
 
@@ -36,6 +37,9 @@ pub const LABEL_RESUME_R2: &str = "RouteLoom/v1/R2";
 pub const LABEL_RESUME_R3: &str = "RouteLoom/v1/R3";
 pub const LABEL_RESUME_CONFIRM: &str = "RouteLoom/v1/resume-confirm";
 pub const LABEL_RESUME_KEY: &str = "RouteLoom/v1/resume-key";
+/// Authority channel (03 §5.3, G-SEC P5): GK-id binds (network, epoch, GK)
+/// for ACK key confirmation. Never a raw-GK export.
+pub const LABEL_GK_ID: &str = "RouteLoom/v1/gk-id";
 
 /// EDHOC Exporter labels (private use, 03 §2.1); consumed by plan P2.
 pub const EXPORTER_AEAD_KEY: u32 = 32768;

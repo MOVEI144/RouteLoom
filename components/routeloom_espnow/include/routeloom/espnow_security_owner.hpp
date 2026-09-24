@@ -96,7 +96,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // session death. Self-addressed downs demux to the LocalJoin attempt.
   Status join_down(NodeId to_proxy, const sdkv1::RelayObject& object, ByteView raw_object,
                    MonotonicMs now_ms) noexcept override;
-  Status join_abort(NodeId proxy, std::uint32_t relay_id, std::uint8_t reason,
+  Status join_abort(NodeId proxy, sdkv1::RelayToken token, std::uint8_t reason,
                     MonotonicMs now_ms) noexcept override;
   void join_session_down(MonotonicMs now_ms) noexcept override;
   // sdkv1::ZtRld1Port / CoordinatorMeshPort: radio sends (refuse before
@@ -111,7 +111,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
                             ByteView message) noexcept override;
   Status send_relay_up_to_host(NodeId proxy, std::uint8_t hops,
                                ByteView object) noexcept override;
-  Status send_relay_abort_to_host(NodeId proxy, std::uint32_t relay_id,
+  Status send_relay_abort_to_host(NodeId proxy, sdkv1::RelayToken token,
                                   sdkv1::RelayAbortReason reason) noexcept override;
   // NeighborAuthenticator (member discovery): OFFER cookies through the
   // coordinator's member cookie box; the handshake path never uses

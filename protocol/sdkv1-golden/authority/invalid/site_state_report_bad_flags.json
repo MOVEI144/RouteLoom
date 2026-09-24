@@ -1,0 +1,9 @@
+{
+  "codec": "authority_fragment",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "inner_hex": "0167001c01000002000000000000010100c0ffee000000000000000000000000",
+  "name": "site_state_report_bad_flags",
+  "note": "only bit0 local-state-valid is defined",
+  "reason": "reserved_nonzero"
+}

@@ -17,6 +17,7 @@ use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{cert_issue, cert_verify, CertClaims, CertType};
 use routeloom_provision::signer::{test_keypair, FileRootSigner, RootSigner};
 
+use super::group_keys::{GroupKeyCommand, GroupKeyTransport};
 use super::store::SiteStore;
 use super::transport::{AbortReason, InProcessTransport, Outbound, RelayKey, RelayUp};
 use super::{Events, SiteAuthority, SiteService, SiteSetup};
@@ -157,6 +158,7 @@ impl SimDevice {
         RelayUp {
             key,
             hops: 2,
+            phase: super::transport::PHASE_EDHOC,
             step,
             joiner_rssi_dbm: -60,
             body,
@@ -246,6 +248,8 @@ impl SimDevice {
         let key = RelayKey {
             gateway: GATEWAY,
             proxy: 0x00A1_0000_0000_0777,
+            gateway_epoch: 7,
+            proxy_epoch: 3,
             relay_id: self.relay,
             joiner_mac: self.mac,
         };
@@ -389,4 +393,44 @@ pub fn request_id(events: &Events) -> Option<u64> {
             .then(|| super::records::parse_request_token(json.get("join_request_id")?.as_str()?))
             .flatten()
     })
+}
+
+/// Fake authority-channel transport (§6.2 seam): a configurable ready-set
+/// plus the sent-command log. The PR1 channel layer replaces it.
+pub struct FakeGroupKeyTransport {
+    ready: std::sync::Mutex<std::collections::HashSet<u64>>,
+    sent: std::sync::Mutex<Vec<GroupKeyCommand>>,
+}
+
+impl FakeGroupKeyTransport {
+    pub fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            ready: std::sync::Mutex::new(std::collections::HashSet::new()),
+            sent: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn set_ready(&self, node: u64, ready: bool) {
+        let mut set = self.ready.lock().expect("gk fake poisoned");
+        if ready {
+            set.insert(node);
+        } else {
+            set.remove(&node);
+        }
+    }
+
+    /// Everything sent since the last call.
+    pub fn take(&self) -> Vec<GroupKeyCommand> {
+        std::mem::take(&mut *self.sent.lock().expect("gk fake poisoned"))
+    }
+}
+
+impl GroupKeyTransport for FakeGroupKeyTransport {
+    fn channel_ready(&self, node: u64, _: &[u8; 32]) -> bool {
+        self.ready.lock().expect("gk fake poisoned").contains(&node)
+    }
+
+    fn send(&self, command: GroupKeyCommand, _: Option<&[u8; 32]>) {
+        self.sent.lock().expect("gk fake poisoned").push(command);
+    }
 }

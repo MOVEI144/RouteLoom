@@ -240,6 +240,21 @@ void test_known_member() {
   const auto object = revocation_object(set);
   CHECK_OK(world.revocations.accept(object.view(), sak().pub, kSiteId, kNetwork));
   CHECK(!hooks.known_member(0x00A1000000000777ULL, kNetwork));
+  // Peer proof cannot outlive the local boot, membership, or RRS floor.
+  {
+    World stale;
+    stale.make_member();
+    SdkMembershipHooks stale_hooks = stale.hooks();
+    stale.boot.boot_ = 100;
+    CHECK(!stale_hooks.known_member(stale.peers.peer_, kNetwork));
+    stale.boot.boot_ = 2000;
+    RevocationSet self_set = revocation_set(14, 1);
+    self_set.entries[0] = RevocationEntry{kNode, 4, RevocationReason::Removed};
+    self_set.count = 1;
+    const auto self_object = revocation_object(self_set);
+    CHECK_OK(stale.revocations.accept(self_object.view(), sak().pub, kSiteId, kNetwork));
+    CHECK(!stale_hooks.known_member(stale.peers.peer_, kNetwork));
+  }
 }
 
 void test_approve_join() {

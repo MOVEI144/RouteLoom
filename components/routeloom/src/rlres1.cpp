@@ -333,8 +333,12 @@ void Engine::send_hint(Output& out, const R2Status status, const ResumeId& rid,
 }
 
 MonotonicMs Engine::deadline_for(const MonotonicMs now, const std::uint8_t hops) const noexcept {
-  return now + limits_.base_timeout_ms +
-         static_cast<MonotonicMs>(limits_.per_hop_timeout_ms) * hops;
+  // Saturating: near the clock ceiling a wrapped deadline would expire a
+  // live session instantly (or never). The per-hop product cannot overflow
+  // (u32 milliseconds times a u8 hop count fits u64).
+  const MonotonicMs span = static_cast<MonotonicMs>(limits_.per_hop_timeout_ms) * hops +
+                           limits_.base_timeout_ms;
+  return (now > UINT64_MAX - span) ? UINT64_MAX : (now + span);
 }
 
 NodeId Engine::responder_identity(const Purpose purpose) const noexcept {
@@ -360,8 +364,13 @@ bool Engine::take_token(const MonotonicMs now) noexcept {
     tokens_primed_ = true;
   }
   if (now > tokens_at_) {
-    const std::uint64_t gained =
-        (now - tokens_at_) * static_cast<std::uint64_t>(limits_.responder_rate_per_s);
+    // Clamp the elapsed span before scaling: past the clock ceiling the raw
+    // product would wrap and starve the bucket instead of refilling it.
+    const std::uint64_t elapsed = now - tokens_at_;
+    const std::uint64_t gained = (elapsed > cap)
+                                     ? cap
+                                     : elapsed * static_cast<std::uint64_t>(
+                                                     limits_.responder_rate_per_s);
     const std::uint64_t total = tokens_milli_ + (gained > cap ? cap : gained);
     tokens_milli_ = static_cast<std::uint32_t>(total > cap ? cap : total);
     tokens_at_ = now;
@@ -445,8 +454,11 @@ void Engine::begin(const BeginRequest& request, const MonotonicMs now, Environme
   const Purpose purpose = slot.purpose;
   const bool pending = purpose == Purpose::PendingJoin;
   const bool link_carrier = request.carrier.kind == Carrier::Kind::Link;
+  // The self-handshake refusal is pairwise-only: for authority/pending-join
+  // the peer is the site id, which lives in a separate namespace and may
+  // numerically equal this node's id (the site check below still applies).
   if (!configured_ || !purpose_is_resumable(purpose) || slot.peer == kInvalidNodeId ||
-      slot.peer == kBroadcastNodeId || slot.peer == local_.self ||
+      slot.peer == kBroadcastNodeId || (pairwise(purpose) && slot.peer == local_.self) ||
       (pending ? (request.ticket.data == nullptr || request.ticket.size == 0 ||
                   request.ticket.size > kTicketMax)
                : request.ticket.size != 0) ||
@@ -581,7 +593,7 @@ void Engine::on_r1(const ByteView message, const Carrier& carrier, const NodeId 
     ~SecretGuard() { secure_clear(s); }
   } guard{slot.secret};
 
-  if (slot.peer == kInvalidNodeId || slot.peer == local_.self ||
+  if (slot.peer == kInvalidNodeId || (pairwise(purpose) && slot.peer == local_.self) ||
       (claimed_peer != kInvalidNodeId && claimed_peer != slot.peer)) {
     reject(out, Reject::PeerMismatch);
     return;

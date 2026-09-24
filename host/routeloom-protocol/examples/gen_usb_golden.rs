@@ -736,7 +736,7 @@ fn main() -> std::io::Result<()> {
     println!("wrote {} steps to {}", steps.len(), frames_dir.display());
     node_status_scenario(&root.join("node-status"))?;
     group_ops_scenario(&root.join("group-ops"))?;
-    join_relay_scenario(&root.join("join-relay"))?;
+    join_relay_scenario(&root.join("join-relay-v2"))?;
     Ok(())
 }
 
@@ -1246,25 +1246,28 @@ fn join_message(len: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
-/// protocol/usb-golden/join-relay: the join_relay_v1 HostOps family (SDK v1
-/// zero-touch join, docs/design/sdk-v1/02 §7.2/§7.4) on a gateway (node 1)
-/// advertising CAP_JOIN_RELAY_V1, with member proxy 2 three hops away. The
-/// C++ replay (test_usb.cpp) attaches a JoinRelayGateway to the bridge and
-/// injects the proxy's Wire relay frames right before each device step.
-/// Scenario: m1 up (single Wire frame) -> host sends m2 down (chunked to the
-/// proxy) -> Ok -> m3 up (4 Wire chunks reassembled) -> host sends the final
-/// m4 -> Ok -> host aborts the finished relay -> Invalid (not known any
-/// more) -> the proxy aborts a second relay -> unsolicited 0x62.
+/// protocol/usb-golden/join-relay-v2: the join_relay_v2 HostOps family (SDK v1
+/// zero-touch join, docs/design/sdk-v1/02 §7.2/§7.4, #116) on a gateway
+/// (node 1) advertising CAP_JOIN_RELAY_V2, with member proxy 2 three hops
+/// away. The C++ replay (test_usb.cpp) attaches a JoinRelayGateway to the
+/// bridge and injects the proxy's Wire relay frames right before each device
+/// step. Scenario: m1 up (single Wire frame) -> host sends m2 down (chunked
+/// to the proxy) -> Ok -> m3 up (4 Wire chunks reassembled) -> host sends
+/// the final m4 -> Ok -> host aborts the relay while its final down is
+/// still in flight -> Ok (SendingFinal is live, Q116-04) -> a second
+/// relay's m1 up -> the proxy aborts it -> unsolicited 0x62.
 fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
     use routeloom_protocol::join_relay as jr;
 
-    const CAPABILITY_JR: u32 = 0x3 | CAP_HOST_OPS_V1 | jr::CAP_JOIN_RELAY_V1;
+    const CAPABILITY_JR: u32 = 0x3 | CAP_HOST_OPS_V1 | jr::CAP_JOIN_RELAY_V2;
     const RELAY_ID: u32 = 0x7E57_AB1E;
+    const GATEWAY_EPOCH: u32 = 7;
+    const PROXY_EPOCH: u32 = 3;
     const HOPS: u8 = 3;
     const JOINER_MAC: [u8; 6] = [0x02, 0, 0, 0, 0x12, 0x34];
     let frames_dir = prepare_frames_dir(root)?;
     let (mut w, proof) =
-        begin_session(CAPABILITY_JR, "capability advertises join_relay_v1 (bit 8)");
+        begin_session(CAPABILITY_JR, "capability advertises join_relay_v2 (bit 9)");
     let mut topup = rx_topup();
 
     let header = |dir, step, state, rssi| jr::RelayHeader {
@@ -1276,6 +1279,8 @@ fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
         step,
         state,
         joiner_rssi_dbm: rssi,
+        gateway_epoch: GATEWAY_EPOCH,
+        proxy_epoch: PROXY_EPOCH,
     };
     let object = |header: jr::RelayHeader, message: Vec<u8>| {
         jr::RelayObject {
@@ -1299,6 +1304,8 @@ fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
             result,
             proxy: PEER_NODE,
             relay_id,
+            gateway_epoch: GATEWAY_EPOCH,
+            proxy_epoch: PROXY_EPOCH,
         })
         .expect("valid result")
     };
@@ -1392,13 +1399,15 @@ fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
     let abort = jr::encode_join_relay_abort(&jr::JoinRelayAbort {
         proxy: PEER_NODE,
         relay_id: RELAY_ID,
+        gateway_epoch: GATEWAY_EPOCH,
+        proxy_epoch: PROXY_EPOCH,
         reason: jr::RelayAbortReason::HostAborted,
     })
     .expect("valid abort");
     w.sealed(
         "join_relay_abort_finished",
         "h2d",
-        "the host cancels the relay it already finished",
+        "the host cancels the relay while its final down is still in flight",
         FrameKind::HostOps,
         502,
         abort.clone(),
@@ -1414,20 +1423,34 @@ fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
     w.sealed(
         "join_relay_result_abort",
         "d2h",
-        "Invalid: the gateway no longer knows a finished relay",
+        "Ok: SendingFinal is still live, so host_abort finishes it (#116 Q116-04)",
         FrameKind::HostOps,
         502,
-        result(ConfigOpsResult::Invalid, RELAY_ID),
+        result(ConfigOpsResult::Ok, RELAY_ID),
+    );
+    let header_r2 = jr::RelayHeader {
+        relay_id: RELAY_ID + 1,
+        ..header(jr::RelayDirection::Up, 1, jr::RelayState::Continue, -69)
+    };
+    w.sealed(
+        "join_relay_up_m1_r2",
+        "d2h",
+        "proxy 2 relays a second relay's m1 (single Wire frame); request 0",
+        FrameKind::HostOps,
+        0,
+        up(object(header_r2, join_message(47, 5))),
     );
     w.sealed(
         "join_relay_proxy_abort",
         "d2h",
-        "proxy 2 gave up a second relay (device silent): unsolicited 0x62",
+        "proxy 2 gave up the second relay (device silent): unsolicited 0x62",
         FrameKind::HostOps,
         0,
         jr::encode_join_relay_abort(&jr::JoinRelayAbort {
             proxy: PEER_NODE,
             relay_id: RELAY_ID + 1,
+            gateway_epoch: GATEWAY_EPOCH,
+            proxy_epoch: PROXY_EPOCH,
             reason: jr::RelayAbortReason::ProxyAborted,
         })
         .expect("valid abort"),
@@ -1440,5 +1463,12 @@ fn join_relay_scenario(root: &Path) -> std::io::Result<()> {
         503,
         vec![CREDIT_CLOSE],
     );
-    finish_session(root, &frames_dir, "join-relay", CAPABILITY_JR, &proof, &w)
+    finish_session(
+        root,
+        &frames_dir,
+        "join-relay-v2",
+        CAPABILITY_JR,
+        &proof,
+        &w,
+    )
 }

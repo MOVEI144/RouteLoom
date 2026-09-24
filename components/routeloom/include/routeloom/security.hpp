@@ -20,6 +20,9 @@ struct SecurityContext {
   NodeId sender{kInvalidNodeId};
   NodeId receiver{kInvalidNodeId};
   std::uint32_t epoch{0};  // Wire v2: 32-bit, never wraps in a device lifetime
+  std::uint32_t group_epoch{0};  // GroupLink: end_epoch (GK generation)
+  std::uint32_t sender_boot{0};  // GroupEnd: message.session
+  NodeId group_id{0};           // GroupEnd: full wire destination
 };
 
 // Deployment assurance level a provider is allowed to claim. The default is
@@ -82,6 +85,13 @@ class SecurityProvider {
                                      NodeId /*peer*/) const noexcept {
     return ContextState::Ready;
   }
+  // GroupLink needs one atomic boot/GK snapshot; unicast providers do not
+  // implement this scope. A retired generation is never accepted on repair.
+  virtual Status tx_group_link_epochs(std::uint32_t& /*boot*/,
+                                      std::uint32_t& /*g*/) noexcept {
+    return Status::error(StatusCode::Unsupported, "group link unavailable");
+  }
+  virtual bool accepts_group_epoch(std::uint32_t /*g*/) const noexcept { return true; }
   virtual Status next_counter(const SecurityContext& context,
                               std::uint64_t& counter) noexcept = 0;
   virtual Status seal(const SecurityContext& context,

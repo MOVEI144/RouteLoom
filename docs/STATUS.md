@@ -2,6 +2,8 @@
 
 更新：2026-09-24。
 
+zcbor 0.8.1 の同梱ソースには、libedhoc が渡す長さ0の protected header で null ポインタを `memmove` に渡さないための1行修正がある。upstreamとの差分と固定 blob id は `components/routeloom/third_party/VENDORED.json` と `tests/test_vendored_sources.py` で検査する。以下の「upstreamのまま」という記録は、この zcbor 修正を除く。
+
 ## 現在の証拠
 
 | 項目 | 状態 |

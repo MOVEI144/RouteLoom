@@ -1,0 +1,10 @@
+{
+  "body_hex": "010100000000001096dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "codec": "rrs_applied",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "applied_typical",
+  "note": "applied evidence for the small object below (its sha256)",
+  "object_sha256_hex": "96dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "rs_epoch": 16
+}

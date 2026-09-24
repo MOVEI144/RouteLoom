@@ -1,14 +1,15 @@
 //! API1 surface of the Site Authority (docs/design/sdk-v1/07 §2, plan
-//! P3-3): `site.status`, `join.policy.get/set`, `join.requests.list`,
-//! `join.decide`, `devices.discovered.list`, `members.list/get`,
-//! `membership.revoke`, and `operations.get` for `op-` tokens.
+//! P3-3, G-SEC P5): `site.status`, `join.policy.get/set`,
+//! `join.requests.list`, `join.decide`, `devices.discovered.list`,
+//! `members.list/get`, `membership.revoke`, `group_keys.status/rotate`,
+//! and `operations.get` for `op-` tokens.
 //!
 //! Authorization (07 §2): `MEMBERSHIP_READ` for the read side,
 //! `MEMBERSHIP_DECIDE` for `join.decide` / `membership.revoke`,
-//! `MEMBERSHIP_ADMIN` for the policy. The network the ACL is checked on is
-//! the site's wire network (network_low32 of the SiteCert). The principal
-//! comes from the socket peer credential only; idempotency identity is
-//! `(principal, idempotency_key)`.
+//! `MEMBERSHIP_ADMIN` for the policy and `group_keys.rotate`. The network
+//! the ACL is checked on is the site's wire network (network_low32 of the
+//! SiteCert). The principal comes from the socket peer credential only;
+//! idempotency identity is `(principal, idempotency_key)`.
 //!
 //! Every successful call appends the authority's events (`join.decided`,
 //! `member.revoked`, …) to the daemon event ring — the `stream:"events"`
@@ -19,9 +20,11 @@ use routeloom_json::Json;
 use super::{ApiContext, ApiError};
 use crate::acl;
 use crate::send_store::OperationStore;
+use crate::site::group_keys::HostTime;
 use crate::site::records::{parse_op_token, parse_request_token, parse_role, Verdict};
 use crate::site::{
-    parse_reason, DecideRequest, DecisionMode, Events, RevokeRequest, SiteError, SiteService,
+    parse_reason, DecideRequest, DecisionMode, Events, RevokeRequest, RotateRequest, SiteError,
+    SiteService,
 };
 
 /// `limit` ceiling of the paged site listings.
@@ -39,6 +42,8 @@ pub const SITE_EVENT_KINDS: &[&str] = &[
     "member.removal_notified",
     "rrs.published",
     "gk.staged",
+    "gk.rotated",
+    "gk.member_applied",
     "authority.error",
     "site.session_drop",
 ];
@@ -53,6 +58,8 @@ pub const SITE_METHODS: &[&str] = &[
     "members.list",
     "members.get",
     "membership.revoke",
+    "group_keys.status",
+    "group_keys.rotate",
 ];
 
 impl From<SiteError> for ApiError {
@@ -197,6 +204,8 @@ pub(super) fn dispatch<S: OperationStore>(
         "members.list" => members_list,
         "members.get" => members_get,
         "membership.revoke" => membership_revoke,
+        "group_keys.status" => group_keys_status,
+        "group_keys.rotate" => group_keys_rotate,
         _ => return None,
     };
     Some(handler(params, ctx))
@@ -209,7 +218,11 @@ fn site_status<S: OperationStore>(
     only(params, &[])?;
     let service = service(ctx)?;
     authorize(ctx, service, acl::PERM_MEMBERSHIP_READ, "MEMBERSHIP_READ")?;
-    let (status, events) = service.with(|a| a.status_json(ctx.now_ms));
+    let time = HostTime {
+        mono_ms: ctx.now_mono,
+        unix_ms: ctx.now_ms,
+    };
+    let (status, events) = service.with(|a| a.status_json(time));
     push_events(ctx, events);
     // The USB link view (gateway attachment) comes from the daemon, not the
     // authority: `usb.attached` says a gateway session is up at all, and
@@ -464,6 +477,10 @@ fn membership_revoke<S: OperationStore>(
             )
         })?;
     let key = idempotency_key(params)?;
+    let time = HostTime {
+        mono_ms: ctx.now_mono,
+        unix_ms: ctx.now_ms,
+    };
     let (result, events) = service.with(|a| {
         a.revoke(
             principal,
@@ -473,7 +490,57 @@ fn membership_revoke<S: OperationStore>(
                 reason,
                 key,
             },
-            ctx.now_ms,
+            time,
+        )
+    });
+    push_events(ctx, events);
+    Ok(result?)
+}
+
+fn group_keys_status<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &[])?;
+    let service = service(ctx)?;
+    authorize(ctx, service, acl::PERM_MEMBERSHIP_READ, "MEMBERSHIP_READ")?;
+    let time = HostTime {
+        mono_ms: ctx.now_mono,
+        unix_ms: ctx.now_ms,
+    };
+    let (status, events) = service.with(|a| a.group_keys_status_json(time));
+    push_events(ctx, events);
+    Ok(status)
+}
+
+fn group_keys_rotate<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(params, &["expected_active_epoch", "idempotency_key"])?;
+    let service = service(ctx)?;
+    let principal = authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let expected_active_epoch = params
+        .get("expected_active_epoch")
+        .and_then(Json::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v >= 1)
+        .ok_or_else(|| {
+            ApiError::simple("INVALID_ARGUMENT", "expected_active_epoch must be >= 1")
+        })?;
+    let key = idempotency_key(params)?;
+    let time = HostTime {
+        mono_ms: ctx.now_mono,
+        unix_ms: ctx.now_ms,
+    };
+    let (result, events) = service.with(|a| {
+        a.rotate(
+            principal,
+            RotateRequest {
+                expected_active_epoch,
+                key,
+            },
+            time,
         )
     });
     push_events(ctx, events);
@@ -527,6 +594,6 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
     };
     let join_relay = join_relay_status(ctx);
     format!(
-        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"not_implemented\",\"storage_durable\":{durable}}}"
+        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"rrs_no_transport\",\"storage_durable\":{durable}}}"
     )
 }

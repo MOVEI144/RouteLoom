@@ -87,7 +87,7 @@ class CheckingHost final : public JoinRelayHostSink {
     }
     return Status::success();
   }
-  Status relay_abort(NodeId, std::uint32_t, RelayAbortReason) noexcept override {
+  Status relay_abort(NodeId, RelayToken, RelayAbortReason) noexcept override {
     return Status::success();
   }
 };
@@ -154,10 +154,12 @@ void codecs(const ByteView input) {
       }
     }
   }
-  JoinReply reply{};
-  if (join_reply_decode(input, reply).ok()) {
-    if (!join_reply_encode(reply, sink, written).ok()) std::abort();
-    require_same(ByteView{out.data(), written}, input);
+  for (const JoinCarrier carrier : {JoinCarrier::Rld1, JoinCarrier::WireRelay}) {
+    JoinReply reply{};
+    if (join_reply_decode(carrier, input, reply).ok()) {
+      if (!join_reply_encode(carrier, reply, sink, written).ok()) std::abort();
+      require_same(ByteView{out.data(), written}, input);
+    }
   }
   // P4 §7.3: the routed end-session object shares the chunk carriers but
   // never an assembly — the lane bit in the sub byte selects it.
@@ -180,6 +182,17 @@ void codecs(const ByteView input) {
     RelayObject single{};
     (void)relay_single_frame_decode(relay_single_frame_type(relay.header), input, single);
   }
+  EpochQuery query{};
+  if (epoch_query_decode(input, query).ok()) {
+    if (!epoch_query_encode(query, sink, written).ok()) std::abort();
+    require_same(ByteView{out.data(), written}, input);
+  }
+  EpochReply epoch_reply{};
+  if (epoch_reply_decode(input, epoch_reply).ok()) {
+    if (!epoch_reply_encode(epoch_reply, sink, written).ok()) std::abort();
+    require_same(ByteView{out.data(), written}, input);
+  }
+  (void)classify_wire_relay(input);
 
   usb::JoinRelayUp up{};
   if (usb::decode_join_relay_up(input, up).ok()) {
@@ -225,12 +238,14 @@ void engines(const ByteView input) {
   proxy_config.mac = kProxyMac;
   proxy_config.network_low32 = 0x0A1B2C3D;
   proxy_config.gateway = kGateway;
+  proxy_config.proxy_epoch = 3;
   JoinProxy proxy(proxy_config, radio, wire, cookie, entropy);
   proxy.set_membership(MembershipState::Member, 0);
   proxy.set_policy(true);
   proxy.set_authority(true, 2, 0);
   JoinRelayGatewayConfig gateway_config{};
   gateway_config.node = kGateway;
+  gateway_config.gateway_epoch = 7;
   JoinRelayGateway gateway(gateway_config, wire);
   gateway.set_membership(MembershipState::Member);
   CheckingHost host;

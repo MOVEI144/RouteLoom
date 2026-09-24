@@ -23,6 +23,17 @@ bool keys_equal(const SessionBankEntry& entry, const ContextKeys& keys) noexcept
   return diff == 0;
 }
 
+bool tx_material_equal(const SessionBankEntry& entry, const ContextKeys& keys) noexcept {
+  std::uint8_t diff = 0;
+  for (std::size_t i = 0; i < kSessionKeySize; ++i) {
+    diff |= static_cast<std::uint8_t>(entry.tx_key[i] ^ keys.tx_key[i]);
+  }
+  for (std::size_t i = 0; i < kSessionIvSize; ++i) {
+    diff |= static_cast<std::uint8_t>(entry.tx_iv[i] ^ keys.tx_iv[i]);
+  }
+  return diff == 0;
+}
+
 bool id_valid(const std::uint64_t id) noexcept {
   return id != kInvalidNodeId && id != kBroadcastNodeId;
 }
@@ -47,7 +58,11 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::configure(const LocalView& loca
   // Draw the salt before touching state: a failed configure keeps working
   // state (or stays unconfigured) instead of half-wiping it.
   std::array<std::uint8_t, 32> salt{};
-  if (!random.fn(random.ctx, salt.data(), salt.size())) {
+  in_port_ = true;
+  const bool drawn = random.fn(random.ctx, salt.data(), salt.size());
+  in_port_ = false;
+  if (!drawn) {
+    secure_clear(salt);
     return Status::error(StatusCode::InvalidState, "session entropy not ready");
   }
   wipe_all();
@@ -107,7 +122,23 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::set_gk_epoch(const std::uint32_
   if (gk_epoch < local_.gk_epoch) {
     return Status::error(StatusCode::Conflict, "session gk epoch regressed");
   }
+  const bool advanced = gk_epoch != local_.gk_epoch;
+  if (advanced) {
+    // Overlap is only duplicate tolerance. Dropping it on a GK change
+    // keeps an old RX key from outliving the epoch that created it.
+    for (std::size_t i = 0; i < kOverlapCapacity; ++i) {
+      if (overlap_used_[i]) wipe_overlap(overlap_[i], overlap_used_[i]);
+    }
+  }
   local_.gk_epoch = gk_epoch;
+  if (advanced) {
+    for (std::size_t i = 0; i < kLinkCapacity; ++i) {
+      if (link_used_[i] && !entry_usable(link_[i])) wipe_entry(link_[i], link_used_[i]);
+    }
+    for (std::size_t i = 0; i < kEndCapacity; ++i) {
+      if (end_used_[i] && !entry_usable(end_[i])) wipe_entry(end_[i], end_used_[i]);
+    }
+  }
   return Status::success();
 }
 
@@ -275,7 +306,10 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::allocate_context_id(std::uint32
   if (!configured_) return Status::error(StatusCode::InvalidState, "session bank not configured");
   for (std::size_t attempt = 0; attempt < kCidRetries; ++attempt) {
     std::uint8_t raw[4] = {0, 0, 0, 0};
-    if (!random_.fn(random_.ctx, raw, sizeof(raw))) {
+    in_port_ = true;
+    const bool drawn = random_.fn(random_.ctx, raw, sizeof(raw));
+    in_port_ = false;
+    if (!drawn) {
       return Status::error(StatusCode::InvalidState, "session entropy not ready");
     }
     const std::uint32_t id = (static_cast<std::uint32_t>(raw[0]) << 24U) |
@@ -324,14 +358,23 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::install_verified(
     // rewind them to 0.
     return Status::error(StatusCode::Conflict, "session install duplicate");
   }
-  // The new RX id must be unambiguous everywhere else: live currents other
-  // than the replaced one, and every overlap entry.
+  if (existing != nullptr && tx_material_equal(*existing, keys)) {
+    return Status::error(StatusCode::Conflict, "session tx nonce domain reused");
+  }
+  // A live TX nonce domain is unique across peers and scopes. The new RX id
+  // must also be unambiguous across currents and overlap entries.
   for (std::size_t i = 0; i < kLinkCapacity; ++i) {
+    if (link_used_[i] && &link_[i] != existing && tx_material_equal(link_[i], keys)) {
+      return Status::error(StatusCode::Conflict, "session tx nonce domain reused");
+    }
     if (link_used_[i] && &link_[i] != existing && link_[i].rx_cid == keys.rx_context_id) {
       return Status::error(StatusCode::Conflict, "session rx id collision");
     }
   }
   for (std::size_t i = 0; i < kEndCapacity; ++i) {
+    if (end_used_[i] && &end_[i] != existing && tx_material_equal(end_[i], keys)) {
+      return Status::error(StatusCode::Conflict, "session tx nonce domain reused");
+    }
     if (end_used_[i] && &end_[i] != existing && end_[i].rx_cid == keys.rx_context_id) {
       return Status::error(StatusCode::Conflict, "session rx id collision");
     }
@@ -587,6 +630,9 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::next_counter(const SecurityCont
     return Status::error(StatusCode::InvalidArgument, "session direction invalid");
   }
   SessionBankEntry* entry = find_current(context.scope, context.receiver);
+  if (entry != nullptr && context.epoch != entry->tx_cid) {
+    return Status::error(StatusCode::InvalidArgument, "session tx context id stale");
+  }
   if (entry == nullptr || !entry_usable(*entry) ||
       check_tx_counter(entry->tx_next) == TxCounterVerdict::Refuse) {
     record_demand(context.scope, context.receiver);

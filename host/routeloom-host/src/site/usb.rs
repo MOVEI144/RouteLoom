@@ -1,24 +1,27 @@
 //! Host-side USB Site Authority adapter (design G-SEC P4 §8.3): the
-//! gateway between HostOps 0x60-0x63 and the Site Authority.
+//! gateway between HostOps 0x60-0x63 (join inner schema 2, #116) and the
+//! Site Authority.
 //!
 //! Trust boundary. Frames reach the inbox only after the session layer
 //! verified them, and the lane feeds this adapter only while a session is
-//! authenticated AND advertises [`site_capable`] (bit 8 +
-//! `CAP_HOST_OPS_V1`). The adapter additionally binds the constructor's
-//! gateway identity into every [`RelayKey`][super::transport::RelayKey] it
-//! builds and refuses ups naming any other gateway; the USB incarnation
-//! (the authenticated session id) binds by instance scoping — one adapter
-//! per session, closed on any boundary, so delayed downs or request
-//! mappings can never leak into a new session.
+//! authenticated AND advertises [`site_capable`] (bit 9 +
+//! `CAP_HOST_OPS_V1`; bit 8 is v1 history — never accepted). The adapter
+//! additionally binds the constructor's gateway identity into every
+//! [`RelayKey`][super::transport::RelayKey] it builds and refuses ups
+//! naming any other gateway; the USB incarnation (the authenticated
+//! session id) binds by instance scoping — one adapter per session,
+//! closed on any boundary, so delayed downs or request mappings can
+//! never leak into a new session.
 //!
-//! Shapes. The authority only speaks EDHOC, so every down carries phase
-//! 4; a phase-5 up is refused with an H→G 0x62 `HostAborted` (P3-5
-//! resume is not implemented, and 0x62 needs no relay object — the
-//! peer's phase-5 object support is unknown). 0x60 ups carrying an abort
-//! object end the relay like a 0x62. There are no USB chunk helpers in
-//! the protocol crate: the host always sends single 0x61 frames (a valid
-//! relay object tops out at 996 B, inside the 1005 B item bound) and the
-//! gateway chunks onward on the Wire lane (`WIRE_PAYLOAD_MAX`).
+//! Shapes. The authority only speaks EDHOC, so every down echoes phase 4;
+//! a phase-5 up is refused with an H→G 0x62 `HostAborted` (P3-5 resume is
+//! not implemented, and 0x62 needs no relay object — the peer's phase-5
+//! object support is unknown). 0x60 ups carrying an abort object end the
+//! relay like a 0x62. Authority aborts are 0x62 only (the key carries the
+//! full #116 token) — never a 0x61 status-2 body. There are no USB chunk
+//! helpers in the protocol crate: the host always sends single 0x61
+//! frames (a valid relay object tops out at 992 B, inside the 1005 B
+//! item bound) and the gateway chunks onward on the Wire lane.
 //!
 //! Mapping tables. The provisional [`AbortReason`][super::transport::AbortReason]
 //! values collide numerically with the USB enums, so they are NEVER cast
@@ -26,13 +29,7 @@
 //! variant breaks the build until the table names it:
 //!
 //! ```text
-//! authority Outbound::Abort → 0x61 status-2 Abort body (preferred: the
-//!   proxy still gets the hint; usable even for unknown relays):
-//!   Busy           → Busy(3),                 retry 30 s (BUSY_RETRY_S)
-//!   UnknownRelay   → Aborted(4),              retry 0 (start a new relay)
-//!   Timeout        → Aborted(4),              retry 0
-//!   AuthorityError → AuthorityUnreachable(2), retry 0 (retry may succeed)
-//! authority abort → H→G 0x62 reason (used for the phase-5 refusal):
+//! authority abort → H→G 0x62 reason (full token from the relay key):
 //!   every reason → HostAborted(4): the host side owns reason 4 only.
 //! G→H 0x62 reason → lane action (all end the attempt; an abort is never
 //! answered with an abort):
@@ -40,6 +37,7 @@
 //!   GatewayExpired(2)  → end attempt (proxy slot timed out)
 //!   DeliveryFailed(3)  → end attempt (m2 bytes are not retained: no resend)
 //!   HostAborted(4)     → end attempt (our abort echoed, or a confused peer)
+//!   Superseded(5)      → end attempt (a newer key replaced this relay)
 //! G→H 0x63 result → lane action (Ok = queued on the gateway's Wire lane,
 //! NOT device delivery — usb-protocol.md §9; strictly correlated to our
 //! request id, stray results ignored):
@@ -63,21 +61,21 @@ use routeloom_protocol::host_ops::{ConfigOpsResult, CAP_HOST_OPS_V1};
 use routeloom_protocol::join_relay::{
     decode_join_relay_abort, decode_join_relay_result, decode_join_relay_up,
     encode_join_relay_abort, encode_join_relay_down, join_relay_sub, JoinRelayAbort, JoinRelayDown,
-    RelayAbortReason, RelayBody, RelayDirection, RelayHeader, RelayObject, RelayState,
-    RelayStatusCode, CAP_JOIN_RELAY_V1, PHASE_EDHOC, PHASE_RESUME, SUB_JOIN_RELAY_ABORT,
-    SUB_JOIN_RELAY_RESULT, SUB_JOIN_RELAY_UP,
+    RelayAbortReason, RelayBody, RelayDirection, RelayHeader, RelayObject, RelayState, RelayToken,
+    CAP_JOIN_RELAY_V2, PHASE_RESUME, SUB_JOIN_RELAY_ABORT, SUB_JOIN_RELAY_RESULT,
+    SUB_JOIN_RELAY_UP,
 };
 use routeloom_protocol::{Frame, FrameKind};
 
 use super::transport::{
     AbortReason, DeliverReject, DownStatus, JoinTransport, Outbound, RelayDown, RelayKey, RelayUp,
 };
-use super::BUSY_RETRY_S;
-use crate::{now_ms, push_event, State};
+use crate::{mono_ms, now_ms, push_event, State};
 
 /// Down-queue depth (G-SEC P4 §8.3).
 pub const DOWN_QUEUE_CAP: usize = 8;
-/// One queued frame, inner bytes (a valid 0x61 tops out at 996 B).
+/// One queued frame, inner bytes (a valid 0x61 tops out at
+/// 4 + 8 + 992 = 1004 B).
 pub const DOWN_ITEM_MAX: usize = 1005;
 /// A queued down older than this never goes on the wire.
 pub const DOWN_TTL_MS: u64 = 20_000;
@@ -101,18 +99,7 @@ pub fn owns(inner: &[u8]) -> bool {
 /// The lane applies this gate before any up touches the authority, and
 /// before any down goes out — join never opens to uncapable callers.
 pub fn site_capable(capability: u32) -> bool {
-    capability & CAP_JOIN_RELAY_V1 != 0 && capability & CAP_HOST_OPS_V1 != 0
-}
-
-/// Authority abort → the status hint of a 0x61 status-2 Abort body.
-/// Every variant named explicitly (see the module table): never a cast.
-pub fn abort_status(reason: AbortReason) -> RelayStatusCode {
-    match reason {
-        AbortReason::Busy => RelayStatusCode::Busy,
-        AbortReason::UnknownRelay => RelayStatusCode::Aborted,
-        AbortReason::Timeout => RelayStatusCode::Aborted,
-        AbortReason::AuthorityError => RelayStatusCode::AuthorityUnreachable,
-    }
+    capability & CAP_JOIN_RELAY_V2 != 0 && capability & CAP_HOST_OPS_V1 != 0
 }
 
 /// Authority abort → the reason of an H→G 0x62. Explicit per variant;
@@ -125,18 +112,6 @@ pub fn abort_reason_62(reason: AbortReason) -> RelayAbortReason {
         AbortReason::AuthorityError => RelayAbortReason::HostAborted,
     }
 }
-
-fn abort_retry_ms(reason: AbortReason) -> u32 {
-    match reason {
-        AbortReason::Busy => BUSY_RETRY_MS,
-        AbortReason::UnknownRelay => 0,
-        AbortReason::Timeout => 0,
-        AbortReason::AuthorityError => 0,
-    }
-}
-
-/// The Busy abort's retry hint mirrors the authority's own busy retry.
-const BUSY_RETRY_MS: u32 = BUSY_RETRY_S * 1000;
 
 /// 0x63 result → does the attempt continue? Only Ok (queued on the
 /// gateway's Wire lane — never device delivery). Every other result ends
@@ -185,18 +160,31 @@ pub struct ReadyDown {
     pub admitted_ms: u64,
 }
 
-/// A live relay the adapter knows: the full key (0x62/0x63 name only
-/// proxy + relay id) and the down step an abort stands in for.
+/// A live relay the adapter knows: the full key (0x62/0x63 name the
+/// same #116 token). Keyed by proxy plus the full token — epochs are
+/// part of the identity, so a recycled relay id from a new incarnation
+/// (or a same-numbered epoch from another proxy) never aliases a live
+/// relay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RelaySlot {
     key: RelayKey,
-    down_step: u8,
+}
+
+fn slot_of(key: RelayKey) -> (u64, RelayToken) {
+    (
+        key.proxy,
+        RelayToken {
+            gateway_epoch: key.gateway_epoch,
+            proxy_epoch: key.proxy_epoch,
+            relay_id: key.relay_id,
+        },
+    )
 }
 
 struct Inner {
     closed: bool,
     queue: VecDeque<ReadyDown>,
-    relays: HashMap<(u64, u32), RelaySlot>,
+    relays: HashMap<(u64, RelayToken), RelaySlot>,
     requests: VecDeque<(u64, RelayKey, bool)>,
     stats: AdapterStats,
 }
@@ -285,10 +273,12 @@ impl UsbSiteAdapter {
         let key = RelayKey {
             gateway: self.gateway,
             proxy: up.from_proxy,
+            gateway_epoch: header.gateway_epoch,
+            proxy_epoch: header.proxy_epoch,
             relay_id: header.relay_id,
             joiner_mac: header.joiner_mac,
         };
-        let slot = (key.proxy, key.relay_id);
+        let slot = slot_of(key);
         if header.state == RelayState::Abort {
             // The proxy ended the relay with an abort object rather than
             // 0x62: drop anything queued for it; the lane fails the
@@ -301,7 +291,7 @@ impl UsbSiteAdapter {
             // P3-5 RLRES1 resume is not implemented: refuse with 0x62, not
             // a 0x61 — the peer's phase-5 relay-object support is unknown.
             guard.stats.phase5_refused += 1;
-            if let Ok(bytes) = abort62_bytes(up.from_proxy, header.relay_id) {
+            if let Ok(bytes) = abort62_bytes(key, RelayAbortReason::HostAborted) {
                 let _ = admit_bytes_locked(&mut guard, bytes, key, true, now_ms);
             }
             return Ok(UpOutcome::Phase5Refused);
@@ -310,17 +300,11 @@ impl UsbSiteAdapter {
             guard.stats.malformed += 1;
             return Err(UpError::Malformed);
         };
-        // The down step this exchange is at: an abort for it stands in
-        // for the next down message (m2 after m1, m4 after m3).
-        let down_step = match header.step {
-            1 => 2,
-            3 => 4,
-            _ => guard.relays.get(&slot).map_or(2, |s| s.down_step),
-        };
-        guard.relays.insert(slot, RelaySlot { key, down_step });
+        guard.relays.insert(slot, RelaySlot { key });
         Ok(UpOutcome::Relay(RelayUp {
             key,
             hops: up.hops,
+            phase: header.phase,
             step: header.step,
             joiner_rssi_dbm: header.joiner_rssi_dbm,
             body: body.clone(),
@@ -339,7 +323,9 @@ impl UsbSiteAdapter {
             guard.stats.malformed += 1;
             return Err(AbortError::Malformed);
         };
-        let slot = (abort.proxy, abort.relay_id);
+        // Full-slot match: an abort for a recycled relay id from
+        // another incarnation (or another proxy) retires nothing.
+        let slot = (abort.proxy, abort.token());
         let Some(entry) = guard.relays.remove(&slot) else {
             guard.stats.stray_aborts += 1;
             return Ok(AbortOutcome::Unknown);
@@ -368,21 +354,25 @@ impl UsbSiteAdapter {
             return Ok(ResultOutcome::Stray);
         };
         let (_, key, terminal) = guard.requests.remove(index).expect("request index");
-        if (result.proxy, result.relay_id) != (key.proxy, key.relay_id) {
-            // Answered our request id but named a different relay: the
-            // entry is consumed (a request is answered once) and the body
-            // ignored — the named relay's fate is decided by its own
-            // result or the authority timers, never by a mismatched id.
+        // Answered our request id but named a different relay: the entry
+        // is consumed (a request is answered once) and the body ignored —
+        // the named relay's fate is decided by its own result or the
+        // authority timers, never by a mismatched id. An Ok always
+        // carries the complete token; a failed result may name only
+        // (proxy, relay_id), so epochs gate only when valid.
+        let token_mismatch = result.token().valid() && result.token() != slot_of(key).1;
+        if result.proxy != key.proxy || result.relay_id != key.relay_id || token_mismatch {
             guard.stats.stray_results += 1;
             return Ok(ResultOutcome::Stray);
         }
         if !result_continues(result.result) {
-            guard.relays.remove(&(key.proxy, key.relay_id));
-            drop_queued(&mut guard.queue, (key.proxy, key.relay_id));
+            let slot = slot_of(key);
+            guard.relays.remove(&slot);
+            drop_queued(&mut guard.queue, slot);
             return Ok(ResultOutcome::Failed { key });
         }
         if terminal {
-            guard.relays.remove(&(key.proxy, key.relay_id));
+            guard.relays.remove(&slot_of(key));
         }
         Ok(ResultOutcome::Acked { key })
     }
@@ -441,8 +431,8 @@ impl UsbSiteAdapter {
     }
 }
 
-fn drop_queued(queue: &mut VecDeque<ReadyDown>, slot: (u64, u32)) {
-    queue.retain(|q| (q.key.proxy, q.key.relay_id) != slot);
+fn drop_queued(queue: &mut VecDeque<ReadyDown>, slot: (u64, RelayToken)) {
+    queue.retain(|q| slot_of(q.key) != slot);
 }
 
 fn admit_bytes_locked(
@@ -459,7 +449,7 @@ fn admit_bytes_locked(
     // A terminal shape ends the relay whether or not it fits: the lane
     // fails the attempt on rejection, so no later 0x62 may resurrect it.
     if terminal {
-        inner.relays.remove(&(key.proxy, key.relay_id));
+        inner.relays.remove(&slot_of(key));
     }
     if inner.queue.len() >= DOWN_QUEUE_CAP {
         inner.stats.rejected_full += 1;
@@ -485,18 +475,21 @@ fn down_object(down: &RelayDown) -> Result<Vec<u8>, DeliverReject> {
             relay_id: down.key.relay_id,
             proxy: down.key.proxy,
             joiner_mac: down.key.joiner_mac,
-            // The authority only speaks EDHOC: every down carries phase 4.
-            phase: PHASE_EDHOC,
+            // Echoes the inbound exchange's phase (the authority only
+            // speaks EDHOC, so this is 4 — never inferred from `step`).
+            phase: down.phase,
             step: down.step,
             state: match down.status {
                 DownStatus::Continue => RelayState::Continue,
                 DownStatus::Final => RelayState::Final,
             },
             joiner_rssi_dbm: 0,
+            gateway_epoch: down.key.gateway_epoch,
+            proxy_epoch: down.key.proxy_epoch,
         },
         body: RelayBody::Message(down.body.clone()),
     };
-    // Authority-produced shapes always validate (nonzero relay id, valid
+    // Authority-produced shapes always validate (nonzero token, valid
     // proxy, unicast joiner MAC, down step 2/4/5 with its matching
     // state); the reachable failure is an oversize message body.
     let encoded = object.encode().map_err(|_| DeliverReject::TooLarge)?;
@@ -507,41 +500,13 @@ fn down_object(down: &RelayDown) -> Result<Vec<u8>, DeliverReject> {
     .map_err(|_| DeliverReject::TooLarge)
 }
 
-/// An authority abort → one 0x61 status-2 Abort body at the relay's
-/// current down step (see the module mapping table).
-fn abort_object(key: RelayKey, step: u8, reason: AbortReason) -> Result<Vec<u8>, DeliverReject> {
-    let object = RelayObject {
-        header: RelayHeader {
-            dir: RelayDirection::Down,
-            relay_id: key.relay_id,
-            proxy: key.proxy,
-            joiner_mac: key.joiner_mac,
-            phase: PHASE_EDHOC,
-            step,
-            state: RelayState::Abort,
-            joiner_rssi_dbm: 0,
-        },
-        body: RelayBody::Abort {
-            status: abort_status(reason),
-            retry_after_ms: abort_retry_ms(reason),
-        },
-    };
-    // Unreachable for authority keys, which descend from validated ups;
-    // mapped (not panicked) so a bad key fails the attempt instead of
-    // the daemon.
-    let encoded = object.encode().map_err(|_| DeliverReject::TooLarge)?;
-    encode_join_relay_down(&JoinRelayDown {
-        to_proxy: key.proxy,
-        object: encoded,
-    })
-    .map_err(|_| DeliverReject::TooLarge)
-}
-
-fn abort62_bytes(proxy: u64, relay_id: u32) -> Result<Vec<u8>, DeliverReject> {
+fn abort62_bytes(key: RelayKey, reason: RelayAbortReason) -> Result<Vec<u8>, DeliverReject> {
     encode_join_relay_abort(&JoinRelayAbort {
-        proxy,
-        relay_id,
-        reason: RelayAbortReason::HostAborted,
+        proxy: key.proxy,
+        relay_id: key.relay_id,
+        gateway_epoch: key.gateway_epoch,
+        proxy_epoch: key.proxy_epoch,
+        reason,
     })
     .map_err(|_| DeliverReject::TooLarge)
 }
@@ -558,12 +523,10 @@ impl JoinTransport for UsbSiteAdapter {
             Outbound::Down(down) => {
                 down_object(down).map(|bytes| (bytes, down.status == DownStatus::Final))
             }
+            // The key carries the full token, so an abort for even an
+            // unknown relay still names it exactly on 0x62.
             Outbound::Abort { reason, .. } => {
-                let step = guard
-                    .relays
-                    .get(&(key.proxy, key.relay_id))
-                    .map_or(2, |s| s.down_step);
-                abort_object(key, step, *reason).map(|bytes| (bytes, true))
+                abort62_bytes(key, abort_reason_62(*reason)).map(|bytes| (bytes, true))
             }
         };
         // The encoders only fail TooLarge (oversize bodies — see
@@ -752,7 +715,10 @@ pub fn site_once(
         // Unbound: the transport slot keeps the closed adapter, whose
         // rejections fail attempts honestly until a session binds.
     }
-    for (ms, fields) in service.tick(now) {
+    for (ms, fields) in service.tick(super::group_keys::HostTime {
+        mono_ms: mono_ms(),
+        unix_ms: now,
+    }) {
         push_event(state, ms, fields);
     }
     let Some(adapter) = lane.adapter.clone() else {
@@ -857,12 +823,14 @@ mod tests {
     use super::*;
     use routeloom_protocol::join_relay::{
         encode_join_relay_result, encode_join_relay_up, JoinRelayResult, JoinRelayUp,
-        RelayBody as Body, RELAY_ABORT_BODY_SIZE,
+        RelayBody as Body, RelayStatusCode, PHASE_EDHOC,
     };
 
     const GATEWAY: u64 = 1;
     const PROXY: u64 = 2;
     const RELAY: u32 = 9;
+    const GW_EPOCH: u32 = 7;
+    const PX_EPOCH: u32 = 3;
     const SESSION: u64 = 7;
     const MAC: [u8; 6] = [2, 0, 0, 0, 0x12, 0x34];
 
@@ -870,6 +838,8 @@ mod tests {
         RelayKey {
             gateway: GATEWAY,
             proxy: PROXY,
+            gateway_epoch: GW_EPOCH,
+            proxy_epoch: PX_EPOCH,
             relay_id: RELAY,
             joiner_mac: MAC,
         }
@@ -886,6 +856,8 @@ mod tests {
                 step,
                 state,
                 joiner_rssi_dbm: -70,
+                gateway_epoch: GW_EPOCH,
+                proxy_epoch: PX_EPOCH,
             },
             body: if state == RelayState::Abort {
                 Body::Abort {
@@ -923,6 +895,7 @@ mod tests {
     fn down(key: RelayKey, step: u8, status: DownStatus, body: Vec<u8>) -> Outbound {
         Outbound::Down(RelayDown {
             key,
+            phase: PHASE_EDHOC,
             step,
             status,
             body,
@@ -933,6 +906,8 @@ mod tests {
         encode_join_relay_abort(&JoinRelayAbort {
             proxy: PROXY,
             relay_id: RELAY,
+            gateway_epoch: GW_EPOCH,
+            proxy_epoch: PX_EPOCH,
             reason,
         })
         .unwrap()
@@ -943,6 +918,8 @@ mod tests {
             result,
             proxy: PROXY,
             relay_id: RELAY,
+            gateway_epoch: GW_EPOCH,
+            proxy_epoch: PX_EPOCH,
         })
         .unwrap();
         (request, inner)
@@ -957,7 +934,7 @@ mod tests {
             .unwrap();
         assert!(matches!(up, UpOutcome::Relay(_)));
         assert!(
-            adapter.lock().relays.contains_key(&(PROXY, RELAY)),
+            adapter.lock().relays.contains_key(&slot_of(key())),
             "m1 registers the relay"
         );
         adapter
@@ -968,18 +945,23 @@ mod tests {
         assert!(owns(&up_inner(4, 1, vec![1])));
         assert!(owns(&abort62_inner(RelayAbortReason::ProxyAborted)));
         assert!(owns(&result_inner(1, ConfigOpsResult::Ok).1));
+        assert!(owns(&[2, 0x60, 0, 0]));
         assert!(!owns(&[]));
-        assert!(!owns(&[1, 0x41, 0, 0]));
-        assert!(!owns(&[1, 0x51, 0, 0]));
-        assert!(!owns(&[2, 0x60, 0, 0]));
+        assert!(!owns(&[1, 0x60, 0, 0]));
+        assert!(!owns(&[2, 0x41, 0, 0]));
+        assert!(!owns(&[2, 0x6F, 0, 0]));
     }
 
     #[test]
     fn site_capable_needs_both_bits() {
-        assert!(site_capable(CAP_JOIN_RELAY_V1 | CAP_HOST_OPS_V1));
-        assert!(!site_capable(CAP_JOIN_RELAY_V1));
+        assert!(site_capable(CAP_JOIN_RELAY_V2 | CAP_HOST_OPS_V1));
+        assert!(!site_capable(CAP_JOIN_RELAY_V2));
         assert!(!site_capable(CAP_HOST_OPS_V1));
         assert!(!site_capable(0));
+        // Bit 8 is v1 history: never accepted, even with the carrier bit.
+        assert!(!site_capable(
+            routeloom_protocol::join_relay::CAP_JOIN_RELAY_V1 | CAP_HOST_OPS_V1
+        ));
     }
 
     #[test]
@@ -992,6 +974,7 @@ mod tests {
             panic!("phase 4 must relay");
         };
         assert_eq!(relay.key, key());
+        assert_eq!(relay.phase, PHASE_EDHOC);
         assert_eq!(relay.step, 1);
         assert_eq!(relay.hops, 3);
         assert_eq!(relay.joiner_rssi_dbm, -70);
@@ -1000,16 +983,19 @@ mod tests {
         let refused = adapter.handle_up(&up_inner(5, 1, vec![9]), 1000).unwrap();
         assert_eq!(refused, UpOutcome::Phase5Refused);
         assert_eq!(adapter.stats().phase5_refused, 1);
-        // The refusal is an H→G 0x62 HostAborted on the down queue.
+        // The refusal is an H→G 0x62 HostAborted on the down queue, naming
+        // the refused relay's full token.
         let ready = adapter.take_ready(1000);
         assert_eq!(ready.len(), 1);
         assert!(ready[0].terminal);
         let abort = decode_join_relay_abort(&ready[0].bytes).unwrap();
         assert_eq!(abort.proxy, PROXY);
         assert_eq!(abort.relay_id, RELAY);
+        assert_eq!(abort.gateway_epoch, GW_EPOCH);
+        assert_eq!(abort.proxy_epoch, PX_EPOCH);
         assert_eq!(abort.reason, RelayAbortReason::HostAborted);
         // …and the refused relay holds no directory entry.
-        assert!(!adapter.lock().relays.contains_key(&(PROXY, RELAY)));
+        assert!(!adapter.lock().relays.contains_key(&slot_of(key())));
     }
 
     #[test]
@@ -1032,20 +1018,8 @@ mod tests {
 
     #[test]
     fn abort_reason_tables_are_explicit() {
-        // 0x61 status-2 table — each row asserted, so a silent numeric
-        // cast (Busy=1→Queued? UnknownRelay=2→AuthorityUnreachable?
-        // AuthorityError=4→Aborted?) fails loudly instead.
-        assert_eq!(abort_status(AbortReason::Busy), RelayStatusCode::Busy);
-        assert_eq!(
-            abort_status(AbortReason::UnknownRelay),
-            RelayStatusCode::Aborted
-        );
-        assert_eq!(abort_status(AbortReason::Timeout), RelayStatusCode::Aborted);
-        assert_eq!(
-            abort_status(AbortReason::AuthorityError),
-            RelayStatusCode::AuthorityUnreachable
-        );
-        // 0x62 table: the host side owns reason 4 only.
+        // 0x62 table: the host side owns reason 4 only — each row
+        // asserted, so a silent numeric cast fails loudly instead.
         for reason in [
             AbortReason::Busy,
             AbortReason::UnknownRelay,
@@ -1054,8 +1028,8 @@ mod tests {
         ] {
             assert_eq!(abort_reason_62(reason), RelayAbortReason::HostAborted);
         }
-        // The encoded 0x61 abort body carries the mapped status (Busy
-        // keeps the authority's 30 s retry hint, the rest carry none).
+        // An authority abort encodes as 0x62 with the relay's full
+        // token (never a 0x61 status-2 body).
         let adapter = live_relay();
         let transport: &dyn JoinTransport = adapter.as_ref();
         transport
@@ -1066,20 +1040,15 @@ mod tests {
             .unwrap();
         let ready = adapter.take_ready(1000);
         assert_eq!(ready.len(), 1);
-        let down = routeloom_protocol::join_relay::decode_join_relay_down(&ready[0].bytes).unwrap();
-        let object = RelayObject::decode(&down.object).unwrap();
-        assert_eq!(object.header.dir, RelayDirection::Down);
-        assert_eq!(object.header.state, RelayState::Abort);
-        assert_eq!(object.header.step, 2);
-        assert_eq!(object.header.phase, PHASE_EDHOC);
-        assert_eq!(
-            object.body,
-            Body::Abort {
-                status: RelayStatusCode::Busy,
-                retry_after_ms: 30_000,
-            }
-        );
-        assert_eq!(ready[0].bytes.len(), 4 + 8 + 24 + RELAY_ABORT_BODY_SIZE);
+        assert!(ready[0].terminal);
+        let abort = decode_join_relay_abort(&ready[0].bytes).unwrap();
+        assert_eq!(abort.proxy, PROXY);
+        assert_eq!(abort.relay_id, RELAY);
+        assert_eq!(abort.gateway_epoch, GW_EPOCH);
+        assert_eq!(abort.proxy_epoch, PX_EPOCH);
+        assert_eq!(abort.reason, RelayAbortReason::HostAborted);
+        // ... and the aborted relay holds no directory entry.
+        assert!(!adapter.lock().relays.contains_key(&slot_of(key())));
     }
 
     #[test]
@@ -1099,6 +1068,8 @@ mod tests {
         assert_eq!(object.header.step, 4);
         assert_eq!(object.header.state, RelayState::Final);
         assert_eq!(object.header.joiner_rssi_dbm, 0);
+        assert_eq!(object.header.gateway_epoch, GW_EPOCH);
+        assert_eq!(object.header.proxy_epoch, PX_EPOCH);
         assert_eq!(object.body, Body::Message(vec![7; 64]));
     }
 
@@ -1187,6 +1158,7 @@ mod tests {
             RelayAbortReason::GatewayExpired,
             RelayAbortReason::DeliveryFailed,
             RelayAbortReason::HostAborted,
+            RelayAbortReason::Superseded,
         ] {
             let adapter = live_relay();
             let transport: &dyn JoinTransport = adapter.as_ref();
@@ -1262,10 +1234,27 @@ mod tests {
             result: ConfigOpsResult::NoRoute,
             proxy: PROXY,
             relay_id: RELAY + 1,
+            gateway_epoch: GW_EPOCH,
+            proxy_epoch: PX_EPOCH,
         })
         .unwrap();
         assert_eq!(
             adapter.handle_result(43, &foreign).unwrap(),
+            ResultOutcome::Stray
+        );
+        // ... as is a mismatched epoch on an otherwise valid token.
+        let adapter = live_relay();
+        adapter.note_sent(44, key(), false);
+        let foreign_epoch = encode_join_relay_result(&JoinRelayResult {
+            result: ConfigOpsResult::Ok,
+            proxy: PROXY,
+            relay_id: RELAY,
+            gateway_epoch: GW_EPOCH + 1,
+            proxy_epoch: PX_EPOCH,
+        })
+        .unwrap();
+        assert_eq!(
+            adapter.handle_result(44, &foreign_epoch).unwrap(),
             ResultOutcome::Stray
         );
     }

@@ -937,14 +937,98 @@ void test_reserve_hook() {
 // P4 §6.2: epochs advance monotonically within a site.
 void test_epoch_regression() {
   Engine e;
-  Output o;
-  TestEnv env;
   CHECK(e.configure(Local{kA, kNetwork, kSite, epochs(3, 12)}, Limits{}).ok());
   CHECK(e.update_epochs(epochs(4, 12)).ok());
   CHECK(e.update_epochs(epochs(4, 13)).ok());
   CHECK(!e.update_epochs(epochs(3, 13)).ok());  // RS regressed: refused
   CHECK(!e.update_epochs(epochs(4, 12)).ok());  // GK regressed: refused
   CHECK(!e.update_epochs(Epochs{8, 4, 13}).ok());  // site change: re-configure
+}
+
+void test_authority_self_name_collision() {
+  // The site id lives in its own namespace: when it numerically equals the
+  // device NodeId the authority handshake must still run (G-SEC P5 §4). The
+  // pairwise self-handshake refusal is unaffected.
+  constexpr NodeId kBoth = 0x42;
+  Engine dev;
+  TestEnv dev_env;
+  CHECK(dev.configure(Local{kBoth, kNetwork, kBoth, epochs(2, 10)}, generous()).ok());
+  Engine host;
+  TestEnv host_env;
+  Limits host_limits = generous();
+  host_limits.responder_purposes = (1u << 4);
+  CHECK(host.configure(Local{kBoth, kNetwork, kBoth, epochs(4, 12)}, host_limits).ok());
+  const Slot dev_slot{keys::Purpose::Authority, kBoth, kNetwork, 0, 1, secret(3)};
+  const Slot host_slot{keys::Purpose::Authority, kBoth, kNetwork, 0, 1, secret(3)};
+  Output o;
+  BeginRequest r{};
+  r.slot = dev_slot;
+  r.carrier = routed(4);
+  dev.begin(r, 0, dev_env, o);
+  CHECK(o.action == Action::Send);  // peer == site id == self: allowed
+  const Bytes r1 = bytes(o);
+  host_env.slots.push_back(host_slot);
+  host.on_r1(view(r1), routed(4), kBoth, 1, host_env, o);
+  CHECK(o.action == Action::Send && o.message_size == kR2Size);
+  const Bytes r2 = bytes(o);
+  Output di;
+  dev.on_r2(kBoth, keys::Purpose::Authority, view(r2), 2, di);
+  CHECK(di.action == Action::SendAndInstall);
+  Output hi;
+  host.on_r3(kBoth, keys::Purpose::Authority, view(bytes(di)), 3, hi);
+  CHECK(hi.action == Action::Install);
+  CHECK(hi.established.rx.key == di.established.tx.key);
+
+  // Pairwise still refuses a handshake with itself.
+  Node n(kA);
+  n.env.slots.push_back(Slot{keys::Purpose::Link, kA, kNetwork, 12, 1, secret(9)});
+  n.engine.begin(begin_req(n, kA), 10, n.env, o);
+  CHECK(o.reject == Reject::InvalidRequest);
+}
+
+void test_clock_ceiling_overflow() {
+  // Deadlines saturate instead of wrapping near UINT64_MAX, and the
+  // responder token bucket refills instead of starving on a wrapped
+  // elapsed*rate product.
+  Node a(kA);
+  Node b(kB);
+  pair(a, b);
+  Output o;
+  constexpr routeloom::MonotonicMs kNearMax = UINT64_MAX - 10;
+  a.engine.begin(begin_req(a, kB), kNearMax, a.env, o);
+  CHECK(o.action == Action::Send);
+  ExpiredSession expired{};
+  CHECK(!a.engine.next_expired(UINT64_MAX, expired));
+  CHECK(a.engine.initiator_in_flight() == 1);
+
+  Limits throttled{};
+  throttled.responder_rate_per_s = 32768;  // 2^15: elapsed 2^49 * rate == 2^64
+  throttled.responder_burst = 1;
+  Node c(kA);
+  Node d(kB, epochs(3, 12), throttled);
+  pair(c, d, keys::Purpose::End);
+  c.engine.begin(begin_req(c, kB, keys::Purpose::End), 100, c.env, o);
+  CHECK(o.action == Action::Send);
+  const Bytes r1a = bytes(o);
+  c.engine.abort(Role::Initiator, kB, keys::Purpose::End);
+  d.engine.on_r1(view(r1a), routed(2), kA, 100, d.env, o);
+  CHECK(o.action == Action::Send);  // consumes the single token
+  d.engine.abort(Role::Responder, kA, keys::Purpose::End);
+  c.engine.begin(begin_req(c, kB, keys::Purpose::End), 100, c.env, o);
+  CHECK(o.action == Action::Send);
+  const Bytes r1b = bytes(o);
+  c.engine.abort(Role::Initiator, kB, keys::Purpose::End);
+  d.engine.on_r1(view(r1b), routed(2), kA, 100, d.env, o);
+  CHECK(o.reject == Reject::RateLimited);  // no time passed: empty bucket
+  d.engine.abort(Role::Responder, kA, keys::Purpose::End);
+  c.engine.begin(begin_req(c, kB, keys::Purpose::End), 100, c.env, o);
+  CHECK(o.action == Action::Send);
+  const Bytes r1c = bytes(o);
+  c.engine.abort(Role::Initiator, kB, keys::Purpose::End);
+  constexpr routeloom::MonotonicMs kWrap =
+      100 + (std::uint64_t{1} << 49);  // elapsed*rate wraps to exactly 0
+  d.engine.on_r1(view(r1c), routed(2), kA, kWrap, d.env, o);
+  CHECK(o.action == Action::Send);  // refilled, not starved
 }
 
 }  // namespace
@@ -964,6 +1048,8 @@ int main() {
   test_simultaneous_open();
   test_authority_and_pending();
   test_configuration_and_counters();
+  test_authority_self_name_collision();
+  test_clock_ceiling_overflow();
   test_reserve_hook();
   test_epoch_regression();
   test_sizing();

@@ -149,7 +149,8 @@ void test_chunk_lane_codec() {
     CHECK(lane == ObjectLane::JoinRelay && step == 5);
   }
   // Chunk round-trip carries the lane; the end lane never rides RLD1.
-  std::array<std::uint8_t, 118> body{};
+  // WireRelay v2 grid is 110 (18 B head with reserved-zero end epochs).
+  std::array<std::uint8_t, 110> body{};
   for (std::size_t i = 0; i < body.size(); ++i) body[i] = static_cast<std::uint8_t>(i);
   JoinChunk chunk{};
   chunk.phase = JoinAuthPhase::EdhocMessage;
@@ -157,7 +158,7 @@ void test_chunk_lane_codec() {
   chunk.id = 0x12345678;
   chunk.offset = 0;
   chunk.total = 200;
-  chunk.data = ByteView{body.data(), 118};
+  chunk.data = ByteView{body.data(), body.size()};
   chunk.lane = ObjectLane::EndSession;
   std::array<std::uint8_t, 128> wire{};
   std::size_t wire_written = 0;
@@ -183,23 +184,24 @@ void test_chunk_lane_codec() {
   CHECK_OK(join_chunk_encode(JoinCarrier::Rld1, legacy,
                              MutableByteView{wire.data(), wire.size()}, wire_written));
   CHECK(wire[1] == 0x45);
-  // Reply round-trip carries the lane too.
+  // Reply round-trip carries the lane too (v2 18 B Wire head).
   JoinReply reply{};
   reply.phase = JoinAuthPhase::Resume;
   reply.step = 2;
   reply.id = 99;
-  reply.received = 118;
+  reply.received = 110;
   reply.status = JoinReplyStatus::Progress;
   reply.lane = ObjectLane::EndSession;
-  std::array<std::uint8_t, kJoinReplySize> reply_wire{};
+  std::array<std::uint8_t, kWireRelayReplySize> reply_wire{};
   std::size_t reply_written = 0;
-  CHECK_OK(
-      join_reply_encode(reply, MutableByteView{reply_wire.data(), reply_wire.size()}, reply_written));
+  CHECK_OK(join_reply_encode(JoinCarrier::WireRelay, reply,
+                             MutableByteView{reply_wire.data(), reply_wire.size()}, reply_written));
   CHECK(reply_wire[1] == 0xD2);
   JoinReply reply_back{};
-  CHECK_OK(join_reply_decode(ByteView{reply_wire.data(), reply_written}, reply_back));
+  CHECK_OK(join_reply_decode(JoinCarrier::WireRelay, ByteView{reply_wire.data(), reply_written},
+                             reply_back));
   CHECK(reply_back.lane == ObjectLane::EndSession);
-  CHECK(reply_back.received == 118);
+  CHECK(reply_back.received == 110);
 }
 
 void test_slot_lane_isolation() {
@@ -209,9 +211,9 @@ void test_slot_lane_isolation() {
   for (std::size_t i = 0; i < object.size(); ++i) object[i] = static_cast<std::uint8_t>(i * 3 + 1);
   JoinObjectSlot join_slot;
   JoinObjectSlot end_slot;
-  CHECK_OK(join_slot.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE,
+  CHECK_OK(join_slot.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE, 7, 3,
                           ByteView{object.data(), object.size()}, kT0));
-  CHECK_OK(end_slot.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE,
+  CHECK_OK(end_slot.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE, 0, 0,
                          ByteView{object.data(), object.size()}, kT0,
                          ObjectLane::EndSession));
   CHECK(join_slot.lane() == ObjectLane::JoinRelay);
@@ -233,20 +235,32 @@ void test_slot_lane_isolation() {
                              MutableByteView{end_wire.data(), end_wire.size()}, end_written));
   CHECK(join_written == end_written);
   CHECK(join_wire[1] == 0x41 && end_wire[1] == 0xC1);
-  CHECK(std::memcmp(join_wire.data() + 2, end_wire.data() + 2, join_written - 2) == 0);
+  // Same id/offset/total, then the lane's epoch bytes: the join lane's
+  // service epochs vs the end lane's reserved zeros.
+  CHECK(std::memcmp(join_wire.data() + 2, end_wire.data() + 2, 8) == 0);
+  CHECK(join_wire[10] == 0 && join_wire[13] == 7 && end_wire[10] == 0 && end_wire[13] == 0);
+  CHECK(std::memcmp(join_wire.data() + 18, end_wire.data() + 18, join_written - 18) == 0);
   // A join reply never advances the end lane's send, and vice versa.
   JoinReply join_complete{};
   join_complete.phase = JoinAuthPhase::EdhocMessage;
   join_complete.step = 1;
   join_complete.id = 0xA11CE;
+  join_complete.gateway_epoch = 7;
+  join_complete.proxy_epoch = 3;
   join_complete.received = static_cast<std::uint16_t>(object.size());
   join_complete.status = JoinReplyStatus::Complete;
   join_complete.lane = ObjectLane::JoinRelay;
   CHECK(end_slot.on_reply(join_complete, kT0) == JoinObjectSlot::ReplyOutcome::Ignored);
   JoinReply end_complete = join_complete;
   end_complete.lane = ObjectLane::EndSession;
+  end_complete.gateway_epoch = 0;
+  end_complete.proxy_epoch = 0;
   CHECK(join_slot.on_reply(end_complete, kT0) == JoinObjectSlot::ReplyOutcome::Ignored);
   CHECK(end_slot.on_reply(end_complete, kT0) == JoinObjectSlot::ReplyOutcome::Done);
+  // ... and nonzero epochs never confirm the end lane's reserved-zero key.
+  JoinReply end_wrong_epoch = end_complete;
+  end_wrong_epoch.gateway_epoch = 7;
+  CHECK(end_slot.on_reply(end_wrong_epoch, kT0) == JoinObjectSlot::ReplyOutcome::Ignored);
   // Inbound: an end chunk never joins a join-lane assembly.
   JoinObjectSlot inbound;
   JoinChunk join_chunk{};
@@ -271,7 +285,7 @@ void test_slot_lane_isolation() {
     JoinChunk ci{};
     // Rebuild the remaining chunks from the peer's sender side.
     JoinObjectSlot sender;
-    CHECK_OK(sender.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE,
+    CHECK_OK(sender.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE, 0, 0,
                          ByteView{object.data(), object.size()}, kT0, ObjectLane::EndSession));
     CHECK_OK(sender.chunk_at(i, ci));
     const auto accepted = end_inbound.accept(JoinCarrier::WireRelay, ci, kT0);
@@ -288,11 +302,15 @@ void test_slot_lane_isolation() {
   // End objects never load on the RLD1 carrier; EDHOC step 5 never loads
   // on the end lane.
   JoinObjectSlot bad;
-  CHECK(!bad.load(JoinCarrier::Rld1, JoinAuthPhase::EdhocMessage, 1, 0xA11CE,
+  CHECK(!bad.load(JoinCarrier::Rld1, JoinAuthPhase::EdhocMessage, 1, 0xA11CE, 0, 0,
                   ByteView{object.data(), object.size()}, kT0, ObjectLane::EndSession)
              .ok());
-  CHECK(!bad.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 5, 0xA11CE,
+  CHECK(!bad.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 5, 0xA11CE, 0, 0,
                   ByteView{object.data(), object.size()}, kT0, ObjectLane::EndSession)
+             .ok());
+  // A WireRelay join-lane load without service epochs is refused (#116).
+  CHECK(!bad.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 1, 0xA11CE, 0, 0,
+                  ByteView{object.data(), object.size()}, kT0, ObjectLane::JoinRelay)
              .ok());
 }
 

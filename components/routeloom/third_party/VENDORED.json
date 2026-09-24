@@ -1,6 +1,6 @@
 {
   "format": "routeloom-vendored-sources-v1",
-  "note": "Upstream files are byte-identical to the pinned commits: `files` maps each vendored path (relative to its directory) to the git blob id at that commit. tests/test_vendored_sources.py recomputes them. RouteLoom glue lives outside these directories (src/edhoc/).",
+  "note": "files maps vendored paths to checked-in git blob ids. All are byte-identical to the pinned upstream commits except the one documented zcbor null/zero-length memmove patch; tests/test_vendored_sources.py checks its exact upstream transformation. RouteLoom glue lives in src/edhoc/.",
   "components": [
     {
       "name": "libedhoc",
@@ -159,7 +159,13 @@
         "include/zcbor_tags.h": "89148776c6073d13f1364098ad49c777bcbdd764",
         "src/zcbor_common.c": "1caf806688b230bc5c31bcc715ecefcf2619b3a1",
         "src/zcbor_decode.c": "92f9fe5171e22848dc9da2b37a465edb5f243f39",
-        "src/zcbor_encode.c": "44411ea3573c5f2e6f3e634e6011c1f0ed692e43"
+        "src/zcbor_encode.c": "d98d94d0c6bd44f700541d15d52903ff7ebea27f"
+      },
+      "local_patches": {
+        "src/zcbor_encode.c": {
+          "upstream_blob": "44411ea3573c5f2e6f3e634e6011c1f0ed692e43",
+          "reason": "Skip zero-byte memmove with the null pointer used by libedhoc Encrypt0 protected headers."
+        }
       }
     },
     {
@@ -170,7 +176,7 @@
       "commit": "29160dd877d29658279fd683b2ae57b320ddcf09",
       "license": "Apache-2.0 OR GPL-2.0-or-later",
       "license_file": "LICENSE",
-      "subset": "builtin AES + CCM (drivers/builtin/src/{aes,ccm,block_cipher}.c, platform/platform_util.c, utilities/constant_time.c) and exactly the headers they include under src/edhoc/tf_psa_crypto_config.h; host builds only. The commit is the tf-psa-crypto submodule of Mbed TLS 0fe989b6b514192783c469039edd325fd0989806, libedhoc's externals/mbedtls pin. Used under Apache-2.0.",
+      "subset": "builtin AES + CCM + GCM (drivers/builtin/src/{aes,ccm,gcm,block_cipher}.c, platform/platform_util.c, utilities/constant_time.c) and exactly the headers they include under src/edhoc/tf_psa_crypto_config.h; host builds only. The commit is the tf-psa-crypto submodule of Mbed TLS 0fe989b6b514192783c469039edd325fd0989806, libedhoc's externals/mbedtls pin. Used under Apache-2.0.",
       "files": {
         "LICENSE": "4c47cb2a5a526a482b939705c41b8610c4e59205",
         "core/alignment.h": "a29fc5fb910927bd9d774090d34464f2cdbd371e",
@@ -184,12 +190,14 @@
         "drivers/builtin/include/mbedtls/private/crypto_adjust_config_enable_builtins.h": "54792d32473bc259402cbdd8d3619c85d11710f8",
         "drivers/builtin/include/mbedtls/private/crypto_adjust_config_tweak_builtins.h": "a7cfff2e3aa2441b70e480a276884e782458c3de",
         "drivers/builtin/include/mbedtls/private/error_common.h": "143366ed62de0ca5dbd6a118745a13f26a21a4fe",
+        "drivers/builtin/include/mbedtls/private/gcm.h": "d9b0435bc5bfb8b4259ee737a5a4b0f453536464",
         "drivers/builtin/include/mbedtls/private_access.h": "b4ff4762e286e1dcb64b128b49db62fe76356ecc",
         "drivers/builtin/src/aes.c": "0bb4ff489609e1d1d51662da87da86ac24e54a57",
         "drivers/builtin/src/block_cipher.c": "90662637e3256c34915beace867d48ca3bb505a2",
         "drivers/builtin/src/block_cipher_internal.h": "bdcacfef1756ff3aeb14e6c1a71a110eaafd79dc",
         "drivers/builtin/src/ccm.c": "742513c68dae128726612bf48e2df747acbea6bc",
         "drivers/builtin/src/ctr.h": "69be68ea03b14fe2ceac18eda1da445d6228108f",
+        "drivers/builtin/src/gcm.c": "b9412a7b6dc20f96e76edc363eb6cd27ca347220",
         "include/mbedtls/compat-3-crypto.h": "c3f290df5ad9df788220dd0291c5b456e9b6acbc",
         "include/mbedtls/constant_time.h": "d31bff677e9dd444ce01dec8d526b6bae94592fb",
         "include/mbedtls/platform.h": "b80deeb48b33eab16d4f10691d4275b6acb6f9a0",
