@@ -1055,8 +1055,14 @@ fn config_command_header_check(command: &ConfigCommand) -> Result<()> {
     {
         return invalid("config command identity/nonce fields must be nonzero");
     }
+    // The u64 axis reserves its top value: next == MAX can never be a
+    // decision (nothing could follow it), and the authority sequence
+    // shares the same reservation so both counters fail closed at the
+    // bound.
     if command.expected_revision == u64::MAX
         || command.next_revision != command.expected_revision + 1
+        || command.next_revision == u64::MAX
+        || command.authority_sequence == u64::MAX
     {
         return invalid("config revision must satisfy next = expected + 1");
     }
@@ -1127,6 +1133,7 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
     let network = u64::from_be_bytes(encoded[12..20].try_into().expect("fixed"));
     let target = u64::from_be_bytes(encoded[20..28].try_into().expect("fixed"));
     let authority = u64::from_be_bytes(encoded[28..36].try_into().expect("fixed"));
+    let authority_sequence = u64::from_be_bytes(encoded[40..48].try_into().expect("fixed"));
     let target_boot = u64::from_be_bytes(encoded[144..152].try_into().expect("fixed"));
     if magic != RCC1_MAGIC
         || version != RCC1_VERSION
@@ -1138,6 +1145,8 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
         || encoded.len() - RCC1_HEADER_SIZE != patch_len
         || expected_revision == u64::MAX
         || next_revision != expected_revision + 1
+        || next_revision == u64::MAX
+        || authority_sequence == u64::MAX
         || network == 0
         || target == 0
         || target == BROADCAST_NODE_ID
@@ -1272,6 +1281,9 @@ fn config_recovery_check(command: &ConfigRecoveryCommand) -> Result<()> {
         || all_zero(&command.operation_id)
     {
         return invalid("config recovery identity fields invalid");
+    }
+    if command.authority_sequence == u64::MAX {
+        return invalid("config recovery authority sequence exhausted");
     }
     match command.recovery_class {
         ConfigRecoveryClass::StoreRecover => {

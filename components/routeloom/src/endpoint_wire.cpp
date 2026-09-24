@@ -767,8 +767,13 @@ Status config_command_encode(const ConfigCommand& command,
       all_zero(ByteView{command.challenge_nonce.data(), command.challenge_nonce.size()})) {
     return invalid("config command identity/nonce fields must be nonzero");
   }
+  // The u64 axis reserves its top value: next == MAX can never be a
+  // decision (nothing could follow it), and the authority sequence shares
+  // the same reservation so both counters fail closed at the bound.
   if (command.expected_revision == UINT64_MAX ||
-      command.next_revision != command.expected_revision + 1) {
+      command.next_revision != command.expected_revision + 1 ||
+      command.next_revision == UINT64_MAX ||
+      command.authority_sequence == UINT64_MAX) {
     return invalid("config revision must satisfy next = expected + 1");
   }
   if (command.field_count == 0 || command.field_count > kConfigFieldCountMax) {
@@ -886,6 +891,7 @@ Status config_command_decode(const ByteView encoded, ConfigCommand& out) noexcep
       reader.remaining() != patch_len ||
       out.expected_revision == UINT64_MAX ||
       out.next_revision != out.expected_revision + 1 ||
+      out.next_revision == UINT64_MAX || out.authority_sequence == UINT64_MAX ||
       out.network == 0 || out.target == kInvalidNodeId ||
       out.target == kBroadcastNodeId || out.authority == kInvalidNodeId ||
       out.authority == kBroadcastNodeId || out.target_boot == 0 ||
@@ -942,10 +948,12 @@ Status config_recovery_encode(const ConfigRecoveryCommand& command,
     return invalid("config recovery class unknown");
   }
   // A store recovery attests a fresh generation (attest 0|1); the
-  // authority-generation field is reserved and stays 0.
+  // authority-generation field is reserved and stays 0. The authority
+  // sequence shares the u64 top-value reservation with RCC1.
   if (command.attest > kRcr1AttestReprovision ||
       command.new_store_generation == 0 ||
-      command.new_authority_generation != 0) {
+      command.new_authority_generation != 0 ||
+      command.authority_sequence == UINT64_MAX) {
     return invalid("config recovery store fields invalid");
   }
   out.clear();
@@ -1018,7 +1026,8 @@ Status config_recovery_decode(const ByteView encoded,
       out.authority == kBroadcastNodeId ||
       all_zero(ByteView{out.operation_id.data(), out.operation_id.size()}) ||
       out.attest > kRcr1AttestReprovision ||
-      out.new_store_generation == 0 || out.new_authority_generation != 0) {
+      out.new_store_generation == 0 || out.new_authority_generation != 0 ||
+      out.authority_sequence == UINT64_MAX) {
     return reject();
   }
   return Status::success();

@@ -26,7 +26,7 @@ using endpoint::ConfigReason;
 //   8   u32  schema_version (1)
 //   12  u32  store generation (monotonic per namespace; never reused)
 //   16  u32  commit seal (0 pending, kJournalSealCommitted committed)
-//   20  u8   phase | u8 reserved | u16 reason
+//   20  u8   phase | u8 record kind (format 2; format 1 reserved=0) | u16 reason
 //   24  u64  network | u64 target
 //   40  u16  namespace | u16 schema | u32 issuer_generation
 //   48  u64  issuer | u64 authority_sequence
@@ -36,7 +36,10 @@ using endpoint::ConfigReason;
 //   140 u16  prev_len | u16 next_len | u16 permit_len | u16 reserved
 //   148 prev_snapshot | next_snapshot | permit | u32 crc32 over [0,len-4)
 constexpr std::uint32_t kJournalMagic = 0x52434A31U;  // "RCJ1"
-constexpr std::uint16_t kJournalFormat = 1;
+// Format 2 carries the record kind byte; format 1 images (reserved byte 0)
+// still decode as Standard records so healthy pre-floor journals migrate.
+constexpr std::uint16_t kJournalFormat = 2;
+constexpr std::uint16_t kJournalFormatLegacy = 1;
 constexpr std::uint32_t kJournalSchemaVersion = 1;
 constexpr std::uint32_t kJournalSealCommitted = 0xC0A61E5EU;
 constexpr std::size_t kJournalHeaderSize = 148;
@@ -381,12 +384,14 @@ StatusCode config_reason_status(const ConfigReason reason) noexcept {
 
 ConfigJournal::ConfigJournal(const ConfigJournalConfig& config,
                              ConfigJournalStorage& storage,
+                             SecurityFloorStore& floor,
                              ConfigAuthorityVerifier& verifier, EntropySource& entropy,
                              ConfigRateLimiter& rate_limiter, ConfigProvider* provider,
                              const ConfigSchemaValidator* validator,
                              ConfigMaintenanceGate* gate) noexcept
     : config_(config),
       storage_(storage),
+      floor_(floor),
       verifier_(verifier),
       entropy_(entropy),
       rate_limiter_(rate_limiter),
@@ -414,7 +419,8 @@ Status ConfigJournal::decode_slot(const std::uint8_t slot, JournalRecord& record
   if (st) st = reader.read_u32(schema);
   if (st) st = reader.read_u32(generation);
   if (st) st = reader.read_u32(seal);
-  if (!st || magic != kJournalMagic || format != kJournalFormat ||
+  if (!st || magic != kJournalMagic ||
+      (format != kJournalFormat && format != kJournalFormatLegacy) ||
       length < kJournalHeaderSize + 4 || length > kJournalRecordMax) {
     content = SlotContent::Corrupt;
     return Status::success();
@@ -457,7 +463,13 @@ Status ConfigJournal::decode_slot(const std::uint8_t slot, JournalRecord& record
   if (st) st = reader.read_u16(reserved16);
   const std::size_t expect =
       kJournalHeaderSize + static_cast<std::size_t>(prev_len) + next_len + permit_len + 4;
-  if (!st || reserved8 != 0 || reserved16 != 0 ||
+  // The kind byte: format 1 images keep reserved=0 (Standard); format 2
+  // names Standard/Intent/Complete — anything else is noise.
+  const bool kind_ok =
+      format == kJournalFormatLegacy
+          ? reserved8 == 0
+          : reserved8 <= static_cast<std::uint8_t>(ConfigRecordKind::RecoveryComplete);
+  if (!st || !kind_ok || reserved16 != 0 ||
       prev_len > endpoint::kConfigSnapshotMax || next_len > endpoint::kConfigSnapshotMax ||
       permit_len > kConfigPermitObjectMax || expect != length ||
       phase > static_cast<std::uint8_t>(ConfigPhase::Quarantined) ||
@@ -474,6 +486,9 @@ Status ConfigJournal::decode_slot(const std::uint8_t slot, JournalRecord& record
   }
   record.phase = static_cast<ConfigPhase>(phase);
   record.reason = static_cast<ConfigReason>(reason);
+  record.kind = format == kJournalFormatLegacy
+                    ? ConfigRecordKind::Standard
+                    : static_cast<ConfigRecordKind>(reserved8);
   record.config_namespace = ns;
   record.schema = schema_id;
   record.issuer_generation = issuer_generation;
@@ -523,7 +538,7 @@ Status ConfigJournal::store_record(const JournalRecord& record) noexcept {
     if (st) st = writer.write_u32(record.store_generation);
     if (st) st = writer.write_u32(seal);
     if (st) st = writer.write_u8(static_cast<std::uint8_t>(record.phase));
-    if (st) st = writer.write_u8(0);
+    if (st) st = writer.write_u8(static_cast<std::uint8_t>(record.kind));
     if (st) st = writer.write_u16(static_cast<std::uint16_t>(record.reason));
     if (st) st = writer.write_u64(record.network);
     if (st) st = writer.write_u64(record.target);
@@ -586,11 +601,48 @@ Status ConfigJournal::store_record(const JournalRecord& record) noexcept {
   return Status::success();
 }
 
+Status ConfigJournal::reserve_generation(const Transaction& txn,
+                                         std::uint32_t& reserved_j) noexcept {
+  SecurityFloorState current{};
+  Status status = floor_.read(current);
+  if (!status.ok()) return status;
+  const SecurityFloorEntry* entry =
+      SecurityFloorStore::entry_for(current, config_.config_namespace);
+  if (entry == nullptr) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "config security floor has no namespace entry");
+  }
+  if (entry->store_floor == 0xFFFFFFFFU) {
+    // The store axis is spent: no further generation can be named, so no
+    // further record can be committed (a device-lifetime event the callers
+    // report as quarantine, never as a silent stall).
+    return Status::error(StatusCode::CounterExhausted,
+                         "config store generation exhausted");
+  }
+  SecurityFloorState next = current;
+  SecurityFloorEntry* slot =
+      SecurityFloorStore::entry_for_mut(next, config_.config_namespace);
+  slot->store_floor = entry->store_floor + 1;
+  // The decision floor only ever rises to the transaction's revision: a
+  // DECIDED moves it, later phases of the same transaction hold it, and a
+  // revision below the floor (a consumed gap) never lowers it.
+  if (txn.command.next_revision > slot->decision_floor) {
+    slot->decision_floor = txn.command.next_revision;
+  }
+  status = floor_.advance(current, next);
+  if (!status.ok()) return status;
+  reserved_j = slot->store_floor;
+  return Status::success();
+}
+
 Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason reason,
                                     const Transaction& txn) noexcept {
+  std::uint32_t reserved_j = 0;
+  Status status = reserve_generation(txn, reserved_j);
+  if (!status.ok()) return status;
   JournalRecord& record = record_scratch_;
   record = JournalRecord{};
-  record.store_generation = store_generation_ + 1;
+  record.store_generation = reserved_j;
   record.phase = phase;
   record.reason = reason;
   record.network = config_.network;
@@ -611,9 +663,11 @@ Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason 
   record.prev_snapshot = txn.prev_snapshot;
   record.next_snapshot = txn.next_snapshot;
   record.permit = txn.permit;
-  const Status status = store_record(record);
+  // The RAM counters follow the reservation even when the journal store
+  // below faults: the gap is consumed, never reused.
+  store_generation_ = reserved_j;
+  status = store_record(record);
   if (!status) return status;
-  ++store_generation_;
   phase_ = phase;
   durable_ = record;
   return Status::success();
@@ -704,6 +758,25 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
   // record below may advance it to the generation that record committed
   // under (issuer_generation carries the pin — see persist_phase).
   authority_generation_ = config_.authority_generation;
+  // The floor bounds every counter below: without a usable floor for this
+  // identity and namespace, no adoption and no intake can be safe — and a
+  // journal newer than its floor proves the save order was violated.
+  SecurityFloorState floor_state{};
+  Status floor_status = floor_.read(floor_state);
+  if (!floor_status.ok()) return floor_status;
+  if (floor_state.network != config_.network ||
+      floor_state.target != config_.target) {
+    return Status::error(StatusCode::Conflict,
+                         "config security floor identity mismatch");
+  }
+  const SecurityFloorEntry* floor_entry = SecurityFloorStore::entry_for(
+      floor_state, config_.config_namespace);
+  if (floor_entry == nullptr) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "config security floor has no namespace entry");
+  }
+  const std::uint32_t floor_j = floor_entry->store_floor;
+  const std::uint64_t floor_r = floor_entry->decision_floor;
   auto& parsed = parsed_;
   std::array<SlotContent, kConfigJournalSlots> content{};
   std::array<bool, kConfigJournalSlots> unreadable{};
@@ -780,10 +853,20 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
   if (valid == 2) {
     const std::uint8_t newer = parsed[1].store_generation >= parsed[0].store_generation ? 1 : 0;
     const std::uint8_t older = static_cast<std::uint8_t>(newer ^ 1U);
+    // Twins at one generation must agree on the whole encoded content —
+    // kind, issuer metadata, identity, phase/reason, opid, digest,
+    // revisions, snapshots and the signed object — or the commit they
+    // claim is ambiguous and bounds nothing.
     const auto same_record = [](const JournalRecord& a, const JournalRecord& b) {
-      return a.phase == b.phase && a.reason == b.reason &&
+      return a.phase == b.phase && a.reason == b.reason && a.kind == b.kind &&
+             a.network == b.network && a.target == b.target &&
+             a.config_namespace == b.config_namespace && a.schema == b.schema &&
+             a.issuer == b.issuer && a.issuer_generation == b.issuer_generation &&
+             a.authority_sequence == b.authority_sequence &&
              a.decision_revision == b.decision_revision &&
              a.active_revision == b.active_revision &&
+             a.target_boot == b.target_boot &&
+             a.apply_within_ms == b.apply_within_ms &&
              a.operation_id == b.operation_id &&
              a.command_digest == b.command_digest &&
              a.prev_snapshot.size == b.prev_snapshot.size &&
@@ -812,6 +895,14 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
     const Status adopted = adopt_record(parsed[newer]);
     if (!adopted) return adopted;
     has_active_ = true;
+    if (parsed[newer].store_generation > floor_j ||
+        parsed[newer].decision_revision > floor_r) {
+      // The journal claims counters the floor never reserved: a violated
+      // save order or a mis-seeded floor — stop, never mint from unknown
+      // counters. Recovery resumes after managed floor re-provisioning.
+      return quarantine(StatusCode::IntegrityError,
+                        "config journal newer than security floor");
+    }
     initialized_ = true;
     return resolve_recovered(now_ms);
   }
@@ -822,6 +913,11 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
     const Status adopted = adopt_record(parsed[slot]);
     if (!adopted) return adopted;
     has_active_ = true;
+    if (parsed[slot].store_generation > floor_j ||
+        parsed[slot].decision_revision > floor_r) {
+      return quarantine(StatusCode::IntegrityError,
+                        "config journal newer than security floor");
+    }
     initialized_ = true;
     if (!provably_absent(static_cast<std::uint8_t>(slot ^ 1U))) {
       // One slot lost without proof it was never committed: the survivor is
@@ -848,7 +944,14 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
     return quarantine(StatusCode::IntegrityError, "config journal corrupt");
   }
 
-  // Fresh journal: all slots empty or pending-only.
+  // Fresh journal: all slots empty or pending-only. When the floor still
+  // names consumed generations, the journal lost everything it decided —
+  // adopt nothing, quarantine, and let the recovery lane re-provision
+  // from the floor's J/R (never a silent return to revision 0).
+  if (floor_j > 0 || floor_r > 0) {
+    return quarantine(StatusCode::RecoveryRequired,
+                      "config journal lost: security floor holds the counters");
+  }
   active_snapshot_.clear();
   Status status = config_snapshot_hash(config_.config_namespace, config_.schema,
                                      active_snapshot_.view(), active_hash_);
@@ -884,7 +987,10 @@ Status ConfigJournal::resolve_recovered(const MonotonicMs now_ms) noexcept {
       Transaction& txn = boot_txn();
       const Status stored =
           persist_phase(ConfigPhase::Interrupted, ConfigReason::Deadline, txn);
-      if (!stored) return stored;
+      if (!stored) {
+        if (stored.code == StatusCode::CounterExhausted) quarantine_ram();
+        return stored;
+      }
       stats_.interrupted++;
       const Status recorded =
           record_result(txn, ConfigPhase::Interrupted, ConfigReason::Deadline, now_ms);
@@ -1711,6 +1817,12 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
     // The seal never landed: nothing was accepted, so the consumed token
     // goes back — a refusal consumes no budget.
     rate_limiter_.refund();
+    if (status.code == StatusCode::CounterExhausted) {
+      quarantine_ram();
+      fill_verdict(verdict, ConfigPhase::Quarantined,
+                   ConfigReason::RecoveryRequired);
+      return status;
+    }
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::StorageFailure);
     ++stats_.storage_failures;
     return status;
@@ -1757,6 +1869,12 @@ Status ConfigJournal::finish_transaction(Transaction& txn, const ConfigPhase pha
                                          const ConfigReason reason) noexcept {
   const Status stored = persist_phase(phase, reason, txn);
   if (!stored) {
+    if (stored.code == StatusCode::CounterExhausted) {
+      // No generation will ever be nameable again: retrying is pointless,
+      // so the live state wedges honestly instead of spinning on poll().
+      quarantine_ram();
+      return stored;
+    }
     // The durable record still says APPLY_INTENT (or DECIDED): a boot
     // restores and interrupts, which is the same safe outcome. For the
     // live transaction — AND for the boot-resolution scratch transaction —
@@ -1787,6 +1905,15 @@ Status ConfigJournal::finish_transaction(Transaction& txn, const ConfigPhase pha
   txn.pending_persist = false;
   txn.intent_pending = false;
   return recorded.ok() ? Status::success() : recorded;
+}
+
+void ConfigJournal::quarantine_ram() noexcept {
+  quarantined_ = true;
+  phase_ = ConfigPhase::Quarantined;
+  txn_.active = false;
+  txn_.intent_pending = false;
+  txn_.pending_persist = false;
+  ++stats_.quarantine_events;
 }
 
 void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
@@ -1885,6 +2012,12 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     const Status stored =
         persist_phase(ConfigPhase::ApplyIntent, ConfigReason::Ok, txn_);
     if (!stored) {
+      if (stored.code == StatusCode::CounterExhausted) {
+        // The DECIDED record is durable but no further record can ever
+        // commit: wedge honestly instead of retrying the intent forever.
+        quarantine_ram();
+        return;
+      }
       // The DECIDED record is durable and safe — a later boot interrupts
       // it; the intent write retries on the next poll.
       ++stats_.storage_failures;
@@ -1998,10 +2131,41 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
     // fabricate state — an undelegated authority decision. The journal
     // stays quarantined/uncertain until the operator attests a
     // re-provisioning under a fresh trust generation (04 §4.7, 06 §6.3:
-    // never an automatic return to revision 0).
+    // never an automatic return to revision 0). This refusal consumes no
+    // floor generation — the reservation below runs only for recoveries
+    // that may actually land.
     return Status::error(StatusCode::RecoveryRequired,
                         "config recovery needs re-provision attestation");
   }
+  // The attested generation is exactly the floor's next: an old command
+  // names a spent generation, a future one a gap nobody reserved — both
+  // are refused, so only the operator's current recovery can land.
+  SecurityFloorState current{};
+  Status floor_status = floor_.read(current);
+  if (!floor_status.ok()) return floor_status;
+  const SecurityFloorEntry* floor_entry =
+      SecurityFloorStore::entry_for(current, config_.config_namespace);
+  if (floor_entry == nullptr) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "config security floor has no namespace entry");
+  }
+  if (floor_entry->store_floor == 0xFFFFFFFFU) {
+    return Status::error(StatusCode::CounterExhausted,
+                         "config store generation exhausted");
+  }
+  if (new_store_generation != floor_entry->store_floor + 1) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "config recovery must name the floor's next generation");
+  }
+  // Reserve before the twins are written; a failed twin write consumes
+  // the generation — the next recovery names the one after.
+  SecurityFloorState next = current;
+  SecurityFloorEntry* floor_slot =
+      SecurityFloorStore::entry_for_mut(next, config_.config_namespace);
+  floor_slot->store_floor = new_store_generation;
+  floor_status = floor_.advance(current, next);
+  if (!floor_status.ok()) return floor_status;
+  store_generation_ = new_store_generation;
   // Re-provision: the surviving known value (if any) is adopted under the
   // new generation; the proven revision floor is never regressed.
   JournalRecord& record = record_scratch_;
@@ -2037,7 +2201,6 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   if (!stored) return stored;
   stored = store_record(record);
   if (!stored) return stored;
-  store_generation_ = new_store_generation;
   proven_floor_ = new_store_generation;
   durable_ = record;
   uncertain_ = false;

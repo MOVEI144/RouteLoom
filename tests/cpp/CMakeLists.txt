@@ -135,6 +135,12 @@ target_include_directories(routeloom_config_tests PRIVATE ${CMAKE_CURRENT_SOURCE
 target_compile_options(routeloom_config_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_config_tests COMMAND routeloom_config_tests)
 
+add_executable(routeloom_security_floor_tests test_security_floor.cpp)
+target_link_libraries(routeloom_security_floor_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_security_floor_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_security_floor_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_security_floor_tests COMMAND routeloom_security_floor_tests)
+
 add_executable(routeloom_cose_tests test_config_cose.cpp)
 target_link_libraries(routeloom_cose_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_cose_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

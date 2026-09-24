@@ -445,6 +445,14 @@ def main():
         rcc1(patch=good_patch,
              **{**base, "expected": 0xFFFFFFFFFFFFFFFF, "nxt": 0}),
         "revision overflow")
+    bad("config_next_revision_max", "config_command",
+        rcc1(patch=good_patch,
+             **{**base, "expected": 0xFFFFFFFFFFFFFFFE,
+                "nxt": 0xFFFFFFFFFFFFFFFF}),
+        "next == MAX can never be a decision")
+    bad("config_authority_seq_max", "config_command",
+        rcc1(patch=good_patch, **{**base, "auth_seq": 0xFFFFFFFFFFFFFFFF}),
+        "authority sequence reserves its top value")
     bad("config_field_count_zero", "config_command",
         rcc1(patch=b"", **{**base, "field_count": 0}),
         "a no-op patch is never issued on the wire")
@@ -537,6 +545,9 @@ def main():
         rcr1(**{**rcr_base, "recovery_class": 2, "new_store_gen": 0,
               "new_auth_gen": 3}),
         "class 2 no longer exists: authority generation changes are RTM1")
+    bad("recovery_authority_seq_max", "config_recovery",
+        rcr1(**{**rcr_base, "auth_seq": 0xFFFFFFFFFFFFFFFF}),
+        "authority sequence reserves its top value")
     bad("recovery_zero_opid", "config_recovery",
         rcr1(**{**rcr_base, "opid": bytes(16)}), "operation id must be nonzero")
     bad("recovery_bad_namespace", "config_recovery",

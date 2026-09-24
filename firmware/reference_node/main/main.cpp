@@ -32,6 +32,7 @@
 #include "routeloom/config_wire.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
 #include "routeloom/nvs_config_store.hpp"
+#include "routeloom/nvs_security_floor.hpp"
 #endif
 #if CONFIG_ROUTELOOM_TRUST_STORE
 #include "routeloom/device_credential.hpp"
@@ -969,6 +970,24 @@ extern "C" void app_main(void) {
   if (!status) {
     ESP_LOGE(kTag, "config provider open failed: %s", status.detail);
   }
+  // The RLF1 security floor bounds every protected counter the journal
+  // and the trust store mint (04 §4.7). It is NEVER auto-created: a
+  // missing floor means managed re-provisioning has not run, so the
+  // journal below initializes impaired and privileged intake refuses.
+  static routeloom::espnow::NvsSecurityFloorStore config_floor_store;
+  status = config_floor_store.open("rlfloor",
+                                   routeloom::espnow::kSecurityNvsPartition);
+  if (!status) {
+    ESP_LOGE(kTag, "security floor open failed: %s", status.detail);
+  }
+  static routeloom::SecurityFloorStore config_floor(config_floor_store);
+  status = config_floor.initialize();
+  if (!status) {
+    ESP_LOGE(kTag,
+             "security floor unavailable: %s — config intake refuses until "
+             "managed re-provisioning installs one",
+             status.detail);
+  }
   static RefNodeMaintenanceGate config_gate(/*independent_admin_path=*/false);
   static routeloom::ConfigRateLimiter config_limiter;
   static routeloom::espnow::EspNowEntropySource config_entropy;
@@ -1040,8 +1059,9 @@ extern "C" void app_main(void) {
   journal_config.authority_generation =
       static_cast<std::uint32_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY_GENERATION);
   static routeloom::ConfigJournal config_journal(
-      journal_config, config_store, config_verifier, config_entropy,
-      config_limiter, &config_provider, /*validator=*/nullptr, &config_gate);
+      journal_config, config_store, config_floor, config_verifier,
+      config_entropy, config_limiter, &config_provider,
+      /*validator=*/nullptr, &config_gate);
   status = config_journal.initialize(monotonic_now_ms());
   if (!status) {
     // Journal impairment is NOT a node-fatal condition (04 §4.7, 06 §6.3):
@@ -1056,10 +1076,10 @@ extern "C" void app_main(void) {
     // Recovery is deliberately NOT implicit: §6.3 requires authorized
     // recovery evidence from the authority. The impaired journal still
     // answers kind-4 recovery objects through config_target's dedicated
-    // lane (signed RCR1 — store-recovery or countersigned trust update),
-    // so an authorized routeloomctl `config-recover`/`config-trust-update`
-    // reaches it over the mesh; the imperative ConfigJournal::recover()
-    // stays an explicit operator/host call (exercised by tests).
+    // lane (a signed RCR1 store-recovery naming the floor's next
+    // generation), so an authorized routeloomctl `config-recover` reaches
+    // it over the mesh; the imperative ConfigJournal::recover() stays an
+    // explicit operator/host call (exercised by tests).
     ESP_LOGE(kTag,
              "config journal init failed: %s — running degraded "
              "(routing continues, config intake refuses)",

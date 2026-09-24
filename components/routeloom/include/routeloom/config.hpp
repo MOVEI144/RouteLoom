@@ -16,10 +16,11 @@
 //     target, namespace) ConfigJournal phase machine
 //     IDLE->...->ACTIVE(+INTERRUPTED/QUARANTINED), CAS on
 //     expected_revision, STALE_REVISION/CONFLICT/duplicate-id semantics,
-//     dual-slot journal persistence with write->commit->readback before
-//     every phase advance, the §6.3 one-slot-loss rule, result records
-//     8x300 s, one active transaction, the 1/min+burst1 acceptance budget
-//     and the kind-3 permit reassembly bound,
+//     dual-slot journal persistence with the RLF1 floor reservation before
+//     and write->commit->readback after every phase advance, the §6.3
+//     one-slot-loss rule, result records 8x300 s, one active transaction,
+//     the 1/min+burst1 acceptance budget and the kind-3 permit
+//     reassembly bound,
 //   - the provider contract: side-effect-free validate/prepare, idempotent
 //     async apply/restore via completion tokens, readback verification,
 //     restore-failure -> QUARANTINED, no whole-board erase,
@@ -46,6 +47,7 @@
 #include "routeloom/endpoint_wire.hpp"
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/security.hpp"
+#include "routeloom/security_floor.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
 
@@ -381,20 +383,36 @@ struct ConfigStats {
   std::uint32_t maintenance_refusals{0};
 };
 
+// The durable record's kind (journal format 2 header byte): a recovery
+// intent and its completion carry the same phase values as a normal
+// transaction's DECIDED/ACTIVE would, but boot must resume them through
+// the recovery ceremony — never through the normal continuation.
+enum class ConfigRecordKind : std::uint8_t {
+  Standard = 0,
+  RecoveryIntent = 1,
+  RecoveryComplete = 2,
+};
+
 // One (Network, target, namespace) ConfigJournal: the phase machine, the
 // dual-slot durable record, the challenge issuer, the permit reassembly
 // bound and the result history. Not thread-safe — the Owner serializes
 // calls; provider calls never block the radio task (async tokens).
+//
+// Every durable phase advance reserves its store generation (and, for
+// decisions, its revision) in the RLF1 security floor BEFORE the journal
+// record is written; a failed journal write consumes the reservation —
+// generations are never reused. The floor is a constructor dependency:
+// without a usable floor the journal refuses privileged intake.
 class ConfigJournal {
  public:
   ConfigJournal(const ConfigJournalConfig& config, ConfigJournalStorage& storage,
-                ConfigAuthorityVerifier& verifier, EntropySource& entropy,
-                ConfigRateLimiter& rate_limiter, ConfigProvider* provider,
-                const ConfigSchemaValidator* validator,
+                SecurityFloorStore& floor, ConfigAuthorityVerifier& verifier,
+                EntropySource& entropy, ConfigRateLimiter& rate_limiter,
+                ConfigProvider* provider, const ConfigSchemaValidator* validator,
                 ConfigMaintenanceGate* gate) noexcept;
 
-  // Boot recovery: verify both slots, adopt the newest verifiable record and
-  // resolve its phase (04 §4.7 + 06 §6.3):
+  // Boot recovery: verify both slots against the security floor, adopt the
+  // newest verifiable record and resolve its phase (04 §4.7 + 06 §6.3):
   //   - record ACTIVE        -> restore the confirmed snapshot (continuation
   //                             of decided config, not a new command run),
   //   - DECIDED pre-intent   -> keep the consumed revision, mark INTERRUPTED
@@ -404,8 +422,12 @@ class ConfigJournal {
   //                             unrestorable -> QUARANTINED,
   //   - one slot lost        -> the survivor is a "known value" only:
   //                             CONFIG_STORAGE_UNCERTAIN, no update intake,
-  //   - both slots lost      -> no auto reset to revision 0; quarantine,
-  //                             explicit recovery/re-provisioning required.
+  //   - both slots lost      -> no auto reset to revision 0; quarantine —
+  //                             the floor's J/R name the next recovery, and
+  //                             explicit recovery/re-provisioning is required,
+  //   - journal newer than the floor -> the save order was violated (or the
+  //                             floor was lost and mis-seeded): stop, never
+  //                             mint from unknown counters.
   Status initialize(MonotonicMs now_ms) noexcept;
 
   // Control22 handlers. The challenge carries a fresh nonce128, this boot
@@ -479,6 +501,9 @@ class ConfigJournal {
   const Digest256& active_hash() const noexcept { return active_hash_; }
   ByteView active_snapshot() const noexcept { return active_snapshot_.view(); }
   bool initialized() const noexcept { return initialized_; }
+  // The RLF1 floor this journal reserves from (targets also serve it to
+  // recovery queries; the reference is stable for the journal's life).
+  SecurityFloorStore& floor() noexcept { return floor_; }
   // Capability advertisement (04 §capabilities): the configured verifier's
   // wire bit when it is provisioned, 0 otherwise — an unready profile is
   // never advertised.
@@ -519,6 +544,7 @@ class ConfigJournal {
     std::uint32_t store_generation{0};
     endpoint::ConfigPhase phase{endpoint::ConfigPhase::Idle};
     endpoint::ConfigReason reason{endpoint::ConfigReason::Ok};
+    ConfigRecordKind kind{ConfigRecordKind::Standard};
     NetworkId network{0};
     NodeId target{kInvalidNodeId};
     std::uint16_t config_namespace{0};
@@ -601,6 +627,12 @@ class ConfigJournal {
   };
 
   Status store_record(const JournalRecord& record) noexcept;
+  // Reserve the next store generation (and the transaction's decision
+  // revision, if higher than the floor) in the RLF1 floor BEFORE the
+  // journal record is written. On success `reserved_j` names the
+  // generation the record MUST carry; a later journal-store failure
+  // consumes it — the RAM counters follow the reservation either way.
+  Status reserve_generation(const Transaction& txn, std::uint32_t& reserved_j) noexcept;
   Status persist_phase(endpoint::ConfigPhase phase, endpoint::ConfigReason reason,
                        const Transaction& txn) noexcept;
   Status decode_slot(std::uint8_t slot, JournalRecord& record,
@@ -610,6 +642,9 @@ class ConfigJournal {
   Status start_restore(Transaction& txn, endpoint::ConfigReason reason) noexcept;
   Status finish_transaction(Transaction& txn, endpoint::ConfigPhase phase,
                             endpoint::ConfigReason reason) noexcept;
+  // Wedge the live state honestly when the floor is spent: no record can
+  // ever commit again, so intake stops and status reports quarantine.
+  void quarantine_ram() noexcept;
   Transaction& boot_txn() noexcept;  // fills boot_txn_; callers take it by ref
   Status record_result(const Transaction& txn, endpoint::ConfigPhase phase,
                        endpoint::ConfigReason reason, MonotonicMs now_ms) noexcept;
@@ -635,6 +670,7 @@ class ConfigJournal {
 
   ConfigJournalConfig config_{};
   ConfigJournalStorage& storage_;
+  SecurityFloorStore& floor_;
   ConfigAuthorityVerifier& verifier_;
   EntropySource& entropy_;
   ConfigRateLimiter& rate_limiter_;

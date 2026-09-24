@@ -37,6 +37,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_join_transport.cpp
   src/sdkv1_records.cpp
   src/sdkv1_store.cpp
+  src/security_floor.cpp
   src/status.cpp
   src/telemetry.cpp
   src/trust_manifest.cpp

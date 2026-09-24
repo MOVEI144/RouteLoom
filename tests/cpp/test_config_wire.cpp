@@ -95,6 +95,43 @@ class FakeJournalStorage final : public ConfigJournalStorage {
   std::array<std::uint8_t, kJournalSlot> slots_[kConfigJournalSlots]{};
 };
 
+class FakeFloorStore final : public SecurityFloorStorage {
+ public:
+  Status read(const MutableByteView target) noexcept override {
+    if (target.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor read");
+    }
+    if (!provisioned) {
+      return Status::error(StatusCode::NotFound, "floor missing");
+    }
+    std::memcpy(target.data, blob_.data(), kSecurityFloorBlobBytes);
+    return Status::success();
+  }
+  Status write(const ByteView data) noexcept override {
+    if (data.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor write");
+    }
+    std::memcpy(blob_.data(), data.data, data.size);
+    provisioned = true;
+    return Status::success();
+  }
+  std::array<std::uint8_t, kSecurityFloorBlobBytes> blob_{};
+  bool provisioned{false};
+};
+
+void seed_floor(FakeFloorStore& storage, const std::uint64_t network,
+                const std::uint64_t target, const std::uint16_t ns,
+                const std::uint16_t schema) {
+  SecurityFloorState state{};
+  state.network = network;
+  state.target = target;
+  state.namespace_count = 1;
+  state.entries[0].config_namespace = ns;
+  state.entries[0].schema = schema;
+  SecurityFloorStore floor(storage);
+  CHECK_OK(floor.provision_seed(state));
+}
+
 // Desired-state provider that completes apply/restore after one poll and
 // commits pending -> active (readback input).
 class FakeProvider final : public ConfigProvider {
@@ -295,12 +332,14 @@ class RecordingHost final : public ConfigHostSink {
 struct TargetRig {
   ConfigJournalConfig config{};
   FakeJournalStorage storage{};
+  FakeFloorStore floor_storage{};
   DevConfigAuthorityVerifier verifier{dev_key()};
   CountingEntropy entropy{};
   ConfigRateLimiter rate{};
   FakeProvider provider{};
   PermitAllGate gate{};
   PermissiveValidator validator{};
+  std::unique_ptr<SecurityFloorStore> floor{};
   std::unique_ptr<ConfigJournal> journal{};
 
   explicit TargetRig(const std::uint64_t boot = kBoot) {
@@ -312,8 +351,13 @@ struct TargetRig {
     config.authorized_issuer = kAuthority;
     config.authority_generation = 1;
     config.challenge_valid_ms = kConfigChallengeMaxMs;
-    journal = std::make_unique<ConfigJournal>(config, storage, verifier, entropy,
-                                            rate, &provider, nullptr, &gate);
+    seed_floor(floor_storage, config.network, config.target,
+               config.config_namespace, config.schema);
+    floor = std::make_unique<SecurityFloorStore>(floor_storage);
+    CHECK_OK(floor->initialize());
+    journal = std::make_unique<ConfigJournal>(config, storage, *floor, verifier,
+                                            entropy, rate, &provider, nullptr,
+                                            &gate);
   }
 };
 

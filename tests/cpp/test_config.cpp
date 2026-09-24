@@ -1,7 +1,9 @@
 // Small Remote Config portable-core tests: the C01-C14 acceptance cases
-// (06-acceptance.md), issuer commit-order/resume behaviour, the dual-slot
-// journal power-loss matrix, reassembly bounds and the schema/TLV layer —
-// all through the real code paths with storage/provider/verifier fakes.
+// (06-acceptance.md), the RLF1 floor reservation rules, the R-series
+// recovery-lane cases, the dual-slot journal power-loss matrix,
+// reassembly bounds and the schema/TLV layer — all through the real
+// code paths with storage/provider/verifier fakes. (Issuance lives in
+// the Rust host; its commit order is covered by the host test suite.)
 
 #include <array>
 #include <cstdint>
@@ -106,6 +108,79 @@ class FakeJournalStorage final : public ConfigJournalStorage {
   std::size_t drop_call{std::numeric_limits<std::size_t>::max()};
   bool read_error{false};
 };
+
+// One 136-byte RLF1 floor image with loss/corruption injection. Reads fail
+// until provisioned — a missing floor is never an empty one.
+class FakeFloorStore final : public SecurityFloorStorage {
+ public:
+  Status read(const MutableByteView target) noexcept override {
+    if (target.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor read");
+    }
+    if (read_error) {
+      return Status::error(StatusCode::StorageFailure, "injected floor read error");
+    }
+    if (!provisioned) {
+      return Status::error(StatusCode::NotFound, "floor missing");
+    }
+    std::memcpy(target.data, blob_.data(), kSecurityFloorBlobBytes);
+    return Status::success();
+  }
+  Status write(const ByteView data) noexcept override {
+    if (data.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor write");
+    }
+    ++write_calls;
+    if (fail_writes) {
+      return Status::error(StatusCode::StorageFailure, "injected floor write error");
+    }
+    if (torn_write) {
+      // The write faults after landing a torn prefix with one flipped
+      // byte — the readback must catch it and the cache must not follow.
+      // (The flip matters: a clean prefix of an advance that only moves
+      // J/R could otherwise be byte-identical to the old image.)
+      const std::size_t landed = data.size / 2;
+      std::memcpy(blob_.data(), data.data, landed);
+      blob_[10] ^= 0xFFU;
+      provisioned = true;
+      return Status::error(StatusCode::StorageFailure, "torn floor write");
+    }
+    std::memcpy(blob_.data(), data.data, data.size);
+    provisioned = true;
+    return Status::success();
+  }
+  void wipe() {
+    blob_.fill(0);
+    provisioned = false;
+  }
+  void corrupt(const std::size_t offset) { blob_[offset] ^= 0xFFU; }
+
+  std::array<std::uint8_t, kSecurityFloorBlobBytes> blob_{};
+  bool provisioned{false};
+  bool read_error{false};
+  bool fail_writes{false};
+  bool torn_write{false};
+  std::size_t write_calls{0};
+};
+
+// Seed `storage` with a floor for (network, target) carrying one namespace
+// entry at (J, R). Aborts on failure — the fake cannot fail unprompted.
+void seed_floor(FakeFloorStore& storage, const std::uint64_t network,
+                const std::uint64_t target, const std::uint16_t ns,
+                const std::uint16_t schema, const std::uint32_t j,
+                const std::uint64_t r, const std::uint8_t flags = 0) {
+  SecurityFloorState state{};
+  state.network = network;
+  state.target = target;
+  state.namespace_count = 1;
+  state.flags = flags;
+  state.entries[0].config_namespace = ns;
+  state.entries[0].schema = schema;
+  state.entries[0].store_floor = j;
+  state.entries[0].decision_floor = r;
+  SecurityFloorStore floor(storage);
+  CHECK_OK(floor.provision_seed(state));
+}
 
 // The test permit envelope (development profile — never advertised as
 // production): AAD(32B) || canonical RCC1 || tag(16B) where
@@ -408,12 +483,14 @@ void build_permit(FakePermitSigner& signer, const ConfigCommand& command,
 struct TargetRig {
   ConfigJournalConfig config{};
   FakeJournalStorage storage{};
+  FakeFloorStore floor_storage{};
   FakeVerifier verifier{};
   CountingEntropy entropy{};
   ConfigRateLimiter rate{};
   FakeProvider provider{};
   FakeMaintenanceGate gate{};
   PermissiveValidator validator{};
+  std::unique_ptr<SecurityFloorStore> floor{};
   std::unique_ptr<ConfigJournal> journal{};
 
   explicit TargetRig(const std::uint64_t boot = kBoot, const bool with_gate = true)
@@ -426,18 +503,46 @@ struct TargetRig {
     config.authorized_issuer = kAuthority;
     config.authority_generation = 1;
     config.challenge_valid_ms = kConfigChallengeMaxMs;
+    // A fresh deployment ships a provisioned floor at J=R=0; tests that
+    // need an impaired floor wipe or corrupt it after construction.
+    seed_floor(floor_storage, config.network, config.target,
+               config.config_namespace, config.schema, 0, 0);
+    floor = std::make_unique<SecurityFloorStore>(floor_storage);
+    CHECK_OK(floor->initialize());
     journal = std::make_unique<ConfigJournal>(
-        config, storage, verifier, entropy, rate, &provider, nullptr,
+        config, storage, *floor, verifier, entropy, rate, &provider, nullptr,
         with_gate ? &gate : nullptr);
   }
   void boot(const MonotonicMs now_ms) {
+    // A reboot re-reads the floor from storage (fresh cache, same bytes);
+    // when the floor is gone the journal init below fails the same way.
+    floor = std::make_unique<SecurityFloorStore>(floor_storage);
+    floor_status_ = floor->initialize();
     journal = std::make_unique<ConfigJournal>(
-        config, storage, verifier, entropy, rate, &provider, nullptr,
+        config, storage, *floor, verifier, entropy, rate, &provider, nullptr,
         gate_installed_ ? &gate : nullptr);
     boot_status_ = journal->initialize(now_ms);
   }
+  // Current floors for the rig's namespace (aborts when unreadable).
+  std::uint32_t floor_j() {
+    SecurityFloorState state{};
+    CHECK_OK(floor->read(state));
+    const SecurityFloorEntry* entry =
+        SecurityFloorStore::entry_for(state, config.config_namespace);
+    CHECK(entry != nullptr);
+    return entry->store_floor;
+  }
+  std::uint64_t floor_r() {
+    SecurityFloorState state{};
+    CHECK_OK(floor->read(state));
+    const SecurityFloorEntry* entry =
+        SecurityFloorStore::entry_for(state, config.config_namespace);
+    CHECK(entry != nullptr);
+    return entry->decision_floor;
+  }
   bool gate_installed_{true};
   Status boot_status_ = Status::success();
+  Status floor_status_ = Status::success();
 };
 
 // Build a command bound to `challenge` (the caller picked the challenge),
@@ -833,10 +938,15 @@ void test_c04_verify_intake_shared() {
   // A second journal on the SAME rate limiter — the embedder's device-wide
   // budget object.
   FakeJournalStorage storage_b{};
+  FakeFloorStore floor_b{};
+  seed_floor(floor_b, rig.config.network, rig.config.target,
+             endpoint::kConfigNamespaceSdk, rig.config.schema, 0, 0);
+  SecurityFloorStore floor_store_b(floor_b);
+  CHECK_OK(floor_store_b.initialize());
   ConfigJournalConfig config_b = rig.config;
   config_b.config_namespace = endpoint::kConfigNamespaceSdk;  // any namespace
-  ConfigJournal journal_b(config_b, storage_b, rig.verifier, rig.entropy,
-                          rig.rate, nullptr, nullptr, nullptr);
+  ConfigJournal journal_b(config_b, storage_b, floor_store_b, rig.verifier,
+                          rig.entropy, rig.rate, nullptr, nullptr, nullptr);
   CHECK_OK(journal_b.initialize(now_ms));
 
   const ConfigField patch[] = {sdk_u8(1, 1)};
@@ -1218,8 +1328,9 @@ void test_c09_slot_corruption() {
     CHECK(rig.journal->submit_permit(last_permit_.view(), now_ms, true, verdict)
               .code == StatusCode::RecoveryRequired);
     CHECK(verdict.reason == ConfigReason::RecoveryRequired);
-    // Authorized recovery re-opens intake without regressing the floor.
-    CHECK_OK(rig.journal->recover(10, now_ms, false));
+    // Authorized recovery re-opens intake without regressing the floor —
+    // it must name the floor's next generation (3 consumed -> 4).
+    CHECK_OK(rig.journal->recover(4, now_ms, false));
     CHECK(!rig.journal->uncertain());
     // The adopted survivor is INTERRUPTED: its prev-restore was scheduled
     // by recover() and must settle before intake re-opens.
@@ -1253,11 +1364,16 @@ void test_c09_slot_corruption() {
     // With no verifiable survivor, a plain recover() must NOT fabricate a
     // base — the journal stays quarantined (04 §4.7: never an automatic
     // return to revision 0).
-    CHECK(rig.journal->recover(11, now_ms, false).code ==
+    CHECK(rig.journal->recover(4, now_ms, false).code ==
           StatusCode::RecoveryRequired);
     CHECK(rig.journal->quarantined());
+    // A generation that is not the floor's next is refused even with the
+    // attestation — only the current recovery can land.
+    CHECK(rig.journal->recover(11, now_ms, true).code ==
+          StatusCode::InvalidArgument);
+    CHECK(rig.journal->quarantined());
     // Only an explicit re-provision attestation may establish the base.
-    CHECK_OK(rig.journal->recover(11, now_ms, true));
+    CHECK_OK(rig.journal->recover(4, now_ms, true));
     CHECK(!rig.journal->quarantined());
     CHECK(rig.journal->phase() == ConfigPhase::Idle);
   }
@@ -1762,6 +1878,7 @@ void test_apply_failure_restores() {
 
 void test_storage_contract() {
   FakeJournalStorage storage;
+  FakeFloorStore floor_storage;
   FakeVerifier verifier;
   CountingEntropy entropy;
   ConfigRateLimiter rate;
@@ -1772,20 +1889,24 @@ void test_storage_contract() {
   config.boot_incarnation = kBoot;
   config.authorized_issuer = kAuthority;
   config.authority_generation = 1;
-  ConfigJournal journal(config, storage, verifier, entropy, rate, &provider,
-                        nullptr, nullptr);
+  seed_floor(floor_storage, config.network, config.target,
+             config.config_namespace, config.schema, 0, 0);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  ConfigJournal journal(config, storage, floor, verifier, entropy, rate,
+                        &provider, nullptr, nullptr);
   MonotonicMs now_ms = 1000;
   CHECK_OK(journal.initialize(now_ms));
   // Invalid identities are refused up front.
   ConfigJournalConfig bad = config;
   bad.challenge_valid_ms = kConfigChallengeMaxMs + 1;
-  ConfigJournal journal_bad(bad, storage, verifier, entropy, rate, &provider,
-                            nullptr, nullptr);
+  ConfigJournal journal_bad(bad, storage, floor, verifier, entropy, rate,
+                            &provider, nullptr, nullptr);
   CHECK(journal_bad.initialize(now_ms).code == StatusCode::InvalidArgument);
   bad = config;
   bad.boot_incarnation = 0;
-  ConfigJournal journal_bad2(bad, storage, verifier, entropy, rate, &provider,
-                             nullptr, nullptr);
+  ConfigJournal journal_bad2(bad, storage, floor, verifier, entropy, rate,
+                             &provider, nullptr, nullptr);
   CHECK(journal_bad2.initialize(now_ms).code == StatusCode::InvalidArgument);
 }
 
@@ -2048,9 +2169,10 @@ void test_floor_corrupt_structural() {
   rig.storage.corrupt(0, 21);
   rig.boot(now_ms += 10);
   CHECK(rig.journal->uncertain());
-  // The floor came only from the valid sibling (generation 2): the
-  // corrupt record's gen-3 claim cannot wedge recovery.
-  CHECK_OK(rig.journal->recover(3, now_ms, false));
+  // The corrupt record's gen-3 claim bounds nothing: recovery names the
+  // floor's next generation (3 consumed -> 4), never the bitrot's claim.
+  CHECK(rig.journal->recover(3, now_ms, false).code == StatusCode::InvalidArgument);
+  CHECK_OK(rig.journal->recover(4, now_ms, false));
   CHECK(!rig.journal->uncertain());
 }
 
@@ -2245,23 +2367,24 @@ void test_r01_quarantine_store_recovery() {
         StatusCode::InvalidState);
 
   // No verifiable record survives: attest=adopt must fail closed — only an
-  // explicit re-provisioning attestation mints the new generation.
+  // explicit re-provisioning attestation mints the new generation. Both
+  // name the floor's next generation (3 consumed -> 4).
   ByteBuffer<kConfigPermitObjectMax> object{};
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestAdopt, 500, 0, 1,
+                 endpoint::kRcr1AttestAdopt, 4, 0, 1,
                  rig.config.authority_generation, object);
   CHECK(rig.journal->submit_recovery(object.view(), now_ms + 130, verdict).code ==
         StatusCode::RecoveryRequired);
   CHECK(rig.journal->quarantined());
 
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 500, 0, 2,
+                 endpoint::kRcr1AttestReprovision, 4, 0, 2,
                  rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 140, verdict));
   CHECK(verdict.reason == ConfigReason::Ok);
   CHECK(!rig.journal->quarantined());
   CHECK(!rig.journal->uncertain());
-  // Both slots now carry the same verifiable record under generation 500.
+  // Both slots now carry the same verifiable record under generation 4.
   CHECK(std::memcmp(rig.storage.slots_[0].data(), rig.storage.slots_[1].data(),
                     64) == 0);
 
@@ -2295,7 +2418,7 @@ void test_r02_uncertain_store_recovery() {
 
   ByteBuffer<kConfigPermitObjectMax> object{};
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestAdopt, 600, 0, 3,
+                 endpoint::kRcr1AttestAdopt, 4, 0, 3,
                  rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 150, verdict));
   CHECK(verdict.reason == ConfigReason::Ok);
@@ -2362,7 +2485,7 @@ void test_r04_recovery_replay_floor() {
 
   ByteBuffer<kConfigPermitObjectMax> object{};
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 500, 0, 6,
+                 endpoint::kRcr1AttestReprovision, 1, 0, 6,
                  rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 10, verdict));
   // Same operation id + same bytes -> recorded verdict, never re-applied.
@@ -2378,15 +2501,15 @@ void test_r04_recovery_replay_floor() {
   CHECK(rig.journal->submit_recovery(conflicting.view(), now_ms + 30, verdict)
             .code == StatusCode::Conflict);
 
-  // A fresh recovery naming the consumed generation or below is refused:
-  // the proven floor moved to 500.
+  // A fresh recovery that does not name the floor's next generation is
+  // refused: the floor moved to 1, so only 2 could land now.
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 500, 0, 7,
+                 endpoint::kRcr1AttestReprovision, 1, 0, 7,
                  rig.config.authority_generation, object);
   rig.storage.fill(0, 0xEE);  // re-impair so class admission passes
   rig.boot(now_ms + 40);
-  // The rebuilt journal proves the 500-generation record; a replay at 500
-  // sits at/below the floor the journal already consumed.
+  // The rebuilt journal proves the gen-1 record; a replay naming 1 again
+  // is a spent generation, not the floor's next.
   CHECK(rig.journal->uncertain());
   CHECK(rig.journal->submit_recovery(object.view(), now_ms + 50, verdict)
             .code == StatusCode::InvalidArgument);
@@ -2403,7 +2526,7 @@ void test_r07_recovery_lane_reassembly() {
 
   ByteBuffer<kConfigPermitObjectMax> object{};
   build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 500, 0, 12,
+                 endpoint::kRcr1AttestReprovision, 1, 0, 12,
                  rig.config.authority_generation, object);
   CHECK_OK(send_recovery_chunks(rig, object, 32, now_ms));
   CHECK(!rig.journal->quarantined());
@@ -2452,6 +2575,288 @@ void test_r07_recovery_lane_reassembly() {
         StatusCode::InvalidState);
 }
 
+// --- F-series: the RLF1 security floor -----------------------------------------
+//
+// The floor reserves every store generation (and every decision revision)
+// BEFORE the journal record that consumes it; a failed journal write
+// consumes the reservation. The tests below pin the reservation order,
+// the gap rule, the missing/corrupt-floor intake stop, the save-order
+// check, exhaustion, and the record-kind migration.
+
+// Recompute a journal slot's trailing CRC32 after surgical byte edits.
+void refix_journal_crc(FakeJournalStorage& storage, const std::uint8_t slot) {
+  auto& image = storage.slots_[slot];
+  const std::size_t len =
+      (static_cast<std::size_t>(image[6]) << 8) | image[7];
+  const std::uint32_t crc =
+      crc32_iso_hdlc(ByteView{image.data(), len - 4});
+  image[len - 4] = static_cast<std::uint8_t>((crc >> 24) & 0xFFU);
+  image[len - 3] = static_cast<std::uint8_t>((crc >> 16) & 0xFFU);
+  image[len - 2] = static_cast<std::uint8_t>((crc >> 8) & 0xFFU);
+  image[len - 1] = static_cast<std::uint8_t>(crc & 0xFFU);
+}
+
+// Every commit reserves first: DECIDED moves J and R, later phases of the
+// same transaction move J and hold R.
+void test_floor_reserve_on_commit() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  CHECK(rig.floor_j() == 1);
+  CHECK(rig.floor_r() == 1);
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.floor_j() == 3);
+  CHECK(rig.floor_r() == 1);
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                        rig.journal->active_snapshot(), verdict));
+  CHECK(rig.floor_j() == 4);
+  CHECK(rig.floor_r() == 2);
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.floor_j() == 6);
+  CHECK(rig.floor_r() == 2);
+}
+
+// A failed journal write consumes its floor reservation: the retry mints
+// the NEXT generation, never the dropped one.
+void test_floor_gap_consumed() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  rig.storage.drop_call = 0;  // the DECIDED write never lands
+  CHECK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict).code ==
+        StatusCode::StorageFailure);
+  CHECK(rig.floor_j() == 1);  // reserved, then dropped: consumed
+  CHECK(rig.floor_r() == 1);
+  rig.storage.drop_call = std::numeric_limits<std::size_t>::max();
+  CHECK_OK(drive_update(rig, patch, 1, now_ms += 61000, 0, ByteView{},
+                        verdict));
+  CHECK(rig.floor_j() == 2);  // the gap is skipped, never reused
+  CHECK(rig.floor_r() == 1);
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 1);
+}
+
+// A missing floor stops ALL privileged intake — and it is never
+// auto-created: only managed re-provisioning restores service.
+void test_floor_missing_stops_intake() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  rig.floor_storage.wipe();
+  rig.boot(now_ms += 10);
+  CHECK(rig.boot_status_.code == StatusCode::RecoveryRequired);
+  CHECK(!rig.journal->initialized());
+  ConfigVerdict verdict{};
+  CHECK(rig.journal->submit_permit(last_permit_.view(), now_ms, true, verdict)
+            .code == StatusCode::InvalidState);
+  endpoint::ControlChallengeQuery query{};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK(rig.journal->handle_challenge_query(query, now_ms, encoded).code ==
+        StatusCode::InvalidState);
+  endpoint::ControlStatusQuery status_query{};
+  CHECK(rig.journal->handle_status_query(status_query, now_ms, encoded).code ==
+        StatusCode::InvalidState);
+  CHECK(rig.journal->submit_recovery(last_permit_.view(), now_ms, verdict)
+            .code == StatusCode::InvalidState);
+  // Managed re-provisioning installs the floor; the journal serves again.
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 0, 0);
+  rig.boot(now_ms += 10);
+  CHECK_OK(rig.boot_status_);
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+}
+
+// A torn floor write invalidates the cache: intake stops until a refresh
+// re-proves the bytes — and a refresh cannot heal durable garbage, only
+// managed re-provisioning can.
+void test_floor_torn_write_invalidates() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  rig.floor_storage.torn_write = true;
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                     rig.journal->active_snapshot(), verdict)
+            .code == StatusCode::StorageFailure);
+  CHECK(!rig.floor->usable());
+  SecurityFloorState state{};
+  CHECK(rig.floor->read(state).code == StatusCode::RecoveryRequired);
+  // Intake now refuses: the reservation path cannot prove its floors.
+  CHECK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                     rig.journal->active_snapshot(), verdict)
+            .code == StatusCode::RecoveryRequired);
+  // The torn image is durable: refresh re-reads the same garbage.
+  rig.floor_storage.torn_write = false;
+  CHECK(rig.floor->refresh().code == StatusCode::IntegrityError);
+  // Managed re-provisioning at the true counters restores service.
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 3, 1);
+  CHECK_OK(rig.floor->refresh());
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                        rig.journal->active_snapshot(), verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
+// A journal newer than its floor proves the save order was violated (or
+// the floor was mis-seeded): stop, never mint from unknown counters.
+void test_floor_order_violation() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 0, 0);
+  rig.boot(now_ms += 10);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->quarantined());
+  // No recovery can mint: below the journal is spent, the floor's next
+  // (1) is below the journal too.
+  CHECK(rig.journal->recover(1, now_ms, true).code ==
+        StatusCode::InvalidArgument);
+  CHECK(rig.journal->recover(4, now_ms, true).code ==
+        StatusCode::InvalidArgument);
+  // Managed fix: re-provision the floor at the true counters, reboot.
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 3, 1);
+  rig.boot(now_ms += 10);
+  CHECK_OK(rig.boot_status_);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  drain(rig, now_ms);
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                        rig.journal->active_snapshot(), verdict));
+}
+
+// Fresh journal slots with a floor that names consumed counters are a
+// total journal loss, never a fresh deployment: quarantine, and recover
+// from the floor's J/R.
+void test_floor_ahead_fresh_quarantines() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  // Total journal loss with the slots reading back erased (the corrupt-
+  // both shape quarantines too, but through the corruption rule — R01).
+  rig.storage.fill(0, 0xFF);
+  rig.storage.fill(1, 0xFF);
+  rig.boot(now_ms + 100);
+  CHECK(rig.boot_status_.code == StatusCode::RecoveryRequired);
+  CHECK(rig.journal->quarantined());
+  // The floor survived the journal: J=3, R=1 still name the next recovery.
+  CHECK(rig.floor_j() == 3);
+  CHECK(rig.floor_r() == 1);
+  // Recovery at the floor's next generation lands (reprovision: no
+  // survivor to adopt).
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 4, 0, 21,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 200, verdict));
+  CHECK(!rig.journal->quarantined());
+}
+
+// A spent store axis wedges honestly: the op fails CounterExhausted, the
+// journal quarantines, and no retry loop spins on poll().
+void test_store_exhausted() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  // A floor far ahead of the journal is tolerated (consumed gaps) —
+  // until the axis itself is spent.
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 0xFFFFFFFFU, 1);
+  rig.boot(now_ms += 10);
+  CHECK_OK(rig.boot_status_);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  drain(rig, now_ms);
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                     rig.journal->active_snapshot(), verdict)
+            .code == StatusCode::CounterExhausted);
+  CHECK(verdict.reason == ConfigReason::RecoveryRequired);
+  CHECK(rig.journal->quarantined());
+  rig.journal->poll(now_ms += 10);
+  CHECK(rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Quarantined);
+  // Recovery cannot mint past the spent axis either.
+  CHECK(rig.journal->recover(4, now_ms, true).code ==
+        StatusCode::CounterExhausted);
+}
+
+// Format-1 journal images (reserved byte 0) still decode as Standard
+// records, so healthy pre-floor journals migrate.
+void test_floor_record_kind_legacy() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  // The ACTIVE record sits in slot 0; downgrade its format to 1.
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  rig.storage.slots_[0][4] = 0;
+  rig.storage.slots_[0][5] = 1;
+  refix_journal_crc(rig.storage, 0);
+  rig.boot(now_ms += 10);
+  CHECK_OK(rig.boot_status_);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 1);
+  drain(rig, now_ms);
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+                        rig.journal->active_snapshot(), verdict));
+}
+
+// Same-generation twins must agree on the whole encoded content: a twin
+// pair differing only in issuer metadata is ambiguous, never adopted.
+void test_floor_twins_full_content() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  rig.storage.corrupt(1, 200);
+  rig.boot(now_ms += 10);
+  CHECK(rig.journal->uncertain());
+  CHECK_OK(rig.journal->recover(4, now_ms, false));
+  // Both slots now carry identical gen-4 ACTIVE twins; flip one byte of
+  // slot 0's issuer_generation (offset 44) and repair the CRC so the
+  // record parses but disagrees with its twin.
+  rig.storage.corrupt(0, 44);
+  refix_journal_crc(rig.storage, 0);
+  rig.boot(now_ms += 10);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->uncertain());
+}
+
 
 }  // namespace
 
@@ -2497,12 +2902,22 @@ int main() {
   test_revision_pair_contract();
   test_manifest_length_conflict();
   test_status_result_expired();
-  // Issue #51: dedicated kind-4 recovery lane + trust update.
+  // Issue #51: dedicated kind-4 recovery lane.
   test_r01_quarantine_store_recovery();
   test_r02_uncertain_store_recovery();
   test_r03_recovery_rejections();
   test_r04_recovery_replay_floor();
   test_r07_recovery_lane_reassembly();
+  // RLF1 security floor.
+  test_floor_reserve_on_commit();
+  test_floor_gap_consumed();
+  test_floor_missing_stops_intake();
+  test_floor_torn_write_invalidates();
+  test_floor_order_violation();
+  test_floor_ahead_fresh_quarantines();
+  test_store_exhausted();
+  test_floor_record_kind_legacy();
+  test_floor_twins_full_content();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;
