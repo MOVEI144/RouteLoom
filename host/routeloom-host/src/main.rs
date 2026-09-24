@@ -2631,7 +2631,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let site_state = Arc::clone(&state);
         thread::spawn(move || loop {
             thread::sleep(Duration::from_millis(100));
-            for (ms, fields) in site.tick(now_ms()) {
+            for (ms, fields) in site.tick(site::group_keys::HostTime {
+                mono_ms: mono_ms(),
+                unix_ms: now_ms(),
+            }) {
                 push_event(&site_state, ms, fields);
             }
         });

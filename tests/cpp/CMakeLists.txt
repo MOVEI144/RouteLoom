@@ -216,6 +216,7 @@ add_test(NAME routeloom_key_schedule_tests COMMAND routeloom_key_schedule_tests)
 # plus a live client round-trip against an in-test fake authority.
 add_executable(routeloom_sdkv1_authority_tests test_sdkv1_authority.cpp)
 target_link_libraries(routeloom_sdkv1_authority_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_authority_tests PRIVATE ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_authority_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_compile_definitions(routeloom_sdkv1_authority_tests PRIVATE
     ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")

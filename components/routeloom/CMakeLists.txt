@@ -48,6 +48,8 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_revocation.cpp
   src/sdkv1_store.cpp
   src/security_floor.cpp
+  src/sdkv1_group_keys.cpp
+  src/sdkv1_group_security.cpp
   src/session_bank.cpp
   src/status.cpp
   src/telemetry.cpp

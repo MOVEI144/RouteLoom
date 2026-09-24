@@ -1,17 +1,15 @@
 #pragma once
 
-// Authority channel, device side (G-SEC P5 PR1): the endpoint half of
+// Authority channel, device side (G-SEC P5): the endpoint half of
 // docs/design/sdk-v1/03-key-hierarchy.md §5.3.
 //
 // This file covers the channel only: the AuthorityEnvelope body codecs
 // (JoinConfirm / GroupKeyUpdate / GroupKeyActivate / GroupKeyPull), the
 // GK-id derivation, the seal/open helpers and the `AuthorityClient`
 // initiator (RLRES1 purpose=4 over DAMS, envelope replay, re-entry guard).
-// It never touches the SiteStore, the mesh or real USB: carriers enter and
-// leave through `AuthorityPort`, verified plaintext leaves through
-// `AuthorityObserver`, and the group-key FSM that stores keys and sends
-// durable ACKs arrives with PR2. Until then an Update/Activate is answered
-// result=unsupported — never a success ACK for work this code cannot do.
+// Carriers enter and leave through AuthorityPort. When the Owner attaches
+// GroupKeyState, verified updates are committed before their ACK is sealed;
+// without that state they are answered Unsupported, never false success.
 //
 // Portable-core discipline: no heap, no exceptions, every API noexcept, all
 // state bounded and owned by the instance. Secrets (DAMS, traffic keys,
@@ -28,6 +26,8 @@
 #include "routeloom/types.hpp"
 
 namespace routeloom::sdkv1 {
+
+class GroupKeyState;
 
 // --- Carrier kinds (P5 §3.2/§3.3; shared with the PR4 mesh/USB transport) ---
 enum class AuthorityCarrierKind : std::uint8_t {
@@ -214,8 +214,8 @@ class AuthorityPort {
                         std::uint64_t& token) noexcept = 0;
 };
 
-// Immutable channel events. Carries no secrets: group-key bytes stay inside
-// the client until PR2 stores them. `passthrough` borrows the client's RX
+// Immutable channel events. Carries no secrets: group-key bytes are passed
+// only to the attached durable state. `passthrough` borrows the client's RX
 // buffer and is valid during the on_event call only — the observer must copy
 // what it keeps.
 struct AuthorityEvent {
@@ -246,9 +246,8 @@ class AuthorityObserver {
 
 // --- Client ------------------------------------------------------------------
 
-// What Start needs. PR2 sources the key epochs from GroupKeyState; PR1
-// carries the values explicitly so the JoinConfirm/Pull round-trips run
-// against the fake carrier without a store.
+// What Start needs. An attached GroupKeyState validates these values against
+// the committed SiteRecord; standalone fake-carrier tests supply them directly.
 struct AuthorityStart {
   NetworkId network{0};
   NodeId self{kInvalidNodeId};
@@ -324,7 +323,7 @@ class AuthorityClient final {
   // supplies entropy and receive context ids (its slot directory is unused:
   // the client only initiates).
   AuthorityClient(const AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
-                  rlres1::Environment& rlres1_env) noexcept;
+                  rlres1::Environment& rlres1_env, GroupKeyState* group = nullptr) noexcept;
 
   AuthorityClient(const AuthorityClient&) = delete;
   AuthorityClient& operator=(const AuthorityClient&) = delete;
@@ -357,6 +356,10 @@ class AuthorityClient final {
   void to_dormant() noexcept;         // full stop, DAMS wiped
   bool flush_tx() noexcept;  // try_send the staged carrier; false = still staged
   Status stage_pending_ack(MonotonicMs now) noexcept;
+  UpdateResult apply_update(const GroupKeyUpdate& msg, MonotonicMs now) noexcept;
+  UpdateResult apply_activate(const GroupKeyActivate& msg, MonotonicMs now) noexcept;
+  StoredState stored_state(std::uint32_t g) const noexcept;
+  bool site_bound() const noexcept;
   Status do_seal(keys::AuthorityEnvelopeType type, ByteView plaintext,
                  MonotonicMs now) noexcept;
   Status send_join_confirm(MonotonicMs now) noexcept;
@@ -368,6 +371,7 @@ class AuthorityClient final {
   AuthorityPort& port_;
   AuthorityObserver& observer_;
   rlres1::Environment& env_;
+  GroupKeyState* group_;  // Owner-owned; never installed by a transport callback
   rlres1::Engine engine_;
   bool engine_ready_{false};
   bool in_call_{false};
@@ -402,6 +406,8 @@ class AuthorityClient final {
   keys::AuthorityEnvelopeType ack_type_{keys::AuthorityEnvelopeType::GroupKeyUpdate};
   std::uint32_t ack_g_{0};
   GkId ack_gk_id_{};
+  UpdateResult ack_result_{UpdateResult::Unsupported};
+  StoredState ack_state_{StoredState::None};
   MonotonicMs last_activity_{0};
   MonotonicMs last_wake_ms_{0};
   bool wake_seen_{false};
