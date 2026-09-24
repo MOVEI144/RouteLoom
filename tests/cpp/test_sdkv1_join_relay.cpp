@@ -143,11 +143,13 @@ struct FakeAuthority final : JoinRelayHostSink {
   Status relay_up(const NodeId proxy, const std::uint8_t hops, const ByteView object) noexcept override {
     if (refuse) return Status::error(StatusCode::NoCapacity, "host queue full");
     ups.push_back({proxy, hops, Bytes(object.data, object.data + object.size)});
+    if (on_up) on_up(ups.back());  // reentry must be refused
     return Status::success();
   }
   Status relay_abort(const NodeId proxy, const std::uint32_t relay_id,
                      const RelayAbortReason reason) noexcept override {
     aborts.push_back({proxy, relay_id, reason});
+    if (on_abort) on_abort(aborts.back());  // reentry must be refused
     return Status::success();
   }
   struct Up {
@@ -163,6 +165,10 @@ struct FakeAuthority final : JoinRelayHostSink {
   std::vector<Up> ups;
   std::vector<Abort> aborts;
   bool refuse{false};
+  // Optional hooks run inside the callbacks (the gateway must refuse
+  // reentry from them; the recorded copy stays valid).
+  std::function<void(const Up&)> on_up;
+  std::function<void(const Abort&)> on_abort;
 };
 
 Bytes down_object(const RelayHeader& up, const std::uint8_t step, const RelayState state,
@@ -1143,6 +1149,245 @@ void test_down_duplicate_keeps_sending() {
   }
 }
 
+// A complete single-frame up object (Continue or Abort) from kProxy.
+Bytes up_frame(const std::uint32_t relay_id, const std::uint8_t step, const RelayState state) {
+  RelayObject object{};
+  object.header.relay_id = relay_id;
+  object.header.proxy = kProxy;
+  object.header.joiner_mac = device_mac(0);
+  object.header.step = step;
+  object.header.state = state;
+  object.header.joiner_rssi_dbm = -40;
+  const Bytes message = state == RelayState::Abort ? Bytes{} : filler(40, step);
+  object.message = view(message);
+  if (state == RelayState::Abort) object.abort.status = RelayStatusCode::Aborted;
+  Bytes out(kJoinObjectMax);
+  std::size_t written = 0;
+  CHECK(relay_object_encode(object, MutableByteView{out.data(), out.size()}, written).ok());
+  out.resize(written);
+  return out;
+}
+
+void test_busy_inside_relay_up() {
+  current = "busy_inside_relay_up";
+  // Sink callbacks must not re-enter the gateway: mutating calls inside
+  // relay_up return Busy (or are ignored) and change nothing. The same
+  // host_down after the callback is the #113 scenario: the chunked down
+  // object keeps its retransmission state and reaches the device.
+  World world;
+  CHECK(world.connect());
+  const Bytes m1 = filler(300, 1);  // chunked all the way to the gateway
+  const Bytes m2 = filler(372, 2);  // chunked down to the proxy
+  const Bytes m3 = filler(404, 3);
+  FakeAuthority other;  // set_host_sink inside the callback must be ignored
+  int answered = 0;
+  Bytes down;
+  world.authority.on_up = [&](const FakeAuthority::Up& up) {
+    if (answered++ != 0) return;
+    const RelayObject object = parse_up(up.object);
+    down = down_object(object.header, 2, RelayState::Continue, m2);
+    CHECK(world.gateway.host_down(kProxy, view(down), world.now).code == StatusCode::Busy);
+    CHECK(world.gateway.host_abort(kProxy, object.header.relay_id, world.now).code ==
+          StatusCode::Busy);
+    world.gateway.set_membership(MembershipState::Unprovisioned);  // ignored
+    world.gateway.set_host_sink(&other);                         // ignored
+    world.gateway.poll(world.now);                               // ignored
+    // A frame fed inside the callback is not processed at all.
+    const std::uint32_t rejected = world.gateway.stats().frames_rejected;
+    world.gateway.on_relay_rx(kProxy, 3, FrameType::BootstrapAuth,
+                              view(up_frame(999, 1, RelayState::Continue)), world.now);
+    CHECK(world.gateway.stats().frames_rejected == rejected);
+  };
+  // Lose exactly the offset-0 Wire chunk of the down object once.
+  int dropped = 0;
+  world.drop_wire = [&dropped](const WireFrame& frame) {
+    if (frame.from != kGateway || frame.to != kProxy || dropped != 0 ||
+        frame.type != FrameType::BootstrapChunk || frame.payload[6] != 0 ||
+        frame.payload[7] != 0) {
+      return false;
+    }
+    ++dropped;
+    return true;
+  };
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 1, view(m1), world.now).ok());
+  world.pump();
+  CHECK(answered == 1 && !down.empty());
+  CHECK(world.authority.ups.size() == 1);
+  CHECK(world.gateway.stats().down_objects == 0);  // nothing changed inside
+  CHECK(world.gateway.stats().host_aborts == 0);
+  CHECK(world.gateway.host_down(kProxy, view(down), world.now).ok());  // works now
+  world.advance(3000);
+  CHECK(dropped == 1);
+  CHECK(world.gateway.stats().retransmissions > 0);
+  CHECK(world.observers[0]->messages.size() == 1 &&
+        message_is(world.observers[0]->messages[0], 2, m2));
+  CHECK(world.authority.aborts.empty());
+  // The sink was never replaced: the next stage still reaches authority.
+  CHECK(world.links[0]->send(JoinAuthPhase::EdhocMessage, 3, view(m3), world.now).ok());
+  world.pump();
+  CHECK(world.authority.ups.size() == 2);
+  CHECK(other.ups.empty() && other.aborts.empty());
+}
+
+void test_busy_inside_relay_abort() {
+  current = "busy_inside_relay_abort";
+  // relay_abort (GatewayExpired and ProxyAborted): mutating calls inside
+  // the callback are refused and ignored. After it returns, the ended
+  // relay is unknown to host_abort and the freed slot takes a new
+  // operation.
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  JoinRelayGateway gateway(config, port);
+  gateway.set_membership(MembershipState::Member);
+  FakeAuthority authority;
+  gateway.set_host_sink(&authority);
+  std::vector<Bytes> objects;
+  std::vector<JoinObjectSlot> senders(2);
+  const auto make_up = [&](const std::size_t i, const std::uint32_t relay_id,
+                           const std::uint8_t step) {
+    RelayObject object{};
+    object.header.relay_id = relay_id;
+    object.header.proxy = kProxy;
+    object.header.joiner_mac = device_mac(0);
+    object.header.step = step;
+    object.header.joiner_rssi_dbm = -40;
+    const Bytes message = filler(300, static_cast<std::uint8_t>(i));
+    object.message = view(message);
+    Bytes encoded(kJoinObjectMax);
+    std::size_t written = 0;
+    CHECK(relay_object_encode(object, MutableByteView{encoded.data(), encoded.size()}, written)
+              .ok());
+    encoded.resize(written);
+    objects.push_back(encoded);
+    CHECK(senders[i]
+              .load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, step, relay_id,
+                    view(objects.back()), 0)
+              .ok());
+  };
+  const auto send_chunk = [&](const std::size_t i, const std::size_t c,
+                              const MonotonicMs now) {
+    JoinChunk chunk{};
+    CHECK(senders[i].chunk_at(c, chunk).ok());
+    std::array<std::uint8_t, kMaxApplicationPayload> body{};
+    std::size_t size = 0;
+    CHECK(join_chunk_encode(JoinCarrier::WireRelay, chunk, MutableByteView{body.data(), body.size()},
+                            size)
+              .ok());
+    gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapChunk, ByteView{body.data(), size}, now);
+  };
+  make_up(0, 200, 1);  // relay B stage 1 (partial: expires in the same pass)
+  make_up(1, 100, 1);  // relay A stage 1 (partial: expires first)
+  send_chunk(1, 0, 10);
+  send_chunk(0, 0, 20);
+  CHECK(gateway.slots_in_use() == 2);
+  bool handled = false;
+  authority.on_abort = [&](const FakeAuthority::Abort& abort) {
+    if (abort.reason != RelayAbortReason::GatewayExpired || handled) return;
+    handled = true;
+    CHECK(abort.proxy == kProxy && abort.relay_id == 100);
+    RelayHeader header{};
+    header.relay_id = 300;
+    header.proxy = kProxy;
+    header.joiner_mac = device_mac(0);
+    const Bytes down = down_object(header, 2, RelayState::Continue, filler(300, 9));
+    CHECK(gateway.host_down(kProxy, view(down), 3020).code == StatusCode::Busy);
+    CHECK(gateway.host_abort(kProxy, 100, 3020).code == StatusCode::Busy);
+    gateway.set_membership(MembershipState::Unprovisioned);  // ignored
+    gateway.set_host_sink(nullptr);                        // ignored
+    // Relay B expires at this same instant: a nested poll must notify
+    // nothing, free nothing, and count nothing.
+    const JoinRelayGatewayStats before = gateway.stats();
+    gateway.poll(3020);  // ignored
+    CHECK(authority.aborts.size() == 1);
+    CHECK(gateway.slots_in_use() == 2);  // A's slot is not freed yet either
+    CHECK(gateway.stats().expired == before.expired);
+    CHECK(gateway.stats().proxy_aborts == before.proxy_aborts);
+  };
+  gateway.poll(3020);  // expires A (callback above), then B in the same pass
+  CHECK(handled);
+  CHECK(authority.aborts.size() == 2);  // B's expiry ran after the callback
+  CHECK(gateway.stats().expired == 2);
+  CHECK(gateway.stats().down_objects == 0);  // the callback changed nothing
+  CHECK(gateway.slots_in_use() == 0);
+  // After the callback: the ended relays are unknown to host_abort, and a
+  // freed slot takes a new operation (membership was never cleared).
+  CHECK(gateway.host_abort(kProxy, 100, 3021).code == StatusCode::NotFound);
+  CHECK(gateway.host_abort(kProxy, 200, 3021).code == StatusCode::NotFound);
+  RelayHeader header{};
+  header.relay_id = 300;
+  header.proxy = kProxy;
+  header.joiner_mac = device_mac(0);
+  const Bytes down = down_object(header, 2, RelayState::Continue, filler(300, 9));
+  CHECK(gateway.host_down(kProxy, view(down), 3021).ok());
+  CHECK(gateway.slots_in_use() == 1);
+  // The ProxyAborted callback applies the same reentry rules, and the
+  // ignored set_host_sink(nullptr) proves the sink is still attached.
+  int proxy_calls = 0;
+  authority.on_abort = [&](const FakeAuthority::Abort& abort) {
+    if (abort.reason != RelayAbortReason::ProxyAborted || proxy_calls++ != 0) return;
+    CHECK(abort.proxy == kProxy && abort.relay_id == 400);
+    CHECK(gateway.host_down(kProxy, view(down), 3030).code == StatusCode::Busy);
+    CHECK(gateway.host_abort(kProxy, 400, 3030).code == StatusCode::Busy);
+  };
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(400, 1, RelayState::Continue)), 3025);
+  CHECK(authority.ups.size() == 1);
+  gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
+                      view(up_frame(400, 1, RelayState::Abort)), 3030);
+  CHECK(proxy_calls == 1);
+  CHECK(authority.aborts.size() == 3);  // the sink was never detached
+  CHECK(gateway.host_abort(kProxy, 300, 3031).ok());
+}
+
+void test_delivery_failed_callback_busy() {
+  current = "delivery_failed_callback_busy";
+  // relay_abort(DeliveryFailed) at the retransmit cap: the callback must
+  // not re-enter — a host_down inside it is Busy, and the post-callback
+  // free_slot must not erase an operation that starts afterwards.
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  JoinRelayGateway gateway(config, port);
+  gateway.set_membership(MembershipState::Member);
+  FakeAuthority authority;
+  gateway.set_host_sink(&authority);
+  RelayHeader header{};
+  header.relay_id = 500;
+  header.proxy = kProxy;
+  header.joiner_mac = device_mac(0);
+  const Bytes down = down_object(header, 2, RelayState::Continue, filler(300, 9));
+  CHECK(gateway.host_down(kProxy, view(down), 10).ok());  // sends_ = 1
+  CHECK(gateway.slots_in_use() == 1);
+  // The proxy never answers: poll hits the retransmit cap.
+  int calls = 0;
+  authority.on_abort = [&](const FakeAuthority::Abort& abort) {
+    if (abort.reason != RelayAbortReason::DeliveryFailed || calls++ != 0) return;
+    CHECK(abort.proxy == kProxy && abort.relay_id == 500);
+    CHECK(gateway.slots_in_use() == 1);  // the failing slot is not freed yet
+    CHECK(gateway.host_down(kProxy, view(down), 2010).code == StatusCode::Busy);
+    CHECK(gateway.host_abort(kProxy, 500, 2010).code == StatusCode::Busy);
+    gateway.set_membership(MembershipState::Unprovisioned);  // ignored
+    gateway.poll(2010);                                    // ignored
+    CHECK(gateway.slots_in_use() == 1);
+  };
+  gateway.poll(510);   // resend -> sends_ = 2
+  gateway.poll(1010);  // resend -> sends_ = 3
+  gateway.poll(1510);  // resend -> sends_ = 4
+  CHECK(calls == 0 && gateway.stats().delivery_failed == 0);
+  gateway.poll(2010);  // sends_ >= max_sends -> DeliveryFailed
+  CHECK(calls == 1 && authority.aborts.size() == 1);
+  CHECK(gateway.stats().delivery_failed == 1);
+  CHECK(gateway.stats().down_objects == 1);  // the callback changed nothing
+  CHECK(gateway.slots_in_use() == 0);
+  // After the callback the relay is forgotten and the same host_down works.
+  CHECK(gateway.host_abort(kProxy, 500, 2020).code == StatusCode::NotFound);
+  CHECK(gateway.host_down(kProxy, view(down), 2020).ok());
+  CHECK(gateway.slots_in_use() == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -1159,6 +1404,9 @@ int main() {
   test_cookie_expiry();
   test_reentrant_send_in_on_message();
   test_down_duplicate_keeps_sending();
+  test_busy_inside_relay_up();
+  test_busy_inside_relay_abort();
+  test_delivery_failed_callback_busy();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 join relay check(s) failed\n", failures);
     return 1;
