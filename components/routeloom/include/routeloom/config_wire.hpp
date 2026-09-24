@@ -17,9 +17,11 @@
 //
 // Frame discipline: Control (22) carries the versioned challenge/status
 // payloads (subtype 1-4); ControlObject/ObjectChunk/ObjectAck (49/50/51)
-// carry the kind-3 permit object. All are end-protected and routed — the
-// link-scoped autonomous forms of 49/50/51 (migration kinds 1/2) are a
-// separate, unchanged path.
+// carry the kind-3 permit object and the kind-4 recovery object — each on
+// its OWN bounded reassembly lane so a stalled permit cannot block the
+// recovery a quarantined journal is waiting for. All are end-protected
+// and routed — the link-scoped autonomous forms of 49/50/51 (migration
+// kinds 1/2) are a separate, unchanged path.
 
 #include <array>
 #include <cstddef>
@@ -118,6 +120,9 @@ class ConfigTarget final : public ConfigEndpointSink {
   std::uint32_t control_denied() const noexcept { return control_denied_; }
   std::uint32_t object_acks() const noexcept { return object_acks_; }
   bool object_active() const noexcept { return intake_.active; }
+  // The kind-4 lane is separate by design: recovery stays reachable while
+  // the permit lane is busy, and kind-3 objects can never poison it.
+  bool recovery_object_active() const noexcept { return recovery_intake_.active; }
 
  private:
   struct Intake {
@@ -139,6 +144,14 @@ class ConfigTarget final : public ConfigEndpointSink {
                        MonotonicMs now_ms) noexcept;
   void handle_chunk(NodeId peer, const wire::PlainFrame& frame,
                     MonotonicMs now_ms) noexcept;
+  // `recovery` selects the journal entry points — kind-4 runs through
+  // note_recovery_*/submit_recovery, never the permit path.
+  void handle_manifest_for(Intake& lane, bool recovery, NodeId origin,
+                           const wire::PlainFrame& frame,
+                           MonotonicMs now_ms) noexcept;
+  void handle_chunk_for(Intake& lane, bool recovery, NodeId origin,
+                        const wire::PlainFrame& frame,
+                        MonotonicMs now_ms) noexcept;
   void send_ack(NodeId dest, const autonomy::ObjectHash& hash,
                 std::uint16_t received_len, autonomy::ObjectAckStatus status,
                 MonotonicMs now_ms) noexcept;
@@ -149,6 +162,7 @@ class ConfigTarget final : public ConfigEndpointSink {
   std::array<std::uint16_t, config_wire_const::kMaxJournals> namespaces_{};
   std::size_t journal_count_{0};
   Intake intake_{};
+  Intake recovery_intake_{};  // kind-4 recovery lane (stays open impaired)
   std::uint32_t control_denied_{0};
   std::uint32_t object_acks_{0};
 };
@@ -192,6 +206,12 @@ class ConfigGateway final : public ConfigEndpointSink {
   // `target` as a kind-3 manifest+chunk exchange; resolves on the ack.
   Status submit_permit(std::uint64_t request, NodeId target, ByteView permit,
                        MonotonicMs now_ms) noexcept;
+  // 0x24 ConfigRecover: the same manifest+chunk pump for a signed recovery
+  // object on the kind-4 lane — the reply reports under sub 0x24. Runs on
+  // its own transfer slot so a permit transfer in flight never holds the
+  // recovery a quarantined target is waiting for.
+  Status submit_recovery(std::uint64_t request, NodeId target, ByteView object,
+                         MonotonicMs now_ms) noexcept;
 
   // ConfigEndpointSink
   void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
@@ -202,6 +222,9 @@ class ConfigGateway final : public ConfigEndpointSink {
 
   bool query_active() const noexcept { return query_.active; }
   bool transfer_active() const noexcept { return transfer_.active; }
+  bool recovery_transfer_active() const noexcept {
+    return recovery_transfer_.active;
+  }
   std::uint32_t replies_reported() const noexcept { return replies_reported_; }
 
  private:
@@ -225,6 +248,7 @@ class ConfigGateway final : public ConfigEndpointSink {
     std::uint64_t request{0};
     NodeId target{kInvalidNodeId};
     autonomy::ObjectHash hash{};
+    std::uint8_t usb_sub{0};           // 0x21 permit / 0x24 recovery reply
     std::uint16_t next_offset{0};      // next byte to send (chunks phase)
     std::uint16_t object_size{0};
     TransferPhase phase{TransferPhase::Chunks};
@@ -232,15 +256,22 @@ class ConfigGateway final : public ConfigEndpointSink {
     ByteBuffer<kConfigPermitObjectMax> object{};
   };
 
-  void pump_transfer(MonotonicMs now_ms) noexcept;
+  // Shared manifest+chunk pump for one transfer slot (permit or recovery).
+  void pump_transfer(PermitTransfer& transfer, MonotonicMs now_ms) noexcept;
+  void start_transfer(PermitTransfer& transfer, std::uint64_t request,
+                      NodeId target, autonomy::ControlObjectKind kind,
+                      ByteView object, MonotonicMs now_ms,
+                      Status& out) noexcept;
   void finish_query(ConfigOpsResult result, ByteView body,
                     MonotonicMs now_ms) noexcept;
-  void finish_transfer(ConfigOpsResult result, MonotonicMs now_ms) noexcept;
+  void finish_transfer(PermitTransfer& transfer, ConfigOpsResult result,
+                       MonotonicMs now_ms) noexcept;
 
   ConfigWirePort& wire_;
   ConfigHostSink& host_;
   PendingQuery query_{};
   PermitTransfer transfer_{};
+  PermitTransfer recovery_transfer_{};  // kind-4 lane, replies under 0x24
   std::uint32_t replies_reported_{0};
 };
 

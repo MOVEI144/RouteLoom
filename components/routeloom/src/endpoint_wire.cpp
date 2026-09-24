@@ -926,6 +926,122 @@ Status config_command_decode(const ByteView encoded, ConfigCommand& out) noexcep
   return Status::success();
 }
 
+Status config_recovery_encode(const ConfigRecoveryCommand& command,
+                              EncodedRecoveryCommand& out) noexcept {
+  // target/authority are logical unicast node ids (same reservation rule as
+  // RCC1); the operation id must be nonzero so dedup can never collide with
+  // an unset record.
+  if (!config_namespace_valid(command.config_namespace) ||
+      command.network == 0 || command.target == kInvalidNodeId ||
+      command.target == kBroadcastNodeId || command.authority == kInvalidNodeId ||
+      command.authority == kBroadcastNodeId ||
+      all_zero(ByteView{command.operation_id.data(), command.operation_id.size()})) {
+    return invalid("config recovery identity fields invalid");
+  }
+  const bool store_recover =
+      command.recovery_class == ConfigRecoveryClass::StoreRecover;
+  const bool generation_update =
+      command.recovery_class == ConfigRecoveryClass::AuthorityGeneration;
+  if (!store_recover && !generation_update) {
+    return invalid("config recovery class unknown");
+  }
+  // Each class carries exactly its own claim: a store recovery attests a
+  // fresh generation (attest 0|1) and a countersign names the generation it
+  // installs — never both, never neither.
+  if (store_recover &&
+      (command.attest > kRcr1AttestReprovision || command.new_store_generation == 0 ||
+       command.new_authority_generation != 0)) {
+    return invalid("config recovery store fields invalid");
+  }
+  if (generation_update &&
+      (command.attest != 0 || command.new_store_generation != 0 ||
+       command.new_authority_generation == 0)) {
+    return invalid("config recovery generation fields invalid");
+  }
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status;
+#define RL_WRITE(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_WRITE(writer.write_u32(kRcr1Magic));
+  RL_WRITE(writer.write_u8(kRcr1Version));
+  RL_WRITE(writer.write_u8(0));
+  RL_WRITE(writer.write_u8(static_cast<std::uint8_t>(command.recovery_class)));
+  RL_WRITE(writer.write_u8(command.attest));
+  RL_WRITE(writer.write_u16(command.config_namespace));
+  RL_WRITE(writer.write_u16(command.schema));
+  RL_WRITE(writer.write_u64(command.network));
+  RL_WRITE(writer.write_u64(command.target));
+  RL_WRITE(writer.write_u64(command.authority));
+  RL_WRITE(writer.write_u32(command.authority_generation));
+  RL_WRITE(writer.write_u64(command.authority_sequence));
+  RL_WRITE(writer.write_bytes(
+      ByteView{command.operation_id.data(), command.operation_id.size()}));
+  RL_WRITE(writer.write_u32(command.new_store_generation));
+  RL_WRITE(writer.write_u32(command.new_authority_generation));
+  RL_WRITE(writer.write_u32(0));
+#undef RL_WRITE
+  if (writer.size() != kRcr1Size) {
+    return Status::error(StatusCode::InternalError, "config recovery size mismatch");
+  }
+  out.size = writer.size();
+  return Status::success();
+}
+
+Status config_recovery_decode(const ByteView encoded,
+                              ConfigRecoveryCommand& out) noexcept {
+  if (encoded.size != kRcr1Size) {
+    return reject();
+  }
+  ByteReader reader(encoded);
+  Status status;
+  std::uint32_t magic = 0;
+  std::uint32_t reserved = 0;
+  std::uint8_t version = 0;
+  std::uint8_t flags = 0;
+  std::uint8_t recovery_class = 0;
+#define RL_READ(expr) do { status = (expr); if (!status) return status; } while (false)
+  RL_READ(reader.read_u32(magic));
+  RL_READ(reader.read_u8(version));
+  RL_READ(reader.read_u8(flags));
+  RL_READ(reader.read_u8(recovery_class));
+  RL_READ(reader.read_u8(out.attest));
+  RL_READ(reader.read_u16(out.config_namespace));
+  RL_READ(reader.read_u16(out.schema));
+  RL_READ(reader.read_u64(out.network));
+  RL_READ(reader.read_u64(out.target));
+  RL_READ(reader.read_u64(out.authority));
+  RL_READ(reader.read_u32(out.authority_generation));
+  RL_READ(reader.read_u64(out.authority_sequence));
+  RL_READ(reader.read_bytes(
+      MutableByteView{out.operation_id.data(), out.operation_id.size()}));
+  RL_READ(reader.read_u32(out.new_store_generation));
+  RL_READ(reader.read_u32(out.new_authority_generation));
+  RL_READ(reader.read_u32(reserved));
+#undef RL_READ
+  out.recovery_class = static_cast<ConfigRecoveryClass>(recovery_class);
+  const bool store_recover =
+      out.recovery_class == ConfigRecoveryClass::StoreRecover;
+  const bool generation_update =
+      out.recovery_class == ConfigRecoveryClass::AuthorityGeneration;
+  if (magic != kRcr1Magic || version != kRcr1Version || flags != 0 ||
+      reserved != 0 || reader.remaining() != 0 ||
+      (!store_recover && !generation_update) ||
+      !config_namespace_valid(out.config_namespace) ||
+      out.network == 0 || out.target == kInvalidNodeId ||
+      out.target == kBroadcastNodeId || out.authority == kInvalidNodeId ||
+      out.authority == kBroadcastNodeId ||
+      all_zero(ByteView{out.operation_id.data(), out.operation_id.size()}) ||
+      (store_recover &&
+       (out.attest > kRcr1AttestReprovision || out.new_store_generation == 0 ||
+        out.new_authority_generation != 0)) ||
+      (generation_update &&
+       (out.attest != 0 || out.new_store_generation != 0 ||
+        out.new_authority_generation == 0))) {
+    return reject();
+  }
+  return Status::success();
+}
+
 Status config_snapshot_hash_input(const std::uint16_t config_namespace,
                                   const std::uint16_t schema, const ByteView snapshot_tlv,
                                   ByteBuffer<kConfigSnapshotInputMax>& out) noexcept {

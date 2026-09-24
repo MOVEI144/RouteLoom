@@ -858,17 +858,18 @@ pub fn decode_host_unregister_response(
 // --- Config endpoint subcommands (scope-gateway-config/05-wire-api.md
 // §5.6, P5) ------------------------------------------------------------------
 //
-// The remote-config HostOps family (0x20-0x23) shares the gateway inner
+// The remote-config HostOps family (0x20-0x24) shares the gateway inner
 // common form (schema:u8=1, sub:u8, payload_len:u16, payload). 0x20's async
-// reply is the separate 0x22 subcommand; 0x21 and 0x23 answer under their
+// reply is the separate 0x22 subcommand; 0x21/0x23/0x24 answer under their
 // own sub — the frame-level request id correlates them. Every reply opens
 // with a u16 ConfigOpsResult: Ok only means the device proved the mesh step
-// it was asked for (a query answer or an assembled permit object), never a
-// config verdict — the permit's own phase/reason is a separate status read.
+// it was asked for (a query answer or an assembled object), never a
+// config verdict — the object's own phase/reason is a separate status read.
 pub const SUB_CONFIG_QUERY: u8 = 0x20;
 pub const SUB_CONFIG_PERMIT: u8 = 0x21;
 pub const SUB_CONFIG_STATUS: u8 = 0x22;
 pub const SUB_CONFIG_CHALLENGE: u8 = 0x23;
+pub const SUB_CONFIG_RECOVER: u8 = 0x24;
 
 pub const CONFIG_QUERY_REQUEST_PAYLOAD: usize = 26; // target8+ns2+opid16
 pub const CONFIG_CHALLENGE_REQUEST_PAYLOAD: usize = 28; // target8+ns2+schema2+nonce16
@@ -922,19 +923,19 @@ fn config_result_valid(result: u16) -> bool {
     ConfigOpsResult::try_from_u16(result).is_ok()
 }
 
-/// The body length a 0x21/0x22/0x23 reply may carry, by subcommand. The
-/// permit reply is result-only; the query replies carry the fixed endpoint
-/// body on Ok and none on failure — so {0, N} is the legal set.
+/// The body length a 0x21/0x22/0x23/0x24 reply may carry, by subcommand.
+/// The object replies are result-only; the query replies carry the fixed
+/// endpoint body on Ok and none on failure — so {0, N} is the legal set.
 fn config_reply_body_valid(sub: u8, body_size: usize) -> bool {
     match sub {
-        SUB_CONFIG_PERMIT => body_size == 0,
+        SUB_CONFIG_PERMIT | SUB_CONFIG_RECOVER => body_size == 0,
         SUB_CONFIG_STATUS => body_size == 0 || body_size == CONFIG_STATUS_BODY_SIZE,
         SUB_CONFIG_CHALLENGE => body_size == 0 || body_size == CONFIG_CHALLENGE_BODY_SIZE,
         _ => false,
     }
 }
 
-/// The sub byte of a config-family inner body, if it is one (0x20-0x23).
+/// The sub byte of a config-family inner body, if it is one (0x20-0x24).
 /// Used to peel config replies out of the generic response-routing lane
 /// without decoding the whole family up front.
 pub fn config_sub(inner: &[u8]) -> Option<u8> {
@@ -942,9 +943,8 @@ pub fn config_sub(inner: &[u8]) -> Option<u8> {
         return None;
     }
     match inner[1] {
-        SUB_CONFIG_QUERY | SUB_CONFIG_PERMIT | SUB_CONFIG_STATUS | SUB_CONFIG_CHALLENGE => {
-            Some(inner[1])
-        }
+        SUB_CONFIG_QUERY | SUB_CONFIG_PERMIT | SUB_CONFIG_STATUS | SUB_CONFIG_CHALLENGE
+        | SUB_CONFIG_RECOVER => Some(inner[1]),
         _ => None,
     }
 }
@@ -1049,7 +1049,39 @@ pub fn decode_config_permit(inner: &[u8]) -> Result<ConfigPermitRequest, HostOps
     })
 }
 
-/// Shared reply shape for 0x21/0x22/0x23: result:u16, target:u64, then an
+/// 0x24 CONFIG_RECOVER (H→G): target:u64, recovery object bytes
+/// (1..CONFIG_PERMIT_MAX). Identical layout to 0x21 — the signed kind-4
+/// object is opaque to the bridge — but delivered on the dedicated
+/// recovery lane and answered under 0x24 (result only, no body). A
+/// recovery object is never accepted on the 0x21 permit path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigRecoverRequest {
+    pub target: u64,
+    pub object: Vec<u8>,
+}
+
+pub fn encode_config_recover(request: &ConfigRecoverRequest) -> Result<Vec<u8>, HostOpsError> {
+    if request.object.is_empty() || request.object.len() > CONFIG_PERMIT_MAX {
+        return Err(HostOpsError::CanonicalTooLarge);
+    }
+    let payload_len = 8 + request.object.len();
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + payload_len);
+    gateway_head(&mut out, SUB_CONFIG_RECOVER, payload_len);
+    out.extend_from_slice(&request.target.to_be_bytes());
+    out.extend_from_slice(&request.object);
+    Ok(out)
+}
+
+pub fn decode_config_recover(inner: &[u8]) -> Result<ConfigRecoverRequest, HostOpsError> {
+    // target:u64 (8) + object (1..CONFIG_PERMIT_MAX).
+    let payload = gateway_body(inner, SUB_CONFIG_RECOVER, 8 + 1, 8 + CONFIG_PERMIT_MAX)?;
+    Ok(ConfigRecoverRequest {
+        target: u64_at(payload, 0)?,
+        object: payload[8..].to_vec(),
+    })
+}
+
+/// Shared reply shape for 0x21/0x22/0x23/0x24: result:u16, target:u64, then an
 /// optional body — the raw ControlStatus (72 B) for a 0x22 reply or the raw
 /// ControlChallenge (92 B) for a 0x23 reply on Ok; empty on any failure and
 /// always for the 0x21 reply. The host decodes the body with the endpoint
@@ -1061,9 +1093,9 @@ pub struct ConfigReply {
     pub body: Vec<u8>,
 }
 
-/// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge; the body
-/// length the codec accepts is derived from it (0 for 0x21; 0-or-fixed for
-/// the query replies).
+/// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge/
+/// ConfigRecover; the body length the codec accepts is derived from it
+/// (0 for 0x21/0x24; 0-or-fixed for the query replies).
 pub fn encode_config_reply(sub: u8, reply: &ConfigReply) -> Result<Vec<u8>, HostOpsError> {
     if !config_reply_body_valid(sub, reply.body.len()) || !config_result_valid(reply.result) {
         return Err(HostOpsError::LengthMismatch);

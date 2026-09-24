@@ -270,8 +270,8 @@ def main():
         control_object(1, 1, 0, 3000, obj_hash),
         "total_len exceeds the 2048-byte object limit")
     bad("control_object_unknown_kind", "control_object",
-        control_object(1, 4, 0, 512, obj_hash),
-        "object kind 4 is unassigned")
+        control_object(1, 5, 0, 512, obj_hash),
+        "object kind 5 is unassigned")
 
     print(f"wrote {len(list((OUT / 'valid').glob('*.json')))} valid and "
           f"{len(list((OUT / 'invalid').glob('*.json')))} invalid vectors to {OUT}")

@@ -101,6 +101,7 @@ enum class HostOpsSub : std::uint8_t {
   ConfigPermit = 0x21,      // H→G request: permit transfer -> async 0x21 reply
   ConfigStatus = 0x22,      // G→H reply: ControlStatus for a 0x20 query
   ConfigChallenge = 0x23,   // H→G query / G→H reply: ControlChallenge exchange
+  ConfigRecover = 0x24,     // H→G request: kind-4 recovery object -> async 0x24 reply
   DiagnosticRequest = 0x30, // H→G request: observer:u64 || diagnostic body
   DiagnosticResponse = 0x31,// G→H reply: result/observer/body_len || body
   NodeStatusQuery = 0x40,   // H→G request: after/max/flags -> 0x41 page
@@ -732,6 +733,16 @@ struct ConfigPermitRequest {
 // object ceiling (config_wire / autonomy object budget).
 constexpr std::size_t kConfigPermitMax = 1024;
 
+// 0x24 CONFIG_RECOVER (H→G): target:u64, recovery object bytes
+//   (1..kConfigPermitMax). Identical request layout to 0x21 — the signed
+//   kind-4 object is opaque to the bridge — but routed to the dedicated
+//   recovery lane and answered under 0x24 (result only, no body). The
+//   recovery object is never accepted on the 0x21 permit path.
+struct ConfigRecoverRequest {
+  NodeId target{kInvalidNodeId};
+  ByteView object{};  // borrows the decoded body (decode) or caller bytes
+};
+
 // Shared reply shape for 0x21/0x22/0x23: result:u16, target:u64, then an
 // optional body — the raw ControlStatus (72 B) for a 0x22 reply or the raw
 // ControlChallenge (92 B) for a 0x23 reply on Ok; empty on any failure and
@@ -755,9 +766,12 @@ Status encode_config_challenge(const ConfigChallengeRequest& request,
 Status decode_config_permit(ByteView inner, ConfigPermitRequest& out) noexcept;
 Status encode_config_permit(const ConfigPermitRequest& request, MutableByteView out,
                             std::size_t& written) noexcept;
-// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge; the body
-// length the codec accepts is derived from it (0 for 0x21; 0-or-fixed for
-// the query replies).
+Status decode_config_recover(ByteView inner, ConfigRecoverRequest& out) noexcept;
+Status encode_config_recover(const ConfigRecoverRequest& request,
+                             MutableByteView out, std::size_t& written) noexcept;
+// `sub` must be one of ConfigPermit/ConfigStatus/ConfigChallenge/
+// ConfigRecover; the body length the codec accepts is derived from it
+// (0 for 0x21/0x24; 0-or-fixed for the query replies).
 Status encode_config_reply(HostOpsSub sub, const ConfigReply& reply,
                            MutableByteView out, std::size_t& written) noexcept;
 Status decode_config_reply(ByteView inner, HostOpsSub sub, ConfigReply& out) noexcept;

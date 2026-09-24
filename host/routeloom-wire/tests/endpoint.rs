@@ -380,6 +380,32 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
             .expect("config_command encode");
             raw
         }
+        "config_recovery" => {
+            let mut raw = Vec::new();
+            config_recovery_encode(
+                &ConfigRecoveryCommand {
+                    recovery_class: match u64_field(fields, "recovery_class") {
+                        1 => ConfigRecoveryClass::StoreRecover,
+                        2 => ConfigRecoveryClass::AuthorityGeneration,
+                        other => panic!("bad recovery class {other}"),
+                    },
+                    attest: u64_field(fields, "attest") as u8,
+                    config_namespace: u64_field(fields, "config_namespace") as u16,
+                    schema: u64_field(fields, "schema") as u16,
+                    network: u64_field(fields, "network"),
+                    target: u64_field(fields, "target"),
+                    authority: u64_field(fields, "authority"),
+                    authority_generation: u64_field(fields, "authority_generation") as u32,
+                    authority_sequence: u64_field(fields, "authority_sequence"),
+                    operation_id: arr16(fields, "operation_id_hex"),
+                    new_store_generation: u64_field(fields, "new_store_generation") as u32,
+                    new_authority_generation: u64_field(fields, "new_authority_generation") as u32,
+                },
+                &mut raw,
+            )
+            .expect("config_recovery encode");
+            raw
+        }
         "config_snapshot_input" => config_snapshot_hash_input(
             u64_field(fields, "config_namespace") as u16,
             u64_field(fields, "schema") as u16,
@@ -423,6 +449,9 @@ fn decode_vector(codec: &str, encoded: &[u8]) -> Result<(), String> {
             .map(|_| ())
             .map_err(|e| e.to_string()),
         "config_command" => config_command_decode(encoded)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        "config_recovery" => config_recovery_decode(encoded)
             .map(|_| ())
             .map_err(|e| e.to_string()),
         // Encode-only canonical helpers have no decoder to run.

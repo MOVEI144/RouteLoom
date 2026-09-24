@@ -1217,6 +1217,160 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
     })
 }
 
+// --- RCR1 canonical recovery command (04-remote-config §4.7, 06 §6.3) --------
+//
+// Fixed 76B body carried as the signed payload of a kind-4 recovery object —
+// never an RCC1 extension and never a kind-3 permit. Two classes: a store
+// recovery (new store generation + explicit reprovision attest) and the
+// authority-generation countersign (03-signing's trust update). The Rust
+// mirror must stay byte-identical with the C++ codec in endpoint_wire.cpp.
+
+pub const RCR1_MAGIC: u32 = 0x5243_5231; // "RCR1"
+pub const RCR1_VERSION: u8 = 1;
+pub const RCR1_SIZE: usize = 76;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ConfigRecoveryClass {
+    /// Signed store-generation recovery for an impaired journal.
+    StoreRecover = 1,
+    /// Countersigned authority-generation install (trust update).
+    AuthorityGeneration = 2,
+}
+
+pub const RCR1_ATTEST_ADOPT: u8 = 0;
+pub const RCR1_ATTEST_REPROVISION: u8 = 1;
+
+/// Fixed-layout recovery command — no challenge/nonce binding by design
+/// (replay protection is the store-generation floor + result dedup).
+#[derive(Clone, Debug)]
+pub struct ConfigRecoveryCommand {
+    pub recovery_class: ConfigRecoveryClass,
+    /// StoreRecover: 0 adopt survivor / 1 reprovision. Generation: must be 0.
+    pub attest: u8,
+    pub config_namespace: u16,
+    pub schema: u16,
+    pub network: u64,
+    pub target: u64,
+    pub authority: u64,
+    /// The generation the signature verifies under (the CURRENT pin for a
+    /// countersign — the new generation lives in new_authority_generation).
+    pub authority_generation: u32,
+    pub authority_sequence: u64,
+    pub operation_id: [u8; 16],
+    /// StoreRecover: the fresh journal store generation (nonzero). Else 0.
+    pub new_store_generation: u32,
+    /// AuthorityGeneration: the generation being installed (nonzero). Else 0.
+    pub new_authority_generation: u32,
+}
+
+fn config_recovery_check(command: &ConfigRecoveryCommand) -> Result<()> {
+    if !config_namespace_valid(command.config_namespace)
+        || command.network == 0
+        || command.target == 0
+        || command.target == BROADCAST_NODE_ID
+        || command.authority == 0
+        || command.authority == BROADCAST_NODE_ID
+        || all_zero(&command.operation_id)
+    {
+        return invalid("config recovery identity fields invalid");
+    }
+    match command.recovery_class {
+        ConfigRecoveryClass::StoreRecover => {
+            if command.attest > RCR1_ATTEST_REPROVISION
+                || command.new_store_generation == 0
+                || command.new_authority_generation != 0
+            {
+                return invalid("config recovery store fields invalid");
+            }
+        }
+        ConfigRecoveryClass::AuthorityGeneration => {
+            if command.attest != 0
+                || command.new_store_generation != 0
+                || command.new_authority_generation == 0
+            {
+                return invalid("config recovery generation fields invalid");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn config_recovery_encode(command: &ConfigRecoveryCommand, out: &mut Vec<u8>) -> Result<()> {
+    config_recovery_check(command)?;
+    out.clear();
+    out.reserve(RCR1_SIZE);
+    out.extend_from_slice(&RCR1_MAGIC.to_be_bytes());
+    out.push(RCR1_VERSION);
+    out.push(0);
+    out.push(command.recovery_class as u8);
+    out.push(command.attest);
+    out.extend_from_slice(&command.config_namespace.to_be_bytes());
+    out.extend_from_slice(&command.schema.to_be_bytes());
+    out.extend_from_slice(&command.network.to_be_bytes());
+    out.extend_from_slice(&command.target.to_be_bytes());
+    out.extend_from_slice(&command.authority.to_be_bytes());
+    out.extend_from_slice(&command.authority_generation.to_be_bytes());
+    out.extend_from_slice(&command.authority_sequence.to_be_bytes());
+    out.extend_from_slice(&command.operation_id);
+    out.extend_from_slice(&command.new_store_generation.to_be_bytes());
+    out.extend_from_slice(&command.new_authority_generation.to_be_bytes());
+    out.extend_from_slice(&0_u32.to_be_bytes());
+    debug_assert_eq!(out.len(), RCR1_SIZE);
+    Ok(())
+}
+
+pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryCommand> {
+    if encoded.len() != RCR1_SIZE {
+        return reject();
+    }
+    let magic = u32::from_be_bytes(encoded[0..4].try_into().expect("fixed"));
+    let version = encoded[4];
+    let flags = encoded[5];
+    let class_raw = encoded[6];
+    let attest = encoded[7];
+    let config_namespace = u16::from_be_bytes(encoded[8..10].try_into().expect("fixed"));
+    let schema = u16::from_be_bytes(encoded[10..12].try_into().expect("fixed"));
+    let network = u64::from_be_bytes(encoded[12..20].try_into().expect("fixed"));
+    let target = u64::from_be_bytes(encoded[20..28].try_into().expect("fixed"));
+    let authority = u64::from_be_bytes(encoded[28..36].try_into().expect("fixed"));
+    let authority_generation = u32::from_be_bytes(encoded[36..40].try_into().expect("fixed"));
+    let authority_sequence = u64::from_be_bytes(encoded[40..48].try_into().expect("fixed"));
+    let mut operation_id = [0_u8; 16];
+    operation_id.copy_from_slice(&encoded[48..64]);
+    let new_store_generation = u32::from_be_bytes(encoded[64..68].try_into().expect("fixed"));
+    let new_authority_generation = u32::from_be_bytes(encoded[68..72].try_into().expect("fixed"));
+    let reserved = u32::from_be_bytes(encoded[72..76].try_into().expect("fixed"));
+    let recovery_class = match class_raw {
+        1 => ConfigRecoveryClass::StoreRecover,
+        2 => ConfigRecoveryClass::AuthorityGeneration,
+        _ => return reject(),
+    };
+    let command = ConfigRecoveryCommand {
+        recovery_class,
+        attest,
+        config_namespace,
+        schema,
+        network,
+        target,
+        authority,
+        authority_generation,
+        authority_sequence,
+        operation_id,
+        new_store_generation,
+        new_authority_generation,
+    };
+    if magic != RCR1_MAGIC
+        || version != RCR1_VERSION
+        || flags != 0
+        || reserved != 0
+        || config_recovery_check(&command).is_err()
+    {
+        return reject();
+    }
+    Ok(command)
+}
+
 /// Snapshot-hash input (§5.4): domain_snapshot || namespace u16 | schema u16 |
 /// complete sorted TLV snapshot bytes.
 pub const CONFIG_SNAPSHOT_MAX: usize = 512;

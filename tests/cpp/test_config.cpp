@@ -166,6 +166,24 @@ void test_permit_tag(const ByteView aad, const ByteView canonical,
   std::memcpy(out.data(), digest.data(), kPermitTagSize);
 }
 
+// The test recovery envelope: recovery_aad(46B) || canonical RCR1 || tag(16B)
+// under its own domain — a kind-4 object can never verify as a kind-3
+// permit, mirroring the dev profile's separate domains.
+constexpr char kTestRecoveryDomain[] = "RouteLoom/config-recover-test/v1";
+constexpr std::size_t kRecoveryAadSize = kConfigRecoveryAadSize;
+
+void test_recovery_tag(const ByteView aad, const ByteView canonical,
+                       std::array<std::uint8_t, kPermitTagSize>& out) {
+  Sha256 hash{};
+  hash.update(ByteView{reinterpret_cast<const std::uint8_t*>(kTestRecoveryDomain),
+                       sizeof(kTestRecoveryDomain)});
+  hash.update(aad);
+  hash.update(canonical);
+  Digest256 digest{};
+  hash.finish(digest);
+  std::memcpy(out.data(), digest.data(), kPermitTagSize);
+}
+
 class FakePermitSigner final : public ConfigPermitSigner {
  public:
   bool ready() const noexcept override { return ready_; }
@@ -187,6 +205,29 @@ class FakePermitSigner final : public ConfigPermitSigner {
     std::memcpy(permit.bytes.data() + aad.size, canonical.data, canonical.size);
     std::array<std::uint8_t, kPermitTagSize> tag{};
     test_permit_tag(aad.view(), canonical, tag);
+    std::memcpy(permit.bytes.data() + aad.size + canonical.size, tag.data(), tag.size());
+    permit.size = aad.size + canonical.size + kPermitTagSize;
+    return Status::success();
+  }
+  Status sign_recovery(const endpoint::ConfigRecoveryCommand& command,
+                       const ByteView canonical,
+                       ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override {
+    ++sign_calls;
+    if (fail_next) {
+      fail_next = false;
+      return Status::error(StatusCode::InternalError, "injected sign failure");
+    }
+    ByteBuffer<kRecoveryAadSize> aad{};
+    Status status = config_recovery_aad(command.network, command.target,
+                                        command.config_namespace, aad);
+    if (!status) return status;
+    if (aad.size + canonical.size + kPermitTagSize > permit.bytes.size()) {
+      return Status::error(StatusCode::NoCapacity, "recovery object oversize");
+    }
+    std::memcpy(permit.bytes.data(), aad.bytes.data(), aad.size);
+    std::memcpy(permit.bytes.data() + aad.size, canonical.data, canonical.size);
+    std::array<std::uint8_t, kPermitTagSize> tag{};
+    test_recovery_tag(aad.view(), canonical, tag);
     std::memcpy(permit.bytes.data() + aad.size + canonical.size, tag.data(), tag.size());
     permit.size = aad.size + canonical.size + kPermitTagSize;
     return Status::success();
@@ -237,7 +278,42 @@ class FakeVerifier final : public ConfigAuthorityVerifier {
     verified = true;
     return Status::success();
   }
+  // The kind-4 recovery envelope: recovery-domain aad || RCR1 || tag16 —
+  // fixed 138 B. Same contract as verify_permit; the test profile resolves
+  // every generation, so the countersign resolvability check always passes.
+  Status verify_recovery(const ConfigPermitContext& context, const ByteView object,
+                         endpoint::EncodedRecoveryCommand& payload,
+                         bool& verified) noexcept override {
+    verified = false;
+    ++verify_calls;
+    if (object.size != kRecoveryAadSize + endpoint::kRcr1Size + kPermitTagSize) {
+      return Status::error(StatusCode::ProtocolError,
+                           "recovery envelope malformed");
+    }
+    ByteBuffer<kRecoveryAadSize> aad{};
+    Status status = config_recovery_aad(context.network, context.target,
+                                        context.config_namespace, aad);
+    if (!status) return status;
+    if (!constant_time_equal(ByteView{object.data, kRecoveryAadSize}, aad.view())) {
+      return Status::success();  // wrong scope binding -> verified=false
+    }
+    const ByteView canonical{object.data + kRecoveryAadSize, endpoint::kRcr1Size};
+    std::array<std::uint8_t, kPermitTagSize> tag{};
+    test_recovery_tag(aad.view(), canonical, tag);
+    if (!constant_time_equal(
+            ByteView{tag.data(), tag.size()},
+            ByteView{object.data + object.size - kPermitTagSize, kPermitTagSize})) {
+      return Status::success();  // signature mismatch -> verified=false
+    }
+    status = endpoint::config_recovery_decode(canonical, decoded_recovery_);
+    if (!status) return status;
+    payload.size = canonical.size;
+    std::memcpy(payload.bytes.data(), canonical.data, canonical.size);
+    verified = true;
+    return Status::success();
+  }
   endpoint::ConfigCommand decoded_{};
+  endpoint::ConfigRecoveryCommand decoded_recovery_{};
   std::size_t verify_calls{0};
 };
 
@@ -2447,6 +2523,503 @@ void test_outbox_tombstone_size() {
   CHECK(rig.outbox.last_write_size <= 32);
 }
 
+// --- R-series: the dedicated recovery lane (Issue #51) -------------------------
+//
+// A signed kind-4 RCR1 object is the ONLY intake an impaired journal still
+// serves. StoreRecover attests a fresh store generation for a quarantined/
+// uncertain journal; AuthorityGeneration countersigns the next trust
+// generation (03-signing trust update) on a proven one. Everything else —
+// bad signatures, stale generations, replays, wrong lanes — stays fail-closed.
+
+// Build + encode + sign an RCR1 recovery object bound to `rig`'s identity.
+// `authority_generation` is the generation the COMMAND claims — the journal
+// only accepts the one it currently pins.
+void build_recovery(FakePermitSigner& signer, const TargetRig& rig,
+                    const endpoint::ConfigRecoveryClass cls,
+                    const std::uint8_t attest,
+                    const std::uint32_t new_store_generation,
+                    const std::uint32_t new_authority_generation,
+                    const std::uint8_t opid_tag,
+                    const std::uint32_t authority_generation,
+                    ByteBuffer<kConfigPermitObjectMax>& object,
+                    endpoint::ConfigRecoveryCommand* command_out = nullptr) {
+  endpoint::ConfigRecoveryCommand command{};
+  command.recovery_class = cls;
+  command.attest = attest;
+  command.config_namespace = rig.config.config_namespace;
+  command.schema = rig.config.schema;
+  command.network = rig.config.network;
+  command.target = rig.config.target;
+  command.authority = rig.config.authorized_issuer;
+  command.authority_generation = authority_generation;
+  command.authority_sequence = 90 + opid_tag;
+  command.operation_id = {0xC0, opid_tag, 2, 3, 4, 5, 6, 7,
+                          8,    9,        10, 11, 12, 13, 14, 15};
+  command.new_store_generation = new_store_generation;
+  command.new_authority_generation = new_authority_generation;
+  if (command_out != nullptr) *command_out = command;
+  endpoint::EncodedRecoveryCommand canonical{};
+  CHECK_OK(endpoint::config_recovery_encode(command, canonical));
+  CHECK_OK(signer.sign_recovery(command, canonical.view(), object));
+}
+
+// Feed `object` through the kind-4 manifest/chunk lane in `chunk_size` pieces.
+Status send_recovery_chunks(TargetRig& rig,
+                            const ByteBuffer<kConfigPermitObjectMax>& object,
+                            const std::uint16_t chunk_size, MonotonicMs& t) {
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::ConfigRecovery;
+  manifest.total_len = static_cast<std::uint16_t>(object.size);
+  sha256(object.view(), manifest.object_hash);
+  Status last = rig.journal->note_recovery_manifest(manifest, t);
+  for (std::uint16_t offset = 0; offset < object.size && last.ok();
+       offset = static_cast<std::uint16_t>(offset + chunk_size)) {
+    autonomy::ObjectChunkPayload chunk{};
+    chunk.object_hash = manifest.object_hash;
+    chunk.offset = offset;
+    chunk.data_size = static_cast<std::uint16_t>(
+        object.size - offset < chunk_size ? object.size - offset : chunk_size);
+    std::memcpy(chunk.data.data(), object.bytes.data() + offset, chunk.data_size);
+    t += 10;
+    last = rig.journal->note_recovery_chunk(chunk, t);
+  }
+  return last;
+}
+
+// R01: both journal slots lost -> quarantine -> a signed StoreRecover object
+// (attest=reprovision) restores intake and a normal permit applies after.
+void test_r01_quarantine_store_recovery() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+
+  // Total loss: both slot images unreadable -> next boot quarantines.
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms + 100);
+  CHECK(rig.journal->quarantined());
+
+  // Ordinary intake stays closed (quarantine -> InvalidState); the
+  // recovery lane does not.
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = 64;
+  manifest.object_hash[0] = 1;
+  CHECK(rig.journal->note_object_manifest(manifest, now_ms + 110).code ==
+        StatusCode::InvalidState);
+
+  // No verifiable record survives: attest=adopt must fail closed — only an
+  // explicit re-provisioning attestation mints the new generation.
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestAdopt, 500, 0, 1,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms + 130, verdict).code ==
+        StatusCode::RecoveryRequired);
+  CHECK(rig.journal->quarantined());
+
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 500, 0, 2,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 140, verdict));
+  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(!rig.journal->quarantined());
+  CHECK(!rig.journal->uncertain());
+  // Both slots now carry the same verifiable record under generation 500.
+  CHECK(std::memcmp(rig.storage.slots_[0].data(), rig.storage.slots_[1].data(),
+                    64) == 0);
+
+  // Intake is re-established: a bound permit flows through the normal path.
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 200,
+                        rig.journal->decision_revision(),
+                        rig.journal->active_snapshot(), verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
+// R02: one-slot bitrot -> uncertain -> StoreRecover (attest=adopt) heals the
+// journal; the surviving record is adopted under the new store generation.
+void test_r02_uncertain_store_recovery() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  const std::uint64_t proven_revision = rig.journal->decision_revision();
+
+  // Bitrot in one slot only -> boot lands uncertain.
+  rig.storage.corrupt(1, 128);
+  rig.boot(now_ms + 100);
+  CHECK(rig.journal->uncertain());
+  CHECK(rig.journal->decision_revision() == proven_revision);  // survivor kept
+
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestAdopt, 600, 0, 3,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 150, verdict));
+  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(!rig.journal->uncertain());
+  // The proven revision floor carried over — pre-loss permits cannot replay.
+  CHECK(rig.journal->decision_revision() >= proven_revision);
+}
+
+// R03: signature/binding/scope rejections on the recovery lane.
+void test_r03_recovery_rejections() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms);
+  CHECK(rig.journal->quarantined());
+  ConfigVerdict verdict{};
+
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 500, 0, 4,
+                 rig.config.authority_generation, object);
+
+  // Tampered signature byte -> unverified, denied.
+  ByteBuffer<kConfigPermitObjectMax> bad = object;
+  bad.bytes[bad.size - 1] ^= 0xFFU;
+  CHECK(rig.journal->submit_recovery(bad.view(), now_ms + 10, verdict).code ==
+        StatusCode::AuthenticationFailed);
+  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
+  CHECK(rig.journal->quarantined());
+
+  // Tampered AAD scope byte -> unverified, denied.
+  bad = object;
+  bad.bytes[kRecoveryAadSize - 1] ^= 0xFFU;
+  CHECK(rig.journal->submit_recovery(bad.view(), now_ms + 20, verdict).code ==
+        StatusCode::AuthenticationFailed);
+
+  // A permit-shaped envelope through the recovery lane: kind-3 bytes are
+  // never reinterpreted as recovery — the aad domain differs.
+  const ConfigField patch[] = {sdk_u8(1, 2)};
+  CHECK(!rig.journal->submit_permit(object.view(), now_ms + 30, true, verdict)
+             .ok());
+
+  // Signed under a generation the journal does not pin -> scope denied.
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 500, 0, 5,
+                 rig.config.authority_generation + 7, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms + 40, verdict).code ==
+        StatusCode::AuthorizationFailed);
+  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
+  CHECK(rig.journal->quarantined());
+  static_cast<void>(patch);
+}
+
+// R04: replay protection — same op+same digest is idempotent, same op+
+// different digest is conflict, a generation at/below the floor is refused.
+void test_r04_recovery_replay_floor() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms);
+  ConfigVerdict verdict{};
+
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 500, 0, 6,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 10, verdict));
+  // Same operation id + same bytes -> recorded verdict, never re-applied.
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 20, verdict));
+  CHECK(verdict.reason == ConfigReason::Ok);
+
+  // Same operation id + different content -> CONFLICT.
+  ByteBuffer<kConfigPermitObjectMax> conflicting{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 700, 0, 6,
+                 rig.config.authority_generation, conflicting);
+  // Same opid tag (6) produces the same operation id with different content.
+  CHECK(rig.journal->submit_recovery(conflicting.view(), now_ms + 30, verdict)
+            .code == StatusCode::Conflict);
+
+  // A fresh recovery naming the consumed generation or below is refused:
+  // the proven floor moved to 500.
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 500, 0, 7,
+                 rig.config.authority_generation, object);
+  rig.storage.fill(0, 0xEE);  // re-impair so class admission passes
+  rig.boot(now_ms + 40);
+  // The rebuilt journal proves the 500-generation record; a replay at 500
+  // sits at/below the floor the journal already consumed.
+  CHECK(rig.journal->uncertain());
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms + 50, verdict)
+            .code == StatusCode::InvalidArgument);
+}
+
+// R05: the 03-signing trust update — a countersigned AuthorityGeneration
+// object durably installs the new pin; permits under it apply only after.
+void test_r05_trust_update() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->authority_generation() == 1);
+
+  // A permit signed under the new generation is rejected BEFORE the trust
+  // update — the journal still pins generation 1.
+  endpoint::ControlChallengeQuery query{};
+  query.config_namespace = rig.config.config_namespace;
+  query.schema = rig.config.schema;
+  query.client_nonce = {1, 1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK_OK(rig.journal->handle_challenge_query(query, now_ms + 10, encoded));
+  endpoint::ControlChallenge challenge{};
+  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), challenge));
+  ConfigCommand command = last_command_;
+  command.operation_id = {0xD0, 1, 2, 3, 4, 5, 6, 7,
+                          8,    9, 10, 11, 12, 13, 14, 15};
+  command.challenge_nonce = challenge.challenge_nonce;
+  command.authority_generation = 3;  // signed under the NEW generation
+  ByteBuffer<kConfigPermitObjectMax> early_permit{};
+  build_permit(signer_, command, early_permit);
+  CHECK(rig.journal->submit_permit(early_permit.view(), now_ms + 20, true, verdict)
+            .code == StatusCode::AuthorizationFailed);
+  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
+
+  // The countersigned trust update installs generation 3 durably.
+  ByteBuffer<kConfigPermitObjectMax> update{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::AuthorityGeneration,
+                 0, 0, 3, 8, rig.config.authority_generation, update);
+  CHECK_OK(rig.journal->submit_recovery(update.view(), now_ms + 30, verdict));
+  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(rig.journal->authority_generation() == 3);
+
+  // The very permit that was rejected now applies under the new pin (a
+  // fresh acceptance-budget window — the trust update consumed one).
+  now_ms += 61000;
+  const ConfigField patch2[] = {sdk_u8(1, 2)};
+  ByteBuffer<endpoint::kConfigSnapshotMax> next{};
+  bool changed = false;
+  CHECK_OK(config_patch_apply(rig.journal->active_snapshot(), patch2, 1, next, changed));
+  Digest256 next_hash{};
+  CHECK_OK(config_snapshot_hash(1, 1, next.view(), next_hash));
+  endpoint::ControlChallengeQuery query2 = query;
+  query2.client_nonce = {2, 2, 2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+  CHECK_OK(rig.journal->handle_challenge_query(query2, now_ms, encoded));
+  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), challenge));
+  command.operation_id = {0xD1, 1, 2, 3, 4, 5, 6, 7,
+                          8,    9, 10, 11, 12, 13, 14, 15};
+  command.challenge_nonce = challenge.challenge_nonce;
+  command.expected_revision = rig.journal->decision_revision();
+  command.next_revision = command.expected_revision + 1;
+  command.base_snapshot_hash = challenge.active_hash;
+  command.next_snapshot_hash = next_hash;
+  command.fields[0] = patch2[0];
+  command.field_count = 1;
+  ByteBuffer<kConfigPermitObjectMax> new_permit{};
+  build_permit(signer_, command, new_permit);
+  CHECK_OK(rig.journal->submit_permit(new_permit.view(), now_ms + 10, true, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+
+  // The pin is durable: a reboot re-adopts generation 3, not the
+  // build-time 1 — and permits under the OLD generation are now stale.
+  now_ms += 200;
+  rig.boot(now_ms);
+  CHECK(rig.journal->authority_generation() == 3);
+  CHECK(!rig.journal->quarantined() && !rig.journal->uncertain());
+  drain(rig, now_ms);  // finish the boot-time restore re-assert
+  ByteBuffer<kConfigPermitObjectMax> old_permit{};
+  command.operation_id = {0xD2, 1, 2, 3, 4, 5, 6, 7,
+                          8,    9, 10, 11, 12, 13, 14, 15};
+  command.authority_generation = 1;
+  build_permit(signer_, command, old_permit);
+  CHECK(rig.journal->submit_permit(old_permit.view(), now_ms + 10, true, verdict)
+            .code == StatusCode::AuthorizationFailed);
+}
+
+// R06: trust-update admission rules — the class only runs on a proven,
+// idle journal and only ever advances the generation.
+void test_r06_trust_update_admission() {
+  // On an IMPAIRED journal the countersign is refused: the journal must
+  // re-prove its store via StoreRecover first.
+  {
+    TargetRig rig;
+    MonotonicMs now_ms = 1000;
+    rig.storage.fill(0, 0xEE);
+    rig.storage.fill(1, 0xEE);
+    rig.boot(now_ms);
+    CHECK(rig.journal->quarantined());
+    ByteBuffer<kConfigPermitObjectMax> update{};
+    build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::AuthorityGeneration,
+                   0, 0, 3, 9, rig.config.authority_generation, update);
+    ConfigVerdict verdict{};
+    CHECK(rig.journal->submit_recovery(update.view(), now_ms + 10, verdict).code ==
+          StatusCode::InvalidState);
+    CHECK(verdict.reason == ConfigReason::RecoveryRequired);
+    CHECK(rig.journal->authority_generation() == 1);
+  }
+
+  // On a proven journal, a non-advancing transition is stale/replay — and
+  // a StoreRecover on a proven journal is out of place.
+  {
+    TargetRig rig;
+    MonotonicMs now_ms = 1000;
+    CHECK_OK(rig.journal->initialize(now_ms));
+    ConfigVerdict verdict{};
+    ByteBuffer<kConfigPermitObjectMax> update{};
+    build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::AuthorityGeneration,
+                   0, 0, 1, 10, rig.config.authority_generation, update);
+    CHECK(rig.journal->submit_recovery(update.view(), now_ms + 10, verdict).code ==
+          StatusCode::InvalidArgument);
+    build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                   endpoint::kRcr1AttestReprovision, 500, 0, 11,
+                   rig.config.authority_generation, update);
+    CHECK(rig.journal->submit_recovery(update.view(), now_ms + 20, verdict).code ==
+          StatusCode::InvalidState);
+    CHECK(verdict.reason == ConfigReason::Unsupported);
+    CHECK(rig.journal->authority_generation() == 1);
+  }
+}
+
+// R07: the kind-4 reassembly lane stays open impaired; kind-3 stays shut.
+void test_r07_recovery_lane_reassembly() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms);
+  CHECK(rig.journal->quarantined());
+
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
+                 endpoint::kRcr1AttestReprovision, 500, 0, 12,
+                 rig.config.authority_generation, object);
+  CHECK_OK(send_recovery_chunks(rig, object, 32, now_ms));
+  CHECK(!rig.journal->quarantined());
+
+  // Kind-4 manifest discipline on a fresh impaired journal: wrong-kind and
+  // oversized manifests reject; digest-mismatched content fails integrity.
+  TargetRig rig2;
+  MonotonicMs t = 5000;
+  rig2.storage.fill(0, 0xEE);
+  rig2.storage.fill(1, 0xEE);
+  rig2.boot(t);
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;  // wrong lane kind
+  manifest.total_len = 64;
+  manifest.object_hash[0] = 1;
+  CHECK(rig2.journal->note_recovery_manifest(manifest, t).code ==
+        StatusCode::ProtocolError);
+  manifest.kind = autonomy::ControlObjectKind::ConfigRecovery;
+  manifest.total_len = kConfigPermitObjectMax + 1;
+  CHECK(rig2.journal->note_recovery_manifest(manifest, t).code ==
+        StatusCode::ProtocolError);
+
+  // Honest manifest + corrupted bytes: the digest check rejects before
+  // submit_recovery ever sees the object.
+  manifest.total_len = static_cast<std::uint16_t>(object.size);
+  sha256(object.view(), manifest.object_hash);
+  CHECK_OK(rig2.journal->note_recovery_manifest(manifest, t));
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.object_hash = manifest.object_hash;
+  chunk.offset = 0;
+  chunk.data_size = 64;
+  std::memcpy(chunk.data.data(), object.bytes.data(), 64);
+  chunk.data[10] ^= 0xFFU;  // corrupted under an honest manifest
+  t += 10;
+  CHECK_OK(rig2.journal->note_recovery_chunk(chunk, t));
+  chunk.offset = 64;
+  chunk.data_size = static_cast<std::uint16_t>(object.size - 64);
+  std::memcpy(chunk.data.data(), object.bytes.data() + 64, chunk.data_size);
+  t += 10;
+  CHECK(rig2.journal->note_recovery_chunk(chunk, t).code ==
+        StatusCode::IntegrityError);
+  CHECK(rig2.journal->quarantined());
+
+  // The kind-3 lane stays shut through all of it (quarantine -> InvalidState).
+  CHECK(rig2.journal->note_object_manifest(manifest, t).code ==
+        StatusCode::InvalidState);
+}
+
+// R08: the issuer mints a recovery object end-to-end — commit order,
+// kind-tagged outbox, signed_object lane selection.
+void test_r08_issuer_issue_recovery() {
+  IssuerRig rig;
+  rig.boot();
+  CHECK_OK(rig.issuer.initialize());
+  const MonotonicMs now_ms = 1000;
+
+  IssuedRecovery out{};
+  CHECK_OK(rig.issuer.issue_recovery(
+      kTarget, 1, 1, endpoint::ConfigRecoveryClass::StoreRecover,
+      endpoint::kRcr1AttestReprovision, 500, 0, out));
+  CHECK(out.issued);
+  CHECK(rig.ledger.state().applied_sequence == 1);
+  // The outbox entry is kind-tagged RCR1 — signed_object reports the lane.
+  std::uint8_t kind = 0xFF;
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  CHECK_OK(rig.issuer.signed_object(out.slot, kind, object));
+  CHECK(kind == kOutboxKindRecovery);
+  CHECK(object.size == kRecoveryAadSize + endpoint::kRcr1Size + kPermitTagSize);
+
+  // The signed object delivers recovery to a quarantined target journal.
+  TargetRig target;
+  target.storage.fill(0, 0xEE);
+  target.storage.fill(1, 0xEE);
+  target.boot(now_ms + 10);
+  ConfigVerdict verdict{};
+  CHECK_OK(target.journal->submit_recovery(object.view(), now_ms + 20, verdict));
+  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(!target.journal->quarantined());
+
+  // The trust-update class mints through the same path.
+  IssuedRecovery trust{};
+  CHECK_OK(rig.issuer.issue_recovery(
+      kTarget, 1, 1, endpoint::ConfigRecoveryClass::AuthorityGeneration,
+      0, 0, 3, trust));
+  CHECK(trust.issued);
+  CHECK(rig.ledger.state().applied_sequence == 2);
+  endpoint::ConfigRecoveryCommand decoded{};
+  ByteBuffer<kConfigPermitObjectMax> trust_object{};
+  CHECK_OK(rig.issuer.signed_object(trust.slot, kind, trust_object));
+  const ByteView canonical{trust_object.bytes.data() + kRecoveryAadSize,
+                           endpoint::kRcr1Size};
+  CHECK_OK(endpoint::config_recovery_decode(canonical, decoded));
+  CHECK(decoded.recovery_class == endpoint::ConfigRecoveryClass::AuthorityGeneration);
+  CHECK(decoded.new_authority_generation == 3);
+  CHECK(decoded.authority_sequence == 2);
+
+  // A recovery entry survives an issuer reboot: resume_pending re-decodes
+  // the RCR1 kind and the signed object retransmits byte-identically.
+  IssuerRig rig2;
+  rig2.boot();
+  CHECK_OK(rig2.issuer.initialize());
+  rig2.signer.fail_next = true;
+  IssuedRecovery pending{};
+  CHECK(rig2.issuer.issue_recovery(
+                kTarget, 1, 1, endpoint::ConfigRecoveryClass::StoreRecover,
+                endpoint::kRcr1AttestReprovision, 500, 0, pending)
+            .code == StatusCode::InternalError);
+  ConfigIssuer resumed(rig2.config, rig2.ledger, rig2.outbox, rig2.signer,
+                       rig2.entropy);
+  CHECK_OK(resumed.initialize());
+  CHECK(resumed.signed_count() == 1);
+  ByteBuffer<kConfigPermitObjectMax> resumed_object{};
+  CHECK_OK(resumed.signed_object(pending.slot, kind, resumed_object));
+  CHECK(kind == kOutboxKindRecovery);
+  CHECK(resumed_object.size > 0);
+}
+
 }  // namespace
 
 int main() {
@@ -2498,6 +3071,15 @@ int main() {
   test_impaired_outbox_slot();
   test_issuer_remint_sequence();
   test_outbox_tombstone_size();
+  // Issue #51: dedicated kind-4 recovery lane + trust update.
+  test_r01_quarantine_store_recovery();
+  test_r02_uncertain_store_recovery();
+  test_r03_recovery_rejections();
+  test_r04_recovery_replay_floor();
+  test_r05_trust_update();
+  test_r06_trust_update_admission();
+  test_r07_recovery_lane_reassembly();
+  test_r08_issuer_issue_recovery();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

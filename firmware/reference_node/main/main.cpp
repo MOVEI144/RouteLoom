@@ -1021,10 +1021,12 @@ extern "C" void app_main(void) {
     // the wire outcome is honest and the node keeps routing.
     //
     // Recovery is deliberately NOT implicit: §6.3 requires authorized
-    // recovery evidence from the authority or redeployment. This profile
-    // wires no recovery verb — ConfigJournal::recover() stays an explicit
-    // operator/host call (exercised by tests), so the field path is
-    // re-provisioning/redeploy, never an unattended self-reset.
+    // recovery evidence from the authority. The impaired journal still
+    // answers kind-4 recovery objects through config_target's dedicated
+    // lane (signed RCR1 — store-recovery or countersigned trust update),
+    // so an authorized routeloomctl `config-recover`/`config-trust-update`
+    // reaches it over the mesh; the imperative ConfigJournal::recover()
+    // stays an explicit operator/host call (exercised by tests).
     ESP_LOGE(kTag,
              "config journal init failed: %s — running degraded "
              "(routing continues, config intake refuses)",

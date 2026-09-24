@@ -293,6 +293,22 @@ Status config_permit_aad(const NetworkId network, const NodeId target,
   return Status::success();
 }
 
+Status config_recovery_aad(const NetworkId network, const NodeId target,
+                           const std::uint16_t config_namespace,
+                           ByteBuffer<kConfigRecoveryAadSize>& out) noexcept {
+  out.clear();
+  ByteWriter writer(out.writable());
+  Status status = writer.write_bytes(
+      ByteView{reinterpret_cast<const std::uint8_t*>(kConfigRecoveryDomain),
+               sizeof(kConfigRecoveryDomain)});
+  if (status) status = writer.write_u64(network);
+  if (status) status = writer.write_u64(target);
+  if (status) status = writer.write_u16(config_namespace);
+  if (!status) return status;
+  out.size = writer.size();
+  return Status::success();
+}
+
 Status config_sdk_field_validate(const ConfigField& field) noexcept {
   switch (field.field_id) {
     case 1:  // diagnostics_level u8 0..2 — no payload/key-dump level exists
@@ -607,7 +623,10 @@ Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason 
   record.config_namespace = config_.config_namespace;
   record.schema = config_.schema;
   record.issuer = txn.command.authority;
-  record.issuer_generation = txn.command.authority_generation;
+  // The pin in force at commit — a countersigned update between a
+  // command's verification and its record must not let the record claim
+  // the retired generation (the durable pin is what boot adopts).
+  record.issuer_generation = authority_generation_;
   record.authority_sequence = txn.command.authority_sequence;
   record.operation_id = txn.command.operation_id;
   record.command_digest = txn.command_digest;
@@ -630,6 +649,12 @@ Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason 
 Status ConfigJournal::adopt_record(const JournalRecord& record) noexcept {
   durable_ = record;
   store_generation_ = record.store_generation;
+  // The record's issuer_generation is the authority pin in force when it
+  // committed (persist_phase/recover write authority_generation_). Zero
+  // marks a record with no generation evidence — keep the configured pin.
+  if (record.issuer_generation != 0) {
+    authority_generation_ = record.issuer_generation;
+  }
   decision_revision_ = record.decision_revision;
   active_revision_ = record.active_revision;
   phase_ = record.phase;
@@ -702,6 +727,10 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
       !endpoint::config_namespace_valid(config_.config_namespace)) {
     return Status::error(StatusCode::InvalidArgument, "config journal identity invalid");
   }
+  // The generation pin starts from configuration; an adopted durable
+  // record below may advance it to the generation that record committed
+  // under (issuer_generation carries the pin — see persist_phase).
+  authority_generation_ = config_.authority_generation;
   auto& parsed = parsed_;
   std::array<SlotContent, kConfigJournalSlots> content{};
   std::array<bool, kConfigJournalSlots> unreadable{};
@@ -1157,6 +1186,318 @@ Status ConfigJournal::reassemble_complete(const MonotonicMs now_ms) noexcept {
   return status;
 }
 
+Status ConfigJournal::note_recovery_manifest(
+    const autonomy::ControlObjectPayload& manifest, const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
+  if (!initialized_) {
+    return Status::error(StatusCode::InvalidState, "config journal not initialized");
+  }
+  // Deliberately NOT gated on quarantined_/uncertain_: this is the lane an
+  // impaired journal still serves — the signed command itself decides
+  // admissibility at submit time, transport acceptance grants nothing.
+  if (manifest.kind != autonomy::ControlObjectKind::ConfigRecovery ||
+      manifest.total_len == 0 || manifest.total_len > kConfigPermitObjectMax ||
+      all_zero(ByteView{manifest.object_hash.data(), manifest.object_hash.size()})) {
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::ProtocolError, "config recovery manifest invalid");
+  }
+  if (recovery_reassembly_.active) {
+    if (recovery_reassembly_.manifest.object_hash == manifest.object_hash) {
+      if (recovery_reassembly_.manifest.total_len == manifest.total_len) {
+        return Status::success();  // same manifest re-delivered: idempotent
+      }
+      ++stats_.reassembly_rejects;
+      return Status::error(StatusCode::Conflict, "config recovery manifest conflict");
+    }
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::Busy, "config recovery reassembly busy");
+  }
+  recovery_reassembly_.active = true;
+  recovery_reassembly_.manifest = manifest;
+  recovery_reassembly_.received.fill(0);
+  recovery_reassembly_.received_count = 0;
+  recovery_reassembly_.started_ms = now_ms;
+  return Status::success();
+}
+
+Status ConfigJournal::note_recovery_chunk(const autonomy::ObjectChunkPayload& chunk,
+                                          const MonotonicMs now_ms) noexcept {
+  last_now_ms_ = now_ms;
+  if (!recovery_reassembly_.active) {
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::InvalidState,
+                        "config recovery chunk without manifest");
+  }
+  if (now_ms - recovery_reassembly_.started_ms > kConfigReassemblyTimeoutMs) {
+    recovery_reassembly_.active = false;
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::Expired, "config recovery reassembly timed out");
+  }
+  if (chunk.object_hash != recovery_reassembly_.manifest.object_hash ||
+      chunk.data_size == 0 ||
+      static_cast<std::uint32_t>(chunk.offset) + chunk.data_size >
+          recovery_reassembly_.manifest.total_len) {
+    recovery_reassembly_.active = false;  // conflicting bytes poison the assembly
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::ProtocolError, "config recovery chunk out of bounds");
+  }
+  for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
+    const std::uint16_t at = static_cast<std::uint16_t>(chunk.offset + i);
+    const std::uint8_t mask = static_cast<std::uint8_t>(1U << (at & 7U));
+    if ((recovery_reassembly_.received[at >> 3U] & mask) != 0) {
+      if (recovery_reassembly_.buffer[at] != chunk.data[i]) {
+        recovery_reassembly_.active = false;
+        ++stats_.reassembly_rejects;
+        return Status::error(StatusCode::Conflict,
+                            "config recovery chunk content conflict");
+      }
+      continue;
+    }
+    recovery_reassembly_.received[at >> 3U] = static_cast<std::uint8_t>(
+        recovery_reassembly_.received[at >> 3U] | mask);
+    recovery_reassembly_.buffer[at] = chunk.data[i];
+    ++recovery_reassembly_.received_count;
+  }
+  if (recovery_reassembly_.received_count < recovery_reassembly_.manifest.total_len) {
+    return Status::success();  // still assembling; ACK Ok = assembly only
+  }
+  return recovery_reassemble_complete(now_ms);
+}
+
+Status ConfigJournal::recovery_reassemble_complete(const MonotonicMs now_ms) noexcept {
+  const std::uint16_t total = recovery_reassembly_.manifest.total_len;
+  Digest256 digest{};
+  sha256(ByteView{recovery_reassembly_.buffer.data(), total}, digest);
+  if (!constant_time_equal(
+          ByteView{digest.data(), digest.size()},
+          ByteView{recovery_reassembly_.manifest.object_hash.data(),
+                   recovery_reassembly_.manifest.object_hash.size()})) {
+    recovery_reassembly_.active = false;
+    ++stats_.reassembly_rejects;
+    return Status::error(StatusCode::IntegrityError,
+                        "config recovery object digest mismatch");
+  }
+  const ByteView object{recovery_reassembly_.buffer.data(), total};
+  recovery_reassembly_.active = false;
+  ConfigVerdict verdict{};
+  // Assembly is done; whether the recovery command applies is the
+  // journal's decision — the ObjectAck Ok meant transport only.
+  const Status status = submit_recovery(object, now_ms, verdict);
+  static_cast<void>(verdict);
+  return status;
+}
+
+Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs now_ms,
+                                      ConfigVerdict& verdict) noexcept {
+  verdict = ConfigVerdict{};
+  last_now_ms_ = now_ms;
+  if (!initialized_) {
+    return Status::error(StatusCode::InvalidState, "config journal not initialized");
+  }
+  if (object.size == 0 || object.size > kConfigPermitObjectMax || object.data == nullptr) {
+    fill_verdict(verdict, phase_, ConfigReason::InvalidPatch);
+    return Status::error(StatusCode::InvalidArgument, "config recovery size invalid");
+  }
+
+  ConfigPermitContext context{};
+  context.network = config_.network;
+  context.target = config_.target;
+  context.config_namespace = config_.config_namespace;
+  context.authorized_issuer = config_.authorized_issuer;
+  context.authority_generation = authority_generation_;
+  endpoint::EncodedRecoveryCommand& canonical = recovery_canonical_;
+  bool verified = false;
+  // The shared expensive-verify intake gate — same device-level bound as
+  // the permit path; a recovery storm cannot monopolize the Owner either.
+  if (verifier_.verify_is_expensive() &&
+      !rate_limiter_.consume_expensive_verify(now_ms)) {
+    fill_verdict(verdict, phase_, ConfigReason::Capacity);
+    ++stats_.verify_intake_refusals;
+    return Status::error(StatusCode::Busy, "recovery verify intake budget");
+  }
+  Status status = verifier_.verify_recovery(context, object, canonical, verified);
+  if (!status) {
+    fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
+    ++stats_.permits_denied;
+    return status;
+  }
+  if (!verified) {
+    fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
+    ++stats_.permits_denied;
+    return Status::error(StatusCode::AuthenticationFailed,
+                        "config recovery unverified");
+  }
+  ++stats_.permits_verified;
+
+  endpoint::ConfigRecoveryCommand& command = recovery_command_;
+  status = endpoint::config_recovery_decode(canonical.view(), command);
+  if (!status) {
+    fill_verdict(verdict, phase_, ConfigReason::InvalidPatch);
+    return status;
+  }
+  Digest256 digest{};
+  sha256(canonical.view(), digest);
+
+  // Identity + authorization scope (04 §4.3): the journal checks these on
+  // its own — the signature only proves the issuer signed the command. The
+  // command must also name the generation the journal currently accepts:
+  // a recovery signed under any other generation is not ours to act on.
+  if (command.network != config_.network || command.target != config_.target ||
+      command.config_namespace != config_.config_namespace ||
+      command.schema != config_.schema ||
+      command.authority != config_.authorized_issuer ||
+      command.authority_generation != authority_generation_) {
+    fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
+    ++stats_.permits_denied;
+    return Status::error(StatusCode::AuthorizationFailed,
+                        "config recovery scope denied");
+  }
+
+  // Idempotency: same operation id + same canonical digest returns the
+  // recorded verdict; same id with different content is CONFLICT.
+  const ResultRecord* prior = nullptr;
+  if (find_result(command.operation_id, prior)) {
+    if (prior->command_digest == digest) {
+      fill_verdict(verdict, prior->phase, prior->reason);
+      return Status::success();  // replayed delivery of an applied command
+    }
+    fill_verdict(verdict, prior->phase, prior->reason);
+    ++stats_.conflicts;
+    return Status::error(StatusCode::Conflict, "config recovery opid conflict");
+  }
+  // Result-table capacity — the same bound permit intake honors: a full
+  // table refuses rather than evicting a verdict a status query still owes.
+  bool any_free = false;
+  for (const ResultRecord& record : results_) {
+    if (!record.used || now_ms - record.stored_ms >= kConfigResultHoldMs) {
+      any_free = true;
+      break;
+    }
+  }
+  if (!any_free) {
+    fill_verdict(verdict, phase_, ConfigReason::Capacity);
+    return Status::error(StatusCode::NoCapacity, "config result table full");
+  }
+
+  if (command.recovery_class == endpoint::ConfigRecoveryClass::StoreRecover) {
+    // The store-recovery ceremony exists only for an impaired journal —
+    // on a proven store it could mint a generation nobody needed.
+    if (!uncertain_ && !quarantined_) {
+      fill_verdict(verdict, phase_, ConfigReason::Unsupported);
+      return Status::error(StatusCode::InvalidState,
+                          "config store recovery needs an impaired journal");
+    }
+    status = recover(command.new_store_generation, now_ms,
+                     command.attest == endpoint::kRcr1AttestReprovision);
+    if (!status) {
+      fill_verdict(verdict, phase_, ConfigReason::RecoveryRequired);
+      return status;
+    }
+    const Status recorded =
+        record_recovery_result(command, digest, phase_, ConfigReason::Ok, now_ms);
+    fill_verdict(verdict, phase_, ConfigReason::Ok);
+    return recorded.ok() ? Status::success() : recorded;
+  }
+
+  // ConfigRecoveryClass::AuthorityGeneration — the countersigned trust
+  // update (03-signing). Only a proven store may take it: an impaired
+  // journal re-proves its state through StoreRecover first, so the new
+  // pin never lands on unverifiable garbage.
+  if (uncertain_ || quarantined_) {
+    fill_verdict(verdict, phase_, ConfigReason::RecoveryRequired);
+    return Status::error(StatusCode::InvalidState,
+                        "config trust update needs a proven store");
+  }
+  // A config operation decided under the current generation finishes
+  // under it — the pin moves only between operations, never mid-flight.
+  if (txn_.active || boot_.restore_pending) {
+    fill_verdict(verdict, phase_, ConfigReason::InProgress);
+    return Status::error(StatusCode::Busy, "config transaction busy");
+  }
+  // Generations only advance: an equal-or-lower install is a stale or
+  // replayed transition, never a new one.
+  if (command.new_authority_generation <= authority_generation_) {
+    fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
+    ++stats_.permits_denied;
+    return Status::error(StatusCode::InvalidArgument,
+                        "config trust update must advance the generation");
+  }
+  // The transition is an accepted authority decision — same budget rule.
+  if (!rate_limiter_.consume(now_ms)) {
+    fill_verdict(verdict, phase_, ConfigReason::Capacity);
+    ++stats_.rate_refusals;
+    return Status::error(StatusCode::Busy, "config acceptance budget exhausted");
+  }
+  status = persist_generation_update(command, digest, object);
+  if (!status) {
+    rate_limiter_.refund();
+    fill_verdict(verdict, phase_, ConfigReason::StorageFailure);
+    ++stats_.storage_failures;
+    return status;
+  }
+  authority_generation_ = command.new_authority_generation;
+  const Status recorded =
+      record_recovery_result(command, digest, phase_, ConfigReason::Ok, now_ms);
+  fill_verdict(verdict, phase_, ConfigReason::Ok);
+  return recorded.ok() ? Status::success() : recorded;
+}
+
+Status ConfigJournal::persist_generation_update(
+    const endpoint::ConfigRecoveryCommand& command, const Digest256& digest,
+    const ByteView object) noexcept {
+  // Clone the durable record under a fresh store generation: phase,
+  // revisions and snapshots carry over unchanged — the update names only
+  // the new pin and the command that authorized it.
+  JournalRecord& record = record_scratch_;
+  record = durable_;
+  record.store_generation = store_generation_ + 1;
+  record.reason = ConfigReason::Ok;
+  record.issuer = command.authority;
+  record.issuer_generation = command.new_authority_generation;
+  record.authority_sequence = command.authority_sequence;
+  record.operation_id = command.operation_id;
+  record.command_digest = digest;
+  record.permit.size = object.size;
+  std::memcpy(record.permit.bytes.data(), object.data, object.size);
+  const Status status = store_record(record);
+  if (!status) return status;
+  ++store_generation_;
+  durable_ = record;
+  return Status::success();
+}
+
+Status ConfigJournal::record_recovery_result(
+    const endpoint::ConfigRecoveryCommand& command, const Digest256& digest,
+    const endpoint::ConfigPhase phase, const endpoint::ConfigReason reason,
+    const MonotonicMs now_ms) noexcept {
+  ResultRecord* slot = nullptr;
+  ResultRecord* expired_slot = nullptr;
+  for (ResultRecord& candidate : results_) {
+    if (!candidate.used) {
+      if (slot == nullptr) slot = &candidate;
+      continue;
+    }
+    if (now_ms - candidate.stored_ms >= kConfigResultHoldMs && expired_slot == nullptr) {
+      expired_slot = &candidate;
+    }
+  }
+  if (slot == nullptr) slot = expired_slot;
+  if (slot == nullptr) {
+    return Status::error(StatusCode::NoCapacity, "config result table full");
+  }
+  *slot = ResultRecord{};
+  slot->used = true;
+  slot->operation_id = command.operation_id;
+  slot->command_digest = digest;
+  slot->phase = phase;
+  slot->reason = reason;
+  slot->decision_revision = decision_revision_;
+  slot->active_revision = active_revision_;
+  slot->active_hash = active_hash_;
+  slot->stored_ms = now_ms;
+  return Status::success();
+}
+
 Status ConfigJournal::validate_command(const endpoint::ConfigCommand& command,
                                        const Digest256& digest, const MonotonicMs now_ms,
                                        const bool clock_known,
@@ -1168,7 +1509,7 @@ Status ConfigJournal::validate_command(const endpoint::ConfigCommand& command,
       command.config_namespace != config_.config_namespace ||
       command.schema != config_.schema ||
       command.authority != config_.authorized_issuer ||
-      command.authority_generation != config_.authority_generation) {
+      command.authority_generation != authority_generation_) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::AuthorityDenied);
     ++stats_.permits_denied;
     return Status::error(StatusCode::AuthorizationFailed, "config scope denied");
@@ -1242,7 +1583,7 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   context.target = config_.target;
   context.config_namespace = config_.config_namespace;
   context.authorized_issuer = config_.authorized_issuer;
-  context.authority_generation = config_.authority_generation;
+  context.authority_generation = authority_generation_;
   endpoint::EncodedConfigCommand& canonical = submit_txn_.canonical;
   bool verified = false;
   // Pre-verification intake limiter (03-signing §3.3): one expensive
@@ -1542,6 +1883,11 @@ void ConfigJournal::poll(const MonotonicMs now_ms) noexcept {
     reassembly_.active = false;
     ++stats_.reassembly_rejects;
   }
+  if (recovery_reassembly_.active &&
+      now_ms - recovery_reassembly_.started_ms > kConfigReassemblyTimeoutMs) {
+    recovery_reassembly_.active = false;
+    ++stats_.reassembly_rejects;
+  }
   // Deferred terminal persist retry (storage fault at finish_transaction).
   if (txn_.active && txn_.pending_persist) {
     const ConfigPhase phase = txn_.pending_phase;
@@ -1766,6 +2112,10 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   record.target = config_.target;
   record.config_namespace = config_.config_namespace;
   record.schema = config_.schema;
+  // The recovered record carries the pin in force — recovery never changes
+  // the accepted authority generation (that transition is the
+  // AuthorityGeneration countersign's own durable record).
+  record.issuer_generation = authority_generation_;
   // Write BOTH slots with the same generation+content: the next boot then
   // sees two verifiable identical records rather than a valid sibling of
   // unverifiable garbage — storage-uncertain would otherwise persist
@@ -1783,6 +2133,7 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   txn_ = Transaction{};
   boot_ = Boot{};
   reassembly_.active = false;
+  recovery_reassembly_.active = false;
   const Status adopted = adopt_record(record);
   if (!adopted) return adopted;
   // The adopted survivor's provider state must be re-issued for THIS boot:
@@ -1992,10 +2343,11 @@ Status ConfigIssuer::propose(const NodeId target, const std::uint16_t config_nam
   // Persist command + outbox BEFORE hashing/committing (recovery order).
   std::uint8_t slot = kConfigIssuerOutboxSlots;
   for (std::uint8_t candidate = 0; candidate < kConfigIssuerOutboxSlots; ++candidate) {
-    std::uint8_t state = 0;
+    std::uint8_t kind = 0, state = 0;
     endpoint::EncodedConfigCommand existing{};
     ByteBuffer<kConfigPermitObjectMax> existing_permit{};
-    const Status loaded = load_entry(candidate, state, existing, existing_permit);
+    const Status loaded =
+        load_entry(candidate, kind, state, existing, existing_permit);
     // A read failure is not "free": the slot's contents are unknown and a
     // write may fault too — skip it and try the next slot.
     if (loaded.ok() && state == 0) {
@@ -2006,7 +2358,8 @@ Status ConfigIssuer::propose(const NodeId target, const std::uint16_t config_nam
   if (slot >= kConfigIssuerOutboxSlots) {
     return Status::error(StatusCode::NoCapacity, "config issuer outbox full");
   }
-  status = persist_entry(slot, kOutboxPending, out.canonical.view(), ByteView{});
+  status = persist_entry(slot, kOutboxKindCommand, kOutboxPending,
+                         out.canonical.view(), ByteView{});
   if (!status) return status;
   ++pending_;
 
@@ -2073,19 +2426,18 @@ Status ConfigIssuer::commit_and_sign(
       bool pending_sibling = false;
       for (std::uint8_t other = 0; other < kConfigIssuerOutboxSlots; ++other) {
         if (other == slot) continue;
-        std::uint8_t other_state = 0;
+        std::uint8_t other_kind = 0, other_state = 0;
         endpoint::EncodedConfigCommand other_canonical{};
         ByteBuffer<kConfigPermitObjectMax> other_permit{};
         const Status loaded =
-            load_entry(other, other_state, other_canonical, other_permit);
+            load_entry(other, other_kind, other_state, other_canonical, other_permit);
         if (!loaded) return loaded;  // cannot prove uniqueness -> stay pending
         if (other_state != kOutboxPending && other_state != kOutboxSigned) {
           continue;
         }
-        endpoint::ConfigCommand sibling{};
-        if (!endpoint::config_command_decode(other_canonical.view(), sibling)
-                 .ok() ||
-            sibling.authority_sequence != command.authority_sequence) {
+        std::uint64_t sibling_sequence = 0;
+        if (!entry_sequence(other_canonical, other_kind, sibling_sequence) ||
+            sibling_sequence != command.authority_sequence) {
           continue;
         }
         if (other_state == kOutboxSigned) {
@@ -2154,7 +2506,197 @@ Status ConfigIssuer::commit_and_sign(
   // Commit + readback verified -> only now sign the permit.
   const Status status = signer_.sign(command, canonical.view(), permit);
   if (!status) return status;
-  return persist_entry(slot, kOutboxSigned, canonical.view(), permit.view());
+  return persist_entry(slot, kOutboxKindCommand, kOutboxSigned,
+                       canonical.view(), permit.view());
+}
+
+Status ConfigIssuer::commit_and_sign_recovery(
+    const std::uint8_t slot, endpoint::EncodedConfigCommand& canonical,
+    endpoint::ConfigRecoveryCommand& command,
+    ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
+  // Identical commit order to commit_and_sign: real SHA-256 hash, ledger
+  // commit under the same sequence-disambiguation rules, then sign — an
+  // RCR1 outbox entry must prove the same "sign only what the ledger
+  // proves" invariant before any recovery object exists.
+  Digest256 operation_hash{};
+  sha256(canonical.view(), operation_hash);
+
+  const std::uint64_t applied = ledger_.state().applied_sequence;
+  bool needs_commit = applied < command.authority_sequence;
+  if (applied >= command.authority_sequence) {
+    if (applied == command.authority_sequence &&
+        ledger_.last_operation_hash() == operation_hash) {
+      // Commit landed before the power loss — continue to signing.
+    } else {
+      if (applied == command.authority_sequence) {
+        const Status cleared = clear_entry(slot);
+        static_cast<void>(cleared);
+        return Status::error(StatusCode::Conflict, "config recovery superseded");
+      }
+      bool signed_sibling = false;
+      bool pending_sibling = false;
+      for (std::uint8_t other = 0; other < kConfigIssuerOutboxSlots; ++other) {
+        if (other == slot) continue;
+        std::uint8_t other_kind = 0, other_state = 0;
+        endpoint::EncodedConfigCommand other_canonical{};
+        ByteBuffer<kConfigPermitObjectMax> other_permit{};
+        const Status loaded =
+            load_entry(other, other_kind, other_state, other_canonical, other_permit);
+        if (!loaded) return loaded;
+        if (other_state != kOutboxPending && other_state != kOutboxSigned) {
+          continue;
+        }
+        std::uint64_t sibling_sequence = 0;
+        if (!entry_sequence(other_canonical, other_kind, sibling_sequence) ||
+            sibling_sequence != command.authority_sequence) {
+          continue;
+        }
+        if (other_state == kOutboxSigned) {
+          signed_sibling = true;
+        } else {
+          pending_sibling = true;
+        }
+      }
+      if (signed_sibling) {
+        const Status cleared = clear_entry(slot);
+        static_cast<void>(cleared);
+        return Status::error(StatusCode::Conflict, "config recovery superseded");
+      }
+      if (pending_sibling) {
+        return Status::error(StatusCode::InvalidState,
+                            "config sequence ownership ambiguous");
+      }
+      // Unique holder of a consumed but unproven sequence: re-mint the
+      // same command under a fresh sequence — same rule as commit_and_sign.
+      command.authority_generation = ledger_.state().generation;
+      command.authority_sequence = ledger_.state().applied_sequence + 1U;
+      endpoint::EncodedRecoveryCommand encoded{};
+      const Status re_encoded = endpoint::config_recovery_encode(command, encoded);
+      if (!re_encoded) return re_encoded;
+      canonical.clear();
+      ByteWriter writer(canonical.writable());
+      Status status = writer.write_bytes(encoded.view());
+      if (!status) return status;
+      canonical.size = writer.size();
+      sha256(canonical.view(), operation_hash);
+      needs_commit = true;
+    }
+  }
+  if (needs_commit) {
+    AuthorityOperation operation{};
+    Status status =
+        ledger_.build_operation(AuthorityOperationKind::RemoteConfig, operation_hash,
+                                operation);
+    if (!status) return status;
+    if (operation.sequence != command.authority_sequence) {
+      return Status::error(StatusCode::InvalidState, "config sequence gap");
+    }
+    Sha256 chain{};
+    chain.update(ByteView{reinterpret_cast<const std::uint8_t*>(kConfigLedgerDomain),
+                          sizeof(kConfigLedgerDomain)});
+    chain.update(ByteView{ledger_.state().state_hash.data(), 32});
+    chain.update(canonical.view());
+    Digest256 resulting{};
+    chain.finish(resulting);
+    status = ledger_.apply_remote_config(operation, resulting, signer_.ready());
+    if (!status) return status;
+  }
+
+  // Ledger-verified -> only now mint the signed recovery object.
+  const Status status = signer_.sign_recovery(command, canonical.view(), permit);
+  if (!status) return status;
+  return persist_entry(slot, kOutboxKindRecovery, kOutboxSigned,
+                       canonical.view(), permit.view());
+}
+
+Status ConfigIssuer::issue_recovery(
+    const NodeId target, const std::uint16_t config_namespace,
+    const std::uint16_t schema,
+    const endpoint::ConfigRecoveryClass recovery_class, const std::uint8_t attest,
+    const std::uint32_t new_store_generation,
+    const std::uint32_t new_authority_generation, IssuedRecovery& out) noexcept {
+  out = IssuedRecovery{};
+  if (!initialized_) {
+    return Status::error(StatusCode::InvalidState, "config issuer not initialized");
+  }
+  // Identity + class-shape validation — the codec re-checks at encode, the
+  // issuer refuses before it has allocated any ledger state.
+  if (target == kInvalidNodeId || target == kBroadcastNodeId ||
+      !endpoint::config_namespace_valid(config_namespace) || schema == 0 ||
+      (recovery_class != endpoint::ConfigRecoveryClass::StoreRecover &&
+       recovery_class != endpoint::ConfigRecoveryClass::AuthorityGeneration)) {
+    return Status::error(StatusCode::InvalidArgument, "config recovery identity invalid");
+  }
+
+  std::array<std::uint8_t, 16> operation_id{};
+  bool filled = false;
+  for (int attempt = 0; attempt < 4 && !filled; ++attempt) {
+    const Status filled_status =
+        entropy_.fill(MutableByteView{operation_id.data(), operation_id.size()});
+    if (!filled_status) return filled_status;
+    filled = !all_zero(ByteView{operation_id.data(), operation_id.size()});
+  }
+  if (!filled) {
+    return Status::error(StatusCode::InternalError, "config opid entropy failed");
+  }
+
+  endpoint::ConfigRecoveryCommand command{};
+  command.recovery_class = recovery_class;
+  command.attest = attest;
+  command.config_namespace = config_namespace;
+  command.schema = schema;
+  command.network = config_.network;
+  command.target = target;
+  command.authority = config_.authority;
+  command.authority_generation = ledger_.state().generation;
+  command.authority_sequence = ledger_.state().applied_sequence + 1;
+  command.operation_id = operation_id;
+  command.new_store_generation = new_store_generation;
+  command.new_authority_generation = new_authority_generation;
+  endpoint::EncodedRecoveryCommand encoded{};
+  const Status encoded_ok = endpoint::config_recovery_encode(command, encoded);
+  if (!encoded_ok) return encoded_ok;
+  out.canonical = encoded;
+
+  // Same outbox ordering as propose: persist pending BEFORE committing.
+  std::uint8_t slot = kConfigIssuerOutboxSlots;
+  for (std::uint8_t candidate = 0; candidate < kConfigIssuerOutboxSlots; ++candidate) {
+    std::uint8_t kind = 0, state = 0;
+    endpoint::EncodedConfigCommand existing{};
+    ByteBuffer<kConfigPermitObjectMax> existing_permit{};
+    const Status loaded =
+        load_entry(candidate, kind, state, existing, existing_permit);
+    if (loaded.ok() && state == 0) {
+      slot = candidate;
+      break;
+    }
+  }
+  if (slot >= kConfigIssuerOutboxSlots) {
+    return Status::error(StatusCode::NoCapacity, "config issuer outbox full");
+  }
+  // The outbox canonical carrier is the EncodedConfigCommand-sized buffer;
+  // an RCR1 body simply occupies its first 76 bytes.
+  endpoint::EncodedConfigCommand canonical{};
+  ByteWriter writer(canonical.writable());
+  Status status = writer.write_bytes(encoded.view());
+  if (!status) return status;
+  canonical.size = writer.size();
+  status = persist_entry(slot, kOutboxKindRecovery, kOutboxPending,
+                         canonical.view(), ByteView{});
+  if (!status) return status;
+  ++pending_;
+
+  endpoint::ConfigRecoveryCommand decoded = command;
+  status = commit_and_sign_recovery(slot, canonical, decoded, out.permit);
+  if (!status) {
+    if (status.code == StatusCode::Conflict) --pending_;  // superseded entry cleared
+    return status;
+  }
+  --pending_;
+  ++signed_;
+  out.issued = true;
+  out.slot = slot;
+  return Status::success();
 }
 
 Status ConfigIssuer::clear_entry(const std::uint8_t slot) noexcept {
@@ -2177,11 +2719,12 @@ Status ConfigIssuer::clear_entry(const std::uint8_t slot) noexcept {
   return storage_.write(slot, ByteView{tombstone.data(), tombstone.size()});
 }
 
-Status ConfigIssuer::persist_entry(const std::uint8_t slot, const std::uint8_t state,
-                                   const ByteView canonical,
+Status ConfigIssuer::persist_entry(const std::uint8_t slot, const std::uint8_t kind,
+                                   const std::uint8_t state, const ByteView canonical,
                                    const ByteView permit) noexcept {
   if (slot >= kConfigIssuerOutboxSlots || canonical.size == 0 ||
-      canonical.size > endpoint::kRcc1MaxTotal || permit.size > kConfigPermitObjectMax) {
+      canonical.size > endpoint::kRcc1MaxTotal || permit.size > kConfigPermitObjectMax ||
+      kind > kOutboxKindRecovery) {
     return Status::error(StatusCode::InvalidArgument, "config outbox entry invalid");
   }
   const std::size_t record_len =
@@ -2195,7 +2738,9 @@ Status ConfigIssuer::persist_entry(const std::uint8_t slot, const std::uint8_t s
     if (st) st = writer.write_u32(kOutboxSchemaVersion);
     if (st) st = writer.write_u32(seal);
     if (st) st = writer.write_u8(state);
-    if (st) st = writer.write_u8(0);
+    // The formerly-reserved byte now carries the canonical kind (0=RCC1,
+    // 1=RCR1): old images read 0, new recovery entries tag themselves.
+    if (st) st = writer.write_u8(kind);
     if (st) st = writer.write_u16(0);
     if (st) st = writer.write_u16(static_cast<std::uint16_t>(canonical.size));
     if (st) st = writer.write_u16(static_cast<std::uint16_t>(permit.size));
@@ -2222,9 +2767,11 @@ Status ConfigIssuer::persist_entry(const std::uint8_t slot, const std::uint8_t s
   return Status::success();
 }
 
-Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& state,
+Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& kind,
+                                std::uint8_t& state,
                                 endpoint::EncodedConfigCommand& canonical,
                                 ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
+  kind = kOutboxKindCommand;
   state = 0;
   if (slot >= kConfigIssuerOutboxSlots) {
     return Status::error(StatusCode::InvalidArgument, "config outbox slot invalid");
@@ -2256,16 +2803,16 @@ Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& state,
     if (seal == 0) return Status::success();
     return Status::error(StatusCode::IntegrityError, "config outbox seal unknown");
   }
-  std::uint8_t found_state = 0, reserved8 = 0;
+  std::uint8_t found_state = 0, found_kind = 0;
   std::uint16_t reserved16 = 0, canonical_len = 0, permit_len = 0;
   st = reader.read_u8(found_state);
-  if (st) st = reader.read_u8(reserved8);
+  if (st) st = reader.read_u8(found_kind);
   if (st) st = reader.read_u16(reserved16);
   if (st) st = reader.read_u16(canonical_len);
   if (st) st = reader.read_u16(permit_len);
   const std::size_t expect =
       kOutboxHeaderSize + static_cast<std::size_t>(canonical_len) + permit_len + 4;
-  if (!st || reserved8 != 0 || reserved16 != 0 ||
+  if (!st || found_kind > kOutboxKindRecovery || reserved16 != 0 ||
       (found_state != kOutboxPending && found_state != kOutboxSigned) ||
       canonical_len == 0 || canonical_len > endpoint::kRcc1MaxTotal ||
       permit_len > kConfigPermitObjectMax || expect != length) {
@@ -2285,8 +2832,30 @@ Status ConfigIssuer::load_entry(std::uint8_t slot, std::uint8_t& state,
     // unavailable until an operator clears it.
     return Status::error(StatusCode::IntegrityError, "config outbox entry crc");
   }
+  kind = found_kind;
   state = found_state;
   return Status::success();
+}
+
+Status ConfigIssuer::entry_sequence(
+    const endpoint::EncodedConfigCommand& canonical, const std::uint8_t kind,
+    std::uint64_t& sequence) const noexcept {
+  sequence = 0;
+  if (kind == kOutboxKindCommand) {
+    endpoint::ConfigCommand command{};
+    const Status decoded = endpoint::config_command_decode(canonical.view(), command);
+    if (!decoded) return decoded;
+    sequence = command.authority_sequence;
+    return Status::success();
+  }
+  if (kind == kOutboxKindRecovery) {
+    endpoint::ConfigRecoveryCommand command{};
+    const Status decoded = endpoint::config_recovery_decode(canonical.view(), command);
+    if (!decoded) return decoded;
+    sequence = command.authority_sequence;
+    return Status::success();
+  }
+  return Status::error(StatusCode::InvalidArgument, "config outbox kind unknown");
 }
 
 Status ConfigIssuer::initialize() noexcept {
@@ -2308,32 +2877,49 @@ Status ConfigIssuer::resume_pending() noexcept {
   for (std::uint8_t pass = 0; pass <= kConfigIssuerOutboxSlots && progress; ++pass) {
     progress = false;
     for (std::uint8_t slot = 0; slot < kConfigIssuerOutboxSlots; ++slot) {
-      std::uint8_t state = 0;
+      std::uint8_t kind = 0, state = 0;
       endpoint::EncodedConfigCommand canonical{};
       ByteBuffer<kConfigPermitObjectMax> permit{};
-      const Status loaded = load_entry(slot, state, canonical, permit);
+      const Status loaded = load_entry(slot, kind, state, canonical, permit);
       if (!loaded) {
         if (first_error.ok()) first_error = loaded;
         continue;
       }
       if (state != kOutboxPending) continue;
-      endpoint::ConfigCommand command{};
-      const Status decoded =
-          endpoint::config_command_decode(canonical.view(), command);
-      if (!decoded) {
-        const Status cleared = clear_entry(slot);
-        static_cast<void>(cleared);
-        if (first_error.ok()) first_error = decoded;
-        progress = true;
-        continue;
+      ByteBuffer<kConfigPermitObjectMax> signed_object{};
+      Status done = Status::success();
+      if (kind == kOutboxKindRecovery) {
+        endpoint::ConfigRecoveryCommand command{};
+        const Status decoded =
+            endpoint::config_recovery_decode(canonical.view(), command);
+        if (decoded) {
+          done = commit_and_sign_recovery(slot, canonical, command, signed_object);
+        } else {
+          done = decoded;
+        }
+      } else {
+        endpoint::ConfigCommand command{};
+        const Status decoded =
+            endpoint::config_command_decode(canonical.view(), command);
+        if (decoded) {
+          done = commit_and_sign(slot, canonical, command, signed_object);
+        } else {
+          done = decoded;
+        }
       }
-      ByteBuffer<kConfigPermitObjectMax> signed_permit{};
-      const Status done = commit_and_sign(slot, canonical, command, signed_permit);
       if (done) {
         progress = true;
       } else if (done.code == StatusCode::Conflict) {
         progress = true;  // superseded entry was cleared
         if (first_error.ok()) first_error = done;
+      } else if (done.code == StatusCode::InvalidArgument ||
+                 done.code == StatusCode::ProtocolError) {
+        // An undecodable pending entry can never commit — discard it so
+        // the slot returns to service (same rule as the old decode path).
+        const Status cleared = clear_entry(slot);
+        static_cast<void>(cleared);
+        if (first_error.ok()) first_error = done;
+        progress = true;
       } else if (done.code != StatusCode::InvalidState) {
         // InvalidState("sequence gap") retries on the next pass; every
         // other failure is reported but does not change progress.
@@ -2343,10 +2929,10 @@ Status ConfigIssuer::resume_pending() noexcept {
   }
   // Final counts.
   for (std::uint8_t slot = 0; slot < kConfigIssuerOutboxSlots; ++slot) {
-    std::uint8_t state = 0;
+    std::uint8_t kind = 0, state = 0;
     endpoint::EncodedConfigCommand canonical{};
     ByteBuffer<kConfigPermitObjectMax> permit{};
-    const Status loaded = load_entry(slot, state, canonical, permit);
+    const Status loaded = load_entry(slot, kind, state, canonical, permit);
     if (!loaded) {
       if (first_error.ok()) first_error = loaded;
       continue;
@@ -2359,12 +2945,25 @@ Status ConfigIssuer::resume_pending() noexcept {
 
 Status ConfigIssuer::signed_permit(
     const std::uint8_t slot, ByteBuffer<kConfigPermitObjectMax>& out) noexcept {
+  std::uint8_t kind = 0, state = 0;
+  endpoint::EncodedConfigCommand canonical{};
+  const Status loaded = load_entry(slot, kind, state, canonical, out);
+  if (!loaded) return loaded;
+  if (state != kOutboxSigned || out.size == 0 || kind != kOutboxKindCommand) {
+    return Status::error(StatusCode::NotFound, "config permit not signed");
+  }
+  return Status::success();
+}
+
+Status ConfigIssuer::signed_object(
+    const std::uint8_t slot, std::uint8_t& kind,
+    ByteBuffer<kConfigPermitObjectMax>& out) noexcept {
   std::uint8_t state = 0;
   endpoint::EncodedConfigCommand canonical{};
-  const Status loaded = load_entry(slot, state, canonical, out);
+  const Status loaded = load_entry(slot, kind, state, canonical, out);
   if (!loaded) return loaded;
   if (state != kOutboxSigned || out.size == 0) {
-    return Status::error(StatusCode::NotFound, "config permit not signed");
+    return Status::error(StatusCode::NotFound, "config object not signed");
   }
   return Status::success();
 }

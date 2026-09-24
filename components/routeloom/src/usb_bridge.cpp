@@ -636,6 +636,9 @@ void UsbBridge::handle_host_ops(const std::uint64_t request,
     case HostOpsSub::ConfigPermit:
       handle_config_permit(request, inner, now_ms);
       break;
+    case HostOpsSub::ConfigRecover:
+      handle_config_recover(request, inner, now_ms);
+      break;
     case HostOpsSub::ConfigStatus:
       // 0x22 is device→host only (the async reply to a 0x20 query): a host
       // issuing one is a protocol violation, never a request to answer.
@@ -1332,6 +1335,33 @@ void UsbBridge::handle_config_permit(const std::uint64_t request,
                       now_ms);
   }
   // Admitted: the ack resolves asynchronously on on_config_reply (0x21).
+}
+
+void UsbBridge::handle_config_recover(const std::uint64_t request,
+                                      const ByteView inner,
+                                      const MonotonicMs now_ms) noexcept {
+  ConfigRecoverRequest recover{};
+  if (!decode_config_recover(inner, recover)) {
+    send_error(UsbErrorCode::ProtocolError, request, "CONFIG_RECOVER_MALFORMED",
+               now_ms);
+    return;
+  }
+  if ((config_.capability & kCapConfigEndpointV1) == 0 ||
+      config_gateway_ == nullptr) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigRecover),
+                      ConfigOpsResult::Unsupported, recover.target, ByteView{},
+                      now_ms);
+    return;
+  }
+  // The dedicated kind-4 lane — never routed through submit_permit.
+  const Status status = config_gateway_->submit_recovery(
+      request, recover.target, recover.object, now_ms);
+  if (!status) {
+    send_config_reply(request, static_cast<std::uint8_t>(HostOpsSub::ConfigRecover),
+                      config_result_for(status), recover.target, ByteView{},
+                      now_ms);
+  }
+  // Admitted: the ack resolves asynchronously on on_config_reply (0x24).
 }
 
 void UsbBridge::send_receipt(const DispatchReceipt& receipt,

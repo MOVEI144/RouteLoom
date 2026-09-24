@@ -21,6 +21,7 @@ constexpr std::uint8_t kSubStatus = 4;
 constexpr std::uint8_t kSubConfigPermit = 0x21;
 constexpr std::uint8_t kSubConfigStatus = 0x22;
 constexpr std::uint8_t kSubConfigChallenge = 0x23;
+constexpr std::uint8_t kSubConfigRecover = 0x24;
 
 // The two-byte Control prelude: version | subtype.
 std::uint8_t control_subtype(const wire::PlainFrame& frame) noexcept {
@@ -133,35 +134,60 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
   autonomy::ControlObjectPayload manifest{};
   Status status = autonomy::control_object_decode(
       ByteView{frame.payload.data(), frame.payload_size}, manifest);
-  if (!status || manifest.kind != autonomy::ControlObjectKind::ConfigPermit ||
-      manifest.total_len == 0 ||
+  if (!status || manifest.total_len == 0 ||
       manifest.total_len > kConfigPermitObjectMax) {
+    ++control_denied_;
+    return;
+  }
+  // Kind-4 recovery runs through a dedicated lane: the journal's
+  // recovery-side entry points keep accepting while quarantined, and a
+  // stalled kind-3 assembly can never occupy its slot.
+  if (manifest.kind == autonomy::ControlObjectKind::ConfigPermit) {
+    handle_manifest_for(intake_, false, origin, frame, now_ms);
+    return;
+  }
+  if (manifest.kind == autonomy::ControlObjectKind::ConfigRecovery) {
+    handle_manifest_for(recovery_intake_, true, origin, frame, now_ms);
+    return;
+  }
+  ++control_denied_;
+}
+
+void ConfigTarget::handle_manifest_for(
+    Intake& lane, const bool recovery, const NodeId origin,
+    const wire::PlainFrame& frame, const MonotonicMs now_ms) noexcept {
+  autonomy::ControlObjectPayload manifest{};
+  Status status = autonomy::control_object_decode(
+      ByteView{frame.payload.data(), frame.payload_size}, manifest);
+  if (!status) {
     ++control_denied_;
     return;
   }
 
   ConfigJournal* journal = nullptr;
-  if (intake_.active) {
-    // One reassembly at a time (kConfigTransactionsPerTarget): a manifest
-    // for a different object is refused — and so is one carrying the same
-    // object hash but a different declared length (a conflicting manifest,
-    // not a duplicate). Only a byte-consistent duplicate of the live
-    // manifest is re-acked by the owning journal.
-    if (intake_.hash != manifest.object_hash ||
-        manifest.total_len != intake_.total_len) {
-      send_ack(origin, manifest.object_hash, intake_.received,
+  if (lane.active) {
+    // One reassembly per lane: a manifest for a different object is
+    // refused — and so is one carrying the same object hash but a
+    // different declared length. Only a byte-consistent duplicate of the
+    // live manifest is re-acked by the owning journal.
+    if (lane.hash != manifest.object_hash ||
+        manifest.total_len != lane.total_len) {
+      send_ack(origin, manifest.object_hash, lane.received,
                autonomy::ObjectAckStatus::Failed, now_ms);
       return;
     }
-    journal = intake_.journal;
+    journal = lane.journal;
   } else {
     // v1 manifests carry no namespace: offer the object to the journals in
     // registration order; the first to accept it owns the reassembly (the
-    // primary journal in the common single-namespace build). A permit whose
-    // decoded namespace does not match is refused by that journal's own
-    // validation at submit time.
+    // primary journal in the common single-namespace build). An object
+    // whose decoded namespace does not match is refused by that journal's
+    // own validation at submit time.
     for (std::size_t i = 0; i < journal_count_; ++i) {
-      if (journals_[i]->note_object_manifest(manifest, now_ms)) {
+      const Status accepted =
+          recovery ? journals_[i]->note_recovery_manifest(manifest, now_ms)
+                   : journals_[i]->note_object_manifest(manifest, now_ms);
+      if (accepted) {
         journal = journals_[i];
         break;
       }
@@ -171,13 +197,13 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
                now_ms);
       return;
     }
-    intake_.active = true;
-    intake_.journal = journal;
-    intake_.hash = manifest.object_hash;
-    intake_.total_len = manifest.total_len;
-    intake_.received = 0;
-    intake_.started_ms = now_ms;
-    std::memset(intake_.bitmap.data(), 0, intake_.bitmap.size());
+    lane.active = true;
+    lane.journal = journal;
+    lane.hash = manifest.object_hash;
+    lane.total_len = manifest.total_len;
+    lane.received = 0;
+    lane.started_ms = now_ms;
+    std::memset(lane.bitmap.data(), 0, lane.bitmap.size());
     send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Incomplete,
              now_ms);
     return;
@@ -185,8 +211,9 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
 
   // Duplicate manifest for the live object: hand it back to the owning
   // journal (which dedups) and re-ack the current progress.
-  status = journal->note_object_manifest(manifest, now_ms);
-  send_ack(origin, manifest.object_hash, intake_.received,
+  status = recovery ? journal->note_recovery_manifest(manifest, now_ms)
+                    : journal->note_object_manifest(manifest, now_ms);
+  send_ack(origin, manifest.object_hash, lane.received,
            status ? autonomy::ObjectAckStatus::Incomplete
                   : autonomy::ObjectAckStatus::Failed,
            now_ms);
@@ -199,26 +226,51 @@ void ConfigTarget::handle_chunk(const NodeId peer, const wire::PlainFrame& frame
   autonomy::ObjectChunkPayload chunk{};
   Status status = autonomy::object_chunk_decode(
       ByteView{frame.payload.data(), frame.payload_size}, chunk);
-  if (!status || !intake_.active || chunk.object_hash != intake_.hash ||
-      intake_.journal == nullptr) {
+  if (!status) {
     ++control_denied_;
     return;
   }
-  status = intake_.journal->note_object_chunk(chunk, now_ms);
+  // Chunks bind to whichever lane's manifest hash they match — the two
+  // lanes can never share a hash (a manifest conflict would have Failed).
+  if (intake_.active && chunk.object_hash == intake_.hash &&
+      intake_.journal != nullptr) {
+    handle_chunk_for(intake_, false, origin, frame, now_ms);
+    return;
+  }
+  if (recovery_intake_.active && chunk.object_hash == recovery_intake_.hash &&
+      recovery_intake_.journal != nullptr) {
+    handle_chunk_for(recovery_intake_, true, origin, frame, now_ms);
+    return;
+  }
+  ++control_denied_;
+}
+
+void ConfigTarget::handle_chunk_for(
+    Intake& lane, const bool recovery, const NodeId origin,
+    const wire::PlainFrame& frame, const MonotonicMs now_ms) noexcept {
+  autonomy::ObjectChunkPayload chunk{};
+  Status status = autonomy::object_chunk_decode(
+      ByteView{frame.payload.data(), frame.payload_size}, chunk);
+  if (!status) {
+    ++control_denied_;
+    return;
+  }
+  status = recovery ? lane.journal->note_recovery_chunk(chunk, now_ms)
+                    : lane.journal->note_object_chunk(chunk, now_ms);
   // Update the honest received-byte mirror only for bytes the journal
   // accepted inside the manifest window (dedup is tracked by the bitmap).
-  if (status && chunk.offset + chunk.data_size <= intake_.total_len) {
+  if (status && chunk.offset + chunk.data_size <= lane.total_len) {
     for (std::uint16_t i = 0; i < chunk.data_size; ++i) {
       const std::uint16_t byte_index = chunk.offset + i;
       const std::uint8_t mask = static_cast<std::uint8_t>(1u << (byte_index & 7u));
-      if ((intake_.bitmap[byte_index >> 3] & mask) == 0) {
-        intake_.bitmap[byte_index >> 3] |= mask;
-        ++intake_.received;
+      if ((lane.bitmap[byte_index >> 3] & mask) == 0) {
+        lane.bitmap[byte_index >> 3] |= mask;
+        ++lane.received;
       }
     }
   }
-  const bool complete = intake_.received >= intake_.total_len;
-  send_ack(origin, chunk.object_hash, intake_.received,
+  const bool complete = lane.received >= lane.total_len;
+  send_ack(origin, chunk.object_hash, lane.received,
            !status ? autonomy::ObjectAckStatus::Failed
                    : (complete ? autonomy::ObjectAckStatus::Ok
                                : autonomy::ObjectAckStatus::Incomplete),
@@ -226,8 +278,8 @@ void ConfigTarget::handle_chunk(const NodeId peer, const wire::PlainFrame& frame
   if (complete || !status) {
     // Assembly finished (Ok) or the journal rejected the object (Failed):
     // either way this intake slot frees for the next manifest.
-    intake_.active = false;
-    intake_.journal = nullptr;
+    lane.active = false;
+    lane.journal = nullptr;
   }
 }
 
@@ -247,7 +299,9 @@ void ConfigTarget::send_ack(const NodeId dest, const autonomy::ObjectHash& hash,
   }
 }
 
-std::uint16_t ConfigTarget::bitmap_count() const noexcept { return intake_.received; }
+std::uint16_t ConfigTarget::bitmap_count() const noexcept {
+  return intake_.received + recovery_intake_.received;
+}
 
 void ConfigTarget::on_config_job_done(const MessageId& id, const bool hop_accepted,
                                       const char* reason,
@@ -264,12 +318,17 @@ void ConfigTarget::poll(const MonotonicMs now_ms) noexcept {
   for (std::size_t i = 0; i < journal_count_; ++i) {
     journals_[i]->poll(now_ms);
   }
-  // Mirror the journal's own reassembly timeout so the intake slot frees in
-  // step with the assembler's 10 s bound (same monotonic clock).
+  // Mirror the journal's own reassembly timeout so each intake slot frees
+  // in step with the assembler's 10 s bound (same monotonic clock).
   if (intake_.active &&
       now_ms - intake_.started_ms >= kConfigReassemblyTimeoutMs) {
     intake_.active = false;
     intake_.journal = nullptr;
+  }
+  if (recovery_intake_.active &&
+      now_ms - recovery_intake_.started_ms >= kConfigReassemblyTimeoutMs) {
+    recovery_intake_.active = false;
+    recovery_intake_.journal = nullptr;
   }
 }
 
@@ -344,68 +403,95 @@ Status ConfigGateway::submit_permit(const std::uint64_t request, const NodeId ta
   if (transfer_.active) {
     return Status::error(StatusCode::WouldBlock, "config permit transfer busy");
   }
-  if (target == kInvalidNodeId || permit.size == 0 ||
-      permit.size > kConfigPermitObjectMax || permit.data == nullptr) {
-    return Status::error(StatusCode::InvalidArgument, "config permit invalid");
+  Status status;
+  start_transfer(transfer_, request, target, autonomy::ControlObjectKind::ConfigPermit,
+                 permit, now_ms, status);
+  if (status) transfer_.usb_sub = kSubConfigPermit;
+  return status;
+}
+
+Status ConfigGateway::submit_recovery(const std::uint64_t request,
+                                      const NodeId target, const ByteView object,
+                                      const MonotonicMs now_ms) noexcept {
+  if (recovery_transfer_.active) {
+    return Status::error(StatusCode::WouldBlock, "config recovery transfer busy");
+  }
+  Status status;
+  start_transfer(recovery_transfer_, request, target,
+                 autonomy::ControlObjectKind::ConfigRecovery, object, now_ms,
+                 status);
+  if (status) recovery_transfer_.usb_sub = kSubConfigRecover;
+  return status;
+}
+
+void ConfigGateway::start_transfer(
+    PermitTransfer& transfer, const std::uint64_t request, const NodeId target,
+    const autonomy::ControlObjectKind kind, const ByteView object,
+    const MonotonicMs now_ms, Status& out) noexcept {
+  if (target == kInvalidNodeId || object.size == 0 ||
+      object.size > kConfigPermitObjectMax || object.data == nullptr) {
+    out = Status::error(StatusCode::InvalidArgument, "config object invalid");
+    return;
   }
   autonomy::ControlObjectPayload manifest{};
   manifest.subtype = autonomy::ControlObjectSubtype::Manifest;
-  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
-  manifest.total_len = static_cast<std::uint16_t>(permit.size);
-  sha256(permit, manifest.object_hash);
+  manifest.kind = kind;
+  manifest.total_len = static_cast<std::uint16_t>(object.size);
+  sha256(object, manifest.object_hash);
   autonomy::EncodedPayload encoded{};
-  Status status = autonomy::control_object_encode(manifest, encoded);
-  if (!status) return status;
-  status = wire_.config_send(target, FrameType::ControlObject, encoded.view(), now_ms);
-  if (!status) return status;
-  transfer_.active = true;
-  transfer_.request = request;
-  transfer_.target = target;
-  transfer_.hash = manifest.object_hash;
-  transfer_.object.size = permit.size;
-  std::memcpy(transfer_.object.bytes.data(), permit.data, permit.size);
-  transfer_.object_size = static_cast<std::uint16_t>(permit.size);
-  transfer_.next_offset = 0;
-  transfer_.phase = TransferPhase::Chunks;
-  transfer_.deadline_ms = now_ms + config_wire_const::kPermitTimeoutMs;
+  out = autonomy::control_object_encode(manifest, encoded);
+  if (!out) return;
+  out = wire_.config_send(target, FrameType::ControlObject, encoded.view(), now_ms);
+  if (!out) return;
+  transfer.active = true;
+  transfer.request = request;
+  transfer.target = target;
+  transfer.hash = manifest.object_hash;
+  transfer.object.size = object.size;
+  std::memcpy(transfer.object.bytes.data(), object.data, object.size);
+  transfer.object_size = static_cast<std::uint16_t>(object.size);
+  transfer.next_offset = 0;
+  transfer.phase = TransferPhase::Chunks;
+  transfer.deadline_ms = now_ms + config_wire_const::kPermitTimeoutMs;
   // Push the first chunk immediately; the rest ride poll() so a full TX
   // queue slows the pump instead of dropping a chunk into a timeout.
-  pump_transfer(now_ms);
-  return Status::success();
+  pump_transfer(transfer, now_ms);
+  out = Status::success();
 }
 
-void ConfigGateway::pump_transfer(const MonotonicMs now_ms) noexcept {
-  if (!transfer_.active || transfer_.phase != TransferPhase::Chunks) return;
+void ConfigGateway::pump_transfer(PermitTransfer& transfer,
+                                  const MonotonicMs now_ms) noexcept {
+  if (!transfer.active || transfer.phase != TransferPhase::Chunks) return;
   // Bounded pump: one chunk per call keeps the manifest+chunk burst inside
   // the scheduler's bounded queue; a WouldBlock/NoRoute send is retried on
   // the next poll until the transfer deadline makes it honest.
-  while (transfer_.active && transfer_.next_offset < transfer_.object_size) {
-    const std::uint16_t offset = transfer_.next_offset;
+  while (transfer.active && transfer.next_offset < transfer.object_size) {
+    const std::uint16_t offset = transfer.next_offset;
     const std::uint16_t len = static_cast<std::uint16_t>(std::min<std::size_t>(
-        config_wire_const::kChunkDataMax, transfer_.object_size - offset));
+        config_wire_const::kChunkDataMax, transfer.object_size - offset));
     autonomy::ObjectChunkPayload chunk{};
     chunk.subtype = autonomy::ObjectChunkSubtype::Chunk;
-    chunk.object_hash = transfer_.hash;
+    chunk.object_hash = transfer.hash;
     chunk.offset = offset;
     chunk.data_size = len;
-    std::memcpy(chunk.data.data(), transfer_.object.bytes.data() + offset, len);
+    std::memcpy(chunk.data.data(), transfer.object.bytes.data() + offset, len);
     autonomy::EncodedPayload encoded{};
     if (!autonomy::object_chunk_encode(chunk, encoded)) {
-      finish_transfer(ConfigOpsResult::Indeterminate, now_ms);
+      finish_transfer(transfer, ConfigOpsResult::Indeterminate, now_ms);
       return;
     }
     const Status sent =
-        wire_.config_send(transfer_.target, FrameType::ObjectChunk,
+        wire_.config_send(transfer.target, FrameType::ObjectChunk,
                           encoded.view(), now_ms);
     if (!sent) {
       // Queue full / transient: stop pumping, retry on the next poll. A
       // permanent NoRoute surfaces at the deadline as Indeterminate.
       return;
     }
-    transfer_.next_offset = static_cast<std::uint16_t>(offset + len);
+    transfer.next_offset = static_cast<std::uint16_t>(offset + len);
   }
-  if (transfer_.active && transfer_.next_offset >= transfer_.object_size) {
-    transfer_.phase = TransferPhase::AwaitAck;
+  if (transfer.active && transfer.next_offset >= transfer.object_size) {
+    transfer.phase = TransferPhase::AwaitAck;
   }
 }
 
@@ -438,20 +524,29 @@ void ConfigGateway::on_config_frame(const NodeId peer, const wire::PlainFrame& f
       break;
     }
     case FrameType::ObjectAck: {
-      if (!transfer_.active || origin != transfer_.target) return;
       autonomy::ObjectAckPayload ack{};
       if (!autonomy::object_ack_decode(
-              ByteView{frame.payload.data(), frame.payload_size}, ack) ||
-          ack.object_hash != transfer_.hash) {
+              ByteView{frame.payload.data(), frame.payload_size}, ack)) {
         return;
       }
+      // An ack binds to whichever in-flight transfer owns the object hash —
+      // permit and recovery transfers run on separate slots.
+      PermitTransfer* lane = nullptr;
+      if (transfer_.active && origin == transfer_.target &&
+          ack.object_hash == transfer_.hash) {
+        lane = &transfer_;
+      } else if (recovery_transfer_.active && origin == recovery_transfer_.target &&
+                 ack.object_hash == recovery_transfer_.hash) {
+        lane = &recovery_transfer_;
+      }
+      if (lane == nullptr) return;
       if (ack.status == autonomy::ObjectAckStatus::Failed) {
-        finish_transfer(ConfigOpsResult::Denied, now_ms);
+        finish_transfer(*lane, ConfigOpsResult::Denied, now_ms);
       } else if (ack.status == autonomy::ObjectAckStatus::Ok &&
-                 ack.received_len >= transfer_.object_size) {
-        // Assembly completed at the target — the permit verdict itself is a
-        // separate status query, never implied by transport success.
-        finish_transfer(ConfigOpsResult::Ok, now_ms);
+                 ack.received_len >= lane->object_size) {
+        // Assembly completed at the target — the object verdict itself is
+        // a separate status query, never implied by transport success.
+        finish_transfer(*lane, ConfigOpsResult::Ok, now_ms);
       }
       // Incomplete acks are progress; the deadline bounds the wait.
       break;
@@ -485,23 +580,28 @@ void ConfigGateway::finish_query(const ConfigOpsResult result, const ByteView bo
   host_.on_config_reply(request, sub, result, target, body, now_ms);
 }
 
-void ConfigGateway::finish_transfer(const ConfigOpsResult result,
+void ConfigGateway::finish_transfer(PermitTransfer& transfer,
+                                    const ConfigOpsResult result,
                                     const MonotonicMs now_ms) noexcept {
-  const std::uint64_t request = transfer_.request;
-  const NodeId target = transfer_.target;
-  transfer_.active = false;
+  const std::uint64_t request = transfer.request;
+  const NodeId target = transfer.target;
+  const std::uint8_t sub = transfer.usb_sub;
+  transfer.active = false;
   ++replies_reported_;
-  host_.on_config_reply(request, kSubConfigPermit, result, target, ByteView{},
-                        now_ms);
+  host_.on_config_reply(request, sub, result, target, ByteView{}, now_ms);
 }
 
 void ConfigGateway::poll(const MonotonicMs now_ms) noexcept {
-  pump_transfer(now_ms);
+  pump_transfer(transfer_, now_ms);
+  pump_transfer(recovery_transfer_, now_ms);
   if (query_.active && now_ms >= query_.deadline_ms) {
     finish_query(ConfigOpsResult::Timeout, ByteView{}, now_ms);
   }
   if (transfer_.active && now_ms >= transfer_.deadline_ms) {
-    finish_transfer(ConfigOpsResult::Indeterminate, now_ms);
+    finish_transfer(transfer_, ConfigOpsResult::Indeterminate, now_ms);
+  }
+  if (recovery_transfer_.active && now_ms >= recovery_transfer_.deadline_ms) {
+    finish_transfer(recovery_transfer_, ConfigOpsResult::Indeterminate, now_ms);
   }
 }
 

@@ -195,6 +195,10 @@ enum class ControlObjectKind : std::uint8_t {
   // Scope-gateway-config §5.1: end-protected routed config permits ride the
   // same object transfer; link-only kinds 1/2 keep their existing path.
   ConfigPermit = 3,
+  // Signed recovery commands (RCR1) ride a dedicated lane of the same
+  // transfer (04 §4.7, 06 §6.3): separate from kind-3 intake so an impaired
+  // journal can receive recovery evidence while refusing normal permits.
+  ConfigRecovery = 4,
 };
 using ObjectHash = std::array<std::uint8_t, 32>;
 // Manifest layout (38B): version u8 | subtype u8 | kind u8 | flags u8 (=0) |

@@ -431,6 +431,11 @@ pub enum ControlObjectKind {
     /// Scope-gateway-config §5.1: end-protected routed config permits ride
     /// the same object transfer; link-only kinds 1/2 keep their path.
     ConfigPermit = 3,
+    /// Signed recovery commands (RCR1) ride a dedicated lane of the same
+    /// transfer (04 §4.7, 06 §6.3): separate from kind-3 intake so an
+    /// impaired journal can receive recovery evidence while refusing
+    /// normal permits.
+    ConfigRecovery = 4,
 }
 
 #[derive(Clone, Debug)]
@@ -469,6 +474,7 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
         1 => ControlObjectKind::ChannelPlan,
         2 => ControlObjectKind::RecoverySnapshot,
         3 => ControlObjectKind::ConfigPermit,
+        4 => ControlObjectKind::ConfigRecovery,
         _ => return reject(),
     };
     let total_len = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));

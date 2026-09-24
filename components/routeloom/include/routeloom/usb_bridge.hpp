@@ -322,9 +322,13 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                                MonotonicMs now_ms) noexcept;
   void handle_config_permit(std::uint64_t request, ByteView inner,
                             MonotonicMs now_ms) noexcept;
+  // 0x24 ConfigRecover: the signed kind-4 recovery object toward a target —
+  // dedicated lane, same async result-only reply shape as 0x21.
+  void handle_config_recover(std::uint64_t request, ByteView inner,
+                             MonotonicMs now_ms) noexcept;
   // Maps a synchronous submit_* Status to the wire result code.
   static ConfigOpsResult config_result_for(const Status& status) noexcept;
-  // Encodes + queues a 0x21/0x22/0x23 reply under `request`.
+  // Encodes + queues a 0x21/0x22/0x23/0x24 reply under `request`.
   void send_config_reply(std::uint64_t request, std::uint8_t sub,
                          ConfigOpsResult result, NodeId target, ByteView body,
                          MonotonicMs now_ms) noexcept;

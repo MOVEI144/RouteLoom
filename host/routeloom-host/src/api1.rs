@@ -330,6 +330,8 @@ pub fn handle_conn<S: OperationStore>(
         "config.challenge" => config_challenge(&params, ctx).map(|r| (r, None)),
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
         "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
+        "config.recover" => config_recover(&params, ctx).map(|r| (r, None)),
+        "config.trust_update" => config_trust_update(&params, ctx).map(|r| (r, None)),
         "config.get" => config_get(&params, ctx).map(|r| (r, None)),
         "group.send" => group_send(&params, ctx).map(|r| (r, None)),
         "group.get" => group_get(&params, ctx).map(|r| (r, None)),
@@ -426,7 +428,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.recover\":true,\"config.trust_update\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -2644,6 +2646,34 @@ fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
     }
 }
 
+/// A u32 field — same number-or-string parsing rule as `u16_field`.
+fn u32_field(value: Option<&Json>, name: &str) -> Result<u32, ApiError> {
+    let invalid = || {
+        ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("{name} must be a u32 (number, decimal, or 0x-hex string)"),
+        )
+    };
+    match value {
+        None => Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            &format!("{name} is required"),
+        )),
+        Some(json) => {
+            if let Some(n) = json.as_u64() {
+                return u32::try_from(n).map_err(|_| invalid());
+            }
+            if let Some(text) = json.as_str() {
+                return match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+                    Some(hex) => u32::from_str_radix(hex, 16).map_err(|_| invalid()),
+                    None => text.parse::<u32>().map_err(|_| invalid()),
+                };
+            }
+            Err(invalid())
+        }
+    }
+}
+
 /// Variable-length hex → bytes (even length, ≤ `max` bytes).
 fn parse_hex_bytes(text: &str, max: usize) -> Option<Vec<u8>> {
     if text.len() % 2 != 0 || text.len() > max * 2 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -2857,6 +2887,148 @@ fn config_propose<S: OperationStore>(
         ctx,
         request,
         format!("propose ns={config_namespace} schema={schema} fields={field_count}"),
+        network,
+        target,
+    )
+}
+
+/// `config.recover` params: `{network, target, config_namespace, schema,
+/// new_store_generation, attest?}`. Signs an RCR1 StoreRecover command and
+/// transfers it on the dedicated recovery lane (HostOps 0x24) — reachable
+/// while the target journal is quarantined/uncertain, which the permit
+/// lane is not. `attest` 0 (default) adopts the surviving journal record
+/// under the new store generation; 1 attests explicit reprovisioning.
+/// Same PERM_CONFIG + configured-authority gates as config.propose.
+fn config_recover<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network"
+                | "target"
+                | "config_namespace"
+                | "schema"
+                | "new_store_generation"
+                | "attest"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
+    let schema = u16_field(params.get("schema"), "schema")?;
+    let new_store_generation =
+        u32_field(params.get("new_store_generation"), "new_store_generation")?;
+    if new_store_generation == 0 {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "new_store_generation must be nonzero",
+        ));
+    }
+    let attest = match params.get("attest") {
+        None => 0_u8,
+        Some(value) => match value.as_u64().and_then(|n| u8::try_from(n).ok()) {
+            Some(n @ (0 | 1)) => n,
+            _ => {
+                return Err(ApiError::simple(
+                    "INVALID_ARGUMENT",
+                    "attest must be 0 (adopt) or 1 (reprovision)",
+                ))
+            }
+        },
+    };
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    if ctx.config_authority.is_none() {
+        return Err(ApiError::simple(
+            "CONFIG_NO_AUTHORITY",
+            "no config authority configured (daemon --config-authority); recovery objects cannot be issued",
+        ));
+    }
+    let request = ConfigRequest::Recover {
+        target,
+        config_namespace,
+        schema,
+        recovery_class: routeloom_wire::endpoint::ConfigRecoveryClass::StoreRecover,
+        attest,
+        new_store_generation,
+        new_authority_generation: 0,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!("recover ns={config_namespace} schema={schema} store_gen={new_store_generation} attest={attest}"),
+        network,
+        target,
+    )
+}
+
+/// `config.trust_update` params: `{network, target, config_namespace, schema,
+/// new_authority_generation}`. Signs an RCR1 AuthorityGeneration command —
+/// the 03-signing countersignature of the next trust generation — and
+/// transfers it on the recovery lane (0x24). Issue it BEFORE the authority
+/// recovers to the new generation so deployed targets pinned to the
+/// current generation durably adopt the new pin; permits under the new
+/// generation are only accepted afterwards. Same PERM_CONFIG +
+/// configured-authority gates as config.propose.
+fn config_trust_update<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(
+            key.as_str(),
+            "network" | "target" | "config_namespace" | "schema" | "new_authority_generation"
+        ) {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
+    let schema = u16_field(params.get("schema"), "schema")?;
+    let new_authority_generation = u32_field(
+        params.get("new_authority_generation"),
+        "new_authority_generation",
+    )?;
+    if new_authority_generation == 0 {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "new_authority_generation must be nonzero",
+        ));
+    }
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    if ctx.config_authority.is_none() {
+        return Err(ApiError::simple(
+            "CONFIG_NO_AUTHORITY",
+            "no config authority configured (daemon --config-authority); trust updates cannot be issued",
+        ));
+    }
+    let request = ConfigRequest::Recover {
+        target,
+        config_namespace,
+        schema,
+        recovery_class: routeloom_wire::endpoint::ConfigRecoveryClass::AuthorityGeneration,
+        attest: 0,
+        new_store_generation: 0,
+        new_authority_generation,
+    };
+    config_submit_op(
+        ctx,
+        request,
+        format!(
+            "trust_update ns={config_namespace} schema={schema} new_gen={new_authority_generation}"
+        ),
         network,
         target,
     )
@@ -3128,6 +3300,9 @@ fn config_outcome_json(record: &ConfigOpRecord) -> String {
                 ),
                 ConfigOutcome::PermitAssembled(op) => {
                     ("PERMIT_ASSEMBLED", operation_id_detail(*op))
+                }
+                ConfigOutcome::RecoveryAssembled(op) => {
+                    ("RECOVERY_ASSEMBLED", operation_id_detail(*op))
                 }
                 ConfigOutcome::NoChange => ("NO_CHANGE", String::new()),
                 ConfigOutcome::Refused(r) => (

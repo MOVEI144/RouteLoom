@@ -343,6 +343,32 @@ bool encode_vector(const std::string& codec, const Fields& fields,
     if (!status) return false;
     out.assign(enc.bytes.begin(), enc.bytes.begin() + enc.size);
     return true;
+  } else if (codec == "config_recovery") {
+    ep::ConfigRecoveryCommand command{};
+    command.config_namespace = static_cast<std::uint16_t>(at("config_namespace"));
+    command.schema = static_cast<std::uint16_t>(at("schema"));
+    command.network = at("network");
+    command.target = at("target");
+    command.authority = at("authority");
+    command.authority_generation =
+        static_cast<std::uint32_t>(at("authority_generation"));
+    command.authority_sequence = at("authority_sequence");
+    command.recovery_class =
+        static_cast<ep::ConfigRecoveryClass>(at("recovery_class"));
+    command.attest = static_cast<std::uint8_t>(at("attest"));
+    command.new_store_generation =
+        static_cast<std::uint32_t>(at("new_store_generation"));
+    command.new_authority_generation =
+        static_cast<std::uint32_t>(at("new_authority_generation"));
+    if (!hex_field(fields, "operation_id_hex", command.operation_id) ||
+        !present) {
+      return false;
+    }
+    ep::EncodedRecoveryCommand enc{};
+    status = ep::config_recovery_encode(command, enc);
+    if (!status) return false;
+    out.assign(enc.bytes.begin(), enc.bytes.begin() + enc.size);
+    return true;
   } else if (codec == "config_snapshot_input") {
     std::vector<std::uint8_t> snapshot;
     if (!hex_decode(fields.at("snapshot_hex"), snapshot)) return false;
@@ -448,6 +474,14 @@ bool decode_and_reencode(const std::string& codec, const std::vector<std::uint8_
            std::equal(reenc.bytes.begin(), reenc.bytes.begin() + reenc.size,
                       encoded.begin(), encoded.end());
   }
+  if (codec == "config_recovery") {
+    ep::ConfigRecoveryCommand command{};
+    ep::EncodedRecoveryCommand reenc{};
+    return ep::config_recovery_decode(to_view(encoded), command).ok() &&
+           ep::config_recovery_encode(command, reenc).ok() &&
+           std::equal(reenc.bytes.begin(), reenc.bytes.begin() + reenc.size,
+                      encoded.begin(), encoded.end());
+  }
   return false;
 }
 
@@ -496,6 +530,10 @@ bool decode_expect_error(const std::string& codec, const std::vector<std::uint8_
   if (codec == "config_command") {
     ep::ConfigCommand p{};
     return !ep::config_command_decode(view, p).ok();
+  }
+  if (codec == "config_recovery") {
+    ep::ConfigRecoveryCommand p{};
+    return !ep::config_recovery_decode(view, p).ok();
   }
   return false;
 }

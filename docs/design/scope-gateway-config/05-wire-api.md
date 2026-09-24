@@ -9,8 +9,8 @@
 | RLD1 v1 | Discover1、Offer2、Auth3等 | Discover/Offer body version2。header44B・flags0 |
 | Wire Service21 | 予約型 | payload v1: Query1/Descriptor2/Submit3/Receipt4/Pending5/Reject6 |
 | Wire Control22 | 予約型 | payload v1: ChallengeQuery1/Challenge2/StatusQuery3/Status4 |
-| ControlObject49/Chunk50/Ack51 | ChannelPlan kind1、RecoverySnapshot kind2 | ConfigPermit kind3、E2E multi-hopの接続 |
-| USB HostOps19 | PR #13 schema1/sub1〜5 | Gateway 0x10〜0x13、Config 0x20〜0x23 |
+| ControlObject49/Chunk50/Ack51 | ChannelPlan kind1、RecoverySnapshot kind2 | ConfigPermit kind3、ConfigRecovery kind4、E2E multi-hopの接続 |
+| USB HostOps19 | PR #13 schema1/sub1〜5 | Gateway 0x10〜0x13、Config 0x20〜0x24 |
 
 mainの49/50/51は宛先local・link-onlyとしてautonomy_sinkへ渡す。Configには**end-protectedでルーティングする新しい入口**が必要。end保護＋manifest kind3＋正当なtransactionをConfigへ、link-only kind1/2は既存移行処理へ分類する。Chunk/Ackはmanifestで確立した `(Network, origin, destination, object_hash, protection_class)` で分類。旧処理を別意味へ変更したり、認証失敗後に別parserへfallbackしたりしない。
 
@@ -99,6 +99,8 @@ Config局所reason表：0 OK、1 IN_PROGRESS、2 STALE_REVISION、3 BASE_HASH_MI
 
 permitは既存38B manifest(kind3)、38+nB chunk(n≤90)、37B object ACKで運ぶ。1024Bなら最大12chunk、774Bなら9chunk。全体一件・10秒reassembly、元challenge/Host期限以内。hashはCOSE全体のSHA-256。未manifest、範囲外、同offset異内容、digest不一致を拒否する。ACK Okは組立完了だけ、適用成功はStatus ACTIVEだけ。
 
+recovery object（`recovery_aad || RCR1 76B || tag16`）は同じmanifest/chunk/ACKをkind4の専用laneで運ぶ。journalのimpaired状態（quarantine/uncertain）で通常kind3 intakeが閉じていても受理され、独自のreassembly slot・署名domain（`RouteLoom/config-recover/v1`、devは`…-dev/v1`）を持つ。kind3形のpermitをkind4経路へ流しても受理しない。RCR1はrecovery_class（1=StoreRecover、2=AuthorityGeneration）・attest・新旧generation・operation_idを固定fieldで運び、reservedは0。store_generation床とresult dedupでreplay/逆行を拒否する。
+
 最初の1024B確保前に認証済み管理相手/対象/予算をAdmissionで確認。relayは再組立せずE2E bytesを転送する。失効・状態変更後は組立済みでも再検証する。protection-class別dispatchを追加し、旧ChannelPlan link-only経路を壊さない。
 
 ## 5.6 USB登録とcredit
@@ -117,6 +119,7 @@ USB FrameKind HostOps=19、既存schema1/sub1〜5は不変。実装済みcapabil
 | 0x21 ConfigPermit | H→G: target8＋permit bytes（payload残り1..1024。`object_len` fieldはなく長さは共通`payload_len`由来）。署名原本を転送 |
 | 0x22 ConfigStatus | G→H: target8/ControlStatus72 |
 | 0x23 ConfigChallenge | 双方向: target8/ControlQuery24またはChallenge92。request IDで形を固定 |
+| 0x24 ConfigRecover | H→G: target8＋recovery object bytes（payload残り1..1024、kind4 lane）。署名原本を転送 |
 
 USB result/outcomeは0 OK、1 BUSY、2 STALE、3 DENIED、4 UNSUPPORTED、5 INVALID、6 STORAGE、7 INDETERMINATE。IngressAck 0はReceiveLogへ実格納済みの場合だけ。receipt/digest/messagekeyの照合前に信用しない。
 
@@ -124,7 +127,7 @@ HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB ses
 
 ## 5.7 Host canonical/API
 
-既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/getを実装済みで追加し、一daemonを維持。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
+既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/get/recover/trust_updateを実装済みで追加し、一daemonを維持。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
 
 Gateway canonical schema2は既存26B field形を保ち、dest_kind=1のpayload_len直前に `scope:u8/reserved:u8/token16/gateway_boot8/egress_gateway8` を加える（34B）。payload≤96で最大156B、SUBMIT固定108Bを加え264B。schema1 Node=0はそのまま、schema1の未実装Gatewayを自動変換しない。
 

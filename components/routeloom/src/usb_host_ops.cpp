@@ -1189,12 +1189,13 @@ bool config_result_valid(const std::uint16_t result) noexcept {
   return false;
 }
 
-// The body length a 0x21/0x22/0x23 reply may carry, by subcommand. The
-// permit reply is result-only; the query replies carry the fixed endpoint
-// body on Ok and none on failure — so {0, N} is the legal set.
+// The body length a 0x21/0x22/0x23/0x24 reply may carry, by subcommand.
+// The object replies are result-only; the query replies carry the fixed
+// endpoint body on Ok and none on failure — so {0, N} is the legal set.
 bool config_reply_body_valid(const HostOpsSub sub, const std::size_t body_size) noexcept {
   switch (sub) {
     case HostOpsSub::ConfigPermit:
+    case HostOpsSub::ConfigRecover:
       return body_size == 0;
     case HostOpsSub::ConfigStatus:
       return body_size == 0 || body_size == kConfigStatusBodySize;
@@ -1309,6 +1310,40 @@ Status encode_config_permit(const ConfigPermitRequest& request,
       static_cast<std::uint16_t>(8 + request.permit.size));
   if (status) status = writer.write_u64(request.target);
   if (status) status = writer.write_bytes(request.permit);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_config_recover(const ByteView inner,
+                             ConfigRecoverRequest& out) noexcept {
+  out = ConfigRecoverRequest{};
+  ByteView payload{};
+  // Same layout as 0x21: target:u64 (8) + object (1..kConfigPermitMax).
+  const Status status =
+      gateway_body(inner, HostOpsSub::ConfigRecover, 8 + 1, 8 + kConfigPermitMax,
+                   payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  Status read = reader.read_u64(out.target);
+  if (!read) return read;
+  out.object = ByteView{payload.data + reader.consumed(), reader.remaining()};
+  return Status::success();
+}
+
+Status encode_config_recover(const ConfigRecoverRequest& request,
+                             const MutableByteView out,
+                             std::size_t& written) noexcept {
+  written = 0;
+  if (request.object.size == 0 || request.object.size > kConfigPermitMax) {
+    return Status::error(StatusCode::InvalidArgument, "config recover size");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(
+      writer, HostOpsSub::ConfigRecover,
+      static_cast<std::uint16_t>(8 + request.object.size));
+  if (status) status = writer.write_u64(request.target);
+  if (status) status = writer.write_bytes(request.object);
   if (!status) return status;
   written = writer.size();
   return Status::success();

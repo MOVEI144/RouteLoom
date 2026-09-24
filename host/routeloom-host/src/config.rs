@@ -17,12 +17,14 @@
 use std::collections::HashMap;
 
 use routeloom_protocol::host_ops::{
-    self, ConfigOpsResult, SUB_CONFIG_CHALLENGE, SUB_CONFIG_PERMIT, SUB_CONFIG_STATUS,
+    self, ConfigOpsResult, SUB_CONFIG_CHALLENGE, SUB_CONFIG_PERMIT, SUB_CONFIG_RECOVER,
+    SUB_CONFIG_STATUS,
 };
 use routeloom_wire::endpoint::{
-    config_command_encode, config_namespace_valid, config_patch_apply, config_snapshot_hash_input,
-    config_tlv_decode, control_challenge_decode, control_status_decode, ConfigCommand, ConfigField,
-    ControlChallenge, ControlStatus,
+    config_command_encode, config_namespace_valid, config_patch_apply, config_recovery_encode,
+    config_snapshot_hash_input, config_tlv_decode, control_challenge_decode, control_status_decode,
+    ConfigCommand, ConfigField, ConfigRecoveryClass, ConfigRecoveryCommand, ControlChallenge,
+    ControlStatus, RCR1_SIZE,
 };
 
 use crate::canonical::sha256;
@@ -37,6 +39,15 @@ pub const CONFIG_DEV_PERMIT_DOMAIN: &[u8] = b"RouteLoom/config-permit-dev/v1\0";
 pub const CONFIG_PERMIT_AAD_SIZE: usize = CONFIG_PERMIT_DOMAIN.len() + 8 + 8 + 2; // 45
 pub const CONFIG_DEV_PERMIT_TAG_SIZE: usize = 16;
 pub const CONFIG_PERMIT_OBJECT_MAX: usize = 1024;
+// The recovery lane's own domains (mirror of config.hpp/config_dev.hpp):
+// object = recovery_aad || RCR1 || tag16, fixed 46+76+16 = 138 B. The
+// domains differ on BOTH sides of the envelope so a kind-4 object can
+// never verify as a kind-3 permit, nor the reverse.
+pub const CONFIG_RECOVERY_DOMAIN: &[u8] = b"RouteLoom/config-recover/v1\0";
+pub const CONFIG_DEV_RECOVERY_DOMAIN: &[u8] = b"RouteLoom/config-recover-dev/v1\0";
+pub const CONFIG_RECOVERY_AAD_SIZE: usize = CONFIG_RECOVERY_DOMAIN.len() + 8 + 8 + 2; // 46
+pub const CONFIG_DEV_RECOVERY_OBJECT_SIZE: usize =
+    CONFIG_RECOVERY_AAD_SIZE + RCR1_SIZE + CONFIG_DEV_PERMIT_TAG_SIZE;
 /// Minimum dev-permit envelope (aad || shortest RCC1 header || tag). Only the
 /// host-side self-check verifier consults it — the production path signs, and
 /// the device is the verifier — so it is test-only like `dev_permit_verify`.
@@ -149,6 +160,109 @@ pub fn config_dev_permit_tag(
     let mut tag = [0_u8; CONFIG_DEV_PERMIT_TAG_SIZE];
     tag.copy_from_slice(&mac[..CONFIG_DEV_PERMIT_TAG_SIZE]);
     Ok(tag)
+}
+
+/// recovery_aad = recovery_domain || network u64 || target u64 || ns u16
+/// (46 B). Mirror of `config_recovery_aad`.
+pub fn config_recovery_aad(
+    network: u64,
+    target: u64,
+    config_namespace: u16,
+) -> Result<[u8; CONFIG_RECOVERY_AAD_SIZE], ConfigError> {
+    if !config_namespace_valid(config_namespace) {
+        return Err(ConfigError::InvalidArgument);
+    }
+    let mut out = [0_u8; CONFIG_RECOVERY_AAD_SIZE];
+    out[..CONFIG_RECOVERY_DOMAIN.len()].copy_from_slice(CONFIG_RECOVERY_DOMAIN);
+    let mut cursor = CONFIG_RECOVERY_DOMAIN.len();
+    out[cursor..cursor + 8].copy_from_slice(&network.to_be_bytes());
+    cursor += 8;
+    out[cursor..cursor + 8].copy_from_slice(&target.to_be_bytes());
+    cursor += 8;
+    out[cursor..cursor + 2].copy_from_slice(&config_namespace.to_be_bytes());
+    Ok(out)
+}
+
+/// tag = HMAC-SHA256(dev_key, dev_recovery_domain || aad || canonical)[..16].
+/// Mirror of `config_dev_recovery_tag` — the canonical must be one RCR1 body.
+pub fn config_dev_recovery_tag(
+    dev_key: &[u8],
+    aad: &[u8; CONFIG_RECOVERY_AAD_SIZE],
+    canonical: &[u8],
+) -> Result<[u8; CONFIG_DEV_PERMIT_TAG_SIZE], ConfigError> {
+    if dev_key.is_empty() || canonical.len() != RCR1_SIZE {
+        return Err(ConfigError::InvalidArgument);
+    }
+    let mut input =
+        Vec::with_capacity(CONFIG_DEV_RECOVERY_DOMAIN.len() + aad.len() + canonical.len());
+    input.extend_from_slice(CONFIG_DEV_RECOVERY_DOMAIN);
+    input.extend_from_slice(aad);
+    input.extend_from_slice(canonical);
+    let mac = hmac_sha256(dev_key, &input);
+    let mut tag = [0_u8; CONFIG_DEV_PERMIT_TAG_SIZE];
+    tag.copy_from_slice(&mac[..CONFIG_DEV_PERMIT_TAG_SIZE]);
+    Ok(tag)
+}
+
+/// Sign a canonical RCR1 command into the dev recovery envelope:
+/// object = recovery_aad || rcr1 || tag16 (fixed 138 B). Mirrors
+/// `DevConfigPermitSigner::sign_recovery`.
+pub fn dev_sign_recovery(
+    dev_key: &[u8],
+    command: &ConfigRecoveryCommand,
+    canonical: &[u8],
+) -> Result<Vec<u8>, ConfigError> {
+    if canonical.len() != RCR1_SIZE {
+        return Err(ConfigError::InvalidArgument);
+    }
+    let aad = config_recovery_aad(command.network, command.target, command.config_namespace)?;
+    let tag = config_dev_recovery_tag(dev_key, &aad, canonical)?;
+    let mut object = Vec::with_capacity(CONFIG_DEV_RECOVERY_OBJECT_SIZE);
+    object.extend_from_slice(&aad);
+    object.extend_from_slice(canonical);
+    object.extend_from_slice(&tag);
+    Ok(object)
+}
+
+/// Verify a dev recovery object (round-trip tests only — same argument as
+/// `dev_permit_verify`). Returns the authenticated RCR1 canonical.
+#[cfg(test)]
+pub fn dev_recovery_verify(
+    dev_key: &[u8],
+    network: u64,
+    target: u64,
+    config_namespace: u16,
+    authorized_issuer: u64,
+    authority_generation: u32,
+    object: &[u8],
+) -> Result<Vec<u8>, ConfigError> {
+    if object.len() != CONFIG_DEV_RECOVERY_OBJECT_SIZE {
+        return Err(ConfigError::Malformed);
+    }
+    let aad: [u8; CONFIG_RECOVERY_AAD_SIZE] = object[..CONFIG_RECOVERY_AAD_SIZE]
+        .try_into()
+        .expect("fixed");
+    let canonical = &object[CONFIG_RECOVERY_AAD_SIZE..CONFIG_RECOVERY_AAD_SIZE + RCR1_SIZE];
+    let tag = &object[CONFIG_RECOVERY_AAD_SIZE + RCR1_SIZE..];
+    let expected_aad = config_recovery_aad(network, target, config_namespace)?;
+    if !constant_time_equal(&aad, &expected_aad) {
+        return Err(ConfigError::Stale);
+    }
+    let expected_tag = config_dev_recovery_tag(dev_key, &aad, canonical)?;
+    if !constant_time_equal(tag, &expected_tag) {
+        return Err(ConfigError::Stale);
+    }
+    let command = routeloom_wire::endpoint::config_recovery_decode(canonical)
+        .map_err(|_| ConfigError::Malformed)?;
+    if command.network != network
+        || command.target != target
+        || command.config_namespace != config_namespace
+        || command.authority != authorized_issuer
+        || command.authority_generation != authority_generation
+    {
+        return Err(ConfigError::Stale);
+    }
+    Ok(canonical.to_vec())
 }
 
 /// Sign a canonical RCC1 command into the dev permit envelope:
@@ -269,6 +383,16 @@ pub struct IssuedPermit {
     pub operation_id: [u8; 16],
     pub next_snapshot_hash: [u8; 32],
     pub next_revision: u64,
+}
+
+/// The issuer's output for one accepted recovery issuance: the canonical
+/// RCR1 (outbox-persisted first, same as propose) plus the signed kind-4
+/// object to retransmit verbatim on the recovery lane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IssuedRecovery {
+    pub canonical: Vec<u8>,
+    pub object: Vec<u8>,
+    pub operation_id: [u8; 16],
 }
 
 /// The Authority-side issuer (04 §4.3). Tracks challenge freshness per
@@ -446,6 +570,56 @@ impl ConfigIssuer {
             next_revision: command.next_revision,
         }))
     }
+
+    /// Issue a signed recovery object (04 §4.7, 06 §6.3): an RCR1 command
+    /// under the CURRENT ledger generation — StoreRecover carries the
+    /// attested new store generation for an impaired target journal,
+    /// AuthorityGeneration countersigns `new_authority_generation` (issue
+    /// it BEFORE the authority recovers to that generation, so targets
+    /// pinned to the current one accept the transition). No challenge
+    /// binding by design — replay protection is the store-generation
+    /// floor plus the result dedup on the target.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_recovery(
+        &self,
+        target: u64,
+        config_namespace: u16,
+        schema: u16,
+        recovery_class: ConfigRecoveryClass,
+        attest: u8,
+        new_store_generation: u32,
+        new_authority_generation: u32,
+        authority_generation: u32,
+        authority_sequence: u64,
+        operation_id: [u8; 16],
+    ) -> Result<IssuedRecovery, ConfigError> {
+        if all_zero(&operation_id) {
+            return Err(ConfigError::InvalidArgument);
+        }
+        let command = ConfigRecoveryCommand {
+            recovery_class,
+            attest,
+            config_namespace,
+            schema,
+            network: self.network,
+            target,
+            authority: self.authority,
+            authority_generation,
+            authority_sequence,
+            operation_id,
+            new_store_generation,
+            new_authority_generation,
+        };
+        let mut canonical = Vec::new();
+        config_recovery_encode(&command, &mut canonical)
+            .map_err(|_| ConfigError::InvalidArgument)?;
+        let object = dev_sign_recovery(&self.dev_key, &command, &canonical)?;
+        Ok(IssuedRecovery {
+            canonical,
+            object,
+            operation_id,
+        })
+    }
 }
 
 // --- Config lane (USB host_ops request lifecycle) -----------------------------
@@ -494,6 +668,26 @@ pub enum ConfigRequest {
         patch: Vec<ConfigField>,
         apply_budget_ms: u32,
     },
+    /// Sign an RCR1 recovery command and transfer it on the kind-4 lane
+    /// (0x24), then read the operation's terminal status. No challenge
+    /// step: recovery commands are nonce-free — the store-generation
+    /// floor and result dedup carry replay protection.
+    ///
+    /// StoreRecover: `new_store_generation` attests the target journal's
+    /// fresh store generation, `attest` 0 adopts the surviving record,
+    /// 1 attests explicit reprovisioning. `new_authority_generation` 0.
+    /// AuthorityGeneration: countersigns `new_authority_generation` for
+    /// the 03-signing trust update; issue it BEFORE the authority
+    /// recovers to that generation. `attest`/`new_store_generation` 0.
+    Recover {
+        target: u64,
+        config_namespace: u16,
+        schema: u16,
+        recovery_class: ConfigRecoveryClass,
+        attest: u8,
+        new_store_generation: u32,
+        new_authority_generation: u32,
+    },
 }
 
 /// The terminal outcome the lane reports for one request — never a bare
@@ -511,6 +705,10 @@ pub enum ConfigOutcome {
     /// `config.get` can still name the operation a follow-up StatusQuery
     /// would read.
     PermitAssembled(Option<[u8; 16]>),
+    /// The recovery object assembled at the target (0x24 Ok) — NOT a
+    /// recovery verdict. The lane follows with a StatusQuery on the
+    /// minted operation_id, whose ControlStatus is the real outcome.
+    RecoveryAssembled(Option<[u8; 16]>),
     /// The patch was a no-op (NO_CHANGE): nothing was signed or sent.
     NoChange,
     /// Device-side refusal (Busy/Denied/Unsupported/Invalid/NoRoute).
@@ -546,6 +744,8 @@ enum Phase {
     Challenge { schema: u16, client_nonce: [u8; 16] },
     /// Waiting on a 0x21 reply (permit transfer ack) before the status read.
     Permit,
+    /// Waiting on a 0x24 reply (recovery object ack) before the status read.
+    Recover,
     /// Waiting on a 0x22 reply carrying the ControlStatus body. The body
     /// must echo the queried operation_id.
     Status { operation_id: [u8; 16] },
@@ -578,6 +778,16 @@ struct ProposeState {
     authority_sequence: u64,
 }
 
+/// Per-request state for a Recover in progress — the minted operation_id
+/// plus the identity the status follow-up needs. The command fields are
+/// consumed at submit (issue_recovery is nonce-free), so they are not
+/// carried here.
+struct RecoverState {
+    target: u64,
+    config_namespace: u16,
+    operation_id: [u8; 16],
+}
+
 /// The lane state machine. `next_request` mirrors the dispatcher's request-id
 /// allocation; entropy for operation_id / client_nonce is injected so tests
 /// are deterministic.
@@ -586,6 +796,7 @@ pub struct ConfigLane {
     next_request: u64,
     in_flight: Option<InFlight>,
     propose: Option<ProposeState>,
+    recover: Option<RecoverState>,
     /// Authority identity inputs the ledger layer supplies per propose.
     authority_generation: u32,
     authority_sequence: u64,
@@ -606,6 +817,7 @@ impl ConfigLane {
             next_request: 0,
             in_flight: None,
             propose: None,
+            recover: None,
             authority_generation,
             authority_sequence,
             entropy,
@@ -693,6 +905,42 @@ impl ConfigLane {
                 });
                 self.emit_challenge(target, config_namespace, schema, now_ms)
             }
+            ConfigRequest::Recover {
+                target,
+                config_namespace,
+                schema,
+                recovery_class,
+                attest,
+                new_store_generation,
+                new_authority_generation,
+            } => {
+                let operation_id = self.draw_nonce();
+                // No challenge step: recovery commands are nonce-free —
+                // sign immediately and transfer on the kind-4 lane.
+                let issued = self.issuer.issue_recovery(
+                    target,
+                    config_namespace,
+                    schema,
+                    recovery_class,
+                    attest,
+                    new_store_generation,
+                    new_authority_generation,
+                    self.authority_generation,
+                    self.authority_sequence,
+                    operation_id,
+                );
+                match issued {
+                    Ok(issued) => {
+                        self.recover = Some(RecoverState {
+                            target,
+                            config_namespace,
+                            operation_id,
+                        });
+                        self.emit_recover(target, config_namespace, issued.object, now_ms)
+                    }
+                    Err(error) => ConfigStep::Done(map_issue_error(error)),
+                }
+            }
         }
     }
 
@@ -774,6 +1022,34 @@ impl ConfigLane {
         ConfigStep::Emit { request, body }
     }
 
+    fn emit_recover(
+        &mut self,
+        target: u64,
+        config_namespace: u16,
+        object: Vec<u8>,
+        now_ms: u64,
+    ) -> ConfigStep {
+        let request = self.alloc_request();
+        let body = match host_ops::encode_config_recover(&host_ops::ConfigRecoverRequest {
+            target,
+            object,
+        }) {
+            Ok(body) => body,
+            Err(_) => {
+                self.recover = None;
+                return ConfigStep::Done(ConfigOutcome::ProtocolError);
+            }
+        };
+        self.in_flight = Some(InFlight {
+            request,
+            phase: Phase::Recover,
+            deadline_ms: now_ms + CONFIG_PERMIT_TIMEOUT_MS,
+            target,
+            config_namespace,
+        });
+        ConfigStep::Emit { request, body }
+    }
+
     /// Consume an inbound reply body for `request`. `inner` is the verified
     /// host_ops inner body (schema|sub|len|payload). Returns Done when the
     /// request resolved, or the next Emit step for a multi-step propose.
@@ -787,6 +1063,7 @@ impl ConfigLane {
             // cleanly now, so the lane clears rather than staying armed
             // behind an op that is already resolving ProtocolError.
             self.propose = None;
+            self.recover = None;
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
         }
         match in_flight.phase {
@@ -802,6 +1079,7 @@ impl ConfigLane {
                 now_ms,
             ),
             Phase::Permit => self.on_permit_reply(inner, in_flight.target, now_ms),
+            Phase::Recover => self.on_recover_reply(inner, in_flight.target, now_ms),
             Phase::Status { operation_id } => self.on_status_reply(
                 inner,
                 in_flight.target,
@@ -824,11 +1102,16 @@ impl ConfigLane {
             // notification cannot resolve the outstanding request, and the
             // lane must not stay armed behind an already-resolved op.
             self.propose = None;
+            self.recover = None;
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
         }
-        let operation_id = self.propose.take().map(|p| p.operation_id);
+        let operation_id = self
+            .propose
+            .take()
+            .map(|p| p.operation_id)
+            .or_else(|| self.recover.take().map(|r| r.operation_id));
         ConfigStep::Done(match in_flight.phase {
-            Phase::Permit => ConfigOutcome::Indeterminate(operation_id),
+            Phase::Permit | Phase::Recover => ConfigOutcome::Indeterminate(operation_id),
             _ => ConfigOutcome::Timeout,
         })
     }
@@ -841,9 +1124,13 @@ impl ConfigLane {
             return None;
         }
         let phase = self.in_flight.take().map(|i| i.phase)?;
-        let operation_id = self.propose.take().map(|p| p.operation_id);
+        let operation_id = self
+            .propose
+            .take()
+            .map(|p| p.operation_id)
+            .or_else(|| self.recover.take().map(|r| r.operation_id));
         Some(match phase {
-            Phase::Permit => ConfigOutcome::Indeterminate(operation_id),
+            Phase::Permit | Phase::Recover => ConfigOutcome::Indeterminate(operation_id),
             _ => ConfigOutcome::Timeout,
         })
     }
@@ -984,6 +1271,43 @@ impl ConfigLane {
         self.emit_status(target, config_namespace, operation_id, now_ms)
     }
 
+    fn on_recover_reply(&mut self, inner: &[u8], target: u64, now_ms: u64) -> ConfigStep {
+        let reply = match host_ops::decode_config_reply(inner, SUB_CONFIG_RECOVER) {
+            Ok(reply) => reply,
+            Err(_) => {
+                self.recover = None;
+                return ConfigStep::Done(ConfigOutcome::ProtocolError);
+            }
+        };
+        if reply.target != target {
+            self.recover = None;
+            return ConfigStep::Done(ConfigOutcome::ProtocolError);
+        }
+        let result = match ConfigOpsResult::try_from_u16(reply.result) {
+            Ok(result) => result,
+            Err(_) => {
+                self.recover = None;
+                return ConfigStep::Done(ConfigOutcome::ProtocolError);
+            }
+        };
+        if result != ConfigOpsResult::Ok {
+            let operation_id = self.recover.take().map(|r| r.operation_id);
+            return ConfigStep::Done(map_refusal(result, operation_id));
+        }
+        // The object assembled — NOT a recovery verdict. Read the
+        // operation's real status on the same operation_id; the
+        // RecoverState stays live until the status reply resolves it.
+        let Some(recover) = self.recover.as_ref() else {
+            return ConfigStep::Done(ConfigOutcome::RecoveryAssembled(None));
+        };
+        let (target, config_namespace, operation_id) = (
+            recover.target,
+            recover.config_namespace,
+            recover.operation_id,
+        );
+        self.emit_status(target, config_namespace, operation_id, now_ms)
+    }
+
     fn on_status_reply(
         &mut self,
         inner: &[u8],
@@ -993,6 +1317,7 @@ impl ConfigLane {
         _now_ms: u64,
     ) -> ConfigStep {
         self.propose = None;
+        self.recover = None;
         let reply = match host_ops::decode_config_reply(inner, SUB_CONFIG_STATUS) {
             Ok(reply) => reply,
             Err(_) => return ConfigStep::Done(ConfigOutcome::ProtocolError),
@@ -1155,6 +1480,45 @@ mod tests {
         // Wrong authority / generation deny.
         assert!(dev_permit_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x43, 1, &issued.permit).is_err());
         assert!(dev_permit_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 2, &issued.permit).is_err());
+    }
+
+    #[test]
+    fn signed_recovery_round_trips_and_tamper_rejected() {
+        let issuer = ConfigIssuer::new(DEV_KEY.to_vec(), 0xAAAA, 0x42, 100);
+        let issued = issuer
+            .issue_recovery(
+                0x99,
+                1,
+                1,
+                ConfigRecoveryClass::StoreRecover,
+                1,
+                42,
+                0,
+                1,
+                9,
+                [0x7E; 16],
+            )
+            .unwrap();
+        // Envelope is recovery_aad(46) || rcr1(76) || tag(16).
+        assert_eq!(issued.object.len(), CONFIG_DEV_RECOVERY_OBJECT_SIZE);
+        assert_eq!(&issued.object[..28], b"RouteLoom/config-recover/v1\0");
+        let recovered =
+            dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 1, &issued.object).unwrap();
+        assert_eq!(recovered, issued.canonical);
+        // Tamper anywhere and verification denies.
+        for pos in [0, 27, 50, issued.object.len() - 1, issued.object.len() / 2] {
+            let mut bad = issued.object.clone();
+            bad[pos] ^= 0x01;
+            assert!(dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 1, &bad).is_err());
+        }
+        // Wrong dev key / authority / generation deny.
+        assert!(dev_recovery_verify(b"other", 0xAAAA, 0x99, 1, 0x42, 1, &issued.object).is_err());
+        assert!(dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x43, 1, &issued.object).is_err());
+        assert!(dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 2, &issued.object).is_err());
+        // A permit-shaped object is not a recovery object (138 B fixed).
+        assert!(
+            dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 1, &issued.object[..137]).is_err()
+        );
     }
 
     #[test]

@@ -18,6 +18,14 @@
 // The verifier additionally enforces the ConfigPermitContext identity
 // policy the journal supplies — transport and MAC are never authority on
 // their own.
+//
+// Recovery envelope (kind-4 objects, same construction, own domain):
+//   object = recovery_aad || canonical_rcr1 || tag
+//   recovery_aad = kConfigRecoveryAadSize bytes from config_recovery_aad()
+//   tag    = HMAC-SHA256(dev_key, input)[..16]
+//   input  = "RouteLoom/config-recover-dev/v1" || NUL || aad || canonical
+// A recovery object can never verify as a permit and vice versa — the AAD
+// domains and the MAC input domains differ on both sides.
 
 #include <array>
 #include <cstddef>
@@ -37,12 +45,21 @@ constexpr std::size_t kConfigDevPermitMin =
     kConfigPermitAadSize + endpoint::kRcc1HeaderSize + kConfigDevPermitTagSize;
 // Domain separator for the dev HMAC (NUL-terminated like kConfigPermitDomain).
 inline constexpr char kConfigDevPermitDomain[] = "RouteLoom/config-permit-dev/v1";
+// The recovery lane's own HMAC domain — a dev recovery object is
+// distinguishable from a dev permit by tag alone.
+inline constexpr char kConfigDevRecoveryDomain[] =
+    "RouteLoom/config-recover-dev/v1";
 
 // Shared tag computation: out = HMAC-SHA256(dev_key,
 // kConfigDevPermitDomain || NUL || aad || canonical)[..16]. Both the C++
 // pair and the Rust issuer use this exact input layout.
 Status config_dev_permit_tag(ByteView dev_key, ByteView aad, ByteView canonical,
                              std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept;
+
+// The recovery variant: same HMAC construction under
+// kConfigDevRecoveryDomain — the aad argument carries the recovery AAD.
+Status config_dev_recovery_tag(ByteView dev_key, ByteView aad, ByteView canonical,
+                               std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept;
 
 // Issuer side (dev profile). `dev_key` is caller-owned and must outlive the
 // signer; an empty key reports !ready() and every sign fails honestly.
@@ -55,6 +72,11 @@ class DevConfigPermitSigner final : public ConfigPermitSigner {
   }
   Status sign(const endpoint::ConfigCommand& command, ByteView canonical,
               ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override;
+  // Recovery object minting (same envelope under the recovery domains):
+  // aad || RCR1 || tag, fixed at kConfigRecoveryAadSize + kRcr1Size + 16.
+  Status sign_recovery(const endpoint::ConfigRecoveryCommand& command,
+                       ByteView canonical,
+                       ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override;
 
  private:
   ByteView dev_key_{};
@@ -76,12 +98,19 @@ class DevConfigAuthorityVerifier final : public ConfigAuthorityVerifier {
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
+  // The kind-4 lane's envelope check: recovery AAD binding + recovery
+  // domain tag + RCR1 decode + the same identity policy, including the
+  // generation pin (context.authority_generation).
+  Status verify_recovery(const ConfigPermitContext& context, ByteView object,
+                         endpoint::EncodedRecoveryCommand& payload,
+                         bool& verified) noexcept override;
 
  private:
   ByteView dev_key_{};
   // Decode scratch — a stack local would cost ~1.8 KiB of the Owner task's
   // 8 KiB stack on top of the reassembly/submit call chain.
   endpoint::ConfigCommand command_{};
+  endpoint::ConfigRecoveryCommand recovery_command_{};
 };
 
 }  // namespace routeloom

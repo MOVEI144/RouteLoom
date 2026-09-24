@@ -782,10 +782,10 @@ impl Dispatcher {
                 .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Busy)));
             return;
         }
-        if let ConfigRequest::Propose { .. } = request {
-            // A signed permit needs a configured authority, a live mesh
-            // network to bind into the AAD, and an issuer that actually holds
-            // a signing key — none of these is client-supplied.
+        if let ConfigRequest::Propose { .. } | ConfigRequest::Recover { .. } = request {
+            // A signed permit/recovery object needs a configured authority,
+            // a live mesh network to bind into the AAD, and an issuer that
+            // actually holds a signing key — none of these is client-supplied.
             if cfg.authority == 0 || link.network == 0 || !cfg.lane.issuer_ready() {
                 self.config_done
                     .push((op_id, ConfigOutcome::Refused(ConfigOpsResult::Denied)));

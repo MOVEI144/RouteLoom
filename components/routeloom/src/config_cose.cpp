@@ -109,7 +109,13 @@ bool cose_be32_is_zero(const std::array<std::uint8_t, 32>& v) noexcept {
   return acc == 0;
 }
 
-Status cose_permit_parse(const ByteView permit, CosePermitParts& out) noexcept {
+namespace {
+
+// Shared envelope walk — the two public parsers differ only in the
+// payload bound (RCC1 body range vs. exactly one RCR1 body).
+Status cose_parse_parts(const ByteView permit, CosePermitParts& out,
+                        const std::size_t payload_min,
+                        const std::size_t payload_max) noexcept {
   out = CosePermitParts{};
   if (permit.size < 24 || permit.size > kCosePermitMax) {
     return Status::error(StatusCode::ProtocolError, "cose permit size");
@@ -137,8 +143,7 @@ Status cose_permit_parse(const ByteView permit, CosePermitParts& out) noexcept {
   ByteView payload{};
   status = cbor_read_bstr(permit, pos, payload, "cose payload");
   if (!status) return status;
-  if (payload.size < endpoint::kRcc1HeaderSize ||
-      payload.size > endpoint::kRcc1MaxTotal) {
+  if (payload.size < payload_min || payload.size > payload_max) {
     return Status::error(StatusCode::ProtocolError, "cose payload bounds");
   }
   ByteView signature{};
@@ -154,12 +159,24 @@ Status cose_permit_parse(const ByteView permit, CosePermitParts& out) noexcept {
   return Status::success();
 }
 
+}  // namespace
+
+Status cose_permit_parse(const ByteView permit, CosePermitParts& out) noexcept {
+  return cose_parse_parts(permit, out, endpoint::kRcc1HeaderSize,
+                          endpoint::kRcc1MaxTotal);
+}
+
+Status cose_recovery_parse(const ByteView object, CosePermitParts& out) noexcept {
+  return cose_parse_parts(object, out, endpoint::kRcr1Size, endpoint::kRcr1Size);
+}
+
 Status cose_sig_structure(const ByteView protected_bytes,
                           const ByteView external_aad, const ByteView payload,
                           ByteBuffer<kCosePermitMax + 64>& out) noexcept {
   out.clear();
   if (protected_bytes.size != kProtectedBstrSize ||
-      external_aad.size != kConfigPermitAadSize ||
+      (external_aad.size != kConfigPermitAadSize &&
+       external_aad.size != kConfigRecoveryAadSize) ||
       payload.size > endpoint::kRcc1MaxTotal) {
     return Status::error(StatusCode::InvalidArgument, "sig_structure fields");
   }
@@ -254,6 +271,67 @@ Status CoseEsp256AuthorityVerifier::verify_permit(
   }
   if (parts.payload.size > payload.bytes.size()) {
     return Status::error(StatusCode::NoCapacity, "cose payload");
+  }
+  std::memcpy(payload.bytes.data(), parts.payload.data, parts.payload.size);
+  payload.size = parts.payload.size;
+  verified = true;
+  return Status::success();
+}
+
+Status CoseEsp256AuthorityVerifier::verify_recovery(
+    const ConfigPermitContext& context, const ByteView object,
+    endpoint::EncodedRecoveryCommand& payload, bool& verified) noexcept {
+  verified = false;
+  if (!provisioned_) {
+    return Status::error(StatusCode::InvalidState, "cose key unprovisioned");
+  }
+  CosePermitParts parts{};
+  const Status parsed = cose_recovery_parse(object, parts);
+  if (!parsed.ok()) return parsed;
+  if (parts.kid != authority_id_ || parts.kid != context.authorized_issuer) {
+    return Status::success();  // foreign authority: denied, never verified
+  }
+
+  // Same R/S range + low-S canonicality rule before the point multiply.
+  std::array<std::uint8_t, 32> r{}, s{};
+  std::memcpy(r.data(), parts.signature.data, 32);
+  std::memcpy(s.data(), parts.signature.data + 32, 32);
+  if (cose_be32_is_zero(r) || cose_be32_is_zero(s) ||
+      cose_be32_cmp(r, kSecp256r1Order) >= 0 ||
+      cose_be32_cmp(s, kSecp256r1Order) >= 0 ||
+      cose_be32_cmp(s, kSecp256r1HalfOrder) > 0) {
+    return Status::success();  // out-of-range / non-canonical: denied
+  }
+
+  // The recovery lane's own external AAD — a permit's 45 B aad can never
+  // alias this Sig_structure.
+  ByteBuffer<kConfigRecoveryAadSize> aad{};
+  const Status aad_ok = config_recovery_aad(context.network, context.target,
+                                          context.config_namespace, aad);
+  if (!aad_ok.ok()) return aad_ok;
+  ByteBuffer<kCosePermitMax + 64> to_verify{};
+  const Status built = cose_sig_structure(parts.protected_bytes, aad.view(),
+                                          parts.payload, to_verify);
+  if (!built.ok()) return built;
+  ScopeDigest digest{};
+  sha256(to_verify.view(), digest);
+  if (uECC_verify(public_key_.data(), digest.data(),
+                  static_cast<unsigned>(digest.size()),
+                  parts.signature.data, uECC_secp256r1()) == 0) {
+    return Status::success();  // bad signature: denied
+  }
+
+  // Authentic envelope — decode RCR1 and apply the same identity policy
+  // the permit path enforces (generation pin included).
+  const Status decoded =
+      endpoint::config_recovery_decode(parts.payload, recovery_command_);
+  if (!decoded.ok()) return decoded;
+  if (recovery_command_.network != context.network ||
+      recovery_command_.target != context.target ||
+      recovery_command_.config_namespace != context.config_namespace ||
+      recovery_command_.authority != context.authorized_issuer ||
+      recovery_command_.authority_generation != context.authority_generation) {
+    return Status::success();  // not the configured authority: denied
   }
   std::memcpy(payload.bytes.data(), parts.payload.data, parts.payload.size);
   payload.size = parts.payload.size;

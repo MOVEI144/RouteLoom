@@ -63,6 +63,9 @@ struct CosePermitParts {
 // Parse the fixed RLCP1 envelope shape. Cheap checks only — no crypto.
 // Returns InvalidArgument/ProtocolError on ANY deviation from the profile.
 Status cose_permit_parse(ByteView permit, CosePermitParts& out) noexcept;
+// The same envelope walk for the recovery lane: identical COSE_Sign1
+// shape, payload constrained to exactly one RCR1 body (76 B).
+Status cose_recovery_parse(ByteView object, CosePermitParts& out) noexcept;
 
 // Encode the Sig_structure for verification: caller provides the target's
 // expected external_aad (45 bytes from config_permit_aad) — wire-supplied
@@ -98,12 +101,19 @@ class CoseEsp256AuthorityVerifier final : public ConfigAuthorityVerifier {
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
+  // The kind-4 lane under the same COSE profile: RCR1 payload, recovery
+  // external AAD, the same kid/R-S/low-S rules and the same identity
+  // policy — including the generation pin.
+  Status verify_recovery(const ConfigPermitContext& context, ByteView object,
+                         endpoint::EncodedRecoveryCommand& payload,
+                         bool& verified) noexcept override;
 
  private:
   std::uint64_t authority_id_{0};
   std::array<std::uint8_t, kCosePublicKeySize> public_key_{};
   bool provisioned_{false};
   endpoint::ConfigCommand command_{};
+  endpoint::ConfigRecoveryCommand recovery_command_{};
 };
 
 }  // namespace routeloom

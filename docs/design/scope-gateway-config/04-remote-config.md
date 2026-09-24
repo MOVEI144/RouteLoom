@@ -85,6 +85,8 @@ NVS write amplification（実装から導出した回数であり、実測のwea
 | 片slot破損 | 生存recordから復旧。ただし保存世代の不明な新recordを成功扱いしない |
 | 両slot/必要metadata全損 | 明示的な再配備・新しい信頼世代が必要。revision0へ自動復帰しない |
 
+「明示的な再配備・新しい信頼世代」の遠隔経路は署名済みRCR1 recovery object（ControlObject kind4の専用lane、[Wire/API](05-wire-api.md) §5.5）で届ける。`StoreRecover`は新しいstore_generationを運び、生存recordの採用（attest=0）または明示的な再配備（attest=1）で通常intakeを復帰する。`AuthorityGeneration`は[署名設計](../m1-completion/03-signing.md)の連署付きtrust updateであり、現generationの署名の下で新しいauthority pinをjournalへ永続化する — 新pinがtargetのtrust imageで解決できないobjectは受理しない。impaired状態で通常permit intakeは閉じたまま、replay床（store_generation）とresult dedupはrecovery laneにも効く。
+
 未確定のdesired値をboot時に無条件適用しない。ACTIVE未確定なのに過去の一瞬の成功を断言もしない。遠隔の観測者へ古いACTIVE通知が遅着した場合もoperation/revisionで照合する。
 
 ## 4.8 Relay停止と保守排他

@@ -113,6 +113,15 @@ def control_status(ns, opid, decision_rev, active_rev, phase, reason,
 
 # --- RCC1 ---------------------------------------------------------------------
 
+def rcr1(ns, schema, recovery_class, attest, network, target, authority,
+         auth_gen, auth_seq, opid, new_store_gen, new_auth_gen,
+         version=1, flags=0, reserved=0, magic=b"RCR1"):
+    return (magic + u8(version) + u8(flags) + u8(recovery_class) + u8(attest) +
+            u16(ns) + u16(schema) + u64(network) + u64(target) +
+            u64(authority) + u32(auth_gen) + u64(auth_seq) + opid +
+            u32(new_store_gen) + u32(new_auth_gen) + u32(reserved))
+
+
 def tlv(field_id, field_type, value):
     return u16(field_id) + u8(field_type) + u16(len(value)) + value
 
@@ -283,6 +292,28 @@ def main():
         config_namespace=1, schema=1,
         snapshot_hex=cf["old_snapshot_hex"]),
         SNAPSHOT_DOMAIN + u16(1) + u16(1) + bytes.fromhex(cf["old_snapshot_hex"])))
+
+    # RCR1 — the recovery command (06 §6.3): class 1 attests a fresh store
+    # generation for an impaired journal; class 2 countersigns the next
+    # authority trust generation (03-signing §Trust update).
+    valid.append(("config_recovery_store", "config_recovery", dict(
+        config_namespace=1, schema=1, recovery_class=1, attest=0, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=15, operation_id_hex=opid.hex(),
+        new_store_generation=42, new_authority_generation=0),
+        rcr1(1, 1, 1, 0, 1, 0x30, 0x10, 2, 15, opid, 42, 0)))
+    valid.append(("config_recovery_store_reprovision", "config_recovery", dict(
+        config_namespace=0x8001, schema=4, recovery_class=1, attest=1, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=16, operation_id_hex=opid.hex(),
+        new_store_generation=43, new_authority_generation=0),
+        rcr1(0x8001, 4, 1, 1, 1, 0x30, 0x10, 2, 16, opid, 43, 0)))
+    valid.append(("config_recovery_trust_update", "config_recovery", dict(
+        config_namespace=1, schema=1, recovery_class=2, attest=0, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=17, operation_id_hex=opid.hex(),
+        new_store_generation=0, new_authority_generation=3),
+        rcr1(1, 1, 2, 0, 1, 0x30, 0x10, 2, 17, opid, 0, 3)))
 
     for name, codec, fields, encoded in valid:
         record = {"format": fmt, "name": name, "codec": codec, "expect": "ok"}
@@ -484,6 +515,60 @@ def main():
     bad("config_broadcast_authority", "config_command",
         rcc1(patch=good_patch, **{**base, "authority": 0xFFFFFFFFFFFFFFFF}),
         "authority broadcast id is reserved")
+
+    # RCR1 — strict fixed-frame decode: wrong magic/version/flags/reserved,
+    # unknown class, class-field mismatches, invalid identity, zero opid.
+    rcr_base = dict(ns=1, schema=1, recovery_class=1, attest=0, network=1,
+                    target=0x30, authority=0x10, auth_gen=2, auth_seq=15,
+                    opid=opid, new_store_gen=42, new_auth_gen=0)
+    bad("recovery_bad_magic", "config_recovery",
+        rcr1(magic=b"RCR2", **rcr_base), "bad magic")
+    bad("recovery_bad_version", "config_recovery",
+        rcr1(version=2, **rcr_base), "unknown RCR version")
+    bad("recovery_bad_flags", "config_recovery",
+        rcr1(flags=1, **rcr_base), "flags must be zero")
+    bad("recovery_reserved_nonzero", "config_recovery",
+        rcr1(reserved=1, **rcr_base), "reserved must be zero")
+    bad("recovery_bad_class", "config_recovery",
+        rcr1(**{**rcr_base, "recovery_class": 3}), "unknown recovery class")
+    bad("recovery_store_bad_attest", "config_recovery",
+        rcr1(**{**rcr_base, "attest": 2}), "attest must be 0 or 1")
+    bad("recovery_store_zero_generation", "config_recovery",
+        rcr1(**{**rcr_base, "new_store_gen": 0}),
+        "store recovery must attest a nonzero generation")
+    bad("recovery_store_authgen_set", "config_recovery",
+        rcr1(**{**rcr_base, "new_auth_gen": 3}),
+        "store recovery must not name an authority generation")
+    bad("recovery_trust_attest_set", "config_recovery",
+        rcr1(**{**rcr_base, "recovery_class": 2, "attest": 1,
+              "new_store_gen": 0, "new_auth_gen": 3}),
+        "trust update carries no attest byte")
+    bad("recovery_trust_storegen_set", "config_recovery",
+        rcr1(**{**rcr_base, "recovery_class": 2, "new_auth_gen": 3}),
+        "trust update must not attest a store generation")
+    bad("recovery_trust_zero_generation", "config_recovery",
+        rcr1(**{**rcr_base, "recovery_class": 2, "new_store_gen": 0}),
+        "trust update must name the new authority generation")
+    bad("recovery_zero_opid", "config_recovery",
+        rcr1(**{**rcr_base, "opid": bytes(16)}), "operation id must be nonzero")
+    bad("recovery_bad_namespace", "config_recovery",
+        rcr1(**{**rcr_base, "ns": 0x7000}),
+        "namespace outside the registered ranges")
+    bad("recovery_zero_network", "config_recovery",
+        rcr1(**{**rcr_base, "network": 0}), "network must be nonzero")
+    bad("recovery_zero_target", "config_recovery",
+        rcr1(**{**rcr_base, "target": 0}), "target 0 is the invalid node id")
+    bad("recovery_broadcast_target", "config_recovery",
+        rcr1(**{**rcr_base, "target": 0xFFFFFFFFFFFFFFFF}),
+        "target broadcast id is reserved")
+    bad("recovery_zero_authority", "config_recovery",
+        rcr1(**{**rcr_base, "authority": 0}),
+        "authority 0 is the invalid node id")
+    bad("recovery_broadcast_authority", "config_recovery",
+        rcr1(**{**rcr_base, "authority": 0xFFFFFFFFFFFFFFFF}),
+        "authority broadcast id is reserved")
+    bad("recovery_truncated", "config_recovery",
+        rcr1(**rcr_base)[:-1], "75 bytes is not the RCR1 body")
     # Trailing bytes: a decoder consumes exactly its frame — leftover bytes
     # are a framing violation, never ignorable padding.
     bad("config_trailing_byte", "config_command",
