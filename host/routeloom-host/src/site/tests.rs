@@ -611,15 +611,51 @@ fn admission_is_bounded() {
             key: RelayKey {
                 gateway: 1,
                 proxy: 2,
+                gateway_epoch: 7,
+                proxy_epoch: 3,
                 relay_id: 3,
                 joiner_mac: [9; 6],
             },
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 3,
             joiner_rssi_dbm: 0,
             body: vec![0x40],
         },
         T0 + 6_000,
+    );
+    assert!(matches!(
+        transport.take().as_slice(),
+        [transport::Outbound::Abort {
+            reason: AbortReason::UnknownRelay,
+            ..
+        }]
+    ));
+}
+
+/// #116: the EDHOC service accepts phase 4 only — a phase-5 step 1 is not
+/// an EDHOC m1 and ends the relay instead of opening a session.
+#[test]
+fn non_edhoc_phase_is_never_an_edhoc_message() {
+    let (service, transport) = service();
+    let key = RelayKey {
+        gateway: 1,
+        proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
+        relay_id: 3,
+        joiner_mac: [7; 6],
+    };
+    service.handle_up(
+        RelayUp {
+            key,
+            hops: 0,
+            phase: super::transport::PHASE_RESUME,
+            step: 1,
+            joiner_rssi_dbm: 0,
+            body: vec![0x40],
+        },
+        T0,
     );
     assert!(matches!(
         transport.take().as_slice(),
@@ -765,6 +801,8 @@ fn message_1_refusals_answer_edhoc_errors() {
     let key = RelayKey {
         gateway: 1,
         proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
         relay_id: 3,
         joiner_mac: [1; 6],
     };
@@ -781,6 +819,7 @@ fn message_1_refusals_answer_edhoc_errors() {
         RelayUp {
             key,
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 1,
             joiner_rssi_dbm: 0,
             body: m1,
@@ -811,6 +850,7 @@ fn message_1_refusals_answer_edhoc_errors() {
         RelayUp {
             key,
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 1,
             joiner_rssi_dbm: 0,
             body: m1,

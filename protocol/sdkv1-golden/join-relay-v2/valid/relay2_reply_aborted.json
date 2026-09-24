@@ -1,0 +1,16 @@
+{
+  "carrier": "wire",
+  "codec": "join_reply",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "gateway_epoch": 7,
+  "id": 2119674654,
+  "name": "relay2_reply_aborted",
+  "note": "an abort carries 0",
+  "payload_hex": "02427e57ab1e000002000000000700000003",
+  "phase": 4,
+  "proxy_epoch": 3,
+  "received": 0,
+  "status": 2,
+  "step": 2
+}

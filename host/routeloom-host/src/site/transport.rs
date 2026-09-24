@@ -1,41 +1,47 @@
 //! Where join messages come from and go to (docs/design/sdk-v1/02 §7,
 //! 07 §4). The Site Authority never touches USB: a gateway adapter turns
-//! HostOps 0x40 JoinRelayUp into [`RelayUp`], and the authority's
-//! [`Outbound`] items into 0x41 JoinRelayDown / 0x42 JoinRelayAbort.
+//! HostOps 0x60 JoinRelayUp into [`RelayUp`], and the authority's
+//! [`Outbound`] items into 0x61 JoinRelayDown / 0x62 JoinRelayAbort.
 //!
-//! Expected shapes (02 §7.1/§7.2; byte layouts are owned by the USB codec
-//! of plan P3-2, not by this module):
+//! Expected shapes (02 §7.1/§7.2 as resolved in §7.4 and hardened by #116;
+//! byte layouts are owned by the USB codec, not by this module):
 //!
 //! ```text
-//! 0x40 JoinRelayUp   (G→H): gateway u64 | from_proxy u64 | hops u8 | RelayHeader(dir=1) | body
-//! 0x41 JoinRelayDown (H→G): to_proxy u64 | RelayHeader(dir=2, status) | body
-//! 0x42 JoinRelayAbort (both): proxy u64 | relay_id u32 | reason u8
-//! RelayHeader (24 B): ver=1 | dir | relay_id u32 | proxy u64 | joiner MAC 6B |
-//!                     step u8 | status u8 | joiner_rssi_dbm i8 | reserved
+//! 0x60 JoinRelayUp   (G→H): gateway u64 | from_proxy u64 | hops u8 | RelayHeader(dir=1) | body
+//! 0x61 JoinRelayDown (H→G): to_proxy u64 | RelayHeader(dir=2, status) | body
+//! 0x62 JoinRelayAbort (both): proxy u64 | relay_id u32 | gateway_epoch u32 | proxy_epoch u32 | reason u8
+//! RelayHeader (32 B): ver=2 | dir | relay_id u32 | proxy u64 | joiner MAC 6B |
+//!                     step u8 | status u8 | joiner_rssi_dbm i8 | phase u8 |
+//!                     gateway_epoch u32 | proxy_epoch u32
 //! ```
 //!
-//! `step` is the EDHOC message number 1..4, or 5 for an EDHOC error
-//! message; `status` on the way down is 0 continue or 1 final (the proxy
-//! frees its slot); aborting is a 0x42 JoinRelayAbort. A gateway joining over its own USB link uses
-//! `proxy = gateway`, `hops = 0` (07 §4).
+//! `phase` names the exchange (4 EDHOC, 5 RLRES1) because `step` alone is
+//! ambiguous; `step` is the EDHOC message number 1..4, or 5 for an EDHOC
+//! error message; `status` on the way down is 0 continue or 1 final (the
+//! proxy frees its slot); aborting is a 0x62 JoinRelayAbort. A gateway
+//! joining over its own USB link uses `proxy = gateway`, `hops = 0` (07 §4).
 //!
 //! The binding to real USB frames is [`UsbJoinRelay`] — deliberately thin
-//! and not wired into the daemon's USB lanes yet: the HostOps codec and
-//! capability bit (`kCapSiteAuthorityV1`) are being defined concurrently
-//! (P3-2). The integrator maps the codec's decoded 0x40 body onto
-//! `RelayUp` and encodes each `Outbound` as 0x41/0x42.
+//! and not wired into the daemon's USB lanes yet. The integrator maps the
+//! codec's decoded 0x60 body onto `RelayUp` and encodes each `Outbound` as
+//! 0x61/0x62.
 
 use std::sync::{Arc, Mutex};
 
 /// Down-link status of a relayed message. (RelayHeader status 2,
 /// "aborted", is never sent as a JoinRelayDown here: an abort is an
-/// [`Outbound::Abort`], i.e. 0x42 JoinRelayAbort.)
+/// [`Outbound::Abort`], i.e. 0x62 JoinRelayAbort.)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum DownStatus {
     Continue = 0,
     Final = 1,
 }
+
+/// `phase` of an EDHOC exchange on the relay.
+pub const PHASE_EDHOC: u8 = 4;
+/// `phase` of an RLRES1 exchange on the relay.
+pub const PHASE_RESUME: u8 = 5;
 
 /// `step` of an EDHOC error message on the relay.
 pub const STEP_EDHOC_ERROR: u8 = 5;
@@ -56,32 +62,39 @@ pub enum AbortReason {
     AuthorityError = 4,
 }
 
-/// Identifies one relayed exchange: the proxy's relay slot and the MAC it
-/// observed (02 §7.1). Unauthenticated routing data, never evidence.
+/// Identifies one relayed exchange: both service epochs, the proxy's
+/// relay slot within its epoch, and the MAC it observed (02 §7.1, #116).
+/// Unauthenticated routing data, never evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct RelayKey {
     pub gateway: u64,
     pub proxy: u64,
+    pub gateway_epoch: u32,
+    pub proxy_epoch: u32,
     pub relay_id: u32,
     pub joiner_mac: [u8; 6],
 }
 
-/// One message up from a joiner (decoded 0x40).
+/// One message up from a joiner (decoded 0x60).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayUp {
     pub key: RelayKey,
     /// Proxy → gateway hops as the gateway reported (display only).
     pub hops: u8,
+    /// BootstrapAuth phase: 4 EDHOC, 5 RLRES1 (never inferred from `step`).
+    pub phase: u8,
     pub step: u8,
     /// Proxy-observed RSSI of the joiner (display only, unauthenticated).
     pub joiner_rssi_dbm: i8,
     pub body: Vec<u8>,
 }
 
-/// One message down to a joiner (encode as 0x41).
+/// One message down to a joiner (encode as 0x61).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RelayDown {
     pub key: RelayKey,
+    /// Echoes the inbound exchange's phase.
+    pub phase: u8,
     pub step: u8,
     pub status: DownStatus,
     pub body: Vec<u8>,
@@ -90,7 +103,7 @@ pub struct RelayDown {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Outbound {
     Down(RelayDown),
-    /// Encode as 0x42 JoinRelayAbort.
+    /// Encode as 0x62 JoinRelayAbort (the key carries the full token).
     Abort {
         key: RelayKey,
         reason: AbortReason,
@@ -160,6 +173,8 @@ mod tests {
         let key = RelayKey {
             gateway: 1,
             proxy: 2,
+            gateway_epoch: 7,
+            proxy_epoch: 3,
             relay_id: 3,
             joiner_mac: [4; 6],
         };
@@ -169,6 +184,7 @@ mod tests {
         });
         relay.deliver(Outbound::Down(RelayDown {
             key,
+            phase: PHASE_EDHOC,
             step: 2,
             status: DownStatus::Continue,
             body: vec![0x40],

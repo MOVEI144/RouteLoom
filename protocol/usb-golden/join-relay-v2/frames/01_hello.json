@@ -1,0 +1,12 @@
+{
+  "name": "hello",
+  "direction": "h2d",
+  "kind": 1,
+  "flags": 0,
+  "session": 0,
+  "request": 100,
+  "inner_hex": "010203040506070801010d686f73742d6f70657261746f72",
+  "body_hex": "010203040506070801010d686f73742d6f70657261746f72",
+  "wire_hex": "07524c553101010101010101010101010101010101010102641e18010203040506070801010d686f73742d6f70657261746f72b278239400",
+  "note": "host opens: nonce, version range, principal"
+}

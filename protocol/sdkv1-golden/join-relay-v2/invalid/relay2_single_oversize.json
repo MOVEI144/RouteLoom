@@ -1,0 +1,9 @@
+{
+  "codec": "relay_single_frame",
+  "encoded_hex": "02017e57ab1e00a10000000007770200000012340100ba040000000700000003ca4006efabbbcb2c5f675db6ad616b557d87a3f383a03c9500b08ca7754c3d32df670aeafc3ed85f9889b298f4167b91ac05ecea8ddd173648f1fd3122b6903dbd8c67a7b05f1fbc79dfc2a1bc580910a0c9088317e72c25950d0dcabf8802d5d7",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_single_oversize",
+  "note": "129 B does not fit one Wire payload",
+  "wire_type": 3
+}
