@@ -71,6 +71,10 @@ void fill_proxy(JoinCandidateProxy& p, const JoinProxyObservation& o,
 // --- Clock ---------------------------------------------------------------------------
 
 bool JoinCandidates::clock_ok(const MonotonicMs now_ms) noexcept {
+  // Sticky: a regressed clock is a new clock domain, which design §4.1 treats
+  // as a restart. Only a new instance resumes; catching up must not release
+  // holds or restart crypto on this table.
+  if (clock_uncertain_) return false;
   if (now_ms < last_now_ms_) {
     clock_uncertain_ = true;
     ++stats_.clock_regressions;
@@ -174,12 +178,20 @@ bool JoinCandidates::proxy_usable(const JoinCandidateProxy& p, const MonotonicMs
 
 const JoinCandidateProxy* JoinCandidates::best_proxy(const JoinCandidate& record,
                                                      const MonotonicMs now) noexcept {
+  // The last failed path is usable again once its hold expires, so rank it
+  // separately: an available alternate wins even when weaker, and the failed
+  // path is reused only when it is the only usable one (§5.1 rule 5). The
+  // zero MAC never matches a stored proxy (observations require a nonzero
+  // unicast MAC), so it cleanly means "no failed path remembered".
   const JoinCandidateProxy* best = nullptr;
+  const JoinCandidateProxy* failed = nullptr;
   for (const auto& p : record.proxies) {
     if (!proxy_usable(p, now)) continue;
-    if (best == nullptr || proxy_better(p, *best)) best = &p;
+    const JoinCandidateProxy*& slot =
+        (p.mac == record.last_failed_proxy) ? failed : best;
+    if (slot == nullptr || proxy_better(p, *slot)) slot = &p;
   }
-  return best;
+  return best != nullptr ? best : failed;
 }
 
 bool JoinCandidates::key_less(const JoinCandidateKey& a, const JoinCandidateKey& b) noexcept {
@@ -344,6 +356,26 @@ Status JoinCandidates::bind_authenticated(const JoinCandidateKey& key,
     if (!r.occupied || !(r.key == key)) continue;
     if (r.site_id_authenticated) {
       if (r.site_id == site_id) {
+        // Re-proving an already-known site on a split key: the in-flight
+        // attempt (if on the other record) belongs to the proven site, so
+        // move the selected state onto this record before handing it back.
+        for (auto& s : records_) {
+          if (s.occupied && s.key == key && &s != &r && s.selected) {
+            r.selected = true;
+            r.attempted_proxy = s.attempted_proxy;
+            r.last_attempt_ms = s.last_attempt_ms;
+            s.selected = false;
+            s.attempted_proxy = -1;
+            break;
+          }
+        }
+        // A held site must not take m3: refuse before crypto continues and
+        // leave both records idle, so the aborted attempt wedges nothing.
+        if (hold_active(effective_eligible_at(r), now_ms)) {
+          r.selected = false;
+          r.attempted_proxy = -1;
+          return err(StatusCode::InvalidState, "join rebind held");
+        }
         record = &r;
         return Status::success();
       }
@@ -414,6 +446,25 @@ void JoinCandidates::mark_attempt(JoinCandidate& record, const std::uint8_t prox
   record.attempted_proxy = proxy_index < kJoinCandidateProxyMax ? proxy_index : -1;
 }
 
+Status JoinCandidates::mark_selected(const JoinSelect& sel,
+                                     const MonotonicMs now_ms) noexcept {
+  if (!clock_ok(now_ms)) return err(StatusCode::TimeUncertain, "join clock regression");
+  if (sel.candidate == nullptr || sel.proxy == nullptr) {
+    return invalid("join selection empty");
+  }
+  for (auto& r : records_) {
+    if (!r.occupied || &r != sel.candidate) continue;
+    for (std::uint8_t i = 0; i < kJoinCandidateProxyMax; ++i) {
+      if (&r.proxies[i] == sel.proxy) {
+        mark_attempt(r, i, now_ms);
+        return Status::success();
+      }
+    }
+    return invalid("join selection proxy");
+  }
+  return invalid("join selection record");
+}
+
 void JoinCandidates::suppress_proxy(JoinCandidate& record, const MacAddress& proxy_mac,
                                     const std::uint32_t suppress_ms,
                                     const MonotonicMs now_ms) noexcept {
@@ -478,6 +529,9 @@ Status JoinCandidates::apply_outcome(JoinCandidate& record, const JoinAttemptOut
       if (record.attempted_proxy >= 0 &&
           record.attempted_proxy < static_cast<std::int8_t>(kJoinCandidateProxyMax)) {
         record.proxies[record.attempted_proxy].suppressed_until_ms = record.eligible_at_ms;
+        if (record.proxies[record.attempted_proxy].present) {
+          record.last_failed_proxy = record.proxies[record.attempted_proxy].mac;
+        }
       }
       clear_streak = false;
       break;
@@ -487,7 +541,10 @@ Status JoinCandidates::apply_outcome(JoinCandidate& record, const JoinAttemptOut
       record.attempted_proxy = -1;
       return Status::success();
   }
-  if (clear_streak) record.failures = 0;
+  if (clear_streak) {
+    record.failures = 0;
+    record.last_failed_proxy = {};  // authenticated verdict resets path memory
+  }
   record.attempted_proxy = -1;
   return st;
 }
@@ -624,6 +681,13 @@ std::uint32_t JoinCandidates::preferred_hint(const std::uint32_t org_hint) const
 
 const JoinCandidate* JoinCandidates::find(const JoinCandidateKey& key) const noexcept {
   for (const auto& r : records_) {
+    if (r.occupied && r.key == key) return &r;
+  }
+  return nullptr;
+}
+
+JoinCandidate* JoinCandidates::find(const JoinCandidateKey& key) noexcept {
+  for (auto& r : records_) {
     if (r.occupied && r.key == key) return &r;
   }
   return nullptr;

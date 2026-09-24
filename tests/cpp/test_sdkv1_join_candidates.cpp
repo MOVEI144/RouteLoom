@@ -102,7 +102,7 @@ JoinSelect pick(JoinCandidates& t, const MonotonicMs now) {
 }
 
 JoinCandidate* record_of(JoinCandidates& t, const JoinCandidateKey& k) {
-  return const_cast<JoinCandidate*>(t.find(k));
+  return t.find(k);
 }
 
 // --- Cases -----------------------------------------------------------------------------
@@ -612,10 +612,30 @@ void clock_regression() {
   std::array<std::uint32_t, kZtAvoidHints> hints{};
   CHECK(t.avoid_hints(7, 9999, hints) == 0);
   CHECK(t.clock_uncertain());
-  CHECK(t.stats().clock_regressions >= 4);
-  // Time catches up again: operation resumes, nothing released early.
-  CHECK(offer(t, 7, 43, 0xA5, 2, -50, 0, 10000) == JoinObserve::Inserted);
-  CHECK(pick(t, 10000).candidate != nullptr);
+  CHECK(t.stats().clock_regressions == 1);
+  // Uncertainty sticks until a new instance: even after time catches up,
+  // every time-dependent operation is still refused (design §4.1: a new
+  // clock domain is a restart).
+  CHECK(offer(t, 7, 43, 0xA5, 2, -50, 0, 10000) == JoinObserve::Rejected);
+  CHECK(!t.select(10000, s).ok() && s.candidate == nullptr);
+  CHECK(!t.next_scan_deadline(10000, entropy, d).ok());
+  CHECK(t.avoid_hints(7, 10000, hints) == 0);
+  CHECK(t.next_eligible_ms(10000) == kJoinNoDeadline);
+  JoinCandidate* rb = nullptr;
+  CHECK(!t.bind_authenticated(key(7, 42, 0xA5), 0x1, 10000, rb).ok() && rb == nullptr);
+  JoinCandidate* rr = record_of(t, key(7, 42, 0xA5));
+  CHECK(rr != nullptr);
+  if (rr != nullptr) {
+    CHECK(!t.apply_outcome(*rr, JoinAttemptOutcome::Failed, 0, 10000, entropy).ok());
+    t.mark_attempt(*rr, 0, 10000);
+    CHECK(!rr->selected);
+  }
+  CHECK(t.clock_uncertain());
+  CHECK(t.stats().clock_regressions == 1);
+  // A new instance starts clean at the same stamps.
+  JoinCandidates fresh;
+  CHECK(offer(fresh, 7, 43, 0xA5, 2, -50, 0, 10000) == JoinObserve::Inserted);
+  CHECK(pick(fresh, 10000).candidate != nullptr);
 }
 
 void scan_cursor() {
@@ -829,6 +849,143 @@ void saturated_hold_never_expires() {
   CHECK(t.avoid_hints(7, kMax, hints) == 2);  // saturated avoids stay on wire
 }
 
+void rebind_moves_attempt_to_existing_site() {
+  // After a split, the same key carries two authenticated sites. An attempt
+  // in flight on A whose m2 proves B belongs to B: the selected state moves
+  // and A drops back to idle instead of wedging as selected-but-unevictable.
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(offer(t, 7, 42, 0xA5, 1, -50, 0, 1000) == JoinObserve::Inserted);
+  JoinCandidate* a = nullptr;
+  CHECK(t.bind_authenticated(k, 0xAAAA, 1100, a).ok() && a != nullptr);
+  JoinCandidate* b = nullptr;
+  CHECK(t.bind_authenticated(k, 0xBBBB, 1200, b).ok() && b != nullptr);
+  if (a == nullptr || b == nullptr) return;
+  t.mark_attempt(*a, 0, 1300);
+  CHECK(a->selected);
+  JoinCandidate* r = nullptr;
+  CHECK(t.bind_authenticated(k, 0xBBBB, 1400, r).ok());
+  CHECK(r == b);
+  CHECK(b->selected);
+  CHECK(b->attempted_proxy == 0);
+  CHECK(b->last_attempt_ms == 1300);
+  CHECK(!a->selected);
+  CHECK(a->attempted_proxy == -1);
+}
+
+void rebind_to_held_site_refused() {
+  // Same split, but B is avoid-blocked for 24 h. Re-proving B must not hand
+  // back a held record for m3: the bind is refused and the attempt aborts,
+  // leaving both records idle (A evictable again).
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(offer(t, 7, 42, 0xA5, 1, -50, 0, 1000) == JoinObserve::Inserted);
+  JoinCandidate* a = nullptr;
+  CHECK(t.bind_authenticated(k, 0xAAAA, 1100, a).ok() && a != nullptr);
+  JoinCandidate* b = nullptr;
+  CHECK(t.bind_authenticated(k, 0xBBBB, 1200, b).ok() && b != nullptr);
+  if (a == nullptr || b == nullptr) return;
+  CHECK(t.apply_outcome(*b, JoinAttemptOutcome::DenyBlocked, 0, 1300, entropy).ok());
+  CHECK(b->policy == JoinCandidatePolicy::AvoidBlocked);
+  t.mark_attempt(*a, 0, 1400);
+  JoinCandidate* r = b;
+  const Status st = t.bind_authenticated(k, 0xBBBB, 1500, r);
+  CHECK(!st.ok() && st.code == StatusCode::InvalidState);
+  CHECK(r == nullptr);
+  CHECK(!a->selected && a->attempted_proxy == -1);
+  CHECK(!b->selected);
+  CHECK(b->policy == JoinCandidatePolicy::AvoidBlocked);
+  // A is evictable again: with B protected and six fresh records, the 9th
+  // key replaces the stalest record — A, observed at t=1000.
+  for (std::uint32_t i = 1; i <= 6; ++i) {
+    CHECK(offer(t, 7, 100 + i, 0xA5, static_cast<std::uint8_t>(10 + i), -60, 1,
+                2000 + i) == JoinObserve::Inserted);
+  }
+  CHECK(t.size() == 8);
+  CHECK(offer(t, 7, 200, 0xA5, 20, -20, 0, 3000) == JoinObserve::Evicted);
+  CHECK(a->key == key(7, 200, 0xA5));  // A's slot reused, not wedged
+}
+
+void failed_proxy_yields_to_alternate() {
+  // Two routes, the better one fails: its record and proxy holds expire
+  // together, so rank alone would reselect the same failed path. The next
+  // selection prefers the usable alternate instead.
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1000) == JoinObserve::Inserted);
+  CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1, true), 1000) == JoinObserve::Updated);
+  JoinSelect s = pick(t, 1000);
+  CHECK(s.proxy != nullptr && s.proxy->mac == mac(1));
+  JoinCandidate* r = record_of(t, k);
+  t.mark_attempt(*r, 0, 1000);
+  CHECK(t.apply_outcome(*r, JoinAttemptOutcome::Failed, 0, 1000, entropy).ok());
+  const MonotonicMs d = r->eligible_at_ms;
+  CHECK(r->proxies[0].suppressed_until_ms == d);  // both holds expire together
+  s = pick(t, d);
+  CHECK(s.candidate != nullptr && s.proxy != nullptr && s.proxy->mac == mac(2));
+  // Failing the alternate flips the preference back.
+  t.mark_attempt(*r, 1, d);
+  CHECK(t.apply_outcome(*r, JoinAttemptOutcome::Failed, 0, d, entropy).ok());
+  s = pick(t, r->eligible_at_ms);
+  CHECK(s.candidate != nullptr && s.proxy != nullptr && s.proxy->mac == mac(1));
+}
+
+void failed_proxy_tracked_by_mac() {
+  // The failed path is tracked by proxy MAC, not by array slot: an OFFER
+  // that replaces the other slot between failure and reselection must not
+  // resurrect the failed route, even though it still ranks best.
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1000) == JoinObserve::Inserted);
+  CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1, true), 1000) == JoinObserve::Updated);
+  JoinCandidate* r = record_of(t, k);
+  t.mark_attempt(*r, 0, 1000);
+  CHECK(t.apply_outcome(*r, JoinAttemptOutcome::Failed, 0, 1000, entropy).ok());
+  const MonotonicMs d = r->eligible_at_ms;
+  // mac3 (hops 0, weaker RSSI) displaces mac2's slot; mac1 still ranks best.
+  CHECK(t.observe(k, obs(3, 0x1003, 1, -60, 0, true), 1100) == JoinObserve::Updated);
+  CHECK(r->proxies[0].mac == mac(1) && r->proxies[1].mac == mac(3));
+  // Re-observing the failed proxy refreshes evidence, not preference.
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1200) == JoinObserve::Updated);
+  const JoinSelect s = pick(t, d);
+  CHECK(s.candidate != nullptr && s.proxy != nullptr && s.proxy->mac == mac(3));
+}
+
+void mark_selected_from_select() {
+  // The select -> attempt path needs no cast: mark_selected validates the
+  // selection against the table and marks the right record/proxy.
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 1, true), 1000) == JoinObserve::Inserted);
+  CHECK(t.observe(k, obs(2, 0x1002, 1, -40, 0, true), 1000) == JoinObserve::Updated);
+  const JoinSelect s = pick(t, 1000);
+  CHECK(s.proxy != nullptr && s.proxy->mac == mac(2));  // hops 0 wins: slot 1
+  CHECK(t.mark_selected(s, 1000).ok());
+  JoinCandidate* r = record_of(t, k);
+  CHECK(r != nullptr && r->selected);
+  CHECK(r->attempted_proxy == 1 && r->last_attempt_ms == 1000);
+  CHECK(t.apply_outcome(*r, JoinAttemptOutcome::Failed, 0, 1000, entropy).ok());
+  CHECK(!r->selected);
+  // Empty, foreign and mismatched selections are rejected; nothing marked.
+  JoinCandidates u;
+  CHECK(offer(u, 7, 42, 0xA5, 1, -50, 0, 1000) == JoinObserve::Inserted);
+  const JoinSelect f = pick(u, 1000);
+  JoinSelect empty{};
+  CHECK(!t.mark_selected(empty, 1100).ok());
+  CHECK(!t.mark_selected(f, 1100).ok());  // record owned by another table
+  JoinCandidate* ur = record_of(u, k);
+  CHECK(ur != nullptr && !ur->selected);
+  JoinSelect crossed{s.candidate, &ur->proxies[0]};
+  CHECK(!t.mark_selected(crossed, 1100).ok());  // proxy from another table
+  CHECK(!r->selected);
+  // A regressed clock refuses the attempt start as well.
+  const JoinSelect s2 = pick(t, r->eligible_at_ms);
+  CHECK(s2.candidate != nullptr);
+  const Status rst = t.mark_selected(s2, 900);
+  CHECK(!rst.ok() && rst.code == StatusCode::TimeUncertain);
+  CHECK(!r->selected);
+}
+
 }  // namespace
 
 int main() {
@@ -861,6 +1018,11 @@ int main() {
       {"avoid_hint_split_collision", avoid_hint_split_collision},
       {"expired_policy_evictable", expired_policy_evictable},
       {"saturated_hold_never_expires", saturated_hold_never_expires},
+      {"rebind_moves_attempt_to_existing_site", rebind_moves_attempt_to_existing_site},
+      {"rebind_to_held_site_refused", rebind_to_held_site_refused},
+      {"failed_proxy_yields_to_alternate", failed_proxy_yields_to_alternate},
+      {"failed_proxy_tracked_by_mac", failed_proxy_tracked_by_mac},
+      {"mark_selected_from_select", mark_selected_from_select},
   };
   for (const auto& c : cases) {
     current = c.name;

@@ -132,6 +132,12 @@ struct JoinCandidate {
   bool preferred{false};            // authenticated former membership (RAM)
   bool selected{false};             // an attempt is currently bound here
   std::int8_t attempted_proxy{-1};  // index of the proxy the attempt uses
+  // MAC of the proxy the last Failed outcome used (zero = none). The record
+  // and proxy holds of a failure expire together, so rank alone would
+  // reselect the same failed path; selection prefers a usable alternate
+  // while this remembers it. Tracked by MAC — not by slot index — because
+  // later OFFERs may replace proxy slots before the next selection.
+  MacAddress last_failed_proxy{};
 };
 static_assert(sizeof(JoinCandidate) <= kJoinCandidateRecordMax,
               "join candidate record must stay within the 160 B bound");
@@ -185,8 +191,9 @@ struct JoinCandidatesStats {
 // --- The table ---------------------------------------------------------------------------
 // Single-threaded, allocation-free; the caller serializes access like the
 // rest of the join core. Time is the uint64 monotonic ms contract of design
-// §4.1: every entry taking `now_ms` enforces non-decrease; a regression sets
-// clock_uncertain(), counts it and refuses to advance or release anything.
+// §4.1: every entry taking `now_ms` refuses while the clock is uncertain. A
+// regression sets clock_uncertain() once, counts it once, and the flag stays
+// until a new instance — catching up does not resume this table.
 class JoinCandidates {
  public:
   JoinCandidates() noexcept = default;
@@ -216,7 +223,10 @@ class JoinCandidates {
   // second record sharing the key; the in-flight attempt state (selected,
   // proxy choice) moves to the new record and the source drops back to idle.
   // Refuses when no slot can be made (design §5.2: full table aborts the
-  // attempt rather than conflating).
+  // attempt rather than conflating). Re-proving an already-known site on a
+  // split key likewise moves the in-flight state onto that record — and is
+  // refused with InvalidState when the proven site is still held, so no m3
+  // is sent to it; both records are left idle then.
   Status bind_authenticated(const JoinCandidateKey& key, std::uint64_t site_id,
                             MonotonicMs now_ms, JoinCandidate*& record) noexcept;
 
@@ -224,6 +234,10 @@ class JoinCandidates {
   // Mark the start of an exchange through `proxy_index` of `record`.
   void mark_attempt(JoinCandidate& record, std::uint8_t proxy_index,
                     MonotonicMs now_ms) noexcept;
+  // Begin the attempt chosen by select(): validates that `sel` still points
+  // into this table's current records and marks that record/proxy. Foreign,
+  // stale or empty selections are rejected with InvalidArgument.
+  Status mark_selected(const JoinSelect& sel, MonotonicMs now_ms) noexcept;
   // Map one authenticated or local outcome onto the record (design §5.2 /
   // §8). Authenticated verdicts clear the transient failure streak; Failed
   // grows it and applies the jittered transient backoff to both the record
@@ -243,7 +257,9 @@ class JoinCandidates {
   // eligible means the effective hold expired AND a fresh proxy observation
   // with authority_reachable && !proxy_busy exists. Ordering: preferred,
   // untried, hops asc (unknown last), RSSI desc, oldest last_attempt, then
-  // key/MAC lexicographic. Unauthenticated flags steer routing only.
+  // key/MAC lexicographic. Unauthenticated flags steer routing only. Among
+  // the usable proxies of the winning record, a proxy other than the last
+  // failed one wins; the failed path is reused only when alone.
   Status select(MonotonicMs now_ms, JoinSelect& out) noexcept;
   // Earliest future effective eligibility across the table (kJoinNoDeadline
   // when nothing is pending or after a clock regression).
@@ -275,7 +291,11 @@ class JoinCandidates {
   std::uint32_t preferred_hint(std::uint32_t org_hint) const noexcept;
 
   // --- accessors ---
+  // First occupied record carrying `key` (or nullptr). The mutable overload
+  // hands a record to the attempt/outcome APIs without a cast; fields stay
+  // owned by the table.
   const JoinCandidate* find(const JoinCandidateKey& key) const noexcept;
+  JoinCandidate* find(const JoinCandidateKey& key) noexcept;
   std::size_t size() const noexcept;
   const JoinCandidatesStats& stats() const noexcept { return stats_; }
   bool clock_uncertain() const noexcept { return clock_uncertain_; }
