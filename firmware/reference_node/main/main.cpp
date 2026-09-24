@@ -1130,7 +1130,7 @@ extern "C" void app_main(void) {
       s_sleep_marker = 0;
       if (!status) fail(status.detail);
     }
-    vTaskDelay(pdMS_TO_TICKS(2));
+    runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
   }
   if (coordinator.state() != routeloom::PowerState::Sleeping) {
     fail("sleep deadline exceeded");

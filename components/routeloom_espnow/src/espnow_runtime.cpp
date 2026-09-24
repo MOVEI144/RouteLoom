@@ -490,7 +490,7 @@ void EspNowRuntime::task_entry(void* argument) noexcept {
   runtime->task_ = xTaskGetCurrentTaskHandle();
   while (runtime->started_) {
     runtime->poll_once();
-    vTaskDelay(pdMS_TO_TICKS(2));
+    runtime->wait_for_event(kOwnerPollPeriodMs);
   }
   runtime->task_ = nullptr;
   // Released last: once task_running_ reads false, a joining stop() owns
@@ -834,6 +834,21 @@ void EspNowRuntime::poll_once() noexcept {
     migration_->poll(now);
   }
   node_.poll(now);
+}
+
+void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
+  if (event_queue_ == nullptr) {
+    vTaskDelay(pdMS_TO_TICKS(timeout_ms));
+    return;
+  }
+  Event peek{};
+  // Peek, not receive: the event stays queued for poll_once's ordered
+  // drain (reserved slots -> lost completions -> queued events -> node
+  // poll). A TX completion posted while we sleep releases the wait NOW —
+  // the pump cadence in owner_pump.hpp makes the event win over the
+  // periodic tick (issue #60-3). Bootstrap-queue traffic keeps its old
+  // bounded latency via the periodic timeout.
+  (void)xQueuePeek(event_queue_, &peek, pdMS_TO_TICKS(timeout_ms));
 }
 
 Status EspNowRuntime::send_application(

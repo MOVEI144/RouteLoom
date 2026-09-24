@@ -712,6 +712,13 @@ class MeshNode {
   // atomic admission reservation (pending + dedup + reply budget) the
   // contract demands before accepting work (03 §3.4).
   std::size_t tx_free_slots() const noexcept { return scheduler_.free_slots(); }
+  // Resolve the in-flight driver attempt. Must be called on the node's
+  // single owner task — a driver completion callback hands the event over
+  // instead of invoking inline (issue #60-3). This resolves only: the next
+  // submission is dispatched by poll() after the runtime's whole event
+  // drain, so control replies queued by inbound traffic keep the control
+  // lane's priority over queued DATA, and this call can never re-enter
+  // radio_ from inside a driver callback.
   void on_radio_tx_result(std::uint64_t token, bool success,
                           MonotonicMs now_ms) noexcept;
 
@@ -1512,8 +1519,6 @@ class MeshNode {
   void note_rx_refusal(const Status& status, NodeId peer,
                        const MessageId* message) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
-  void resolve_radio_tx_result(std::uint64_t token, bool success,
-                               MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
   void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;

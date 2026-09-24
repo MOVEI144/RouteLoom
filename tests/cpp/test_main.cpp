@@ -19,6 +19,7 @@
 #include "routeloom/routing.hpp"
 #include "routeloom/wire.hpp"
 
+#include "test_autonomy.hpp"
 #include "test_ledger.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
@@ -646,77 +647,238 @@ void test_delivery_terminal_eviction() {
   }
 }
 
+// End-protected transit DATA `prev` -> `relay` bound for `destination` —
+// the kind of inbound frame whose receive queues a HOP_ACCEPT on the
+// control lane (same construction as test_congestion's craft_transit).
+wire::EncodedFrame craft_transit_frame(TestSecurity& cipher, NodeId prev,
+                                       NodeId relay, NodeId origin,
+                                       NodeId destination, std::uint64_t seq,
+                                       ByteView payload) {
+  wire::PlainFrame plain{};
+  wire::Header& h = plain.header;
+  h.type = FrameType::Data;
+  h.flags = wire::kFlagEndProtected;
+  h.delivery = DeliveryClass::Reliable;
+  h.hop_remaining = kDefaultHopLimit;
+  h.network = 1;
+  h.origin = origin;
+  h.destination = destination;
+  h.previous_hop = prev;
+  h.next_hop = relay;
+  h.message = MessageId{42, seq};
+  h.remaining_deadline_ms = 5000;
+  h.original_lifetime_ms = 5000;
+  h.link_epoch = 1;
+  h.end_epoch = 1;
+  plain.payload_size = payload.size;
+  std::memcpy(plain.payload.data(), payload.data, payload.size);
+  wire::EncodedFrame out{};
+  CHECK_OK(wire::encode_new(plain, cipher, out));
+  return out;
+}
+
 void test_tx_result_dispatch() {
-  // Issue #60-3: a resolved send frees the driver's single in-flight slot,
-  // so the next queued job is submitted inside the same task turn
-  // (on_radio_tx_result -> dispatch_next), not at the next poll() tick.
-  // The tick wait used to leave ~1 poll period of idle airtime between
-  // back-to-back frames — the runtime's ~2ms cadence against a ~6ms
-  // HOP_ACCEPT-class exchange is the 25-30% throughput loss the issue
-  // measured. In this harness the gap shows up as "how many frames went
-  // on the air inside ONE net.flush()": every in-flush submission is a
-  // dispatch that needed no poll tick.
-  SimNetwork network;
-  TestSecurity s1, s2;
-  CapturingObserver o1, o2;
-  SimRadio r1(network, 1), r2(network, 2);
-  NodeConfig c1{1, 1, 901}, c2{1, 2, 902};
-  MeshNode n1(c1, r1, s1, o1), n2(c2, r2, s2, o2);
-  network.register_node(1, &n1); network.register_node(2, &n2);
-  network.connect(1, 2);
-  CHECK_OK(n1.start(0)); CHECK_OK(n2.start(0));
-  CHECK_OK(n1.add_neighbor(2, 1, 0)); CHECK_OK(n2.add_neighbor(1, 1, 0));
+  // Issue #60-3: a driver TX completion is staged, not handled inline —
+  // the owner task wakes on the event (owner_pump.hpp's owner_wake_at,
+  // bound by EspNowRuntime::wait_for_event on the firmware queue), drains
+  // every staged event, and the following poll() submits the next frame.
+  // FakeRadioPort stamps each submission; OwnerPump models the firmware
+  // loop end to end: post -> wait -> drain -> poll.
+  TestSecurity security;
+  CapturingObserver observer;
+  routeloom_test::FakeRadioPort radio;
+  routeloom_test::OwnerPump pump;
+  NodeConfig config{1, 1, 901};
+  MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.start(0));
+  CHECK_OK(node.add_neighbor(2, 1, 0));
   const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
   const ByteView body{payload.data(), payload.size()};
-  const auto data_frames = [&]() { return network.tx_by_type[FrameType::Data].frames; };
+  const auto sight_of = [](const routeloom_test::FakeRadioPort::SentFrame& f,
+                           routeloom_test::FrameSight& sight) {
+    return routeloom_test::sight_frame(
+        ByteView{f.bytes.data(), f.bytes.size()}, sight);
+  };
 
-  // Three BestEffort sends chain inside ONE flush: each TX result submits
-  // the next queued job in the same task turn, so all three reach the air
-  // without an intervening poll.
+  // --- callback -> next-submit latency ------------------------------------
+  // Three queued sends, one pass at t=0 puts the first frame in the
+  // driver, then the owner task sleeps. A completion posted mid-sleep at
+  // t=1 wakes the task AT t=1 — not the 2 ms tick the fixed vTaskDelay
+  // loop waited out — and the drained pass submits the next frame with no
+  // tick tax, so the queue drains at the callback rate.
+  SendOptions best{};
+  best.delivery = DeliveryClass::BestEffort;
+  for (int i = 0; i < 3; ++i) {
+    MessageId id{};
+    CHECK_OK(node.send(2, body, best, 0, id));
+  }
+  radio.now_ms = 0;
+  pump.run_once(0, node);
+  CHECK(radio.sent.size() == 1);  // the boot advertisement is in flight
+  // With nothing staged, the wait still bounds idle at one poll period.
+  CHECK(owner_wake_at(0, UINT64_MAX) == kOwnerPollPeriodMs);
+  constexpr MonotonicMs kCompletedAt = 1;
+  pump.post_tx_result(radio.sent.back().token, true, kCompletedAt);
+  CHECK(pump.wake_at(0) == kCompletedAt);  // the event beats the tick
+  radio.now_ms = pump.wake_at(0);
+  pump.run_once(radio.now_ms, node);
+  CHECK(radio.sent.size() == 2);
+  CHECK(radio.sent.back().at_ms == kCompletedAt);  // submitted on the wake —
+                                                   // 0 ms of idle airtime
+  // Two more completions at t=1 chain the remaining sends at the same
+  // instant — the fixed-tick loop would have paid a tick per frame.
+  for (int i = 0; i < 2; ++i) {
+    pump.post_tx_result(radio.sent.back().token, true, kCompletedAt);
+    pump.run_once(kCompletedAt, node);
+  }
+  CHECK(radio.sent.size() == 4);
+  CHECK(radio.sent.back().at_ms == kCompletedAt);
+  routeloom_test::FrameSight sight{};
+  CHECK(sight_of(radio.sent.back(), sight) && sight.type == FrameType::Data);
+
+  // The pause mask still gates the pump's dispatch: a staged completion
+  // frees nothing while kDataDispatch is held.
   {
-    SendOptions opts{};
-    opts.delivery = DeliveryClass::BestEffort;
-    for (int i = 0; i < 3; ++i) {
-      MessageId id{};
-      CHECK_OK(n1.send(2, body, opts, 10, id));
+    MessageId paused_a{}, paused_b{};
+    CHECK_OK(node.send(2, body, best, 4, paused_a));
+    CHECK_OK(node.send(2, body, best, 4, paused_b));
+    CHECK_OK(node.set_pause(PauseReason::SurveyVisit, pause::kDataDispatch));
+    pump.post_tx_result(radio.sent.back().token, true, 4);
+    // Idle since t=1: the tick (t=3) beats the event's t=4 post — the task
+    // wakes, finds nothing staged, and sleeps again until the event lands.
+    radio.now_ms = pump.wake_at(1);
+    CHECK(radio.now_ms == 3);
+    pump.run_once(radio.now_ms, node);
+    radio.now_ms = pump.wake_at(radio.now_ms);
+    CHECK(radio.now_ms == 4);
+    pump.run_once(radio.now_ms, node);  // resolved, nothing dispatched
+    CHECK(radio.sent.size() == 4);
+    CHECK_OK(node.clear_pause(PauseReason::SurveyVisit));
+    radio.now_ms = 5;
+    pump.run_once(radio.now_ms, node);
+    CHECK(radio.sent.size() == 5 && radio.sent.back().at_ms == 5);
+  }
+
+  // --- mixed TX/RX drain order --------------------------------------------
+  // A TX completion and an inbound transit DATA (which owes a HOP_ACCEPT)
+  // are both staged while the owner sleeps. The pass must drain BOTH and
+  // only then let poll() dispatch: the accept takes the control lane
+  // ahead of the queued DATA. Dispatching inside on_radio_tx_result —
+  // the rejected first-round fix — put the DATA on the air before the RX
+  // was even decoded (review P2).
+  {
+    TestSecurity security2;
+    CapturingObserver observer2;
+    routeloom_test::FakeRadioPort radio2;
+    routeloom_test::OwnerPump pump2;
+    NodeConfig config2{1, 7, 902};
+    MeshNode node2(config2, radio2, security2, observer2);
+    CHECK_OK(node2.start(0));
+    CHECK_OK(node2.add_neighbor(2, 1, 0));
+    CHECK_OK(node2.add_neighbor(9, 1, 0));  // next hop for the transit forward
+    MessageId q1{}, q2{};
+    CHECK_OK(node2.send(2, body, best, 0, q1));
+    CHECK_OK(node2.send(2, body, best, 0, q2));
+    radio2.now_ms = 0;
+    pump2.run_once(0, node2);  // boot ad in flight; resolve it so DATA can go
+    pump2.post_tx_result(radio2.sent.back().token, true, 1);
+    radio2.now_ms = pump2.wake_at(0);
+    CHECK(radio2.now_ms == 1);
+    pump2.run_once(radio2.now_ms, node2);  // DATA #1 is with the driver now
+    CHECK(radio2.sent.back().at_ms == 1);
+    const std::size_t sent_before = radio2.sent.size();
+    // Both events land while the owner sleeps: completion first, then RX.
+    pump2.post_tx_result(radio2.sent.back().token, true, 2);
+    const wire::EncodedFrame inbound = craft_transit_frame(
+        security2, /*prev=*/2, /*relay=*/7, /*origin=*/2, /*destination=*/9,
+        /*seq=*/9001, body);
+    pump2.post_rx(2,
+                  std::vector<std::uint8_t>(
+                      inbound.view().data,
+                      inbound.view().data + inbound.view().size),
+                  -55, 2);
+    radio2.now_ms = pump2.wake_at(1);
+    CHECK(radio2.now_ms == 2);
+    pump2.run_once(radio2.now_ms, node2);
+    // First post-drain submission is the HOP_ACCEPT, not the queued DATA.
+    CHECK(radio2.sent.size() > sent_before);
+    routeloom_test::FrameSight first{};
+    CHECK(sight_of(radio2.sent[sent_before], first));
+    CHECK(first.type == FrameType::HopAccept);
+    // The queued DATA follows once the accept's own completion arrives.
+    pump2.post_tx_result(radio2.sent.back().token, true, 3);
+    radio2.now_ms = 3;
+    pump2.run_once(radio2.now_ms, node2);
+    CHECK(radio2.sent.size() > sent_before + 1);
+    routeloom_test::FrameSight second{};
+    CHECK(sight_of(radio2.sent[sent_before + 1], second));
+    CHECK(second.type == FrameType::Data);
+  }
+}
+
+// Issue #60-3 over the public C ABI: rl_on_radio_tx_result resolves the
+// in-flight attempt ONLY — the next submission always comes from the
+// owner task's rl_poll, after any same-cycle RX/control work. A driver
+// completion callback that invoked the handler inline can therefore never
+// re-enter the driver's own send() — the staged hand-off the header now
+// documents is the supported path.
+struct CApiTxProbe {
+  CApiState security{};
+  int send_calls{0};
+  std::uint64_t last_token{0};
+};
+
+rl_status_code_t capi_probe_send(void* user, rl_node_id_t, uint64_t token,
+                                 const uint8_t*, size_t) {
+  auto* probe = static_cast<CApiTxProbe*>(user);
+  ++probe->send_calls;
+  probe->last_token = token;
+  return RL_STATUS_OK;
+}
+
+void test_c_api_tx_result_owner_task() {
+  CApiTxProbe probe{};
+  rl_node_config_t config{};
+  rl_node_config_init(&config);
+  config.network = 1;
+  config.node = 7;
+  config.message_session = 77;
+  const rl_radio_vtable_t radio{&probe, capi_probe_send, capi_radio_recover};
+  const rl_security_vtable_t security{&probe.security, capi_security_ready,
+                                      capi_next_counter, capi_seal, capi_open};
+  const rl_observer_vtable_t observer{};
+  std::vector<std::max_align_t> storage(
+      (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
+  rl_context_t* context = nullptr;
+  CHECK(rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
+                &radio, &security, &observer, &context) == RL_STATUS_OK);
+  CHECK(context != nullptr);
+  CHECK(rl_start(context, 0) == RL_STATUS_OK);
+  CHECK(rl_add_neighbor(context, 8, 1, 0) == RL_STATUS_OK);
+  rl_send_options_t options{};
+  rl_send_options_init(&options);
+  options.delivery = RL_DELIVERY_BEST_EFFORT;
+  const uint8_t payload[] = {1, 2};
+  for (int i = 0; i < 3; ++i) {
+    rl_message_id_t id{};
+    CHECK(rl_send(context, 8, payload, sizeof(payload), &options, 0, &id) ==
+          RL_STATUS_OK);
+  }
+  // Owner pump on the C ABI: each pass submits at most one frame, and only
+  // rl_poll submits — the completion handed to the owner task resolves the
+  // attempt without ever calling back into the driver.
+  int submitted = 0;
+  for (rl_monotonic_ms_t now = 0; now < 8 && submitted < 3; ++now) {
+    rl_poll(context, now);
+    if (probe.send_calls > submitted) {
+      submitted = probe.send_calls;
+      const int before = probe.send_calls;
+      rl_on_radio_tx_result(context, probe.last_token, true, now);
+      CHECK(probe.send_calls == before);
     }
-    n1.poll(10);            // only the first job reaches the driver here
-    network.flush(10);      // one drain pass, no poll() inside
-    CHECK(data_frames() == 3);
-    CHECK(o2.messages.size() == 3);
   }
-
-  // The immediate dispatch still honours the pause mask: while
-  // kDataDispatch is held, a resolved send frees nothing to the scheduler.
-  {
-    SendOptions opts{};
-    opts.delivery = DeliveryClass::BestEffort;
-    MessageId a{}, b{};
-    CHECK_OK(n1.send(2, body, opts, 20, a));
-    CHECK_OK(n1.send(2, body, opts, 20, b));
-    n1.poll(20);            // job A is with the driver before the pause lands
-    CHECK_OK(n1.set_pause(PauseReason::SurveyVisit, pause::kDataDispatch));
-    network.flush(20);      // A's TX result resolves — B must NOT dispatch
-    CHECK(data_frames() == 4);
-    CHECK_OK(n1.clear_pause(PauseReason::SurveyVisit));
-    n1.poll(20);
-    network.flush(20);
-    CHECK(data_frames() == 5);
-  }
-
-  // And the congestion rules still gate it: three RELIABLE sends to the
-  // same peer exceed the initial peer window (two in-flight exchanges), so
-  // the immediate dispatch puts the second on the air but the third waits.
-  {
-    SendOptions opts{};     // Reliable: each send owes a HOP_ACCEPT exchange
-    for (int i = 0; i < 3; ++i) {
-      MessageId id{};
-      CHECK_OK(n1.send(2, body, opts, 30, id));
-    }
-    n1.poll(30);
-    network.flush(30);
-    CHECK(data_frames() == 7);  // 5 + 2 — the peer window held the third
-  }
+  CHECK(submitted >= 3);
+  rl_deinit(context);
 }
 
 }  // namespace
@@ -737,6 +899,7 @@ int main() {
   test_diamond_repair();
   test_delivery_terminal_eviction();
   test_tx_result_dispatch();
+  test_c_api_tx_result_owner_task();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;
