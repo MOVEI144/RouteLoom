@@ -464,6 +464,11 @@ target_link_libraries(routeloom_sdkv1_legacy_purge_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_sdkv1_legacy_purge_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_legacy_purge_tests COMMAND routeloom_sdkv1_legacy_purge_tests)
 
+add_executable(routeloom_sdkv1_session_rtc_tests test_sdkv1_session_rtc.cpp)
+target_link_libraries(routeloom_sdkv1_session_rtc_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_session_rtc_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_session_rtc_tests COMMAND routeloom_sdkv1_session_rtc_tests)
+
 add_executable(routeloom_sdkv1_boot_session_tests test_sdkv1_boot_session.cpp)
 target_link_libraries(routeloom_sdkv1_boot_session_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_sdkv1_boot_session_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
