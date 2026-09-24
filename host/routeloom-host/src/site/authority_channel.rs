@@ -30,6 +30,7 @@ use routeloom_keysched::{
     LABEL_RESUME_R2, LABEL_RESUME_R3,
 };
 use routeloom_protocol::authority::CarrierKind;
+use zeroize::{Zeroize, Zeroizing};
 
 pub use routeloom_keysched::authority::{PullReason, StoredState, UpdateCause, UpdateResult};
 
@@ -44,19 +45,27 @@ pub const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
 pub const IDLE_RETIRE_MS: u64 = 600_000;
 pub const PROACTIVE_REKEY_COUNTER: u64 = 1 << 32;
 
-/// The member record a channel needs. PR3 serves it from the SiteStore —
-/// and extends it with the generation/kid the JoinConfirm checks need; the
-/// only PR1 question is "current DAMS or gone".
-#[derive(Clone, Debug)]
+/// Current membership binding, supplied by the owner from its durable row.
+/// Every channel operation is fenced by this entire binding.
+#[derive(Clone, Eq, PartialEq)]
 pub struct ChannelMember {
+    pub member: bool,
+    pub kid: [u8; 32],
+    pub generation: u32,
     pub dams: [u8; 32],
     pub network: u64,
 }
 
+impl Drop for ChannelMember {
+    fn drop(&mut self) {
+        self.dams.zeroize();
+    }
+}
+
 pub trait AuthorityDirectory {
     /// Current record for `device`, or `None` when removed/unknown. The
-    /// channel compares DAMS bytes across the handshake and every dispatch,
-    /// so a reissue retires the channel even mid-dialogue.
+    /// The channel compares membership, kid, generation, network and DAMS
+    /// across the handshake and every dispatch.
     fn lookup(&self, device: u64) -> Option<ChannelMember>;
 }
 
@@ -224,8 +233,18 @@ struct PendingHandshake {
     rx_key: TrafficKey,
     tx_key: TrafficKey,
     expected_r3: [u8; 16],
-    dams: [u8; 32],
+    member: ChannelMember,
     deadline_ms: u64,
+}
+
+impl Drop for PendingHandshake {
+    fn drop(&mut self) {
+        self.rx_key.key.zeroize();
+        self.rx_key.iv.zeroize();
+        self.tx_key.key.zeroize();
+        self.tx_key.iv.zeroize();
+        self.expected_r3.zeroize();
+    }
 }
 
 struct Channel {
@@ -238,7 +257,16 @@ struct Channel {
     tx_counter: u64,
     request_id: u64,
     last_activity_ms: u64,
-    dams: [u8; 32],
+    member: ChannelMember,
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        self.rx_key.key.zeroize();
+        self.rx_key.iv.zeroize();
+        self.tx_key.key.zeroize();
+        self.tx_key.iv.zeroize();
+    }
 }
 
 pub struct AuthorityChannels {
@@ -305,11 +333,21 @@ impl AuthorityChannels {
         if let Some(channel) = self.channels.remove(&device) {
             self.ctx_to_device.remove(&channel.rx_ctx);
         }
+        self.outbound.retain(|carrier| carrier.device != device);
+        self.events.retain(|event| match event {
+            ChannelEvent::ChannelReady { device: bound }
+            | ChannelEvent::ChannelLost { device: bound, .. }
+            | ChannelEvent::JoinConfirm { device: bound, .. }
+            | ChannelEvent::Pull { device: bound, .. }
+            | ChannelEvent::UpdateAck { device: bound, .. }
+            | ChannelEvent::ActivateAck { device: bound, .. }
+            | ChannelEvent::Passthrough { device: bound, .. } => *bound != device,
+        });
     }
 
     /// Advances timers: handshake expiry and the 10-minute idle retire.
     pub fn tick(&mut self, now_ms: u64) {
-        self.pending.retain(|p| now_ms <= p.deadline_ms);
+        self.pending.retain(|p| now_ms < p.deadline_ms);
         let idle: Vec<u64> = self
             .channels
             .iter()
@@ -350,9 +388,20 @@ impl AuthorityChannels {
 
     fn push_event(&mut self, event: ChannelEvent) {
         if self.events.len() >= MAX_EVENTS {
-            self.events.pop_front();
+            return;
         }
         self.events.push_back(event);
+    }
+
+    fn binding_current(
+        &self,
+        directory: &dyn AuthorityDirectory,
+        device: u64,
+        bound: &ChannelMember,
+    ) -> bool {
+        directory.lookup(device).is_some_and(|current| {
+            current.member && current.network == self.config.network && current == *bound
+        })
     }
 
     fn push_outbound(&mut self, outbound: AuthorityOutbound) -> bool {
@@ -422,12 +471,39 @@ impl AuthorityChannels {
                 return;
             }
         };
-        if r1.purpose != Purpose::Authority || !r1.ticket.is_empty() || r1.cid_i == 0 {
+        if r1.purpose != Purpose::Authority
+            || !r1.ticket.is_empty()
+            || r1.cid_i == 0
+            || device == 0
+            || device == u64::MAX
+            || self.config.network == 0
+            || self.config.site_id == 0
+            || self.config.site_epoch != (self.config.network >> 32) as u32
+        {
             self.stats.r1_rejected += 1;
             return;
         }
+        if self
+            .channels
+            .get(&device)
+            .is_some_and(|channel| !self.binding_current(directory, device, &channel.member))
+        {
+            self.retire_device(device);
+            self.push_event(ChannelEvent::ChannelLost {
+                device,
+                reason: ChannelLostReason::StaleMember,
+            });
+        }
         let member = match directory.lookup(device) {
-            Some(member) if member.network == self.config.network => member,
+            Some(member)
+                if member.member
+                    && member.generation != 0
+                    && member.kid.iter().any(|byte| *byte != 0)
+                    && member.dams.iter().any(|byte| *byte != 0)
+                    && member.network == self.config.network =>
+            {
+                member
+            }
             _ => {
                 self.send_hint(device, &r1.rid);
                 self.stats.r1_rejected += 1;
@@ -439,19 +515,19 @@ impl AuthorityChannels {
             self.stats.r1_rejected += 1;
             return;
         }
-        let k_auth = resume_auth_key(
+        let k_auth = Zeroizing::new(resume_auth_key(
             &member.dams,
             Purpose::Authority,
             self.config.network,
             device,
             self.config.site_id,
-        );
+        ));
         let binding = resume_binding_routed(Purpose::Authority, device, self.config.site_id);
         // The R1 MAC covers the body (everything but the tag); the full
         // bytes — `bytes` itself, which just decoded — feed R2 and the
         // transcript.
         let r1_body = r1.body();
-        let mac = resume_mac(&k_auth, LABEL_RESUME_R1, &[&binding, &r1_body]);
+        let mac = resume_mac(&k_auth[..], LABEL_RESUME_R1, &[&binding, &r1_body]);
         if !mac_equal(&mac, &r1.mac) {
             // Wrong key guess: silent, like the engine's BadMac (no hint).
             self.stats.r1_rejected += 1;
@@ -502,7 +578,7 @@ impl AuthorityChannels {
             gk_epoch: self.config.gk_epoch,
         };
         let r2_body = R2::ok_body(&nonce_r, cid_r, &epochs_r);
-        let mac_r = resume_mac(&k_auth, LABEL_RESUME_R2, &[&binding, bytes, &r2_body]);
+        let mac_r = resume_mac(&k_auth[..], LABEL_RESUME_R2, &[&binding, bytes, &r2_body]);
         let mut r2_bytes = r2_body;
         r2_bytes.extend_from_slice(&mac_r);
         let context = ResumeKeyContext {
@@ -514,9 +590,9 @@ impl AuthorityChannels {
             cid_r,
         };
         let th = sha256(&[bytes, &r2_bytes]);
-        let prk = resume_prk(&r1.nonce_i, &nonce_r, &member.dams);
-        let k_conf = resume_confirm_key(&prk, &th);
-        let expected_r3 = resume_mac(&k_conf, LABEL_RESUME_R3, &[&th]);
+        let prk = Zeroizing::new(resume_prk(&r1.nonce_i, &nonce_r, &member.dams));
+        let k_conf = Zeroizing::new(resume_confirm_key(&prk, &th));
+        let expected_r3 = resume_mac(&k_conf[..], LABEL_RESUME_R3, &[&th]);
         let pending = PendingHandshake {
             device,
             cid_i: r1.cid_i,
@@ -524,7 +600,7 @@ impl AuthorityChannels {
             rx_key: resume_traffic_key(&prk, &context, Direction::InitiatorToResponder, &th),
             tx_key: resume_traffic_key(&prk, &context, Direction::ResponderToInitiator, &th),
             expected_r3,
-            dams: member.dams,
+            member,
             deadline_ms: now_ms.saturating_add(HANDSHAKE_TIMEOUT_MS),
         };
         // The outbound must have room before the pending slot is spent: a
@@ -576,8 +652,9 @@ impl AuthorityChannels {
                 return;
             }
         };
-        let pending = self.pending.remove(slot);
-        if now_ms > pending.deadline_ms {
+        let pending = &self.pending[slot];
+        if now_ms >= pending.deadline_ms {
+            self.pending.remove(slot);
             self.stats.r1_rejected += 1;
             return;
         }
@@ -587,19 +664,22 @@ impl AuthorityChannels {
         }
         // R3-complete re-check: the member may have been removed or reissued
         // between R1 and R3.
-        match directory.lookup(device) {
-            Some(member) if member.dams == pending.dams => {}
-            _ => {
-                self.stats.r1_rejected += 1;
-                return;
-            }
+        if !self.binding_current(directory, device, &pending.member) {
+            self.pending.remove(slot);
+            self.stats.r1_rejected += 1;
+            return;
         }
         if self.channels.len() >= MAX_CHANNELS && !self.channels.contains_key(&device) {
             self.stats.r1_rejected += 1;
             return;
         }
-        if let Some(old) = self.channels.remove(&device) {
-            self.ctx_to_device.remove(&old.rx_ctx);
+        if self.events.len() >= MAX_EVENTS {
+            self.stats.r1_rejected += 1;
+            return;
+        }
+        let pending = self.pending.remove(slot);
+        if self.channels.contains_key(&device) {
+            self.retire_device(device);
         }
         self.ctx_to_device.insert(pending.cid_r, device);
         self.channels.insert(
@@ -614,7 +694,7 @@ impl AuthorityChannels {
                 tx_counter: 0,
                 request_id: 1,
                 last_activity_ms: now_ms,
-                dams: pending.dams,
+                member: pending.member.clone(),
             },
         );
         self.stats.handshakes_completed += 1;
@@ -655,14 +735,10 @@ impl AuthorityChannels {
         }
         // Dispatch-time re-check: a removed or reissued member retires its
         // channel instead of answering under a stale DAMS.
-        let stale = match directory.lookup(device) {
-            Some(member) => self
-                .channels
-                .get(&device)
-                .map(|c| c.dams != member.dams)
-                .unwrap_or(true),
-            None => true,
-        };
+        let stale = !self
+            .channels
+            .get(&device)
+            .is_some_and(|c| self.binding_current(directory, device, &c.member));
         if stale {
             self.retire_device(device);
             self.stats.envelopes_rejected += 1;
@@ -670,6 +746,12 @@ impl AuthorityChannels {
                 device,
                 reason: ChannelLostReason::StaleMember,
             });
+            return;
+        }
+        // The caller may retry the same ciphertext after draining events.
+        // Preserve its replay slot until the verified business can be queued.
+        if self.events.len() >= MAX_EVENTS {
+            self.stats.envelopes_rejected += 1;
             return;
         }
         let channel = match self.channels.get_mut(&device) {
@@ -692,67 +774,77 @@ impl AuthorityChannels {
         }
         channel.last_activity_ms = now_ms;
         self.stats.envelopes_opened += 1;
+        let generation = channel.member.generation;
         match header.env_type {
             1 => match JoinConfirmUp::decode(&plaintext) {
-                Ok(up) => self.push_event(ChannelEvent::JoinConfirm {
-                    device,
-                    confirm: JoinConfirmFields {
-                        generation: up.head.generation,
-                        request_id: up.head.request_id,
-                        cert_hash: up.cert_hash,
-                        boot: up.boot,
-                        current: up.current,
-                        next: up.next,
-                    },
-                }),
-                Err(_) => self.stats.envelopes_rejected += 1,
+                Ok(up) if up.head.generation == generation => {
+                    self.push_event(ChannelEvent::JoinConfirm {
+                        device,
+                        confirm: JoinConfirmFields {
+                            generation: up.head.generation,
+                            request_id: up.head.request_id,
+                            cert_hash: up.cert_hash,
+                            boot: up.boot,
+                            current: up.current,
+                            next: up.next,
+                        },
+                    })
+                }
+                _ => self.stats.envelopes_rejected += 1,
             },
             4 => match GroupKeyPull::decode(&plaintext) {
-                Ok(pull) => self.push_event(ChannelEvent::Pull {
-                    device,
-                    pull: PullFields {
-                        generation: pull.head.generation,
-                        request_id: pull.head.request_id,
-                        current: pull.current,
-                        next: pull.next,
-                        reason: pull.reason,
-                    },
-                }),
-                Err(_) => self.stats.envelopes_rejected += 1,
+                Ok(pull) if pull.head.generation == generation => {
+                    self.push_event(ChannelEvent::Pull {
+                        device,
+                        pull: PullFields {
+                            generation: pull.head.generation,
+                            request_id: pull.head.request_id,
+                            current: pull.current,
+                            next: pull.next,
+                            reason: pull.reason,
+                        },
+                    })
+                }
+                _ => self.stats.envelopes_rejected += 1,
             },
             2 => match GroupKeyAck::decode(&plaintext) {
-                Ok(ack) => self.push_event(ChannelEvent::UpdateAck {
-                    device,
-                    ack: AckFields {
-                        generation: ack.head.generation,
-                        request_id: ack.head.request_id,
-                        g: ack.g,
-                        gk_id: ack.gk_id,
-                        result: ack.result,
-                        stored_state: ack.stored_state,
-                    },
-                }),
-                Err(_) => self.stats.envelopes_rejected += 1,
+                Ok(ack) if ack.head.generation == generation => {
+                    self.push_event(ChannelEvent::UpdateAck {
+                        device,
+                        ack: AckFields {
+                            generation: ack.head.generation,
+                            request_id: ack.head.request_id,
+                            g: ack.g,
+                            gk_id: ack.gk_id,
+                            result: ack.result,
+                            stored_state: ack.stored_state,
+                        },
+                    })
+                }
+                _ => self.stats.envelopes_rejected += 1,
             },
             3 => match GroupKeyAck::decode(&plaintext) {
-                Ok(ack) => self.push_event(ChannelEvent::ActivateAck {
-                    device,
-                    ack: AckFields {
-                        generation: ack.head.generation,
-                        request_id: ack.head.request_id,
-                        g: ack.g,
-                        gk_id: ack.gk_id,
-                        result: ack.result,
-                        stored_state: ack.stored_state,
-                    },
-                }),
-                Err(_) => self.stats.envelopes_rejected += 1,
+                Ok(ack) if ack.head.generation == generation => {
+                    self.push_event(ChannelEvent::ActivateAck {
+                        device,
+                        ack: AckFields {
+                            generation: ack.head.generation,
+                            request_id: ack.head.request_id,
+                            g: ack.g,
+                            gk_id: ack.gk_id,
+                            result: ack.result,
+                            stored_state: ack.stored_state,
+                        },
+                    })
+                }
+                _ => self.stats.envelopes_rejected += 1,
             },
             env_type => {
                 // Types 5..8: AEAD-verified plaintext for the P6 sink. The
                 // head must still be well-formed; the tail stays opaque.
                 let head_ok = plaintext.len() >= BODY_HEAD
-                    && BodyHead::decode(&plaintext[..BODY_HEAD], plaintext[1]).is_ok();
+                    && BodyHead::decode(&plaintext[..BODY_HEAD], plaintext[1])
+                        .is_ok_and(|head| head.generation == generation);
                 if head_ok {
                     self.push_event(ChannelEvent::Passthrough {
                         device,
@@ -775,14 +867,10 @@ impl AuthorityChannels {
         now_ms: u64,
     ) -> Result<(), ChannelSendError> {
         // Pre-send re-check: never seal under a stale DAMS.
-        let stale = match directory.lookup(device) {
-            Some(member) => self
-                .channels
-                .get(&device)
-                .map(|c| c.dams != member.dams)
-                .unwrap_or(true),
-            None => true,
-        };
+        let stale = !self
+            .channels
+            .get(&device)
+            .is_some_and(|c| self.binding_current(directory, device, &c.member));
         if stale {
             self.retire_device(device);
             self.stats.send_errors += 1;
@@ -815,7 +903,7 @@ impl AuthorityChannels {
             });
             return Err(ChannelSendError::CounterExhausted);
         }
-        if channel.request_id == 0 {
+        if channel.request_id == u64::MAX {
             let device = channel.device;
             self.retire_device(device);
             self.stats.send_errors += 1;
@@ -825,11 +913,20 @@ impl AuthorityChannels {
             });
             return Err(ChannelSendError::CounterExhausted);
         }
+        let op = if env_type == 1 { 2 } else { 1 };
+        if !BodyHead::decode(plaintext, op)
+            .is_ok_and(|head| head.generation == channel.member.generation)
+        {
+            self.stats.send_errors += 1;
+            return Err(ChannelSendError::InvalidParams);
+        }
+        let counter = channel.tx_counter;
+        channel.tx_counter += 1;
         let envelope = match seal_envelope(
             &channel.tx_key,
             env_type,
             channel.tx_ctx,
-            channel.tx_counter,
+            counter,
             plaintext,
         ) {
             Ok(envelope) => envelope,
@@ -838,7 +935,6 @@ impl AuthorityChannels {
                 return Err(ChannelSendError::CounterExhausted);
             }
         };
-        channel.tx_counter += 1;
         channel.request_id += 1;
         channel.last_activity_ms = now_ms;
         self.stats.sends += 1;
@@ -855,7 +951,7 @@ impl AuthorityChannels {
             None => return Err(ChannelSendError::NoChannel),
             Some(channel) => channel.request_id,
         };
-        if id == 0 {
+        if id == u64::MAX {
             // The id space wrapped: end the channel before any id is reused.
             self.retire_device(device);
             self.stats.send_errors += 1;
@@ -891,10 +987,12 @@ impl AuthorityChannels {
             overlap_s: params.overlap_s,
             gk: *params.gk,
         };
-        let plaintext = update
+        let mut plaintext = update
             .encode()
             .map_err(|_| ChannelSendError::InvalidParams)?;
-        self.seal_for(directory, device, 2, &plaintext, now_ms)
+        let sent = self.seal_for(directory, device, 2, &plaintext, now_ms);
+        plaintext.zeroize();
+        sent
     }
 
     /// Seals a GroupKeyActivate for `device` (PR3: GK activation).
@@ -977,6 +1075,9 @@ mod tests {
             directory.devices.insert(
                 device,
                 ChannelMember {
+                    member: true,
+                    kid: [0xC1; 32],
+                    generation: 9,
                     dams,
                     network: NETWORK,
                 },
@@ -1647,6 +1748,9 @@ mod tests {
             directory.devices.insert(
                 device,
                 ChannelMember {
+                    member: true,
+                    kid: [0xC1; 32],
+                    generation: 9,
                     dams: dams(),
                     network: NETWORK,
                 },
@@ -1761,5 +1865,417 @@ mod tests {
         assert_eq!(delivered[0].device, DEVICE);
         assert_eq!(delivered[0].kind, CarrierKind::R2);
         assert!(channels.take_outbound().is_empty());
+    }
+
+    #[test]
+    fn directory_network_change_retires_before_send() {
+        let mut directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let _device = handshake(&mut channels, &directory);
+        directory.devices.get_mut(&DEVICE).expect("member").network += 1;
+        let key = [0xA5; 32];
+        assert_eq!(
+            channels.send_update(
+                &directory,
+                DEVICE,
+                UpdateParams {
+                    generation: 9,
+                    g: 13,
+                    cause: UpdateCause::Periodic,
+                    overlap_s: 60,
+                    gk: &key,
+                },
+                1001,
+            ),
+            Err(ChannelSendError::StaleMember)
+        );
+        assert!(channels.take_outbound().is_empty());
+    }
+
+    #[test]
+    fn retire_device_discards_queued_carriers() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let _device = handshake(&mut channels, &directory);
+        let key = [0xA5; 32];
+        channels
+            .send_update(
+                &directory,
+                DEVICE,
+                UpdateParams {
+                    generation: 9,
+                    g: 13,
+                    cause: UpdateCause::Periodic,
+                    overlap_s: 60,
+                    gk: &key,
+                },
+                1001,
+            )
+            .expect("queued update");
+        channels.retire_device(DEVICE);
+        assert!(channels.take_outbound().is_empty());
+    }
+
+    #[test]
+    fn full_event_queue_does_not_lose_verified_events_or_replay_retry() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut device = handshake(&mut channels, &directory);
+        let mut state = 0x52;
+        for request_id in 1..=MAX_EVENTS as u64 {
+            let body = BodyHead {
+                op: 1,
+                generation: 9,
+                request_id,
+            }
+            .encode(1)
+            .expect("head");
+            channels.on_carrier(
+                &directory,
+                DEVICE,
+                CarrierKind::Envelope,
+                &device.seal(6, &body),
+                1000,
+                &mut rng(&mut state),
+            );
+        }
+        let last = BodyHead {
+            op: 1,
+            generation: 9,
+            request_id: MAX_EVENTS as u64 + 1,
+        }
+        .encode(1)
+        .expect("head");
+        let retry = device.seal(6, &last);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::Envelope,
+            &retry,
+            1000,
+            &mut rng(&mut state),
+        );
+        for request_id in 1..=MAX_EVENTS as u64 {
+            let Some(ChannelEvent::Passthrough { body, .. }) = channels.poll_event() else {
+                panic!("lost event {request_id}");
+            };
+            assert_eq!(
+                BodyHead::decode(&body, 1).expect("head").request_id,
+                request_id
+            );
+        }
+        assert!(channels.poll_event().is_none());
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::Envelope,
+            &retry,
+            1001,
+            &mut rng(&mut state),
+        );
+        assert!(matches!(
+            channels.poll_event(),
+            Some(ChannelEvent::Passthrough { .. })
+        ));
+    }
+
+    #[test]
+    fn malformed_r3_does_not_consume_a_valid_pending_handshake() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut state = 0x1234;
+        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x64; 16]);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R1,
+            &r1,
+            1000,
+            &mut rng(&mut state),
+        );
+        let r2 = drain_r2(&mut channels);
+        let r3 = device.on_r2(&r2);
+        let mut corrupt = r3.clone();
+        corrupt[0] ^= 1;
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R3,
+            &corrupt,
+            1001,
+            &mut rng(&mut state),
+        );
+        assert_eq!(channels.stats().pending, 1);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R3,
+            &r3,
+            1002,
+            &mut rng(&mut state),
+        );
+        assert!(matches!(
+            channels.poll_event(),
+            Some(ChannelEvent::ChannelReady { .. })
+        ));
+    }
+
+    #[test]
+    fn request_id_exhaustion_retires_before_wrap() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let _device = handshake(&mut channels, &directory);
+        channels
+            .channels
+            .get_mut(&DEVICE)
+            .expect("channel")
+            .request_id = u64::MAX;
+        let key = [0xA5; 32];
+        assert_eq!(
+            channels.send_update(
+                &directory,
+                DEVICE,
+                UpdateParams {
+                    generation: 9,
+                    g: 13,
+                    cause: UpdateCause::Periodic,
+                    overlap_s: 60,
+                    gk: &key,
+                },
+                1001,
+            ),
+            Err(ChannelSendError::CounterExhausted)
+        );
+        assert_eq!(channels.stats().channels, 0);
+    }
+
+    #[test]
+    fn zero_dams_member_cannot_start_a_channel() {
+        let directory = FakeDirectory::with(DEVICE, [0; 32]);
+        let mut channels = AuthorityChannels::new(config());
+        let mut state = 0x23;
+        let (r1, _) = FakeDevice::begin(DEVICE, [0; 32], 0xA001, [0x81; 16]);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R1,
+            &r1,
+            1000,
+            &mut rng(&mut state),
+        );
+        assert_eq!(channels.stats().pending, 0);
+
+        let mut directory = FakeDirectory::with(DEVICE, dams());
+        directory.devices.get_mut(&DEVICE).expect("member").kid = [0; 32];
+        let mut channels = AuthorityChannels::new(config());
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA002, [0x82; 16]);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R1,
+            &r1,
+            1000,
+            &mut rng(&mut state),
+        );
+        assert_eq!(channels.stats().pending, 0);
+    }
+
+    #[test]
+    fn changed_generation_or_kid_retires_an_existing_channel() {
+        let mut directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut device = handshake(&mut channels, &directory);
+        let mut state = 0x19;
+        let body = JoinConfirmUp {
+            head: BodyHead {
+                op: 1,
+                generation: 9,
+                request_id: 1,
+            },
+            cert_hash: [0x42; 32],
+            boot: 1,
+            current: 0,
+            next: 0,
+        }
+        .encode()
+        .expect("confirm");
+        let envelope = device.seal(1, &body);
+        directory
+            .devices
+            .get_mut(&DEVICE)
+            .expect("member")
+            .generation += 1;
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::Envelope,
+            &envelope,
+            1001,
+            &mut rng(&mut state),
+        );
+        assert_eq!(channels.stats().channels, 0);
+        assert!(matches!(
+            channels.poll_event(),
+            Some(ChannelEvent::ChannelLost { .. })
+        ));
+
+        let mut channels = AuthorityChannels::new(config());
+        let mut directory = FakeDirectory::with(DEVICE, dams());
+        let _device = handshake(&mut channels, &directory);
+        directory.devices.get_mut(&DEVICE).expect("member").kid[0] ^= 1;
+        let key = [0xA5; 32];
+        assert_eq!(
+            channels.send_update(
+                &directory,
+                DEVICE,
+                UpdateParams {
+                    generation: 9,
+                    g: 13,
+                    cause: UpdateCause::Periodic,
+                    overlap_s: 60,
+                    gk: &key,
+                },
+                1001,
+            ),
+            Err(ChannelSendError::StaleMember)
+        );
+    }
+
+    #[test]
+    fn pending_handshake_expires_at_clock_ceiling() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut state = 0x61;
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x9A; 16]);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R1,
+            &r1,
+            u64::MAX - 5,
+            &mut rng(&mut state),
+        );
+        assert_eq!(channels.stats().pending, 1);
+        channels.tick(u64::MAX);
+        assert_eq!(channels.stats().pending, 0);
+    }
+
+    #[test]
+    fn body_generation_must_match_bound_member() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let mut device = handshake(&mut channels, &directory);
+        let mut state = 0x97;
+        let body = JoinConfirmUp {
+            head: BodyHead {
+                op: 1,
+                generation: 10,
+                request_id: 1,
+            },
+            cert_hash: [0x42; 32],
+            boot: 1,
+            current: 0,
+            next: 0,
+        }
+        .encode()
+        .expect("confirm");
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::Envelope,
+            &device.seal(1, &body),
+            1001,
+            &mut rng(&mut state),
+        );
+        assert!(channels.poll_event().is_none());
+        let key = [0xA5; 32];
+        assert_eq!(
+            channels.send_update(
+                &directory,
+                DEVICE,
+                UpdateParams {
+                    generation: 10,
+                    g: 13,
+                    cause: UpdateCause::Periodic,
+                    overlap_s: 60,
+                    gk: &key,
+                },
+                1002,
+            ),
+            Err(ChannelSendError::InvalidParams)
+        );
+        assert!(channels.take_outbound().is_empty());
+    }
+
+    #[test]
+    fn rehandshake_discards_old_channel_carriers() {
+        let directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let _old = handshake(&mut channels, &directory);
+        let key = [0xA5; 32];
+        channels
+            .send_update(
+                &directory,
+                DEVICE,
+                UpdateParams {
+                    generation: 9,
+                    g: 13,
+                    cause: UpdateCause::Periodic,
+                    overlap_s: 60,
+                    gk: &key,
+                },
+                1001,
+            )
+            .expect("old update");
+        let mut state = 0x1A;
+        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), 0xA002, [0xA2; 16]);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R1,
+            &r1,
+            1002,
+            &mut rng(&mut state),
+        );
+        let r2_slot = channels
+            .outbound
+            .iter()
+            .position(|carrier| carrier.kind == CarrierKind::R2)
+            .expect("R2");
+        let r2 = channels.outbound.remove(r2_slot);
+        let r3 = device.on_r2(&r2.bytes);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R3,
+            &r3,
+            1003,
+            &mut rng(&mut state),
+        );
+        assert!(channels.take_outbound().is_empty());
+    }
+
+    #[test]
+    fn reissued_member_r1_retires_old_context() {
+        let mut directory = FakeDirectory::with(DEVICE, dams());
+        let mut channels = AuthorityChannels::new(config());
+        let _old = handshake(&mut channels, &directory);
+        let new_dams = [0xA5; 32];
+        let member = directory.devices.get_mut(&DEVICE).expect("member");
+        member.dams = new_dams;
+        member.generation += 1;
+        member.kid[0] ^= 1;
+        let mut state = 0x1B;
+        let (r1, _) = FakeDevice::begin(DEVICE, new_dams, 0xA002, [0xA3; 16]);
+        channels.on_carrier(
+            &directory,
+            DEVICE,
+            CarrierKind::R1,
+            &r1,
+            1002,
+            &mut rng(&mut state),
+        );
+        assert_eq!(channels.stats().channels, 0);
+        assert_eq!(channels.stats().pending, 1);
     }
 }

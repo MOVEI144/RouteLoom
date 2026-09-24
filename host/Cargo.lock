@@ -521,6 +521,7 @@ dependencies = [
  "routeloom-tui",
  "routeloom-wire",
  "rusqlite",
+ "zeroize",
 ]
 
 [[package]]

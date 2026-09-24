@@ -226,7 +226,7 @@ fn authority_bodies_match() {
         invalid += 1;
     }
     assert_eq!(valid, 7);
-    assert_eq!(invalid, 13);
+    assert_eq!(invalid, 15);
 }
 
 #[test]

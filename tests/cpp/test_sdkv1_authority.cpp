@@ -252,7 +252,7 @@ void test_golden_bodies() {
     CHECK(status.detail != nullptr && want == status.detail);
     ++invalid_seen;
   }
-  CHECK(invalid_seen == 13);
+  CHECK(invalid_seen == 15);
 }
 
 void test_golden_gk_id() {
@@ -425,11 +425,12 @@ struct FakePort final : sdkv1::AuthorityPort {
   std::vector<SentCarrier> sent;
   std::uint64_t next_token{1};
   bool full{false};
+  bool block_envelopes{false};
   sdkv1::AuthorityClient* reenter{nullptr};  // when set, advance() from try_send
 
   bool try_send(NodeId gateway, sdkv1::AuthorityCarrierKind kind, ByteView carrier,
                 std::uint64_t& token) noexcept override {
-    if (full) return false;
+    if (full || (block_envelopes && kind == sdkv1::AuthorityCarrierKind::Envelope)) return false;
     token = next_token++;
     SentCarrier out{};
     out.gateway = gateway;
@@ -968,6 +969,7 @@ void test_timeouts_and_backoff() {
     CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Connecting);
     CHECK(pump(client, port, fake, 1000 + 600000));
     CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Ready);
+    CHECK(client.snapshot().next_request_id == 2);  // new channel starts at one
   }
   // Pulls coalesce to one per 60 s device-wide.
   {
@@ -1210,6 +1212,293 @@ void test_port_full_and_tx_result() {
   CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Connecting);
 }
 
+void test_staged_confirm_and_one_pending_ack() {
+  const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(*aead, port, observer, env);
+  FakeAuthority fake(secret(0xD0));
+  sdkv1::AuthorityInput start{};
+  start.kind = sdkv1::AuthorityInputKind::Start;
+  start.start = make_start();
+  CHECK(client.advance(start, 1000));
+  CHECK(port.sent.size() == 1);
+  if (port.sent.empty()) return;
+  const auto r2 = fake.on_carrier(port.sent[0].kind,
+                                  ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()},
+                                  1000);
+  CHECK(r2.size() == 1);
+  if (r2.empty()) return;
+  port.sent.clear();
+  port.block_envelopes = true;
+  sdkv1::AuthorityInput rx{};
+  rx.kind = sdkv1::AuthorityInputKind::RxCarrier;
+  rx.rx.kind = sdkv1::AuthorityCarrierKind::R2;
+  rx.rx.bytes = ByteView{r2[0].bytes.data(), r2[0].bytes.size()};
+  CHECK(client.advance(rx, 1000));
+  CHECK(port.sent.size() == 1);  // R3 left, JoinConfirm is still staged.
+  if (port.sent.empty()) return;
+  (void)fake.on_carrier(port.sent[0].kind,
+                        ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()}, 1000);
+  CHECK(fake.ready);
+  port.sent.clear();
+
+  auto make_update = [&](std::uint32_t g) {
+    sdkv1::GroupKeyUpdate update{};
+    update.head.op = 1;
+    update.head.generation = kGeneration;
+    update.head.request_id = fake.next_request++;
+    update.g = g;
+    update.cause = sdkv1::UpdateCause::Periodic;
+    update.overlap_s = 60;
+    update.gk = secret(static_cast<std::uint8_t>(g));
+    return fake.seal(keys::AuthorityEnvelopeType::GroupKeyUpdate, update);
+  };
+  const SentCarrier first = make_update(11);
+  rx.rx.kind = sdkv1::AuthorityCarrierKind::Envelope;
+  rx.rx.bytes = ByteView{first.bytes.data(), first.bytes.size()};
+  CHECK(client.advance(rx, 1001));
+  CHECK(client.snapshot().tx_counter == 1);  // only staged JoinConfirm was sealed
+  const SentCarrier second = make_update(12);
+  rx.rx.bytes = ByteView{second.bytes.data(), second.bytes.size()};
+  CHECK(client.advance(rx, 1002));
+  CHECK(client.snapshot().tx_counter == 1);  // second update waits for capacity
+
+  port.block_envelopes = false;
+  sdkv1::AuthorityInput tick{};
+  tick.kind = sdkv1::AuthorityInputKind::Tick;
+  CHECK(client.advance(tick, 1003));
+  CHECK(client.advance(tick, 1004));
+  CHECK(port.sent.size() == 2);
+  for (const auto& sent : port.sent) {
+    (void)fake.on_carrier(sent.kind, ByteView{sent.bytes.data(), sent.bytes.size()}, 1004);
+  }
+  CHECK(fake.acks_seen == 1);
+  CHECK(fake.last_ack_g == 11);
+  port.sent.clear();
+  rx.rx.bytes = ByteView{second.bytes.data(), second.bytes.size()};
+  CHECK(client.advance(rx, 1005));
+  for (const auto& sent : port.sent) {
+    (void)fake.on_carrier(sent.kind, ByteView{sent.bytes.data(), sent.bytes.size()}, 1005);
+  }
+  CHECK(fake.acks_seen == 2);
+  CHECK(fake.last_ack_g == 12);
+}
+
+void test_pull_bucket_at_zero() {
+  const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(*aead, port, observer, env);
+  FakeAuthority fake(secret(0xD0));
+  sdkv1::AuthorityInput start{};
+  start.kind = sdkv1::AuthorityInputKind::Start;
+  start.start = make_start();
+  CHECK(client.advance(start, 0));
+  CHECK(pump(client, port, fake, 0));
+  sdkv1::AuthorityInput pull{};
+  pull.kind = sdkv1::AuthorityInputKind::RequestPull;
+  CHECK(client.advance(pull, 0));
+  CHECK(client.advance(pull, 1));
+  CHECK(port.sent.size() == 1);
+  CHECK(client.snapshot().pull_pending);
+}
+
+void test_unknown_body_op_is_refused() {
+  sdkv1::AuthorityBodyHead head{};
+  head.op = 3;
+  head.generation = kGeneration;
+  head.request_id = 1;
+  std::array<std::uint8_t, sdkv1::kAuthorityBodyHeadSize> bytes{};
+  std::size_t written = 0;
+  CHECK(!sdkv1::authority_head_encode(head, MutableByteView{bytes.data(), bytes.size()},
+                                      written));
+  head.op = 1;
+  CHECK(sdkv1::authority_head_encode(head, MutableByteView{bytes.data(), bytes.size()},
+                                     written));
+  bytes[1] = 3;
+  CHECK(!sdkv1::authority_head_decode(ByteView{bytes.data(), bytes.size()}, head));
+}
+
+void test_durable_ack_requires_stored_key() {
+  sdkv1::GroupKeyAck ack{};
+  ack.head.op = 2;
+  ack.head.generation = kGeneration;
+  ack.head.request_id = 1;
+  ack.g = 12;
+  ack.gk_id.fill(0xA5);
+  ack.result = sdkv1::UpdateResult::Durable;
+  ack.stored_state = sdkv1::StoredState::None;
+  std::array<std::uint8_t, sdkv1::kGroupKeyAckSize> bytes{};
+  std::size_t written = 0;
+  CHECK(!sdkv1::encode_group_key_ack(ack, MutableByteView{bytes.data(), bytes.size()},
+                                     written));
+  ack.stored_state = sdkv1::StoredState::Staged;
+  CHECK(sdkv1::encode_group_key_ack(ack, MutableByteView{bytes.data(), bytes.size()},
+                                    written));
+  bytes[53] = 0;
+  CHECK(!sdkv1::decode_group_key_ack(ByteView{bytes.data(), bytes.size()}, ack));
+}
+
+void test_receiver_generation_fence() {
+  const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(*aead, port, observer, env);
+  FakeAuthority fake(secret(0xD0));
+  sdkv1::AuthorityInput start{};
+  start.kind = sdkv1::AuthorityInputKind::Start;
+  start.start = make_start();
+  CHECK(client.advance(start, 1000));
+  CHECK(port.sent.size() == 1);
+  if (port.sent.empty()) return;
+  const auto r2 = fake.on_carrier(port.sent[0].kind,
+                                  ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()},
+                                  1000);
+  CHECK(r2.size() == 1);
+  if (r2.empty()) return;
+  port.sent.clear();
+  sdkv1::AuthorityInput rx{};
+  rx.kind = sdkv1::AuthorityInputKind::RxCarrier;
+  rx.rx.kind = sdkv1::AuthorityCarrierKind::R2;
+  rx.rx.bytes = ByteView{r2[0].bytes.data(), r2[0].bytes.size()};
+  CHECK(client.advance(rx, 1000));
+  CHECK(port.sent.size() == 2);
+  if (port.sent.size() < 2) return;
+  (void)fake.on_carrier(port.sent[0].kind,
+                        ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()}, 1000);
+  CHECK(fake.ready);
+  port.sent.clear();
+  sdkv1::JoinConfirmDown down{};
+  down.head.op = 2;
+  down.head.generation = kGeneration;
+  down.head.request_id = 1;
+  down.confirmed_generation = kGeneration + 1;
+  const auto wrong_confirm = fake.seal(keys::AuthorityEnvelopeType::JoinConfirm, down);
+  rx.rx.kind = sdkv1::AuthorityCarrierKind::Envelope;
+  rx.rx.bytes = ByteView{wrong_confirm.bytes.data(), wrong_confirm.bytes.size()};
+  CHECK(client.advance(rx, 1001));
+  CHECK(!client.snapshot().join_confirmed);
+
+  sdkv1::GroupKeyUpdate update{};
+  update.head.op = 1;
+  update.head.generation = kGeneration + 1;
+  update.head.request_id = 2;
+  update.g = 11;
+  update.cause = sdkv1::UpdateCause::Periodic;
+  update.overlap_s = 60;
+  update.gk = secret(0xA0);
+  const auto wrong_update = fake.seal(keys::AuthorityEnvelopeType::GroupKeyUpdate, update);
+  rx.rx.bytes = ByteView{wrong_update.bytes.data(), wrong_update.bytes.size()};
+  CHECK(client.advance(rx, 1002));
+  bool saw_update = false;
+  for (const auto& event : observer.seen) {
+    if (event.kind == sdkv1::AuthorityEvent::Kind::UpdateReceived) saw_update = true;
+  }
+  CHECK(!saw_update);
+}
+
+struct FailingSeal {
+  const routeloom::AeadGcm* inner{routeloom::builtin_aead_gcm()};
+  sdkv1::AuthorityClient* client{nullptr};
+  std::uint64_t seen_counter{0};
+  bool fail_once{true};
+
+  static bool seal(void* context, const std::uint8_t* key, const std::uint8_t* nonce,
+                   ByteView aad, ByteView plaintext, std::uint8_t* out) noexcept {
+    auto& self = *static_cast<FailingSeal*>(context);
+    if (self.fail_once) {
+      self.fail_once = false;
+      if (self.client != nullptr) self.seen_counter = self.client->snapshot().tx_counter;
+      return false;
+    }
+    return self.inner->seal(self.inner->ctx, key, nonce, aad, plaintext, out);
+  }
+  static bool open(void* context, const std::uint8_t* key, const std::uint8_t* nonce,
+                   ByteView aad, ByteView ciphertext, std::uint8_t* out) noexcept {
+    auto& self = *static_cast<FailingSeal*>(context);
+    return self.inner->open(self.inner->ctx, key, nonce, aad, ciphertext, out);
+  }
+};
+
+void test_failed_seal_burns_counter() {
+  FailingSeal failing{};
+  CHECK(failing.inner != nullptr);
+  if (failing.inner == nullptr) return;
+  const routeloom::AeadGcm aead{&FailingSeal::seal, &FailingSeal::open, &failing};
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(aead, port, observer, env);
+  failing.client = &client;
+  FakeAuthority fake(secret(0xD0));
+  sdkv1::AuthorityInput start{};
+  start.kind = sdkv1::AuthorityInputKind::Start;
+  start.start = make_start();
+  CHECK(client.advance(start, 1000));
+  CHECK(port.sent.size() == 1);
+  if (port.sent.empty()) return;
+  const auto r2 = fake.on_carrier(port.sent[0].kind,
+                                  ByteView{port.sent[0].bytes.data(), port.sent[0].bytes.size()},
+                                  1000);
+  CHECK(r2.size() == 1);
+  if (r2.empty()) return;
+  port.sent.clear();
+  sdkv1::AuthorityInput rx{};
+  rx.kind = sdkv1::AuthorityInputKind::RxCarrier;
+  rx.rx.kind = sdkv1::AuthorityCarrierKind::R2;
+  rx.rx.bytes = ByteView{r2[0].bytes.data(), r2[0].bytes.size()};
+  CHECK(client.advance(rx, 1000));
+  CHECK(failing.seen_counter == 1);
+  CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Backoff);
+  CHECK(client.snapshot().rx_ctx == 0);
+}
+
+void test_malformed_wake_does_not_start_handshake() {
+  const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  FakePort port;
+  FakeObserver observer;
+  FakeEnv env;
+  sdkv1::AuthorityClient client(*aead, port, observer, env);
+  FakeAuthority fake(secret(0xD0));
+  sdkv1::AuthorityInput start{};
+  start.kind = sdkv1::AuthorityInputKind::Start;
+  start.start = make_start();
+  CHECK(client.advance(start, 1000));
+  CHECK(pump(client, port, fake, 1000));
+  sdkv1::AuthorityInput tick{};
+  tick.kind = sdkv1::AuthorityInputKind::Tick;
+  CHECK(client.advance(tick, 601000));
+  CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Dormant);
+  sdkv1::AuthorityInput wake{};
+  wake.kind = sdkv1::AuthorityInputKind::RxCarrier;
+  wake.rx.kind = sdkv1::AuthorityCarrierKind::Wake;
+  const std::array<std::uint8_t, 7> short_hint{};
+  wake.rx.bytes = ByteView{short_hint.data(), short_hint.size()};
+  CHECK(client.advance(wake, 601001));
+  CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Dormant);
+  CHECK(port.sent.empty());
+  start.start = make_start();
+  start.start.network += (std::uint64_t{1} << 32);
+  start.start.epochs.site_epoch = 8;
+  start.start.site_id += 1;
+  start.start.dams = secret(0xC1);
+  CHECK(client.advance(start, 601002));
+  CHECK(client.snapshot().state == sdkv1::AuthoritySnapshot::State::Connecting);
+  CHECK(port.sent.size() == 1);
+}
+
 void test_suspend_and_validation() {
   const routeloom::AeadGcm* aead = routeloom::builtin_aead_gcm();
   CHECK(aead != nullptr);
@@ -1349,6 +1638,13 @@ int main() {
   test_timeouts_and_backoff();
   test_rx_attacks();
   test_port_full_and_tx_result();
+  test_staged_confirm_and_one_pending_ack();
+  test_pull_bucket_at_zero();
+  test_unknown_body_op_is_refused();
+  test_durable_ack_requires_stored_key();
+  test_receiver_generation_fence();
+  test_failed_seal_burns_counter();
+  test_malformed_wake_does_not_start_handshake();
   test_suspend_and_validation();
   test_no_heap();
   if (failures == 0) {
@@ -1358,4 +1654,3 @@ int main() {
   std::printf("sdkv1_authority: %d FAILURES\n", failures);
   return 1;
 }
-

@@ -395,6 +395,7 @@ class AuthorityClient final {
   MonotonicMs hs_deadline_{0};
   std::uint32_t backoff_s_{0};
   MonotonicMs last_pull_ms_{0};
+  bool pull_sent_{false};
   bool pull_pending_{false};
   PullReason pending_reason_{PullReason::BootReconnectSync};
   bool ack_pending_{false};

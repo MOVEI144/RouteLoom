@@ -93,6 +93,7 @@ MonotonicMs sat_add(MonotonicMs a, MonotonicMs b) noexcept {
 Status authority_head_encode(const AuthorityBodyHead& head, const MutableByteView out,
                              std::size_t& written) noexcept {
   written = 0;
+  if (head.op != 1 && head.op != 2) return refusal(kBadOp);
   if (out.data == nullptr || out.size < kAuthorityBodyHeadSize) return refusal(kTruncated);
   ByteWriter writer(out);
   const Status status = encode_head_checked(writer, head, head.op);
@@ -113,6 +114,7 @@ Status authority_head_decode(const ByteView input, AuthorityBodyHead& out) noexc
     return refusal(kTruncated);
   }
   if (version != kAuthorityBodyVersion) return refusal(kBadVersion);
+  if (out.op != 1 && out.op != 2) return refusal(kBadOp);
   if (flags != 0) return refusal(kReservedNonZero);
   if (out.generation == 0) return refusal(kZeroGeneration);
   if (out.request_id == 0) return refusal(kZeroRequestId);
@@ -239,6 +241,9 @@ Status encode_group_key_ack(const GroupKeyAck& msg, const MutableByteView out,
   if (!stored_state_valid(static_cast<std::uint8_t>(msg.stored_state))) {
     return refusal(kBadStoredState);
   }
+  if (msg.result == UpdateResult::Durable && msg.stored_state == StoredState::None) {
+    return refusal(kBadStoredState);
+  }
   ByteWriter writer(out);
   Status status = encode_head_checked(writer, msg.head, 2);
   if (!status) return status;
@@ -271,6 +276,10 @@ Status decode_group_key_ack(const ByteView input, GroupKeyAck& out) noexcept {
   if (reserved != 0) return refusal(kReservedNonZero);
   if (!result_valid(result)) return refusal(kBadResult);
   if (!stored_state_valid(stored)) return refusal(kBadStoredState);
+  if (result == static_cast<std::uint8_t>(UpdateResult::Durable) &&
+      stored == static_cast<std::uint8_t>(StoredState::None)) {
+    return refusal(kBadStoredState);
+  }
   out.gk_id = gk_id;
   out.result = static_cast<UpdateResult>(result);
   out.stored_state = static_cast<StoredState>(stored);
@@ -564,11 +573,12 @@ MonotonicMs AuthorityClient::next_deadline() const noexcept {
   if (tx_size_ != 0) return 0;  // staged bytes wait for the port; retry now
   if (state_ == AuthoritySnapshot::State::Backoff) return backoff_until_;
   if (state_ == AuthoritySnapshot::State::Connecting) return hs_deadline_;
+  if (ack_pending_ || !join_confirm_sent_) return 0;
   MonotonicMs deadline = UINT64_MAX;
   if (!join_confirmed_) deadline = sat_add(ready_since_, kJoinConfirmTimeoutMs);
   if (pull_pending_) {
     const MonotonicMs due =
-        (last_pull_ms_ == 0) ? ready_since_ : sat_add(last_pull_ms_, kPullBucketMs);
+        !pull_sent_ ? ready_since_ : sat_add(last_pull_ms_, kPullBucketMs);
     if (due < deadline) deadline = due;
   }
   const MonotonicMs idle_at = sat_add(last_activity_, kIdleRetireMs);
@@ -593,6 +603,11 @@ Status AuthorityClient::on_start(const AuthorityStart& start, const MonotonicMs 
   if (dams_zero) {
     return Status::error(StatusCode::InvalidArgument, "AUTHORITY_START_NO_DAMS");
   }
+  if (started_) {
+    engine_.clear_all();
+    engine_ready_ = false;
+    secure_clear(local_.dams);
+  }
   local_ = start;
   started_ = true;
   return begin_handshake(now);
@@ -608,6 +623,10 @@ Status AuthorityClient::on_rx(const AuthorityRxCarrier& rx, const MonotonicMs no
   if (state_ == AuthoritySnapshot::State::Dormant) {
     // Armed by an earlier Start, channel retired: only a Wake may re-open it.
     if (rx.kind == AuthorityCarrierKind::Wake) {
+      if (rx.bytes.size != 8) {
+        ++rx_rejected_;
+        return Status::success();
+      }
       if (wake_seen_ && now < sat_add(last_wake_ms_, kPullBucketMs)) {
         return Status::success();  // coalesced; the last handshake is still fresh
       }
@@ -726,7 +745,7 @@ Status AuthorityClient::on_tick(const MonotonicMs now) noexcept {
         if (!join_confirm_sent_) (void)send_join_confirm(now);
         if (pull_pending_ && tx_size_ == 0 && !ack_pending_) {
           const bool due =
-              (last_pull_ms_ == 0) || (now >= sat_add(last_pull_ms_, kPullBucketMs));
+              !pull_sent_ || (now >= sat_add(last_pull_ms_, kPullBucketMs));
           if (due && send_pull(pending_reason_, now)) pull_pending_ = false;
         }
       } else {
@@ -770,7 +789,7 @@ Status AuthorityClient::on_pull(const AuthorityPullRequest& pull, const Monotoni
     pending_reason_ = pull.reason;
     return Status::success();
   }
-  const bool due = (last_pull_ms_ == 0) || (now >= sat_add(last_pull_ms_, kPullBucketMs));
+  const bool due = !pull_sent_ || (now >= sat_add(last_pull_ms_, kPullBucketMs));
   if (!due) {
     pull_pending_ = true;  // one Pull per 60 s device-wide; coalesced
     pending_reason_ = pull.reason;
@@ -844,6 +863,7 @@ void AuthorityClient::wipe_channel_keys() noexcept {
   tx_ctx_ = 0;
   rx_window_.reset();
   tx_counter_ = 0;
+  next_request_id_ = 1;
   secure_clear(tx_buffer_);
   tx_size_ = 0;
   tx_kind_ = TxKind::None;
@@ -911,6 +931,9 @@ Status AuthorityClient::do_seal(const keys::AuthorityEnvelopeType type, const By
   if (state_ != AuthoritySnapshot::State::Ready) {
     return Status::error(StatusCode::InvalidState, "AUTHORITY_NOT_READY");
   }
+  if (tx_size_ != 0) {
+    return Status::error(StatusCode::Busy, "AUTHORITY_TX_BUSY");
+  }
   if (tx_counter_ >= kProactiveRekeyCounter) {
     // 2^32 envelopes on one context: retire before the 2^48 hard stop and
     // re-establish. The caller re-queues what is still wanted.
@@ -918,11 +941,14 @@ Status AuthorityClient::do_seal(const keys::AuthorityEnvelopeType type, const By
     return Status::error(StatusCode::CounterExhausted, "AUTHORITY_COUNTER_REKEY");
   }
   std::size_t written = 0;
-  const Status status = authority_seal(aead_, tx_key_, type, tx_ctx_, tx_counter_, plaintext,
+  const std::uint64_t counter = tx_counter_++;
+  const Status status = authority_seal(aead_, tx_key_, type, tx_ctx_, counter, plaintext,
                                        MutableByteView{tx_buffer_.data(), tx_buffer_.size()},
                                        written);
-  if (!status) return status;
-  ++tx_counter_;
+  if (!status) {
+    retire_channel("AEAD_SEAL_FAILED", now);
+    return status;
+  }
   tx_size_ = written;
   tx_kind_ = TxKind::Envelope;
   last_activity_ = now;
@@ -932,7 +958,8 @@ Status AuthorityClient::do_seal(const keys::AuthorityEnvelopeType type, const By
 
 Status AuthorityClient::stage_pending_ack(const MonotonicMs now) noexcept {
   if (!ack_pending_) return Status::success();
-  if (next_request_id_ == 0) {
+  if (tx_size_ != 0) return Status::error(StatusCode::Busy, "AUTHORITY_TX_BUSY");
+  if (next_request_id_ == UINT64_MAX) {
     retire_channel("REQUEST_ID_EXHAUSTED", now);
     return Status::error(StatusCode::CounterExhausted, "AUTHORITY_REQUEST_ID_WRAP");
   }
@@ -964,7 +991,7 @@ Status AuthorityClient::stage_pending_ack(const MonotonicMs now) noexcept {
 Status AuthorityClient::send_join_confirm(const MonotonicMs now) noexcept {
   if (join_confirm_sent_) return Status::success();
   if (tx_size_ != 0) return Status::error(StatusCode::Busy, "AUTHORITY_TX_BUSY");
-  if (next_request_id_ == 0) {
+  if (next_request_id_ == UINT64_MAX) {
     retire_channel("REQUEST_ID_EXHAUSTED", now);
     return Status::error(StatusCode::CounterExhausted, "AUTHORITY_REQUEST_ID_WRAP");
   }
@@ -991,7 +1018,7 @@ Status AuthorityClient::send_join_confirm(const MonotonicMs now) noexcept {
 
 Status AuthorityClient::send_pull(const PullReason reason, const MonotonicMs now) noexcept {
   if (tx_size_ != 0) return Status::error(StatusCode::Busy, "AUTHORITY_TX_BUSY");
-  if (next_request_id_ == 0) {
+  if (next_request_id_ == UINT64_MAX) {
     retire_channel("REQUEST_ID_EXHAUSTED", now);
     return Status::error(StatusCode::CounterExhausted, "AUTHORITY_REQUEST_ID_WRAP");
   }
@@ -1013,6 +1040,7 @@ Status AuthorityClient::send_pull(const PullReason reason, const MonotonicMs now
               now);
   if (!status) return status;
   last_pull_ms_ = now;
+  pull_sent_ = true;
   return Status::success();
 }
 
@@ -1032,6 +1060,12 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
                                        MutableByteView{rx_buffer_.data(), rx_buffer_.size()},
                                        plain_size, header);
   if (!opened) {
+    secure_clear(rx_buffer_);
+    ++rx_rejected_;
+    return;
+  }
+  if (ack_pending_ && (header.type == keys::AuthorityEnvelopeType::GroupKeyUpdate ||
+                       header.type == keys::AuthorityEnvelopeType::GroupKeyActivate)) {
     secure_clear(rx_buffer_);
     ++rx_rejected_;
     return;
@@ -1059,6 +1093,11 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
         fail();
         return;
       }
+      if (msg.head.generation != local_.generation ||
+          msg.confirmed_generation != local_.generation) {
+        fail();
+        return;
+      }
       join_confirmed_ = true;
       AuthorityEvent event{};
       event.kind = AuthorityEvent::Kind::JoinConfirmAck;
@@ -1072,6 +1111,11 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
     case keys::AuthorityEnvelopeType::GroupKeyUpdate: {
       GroupKeyUpdate msg{};
       if (!decode_group_key_update(body, msg)) {
+        fail();
+        return;
+      }
+      if (msg.head.generation != local_.generation) {
+        secure_clear(msg.gk);
         fail();
         return;
       }
@@ -1097,6 +1141,10 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
     case keys::AuthorityEnvelopeType::GroupKeyActivate: {
       GroupKeyActivate msg{};
       if (!decode_group_key_activate(body, msg)) {
+        fail();
+        return;
+      }
+      if (msg.head.generation != local_.generation) {
         fail();
         return;
       }
@@ -1163,7 +1211,6 @@ void AuthorityClient::wipe() noexcept {
   backoff_until_ = 0;
   hs_deadline_ = 0;
   backoff_s_ = 0;
-  last_pull_ms_ = 0;
   pull_pending_ = false;
   ack_pending_ = false;
   ack_g_ = 0;

@@ -455,6 +455,8 @@ def main() -> None:
         ("body_truncated", update[:-1], "truncated", "55 of 56 bytes"),
         ("body_surplus", update + b"\x00", "surplus", "57 of 56 bytes"),
         ("body_bad_version", b"\x02" + update[1:], "bad_version", "body_version 2"),
+        ("body_bad_op", update[:1] + b"\x03" + update[2:], "bad_op",
+         "op 3 is undefined"),
         ("body_flags_set", update[:2] + b"\x00\x01" + update[4:], "reserved_nonzero",
          "head flags bit set"),
         ("body_zero_generation", update[:4] + u32(0) + update[8:], "zero_generation",
@@ -472,6 +474,8 @@ def main() -> None:
          "result 9 is undefined"),
         ("body_ack_bad_state", ack[:53] + b"\x07" + ack[54:], "bad_stored_state",
          "stored_state 7 is undefined"),
+        ("body_ack_durable_none", ack[:52] + b"\x00\x00" + ack[54:],
+         "bad_stored_state", "durable ACK requires a stored key state"),
     ]
     negatives += [
         ("body_pull_bad_reason", pull[:24] + b"\x09" + pull[25:], "bad_reason",

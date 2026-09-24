@@ -1,0 +1,9 @@
+{
+  "codec": "authority_body",
+  "encoded_hex": "010200000000000901020304050607080000000bd873eccd12f184617fe3dc2644e7d15dbea1573d62d63bfc0204b1b36c19905500000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "name": "body_ack_durable_none",
+  "note": "durable ACK requires a stored key state",
+  "reason": "bad_stored_state"
+}

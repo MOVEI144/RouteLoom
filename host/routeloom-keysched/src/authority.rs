@@ -87,7 +87,7 @@ pub struct BodyHead {
 
 impl BodyHead {
     pub fn encode(&self, op: u8) -> Result<[u8; BODY_HEAD], BodyError> {
-        if self.op != op {
+        if self.op != op || !(1..=2).contains(&op) {
             return Err(BodyError::BadOp);
         }
         if self.generation == 0 {
@@ -111,7 +111,7 @@ impl BodyHead {
         if input[0] != BODY_VERSION {
             return Err(BodyError::BadVersion);
         }
-        if input[1] != op {
+        if input[1] != op || !(1..=2).contains(&op) {
             return Err(BodyError::BadOp);
         }
         if input[2] != 0 || input[3] != 0 {
@@ -373,6 +373,9 @@ pub struct GroupKeyAck {
 
 impl GroupKeyAck {
     pub fn encode(&self) -> Result<[u8; GROUP_KEY_ACK], BodyError> {
+        if self.result == UpdateResult::Durable && self.stored_state == StoredState::None {
+            return Err(BodyError::BadStoredState);
+        }
         let head = self.head.encode(2)?;
         let mut out = [0_u8; GROUP_KEY_ACK];
         out[..BODY_HEAD].copy_from_slice(&head);
@@ -389,13 +392,17 @@ impl GroupKeyAck {
         if input[54] != 0 || input[55] != 0 {
             return Err(BodyError::ReservedNonZero);
         }
-        Ok(Self {
+        let ack = Self {
             head,
             g: u32::from_be_bytes(input[16..20].try_into().expect("4 bytes")),
             gk_id: input[20..52].try_into().expect("32 bytes"),
             result: UpdateResult::from_u8(input[52]).ok_or(BodyError::BadResult)?,
             stored_state: StoredState::from_u8(input[53]).ok_or(BodyError::BadStoredState)?,
-        })
+        };
+        if ack.result == UpdateResult::Durable && ack.stored_state == StoredState::None {
+            return Err(BodyError::BadStoredState);
+        }
+        Ok(ack)
     }
 }
 
@@ -628,11 +635,17 @@ pub fn open_envelope(
 
 /// 64-frame replay window over one direction's envelope counter. `accept`
 /// commits only after the caller verified the AEAD tag.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ReplayWindow {
     max: u64,
     bitmap: u64,
     empty: bool,
+}
+
+impl Default for ReplayWindow {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReplayWindow {
@@ -888,6 +901,55 @@ mod tests {
         assert!(window.accept(1000 - 63));
         assert!(!window.accept(1000 - 63));
         assert!(!window.accept(1000 - 64));
+    }
+
+    #[test]
+    fn default_replay_window_starts_empty() {
+        let mut window = ReplayWindow::default();
+        assert_eq!(window.max_seen(), None);
+        assert!(window.accept(0));
+        assert!(!window.accept(0));
+    }
+
+    #[test]
+    fn unknown_body_op_is_refused() {
+        let head = BodyHead {
+            op: 3,
+            generation: 9,
+            request_id: 1,
+        };
+        assert_eq!(head.encode(3), Err(BodyError::BadOp));
+        let mut encoded = BodyHead { op: 1, ..head }.encode(1).expect("head");
+        encoded[1] = 3;
+        assert_eq!(BodyHead::decode(&encoded, 3), Err(BodyError::BadOp));
+    }
+
+    #[test]
+    fn durable_ack_requires_a_stored_key_state() {
+        let ack = GroupKeyAck {
+            head: BodyHead {
+                op: 2,
+                generation: 9,
+                request_id: 1,
+            },
+            g: 12,
+            gk_id: [0xA5; 32],
+            result: UpdateResult::Durable,
+            stored_state: StoredState::None,
+        };
+        assert_eq!(ack.encode(), Err(BodyError::BadStoredState));
+        let good = GroupKeyAck {
+            stored_state: StoredState::Staged,
+            ..ack
+        }
+        .encode()
+        .expect("ack");
+        let mut invalid = good;
+        invalid[53] = 0;
+        assert_eq!(
+            GroupKeyAck::decode(&invalid),
+            Err(BodyError::BadStoredState)
+        );
     }
 
     #[test]
