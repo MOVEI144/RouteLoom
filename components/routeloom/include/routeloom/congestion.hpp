@@ -87,6 +87,19 @@ constexpr std::uint8_t kWindowGrowAccepts = 8;  // consecutive authenticated acc
 constexpr std::uint8_t kRfAttemptsMax = 2;
 constexpr std::uint8_t kBusyReadmissionsMax = 4;
 constexpr std::uint8_t kCombinedPhysicalAttemptsMax = 6;
+// Reply-peer lease (PeerLeasePurpose::ExpectedReply): before accepting a
+// frame whose obligations we still owe a reply for (HOP_ACCEPT / END_RECEIPT
+// / BUSY), the relay must hold a lease on the replying peer —
+// resource-profiles.json admission.reply_peer_leases_max=3 per peer, and the
+// lease lives at most the link transaction lifetime 1500ms
+// (admission.transaction_lifetime_ms, crash-time-resources.md §3).
+constexpr std::uint8_t kReplyLeaseMaxPerPeer = 3;
+constexpr std::uint32_t kLinkTransactionLifetimeMs = 1500;
+// Global bound on simultaneously live reply leases: a defensive pool so the
+// table itself stays bounded (each entry covers one accepted transaction's
+// outstanding reply jobs, and a full table refuses admission instead of
+// allocating). Sized so every neighbor could hold one lease.
+constexpr std::size_t kReplyLeasePoolCapacity = 32;
 // Link-layer RTO (radio.md §8: RTO初期60ms、適応20〜250ms): the configured
 // NodeConfig::hop_accept_timeout_ms is the initial value; per-peer
 // adaptation measures the HOP_ACCEPT round trip as an EWMA and clamps

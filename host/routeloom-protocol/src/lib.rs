@@ -70,7 +70,6 @@ pub enum ProtocolError {
     InvalidLength,
     CrcMismatch,
     CreditSessionMismatch,
-    CreditRegression,
     CreditExhausted,
     PrincipalTooLong,
 }
@@ -263,6 +262,9 @@ impl CumulativeCredit {
         }
     }
 
+    /// Adopt a cumulative grant notice (usb-protocol.md §3): each axis takes
+    /// the max, so a stale or partially-stale notice is absorbed without
+    /// error and never shrinks the allowance.
     pub fn update(
         &mut self,
         session: u64,
@@ -272,11 +274,8 @@ impl CumulativeCredit {
         if session != self.session {
             return Err(ProtocolError::CreditSessionMismatch);
         }
-        if granted_frames < self.granted_frames || granted_bytes < self.granted_bytes {
-            return Err(ProtocolError::CreditRegression);
-        }
-        self.granted_frames = granted_frames;
-        self.granted_bytes = granted_bytes;
+        self.granted_frames = self.granted_frames.max(granted_frames);
+        self.granted_bytes = self.granted_bytes.max(granted_bytes);
         Ok(())
     }
 
@@ -353,5 +352,21 @@ mod tests {
         credit.consume(10).unwrap();
         assert_eq!(credit.consume(1), Err(ProtocolError::CreditExhausted));
         assert_eq!(credit.available(), (0, 0));
+    }
+
+    #[test]
+    fn cumulative_credit_stale_grants_are_absorbed() {
+        // usb-protocol.md §3: each grant axis adopts the max — a reordered
+        // (stale) or zero notice must not error or shrink the allowance.
+        let mut credit = CumulativeCredit::new(9);
+        credit.update(9, 16, 65536).unwrap();
+        credit.update(9, 4, 1024).unwrap(); // stale: lower on both axes
+        credit.update(9, 0, 0).unwrap(); // stale zero grant
+        credit.update(9, 20, 4096).unwrap(); // mixed: frames up, bytes stale
+        assert_eq!(credit.available(), (20, 65536));
+        assert_eq!(
+            credit.update(8, 100, 100),
+            Err(ProtocolError::CreditSessionMismatch)
+        );
     }
 }

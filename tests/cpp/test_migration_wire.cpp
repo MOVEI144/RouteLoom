@@ -1581,6 +1581,9 @@ void test_exchange_bounded_and_expiry() {
   pair.wire_b.sent.clear();
 
   // An inbound reassembly that stalls expires instead of pinning the slot.
+  // The expiry itself is contract-pinned: docs/spec/wire-protocol.md §6
+  // ("10秒組立timeout") and radio-defaults.json control_reassembly_timeout_ms.
+  CHECK(migration_wire_const::kInboundExpiryMs == 10000);
   manifest.total_len = 100;
   pair.b.on_manifest(kAuthority, manifest, kNow);
   autonomy::ObjectChunkPayload chunk{};

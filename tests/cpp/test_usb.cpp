@@ -343,8 +343,18 @@ void test_credit() {
   CHECK(credit.update(8, 4, 400).code == StatusCode::ProtocolError);
   CHECK_OK(credit.update(9, 4, 400));
   CHECK_OK(credit.update(9, 4, 400));  // duplicate grant never adds
-  CHECK(credit.update(9, 3, 400).code == StatusCode::ProtocolError);
-  CHECK(credit.update(9, 4, 300).code == StatusCode::ProtocolError);
+  // Stale (reordered, smaller) notices are absorbed per-axis max — no error,
+  // no shrink (usb-protocol.md §3, shared golden tx_grant_stale/zero/mixed).
+  CHECK_OK(credit.update(9, 3, 400));
+  CHECK(credit.grant_frames() == 4 && credit.grant_bytes() == 400);
+  CHECK_OK(credit.update(9, 4, 300));
+  CHECK(credit.grant_frames() == 4 && credit.grant_bytes() == 400);
+  CHECK_OK(credit.update(9, 0, 0));
+  CHECK(credit.grant_frames() == 4 && credit.grant_bytes() == 400);
+  // Partially-stale: a higher frames axis still advances while bytes keeps
+  // the earlier maximum.
+  CHECK_OK(credit.update(9, 6, 100));
+  CHECK(credit.grant_frames() == 6 && credit.grant_bytes() == 400);
   CHECK_OK(credit.consume(100));
   CHECK_OK(credit.consume(100));
   CHECK_OK(credit.consume(100));

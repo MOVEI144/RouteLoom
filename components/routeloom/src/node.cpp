@@ -564,9 +564,13 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
       // Tombstoned records only remember a departed peer's last-seen
       // generation — soft state. Reclaim one before refusing, or churn
       // through more than the table capacity in distinct peers permanently
-      // exhausts the pool (issue #20).
-      record = neighbors_.find(
-          [](const Neighbor& value) { return !value.active; });
+      // exhausts the pool (issue #20). A tombstone whose peer still holds a
+      // live ExpectedReply lease is NOT reclaimable: the lease keeps the
+      // record until the transaction lifetime lapses (crash-time §3).
+      expire_reply_leases(now_ms);
+      record = neighbors_.find([&](const Neighbor& value) {
+        return !value.active && count_reply_leases(value.node, now_ms) == 0;
+      });
       if (record != nullptr) {
         // A different identity inherits this slot: the per-peer feedback
         // ordering state is anti-replay continuity for THAT peer only and
@@ -1264,7 +1268,8 @@ Status MeshNode::queue_origin_data(Delivery& delivery, const MonotonicMs now_ms)
 }
 
 Status MeshNode::queue_forward(const wire::LinkOpenedFrame& frame, const NodeId next_hop,
-                               const MonotonicMs now_ms) noexcept {
+                               const MonotonicMs now_ms,
+                               const std::uint32_t reply_lease_id) noexcept {
   TxJob job{};
   job.set_forwarded(frame);
   job.owner = JobOwner::Transit;
@@ -1282,7 +1287,10 @@ Status MeshNode::queue_forward(const wire::LinkOpenedFrame& frame, const NodeId 
   job.ack = AckKey{frame.header.type,
                    MessageKey{frame.header.origin, frame.header.message},
                    frame.header.delivery_round};
-  return scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  job.reply_lease_id = reply_lease_id;
+  const auto status = scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  if (status) hold_reply_lease(reply_lease_id);
+  return status;
 }
 
 Status MeshNode::encode_ack_payload(const AckKey& key,
@@ -1331,7 +1339,8 @@ Status MeshNode::decode_ack_payload(const ByteView payload, AckKey& key) noexcep
 }
 
 Status MeshNode::queue_hop_accept(const wire::Header& accepted,
-                                  const MonotonicMs now_ms) noexcept {
+                                  const MonotonicMs now_ms,
+                                  const std::uint32_t reply_lease_id) noexcept {
   TxJob job{};
   job.form = JobForm::Plain;
   job.peer = accepted.previous_hop;
@@ -1356,7 +1365,10 @@ Status MeshNode::queue_hop_accept(const wire::Header& accepted,
                    accepted.delivery_round};
   auto status = encode_ack_payload(job.ack, job.plain.payload, job.plain.payload_size);
   if (!status) return status;
-  return scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  job.reply_lease_id = reply_lease_id;
+  status = scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  if (status) hold_reply_lease(reply_lease_id);
+  return status;
 }
 
 Status MeshNode::encode_receipt_payload(
@@ -1399,7 +1411,8 @@ Status MeshNode::decode_receipt_payload(const ByteView payload, MessageKey& key,
 }
 
 Status MeshNode::queue_end_receipt(const wire::Header& data,
-                                   const MonotonicMs now_ms) noexcept {
+                                   const MonotonicMs now_ms,
+                                   const std::uint32_t reply_lease_id) noexcept {
   const auto route = routes_.best(data.origin);
   if (!route.valid) {
     // The sender's retry round will find the return route once discovery
@@ -1441,7 +1454,10 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
                    data.delivery_round};
   auto status = encode_receipt_payload(data, job.plain.payload, job.plain.payload_size);
   if (!status) return status;
-  return scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  job.reply_lease_id = reply_lease_id;
+  status = scheduler_.enqueue(std::move(job), config_.node, now_ms);
+  if (status) hold_reply_lease(reply_lease_id);
+  return status;
 }
 
 MeshNode::TxJob MeshNode::link_control_job(const FrameType type, const NodeId neighbor,
@@ -1774,6 +1790,59 @@ void MeshNode::emit_busy_or_drop(const NodeId peer, const wire::Header& rejected
   }
 }
 
+MeshNode::ReplyLease* MeshNode::acquire_reply_lease(const NodeId peer,
+                                                  const MonotonicMs now_ms) noexcept {
+  expire_reply_leases(now_ms);
+  if (count_reply_leases(peer, now_ms) >= kReplyLeaseMaxPerPeer) {
+    return nullptr;
+  }
+  auto* record = reply_leases_.allocate();  // bounded pool: nullptr = full
+  if (record == nullptr) return nullptr;
+  record->peer = peer;
+  record->id = next_reply_lease_id_++;
+  if (next_reply_lease_id_ == 0) next_reply_lease_id_ = 1;  // 0 = "no lease"
+  record->lease.purpose = PeerLeasePurpose::ExpectedReply;
+  record->lease.ttl_ms = kLinkTransactionLifetimeMs;
+  record->lease.refcount = 0;
+  record->lease.expires_at_ms = now_ms + kLinkTransactionLifetimeMs;
+  return record;
+}
+
+void MeshNode::hold_reply_lease(const std::uint32_t lease_id) noexcept {
+  auto* record = reply_leases_.find(
+      [&](const ReplyLease& value) { return value.id == lease_id; });
+  if (record == nullptr) return;
+  if (record->lease.refcount != UINT16_MAX) ++record->lease.refcount;
+}
+
+void MeshNode::release_reply_lease(const std::uint32_t lease_id) noexcept {
+  if (lease_id == 0) return;
+  auto* record = reply_leases_.find(
+      [&](const ReplyLease& value) { return value.id == lease_id; });
+  if (record == nullptr) return;
+  if (record->lease.refcount > 0) --record->lease.refcount;
+  if (record->lease.refcount == 0) reply_leases_.release(record);
+}
+
+void MeshNode::expire_reply_leases(const MonotonicMs now_ms) noexcept {
+  while (true) {
+    auto* expired = reply_leases_.find([&](const ReplyLease& value) {
+      return value.lease.expired(now_ms);
+    });
+    if (expired == nullptr) break;
+    reply_leases_.release(expired);
+  }
+}
+
+std::size_t MeshNode::count_reply_leases(const NodeId peer,
+                                         const MonotonicMs now_ms) const noexcept {
+  std::size_t count = 0;
+  reply_leases_.for_each([&](const ReplyLease& value) {
+    if (value.peer == peer && !value.lease.expired(now_ms)) ++count;
+  });
+  return count;
+}
+
 Status MeshNode::encode_job(TxJob& job, const MonotonicMs now_ms) noexcept {
   // tx_encoded_ still holds this job's sealed frame (the driver refused it
   // and nothing else was sealed since): hand the same bytes over again.
@@ -2094,6 +2163,9 @@ void MeshNode::resolve_radio_tx_result(const std::uint64_t token,
 
 void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
                             const MonotonicMs now_ms) noexcept {
+  // A stamped reply job resolved — drop its lease reference before any
+  // owner-specific handling (id 0 = unleashed job, no-op).
+  release_reply_lease(job.reply_lease_id);
   if (job.owner == JobOwner::Group) {
     group_job_done(job, true, now_ms);
     return;
@@ -2161,11 +2233,15 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
   }
   // Accepted transit work that failed post-acceptance reports a bounded
   // TransitFailure to its retained upstream — BUSY is pre-acceptance only
-  // and must never retract an earlier HOP_ACCEPT.
+  // and must never retract an earlier HOP_ACCEPT. The report job takes its
+  // own lease reference first; only then does the forward's reference drop
+  // so the lease record never frees mid-handoff.
   if (job.owner == JobOwner::Transit) {
     report_transit_failure(job, reason, now_ms);
+    release_reply_lease(job.reply_lease_id);
     return;
   }
+  release_reply_lease(job.reply_lease_id);
   if (job.owner != JobOwner::OriginDelivery) return;
   auto* delivery = find_delivery(job.ack.key.id);
   if (delivery == nullptr) return;
@@ -2407,8 +2483,11 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
                                     frame.header.remaining_deadline_ms,
                                     terminal->first_seen_ms, now_ms));
       if (scheduler_.free_slots() >= 2) {
-        (void)queue_hop_accept(frame.header, now_ms);
-        (void)queue_end_receipt(frame.header, now_ms);
+        // Re-ACK of an already-accepted transaction — dedup replay, not a
+        // new admission: no new reply lease (crash-time-resources §3 covers
+        // the obligation accepted at admission, bounded by its TTL).
+        (void)queue_hop_accept(frame.header, now_ms, 0);
+        (void)queue_end_receipt(frame.header, now_ms, 0);
         if (frame.header.delivery == DeliveryClass::Applied) {
           // APPLIED (01 §1.5): a new-round retransmission replays the stored
           // verdict — the endpoint is never invoked twice for one MessageKey.
@@ -2457,10 +2536,10 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       replay_retained_failure(*duplicate, frame.header.type, now_ms);
       return;
     }
-    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
+    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms, 0);
     if (duplicate->delivered && frame.header.destination == config_.node &&
         scheduler_.free_slots() >= 1) {
-      (void)queue_end_receipt(frame.header, now_ms);
+      (void)queue_end_receipt(frame.header, now_ms, 0);
       if (frame.header.delivery == DeliveryClass::Applied) {
         if (auto* record = find_applied(key)) {
           emit_applied_result(*record, now_ms);
@@ -2522,10 +2601,24 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
         applied_new = true;
       }
     }
-    if (!queue_hop_accept(frame.header, now_ms)) {
+    // ExpectedReply lease (crash-time-resources §3): the reply-peer
+    // reservation sits between the transaction records and the ACK slot —
+    // a refusal leaves no side effects.
+    const auto* lease = acquire_reply_lease(peer, now_ms);
+    if (lease == nullptr) {
+      dedup_.release(entry);
+      if (applied_new) applied_records_.release(applied);
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+      observer_.on_diagnostic("REPLY_CAPACITY_DROP", peer, &frame.header.message);
+      return;
+    }
+    const std::uint32_t lease_id = lease->id;
+    if (!queue_hop_accept(frame.header, now_ms, lease_id)) {
       // The reply itself could not be reserved (control lane full): the
       // admission failed pre-acceptance, so report it honestly — the BUSY
       // most likely cannot be queued either and is counted as unsent.
+      release_reply_lease(lease_id);
       dedup_.release(entry);
       if (applied_new) applied_records_.release(applied);
       emit_busy_or_drop(peer, frame.header,
@@ -2536,14 +2629,14 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     if (applied != nullptr) {
       // END_RECEIPT is SDK-level acceptance evidence first (01 §1.3); the
       // application verdict follows as its own APP_RESULT RESULT frame.
-      const auto receipt_status = queue_end_receipt(frame.header, now_ms);
+      const auto receipt_status = queue_end_receipt(frame.header, now_ms, lease_id);
       if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
       dispatch_applied(frame.header, ByteView{plain.payload.data(), plain.payload_size},
                        *applied, applied_new, now_ms);
     } else {
       observer_.on_message(key, frame.header.origin,
                            ByteView{plain.payload.data(), plain.payload_size});
-      const auto receipt_status = queue_end_receipt(frame.header, now_ms);
+      const auto receipt_status = queue_end_receipt(frame.header, now_ms, lease_id);
       if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
     }
     return;
@@ -2596,10 +2689,23 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
     return;
   }
+  // ExpectedReply lease (crash-time-resources §3): reserved before the
+  // forward so the accepted work's reply obligations (HOP_ACCEPT now,
+  // TransitFailure on a post-acceptance failure) stay accounted.
+  const auto* lease = acquire_reply_lease(peer, now_ms);
+  if (lease == nullptr) {
+    dedup_.release(entry);
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+    observer_.on_diagnostic("REPLY_CAPACITY_DROP", peer, &frame.header.message);
+    return;
+  }
+  const std::uint32_t lease_id = lease->id;
   // The forward is committed BEFORE its HOP_ACCEPT reply is queued: a failed
   // reservation must never leave a false "accepted" ACK on the wire next to
   // the BUSY refusal.
-  if (!queue_forward(frame, route.next_hop, now_ms)) {
+  if (!queue_forward(frame, route.next_hop, now_ms, lease_id)) {
+    release_reply_lease(lease_id);
     dedup_.release(entry);
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
@@ -2617,7 +2723,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   entry->ref_destination = frame.header.destination;
   entry->has_fingerprint =
       wire::transit_fingerprint(frame, entry->fingerprint).ok();
-  if (!queue_hop_accept(frame.header, now_ms)) {
+  if (!queue_hop_accept(frame.header, now_ms, lease_id)) {
     // The accepted forward stays committed — accepted work is never silently
     // dropped. The sender's retry hits the dedup and re-ACKs instead of
     // double-forwarding.
@@ -2671,7 +2777,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
       replay_retained_failure(*duplicate, type, now_ms);
       return;
     }
-    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
+    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms, 0);
     return;
   }
 
@@ -2698,7 +2804,17 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
       return;
     }
-    if (!queue_hop_accept(frame.header, now_ms)) {
+    // ExpectedReply lease (crash-time-resources §3) before the ACK slot.
+    const auto* lease = acquire_reply_lease(peer, now_ms);
+    if (lease == nullptr) {
+      dedup_.release(entry);
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+      observer_.on_diagnostic("REPLY_CAPACITY_DROP", peer, &frame.header.message);
+      return;
+    }
+    if (!queue_hop_accept(frame.header, now_ms, lease->id)) {
+      release_reply_lease(lease->id);
       dedup_.release(entry);
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
@@ -2767,7 +2883,20 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
     return;
   }
-  if (!queue_forward(frame, route.next_hop, now_ms)) {
+  // ExpectedReply lease (crash-time-resources §3): reserved before the
+  // forward; the HOP_ACCEPT and a possible post-acceptance TransitFailure
+  // are the replies it covers.
+  const auto* lease = acquire_reply_lease(peer, now_ms);
+  if (lease == nullptr) {
+    dedup_.release(entry);
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+    observer_.on_diagnostic("REPLY_CAPACITY_DROP", peer, &frame.header.message);
+    return;
+  }
+  const std::uint32_t lease_id = lease->id;
+  if (!queue_forward(frame, route.next_hop, now_ms, lease_id)) {
+    release_reply_lease(lease_id);
     dedup_.release(entry);
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
@@ -2781,7 +2910,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   entry->ref_destination = frame.header.destination;
   entry->has_fingerprint =
       wire::transit_fingerprint(frame, entry->fingerprint).ok();
-  if (!queue_hop_accept(frame.header, now_ms)) {
+  if (!queue_hop_accept(frame.header, now_ms, lease_id)) {
     // The forward stays committed; the sender's retry dedups and re-ACKs.
     observer_.on_diagnostic("ROUTED_TRANSIT_ACK_FULL", peer, &frame.header.message);
     return;
@@ -2947,7 +3076,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
         return;
       }
     }
-    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
+    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms, 0);
     return;
   }
 
@@ -2986,8 +3115,20 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
                         now_ms);
       return;
     }
+    // ExpectedReply lease (crash-time-resources §3) before the forward.
+    const auto* lease = acquire_reply_lease(peer, now_ms);
+    if (lease == nullptr) {
+      dedup_.release(entry);
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        now_ms);
+      observer_.on_diagnostic("REPLY_CAPACITY_DROP", peer, &frame.header.message);
+      return;
+    }
+    const std::uint32_t lease_id = lease->id;
     // Forward first: a failed reservation must not leave a false ACK behind.
-    if (!queue_forward(frame, route.next_hop, now_ms)) {
+    if (!queue_forward(frame, route.next_hop, now_ms, lease_id)) {
+      release_reply_lease(lease_id);
       dedup_.release(entry);
       return;
     }
@@ -3001,7 +3142,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
         wire::transit_fingerprint(frame, entry->fingerprint).ok();
     // Accepted work stays committed when the ACK cannot be queued — the
     // sender's retry hits the dedup and re-ACKs.
-    (void)queue_hop_accept(frame.header, now_ms);
+    (void)queue_hop_accept(frame.header, now_ms, lease_id);
     return;
   }
 
@@ -3034,7 +3175,18 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
                       now_ms);
     return;
   }
-  if (!queue_hop_accept(frame.header, now_ms)) {
+  // ExpectedReply lease (crash-time-resources §3) before the ACK slot.
+  const auto* lease = acquire_reply_lease(peer, now_ms);
+  if (lease == nullptr) {
+    dedup_.release(entry);
+    emit_busy_or_drop(peer, frame.header,
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                      now_ms);
+    observer_.on_diagnostic("REPLY_CAPACITY_DROP", peer, &frame.header.message);
+    return;
+  }
+  if (!queue_hop_accept(frame.header, now_ms, lease->id)) {
+    release_reply_lease(lease->id);
     dedup_.release(entry);
     return;
   }
@@ -4458,6 +4610,7 @@ void MeshNode::poll(const MonotonicMs now_ms) noexcept {
   // route-switch hysteresis before any selection change is advertised.
   refresh_neighbor_load(now_ms);
   expire_dedup(now_ms);
+  expire_reply_leases(now_ms);
   expire_sequence_requests(now_ms);
   process_awaiting_hop(now_ms);
   process_delivery_timeouts(now_ms);
@@ -5491,7 +5644,8 @@ void MeshNode::map_transit_reason(const char* reason,
 
 void MeshNode::emit_transit_failure(const NodeId upstream,
                                     const TransitFailure& report,
-                                    const MonotonicMs now_ms) noexcept {
+                                    const MonotonicMs now_ms,
+                                    const std::uint32_t reply_lease_id) noexcept {
   if (upstream == kInvalidNodeId || upstream == kBroadcastNodeId ||
       upstream == config_.node || report.report_id == 0) {
     return;
@@ -5536,9 +5690,12 @@ void MeshNode::emit_transit_failure(const NodeId upstream,
   job.plain.header.end_epoch = config_.end_epoch;
   std::memcpy(job.plain.payload.data(), body.data(), body.size());
   job.plain.payload_size = body.size();
+  job.reply_lease_id = reply_lease_id;
   if (!scheduler_.enqueue(std::move(job), config_.node, now_ms)) {
     // A report that cannot be queued is a counted loss, never a spin.
     ++telemetry_event_drops_;
+  } else {
+    hold_reply_lease(reply_lease_id);
   }
 }
 
@@ -5564,7 +5721,7 @@ void MeshNode::emit_transit_refusal(const wire::LinkOpenedFrame& frame,
   }
   report.report_id = next_failure_report_id_++;
   if (!wire::transit_fingerprint(frame, report.fingerprint).ok()) return;
-  emit_transit_failure(frame.header.previous_hop, report, now_ms);
+  emit_transit_failure(frame.header.previous_hop, report, now_ms, 0);
 }
 
 void MeshNode::replay_retained_failure(DedupEntry& duplicate,
@@ -5596,7 +5753,7 @@ void MeshNode::replay_retained_failure(DedupEntry& duplicate,
   reemit.fingerprint = duplicate.fingerprint;
   ++duplicate.failure_replays;
   duplicate.last_replay_ms = now_ms;
-  emit_transit_failure(duplicate.upstream_peer, reemit, now_ms);
+  emit_transit_failure(duplicate.upstream_peer, reemit, now_ms, 0);
 }
 
 void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
@@ -5637,7 +5794,9 @@ void MeshNode::report_transit_failure(const TxJob& job, const char* reason,
   // Post-acceptance failure retained: the record demotes to the Evidence
   // class (sdk-completion/02 §2.6) — still evictable, after all Resolved.
   mark_dedup_evidence(*entry);
-  emit_transit_failure(entry->upstream_peer, report, now_ms);
+  // The report inherits the accepted forward's lease — it is the reply this
+  // transaction still owes the upstream peer (crash-time-resources §3).
+  emit_transit_failure(entry->upstream_peer, report, now_ms, job.reply_lease_id);
 }
 
 void MeshNode::handle_transit_failure_report(const NodeId peer,
@@ -5731,7 +5890,7 @@ void MeshNode::handle_transit_failure_report(const NodeId peer,
   // is re-stamped from our retained record, never trusted from the wire.
   TransitFailure onward = report;
   onward.fingerprint = entry->fingerprint;
-  emit_transit_failure(entry->upstream_peer, onward, now_ms);
+  emit_transit_failure(entry->upstream_peer, onward, now_ms, 0);
 }
 
 // ---------------------------------------------------------------------------

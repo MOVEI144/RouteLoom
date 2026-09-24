@@ -20,7 +20,13 @@ class MutationTests(unittest.TestCase):
     def rejected(self): self.assertTrue(validate(self.root)['failed'])
     def test_valid_source_passes(self): self.assertEqual(validate(self.root)['failed'],[])
     def test_original_review_latency_mutation(self):
-        p=self.root/'docs/spec/acceptance.md'; s=p.read_text(); self.assertIn('P95 20ms以内',s); p.write_text(s.replace('P95 20ms以内','P95 2ms以内',1)); self.rejected()
+        p=self.root/'docs/spec/acceptance.md'; s=p.read_text(); self.assertIn('P95 35ms以内',s); p.write_text(s.replace('P95 35ms以内','P95 2ms以内',1)); self.rejected()
+    def test_latency_target_below_airtime_floor_mutation(self):
+        # Issue #47: a doc-consistent target below the LR250 serial floor must
+        # still be rejected by the contract invariant.
+        self.change_json('docs/reference/radio-defaults.json',lambda d:d['performance_targets_ms'].update(reliable_1hop_p95=10)); self.rejected()
+    def test_latency_floor_understated_mutation(self):
+        self.change_json('docs/reference/radio-defaults.json',lambda d:d['latency_floor']['floor_ms'].update(reliable_10hop_p95=100)); self.rejected()
     def test_original_review_pin_mutation(self):
         p=self.root/'docs/hardware/xiao-esp32c3.md'; s=p.read_text(); self.assertIn('| D4 | 6 |',s); p.write_text(s.replace('| D4 | 6 |','| D4 | 12 |',1)); self.rejected()
     def test_original_review_commit_mutation(self):

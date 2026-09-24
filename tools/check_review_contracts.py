@@ -105,6 +105,33 @@ def validate(root: Path) -> dict:
             radio["radio"]["mode"] == "LR250_FIXED"
             and radio["migration"]["auto_policy"] is False,
         )
+        # Issue #47: acceptance targets must not undercut the LR250 serial
+        # airtime floor. floor(n hop) = n x (DATA + HOP_ACCEPT + 2xturn) +
+        # n x (END_RECEIPT + turn); the documented floor_ms adds relay
+        # queueing margin on top of that serial calculation.
+        floor_model = radio["latency_floor"]
+        turn = floor_model["relay_turnaround_ms"]
+        airtime = floor_model["frame_airtime_ms"]
+        hop_floors = {
+            "reliable_1hop_p95": 1,
+            "reliable_5hop_p95": 5,
+            "reliable_10hop_p95": 10,
+        }
+        targets = radio["performance_targets_ms"]
+        floors = floor_model["floor_ms"]
+
+        def serial_floor_ms(hops):
+            return hops * (
+                airtime["data"] + airtime["hop_accept"] + 2 * turn
+            ) + hops * (airtime["end_receipt"] + turn)
+
+        test(
+            "latency_targets_above_airtime_floor",
+            all(
+                targets[key] >= floors[key] >= serial_floor_ms(hops)
+                for key, hops in hop_floors.items()
+            ),
+        )
         feature_map = features["features"]
         prototype_features = {
             "portable_core",

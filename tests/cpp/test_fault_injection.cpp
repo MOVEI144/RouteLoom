@@ -935,10 +935,14 @@ void test_dedup_terminal_reserve_and_pool_full() {
   world.add(3);   // P: upstream peer (real node so acks drain cleanly)
   world.add(4);   // E: downstream destination for transit
   world.add(5);   // Q: second upstream (P's scheduler scope is full below)
+  world.add(6);   // extra upstreams: the transit fill spreads over four
+  world.add(7);   // sender scopes to stay under the reply-lease bound (3)
   world.start_all();
   world.link(2, 3, 1, 1);
   world.link(2, 4, 1, 1);
   world.link(2, 5, 1, 1);
+  world.link(2, 6, 1, 1);
+  world.link(2, 7, 1, 1);
   world.run(400);
   CHECK(world.at(2)->routes().best(4).valid);
   world.at(2)->set_peer_busy_capable(3, true);
@@ -977,19 +981,22 @@ void test_dedup_terminal_reserve_and_pool_full() {
   CHECK(world.obs(2)->messages.size() == kPins);
 
   // The reserve still admits transit (Live) traffic — without a poll the
-  // forwards stay queued and their records Live...
+  // forwards stay queued and their records Live. The fill spreads over
+  // four upstream peers: an undispatched forward holds its sender's reply
+  // lease, so one peer can carry at most kReplyLeaseMaxPerPeer at once.
   constexpr std::uint64_t kReserve = kDedupTransitReserve;
+  constexpr NodeId kSenders[] = {3, 5, 6, 7};
   for (std::uint64_t i = 1; i <= kReserve; ++i) {
-    inject(world, 2, 3,
-           craft_data(*world.security[3], 3, 2, /*origin=*/800 + i,
+    const NodeId peer = kSenders[(i - 1) % 4];
+    inject(world, 2, peer,
+           craft_data(*world.security[peer], peer, 2, /*origin=*/800 + i,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
   }
   CHECK(world.at(2)->dedup_stats().admitted_transit == kReserve);
-  // ...and the next transit (from Q: P's scheduler scope is at its per-peer
-  // job bound) finds the pool truly full: nothing evictable (all Live or
-  // Terminal), so the refusal is counted and diagnosed — the exactly-once pin
-  // is never weakened to make room.
+  // ...and the next transit finds the pool truly full: nothing evictable
+  // (all Live or Terminal), so the refusal is counted and diagnosed — the
+  // exactly-once pin is never weakened to make room.
   inject(world, 2, 5,
          craft_data(*world.security[5], 5, 2, 850, 4, 50, 30000), world.now);
   CHECK(world.at(2)->dedup_stats().refused_pool_full == 1);
@@ -1071,12 +1078,15 @@ void test_dedup_eviction_expired_then_resolved() {
   world.add(2);   // relay under test
   world.add(3);   // upstream peer
   world.add(4);   // destination
-  world.add(5);   // second upstream: spreads the Live fill over two
-                  // scheduler scopes (12 queued forwards per peer)
+  world.add(5);   // extra upstreams: spreads the Live fill over four
+  world.add(6);   // sender scopes — an undispatched forward pins its
+  world.add(7);   // sender's reply lease (3 per peer)
   world.start_all();
   world.link(2, 3, 1, 1);
   world.link(2, 4, 1, 1);
   world.link(2, 5, 1, 1);
+  world.link(2, 6, 1, 1);
+  world.link(2, 7, 1, 1);
   world.run(400);
 
   // A full pin class leaves the kDedupTransitReserve non-terminal slots.
@@ -1091,8 +1101,10 @@ void test_dedup_eviction_expired_then_resolved() {
   CHECK(world.at(2)->dedup_stats().admitted_terminal == kPins);
 
   // One short-deadline transit (expires ~5.1s in) plus kFree-1 long ones fill
-  // the pool without dispatching — the records stay Live.
-  const auto from = [&](std::uint64_t i) -> NodeId { return i % 2 == 0 ? 3 : 5; };
+  // the pool without dispatching — the records stay Live. Four upstream
+  // scopes keep every peer inside the reply-lease bound (3).
+  constexpr NodeId kSenders[] = {3, 5, 6, 7};
+  const auto from = [&](std::uint64_t i) -> NodeId { return kSenders[(i - 1) % 4]; };
   inject(world, 2, 3,
          craft_data(*world.security[3], 3, 2, 600, 4, 9001, 100), world.now);
   for (std::uint64_t i = 2; i <= kFree; ++i) {
@@ -1140,22 +1152,23 @@ void test_scheduler_pool_saturation() {
   SimWorld world;
   world.network_id = kNet;
   world.add(2);   // relay under test
-  world.add(3);   // upstream peer 1
-  world.add(5);   // upstream peer 2 (second scope -> pool, not just scope cap)
   world.add(4);   // destination
+  // Fourteen upstream peers: an undispatched forward pins its sender's
+  // ExpectedReply lease (3/peer), so the flood spreads over enough scopes
+  // that the SCHEDULER pool — not the lease bound — is what refuses.
+  constexpr NodeId kSenders[] = {3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17};
+  for (const NodeId peer : kSenders) world.add(peer);
   world.start_all();
-  world.link(2, 3, 1, 1);
-  world.link(2, 5, 1, 1);
+  for (const NodeId peer : kSenders) world.link(2, peer, 1, 1);
   world.link(2, 4, 1, 1);
   world.run(400);
   world.at(2)->set_peer_busy_capable(3, true);
   world.at(2)->set_peer_busy_capable(5, true);
 
   // No drain between injections: forwards and their HOP_ACCEPTs pile into
-  // the 32-slot queue; the per-scope cap (12) binds at each peer first, then
-  // the pool itself refuses.
+  // the 32-slot queue; the pool itself refuses once it fills.
   for (std::uint64_t i = 1; i <= 40; ++i) {
-    const NodeId peer = (i % 2 == 0) ? 3 : 5;
+    const NodeId peer = kSenders[(i - 1) % 14];
     inject(world, 2, peer,
            craft_data(*world.security[peer], peer, 2, /*origin=*/300 + i,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
