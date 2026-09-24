@@ -1492,6 +1492,18 @@ impl SiteAuthority {
         row
     }
 
+    /// True while the membership an allow `decision_result` committed is
+    /// the live row: the node is a member with the request's kid at the
+    /// committed generation.
+    fn committed_allow_is_live(&self, open: &JoinRequestRec, result: &str) -> bool {
+        let generation = routeloom_json::parse(result)
+            .ok()
+            .and_then(|json| json.get("generation").and_then(|v| v.as_u64()));
+        self.devices.get(&open.facts.node).is_some_and(|row| {
+            row.member && row.kid == open.facts.kid && Some(u64::from(row.generation)) == generation
+        })
+    }
+
     /// `join.decide` (07 §2.1). `allow` commits the approval before it
     /// answers `committed`; the verdict reaches a waiting exchange at once,
     /// otherwise the device's next attempt.
@@ -1528,6 +1540,17 @@ impl SiteAuthority {
         if let Some(existing) = open.decision {
             if existing == request.verdict {
                 if let Some(result) = &open.decision_result {
+                    // A stored "committed" answer is only valid while the
+                    // membership it created is still live; after a revoke
+                    // or a replacement it would lie about current state.
+                    if matches!(existing, Verdict::Allow { .. })
+                        && !self.committed_allow_is_live(&open, result)
+                    {
+                        return Err(SiteError::new(
+                            "CONFLICT",
+                            "the membership this request committed is no longer live (removed or replaced)",
+                        ));
+                    }
                     return Ok(result.clone());
                 }
             }

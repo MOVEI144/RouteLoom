@@ -1150,8 +1150,10 @@ fn review_replacement_flow_survives_a_restart() {
 /// #107 follow-through: a decision applies to the membership as it is
 /// at commit. An allow delayed past an approve+revoke cannot resurrect
 /// the old request (delivered → NOT_FOUND), a stored kid_conflict flag
-/// clears once the member is gone, and a recorded decision replays
-/// without committing anything new.
+/// clears once the member is gone, and a decided allow replayed under a
+/// new idempotency key is re-checked against the live membership —
+/// CONFLICT once it is removed or replaced, while the same key's resend
+/// keeps returning the recorded answer (idempotency contract).
 #[test]
 fn review_late_allow_follows_the_current_membership() {
     let (service, transport) = service();
@@ -1232,9 +1234,9 @@ fn review_late_allow_follows_the_current_membership() {
         b.finish(&mut exchange_b, &transport),
         Outcome::Result(JoinResult::Allow { .. })
     ));
-    // A decision recorded for next_attempt stays open; after the
-    // membership is revoked, replaying it returns the stored answer and
-    // commits nothing — the device stays removed.
+    // A decision recorded for next_attempt stays open. A new idempotency
+    // key replays the stored committed answer only while the membership
+    // it created is still live…
     let mut c = SimDevice::new(0x00A1_0000_0000_C005, 0xC9);
     let (_, _, events) = c.start(&service, &transport, T0 + 300);
     let id_c = request_id(&events).unwrap();
@@ -1255,6 +1257,18 @@ fn review_late_allow_follows_the_current_membership() {
         json(&first).get("applied").unwrap().as_str(),
         Some("next_attempt")
     );
+    let live_replay = decide(
+        &service,
+        id_c,
+        c.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "c2",
+        T0 + 2_315,
+    )
+    .unwrap();
+    assert_eq!(live_replay, first);
     let (revoked, _) = service.with(|auth| {
         auth.revoke(
             KGUARD,
@@ -1268,6 +1282,8 @@ fn review_late_allow_follows_the_current_membership() {
         )
     });
     revoked.unwrap();
+    // …the same key's resend still returns the recorded answer (the
+    // idempotency contract is about the call, not the state)…
     let replay = decide(
         &service,
         id_c,
@@ -1280,6 +1296,50 @@ fn review_late_allow_follows_the_current_membership() {
     )
     .unwrap();
     assert_eq!(replay, first);
+    // …but a new key asks again and is checked against the current row:
+    // CONFLICT, nothing committed, the device stays removed.
+    let stale = decide(
+        &service,
+        id_c,
+        c.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "c3",
+        T0 + 2_340,
+    )
+    .unwrap_err();
+    assert_eq!(stale.code, "CONFLICT");
     let (still_removed, _) = service.with(|auth| !auth.devices[&c.node].member);
     assert!(still_removed);
+    // The same check after a replacement: the committed (kid, generation)
+    // is gone even though the node is a member again. (The join is after
+    // the pending holdoff the earlier KGuard-silent expiry set.)
+    let mut d = SimDevice::new(c.node, 0xCA);
+    let (mut exchange_d, _, events) = d.start(&service, &transport, T0 + 60_000);
+    let id_d = request_id(&events).unwrap();
+    decide(
+        &service,
+        id_d,
+        d.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "d",
+        T0 + 60_010,
+    )
+    .unwrap();
+    d.finish(&mut exchange_d, &transport);
+    let replaced = decide(
+        &service,
+        id_c,
+        c.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "c4",
+        T0 + 60_020,
+    )
+    .unwrap_err();
+    assert_eq!(replaced.code, "CONFLICT");
 }
