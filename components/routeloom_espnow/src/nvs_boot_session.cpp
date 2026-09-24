@@ -38,8 +38,19 @@ Status next_boot_session(std::uint32_t& session) noexcept {
   NvsBootSessionPort port;
   sdkv1::BootSessionStore store(port);
   // The normal boot increment precedes rlsec/site classification. A site
-  // witness is checked later by the Coordinator, not inferred from NVS here.
+  // witness is reconciled after the independent site store is initialized.
   return store.advance(false, 0, session);
+}
+
+Status reconcile_boot_session(const sdkv1::SiteStore& site,
+                              std::uint32_t& session) noexcept {
+  if (!site.initialized() || site.quarantined() || site.uncertain()) {
+    return Status::error(StatusCode::RecoveryRequired, "site boot witness unavailable");
+  }
+  if (!site.has_site()) return Status::success();
+  NvsBootSessionPort port;
+  sdkv1::BootSessionStore store(port);
+  return store.reconcile_site(site.site().boot_witness, session);
 }
 
 }  // namespace routeloom

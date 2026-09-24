@@ -41,6 +41,26 @@ int main() {
   BootSessionStore store(port);
   std::uint32_t token = 0;
   CHECK(store.advance(false, 0, token).ok() && token == 1);
+  // Site becomes visible only after the independent system-NVS increment.
+  CHECK(store.reconcile_site(100, token).ok() && token == 100 + (1U << 20));
+  const int repaired_writes = port.writes;
+  CHECK(store.reconcile_site(100, token).ok() && port.writes == repaired_writes);
+  CHECK(store.reconcile_site(0, token).code == StatusCode::RecoveryRequired &&
+        port.writes == repaired_writes);
+  CHECK(store.reconcile_site(UINT32_MAX, token).code == StatusCode::CounterExhausted &&
+        port.writes == repaired_writes);
+  port.read_error = true;
+  CHECK(store.reconcile_site(100, token).code == StatusCode::StorageFailure &&
+        port.writes == repaired_writes);
+  port.read_error = false;
+  port.lost_write = true;
+  CHECK(store.reconcile_site(token, token).code == StatusCode::StorageFailure &&
+        token == 100 + (1U << 20));
+  port.lost_write = false;
+  port.stored = 1;
+  CHECK(store.reconcile_site(100, token).code == StatusCode::StorageFailure &&
+        token == 100 + (1U << 20));
+  token = 1;
   CHECK(store.advance(true, 1, token).ok() && token == 2);
   port.stored = 1;
   CHECK(store.advance(true, 100, token).ok() && token == 100 + (1U << 20));

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "routeloom/sdkv1_boot_session.hpp"
+#include "routeloom/sdkv1_store.hpp"
 
 namespace routeloom {
 
@@ -12,5 +13,8 @@ class NvsBootSessionPort final : public sdkv1::BootSessionPort {
 };
 
 Status next_boot_session(std::uint32_t& session) noexcept;
+// Call after site initialization, before constructing any radio/session owner.
+Status reconcile_boot_session(const sdkv1::SiteStore& site,
+                              std::uint32_t& session) noexcept;
 
 }  // namespace routeloom

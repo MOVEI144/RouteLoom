@@ -23,6 +23,9 @@ class BootSessionStore final {
   // site exists, missing/rolled-back rlboot must skip past its witness.
   Status advance(bool has_site, std::uint32_t witness,
                  std::uint32_t& session) noexcept;
+  // The system counter advances before rlsec opens. Once the site has been
+  // read, reconcile its witness without consuming another boot on a match.
+  Status reconcile_site(std::uint32_t witness, std::uint32_t& session) noexcept;
 
  private:
   BootSessionPort& port_;

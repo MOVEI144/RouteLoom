@@ -228,6 +228,12 @@ extern "C" void app_main(void) {
       ESP_LOGE(kTag, "sdkv1 stores init: %s", sdkv1_status.detail);
     }
     sdkv1_stores.log_state(kTag);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    // Repair the already advanced system token against the adopted RLS1
+    // before any provider, group sender or radio session can use it.
+    status = routeloom::reconcile_boot_session(sdkv1_stores.site(), message_session);
+    if (!status) fail(status.detail);
+#endif
   }
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
   // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
