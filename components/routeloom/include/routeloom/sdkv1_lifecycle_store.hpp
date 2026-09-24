@@ -15,7 +15,9 @@ namespace routeloom::sdkv1 {
 constexpr std::uint32_t kLifecycleMagic = 0x524C5831U;
 constexpr std::uint32_t kLifecycleSeal = 0x4C583101U;
 constexpr std::size_t kLifecycleSlotBytes = 2048;
-constexpr std::size_t kLifecyclePayloadMax = 4 + kRlcw1CertMax + kRemovalNoticeObjectSize;
+// Switching carries new RLS1, signed new RRS1 and CutoverCommit in one
+// durable intent; the maximum sealed record is 1609 B.
+constexpr std::size_t kLifecyclePayloadMax = 1521;
 
 enum class LifecycleMode : std::uint8_t {
   Idle = 0, Removing = 1, Holdoff = 2, UnassignedReady = 3,
@@ -37,8 +39,6 @@ struct LifecycleRecord {
   ByteBuffer<kLifecyclePayloadMax> payload{};
 };
 
-// PR B accepts only removal modes; reserved modes cannot be interpreted as
-// Idle until their signature/semantic contracts are implemented.
 Status lifecycle_record_encode(const LifecycleRecord& record, std::uint32_t seal,
                                std::uint32_t seq, ByteBuffer<kLifecycleSlotBytes>& out) noexcept;
 Status lifecycle_record_decode(ByteView bytes, LifecycleRecord& out) noexcept;
@@ -50,6 +50,17 @@ class LifecycleStore final {
   Status initialize() noexcept;
   // Only a verified Notice, bound to the current RLS1, may create intent.
   Status begin_removal(const LifecycleRecord& record) noexcept;
+  // Caller has verified the CA/SAK chain and the complete binding before
+  // staging. Neither call changes the active RLS1 by itself.
+  Status prepare(const LifecycleRecord& record) noexcept;
+  Status switch_network(const LifecycleRecord& record) noexcept;
+  // Retain the nonsecret COMMIT digest and operation watermark so APPLIED can
+  // be retried after a cold boot without retaining staged credentials.
+  Status finish_switch(const Digest256& commit_digest) noexcept;
+  // Re-twin an adopted secret-free watermark after a torn twin write.
+  Status scrub_idle() noexcept;
+  bool stale_sibling() const noexcept { return pair_.stale_sibling(); }
+  Status resume_switch(const LifecycleRecord& verified) noexcept;
   Status holdoff() noexcept;
   Status unassigned_ready() noexcept;
   // A valid Removing/Holdoff survivor may repair a known corrupt sibling,

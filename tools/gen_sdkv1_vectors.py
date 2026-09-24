@@ -305,9 +305,10 @@ def rlx1(r: dict, payload: bytes, seal: int = 0x4C583101,
          seq: int = 7) -> bytes:
     body = (u32(seq) + u8(r["mode"]) + b"\x00" + u16(len(payload)) +
             u64(r["self_node"]) + u64(r["site_id"]) +
-            u64(r["old_network"]) + u64(0) + u32(r["generation"]) +
+            u64(r["old_network"]) + u64(r.get("new_network", 0)) + u32(r["generation"]) +
             u32(r["rs_floor"]) + u32(r["gk_floor"]) +
-            u32(r["boot_witness"]) + u64(0) + u32(0) + payload)
+            u32(r["boot_witness"]) + u64(r.get("cutover_id", 0)) +
+            u32(r.get("revision", 0)) + payload)
     head = b"RLX1" + u16(1) + u16(16 + len(body) + 4) + u32(1) + u32(seal)
     data = head + body
     return data + u32(crc32(data))
@@ -782,7 +783,7 @@ def main() -> None:
     bad("rlx1_zero_seq", "rlx1_record", rlx1(dict(removal, mode=1), proof, seq=0),
         "sequence zero is invalid")
     bad("rlx1_reserved_mode", "rlx1_record", rlx1(dict(removal, mode=4), proof),
-        "Prepared is reserved until cutover")
+        "Prepared requires a next-network binding and exact staged payload")
     bad("rlx1_wrong_notice_generation", "rlx1_record",
         rlx1(dict(removal, mode=1, generation=4), proof),
         "journal generation must match signed Notice")
@@ -791,6 +792,85 @@ def main() -> None:
         "journal floor cannot be below signed Notice")
     bad("rlx1_ready_with_proof", "rlx1_record", rlx1(dict(removal, mode=3), proof),
         "UnassignedReady contains no proof")
+    bad("rlx1_ready_with_cutover_id", "rlx1_record",
+        rlx1(dict(removal, mode=3, cutover_id=19, revision=2), b""),
+        "non-cutover modes cannot retain a cutover ID")
+
+    # ---- Signed GrantRenew cutover (device wire and secret-free RLX1 Idle) --
+    new_network = ((site_epoch + 1) << 32) | network_low32
+    cutover_id, revision, new_gk_epoch, new_rs_epoch = 19, 2, 205, 15
+    next_sitecert = make_cert(cert_fields(SITE, site_ca_id, site_id, sak_pub, 8,
+                                          network_low32=network_low32,
+                                          site_epoch=site_epoch + 1, usage=1), site_ca)
+    next_membercert = make_cert(cert_fields(MEMBER, site_id, node, device_pub, 4414,
+                                            network=new_network, role=1,
+                                            assignment_generation=3,
+                                            site_epoch=site_epoch + 1), sak)
+    next_rrs_payload = rrs1_payload(dict(site_id=site_id, network=new_network,
+                                         rs_epoch=new_rs_epoch,
+                                         site_epoch_floor=site_epoch + 1, entries=[]))
+    next_rrs = sign1(next_rrs_payload,
+                     sign(sak, sig_structure(next_rrs_payload, rrs1_aad(new_network))))
+    next_rrs_hash = hashlib.sha256(next_rrs).digest()
+    commit_payload = (u8(1) + u8(0) + u16(0) + u64(site_id) + u64(network) +
+                      u64(new_network) + u64(cutover_id) + u32(revision) +
+                      u32(new_gk_epoch) + u32(new_rs_epoch) + next_rrs_hash)
+    commit_aad = b"RouteLoom/site-cutover/v1\x00" + u64(network)
+    commit_structure = sig_structure(commit_payload, commit_aad)
+    commit_signature = sign(sak, commit_structure)
+    commit_proof = sign1(commit_payload, commit_signature)
+    assert len(commit_payload) == 80 and len(commit_proof) == 155
+    commit_digest = hashlib.sha256(commit_proof).digest()
+    next_gk, next_dams = bytes(range(0x80, 0xA0)), bytes(range(0xA0, 0xC0))
+    site_package = (u8(1) + u8(0) + u16(0) + u64(site_id) + u64(new_network) +
+                    u32(0) + u32(new_gk_epoch) + next_gk + u8(rls1["channel"]) +
+                    u8(rls1["role"]) + u8(rls1["gateway_count"]) + u8(0) +
+                    u32(rls1["channel_epoch"]) +
+                    b"".join(u64(rls1[f"gateway{i}"]) for i in range(4)) +
+                    u64(0) + u32(0) + u32(42) + u32(0))
+    assert len(site_package) == 120
+
+    def renew_head(phase: int) -> bytes:
+        return u8(1) + u8(phase) + u16(0) + u64(cutover_id) + u32(revision) + u64(network)
+
+    next_site_bytes = bytes.fromhex(next_sitecert["cert_hex"])
+    next_member_bytes = bytes.fromhex(next_membercert["cert_hex"])
+    prepare = (renew_head(1) + u64(new_network) + u16(len(next_site_bytes)) +
+               u16(len(next_member_bytes)) + next_site_bytes + next_member_bytes +
+               site_package + next_dams)
+    commit = renew_head(2) + u16(len(commit_proof)) + u16(len(next_rrs)) + commit_proof + next_rrs
+    prepared_receipt = (renew_head(3) + u64(new_network) + u32(new_gk_epoch) +
+                        u32(0) + hashlib.sha256(prepare).digest() + u8(0) + b"\x00" * 3)
+    applied_receipt = (renew_head(4) + u64(new_network) + u32(new_gk_epoch) +
+                       u32(new_rs_epoch) + commit_digest + u8(0) + b"\x00" * 3)
+    assert len(prepare) <= 700 and len(commit) <= 799
+    assert len(prepared_receipt) == len(applied_receipt) == 76
+    emit("valid", "cutover_signed", dict(
+        codec="cutover", expect="ok", site_id=site_id, old_network=network,
+        new_network=new_network, cutover_id=cutover_id, revision=revision,
+        gk_epoch=new_gk_epoch, rs_epoch=new_rs_epoch,
+        signer_secret_hex=sak.to_bytes(32, "big").hex(),
+        signer_pubkey_hex=sak_pub.hex(),
+        sitecert_hex=next_site_bytes.hex(), membercert_hex=next_member_bytes.hex(),
+        site_package_hex=site_package.hex(), dams_hex=next_dams.hex(),
+        rrs_hex=next_rrs.hex(), rrs_sha256_hex=next_rrs_hash.hex(),
+        commit_payload_hex=commit_payload.hex(), commit_aad_hex=commit_aad.hex(),
+        commit_sig_structure_hex=commit_structure.hex(),
+        commit_signature_hex=commit_signature.hex(), commit_proof_hex=commit_proof.hex(),
+        commit_digest_hex=commit_digest.hex(), prepare_hex=prepare.hex(),
+        prepare_digest_hex=hashlib.sha256(prepare).hexdigest(),
+        commit_hex=commit.hex(), prepared_hex=prepared_receipt.hex(),
+        applied_hex=applied_receipt.hex()))
+    idle = dict(removal, mode=0, old_network=new_network, rs_floor=new_rs_epoch,
+                gk_floor=new_gk_epoch, cutover_id=cutover_id, revision=revision,
+                payload_hex=commit_digest.hex(), commit_seq=8)
+    emit("valid", "rlx1_idle_applied", dict(idle, codec="rlx1_record", expect="ok",
+                                             record_hex=rlx1(idle, commit_digest, seq=8).hex()))
+    bad("rlx1_idle_short_digest", "rlx1_record", rlx1(idle, commit_digest[:-1], seq=8),
+        "APPLIED watermark requires exactly 32 digest bytes")
+    bad("rlx1_idle_zero_new_epoch", "rlx1_record",
+        rlx1(dict(idle, old_network=network_low32), commit_digest, seq=8),
+        "an APPLIED watermark must follow a real epoch advance")
 
     # ---- RLP1 --------------------------------------------------------------
     peer_cert_id = hashlib.sha256(bytes.fromhex(peercert["cert_hex"])).digest()[:8]

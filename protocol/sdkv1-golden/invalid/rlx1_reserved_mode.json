@@ -4,5 +4,5 @@
   "expect": "error",
   "format": "routeloom-sdkv1-golden-v1",
   "name": "rlx1_reserved_mode",
-  "note": "Prepared is reserved until cutover"
+  "note": "Prepared requires a next-network binding and exact staged payload"
 }
