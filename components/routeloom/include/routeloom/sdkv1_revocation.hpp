@@ -24,6 +24,7 @@
 #include "routeloom/rlcw1.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
+#include "routeloom/sdkv1_lifecycle_store.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/types.hpp"
@@ -226,7 +227,10 @@ enum class LifecyclePhase : std::uint8_t {
   Recovering = 4,
   StorageBlocked = 5,
   Stopped = 6,
-  // PR B/C append Removing/Holdoff/Prepared/Switching — never renumber.
+  Removing = 7,
+  Holdoff = 8,
+  UnassignedReady = 9,
+  // Prepared/Switching follow after the cutover proof is implemented.
 };
 
 enum class TrafficUse : std::uint8_t {
@@ -265,7 +269,7 @@ enum class LifecycleInputTag : std::uint8_t {
   JoinRecoveryComplete = 7,
   ActionComplete = 8,
   Stop = 9,
-  // PR B appends RemovalRequired — never renumber.
+  RemovalRequired = 10,
 };
 
 struct LifecycleBootEvidence {
@@ -324,6 +328,7 @@ union LifecyclePayload {
   LifecycleLinkFailure link_failure;
   LifecycleJoinRecovery recovery;
   LifecycleActionComplete action_complete;
+  ByteView removal_required;
 };
 
 struct LifecycleInput {
@@ -394,6 +399,12 @@ struct LifecycleInput {
     in.tag = LifecycleInputTag::ActionComplete;
     in.payload.action_complete.token = token;
     in.payload.action_complete.result = result;
+    return in;
+  }
+  static LifecycleInput RemovalRequired(ByteView notice) noexcept {
+    LifecycleInput in{};
+    in.tag = LifecycleInputTag::RemovalRequired;
+    in.payload.removal_required = notice;
     return in;
   }
   static LifecycleInput Stop() noexcept {
@@ -486,6 +497,15 @@ class LifecycleRuntimePort {
   virtual ~LifecycleRuntimePort() = default;
   virtual Status enforce_revocation(const RevocationSet& set, std::uint32_t site_epoch,
                                     MonotonicMs now_ms) noexcept = 0;
+  // Retire every member-scoped RAM/RTC context, TX, group callback and
+  // queued job before persistent erasure. Default refuses until wired.
+  virtual Status remove_member_runtime() noexcept {
+    return Status::error(StatusCode::Unsupported, "removal runtime not wired");
+  }
+  // Erase/read back only the site's two RLT1 blobs and clear its RAM view.
+  virtual Status erase_site_trust() noexcept {
+    return Status::error(StatusCode::Unsupported, "site trust erasure not wired");
+  }
 };
 
 struct LifecyclePorts {
@@ -541,13 +561,15 @@ struct LifecycleSnapshot {
   std::uint32_t authority_acks_sent{0};
   std::uint32_t recoveries{0};
   std::uint32_t clock_regressions{0};
+  std::uint64_t holdoff_remaining_ms{0};
 };
 
 class MembershipLifecycle final {
  public:
   MembershipLifecycle(const LifecycleConfig& config, IdentityStore& identity, SiteStore& site,
                       RevocationStore& revocations, ResumeCache& resume, LifecyclePorts& ports,
-                      const Es256Verifier& verifier = default_es256_verifier()) noexcept;
+                      const Es256Verifier& verifier = default_es256_verifier(),
+                      LifecycleStore* journal = nullptr) noexcept;
 
   // Accepts one input; success means "received", never "durably done" —
   // completion shows in the phase, the pending action and the ACKs. Busy
@@ -568,6 +590,7 @@ class MembershipLifecycle final {
  private:
   enum class ApplyStep : std::uint8_t { Verify, Store, Enforce, Sweep, Floor, Done };
   enum class CandidateSource : std::uint8_t { None, Authority, Gossip, Stored };
+  enum class RemovalStep : std::uint8_t { Runtime, Resume, Trust, Site, Revocation, Finish };
 
   struct Neighbor {
     // u64 fields first: the entry must stay <= 40 B (32 x 40 = 1280 B).
@@ -605,6 +628,10 @@ class MembershipLifecycle final {
   Status on_recovery(const LifecycleJoinRecovery& recovery, MonotonicMs now_ms) noexcept;
   Status on_action_complete(const LifecycleActionComplete& done, MonotonicMs now_ms) noexcept;
   Status on_stop(MonotonicMs now_ms) noexcept;
+  Status on_removal(ByteView notice, MonotonicMs now_ms) noexcept;
+  Status removal_poll(MonotonicMs now_ms) noexcept;
+  bool removal_proof_valid(const LifecycleRecord& record) noexcept;
+  bool reassigned_after_removal() const noexcept;
 
   LifecycleBlockReason adopt_stores() noexcept;
   Status begin_apply(ByteView object, CandidateSource source, NodeId peer,
@@ -674,6 +701,7 @@ class MembershipLifecycle final {
   SiteStore& site_;
   RevocationStore& revocations_;
   ResumeCache& resume_;
+  LifecycleStore* journal_{nullptr};
   LifecyclePorts& ports_;
   const Es256Verifier& verifier_;
   RrsExchange exchange_;
@@ -687,6 +715,9 @@ class MembershipLifecycle final {
   std::uint64_t policy_revision_{0};
   bool equivocated_{false};
   bool self_revoked_{false};
+  RemovalStep removal_step_{RemovalStep::Runtime};
+  std::size_t removal_cursor_{0};
+  MonotonicMs holdoff_start_{0};
 
   LifecycleAction action_{};
   bool action_pending_{false};

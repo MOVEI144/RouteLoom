@@ -2154,6 +2154,103 @@ void test_healthy_member_boot_adopts() {
   current.clear();
 }
 
+// A link-failure recovery query must not silently adopt the old RLS1.
+void test_healthy_member_recovery_queries() {
+  current = "member-recovery-query";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  CHECK(net.device().joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  const auto seq = net.device().site_store.commit_seq();
+  net.clear_terminal();
+  AuthorityPolicy removed{};
+  removed.verdict = JoinVerdict::Removed;
+  removed.removal_configured = true;
+  removed.removal.site_id = kSiteA;
+  removed.removal.node_id = kDeviceNode;
+  removed.removal.generation = 1;
+  removed.removal.rs_epoch = 15;
+  net.site(0).set_policy(removed);
+  net.restart_device(device_config(), 0xADE1);
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(net.device().joiner.start(boot, net.now()).ok());
+  CHECK(net.device().joiner.poll(net.now()).ok());
+  CHECK(net.device().joiner.snapshot().state != JoinState::Ready);
+  CHECK(net.device().site_store.commit_seq() == seq);
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  CHECK(net.has_terminal_action());
+  if (net.has_terminal_action()) {
+    CHECK(net.terminal_action().kind == JoinActionKind::RemovalRequired);
+    RemovalNotice verified{};
+    bool valid = false;
+    CHECK(removal_notice_verify(ByteView{net.terminal_action().removal_object.data(),
+                                         net.terminal_action().removal_object.size()}, sak().pub,
+                                kSiteA, kNetworkA, kDeviceNode, 1,
+                                verified, valid).ok());
+    CHECK(valid);
+  }
+  CHECK(net.device().site_store.commit_seq() == seq);  // Owner has not yet erased it
+  CHECK(net.device().radio.sends > 0);
+  bool recovery_discover = false;
+  for (const auto& body : discovers(net)) {
+    recovery_discover = recovery_discover ||
+        (body.profile_bits & kJoinProfileMembershipRecovery) != 0;
+  }
+  CHECK(recovery_discover);
+  current.clear();
+}
+
+void test_removed_watermark_rejects_stale_allow() {
+  current = "removed-watermark-stale";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  JoinBootInput boot = boot_input();
+  boot.removal_watermark_site_id = kSiteA;
+  boot.removal_watermark_generation = 1;
+  CHECK(net.device().joiner.start(boot, 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  CHECK(net.terminal_action().kind == JoinActionKind::RecoveryRequired);
+  CHECK(net.terminal_action().recovery_reason == JoinRecoveryReason::AssignmentRegressed);
+  CHECK(!net.device().site_store.has_site());
+  CHECK(net.device().site_storage.writes() == 0);
+  current.clear();
+}
+
+void test_removed_watermark_allows_new_generation() {
+  current = "removed-watermark-new";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  net.site(0).authority_.ledger.next_generation = 2;
+  JoinBootInput boot = boot_input();
+  boot.removal_watermark_site_id = kSiteA;
+  boot.removal_watermark_generation = 1;
+  CHECK(net.device().joiner.start(boot, 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  CHECK(net.terminal_action().kind == JoinActionKind::MemberReady);
+  CHECK(net.device().site_store.has_site());
+  CHECK(net.device().site_store.site().assignment_generation == 2);
+  current.clear();
+}
+
+void test_removed_watermark_blocks_stale_stored_member() {
+  current = "removed-watermark-stored";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  CHECK(net.device().site_store.commit(site_record(1, 203, kNetworkA)).ok());
+  const auto writes = net.device().site_storage.writes();
+  JoinBootInput boot = boot_input();
+  boot.removal_watermark_site_id = kSiteA;
+  boot.removal_watermark_generation = 1;
+  CHECK(net.device().joiner.start(boot, 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  CHECK(net.terminal_action().kind == JoinActionKind::RecoveryRequired);
+  CHECK(net.terminal_action().recovery_reason == JoinRecoveryReason::AssignmentRegressed);
+  CHECK(net.device().site_storage.writes() == writes);
+  CHECK(net.device().radio.sends == 0);
+  current.clear();
+}
+
 void test_member_boot_active_reread_failure() {
   current = "store-active-reread";
   JoinSimNetwork net(device_config(), device_identity());
@@ -2378,6 +2475,10 @@ int main() {
   test_floor_regression_refused();
   test_cross_site_recover_forbidden();
   test_healthy_member_boot_adopts();
+  test_healthy_member_recovery_queries();
+  test_removed_watermark_rejects_stale_allow();
+  test_removed_watermark_allows_new_generation();
+  test_removed_watermark_blocks_stale_stored_member();
   test_member_boot_active_reread_failure();
   test_member_boot_unreadable_sibling();
   test_v1_j05_split_channels();

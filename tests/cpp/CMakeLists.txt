@@ -419,6 +419,8 @@ target_include_directories(routeloom_sdkv1_joiner_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_joiner_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_joiner_tests COMMAND routeloom_sdkv1_joiner_tests)
+set_tests_properties(routeloom_sdkv1_joiner_tests PROPERTIES
+  ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
 
 # Live E2E peer (design P3-4 §10.2): driven by the Rust Site Authority
 # test (host/routeloom-host/src/site/joiner_interop.rs), never by ctest.

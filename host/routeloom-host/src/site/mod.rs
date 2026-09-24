@@ -64,9 +64,9 @@ use routeloom_edhoc::{
     Error as EdhocError, LocalCredential, LocalKey, Method, PeerCredential, Responder, SUITE_2,
 };
 use routeloom_join::{
-    dams_exporter_context, JoinEad, JoinIntent, JoinRequest, JoinResult, RemovalNotice, SiteOffer,
-    SitePackage, DAMS_SIZE, EXPORTER_LABEL_DAMS, JOIN_EAD_CREDENTIAL_LABEL, PENDING_RETRY_MIN_S,
-    RETRY_AFTER_MAX_S,
+    dams_exporter_context, JoinEad, JoinIntent, JoinRequest, JoinResult, LastMembership,
+    RemovalNotice, SiteOffer, SitePackage, DAMS_SIZE, EXPORTER_LABEL_DAMS,
+    JOIN_EAD_CREDENTIAL_LABEL, PENDING_RETRY_MIN_S, RETRY_AFTER_MAX_S,
 };
 use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{
@@ -378,6 +378,7 @@ fn store_failure(detail: &store::StoreError) -> SiteError {
 #[derive(Clone, Debug)]
 struct Verified {
     facts: DeviceFacts,
+    last_network: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -394,6 +395,7 @@ struct Txn {
     state: TxnState,
     responder: Responder,
     device: Option<Verified>,
+    recovery_profile: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1127,11 +1129,10 @@ impl SiteAuthority {
                 return;
             }
         };
-        let intent_ok = split_join_ead(&message_1.ead, JoinEad::Intent, false)
+        let intent = split_join_ead(&message_1.ead, JoinEad::Intent, false)
             .ok()
-            .and_then(|(value, _)| JoinIntent::decode(&value).ok())
-            .is_some();
-        if !intent_ok {
+            .and_then(|(value, _)| JoinIntent::decode(&value).ok());
+        if intent.is_none() {
             self.counters.message_1_refused += 1;
             self.down(
                 up.key,
@@ -1176,6 +1177,9 @@ impl SiteAuthority {
                     state: TxnState::AwaitMessage3,
                     responder,
                     device: None,
+                    recovery_profile: intent.is_some_and(|i| {
+                        i.profile_bits & routeloom_join::JOIN_PROFILE_MEMBERSHIP_RECOVERY != 0
+                    }),
                 });
                 self.down(up.key, PHASE_EDHOC, 2, DownStatus::Continue, message_2);
             }
@@ -1197,9 +1201,10 @@ impl SiteAuthority {
         let mut verified: Option<Verified> = None;
         let mut reason: &'static str = "message_3";
         let id = &self.id;
+        let recovery_profile = txn.recovery_profile;
         let result = txn.responder.process_message_3(&up.body, |kid, ead| {
-            let (request_bytes, cert) =
-                split_join_ead(ead, JoinEad::Request, true).map_err(|r| {
+            let (request_bytes, cert, last_bytes) = split_recovery_ead(ead, recovery_profile)
+                .map_err(|r| {
                     reason = "ead";
                     r.to_string()
                 })?;
@@ -1223,8 +1228,18 @@ impl SiteAuthority {
                     reason = "request";
                     e.to_string()
                 })?;
+            let last_network = last_bytes
+                .map(|b| LastMembership::decode(&b).map(|n| n.0))
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            if last_network.is_some_and(|network| {
+                !recovery_network_valid(network, id.network, request.last_site_id)
+            }) {
+                return Err("last network binding".into());
+            }
             reason = "signature";
             verified = Some(Verified {
+                last_network,
                 facts: DeviceFacts {
                     node: claims.subject,
                     kid,
@@ -1288,7 +1303,12 @@ impl SiteAuthority {
             Some(row) if row.kid == device.facts.kid => {
                 if device.facts.last_site_id == self.id.site_id {
                     // Still holds this site's state: tell it (04 §6.3).
-                    self.finish_removed(txn, &row, now_ms);
+                    self.finish_removed(
+                        txn,
+                        &row,
+                        device.last_network.unwrap_or(self.id.network),
+                        now_ms,
+                    );
                     return;
                 }
                 previously_removed = true;
@@ -1658,7 +1678,7 @@ impl SiteAuthority {
         }
     }
 
-    fn finish_removed(&mut self, txn: Txn, row: &DeviceRow, now_ms: u64) {
+    fn finish_removed(&mut self, txn: Txn, row: &DeviceRow, network: u64, now_ms: u64) {
         let reason = match row.removal_reason {
             2 => RevocationReason::Lost,
             3 => RevocationReason::Replaced,
@@ -1672,7 +1692,7 @@ impl SiteAuthority {
             generation: row.generation,
             rs_epoch: self.rs_epoch.max(1),
         }
-        .issue(self.id.network, self.sak.as_ref());
+        .issue(network, self.sak.as_ref());
         match notice {
             Ok(removal_notice) => {
                 self.counters.removed_notices += 1;
@@ -3847,6 +3867,84 @@ fn split_join_ead(
         return Err("certificate ead item missing");
     }
     Ok((join_value, credential))
+}
+
+// Recovery m3 has an additional critical item after the credential. Never
+// accept it without the m1 profile bit or on a fresh join.
+type RecoveryEad = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
+
+fn recovery_network_valid(network: u64, current_network: u64, last_site_id: u64) -> bool {
+    let epoch = network >> 32;
+    last_site_id != 0
+        && epoch != 0
+        && epoch <= current_network >> 32
+        && (network as u32) == (current_network as u32)
+}
+
+fn split_recovery_ead(items: &[EadItem], recovery: bool) -> Result<RecoveryEad, &'static str> {
+    if !recovery {
+        let (request, cert) = split_join_ead(items, JoinEad::Request, true)?;
+        return Ok((request, cert, None));
+    }
+    let mut parts = items
+        .iter()
+        .filter(|i| !(i.is_padding() && i.value.is_none()));
+    let mut next = |label: JoinEad| -> Result<Vec<u8>, &'static str> {
+        let item = parts.next().ok_or("missing recovery ead")?;
+        if !item.is_critical() || item.absolute_label() != u64::from(label as u32) {
+            return Err("recovery ead order");
+        }
+        item.value.clone().ok_or("recovery ead value")
+    };
+    let request = next(JoinEad::Request)?;
+    let cert = next(JoinEad::Credential)?;
+    let last = next(JoinEad::LastMembership)?;
+    if parts.next().is_some() {
+        return Err("extra recovery ead");
+    }
+    if last.len() != routeloom_join::LAST_MEMBERSHIP_SIZE || cert.is_empty() {
+        return Err("recovery ead size");
+    }
+    Ok((request, Some(cert), Some(last)))
+}
+
+#[cfg(test)]
+mod recovery_ead_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_network_requires_a_real_old_epoch() {
+        let current = 0x0000_0003_0a1b_2c3d;
+        assert!(recovery_network_valid(0x0000_0002_0a1b_2c3d, current, 42));
+        assert!(!recovery_network_valid(0x0000_0000_0a1b_2c3d, current, 42));
+        assert!(!recovery_network_valid(0x0000_0004_0a1b_2c3d, current, 42));
+        assert!(!recovery_network_valid(0x0000_0002_0a1b_2c3e, current, 42));
+        assert!(!recovery_network_valid(0x0000_0002_0a1b_2c3d, current, 0));
+    }
+
+    #[test]
+    fn old_membership_requires_profile_and_exact_order() {
+        let items = vec![
+            EadItem::critical(
+                JoinEad::Request as u32,
+                vec![0; routeloom_join::JOIN_REQUEST_SIZE],
+            ),
+            EadItem::critical(JoinEad::Credential as u32, vec![1]),
+            EadItem::critical(
+                JoinEad::LastMembership as u32,
+                LastMembership(0x0000_0003_0a1b_2c3d)
+                    .encode()
+                    .unwrap()
+                    .to_vec(),
+            ),
+        ];
+        assert!(split_recovery_ead(&items, true).is_ok());
+        assert!(split_recovery_ead(&items, false).is_err());
+        let mut swapped = items.clone();
+        swapped.swap(1, 2);
+        assert!(split_recovery_ead(&swapped, true).is_err());
+        assert!(split_recovery_ead(&items[..2], true).is_err());
+    }
 }
 
 // --- service wrapper ---------------------------------------------------------------------------

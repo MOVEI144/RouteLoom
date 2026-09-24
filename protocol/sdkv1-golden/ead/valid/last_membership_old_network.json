@@ -1,0 +1,10 @@
+{
+  "codec": "last_membership",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "item_hex": "3a000100054c01000000000000030a1b2c3d",
+  "label": 65542,
+  "name": "last_membership_old_network",
+  "network": 13054454845,
+  "value_hex": "01000000000000030a1b2c3d"
+}

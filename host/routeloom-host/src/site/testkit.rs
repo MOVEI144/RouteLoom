@@ -10,8 +10,8 @@ use routeloom_edhoc::{
 };
 use routeloom_join::{
     dams_exporter_context, join_allow_verify, join_org_hint, JoinEad, JoinIntent, JoinRequest,
-    JoinResult, RemovalNotice, SiteOffer, DAMS_SIZE, EXPORTER_LABEL_DAMS,
-    JOIN_EAD_CREDENTIAL_LABEL, JOIN_PROFILE_RLJOIN1,
+    JoinResult, LastMembership, RemovalNotice, SiteOffer, DAMS_SIZE, EXPORTER_LABEL_DAMS,
+    JOIN_EAD_CREDENTIAL_LABEL, JOIN_PROFILE_MEMBERSHIP_RECOVERY, JOIN_PROFILE_RLJOIN1,
 };
 use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{cert_issue, cert_verify, CertClaims, CertType};
@@ -97,6 +97,7 @@ pub struct SimDevice {
     pub capability: u32,
     pub mac: [u8; 6],
     pub site: Option<SiteState>,
+    pub recovery_existing: bool,
     relay: u32,
 }
 
@@ -146,6 +147,7 @@ impl SimDevice {
             capability: routeloom_join::JOIN_CAPABILITY_RELAY,
             mac: [0x02, 0, 0, 0, seed, 1],
             site: None,
+            recovery_existing: false,
             relay: 0,
         }
     }
@@ -263,9 +265,19 @@ impl SimDevice {
             key,
             site: None,
         };
+        let old_network = self
+            .site
+            .as_ref()
+            .filter(|_| self.recovery_existing)
+            .map(|s| s.member.network);
         let intent = JoinIntent {
             org_hint: join_org_hint(&site_ca_pub()),
-            profile_bits: JOIN_PROFILE_RLJOIN1,
+            profile_bits: JOIN_PROFILE_RLJOIN1
+                | if old_network.is_some() {
+                    JOIN_PROFILE_MEMBERSHIP_RECOVERY
+                } else {
+                    0
+                },
         }
         .encode()
         .unwrap();
@@ -340,16 +352,17 @@ impl SimDevice {
             cred: &self.dev_cert,
             key: LocalKey::Signature(&signer),
         };
-        let m3 = exchange
-            .initiator
-            .compose_message_3(
-                &local,
-                &[
-                    EadItem::critical(JoinEad::Request as u32, request.to_vec()),
-                    EadItem::critical(JOIN_EAD_CREDENTIAL_LABEL, self.dev_cert.clone()),
-                ],
-            )
-            .unwrap();
+        let mut ead = vec![
+            EadItem::critical(JoinEad::Request as u32, request.to_vec()),
+            EadItem::critical(JOIN_EAD_CREDENTIAL_LABEL, self.dev_cert.clone()),
+        ];
+        if let Some(network) = old_network {
+            ead.push(EadItem::critical(
+                JoinEad::LastMembership as u32,
+                LastMembership(network).encode().unwrap().to_vec(),
+            ));
+        }
+        let m3 = exchange.initiator.compose_message_3(&local, &ead).unwrap();
         events.extend(service.handle_up(self.up(key, 3, m3), now_ms));
         let sent = transport.take();
         let outcome = self.outcome_from(&mut exchange, sent);
