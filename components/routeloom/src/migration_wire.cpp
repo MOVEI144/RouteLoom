@@ -359,19 +359,32 @@ void PlanExchange::on_manifest(
     }
   }
   if (slot == nullptr) return;  // bounded: sender's resend retries later
+  // The reassembly window is absolute: it opens at the FIRST manifest for
+  // this (peer, hash). A duplicate manifest restarts the byte count but
+  // never extends the deadline, so a sender cannot hold a slot past the
+  // window by re-announcing or dribbling chunks. A slot whose window
+  // already lapsed is a fresh transfer and gets a fresh deadline.
+  const bool live = slot->used && slot->deadline_ms > now_ms;
   slot->used = true;
   slot->peer = peer;
   slot->kind = manifest.kind;
   slot->hash = manifest.object_hash;
   slot->total_len = manifest.total_len;
   slot->received = 0;
-  slot->deadline_ms = now_ms + config_.inbound_expiry_ms;
+  if (!live) slot->deadline_ms = now_ms + config_.inbound_expiry_ms;
 }
 
 void PlanExchange::on_chunk(const NodeId peer,
                             const autonomy::ObjectChunkPayload& chunk,
                             const MonotonicMs now_ms) noexcept {
   Inbound* slot = find_inbound(peer, chunk.object_hash);
+  if (slot != nullptr && slot->deadline_ms <= now_ms) {
+    // The manifest-time window is absolute — late chunks must not extend or
+    // ride it. Free the slot and answer like an unknown object so the
+    // sender's bounded retry restarts with a fresh manifest and window.
+    slot->used = false;
+    slot = nullptr;
+  }
   if (slot == nullptr) {
     send_ack(peer, chunk.object_hash, 0,
              autonomy::ObjectAckStatus::Incomplete);
@@ -394,7 +407,6 @@ void PlanExchange::on_chunk(const NodeId peer,
   std::memcpy(slot->data.data() + chunk.offset, chunk.data.data(),
               chunk.data_size);
   slot->received = static_cast<std::uint16_t>(slot->received + chunk.data_size);
-  slot->deadline_ms = now_ms + config_.inbound_expiry_ms;
   if (slot->received == slot->total_len) complete_inbound(*slot, now_ms);
 }
 

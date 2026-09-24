@@ -203,6 +203,18 @@ def run(root: Path) -> dict:
     except (OSError, ValueError) as error:
         return {"scope": "design-lint-only", "passed": False, "errors": [str(error)]}
     errors.extend(validate_contract(c, s))
+    # The design discovery window must not drift from the shipped contract:
+    # radio-defaults.json discovery.offer_slots/channel_dwell_max_ms are the
+    # canonical values (radio.md §7/§13, issue #55 review).
+    try:
+        radio = json.loads((root / "docs/reference/radio-defaults.json").read_text(encoding="utf-8"))
+        d = c["discovery"]
+        canonical = radio["discovery"]
+        if (d["offer_slots"], d["channel_visit_max_ms"]) != (
+                canonical["offer_slots"], canonical["channel_dwell_max_ms"]):
+            errors.append("discovery:design window drifts from radio-defaults.json")
+    except (OSError, ValueError, KeyError) as error:
+        errors.append(f"discovery window cross-check: {error}")
     # This is a comparison with the checked-in semantic contract, not with
     # runtime frame_allowed(), which the implementation backlog must reconcile.
     try:

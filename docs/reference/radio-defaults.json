@@ -233,7 +233,7 @@
     "synchronized_sleep_relay": false
   },
   "latency_floor": {
-    "note": "LR250 airtime 前提の直列最小経路の理論下限 (issue #47)。bit time 32us/byte、ESP-NOW MAC overhead +43B、LR preamble 0.19-0.77ms（非公開のため幅付き推定、計算は中央値0.49）。frame airtime = preamble + (wire + 43B) x 32us → DATA≈7.75ms / HOP_ACCEPT≈5.9ms / END_RECEIPT≈6.65ms。relay_turnaround は tick・復号・commit・queue を含む最小値。計算式: floor(n hop) = n x (DATA + HOP_ACCEPT + 2 x turn) + n x (END_RECEIPT + turn)（往路 DATA+受信確認、復路 RECEIPT、中継毎の前後 turnaround）。floor_ms はこの計算に relay queueing の余裕を足した記載値で、機械検査は targets >= floor_ms >= 計算値を保証する。",
+    "note": "LR250 airtime 前提の直列最小経路の理論下限 (issue #47)。bit time 32us/byte、ESP-NOW MAC overhead +43B、LR preamble 0.19-0.77ms（非公開のため幅付き推定、計算は中央値0.49）。frame airtime = preamble + (wire + 43B) x 32us → DATA≈7.75ms / HOP_ACCEPT≈5.9ms / END_RECEIPT≈6.65ms。relay_turnaround は tick・復号・commit・queue を含む最小値。計算式: floor(n hop) = n x DATA + (2n-1) x HOP_ACCEPT + n x END_RECEIPT + (4n-1) x turn — 往路は各hopがDATAを中継し宛先を含む各受信者がHOP_ACCEPTを返す、復路END_RECEIPTも中継ごとにHOP_ACCEPTされ、全受信frameがturnaroundを要する（issue #47 検算の片道≈84ms+復路≈87msと一致）。floor_ms は ceil(計算値) で前提から一意に導出され、機械検査は targets >= floor_ms == ceil(計算値) と frame_airtime_ms の前提整合を保証する。",
     "us_per_byte": 32,
     "espnow_mac_overhead_bytes": 43,
     "lr_preamble_ms": [0.19, 0.77],
@@ -251,8 +251,8 @@
     },
     "floor_ms": {
       "reliable_1hop_p95": 28,
-      "reliable_5hop_p95": 170,
-      "reliable_10hop_p95": 340
+      "reliable_5hop_p95": 173,
+      "reliable_10hop_p95": 354
     }
   },
   "performance_targets_ms": {

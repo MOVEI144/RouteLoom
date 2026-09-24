@@ -39,8 +39,8 @@
 | 指標 | 目標 | LR250理論下限 |
 |---|---|---:|
 | 1hop RELIABLE | P95 35ms以内、send→END_RECEIPT | 28ms |
-| 5hop RELIABLE | P95 250ms以内 | 170ms |
-| 10hop RELIABLE | P95 500ms以内 | 340ms |
+| 5hop RELIABLE | P95 250ms以内 | 173ms |
+| 10hop RELIABLE | P95 500ms以内 | 354ms |
 | Deep Sleepから報告 | P95 500ms以内、warm条件。cold/auth/recoveryは別系列 | — |
 | 既知代替への復旧 | P95 500ms以内、最初の故障観測→最終receipt | — |
 | 同channel探索修復 | P95 2000ms以内を目標、物理経路が存在 | — |
@@ -72,7 +72,7 @@ P50/P95/P99、期限内成功、未達、expired、cancel、indeterminate、標�
 
 ## 7. 改訂1.1の測定条件と負例
 
-性能表は目標条件の正本JSONから生成して照合する。hop遅延の目標は`radio-defaults.json`の`latency_floor`（LR250 airtime前提の直列最小経路: bit time 32us/byte + MAC 43B + LR preamble中央値 + relay turnaround）が下回れない下限として記載し、`check_review_contracts.py`が`targets >= floor_ms >= 計算値`を機械検査する。4Hは総送信会計、send→END_RECEIPTはcritical path。最大payload/全LR250と昇速済み短payloadは別系列。
+性能表は目標条件の正本JSONから生成して照合する。hop遅延の目標は`radio-defaults.json`の`latency_floor`（LR250 airtime前提の直列最小経路: bit time 32us/byte + MAC 43B + LR preamble中央値 + relay turnaround、復路receiptも中継ごとにHOP_ACCEPTされるモデル）が下回れない下限として記載し、`check_review_contracts.py`が前提からairtimeを再導出し`targets >= floor_ms == ceil(計算値)`を機械検査する。4Hは総送信会計、send→END_RECEIPTはcritical path。最大payload/全LR250と昇速済み短payloadは別系列。
 
 初回DATA jitterはSDKで0、retry jitterとdriver待ちは別。wakeはwarm/cold/new-peer/channel-recovery/key-recovery別、NVS fresh/populated・履歴を分ける。単独Joinと同時100Join、100台管理と100件5秒以内burstを別資格にする。
 

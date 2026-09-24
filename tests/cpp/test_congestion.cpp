@@ -342,26 +342,18 @@ void test_flow_caps() {
   MeshNode* a = h.add(1);
   (void)h.add(3);
   (void)h.add(4);
-  (void)h.add(5);
   (void)h.add(6);
-  (void)h.add(7);
-  (void)h.add(8);
   h.link(1, 3);
   h.link(1, 4);
-  h.link(1, 5);
   h.link(1, 6);
-  h.link(1, 7);
-  h.link(1, 8);
 
-  // 14 forwards claiming the SAME origin, cycling five sender scopes so
-  // the per-origin cap (not the per-scope cap, and not the per-peer reply
-  // lease bound of 3) is what trips. Each step drains the accept AND sends
-  // the next queued job inside the same flush (TX-complete submits
-  // directly) — the peer window holds 2 forwards in flight, so 14
-  // admissions leave 12 pooled against the cap.
-  constexpr NodeId kScopes[] = {3, 4, 5, 7, 8};
+  // 14 forwards claiming the SAME origin, alternating two sender scopes so
+  // the per-origin cap (not the per-scope cap) is what trips. Each step
+  // drains the accept AND sends the next queued job inside the same flush
+  // (TX-complete submits directly) — the peer window holds 2 forwards in
+  // flight, so 14 admissions leave 12 pooled against the cap.
   for (std::uint64_t i = 1; i <= 14; ++i) {
-    const NodeId peer = kScopes[(i - 1) % 5];
+    const NodeId peer = (i % 2 == 0) ? 3 : 4;
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, i));
     h.step(1);  // drains the accept; the forward job accumulates
     ++h.now;
@@ -374,9 +366,8 @@ void test_flow_caps() {
   CHECK(a->congestion_stats().flow_overflow_merged == 0);
 }
 
-// D4-03/D4-08: BUSY emission on a real admission failure (the per-peer
-// ExpectedReply lease bound trips before the scheduler's scope caps) and
-// dispatch of the Busy(20) frame back to the rejected peer.
+// D4-03/D4-08: BUSY emission on a real admission failure (per-sender scope
+// cap) and dispatch of the Busy(20) frame back to the rejected peer.
 void test_busy_emission() {
   Harness h;
   MeshNode* p = h.add(3);
@@ -386,18 +377,17 @@ void test_busy_emission() {
   h.link(2, 4);
   b->set_peer_busy_capable(3, true);
 
-  // Three transit DATA from P fill its reply-lease bound
-  // (kReplyLeaseMaxPerPeer); each step drains the accept AND sends the next
-  // queued job inside the same flush (TX-complete submits directly), so the
-  // forwards stay unresolved and keep their leases.
-  for (std::uint64_t i = 1; i <= 3; ++i) {
+  // 14 transit DATA from P with distinct origins fill the per-scope cap.
+  // Each step drains the accept AND sends the next queued job inside the
+  // same flush (TX-complete submits directly) — the peer window holds 2
+  // forwards in flight, so 14 admissions leave 12 pooled against the cap.
+  for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
     h.step(2);  // drains the HOP_ACCEPT so the control lane stays usable
     ++h.now;
   }
   const std::size_t sights_before = h.net.sights.size();
   inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
-  CHECK(h.observer(2)->has_diag("REPLY_CAPACITY_DROP"));
   CHECK(b->congestion_stats().busy_sent == 1);
 
   h.step(2);  // BUSY leaves via the reserved control lane
@@ -423,9 +413,9 @@ void test_busy_legacy_peer() {
   (void)h.add(4);
   h.link(3, 2);
   h.link(2, 4);
-  // NB: no set_peer_busy_capable — P is a legacy peer. Its reply-lease
-  // bound (3) fills after the first three admissions; every later frame is
-  // refused and counted as an unsent BUSY.
+  // NB: no set_peer_busy_capable — P is a legacy peer. Two forwards go
+  // in flight under the peer window while each step drains the rest, so
+  // 14 admissions leave the per-scope cap full.
   for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
     h.step(2);
@@ -438,55 +428,6 @@ void test_busy_legacy_peer() {
   for (std::size_t i = sights_before; i < h.net.sights.size(); ++i) {
     CHECK(h.net.sights[i].type != FrameType::Busy);
   }
-}
-
-// Issue #55 / crash-time-resources §3: ExpectedReply peer leases. Each
-// accepted transaction from a peer reserves a bounded reply lease; the
-// per-peer bound (kReplyLeaseMaxPerPeer) refuses the next admission
-// pre-acceptance without consuming dedup, other peers are unaffected, and
-// expiry at the link-transaction lifetime reclaims the slots.
-void test_reply_peer_leases() {
-  Harness h;
-  MeshNode* b = h.add(2);
-  (void)h.add(3);  // peer P
-  (void)h.add(5);  // peer Q
-  (void)h.add(4);  // transit destination
-  h.link(3, 2);
-  h.link(5, 2);
-  h.link(2, 4);
-  b->set_peer_busy_capable(3, true);
-
-  // Three unresolved transits from P fill its lease bound exactly: each
-  // admission holds a lease for its forward job after the HOP_ACCEPT job
-  // itself has drained.
-  for (std::uint64_t i = 1; i <= 3; ++i) {
-    inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));
-    h.step(2);
-    ++h.now;
-  }
-  CHECK(b->dedup_stats().admitted_transit == 3);
-  CHECK(b->reply_leases_held(3, h.now) == kReplyLeaseMaxPerPeer);
-
-  // The fourth admission is refused pre-acceptance — REPLY_CAPACITY_DROP
-  // and an honest BUSY — and the freed dedup record leaves no residue
-  // (the same frame is admissible again below).
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
-  CHECK(h.observer(2)->has_diag("REPLY_CAPACITY_DROP"));
-  CHECK(b->congestion_stats().busy_sent == 1);
-  CHECK(b->reply_leases_held(3, h.now) == kReplyLeaseMaxPerPeer);
-
-  // Isolation: the bound is per-peer — Q admits while P is saturated.
-  inject(h, 2, 5, craft_transit(h.cipher, 5, 2, 3000, 4, 20));
-  CHECK(b->dedup_stats().admitted_transit == 5);
-  CHECK(b->reply_leases_held(5, h.now) == 1);
-
-  // TTL: once the lease outlives the link-transaction lifetime the slots
-  // are reclaimed. Re-injecting the refused frame is a fresh admission —
-  // proof the refusal above consumed no dedup record.
-  h.now += kLinkTransactionLifetimeMs;
-  inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 2000, 4, 15));
-  CHECK(b->dedup_stats().admitted_transit == 6);
-  CHECK(b->reply_leases_held(3, h.now) == 1);
 }
 
 // D4-03/D4-08: an authenticated BUSY matching a pending (peer, MessageId,
@@ -728,35 +669,18 @@ void test_watermarks() {
   (void)h.add(4);
   (void)h.add(5);
   (void)h.add(6);  // transit next-hop
-  (void)h.add(7);
-  (void)h.add(8);
-  (void)h.add(9);
-  (void)h.add(10);
-  (void)h.add(11);
-  (void)h.add(12);
-  (void)h.add(13);
-  (void)h.add(14);
   h.link(1, 3);
   h.link(1, 4);
   h.link(1, 5);
   h.link(1, 6);
-  h.link(1, 7);
-  h.link(1, 8);
-  h.link(1, 9);
-  h.link(1, 10);
-  h.link(1, 11);
-  h.link(1, 12);
-  h.link(1, 13);
-  h.link(1, 14);
 
   // 29 forwards accumulate; each step drains that frame's control-lane
   // accept AND sends the next queued job inside the same flush — the peer
   // window holds 2 forwards in flight (the boot advertisement is drained
-  // too), leaving 27 pooled. Cycling ten sender scopes keeps every cap —
-  // including the per-peer reply lease bound of 3 — below its bound.
-  constexpr NodeId kScopes[] = {3, 4, 5, 7, 8, 9, 10, 11, 12, 13};
+  // too), leaving 27 pooled. Cycling three sender scopes keeps every cap
+  // below its bound.
   for (std::uint64_t i = 1; i <= 29; ++i) {
-    const NodeId peer = kScopes[(i - 1) % 10];
+    const NodeId peer = 3 + (i % 3);
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 5000 + i, 6, i));
     h.step(1);
     ++h.now;
@@ -772,9 +696,8 @@ void test_watermarks() {
   CHECK(!refused.ok());  // explicit rejection, not a silent queue
   CHECK(a->congestion_stats().bulk_suspended >= 1);
 
-  // Non-bulk admission still works at the watermark (normal-class forward
-  // from a peer with free reply leases).
-  inject(h, 1, 14, craft_transit(h.cipher, 14, 1, 7777, 6, 99));
+  // Non-bulk admission still works at the watermark (normal-class forward).
+  inject(h, 1, 3, craft_transit(h.cipher, 3, 1, 7777, 6, 99));
   CHECK(a->congestion_stats().queued == 29);  // accept + forward admitted
 }
 
@@ -1526,7 +1449,6 @@ int main() {
   test_flow_caps();
   test_busy_emission();
   test_busy_legacy_peer();
-  test_reply_peer_leases();
   test_busy_deferral_readmission();
   test_busy_retry_clamp();
   test_busy_stale_sequence();

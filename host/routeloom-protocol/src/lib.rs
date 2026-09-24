@@ -70,6 +70,9 @@ pub enum ProtocolError {
     InvalidLength,
     CrcMismatch,
     CreditSessionMismatch,
+    /// Retained for match compatibility: stale cumulative grants are now
+    /// absorbed per usb-protocol.md §3, so `update` never returns this.
+    CreditRegression,
     CreditExhausted,
     PrincipalTooLong,
 }

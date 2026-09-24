@@ -81,7 +81,7 @@ cookieはMAC/nonce/Network/時間bucketへ結び、返せる相手にだけ重�
 
 起床直後に全員同時broadcastしない。要求側に全体token bucket、位相ばらし、失敗時指数backoffを置く。新しい物理イベントの初回DATAには長いheartbeat用jitterを適用しない。
 
-初期OFFERは32slots×10msの応答窓、1channel最大400msを目標とする。slotは衝突しない予約ではない。OFFER最大長とLR250所要時間が10ms内に収まる保証はせず、slotは開始時刻分散としてのみ使う。
+初期OFFERは16slots×10msの応答窓、1channel最大200msを目標とする（現行契約は `docs/reference/radio-defaults.json` の `discovery.offer_slots`／`channel_dwell_max_ms` と一致）。slotは衝突しない予約ではない。OFFER最大長とLR250所要時間が10ms内に収まる保証はせず、slotは開始時刻分散としてのみ使う。
 
 全ノード同時加入に固定slotだけで対処しない。responderは直近の観測密度に応じて返信確率を抑え、requesterはattempt nonceを更新して独立再試行する。密度申告は未認証hintとして上限付きで扱い、返信確率を恒久0にしない。single requesterでも応答者100台のケースを別試験にする。
 
@@ -111,7 +111,7 @@ evictionは未使用・非保護Peerから、freshness、active路への依存�
 
 awake neighborのlease初期30秒、idle refresh目標10秒、candidate TTL5秒。実DATAがあればprobeを省ける。lease切れはbinding削除ではなく利用停止で、再確認後に復帰する。
 
-眠る端末は常時route監視をしない。既知peerへ本体DATA→必要時だけ同channel発見→保存channel候補の順。追加探索は起床予算2000ms、停止予約100msと未完TXの最悪待ちを先に差し引く。400ms×候補数を全部完遂する約束ではない。予算切れでも所属・Message ID・期限を維持する。
+眠る端末は常時route監視をしない。既知peerへ本体DATA→必要時だけ同channel発見→保存channel候補の順。追加探索は起床予算2000ms、停止予約100msと未完TXの最悪待ちを先に差し引く。200ms×候補数を全部完遂する約束ではない。予算切れでも所属・Message ID・期限を維持する。
 
 `EspNowPowerPort::start_discovery()` をこのengineへ接続し、UNSUPPORTEDを単に成功へ置換しない。完了は認証済み可用性eventでPowerCoordinatorへ返す。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
@@ -106,12 +107,43 @@ def validate(root: Path) -> dict:
             and radio["migration"]["auto_policy"] is False,
         )
         # Issue #47: acceptance targets must not undercut the LR250 serial
-        # airtime floor. floor(n hop) = n x (DATA + HOP_ACCEPT + 2xturn) +
-        # n x (END_RECEIPT + turn); the documented floor_ms adds relay
-        # queueing margin on top of that serial calculation.
+        # airtime floor. Airtime is derived from the physical premises
+        # (wire bytes + ESP-NOW MAC overhead) x bit time + LR preamble, and
+        # the displayed floor_ms must equal ceil() of the derived serial
+        # model — floor(n) = n x DATA + (2n-1) x HOP_ACCEPT +
+        # n x END_RECEIPT + (4n-1) x turnaround. Every hop relays DATA once,
+        # every hop receiver (relays and destination on the forward path,
+        # relays on the receipt's return path) emits HOP_ACCEPT, and every
+        # frame reception costs a turnaround tick; the issue #47 cross-check
+        # (5hop ~= forward 84ms + return 87ms) reproduces this model.
         floor_model = radio["latency_floor"]
         turn = floor_model["relay_turnaround_ms"]
-        airtime = floor_model["frame_airtime_ms"]
+        preamble_range = floor_model["lr_preamble_ms"]
+        preamble = floor_model["lr_preamble_model_ms"]
+        wire = floor_model["frame_wire_bytes"]
+
+        def airtime_ms(wire_bytes):
+            return preamble + (
+                (wire_bytes + floor_model["espnow_mac_overhead_bytes"])
+                * floor_model["us_per_byte"] / 1000.0
+            )
+
+        derived_airtime = {
+            "data": airtime_ms(wire["data_64b_payload"]),
+            "hop_accept": airtime_ms(wire["hop_accept"]),
+            "end_receipt": airtime_ms(wire["end_receipt"]),
+        }
+        test(
+            "latency_preamble_model_within_range",
+            preamble_range[0] <= preamble <= preamble_range[1],
+        )
+        test(
+            "latency_airtime_matches_physical_premises",
+            all(
+                abs(floor_model["frame_airtime_ms"][key] - value) <= 0.05
+                for key, value in derived_airtime.items()
+            ),
+        )
         hop_floors = {
             "reliable_1hop_p95": 1,
             "reliable_5hop_p95": 5,
@@ -121,15 +153,25 @@ def validate(root: Path) -> dict:
         floors = floor_model["floor_ms"]
 
         def serial_floor_ms(hops):
-            return hops * (
-                airtime["data"] + airtime["hop_accept"] + 2 * turn
-            ) + hops * (airtime["end_receipt"] + turn)
+            return (
+                hops * derived_airtime["data"]
+                + (2 * hops - 1) * derived_airtime["hop_accept"]
+                + hops * derived_airtime["end_receipt"]
+                + (4 * hops - 1) * turn
+            )
 
+        test(
+            "latency_floor_displayed_is_derived",
+            all(
+                floors[key] == math.ceil(serial_floor_ms(hops) - 1e-9)
+                for key, hops in hop_floors.items()
+            ),
+        )
         test(
             "latency_targets_above_airtime_floor",
             all(
-                targets[key] >= floors[key] >= serial_floor_ms(hops)
-                for key, hops in hop_floors.items()
+                targets[key] >= floors[key]
+                for key in hop_floors
             ),
         )
         feature_map = features["features"]

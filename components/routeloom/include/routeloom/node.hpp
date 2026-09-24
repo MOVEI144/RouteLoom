@@ -12,7 +12,6 @@
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/group.hpp"
 #include "routeloom/node_status.hpp"
-#include "routeloom/peer_directory.hpp"
 #include "routeloom/route_request.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
@@ -839,12 +838,6 @@ class MeshNode {
   std::size_t dedup_resident() const noexcept { return dedup_.size(); }
   // Current per-peer in-flight window (1..4) used by the dispatch gate.
   std::uint8_t peer_tx_window(NodeId peer) const noexcept;
-  // Unexpired ExpectedReply leases this node holds for `peer`
-  // (crash-time-resources §3) — test/diagnostic surface for the admission
-  // reservation; always <= kReplyLeaseMaxPerPeer by construction.
-  std::size_t reply_leases_held(NodeId peer, MonotonicMs now_ms) const noexcept {
-    return count_reply_leases(peer, now_ms);
-  }
   // Marks a peer as implementing the Busy(20) feedback payload. Until
   // capability negotiation lands, BUSY replies are emitted only to peers
   // marked here or proven by a valid received BUSY (03 §5, scenario D4-09).
@@ -959,9 +952,6 @@ class MeshNode {
     }
     scheduler_.clear();
     awaiting_hop_.clear();
-    // Every stamped reply job is gone — the obligations they held vanish
-    // with the queue; leases would otherwise linger until their TTL.
-    reply_leases_.clear();
   }
 
  private:
@@ -1271,10 +1261,6 @@ class MeshNode {
     // Held for a provider-owned session (sdk-v1/03 §9): the deferral was
     // counted and diagnosed once; cleared when the job encodes.
     bool session_deferred{false};
-    // ExpectedReply lease this reply job keeps pinned (0 = none). Set only
-    // on locally generated replies to an accepted transaction (HOP_ACCEPT /
-    // END_RECEIPT); released when the job resolves.
-    std::uint32_t reply_lease_id{0};
 
     void set_forwarded(const wire::LinkOpenedFrame& frame) noexcept {
       form = JobForm::Forwarded;
@@ -1467,16 +1453,6 @@ class MeshNode {
     bool busy_deferred{false};
   };
 
-  // One ExpectedReply lease record (crash-time-resources.md §3): created
-  // when an accepted admission commits us to reply, bounded per peer by
-  // kReplyLeaseMaxPerPeer, expiring at the link transaction lifetime, and
-  // freed early once every reply job it stamped has resolved (refcount 0).
-  struct ReplyLease {
-    NodeId peer{kInvalidNodeId};
-    std::uint32_t id{0};
-    PeerLease lease{};
-  };
-
   Status validate_config() const noexcept;
   Neighbor* find_neighbor(NodeId node) noexcept;
   const Neighbor* find_neighbor(NodeId node) const noexcept;
@@ -1538,11 +1514,9 @@ class MeshNode {
                           MessageId& out) noexcept;
   Status queue_origin_data(Delivery& delivery, MonotonicMs now_ms) noexcept;
   Status queue_forward(const wire::LinkOpenedFrame& frame, NodeId next_hop,
-                       MonotonicMs now_ms, std::uint32_t reply_lease_id) noexcept;
-  Status queue_hop_accept(const wire::Header& accepted, MonotonicMs now_ms,
-                          std::uint32_t reply_lease_id) noexcept;
-  Status queue_end_receipt(const wire::Header& data, MonotonicMs now_ms,
-                           std::uint32_t reply_lease_id) noexcept;
+                       MonotonicMs now_ms) noexcept;
+  Status queue_hop_accept(const wire::Header& accepted, MonotonicMs now_ms) noexcept;
+  Status queue_end_receipt(const wire::Header& data, MonotonicMs now_ms) noexcept;
   // BUSY emission (03 §5): pre-admission refusal for a NEW authenticated
   // inbound DATA — never for already HOP_ACCEPT-ed work. Emits only when the
   // peer is busy-capable and a reply slot is affordable; otherwise drops and
@@ -1551,24 +1525,6 @@ class MeshNode {
                     std::uint8_t reason, MonotonicMs now_ms) noexcept;
   void emit_busy_or_drop(NodeId peer, const wire::Header& rejected,
                          std::uint8_t reason, MonotonicMs now_ms) noexcept;
-  // ExpectedReply leases (crash-time-resources.md §3, radio.md §13): the
-  // reply_peer reservation in the documented
-  // frame -> dedup -> transaction -> reply_peer -> ack_slot order.
-  // acquire sweeps expired records, applies the per-peer bound and allocates
-  // as one indivisible step inside admission — a refusal leaves no side
-  // effects. The lease keeps the peer's record protected from eviction
-  // while a stamped reply job is outstanding.
-  ReplyLease* acquire_reply_lease(NodeId peer, MonotonicMs now_ms) noexcept;
-  // One more reply job carries the lease (called only after that job was
-  // successfully enqueued).
-  void hold_reply_lease(std::uint32_t lease_id) noexcept;
-  // A stamped reply job resolved — drop its reference; the record frees
-  // early once no job still needs it. 0 or unknown id is a no-op.
-  void release_reply_lease(std::uint32_t lease_id) noexcept;
-  // Release every record past the link transaction lifetime.
-  void expire_reply_leases(MonotonicMs now_ms) noexcept;
-  // Unexpired leases held for this peer (the admission bound's operand).
-  std::size_t count_reply_leases(NodeId peer, MonotonicMs now_ms) const noexcept;
   TxJob link_control_job(FrameType type, NodeId neighbor, std::uint32_t lifetime_ms,
                          MonotonicMs now_ms) noexcept;
   Status queue_route_update(NodeId neighbor, MonotonicMs now_ms) noexcept;
@@ -1667,7 +1623,7 @@ class MeshNode {
   // Emit one bounded link-only TransitFailure toward `upstream` (hop-1,
   // BestEffort, never hop-ACKed — a report must not spawn reports).
   void emit_transit_failure(NodeId upstream, const TransitFailure& report,
-                            MonotonicMs now_ms, std::uint32_t reply_lease_id) noexcept;
+                            MonotonicMs now_ms) noexcept;
   // fail_job hook for JobOwner::Transit: find the retained transit record
   // for job.ack and report the post-acceptance failure to its upstream.
   void report_transit_failure(const TxJob& job, const char* reason,
@@ -2067,9 +2023,6 @@ class MeshNode {
   FixedPool<SeqnoState, kSeqnoStateCapacity> seqno_state_{};
   TxScheduler scheduler_{};
   FixedPool<AwaitingHop, kAwaitingHopCapacity> awaiting_hop_{};
-  // ExpectedReply leases owed to peers (bounded; congestion.hpp pins).
-  FixedPool<ReplyLease, kReplyLeasePoolCapacity> reply_leases_{};
-  std::uint32_t next_reply_lease_id_{1};
   PhysicalInflight physical_{};
   // The one sealed frame (TxJob::encoded_tag): only dispatch_next seals, it
   // hands the driver one frame at a time and the driver copies it, so a

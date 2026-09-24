@@ -1256,9 +1256,6 @@ void test_result_binding_rejects() {
     inject_result(head, 5, 5, 4);
     CHECK(w.obs(1)->has_diag("APPLIED_RESULT_ORPHAN"));
   }
-  // The queued HOP_ACCEPTs hold peer 2's three reply leases — drain them
-  // so the next admission from 2 is not refused pre-acceptance.
-  w.run(50);
   // (e) RESULT for an unknown MessageId -> orphan, never acted on.
   {
     MessageId other{101, 7777};
