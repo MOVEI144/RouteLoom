@@ -1220,10 +1220,11 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
 // --- RCR1 canonical recovery command (04-remote-config §4.7, 06 §6.3) --------
 //
 // Fixed 76B body carried as the signed payload of a kind-4 recovery object —
-// never an RCC1 extension and never a kind-3 permit. Two classes: a store
-// recovery (new store generation + explicit reprovision attest) and the
-// authority-generation countersign (03-signing's trust update). The Rust
-// mirror must stay byte-identical with the C++ codec in endpoint_wire.cpp.
+// never an RCC1 extension and never a kind-3 permit. A single class: a store
+// recovery (new store generation + explicit reprovision attest). Authority
+// generation changes are root-authorized trust updates (RTM1), never
+// recovery commands. The Rust mirror must stay byte-identical with the C++
+// codec in endpoint_wire.cpp.
 
 pub const RCR1_MAGIC: u32 = 0x5243_5231; // "RCR1"
 pub const RCR1_VERSION: u8 = 1;
@@ -1234,8 +1235,6 @@ pub const RCR1_SIZE: usize = 76;
 pub enum ConfigRecoveryClass {
     /// Signed store-generation recovery for an impaired journal.
     StoreRecover = 1,
-    /// Countersigned authority-generation install (trust update).
-    AuthorityGeneration = 2,
 }
 
 pub const RCR1_ATTEST_ADOPT: u8 = 0;
@@ -1253,14 +1252,13 @@ pub struct ConfigRecoveryCommand {
     pub network: u64,
     pub target: u64,
     pub authority: u64,
-    /// The generation the signature verifies under (the CURRENT pin for a
-    /// countersign — the new generation lives in new_authority_generation).
+    /// The generation the signature verifies under.
     pub authority_generation: u32,
     pub authority_sequence: u64,
     pub operation_id: [u8; 16],
-    /// StoreRecover: the fresh journal store generation (nonzero). Else 0.
+    /// The fresh journal store generation (nonzero).
     pub new_store_generation: u32,
-    /// AuthorityGeneration: the generation being installed (nonzero). Else 0.
+    /// Reserved: always 0.
     pub new_authority_generation: u32,
 }
 
@@ -1282,14 +1280,6 @@ fn config_recovery_check(command: &ConfigRecoveryCommand) -> Result<()> {
                 || command.new_authority_generation != 0
             {
                 return invalid("config recovery store fields invalid");
-            }
-        }
-        ConfigRecoveryClass::AuthorityGeneration => {
-            if command.attest != 0
-                || command.new_store_generation != 0
-                || command.new_authority_generation == 0
-            {
-                return invalid("config recovery generation fields invalid");
             }
         }
     }
@@ -1343,7 +1333,6 @@ pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryCommand> {
     let reserved = u32::from_be_bytes(encoded[72..76].try_into().expect("fixed"));
     let recovery_class = match class_raw {
         1 => ConfigRecoveryClass::StoreRecover,
-        2 => ConfigRecoveryClass::AuthorityGeneration,
         _ => return reject(),
     };
     let command = ConfigRecoveryCommand {

@@ -366,11 +366,27 @@ ConfigCommand make_command(const endpoint::ControlChallenge& challenge,
   return command;
 }
 
+// Test-only dev envelope minter (the device carries no issuance path —
+// the production issuer is the Rust host). Mirrors the envelope byte
+// layout via the public tag helper.
+void dev_wrap_permit(const ConfigCommand& command, const ByteView canonical,
+                     ByteBuffer<kConfigPermitObjectMax>& permit) {
+  ByteBuffer<kConfigPermitAadSize> aad{};
+  CHECK_OK(config_permit_aad(command.network, command.target,
+                           command.config_namespace, aad));
+  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
+  CHECK_OK(config_dev_permit_tag(dev_key(), aad.view(), canonical, tag));
+  CHECK(aad.size + canonical.size + tag.size() <= permit.bytes.size());
+  std::memcpy(permit.bytes.data(), aad.bytes.data(), aad.size);
+  std::memcpy(permit.bytes.data() + aad.size, canonical.data, canonical.size);
+  std::memcpy(permit.bytes.data() + aad.size + canonical.size, tag.data(),
+              tag.size());
+  permit.size = aad.size + canonical.size + tag.size();
+}
+
 void test_dev_permit_roundtrip() {
-  DevConfigPermitSigner signer(dev_key());
   DevConfigAuthorityVerifier verifier(dev_key());
-  CHECK(signer.ready() && verifier.ready());
-  CHECK(signer.security_profile() == SecurityProfile::Development);
+  CHECK(verifier.ready());
   CHECK(verifier.security_profile() == SecurityProfile::Development);
 
   endpoint::ControlChallenge challenge{};
@@ -384,7 +400,7 @@ void test_dev_permit_roundtrip() {
   endpoint::EncodedConfigCommand canonical{};
   CHECK_OK(endpoint::config_command_encode(command, canonical));
   ByteBuffer<kConfigPermitObjectMax> permit{};
-  CHECK_OK(signer.sign(command, canonical.view(), permit));
+  dev_wrap_permit(command, canonical.view(), permit);
 
   ConfigPermitContext context{};
   context.network = kNet;
@@ -579,11 +595,10 @@ void test_permit_transfer_e2e() {
   ByteBuffer<endpoint::kConfigSnapshotMax> base{};
   ConfigCommand command = make_command(challenge, challenge.revision, fields, 1,
                                        base.view());
-  DevConfigPermitSigner signer(dev_key());
   endpoint::EncodedConfigCommand canonical{};
   CHECK_OK(endpoint::config_command_encode(command, canonical));
   ByteBuffer<kConfigPermitObjectMax> permit{};
-  CHECK_OK(signer.sign(command, canonical.view(), permit));
+  dev_wrap_permit(command, canonical.view(), permit);
 
   // 3. Transfer the object. The journal assembles + submits it internally;
   //    the Ok ack means "assembled", proven by the journal revision after.

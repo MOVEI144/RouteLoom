@@ -293,9 +293,10 @@ def main():
         snapshot_hex=cf["old_snapshot_hex"]),
         SNAPSHOT_DOMAIN + u16(1) + u16(1) + bytes.fromhex(cf["old_snapshot_hex"])))
 
-    # RCR1 — the recovery command (06 §6.3): class 1 attests a fresh store
-    # generation for an impaired journal; class 2 countersigns the next
-    # authority trust generation (03-signing §Trust update).
+    # RCR1 — the recovery command (06 §6.3): the single class 1 attests
+    # a fresh store generation for an impaired journal. Authority
+    # generation changes are root-authorized trust updates (RTM1), never
+    # recovery commands, so class 2 no longer exists.
     valid.append(("config_recovery_store", "config_recovery", dict(
         config_namespace=1, schema=1, recovery_class=1, attest=0, network=1,
         target=0x30, authority=0x10, authority_generation=2,
@@ -308,13 +309,6 @@ def main():
         authority_sequence=16, operation_id_hex=opid.hex(),
         new_store_generation=43, new_authority_generation=0),
         rcr1(0x8001, 4, 1, 1, 1, 0x30, 0x10, 2, 16, opid, 43, 0)))
-    valid.append(("config_recovery_trust_update", "config_recovery", dict(
-        config_namespace=1, schema=1, recovery_class=2, attest=0, network=1,
-        target=0x30, authority=0x10, authority_generation=2,
-        authority_sequence=17, operation_id_hex=opid.hex(),
-        new_store_generation=0, new_authority_generation=3),
-        rcr1(1, 1, 2, 0, 1, 0x30, 0x10, 2, 17, opid, 0, 3)))
-
     for name, codec, fields, encoded in valid:
         record = {"format": fmt, "name": name, "codec": codec, "expect": "ok"}
         record.update(fields)
@@ -539,16 +533,10 @@ def main():
     bad("recovery_store_authgen_set", "config_recovery",
         rcr1(**{**rcr_base, "new_auth_gen": 3}),
         "store recovery must not name an authority generation")
-    bad("recovery_trust_attest_set", "config_recovery",
-        rcr1(**{**rcr_base, "recovery_class": 2, "attest": 1,
-              "new_store_gen": 0, "new_auth_gen": 3}),
-        "trust update carries no attest byte")
-    bad("recovery_trust_storegen_set", "config_recovery",
-        rcr1(**{**rcr_base, "recovery_class": 2, "new_auth_gen": 3}),
-        "trust update must not attest a store generation")
-    bad("recovery_trust_zero_generation", "config_recovery",
-        rcr1(**{**rcr_base, "recovery_class": 2, "new_store_gen": 0}),
-        "trust update must name the new authority generation")
+    bad("recovery_class_two_removed", "config_recovery",
+        rcr1(**{**rcr_base, "recovery_class": 2, "new_store_gen": 0,
+              "new_auth_gen": 3}),
+        "class 2 no longer exists: authority generation changes are RTM1")
     bad("recovery_zero_opid", "config_recovery",
         rcr1(**{**rcr_base, "opid": bytes(16)}), "operation id must be nonzero")
     bad("recovery_bad_namespace", "config_recovery",

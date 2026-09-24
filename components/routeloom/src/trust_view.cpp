@@ -201,17 +201,6 @@ Status TrustView::verify_recovery(
   if (key == nullptr) {
     return Status::success();  // absent / inactive / below floor: denied
   }
-  // An AuthorityGeneration countersign installs a new pin — it must name
-  // a generation the committed image ALREADY serves, or the journal would
-  // adopt a pin no permit can ever verify under (a lockout the trust
-  // update exists to prevent, not cause). StoreRecover needs no new key.
-  if (recovery_command_.recovery_class ==
-          endpoint::ConfigRecoveryClass::AuthorityGeneration &&
-      resolve_authority_key(recovery_command_.authority,
-                            recovery_command_.new_authority_generation) ==
-          nullptr) {
-    return Status::success();  // countersigned generation not servable
-  }
 
   std::array<std::uint8_t, 32> r{}, s{};
   std::memcpy(r.data(), parts.signature.data, 32);

@@ -76,13 +76,9 @@ class TrustView final : public ConfigAuthorityVerifier {
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
-  // The kind-4 lane over the same trust image (03-signing's trust
-  // update): an RCR1 recovery command verifies under the generation its
-  // body names — resolved live from the committed image, not the
-  // context's pin. An AuthorityGeneration command additionally must name
-  // a NEW generation the image already serves (the countersign installs
-  // only a pin the store can still verify); a store-recovery command
-  // verifies under the context's current generation.
+  // The kind-4 lane over the same trust image: an RCR1 recovery
+  // command verifies under the generation its body names — resolved
+  // live from the committed image, not the context's pin.
   Status verify_recovery(const ConfigPermitContext& context, ByteView object,
                          endpoint::EncodedRecoveryCommand& payload,
                          bool& verified) noexcept override;

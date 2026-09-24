@@ -74,6 +74,9 @@ pub enum ConfigError {
     Stale,
     /// A permit field exceeded its object bound.
     TooLarge,
+    /// The requested issuance shape is not offered (e.g. a recovery
+    /// class other than StoreRecover). Never a fallback trigger.
+    Unsupported,
 }
 
 /// HMAC-SHA256 over the workspace's portable `sha256` (RFC 2104): no external
@@ -205,8 +208,8 @@ pub fn config_dev_recovery_tag(
 }
 
 /// Sign a canonical RCR1 command into the dev recovery envelope:
-/// object = recovery_aad || rcr1 || tag16 (fixed 138 B). Mirrors
-/// `DevConfigPermitSigner::sign_recovery`.
+/// object = recovery_aad || rcr1 || tag16 (fixed 138 B). Verified on
+/// the device by the dev recovery verifier.
 pub fn dev_sign_recovery(
     dev_key: &[u8],
     command: &ConfigRecoveryCommand,
@@ -266,7 +269,8 @@ pub fn dev_recovery_verify(
 }
 
 /// Sign a canonical RCC1 command into the dev permit envelope:
-/// permit = aad || canonical || tag16. Mirrors `DevConfigPermitSigner::sign`.
+/// permit = aad || canonical || tag16. Verified on the device by the
+/// dev permit verifier.
 pub fn dev_sign_permit(
     dev_key: &[u8],
     command: &ConfigCommand,
@@ -395,12 +399,13 @@ pub struct IssuedRecovery {
     pub operation_id: [u8; 16],
 }
 
-/// The Authority-side issuer (04 §4.3). Tracks challenge freshness per
-/// (target, namespace); `propose` performs the CAS/revision binding and the
-/// dev-profile sign exactly as `ConfigIssuer::propose` does on-device. The
-/// SingleAuthority (generation, sequence) and outbox persistence are supplied
-/// by the caller per proposal so this core stays pure and testable — the
-/// durable commit order lives in the store/dispatch layer.
+/// The Authority-side issuer (04 §4.3): the single issuance path (no
+/// device-side issuer exists). Tracks challenge freshness per (target,
+/// namespace); `propose` performs the CAS/revision binding and the
+/// profile sign. The SingleAuthority (generation, sequence) and outbox
+/// persistence are supplied by the caller per proposal so this core stays
+/// pure and testable — the durable commit order lives in the
+/// store/dispatch layer.
 pub struct ConfigIssuer {
     dev_key: Vec<u8>,
     network: u64,
@@ -571,14 +576,13 @@ impl ConfigIssuer {
         }))
     }
 
-    /// Issue a signed recovery object (04 §4.7, 06 §6.3): an RCR1 command
-    /// under the CURRENT ledger generation — StoreRecover carries the
-    /// attested new store generation for an impaired target journal,
-    /// AuthorityGeneration countersigns `new_authority_generation` (issue
-    /// it BEFORE the authority recovers to that generation, so targets
-    /// pinned to the current one accept the transition). No challenge
-    /// binding by design — replay protection is the store-generation
-    /// floor plus the result dedup on the target.
+    /// Issue a signed StoreRecover object (04 §4.7, 06 §6.3): an RCR1
+    /// command under the CURRENT ledger generation carrying the attested
+    /// new store generation for an impaired target journal. Authority
+    /// generation changes are root-authorized trust updates (RTM1), never
+    /// issued here. No challenge binding by design — replay protection
+    /// is the store-generation floor plus the result dedup on the
+    /// target.
     #[allow(clippy::too_many_arguments)]
     pub fn issue_recovery(
         &self,
@@ -595,6 +599,9 @@ impl ConfigIssuer {
     ) -> Result<IssuedRecovery, ConfigError> {
         if all_zero(&operation_id) {
             return Err(ConfigError::InvalidArgument);
+        }
+        if recovery_class != ConfigRecoveryClass::StoreRecover {
+            return Err(ConfigError::Unsupported);
         }
         let command = ConfigRecoveryCommand {
             recovery_class,
@@ -675,10 +682,8 @@ pub enum ConfigRequest {
     ///
     /// StoreRecover: `new_store_generation` attests the target journal's
     /// fresh store generation, `attest` 0 adopts the surviving record,
-    /// 1 attests explicit reprovisioning. `new_authority_generation` 0.
-    /// AuthorityGeneration: countersigns `new_authority_generation` for
-    /// the 03-signing trust update; issue it BEFORE the authority
-    /// recovers to that generation. `attest`/`new_store_generation` 0.
+    /// 1 attests explicit reprovisioning. `new_authority_generation`
+    /// stays 0 (reserved); any other class is refused Unsupported.
     Recover {
         target: u64,
         config_namespace: u16,
@@ -1363,6 +1368,7 @@ fn map_issue_error(error: ConfigError) -> ConfigOutcome {
     match error {
         ConfigError::Expired => ConfigOutcome::Timeout,
         ConfigError::Stale => ConfigOutcome::RefusedStale,
+        ConfigError::Unsupported => ConfigOutcome::Refused(ConfigOpsResult::Unsupported),
         ConfigError::InvalidArgument | ConfigError::Malformed | ConfigError::TooLarge => {
             ConfigOutcome::Refused(ConfigOpsResult::Invalid)
         }

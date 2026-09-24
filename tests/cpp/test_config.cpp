@@ -16,8 +16,6 @@
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
 
-#include "test_ledger.hpp"  // FaultyLedgerStorage for the issuer's ledger
-
 namespace {
 
 int failures = 0;
@@ -51,7 +49,6 @@ constexpr NodeId kAuthority = 42;
 constexpr NodeId kTarget = 0x1234;
 constexpr std::uint64_t kBoot = 0xB007;
 constexpr std::size_t kJournalSlot = kConfigJournalSlotBytes;   // 4096
-constexpr std::size_t kOutboxSlot = kConfigOutboxRecordBytes;   // 2048
 
 // --- Fakes ----------------------------------------------------------------------
 
@@ -110,41 +107,6 @@ class FakeJournalStorage final : public ConfigJournalStorage {
   bool read_error{false};
 };
 
-// Four 2048-byte issuer outbox slots.
-class FakeOutboxStorage final : public ConfigOutboxStorage {
- public:
-  Status read(const std::uint8_t slot, const MutableByteView target) noexcept override {
-    if (slot >= kConfigIssuerOutboxSlots || target.size != kOutboxSlot) {
-      return Status::error(StatusCode::InvalidArgument, "bad outbox read");
-    }
-    std::memcpy(target.data, slots_[slot].data(), kOutboxSlot);
-    return Status::success();
-  }
-  Status write(const std::uint8_t slot, const ByteView data) noexcept override {
-    if (slot >= kConfigIssuerOutboxSlots || data.size == 0 || data.size > kOutboxSlot) {
-      return Status::error(StatusCode::InvalidArgument, "bad outbox write");
-    }
-    last_write_size = data.size;
-    const std::size_t call = write_calls++;
-    if (call == cut_call) {
-      const std::size_t landed = cut_bytes < data.size ? cut_bytes : data.size;
-      std::memcpy(slots_[slot].data(), data.data, landed);
-      return Status::error(StatusCode::StorageFailure, "power cut mid write");
-    }
-    if (call == drop_call) {
-      return Status::error(StatusCode::StorageFailure, "power lost before write");
-    }
-    std::memcpy(slots_[slot].data(), data.data, data.size);
-    return Status::success();
-  }
-  std::array<std::array<std::uint8_t, kOutboxSlot>, kConfigIssuerOutboxSlots> slots_{};
-  std::size_t write_calls{0};
-  std::size_t last_write_size{0};
-  std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
-  std::size_t cut_bytes{0};
-  std::size_t drop_call{std::numeric_limits<std::size_t>::max()};
-};
-
 // The test permit envelope (development profile — never advertised as
 // production): AAD(32B) || canonical RCC1 || tag(16B) where
 // tag = SHA256("RouteLoom/config-permit-test/v1\0" || aad || canonical)[0:16].
@@ -184,16 +146,12 @@ void test_recovery_tag(const ByteView aad, const ByteView canonical,
   std::memcpy(out.data(), digest.data(), kPermitTagSize);
 }
 
-class FakePermitSigner final : public ConfigPermitSigner {
+// Test-only envelope minter (the device carries no issuance path — the
+// production issuer is the Rust host). Plain struct, no interface.
+class FakePermitSigner {
  public:
-  bool ready() const noexcept override { return ready_; }
   Status sign(const ConfigCommand& command, const ByteView canonical,
-              ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override {
-    ++sign_calls;
-    if (fail_next) {
-      fail_next = false;
-      return Status::error(StatusCode::InternalError, "injected sign failure");
-    }
+              ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
     ByteBuffer<kConfigPermitAadSize> aad{};
     Status status =
         config_permit_aad(command.network, command.target, command.config_namespace, aad);
@@ -211,12 +169,7 @@ class FakePermitSigner final : public ConfigPermitSigner {
   }
   Status sign_recovery(const endpoint::ConfigRecoveryCommand& command,
                        const ByteView canonical,
-                       ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override {
-    ++sign_calls;
-    if (fail_next) {
-      fail_next = false;
-      return Status::error(StatusCode::InternalError, "injected sign failure");
-    }
+                       ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
     ByteBuffer<kRecoveryAadSize> aad{};
     Status status = config_recovery_aad(command.network, command.target,
                                         command.config_namespace, aad);
@@ -232,9 +185,6 @@ class FakePermitSigner final : public ConfigPermitSigner {
     permit.size = aad.size + canonical.size + kPermitTagSize;
     return Status::success();
   }
-  bool ready_{true};
-  bool fail_next{false};
-  std::size_t sign_calls{0};
 };
 
 class FakeVerifier final : public ConfigAuthorityVerifier {
@@ -1768,214 +1718,6 @@ void test_c14_stale_and_busy() {
   CHECK(rig.journal->decision_revision() == 2);
 }
 
-// --- Issuer-side flows -----------------------------------------------------------------
-
-struct IssuerRig {
-  static ConfigIssuerConfig make_config() {
-    ConfigIssuerConfig config{};
-    config.network = kNet;
-    config.authority = kAuthority;
-    config.safety_margin_ms = 200;
-    return config;
-  }
-
-  ConfigIssuerConfig config{make_config()};
-  routeloom_test::FaultyLedgerStorage ledger_storage{};
-  SingleAuthority ledger{kNet, kAuthority, ledger_storage};
-  FakeOutboxStorage outbox{};
-  FakePermitSigner signer{};
-  CountingEntropy entropy{};
-  ConfigIssuer issuer{config, ledger, outbox, signer, entropy};
-
-  void boot() { CHECK_OK(ledger.initialize()); }
-};
-
-endpoint::ControlChallenge fake_challenge(const std::uint64_t revision,
-                                          const ByteView active_snapshot,
-                                          const MonotonicMs /*now*/) {
-  endpoint::ControlChallenge challenge{};
-  challenge.config_namespace = 1;
-  challenge.schema = 1;
-  challenge.target_boot = kBoot;
-  challenge.challenge_nonce = {0x5A, 1, 2, 3, 4, 5, 6, 7,
-                               8,    9, 10, 11, 12, 13, 14, 15};
-  challenge.revision = revision;
-  CHECK_OK(config_snapshot_hash(1, 1, active_snapshot, challenge.active_hash));
-  challenge.valid_for_ms = 30000;
-  return challenge;
-}
-
-void test_issuer_commit_order() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms), kTarget,
-                                     now_ms));
-
-  const ConfigField patch[] = {sdk_u8(1, 1)};
-  IssuedOperation op{};
-  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms + 10, op));
-  CHECK(op.issued);
-  // The ledger committed exactly once, at sequence 1, with the REAL
-  // SHA-256 operation hash — bind_operation_payload is never involved.
-  CHECK(rig.ledger.state().applied_sequence == 1);
-  Digest256 expected_hash{};
-  sha256(op.canonical.view(), expected_hash);
-  CHECK(rig.ledger.last_operation_hash() == expected_hash);
-
-  // The signed permit retransmits byte-identically every time.
-  ByteBuffer<kConfigPermitObjectMax> p1{}, p2{};
-  CHECK_OK(rig.issuer.signed_permit(op.slot, p1));
-  CHECK_OK(rig.issuer.signed_permit(op.slot, p2));
-  CHECK(p1.size == p2.size);
-  CHECK(std::memcmp(p1.bytes.data(), p2.bytes.data(), p1.size) == 0);
-  CHECK(p1.size == op.permit.size);
-  CHECK(std::memcmp(p1.bytes.data(), op.permit.bytes.data(), p1.size) == 0);
-
-  // The canonical command inside the permit decodes and binds the op.
-  endpoint::ConfigCommand decoded{};
-  const ByteView canonical{p1.bytes.data() + kPermitAadSize,
-                           p1.size - kPermitAadSize - kPermitTagSize};
-  CHECK_OK(endpoint::config_command_decode(canonical, decoded));
-  CHECK(decoded.expected_revision == 0 && decoded.next_revision == 1);
-  CHECK(decoded.authority_sequence == 1);
-  CHECK(decoded.target == kTarget && decoded.network == kNet);
-}
-
-void test_issuer_no_change_and_budget() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-  // Build a base snapshot the challenge commits to.
-  const ConfigField base[] = {sdk_u8(1, 1)};
-  ByteBuffer<endpoint::kConfigSnapshotMax> base_tlv{};
-  CHECK_OK(config_tlv_encode(base, 1, base_tlv));
-  CHECK_OK(rig.issuer.note_challenge(fake_challenge(3, base_tlv.view(), now_ms),
-                                     kTarget, now_ms));
-
-  // NO_CHANGE: same-value patch decides before signing — no ledger write,
-  // no outbox write, no flash, no revision.
-  const std::size_t ledger_writes = rig.ledger_storage.write_calls;
-  const std::size_t outbox_writes = rig.outbox.write_calls;
-  const ConfigField noop[] = {sdk_u8(1, 1)};
-  IssuedOperation op{};
-  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, base_tlv.view(), noop, 1, 0,
-                              now_ms + 10, op));
-  CHECK(op.no_change);
-  CHECK(!op.issued);
-  CHECK(rig.ledger_storage.write_calls == ledger_writes);
-  CHECK(rig.outbox.write_calls == outbox_writes);
-  CHECK(rig.ledger.state().applied_sequence == 0);
-  CHECK(rig.signer.sign_calls == 0);
-
-  // Challenge budget: apply_within is the remaining lifetime minus the
-  // conservative safety margin — never the full challenge window.
-  const ConfigField patch[] = {sdk_u8(1, 2)};
-  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, base_tlv.view(), patch, 1, 0,
-                              now_ms + 29000, op));
-  CHECK(op.issued);
-  endpoint::ConfigCommand decoded{};
-  CHECK_OK(endpoint::config_command_decode(op.canonical.view(), decoded));
-  CHECK(decoded.apply_within_ms == 30000 - 29000 - 200);
-  // Inside the remaining window but past the margin -> refused.
-  CHECK(rig.issuer.propose(kTarget, 1, 1, base_tlv.view(), patch, 1, 0,
-                           now_ms + 29900, op)
-            .code == StatusCode::Expired);
-  // A caller budget larger than the remaining window is refused, not
-  // silently clamped past the challenge lifetime.
-  CHECK(rig.issuer.propose(kTarget, 1, 1, base_tlv.view(), patch, 1, 60000,
-                           now_ms + 10, op)
-            .code == StatusCode::Expired);
-}
-
-void test_issuer_resume_after_power_loss() {
-  // Case A: outbox persisted + ledger committed, signing never completed.
-  {
-    IssuerRig rig;
-    rig.boot();
-    CHECK_OK(rig.issuer.initialize());
-    const MonotonicMs now_ms = 1000;
-    CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms), kTarget,
-                                       now_ms));
-    rig.signer.fail_next = true;  // power loss lands right at the sign step
-    const ConfigField patch[] = {sdk_u8(1, 1)};
-    IssuedOperation op{};
-    CHECK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
-              .code == StatusCode::InternalError);
-    CHECK(rig.ledger.state().applied_sequence == 1);  // commit DID land
-    // Resume: the pending entry sees the commit already landed, then signs.
-    ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
-                         rig.entropy);
-    CHECK_OK(resumed.initialize());
-    CHECK(resumed.signed_count() == 1);
-    CHECK(resumed.pending_count() == 0);
-    ByteBuffer<kConfigPermitObjectMax> permit{};
-    CHECK_OK(resumed.signed_permit(0, permit));
-    endpoint::ConfigCommand decoded{};
-    CHECK_OK(endpoint::config_command_decode(
-        ByteView{permit.bytes.data() + kPermitAadSize, permit.size - kPermitAadSize - 16}, decoded));
-    CHECK(decoded.authority_sequence == 1);  // same command, same blob
-  }
-
-  // Case B: outbox persisted but the ledger commit itself was cut.
-  {
-    IssuerRig rig;
-    rig.boot();
-    CHECK_OK(rig.issuer.initialize());
-    const MonotonicMs now_ms = 1000;
-    CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms), kTarget,
-                                       now_ms));
-    // Cut the ledger's FIRST commit write (call 0 = pending phase).
-    rig.ledger_storage.cut_call = 0;
-    rig.ledger_storage.cut_bytes = 40;
-    const ConfigField patch[] = {sdk_u8(1, 1)};
-    IssuedOperation op{};
-    CHECK(!rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
-               .ok());
-    CHECK(rig.ledger.state().applied_sequence == 0);
-    ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
-                         rig.entropy);
-    CHECK_OK(resumed.initialize());
-    CHECK(resumed.signed_count() == 1);
-    CHECK(rig.ledger.state().applied_sequence == 1);
-  }
-}
-
-void test_issuer_outbox_bounds() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms), kTarget,
-                                     now_ms));
-  // Force every sign to fail once: each propose leaves a committed-but-
-  // unsigned pending entry, until the outbox (4) fills.
-  const ConfigField patch[] = {sdk_u8(1, 1)};
-  for (int i = 0; i < 4; ++i) {
-    rig.signer.fail_next = true;
-    // Each failure leaves the ledger one sequence ahead; the next propose
-    // mints the next sequence.
-    IssuedOperation op{};
-    CHECK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
-              .code == StatusCode::InternalError);
-  }
-  IssuedOperation op{};
-  CHECK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
-            .code == StatusCode::NoCapacity);
-  // Resume finishes all four. Each entry's own commit DID land, but
-  // applied has moved past it and no sibling holds its sequence — that
-  // makes the "this entry consumed the sequence" claim unprovable (an
-  // outside ledger consumer could hold it), so every entry is re-minted
-  // under a fresh sequence and committed again rather than signing a
-  // canonical whose commit cannot be proven.
-  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
-                       rig.entropy);
-  CHECK_OK(resumed.initialize());
-  CHECK(resumed.signed_count() == 4);
-  CHECK(rig.ledger.state().applied_sequence == 8);
-}
 
 // --- Apply-path failure -> restore -> INTERRUPTED ------------------------------------------
 
@@ -2412,124 +2154,13 @@ void test_status_result_expired() {
   CHECK(status.reason == ConfigReason::ResultExpired);
 }
 
-// A CRC-failed SIGNED outbox entry is impaired — never a free slot: its
-// signature may already have been consumed.
-void test_impaired_outbox_slot() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms),
-                                     kTarget, now_ms));
-  const ConfigField patch[] = {sdk_u8(1, 1)};
-  IssuedOperation op{};
-  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms,
-                              op));
-  CHECK(op.issued);
-  CHECK(op.slot == 0);
-  // Corrupt the signed record's payload (past the 24-byte header): the
-  // record parses under a committed seal but fails CRC.
-  rig.outbox.slots_[0][40] ^= 0xFFU;
-  // A new propose must skip the impaired slot — never reuse it.
-  IssuedOperation op2{};
-  CHECK_OK(rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms,
-                              op2));
-  CHECK(op2.issued);
-  CHECK(op2.slot == 1);
-  // Resume reports the impairment instead of silently freeing the slot.
-  const auto snapshot = rig.outbox.slots_[0];
-  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
-                       rig.entropy);
-  CHECK(!resumed.initialize().ok());
-  CHECK(rig.outbox.slots_[0] == snapshot);  // never cleared or overwritten
-}
-
-// Unique holder of a consumed sequence is unprovable: resume re-mints the
-// operation under a fresh sequence and commits it, rather than signing a
-// canonical whose ledger commit cannot be proven.
-void test_issuer_remint_sequence() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms),
-                                     kTarget, now_ms));
-  // Power cut inside the ledger commit: the PENDING outbox entry (seq 1)
-  // persisted, but its commit never landed.
-  rig.ledger_storage.cut_call = 0;
-  rig.ledger_storage.cut_bytes = 40;
-  const ConfigField patch[] = {sdk_u8(1, 1)};
-  IssuedOperation op{};
-  CHECK(!rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
-             .ok());
-  CHECK(rig.ledger.state().applied_sequence == 0);
-  // An outside consumer then takes sequences 1 and 2 — the ledger's
-  // global sequence is shared, config ops are not its only commits.
-  for (int i = 0; i < 2; ++i) {
-    AuthorityOperation external{};
-    Digest256 hash{};
-    sha256(ByteView{reinterpret_cast<const std::uint8_t*>("ext"), 3}, hash);
-    CHECK_OK(rig.ledger.build_operation(
-        AuthorityOperationKind::MembershipApproval, hash, external));
-    CHECK_OK(rig.ledger.apply_membership_approval(external, hash, true));
-  }
-  CHECK(rig.ledger.state().applied_sequence == 2);
-  // Resume: whether the entry's own commit landed is unprovable — it is
-  // re-minted to sequence 3, committed, then signed.
-  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
-                       rig.entropy);
-  CHECK_OK(resumed.initialize());
-  CHECK(resumed.signed_count() == 1);
-  CHECK(rig.ledger.state().applied_sequence == 3);
-  ByteBuffer<kConfigPermitObjectMax> permit{};
-  CHECK_OK(resumed.signed_permit(0, permit));
-  endpoint::ConfigCommand decoded{};
-  CHECK_OK(endpoint::config_command_decode(
-      ByteView{permit.bytes.data() + kPermitAadSize,
-               permit.size - kPermitAadSize - kPermitTagSize},
-      decoded));
-  CHECK(decoded.authority_sequence == 3);
-}
-
-// Superseded outbox entries are tombstoned with a short pending-seal
-// header — not a full 2048-byte erase (the §6.8 flash budget counts writes).
-void test_outbox_tombstone_size() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-  CHECK_OK(rig.issuer.note_challenge(fake_challenge(0, ByteView{}, now_ms),
-                                     kTarget, now_ms));
-  rig.ledger_storage.cut_call = 0;
-  rig.ledger_storage.cut_bytes = 40;
-  const ConfigField patch[] = {sdk_u8(1, 1)};
-  IssuedOperation op{};
-  CHECK(!rig.issuer.propose(kTarget, 1, 1, ByteView{}, patch, 1, 0, now_ms, op)
-             .ok());
-  // An outside consumer takes sequence 1: the pending entry is provably
-  // superseded and gets tombstoned on resume.
-  AuthorityOperation external{};
-  Digest256 hash{};
-  sha256(ByteView{reinterpret_cast<const std::uint8_t*>("ext"), 3}, hash);
-  CHECK_OK(rig.ledger.build_operation(AuthorityOperationKind::MembershipApproval,
-                                      hash, external));
-  CHECK_OK(rig.ledger.apply_membership_approval(external, hash, true));
-  ConfigIssuer resumed(rig.config, rig.ledger, rig.outbox, rig.signer,
-                       rig.entropy);
-  const Status status = resumed.initialize();
-  CHECK(status.code == StatusCode::Conflict);  // superseded, honestly reported
-  CHECK(resumed.signed_count() == 0);
-  CHECK(resumed.pending_count() == 0);
-  CHECK(rig.outbox.last_write_size <= 32);
-}
 
 // --- R-series: the dedicated recovery lane (Issue #51) -------------------------
 //
-// A signed kind-4 RCR1 object is the ONLY intake an impaired journal still
-// serves. StoreRecover attests a fresh store generation for a quarantined/
-// uncertain journal; AuthorityGeneration countersigns the next trust
-// generation (03-signing trust update) on a proven one. Everything else —
-// bad signatures, stale generations, replays, wrong lanes — stays fail-closed.
+// A signed kind-4 RCR1 StoreRecover object is the ONLY intake an impaired
+// journal still serves: it attests a fresh store generation for a
+// quarantined/uncertain journal. Everything else — bad signatures, stale
+// generations, replays, wrong lanes — stays fail-closed.
 
 // Build + encode + sign an RCR1 recovery object bound to `rig`'s identity.
 // `authority_generation` is the generation the COMMAND claims — the journal
@@ -2761,136 +2392,6 @@ void test_r04_recovery_replay_floor() {
             .code == StatusCode::InvalidArgument);
 }
 
-// R05: the 03-signing trust update — a countersigned AuthorityGeneration
-// object durably installs the new pin; permits under it apply only after.
-void test_r05_trust_update() {
-  TargetRig rig;
-  MonotonicMs now_ms = 1000;
-  CHECK_OK(rig.journal->initialize(now_ms));
-  const ConfigField patch[] = {sdk_u8(1, 1)};
-  ConfigVerdict verdict{};
-  CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
-  drain(rig, now_ms);
-  CHECK(rig.journal->phase() == ConfigPhase::Active);
-  CHECK(rig.journal->authority_generation() == 1);
-
-  // A permit signed under the new generation is rejected BEFORE the trust
-  // update — the journal still pins generation 1.
-  endpoint::ControlChallengeQuery query{};
-  query.config_namespace = rig.config.config_namespace;
-  query.schema = rig.config.schema;
-  query.client_nonce = {1, 1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13};
-  endpoint::EncodedServicePayload encoded{};
-  CHECK_OK(rig.journal->handle_challenge_query(query, now_ms + 10, encoded));
-  endpoint::ControlChallenge challenge{};
-  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), challenge));
-  ConfigCommand command = last_command_;
-  command.operation_id = {0xD0, 1, 2, 3, 4, 5, 6, 7,
-                          8,    9, 10, 11, 12, 13, 14, 15};
-  command.challenge_nonce = challenge.challenge_nonce;
-  command.authority_generation = 3;  // signed under the NEW generation
-  ByteBuffer<kConfigPermitObjectMax> early_permit{};
-  build_permit(signer_, command, early_permit);
-  CHECK(rig.journal->submit_permit(early_permit.view(), now_ms + 20, true, verdict)
-            .code == StatusCode::AuthorizationFailed);
-  CHECK(verdict.reason == ConfigReason::AuthorityDenied);
-
-  // The countersigned trust update installs generation 3 durably.
-  ByteBuffer<kConfigPermitObjectMax> update{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::AuthorityGeneration,
-                 0, 0, 3, 8, rig.config.authority_generation, update);
-  CHECK_OK(rig.journal->submit_recovery(update.view(), now_ms + 30, verdict));
-  CHECK(verdict.reason == ConfigReason::Ok);
-  CHECK(rig.journal->authority_generation() == 3);
-
-  // The very permit that was rejected now applies under the new pin (a
-  // fresh acceptance-budget window — the trust update consumed one).
-  now_ms += 61000;
-  const ConfigField patch2[] = {sdk_u8(1, 2)};
-  ByteBuffer<endpoint::kConfigSnapshotMax> next{};
-  bool changed = false;
-  CHECK_OK(config_patch_apply(rig.journal->active_snapshot(), patch2, 1, next, changed));
-  Digest256 next_hash{};
-  CHECK_OK(config_snapshot_hash(1, 1, next.view(), next_hash));
-  endpoint::ControlChallengeQuery query2 = query;
-  query2.client_nonce = {2, 2, 2, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-  CHECK_OK(rig.journal->handle_challenge_query(query2, now_ms, encoded));
-  CHECK_OK(endpoint::control_challenge_decode(encoded.view(), challenge));
-  command.operation_id = {0xD1, 1, 2, 3, 4, 5, 6, 7,
-                          8,    9, 10, 11, 12, 13, 14, 15};
-  command.challenge_nonce = challenge.challenge_nonce;
-  command.expected_revision = rig.journal->decision_revision();
-  command.next_revision = command.expected_revision + 1;
-  command.base_snapshot_hash = challenge.active_hash;
-  command.next_snapshot_hash = next_hash;
-  command.fields[0] = patch2[0];
-  command.field_count = 1;
-  ByteBuffer<kConfigPermitObjectMax> new_permit{};
-  build_permit(signer_, command, new_permit);
-  CHECK_OK(rig.journal->submit_permit(new_permit.view(), now_ms + 10, true, verdict));
-  drain(rig, now_ms);
-  CHECK(rig.journal->phase() == ConfigPhase::Active);
-
-  // The pin is durable: a reboot re-adopts generation 3, not the
-  // build-time 1 — and permits under the OLD generation are now stale.
-  now_ms += 200;
-  rig.boot(now_ms);
-  CHECK(rig.journal->authority_generation() == 3);
-  CHECK(!rig.journal->quarantined() && !rig.journal->uncertain());
-  drain(rig, now_ms);  // finish the boot-time restore re-assert
-  ByteBuffer<kConfigPermitObjectMax> old_permit{};
-  command.operation_id = {0xD2, 1, 2, 3, 4, 5, 6, 7,
-                          8,    9, 10, 11, 12, 13, 14, 15};
-  command.authority_generation = 1;
-  build_permit(signer_, command, old_permit);
-  CHECK(rig.journal->submit_permit(old_permit.view(), now_ms + 10, true, verdict)
-            .code == StatusCode::AuthorizationFailed);
-}
-
-// R06: trust-update admission rules — the class only runs on a proven,
-// idle journal and only ever advances the generation.
-void test_r06_trust_update_admission() {
-  // On an IMPAIRED journal the countersign is refused: the journal must
-  // re-prove its store via StoreRecover first.
-  {
-    TargetRig rig;
-    MonotonicMs now_ms = 1000;
-    rig.storage.fill(0, 0xEE);
-    rig.storage.fill(1, 0xEE);
-    rig.boot(now_ms);
-    CHECK(rig.journal->quarantined());
-    ByteBuffer<kConfigPermitObjectMax> update{};
-    build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::AuthorityGeneration,
-                   0, 0, 3, 9, rig.config.authority_generation, update);
-    ConfigVerdict verdict{};
-    CHECK(rig.journal->submit_recovery(update.view(), now_ms + 10, verdict).code ==
-          StatusCode::InvalidState);
-    CHECK(verdict.reason == ConfigReason::RecoveryRequired);
-    CHECK(rig.journal->authority_generation() == 1);
-  }
-
-  // On a proven journal, a non-advancing transition is stale/replay — and
-  // a StoreRecover on a proven journal is out of place.
-  {
-    TargetRig rig;
-    MonotonicMs now_ms = 1000;
-    CHECK_OK(rig.journal->initialize(now_ms));
-    ConfigVerdict verdict{};
-    ByteBuffer<kConfigPermitObjectMax> update{};
-    build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::AuthorityGeneration,
-                   0, 0, 1, 10, rig.config.authority_generation, update);
-    CHECK(rig.journal->submit_recovery(update.view(), now_ms + 10, verdict).code ==
-          StatusCode::InvalidArgument);
-    build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                   endpoint::kRcr1AttestReprovision, 500, 0, 11,
-                   rig.config.authority_generation, update);
-    CHECK(rig.journal->submit_recovery(update.view(), now_ms + 20, verdict).code ==
-          StatusCode::InvalidState);
-    CHECK(verdict.reason == ConfigReason::Unsupported);
-    CHECK(rig.journal->authority_generation() == 1);
-  }
-}
-
 // R07: the kind-4 reassembly lane stays open impaired; kind-3 stays shut.
 void test_r07_recovery_lane_reassembly() {
   TargetRig rig;
@@ -2951,74 +2452,6 @@ void test_r07_recovery_lane_reassembly() {
         StatusCode::InvalidState);
 }
 
-// R08: the issuer mints a recovery object end-to-end — commit order,
-// kind-tagged outbox, signed_object lane selection.
-void test_r08_issuer_issue_recovery() {
-  IssuerRig rig;
-  rig.boot();
-  CHECK_OK(rig.issuer.initialize());
-  const MonotonicMs now_ms = 1000;
-
-  IssuedRecovery out{};
-  CHECK_OK(rig.issuer.issue_recovery(
-      kTarget, 1, 1, endpoint::ConfigRecoveryClass::StoreRecover,
-      endpoint::kRcr1AttestReprovision, 500, 0, out));
-  CHECK(out.issued);
-  CHECK(rig.ledger.state().applied_sequence == 1);
-  // The outbox entry is kind-tagged RCR1 — signed_object reports the lane.
-  std::uint8_t kind = 0xFF;
-  ByteBuffer<kConfigPermitObjectMax> object{};
-  CHECK_OK(rig.issuer.signed_object(out.slot, kind, object));
-  CHECK(kind == kOutboxKindRecovery);
-  CHECK(object.size == kRecoveryAadSize + endpoint::kRcr1Size + kPermitTagSize);
-
-  // The signed object delivers recovery to a quarantined target journal.
-  TargetRig target;
-  target.storage.fill(0, 0xEE);
-  target.storage.fill(1, 0xEE);
-  target.boot(now_ms + 10);
-  ConfigVerdict verdict{};
-  CHECK_OK(target.journal->submit_recovery(object.view(), now_ms + 20, verdict));
-  CHECK(verdict.reason == ConfigReason::Ok);
-  CHECK(!target.journal->quarantined());
-
-  // The trust-update class mints through the same path.
-  IssuedRecovery trust{};
-  CHECK_OK(rig.issuer.issue_recovery(
-      kTarget, 1, 1, endpoint::ConfigRecoveryClass::AuthorityGeneration,
-      0, 0, 3, trust));
-  CHECK(trust.issued);
-  CHECK(rig.ledger.state().applied_sequence == 2);
-  endpoint::ConfigRecoveryCommand decoded{};
-  ByteBuffer<kConfigPermitObjectMax> trust_object{};
-  CHECK_OK(rig.issuer.signed_object(trust.slot, kind, trust_object));
-  const ByteView canonical{trust_object.bytes.data() + kRecoveryAadSize,
-                           endpoint::kRcr1Size};
-  CHECK_OK(endpoint::config_recovery_decode(canonical, decoded));
-  CHECK(decoded.recovery_class == endpoint::ConfigRecoveryClass::AuthorityGeneration);
-  CHECK(decoded.new_authority_generation == 3);
-  CHECK(decoded.authority_sequence == 2);
-
-  // A recovery entry survives an issuer reboot: resume_pending re-decodes
-  // the RCR1 kind and the signed object retransmits byte-identically.
-  IssuerRig rig2;
-  rig2.boot();
-  CHECK_OK(rig2.issuer.initialize());
-  rig2.signer.fail_next = true;
-  IssuedRecovery pending{};
-  CHECK(rig2.issuer.issue_recovery(
-                kTarget, 1, 1, endpoint::ConfigRecoveryClass::StoreRecover,
-                endpoint::kRcr1AttestReprovision, 500, 0, pending)
-            .code == StatusCode::InternalError);
-  ConfigIssuer resumed(rig2.config, rig2.ledger, rig2.outbox, rig2.signer,
-                       rig2.entropy);
-  CHECK_OK(resumed.initialize());
-  CHECK(resumed.signed_count() == 1);
-  ByteBuffer<kConfigPermitObjectMax> resumed_object{};
-  CHECK_OK(resumed.signed_object(pending.slot, kind, resumed_object));
-  CHECK(kind == kOutboxKindRecovery);
-  CHECK(resumed_object.size > 0);
-}
 
 }  // namespace
 
@@ -3048,10 +2481,6 @@ int main() {
   test_c13_result_records();
   test_c14_stale_and_busy();
   // Issuer side.
-  test_issuer_commit_order();
-  test_issuer_no_change_and_budget();
-  test_issuer_resume_after_power_loss();
-  test_issuer_outbox_bounds();
   // Provider apply/verify failure -> restore semantics.
   test_apply_failure_restores();
   test_storage_contract();
@@ -3068,18 +2497,12 @@ int main() {
   test_revision_pair_contract();
   test_manifest_length_conflict();
   test_status_result_expired();
-  test_impaired_outbox_slot();
-  test_issuer_remint_sequence();
-  test_outbox_tombstone_size();
   // Issue #51: dedicated kind-4 recovery lane + trust update.
   test_r01_quarantine_store_recovery();
   test_r02_uncertain_store_recovery();
   test_r03_recovery_rejections();
   test_r04_recovery_replay_floor();
-  test_r05_trust_update();
-  test_r06_trust_update_admission();
   test_r07_recovery_lane_reassembly();
-  test_r08_issuer_issue_recovery();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

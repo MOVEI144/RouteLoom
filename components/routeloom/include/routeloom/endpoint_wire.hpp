@@ -387,29 +387,26 @@ Status config_command_decode(ByteView encoded, ConfigCommand& out) noexcept;
 
 // --- RCR1 canonical recovery command (04 §4.7, 06 §6.3) ----------------------
 // Fixed 76B body carried as the signed payload of a kind-4 recovery object —
-// never an RCC1 extension and never a kind-3 permit. Two classes share the
-// header: StoreRecover attests a fresh store generation for a quarantined/
-// uncertain journal (the signed RECOVER evidence §6.3 requires); the
-// AuthorityGeneration countersign installs a newer authority generation on a
-// healthy journal so post-disaster permits verify (03-signing trust update).
+// never an RCC1 extension and never a kind-3 permit. The single class,
+// StoreRecover, attests a fresh store generation for a quarantined/
+// uncertain journal (the signed RECOVER evidence §6.3 requires).
+// Authority generation changes are root-authorized trust updates (RTM1),
+// never recovery commands.
 //
 // Header layout (76B): magic "RCR1" 4 | version u8 | flags u8=0 |
 // class u8 | attest u8 | namespace u16 | schema u16 | network u64 |
 // target u64 | authority u64 | authority_generation u32 (the generation the
 // signature verifies under) | authority_sequence u64 | operation_id 16B |
-// new_store_generation u32 | new_authority_generation u32 | reserved u32=0.
-// Class rules: StoreRecover carries attest 0|1 and a nonzero
-// new_store_generation with new_authority_generation == 0;
-// AuthorityGeneration carries attest 0, new_store_generation == 0 and a
-// nonzero new_authority_generation.
+// new_store_generation u32 | new_authority_generation u32 (reserved, 0) |
+// reserved u32=0. StoreRecover carries attest 0|1 and a nonzero
+// new_store_generation; any other class value is rejected.
 
 constexpr std::uint32_t kRcr1Magic = 0x52435231;  // "RCR1"
 constexpr std::uint8_t kRcr1Version = 1;
 constexpr std::size_t kRcr1Size = 76;
 
 enum class ConfigRecoveryClass : std::uint8_t {
-  StoreRecover = 1,         // quarantine/uncertain -> fresh store generation
-  AuthorityGeneration = 2,  // countersign: install a newer authority generation
+  StoreRecover = 1,  // quarantine/uncertain -> fresh store generation
 };
 
 // `attest` values for ConfigRecoveryClass::StoreRecover — the signed
@@ -431,8 +428,8 @@ struct ConfigRecoveryCommand {
   std::uint32_t authority_generation{0};
   std::uint64_t authority_sequence{0};
   std::array<std::uint8_t, 16> operation_id{};
-  std::uint32_t new_store_generation{0};        // StoreRecover only
-  std::uint32_t new_authority_generation{0};    // AuthorityGeneration only
+  std::uint32_t new_store_generation{0};        // the attested fresh generation
+  std::uint32_t new_authority_generation{0};    // reserved: always 0
 };
 
 using EncodedRecoveryCommand = ByteBuffer<kRcr1Size>;

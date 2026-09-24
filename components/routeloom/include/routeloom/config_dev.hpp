@@ -1,9 +1,10 @@
 #pragma once
 
 // Development (EXPERIMENTAL) config permit profile. This is the reference
-// issuer/target pair the dev profile uses while the production COSE_Sign1
-// provider lands with #10 — it is NOT production cryptography and is never
-// advertised as such (security_profile() stays Development).
+// target-side verifier the dev profile uses — it is NOT production
+// cryptography and is never advertised as such (security_profile() stays
+// Development). Issuance lives in the Rust host, which mirrors the
+// envelope byte-for-byte.
 //
 // Envelope (mirrored byte-for-byte by the Rust host issuer):
 //   permit = aad || canonical || tag
@@ -60,27 +61,6 @@ Status config_dev_permit_tag(ByteView dev_key, ByteView aad, ByteView canonical,
 // kConfigDevRecoveryDomain — the aad argument carries the recovery AAD.
 Status config_dev_recovery_tag(ByteView dev_key, ByteView aad, ByteView canonical,
                                std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept;
-
-// Issuer side (dev profile). `dev_key` is caller-owned and must outlive the
-// signer; an empty key reports !ready() and every sign fails honestly.
-class DevConfigPermitSigner final : public ConfigPermitSigner {
- public:
-  explicit DevConfigPermitSigner(ByteView dev_key) noexcept : dev_key_(dev_key) {}
-  bool ready() const noexcept override { return dev_key_.size > 0; }
-  SecurityProfile security_profile() const noexcept override {
-    return SecurityProfile::Development;
-  }
-  Status sign(const endpoint::ConfigCommand& command, ByteView canonical,
-              ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override;
-  // Recovery object minting (same envelope under the recovery domains):
-  // aad || RCR1 || tag, fixed at kConfigRecoveryAadSize + kRcr1Size + 16.
-  Status sign_recovery(const endpoint::ConfigRecoveryCommand& command,
-                       ByteView canonical,
-                       ByteBuffer<kConfigPermitObjectMax>& permit) noexcept override;
-
- private:
-  ByteView dev_key_{};
-};
 
 // Target side (dev profile). Verifies the envelope, the scope binding (aad
 // must equal the context's own) and the MAC; decodes the canonical command

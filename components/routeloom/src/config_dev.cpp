@@ -57,49 +57,6 @@ Status config_dev_recovery_tag(
   return Status::success();
 }
 
-Status DevConfigPermitSigner::sign(
-    const endpoint::ConfigCommand& command, ByteView canonical,
-    ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
-  ByteBuffer<kConfigPermitAadSize> aad{};
-  const Status aad_ok = config_permit_aad(command.network, command.target,
-                                        command.config_namespace, aad);
-  if (!aad_ok.ok()) return aad_ok;
-  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
-  const Status tag_ok =
-      config_dev_permit_tag(dev_key_, aad.view(), canonical, tag);
-  if (!tag_ok.ok()) return tag_ok;
-  ByteWriter writer(permit.writable());
-  Status status = writer.write_bytes(aad.view());
-  if (status.ok()) status = writer.write_bytes(canonical);
-  if (status.ok()) status = writer.write_bytes(ByteView{tag.data(), tag.size()});
-  if (!status.ok()) return status;
-  permit.size = writer.size();
-  return Status::success();
-}
-
-Status DevConfigPermitSigner::sign_recovery(
-    const endpoint::ConfigRecoveryCommand& command, ByteView canonical,
-    ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
-  if (canonical.size != endpoint::kRcr1Size) {
-    return Status::error(StatusCode::InvalidArgument, "config dev recovery canonical");
-  }
-  ByteBuffer<kConfigRecoveryAadSize> aad{};
-  const Status aad_ok = config_recovery_aad(command.network, command.target,
-                                          command.config_namespace, aad);
-  if (!aad_ok.ok()) return aad_ok;
-  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
-  const Status tag_ok =
-      config_dev_recovery_tag(dev_key_, aad.view(), canonical, tag);
-  if (!tag_ok.ok()) return tag_ok;
-  ByteWriter writer(permit.writable());
-  Status status = writer.write_bytes(aad.view());
-  if (status.ok()) status = writer.write_bytes(canonical);
-  if (status.ok()) status = writer.write_bytes(ByteView{tag.data(), tag.size()});
-  if (!status.ok()) return status;
-  permit.size = writer.size();
-  return Status::success();
-}
-
 Status DevConfigAuthorityVerifier::verify_recovery(
     const ConfigPermitContext& context, ByteView object,
     endpoint::EncodedRecoveryCommand& payload, bool& verified) noexcept {

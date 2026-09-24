@@ -8,11 +8,9 @@
 //   - the schema/TLV layer: sorted typed TLV snapshots, patch -> next-
 //     snapshot merge, the §5.4 snapshot hash and the SDK ns=1/schema=1
 //     field rules,
-//   - the issuer side: canonical RCC1 construction, the durable outbox and
-//     the commit order persist -> real-SHA-256 operation_hash ->
-//     SingleAuthority commit -> readback-verified -> sign -> retransmit the
-//     SAME blob. NO_CHANGE is decided before signing and consumes no
-//     revision and no flash,
+//   (the issuer side — canonical construction, the durable outbox and the
+//   commit order — lives in the Rust host, never on the device: this unit
+//   is the target/verifier side only),
 //   - the target side: ConfigChallenge issuance (nonce128, boot
 //     incarnation, local monotonic expiry <= 30 s), the per-(Network,
 //     target, namespace) ConfigJournal phase machine
@@ -63,8 +61,6 @@ constexpr std::uint32_t kConfigChallengeMaxMs = 30000;    // challenge_max_ms
 constexpr std::uint32_t kConfigReassemblyTimeoutMs = 10000;  // reassembly_timeout_ms
 constexpr std::size_t kConfigPermitObjectMax = 1024;      // object_max
 constexpr std::size_t kConfigPermitEncodedMax = 774;      // permit_encoded_max
-constexpr std::size_t kConfigIssuerOutboxSlots = 4;       // issuer_outbox
-constexpr std::size_t kConfigOutboxRecordBytes = 2048;    // fits command+permit+crc
 constexpr std::uint32_t kConfigAcceptPerMinute = 1;       // accepted_per_minute
 constexpr std::uint32_t kConfigAcceptBurst = 1;           // burst
 constexpr std::uint32_t kConfigAcceptWindowMs = 60000;
@@ -203,13 +199,10 @@ class ConfigAuthorityVerifier {
                                endpoint::EncodedConfigCommand& payload,
                                bool& verified) noexcept = 0;
   // The same contract for a kind-4 recovery object (RCR1 payload, the
-  // recovery-domain external_aad — never the permit aad). For an
-  // AuthorityGeneration-class command the verifier additionally fails
-  // closed when it could not itself verify under the command's
-  // new_authority_generation: a countersign must never install a
-  // generation the verifier cannot resolve (03-signing trust update).
-  // The default refuses — a profile without a recovery envelope must fail
-  // closed, never silently accept.
+  // recovery-domain external_aad — never the permit aad). Authority
+  // generation changes are root-authorized trust updates (RTM1), never
+  // recovery commands. The default refuses — a profile without a recovery
+  // envelope must fail closed, never silently accept.
   virtual Status verify_recovery(const ConfigPermitContext& context,
                                  ByteView object,
                                  endpoint::EncodedRecoveryCommand& payload,
@@ -223,32 +216,6 @@ class ConfigAuthorityVerifier {
   }
 };
 
-// The issuer-side signing surface (production: the same #10 provider).
-// Sign only AFTER the ledger commit read back — the signature asserts
-// "issuer committed, then signed" (04 §4.3).
-class ConfigPermitSigner {
- public:
-  virtual ~ConfigPermitSigner() = default;
-  virtual bool ready() const noexcept = 0;
-  virtual SecurityProfile security_profile() const noexcept {
-    return SecurityProfile::Development;
-  }
-  virtual Status sign(const endpoint::ConfigCommand& command, ByteView canonical,
-                      ByteBuffer<kConfigPermitObjectMax>& permit) noexcept = 0;
-  // Sign an RCR1 recovery command into the profile's recovery envelope
-  // (recovery-domain aad). The default refuses: a profile that cannot mint
-  // recovery objects must say so, never emit an unsigned one.
-  virtual Status sign_recovery(const endpoint::ConfigRecoveryCommand& command,
-                               ByteView canonical,
-                               ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
-    (void)command;
-    (void)canonical;
-    (void)permit;
-    return Status::error(StatusCode::Unsupported,
-                         "config recovery signing unsupported");
-  }
-};
-
 // Per-namespace dual-slot journal persistence. read() fills the whole
 // 4096-byte slot image; write() lands a record of <=4096 bytes.
 // Implementations must tolerate power loss at any byte boundary and must
@@ -256,15 +223,6 @@ class ConfigPermitSigner {
 class ConfigJournalStorage {
  public:
   virtual ~ConfigJournalStorage() = default;
-  virtual Status read(std::uint8_t slot, MutableByteView target) noexcept = 0;
-  virtual Status write(std::uint8_t slot, ByteView data) noexcept = 0;
-};
-
-// Issuer outbox persistence: kConfigIssuerOutboxSlots records of up to
-// kConfigOutboxRecordBytes each. Same power-loss contract.
-class ConfigOutboxStorage {
- public:
-  virtual ~ConfigOutboxStorage() = default;
   virtual Status read(std::uint8_t slot, MutableByteView target) noexcept = 0;
   virtual Status write(std::uint8_t slot, ByteView data) noexcept = 0;
 };
@@ -488,14 +446,12 @@ class ConfigJournal {
   Status note_recovery_chunk(const autonomy::ObjectChunkPayload& chunk,
                              MonotonicMs now_ms) noexcept;
 
-  // Verify -> dedup -> class dispatch on a signed RCR1 command:
-  //   StoreRecover (impaired journals only) attests a fresh store
-  //   generation and runs the recover() ceremony under the signed attest;
-  //   AuthorityGeneration (proven journals only) durably installs the
-  //   countersigned new authority generation — the 03-signing trust
-  //   update that lets a deployed node accept post-disaster permits.
+  // Verify -> dedup -> dispatch on a signed RCR1 StoreRecover command
+  // (impaired journals only): attests a fresh store generation and runs
+  // the recover() ceremony under the signed attest. Authority generation
+  // changes arrive as root-authorized trust updates (RTM1), never here.
   // Signature verification, the generation/revision floors and the
-  // result-record dedup apply to both; every failure stays fail-closed.
+  // result-record dedup apply; every failure stays fail-closed.
   Status submit_recovery(ByteView object, MonotonicMs now_ms,
                          ConfigVerdict& verdict) noexcept;
 
@@ -532,8 +488,8 @@ class ConfigJournal {
   bool uncertain() const noexcept { return uncertain_; }
   bool quarantined() const noexcept { return quarantined_; }
   // The authority generation this journal accepts: the configured pin
-  // until an AuthorityGeneration countersign installs a newer one (then
-  // the adopted durable record's generation on every later boot).
+  // (a root-authorized trust update moves it; the adopted durable
+  // record's generation carries it across boots).
   std::uint32_t authority_generation() const noexcept {
     return authority_generation_;
   }
@@ -665,16 +621,10 @@ class ConfigJournal {
                           const Digest256& digest, MonotonicMs now_ms,
                           bool clock_known, ConfigVerdict& verdict) noexcept;
   Status reassemble_complete(MonotonicMs now_ms) noexcept;
-  // The recovery lane's own completion + durable transition paths.
+  // The recovery lane's own completion path.
   Status recovery_reassemble_complete(MonotonicMs now_ms) noexcept;
-  // AuthorityGeneration countersign: clone the durable record under a
-  // fresh store generation carrying the new pin — same write->seal->
-  // readback proof every other transition gets.
-  Status persist_generation_update(const endpoint::ConfigRecoveryCommand& command,
-                                   const Digest256& digest,
-                                   ByteView object) noexcept;
-  // Result-record write shared by both recovery classes (same dedup table
-  // as permit outcomes so a replayed recovery answers with its verdict).
+  // Result-record write for the recovery lane (same dedup table as permit
+  // outcomes so a replayed recovery answers with its verdict).
   Status record_recovery_result(const endpoint::ConfigRecoveryCommand& command,
                                 const Digest256& digest, endpoint::ConfigPhase phase,
                                 endpoint::ConfigReason reason,
@@ -749,172 +699,6 @@ class ConfigJournal {
   // verified RCR1 canonical and its decoded command.
   endpoint::EncodedRecoveryCommand recovery_canonical_{};
   endpoint::ConfigRecoveryCommand recovery_command_{};
-};
-
-// --- Issuer side -------------------------------------------------------------------
-
-struct ConfigIssuerConfig {
-  NetworkId network{0};
-  NodeId authority{kInvalidNodeId};
-  // Conservative slack subtracted from the challenge's remaining lifetime
-  // so the signed apply_within_ms budget survives Host/USB wait and radio
-  // transit (04 §4.4).
-  std::uint32_t safety_margin_ms{200};
-};
-
-// A target's outstanding challenge as the issuer recorded it.
-struct IssuerChallenge {
-  bool valid{false};
-  NodeId target{kInvalidNodeId};
-  std::uint16_t config_namespace{0};
-  std::uint16_t schema{0};
-  std::uint64_t target_boot{0};
-  std::array<std::uint8_t, 16> nonce{};
-  std::uint64_t revision{0};
-  Digest256 active_hash{};
-  std::uint32_t valid_for_ms{0};
-  MonotonicMs received_ms{0};
-};
-
-struct IssuedOperation {
-  bool issued{false};
-  bool no_change{false};  // patch produced the base snapshot: nothing signed
-  std::uint8_t slot{0};
-  endpoint::EncodedConfigCommand canonical{};
-  ByteBuffer<kConfigPermitObjectMax> permit{};
-};
-
-// The issuer's output for one accepted recovery issuance: the canonical
-// RCR1 (persisted to the outbox BEFORE signing, kind-tagged) plus the
-// signed recovery object to retransmit verbatim on the kind-4 lane.
-struct IssuedRecovery {
-  bool issued{false};
-  std::uint8_t slot{0};
-  endpoint::EncodedRecoveryCommand canonical{};
-  ByteBuffer<kConfigPermitObjectMax> permit{};
-};
-
-// Outbox canonical kinds (the record's kind byte — 0 was the reserved
-// byte's only legal value, so existing RCO1 images read as kind 0).
-constexpr std::uint8_t kOutboxKindCommand = 0;    // RCC1 config command
-constexpr std::uint8_t kOutboxKindRecovery = 1;   // RCR1 recovery command
-
-// The Authority-side issuer (04 §4.3). Commit order is exactly:
-//   persist canonical command + outbox record -> real SHA-256
-//   operation_hash -> SingleAuthority commit -> commit/readback verified ->
-//   sign permit -> retransmit the SAME signed blob.
-// The global (generation, sequence, state_hash) serialization lives in
-// SingleAuthority; the per-target config_revision is a separate axis the
-// target checks on its own — the issuer never asks a target to replay the
-// global log.
-class ConfigIssuer {
- public:
-  ConfigIssuer(const ConfigIssuerConfig& config, SingleAuthority& ledger,
-               ConfigOutboxStorage& storage, ConfigPermitSigner& signer,
-               EntropySource& entropy) noexcept;
-
-  // Resume the durable outbox: pending records continue the commit order
-  // (the ledger's last operation_hash disambiguates whether the commit
-  // landed before the power loss); signed records are retransmittable.
-  Status initialize() noexcept;
-
-  // Build a Control22 ChallengeQuery1 body for transport to `target`.
-  Status challenge_query(NodeId target, std::uint16_t config_namespace,
-                         std::uint16_t schema,
-                         const std::array<std::uint8_t, 16>& client_nonce,
-                         endpoint::EncodedServicePayload& out) const noexcept;
-
-  // Record a received Challenge2 for (target, namespace). The remaining
-  // apply budget is measured from THIS receipt on the issuer's own clock —
-  // never from the target's or a wall clock.
-  Status note_challenge(const endpoint::ControlChallenge& challenge, NodeId target,
-                        MonotonicMs received_ms) noexcept;
-
-  // Issue a signed permit for a patch. `base_snapshot` must be the complete
-  // active snapshot bytes the issuer holds for the target; it is verified
-  // against the challenge's active_hash before signing. A no-op patch sets
-  // `no_change` and consumes neither a revision nor a flash write.
-  // `apply_budget_ms == 0` requests the whole remaining challenge budget.
-  Status propose(NodeId target, std::uint16_t config_namespace, std::uint16_t schema,
-                 ByteView base_snapshot, const endpoint::ConfigField* patch,
-                 std::uint16_t patch_count, std::uint32_t apply_budget_ms,
-                 MonotonicMs now_ms, IssuedOperation& out) noexcept;
-
-  // Issue a signed recovery object (04 §4.7, 06 §6.3): an RCR1 command
-  // under the CURRENT ledger generation — StoreRecover carries the
-  // attested new store generation for an impaired target journal,
-  // AuthorityGeneration countersigns `new_authority_generation` (issue it
-  // BEFORE SingleAuthority::recover() retires this generation, so targets
-  // pinned to it accept the transition). Same commit order as propose:
-  // canonical persisted, ledger commit, sign — the outbox record is
-  // kind-tagged so resume_pending decodes the right canonical shape.
-  // No challenge binding: recovery commands are nonce-free by design —
-  // replay protection is the store-generation floor plus the result dedup.
-  Status issue_recovery(NodeId target, std::uint16_t config_namespace,
-                        std::uint16_t schema,
-                        endpoint::ConfigRecoveryClass recovery_class,
-                        std::uint8_t attest, std::uint32_t new_store_generation,
-                        std::uint32_t new_authority_generation,
-                        IssuedRecovery& out) noexcept;
-
-  // The same signed blob for retransmission — the outbox record is
-  // authoritative, so the bytes never change between sends.
-  Status signed_permit(std::uint8_t slot,
-                       ByteBuffer<kConfigPermitObjectMax>& out) noexcept;
-
-  // The signed object plus its canonical kind — the caller picks the
-  // kind-3 permit lane for kOutboxKindCommand, the kind-4 recovery lane
-  // for kOutboxKindRecovery.
-  Status signed_object(std::uint8_t slot, std::uint8_t& kind,
-                       ByteBuffer<kConfigPermitObjectMax>& out) noexcept;
-
-  // Retry entries that persisted but did not finish sign (e.g. after a
-  // power loss between outbox write and ledger commit).
-  Status resume_pending() noexcept;
-
-  std::uint8_t pending_count() const noexcept { return pending_; }
-  std::uint8_t signed_count() const noexcept { return signed_; }
-
- private:
-  struct ChallengeSlot {
-    bool used{false};
-    IssuerChallenge challenge{};
-  };
-
-  Status persist_entry(std::uint8_t slot, std::uint8_t kind, std::uint8_t state,
-                       ByteView canonical, ByteView permit) noexcept;
-  Status clear_entry(std::uint8_t slot) noexcept;
-  Status load_entry(std::uint8_t slot, std::uint8_t& kind, std::uint8_t& state,
-                    endpoint::EncodedConfigCommand& canonical,
-                    ByteBuffer<kConfigPermitObjectMax>& permit) noexcept;
-  Status commit_and_sign(std::uint8_t slot, endpoint::EncodedConfigCommand& canonical,
-                         endpoint::ConfigCommand& command,
-                         ByteBuffer<kConfigPermitObjectMax>& permit) noexcept;
-  // The same ledger commit order for an RCR1 entry (kind-tagged slot):
-  // same applied/sequence disambiguation, recovery decode for sibling
-  // scans and sign_recovery for the final object.
-  Status commit_and_sign_recovery(std::uint8_t slot,
-                                  endpoint::EncodedConfigCommand& canonical,
-                                  endpoint::ConfigRecoveryCommand& command,
-                                  ByteBuffer<kConfigPermitObjectMax>& permit) noexcept;
-  // Read a sibling entry's authority_sequence without owning its kind —
-  // the sequence-consistency scan spans RCC1 and RCR1 entries alike.
-  Status entry_sequence(const endpoint::EncodedConfigCommand& canonical,
-                        std::uint8_t kind, std::uint64_t& sequence) const noexcept;
-  IssuerChallenge* find_challenge(NodeId target, std::uint16_t config_namespace) noexcept;
-  Status validate_patch_fields(std::uint16_t config_namespace,
-                               const endpoint::ConfigField* patch,
-                               std::uint16_t patch_count) const noexcept;
-
-  ConfigIssuerConfig config_{};
-  SingleAuthority& ledger_;
-  ConfigOutboxStorage& storage_;
-  ConfigPermitSigner& signer_;
-  EntropySource& entropy_;
-  std::array<ChallengeSlot, 4> challenges_{};
-  std::uint8_t pending_{0};
-  std::uint8_t signed_{0};
-  bool initialized_{false};
 };
 
 }  // namespace routeloom

@@ -938,25 +938,15 @@ Status config_recovery_encode(const ConfigRecoveryCommand& command,
       all_zero(ByteView{command.operation_id.data(), command.operation_id.size()})) {
     return invalid("config recovery identity fields invalid");
   }
-  const bool store_recover =
-      command.recovery_class == ConfigRecoveryClass::StoreRecover;
-  const bool generation_update =
-      command.recovery_class == ConfigRecoveryClass::AuthorityGeneration;
-  if (!store_recover && !generation_update) {
+  if (command.recovery_class != ConfigRecoveryClass::StoreRecover) {
     return invalid("config recovery class unknown");
   }
-  // Each class carries exactly its own claim: a store recovery attests a
-  // fresh generation (attest 0|1) and a countersign names the generation it
-  // installs — never both, never neither.
-  if (store_recover &&
-      (command.attest > kRcr1AttestReprovision || command.new_store_generation == 0 ||
-       command.new_authority_generation != 0)) {
+  // A store recovery attests a fresh generation (attest 0|1); the
+  // authority-generation field is reserved and stays 0.
+  if (command.attest > kRcr1AttestReprovision ||
+      command.new_store_generation == 0 ||
+      command.new_authority_generation != 0) {
     return invalid("config recovery store fields invalid");
-  }
-  if (generation_update &&
-      (command.attest != 0 || command.new_store_generation != 0 ||
-       command.new_authority_generation == 0)) {
-    return invalid("config recovery generation fields invalid");
   }
   out.clear();
   ByteWriter writer(out.writable());
@@ -1019,24 +1009,16 @@ Status config_recovery_decode(const ByteView encoded,
   RL_READ(reader.read_u32(reserved));
 #undef RL_READ
   out.recovery_class = static_cast<ConfigRecoveryClass>(recovery_class);
-  const bool store_recover =
-      out.recovery_class == ConfigRecoveryClass::StoreRecover;
-  const bool generation_update =
-      out.recovery_class == ConfigRecoveryClass::AuthorityGeneration;
   if (magic != kRcr1Magic || version != kRcr1Version || flags != 0 ||
       reserved != 0 || reader.remaining() != 0 ||
-      (!store_recover && !generation_update) ||
+      out.recovery_class != ConfigRecoveryClass::StoreRecover ||
       !config_namespace_valid(out.config_namespace) ||
       out.network == 0 || out.target == kInvalidNodeId ||
       out.target == kBroadcastNodeId || out.authority == kInvalidNodeId ||
       out.authority == kBroadcastNodeId ||
       all_zero(ByteView{out.operation_id.data(), out.operation_id.size()}) ||
-      (store_recover &&
-       (out.attest > kRcr1AttestReprovision || out.new_store_generation == 0 ||
-        out.new_authority_generation != 0)) ||
-      (generation_update &&
-       (out.attest != 0 || out.new_store_generation != 0 ||
-        out.new_authority_generation == 0))) {
+      out.attest > kRcr1AttestReprovision ||
+      out.new_store_generation == 0 || out.new_authority_generation != 0) {
     return reject();
   }
   return Status::success();

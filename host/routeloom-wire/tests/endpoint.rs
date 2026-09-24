@@ -386,7 +386,6 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
                 &ConfigRecoveryCommand {
                     recovery_class: match u64_field(fields, "recovery_class") {
                         1 => ConfigRecoveryClass::StoreRecover,
-                        2 => ConfigRecoveryClass::AuthorityGeneration,
                         other => panic!("bad recovery class {other}"),
                     },
                     attest: u64_field(fields, "attest") as u8,

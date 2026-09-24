@@ -11,7 +11,7 @@ mod provision_office;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --new-store-generation <u32> [--attest 0|1]|config-trust-update --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --new-authority-generation <u32>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --new-store-generation <u32> [--attest 0|1]|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
@@ -194,22 +194,6 @@ fn config_recover_request(
     )
 }
 
-/// Build the API1 `config.trust_update` request line — the 03-signing
-/// countersignature of the next authority trust generation, issued under
-/// the CURRENT generation BEFORE the authority recovers to it.
-fn config_trust_update_request(
-    network: &str,
-    target: &str,
-    ns: u16,
-    schema: u16,
-    new_authority_generation: u32,
-) -> String {
-    format!(
-        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.trust_update\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"schema\":{schema},\"new_authority_generation\":{new_authority_generation}}}}}",
-        request_id(),
-    )
-}
-
 /// Build the API1 `config.get` request line. `id` is the `cfg`-prefixed op
 /// token the submit verbs return — the config op space, never operations.get.
 fn config_get_request(id: &str) -> String {
@@ -288,7 +272,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "config-status" => config_status_command(rest)?,
         [name, rest @ ..] if name == "config-propose" => config_propose_command(rest)?,
         [name, rest @ ..] if name == "config-recover" => config_recover_command(rest)?,
-        [name, rest @ ..] if name == "config-trust-update" => config_trust_update_command(rest)?,
+        [name, ..] if name == "config-trust-update" => {
+            return Err("config-trust-update is removed: \
+                 root updates are trust-install of a signed trust manifest"
+                .into());
+        }
         [name, rest @ ..] if name == "config-get" => config_get_command(rest)?,
         [name, id] if name == "cancel" => cancel_command(id)?,
         [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
@@ -1170,62 +1158,6 @@ fn config_recover_command(args: &[String]) -> Result<String, Box<dyn std::error:
     }
     Ok(config_recover_request(
         &network, &target, ns, schema, store_gen, attest,
-    ))
-}
-
-/// `config-trust-update --network <16hex> --target <16hex> --config-namespace
-/// <u16> --schema <u16> --new-authority-generation <u32>`. Issues the
-/// 03-signing trust update: an RCR1 AuthorityGeneration command signed
-/// under the CURRENT generation, countersigning the new one. Run it
-/// BEFORE the authority recovers to the new generation so deployed
-/// targets durably adopt the new pin; permits under the new generation
-/// are only accepted afterwards.
-fn config_trust_update_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
-    let mut network: Option<String> = None;
-    let mut target: Option<String> = None;
-    let mut ns: Option<u16> = None;
-    let mut schema: Option<u16> = None;
-    let mut new_gen: Option<u32> = None;
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--network" => network = Some(opt_value(&mut args, "--network")?),
-            "--target" => target = Some(opt_value(&mut args, "--target")?),
-            "--config-namespace" => {
-                ns = Some(want_u16(
-                    "--config-namespace",
-                    opt_value(&mut args, "--config-namespace")?,
-                )?)
-            }
-            "--schema" => schema = Some(want_u16("--schema", opt_value(&mut args, "--schema")?)?),
-            "--new-authority-generation" => {
-                let raw = opt_value(&mut args, "--new-authority-generation")?;
-                new_gen = Some(
-                    raw.parse::<u32>()
-                        .map_err(|_| "--new-authority-generation must be a u32")?,
-                );
-            }
-            other => {
-                return Err(format!("unknown config-trust-update option: {other}").into());
-            }
-        }
-    }
-    let network = want_hex16(
-        "--network",
-        network.ok_or("config-trust-update requires --network <16hex>")?,
-    )?;
-    let target = want_hex16(
-        "--target",
-        target.ok_or("config-trust-update requires --target <16hex>")?,
-    )?;
-    let ns = ns.ok_or("config-trust-update requires --config-namespace <u16>")?;
-    let schema = schema.ok_or("config-trust-update requires --schema <u16>")?;
-    let new_gen = new_gen.ok_or("config-trust-update requires --new-authority-generation <u32>")?;
-    if new_gen == 0 {
-        return Err("--new-authority-generation must be nonzero".into());
-    }
-    Ok(config_trust_update_request(
-        &network, &target, ns, schema, new_gen,
     ))
 }
 
