@@ -2232,4 +2232,230 @@ Status decode_join_relay_result(const ByteView inner, JoinRelayResult& out) noex
   return Status::success();
 }
 
+namespace {
+
+static_assert(kGatewayInnerHeadSize + kAuthorityFragmentMax <= 1024,
+              "a full fragment fits the 1024-byte USB queue slot with the head");
+
+bool authority_kind_total_ok(const sdkv1::AuthorityCarrierKind kind,
+                             const std::uint16_t total) noexcept {
+  // The kind pins the object length exactly, except envelopes (28..2048).
+  switch (kind) {
+    case sdkv1::AuthorityCarrierKind::R1:
+      return total == rlres1::kR1BaseSize;
+    case sdkv1::AuthorityCarrierKind::R2:
+      return total == rlres1::kR2Size || total == rlres1::kR2HintSize;
+    case sdkv1::AuthorityCarrierKind::R3:
+      return total == rlres1::kR3Size;
+    case sdkv1::AuthorityCarrierKind::Envelope:
+      return total >= keys::kAuthorityEnvelopeMin && total <= kAuthorityFragmentTotalMax;
+    case sdkv1::AuthorityCarrierKind::Wake:
+      return total == 8;  // site_epoch:u32 | gk_epoch:u32
+    default:
+      return false;
+  }
+}
+
+Status check_authority_fragment(const AuthorityFragment& fragment, const bool up) noexcept {
+  if (!relay_node_valid(fragment.device) || fragment.transfer_id == 0 ||
+      !sdkv1::authority_carrier_kind_valid(static_cast<std::uint8_t>(fragment.kind))) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_ID");
+  }
+  if (up ? (fragment.hops > kAuthorityHopsMax) : (fragment.hops != 0)) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_HOPS");
+  }
+  // (device == gateway) <=> (hops == 0) needs the gateway identity, which the
+  // codec does not have; the bridge enforces it when PR4 wires the lane.
+  if (!authority_kind_total_ok(fragment.kind, fragment.total)) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_TOTAL");
+  }
+  if (fragment.offset % kAuthorityFragmentDataMax != 0 ||
+      fragment.offset >= fragment.total) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_GRID");
+  }
+  if (fragment.data.data == nullptr || fragment.data.size == 0 ||
+      fragment.data.size > kAuthorityFragmentDataMax ||
+      static_cast<std::uint32_t>(fragment.offset) + fragment.data.size > fragment.total) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_SPAN");
+  }
+  const bool last =
+      static_cast<std::uint32_t>(fragment.offset) + fragment.data.size == fragment.total;
+  if (!last && fragment.data.size != kAuthorityFragmentDataMax) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_SHORT");
+  }
+  return Status::success();
+}
+
+Status encode_authority_fragment(const HostOpsSub sub, const AuthorityFragment& fragment,
+                                 const MutableByteView out, std::size_t& written) noexcept {
+  written = 0;
+  const bool up = (sub == HostOpsSub::AuthorityUp);
+  Status status = check_authority_fragment(fragment, up);
+  if (!status) return status;
+  ByteWriter writer(out);
+  status = write_gateway_head(
+      writer, sub, static_cast<std::uint16_t>(kAuthorityFragmentHead + fragment.data.size));
+  if (status) status = writer.write_u64(fragment.device);
+  if (status) status = writer.write_u32(fragment.transfer_id);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(fragment.kind));
+  if (status) status = writer.write_u8(fragment.hops);
+  if (status) status = writer.write_u16(fragment.total);
+  if (status) status = writer.write_u16(fragment.offset);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(fragment.data.size));
+  if (status) status = writer.write_bytes(fragment.data);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_authority_fragment(const ByteView inner, const HostOpsSub sub, const bool up,
+                                 AuthorityFragment& out) noexcept {
+  out = AuthorityFragment{};
+  ByteView payload{};
+  Status status = gateway_body(inner, sub, kAuthorityFragmentHead + 1, kAuthorityFragmentMax,
+                               payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  AuthorityFragment fragment{};
+  std::uint8_t kind = 0;
+  std::uint16_t length = 0;
+  status = reader.read_u64(fragment.device);
+  if (status) status = reader.read_u32(fragment.transfer_id);
+  if (status) status = reader.read_u8(kind);
+  if (status) status = reader.read_u8(fragment.hops);
+  if (status) status = reader.read_u16(fragment.total);
+  if (status) status = reader.read_u16(fragment.offset);
+  if (status) status = reader.read_u16(length);
+  if (!status) return status;
+  if (payload.size != kAuthorityFragmentHead + length) {
+    return Status::error(StatusCode::ProtocolError, "AUTHORITY_FRAGMENT_LENGTH");
+  }
+  fragment.kind = static_cast<sdkv1::AuthorityCarrierKind>(kind);
+  fragment.data = ByteView{payload.data + kAuthorityFragmentHead, length};
+  status = check_authority_fragment(fragment, up);
+  if (!status) return status;
+  out = fragment;
+  return Status::success();
+}
+
+}  // namespace
+
+Status encode_authority_up(const AuthorityFragment& fragment, const MutableByteView out,
+                           std::size_t& written) noexcept {
+  return encode_authority_fragment(HostOpsSub::AuthorityUp, fragment, out, written);
+}
+
+Status decode_authority_up(const ByteView inner, AuthorityFragment& out) noexcept {
+  return decode_authority_fragment(inner, HostOpsSub::AuthorityUp, true, out);
+}
+
+Status encode_authority_down(const AuthorityFragment& fragment, const MutableByteView out,
+                             std::size_t& written) noexcept {
+  return encode_authority_fragment(HostOpsSub::AuthorityDown, fragment, out, written);
+}
+
+Status decode_authority_down(const ByteView inner, AuthorityFragment& out) noexcept {
+  return decode_authority_fragment(inner, HostOpsSub::AuthorityDown, false, out);
+}
+
+Status encode_site_state_set(const SiteStateSet& set, const MutableByteView out,
+                             std::size_t& written) noexcept {
+  written = 0;
+  if (set.action != SiteStateAction::WakeLocal && set.action != SiteStateAction::QueryLocal) {
+    return Status::error(StatusCode::InvalidArgument, "site state set");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::SiteStateSet,
+                                     static_cast<std::uint16_t>(kSiteStateSetPayload));
+  if (status) status = writer.write_u8(1);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(set.action));
+  if (status) status = writer.write_u16(0);
+  if (status) status = writer.write_u32(set.site_epoch);
+  if (status) status = writer.write_u32(set.rs_epoch_hint);
+  if (status) status = writer.write_u32(set.gk_epoch_hint);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_site_state_set(const ByteView inner, SiteStateSet& out) noexcept {
+  out = SiteStateSet{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::SiteStateSet, kSiteStateSetPayload,
+                               kSiteStateSetPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  SiteStateSet set{};
+  std::uint8_t version = 0;
+  std::uint8_t action = 0;
+  std::uint16_t reserved = 0;
+  status = reader.read_u8(version);
+  if (status) status = reader.read_u8(action);
+  if (status) status = reader.read_u16(reserved);
+  if (status) status = reader.read_u32(set.site_epoch);
+  if (status) status = reader.read_u32(set.rs_epoch_hint);
+  if (status) status = reader.read_u32(set.gk_epoch_hint);
+  if (!status) return status;
+  if (version != 1 || reserved != 0 || (action != 1 && action != 2)) {
+    return Status::error(StatusCode::ProtocolError, "SITE_STATE_SET");
+  }
+  set.action = static_cast<SiteStateAction>(action);
+  out = set;
+  return Status::success();
+}
+
+Status encode_site_state_report(const SiteStateReport& report, const MutableByteView out,
+                                std::size_t& written) noexcept {
+  written = 0;
+  if (static_cast<std::uint8_t>(report.result) > 6) {
+    return Status::error(StatusCode::InvalidArgument, "site state report");
+  }
+  ByteWriter writer(out);
+  Status status = write_gateway_head(writer, HostOpsSub::SiteStateReport,
+                                     static_cast<std::uint16_t>(kSiteStateReportPayload));
+  if (status) status = writer.write_u8(1);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(report.result));
+  if (status) status = writer.write_u16(report.local_state_valid ? 1 : 0);
+  if (status) status = writer.write_u64(report.device);
+  if (status) status = writer.write_u32(report.transfer_id);
+  if (status) status = writer.write_u16(report.received_len);
+  if (status) status = writer.write_u16(0);
+  if (status) status = writer.write_u32(report.local_current);
+  if (status) status = writer.write_u32(report.local_next);
+  if (!status) return status;
+  written = writer.size();
+  return Status::success();
+}
+
+Status decode_site_state_report(const ByteView inner, SiteStateReport& out) noexcept {
+  out = SiteStateReport{};
+  ByteView payload{};
+  Status status = gateway_body(inner, HostOpsSub::SiteStateReport, kSiteStateReportPayload,
+                               kSiteStateReportPayload, payload);
+  if (!status) return status;
+  ByteReader reader(payload);
+  SiteStateReport report{};
+  std::uint8_t version = 0;
+  std::uint8_t result = 0;
+  std::uint16_t flags = 0;
+  std::uint16_t reserved = 0;
+  status = reader.read_u8(version);
+  if (status) status = reader.read_u8(result);
+  if (status) status = reader.read_u16(flags);
+  if (status) status = reader.read_u64(report.device);
+  if (status) status = reader.read_u32(report.transfer_id);
+  if (status) status = reader.read_u16(report.received_len);
+  if (status) status = reader.read_u16(reserved);
+  if (status) status = reader.read_u32(report.local_current);
+  if (status) status = reader.read_u32(report.local_next);
+  if (!status) return status;
+  if (version != 1 || result > 6 || flags > 1 || reserved != 0) {
+    return Status::error(StatusCode::ProtocolError, "SITE_STATE_REPORT");
+  }
+  report.result = static_cast<SiteStateResult>(result);
+  report.local_state_valid = (flags == 1);
+  out = report;
+  return Status::success();
+}
+
 }  // namespace routeloom::usb

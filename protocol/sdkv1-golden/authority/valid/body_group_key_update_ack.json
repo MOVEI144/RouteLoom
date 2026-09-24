@@ -1,0 +1,15 @@
+{
+  "codec": "authority_body",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "g": 11,
+  "generation": 9,
+  "gk_id_hex": "d873eccd12f184617fe3dc2644e7d15dbea1573d62d63bfc0204b1b36c199055",
+  "name": "body_group_key_update_ack",
+  "op": 2,
+  "plaintext_hex": "010200000000000901020304050607080000000bd873eccd12f184617fe3dc2644e7d15dbea1573d62d63bfc0204b1b36c19905500020000",
+  "request_id": 72623859790382856,
+  "result": 0,
+  "stored_state": 2,
+  "type": 2
+}

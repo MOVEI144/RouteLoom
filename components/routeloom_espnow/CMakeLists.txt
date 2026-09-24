@@ -14,6 +14,7 @@ idf_component_register(
     src/nvs_sdkv1_store.cpp
     src/nvs_security_floor.cpp
     src/nvs_trust_store.cpp
+    src/psa_aead_gcm.cpp
     src/psa_edhoc_aead.cpp
     src/psk_security.cpp
   INCLUDE_DIRS include

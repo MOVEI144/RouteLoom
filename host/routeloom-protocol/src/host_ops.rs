@@ -78,6 +78,27 @@ impl fmt::Display for HostOpsError {
 
 impl std::error::Error for HostOpsError {}
 
+impl HostOpsError {
+    /// Shared refusal vocabulary with the C++ decoder and the golden
+    /// `reason` strings (authority fragments and site-state bodies).
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Truncated => "truncated",
+            Self::LengthMismatch => "length_mismatch",
+            Self::BadSchema => "bad_schema",
+            Self::SubcommandMismatch => "subcommand_mismatch",
+            Self::UnknownEnum(tag, _) => match *tag {
+                "kind" => "bad_kind",
+                "action" => "bad_action",
+                "result" => "bad_result",
+                _ => "unknown_enum",
+            },
+            Self::CanonicalTooLarge => "canonical_too_large",
+            Self::Invalid(reason) => reason,
+        }
+    }
+}
+
 /// Typed outcome carried inside every host_ops response (mirrors the C++
 /// `HostOpsResult`). Malformed inner bodies never surface here — those are
 /// USB Error frames (ProtocolError/Unsupported).
@@ -1243,6 +1264,317 @@ pub fn decode_config_reply(inner: &[u8], sub: u8) -> Result<ConfigReply, HostOps
     })
 }
 
+// --- Authority channel subcommands (G-SEC P5 design §3.3) ----------------------
+//
+// 0x64 AUTHORITY_UP (G→H, request id 0) / 0x65 AUTHORITY_DOWN (H→G) carry
+// one carrier Fragment each; 0x66 SITE_STATE_SET (H→G) carries WakeLocal /
+// QueryLocal; 0x67 SITE_STATE_REPORT (G→H) answers 0x65/0x66. Same inner
+// common form as the gateway family (schema/sub/payload_len, exact
+// length). The gateway relays opaque bytes; 0x67 results are transport
+// receipts, never decrypt/apply evidence.
+//
+// The kind values are `authority::CarrierKind` 1..=5; the object lengths a
+// kind pins are USB wire facts re-declared here (they match
+// routeloom-keysched's RLRES1 sizes and the 28..=2048 envelope span, which
+// this crate must not depend on).
+pub const CAP_AUTHORITY_CHANNEL_V1: u32 = 1 << 9;
+pub const SUB_AUTHORITY_UP: u8 = 0x64;
+pub const SUB_AUTHORITY_DOWN: u8 = 0x65;
+pub const SUB_SITE_STATE_SET: u8 = 0x66;
+pub const SUB_SITE_STATE_REPORT: u8 = 0x67;
+
+pub const AUTHORITY_FRAGMENT_HEAD: usize = 20;
+pub const AUTHORITY_FRAGMENT_DATA_MAX: usize = 960;
+pub const AUTHORITY_FRAGMENT_TOTAL_MAX: usize = 2048;
+pub const AUTHORITY_FRAGMENT_MAX: usize = AUTHORITY_FRAGMENT_HEAD + AUTHORITY_FRAGMENT_DATA_MAX;
+pub const AUTHORITY_HOPS_MAX: u8 = 16;
+pub const SITE_STATE_SET_PAYLOAD: usize = 16;
+pub const SITE_STATE_REPORT_PAYLOAD: usize = 28;
+
+pub const CARRIER_R1_TOTAL: u16 = 60;
+pub const CARRIER_R2_OK_TOTAL: u16 = 52;
+pub const CARRIER_R2_HINT_TOTAL: u16 = 12;
+pub const CARRIER_R3_TOTAL: u16 = 16;
+pub const CARRIER_ENVELOPE_MIN_TOTAL: u16 = 28;
+pub const CARRIER_WAKE_TOTAL: u16 = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SiteStateAction {
+    WakeLocal = 1,
+    QueryLocal = 2,
+}
+
+impl SiteStateAction {
+    pub fn try_from_byte(value: u8) -> Result<Self, HostOpsError> {
+        Ok(match value {
+            1 => Self::WakeLocal,
+            2 => Self::QueryLocal,
+            _ => return Err(HostOpsError::UnknownEnum("action", value)),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum SiteStateResult {
+    FragmentQueued = 0,
+    ObjectQueued = 1,
+    Busy = 2,
+    Unreachable = 3,
+    Unsupported = 4,
+    Conflict = 5,
+    Timeout = 6,
+}
+
+impl SiteStateResult {
+    pub fn try_from_byte(value: u8) -> Result<Self, HostOpsError> {
+        Ok(match value {
+            0 => Self::FragmentQueued,
+            1 => Self::ObjectQueued,
+            2 => Self::Busy,
+            3 => Self::Unreachable,
+            4 => Self::Unsupported,
+            5 => Self::Conflict,
+            6 => Self::Timeout,
+            _ => return Err(HostOpsError::UnknownEnum("result", value)),
+        })
+    }
+}
+
+/// One carrier fragment (20 B head + data).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthorityFragment {
+    pub device: u64,
+    pub transfer_id: u32,
+    pub kind: crate::authority::CarrierKind,
+    pub hops: u8,
+    pub total: u16,
+    pub offset: u16,
+    pub data: Vec<u8>,
+}
+
+fn authority_kind_total_ok(kind: crate::authority::CarrierKind, total: u16) -> bool {
+    match kind {
+        crate::authority::CarrierKind::R1 => total == CARRIER_R1_TOTAL,
+        crate::authority::CarrierKind::R2 => {
+            total == CARRIER_R2_OK_TOTAL || total == CARRIER_R2_HINT_TOTAL
+        }
+        crate::authority::CarrierKind::R3 => total == CARRIER_R3_TOTAL,
+        crate::authority::CarrierKind::Envelope => {
+            total >= CARRIER_ENVELOPE_MIN_TOTAL && total <= AUTHORITY_FRAGMENT_TOTAL_MAX as u16
+        }
+        crate::authority::CarrierKind::Wake => total == CARRIER_WAKE_TOTAL,
+    }
+}
+
+fn check_authority_fragment(fragment: &AuthorityFragment, up: bool) -> Result<(), HostOpsError> {
+    if fragment.device == 0 || fragment.device == u64::MAX {
+        return Err(HostOpsError::Invalid("bad device"));
+    }
+    if fragment.transfer_id == 0 {
+        return Err(HostOpsError::Invalid("zero_transfer_id"));
+    }
+    if up {
+        if fragment.hops > AUTHORITY_HOPS_MAX {
+            return Err(HostOpsError::Invalid("bad_hops"));
+        }
+    } else if fragment.hops != 0 {
+        return Err(HostOpsError::Invalid("bad_hops"));
+    }
+    // (device == gateway) <=> (hops == 0) needs the gateway identity, which
+    // the codec does not have; the bridge enforces it when the lane lands.
+    if !authority_kind_total_ok(fragment.kind, fragment.total) {
+        if fragment.total > AUTHORITY_FRAGMENT_TOTAL_MAX as u16 {
+            return Err(HostOpsError::Invalid("oversized"));
+        }
+        return Err(HostOpsError::Invalid("bad total for kind"));
+    }
+    if fragment.offset as usize % AUTHORITY_FRAGMENT_DATA_MAX != 0
+        || fragment.offset >= fragment.total
+    {
+        return Err(HostOpsError::Invalid("bad_grid"));
+    }
+    if fragment.data.is_empty()
+        || fragment.data.len() > AUTHORITY_FRAGMENT_DATA_MAX
+        || fragment.offset as usize + fragment.data.len() > fragment.total as usize
+    {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    let last = fragment.offset as usize + fragment.data.len() == fragment.total as usize;
+    if !last && fragment.data.len() != AUTHORITY_FRAGMENT_DATA_MAX {
+        return Err(HostOpsError::Invalid("short middle fragment"));
+    }
+    Ok(())
+}
+
+fn encode_authority_fragment(
+    sub: u8,
+    fragment: &AuthorityFragment,
+    up: bool,
+) -> Result<Vec<u8>, HostOpsError> {
+    check_authority_fragment(fragment, up)?;
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + AUTHORITY_FRAGMENT_HEAD);
+    gateway_head(&mut out, sub, AUTHORITY_FRAGMENT_HEAD + fragment.data.len());
+    out.extend_from_slice(&fragment.device.to_be_bytes());
+    out.extend_from_slice(&fragment.transfer_id.to_be_bytes());
+    out.push(fragment.kind as u8);
+    out.push(fragment.hops);
+    out.extend_from_slice(&fragment.total.to_be_bytes());
+    out.extend_from_slice(&fragment.offset.to_be_bytes());
+    out.extend_from_slice(&(fragment.data.len() as u16).to_be_bytes());
+    out.extend_from_slice(&fragment.data);
+    Ok(out)
+}
+
+fn decode_authority_fragment(
+    inner: &[u8],
+    sub: u8,
+    up: bool,
+) -> Result<AuthorityFragment, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        sub,
+        AUTHORITY_FRAGMENT_HEAD + 1,
+        AUTHORITY_FRAGMENT_MAX,
+    )?;
+    let device = u64_at(payload, 0)?;
+    let transfer_id = u32_at(payload, 8)?;
+    let kind = crate::authority::CarrierKind::try_from_byte(payload[12])
+        .map_err(|_| HostOpsError::UnknownEnum("kind", payload[12]))?;
+    let hops = payload[13];
+    let total = u16_at(payload, 14)?;
+    let offset = u16_at(payload, 16)?;
+    let length = u16_at(payload, 18)? as usize;
+    if payload.len() != AUTHORITY_FRAGMENT_HEAD + length {
+        return Err(HostOpsError::LengthMismatch);
+    }
+    let fragment = AuthorityFragment {
+        device,
+        transfer_id,
+        kind,
+        hops,
+        total,
+        offset,
+        data: payload[AUTHORITY_FRAGMENT_HEAD..].to_vec(),
+    };
+    check_authority_fragment(&fragment, up)?;
+    Ok(fragment)
+}
+
+pub fn encode_authority_up(fragment: &AuthorityFragment) -> Result<Vec<u8>, HostOpsError> {
+    encode_authority_fragment(SUB_AUTHORITY_UP, fragment, true)
+}
+
+pub fn decode_authority_up(inner: &[u8]) -> Result<AuthorityFragment, HostOpsError> {
+    decode_authority_fragment(inner, SUB_AUTHORITY_UP, true)
+}
+
+pub fn encode_authority_down(fragment: &AuthorityFragment) -> Result<Vec<u8>, HostOpsError> {
+    encode_authority_fragment(SUB_AUTHORITY_DOWN, fragment, false)
+}
+
+pub fn decode_authority_down(inner: &[u8]) -> Result<AuthorityFragment, HostOpsError> {
+    decode_authority_fragment(inner, SUB_AUTHORITY_DOWN, false)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiteStateSet {
+    pub action: SiteStateAction,
+    pub site_epoch: u32,
+    pub rs_epoch_hint: u32,
+    pub gk_epoch_hint: u32,
+}
+
+pub fn encode_site_state_set(set: &SiteStateSet) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + SITE_STATE_SET_PAYLOAD);
+    gateway_head(&mut out, SUB_SITE_STATE_SET, SITE_STATE_SET_PAYLOAD);
+    out.push(1);
+    out.push(set.action as u8);
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    out.extend_from_slice(&set.site_epoch.to_be_bytes());
+    out.extend_from_slice(&set.rs_epoch_hint.to_be_bytes());
+    out.extend_from_slice(&set.gk_epoch_hint.to_be_bytes());
+    out
+}
+
+pub fn decode_site_state_set(inner: &[u8]) -> Result<SiteStateSet, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_SITE_STATE_SET,
+        SITE_STATE_SET_PAYLOAD,
+        SITE_STATE_SET_PAYLOAD,
+    )?;
+    if payload[0] != 1 {
+        return Err(HostOpsError::Invalid("bad version"));
+    }
+    let action = SiteStateAction::try_from_byte(payload[1])?;
+    if payload[2] != 0 || payload[3] != 0 {
+        return Err(HostOpsError::Invalid("reserved_nonzero"));
+    }
+    Ok(SiteStateSet {
+        action,
+        site_epoch: u32_at(payload, 4)?,
+        rs_epoch_hint: u32_at(payload, 8)?,
+        gk_epoch_hint: u32_at(payload, 12)?,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SiteStateReport {
+    pub result: SiteStateResult,
+    pub local_state_valid: bool,
+    pub device: u64,
+    pub transfer_id: u32,
+    pub received_len: u16,
+    pub local_current: u32,
+    pub local_next: u32,
+}
+
+pub fn encode_site_state_report(report: &SiteStateReport) -> Vec<u8> {
+    let mut out = Vec::with_capacity(GATEWAY_INNER_HEAD_SIZE + SITE_STATE_REPORT_PAYLOAD);
+    gateway_head(&mut out, SUB_SITE_STATE_REPORT, SITE_STATE_REPORT_PAYLOAD);
+    out.push(1);
+    out.push(report.result as u8);
+    out.extend_from_slice(&(u16::from(report.local_state_valid)).to_be_bytes());
+    out.extend_from_slice(&report.device.to_be_bytes());
+    out.extend_from_slice(&report.transfer_id.to_be_bytes());
+    out.extend_from_slice(&report.received_len.to_be_bytes());
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    out.extend_from_slice(&report.local_current.to_be_bytes());
+    out.extend_from_slice(&report.local_next.to_be_bytes());
+    out
+}
+
+pub fn decode_site_state_report(inner: &[u8]) -> Result<SiteStateReport, HostOpsError> {
+    let payload = gateway_body(
+        inner,
+        SUB_SITE_STATE_REPORT,
+        SITE_STATE_REPORT_PAYLOAD,
+        SITE_STATE_REPORT_PAYLOAD,
+    )?;
+    if payload[0] != 1 {
+        return Err(HostOpsError::Invalid("bad version"));
+    }
+    let result = SiteStateResult::try_from_byte(payload[1])?;
+    let flags = u16_at(payload, 2)?;
+    if flags > 1 {
+        return Err(HostOpsError::Invalid("reserved_nonzero"));
+    }
+    if payload[18] != 0 || payload[19] != 0 {
+        return Err(HostOpsError::Invalid("reserved_nonzero"));
+    }
+    Ok(SiteStateReport {
+        result,
+        local_state_valid: flags == 1,
+        device: u64_at(payload, 4)?,
+        transfer_id: u32_at(payload, 12)?,
+        received_len: u16_at(payload, 16)?,
+        local_current: u32_at(payload, 20)?,
+        local_next: u32_at(payload, 24)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1699,5 +2031,87 @@ mod tests {
         bad_result[GATEWAY_INNER_HEAD_SIZE] = 0;
         bad_result[GATEWAY_INNER_HEAD_SIZE + 1] = 2; // result=2 (unused)
         assert!(decode_config_reply(&bad_result, SUB_CONFIG_PERMIT).is_err());
+    }
+
+    #[test]
+    fn authority_fragments_round_trip_and_refuse() {
+        use crate::authority::CarrierKind;
+        let fragment = AuthorityFragment {
+            device: 0x101,
+            transfer_id: 0xC0FFEE,
+            kind: CarrierKind::Envelope,
+            hops: 3,
+            total: 1920,
+            offset: 960,
+            data: vec![0x55; 960],
+        };
+        let bytes = encode_authority_up(&fragment).expect("encode up");
+        assert_eq!(decode_authority_up(&bytes).expect("decode up"), fragment);
+        assert!(decode_authority_down(&bytes).is_err());
+        // The largest legal fragment fits the 1024-byte USB queue slot.
+        assert_eq!(GATEWAY_INNER_HEAD_SIZE + AUTHORITY_FRAGMENT_MAX, 984);
+        let mut full = fragment.clone();
+        full.total = 2048;
+        full.offset = 0;
+        full.data = vec![0xAA; AUTHORITY_FRAGMENT_DATA_MAX];
+        assert!(encode_authority_up(&full).expect("encode").len() <= 1024);
+        // Down fragments must carry hops 0.
+        let mut down = fragment.clone();
+        down.hops = 0;
+        assert!(encode_authority_down(&down).is_ok());
+        down.hops = 1;
+        assert!(encode_authority_down(&down).is_err());
+        // Kind pins total: R1 is exactly 60 bytes, Wake exactly 8.
+        let mut r1 = fragment.clone();
+        r1.kind = CarrierKind::R1;
+        r1.total = 60;
+        r1.offset = 0;
+        r1.data = vec![0; 60];
+        assert!(encode_authority_up(&r1).is_ok());
+        r1.total = 61;
+        r1.data = vec![0; 61];
+        assert!(encode_authority_up(&r1).is_err());
+        // A short middle fragment is malformed.
+        let mut short = fragment;
+        short.total = 1920;
+        short.offset = 0;
+        short.data = vec![0; 900];
+        assert!(encode_authority_up(&short).is_err());
+    }
+
+    #[test]
+    fn authority_site_state_round_trip_and_refuse() {
+        let set = SiteStateSet {
+            action: SiteStateAction::WakeLocal,
+            site_epoch: 7,
+            rs_epoch_hint: 4,
+            gk_epoch_hint: 11,
+        };
+        let bytes = encode_site_state_set(&set);
+        assert_eq!(decode_site_state_set(&bytes).expect("decode"), set);
+        let mut bad = bytes.clone();
+        bad[GATEWAY_INNER_HEAD_SIZE + 1] = 9;
+        assert_eq!(
+            decode_site_state_set(&bad).unwrap_err().name(),
+            "bad_action"
+        );
+
+        let report = SiteStateReport {
+            result: SiteStateResult::ObjectQueued,
+            local_state_valid: true,
+            device: 0x101,
+            transfer_id: 0xC0FFEE,
+            received_len: 2048,
+            local_current: 10,
+            local_next: 11,
+        };
+        let bytes = encode_site_state_report(&report);
+        assert_eq!(decode_site_state_report(&bytes).expect("decode"), report);
+        let mut bad = bytes;
+        bad[GATEWAY_INNER_HEAD_SIZE + 1] = 9;
+        assert_eq!(
+            decode_site_state_report(&bad).unwrap_err().name(),
+            "bad_result"
+        );
     }
 }
