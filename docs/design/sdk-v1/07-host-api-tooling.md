@@ -239,7 +239,20 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 
 生成したCSVはPyPIの`esp-idf-nvs-partition-gen`（ESP-IDFの`nvs_partition_gen.py`と同じもの）で64KiB imageにでき、image内の`rlident`/`i0`・`i1`が`identity.rli1`とbyte一致することを手元で確認した（CIには入れていない）。`rlsec`全体を書き換えるので既存の`rlcounter`/`rlreplay`は消える（08 Q13で許容済みのNVS消去）。tier T2のNVS暗号化は生成器の`encrypt`と`nvs_keys` partitionで行うが、flash暗号化・secure bootのeFuse操作は不可逆で別承認のため、この手順にもtoolにも入れていない。
 
-機器内生成（既定）：`provision-pop-challenge --node <id>`→機器の保守verbが鍵生成（Entropy READY後）とPoPを返す→`provision-devcert … --challenge <hex> --pop <file>`がPoPを検証してDevCertと`identity-bundle.json`を出す→保守verbがbundleとDevCertのcnf＝自分の公開鍵を確かめてRLI1を`rlident`へ封緘・readback。**保守verb（firmware側、USB console）は未実装**で、P7-1の残り（firmware follow-up）として扱う。PoPのbyte列はRustの試験でのみ固定しており、firmware実装時に共通vector（`protocol/sdkv1-golden/`）へ加える。
+機器内生成（既定）：`provision-pop-challenge --node <id>`→機器の保守verbが鍵生成（Entropy READY後）とPoPを返す→`provision-devcert … --challenge <hex> --pop <file>`がPoPを検証してDevCertと`identity-bundle.json`を出す→保守verbがbundleとDevCertのcnf＝自分の公開鍵を確かめてRLI1を`rlident`へ封緘・readback。保守verbとPoPの共通vectorはP7の残り（下の§6.2）で実装した。
+
+### 6.2 実装状況（P7の残り：保守verb・P7-2、host試験済み・実機未試験）
+
+このbranchで実装したもの。量産custody（HSM）・eFuse（Q5）は含まない。
+
+| 部品 | 場所 | 内容 |
+|---|---|---|
+| PoPのC++ codec | `sdkv1_pop.{hpp,cpp}` | payloadのencode／厳密decode、AAD、検証（形式不正はProtocolError、node・challenge不一致と署名不正はverified=false）、機器の署名（micro-ecc決定的署名＋low-S正規化）。`protocol/sdkv1-golden/`の`pop` codec（独立Python生成器）でRust側とbyte一致し、Rust harnessはRFC 6979で再署名して一致を確認。C++側は証明書と同じくverify-only |
+| 保守console engine | `sdkv1_maintenance.{hpp,cpp}` | 1行入出力のportable engine。`status`／`keygen <node> <challenge>`／`identity <bundle hex>`。entropy portの失敗で鍵生成を拒否（security §9）。bundleは`routeloom-identity-bundle-v1`の厳密JSON読み（順序・鍵・列挙値を固定、未知のfieldは拒否）。node・公開鍵・kidをpending鍵と照合し、RLI1起動検査→twin commit→boot相当の再読込で照合してから成功を返す。`console_locked`は全verb拒否。host試験（`routeloom_sdkv1_maintenance_tests`）は共通vectorのDevCert・anchor・kidを束ねた本物のbundleで密封まで通す |
+| firmware配線 | `routeloom_espnow`の`espnow_sdkv1`、両firmwareの`main.cpp`・Kconfig | 4 store（`rlident`／`rlsite`／`rlrevo`／`rlres`、gatewayは160 resume slot）を`rlsec`上に開いて初期化し、状態をboot診断に出す（秘密なし）。consoleは`CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE`のbuildだけがRF前にUSB Serial/JTAGで起動し、8 KiBの専用taskで回る。firmware CIに`maintenance_on` cellを追加し、console分岐のbuildを確認する。静的RAM増は約5.2 KiB（console bufferはfield buildではlinkで落ちる） |
+| `SiteCaSigner` | `routeloom-provision`の`sdkv1::siteca` | `DeviceCaSigner`と同じ境界のtrait。開発用`FileSiteCaSigner`は鍵文書`routeloom-site-ca-key-v1`（0600・上書き拒否・Device CA文書と相互不可）。SiteCert発行は発行後にSite CA公開鍵で自己検証する |
+| CLI | `routeloomctl provision-siteca-keygen`／`site-cert` | `site-cert --ca-key <siteca.key> --site-id … --sak-pubkey … --network-low32 … --site-epoch … --serial … --out sitecert.cwt`。SAK公開鍵はsite PCから帯域外で受け取り、Site Authorityが起動時に不一致を拒否する。daemon socketを使わない |
+| 在庫出力 | `sdkv1::office`の`inventory_file_json` | `provision-devcert`／`provision-identity`が`inventory.json`（`routeloom-inventory-v1`、DevCert由来の6 field＋format marker）をout-dirへ書く。stdoutの1行はbyte互換で残す |
 
 ## 7. 失敗の扱い
 
@@ -264,4 +277,4 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 | V1-H06 | ACL：read権限では`join.decide`不可（**P3-3でhost試験済み**：`MEMBERSHIP_READ`だけのprincipalは一覧可・revoke不可、grant無しは`site.status`も不可） |
 | V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行（**P3-3でhost試験済み**：SQLite storeを開き直し、同じMemberCert byte列を再発行） |
 | V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |
-| V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。機器の保守verbとHILは未実施） |
+| V1-H09 | routeloom-provision：RLI1・DevCertのgolden一致、所持証明の無い公開鍵には発行しない（**P7-1でhost試験済み**：`tests/sdkv1_office.rs`が発行したDevCert・注入鍵RLI1を共通vectorとbyte一致で確認し、PoPの不一致・改ざん・再送を拒否。**P7の残りでhost試験済み**：PoPのC++/Rust共通vectorとbyte一致、保守verbの鍵生成・PoP・bundle密封・readback（共通vectorの本物bundle）、SiteCert発行のgolden一致と`inventory.json`。HILは未実施） |
