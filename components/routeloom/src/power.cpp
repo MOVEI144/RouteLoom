@@ -184,13 +184,38 @@ PowerCoordinator::PowerCoordinator(const PowerConfig& config, MeshNode& node,
                                    PowerPort& port, PowerStorage& storage,
                                    PowerEvents& events) noexcept
     : config_(config), node_(node), port_(port), storage_(storage),
-      events_(events) {}
+      events_(events) {
+  save_target_.fill(0xFF);
+}
+
+void PowerCoordinator::notify_transition(const PowerState from,
+                                         const PowerState to,
+                                         const char* reason) noexcept {
+  CallbackScope callback(in_callback_);
+  events_.on_transition(from, to, reason);
+}
+
+void PowerCoordinator::notify_pending_result(
+    const PendingDeliveryRecord& record, const StatusCode result) noexcept {
+  CallbackScope callback(in_callback_);
+  events_.on_pending_result(record, result);
+}
+
+void PowerCoordinator::notify_diagnostic(const char* reason) noexcept {
+  CallbackScope callback(in_callback_);
+  events_.on_diagnostic(reason);
+}
 
 void PowerCoordinator::transition(const PowerState next,
                                   const char* reason) noexcept {
   if (state_ == next) return;
-  events_.on_transition(state_, next, reason);
+  const PowerState from = state_;
+  // Post-state notification: the new state is fully in effect (mask and
+  // ticket updates included) before the application runs, so a callback
+  // observes `to` from state(). Mutating calls from the callback are Busy —
+  // nothing overwrites this assignment behind the notification.
   state_ = next;
+  notify_transition(from, next, reason);
 }
 
 std::uint32_t PowerCoordinator::pending_generation() const noexcept {
@@ -212,6 +237,9 @@ void PowerCoordinator::issue_ticket() noexcept {
 Status PowerCoordinator::begin(const ResetCause cause,
                                const ElapsedInterval elapsed,
                                const MonotonicMs now_ms) noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
   if (begun_) {
     return Status::error(StatusCode::AlreadyExists, "coordinator already begun");
   }
@@ -225,77 +253,188 @@ Status PowerCoordinator::begin(const ResetCause cause,
 
 Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
                                        const MonotonicMs now_ms) noexcept {
-  if (!begun_ || state_ != PowerState::Running || !node_.started()) {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  if (!begun_ || !node_.started()) {
     return Status::error(StatusCode::InvalidState, "not running");
   }
-  request_ = request;
-  node_.set_draining(true);
-  drain_deadline_ms_ = now_ms + config_.drain_timeout_ms;
-  transition(PowerState::Draining, "SLEEP_PREPARE");
+  if (state_ != PowerState::Running) {
+    return Status::error(StatusCode::InvalidState, "not running");
+  }
+  if (image_sequence_ == UINT32_MAX) {
+    return Status::error(StatusCode::CounterExhausted,
+                         "SLEEP_SEQUENCE_EXHAUSTED");
+  }
+  start_prepare(request, now_ms);
   return Status::success();
 }
 
 Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
-  if (state_ != PowerState::Draining && state_ != PowerState::ReadyToSleep) {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  if (!sleep_attempt_active()) {
     return Status::error(StatusCode::InvalidState, "no sleep in progress");
   }
-  abort_to_running(reason == nullptr ? "SLEEP_ABORT_REQUEST" : reason);
+  if (reason == nullptr) reason = "SLEEP_ABORT_REQUEST";
+  // Immediate: the reason is consumed synchronously by the notification
+  // below, never retained, so no copy is needed.
+  abort_to_running(reason);
   return Status::success();
 }
 
 Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
                                      const MonotonicMs now_ms) noexcept {
-  if (state_ != PowerState::ReadyToSleep) {
-    return Status::error(StatusCode::InvalidState, "not ready to sleep");
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
   }
-  if (!image_valid_) {
-    // READY_TO_SLEEP is only reachable after commit_image() succeeded, but
-    // re-check the durable flag: entering deep sleep without a committed
-    // image would silently lose the resume context.
-    return Status::error(StatusCode::InvalidState, "SLEEP_IMAGE_MISSING");
-  }
-  if (!ticket_valid(ticket)) {
+  // Value-copy the ticket at receipt: callers may alias ticket() itself,
+  // which later calls invalidate — the copy below stays intact.
+  const SleepTicket submitted = ticket;
+  // Receipt gate: READY, armed image, current ticket.
+  // A rejection here changes nothing — a bogus ticket alone never consumes
+  // or destroys the outstanding one.
+  if (!validate_enter(submitted, false)) {
+    if (state_ != PowerState::ReadyToSleep) {
+      return Status::error(StatusCode::InvalidState, "not ready to sleep");
+    }
+    if (!image_valid_ || !sleep_image_armed_) {
+      return Status::error(StatusCode::InvalidState, "SLEEP_IMAGE_MISSING");
+    }
     return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
   }
-  // Time spent waiting in READY_TO_SLEEP is real elapsed lifetime: re-derive
-  // every pending's remaining budget against its absolute deadline and
-  // re-commit the image so work that expired while waiting is not
-  // resurrected after the wake.
-  bool pending_changed = false;
-  for (auto& record : image_.pending) {
-    if (!record.used) continue;
-    if (record.expires_at_ms <= now_ms) {
-      events_.on_pending_result(record, StatusCode::Expired);
-      record.used = false;
-      pending_changed = true;
-      continue;
-    }
-    const auto remaining =
-        static_cast<std::uint32_t>(record.expires_at_ms - now_ms);
-    if (remaining != record.stored_remaining_ms) {
-      record.stored_remaining_ms = remaining;
-      pending_changed = true;
+  return run_enter(submitted, now_ms);
+}
+
+bool PowerCoordinator::validate_enter(const SleepTicket& ticket,
+                                      const bool handoff) const noexcept {
+  if (handoff) {
+    if (state_ != PowerState::Sleeping || !entering_) return false;
+  } else if (state_ != PowerState::ReadyToSleep) {
+    return false;
+  }
+  if (!ticket.issued || !ticket_.issued || ticket.id != ticket_.id) return false;
+  if (ticket.radio_generation != radio_generation_) return false;
+  if (ticket.config_revision != node_.config_revision()) return false;
+  if (ticket.pending_generation != pending_generation()) return false;
+  if (!image_valid_ || !sleep_image_armed_) return false;
+  for (const auto plan : carry_plan_) {
+    if (plan == CarryPlanKind::Expired) {
+      return false;  // un-notified carry plan: settlement did not finish
     }
   }
-  if (pending_changed) {
-    // Write the refreshed image to BOTH slots: if a power cut tears one
-    // commit, the other still carries the corrected lifetimes rather than an
-    // older image whose longer budgets would resurrect expired work.
+  if (!node_.draining() || !radio_quiesced_) return false;
+  return true;
+}
+
+Status PowerCoordinator::run_enter(const SleepTicket& ticket,
+                                   const MonotonicMs now_ms) noexcept {
+  // Execution-start gate: the ticket was valid at receipt; re-check before
+  // touching anything.
+  if (!validate_enter(ticket, false)) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+    return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
+  }
+  // Time spent waiting in READY_TO_SLEEP is real elapsed lifetime: plan the
+  // refresh from the carry set's absolute deadlines first, commit it, and
+  // only then terminate what expired while waiting — never the reverse.
+  std::array<bool, kPowerPendingCapacity> expired_mask{};
+  std::array<std::uint32_t, kPowerPendingCapacity> refreshed{};
+  bool changed = false;
+  for (std::size_t i = 0; i < carry_.size(); ++i) {
+    if (!carry_[i].used) continue;
+    if (carry_[i].expires_at_ms <= now_ms) {
+      expired_mask[i] = true;
+      changed = true;
+      continue;
+    }
+    refreshed[i] =
+        static_cast<std::uint32_t>(carry_[i].expires_at_ms - now_ms);
+    if (refreshed[i] != carry_[i].stored_remaining_ms) changed = true;
+  }
+  if (changed) {
+    PowerImage refresh = image_;
+    for (auto& record : refresh.pending) record.used = false;
+    for (std::size_t i = 0; i < carry_.size(); ++i) {
+      if (!carry_[i].used) continue;
+      refresh.pending[i] = carry_[i];
+      refresh.pending[i].stored_remaining_ms = refreshed[i];
+    }
+    // The first slot retains every carried record, including those whose
+    // lifetime reached zero. If the final image does not land, reboot still
+    // reports their expiry.
     for (std::uint8_t copy = 0; copy < kPowerImageSlots; ++copy) {
-      image_.sequence = image_sequence_ + 1;
-      const auto refresh = commit_image(image_);
-      if (!refresh) {
-        // Abort instead of sleeping on a stale image. The durable records
-        // are not lost; they survive for a later resume.
-        abort_to_running(refresh.detail);
-        return refresh;
+      if (copy != 0) {
+        for (std::size_t i = 0; i < carry_.size(); ++i) {
+          if (expired_mask[i]) refresh.pending[i].used = false;
+        }
+      }
+      if (!next_image_sequence(refresh.sequence)) {
+        ticket_ = SleepTicket{};
+        sleep_image_armed_ = false;
+        disk_pending_possible_ = true;
+        abort_to_running("SLEEP_SEQUENCE_EXHAUSTED");
+        return Status::error(StatusCode::CounterExhausted,
+                             "SLEEP_SEQUENCE_EXHAUSTED");
+      }
+      const auto commit = commit_image(refresh);
+      if (!commit) {
+        // Abort instead of sleeping on a stale image, with no new Expired
+        // notification: the refresh never landed, so nothing terminated.
+        ticket_ = SleepTicket{};
+        sleep_image_armed_ = false;
+        abort_to_running(commit.detail);
+        return commit;
+      }
+    }
+    disk_pending_possible_ = has_pending(refresh);
+    for (std::size_t i = 0; i < carry_.size(); ++i) {
+      if (carry_[i].used && !expired_mask[i]) {
+        carry_[i].stored_remaining_ms = refreshed[i];
       }
     }
   }
-  ticket_ = SleepTicket{};  // consume: no other ticket can re-enter
+  // Terminate what the refresh dropped. The notifications below are app
+  // callbacks: a refused send from one still retires the ticket's
+  // generation, so the entry revalidates before the handoff.
+  for (std::size_t i = 0; i < carry_.size(); ++i) {
+    if (!carry_[i].used || !expired_mask[i]) continue;
+    const PendingDeliveryRecord record = carry_[i];
+    carry_[i].used = false;
+    carry_plan_[i] = CarryPlanKind::Unused;
+    notify_pending_result(record, StatusCode::Expired);
+  }
+  if (!validate_enter(ticket, false)) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+    return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
+  }
+  // Handoff begins. SLEEP_ENTER reports "platform handoff in progress", not
+  // proof of physical sleep: a failed wake setup still aborts from here.
+  entering_ = true;
   transition(PowerState::Sleeping, "SLEEP_ENTER");
+  if (!validate_enter(ticket, true)) {
+    entering_ = false;
+    abort_to_running("SLEEP_TICKET_INVALID");
+    return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
+  }
   auto status = port_.configure_wake(request_.wake);
-  if (status) status = port_.enter_sleep();
+  if (!status) {
+    entering_ = false;
+    abort_to_running("SLEEP_ENTER_FAILED");
+    return status;
+  }
+  // Final gate and the single port call with no application callback
+  // between them: nothing can invalidate the ticket in this gap.
+  if (!validate_enter(ticket, true)) {
+    entering_ = false;
+    abort_to_running("SLEEP_TICKET_INVALID");
+    return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
+  }
+  ticket_ = SleepTicket{};  // consume: at most one platform enter per ticket
+  sleep_image_armed_ = false;
+  status = port_.enter_sleep();
+  entering_ = false;
   if (!status) {
     abort_to_running("SLEEP_ENTER_FAILED");
     return status;
@@ -306,6 +445,9 @@ Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
 Status PowerCoordinator::wake(const ResetCause cause,
                               const ElapsedInterval elapsed,
                               const MonotonicMs now_ms) noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
   if (state_ != PowerState::Sleeping) {
     return Status::error(StatusCode::InvalidState, "not sleeping");
   }
@@ -315,17 +457,43 @@ Status PowerCoordinator::wake(const ResetCause cause,
   return Status::success();
 }
 
+Status PowerCoordinator::notify_app_event() noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  ++app_events_;
+  if (sleep_attempt_active()) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+  }
+  return Status::success();
+}
+
+Status PowerCoordinator::notify_radio_reset() noexcept {
+  if (in_callback()) {
+    return Status::error(StatusCode::Busy, "POWER_IN_CALLBACK");
+  }
+  ++radio_generation_;
+  if (sleep_attempt_active()) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+  }
+  return Status::success();
+}
+
 void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
+  // Re-entrant drive from a callback is a silent no-op: no side effects, no
+  // diagnostic.
+  if (in_callback()) return;
   switch (state_) {
     case PowerState::Running:
       node_.poll(now_ms);
       break;
-    case PowerState::Draining:
+    case PowerState::Draining: {
       node_.poll(now_ms);
       if (node_.quiesced() || now_ms >= drain_deadline_ms_) {
-        finish_drain(now_ms);
+        settle_current_attempt(now_ms);
       }
       break;
+    }
     case PowerState::ReadyToSleep:
       // Radio is quiesced; a ticket invalidated by late activity aborts the
       // sleep attempt instead of entering on a stale snapshot.
@@ -344,8 +512,8 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
         if (!discovery_started_) {
           discovery_started_ = true;
           const auto discovery = port_.start_discovery(image_);
-          events_.on_diagnostic(discovery ? "RESUME_DISCOVERY_STARTED"
-                                        : discovery.detail);
+          notify_diagnostic(discovery ? "RESUME_DISCOVERY_STARTED"
+                                      : discovery.detail);
         }
         outcome_ = ResumeOutcome::DiscoveryRequired;
         transition(PowerState::Running, "RESUME_UNCONFIRMED");
@@ -357,139 +525,324 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
   }
 }
 
-void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
+void PowerCoordinator::start_prepare(const SleepRequest& request,
+                                     const MonotonicMs start_at) noexcept {
+  request_ = request;
+  node_.set_draining(true);
+  drain_deadline_ms_ = start_at + config_.drain_timeout_ms;
+  sleep_image_armed_ = false;
+  transition(PowerState::Draining, "SLEEP_PREPARE");
+}
+
+void PowerCoordinator::settle_current_attempt(const MonotonicMs now_ms) noexcept {
   transition(PowerState::Persisting,
              node_.quiesced() ? "DRAIN_SETTLED" : "DRAIN_DEADLINE");
-  // Records already durable in the previous image — e.g. a pending retained
-  // when its resume re-inject failed — are invisible to the node snapshot
-  // below: the live delivery is no longer offerable. They are carried over
-  // explicitly once the fresh snapshot has landed. The whole image is kept
-  // for rollback: while the deliveries it references are still live (i.e.
-  // until apply_sleep_dispositions runs), image_ must only ever describe
-  // durable-bound pendings. An abort before then restores this image so the
-  // uncommitted snapshot cannot leak into the next drain's carry-over set
-  // and resurrect work that completed while the node stayed awake.
-  const auto previous_image = image_;
-  image_ = PowerImage{};
+  // Phase 1: plan and commit WITHOUT changing delivery state or notifying.
+  // A failure here aborts with live work, carry set and holds untouched.
+  plan_sleep_image(now_ms);
+  const auto status = persist_image(now_ms);
+  if (!status) {
+    abort_to_running(status.detail);
+    return;
+  }
+  // Phase 2: the image is durable — only now settle. Every callback below
+  // still sees PERSISTING with the node draining: send()/send_group() are
+  // refused by the drain pause, and coordinator calls are Busy, so the
+  // settlement always runs to completion — no abort can land mid-way.
+  for (std::size_t i = 0; i < carry_.size(); ++i) {
+    if (carry_plan_[i] != CarryPlanKind::Expired) {
+      continue;
+    }
+    const PendingDeliveryRecord record = carry_[i];
+    carry_[i].used = false;
+    carry_plan_[i] = CarryPlanKind::Unused;
+    notify_pending_result(record, StatusCode::Expired);
+  }
+  while (node_.settle_one_sleep_delivery(
+      request_.pending_policy,
+      [&](const MessageId& id) { return claim_saved(id); })) {
+  }
+  while (node_.settle_one_sleep_group_origin(request_.pending_policy)) {
+  }
+  while (true) {
+    const SleepHoldRelease released = node_.release_one_group_hold_for_sleep();
+    if (released == SleepHoldRelease::NonePending) break;
+    if (released == SleepHoldRelease::StreamInvariant) {
+      // Holds are kept; the attempt cannot honestly proceed to a ticket.
+      abort_to_running("GROUP_HOLD_STREAM_MISSING");
+      return;
+    }
+  }
+  node_.quiesce_for_sleep();
+  const auto radio = port_.quiesce_radio();
+  if (!radio) {
+    abort_to_running(radio.detail);
+    return;
+  }
+  radio_quiesced_ = true;
+  ++radio_generation_;
+  // Pre-ticket gate: leftover plans or unclaimed records mean the commit
+  // and the settlement disagree — abort instead of issuing a ticket on
+  // half-settled books. Refused sends need no gate here: their
+  // work_generation bump is baked into the freshly issued ticket, and the
+  // caller already saw the deterministic NODE_DRAINING error.
+  if (!sleep_books_consistent()) {
+    abort_to_running("SLEEP_BOOKS_INCONSISTENT");
+    return;
+  }
+  issue_ticket();
+  sleep_image_armed_ = true;
+  transition(PowerState::ReadyToSleep, "SLEEP_READY");
+}
+
+void PowerCoordinator::plan_sleep_image(const MonotonicMs now_ms) noexcept {
+  for (auto& record : image_.pending) record = PendingDeliveryRecord{};
+  fresh_live_mask_ = 0;
+  for (auto& plan : carry_plan_) plan = CarryPlanKind::Unused;
+  save_target_.fill(0xFF);
+  saved_live_mask_ = 0;
   image_.network = node_.config().network;
   image_.node = node_.config().node;
-  // Phase 1: snapshot durable work into the image WITHOUT changing delivery
-  // state. If the commit below fails, abort_to_running leaves every delivery
-  // live so the work can retry instead of being marked SLEEP_SAVED and lost.
+  // Carry first: an un-notified durable carry is NEVER evicted from the
+  // candidate by fresh work. Settlement always runs to completion, so a
+  // carry left out of the candidate would be dropped, never retried —
+  // fresh overflow instead fails its live delivery loudly
+  // (SLEEP_PERSIST_FULL) in phase 2. A carry that outlived its deadline
+  // while awake terminates loudly in phase 2. The carry set fits the
+  // candidate by construction (same capacity).
+  std::array<std::uint8_t, kPowerPendingCapacity> carry_slot{};
+  carry_slot.fill(0xFF);
+  for (std::size_t j = 0; j < carry_.size(); ++j) {
+    if (!carry_[j].used) continue;
+    if (carry_[j].expires_at_ms <= now_ms) {
+      carry_plan_[j] = CarryPlanKind::Expired;
+      continue;
+    }
+    for (std::size_t i = 0; i < image_.pending.size(); ++i) {
+      if (image_.pending[i].used) continue;
+      image_.pending[i] = carry_[j];
+      image_.pending[i].stored_remaining_ms =
+          static_cast<std::uint32_t>(carry_[j].expires_at_ms - now_ms);
+      carry_slot[i] = static_cast<std::uint8_t>(j);
+      break;
+    }
+    carry_plan_[j] = CarryPlanKind::Keep;
+  }
+  const auto fill_slot = [&](const std::size_t i,
+                               const DeliverySnapshot& snapshot) noexcept {
+    PendingDeliveryRecord& record = image_.pending[i];
+    record.used = true;
+    record.original_id = snapshot.id;
+    record.destination = snapshot.destination;
+    record.delivery = snapshot.options.delivery;
+    record.priority = snapshot.options.priority;
+    record.hop_limit = snapshot.options.hop_limit;
+    record.expires_at_ms = snapshot.expires_at_ms;
+    record.stored_remaining_ms =
+        static_cast<std::uint32_t>(snapshot.expires_at_ms - now_ms);
+    record.payload_size = static_cast<std::uint8_t>(snapshot.payload.size);
+    if (snapshot.payload.size != 0) {
+      std::memcpy(record.payload.data(), snapshot.payload.data,
+                  snapshot.payload.size);
+    }
+    fresh_live_mask_ = static_cast<std::uint8_t>(
+        fresh_live_mask_ | static_cast<std::uint8_t>(1U << i));
+  };
+  // Fresh snapshot into the remaining room: durable work, or every live
+  // delivery under Save. Expired live work is never persisted. A fresh
+  // record that re-persists a carried id supersedes its namesake in place
+  // (no extra slot); one that finds the candidate full is simply not
+  // placed — phase 2 fails it as SLEEP_PERSIST_FULL, never silently.
   node_.snapshot_for_sleep(request_.pending_policy,
                            [&](const DeliverySnapshot& snapshot) {
                              if (snapshot.expires_at_ms <= now_ms) return false;
-                             for (auto& record : image_.pending) {
-                               if (record.used) continue;
-                               record.used = true;
-                               record.original_id = snapshot.id;
-                               record.destination = snapshot.destination;
-                               record.delivery = snapshot.options.delivery;
-                               record.priority = snapshot.options.priority;
-                               record.hop_limit = snapshot.options.hop_limit;
-                               record.expires_at_ms = snapshot.expires_at_ms;
-                               record.stored_remaining_ms = static_cast<std::uint32_t>(
-                                   snapshot.expires_at_ms - now_ms);
-                               record.payload_size = static_cast<std::uint8_t>(
-                                   snapshot.payload.size);
-                               if (snapshot.payload.size != 0) {
-                                 std::memcpy(record.payload.data(), snapshot.payload.data,
-                                             snapshot.payload.size);
+                             for (std::size_t i = 0; i < image_.pending.size();
+                                  ++i) {
+                               if (!image_.pending[i].used) continue;
+                               if ((fresh_live_mask_ &
+                                    static_cast<std::uint8_t>(1U << i)) != 0) {
+                                 continue;
                                }
+                               if (!(image_.pending[i].original_id ==
+                                     snapshot.id)) {
+                                 continue;
+                               }
+                               fill_slot(i, snapshot);
+                               const std::uint8_t target = carry_slot[i];
+                               if (target < carry_.size()) {
+                                 carry_plan_[target] =
+                                     CarryPlanKind::CoveredByFresh;
+                                 save_target_[i] = target;
+                               }
+                               return true;
+                             }
+                             for (std::size_t i = 0; i < image_.pending.size();
+                                  ++i) {
+                               if (image_.pending[i].used) continue;
+                               fill_slot(i, snapshot);
                                return true;
                              }
                              return false;
                            });
-  // Carry over still-live records the snapshot did not cover. A record the
-  // snapshot re-persisted under the same logical id is superseded by it;
-  // one that outlived its deadline while awake terminates loudly here; one
-  // that cannot fit reports NoCapacity rather than vanishing silently.
-  bool previous_had_pending = false;
-  for (const auto& record : previous_image.pending) {
-    if (!record.used) continue;
-    previous_had_pending = true;
-    bool covered = false;
-    for (const auto& fresh : image_.pending) {
-      if (fresh.used && fresh.original_id == record.original_id) {
-        covered = true;
+  // Claim targets: every other fresh record takes a free carry slot.
+  // Fresh-placed + Keep <= capacity by construction above. Expired slots
+  // count as free here: phase 2 consumes them before the first claim runs,
+  // so they are available when the claims land. A missing slot (impossible
+  // by the counting above) defensively settles as unsaved.
+  for (std::size_t i = 0; i < image_.pending.size(); ++i) {
+    if ((fresh_live_mask_ & static_cast<std::uint8_t>(1U << i)) == 0 ||
+        save_target_[i] != 0xFF) {
+      continue;
+    }
+    for (std::size_t j = 0; j < carry_.size(); ++j) {
+      const bool reusable =
+          !carry_[j].used || carry_plan_[j] == CarryPlanKind::Expired;
+      if (!reusable) continue;
+      bool taken = false;
+      for (const auto target : save_target_) taken = taken || target == j;
+      if (!taken) {
+        save_target_[i] = static_cast<std::uint8_t>(j);
         break;
       }
     }
-    if (covered) continue;
-    if (record.expires_at_ms <= now_ms) {
-      events_.on_pending_result(record, StatusCode::Expired);
-      continue;
-    }
-    bool placed = false;
-    for (auto& slot : image_.pending) {
-      if (slot.used) continue;
-      slot = record;
-      slot.stored_remaining_ms =
-          static_cast<std::uint32_t>(record.expires_at_ms - now_ms);
-      placed = true;
-      break;
-    }
-    if (!placed) {
-      events_.on_pending_result(record, StatusCode::NoCapacity);
-    }
   }
-  const auto status = persist_image();
-  if (!status) {
-    // Abort before dispositions ran: the rebuilt image was never persisted
-    // and every delivery it captured is still live. Roll back so its
-    // records do not become holdover input for the next drain.
-    image_ = previous_image;
-    abort_to_running(status.detail);
-    return;
-  }
-  if (previous_had_pending) {
-    // The slot this commit did not touch still holds the previous image,
-    // whose copies of these records carry a longer, pre-decay stored
-    // budget. Overwrite it too so a torn commit cannot resurrect that
-    // budget — same dual-write pattern sleep_enter uses for its refresh.
-    image_.sequence = image_sequence_ + 1;
-    const auto second = commit_image(image_);
-    if (!second) {
-      image_ = previous_image;
-      abort_to_running(second.detail);
-      return;
-    }
-  }
-  // Phase 2: the image is durable — only now apply dispositions and drop the
-  // radio-bound queues.
-  node_.apply_sleep_dispositions(
-      request_.pending_policy, [&](const MessageId& id) {
-        for (const auto& record : image_.pending) {
-          if (record.used && record.original_id == id) return true;
-        }
-        return false;
-      });
-  node_.quiesce_for_sleep();
 }
 
-Status PowerCoordinator::persist_image() noexcept {
-  image_.sequence = image_sequence_ + 1;
+bool PowerCoordinator::claim_saved(const MessageId& id) noexcept {
+  for (std::size_t i = 0; i < image_.pending.size(); ++i) {
+    if (!image_.pending[i].used ||
+        (fresh_live_mask_ & static_cast<std::uint8_t>(1U << i)) == 0 ||
+        !(image_.pending[i].original_id == id)) {
+      continue;
+    }
+    const std::uint8_t target = save_target_[i];
+    if (target >= carry_.size()) return false;  // defensive: unsettled
+    carry_[target] = image_.pending[i];
+    carry_[target].used = true;
+    // The target was a CoveredByFresh slot (replaced in place), a free
+    // slot, or an Expired slot phase 2 already consumed: in all cases it
+    // now holds a live carried record.
+    carry_plan_[target] = CarryPlanKind::Keep;
+    saved_live_mask_ = static_cast<std::uint8_t>(
+        saved_live_mask_ | static_cast<std::uint8_t>(1U << i));
+    return true;
+  }
+  return false;
+}
+
+bool PowerCoordinator::sleep_books_consistent() const noexcept {
+  for (const auto plan : carry_plan_) {
+    if (plan == CarryPlanKind::Expired) {
+      return false;
+    }
+  }
+  for (const auto& carried : carry_) {
+    if (!carried.used) continue;
+    bool in_candidate = false;
+    for (const auto& record : image_.pending) {
+      if (record.used && record.original_id == carried.original_id) {
+        in_candidate = true;
+        break;
+      }
+    }
+    if (!in_candidate) return false;
+  }
+  for (std::size_t i = 0; i < image_.pending.size(); ++i) {
+    if ((fresh_live_mask_ & static_cast<std::uint8_t>(1U << i)) != 0 &&
+        (saved_live_mask_ & static_cast<std::uint8_t>(1U << i)) == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Status PowerCoordinator::persist_image(const MonotonicMs now_ms) noexcept {
+  // Durable commit only: capture the platform cache and write the image.
+  // Radio quiesce, the ticket and the READY_TO_SLEEP transition belong to
+  // the settlement chain AFTER the dispositions — issuing them here would
+  // let a callback observe READY_TO_SLEEP while its own work is still
+  // being torn down. Callback-free: live work, carry set and holds stay
+  // untouched, so any failure aborts with nothing half-settled.
+  if (!next_image_sequence(image_.sequence)) {
+    disk_pending_possible_ = true;
+    return Status::error(StatusCode::CounterExhausted,
+                         "SLEEP_SEQUENCE_EXHAUSTED");
+  }
   image_.config_revision = node_.config_revision();
   auto status = port_.capture_cache(image_);
   if (!status) return status;
+  // An older slot may still hold pending records. When two writes are needed,
+  // the first keeps every carried record (with its current remaining life):
+  // if the final image does not land, reboot must not lose a carry whose
+  // expiry or same-id replacement phase 2 never reported. The final
+  // candidate lands only in the second slot, after the retained set is
+  // safely staged.
+  const bool dual_write = disk_pending_possible_;
+  if (dual_write) {
+    PowerImage staged = image_;
+    for (auto& record : staged.pending) record = PendingDeliveryRecord{};
+    for (std::size_t i = 0; i < carry_.size(); ++i) {
+      if (!carry_[i].used) continue;
+      staged.pending[i] = carry_[i];
+      staged.pending[i].stored_remaining_ms =
+          carry_[i].expires_at_ms > now_ms
+              ? static_cast<std::uint32_t>(carry_[i].expires_at_ms - now_ms)
+              : 0;
+    }
+    // Keep fresh candidate records in the room left by carry. A record
+    // successfully re-injected on wake is live rather than carried, but its
+    // durable copy must not disappear if the final write fails.
+    for (const auto& candidate : image_.pending) {
+      if (!candidate.used) continue;
+      bool present = false;
+      for (const auto& record : staged.pending) {
+        present = present ||
+                  (record.used && record.original_id == candidate.original_id);
+      }
+      if (present) continue;
+      for (auto& record : staged.pending) {
+        if (record.used) continue;
+        record = candidate;
+        break;
+      }
+    }
+    status = commit_image(staged);
+    if (!status) return status;
+    if (!next_image_sequence(image_.sequence)) {
+      disk_pending_possible_ = true;
+      return Status::error(StatusCode::CounterExhausted,
+                           "SLEEP_SEQUENCE_EXHAUSTED");
+    }
+  }
   status = commit_image(image_);
   if (!status) return status;
-  status = port_.quiesce_radio();
-  if (!status) return status;
-  radio_quiesced_ = true;
-  ++radio_generation_;
-  issue_ticket();
-  transition(PowerState::ReadyToSleep, "SLEEP_READY");
+  disk_pending_possible_ = has_pending(image_);
   return Status::success();
+}
+
+bool PowerCoordinator::next_image_sequence(std::uint32_t& out) noexcept {
+  if (image_sequence_ == UINT32_MAX) return false;
+  out = image_sequence_ + 1;
+  return true;
 }
 
 Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {
   std::array<std::uint8_t, kPowerImageRecordSize> record{};
   auto status = encode_image(image, record);
-  if (!status) return status;
+  if (!status) {
+    image_sequence_ = image.sequence;  // numbering is consumed regardless
+    disk_pending_possible_ = true;
+    return status;
+  }
   status = storage_.write(static_cast<std::uint8_t>(image.sequence & 1U),
                           ByteView{record.data(), record.size()});
-  if (!status) return status;
+  if (!status) {
+    // A failed write may still have torn the slot: numbering is consumed so
+    // the sequence is never reused, and the slot counts as suspect.
+    image_sequence_ = image.sequence;
+    disk_pending_possible_ = true;
+    return status;
+  }
   image_sequence_ = image.sequence;
   image_valid_ = true;
   return Status::success();
@@ -499,18 +852,20 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
   found = false;
   std::array<std::uint8_t, kPowerImageRecordSize> record{};
   bool any = false;
+  bool any_pending = false;
   std::uint32_t best_sequence = 0;
   for (std::uint8_t slot = 0; slot < kPowerImageSlots; ++slot) {
     const auto status =
         storage_.read(slot, MutableByteView{record.data(), record.size()});
     if (!status) {
-      events_.on_diagnostic(status.detail);
+      notify_diagnostic(status.detail);
       continue;
     }
     PowerImage candidate{};
     if (!decode_image(ByteView{record.data(), record.size()}, candidate)) {
       continue;  // torn/corrupt slot: discard, never erase
     }
+    any_pending = any_pending || has_pending(candidate);
     if (!any || candidate.sequence > best_sequence) {
       image = candidate;
       best_sequence = candidate.sequence;
@@ -521,6 +876,7 @@ Status PowerCoordinator::load_image(PowerImage& image, bool& found) noexcept {
     found = true;
     image_sequence_ = best_sequence;
   }
+  disk_pending_possible_ = any_pending;
   return Status::success();
 }
 
@@ -540,13 +896,16 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
   discovery_started_ = false;
   radio_quiesced_ = false;
   image_valid_ = false;
+  sleep_image_armed_ = false;
+  for (auto& record : carry_) record = PendingDeliveryRecord{};
+  for (auto& plan : carry_plan_) plan = CarryPlanKind::Unused;
 
   PowerImage stored{};
   bool found = false;
   (void)load_image(stored, found);
   const bool usable = found && image_usable(stored);
   if (found && !usable) {
-    events_.on_diagnostic("SLEEP_IMAGE_CONTEXT_MISMATCH");
+    notify_diagnostic("SLEEP_IMAGE_CONTEXT_MISMATCH");
   }
 
   // Saved peers first, then the platform's current peer table (static config
@@ -577,7 +936,7 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
 
   ++radio_generation_;
   const auto radio = port_.start_radio(&merged);
-  if (!radio) events_.on_diagnostic(radio.detail);
+  if (!radio) notify_diagnostic(radio.detail);
 
   if (!node_.started()) {
     (void)node_.start(now_ms);
@@ -594,9 +953,17 @@ void PowerCoordinator::resume_flow(const ResetCause cause,
     if (has_pending(stored)) {
       // Consume only the pendings that were re-injected; records whose send
       // failed stay in `merged.pending` so the next sleep image retains them
-      // instead of silently dropping durable work.
-      merged.sequence = image_sequence_ + 1;
-      (void)commit_image(merged);
+      // instead of silently dropping durable work. A single slot: the other
+      // still holds the pre-consume image, which is exactly what
+      // disk_pending_possible_ remembers for the next phase 1.
+      if (next_image_sequence(merged.sequence)) {
+        (void)commit_image(merged);
+      }
+    }
+    // The retained records become this incarnation's carry set; the next
+    // prepare plans them into its candidate explicitly.
+    for (std::size_t i = 0; i < carry_.size(); ++i) {
+      carry_[i] = merged.pending[i];
     }
   }
   image_ = merged;
@@ -633,7 +1000,7 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
         config_.deadline_policy, record.stored_remaining_ms, elapsed, remaining);
     if (!resumed) {
       // TIME_UNCERTAIN/EXPIRED: never auto-resend on a fabricated clock.
-      events_.on_pending_result(record, resumed.code);
+      notify_pending_result(record, resumed.code);
       continue;
     }
     const SendOptions options{record.delivery, record.priority, remaining,
@@ -646,31 +1013,44 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
     const auto sent = node_.resume_delivery(
         record.original_id, record.destination,
         ByteView{record.payload.data(), record.payload_size}, options, now_ms);
-    events_.on_pending_result(record, sent.ok() ? StatusCode::Ok : sent.code);
     if (!sent.ok() && keep != nullptr) {
       // Re-injection failed (queue full, draining, ...): keep the durable
       // record — with the decayed lifetime — so a later sleep image retries
       // it instead of dropping it at the storage layer. expires_at_ms is
       // RAM-only bookkeeping, so it is re-anchored on this boot's clock and
-      // awake time still counts against the deadline.
+      // awake time still counts against the deadline. Settled BEFORE the
+      // notification below, so a callback observes final bookkeeping.
       *keep = record;
       keep->used = true;
       keep->stored_remaining_ms = remaining;
       keep->expires_at_ms = now_ms + remaining;
     }
+    notify_pending_result(record, sent.ok() ? StatusCode::Ok : sent.code);
   }
 }
 
 void PowerCoordinator::abort_to_running(const char* reason) noexcept {
-  events_.on_diagnostic(reason);
+  // All teardown first, notifications last: a mutating call inside the
+  // notifications below is Busy — it can never re-run this worker.
   ticket_ = SleepTicket{};
+  sleep_image_armed_ = false;
+  Status radio_status = Status::success();
   if (radio_quiesced_) {
     ++radio_generation_;
-    (void)port_.start_radio(&image_);
+    radio_status = port_.start_radio(&image_);
     radio_quiesced_ = false;
   }
   node_.set_draining(false);
-  transition(PowerState::Running, "SLEEP_ABORTED");
+  const PowerState from = state_;
+  state_ = PowerState::Running;
+  notify_diagnostic(reason);
+  // A failed radio restart is surfaced, never hidden: RUNNING means control
+  // is back with the owner, not that the radio is healthy. The ticket stays
+  // invalid and later radio errors take the normal recovery path.
+  if (!radio_status) notify_diagnostic(radio_status.detail);
+  if (from != PowerState::Running) {
+    notify_transition(from, PowerState::Running, "SLEEP_ABORTED");
+  }
 }
 
 }  // namespace routeloom
