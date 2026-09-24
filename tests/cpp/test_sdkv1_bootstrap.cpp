@@ -768,7 +768,7 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapAuth, 1, 2, 1, 2, MessageId{101, 1}, view,
                         /*end_protected=*/true, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), routeloom_test::sim_rx_metadata(w.reply_ports.at(2).get(), 1), w.now);
     CHECK(tap_b.metas.empty());
     CHECK(w.obs(2)->has_diag("BOOTSTRAP_SCOPE_REJECTED"));
   }
@@ -777,7 +777,7 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapAuth, 1, kBroadcastNodeId, 1, 2,
                         MessageId{101, 2}, view, false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), routeloom_test::sim_rx_metadata(w.reply_ports.at(2).get(), 1), w.now);
     CHECK(tap_b.metas.empty());
     CHECK(w.obs(2)->diagnostics.back() == "BOOTSTRAP_SCOPE_REJECTED");
   }
@@ -786,8 +786,8 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapChunk, 1, 2, 1, 2, MessageId{101, 3}, view,
                         false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), routeloom_test::sim_rx_metadata(w.reply_ports.at(2).get(), 1), w.now);
+    b->on_radio_receive(1, frame.view(), routeloom_test::sim_rx_metadata(w.reply_ports.at(2).get(), 1), w.now);
     CHECK(tap_b.metas.size() == 1);
     CHECK(tap_b.types.back() == FrameType::BootstrapChunk);
   }
@@ -849,7 +849,7 @@ void test_node_bootstrap_transit_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::MembershipResult, 1, 3, 1, 2, MessageId{101, 13},
                         view, false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), routeloom_test::sim_rx_metadata(w.reply_ports.at(2).get(), 1), w.now);
     w.run(1500);
     CHECK(tap_c.metas.size() == 1);
     if (tap_c.metas.size() == 1) {
