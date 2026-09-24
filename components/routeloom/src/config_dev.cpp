@@ -43,12 +43,13 @@ Status config_dev_permit_tag(
 }
 
 // Same construction under the recovery domain: input =
-// kConfigDevRecoveryDomain || NUL || recovery_aad || rcr1_canonical.
+// kConfigDevRecoveryDomain || NUL || recovery_aad || rcr2_canonical.
 Status config_dev_recovery_tag(
     ByteView dev_key, ByteView aad, ByteView canonical,
     std::array<std::uint8_t, kConfigDevPermitTagSize>& out) noexcept {
   if (dev_key.size == 0 || aad.size != kConfigRecoveryAadSize ||
-      canonical.size != endpoint::kRcr1Size) {
+      canonical.size < endpoint::kRcr2HeaderSize ||
+      canonical.size > endpoint::kRcr2MaxTotal) {
     return Status::error(StatusCode::InvalidArgument, "config dev recovery tag input");
   }
   ScopeDigest mac{};
@@ -59,20 +60,24 @@ Status config_dev_recovery_tag(
 
 Status DevConfigAuthorityVerifier::verify_recovery(
     const ConfigPermitContext& context, ByteView object,
-    endpoint::EncodedRecoveryCommand& payload, bool& verified) noexcept {
+    endpoint::EncodedRecoveryIntent& payload, bool& verified) noexcept {
   verified = false;
   if (dev_key_.size == 0) {
     return Status::error(StatusCode::InvalidState, "config dev key unset");
   }
-  // The recovery envelope is fixed: aad(46) || RCR1(76) || tag(16) = 138 B.
-  constexpr std::size_t kDevRecoveryObjectSize =
-      kConfigRecoveryAadSize + endpoint::kRcr1Size + kConfigDevPermitTagSize;
-  if (object.size != kDevRecoveryObjectSize) {
+  // Variable RCR2 envelope: aad(46) || header+snapshot(112..624) || tag(16),
+  // within the same signed-object bound as the permit lane.
+  constexpr std::size_t kDevRecoveryObjectMin =
+      kConfigRecoveryAadSize + endpoint::kRcr2HeaderSize + kConfigDevPermitTagSize;
+  if (object.size < kDevRecoveryObjectMin ||
+      object.size > kConfigPermitObjectMax) {
     return Status::error(StatusCode::ProtocolError, "config dev recovery size");
   }
   const ByteView aad{object.data, kConfigRecoveryAadSize};
-  const ByteView canonical{object.data + kConfigRecoveryAadSize, endpoint::kRcr1Size};
-  const ByteView tag{object.data + kConfigRecoveryAadSize + endpoint::kRcr1Size,
+  const ByteView canonical{
+      object.data + kConfigRecoveryAadSize,
+      object.size - kConfigRecoveryAadSize - kConfigDevPermitTagSize};
+  const ByteView tag{object.data + object.size - kConfigDevPermitTagSize,
                      kConfigDevPermitTagSize};
 
   // Scope binding + MAC under the recovery domains — a kind-3 permit's aad
@@ -92,17 +97,17 @@ Status DevConfigAuthorityVerifier::verify_recovery(
           tag, ByteView{expected_tag.data(), expected_tag.size()})) {
     return Status::success();  // bad MAC: denied
   }
-  // Authentic envelope: decode the RCR1 and apply the identity policy —
+  // Authentic envelope: decode the RCR2 and apply the identity policy —
   // including the generation pin: a recovery command signed under a
   // different authority generation is not this journal's to act on.
   const Status decoded =
-      endpoint::config_recovery_decode(canonical, recovery_command_);
+      endpoint::config_recovery_decode(canonical, recovery_intent_);
   if (!decoded.ok()) return decoded;
-  if (recovery_command_.network != context.network ||
-      recovery_command_.target != context.target ||
-      recovery_command_.config_namespace != context.config_namespace ||
-      recovery_command_.authority != context.authorized_issuer ||
-      recovery_command_.authority_generation != context.authority_generation) {
+  if (recovery_intent_.network != context.network ||
+      recovery_intent_.target != context.target ||
+      recovery_intent_.config_namespace != context.config_namespace ||
+      recovery_intent_.authority != context.authorized_issuer ||
+      recovery_intent_.authority_generation != context.authority_generation) {
     return Status::success();  // not the configured authority: denied
   }
   std::memcpy(payload.bytes.data(), canonical.data, canonical.size);

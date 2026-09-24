@@ -21,10 +21,10 @@
 // their own.
 //
 // Recovery envelope (kind-4 objects, same construction, own domain):
-//   object = recovery_aad || canonical_rcr1 || tag
+//   object = recovery_aad || canonical_rcr2 || tag
 //   recovery_aad = kConfigRecoveryAadSize bytes from config_recovery_aad()
 //   tag    = HMAC-SHA256(dev_key, input)[..16]
-//   input  = "RouteLoom/config-recover-dev/v1" || NUL || aad || canonical
+//   input  = "RouteLoom/config-recover-dev/v2" || NUL || aad || canonical
 // A recovery object can never verify as a permit and vice versa — the AAD
 // domains and the MAC input domains differ on both sides.
 
@@ -49,7 +49,7 @@ inline constexpr char kConfigDevPermitDomain[] = "RouteLoom/config-permit-dev/v1
 // The recovery lane's own HMAC domain — a dev recovery object is
 // distinguishable from a dev permit by tag alone.
 inline constexpr char kConfigDevRecoveryDomain[] =
-    "RouteLoom/config-recover-dev/v1";
+    "RouteLoom/config-recover-dev/v2";
 
 // Shared tag computation: out = HMAC-SHA256(dev_key,
 // kConfigDevPermitDomain || NUL || aad || canonical)[..16]. Both the C++
@@ -79,10 +79,10 @@ class DevConfigAuthorityVerifier final : public ConfigAuthorityVerifier {
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
   // The kind-4 lane's envelope check: recovery AAD binding + recovery
-  // domain tag + RCR1 decode + the same identity policy, including the
+  // domain tag + RCR2 decode + the same identity policy, including the
   // generation pin (context.authority_generation).
   Status verify_recovery(const ConfigPermitContext& context, ByteView object,
-                         endpoint::EncodedRecoveryCommand& payload,
+                         endpoint::EncodedRecoveryIntent& payload,
                          bool& verified) noexcept override;
 
  private:
@@ -90,7 +90,7 @@ class DevConfigAuthorityVerifier final : public ConfigAuthorityVerifier {
   // Decode scratch — a stack local would cost ~1.8 KiB of the Owner task's
   // 8 KiB stack on top of the reassembly/submit call chain.
   endpoint::ConfigCommand command_{};
-  endpoint::ConfigRecoveryCommand recovery_command_{};
+  endpoint::ConfigRecoveryIntent recovery_intent_{};
 };
 
 }  // namespace routeloom

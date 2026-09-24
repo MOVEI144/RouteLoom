@@ -112,7 +112,7 @@ bool cose_be32_is_zero(const std::array<std::uint8_t, 32>& v) noexcept {
 namespace {
 
 // Shared envelope walk — the two public parsers differ only in the
-// payload bound (RCC1 body range vs. exactly one RCR1 body).
+// payload bound (RCC1 body range vs. the RCR2 body range).
 Status cose_parse_parts(const ByteView permit, CosePermitParts& out,
                         const std::size_t payload_min,
                         const std::size_t payload_max) noexcept {
@@ -159,6 +159,21 @@ Status cose_parse_parts(const ByteView permit, CosePermitParts& out,
   return Status::success();
 }
 
+// Shared R/S gate for the permit and recovery lanes: nonzero, in range,
+// low-S canonical — checked before the expensive point multiply.
+bool cose_signature_canonical(const ByteView signature) noexcept {
+  if (signature.size != kCoseSignatureSize || signature.data == nullptr) {
+    return false;
+  }
+  std::array<std::uint8_t, 32> r{}, s{};
+  std::memcpy(r.data(), signature.data, 32);
+  std::memcpy(s.data(), signature.data + 32, 32);
+  return !cose_be32_is_zero(r) && !cose_be32_is_zero(s) &&
+         cose_be32_cmp(r, kSecp256r1Order) < 0 &&
+         cose_be32_cmp(s, kSecp256r1Order) < 0 &&
+         cose_be32_cmp(s, kSecp256r1HalfOrder) <= 0;
+}
+
 }  // namespace
 
 Status cose_permit_parse(const ByteView permit, CosePermitParts& out) noexcept {
@@ -167,7 +182,8 @@ Status cose_permit_parse(const ByteView permit, CosePermitParts& out) noexcept {
 }
 
 Status cose_recovery_parse(const ByteView object, CosePermitParts& out) noexcept {
-  return cose_parse_parts(object, out, endpoint::kRcr1Size, endpoint::kRcr1Size);
+  return cose_parse_parts(object, out, endpoint::kRcr2HeaderSize,
+                          endpoint::kRcr2MaxTotal);
 }
 
 Status cose_sig_structure(const ByteView protected_bytes,
@@ -232,13 +248,7 @@ Status CoseEsp256AuthorityVerifier::verify_permit(
   }
 
   // R/S range + low-S canonicality before the expensive point multiply.
-  std::array<std::uint8_t, 32> r{}, s{};
-  std::memcpy(r.data(), parts.signature.data, 32);
-  std::memcpy(s.data(), parts.signature.data + 32, 32);
-  if (cose_be32_is_zero(r) || cose_be32_is_zero(s) ||
-      cose_be32_cmp(r, kSecp256r1Order) >= 0 ||
-      cose_be32_cmp(s, kSecp256r1Order) >= 0 ||
-      cose_be32_cmp(s, kSecp256r1HalfOrder) > 0) {
+  if (!cose_signature_canonical(parts.signature)) {
     return Status::success();  // out-of-range / non-canonical: denied
   }
 
@@ -280,7 +290,7 @@ Status CoseEsp256AuthorityVerifier::verify_permit(
 
 Status CoseEsp256AuthorityVerifier::verify_recovery(
     const ConfigPermitContext& context, const ByteView object,
-    endpoint::EncodedRecoveryCommand& payload, bool& verified) noexcept {
+    endpoint::EncodedRecoveryIntent& payload, bool& verified) noexcept {
   verified = false;
   if (!provisioned_) {
     return Status::error(StatusCode::InvalidState, "cose key unprovisioned");
@@ -293,13 +303,7 @@ Status CoseEsp256AuthorityVerifier::verify_recovery(
   }
 
   // Same R/S range + low-S canonicality rule before the point multiply.
-  std::array<std::uint8_t, 32> r{}, s{};
-  std::memcpy(r.data(), parts.signature.data, 32);
-  std::memcpy(s.data(), parts.signature.data + 32, 32);
-  if (cose_be32_is_zero(r) || cose_be32_is_zero(s) ||
-      cose_be32_cmp(r, kSecp256r1Order) >= 0 ||
-      cose_be32_cmp(s, kSecp256r1Order) >= 0 ||
-      cose_be32_cmp(s, kSecp256r1HalfOrder) > 0) {
+  if (!cose_signature_canonical(parts.signature)) {
     return Status::success();  // out-of-range / non-canonical: denied
   }
 
@@ -321,16 +325,16 @@ Status CoseEsp256AuthorityVerifier::verify_recovery(
     return Status::success();  // bad signature: denied
   }
 
-  // Authentic envelope — decode RCR1 and apply the same identity policy
+  // Authentic envelope — decode RCR2 and apply the same identity policy
   // the permit path enforces (generation pin included).
   const Status decoded =
-      endpoint::config_recovery_decode(parts.payload, recovery_command_);
+      endpoint::config_recovery_decode(parts.payload, recovery_intent_);
   if (!decoded.ok()) return decoded;
-  if (recovery_command_.network != context.network ||
-      recovery_command_.target != context.target ||
-      recovery_command_.config_namespace != context.config_namespace ||
-      recovery_command_.authority != context.authorized_issuer ||
-      recovery_command_.authority_generation != context.authority_generation) {
+  if (recovery_intent_.network != context.network ||
+      recovery_intent_.target != context.target ||
+      recovery_intent_.config_namespace != context.config_namespace ||
+      recovery_intent_.authority != context.authorized_issuer ||
+      recovery_intent_.authority_generation != context.authority_generation) {
     return Status::success();  // not the configured authority: denied
   }
   std::memcpy(payload.bytes.data(), parts.payload.data, parts.payload.size);

@@ -64,7 +64,7 @@ struct CosePermitParts {
 // Returns InvalidArgument/ProtocolError on ANY deviation from the profile.
 Status cose_permit_parse(ByteView permit, CosePermitParts& out) noexcept;
 // The same envelope walk for the recovery lane: identical COSE_Sign1
-// shape, payload constrained to exactly one RCR1 body (76 B).
+// shape, payload constrained to one RCR2 body (112..624 B).
 Status cose_recovery_parse(ByteView object, CosePermitParts& out) noexcept;
 
 // Encode the Sig_structure for verification: caller provides the target's
@@ -101,11 +101,11 @@ class CoseEsp256AuthorityVerifier final : public ConfigAuthorityVerifier {
   Status verify_permit(const ConfigPermitContext& context, ByteView permit,
                        endpoint::EncodedConfigCommand& payload,
                        bool& verified) noexcept override;
-  // The kind-4 lane under the same COSE profile: RCR1 payload, recovery
+  // The kind-4 lane under the same COSE profile: RCR2 payload, recovery
   // external AAD, the same kid/R-S/low-S rules and the same identity
   // policy — including the generation pin.
   Status verify_recovery(const ConfigPermitContext& context, ByteView object,
-                         endpoint::EncodedRecoveryCommand& payload,
+                         endpoint::EncodedRecoveryIntent& payload,
                          bool& verified) noexcept override;
 
  private:
@@ -113,7 +113,7 @@ class CoseEsp256AuthorityVerifier final : public ConfigAuthorityVerifier {
   std::array<std::uint8_t, kCosePublicKeySize> public_key_{};
   bool provisioned_{false};
   endpoint::ConfigCommand command_{};
-  endpoint::ConfigRecoveryCommand recovery_command_{};
+  endpoint::ConfigRecoveryIntent recovery_intent_{};
 };
 
 }  // namespace routeloom

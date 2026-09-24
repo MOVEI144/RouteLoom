@@ -191,7 +191,7 @@ Status TrustView::verify_permit(
 
 Status TrustView::verify_recovery(
     const ConfigPermitContext& context, const ByteView object,
-    endpoint::EncodedRecoveryCommand& payload, bool& verified) noexcept {
+    endpoint::EncodedRecoveryIntent& payload, bool& verified) noexcept {
   verified = false;
   // The same impairment ladder as verify_permit — an impaired trust image
   // can serve NEITHER lane: a store-quarantined node still needs the
@@ -214,17 +214,17 @@ Status TrustView::verify_recovery(
     return Status::success();  // foreign authority: denied, never verified
   }
 
-  // The RCR1 body decodes BEFORE the signature check — same untrusted-hint
+  // The RCR2 body decodes BEFORE the signature check — same untrusted-hint
   // pattern as the permit path: its (authority, authority_generation)
   // select the key record and the signature then authenticates them.
   const Status decoded =
-      endpoint::config_recovery_decode(parts.payload, recovery_command_);
+      endpoint::config_recovery_decode(parts.payload, recovery_intent_);
   if (!decoded.ok()) return decoded;
-  if (recovery_command_.authority != context.authorized_issuer) {
+  if (recovery_intent_.authority != context.authorized_issuer) {
     return Status::success();  // hint names a foreign issuer: denied
   }
   const TrustKeyRecord* key = resolve_authority_key(
-      recovery_command_.authority, recovery_command_.authority_generation);
+      recovery_intent_.authority, recovery_intent_.authority_generation);
   if (key == nullptr) {
     return Status::success();  // absent / inactive / below floor: denied
   }
@@ -256,13 +256,13 @@ Status TrustView::verify_recovery(
   }
 
   // Authentic envelope: bind the context and the resolved record — the
-  // recovery command must name THIS node, THIS namespace and the same
+  // recovery intent must name THIS node, THIS namespace and the same
   // authority/generation the key resolved under.
-  if (recovery_command_.network != context.network ||
-      recovery_command_.target != context.target ||
-      recovery_command_.config_namespace != context.config_namespace ||
-      recovery_command_.authority != context.authorized_issuer ||
-      recovery_command_.authority_generation != key->generation) {
+  if (recovery_intent_.network != context.network ||
+      recovery_intent_.target != context.target ||
+      recovery_intent_.config_namespace != context.config_namespace ||
+      recovery_intent_.authority != context.authorized_issuer ||
+      recovery_intent_.authority_generation != key->generation) {
     return Status::success();  // not the authorized scope: denied
   }
   std::memcpy(payload.bytes.data(), parts.payload.data, parts.payload.size);
