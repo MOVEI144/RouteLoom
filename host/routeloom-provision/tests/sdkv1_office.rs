@@ -24,10 +24,15 @@ use routeloom_provision::sdkv1::identity::{
     IDENTITY_SEAL_COMMITTED,
 };
 use routeloom_provision::sdkv1::office::{
-    identity_build_injected, identity_bundle_json, inventory_json, IdentityPlan,
+    identity_build_injected, identity_bundle_json, inventory_file_json, inventory_json,
+    IdentityPlan, INVENTORY_FORMAT,
 };
 use routeloom_provision::sdkv1::pop::{pop_challenge, pop_sign, pop_verify};
 use routeloom_provision::sdkv1::rlsec::{rlsec_identity_readback, rlsec_identity_set};
+use routeloom_provision::sdkv1::siteca::{
+    sitecert_issue, sitecert_verify, FileSiteCaSigner, SiteCaSigner, SiteCertProfile,
+    SITE_CA_KEY_FORMAT,
+};
 use routeloom_provision::signer::{generate_keypair, test_keypair, FileRootSigner};
 use routeloom_provision::Code;
 
@@ -358,6 +363,154 @@ fn identity_bundle_for_device_generated_keys() {
     let mut plan = golden_plan();
     plan.node_id = NODE + 1;
     assert!(identity_bundle_json(&plan, &devcert).is_err());
+}
+
+#[test]
+fn sitecert_issue_matches_golden_and_verifies() {
+    // The shared vector's SiteCert, re-issued through the Site CA seam.
+    let site_ca = FileSiteCaSigner::from_secret(SITE_CA_ID, &[0x52; 32]).unwrap();
+    let (_, sak_pub) = test_keypair(0x53);
+    let profile = SiteCertProfile {
+        network_low32: 0x0A1B_2C3D,
+        site_epoch: 3,
+        serial: 7,
+    };
+    let sitecert = sitecert_issue(&site_ca, SITE_ID, &sak_pub, &profile).unwrap();
+    assert_eq!(
+        sitecert,
+        golden_hex(&golden("cert_sitecert.json"), "cert_hex")
+    );
+    let claims = sitecert_verify(&sitecert, SITE_CA_ID, &site_ca.pubkey()).unwrap();
+    assert_eq!(claims.subject, SITE_ID);
+    assert_eq!(claims.pubkey, sak_pub);
+    assert_eq!(claims.serial, 7);
+    // Another CA's id or key does not verify it.
+    assert_eq!(
+        sitecert_verify(&sitecert, SITE_CA_ID + 1, &site_ca.pubkey())
+            .unwrap_err()
+            .code,
+        Code::AuthorizationFailed
+    );
+    let other_ca = FileSiteCaSigner::generate(SITE_CA_ID).unwrap();
+    assert_eq!(
+        sitecert_verify(&sitecert, SITE_CA_ID, &other_ca.pubkey())
+            .unwrap_err()
+            .code,
+        Code::AuthorizationFailed
+    );
+    // A DevCert is not a SiteCert.
+    let device_ca = FileDeviceCaSigner::from_secret(DEVICE_CA_ID, &[0x51; 32]).unwrap();
+    let (device_secret, _) = test_keypair(0x54);
+    let challenge = [0x46_u8; 32];
+    let key = pop_verify(
+        &pop_sign(&device_secret, NODE, KeyLocation::NvsPlaintext, &challenge).unwrap(),
+        NODE,
+        &challenge,
+    )
+    .unwrap();
+    let devcert = devcert_issue(&device_ca, &key, &golden_profile()).unwrap();
+    assert_eq!(
+        sitecert_verify(&devcert, SITE_CA_ID, &site_ca.pubkey())
+            .unwrap_err()
+            .code,
+        Code::AuthorizationFailed
+    );
+    // Unusable inputs are refused, never minted.
+    assert!(sitecert_issue(&site_ca, 0, &sak_pub, &profile).is_err());
+    assert!(sitecert_issue(&site_ca, SITE_ID, &[0x11; 64], &profile).is_err());
+    assert!(sitecert_issue(
+        &site_ca,
+        SITE_ID,
+        &sak_pub,
+        &SiteCertProfile {
+            network_low32: 0,
+            ..profile
+        },
+    )
+    .is_err());
+}
+
+#[test]
+fn site_ca_key_file_custody() {
+    let dir = scratch_dir("siteca");
+    let path = dir.join("siteca.key");
+    let signer = FileSiteCaSigner::from_secret(SITE_CA_ID, &[0x52; 32]).unwrap();
+    signer.save(&path).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let loaded = FileSiteCaSigner::load(&path).unwrap();
+    assert_eq!(loaded.site_ca_id(), SITE_CA_ID);
+    assert_eq!(loaded.pubkey(), signer.pubkey());
+    assert_eq!(loaded.sign(b"x").unwrap(), signer.sign(b"x").unwrap());
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains(&format!("\"format\": \"{SITE_CA_KEY_FORMAT}\"")));
+    assert!(text.contains("\"site_ca_id\": \"05ca000000000001\""));
+    // Never overwrite.
+    assert!(signer.save(&path).is_err());
+    // A Device CA document is not a Site CA key and vice versa (no silent
+    // cross-use between the authorities).
+    let devca_path = dir.join("devca.key");
+    FileDeviceCaSigner::from_secret(DEVICE_CA_ID, &[0x51; 32])
+        .unwrap()
+        .save(&devca_path)
+        .unwrap();
+    assert_eq!(
+        FileSiteCaSigner::load(&devca_path).err().unwrap().code,
+        Code::ProtocolError
+    );
+    assert!(FileDeviceCaSigner::load(&path).is_err());
+    // Group/other-readable key files are refused.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            FileSiteCaSigner::load(&path).err().unwrap().code,
+            Code::AuthorizationFailed
+        );
+    }
+    // Invalid ids are refused at construction.
+    assert!(FileSiteCaSigner::from_secret(0, &[0x52; 32]).is_err());
+    assert!(FileSiteCaSigner::from_secret(u64::MAX, &[0x52; 32]).is_err());
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn inventory_file_is_the_formal_record() {
+    let device_ca = FileDeviceCaSigner::from_secret(DEVICE_CA_ID, &[0x51; 32]).unwrap();
+    let (device_secret, _) = test_keypair(0x54);
+    let challenge = [0x47_u8; 32];
+    let key = pop_verify(
+        &pop_sign(&device_secret, NODE, KeyLocation::NvsPlaintext, &challenge).unwrap(),
+        NODE,
+        &challenge,
+    )
+    .unwrap();
+    let devcert = devcert_issue(&device_ca, &key, &golden_profile()).unwrap();
+    let file = routeloom_json::parse(&inventory_file_json(&devcert).unwrap()).unwrap();
+    assert_eq!(
+        file.get("format").and_then(|v| v.as_str()),
+        Some(INVENTORY_FORMAT)
+    );
+    // Same record as the stdout line, derived from the DevCert alone.
+    let line = routeloom_json::parse(&inventory_json(&devcert).unwrap()).unwrap();
+    for field in [
+        "node_id",
+        "kid",
+        "model",
+        "hw_rev",
+        "cert_serial",
+        "device_ca_id",
+    ] {
+        assert_eq!(file.get(field), line.get(field), "{field}");
+    }
+    assert!(inventory_file_json(b"not a certificate").is_err());
 }
 
 #[test]

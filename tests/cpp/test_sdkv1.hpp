@@ -36,7 +36,8 @@ class FaultyRecordStorage final : public RecordSlotStorage {
     if (slot >= 2 || target.data == nullptr || target.size != slot_bytes_) {
       return Status::error(StatusCode::InvalidArgument, "bad read");
     }
-    if (read_error || slot == read_error_slot) {
+    ++read_calls;
+    if (read_error || slot == read_error_slot || read_calls == fail_read_call) {
       return Status::error(StatusCode::StorageFailure, "injected read error");
     }
     std::memcpy(target.data, slots_[slot].data(), slot_bytes_);
@@ -65,6 +66,8 @@ class FaultyRecordStorage final : public RecordSlotStorage {
   }
 
   std::size_t write_calls{0};
+  std::size_t read_calls{0};
+  std::size_t fail_read_call{0};  // 1-based call, once
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
   std::size_t drop_call{std::numeric_limits<std::size_t>::max()};

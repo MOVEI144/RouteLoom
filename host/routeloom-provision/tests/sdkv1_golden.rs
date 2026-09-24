@@ -23,6 +23,7 @@ use routeloom_provision::sdkv1::identity::{
 use routeloom_provision::sdkv1::local_revocation::{
     local_revocation_record_decode, local_revocation_record_encode, LOCAL_REVOCATION_SEAL_COMMITTED,
 };
+use routeloom_provision::sdkv1::pop::{pop_aad, pop_payload_encode, pop_sign, pop_verify};
 use routeloom_provision::sdkv1::resume::{
     resume_peer_cert_id, resume_slot_decode, resume_slot_encode, ResumePurpose,
 };
@@ -36,7 +37,9 @@ use routeloom_provision::sdkv1::revocation::{
 use routeloom_provision::sdkv1::site::{
     site_record_decode, site_record_encode, SiteState, SITE_SEAL_COMMITTED,
 };
+use routeloom_provision::sdkv1::{cose_es256_assemble, cose_es256_sig_structure};
 use routeloom_provision::signer::{pubkey_from_secret, FileRootSigner, RootSigner};
+use routeloom_provision::Code;
 
 fn golden_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../protocol/sdkv1-golden")
@@ -421,10 +424,42 @@ fn check_rlv1(name: &str, doc: &Json) {
     );
 }
 
+fn check_pop(name: &str, doc: &Json) {
+    let node = num(doc, "node_id");
+    let location = match num(doc, "key_location") {
+        1 => KeyLocation::NvsPlaintext,
+        2 => KeyLocation::EfuseDsBound,
+        3 => KeyLocation::SecureElement,
+        other => panic!("{name}: key_location {other}"),
+    };
+    let challenge = arr::<32>(doc, "challenge_hex");
+    let pubkey = arr::<64>(doc, "pubkey_hex");
+    let payload = pop_payload_encode(node, location, &challenge, &pubkey)
+        .unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(payload, hex(doc, "payload_hex"), "{name}: payload");
+    assert_eq!(pop_aad(), hex(doc, "aad_hex"), "{name}: aad");
+    let structure = cose_es256_sig_structure(&payload, &pop_aad());
+    assert_eq!(structure, hex(doc, "sig_structure_hex"), "{name}");
+    let signature = arr::<64>(doc, "signature_hex");
+    let object = hex(doc, "object_hex");
+    assert_eq!(cose_es256_assemble(&payload, &signature), object, "{name}");
+    let key = pop_verify(&object, node, &challenge).unwrap_or_else(|e| panic!("{name}: {e}"));
+    assert_eq!(key.node_id(), node);
+    assert_eq!(key.pubkey(), pubkey);
+    assert_eq!(key.key_location(), location);
+    // RFC 6979 re-sign: the device secret reproduces the generator exactly.
+    let secret = arr::<32>(doc, "signer_secret_hex");
+    assert_eq!(
+        pop_sign(&secret, node, location, &challenge).unwrap(),
+        object,
+        "{name}: re-sign"
+    );
+}
+
 #[test]
 fn sdkv1_valid_vectors_match_byte_for_byte() {
     let valid = files("valid");
-    assert!(valid.len() >= 15);
+    assert!(valid.len() >= 17);
     for (name, doc) in &valid {
         assert_eq!(text(doc, "format"), "routeloom-sdkv1-golden-v1");
         assert_eq!(text(doc, "expect"), "ok", "{name}");
@@ -437,6 +472,7 @@ fn sdkv1_valid_vectors_match_byte_for_byte() {
             "rlp1" => check_rlp1(name, doc),
             "rlp2" => check_rlp2(name, doc),
             "rlv1" => check_rlv1(name, doc),
+            "pop" => check_pop(name, doc),
             other => panic!("{name}: unknown codec {other}"),
         }
     }
@@ -445,7 +481,7 @@ fn sdkv1_valid_vectors_match_byte_for_byte() {
 #[test]
 fn sdkv1_invalid_vectors_are_rejected() {
     let invalid = files("invalid");
-    assert!(invalid.len() >= 60);
+    assert!(invalid.len() >= 80);
     for (name, doc) in &invalid {
         let bytes = hex(doc, "encoded_hex");
         let deny = match text(doc, "expect") {
@@ -490,6 +526,27 @@ fn sdkv1_invalid_vectors_are_rejected() {
             "rlp1" => assert!(resume_slot_decode(&bytes).is_err(), "{name}"),
             "rlp2" => assert!(resume2_slot_decode(&bytes).is_err(), "{name}"),
             "rlv1" => assert!(local_revocation_record_decode(&bytes).is_err(), "{name}"),
+            "pop" => {
+                // Malformed objects are ProtocolError; well-formed ones for
+                // another node/challenge or with a bad signature are
+                // AuthorizationFailed.
+                let expected = if deny {
+                    Code::AuthorizationFailed
+                } else {
+                    Code::ProtocolError
+                };
+                assert_eq!(
+                    pop_verify(
+                        &bytes,
+                        num(doc, "expected_node_id"),
+                        &arr::<32>(doc, "expected_challenge_hex"),
+                    )
+                    .unwrap_err()
+                    .code,
+                    expected,
+                    "{name}"
+                );
+            }
             other => panic!("{name}: unknown codec {other}"),
         }
     }

@@ -24,6 +24,10 @@
 //! - [`rlsec`] — the manufactured `rlsec` NVS set (`rlident` twin pair) and
 //!   its `nvs_partition_gen` CSV.
 //!
+//! Site tooling (P7-2, 07 §6):
+//! - [`siteca`] — `SiteCaSigner` custody seam, dev `FileSiteCaSigner`, and
+//!   SiteCert issue (HQ, when the site PC is set up) and verification.
+//!
 //! The device-side dual-slot stores are C++ only; the host needs the
 //! byte formats, not the power-cut state machine.
 
@@ -38,6 +42,7 @@ pub mod resume2;
 pub mod revocation;
 pub mod rlsec;
 pub mod site;
+pub mod siteca;
 
 use crate::crc32::crc32_iso_hdlc;
 use crate::sha256::sha256;

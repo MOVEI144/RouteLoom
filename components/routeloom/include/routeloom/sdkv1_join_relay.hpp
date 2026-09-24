@@ -194,6 +194,10 @@ class ZtJoinerLink {
   ZtJoinerObserver& observer_;
   MembershipState membership_{MembershipState::Discovering};
   JoinNonce nonce_{};
+  // org_hint of the DISCOVER that produced `nonce_`: OFFERs answer the
+  // scan window that is open, not the constructor's single anchor, so a
+  // multi-anchor scan can rotate windows without rewiring the link.
+  std::uint32_t discover_org_hint_{0};
   bool discovering_{false};
   bool connected_{false};
   MacAddress proxy_mac_{};
