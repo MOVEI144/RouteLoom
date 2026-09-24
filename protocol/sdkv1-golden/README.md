@@ -83,10 +83,18 @@ signed object as received (so it can be re-gossiped), CRC — exactly 640 B at
 CRC and is treated as empty). An empty slot has purpose, state and every
 later field zero.
 
+**RLP2** (P4 §6.2): 96 B, same single-slot discipline. Adds the peer role,
+the local MemberCert id and the durable `reserved_uses` high-water (0..64)
+behind the 64-use ceiling; RLP1 blobs are a safe cache miss.
+
+**RLV1** (P4 §3.3): 108 B sealed sequenced record (seal `0x72564B31`),
+the durable local-removal evidence. State is Blocked(1)/Cleaned(2), cause
+1..3, holdoff fixed at 600000 ms.
+
 ## Files
 
 - `valid/*.json` — `codec` (`rlcw1`, `rli1`, `rls1`, `rrs1`, `rrs1_record`,
-  `rlp1`), the decoded fields, the encodings (`cert_hex`, `payload_hex`,
+  `rlp1`, `rlp2`, `rlv1`), the decoded fields, the encodings (`cert_hex`, `payload_hex`,
   `sig_structure_hex`, `record_hex`, …), `expect: "ok"`.
 - `invalid/*.json` — `codec`, `encoded_hex`, `note`, and `expect`:
   `"error"` (every decoder must reject it) or `"deny"` (well-formed, but the

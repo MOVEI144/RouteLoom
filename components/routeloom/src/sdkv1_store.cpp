@@ -5,6 +5,7 @@
 
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
+#include "routeloom/key_schedule.hpp"     // resume_id (RLP2 rid lookup)
 
 namespace routeloom::sdkv1 {
 namespace {
@@ -52,6 +53,10 @@ Status revocation_semantic(const ByteView record, void* context) noexcept {
   return revocation_record_decode(record, *static_cast<RevocationSet*>(context), object);
 }
 
+Status local_revocation_semantic(const ByteView record, void* context) noexcept {
+  return local_revocation_record_decode(record, *static_cast<LocalRevocationRecord*>(context));
+}
+
 const SealedRecordFormat kIdentityFormat{
     kIdentityMagic,     kIdentitySealCommitted, kIdentitySlotBytes, kIdentityRecordMin,
     kIdentityRecordMax, false,                  &identity_record_structure,
@@ -66,11 +71,19 @@ const SealedRecordFormat kRevocationFormat{
     kRevocationRecordMax, true,                     &revocation_record_structure,
     &revocation_semantic};
 
+const SealedRecordFormat kLocalRevocationFormat{
+    kLocalRevocationMagic,     kLocalRevocationSealCommitted, kLocalRevocationSlotBytes,
+    kLocalRevocationRecordLen, kLocalRevocationRecordLen,     true,
+    &local_revocation_record_structure, &local_revocation_semantic};
+
 }  // namespace
 
 const SealedRecordFormat& identity_record_format() noexcept { return kIdentityFormat; }
 const SealedRecordFormat& site_record_format() noexcept { return kSiteFormat; }
 const SealedRecordFormat& revocation_record_format() noexcept { return kRevocationFormat; }
+const SealedRecordFormat& local_revocation_record_format() noexcept {
+  return kLocalRevocationFormat;
+}
 
 // --- SealedSlotPair ------------------------------------------------------------
 
@@ -733,6 +746,303 @@ Status ResumeCache::clear_all() noexcept {
       status = write_slot(i, ResumeSlot{});
       if (!status) return status;
     }
+  }
+  return Status::success();
+}
+
+// --- ResumeCache2 --------------------------------------------------------------
+
+bool ResumeCache2::in_partition(const ResumePurpose purpose, const std::size_t index) const noexcept {
+  if (purpose == ResumePurpose::Link) return index < link_quota_;
+  return index >= link_quota_ && index < link_quota_ + end_quota_;
+}
+
+void ResumeCache2::drop_budget(const std::size_t index) noexcept {
+  for (auto& entry : budget_) {
+    if (entry.used && entry.slot_index == index) {
+      entry.used = false;
+      entry.remaining = 0;
+    }
+  }
+}
+
+Status ResumeCache2::read_slot(const std::size_t index, ResumeSlot2& out, bool& intact) noexcept {
+  out = ResumeSlot2{};
+  intact = true;
+  const Status status = storage_.read(index, MutableByteView{buffer_.data(), buffer_.size()});
+  if (!status) return status;
+  if (is_erased(buffer_.data(), buffer_.size())) return Status::success();
+  if (!resume2_slot_decode(ByteView{buffer_.data(), buffer_.size()}, out).ok()) {
+    // Torn, corrupt, or an old RLP1 blob: an empty slot (the consequence is
+    // one full EDHOC), never a usable secret.
+    out = ResumeSlot2{};
+    intact = false;
+  }
+  return Status::success();
+}
+
+Status ResumeCache2::write_slot(const std::size_t index, const ResumeSlot2& slot) noexcept {
+  Status status = resume2_slot_encode(slot, buffer_);
+  if (status) status = storage_.write(index, ByteView{buffer_.data(), buffer_.size()});
+  if (!status) return status;
+  std::array<std::uint8_t, kResume2SlotBytes> expected = buffer_;
+  status = storage_.read(index, MutableByteView{buffer_.data(), buffer_.size()});
+  if (!status) return status;
+  if (buffer_ != expected) {
+    return Status::error(StatusCode::StorageFailure, "resume2 slot readback mismatch");
+  }
+  return Status::success();
+}
+
+bool ResumeCache2::usable(const ResumeSlot2& slot, const ResumeContext& context) const noexcept {
+  if (!slot.valid || slot.network != context.network) return false;
+  if (slot.peer_generation == 0 || slot.peer_role == 0) return false;
+  // u64 arithmetic throughout: created+2 must not wrap, and a regressed GK
+  // (current < created) fails closed instead of reviving an old RMS.
+  const std::uint64_t created = slot.created_gk_epoch;
+  const std::uint64_t current = context.gk_epoch;
+  if (current < created || current >= created + 2U) return false;
+  if (context.revocations != nullptr &&
+      revocation_rejects(*context.revocations, slot.peer, slot.peer_generation,
+                         static_cast<std::uint32_t>(slot.network >> 32U))) {
+    return false;
+  }
+  return true;
+}
+
+Status ResumeCache2::find_by_peer(const ResumePurpose purpose, const NodeId peer,
+                                  const ResumeContext& context, ResumeSlot2& out,
+                                  std::size_t& index) noexcept {
+  out = ResumeSlot2{};
+  index = 0;
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const std::size_t begin = purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = purpose == ResumePurpose::Link ? link_quota_ : link_quota_ + end_quota_;
+  for (std::size_t i = begin; i < end; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    if (slot.valid && slot.purpose == purpose && slot.peer == peer && usable(slot, context)) {
+      out = slot;
+      index = i;
+      return Status::success();
+    }
+  }
+  return Status::error(StatusCode::NotFound, "no resumption slot");
+}
+
+Status ResumeCache2::find_by_id(const ResumePurpose purpose,
+                                const std::array<std::uint8_t, 8>& rid, const NodeId claimed_peer,
+                                const ResumeContext& context, ResumeSlot2& out,
+                                std::size_t& index) noexcept {
+  out = ResumeSlot2{};
+  index = 0;
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const keys::Purpose key_purpose =
+      purpose == ResumePurpose::Link ? keys::Purpose::Link : keys::Purpose::End;
+  const std::size_t begin = purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = purpose == ResumePurpose::Link ? link_quota_ : link_quota_ + end_quota_;
+  constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
+  std::size_t match = kNone;
+  for (std::size_t i = begin; i < end; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    if (!slot.valid || slot.purpose != purpose || !usable(slot, context)) continue;
+    if (claimed_peer != kInvalidNodeId && slot.peer != claimed_peer) continue;
+    keys::ResumeId slot_rid{};
+    keys::resume_id(slot.rms, key_purpose, slot_rid);
+    if (slot_rid != rid) continue;
+    if (match != kNone) {
+      // Ambiguous even after the purpose/network/peer filter: refuse rather
+      // than guess which RMS the initiator meant.
+      out = ResumeSlot2{};
+      return Status::error(StatusCode::NotFound, "resumption id ambiguous");
+    }
+    match = i;
+    out = slot;
+  }
+  if (match == kNone) return Status::error(StatusCode::NotFound, "no resumption slot");
+  index = match;
+  return Status::success();
+}
+
+Status ResumeCache2::read_at(const std::size_t index, ResumeSlot2& out, bool& intact) noexcept {
+  if (index >= storage_.slot_count()) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot index");
+  }
+  return read_slot(index, out, intact);
+}
+
+Status ResumeCache2::reserve_uses(const std::size_t index, const ResumeContext& context,
+                                 const std::uint32_t boot, const bool gk_epoch_changed) noexcept {
+  if (index >= storage_.slot_count()) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot index");
+  }
+  for (auto& entry : budget_) {
+    if (!entry.used || entry.slot_index != index) continue;
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(index, slot, intact);
+    if (!status) return status;
+    if (!slot.valid || !usable(slot, context) || slot.reserved_uses != entry.granted ||
+        entry.remaining == 0) {
+      // The slot changed under the grant (or the grant is spent): fall
+      // through to a fresh durable quantum instead of serving stale uses.
+      entry.used = false;
+      entry.remaining = 0;
+      break;
+    }
+    --entry.remaining;
+    return Status::success();
+  }
+  ResumeSlot2 slot{};
+  bool intact = true;
+  Status status = read_slot(index, slot, intact);
+  if (!status) return status;
+  // Unusable, torn, or fully reserved: no use to grant. The handshake falls
+  // back to a full EDHOC; the slot itself is left alone (never erased on an
+  // unauthenticated trigger).
+  if (!slot.valid || !usable(slot, context)) {
+    return Status::error(StatusCode::NotFound, "resume2 slot unusable");
+  }
+  if (slot.reserved_uses >= kResume2MaxUses) {
+    return Status::error(StatusCode::CounterExhausted, "resume2 uses exhausted");
+  }
+  // The grant is the headroom up to the ceiling: a short final quantum
+  // (e.g. 60 -> 64) serves 4 uses, never a full 8 past the ceiling.
+  const std::uint32_t headroom = kResume2MaxUses - slot.reserved_uses;
+  const std::uint32_t quantum =
+      headroom > kResume2ReserveQuantum ? kResume2ReserveQuantum : headroom;
+  slot.reserved_uses += quantum;
+  // The touch wear rule rides the same write: one durable write per grant.
+  const std::uint64_t last = slot.last_used_boot;
+  if (gk_epoch_changed || (boot >= last && boot - last >= kTouchBootInterval)) {
+    slot.last_used_boot = boot;
+  }
+  status = write_slot(index, slot);
+  if (!status) return status;
+  BudgetEntry& entry = budget_[budget_next_];
+  budget_next_ = (budget_next_ + 1) % kUseBudgetEntries;
+  entry.used = true;
+  entry.slot_index = static_cast<std::uint32_t>(index);
+  entry.granted = slot.reserved_uses;
+  // The grant covers the quantum; this call consumes one use of it.
+  entry.remaining = static_cast<std::uint8_t>(quantum - 1);
+  return Status::success();
+}
+
+Status ResumeCache2::put(const ResumeSlot2& slot, const ResumeContext& context) noexcept {
+  if (!slot.valid) return Status::error(StatusCode::InvalidArgument, "resume2 slot not valid");
+  const Status valid = resume2_validate(slot);
+  if (!valid) return valid;
+  if (slot.reserved_uses != 0) {
+    // A fresh RMS always restarts the count; a carried-over high-water
+    // would silently shorten (or, by bug, extend) the 64-use lifetime.
+    return Status::error(StatusCode::InvalidArgument, "resume2 uses must restart");
+  }
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const std::size_t quota = slot.purpose == ResumePurpose::Link ? link_quota_ : end_quota_;
+  if (quota < 3) return Status::error(StatusCode::InvalidState, "resume2 quota too small");
+  const std::size_t begin = slot.purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = begin + quota;
+  constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
+  std::size_t same = kNone, free_slot = kNone, lru = kNone;
+  std::uint32_t lru_boot = 0;
+  std::size_t pinned = 0;
+  for (std::size_t i = begin; i < end; ++i) {
+    ResumeSlot2 current{};
+    bool intact = true;
+    const Status status = read_slot(i, current, intact);
+    if (!status) return status;
+    const bool live = usable(current, context);
+    if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer) {
+      if (same == kNone) same = i;
+      continue;  // replaced below; its pin does not count
+    }
+    if (!live) {
+      if (free_slot == kNone) free_slot = i;
+      continue;
+    }
+    if ((current.flags & kResumeFlagPinned) != 0) {
+      ++pinned;
+      continue;
+    }
+    if (lru == kNone || current.last_used_boot < lru_boot) {
+      lru = i;
+      lru_boot = current.last_used_boot;
+    }
+  }
+  if ((slot.flags & kResumeFlagPinned) != 0 && pinned + 1 > quota - 2) {
+    return Status::error(StatusCode::NoCapacity, "resume2 pin budget");
+  }
+  const std::size_t target = same != kNone ? same : (free_slot != kNone ? free_slot : lru);
+  if (target == kNone) return Status::error(StatusCode::NoCapacity, "resume2 cache full");
+  const Status written = write_slot(target, slot);
+  if (!written) return written;
+  drop_budget(target);
+  return Status::success();
+}
+
+Status ResumeCache2::touch(const std::size_t index, const std::uint32_t boot,
+                           const bool gk_epoch_changed) noexcept {
+  if (index >= storage_.slot_count()) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot index");
+  }
+  ResumeSlot2 slot{};
+  bool intact = true;
+  const Status status = read_slot(index, slot, intact);
+  if (!status) return status;
+  if (!slot.valid) return Status::error(StatusCode::NotFound, "resume2 slot empty");
+  const std::uint64_t last = slot.last_used_boot;
+  if (!gk_epoch_changed && (boot < last || boot - last < kTouchBootInterval)) {
+    return Status::success();  // wear rule: no write
+  }
+  slot.last_used_boot = boot;
+  return write_slot(index, slot);
+}
+
+Status ResumeCache2::invalidate_peer(const NodeId peer) noexcept {
+  const std::size_t count = storage_.slot_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    if (slot.valid && slot.peer == peer) {
+      status = write_slot(i, ResumeSlot2{});
+      if (!status) return status;
+      drop_budget(i);
+    }
+  }
+  return Status::success();
+}
+
+Status ResumeCache2::clear_all() noexcept {
+  const std::size_t count = storage_.slot_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    const bool erased_empty = !slot.valid && intact;
+    if (!erased_empty) {
+      // Valid or torn: overwrite so no RMS fragment survives.
+      status = write_slot(i, ResumeSlot2{});
+      if (!status) return status;
+    }
+    drop_budget(i);
   }
   return Status::success();
 }

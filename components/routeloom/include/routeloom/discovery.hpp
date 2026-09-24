@@ -269,6 +269,16 @@ class MembershipHooks {
   // modeling the Authority's MembershipResult). Returning false leaves the
   // controller AuthorizedPendingCommit — never silently approved.
   virtual bool approve_join(NodeId node, NetworkId network) noexcept = 0;
+  // Full boot assignment (P4 §3.1): Member, Unprovisioned, or Revoked. A
+  // bool cannot restore Revoked, so production hooks implement this and the
+  // controller calls it instead of local_member(). The default delegates to
+  // the legacy bool (Member/Unprovisioned, always success) so existing
+  // hooks keep working; an error return means "cannot prove" and the
+  // controller takes the accompanying (fail-closed) state.
+  virtual Status local_state(NetworkId network, MembershipState& out) const noexcept {
+    out = local_member(network) ? MembershipState::Member : MembershipState::Unprovisioned;
+    return Status::success();
+  }
 };
 
 // Sole writer of MembershipState (node x network). Values and semantics are

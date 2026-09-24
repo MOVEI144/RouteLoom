@@ -372,6 +372,32 @@ target_include_directories(routeloom_sdkv1_store_tests PRIVATE
 target_compile_options(routeloom_sdkv1_store_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_store_tests COMMAND routeloom_sdkv1_store_tests)
 
+# RAM session bank and provider (G-SEC P4 §4, V1-K02/K03/K04): install
+# discipline, use budget, replay windows, lifetimes, demand, overlap and
+# re-entry. Runs against a deterministic test AEAD and — when OpenSSL is
+# available — against real AES-GCM-128 (NIST vectors), since the design
+# forbids accepting on the test cipher alone.
+add_executable(routeloom_sdkv1_session_bank_tests test_sdkv1_session_bank.cpp)
+target_link_libraries(routeloom_sdkv1_session_bank_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_session_bank_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(routeloom_sdkv1_session_bank_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+find_package(OpenSSL QUIET)
+if(OpenSSL_FOUND)
+  target_link_libraries(routeloom_sdkv1_session_bank_tests PRIVATE OpenSSL::Crypto)
+  target_compile_definitions(routeloom_sdkv1_session_bank_tests PRIVATE ROUTELOOM_HAVE_OPENSSL=1)
+endif()
+add_test(NAME routeloom_sdkv1_session_bank_tests COMMAND routeloom_sdkv1_session_bank_tests)
+
+# P4 membership evidence (G-SEC P4 §3): SdkMembershipHooks over adopted
+# RLI1/RLS1/RRS1 with the RLV1 removal gate (V1-R04/R05/R06 local, P4-M01).
+add_executable(routeloom_sdkv1_membership_tests test_sdkv1_membership.cpp)
+target_link_libraries(routeloom_sdkv1_membership_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_membership_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_membership_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_membership_tests COMMAND routeloom_sdkv1_membership_tests)
+
 # SDK v1 stores over the key/blob storage port — the portable half of the
 # `rlsec` NVS adapter (sdk-v1/05 §5, 08 P7-1), against a fake NVS.
 add_executable(routeloom_sdkv1_blob_storage_tests test_sdkv1_blob_storage.cpp)

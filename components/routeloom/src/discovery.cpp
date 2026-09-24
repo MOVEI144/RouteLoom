@@ -197,9 +197,12 @@ Status DevPskAuthenticator::issue_proof(const AuthTranscript& transcript,
 
 Status MembershipController::initialize(const MembershipHooks& hooks,
                                         const NetworkId network) noexcept {
-  state_ = hooks.local_member(network) ? MembershipState::Member
-                                       : MembershipState::Unprovisioned;
-  return Status::success();
+  MembershipState state = MembershipState::Unprovisioned;
+  const Status status = hooks.local_state(network, state);
+  // The hooks' verdict stands even on error: "cannot prove" arrives with a
+  // fail-closed state (P4 §3.1) and the status propagates to the Owner.
+  state_ = state;
+  return status;
 }
 
 Status MembershipController::begin_discovery() noexcept {
@@ -331,7 +334,10 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
             : std::min(config_.migration_until_ms,
                        now_ms + kScopeLegacyMigrationMaxMs);
   }
-  membership_.initialize(hooks_, config_.network);
+  // A membership the hooks cannot prove (notably Revoked-behind-broken
+  // storage) must reach the Owner, never start traffic silently.
+  const Status membership = membership_.initialize(hooks_, config_.network);
+  if (!membership) return membership;
   started_ = true;
   return Status::success();
 }

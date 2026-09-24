@@ -15,6 +15,9 @@
 #include <cstdio>
 #include <functional>
 
+#include "routeloom/key_schedule.hpp"
+#include "routeloom/sdkv1_membership.hpp"
+
 #include "test_sdkv1.hpp"
 
 namespace {
@@ -586,6 +589,44 @@ ResumeContext context(const std::uint32_t gk_epoch = 203, const RevocationSet* r
   return ResumeContext{kNetwork, gk_epoch, rrs};
 }
 
+ResumeSlot2 resume2_slot(const NodeId peer, const std::uint8_t flags = 0,
+                         const std::uint32_t last_used_boot = 0,
+                         const std::uint32_t gk_epoch = 203,
+                         const ResumePurpose purpose = ResumePurpose::Link) {
+  ResumeSlot2 slot{};
+  slot.valid = true;
+  slot.purpose = purpose;
+  slot.flags = flags;
+  slot.peer = peer;
+  slot.network = kNetwork;
+  slot.peer_cert_id = {1, 2, 3, 4, 5, 6, 7, 8};
+  slot.local_cert_id = {9, 9, 9, 9, 9, 9, 9, 9};
+  slot.peer_generation = 1;
+  slot.peer_role = 0b011;
+  slot.created_gk_epoch = gk_epoch;
+  slot.last_used_boot = last_used_boot;
+  for (std::size_t i = 0; i < slot.rms.size(); ++i) {
+    slot.rms[i] = static_cast<std::uint8_t>(peer + i + 1);
+  }
+  return slot;
+}
+
+LocalRevocationRecord removal_record() {
+  LocalRevocationRecord record{};
+  record.state = LocalRevocationState::Blocked;
+  record.cause = LocalRevocationCause::Notice;
+  record.local_node = 0x00A1000000001234ULL;
+  record.site_id = 0x5173000000000042ULL;
+  record.network = kNetwork;
+  record.removed_generation = 3;
+  record.rs_epoch_floor = 11;
+  record.site_epoch_floor = kSiteEpoch;
+  record.evidence_digest.fill(0xE4);
+  record.rls_commit_seq = 41;
+  record.boot_witness = 9000;
+  return record;
+}
+
 void test_resume_cache_rules() {
   FaultyResumeStorage storage(4);
   ResumeCache cache(storage);
@@ -697,17 +738,333 @@ void test_resume_power_cuts() {
   }
 }
 
+// --- ResumeCache2 (RLP2) -------------------------------------------------------------
+
+void test_resume2_cache_rules() {
+  FaultyResumeStorage2 storage(6);  // link 0..2, end 3..5
+  ResumeCache2 cache(storage, 3, 3);
+  ResumeSlot2 out{};
+  std::size_t index = 0;
+  CHECK(cache.find_by_peer(ResumePurpose::Link, kPeer, context(), out, index).code ==
+        StatusCode::NotFound);
+  // A fresh RMS restarts the count: a carried-over high-water is refused.
+  ResumeSlot2 carried = resume2_slot(100);
+  carried.reserved_uses = 8;
+  CHECK(cache.put(carried, context()).code == StatusCode::InvalidArgument);
+  CHECK_OK(cache.put(resume2_slot(100, 0, 10), context()));
+  CHECK_OK(cache.put(resume2_slot(101, 0, 5), context()));
+  CHECK_OK(cache.put(resume2_slot(102, kResumeFlagPinned, 1), context()));
+  // The link partition is full (3): LRU eviction stays inside it and never
+  // touches the end partition.
+  CHECK_OK(cache.put(resume2_slot(103, 0, 20), context()));
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 101, context(), out, index).code ==
+        StatusCode::NotFound);
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 102, context(), out, index));  // pinned
+  CHECK_OK(cache.put(resume2_slot(200, 0, 7, 203, ResumePurpose::End), context()));
+  CHECK_OK(cache.find_by_peer(ResumePurpose::End, 200, context(), out, index));
+  CHECK(index >= 3);  // end slots live in the end partition
+  // Pin budget is per purpose: quota - 2 = 1 pinned end slot at most here.
+  CHECK_OK(cache.put(resume2_slot(201, kResumeFlagPinned, 50, 203, ResumePurpose::End), context()));
+  CHECK(cache.put(resume2_slot(202, kResumeFlagPinned, 60, 203, ResumePurpose::End), context())
+            .code == StatusCode::NoCapacity);
+  // Validity: GK window with u64 edges, network, revocation, role.
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(204), out, index));
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context(205), out, index).code ==
+        StatusCode::NotFound);  // created 203 + 2 <= 205
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context(202), out, index).code ==
+        StatusCode::NotFound);  // a regressed GK fails closed
+  ResumeSlot2 future = resume2_slot(104, 0, 0, 0xFFFFFFFE);
+  CHECK_OK(cache.put(future, context()));  // stored, but never usable here
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 104, context(), out, index).code ==
+        StatusCode::NotFound);
+  ResumeContext other_network = context();
+  other_network.network = kNetwork + 1;
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, other_network, out, index).code ==
+        StatusCode::NotFound);
+  RevocationSet rrs = revocation_set(1, 0);
+  rrs.entries[0] = RevocationEntry{100, 2, RevocationReason::Lost};
+  rrs.count = 1;
+  CHECK(cache.find_by_peer(ResumePurpose::Link, 100, context(203, &rrs), out, index).code ==
+        StatusCode::NotFound);
+  // read_at reports torn slots without failing.
+  bool intact = true;
+  CHECK_OK(cache.read_at(0, out, intact));
+  CHECK(intact);
+  storage.slot(0)[40] ^= 0xFF;  // corrupt the generation word, CRC now fails
+  CHECK_OK(cache.read_at(0, out, intact));
+  CHECK(!intact && !out.valid);
+  CHECK(cache.read_at(6, out, intact).code == StatusCode::InvalidArgument);
+  // Quota mismatch against the storage refuses lookups loudly.
+  ResumeCache2 misconfigured(storage, 3, 4);
+  CHECK(misconfigured.find_by_peer(ResumePurpose::Link, 100, context(), out, index).code ==
+        StatusCode::InvalidState);
+}
+
+void test_resume2_find_by_id() {
+  FaultyResumeStorage2 storage(6);
+  ResumeCache2 cache(storage, 3, 3);
+  CHECK_OK(cache.put(resume2_slot(100), context()));
+  CHECK_OK(cache.put(resume2_slot(101), context()));
+  ResumeSlot2 out{};
+  std::size_t index = 0;
+  routeloom::keys::ResumeId rid{};
+  {
+    ResumeSlot2 slot{};
+    CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), slot, index));
+    routeloom::keys::resume_id(slot.rms, routeloom::keys::Purpose::Link, rid);
+  }
+  // Unknown carrier peer: the rid alone still finds the unique slot.
+  CHECK_OK(cache.find_by_id(ResumePurpose::Link, rid, kInvalidNodeId, context(), out, index));
+  CHECK(out.peer == 100);
+  // A claimed peer that matches filters; one that does not refuses.
+  CHECK_OK(cache.find_by_id(ResumePurpose::Link, rid, 100, context(), out, index));
+  CHECK(cache.find_by_id(ResumePurpose::Link, rid, 101, context(), out, index).code ==
+        StatusCode::NotFound);
+  // Two slots sharing one RMS are ambiguous even with a claimed peer that
+  // both... no: the claimed peer disambiguates, unknown does not.
+  ResumeSlot2 twin = resume2_slot(102);
+  ResumeSlot2 first{};
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), first, index));
+  twin.rms = first.rms;
+  CHECK_OK(cache.put(twin, context()));
+  CHECK_OK(cache.find_by_id(ResumePurpose::Link, rid, 102, context(), out, index));
+  CHECK(out.peer == 102);
+  CHECK(cache.find_by_id(ResumePurpose::Link, rid, kInvalidNodeId, context(), out, index).code ==
+        StatusCode::NotFound);
+  // Wrong purpose or network never matches.
+  CHECK(cache.find_by_id(ResumePurpose::End, rid, kInvalidNodeId, context(), out, index).code ==
+        StatusCode::NotFound);
+  ResumeContext other = context();
+  other.network = kNetwork + 1;
+  CHECK(cache.find_by_id(ResumePurpose::Link, rid, kInvalidNodeId, other, out, index).code ==
+        StatusCode::NotFound);
+}
+
+void test_resume2_uses() {
+  // The 64-use ceiling holds across reboots; one RMS generation costs at
+  // most 8 durable reservation writes (P4 §6.2, V1-F05). Each boot drops
+  // the RAM remainder (safe side), so a use-per-boot pattern serves 8, not
+  // 64 — the cap is a ceiling, never a promise.
+  FaultyResumeStorage2 storage(16);
+  std::size_t index = 0;
+  {
+    ResumeCache2 cache(storage, 12, 4);
+    CHECK_OK(cache.put(resume2_slot(100, 0, 1000), context()));
+    ResumeSlot2 slot{};
+    CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), slot, index));
+    // One boot serves the whole quantum from one grant + RAM.
+    for (int i = 0; i < 64; ++i) CHECK_OK(cache.reserve_uses(index, context(), 1000, false));
+    CHECK(cache.reserve_uses(index, context(), 1000, false).code ==
+          StatusCode::CounterExhausted);
+  }
+  {
+    ResumeCache2 cache(storage, 12, 4);
+    ResumeSlot2 slot{};
+    bool intact = true;
+    CHECK_OK(cache.read_at(index, slot, intact));
+    CHECK(intact && slot.reserved_uses == 64);
+    CHECK(cache.reserve_uses(index, context(), 1001, false).code ==
+          StatusCode::CounterExhausted);
+  }
+  CHECK(storage.write_calls == 1 + 8);  // put + 8 quanta, no touch double-write
+  // A reboot between every use wastes the RAM remainder: 8 serves, then the
+  // high-water is spent. Uses served never exceed the durable proof.
+  {
+    FaultyResumeStorage2 rebooted(16);
+    ResumeCache2 seed(rebooted, 12, 4);
+    CHECK_OK(seed.put(resume2_slot(100, 0, 5000), context()));
+    std::uint32_t served = 0;
+    for (std::uint32_t boot = 5000; boot < 5020; ++boot) {
+      ResumeCache2 cache(rebooted, 12, 4);
+      ResumeSlot2 slot{};
+      std::size_t at = 0;
+      CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), slot, at));
+      if (!cache.reserve_uses(at, context(), boot, false).ok()) break;
+      ++served;
+    }
+    CHECK(served == 8);
+    ResumeCache2 cache(rebooted, 12, 4);
+    ResumeSlot2 slot{};
+    bool intact = true;
+    CHECK_OK(cache.read_at(0, slot, intact));
+    CHECK(slot.reserved_uses == 64);
+  }
+  // A rewritten slot invalidates the RAM remainder; failures grant nothing.
+  {
+    ResumeCache2 cache(storage, 12, 4);
+    CHECK(cache.reserve_uses(15, context(), 3000, false).code == StatusCode::NotFound);
+    storage.read_error = true;
+    CHECK(!cache.reserve_uses(index, context(), 3000, false).ok());
+    storage.disarm();
+    // Peer 100's slot is spent; re-put a fresh RMS and the count restarts.
+    ResumeSlot2 fresh = resume2_slot(100, 0, 4000);
+    CHECK_OK(cache.put(fresh, context()));
+    ResumeSlot2 slot{};
+    CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), slot, index));
+    CHECK(slot.reserved_uses == 0);
+    CHECK_OK(cache.reserve_uses(index, context(), 4000, false));
+  }
+}
+
+void test_resume2_power_cuts() {
+  // Cut a use-grant at every byte: afterwards the slot grants at most the
+  // uses its durable high-water proves — never more (V1-F05).
+  const ResumeSlot2 fresh = resume2_slot(100, 0, 1000);
+  for (std::size_t boundary = 0; boundary <= kResume2SlotBytes; ++boundary) {
+    FaultyResumeStorage2 storage(16);
+    std::size_t index = 0;
+    {
+      ResumeCache2 cache(storage, 12, 4);
+      CHECK_OK(cache.put(fresh, context()));
+      ResumeSlot2 slot{};
+      CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), slot, index));
+      storage.cut_call = storage.write_calls;
+      storage.cut_bytes = boundary;
+      static_cast<void>(cache.reserve_uses(index, context(), 1000, false));
+    }
+    ResumeCache2 reboot(storage, 12, 4);
+    ResumeSlot2 slot{};
+    bool intact = true;
+    CHECK_OK(reboot.read_at(index, slot, intact));
+    if (!slot.valid) continue;  // torn single-copy slot: one full EDHOC
+    CHECK(slot.reserved_uses == 0 || slot.reserved_uses == 8);
+    // Whatever survived, the lifetime cap still holds end to end: fresh
+    // caches serve at most one use per remaining quantum.
+    std::uint32_t granted = 0;
+    for (std::uint32_t i = 0; i < 70; ++i) {
+      ResumeCache2 attempt(storage, 12, 4);
+      ResumeSlot2 probe{};
+      std::size_t at = 0;
+      if (!attempt.find_by_peer(ResumePurpose::Link, 100, context(), probe, at).ok()) break;
+      if (!attempt.reserve_uses(at, context(), 1000 + i, false).ok()) break;
+      ++granted;
+    }
+    CHECK(granted <= (64 - slot.reserved_uses) / 8);
+    ResumeCache2 tail(storage, 12, 4);
+    ResumeSlot2 end{};
+    CHECK_OK(tail.read_at(index, end, intact));
+    CHECK(end.reserved_uses <= 64);
+  }
+}
+
+// --- LocalRevocationStore (RLV1, P4-M01) ----------------------------------------------
+
+void test_local_revocation_basic() {
+  FaultyRecordStorage storage(kLocalRevocationSlotBytes);
+  {
+    LocalRevocationStore store(storage);
+    CHECK_OK(store.initialize());
+    CHECK(!store.has_record() && !store.blocks_membership(false));
+    CHECK_OK(store.check_join(0x5173000000000042ULL, 4, true));
+    CHECK_OK(store.commit_blocked(removal_record()));
+    CHECK(store.has_record() && store.blocks_membership(false));
+    CHECK(store.blocks_membership(true));  // Blocked ignores the holdoff
+    CHECK(store.check_join(0x5173000000000042ULL, 9, true).code ==
+          StatusCode::AuthorizationFailed);
+    // Same-site re-commit with a regressed generation is Conflict.
+    LocalRevocationRecord older = removal_record();
+    older.removed_generation = 2;
+    CHECK(store.commit_blocked(older).code == StatusCode::Conflict);
+    // A different site while one stands: finish the cleanup first.
+    LocalRevocationRecord foreign = removal_record();
+    foreign.site_id = 0x99;
+    CHECK(store.commit_blocked(foreign).code == StatusCode::Conflict);
+    CHECK_OK(store.commit_cleaned());
+    CHECK(store.has_record() && store.blocks_membership(false));
+    CHECK(!store.blocks_membership(true));  // Cleaned + elapsed holdoff
+    CHECK_OK(store.check_join(0x5173000000000042ULL, 4, true));
+    CHECK(store.check_join(0x5173000000000042ULL, 3, true).code ==
+          StatusCode::AuthorizationFailed);  // the removed generation never returns
+    CHECK(store.check_join(0x5173000000000042ULL, 4, false).code ==
+          StatusCode::AuthorizationFailed);  // holdoff still running
+    CHECK_OK(store.check_join(0x1234ULL, 1, true));  // another site, full join
+    CHECK(store.commit_cleaned().code == StatusCode::InvalidState);  // not Blocked
+  }
+  // The evidence survives the reboot either way.
+  LocalRevocationStore reboot(storage);
+  CHECK_OK(reboot.initialize());
+  CHECK(reboot.has_record());
+  CHECK(reboot.record().state == LocalRevocationState::Cleaned);
+  CHECK(reboot.record().removed_generation == 3);
+}
+
+void test_local_revocation_power_cuts() {
+  // P4-M01: cut the Blocked commit at every byte, then reboot. Either the
+  // removal is durably present (and blocks), or nothing landed (and the
+  // commit reported an error, so the issuer redelivers) — a reboot never
+  // turns an accepted removal back into Member.
+  for (const bool has_old : {false, true}) {
+    // A sequenced commit is two storage writes (pending + commit marker):
+    // cut each of them, at every byte.
+    for (const std::size_t cut_write : {0, 1}) {
+      for (std::size_t boundary = 0; boundary <= kLocalRevocationSlotBytes; ++boundary) {
+        FaultyRecordStorage storage(kLocalRevocationSlotBytes);
+        LocalRevocationRecord old_record = removal_record();
+        old_record.removed_generation = 2;
+        if (has_old) {
+          LocalRevocationStore seed(storage);
+          CHECK_OK(seed.initialize());
+          CHECK_OK(seed.commit_blocked(old_record));
+        }
+        bool committed = false;
+        {
+          LocalRevocationStore store(storage);
+          CHECK_OK(store.initialize());
+          storage.cut_call = storage.write_calls + cut_write;
+          storage.cut_bytes = boundary;
+          committed = store.commit_blocked(removal_record()).ok();
+        }
+        LocalRevocationStore reboot(storage);
+        const Status booted = reboot.initialize();
+        if (!booted.ok()) {
+          // Torn sibling states quarantine or report uncertainty: blocking.
+          CHECK(reboot.blocks_membership(false));
+          continue;
+        }
+        if (!reboot.has_record()) {
+          // Nothing landed: the commit must have said so.
+          CHECK(!committed);
+          CHECK(!has_old);  // an old record is never lost by a cut
+          CHECK(!reboot.blocks_membership(false));
+          continue;
+        }
+        CHECK(reboot.blocks_membership(false));
+        CHECK(reboot.blocks_membership(true));
+        const LocalRevocationRecord& adopted = reboot.record();
+        if (committed) {
+          CHECK(adopted.removed_generation == 3);  // read back before reporting
+        } else if (adopted.removed_generation == 3) {
+          // Only a full commit-marker payload that landed despite the
+          // error adopts the new record without a success report.
+          CHECK(boundary == kLocalRevocationSlotBytes && cut_write == 1);
+        } else {
+          CHECK(has_old && adopted.removed_generation == 2);  // the old removal stands
+        }
+        // Every survivor still verifies as the record it claims to be.
+        CHECK_OK(local_revocation_validate(adopted));
+      }
+    }
+  }
+}
+
 void test_ram_footprint() {
   // None of these is a MeshNode member; each holds one slot-sized scratch
-  // plus its decoded record. The resume cache holds one 84-byte buffer
+  // plus its decoded record. The resume caches hold one slot buffer
   // whatever the slot count (C3 gateway sizing floor).
   std::printf("sizeof IdentityStore=%zu SiteStore=%zu RevocationStore=%zu ResumeCache=%zu\n",
               sizeof(IdentityStore), sizeof(SiteStore), sizeof(RevocationStore),
               sizeof(ResumeCache));
+  std::printf("sizeof ResumeCache2=%zu LocalRevocationStore=%zu\n", sizeof(ResumeCache2),
+              sizeof(LocalRevocationStore));
   CHECK(sizeof(ResumeCache) <= 128);
+  CHECK(sizeof(ResumeCache2) <= 512);
   CHECK(sizeof(IdentityStore) <= 2 * kIdentitySlotBytes);
   CHECK(sizeof(SiteStore) <= 2 * kSiteSlotBytes);
   CHECK(sizeof(RevocationStore) <= 2 * kRevocationSlotBytes);
+  // The 108 B record is dwarfed by the shared pair machinery; the bound is
+  // the record plus one slot buffer plus that fixed overhead.
+  CHECK(sizeof(LocalRevocationStore) <=
+        sizeof(LocalRevocationRecord) + kLocalRevocationSlotBytes + 128);
 }
 
 }  // namespace
@@ -725,6 +1082,12 @@ int main() {
   test_resume_cache_rules();
   test_resume_touch_wear_rule();
   test_resume_power_cuts();
+  test_resume2_cache_rules();
+  test_resume2_find_by_id();
+  test_resume2_uses();
+  test_resume2_power_cuts();
+  test_local_revocation_basic();
+  test_local_revocation_power_cuts();
   test_ram_footprint();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 store check(s) failed\n", failures);
