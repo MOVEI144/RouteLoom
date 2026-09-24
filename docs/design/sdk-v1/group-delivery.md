@@ -87,6 +87,7 @@ broadcast方式の節約は写しの部分（約0.47s）だけで、reportは同
 ## 4. 重複排除
 
 - 受信側は送信元ごとに`GroupStream`（stream番号64個分の既受信bitmapと順序cursor）を持つ。容量は`kMaxRouteGateways`（2）で、送信元はroute gatewayに限られるので溢れない。
+- 新しいsessionへのstream切替・保持messageの排出・重複窓の更新は、Group end認証とpayload検証が通った時点でcommitする。認証に失敗したframeは既存のstream状態を一切変えない（issue #106：link認証だけが有効なframeでsessionを前へ進められ、以後の正規frameが`GROUP_STALE_SESSION`で拒否される不具合）。
 - 同じ(送信元, stream番号)の2回目以降はアプリへ渡さず、reportだけ返す（repairの写しは必ず重複する）。
 - 窓より古い番号は`GROUP_TOO_OLD`で拒否する。送信元は自分のstream番号が32以上進んだ古いmessageを`GROUP_SUPERSEDED`で打ち切るので、repairが受信側の窓を越えることはない。
 - 1 messageの寿命は`kMaxMessageLifetimeMs`（30s）が上限で、窓（64）と上限の組み合わせで、寿命内に同じ番号が再利用されることはない（stream番号は単調、boot sessionが変わればMessage IDのsessionが変わる）。

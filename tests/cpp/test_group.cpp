@@ -859,6 +859,336 @@ void test_unordered_never_held() {
   w.net.drop_frame = nullptr;
 }
 
+// ---------------------------------------------------------------------------
+// Stream state commits only after Group end authentication (issue #106)
+// ---------------------------------------------------------------------------
+
+// The plain GROUP_DATA header as gateway `source` would build it.
+wire::PlainFrame group_plain_header(const NodeId source, const MessageId& message) {
+  wire::PlainFrame plain{};
+  plain.header.type = FrameType::GroupData;
+  plain.header.flags = wire::kFlagEndProtected;
+  plain.header.delivery = DeliveryClass::Reliable;
+  plain.header.hop_remaining = 8;
+  plain.header.network = 1;
+  plain.header.origin = source;
+  plain.header.destination = group_address(kGroupAll);
+  plain.header.previous_hop = source;
+  plain.header.next_hop = source;
+  plain.header.message = message;
+  plain.header.remaining_deadline_ms = 5000;
+  plain.header.original_lifetime_ms = 5000;
+  plain.header.link_epoch = 1;
+  plain.header.end_epoch = 1;
+  return plain;
+}
+
+// Seals a GROUP_DATA frame exactly as gateway `source` would build it — the
+// end tag is genuine for the header given. A caller that then edits the
+// sealed header (e.g. the session field, which the end AAD covers) gets a
+// frame whose link wrap can still be honest while the end tag is not.
+wire::LinkOpenedFrame seal_group_frame(SecurityProvider& sealer, const NodeId source,
+                                       const MessageId& message, const char* text) {
+  wire::PlainFrame plain = group_plain_header(source, message);
+  GroupDataHeader head{};
+  head.priority = Priority::Normal;
+  wire::LinkOpenedFrame sealed{};
+  CHECK_OK(encode_group_data(head,
+                             ByteView{reinterpret_cast<const std::uint8_t*>(text),
+                                      std::strlen(text)},
+                             MutableByteView{plain.payload.data(), plain.payload.size()},
+                             plain.payload_size));
+  CHECK_OK(wire::seal_group(plain, source, sealer, sealed));
+  return sealed;
+}
+
+// Same as seal_group_frame but takes the GROUP_DATA payload bytes verbatim
+// — including bytes encode_group_data would never produce, like reserved
+// flag bits that decode_group_data must refuse. The end tag stays genuine.
+wire::LinkOpenedFrame seal_group_frame_raw(SecurityProvider& sealer, const NodeId source,
+                                           const MessageId& message,
+                                           const ByteView payload) {
+  wire::PlainFrame plain = group_plain_header(source, message);
+  std::memcpy(plain.payload.data(), payload.data, payload.size);
+  plain.payload_size = payload.size;
+  wire::LinkOpenedFrame sealed{};
+  CHECK_OK(wire::seal_group(plain, source, sealer, sealed));
+  return sealed;
+}
+
+// The frame as relay `via` received it, then re-wrapped in `via`'s own
+// honest link protection toward `to` (wire::forward never re-computes the
+// end tag — whatever the mutation did to it stays).
+wire::EncodedFrame link_wrap(wire::LinkOpenedFrame& frame, SimWorld& w, const NodeId via,
+                             const NodeId to) {
+  frame.header.next_hop = via;
+  wire::EncodedFrame encoded{};
+  CHECK_OK(wire::forward(frame, via, to, 1, frame.header.remaining_deadline_ms,
+                         *w.security.at(via), encoded));
+  return encoded;
+}
+
+// Comparable read of a node's receive-side group state: every per-source
+// dedup/ordering stream and every held ordered message, contents included.
+// Pool order is deterministic, so equality means bit-for-bit equality.
+bool operator==(const GroupStreamSnapshot& a, const GroupStreamSnapshot& b) {
+  return a.source == b.source && a.session == b.session && a.max_seq == b.max_seq &&
+         a.seen == b.seen && a.next_seq == b.next_seq;
+}
+bool operator==(const GroupHoldSnapshot& a, const GroupHoldSnapshot& b) {
+  return a.info.key == b.info.key && a.info.group == b.info.group &&
+         a.info.group_seq == b.info.group_seq && a.info.priority == b.info.priority &&
+         a.info.ordered == b.info.ordered && a.info.late == b.info.late &&
+         a.release_at_ms == b.release_at_ms && a.size == b.size &&
+         a.payload == b.payload;
+}
+struct GroupRxSnapshot {
+  std::vector<GroupStreamSnapshot> streams;
+  std::vector<GroupHoldSnapshot> holds;
+};
+bool operator==(const GroupRxSnapshot& a, const GroupRxSnapshot& b) {
+  if (a.streams.size() != b.streams.size() || a.holds.size() != b.holds.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < a.streams.size(); ++i) {
+    if (!(a.streams[i] == b.streams[i])) return false;
+  }
+  for (std::size_t i = 0; i < a.holds.size(); ++i) {
+    if (!(a.holds[i] == b.holds[i])) return false;
+  }
+  return true;
+}
+GroupRxSnapshot group_rx_snapshot(const SimWorld& w, const NodeId node) {
+  GroupRxSnapshot snap;
+  w.at(node)->for_each_group_stream(
+      [&](const GroupStreamSnapshot& s) { snap.streams.push_back(s); });
+  w.at(node)->for_each_group_hold(
+      [&](const GroupHoldSnapshot& h) { snap.holds.push_back(h); });
+  return snap;
+}
+
+void test_unauthenticated_session_jump_is_ignored() {
+  // Issue #106 regression: a link-valid GROUP_DATA whose Group end tag is
+  // invalid must not move the sender's stream. Before the fix it advanced
+  // the session to UINT32_MAX, and every later legitimate frame from the
+  // gateway was refused GROUP_STALE_SESSION.
+  SimWorld w;
+  build_tree(w);
+  MessageId first{};
+  CHECK(send_group(w, 1, kGroupAll, first));
+  w.run(1000);
+  CHECK(group_count(w, 4, first) == 1);
+  CHECK(group_count(w, 5, first) == 1);
+
+  // Genuine group ciphertext from the gateway's provider, then the
+  // AAD-covered session field raised to UINT32_MAX without resealing.
+  wire::LinkOpenedFrame forged = seal_group_frame(
+      *w.security.at(1), 1, MessageId{101, kGroupSequenceFlag | 9}, "FORGED");
+  forged.header.message.session = UINT32_MAX;
+  wire::EncodedFrame injected = link_wrap(forged, w, 2, 4);
+  // Inspection provider: the link layer opens, the Group end layer cannot.
+  routeloom_test::TestSecurity inspect;
+  wire::LinkOpenedFrame at_leaf{};
+  CHECK_OK(wire::open_link(injected.view(), 4, inspect, at_leaf));
+  wire::PlainFrame opened{};
+  const auto invalid_group = wire::open_group(at_leaf, inspect, opened);
+  CHECK(!invalid_group.ok());
+
+  const GroupStats before = w.at(4)->group_stats();
+  const GroupRxSnapshot rx_before = group_rx_snapshot(w, 4);
+  const std::size_t receipts_before = w.obs(4)->group_messages.size();
+  const std::size_t diags_before = w.obs(4)->diagnostics.size();
+  w.at(4)->on_radio_receive(2, injected.view(), RadioRxMetadata{-60}, w.now);
+  // The end layer refused: one open failure, the refusal detail — and
+  // NOTHING else. Stream (session/max_seq/seen/next_seq) and the hold pool
+  // are bit-invariant, not just the aggregate counters.
+  GroupStats after = w.at(4)->group_stats();
+  CHECK(after.open_failures == before.open_failures + 1);
+  after.open_failures = before.open_failures;
+  CHECK(std::memcmp(&before, &after, sizeof(GroupStats)) == 0);
+  CHECK(group_rx_snapshot(w, 4) == rx_before);
+  CHECK(w.obs(4)->group_messages.size() == receipts_before);
+  CHECK(w.obs(4)->diagnostics.size() == diags_before + 1);
+  CHECK(w.obs(4)->diagnostics.back() == std::string(invalid_group.detail));
+
+  // The committed session's duplicate handling is untouched too: a
+  // re-delivery of `first` is dedup'd at the receiver tree, never
+  // re-delivered.
+  wire::LinkOpenedFrame dup = seal_group_frame(*w.security.at(1), 1, first, "DUP");
+  wire::EncodedFrame dup_wire = link_wrap(dup, w, 2, 4);
+  w.at(4)->on_radio_receive(2, dup_wire.view(), RadioRxMetadata{-60}, w.now);
+  CHECK(group_count(w, 4, first) == 1);
+  CHECK(w.at(4)->group_stats().duplicates == after.duplicates + 1);
+
+  // And repair for the committed session still works: drop the round-0
+  // copies of the next ALL toward leaf 4 — the bounded repair round brings
+  // it in (under the bug this lands as GROUP_STALE_SESSION). Leaf 5, which
+  // never saw the forged frame, gets round 0 as usual.
+  w.net.drop_frame = loss_hook;
+  g_loss = LossPlan{};
+  g_loss.drop_to = 4;
+  g_loss.drop_left = 2;
+  g_loss.drop_round = 0;
+  g_loss.only_sequence = kGroupSequenceFlag | 2;
+  MessageId second{};
+  CHECK(send_group(w, 1, kGroupAll, second));
+  w.run(2500);
+  w.net.drop_frame = nullptr;
+  CHECK(group_count(w, 4, second) == 1);
+  CHECK(group_count(w, 5, second) == 1);
+  CHECK(!w.obs(4)->has_diag("GROUP_STALE_SESSION"));
+  CHECK(w.at(1)->group_delivery(second).state == DeliveryState::Delivered);
+}
+
+void test_authenticated_session_switch_commits() {
+  // The same gate from the other side: while the forged session jump leaves
+  // the stream AND the held ordered message untouched, a properly sealed
+  // newer session still commits — switching the stream and draining the
+  // old session's holds in order.
+  SimWorld w;
+  build_tree(w);
+  MessageId m1{};
+  CHECK(send_group(w, 1, kGroupAll, m1, Priority::Normal, true));
+  w.run(150);
+  CHECK(group_order(w, 4) == std::vector<std::uint32_t>({1}));
+  // Stream 2's copies to leaf 4 are lost in round 0; stream 3 (Urgent,
+  // ordered) arrives behind the gap and is held.
+  w.net.drop_frame = loss_hook;
+  g_loss = LossPlan{};
+  g_loss.drop_to = 4;
+  g_loss.drop_left = 2;
+  g_loss.drop_round = 0;
+  g_loss.only_sequence = kGroupSequenceFlag | 2;
+  MessageId m2{};
+  MessageId m3{};
+  CHECK(send_group(w, 1, kGroupAll, m2, Priority::Normal, true));
+  CHECK(send_group(w, 1, kGroupAll, m3, Priority::Urgent, true));
+  for (int step = 0; step < 200 && w.at(4)->group_stats().held == 0; ++step) w.run(0);
+  w.net.drop_frame = nullptr;
+  CHECK(w.at(4)->group_stats().held == 1);
+  CHECK(group_order(w, 4) == std::vector<std::uint32_t>({1}));
+
+  // Forged jump to UINT32_MAX: refused, and stream + session + hold +
+  // dedup are bit-identical — the held message is NOT drained.
+  wire::LinkOpenedFrame forged = seal_group_frame(
+      *w.security.at(1), 1, MessageId{101, kGroupSequenceFlag | 9}, "FORGED");
+  forged.header.message.session = UINT32_MAX;
+  wire::EncodedFrame injected = link_wrap(forged, w, 2, 4);
+  const GroupStats before = w.at(4)->group_stats();
+  const GroupRxSnapshot rx_before = group_rx_snapshot(w, 4);
+  w.at(4)->on_radio_receive(2, injected.view(), RadioRxMetadata{-60}, w.now);
+  GroupStats after = w.at(4)->group_stats();
+  CHECK(after.open_failures == before.open_failures + 1);
+  after.open_failures = before.open_failures;
+  CHECK(std::memcmp(&before, &after, sizeof(GroupStats)) == 0);
+  CHECK(group_rx_snapshot(w, 4) == rx_before);
+  CHECK(group_order(w, 4) == std::vector<std::uint32_t>({1}));
+
+  // A properly sealed newer session commits: the old hold drains in order
+  // and the new session's first message lands. Sealed by the gateway's own
+  // provider, so the end counter is fresh for leaf 4's replay check.
+  wire::LinkOpenedFrame reboot = seal_group_frame(
+      *w.security.at(1), 1, MessageId{9999, kGroupSequenceFlag | 1}, "BOOT2");
+  wire::EncodedFrame valid = link_wrap(reboot, w, 2, 4);
+  routeloom_test::TestSecurity inspect;
+  wire::LinkOpenedFrame at_leaf{};
+  CHECK_OK(wire::open_link(valid.view(), 4, inspect, at_leaf));
+  wire::PlainFrame opened{};
+  CHECK_OK(wire::open_group(at_leaf, inspect, opened));
+  w.at(4)->on_radio_receive(2, valid.view(), RadioRxMetadata{-60}, w.now);
+  const auto& got = w.obs(4)->group_messages;
+  CHECK(got.size() == 3);
+  if (got.size() == 3) {
+    CHECK(got[0].info.key.id.session == 101 && got[0].info.group_seq == 1);
+    CHECK(got[1].info.key.id.session == 101 && got[1].info.group_seq == 3);  // drained hold
+    CHECK(got[2].info.key.id.session == 9999 && got[2].info.group_seq == 1);  // new session
+  }
+  CHECK(w.at(4)->group_stats().open_failures == before.open_failures + 1);
+
+  // The switch is real: the gateway's pre-reboot session is now stale at
+  // leaf 4, while leaf 5 (never saw the new session) still accepts it.
+  w.run(500);  // let m3's report settle so the non-urgent slot is free
+  MessageId m4{};
+  CHECK(send_group(w, 1, kGroupAll, m4));
+  w.run(1000);
+  CHECK(group_count(w, 4, m4) == 0);
+  CHECK(w.obs(4)->has_diag("GROUP_STALE_SESSION"));
+  CHECK(group_count(w, 5, m4) == 1);
+}
+
+void test_bad_payload_session_jump_is_ignored() {
+  // The other half of the commit gate: a new-session frame whose Group end
+  // tag is GENUINE but whose payload fails decode_group_data must commit
+  // nothing either — payload verification is part of the same atomic step
+  // (issue #106). A commit ordered between open_group() and the decode
+  // would switch the stream and drain the hold on this frame.
+  SimWorld w;
+  build_tree(w);
+  MessageId m1{};
+  CHECK(send_group(w, 1, kGroupAll, m1, Priority::Normal, true));
+  w.run(150);
+  CHECK(group_order(w, 4) == std::vector<std::uint32_t>({1}));
+  // Same hold setup as above: stream 2 lost in round 0, stream 3 held.
+  w.net.drop_frame = loss_hook;
+  g_loss = LossPlan{};
+  g_loss.drop_to = 4;
+  g_loss.drop_left = 2;
+  g_loss.drop_round = 0;
+  g_loss.only_sequence = kGroupSequenceFlag | 2;
+  MessageId m2{};
+  MessageId m3{};
+  CHECK(send_group(w, 1, kGroupAll, m2, Priority::Normal, true));
+  CHECK(send_group(w, 1, kGroupAll, m3, Priority::Urgent, true));
+  for (int step = 0; step < 200 && w.at(4)->group_stats().held == 0; ++step) w.run(0);
+  w.net.drop_frame = nullptr;
+  CHECK(w.at(4)->group_stats().held == 1);
+
+  // Properly sealed newer session — but the payload's flags byte carries a
+  // reserved bit, so open_group() succeeds and decode_group_data() fails.
+  // End-authenticated garbage is still garbage.
+  const std::uint8_t bad[] = {0x08, 'B', 'A', 'D'};
+  wire::LinkOpenedFrame forged =
+      seal_group_frame_raw(*w.security.at(1), 1,
+                           MessageId{9999, kGroupSequenceFlag | 1},
+                           ByteView{bad, sizeof(bad)});
+  wire::EncodedFrame injected = link_wrap(forged, w, 2, 4);
+  routeloom_test::TestSecurity inspect;
+  wire::LinkOpenedFrame at_leaf{};
+  CHECK_OK(wire::open_link(injected.view(), 4, inspect, at_leaf));
+  wire::PlainFrame opened{};
+  CHECK_OK(wire::open_group(at_leaf, inspect, opened));
+  GroupDataHeader head{};
+  ByteView app{};
+  const auto bad_payload =
+      decode_group_data(ByteView{opened.payload.data(), opened.payload_size}, head, app);
+  CHECK(!bad_payload.ok());
+
+  const GroupStats before = w.at(4)->group_stats();
+  const GroupRxSnapshot rx_before = group_rx_snapshot(w, 4);
+  const std::size_t diags_before = w.obs(4)->diagnostics.size();
+  w.at(4)->on_radio_receive(2, injected.view(), RadioRxMetadata{-60}, w.now);
+  // The payload check refused: one rejection + the refusal detail — and
+  // NOTHING else. Stream, session, holds and dedup are bit-invariant.
+  GroupStats after = w.at(4)->group_stats();
+  CHECK(after.rejected == before.rejected + 1);
+  after.rejected = before.rejected;
+  CHECK(std::memcmp(&before, &after, sizeof(GroupStats)) == 0);
+  CHECK(group_rx_snapshot(w, 4) == rx_before);
+  CHECK(group_order(w, 4) == std::vector<std::uint32_t>({1}));
+  CHECK(w.obs(4)->diagnostics.size() == diags_before + 1);
+  CHECK(w.obs(4)->diagnostics.back() == std::string(bad_payload.detail));
+
+  // The committed session keeps working: the m2 repair lands, drains the
+  // held m3 in order, and the next legitimate ALL is received as usual.
+  w.run(2500);
+  CHECK(group_order(w, 4) == std::vector<std::uint32_t>({1, 2, 3}));
+  MessageId m4{};
+  CHECK(send_group(w, 1, kGroupAll, m4));
+  w.run(1000);
+  CHECK(group_count(w, 4, m4) == 1);
+  CHECK(!w.obs(4)->has_diag("GROUP_STALE_SESSION"));
+}
+
 void test_unicast_ordering() {
   // 1 - 2 - 3 line under gateway 1. Three ordered RELIABLE messages to 3:
   // each successor is held (ORDER_WAIT) until its predecessor is Delivered,
@@ -1453,6 +1783,9 @@ int main(int argc, char** argv) {
     test_group_ordering_reorder();
     test_group_ordering_skip_and_late();
     test_unordered_never_held();
+    test_unauthenticated_session_jump_is_ignored();
+    test_authenticated_session_switch_commits();
+    test_bad_payload_session_jump_is_ignored();
     test_unicast_ordering();
   }
   if (mode.empty() || mode == "scale") {
