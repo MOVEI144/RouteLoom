@@ -36,10 +36,10 @@
 
 use crate::canonical::SendRequest;
 use crate::send_store::{
-    mint_id128, CapacityStatus, DispatchAttachment, DispatchState, EpochScope, OpIdentity,
-    OpenEpochError, OperationStore, PrepareOutcome, StoredOperation, SubmitOutcome, ACTIVE_CAP,
-    ACTIVE_PER_PRINCIPAL_CAP, EPOCH_WINDOW_MS, MAX_UNRETIRED_EPOCHS, RECORD_CAP,
-    RECORD_RESERVATION_BYTES, RETENTION_MS, STORE_BYTES_CAP,
+    mint_id128, CapacityStatus, DispatchAttachment, DispatchState, EpochScope, IssueIdentity,
+    IssueRefusal, OpIdentity, OpenEpochError, OperationStore, PrepareOutcome, StoredOperation,
+    SubmitOutcome, ACTIVE_CAP, ACTIVE_PER_PRINCIPAL_CAP, EPOCH_WINDOW_MS, ISSUE_OUTBOX_CAP,
+    MAX_UNRETIRED_EPOCHS, RECORD_CAP, RECORD_RESERVATION_BYTES, RETENTION_MS, STORE_BYTES_CAP,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
@@ -83,6 +83,13 @@ CREATE TABLE IF NOT EXISTS operations(
     UNIQUE(uid, network, epoch, key));
 CREATE INDEX IF NOT EXISTS idx_operations_scope_epoch
     ON operations(uid, network, epoch);
+CREATE TABLE IF NOT EXISTS config_outbox(
+    opid BLOB PRIMARY KEY,
+    kind INTEGER NOT NULL, target BLOB NOT NULL, ns INTEGER NOT NULL,
+    profile INTEGER NOT NULL, authority BLOB NOT NULL,
+    generation INTEGER NOT NULL, network BLOB NOT NULL,
+    sequence BLOB NOT NULL, canonical BLOB,
+    signed BLOB);
 ";
 
 const TERMINAL_SQL: &str =
@@ -1215,17 +1222,79 @@ impl SqliteOperationStore {
         Ok(next)
     }
 
-    /// Config SingleAuthority ledger (scope-gateway-config P5): a monotonic
-    /// `authority_sequence` persisted in `meta` so a daemon restart resumes
-    /// numbering instead of re-issuing a sequence the target may still hold.
-    /// The value is read and bumped in one immediate transaction — the
-    /// sequence is consumed whether or not the permit later applies, so a
-    /// crash leaves a gap, never a reuse.
-    pub fn config_authority_next_tx(&mut self) -> Result<u64, ()> {
+    /// Config SingleAuthority ledger (scope-gateway-config P5): reserve the
+    /// next `authority_sequence` for this issuance identity in one
+    /// immediate transaction, so a crash leaves a gap, never a reuse.
+    /// The issuance identity (network, authority, generation) pins on
+    /// first use — a pre-outbox database migrates by pinning whatever
+    /// identity issues next (and keeps its surviving `config_auth_seq`
+    /// cursor), while a changed identity is refused until the operator
+    /// reprovisions the store lineage for the rotation.
+    pub fn issue_reserve_tx(&mut self, identity: &IssueIdentity) -> Result<u64, IssueRefusal> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        let identity_blob =
+            issue_identity_blob(identity.network, identity.authority, identity.generation);
+        let pinned: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='config_auth_identity'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        match pinned {
+            Some(pinned) if pinned != identity_blob => {
+                eprintln!("opstore fault: config issuance identity changed; reprovision the op-store to rotate");
+                return Err(IssueRefusal::IdentityChanged);
+            }
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES('config_auth_identity', ?1)",
+                    params![identity_blob],
+                )
+                .map_err(|error| {
+                    eprintln!("opstore fault: {error}");
+                    IssueRefusal::Unprovable
+                })?;
+            }
+        }
+        let prior: Option<(i64, Vec<u8>)> = tx
+            .query_row(
+                "SELECT kind, sequence FROM config_outbox WHERE opid=?1",
+                params![identity.op_id.to_vec()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        if let Some((kind, sequence)) = prior {
+            if kind != i64::from(identity.kind) {
+                return Err(IssueRefusal::OpConflict);
+            }
+            let sequence = blob_u64(sequence).ok_or_else(|| {
+                eprintln!("opstore fault: corrupt config outbox sequence");
+                IssueRefusal::Unprovable
+            })?;
+            tx.commit().map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+            return Ok(sequence);
+        }
+        // Smallest allocator state first: the sequence cursor survives from
+        // before the outbox existed, so a migrated database keeps numbering.
         let raw: Option<Vec<u8>> = tx
             .query_row(
                 "SELECT value FROM meta WHERE key='config_auth_seq'",
@@ -1233,26 +1302,233 @@ impl SqliteOperationStore {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| eprintln!("opstore fault: {error}"))?;
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
         let next = match raw {
             Some(raw) => blob_u64(raw).ok_or_else(|| {
                 eprintln!("opstore fault: corrupt config_auth_seq cursor");
+                IssueRefusal::Unprovable
             })?,
             None => 1,
         };
         if next == 0 || next == u64::MAX {
             eprintln!("opstore fault: config authority sequence exhausted");
-            return Err(());
+            return Err(IssueRefusal::Unprovable);
         }
         tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('config_auth_seq', ?1)",
-            params![u64_blob(next.saturating_add(1))],
+            params![u64_blob(next + 1)],
         )
-        .map_err(|error| eprintln!("opstore fault: {error}"))?;
-        tx.commit()
-            .map_err(|error| eprintln!("opstore fault: {error}"))?;
-        Ok(next)
+        .map_err(|error| {
+            eprintln!("opstore fault: {error}");
+            IssueRefusal::Unprovable
+        })?;
+        // Oldest-first eviction keeps the table bounded; the just-reserved
+        // row has the newest rowid so it can never evict itself.
+        tx.execute(
+            "DELETE FROM config_outbox WHERE opid IN \
+             (SELECT opid FROM config_outbox ORDER BY rowid ASC \
+              LIMIT MAX(0, (SELECT COUNT(*) FROM config_outbox) - ?1 + 1))",
+            params![ISSUE_OUTBOX_CAP as i64],
+        )
+        .map_err(|error| {
+            eprintln!("opstore fault: {error}");
+            IssueRefusal::Unprovable
+        })?;
+        tx.execute(
+            "INSERT INTO config_outbox(opid, kind, target, ns, profile, authority, \
+             generation, network, sequence, canonical, signed) \
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)",
+            params![
+                identity.op_id.to_vec(),
+                identity.kind as i64,
+                u64_blob(identity.target),
+                identity.namespace as i64,
+                identity.profile as i64,
+                u64_blob(identity.authority),
+                identity.generation as i64,
+                u64_blob(identity.network),
+                u64_blob(next),
+            ],
+        )
+        .map_err(|error| {
+            eprintln!("opstore fault: {error}");
+            IssueRefusal::Unprovable
+        })?;
+        tx.commit().map_err(|error| {
+            eprintln!("opstore fault: {error}");
+            IssueRefusal::Unprovable
+        })?;
+        // Read the reservation back: the sequence the lane signs under
+        // must be the one the store actually holds.
+        let stored: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT sequence FROM config_outbox WHERE opid=?1",
+                params![identity.op_id.to_vec()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        match stored.and_then(blob_u64) {
+            Some(stored) if stored == next => Ok(next),
+            _ => {
+                eprintln!("opstore fault: config outbox reserve readback mismatch");
+                Err(IssueRefusal::Unprovable)
+            }
+        }
     }
+
+    /// Bind the finalized canonical to the reservation, then read it back.
+    /// Same op_id + same bytes is idempotent; different bytes conflict.
+    pub fn issue_bind_tx(
+        &mut self,
+        op_id: &[u8; 16],
+        canonical: &[u8],
+    ) -> Result<(), IssueRefusal> {
+        let stored: Option<Option<Vec<u8>>> = self
+            .conn
+            .query_row(
+                "SELECT canonical FROM config_outbox WHERE opid=?1",
+                params![op_id.to_vec()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        match stored {
+            None => Err(IssueRefusal::Unprovable),
+            Some(Some(stored)) if stored != canonical => Err(IssueRefusal::OpConflict),
+            Some(Some(_)) => Ok(()),
+            Some(None) => {
+                self.conn
+                    .execute(
+                        "UPDATE config_outbox SET canonical=?1 WHERE opid=?2",
+                        params![canonical.to_vec(), op_id.to_vec()],
+                    )
+                    .map_err(|error| {
+                        eprintln!("opstore fault: {error}");
+                        IssueRefusal::Unprovable
+                    })?;
+                let readback: Option<Vec<u8>> = self
+                    .conn
+                    .query_row(
+                        "SELECT canonical FROM config_outbox WHERE opid=?1",
+                        params![op_id.to_vec()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| {
+                        eprintln!("opstore fault: {error}");
+                        IssueRefusal::Unprovable
+                    })?
+                    .flatten();
+                if readback.as_deref() == Some(canonical) {
+                    Ok(())
+                } else {
+                    eprintln!("opstore fault: config outbox bind readback mismatch");
+                    Err(IssueRefusal::Unprovable)
+                }
+            }
+        }
+    }
+
+    /// Store the signed original, then read it back — the lane may only
+    /// transmit bytes the store proved it holds. Needs a bound canonical.
+    pub fn issue_signed_tx(&mut self, op_id: &[u8; 16], signed: &[u8]) -> Result<(), IssueRefusal> {
+        let stored: Option<OutboxHalves> = self
+            .conn
+            .query_row(
+                "SELECT canonical, signed FROM config_outbox WHERE opid=?1",
+                params![op_id.to_vec()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        let (canonical, stored) = match stored {
+            None => return Err(IssueRefusal::Unprovable),
+            Some(row) => row,
+        };
+        if canonical.is_none() {
+            return Err(IssueRefusal::Unprovable);
+        }
+        match stored {
+            Some(stored) if stored != signed => Err(IssueRefusal::OpConflict),
+            Some(_) => Ok(()),
+            None => {
+                self.conn
+                    .execute(
+                        "UPDATE config_outbox SET signed=?1 WHERE opid=?2",
+                        params![signed.to_vec(), op_id.to_vec()],
+                    )
+                    .map_err(|error| {
+                        eprintln!("opstore fault: {error}");
+                        IssueRefusal::Unprovable
+                    })?;
+                let readback: Option<Vec<u8>> = self
+                    .conn
+                    .query_row(
+                        "SELECT signed FROM config_outbox WHERE opid=?1",
+                        params![op_id.to_vec()],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(|error| {
+                        eprintln!("opstore fault: {error}");
+                        IssueRefusal::Unprovable
+                    })?
+                    .flatten();
+                if readback.as_deref() == Some(signed) {
+                    Ok(())
+                } else {
+                    eprintln!("opstore fault: config outbox signed readback mismatch");
+                    Err(IssueRefusal::Unprovable)
+                }
+            }
+        }
+    }
+
+    /// Load the (canonical, signed) original, retransmit-only. None until
+    /// both halves are stored.
+    pub fn issue_original_row(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let row: Option<OutboxHalves> = self
+            .conn
+            .query_row(
+                "SELECT canonical, signed FROM config_outbox WHERE opid=?1",
+                params![op_id.to_vec()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .ok()?;
+        let (canonical, signed) = row?;
+        match (canonical, signed) {
+            (Some(canonical), Some(signed)) => Some((canonical, signed)),
+            _ => None,
+        }
+    }
+}
+
+/// The two nullable outbox halves (canonical, signed) as one row read.
+type OutboxHalves = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// The pinned issuance identity: network u64 || authority u64 ||
+/// generation u32 (20 bytes, big-endian).
+fn issue_identity_blob(network: u64, authority: u64, generation: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(20);
+    out.extend_from_slice(&network.to_be_bytes());
+    out.extend_from_slice(&authority.to_be_bytes());
+    out.extend_from_slice(&generation.to_be_bytes());
+    out
 }
 
 impl OperationStore for SqliteOperationStore {
@@ -2613,5 +2889,96 @@ mod tests {
             assert_all_owner_only(&dir);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn issue(op: u8, kind: u8) -> IssueIdentity {
+        IssueIdentity {
+            kind,
+            op_id: [op; 16],
+            target: 0x99,
+            namespace: 1,
+            profile: crate::send_store::ISSUE_PROFILE_DEV,
+            authority: 0x42,
+            generation: 1,
+            network: 0xAAAA,
+        }
+    }
+
+    #[test]
+    fn issue_outbox_survives_reopen_without_reuse() {
+        // T09 durable leg: the reserve → bind → sign halves persist,
+        // a reopen resumes numbering (never reuses), the identity stays
+        // pinned, and a pre-outbox sequence cursor migrates forward.
+        let db = TestDb::new("issue-outbox");
+        let mut store = db.open();
+        assert_eq!(
+            store.issue_reserve_tx(&issue(1, crate::send_store::ISSUE_KIND_PERMIT)),
+            Ok(1)
+        );
+        store.issue_bind_tx(&[1; 16], b"canon-1").unwrap();
+        store.issue_signed_tx(&[1; 16], b"signed-1").unwrap();
+        assert_eq!(
+            store.issue_reserve_tx(&issue(2, crate::send_store::ISSUE_KIND_RECOVERY)),
+            Ok(2)
+        );
+        drop(store);
+        let mut reopened = db.open();
+        // Both halves survived the reopen; the unsigned recovery leg
+        // reports None until it is bound and signed.
+        assert_eq!(
+            reopened.issue_original_row(&[1; 16]),
+            Some((b"canon-1".to_vec(), b"signed-1".to_vec()))
+        );
+        assert_eq!(reopened.issue_original_row(&[2; 16]), None);
+        // Numbering resumes at 3 — the consumed 1..=2 never repeat —
+        // and the pinned identity still refuses a rotated generation.
+        assert_eq!(
+            reopened.issue_reserve_tx(&issue(3, crate::send_store::ISSUE_KIND_PERMIT)),
+            Ok(3)
+        );
+        let mut rotated = issue(4, crate::send_store::ISSUE_KIND_PERMIT);
+        rotated.generation = 2;
+        assert_eq!(
+            reopened.issue_reserve_tx(&rotated),
+            Err(IssueRefusal::IdentityChanged)
+        );
+        // A same-opid, same-kind re-reserve after the crash replays the
+        // bound sequence instead of consuming a new one.
+        assert_eq!(
+            reopened.issue_reserve_tx(&issue(2, crate::send_store::ISSUE_KIND_RECOVERY)),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn issue_outbox_migrates_a_legacy_sequence_cursor() {
+        // A database that only ever ran the pre-outbox allocator keeps
+        // its cursor: the next reservation continues numbering and pins
+        // the issuing identity.
+        let db = TestDb::new("issue-migrate");
+        let store = db.open();
+        store
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES('config_auth_seq', ?1)",
+                params![u64_blob(41)],
+            )
+            .unwrap();
+        drop(store);
+        let mut migrated = db.open();
+        assert_eq!(
+            migrated.issue_reserve_tx(&issue(1, crate::send_store::ISSUE_KIND_PERMIT)),
+            Ok(41)
+        );
+        assert_eq!(
+            migrated.issue_reserve_tx(&issue(2, crate::send_store::ISSUE_KIND_PERMIT)),
+            Ok(42)
+        );
+        let mut rotated = issue(3, crate::send_store::ISSUE_KIND_PERMIT);
+        rotated.authority = 0x777;
+        assert_eq!(
+            migrated.issue_reserve_tx(&rotated),
+            Err(IssueRefusal::IdentityChanged)
+        );
     }
 }

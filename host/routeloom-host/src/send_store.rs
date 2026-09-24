@@ -23,7 +23,7 @@
 
 use crate::canonical::SendRequest;
 use crate::sqlite_store::SqliteOperationStore;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 // contracts.json `capacity.*`.
 pub const RECORD_CAP: usize = 4096;
@@ -498,19 +498,80 @@ pub trait OperationStore {
     }
 }
 
+/// Object kinds the issuance outbox carries (the autonomy
+/// ControlObjectKind numbers of the config family): 3 = RCC1 permit,
+/// 4 = RCR2 recovery.
+pub const ISSUE_KIND_PERMIT: u8 = 3;
+pub const ISSUE_KIND_RECOVERY: u8 = 4;
+/// Issuance profiles: 0 = dev HMAC, 1 = RLCP1_COSE_ESP256. Stored per
+/// entry so a profile/key change can never silently re-sign one.
+pub const ISSUE_PROFILE_DEV: u8 = 0;
+pub const ISSUE_PROFILE_COSE: u8 = 1;
+/// Bound on retained issuance entries (both providers, oldest evicted).
+pub const ISSUE_OUTBOX_CAP: usize = 64;
+
+/// One issuance the lane commits BEFORE signing (§7.2 step 2): the
+/// identity it binds. `network` / `authority` / `generation` are the
+/// daemon's live issuance identity — the store pins the first identity
+/// it sees per lineage and refuses a changed one, so a restarted daemon
+/// can neither downgrade the generation nor spend another authority's
+/// sequence space. The finalized canonical names the reserved sequence,
+/// so it cannot exist before the reservation — it lands via `issue_bind`
+/// right after, still before any signature.
+#[derive(Clone, Debug)]
+pub struct IssueIdentity {
+    pub kind: u8,
+    pub op_id: [u8; 16],
+    pub target: u64,
+    pub namespace: u16,
+    pub profile: u8,
+    pub authority: u64,
+    pub generation: u32,
+    pub network: u64,
+}
+
+/// Why the issuance commit refused — mapped by the lane to honest
+/// outcomes, never to a sequence the store did not durably own.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IssueRefusal {
+    /// Storage fault, exhaustion, or an unknown/evicted op id — the
+    /// issuance cannot be proven.
+    Unprovable,
+    /// The daemon's (network, authority, generation) differs from the
+    /// lineage's pinned identity — reprovision the op-store to rotate.
+    IdentityChanged,
+    /// `op_id` is already bound to different bytes.
+    OpConflict,
+    /// Recovery issuance on a memory-only store — recovery needs the
+    /// durable outbox (§7.2); trust install takes no ledger at all.
+    RecoveryNeedsDurable,
+}
+
 /// The SingleAuthority-style config ledger: a monotonically increasing
-/// `authority_sequence` handed out once per proposed permit (scope-gateway-
-/// config P5, 04-remote-config.md §4.3). A value is allocated and committed
-/// together so a crash between allocate and sign can never re-issue the same
-/// sequence for a different command — gaps from failed proposes are fine,
-/// reuse is not. The memory provider keeps the counter in RAM (honest
-/// caveat: a restart restarts numbering, matching its RAM_ONLY durability);
-/// the durable provider persists it in the `meta` table.
+/// `authority_sequence` handed out once per issued object (scope-gateway-
+/// config P5, 04-remote-config.md §4.3), durably bound to the finalized
+/// canonical BEFORE signing so a crash between reserve and sign can never
+/// re-issue the same sequence for a different command — gaps from failed
+/// issues are fine, reuse is not. The memory provider keeps the ledger in
+/// RAM (honest caveat: a restart restarts numbering, matching its
+/// RAM_ONLY durability, and recovery issuance is refused there); the
+/// durable provider persists ledger + outbox in SQLite.
 pub trait ConfigAuthorityLedger {
-    /// Allocate the next authority sequence and commit the bump. Returns the
-    /// value bound into this permit's command; Err(()) is a store fault —
-    /// the caller must refuse the propose, never guess a sequence.
-    fn config_authority_next(&mut self) -> Result<u64, ()>;
+    /// Reserve the next authority sequence for this issuance identity.
+    /// Same op_id replays the bound sequence (a crash-before-sign
+    /// resume); bytes conflicts surface at `issue_bind`.
+    fn issue_reserve(&mut self, identity: &IssueIdentity) -> Result<u64, IssueRefusal>;
+    /// Bind the finalized canonical (which names the reserved sequence)
+    /// to the reservation. Same op_id + same bytes is idempotent; same
+    /// op_id with different bytes is `OpConflict`.
+    fn issue_bind(&mut self, op_id: &[u8; 16], canonical: &[u8]) -> Result<(), IssueRefusal>;
+    /// Store the signed original after the readback — the bytes the lane
+    /// must retransmit verbatim. Needs a bound canonical first; refuses
+    /// to overwrite a different original; identical bytes are idempotent.
+    fn issue_signed(&mut self, op_id: &[u8; 16], signed: &[u8]) -> Result<(), IssueRefusal>;
+    /// Load the (canonical, signed) original, retransmit-only — the lane
+    /// never re-signs from this. None until both halves are stored.
+    fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)>;
 }
 
 /// Fresh 128-bit id minted once per store lineage. Falls back to time^pid
@@ -703,9 +764,28 @@ pub struct MemoryOperationStore {
     /// matching this provider's RAM_ONLY durability — never silently
     /// presented as durable).
     config_auth_next: u64,
+    /// Pinned issuance identity (network, authority, generation): the
+    /// first `issue_reserve` pins it, a changed one is refused.
+    config_auth_identity: Option<(u64, u64, u32)>,
+    /// Issuance outbox, oldest first — the RAM mirror of the durable
+    /// table, same cap and oldest-first eviction.
+    config_outbox: VecDeque<([u8; 16], StoredIssue)>,
     epochs: HashMap<EpochScope, ScopeEpochs>,
     by_identity: HashMap<OpIdentity, u64>,
     by_seq: HashMap<u64, StoredOperation>,
+}
+
+/// One RAM outbox entry: the reserved sequence, the bound canonical
+/// (None until `issue_bind`), and the signed original once stored. The
+/// store-level pinned identity already covers the (network, authority,
+/// generation) these entries were issued under; the durable table
+/// persists the full per-entry row.
+#[derive(Clone, Debug)]
+struct StoredIssue {
+    kind: u8,
+    sequence: u64,
+    canonical: Option<Vec<u8>>,
+    signed: Option<Vec<u8>>,
 }
 
 impl MemoryOperationStore {
@@ -716,6 +796,8 @@ impl MemoryOperationStore {
             dispatch_lease: None,
             dispatch_next: 1,
             config_auth_next: 1,
+            config_auth_identity: None,
+            config_outbox: VecDeque::new(),
             epochs: HashMap::new(),
             by_identity: HashMap::new(),
             by_seq: HashMap::new(),
@@ -1127,24 +1209,134 @@ impl OperationStore for StoreBackend {
 }
 
 impl ConfigAuthorityLedger for MemoryOperationStore {
-    fn config_authority_next(&mut self) -> Result<u64, ()> {
+    fn issue_reserve(&mut self, identity: &IssueIdentity) -> Result<u64, IssueRefusal> {
+        if identity.kind == ISSUE_KIND_RECOVERY {
+            return Err(IssueRefusal::RecoveryNeedsDurable);
+        }
+        let pinned_identity = (identity.network, identity.authority, identity.generation);
+        match self.config_auth_identity {
+            Some(pinned) if pinned != pinned_identity => {
+                return Err(IssueRefusal::IdentityChanged);
+            }
+            Some(_) => {}
+            None => self.config_auth_identity = Some(pinned_identity),
+        }
+        if let Some((_, entry)) = self
+            .config_outbox
+            .iter()
+            .find(|(id, _)| id == &identity.op_id)
+        {
+            if entry.kind == identity.kind {
+                return Ok(entry.sequence);
+            }
+            return Err(IssueRefusal::OpConflict);
+        }
         let seq = self.config_auth_next.max(1);
-        self.config_auth_next = seq.saturating_add(1).max(1);
+        if seq == u64::MAX {
+            return Err(IssueRefusal::Unprovable);
+        }
+        self.config_auth_next = seq + 1;
+        while self.config_outbox.len() >= ISSUE_OUTBOX_CAP {
+            self.config_outbox.pop_front();
+        }
+        self.config_outbox.push_back((
+            identity.op_id,
+            StoredIssue {
+                kind: identity.kind,
+                sequence: seq,
+                canonical: None,
+                signed: None,
+            },
+        ));
         Ok(seq)
+    }
+
+    fn issue_bind(&mut self, op_id: &[u8; 16], canonical: &[u8]) -> Result<(), IssueRefusal> {
+        let Some((_, entry)) = self.config_outbox.iter_mut().find(|(id, _)| id == op_id) else {
+            return Err(IssueRefusal::Unprovable);
+        };
+        match &entry.canonical {
+            Some(stored) if stored.as_slice() != canonical => {
+                return Err(IssueRefusal::OpConflict);
+            }
+            Some(_) => {}
+            None => entry.canonical = Some(canonical.to_vec()),
+        }
+        Ok(())
+    }
+
+    fn issue_signed(&mut self, op_id: &[u8; 16], signed: &[u8]) -> Result<(), IssueRefusal> {
+        let Some((_, entry)) = self.config_outbox.iter_mut().find(|(id, _)| id == op_id) else {
+            return Err(IssueRefusal::Unprovable);
+        };
+        if entry.canonical.is_none() {
+            return Err(IssueRefusal::Unprovable);
+        }
+        match &entry.signed {
+            Some(stored) if stored.as_slice() != signed => {
+                return Err(IssueRefusal::OpConflict);
+            }
+            Some(_) => {}
+            None => entry.signed = Some(signed.to_vec()),
+        }
+        Ok(())
+    }
+
+    fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.config_outbox
+            .iter()
+            .find(|(id, _)| id == op_id)
+            .and_then(|(_, entry)| match (&entry.canonical, &entry.signed) {
+                (Some(canonical), Some(signed)) => Some((canonical.clone(), signed.clone())),
+                _ => None,
+            })
     }
 }
 
 impl ConfigAuthorityLedger for SqliteOperationStore {
-    fn config_authority_next(&mut self) -> Result<u64, ()> {
-        self.config_authority_next_tx()
+    fn issue_reserve(&mut self, identity: &IssueIdentity) -> Result<u64, IssueRefusal> {
+        self.issue_reserve_tx(identity)
+    }
+
+    fn issue_bind(&mut self, op_id: &[u8; 16], canonical: &[u8]) -> Result<(), IssueRefusal> {
+        self.issue_bind_tx(op_id, canonical)
+    }
+
+    fn issue_signed(&mut self, op_id: &[u8; 16], signed: &[u8]) -> Result<(), IssueRefusal> {
+        self.issue_signed_tx(op_id, signed)
+    }
+
+    fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.issue_original_row(op_id)
     }
 }
 
 impl ConfigAuthorityLedger for StoreBackend {
-    fn config_authority_next(&mut self) -> Result<u64, ()> {
+    fn issue_reserve(&mut self, identity: &IssueIdentity) -> Result<u64, IssueRefusal> {
         match self {
-            Self::Memory(store) => store.config_authority_next(),
-            Self::Sqlite(store) => store.config_authority_next(),
+            Self::Memory(store) => store.issue_reserve(identity),
+            Self::Sqlite(store) => store.issue_reserve(identity),
+        }
+    }
+
+    fn issue_bind(&mut self, op_id: &[u8; 16], canonical: &[u8]) -> Result<(), IssueRefusal> {
+        match self {
+            Self::Memory(store) => store.issue_bind(op_id, canonical),
+            Self::Sqlite(store) => store.issue_bind(op_id, canonical),
+        }
+    }
+
+    fn issue_signed(&mut self, op_id: &[u8; 16], signed: &[u8]) -> Result<(), IssueRefusal> {
+        match self {
+            Self::Memory(store) => store.issue_signed(op_id, signed),
+            Self::Sqlite(store) => store.issue_signed(op_id, signed),
+        }
+    }
+
+    fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
+        match self {
+            Self::Memory(store) => store.issue_original(op_id),
+            Self::Sqlite(store) => store.issue_original(op_id),
         }
     }
 }
@@ -1672,5 +1864,77 @@ mod tests {
         let op = store.get_by_seq(seq).unwrap().unwrap();
         assert_eq!(op.dispatch_state, DispatchState::HostQueued);
         assert_eq!(op.terminal_ms, None);
+    }
+
+    fn issue(op: u8, kind: u8) -> IssueIdentity {
+        IssueIdentity {
+            kind,
+            op_id: [op; 16],
+            target: 0x99,
+            namespace: 1,
+            profile: ISSUE_PROFILE_DEV,
+            authority: 0x42,
+            generation: 1,
+            network: 0xAAAA,
+        }
+    }
+
+    #[test]
+    fn memory_issue_outbox_replays_conflicts_and_bounds() {
+        // T09 memory leg: reserve replays the bound sequence for a
+        // resumed op, conflicts on kind changes, binds idempotently,
+        // stores the signed half idempotently, refuses recovery (the
+        // durable outbox is mandatory there), and evicts oldest-first.
+        let mut store = MemoryOperationStore::new([0xab; 16]);
+        assert_eq!(store.issue_reserve(&issue(1, ISSUE_KIND_PERMIT)), Ok(1));
+        assert_eq!(store.issue_reserve(&issue(1, ISSUE_KIND_PERMIT)), Ok(1));
+        assert_eq!(
+            store.issue_reserve(&issue(1, ISSUE_KIND_RECOVERY)),
+            Err(IssueRefusal::RecoveryNeedsDurable)
+        );
+        assert_eq!(store.issue_reserve(&issue(2, ISSUE_KIND_PERMIT)), Ok(2));
+        assert_eq!(store.issue_bind(&[1; 16], b"canon-1"), Ok(()));
+        assert_eq!(store.issue_bind(&[1; 16], b"canon-1"), Ok(()));
+        assert_eq!(
+            store.issue_bind(&[1; 16], b"canon-other"),
+            Err(IssueRefusal::OpConflict)
+        );
+        assert_eq!(
+            store.issue_bind(&[9; 16], b"canon-9"),
+            Err(IssueRefusal::Unprovable)
+        );
+        // Signed needs a bound canonical: op 2 reserved but never bound.
+        assert_eq!(
+            store.issue_signed(&[2; 16], b"signed-2"),
+            Err(IssueRefusal::Unprovable)
+        );
+        assert_eq!(store.issue_signed(&[1; 16], b"signed-1"), Ok(()));
+        assert_eq!(store.issue_signed(&[1; 16], b"signed-1"), Ok(()));
+        assert_eq!(
+            store.issue_signed(&[1; 16], b"signed-other"),
+            Err(IssueRefusal::OpConflict)
+        );
+        assert_eq!(
+            store.issue_original(&[1; 16]),
+            Some((b"canon-1".to_vec(), b"signed-1".to_vec()))
+        );
+        assert_eq!(store.issue_original(&[2; 16]), None);
+        // Identity pins on first use: a rotated generation refuses.
+        let mut rotated = issue(3, ISSUE_KIND_PERMIT);
+        rotated.generation = 2;
+        assert_eq!(
+            store.issue_reserve(&rotated),
+            Err(IssueRefusal::IdentityChanged)
+        );
+        // The table holds the cap: overfill evicts oldest-first while
+        // the sequence cursor never rewinds.
+        for op in 10..10 + ISSUE_OUTBOX_CAP as u8 + 2 {
+            store.issue_reserve(&issue(op, ISSUE_KIND_PERMIT)).unwrap();
+        }
+        assert_eq!(store.issue_original(&[1; 16]), None, "oldest evicted");
+        // Two reservations plus the 66 above consumed 1..=68 — the next
+        // one advances, never reuses.
+        let seq = store.issue_reserve(&issue(200, ISSUE_KIND_PERMIT)).unwrap();
+        assert_eq!(seq, 2 + ISSUE_OUTBOX_CAP as u64 + 3);
     }
 }

@@ -1208,7 +1208,7 @@ pub enum ConfigFieldType {
     Bytes = 4,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigField {
     pub field_id: u16,
     pub field_type: ConfigFieldType,
@@ -1228,7 +1228,7 @@ fn tlv_value_length(field_type: u8, declared: u16) -> Option<usize> {
 }
 
 /// 176B fixed header + sorted TLV patch (max 512B) = max 688B.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigCommand {
     pub config_namespace: u16,
     pub schema: u16,
@@ -1533,8 +1533,7 @@ fn rcr2_snapshot_shape_valid(snapshot: &[u8]) -> bool {
         if count >= CONFIG_FIELD_COUNT_MAX || snapshot.len() - cursor < 5 {
             return false;
         }
-        let field_id =
-            u16::from_be_bytes(snapshot[cursor..cursor + 2].try_into().expect("fixed"));
+        let field_id = u16::from_be_bytes(snapshot[cursor..cursor + 2].try_into().expect("fixed"));
         let field_type = snapshot[cursor + 2];
         let declared =
             u16::from_be_bytes(snapshot[cursor + 3..cursor + 5].try_into().expect("fixed"));
@@ -1649,8 +1648,7 @@ pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryIntent> {
     operation_id.copy_from_slice(&encoded[48..64]);
     let new_store_generation = u32::from_be_bytes(encoded[64..68].try_into().expect("fixed"));
     let new_revision = u64::from_be_bytes(encoded[68..76].try_into().expect("fixed"));
-    let snapshot_len =
-        u16::from_be_bytes(encoded[76..78].try_into().expect("fixed")) as usize;
+    let snapshot_len = u16::from_be_bytes(encoded[76..78].try_into().expect("fixed")) as usize;
     let reserved = u16::from_be_bytes(encoded[78..80].try_into().expect("fixed"));
     let mut snapshot_hash = [0_u8; 32];
     snapshot_hash.copy_from_slice(&encoded[80..112]);

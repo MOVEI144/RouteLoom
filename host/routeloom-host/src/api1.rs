@@ -122,6 +122,10 @@ pub struct ApiContext<'a, S: OperationStore> {
     /// authority is provisioned, so `config.propose` is refused honestly
     /// while queries still run.
     pub config_authority: Option<u64>,
+    /// The daemon's issuance profile (`ISSUE_PROFILE_DEV`/`ISSUE_PROFILE_COSE`)
+    /// — mirrored by `config_lane_for` into the lane issuer. Reported by
+    /// `capabilities.get` as the permit_profile the daemon signs under.
+    pub config_profile: u8,
     /// USB link snapshot captured by the socket layer before dispatch —
     /// powers link.get.
     pub link: LinkStatus,
@@ -331,7 +335,10 @@ pub fn handle_conn<S: OperationStore>(
         "config.status" => config_status(&params, ctx).map(|r| (r, None)),
         "config.propose" => config_propose(&params, ctx).map(|r| (r, None)),
         "config.recover" => config_recover(&params, ctx).map(|r| (r, None)),
+        "config.recovery_info" => config_recovery_info(&params, ctx).map(|r| (r, None)),
         "config.trust_update" => config_trust_update(&params, ctx).map(|r| (r, None)),
+        "trust.install" => trust_install(&params, ctx).map(|r| (r, None)),
+        "trust.status" => trust_status(&params, ctx).map(|r| (r, None)),
         "config.get" => config_get(&params, ctx).map(|r| (r, None)),
         "group.send" => group_send(&params, ctx).map(|r| (r, None)),
         "group.get" => group_get(&params, ctx).map(|r| (r, None)),
@@ -428,7 +435,7 @@ fn capabilities<S: OperationStore>(
         .expect("operation store poisoned")
         .durable();
     Ok(format!(
-        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.recover\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"dev-hmac-sha256-16\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
+        "{{\"api\":{{\"version\":1,\"request_max_bytes\":{REQUEST_MAX_BYTES},\"response_max_bytes\":{RESPONSE_MAX_BYTES},\"max_depth\":{JSON_MAX_DEPTH}}},\"methods\":{{\"capabilities.get\":true,\"messages.read\":true,\"messages.subscribe\":true,\"messages.unsubscribe\":true,\"messages.subscriptions\":true,\"messages.submit\":true,\"operations.open_epoch\":true,\"operations.get\":true,\"operations.get_by_key\":true,\"operations.cancel\":true,\"gateway.resolve\":true,\"gateway.get\":true,\"link.get\":true,\"nodes.list\":true,\"nodes.get\":true,\"config.challenge\":true,\"config.status\":true,\"config.propose\":true,\"config.recover\":true,\"config.recovery_info\":true,\"trust.install\":true,\"trust.status\":true,\"config.get\":true,\"group.send\":true,\"group.get\":true{site_methods}}},\"receive\":{{\"mode\":\"cursor_poll\",\"push\":\"subscribe_v1\",\"streams\":[\"messages\",\"events\"],\"retention_seconds\":{},\"entries_per_network\":{},\"bytes_per_network\":{},\"record_charge_bytes\":{},\"max_networks\":{},\"global_log_bytes\":{},\"page_limit\":{PAGE_LIMIT},\"subscriptions_per_connection\":{SUBS_PER_CONNECTION},\"subscriptions_per_principal\":{SUBS_PER_PRINCIPAL},\"subscriptions_total\":{SUBS_TOTAL},\"subscription_queue_events\":{SUB_QUEUE_EVENTS},\"subscription_queue_bytes\":{SUB_QUEUE_BYTES},\"notify_line_max_bytes\":{NOTIFY_LINE_MAX},\"long_poll_ms_max\":{WAIT_MS_MAX},\"heartbeat_ms\":{{\"min\":{HEARTBEAT_MS_MIN},\"max\":{HEARTBEAT_MS_MAX},\"default\":{HEARTBEAT_MS_DEFAULT}}},\"durable_receive\":false,\"durable_subscription\":false,\"pc_service_destination\":false}},\"send\":{{\"storage_durable\":{durable},\"dispatch\":\"usb_host_ops_v1\",\"delivery\":[\"BEST_EFFORT\",\"RELIABLE\"],\"priority\":[\"NORMAL\"],\"deadline_policy\":\"WALL_ELAPSED_VALIDITY\",\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"payload_max_bytes\":{}}},\"config\":{{\"dispatch\":\"usb_host_ops_v1\",\"permit_profile\":\"{config_profile}\",\"authority_configured\":{config_auth}}},\"nodes\":{{\"source\":\"usb_node_status_v1\",\"page_max\":{NODES_PAGE_MAX},\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\"}},\"group\":{{\"dispatch\":\"usb_group_delivery_v1\",\"gateway_capable\":{group_capable},\"payload_max_bytes\":{},\"priority\":[\"BULK\",\"NORMAL\",\"MANAGEMENT\",\"URGENT\"],\"ttl_ms\":{{\"min\":{},\"max\":{},\"default\":{}}},\"hop_limit\":{{\"min\":{},\"max\":{},\"default\":{}}},\"records_max\":{},\"queue_max\":{},\"unsettled_max\":{},\"memberships_per_node\":{},\"membership_set\":false,\"events\":[\"group_settled\"],\"storage_durable\":false}},\"site\":{site_caps},\"rx_events_v1\":false,\"ingress_loss_observable\":false,\"acl_revision\":{},\"peer_credential_resolved\":{epoch_known}}}",
         crate::receive_log::RETENTION_SECONDS,
         crate::receive_log::ENTRIES_PER_NETWORK,
         crate::receive_log::BYTES_PER_NETWORK,
@@ -455,6 +462,7 @@ fn capabilities<S: OperationStore>(
         crate::group::MEMBERSHIPS_PER_NODE,
         ctx.acl.revision(),
         config_auth = ctx.config_authority.is_some(),
+        config_profile = config_profile_name(ctx.config_profile),
         group_capable = group_capability_json(ctx),
         site_methods = site::SITE_METHODS
             .iter()
@@ -2647,6 +2655,8 @@ fn u16_field(value: Option<&Json>, name: &str) -> Result<u16, ApiError> {
 }
 
 /// A u32 field — same number-or-string parsing rule as `u16_field`.
+/// Unused until RCR2 issuance reparses generation fields.
+#[allow(dead_code)]
 fn u32_field(value: Option<&Json>, name: &str) -> Result<u32, ApiError> {
     let invalid = || {
         ApiError::simple(
@@ -2893,12 +2903,15 @@ fn config_propose<S: OperationStore>(
 }
 
 /// `config.recover` params: `{network, target, config_namespace, schema,
-/// new_store_generation, attest?}`. Signs an RCR1 StoreRecover command and
-/// transfers it on the dedicated recovery lane (HostOps 0x24) — reachable
-/// while the target journal is quarantined/uncertain, which the permit
-/// lane is not. `attest` 0 (default) adopts the surviving journal record
-/// under the new store generation; 1 attests explicit reprovisioning.
-/// Same PERM_CONFIG + configured-authority gates as config.propose.
+/// mode, new_store_generation, new_revision, snapshot_hash?, baseline?}`.
+/// Signs an RCR2 recovery intent against the operator-read RecoveryInfo
+/// baseline and delivers it on the kind-4 lane, then reads the terminal
+/// status. `mode` is `adopt-known` (bind the proven survivor by
+/// `snapshot_hash`, no `baseline`) or `reprovision` (carry the complete
+/// `baseline` TLV to re-apply). (`new_store_generation`, `new_revision`)
+/// must name the floor's exact next — read them from
+/// `config.recovery_info` first; a skewed pair is refused by the target,
+/// never coerced. Requires a configured authority AND PERM_CONFIG.
 fn config_recover<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -2910,8 +2923,11 @@ fn config_recover<S: OperationStore>(
                 | "target"
                 | "config_namespace"
                 | "schema"
+                | "mode"
                 | "new_store_generation"
-                | "attest"
+                | "new_revision"
+                | "snapshot_hash"
+                | "baseline"
         ) {
             return Err(ApiError::simple(
                 "INVALID_ARGUMENT",
@@ -2922,48 +2938,193 @@ fn config_recover<S: OperationStore>(
     let (network, target) = config_target_params(params)?;
     let config_namespace = config_ns_field(params.get("config_namespace"))?;
     let schema = u16_field(params.get("schema"), "schema")?;
+    let mode = match params.get("mode").and_then(Json::as_str) {
+        Some("adopt-known") => 0,
+        Some("reprovision") => 1,
+        _ => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "mode must be \"adopt-known\" or \"reprovision\"",
+            ));
+        }
+    };
     let new_store_generation =
         u32_field(params.get("new_store_generation"), "new_store_generation")?;
-    if new_store_generation == 0 {
+    let new_revision = match params.get("new_revision").and_then(Json::as_u64) {
+        Some(revision) => revision,
+        None => {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                "new_revision must be a u64",
+            ));
+        }
+    };
+    let snapshot_hash = match params.get("snapshot_hash").and_then(Json::as_str) {
+        Some(text) => parse_hex_32(text).ok_or_else(|| {
+            ApiError::simple("INVALID_ARGUMENT", "snapshot_hash must be a 64-hex string")
+        })?,
+        None => [0; 32],
+    };
+    let baseline = match params.get("baseline").and_then(Json::as_str) {
+        Some(text) => parse_hex_bytes(text, 512).ok_or_else(|| {
+            ApiError::simple(
+                "INVALID_ARGUMENT",
+                "baseline must be hex, at most 512 bytes",
+            )
+        })?,
+        None => Vec::new(),
+    };
+    if mode == 0 && !baseline.is_empty() {
         return Err(ApiError::simple(
             "INVALID_ARGUMENT",
-            "new_store_generation must be nonzero",
+            "adopt-known carries no baseline (the survivor is bound by hash)",
         ));
     }
-    let attest = match params.get("attest") {
-        None => 0_u8,
-        Some(value) => match value.as_u64().and_then(|n| u8::try_from(n).ok()) {
-            Some(n @ (0 | 1)) => n,
-            _ => {
-                return Err(ApiError::simple(
-                    "INVALID_ARGUMENT",
-                    "attest must be 0 (adopt) or 1 (reprovision)",
-                ))
-            }
-        },
-    };
+    if mode == 0 && snapshot_hash == [0; 32] {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "adopt-known needs the proven survivor snapshot_hash",
+        ));
+    }
     if !config_permit(ctx, network) {
         return Err(config_denied());
     }
     if ctx.config_authority.is_none() {
         return Err(ApiError::simple(
             "CONFIG_NO_AUTHORITY",
-            "no config authority configured (daemon --config-authority); recovery objects cannot be issued",
+            "no config authority configured (daemon --config-authority); recovery cannot be issued",
         ));
     }
     let request = ConfigRequest::Recover {
         target,
         config_namespace,
         schema,
-        recovery_class: routeloom_wire::endpoint::ConfigRecoveryClass::StoreRecover,
-        attest,
+        mode,
         new_store_generation,
-        new_authority_generation: 0,
+        new_revision,
+        snapshot_hash,
+        baseline,
     };
     config_submit_op(
         ctx,
         request,
-        format!("recover ns={config_namespace} schema={schema} store_gen={new_store_generation} attest={attest}"),
+        format!("recover ns={config_namespace} mode={mode} store_gen={new_store_generation} rev={new_revision}"),
+        network,
+        target,
+    )
+}
+
+/// `config.recovery_info` params: `{network, target, config_namespace}`.
+/// Reads the target's RecoveryInfo — the floor readings and the
+/// survivor/testimony hashes the operator's RCR2 baseline binds. Needs
+/// PERM_CONFIG; needs no authority (a pure query).
+fn config_recovery_info<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "network" | "target" | "config_namespace") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let config_namespace = config_ns_field(params.get("config_namespace"))?;
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    config_submit_op(
+        ctx,
+        ConfigRequest::RecoveryInfo {
+            target,
+            network,
+            config_namespace,
+        },
+        format!("recovery_info ns={config_namespace}"),
+        network,
+        target,
+    )
+}
+
+/// `trust.install` params: `{network, target, manifest}`. Delivers an
+/// offline-signed trust manifest (RTM1, hex ≤ 2048 B) on the kind-5 lane
+/// and reads back the target's TrustStatus as the install receipt.
+/// Deliberately independent of the config authority (§6.3): a rotation
+/// must work while the authority is being rebuilt. Needs PERM_CONFIG.
+/// The envelope shape is checked at admission; the target's TrustView
+/// verifies the root signature.
+fn trust_install<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "network" | "target" | "manifest") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    let Some(manifest_text) = params.get("manifest").and_then(Json::as_str) else {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "manifest must be a hex string",
+        ));
+    };
+    let manifest = parse_hex_bytes(manifest_text, 2048).ok_or_else(|| {
+        ApiError::simple(
+            "INVALID_ARGUMENT",
+            "manifest must be hex, at most 2048 bytes",
+        )
+    })?;
+    if routeloom_provision::manifest::manifest_parse(&manifest).is_err() {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "manifest is not a restricted COSE_Sign1 trust envelope",
+        ));
+    }
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    config_submit_op(
+        ctx,
+        ConfigRequest::TrustInstall {
+            target,
+            network,
+            manifest,
+        },
+        "trust_install".to_string(),
+        network,
+        target,
+    )
+}
+
+/// `trust.status` params: `{network, target}`. Reads the target's
+/// TrustStatus — the install receipt and the generation/image evidence
+/// for a rotation. Needs PERM_CONFIG; needs no authority.
+fn trust_status<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    for (key, _) in params.object_entries() {
+        if !matches!(key.as_str(), "network" | "target") {
+            return Err(ApiError::simple(
+                "INVALID_ARGUMENT",
+                &format!("unknown param \"{key}\""),
+            ));
+        }
+    }
+    let (network, target) = config_target_params(params)?;
+    if !config_permit(ctx, network) {
+        return Err(config_denied());
+    }
+    config_submit_op(
+        ctx,
+        ConfigRequest::TrustStatus { target, network },
+        "trust_status".to_string(),
         network,
         target,
     )
@@ -3195,6 +3356,16 @@ fn config_ops_result_name(result: ConfigOpsResult) -> &'static str {
     }
 }
 
+/// The issuance profile name `capabilities.get` reports: the profile the
+/// daemon's lane signs under — never a fixed string.
+fn config_profile_name(profile: u8) -> &'static str {
+    if profile == crate::config::ISSUE_PROFILE_COSE {
+        "rlcp1-cose-esp256"
+    } else {
+        "dev-hmac-sha256-16"
+    }
+}
+
 /// The device operation_id an outcome carries, rendered for `config.get`:
 /// on outcomes where the device-side operation may still be unresolved
 /// (permit assembled, indeterminate transfer) the caller needs the id to
@@ -3249,11 +3420,37 @@ fn config_outcome_json(record: &ConfigOpRecord) -> String {
                         hex_lower(&s.active_hash)
                     ),
                 ),
+                ConfigOutcome::TrustStatus(s) => (
+                    "TRUST_STATUS",
+                    format!(
+                        ",\"trust_status\":{{\"store_epoch\":{},\"min_authority_generation\":{},\"network\":\"{:016x}\",\"image_fingerprint\":\"{}\",\"anchor_count\":{},\"key_count\":{},\"revocation_count\":{},\"flags\":{}}}",
+                        s.store_epoch,
+                        s.min_authority_generation,
+                        s.network,
+                        hex_lower(&s.image_fingerprint),
+                        s.anchor_count,
+                        s.key_count,
+                        s.revocation_count,
+                        s.flags
+                    ),
+                ),
+                ConfigOutcome::RecoveryInfo(i) => (
+                    "RECOVERY_INFO",
+                    format!(
+                        ",\"recovery_info\":{{\"config_namespace\":{},\"schema\":{},\"network\":\"{:016x}\",\"store_floor\":{},\"decision_floor\":{},\"flags\":{},\"recovery_version\":{},\"profile_bits\":{},\"snapshot_hash\":\"{}\"}}",
+                        i.config_namespace,
+                        i.schema,
+                        i.network,
+                        i.store_floor,
+                        i.decision_floor,
+                        i.flags,
+                        i.recovery_version,
+                        i.profile_bits,
+                        hex_lower(&i.snapshot_hash)
+                    ),
+                ),
                 ConfigOutcome::PermitAssembled(op) => {
                     ("PERMIT_ASSEMBLED", operation_id_detail(*op))
-                }
-                ConfigOutcome::RecoveryAssembled(op) => {
-                    ("RECOVERY_ASSEMBLED", operation_id_detail(*op))
                 }
                 ConfigOutcome::NoChange => ("NO_CHANGE", String::new()),
                 ConfigOutcome::Refused(r) => (
@@ -3261,6 +3458,9 @@ fn config_outcome_json(record: &ConfigOpRecord) -> String {
                     format!(",\"result\":\"{}\"", config_ops_result_name(*r)),
                 ),
                 ConfigOutcome::RefusedStale => ("REFUSED", ",\"result\":\"STALE\"".to_string()),
+                ConfigOutcome::RefusedProfile => {
+                    ("REFUSED", ",\"result\":\"PROFILE_UNAVAILABLE\"".to_string())
+                }
                 ConfigOutcome::Timeout => ("TIMEOUT", String::new()),
                 ConfigOutcome::Indeterminate(op) => {
                     ("INDETERMINATE", operation_id_detail(*op))
@@ -3502,6 +3702,7 @@ mod tests {
             group_ops: leaked_group_ops(),
             site: None,
             config_authority,
+            config_profile: crate::config::ISSUE_PROFILE_DEV,
             subscriptions,
             conn_id,
             event_ring,
@@ -3688,6 +3889,14 @@ mod tests {
         assert!(response.contains(
             "\"events\":[\"node_joined\",\"node_left\",\"link_changed\"],\"clock\":\"host_unix_ms\""
         ));
+        // The config/trust verbs are registered and the profile reflects
+        // the daemon's selected issuance profile (dev here).
+        assert!(response.contains("\"config.propose\":true"));
+        assert!(response.contains("\"config.recover\":true"));
+        assert!(response.contains("\"config.recovery_info\":true"));
+        assert!(response.contains("\"trust.install\":true"));
+        assert!(response.contains("\"trust.status\":true"));
+        assert!(response.contains("\"permit_profile\":\"dev-hmac-sha256-16\""));
     }
 
     /// nodes.list / nodes.get JSON shapes against a populated node table:
@@ -5701,6 +5910,11 @@ mod tests {
     const CFG_CHALLENGE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1";
     const CFG_STATUS_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"operation_id\":\"00112233445566778899aabbccddeeff\"";
     const CFG_PROPOSE_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1,\"base_snapshot\":\"aabb\",\"patch\":[{\"field_id\":1,\"field_type\":\"u32\",\"value\":\"0000002a\"}]";
+    const CFG_RECOVER_PARAMS: &str = "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1,\"schema\":1,\"mode\":\"adopt-known\",\"new_store_generation\":4,\"new_revision\":8,\"snapshot_hash\":\"abababababababababababababababababababababababababababababababab\"";
+    const CFG_RECOVERY_INFO_PARAMS: &str =
+        "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\",\"config_namespace\":1";
+    const CFG_TRUST_STATUS_PARAMS: &str =
+        "\"network\":\"0000000000000001\",\"target\":\"0000000000000009\"";
 
     #[test]
     fn config_challenge_submits_a_pending_op() {
@@ -5768,12 +5982,24 @@ mod tests {
             leaked_event_ring(),
             100,
         );
+        // The trust verbs need the manifest hex, which no const can hold.
+        let manifest =
+            routeloom_provision::manifest::manifest_assemble(&[7_u8; 64], 0x100, &[9_u8; 64])
+                .unwrap();
+        let trust_install = format!(
+            "{CFG_TRUST_STATUS_PARAMS},\"manifest\":\"{}\"",
+            hex_lower(&manifest)
+        );
         for (method, params) in [
-            ("config.challenge", CFG_CHALLENGE_PARAMS),
-            ("config.status", CFG_STATUS_PARAMS),
-            ("config.propose", CFG_PROPOSE_PARAMS),
+            ("config.challenge", CFG_CHALLENGE_PARAMS.to_string()),
+            ("config.status", CFG_STATUS_PARAMS.to_string()),
+            ("config.propose", CFG_PROPOSE_PARAMS.to_string()),
+            ("config.recover", CFG_RECOVER_PARAMS.to_string()),
+            ("config.recovery_info", CFG_RECOVERY_INFO_PARAMS.to_string()),
+            ("trust.install", trust_install.clone()),
+            ("trust.status", CFG_TRUST_STATUS_PARAMS.to_string()),
         ] {
-            let response = handle(cfg_req(method, params).as_bytes(), &c);
+            let response = handle(cfg_req(method, &params).as_bytes(), &c);
             assert_error_schema(&response, "AuthorizationFailed");
         }
         // Anonymous socket peer is denied outright.
@@ -5861,6 +6087,117 @@ mod tests {
         // Acceptance is PENDING — never ACTIVE or APPLIED.
         assert!(response.contains("\"state\":\"PENDING\""), "{response}");
         assert!(!response.contains("ACTIVE"), "{response}");
+    }
+
+    #[test]
+    fn config_recover_validates_mode_and_baseline() {
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            Some(0xabc),
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
+            100,
+        );
+        // A well-formed adopt-known submits PENDING.
+        let response = handle(cfg_req("config.recover", CFG_RECOVER_PARAMS).as_bytes(), &c);
+        assert!(response.contains("\"ok\":true"), "{response}");
+        assert!(response.contains("\"state\":\"PENDING\""), "{response}");
+        // Unknown mode, adopt-with-baseline, adopt-without-hash refuse.
+        for params in [
+            CFG_RECOVER_PARAMS.replace("adopt-known", "attest"),
+            format!("{CFG_RECOVER_PARAMS},\"baseline\":\"aabb\""),
+            CFG_RECOVER_PARAMS.replace(
+                "\"snapshot_hash\":\"abababababababababababababababababababababababababababababababab\"",
+                "\"snapshot_hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"",
+            ),
+        ] {
+            let response = handle(cfg_req("config.recover", &params).as_bytes(), &c);
+            assert_error_schema(&response, "INVALID_ARGUMENT");
+        }
+        // Without an authority the daemon cannot sign a recovery.
+        let no_auth = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
+            100,
+        );
+        let response = handle(
+            cfg_req("config.recover", CFG_RECOVER_PARAMS).as_bytes(),
+            &no_auth,
+        );
+        assert_error_schema(&response, "CONFIG_NO_AUTHORITY");
+    }
+
+    #[test]
+    fn trust_verbs_submit_without_an_authority() {
+        // Trust delivery is independent of the config authority (§6.3):
+        // with NO authority configured, trust.install/status and
+        // config.recovery_info still submit — only the ACL gates them.
+        let acl = config_acl();
+        let log = Mutex::new(ReceiveLog::new([9; 16]));
+        let store = Mutex::new(MemoryOperationStore::new([0xab; 16]));
+        let limiter = Mutex::new(AdmissionLimiter::new(0));
+        let (session, lane, config_ops) = config_fixture();
+        let c = ctx_lane(
+            Some(9),
+            &acl,
+            &log,
+            &store,
+            &limiter,
+            &session,
+            &lane,
+            &config_ops,
+            None,
+            leaked_hub(),
+            7,
+            leaked_event_ring(),
+            100,
+        );
+        let manifest =
+            routeloom_provision::manifest::manifest_assemble(&[7_u8; 64], 0x100, &[9_u8; 64])
+                .unwrap();
+        let install = format!(
+            "{CFG_TRUST_STATUS_PARAMS},\"manifest\":\"{}\"",
+            hex_lower(&manifest)
+        );
+        for (method, params) in [
+            ("trust.install", install),
+            ("trust.status", CFG_TRUST_STATUS_PARAMS.to_string()),
+            ("config.recovery_info", CFG_RECOVERY_INFO_PARAMS.to_string()),
+        ] {
+            let response = handle(cfg_req(method, &params).as_bytes(), &c);
+            assert!(response.contains("\"ok\":true"), "{method}: {response}");
+            assert!(
+                response.contains("\"state\":\"PENDING\""),
+                "{method}: {response}"
+            );
+        }
+        // A non-envelope manifest refuses at admission, never queued.
+        let bad = format!("{CFG_TRUST_STATUS_PARAMS},\"manifest\":\"d284\"");
+        let response = handle(cfg_req("trust.install", &bad).as_bytes(), &c);
+        assert_error_schema(&response, "INVALID_ARGUMENT");
     }
 
     #[test]
