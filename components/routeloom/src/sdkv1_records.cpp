@@ -895,4 +895,205 @@ void resume_peer_cert_id(const ByteView member_cert, std::array<std::uint8_t, 8>
   std::memcpy(out.data(), digest.data(), out.size());
 }
 
+// === RLP2 ======================================================================
+
+namespace {
+
+bool resume2_purpose_known(const std::uint8_t purpose) noexcept {
+  return purpose == static_cast<std::uint8_t>(ResumePurpose::Link) ||
+         purpose == static_cast<std::uint8_t>(ResumePurpose::End);
+}
+
+}  // namespace
+
+Status resume2_validate(const ResumeSlot2& slot) noexcept {
+  if (!slot.valid) {
+    const bool zero = slot.flags == 0 && slot.peer == 0 && slot.network == 0 &&
+                      all_zero(slot.peer_cert_id) && all_zero(slot.local_cert_id) &&
+                      slot.peer_generation == 0 && slot.peer_role == 0 &&
+                      slot.created_gk_epoch == 0 && slot.last_used_boot == 0 &&
+                      slot.reserved_uses == 0 && all_zero(slot.rms);
+    return zero ? Status::success()
+                : Status::error(StatusCode::InvalidArgument, "rlp2 empty residue");
+  }
+  if (!resume2_purpose_known(static_cast<std::uint8_t>(slot.purpose)) ||
+      (slot.flags & ~kResumeFlagPinned) != 0 || !id_valid(slot.peer) || slot.network == 0 ||
+      slot.peer_generation == 0 || slot.peer_role == 0 || slot.created_gk_epoch == 0 ||
+      slot.reserved_uses > kResume2MaxUses || all_zero(slot.rms)) {
+    return Status::error(StatusCode::InvalidArgument, "rlp2 fields");
+  }
+  return Status::success();
+}
+
+Status resume2_slot_encode(const ResumeSlot2& slot,
+                           std::array<std::uint8_t, kResume2SlotBytes>& out) noexcept {
+  out.fill(0);
+  const Status valid = resume2_validate(slot);
+  if (!valid) return valid;
+  const MutableByteView target{out.data(), out.size()};
+  ByteWriter writer(target);
+  Status status = writer.write_u32(kResume2Magic);
+  if (status) status = writer.write_u8(kResume2Format);
+  if (status) status = writer.write_u8(slot.valid ? static_cast<std::uint8_t>(slot.purpose) : 0);
+  if (status) status = writer.write_u8(slot.valid ? 1 : 0);
+  if (status) status = writer.write_u8(slot.flags);
+  if (status) status = writer.write_u64(slot.peer);
+  if (status) status = writer.write_u64(slot.network);
+  if (status) status = write_array(writer, slot.peer_cert_id);
+  if (status) status = write_array(writer, slot.local_cert_id);
+  if (status) status = writer.write_u32(slot.peer_generation);
+  if (status) status = writer.write_u32(slot.peer_role);
+  if (status) status = writer.write_u32(slot.created_gk_epoch);
+  if (status) status = writer.write_u32(slot.last_used_boot);
+  if (status) status = writer.write_u32(slot.reserved_uses);
+  if (status) status = write_array(writer, slot.rms);
+  if (status) status = finish_crc(writer, target, kResume2SlotBytes);
+  return status;
+}
+
+Status resume2_slot_decode(const ByteView bytes, ResumeSlot2& out) noexcept {
+  out = ResumeSlot2{};
+  if (bytes.data == nullptr || bytes.size != kResume2SlotBytes) {
+    return Status::error(StatusCode::ProtocolError, "rlp2 size");
+  }
+  ByteReader reader(bytes);
+  std::uint32_t magic = 0, crc = 0;
+  std::uint8_t format = 0, purpose = 0, state = 0;
+  Status status = reader.read_u32(magic);
+  if (status) status = reader.read_u8(format);
+  if (status) status = reader.read_u8(purpose);
+  if (status) status = reader.read_u8(state);
+  if (status) status = reader.read_u8(out.flags);
+  if (status) status = reader.read_u64(out.peer);
+  if (status) status = reader.read_u64(out.network);
+  if (status) status = read_array(reader, out.peer_cert_id);
+  if (status) status = read_array(reader, out.local_cert_id);
+  if (status) status = reader.read_u32(out.peer_generation);
+  if (status) status = reader.read_u32(out.peer_role);
+  if (status) status = reader.read_u32(out.created_gk_epoch);
+  if (status) status = reader.read_u32(out.last_used_boot);
+  if (status) status = reader.read_u32(out.reserved_uses);
+  if (status) status = read_array(reader, out.rms);
+  if (status) status = reader.read_u32(crc);
+  if (!status) return status;
+  if (magic != kResume2Magic || format != kResume2Format) {
+    return Status::error(StatusCode::ProtocolError, "rlp2 head");
+  }
+  if (crc32_iso_hdlc(ByteView{bytes.data, kResume2SlotBytes - 4}) != crc) {
+    return Status::error(StatusCode::IntegrityError, "rlp2 crc");
+  }
+  if (state > 1 || (state == 0 && purpose != 0) ||
+      (state == 1 && !resume2_purpose_known(purpose))) {
+    return Status::error(StatusCode::ProtocolError, "rlp2 fields");
+  }
+  out.valid = state == 1;
+  out.purpose = static_cast<ResumePurpose>(state == 1 ? purpose : 1);
+  const Status valid = resume2_validate(out);
+  if (!valid) return Status::error(StatusCode::ProtocolError, valid.detail);
+  return Status::success();
+}
+
+// === RLV1 ======================================================================
+
+Status local_revocation_validate(const LocalRevocationRecord& record) noexcept {
+  const std::uint8_t state = static_cast<std::uint8_t>(record.state);
+  const std::uint8_t cause = static_cast<std::uint8_t>(record.cause);
+  if ((state != static_cast<std::uint8_t>(LocalRevocationState::Blocked) &&
+       state != static_cast<std::uint8_t>(LocalRevocationState::Cleaned)) ||
+      cause < static_cast<std::uint8_t>(LocalRevocationCause::Rrs) ||
+      cause > static_cast<std::uint8_t>(LocalRevocationCause::LocalMaintenance) ||
+      !id_valid(record.local_node) || record.site_id == 0 || record.network == 0 ||
+      record.removed_generation == 0 || all_zero(record.evidence_digest) ||
+      record.holdoff_ms != kLocalRevocationHoldoffMs) {
+    return Status::error(StatusCode::InvalidArgument, "rlv1 fields");
+  }
+  return Status::success();
+}
+
+Status local_revocation_record_encode(const LocalRevocationRecord& record, const std::uint32_t seal,
+                                      const std::uint32_t commit_seq,
+                                      ByteBuffer<kLocalRevocationSlotBytes>& out) noexcept {
+  out.clear();
+  const Status valid = local_revocation_validate(record);
+  if (!valid) return valid;
+  if (seal != kSealPending && seal != kLocalRevocationSealCommitted) {
+    return Status::error(StatusCode::InvalidArgument, "rlv1 seal value");
+  }
+  const MutableByteView target{out.bytes.data(), out.bytes.size()};
+  ByteWriter writer(target);
+  Status status = write_head(writer, kLocalRevocationMagic, kLocalRevocationRecordLen, seal);
+  if (status) status = writer.write_u32(commit_seq);
+  if (status) status = writer.write_u64(record.local_node);
+  if (status) status = writer.write_u64(record.site_id);
+  if (status) status = writer.write_u64(record.network);
+  if (status) status = writer.write_u32(record.removed_generation);
+  if (status) status = writer.write_u32(record.rs_epoch_floor);
+  if (status) status = writer.write_u32(record.site_epoch_floor);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(record.state));
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(record.cause));
+  if (status) status = writer.write_u16(0);
+  if (status) status = write_array(writer, record.evidence_digest);
+  if (status) status = writer.write_u32(record.rls_commit_seq);
+  if (status) status = writer.write_u32(record.boot_witness);
+  if (status) status = writer.write_u32(record.holdoff_ms);
+  if (status) status = finish_crc(writer, target, kLocalRevocationRecordLen);
+  if (!status) return status;
+  out.size = kLocalRevocationRecordLen;
+  return Status::success();
+}
+
+Status local_revocation_record_decode(const ByteView record, LocalRevocationRecord& out,
+                                      std::uint32_t* commit_seq) noexcept {
+  out = LocalRevocationRecord{};
+  if (record.data == nullptr || record.size != kLocalRevocationRecordLen) {
+    return Status::error(StatusCode::ProtocolError, "rlv1 size");
+  }
+  ByteReader reader(record);
+  std::uint16_t used_len = 0;
+  Status status = read_head(reader, record, kLocalRevocationMagic,
+                            kLocalRevocationSealCommitted, kLocalRevocationRecordLen,
+                            kLocalRevocationRecordLen, used_len);
+  std::uint32_t seq = 0, crc = 0;
+  std::uint8_t state = 0, cause = 0;
+  std::uint16_t reserved = 0;
+  if (status) status = reader.read_u32(seq);
+  if (status) status = reader.read_u64(out.local_node);
+  if (status) status = reader.read_u64(out.site_id);
+  if (status) status = reader.read_u64(out.network);
+  if (status) status = reader.read_u32(out.removed_generation);
+  if (status) status = reader.read_u32(out.rs_epoch_floor);
+  if (status) status = reader.read_u32(out.site_epoch_floor);
+  if (status) status = reader.read_u8(state);
+  if (status) status = reader.read_u8(cause);
+  if (status) status = reader.read_u16(reserved);
+  if (status) status = read_array(reader, out.evidence_digest);
+  if (status) status = reader.read_u32(out.rls_commit_seq);
+  if (status) status = reader.read_u32(out.boot_witness);
+  if (status) status = reader.read_u32(out.holdoff_ms);
+  if (status) status = reader.read_u32(crc);
+  if (!status) return status;
+  if (crc32_iso_hdlc(ByteView{record.data, kLocalRevocationRecordLen - 4}) != crc) {
+    return Status::error(StatusCode::IntegrityError, "rlv1 crc");
+  }
+  if (reserved != 0) {
+    return Status::error(StatusCode::ProtocolError, "rlv1 reserved");
+  }
+  out.state = static_cast<LocalRevocationState>(state);
+  out.cause = static_cast<LocalRevocationCause>(cause);
+  const Status valid = local_revocation_validate(out);
+  if (!valid) return Status::error(StatusCode::ProtocolError, valid.detail);
+  if (commit_seq != nullptr) *commit_seq = seq;
+  return Status::success();
+}
+
+Status local_revocation_record_structure(const ByteView record) noexcept {
+  const Status head = structure_head(record, kLocalRevocationMagic, kLocalRevocationRecordLen,
+                                     kLocalRevocationRecordLen);
+  if (!head) return head;
+  if (record.data[58] != 0 || record.data[59] != 0) {
+    return Status::error(StatusCode::ProtocolError, "rlv1 reserved");
+  }
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

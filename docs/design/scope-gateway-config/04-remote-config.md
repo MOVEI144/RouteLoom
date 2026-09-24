@@ -82,10 +82,10 @@ NVS write amplification（実装から導出した回数であり、実測のwea
 | DECIDED後・APPLY_INTENT前 | 新revisionを維持。boot変更でchallenge失効、初回applyしない。DECISION_EXPIRED/INTERRUPTED |
 | APPLY_INTENT後・ACTIVE確定前 | 作用の有無を断定しない。前の確認済みactive snapshotへidempotent restoreし、APPLY_INTERRUPTEDを記録。復元不能は隔離 |
 | ACTIVE確定後 | 保存されたactiveをboot時に復元する。これは新たな期限切れcommandの実行ではなく確定済み設定の継続 |
-| 片slot破損 | 生存recordから復旧。ただし保存世代の不明な新recordを成功扱いしない |
+| 片slot破損 | 生存recordを既知のbaselineとして保持し、CONFIG_STORAGE_UNCERTAINで新規更新を止める。署名済み回復証跡を要求する |
 | 両slot/必要metadata全損 | 明示的な再配備・新しい信頼世代が必要。revision0へ自動復帰しない |
 
-「明示的な再配備・新しい信頼世代」の遠隔経路は署名済みRCR1 recovery object（ControlObject kind4の専用lane、[Wire/API](05-wire-api.md) §5.5）で届ける。`StoreRecover`は新しいstore_generationを運び、生存recordの採用（attest=0）または明示的な再配備（attest=1）で通常intakeを復帰する。`AuthorityGeneration`は[署名設計](../m1-completion/03-signing.md)の連署付きtrust updateであり、現generationの署名の下で新しいauthority pinをjournalへ永続化する — 新pinがtargetのtrust imageで解決できないobjectは受理しない。impaired状態で通常permit intakeは閉じたまま、replay床（store_generation）とresult dedupはrecovery laneにも効く。
+遠隔のjournal回復は署名済みRCR2 recovery object（ControlObject kind4の専用lane、[Wire/API](05-wire-api.md) §5.5）で届ける。mode 0のAdoptKnownは生存recordのbaselineを採用し、mode 1のReprovisionは明示したbaselineを再配備する。いずれも新しいstore_generation・revision・snapshot_hashを運び、providerのreadbackと独立RLF1床の前進を確認してから通常intakeを復帰する。authority世代の移行は別のroot署名RTM1 trust-manifest（kind5、`trust.install`）で行い、targetのTrustViewが新しい鍵・世代を解決する。impaired状態で通常permit intakeは閉じたまま、replay床（store_generation）とresult dedupはrecovery laneにも効く。RLF1床自体の喪失は遠隔のRCR2で再生成せず、管理された再provisioningを要する。
 
 未確定のdesired値をboot時に無条件適用しない。ACTIVE未確定なのに過去の一瞬の成功を断言もしない。遠隔の観測者へ古いACTIVE通知が遅着した場合もoperation/revisionで照合する。
 

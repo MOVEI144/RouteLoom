@@ -1,0 +1,20 @@
+{
+  "codec": "rlp2",
+  "created_gk_epoch": 0,
+  "expect": "ok",
+  "flags": 0,
+  "format": "routeloom-sdkv1-golden-v1",
+  "last_used_boot": 0,
+  "local_cert_id_hex": "0000000000000000",
+  "name": "rlp2_empty",
+  "network": 0,
+  "peer": 0,
+  "peer_cert_id_hex": "0000000000000000",
+  "peer_generation": 0,
+  "peer_role": 0,
+  "purpose": 0,
+  "record_hex": "524c503201000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000ec0ce19f",
+  "reserved_uses": 0,
+  "rms_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "state": 0
+}
