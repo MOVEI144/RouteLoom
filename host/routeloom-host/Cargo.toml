@@ -25,6 +25,9 @@ rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 routeloom-edhoc = { path = "../routeloom-edhoc" }
 routeloom-join = { path = "../routeloom-join" }
 routeloom-provision = { path = "../routeloom-provision" }
+# G-SEC P5 group keys (design §6): RAM-held GK copies are wiped on every
+# retirement path. Already in Cargo.lock as a transitive dependency.
+zeroize = "1"
 
 [dev-dependencies]
 # The TUI's parser validates that the JSON this daemon emits stays compatible

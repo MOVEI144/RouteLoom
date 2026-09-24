@@ -6,8 +6,9 @@ use routeloom_json::Json;
 
 use super::{parse_hex_u64, protocol, Notifications, RouteLoomTransport};
 use crate::site::{
-    Decision, DecisionOutcome, DiscoveredDevice, JoinRequest, Member, RemovalReason, RevokeOutcome,
-    SiteAdmin, SiteEvent, SiteEventStream, SiteStatus, Via, SITE_EVENT_KINDS,
+    Decision, DecisionOutcome, DiscoveredDevice, GroupKeyStatus, JoinRequest, LastRotation, Member,
+    RemovalReason, RevokeOutcome, RotateOutcome, SiteAdmin, SiteEvent, SiteEventStream, SiteStatus,
+    Via, SITE_EVENT_KINDS,
 };
 use crate::{NodeId, TransportError};
 
@@ -17,6 +18,16 @@ fn u32_of(json: &Json, key: &str) -> Option<u32> {
 
 fn opt_u64(json: &Json, key: &str) -> Option<u64> {
     json.get(key).and_then(Json::as_u64)
+}
+
+fn opt_u32(json: &Json, key: &str) -> Option<u32> {
+    json.get(key)
+        .and_then(Json::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+}
+
+fn opt_string(json: &Json, key: &str) -> Option<String> {
+    json.get(key).and_then(Json::as_str).map(str::to_string)
 }
 
 fn node_of(json: &Json, key: &str) -> Option<NodeId> {
@@ -117,6 +128,38 @@ pub fn member_from_json(json: &Json) -> Option<Member> {
             .get("removal_reason")
             .and_then(Json::as_str)
             .map(str::to_string),
+    })
+}
+
+pub fn group_key_status_from_json(json: &Json) -> Option<GroupKeyStatus> {
+    Some(GroupKeyStatus {
+        active: u32_of(json, "active")?,
+        staged: opt_u32(json, "staged"),
+        phase: string_of(json, "phase")?,
+        cause: opt_string(json, "cause"),
+        targets: u32_of(json, "targets")?,
+        staged_ack: u32_of(json, "staged_ack")?,
+        active_ack: u32_of(json, "active_ack")?,
+        unknown: u32_of(json, "unknown")?,
+        last_rotation: json.get("last_rotation").and_then(|v| {
+            Some(LastRotation {
+                from_epoch: u32_of(v, "from")?,
+                to_epoch: u32_of(v, "to")?,
+                cause: string_of(v, "cause")?,
+                activated_ms: opt_u64(v, "activated_ms")?,
+            })
+        }),
+        next_due_ms: opt_u64(json, "next_due_ms"),
+    })
+}
+
+pub fn rotate_outcome_from_json(json: &Json) -> Option<RotateOutcome> {
+    Some(RotateOutcome {
+        operation_id: string_of(json, "operation_id")?,
+        state: string_of(json, "state")?,
+        from_epoch: u32_of(json, "from")?,
+        to_epoch: u32_of(json, "to")?,
+        targets: u32_of(json, "targets")?,
     })
 }
 
@@ -305,6 +348,26 @@ impl SiteAdmin for RouteLoomTransport {
         })
     }
 
+    fn group_key_status(&self) -> Result<GroupKeyStatus, TransportError> {
+        let result = self.call("group_keys.status", "{}")?;
+        group_key_status_from_json(&result).ok_or_else(|| protocol("unparsable group_keys.status"))
+    }
+
+    fn rotate_group_key(
+        &self,
+        expected_active_epoch: u32,
+        idempotency_key: &str,
+    ) -> Result<RotateOutcome, TransportError> {
+        let result = self.call(
+            "group_keys.rotate",
+            &format!(
+                "{{\"expected_active_epoch\":{expected_active_epoch},\"idempotency_key\":\"{}\"}}",
+                routeloom_json::escape_string(idempotency_key)
+            ),
+        )?;
+        rotate_outcome_from_json(&result).ok_or_else(|| protocol("unparsable group_keys.rotate"))
+    }
+
     fn site_events(&self) -> Result<SiteEventStream, TransportError> {
         let kinds: Vec<String> = SITE_EVENT_KINDS
             .iter()
@@ -319,5 +382,72 @@ impl SiteAdmin for RouteLoomTransport {
             parse: parse_site_event_notification,
             done: false,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_key_status_maps_the_daemon_shape() {
+        let json = routeloom_json::parse(
+            "{\"active\":2,\"staged\":3,\"phase\":\"staging\",\"cause\":\"manual\",\"targets\":5,\
+             \"staged_ack\":2,\"active_ack\":1,\"unknown\":3,\
+             \"last_rotation\":{\"from\":1,\"to\":2,\"cause\":\"periodic\",\"activated_ms\":777},\
+             \"next_due_ms\":null,\"clock\":{\"unix_ms\":1,\"mono_ms\":2}}",
+        )
+        .unwrap();
+        let status = group_key_status_from_json(&json).unwrap();
+        assert_eq!(status.active, 2);
+        assert_eq!(status.staged, Some(3));
+        assert_eq!(status.phase, "staging");
+        assert_eq!(status.cause.as_deref(), Some("manual"));
+        assert_eq!(
+            (
+                status.targets,
+                status.staged_ack,
+                status.active_ack,
+                status.unknown
+            ),
+            (5, 2, 1, 3)
+        );
+        let last = status.last_rotation.unwrap();
+        assert_eq!(
+            (last.from_epoch, last.to_epoch, last.activated_ms),
+            (1, 2, 777)
+        );
+        assert_eq!(last.cause, "periodic");
+        assert_eq!(status.next_due_ms, None);
+        // The stable shape (nulls) parses too.
+        let json = routeloom_json::parse(
+            "{\"active\":1,\"staged\":null,\"phase\":\"stable\",\"cause\":null,\"targets\":0,\
+             \"staged_ack\":0,\"active_ack\":0,\"unknown\":0,\"last_rotation\":null,\
+             \"next_due_ms\":99,\"clock\":{\"unix_ms\":1,\"mono_ms\":2}}",
+        )
+        .unwrap();
+        let status = group_key_status_from_json(&json).unwrap();
+        assert_eq!((status.active, status.staged), (1, None));
+        assert_eq!(status.last_rotation, None);
+        assert_eq!(status.next_due_ms, Some(99));
+    }
+
+    #[test]
+    fn rotate_outcome_maps_the_daemon_shape() {
+        let json = routeloom_json::parse(
+            "{\"operation_id\":\"op-0000000000000009\",\"state\":\"committed\",\"from\":1,\"to\":2,\"targets\":4}",
+        )
+        .unwrap();
+        let outcome = rotate_outcome_from_json(&json).unwrap();
+        assert_eq!(outcome.operation_id, "op-0000000000000009");
+        assert_eq!(outcome.state, "committed");
+        assert_eq!(
+            (outcome.from_epoch, outcome.to_epoch, outcome.targets),
+            (1, 2, 4)
+        );
+        assert!(rotate_outcome_from_json(
+            &routeloom_json::parse("{\"operation_id\":\"x\"}").unwrap()
+        )
+        .is_none());
     }
 }
