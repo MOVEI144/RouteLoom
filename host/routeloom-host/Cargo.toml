@@ -25,8 +25,7 @@ rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 routeloom-edhoc = { path = "../routeloom-edhoc" }
 routeloom-join = { path = "../routeloom-join" }
 routeloom-provision = { path = "../routeloom-provision" }
-# Authority channel (03 §5.3, G-SEC P5 PR1): RLRES1 purpose-4 responder,
-# envelope bodies and AES-GCM channel crypto — reused, never re-implemented.
+# G-SEC P5: authority channel and RAM-held group keys.
 routeloom-keysched = { path = "../routeloom-keysched" }
 zeroize = { version = "1", default-features = false }
 
