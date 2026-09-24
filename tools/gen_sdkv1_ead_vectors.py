@@ -45,7 +45,7 @@ pubkey, seed = base.pubkey, base.seed
 
 # --- EAD labels (absolute values; the wire carries -label, i.e. critical) ------
 LABELS = {"intent": 65537, "offer": 65538, "request": 65539, "result": 65540,
-          "credential": 65541}
+          "credential": 65541, "last_membership": 65542}
 VALUE_SIZE = {"intent": 12, "offer": 22, "request": 26}
 RESULT_HEAD, RESULT_MAX = 12, 520
 SITE_PACKAGE_SIZE = 120
@@ -204,6 +204,7 @@ def main() -> None:
     intent = dict(org_hint=org_hint(site_ca_pub), profile_bits=0b11)
     for name, r in (("join_intent_rljoin_rlres", intent),
                     ("join_intent_rljoin_only", dict(intent, profile_bits=0b01)),
+                    ("join_intent_membership_recovery", dict(intent, profile_bits=0b101)),
                     ("join_intent_hint_extremes", dict(org_hint=0xFFFFFFFF, profile_bits=1))):
         value = join_intent(r)
         item = ead_item("intent", value)
@@ -271,6 +272,9 @@ def main() -> None:
     request = dict(model=17, fw_version=0x01040000, capability=0b010, requested_role=0b001,
                    last_site_id=0, last_generation=0)
     for name, r in (("join_request_first_join", request),
+                    ("join_request_membership_recovery",
+                     dict(request, capability=0b11010, last_site_id=site_id,
+                          last_generation=3)),
                     ("join_request_rejoin_relay",
                      dict(request, requested_role=0b011, last_site_id=site_id,
                           last_generation=3)),
@@ -308,6 +312,19 @@ def main() -> None:
         join_request(dict(request, last_generation=1)), "last_generation needs a last_site_id")
     bad("join_request_site_without_generation", "join_request",
         join_request(dict(request, last_site_id=site_id)), "a last site has generation >= 1")
+
+    # The retained RLS1 network is carried after the DevCert in recovery m3.
+    last_value = u8(1) + b"\x00\x00\x00" + u64(network)
+    last_item = ead_item("last_membership", last_value)
+    good("last_membership_old_network", "last_membership",
+         dict(network=network, value_hex=last_value.hex(), item_hex=last_item.hex(),
+              label=LABELS["last_membership"]), value=last_value, item=last_item)
+    bad("last_membership_short", "last_membership", last_value[:-1],
+        "LastMembership is exactly 12 bytes")
+    bad("last_membership_reserved", "last_membership",
+        last_value[:2] + b"\x01" + last_value[3:], "reserved bytes are zero")
+    bad("last_membership_zero_network", "last_membership", b"\x01\x00\x00\x00" + u64(0),
+        "network zero is invalid")
     bad("join_request_last_site_all_ones", "join_request",
         join_request(dict(request, last_site_id=0xFFFFFFFFFFFFFFFF, last_generation=1)),
         "last_site_id all-ones is invalid")
@@ -607,7 +624,7 @@ def main() -> None:
     ebad("ead_padding_only", cbor_int(0) + cbor_bstr(b"\x00"), "the join item is required")
     ebad("ead_non_critical", cbor_int(LABELS["intent"]) + cbor_bstr(intent_value),
          "join items must be critical (negative label)")
-    ebad("ead_unknown_critical", cbor_int(-65542) + cbor_bstr(intent_value),
+    ebad("ead_unknown_critical", cbor_int(-65543) + cbor_bstr(intent_value),
          "unknown critical label")
     ebad("ead_credential_in_m1", ead_item("credential", devcert) + intent_item,
          "the Credential item rides EAD_2/EAD_3 only")

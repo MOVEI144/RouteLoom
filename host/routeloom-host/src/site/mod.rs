@@ -927,9 +927,7 @@ impl SiteAuthority {
                 .transpose()
                 .map_err(|e| e.to_string())?;
             if last_network.is_some_and(|network| {
-                request.last_site_id == 0
-                    || (network as u32) != (id.network as u32)
-                    || (network >> 32) > (id.network >> 32)
+                !recovery_network_valid(network, id.network, request.last_site_id)
             }) {
                 return Err("last network binding".into());
             }
@@ -2348,6 +2346,14 @@ fn split_join_ead(
 // accept it without the m1 profile bit or on a fresh join.
 type RecoveryEad = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
+fn recovery_network_valid(network: u64, current_network: u64, last_site_id: u64) -> bool {
+    let epoch = network >> 32;
+    last_site_id != 0
+        && epoch != 0
+        && epoch <= current_network >> 32
+        && (network as u32) == (current_network as u32)
+}
+
 fn split_recovery_ead(items: &[EadItem], recovery: bool) -> Result<RecoveryEad, &'static str> {
     if !recovery {
         let (request, cert) = split_join_ead(items, JoinEad::Request, true)?;
@@ -2378,6 +2384,16 @@ fn split_recovery_ead(items: &[EadItem], recovery: bool) -> Result<RecoveryEad, 
 #[cfg(test)]
 mod recovery_ead_tests {
     use super::*;
+
+    #[test]
+    fn recovery_network_requires_a_real_old_epoch() {
+        let current = 0x0000_0003_0a1b_2c3d;
+        assert!(recovery_network_valid(0x0000_0002_0a1b_2c3d, current, 42));
+        assert!(!recovery_network_valid(0x0000_0000_0a1b_2c3d, current, 42));
+        assert!(!recovery_network_valid(0x0000_0004_0a1b_2c3d, current, 42));
+        assert!(!recovery_network_valid(0x0000_0002_0a1b_2c3e, current, 42));
+        assert!(!recovery_network_valid(0x0000_0002_0a1b_2c3d, current, 0));
+    }
 
     #[test]
     fn old_membership_requires_profile_and_exact_order() {

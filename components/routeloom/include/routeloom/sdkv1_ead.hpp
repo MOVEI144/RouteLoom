@@ -140,8 +140,8 @@ constexpr std::size_t kJoinRequestSize = 26;
 constexpr std::uint32_t kJoinCapabilitySleepy = 1u << 0;
 constexpr std::uint32_t kJoinCapabilityRelay = 1u << 1;
 constexpr std::uint32_t kJoinCapabilityGateway = 1u << 2;
-constexpr std::uint32_t kJoinCapabilityApplyRrs = 1u << 3;
-constexpr std::uint32_t kJoinCapabilityRelayRrs = 1u << 4;
+constexpr std::uint32_t kJoinCapabilityRrsGossipV1 = 1u << 3;
+constexpr std::uint32_t kJoinCapabilityMembershipLifecycleV1 = 1u << 4;
 constexpr std::uint32_t kJoinCapabilityMask = 0x1Fu;
 
 struct JoinRequest {

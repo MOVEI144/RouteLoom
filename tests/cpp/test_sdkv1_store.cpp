@@ -625,6 +625,33 @@ void test_revocation_power_cuts() {
   }
 }
 
+void test_revocation_clear_power_cuts() {
+  const MemoVerifier verifier;
+  const auto object = revocation_object(revocation_set(14, 2));
+  ByteBuffer<kRevocationSlotBytes> cleared{};
+  CHECK_OK(revocation_record_encode(ByteView{}, kRevocationSealCommitted, 2, cleared));
+  for (std::size_t call = 0; call < 4; ++call) {
+    for (std::size_t boundary = 0; boundary <= cleared.size; ++boundary) {
+      FaultyRecordStorage storage(kRevocationSlotBytes);
+      RevocationStore store(storage);
+      CHECK_OK(store.initialize());
+      CHECK_OK(store.accept(object.view(), sak().pub, kSiteId, kNetwork, verifier));
+      storage.cut_call = storage.write_calls + call;
+      storage.cut_bytes = boundary;
+      CHECK(store.clear().code == StatusCode::StorageFailure);
+      storage.disarm();
+      RevocationStore reboot(storage);
+      (void)reboot.initialize();
+      CHECK(!reboot.has_set() || reboot.rs_epoch() == 14);
+      CHECK_OK(reboot.clear());
+      RevocationStore finished(storage);
+      CHECK_OK(finished.initialize());
+      CHECK(finished.clean_empty());
+      CHECK(storage.slot(0) == storage.slot(1));
+    }
+  }
+}
+
 // --- ResumeCache -----------------------------------------------------------------
 
 ResumeContext context(const std::uint32_t gk_epoch = 203, const RevocationSet* rrs = nullptr) {
@@ -804,6 +831,7 @@ int main() {
   test_revocation_accept();
   test_revocation_entry_monotonicity();
   test_revocation_power_cuts();
+  test_revocation_clear_power_cuts();
   test_resume_cache_rules();
   test_resume_touch_wear_rule();
   test_resume_power_cuts();

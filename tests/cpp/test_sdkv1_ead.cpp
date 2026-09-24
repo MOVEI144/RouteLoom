@@ -442,6 +442,9 @@ void invalid(const Fields& f) {
       const Status match = join_request_matches_dev_cert(request, decode_cert(f, "dev_cert_hex"));
       CHECK(match.code == StatusCode::AuthorizationFailed);
     }
+  } else if (codec == "last_membership") {
+    NetworkId network = 0;
+    CHECK(!last_membership_decode(input, network).ok());
   } else if (codec == "site_package") {
     CHECK(!deny);
     SitePackage package{};
@@ -489,6 +492,8 @@ void invalid(const Fields& f) {
 // --- unit checks ------------------------------------------------------------------
 
 void unit_checks() {
+  static_assert(kJoinCapabilityRrsGossipV1 == (1u << 3));
+  static_assert(kJoinCapabilityMembershipLifecycleV1 == (1u << 4));
   current = "unit";
   // Encoders refuse what decoders refuse.
   ByteBuffer<kJoinIntentSize> intent_out{};
@@ -586,6 +591,7 @@ void run() {
   const auto invalid_files = list_json(dir / "invalid");
   CHECK(valid_files.size() >= 30);
   CHECK(invalid_files.size() >= 120);
+  bool saw_last_membership = false;
   for (const auto& path : valid_files) {
     const Fields f = parse_flat_json(read_file(path));
     current = path.filename().string();
@@ -599,6 +605,18 @@ void run() {
       valid_offer(f);
     } else if (codec == "join_request") {
       valid_request(f);
+    } else if (codec == "last_membership") {
+      saw_last_membership = true;
+      const auto value = hex(f, "value_hex");
+      NetworkId network = 0;
+      CHECK(last_membership_decode(view(value), network).ok());
+      CHECK(network == num(f, "network"));
+      ByteBuffer<kLastMembershipSize> encoded{};
+      CHECK(last_membership_encode(network, encoded).ok());
+      CHECK(equals(encoded, value));
+      ByteBuffer<kJoinEadItemMax> item{};
+      CHECK(join_ead_item_encode(JoinEad::LastMembership, view(value), item).ok());
+      CHECK(equals(item, hex(f, "item_hex")));
     } else if (codec == "site_package") {
       valid_package(f);
     } else if (codec == "removal_notice") {
@@ -614,6 +632,7 @@ void run() {
       CHECK(!"unknown valid codec");
     }
   }
+  CHECK(saw_last_membership);
   for (const auto& path : invalid_files) {
     const Fields f = parse_flat_json(read_file(path));
     current = path.filename().string();

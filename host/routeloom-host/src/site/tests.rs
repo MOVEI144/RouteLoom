@@ -541,6 +541,52 @@ fn removal_end_to_end() {
     );
 }
 
+#[test]
+fn removed_recovery_notice_uses_retained_network() {
+    let (service, transport) = service();
+    let mut device = SimDevice::new(0x00A1_0000_0000_60A1, 0x79);
+    let (mut exchange, _, events) = device.start(&service, &transport, T0);
+    decide(
+        &service,
+        request_id(&events).unwrap(),
+        device.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        "allow-old-network",
+        T0 + 10,
+    )
+    .unwrap();
+    assert!(matches!(
+        device.finish(&mut exchange, &transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+    service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: device.node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Lost,
+                    key: "revoke-old-network".into(),
+                },
+                T0 + 20,
+            )
+        })
+        .0
+        .unwrap();
+    let old_network = (2_u64 << 32) | u64::from(testkit::NETWORK_LOW);
+    device.site.as_mut().unwrap().member.network = old_network;
+    device.recovery_existing = true;
+    let (outcome, _) = device.attempt(&service, &transport, T0 + 60_000);
+    assert!(matches!(
+        outcome,
+        Outcome::Result(JoinResult::Removed { .. })
+    ));
+    assert!(device.site.is_none());
+}
+
 /// V1-J07: a DevCert from another Device CA is refused with an EDHOC
 /// error, counted by reason, and never listed as discovered.
 #[test]

@@ -62,7 +62,8 @@ struct JoinerConfig {
 // The Owner reads, repairs and durably writes rlboot before start and hands
 // the witness over; the Joiner issues no boot counter and takes no wall
 // clock. A preferred former membership is RAM-only and derived from the
-// stored RLS1, never passed in here.
+// stored RLS1. A completed RLX1 removal supplies a durable generation
+// watermark through the Owner's boot gate.
 enum class JoinBootMode : std::uint8_t { Normal = 0, VerifyExistingMembership = 1 };
 
 struct JoinBootInput {
@@ -70,6 +71,9 @@ struct JoinBootInput {
   bool prepared{false};
   // Query the authority without dropping a healthy retained membership.
   JoinBootMode mode{JoinBootMode::Normal};
+  // Both zero unless a verified RLX1 watermark names the last removed site.
+  std::uint64_t removal_watermark_site_id{0};
+  std::uint32_t removal_watermark_generation{0};
 };
 
 // --- Radio input ------------------------------------------------------------------------------
@@ -307,6 +311,7 @@ class Joiner final {
   bool recovery_match(const JoinCandidateKey& key) const noexcept;
   // Full re-verification of an adopted RLS1 before it may drive anything.
   bool verify_adopted(const SiteRecord& site, const IdentityRecord& identity) noexcept;
+  bool below_removal_watermark(const SiteRecord& site) const noexcept;
   bool retain_membership(const SiteRecord& site, const IdentityRecord& identity) noexcept;
   static MonotonicMs sat_add(MonotonicMs a, std::uint64_t delta) noexcept;
   static void sat_inc(std::uint32_t& counter) noexcept;
@@ -330,6 +335,8 @@ class Joiner final {
   bool in_call_{false};
 
   std::uint32_t boot_witness_{0};
+  std::uint64_t removal_watermark_site_id_{0};
+  std::uint32_t removal_watermark_generation_{0};
   std::uint32_t retained_floor_{0};  // adopted rs_epoch_floor, kept on same-site recovery
   std::uint8_t channel_{0};          // last tuned channel, 0 = untuned
   std::uint8_t channel_target_{0};   // tune in flight

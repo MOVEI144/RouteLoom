@@ -9,6 +9,7 @@
 //! - [`cert`] — RLCW1 DevCert / SiteCert / MemberCert (CWT in a restricted
 //!   ES256 COSE_Sign1), strict decode, RFC 6979 issue, verify.
 //! - [`identity`] — RLI1 device identity record.
+//! - [`lifecycle`] — RLX1 removal journal record.
 //! - [`site`] — RLS1 site membership record (with the A/B `commit_seq`).
 //! - [`revocation`] — RRS1 payload, AAD, Sign1 object, storage record.
 //! - [`resume`] — RLP1 resumption-cache slot.
@@ -32,6 +33,7 @@
 pub mod cert;
 pub mod devca;
 pub mod identity;
+pub mod lifecycle;
 pub mod office;
 pub mod pop;
 pub mod resume;

@@ -1373,16 +1373,25 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
         removal_step_ = RemovalStep::Runtime;
         removal_cursor_ = 0;
         holdoff_start_ = now_ms;  // lost monotonic continuity: start 600 s again
-        if (phase_ == LifecyclePhase::Holdoff && (site_.has_site() || revocations_.has_set())) {
-          enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        if (phase_ == LifecyclePhase::Holdoff) {
+          const SiteStoreHealth health = site_.health();
+          if (!health.initialized || health.has_site || health.quarantined ||
+              health.uncertain || health.unsupported_mask != 0 ||
+              health.read_error_mask != 0 || health.active_load_failed ||
+              !revocations_.clean_empty()) {
+            enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+          }
         }
         return Status::success();
       }
       if (record.mode == LifecycleMode::UnassignedReady) {
+        const SiteStoreHealth health = site_.health();
         if (!identity_.has_identity() || identity_.quarantined() || identity_.uncertain() ||
             identity_.identity().node_id != config_.self || record.self != config_.self ||
-            site_.has_site() || revocations_.has_set() || site_.uncertain() ||
-            revocations_.uncertain() || site_.quarantined() || revocations_.quarantined()) {
+            !health.initialized || health.has_site || health.quarantined ||
+            health.uncertain || health.unsupported_mask != 0 ||
+            health.read_error_mask != 0 || health.active_load_failed ||
+            !revocations_.clean_empty()) {
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
           return Status::success();
         }
@@ -1634,12 +1643,16 @@ bool MembershipLifecycle::removal_proof_valid(const LifecycleRecord& record) noe
     const SiteRecord& site = site_.site();
     if (site.site_id != record.site_id || site.network != record.old_network ||
         site.assignment_generation > record.generation ||
+        site.rs_epoch_floor > record.rs_floor ||
         site.boot_witness != record.boot_witness ||
         site.gk_epoch_current != record.gk_floor || site.site_cert.size != cert_len ||
         std::memcmp(site.site_cert.bytes.data(), p + 4, cert_len) != 0) return false;
-  } else if (site_.quarantined() || site_.uncertain()) {
-    return false;
   }
+  // A cut during the twin tombstone can leave an adopted tombstone and one
+  // corrupt sibling. Without a valid slot, deletion progress is unproven.
+  const SiteStoreHealth health = site_.health();
+  if (!health.initialized || health.quarantined || health.unsupported_mask != 0 ||
+      health.read_error_mask != 0 || health.active_load_failed) return false;
   return true;
 }
 
@@ -1668,6 +1681,9 @@ Status MembershipLifecycle::on_removal(ByteView object, MonotonicMs now_ms) noex
   intent.old_network = adopted_.network;
   intent.generation = notice.generation;
   intent.rs_floor = notice.rs_epoch > adopted_.rs_epoch ? notice.rs_epoch : adopted_.rs_epoch;
+  if (site_.site().rs_epoch_floor > intent.rs_floor) {
+    intent.rs_floor = site_.site().rs_epoch_floor;
+  }
   intent.gk_floor = adopted_.gk_epoch;
   intent.boot_witness = site_.site().boot_witness;
   const auto& cert = site_.site().site_cert;
@@ -1688,6 +1704,16 @@ Status MembershipLifecycle::on_removal(ByteView object, MonotonicMs now_ms) noex
   if (!journal_->begin_removal(intent)) {
     enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
     return Status::success();
+  }
+  RrsNoticeAccepted accepted{};
+  accepted.rs_epoch = notice.rs_epoch;
+  sha256(object, accepted.notice_sha256);
+  std::array<std::uint8_t, kRrsNoticeAcceptedSize> ack{};
+  if (rrs_notice_accepted_encode(accepted, ack)) {
+    // The port copies a sealed report before runtime secrets are destroyed.
+    // Delivery is best effort; erasure never waits for transport progress.
+    (void)ports_.authority.authority_send(kAuthorityTypeRevocation,
+                                          ByteView{ack.data(), ack.size()});
   }
   pending_ack_ = false;
   fetch_outstanding_ = false;
@@ -1721,18 +1747,29 @@ Status MembershipLifecycle::removal_poll(MonotonicMs now_ms) noexcept {
       if (result) removal_step_ = RemovalStep::Site;
       break;
     case RemovalStep::Site:
-      result = site_.clear();
+      {
+        const SiteStoreHealth health = site_.health();
+        result = health.initialized && health.unsupported_mask == 0 &&
+                         health.read_error_mask == 0 && !health.active_load_failed
+                     ? site_.clear()
+                     : Status::error(StatusCode::RecoveryRequired, "site erasure unproven");
+      }
       if (result) removal_step_ = RemovalStep::Revocation;
       break;
     case RemovalStep::Revocation:
-      result = revocations_.clear();
+      result = revocations_.erasure_safe()
+                   ? revocations_.clear()
+                   : Status::error(StatusCode::RecoveryRequired, "rrs erasure unproven");
       if (result) removal_step_ = RemovalStep::Finish;
       break;
     case RemovalStep::Finish:
       result = site_.initialize();
       if (result) result = revocations_.initialize();
-      if (result && !site_.has_site() && !revocations_.has_set() &&
-          !site_.uncertain() && !revocations_.uncertain()) result = journal_->holdoff();
+      const SiteStoreHealth health = site_.health();
+      if (result && health.initialized && !health.has_site && !health.quarantined &&
+          !health.uncertain && health.unsupported_mask == 0 &&
+          health.read_error_mask == 0 && !health.active_load_failed &&
+          revocations_.clean_empty()) result = journal_->holdoff();
       else if (result) result = Status::error(StatusCode::IntegrityError, "removal postcondition");
       if (result) {
         phase_ = LifecyclePhase::Holdoff;

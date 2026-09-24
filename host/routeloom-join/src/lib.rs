@@ -355,6 +355,8 @@ pub const JOIN_REQUEST_SIZE: usize = 26;
 pub const JOIN_CAPABILITY_SLEEPY: u32 = 1 << 0;
 pub const JOIN_CAPABILITY_RELAY: u32 = 1 << 1;
 pub const JOIN_CAPABILITY_GATEWAY: u32 = 1 << 2;
+pub const JOIN_CAPABILITY_RRS_GOSSIP_V1: u32 = 1 << 3;
+pub const JOIN_CAPABILITY_MEMBERSHIP_LIFECYCLE_V1: u32 = 1 << 4;
 pub const JOIN_CAPABILITY_MASK: u32 = 0x1f;
 
 /// EAD_3: `ver | flags | model u16 | fw_version u32 | capability u32 |
@@ -1243,6 +1245,8 @@ mod tests {
 
     #[test]
     fn retained_network_is_exact_and_profile_is_explicit() {
+        assert_eq!(JOIN_CAPABILITY_RRS_GOSSIP_V1, 1 << 3);
+        assert_eq!(JOIN_CAPABILITY_MEMBERSHIP_LIFECYCLE_V1, 1 << 4);
         let network = LastMembership(0x0000_0003_0a1b_2c3d);
         let bytes = network.encode().unwrap();
         assert_eq!(LastMembership::decode(&bytes).unwrap(), network);

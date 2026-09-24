@@ -1882,6 +1882,103 @@ void test_revocation_wire_vectors() {
 
 // V1-R05/R06: no unverified hint may start erasure; a valid signed notice
 // must leave a durable Removing intent before any site secret is deleted.
+ByteBuffer<kRemovalNoticeObjectSize> signed_removal_notice(std::uint32_t generation,
+                                                           std::uint32_t rs_epoch) {
+  ByteBuffer<kRemovalNoticePayloadSize> payload{};
+  CHECK_OK(removal_notice_payload_encode(
+      RemovalNotice{RevocationReason::Removed, kSiteId, kNode, generation, rs_epoch}, payload));
+  ByteBuffer<kRemovalNoticeAadSize> aad{};
+  CHECK_OK(removal_notice_aad(kNetwork, aad));
+  Es256Signature signature{};
+  sign_payload(sak(), payload.view(), aad.view(), signature);
+  ByteBuffer<kRemovalNoticeObjectSize> object{};
+  CHECK_OK(removal_notice_assemble(payload.view(),
+                                   ByteView{signature.data(), signature.size()}, object));
+  return object;
+}
+
+void test_removal_preserves_stored_floor() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 0, 2, 40));
+  CHECK(f.snap().phase == LifecyclePhase::BootGate);
+  const auto notice = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(notice.view()), 100));
+  CHECK(f.journal.has_record());
+  CHECK(f.journal.record().rs_floor >= 40);
+}
+
+void test_removal_resumes_with_corrupt_cleared_site_sibling() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto notice = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(notice.view()), 100));
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
+  CHECK_OK(f.site.clear());
+  f.site_storage.slot(1)[40] ^= 1;
+  CHECK(!f.site.initialize());
+  CHECK(!f.site.has_site() && f.site.uncertain());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 200));
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 201 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+}
+
+void test_removal_blocks_when_both_site_slots_are_corrupt() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto notice = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(notice.view()), 100));
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
+  f.site_storage.slot(0)[40] ^= 1;
+  f.site_storage.slot(1)[40] ^= 1;
+  CHECK(!f.site.initialize());
+  CHECK(f.site.quarantined());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 200));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
+}
+
+void test_holdoff_blocks_on_corrupt_stores() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto notice = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(notice.view()), 100));
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  f.rrs_storage.slot(0)[20] ^= 1;
+  f.rrs_storage.slot(1)[20] ^= 1;
+  CHECK(!f.revocations.initialize());
+  CHECK(f.revocations.quarantined());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 200));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 600200));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(f.journal.record().mode == LifecycleMode::Holdoff);
+}
+
+void test_removal_ack_queues_after_intent_without_delaying_erasure() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto notice = signed_removal_notice(2, 14);
+  const auto before = f.authority.sent.size();
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6,
+                                                 notice.view()), 100));
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
+  CHECK(f.authority.sent.size() == before + 1);
+  if (f.authority.sent.size() == before + 1) {
+    const auto& sent = f.authority.sent.back();
+    CHECK(sent.type == kAuthorityTypeRevocation);
+    RrsNoticeAccepted accepted{};
+    CHECK_OK(rrs_notice_accepted_decode(ByteView{sent.body.data(), sent.body.size()}, accepted));
+    Digest256 hash{};
+    sha256(notice.view(), hash);
+    CHECK(accepted.rs_epoch == 14 && accepted.notice_sha256 == hash);
+  }
+  f.authority.refuse = true;
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+}
+
 void test_removal_notice_intent() {
   NodeFixture f{};
   CHECK(f.provision(2, 14));
@@ -1978,6 +2075,31 @@ void test_removal_journal_powercuts() {
     CHECK(cold.record().mode == LifecycleMode::Removing ||
           cold.record().mode == LifecycleMode::Holdoff);
   }
+  LifecycleRecord ready = intent;
+  ready.mode = LifecycleMode::UnassignedReady;
+  ready.payload.clear();
+  CHECK_OK(lifecycle_record_encode(ready, kLifecycleSeal, 3, encoded));
+  for (std::size_t call = 0; call < 4; ++call) {
+    for (std::size_t byte = 0; byte <= encoded.size; ++byte) {
+      FaultyRecordStorage storage{kLifecycleSlotBytes};
+      LifecycleStore store{storage};
+      CHECK_OK(store.initialize());
+      CHECK_OK(store.begin_removal(intent));
+      CHECK_OK(store.holdoff());
+      storage.cut_call = storage.write_calls + call;
+      storage.cut_bytes = byte;
+      CHECK(!store.unassigned_ready());
+      LifecycleStore cold{storage};
+      (void)cold.initialize();
+      CHECK(cold.has_record());
+      if (cold.has_record()) {
+        CHECK(cold.record().mode == LifecycleMode::Holdoff ||
+              cold.record().mode == LifecycleMode::UnassignedReady);
+        CHECK(cold.record().generation == intent.generation);
+        CHECK(cold.commit_seq() >= 2 && cold.commit_seq() <= 3);
+      }
+    }
+  }
 }
 
 void test_removal_failure_after_intent_reboots_closed() {
@@ -2010,6 +2132,11 @@ void test_removal_failure_after_intent_reboots_closed() {
 }  // namespace
 
 int main() {
+  test_removal_preserves_stored_floor();
+  test_removal_resumes_with_corrupt_cleared_site_sibling();
+  test_removal_blocks_when_both_site_slots_are_corrupt();
+  test_holdoff_blocks_on_corrupt_stores();
+  test_removal_ack_queues_after_intent_without_delaying_erasure();
   test_removal_notice_intent();
   test_removal_failure_after_intent_reboots_closed();
   test_removal_journal_powercuts();

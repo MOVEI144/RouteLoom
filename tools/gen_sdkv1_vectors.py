@@ -301,6 +301,18 @@ def rlp1(r: dict) -> bytes:
     return data + u32(crc32(data))
 
 
+def rlx1(r: dict, payload: bytes, seal: int = 0x4C583101,
+         seq: int = 7) -> bytes:
+    body = (u32(seq) + u8(r["mode"]) + b"\x00" + u16(len(payload)) +
+            u64(r["self_node"]) + u64(r["site_id"]) +
+            u64(r["old_network"]) + u64(0) + u32(r["generation"]) +
+            u32(r["rs_floor"]) + u32(r["gk_floor"]) +
+            u32(r["boot_witness"]) + u64(0) + u32(0) + payload)
+    head = b"RLX1" + u16(1) + u16(16 + len(body) + 4) + u32(1) + u32(seal)
+    data = head + body
+    return data + u32(crc32(data))
+
+
 # --- emit ---------------------------------------------------------------------
 def emit(folder: str, name: str, record: dict) -> None:
     record = dict(record, format=FMT, name=name)
@@ -725,6 +737,41 @@ def main() -> None:
     bad("pop_wrong_challenge", "pop", pop_good,
         "a PoP replayed against another challenge", expect="deny",
         expected_node_id=node, expected_challenge_hex=("34" * 32))
+
+    # ---- RLX1 removal journal ---------------------------------------------
+    notice_payload = (u8(1) + u8(1) + u16(0) + u64(site_id) + u64(node) +
+                      u32(3) + u32(14))
+    notice_aad = b"RouteLoom/removal-notice/v1\x00" + u64(network)
+    signed_notice = sign1(notice_payload, sign(sak, sig_structure(notice_payload, notice_aad)))
+    assert len(signed_notice) == 103
+    cert_bytes = bytes.fromhex(sitecert["cert_hex"])
+    proof = u16(len(cert_bytes)) + u16(len(signed_notice)) + cert_bytes + signed_notice
+    removal = dict(self_node=node, site_id=site_id, old_network=network,
+                   generation=3, rs_floor=14, gk_floor=203, boot_witness=512)
+    for mode, name, payload in ((1, "rlx1_removing", proof),
+                                (2, "rlx1_holdoff", proof),
+                                (3, "rlx1_unassigned_ready", b"")):
+        fields = dict(removal, mode=mode, payload_hex=payload.hex(), commit_seq=7,
+                      signer_pubkey_hex=sak_pub.hex())
+        emit("valid", name, dict(fields, codec="rlx1_record", expect="ok",
+                                 record_hex=rlx1(fields, payload).hex()))
+    good_rlx = rlx1(dict(removal, mode=1), proof)
+    bad("rlx1_bad_crc", "rlx1_record", good_rlx[:-1] + bytes([good_rlx[-1] ^ 1]),
+        "CRC mismatch")
+    bad("rlx1_pending", "rlx1_record", rlx1(dict(removal, mode=1), proof, seal=0),
+        "pending seal is not durable")
+    bad("rlx1_zero_seq", "rlx1_record", rlx1(dict(removal, mode=1), proof, seq=0),
+        "sequence zero is invalid")
+    bad("rlx1_reserved_mode", "rlx1_record", rlx1(dict(removal, mode=4), proof),
+        "Prepared is reserved until cutover")
+    bad("rlx1_wrong_notice_generation", "rlx1_record",
+        rlx1(dict(removal, mode=1, generation=4), proof),
+        "journal generation must match signed Notice")
+    bad("rlx1_floor_below_notice", "rlx1_record",
+        rlx1(dict(removal, mode=1, rs_floor=13), proof),
+        "journal floor cannot be below signed Notice")
+    bad("rlx1_ready_with_proof", "rlx1_record", rlx1(dict(removal, mode=3), proof),
+        "UnassignedReady contains no proof")
 
     # ---- RLP1 --------------------------------------------------------------
     peer_cert_id = hashlib.sha256(bytes.fromhex(peercert["cert_hex"])).digest()[:8]

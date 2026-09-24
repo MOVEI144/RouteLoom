@@ -242,6 +242,14 @@ class RevocationStore {
   bool has_set() const noexcept { return has_set_; }
   bool quarantined() const noexcept { return pair_.quarantined(); }
   bool uncertain() const noexcept { return pair_.uncertain(); }
+  bool erasure_safe() const noexcept {
+    return pair_.initialized() && !pair_.slot_unsupported(0) &&
+           !pair_.slot_unsupported(1) && !pair_.slot_unreadable(0) &&
+           !pair_.slot_unreadable(1);
+  }
+  bool clean_empty() const noexcept {
+    return erasure_safe() && !has_set_ && !pair_.quarantined() && !pair_.uncertain();
+  }
   const RevocationSet& set() const noexcept { return set_; }
   std::uint32_t rs_epoch() const noexcept { return has_set_ ? set_.rs_epoch : 0; }
   // The signed object as stored (for 1-hop gossip, 04 §4); re-read from

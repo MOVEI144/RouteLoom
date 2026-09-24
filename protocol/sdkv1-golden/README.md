@@ -3,7 +3,7 @@
 Byte-exact vectors for the SDK v1 zero-touch security formats
 (`docs/design/sdk-v1/`, plan items P1-2, P1-3 and P7): RLCW1 certificates
 (DevCert / SiteCert / MemberCert), the RLI1 identity record, the RLS1 site
-record, the RRS1 revocation set (payload, external AAD, Sig_structure,
+record, the RLX1 removal journal record, the RRS1 revocation set (payload, external AAD, Sig_structure,
 COSE_Sign1 object and the `rlrevo` storage record), the RLP1
 resumption-cache slot and the device-key proof of possession (07 §6).
 
@@ -12,7 +12,7 @@ Three implementations must agree on every byte:
 | side | code | what it does with the vectors |
 |---|---|---|
 | generator | `tools/gen_sdkv1_vectors.py` | independent reference encoder from the design text (shares no code with the others) |
-| C++ | `components/routeloom/src/{rlcw1,sdkv1_records,sdkv1_pop}.cpp`, test `tests/cpp/test_sdkv1_golden.cpp` | decode, re-encode, rebuild AAD/Sig_structure/Sign1, **verify** signatures (micro-ecc) |
+| C++ | `components/routeloom/src/{rlcw1,sdkv1_records,sdkv1_lifecycle_store,sdkv1_pop}.cpp`, test `tests/cpp/test_sdkv1_golden.cpp` | decode, re-encode, rebuild AAD/Sig_structure/Sign1, **verify** signatures (micro-ecc) |
 | Rust | `host/routeloom-provision/src/sdkv1/`, test `host/routeloom-provision/tests/sdkv1_golden.rs` | the same, and **re-sign** every certificate, revocation set and PoP (RustCrypto `p256`, RFC 6979, low-S) |
 
 Regenerate with `python3 tools/gen_sdkv1_vectors.py`; CI regenerates and
@@ -79,6 +79,14 @@ Storage record (seal `0x2E5E7C0D`): sealed head, `commit_seq u32`, the
 signed object as received (so it can be re-gossiped), CRC — exactly 640 B at
 32 entries; an object-less 24 B record is the cleared tombstone.
 
+**RLX1** (04 §6, seal `0x4C583101`): sequenced 2-slot removal journal,
+`commit_seq u32 | mode u8 | reserved u8 | payload_len u16 | self u64 |
+site_id u64 | old_network u64 | new_network u64 | generation u32 |
+rs_floor u32 | gk_floor u32 | boot_witness u32 | cutover_id u64 |
+revision u32 | payload | crc32`. Removing and Holdoff carry a length-prefixed
+SiteCert and signed RemovalNotice; UnassignedReady carries no payload. The
+codec rejects reserved cutover modes until their semantics are implemented.
+
 **RLP1** (05 §3.2): 84 B, no seal (single-slot write; a torn slot fails its
 CRC and is treated as empty). An empty slot has purpose, state and every
 later field zero.
@@ -95,7 +103,7 @@ does not re-sign.
 
 ## Files
 
-- `valid/*.json` — `codec` (`rlcw1`, `rli1`, `rls1`, `rrs1`, `rrs1_record`,
+- `valid/*.json` — `codec` (`rlcw1`, `rli1`, `rls1`, `rrs1`, `rrs1_record`, `rlx1_record`,
   `rlp1`, `pop`), the decoded fields, the encodings (`cert_hex`,
   `payload_hex`, `sig_structure_hex`, `record_hex`, `object_hex`, …),
   `expect: "ok"`.

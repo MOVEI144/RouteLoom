@@ -139,4 +139,6 @@ SAK侵害または計画交換では、Site CA（オフライン）が署名す�
 | V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | PR B の portable Joiner は健康なRLS1を保持して問い合わせ、実署名NoticeをOwnerへ渡すsim試験あり。Hostは旧networkのEADを同一kidの削除済みrowに照合する。Owner引渡し・旧kid履歴・Host通知配送・pipe E2Eは未接続 |
 | V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） | planned_not_run（P6-2） |
 | V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 | P6-1 PR Aでpartition/merge sim試験（`test_sdkv1_revocation.cpp`）。HILはP8へ引継ぎ |
-| V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz | RRS部分のみP6-1 PR Aで実施（`protocol/sdkv1-golden/revocation/`、C++/Rust両harness＋CI再生成検査）。Notice/RLX1/Renewは後続PR |
+| V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz | RRS部分はPR Aで実施。PR BでRLX1 recordとLastMembership/profile/capabilityのvalid/invalid共通vectorを追加し、C++/Rust両harnessとCI再生成検査を実施。Renewと実結線E2Eは後続PR |
+
+P6 の本番プロフィールは未有効。Host の通知 outbox、旧 kid 履歴照会、Owner／ESP の消去実接続と E2E は PR D で接続する。portable Joiner は起動時に渡された RLX1 の削除世代 watermark 以下の同一site Allowを拒否する。Owner が検証済み watermark を渡し、再割当後の journal を整合させる結線も PR D に属する。portable の `NoticeAccepted` は intent 保存後の best effort 引渡しであり、Host の受領永続化を表さない。
