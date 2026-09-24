@@ -813,6 +813,33 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_caps_targets_and_counts_overflow() {
+        let mut auth = super::super::testkit::authority(
+            Box::<super::super::store::MemoryStore>::default(),
+            1_790_000_000_000,
+        );
+        for i in 0..140_u64 {
+            let node = 0x00A1_0000_0001_0000 + i;
+            auth.devices.insert(
+                node,
+                super::super::store::DeviceRow {
+                    node,
+                    member: true,
+                    generation: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        let dist = auth.snapshot_targets(0x00A1_0000_0001_0000, 9, [0x11; 32]);
+        assert_eq!(dist.targets.len(), DISTRIBUTION_TARGET_MAX);
+        assert_eq!(dist.overflow, 139 - DISTRIBUTION_TARGET_MAX as u32);
+        // Every survivor counts unknown: tracked targets plus overflow.
+        assert_eq!(dist.counts(), (0, 0, 139, 139));
+        // First-node-wins order: the lowest survivors are tracked.
+        assert_eq!(dist.targets[0].node, 0x00A1_0000_0001_0001);
+    }
+
+    #[test]
     fn distribution_doc_round_trip() {
         let dist = OperationDistribution {
             state: DistState::Distributing,
