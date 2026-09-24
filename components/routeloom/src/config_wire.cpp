@@ -6,6 +6,7 @@
 
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
+#include "routeloom/sdkv1_authority_transport.hpp"
 
 namespace routeloom {
 
@@ -72,8 +73,55 @@ void ConfigTarget::attach_trust_store(TrustStore& store,
   trust_floor_ = &floor;
 }
 
+void ConfigTarget::attach_authority(sdkv1::AuthorityMeshDemux* demux) noexcept {
+  authority_ = demux;
+}
+
 void ConfigTarget::on_config_frame(const NodeId peer, const wire::PlainFrame& frame,
                                    const MonotonicMs now_ms) noexcept {
+  // The authority lane claims its frames before the config path: subtype 9
+  // carriers, kind-7 manifests, and the chunks/acks of a live authority
+  // transfer (chunks carry no kind, so they route by hash only).
+  if (authority_ != nullptr) {
+    const ByteView payload{frame.payload.data(), frame.payload_size};
+    switch (frame.header.type) {
+      case FrameType::Control:
+        if (authority_->claim_control(control_subtype(frame))) {
+          authority_->on_control(frame.header.origin, payload, now_ms);
+          return;
+        }
+        break;
+      case FrameType::ControlObject: {
+        autonomy::ControlObjectPayload manifest{};
+        if (autonomy::control_object_decode(payload, manifest) &&
+            authority_->claim_kind(manifest.kind)) {
+          authority_->on_manifest(frame.header.origin, manifest, now_ms);
+          return;
+        }
+        break;
+      }
+      case FrameType::ObjectChunk: {
+        autonomy::ObjectChunkPayload chunk{};
+        if (autonomy::object_chunk_decode(payload, chunk) &&
+            authority_->claim_transfer(chunk.object_hash)) {
+          authority_->on_chunk(frame.header.origin, chunk, now_ms);
+          return;
+        }
+        break;
+      }
+      case FrameType::ObjectAck: {
+        autonomy::ObjectAckPayload ack{};
+        if (autonomy::object_ack_decode(payload, ack) &&
+            authority_->claim_transfer(ack.object_hash)) {
+          authority_->on_ack(frame.header.origin, ack, now_ms);
+          return;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
   switch (frame.header.type) {
     case FrameType::Control:
       handle_control(peer, frame, now_ms);

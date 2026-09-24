@@ -43,6 +43,10 @@
 
 namespace routeloom {
 
+namespace sdkv1 {
+class AuthorityMeshDemux;  // sdkv1_authority_transport.hpp (the P5 mesh lane)
+}
+
 // The wire result code the config endpoint reports (0x20-0x23 replies) —
 // defined beside the other HostOps result enums. Imported here so the mesh
 // components and the USB bridge share one value space.
@@ -119,6 +123,13 @@ class ConfigTarget final : public ConfigEndpointSink {
   // status query answer from. Optional: without it kind-5 manifests are
   // refused and subtype-5 queries denied. Caller-owned; must outlive this.
   void attach_trust_store(TrustStore& store, SecurityFloorStore& floor) noexcept;
+  // Attach the authority-channel mesh demux (G-SEC P5: the endpoint on a
+  // device, the relay on a gateway). Claimed frames — Control subtype 9,
+  // kind-7 manifests, chunks/acks of a live authority transfer — route
+  // to the demux before the config path sees them; without it they are
+  // denied like any unknown subtype/kind. Caller-owned; must outlive
+  // this. The demux's own poll stays with its Owner, not this target.
+  void attach_authority(sdkv1::AuthorityMeshDemux* demux) noexcept;
 
   // ConfigEndpointSink
   void on_config_frame(NodeId peer, const wire::PlainFrame& frame,
@@ -184,6 +195,7 @@ class ConfigTarget final : public ConfigEndpointSink {
   ConfigRateLimiter& limiter_;
   TrustStore* trust_{nullptr};
   SecurityFloorStore* trust_floor_{nullptr};
+  sdkv1::AuthorityMeshDemux* authority_{nullptr};
   std::array<ConfigJournal*, config_wire_const::kMaxJournals> journals_{};
   std::array<std::uint16_t, config_wire_const::kMaxJournals> namespaces_{};
   std::size_t journal_count_{0};

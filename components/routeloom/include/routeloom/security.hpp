@@ -101,6 +101,11 @@ class SecurityProvider {
     return Status::error(StatusCode::Unsupported, "group link unavailable");
   }
   virtual bool accepts_group_epoch(std::uint32_t /*g*/) const noexcept { return true; }
+  // True while a next-GK frame authenticated but its durable promote is
+  // still outstanding: the node holds (not drops) the triggering frame
+  // and retries it after the promote. Providers without GK state never
+  // pend, so their Busy stays an ordinary refusal.
+  virtual bool group_promotion_pending() const noexcept { return false; }
   virtual Status next_counter(const SecurityContext& context,
                               std::uint64_t& counter) noexcept = 0;
   virtual Status seal(const SecurityContext& context,

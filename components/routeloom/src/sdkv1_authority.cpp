@@ -384,7 +384,7 @@ void authority_gk_id(const NetworkId network, const std::uint32_t epoch,
   secure_clear(digest);
 }
 
-Status authority_seal(const AeadGcm& aead, const keys::TrafficKey& tx,
+Status authority_seal(const routeloom::AeadGcm& aead, const keys::TrafficKey& tx,
                       const keys::AuthorityEnvelopeType type, const std::uint32_t ctx_id,
                       const std::uint64_t counter, const ByteView plaintext,
                       const MutableByteView out, std::size_t& written) noexcept {
@@ -432,7 +432,7 @@ Status authority_seal(const AeadGcm& aead, const keys::TrafficKey& tx,
   return Status::success();
 }
 
-Status authority_open(const AeadGcm& aead, const keys::TrafficKey& rx, const ByteView envelope,
+Status authority_open(const routeloom::AeadGcm& aead, const keys::TrafficKey& rx, const ByteView envelope,
                       const std::uint32_t want_ctx, const MutableByteView plaintext,
                       std::size_t& written, keys::AuthorityEnvelopeHeader& header) noexcept {
   written = 0;
@@ -503,7 +503,7 @@ bool AuthorityReplayWindow::accept(const std::uint64_t counter) noexcept {
   return true;
 }
 
-AuthorityClient::AuthorityClient(const AeadGcm& aead, AuthorityPort& port,
+AuthorityClient::AuthorityClient(const routeloom::AeadGcm& aead, AuthorityPort& port,
                                  AuthorityObserver& observer,
                                  rlres1::Environment& rlres1_env,
                                  GroupKeyState* group) noexcept
@@ -560,6 +560,9 @@ AuthoritySnapshot AuthorityClient::snapshot() const noexcept {
   snap.backoff_s = backoff_s_;
   snap.pull_pending = pull_pending_;
   snap.join_confirmed = join_confirmed_;
+  snap.busy = tx_size_ != 0 || ack_pending_ ||
+              state_ == AuthoritySnapshot::State::Connecting ||
+              state_ == AuthoritySnapshot::State::Backoff;
   return snap;
 }
 

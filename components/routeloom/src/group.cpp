@@ -808,6 +808,22 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     wire::PlainFrame plain{};
     const auto status = wire::open_group(frame, security_, plain);
     if (!status) {
+      if (status.code == StatusCode::Busy && security_.group_promotion_pending()) {
+        // The frame authenticated under the staged next GK but the
+        // durable promote is still outstanding: hold the sealed bytes
+        // (one slot) and retry after the Owner's promote instead of
+        // dropping onto the repair round. Nothing was committed above,
+        // so the retry is a clean re-entry.
+        if (!group_promote_hold_.used) {
+          group_promote_hold_.used = true;
+          group_promote_hold_.frame = frame;
+          group_promote_hold_.peer = peer;
+          group_promote_hold_.held_at_ms = now_ms;
+          saturating_inc(group_stats_.promote_holds);
+          return;
+        }
+        saturating_inc(group_stats_.promote_drops);
+      }
       saturating_inc(group_stats_.open_failures);
       note_rx_refusal(status, peer, &header.message);
       return;
@@ -1213,6 +1229,19 @@ bool MeshNode::group_radio_pending() const noexcept {
 // --- poll() driver ------------------------------------------------------------------
 
 void MeshNode::process_group(const MonotonicMs now_ms) noexcept {
+  // A frame held for a GK promote retries once the promote settles
+  // (landed or failed); a promote that never settles expires the hold.
+  if (group_promote_hold_.used && !security_.group_promotion_pending()) {
+    const wire::LinkOpenedFrame frame = group_promote_hold_.frame;
+    const NodeId peer = group_promote_hold_.peer;
+    group_promote_hold_ = GroupPromoteHold{};
+    handle_group_data(frame, peer, now_ms);
+  } else if (group_promote_hold_.used &&
+             now_ms - group_promote_hold_.held_at_ms > kGroupPromoteHoldMs) {
+    group_promote_hold_ = GroupPromoteHold{};
+    saturating_inc(group_stats_.promote_drops);
+    saturating_inc(group_stats_.open_failures);
+  }
   // Relay/receiver trees: report deadlines, then retention.
   group_trees_.for_each([&](GroupTree& tree) {
     if (tree.collecting && now_ms >= tree.deadline_ms) group_finalize(tree, now_ms);

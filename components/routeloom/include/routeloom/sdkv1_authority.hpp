@@ -177,11 +177,11 @@ void authority_gk_id(NetworkId network, std::uint32_t epoch, const keys::Secret&
 // maps an AEAD failure to AuthenticationFailed without touching `plaintext`
 // beyond zeroing it. Neither tracks replay: the caller commits the window
 // only after a successful open.
-Status authority_seal(const AeadGcm& aead, const keys::TrafficKey& tx,
+Status authority_seal(const routeloom::AeadGcm& aead, const keys::TrafficKey& tx,
                       keys::AuthorityEnvelopeType type, std::uint32_t ctx_id,
                       std::uint64_t counter, ByteView plaintext, MutableByteView out,
                       std::size_t& written) noexcept;
-Status authority_open(const AeadGcm& aead, const keys::TrafficKey& rx, ByteView envelope,
+Status authority_open(const routeloom::AeadGcm& aead, const keys::TrafficKey& rx, ByteView envelope,
                       std::uint32_t want_ctx, MutableByteView plaintext, std::size_t& written,
                       keys::AuthorityEnvelopeHeader& header) noexcept;
 
@@ -315,6 +315,10 @@ struct AuthoritySnapshot {
   std::uint32_t backoff_s{0};  // current backoff step (0 = not backing off)
   bool pull_pending{false};
   bool join_confirmed{false};
+  // True while channel work is in flight (staged TX, pending ACK,
+  // handshake or backoff). Diagnostics only: the channel naps across
+  // sleep and resumes on Wake, so busyness never gates sleep.
+  bool busy{false};
 };
 
 class AuthorityClient final {
@@ -322,7 +326,7 @@ class AuthorityClient final {
   // All references are caller-owned and must outlive the client. `rlres1_env`
   // supplies entropy and receive context ids (its slot directory is unused:
   // the client only initiates).
-  AuthorityClient(const AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
+  AuthorityClient(const routeloom::AeadGcm& aead, AuthorityPort& port, AuthorityObserver& observer,
                   rlres1::Environment& rlres1_env, GroupKeyState* group = nullptr) noexcept;
 
   AuthorityClient(const AuthorityClient&) = delete;
@@ -367,7 +371,7 @@ class AuthorityClient final {
   void on_envelope_ready(ByteView bytes, MonotonicMs now) noexcept;
   void wipe() noexcept;
 
-  const AeadGcm& aead_;
+  const routeloom::AeadGcm& aead_;
   AuthorityPort& port_;
   AuthorityObserver& observer_;
   rlres1::Environment& env_;

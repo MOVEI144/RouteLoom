@@ -80,8 +80,9 @@ pub struct AuthorityOutbound {
 
 /// Outbound sink. The channel calls it with the lock released (mirroring
 /// the JoinTransport discipline), so implementations must be re-entrant
-/// safe; `deliver` itself never calls back into the channel.
-pub trait AuthorityTransport {
+/// safe; `deliver` itself never calls back into the channel. Send + Sync:
+/// the service holds it across the lane threads.
+pub trait AuthorityTransport: Send + Sync {
     fn deliver(&self, outbound: AuthorityOutbound);
 }
 
@@ -307,6 +308,15 @@ impl AuthorityChannels {
         stats.channels = self.channels.len();
         stats.pending = self.pending.len();
         stats
+    }
+
+    /// Refreshes the epochs echoed in R2 (the owner calls this after a
+    /// revocation or activation commits). Stale R2 epochs would mislead a
+    /// joining device about the live revocation/group state; the fence
+    /// itself never trusts them, but honesty costs one call.
+    pub fn set_epochs(&mut self, rs_epoch: u32, gk_epoch: u32) {
+        self.config.rs_epoch = rs_epoch;
+        self.config.gk_epoch = gk_epoch;
     }
 
     pub fn poll_event(&mut self) -> Option<ChannelEvent> {
@@ -1044,17 +1054,70 @@ impl AuthorityChannels {
             .map_err(|_| ChannelSendError::InvalidParams)?;
         self.seal_for(directory, device, 1, &plaintext, now_ms)
     }
+
+    /// Queues an unsealed kind-5 Wake hint for `device` (P5 §3.2: the
+    /// only carrier that needs no channel). The 8 B body carries the
+    /// owner's site/gk epochs so the device can tell a stale hint from a
+    /// live one; it changes no key, generation, floor or membership, and
+    /// the device answers by opening R1 as initiator. Still fenced on the
+    /// live row: a removed or unknown device is `StaleMember`, never a
+    /// hint to a stranger.
+    pub fn queue_wake(
+        &mut self,
+        directory: &dyn AuthorityDirectory,
+        device: u64,
+        site_epoch: u32,
+        gk_epoch: u32,
+    ) -> Result<(), ChannelSendError> {
+        let member = directory.lookup(device).filter(|row| row.member);
+        if member.is_none() {
+            self.stats.send_errors += 1;
+            return Err(ChannelSendError::StaleMember);
+        }
+        if self.outbound.len() >= MAX_OUTBOUND {
+            self.stats.send_errors += 1;
+            return Err(ChannelSendError::OutboundFull);
+        }
+        let mut body = [0_u8; 8];
+        body[..4].copy_from_slice(&site_epoch.to_be_bytes());
+        body[4..].copy_from_slice(&gk_epoch.to_be_bytes());
+        self.stats.sends += 1;
+        self.push_outbound(AuthorityOutbound {
+            device,
+            kind: CarrierKind::Wake,
+            bytes: body.to_vec(),
+        });
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site::testkit::{AuthorityNet, FakeDevice};
     use routeloom_keysched::authority::gk_id;
-    use routeloom_keysched::rlres1::R3_SIZE;
+    use routeloom_keysched::rlres1::{Epochs, R3_SIZE};
 
     const NETWORK: u64 = (7 << 32) | 0x0A0B0C0D;
     const SITE: u64 = 0x5100000000000042;
     const DEVICE: u64 = 0x101;
+
+    fn net() -> AuthorityNet {
+        AuthorityNet {
+            network: NETWORK,
+            site: SITE,
+            epochs_i: Epochs {
+                site_epoch: 7,
+                rs_epoch: 2,
+                gk_epoch: 10,
+            },
+            epochs_r: Epochs {
+                site_epoch: 7,
+                rs_epoch: 4,
+                gk_epoch: 12,
+            },
+        }
+    }
 
     fn dams() -> [u8; 32] {
         let mut dams = [0_u8; 32];
@@ -1114,140 +1177,6 @@ mod tests {
         }
     }
 
-    /// Minimal fake device: drives RLRES1 as initiator with the keysched
-    /// codecs and seals/opens envelopes with real AES-GCM.
-    struct FakeDevice {
-        device: u64,
-        dams: [u8; 32],
-        k_auth: [u8; 32],
-        binding: [u8; 32],
-        nonce_i: [u8; 16],
-        cid_i: u32,
-        r1_bytes: Vec<u8>,
-        rx_key: TrafficKey,
-        tx_key: TrafficKey,
-        rx_ctx: u32,
-        tx_ctx: u32,
-        tx_counter: u64,
-        request_id: u64,
-        rx_window: ReplayWindow,
-    }
-
-    impl FakeDevice {
-        fn begin(device: u64, dams: [u8; 32], cid_i: u32, nonce_i: [u8; 16]) -> (Vec<u8>, Self) {
-            let k_auth = resume_auth_key(&dams, Purpose::Authority, NETWORK, device, SITE);
-            let binding = resume_binding_routed(Purpose::Authority, device, SITE);
-            let epochs = Epochs {
-                site_epoch: 7,
-                rs_epoch: 2,
-                gk_epoch: 10,
-            };
-            let mut r1 = R1 {
-                purpose: Purpose::Authority,
-                rid: resume_id(&dams, Purpose::Authority),
-                nonce_i,
-                cid_i,
-                epochs,
-                ticket: Vec::new(),
-                mac: [0; 16],
-            };
-            r1.mac = resume_mac(&k_auth, LABEL_RESUME_R1, &[&binding, &r1.body()]);
-            let r1_bytes = r1.encode();
-            (
-                r1_bytes.clone(),
-                Self {
-                    device,
-                    dams,
-                    k_auth,
-                    binding,
-                    nonce_i,
-                    cid_i,
-                    r1_bytes,
-                    rx_key: TrafficKey {
-                        key: [0; 16],
-                        iv: [0; 12],
-                    },
-                    tx_key: TrafficKey {
-                        key: [0; 16],
-                        iv: [0; 12],
-                    },
-                    rx_ctx: 0,
-                    tx_ctx: 0,
-                    tx_counter: 0,
-                    request_id: 1,
-                    rx_window: ReplayWindow::new(),
-                },
-            )
-        }
-
-        fn on_r2(&mut self, r2_bytes: &[u8]) -> Vec<u8> {
-            let R2::Ok {
-                nonce_r,
-                cid_r,
-                epochs: _,
-                mac,
-            } = R2::decode(r2_bytes).expect("R2 ok")
-            else {
-                panic!("expected R2 ok");
-            };
-            let body = R2::ok_body(
-                &nonce_r,
-                cid_r,
-                &Epochs {
-                    site_epoch: 7,
-                    rs_epoch: 4,
-                    gk_epoch: 12,
-                },
-            );
-            // Rebuild the exact R2 bytes the host sealed the MAC over.
-            let mut full = body.clone();
-            full.extend_from_slice(&mac);
-            let expect = resume_mac(
-                &self.k_auth,
-                LABEL_RESUME_R2,
-                &[&self.binding, &self.r1_bytes, &body],
-            );
-            assert!(mac_equal(&expect, &mac));
-            let context = ResumeKeyContext {
-                purpose: Purpose::Authority,
-                network: NETWORK,
-                node_i: self.device,
-                node_r: SITE,
-                cid_i: self.cid_i,
-                cid_r,
-            };
-            let th = sha256(&[&self.r1_bytes, &full]);
-            let prk = resume_prk(&self.nonce_i, &nonce_r, &self.dams);
-            let k_conf = resume_confirm_key(&prk, &th);
-            self.tx_key = resume_traffic_key(&prk, &context, Direction::InitiatorToResponder, &th);
-            self.rx_key = resume_traffic_key(&prk, &context, Direction::ResponderToInitiator, &th);
-            self.rx_ctx = self.cid_i;
-            self.tx_ctx = cid_r;
-            resume_mac(&k_conf, LABEL_RESUME_R3, &[&th]).to_vec()
-        }
-
-        fn seal(&mut self, env_type: u8, plaintext: &[u8]) -> Vec<u8> {
-            let envelope = seal_envelope(
-                &self.tx_key,
-                env_type,
-                self.tx_ctx,
-                self.tx_counter,
-                plaintext,
-            )
-            .expect("seal");
-            self.tx_counter += 1;
-            self.request_id += 1;
-            envelope
-        }
-
-        fn open(&mut self, envelope: &[u8]) -> (u8, Vec<u8>) {
-            let (header, plaintext) =
-                open_envelope(&self.rx_key, envelope, self.rx_ctx).expect("open");
-            assert!(self.rx_window.accept(header.counter));
-            (header.env_type, plaintext)
-        }
-    }
-
     fn drain_r2(channels: &mut AuthorityChannels) -> Vec<u8> {
         let outbound = channels.take_outbound();
         assert_eq!(outbound.len(), 1);
@@ -1264,7 +1193,7 @@ mod tests {
         now_ms: u64,
     ) -> FakeDevice {
         let mut state = 0x1234_5678_9ABC_DEF0;
-        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), cid_i, nonce_i);
+        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), cid_i, nonce_i, net());
         channels.on_carrier(
             directory,
             DEVICE,
@@ -1493,7 +1422,7 @@ mod tests {
         let mut state = 0x55;
 
         // Unknown device: R2 hint, no channel.
-        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x11; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x11; 16], net());
         channels.on_carrier(
             &directory,
             0x999,
@@ -1511,7 +1440,7 @@ mod tests {
         assert_eq!(channels.stats().r1_rejected, 1);
 
         // Right device, wrong DAMS guess: silent (no oracle beyond the rid).
-        let (r1, _) = FakeDevice::begin(DEVICE, [0xEE; 32], 0xA001, [0x22; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, [0xEE; 32], 0xA001, [0x22; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -1650,7 +1579,7 @@ mod tests {
         let directory = FakeDirectory::with(DEVICE, [0xE0; 32]);
         let mut channels = AuthorityChannels::new(config());
         let mut state = 0x22;
-        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x44; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x44; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -1757,7 +1686,8 @@ mod tests {
             );
         }
         for (i, device) in (0x300..0x305).enumerate() {
-            let (r1, _) = FakeDevice::begin(device, dams(), 0xA001 + i as u32, [device as u8; 16]);
+            let (r1, _) =
+                FakeDevice::begin(device, dams(), 0xA001 + i as u32, [device as u8; 16], net());
             channels.on_carrier(
                 &directory,
                 device,
@@ -1769,7 +1699,7 @@ mod tests {
         }
         assert_eq!(channels.stats().pending, MAX_PENDING);
         // A second R1 from a pending device is dropped, not queued.
-        let (r1dup, _) = FakeDevice::begin(0x300, dams(), 0xB000, [0x52; 16]);
+        let (r1dup, _) = FakeDevice::begin(0x300, dams(), 0xB000, [0x52; 16], net());
         channels.on_carrier(
             &directory,
             0x300,
@@ -1850,7 +1780,7 @@ mod tests {
             inner: Mutex::new(Vec::new()),
         };
         let mut state = 0x12;
-        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x71; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x71; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -1984,7 +1914,7 @@ mod tests {
         let directory = FakeDirectory::with(DEVICE, dams());
         let mut channels = AuthorityChannels::new(config());
         let mut state = 0x1234;
-        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x64; 16]);
+        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x64; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -2054,7 +1984,7 @@ mod tests {
         let directory = FakeDirectory::with(DEVICE, [0; 32]);
         let mut channels = AuthorityChannels::new(config());
         let mut state = 0x23;
-        let (r1, _) = FakeDevice::begin(DEVICE, [0; 32], 0xA001, [0x81; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, [0; 32], 0xA001, [0x81; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -2068,7 +1998,7 @@ mod tests {
         let mut directory = FakeDirectory::with(DEVICE, dams());
         directory.devices.get_mut(&DEVICE).expect("member").kid = [0; 32];
         let mut channels = AuthorityChannels::new(config());
-        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA002, [0x82; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA002, [0x82; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -2146,7 +2076,7 @@ mod tests {
         let directory = FakeDirectory::with(DEVICE, dams());
         let mut channels = AuthorityChannels::new(config());
         let mut state = 0x61;
-        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x9A; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, dams(), 0xA001, [0x9A; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -2228,7 +2158,7 @@ mod tests {
             )
             .expect("old update");
         let mut state = 0x1A;
-        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), 0xA002, [0xA2; 16]);
+        let (r1, mut device) = FakeDevice::begin(DEVICE, dams(), 0xA002, [0xA2; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,
@@ -2266,7 +2196,7 @@ mod tests {
         member.generation += 1;
         member.kid[0] ^= 1;
         let mut state = 0x1B;
-        let (r1, _) = FakeDevice::begin(DEVICE, new_dams, 0xA002, [0xA3; 16]);
+        let (r1, _) = FakeDevice::begin(DEVICE, new_dams, 0xA002, [0xA3; 16], net());
         channels.on_carrier(
             &directory,
             DEVICE,

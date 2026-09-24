@@ -323,6 +323,7 @@ extern "C" void app_main(void) {
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
   owner_config.log_tag = kTag;
+  owner_config.gateway = true;  // USB-attached: relay + direct local channel
   status = owner.begin(sdkv1_stores, entropy, owner_config);
   if (!status) fail(status.detail);
   routeloom::SecurityProvider& session_security = owner.session_provider();
@@ -614,6 +615,9 @@ extern "C" void app_main(void) {
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/true, monotonic_now_ms());
   if (!status) fail(status.detail);
+  // Authority lane (G-SEC P5): the relay demux serves terminal 22/49/50/51
+  // for USB-bound devices plus the gateway's own channel.
+  runtime.node().set_config_sink(owner.authority_mesh_sink());
 #endif
   bridge.set_mesh(&runtime.node());
   // Device nonce seeds the session transcript; sampling esp_random only

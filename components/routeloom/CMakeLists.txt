@@ -34,6 +34,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/route_scale.cpp
   src/routing.cpp
   src/sdkv1_authority.cpp
+  src/sdkv1_authority_transport.cpp
   src/sdkv1_blob_storage.cpp
   src/sdkv1_ead.cpp
   src/sdkv1_join_candidates.cpp

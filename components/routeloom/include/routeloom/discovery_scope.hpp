@@ -55,6 +55,11 @@ struct ScopeRef {
   }
 };
 constexpr ScopeRef kInvalidScopeRef{0};
+// The member-discovery scope handle (G-SEC P5): the Owner's GK-backed
+// scope provider serves this handle, and the member discovery is
+// configured with it. Distinct from any legacy/dev scope handle the
+// firmware configures for other providers.
+constexpr ScopeRef kMemberScopeRef{1};
 
 // §2.2 mode registry. Off/OpenLegacy are explicit non-scoped configurations;
 // nothing may silently move a Required deployment into them on key loss.
