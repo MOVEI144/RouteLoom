@@ -115,6 +115,13 @@ Status EspNowPowerPort::enter_sleep() noexcept {
   // in quiesce_radio() because the coordinator's abort path
   // (start_radio() -> runtime_.recover()) never restarts Wi-Fi.
   (void)esp_wifi_stop();
+  // Point of no return: every fallible step of the sleep path (image
+  // commits, ticket validation, wake configuration) is already behind
+  // this call, so the hook is the firmware's proof that a coordinated
+  // sleep is actually entering.
+  if (pre_sleep_hook_ != nullptr) {
+    pre_sleep_hook_->on_pre_sleep();
+  }
   esp_deep_sleep_start();
   // esp_deep_sleep_start does not return on success; if it did, no sleep
   // happened, so restore the driver the stop above took down.
