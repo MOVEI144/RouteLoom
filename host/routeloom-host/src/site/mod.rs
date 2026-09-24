@@ -935,6 +935,10 @@ impl SiteAuthority {
                 }
                 previously_removed = true;
             }
+            // A removed row is history, not a conflict (07 §7): the
+            // replacement key asks KGuard like any other device, marked
+            // by the node's removal.
+            Some(row) if !row.member => previously_removed = true,
             Some(_) => kid_conflict = true,
             None => {}
         }
@@ -1184,7 +1188,15 @@ impl SiteAuthority {
     fn finish_verdict(&mut self, txn: Txn, node: u64, verdict: Verdict, now_ms: u64) {
         match verdict {
             Verdict::Allow { .. } => match self.devices.get(&node).cloned() {
-                Some(row) if row.member => self.finish_allow(txn, &row, now_ms),
+                // The verdict was recorded for this key: if the row has
+                // since moved to another key the device retries instead
+                // of receiving a certificate it cannot use.
+                Some(row)
+                    if row.member
+                        && txn.device.as_ref().is_some_and(|d| d.facts.kid == row.kid) =>
+                {
+                    self.finish_allow(txn, &row, now_ms)
+                }
                 _ => self.finish_busy(txn, BUSY_RETRY_S),
             },
             Verdict::Pending { retry_after_s } => {
@@ -1480,6 +1492,18 @@ impl SiteAuthority {
         row
     }
 
+    /// True while the membership an allow `decision_result` committed is
+    /// the live row: the node is a member with the request's kid at the
+    /// committed generation.
+    fn committed_allow_is_live(&self, open: &JoinRequestRec, result: &str) -> bool {
+        let generation = routeloom_json::parse(result)
+            .ok()
+            .and_then(|json| json.get("generation").and_then(|v| v.as_u64()));
+        self.devices.get(&open.facts.node).is_some_and(|row| {
+            row.member && row.kid == open.facts.kid && Some(u64::from(row.generation)) == generation
+        })
+    }
+
     /// `join.decide` (07 §2.1). `allow` commits the approval before it
     /// answers `committed`; the verdict reaches a waiting exchange at once,
     /// otherwise the device's next attempt.
@@ -1516,6 +1540,27 @@ impl SiteAuthority {
         if let Some(existing) = open.decision {
             if existing == request.verdict {
                 if let Some(result) = &open.decision_result {
+                    // A stored "committed" answer is only valid while the
+                    // membership it created is still live; after a revoke
+                    // or a replacement it would lie about current state.
+                    if matches!(existing, Verdict::Allow { .. })
+                        && !self.committed_allow_is_live(&open, result)
+                    {
+                        return Err(SiteError::new(
+                            "CONFLICT",
+                            "the membership this request committed is no longer live (removed or replaced)",
+                        ));
+                    }
+                    // The answer this caller receives is also stored under
+                    // its key, so its own resends replay under the
+                    // idempotency contract even after the state moves on.
+                    let mut batch = Batch::default();
+                    self.decision_doc(&mut batch, principal, &request.key, digest, result, now_ms);
+                    if let Err(error) = self.store.commit(&batch) {
+                        self.store_error(now_ms, &error);
+                        return Err(store_failure(&error));
+                    }
+                    self.remember_decision(principal, &request.key, digest, result, now_ms);
                     return Ok(result.clone());
                 }
             }
@@ -1539,7 +1584,14 @@ impl SiteAuthority {
         let mut approved: Option<(DeviceRow, LedgerRow, Operation)> = None;
         match request.verdict {
             Verdict::Allow { role } => {
-                if open.kid_conflict {
+                // The flag stored with the request is stale information:
+                // the conflict is judged on the membership as it is now,
+                // inside this commit. A removed row does not conflict.
+                if self
+                    .devices
+                    .get(&open.facts.node)
+                    .is_some_and(|row| row.member && row.kid != open.facts.kid)
+                {
                     return Err(SiteError::new(
                         "CONFLICT",
                         "another key holds this device id here; revoke that membership first (07 §7)",

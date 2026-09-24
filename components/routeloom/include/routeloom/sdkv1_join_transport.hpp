@@ -304,6 +304,13 @@ class JoinObjectSlot {
   // the object completed last for Repeat detection (the owner consumed or
   // converted the object).
   void release_assembled() noexcept;
+  // Occupant tag: bumped on every mode change, so a value captured before
+  // a callback still names the occupant that was current then.
+  std::uint32_t generation() const noexcept { return generation_; }
+  // release_assembled() only while the slot still holds the occupant that
+  // `expected` names — a callback that re-entered the owner (a fresh send,
+  // a close, a new assembly) is left alone.
+  void release_assembled_if(std::uint32_t expected) noexcept;
 
   // --- outbound
   // Copies `object` (> the carrier's single-frame limit, <= 1024 B) and
@@ -348,6 +355,9 @@ class JoinObjectSlot {
   MonotonicMs started_ms_{0};
   MonotonicMs last_send_ms_{0};
   std::uint8_t sends_{0};
+  // Bumped on every mode change: separates the occupant a callback saw
+  // from one a reentrant call installed (see release_assembled_if).
+  std::uint32_t generation_{0};
   // Last completed inbound object (Repeat detection).
   bool completed_valid_{false};
   JoinCarrier completed_carrier_{JoinCarrier::Rld1};

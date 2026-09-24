@@ -117,8 +117,12 @@ class ZtJoinerObserver {
   virtual ~ZtJoinerObserver() = default;
   // A well-formed OFFER for the current DISCOVER whose org_hint matches.
   virtual void on_offer(const ZtOfferView& offer) noexcept = 0;
-  // A complete down message (phase 4 steps 2/4/5, phase 5 step 2). `message`
-  // is valid only during the call.
+  // A complete down message (phase 4 steps 2/4/5, phase 5 step 2), once per
+  // stage: retransmitted duplicates are filtered by the link. `message` is
+  // valid only during the call and may alias the object slot, so read it
+  // before re-entering the link. send()/close()/discover() from inside the
+  // callback are supported: cleanup afterwards releases only the delivered
+  // object, never the state a reentrant call installed.
   virtual void on_message(JoinAuthPhase phase, std::uint8_t step, ByteView message) noexcept = 0;
   // Unauthenticated proxy hint (02 §5.3 phase 6): wait, never a verdict.
   virtual void on_relay_status(RelayStatusCode status, std::uint32_t retry_after_ms) noexcept = 0;
@@ -196,6 +200,9 @@ class ZtJoinerLink {
   NodeId proxy_{kInvalidNodeId};
   std::uint32_t network_low32_{0};
   JoinCookieBytes cookie_{};
+  // join_sub() of the newest down message handed to the observer; a frame
+  // or chunk only displaces the Sending object when it advances past it.
+  std::uint8_t last_down_sub_{0};
   JoinObjectSlot slot_{};
   ZtJoinerStats stats_{};
 };
@@ -354,8 +361,15 @@ class JoinRelayHostSink {
  public:
   virtual ~JoinRelayHostSink() = default;
   // A complete up relay object (RelayHeader dir=up + message) from `proxy`,
-  // `hops` mesh hops away. The sink copies it before returning.
+  // `hops` mesh hops away. `object` is valid only during the call and may
+  // alias a gateway slot, so copy it before keeping it. The callback must
+  // not re-enter the gateway: host_down()/host_abort() return Busy and
+  // the other mutating calls are ignored while it runs — call them after
+  // it returns. Returning an error aborts the relay with
+  // authority_unreachable.
   virtual Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept = 0;
+  // The relay ended at the gateway. The callback must not re-enter the
+  // gateway — the same rules as relay_up apply.
   virtual Status relay_abort(NodeId proxy, std::uint32_t relay_id,
                              RelayAbortReason reason) noexcept = 0;
 };
@@ -393,7 +407,9 @@ class JoinRelayGateway {
 
   JoinRelayGateway(const JoinRelayGatewayConfig& config, ZtRelayPort& wire) noexcept;
 
-  void set_host_sink(JoinRelayHostSink* sink) noexcept { sink_ = sink; }
+  void set_host_sink(JoinRelayHostSink* sink) noexcept {
+    if (!in_call_) sink_ = sink;  // ignored inside a sink callback
+  }
   void set_membership(MembershipState state) noexcept;
 
   // Wire RX: `from` is the verified mesh origin, `hops` its distance.
@@ -446,6 +462,8 @@ class JoinRelayGateway {
   ZtRelayPort& wire_;
   JoinRelayHostSink* sink_{nullptr};
   MembershipState membership_{MembershipState::Unprovisioned};
+  // Inside a sink callback: mutating calls return Busy or are ignored.
+  bool in_call_{false};
   std::array<Slot, kSlots> slots_{};
   std::array<Recent, kRecentRelays> recent_{};
   JoinRelayGatewayStats stats_{};

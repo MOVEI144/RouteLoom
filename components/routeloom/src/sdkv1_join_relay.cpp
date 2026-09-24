@@ -125,6 +125,7 @@ Status ZtJoinerLink::connect(const ZtOfferView& offer) noexcept {
   proxy_ = offer.proxy;
   network_low32_ = offer.network_low32;
   cookie_ = offer.body.cookie;
+  last_down_sub_ = 0;
   slot_.reset();
   return Status::success();
 }
@@ -136,6 +137,7 @@ void ZtJoinerLink::close() noexcept {
   proxy_ = kInvalidNodeId;
   network_low32_ = 0;
   secure_clear(cookie_);
+  last_down_sub_ = 0;
   slot_.reset();
 }
 
@@ -247,9 +249,15 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         observer_.on_relay_status(object.relay_status, object.retry_after_ms);
         return;
       }
-      // A down message answers our last up object: it was delivered.
+      // A down message answers our last up object only when it advances
+      // the exchange: a retransmitted duplicate of an earlier stage is
+      // dropped without touching the slot or the observer (single-frame
+      // objects have no receipt to re-send).
+      const std::uint8_t sub = join_sub(object.phase, object.step);
+      if (sub <= last_down_sub_) return;
       if (slot_.mode() == JoinObjectSlot::Mode::Sending) slot_.release_assembled();
       ++stats_.messages_rx;
+      last_down_sub_ = sub;
       observer_.on_message(object.phase, object.step, object.message);
       return;
     }
@@ -260,8 +268,16 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         ++stats_.frames_rejected;
         return;
       }
-      if (slot_.mode() == JoinObjectSlot::Mode::Sending) slot_.release_assembled();
-      const JoinObjectSlot::Accepted accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
+      JoinObjectSlot::Accepted accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
+      if (accepted.outcome == JoinObjectSlot::Outcome::Busy &&
+          slot_.mode() == JoinObjectSlot::Mode::Sending &&
+          join_sub(chunk.phase, chunk.step) > last_down_sub_) {
+        // Only a NEW down object displaces our Sending object (it reached
+        // the proxy): a duplicate of the delivered one re-earns its
+        // Complete reply above, a stale one stays refused.
+        slot_.release_assembled();
+        accepted = slot_.accept(JoinCarrier::Rld1, chunk, now_ms);
+      }
       if (accepted.send_reply) send_reply(accepted.reply);
       if (accepted.outcome == JoinObjectSlot::Outcome::Conflict) ++stats_.assembly_conflicts;
       if (accepted.outcome == JoinObjectSlot::Outcome::Busy ||
@@ -276,9 +292,20 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         slot_.release_assembled();
         return;
       }
+      const std::uint8_t sub = join_sub(object.phase, object.step);
+      if (sub <= last_down_sub_) {
+        // A stale object re-assembled (older than the stage delivered
+        // last): drop it like a single-frame duplicate.
+        slot_.release_assembled();
+        return;
+      }
       ++stats_.messages_rx;
+      last_down_sub_ = sub;
+      // The callback may re-enter the link (send/close/discover): release
+      // the slot only while it still holds the delivered object.
+      const std::uint32_t delivered = slot_.generation();
       observer_.on_message(object.phase, object.step, object.message);
-      slot_.release_assembled();
+      slot_.release_assembled_if(delivered);
       return;
     }
     case FrameType::BootstrapReply: {
@@ -957,6 +984,7 @@ JoinRelayGateway::JoinRelayGateway(const JoinRelayGatewayConfig& config,
     : config_(config), wire_(wire) {}
 
 void JoinRelayGateway::set_membership(const MembershipState state) noexcept {
+  if (in_call_) return;  // sink callbacks must not re-enter the gateway
   membership_ = state;
   if (state != MembershipState::Member) {
     for (Slot& slot : slots_) free_slot(slot);
@@ -1079,12 +1107,22 @@ void JoinRelayGateway::deliver_up(const NodeId proxy, const std::uint8_t hops,
   if (h.state == RelayState::Abort) {
     ++stats_.proxy_aborts;
     forget(proxy, h.relay_id);
-    if (sink_ != nullptr) (void)sink_->relay_abort(proxy, h.relay_id, RelayAbortReason::ProxyAborted);
+    if (sink_ != nullptr) {
+      in_call_ = true;
+      (void)sink_->relay_abort(proxy, h.relay_id, RelayAbortReason::ProxyAborted);
+      in_call_ = false;
+    }
     return;
   }
   remember(proxy, h, now_ms);
   ++stats_.up_objects;
-  if (sink_ == nullptr || !sink_->relay_up(proxy, hops, bytes)) {
+  bool accepted = false;
+  if (sink_ != nullptr) {
+    in_call_ = true;
+    accepted = sink_->relay_up(proxy, hops, bytes).ok();
+    in_call_ = false;
+  }
+  if (!accepted) {
     // 07 §7: no host -> the proxy tells the device authority_unreachable.
     ++stats_.host_unavailable;
     send_down_abort(proxy, h, RelayStatusCode::AuthorityUnreachable, config_.unreachable_retry_ms);
@@ -1095,6 +1133,7 @@ void JoinRelayGateway::deliver_up(const NodeId proxy, const std::uint8_t hops,
 void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
                                    const FrameType type, const ByteView payload,
                                    const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // sink callbacks must not re-enter the gateway
   if (from == config_.node ||
       !zt_admit_relay(membership_, true, AdmissionDirection::Rx, type, from, config_.node)) {
     ++stats_.frames_rejected;
@@ -1210,6 +1249,7 @@ Status JoinRelayGateway::send_due_chunks(Slot& slot, const MonotonicMs now_ms) n
 
 Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
                                    const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in sink callback");
   if (membership_ != MembershipState::Member) {
     return Status::error(StatusCode::InvalidState, "gateway is not a member");
   }
@@ -1260,6 +1300,7 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
 Status JoinRelayGateway::host_abort(const NodeId proxy, const std::uint32_t relay_id,
                                     const MonotonicMs now_ms) noexcept {
   (void)now_ms;
+  if (in_call_) return Status::error(StatusCode::Busy, "in sink callback");
   if (membership_ != MembershipState::Member) {
     return Status::error(StatusCode::InvalidState, "gateway is not a member");
   }
@@ -1294,12 +1335,15 @@ Status JoinRelayGateway::host_abort(const NodeId proxy, const std::uint32_t rela
 }
 
 void JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // sink callbacks must not re-enter the gateway
   for (Slot& slot : slots_) {
     if (!slot.active) continue;
     if (slot.object.expire(now_ms, config_.assembly_timeout_ms)) {
       ++stats_.expired;
       if (sink_ != nullptr) {
+        in_call_ = true;
         (void)sink_->relay_abort(slot.proxy, slot.relay_id, RelayAbortReason::GatewayExpired);
+        in_call_ = false;
       }
       forget(slot.proxy, slot.relay_id);
       free_slot(slot);
@@ -1312,7 +1356,9 @@ void JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
     if (slot.object.sends() >= config_.max_sends) {
       ++stats_.delivery_failed;
       if (sink_ != nullptr) {
+        in_call_ = true;
         (void)sink_->relay_abort(slot.proxy, slot.relay_id, RelayAbortReason::DeliveryFailed);
+        in_call_ = false;
       }
       forget(slot.proxy, slot.relay_id);
       free_slot(slot);
