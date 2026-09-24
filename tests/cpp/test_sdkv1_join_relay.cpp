@@ -1277,14 +1277,15 @@ void test_busy_inside_relay_abort() {
               .ok());
     gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapChunk, ByteView{body.data(), size}, now);
   };
-  make_up(0, 200, 1);  // relay B stage 1 (partial: pins the other slot)
-  make_up(1, 100, 1);  // relay A stage 1 (partial: will expire)
+  make_up(0, 200, 1);  // relay B stage 1 (partial: expires in the same pass)
+  make_up(1, 100, 1);  // relay A stage 1 (partial: expires first)
   send_chunk(1, 0, 10);
-  send_chunk(0, 0, 2000);
+  send_chunk(0, 0, 20);
   CHECK(gateway.slots_in_use() == 2);
-  int calls = 0;
+  bool handled = false;
   authority.on_abort = [&](const FakeAuthority::Abort& abort) {
-    if (abort.reason != RelayAbortReason::GatewayExpired || calls++ != 0) return;
+    if (abort.reason != RelayAbortReason::GatewayExpired || handled) return;
+    handled = true;
     CHECK(abort.proxy == kProxy && abort.relay_id == 100);
     RelayHeader header{};
     header.relay_id = 300;
@@ -1295,23 +1296,32 @@ void test_busy_inside_relay_abort() {
     CHECK(gateway.host_abort(kProxy, 100, 3020).code == StatusCode::Busy);
     gateway.set_membership(MembershipState::Unprovisioned);  // ignored
     gateway.set_host_sink(nullptr);                        // ignored
-    gateway.poll(3020);                                    // ignored
+    // Relay B expires at this same instant: a nested poll must notify
+    // nothing, free nothing, and count nothing.
+    const JoinRelayGatewayStats before = gateway.stats();
+    gateway.poll(3020);  // ignored
+    CHECK(authority.aborts.size() == 1);
+    CHECK(gateway.slots_in_use() == 2);  // A's slot is not freed yet either
+    CHECK(gateway.stats().expired == before.expired);
+    CHECK(gateway.stats().proxy_aborts == before.proxy_aborts);
   };
-  gateway.poll(3020);  // relay A's assembly expired; B is too young
-  CHECK(calls == 1);
-  CHECK(authority.aborts.size() == 1);
+  gateway.poll(3020);  // expires A (callback above), then B in the same pass
+  CHECK(handled);
+  CHECK(authority.aborts.size() == 2);  // B's expiry ran after the callback
+  CHECK(gateway.stats().expired == 2);
   CHECK(gateway.stats().down_objects == 0);  // the callback changed nothing
-  CHECK(gateway.slots_in_use() == 1);        // only B's assembly remains
-  // After the callback: the ended relay is unknown to host_abort, and the
+  CHECK(gateway.slots_in_use() == 0);
+  // After the callback: the ended relays are unknown to host_abort, and a
   // freed slot takes a new operation (membership was never cleared).
   CHECK(gateway.host_abort(kProxy, 100, 3021).code == StatusCode::NotFound);
+  CHECK(gateway.host_abort(kProxy, 200, 3021).code == StatusCode::NotFound);
   RelayHeader header{};
   header.relay_id = 300;
   header.proxy = kProxy;
   header.joiner_mac = device_mac(0);
   const Bytes down = down_object(header, 2, RelayState::Continue, filler(300, 9));
   CHECK(gateway.host_down(kProxy, view(down), 3021).ok());
-  CHECK(gateway.slots_in_use() == 2);
+  CHECK(gateway.slots_in_use() == 1);
   // The ProxyAborted callback applies the same reentry rules, and the
   // ignored set_host_sink(nullptr) proves the sink is still attached.
   int proxy_calls = 0;
@@ -1327,8 +1337,55 @@ void test_busy_inside_relay_abort() {
   gateway.on_relay_rx(kProxy, 2, FrameType::BootstrapAuth,
                       view(up_frame(400, 1, RelayState::Abort)), 3030);
   CHECK(proxy_calls == 1);
-  CHECK(authority.aborts.size() == 2);  // the sink was never detached
+  CHECK(authority.aborts.size() == 3);  // the sink was never detached
   CHECK(gateway.host_abort(kProxy, 300, 3031).ok());
+}
+
+void test_delivery_failed_callback_busy() {
+  current = "delivery_failed_callback_busy";
+  // relay_abort(DeliveryFailed) at the retransmit cap: the callback must
+  // not re-enter — a host_down inside it is Busy, and the post-callback
+  // free_slot must not erase an operation that starts afterwards.
+  std::deque<WireFrame> mesh;
+  WirePort port(mesh, kGateway);
+  JoinRelayGatewayConfig config{};
+  config.node = kGateway;
+  JoinRelayGateway gateway(config, port);
+  gateway.set_membership(MembershipState::Member);
+  FakeAuthority authority;
+  gateway.set_host_sink(&authority);
+  RelayHeader header{};
+  header.relay_id = 500;
+  header.proxy = kProxy;
+  header.joiner_mac = device_mac(0);
+  const Bytes down = down_object(header, 2, RelayState::Continue, filler(300, 9));
+  CHECK(gateway.host_down(kProxy, view(down), 10).ok());  // sends_ = 1
+  CHECK(gateway.slots_in_use() == 1);
+  // The proxy never answers: poll hits the retransmit cap.
+  int calls = 0;
+  authority.on_abort = [&](const FakeAuthority::Abort& abort) {
+    if (abort.reason != RelayAbortReason::DeliveryFailed || calls++ != 0) return;
+    CHECK(abort.proxy == kProxy && abort.relay_id == 500);
+    CHECK(gateway.slots_in_use() == 1);  // the failing slot is not freed yet
+    CHECK(gateway.host_down(kProxy, view(down), 2010).code == StatusCode::Busy);
+    CHECK(gateway.host_abort(kProxy, 500, 2010).code == StatusCode::Busy);
+    gateway.set_membership(MembershipState::Unprovisioned);  // ignored
+    gateway.poll(2010);                                    // ignored
+    CHECK(gateway.slots_in_use() == 1);
+  };
+  gateway.poll(510);   // resend -> sends_ = 2
+  gateway.poll(1010);  // resend -> sends_ = 3
+  gateway.poll(1510);  // resend -> sends_ = 4
+  CHECK(calls == 0 && gateway.stats().delivery_failed == 0);
+  gateway.poll(2010);  // sends_ >= max_sends -> DeliveryFailed
+  CHECK(calls == 1 && authority.aborts.size() == 1);
+  CHECK(gateway.stats().delivery_failed == 1);
+  CHECK(gateway.stats().down_objects == 1);  // the callback changed nothing
+  CHECK(gateway.slots_in_use() == 0);
+  // After the callback the relay is forgotten and the same host_down works.
+  CHECK(gateway.host_abort(kProxy, 500, 2020).code == StatusCode::NotFound);
+  CHECK(gateway.host_down(kProxy, view(down), 2020).ok());
+  CHECK(gateway.slots_in_use() == 1);
 }
 
 }  // namespace
@@ -1349,6 +1406,7 @@ int main() {
   test_down_duplicate_keeps_sending();
   test_busy_inside_relay_up();
   test_busy_inside_relay_abort();
+  test_delivery_failed_callback_busy();
   if (failures != 0) {
     std::fprintf(stderr, "%d sdkv1 join relay check(s) failed\n", failures);
     return 1;
