@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "routeloom/edhoc.hpp"
+#include "routeloom/kdf.hpp"
 #include "routeloom/sdkv1_join_handshake.hpp"
 #include "routeloom/sdkv1_join_transport.hpp"  // kJoinMessageMax
 #include "routeloom/secure_clear.hpp"
@@ -448,6 +449,139 @@ void test_dams_context_vectors() {
                                  hex_array<32>(fields, "sak_kid_hex"), context)
                .ok());
   }
+  current.clear();
+}
+
+// Shortest-form CBOR writers for the EDHOC-KDF info layout
+// (uint(label) || bstr(context) || uint(length), RFC 9528 §4.2).
+void cbor_uint(Bytes& out, std::uint64_t value) {
+  if (value < 24) {
+    out.push_back(static_cast<std::uint8_t>(value));
+  } else if (value <= 0xFF) {
+    out.push_back(0x18);
+    out.push_back(static_cast<std::uint8_t>(value));
+  } else if (value <= 0xFFFF) {
+    out.push_back(0x19);
+    out.push_back(static_cast<std::uint8_t>(value >> 8));
+    out.push_back(static_cast<std::uint8_t>(value));
+  } else if (value <= 0xFFFFFFFF) {
+    out.push_back(0x1A);
+    for (int shift = 24; shift >= 0; shift -= 8) {
+      out.push_back(static_cast<std::uint8_t>(value >> shift));
+    }
+  } else {
+    out.push_back(0x1B);
+    for (int shift = 56; shift >= 0; shift -= 8) {
+      out.push_back(static_cast<std::uint8_t>(value >> shift));
+    }
+  }
+}
+
+void cbor_bstr(Bytes& out, const Bytes& data) {
+  const std::uint64_t n = data.size();
+  if (n < 24) {
+    out.push_back(static_cast<std::uint8_t>(0x40 + n));
+  } else if (n <= 0xFF) {
+    out.push_back(0x58);
+    out.push_back(static_cast<std::uint8_t>(n));
+  } else {
+    out.push_back(0x59);
+    out.push_back(static_cast<std::uint8_t>(n >> 8));
+    out.push_back(static_cast<std::uint8_t>(n));
+  }
+  out.insert(out.end(), data.begin(), data.end());
+}
+
+void test_dams_exporter_vectors() {
+  // Whole exporter outputs for a fixed test PRK: the DAMS output plus the
+  // label/purpose negatives. HKDF-SHA256-Expand over the RFC info layout
+  // must reproduce the generator's bytes exactly — and the three outputs
+  // must differ from each other.
+  const std::filesystem::path dir =
+      std::filesystem::path(ROUTELOOM_SDKV1_GOLDEN_DIR) / "dams" / "exporter";
+  std::vector<Bytes> outputs;
+  std::size_t count = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+    if (entry.path().extension() != ".json") continue;
+    ++count;
+    std::ifstream in(entry.path());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    const Fields fields = parse_flat_json(buffer.str());
+    current = entry.path().filename().string();
+    const Bytes prk = hex(fields, "prk_hex");
+    const Bytes context = hex(fields, "context_hex");
+    const Bytes want = hex(fields, "output_hex");
+    Bytes info;
+    cbor_uint(info, num(fields, "label"));
+    cbor_bstr(info, context);
+    cbor_uint(info, num(fields, "length"));
+    CHECK(prk.size() == kJoinDamsSize && want.size() == kJoinDamsSize);
+    std::array<std::uint8_t, kJoinDamsSize> out{};
+    CHECK(hkdf_sha256_expand(ByteView{prk.data(), prk.size()},
+                             ByteView{info.data(), info.size()},
+                             MutableByteView{out.data(), out.size()})
+              .ok());
+    CHECK(std::memcmp(out.data(), want.data(), want.size()) == 0);
+    outputs.push_back(want);
+  }
+  CHECK(count >= 3);
+  for (std::size_t i = 0; i < outputs.size(); ++i) {
+    for (std::size_t j = i + 1; j < outputs.size(); ++j) {
+      CHECK(outputs[i] != outputs[j]);  // label/purpose separation
+    }
+  }
+  current.clear();
+}
+
+void test_dams_separation() {
+  // Through real sessions: both ends agree on the DAMS output, and one
+  // label or purpose flip derives a different output on the same session.
+  // (Session::exporter is the same libedhoc call on both ends; the device
+  // side is reachable here only for the DAMS output via the prepared
+  // record, the authority side for all three.)
+  current = "dams separation";
+  JoinFixture fx;
+  Authority authority(fx.sitecert, fx.sak_kid, 0x71);
+  authority.ead.credential_cert = &fx.sitecert;
+  fx.result(JoinVerdict::Allow, authority.ead.result_value);
+  JoinHandshake hs;
+  TestEntropy entropy(0xA23);
+  CHECK(hs.begin(fx.config, fx.identity, entropy).ok());
+  Transcript t;
+  CHECK(exchange(hs, authority, t) == 4);
+  JoinDecideInput input{};
+  JoinDecided decided{};
+  CHECK(hs.decide(input, decided).ok());
+  CHECK(decided.outcome == JoinAttemptOutcome::AllowVerified);
+  CHECK(decided.record != nullptr);
+  if (decided.record == nullptr) {
+    current.clear();
+    return;
+  }
+  ByteBuffer<kJoinDamsContextMax> context{};
+  CHECK(dams_exporter_context(kNetwork, fx.identity.node_id, kSiteId, fx.identity.kid,
+                              hs.sak_kid(), context)
+            .ok());
+  // Same context with purpose 5 instead of 4 (byte 12: version, then purpose).
+  Bytes context5(context.bytes.begin(), context.bytes.begin() + context.size);
+  CHECK(context5.size() > 12 && context5[12] == 0x04);
+  context5[12] = 0x05;
+  std::array<std::uint8_t, kJoinDamsSize> dams{};
+  std::array<std::uint8_t, kJoinDamsSize> pending{};
+  std::array<std::uint8_t, kJoinDamsSize> other_purpose{};
+  CHECK(authority.session
+            .exporter(32771, context.view(), MutableByteView{dams.data(), dams.size()})
+            .ok());
+  CHECK(authority.session
+            .exporter(32772, context.view(), MutableByteView{pending.data(), pending.size()})
+            .ok());
+  CHECK(authority.session
+            .exporter(32771, ByteView{context5.data(), context5.size()},
+                      MutableByteView{other_purpose.data(), other_purpose.size()})
+            .ok());
+  CHECK(std::memcmp(dams.data(), decided.record->dams.data(), dams.size()) == 0);
+  CHECK(dams != pending && dams != other_purpose && pending != other_purpose);
   current.clear();
 }
 
@@ -1226,6 +1360,8 @@ void test_membership_verify() {
 
 int main() {
   test_dams_context_vectors();
+  test_dams_exporter_vectors();
+  test_dams_separation();
   test_allow();
   test_recovery_join_keeps_floor();
   test_verdicts();

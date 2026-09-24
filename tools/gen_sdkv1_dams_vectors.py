@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Regenerate protocol/sdkv1-golden/dams/ — SDK v1 join DAMS context vectors
-(plan P3-4 PR 1).
+"""Regenerate protocol/sdkv1-golden/dams/ — SDK v1 join DAMS vectors
+(plan P3-4 PR 1, extended in the R2 review round).
 
 Independent reference encoder for the EDHOC_Exporter context both join ends
 build for the DAMS derivation (docs/design/sdk-v1/02-zero-touch-join.md
@@ -12,20 +12,25 @@ with version 1, purpose 4 (authority) and each kid a 32-byte bstr; every
 integer is shortest-form. The join profile pins this context instead of the
 generic 03 §2 exporter context; the Site Authority has emitted these bytes
 since P3-3 (host/routeloom-join's dams_exporter_context) and the device's
-sdkv1_ead.cpp twin must agree byte for byte. Only the exporter CONTEXT is
-pinned — the output depends on the session PRK_exporter (the
-protocol/edhoc-interop transcripts pin a whole exporter output for fixed
-keys, and both ends' agreement on an authenticated session is EDHOC's own
-property).
+sdkv1_ead.cpp twin must agree byte for byte.
 
-Keys are the shared test material; the context encoder below is written
-from the design text and shares no code with C++ or Rust (only the key and
-kid helpers of tools/gen_sdkv1_vectors.py, which are test material, not the
-format under test).
+The `exporter/` folder additionally pins whole exporter OUTPUTS for a fixed
+test-only PRK_exporter: the DAMS output (label 32771, purpose 4) plus the
+negative cases that prove label/purpose separation (label 32772, purpose 5).
+The exporter is EDHOC-KDF (RFC 9528 §4.2): HKDF-SHA256-Expand over
+`uint(label) || bstr(context) || uint(length)` — the same info layout the
+RFC 9529 vectors use. The fixed sessions of protocol/edhoc-interop pin the
+same mapping through real sessions in both languages.
+
+Keys are the shared test material; the encoders below are written from the
+design text and share no code with C++ or Rust (only the key and kid helpers
+of tools/gen_sdkv1_vectors.py, which are test material, not the format under
+test).
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.util
 import json
 import shutil
@@ -60,8 +65,9 @@ def cbor_uint(value: int) -> bytes:
 
 
 def dams_context(network: int, node_id: int, site_id: int,
-                 device_kid: bytes, sak_kid: bytes) -> bytes:
-    """["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]."""
+                 device_kid: bytes, sak_kid: bytes,
+                 purpose: int = PURPOSE_AUTHORITY) -> bytes:
+    """["RouteLoom", 1, purpose, network, node_id, site_id, device_kid, sak_kid]."""
     if network == 0 or network & 0xFFFFFFFF == 0:
         raise ValueError("network")
     if node_id in (0, 0xFFFFFFFFFFFFFFFF) or site_id in (0, 0xFFFFFFFFFFFFFFFF):
@@ -69,12 +75,47 @@ def dams_context(network: int, node_id: int, site_id: int,
     if len(device_kid) != 32 or len(sak_kid) != 32:
         raise ValueError("kid")
     context = (b"\x88\x69" + b"RouteLoom" +
-               cbor_uint(1) + cbor_uint(PURPOSE_AUTHORITY) +
+               cbor_uint(1) + cbor_uint(purpose) +
                cbor_uint(network) + cbor_uint(node_id) + cbor_uint(site_id) +
                b"\x58\x20" + device_kid + b"\x58\x20" + sak_kid)
     if len(context) > CONTEXT_MAX:
         raise AssertionError("context bound")
     return context
+
+
+def cbor_bstr(data: bytes) -> bytes:
+    """CBOR byte string, shortest-form head."""
+    n = len(data)
+    if n < 24:
+        return bytes((0x40 + n,)) + data
+    if n <= 0xFF:
+        return b"\x58" + n.to_bytes(1, "big") + data
+    if n <= 0xFFFF:
+        return b"\x59" + n.to_bytes(2, "big") + data
+    raise ValueError("bstr too long")
+
+
+def hkdf_expand(prk: bytes, info: bytes, length: int) -> bytes:
+    """HKDF-SHA256-Expand (RFC 5869 §2.3), the EDHOC-KDF core."""
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes((counter,)),
+                         hashlib.sha256).digest()
+        out += block
+        counter += 1
+        if counter > 255:
+            raise ValueError("expand length")
+    return out[:length]
+
+
+def edhoc_exporter(prk: bytes, label: int, context: bytes, length: int) -> bytes:
+    """EDHOC_Exporter (RFC 9528 §4.2): info is uint || bstr || uint."""
+    if len(prk) != 32:
+        raise ValueError("prk")
+    info = cbor_uint(label) + cbor_bstr(context) + cbor_uint(length)
+    return hkdf_expand(prk, info, length)
 
 
 def emit(folder: str, name: str, record: dict) -> None:
@@ -94,9 +135,25 @@ def good(name: str, network: int, node_id: int, site_id: int,
               context_sha256=hashlib.sha256(context).hexdigest(), note=note))
 
 
+LABEL_DAMS = 32771
+LABEL_PENDING = 32772
+# Fixed test-only PRK_exporter for the exporter/ outputs (deterministic and
+# self-describing; never a real session key).
+TEST_PRK = hashlib.sha256(b"RouteLoom DAMS exporter test PRK v1").digest()
+
+
+def exporter(name: str, prk: bytes, label: int, context: bytes, note: str) -> bytes:
+    output = edhoc_exporter(prk, label, context, 32)
+    emit("exporter", name,
+         dict(codec="dams_exporter", expect="ok", prk_hex=prk.hex(), label=label,
+              context_hex=context.hex(), length=32, output_hex=output.hex(),
+              note=note))
+    return output
+
+
 def main() -> None:
     base.self_test()
-    for sub in ("valid", "invalid"):
+    for sub in ("valid", "invalid", "exporter"):
         shutil.rmtree(OUT / sub, ignore_errors=True)
         (OUT / sub).mkdir(parents=True)
 
@@ -126,6 +183,20 @@ def main() -> None:
               node_id=0xFFFFFFFFFFFFFFFF, site_id=site_id,
               device_kid_hex=device_kid.hex(), sak_kid_hex=sak_kid.hex(),
               note="0xFF..FF is not a node id"))
+
+    context = dams_context(network, node, site_id, device_kid, sak_kid)
+    outputs = [
+        exporter("dams_output", TEST_PRK, LABEL_DAMS, context,
+                 "the DAMS output for the join test identities (label 32771)"),
+        exporter("dams_output_label_pending", TEST_PRK, LABEL_PENDING, context,
+                 "negative: the pending label must derive a different output"),
+        exporter("dams_output_purpose_5", TEST_PRK, LABEL_DAMS,
+                 dams_context(network, node, site_id, device_kid, sak_kid,
+                              purpose=5),
+                 "negative: a different purpose must derive a different output"),
+    ]
+    if len(set(outputs)) != len(outputs):
+        raise AssertionError("exporter separation broken")
 
 
 if __name__ == "__main__":

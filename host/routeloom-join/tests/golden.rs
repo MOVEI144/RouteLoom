@@ -475,3 +475,33 @@ fn sdkv1_dams_golden_vectors() {
         assert_eq!(context, hex(doc, "context_hex"), "{name}");
     }
 }
+
+/// Whole DAMS exporter outputs for a fixed test PRK: the DAMS output plus
+/// the label/purpose negatives. The Site Authority's real KDF
+/// (`routeloom_edhoc::crypto::edhoc_kdf`, the same call behind
+/// `Session::exporter`) must reproduce the generator's bytes exactly — and
+/// the three outputs must differ from each other.
+#[test]
+fn sdkv1_dams_exporter_vectors() {
+    let files = files_in(&dams_dir(), "exporter");
+    assert!(files.len() >= 3);
+    let mut outputs = Vec::with_capacity(files.len());
+    for (name, doc) in &files {
+        assert_eq!(text(doc, "expect"), "ok", "{name}");
+        assert_eq!(text(doc, "codec"), "dams_exporter", "{name}");
+        let output = routeloom_edhoc::crypto::edhoc_kdf(
+            &arr::<32>(doc, "prk_hex"),
+            num(doc, "label"),
+            &hex(doc, "context_hex"),
+            num(doc, "length") as usize,
+        )
+        .unwrap();
+        assert_eq!(output, hex(doc, "output_hex"), "{name}");
+        outputs.push(output);
+    }
+    for (i, a) in outputs.iter().enumerate() {
+        for b in &outputs[i + 1..] {
+            assert_ne!(a, b, "label/purpose separation");
+        }
+    }
+}
