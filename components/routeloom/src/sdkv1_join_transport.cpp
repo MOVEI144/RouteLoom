@@ -530,6 +530,7 @@ void JoinObjectSlot::reset() noexcept {
   // nothing leaks into the next exchange.
   data_.fill(0);
   mode_ = Mode::Idle;
+  ++generation_;
   step_ = 0;
   id_ = 0;
   total_ = 0;
@@ -601,6 +602,7 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
   if (mode_ == Mode::Idle) {
     data_.fill(0);
     mode_ = Mode::Assembling;
+    ++generation_;
     carrier_ = carrier;
     phase_ = chunk.phase;
     step_ = chunk.step;
@@ -635,6 +637,7 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
   result.send_reply = true;
   if (have_ == full_mask()) {
     mode_ = Mode::Assembled;
+    ++generation_;
     completed_valid_ = true;
     completed_carrier_ = carrier_;
     completed_sub_ = sub;
@@ -657,6 +660,10 @@ ByteView JoinObjectSlot::assembled() const noexcept {
 }
 
 void JoinObjectSlot::release_assembled() noexcept { drop_keep_completed(); }
+
+void JoinObjectSlot::release_assembled_if(const std::uint32_t expected) noexcept {
+  if (mode_ == Mode::Assembled && generation_ == expected) release_assembled();
+}
 
 Status JoinObjectSlot::load(const JoinCarrier carrier, const JoinAuthPhase phase,
                             const std::uint8_t step, const std::uint32_t id,
@@ -684,6 +691,7 @@ Status JoinObjectSlot::load_in_place(const JoinCarrier carrier, const JoinAuthPh
   }
   std::fill(data_.begin() + static_cast<std::ptrdiff_t>(size), data_.end(), std::uint8_t{0});
   mode_ = Mode::Sending;
+  ++generation_;
   carrier_ = carrier;
   phase_ = phase;
   step_ = step;
@@ -729,6 +737,7 @@ JoinObjectSlot::ReplyOutcome JoinObjectSlot::on_reply(const JoinReply& reply,
       if (reply.received != total_) return ReplyOutcome::Ignored;
       data_.fill(0);
       mode_ = Mode::Idle;
+      ++generation_;
       have_ = 0;
       return ReplyOutcome::Done;
     case JoinReplyStatus::Aborted:

@@ -277,8 +277,11 @@ void ZtJoinerLink::on_rld1_rx(const MacAddress& source, const MacAddress& destin
         return;
       }
       ++stats_.messages_rx;
+      // The callback may re-enter the link (send/close/discover): release
+      // the slot only while it still holds the delivered object.
+      const std::uint32_t delivered = slot_.generation();
       observer_.on_message(object.phase, object.step, object.message);
-      slot_.release_assembled();
+      slot_.release_assembled_if(delivered);
       return;
     }
     case FrameType::BootstrapReply: {

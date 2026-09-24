@@ -118,7 +118,10 @@ class ZtJoinerObserver {
   // A well-formed OFFER for the current DISCOVER whose org_hint matches.
   virtual void on_offer(const ZtOfferView& offer) noexcept = 0;
   // A complete down message (phase 4 steps 2/4/5, phase 5 step 2). `message`
-  // is valid only during the call.
+  // is valid only during the call and may alias the object slot, so read it
+  // before re-entering the link. send()/close()/discover() from inside the
+  // callback are supported: cleanup afterwards releases only the delivered
+  // object, never the state a reentrant call installed.
   virtual void on_message(JoinAuthPhase phase, std::uint8_t step, ByteView message) noexcept = 0;
   // Unauthenticated proxy hint (02 §5.3 phase 6): wait, never a verdict.
   virtual void on_relay_status(RelayStatusCode status, std::uint32_t retry_after_ms) noexcept = 0;
