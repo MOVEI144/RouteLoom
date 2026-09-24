@@ -179,6 +179,7 @@ struct HandshakeRequest {
   SecurityScope scope{SecurityScope::Link};
   NodeId peer{kInvalidNodeId};  // expected peer
   HandshakeReason reason{HandshakeReason::Initial};
+  std::uint32_t elevation_token{0};  // local discovery reservation (link)
   // Link: we are I; the frozen DISCOVER/OFFER exchange (P4 §5.2).
   MacAddress mac_i{};
   MacAddress mac_r{};
@@ -190,6 +191,7 @@ struct HandshakeRx {
   std::uint8_t phase{0};  // 4 EDHOC, 5 RLRES1 (join-transport object codec)
   std::uint8_t step{0};   // 1..4 / 1..3
   NodeId claimed_peer{kInvalidNodeId};  // carrier-claimed sender (0 unknown)
+  std::uint32_t elevation_token{0};  // local discovery reservation on step 1
   // Link: observed carrier. Responder-first-message carries the frozen
   // exchange (from the Owner's discovery candidate); later steps must
   // repeat the same carrier (re-binding mid-exchange is refused).
@@ -303,6 +305,12 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
     EdhocM4Sent,    // responder: m4 sent, installed
   };
 
+  struct ResumeBinding {
+    bool valid{false};
+    std::size_t slot_index{0};
+    ScopeDigest identity{};
+  };
+
   struct CarrierRecord {
     bool used{false};
     SecurityScope scope{SecurityScope::Link};
@@ -310,6 +318,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
     HandshakeRole role{HandshakeRole::Initiator};
     HandshakeReason reason{HandshakeReason::Initial};
     std::uint32_t token{0};
+    std::uint32_t elevation_token{0};
     RecordState state{RecordState::Free};
     MacAddress mac_i{};
     MacAddress mac_r{};
@@ -326,6 +335,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
     std::uint8_t last_step{0};
     std::array<std::uint8_t, 16> r1_nonce{};  // responder duplicate Kompas
     bool r1_nonce_set{false};
+    ResumeBinding resume{};
   };
 
   struct StagedEstablished {
@@ -405,7 +415,8 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
                    bool cookie_attach) noexcept;
   Status emit_failed(CarrierRecord& record, StatusCode failure) noexcept;
   void stage_established(const StagedEstablished& established) noexcept;
-  Status begin_resume(CarrierRecord& record, const ResumeSlot2& slot, MonotonicMs now) noexcept;
+  Status begin_resume(CarrierRecord& record, const ResumeSlot2& slot, std::size_t slot_index,
+                      MonotonicMs now) noexcept;
   Status begin_edhoc(CarrierRecord& record, MonotonicMs now) noexcept;
   // Responder m1 intake (fresh or parked): starts the flight and
   // answers m2, or parks the bytes in the shared stash when the flight
@@ -488,6 +499,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   bool rlres1_configured_{false};
 
   std::array<CarrierRecord, kCarrierRecords> records_{};
+  ResumeBinding resume_lookup_{};
   EdhocFlight edhoc_flight_{};
   std::array<std::uint8_t, 4> edhoc_cid_bytes_{};
   // Single-owner big-message buffer (m2/m4 responder-duplicate, m3

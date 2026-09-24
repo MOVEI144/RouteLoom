@@ -35,10 +35,10 @@ class LocalRevocationStore {
   Status refresh() noexcept;
 
   // Durably record a verified removal (`record.state` must be Blocked).
-  // Allowed when no record stands, or for the same (node, site, network)
-  // with a non-decreasing removed generation; anything else is Conflict
-  // (finish the recorded cleanup first). Reports success only after the
-  // commit read back.
+  // An unresolved Blocked record only accepts the same membership with a
+  // non-decreasing removed generation. Once Cleaned, a later joined site
+  // may record its own removal; the same site's generation cannot regress.
+  // Reports success only after the commit read back.
   Status commit_blocked(const LocalRevocationRecord& record) noexcept;
   // The recorded site/network is fully cleaned (RLS1/RLT1/RLP/RRS1
   // tombstones all read back): Blocked -> Cleaned. Refused unless Blocked.

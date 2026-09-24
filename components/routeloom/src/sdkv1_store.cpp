@@ -20,6 +20,24 @@ bool is_erased(const std::uint8_t* data, const std::size_t size) noexcept {
   return true;
 }
 
+bool revocation_entries_monotone(const RevocationSet& current,
+                                 const RevocationSet& candidate) noexcept {
+  if (current.network != candidate.network) return true;
+  for (std::size_t old_index = 0; old_index < current.count; ++old_index) {
+    const RevocationEntry& old = current.entries[old_index];
+    bool retained = false;
+    for (std::size_t new_index = 0; new_index < candidate.count; ++new_index) {
+      const RevocationEntry& next = candidate.entries[new_index];
+      if (next.node_id == old.node_id && next.min_generation >= old.min_generation) {
+        retained = true;
+        break;
+      }
+    }
+    if (!retained) return false;
+  }
+  return true;
+}
+
 std::uint32_t be32(const std::uint8_t* p) noexcept {
   return (static_cast<std::uint32_t>(p[0]) << 24U) | (static_cast<std::uint32_t>(p[1]) << 16U) |
          (static_cast<std::uint32_t>(p[2]) << 8U) | static_cast<std::uint32_t>(p[3]);
@@ -607,6 +625,9 @@ Status RevocationStore::accept(const ByteView object, const P256PublicKey& sak_p
     if (candidate.site_epoch_floor < set_.site_epoch_floor) {
       return Status::error(StatusCode::Conflict, "revocation floor regressed");
     }
+    if (!revocation_entries_monotone(set_, candidate)) {
+      return Status::error(StatusCode::Conflict, "revocation entry regressed");
+    }
   }
   return store(object, false, candidate);
 }
@@ -629,7 +650,8 @@ Status RevocationStore::recover(const ByteView object, const P256PublicKey& sak_
   if (!checked) return checked;
   if (has_set_ && set_.site_id == candidate.site_id &&
       (candidate.rs_epoch < set_.rs_epoch ||
-       candidate.site_epoch_floor < set_.site_epoch_floor)) {
+       candidate.site_epoch_floor < set_.site_epoch_floor ||
+       !revocation_entries_monotone(set_, candidate))) {
     return Status::error(StatusCode::Conflict, "revocation recovery regressed");
   }
   return store(object, true, candidate);
@@ -1018,6 +1040,10 @@ Status ResumeCache2::put(const ResumeSlot2& slot, const ResumeContext& context) 
     bool intact = true;
     const Status status = read_slot(i, current, intact);
     if (!status) return status;
+    if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer &&
+        current.network == slot.network && current.rms == slot.rms) {
+      return Status::error(StatusCode::Conflict, "resume2 rms already cached");
+    }
     const bool live = usable(current, context);
     if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer) {
       if (same == kNone) same = i;

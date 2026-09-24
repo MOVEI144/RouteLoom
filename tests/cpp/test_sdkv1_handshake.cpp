@@ -135,6 +135,8 @@ struct TestAead {
 struct TestMembership final : public HandshakeMembershipView {
   bool local(HandshakeLocal& out) const noexcept override {
     if (!local_ok) return false;
+    ++local_calls;
+    if (change_on_local_call == local_calls) ++view.gk_epoch;
     if (reenter_engine != nullptr && reenter_request) {
       // P4-C01 probe: a mutating call from inside the callback.
       HandshakeRequest req{};
@@ -151,8 +153,10 @@ struct TestMembership final : public HandshakeMembershipView {
     return revoked_peers.count(peer) != 0;
   }
 
-  HandshakeLocal view{};
+  mutable HandshakeLocal view{};
   bool local_ok{true};
+  mutable std::size_t local_calls{0};
+  std::size_t change_on_local_call{0};
   std::set<NodeId> revoked_peers;
   // Re-entry probe wiring (mutable: the interface is const).
   HandshakeEngine* reenter_engine{nullptr};
@@ -481,11 +485,13 @@ struct Pair {
 
 Status request_link(Side& initiator, Side& responder, const FrozenLink& frozen,
                     const MonotonicMs now,
-                    const HandshakeReason reason = HandshakeReason::Initial) {
+                    const HandshakeReason reason = HandshakeReason::Initial,
+                    const std::uint32_t elevation_token = 0) {
   HandshakeRequest req{};
   req.scope = SecurityScope::Link;
   req.peer = responder.self;
   req.reason = reason;
+  req.elevation_token = elevation_token;
   req.mac_i = initiator.mac_self;
   req.mac_r = responder.mac_self;
   req.carrier = frozen.carrier;
@@ -571,6 +577,99 @@ void test_resume_after_edhoc() {
   CHECK(resumed.est_a.has_proof && resumed.est_b.has_proof);
   std::printf("resume sizes: r1=%zu r2=%zu r3=%zu\n", r1_size, resumed.r2_size,
               resumed.r3_size);
+}
+
+void test_resume_slot_replaced_before_commit() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  const PumpResult first = pump(*pair.a, *pair.b, frozen);
+  CHECK(first.established_a && first.established_b);
+  CHECK_OK(pair.a->bank.retire(SecurityScope::Link, kNodeB));
+  CHECK_OK(pair.b->bank.retire(SecurityScope::Link, kNodeA));
+  const MonotonicMs t1 = kT0 + 500;
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, t1));
+  HandshakeResult r1{}, r2{};
+  CHECK_OK(pair.a->engine.take_result(r1));
+  CHECK(r1.phase == 5 && r1.step == 1);
+  CHECK_OK(deliver_to(*pair.b, *pair.a, r1, frozen, t1 + 50));
+  CHECK_OK(pair.b->engine.take_result(r2));
+  CHECK(r2.phase == 5 && r2.step == 2);
+  ResumeSlot2 replacement{};
+  CHECK(slot_for(*pair.a, kNodeB, replacement));
+  replacement.rms[0] ^= 0x5A;
+  ++replacement.peer_generation;
+  replacement.reserved_uses = 0;
+  ResumeContext context{};
+  context.network = kNet;
+  context.gk_epoch = kGk;
+  CHECK_OK(pair.a->cache.put(replacement, context));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, r2, frozen, t1 + 100));
+  CHECK(pair.a->sink.installs == 1);
+  HandshakeResult outcome{};
+  CHECK_OK(pair.a->engine.take_result(outcome));
+  CHECK(outcome.event == HandshakeEvent::Failed);
+}
+
+void test_pending_send_invalidated_by_membership_loss() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  pair.a->membership.local_ok = false;
+  HandshakeResult result{};
+  CHECK(!pair.a->engine.take_result(result).ok());
+  CHECK(result.token == 0 && result.message_size == 0);
+  CHECK(pair.a->engine.quiescent());
+}
+
+void test_local_epoch_floor_survives_reconfiguration() {
+  Pair pair = Pair::make();
+  HandshakeResult out{};
+  pair.a->membership.view.gk_epoch = kGk - 1;
+  CHECK(pair.a->engine.configure(kT0 + 1).code == StatusCode::Conflict);
+  pair.a->membership.view.gk_epoch = kGk;
+  pair.a->membership.view.gk_epoch = kGk - 1;
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::Conflict);
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::Conflict);
+  pair.a->membership.local_ok = false;
+  CHECK(!pair.a->engine.take_result(out).ok());
+  pair.a->membership.local_ok = true;
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::Conflict);
+  pair.a->membership.view.gk_epoch = kGk + 1;
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::Conflict);
+  CHECK(pair.a->engine.take_result(out).code == StatusCode::NotFound);
+}
+
+void test_local_change_during_commit_cancels_result() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  HandshakeResult m1{}, m2{}, m3{};
+  CHECK_OK(pair.a->engine.take_result(m1));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen, kT0 + 50));
+  CHECK_OK(pair.b->engine.take_result(m2));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, m2, frozen, kT0 + 100));
+  CHECK_OK(pair.a->engine.take_result(m3));
+  CHECK(m3.step == 3);
+  pair.b->membership.change_on_local_call = pair.b->membership.local_calls + 2;
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen, kT0 + 150));
+  HandshakeResult out{};
+  CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
+  CHECK(out.token == 0 && out.message_size == 0);
+  CHECK(pair.b->engine.quiescent());
+}
+
+void test_reconfigure_does_not_reuse_exchange_token() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  HandshakeResult old_send{}, new_send{};
+  CHECK_OK(pair.a->engine.take_result(old_send));
+  CHECK(old_send.event == HandshakeEvent::Send && old_send.token != 0);
+  CHECK_OK(pair.a->engine.configure(kT0 + 500));
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0 + 500));
+  CHECK_OK(pair.a->engine.take_result(new_send));
+  CHECK(new_send.event == HandshakeEvent::Send && new_send.token != old_send.token);
 }
 
 void test_cookie_reject() {
@@ -907,13 +1006,16 @@ struct ElevationRig {
 void test_elevation() {
   Pair pair = Pair::make();
   const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  ScopeDigest carrier_digest{};
+  keys::link_carrier_digest(frozen.carrier, carrier_digest);
   ElevationRig rig(kNodeA, pair.a->mac_self);
   CHECK_OK(rig.discovery.start(kT0));
   // Reserve first (the owner does this before driving the engine).
   std::uint32_t token = 0;
-  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, pair.b->mac_self, kT0, token));
+  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, pair.b->mac_self, carrier_digest,
+                                                kT0, token));
   CHECK(token != NeighborDiscovery::kMemberHandshakeNone);
-  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0, HandshakeReason::Initial, token));
   const PumpResult result = pump(*pair.a, *pair.b, frozen);
   CHECK(result.established_a);
   // Complete with the minted proof: Bound with a probe on the wire.
@@ -925,6 +1027,22 @@ void test_elevation() {
   // The token is single-use; the proof names exactly this peer/MAC/net.
   CHECK(rig.discovery.complete_handshake(token, result.est_a.proof, kT0 + 600).code ==
         StatusCode::NotFound);
+  std::uint32_t next_token = 0;
+  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, pair.b->mac_self, carrier_digest,
+                                                kT0 + 700,
+                                                next_token));
+  CHECK(rig.discovery.complete_handshake(next_token, result.est_a.proof, kT0 + 800).code ==
+        StatusCode::AuthenticationFailed);
+  ElevationRig restarted(kNodeA, pair.a->mac_self);
+  CHECK_OK(restarted.discovery.start(kT0));
+  std::uint32_t restarted_token = 0;
+  ScopeDigest next_carrier = carrier_digest;
+  next_carrier[0] ^= 0x80;
+  CHECK_OK(restarted.discovery.begin_member_handshake(kNodeB, pair.b->mac_self, next_carrier, kT0,
+                                                      restarted_token));
+  CHECK(restarted.discovery.complete_handshake(restarted_token, result.est_a.proof,
+                                                kT0 + 100).code ==
+        StatusCode::AuthenticationFailed);
   CHECK(result.est_a.proof.peer() == kNodeB);
   CHECK(result.est_a.proof.network() == kNet);
   CHECK(std::memcmp(result.est_a.proof.mac().data(), pair.b->mac_self.data(), 6) == 0);
@@ -933,8 +1051,11 @@ void test_elevation() {
 void test_elevation_negatives() {
   ElevationRig rig(kNodeA, mac_of(0x0A));
   CHECK_OK(rig.discovery.start(kT0));
+  ScopeDigest dummy_digest{};
+  dummy_digest.fill(0xA5);
   std::uint32_t token = 0;
-  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0B), kT0, token));
+  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0B), dummy_digest,
+                                                kT0, token));
   // An empty proof is refused and consumes the reservation.
   AuthenticatedPeerProof empty{};
   CHECK(!empty.valid());
@@ -944,7 +1065,8 @@ void test_elevation_negatives() {
   // Unknown tokens never elevate.
   CHECK(rig.discovery.complete_handshake(0xDEAD, empty, kT0 + 100).code == StatusCode::NotFound);
   // Cancel drops the reservation silently; unknown cancels are ignored.
-  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0B), kT0 + 100, token));
+  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0B), dummy_digest,
+                                                kT0 + 100, token));
   rig.discovery.cancel_member_handshake(token);
   CHECK(rig.discovery.complete_handshake(token, empty, kT0 + 200).code == StatusCode::NotFound);
   rig.discovery.cancel_member_handshake(0xBEEF);
@@ -953,22 +1075,28 @@ void test_elevation_negatives() {
   for (int i = 0; i < 4; ++i) {
     CHECK_OK(rig.discovery.begin_member_handshake(
         static_cast<NodeId>(0x00A1000000001000ULL + static_cast<std::uint64_t>(i)),
-        mac_of(static_cast<std::uint8_t>(0x20 + i)), kT0 + 200, tokens[i]));
+        mac_of(static_cast<std::uint8_t>(0x20 + i)), dummy_digest, kT0 + 200, tokens[i]));
   }
   std::uint32_t overflow = 0;
-  CHECK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0B), kT0 + 200, overflow).code ==
+  CHECK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0B), dummy_digest,
+                                             kT0 + 200, overflow).code ==
         StatusCode::PeerCapacity);
   for (const std::uint32_t live : tokens) rig.discovery.cancel_member_handshake(live);
   // A start contradicting a bound record is a conflict, not a re-bind.
   Pair pair = Pair::make();
   const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
-  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, pair.b->mac_self, kT0 + 300, token));
-  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0 + 300));
+  ScopeDigest carrier_digest{};
+  keys::link_carrier_digest(frozen.carrier, carrier_digest);
+  CHECK_OK(rig.discovery.begin_member_handshake(kNodeB, pair.b->mac_self, carrier_digest,
+                                                kT0 + 300, token));
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0 + 300,
+                        HandshakeReason::Initial, token));
   const PumpResult result = pump(*pair.a, *pair.b, frozen, kT0 + 300);
   CHECK(result.established_a);
   CHECK_OK(rig.discovery.complete_handshake(token, result.est_a.proof, kT0 + 800));
   std::uint32_t conflict = 0;
-  CHECK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0C), kT0 + 800, conflict).code ==
+  CHECK(rig.discovery.begin_member_handshake(kNodeB, mac_of(0x0C), carrier_digest,
+                                             kT0 + 800, conflict).code ==
         StatusCode::BindingConflict);
 }
 
@@ -1002,6 +1130,11 @@ void test_bank_sink_forwarding() {
 int main() {
   test_link_edhoc_full();
   test_resume_after_edhoc();
+  test_resume_slot_replaced_before_commit();
+  test_pending_send_invalidated_by_membership_loss();
+  test_local_epoch_floor_survives_reconfiguration();
+  test_local_change_during_commit_cancels_result();
+  test_reconfigure_does_not_reuse_exchange_token();
   test_cookie_reject();
   test_binding_reject();
   test_caps_unsupported();

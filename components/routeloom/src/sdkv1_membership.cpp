@@ -61,11 +61,16 @@ Status LocalRevocationStore::commit_blocked(const LocalRevocationRecord& record)
   const Status valid = local_revocation_validate(record);
   if (!valid) return valid;
   if (pair_.has_active()) {
-    const bool same = record_.local_node == record.local_node && record_.site_id == record.site_id &&
-                      record_.network == record.network;
-    if (!same || record.removed_generation < record_.removed_generation) {
-      // A different removal while one stands (or a generation that walks
-      // backwards): finish the recorded cleanup first.
+    const bool same_membership = record_.local_node == record.local_node &&
+                                 record_.site_id == record.site_id &&
+                                 record_.network == record.network;
+    const bool same_site = record_.site_id == record.site_id;
+    if (record_.local_node != record.local_node ||
+        (record_.state == LocalRevocationState::Blocked && !same_membership) ||
+        (same_site && record.removed_generation < record_.removed_generation)) {
+      // An unfinished removal must be cleaned first. A completed removal
+      // may be replaced after a later join, without lowering this site's
+      // recorded generation.
       return Status::error(StatusCode::Conflict, "rlv1 removal superseded");
     }
   }
@@ -206,9 +211,7 @@ bool SdkMembershipHooks::local_member(const NetworkId network) const noexcept {
 }
 
 bool SdkMembershipHooks::known_member(const NodeId peer, const NetworkId network) const noexcept {
-  if (peers_ == nullptr || !stores_healthy()) return false;
-  if (!site_matches(site_.site(), network)) return false;
-  if (local_revocation_.blocks_membership(holdoff_elapsed_)) return false;
+  if (peers_ == nullptr || !local_member(network)) return false;
   std::uint32_t generation = 0, role = 0;
   if (!peers_->authenticated(peer, network, generation, role)) return false;
   // This boot's authentication, re-checked against the latest revocation

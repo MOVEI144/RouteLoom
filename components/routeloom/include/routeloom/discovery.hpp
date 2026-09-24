@@ -120,6 +120,8 @@ class AuthenticatedPeerProof {
   const MacAddress& mac() const noexcept { return mac_; }
   NetworkId network() const noexcept { return network_; }
   const AuthTag& evidence() const noexcept { return evidence_; }
+  std::uint32_t elevation_token() const noexcept { return elevation_token_; }
+  const ScopeDigest& carrier_digest() const noexcept { return carrier_digest_; }
   bool valid() const noexcept { return peer_ != kInvalidNodeId; }
 
  private:
@@ -127,13 +129,18 @@ class AuthenticatedPeerProof {
   friend class NeighborDiscovery;  // out-parameter holder only, cannot mint
   friend class sdkv1::HandshakeEngine;  // member handshake (P4 §7.2)
   AuthenticatedPeerProof(NodeId peer, const MacAddress& mac, NetworkId network,
-                         const AuthTag& evidence) noexcept
-      : peer_(peer), mac_(mac), network_(network), evidence_(evidence) {}
+                         const AuthTag& evidence,
+                         const std::uint32_t elevation_token = 0,
+                         const ScopeDigest& carrier_digest = ScopeDigest{}) noexcept
+      : peer_(peer), mac_(mac), network_(network), evidence_(evidence),
+        elevation_token_(elevation_token), carrier_digest_(carrier_digest) {}
 
   NodeId peer_{kInvalidNodeId};
   MacAddress mac_{};
   NetworkId network_{0};
   AuthTag evidence_{};
+  std::uint32_t elevation_token_{0};
+  ScopeDigest carrier_digest_{};
 };
 
 // NeighborAuthenticator contract (02 §5): the engine supplies cookie
@@ -509,6 +516,7 @@ class NeighborDiscovery {
   // PeerCapacity when no neighbor slot could take the elevation. The
   // returned token names the reservation for complete/cancel.
   Status begin_member_handshake(NodeId peer, const MacAddress& peer_mac,
+                                const ScopeDigest& carrier_digest,
                                 MonotonicMs now_ms, std::uint32_t& token) noexcept;
   // Elevate the reservation named by `token` with the engine-minted proof.
   // The proof's peer/MAC/network must match the reservation; anything else
@@ -804,6 +812,7 @@ class NeighborDiscovery {
     std::uint32_t token{kMemberHandshakeNone};
     NodeId peer{kInvalidNodeId};
     MacAddress mac{};
+    ScopeDigest carrier_digest{};
     MonotonicMs expires_at_ms{0};
   };
   std::array<MemberPending, kMemberHandshakePendings> member_pendings_{};
