@@ -1323,7 +1323,8 @@ void test_c06_fault_injection_decided() {
     }
   }
 
-  // Drop the DECIDED seal write entirely: pending record discarded, clean.
+  // Drop the DECIDED seal write entirely: the floor still spent its J/R,
+  // so a reboot cannot prove the surviving record is the latest one.
   {
     TargetRig rig;
     MonotonicMs now_ms = 1000;
@@ -1338,14 +1339,14 @@ void test_c06_fault_injection_decided() {
                         rig.journal->active_snapshot(), verdict)
                .ok());
     rig.boot(now_ms += 10);
-    CHECK_OK(rig.boot_status_);
-    drain(rig, now_ms);
+    CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+    CHECK(rig.journal->uncertain());
     CHECK(rig.journal->decision_revision() == 1);
   }
 
   // DECIDED committed, then the deferred APPLY_INTENT write is dropped in
-  // poll: the committed DECIDED record IS durable — boot resolves it to
-  // INTERRUPTED (challenge dead across the boot), revision consumed.
+  // poll: the committed DECIDED record is a known value, but the floor
+  // spent one more J, so boot cannot prove whether APPLY_INTENT landed.
   {
     TargetRig rig;
     MonotonicMs now_ms = 1000;
@@ -1364,22 +1365,16 @@ void test_c06_fault_injection_decided() {
     CHECK(submitted.ok());  // DECIDED is durable; the intent write defers
     rig.journal->poll(now_ms += 10);  // intent write dropped -> stays pending
     rig.boot(now_ms += 10);
-    CHECK_OK(rig.boot_status_);
-    drain(rig, now_ms);
-    // DECIDED committed, APPLY_INTENT dropped: the revision stays consumed
-    // and the operation is recorded interrupted — never applied.
+    CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+    CHECK(rig.journal->uncertain());
+    // The known DECIDED record cannot be reported as an interruption
+    // without resolving the missing floor generation.
     CHECK(rig.journal->decision_revision() == 2);
-    CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
+    CHECK(rig.journal->phase() == ConfigPhase::Decided);
     CHECK(rig.journal->active_revision() == 1);
-    endpoint::ControlStatusQuery sq{};
-    sq.config_namespace = 1;
-    sq.operation_id = last_command_.operation_id;
+    endpoint::ControlChallengeQuery query{};
     endpoint::EncodedServicePayload reply{};
-    CHECK_OK(rig.journal->handle_status_query(sq, now_ms, reply));
-    endpoint::ControlStatus status{};
-    CHECK_OK(endpoint::control_status_decode(reply.view(), status));
-    CHECK(status.phase == ConfigPhase::Interrupted);
-    CHECK(status.reason == ConfigReason::Deadline);
+    CHECK(!rig.journal->handle_challenge_query(query, now_ms, reply).ok());
   }
 }
 
@@ -3159,6 +3154,40 @@ void test_floor_gap_consumed() {
   CHECK(rig.journal->decision_revision() == 1);
 }
 
+void test_floor_ahead_of_standard_record_parks_on_boot() {
+  TargetRig rig;
+  MonotonicMs now_ms = 1000;
+  CHECK_OK(rig.journal->initialize(now_ms));
+  const ConfigField first[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  CHECK_OK(drive_update(rig, first, 1, now_ms, 0, ByteView{}, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.floor_j() == 3 && rig.floor_r() == 1);
+  const auto completed_id = last_command_.operation_id;
+
+  const ConfigField second[] = {sdk_u8(1, 2)};
+  rig.storage.drop_call = rig.storage.write_calls;
+  CHECK(drive_update(rig, second, 1, now_ms += 61000, 1,
+                     rig.journal->active_snapshot(), verdict)
+            .code == StatusCode::StorageFailure);
+  CHECK(rig.floor_j() == 4 && rig.floor_r() == 2);
+  rig.storage.drop_call = std::numeric_limits<std::size_t>::max();
+  rig.boot(now_ms += 10);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->uncertain());
+  endpoint::ControlChallengeQuery query{};
+  endpoint::EncodedServicePayload reply{};
+  CHECK(!rig.journal->handle_challenge_query(query, now_ms, reply).ok());
+  endpoint::ControlStatusQuery status_query{};
+  status_query.config_namespace = rig.config.config_namespace;
+  status_query.operation_id = completed_id;
+  CHECK_OK(rig.journal->handle_status_query(status_query, now_ms, reply));
+  endpoint::ControlStatus status{};
+  CHECK_OK(endpoint::control_status_decode(reply.view(), status));
+  CHECK(status.phase == ConfigPhase::Quarantined);
+  CHECK(status.reason == ConfigReason::RecoveryRequired);
+}
+
 // A missing floor stops ALL privileged intake — and it is never
 // auto-created: only managed re-provisioning restores service.
 void test_floor_missing_stops_intake() {
@@ -3314,14 +3343,13 @@ void test_store_exhausted() {
   ConfigVerdict verdict{};
   CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
   drain(rig, now_ms);
-  // A floor far ahead of the journal is tolerated (consumed gaps) —
-  // until the axis itself is spent.
-  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
-             rig.config.config_namespace, rig.config.schema, 0xFFFFFFFFU, 1);
-  rig.boot(now_ms += 10);
-  CHECK_OK(rig.boot_status_);
-  CHECK(rig.journal->phase() == ConfigPhase::Active);
-  drain(rig, now_ms);
+  // Spend the remaining axis in this boot; after a reboot a floor ahead
+  // of the journal is unproven history and correctly parks the journal.
+  SecurityFloorState current{};
+  CHECK_OK(rig.floor->read(current));
+  SecurityFloorState spent = current;
+  spent.entries[0].store_floor = 0xFFFFFFFFU;
+  CHECK_OK(rig.floor->advance(current, spent));
   const ConfigField patch2[] = {sdk_u8(1, 2)};
   CHECK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
                      rig.journal->active_snapshot(), verdict)
@@ -5204,6 +5232,7 @@ int main() {
   // RLF1 security floor.
   test_floor_reserve_on_commit();
   test_floor_gap_consumed();
+  test_floor_ahead_of_standard_record_parks_on_boot();
   test_floor_missing_stops_intake();
   test_floor_torn_write_invalidates();
   test_floor_order_violation();

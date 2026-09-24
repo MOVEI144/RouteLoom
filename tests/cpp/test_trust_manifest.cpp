@@ -13,6 +13,7 @@
 #include "routeloom/discovery_scope.hpp"  // sha256
 #include "routeloom/trust_manifest.hpp"
 #include "routeloom/trust_store.hpp"
+#include "routeloom/trust_view.hpp"
 
 #include "test_provisioning.hpp"
 
@@ -321,7 +322,10 @@ void test_manifest_accept_replay_and_stale() {
   SecurityFloorStore floor(floor_storage);
   CHECK_OK(floor.initialize());
   store.attach_floor(&floor);
-  CHECK_OK(store.commit_image(test_image(5, kNetwork, kRootA, kRootIdA)));
+  ByteBuffer<kTrustManifestObjectMax> installed{};
+  make_manifest(test_image(5, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, installed);
+  CHECK_OK(trust_manifest_accept(store, installed.view(), floor));
 
   ByteBuffer<kTrustManifestObjectMax> object{};
   make_manifest(test_image(4, kNetwork, kRootA, kRootIdA), kRootIdA,
@@ -772,6 +776,60 @@ void test_manifest_accept_power_cut() {
   CHECK(reboot.store_epoch() == 2);
 }
 
+void test_reserved_manifest_is_the_only_resume() {
+  FaultyTrustStorage storage;
+  provisioned_store(storage);
+  TrustStore store(storage);
+  CHECK_OK(store.initialize());
+  FakeFloorStore floor_storage;
+  seed_floor(floor_storage);
+  SecurityFloorStore floor(floor_storage);
+  CHECK_OK(floor.initialize());
+  store.attach_floor(&floor);
+  TrustView view(store);
+  view.attach_floor(&floor);
+  CHECK(view.ready());
+
+  ByteBuffer<kTrustManifestObjectMax> reserved_object{};
+  make_manifest(test_image(2, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, reserved_object);
+  SecurityFloorState before{};
+  CHECK_OK(floor.read(before));
+  SecurityFloorState reserved = before;
+  reserved.trust_epoch_floor = 2;
+  reserved.min_authority_generation = 1;
+  sha256(reserved_object.view(), reserved.last_manifest_hash);
+  CHECK_OK(floor.advance(before, reserved));
+
+  // A cut after the floor reservation leaves an old, CRC-valid image.
+  // It must serve neither config permits nor a different root update.
+  CHECK(!view.ready());
+  CHECK(view.resolve_authority_key(0xA17, 1) == nullptr);
+  ByteBuffer<kTrustManifestObjectMax> replacement{};
+  make_manifest(test_image(3, kNetwork, kRootA, kRootIdA), kRootIdA,
+                kRootA.priv, replacement);
+  CHECK(!trust_manifest_accept(store, replacement.view(), floor).ok());
+  SecurityFloorState after{};
+  CHECK_OK(floor.read(after));
+  CHECK(after.trust_epoch_floor == 2);
+  CHECK(after.last_manifest_hash == reserved.last_manifest_hash);
+  CHECK(store.store_epoch() == 1);
+
+  CHECK_OK(trust_manifest_accept(store, reserved_object.view(), floor));
+  CHECK(store.store_epoch() == 2);
+  CHECK(view.usable());
+
+  // Equal payload with a corrupted signature is not the reserved original.
+  auto forged = reserved_object;
+  forged.bytes[forged.size - 1] ^= 1;
+  CHECK(!trust_manifest_accept(store, forged.view(), floor).ok());
+
+  floor_storage.provisioned = false;
+  CHECK(floor.refresh().code == StatusCode::RecoveryRequired);
+  CHECK(!view.usable() && !view.ready());
+  CHECK(view.resolve_authority_key(0xA17, 1) == nullptr);
+}
+
 void test_manifest_accept_total_loss_resume() {
   // Both trust slots destroyed after a committed update: the ONLY way
   // back is re-delivering the exact original the floor binds (same
@@ -1054,6 +1112,7 @@ int main() {
   test_manifest_accept_anchor_rotation();
   test_manifest_accept_max_size();
   test_manifest_accept_power_cut();
+  test_reserved_manifest_is_the_only_resume();
   test_manifest_accept_total_loss_resume();
   test_manifest_accept_total_loss_foreign_refused();
   test_manifest_accept_uncertain_heal();

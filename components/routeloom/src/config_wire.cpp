@@ -590,46 +590,44 @@ Status ConfigGateway::submit_permit(const std::uint64_t request, const NodeId ta
     return Status::error(StatusCode::WouldBlock, "config permit transfer busy");
   }
   Status status;
-  start_transfer(transfer_, request, target, autonomy::ControlObjectKind::ConfigPermit,
+  start_transfer(request, target, autonomy::ControlObjectKind::ConfigPermit,
                  permit, now_ms, status);
-  if (status) transfer_.usb_sub = kSubConfigPermit;
   return status;
 }
 
 Status ConfigGateway::submit_recovery(const std::uint64_t request,
                                       const NodeId target, const ByteView object,
                                       const MonotonicMs now_ms) noexcept {
-  if (recovery_transfer_.active) {
-    return Status::error(StatusCode::WouldBlock, "config recovery transfer busy");
+  if (transfer_.active) {
+    return Status::error(StatusCode::WouldBlock, "config transfer busy");
   }
   Status status;
-  start_transfer(recovery_transfer_, request, target,
+  start_transfer(request, target,
                  autonomy::ControlObjectKind::ConfigRecovery, object, now_ms,
                  status);
-  if (status) recovery_transfer_.usb_sub = kSubConfigRecover;
   return status;
 }
 
 Status ConfigGateway::submit_trust(const std::uint64_t request,
                                    const NodeId target, const ByteView object,
                                    const MonotonicMs now_ms) noexcept {
-  if (trust_transfer_.active) {
-    return Status::error(StatusCode::WouldBlock, "config trust transfer busy");
+  if (transfer_.active) {
+    return Status::error(StatusCode::WouldBlock, "config transfer busy");
   }
   Status status;
-  start_transfer(trust_transfer_, request, target,
+  start_transfer(request, target,
                  autonomy::ControlObjectKind::TrustManifest, object, now_ms,
                  status);
-  if (status) trust_transfer_.usb_sub = kSubConfigTrust;
   return status;
 }
 
-template <std::size_t N>
 void ConfigGateway::start_transfer(
-    TransferSlot<N>& transfer, const std::uint64_t request, const NodeId target,
+    const std::uint64_t request, const NodeId target,
     const autonomy::ControlObjectKind kind, const ByteView object,
     const MonotonicMs now_ms, Status& out) noexcept {
-  if (target == kInvalidNodeId || object.size == 0 || object.size > N ||
+  const std::size_t cap = kind == autonomy::ControlObjectKind::TrustManifest
+                              ? kConfigTrustObjectMax : kConfigPermitObjectMax;
+  if (target == kInvalidNodeId || object.size == 0 || object.size > cap ||
       object.data == nullptr) {
     out = Status::error(StatusCode::InvalidArgument, "config object invalid");
     return;
@@ -644,9 +642,15 @@ void ConfigGateway::start_transfer(
   if (!out) return;
   out = wire_.config_send(target, FrameType::ControlObject, encoded.view(), now_ms);
   if (!out) return;
+  TransferSlot& transfer = transfer_;
   transfer.active = true;
   transfer.request = request;
   transfer.target = target;
+  transfer.usb_sub = kind == autonomy::ControlObjectKind::ConfigPermit
+                         ? kSubConfigPermit
+                         : kind == autonomy::ControlObjectKind::ConfigRecovery
+                               ? kSubConfigRecover
+                               : kSubConfigTrust;
   transfer.hash = manifest.object_hash;
   transfer.object.size = object.size;
   std::memcpy(transfer.object.bytes.data(), object.data, object.size);
@@ -656,13 +660,12 @@ void ConfigGateway::start_transfer(
   transfer.deadline_ms = now_ms + config_wire_const::kPermitTimeoutMs;
   // Push the first chunk immediately; the rest ride poll() so a full TX
   // queue slows the pump instead of dropping a chunk into a timeout.
-  pump_transfer(transfer, now_ms);
+  pump_transfer(now_ms);
   out = Status::success();
 }
 
-template <std::size_t N>
-void ConfigGateway::pump_transfer(TransferSlot<N>& transfer,
-                                  const MonotonicMs now_ms) noexcept {
+void ConfigGateway::pump_transfer(const MonotonicMs now_ms) noexcept {
+  TransferSlot& transfer = transfer_;
   if (!transfer.active || transfer.phase != TransferPhase::Chunks) return;
   // Bounded pump: one chunk per call keeps the manifest+chunk burst inside
   // the scheduler's bounded queue; a WouldBlock/NoRoute send is retried on
@@ -679,7 +682,7 @@ void ConfigGateway::pump_transfer(TransferSlot<N>& transfer,
     std::memcpy(chunk.data.data(), transfer.object.bytes.data() + offset, len);
     autonomy::EncodedPayload encoded{};
     if (!autonomy::object_chunk_encode(chunk, encoded)) {
-      finish_transfer(transfer, ConfigOpsResult::Indeterminate, now_ms);
+      finish_transfer(ConfigOpsResult::Indeterminate, now_ms);
       return;
     }
     const Status sent =
@@ -750,18 +753,10 @@ void ConfigGateway::on_config_frame(const NodeId peer, const wire::PlainFrame& f
               ByteView{frame.payload.data(), frame.payload_size}, ack)) {
         return;
       }
-      // An ack binds to whichever in-flight transfer owns the object hash —
-      // each kind runs on its own slot.
+      // An ack binds to the active transfer's origin and object hash.
       if (transfer_.active && origin == transfer_.target &&
           ack.object_hash == transfer_.hash) {
-        resolve_transfer_ack(transfer_, ack, now_ms);
-      } else if (recovery_transfer_.active &&
-                 origin == recovery_transfer_.target &&
-                 ack.object_hash == recovery_transfer_.hash) {
-        resolve_transfer_ack(recovery_transfer_, ack, now_ms);
-      } else if (trust_transfer_.active && origin == trust_transfer_.target &&
-                 ack.object_hash == trust_transfer_.hash) {
-        resolve_transfer_ack(trust_transfer_, ack, now_ms);
+        resolve_transfer_ack(ack, now_ms);
       }
       break;
     }
@@ -794,48 +789,36 @@ void ConfigGateway::finish_query(const ConfigOpsResult result, const ByteView bo
   host_.on_config_reply(request, sub, result, target, body, now_ms);
 }
 
-template <std::size_t N>
-void ConfigGateway::finish_transfer(TransferSlot<N>& transfer,
-                                    const ConfigOpsResult result,
+void ConfigGateway::finish_transfer(const ConfigOpsResult result,
                                     const MonotonicMs now_ms) noexcept {
-  const std::uint64_t request = transfer.request;
-  const NodeId target = transfer.target;
-  const std::uint8_t sub = transfer.usb_sub;
-  transfer.active = false;
+  const std::uint64_t request = transfer_.request;
+  const NodeId target = transfer_.target;
+  const std::uint8_t sub = transfer_.usb_sub;
+  transfer_.active = false;
   ++replies_reported_;
   host_.on_config_reply(request, sub, result, target, ByteView{}, now_ms);
 }
 
-template <std::size_t N>
-void ConfigGateway::resolve_transfer_ack(TransferSlot<N>& transfer,
-                                         const autonomy::ObjectAckPayload& ack,
+void ConfigGateway::resolve_transfer_ack(const autonomy::ObjectAckPayload& ack,
                                          const MonotonicMs now_ms) noexcept {
   if (ack.status == autonomy::ObjectAckStatus::Failed) {
-    finish_transfer(transfer, ConfigOpsResult::Denied, now_ms);
+    finish_transfer(ConfigOpsResult::Denied, now_ms);
   } else if (ack.status == autonomy::ObjectAckStatus::Ok &&
-             ack.received_len >= transfer.object_size) {
+             ack.received_len >= transfer_.object_size) {
     // Assembly completed at the target — the object verdict itself is
     // a separate status query, never implied by transport success.
-    finish_transfer(transfer, ConfigOpsResult::Ok, now_ms);
+    finish_transfer(ConfigOpsResult::Ok, now_ms);
   }
   // Incomplete acks are progress; the deadline bounds the wait.
 }
 
 void ConfigGateway::poll(const MonotonicMs now_ms) noexcept {
-  pump_transfer(transfer_, now_ms);
-  pump_transfer(recovery_transfer_, now_ms);
-  pump_transfer(trust_transfer_, now_ms);
+  pump_transfer(now_ms);
   if (query_.active && now_ms >= query_.deadline_ms) {
     finish_query(ConfigOpsResult::Timeout, ByteView{}, now_ms);
   }
   if (transfer_.active && now_ms >= transfer_.deadline_ms) {
-    finish_transfer(transfer_, ConfigOpsResult::Indeterminate, now_ms);
-  }
-  if (recovery_transfer_.active && now_ms >= recovery_transfer_.deadline_ms) {
-    finish_transfer(recovery_transfer_, ConfigOpsResult::Indeterminate, now_ms);
-  }
-  if (trust_transfer_.active && now_ms >= trust_transfer_.deadline_ms) {
-    finish_transfer(trust_transfer_, ConfigOpsResult::Indeterminate, now_ms);
+    finish_transfer(ConfigOpsResult::Indeterminate, now_ms);
   }
 }
 

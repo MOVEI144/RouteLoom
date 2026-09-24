@@ -507,7 +507,8 @@ pub const ISSUE_KIND_RECOVERY: u8 = 4;
 /// entry so a profile/key change can never silently re-sign one.
 pub const ISSUE_PROFILE_DEV: u8 = 0;
 pub const ISSUE_PROFILE_COSE: u8 = 1;
-/// Bound on retained issuance entries (both providers, oldest evicted).
+/// Bound on retained issuance entries (both providers). Only entries with
+/// a confirmed terminal device result may be evicted.
 pub const ISSUE_OUTBOX_CAP: usize = 64;
 
 /// One issuance the lane commits BEFORE signing (§7.2 step 2): the
@@ -545,6 +546,8 @@ pub enum IssueRefusal {
     /// Recovery issuance on a memory-only store — recovery needs the
     /// durable outbox (§7.2); trust install takes no ledger at all.
     RecoveryNeedsDurable,
+    /// Every retained original may still be needed to resolve an issue.
+    Capacity,
 }
 
 /// The SingleAuthority-style config ledger: a monotonically increasing
@@ -572,6 +575,9 @@ pub trait ConfigAuthorityLedger {
     /// Load the (canonical, signed) original, retransmit-only — the lane
     /// never re-signs from this. None until both halves are stored.
     fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)>;
+    /// Mark a device-terminal outcome. It may be evicted only after this
+    /// proof; a timeout or lost reply leaves the original protected.
+    fn issue_complete(&mut self, op_id: &[u8; 16]) -> Result<(), IssueRefusal>;
 }
 
 /// Fresh 128-bit id minted once per store lineage. Falls back to time^pid
@@ -768,7 +774,7 @@ pub struct MemoryOperationStore {
     /// first `issue_reserve` pins it, a changed one is refused.
     config_auth_identity: Option<(u64, u64, u32)>,
     /// Issuance outbox, oldest first — the RAM mirror of the durable
-    /// table, same cap and oldest-first eviction.
+    /// table, same cap and terminal-only eviction.
     config_outbox: VecDeque<([u8; 16], StoredIssue)>,
     epochs: HashMap<EpochScope, ScopeEpochs>,
     by_identity: HashMap<OpIdentity, u64>,
@@ -786,6 +792,7 @@ struct StoredIssue {
     sequence: u64,
     canonical: Option<Vec<u8>>,
     signed: Option<Vec<u8>>,
+    terminal: bool,
 }
 
 impl MemoryOperationStore {
@@ -1235,10 +1242,17 @@ impl ConfigAuthorityLedger for MemoryOperationStore {
         if seq == u64::MAX {
             return Err(IssueRefusal::Unprovable);
         }
-        self.config_auth_next = seq + 1;
-        while self.config_outbox.len() >= ISSUE_OUTBOX_CAP {
-            self.config_outbox.pop_front();
+        if self.config_outbox.len() >= ISSUE_OUTBOX_CAP {
+            let Some(index) = self
+                .config_outbox
+                .iter()
+                .position(|(_, entry)| entry.terminal)
+            else {
+                return Err(IssueRefusal::Capacity);
+            };
+            self.config_outbox.remove(index);
         }
+        self.config_auth_next = seq + 1;
         self.config_outbox.push_back((
             identity.op_id,
             StoredIssue {
@@ -1246,6 +1260,7 @@ impl ConfigAuthorityLedger for MemoryOperationStore {
                 sequence: seq,
                 canonical: None,
                 signed: None,
+                terminal: false,
             },
         ));
         Ok(seq)
@@ -1291,6 +1306,20 @@ impl ConfigAuthorityLedger for MemoryOperationStore {
                 _ => None,
             })
     }
+
+    fn issue_complete(&mut self, op_id: &[u8; 16]) -> Result<(), IssueRefusal> {
+        let entry = self
+            .config_outbox
+            .iter_mut()
+            .find(|(id, _)| id == op_id)
+            .map(|(_, entry)| entry)
+            .ok_or(IssueRefusal::Unprovable)?;
+        if entry.signed.is_none() {
+            return Err(IssueRefusal::Unprovable);
+        }
+        entry.terminal = true;
+        Ok(())
+    }
 }
 
 impl ConfigAuthorityLedger for SqliteOperationStore {
@@ -1308,6 +1337,10 @@ impl ConfigAuthorityLedger for SqliteOperationStore {
 
     fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
         self.issue_original_row(op_id)
+    }
+
+    fn issue_complete(&mut self, op_id: &[u8; 16]) -> Result<(), IssueRefusal> {
+        self.issue_complete_tx(op_id)
     }
 }
 
@@ -1337,6 +1370,13 @@ impl ConfigAuthorityLedger for StoreBackend {
         match self {
             Self::Memory(store) => store.issue_original(op_id),
             Self::Sqlite(store) => store.issue_original(op_id),
+        }
+    }
+
+    fn issue_complete(&mut self, op_id: &[u8; 16]) -> Result<(), IssueRefusal> {
+        match self {
+            Self::Memory(store) => store.issue_complete(op_id),
+            Self::Sqlite(store) => store.issue_complete(op_id),
         }
     }
 }
@@ -1926,15 +1966,23 @@ mod tests {
             store.issue_reserve(&rotated),
             Err(IssueRefusal::IdentityChanged)
         );
-        // The table holds the cap: overfill evicts oldest-first while
-        // the sequence cursor never rewinds.
-        for op in 10..10 + ISSUE_OUTBOX_CAP as u8 + 2 {
+        // An unresolved signed original remains available when the
+        // outbox reaches capacity; a new issue must wait for a terminal
+        // receipt rather than deleting bytes the target may have seen.
+        for op in 10..10 + ISSUE_OUTBOX_CAP as u8 - 2 {
             store.issue_reserve(&issue(op, ISSUE_KIND_PERMIT)).unwrap();
         }
-        assert_eq!(store.issue_original(&[1; 16]), None, "oldest evicted");
-        // Two reservations plus the 66 above consumed 1..=68 — the next
-        // one advances, never reuses.
-        let seq = store.issue_reserve(&issue(200, ISSUE_KIND_PERMIT)).unwrap();
-        assert_eq!(seq, 2 + ISSUE_OUTBOX_CAP as u64 + 3);
+        assert_eq!(
+            store.issue_original(&[1; 16]),
+            Some((b"canon-1".to_vec(), b"signed-1".to_vec()))
+        );
+        assert_eq!(
+            store.issue_reserve(&issue(200, ISSUE_KIND_PERMIT)),
+            Err(IssueRefusal::Capacity)
+        );
+        assert!(store.issue_original(&[1; 16]).is_some());
+        assert_eq!(store.issue_complete(&[1; 16]), Ok(()));
+        assert_eq!(store.issue_reserve(&issue(200, ISSUE_KIND_PERMIT)), Ok(65));
+        assert_eq!(store.issue_original(&[1; 16]), None);
     }
 }

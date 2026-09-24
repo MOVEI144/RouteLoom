@@ -32,10 +32,9 @@
 //
 // Fail-closed posture (§4.3.1, §4.7): the view verifies only under a
 // committed image that is not quarantined, not uncertain (the lost
-// sibling may have held a newer image — the store refuses commits until
-// recover(), and this consumer refuses to serve possibly-stale trust as
-// policy), and not provably stale (store_epoch below the epoch_floor a
-// damaged committed record proved). Every impairment reports !ready()
+// sibling may have held a newer image), and not below either the store's
+// proven epoch or an attached RLF1 epoch/generation reservation. An
+// unreadable attached floor also disables the view. Every impairment reports !ready()
 // and verify_permit() returns an error — never a silent verdict.
 //
 // §4.6.2's trust_epoch intake capture and §4.6.3's decision-time recheck
@@ -64,8 +63,9 @@ class TrustView final : public ConfigAuthorityVerifier {
 
   // Bind the RLF1 floor whose G joins the image's
   // min_authority_generation into the effective generation floor (higher
-  // wins). The floor must outlive the view; without it the image floor
-  // alone applies. Trust-managed deployments always attach.
+  // wins) and bounds the image epoch. The floor must outlive the view;
+  // without it the image floor alone applies. Trust-managed deployments
+  // always attach.
   void attach_floor(const SecurityFloorStore* floor) noexcept { floor_ = floor; }
 
   // The generation floor in force: the image's
@@ -147,9 +147,8 @@ class TrustView final : public ConfigAuthorityVerifier {
   bool uncertain() const noexcept { return store_.uncertain(); }
 
   // The store is fit to verify under: initialized, a committed image,
-  // not quarantined, not uncertain, and not provably stale — the active
-  // epoch covers every epoch any committed-seal record proved this boot,
-  // including CRC-failed ones (§4.3.1's recovery-floor rule).
+  // not quarantined, not uncertain, and not provably stale against the
+  // store's own record history or an attached independent floor.
   bool usable() const noexcept;
 
  private:

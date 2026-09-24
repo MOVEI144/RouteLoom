@@ -34,9 +34,10 @@ use routeloom_provision::signer::{ecdsa_p256_verify, signature_range_check, File
 use routeloom_wire::endpoint::{
     config_command_encode, config_namespace_valid, config_patch_apply, config_recovery_encode,
     config_snapshot_hash_input, config_tlv_decode, control_challenge_decode, control_status_decode,
-    recovery_info_decode, trust_status_decode, ConfigCommand, ConfigField, ConfigRecoveryIntent,
-    ControlChallenge, ControlStatus, RecoveryInfo, TrustStatus, RCR2_MAX_TOTAL,
-    RCR2_MODE_REPROVISION,
+    recovery_info_decode, trust_status_decode, ConfigCommand, ConfigField, ConfigPhase,
+    ConfigRecoveryIntent, ControlChallenge, ControlStatus, RecoveryInfo, TrustStatus,
+    RCR2_MAX_TOTAL, RCR2_MODE_REPROVISION, RCR2_VERSION, RECOVERY_INFO_FLAG_IMPAIRED,
+    RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
 };
 
 use crate::canonical::sha256;
@@ -833,10 +834,10 @@ impl ConfigIssuer {
 pub const CONFIG_QUERY_TIMEOUT_MS: u64 = 3_000;
 pub const CONFIG_PERMIT_TIMEOUT_MS: u64 = 15_000;
 
-/// A client request the lane drives. `Propose` runs challenge -> commit ->
-/// sign -> permit -> status; `Recover` runs commit -> sign -> recovery
-/// transfer -> status against the caller-supplied RecoveryInfo baseline;
-/// the others are single queries.
+/// A client request the lane drives. `Propose` reads target capability,
+/// then challenge -> commit -> sign -> permit -> status. `Recover` reads
+/// target capability and floors, then commit -> sign -> recovery transfer
+/// -> status; the others are single queries.
 #[derive(Clone, Debug)]
 pub enum ConfigRequest {
     /// Issue a ChallengeQuery and report the ControlChallenge body.
@@ -1010,6 +1011,17 @@ struct ProposeState {
     authority_generation: u32,
 }
 
+struct RecoverState {
+    target: u64,
+    config_namespace: u16,
+    schema: u16,
+    mode: u8,
+    new_store_generation: u32,
+    new_revision: u64,
+    snapshot_hash: [u8; 32],
+    baseline: Vec<u8>,
+}
+
 /// An issued object in flight toward its status read — shared by the
 /// propose and recover paths. Set when the signed transfer emits,
 /// consumed by the follow-up StatusQuery; also names the operation a
@@ -1028,6 +1040,7 @@ pub struct ConfigLane {
     next_request: u64,
     in_flight: Option<InFlight>,
     propose: Option<ProposeState>,
+    recover: Option<RecoverState>,
     pending: Option<PendingStatus>,
     /// A trust install awaiting its receipt read: the (target, network)
     /// the 0x26 follow-up queries. Set when the 0x25 transfer emits.
@@ -1048,6 +1061,7 @@ impl ConfigLane {
             next_request: 0,
             in_flight: None,
             propose: None,
+            recover: None,
             pending: None,
             trust_followup: None,
             authority_generation,
@@ -1098,12 +1112,12 @@ impl ConfigLane {
     /// Begin a client request. Returns the first step (an Emit) or a Done
     /// when the request is trivially refusable. Busy while a request is in
     /// flight — the caller must not submit a second. `commit` is the
-    /// issuance ledger: Propose challenges first and commits after the
-    /// reply lands, while Recover — whose canonical needs no challenge —
-    /// commits and signs here, before its transfer emits.
+    /// issuance ledger: Propose and Recover read the target's capability
+    /// first. Propose then challenges, while Recover checks the live floor.
+    /// Both commit and sign only after the corresponding reply lands.
     pub fn submit<C: ConfigAuthorityLedger>(
         &mut self,
-        commit: &mut C,
+        _commit: &mut C,
         request: ConfigRequest,
         now_ms: u64,
     ) -> ConfigStep {
@@ -1145,7 +1159,18 @@ impl ConfigLane {
                     operation_id,
                     authority_generation: self.authority_generation,
                 });
-                self.emit_challenge(target, config_namespace, schema, now_ms)
+                let (network, _) = self.issuer.identity();
+                let step = self.emit_trust_query(
+                    SUB_CONFIG_RECOVERY_INFO,
+                    target,
+                    network,
+                    config_namespace,
+                    now_ms,
+                );
+                if matches!(step, ConfigStep::Done(_)) {
+                    self.clear_issue();
+                }
+                step
             }
             ConfigRequest::Recover {
                 target,
@@ -1156,8 +1181,7 @@ impl ConfigLane {
                 new_revision,
                 snapshot_hash,
                 baseline,
-            } => self.submit_recover(
-                commit,
+            } => self.begin_recover(
                 target,
                 config_namespace,
                 schema,
@@ -1165,7 +1189,7 @@ impl ConfigLane {
                 new_store_generation,
                 new_revision,
                 snapshot_hash,
-                &baseline,
+                baseline,
                 now_ms,
             ),
             ConfigRequest::TrustInstall {
@@ -1188,6 +1212,64 @@ impl ConfigLane {
                 now_ms,
             ),
         }
+    }
+
+    /// Read the target's recovery version, selected profile and live floor
+    /// before any sequence or signature is spent. The target independently
+    /// checks the values again when it receives the signed object.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_recover(
+        &mut self,
+        target: u64,
+        config_namespace: u16,
+        schema: u16,
+        mode: u8,
+        new_store_generation: u32,
+        new_revision: u64,
+        snapshot_hash: [u8; 32],
+        baseline: Vec<u8>,
+        now_ms: u64,
+    ) -> ConfigStep {
+        if !self.issuer.ready() {
+            return ConfigStep::Done(ConfigOutcome::RefusedProfile);
+        }
+        if let Err(error) = self.issuer.prepare_recovery(
+            target,
+            config_namespace,
+            schema,
+            mode,
+            new_store_generation,
+            new_revision,
+            snapshot_hash,
+            &baseline,
+            self.authority_generation,
+            1,
+            [1; 16],
+        ) {
+            return ConfigStep::Done(map_issue_error(error));
+        }
+        let (network, _) = self.issuer.identity();
+        self.recover = Some(RecoverState {
+            target,
+            config_namespace,
+            schema,
+            mode,
+            new_store_generation,
+            new_revision,
+            snapshot_hash,
+            baseline,
+        });
+        let step = self.emit_trust_query(
+            SUB_CONFIG_RECOVERY_INFO,
+            target,
+            network,
+            config_namespace,
+            now_ms,
+        );
+        if matches!(step, ConfigStep::Done(_)) {
+            self.clear_issue();
+        }
+        step
     }
 
     /// The Recover submit: pure input/profile checks, then reserve,
@@ -1468,6 +1550,7 @@ impl ConfigLane {
     /// pending follow-up) when the exchange tears.
     fn clear_issue(&mut self) {
         self.propose = None;
+        self.recover = None;
         self.pending = None;
         self.trust_followup = None;
     }
@@ -1475,6 +1558,7 @@ impl ConfigLane {
     /// The device operation id an indeterminate transfer leaves behind —
     /// the follow-up status read (or a later explicit query) names it.
     fn pending_op_id(&mut self) -> Option<[u8; 16]> {
+        self.recover = None;
         if let Some(pending) = self.pending.take() {
             return Some(pending.operation_id);
         }
@@ -1523,6 +1607,7 @@ impl ConfigLane {
                 network,
                 nonce,
             } => self.on_trust_query_reply(
+                commit,
                 sub,
                 inner,
                 in_flight.target,
@@ -1532,6 +1617,7 @@ impl ConfigLane {
                 now_ms,
             ),
             Phase::Status { operation_id } => self.on_status_reply(
+                commit,
                 inner,
                 in_flight.target,
                 in_flight.config_namespace,
@@ -1801,15 +1887,16 @@ impl ConfigLane {
     /// that passes is reported verbatim: the install receipt (0x26) or
     /// the RCR2 baseline evidence (0x27).
     #[allow(clippy::too_many_arguments)]
-    fn on_trust_query_reply(
+    fn on_trust_query_reply<C: ConfigAuthorityLedger>(
         &mut self,
+        commit: &mut C,
         sub: u8,
         inner: &[u8],
         target: u64,
         config_namespace: u16,
         network: u64,
         nonce: [u8; 16],
-        _now_ms: u64,
+        now_ms: u64,
     ) -> ConfigStep {
         let reply = match host_ops::decode_config_reply(inner, sub) {
             Ok(reply) => reply,
@@ -1848,8 +1935,50 @@ impl ConfigLane {
                 self.clear_issue();
                 return ConfigStep::Done(ConfigOutcome::ProtocolError);
             }
-            self.clear_issue();
-            ConfigStep::Done(ConfigOutcome::RecoveryInfo(info))
+            if let Some(recover) = self.recover.take() {
+                if info.recovery_version != RCR2_VERSION
+                    || info.profile_bits & (1_u32 << self.issuer.profile()) == 0
+                {
+                    return ConfigStep::Done(ConfigOutcome::RefusedProfile);
+                }
+                if info.schema != recover.schema
+                    || info.flags & RECOVERY_INFO_FLAG_IMPAIRED == 0
+                    || info.store_floor >= u32::MAX - 1
+                    || info.decision_floor == u64::MAX
+                    || recover.new_store_generation != info.store_floor + 1
+                    || recover.new_revision != info.decision_floor + 1
+                    || (recover.mode != RCR2_MODE_REPROVISION
+                        && (info.flags & RECOVERY_INFO_FLAG_SURVIVOR_KNOWN == 0
+                            || recover.snapshot_hash != info.snapshot_hash))
+                {
+                    return ConfigStep::Done(ConfigOutcome::RefusedStale);
+                }
+                self.submit_recover(
+                    commit,
+                    recover.target,
+                    recover.config_namespace,
+                    recover.schema,
+                    recover.mode,
+                    recover.new_store_generation,
+                    recover.new_revision,
+                    recover.snapshot_hash,
+                    &recover.baseline,
+                    now_ms,
+                )
+            } else if let Some(propose) = self.propose.as_ref() {
+                if info.schema != propose.schema || info.flags & RECOVERY_INFO_FLAG_IMPAIRED != 0 {
+                    self.clear_issue();
+                    return ConfigStep::Done(ConfigOutcome::RefusedStale);
+                }
+                if info.profile_bits & (1_u32 << self.issuer.profile()) == 0 {
+                    self.clear_issue();
+                    return ConfigStep::Done(ConfigOutcome::RefusedProfile);
+                }
+                self.emit_challenge(target, config_namespace, info.schema, now_ms)
+            } else {
+                self.clear_issue();
+                ConfigStep::Done(ConfigOutcome::RecoveryInfo(info))
+            }
         } else {
             let status = match trust_status_decode(&reply.body) {
                 Ok(status) => status,
@@ -1867,8 +1996,9 @@ impl ConfigLane {
         }
     }
 
-    fn on_status_reply(
+    fn on_status_reply<C: ConfigAuthorityLedger>(
         &mut self,
+        commit: &mut C,
         inner: &[u8],
         target: u64,
         config_namespace: u16,
@@ -1899,6 +2029,11 @@ impl ConfigLane {
         // report a verdict for work we did not ask about.
         if status.config_namespace != config_namespace || status.operation_id != operation_id {
             return ConfigStep::Done(ConfigOutcome::ProtocolError);
+        }
+        if matches!(status.phase, ConfigPhase::Active | ConfigPhase::Interrupted)
+            && status.reason != routeloom_wire::endpoint::ConfigReason::InProgress
+        {
+            let _ = commit.issue_complete(&operation_id);
         }
         ConfigStep::Done(ConfigOutcome::Statused(status))
     }
@@ -1940,6 +2075,7 @@ fn map_issue_refusal(refusal: IssueRefusal) -> ConfigOutcome {
         IssueRefusal::IdentityChanged => ConfigOutcome::Refused(ConfigOpsResult::Denied),
         IssueRefusal::OpConflict => ConfigOutcome::Refused(ConfigOpsResult::Invalid),
         IssueRefusal::RecoveryNeedsDurable => ConfigOutcome::Refused(ConfigOpsResult::Unsupported),
+        IssueRefusal::Capacity => ConfigOutcome::Refused(ConfigOpsResult::Busy),
     }
 }
 
@@ -2227,7 +2363,8 @@ mod tests {
         let mut commit = crate::send_store::MemoryOperationStore::new([0xC0; 16]);
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         let patch = vec![field(1, ConfigFieldType::U8, &[2])];
-        let (req1, body1) = emit(lane.submit(
+        let (req1, body1) = start_propose_challenge(
+            &mut lane,
             &mut commit,
             ConfigRequest::Propose {
                 target: 0x99,
@@ -2238,7 +2375,7 @@ mod tests {
                 apply_budget_ms: 0,
             },
             1_000,
-        ));
+        );
         // The first emit is a ConfigChallenge request (0x23).
         assert_eq!(body1[1], SUB_CONFIG_CHALLENGE);
         assert!(lane.busy());
@@ -2341,7 +2478,8 @@ mod tests {
         // issued operation_id so the caller can keep querying it.
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         let patch = vec![field(1, ConfigFieldType::U8, &[2])];
-        let (req1, body1) = emit(lane.submit(
+        let (req1, body1) = start_propose_challenge(
+            &mut lane,
             &mut commit,
             ConfigRequest::Propose {
                 target: 0x99,
@@ -2352,7 +2490,7 @@ mod tests {
                 apply_budget_ms: 0,
             },
             2_000,
-        ));
+        );
         let mut ch = challenge(1, 1, &base, 4);
         ch.client_nonce = emitted_nonce(&body1);
         let (_req2, _b2) =
@@ -2427,7 +2565,8 @@ mod tests {
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         // Patch identical to base -> NO_CHANGE before any permit is sent.
         let patch = vec![field(1, ConfigFieldType::U8, &[1])];
-        let (req1, body1) = emit(lane.submit(
+        let (req1, body1) = start_propose_challenge(
+            &mut lane,
             &mut commit,
             ConfigRequest::Propose {
                 target: 0x99,
@@ -2438,7 +2577,7 @@ mod tests {
                 apply_budget_ms: 0,
             },
             1_000,
-        ));
+        );
         let mut ch = challenge(1, 1, &base, 4);
         ch.client_nonce = emitted_nonce(&body1);
         let outcome = done(lane.on_reply(&mut commit, req1, &challenge_reply(0x99, &ch), 1_100));
@@ -2694,7 +2833,8 @@ mod tests {
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         let wrong_base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[9])]).unwrap();
         let patch = vec![field(1, ConfigFieldType::U8, &[2])];
-        let (req1, body1) = emit(lane.submit(
+        let (req1, body1) = start_propose_challenge(
+            &mut lane,
             &mut commit,
             ConfigRequest::Propose {
                 target: 0x99,
@@ -2705,7 +2845,7 @@ mod tests {
                 apply_budget_ms: 0,
             },
             1_000,
-        ));
+        );
         let mut ch = challenge(1, 1, &base, 4);
         ch.client_nonce = emitted_nonce(&body1);
         assert_eq!(
@@ -2770,6 +2910,13 @@ mod tests {
 
         fn issue_original(&mut self, op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
             self.inner.issue_original(op_id)
+        }
+
+        fn issue_complete(
+            &mut self,
+            op_id: &[u8; 16],
+        ) -> Result<(), crate::send_store::IssueRefusal> {
+            self.inner.issue_complete(op_id)
         }
     }
 
@@ -3063,13 +3210,13 @@ mod tests {
 
     #[test]
     fn recover_lane_drives_transfer_then_status() {
-        // The full RCR2 trip on a DURABLE store: submit commits
-        // (reserve → bind → sign → store), emits the 0x24 transfer,
+        // The full RCR2 trip on a DURABLE store: target preflight, then
+        // reserve → bind → sign → store, then the 0x24 transfer,
         // follows with the status read, and reports the verdict. The
         // outbox original is byte-identical to the transmitted object.
         let (_db, mut commit) = TempDb::open("recover-trip");
         let mut lane = make_lane();
-        let (req1, body1) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        let (req1, body1) = start_recovery_transfer(&mut lane, &mut commit, 1_000);
         assert_eq!(body1[1], SUB_CONFIG_RECOVER);
         let transfer = host_ops::decode_config_recover(&body1).unwrap();
         assert_eq!(transfer.target, 0x99);
@@ -3110,11 +3257,89 @@ mod tests {
         // store refuses honestly instead of claiming durability.
         let mut lane = make_lane();
         let mut commit = crate::send_store::MemoryOperationStore::new([0xC0; 16]);
+        let (request, body) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        let query = host_ops::decode_config_recovery_info(&body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: 0xAAAA,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1,
+            snapshot_hash: [0xAB; 32],
+        };
         assert_eq!(
-            done(lane.submit(&mut commit, recover_request(), 1_000)),
+            done(lane.on_reply(
+                &mut commit,
+                request,
+                &recovery_info_reply(0x99, &info),
+                1_100
+            )),
             ConfigOutcome::Refused(ConfigOpsResult::Unsupported)
         );
         assert!(!lane.busy());
+    }
+
+    #[test]
+    fn failed_transfer_keeps_the_signed_original() {
+        let (_db, mut commit) = TempDb::open("recover-denied-original");
+        let mut lane = make_lane();
+        let (request, body) = start_recovery_transfer(&mut lane, &mut commit, 1_000);
+        let signed = host_ops::decode_config_recover(&body).unwrap().object;
+        let denied = host_ops::encode_config_reply(
+            SUB_CONFIG_RECOVER,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Denied as u16,
+                target: 0x99,
+                body: Vec::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            done(lane.on_reply(&mut commit, request, &denied, 1_100)),
+            ConfigOutcome::Refused(ConfigOpsResult::Denied)
+        );
+        let canonical = dev_recovery_verify(DEV_KEY, 0xAAAA, 0x99, 1, 0x42, 1, &signed).unwrap();
+        let op_id = routeloom_wire::endpoint::config_recovery_decode(&canonical)
+            .unwrap()
+            .operation_id;
+        assert_eq!(commit.issue_original(&op_id), Some((canonical, signed)));
+        for id in 1..64_u8 {
+            let mut filler = [0_u8; 16];
+            filler[0] = 0xFE;
+            filler[1] = id;
+            commit
+                .issue_reserve(&IssueIdentity {
+                    kind: ISSUE_KIND_PERMIT,
+                    op_id: filler,
+                    target: 0x99,
+                    namespace: 1,
+                    profile: ISSUE_PROFILE_DEV,
+                    authority: 0x42,
+                    generation: 1,
+                    network: 0xAAAA,
+                })
+                .unwrap();
+        }
+        let mut overflow = [0_u8; 16];
+        overflow[0] = 0xFE;
+        overflow[1] = 64;
+        assert_eq!(
+            commit.issue_reserve(&IssueIdentity {
+                kind: ISSUE_KIND_PERMIT,
+                op_id: overflow,
+                target: 0x99,
+                namespace: 1,
+                profile: ISSUE_PROFILE_DEV,
+                authority: 0x42,
+                generation: 1,
+                network: 0xAAAA,
+            }),
+            Err(crate::send_store::IssueRefusal::Capacity)
+        );
     }
 
     #[test]
@@ -3125,7 +3350,8 @@ mod tests {
         let mut commit = crate::send_store::MemoryOperationStore::new([0xC0; 16]);
         let base = config_tlv_encode(&[field(1, ConfigFieldType::U8, &[1])]).unwrap();
         let patch = vec![field(1, ConfigFieldType::U8, &[2])];
-        let (req1, body1) = emit(lane.submit(
+        let (req1, body1) = start_propose_challenge(
+            &mut lane,
             &mut commit,
             ConfigRequest::Propose {
                 target: 0x99,
@@ -3136,7 +3362,7 @@ mod tests {
                 apply_budget_ms: 0,
             },
             1_000,
-        ));
+        );
         let mut ch = challenge(1, 1, &base, 4);
         ch.client_nonce = emitted_nonce(&body1);
         let (req2, body2) =
@@ -3162,7 +3388,8 @@ mod tests {
             &status_reply(0x99, &control_status(op)),
             1_300,
         );
-        let (req4, body4) = emit(lane.submit(
+        let (req4, body4) = start_propose_challenge(
+            &mut lane,
             &mut commit,
             ConfigRequest::Propose {
                 target: 0x99,
@@ -3173,7 +3400,7 @@ mod tests {
                 apply_budget_ms: 0,
             },
             2_000,
-        ));
+        );
         let mut ch2 = challenge(1, 1, &base, 4);
         ch2.client_nonce = emitted_nonce(&body4);
         let (_req5, body5) =
@@ -3272,6 +3499,225 @@ mod tests {
         .unwrap()
     }
 
+    fn start_propose_challenge<C: crate::send_store::ConfigAuthorityLedger>(
+        lane: &mut ConfigLane,
+        commit: &mut C,
+        request: ConfigRequest,
+        now_ms: u64,
+    ) -> (u64, Vec<u8>) {
+        let (query_id, body) = emit(lane.submit(commit, request, now_ms));
+        assert_eq!(body[1], SUB_CONFIG_RECOVERY_INFO);
+        let query = host_ops::decode_config_recovery_info(&body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: 0xAAAA,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: 0,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1_u32 << lane.issuer.profile(),
+            snapshot_hash: [0; 32],
+        };
+        emit(lane.on_reply(
+            commit,
+            query_id,
+            &recovery_info_reply(0x99, &info),
+            now_ms + 10,
+        ))
+    }
+
+    fn start_recovery_transfer<C: crate::send_store::ConfigAuthorityLedger>(
+        lane: &mut ConfigLane,
+        commit: &mut C,
+        now_ms: u64,
+    ) -> (u64, Vec<u8>) {
+        let (request, body) = emit(lane.submit(commit, recover_request(), now_ms));
+        assert_eq!(body[1], SUB_CONFIG_RECOVERY_INFO);
+        let query = host_ops::decode_config_recovery_info(&body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: 0xAAAA,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1_u32 << lane.issuer.profile(),
+            snapshot_hash: [0xAB; 32],
+        };
+        emit(lane.on_reply(
+            commit,
+            request,
+            &recovery_info_reply(0x99, &info),
+            now_ms + 10,
+        ))
+    }
+
+    #[test]
+    fn recover_checks_target_capability_before_reserving() {
+        for case in 0..9 {
+            let mut lane = make_lane();
+            let mut commit = CountingCommit::fresh();
+            let (request, body) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+            assert_eq!(body[1], SUB_CONFIG_RECOVERY_INFO);
+            assert_eq!(commit.reserves, 0);
+            let query = host_ops::decode_config_recovery_info(&body).unwrap();
+            let mut info = RecoveryInfo {
+                config_namespace: 1,
+                schema: 1,
+                nonce_echo: query.nonce,
+                network: 0xAAAA,
+                store_floor: 3,
+                decision_floor: 7,
+                flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+                recovery_version: RCR2_VERSION,
+                profile_bits: 1,
+                snapshot_hash: [0xAB; 32],
+            };
+            let expected = match case {
+                0 => {
+                    info.profile_bits = 0;
+                    ConfigOutcome::RefusedProfile
+                }
+                1 => {
+                    info.recovery_version = 1;
+                    ConfigOutcome::RefusedProfile
+                }
+                2 => {
+                    info.flags = 0;
+                    ConfigOutcome::RefusedStale
+                }
+                3 => {
+                    info.store_floor = 4;
+                    ConfigOutcome::RefusedStale
+                }
+                4 => {
+                    info.decision_floor = u64::MAX;
+                    ConfigOutcome::RefusedStale
+                }
+                5 => {
+                    info.store_floor = u32::MAX - 1;
+                    ConfigOutcome::RefusedStale
+                }
+                6 => {
+                    info.flags = RECOVERY_INFO_FLAG_IMPAIRED;
+                    ConfigOutcome::RefusedStale
+                }
+                7 => {
+                    info.snapshot_hash[0] ^= 1;
+                    ConfigOutcome::RefusedStale
+                }
+                _ => {
+                    info.schema = 2;
+                    ConfigOutcome::RefusedStale
+                }
+            };
+            assert_eq!(
+                done(lane.on_reply(
+                    &mut commit,
+                    request,
+                    &recovery_info_reply(0x99, &info),
+                    1_100
+                )),
+                expected,
+                "case {case}"
+            );
+            assert_eq!(commit.reserves, 0, "case {case}");
+        }
+    }
+
+    #[test]
+    fn recover_query_timeout_clears_pending_state() {
+        let mut lane = make_lane();
+        let mut commit = CountingCommit::fresh();
+        let (_request, body) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        assert_eq!(body[1], SUB_CONFIG_RECOVERY_INFO);
+        assert_eq!(
+            lane.poll(1_000 + CONFIG_QUERY_TIMEOUT_MS),
+            Some(ConfigOutcome::Timeout)
+        );
+        assert!(lane.recover.is_none());
+        assert_eq!(commit.reserves, 0);
+        let (request, body) = emit(lane.submit(
+            &mut commit,
+            ConfigRequest::RecoveryInfo {
+                target: 0x99,
+                network: 0xAAAA,
+                config_namespace: 1,
+            },
+            2_000,
+        ));
+        let query = host_ops::decode_config_recovery_info(&body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: 0xAAAA,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1,
+            snapshot_hash: [0xAB; 32],
+        };
+        assert_eq!(
+            done(lane.on_reply(
+                &mut commit,
+                request,
+                &recovery_info_reply(0x99, &info),
+                2_100
+            )),
+            ConfigOutcome::RecoveryInfo(info)
+        );
+        assert_eq!(commit.reserves, 0);
+    }
+
+    #[test]
+    fn propose_checks_target_capability_before_reserving() {
+        let mut lane = make_lane();
+        let mut commit = CountingCommit::fresh();
+        let (request, body) = emit(lane.submit(
+            &mut commit,
+            ConfigRequest::Propose {
+                target: 0x99,
+                config_namespace: 1,
+                schema: 1,
+                base_snapshot: Vec::new(),
+                patch: vec![field(1, ConfigFieldType::U8, &[1])],
+                apply_budget_ms: 0,
+            },
+            1_000,
+        ));
+        assert_eq!(body[1], SUB_CONFIG_RECOVERY_INFO);
+        assert_eq!(commit.reserves, 0);
+        let query = host_ops::decode_config_recovery_info(&body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: 0xAAAA,
+            store_floor: 1,
+            decision_floor: 1,
+            flags: 0,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 0,
+            snapshot_hash: [0; 32],
+        };
+        assert_eq!(
+            done(lane.on_reply(
+                &mut commit,
+                request,
+                &recovery_info_reply(0x99, &info),
+                1_100
+            )),
+            ConfigOutcome::RefusedProfile
+        );
+        assert_eq!(commit.reserves, 0);
+    }
+
     #[test]
     fn trust_install_transfers_then_reads_the_receipt() {
         let mut lane = make_lane();
@@ -3350,7 +3796,7 @@ mod tests {
             1,
             lane_entropy(),
         );
-        let (req1, body1) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        let (req1, body1) = start_recovery_transfer(&mut lane, &mut commit, 1_000);
         assert_eq!(body1[1], SUB_CONFIG_RECOVER);
         let transfer = host_ops::decode_config_recover(&body1).unwrap();
         assert_eq!(transfer.target, 0x99);
@@ -3413,6 +3859,13 @@ mod tests {
         fn issue_original(&mut self, _op_id: &[u8; 16]) -> Option<(Vec<u8>, Vec<u8>)> {
             None
         }
+
+        fn issue_complete(
+            &mut self,
+            _op_id: &[u8; 16],
+        ) -> Result<(), crate::send_store::IssueRefusal> {
+            Err(crate::send_store::IssueRefusal::Unprovable)
+        }
     }
 
     #[test]
@@ -3469,7 +3922,7 @@ mod tests {
         // generation — while the old lineage refuses to rotate.
         let mut lane = make_lane();
         let (_db, mut commit) = TempDb::open("gen-rebind-1");
-        let (req1, body1) = emit(lane.submit(&mut commit, recover_request(), 1_000));
+        let (req1, body1) = start_recovery_transfer(&mut lane, &mut commit, 1_000);
         assert_eq!(body1[1], SUB_CONFIG_RECOVER);
         let (req2, body2) = emit(lane.on_reply(
             &mut commit,
@@ -3493,7 +3946,7 @@ mod tests {
         // Disaster + recovery: the new generation over a fresh lineage.
         lane.set_authority(2);
         let (_db2, mut commit2) = TempDb::open("gen-rebind-2");
-        let (req3, body3) = emit(lane.submit(&mut commit2, recover_request(), 2_000));
+        let (req3, body3) = start_recovery_transfer(&mut lane, &mut commit2, 2_000);
         assert_eq!(body3[1], SUB_CONFIG_RECOVER);
         let (req4, body4) = emit(lane.on_reply(
             &mut commit2,
@@ -3519,8 +3972,27 @@ mod tests {
         // generation against it refuses instead of rotating in place.
         let mut lane2 = make_lane();
         lane2.set_authority(2);
+        let (request, body) = emit(lane2.submit(&mut commit, recover_request(), 3_000));
+        let query = host_ops::decode_config_recovery_info(&body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: 0xAAAA,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1,
+            snapshot_hash: [0xAB; 32],
+        };
         assert_eq!(
-            done(lane2.submit(&mut commit, recover_request(), 3_000)),
+            done(lane2.on_reply(
+                &mut commit,
+                request,
+                &recovery_info_reply(0x99, &info),
+                3_100
+            )),
             ConfigOutcome::Refused(ConfigOpsResult::Denied)
         );
         assert!(!lane2.busy());

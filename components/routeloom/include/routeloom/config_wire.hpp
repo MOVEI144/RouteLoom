@@ -207,8 +207,7 @@ class ConfigHostSink {
                                ByteView body, MonotonicMs now_ms) noexcept = 0;
 };
 
-// One outstanding query, plus one outstanding transfer per object kind —
-// the single-transaction bound the design fixes. The USB bridge calls
+// One outstanding query and one outstanding object transfer. The USB bridge calls
 // submit_*; the replies arrive on on_config_frame and are reported to the
 // host once, correlated by the original request id.
 class ConfigGateway final : public ConfigEndpointSink {
@@ -246,14 +245,12 @@ class ConfigGateway final : public ConfigEndpointSink {
   Status submit_permit(std::uint64_t request, NodeId target, ByteView permit,
                        MonotonicMs now_ms) noexcept;
   // 0x24 ConfigRecover: the same manifest+chunk pump for a signed recovery
-  // object on the kind-4 lane — the reply reports under sub 0x24. Runs on
-  // its own transfer slot so a permit transfer in flight never holds the
-  // recovery a quarantined target is waiting for.
+  // object on the kind-4 lane — the reply reports under sub 0x24.
   Status submit_recovery(std::uint64_t request, NodeId target, ByteView object,
                          MonotonicMs now_ms) noexcept;
   // 0x25 ConfigTrust: the same pump for a signed trust-manifest (RTM1)
   // object (<=2048 B) on the kind-5 lane — the reply reports under sub
-  // 0x25. Its own slot, so trust delivery never waits on config traffic.
+  // 0x25.
   Status submit_trust(std::uint64_t request, NodeId target, ByteView object,
                       MonotonicMs now_ms) noexcept;
 
@@ -267,10 +264,10 @@ class ConfigGateway final : public ConfigEndpointSink {
   bool query_active() const noexcept { return query_.active; }
   bool transfer_active() const noexcept { return transfer_.active; }
   bool recovery_transfer_active() const noexcept {
-    return recovery_transfer_.active;
+    return transfer_.active && transfer_.usb_sub == 0x24;
   }
   bool trust_transfer_active() const noexcept {
-    return trust_transfer_.active;
+    return transfer_.active && transfer_.usb_sub == 0x25;
   }
   std::uint32_t replies_reported() const noexcept { return replies_reported_; }
 
@@ -298,10 +295,8 @@ class ConfigGateway final : public ConfigEndpointSink {
     NetworkId network{0};
   };
   enum class TransferPhase : std::uint8_t { Chunks, AwaitAck };
-  // One manifest+chunk transfer slot, sized by the kind it carries (1024
-  // for kind 3/4, 2048 for kind 5). The pump below is shared — the size
-  // parameter only bounds the staging buffer.
-  template <std::size_t N>
+  // One manifest+chunk slot with the maximum carrier buffer. Kind 3/4
+  // still enforce their 1024 B object cap at admission.
   struct TransferSlot {
     bool active{false};
     std::uint64_t request{0};
@@ -312,35 +307,24 @@ class ConfigGateway final : public ConfigEndpointSink {
     std::uint16_t object_size{0};
     TransferPhase phase{TransferPhase::Chunks};
     MonotonicMs deadline_ms{0};
-    ByteBuffer<N> object{};
+    ByteBuffer<kConfigTrustObjectMax> object{};
   };
 
-  // Shared manifest+chunk pump for one transfer slot of any kind: the
-  // slot's buffer size caps the object, so a kind can never overflow the
-  // slot it was given.
-  template <std::size_t N>
-  void pump_transfer(TransferSlot<N>& transfer, MonotonicMs now_ms) noexcept;
-  template <std::size_t N>
-  void start_transfer(TransferSlot<N>& transfer, std::uint64_t request,
+  void pump_transfer(MonotonicMs now_ms) noexcept;
+  void start_transfer(std::uint64_t request,
                       NodeId target, autonomy::ControlObjectKind kind,
                       ByteView object, MonotonicMs now_ms,
                       Status& out) noexcept;
   void finish_query(ConfigOpsResult result, ByteView body,
                     MonotonicMs now_ms) noexcept;
-  template <std::size_t N>
-  void finish_transfer(TransferSlot<N>& transfer, ConfigOpsResult result,
-                       MonotonicMs now_ms) noexcept;
-  template <std::size_t N>
-  void resolve_transfer_ack(TransferSlot<N>& transfer,
-                            const autonomy::ObjectAckPayload& ack,
+  void finish_transfer(ConfigOpsResult result, MonotonicMs now_ms) noexcept;
+  void resolve_transfer_ack(const autonomy::ObjectAckPayload& ack,
                             MonotonicMs now_ms) noexcept;
 
   ConfigWirePort& wire_;
   ConfigHostSink& host_;
   PendingQuery query_{};
-  TransferSlot<kConfigPermitObjectMax> transfer_{};
-  TransferSlot<kConfigPermitObjectMax> recovery_transfer_{};
-  TransferSlot<kConfigTrustObjectMax> trust_transfer_{};
+  TransferSlot transfer_{};
   std::uint32_t replies_reported_{0};
 };
 

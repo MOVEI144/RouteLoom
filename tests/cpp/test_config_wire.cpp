@@ -1362,10 +1362,9 @@ void test_recovery_info_query_wire() {
   CHECK(host.last_result == ConfigOpsResult::Ok);
 }
 
-// Permit, recovery and trust transfers run on independent slots — each
-// resolves under its own subcommand, and the trust slot stages the full
-// 2048 B ceiling the 1024 B slots cannot hold.
-void test_transfer_slots_independent() {
+// All three kinds share one bounded staging slot; the object kind fixes
+// the cap, while the reply keeps the submitted HostOps subcommand.
+void test_transfer_slot_shared() {
   MonotonicMs now_ms = 12000;
   ConfigEndpointSink* gw_peer = nullptr;
   ConfigEndpointSink* tgt_peer = nullptr;
@@ -1385,16 +1384,10 @@ void test_transfer_slots_independent() {
   CHECK_OK(gateway.submit_permit(0xE1, kTarget,
                                  ByteView{permit.data(), permit.size()},
                                  now_ms));
-  CHECK_OK(gateway.submit_recovery(0xE2, kTarget,
-                                   ByteView{recovery.data(), recovery.size()},
-                                   now_ms));
-  CHECK_OK(gateway.submit_trust(0xE3, kTarget,
-                                ByteView{manifest.data(), manifest.size()},
-                                now_ms));
   CHECK(gateway.transfer_active());
-  CHECK(gateway.recovery_transfer_active());
-  CHECK(gateway.trust_transfer_active());
-  // A second trust object while one is outstanding reports Busy.
+  CHECK(!gateway.submit_recovery(0xE2, kTarget,
+                                 ByteView{recovery.data(), recovery.size()},
+                                 now_ms).ok());
   CHECK(!gateway.submit_trust(0xE4, kTarget,
                               ByteView{manifest.data(), manifest.size()},
                               now_ms)
@@ -1417,14 +1410,19 @@ void test_transfer_slots_independent() {
     CHECK(host.last_sub == sub);
     CHECK(host.last_result == ConfigOpsResult::Ok);
   };
+  ack_for(ByteView{permit.data(), permit.size()}, 0xE1, 0x21);
+  CHECK(!gateway.transfer_active());
+  CHECK_OK(gateway.submit_recovery(0xE2, kTarget,
+                                   ByteView{recovery.data(), recovery.size()},
+                                   now_ms));
   ack_for(ByteView{recovery.data(), recovery.size()}, 0xE2, 0x24);
   CHECK(!gateway.recovery_transfer_active());
-  CHECK(gateway.transfer_active());
+  CHECK_OK(gateway.submit_trust(0xE3, kTarget,
+                                ByteView{manifest.data(), manifest.size()},
+                                now_ms));
   CHECK(gateway.trust_transfer_active());
   ack_for(ByteView{manifest.data(), manifest.size()}, 0xE3, 0x25);
   CHECK(!gateway.trust_transfer_active());
-  ack_for(ByteView{permit.data(), permit.size()}, 0xE1, 0x21);
-  CHECK(!gateway.transfer_active());
   CHECK(host.calls == 3);
 
   // And the 1024 B slots still refuse what only the trust slot can stage.
@@ -1453,7 +1451,7 @@ int main() {
   test_trust_verify_shares_budget();
   test_trust_status_query_wire();
   test_recovery_info_query_wire();
-  test_transfer_slots_independent();
+  test_transfer_slot_shared();
   if (failures == 0) {
     std::printf("config_wire tests OK\n");
     return 0;

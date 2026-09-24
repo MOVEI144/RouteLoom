@@ -989,17 +989,11 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
       return quarantine(StatusCode::IntegrityError,
                         "config journal newer than security floor");
     }
-    if ((parsed[newer].store_generation < floor_j ||
-         parsed[newer].decision_revision < floor_r) &&
-        parsed[newer].kind != ConfigRecordKind::Standard) {
-      // A ceremony record whose counters the floor already moved past:
-      // the authorization it was reserved under is spent, so resuming
-      // from it would spend an authorization the floor no longer names.
-      // The survivor stays a known value only; only a fresh exact-next
-      // authorization resumes. (Consumed gaps under Standard records
-      // stay tolerated — a dropped normal write faults the operation,
-      // not the journal's continuity, which the revision CAS still
-      // guards.)
+    if (parsed[newer].store_generation < floor_j ||
+        parsed[newer].decision_revision < floor_r) {
+      // A gap can be spent safely in the same boot, but after a restart
+      // the journal cannot prove whether a later committed record was
+      // lost. Keep the survivor as a known value only.
       uncertain_ = true;
       initialized_ = true;
       return Status::error(StatusCode::IntegrityError,
@@ -1052,11 +1046,10 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
       }
       return resolve_recovered(now_ms);
     }
-    if ((parsed[slot].store_generation < floor_j ||
-         parsed[slot].decision_revision < floor_r) &&
-        parsed[slot].kind != ConfigRecordKind::Standard) {
-      // Same spent authorization as the two-slot path: a ceremony
-      // record the floor moved past never auto-resumes.
+    if (parsed[slot].store_generation < floor_j ||
+        parsed[slot].decision_revision < floor_r) {
+      // The persisted counters lag the independent floor; the missing
+      // history cannot be distinguished from a consumed write gap.
       uncertain_ = true;
       return Status::error(StatusCode::IntegrityError,
                            "config floor ahead of journal");
@@ -1328,13 +1321,22 @@ Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& qu
   endpoint::ControlStatus status{};
   status.config_namespace = config_.config_namespace;
   status.operation_id = query.operation_id;
+  const auto encode_status = [&]() noexcept {
+    // A stored Active record is only a known historical value while the
+    // journal is impaired; it cannot certify the current provider state.
+    if ((uncertain_ || quarantined_) && status.phase == ConfigPhase::Active) {
+      status.phase = ConfigPhase::Quarantined;
+      status.reason = ConfigReason::RecoveryRequired;
+    }
+    return endpoint::control_status_encode(status, out);
+  };
   if (txn_.active && txn_.command.operation_id == query.operation_id) {
     status.phase = phase_;
     status.reason = ConfigReason::InProgress;
     status.decision_revision = txn_.command.next_revision;
     status.active_revision = active_revision_;
     status.active_hash = active_hash_;
-    return endpoint::control_status_encode(status, out);
+    return encode_status();
   }
   if (has_active_ && durable_.operation_id == query.operation_id) {
     status.phase = durable_.phase;
@@ -1351,7 +1353,7 @@ Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& qu
     status.decision_revision = durable_.decision_revision;
     status.active_revision = durable_.active_revision;
     status.active_hash = active_hash_;
-    return endpoint::control_status_encode(status, out);
+    return encode_status();
   }
   const ResultRecord* record = nullptr;
   if (find_result(query.operation_id, record)) {
@@ -1365,14 +1367,14 @@ Status ConfigJournal::handle_status_query(const endpoint::ControlStatusQuery& qu
       status.decision_revision = record->decision_revision;
       status.active_revision = record->active_revision;
       status.active_hash = record->active_hash;
-      return endpoint::control_status_encode(status, out);
+      return encode_status();
     }
     status.phase = record->phase;
     status.reason = record->reason;
     status.decision_revision = record->decision_revision;
     status.active_revision = record->active_revision;
     status.active_hash = record->active_hash;
-    return endpoint::control_status_encode(status, out);
+    return encode_status();
   }
   return Status::error(StatusCode::NotFound, "config operation unknown");
 }

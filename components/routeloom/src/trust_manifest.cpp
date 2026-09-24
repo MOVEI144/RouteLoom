@@ -259,11 +259,21 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object,
     return Status::error(StatusCode::ProtocolError, "manifest epoch zero");
   }
 
-  // 3. Completed duplicate: same epoch as the committed image with
-  //    byte-identical content — success WITHOUT a flash write on a clean
-  //    store; on an uncertain store the same bytes heal the missing twin
-  //    through install_reserved(). Same epoch with different content is a
-  //    fork attempt, never an update.
+  SecurityFloorState floor_state{};
+  status = floor.read(floor_state);
+  if (!status.ok()) return status;
+  Digest256 object_hash{};
+  sha256(object, object_hash);
+  const bool floor_bound =
+      object_hash == floor_state.last_manifest_hash &&
+      candidate.store_epoch == floor_state.trust_epoch_floor &&
+      candidate.min_authority_generation == floor_state.min_authority_generation &&
+      candidate.network == floor_state.network;
+
+  // 3. Completed duplicate: the same signed original and image content
+  //    succeeds WITHOUT a flash write on a clean store; on an uncertain
+  //    store it heals the missing twin. Different original bytes or
+  //    content at this epoch cannot stand in for the root reservation.
   if (store.has_active() && candidate.store_epoch == store.store_epoch()) {
     ByteBuffer<kTrustImageContentMax> active_body{};
     status = trust_image_body_encode(store.image(), active_body);
@@ -272,6 +282,10 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object,
         std::memcmp(active_body.bytes.data(), parts.payload.data,
                     parts.payload.size) != 0) {
       return Status::error(StatusCode::Conflict, "manifest epoch fork");
+    }
+    if (!floor_bound) {
+      return Status::error(StatusCode::Conflict,
+                           "manifest duplicate is not the reserved original");
     }
     if (!store.quarantined() && !store.uncertain()) return Status::success();
     return store.install_reserved(candidate);
@@ -284,24 +298,6 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object,
     return Status::error(StatusCode::InvalidArgument,
                          "manifest seals the counter axis");
   }
-
-  // The floor binding for this exact original.
-  Digest256 object_hash{};
-  sha256(object, object_hash);
-  SecurityFloorState floor_state{};
-  status = floor.read(floor_state);
-  if (!status.ok()) return status;
-  bool hash_matches = true;
-  for (std::size_t i = 0; i < object_hash.size(); ++i) {
-    if (object_hash[i] != floor_state.last_manifest_hash[i]) {
-      hash_matches = false;
-      break;
-    }
-  }
-  const bool floor_bound =
-      hash_matches && candidate.store_epoch == floor_state.trust_epoch_floor &&
-      candidate.min_authority_generation == floor_state.min_authority_generation &&
-      candidate.network == floor_state.network;
 
   // 4. Floor-bound re-install: these exact bytes were root-authorized
   //    before (that is the only way a reservation exists), but the commit
@@ -333,7 +329,6 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object,
     return Status::error(StatusCode::AuthorizationFailed,
                         "no trust anchor base installed");
   }
-
   // Ordinal epoch compare — a manifest at or below the committed epoch
   // is a harmless stale replay, denied without spending the verify.
   if (candidate.store_epoch <= store.store_epoch()) {
@@ -352,6 +347,11 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object,
   if (candidate.network != floor_state.network) {
     return Status::error(StatusCode::AuthorizationFailed,
                         "manifest foreign floor network");
+  }
+  if (store.store_epoch() < floor_state.trust_epoch_floor ||
+      store.min_authority_generation() < floor_state.min_authority_generation) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "trust reservation awaits its original");
   }
 
   // kid names an anchor ACTIVE in the CURRENT image (a manifest signed

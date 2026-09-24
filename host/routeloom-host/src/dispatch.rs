@@ -2688,8 +2688,9 @@ mod tests {
     };
     use routeloom_wire::autonomy::EncodedPayload;
     use routeloom_wire::endpoint::{
-        control_challenge_encode, control_status_encode, ConfigField, ConfigFieldType, ConfigPhase,
-        ConfigReason, ControlChallenge, ControlStatus,
+        control_challenge_encode, control_status_encode, recovery_info_encode, ConfigField,
+        ConfigFieldType, ConfigPhase, ConfigReason, ControlChallenge, ControlStatus, RecoveryInfo,
+        RCR2_VERSION, RECOVERY_INFO_FLAG_IMPAIRED, RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
     };
 
     const UID: u32 = 501;
@@ -5168,6 +5169,37 @@ mod tests {
         dispatcher.attach_config(test_config_lane(), 0x42, 1);
         let mut store = MemoryOperationStore::new([0xab; 16]);
         dispatcher.config_submit(&mut store, &link(), 31, recover_request(), 1_000);
+        let out = dispatcher.tick(&mut store, &link(), 1_000);
+        let wire = config_wire(&out, host_ops::SUB_CONFIG_RECOVERY_INFO);
+        let emit = out
+            .iter()
+            .find(|r| r.body.get(1) == Some(&host_ops::SUB_CONFIG_RECOVERY_INFO))
+            .unwrap();
+        let query = host_ops::decode_config_recovery_info(&emit.body).unwrap();
+        let info = RecoveryInfo {
+            config_namespace: 1,
+            schema: 1,
+            nonce_echo: query.nonce,
+            network: NET,
+            store_floor: 3,
+            decision_floor: 7,
+            flags: RECOVERY_INFO_FLAG_IMPAIRED | RECOVERY_INFO_FLAG_SURVIVOR_KNOWN,
+            recovery_version: RCR2_VERSION,
+            profile_bits: 1,
+            snapshot_hash: [0xAB; 32],
+        };
+        let mut encoded = EncodedPayload::default();
+        recovery_info_encode(&info, &mut encoded).unwrap();
+        let reply = host_ops::encode_config_reply(
+            host_ops::SUB_CONFIG_RECOVERY_INFO,
+            &host_ops::ConfigReply {
+                result: ConfigOpsResult::Ok as u16,
+                target: 0x99,
+                body: encoded.view().to_vec(),
+            },
+        )
+        .unwrap();
+        dispatcher.handle_reply(&mut store, wire, &reply, 1_050);
         assert_eq!(
             dispatcher.take_config_done(),
             vec![(31, ConfigOutcome::Refused(ConfigOpsResult::Unsupported))]

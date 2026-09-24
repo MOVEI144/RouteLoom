@@ -45,11 +45,10 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-/// Schema v2 adds `operations.dispatch` — the TX-I2 dispatch attachment
-/// blob. A v1 file is migrated by one additive `ALTER TABLE` inside a
-/// transaction (the column defaults to NULL, exactly what a never-dispatched
-/// record means); anything else is still refused rather than rewritten.
-const SCHEMA_VERSION: u32 = 2;
+/// Schema v2 added the TX-I2 `operations.dispatch` attachment. Schema v3
+/// adds the bounded config outbox and its terminal marker. v1/v2 files are
+/// migrated atomically; unknown versions still refuse to open.
+const SCHEMA_VERSION: u32 = 3;
 
 /// Mirror of the device dispatch window (contracts `DISPATCH_WINDOW`,
 /// kept in `dispatch.rs`): lane positions further than this below the
@@ -83,13 +82,16 @@ CREATE TABLE IF NOT EXISTS operations(
     UNIQUE(uid, network, epoch, key));
 CREATE INDEX IF NOT EXISTS idx_operations_scope_epoch
     ON operations(uid, network, epoch);
+";
+
+const CONFIG_OUTBOX_SQL: &str = "
 CREATE TABLE IF NOT EXISTS config_outbox(
     opid BLOB PRIMARY KEY,
     kind INTEGER NOT NULL, target BLOB NOT NULL, ns INTEGER NOT NULL,
     profile INTEGER NOT NULL, authority BLOB NOT NULL,
     generation INTEGER NOT NULL, network BLOB NOT NULL,
     sequence BLOB NOT NULL, canonical BLOB,
-    signed BLOB);
+    signed BLOB, terminal INTEGER NOT NULL DEFAULT 0);
 ";
 
 const TERMINAL_SQL: &str =
@@ -495,6 +497,7 @@ impl SqliteOperationStore {
             // and lineage set, next_seq missing).
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(SCHEMA_SQL)?;
+            tx.execute_batch(CONFIG_OUTBOX_SQL)?;
             tx.execute(
                 "INSERT INTO meta(key, value) VALUES ('schema_version', ?1)",
                 params![SCHEMA_VERSION.to_be_bytes().to_vec()],
@@ -521,9 +524,9 @@ impl SqliteOperationStore {
         }
         match version {
             None | Some(SCHEMA_VERSION) => {}
-            // v1 → v2: one additive nullable column for the TX-I2 dispatch
-            // attachment, committed atomically with the version bump.
-            Some(1) => {
+            // v1/v2 → v3: preserve the dispatch attachment and add the
+            // bounded config outbox with an explicit terminal marker.
+            Some(1) | Some(2) => {
                 let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let has_dispatch: i64 = tx.query_row(
                     "SELECT COUNT(*) FROM pragma_table_info('operations') WHERE name='dispatch'",
@@ -532,6 +535,18 @@ impl SqliteOperationStore {
                 )?;
                 if has_dispatch == 0 {
                     tx.execute("ALTER TABLE operations ADD COLUMN dispatch BLOB", [])?;
+                }
+                tx.execute_batch(CONFIG_OUTBOX_SQL)?;
+                let has_terminal: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('config_outbox') WHERE name='terminal'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if has_terminal == 0 {
+                    tx.execute(
+                        "ALTER TABLE config_outbox ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0",
+                        [],
+                    )?;
                 }
                 tx.execute(
                     "UPDATE meta SET value=?1 WHERE key='schema_version'",
@@ -1317,21 +1332,39 @@ impl SqliteOperationStore {
             eprintln!("opstore fault: config authority sequence exhausted");
             return Err(IssueRefusal::Unprovable);
         }
+        let count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM config_outbox", [], |row| row.get(0))
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        if count >= ISSUE_OUTBOX_CAP as i64 {
+            let completed: Option<Vec<u8>> = tx
+                .query_row(
+                    "SELECT opid FROM config_outbox WHERE terminal=1 ORDER BY rowid ASC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| {
+                    eprintln!("opstore fault: {error}");
+                    IssueRefusal::Unprovable
+                })?;
+            let Some(completed) = completed else {
+                return Err(IssueRefusal::Capacity);
+            };
+            tx.execute(
+                "DELETE FROM config_outbox WHERE opid=?1",
+                params![completed],
+            )
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        }
         tx.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES('config_auth_seq', ?1)",
             params![u64_blob(next + 1)],
-        )
-        .map_err(|error| {
-            eprintln!("opstore fault: {error}");
-            IssueRefusal::Unprovable
-        })?;
-        // Oldest-first eviction keeps the table bounded; the just-reserved
-        // row has the newest rowid so it can never evict itself.
-        tx.execute(
-            "DELETE FROM config_outbox WHERE opid IN \
-             (SELECT opid FROM config_outbox ORDER BY rowid ASC \
-              LIMIT MAX(0, (SELECT COUNT(*) FROM config_outbox) - ?1 + 1))",
-            params![ISSUE_OUTBOX_CAP as i64],
         )
         .map_err(|error| {
             eprintln!("opstore fault: {error}");
@@ -1514,6 +1547,38 @@ impl SqliteOperationStore {
         match (canonical, signed) {
             (Some(canonical), Some(signed)) => Some((canonical, signed)),
             _ => None,
+        }
+    }
+
+    pub fn issue_complete_tx(&mut self, op_id: &[u8; 16]) -> Result<(), IssueRefusal> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE config_outbox SET terminal=1 WHERE opid=?1 AND signed IS NOT NULL",
+                params![op_id.to_vec()],
+            )
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        if updated != 1 {
+            return Err(IssueRefusal::Unprovable);
+        }
+        let terminal: i64 = self
+            .conn
+            .query_row(
+                "SELECT terminal FROM config_outbox WHERE opid=?1",
+                params![op_id.to_vec()],
+                |row| row.get(0),
+            )
+            .map_err(|error| {
+                eprintln!("opstore fault: {error}");
+                IssueRefusal::Unprovable
+            })?;
+        if terminal == 1 {
+            Ok(())
+        } else {
+            Err(IssueRefusal::Unprovable)
         }
     }
 }
@@ -2948,6 +3013,47 @@ mod tests {
             reopened.issue_reserve_tx(&issue(2, crate::send_store::ISSUE_KIND_RECOVERY)),
             Ok(2)
         );
+    }
+
+    #[test]
+    fn issue_outbox_migrates_v2_and_preserves_unresolved_rows() {
+        let db = TestDb::new("issue-v2-outbox");
+        let store = db.open();
+        store.conn.execute("DROP TABLE config_outbox", []).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE meta SET value=?1 WHERE key='schema_version'",
+                params![2u32.to_be_bytes().to_vec()],
+            )
+            .unwrap();
+        drop(store);
+        let mut migrated = db.open();
+        assert_eq!(
+            migrated.issue_reserve_tx(&issue(1, crate::send_store::ISSUE_KIND_PERMIT)),
+            Ok(1)
+        );
+        migrated.issue_bind_tx(&[1; 16], b"canon-1").unwrap();
+        migrated.issue_signed_tx(&[1; 16], b"signed-1").unwrap();
+        for op in 2..=crate::send_store::ISSUE_OUTBOX_CAP as u8 {
+            migrated
+                .issue_reserve_tx(&issue(op, crate::send_store::ISSUE_KIND_PERMIT))
+                .unwrap();
+        }
+        assert_eq!(
+            migrated.issue_reserve_tx(&issue(200, crate::send_store::ISSUE_KIND_PERMIT)),
+            Err(IssueRefusal::Capacity)
+        );
+        assert_eq!(
+            migrated.issue_original_row(&[1; 16]),
+            Some((b"canon-1".to_vec(), b"signed-1".to_vec()))
+        );
+        migrated.issue_complete_tx(&[1; 16]).unwrap();
+        assert_eq!(
+            migrated.issue_reserve_tx(&issue(200, crate::send_store::ISSUE_KIND_PERMIT)),
+            Ok(crate::send_store::ISSUE_OUTBOX_CAP as u64 + 1)
+        );
+        assert_eq!(migrated.issue_original_row(&[1; 16]), None);
     }
 
     #[test]

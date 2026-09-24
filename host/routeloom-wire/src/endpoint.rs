@@ -1108,8 +1108,8 @@ const RECOVERY_INFO_FLAG_MASK: u8 = 0x0F;
 /// RecoveryInfo8 (80B): ver/sub8 | ns u16 | schema u16 | nonce_echo 16B |
 /// network u64 | store floor J u32 | decision floor R u64 | flags u8 |
 /// recovery_version u8 | profile_bits u32 | snapshot_hash 32B. Read-only
-/// and advisory: J/R name the exact-next recovery, the hash names the
-/// known survivor baseline (or explicit unknown).
+/// and advisory: J/R are the current floors (recovery must name each +1).
+/// The hash names the known survivor baseline (or explicit unknown).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecoveryInfo {
     pub config_namespace: u16,

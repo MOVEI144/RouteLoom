@@ -27,16 +27,23 @@ bool key_serves(const TrustKeyRecord& key, const std::uint32_t floor) noexcept {
 }  // namespace
 
 bool TrustView::usable() const noexcept {
-  return store_.initialized() && store_.has_active() &&
-         !store_.quarantined() && !store_.uncertain() &&
-         store_.store_epoch() >= store_.epoch_floor();
+  if (!store_.initialized() || !store_.has_active() ||
+      store_.quarantined() || store_.uncertain() ||
+      store_.store_epoch() < store_.epoch_floor()) {
+    return false;
+  }
+  if (floor_ == nullptr) return true;
+  SecurityFloorState state{};
+  return floor_->read(state).ok() && state.network == store_.network() &&
+         store_.store_epoch() >= state.trust_epoch_floor &&
+         store_.min_authority_generation() >= state.min_authority_generation;
 }
 
 std::uint32_t TrustView::effective_generation_floor() const noexcept {
   const std::uint32_t image_floor = store_.min_authority_generation();
   if (floor_ == nullptr) return image_floor;
   SecurityFloorState state{};
-  if (!floor_->read(state)) return image_floor;
+  if (!floor_->read(state)) return UINT32_MAX;
   // Higher wins: the floor reservation lands before the image commit, so
   // the floor leads across the update window and neither can lag the
   // other into admitting a retired generation.
@@ -110,6 +117,10 @@ Status TrustView::verify_permit(
   if (store_.uncertain() || store_.store_epoch() < store_.epoch_floor()) {
     return Status::error(StatusCode::RecoveryRequired,
                         "trust store image unproven");
+  }
+  if (!usable()) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "trust image below security floor");
   }
 
   CosePermitParts parts{};
@@ -205,6 +216,10 @@ Status TrustView::verify_recovery(
   if (store_.uncertain() || store_.store_epoch() < store_.epoch_floor()) {
     return Status::error(StatusCode::RecoveryRequired,
                         "trust store image unproven");
+  }
+  if (!usable()) {
+    return Status::error(StatusCode::RecoveryRequired,
+                         "trust image below security floor");
   }
 
   CosePermitParts parts{};
