@@ -518,6 +518,22 @@ void impaired_store_is_unavailable() {
 
 void scalar_and_signature_primitives() {
   current = "scalar_and_signature_primitives";
+  // P-256's independent group-order midpoint, not a value derived from
+  // the implementation constant being checked.
+  const std::array<std::uint8_t, 32> true_half{{
+      0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
+      0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+      0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42,
+      0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31, 0x92, 0xa8}};
+  CHECK(kSecp256r1HalfOrder == true_half);
+  Es256Signature boundary{};
+  boundary[31] = 1;
+  std::memcpy(boundary.data() + 32, true_half.data(), true_half.size());
+  CHECK(es256_signature_canonical(ByteView{boundary.data(), boundary.size()}));
+  ++boundary[63];
+  CHECK(!es256_signature_canonical(ByteView{boundary.data(), boundary.size()}));
+  es256_signature_normalize_low_s(boundary);
+  CHECK(es256_signature_canonical(ByteView{boundary.data(), boundary.size()}));
   const std::array<std::uint8_t, 32> zero{};
   std::array<std::uint8_t, 32> one{};
   one[31] = 1;

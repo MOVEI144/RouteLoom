@@ -555,6 +555,37 @@ extern "C" void app_main(void) {
              esp_err_to_name(sec_nvs_error));
     fail("security NVS initialization failed");
   }
+
+  // SDK v1 stores (sdk-v1/05 §5): the `rlsec` namespaces rlident/rlsite/
+  // rlrevo/rlres behind the dual-slot discipline. Impairment is never
+  // node-fatal and never triggers an erase: a quarantined/uncertain store
+  // is reported and its consumers fail closed (the maintenance console
+  // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
+  // the node keeps routing.
+  static routeloom::espnow::Sdkv1Stores sdkv1_stores(
+      routeloom::sdkv1::kResumeNodeSlots);
+  status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
+  if (!status) {
+#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+    fail(status.detail);  // a factory console without NVS provisions nothing
+#else
+    ESP_LOGE(kTag, "sdkv1 stores open failed: %s", status.detail);
+#endif
+  } else {
+    const routeloom::Status sdkv1_status = sdkv1_stores.initialize();
+    if (!sdkv1_status) {
+      ESP_LOGE(kTag, "sdkv1 stores init: %s", sdkv1_status.detail);
+    }
+    sdkv1_stores.log_state(kTag);
+  }
+#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+  // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
+  // device from here — no radio, no mesh. Returns only when the USB
+  // console itself cannot be set up.
+  status = routeloom::espnow::run_maintenance_console(sdkv1_stores);
+  fail(status.detail);
+#endif
+
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
                                               "rlcounter") ||
       routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
@@ -727,36 +758,6 @@ extern "C" void app_main(void) {
            static_cast<unsigned long long>(trust_writes.bytes),
            static_cast<unsigned long long>(cred_writes.commits),
            static_cast<unsigned long long>(cred_writes.bytes));
-#endif
-
-  // SDK v1 stores (sdk-v1/05 §5): the `rlsec` namespaces rlident/rlsite/
-  // rlrevo/rlres behind the dual-slot discipline. Impairment is never
-  // node-fatal and never triggers an erase: a quarantined/uncertain store
-  // is reported and its consumers fail closed (the maintenance console
-  // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
-  // the node keeps routing.
-  static routeloom::espnow::Sdkv1Stores sdkv1_stores(
-      routeloom::sdkv1::kResumeNodeSlots);
-  status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
-  if (!status) {
-#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
-    fail(status.detail);  // a factory console without NVS provisions nothing
-#else
-    ESP_LOGE(kTag, "sdkv1 stores open failed: %s", status.detail);
-#endif
-  } else {
-    const routeloom::Status sdkv1_status = sdkv1_stores.initialize();
-    if (!sdkv1_status) {
-      ESP_LOGE(kTag, "sdkv1 stores init: %s", sdkv1_status.detail);
-    }
-    sdkv1_stores.log_state(kTag);
-  }
-#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
-  // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
-  // device from here — no radio, no mesh. Returns only when the USB
-  // console itself cannot be set up.
-  status = routeloom::espnow::run_maintenance_console(sdkv1_stores);
-  fail(status.detail);
 #endif
 
   static LogObserver observer;

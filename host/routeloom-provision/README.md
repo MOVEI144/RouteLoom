@@ -100,6 +100,10 @@ identity <bundle:hex of identity-bundle.json>
 Failures are `ERR <token>` (`locked`, `invalid_argument`,
 `entropy_not_ready`, `already_provisioned`, `store_unavailable`,
 `no_pending_key`, `node_mismatch`, `key_mismatch`, `seal_failed`).
+The pre-RF firmware enables the chip's internal entropy source and seeds a fresh
+CTR-DRBG before `keygen` can draw a key. A seed or draw failure leaves the
+console unable to generate keys until reboot.
+
 `keygen` refuses before entropy READY and overwrites any pending key;
 `identity` checks node and key against the pending keygen, validates the
 bundle with the RLI1 boot checks, commits the twin pair and confirms by

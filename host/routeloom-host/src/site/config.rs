@@ -18,8 +18,7 @@
 //! }
 //! ```
 //!
-//! Issuing the SiteCert is an HQ step (`routeloomctl site-cert`, plan
-//! P7-2); a development directory is assembled with the office tooling's
+//! Issuing the SiteCert is an HQ step (`routeloomctl site-cert`, P7-2); a development directory is assembled with the office tooling's
 //! key files and that command.
 
 use std::path::Path;

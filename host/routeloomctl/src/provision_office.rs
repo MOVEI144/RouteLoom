@@ -81,7 +81,7 @@ pub fn provision_devca_keygen_command(args: &[String]) -> Result<(), DynError> {
     println!(
         "{{\"device_ca_id\":\"{id:016x}\",\"pubkey_hex\":\"{}\",\"key_file\":\"{}\"}}",
         hex_encode(&signer.pubkey()),
-        out.display()
+        json_path(&out)
     );
     Ok(())
 }
@@ -220,7 +220,7 @@ pub fn provision_siteca_keygen_command(args: &[String]) -> Result<(), DynError> 
     println!(
         "{{\"site_ca_id\":\"{id:016x}\",\"pubkey_hex\":\"{}\",\"key_file\":\"{}\"}}",
         hex_encode(&signer.pubkey()),
-        out.display()
+        json_path(&out)
     );
     Ok(())
 }
@@ -304,7 +304,7 @@ pub fn site_cert_command(args: &[String]) -> Result<(), DynError> {
     let network = (u64::from(site_epoch) << 32) | u64::from(network_low32);
     println!(
         "{{\"site_id\":\"{site_id:016x}\",\"network\":\"{network:016x}\",\"site_epoch\":{site_epoch},\"serial\":{serial},\"cert_file\":\"{}\"}}",
-        out.display()
+        json_path(&out)
     );
     Ok(())
 }
@@ -376,6 +376,10 @@ impl OfficeOptions {
 fn read_json(path: &Path) -> Result<Json, DynError> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(routeloom_json::parse(&text).map_err(|e| format!("{}: {e}", path.display()))?)
+}
+
+fn json_path(path: &Path) -> String {
+    routeloom_json::escape_string(&path.to_string_lossy())
 }
 
 fn hex64(flag: &str, value: &str) -> Result<u64, DynError> {

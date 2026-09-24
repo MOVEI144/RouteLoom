@@ -5,10 +5,9 @@
 
 #include "driver/usb_serial_jtag.h"
 #include "esp_log.h"
-#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "routeloom/discovery.hpp"  // EntropySource
+#include "routeloom/espnow_sdkv1_entropy.hpp"
 #include "routeloom/sdkv1_maintenance.hpp"
 
 namespace routeloom::espnow {
@@ -19,26 +18,13 @@ constexpr char kTag[] = "RouteLoomSdkv1";
 // driver calls; 8 KiB leaves headroom without touching the main task.
 constexpr std::uint32_t kConsoleTaskStack = 8192;
 
-class EspEntropy final : public EntropySource {
- public:
-  Status fill(MutableByteView out) noexcept override {
-    if (out.data == nullptr) {
-      return Status::error(StatusCode::InvalidArgument, "entropy target");
-    }
-    // Pre-RF factory provisioning: esp_fill_random is the only on-chip
-    // source before the radio owns the RF entropy path. Whether that meets
-    // the security §9 READY bar (chip procedure, DRBG seeding) is a
-    // qualification step the production rollout still owes (08 Q5
-    // follow-up) — the gate itself (refuse before READY) is enforced by
-    // the engine through this port.
-    esp_fill_random(out.data, out.size);
-    return Status::success();
-  }
-};
-
 void console_task(void* arg) {
   Sdkv1Stores* stores = static_cast<Sdkv1Stores*>(arg);
-  EspEntropy entropy;
+  EspMaintenanceEntropy entropy;
+  const Status entropy_status = entropy.begin();
+  if (!entropy_status) {
+    ESP_LOGE(kTag, "maintenance entropy unavailable: %s", entropy_status.detail);
+  }
   sdkv1::MaintenanceConsole console(stores->identity(), entropy);
   static char line[sdkv1::kMaintenanceLineMax + 2];
   static char response[sdkv1::kMaintenanceResponseMax];
@@ -155,7 +141,7 @@ void Sdkv1Stores::log_state(const char* tag) const noexcept {
 
 Status run_maintenance_console(Sdkv1Stores& stores) noexcept {
   usb_serial_jtag_driver_config_t config{};
-  config.rx_buffer_size = 1024;
+  config.rx_buffer_size = sdkv1::kMaintenanceLineMax + 2;
   config.tx_buffer_size = 1024;
   if (usb_serial_jtag_driver_install(&config) != ESP_OK) {
     return Status::error(StatusCode::InternalError, "maintenance usb install failed");

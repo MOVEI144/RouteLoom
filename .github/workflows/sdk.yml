@@ -171,6 +171,11 @@ jobs:
             profile: normal
             autonomy: off
             features: maintenance_on
+          - app: bridge_node
+            target: esp32c3
+            profile: normal
+            autonomy: off
+            features: maintenance_on
           - app: reference_node
             target: esp32c3
             profile: normal

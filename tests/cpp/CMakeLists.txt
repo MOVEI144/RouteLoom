@@ -384,6 +384,16 @@ target_compile_definitions(routeloom_sdkv1_maintenance_tests PRIVATE
     ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 add_test(NAME routeloom_sdkv1_maintenance_tests COMMAND routeloom_sdkv1_maintenance_tests)
 
+add_executable(routeloom_espnow_sdkv1_entropy_tests
+    test_espnow_sdkv1_entropy.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp)
+target_link_libraries(routeloom_espnow_sdkv1_entropy_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_sdkv1_entropy_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/stubs/maintenance
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_espnow_sdkv1_entropy_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_sdkv1_entropy_tests COMMAND routeloom_espnow_sdkv1_entropy_tests)
+
 # SDK v1 stores over the key/blob storage port — the portable half of the
 # `rlsec` NVS adapter (sdk-v1/05 §5, 08 P7-1), against a fake NVS.
 add_executable(routeloom_sdkv1_blob_storage_tests test_sdkv1_blob_storage.cpp)
