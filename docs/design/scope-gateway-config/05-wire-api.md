@@ -103,7 +103,7 @@ Config局所reason表：0 OK、1 IN_PROGRESS、2 STALE_REVISION、3 BASE_HASH_MI
 
 permitは既存38B manifest(kind3)、38+nB chunk(n≤90)、37B object ACKで運ぶ。1024Bなら最大12chunk、774Bなら9chunk。全体一件・10秒reassembly、元challenge/Host期限以内。hashはCOSE全体のSHA-256。未manifest、範囲外、同offset異内容、digest不一致を拒否する。ACK Okは組立完了だけ、適用成功はStatus ACTIVEだけ。
 
-recovery object（`recovery_aad || RCR1 76B || tag16`）は同じmanifest/chunk/ACKをkind4で運ぶ。targetはkind3/4/5で一つのbounded assembler（2048B buffer＋bitmap、10秒期限、完了時に型別dispatch）を共有し、kind別のreassembly slotは持たない。journalのimpaired状態（quarantine/uncertain）で通常kind3 intakeが閉じていてもkind4は受理され、quarantine遷移時は進行中のkind3 assemblyを無効化する。署名domain（`RouteLoom/config-recover/v1`、devは`…-dev/v1`）はkind毎に分離し、kind3形のpermitをkind4経路へ流しても受理しない。RCR1はrecovery_class（1=StoreRecover、2=AuthorityGeneration）・attest・新旧generation・operation_idを固定fieldで運び、reservedは0。store_generation床とresult dedupでreplay/逆行を拒否する。trust-manifest（RTM1）はkind5で同じcarrierの2048B上限まで運び、完了先はtrust_manifest_accept（journalへ渡さない）。
+recovery object（dev: `recovery_aad || RCR2 || tag16`、COSE: COSE_Sign1）は同じmanifest/chunk/ACKをkind4で運ぶ。targetはkind3/4/5で一つのbounded assembler（2048B buffer＋bitmap、10秒期限、完了時に型別dispatch）を共有し、kind別のreassembly slotは持たない。journalのimpaired状態（quarantine/uncertain）で通常kind3 intakeが閉じていてもkind4は受理され、quarantine遷移時は進行中のkind3 assemblyを無効化する。署名domain（`RouteLoom/config-recover/v2`、dev HMACは`…-recover-dev/v2`でtag化）はkind毎に分離し、kind3形のpermitをkind4経路へ流しても受理しない。RCR2はmode（0=AdoptKnown、1=Reprovision）・新store_generation・新revision・snapshot_hash・baseline（0〜512B）を運び、RCR1との互換解釈はない。store_generation床とresult dedupでreplay/逆行を拒否する。trust-manifest（RTM1）はkind5で同じcarrierの2048B上限まで運び、完了先はtrust_manifest_accept（journalへ渡さない）。
 
 最初の1024B確保前に認証済み管理相手/対象/予算をAdmissionで確認。relayは再組立せずE2E bytesを転送する。失効・状態変更後は組立済みでも再検証する。protection-class別dispatchを追加し、旧ChannelPlan link-only経路を壊さない。
 
@@ -134,7 +134,7 @@ HostRegisterのprincipalは認証session由来。同じHost boot＋同じUSB ses
 
 ## 5.7 Host canonical/API
 
-既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/get/recover/trust_updateを実装済みで追加し、一daemonを維持。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
+既存API1へgateway.resolve・gateway.getとconfig.challenge/status/propose/get/recover/recovery_infoおよびtrust.install/statusを実装済みで追加し、一daemonを維持（世代のみのconfig.trust_updateは廃止し、世代移行は署名済みtrust-manifestのtrust.installで行う）。64bit IDは既存固定hex/decimal string、本文はこのAPI版ではhex一方式。client申告のprincipalを信用せずOS/USB認証を使う。`routeloomctl`にも同名subcommandがある（実例は[README](README.md)のCLI節）。
 
 Gateway canonical schema2は既存26B field形を保ち、dest_kind=1のpayload_len直前に `scope:u8/reserved:u8/token16/gateway_boot8/egress_gateway8` を加える（34B）。payload≤96で最大156B、SUBMIT固定108Bを加え264B。schema1 Node=0はそのまま、schema1の未実装Gatewayを自動変換しない。
 
