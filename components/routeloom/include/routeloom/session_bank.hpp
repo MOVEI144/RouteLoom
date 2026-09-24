@@ -218,6 +218,12 @@ class SessionBank {
   // Inspection for the Owner/tests (side-effect-free, guard-transparent).
   std::size_t live_count(SecurityScope scope) const noexcept;
   bool has_usable(SecurityScope scope, NodeId peer) const noexcept;
+  // Verified peer summary for the Owner's AuthenticatedPeerView: true
+  // with the installed generation/role when a usable entry for (scope,
+  // peer) stands. Only engine installs set nonzero claims, so a hit
+  // proves a completed authentication behind this bank.
+  bool peer_summary(SecurityScope scope, NodeId peer, std::uint32_t& generation,
+                    std::uint32_t& role) const noexcept;
   std::size_t demand_count() const noexcept;
 
  private:

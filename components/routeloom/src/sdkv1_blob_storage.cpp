@@ -87,6 +87,11 @@ BlobRecordSlotStorage BlobRecordSlotStorage::revocation(BlobNamespace& blobs) no
   return BlobRecordSlotStorage(blobs, kRevocationKey0, kRevocationKey1, kRevocationSlotBytes);
 }
 
+BlobRecordSlotStorage BlobRecordSlotStorage::local_revocation(BlobNamespace& blobs) noexcept {
+  return BlobRecordSlotStorage(blobs, kLocalRevocationKey0, kLocalRevocationKey1,
+                               kLocalRevocationSlotBytes);
+}
+
 // --- BlobResumeSlotStorage -------------------------------------------------------
 
 Status BlobResumeSlotStorage::slot_key(const std::size_t index, const std::size_t slot_count,
@@ -133,6 +138,36 @@ Status BlobResumeSlotStorage::write(const std::size_t index, const ByteView data
   }
   char key[kResumeKeyBytes]{};
   const Status status = slot_key(index, slot_count_, key);
+  if (!status) return status;
+  return blobs_.blob_write(key, data);
+}
+
+// --- BlobResumeSlotStorage2 ------------------------------------------------------
+
+Status BlobResumeSlotStorage2::read(const std::size_t index, const MutableByteView target) noexcept {
+  if (target.data == nullptr || target.size != kResume2SlotBytes) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot read arguments");
+  }
+  char key[kResumeKeyBytes]{};
+  const Status status = BlobResumeSlotStorage::slot_key(index, slot_count_, key);
+  if (!status) return status;
+  std::size_t actual = 0;
+  bool found = false;
+  const Status size_status = blobs_.blob_size(key, actual, found);
+  if (!size_status) return size_status;
+  if (found && actual != kResume2SlotBytes) {
+    std::memset(target.data, kBlobCorruptFill, target.size);
+    return Status::success();
+  }
+  return read_blob_slot(blobs_, key, target);
+}
+
+Status BlobResumeSlotStorage2::write(const std::size_t index, const ByteView data) noexcept {
+  if (data.data == nullptr || data.size != kResume2SlotBytes) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot write arguments");
+  }
+  char key[kResumeKeyBytes]{};
+  const Status status = BlobResumeSlotStorage::slot_key(index, slot_count_, key);
   if (!status) return status;
   return blobs_.blob_write(key, data);
 }

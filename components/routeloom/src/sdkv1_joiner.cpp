@@ -319,17 +319,7 @@ void Joiner::LinkObserver::on_link_failure(const char* reason) noexcept {
 
 // --- Public API -------------------------------------------------------------------------------
 
-Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept {
-  if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
-  InCall guard(in_call_);
-  if (state_ != JoinState::Stopped) {
-    return Status::error(StatusCode::InvalidState, "joiner already started");
-  }
-  if (!boot.prepared) return Status::error(StatusCode::InvalidArgument, "joiner boot unprepared");
-  if (!channels_valid(config_) || !role_valid(config_)) {
-    return Status::error(StatusCode::InvalidArgument, "joiner config");
-  }
-  if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+void Joiner::begin_run(const JoinBootInput& boot) noexcept {
   // A new run drops every pending output; the radio stays where it is and
   // the candidate holds survive a soft restart.
   teardown_attempt();
@@ -352,7 +342,71 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
   decided_valid_ = false;
   boot_witness_ = boot.boot_witness;
   last_error_ = StatusCode::Ok;
+}
+
+Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
+  InCall guard(in_call_);
+  if (state_ != JoinState::Stopped) {
+    return Status::error(StatusCode::InvalidState, "joiner already started");
+  }
+  if (!boot.prepared) return Status::error(StatusCode::InvalidArgument, "joiner boot unprepared");
+  if (!channels_valid(config_) || !role_valid(config_)) {
+    return Status::error(StatusCode::InvalidArgument, "joiner config");
+  }
+  if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+  begin_run(boot);
+  direct_ = false;
+  direct_port_ = nullptr;
   set_state(JoinState::BootCheck);
+  return Status::success();
+}
+
+Status Joiner::start_direct(const JoinBootInput& boot, JoinDirectPort& port,
+                            const MonotonicMs now) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
+  InCall guard(in_call_);
+  if (state_ != JoinState::Stopped) {
+    return Status::error(StatusCode::InvalidState, "joiner already started");
+  }
+  if (!boot.prepared) return Status::error(StatusCode::InvalidArgument, "joiner boot unprepared");
+  // No radio is touched, so the scan channels are not consulted — but the
+  // requested role still gates what may be committed.
+  if (!role_valid(config_)) {
+    return Status::error(StatusCode::InvalidArgument, "joiner config");
+  }
+  if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+  begin_run(boot);
+  direct_ = true;
+  direct_port_ = &port;
+  set_state(JoinState::BootCheck);
+  return Status::success();
+}
+
+Status Joiner::on_direct_message(const JoinAuthPhase phase, const std::uint8_t step,
+                                const ByteView body, const MonotonicMs now) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
+  InCall guard(in_call_);
+  if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+  if (!direct_ || state_ == JoinState::Stopped || direct_port_ == nullptr) {
+    return Status::error(StatusCode::InvalidState, "joiner not in direct run");
+  }
+  // Same staging rules as the radio mailbox: expected steps only, never
+  // overwrite, oversized bodies drop counted.
+  if (!step_expected(state_, phase, step)) {
+    sat_inc(counters_.rx_dropped);
+    return Status::success();
+  }
+  if (mailbox_valid_) return Status::error(StatusCode::Busy, "joiner mailbox full");
+  if (body.size > msg_.size() || (body.size > 0 && body.data == nullptr)) {
+    sat_inc(counters_.rx_dropped);
+    return Status::success();
+  }
+  if (body.size > 0) std::memcpy(msg_.data(), body.data, body.size);
+  msg_len_ = body.size;
+  mailbox_phase_ = phase;
+  mailbox_step_ = step;
+  mailbox_valid_ = true;
   return Status::success();
 }
 
@@ -381,6 +435,8 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
     recovery_only_ = false;
     evidence_valid_ = false;
     last_error_ = StatusCode::Ok;
+    direct_ = false;
+    direct_port_ = nullptr;
     set_state(JoinState::Stopped);
     return Status::success();
   }
@@ -403,6 +459,8 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
   secure_clear(retained_fingerprint_);
   retained_fingerprint_valid_ = false;
   reconcile_retries_ = 0;
+  direct_ = false;
+  direct_port_ = nullptr;
   set_state(JoinState::Stopped);
   return Status::success();
 }
@@ -420,6 +478,9 @@ Status Joiner::on_rld1_rx(const JoinRxMeta& meta, const ByteView frame,
   if (in_call_) return Status::error(StatusCode::Busy, "joiner re-entry");
   InCall guard(in_call_);
   if (!clock_ok(now)) return Status::error(StatusCode::ClockUncertain, "joiner clock");
+  // A direct run never touches the radio: feeding it radio frames is an
+  // Owner bug, refused before any state moves.
+  if (direct_) return Status::error(StatusCode::InvalidState, "joiner direct run");
   last_rx_ = meta;
   // The adapter gate (§5.3): the link re-checks the enrolment-level rules,
   // but destination, channel and phase/step gating live here so a stale or
@@ -752,7 +813,9 @@ void Joiner::finish_attempt(const JoinAttemptOutcome outcome, const std::uint32_
   }
   teardown_attempt();
   emit(JoinEventKind::AttemptFinished);
-  set_state(JoinState::Select);
+  // A direct run has no table to select from: park terminally so no scan
+  // can start behind the Owner's back. The Owner restarts for the next one.
+  set_state(direct_ ? JoinState::Stopped : JoinState::Select);
 }
 
 Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
@@ -848,7 +911,11 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
         recovery_required(JoinRecoveryReason::MembershipInvalid);
         return Status::success();
       }
-      start_scan();
+      if (direct_) {
+        begin_direct_attempt();
+      } else {
+        start_scan();
+      }
       return Status::success();
     }
     // A healthy stored member: adopt it without touching the air.
@@ -869,8 +936,43 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
     reconcile_enter(false, now);  // re-read before classifying further
     return Status::success();
   }
-  start_scan();  // fresh, or a clean quarantine healing via full EDHOC
+  // Fresh, or a clean quarantine healing via full EDHOC. Direct runs skip
+  // the scan: the attachment already selected the site.
+  if (direct_) {
+    begin_direct_attempt();
+  } else {
+    start_scan();
+  }
   return Status::success();
+}
+
+void Joiner::begin_direct_attempt() noexcept {
+  JoinHandshakeConfig hs{};
+  hs.node = config_.node;
+  hs.direct_transport = true;  // zero observed hints: USB selects the site
+  hs.fw_version = config_.fw_version;
+  hs.capability = config_.capability;
+  hs.requested_role = config_.requested_role;
+  hs.last_site_id = evidence_valid_ ? evidence_.site_id : 0;
+  hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
+  hs.usable_channel_mask = config_.usable_channel_mask;
+  if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
+    // No candidate table in a direct run: terminal, the Owner restarts.
+    last_error_ = StatusCode::InvalidState;
+    teardown_attempt();
+    set_state(JoinState::Stopped);
+    return;
+  }
+  attempt_ = JoinAttempt{};  // inactive: no table begin/apply, no avoidance
+  attempt_record_ = nullptr;
+  attempt_key_ = JoinCandidateKey{};
+  attempt_proxy_ = MacAddress{};  // no radio proxy
+  attempt_hops_ = 0;              // attached gateway: zero hops
+  sat_inc(counters_.attempts);
+  event_.key = attempt_key_;
+  event_.proxy = attempt_proxy_;
+  emit(JoinEventKind::AttemptStarted);
+  set_state(JoinState::SendM1);
 }
 
 // Opens scan windows until one DISCOVER goes out or the cursor exhausts.
@@ -1124,7 +1226,12 @@ Status Joiner::drive_send_m1(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
-  if (!link_.send(JoinAuthPhase::EdhocMessage, 1, ByteView{msg_.data(), length}, now)) {
+  const ByteView m1{msg_.data(), length};
+  const bool sent =
+      direct_ ? (direct_port_ != nullptr &&
+                 direct_port_->send_direct(JoinAuthPhase::EdhocMessage, 1, m1).ok())
+              : link_.send(JoinAuthPhase::EdhocMessage, 1, m1, now).ok();
+  if (!sent) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
@@ -1143,7 +1250,9 @@ Status Joiner::drive_wait_m2(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
-  if (link_failed_) {
+  // No radio link in a direct run — and no candidate record to bind: the
+  // attachment is the selection, the SiteCert is the proof.
+  if (!direct_ && link_failed_) {
     sat_inc(counters_.link_failures);
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
@@ -1168,21 +1277,23 @@ Status Joiner::drive_wait_m2(const MonotonicMs now) noexcept {
     return Status::success();
   }
   sat_inc(counters_.m2_ok);
-  JoinCandidate* bound = nullptr;
-  if (!candidates_.bind_authenticated(attempt_, handshake_.offer().site_id, now, bound) ||
-      bound == nullptr) {
-    // Held elsewhere or no room for the split: park this record briefly
-    // and let another candidate go first.
-    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
-    return Status::success();
+  if (!direct_) {
+    JoinCandidate* bound = nullptr;
+    if (!candidates_.bind_authenticated(attempt_, handshake_.offer().site_id, now, bound) ||
+        bound == nullptr) {
+      // Held elsewhere or no room for the split: park this record briefly
+      // and let another candidate go first.
+      finish_attempt(JoinAttemptOutcome::Failed, 0, now);
+      return Status::success();
+    }
+    if (recovery_only_ && handshake_.offer().site_id != recovery_site_id_) {
+      // A hint collision resolved against us: this record is not the known
+      // site, so no m3 goes out here.
+      finish_attempt(JoinAttemptOutcome::Failed, 0, now);
+      return Status::success();
+    }
+    attempt_record_ = bound;
   }
-  if (recovery_only_ && handshake_.offer().site_id != recovery_site_id_) {
-    // A hint collision resolved against us: this record is not the known
-    // site, so no m3 goes out here.
-    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
-    return Status::success();
-  }
-  attempt_record_ = bound;
   set_state(JoinState::SendM3);  // m3 composes on the next poll, never here
   return Status::success();
 }
@@ -1198,7 +1309,12 @@ Status Joiner::drive_send_m3(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
-  if (!link_.send(JoinAuthPhase::EdhocMessage, 3, ByteView{msg_.data(), length}, now)) {
+  const ByteView m3{msg_.data(), length};
+  const bool sent =
+      direct_ ? (direct_port_ != nullptr &&
+                 direct_port_->send_direct(JoinAuthPhase::EdhocMessage, 3, m3).ok())
+              : link_.send(JoinAuthPhase::EdhocMessage, 3, m3, now).ok();
+  if (!sent) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
@@ -1218,7 +1334,7 @@ Status Joiner::drive_wait_m4(const MonotonicMs now) noexcept {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
-  if (link_failed_) {
+  if (!direct_ && link_failed_) {
     sat_inc(counters_.link_failures);
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
@@ -1310,7 +1426,10 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
 Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   if (action_pending_) return Status::success();
   link_.close();  // the m4 Complete reply already went out during assembly
-  if (!decided_valid_ || decided_.record == nullptr || attempt_record_ == nullptr) {
+  // A direct run has no candidate record by construction; the radio path
+  // must still hold one.
+  if (!decided_valid_ || decided_.record == nullptr ||
+      (!direct_ && attempt_record_ == nullptr)) {
     teardown_attempt();
     reconcile_enter(true, now);  // nothing was written; classify the store
     return Status::success();
@@ -1319,6 +1438,12 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   Digest256 prepared_fingerprint{};
   if (!site_.fingerprint(prepared, prepared_fingerprint)) {
     finish_attempt(JoinAttemptOutcome::MalformedResult, 0, now);
+    return Status::success();
+  }
+  // The Owner's read-only veto (P4 §8): a commit that would resurrect a
+  // removed membership is avoided without writing anything.
+  if (commit_policy_ != nullptr && !commit_policy_->check(prepared, now)) {
+    finish_attempt(JoinAttemptOutcome::DenyBlocked, 0, now);
     return Status::success();
   }
   Status stored;

@@ -40,6 +40,7 @@ pub const SITE_EVENT_KINDS: &[&str] = &[
     "rrs.published",
     "gk.staged",
     "authority.error",
+    "site.session_drop",
 ];
 
 pub const SITE_METHODS: &[&str] = &[
@@ -211,11 +212,14 @@ fn site_status<S: OperationStore>(
     let (status, events) = service.with(|a| a.status_json(ctx.now_ms));
     push_events(ctx, events);
     // The USB link view (gateway attachment) comes from the daemon, not the
-    // authority: `usb.attached` says a gateway session is up at all.
+    // authority: `usb.attached` says a gateway session is up at all, and
+    // `usb.join_relay` says the site lane can serve joins on it — the same
+    // gate the lane applies (authenticated + CAP_JOIN_RELAY_V1).
     let attached =
         ctx.session.lock().expect("session poisoned").node.is_some() && ctx.link.connected;
+    let join_relay = join_relay_status(ctx);
     Ok(format!(
-        "{},\"usb\":{{\"configured\":{},\"attached\":{attached},\"join_relay\":\"not_wired\"}}}}",
+        "{},\"usb\":{{\"configured\":{},\"attached\":{attached},\"join_relay\":\"{join_relay}\"}}}}",
         &status[..status.len() - 1],
         ctx.link.configured
     ))
@@ -496,6 +500,20 @@ pub(super) fn operation_get<S: OperationStore>(
     })())
 }
 
+/// Live USB join-relay view: `ready` exactly when the site lane can
+/// serve joins (an authenticated session advertising 0x60-0x63).
+fn join_relay_status<S: OperationStore>(ctx: &ApiContext<'_, S>) -> &'static str {
+    let info = ctx.session.lock().expect("session poisoned");
+    if info.authenticated
+        && info.id.is_some()
+        && info.capability.is_some_and(crate::site::usb::site_capable)
+    {
+        "ready"
+    } else {
+        "not_ready"
+    }
+}
+
 /// The `site` object of `capabilities.get`.
 pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> String {
     let kinds = SITE_EVENT_KINDS
@@ -507,7 +525,8 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
         Some(service) => (true, service.with(|a| a.storage_durable()).0),
         None => (false, false),
     };
+    let join_relay = join_relay_status(ctx);
     format!(
-        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"not_wired\",\"distribution\":\"not_implemented\",\"storage_durable\":{durable}}}"
+        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"{join_relay}\",\"distribution\":\"not_implemented\",\"storage_durable\":{durable}}}"
     )
 }

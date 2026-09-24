@@ -75,21 +75,29 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
       revo_storage_(revo_ns_, sdkv1::kRevocationKey0, sdkv1::kRevocationKey1,
                     sdkv1::kRevocationSlotBytes),
       resume_storage_(resume_ns_, resume_slots),
+      local_revocation_storage_(local_revocation_ns_, sdkv1::kLocalRevocationKey0,
+                                sdkv1::kLocalRevocationKey1, sdkv1::kLocalRevocationSlotBytes),
+      resume2_storage_(resume2_ns_, resume_slots),
       identity_(ident_storage_),
       site_(site_storage_),
       revocation_(revo_storage_),
-      resume_(resume_storage_) {}
+      resume_(resume_storage_),
+      local_revocation_(local_revocation_storage_) {}
 
 Status Sdkv1Stores::open(const char* partition) noexcept {
   Status status = ident_ns_.open(partition, sdkv1::kIdentityNamespace);
   if (status) status = site_ns_.open(partition, sdkv1::kSiteNamespace);
   if (status) status = revo_ns_.open(partition, sdkv1::kRevocationNamespace);
   if (status) status = resume_ns_.open(partition, sdkv1::kResumeNamespace);
+  if (status) status = local_revocation_ns_.open(partition, sdkv1::kLocalRevocationNamespace);
+  if (status) status = resume2_ns_.open(partition, sdkv1::kResume2Namespace);
   if (!status) {
     ident_ns_.close();
     site_ns_.close();
     revo_ns_.close();
     resume_ns_.close();
+    local_revocation_ns_.close();
+    resume2_ns_.close();
   }
   return status;
 }
@@ -98,9 +106,11 @@ Status Sdkv1Stores::initialize() noexcept {
   const Status identity = identity_.initialize();
   const Status site = site_.initialize();
   const Status revocation = revocation_.initialize();
+  const Status local_revocation = local_revocation_.initialize();
   if (!identity.ok()) return identity;
   if (!site.ok()) return site;
-  return revocation;
+  if (!revocation.ok()) return revocation;
+  return local_revocation;
 }
 
 void Sdkv1Stores::log_state(const char* tag) const noexcept {
@@ -130,10 +140,18 @@ void Sdkv1Stores::log_state(const char* tag) const noexcept {
            revocation_.has_set() ? "adopted" : "none",
            static_cast<unsigned long>(revocation_.rs_epoch()),
            static_cast<unsigned>(resume_slots_));
-  if (identity_.quarantined() || site_.quarantined() || revocation_.quarantined()) {
+  ESP_LOGI(tag, "sdkv1 local_revocation: %s",
+           !local_revocation_.has_record()
+               ? "none"
+               : (local_revocation_.record().state == sdkv1::LocalRevocationState::Blocked
+                      ? "blocked"
+                      : "cleaned"));
+  if (identity_.quarantined() || site_.quarantined() || revocation_.quarantined() ||
+      local_revocation_.quarantined()) {
     ESP_LOGE(tag, "REPROVISION_REQUIRED: sdkv1 store quarantined — recovery is an "
                   "explicit operator act, never an implicit reset");
-  } else if (identity_.uncertain() || site_.uncertain() || revocation_.uncertain()) {
+  } else if (identity_.uncertain() || site_.uncertain() || revocation_.uncertain() ||
+             local_revocation_.uncertain()) {
     ESP_LOGE(tag, "REPROVISION_REQUIRED: sdkv1 sibling state unproven — "
                   "possibly-stale state is refused until recover()");
   }

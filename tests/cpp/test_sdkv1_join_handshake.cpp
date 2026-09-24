@@ -653,6 +653,48 @@ void test_allow() {
   CHECK(all_zero(ByteView{record.dams.data(), record.dams.size()}));  // wiped
 }
 
+void test_direct_transport() {
+  // P4 §8.2: a direct transport (USB LocalJoin) observes no radio, so the
+  // hints stay zero and m2 skips the observed-hint binding — the SiteCert
+  // binding still proves the site, and decide() (with the strict flag) is
+  // untouched.
+  current = "direct transport";
+  JoinFixture fx;
+  Authority authority(fx.sitecert, fx.sak_kid, 0x71);
+  authority.ead.credential_cert = &fx.sitecert;
+  fx.result(JoinVerdict::Allow, authority.ead.result_value);
+
+  fx.config.direct_transport = true;
+  fx.config.org_hint = 0;
+  fx.config.site_hint = 0;
+  fx.config.network_low32 = 0;
+  JoinHandshake hs;
+  TestEntropy entropy(0xA17);
+  CHECK(hs.begin(fx.config, fx.identity, entropy).ok());
+  Transcript t;
+  CHECK(exchange(hs, authority, t) == 4);
+  CHECK(hs.m2_authenticated());
+  CHECK(hs.offer().site_id == kSiteId);
+  JoinDecideInput input{};
+  input.boot_witness = 99;
+  JoinDecided decided{};
+  CHECK(hs.decide(input, decided).ok());
+  CHECK(decided.outcome == JoinAttemptOutcome::AllowVerified);
+  CHECK(decided.record != nullptr && decided.record->site_id == kSiteId);
+
+  // Direct with nonzero hints would be an uncheckable lie: refused.
+  JoinFixture fx2;
+  fx2.config.direct_transport = true;
+  JoinHandshake hs2;
+  CHECK(!hs2.begin(fx2.config, fx2.identity, entropy).ok());
+
+  // Radio with zero hints is still refused.
+  JoinFixture fx3;
+  fx3.config.org_hint = 0;
+  JoinHandshake hs3;
+  CHECK(!hs3.begin(fx3.config, fx3.identity, entropy).ok());
+}
+
 void test_recovery_join_keeps_floor() {
   current = "recovery join";
   JoinFixture fx;
@@ -1363,6 +1405,7 @@ int main() {
   test_dams_exporter_vectors();
   test_dams_separation();
   test_allow();
+  test_direct_transport();
   test_recovery_join_keeps_floor();
   test_verdicts();
   test_allow_denials();

@@ -2253,4 +2253,61 @@ Status HandshakeEngine::cancel_all() noexcept {
   return Status::success();
 }
 
+// --- StoreCredentialVerifier -------------------------------------------------------------------
+// Fail-closed on every issue: the engine treats false as "unverifiable"
+// and refuses the exchange (never a silent downgrade to an unverified
+// peer). The cnf-kid match stays the engine's own check (P4 §5.1) — the
+// verifier never sees the kid.
+
+bool StoreCredentialVerifier::local_credential(LocalCredential& out) noexcept {
+  out = LocalCredential{};
+  if (!identity_.has_identity() || !site_.has_site()) return false;
+  const IdentityRecord& identity = identity_.identity();
+  const SiteRecord& site = site_.site();
+  // Handles name a key the device cannot export; PR4 has no DS/SE signer,
+  // so only NVS-plaintext material can drive EDHOC here.
+  if (identity.key_location != CredentialKeyLocation::NvsPlaintext) return false;
+  if (!p256_scalar_valid(
+          ByteView{identity.key_material.data(), identity.key_material.size()})) {
+    return false;
+  }
+  if (site.member_cert.size == 0 || site.member_cert.size > out.cred.size()) return false;
+  std::memcpy(out.cred.data(), site.member_cert.bytes.data(), site.member_cert.size);
+  out.cred_size = site.member_cert.size;
+  out.privkey = identity.key_material;
+  return true;
+}
+
+bool StoreCredentialVerifier::verify_peer(const ByteView cert, const NodeId expected_node,
+                                          PeerCertClaims& out) noexcept {
+  out = PeerCertClaims{};
+  if (cert.data == nullptr || cert.size == 0 || !id_usable(expected_node)) return false;
+  if (!site_.has_site()) return false;
+  const SiteRecord& site = site_.site();
+  CertClaims claims{};
+  if (!cert_decode(cert, claims).ok()) return false;
+  // Binding first (cheap, no crypto): a well-formed MemberCert of another
+  // node, site or network is reported unverified, never an error.
+  if (claims.type != CertType::Member || claims.subject != expected_node ||
+      claims.issuer != site.site_id || claims.network != site.network ||
+      claims.site_epoch != static_cast<std::uint32_t>(site.network >> 32)) {
+    return false;
+  }
+  // SAK signature over the peer cert: the SAK is the adopted SiteCert's
+  // cnf key, so only the site's assignment key mints acceptable peers.
+  CertClaims site_claims{};
+  if (!cert_decode(site.site_cert.view(), site_claims).ok()) return false;
+  if (site_claims.type != CertType::Site) return false;
+  CertClaims unused{};
+  bool verified = false;
+  if (!cert_verify(cert, site_claims.pubkey, unused, verified, verifier_).ok() || !verified) {
+    return false;
+  }
+  out.node = claims.subject;
+  out.generation = claims.assignment_generation;
+  out.role = claims.role;
+  out.site_epoch = claims.site_epoch;
+  return true;
+}
+
 }  // namespace routeloom::sdkv1

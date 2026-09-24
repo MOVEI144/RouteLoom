@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -37,7 +38,13 @@
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/fail_policy.hpp"
 #include "routeloom/nvs_counter_store.hpp"
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/espnow_security_owner.hpp"
+#include "routeloom/owner_pump.hpp"
+#else
 #include "routeloom/psk_security.hpp"
+#endif
 #include "routeloom/secure_clear.hpp"
 #include "routeloom/usb_bridge.hpp"
 
@@ -48,7 +55,12 @@ using routeloom::ByteView;
 using routeloom::NodeId;
 using routeloom::Status;
 using routeloom::StatusCode;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+using routeloom::espnow::EspNowSecurityOwner;
+using routeloom::espnow::EspOwnerEntropy;
+#else
 using routeloom::espnow::DevelopmentPskSecurityProvider;
+#endif
 using routeloom::espnow::EspNowRuntime;
 using routeloom::espnow::EspNowRuntimeConfig;
 using routeloom::espnow::MacAddress;
@@ -77,7 +89,7 @@ class UsbSerialStream final : public routeloom::usb::ByteStream {
   }
 };
 
-int hex_value(const char value) noexcept {
+[[maybe_unused]] int hex_value(const char value) noexcept {
   if (value >= '0' && value <= '9') return value - '0';
   const char lower =
       static_cast<char>(std::tolower(static_cast<unsigned char>(value)));
@@ -86,8 +98,8 @@ int hex_value(const char value) noexcept {
 }
 
 template <std::size_t Size>
-bool parse_hex(const char* text,
-               std::array<std::uint8_t, Size>& output) noexcept {
+[[maybe_unused]] bool parse_hex(const char* text,
+                                std::array<std::uint8_t, Size>& output) noexcept {
   if (text == nullptr || std::strlen(text) != Size * 2U) return false;
   for (std::size_t i = 0; i < Size; ++i) {
     const int high = hex_value(text[i * 2]);
@@ -98,7 +110,7 @@ bool parse_hex(const char* text,
   return true;
 }
 
-bool parse_mac(const char* text, MacAddress& mac) noexcept {
+[[maybe_unused]] bool parse_mac(const char* text, MacAddress& mac) noexcept {
   if (text == nullptr) return false;
   unsigned values[6]{};
   if (std::sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x", &values[0], &values[1],
@@ -231,8 +243,10 @@ extern "C" void app_main(void) {
       routeloom::sdkv1::kResumeGatewaySlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
-#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
-    fail(status.detail);  // a factory console without NVS provisions nothing
+#if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE || !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    // A factory console without NVS provisions nothing, and the security
+    // owner cannot join without stores — continuing would run a dead node.
+    fail(status.detail);
 #else
     ESP_LOGE(kTag, "sdkv1 stores open failed: %s", status.detail);
 #endif
@@ -260,6 +274,7 @@ extern "C" void app_main(void) {
              "is orphaned (pre-rlsec layout); an explicit NVS erase reclaims "
              "it");
   }
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,
@@ -290,6 +305,28 @@ extern "C" void app_main(void) {
   if (!status) fail(status.detail);
   routeloom::espnow::log_peer_state(kTag, security,
                                     routeloom::espnow::kSecurityNvsPartition);
+  routeloom::SecurityProvider& session_security = security;
+#else
+  // Owner profile (G-SEC P4 §8.4): the shared security owner runs over
+  // the sdkv1 stores above; the dev-PSK path is compiled out. The owner
+  // boots after radio-up (entropy + attach + boot below); the node start
+  // stays deferred to ApplyMemberConfig.
+  static EspOwnerEntropy entropy;
+  static EspNowSecurityOwner owner;
+  EspNowSecurityOwner::Config owner_config{};
+  owner_config.local_node = CONFIG_ROUTELOOM_NODE_ID;
+  // Pre-radio station MAC from eFuse: no custom MAC is ever set, so this
+  // is the address the runtime will read back after Wi-Fi init.
+  if (esp_read_mac(owner_config.local_mac.data(), ESP_MAC_WIFI_STA) != ESP_OK) {
+    fail("station MAC unreadable");
+  }
+  owner_config.joiner.node = owner_config.local_node;
+  owner_config.joiner.mac = owner_config.local_mac;
+  owner_config.log_tag = kTag;
+  status = owner.begin(sdkv1_stores, entropy, owner_config);
+  if (!status) fail(status.detail);
+  routeloom::SecurityProvider& session_security = owner.session_provider();
+#endif
 
 #if CONFIG_ROUTELOOM_MIGRATION
   // Channel migration (issue #5): durable plan/commit/active state. The
@@ -467,6 +504,9 @@ extern "C" void app_main(void) {
 #endif
   config.node.node = CONFIG_ROUTELOOM_NODE_ID;
   config.node.message_session = message_session;
+  // Explicit durable boot token (G-SEC P4 §9.1): identical to the compat
+  // init for the legacy provider, explicit-nonzero for session providers.
+  config.node.boot_session = message_session;
   config.node.boot_incarnation = message_session;
   // Origin generation must rise every boot so peers discard the previous
   // incarnation's route state. It is derived from the persisted monotonic
@@ -551,13 +591,30 @@ extern "C" void app_main(void) {
   status = commit_verifier.initialize(key);
   if (!status) fail(status.detail);
 #endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   routeloom::secure_clear(key);
+#endif
 
   // The bridge is the node's observer: mesh deliveries and diagnostics are
   // reported to the host as DataFromMesh/Delivery/Diag frames.
-  static EspNowRuntime runtime(config, security, bridge);
+  static EspNowRuntime runtime(config, session_security, bridge);
   status = runtime.initialize();
   if (!status) fail(status.detail);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Owner profile: boot after radio-up — entropy.begin() draws post-RF
+  // randomness, then boot() arms the cookie sealer from it. usb_direct
+  // selects the gateway's USB local-join transport (G-SEC P4 §8.2); an
+  // already-provisioned gateway resumes its membership either way.
+  status = entropy.begin();
+  if (!status) fail(status.detail);
+  status = owner.attach_runtime(runtime);
+  if (!status) fail(status.detail);
+  status = owner.attach_usb(bridge);
+  if (!status) fail(status.detail);
+  status = owner.boot(message_session, /*rlboot_prepared=*/true,
+                      /*usb_direct=*/true, monotonic_now_ms());
+  if (!status) fail(status.detail);
+#endif
   bridge.set_mesh(&runtime.node());
   // Device nonce seeds the session transcript; sampling esp_random only
   // once the radio is up follows the entropy contract (security spec §9):
@@ -620,6 +677,7 @@ extern "C" void app_main(void) {
     if (!status) fail(status.detail);
   }
 
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (CONFIG_ROUTELOOM_PEER_NODE_ID != 0) {
     MacAddress mac{};
     if (!parse_mac(CONFIG_ROUTELOOM_PEER_MAC, mac)) {
@@ -629,6 +687,7 @@ extern "C" void app_main(void) {
         runtime.register_neighbor(CONFIG_ROUTELOOM_PEER_NODE_ID, mac, 1);
     if (!status) fail(status.detail);
   }
+#endif
 
 #if CONFIG_ROUTELOOM_DISCOVERY
   // Autonomous discovery (issue #3): the RLD1 bootstrap lane plus the
@@ -717,18 +776,25 @@ extern "C" void app_main(void) {
            CONFIG_ROUTELOOM_MIGRATION);
 #endif
 
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   status = runtime.start();
   if (!status) fail(status.detail);
+#else
+  ESP_LOGI(kTag,
+           "security owner started; node start deferred to membership");
+#endif
   // Boot complete — the pump loop below is the node's main loop, so a
   // later fatal is a runtime fault rather than a boot-loop streak.
   routeloom::fail_streak_runtime_started(s_fail);
 
+#if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
   if (security.security_profile() != routeloom::SecurityProfile::Production) {
     ESP_LOGW(
         kTag,
         "EXPERIMENTAL bridge started; development PSK is not a production "
         "identity profile");
   }
+#endif
 
   // Power management is deliberately unwired on this profile: the bridge is
   // a USB-powered always-on gateway — deep sleep would sever the USB
@@ -751,6 +817,9 @@ extern "C" void app_main(void) {
     }
     bridge.poll(monotonic_now_ms());
     runtime.poll_once();
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    owner.poll(monotonic_now_ms());
+#endif
     runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
   }
 }

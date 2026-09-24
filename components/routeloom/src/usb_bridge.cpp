@@ -107,8 +107,20 @@ Status UsbBridge::attach_group() noexcept {
 }
 
 Status UsbBridge::attach_join_relay(sdkv1::JoinRelayGateway& gateway) noexcept {
+  if (join_owner_ != nullptr) {
+    return Status::error(StatusCode::InvalidState, "security owner already attached");
+  }
   join_relay_ = &gateway;
   gateway.set_host_sink(this);
+  config_.capability |= kCapJoinRelayV1;
+  return Status::success();
+}
+
+Status UsbBridge::attach_security_owner(SecurityOwnerUsbSink& owner) noexcept {
+  if (join_relay_ != nullptr) {
+    return Status::error(StatusCode::InvalidState, "legacy join relay already attached");
+  }
+  join_owner_ = &owner;
   config_.capability |= kCapJoinRelayV1;
   return Status::success();
 }
@@ -1089,7 +1101,21 @@ void UsbBridge::handle_join_relay_down(const std::uint64_t request, const ByteVi
     send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_MALFORMED", now_ms);
     return;
   }
-  if ((config_.capability & kCapJoinRelayV1) == 0 || join_relay_ == nullptr) {
+  if ((config_.capability & kCapJoinRelayV1) == 0) {
+    send_join_relay_result(request, ConfigOpsResult::Unsupported, down.to_proxy,
+                           object.header.relay_id, now_ms);
+    return;
+  }
+  if (join_owner_ != nullptr) {
+    // The security owner demuxes: self-addressed downs to its LocalJoin
+    // attempt, mesh-proxy downs to its gateway engine. Admission returns
+    // synchronously for the 0x63.
+    const Status status = join_owner_->join_down(down.to_proxy, object, down.object, now_ms);
+    send_join_relay_result(request, join_relay_result_for(status), down.to_proxy,
+                           object.header.relay_id, now_ms);
+    return;
+  }
+  if (join_relay_ == nullptr) {
     send_join_relay_result(request, ConfigOpsResult::Unsupported, down.to_proxy,
                            object.header.relay_id, now_ms);
     return;
@@ -1106,7 +1132,19 @@ void UsbBridge::handle_join_relay_abort(const std::uint64_t request, const ByteV
     send_error(UsbErrorCode::ProtocolError, request, "JOIN_RELAY_MALFORMED", now_ms);
     return;
   }
-  if ((config_.capability & kCapJoinRelayV1) == 0 || join_relay_ == nullptr) {
+  if ((config_.capability & kCapJoinRelayV1) == 0) {
+    send_join_relay_result(request, ConfigOpsResult::Unsupported, abort.proxy, abort.relay_id,
+                           now_ms);
+    return;
+  }
+  if (join_owner_ != nullptr) {
+    const Status status = join_owner_->join_abort(abort.proxy, abort.relay_id, abort.reason,
+                                                  now_ms);
+    send_join_relay_result(request, join_relay_result_for(status), abort.proxy, abort.relay_id,
+                           now_ms);
+    return;
+  }
+  if (join_relay_ == nullptr) {
     send_join_relay_result(request, ConfigOpsResult::Unsupported, abort.proxy, abort.relay_id,
                            now_ms);
     return;
@@ -1985,6 +2023,8 @@ void UsbBridge::note_credit_stall(const MonotonicMs now_ms) noexcept {
 }
 
 void UsbBridge::reset_session_state() noexcept {
+  const bool had_session =
+      state_ == SessionState::Active || state_ == SessionState::Draining;
   state_ = SessionState::Disconnected;
   state_entered_ms_ = now_ms_;
   transcript_ = SessionTranscript{};
@@ -2029,6 +2069,12 @@ void UsbBridge::reset_session_state() noexcept {
   // Idempotency records and the dispatch window intentionally survive: their
   // scope is the host identity / boot lease, not the session. Everything
   // else volatile is cleared.
+  // A dying established session drops the owner's USB-bound relay state
+  // with it (LocalJoin attempts, gateway relay liveness) — never reused
+  // by the next session.
+  if (had_session && join_owner_ != nullptr) {
+    join_owner_->join_session_down(now_ms_);
+  }
 }
 
 std::uint64_t UsbBridge::request_for(const MessageId& id) const noexcept {

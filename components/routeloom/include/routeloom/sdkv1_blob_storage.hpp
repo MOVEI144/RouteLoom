@@ -51,6 +51,8 @@ inline constexpr char kIdentityNamespace[] = "rlident";
 inline constexpr char kSiteNamespace[] = "rlsite";
 inline constexpr char kRevocationNamespace[] = "rlrevo";
 inline constexpr char kResumeNamespace[] = "rlres";
+inline constexpr char kLocalRevocationNamespace[] = "rlrev";
+inline constexpr char kResume2Namespace[] = "rlres2";
 
 inline constexpr char kIdentityKey0[] = "i0";
 inline constexpr char kIdentityKey1[] = "i1";
@@ -58,6 +60,8 @@ inline constexpr char kSiteKey0[] = "s0";
 inline constexpr char kSiteKey1[] = "s1";
 inline constexpr char kRevocationKey0[] = "r0";
 inline constexpr char kRevocationKey1[] = "r1";
+inline constexpr char kLocalRevocationKey0[] = "v0";
+inline constexpr char kLocalRevocationKey1[] = "v1";
 
 // Resume-cache slot counts (05 §3.2 / §5.1): a node keeps 16 slots, a
 // gateway 160. Key names are fixed per slot so NVS usage never grows with
@@ -107,6 +111,7 @@ class BlobRecordSlotStorage final : public RecordSlotStorage {
   static BlobRecordSlotStorage identity(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage site(BlobNamespace& blobs) noexcept;
   static BlobRecordSlotStorage revocation(BlobNamespace& blobs) noexcept;
+  static BlobRecordSlotStorage local_revocation(BlobNamespace& blobs) noexcept;
 
  private:
   BlobNamespace& blobs_;
@@ -130,6 +135,26 @@ class BlobResumeSlotStorage final : public ResumeSlotStorage {
   // Key of slot `index` for a cache of `slot_count` slots.
   static Status slot_key(std::size_t index, std::size_t slot_count,
                          char (&key)[kResumeKeyBytes]) noexcept;
+
+ private:
+  BlobNamespace& blobs_;
+  std::size_t slot_count_;
+};
+
+// ResumeSlotStorage2 (ResumeCache2, RLP2) over "s%02u"/"s%03u" keys of a
+// dedicated namespace (kResume2Namespace): the same key scheme as RLP1,
+// separated by the namespace so the two layouts never alias. Slots are
+// exactly kResume2SlotBytes (96 B); any other stored length reads as the
+// corrupt pattern (an empty slot — one full EDHOC).
+class BlobResumeSlotStorage2 final : public ResumeSlotStorage2 {
+ public:
+  BlobResumeSlotStorage2(BlobNamespace& blobs, std::size_t slot_count) noexcept
+      : blobs_(blobs),
+        slot_count_(slot_count > 0 && slot_count <= kResumeSlotsMax ? slot_count : 0) {}
+
+  std::size_t slot_count() const noexcept override { return slot_count_; }
+  Status read(std::size_t index, MutableByteView target) noexcept override;
+  Status write(std::size_t index, ByteView data) noexcept override;
 
  private:
   BlobNamespace& blobs_;

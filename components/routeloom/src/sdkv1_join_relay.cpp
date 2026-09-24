@@ -45,7 +45,18 @@ bool offset_of(const JoinObjectSlot& slot, const ByteView view, std::size_t& off
 
 HmacJoinCookie::~HmacJoinCookie() { secure_clear(key_); }
 
+Status HmacJoinCookie::install_key(const std::array<std::uint8_t, 32>& key) noexcept {
+  if (keyed_) return Status::error(StatusCode::InvalidState, "cookie sealer already keyed");
+  bool nonzero = false;
+  for (const std::uint8_t byte : key) nonzero = nonzero || (byte != 0);
+  if (!nonzero) return Status::error(StatusCode::InvalidArgument, "cookie key is zero");
+  key_ = key;
+  keyed_ = true;
+  return Status::success();
+}
+
 Status HmacJoinCookie::seal(const JoinCookieMaterial& material, JoinCookieBytes& out) noexcept {
+  if (!keyed_) return Status::error(StatusCode::InvalidState, "cookie sealer unkeyed");
   std::array<std::uint8_t, sizeof(kJoinCookieDomain) + 6 + 16 + 8 + 4 + 8> input{};
   std::size_t pos = 0;
   std::memcpy(input.data(), kJoinCookieDomain, sizeof(kJoinCookieDomain));
@@ -764,8 +775,11 @@ void JoinProxy::on_relay_rx(const NodeId from, const FrameType type, const ByteV
     }
     case FrameType::BootstrapChunk: {
       JoinChunk chunk{};
+      // Lane guard (P4 §7.3): end-session chunks never enter the
+      // join-relay assembly, even on a colliding (id, phase, step).
       if (!join_chunk_decode(JoinCarrier::WireRelay, payload, chunk) ||
-          chunk.id != relay_.relay_id || chunk.phase != relay_.phase ||
+          chunk.lane != ObjectLane::JoinRelay || chunk.id != relay_.relay_id ||
+          chunk.phase != relay_.phase ||
           join_step_flow(chunk.phase, chunk.step) == JoinFlow::Up) {
         ++stats_.frames_rejected;
         return;
@@ -794,7 +808,10 @@ void JoinProxy::on_relay_rx(const NodeId from, const FrameType type, const ByteV
     }
     case FrameType::BootstrapReply: {
       JoinReply reply{};
-      if (!join_reply_decode(payload, reply) || reply.id != relay_.relay_id || !relay_.slot_up) {
+      // Lane guard (P4 §7.3): an end-lane reply never advances a
+      // join-relay send.
+      if (!join_reply_decode(payload, reply) || reply.lane != ObjectLane::JoinRelay ||
+          reply.id != relay_.relay_id || !relay_.slot_up) {
         ++stats_.frames_rejected;
         return;
       }
@@ -1166,7 +1183,10 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
     }
     case FrameType::BootstrapChunk: {
       JoinChunk chunk{};
+      // Lane guard (P4 §7.3): end-session chunks never enter the
+      // join-relay assembly, even on a colliding (id, phase, step).
       if (!join_chunk_decode(JoinCarrier::WireRelay, payload, chunk) ||
+          chunk.lane != ObjectLane::JoinRelay ||
           join_step_flow(chunk.phase, chunk.step) == JoinFlow::Down) {
         ++stats_.frames_rejected;
         return;
@@ -1215,8 +1235,10 @@ void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
     case FrameType::BootstrapReply: {
       JoinReply reply{};
       Slot* slot = nullptr;
-      if (!join_reply_decode(payload, reply) || (slot = find(from, reply.id)) == nullptr ||
-          !slot->down) {
+      // Lane guard (P4 §7.3): an end-lane reply never advances a
+      // join-relay send.
+      if (!join_reply_decode(payload, reply) || reply.lane != ObjectLane::JoinRelay ||
+          (slot = find(from, reply.id)) == nullptr || !slot->down) {
         ++stats_.frames_rejected;
         return;
       }

@@ -786,6 +786,22 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::has_usable(const SecurityScope sc
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+bool SessionBank<kLinkCapacity, kEndCapacity>::peer_summary(const SecurityScope scope,
+                                                            const NodeId peer,
+                                                            std::uint32_t& generation,
+                                                            std::uint32_t& role) const noexcept {
+  generation = 0;
+  role = 0;
+  if (!configured_) return false;
+  const SessionBankEntry* entry = find_current(scope, peer);
+  if (entry == nullptr || !entry_usable(*entry)) return false;
+  if (entry->peer_generation == 0 || entry->peer_role == 0) return false;
+  generation = entry->peer_generation;
+  role = entry->peer_role;
+  return true;
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 std::size_t SessionBank<kLinkCapacity, kEndCapacity>::demand_count() const noexcept {
   std::size_t count = 0;
   for (const auto& demand : demand_) count += demand.used ? 1 : 0;

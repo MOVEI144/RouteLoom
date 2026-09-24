@@ -335,7 +335,7 @@ fn api_surface_validates_and_advertises() {
     let caps = call("capabilities.get", "{}");
     assert!(caps.contains("\"join.decide\":true"), "{caps}");
     assert!(caps.contains("\"site\":{\"configured\":true"), "{caps}");
-    assert!(caps.contains("\"join_relay\":\"not_wired\""), "{caps}");
+    assert!(caps.contains("\"join_relay\":\"not_ready\""), "{caps}");
     routeloom_json::parse(caps.trim_end()).unwrap();
     // Policy: admin read/write, validated ranges.
     let policy = call(
@@ -397,4 +397,35 @@ fn api_surface_validates_and_advertises() {
         "API1 {\"v\":1,\"request_id\":\"c\",\"method\":\"capabilities.get\",\"params\":{}}",
     );
     assert!(caps.contains("\"site\":{\"configured\":false"), "{caps}");
+}
+
+#[test]
+fn join_relay_advertises_only_on_a_capable_session() {
+    let daemon = Daemon::start("relay-ready");
+    let uid = std::fs::metadata(&daemon.dir).unwrap().uid();
+    let caps = || {
+        raw_api1(
+            &daemon.state,
+            uid,
+            "API1 {\"v\":1,\"request_id\":\"t\",\"method\":\"capabilities.get\",\"params\":{}}",
+        )
+    };
+    assert!(caps().contains("\"join_relay\":\"not_ready\""));
+    {
+        let mut info = daemon.state.session.lock().unwrap();
+        info.authenticated = true;
+        info.id = Some(7);
+        info.node = Some(1);
+        info.capability = Some(
+            routeloom_protocol::join_relay::CAP_JOIN_RELAY_V1
+                | routeloom_protocol::host_ops::CAP_HOST_OPS_V1,
+        );
+    }
+    let ready = caps();
+    assert!(ready.contains("\"join_relay\":\"ready\""), "{ready}");
+    {
+        // The capability bit alone is not enough without authentication.
+        daemon.state.session.lock().unwrap().authenticated = false;
+    }
+    assert!(caps().contains("\"join_relay\":\"not_ready\""));
 }

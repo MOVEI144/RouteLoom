@@ -165,6 +165,30 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // feeds the gateway's Wire side; the bridge never touches the mesh here.
   Status attach_join_relay(sdkv1::JoinRelayGateway& gateway) noexcept;
 
+  // P4 security-owner binding (G-SEC P4 §8.2/§8.3): when attached, 0x61
+  // and 0x62 route to the owner (self-addressed LocalJoin downs and
+  // mesh-proxy downs alike) instead of the legacy gateway above, and a
+  // dying session notifies the owner so USB-bound relay state drops with
+  // it. The owner answers admission synchronously for the 0x63 and emits
+  // its own 0x60/0x62 through relay_up/relay_abort below. Attaching both
+  // is refused — the owner is the gateway's only host sink then.
+  class SecurityOwnerUsbSink {
+   public:
+    virtual ~SecurityOwnerUsbSink() = default;
+    // One decoded H→G down: the relay object borrows the 0x61 inner
+    // bytes (valid during the call); `raw_object` is the same bytes for
+    // the gateway engine. Returns queue admission for the 0x63.
+    virtual Status join_down(NodeId to_proxy, const sdkv1::RelayObject& object,
+                             ByteView raw_object, MonotonicMs now_ms) noexcept = 0;
+    // One H→G abort: admission for the 0x63.
+    virtual Status join_abort(NodeId proxy, std::uint32_t relay_id, std::uint8_t reason,
+                              MonotonicMs now_ms) noexcept = 0;
+    // An established session died (disconnect, host restart, drain):
+    // USB-bound state drops, never reused.
+    virtual void join_session_down(MonotonicMs now_ms) noexcept = 0;
+  };
+  Status attach_security_owner(SecurityOwnerUsbSink& owner) noexcept;
+
   // Serial RX entry point: feed raw bytes read from the wire.
   void on_bytes(ByteView input, MonotonicMs now_ms) noexcept;
   // Periodic work: partial-frame timeout, handshake timeout, TX pump,
@@ -584,6 +608,9 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // nullptr -> 0x61/0x62 answer Unsupported). 0x60 bodies are staged in
   // tx_body_ like the node-status page (copied into a TxItem at once).
   sdkv1::JoinRelayGateway* join_relay_{nullptr};
+  // P4 security owner (exclusive with join_relay_ above): owns the 0x61
+  // /0x62 dispatch and the session-death hook when attached.
+  SecurityOwnerUsbSink* join_owner_{nullptr};
   static_assert(kMaxTxBody >= kGatewayInnerHeadSize + kJoinRelayUpMaxPayload,
                 "join relay up staging");
   static_assert(kGatewayInnerHeadSize + kJoinRelayUpMaxPayload <= kMaxTxInner,

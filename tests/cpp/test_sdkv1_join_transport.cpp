@@ -513,6 +513,35 @@ JoinChunk make_chunk(const Bytes& object, const std::size_t index, const std::ui
   return chunk;
 }
 
+void unit_cookie_keying() {
+  current = "unit_cookie_keying";
+  // G-SEC P4 §8.4: the owner constructs the sealer before radio-up
+  // entropy exists and arms it at boot. An unkeyed sealer refuses (never
+  // a weak zero-key cookie); arming is one-time and rejects zero keys.
+  HmacJoinCookie sealer;
+  JoinCookieMaterial material{};
+  material.proxy = 0x11;
+  material.network_low32 = 0x524c0001;
+  JoinCookieBytes cookie{};
+  CHECK(!sealer.keyed());
+  CHECK(sealer.seal(material, cookie).code == StatusCode::InvalidState);
+  std::array<std::uint8_t, 32> zero{};
+  CHECK(sealer.install_key(zero).code == StatusCode::InvalidArgument);
+  CHECK(!sealer.keyed());
+  std::array<std::uint8_t, 32> key{};
+  for (std::size_t i = 0; i < key.size(); ++i) key[i] = static_cast<std::uint8_t>(i + 1);
+  CHECK(sealer.install_key(key).ok());
+  CHECK(sealer.keyed());
+  CHECK(sealer.seal(material, cookie).ok());
+  CHECK(sealer.install_key(key).code == StatusCode::InvalidState);
+  // The explicit ctor stays keyed (existing proxy/gateway callers).
+  HmacJoinCookie keyed(key);
+  JoinCookieBytes again{};
+  CHECK(keyed.keyed());
+  CHECK(keyed.seal(material, again).ok());
+  CHECK(cookie == again);
+}
+
 void unit_slot() {
   current = "unit_slot";
   Bytes object(300);
@@ -779,6 +808,7 @@ void run() {
     current = path.filename().string();
     invalid(f);
   }
+  unit_cookie_keying();
   unit_slot();
   unit_admission();
   unit_budgets();

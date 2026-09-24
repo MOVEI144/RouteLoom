@@ -42,15 +42,17 @@
 //! activates the staged one (24 h / on-removal rotation, 08 §6 Q11).
 
 // The relay input path (`handle_up` and everything behind it) is driven by
-// the USB join relay, whose HostOps codec is defined concurrently (P3-2)
-// and wired by the integrator; until then only the tests and the
-// in-process transport exercise it, so a non-test build sees it unused.
+// the USB join relay (`usb::UsbSiteAdapter`, design G-SEC P4 §8.3);
+// the in-process transport keeps exercising it in tests and simulations.
 #![cfg_attr(not(test), allow(dead_code))]
 
 pub mod config;
 pub mod records;
 pub mod store;
 pub mod transport;
+pub mod usb;
+
+pub use usb::owns;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -366,6 +368,10 @@ pub struct Counters {
     pub busy_aborts: u64,
     pub unknown_relay: u64,
     pub timeouts: u64,
+    /// Live exchanges ended without an answer: a downlink the transport
+    /// refused, a relay the gateway reported over, or a USB session that
+    /// died mid-join (`fail_attempt` / `drop_gateway_relays`).
+    pub relay_failed: u64,
     pub rejected_unverified: BTreeMap<&'static str, u64>,
     pub allowed: u64,
     pub reissued: u64,
@@ -385,12 +391,13 @@ impl Counters {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"message_1\":{},\"message_1_refused\":{},\"busy_aborts\":{},\"unknown_relay\":{},\"timeouts\":{},\"rejected_unverified\":{{{rejected}}},\"allowed\":{},\"reissued\":{},\"pending\":{},\"denied\":{},\"removed_notices\":{},\"authority_busy\":{},\"store_failures\":{}}}",
+            "{{\"message_1\":{},\"message_1_refused\":{},\"busy_aborts\":{},\"unknown_relay\":{},\"timeouts\":{},\"relay_failed\":{},\"rejected_unverified\":{{{rejected}}},\"allowed\":{},\"reissued\":{},\"pending\":{},\"denied\":{},\"removed_notices\":{},\"authority_busy\":{},\"store_failures\":{}}}",
             self.message_1,
             self.message_1_refused,
             self.busy_aborts,
             self.unknown_relay,
             self.timeouts,
+            self.relay_failed,
             self.allowed,
             self.reissued,
             self.pending,
@@ -1359,6 +1366,33 @@ impl SiteAuthority {
         }
     }
 
+    /// Ends one relayed exchange as failed: its answer could not be
+    /// admitted to the downlink, the gateway reported the relay over, or
+    /// a queue result arrived non-Ok. Queues no further outbound — the
+    /// device retries with a fresh relay, and answering a dead relay
+    /// could loop (`SiteService::with` relies on this: no recursion).
+    /// Returns whether a live exchange was dropped.
+    pub fn fail_attempt(&mut self, key: RelayKey) -> bool {
+        if !self.txns.iter().any(|t| t.key == key) {
+            return false;
+        }
+        self.txns.retain(|t| t.key != key);
+        self.counters.relay_failed += 1;
+        true
+    }
+
+    /// Drops every live exchange relayed through `gateway`: its USB
+    /// session died, and the proxy slots died with it. The lane logs the
+    /// session boundary; the count lets it say how many relays went with
+    /// it. Returns the number dropped.
+    pub fn drop_gateway_relays(&mut self, gateway: u64) -> usize {
+        let before = self.txns.len();
+        self.txns.retain(|t| t.key.gateway != gateway);
+        let dropped = before - self.txns.len();
+        self.counters.relay_failed += dropped as u64;
+        dropped
+    }
+
     // --- KGuard decisions --------------------------------------------------------------------
 
     fn idempotent(
@@ -2215,9 +2249,14 @@ impl SiteService {
         *self.transport.lock().expect("transport poisoned") = Some(transport);
     }
 
-    /// Runs `f` on the authority; delivers what it queued.
+    /// Runs `f` on the authority; delivers what it queued. A delivery
+    /// the transport rejects (bounded queue full, oversize, session
+    /// gone) ends that relay's attempt as failed — re-locked after the
+    /// delivery loop, so no transport mutex is ever held across an
+    /// authority call and a rejection can never recurse into another
+    /// delivery (`fail_attempt` queues no outbound).
     pub fn with<R>(&self, f: impl FnOnce(&mut SiteAuthority) -> R) -> (R, Events) {
-        let (result, outbound, events) = {
+        let (result, outbound, mut events) = {
             let mut authority = self.authority.lock().expect("site authority poisoned");
             let result = f(&mut authority);
             (result, authority.take_outbound(), authority.take_events())
@@ -2225,8 +2264,19 @@ impl SiteService {
         if !outbound.is_empty() {
             let transport = self.transport.lock().expect("transport poisoned").clone();
             if let Some(transport) = transport {
+                let mut failed = Vec::new();
                 for message in outbound {
-                    transport.deliver(message);
+                    let key = message.key();
+                    if transport.deliver(message).is_err() {
+                        failed.push(key);
+                    }
+                }
+                if !failed.is_empty() {
+                    let mut authority = self.authority.lock().expect("site authority poisoned");
+                    for key in failed {
+                        authority.fail_attempt(key);
+                    }
+                    events.extend(authority.take_events());
                 }
             }
         }

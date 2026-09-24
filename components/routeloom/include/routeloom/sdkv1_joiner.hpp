@@ -78,6 +78,30 @@ struct JoinRxMeta {
   std::int16_t rssi{0};
 };
 
+// --- Direct transport (P4 §8.2: a gateway joining over its own USB) -----------
+// The Owner's USB LocalJoin adapter: one attached gateway, no radio, no
+// scan. Up messages leave here as (phase, step, message) tuples for the
+// adapter to wrap in USB 0x60; down messages arrive via on_direct_message.
+// The handshake, Decided/Commit/Reconcile and the commit policy are the
+// same objects the radio path uses — no second RLS1 commit is duplicated.
+class JoinDirectPort {
+ public:
+  virtual ~JoinDirectPort() = default;
+  virtual Status send_direct(JoinAuthPhase phase, std::uint8_t step,
+                             ByteView message) noexcept = 0;
+};
+
+// --- Pre-commit gate (P4 §8: local-removal evidence) ----------------------------------
+// Read-only veto consulted after the verified Allow and before any flash
+// write: the Owner refuses a commit that would resurrect a removed
+// membership (stale RLV1/floor evidence). A refusal avoids the site
+// without writing anything.
+class JoinCommitPolicy {
+ public:
+  virtual ~JoinCommitPolicy() = default;
+  virtual bool check(const SiteRecord& prepared, MonotonicMs now) noexcept = 0;
+};
+
 // --- Actions (single slot; take before the driver advances) -------------------------
 enum class JoinActionKind : std::uint8_t {
   None = 0,
@@ -223,6 +247,23 @@ class Joiner final {
   // Starts from Stopped only; the next poll runs the boot/store check.
   // Refuses an unprepared boot witness or an invalid scan-channel set.
   Status start(const JoinBootInput& boot, MonotonicMs now) noexcept;
+  // Starts from Stopped only, over the direct transport instead of the
+  // radio: the same boot/store check runs, then one handshake attempt
+  // without scan/select/refresh. Refuses an unprepared boot witness or an
+  // unusable requested role; the scan channels are not consulted. A
+  // finished attempt — success, deny or failure — parks in Stopped; the
+  // Owner restarts for the next one. No ChangeChannel is ever emitted.
+  Status start_direct(const JoinBootInput& boot, JoinDirectPort& port,
+                      MonotonicMs now) noexcept;
+  // One down message from the direct transport (the USB 0x61 body after
+  // the adapter unwraps it). InvalidState outside a direct run or in
+  // Stopped; unexpected steps count rx_dropped; a full mailbox answers
+  // Busy without overwriting. `body` is valid during the call only.
+  Status on_direct_message(JoinAuthPhase phase, std::uint8_t step, ByteView body,
+                           MonotonicMs now) noexcept;
+  // Installs/clears the pre-commit gate (nullptr disables). Consulted on
+  // the Commit poll, never from a callback.
+  void set_commit_policy(JoinCommitPolicy* policy) noexcept { commit_policy_ = policy; }
   // Completion of the pending ChangeChannel token (sync radios report it
   // from a separate call after consuming the action). Stale tokens from an
   // older tune are ignored and counted, never applied.
@@ -292,6 +333,13 @@ class Joiner final {
   void teardown_attempt() noexcept;
   void clear_mailbox() noexcept;
   void start_scan() noexcept;
+  // Shared run reset of start()/start_direct().
+  void begin_run(const JoinBootInput& boot) noexcept;
+  // Direct attempt without scan/select/refresh: the handshake opens with
+  // zero observed hints (the attachment selects the site) and the first
+  // m1 composes on the next poll. Terminal on failure: Stopped, never
+  // Select, so no scan can start behind the Owner's back.
+  void begin_direct_attempt() noexcept;
   bool open_scan_window(MonotonicMs now) noexcept;
   void tune_failed(MonotonicMs now) noexcept;
   void begin_refresh() noexcept;
@@ -323,6 +371,12 @@ class Joiner final {
   MonotonicMs last_now_{0};
   bool clock_uncertain_{false};
   bool in_call_{false};
+  // Direct transport run (P4 §8.2): set by start_direct, cleared by stop
+  // and by start. While set, m1/m3 leave via direct_port_, downs arrive
+  // via on_direct_message, and a finished attempt parks in Stopped.
+  bool direct_{false};
+  JoinDirectPort* direct_port_{nullptr};
+  JoinCommitPolicy* commit_policy_{nullptr};
 
   std::uint32_t boot_witness_{0};
   std::uint32_t retained_floor_{0};  // adopted rs_epoch_floor, kept on same-site recovery

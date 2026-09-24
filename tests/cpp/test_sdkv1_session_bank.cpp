@@ -813,8 +813,27 @@ void suite_nist_gcm() {
 #endif
 
 template <typename Bank>
+void suite_peer_summary(const AeadGcm& port) {
+  // The Owner's AuthenticatedPeerView feed: an engine install reports its
+  // verified generation/role, anything else (unknown peer, role-0 public
+  // installs) refuses.
+  Fixture<Bank> fix;
+  CHECK_OK(fix.configure(port));
+  std::uint32_t generation = 0;
+  std::uint32_t role = 0;
+  CHECK(!fix.bank.peer_summary(SecurityScope::Link, kPeer, generation, role));
+  install_link(fix.bank, kPeer, 0x1111, 0x2222, 0x10);
+  CHECK(fix.bank.peer_summary(SecurityScope::Link, kPeer, generation, role));
+  CHECK(generation == 3);
+  CHECK(role == 0b011);
+  CHECK(!fix.bank.peer_summary(SecurityScope::EndToEnd, kPeer, generation, role));
+  CHECK(!fix.bank.peer_summary(SecurityScope::Link, kPeer + 1, generation, role));
+}
+
+template <typename Bank>
 void run_suite(const AeadGcm& port, bool& fail_next) {
   suite_roundtrip<Bank>(port);
+  suite_peer_summary<Bank>(port);
   suite_unknown_and_demand<Bank>(port);
   suite_reservation<Bank>(port, fail_next);
   suite_install_retire<Bank>(port);

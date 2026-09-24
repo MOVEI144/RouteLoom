@@ -15,8 +15,21 @@
 #include "routeloom/migration_wire.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/owner_pump.hpp"
+#include "routeloom/sdkv1_joiner.hpp"
 
 namespace routeloom::espnow {
+
+// Observed RLD1 consumer (G-SEC P4 §7.1/§8.4): the security owner
+// attaches here and the runtime feeds it every bootstrap frame with the
+// observed radio identity (channel + generation at enqueue) instead of
+// handing the frame to discovery directly. Called synchronously from
+// poll_once on the pump task — the sink must not block.
+class BootstrapRld1Sink {
+ public:
+  virtual ~BootstrapRld1Sink() = default;
+  virtual void on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta, std::uint32_t radio_generation,
+                                 ByteView frame, MonotonicMs received_ms) noexcept = 0;
+};
 
 struct MacAddress {
   std::array<std::uint8_t, 6> bytes{};
@@ -107,6 +120,23 @@ class EspNowRuntime final : public RadioPort,
   // peer (LR250 applied). Optional — when never called the runtime behaves
   // exactly like the static-peer build.
   Status attach_autonomy(NeighborDiscovery& engine) noexcept;
+  // Attach the P4 security owner as the bootstrap consumer (once): from
+  // then on poll_once feeds every RLD1 frame to the sink with its
+  // observed radio identity and no longer hands frames to discovery
+  // directly (the owner routes member-scope Discovers back into
+  // discovery itself). The sink also unlocks send_rld1 without an
+  // attached autonomy engine (radio-only join).
+  Status attach_bootstrap_sink(BootstrapRld1Sink& sink) noexcept;
+  // Rebuild the mesh node with the adopted member config (G-SEC P4 §8.1):
+  // only before start (the node never ran, so nothing is lost); refuses
+  // once started. Radio/security/observer bindings are preserved.
+  Status adopt_member_node(const routeloom::NodeConfig& adopted) noexcept;
+  // Live radio identity for the security owner (ApplyMemberConfig
+  // channel handling): the last verified channel (the generation rides
+  // radio_generation() below).
+  std::uint8_t committed_channel() const noexcept {
+    return channel_runner_.committed_channel();
+  }
   NeighborDiscovery* discovery() const noexcept { return discovery_; }
 
   // Observed station MAC, valid after initialize(); the discovery config and
@@ -265,6 +295,12 @@ class EspNowRuntime final : public RadioPort,
     MonotonicMs received_ms{0};
     std::uint16_t length{0};
     std::int8_t rssi_dbm{0};
+    // Observed radio identity (G-SEC P4 §8.4): the channel the frame
+    // arrived on and the radio generation at enqueue, so the security
+    // owner can gate RLD1 on (channel, generation) instead of trusting
+    // body claims. Captured under the callback lock with the wire lane.
+    std::uint8_t channel{0};
+    std::uint32_t radio_generation{0};
     std::array<std::uint8_t, autonomy::kRld1MaxTotal> data{};
   };
   struct Peer {
@@ -379,6 +415,7 @@ class EspNowRuntime final : public RadioPort,
   std::array<Peer, kPeerCapacity> peers_{};
   std::array<TransientPeer, kTransientPeerCapacity> transient_peers_{};
   NeighborDiscovery* discovery_{nullptr};
+  BootstrapRld1Sink* bootstrap_sink_{nullptr};
   QueueHandle_t event_queue_{nullptr};
   QueueHandle_t bootstrap_queue_{nullptr};
   // Poll-task lifecycle: task_running_ is claimed (CAS) by start_task()

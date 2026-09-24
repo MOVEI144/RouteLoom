@@ -85,12 +85,24 @@ class JoinCookieSealer {
 // RAM-only state drawn from boot entropy; a reboot invalidates old cookies.
 class HmacJoinCookie final : public JoinCookieSealer {
  public:
-  explicit HmacJoinCookie(const std::array<std::uint8_t, 32>& key) noexcept : key_(key) {}
+  // Unkeyed: seal() refuses until install_key() arms the sealer. The
+  // firmware owner needs this split — the coordinator (which holds the
+  // sealer) is constructed before radio-up entropy exists, and the
+  // cookie key must be drawn only after the radio entropy source is
+  // ready (G-SEC P4 §8.4), never from weak pre-RF randomness.
+  HmacJoinCookie() noexcept = default;
+  explicit HmacJoinCookie(const std::array<std::uint8_t, 32>& key) noexcept
+      : key_(key), keyed_(true) {}
   ~HmacJoinCookie() override;
+  // One-time arming; refuses a second key (no silent rekey under a live
+  // coordinator) and refuses to arm from an all-zero key.
+  Status install_key(const std::array<std::uint8_t, 32>& key) noexcept;
+  bool keyed() const noexcept { return keyed_; }
   Status seal(const JoinCookieMaterial& material, JoinCookieBytes& out) noexcept override;
 
  private:
   std::array<std::uint8_t, 32> key_{};
+  bool keyed_{false};
 };
 
 inline constexpr char kJoinCookieDomain[] = "RouteLoom/zt-cookie/v1";

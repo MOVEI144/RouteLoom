@@ -19,6 +19,7 @@
 #include "routeloom/discovery.hpp"  // AuthenticatedPeerProof (link elevation)
 #include "routeloom/edhoc.hpp"
 #include "routeloom/key_schedule.hpp"
+#include "routeloom/rlcw1.hpp"
 #include "routeloom/rlres1.hpp"
 #include "routeloom/sdkv1_session_wire.hpp"
 #include "routeloom/sdkv1_store.hpp"
@@ -141,6 +142,27 @@ class SessionCredentialVerifier {
   // decode. Must fail closed on any issue.
   virtual bool verify_peer(ByteView cert, NodeId expected_node,
                            PeerCertClaims& out) noexcept = 0;
+};
+
+// The store-backed verifier (G-SEC P4 §5.3 m2 row): local credentials
+// from the adopted RLI1/RLS1, peer MemberCerts verified against the
+// adopted SiteCert's SAK with the full site/network/assignment binding.
+// Handles (EfuseDsBound/SecureElement) refuse: PR4 has no DS/SE signer.
+// Portable (host-tested); the firmware binds it to its Sdkv1Stores.
+class StoreCredentialVerifier final : public SessionCredentialVerifier {
+ public:
+  StoreCredentialVerifier(const IdentityStore& identity, const SiteStore& site,
+                          const Es256Verifier& verifier = default_es256_verifier()) noexcept
+      : identity_(identity), site_(site), verifier_(verifier) {}
+
+  bool local_credential(LocalCredential& out) noexcept override;
+  bool verify_peer(ByteView cert, NodeId expected_node,
+                   PeerCertClaims& out) noexcept override;
+
+ private:
+  const IdentityStore& identity_;
+  const SiteStore& site_;
+  const Es256Verifier& verifier_;
 };
 
 // The narrow install surface the engine needs (P4 §2.2): verified installs

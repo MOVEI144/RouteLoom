@@ -971,6 +971,13 @@ void NeighborDiscovery::handle_prove(const MacAddress& source,
                                      const autonomy::BootstrapAuthBody& auth,
                                      const MonotonicMs now_ms) noexcept {
   ++stats_.proves_rx;
+  // Member-handshake mode: mutual authentication runs in the Owner's
+  // engine — a dev-profile PROVE is refused, never confirmed.
+  if (member_handshake_mode_) {
+    ++stats_.kind_rejects;
+    reject_event("MEMBER_MODE_PROVE", env.claimed_node);
+    return;
+  }
   Candidate* candidate = find_candidate(source, env.transaction_nonce);
   if (candidate == nullptr || candidate->phase != NeighborPhase::Candidate ||
       candidate->offer_pending || auth.body_size != kProveBodySize ||
@@ -1561,6 +1568,56 @@ void NeighborDiscovery::sweep_member_pendings(const MonotonicMs now_ms) noexcept
   }
 }
 
+Status NeighborDiscovery::take_member_start(MemberStartRequest& out,
+                                               const MonotonicMs now_ms) noexcept {
+  out = MemberStartRequest{};
+  if (!member_handshake_mode_) return Status::error(StatusCode::NotFound, "member mode off");
+  // Oldest parked responder start first: its peer may already have an m1
+  // in flight, while our initiator leg can wait one more Owner poll.
+  Candidate* oldest = nullptr;
+  candidates_.for_each([&](Candidate& c) {
+    if (!c.member_start_parked || now_ms >= c.expires_at_ms) return;
+    if (oldest == nullptr || c.expires_at_ms < oldest->expires_at_ms) oldest = &c;
+  });
+  if (oldest != nullptr) {
+    out.initiator = false;
+    out.peer = oldest->claimed_node;
+    out.peer_mac = oldest->mac;
+    // The exchange as the responder froze it: their DISCOVER nonce is the
+    // requester nonce, ours the responder nonce; the cookie is ours.
+    // network/node_i/node_r stay zero for the Owner's full64 stamp.
+    out.carrier.requester_nonce = oldest->txn_nonce;
+    out.carrier.responder_nonce = oldest->our_nonce;
+    out.carrier.cookie = oldest->cookie;
+    out.carrier.capability_i = oldest->peer_capability;
+    out.carrier.capability_r = config_.capability_bits;
+    out.carrier.scope_binding = oldest->exchange.binding();
+    out.expires_at_ms = oldest->expires_at_ms;
+    oldest->member_start_parked = false;
+    return Status::success();
+  }
+  // The parked initiator start, if the accepted OFFER is still live.
+  if (outbound_.active && outbound_.stage == OutboundStage::ProvePending &&
+      outbound_.have_offer && now_ms < outbound_.stage_deadline_ms) {
+    out.initiator = true;
+    out.peer = outbound_.peer_node;
+    out.peer_mac = outbound_.peer_mac;
+    out.carrier.requester_nonce = outbound_.our_nonce;
+    out.carrier.responder_nonce = outbound_.peer_nonce;
+    out.carrier.cookie = outbound_.cookie_echo;
+    out.carrier.capability_i = config_.capability_bits;
+    out.carrier.capability_r = outbound_.peer_capability;
+    out.carrier.scope_binding = outbound_.exchange.binding();
+    out.expires_at_ms = outbound_.stage_deadline_ms;
+    // Consumed: the engine owns the exchange now and the slot frees for
+    // the next begin_discovery. Attempts reset — engine retries are not
+    // discovery retries.
+    outbound_ = Outbound{};
+    return Status::success();
+  }
+  return Status::error(StatusCode::NotFound, "no parked member start");
+}
+
 Status NeighborDiscovery::begin_member_handshake(
     const NodeId peer, const MacAddress& peer_mac, const MonotonicMs now_ms,
     std::uint32_t& token) noexcept {
@@ -1964,6 +2021,9 @@ Status NeighborDiscovery::send_offer(Candidate& candidate,
                 &candidate.exchange.offer_digest);
   if (status.ok()) {
     candidate.offer_pending = false;
+    // Member-handshake mode: the OFFER freezes the responder exchange for
+    // the Owner's engine — park it instead of awaiting a dev PROVE.
+    if (member_handshake_mode_) candidate.member_start_parked = true;
     ++stats_.offers_tx;
     // The OFFER commits us to a bounded mutual exchange: a non-member
     // responder becomes Authenticating so the incoming PROVE passes the
@@ -2046,6 +2106,9 @@ Status NeighborDiscovery::send_scoped_offer(Candidate& candidate,
   if (status.ok()) {
     sha256(encoded.view(), candidate.exchange.offer_digest);
     candidate.offer_pending = false;
+    // Member-handshake mode: park the frozen responder exchange for the
+    // Owner's engine instead of awaiting a dev PROVE.
+    if (member_handshake_mode_) candidate.member_start_parked = true;
     ++stats_.offers_tx;
     membership_.begin_authentication();
   } else {
@@ -2207,9 +2270,13 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
   // Outbound exchange driver.
   if (outbound_.active) {
     if (outbound_.stage == OutboundStage::ProvePending &&
-        outbound_.have_offer && now_ms >= next_handshake_ms_) {
+        outbound_.have_offer && now_ms >= next_handshake_ms_ &&
+        !member_handshake_mode_) {
       send_prove(now_ms);
     }
+    // Member-handshake mode: the accepted OFFER stays parked for
+    // take_member_start; the stage deadline below still sweeps untaken
+    // starts, so parking is bounded either way.
     if (outbound_.stage != OutboundStage::Idle &&
         now_ms > outbound_.stage_deadline_ms) {
       // Exchange attempt failed: fresh attempt nonce, and the next retry
