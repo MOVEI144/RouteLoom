@@ -107,19 +107,25 @@ struct CookieMaterial {
 // Owner still re-verify before a VerifiedBinding exists. Only an
 // authenticator may construct one — applications cannot mint proofs from a
 // bare bool.
+namespace sdkv1 {
+class HandshakeEngine;
+}  // namespace sdkv1
+
 class AuthenticatedPeerProof {
  public:
+  // Default-constructible so results can hold one; carries no evidence and
+  // is never valid. Only the friend minters below can make a valid proof.
+  AuthenticatedPeerProof() noexcept = default;
   NodeId peer() const noexcept { return peer_; }
   const MacAddress& mac() const noexcept { return mac_; }
   NetworkId network() const noexcept { return network_; }
   const AuthTag& evidence() const noexcept { return evidence_; }
-  // A default-constructed proof carries no evidence and is never valid.
   bool valid() const noexcept { return peer_ != kInvalidNodeId; }
 
  private:
   friend class NeighborAuthenticator;
   friend class NeighborDiscovery;  // out-parameter holder only, cannot mint
-  AuthenticatedPeerProof() noexcept = default;
+  friend class sdkv1::HandshakeEngine;  // member handshake (P4 §7.2)
   AuthenticatedPeerProof(NodeId peer, const MacAddress& mac, NetworkId network,
                          const AuthTag& evidence) noexcept
       : peer_(peer), mac_(mac), network_(network), evidence_(evidence) {}
@@ -490,6 +496,29 @@ class NeighborDiscovery {
   // re-check, never resurrect).
   void reevaluate(MonotonicMs now_ms) noexcept;
 
+  // --- Member handshake elevation (P4 §7.2) ---------------------------------
+  // The Owner runs the sdkv1 HandshakeEngine beside discovery: it reserves a
+  // link start here, drives the engine's RLD1 link frames, and completes with
+  // the engine-minted proof. The elevation tail (MAC conflict, membership
+  // re-check, regular slot, binding generation, Bound→Probe) is shared with
+  // the dev exchange path — there is exactly one promotion implementation.
+  static constexpr std::uint32_t kMemberHandshakeNone = 0;
+  static constexpr std::size_t kMemberHandshakePendings = 4;
+  // Reserve a member-handshake start for (peer, peer_mac): fails
+  // BindingConflict when the pair contradicts a known record and
+  // PeerCapacity when no neighbor slot could take the elevation. The
+  // returned token names the reservation for complete/cancel.
+  Status begin_member_handshake(NodeId peer, const MacAddress& peer_mac,
+                                MonotonicMs now_ms, std::uint32_t& token) noexcept;
+  // Elevate the reservation named by `token` with the engine-minted proof.
+  // The proof's peer/MAC/network must match the reservation; anything else
+  // is refused and the reservation is dropped.
+  Status complete_handshake(std::uint32_t token, const AuthenticatedPeerProof& proof,
+                            MonotonicMs now_ms) noexcept;
+  // Drop the reservation (engine failure/abort path). Unknown tokens are
+  // ignored — completion and cancellation never race into an error.
+  void cancel_member_handshake(std::uint32_t token) noexcept;
+
   const MembershipController& membership() const noexcept { return membership_; }
   MembershipController& membership() noexcept { return membership_; }
   const DiscoveryStats& stats() const noexcept { return stats_; }
@@ -687,6 +716,12 @@ class NeighborDiscovery {
                          bool we_are_requester,
                          MonotonicMs now_ms) noexcept;
   void fail_outbound(MonotonicMs now_ms, const char* reason) noexcept;
+  // Shared elevation tail: membership advance + re-check, MAC-conflict
+  // handling, re-auth generation bump or fresh bind, Bound→Probe. Both the
+  // dev exchange path and complete_handshake converge here.
+  void elevate_proven_peer(const MacAddress& peer_mac, NodeId peer_node,
+                           MonotonicMs now_ms) noexcept;
+  void sweep_member_pendings(MonotonicMs now_ms) noexcept;
   void release_candidate(Candidate& candidate) noexcept;
   void cancel_competing(const MacAddress& mac, NodeId node) noexcept;
   // Drop a passive responder back to Discovering when no auth exchange is
@@ -761,7 +796,18 @@ class NeighborDiscovery {
 
   Outbound outbound_{};
   std::uint32_t next_candidate_id_{1};
+  // Minted binding ids never wrap to 0: UINT32_MAX is the last mintable id
+  // and 0 afterwards means exhausted (P4 §7.2) — a live id is never reused.
   std::uint32_t next_binding_id_{1};
+  struct MemberPending {
+    bool used{false};
+    std::uint32_t token{kMemberHandshakeNone};
+    NodeId peer{kInvalidNodeId};
+    MacAddress mac{};
+    MonotonicMs expires_at_ms{0};
+  };
+  std::array<MemberPending, kMemberHandshakePendings> member_pendings_{};
+  std::uint32_t next_member_token_{1};
   std::uint32_t next_probe_sequence_{1};
   MonotonicMs next_handshake_ms_{0};   // 1/s burst-1 token bucket
   // Stranded-node re-discovery (04 §9.2): armed when the last usable edge

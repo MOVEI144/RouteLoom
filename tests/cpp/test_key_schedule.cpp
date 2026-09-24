@@ -323,6 +323,7 @@ struct ScriptedEnv final : rlres1::Environment {
     out = cid;
     return cid != 0;
   }
+  bool reserve_resume_use(keys::Purpose, const keys::ResumeId&) noexcept override { return true; }
 };
 
 void check_rlres1_engine(const Fields& f) {

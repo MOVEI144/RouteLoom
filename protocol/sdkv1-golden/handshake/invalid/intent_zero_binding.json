@@ -1,0 +1,8 @@
+{
+  "codec": "session_intent",
+  "encoded_hex": "0101010003000000000000070000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "intent_zero_binding",
+  "note": "binding is a digest, never zero"
+}

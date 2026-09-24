@@ -290,6 +290,13 @@ class Session {
                         MutableByteView recipient_id,
                         std::size_t& recipient_id_length) noexcept;
 
+  // The peer's negotiated connection identifier (C_I on a responder
+  // after message 1, C_R on an initiator after message 2), up to
+  // kConnectionIdMaxSize bytes. NotFound while none was negotiated yet;
+  // the member profile's exact-4-byte rule (P4 §5.1) is the caller's
+  // policy, not this read-out's.
+  Status peer_connection_id(MutableByteView out, std::size_t& length) noexcept;
+
   int last_error() const noexcept { return last_error_; }
   edhoc_context* native() noexcept;
   const KeyStore& keys() const noexcept { return keys_; }

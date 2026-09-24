@@ -39,6 +39,8 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_join_transport.cpp
   src/sdkv1_membership.cpp
   src/sdkv1_records.cpp
+  src/sdkv1_handshake.cpp
+  src/sdkv1_session_wire.cpp
   src/sdkv1_store.cpp
   src/session_bank.cpp
   src/status.cpp

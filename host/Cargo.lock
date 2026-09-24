@@ -459,6 +459,7 @@ dependencies = [
  "hkdf",
  "p256",
  "routeloom-join",
+ "routeloom-keysched",
  "routeloom-provision",
  "sha2",
  "zeroize",
