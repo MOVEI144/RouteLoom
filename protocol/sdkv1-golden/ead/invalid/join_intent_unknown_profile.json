@@ -1,8 +1,8 @@
 {
   "codec": "join_intent",
-  "encoded_hex": "010049746ee2000000050000",
+  "encoded_hex": "010049746ee2000000090000",
   "expect": "error",
   "format": "routeloom-sdkv1-ead-golden-v1",
   "name": "join_intent_unknown_profile",
-  "note": "only profile bits 0..1 are defined"
+  "note": "only profile bits 0..2 are defined"
 }

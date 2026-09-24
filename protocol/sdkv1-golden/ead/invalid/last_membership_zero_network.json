@@ -1,0 +1,8 @@
+{
+  "codec": "last_membership",
+  "encoded_hex": "010000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-ead-golden-v1",
+  "name": "last_membership_zero_network",
+  "note": "network zero is invalid"
+}

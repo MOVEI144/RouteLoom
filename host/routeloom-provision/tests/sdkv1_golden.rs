@@ -20,6 +20,10 @@ use routeloom_provision::sdkv1::identity::{
     identity_record_decode, identity_record_encode, AnchorKind, AnchorStatus,
     IDENTITY_SEAL_COMMITTED,
 };
+use routeloom_provision::sdkv1::lifecycle::{
+    lifecycle_record_decode, lifecycle_record_encode, LifecycleMode, LifecycleRecord,
+    LIFECYCLE_SEAL_COMMITTED, REMOVAL_NOTICE_OBJECT_SIZE,
+};
 use routeloom_provision::sdkv1::local_revocation::{
     local_revocation_record_decode, local_revocation_record_encode, LOCAL_REVOCATION_SEAL_COMMITTED,
 };
@@ -37,7 +41,9 @@ use routeloom_provision::sdkv1::revocation::{
 use routeloom_provision::sdkv1::site::{
     site_record_decode, site_record_encode, SiteState, SITE_SEAL_COMMITTED,
 };
-use routeloom_provision::sdkv1::{cose_es256_assemble, cose_es256_sig_structure};
+use routeloom_provision::sdkv1::{
+    cose_es256_assemble, cose_es256_parse, cose_es256_sig_structure, cose_es256_verify,
+};
 use routeloom_provision::signer::{pubkey_from_secret, FileRootSigner, RootSigner};
 use routeloom_provision::Code;
 
@@ -303,6 +309,56 @@ fn check_rrs1_record(name: &str, doc: &Json) {
     );
 }
 
+fn check_rlx1_record(name: &str, doc: &Json) {
+    let mode = match num(doc, "mode") {
+        1 => LifecycleMode::Removing,
+        2 => LifecycleMode::Holdoff,
+        3 => LifecycleMode::UnassignedReady,
+        _ => panic!("{name}: unsupported mode"),
+    };
+    let expected = LifecycleRecord {
+        mode,
+        self_node: num(doc, "self_node"),
+        site_id: num(doc, "site_id"),
+        old_network: num(doc, "old_network"),
+        new_network: 0,
+        generation: num(doc, "generation") as u32,
+        rs_floor: num(doc, "rs_floor") as u32,
+        gk_floor: num(doc, "gk_floor") as u32,
+        boot_witness: num(doc, "boot_witness") as u32,
+        cutover_id: 0,
+        revision: 0,
+        payload: hex(doc, "payload_hex"),
+    };
+    let record = hex(doc, "record_hex");
+    let seq = num(doc, "commit_seq") as u32;
+    assert_eq!(
+        lifecycle_record_decode(&record).unwrap(),
+        (expected.clone(), seq),
+        "{name}"
+    );
+    assert_eq!(
+        lifecycle_record_encode(&expected, LIFECYCLE_SEAL_COMMITTED, seq).unwrap(),
+        record,
+        "{name}"
+    );
+    if matches!(mode, LifecycleMode::Removing | LifecycleMode::Holdoff) {
+        let cert_len = usize::from(u16::from_be_bytes(
+            expected.payload[..2].try_into().unwrap(),
+        ));
+        let notice = &expected.payload[4 + cert_len..];
+        let parts = cose_es256_parse(notice, 28, 28, REMOVAL_NOTICE_OBJECT_SIZE).unwrap();
+        let mut aad = b"RouteLoom/removal-notice/v1\0".to_vec();
+        aad.extend_from_slice(&expected.old_network.to_be_bytes());
+        assert!(cose_es256_verify(
+            parts.payload,
+            &aad,
+            &parts.signature,
+            &arr::<64>(doc, "signer_pubkey_hex")
+        ));
+    }
+}
+
 fn check_rlp1(name: &str, doc: &Json) {
     let record = hex(doc, "record_hex");
     let slot = resume_slot_decode(&record).unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -460,6 +516,7 @@ fn check_pop(name: &str, doc: &Json) {
 fn sdkv1_valid_vectors_match_byte_for_byte() {
     let valid = files("valid");
     assert!(valid.len() >= 17);
+    let mut saw_rlx1 = false;
     for (name, doc) in &valid {
         assert_eq!(text(doc, "format"), "routeloom-sdkv1-golden-v1");
         assert_eq!(text(doc, "expect"), "ok", "{name}");
@@ -469,6 +526,10 @@ fn sdkv1_valid_vectors_match_byte_for_byte() {
             "rls1" => check_rls1(name, doc),
             "rrs1" => check_rrs1(name, doc),
             "rrs1_record" => check_rrs1_record(name, doc),
+            "rlx1_record" => {
+                saw_rlx1 = true;
+                check_rlx1_record(name, doc);
+            }
             "rlp1" => check_rlp1(name, doc),
             "rlp2" => check_rlp2(name, doc),
             "rlv1" => check_rlv1(name, doc),
@@ -476,6 +537,7 @@ fn sdkv1_valid_vectors_match_byte_for_byte() {
             other => panic!("{name}: unknown codec {other}"),
         }
     }
+    assert!(saw_rlx1);
 }
 
 #[test]
@@ -523,6 +585,7 @@ fn sdkv1_invalid_vectors_are_rejected() {
                 }
             }
             "rrs1_record" => assert!(revocation_record_decode(&bytes).is_err(), "{name}"),
+            "rlx1_record" => assert!(lifecycle_record_decode(&bytes).is_err(), "{name}"),
             "rlp1" => assert!(resume_slot_decode(&bytes).is_err(), "{name}"),
             "rlp2" => assert!(resume2_slot_decode(&bytes).is_err(), "{name}"),
             "rlv1" => assert!(local_revocation_record_decode(&bytes).is_err(), "{name}"),
