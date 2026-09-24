@@ -14,6 +14,7 @@
 
 #include "routeloom/authority.hpp"
 #include "routeloom/config.hpp"
+#include "routeloom/config_dev.hpp"
 #include "routeloom/config_wire.hpp"
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"
@@ -205,7 +206,7 @@ void test_permit_tag(const ByteView aad, const ByteView canonical,
   std::memcpy(out.data(), digest.data(), kPermitTagSize);
 }
 
-// The test recovery envelope: recovery_aad(46B) || canonical RCR1 || tag(16B)
+// The test recovery envelope: recovery_aad(46B) || canonical RCR2 || tag(16B)
 // under its own domain — a kind-4 object can never verify as a kind-3
 // permit, mirroring the dev profile's separate domains.
 constexpr char kTestRecoveryDomain[] = "RouteLoom/config-recover-test/v1";
@@ -244,12 +245,12 @@ class FakePermitSigner {
     permit.size = aad.size + canonical.size + kPermitTagSize;
     return Status::success();
   }
-  Status sign_recovery(const endpoint::ConfigRecoveryCommand& command,
+  Status sign_recovery(const endpoint::ConfigRecoveryIntent& intent,
                        const ByteView canonical,
                        ByteBuffer<kConfigPermitObjectMax>& permit) noexcept {
     ByteBuffer<kRecoveryAadSize> aad{};
-    Status status = config_recovery_aad(command.network, command.target,
-                                        command.config_namespace, aad);
+    Status status = config_recovery_aad(intent.network, intent.target,
+                                        intent.config_namespace, aad);
     if (!status) return status;
     if (aad.size + canonical.size + kPermitTagSize > permit.bytes.size()) {
       return Status::error(StatusCode::NoCapacity, "recovery object oversize");
@@ -305,15 +306,16 @@ class FakeVerifier final : public ConfigAuthorityVerifier {
     verified = true;
     return Status::success();
   }
-  // The kind-4 recovery envelope: recovery-domain aad || RCR1 || tag16 —
-  // fixed 138 B. Same contract as verify_permit; the test profile resolves
+  // The kind-4 recovery envelope: recovery-domain aad || RCR2(112..624) ||
+  // tag16. Same contract as verify_permit; the test profile resolves
   // every generation, so the countersign resolvability check always passes.
   Status verify_recovery(const ConfigPermitContext& context, const ByteView object,
-                         endpoint::EncodedRecoveryCommand& payload,
+                         endpoint::EncodedRecoveryIntent& payload,
                          bool& verified) noexcept override {
     verified = false;
     ++verify_calls;
-    if (object.size != kRecoveryAadSize + endpoint::kRcr1Size + kPermitTagSize) {
+    if (object.size < kRecoveryAadSize + endpoint::kRcr2HeaderSize + kPermitTagSize ||
+        object.size > kConfigPermitObjectMax) {
       return Status::error(StatusCode::ProtocolError,
                            "recovery envelope malformed");
     }
@@ -324,7 +326,8 @@ class FakeVerifier final : public ConfigAuthorityVerifier {
     if (!constant_time_equal(ByteView{object.data, kRecoveryAadSize}, aad.view())) {
       return Status::success();  // wrong scope binding -> verified=false
     }
-    const ByteView canonical{object.data + kRecoveryAadSize, endpoint::kRcr1Size};
+    const ByteView canonical{object.data + kRecoveryAadSize,
+                             object.size - kRecoveryAadSize - kPermitTagSize};
     std::array<std::uint8_t, kPermitTagSize> tag{};
     test_recovery_tag(aad.view(), canonical, tag);
     if (!constant_time_equal(
@@ -340,16 +343,25 @@ class FakeVerifier final : public ConfigAuthorityVerifier {
     return Status::success();
   }
   endpoint::ConfigCommand decoded_{};
-  endpoint::ConfigRecoveryCommand decoded_recovery_{};
+  endpoint::ConfigRecoveryIntent decoded_recovery_{};
   std::size_t verify_calls{0};
 };
 
 // Desired-state provider fake: validate/prepare are side-effect-free,
 // apply/restore complete after `polls_to_complete` polls, then commit the
-// pending snapshot to the "active" image. read_active returns the actual
-// committed bytes (readback verification).
+// pending snapshot to the durable ("active") image and — unless frozen —
+// to the live-effects image. read_active returns the durable bytes after
+// proving the live image still matches them (readback verification);
+// legacy tests that seed only `active_` skip the live check.
 class FakeProvider final : public ConfigProvider {
  public:
+  // Seed both images at once: the provider's durable and live state agree.
+  void seed(const ByteView image) noexcept {
+    active_.size = image.size;
+    std::memcpy(active_.bytes.data(), image.data, image.size);
+    live_ = active_;
+    live_explicit_ = true;
+  }
   Status validate(const std::uint16_t, const std::uint16_t,
                   const ByteView) noexcept override {
     ++validate_calls;
@@ -359,6 +371,11 @@ class FakeProvider final : public ConfigProvider {
                  const ByteView) noexcept override {
     ++prepare_calls;
     return prepare_result;
+  }
+  Status validate_recovery(const std::uint16_t, const std::uint16_t,
+                           const ByteView) noexcept override {
+    ++validate_recovery_calls;
+    return validate_recovery_result;
   }
   Status apply(const std::uint16_t, const ByteView next,
                OperationToken& token) noexcept override {
@@ -396,16 +413,27 @@ class FakeProvider final : public ConfigProvider {
       return Status::success();
     }
     active_ = pending_;
+    if (!freeze_live) live_ = pending_;  // a frozen live image stays stale
+    live_explicit_ = true;
     outcome = Status::success();
     return Status::success();
   }
   Status read_active(const std::uint16_t, const MutableByteView target,
                      std::size_t& out_size) noexcept override {
+    if (fail_reads > 0) {
+      --fail_reads;
+      return Status::error(StatusCode::StorageFailure, "readback failed");
+    }
     if (corrupt_reads > 0) {
       --corrupt_reads;
       out_size = 3;
       std::memcpy(target.data, "bad", 3);
       return Status::success();
+    }
+    if (live_explicit_ && (live_.size != active_.size ||
+                           std::memcmp(live_.bytes.data(), active_.bytes.data(),
+                                       active_.size) != 0)) {
+      return Status::error(StatusCode::IntegrityError, "live image diverged");
     }
     if (active_.size > target.size) {
       return Status::error(StatusCode::NoCapacity, "read buffer small");
@@ -415,18 +443,24 @@ class FakeProvider final : public ConfigProvider {
     return Status::success();
   }
   ByteBuffer<endpoint::kConfigSnapshotMax> active_{};
+  ByteBuffer<endpoint::kConfigSnapshotMax> live_{};
+  bool live_explicit_{false};
   ByteBuffer<endpoint::kConfigSnapshotMax> pending_{};
   int polls_to_complete{1};
   int polls_left_{0};
   std::uint64_t token_id_{0};
   Status validate_result = Status::success();
   Status prepare_result = Status::success();
+  Status validate_recovery_result = Status::success();
   Status apply_result = Status::success();
   Status restore_result = Status::success();
   int fail_polls{0};
+  int fail_reads{0};
+  bool freeze_live{false};
   bool partial_apply{false};
   int corrupt_reads{0};
   int validate_calls{0}, prepare_calls{0}, apply_calls{0}, restore_calls{0};
+  int validate_recovery_calls{0};
 };
 
 class FakeMaintenanceGate final : public ConfigMaintenanceGate {
@@ -482,11 +516,18 @@ void build_permit(FakePermitSigner& signer, const ConfigCommand& command,
   CHECK_OK(signer.sign(command, canonical.view(), permit));
 }
 
+// Test-only dev-authority key (16 B). T04 signs with the PRODUCTION dev
+// envelope helpers and verifies through the REAL DevConfigAuthorityVerifier
+// (§9.1: security acceptance runs the real verifier, never verified=true).
+constexpr std::uint8_t kDevKeyBytes[] = {
+    't', '0', '4', '-', 'd', 'e', 'v', '-', 'k', 'e', 'y', '-', '0', '0', '0', '1'};
+
 struct TargetRig {
   ConfigJournalConfig config{};
   FakeJournalStorage storage{};
   FakeFloorStore floor_storage{};
   FakeVerifier verifier{};
+  DevConfigAuthorityVerifier dev_verifier{ByteView{kDevKeyBytes, sizeof(kDevKeyBytes)}};
   CountingEntropy entropy{};
   ConfigRateLimiter rate{};
   FakeProvider provider{};
@@ -495,8 +536,9 @@ struct TargetRig {
   std::unique_ptr<SecurityFloorStore> floor{};
   std::unique_ptr<ConfigJournal> journal{};
 
-  explicit TargetRig(const std::uint64_t boot = kBoot, const bool with_gate = true)
-      : gate_installed_(with_gate) {
+  explicit TargetRig(const std::uint64_t boot = kBoot, const bool with_gate = true,
+                     const bool with_dev = false)
+      : gate_installed_(with_gate), dev_installed_(with_dev) {
     config.network = kNet;
     config.target = kTarget;
     config.config_namespace = endpoint::kConfigNamespaceSdk;
@@ -511,8 +553,11 @@ struct TargetRig {
                config.config_namespace, config.schema, 0, 0);
     floor = std::make_unique<SecurityFloorStore>(floor_storage);
     CHECK_OK(floor->initialize());
+    ConfigAuthorityVerifier& active_verifier =
+        with_dev ? static_cast<ConfigAuthorityVerifier&>(dev_verifier)
+                 : static_cast<ConfigAuthorityVerifier&>(verifier);
     journal = std::make_unique<ConfigJournal>(
-        config, storage, *floor, verifier, entropy, rate, &provider, nullptr,
+        config, storage, *floor, active_verifier, entropy, rate, &provider, nullptr,
         with_gate ? &gate : nullptr);
   }
   void boot(const MonotonicMs now_ms) {
@@ -520,8 +565,11 @@ struct TargetRig {
     // when the floor is gone the journal init below fails the same way.
     floor = std::make_unique<SecurityFloorStore>(floor_storage);
     floor_status_ = floor->initialize();
+    ConfigAuthorityVerifier& active_verifier =
+        dev_installed_ ? static_cast<ConfigAuthorityVerifier&>(dev_verifier)
+                       : static_cast<ConfigAuthorityVerifier&>(verifier);
     journal = std::make_unique<ConfigJournal>(
-        config, storage, *floor, verifier, entropy, rate, &provider, nullptr,
+        config, storage, *floor, active_verifier, entropy, rate, &provider, nullptr,
         gate_installed_ ? &gate : nullptr);
     boot_status_ = journal->initialize(now_ms);
   }
@@ -543,6 +591,7 @@ struct TargetRig {
     return entry->decision_floor;
   }
   bool gate_installed_{true};
+  bool dev_installed_{false};
   Status boot_status_ = Status::success();
   Status floor_status_ = Status::success();
 };
@@ -624,6 +673,106 @@ Status drive_update(TargetRig& rig, const ConfigField* patch,
 
 void drain(TargetRig& rig, MonotonicMs& now_ms, const int polls = 6) {
   for (int i = 0; i < polls; ++i) rig.journal->poll(now_ms += 10);
+}
+
+// Build + encode + sign an RCR2 recovery object bound to `rig`'s identity.
+// `hash_basis` is hashed into snapshot_hash — the baseline itself for
+// Reprovision, the expected survivor for AdoptKnown (which carries no
+// bytes); pass anything else to forge a hash mismatch.
+// `authority_generation` is the generation the INTENT claims — the journal
+// only accepts the one it currently pins.
+void build_recovery(FakePermitSigner& signer, const TargetRig& rig,
+                    const std::uint8_t mode,
+                    const std::uint32_t new_store_generation,
+                    const std::uint64_t new_revision,
+                    const ByteView hash_basis,
+                    const ByteView baseline,
+                    const std::uint8_t opid_tag,
+                    const std::uint32_t authority_generation,
+                    ByteBuffer<kConfigPermitObjectMax>& object,
+                    endpoint::ConfigRecoveryIntent* intent_out = nullptr) {
+  endpoint::ConfigRecoveryIntent intent{};
+  intent.mode = mode;
+  intent.config_namespace = rig.config.config_namespace;
+  intent.schema = rig.config.schema;
+  intent.network = rig.config.network;
+  intent.target = rig.config.target;
+  intent.authority = rig.config.authorized_issuer;
+  intent.authority_generation = authority_generation;
+  intent.authority_sequence = 90 + opid_tag;
+  intent.operation_id = {0xC0, opid_tag, 2, 3, 4, 5, 6, 7,
+                         8,    9,        10, 11, 12, 13, 14, 15};
+  intent.new_store_generation = new_store_generation;
+  intent.new_revision = new_revision;
+  CHECK_OK(config_snapshot_hash(rig.config.config_namespace, rig.config.schema,
+                                hash_basis, intent.snapshot_hash));
+  if (mode == endpoint::kRcr2ModeReprovision) {
+    intent.baseline.size = baseline.size;
+    if (baseline.size > 0) {
+      std::memcpy(intent.baseline.bytes.data(), baseline.data, baseline.size);
+    }
+  }
+  if (intent_out != nullptr) *intent_out = intent;
+  endpoint::EncodedRecoveryIntent canonical{};
+  CHECK_OK(endpoint::config_recovery_encode(intent, canonical));
+  CHECK_OK(signer.sign_recovery(intent, canonical.view(), object));
+}
+
+// Encode SDK fields into canonical snapshot bytes for recovery baselines.
+ByteBuffer<endpoint::kConfigSnapshotMax> snapshot_of(const ConfigField* fields,
+                                                     const std::uint16_t count) {
+  ByteBuffer<endpoint::kConfigSnapshotMax> out{};
+  CHECK_OK(config_tlv_encode(fields, count, out));
+  return out;
+}
+
+// Build + encode + sign an RCR2 object with the PRODUCTION dev-envelope
+// helpers (same shape as build_recovery, real HMAC). T04's acceptance
+// evidence runs through this, never through verified=true.
+void build_dev_recovery(const TargetRig& rig, const std::uint8_t mode,
+                        const std::uint32_t new_store_generation,
+                        const std::uint64_t new_revision,
+                        const ByteView hash_basis, const ByteView baseline,
+                        const std::uint8_t opid_tag,
+                        ByteBuffer<kConfigPermitObjectMax>& object) {
+  endpoint::ConfigRecoveryIntent intent{};
+  intent.mode = mode;
+  intent.config_namespace = rig.config.config_namespace;
+  intent.schema = rig.config.schema;
+  intent.network = rig.config.network;
+  intent.target = rig.config.target;
+  intent.authority = rig.config.authorized_issuer;
+  intent.authority_generation = rig.config.authority_generation;
+  intent.authority_sequence = 90 + opid_tag;
+  intent.operation_id = {0xD0, opid_tag, 2, 3, 4, 5, 6, 7,
+                         8,    9,        10, 11, 12, 13, 14, 15};
+  intent.new_store_generation = new_store_generation;
+  intent.new_revision = new_revision;
+  CHECK_OK(config_snapshot_hash(rig.config.config_namespace, rig.config.schema,
+                                hash_basis, intent.snapshot_hash));
+  if (mode == endpoint::kRcr2ModeReprovision) {
+    intent.baseline.size = baseline.size;
+    if (baseline.size > 0) {
+      std::memcpy(intent.baseline.bytes.data(), baseline.data, baseline.size);
+    }
+  }
+  endpoint::EncodedRecoveryIntent canonical{};
+  CHECK_OK(endpoint::config_recovery_encode(intent, canonical));
+  ByteBuffer<kConfigRecoveryAadSize> aad{};
+  CHECK_OK(config_recovery_aad(intent.network, intent.target,
+                               intent.config_namespace, aad));
+  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
+  CHECK_OK(config_dev_recovery_tag(
+      ByteView{kDevKeyBytes, sizeof(kDevKeyBytes)}, aad.view(),
+      canonical.view(), tag));
+  object.clear();
+  CHECK(aad.size + canonical.size + tag.size() <= object.bytes.size());
+  std::memcpy(object.bytes.data(), aad.bytes.data(), aad.size);
+  std::memcpy(object.bytes.data() + aad.size, canonical.bytes.data(),
+              canonical.size);
+  std::memcpy(object.bytes.data() + aad.size + canonical.size, tag.data(),
+              tag.size());
+  object.size = aad.size + canonical.size + tag.size();
 }
 
 // --- Unit tests: TLV / snapshot hash / patch merge -------------------------------
@@ -1331,14 +1480,19 @@ void test_c09_slot_corruption() {
               .code == StatusCode::RecoveryRequired);
     CHECK(verdict.reason == ConfigReason::RecoveryRequired);
     // Authorized recovery re-opens intake without regressing the floor —
-    // it must name the floor's next generation (3 consumed -> 4).
-    CHECK_OK(rig.journal->recover(4, now_ms, false));
-    CHECK(!rig.journal->uncertain());
-    // The adopted survivor is INTERRUPTED: its prev-restore was scheduled
-    // by recover() and must settle before intake re-opens.
+    // it must name the floor's exact next (J 3 -> 4, R 1 -> 2). AdoptKnown
+    // binds the surviving APPLY_INTENT's confirmed (prev) snapshot.
+    ByteBuffer<kConfigPermitObjectMax> object{};
+    build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2,
+                   rig.journal->active_snapshot(), ByteView{}, 31,
+                   rig.config.authority_generation, object);
+    CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+    CHECK(rig.journal->uncertain());  // isolated until the readback proves it
     drain(rig, now_ms);
-    CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
-    CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 1,
+    CHECK(!rig.journal->uncertain());
+    CHECK(rig.journal->phase() == ConfigPhase::Active);
+    CHECK(rig.journal->decision_revision() == 2);
+    CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000, 2,
                           rig.journal->active_snapshot(), verdict));
     drain(rig, now_ms);
     CHECK(rig.journal->phase() == ConfigPhase::Active);
@@ -1358,26 +1512,45 @@ void test_c09_slot_corruption() {
     rig.boot(now_ms += 10);
     CHECK(!rig.boot_status_.ok());
     CHECK(rig.journal->quarantined());
-    // Intake is closed; recovery requires a generation above the floor.
+    // Intake is closed; recovery requires the floor's exact next.
     ConfigVerdict v{};
     CHECK(rig.journal->submit_permit(last_permit_.view(), now_ms, true, v).code ==
           StatusCode::IntegrityError);
-    CHECK(rig.journal->recover(0, now_ms, false).code == StatusCode::InvalidArgument);
-    // With no verifiable survivor, a plain recover() must NOT fabricate a
-    // base — the journal stays quarantined (04 §4.7: never an automatic
+    const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+    const auto baseline = snapshot_of(baseline_fields, 1);
+    ByteBuffer<kConfigPermitObjectMax> object{};
+    // A generation at/below the floor is refused: only the current
+    // recovery can land.
+    build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 3, 2,
+                   baseline.view(), baseline.view(), 32,
+                   rig.config.authority_generation, object);
+    CHECK(rig.journal->submit_recovery(object.view(), now_ms, v).code ==
+          StatusCode::InvalidArgument);
+    // With no verifiable survivor, adopt-known must NOT fabricate a base
+    // — the journal stays quarantined (04 §4.7: never an automatic
     // return to revision 0).
-    CHECK(rig.journal->recover(4, now_ms, false).code ==
+    build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2, ByteView{},
+                   ByteView{}, 33, rig.config.authority_generation, object);
+    CHECK(rig.journal->submit_recovery(object.view(), now_ms, v).code ==
           StatusCode::RecoveryRequired);
     CHECK(rig.journal->quarantined());
-    // A generation that is not the floor's next is refused even with the
-    // attestation — only the current recovery can land.
-    CHECK(rig.journal->recover(11, now_ms, true).code ==
+    // A generation that is not the floor's next is refused even in
+    // reprovision mode — only the current recovery can land.
+    build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 11, 2,
+                   baseline.view(), baseline.view(), 34,
+                   rig.config.authority_generation, object);
+    CHECK(rig.journal->submit_recovery(object.view(), now_ms, v).code ==
           StatusCode::InvalidArgument);
     CHECK(rig.journal->quarantined());
-    // Only an explicit re-provision attestation may establish the base.
-    CHECK_OK(rig.journal->recover(4, now_ms, true));
+    // Only an explicit reprovisioning baseline may establish the base.
+    build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                   baseline.view(), baseline.view(), 35,
+                   rig.config.authority_generation, object);
+    CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, v));
+    drain(rig, now_ms);
     CHECK(!rig.journal->quarantined());
-    CHECK(rig.journal->phase() == ConfigPhase::Idle);
+    CHECK(rig.journal->phase() == ConfigPhase::Active);
+    CHECK(rig.journal->decision_revision() == 2);
   }
 }
 
@@ -2004,7 +2177,7 @@ void test_storage_contract() {
 // --- Recovery / floor / deferred-intent regressions ---------------------------------------
 
 // The generation/revision floors must advance on every committed record:
-// recover() may never re-mint a generation this boot already consumed,
+// A recovery may never re-mint counters this boot already consumed,
 // nor roll a decided revision back (06 §6.3).
 void test_floor_advance_on_commit() {
   TargetRig rig;
@@ -2020,14 +2193,32 @@ void test_floor_advance_on_commit() {
   CHECK_OK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict));
   drain(rig, now_ms);
   CHECK(rig.journal->quarantined());
+  rig.provider.apply_result = Status::success();
+  rig.provider.restore_result = Status::success();
   // Generations 1..3 (DECIDED, APPLY_INTENT, QUARANTINED) are all consumed
   // this boot — recovery must start above them, not above a stale floor.
-  CHECK(rig.journal->recover(2, now_ms, false).code == StatusCode::InvalidArgument);
-  CHECK(rig.journal->recover(3, now_ms, false).code == StatusCode::InvalidArgument);
-  CHECK_OK(rig.journal->recover(4, now_ms, false));
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 2, 2,
+                 baseline.view(), baseline.view(), 36,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidArgument);
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 3, 2,
+                 baseline.view(), baseline.view(), 37,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidArgument);
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                 baseline.view(), baseline.view(), 38,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
   CHECK(!rig.journal->quarantined());
-  // The decided revision was adopted — never rolled back to a lower base.
-  CHECK(rig.journal->decision_revision() == 1);
+  // The completed revision advances past the proven floor — never rolled
+  // back to a lower base.
+  CHECK(rig.journal->decision_revision() == 2);
 }
 
 // An ACTIVE survivor stays ACTIVE across recovery: losing the sibling
@@ -2050,14 +2241,19 @@ void test_active_survivor_recover() {
   CHECK(rig.journal->uncertain());
   CHECK(rig.journal->phase() == ConfigPhase::Active);
 
-  CHECK_OK(rig.journal->recover(4, now_ms, false));
-  CHECK(!rig.journal->uncertain());
-  // The survivor is adopted as ACTIVE with its confirmed snapshot — the
-  // recover() code used to degrade it to INTERRUPTED and roll back.
-  CHECK(rig.journal->phase() == ConfigPhase::Active);
-  CHECK(rig.journal->decision_revision() == 1);
-  CHECK(rig.journal->active_revision() == 1);
+  // AdoptKnown re-proves the ACTIVE survivor: no rollback to prev.
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2,
+                 rig.journal->active_snapshot(), ByteView{}, 39,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
   drain(rig, now_ms);
+  CHECK(!rig.journal->uncertain());
+  // The survivor completes as ACTIVE with its confirmed snapshot — the
+  // old recovery code used to degrade it to INTERRUPTED and roll back.
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 2);
+  CHECK(rig.journal->active_revision() == 2);
   CHECK(rig.journal->phase() == ConfigPhase::Active);
   CHECK(rig.provider.active_.size == active_size);
 }
@@ -2269,9 +2465,18 @@ void test_floor_corrupt_structural() {
   rig.boot(now_ms += 10);
   CHECK(rig.journal->uncertain());
   // The corrupt record's gen-3 claim bounds nothing: recovery names the
-  // floor's next generation (3 consumed -> 4), never the bitrot's claim.
-  CHECK(rig.journal->recover(3, now_ms, false).code == StatusCode::InvalidArgument);
-  CHECK_OK(rig.journal->recover(4, now_ms, false));
+  // floor's exact next (J 3 -> 4, R 1 -> 2), never the bitrot's claim.
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 3, 2,
+                 rig.journal->active_snapshot(), ByteView{}, 40,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidArgument);
+  build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2,
+                 rig.journal->active_snapshot(), ByteView{}, 41,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
   CHECK(!rig.journal->uncertain());
 }
 
@@ -2441,42 +2646,12 @@ void test_status_result_expired() {
 
 // --- R-series: the dedicated recovery lane (Issue #51) -------------------------
 //
-// A signed kind-4 RCR1 StoreRecover object is the ONLY intake an impaired
-// journal still serves: it attests a fresh store generation for a
-// quarantined/uncertain journal. Everything else — bad signatures, stale
-// generations, replays, wrong lanes — stays fail-closed.
+// A signed kind-4 RCR2 recovery intent is the ONLY intake an impaired
+// journal still serves: it names the floor's exact-next counters and the
+// baseline to re-apply. Everything else — bad signatures, stale counters,
+// replays, wrong lanes — stays fail-closed.
 
-// Build + encode + sign an RCR1 recovery object bound to `rig`'s identity.
-// `authority_generation` is the generation the COMMAND claims — the journal
-// only accepts the one it currently pins.
-void build_recovery(FakePermitSigner& signer, const TargetRig& rig,
-                    const endpoint::ConfigRecoveryClass cls,
-                    const std::uint8_t attest,
-                    const std::uint32_t new_store_generation,
-                    const std::uint32_t new_authority_generation,
-                    const std::uint8_t opid_tag,
-                    const std::uint32_t authority_generation,
-                    ByteBuffer<kConfigPermitObjectMax>& object,
-                    endpoint::ConfigRecoveryCommand* command_out = nullptr) {
-  endpoint::ConfigRecoveryCommand command{};
-  command.recovery_class = cls;
-  command.attest = attest;
-  command.config_namespace = rig.config.config_namespace;
-  command.schema = rig.config.schema;
-  command.network = rig.config.network;
-  command.target = rig.config.target;
-  command.authority = rig.config.authorized_issuer;
-  command.authority_generation = authority_generation;
-  command.authority_sequence = 90 + opid_tag;
-  command.operation_id = {0xC0, opid_tag, 2, 3, 4, 5, 6, 7,
-                          8,    9,        10, 11, 12, 13, 14, 15};
-  command.new_store_generation = new_store_generation;
-  command.new_authority_generation = new_authority_generation;
-  if (command_out != nullptr) *command_out = command;
-  endpoint::EncodedRecoveryCommand canonical{};
-  CHECK_OK(endpoint::config_recovery_encode(command, canonical));
-  CHECK_OK(signer.sign_recovery(command, canonical.view(), object));
-}
+// (build_recovery/snapshot_of are defined above drain(); used from C09 on.)
 
 // Feed `object` through the kind-4 intake in `chunk_size` pieces.
 autonomy::ObjectAckStatus send_recovery_chunks(
@@ -2488,8 +2663,8 @@ autonomy::ObjectAckStatus send_recovery_chunks(
                         object.view(), chunk_size, t);
 }
 
-// R01: both journal slots lost -> quarantine -> a signed StoreRecover object
-// (attest=reprovision) restores intake and a normal permit applies after.
+// R01: both journal slots lost -> quarantine -> a signed Reprovision intent
+// re-applies its baseline and restores intake; a normal permit applies after.
 void test_r01_quarantine_store_recovery() {
   TargetRig rig;
   MonotonicMs now_ms = 1000;
@@ -2515,39 +2690,49 @@ void test_r01_quarantine_store_recovery() {
   CHECK(rig.journal->note_object_manifest(manifest, now_ms + 110).code ==
         StatusCode::InvalidState);
 
-  // No verifiable record survives: attest=adopt must fail closed — only an
-  // explicit re-provisioning attestation mints the new generation. Both
-  // name the floor's next generation (3 consumed -> 4).
+  // No verifiable record survives: adopt-known must fail closed — a mere
+  // signed attestation adopts nothing. Both intents name the floor's
+  // exact next (J 3 -> 4, R 1 -> 2).
   ByteBuffer<kConfigPermitObjectMax> object{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestAdopt, 4, 0, 1,
-                 rig.config.authority_generation, object);
+  build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2, ByteView{},
+                 ByteView{}, 1, rig.config.authority_generation, object);
   CHECK(rig.journal->submit_recovery(object.view(), now_ms + 130, verdict).code ==
         StatusCode::RecoveryRequired);
   CHECK(rig.journal->quarantined());
 
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 4, 0, 2,
+  // Reprovision carries the complete new baseline: intent persists, the
+  // restore proves it, the completion twins re-open intake.
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1), sdk_bool(2, true),
+                                         sdk_bool(3, true), sdk_u8(4, 0)};
+  const auto baseline = snapshot_of(baseline_fields, 4);
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                 baseline.view(), baseline.view(), 2,
                  rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 140, verdict));
-  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  CHECK(rig.journal->quarantined());  // isolated until the readback proves it
+  drain(rig, now_ms);
   CHECK(!rig.journal->quarantined());
   CHECK(!rig.journal->uncertain());
-  // Both slots now carry the same verifiable record under generation 4.
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 2);
+  CHECK(rig.journal->active_snapshot().size == baseline.size);
+  // Both slots now carry the same completion record (intent J=4, complete J=5).
   CHECK(std::memcmp(rig.storage.slots_[0].data(), rig.storage.slots_[1].data(),
                     64) == 0);
 
   // Intake is re-established: a bound permit flows through the normal path.
   const ConfigField patch2[] = {sdk_u8(1, 2)};
-  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 200,
+  CHECK_OK(drive_update(rig, patch2, 1, now_ms += 61000,
                         rig.journal->decision_revision(),
                         rig.journal->active_snapshot(), verdict));
   drain(rig, now_ms);
   CHECK(rig.journal->phase() == ConfigPhase::Active);
 }
 
-// R02: one-slot bitrot -> uncertain -> StoreRecover (attest=adopt) heals the
-// journal; the surviving record is adopted under the new store generation.
+// R02: one-slot bitrot -> uncertain -> AdoptKnown re-proves the survivor
+// and heals the journal; the completed revision advances past the proven
+// floor, so pre-loss permits cannot replay.
 void test_r02_uncertain_store_recovery() {
   TargetRig rig;
   MonotonicMs now_ms = 1000;
@@ -2565,15 +2750,19 @@ void test_r02_uncertain_store_recovery() {
   CHECK(rig.journal->uncertain());
   CHECK(rig.journal->decision_revision() == proven_revision);  // survivor kept
 
+  // AdoptKnown binds the survivor's confirmed snapshot by hash: the
+  // re-apply re-proves it through the provider readback.
   ByteBuffer<kConfigPermitObjectMax> object{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestAdopt, 4, 0, 3,
-                 rig.config.authority_generation, object);
+  const ByteView survivor = rig.journal->active_snapshot();
+  build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2, survivor,
+                 ByteView{}, 3, rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 150, verdict));
-  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  drain(rig, now_ms);
   CHECK(!rig.journal->uncertain());
-  // The proven revision floor carried over — pre-loss permits cannot replay.
-  CHECK(rig.journal->decision_revision() >= proven_revision);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == proven_revision + 1);
+  CHECK(rig.journal->active_snapshot().size == survivor.size);
 }
 
 // R03: signature/binding/scope rejections on the recovery lane.
@@ -2586,9 +2775,13 @@ void test_r03_recovery_rejections() {
   CHECK(rig.journal->quarantined());
   ConfigVerdict verdict{};
 
+  // The counters never matter here: every case below fails before the
+  // floor checks (exact-next J=1/R=1 on the fresh floor would apply).
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
   ByteBuffer<kConfigPermitObjectMax> object{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 500, 0, 4,
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 500, 7,
+                 baseline.view(), baseline.view(), 4,
                  rig.config.authority_generation, object);
 
   // Tampered signature byte -> unverified, denied.
@@ -2612,8 +2805,8 @@ void test_r03_recovery_rejections() {
              .ok());
 
   // Signed under a generation the journal does not pin -> scope denied.
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 500, 0, 5,
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 500, 7,
+                 baseline.view(), baseline.view(), 5,
                  rig.config.authority_generation + 7, object);
   CHECK(rig.journal->submit_recovery(object.view(), now_ms + 40, verdict).code ==
         StatusCode::AuthorizationFailed);
@@ -2623,7 +2816,7 @@ void test_r03_recovery_rejections() {
 }
 
 // R04: replay protection — same op+same digest is idempotent, same op+
-// different digest is conflict, a generation at/below the floor is refused.
+// different digest is conflict, counters at/below the floor are refused.
 void test_r04_recovery_replay_floor() {
   TargetRig rig;
   MonotonicMs now_ms = 1000;
@@ -2632,34 +2825,44 @@ void test_r04_recovery_replay_floor() {
   rig.boot(now_ms);
   ConfigVerdict verdict{};
 
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
   ByteBuffer<kConfigPermitObjectMax> object{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 1, 0, 6,
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 1, 1,
+                 baseline.view(), baseline.view(), 6,
                  rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 10, verdict));
-  // Same operation id + same bytes -> recorded verdict, never re-applied.
-  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 20, verdict));
-  CHECK(verdict.reason == ConfigReason::Ok);
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  // Same operation id + same bytes while in flight -> progress, never a
+  // second ceremony.
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 15, verdict));
+  CHECK(verdict.reason == ConfigReason::InProgress);
 
   // Same operation id + different content -> CONFLICT.
   ByteBuffer<kConfigPermitObjectMax> conflicting{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 700, 0, 6,
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 700, 9,
+                 baseline.view(), baseline.view(), 6,
                  rig.config.authority_generation, conflicting);
   // Same opid tag (6) produces the same operation id with different content.
   CHECK(rig.journal->submit_recovery(conflicting.view(), now_ms + 30, verdict)
             .code == StatusCode::Conflict);
 
-  // A fresh recovery that does not name the floor's next generation is
-  // refused: the floor moved to 1, so only 2 could land now.
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 1, 0, 7,
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  // The lane closes once healed: even the completed operation's own
+  // bytes are refused here (completion is answered on the status lane).
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms + 35, verdict)
+            .code == StatusCode::InvalidState);
+
+  // A fresh recovery that does not name the floor's exact next is
+  // refused: the floor moved to J=2/R=1, so only J=3/R=2 could land now.
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 1, 1,
+                 baseline.view(), baseline.view(), 7,
                  rig.config.authority_generation, object);
-  rig.storage.fill(0, 0xEE);  // re-impair so class admission passes
+  rig.storage.fill(0, 0xEE);  // re-impair so the lane stays admissible
+  rig.storage.fill(1, 0xEE);
   rig.boot(now_ms + 40);
-  // The rebuilt journal proves the gen-1 record; a replay naming 1 again
-  // is a spent generation, not the floor's next.
-  CHECK(rig.journal->uncertain());
+  CHECK(rig.journal->quarantined());
   CHECK(rig.journal->submit_recovery(object.view(), now_ms + 50, verdict)
             .code == StatusCode::InvalidArgument);
 }
@@ -2673,9 +2876,11 @@ void test_r07_recovery_lane_reassembly() {
   rig.boot(now_ms);
   CHECK(rig.journal->quarantined());
 
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
   ByteBuffer<kConfigPermitObjectMax> object{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 1, 0, 12,
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 1, 1,
+                 baseline.view(), baseline.view(), 12,
                  rig.config.authority_generation, object);
   AckPort port;
   ConfigTarget target(port, rig.rate);
@@ -2683,10 +2888,16 @@ void test_r07_recovery_lane_reassembly() {
   CHECK(send_recovery_chunks(target, port, object, 32, now_ms) ==
         autonomy::ObjectAckStatus::Ok);
   CHECK(!target.object_active());
+  // Assembly completed — not CONFIG_ACTIVE: the ceremony still has to
+  // prove the baseline before intake re-opens.
+  CHECK(rig.journal->quarantined());
+  drain(rig, now_ms);
   CHECK(!rig.journal->quarantined());
 
-  // Kind-4 manifest discipline on a fresh impaired journal: wrong-kind and
-  // oversized manifests reject; digest-mismatched content fails integrity.
+  // Manifest discipline on a fresh impaired journal: a permit manifest is
+  // refused (that lane is closed while impaired) and an oversized
+  // recovery manifest is malformed; digest-mismatched content fails
+  // integrity.
   TargetRig rig2;
   MonotonicMs t = 5000;
   rig2.storage.fill(0, 0xEE);
@@ -2696,14 +2907,14 @@ void test_r07_recovery_lane_reassembly() {
   ConfigTarget target2(port2, rig2.rate);
   CHECK_OK(target2.add_journal(1, *rig2.journal));
   autonomy::ControlObjectPayload manifest{};
-  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;  // wrong lane kind
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;  // lane closed impaired
   manifest.total_len = 64;
   manifest.object_hash[0] = 1;
-  CHECK(rig2.journal->note_recovery_manifest(manifest, t).code ==
-        StatusCode::ProtocolError);
+  CHECK(rig2.journal->note_object_manifest(manifest, t).code ==
+        StatusCode::InvalidState);
   manifest.kind = autonomy::ControlObjectKind::ConfigRecovery;
   manifest.total_len = kConfigPermitObjectMax + 1;
-  CHECK(rig2.journal->note_recovery_manifest(manifest, t).code ==
+  CHECK(rig2.journal->note_object_manifest(manifest, t).code ==
         StatusCode::ProtocolError);
 
   // Honest manifest + corrupted bytes: the digest check rejects before
@@ -2721,16 +2932,25 @@ void test_r07_recovery_lane_reassembly() {
   t += 10;
   send_chunk(target2, kAuthority, chunk, t);
   CHECK(port2.last_status == autonomy::ObjectAckStatus::Incomplete);
-  chunk.offset = 64;
-  chunk.data_size = static_cast<std::uint16_t>(object.size - 64);
-  std::memcpy(chunk.data.data(), object.bytes.data() + 64, chunk.data_size);
-  t += 10;
-  send_chunk(target2, kAuthority, chunk, t);
+  // The remainder in bounded pieces: the digest check rejects at
+  // completion, before submit_recovery ever sees the object.
+  std::size_t sent = 64;
+  while (sent < object.size) {
+    const std::size_t piece =
+        object.size - sent > 64 ? 64 : object.size - sent;
+    chunk.offset = static_cast<std::uint16_t>(sent);
+    chunk.data_size = static_cast<std::uint16_t>(piece);
+    std::memcpy(chunk.data.data(), object.bytes.data() + sent, piece);
+    t += 10;
+    send_chunk(target2, kAuthority, chunk, t);
+    sent += piece;
+  }
   CHECK(port2.last_status == autonomy::ObjectAckStatus::Failed);
   CHECK(!target2.object_active());
   CHECK(rig2.journal->quarantined());
 
   // The kind-3 lane stays shut through all of it (quarantine -> InvalidState).
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
   CHECK(rig2.journal->note_object_manifest(manifest, t).code ==
         StatusCode::InvalidState);
 }
@@ -2999,11 +3219,20 @@ void test_floor_order_violation() {
   rig.boot(now_ms += 10);
   CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
   CHECK(rig.journal->quarantined());
-  // No recovery can mint: below the journal is spent, the floor's next
-  // (1) is below the journal too.
-  CHECK(rig.journal->recover(1, now_ms, true).code ==
+  // No recovery can mint: below the journal is spent, and the floor's
+  // next (1) is below the journal too.
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 1, 1,
+                 baseline.view(), baseline.view(), 42,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
         StatusCode::InvalidArgument);
-  CHECK(rig.journal->recover(4, now_ms, true).code ==
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 4, 1,
+                 baseline.view(), baseline.view(), 43,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
         StatusCode::InvalidArgument);
   // Managed fix: re-provision the floor at the true counters, reboot.
   seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
@@ -3038,14 +3267,19 @@ void test_floor_ahead_fresh_quarantines() {
   // The floor survived the journal: J=3, R=1 still name the next recovery.
   CHECK(rig.floor_j() == 3);
   CHECK(rig.floor_r() == 1);
-  // Recovery at the floor's next generation lands (reprovision: no
+  // Recovery at the floor's exact next lands (reprovision: no
   // survivor to adopt).
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
   ByteBuffer<kConfigPermitObjectMax> object{};
-  build_recovery(signer_, rig, endpoint::ConfigRecoveryClass::StoreRecover,
-                 endpoint::kRcr1AttestReprovision, 4, 0, 21,
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                 baseline.view(), baseline.view(), 21,
                  rig.config.authority_generation, object);
   CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms + 200, verdict));
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  drain(rig, now_ms);
   CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
 }
 
 // A spent store axis wedges honestly: the op fails CounterExhausted, the
@@ -3075,8 +3309,15 @@ void test_store_exhausted() {
   rig.journal->poll(now_ms += 10);
   CHECK(rig.journal->quarantined());
   CHECK(rig.journal->phase() == ConfigPhase::Quarantined);
-  // Recovery cannot mint past the spent axis either.
-  CHECK(rig.journal->recover(4, now_ms, true).code ==
+  // Recovery cannot mint past the spent axis either: the headroom check
+  // fires before exact-next, whatever the intent names.
+  const ConfigField baseline_fields[] = {sdk_u8(1, 1)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::kRcr2ModeReprovision, 7, 2,
+                 baseline.view(), baseline.view(), 44,
+                 rig.config.authority_generation, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
         StatusCode::CounterExhausted);
 }
 
@@ -3118,10 +3359,17 @@ void test_floor_twins_full_content() {
   rig.storage.corrupt(1, 200);
   rig.boot(now_ms += 10);
   CHECK(rig.journal->uncertain());
-  CHECK_OK(rig.journal->recover(4, now_ms, false));
-  // Both slots now carry identical gen-4 ACTIVE twins; flip one byte of
-  // slot 0's issuer_generation (offset 44) and repair the CRC so the
-  // record parses but disagrees with its twin.
+  // Complete a recovery so both slots carry identical ACTIVE twins
+  // (intent J=4, complete J=5); then flip one byte of slot 0's
+  // issuer_generation (offset 44) and repair the CRC so the record
+  // parses but disagrees with its twin.
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_recovery(signer_, rig, endpoint::kRcr2ModeAdoptKnown, 4, 2,
+                 rig.journal->active_snapshot(), ByteView{}, 45,
+                 rig.config.authority_generation, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
   rig.storage.corrupt(0, 44);
   refix_journal_crc(rig.storage, 0);
   rig.boot(now_ms += 10);
@@ -3131,6 +3379,599 @@ void test_floor_twins_full_content() {
 
 
 }  // namespace
+
+// --- T04 + power table (§5.4-§5.6): the RCR2 ceremony under a REAL -------
+// verifier. Every intent below is dev-signed with the production envelope
+// helpers and verified by DevConfigAuthorityVerifier — never verified=true
+// (§9.1). The setups seed directly the state one applied update plus total
+// journal loss leaves (floor J=3/R=1, provider holding the old 6 B
+// snapshot, both slots destroyed) — R01 proves the same shape end to end.
+
+// Seed the T04 post-loss state: floor (3,1), provider durable+live on the
+// old 6 B snapshot, both journal slots destroyed. Boots quarantined.
+void t04_seed_loss(TargetRig& rig, MonotonicMs& now_ms) {
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 3, 1);
+  const ConfigField old_fields[] = {sdk_u8(1, 1)};
+  const auto old_snapshot = snapshot_of(old_fields, 1);
+  CHECK(old_snapshot.size == 6);
+  rig.provider.seed(old_snapshot.view());
+  rig.storage.fill(0, 0xEE);
+  rig.storage.fill(1, 0xEE);
+  rig.boot(now_ms);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->quarantined());
+}
+
+std::array<std::uint8_t, 16> dev_opid(const std::uint8_t tag) {
+  return {0xD0, tag, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+}
+
+endpoint::ControlStatus query_status(TargetRig& rig,
+                                     const std::array<std::uint8_t, 16>& opid,
+                                     const MonotonicMs now_ms) {
+  endpoint::ControlStatusQuery query{};
+  query.config_namespace = 1;
+  query.operation_id = opid;
+  endpoint::EncodedServicePayload reply{};
+  CHECK_OK(rig.journal->handle_status_query(query, now_ms, reply));
+  endpoint::ControlStatus status{};
+  CHECK_OK(endpoint::control_status_decode(reply.view(), status));
+  return status;
+}
+
+// T04a: a different complete baseline re-provisions the wiped journal —
+// isolated until the readback proves it, then journal bytes/hash plus
+// provider durable AND live all match the baseline.
+void test_t04_reprovision_success() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  CHECK(rig.provider.validate_recovery_calls == 0);
+
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2), sdk_bool(2, true),
+                                         sdk_bool(3, true), sdk_u8(4, 0)};
+  const auto baseline = snapshot_of(baseline_fields, 4);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 1, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  CHECK(verdict.reason == ConfigReason::InProgress);
+  CHECK(rig.journal->quarantined());  // isolated until complete
+  CHECK(rig.provider.validate_recovery_calls == 1);  // capability probed
+  // Never Active/Ok before the completion twins land.
+  const endpoint::ControlStatus progress =
+      query_status(rig, dev_opid(1), now_ms);
+  CHECK(progress.phase != ConfigPhase::Active);
+  CHECK(progress.reason == ConfigReason::InProgress);
+
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(!rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 2);
+  CHECK(rig.journal->active_revision() == 2);
+  const ByteView active = rig.journal->active_snapshot();
+  CHECK(active.size == baseline.size);
+  CHECK(std::memcmp(active.data, baseline.bytes.data(), active.size) == 0);
+  Digest256 expect_hash{};
+  CHECK_OK(config_snapshot_hash(rig.config.config_namespace, rig.config.schema,
+                                baseline.view(), expect_hash));
+  CHECK(rig.journal->active_hash() == expect_hash);
+  CHECK(rig.provider.active_.size == baseline.size);
+  CHECK(std::memcmp(rig.provider.active_.bytes.data(), baseline.bytes.data(),
+                    baseline.size) == 0);
+  CHECK(rig.provider.live_.size == baseline.size);
+  CHECK(std::memcmp(rig.provider.live_.bytes.data(), baseline.bytes.data(),
+                    baseline.size) == 0);
+  const endpoint::ControlStatus done = query_status(rig, dev_opid(1), now_ms);
+  CHECK(done.phase == ConfigPhase::Active);
+  CHECK(done.reason == ConfigReason::Ok);
+  CHECK(done.active_hash == expect_hash);
+}
+
+// T04b: the schema-allows-empty baseline restores clean — no old live
+// value survives the re-apply.
+void test_t04_reprovision_empty() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2, ByteView{},
+                     ByteView{}, 2, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->active_snapshot().size == 0);
+  Digest256 expect_hash{};
+  CHECK_OK(config_snapshot_hash(rig.config.config_namespace, rig.config.schema,
+                                ByteView{}, expect_hash));
+  CHECK(rig.journal->active_hash() == expect_hash);
+  // The old 6 B live image is gone from both provider images.
+  CHECK(rig.provider.active_.size == 0);
+  CHECK(rig.provider.live_.size == 0);
+}
+
+// Transplant one applied update's history onto a dev rig: valid records
+// need a writer, so drive it on a sibling rig and move the storage
+// image, floor and provider state over. Loses the non-ACTIVE sibling —
+// boots uncertain with a proven ACTIVE survivor.
+void t04_seed_uncertain_survivor(TargetRig& rig, MonotonicMs& now_ms) {
+  const ConfigField patch[] = {sdk_u8(1, 1)};
+  ConfigVerdict verdict{};
+  TargetRig donor;
+  CHECK_OK(donor.journal->initialize(now_ms));
+  CHECK_OK(drive_update(donor, patch, 1, now_ms, 0, ByteView{}, verdict));
+  drain(donor, now_ms);
+  rig.storage.slots_ = donor.storage.slots_;
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 3, 1);
+  rig.provider.seed(donor.provider.active_.view());
+  rig.storage.corrupt(1, 200);  // lose the non-ACTIVE sibling
+  rig.boot(now_ms += 100);
+  CHECK(rig.journal->uncertain());
+}
+
+// T04c: a mere signed attestation adopts nothing; a bound survivor adopts.
+void test_t04_adopt_known() {
+  // No survivor: AdoptKnown refuses, the journal stays quarantined.
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeAdoptKnown, 4, 2, ByteView{},
+                     ByteView{}, 3, object);
+  ConfigVerdict verdict{};
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::RecoveryRequired);
+  CHECK(rig.journal->quarantined());
+
+  // A wrong hash against a real survivor refuses as Conflict, never a
+  // partial adoption.
+  TargetRig rig2(kBoot, true, true);
+  t04_seed_uncertain_survivor(rig2, now_ms);
+  const ConfigField wrong_fields[] = {sdk_u8(1, 2)};
+  const auto wrong = snapshot_of(wrong_fields, 1);
+  build_dev_recovery(rig2, endpoint::kRcr2ModeAdoptKnown, 4, 2, wrong.view(),
+                     ByteView{}, 4, object);
+  CHECK(rig2.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::Conflict);
+  CHECK(rig2.journal->uncertain());
+
+  // The bound survivor adopts and completes.
+  build_dev_recovery(rig2, endpoint::kRcr2ModeAdoptKnown, 4, 2,
+                     rig2.journal->active_snapshot(), ByteView{}, 5, object);
+  CHECK_OK(rig2.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig2, now_ms);
+  CHECK(!rig2.journal->uncertain());
+  CHECK(rig2.journal->phase() == ConfigPhase::Active);
+  CHECK(rig2.journal->active_snapshot().size == 6);
+}
+
+// T04d: provider fault injections during the ceremony — a delayed restore
+// still completes; a partial change, a readback failure and a byte
+// mismatch all land terminal failures and stay impaired.
+void test_t04_provider_faults() {
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2), sdk_bool(2, true),
+                                         sdk_bool(3, true), sdk_u8(4, 0)};
+  const auto baseline = snapshot_of(baseline_fields, 4);
+
+  // Delayed restore: three polls to commit, still completes.
+  {
+    TargetRig rig(kBoot, true, true);
+    MonotonicMs now_ms = 1000;
+    t04_seed_loss(rig, now_ms);
+    rig.provider.polls_to_complete = 3;
+    ByteBuffer<kConfigPermitObjectMax> object{};
+    build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                       baseline.view(), baseline.view(), 6, object);
+    ConfigVerdict verdict{};
+    CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+    rig.journal->poll(now_ms += 10);
+    rig.journal->poll(now_ms += 10);
+    CHECK(rig.journal->quarantined());  // restore still running
+    drain(rig, now_ms);
+    CHECK(!rig.journal->quarantined());
+    CHECK(rig.journal->phase() == ConfigPhase::Active);
+  }
+
+  // Partial change: durable advances, live stays stale — the readback
+  // catches it, the failure is terminal, isolation continues.
+  {
+    TargetRig rig(kBoot, true, true);
+    MonotonicMs now_ms = 1000;
+    t04_seed_loss(rig, now_ms);
+    rig.provider.freeze_live = true;
+    ByteBuffer<kConfigPermitObjectMax> object{};
+    build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                       baseline.view(), baseline.view(), 7, object);
+    ConfigVerdict verdict{};
+    CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+    drain(rig, now_ms);
+    CHECK(rig.journal->quarantined());
+    CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
+    const endpoint::ControlStatus failed = query_status(rig, dev_opid(7), now_ms);
+    CHECK(failed.phase == ConfigPhase::Interrupted);
+    CHECK(failed.reason == ConfigReason::StorageFailure);
+  }
+
+  // Readback failure at proof time: same terminal shape.
+  {
+    TargetRig rig(kBoot, true, true);
+    MonotonicMs now_ms = 1000;
+    t04_seed_loss(rig, now_ms);
+    ByteBuffer<kConfigPermitObjectMax> object{};
+    build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                       baseline.view(), baseline.view(), 8, object);
+    ConfigVerdict verdict{};
+    CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+    rig.provider.fail_reads = 1;  // the maintenance-base read already passed
+    drain(rig, now_ms);
+    CHECK(rig.journal->quarantined());
+    const endpoint::ControlStatus failed = query_status(rig, dev_opid(8), now_ms);
+    CHECK(failed.phase == ConfigPhase::Interrupted);
+    CHECK(failed.reason == ConfigReason::StorageFailure);
+  }
+
+  // Byte mismatch: the read succeeds but differs — VerifyFailed.
+  {
+    TargetRig rig(kBoot, true, true);
+    MonotonicMs now_ms = 1000;
+    t04_seed_loss(rig, now_ms);
+    ByteBuffer<kConfigPermitObjectMax> object{};
+    build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                       baseline.view(), baseline.view(), 9, object);
+    ConfigVerdict verdict{};
+    CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+    rig.provider.corrupt_reads = 1;  // poison the proof read only
+    drain(rig, now_ms);
+    CHECK(rig.journal->quarantined());
+    const endpoint::ControlStatus failed = query_status(rig, dev_opid(9), now_ms);
+    CHECK(failed.phase == ConfigPhase::Interrupted);
+    CHECK(failed.reason == ConfigReason::VerifyFailed);
+  }
+}
+
+// Power row 1 (§5.6): floor saved, intent not — the counters are consumed,
+// the old object is refused, a fresh authorization on the new floor lands.
+void test_power_floor_saved_intent_not() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 10, object);
+  // Drop the intent's seal write: the pending image is discardable, the
+  // floor reservation (J=4/R=2) stands.
+  rig.storage.drop_call = rig.storage.write_calls + 1;
+  ConfigVerdict verdict{};
+  CHECK(!rig.journal->submit_recovery(object.view(), now_ms, verdict).ok());
+  CHECK(rig.journal->quarantined());
+  CHECK(rig.floor_j() == 4);
+  CHECK(rig.floor_r() == 2);
+  rig.boot(now_ms += 100);
+  CHECK(rig.journal->quarantined());  // pending intent + lost slots: no resume
+  // The old authorization is spent — only the new floor's exact next lands.
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidArgument);
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 5, 3,
+                     baseline.view(), baseline.view(), 11, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
+// Power row 2 (§5.6): durable intent, restore never started — the boot
+// resumes the SAME baseline idempotently, no new authorization.
+void test_power_intent_resume() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2), sdk_bool(3, true)};
+  const auto baseline = snapshot_of(baseline_fields, 2);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 12, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  CHECK(rig.provider.restore_calls == 0);
+  rig.boot(now_ms += 100);  // cut before the first poll: restore never ran
+  CHECK_OK(rig.boot_status_);
+  // New intake stays Busy until the resumed restore proves the provider;
+  // the recovery lane itself is closed while the adopt is healthy.
+  endpoint::ControlChallengeQuery challenge{};
+  challenge.config_namespace = 1;
+  endpoint::EncodedServicePayload encoded{};
+  CHECK(rig.journal->handle_challenge_query(challenge, now_ms, encoded).code ==
+        StatusCode::Busy);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidState);
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->decision_revision() == 2);
+  CHECK(rig.journal->active_snapshot().size == baseline.size);
+  CHECK(rig.provider.live_.size == baseline.size);
+  const endpoint::ControlStatus done = query_status(rig, dev_opid(12), now_ms);
+  CHECK(done.phase == ConfigPhase::Active);
+  CHECK(done.reason == ConfigReason::Ok);
+}
+
+// Power row 2b (§5.6): restore interrupted mid-flight — same idempotent
+// resume, the partial provider write is re-applied wholesale.
+void test_power_restore_midflight_resume() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  rig.provider.polls_to_complete = 3;
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 13, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  rig.journal->poll(now_ms += 10);  // restore starts...
+  rig.journal->poll(now_ms += 10);  // ...but never commits
+  CHECK(rig.journal->quarantined());
+  rig.boot(now_ms += 100);  // cut mid-restore
+  CHECK_OK(rig.boot_status_);
+  drain(rig, now_ms);
+  CHECK(!rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.provider.active_.size == baseline.size);
+  CHECK(rig.provider.live_.size == baseline.size);
+}
+
+// Power row 4 (§5.6): provider done, readback pending — the resume never
+// assumes success. It restores and readback-verifies even when the
+// provider already holds the baseline, and re-applies wholesale when the
+// provider diverged.
+void test_power_resume_reverifies() {
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ConfigVerdict verdict{};
+
+  // Provider already complete: the restore still runs, then the readback
+  // proof completes the ceremony.
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 18, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  CHECK(rig.provider.restore_calls == 0);
+  rig.provider.seed(baseline.view());  // provider finished before the cut
+  rig.boot(now_ms += 100);
+  CHECK_OK(rig.boot_status_);
+  drain(rig, now_ms);
+  CHECK(rig.provider.restore_calls >= 1);  // no success assumption
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->active_snapshot().size == baseline.size);
+
+  // Provider diverged: the same durable intent re-applies the baseline.
+  TargetRig rig2(kBoot, true, true);
+  t04_seed_loss(rig2, now_ms);
+  build_dev_recovery(rig2, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 19, object);
+  CHECK_OK(rig2.journal->submit_recovery(object.view(), now_ms, verdict));
+  const ConfigField garbage_fields[] = {sdk_u8(9, 9)};
+  const auto garbage = snapshot_of(garbage_fields, 1);
+  rig2.provider.seed(garbage.view());
+  rig2.boot(now_ms += 100);
+  CHECK_OK(rig2.boot_status_);
+  drain(rig2, now_ms);
+  CHECK(rig2.journal->phase() == ConfigPhase::Active);
+  CHECK(rig2.provider.live_.size == baseline.size);
+  CHECK(std::memcmp(rig2.provider.live_.bytes.data(), baseline.bytes.data(),
+                    baseline.size) == 0);
+  CHECK(rig2.provider.active_.size == baseline.size);
+}
+
+// Power row 3 (§5.6): the readback fails — a terminal failure record
+// lands, isolation continues, the next boot does NOT retry the spent
+// authorization; a fresh one supersedes it.
+void test_power_verify_failure_terminal() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  rig.provider.freeze_live = true;
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 14, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->quarantined());
+  CHECK(rig.journal->phase() == ConfigPhase::Interrupted);
+  // Intent J=4 plus the failure record J=5 are both consumed.
+  CHECK(rig.floor_j() == 5);
+  rig.boot(now_ms += 100);
+  CHECK(rig.boot_status_.code == StatusCode::RecoveryRequired);
+  CHECK(rig.journal->uncertain());  // failed intent: terminal, never resumed
+  CHECK(!rig.journal->quarantined());
+  // The spent authorization answers its terminal record, never Active/Ok.
+  const endpoint::ControlStatus failed = query_status(rig, dev_opid(14), now_ms);
+  CHECK(failed.phase == ConfigPhase::Interrupted);
+  CHECK(failed.reason == ConfigReason::StorageFailure);
+  // A fresh authorization supersedes (J=6/R=3 on the live floor).
+  rig.provider.freeze_live = false;
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 6, 3,
+                     baseline.view(), baseline.view(), 15, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(!rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
+// Power row 4 (§5.6): complete reserved, completion never written — the
+// floor moved past the intent, so the boot parks uncertain without
+// resuming; a fresh authorization recovers. Both slots stay valid here,
+// isolating the ceremony-gap rule from the sibling-loss rules.
+void test_power_complete_reserved_unwritten() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_uncertain_survivor(rig, now_ms);
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 16, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  // Slots now [ACTIVE gen 3, intent gen 4], both valid: the complete's
+  // floor reservation (J=5) lands, then both twin writes die.
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 5, 2);
+  rig.boot(now_ms += 100);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->uncertain());
+  // No autonomous resume from the stale intent: new intake (not Busy)
+  // and no restore running.
+  CHECK(rig.provider.restore_calls == 0);
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 6, 3,
+                     baseline.view(), baseline.view(), 17, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(!rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+}
+
+// Power row 5 (§5.6) over destroyed flash: a lone intent the floor moved
+// past is spent — the boot parks uncertain even though the intent record
+// itself is intact; only a fresh exact-next authorization resumes.
+void test_power_spent_intent_parks() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 20, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  // Slots are [destroyed, intent J=4]: the complete's floor reservation
+  // (J=5) lands, then both twin writes die.
+  seed_floor(rig.floor_storage, rig.config.network, rig.config.target,
+             rig.config.config_namespace, rig.config.schema, 5, 2);
+  rig.boot(now_ms += 100);
+  CHECK(rig.boot_status_.code == StatusCode::IntegrityError);
+  CHECK(rig.journal->uncertain());
+  CHECK(rig.provider.restore_calls == 0);  // spent: no autonomous resume
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 6, 3,
+                     baseline.view(), baseline.view(), 21, object);
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(!rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.journal->active_snapshot().size == baseline.size);
+}
+
+// Power row 5 (§5.6): a lone completion — the boot re-verifies the
+// provider and lands the identical twin before intake re-opens, with no
+// new authorization.
+void test_power_lone_complete_mirror() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2), sdk_bool(2, true)};
+  const auto baseline = snapshot_of(baseline_fields, 2);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 18, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  rig.journal->poll(now_ms += 10);  // the restore starts (no journal writes)
+  // Cut the second twin's seal: slot 1 completes, slot 0 stays pending.
+  rig.storage.drop_call = rig.storage.write_calls + 3;
+  rig.journal->poll(now_ms += 10);  // commit + readback + partial twins
+  CHECK(rig.journal->quarantined());  // completion not durable yet
+  rig.boot(now_ms += 100);  // cut between the twin writes
+  CHECK_OK(rig.boot_status_);
+  drain(rig, now_ms);  // mirror leg: re-verify + land the twin
+  CHECK(!rig.journal->quarantined());
+  CHECK(!rig.journal->uncertain());
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(std::memcmp(rig.storage.slots_[0].data(), rig.storage.slots_[1].data(),
+                    64) == 0);
+  const endpoint::ControlStatus done = query_status(rig, dev_opid(18), now_ms);
+  CHECK(done.phase == ConfigPhase::Active);
+  CHECK(done.reason == ConfigReason::Ok);
+}
+
+// Power row 6 (§5.6): twins durable, reply never sent — the boot
+// re-confirms the provider, the same opid answers Active/Ok, and a
+// re-received object runs no extra restore.
+void test_power_twins_no_reply() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  const ConfigField baseline_fields[] = {sdk_u8(1, 2)};
+  const auto baseline = snapshot_of(baseline_fields, 1);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2,
+                     baseline.view(), baseline.view(), 19, object);
+  ConfigVerdict verdict{};
+  CHECK_OK(rig.journal->submit_recovery(object.view(), now_ms, verdict));
+  drain(rig, now_ms);
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  const int restores = rig.provider.restore_calls;
+  rig.boot(now_ms += 100);  // cut after the twins, before any reply
+  CHECK_OK(rig.boot_status_);
+  drain(rig, now_ms);  // reconfirmation restore, no new ceremony
+  CHECK(rig.journal->phase() == ConfigPhase::Active);
+  CHECK(rig.provider.restore_calls == restores + 1);
+  const endpoint::ControlStatus done = query_status(rig, dev_opid(19), now_ms);
+  CHECK(done.phase == ConfigPhase::Active);
+  CHECK(done.reason == ConfigReason::Ok);
+  // Re-receiving the spent object refuses without touching the provider.
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidState);
+  CHECK(rig.provider.restore_calls == restores + 1);
+}
+
+// Power row 7 (§5.6): the floor cannot be read — initialization fails
+// and every intake refuses as uninitialized.
+void test_power_floor_unreadable() {
+  TargetRig rig(kBoot, true, true);
+  MonotonicMs now_ms = 1000;
+  t04_seed_loss(rig, now_ms);
+  rig.floor_storage.read_error = true;
+  rig.boot(now_ms += 100);
+  CHECK(!rig.boot_status_.ok());
+  CHECK(!rig.journal->initialized());
+  ConfigVerdict verdict{};
+  const ConfigField patch[] = {sdk_u8(1, 2)};
+  CHECK(drive_update(rig, patch, 1, now_ms, 0, ByteView{}, verdict).code ==
+        StatusCode::InvalidState);
+  ByteBuffer<kConfigPermitObjectMax> object{};
+  build_dev_recovery(rig, endpoint::kRcr2ModeReprovision, 4, 2, ByteView{},
+                     ByteView{}, 20, object);
+  CHECK(rig.journal->submit_recovery(object.view(), now_ms, verdict).code ==
+        StatusCode::InvalidState);
+  endpoint::ControlChallengeQuery challenge{};
+  endpoint::EncodedServicePayload encoded{};
+  CHECK(rig.journal->handle_challenge_query(challenge, now_ms, encoded).code ==
+        StatusCode::InvalidState);
+  endpoint::ControlStatusQuery query{};
+  CHECK(rig.journal->handle_status_query(query, now_ms, encoded).code ==
+        StatusCode::InvalidState);
+}
+
+// Power row 8 (§5.6: empty floor) is test_floor_missing_stops_intake —
+// initialization fails, all intake refuses, managed re-provisioning
+// recovers. No duplicate here.
 
 int main() {
   // Schema / TLV / hash layer.
@@ -3194,6 +4035,21 @@ int main() {
   test_store_exhausted();
   test_floor_record_kind_legacy();
   test_floor_twins_full_content();
+  // T04 + §5.6 power table: the RCR2 ceremony under the real dev verifier.
+  test_t04_reprovision_success();
+  test_t04_reprovision_empty();
+  test_t04_adopt_known();
+  test_t04_provider_faults();
+  test_power_floor_saved_intent_not();
+  test_power_intent_resume();
+  test_power_restore_midflight_resume();
+  test_power_resume_reverifies();
+  test_power_verify_failure_terminal();
+  test_power_complete_reserved_unwritten();
+  test_power_spent_intent_parks();
+  test_power_lone_complete_mirror();
+  test_power_twins_no_reply();
+  test_power_floor_unreadable();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

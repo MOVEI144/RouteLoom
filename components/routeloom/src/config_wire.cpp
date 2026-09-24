@@ -266,9 +266,7 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
   } else {
     for (std::size_t i = 0; i < journal_count_; ++i) {
       const Status accepted =
-          manifest.kind == autonomy::ControlObjectKind::ConfigRecovery
-              ? journals_[i]->note_recovery_manifest(manifest, now_ms)
-              : journals_[i]->note_object_manifest(manifest, now_ms);
+          journals_[i]->note_object_manifest(manifest, now_ms);
       if (accepted) {
         journal = journals_[i];
         break;
