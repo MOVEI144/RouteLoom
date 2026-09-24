@@ -176,7 +176,7 @@ capability bit `kCapSiteAuthorityV1 = 1u << 6`（HelloAckのcapability digestに
 
 USB frame上限4096Bに対し最大の本文はRRS1付きで約700B。gateway自身の参加は、USB上で同じEDHOC m1〜m4を0x40/0x41で直接運ぶ（proxy無し、`hops=0`）。KGuardのallowが必要なのは他の機器と同じ。
 
-**Resolved in implementation（P3-2）**：上の表のbit 6と0x40〜0x42はnode_status_v1が、0x50〜0x52とbit 7はgroup_delivery_v1が既に使っているため、参加中継は**capability bit 8（`kCapJoinRelayV1`）とHostOps 0x60 JOIN_RELAY_UP／0x61 JOIN_RELAY_DOWN／0x62 JOIN_RELAY_ABORT／0x63 JOIN_RELAY_RESULT**（0x61/0x62への応答）として実装した（形式は[02 §7.4](02-zero-touch-join.md)、共通vector `protocol/usb-golden/join-relay`、Rust `routeloom-protocol::join_relay`）。表の0x43〜0x46（P5）も同じsite-authority族の0x64〜0x67に置くことを推奨する（未実装）。bitは中継だけを表し、P5の機能は別bitで広告する。gateway自身の参加（`hops=0`）は未実装。
+**Resolved in implementation（P3-2）**：上の表のbit 6と0x40〜0x42はnode_status_v1が、0x50〜0x52とbit 7はgroup_delivery_v1が既に使っているため、参加中継は**capability bit 8（`kCapJoinRelayV1`）とHostOps 0x60 JOIN_RELAY_UP／0x61 JOIN_RELAY_DOWN／0x62 JOIN_RELAY_ABORT／0x63 JOIN_RELAY_RESULT**（0x61/0x62への応答）として実装した（形式は[02 §7.4](02-zero-touch-join.md)、共通vector `protocol/usb-golden/join-relay`、Rust `routeloom-protocol::join_relay`）。表の0x43〜0x46（P5）は同じsite-authority族の0x64 AUTHORITY_UP／0x65 AUTHORITY_DOWN／0x66 SITE_STATE_SET／0x67 SITE_STATE_REPORTとして実装した（G-SEC P5 PR1：capability bit 9 `kCapAuthorityChannelV1`、**未広告**。形式はP5設計書 §3.3、共通vector `protocol/sdkv1-golden/authority/`、C++ `sdkv1_authority.hpp`＋`usb_host_ops.hpp`、Rust `routeloom-keysched::authority`＋`routeloom-protocol::{authority,host_ops}`）。bitは中継だけを表し、P5の機能は別bitで広告する。gateway自身の参加（`hops=0`）は未実装。
 
 ## 5. KGuardとの典型的な流れ
 
@@ -247,7 +247,7 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 |---|---|
 | KGuard未接続 | 参加要求はpending（`decision_timeout_ms`で）、`authority.error`は出さない。既存memberは影響なし |
 | host停止 | gatewayは0x40を送れず、proxyへ`authority_unreachable`。OFFERの`authority_reachable`を落とす |
-| USB再接続 | 新しいUSB sessionで0x45を再送し、gatewayのGK状態を一致させる |
+| USB再接続 | 新しいUSB sessionで0x66を再送し、gatewayのGK状態を一致させる |
 | 台帳・store失敗 | 参加はAuthorityBusy、revokeはエラー。成功へ変換しない |
 | 同じNodeIdで別kid（有効なmembership） | 別の機器として扱い`join.request`に`kid_conflict:true`。自動allowしない。revoke済みの行は競合にせず、明示allowで置換できる |
 | 決定済み要求への別key再allow | 承認した(kid, generation)がmemberとして有効なら保存済み応答（そのkeyにも記録）、失効・置換済みならCONFLICT。同一idempotency keyの再送は記録の保持範囲（最新1,024件）内で保存済み応答 |
