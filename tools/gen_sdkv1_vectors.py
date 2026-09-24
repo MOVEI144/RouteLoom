@@ -301,6 +301,25 @@ def rlp1(r: dict) -> bytes:
     return data + u32(crc32(data))
 
 
+def rlp2(r: dict) -> bytes:
+    data = (b"RLP2" + u8(1) + u8(r["purpose"]) + u8(r["state"]) + u8(r["flags"]) +
+            u64(r["peer"]) + u64(r["network"]) + bytes.fromhex(r["peer_cert_id_hex"]) +
+            bytes.fromhex(r["local_cert_id_hex"]) + u32(r["peer_generation"]) +
+            u32(r["peer_role"]) + u32(r["created_gk_epoch"]) + u32(r["last_used_boot"]) +
+            u32(r["reserved_uses"]) + bytes.fromhex(r["rms_hex"]))
+    return data + u32(crc32(data))
+
+
+def rlv1(r: dict, seal: int, commit_seq: int) -> bytes:
+    data = (b"RLV1" + u16(1) + u16(108) + u32(1) + u32(seal) + u32(commit_seq) +
+            u64(r["local_node"]) + u64(r["site_id"]) + u64(r["network"]) +
+            u32(r["removed_generation"]) + u32(r["rs_epoch_floor"]) +
+            u32(r["site_epoch_floor"]) + u8(r["state"]) + u8(r["cause"]) + u16(0) +
+            bytes.fromhex(r["evidence_digest_hex"]) + u32(r["rls_commit_seq"]) +
+            u32(r["boot_witness"]) + u32(r["holdoff_ms"]))
+    return data + u32(crc32(data))
+
+
 # --- emit ---------------------------------------------------------------------
 def emit(folder: str, name: str, record: dict) -> None:
     record = dict(record, format=FMT, name=name)
@@ -759,6 +778,67 @@ def main() -> None:
     bad("rlp1_zero_rms", "rlp1", rlp1(dict(rlp, rms_hex="00" * 32)),
         "a valid slot has a nonzero RMS")
     bad("rlp1_truncated", "rlp1", good_slot[:83], "slots are exactly 84 bytes")
+
+    # ---- RLP2 --------------------------------------------------------------
+    local_cert_id = hashlib.sha256(bytes.fromhex(membercert["cert_hex"])).digest()[:8]
+    rlp2_link = dict(purpose=1, state=1, flags=1, peer=peer_node, network=network,
+                     peer_cert_id_hex=peer_cert_id.hex(), local_cert_id_hex=local_cert_id.hex(),
+                     peer_generation=1, peer_role=0b010, created_gk_epoch=203,
+                     last_used_boot=512, reserved_uses=9,
+                     rms_hex=bytes(range(0xC0, 0xE0)).hex(),
+                     peer_cert_hex=peercert["cert_hex"])
+    emit("valid", "rlp2_link_pinned", dict(rlp2_link, codec="rlp2", expect="ok",
+                                           record_hex=rlp2(rlp2_link).hex()))
+    rlp2_end = dict(rlp2_link, purpose=2, flags=0, reserved_uses=64)
+    emit("valid", "rlp2_end_capped", dict(rlp2_end, codec="rlp2", expect="ok",
+                                          record_hex=rlp2(rlp2_end).hex()))
+    empty2 = dict(purpose=0, state=0, flags=0, peer=0, network=0,
+                  peer_cert_id_hex="00" * 8, local_cert_id_hex="00" * 8,
+                  peer_generation=0, peer_role=0, created_gk_epoch=0, last_used_boot=0,
+                  reserved_uses=0, rms_hex="00" * 32)
+    emit("valid", "rlp2_empty", dict(empty2, codec="rlp2", expect="ok",
+                                     record_hex=rlp2(empty2).hex()))
+    good2 = rlp2(rlp2_link)
+    bad("rlp2_bad_crc", "rlp2", good2[:-1] + bytes([good2[-1] ^ 1]), "CRC mismatch")
+    bad("rlp2_bad_magic", "rlp2", recrc(b"RLP1" + good2[4:]), "magic must be RLP2")
+    bad("rlp2_bad_purpose", "rlp2", rlp2(dict(rlp2_link, purpose=3)), "purpose is 1 or 2")
+    bad("rlp2_role_zero", "rlp2", rlp2(dict(rlp2_link, peer_role=0)),
+        "a valid slot names the peer role")
+    bad("rlp2_uses_over_cap", "rlp2", rlp2(dict(rlp2_link, reserved_uses=65)),
+        "reserved_uses never exceeds 64")
+    bad("rlp2_empty_residue", "rlp2", rlp2(dict(empty2, reserved_uses=8)),
+        "an empty slot carries no use count")
+    bad("rlp2_truncated", "rlp2", good2[:95], "slots are exactly 96 bytes")
+
+    # ---- RLV1 --------------------------------------------------------------
+    RLV1_SEAL = 0x72564B31
+    removal = dict(local_node=node, site_id=site_id, network=network,
+                   removed_generation=3, rs_epoch_floor=11, site_epoch_floor=site_epoch,
+                   state=1, cause=1,
+                   evidence_digest_hex=hashlib.sha256(b"removal-evidence").digest().hex(),
+                   rls_commit_seq=41, boot_witness=9000, holdoff_ms=600000)
+    emit("valid", "rlv1_blocked", dict(removal, codec="rlv1", expect="ok", commit_seq=7,
+                                       record_hex=rlv1(removal, RLV1_SEAL, 7).hex()))
+    cleaned = dict(removal, state=2, cause=2)
+    emit("valid", "rlv1_cleaned", dict(cleaned, codec="rlv1", expect="ok", commit_seq=8,
+                                       record_hex=rlv1(cleaned, RLV1_SEAL, 8).hex()))
+    good_rlv = rlv1(removal, RLV1_SEAL, 7)
+    bad("rlv1_bad_crc", "rlv1", good_rlv[:-1] + bytes([good_rlv[-1] ^ 1]), "CRC mismatch")
+    bad("rlv1_pending_seal", "rlv1", rlv1(removal, 0, 7), "a readable record is committed")
+    bad("rlv1_bad_state", "rlv1", rlv1(dict(removal, state=0), RLV1_SEAL, 7),
+        "state is Blocked(1) or Cleaned(2)")
+    bad("rlv1_bad_cause", "rlv1", rlv1(dict(removal, cause=0), RLV1_SEAL, 7),
+        "cause is 1..3")
+    bad("rlv1_zero_generation", "rlv1", rlv1(dict(removal, removed_generation=0), RLV1_SEAL, 7),
+        "a removal names a nonzero generation")
+    bad("rlv1_zero_evidence", "rlv1",
+        rlv1(dict(removal, evidence_digest_hex="00" * 32), RLV1_SEAL, 7),
+        "evidence is the digest of a verified object")
+    bad("rlv1_holdoff_changed", "rlv1", rlv1(dict(removal, holdoff_ms=599999), RLV1_SEAL, 7),
+        "holdoff is the fixed 600000 ms")
+    bad("rlv1_reserved_nonzero", "rlv1",
+        recrc(good_rlv[:58] + b"\x00\x01" + good_rlv[60:]), "reserved bytes must be zero")
+    bad("rlv1_truncated", "rlv1", good_rlv[:107], "records are exactly 108 bytes")
 
 
 if __name__ == "__main__":

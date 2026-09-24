@@ -1,0 +1,20 @@
+{
+  "boot_witness": 9000,
+  "cause": 2,
+  "codec": "rlv1",
+  "commit_seq": 8,
+  "evidence_digest_hex": "1dcd5277e1bc1150aae860930ac7c9675c6e662084bb4f9e4c79476593607294",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-golden-v1",
+  "holdoff_ms": 600000,
+  "local_node": 45317471250420276,
+  "name": "rlv1_cleaned",
+  "network": 13054454845,
+  "record_hex": "524c56310001006c0000000172564b310000000800a10000000012345173000000000042000000030a1b2c3d000000030000000b00000003020200001dcd5277e1bc1150aae860930ac7c9675c6e662084bb4f9e4c794765936072940000002900002328000927c04142f00b",
+  "removed_generation": 3,
+  "rls_commit_seq": 41,
+  "rs_epoch_floor": 11,
+  "site_epoch_floor": 3,
+  "site_id": 5869034739393888322,
+  "state": 2
+}

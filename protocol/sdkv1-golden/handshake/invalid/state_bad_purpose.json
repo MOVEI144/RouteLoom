@@ -1,0 +1,8 @@
+{
+  "codec": "session_state",
+  "encoded_hex": "01000100000000030000000b0000000c0000000901000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "state_bad_purpose",
+  "note": "purpose is 1 link or 2 end"
+}

@@ -256,6 +256,7 @@ const char* reject_name(const Reject reject) noexcept {
     case Reject::RateLimited: return "rate_limited";
     case Reject::EntropyUnavailable: return "entropy_unavailable";
     case Reject::ContextIdUnavailable: return "context_id_unavailable";
+    case Reject::ResumeBudgetExhausted: return "resume_budget_exhausted";
     case Reject::InvalidRequest: return "invalid_request";
   }
   return "unknown";
@@ -301,6 +302,11 @@ Status Engine::update_epochs(const Epochs& epochs) noexcept {
   if (!configured_ || epochs.site_epoch != local_.epochs.site_epoch) {
     return Status::error(StatusCode::InvalidState, "rlres1 site epoch change needs configure");
   }
+  // Epochs advance monotonically within a site: a regressed GK/RS is a
+  // caller bug or a confused deputy, never applied (P4 §6.2).
+  if (epochs.gk_epoch < local_.epochs.gk_epoch || epochs.rs_epoch < local_.epochs.rs_epoch) {
+    return Status::error(StatusCode::InvalidState, "rlres1 epochs regressed");
+  }
   local_.epochs = epochs;
   return Status::success();
 }
@@ -308,7 +314,9 @@ Status Engine::update_epochs(const Epochs& epochs) noexcept {
 void Engine::reject(Output& out, const Reject reason, const DecodeError decode) noexcept {
   out.reject = reason;
   out.decode = decode;
-  ++reject_counts_[static_cast<std::size_t>(reason)];
+  // Saturating: flood counters must not wrap back to a healthy-looking 0.
+  std::uint32_t& count = reject_counts_[static_cast<std::size_t>(reason)];
+  if (count < 0xFFFFFFFFU) ++count;
 }
 
 void Engine::send_hint(Output& out, const R2Status status, const ResumeId& rid,
@@ -664,6 +672,13 @@ void Engine::on_r1(const ByteView message, const Carrier& carrier, const NodeId 
   }
   if (!take_token(now)) {
     reject(out, Reject::RateLimited);
+    return;
+  }
+  // The slot is verified: spend one of its 64 uses before R2 exists. A
+  // spent or unprovable budget answers Expired (full EDHOC), never
+  // UnknownId — the MAC already proved the RMS is ours.
+  if (!env.reserve_resume_use(purpose, r1.rid)) {
+    send_hint(out, R2Status::Expired, r1.rid, Reject::ResumeBudgetExhausted);
     return;
   }
 

@@ -70,6 +70,7 @@ struct Env final : rl::Environment {
     if (out == 0) out = cid++;
     return true;
   }
+  bool reserve_resume_use(keys::Purpose, const keys::ResumeId&) noexcept override { return true; }
   rl::Slot slot() const noexcept { return rl::Slot{keys::Purpose::Link, peer, kNetwork, 12, 1, rms}; }
 };
 

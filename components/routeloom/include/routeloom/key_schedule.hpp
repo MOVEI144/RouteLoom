@@ -41,6 +41,11 @@ inline constexpr char kLabelResumeR2[] = "RouteLoom/v1/R2";
 inline constexpr char kLabelResumeR3[] = "RouteLoom/v1/R3";
 inline constexpr char kLabelResumeConfirm[] = "RouteLoom/v1/resume-confirm";
 inline constexpr char kLabelResumeKey[] = "RouteLoom/v1/resume-key";
+// P4 member handshake (frozen with the same rule as above).
+inline constexpr char kLabelLinkCarrier[] = "RouteLoom/v1/link-carrier";
+inline constexpr char kLabelEndCarrier[] = "RouteLoom/v1/end-carrier";
+inline constexpr char kLabelSessionProfile[] = "RouteLoom/v1/session-profile";
+inline constexpr char kLabelContextConfirm[] = "RouteLoom/v1/context-confirm";
 // Authority channel (03 §5.3, G-SEC P5): GK-id binds (network, epoch, GK)
 // for ACK key confirmation. Never a raw-GK export.
 inline constexpr char kLabelGkId[] = "RouteLoom/v1/gk-id";
@@ -158,6 +163,50 @@ Status resume_traffic_key(const ScopeDigest& prk, const ResumeKeyContext& contex
 // caller must treat the MAC as failed (never compare against it).
 Status resume_mac(ByteView key, const char* label, ByteView a, ByteView b, ByteView c,
                   std::array<std::uint8_t, kResumeMacSize>& out) noexcept;
+
+// --- Member link carrier (P4 §5.2) ------------------------------------------------
+// carrier_digest binds the EDHOC/RLRES1 exchange to the exact RLD1
+// DISCOVER/OFFER exchange that carried it (frozen bytes, both nonces, the
+// cookie, both capability words and the scope binding):
+//   SHA-256("RouteLoom/v1/link-carrier" 0x00 || rld1_version u8(1) ||
+//           full_network u64 || node_I u64 || node_R u64 ||
+//           requester_nonce16 || responder_nonce16 || cookie16 ||
+//           capability_I u32 || capability_R u32 || scope_binding32)
+// I is the DISCOVER requester, R the OFFER responder. A re-sent DISCOVER
+// refreshes nonces/cookie/digest together; nothing re-binds mid-exchange.
+struct LinkCarrier {
+  NetworkId network{0};  // full64
+  NodeId node_i{kInvalidNodeId};
+  NodeId node_r{kInvalidNodeId};
+  std::array<std::uint8_t, 16> requester_nonce{};
+  std::array<std::uint8_t, 16> responder_nonce{};
+  std::array<std::uint8_t, 16> cookie{};
+  std::uint32_t capability_i{0};
+  std::uint32_t capability_r{0};
+  ScopeDigest scope_binding{};
+};
+void link_carrier_digest(const LinkCarrier& carrier, ScopeDigest& out) noexcept;
+
+// End-to-end carrier binding for the member EDHOC profile (P4 §5.3, NOT
+// the RLRES1 routed binding above):
+//   SHA-256("RouteLoom/v1/end-carrier" 0x00 || full_network u64 ||
+//           node_I u64 || node_R u64 || exchange_id u32)
+void end_carrier_binding(NetworkId network, NodeId node_i, NodeId node_r,
+                         std::uint32_t exchange_id, ScopeDigest& out) noexcept;
+
+// Binds the negotiated session profile into the Exporter context (P4 §5.4):
+//   SHA-256("RouteLoom/v1/session-profile" 0x00 || Intent44 || State_R24 ||
+//           State_I24)
+// Refuses anything but the exact EAD value widths (44/24/24).
+Status session_capability_digest(ByteView intent44, ByteView state_r24, ByteView state_i24,
+                                 ScopeDigest& out) noexcept;
+
+// Confirms both ends derived identical Exporter contexts (P4 §5.4; a hash
+// of the public context encodings, never of secrets):
+//   SHA-256("RouteLoom/v1/context-confirm" 0x00 || len16(C_1) || C_1 ||
+//           len16(C_2) || C_2 || len16(C_RMS) || C_RMS)
+Status session_contexts_digest(ByteView context_dir1, ByteView context_dir2, ByteView context_rms,
+                               ScopeDigest& out) noexcept;
 
 // --- AuthorityEnvelope (03 §5.3) ----------------------------------------------
 // ver u8 | type u8 | ctx_id u32 | counter u48 | ciphertext n | tag 16B.

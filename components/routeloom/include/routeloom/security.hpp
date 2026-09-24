@@ -151,13 +151,15 @@ inline Status check_context_keys(const ContextKeys& keys) noexcept {
 //   03 §3). It rejects an rx_context_id already live for another context
 //   (Conflict) and a full table (NoCapacity) without disturbing live state.
 // - retire() drops one context; retire_all() drops every context of a peer
-//   (revocation, sdk-v1/04 §5). Both are idempotent.
+//   (revocation, sdk-v1/04 §5). Both are idempotent. Both return Status so
+//   a re-entrant call (from a crypto/storage callback) can refuse with Busy
+//   instead of mutating half an exchange (P4 §2.2).
 class SessionInstaller {
  public:
   virtual ~SessionInstaller() = default;
   virtual Status install(const ContextKeys& keys) noexcept = 0;
-  virtual void retire(SecurityScope scope, NodeId peer) noexcept = 0;
-  virtual void retire_all(NodeId peer) noexcept = 0;
+  virtual Status retire(SecurityScope scope, NodeId peer) noexcept = 0;
+  virtual Status retire_all(NodeId peer) noexcept = 0;
 };
 
 }  // namespace routeloom

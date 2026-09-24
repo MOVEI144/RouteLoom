@@ -280,7 +280,7 @@ class RecordingHost final : public ConfigHostSink {
     last_result = result;
     last_target = target;
     last_body.size = body.size;
-    std::memcpy(last_body.bytes.data(), body.data, body.size);
+    if (body.size != 0) std::memcpy(last_body.bytes.data(), body.data, body.size);
   }
   int calls{0};
   std::uint64_t last_request{0};

@@ -506,6 +506,10 @@ struct FakeEnv final : rlres1::Environment {
     return false;  // initiator only
   }
 
+  bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
+    return false;
+  }
+
   bool revoked(NodeId, std::uint32_t) noexcept override { return false; }
 
   bool allocate_context_id(rlres1::Purpose, NodeId, std::uint32_t& cid) noexcept override {
@@ -568,6 +572,10 @@ struct FakeAuthorityEnv final : rlres1::Environment {
     out.created_gk_epoch = 12;
     out.peer_generation = kGeneration;
     out.secret = dams;
+    return true;
+  }
+
+  bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
     return true;
   }
 
