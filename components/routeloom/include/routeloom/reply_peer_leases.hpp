@@ -2,7 +2,7 @@
 
 // ExpectedReply (reply-direction) peer leases (issue #117, design-q116 §6):
 // the portable Owner-side table behind ReplyPeerPort. One instance per radio
-// Owner; MeshNode holds only the port (PR-C wires admission to it).
+// Owner; MeshNode holds only the port and opaque use handles.
 //
 // Capacity (docs/reference/resource-profiles.json admission.*):
 //   - 3 binding entries for the whole Owner, keyed by
@@ -92,7 +92,7 @@ constexpr bool next_use_serial(const std::uint32_t current,
   return true;
 }
 
-// The Owner's reply-lease surface toward MeshNode (PR-C caller). All methods
+// The Owner's reply-lease surface toward MeshNode. All methods
 // are noexcept and bounded; re-entry from a driver/observer callback returns
 // Busy with zero observable change.
 class ReplyPeerPort {
@@ -161,7 +161,8 @@ class ExpectedReplyLeases {
   // NotFound for an unknown slot or a rotated serial; Busy on re-entry.
   Status release(ReplyLeaseToken token) noexcept;
   // Liveness of one use; see ReplyPeerPort::validate. TimeUncertain on a
-  // regressed clock, Busy on re-entry. Read-only apart from the guard.
+  // regressed clock, Busy on re-entry. Advances the clock anchor so a later
+  // acquire cannot use an earlier time than a validated dispatch.
   Status validate(ReplyLeaseToken token, MonotonicMs now) noexcept;
   // Retire every entry of one binding id (revoke/rebind/context-retire):
   // outstanding uses drain via release, new acquires on the id conflict,
@@ -219,7 +220,7 @@ class ExpectedReplyLeases {
 
   std::array<Entry, kExpectedReplyBindingsMax> entries_{};
   std::array<Use, kReplyLeaseUsesMax> uses_{};
-  MonotonicMs last_now_{0};  // admission clock anchor; regression is TimeUncertain
+  MonotonicMs last_now_{0};  // observed clock anchor; regression is TimeUncertain
   bool in_call_{false};      // re-entry guard: mutators Busy while set
 };
 static_assert(sizeof(ExpectedReplyLeases) <= 384, "reply lease table bound");

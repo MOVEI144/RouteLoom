@@ -1956,6 +1956,12 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
         queued->encoded_tag = 0;  // re-stamp next_hop at encode
       }
     }
+    if (next_physical_token_ == 0) {
+      TxJob exhausted{};
+      scheduler_.take_selected(exhausted);
+      fail_job(exhausted, "TX_TOKEN_EXHAUSTED", now_ms);
+      continue;
+    }
     auto status = encode_job(*queued, now_ms);
     if (!status) {
       if (status.code == StatusCode::AuthRequired && defer_for_session(*queued)) {
@@ -1970,7 +1976,8 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
       fail_job(failed, status.detail, now_ms);
       continue;
     }
-    const std::uint64_t token = next_physical_token_++;
+    std::uint64_t token = 0;
+    (void)mint_physical_token(next_physical_token_, token);
     status = radio_.send(queued->peer, token, tx_encoded_.view());
     if (status.code == StatusCode::WouldBlock || status.code == StatusCode::Busy) {
       // The driver could not take the frame: no attempt was made. Restore
@@ -2601,7 +2608,9 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   // when a reply slot is affordable.
   const AdmitVerdict admit =
       scheduler_.check(config_.node, /*scope=*/peer, frame.header.origin, 2);
-  if (admit != AdmitVerdict::Admitted) {
+  if (admit != AdmitVerdict::Admitted ||
+      !scheduler_.control_slot_available()) {
+    saturating_inc(scheduler_.stats_.admissions_rejected);
     emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), now_ms);
     observer_.on_diagnostic("TRANSIT_ADMISSION_DENIED", peer, &frame.header.message);
     return;
@@ -2776,7 +2785,9 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   }
   const AdmitVerdict admit =
       scheduler_.check(config_.node, /*scope=*/peer, frame.header.origin, 2);
-  if (admit != AdmitVerdict::Admitted) {
+  if (admit != AdmitVerdict::Admitted ||
+      !scheduler_.control_slot_available()) {
+    saturating_inc(scheduler_.stats_.admissions_rejected);
     emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), now_ms);
     observer_.on_diagnostic("ROUTED_TRANSIT_DENIED", peer, &frame.header.message);
     return;
@@ -2992,8 +3003,18 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
       return;
     }
     const auto route = routes_.best(frame.header.destination);
-    if (!route.valid || route.next_hop == peer || scheduler_.free_slots() < 2) {
+    if (!route.valid || route.next_hop == peer) {
       observer_.on_diagnostic("RECEIPT_TRANSIT_NO_ROUTE", peer, &frame.header.message);
+      return;
+    }
+    const AdmitVerdict admit =
+        scheduler_.check(config_.node, peer, frame.header.origin, 2);
+    if (admit != AdmitVerdict::Admitted ||
+        !scheduler_.control_slot_available()) {
+      saturating_inc(scheduler_.stats_.admissions_rejected);
+      emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), now_ms);
+      observer_.on_diagnostic("RECEIPT_TRANSIT_DENIED", peer,
+                              &frame.header.message);
       return;
     }
     auto* entry = allocate_dedup(frame_key, FrameType::EndReceipt,

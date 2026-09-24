@@ -76,6 +76,12 @@ using routeloom_test::test_keypair;
 const TestKeyPair kRoot = test_keypair(0x42);
 
 constexpr NetworkId kNet = 7;
+
+bool hold_relay_data(const NodeId from, const NodeId to, const ByteView frame) {
+  return from == 2 && to == 4 && frame.size > 4 &&
+         frame.data[4] == static_cast<std::uint8_t>(FrameType::Data);
+}
+
 const std::uint8_t kPayload[] = "fault-injection";
 ByteView payload_view() { return ByteView{kPayload, sizeof(kPayload) - 1}; }
 
@@ -976,14 +982,16 @@ void test_dedup_terminal_reserve_and_pool_full() {
   world.run(60);
   CHECK(world.obs(2)->messages.size() == kPins);
 
-  // The reserve still admits transit (Live) traffic — without a poll the
-  // forwards stay queued and their records Live...
+  // The reserve still admits transit (Live) traffic. Driver backpressure
+  // keeps forwards queued while polls drain the required ACK lane.
   constexpr std::uint64_t kReserve = kDedupTransitReserve;
+  world.net.block_send = hold_relay_data;
   for (std::uint64_t i = 1; i <= kReserve; ++i) {
     inject(world, 2, 3,
            craft_data(*world.security[3], 3, 2, /*origin=*/800 + i,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
+    if (i % 8 == 0) world.run(0);
   }
   CHECK(world.at(2)->dedup_stats().admitted_transit == kReserve);
   // ...and the next transit (from Q: P's scheduler scope is at its per-peer
@@ -998,6 +1006,7 @@ void test_dedup_terminal_reserve_and_pool_full() {
 
   // After the forwards drain and resolve, a Resolved record is the honest
   // eviction victim — the next admission reclaims it instead of refusing.
+  world.net.block_send = nullptr;
   world.run(2000);  // forwards dispatch; hop accepts resolve them
   CHECK(world.obs(4)->messages.size() == kReserve);  // all transit delivered
   inject(world, 2, 3,
@@ -1095,12 +1104,15 @@ void test_dedup_eviction_expired_then_resolved() {
   const auto from = [&](std::uint64_t i) -> NodeId { return i % 2 == 0 ? 3 : 5; };
   inject(world, 2, 3,
          craft_data(*world.security[3], 3, 2, 600, 4, 9001, 100), world.now);
+  world.net.block_send = hold_relay_data;
   for (std::uint64_t i = 2; i <= kFree; ++i) {
     inject(world, 2, from(i),
            craft_data(*world.security[from(i)], from(i), 2, 600 + i, 4,
                       9000 + i, 30000),
            world.now);
+    if (i % 8 == 0) world.run(0);
   }
+  world.run(0);
   CHECK(world.at(2)->dedup_stats().admitted_transit == kFree);
 
   // Advance past the short record's expiry (100 + 5000 slack < 6000) while
@@ -1124,6 +1136,7 @@ void test_dedup_eviction_expired_then_resolved() {
   // Drain the queued forwards: hop accepts demote them to Resolved. The pool
   // is still full, and now Resolved victims exist — the next admission takes
   // one, counted and diagnosed.
+  world.net.block_send = nullptr;
   world.run(2000);
   CHECK(world.obs(4)->messages.size() >= kFree);
   inject(world, 2, 3,
@@ -1151,15 +1164,17 @@ void test_scheduler_pool_saturation() {
   world.at(2)->set_peer_busy_capable(3, true);
   world.at(2)->set_peer_busy_capable(5, true);
 
-  // No drain between injections: forwards and their HOP_ACCEPTs pile into
-  // the 32-slot queue; the per-scope cap (12) binds at each peer first, then
-  // the pool itself refuses.
+  // Drain required ACKs in batches while DATA is held downstream. This
+  // exercises the data pool without violating the independent 8-slot
+  // control-lane admission bound.
+  world.net.block_send = hold_relay_data;
   for (std::uint64_t i = 1; i <= 40; ++i) {
     const NodeId peer = (i % 2 == 0) ? 3 : 5;
     inject(world, 2, peer,
            craft_data(*world.security[peer], peer, 2, /*origin=*/300 + i,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
+    if (i % 8 == 0) world.run(0);
   }
   CHECK(world.obs(2)->has_diag("TRANSIT_ADMISSION_DENIED"));
   const CongestionStats stats = world.at(2)->congestion_stats();
@@ -1169,6 +1184,7 @@ void test_scheduler_pool_saturation() {
   // record, and dispatching the backlog delivers it.
   const std::uint64_t admitted = world.at(2)->dedup_stats().admitted_transit;
   CHECK(admitted >= 20 && admitted <= 32);
+  world.net.block_send = nullptr;
   world.run(4000);
   CHECK(world.obs(4)->messages.size() == admitted);
   // Once drained, the same flood admission succeeds again — saturation is a

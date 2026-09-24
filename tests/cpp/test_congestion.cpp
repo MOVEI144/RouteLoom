@@ -331,6 +331,50 @@ void test_control_lane() {
   CHECK(first_is_accept);
 }
 
+void test_full_control_lane_never_commits_a_forward() {
+  for (const FrameType type : {FrameType::Data, FrameType::Service,
+                               FrameType::EndReceipt}) {
+    Harness h;
+    (void)h.add(1);
+    MeshNode* relay = h.add(2);
+    (void)h.add(3);
+    h.link(1, 2);
+    h.link(2, 3);
+    for (std::size_t i = 0; i < 8; ++i) {
+      const auto terminal = craft_frame(
+          h.cipher,
+          mk_header(FrameType::Data, 1, 2, 1, 2, MessageId{42, 1},
+                    wire::kFlagEndProtected),
+          payload_view());
+      inject(h, 2, 1, terminal);
+    }
+    CHECK(relay->congestion_stats().control_queued == 8);
+    const std::size_t accepted_before = relay->transit_in_flight();
+    const auto dropped_before = relay->congestion_stats().busy_send_failed;
+    const DedupStats dedup_before = relay->dedup_stats();
+    const auto transit = craft_frame(
+        h.cipher,
+        mk_header(type, 1, 3, 1, 2, MessageId{42, 2},
+                  wire::kFlagEndProtected),
+        payload_view());
+    inject(h, 2, 1, transit);
+    CHECK(relay->transit_in_flight() == accepted_before);
+    CHECK(relay->congestion_stats().busy_send_failed == dropped_before + 1);
+    CHECK(relay->dedup_stats().admitted_transit == dedup_before.admitted_transit);
+    CHECK(relay->dedup_stats().evicted_resolved == dedup_before.evicted_resolved);
+  }
+}
+
+void test_physical_token_never_wraps() {
+  std::uint64_t next = UINT64_MAX;
+  std::uint64_t issued = 0;
+  CHECK(mint_physical_token(next, issued));
+  CHECK(issued == UINT64_MAX && next == 0);
+  issued = 7;
+  CHECK(!mint_physical_token(next, issued));
+  CHECK(issued == 7 && next == 0);
+}
+
 // D4-04: bounded capacity — the per-origin cap rejects spoofed-flood
 // admissions and the flow descriptor table stays bounded. The origin cap is
 // exercised through crafted transit forwards (delivery slots are 8, below
@@ -1448,6 +1492,8 @@ void test_awaiting_full_defers_without_attempts() {
 int main() {
   test_drr_fairness();
   test_control_lane();
+  test_full_control_lane_never_commits_a_forward();
+  test_physical_token_never_wraps();
   test_flow_caps();
   test_busy_emission();
   test_busy_legacy_peer();

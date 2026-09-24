@@ -275,9 +275,8 @@ typedef struct rl_observer_vtable {
 /* ---- ExpectedReply peer leases (issue #117, design-q116 §6.4) ------------
    Additive symbols: RL_ABI_VERSION stays 2 (the unsized rl_radio_vtable_t
    layout above is frozen — the reply port is a separate versioned struct,
-   never a tail extension of it). PR-B publishes the surface only: attach
-   stores the port on the node and the RX entry carries the binding into the
-   V2 metadata path; admission enforcement arrives with PR-C. */
+   never a tail extension of it). Attach stores the port on the node, and
+   the RX entry carries the binding into the V2 metadata path. */
 #define RL_REPLY_PEER_VERSION 1u
 
 /* Mirrors ReplyPeerPort (reply_peer_leases.hpp). A NULL function behaves as

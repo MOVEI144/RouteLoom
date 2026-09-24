@@ -118,6 +118,10 @@ class SimNetwork {
   // the receiver never processes it — loss after the MAC ACK (RX queue
   // overflow, corruption above the MAC), which link retries cannot see.
   bool (*silent_drop)(const Pending& pending) = nullptr;
+  // Driver backpressure without a physical attempt. ACKs may drain while
+  // queued DATA remains live under its original deadline.
+  bool (*block_send)(routeloom::NodeId from, routeloom::NodeId to,
+                     routeloom::ByteView frame) = nullptr;
 
   // Long simulations (issue #59): sightings can be switched off so a
   // multi-minute 100-node run does not grow an unbounded vector; the
@@ -254,6 +258,10 @@ class SimNetwork {
 
 inline routeloom::Status SimRadio::send(routeloom::NodeId peer, std::uint64_t token,
                                         routeloom::ByteView frame) noexcept {
+  if (network_.block_send != nullptr && network_.block_send(owner_, peer, frame)) {
+    return routeloom::Status::error(routeloom::StatusCode::WouldBlock,
+                                    "simulated driver backpressure");
+  }
   return network_.enqueue(owner_, peer, token, frame);
 }
 

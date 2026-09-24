@@ -9,8 +9,7 @@
 // reusing handles, physically-unknown TX holds the driver, and late
 // completions never resolve a newer binding's send.
 //
-// Q117-01..04/06/09/13, Owner-component parts (PR-B scope). Node admission,
-// transaction lifetimes and batch reservation arrive with PR-C.
+// Q117-01..04/06/09/13 exercise the Owner-side contract.
 
 #include <array>
 #include <cstddef>
@@ -164,6 +163,24 @@ void test_keys_split_by_id_and_generation() {
   CHECK(leases.check_invariants());
 }
 
+void test_same_key_cannot_change_peer_or_rx_context() {
+  ExpectedReplyLeases leases{};
+  ReplyLeaseToken held{};
+  CHECK_OK(leases.acquire(binding(kPeerA, 1, 1, 7), 1500, 0, held));
+  ReplyLeaseToken refused{};
+  CHECK_CODE(leases.acquire(binding(kPeerB, 1, 1, 7), 1500, 0, refused),
+             StatusCode::Conflict);
+  CHECK_CODE(leases.acquire(binding(kPeerA, 1, 1, 8), 1500, 0, refused),
+             StatusCode::Conflict);
+  CHECK(leases.live_entry_count() == 1);
+  CHECK(leases.live_use_count() == 1);
+  ReplyBinding owner{};
+  CHECK_OK(leases.use_binding(held, owner));
+  CHECK(owner == binding(kPeerA, 1, 1, 7));
+  CHECK(leases.check_invariants());
+  CHECK_OK(leases.release(held));
+}
+
 void test_stale_tokens_never_touch_the_new_owner() {
   ExpectedReplyLeases leases{};
   ReplyLeaseToken first{};
@@ -203,15 +220,15 @@ void test_deadline_clamped_to_now_plus_ttl() {
   ReplyLeaseToken token{};
   // A far-future request is clamped to now + 1500 ms, never extended.
   CHECK_OK(leases.acquire(binding(kPeerA, 1, 1), 5000, 100, token));
-  CHECK_OK(leases.validate(token, 100));
-  CHECK_OK(leases.validate(token, 1599));
-  CHECK_CODE(leases.validate(token, 1600), StatusCode::Expired);  // now >= deadline
-  CHECK_CODE(leases.validate(token, 1601), StatusCode::Expired);
   // A nearer request keeps its own deadline.
   ReplyLeaseToken tight{};
   CHECK_OK(leases.acquire(binding(kPeerB, 2, 1), 900, 100, tight));
+  CHECK_OK(leases.validate(token, 100));
   CHECK_OK(leases.validate(tight, 899));
   CHECK_CODE(leases.validate(tight, 900), StatusCode::Expired);
+  CHECK_OK(leases.validate(token, 1599));
+  CHECK_CODE(leases.validate(token, 1600), StatusCode::Expired);  // now >= deadline
+  CHECK_CODE(leases.validate(token, 1601), StatusCode::Expired);
   CHECK_OK(leases.release(token));
   CHECK_OK(leases.release(tight));
 }
@@ -238,6 +255,8 @@ void test_rejects_unusable_time_and_bindings() {
              StatusCode::InvalidArgument);
   CHECK_CODE(leases.acquire(binding(kPeerA, 1, 0), 1500, 0, token),
              StatusCode::InvalidArgument);
+  CHECK_CODE(leases.acquire(binding(kPeerA, 1, 1, 0), 1500, 0, token),
+             StatusCode::InvalidArgument);
   CHECK(leases.live_use_count() == 0);
 }
 
@@ -256,6 +275,17 @@ void test_clock_regression_stops_admission() {
   CHECK_OK(leases.validate(token, 1000));
   CHECK_OK(leases.release(token));
   CHECK(leases.check_invariants());
+}
+
+void test_validated_clock_cannot_regress_on_new_admission() {
+  ExpectedReplyLeases leases{};
+  ReplyLeaseToken first{}, second{};
+  CHECK_OK(leases.acquire(binding(kPeerA, 1, 1), 1500, 0, first));
+  CHECK_OK(leases.validate(first, 1000));
+  CHECK_CODE(leases.acquire(binding(kPeerB, 2, 1), 1500, 999, second),
+             StatusCode::TimeUncertain);
+  CHECK(leases.live_use_count() == 1);
+  CHECK_OK(leases.release(first));
 }
 
 // --- Table: binding invalidation (Q117-04) --------------------------------------
@@ -335,10 +365,8 @@ void test_driver_release_gate_conjunction() {
 
 // --- FakeOwner: reference radio Owner (binding directory + FakeDriver) ----------
 //
-// The production ESP-NOW runtime must mirror this policy when it adopts the
-// port (deferred: no ESP-IDF toolchain in this environment). The FakeDriver
-// fails sends to unregistered MACs, so a test that drops a registration too
-// early fails loudly instead of passing on a permissive stub.
+// The FakeDriver fails sends to unregistered MACs, so dropping a registration
+// while a reply is owed is observable in the test.
 
 struct FakeMac {
   std::array<std::uint8_t, 6> bytes{};
@@ -1007,7 +1035,7 @@ void test_rx_metadata_v2_carries_binding_id() {
   static_assert(sizeof(routeloom::RadioRxMetadataV2) <= 48, "bounded RX metadata");
 }
 
-// --- C ABI: the versioned reply-peer surface (publish-only in PR-B) ---------------
+// --- C ABI: the versioned reply-peer surface -------------------------------------
 
 void test_c_reply_peer_surface() {
   rl_reply_peer_vtable_t vtable{};
@@ -1042,11 +1070,13 @@ int main() {
   test_three_bindings_shared_per_key();
   test_eight_uses_then_refused();
   test_keys_split_by_id_and_generation();
+  test_same_key_cannot_change_peer_or_rx_context();
   test_stale_tokens_never_touch_the_new_owner();
   test_use_serials_never_wrap();
   test_deadline_clamped_to_now_plus_ttl();
   test_rejects_unusable_time_and_bindings();
   test_clock_regression_stops_admission();
+  test_validated_clock_cannot_regress_on_new_admission();
   test_invalidate_binding_retires_uses_keeps_slot_until_released();
   test_invalidate_all_and_empty_entries_recycled();
   test_driver_release_gate_conjunction();

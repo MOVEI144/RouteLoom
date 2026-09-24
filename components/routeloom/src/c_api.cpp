@@ -127,7 +127,7 @@ struct BridgeGuard {
 };
 
 // C++ ReplyPeerPort over a C reply-peer vtable (issue #117). A missing C
-// function reports Unsupported — the PR-B default for an unimplemented port.
+// function reports Unsupported.
 class CReplyPeerBridge final : public ReplyPeerPort {
  public:
   CReplyPeerBridge() noexcept = default;

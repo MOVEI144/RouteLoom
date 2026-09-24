@@ -22,6 +22,16 @@
 
 namespace routeloom {
 
+// Physical submission tokens never repeat within one node lifetime. Zero is
+// the exhausted sentinel after the last nonzero token is issued.
+constexpr bool mint_physical_token(std::uint64_t& next,
+                                   std::uint64_t& out) noexcept {
+  if (next == 0) return false;
+  out = next;
+  ++next;
+  return true;
+}
+
 struct NodeConfig {
   NetworkId network{0};
   NodeId node{kInvalidNodeId};
@@ -712,9 +722,8 @@ class MeshNode {
   // Install/clear the end-protected Diagnostic (48) terminal sink — the
   // surface remote TelemetrySnapshot/Reject bodies arrive on (02 §4.2).
   void set_diagnostic_sink(DiagnosticSink* sink) noexcept { diagnostic_sink_ = sink; }
-  // Install/clear the Owner's ExpectedReply lease port (issue #117, PR-B
-  // declaration only: stored, never called yet — admission enforcement
-  // arrives with PR-C). Nullptr disables.
+  // Install/clear the Owner's ExpectedReply lease port. Nullptr means the
+  // Owner cannot reserve a protected reply binding.
   void set_reply_peer_port(ReplyPeerPort* port) noexcept { reply_peer_port_ = port; }
   ReplyPeerPort* reply_peer_port() const noexcept { return reply_peer_port_; }
   // Issue an end-protected TelemetryQuery toward `observer` over the routed
@@ -1454,6 +1463,9 @@ class MeshNode {
     static constexpr std::size_t capacity() noexcept { return kTxQueueCapacity; }
     std::size_t free_slots() const noexcept { return capacity() - used_; }
     std::size_t control_depth() const noexcept { return control_.count; }
+    bool control_slot_available() const noexcept {
+      return control_.count < kControlLaneCapacity;
+    }
     std::size_t flows_active() const noexcept { return flows_.size(); }
     std::uint32_t occupancy_percent() const noexcept {
       return static_cast<std::uint32_t>(used_ * 100 / capacity());

@@ -270,6 +270,11 @@ bool drop_data_frames(const SimNetwork::Pending& p) {
          s.type == FrameType::Data;
 }
 
+bool hold_data_frames(const NodeId from, const NodeId to, const ByteView frame) {
+  return from == 1 && to == 2 && frame.size > 4 &&
+         frame.data[4] == static_cast<std::uint8_t>(FrameType::Data);
+}
+
 // Drive a transit admission to post-acceptance failure (Evidence): the
 // forward toward `downstream` (a real, linked, never-polled node) is dropped
 // on the air twice, the attempt budget exhausts, and the retained evidence
@@ -447,6 +452,7 @@ void test_eviction_order() {
   // eviction while itself staying Live.
   std::uint64_t prev_res = stats.evicted_resolved;
   std::uint64_t prev_ev = stats.evicted_evidence;
+  h.net.block_send = hold_data_frames;
   for (std::uint64_t i = 0; i < 4; ++i) {
     const NodeId p = 140 + static_cast<NodeId>(i);
     inject(h, 1, p, craft_transit(h.cipher, p, 1, 700 + i, 2, 41 + i));
@@ -461,6 +467,7 @@ void test_eviction_order() {
     CHECK(stats.evicted_evidence == prev_ev + 1);    // Evidence next
     prev_ev = stats.evicted_evidence;
   }
+  h.step(1);  // clear the required ACK lane before probing all-Live overflow
   // All evictable records gone: pool = 48 Terminal + 16 Live. Honest refusal
   // — Live and Terminal records are never eviction victims.
   const NodeId p_last = 160;
@@ -949,15 +956,17 @@ void test_expired_reclaim_beats_eviction() {
 
   // Advance past the Resolved expiry (+5500) but inside the terminal slack
   // (+30500) and the live records' expiry (+13000): nine records are
-  // dead-but-resident. NB: no poll — the probes' own allocation-time sweep
-  // must do the reclaim.
+  // dead-but-resident. The first eight probes reclaim on admission; the
+  // ninth expires when the required ACK lane is drained.
   h.now += 5600;
+  h.net.block_send = hold_data_frames;
   for (std::uint64_t i = 0; i < 9; ++i) {
     const NodeId p = 140 + static_cast<NodeId>(i);
     inject(h, 1, p, craft_transit(h.cipher, p, 1, 700 + i, 2, 51 + i));
-    CHECK(r->dedup_stats().expired == i + 1);  // one lazy reclaim per probe
+    CHECK(r->dedup_stats().expired == i + 1);
     CHECK(r->dedup_stats().evicted_resolved == 0);
     CHECK(r->dedup_stats().evicted_evidence == 0);
+    if (i == 7) h.step(1);  // the ninth expired record also sweeps here
   }
   // Pool = (kCap-17) Terminal + 8 parked Live + 9 Live probes: the next probe
   // honestly refuses — nothing safe to reclaim or evict remains.

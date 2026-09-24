@@ -55,7 +55,8 @@ Status ExpectedReplyLeases::acquire(const ReplyBinding captured,
     return Status::error(StatusCode::TimeUncertain, "clock regressed");
   }
   if (captured.peer == kInvalidNodeId || captured.id == kInvalidBindingId ||
-      captured.generation == BindingGeneration{0}) {
+      captured.generation == BindingGeneration{0} ||
+      captured.rx_context_id == 0) {
     return Status::error(StatusCode::InvalidArgument, "zero identity field");
   }
   if (deadline <= now) {
@@ -73,6 +74,9 @@ Status ExpectedReplyLeases::acquire(const ReplyBinding captured,
   Entry* entry = find_entry(captured.id, captured.generation);
   if (entry != nullptr && entry->retired) {
     return Status::error(StatusCode::Conflict, "binding retired");
+  }
+  if (entry != nullptr && entry->binding != captured) {
+    return Status::error(StatusCode::Conflict, "binding identity changed");
   }
   std::size_t entry_index = entries_.size();
   if (entry != nullptr) {
@@ -182,6 +186,7 @@ Status ExpectedReplyLeases::validate(const ReplyLeaseToken token,
   if (now < last_now_) {
     return Status::error(StatusCode::TimeUncertain, "clock regressed");
   }
+  last_now_ = now;
   const Use* use = resolve(token);
   if (use == nullptr) return Status::error(StatusCode::NotFound, "stale token");
   if (use->entry >= entries_.size()) {
