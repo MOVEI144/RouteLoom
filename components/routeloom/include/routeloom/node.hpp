@@ -166,6 +166,23 @@ struct GroupStats {
   std::uint64_t state_refusals{0};    // no tree slot: subtree reported missing
 };
 
+// Read-only views of the receive-side group state (tests/diagnostics):
+// the per-source dedup window + ordering cursor, and one ordered message
+// held behind a gap (group-delivery.md §4, §5.1).
+struct GroupStreamSnapshot {
+  NodeId source{kInvalidNodeId};
+  std::uint32_t session{0};
+  std::uint32_t max_seq{0};   // highest stream number seen (0 = none)
+  std::uint64_t seen{0};      // bit i: stream number max_seq - i seen
+  std::uint32_t next_seq{0};  // in-order delivery cursor (0 = unset)
+};
+struct GroupHoldSnapshot {
+  GroupMessageInfo info{};
+  MonotonicMs release_at_ms{0};
+  std::uint8_t size{0};
+  std::array<std::uint8_t, kGroupPayloadMax> payload{};
+};
+
 struct RadioRxMetadata {
   std::int8_t rssi_dbm{0};
 };
@@ -762,6 +779,22 @@ class MeshNode {
   const SessionStats& session_stats() const noexcept { return session_stats_; }
   // Group lane occupancy (tests/diagnostics): relay/receiver trees in use.
   std::size_t group_trees_in_use() const noexcept { return group_trees_.size(); }
+  // Receive-side stream/hold snapshots (tests/diagnostics), pool order:
+  // the per-source dedup/ordering state and the ordered messages held
+  // behind a gap, contents included.
+  template <typename Fn>
+  void for_each_group_stream(Fn fn) const noexcept {
+    group_streams_.for_each([&](const GroupStream& stream) {
+      fn(GroupStreamSnapshot{stream.source, stream.session, stream.max_seq, stream.seen,
+                             stream.next_seq});
+    });
+  }
+  template <typename Fn>
+  void for_each_group_hold(Fn fn) const noexcept {
+    group_holds_.for_each([&](const GroupHold& hold) {
+      fn(GroupHoldSnapshot{hold.info, hold.release_at_ms, hold.size, hold.payload});
+    });
+  }
 
   const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
