@@ -1,6 +1,6 @@
 # 03 — 鍵階層・Wire v2 epochとの対応・SecurityProviderの変更
 
-用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。機器GKの保存・GroupEnd/Member scopeのportable部品は `sdkv1_group_keys` / `sdkv1_group_security` に実装したが、mesh Ownerとの結線・Host配布は別PRであり本番出荷認定ではない。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
+用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。機器GKの保存・GroupEnd/Member scopeのportable部品は `sdkv1_group_keys` / `sdkv1_group_security` に実装し、`AuthorityClient` にOwner所有のGK状態を渡すと検証済みUpdate/Activateの保存読戻し後にだけdurable ACKを返す。mesh Ownerとの実結線・Host配布は別PRであり本番出荷認定ではない。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
 
 ## 1. 鍵の木
 

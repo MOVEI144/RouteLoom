@@ -1,6 +1,7 @@
 // Authority channel, device side (routeloom/sdkv1_authority.hpp, G-SEC P5 PR1).
 
 #include "routeloom/sdkv1_authority.hpp"
+#include "routeloom/sdkv1_group_keys.hpp"
 
 #include <cstring>
 
@@ -504,8 +505,9 @@ bool AuthorityReplayWindow::accept(const std::uint64_t counter) noexcept {
 
 AuthorityClient::AuthorityClient(const AeadGcm& aead, AuthorityPort& port,
                                  AuthorityObserver& observer,
-                                 rlres1::Environment& rlres1_env) noexcept
-    : aead_(aead), port_(port), observer_(observer), env_(rlres1_env) {}
+                                 rlres1::Environment& rlres1_env,
+                                 GroupKeyState* group) noexcept
+    : aead_(aead), port_(port), observer_(observer), env_(rlres1_env), group_(group) {}
 
 Status AuthorityClient::advance(const AuthorityInput& in, const MonotonicMs now) noexcept {
   if (in_call_) {
@@ -603,6 +605,19 @@ Status AuthorityClient::on_start(const AuthorityStart& start, const MonotonicMs 
   if (dams_zero) {
     return Status::error(StatusCode::InvalidArgument, "AUTHORITY_START_NO_DAMS");
   }
+  if (group_ != nullptr) {
+    if (!group_->ready()) return Status::error(StatusCode::RecoveryRequired, "AUTHORITY_GROUP_BLOCKED");
+    const SiteRecord& site = group_->store_.site();
+    ScopeDigest cert_hash{};
+    sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, cert_hash);
+    const bool bound = site.state == SiteState::Member && site.network == start.network &&
+        site.site_id == start.site_id && site.assignment_generation == start.generation &&
+        site.dams == start.dams && group_->boot() == start.boot &&
+        start.gk_current == site.gk_epoch_current && start.gk_next == site.gk_epoch_next &&
+        cert_hash == start.member_cert_hash;
+    secure_clear(cert_hash);
+    if (!bound) return Status::error(StatusCode::Conflict, "AUTHORITY_SITE_BINDING");
+  }
   if (started_) {
     engine_.clear_all();
     engine_ready_ = false;
@@ -686,7 +701,16 @@ Status AuthorityClient::on_rx(const AuthorityRxCarrier& rx, const MonotonicMs no
     ++rx_rejected_;
     return Status::success();
   }
-  // Ready.
+  // Ready. A replaced assignment or DAMS invalidates the whole context,
+  // including replies already in flight from the former authority session.
+  if (!site_bound()) {
+    to_dormant();
+    AuthorityEvent event{};
+    event.kind = AuthorityEvent::Kind::ChannelLost;
+    event.reason = "SITE_CHANGED";
+    observer_.on_event(event);
+    return Status::error(StatusCode::Conflict, "AUTHORITY_SITE_CHANGED");
+  }
   if (rx.kind != AuthorityCarrierKind::Envelope) {
     ++rx_rejected_;  // stray handshake bytes and Wakes change nothing
     return Status::success();
@@ -705,6 +729,10 @@ Status AuthorityClient::on_tx_result(const AuthorityTxResult& tx) noexcept {
 Status AuthorityClient::on_tick(const MonotonicMs now) noexcept {
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "AUTHORITY_NOT_STARTED");
+  }
+  if (!site_bound()) {
+    to_dormant();
+    return Status::error(StatusCode::Conflict, "AUTHORITY_SITE_CHANGED");
   }
   switch (state_) {
     case AuthoritySnapshot::State::Dormant:
@@ -777,6 +805,10 @@ Status AuthorityClient::on_tick(const MonotonicMs now) noexcept {
 Status AuthorityClient::on_pull(const AuthorityPullRequest& pull, const MonotonicMs now) noexcept {
   if (!started_) {
     return Status::error(StatusCode::InvalidState, "AUTHORITY_NOT_STARTED");
+  }
+  if (!site_bound()) {
+    to_dormant();
+    return Status::error(StatusCode::Conflict, "AUTHORITY_SITE_CHANGED");
   }
   if (state_ == AuthoritySnapshot::State::Dormant) {
     // Armed: re-open the channel first, then pull on the new Ready.
@@ -872,6 +904,8 @@ void AuthorityClient::wipe_channel_keys() noexcept {
   ack_pending_ = false;
   secure_clear(ack_gk_id_);
   ack_g_ = 0;
+  ack_result_ = UpdateResult::Unsupported;
+  ack_state_ = StoredState::None;
   join_confirm_sent_ = false;
   join_confirmed_ = false;
 }
@@ -956,6 +990,78 @@ Status AuthorityClient::do_seal(const keys::AuthorityEnvelopeType type, const By
   return Status::success();
 }
 
+bool AuthorityClient::site_bound() const noexcept {
+  if (group_ == nullptr) return true;  // PR1 fake-carrier mode
+  // A failed GK twin write blocks group traffic, but the already established
+  // DAMS may still report StorageFailure if the assignment remains known.
+  if (!group_->store_.has_site() || group_->store_.quarantined()) return false;
+  const SiteRecord& site = group_->store_.site();
+  return site.state == SiteState::Member && site.network == local_.network &&
+         site.site_id == local_.site_id && site.assignment_generation == local_.generation &&
+         site.dams == local_.dams;
+}
+
+StoredState AuthorityClient::stored_state(const std::uint32_t g) const noexcept {
+  if (group_ == nullptr || !group_->ready()) return StoredState::None;
+  const SiteRecord& site = group_->store_.site();
+  if (site.gk_epoch_current == g) return StoredState::Active;
+  if (site.gk_epoch_next == g) return StoredState::Staged;
+  return StoredState::None;
+}
+
+UpdateResult AuthorityClient::apply_update(const GroupKeyUpdate& msg,
+                                           const MonotonicMs now) noexcept {
+  if (group_ == nullptr) return UpdateResult::Unsupported;
+  GroupKeyState::Input input{};
+  input.op = GroupKeyState::Op::Stage;
+  input.epoch = msg.g;
+  input.key = msg.gk;
+  input.generation = msg.head.generation;
+  input.overlap_s = msg.overlap_s;
+  const Status result = group_->advance(input, now);
+  secure_clear(input.key);
+  if (result) {
+    local_.gk_current = group_->current();
+    local_.gk_next = group_->store_.site().gk_epoch_next;
+    return UpdateResult::Durable;
+  }
+  if (result.code == StatusCode::Conflict) return UpdateResult::Conflict;
+  if (result.code == StatusCode::Busy) return UpdateResult::Busy;
+  return UpdateResult::StorageFailure;
+}
+
+UpdateResult AuthorityClient::apply_activate(const GroupKeyActivate& msg,
+                                             const MonotonicMs now) noexcept {
+  if (group_ == nullptr) return UpdateResult::Unsupported;
+  if (!group_->ready()) return UpdateResult::StorageFailure;
+  const SiteRecord& site = group_->store_.site();
+  const keys::Secret* key = nullptr;
+  if (msg.g == site.gk_epoch_next) key = &site.gk_next;
+  else if (msg.g == site.gk_epoch_current && site.gk_epoch_next == 0) key = &site.gk_current;
+  if (key == nullptr) return UpdateResult::Conflict;
+  GkId actual{};
+  authority_gk_id(site.network, msg.g, *key, actual);
+  std::uint8_t mismatch = 0;
+  for (std::size_t i = 0; i < actual.size(); ++i) mismatch |= actual[i] ^ msg.gk_id[i];
+  secure_clear(actual);
+  if (mismatch != 0) return UpdateResult::Conflict;
+  GroupKeyState::Input input{};
+  input.op = GroupKeyState::Op::Activate;
+  input.epoch = msg.g;
+  input.generation = msg.head.generation;
+  input.boot = group_->boot();
+  input.overlap_s = msg.overlap_s;
+  const Status result = group_->advance(input, now);
+  if (result) {
+    local_.gk_current = group_->current();
+    local_.gk_next = group_->store_.site().gk_epoch_next;
+    return UpdateResult::Durable;
+  }
+  if (result.code == StatusCode::Conflict) return UpdateResult::Conflict;
+  if (result.code == StatusCode::Busy) return UpdateResult::Busy;
+  return UpdateResult::StorageFailure;
+}
+
 Status AuthorityClient::stage_pending_ack(const MonotonicMs now) noexcept {
   if (!ack_pending_) return Status::success();
   if (tx_size_ != 0) return Status::error(StatusCode::Busy, "AUTHORITY_TX_BUSY");
@@ -969,10 +1075,10 @@ Status AuthorityClient::stage_pending_ack(const MonotonicMs now) noexcept {
   ack.head.request_id = next_request_id_++;
   ack.g = ack_g_;
   ack.gk_id = ack_gk_id_;
-  // No store is attached in PR1, so nothing was applied: report unsupported
-  // honestly. PR2 replaces this with the durable FSM's real result.
-  ack.result = UpdateResult::Unsupported;
-  ack.stored_state = StoredState::None;
+  // Only a verified store readback yields Durable; the port's queued result
+  // is transport evidence, not an application ACK.
+  ack.result = ack_result_;
+  ack.stored_state = ack_state_;
   std::array<std::uint8_t, kGroupKeyAckSize> encoded{};
   std::size_t encoded_size = 0;
   if (!encode_group_key_ack(ack, MutableByteView{encoded.data(), encoded.size()},
@@ -985,6 +1091,8 @@ Status AuthorityClient::stage_pending_ack(const MonotonicMs now) noexcept {
   ack_pending_ = false;
   secure_clear(ack_gk_id_);
   ack_g_ = 0;
+  ack_result_ = UpdateResult::Unsupported;
+  ack_state_ = StoredState::None;
   return Status::success();
 }
 
@@ -1026,8 +1134,8 @@ Status AuthorityClient::send_pull(const PullReason reason, const MonotonicMs now
   msg.head.op = 1;
   msg.head.generation = local_.generation;
   msg.head.request_id = next_request_id_++;
-  msg.current = local_.gk_current;
-  msg.next = local_.gk_next;
+  msg.current = group_ != nullptr ? group_->current() : local_.gk_current;
+  msg.next = group_ != nullptr ? group_->store_.site().gk_epoch_next : local_.gk_next;
   msg.reason = reason;
   std::array<std::uint8_t, kGroupKeyPullSize> encoded{};
   std::size_t encoded_size = 0;
@@ -1121,7 +1229,9 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
       }
       GkId gk_id{};
       authority_gk_id(local_.network, msg.g, msg.gk, gk_id);
-      secure_clear(msg.gk);  // PR1 keeps no key: name it, then wipe it
+      ack_result_ = apply_update(msg, now);
+      ack_state_ = ack_result_ == UpdateResult::Durable ? stored_state(msg.g) : StoredState::None;
+      secure_clear(msg.gk);
       ack_type_ = keys::AuthorityEnvelopeType::GroupKeyUpdate;
       ack_g_ = msg.g;
       ack_gk_id_ = gk_id;
@@ -1148,6 +1258,8 @@ void AuthorityClient::on_envelope_ready(const ByteView bytes, const MonotonicMs 
         fail();
         return;
       }
+      ack_result_ = apply_activate(msg, now);
+      ack_state_ = ack_result_ == UpdateResult::Durable ? stored_state(msg.g) : StoredState::None;
       ack_type_ = keys::AuthorityEnvelopeType::GroupKeyActivate;
       ack_g_ = msg.g;
       ack_gk_id_ = msg.gk_id;  // name the key we could not apply
@@ -1214,6 +1326,8 @@ void AuthorityClient::wipe() noexcept {
   pull_pending_ = false;
   ack_pending_ = false;
   ack_g_ = 0;
+  ack_result_ = UpdateResult::Unsupported;
+  ack_state_ = StoredState::None;
   secure_clear(ack_gk_id_);
   last_activity_ = 0;
   last_wake_ms_ = 0;

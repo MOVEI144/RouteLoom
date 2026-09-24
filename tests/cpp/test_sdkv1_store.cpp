@@ -766,7 +766,7 @@ void test_revocation_accept() {
         std::memcmp(loaded.bytes.data(), next_set.bytes.data(), next_set.size) == 0);
   RevocationStore reboot(storage);
   CHECK_OK(reboot.initialize());
-  CHECK(reboot.has_set() && reboot.rs_epoch() == 16);
+  CHECK(reboot.has_set() && reboot.rs_epoch() == 17);
   CHECK_OK(reboot.clear());
   CHECK(!reboot.has_set());
   CHECK(reboot.load_object(loaded).code == StatusCode::NotFound);

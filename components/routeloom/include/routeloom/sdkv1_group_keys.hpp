@@ -41,6 +41,7 @@ class GroupKeyState final {
  private:
   friend class GkMemberScopeProvider;
   friend class GroupSecurityProvider;
+  friend class AuthorityClient;
   Status derive(std::uint32_t epoch, ScopeDigest& prk) const noexcept;
   SiteStore& store_;
   keys::Secret previous_{};

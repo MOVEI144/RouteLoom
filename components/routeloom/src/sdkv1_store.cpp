@@ -721,7 +721,6 @@ Status RevocationStore::accept(const ByteView object, const P256PublicKey& sak_p
     if (candidate.network == set_.network && !revocation_covers(set_, candidate)) {
       return Status::error(StatusCode::Conflict, "revocation entry omitted or weakened");
     }
-    }
   }
   return store(object, false, candidate);
 }
