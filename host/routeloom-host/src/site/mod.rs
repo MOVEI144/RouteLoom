@@ -121,6 +121,30 @@ pub const DECISIONS_CAP: usize = 1024;
 /// Operations kept for `operations.get` (oldest evicted, but never the
 /// live rotation's — design §6.1 keeps 1024).
 pub const OPERATIONS_CAP: usize = 1024;
+
+fn evictable_operation(
+    operations: &BTreeMap<u64, Operation>,
+    devices: &BTreeMap<u64, DeviceRow>,
+    active_epoch: u32,
+    live_rotation: Option<u64>,
+) -> Option<u64> {
+    operations.iter().find_map(|(&id, op)| {
+        if Some(id) == live_rotation {
+            return None;
+        }
+        let terminal = match op.kind.as_str() {
+            "revoke" => op.distribution.as_ref().is_some_and(|dist| {
+                dist.state == revocation::DistState::Converged
+                    && (op.gk_end == "superseded" || active_epoch >= op.gk_to)
+            }),
+            "rotate" => !op.gk_end.is_empty(),
+            _ => devices
+                .get(&op.node)
+                .is_some_and(|row| row.generation != op.generation || !row.member || row.confirmed),
+        };
+        terminal.then_some(id)
+    })
+}
 /// AuthorityBusy retry when the request table is full or the store failed.
 pub const BUSY_RETRY_S: u32 = 30;
 /// Slack under the pending retry: a device retrying this early is not
@@ -634,6 +658,9 @@ impl SiteAuthority {
                 }
             }
         }
+        if operations.len() > OPERATIONS_CAP {
+            return Err("site store operation cap exceeded".into());
+        }
         let rs_epoch = meta_u32(&snapshot, "rs_epoch")?.unwrap_or(0);
         let rrs_entries = match snapshot.rrs.iter().max_by_key(|(e, _)| *e) {
             Some((epoch, object)) => {
@@ -820,6 +847,17 @@ impl SiteAuthority {
                                 None => {
                                     if next_op_id == u64::MAX {
                                         return Err("operation id exhausted".into());
+                                    }
+                                    if operations.len() >= OPERATIONS_CAP {
+                                        let id = evictable_operation(
+                                            &operations,
+                                            &devices,
+                                            keys.active_epoch,
+                                            None,
+                                        )
+                                        .ok_or("site store has no terminal operation slot for staged key recovery")?;
+                                        init.docs.push((DocKind::Operation, h16(id), None));
+                                        operations.remove(&id);
                                     }
                                     let op = Operation {
                                         id: next_op_id,
@@ -1772,23 +1810,12 @@ impl SiteAuthority {
     /// Retain every operation whose distribution or rotation still needs
     /// evidence; the in-flight rotation is never evicted.
     fn evictable_op(&self) -> Option<u64> {
-        let live = self.gks.rotation().map(|r| r.row.operation_id);
-        self.operations.iter().find_map(|(&id, op)| {
-            if Some(id) == live {
-                return None;
-            }
-            let terminal = match op.kind.as_str() {
-                "revoke" => op.distribution.as_ref().is_some_and(|dist| {
-                    dist.state == revocation::DistState::Converged
-                        && (op.gk_end == "superseded" || self.gks.active_epoch() >= op.gk_to)
-                }),
-                "rotate" => !op.gk_end.is_empty(),
-                _ => self.devices.get(&op.node).is_some_and(|row| {
-                    row.generation != op.generation || !row.member || row.confirmed
-                }),
-            };
-            terminal.then_some(id)
-        })
+        evictable_operation(
+            &self.operations,
+            &self.devices,
+            self.gks.active_epoch(),
+            self.gks.rotation().map(|r| r.row.operation_id),
+        )
     }
 
     fn operation_doc(&self, batch: &mut Batch, op: &Operation) -> Result<Option<u64>, SiteError> {

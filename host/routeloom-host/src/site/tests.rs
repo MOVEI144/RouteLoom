@@ -3014,6 +3014,61 @@ fn gk_migrated_staged_key_rebuilds_its_rotation() {
     let _ = std::fs::remove_dir_all(db.parent().unwrap());
 }
 
+#[test]
+fn gk_migrated_staged_key_keeps_operation_cap() {
+    let mut store = member_rows(0, 1);
+    let docs = (1..=OPERATIONS_CAP as u64)
+        .map(|id| {
+            let op = Operation {
+                id,
+                kind: "rotate".into(),
+                node: 0,
+                generation: 0,
+                member_cert_serial: 0,
+                rs_epoch: 0,
+                gk_from: 1,
+                gk_to: 1,
+                created_ms: T0,
+                gk_cause: "manual".into(),
+                gk_end: "converged".into(),
+                distribution: None,
+            };
+            (store::DocKind::Operation, h16(id), Some(op.doc()))
+        })
+        .collect();
+    store
+        .commit(&Batch {
+            group_keys: vec![store::GroupKeyRow {
+                epoch: 2,
+                key: [0x22; 32],
+                state: "staged".into(),
+                created_ms: T0 + 1_000,
+            }],
+            meta: vec![(group_keys::META_HIGH_WATER, 2_u32.to_be_bytes().to_vec())],
+            docs,
+            ..Batch::default()
+        })
+        .unwrap();
+    let mut auth = SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(store),
+        T0,
+    )
+    .unwrap();
+    assert_eq!(auth.operations.len(), OPERATIONS_CAP);
+    assert_eq!(
+        auth.gks.rotation().unwrap().row.operation_id,
+        OPERATIONS_CAP as u64 + 1
+    );
+    assert!(!auth.operations.contains_key(&1));
+    let persisted = auth.store.load().unwrap();
+    assert_eq!(persisted.docs.len(), OPERATIONS_CAP);
+    assert!(!persisted
+        .docs
+        .contains_key(&(store::DocKind::Operation, h16(1))));
+}
+
 /// G-SEC P5 PR3 (§6.1): the store never holds more than the active and
 /// staged secrets, across staging, supersede and activation.
 #[test]
