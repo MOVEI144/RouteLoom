@@ -286,8 +286,8 @@ class Joiner final {
   void emit(JoinEventKind kind) noexcept;
   bool emit_action(const JoinAction& action) noexcept;
   // Ends the radio/session leg of an attempt; maps the outcome onto the
-  // candidate record (unless `record` is null) and returns to Select.
-  void finish_attempt(JoinCandidate* record, JoinAttemptOutcome outcome,
+  // table's live attempt (when one is in flight) and returns to Select.
+  void finish_attempt(JoinAttemptOutcome outcome,
                       std::uint32_t retry_after_s, MonotonicMs now) noexcept;
   void teardown_attempt() noexcept;
   void clear_mailbox() noexcept;
@@ -340,6 +340,7 @@ class Joiner final {
   MacAddress attempt_proxy_{};
   std::uint8_t attempt_hops_{kZtHopsUnknown};
   JoinCandidate* attempt_record_{nullptr};
+  JoinAttempt attempt_{};
   ZtOfferView refresh_offer_{};
   bool refresh_offer_valid_{false};
   std::int16_t refresh_rssi_{0};

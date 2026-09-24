@@ -106,9 +106,9 @@ bool Joiner::clock_ok(const MonotonicMs now) noexcept {
   }
   // Regression: a new clock domain. Park the attempt, keep every hold (the
   // tables never see this `now`), and latch until stop() reopens.
-  if (attempt_record_ != nullptr) {
-    candidates_.apply_outcome(*attempt_record_, JoinAttemptOutcome::Pending, 0, last_now_,
-                              entropy_);
+  if (attempt_.active) {
+    candidates_.apply_outcome(attempt_, JoinAttemptOutcome::Pending, 0, last_now_, entropy_);
+    attempt_ = JoinAttempt{};
     attempt_record_ = nullptr;
   }
   teardown_attempt();
@@ -204,6 +204,7 @@ void Joiner::teardown_attempt() noexcept {
   decided_valid_ = false;
   decided_ = JoinDecided{};
   attempt_record_ = nullptr;
+  attempt_ = JoinAttempt{};
   attempt_key_ = JoinCandidateKey{};
   attempt_proxy_ = MacAddress{};
   attempt_hops_ = kZtHopsUnknown;
@@ -384,8 +385,8 @@ Status Joiner::stop(const MonotonicMs now) noexcept {
   }
   last_now_ = now;
   // Quietly unbind the selected record: stopping is not an outcome.
-  if (attempt_record_ != nullptr) {
-    candidates_.apply_outcome(*attempt_record_, JoinAttemptOutcome::Pending, 0, now, entropy_);
+  if (attempt_.active) {
+    candidates_.apply_outcome(attempt_, JoinAttemptOutcome::Pending, 0, now, entropy_);
   }
   teardown_attempt();
   clear_mailbox();
@@ -696,8 +697,8 @@ void Joiner::recovery_required(const JoinRecoveryReason reason) noexcept {
   set_state(JoinState::RecoveryRequired);
 }
 
-void Joiner::finish_attempt(JoinCandidate* record, const JoinAttemptOutcome outcome,
-                            const std::uint32_t retry_after_s, const MonotonicMs now) noexcept {
+void Joiner::finish_attempt(const JoinAttemptOutcome outcome, const std::uint32_t retry_after_s,
+                            const MonotonicMs now) noexcept {
   switch (outcome) {
     case JoinAttemptOutcome::AllowVerified:
       sat_inc(counters_.allows);
@@ -735,13 +736,13 @@ void Joiner::finish_attempt(JoinCandidate* record, const JoinAttemptOutcome outc
   event_.key = attempt_key_;
   event_.outcome = outcome;
   event_.authenticated = authenticated;
-  if (record != nullptr) {
-    candidates_.apply_outcome(*record, outcome, retry_after_s, now, entropy_);
+  if (attempt_.active) {
+    candidates_.apply_outcome(attempt_, outcome, retry_after_s, now, entropy_);
     // The unauthenticated proxy hint only steers path selection after a
     // failure — never a verdict, never storage (§8).
     if (outcome == JoinAttemptOutcome::Failed && hint_valid_ &&
-        hint_status_ != RelayStatusCode::Queued) {
-      candidates_.suppress_proxy(*record, attempt_proxy_, hint_retry_ms_, now);
+        hint_status_ != RelayStatusCode::Queued && attempt_record_ != nullptr) {
+      candidates_.suppress_proxy(*attempt_record_, attempt_proxy_, hint_retry_ms_, now);
     }
   }
   teardown_attempt();
@@ -915,7 +916,7 @@ void Joiner::tune_failed(const MonotonicMs now) noexcept {
   if (tune_is_refresh_) {
     // The selected proxy's channel never came up: a path failure on this
     // record, like a refresh window with no answer.
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return;
   }
   // Skip every remaining window on the dead channel, then tune on or select.
@@ -965,9 +966,13 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
   // stronger foreign site cannot wedge the selection), then either binds
   // the known site or backs off to rescan.
   for (std::size_t pass = 0; pass <= kJoinCandidateMax; ++pass) {
+    // Selection and attempt start are one atomic table operation: each
+    // begun attempt the recovery join skips is ended (Failed parks the
+    // foreign record under a short hold) before the next begin.
+    JoinAttempt attempt{};
     JoinSelect selected{};
-    if (!candidates_.select(now, selected) || selected.candidate == nullptr ||
-        selected.proxy == nullptr) {
+    const Status begun = candidates_.select_and_begin(now, attempt, selected);
+    if (!begun.ok() || selected.candidate == nullptr) {
       candidates_.note_scan_cycle_failed();
       // The deadline is set even when entropy fails (the floor holds then).
       (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
@@ -976,26 +981,19 @@ Status Joiner::drive_select(const MonotonicMs now) noexcept {
       return Status::success();
     }
     if (recovery_only_ && !recovery_match(selected.candidate->key)) {
-      JoinCandidate* foreign = const_cast<JoinCandidate*>(selected.candidate);
-      candidates_.apply_outcome(*foreign, JoinAttemptOutcome::Failed, 0, now, entropy_);
+      candidates_.apply_outcome(attempt, JoinAttemptOutcome::Failed, 0, now, entropy_);
       continue;
     }
     if (recovery_only_ && selected.candidate->site_id_authenticated &&
         selected.candidate->site_id != recovery_site_id_) {
-      JoinCandidate* foreign = const_cast<JoinCandidate*>(selected.candidate);
-      candidates_.apply_outcome(*foreign, JoinAttemptOutcome::Failed, 0, now, entropy_);
+      candidates_.apply_outcome(attempt, JoinAttemptOutcome::Failed, 0, now, entropy_);
       continue;
     }
-    if (!candidates_.mark_selected(selected, now)) {
-      (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);
-      backoff_wake_ = candidates_.next_eligible_ms(now);
-      set_state(JoinState::Backoff);
-      return Status::success();
-    }
+    attempt_ = attempt;
     attempt_record_ = const_cast<JoinCandidate*>(selected.candidate);
     attempt_key_ = selected.candidate->key;
-    attempt_proxy_ = selected.proxy->mac;
-    attempt_hops_ = selected.proxy->authority_hops;
+    attempt_proxy_ = selected.proxy.mac;
+    attempt_hops_ = selected.proxy.authority_hops;
     begin_refresh();
     return Status::success();
   }
@@ -1056,7 +1054,7 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
     body.preferred_site_hint = candidates_.preferred_hint(attempt_key_.org_hint);
     candidates_.avoid_hints(attempt_key_.org_hint, now, body.avoid_site_hints);
     if (!link_.discover(body, now)) {
-      finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+      finish_attempt(JoinAttemptOutcome::Failed, 0, now);
       return Status::success();
     }
     window_org_ = attempt_key_.org_hint;
@@ -1069,11 +1067,11 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   if (!refresh_offer_valid_) {
     // The selected proxy never answered: a path failure; the alternate
     // proxy (if any) wins the next selection.
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (!link_.connect(refresh_offer_)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   JoinHandshakeConfig hs{};
@@ -1088,7 +1086,7 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
   if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   sat_inc(counters_.attempts);
@@ -1105,11 +1103,11 @@ Status Joiner::drive_send_m1(const MonotonicMs now) noexcept {
   }
   std::size_t length = 0;
   if (!handshake_.compose_m1(MutableByteView{msg_.data(), msg_.size()}, length)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (!link_.send(JoinAuthPhase::EdhocMessage, 1, ByteView{msg_.data(), length}, now)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   clear_mailbox();
@@ -1125,18 +1123,18 @@ Status Joiner::drive_send_m1(const MonotonicMs now) noexcept {
 Status Joiner::drive_wait_m2(const MonotonicMs now) noexcept {
   if (now >= t2_deadline_ || now >= overall_deadline_) {
     sat_inc(counters_.timeouts);
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (link_failed_) {
     sat_inc(counters_.link_failures);
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (!mailbox_valid_) return Status::success();
   if (mailbox_phase_ != JoinAuthPhase::EdhocMessage || mailbox_step_ == 5) {
     clear_mailbox();  // an EDHOC error answers the attempt: transient, counted
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (mailbox_step_ != 2) {
@@ -1149,22 +1147,22 @@ Status Joiner::drive_wait_m2(const MonotonicMs now) noexcept {
   if (!handshake_.process_m2(message)) {
     // AuthenticationFailed (bad SiteCert/responder signature -> 24 h on
     // the key, no m3) or Failed (decode/transport -> transient).
-    finish_attempt(attempt_record_, handshake_.outcome(), 0, now);
+    finish_attempt(handshake_.outcome(), 0, now);
     return Status::success();
   }
   sat_inc(counters_.m2_ok);
   JoinCandidate* bound = nullptr;
-  if (!candidates_.bind_authenticated(attempt_key_, handshake_.offer().site_id, now, bound) ||
+  if (!candidates_.bind_authenticated(attempt_, handshake_.offer().site_id, now, bound) ||
       bound == nullptr) {
     // Held elsewhere or no room for the split: park this record briefly
     // and let another candidate go first.
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (recovery_only_ && handshake_.offer().site_id != recovery_site_id_) {
     // A hint collision resolved against us: this record is not the known
     // site, so no m3 goes out here.
-    finish_attempt(bound, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   attempt_record_ = bound;
@@ -1175,16 +1173,16 @@ Status Joiner::drive_wait_m2(const MonotonicMs now) noexcept {
 Status Joiner::drive_send_m3(const MonotonicMs now) noexcept {
   if (now >= overall_deadline_) {
     sat_inc(counters_.timeouts);
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   std::size_t length = 0;
   if (!handshake_.compose_m3(MutableByteView{msg_.data(), msg_.size()}, length)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (!link_.send(JoinAuthPhase::EdhocMessage, 3, ByteView{msg_.data(), length}, now)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   clear_mailbox();
@@ -1201,18 +1199,18 @@ Status Joiner::drive_send_m3(const MonotonicMs now) noexcept {
 Status Joiner::drive_wait_m4(const MonotonicMs now) noexcept {
   if (now >= t4_deadline_ || now >= overall_deadline_) {
     sat_inc(counters_.timeouts);
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (link_failed_) {
     sat_inc(counters_.link_failures);
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (!mailbox_valid_) return Status::success();
   if (mailbox_phase_ != JoinAuthPhase::EdhocMessage || mailbox_step_ == 5) {
     clear_mailbox();
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   if (mailbox_step_ != 4) {
@@ -1223,7 +1221,7 @@ Status Joiner::drive_wait_m4(const MonotonicMs now) noexcept {
   const ByteView message{msg_.data(), msg_len_};
   clear_mailbox();
   if (!handshake_.process_m4(message)) {
-    finish_attempt(attempt_record_, handshake_.outcome(), 0, now);
+    finish_attempt(handshake_.outcome(), 0, now);
     return Status::success();
   }
   sat_inc(counters_.m4_ok);
@@ -1239,7 +1237,7 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
   input.prior_rs_epoch_floor = evidence_valid_ ? retained_floor_ : 0;
   JoinDecided decided{};
   if (!handshake_.decide(input, decided)) {
-    finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+    finish_attempt(JoinAttemptOutcome::Failed, 0, now);
     return Status::success();
   }
   decided_ = decided;
@@ -1250,14 +1248,14 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
       return Status::success();
     case JoinAttemptOutcome::PendingAssignment:
     case JoinAttemptOutcome::AuthorityBusy:
-      finish_attempt(attempt_record_, decided.outcome, decided.retry_after_s, now);
+      finish_attempt(decided.outcome, decided.retry_after_s, now);
       return Status::success();
     case JoinAttemptOutcome::DenyNotHere:
     case JoinAttemptOutcome::DenyBlocked:
     case JoinAttemptOutcome::MalformedResult:
     case JoinAttemptOutcome::RemovedDenied:
     case JoinAttemptOutcome::RemovedNoMembership:
-      finish_attempt(attempt_record_, decided.outcome, 0, now);
+      finish_attempt(decided.outcome, 0, now);
       return Status::success();
     case JoinAttemptOutcome::RemovedVerified: {
       JoinAction action{};
@@ -1270,8 +1268,8 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
       event_.outcome = decided.outcome;
       event_.authenticated = true;
       sat_inc(counters_.removals);
-      if (attempt_record_ != nullptr) {
-        candidates_.apply_outcome(*attempt_record_, decided.outcome, 0, now, entropy_);
+      if (attempt_.active) {
+        candidates_.apply_outcome(attempt_, decided.outcome, 0, now, entropy_);
       }
       teardown_attempt();
       emit(JoinEventKind::AttemptFinished);
@@ -1281,10 +1279,10 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
     case JoinAttemptOutcome::Failed:
     case JoinAttemptOutcome::AuthenticationFailed:
     case JoinAttemptOutcome::Pending:
-      finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+      finish_attempt(JoinAttemptOutcome::Failed, 0, now);
       return Status::success();
   }
-  finish_attempt(attempt_record_, JoinAttemptOutcome::Failed, 0, now);
+  finish_attempt(JoinAttemptOutcome::Failed, 0, now);
   return Status::success();
 }
 
@@ -1303,9 +1301,8 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
     // An impaired store refuses commit(): the verified Allow is the
     // explicit way out — except over unknown schemas or read errors.
     if (health.unsupported_mask != 0 || health.read_error_mask != 0) {
-      if (attempt_record_ != nullptr) {
-        candidates_.apply_outcome(*attempt_record_, JoinAttemptOutcome::AllowVerified, 0, now,
-                                  entropy_);
+      if (attempt_.active) {
+        candidates_.apply_outcome(attempt_, JoinAttemptOutcome::AllowVerified, 0, now, entropy_);
       }
       teardown_attempt();
       reconcile_enter(true, now);
@@ -1345,7 +1342,7 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   commit_expect_.boot_witness = prepared.boot_witness;
   commit_expect_.rs_epoch_to_fetch = decided_.rs_epoch_to_fetch;
   commit_expect_.dams = prepared.dams;
-  candidates_.apply_outcome(*attempt_record_, JoinAttemptOutcome::AllowVerified, 0, now, entropy_);
+  candidates_.apply_outcome(attempt_, JoinAttemptOutcome::AllowVerified, 0, now, entropy_);
   teardown_attempt();
   if (!stored) {
     // A commit error is NOT "flash unchanged": the sealed record may have
@@ -1467,12 +1464,9 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
 Status Joiner::drive_backoff(const MonotonicMs now) noexcept {
   if (action_pending_) return Status::success();
   backoff_wake_ = candidates_.next_eligible_ms(now);
-  JoinSelect selected{};
-  if (candidates_.select(now, selected) && selected.candidate != nullptr &&
-      selected.proxy != nullptr) {
-    set_state(JoinState::Select);  // another candidate is eligible: skip the wait
-    return Status::success();
-  }
+  // No eligibility peek exists: selection and attempt start are atomic, so
+  // Backoff always honors its deadline (a jittered ~1-2 s at k=0, cut by
+  // the nearest pending eligibility) before the rescan.
   if (now < backoff_deadline_) return Status::success();
   start_scan();
   return Status::success();
