@@ -148,29 +148,41 @@ MeshNode::GroupTree* MeshNode::allocate_group_tree(const MonotonicMs now_ms) noe
   return group_trees_.allocate();
 }
 
-MeshNode::GroupStream* MeshNode::group_stream(const NodeId source, const std::uint32_t session,
-                                              bool& stale, const MonotonicMs now_ms) noexcept {
-  (void)now_ms;
+// Read-only resolution of the stream a (source, session) frame maps to:
+// the source's existing stream (its session current or newer), nullptr for
+// a source with no stream yet or — with `stale` set — a session from the
+// source's previous boot. Nothing is switched, drained or allocated here:
+// a candidate commits only after the frame authenticates (issue #106).
+MeshNode::GroupStream* MeshNode::group_stream_candidate(const NodeId source,
+                                                      const std::uint32_t session,
+                                                      bool& stale) noexcept {
   stale = false;
   GroupStream* stream =
       group_streams_.find([&](const GroupStream& value) { return value.source == source; });
-  if (stream != nullptr) {
-    if (session == stream->session) return stream;
-    if (session < stream->session) {
-      stale = true;  // a frame from the source's previous boot
-      return nullptr;
-    }
-    // The source rebooted: its stream restarts. Messages still held from the
-    // old session are handed over now, in order — they can never be
-    // completed by the old session any more.
-    group_skip_to(*stream, stream->max_seq + 1U);
-    stream->session = session;
-    stream->max_seq = 0;
-    stream->seen = 0;
-    stream->next_seq = 0;
-    return stream;
+  if (stream != nullptr && session < stream->session) {
+    stale = true;
+    return nullptr;
   }
-  stream = group_streams_.allocate();
+  return stream;
+}
+
+// Commits the candidate after Group end authentication. A newer session
+// means the source rebooted: its stream restarts, and messages still held
+// from the old session are handed over now, in order — they can never be
+// completed by the old session any more. A new source takes a fresh slot.
+MeshNode::GroupStream* MeshNode::group_stream_commit(GroupStream* candidate,
+                                                   const NodeId source,
+                                                   const std::uint32_t session) noexcept {
+  if (candidate != nullptr) {
+    if (session <= candidate->session) return candidate;  // same or older: nothing to commit
+    group_skip_to(*candidate, candidate->max_seq + 1U);
+    candidate->session = session;
+    candidate->max_seq = 0;
+    candidate->seen = 0;
+    candidate->next_seq = 0;
+    return candidate;
+  }
+  GroupStream* stream = group_streams_.allocate();
   if (stream == nullptr) return nullptr;
   stream->source = source;
   stream->session = session;
@@ -713,9 +725,14 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
   const MessageKey key{header.origin, header.message};
   const std::uint8_t round = static_cast<std::uint8_t>(header.delivery_round & kGroupRoundMask);
   const bool refresh = (header.delivery_round & kGroupRoundRefresh) != 0;
+  // Resolve the stream candidate read-only: a newer session or a new
+  // source commits — session switch, held-message drain, dedup window —
+  // only after the Group end layer and the payload authenticate (issue
+  // #106). A stale session is the source's previous boot and is refused
+  // outright; a new source is refused when no stream slot is free.
   bool stale = false;
-  GroupStream* stream = group_stream(header.origin, header.message.session, stale, now_ms);
-  if (stream == nullptr) {
+  GroupStream* stream = group_stream_candidate(header.origin, header.message.session, stale);
+  if (stale || (stream == nullptr && group_streams_.size() >= group_streams_.capacity())) {
     saturating_inc(group_stats_.rejected);
     observer_.on_diagnostic(stale ? "GROUP_STALE_SESSION" : "GROUP_STREAM_CAPACITY", peer,
                             &header.message);
@@ -757,7 +774,12 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
     return;
   }
 
-  if (stream->max_seq != 0 && seq + kGroupSeenWindow <= stream->max_seq) {
+  // A candidate session — a new source, or the source's newer boot — has
+  // no committed dedup state to test (the commit below resets it), so its
+  // copy always opens. For the committed session, anything the duplicate
+  // window can no longer tell apart is dropped, never re-delivered.
+  const bool new_session = stream == nullptr || header.message.session != stream->session;
+  if (!new_session && stream->max_seq != 0 && seq + kGroupSeenWindow <= stream->max_seq) {
     // Older than the duplicate window: whether it was delivered can no
     // longer be told — dropped, never re-delivered.
     saturating_inc(group_stats_.rejected);
@@ -767,7 +789,7 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
   const GroupId group = group_of_address(header.destination);
   const bool member = group_member(group);
   Priority priority = Priority::Normal;
-  if (group_seen(*stream, seq)) {
+  if (!new_session && group_seen(*stream, seq)) {
     // Received before, tree state since reclaimed: rebuild it without
     // opening or delivering again (exactly once).
     saturating_inc(group_stats_.duplicates);
@@ -789,6 +811,14 @@ void MeshNode::handle_group_data(const wire::LinkOpenedFrame& frame, const NodeI
       return;
     }
     priority = head.priority;
+    // Authenticated and well-formed: the candidate commits now — a newer
+    // session restarts the stream, a new source takes its slot.
+    stream = group_stream_commit(stream, header.origin, header.message.session);
+    if (stream == nullptr) {  // defensive: capacity was checked above
+      saturating_inc(group_stats_.rejected);
+      observer_.on_diagnostic("GROUP_STREAM_CAPACITY", peer, &header.message);
+      return;
+    }
     saturating_inc(group_stats_.received);
     group_mark_seen(*stream, seq);
     const std::uint32_t remaining =
