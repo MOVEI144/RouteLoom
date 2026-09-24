@@ -4,5 +4,5 @@
   "expect": "error",
   "format": "routeloom-sdkv1-revocation-golden-v1",
   "name": "kind6_manifest_kind5",
-  "note": "kind 5 is the reserved P5 envelope, never a manifest here"
+  "note": "kind 5 carries trust manifests, not revocation sets"
 }

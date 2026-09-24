@@ -27,6 +27,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/peer_state.cpp
   src/power.cpp
   src/replay.cpp
+  src/reply_peer_leases.cpp
   src/rlcw1.cpp
   src/rlres1.cpp
   src/route_scale.cpp
@@ -49,6 +50,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_revocation.cpp
   src/sdkv1_lifecycle_store.cpp
   src/sdkv1_store.cpp
+  src/security_floor.cpp
   src/sdkv1_group_keys.cpp
   src/sdkv1_group_security.cpp
   src/session_bank.cpp

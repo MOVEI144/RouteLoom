@@ -1477,6 +1477,31 @@ void test_retry_backoff_draw_clamped_to_cap() {
   }
 }
 
+// Checked handle issuance (issue #117, Q117-13): binding/candidate ids and
+// binding generations are never 0 and never wrap — exhaustion refuses the
+// binding instead of reusing an old handle.
+void test_handle_issuance_never_zero_never_wraps() {
+  std::uint32_t next = 1;
+  BindingId id{};
+  CHECK(mint_binding_id(next, id) && id == BindingId{1} && next == 2);
+  next = UINT32_MAX;
+  CHECK(mint_binding_id(next, id) && id == BindingId{UINT32_MAX} && next == 0);
+  CHECK(!mint_binding_id(next, id));
+  next = 0;
+  CHECK(!mint_binding_id(next, id));
+  CandidateId candidate{};
+  next = 7;
+  CHECK(mint_candidate_id(next, candidate) && candidate == CandidateId{7} && next == 8);
+  next = 0;
+  CHECK(!mint_candidate_id(next, candidate));
+  BindingGeneration generation{0};
+  CHECK(bump_binding_generation(generation) && generation == BindingGeneration{1});
+  generation = BindingGeneration{UINT32_MAX - 1};
+  CHECK(bump_binding_generation(generation) && generation == BindingGeneration{UINT32_MAX});
+  CHECK(!bump_binding_generation(generation));
+  CHECK(generation == BindingGeneration{UINT32_MAX});
+}
+
 }  // namespace
 
 int main() {
@@ -1509,6 +1534,7 @@ int main() {
   test_cold_start_jitter();
   test_retry_backoff_draw_double_cap();
   test_retry_backoff_draw_clamped_to_cap();
+  test_handle_issuance_never_zero_never_wraps();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d discovery checks failed\n", failures);

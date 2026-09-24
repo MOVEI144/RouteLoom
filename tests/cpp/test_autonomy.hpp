@@ -22,6 +22,7 @@
 #include "routeloom/owner_pump.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/types.hpp"
+#include "test_sim.hpp"
 
 namespace routeloom_test {
 
@@ -239,6 +240,11 @@ class OwnerPump {
     return queue.now_ms;
   }
 
+  // Owner lease port for RX evidence (issue #117): when set, staged RX
+  // events arrive with the port's binding snapshot for the sender (V2) —
+  // unset keeps the legacy binding-less V1 delivery, which admits nothing.
+  void set_reply_port(routeloom_test::SimReplyPort* port) { reply_port_ = port; }
+
   // One owner pass at `now_ms`: drain the staged slot first (firmware
   // order — the reserved completion resolves the node's outstanding job),
   // then every event the driver posted up to now (a real queue only holds
@@ -254,6 +260,13 @@ class OwnerPump {
       events_.pop_front();
       if (event.kind == Event::Kind::TxResult) {
         node.on_radio_tx_result(event.token, event.success, now_ms);
+      } else if (reply_port_ != nullptr) {
+        node.on_radio_receive(
+            event.peer,
+            routeloom::ByteView{event.frame.data(), event.frame.size()},
+            routeloom_test::sim_rx_metadata(reply_port_, event.peer,
+                                             event.rssi_dbm),
+            now_ms);
       } else {
         node.on_radio_receive(
             event.peer,
@@ -268,6 +281,7 @@ class OwnerPump {
   std::deque<Event> events_;
   Event staged_{};
   bool staged_valid_{false};
+  routeloom_test::SimReplyPort* reply_port_{nullptr};
 };
 
 // Deterministic entropy for tests (splitmix64). Can be scripted to fail so

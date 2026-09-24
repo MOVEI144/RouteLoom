@@ -245,6 +245,43 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data,
     }
   }
   {
+    ConfigTrustRequest out{};
+    if (decode_config_trust(inner, out)) {
+      touch(out.object);
+      written = 0;
+      if (encode_config_trust(out, MutableByteView{enc.data(), enc.size()},
+                              written)) {
+        ConfigTrustRequest again{};
+        if (!decode_config_trust(ByteView{enc.data(), written}, again))
+          std::abort();
+      }
+    }
+  }
+  {
+    TrustStatusRequest out{};
+    if (decode_trust_status(inner, out)) {
+      written = 0;
+      if (encode_trust_status(out, MutableByteView{enc.data(), enc.size()},
+                              written)) {
+        TrustStatusRequest again{};
+        if (!decode_trust_status(ByteView{enc.data(), written}, again))
+          std::abort();
+      }
+    }
+  }
+  {
+    RecoveryInfoRequest out{};
+    if (decode_recovery_info(inner, out)) {
+      written = 0;
+      if (encode_recovery_info(out, MutableByteView{enc.data(), enc.size()},
+                               written)) {
+        RecoveryInfoRequest again{};
+        if (!decode_recovery_info(ByteView{enc.data(), written}, again))
+          std::abort();
+      }
+    }
+  }
+  {
     ConfigReply out{};
     if (decode_config_reply(inner, sub, out)) {
       touch(out.body);

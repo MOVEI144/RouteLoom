@@ -326,6 +326,84 @@ constexpr std::size_t kControlStatusSize = 72;
 Status control_status_encode(const ControlStatus& payload, EncodedServicePayload& out) noexcept;
 Status control_status_decode(ByteView encoded, ControlStatus& out) noexcept;
 
+// TrustStatusQuery5 (20B): ver/sub5 | reserved u16=0 | nonce 16B. Device
+// global (trust has no namespace); the reply echoes the nonce.
+struct TrustStatusQuery {
+  std::array<std::uint8_t, 16> nonce{};
+};
+constexpr std::size_t kTrustStatusQuerySize = 20;
+Status trust_status_query_encode(const TrustStatusQuery& payload,
+                                 EncodedServicePayload& out) noexcept;
+Status trust_status_query_decode(ByteView encoded, TrustStatusQuery& out) noexcept;
+
+// TrustStatus6 (72B): ver/sub6 | reserved u16=0 | nonce_echo 16B |
+// store_epoch u32 | min_authority_generation u32 | network u64 |
+// image_fingerprint 32B | anchor_count u8 | key_count u8 |
+// revocation_count u8 | flags u8. Public fields only — never keys, never
+// grant bytes (04-provisioning-lifecycle §4.3.4). Receipt evidence is the
+// epoch, the generation floor, the fingerprint and the impairment flags;
+// an ObjectAck alone never proves fleet convergence.
+constexpr std::uint8_t kTrustStatusFlagHasActive = 0x01;
+constexpr std::uint8_t kTrustStatusFlagUncertain = 0x02;
+constexpr std::uint8_t kTrustStatusFlagQuarantined = 0x04;
+constexpr std::uint8_t kTrustStatusFlagMask = 0x07;
+struct TrustStatus {
+  std::array<std::uint8_t, 16> nonce_echo{};
+  std::uint32_t store_epoch{0};
+  std::uint32_t min_authority_generation{0};
+  NetworkId network{0};
+  std::array<std::uint8_t, 32> image_fingerprint{};
+  std::uint8_t anchor_count{0};
+  std::uint8_t key_count{0};
+  std::uint8_t revocation_count{0};
+  std::uint8_t flags{0};
+};
+constexpr std::size_t kTrustStatusSize = 72;
+Status trust_status_encode(const TrustStatus& payload,
+                           EncodedServicePayload& out) noexcept;
+Status trust_status_decode(ByteView encoded, TrustStatus& out) noexcept;
+
+// RecoveryInfoQuery7 (20B): ver/sub7 | ns u16 | nonce 16B. Selects the
+// journal; the reply echoes the nonce.
+struct RecoveryInfoQuery {
+  std::uint16_t config_namespace{0};
+  std::array<std::uint8_t, 16> nonce{};
+};
+constexpr std::size_t kRecoveryInfoQuerySize = 20;
+Status recovery_info_query_encode(const RecoveryInfoQuery& payload,
+                                  EncodedServicePayload& out) noexcept;
+Status recovery_info_query_decode(ByteView encoded, RecoveryInfoQuery& out) noexcept;
+
+// RecoveryInfo8 (80B): ver/sub8 | ns u16 | schema u16 | nonce_echo 16B |
+// network u64 | store floor J u32 | decision floor R u64 | flags u8 |
+// recovery_version u8 | profile_bits u32 | snapshot_hash 32B. Read-only:
+// J/R report the CURRENT floors — a recovery must carry one past each
+// (the floor's exact next), the hash names the known survivor baseline
+// (or explicit unknown), and the version/profile name what the target
+// accepts. Advisory only — the target re-checks the floor at accept
+// time, and nothing here authorizes skipping the signature.
+constexpr std::uint8_t kRecoveryInfoFlagImpaired = 0x01;
+constexpr std::uint8_t kRecoveryInfoFlagUncertain = 0x02;
+constexpr std::uint8_t kRecoveryInfoFlagQuarantined = 0x04;
+constexpr std::uint8_t kRecoveryInfoFlagSurvivorKnown = 0x08;
+constexpr std::uint8_t kRecoveryInfoFlagMask = 0x0F;
+struct RecoveryInfo {
+  std::uint16_t config_namespace{0};
+  std::uint16_t schema{0};
+  std::array<std::uint8_t, 16> nonce_echo{};
+  NetworkId network{0};
+  std::uint32_t store_floor{0};
+  std::uint64_t decision_floor{0};
+  std::uint8_t flags{0};
+  std::uint8_t recovery_version{0};
+  std::uint32_t profile_bits{0};
+  std::array<std::uint8_t, 32> snapshot_hash{};
+};
+constexpr std::size_t kRecoveryInfoSize = 80;
+Status recovery_info_encode(const RecoveryInfo& payload,
+                            EncodedServicePayload& out) noexcept;
+Status recovery_info_decode(ByteView encoded, RecoveryInfo& out) noexcept;
+
 // --- RCC1 canonical config command (§5.4) ------------------------------------
 // 176B fixed header + sorted TLV patch (max 512B) = max 688B. Carried as the
 // COSE_Sign1 payload inside manifest kind 3 objects — this codec covers the
@@ -335,6 +413,7 @@ constexpr std::uint32_t kRcc1Magic = 0x52434331;  // "RCC1"
 constexpr std::uint8_t kRcc1Version = 1;
 constexpr std::size_t kRcc1HeaderSize = 176;
 constexpr std::size_t kConfigPatchMax = 512;
+constexpr std::size_t kConfigSnapshotMax = 512;
 constexpr std::size_t kConfigFieldCountMax = 16;
 constexpr std::size_t kConfigFieldValueMax = 96;
 constexpr std::size_t kRcc1MaxTotal = kRcc1HeaderSize + kConfigPatchMax;  // 688
@@ -385,10 +464,68 @@ Status config_command_encode(const ConfigCommand& command,
                              EncodedConfigCommand& out) noexcept;
 Status config_command_decode(ByteView encoded, ConfigCommand& out) noexcept;
 
+// --- RCR2 canonical recovery command (04 §4.7, 06 §6.3) ----------------------
+// Fixed 112B header plus the 0–512B adopted snapshot, carried as the signed
+// payload of a kind-4 recovery object — never an RCC1 extension and never a
+// kind-3 permit. RCR2 replaces RCR1 outright: no compatibility interpretation
+// of the old magic or version exists, and generation-only authority updates
+// are root-authorized trust updates (RTM1), never recovery commands.
+//
+// Header layout (112B): magic "RCR2" 4 | version u8=2 | mode u8 |
+// namespace u16 | schema u16 | flags u16=0 | network u64 | target u64 |
+// authority u64 | authority_generation u32 (the generation the signature
+// verifies under) | authority_sequence u64 | operation_id 16B (nonzero) |
+// new_store_generation u32 (the floor's exact next) | new_revision u64
+// (the floor's exact next decision revision) | snapshot_len u16 |
+// reserved u16=0 | snapshot_hash 32B (the domain-tagged SHA-256 of the
+// adopted canonical snapshot) | snapshot snapshot_len bytes.
+//
+// AdoptKnown carries no snapshot bytes: the signed hash must equal the
+// journal's confirmed-active survivor. Reprovision carries the complete
+// snapshot the administrator approved — including the empty snapshot when
+// the schema defines all-omitted as the complete default state (a zero
+// length never skips the provider restore or its readback).
+
+constexpr std::uint32_t kRcr2Magic = 0x52435232;  // "RCR2"
+constexpr std::uint8_t kRcr2Version = 2;
+constexpr std::size_t kRcr2HeaderSize = 112;
+constexpr std::size_t kRcr2MaxTotal = kRcr2HeaderSize + kConfigSnapshotMax;  // 624
+
+// Recovery modes (04 §4.7): adopt the proven survivor, or adopt the carried
+// snapshot as an explicitly re-provisioned baseline under a new revision.
+constexpr std::uint8_t kRcr2ModeAdoptKnown = 0;
+constexpr std::uint8_t kRcr2ModeReprovision = 1;
+
+struct ConfigRecoveryIntent {
+  std::uint8_t mode{kRcr2ModeAdoptKnown};
+  std::uint16_t config_namespace{0};
+  std::uint16_t schema{0};
+  NetworkId network{0};
+  NodeId target{kInvalidNodeId};
+  NodeId authority{kInvalidNodeId};
+  // The generation the command's signature verifies under — the journal's
+  // currently accepted generation, NOT the generation being installed.
+  std::uint32_t authority_generation{0};
+  std::uint64_t authority_sequence{0};
+  std::array<std::uint8_t, 16> operation_id{};
+  std::uint32_t new_store_generation{0};  // the attested exact-next generation
+  std::uint64_t new_revision{0};          // the attested exact-next revision
+  std::array<std::uint8_t, 32> snapshot_hash{};
+  // The adopted baseline bytes (Reprovision) — empty for AdoptKnown. The
+  // codec validates the strict TLV shape; the schema rules are the
+  // journal's check against the registered validator.
+  ByteBuffer<kConfigSnapshotMax> baseline{};
+};
+
+using EncodedRecoveryIntent = ByteBuffer<kRcr2MaxTotal>;
+
+Status config_recovery_encode(const ConfigRecoveryIntent& intent,
+                              EncodedRecoveryIntent& out) noexcept;
+Status config_recovery_decode(ByteView encoded, ConfigRecoveryIntent& out) noexcept;
+
 // Snapshot-hash input (§5.4): domain_snapshot || namespace u16 | schema u16 |
 // complete sorted TLV snapshot bytes. Layout helper only — SHA-256 lives in
 // the crypto phase.
-constexpr std::size_t kConfigSnapshotMax = 512;
 constexpr std::size_t kConfigSnapshotInputMax =
     sizeof(kConfigSnapshotDomain) + 2 + 2 + kConfigSnapshotMax;  // 547
 Status config_snapshot_hash_input(std::uint16_t config_namespace, std::uint16_t schema,

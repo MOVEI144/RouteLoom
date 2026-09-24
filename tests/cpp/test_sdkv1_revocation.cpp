@@ -441,6 +441,15 @@ void test_boot_self_revoked_and_blocked() {
   NodeFixture no_trace;
   CHECK_OK(no_trace.dispatch(LifecycleInput::Boot(false), 0));
   CHECK(no_trace.snap().phase == LifecyclePhase::StorageBlocked);
+  NodeFixture blocked;
+  CHECK(blocked.provision(3, 14));
+  CHECK_OK(blocked.dispatch(LifecycleInput::Boot(false), 1));
+  CHECK(blocked.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(!blocked.dispatch(LifecycleInput::MemberReady(blocked.site.commit_seq(), 0), 2));
+  CHECK(!blocked.dispatch(LifecycleInput::Recovery(true), 3));
+  CHECK(blocked.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK_OK(blocked.dispatch(LifecycleInput::Boot(true), 4));
+  CHECK(blocked.snap().phase == LifecyclePhase::Active);
 
   // Wrong resume geometry (gateway profile, node storage): blocked.
   NodeFixture wrong_geo(kNode, kCapRrsGossipV1 | kCapMembershipLifecycleV1);
@@ -1882,7 +1891,8 @@ void test_revocation_wire_vectors() {
       CHECK(!rrs_notice_accepted_decode(vector_view(encoded), out));
     } else if (codec == "rrs_kind6_manifest") {
       autonomy::ControlObjectPayload out{};
-      CHECK(!autonomy::control_object_decode(vector_view(encoded), out));
+      const Status decoded = autonomy::control_object_decode(vector_view(encoded), out);
+      CHECK(!decoded || out.kind != autonomy::ControlObjectKind::RevocationSet);
     } else if (codec == "rrs_kind6_chunk") {
       autonomy::ObjectChunkPayload out{};
       CHECK(!autonomy::object_chunk_decode(vector_view(encoded), out));
@@ -2457,6 +2467,34 @@ void test_signed_prepare_stages_without_switching() {
     CHECK(receipt.head.cutover_id == 7 && receipt.head.revision == 1);
     CHECK(receipt.rs_epoch == 15 && receipt.digest == proof_hash);
   }
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(false), 256));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(!f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 257));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 258));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  CHECK_OK(f.lifecycle.take_action(action));
+  CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
+  CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 259));
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  CHECK_OK(f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 260));
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  CHECK_OK(f.dispatch(LifecycleInput::LinkFailure(kPeer, 3, 0), 261));
+  CHECK(f.snap().phase == LifecyclePhase::Recovering);
+  CHECK_OK(f.dispatch(LifecycleInput::Recovery(true), 262));
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  ByteBuffer<kRemovalNoticePayloadSize> removal_payload{};
+  CHECK_OK(removal_notice_payload_encode(
+      RemovalNotice{RevocationReason::Removed, kSiteId, kNode, 2, 15}, removal_payload));
+  ByteBuffer<kRemovalNoticeAadSize> removal_aad{};
+  CHECK_OK(removal_notice_aad(next, removal_aad));
+  Es256Signature removal_sig{};
+  sign_payload(sak(), removal_payload.view(), removal_aad.view(), removal_sig);
+  ByteBuffer<kRemovalNoticeObjectSize> removal{};
+  CHECK_OK(removal_notice_assemble(removal_payload.view(),
+                                    ByteView{removal_sig.data(), removal_sig.size()}, removal));
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(removal.view()), 263));
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  CHECK(f.journal.record().mode == LifecycleMode::Removing);
 }
 
 void test_switching_intent_reboots_closed() {
@@ -2519,6 +2557,38 @@ void test_removal_failure_after_intent_reboots_closed() {
   CHECK(f.identity_storage.slot(0) == id0 && f.identity_storage.slot(1) == id1);
 }
 
+void test_reassigned_member_can_be_removed_again() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const auto first = signed_removal_notice(2, 14);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(first.view()), 100));
+  for (int i = 0; i < 24; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.snap().phase == LifecyclePhase::Holdoff);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 600124));
+  CHECK(f.snap().phase == LifecyclePhase::UnassignedReady);
+
+  CHECK_OK(f.site.commit(site_for(kNode, 2, 14)));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 600125));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK_OK(f.site.commit(site_for(kNode, 3, 14)));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 600126));
+  CHECK(f.snap().phase == LifecyclePhase::BootGate);
+  const auto second = signed_removal_notice(3, 15);
+  CHECK_OK(f.dispatch(LifecycleInput::RemovalRequired(second.view()), 600127));
+  CHECK(f.snap().phase == LifecyclePhase::Removing);
+  CHECK(f.journal.record().generation == 3);
+
+  NodeFixture live{};
+  CHECK(live.provision(2, 14));
+  CHECK_OK(live.dispatch(LifecycleInput::RemovalRequired(first.view()), 100));
+  for (int i = 0; i < 24; ++i) CHECK_OK(live.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK_OK(live.dispatch(LifecycleInput::Poll(), 600124));
+  CHECK(live.snap().phase == LifecyclePhase::UnassignedReady);
+  CHECK_OK(live.site.commit(site_for(kNode, 3, 14)));
+  CHECK_OK(live.dispatch(LifecycleInput::MemberReady(live.site.commit_seq(), 0), 600125));
+  CHECK(live.snap().phase == LifecyclePhase::BootGate);
+}
+
 }  // namespace
 
 int main() {
@@ -2529,6 +2599,7 @@ int main() {
   test_removal_ack_queues_after_intent_without_delaying_erasure();
   test_removal_notice_intent();
   test_removal_failure_after_intent_reboots_closed();
+  test_reassigned_member_can_be_removed_again();
   test_removal_journal_powercuts();
   test_signed_prepare_stages_without_switching();
   test_switching_intent_reboots_closed();

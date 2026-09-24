@@ -67,6 +67,8 @@ using routeloom_test::CapturingObserver;
 using routeloom_test::FaultyTrustStorage;
 using routeloom_test::SimNetwork;
 using routeloom_test::SimRadio;
+using routeloom_test::SimReplyPort;
+using routeloom_test::sim_rx_metadata;
 using routeloom_test::SimWorld;
 using routeloom_test::TestKeyPair;
 using routeloom_test::TestSecurity;
@@ -76,6 +78,12 @@ using routeloom_test::test_keypair;
 const TestKeyPair kRoot = test_keypair(0x42);
 
 constexpr NetworkId kNet = 7;
+
+bool hold_relay_data(const NodeId from, const NodeId to, const ByteView frame) {
+  return from == 2 && to == 4 && frame.size > 4 &&
+         frame.data[4] == static_cast<std::uint8_t>(FrameType::Data);
+}
+
 const std::uint8_t kPayload[] = "fault-injection";
 ByteView payload_view() { return ByteView{kPayload, sizeof(kPayload) - 1}; }
 
@@ -277,6 +285,9 @@ wire::EncodedFrame craft_frame(TestSecurity& cipher, const wire::Header& header,
 wire::EncodedFrame craft_data(TestSecurity& cipher, NodeId prev, NodeId node,
                               NodeId origin, NodeId destination,
                               std::uint64_t seq, std::uint32_t deadline_ms) {
+  // Terminal capacity probes use a reachable immediate source. Their
+  // MessageIds, rather than synthetic origins, distinguish the records.
+  if (destination == node) origin = prev;
   return craft_frame(
       cipher,
       mk_header(FrameType::Data, origin, destination, prev, node,
@@ -286,8 +297,9 @@ wire::EncodedFrame craft_data(TestSecurity& cipher, NodeId prev, NodeId node,
 
 void inject(SimWorld& world, NodeId receiver, NodeId peer,
             const wire::EncodedFrame& frame, MonotonicMs now) {
-  world.at(receiver)->on_radio_receive(peer, frame.view(), RadioRxMetadata{-60},
-                                       now);
+  world.at(receiver)->on_radio_receive(
+      peer, frame.view(),
+      sim_rx_metadata(world.net.reply_port(receiver), peer), now);
 }
 
 // ============================================================================
@@ -575,7 +587,9 @@ void test_clock_faults_decay_windows_bounded() {
   config.message_session = 100;
   config.route_advertisement_period_ms = 30000;
   config.route_lifetime_ms = 60000;
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(100));
   CHECK_OK(node.add_neighbor(2, 1, 100));
 
@@ -624,7 +638,9 @@ void test_clock_stall_bounded_admission() {
   config.message_session = 100;
   config.route_advertisement_period_ms = 30000;
   config.route_lifetime_ms = 60000;
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(1000));
   CHECK_OK(node.add_neighbor(2, 1, 1000));
 
@@ -907,7 +923,9 @@ void test_neighbor_table_saturation() {
   config.network = kNet;
   config.node = 1;
   config.message_session = 100;
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(0));
   for (NodeId peer = 10; peer < 42; ++peer) {  // 32 neighbors
     CHECK_OK(node.add_neighbor(peer, 1, 0));
@@ -976,36 +994,47 @@ void test_dedup_terminal_reserve_and_pool_full() {
   world.run(60);
   CHECK(world.obs(2)->messages.size() == kPins);
 
-  // The reserve still admits transit (Live) traffic — without a poll the
-  // forwards stay queued and their records Live...
-  constexpr std::uint64_t kReserve = kDedupTransitReserve;
-  for (std::uint64_t i = 1; i <= kReserve; ++i) {
+  // The reserve still admits transit (Live) traffic — up to the 8 live
+  // transactions (one upstream binding shared by all 8). Driver
+  // backpressure keeps forwards queued while polls drain the ACK lane.
+  constexpr std::uint64_t kHeld = 8;
+  world.net.block_send = hold_relay_data;
+  for (std::uint64_t i = 1; i <= kHeld; ++i) {
     inject(world, 2, 3,
            craft_data(*world.security[3], 3, 2, /*origin=*/800 + i,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
+    if (i % 8 == 0) world.run(0);
   }
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kReserve);
-  // ...and the next transit (from Q: P's scheduler scope is at its per-peer
-  // job bound) finds the pool truly full: nothing evictable (all Live or
-  // Terminal), so the refusal is counted and diagnosed — the exactly-once pin
-  // is never weakened to make room.
+  CHECK(world.at(2)->dedup_stats().admitted_transit == kHeld);
+  // ...and the next transit (from Q) finds the transaction budget spent:
+  // the refusal is counted and diagnosed, and the BUSY itself is
+  // unaffordable — a uniform counted drop (issue #117, Q117-14).
+  const auto failed_before = world.at(2)->congestion_stats().busy_send_failed;
   inject(world, 2, 5,
          craft_data(*world.security[5], 5, 2, 850, 4, 50, 30000), world.now);
-  CHECK(world.at(2)->dedup_stats().refused_pool_full == 1);
-  CHECK(world.obs(2)->has_diag("DEDUP_OVERFLOW"));
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kReserve);
+  CHECK(world.obs(2)->has_diag("TRANSIT_ADMISSION_DENIED"));
+  CHECK(world.at(2)->congestion_stats().busy_send_failed == failed_before + 1);
+  CHECK(world.at(2)->dedup_stats().admitted_transit == kHeld);
 
-  // After the forwards drain and resolve, a Resolved record is the honest
-  // eviction victim — the next admission reclaims it instead of refusing.
+  // After the forwards drain and resolve, fill to a full pool with four
+  // more completed exchanges — then a Resolved record is the honest
+  // eviction victim and the next admission takes it instead of refusing.
+  world.net.block_send = nullptr;
   world.run(2000);  // forwards dispatch; hop accepts resolve them
-  CHECK(world.obs(4)->messages.size() == kReserve);  // all transit delivered
+  CHECK(world.obs(4)->messages.size() == kHeld);  // all transit delivered
+  for (std::uint64_t i = 1; i <= 4; ++i) {
+    inject(world, 2, 3,
+           craft_data(*world.security[3], 3, 2, /*origin=*/900 + i,
+                      /*dest=*/4, /*seq=*/100 + i, /*deadline_ms=*/30000),
+           world.now);
+    world.run(200);
+  }
   inject(world, 2, 3,
          craft_data(*world.security[3], 3, 2, 860, 4, 60, 30000), world.now);
   CHECK(world.at(2)->dedup_stats().evicted_resolved >= 1);
   CHECK(world.obs(2)->has_diag("DEDUP_EVICTED_RESOLVED"));
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kReserve + 1);
-  CHECK(world.at(2)->dedup_stats().refused_pool_full == 1);  // unchanged
+  CHECK(world.at(2)->dedup_stats().admitted_transit == kHeld + 5);
 }
 
 // One upstream peer may occupy at most kDedupPerUpstreamMax non-terminal
@@ -1028,12 +1057,13 @@ void test_dedup_upstream_cap() {
   constexpr std::uint64_t kUpCap = kDedupPerUpstreamMax;
   for (std::uint64_t i = 1; i <= kUpCap; ++i) {
     inject(world, 2, 3,
-           craft_data(*world.security[3], 3, 2, /*origin=*/700 + i,
+           craft_data(*world.security[3], 3, 2, /*origin=*/3,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
     world.run(120);  // dispatch + hop accept -> Resolved (still counted)
   }
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kUpCap);
+  // Each DATA also returns an END_RECEIPT through this relay.
+  CHECK(world.at(2)->dedup_stats().admitted_transit == 2 * kUpCap);
   CHECK(world.obs(4)->messages.size() == kUpCap);
 
   // Past the bound: the upstream's earliest-expiry Resolved record is
@@ -1041,15 +1071,15 @@ void test_dedup_upstream_cap() {
   // forwarded — no refusal, no BUSY.
   const std::uint64_t busy_before = world.at(2)->congestion_stats().busy_sent;
   inject(world, 2, 3,
-         craft_data(*world.security[3], 3, 2, 800, 4, 100, 30000), world.now);
+         craft_data(*world.security[3], 3, 2, 3, 4, 100, 30000), world.now);
   world.run(120);
   CHECK(world.at(2)->dedup_stats().refused_upstream_cap == 0);
-  CHECK(world.at(2)->dedup_stats().evicted_resolved == 1);
+  CHECK(world.at(2)->dedup_stats().evicted_resolved == 2);
   CHECK(world.obs(2)->has_diag("DEDUP_EVICTED_RESOLVED"));
   CHECK(world.at(2)->congestion_stats().busy_sent == busy_before);
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kUpCap + 1);
+  CHECK(world.at(2)->dedup_stats().admitted_transit == 2 * (kUpCap + 1));
   CHECK(world.obs(4)->messages.size() == kUpCap + 1);
-  CHECK(world.at(2)->dedup_resident() == kUpCap);  // the bound still holds
+  CHECK(world.at(2)->dedup_resident() == 2 * kUpCap);
 
   // A different upstream peer is unaffected — the bound is per-sender-scope.
   world.add(5);
@@ -1057,14 +1087,15 @@ void test_dedup_upstream_cap() {
   world.run(300);
   inject(world, 2, 5,
          craft_data(*world.security[5], 5, 2, 801, 4, 101, 30000), world.now);
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kUpCap + 2);
-  CHECK(world.at(2)->dedup_stats().evicted_resolved == 1);
+  CHECK(world.at(2)->dedup_stats().admitted_transit == 2 * (kUpCap + 1) + 1);
+  CHECK(world.at(2)->dedup_stats().evicted_resolved == 2);
 }
 
 // Eviction order under a full pool: an already-expired record is reclaimed
 // as a normal expiry first; only when nothing is expired does a Resolved
-// record get force-evicted; with only Live/Terminal left the refusal is
-// honest overflow.
+// record get force-evicted; with all transactions live the refusal is an
+// honest counted drop (issue #117 — pool-full-without-victim needs more
+// Live records than the 8-transaction budget allows).
 void test_dedup_eviction_expired_then_resolved() {
   SimWorld world;
   world.network_id = kNet;
@@ -1090,22 +1121,27 @@ void test_dedup_eviction_expired_then_resolved() {
   }
   CHECK(world.at(2)->dedup_stats().admitted_terminal == kPins);
 
-  // One short-deadline transit (expires ~5.1s in) plus kFree-1 long ones fill
-  // the pool without dispatching — the records stay Live.
+  // kFree-1 long-deadline Resolved records plus one short-deadline
+  // Resolved record fill the pool with zero live transactions: every
+  // exchange completes (its transaction closes) before the next inject.
   const auto from = [&](std::uint64_t i) -> NodeId { return i % 2 == 0 ? 3 : 5; };
-  inject(world, 2, 3,
-         craft_data(*world.security[3], 3, 2, 600, 4, 9001, 100), world.now);
-  for (std::uint64_t i = 2; i <= kFree; ++i) {
+  for (std::uint64_t i = 1; i <= kFree - 1; ++i) {
     inject(world, 2, from(i),
            craft_data(*world.security[from(i)], from(i), 2, 600 + i, 4,
                       9000 + i, 30000),
            world.now);
+    world.run(200);
   }
+  inject(world, 2, 3,
+         craft_data(*world.security[3], 3, 2, 600, 4, 9001, 100), world.now);
+  world.run(200);
   CHECK(world.at(2)->dedup_stats().admitted_transit == kFree);
 
   // Advance past the short record's expiry (100 + 5000 slack < 6000) while
   // the long transits (30000 + 5000) and terminals (30000 + 30000) live.
+  // No poll runs before the probe, so no sweep eats the expired record.
   world.now += 6000;
+  world.net.block_send = hold_relay_data;
   inject(world, 2, 5,
          craft_data(*world.security[5], 5, 2, 700, 4, 9100, 30000), world.now);
   // The expired record was reclaimed as a normal expiry — not a forced
@@ -1115,27 +1151,34 @@ void test_dedup_eviction_expired_then_resolved() {
   CHECK(world.at(2)->dedup_stats().evicted_resolved == 0);
   CHECK(world.at(2)->dedup_stats().admitted_transit == kFree + 1);
 
-  // Pool still full, nothing expired: only Live/Terminal records remain, so
-  // the next admission is an honest overflow.
+  // Fill the transaction budget with 7 more held Lives (each evicts a
+  // Resolved record — the pool stays full): the next admission then
+  // honestly refuses with a diagnosed, counted drop.
+  for (std::uint64_t i = 1; i <= 7; ++i) {
+    inject(world, 2, from(i),
+           craft_data(*world.security[from(i)], from(i), 2, 610 + i, 4,
+                      9200 + i, 30000),
+           world.now);
+  }
   inject(world, 2, 3,
          craft_data(*world.security[3], 3, 2, 701, 4, 9101, 30000), world.now);
-  CHECK(world.at(2)->dedup_stats().refused_pool_full == 1);
+  CHECK(world.obs(2)->has_diag("TRANSIT_ADMISSION_DENIED"));
 
   // Drain the queued forwards: hop accepts demote them to Resolved. The pool
   // is still full, and now Resolved victims exist — the next admission takes
   // one, counted and diagnosed.
+  world.net.block_send = nullptr;
   world.run(2000);
-  CHECK(world.obs(4)->messages.size() >= kFree);
+  CHECK(world.obs(4)->messages.size() == 8 + kFree);
   inject(world, 2, 3,
          craft_data(*world.security[3], 3, 2, 702, 4, 9102, 30000), world.now);
   CHECK(world.at(2)->dedup_stats().evicted_resolved >= 1);
   CHECK(world.obs(2)->has_diag("DEDUP_EVICTED_RESOLVED"));
-  CHECK(world.at(2)->dedup_stats().refused_pool_full == 1);  // still one
 }
 
-// A transit flood that outruns the scheduler: the 32-slot TX pool plus the
-// per-scope cap refuse new admissions with a counted BUSY/drop — never an
-// overwrite, never an unbounded queue — and the pool drains and re-admits.
+// A transit flood that outruns the lease budget: the 8-transaction bound
+// refuses new admissions with a counted drop — never an overwrite, never
+// an unbounded queue — and the pool drains and re-admits (issue #117).
 void test_scheduler_pool_saturation() {
   SimWorld world;
   world.network_id = kNet;
@@ -1151,24 +1194,28 @@ void test_scheduler_pool_saturation() {
   world.at(2)->set_peer_busy_capable(3, true);
   world.at(2)->set_peer_busy_capable(5, true);
 
-  // No drain between injections: forwards and their HOP_ACCEPTs pile into
-  // the 32-slot queue; the per-scope cap (12) binds at each peer first, then
-  // the pool itself refuses.
+  // Drain required ACKs in batches while DATA is held downstream. This
+  // exercises the data pool without violating the independent 8-slot
+  // control-lane admission bound.
+  world.net.block_send = hold_relay_data;
   for (std::uint64_t i = 1; i <= 40; ++i) {
     const NodeId peer = (i % 2 == 0) ? 3 : 5;
     inject(world, 2, peer,
            craft_data(*world.security[peer], peer, 2, /*origin=*/300 + i,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
+    if (i % 8 == 0) world.run(0);
   }
   CHECK(world.obs(2)->has_diag("TRANSIT_ADMISSION_DENIED"));
   const CongestionStats stats = world.at(2)->congestion_stats();
   CHECK(stats.queued <= 32);               // pool bound is absolute
   CHECK(stats.busy_sent + stats.busy_send_failed >= 1);  // honest refusal
   // Accepted work is intact: every admitted transit still has its dedup
-  // record, and dispatching the backlog delivers it.
+  // record, and dispatching the backlog delivers it. The 8-transaction
+  // budget (two upstream bindings shared) is what trips on the flood.
   const std::uint64_t admitted = world.at(2)->dedup_stats().admitted_transit;
-  CHECK(admitted >= 20 && admitted <= 32);
+  CHECK(admitted == 8);
+  world.net.block_send = nullptr;
   world.run(4000);
   CHECK(world.obs(4)->messages.size() == admitted);
   // Once drained, the same flood admission succeeds again — saturation is a
@@ -1263,7 +1310,9 @@ void test_driver_backpressure_reuses_sealed_frame() {
   config.route_generation = 1;
   config.link_epoch = 1;
   config.end_epoch = 1;  // default max_link_attempts (2): one RF-loss retry
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(0));
   CHECK_OK(node.add_neighbor(2, 1, 0));
   // Drain start-up control traffic (route advertisements) to an idle queue.

@@ -689,7 +689,8 @@ impl World {
                             let durable = durable.expect("allow persisted before its m4");
                             assert_eq!(durable.delivered_ms, Some(delivered));
                             assert_eq!(durable.dams, row.dams);
-                            // API timestamps use wall time, not this fixture's virtual time.
+                            // The API socket stamps decisions with wall time;
+                            // the peer tick runs on this fixture's virtual time.
                             let forwarded_at = now_ms();
                             assert!(
                                 delivered <= forwarded_at,

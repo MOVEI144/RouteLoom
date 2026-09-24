@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "routeloom/node.hpp"
+#include "routeloom/reply_peer_leases.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/wire.hpp"
 
@@ -65,6 +66,7 @@ inline bool sight_frame(routeloom::ByteView frame, FrameSight& sight) {
 }
 
 class SimNetwork;
+class SimReplyPort;
 class SimRadio final : public routeloom::RadioPort {
  public:
   SimRadio(SimNetwork& network, routeloom::NodeId owner) : network_(network), owner_(owner) {}
@@ -89,7 +91,23 @@ class SimNetwork {
   };
 
   void register_node(routeloom::NodeId id, routeloom::MeshNode* node) { nodes[id] = node; }
-  void unregister_node(routeloom::NodeId id) { nodes.erase(id); }
+  void unregister_node(routeloom::NodeId id) {
+    nodes.erase(id);
+    reply_ports.erase(id);
+  }
+  // The receiver's Owner port: flush() snapshots the sender's binding from it
+  // so deliveries carry the same RX evidence the real runtime captures.
+  void register_reply_port(routeloom::NodeId id, SimReplyPort* port) {
+    if (port == nullptr) {
+      reply_ports.erase(id);
+    } else {
+      reply_ports[id] = port;
+    }
+  }
+  SimReplyPort* reply_port(routeloom::NodeId id) const {
+    const auto it = reply_ports.find(id);
+    return it == reply_ports.end() ? nullptr : it->second;
+  }
   void connect(routeloom::NodeId a, routeloom::NodeId b) { links.insert(normalize(a, b)); }
   void disconnect(routeloom::NodeId a, routeloom::NodeId b) { links.erase(normalize(a, b)); }
   bool connected(routeloom::NodeId a, routeloom::NodeId b) const {
@@ -118,6 +136,10 @@ class SimNetwork {
   // the receiver never processes it — loss after the MAC ACK (RX queue
   // overflow, corruption above the MAC), which link retries cannot see.
   bool (*silent_drop)(const Pending& pending) = nullptr;
+  // Driver backpressure without a physical attempt. ACKs may drain while
+  // queued DATA remains live under its original deadline.
+  bool (*block_send)(routeloom::NodeId from, routeloom::NodeId to,
+                     routeloom::ByteView frame) = nullptr;
 
   // Long simulations (issue #59): sightings can be switched off so a
   // multi-minute 100-node run does not grow an unbounded vector; the
@@ -135,6 +157,15 @@ class SimNetwork {
   // Every TX attempt by frame type (group delivery airtime, issue #82):
   // delivered or not, each attempt costs air time.
   std::map<routeloom::FrameType, TxTally> tx_by_type;
+
+  // Owner-side component drive (issue #117, design-q116 §8.3): after the
+  // node calls above returned, take each node's pending component events
+  // (at most kComponentEventsMax per node) and hand them to the installed
+  // Service/config components as ordinary outside calls, then complete
+  // each event. Payload events past their deadline are completed without
+  // starting new component work; completions of finished jobs are always
+  // delivered. The installed components are ticked after their events.
+  void pump_components(routeloom::MonotonicMs now);
 
   // Returns the number of undelivered frames (link down, node missing, or
   // dropped by the loss hook).
@@ -154,7 +185,196 @@ class SimNetwork {
   // 10,000-frame budget. When the bound stops the drain with frames
   // still queued, flush() aborts instead of returning the partial drain
   // silently.
-  std::size_t flush(routeloom::MonotonicMs now) {
+  std::size_t flush(routeloom::MonotonicMs now);
+
+
+  std::vector<FrameSight> sights;
+
+ private:
+  static std::pair<routeloom::NodeId, routeloom::NodeId> normalize(routeloom::NodeId a,
+                                                                 routeloom::NodeId b) {
+    return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+  }
+  std::map<routeloom::NodeId, routeloom::MeshNode*> nodes;
+  std::map<routeloom::NodeId, SimReplyPort*> reply_ports;
+  std::set<std::pair<routeloom::NodeId, routeloom::NodeId>> links;
+  std::deque<Pending> queue;
+};
+
+inline routeloom::Status SimRadio::send(routeloom::NodeId peer, std::uint64_t token,
+                                        routeloom::ByteView frame) noexcept {
+  if (network_.block_send != nullptr && network_.block_send(owner_, peer, frame)) {
+    return routeloom::Status::error(routeloom::StatusCode::WouldBlock,
+                                    "simulated driver backpressure");
+  }
+  return network_.enqueue(owner_, peer, token, frame);
+}
+
+// Simulated radio Owner's ExpectedReply lease port (issue #117): a stable
+// binding directory (one minted BindingId per peer, never id 0 shared) over
+// the portable ExpectedReplyLeases table, with sends routed into the sim
+// radio. Mirrors the contract the real ESP-NOW runtime implements — mapping
+// recheck before every acquire/send, driver pin before success — so node
+// admission tests exercise the same enforcement shape host-side.
+//
+// The test world supplies each peer's actual receive context. Peer boot
+// epochs and receiver-chosen session ids can differ from the local TX epoch.
+class SimReplyPort final : public routeloom::ReplyPeerPort {
+ public:
+  SimReplyPort(routeloom::RadioPort& radio, routeloom::NodeId owner,
+               std::uint32_t rx_context) noexcept
+      : radio_(radio),
+        owner_(owner),
+        rx_context_(rx_context != 0 ? rx_context : 1) {}
+
+  void set_rx_context(routeloom::NodeId peer,
+                      std::uint32_t context) noexcept {
+    if (context == 0) return;
+    if (directory_.find(peer) == directory_.end()) (void)mapping(peer);
+    auto& live = directory_.at(peer);
+    if (live.rx_context_id != context) {
+      (void)leases_.invalidate_binding(live.id);
+      live.rx_context_id = context;
+    }
+  }
+
+  routeloom::Status acquire(routeloom::ReplyBinding captured,
+                            routeloom::MonotonicMs deadline,
+                            routeloom::MonotonicMs now,
+                            routeloom::ReplyLeaseToken& out) noexcept override {
+    const routeloom::ReplyBinding live = mapping(captured.peer);
+    if (live.peer != captured.peer || live.id != captured.id ||
+        live.generation != captured.generation ||
+        live.rx_context_id != captured.rx_context_id) {
+      return routeloom::Status::error(routeloom::StatusCode::Conflict,
+                                      "sim mapping changed");
+    }
+    pinned_.insert(captured.peer);
+    const routeloom::Status status = leases_.acquire(captured, deadline, now, out);
+    if (!status) pinned_.erase(captured.peer);
+    return status;
+  }
+  routeloom::Status release(routeloom::ReplyLeaseToken token) noexcept override {
+    routeloom::ReplyBinding bound{};
+    const bool known = leases_.use_binding(token, bound).ok();
+    const routeloom::Status status = leases_.release(token);
+    if (status && known && !leases_.holds_binding(bound.id, bound.generation)) {
+      pinned_.erase(bound.peer);
+    }
+    return status;
+  }
+  routeloom::Status validate(routeloom::ReplyLeaseToken token,
+                             routeloom::MonotonicMs now) noexcept override {
+    return leases_.validate(token, now);
+  }
+  routeloom::Status send_reply(routeloom::ReplyLeaseToken token,
+                               std::uint64_t tx_token, routeloom::ByteView frame,
+                               routeloom::MonotonicMs now) noexcept override {
+    routeloom::ReplyBinding bound{};
+    routeloom::Status status = leases_.use_binding(token, bound);
+    if (!status) return status;
+    status = leases_.validate(token, now);
+    if (!status) return status;
+    const routeloom::ReplyBinding live = mapping(bound.peer);
+    if (live.id != bound.id || live.generation != bound.generation ||
+        live.rx_context_id != bound.rx_context_id ||
+        pinned_.count(bound.peer) == 0) {
+      return routeloom::Status::error(routeloom::StatusCode::Conflict,
+                                      "sim mapping changed");
+    }
+    return radio_.send(bound.peer, tx_token, frame);
+  }
+  routeloom::Status snapshot_binding(routeloom::NodeId peer,
+                                     routeloom::ReplyBinding& out) noexcept override {
+    if (peer == routeloom::kInvalidNodeId || peer == owner_) {
+      return routeloom::Status::error(routeloom::StatusCode::InvalidArgument,
+                                      "sim snapshot identity");
+    }
+    if (stale_.count(peer) != 0) {
+      return routeloom::Status::error(routeloom::StatusCode::Conflict,
+                                      "sim peer stale");
+    }
+    out = mapping(peer);
+    return routeloom::Status::success();
+  }
+  routeloom::Status send_bound(routeloom::ReplyBinding binding,
+                               std::uint64_t tx_token,
+                               routeloom::ByteView frame) noexcept override {
+    if (stale_.count(binding.peer) != 0) {
+      return routeloom::Status::error(routeloom::StatusCode::Conflict,
+                                      "sim peer stale");
+    }
+    const routeloom::ReplyBinding live = mapping(binding.peer);
+    if (live != binding) {
+      return routeloom::Status::error(routeloom::StatusCode::Conflict,
+                                      "sim mapping changed");
+    }
+    return radio_.send(binding.peer, tx_token, frame);
+  }
+
+  // Test-only mutation: retire one peer (Stale equivalent — permanent in the
+  // sim; the firmware Owner revives with a fresh generation on rebind).
+  // Snapshots, bound sends, and new acquires for the peer refuse from here
+  // on; outstanding uses drain via release.
+  void retire_peer(routeloom::NodeId peer) noexcept {
+    stale_.insert(peer);
+    const auto it = directory_.find(peer);
+    if (it != directory_.end()) {
+      (void)leases_.invalidate_binding(it->second.id);
+      directory_.erase(it);
+    }
+    pinned_.erase(peer);
+  }
+  const routeloom::ExpectedReplyLeases& leases() const noexcept { return leases_; }
+
+ private:
+  routeloom::ReplyBinding mapping(routeloom::NodeId peer) noexcept {
+    if (stale_.count(peer) != 0) {
+      // Frozen: a retired peer never mints again — captures mismatch it.
+      return routeloom::ReplyBinding{peer, routeloom::BindingId{0},
+                                     routeloom::BindingGeneration{0}, 0};
+    }
+    const auto it = directory_.find(peer);
+    if (it != directory_.end()) return it->second;
+    routeloom::BindingId id{0};
+    (void)routeloom::mint_binding_id(next_binding_id_, id);
+    const routeloom::ReplyBinding fresh{peer, id, routeloom::BindingGeneration{1},
+                                        rx_context_};
+    directory_[peer] = fresh;
+    return fresh;
+  }
+
+  routeloom::RadioPort& radio_;
+  routeloom::NodeId owner_;
+  std::uint32_t rx_context_;
+  std::uint32_t next_binding_id_{1};
+  std::map<routeloom::NodeId, routeloom::ReplyBinding> directory_;
+  std::set<routeloom::NodeId> pinned_;
+  std::set<routeloom::NodeId> stale_;
+  routeloom::ExpectedReplyLeases leases_;
+};
+
+// V2 RX metadata carrying the receiver Owner port's binding snapshot for
+// `peer` — the RX evidence manual inject() helpers must supply now that
+// admission requires it. A null port (or snapshot failure) yields invalid
+// evidence, which admission refuses.
+inline routeloom::RadioRxMetadataV2 sim_rx_metadata(
+    SimReplyPort* port, routeloom::NodeId peer, std::int8_t rssi = -60) {
+  routeloom::RadioRxMetadataV2 meta{};
+  meta.rssi_dbm = rssi;
+  meta.rssi_valid = true;
+  meta.provenance = routeloom::ObservationProvenance::InjectedTest;
+  if (port != nullptr) {
+    routeloom::ReplyBinding binding{};
+    if (port->snapshot_binding(peer, binding).ok()) {
+      meta.binding = binding.id;
+      meta.binding_generation = binding.generation;
+    }
+  }
+  return meta;
+}
+
+inline std::size_t SimNetwork::flush(routeloom::MonotonicMs now) {
     std::size_t dropped = 0;
     constexpr std::size_t kFlushLimit = 10000;
     std::size_t processed = 0;
@@ -207,18 +427,26 @@ class SimNetwork {
           // Echo the submission token like the real runtime's Reserved lane
           // so the completion attributes to the in-flight job's §14 domain.
           obs.token = pending.token;
-          nodes.at(pending.from)->note_radio_tx(obs, now);
+          (void)nodes.at(pending.from)->note_radio_tx(obs, now);
         }
-        nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
+        (void)nodes.at(pending.from)
+            ->on_radio_tx_result(pending.token, success, now);
         woken.insert(pending.from);
         if (success && silent_drop != nullptr && silent_drop(pending)) {
           ++dropped;
           continue;
         }
         if (success) {
-          nodes.at(pending.to)->on_radio_receive(
-              pending.from, routeloom::ByteView{pending.frame.data(), pending.frame.size()},
-              routeloom::RadioRxMetadata{-60}, now);
+          // V2 delivery with the receiver's binding snapshot — the RX
+          // evidence the real runtime captures at enqueue. A receiver
+          // without a registered Owner port gets invalid evidence and
+          // refuses admission.
+          const routeloom::RadioRxMetadataV2 meta =
+              sim_rx_metadata(reply_port(pending.to), pending.from);
+          (void)nodes.at(pending.to)->on_radio_receive(
+              pending.from,
+              routeloom::ByteView{pending.frame.data(), pending.frame.size()},
+              meta, now);
         }
       }
       // The queue is drained: every sender a completion reached wakes and
@@ -237,24 +465,55 @@ class SimNetwork {
                    kFlushLimit, queue.size());
       std::abort();
     }
+    pump_components(now);
     return dropped;
   }
 
-  std::vector<FrameSight> sights;
-
- private:
-  static std::pair<routeloom::NodeId, routeloom::NodeId> normalize(routeloom::NodeId a,
-                                                                 routeloom::NodeId b) {
-    return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+inline void SimNetwork::pump_components(routeloom::MonotonicMs now) {
+  for (auto& [id, node] : nodes) {
+    for (std::size_t i = 0; i < routeloom::kComponentEventsMax; ++i) {
+      routeloom::ComponentEvent event{};
+      if (!node->take_component_event(event).ok()) break;
+      const bool payload =
+          event.target == routeloom::ComponentEventTarget::ServicePayload ||
+          event.target == routeloom::ComponentEventTarget::ConfigFrame;
+      // A payload whose transaction already expired never starts new
+      // component work; its event still completes to free the reference.
+      if (!payload || now < event.deadline_ms) {
+        switch (event.target) {
+          case routeloom::ComponentEventTarget::ServicePayload:
+            if (node->gateway_sink() != nullptr) {
+              node->gateway_sink()->on_service_payload(event.peer, event.frame,
+                                                       now);
+            }
+            break;
+          case routeloom::ComponentEventTarget::ConfigFrame:
+            if (node->config_sink() != nullptr) {
+              node->config_sink()->on_config_frame(event.peer, event.frame,
+                                                   now);
+            }
+            break;
+          case routeloom::ComponentEventTarget::ServiceJobDone:
+            if (node->gateway_sink() != nullptr) {
+              node->gateway_sink()->on_service_job_done(
+                  event.job_id, event.job_accepted, event.job_reason, now);
+            }
+            break;
+          case routeloom::ComponentEventTarget::ConfigJobDone:
+            if (node->config_sink() != nullptr) {
+              node->config_sink()->on_config_job_done(
+                  event.job_id, event.job_accepted, event.job_reason, now);
+            }
+            break;
+        }
+      }
+      (void)node->complete_component_event(event.handle);
+    }
+    // The component tick the node poll used to provide (design-q116 §8.3):
+    // gateway first, then config — the historical order.
+    if (node->gateway_sink() != nullptr) node->gateway_sink()->poll(now);
+    if (node->config_sink() != nullptr) node->config_sink()->poll(now);
   }
-  std::map<routeloom::NodeId, routeloom::MeshNode*> nodes;
-  std::set<std::pair<routeloom::NodeId, routeloom::NodeId>> links;
-  std::deque<Pending> queue;
-};
-
-inline routeloom::Status SimRadio::send(routeloom::NodeId peer, std::uint64_t token,
-                                        routeloom::ByteView frame) noexcept {
-  return network_.enqueue(owner_, peer, token, frame);
 }
 
 struct CapturingObserver final : routeloom::NodeObserver {
@@ -309,7 +568,9 @@ struct SimWorld {
   std::map<routeloom::NodeId, std::unique_ptr<routeloom_test::TestSecurity>> security;
   std::map<routeloom::NodeId, std::unique_ptr<CapturingObserver>> observers;
   std::map<routeloom::NodeId, std::unique_ptr<SimRadio>> radios;
+  std::map<routeloom::NodeId, std::unique_ptr<SimReplyPort>> reply_ports;
   std::map<routeloom::NodeId, std::unique_ptr<routeloom::MeshNode>> nodes;
+  std::map<routeloom::NodeId, std::uint32_t> peer_link_epochs;
   routeloom::MonotonicMs now{0};
   // Epochs stamped on nodes added afterwards (Wire v2: 32-bit).
   std::uint32_t link_epoch{1};
@@ -334,9 +595,18 @@ struct SimWorld {
     security[id] = std::make_unique<routeloom_test::TestSecurity>();
     observers[id] = std::make_unique<CapturingObserver>();
     radios[id] = std::make_unique<SimRadio>(net, id);
+    reply_ports[id] =
+        std::make_unique<SimReplyPort>(*radios[id], id, config.link_epoch);
+    for (const auto& [other, epoch] : peer_link_epochs) {
+      reply_ports[id]->set_rx_context(other, epoch);
+      reply_ports[other]->set_rx_context(id, config.link_epoch);
+    }
+    peer_link_epochs[id] = config.link_epoch;
     nodes[id] = std::make_unique<routeloom::MeshNode>(config, *radios[id], *security[id],
                                                     *observers[id]);
+    nodes[id]->set_reply_peer_port(reply_ports[id].get());
     net.register_node(id, nodes[id].get());
+    net.register_reply_port(id, reply_ports[id].get());
     return nodes[id].get();
   }
 
@@ -346,9 +616,11 @@ struct SimWorld {
   void remove_node(routeloom::NodeId id) {
     net.unregister_node(id);
     nodes.erase(id);
+    reply_ports.erase(id);
     radios.erase(id);
     security.erase(id);
     observers.erase(id);
+    peer_link_epochs.erase(id);
   }
 
   void link(routeloom::NodeId a, routeloom::NodeId b, routeloom::RouteMetric metric_ab,

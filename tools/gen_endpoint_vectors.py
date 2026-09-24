@@ -111,7 +111,58 @@ def control_status(ns, opid, decision_rev, active_rev, phase, reason,
             active_hash)
 
 
+def trust_status_query(nonce, reserved=0):
+    return u8(1) + u8(5) + u16(reserved) + nonce
+
+
+def trust_status(nonce_echo, store_epoch, min_gen, network, fingerprint,
+                 anchor_count, key_count, revocation_count, flags,
+                 reserved=0):
+    return (u8(1) + u8(6) + u16(reserved) + nonce_echo +
+            u32(store_epoch) + u32(min_gen) + u64(network) + fingerprint +
+            u8(anchor_count) + u8(key_count) + u8(revocation_count) +
+            u8(flags))
+
+
+def recovery_info_query(ns, nonce):
+    return u8(1) + u8(7) + u16(ns) + nonce
+
+
+def recovery_info(ns, schema, nonce_echo, network, store_floor, decision_floor,
+                  flags, version, profile_bits, snapshot_hash):
+    return (u8(1) + u8(8) + u16(ns) + u16(schema) + nonce_echo + u64(network) +
+            u32(store_floor) + u64(decision_floor) + u8(flags) + u8(version) +
+            u32(profile_bits) + snapshot_hash)
+
+
 # --- RCC1 ---------------------------------------------------------------------
+
+def rcr2(ns, schema, mode, network, target, authority, auth_gen, auth_seq,
+         opid, new_store_gen, new_revision, snapshot_hash, snapshot,
+         version=2, flags=0, reserved=0, snapshot_len=None, magic=b"RCR2"):
+    if snapshot_len is None:
+        snapshot_len = len(snapshot)
+    return (magic + u8(version) + u8(mode) + u16(ns) + u16(schema) +
+            u16(flags) + u64(network) + u64(target) + u64(authority) +
+            u32(auth_gen) + u64(auth_seq) + opid + u32(new_store_gen) +
+            u64(new_revision) + u16(snapshot_len) + u16(reserved) +
+            snapshot_hash + snapshot)
+
+
+def rcr1_legacy(ns, schema, network, target, authority, auth_gen, auth_seq,
+                opid, new_store_gen):
+    # The retired RCR1 body (fixed 76 B): kept only as an invalid vector —
+    # no decoder may accept it (Unsupported, never a best-effort parse).
+    return (b"RCR1" + u8(1) + u8(0) + u8(1) + u8(0) + u16(ns) + u16(schema) +
+            u64(network) + u64(target) + u64(authority) + u32(auth_gen) +
+            u64(auth_seq) + opid + u32(new_store_gen) + u32(0) + u32(0))
+
+
+def snapshot_hash(ns, schema, snapshot):
+    h = hashlib.sha256()
+    h.update(SNAPSHOT_DOMAIN + u16(ns) + u16(schema) + snapshot)
+    return h.digest()
+
 
 def tlv(field_id, field_type, value):
     return u16(field_id) + u8(field_type) + u16(len(value)) + value
@@ -255,6 +306,22 @@ def main():
         config_namespace=1, operation_id_hex=opid.hex(), decision_revision=8,
         active_revision=8, phase=6, reason=0, active_hash_hex=digest32.hex()),
         control_status(1, opid, 8, 8, 6, 0, digest32)))
+    valid.append(("control_trust_status_query", "control_trust_status_query", dict(
+        nonce_hex=nonce.hex()),
+        trust_status_query(nonce)))
+    valid.append(("control_trust_status", "control_trust_status", dict(
+        nonce_echo_hex=nonce.hex(), store_epoch=2, min_authority_generation=2,
+        network=7, image_fingerprint_hex=digest32.hex(), anchor_count=1,
+        key_count=2, revocation_count=0, flags=1),
+        trust_status(nonce, 2, 2, 7, digest32, 1, 2, 0, 1)))
+    valid.append(("control_recovery_info_query", "control_recovery_info_query", dict(
+        config_namespace=1, nonce_hex=nonce.hex()),
+        recovery_info_query(1, nonce)))
+    valid.append(("control_recovery_info", "control_recovery_info", dict(
+        config_namespace=1, schema=1, nonce_echo_hex=nonce.hex(), network=7,
+        store_floor=3, decision_floor=1, flags=0x08, recovery_version=2,
+        profile_bits=1, snapshot_hash_hex=digest32.hex()),
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x08, 2, 1, digest32)))
 
     # RCC1 — the design config-example is pinned verbatim.
     valid.append(("config_command", "config_command", dict(
@@ -284,6 +351,50 @@ def main():
         snapshot_hex=cf["old_snapshot_hex"]),
         SNAPSHOT_DOMAIN + u16(1) + u16(1) + bytes.fromhex(cf["old_snapshot_hex"])))
 
+    # RCR2 — the recovery intent (06 §6.3): a 112 B header naming the
+    # floor's exact-next counters plus the adopted baseline. AdoptKnown
+    # carries no bytes (the hash names the survivor); Reprovision
+    # carries the complete snapshot, including the empty one when the
+    # schema defines all-omitted as the default state.
+    sdk_snapshot = (tlv(1, 2, b"\x02") + tlv(2, 1, b"\x01") +
+                    tlv(3, 1, b"\x01") + tlv(4, 2, b"\x00"))
+    sdk_hash = snapshot_hash(1, 1, sdk_snapshot)
+    valid.append(("config_recovery_adopt_known", "config_recovery", dict(
+        config_namespace=1, schema=1, mode=0, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=15, operation_id_hex=opid.hex(),
+        new_store_generation=42, new_revision=7,
+        snapshot_hash_hex=sdk_hash.hex(), snapshot_hex=""),
+        rcr2(1, 1, 0, 1, 0x30, 0x10, 2, 15, opid, 42, 7, sdk_hash, b"")))
+    valid.append(("config_recovery_reprovision", "config_recovery", dict(
+        config_namespace=1, schema=1, mode=1, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=16, operation_id_hex=opid.hex(),
+        new_store_generation=43, new_revision=8,
+        snapshot_hash_hex=sdk_hash.hex(), snapshot_hex=sdk_snapshot.hex()),
+        rcr2(1, 1, 1, 1, 0x30, 0x10, 2, 16, opid, 43, 8, sdk_hash,
+             sdk_snapshot)))
+    empty_hash = snapshot_hash(1, 1, b"")
+    valid.append(("config_recovery_reprovision_empty", "config_recovery", dict(
+        config_namespace=1, schema=1, mode=1, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=17, operation_id_hex=opid.hex(),
+        new_store_generation=44, new_revision=9,
+        snapshot_hash_hex=empty_hash.hex(), snapshot_hex=""),
+        rcr2(1, 1, 1, 1, 0x30, 0x10, 2, 17, opid, 44, 9, empty_hash, b"")))
+    # Boundary: the full 512 B snapshot (16 bytes-fields of 27 B) plus
+    # the app-namespace identity range in one vector.
+    max_snapshot = b"".join(tlv(i, 4, bytes([i]) * 27) for i in range(1, 17))
+    assert len(max_snapshot) == 512
+    max_hash = snapshot_hash(0x8001, 4, max_snapshot)
+    valid.append(("config_recovery_reprovision_max", "config_recovery", dict(
+        config_namespace=0x8001, schema=4, mode=1, network=1,
+        target=0x30, authority=0x10, authority_generation=2,
+        authority_sequence=18, operation_id_hex=opid.hex(),
+        new_store_generation=45, new_revision=10,
+        snapshot_hash_hex=max_hash.hex(), snapshot_hex=max_snapshot.hex()),
+        rcr2(0x8001, 4, 1, 1, 0x30, 0x10, 2, 18, opid, 45, 10, max_hash,
+             max_snapshot)))
     for name, codec, fields, encoded in valid:
         record = {"format": fmt, "name": name, "codec": codec, "expect": "ok"}
         record.update(fields)
@@ -398,6 +509,32 @@ def main():
     bad("control_status_reserved", "control_status",
         control_status(1, opid, 8, 8, 6, 0, digest32, reserved=1),
         "reserved byte must be zero")
+    bad("trust_status_query_reserved", "control_trust_status_query",
+        trust_status_query(nonce, reserved=1), "reserved u16 must be zero")
+    bad("trust_status_query_zero_nonce", "control_trust_status_query",
+        trust_status_query(bytes(16)), "query nonce must be nonzero")
+    bad("trust_status_bad_flags", "control_trust_status",
+        trust_status(nonce, 2, 2, 7, digest32, 1, 2, 0, 0x08),
+        "flag bit 3 is unassigned")
+    bad("trust_status_zero_echo", "control_trust_status",
+        trust_status(bytes(16), 2, 2, 7, digest32, 1, 2, 0, 1),
+        "nonce echo must be nonzero")
+    bad("trust_status_truncated", "control_trust_status",
+        trust_status(nonce, 2, 2, 7, digest32, 1, 2, 0, 1)[:-1],
+        "71 bytes is not the TrustStatus body")
+    bad("recovery_info_query_bad_namespace", "control_recovery_info_query",
+        recovery_info_query(2, nonce), "namespace 2 is unallocated")
+    bad("recovery_info_query_zero_nonce", "control_recovery_info_query",
+        recovery_info_query(1, bytes(16)), "query nonce must be nonzero")
+    bad("recovery_info_bad_flags", "control_recovery_info",
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x10, 1, 1, digest32),
+        "flag bit 4 is unassigned")
+    bad("recovery_info_zero_version", "control_recovery_info",
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x08, 0, 1, digest32),
+        "recovery version must be nonzero")
+    bad("recovery_info_trailing", "control_recovery_info",
+        recovery_info(1, 1, nonce, 7, 3, 1, 0x08, 1, 1, digest32) + b"\x00",
+        "fixed-size reply with a trailing byte")
 
     good_patch = tlv(1, 2, b"\x01") + tlv(3, 1, b"\x00")
     base = dict(ns=1, schema=1, field_count=2, network=1, target=0x30,
@@ -420,6 +557,14 @@ def main():
         rcc1(patch=good_patch,
              **{**base, "expected": 0xFFFFFFFFFFFFFFFF, "nxt": 0}),
         "revision overflow")
+    bad("config_next_revision_max", "config_command",
+        rcc1(patch=good_patch,
+             **{**base, "expected": 0xFFFFFFFFFFFFFFFE,
+                "nxt": 0xFFFFFFFFFFFFFFFF}),
+        "next == MAX can never be a decision")
+    bad("config_authority_seq_max", "config_command",
+        rcc1(patch=good_patch, **{**base, "auth_seq": 0xFFFFFFFFFFFFFFFF}),
+        "authority sequence reserves its top value")
     bad("config_field_count_zero", "config_command",
         rcc1(patch=b"", **{**base, "field_count": 0}),
         "a no-op patch is never issued on the wire")
@@ -484,6 +629,90 @@ def main():
     bad("config_broadcast_authority", "config_command",
         rcc1(patch=good_patch, **{**base, "authority": 0xFFFFFFFFFFFFFFFF}),
         "authority broadcast id is reserved")
+
+    # RCR2 — strict variable-frame decode: retired RCR1 bodies, wrong
+    # magic/version/mode/flags/reserved, length mismatches, counter
+    # bounds, invalid identity, zero opid, malformed snapshots.
+    rcr_base = dict(ns=1, schema=1, mode=1, network=1, target=0x30,
+                    authority=0x10, auth_gen=2, auth_seq=15, opid=opid,
+                    new_store_gen=42, new_revision=7, snapshot_hash=sdk_hash,
+                    snapshot=sdk_snapshot)
+    bad("recovery_old_rcr1_body", "config_recovery",
+        rcr1_legacy(1, 1, 1, 0x30, 0x10, 2, 15, opid, 42),
+        "retired RCR1 bodies are Unsupported, never parsed")
+    bad("recovery_bad_magic", "config_recovery",
+        rcr2(magic=b"RCRX", **rcr_base), "bad magic")
+    bad("recovery_bad_version", "config_recovery",
+        rcr2(version=1, **rcr_base), "unknown RCR version")
+    bad("recovery_bad_mode", "config_recovery",
+        rcr2(**{**rcr_base, "mode": 2}), "unknown recovery mode")
+    bad("recovery_adopt_with_bytes", "config_recovery",
+        rcr2(**{**rcr_base, "mode": 0}),
+        "adopt-known names the survivor by hash alone")
+    bad("recovery_bad_flags", "config_recovery",
+        rcr2(flags=1, **rcr_base), "flags must be zero")
+    bad("recovery_reserved_nonzero", "config_recovery",
+        rcr2(reserved=1, **rcr_base), "reserved must be zero")
+    bad("recovery_length_short", "config_recovery",
+        rcr2(snapshot_len=len(sdk_snapshot) - 1, **rcr_base),
+        "declared length below the carried bytes")
+    bad("recovery_length_long", "config_recovery",
+        rcr2(snapshot_len=len(sdk_snapshot) + 1, **rcr_base),
+        "declared length above the carried bytes")
+    bad("recovery_zero_generation", "config_recovery",
+        rcr2(**{**rcr_base, "new_store_gen": 0}),
+        "generation 0 was never issued")
+    bad("recovery_max_generation", "config_recovery",
+        rcr2(**{**rcr_base, "new_store_gen": 0xFFFFFFFF}),
+        "generation UINT32_MAX leaves no intent+complete headroom")
+    bad("recovery_zero_revision", "config_recovery",
+        rcr2(**{**rcr_base, "new_revision": 0}),
+        "revision 0 never follows a floor")
+    bad("recovery_max_revision", "config_recovery",
+        rcr2(**{**rcr_base, "new_revision": 0xFFFFFFFFFFFFFFFF}),
+        "revision reserves its top value")
+    bad("recovery_authority_seq_max", "config_recovery",
+        rcr2(**{**rcr_base, "auth_seq": 0xFFFFFFFFFFFFFFFF}),
+        "authority sequence reserves its top value")
+    bad("recovery_zero_opid", "config_recovery",
+        rcr2(**{**rcr_base, "opid": bytes(16)}), "operation id must be nonzero")
+    bad("recovery_bad_namespace", "config_recovery",
+        rcr2(**{**rcr_base, "ns": 0x7000}),
+        "namespace outside the registered ranges")
+    bad("recovery_zero_network", "config_recovery",
+        rcr2(**{**rcr_base, "network": 0}), "network must be nonzero")
+    bad("recovery_zero_target", "config_recovery",
+        rcr2(**{**rcr_base, "target": 0}), "target 0 is the invalid node id")
+    bad("recovery_broadcast_target", "config_recovery",
+        rcr2(**{**rcr_base, "target": 0xFFFFFFFFFFFFFFFF}),
+        "target broadcast id is reserved")
+    bad("recovery_zero_authority", "config_recovery",
+        rcr2(**{**rcr_base, "authority": 0}),
+        "authority 0 is the invalid node id")
+    bad("recovery_broadcast_authority", "config_recovery",
+        rcr2(**{**rcr_base, "authority": 0xFFFFFFFFFFFFFFFF}),
+        "authority broadcast id is reserved")
+    bad("recovery_truncated", "config_recovery",
+        rcr2(**rcr_base)[:-1], "a short frame is not the RCR2 body")
+    bad("recovery_snapshot_unsorted", "config_recovery",
+        rcr2(**{**rcr_base, "snapshot": tlv(2, 1, b"\x01") + tlv(1, 2, b"\x02")}),
+        "snapshot field ids must ascend strictly")
+    bad("recovery_snapshot_duplicate", "config_recovery",
+        rcr2(**{**rcr_base, "snapshot": tlv(1, 2, b"\x02") + tlv(1, 2, b"\x01")}),
+        "snapshot field ids must not repeat")
+    bad("recovery_snapshot_bad_bool", "config_recovery",
+        rcr2(**{**rcr_base, "snapshot": tlv(2, 1, b"\x02")}),
+        "snapshot bools are 0 or 1")
+    bad("recovery_snapshot_truncated_field", "config_recovery",
+        rcr2(**{**rcr_base, "snapshot": tlv(1, 2, b"\x02")[:5]}),
+        "a snapshot field header without its value")
+    bad("recovery_snapshot_too_many", "config_recovery",
+        rcr2(**{**rcr_base, "snapshot": b"".join(
+            tlv(i, 2, b"\x00") for i in range(1, 18))}),
+        "snapshots hold at most 16 fields")
+    bad("recovery_snapshot_oversize", "config_recovery",
+        rcr2(**{**rcr_base, "snapshot": bytes(513)}),
+        "snapshots hold at most 512 bytes")
     # Trailing bytes: a decoder consumes exactly its frame — leftover bytes
     # are a framing violation, never ignorable padding.
     bad("config_trailing_byte", "config_command",

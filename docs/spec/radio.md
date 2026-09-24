@@ -155,7 +155,9 @@ ESP-IDFの素のesp_now APIを使う。上位のespressif/esp-now componentに�
 
 ## 13. 受理・混雑・探索の追加規範
 
-HOP_ACCEPT前にframe、dedup、transaction、reply Peer lease、ACK slotを一括予約する。失敗は全部解放し、副作用も受理成功も発生させない。返信枠自体が無ければBUSYの送信まで保証せず、ローカルREPLY_CAPACITY_DROPを記録する。retryで空く枠を待ちながら他の資源を保持しない。[電源断・資源契約](crash-time-resources.md)参照。
+HOP_ACCEPT前にframe、dedup、transaction、reply Peer lease、ACK slotを一括予約する。終端DATAはEND_RECEIPTの枠もアプリdispatch前に確保する。失敗は全部解放し、副作用も受理成功も発生させない。返信枠自体が無ければBUSYの送信まで保証せず、ローカルREPLY_CAPACITY_DROPを記録する。retryで空く枠を待ちながら他の資源を保持しない。受理済みのローカルforwardは初回受理から最大1500msで終結し、wire上の残転送予算は1500msに縮めない。[電源断・資源契約](crash-time-resources.md)参照。
+
+静的peerの開発PSK構成では、相手の送信boot epochを最初の認証済み受信で記録する。受信前はACK待ちTXのbinding snapshotを作れないため、Reliable送信は相手からの認証済みframeを受けてから開始する。再起動でepochが進んだ場合は旧reply useを失効させ、古いHOP_ACCEPT／BUSYを新しい交換に適用しない。sessionを所有するproviderは送受信で異なるcontext idを報告できる。
 
 初回DATAにはSDKの無条件random jitterを加えない。0〜20msはlink retryのみ。driver CCA/backoffは残る。認証・受理後のHOP_ACCEPTを、当該DATAのforwardより先に予約queueへ投入するが、外部無線による送信時刻までは保証しない。END_RECEIPT受領時点のAPI完了と最後のlink ACK送信時間は別計測。
 

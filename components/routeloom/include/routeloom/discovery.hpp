@@ -434,6 +434,11 @@ struct DiscoveryStats {
   std::uint32_t suppressed_offers{0};
   std::uint32_t rate_limited{0};
   std::uint32_t peer_capacity{0};
+  // Handle-space exhaustion (issue #117, Q117-13): the binding/exchange is
+  // refused instead of reusing id 0 or a wrapped handle.
+  std::uint32_t binding_id_exhausted{0};
+  std::uint32_t candidate_id_exhausted{0};
+  std::uint32_t binding_generation_exhausted{0};
   std::uint32_t conflicts{0};
   std::uint32_t simultaneous_resolved{0};
   std::uint32_t stale_expirations{0};
@@ -481,6 +486,7 @@ class NeighborDiscovery {
   // epoch that keys telemetry attribution (02-telemetry §2.4). Same
   // resolvability bar as binding_of; false when no live binding exists.
   bool binding_generation_of(NodeId peer, BindingGeneration& out) const noexcept;
+  bool topology_pinned(NodeId peer) const noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
   // resolve). False when the MAC has no neighbor record.

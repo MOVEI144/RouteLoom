@@ -624,6 +624,10 @@ pub const CONTROL_CHALLENGE_QUERY_SIZE: usize = 24;
 pub const CONTROL_CHALLENGE_SIZE: usize = 92;
 pub const CONTROL_STATUS_QUERY_SIZE: usize = 20;
 pub const CONTROL_STATUS_SIZE: usize = 72;
+pub const TRUST_STATUS_QUERY_SIZE: usize = 20;
+pub const TRUST_STATUS_SIZE: usize = 72;
+pub const RECOVERY_INFO_QUERY_SIZE: usize = 20;
+pub const RECOVERY_INFO_SIZE: usize = 80;
 
 pub fn config_namespace_valid(value: u16) -> bool {
     value == CONFIG_NAMESPACE_SDK
@@ -938,6 +942,253 @@ pub fn control_status_decode(encoded: &[u8]) -> Result<ControlStatus> {
     })
 }
 
+/// TrustStatusQuery5 (20B): ver/sub5 | reserved u16=0 | nonce 16B.
+/// Device global (trust has no namespace); the reply echoes the nonce.
+#[derive(Clone, Debug)]
+pub struct TrustStatusQuery {
+    pub nonce: [u8; 16],
+}
+
+pub fn trust_status_query_encode(
+    payload: &TrustStatusQuery,
+    out: &mut EncodedPayload,
+) -> Result<()> {
+    if all_zero(&payload.nonce) {
+        return invalid("trust query nonce must be nonzero");
+    }
+    let mut raw = Vec::with_capacity(TRUST_STATUS_QUERY_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(5);
+    raw.extend_from_slice(&0_u16.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce);
+    debug_assert_eq!(raw.len(), TRUST_STATUS_QUERY_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn trust_status_query_decode(encoded: &[u8]) -> Result<TrustStatusQuery> {
+    if encoded.len() != TRUST_STATUS_QUERY_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 5)?;
+    let reserved = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let mut nonce = [0_u8; 16];
+    nonce.copy_from_slice(&encoded[4..20]);
+    if reserved != 0 || all_zero(&nonce) {
+        return reject();
+    }
+    Ok(TrustStatusQuery { nonce })
+}
+
+pub const TRUST_STATUS_FLAG_HAS_ACTIVE: u8 = 0x01;
+pub const TRUST_STATUS_FLAG_UNCERTAIN: u8 = 0x02;
+pub const TRUST_STATUS_FLAG_QUARANTINED: u8 = 0x04;
+const TRUST_STATUS_FLAG_MASK: u8 = 0x07;
+
+/// TrustStatus6 (72B): ver/sub6 | reserved u16=0 | nonce_echo 16B |
+/// store_epoch u32 | min_authority_generation u32 | network u64 |
+/// image_fingerprint 32B | anchor/key/revocation counts u8 | flags u8.
+/// Public fields only — never keys, never grant bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TrustStatus {
+    pub nonce_echo: [u8; 16],
+    pub store_epoch: u32,
+    pub min_authority_generation: u32,
+    pub network: u64,
+    pub image_fingerprint: [u8; 32],
+    pub anchor_count: u8,
+    pub key_count: u8,
+    pub revocation_count: u8,
+    pub flags: u8,
+}
+
+pub fn trust_status_encode(payload: &TrustStatus, out: &mut EncodedPayload) -> Result<()> {
+    if all_zero(&payload.nonce_echo) {
+        return invalid("trust status nonce echo must be nonzero");
+    }
+    if payload.flags & !TRUST_STATUS_FLAG_MASK != 0 {
+        return invalid("trust status flags out of range");
+    }
+    let mut raw = Vec::with_capacity(TRUST_STATUS_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(6);
+    raw.extend_from_slice(&0_u16.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce_echo);
+    raw.extend_from_slice(&payload.store_epoch.to_be_bytes());
+    raw.extend_from_slice(&payload.min_authority_generation.to_be_bytes());
+    raw.extend_from_slice(&payload.network.to_be_bytes());
+    raw.extend_from_slice(&payload.image_fingerprint);
+    raw.push(payload.anchor_count);
+    raw.push(payload.key_count);
+    raw.push(payload.revocation_count);
+    raw.push(payload.flags);
+    debug_assert_eq!(raw.len(), TRUST_STATUS_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn trust_status_decode(encoded: &[u8]) -> Result<TrustStatus> {
+    if encoded.len() != TRUST_STATUS_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 6)?;
+    let reserved = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let mut nonce_echo = [0_u8; 16];
+    nonce_echo.copy_from_slice(&encoded[4..20]);
+    let mut image_fingerprint = [0_u8; 32];
+    image_fingerprint.copy_from_slice(&encoded[36..68]);
+    let flags = encoded[71];
+    if reserved != 0 || all_zero(&nonce_echo) || flags & !TRUST_STATUS_FLAG_MASK != 0 {
+        return reject();
+    }
+    Ok(TrustStatus {
+        nonce_echo,
+        store_epoch: u32::from_be_bytes(encoded[20..24].try_into().expect("fixed")),
+        min_authority_generation: u32::from_be_bytes(encoded[24..28].try_into().expect("fixed")),
+        network: u64::from_be_bytes(encoded[28..36].try_into().expect("fixed")),
+        image_fingerprint,
+        anchor_count: encoded[68],
+        key_count: encoded[69],
+        revocation_count: encoded[70],
+        flags,
+    })
+}
+
+/// RecoveryInfoQuery7 (20B): ver/sub7 | ns u16 | nonce 16B. Selects the
+/// journal; the reply echoes the nonce.
+#[derive(Clone, Debug)]
+pub struct RecoveryInfoQuery {
+    pub config_namespace: u16,
+    pub nonce: [u8; 16],
+}
+
+pub fn recovery_info_query_encode(
+    payload: &RecoveryInfoQuery,
+    out: &mut EncodedPayload,
+) -> Result<()> {
+    if !config_namespace_valid(payload.config_namespace) {
+        return invalid("control namespace is not registered");
+    }
+    if all_zero(&payload.nonce) {
+        return invalid("recovery query nonce must be nonzero");
+    }
+    let mut raw = Vec::with_capacity(RECOVERY_INFO_QUERY_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(7);
+    raw.extend_from_slice(&payload.config_namespace.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce);
+    debug_assert_eq!(raw.len(), RECOVERY_INFO_QUERY_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn recovery_info_query_decode(encoded: &[u8]) -> Result<RecoveryInfoQuery> {
+    if encoded.len() != RECOVERY_INFO_QUERY_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 7)?;
+    let config_namespace = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let mut nonce = [0_u8; 16];
+    nonce.copy_from_slice(&encoded[4..20]);
+    if !config_namespace_valid(config_namespace) || all_zero(&nonce) {
+        return reject();
+    }
+    Ok(RecoveryInfoQuery {
+        config_namespace,
+        nonce,
+    })
+}
+
+pub const RECOVERY_INFO_FLAG_IMPAIRED: u8 = 0x01;
+pub const RECOVERY_INFO_FLAG_UNCERTAIN: u8 = 0x02;
+pub const RECOVERY_INFO_FLAG_QUARANTINED: u8 = 0x04;
+pub const RECOVERY_INFO_FLAG_SURVIVOR_KNOWN: u8 = 0x08;
+const RECOVERY_INFO_FLAG_MASK: u8 = 0x0F;
+
+/// RecoveryInfo8 (80B): ver/sub8 | ns u16 | schema u16 | nonce_echo 16B |
+/// network u64 | store floor J u32 | decision floor R u64 | flags u8 |
+/// recovery_version u8 | profile_bits u32 | snapshot_hash 32B. Read-only
+/// and advisory: J/R are the current floors (recovery must name each +1).
+/// The hash names the known survivor baseline (or explicit unknown).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryInfo {
+    pub config_namespace: u16,
+    pub schema: u16,
+    pub nonce_echo: [u8; 16],
+    pub network: u64,
+    pub store_floor: u32,
+    pub decision_floor: u64,
+    pub flags: u8,
+    pub recovery_version: u8,
+    pub profile_bits: u32,
+    pub snapshot_hash: [u8; 32],
+}
+
+pub fn recovery_info_encode(payload: &RecoveryInfo, out: &mut EncodedPayload) -> Result<()> {
+    if !config_namespace_valid(payload.config_namespace) {
+        return invalid("control namespace is not registered");
+    }
+    if all_zero(&payload.nonce_echo) {
+        return invalid("recovery info nonce echo must be nonzero");
+    }
+    if payload.flags & !RECOVERY_INFO_FLAG_MASK != 0 {
+        return invalid("recovery info flags out of range");
+    }
+    if payload.recovery_version == 0 {
+        return invalid("recovery info version must be nonzero");
+    }
+    let mut raw = Vec::with_capacity(RECOVERY_INFO_SIZE);
+    raw.push(CONTROL_PAYLOAD_VERSION);
+    raw.push(8);
+    raw.extend_from_slice(&payload.config_namespace.to_be_bytes());
+    raw.extend_from_slice(&payload.schema.to_be_bytes());
+    raw.extend_from_slice(&payload.nonce_echo);
+    raw.extend_from_slice(&payload.network.to_be_bytes());
+    raw.extend_from_slice(&payload.store_floor.to_be_bytes());
+    raw.extend_from_slice(&payload.decision_floor.to_be_bytes());
+    raw.push(payload.flags);
+    raw.push(payload.recovery_version);
+    raw.extend_from_slice(&payload.profile_bits.to_be_bytes());
+    raw.extend_from_slice(&payload.snapshot_hash);
+    debug_assert_eq!(raw.len(), RECOVERY_INFO_SIZE);
+    *out = EncodedPayload::wrap(&raw)?;
+    Ok(())
+}
+
+pub fn recovery_info_decode(encoded: &[u8]) -> Result<RecoveryInfo> {
+    if encoded.len() != RECOVERY_INFO_SIZE {
+        return reject();
+    }
+    control_preamble_check(encoded, 8)?;
+    let config_namespace = u16::from_be_bytes(encoded[2..4].try_into().expect("fixed"));
+    let schema = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));
+    let mut nonce_echo = [0_u8; 16];
+    nonce_echo.copy_from_slice(&encoded[6..22]);
+    let flags = encoded[42];
+    let recovery_version = encoded[43];
+    let mut snapshot_hash = [0_u8; 32];
+    snapshot_hash.copy_from_slice(&encoded[48..80]);
+    if !config_namespace_valid(config_namespace)
+        || all_zero(&nonce_echo)
+        || flags & !RECOVERY_INFO_FLAG_MASK != 0
+        || recovery_version == 0
+    {
+        return reject();
+    }
+    Ok(RecoveryInfo {
+        config_namespace,
+        schema,
+        nonce_echo,
+        network: u64::from_be_bytes(encoded[22..30].try_into().expect("fixed")),
+        store_floor: u32::from_be_bytes(encoded[30..34].try_into().expect("fixed")),
+        decision_floor: u64::from_be_bytes(encoded[34..42].try_into().expect("fixed")),
+        flags,
+        recovery_version,
+        profile_bits: u32::from_be_bytes(encoded[44..48].try_into().expect("fixed")),
+        snapshot_hash,
+    })
+}
+
 // --- RCC1 canonical config command (§5.4) ------------------------------------------
 
 pub const RCC1_MAGIC: u32 = 0x5243_4331; // "RCC1"
@@ -957,7 +1208,7 @@ pub enum ConfigFieldType {
     Bytes = 4,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigField {
     pub field_id: u16,
     pub field_type: ConfigFieldType,
@@ -977,7 +1228,7 @@ fn tlv_value_length(field_type: u8, declared: u16) -> Option<usize> {
 }
 
 /// 176B fixed header + sorted TLV patch (max 512B) = max 688B.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConfigCommand {
     pub config_namespace: u16,
     pub schema: u16,
@@ -1055,8 +1306,14 @@ fn config_command_header_check(command: &ConfigCommand) -> Result<()> {
     {
         return invalid("config command identity/nonce fields must be nonzero");
     }
+    // The u64 axis reserves its top value: next == MAX can never be a
+    // decision (nothing could follow it), and the authority sequence
+    // shares the same reservation so both counters fail closed at the
+    // bound.
     if command.expected_revision == u64::MAX
         || command.next_revision != command.expected_revision + 1
+        || command.next_revision == u64::MAX
+        || command.authority_sequence == u64::MAX
     {
         return invalid("config revision must satisfy next = expected + 1");
     }
@@ -1127,6 +1384,7 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
     let network = u64::from_be_bytes(encoded[12..20].try_into().expect("fixed"));
     let target = u64::from_be_bytes(encoded[20..28].try_into().expect("fixed"));
     let authority = u64::from_be_bytes(encoded[28..36].try_into().expect("fixed"));
+    let authority_sequence = u64::from_be_bytes(encoded[40..48].try_into().expect("fixed"));
     let target_boot = u64::from_be_bytes(encoded[144..152].try_into().expect("fixed"));
     if magic != RCC1_MAGIC
         || version != RCC1_VERSION
@@ -1138,6 +1396,8 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
         || encoded.len() - RCC1_HEADER_SIZE != patch_len
         || expected_revision == u64::MAX
         || next_revision != expected_revision + 1
+        || next_revision == u64::MAX
+        || authority_sequence == u64::MAX
         || network == 0
         || target == 0
         || target == BROADCAST_NODE_ID
@@ -1215,6 +1475,206 @@ pub fn config_command_decode(encoded: &[u8]) -> Result<ConfigCommand> {
         apply_within_ms: u32::from_be_bytes(encoded[168..172].try_into().expect("fixed")),
         fields,
     })
+}
+
+// --- RCR2 canonical recovery command (04-remote-config §4.7, 06 §6.3) --------
+//
+// Fixed 112B header plus the 0–512B adopted snapshot, carried as the signed
+// payload of a kind-4 recovery object — never an RCC1 extension and never a
+// kind-3 permit. RCR2 replaces RCR1 outright: no compatibility interpretation
+// of the old magic or version exists. The Rust mirror must stay byte-identical
+// with the C++ codec in endpoint_wire.cpp.
+
+pub const RCR2_MAGIC: u32 = 0x5243_5232; // "RCR2"
+pub const RCR2_VERSION: u8 = 2;
+pub const RCR2_HEADER_SIZE: usize = 112;
+pub const RCR2_MAX_TOTAL: usize = RCR2_HEADER_SIZE + CONFIG_SNAPSHOT_MAX;
+
+pub const RCR2_MODE_ADOPT_KNOWN: u8 = 0;
+pub const RCR2_MODE_REPROVISION: u8 = 1;
+
+/// Recovery intent — no challenge/nonce binding by design (freshness is the
+/// floor's exact-next authorization, replay protection the floor + dedup).
+/// AdoptKnown binds the proven survivor by hash alone; Reprovision carries
+/// the complete adopted snapshot as its baseline.
+#[derive(Clone, Debug)]
+pub struct ConfigRecoveryIntent {
+    pub mode: u8,
+    pub config_namespace: u16,
+    pub schema: u16,
+    pub network: u64,
+    pub target: u64,
+    pub authority: u64,
+    /// The generation the signature verifies under.
+    pub authority_generation: u32,
+    pub authority_sequence: u64,
+    pub operation_id: [u8; 16],
+    /// The attested exact-next store generation.
+    pub new_store_generation: u32,
+    /// The attested exact-next decision revision.
+    pub new_revision: u64,
+    /// Domain-tagged SHA-256 of the adopted canonical snapshot.
+    pub snapshot_hash: [u8; 32],
+    /// The adopted baseline bytes (empty for AdoptKnown).
+    pub baseline: Vec<u8>,
+}
+
+/// The adopted baseline is a complete canonical snapshot: strict ascending
+/// field ids, known TLV types with exact lengths, canonical bools, at most
+/// the field-count bound. The same shape rule as the RCC1 patch loop.
+fn rcr2_snapshot_shape_valid(snapshot: &[u8]) -> bool {
+    if snapshot.len() > CONFIG_SNAPSHOT_MAX {
+        return false;
+    }
+    let mut cursor = 0_usize;
+    let mut previous_id = 0_u16;
+    let mut count = 0_usize;
+    while cursor < snapshot.len() {
+        if count >= CONFIG_FIELD_COUNT_MAX || snapshot.len() - cursor < 5 {
+            return false;
+        }
+        let field_id = u16::from_be_bytes(snapshot[cursor..cursor + 2].try_into().expect("fixed"));
+        let field_type = snapshot[cursor + 2];
+        let declared =
+            u16::from_be_bytes(snapshot[cursor + 3..cursor + 5].try_into().expect("fixed"));
+        let Some(value_len) = tlv_value_length(field_type, declared) else {
+            return false;
+        };
+        if snapshot.len() - (cursor + 5) < value_len {
+            return false;
+        }
+        if count > 0 && field_id <= previous_id {
+            return false;
+        }
+        previous_id = field_id;
+        if field_type == 1 && snapshot[cursor + 5] > 1 {
+            return false;
+        }
+        cursor += 5 + value_len;
+        count += 1;
+    }
+    true
+}
+
+fn config_recovery_check(intent: &ConfigRecoveryIntent) -> Result<()> {
+    if !config_namespace_valid(intent.config_namespace)
+        || intent.network == 0
+        || intent.target == 0
+        || intent.target == BROADCAST_NODE_ID
+        || intent.authority == 0
+        || intent.authority == BROADCAST_NODE_ID
+        || all_zero(&intent.operation_id)
+    {
+        return invalid("config recovery identity fields invalid");
+    }
+    if intent.mode != RCR2_MODE_ADOPT_KNOWN && intent.mode != RCR2_MODE_REPROVISION {
+        return invalid("config recovery mode unknown");
+    }
+    if intent.mode == RCR2_MODE_ADOPT_KNOWN && !intent.baseline.is_empty() {
+        return invalid("config recovery adopt-known carries no snapshot");
+    }
+    if intent.new_store_generation == 0
+        || intent.new_store_generation == u32::MAX
+        || intent.new_revision == 0
+        || intent.new_revision == u64::MAX
+        || intent.authority_sequence == u64::MAX
+    {
+        return invalid("config recovery counters invalid");
+    }
+    if !rcr2_snapshot_shape_valid(&intent.baseline) {
+        return invalid("config recovery snapshot shape invalid");
+    }
+    Ok(())
+}
+
+pub fn config_recovery_encode(intent: &ConfigRecoveryIntent, out: &mut Vec<u8>) -> Result<()> {
+    config_recovery_check(intent)?;
+    out.clear();
+    out.reserve(RCR2_HEADER_SIZE + intent.baseline.len());
+    out.extend_from_slice(&RCR2_MAGIC.to_be_bytes());
+    out.push(RCR2_VERSION);
+    out.push(intent.mode);
+    out.extend_from_slice(&intent.config_namespace.to_be_bytes());
+    out.extend_from_slice(&intent.schema.to_be_bytes());
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    out.extend_from_slice(&intent.network.to_be_bytes());
+    out.extend_from_slice(&intent.target.to_be_bytes());
+    out.extend_from_slice(&intent.authority.to_be_bytes());
+    out.extend_from_slice(&intent.authority_generation.to_be_bytes());
+    out.extend_from_slice(&intent.authority_sequence.to_be_bytes());
+    out.extend_from_slice(&intent.operation_id);
+    out.extend_from_slice(&intent.new_store_generation.to_be_bytes());
+    out.extend_from_slice(&intent.new_revision.to_be_bytes());
+    out.extend_from_slice(&(intent.baseline.len() as u16).to_be_bytes());
+    out.extend_from_slice(&0_u16.to_be_bytes());
+    out.extend_from_slice(&intent.snapshot_hash);
+    out.extend_from_slice(&intent.baseline);
+    debug_assert_eq!(out.len(), RCR2_HEADER_SIZE + intent.baseline.len());
+    Ok(())
+}
+
+pub fn config_recovery_decode(encoded: &[u8]) -> Result<ConfigRecoveryIntent> {
+    if encoded.len() > RCR2_MAX_TOTAL {
+        return reject();
+    }
+    // No compatibility interpretation of the old wire exists: anything that
+    // is not an RCR2 body is Unsupported — including an RCR1 body, which is
+    // shorter than the RCR2 header. The magic/version gate therefore runs
+    // before the size gate, mirroring the C++ codec.
+    if encoded.len() < 6 {
+        return reject();
+    }
+    let magic = u32::from_be_bytes(encoded[0..4].try_into().expect("fixed"));
+    let version = encoded[4];
+    if magic != RCR2_MAGIC || version != RCR2_VERSION {
+        return Err(WireError::new(
+            ErrorCode::Unsupported,
+            "config recovery version unsupported",
+        ));
+    }
+    if encoded.len() < RCR2_HEADER_SIZE {
+        return reject();
+    }
+    let mode = encoded[5];
+    let config_namespace = u16::from_be_bytes(encoded[6..8].try_into().expect("fixed"));
+    let schema = u16::from_be_bytes(encoded[8..10].try_into().expect("fixed"));
+    let flags = u16::from_be_bytes(encoded[10..12].try_into().expect("fixed"));
+    let network = u64::from_be_bytes(encoded[12..20].try_into().expect("fixed"));
+    let target = u64::from_be_bytes(encoded[20..28].try_into().expect("fixed"));
+    let authority = u64::from_be_bytes(encoded[28..36].try_into().expect("fixed"));
+    let authority_generation = u32::from_be_bytes(encoded[36..40].try_into().expect("fixed"));
+    let authority_sequence = u64::from_be_bytes(encoded[40..48].try_into().expect("fixed"));
+    let mut operation_id = [0_u8; 16];
+    operation_id.copy_from_slice(&encoded[48..64]);
+    let new_store_generation = u32::from_be_bytes(encoded[64..68].try_into().expect("fixed"));
+    let new_revision = u64::from_be_bytes(encoded[68..76].try_into().expect("fixed"));
+    let snapshot_len = u16::from_be_bytes(encoded[76..78].try_into().expect("fixed")) as usize;
+    let reserved = u16::from_be_bytes(encoded[78..80].try_into().expect("fixed"));
+    let mut snapshot_hash = [0_u8; 32];
+    snapshot_hash.copy_from_slice(&encoded[80..112]);
+    let intent = ConfigRecoveryIntent {
+        mode,
+        config_namespace,
+        schema,
+        network,
+        target,
+        authority,
+        authority_generation,
+        authority_sequence,
+        operation_id,
+        new_store_generation,
+        new_revision,
+        snapshot_hash,
+        baseline: encoded[RCR2_HEADER_SIZE..].to_vec(),
+    };
+    if flags != 0
+        || reserved != 0
+        || encoded.len() - RCR2_HEADER_SIZE != snapshot_len
+        || config_recovery_check(&intent).is_err()
+    {
+        return reject();
+    }
+    Ok(intent)
 }
 
 /// Snapshot-hash input (§5.4): domain_snapshot || namespace u16 | schema u16 |

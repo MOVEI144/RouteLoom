@@ -47,6 +47,7 @@ int failures = 0;
 using namespace routeloom;
 using routeloom_test::CapturingObserver;
 using routeloom_test::FakeRadioPort;
+using routeloom_test::SimReplyPort;
 using routeloom_test::SimWorld;
 using routeloom_test::TestSecurity;
 
@@ -637,7 +638,9 @@ void test_single_radio_visit_model() {
   config.network = 1;
   config.node = 1;
   config.message_session = 10;
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   radio.set_home_channel(1);
   CHECK_OK(node.start(0));
   const std::array<std::uint8_t, 4> junk{{1, 2, 3, 4}};

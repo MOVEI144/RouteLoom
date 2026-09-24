@@ -11,10 +11,10 @@ mod provision_office;
 
 fn usage() {
     eprintln!(
-        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
+        "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
     eprintln!(
-        "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
+        "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
     );
     eprintln!(
         "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
@@ -139,8 +139,18 @@ fn config_challenge_request(network: &str, target: &str, ns: u16, schema: u16) -
 /// id the verdict is read for — the status verb returns the real phase/reason,
 /// never a claimed one.
 fn config_status_request(network: &str, target: &str, ns: u16, operation_id: &str) -> String {
+    config_operation_request("config.status", network, target, ns, operation_id)
+}
+
+fn config_operation_request(
+    method: &str,
+    network: &str,
+    target: &str,
+    ns: u16,
+    operation_id: &str,
+) -> String {
     format!(
-        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.status\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"operation_id\":\"{operation_id}\"}}}}",
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"{method}\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"operation_id\":\"{operation_id}\"}}}}",
         request_id(),
     )
 }
@@ -168,6 +178,79 @@ fn config_propose_request(
         "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.propose\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"schema\":{schema},\"base_snapshot\":\"{base_snapshot}\",\"patch\":{patch}{budget}}}}}",
         request_id(),
     )
+}
+
+/// Build the API1 `config.recover` request line — a signed RCR2 recovery
+/// intent issued + transferred on the dedicated recovery lane, reachable
+/// while the target journal is quarantined/uncertain. `mode` is
+/// `adopt-known` (bind the proven survivor by `snapshot_hash`) or
+/// `reprovision` (carry the complete `baseline` TLV to re-apply).
+/// `snapshot_hash`/`baseline` are omitted when empty (reprovision without
+/// an explicit hash / adopt-known carry neither field).
+#[allow(clippy::too_many_arguments)]
+fn config_recover_request(
+    network: &str,
+    target: &str,
+    ns: u16,
+    schema: u16,
+    mode: &str,
+    new_store_generation: u32,
+    new_revision: u64,
+    snapshot_hash: &str,
+    baseline: &str,
+) -> String {
+    let hash_field = if snapshot_hash.is_empty() {
+        String::new()
+    } else {
+        format!(",\"snapshot_hash\":\"{snapshot_hash}\"")
+    };
+    let baseline_field = if baseline.is_empty() {
+        String::new()
+    } else {
+        format!(",\"baseline\":\"{baseline}\"")
+    };
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.recover\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns},\"schema\":{schema},\"mode\":\"{mode}\",\"new_store_generation\":{new_store_generation},\"new_revision\":{new_revision}{hash_field}{baseline_field}}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `config.recovery_info` request line — reads the
+/// target's RecoveryInfo (floor readings + survivor/testimony hashes)
+/// the operator's RCR2 baseline binds.
+fn config_recovery_info_request(network: &str, target: &str, ns: u16) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"config.recovery_info\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"config_namespace\":{ns}}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `trust.install` request line — delivers a signed trust
+/// manifest (hex) on the kind-5 lane and reads back the TrustStatus
+/// receipt. Independent of the config authority by design.
+fn trust_install_request(network: &str, target: &str, manifest_hex: &str) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"trust.install\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\",\"manifest\":\"{manifest_hex}\"}}}}",
+        request_id(),
+    )
+}
+
+/// Build the API1 `trust.status` request line — reads the target's
+/// TrustStatus (install receipt + generation/image evidence).
+fn trust_status_request(network: &str, target: &str) -> String {
+    format!(
+        "API1 {{\"v\":1,\"request_id\":\"{}\",\"method\":\"trust.status\",\"params\":{{\"network\":\"{network}\",\"target\":\"{target}\"}}}}",
+        request_id(),
+    )
+}
+
+/// Lowercase hex encoding for file bytes embedded in a request line.
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
 
 /// Build the API1 `config.get` request line. `id` is the `cfg`-prefixed op
@@ -210,6 +293,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = remaining.first().map(String::as_str) {
         match name {
             "provision-keygen" => return provision::provision_keygen_command(&remaining[1..]),
+            "provision-authority-keygen" => {
+                return provision::provision_authority_keygen_command(&remaining[1..])
+            }
             "provision-image" => return provision::provision_image_command(&remaining[1..]),
             "provision-manifest" => return provision::provision_manifest_command(&remaining[1..]),
             "provision-verify" => return provision::provision_verify_command(&remaining[1..]),
@@ -250,7 +336,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [name, rest @ ..] if name == "operation-get-by-key" => operation_get_by_key_command(rest)?,
         [name, rest @ ..] if name == "config-challenge" => config_challenge_command(rest)?,
         [name, rest @ ..] if name == "config-status" => config_status_command(rest)?,
+        [name, rest @ ..] if name == "config-retry" => config_retry_command(rest)?,
         [name, rest @ ..] if name == "config-propose" => config_propose_command(rest)?,
+        [name, rest @ ..] if name == "config-recover" => config_recover_command(rest)?,
+        [name, rest @ ..] if name == "config-recovery-info" => config_recovery_info_command(rest)?,
+        [name, rest @ ..] if name == "trust-install" => trust_install_command(rest)?,
+        [name, rest @ ..] if name == "trust-status" => trust_status_command(rest)?,
         [name, rest @ ..] if name == "config-get" => config_get_command(rest)?,
         [name, id] if name == "cancel" => cancel_command(id)?,
         [name, rest @ ..] if name == "nodes" => nodes_command(rest)?,
@@ -948,6 +1039,22 @@ fn config_challenge_command(args: &[String]) -> Result<String, Box<dyn std::erro
 /// --operation-id <32hex>`. Reads the real phase/reason verdict of the config
 /// operation `operation_id` names — never a claimed one.
 fn config_status_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    config_status_or_retry_command(args, false)
+}
+
+fn config_retry_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    config_status_or_retry_command(args, true)
+}
+
+fn config_status_or_retry_command(
+    args: &[String],
+    retry: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let name = if retry {
+        "config-retry"
+    } else {
+        "config-status"
+    };
     let mut network: Option<String> = None;
     let mut target: Option<String> = None;
     let mut ns: Option<u16> = None;
@@ -964,28 +1071,28 @@ fn config_status_command(args: &[String]) -> Result<String, Box<dyn std::error::
                 )?)
             }
             "--operation-id" => operation_id = Some(opt_value(&mut args, "--operation-id")?),
-            other => return Err(format!("unknown config-status option: {other}").into()),
+            other => return Err(format!("unknown {name} option: {other}").into()),
         }
     }
     let network = want_hex16(
         "--network",
-        network.ok_or("config-status requires --network <16hex>")?,
+        network.ok_or(format!("{name} requires --network <16hex>"))?,
     )?;
     let target = want_hex16(
         "--target",
-        target.ok_or("config-status requires --target <16hex>")?,
+        target.ok_or(format!("{name} requires --target <16hex>"))?,
     )?;
-    let ns = ns.ok_or("config-status requires --config-namespace <u16>")?;
-    let operation_id = operation_id.ok_or("config-status requires --operation-id <32hex>")?;
+    let ns = ns.ok_or(format!("{name} requires --config-namespace <u16>"))?;
+    let operation_id = operation_id.ok_or(format!("{name} requires --operation-id <32hex>"))?;
     if !is_hex(&operation_id, 32) {
         return Err("--operation-id must be a 32-hex operation id".into());
     }
-    Ok(config_status_request(
-        &network,
-        &target,
-        ns,
-        &operation_id.to_ascii_lowercase(),
-    ))
+    let operation_id = operation_id.to_ascii_lowercase();
+    Ok(if retry {
+        config_operation_request("config.retry", &network, &target, ns, &operation_id)
+    } else {
+        config_status_request(&network, &target, ns, &operation_id)
+    })
 }
 
 /// `config-propose --network <16hex> --target <16hex> --config-namespace
@@ -1072,6 +1179,203 @@ fn config_propose_command(args: &[String]) -> Result<String, Box<dyn std::error:
         &patch,
         apply_budget_ms,
     ))
+}
+
+/// `config-recover --network <16hex> --target <16hex> --config-namespace
+/// <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation
+/// <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]`.
+/// Issues a signed RCR2 recovery intent on the dedicated recovery lane
+/// (HostOps 0x24) — reachable while the target journal is
+/// quarantined/uncertain. Read `config-recovery-info` first: adopt-known
+/// binds the proven survivor hash, reprovision carries the complete
+/// baseline TLV; (store generation, revision) must name the floor's exact
+/// next. The real verdict arrives via `config-get`.
+fn config_recover_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut ns: Option<u16> = None;
+    let mut schema: Option<u16> = None;
+    let mut mode: Option<String> = None;
+    let mut store_gen: Option<u32> = None;
+    let mut revision: Option<u64> = None;
+    let mut snapshot_hash = String::new();
+    let mut baseline = String::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            "--config-namespace" => {
+                ns = Some(want_u16(
+                    "--config-namespace",
+                    opt_value(&mut args, "--config-namespace")?,
+                )?)
+            }
+            "--schema" => schema = Some(want_u16("--schema", opt_value(&mut args, "--schema")?)?),
+            "--mode" => mode = Some(opt_value(&mut args, "--mode")?),
+            "--new-store-generation" => {
+                let raw = opt_value(&mut args, "--new-store-generation")?;
+                store_gen = Some(
+                    raw.parse::<u32>()
+                        .map_err(|_| "--new-store-generation must be a u32")?,
+                );
+            }
+            "--new-revision" => {
+                let raw = opt_value(&mut args, "--new-revision")?;
+                revision = Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| "--new-revision must be a u64")?,
+                );
+            }
+            "--snapshot-hash" => snapshot_hash = opt_value(&mut args, "--snapshot-hash")?,
+            "--baseline" => baseline = opt_value(&mut args, "--baseline")?,
+            other => return Err(format!("unknown config-recover option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("config-recover requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("config-recover requires --target <16hex>")?,
+    )?;
+    let ns = ns.ok_or("config-recover requires --config-namespace <u16>")?;
+    let schema = schema.ok_or("config-recover requires --schema <u16>")?;
+    let mode = mode.ok_or("config-recover requires --mode adopt-known|reprovision")?;
+    if mode != "adopt-known" && mode != "reprovision" {
+        return Err("--mode must be adopt-known or reprovision".into());
+    }
+    let store_gen = store_gen.ok_or("config-recover requires --new-store-generation <u32>")?;
+    if store_gen == 0 {
+        return Err("--new-store-generation must be nonzero".into());
+    }
+    let revision = revision.ok_or("config-recover requires --new-revision <u64>")?;
+    if !snapshot_hash.is_empty() && !is_hex(&snapshot_hash, 64) {
+        return Err("--snapshot-hash must be a 64-hex string".into());
+    }
+    if !baseline.is_empty()
+        && (baseline.len() % 2 != 0
+            || baseline.len() > 1024
+            || !baseline.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err("--baseline must be hex, at most 512 bytes".into());
+    }
+    if mode == "adopt-known" && !baseline.is_empty() {
+        return Err("adopt-known carries no --baseline (the survivor is bound by hash)".into());
+    }
+    if mode == "adopt-known" && snapshot_hash.is_empty() {
+        return Err("adopt-known requires --snapshot-hash <64hex>".into());
+    }
+    Ok(config_recover_request(
+        &network,
+        &target,
+        ns,
+        schema,
+        &mode,
+        store_gen,
+        revision,
+        &snapshot_hash.to_ascii_lowercase(),
+        &baseline.to_ascii_lowercase(),
+    ))
+}
+
+/// `config-recovery-info --network <16hex> --target <16hex>
+/// --config-namespace <u16>`: reads the target's RecoveryInfo — the floor
+/// readings and survivor/testimony hashes the RCR2 baseline binds. Run
+/// this before `config-recover`: the recovery must name one past each
+/// reported floor (the floor's exact next).
+fn config_recovery_info_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut ns: Option<u16> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            "--config-namespace" => {
+                ns = Some(want_u16(
+                    "--config-namespace",
+                    opt_value(&mut args, "--config-namespace")?,
+                )?)
+            }
+            other => return Err(format!("unknown config-recovery-info option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("config-recovery-info requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("config-recovery-info requires --target <16hex>")?,
+    )?;
+    let ns = ns.ok_or("config-recovery-info requires --config-namespace <u16>")?;
+    Ok(config_recovery_info_request(&network, &target, ns))
+}
+
+/// `trust-install --network <16hex> --target <16hex> --manifest <file>`:
+/// delivers an offline-signed trust manifest (raw `.rtm1` bytes, as
+/// `provision-manifest --out` writes them) on the kind-5 lane and reads
+/// back the TrustStatus receipt. Needs no config authority by design —
+/// a rotation works while the authority is being rebuilt.
+fn trust_install_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut manifest: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            "--manifest" => manifest = Some(opt_value(&mut args, "--manifest")?),
+            other => return Err(format!("unknown trust-install option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("trust-install requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("trust-install requires --target <16hex>")?,
+    )?;
+    let path = manifest.ok_or("trust-install requires --manifest <file>")?;
+    let bytes = std::fs::read(&path).map_err(|_| format!("cannot read manifest file {path}"))?;
+    if bytes.is_empty() || bytes.len() > 2048 {
+        return Err("manifest must be 1-2048 bytes of signed trust envelope".into());
+    }
+    Ok(trust_install_request(
+        &network,
+        &target,
+        &hex_encode(&bytes),
+    ))
+}
+
+/// `trust-status --network <16hex> --target <16hex>`: reads the target's
+/// TrustStatus — the install receipt and the generation/image evidence
+/// for a rotation.
+fn trust_status_command(args: &[String]) -> Result<String, Box<dyn std::error::Error>> {
+    let mut network: Option<String> = None;
+    let mut target: Option<String> = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--network" => network = Some(opt_value(&mut args, "--network")?),
+            "--target" => target = Some(opt_value(&mut args, "--target")?),
+            other => return Err(format!("unknown trust-status option: {other}").into()),
+        }
+    }
+    let network = want_hex16(
+        "--network",
+        network.ok_or("trust-status requires --network <16hex>")?,
+    )?;
+    let target = want_hex16(
+        "--target",
+        target.ok_or("trust-status requires --target <16hex>")?,
+    )?;
+    Ok(trust_status_request(&network, &target))
 }
 
 /// `config-get --id <cfg-token>`: thin client over `config.get` — reads one
@@ -1740,6 +2044,19 @@ mod tests {
             line.contains("\"operation_id\":\"00112233445566778899aabbccddeeff\""),
             "{line}"
         );
+        let retry = config_retry_command(&args(&[
+            "--network",
+            "0000000000000001",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "7",
+            "--operation-id",
+            "00112233445566778899AABBCCDDEEFF",
+        ]))
+        .unwrap();
+        assert!(retry.contains("\"method\":\"config.retry\""), "{retry}");
+        assert!(retry.contains("\"operation_id\":\"00112233445566778899aabbccddeeff\""));
         assert!(config_status_command(&args(&[
             "--network",
             "0000000000000001",
@@ -1857,6 +2174,114 @@ mod tests {
         assert!(config_get_command(&args(&["--id", "0000000000000007"])).is_err());
         assert!(config_get_command(&args(&["--id", "cfgzz"])).is_err());
         assert!(config_get_command(&args(&[])).is_err());
+    }
+
+    #[test]
+    fn config_recover_builds_api1_line() {
+        let base = [
+            "--network",
+            "0000000000000007",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "1",
+            "--schema",
+            "1",
+            "--mode",
+            "adopt-known",
+            "--new-store-generation",
+            "4",
+            "--new-revision",
+            "8",
+            "--snapshot-hash",
+            "ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+        ];
+        let line = config_recover_command(&args(&base)).unwrap();
+        assert!(line.starts_with("API1 {"), "{line}");
+        assert!(line.contains("\"method\":\"config.recover\""), "{line}");
+        assert!(line.contains("\"mode\":\"adopt-known\""), "{line}");
+        assert!(line.contains("\"new_store_generation\":4"), "{line}");
+        assert!(line.contains("\"new_revision\":8"), "{line}");
+        assert!(line.contains("\"snapshot_hash\":\"abab"), "{line}");
+        assert!(!line.contains("baseline"), "{line}");
+        // Reprovision carries the baseline instead of the hash.
+        let line = config_recover_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "1",
+            "--schema",
+            "1",
+            "--mode",
+            "reprovision",
+            "--new-store-generation",
+            "4",
+            "--new-revision",
+            "8",
+            "--baseline",
+            "AABB",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"mode\":\"reprovision\""), "{line}");
+        assert!(line.contains("\"baseline\":\"aabb\""), "{line}");
+        assert!(!line.contains("snapshot_hash"), "{line}");
+        // Mode/hash/baseline cross-checks refuse before any socket opens.
+        assert!(config_recover_command(&args(&base[..base.len() - 2])).is_err());
+        let mut bad_mode = base.to_vec();
+        bad_mode[9] = "attest";
+        assert!(config_recover_command(&args(&bad_mode)).is_err());
+        let mut with_baseline = base.to_vec();
+        with_baseline.extend(["--baseline", "aabb"]);
+        assert!(config_recover_command(&args(&with_baseline)).is_err());
+        let mut bad_hash = base.to_vec();
+        bad_hash[15] = "zzzz";
+        assert!(config_recover_command(&args(&bad_hash)).is_err());
+    }
+
+    #[test]
+    fn recovery_info_and_trust_commands_build_api1_lines() {
+        let line = config_recovery_info_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--target",
+            "0000000000000009",
+            "--config-namespace",
+            "1",
+        ]))
+        .unwrap();
+        assert!(
+            line.contains("\"method\":\"config.recovery_info\""),
+            "{line}"
+        );
+        assert!(config_recovery_info_command(&args(&[])).is_err());
+        let line = trust_status_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--target",
+            "0000000000000009",
+        ]))
+        .unwrap();
+        assert!(line.contains("\"method\":\"trust.status\""), "{line}");
+        assert!(trust_status_command(&args(&[])).is_err());
+        // trust-install embeds the manifest file bytes as hex.
+        let path =
+            std::env::temp_dir().join(format!("routeloom-ctl-test-{}.rtm1", std::process::id()));
+        std::fs::write(&path, [0xD2_u8, 0x84, 0x01]).unwrap();
+        let line = trust_install_command(&args(&[
+            "--network",
+            "0000000000000007",
+            "--target",
+            "0000000000000009",
+            "--manifest",
+            path.to_str().unwrap(),
+        ]))
+        .unwrap();
+        assert!(line.contains("\"method\":\"trust.install\""), "{line}");
+        assert!(line.contains("\"manifest\":\"d28401\""), "{line}");
+        assert!(trust_install_command(&args(&["--network", "1", "--target", "2"])).is_err());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

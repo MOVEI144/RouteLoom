@@ -208,9 +208,16 @@ Status LifecycleStore::commit(const LifecycleRecord& record, bool twin) noexcept
 }
 
 Status LifecycleStore::begin_removal(const LifecycleRecord& record) noexcept {
+  const bool fresh_after_removal = pair_.has_active() &&
+      record_.mode == LifecycleMode::UnassignedReady && record.self == record_.self &&
+      (record.site_id != record_.site_id ||
+       (record.generation > record_.generation &&
+        static_cast<std::uint32_t>(record.old_network) ==
+            static_cast<std::uint32_t>(record_.old_network) &&
+        (record.old_network >> 32U) >= (record_.old_network >> 32U)));
   if (record.mode != LifecycleMode::Removing || pair_.uncertain() || pair_.quarantined() ||
       (pair_.has_active() && record_.mode != LifecycleMode::Idle &&
-       record_.mode != LifecycleMode::Prepared)) {
+       record_.mode != LifecycleMode::Prepared && !fresh_after_removal)) {
     return Status::error(StatusCode::InvalidState, "rlx removal state");
   }
   return commit(record, has_record() && record_.mode == LifecycleMode::Prepared);
