@@ -1,0 +1,9 @@
+{
+  "codec": "authority_body",
+  "encoded_hex": "010100000000000901020304050607080000000a000000000200000000000000000000000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "name": "body_pull_wrong_length",
+  "note": "Pull must be exactly 28 bytes",
+  "reason": "surplus"
+}

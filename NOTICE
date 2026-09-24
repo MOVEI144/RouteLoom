@@ -73,10 +73,11 @@ Vendored in this repository
              tf-psa-crypto submodule of Mbed TLS commit
              0fe989b6b514192783c469039edd325fd0989806, which is libedhoc's
              externals/mbedtls pin)
-  Notes    : Only the builtin AES block cipher and CCM mode plus the
-             headers they include, configured by
+  Notes    : Only the builtin AES block cipher and the CCM and GCM
+             modes plus the headers they include, configured by
              components/routeloom/src/edhoc/tf_psa_crypto_config.h. Provides
-             the AES-CCM-16-64-128 of EDHOC cipher suite 2 in HOST builds
+             the AES-CCM-16-64-128 of EDHOC cipher suite 2 and the
+             AES-GCM-128 of the SDK v1 authority channel in HOST builds
              only; the ESP-IDF component does not compile it (firmware uses
              ESP-IDF's own Mbed TLS through PSA). Unmodified.
 

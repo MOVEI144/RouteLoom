@@ -99,7 +99,9 @@ jobs:
           cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
           cargo run --manifest-path host/Cargo.toml -p routeloom-provision --example gen_provisioning_golden
           python3 tools/gen_autonomy_vectors.py
+          python3 -c "import cryptography" 2>/dev/null || pip install "cryptography==44.0.0"
           python3 tools/gen_sdkv1_derivation_vectors.py
+          python3 tools/gen_sdkv1_authority_vectors.py
           python3 tools/gen_sdkv1_vectors.py
           python3 tools/gen_sdkv1_ead_vectors.py
           python3 tools/gen_sdkv1_dams_vectors.py

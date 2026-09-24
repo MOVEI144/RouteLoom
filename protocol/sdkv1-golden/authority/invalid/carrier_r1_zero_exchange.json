@@ -1,0 +1,9 @@
+{
+  "codec": "authority_carrier",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "head_hex": "0105010000000000",
+  "name": "carrier_r1_zero_exchange",
+  "note": "kinds 1..3 need a nonzero exchange id",
+  "reason": "zero_exchange_id"
+}
