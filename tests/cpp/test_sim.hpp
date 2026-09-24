@@ -134,6 +134,11 @@ class SimNetwork {
   // delivered or not, each attempt costs air time.
   std::map<routeloom::FrameType, TxTally> tx_by_type;
 
+  // Set when the last flush() hit the dequeue bound with frames still
+  // queued; cleared on entry. Scenarios size their traffic so one
+  // flush() always drains the queue, keeping this false.
+  bool flush_truncated{false};
+
   // Returns the number of undelivered frames (link down, node missing, or
   // dropped by the loss hook).
   //
@@ -146,12 +151,21 @@ class SimNetwork {
   // while the whole drain still precedes any dispatch, keeping RX-raised
   // control replies ahead of queued DATA. The receiver side keeps the
   // step cadence callers already model with their own poll loops.
+  //
+  // The drain bound counts dequeued frames only — outer wake/poll
+  // iterations cost nothing — so chained traffic keeps the historic
+  // 10,000-frame budget. When the bound stops the drain with frames
+  // still queued, flush_truncated records the partial drain instead of
+  // returning it silently.
   std::size_t flush(routeloom::MonotonicMs now) {
     std::size_t dropped = 0;
-    std::size_t safety = 0;
-    while (!queue.empty() && safety++ < 10000) {
+    constexpr std::size_t kFlushLimit = 10000;
+    std::size_t processed = 0;
+    flush_truncated = false;
+    while (!queue.empty() && processed < kFlushLimit) {
       std::set<routeloom::NodeId> woken;
-      while (!queue.empty() && safety++ < 10000) {
+      while (!queue.empty() && processed < kFlushLimit) {
+        ++processed;
         Pending pending = std::move(queue.front());
         queue.pop_front();
         if (nodes.count(pending.from) == 0) {  // sender was removed mid-flight
@@ -218,6 +232,7 @@ class SimNetwork {
         if (nodes.count(id) != 0) nodes.at(id)->poll(now);
       }
     }
+    flush_truncated = !queue.empty();
     return dropped;
   }
 

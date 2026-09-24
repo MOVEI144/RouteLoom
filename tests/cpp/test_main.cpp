@@ -763,13 +763,13 @@ void test_tx_result_dispatch() {
   }
 
   // --- staged completion skips the wait ------------------------------------
-  // Review P2: the completion lands on a full driver queue AFTER the
-  // pass's entry check, so it is staged outside the queue
-  // (firmware: lost_node_tx_; here: post_staged_tx_result) while the
-  // queue itself drains empty. The wait must still return immediately —
-  // an empty queue must not idle a resolvable job — and the next pass
-  // submits with no gap. wait_for_event runs this same gate on the
-  // firmware side (owner_pump.hpp).
+  // The completion lands on a full driver queue AFTER the pass's entry
+  // check, so it is staged outside the queue (firmware: lost_node_tx_;
+  // here: post_staged_tx_result) while the queue itself drains empty.
+  // The wait still returns immediately — an empty queue must not idle a
+  // resolvable job — and the next pass submits with no gap.
+  // wait_for_event runs this same gate on the firmware side
+  // (owner_pump.hpp).
   pump.post_staged_tx_result(radio.sent.back().token, true, 5);
   radio.now_ms = pump.wake_at(5);
   CHECK(radio.now_ms == 5);  // staged work never sleeps out the tick
@@ -781,9 +781,10 @@ void test_tx_result_dispatch() {
   // A TX completion and an inbound transit DATA (which owes a HOP_ACCEPT)
   // are both staged while the owner sleeps. The pass must drain BOTH and
   // only then let poll() dispatch: the accept takes the control lane
-  // ahead of the queued DATA. Dispatching inside on_radio_tx_result —
-  // the rejected first-round fix — put the DATA on the air before the RX
-  // was even decoded (review P2).
+  // ahead of the queued DATA. Dispatching inside on_radio_tx_result
+  // would put the DATA on the air before the RX was even decoded, so a
+  // completion resolves the in-flight attempt only and the next
+  // submission always comes from poll() after the drain.
   {
     TestSecurity security2;
     CapturingObserver observer2;
