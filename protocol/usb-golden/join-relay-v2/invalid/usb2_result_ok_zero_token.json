@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_result",
+  "encoded_hex": "0263001600000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_result_ok_zero_token",
+  "note": "an Ok always carries the complete token"
+}

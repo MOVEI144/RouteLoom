@@ -1,0 +1,8 @@
+{
+  "codec": "epoch_query",
+  "encoded_hex": "0201000000000000404142434445464748494a4b4c4d4e4f",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_query_kind_1",
+  "note": "kind 3 is a query, 1 is an up head"
+}

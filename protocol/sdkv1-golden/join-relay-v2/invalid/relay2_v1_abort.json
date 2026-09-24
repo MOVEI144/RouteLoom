@@ -1,0 +1,8 @@
+{
+  "codec": "relay_object",
+  "encoded_hex": "01017e57ab1e00a10000000007770200000012340102ba040400000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_v1_abort",
+  "note": "a v1 abort is not a v2 object"
+}

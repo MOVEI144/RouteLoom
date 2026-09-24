@@ -1,0 +1,9 @@
+{
+  "carrier": "wire",
+  "codec": "join_reply",
+  "encoded_hex": "024210111213000a0000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_reply_v1_size",
+  "note": "a 10 B v1 reply is short for wire"
+}

@@ -210,6 +210,17 @@ class ZtJoinerLink {
 // ===================================================================================
 // JoinProxy — one relay at a time (02 §7.3)
 // ===================================================================================
+
+// Gateway-epoch cache and query policy (#116 §3.3): a proxy learns its
+// gateway's service epoch with a 24 B query before admitting a relay, keeps
+// it for 30 s, and retries a lost query every 500 ms (at most 4 sends, the
+// query dies after 2 s). An ongoing 20 s exchange is never interrupted by a
+// mere cache expiry.
+constexpr std::uint32_t kGatewayEpochCacheMs = 30000;
+constexpr std::uint32_t kEpochQueryIntervalMs = 500;
+constexpr std::uint8_t kEpochQueryMaxSends = 4;
+constexpr std::uint32_t kEpochQueryLifetimeMs = 2000;
+
 struct JoinProxyConfig {
   NodeId node{kInvalidNodeId};
   MacAddress mac{};
@@ -217,6 +228,11 @@ struct JoinProxyConfig {
   std::uint32_t org_hint{0};    // of this site's Site CA
   std::uint32_t site_hint{0};   // join_site_hint(site_id)
   NodeId gateway{kInvalidNodeId};
+  // This proxy relay service's incarnation, injected by the Owner from a
+  // committed durable allocator value and immutable afterwards (#116 §3.2).
+  // Zero (or any other invalid config) makes every mutator fail with
+  // InvalidArgument; the engine never sends before it learns its epoch.
+  std::uint32_t proxy_epoch{0};
   std::uint32_t cookie_bucket_ms{2000};
   std::uint32_t offer_slots{32};       // random OFFER slot (02-discovery §5)
   std::uint32_t offer_slot_ms{10};
@@ -245,6 +261,8 @@ struct JoinProxyStats {
   std::uint32_t down_objects{0};
   std::uint32_t retransmissions{0};
   std::uint32_t send_failures{0};
+  std::uint32_t epoch_queries_tx{0};
+  std::uint32_t epoch_replies_rx{0};
 };
 
 class JoinProxy {
@@ -257,15 +275,18 @@ class JoinProxy {
   // Owner-fed policy: the site's zero_touch_open flag, whether the gateway
   // path is currently usable (and its hop count), and the local membership.
   // Leaving Member (revoked, GK unknown) aborts any relay and stops OFFERs.
-  void set_policy(bool zero_touch_open) noexcept { open_ = zero_touch_open; }
-  void set_authority(bool reachable, std::uint8_t hops, MonotonicMs now_ms) noexcept;
-  void set_membership(MembershipState state, MonotonicMs now_ms) noexcept;
+  // All mutators refuse re-entry from a port callback with Busy and change
+  // nothing; a regressed clock fails new work with TimeUncertain.
+  Status set_policy(bool zero_touch_open) noexcept;
+  Status set_authority(bool reachable, std::uint8_t hops, MonotonicMs now_ms) noexcept;
+  Status set_membership(MembershipState state, MonotonicMs now_ms) noexcept;
 
-  void on_rld1_rx(const MacAddress& source, const MacAddress& destination,
-                  std::int8_t rssi_dbm, ByteView frame, MonotonicMs now_ms) noexcept;
+  Status on_rld1_rx(const MacAddress& source, const MacAddress& destination,
+                    std::int8_t rssi_dbm, ByteView frame, MonotonicMs now_ms) noexcept;
   // `from` is the verified mesh origin of a routed relay frame.
-  void on_relay_rx(NodeId from, FrameType type, ByteView payload, MonotonicMs now_ms) noexcept;
-  void poll(MonotonicMs now_ms) noexcept;
+  Status on_relay_rx(NodeId from, FrameType type, ByteView payload,
+                     MonotonicMs now_ms) noexcept;
+  Status poll(MonotonicMs now_ms) noexcept;
 
   State state() const noexcept { return relay_.active ? State::Relaying : State::Idle; }
   std::uint32_t relay_id() const noexcept { return relay_.active ? relay_.relay_id : 0; }
@@ -284,6 +305,7 @@ class JoinProxy {
   struct Relay {
     bool active{false};
     std::uint32_t relay_id{0};
+    std::uint32_t gateway_epoch{0};  // the gateway incarnation this relay uses
     MacAddress joiner_mac{};
     JoinNonce nonce{};
     NodeId joiner{kInvalidNodeId};
@@ -296,6 +318,15 @@ class JoinProxy {
     bool slot_up{false};                // slot Sending holds an up object
   };
 
+  // One outstanding gateway-epoch query (#116 §3.3).
+  struct EpochQueryState {
+    bool active{false};
+    JoinNonce nonce{};
+    std::uint8_t sends{0};
+    MonotonicMs next_ms{0};
+    MonotonicMs deadline_ms{0};
+  };
+
   void handle_discover(const MacAddress& source, const MacAddress& destination,
                        ByteView frame, MonotonicMs now_ms) noexcept;
   void handle_auth(const MacAddress& source, const autonomy::Rld1Envelope& env,
@@ -304,7 +335,8 @@ class JoinProxy {
                     std::int8_t rssi, MonotonicMs now_ms) noexcept;
   void handle_reply(const MacAddress& source, const autonomy::Rld1Envelope& env,
                     MonotonicMs now_ms) noexcept;
-  // Step-1 admission: cookie + budget + slot; answers RelayStatus on refusal.
+  // Step-1 admission: cookie + epoch + budget + slot; answers RelayStatus
+  // on refusal.
   bool admit_first(const MacAddress& source, const autonomy::Rld1Envelope& env,
                    const JoinCookieBytes& cookie, std::int8_t rssi, MonotonicMs now_ms) noexcept;
   bool cookie_valid(const MacAddress& mac, const JoinNonce& nonce, const JoinCookieBytes& cookie,
@@ -325,6 +357,14 @@ class JoinProxy {
   void end_relay() noexcept;
   Status emit_rld1(const MacAddress& mac, const JoinNonce& nonce, FrameType kind,
                    ByteView body) noexcept;
+  // Gateway-epoch cache (#116 §3.3): a DISCOVER creates the need when the
+  // cache is missing; admit_first consumes it; poll drives retransmission.
+  bool epoch_cache_valid(MonotonicMs now_ms) const noexcept;
+  void need_gateway_epoch(MonotonicMs now_ms) noexcept;
+  void send_epoch_query(MonotonicMs now_ms) noexcept;
+  void handle_epoch_reply(const EpochReply& reply, MonotonicMs now_ms) noexcept;
+  void on_relay_rx_impl(NodeId from, FrameType type, ByteView payload,
+                        MonotonicMs now_ms) noexcept;
 
   JoinProxyConfig config_{};
   ZtRld1Port& rld1_;
@@ -335,47 +375,77 @@ class JoinProxy {
   bool reachable_{false};
   std::uint8_t hops_{kZtHopsUnknown};
   MembershipState membership_{MembershipState::Unprovisioned};
+  // Guards: re-entry from a port callback is Busy; a bad config fails every
+  // mutator; time never runs backwards for new work.
+  bool in_call_{false};
+  bool config_valid_{false};
+  MonotonicMs last_now_ms_{0};
   FixedPool<PendingOffer, kPendingOffers> offers_{};
   Relay relay_{};
   JoinObjectSlot slot_{};
   MonotonicMs next_m1_ms_{0};
-  std::uint32_t next_relay_id_{0};
+  std::uint32_t next_relay_id_{1};  // strictly increasing within proxy_epoch
+  bool relay_ids_exhausted_{false};
+  // The gateway incarnation cache: the epoch, whether the gateway reported
+  // its authority ready, when it was cached, and the largest epoch seen
+  // (a smaller reply is stale and refused).
+  std::uint32_t gateway_epoch_{0};
+  bool gateway_ready_{false};
+  MonotonicMs gateway_cached_ms_{0};
+  std::uint32_t gateway_max_epoch_{0};
+  EpochQueryState query_{};
   JoinProxyStats stats_{};
 };
 
 // ===================================================================================
 // JoinRelayGateway — Wire relay <-> host (USB HostOps 0x60-0x63)
 // ===================================================================================
-// Why the gateway reported an aborted relay to the host (USB 0x62 reason).
+// Why a relay ended (USB 0x62 reason). Superseded is new in #116: a larger
+// key from the same proxy closed this exchange.
 enum class RelayAbortReason : std::uint8_t {
   ProxyAborted = 1,    // the proxy ended the relay (device silent, 20 s cap, stopped)
-  GatewayExpired = 2,  // an up object never completed at the gateway
+  GatewayExpired = 2,  // the exchange ran past its 20 s bound at the gateway
   DeliveryFailed = 3,  // the proxy never confirmed a down object
   HostAborted = 4,     // H->G: the Site Authority cancels the relay
+  Superseded = 5,      // a newer key from the same proxy replaced this relay
 };
 constexpr bool relay_abort_reason_known(const std::uint8_t value) noexcept {
-  return value >= 1 && value <= 4;
+  return value >= 1 && value <= 5;
 }
 
 class JoinRelayHostSink {
  public:
   virtual ~JoinRelayHostSink() = default;
-  // A complete up relay object (RelayHeader dir=up + message) from `proxy`,
-  // `hops` mesh hops away. `object` is valid only during the call and may
-  // alias a gateway slot, so copy it before keeping it. The callback must
-  // not re-enter the gateway: host_down()/host_abort() return Busy and
-  // the other mutating calls are ignored while it runs — call them after
-  // it returns. Returning an error aborts the relay with
+  // A complete up relay object (v2 RelayHeader dir=up + message) from
+  // `proxy`, `hops` mesh hops away, handed over at most once per up stage.
+  // `object` is valid only during the call and may alias a gateway slot, so
+  // copy it before keeping it. The callback must not re-enter the gateway:
+  // every mutating call returns Busy while it runs — call them after it
+  // returns. Returning an error terminates the relay; the proxy is told
   // authority_unreachable.
   virtual Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept = 0;
-  // The relay ended at the gateway. The callback must not re-enter the
-  // gateway — the same rules as relay_up apply.
-  virtual Status relay_abort(NodeId proxy, std::uint32_t relay_id,
+  // The relay ended at the gateway: the first termination of `token` only,
+  // never a late duplicate. The callback must not re-enter the gateway —
+  // the same rules as relay_up apply.
+  virtual Status relay_abort(NodeId proxy, RelayToken token,
                              RelayAbortReason reason) noexcept = 0;
 };
 
+// One exchange lives at most 20 s from its first admission; a duplicate
+// never extends it (#116 §4.4).
+constexpr std::uint32_t kRelayExchangeTimeoutMs = 20000;
+// The gateway answers epoch queries statelessly through a token bucket:
+// bursts of 4, 10 answers per second at most (#116 §3.3).
+constexpr std::uint32_t kEpochAnswerBurst = 4;
+constexpr std::uint32_t kEpochAnswersPerSecond = 10;
+
 struct JoinRelayGatewayConfig {
   NodeId node{kInvalidNodeId};
+  // This gateway relay service's incarnation, injected by the Owner from a
+  // committed durable allocator value and immutable afterwards (#116 §3.2).
+  // Zero (or any other invalid config) makes every mutator fail with
+  // InvalidArgument; the engine never relays before it learns its epoch.
+  std::uint32_t gateway_epoch{0};
   // Retry hint the gateway gives a proxy when no host (Site Authority) is
   // attached or the host refused the object (07 §7: authority_unreachable).
   std::uint32_t unreachable_retry_ms{5000};
@@ -395,6 +465,8 @@ struct JoinRelayGatewayStats {
   std::uint32_t delivery_failed{0};
   std::uint32_t retransmissions{0};
   std::uint32_t host_unavailable{0};
+  std::uint32_t epoch_queries_rx{0};
+  std::uint32_t epoch_replies_tx{0};
 };
 
 class JoinRelayGateway {
@@ -402,70 +474,146 @@ class JoinRelayGateway {
   // Concurrent chunked objects (either direction). The Site Authority runs
   // at most 4 joins (02 §13); single-frame objects need no slot.
   static constexpr std::size_t kSlots = 2;
-  // Relays recently seen from proxies — lets a host abort by (proxy, id).
-  static constexpr std::size_t kRecentRelays = 8;
+  // The RelayBook (#116 §4.1): one floor row per proxy seen in this gateway
+  // service epoch (never evicted, never expired), one live exchange each.
+  static constexpr std::size_t kProxyFloors = 128;
+  static constexpr std::size_t kActiveRelays = 8;
+  static constexpr std::uint8_t kNoActive = 0xFF;
+  static constexpr std::uint8_t kNoSlot = 0xFF;
 
   JoinRelayGateway(const JoinRelayGatewayConfig& config, ZtRelayPort& wire) noexcept;
 
-  void set_host_sink(JoinRelayHostSink* sink) noexcept {
-    if (!in_call_) sink_ = sink;  // ignored inside a sink callback
-  }
-  void set_membership(MembershipState state) noexcept;
+  // (De)attaches the host sink. Detaching terminates every live exchange
+  // (the proxies hear authority_unreachable, best effort) but keeps the
+  // floors and the epoch. Busy inside a sink callback.
+  Status set_host_sink(JoinRelayHostSink* sink) noexcept;
+  Status set_membership(MembershipState state) noexcept;
 
   // Wire RX: `from` is the verified mesh origin, `hops` its distance.
-  void on_relay_rx(NodeId from, std::uint8_t hops, FrameType type, ByteView payload,
-                   MonotonicMs now_ms) noexcept;
+  Status on_relay_rx(NodeId from, std::uint8_t hops, FrameType type, ByteView payload,
+                     MonotonicMs now_ms) noexcept;
   // USB 0x61: deliver a down relay object to `to_proxy`. Ok = accepted for
-  // Wire delivery (not delivered to the device). InvalidArgument/
-  // ProtocolError = malformed or inconsistent, NoCapacity = no slot,
-  // NoRoute/others = the Wire port refused, InvalidState = not a member.
+  // Wire delivery (not delivered to the device). NotFound/Expired = unknown
+  // or terminated token, Conflict/ProtocolError = wrong order or identity,
+  // NoCapacity = no slot, InvalidState = not a member. A down Abort object
+  // is refused here — cancel with host_abort instead.
   Status host_down(NodeId to_proxy, ByteView object, MonotonicMs now_ms) noexcept;
-  // USB 0x62 (H->G): cancel a relay seen recently. NotFound when the gateway
-  // does not know it (use 0x61 with an Abort header instead).
-  Status host_abort(NodeId proxy, std::uint32_t relay_id, MonotonicMs now_ms) noexcept;
-  void poll(MonotonicMs now_ms) noexcept;
+  // USB 0x62 (H->G): cancel the live relay `token`. NotFound when the
+  // gateway does not know it.
+  Status host_abort(NodeId proxy, RelayToken token, MonotonicMs now_ms) noexcept;
+  Status poll(MonotonicMs now_ms) noexcept;
 
   const JoinRelayGatewayStats& stats() const noexcept { return stats_; }
   std::size_t slots_in_use() const noexcept;
 
  private:
+  // One proxy's monotonic frontier within this gateway epoch: the largest
+  // key seen, and the live exchange for it if any (kNoActive = terminated:
+  // smaller keys stay old forever, the same key never reopens).
+  struct ProxyFloor {
+    NodeId proxy{kInvalidNodeId};
+    std::uint32_t max_proxy_epoch{0};
+    std::uint32_t max_relay_id{0};
+    std::uint8_t active{kNoActive};
+    bool valid{false};
+  };
+  // One live exchange. The only stage floor: it never moves with a slot,
+  // so losing a buffer can never resurrect an old stage (#116 R-I2/R-I3).
+  struct ActiveRelay {
+    bool active{false};
+    std::uint8_t floor{0};
+    RelayToken token{};
+    MacAddress joiner_mac{};
+    JoinAuthPhase phase{JoinAuthPhase::EdhocMessage};
+    std::uint8_t hops{0};
+    MonotonicMs started_ms{0};
+    MonotonicMs deadline_ms{0};
+    // Accepted up stages: bit i covers step (1, 3, 5)[i]; totals[i] is the
+    // accepted encoded-or-chunk total, used to re-acknowledge a duplicate.
+    std::uint8_t accepted_up_mask{0};
+    std::array<std::uint16_t, 3> accepted_totals{};
+    bool host_up_delivered{false};  // the host owns a session for this key
+    // The down object in flight or just done (a step number, 0 = none yet).
+    std::uint8_t down_step{0};
+    bool down_sending{false};
+    bool down_done{false};
+    bool down_final{false};
+    bool m2_done{false};  // a step-2 down completed (a duplicate is Expired)
+    std::uint8_t slot{kNoSlot};
+  };
   struct Slot {
     bool active{false};
     bool down{false};  // Sending a down object (else assembling an up one)
-    NodeId proxy{kInvalidNodeId};
-    std::uint32_t relay_id{0};
-    std::uint8_t hops{0};
+    std::uint8_t relay{kNoActive};
     JoinObjectSlot object{};
   };
-  struct Recent {
-    bool valid{false};
-    NodeId proxy{kInvalidNodeId};
-    std::uint32_t relay_id{0};
-    MacAddress joiner_mac{};
-    JoinAuthPhase phase{JoinAuthPhase::EdhocMessage};
-    std::uint8_t step{1};
-    MonotonicMs seen_ms{0};
-  };
 
-  Slot* find(NodeId proxy, std::uint32_t relay_id) noexcept;
-  Slot* allocate(NodeId proxy, std::uint32_t relay_id) noexcept;
+  // Compares `token` against the floor row of `proxy`: older (drop), same
+  // (classify against the live exchange), or newer (may open).
+  enum class KeyOrder : std::uint8_t { Older = 0, Same, Newer, UnknownProxy };
+  KeyOrder order_key(NodeId proxy, const RelayToken& token, ProxyFloor*& floor) noexcept;
+  ActiveRelay* live_exchange(ProxyFloor& floor) noexcept;
+  // Opens a new exchange for a larger key (or a first key of a new proxy):
+  // validates the inner header, batch-allocates floor/active/slot and
+  // supersedes the proxy's previous exchange. Fails without changing any
+  // other exchange when resources are missing.
+  Status open_exchange(NodeId proxy, std::uint8_t hops, const RelayHeader& header,
+                       MonotonicMs now_ms, ActiveRelay*& relay) noexcept;
+  Slot* slot_for(ActiveRelay& relay) noexcept;
+  Slot* allocate_slot(ActiveRelay& relay, std::uint8_t relay_index, bool down) noexcept;
   void free_slot(Slot& slot) noexcept;
-  void remember(NodeId proxy, const RelayHeader& header, MonotonicMs now_ms) noexcept;
-  void forget(NodeId proxy, std::uint32_t relay_id) noexcept;
-  void deliver_up(NodeId proxy, std::uint8_t hops, const RelayObject& object, ByteView bytes,
-                  MonotonicMs now_ms) noexcept;
-  Status send_due_chunks(Slot& slot, MonotonicMs now_ms) noexcept;
+  // Commits the termination before any callback: floors stay terminated,
+  // buffers are wiped, the live row is unlinked, then at most one
+  // notification goes out. A second finish of the same key is a no-op.
+  void finish_exchange(ActiveRelay& relay, RelayAbortReason reason, bool notify_sink) noexcept;
+  void finish_index(std::uint8_t relay_index, RelayAbortReason reason, bool notify_sink) noexcept;
+  // Unlinks and wipes without counting or notifying: sink detach, membership
+  // leave, host-refused ups (already counted) and silent completions.
+  void finish_silent(ActiveRelay& relay) noexcept;
+  void deliver_up(ActiveRelay& relay, std::uint8_t relay_index, std::uint8_t hops,
+                  const RelayObject& object, ByteView bytes) noexcept;
+  // A valid new up stage implicitly received the down object in flight.
+  void implicit_down_receipt(ActiveRelay& relay) noexcept;
+  Status send_due_chunks(Slot& slot, NodeId proxy, MonotonicMs now_ms) noexcept;
   void send_down_abort(NodeId proxy, const RelayHeader& up, RelayStatusCode status,
                        std::uint32_t retry_after_ms) noexcept;
+  void send_up_complete(NodeId proxy, const RelayToken& token, JoinAuthPhase phase,
+                        std::uint8_t step, std::uint16_t total) noexcept;
+  void answer_epoch_query(NodeId proxy, const EpochQuery& query, MonotonicMs now_ms) noexcept;
+  void on_relay_rx_impl(NodeId from, std::uint8_t hops, FrameType type, ByteView payload,
+                        MonotonicMs now_ms) noexcept;
+  void handle_up_single(NodeId from, std::uint8_t hops, const RelayObject& object, ByteView bytes,
+                        MonotonicMs now_ms) noexcept;
+  void handle_up_same(ActiveRelay& relay, std::uint8_t hops, const RelayHeader& header,
+                      ByteView bytes, std::uint16_t total) noexcept;
+  void handle_up_chunk(NodeId from, std::uint8_t hops, const JoinChunk& chunk,
+                       MonotonicMs now_ms) noexcept;
+  void handle_chunk_same(NodeId from, ActiveRelay& relay, const JoinChunk& chunk,
+                         MonotonicMs now_ms) noexcept;
+  void feed_assembly(NodeId from, ActiveRelay& relay, Slot& slot, const JoinChunk& chunk,
+                     MonotonicMs now_ms) noexcept;
+  void handle_proxy_aborted(NodeId from, const RelayToken& token,
+                            const RelayHeader& header) noexcept;
+  void handle_down_reply(NodeId from, const JoinReply& reply, MonotonicMs now_ms) noexcept;
+  // The first chunk of a new stage carries the whole 32 B object head in
+  // the clear: it is checked before any buffer is granted or freed.
+  bool first_chunk_header(ByteView chunk_data, RelayHeader& header) const noexcept;
 
   JoinRelayGatewayConfig config_{};
   ZtRelayPort& wire_;
   JoinRelayHostSink* sink_{nullptr};
   MembershipState membership_{MembershipState::Unprovisioned};
-  // Inside a sink callback: mutating calls return Busy or are ignored.
+  // Guards: re-entry from a sink/port callback is Busy; a bad config fails
+  // every mutator; time never runs backwards for new work.
   bool in_call_{false};
+  bool config_valid_{false};
+  MonotonicMs last_now_ms_{0};
   std::array<Slot, kSlots> slots_{};
-  std::array<Recent, kRecentRelays> recent_{};
+  std::array<ProxyFloor, kProxyFloors> floors_{};
+  std::array<ActiveRelay, kActiveRelays> relays_{};
+  // Epoch-answer bucket in tenths of a token (burst 40 = 4 tokens).
+  std::uint32_t answer_budget_{kEpochAnswerBurst * 10};
+  MonotonicMs answer_refill_ms_{0};
   JoinRelayGatewayStats stats_{};
 };
 
