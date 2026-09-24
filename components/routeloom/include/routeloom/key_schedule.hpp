@@ -49,6 +49,10 @@ inline constexpr char kLabelContextConfirm[] = "RouteLoom/v1/context-confirm";
 // Authority channel (03 §5.3, G-SEC P5): GK-id binds (network, epoch, GK)
 // for ACK key confirmation. Never a raw-GK export.
 inline constexpr char kLabelGkId[] = "RouteLoom/v1/gk-id";
+inline constexpr char kLabelDevRam[] = "RouteLoom/v1/dev-ram";
+inline constexpr char kLabelDevRms[] = "RouteLoom/v1/dev-rms";
+inline constexpr char kLabelDevGroupKey[] = "RouteLoom/v1/dev-group-key";
+inline constexpr char kLabelDevGroupIv[] = "RouteLoom/v1/dev-group-iv";
 
 // EDHOC Exporter labels (private use, 03 §2.1). Consumed by P2; listed here so
 // the whole RouteLoom label space is frozen in one place.
@@ -114,6 +118,14 @@ Status group_end_key(const ScopeDigest& prk, std::uint32_t gk_epoch, std::uint64
                      NodeId origin, std::uint32_t session, TrafficKey& out) noexcept;
 // K_dsk(g) = Expand(PRK_g, "RouteLoom/v1/dsk-member" 0x00 || g u32, 32)
 Status group_dsk_key(const ScopeDigest& prk, std::uint32_t gk_epoch, Secret& out) noexcept;
+
+// Development profile only (§10.1): the shared PSK roots per-network,
+// per-pair RLRES1 secrets; group keys are separate and boot-scoped. Callers
+// must reserve the durable boot epoch before deriving a group sender key.
+Status dev_pair_rms(const Secret& psk, NetworkId network, NodeId a, NodeId b,
+                    Purpose purpose, Secret& out) noexcept;
+Status dev_group_key(const Secret& psk, NetworkId network, NodeId origin,
+                     std::uint32_t boot, TrafficKey& out) noexcept;
 
 // --- RLRES1 (06 §2.1) -----------------------------------------------------------
 // rid = first8(HMAC(RMS, "RouteLoom/v1/rid" 0x00 || purpose u8))
