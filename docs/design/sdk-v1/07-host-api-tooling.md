@@ -90,14 +90,16 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 
 | method | 権限 | params → result |
 |---|---|---|
-| `site.status` | READ | なし → site_id、network、site_epoch、SAK fingerprint（kid）、rs_epoch、gk_epoch／gk_staged、member・removed・unconfirmed数、discovered・join_requests数、live exchange数、channel、gateways、ledger_seq、policy、counters（`rejected_unverified{reason}`等）、`usb{configured,attached,join_relay:"not_wired"}` |
+| `site.status` | READ | なし → site_id、network、site_epoch、SAK fingerprint（kid）、rs_epoch、gk_epoch／gk_staged、GK要約`gk{phase,cause,targets,staged_ack,active_ack,unknown}`、authority状態`authority{attached,channels}`（PR1配線までfalse/0）、`member_cap:128`、member・removed・unconfirmed数、discovered・join_requests数、live exchange数、channel、gateways、ledger_seq、policy、counters（`rejected_unverified{reason}`・`gk_rejected{reason}`等）、`usb{configured,attached,join_relay:"not_wired"}` |
 | `join.policy.get` / `.set` | ADMIN | `zero_touch_open`、`decision_mode`（`kguard`/`closed`）、`decision_timeout_ms`（500〜5000）、`pending_retry_after_s`（30〜3600）。setは部分更新 |
 | `join.requests.list` | READ | 開いている参加要求（≤256）：`state`＝`awaiting`／`decided`、`remaining_ms` |
 | `join.decide` | DECIDE | `join_request_id`、`device_id`、`verdict`＋その引数だけ（allow→`role`、pending→`retry_after_s`、deny→`reason`）、`idempotency_key` |
 | `devices.discovered.list` | READ | `after?`、`limit?`（1〜128）→ `devices[]`、`next_after`、`total`、`max:1024` |
 | `members.list` / `members.get` | READ | `after?`、`limit?`、`include_removed?` ／ `device_id` |
 | `membership.revoke` | DECIDE | `device_id`、`expected_generation`、`reason`（removed/lost/replaced/blocked）、`idempotency_key` |
-| `operations.get` | READ | `op-…`（approve／revoke）はSite Authorityが答える。grant無しは存在を明かさずNOT_FOUND |
+| `group_keys.status` | READ | active／staged／phase（stable/staging/activating/catching_up）／cause／target・staged_ack・active_ack・unknown数／last_rotation／next_due（G-SEC P5 PR3で実装。秘密・GK-id列・DAMSは出さない） |
+| `group_keys.rotate` | ADMIN | `expected_active_epoch`、`idempotency_key` → 手動更新をstage（causeはmanual固定。配布中・cleanup中は`BUSY`） |
+| `operations.get` | READ | `op-…`（approve／revoke／rotate）はSite Authorityが答える。grant無しは存在を明かさずNOT_FOUND |
 
 ```json
 // join.request（stream "events"、ringのseq/ms付き）
@@ -112,15 +114,22 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
  "verdict":"allow","role":"endpoint","generation":1,"member_cert_serial":1,
  "operation_id":"op-0000000000000001","applied":"current_attempt"}
 // join.decide pending / deny → "state":"recorded"（"applied":"next_attempt"は期限後の決定）
-// membership.revoke
+// membership.revoke（削除ごとに新しいepochをstageし直す。P5 PR3）
 {"operation_id":"op-0000000000000002","state":"committed","device_id":"00a1000000001234",
- "generation":1,"rs_epoch":1,"gk_rotation":{"from":1,"to":2,"state":"staged"},
+ "generation":1,"rs_epoch":1,"gk_rotation":{"from":1,"to":2,"state":"committed"},
  "distribution":"not_implemented"}
-// operations.get op-…2
+// operations.get op-…2（revoke全体はRRS1未配布でcommittedのまま。GK半分だけ収束する）
 {"operation_id":"op-0000000000000002","kind":"revoke","device_id":"00a1000000001234","generation":1,
  "state":"committed","rs_epoch":1,
  "distribution":{"state":"not_implemented","reached":null,"members":0,"unknown":0},
- "gk_rotation":{"from":1,"to":2,"state":"staged"},"created_ms":1790000000030}
+ "gk_rotation":{"from":1,"to":2,"state":"distributing"},"created_ms":1790000000030}
+// group_keys.rotate → {"operation_id":"op-…","state":"committed","from":1,"to":2,"cause":"manual","targets":n}
+// operations.get op-…（rotate）は state が committed→distributing→activated→converged
+//（またはactivated_with_unknown。supersedeされた旧operationはsuperseded）
+// group_keys.status
+{"active":1,"staged":2,"phase":"staging","cause":"manual","targets":2,"staged_ack":1,
+ "active_ack":0,"unknown":1,"last_rotation":null,"next_due_ms":null,
+ "clock":{"unix_ms":…,"mono_ms":…}}
 // members.get
 {"member":{"device_id":"00a1000000001234","kid":"b3…","state":"member","generation":1,"role":"endpoint",
  "member_cert_serial":1,"confirm_state":"allowed_unconfirmed","delivered":true,"model":17,"hw_rev":2,
@@ -128,9 +137,9 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
  "removed_ms":null,"removal_reason":null}}
 ```
 
-エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`不一致・削除済みへのrevokeは`CONFLICT`、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
+エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`／`expected_active_epoch`不一致・削除済みへのrevokeは`CONFLICT`、配布中・cleanup中の`group_keys.rotate`は`BUSY`（retryable）、129番目のallow・128超えでの更新開始は`NO_CAPACITY`（P5 PR3）、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
 
-**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`gk.rotated`・`cutover.progress`は対応する機能（P5・P6-2）が無いので出さない。
+**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`gk.rotated`、`gk.member_applied`（P5 PR3で追加）、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`cutover.progress`は対応する機能（P6-2）が無いので出さない。
 
 **判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かず同じMemberCertを再発行（`member.reissued`）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（先に既存membershipをrevokeする）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定し、revoke済みの行は競合にしない（別kidの参加は`previously_removed:true`の要求で、明示allowがgenerationを進めて置換する）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyならidempotency記録の保持範囲（最新1,024件）内で保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。別keyへの成功応答もそのkeyのidempotency記録として残る。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
 
@@ -260,7 +269,7 @@ esptool.py write_flash 0x190000 rlsec.bin                                      #
 | V1-H02 | 期限後のdecisionが次の試行で反映（**P3-3でhost試験済み**：allow／deny、`applied:"next_attempt"`） |
 | V1-H03 | idempotency：同key再送は同結果、別verdictはConflict（**P3-3でhost試験済み**、API1 socket経由を含む） |
 | V1-H04 | `membership.revoke`の`expected_generation`不一致はConflict（**P3-3でhost試験済み**） |
-| V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数（**P3-3は`committed`まで**：配布（P5/P6）が無いので`distribution:"not_implemented"`、全memberを`unknown`と数える） |
+| V1-H05 | revokeの段階（committed→distributing→converged）とunknownの計数（**P5 PR3でGK半分が配布・収束**：RRS1配布（P6）が無いので`distribution:"not_implemented"`は残り、GK側は`gk_rotation`の段階とunknown計数で追える） |
 | V1-H06 | ACL：read権限では`join.decide`不可（**P3-3でhost試験済み**：`MEMBERSHIP_READ`だけのprincipalは一覧可・revoke不可、grant無しは`site.status`も不可） |
 | V1-H07 | host crash（commit後・送信前）→機器の再試行で冪等再発行（**P3-3でhost試験済み**：SQLite storeを開き直し、同じMemberCert byte列を再発行） |
 | V1-H08 | USB 0x40〜0x46 codecのC++/Rust共通vector、capability無しでUnsupported |

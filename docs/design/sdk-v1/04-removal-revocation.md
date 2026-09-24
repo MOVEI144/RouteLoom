@@ -41,7 +41,7 @@ KGuard: membership.revoke(device, expected_generation)
   → API: 状態 committed → distributing → converged(件数) を返す
 ```
 
-API上の段階は「受付」「台帳commit」「配布中（到達member数/全member数）」「収束」を分け、到達できないmemberは`unknown`のまま数える（適用済みとみなさない）。
+API上の段階は「受付」「台帳commit」「配布中（到達member数/全member数）」「収束」を分け、到達できないmemberは`unknown`のまま数える（適用済みとみなさない）。Host側（G-SEC P5 PR3で実装）：revokeは台帳・RRS1・削除と**新しいepochのstage**を1 transactionでcommitし、削除者を除く全memberへ配布する。削除のたびに新しいepochを作り直し（stage済み鍵の再利用はしない）、連続削除は最初の削除batchの期限を維持する。RRS1自体の配布（a）はP6のまま。
 
 ## 4. 伝播（gossip）
 
