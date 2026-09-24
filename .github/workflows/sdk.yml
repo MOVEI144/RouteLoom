@@ -99,12 +99,16 @@ jobs:
           cargo run --manifest-path host/Cargo.toml -p routeloom-protocol --example gen_usb_golden
           cargo run --manifest-path host/Cargo.toml -p routeloom-provision --example gen_provisioning_golden
           python3 tools/gen_autonomy_vectors.py
+          python3 -c "import cryptography" 2>/dev/null || pip install "cryptography==44.0.0"
           python3 tools/gen_sdkv1_derivation_vectors.py
+          python3 tools/gen_sdkv1_authority_vectors.py
           python3 tools/gen_sdkv1_vectors.py
           python3 tools/gen_sdkv1_ead_vectors.py
           python3 tools/gen_sdkv1_dams_vectors.py
           python3 tools/gen_sdkv1_join_transport_vectors.py
           python3 tools/gen_sdkv1_handshake_vectors.py
+          python3 tools/gen_sdkv1_join_relay_v2_vectors.py
+          python3 tools/gen_sdkv1_revocation_vectors.py
           git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join
           # git diff ignores untracked files: a generator that starts
           # emitting an unreviewed vector must fail too.

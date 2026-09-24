@@ -1,0 +1,9 @@
+{
+  "carrier": "wire",
+  "codec": "join_reply",
+  "encoded_hex": "024210111213000a00000000000000000003",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_reply_gw_zero",
+  "note": "gateway epoch nonzero"
+}

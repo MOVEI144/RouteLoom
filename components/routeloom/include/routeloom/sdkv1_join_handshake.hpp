@@ -47,6 +47,13 @@
 
 namespace routeloom::sdkv1 {
 
+// JoinRequest capability bits above the role positions (04 §4, P6 PR A):
+// bit3 = this Joiner can apply an RRS1 during ZT recovery, bit4 = the
+// join transport can relay RRS1 bytes. Assigned here; consumed by the
+// P3-4 Joiner / P4 join-transport work that advertises them.
+constexpr std::uint32_t kJoinCapApplyRrs = 1u << 3;
+constexpr std::uint32_t kJoinCapRelayRrs = 1u << 4;
+
 // --- Attempt configuration ---------------------------------------------------------
 struct JoinHandshakeConfig {
   NodeId node{kInvalidNodeId};      // must equal identity.node_id

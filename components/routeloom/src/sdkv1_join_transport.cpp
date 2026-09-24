@@ -83,6 +83,14 @@ Status chunk_check(const JoinCarrier carrier, const JoinChunk& chunk) noexcept {
     return malformed("join chunk sub");
   }
   if (chunk.id == 0) return malformed("join chunk id");
+  // The epochs name the Wire exchange; RLD1 has no epochs (#116).
+  if (carrier == JoinCarrier::Rld1) {
+    if (chunk.gateway_epoch != 0 || chunk.proxy_epoch != 0) {
+      return malformed("join chunk epoch");
+    }
+  } else if (chunk.gateway_epoch == 0 || chunk.proxy_epoch == 0) {
+    return malformed("join chunk epoch");
+  }
   const std::size_t grid = join_chunk_data_max(carrier);
   if (chunk.total <= join_single_frame_max(carrier) || chunk.total > kJoinObjectMax) {
     return malformed("join chunk total");
@@ -93,6 +101,25 @@ Status chunk_check(const JoinCarrier carrier, const JoinChunk& chunk) noexcept {
   if (chunk.data.size != std::min<std::size_t>(grid, chunk.total - chunk.offset) ||
       chunk.data.data == nullptr) {
     return malformed("join chunk length");
+  }
+  return Status::success();
+}
+
+// Shared reply checks for encode and decode.
+Status reply_check(const JoinCarrier carrier, const JoinReply& reply) noexcept {
+  if (reply.phase == JoinAuthPhase::RelayStatus || !join_step_valid(reply.phase, reply.step) ||
+      reply.id == 0 || reply.received > kJoinObjectMax ||
+      static_cast<std::uint8_t>(reply.status) > static_cast<std::uint8_t>(JoinReplyStatus::Aborted) ||
+      (reply.status == JoinReplyStatus::Aborted && reply.received != 0) ||
+      (reply.status == JoinReplyStatus::Complete && reply.received == 0)) {
+    return malformed("join reply fields");
+  }
+  if (carrier == JoinCarrier::Rld1) {
+    if (reply.gateway_epoch != 0 || reply.proxy_epoch != 0) {
+      return malformed("join reply epoch");
+    }
+  } else if (reply.gateway_epoch == 0 || reply.proxy_epoch == 0) {
+    return malformed("join reply epoch");
   }
   return Status::success();
 }
@@ -438,26 +465,32 @@ Status join_chunk_encode(const JoinCarrier carrier, const JoinChunk& chunk,
   written = 0;
   const Status status = chunk_check(carrier, chunk);
   if (!status) return invalid(status.detail);
-  const std::size_t size = kJoinChunkHeaderSize + chunk.data.size;
+  const std::size_t head = join_chunk_header_size(carrier);
+  const std::size_t size = head + chunk.data.size;
   if (out.data == nullptr || out.size < size) {
     return Status::error(StatusCode::NoCapacity, "join chunk output");
   }
   std::uint8_t* p = out.data;
-  p[0] = kJoinChunkVersion;
+  p[0] = join_chunk_version(carrier);
   p[1] = join_sub(chunk.phase, chunk.step);
   put_u32(p + 2, chunk.id);
   put_u16(p + 6, chunk.offset);
   put_u16(p + 8, chunk.total);
-  std::memcpy(p + kJoinChunkHeaderSize, chunk.data.data, chunk.data.size);
+  if (carrier == JoinCarrier::WireRelay) {
+    put_u32(p + 10, chunk.gateway_epoch);
+    put_u32(p + 14, chunk.proxy_epoch);
+  }
+  std::memcpy(p + head, chunk.data.data, chunk.data.size);
   written = size;
   return Status::success();
 }
 
 Status join_chunk_decode(const JoinCarrier carrier, const ByteView encoded,
                          JoinChunk& out) noexcept {
-  if (encoded.data == nullptr || encoded.size <= kJoinChunkHeaderSize ||
-      encoded.size > kJoinChunkHeaderSize + join_chunk_data_max(carrier) ||
-      encoded.data[0] != kJoinChunkVersion) {
+  const std::size_t head = join_chunk_header_size(carrier);
+  if (encoded.data == nullptr || encoded.size <= head ||
+      encoded.size > head + join_chunk_data_max(carrier) ||
+      encoded.data[0] != join_chunk_version(carrier)) {
     return malformed("join chunk head");
   }
   JoinChunk chunk{};
@@ -467,40 +500,46 @@ Status join_chunk_decode(const JoinCarrier carrier, const ByteView encoded,
   chunk.id = get_u32(encoded.data + 2);
   chunk.offset = get_u16(encoded.data + 6);
   chunk.total = get_u16(encoded.data + 8);
-  chunk.data = ByteView{encoded.data + kJoinChunkHeaderSize, encoded.size - kJoinChunkHeaderSize};
+  if (carrier == JoinCarrier::WireRelay) {
+    chunk.gateway_epoch = get_u32(encoded.data + 10);
+    chunk.proxy_epoch = get_u32(encoded.data + 14);
+  }
+  chunk.data = ByteView{encoded.data + head, encoded.size - head};
   const Status status = chunk_check(carrier, chunk);
   if (!status) return status;
   out = chunk;
   return Status::success();
 }
 
-Status join_reply_encode(const JoinReply& reply, const MutableByteView out,
-                         std::size_t& written) noexcept {
+Status join_reply_encode(const JoinCarrier carrier, const JoinReply& reply,
+                         const MutableByteView out, std::size_t& written) noexcept {
   written = 0;
-  if (reply.phase == JoinAuthPhase::RelayStatus || !join_step_valid(reply.phase, reply.step) ||
-      reply.id == 0 || reply.received > kJoinObjectMax ||
-      static_cast<std::uint8_t>(reply.status) > static_cast<std::uint8_t>(JoinReplyStatus::Aborted) ||
-      (reply.status == JoinReplyStatus::Aborted && reply.received != 0) ||
-      (reply.status == JoinReplyStatus::Complete && reply.received == 0)) {
-    return invalid("join reply fields");
-  }
-  if (out.data == nullptr || out.size < kJoinReplySize) {
+  const Status status = reply_check(carrier, reply);
+  if (!status) return invalid(status.detail);
+  const std::size_t size = join_reply_size(carrier);
+  if (out.data == nullptr || out.size < size) {
     return Status::error(StatusCode::NoCapacity, "join reply output");
   }
   std::uint8_t* p = out.data;
-  p[0] = kJoinChunkVersion;
+  p[0] = join_chunk_version(carrier);
   p[1] = join_sub(reply.phase, reply.step);
   put_u32(p + 2, reply.id);
   put_u16(p + 6, reply.received);
   p[8] = static_cast<std::uint8_t>(reply.status);
   p[9] = 0;
-  written = kJoinReplySize;
+  if (carrier == JoinCarrier::WireRelay) {
+    put_u32(p + 10, reply.gateway_epoch);
+    put_u32(p + 14, reply.proxy_epoch);
+  }
+  written = size;
   return Status::success();
 }
 
-Status join_reply_decode(const ByteView encoded, JoinReply& out) noexcept {
-  if (encoded.data == nullptr || encoded.size != kJoinReplySize ||
-      encoded.data[0] != kJoinChunkVersion || encoded.data[9] != 0) {
+Status join_reply_decode(const JoinCarrier carrier, const ByteView encoded,
+                         JoinReply& out) noexcept {
+  const std::size_t size = join_reply_size(carrier);
+  if (encoded.data == nullptr || encoded.size != size ||
+      encoded.data[0] != join_chunk_version(carrier) || encoded.data[9] != 0) {
     return malformed("join reply head");
   }
   JoinReply reply{};
@@ -510,15 +549,16 @@ Status join_reply_decode(const ByteView encoded, JoinReply& out) noexcept {
   reply.id = get_u32(encoded.data + 2);
   reply.received = get_u16(encoded.data + 6);
   const std::uint8_t status = encoded.data[8];
-  if (reply.id == 0 || reply.received > kJoinObjectMax ||
-      status > static_cast<std::uint8_t>(JoinReplyStatus::Aborted)) {
+  if (status > static_cast<std::uint8_t>(JoinReplyStatus::Aborted)) {
     return malformed("join reply fields");
   }
   reply.status = static_cast<JoinReplyStatus>(status);
-  if ((reply.status == JoinReplyStatus::Aborted && reply.received != 0) ||
-      (reply.status == JoinReplyStatus::Complete && reply.received == 0)) {
-    return malformed("join reply received");
+  if (carrier == JoinCarrier::WireRelay) {
+    reply.gateway_epoch = get_u32(encoded.data + 10);
+    reply.proxy_epoch = get_u32(encoded.data + 14);
   }
+  const Status checked = reply_check(carrier, reply);
+  if (!checked) return checked;
   out = reply;
   return Status::success();
 }
@@ -533,6 +573,8 @@ void JoinObjectSlot::reset() noexcept {
   ++generation_;
   step_ = 0;
   id_ = 0;
+  gateway_epoch_ = 0;
+  proxy_epoch_ = 0;
   total_ = 0;
   have_ = 0;
   started_ms_ = 0;
@@ -542,6 +584,8 @@ void JoinObjectSlot::reset() noexcept {
   completed_carrier_ = JoinCarrier::Rld1;
   completed_sub_ = 0;
   completed_id_ = 0;
+  completed_gateway_epoch_ = 0;
+  completed_proxy_epoch_ = 0;
   completed_total_ = 0;
 }
 
@@ -550,12 +594,16 @@ void JoinObjectSlot::drop_keep_completed() noexcept {
   const JoinCarrier keep_carrier = completed_carrier_;
   const std::uint8_t keep_sub = completed_sub_;
   const std::uint32_t keep_id = completed_id_;
+  const std::uint32_t keep_gateway = completed_gateway_epoch_;
+  const std::uint32_t keep_proxy = completed_proxy_epoch_;
   const std::uint16_t keep_total = completed_total_;
   reset();
   completed_valid_ = keep;
   completed_carrier_ = keep_carrier;
   completed_sub_ = keep_sub;
   completed_id_ = keep_id;
+  completed_gateway_epoch_ = keep_gateway;
+  completed_proxy_epoch_ = keep_proxy;
   completed_total_ = keep_total;
 }
 
@@ -581,12 +629,17 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
   result.reply.phase = chunk.phase;
   result.reply.step = chunk.step;
   result.reply.id = chunk.id;
+  result.reply.gateway_epoch = chunk.gateway_epoch;
+  result.reply.proxy_epoch = chunk.proxy_epoch;
   if (!chunk_check(carrier, chunk)) return result;  // Rejected
   const std::uint8_t sub = join_sub(chunk.phase, chunk.step);
   // A late duplicate of the object completed last (its Complete reply was
-  // lost): answer Complete again, whatever the slot holds now.
+  // lost): answer Complete again, whatever the slot holds now. The full
+  // token must match: a chunk from another epoch is never this object.
   if (mode_ != Mode::Assembling && completed_valid_ && completed_carrier_ == carrier &&
-      completed_sub_ == sub && completed_id_ == chunk.id && completed_total_ == chunk.total) {
+      completed_sub_ == sub && completed_id_ == chunk.id &&
+      completed_gateway_epoch_ == chunk.gateway_epoch &&
+      completed_proxy_epoch_ == chunk.proxy_epoch && completed_total_ == chunk.total) {
     result.outcome = Outcome::Repeat;
     result.reply.received = chunk.total;
     result.reply.status = JoinReplyStatus::Complete;
@@ -598,7 +651,8 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
     return result;
   }
   const bool same_key = mode_ == Mode::Assembling && carrier == carrier_ &&
-                        sub == join_sub(phase_, step_) && chunk.id == id_;
+                        sub == join_sub(phase_, step_) && chunk.id == id_ &&
+                        chunk.gateway_epoch == gateway_epoch_ && chunk.proxy_epoch == proxy_epoch_;
   if (mode_ == Mode::Idle) {
     data_.fill(0);
     mode_ = Mode::Assembling;
@@ -607,6 +661,8 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
     phase_ = chunk.phase;
     step_ = chunk.step;
     id_ = chunk.id;
+    gateway_epoch_ = chunk.gateway_epoch;
+    proxy_epoch_ = chunk.proxy_epoch;
     total_ = chunk.total;
     have_ = 0;
     started_ms_ = now_ms;
@@ -642,6 +698,8 @@ JoinObjectSlot::Accepted JoinObjectSlot::accept(const JoinCarrier carrier, const
     completed_carrier_ = carrier_;
     completed_sub_ = sub;
     completed_id_ = id_;
+    completed_gateway_epoch_ = gateway_epoch_;
+    completed_proxy_epoch_ = proxy_epoch_;
     completed_total_ = total_;
     result.outcome = Outcome::Complete;
     result.reply.received = total_;
@@ -659,6 +717,11 @@ ByteView JoinObjectSlot::assembled() const noexcept {
   return ByteView{data_.data(), total_};
 }
 
+ByteView JoinObjectSlot::sending() const noexcept {
+  if (mode_ != Mode::Sending) return ByteView{};
+  return ByteView{data_.data(), total_};
+}
+
 void JoinObjectSlot::release_assembled() noexcept { drop_keep_completed(); }
 
 void JoinObjectSlot::release_assembled_if(const std::uint32_t expected) noexcept {
@@ -667,6 +730,7 @@ void JoinObjectSlot::release_assembled_if(const std::uint32_t expected) noexcept
 
 Status JoinObjectSlot::load(const JoinCarrier carrier, const JoinAuthPhase phase,
                             const std::uint8_t step, const std::uint32_t id,
+                            const std::uint32_t gateway_epoch, const std::uint32_t proxy_epoch,
                             const ByteView object, const MonotonicMs now_ms) noexcept {
   if (object.data == nullptr || object.size > kJoinObjectMax) {
     return invalid("join slot object");
@@ -677,17 +741,29 @@ Status JoinObjectSlot::load(const JoinCarrier carrier, const JoinAuthPhase phase
         !join_step_valid(phase, step) || id == 0) {
       return invalid("join slot load");
     }
+    if (carrier == JoinCarrier::Rld1) {
+      if (gateway_epoch != 0 || proxy_epoch != 0) return invalid("join slot epoch");
+    } else if (gateway_epoch == 0 || proxy_epoch == 0) {
+      return invalid("join slot epoch");
+    }
     std::memmove(data_.data(), object.data, object.size);
   }
-  return load_in_place(carrier, phase, step, id, object.size, now_ms);
+  return load_in_place(carrier, phase, step, id, gateway_epoch, proxy_epoch, object.size, now_ms);
 }
 
 Status JoinObjectSlot::load_in_place(const JoinCarrier carrier, const JoinAuthPhase phase,
                                      const std::uint8_t step, const std::uint32_t id,
-                                     const std::size_t size, const MonotonicMs now_ms) noexcept {
+                                     const std::uint32_t gateway_epoch,
+                                     const std::uint32_t proxy_epoch, const std::size_t size,
+                                     const MonotonicMs now_ms) noexcept {
   if (size <= join_single_frame_max(carrier) || size > kJoinObjectMax ||
       phase == JoinAuthPhase::RelayStatus || !join_step_valid(phase, step) || id == 0) {
     return invalid("join slot load");
+  }
+  if (carrier == JoinCarrier::Rld1) {
+    if (gateway_epoch != 0 || proxy_epoch != 0) return invalid("join slot epoch");
+  } else if (gateway_epoch == 0 || proxy_epoch == 0) {
+    return invalid("join slot epoch");
   }
   std::fill(data_.begin() + static_cast<std::ptrdiff_t>(size), data_.end(), std::uint8_t{0});
   mode_ = Mode::Sending;
@@ -696,6 +772,8 @@ Status JoinObjectSlot::load_in_place(const JoinCarrier carrier, const JoinAuthPh
   phase_ = phase;
   step_ = step;
   id_ = id;
+  gateway_epoch_ = gateway_epoch;
+  proxy_epoch_ = proxy_epoch;
   total_ = static_cast<std::uint16_t>(size);
   have_ = 0;
   started_ms_ = now_ms;
@@ -714,6 +792,8 @@ Status JoinObjectSlot::chunk_at(const std::size_t index, JoinChunk& out) const n
   out.phase = phase_;
   out.step = step_;
   out.id = id_;
+  out.gateway_epoch = gateway_epoch_;
+  out.proxy_epoch = proxy_epoch_;
   out.offset = static_cast<std::uint16_t>(offset);
   out.total = total_;
   out.data = ByteView{data_.data() + offset, chunk_len(carrier_, total_, index)};
@@ -729,7 +809,8 @@ JoinObjectSlot::ReplyOutcome JoinObjectSlot::on_reply(const JoinReply& reply,
                                                       const MonotonicMs now_ms) noexcept {
   (void)now_ms;
   if (mode_ != Mode::Sending || reply.phase != phase_ || reply.step != step_ ||
-      reply.id != id_) {
+      reply.id != id_ || reply.gateway_epoch != gateway_epoch_ ||
+      reply.proxy_epoch != proxy_epoch_) {
     return ReplyOutcome::Ignored;
   }
   switch (reply.status) {
@@ -782,6 +863,7 @@ Status relay_object_validate(const RelayObject& object) noexcept {
   if (h.relay_id == 0 || !id_valid(h.proxy) || !unicast_mac(h.joiner_mac)) {
     return invalid("relay identity");
   }
+  if (h.gateway_epoch == 0 || h.proxy_epoch == 0) return invalid("relay epoch");
   if (h.phase == JoinAuthPhase::RelayStatus || !join_step_valid(h.phase, h.step)) {
     return invalid("relay step");
   }
@@ -844,9 +926,11 @@ Status relay_object_encode(const RelayObject& object, const MutableByteView out,
   p[21] = static_cast<std::uint8_t>(h.state);
   p[22] = static_cast<std::uint8_t>(h.joiner_rssi_dbm);
   p[23] = static_cast<std::uint8_t>(h.phase);
+  put_u32(p + 24, h.gateway_epoch);
+  put_u32(p + 28, h.proxy_epoch);
   if (h.state == RelayState::Abort) {
-    p[24] = static_cast<std::uint8_t>(object.abort.status);
-    put_u32(p + 25, object.abort.retry_after_ms);
+    p[32] = static_cast<std::uint8_t>(object.abort.status);
+    put_u32(p + 33, object.abort.retry_after_ms);
   } else if (object.message.data != p + kRelayHeaderSize) {
     std::memmove(p + kRelayHeaderSize, object.message.data, object.message.size);
   }
@@ -877,6 +961,8 @@ Status relay_object_decode(const ByteView encoded, RelayObject& out) noexcept {
     return malformed("relay phase");
   }
   h.phase = static_cast<JoinAuthPhase>(phase);
+  h.gateway_epoch = get_u32(p + 24);
+  h.proxy_epoch = get_u32(p + 28);
   const ByteView body{p + kRelayHeaderSize, encoded.size - kRelayHeaderSize};
   if (h.state == RelayState::Abort) {
     if (body.size != kRelayAbortBodySize) return malformed("relay abort size");
@@ -907,6 +993,108 @@ Status relay_single_frame_decode(const FrameType type, const ByteView payload,
   if (relay_single_frame_type(object.header) != type) return malformed("relay frame type");
   out = object;
   return Status::success();
+}
+
+// ===================================================================================
+// Gateway epoch query/reply
+// ===================================================================================
+
+namespace {
+
+bool nonce_all_zero(const JoinNonce& nonce) noexcept {
+  for (const std::uint8_t b : nonce) {
+    if (b != 0) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+Status epoch_query_encode(const EpochQuery& query, const MutableByteView out,
+                          std::size_t& written) noexcept {
+  written = 0;
+  if (nonce_all_zero(query.nonce)) return invalid("epoch query nonce");
+  if (out.data == nullptr || out.size < kEpochQuerySize) {
+    return Status::error(StatusCode::NoCapacity, "epoch query output");
+  }
+  std::uint8_t* p = out.data;
+  p[0] = kRelayVersion;
+  p[1] = kEpochQueryKind;
+  p[2] = 0;
+  p[3] = 0;
+  put_u32(p + 4, 0);
+  std::memcpy(p + 8, query.nonce.data(), query.nonce.size());
+  written = kEpochQuerySize;
+  return Status::success();
+}
+
+Status epoch_query_decode(const ByteView encoded, EpochQuery& out) noexcept {
+  if (encoded.data == nullptr || encoded.size != kEpochQuerySize ||
+      encoded.data[0] != kRelayVersion || encoded.data[1] != kEpochQueryKind ||
+      encoded.data[2] != 0 || encoded.data[3] != 0 || get_u32(encoded.data + 4) != 0) {
+    return malformed("epoch query head");
+  }
+  EpochQuery query{};
+  std::memcpy(query.nonce.data(), encoded.data + 8, query.nonce.size());
+  if (nonce_all_zero(query.nonce)) return malformed("epoch query nonce");
+  out = query;
+  return Status::success();
+}
+
+Status epoch_reply_encode(const EpochReply& reply, const MutableByteView out,
+                          std::size_t& written) noexcept {
+  written = 0;
+  if (reply.gateway_epoch == 0 || nonce_all_zero(reply.nonce)) {
+    return invalid("epoch reply fields");
+  }
+  if (out.data == nullptr || out.size < kEpochReplySize) {
+    return Status::error(StatusCode::NoCapacity, "epoch reply output");
+  }
+  std::uint8_t* p = out.data;
+  p[0] = kRelayVersion;
+  p[1] = kEpochReplyKind;
+  p[2] = reply.authority_ready ? kEpochReplyReady : std::uint8_t{0};
+  p[3] = 0;
+  put_u32(p + 4, reply.gateway_epoch);
+  std::memcpy(p + 8, reply.nonce.data(), reply.nonce.size());
+  written = kEpochReplySize;
+  return Status::success();
+}
+
+Status epoch_reply_decode(const ByteView encoded, EpochReply& out) noexcept {
+  if (encoded.data == nullptr || encoded.size != kEpochReplySize ||
+      encoded.data[0] != kRelayVersion || encoded.data[1] != kEpochReplyKind ||
+      encoded.data[3] != 0) {
+    return malformed("epoch reply head");
+  }
+  const std::uint8_t flags = encoded.data[2];
+  if ((flags & ~kEpochReplyReady) != 0) return malformed("epoch reply flags");
+  EpochReply reply{};
+  reply.gateway_epoch = get_u32(encoded.data + 4);
+  std::memcpy(reply.nonce.data(), encoded.data + 8, reply.nonce.size());
+  reply.authority_ready = (flags & kEpochReplyReady) != 0;
+  if (reply.gateway_epoch == 0 || nonce_all_zero(reply.nonce)) {
+    return malformed("epoch reply fields");
+  }
+  out = reply;
+  return Status::success();
+}
+
+WireRelayKind classify_wire_relay(const ByteView payload) noexcept {
+  if (payload.data == nullptr || payload.size < 2 || payload.data[0] != kRelayVersion) {
+    return WireRelayKind::Invalid;
+  }
+  switch (payload.data[1]) {
+    case static_cast<std::uint8_t>(RelayDirection::Up):
+    case static_cast<std::uint8_t>(RelayDirection::Down):
+      return WireRelayKind::RelayObject;
+    case kEpochQueryKind:
+      return payload.size == kEpochQuerySize ? WireRelayKind::EpochQuery : WireRelayKind::Invalid;
+    case kEpochReplyKind:
+      return payload.size == kEpochReplySize ? WireRelayKind::EpochReply : WireRelayKind::Invalid;
+    default:
+      return WireRelayKind::Invalid;
+  }
 }
 
 // ===================================================================================

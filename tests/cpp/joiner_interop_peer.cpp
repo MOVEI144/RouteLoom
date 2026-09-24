@@ -12,7 +12,8 @@
 //   T <now u64le>                    advance virtual time, run the pump
 //   W <site u8><to_proxy u64le><relay object>   host down (queued, applied
 //                                        at the next round, never in a callback)
-//   B <site u8><proxy u64le><relay_id u32le>     host abort (queued likewise)
+//   B <site u8><proxy u64le><relay_id u32le><gateway_epoch u32le>
+//     <proxy_epoch u32le> host abort (queued likewise)
 //   F <site u8><proxy u8><muted u8>   power a proxy off/on
 //   P                              dump the flash image (4 slot replies)
 //   Q                              quit (exit 0)
@@ -20,7 +21,8 @@
 // C++ -> Rust, emitted after each T in this order:
 //
 //   U <site u8><proxy u64le><hops u8><relay object>   one relayed up
-//   A <site u8><proxy u64le><relay_id u32le><reason u8> gateway/proxy abort
+//   A <site u8><proxy u64le><relay_id u32le><gateway_epoch u32le>
+//     <proxy_epoch u32le><reason u8> gateway/proxy abort
 //   S <46 B snapshot>               state/action/store/counter observation
 //   M <site cert><member cert><dams sha256>  member material (digests, no keys)
 //   P <store u8><slot u8><1024 B>    flash slot image (power-cut handover)
@@ -147,7 +149,7 @@ struct PeerUp {
 
 struct PeerAbort {
   NodeId proxy{kInvalidNodeId};
-  std::uint32_t relay_id{0};
+  RelayToken token{};
   std::uint8_t reason{0};
 };
 
@@ -158,9 +160,9 @@ class PipeSink final : public JoinRelayHostSink {
     ups.push_back(PeerUp{proxy, hops, Bytes(object.data, object.data + object.size)});
     return Status::success();
   }
-  Status relay_abort(const NodeId proxy, const std::uint32_t relay_id,
+  Status relay_abort(const NodeId proxy, const RelayToken token,
                      const RelayAbortReason reason) noexcept override {
-    aborts.push_back(PeerAbort{proxy, relay_id, static_cast<std::uint8_t>(reason)});
+    aborts.push_back(PeerAbort{proxy, token, static_cast<std::uint8_t>(reason)});
     return Status::success();
   }
   std::deque<PeerUp> ups;
@@ -212,8 +214,8 @@ class PeerSite {
   Status apply_down(NodeId to_proxy, const Bytes& object, std::uint64_t now) {
     return gateway_.host_down(to_proxy, view(object), now);
   }
-  Status apply_abort(NodeId proxy, std::uint32_t relay_id, std::uint64_t now) {
-    return gateway_.host_abort(proxy, relay_id, now);
+  Status apply_abort(NodeId proxy, RelayToken token, std::uint64_t now) {
+    return gateway_.host_abort(proxy, token, now);
   }
   PipeSink sink_;
 
@@ -240,6 +242,7 @@ class PeerSite {
   static JoinRelayGatewayConfig gateway_config(const SimSiteParams& params) {
     JoinRelayGatewayConfig config{};
     config.node = params.gateway;
+    config.gateway_epoch = 7;
     return config;
   }
   static JoinProxyConfig proxy_config(const SimProxyParams& proxy, const SimSiteParams& site) {
@@ -250,6 +253,7 @@ class PeerSite {
     config.org_hint = join_org_hint(site.site_ca->pub);
     config.site_hint = join_site_hint(site.site_id);
     config.gateway = site.gateway;
+    config.proxy_epoch = 3;
     return config;
   }
 
@@ -432,7 +436,7 @@ struct QueuedDown {
 struct QueuedAbort {
   std::uint8_t site{0};
   NodeId proxy{kInvalidNodeId};
-  std::uint32_t relay_id{0};
+  RelayToken token{};
 };
 
 class PeerWorld {
@@ -472,8 +476,8 @@ class PeerWorld {
   void queue_down(std::uint8_t site, NodeId to_proxy, Bytes object) {
     downs_.push_back(QueuedDown{site, to_proxy, std::move(object)});
   }
-  void queue_abort(std::uint8_t site, NodeId proxy, std::uint32_t relay_id) {
-    aborts_.push_back(QueuedAbort{site, proxy, relay_id});
+  void queue_abort(std::uint8_t site, NodeId proxy, RelayToken token) {
+    aborts_.push_back(QueuedAbort{site, proxy, token});
   }
   void set_proxy_muted(std::uint8_t site, std::uint8_t proxy, bool muted) {
     if (site < sites_.size()) sites_[site]->set_proxy_muted(proxy, muted);
@@ -513,7 +517,9 @@ class PeerWorld {
         payload.push_back('A');
         payload.push_back(static_cast<std::uint8_t>(i));
         put_u64(payload, abort.proxy);
-        put_u32(payload, abort.relay_id);
+        put_u32(payload, abort.token.relay_id);
+        put_u32(payload, abort.token.gateway_epoch);
+        put_u32(payload, abort.token.proxy_epoch);
         payload.push_back(abort.reason);
         if (!write_frame(payload)) fatal("A write failed");
       }
@@ -598,7 +604,7 @@ class PeerWorld {
       const QueuedAbort abort = aborts_.front();
       aborts_.pop_front();
       if (abort.site >= sites_.size()) fatal("abort for an unknown site");
-      const Status status = sites_[abort.site]->apply_abort(abort.proxy, abort.relay_id, now_);
+      const Status status = sites_[abort.site]->apply_abort(abort.proxy, abort.token, now_);
       if (!status.ok()) fatal("gateway host_abort failed");
     }
     deliver_radio();
@@ -695,6 +701,12 @@ std::uint64_t get_u64(const Bytes& payload, std::size_t& pos) {
   return value;
 }
 
+std::uint32_t get_u32(const Bytes& payload, std::size_t& pos) {
+  std::uint32_t value = 0;
+  for (int i = 0; i < 4; ++i) value |= static_cast<std::uint32_t>(payload.at(pos++)) << (8 * i);
+  return value;
+}
+
 int run(int argc, char** argv) {
   PeerSetup setup{};
   if (!parse_setup(argc, argv, setup)) {
@@ -722,14 +734,15 @@ int run(int argc, char** argv) {
         const NodeId to_proxy = get_u64(frame, pos);
         world.queue_down(site, to_proxy, Bytes(frame.begin() + pos, frame.end()));
       } else if (tag == 'B') {
-        if (frame.size() != 14) fatal("bad B");
+        if (frame.size() != 22) fatal("bad B");
         std::size_t pos = 1;
         const std::uint8_t site = frame[pos++];
         const NodeId proxy = get_u64(frame, pos);
-        std::uint32_t relay_id = 0;
-        for (int i = 0; i < 4; ++i)
-          relay_id |= static_cast<std::uint32_t>(frame.at(pos++)) << (8 * i);
-        world.queue_abort(site, proxy, relay_id);
+        RelayToken token{};
+        token.relay_id = get_u32(frame, pos);
+        token.gateway_epoch = get_u32(frame, pos);
+        token.proxy_epoch = get_u32(frame, pos);
+        world.queue_abort(site, proxy, token);
       } else if (tag == 'F') {
         if (frame.size() != 4) fatal("bad F");
         world.set_proxy_muted(frame[1], frame[2], frame[3] != 0);

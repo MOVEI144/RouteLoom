@@ -1,0 +1,9 @@
+{
+  "codec": "authority_body",
+  "encoded_hex": "010100000000000901020304050607080000000a0000000009000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "name": "body_pull_bad_reason",
+  "note": "reason 9 is undefined",
+  "reason": "bad_reason"
+}

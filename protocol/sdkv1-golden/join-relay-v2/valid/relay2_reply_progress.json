@@ -1,0 +1,16 @@
+{
+  "carrier": "wire",
+  "codec": "join_reply",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "gateway_epoch": 7,
+  "id": 2119674654,
+  "name": "relay2_reply_progress",
+  "note": "18 B wire reply",
+  "payload_hex": "02427e57ab1e006e00000000000700000003",
+  "phase": 4,
+  "proxy_epoch": 3,
+  "received": 110,
+  "status": 0,
+  "step": 2
+}

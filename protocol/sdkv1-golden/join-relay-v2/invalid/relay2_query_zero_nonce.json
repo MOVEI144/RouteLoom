@@ -1,0 +1,8 @@
+{
+  "codec": "epoch_query",
+  "encoded_hex": "020300000000000000000000000000000000000000000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "name": "relay2_query_zero_nonce",
+  "note": "the nonce is fresh, never zero"
+}

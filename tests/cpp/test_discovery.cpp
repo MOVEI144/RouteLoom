@@ -1331,6 +1331,38 @@ void test_forget_revoked_peer() {
   CHECK(a.engine.data_permitted(b.mac));
 }
 
+// P6 (04 §5, V1-R04): a Revoked peer may start a new-credential handshake
+// at most once per minute per peer; normal traffic stays refused until the
+// Owner promotes the re-verified credential via forget_peer().
+void test_reauth_revoked_rate_limit() {
+  DiscWorld world;
+  Unit& a = world.add(1, 0xA1, /*member=*/true);
+  Unit& b = world.add(2, 0xB2, /*member=*/true);
+  a.hooks.peer_members.insert(2);
+  b.hooks.peer_members.insert(1);
+  world.start_all();
+  run_exchange(world, a);
+  // Live bindings and unknown peers are not re-auth candidates.
+  CHECK(a.engine.reauth_revoked(2, 1000).code == StatusCode::NotFound);
+  CHECK(a.engine.forget_peer(77).code == StatusCode::NotFound);
+
+  CHECK_OK(a.engine.revoke_peer(2));
+  CHECK_OK(a.engine.reauth_revoked(2, 1000));  // first attempt admitted
+  CHECK(a.observer.has("REAUTH_ADMITTED"));
+  // The record is still Revoked: no traffic flows on the old binding.
+  NeighborPhase phase{};
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Revoked);
+  CHECK(!a.engine.data_permitted(b.mac));
+  // Inside the minute: Busy, with the timestamp untouched (no extension).
+  CHECK(a.engine.reauth_revoked(2, 59999).code == StatusCode::Busy);
+  CHECK(a.engine.reauth_revoked(2, 60999).code == StatusCode::Busy);
+  CHECK_OK(a.engine.reauth_revoked(2, 61000));  // the minute lapsed
+  // Promotion after the new credential verifies: the peer binds fresh.
+  CHECK_OK(a.engine.forget_peer(2));
+  run_exchange(world, a);
+  CHECK(a.engine.phase_of(b.mac, phase) && phase == NeighborPhase::Reachable);
+}
+
 // radio.md §13 / radio-defaults.json discovery: the requester's first
 // DISCOVER spreads by a uniform [0, cold_start_jitter_max_ms) draw. The
 // harness replays the deterministic entropy stream to predict the draw:
@@ -1473,6 +1505,7 @@ int main() {
   test_stranded_rediscovery_rebinds();
   test_send_failure_stats();
   test_forget_revoked_peer();
+  test_reauth_revoked_rate_limit();
   test_cold_start_jitter();
   test_retry_backoff_draw_double_cap();
   test_retry_backoff_draw_clamped_to_cap();

@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_state_epochs",
+  "encoded_hex": "0261000000030000000e00000007",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "epochs_bad_version",
+  "note": "version is 1"
+}

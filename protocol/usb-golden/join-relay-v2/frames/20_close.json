@@ -1,0 +1,12 @@
+{
+  "name": "close",
+  "direction": "h2d",
+  "kind": 32,
+  "flags": 0,
+  "session": 13962032385914376707,
+  "request": 503,
+  "inner_hex": "02",
+  "body_hex": "0000000000000004ecce59412b4f3d94c70ed5bd13a8af9402",
+  "wire_hex": "07524c553101200109c1c31a7b20ed120301010101010301f702190101010101011704ecce59412b4f3d94c70ed5bd13a8af94026c84342e00",
+  "note": "host requests session close; device drains"
+}

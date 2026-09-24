@@ -4,8 +4,11 @@
 Independent reference encoder for the zero-touch join transport of
 docs/design/sdk-v1/02-zero-touch-join.md §5 (RLD1 body v3 DISCOVER/OFFER,
 BootstrapAuth phases 4-6, the <= 1024 B assembly object and its chunks and
-replies) and §7.1 (the Wire relay object between proxy and gateway), as
-resolved in 02 §5.4 / §7.4 and protocol/sdkv1-golden/join-transport/README.md.
+replies), as resolved in 02 §5.4 / §7.4 and
+protocol/sdkv1-golden/join-transport/README.md. The Wire relay lane v2
+(#116: 32 B objects, 18 B chunks/replies, epoch query/reply) moved to
+tools/gen_sdkv1_join_relay_v2_vectors.py; the v1-shaped invalid vectors
+kept here must still be refused by the v2 decoders.
 It shares no code with the C++ codecs (components/routeloom/src/
 sdkv1_join_transport.cpp, sdkv1_join_relay.cpp) or the Rust relay-object
 mirror (host/routeloom-protocol/src/join_relay.rs); they must agree on every
@@ -334,81 +337,22 @@ def valid_chunk_codecs() -> None:
              dict(payload_hex=part.hex(), carrier="rld1", phase=EDHOC, step=2, id=ident,
                   offset=i * GRID["rld1"], total=len(obj), data_hex=part[CHUNK_HEAD:].hex(),
                   note="grid 106 B"), part)
-    relay = relay_object(DOWN, 0x0000BEEF, PROXY, DEVICE_MAC, EDHOC, 4, FINAL, 0,
-                         filler("m4", 353))
-    for i, part in enumerate(chunks_of("wire", relay, EDHOC, 4, 0xBEEF)):
-        good(f"join_chunk_wire_{i}", "join_chunk",
-             dict(payload_hex=part.hex(), carrier="wire", phase=EDHOC, step=4, id=0xBEEF,
-                  offset=i * GRID["wire"], total=len(relay), data_hex=part[CHUNK_HEAD:].hex(),
-                  note="grid 118 B"), part)
+    # The Wire lane moved to v2 (#116: 18 B chunks/replies with epochs);
+    # its vectors live in join-relay-v2 (tools/gen_sdkv1_join_relay_v2_vectors.py).
+    # These 10 B replies are the RLD1 shape, tagged as such.
     for name, phase, step, ident2, received, status in (
             ("join_reply_progress", EDHOC, 2, ident, 212, 0),
             ("join_reply_complete", EDHOC, 3, ident, 410, 1),
             ("join_reply_aborted", RESUME, 1, 0xBEEF, 0, 2)):
         payload = reply(phase, step, ident2, received, status)
         good(name, "join_reply",
-             dict(payload_hex=payload.hex(), phase=phase, step=step, id=ident2,
-                  received=received, status=status, note="10 B reply"), payload)
+             dict(payload_hex=payload.hex(), carrier="rld1", phase=phase, step=step, id=ident2,
+                  received=received, status=status, note="10 B RLD1 reply"), payload)
 
 
-def relay_record(obj: bytes, direction, relay_id, proxy, mac, phase, step, state, rssi,
-                 message=b"", abort=(0, 0)) -> dict:
-    return dict(object_hex=obj.hex(), dir=direction, relay_id=relay_id, proxy=proxy,
-                joiner_mac_hex=mac.hex(), phase=phase, step=step, state=state, rssi_u8=rssi & 0xFF,
-                message_hex=message.hex(), abort_status=abort[0], abort_retry_ms=abort[1],
-                wire_type=single_type(direction, state) if len(obj) <= WIRE_MAX_PAYLOAD else 0)
-
-
-def valid_relay_objects() -> list[tuple[int, bytes]]:
-    rid = 0x7E57AB1E
-    wire_script = []
-    cases = [
-        ("relay_up_m1", UP, EDHOC, 1, CONTINUE, -71, filler("m1", 59), None, "m1 up: 83 B, type 3"),
-        ("relay_down_m2", DOWN, EDHOC, 2, CONTINUE, 0, filler("m2", 372), None, "m2 down: chunked"),
-        ("relay_up_m3", UP, EDHOC, 3, CONTINUE, -64, filler("m3", 404), None, "m3 up: chunked"),
-        ("relay_down_m4_final", DOWN, EDHOC, 4, FINAL, 0, filler("m4", 353), None, "m4 final"),
-        ("relay_down_deny_final", DOWN, EDHOC, 4, FINAL, 0, filler("m4d", 31), None,
-         "short m4 (deny) final: type 4 single frame"),
-        ("relay_down_error_final", DOWN, EDHOC, 5, FINAL, 0, filler("err", 3), None,
-         "EDHOC error from the authority: final, type 4"),
-        ("relay_up_error", UP, EDHOC, 5, CONTINUE, -80, filler("err", 3), None, "device error up"),
-        ("relay_up_r1", UP, RESUME, 1, CONTINUE, -50, filler("r1", 109), None, "R1 up: 133 B chunked"),
-        ("relay_down_r2_final", DOWN, RESUME, 2, FINAL, 0, filler("r2", 52), None, "R2 final"),
-        ("relay_down_busy_abort", DOWN, EDHOC, 1, ABORT, 0, b"", (BUSY, 2000),
-         "authority busy before m2: abort, type 4"),
-        ("relay_down_unreachable_abort", DOWN, EDHOC, 3, ABORT, 0, b"", (UNREACHABLE, 5000),
-         "gateway has no host: abort"),
-        ("relay_up_abort", UP, EDHOC, 3, ABORT, -60, b"", (ABORTED, 0),
-         "proxy ends the relay (device silent)"),
-        ("relay_up_max", UP, EDHOC, 1, CONTINUE, -127, filler("max", MESSAGE_MAX), None,
-         "largest relay object: 984 B"),
-    ]
-    for name, direction, phase, step, state, rssi, message, abort, note in cases:
-        obj = relay_object(direction, rid, PROXY, DEVICE_MAC, phase, step, state, rssi, message,
-                           abort)
-        record = relay_record(obj, direction, rid, PROXY, DEVICE_MAC, phase, step, state, rssi,
-                              message, abort or (0, 0))
-        record["note"] = note
-        frames = []
-        if len(obj) <= WIRE_MAX_PAYLOAD:
-            frames.append((single_type(direction, state), obj))
-        else:
-            for part in chunks_of("wire", obj, phase, step, rid):
-                frames.append((KIND["chunk"], part))
-        record["frame_count"] = len(frames)
-        for i, (ftype, payload) in enumerate(frames):
-            record[f"frame_{i:02d}_type"] = ftype
-            record[f"frame_{i:02d}_hex"] = payload.hex()
-        if len(frames) > 1:
-            received = 0
-            for i, (_, payload) in enumerate(frames):
-                received += len(payload) - CHUNK_HEAD
-                record[f"receipt_{i:02d}_hex"] = reply(phase, step, rid, received,
-                                                       1 if received == len(obj) else 0).hex()
-        good(name, "relay_object", record, obj)
-        if name in ("relay_up_m1", "relay_down_m2", "relay_up_m3", "relay_down_m4_final"):
-            wire_script += frames
-    return wire_script
+# NOTE (#116): valid Wire relay objects moved to join-relay-v2
+# (tools/gen_sdkv1_join_relay_v2_vectors.py); the v1 bytes below only feed
+# the invalid vectors, which the v2 decoders must still refuse.
 
 
 # --- invalid vectors -----------------------------------------------------------------------
@@ -554,7 +498,9 @@ def invalid_relay() -> None:
 
     rb("relay_dir_0", h(direction=0) + msg, "dir 1 up / 2 down")
     rb("relay_dir_3", h(direction=3) + msg, "dir 1 up / 2 down")
-    rb("relay_version_2", h(version=2) + msg, "RelayHeader version 1")
+    # NOTE (#116): the old relay_version_2 case (a 24 B head with ver 2)
+    # reparses as a valid v2 object; version misuse is covered by the
+    # join-relay-v2 invalid vectors instead.
     rb("relay_id_zero", h(relay_id=0) + msg, "relay_id nonzero")
     rb("relay_proxy_zero", h(proxy=0) + msg, "proxy NodeId valid")
     rb("relay_proxy_all_ones", h(proxy=(1 << 64) - 1) + msg, "proxy NodeId valid")
@@ -606,26 +552,24 @@ def main() -> None:
     for sub_dir in ("valid", "invalid"):
         shutil.rmtree(OUT / sub_dir, ignore_errors=True)
         (OUT / sub_dir).mkdir(parents=True)
-    shutil.rmtree(CORPUS, ignore_errors=True)
-    CORPUS.mkdir(parents=True)
+    # The corpus is shared with the v2 generator (#116): manage only the
+    # files owned here, never the whole directory.
+    CORPUS.mkdir(parents=True, exist_ok=True)
 
     discovery_frames = valid_discovery()
     valid_cookies()
     valid_objects()
     rld1_frames = valid_rld1_sequences()
     valid_chunk_codecs()
-    wire_frames = valid_relay_objects()
     invalid_discovery()
     invalid_offer()
     invalid_objects()
     invalid_chunks()
     invalid_relay()
 
-    # Engine scripts for fuzz_sdkv1_join: [u16 len | RLD1 frame]... and
-    # [u16 len | u8 wire type | payload]... of a complete exchange.
+    # Engine script for fuzz_sdkv1_join: [u16 len | RLD1 frame]... of a
+    # complete exchange (the Wire script moved to the v2 generator).
     seeds.append(("script.rld1_exchange", u8(0) + script(discovery_frames + rld1_frames)))
-    seeds.append(("script.wire_exchange",
-                  u8(1) + b"".join(u16(len(p) + 1) + u8(t) + p for t, p in wire_frames)))
     for name, data in seeds:
         (CORPUS / name).write_bytes(data)
     print(f"join-transport: {counts['valid']} valid, {counts['invalid']} invalid, "

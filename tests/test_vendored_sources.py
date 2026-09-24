@@ -1,8 +1,8 @@
 """Vendored EDHOC sources match pinned blobs, with one checked zcbor patch.
 
 components/routeloom/third_party/VENDORED.json records, for libedhoc, zcbor
-and the TF-PSA-Crypto AES/CCM subset, the upstream URL, commit, SPDX license
-and the checked-in git blob id of every vendored file. This test
+and the TF-PSA-Crypto AES/CCM/GCM subset, the upstream URL, commit, SPDX license
+and the git blob id of every vendored file at that commit. This test
 recomputes the blob ids (sha1 of "blob <len>\\0" + bytes, what `git hash-object`
 prints), so any unreviewed edit, added or missing file fails; RouteLoom glue must
 live outside these directories (components/routeloom/src/edhoc/). It also
@@ -70,6 +70,18 @@ class VendoredSources(unittest.TestCase):
         restored = source.replace(fixed, upstream, 1)
         self.assertEqual(blob_id_bytes(restored),
                          zcbor["local_patches"]["src/zcbor_encode.c"]["upstream_blob"])
+    def test_tf_psa_gcm_is_pinned_to_upstream(self):
+        component = next(c for c in LOCK["components"] if c["name"] == "TF-PSA-Crypto")
+        self.assertEqual(component["commit"], "29160dd877d29658279fd683b2ae57b320ddcf09")
+        expected = {
+            "drivers/builtin/include/mbedtls/private/gcm.h": "d9b0435bc5bfb8b4259ee737a5a4b0f453536464",
+            "drivers/builtin/src/gcm.c": "b9412a7b6dc20f96e76edc363eb6cd27ca347220",
+        }
+        directory = THIRD_PARTY / component["directory"]
+        for relative, upstream_blob in expected.items():
+            with self.subTest(file=relative):
+                self.assertEqual(component["files"].get(relative), upstream_blob)
+                self.assertEqual(blob_id(directory / relative), upstream_blob)
 
     def test_notice_credits_every_component(self):
         notice = (ROOT / "NOTICE").read_text(encoding="utf-8")

@@ -1,0 +1,17 @@
+{
+  "carrier": "wire",
+  "codec": "join_chunk",
+  "data_hex": "d741d95711d50e2f1eaa5204c55aa9e20636f1",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "gateway_epoch": 7,
+  "id": 2119674654,
+  "name": "relay2_chunk_129_1",
+  "note": "129 B object: 110 + 19",
+  "offset": 110,
+  "payload_hex": "02417e57ab1e006e00810000000700000003d741d95711d50e2f1eaa5204c55aa9e20636f1",
+  "phase": 4,
+  "proxy_epoch": 3,
+  "step": 1,
+  "total": 129
+}

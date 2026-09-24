@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_kind6_chunk",
+  "encoded_hex": "010196dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf00000059d28443a10126a0583c010000025173000000000042000000030a1b2c3d000000100000000200a1000000000100000000020100000000a100000000077700000004020000005840f7d9f14acb515a28e644995f15606633bfb59f",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "kind6_chunk_length_mismatch",
+  "note": "declared length must equal the trailing bytes"
+}
