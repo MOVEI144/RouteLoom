@@ -229,12 +229,16 @@ Status SealedSlotPair::initialize() noexcept {
   if (valid == 1) {
     const std::uint8_t slot = content[0] == SlotContent::Valid ? 0 : 1;
     adopt(slot);
-    if (!provably_absent(static_cast<std::uint8_t>(slot ^ 1U))) {
+    const std::uint8_t sibling = static_cast<std::uint8_t>(slot ^ 1U);
+    if (!provably_absent(sibling)) {
       // The lost sibling may have held a newer record: known value only,
       // commits refused until recover().
       uncertain_ = true;
       return Status::error(StatusCode::IntegrityError, "record sibling state unproven");
     }
+    // A pending write is not adopted, but partial bytes may still contain
+    // the previous secret. Typed stores scrub it before enabling its use.
+    stale_sibling_ = content[sibling] == SlotContent::Pending;
     return Status::success();
   }
   if (unreadable[0] || unreadable[1]) return read_error;  // retryable storage fault
@@ -421,9 +425,19 @@ void SiteStore::wipe_scratch() noexcept {
   scratch_.size = 0;
 }
 
+void SiteStore::advance_group_lifecycle() noexcept {
+  if (group_lifecycle_ == std::numeric_limits<std::uint64_t>::max()) {
+    group_lifecycle_exhausted_ = true;
+  } else {
+    ++group_lifecycle_;
+  }
+}
+
 Status SiteStore::initialize() noexcept {
+  advance_group_lifecycle();
   active_load_failed_ = false;
   scrub_needed_ = false;
+  group_write_failed_ = false;
   const Status status = pair_.initialize();
   site_ = SiteRecord{};
   if (pair_.has_active()) {
@@ -437,9 +451,9 @@ Status SiteStore::initialize() noexcept {
       return loaded;
     }
   }
-  // A completed promotion has no next key. A newer active-only record
-  // beside a stale sibling may be a promotion interrupted before scrub.
-  scrub_needed_ = pair_.stale_sibling() && has_site() && site_.gk_epoch_next == 0;
+  // A stale sibling may retain a retired current or superseded next key.
+  // Scrub the adopted record to both slots before group use after reboot.
+  scrub_needed_ = pair_.stale_sibling() && has_site();
   wipe_scratch();
   return status;
 }
@@ -483,6 +497,9 @@ Status SiteStore::encode(const SiteRecord& record, std::size_t& used_len) noexce
 Status SiteStore::commit(const SiteRecord& record) noexcept {
   if (!pair_.initialized()) {
     return Status::error(StatusCode::InvalidState, "site store not initialized");
+  }
+  if (group_write_failed_) {
+    return Status::error(StatusCode::RecoveryRequired, "group scrub required");
   }
   if (active_load_failed_) {
     return Status::error(StatusCode::StorageFailure, "site active record unreadable");
@@ -530,24 +547,46 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
 
 Status SiteStore::stage_group_key(const std::uint32_t epoch,
                                   const std::array<std::uint8_t, 32>& key) noexcept {
-  if (!has_site() || scrub_needed_ || pair_.uncertain() || pair_.quarantined()) {
+  if (!has_site() || scrub_needed_ || group_write_failed_ || pair_.uncertain() ||
+      pair_.quarantined()) {
     return Status::error(StatusCode::RecoveryRequired, "group store not ready");
   }
   if (epoch == site_.gk_epoch_current && key == site_.gk_current) return Status::success();
   if (epoch == site_.gk_epoch_next && key == site_.gk_next) return Status::success();
   const std::uint32_t high = site_.gk_epoch_next ? site_.gk_epoch_next : site_.gk_epoch_current;
   if (epoch <= high) return Status::error(StatusCode::Conflict, "group epoch not new");
+  bool key_zero = true;
+  for (const auto byte : key) key_zero = key_zero && byte == 0;
+  if (key_zero) return Status::error(StatusCode::Conflict, "group key empty");
   SiteRecord candidate = site_;
   candidate.gk_epoch_next = epoch;
   candidate.gk_next = key;
-  const Status status = commit(candidate);
+  Status status = Status::success();
+  if (site_.gk_epoch_next == 0) {
+    status = commit(candidate);
+  } else {
+    // Superseding a staged key retires its secret immediately. A plain A/B
+    // commit would leave the old next key in the sibling slot.
+    std::size_t length = 0;
+    status = encode(candidate, length);
+    if (status) status = pair_.commit_twin_prepared(length);
+    wipe_scratch();
+    if (status) {
+      site_ = candidate;
+      scrub_needed_ = false;
+    } else {
+      scrub_needed_ = true;
+    }
+  }
+  if (!status) group_write_failed_ = true;
   secure_clear(&candidate, sizeof(candidate));
   return status;
 }
 
 Status SiteStore::activate_group_key(const std::uint32_t epoch,
                                      const std::uint32_t boot_witness) noexcept {
-  if (!has_site() || scrub_needed_ || pair_.uncertain() || pair_.quarantined()) {
+  if (!has_site() || scrub_needed_ || group_write_failed_ || pair_.uncertain() ||
+      pair_.quarantined()) {
     return Status::error(StatusCode::RecoveryRequired, "group store not ready");
   }
   if (epoch == site_.gk_epoch_current && site_.gk_epoch_next == 0 &&
@@ -568,28 +607,36 @@ Status SiteStore::activate_group_key(const std::uint32_t epoch,
   if (status) {
     site_ = candidate;
     scrub_needed_ = false;
+    group_write_failed_ = false;
   } else {
     // The first twin write may already have committed. No group use until
     // initialize() re-reads both slots and finish_group_scrub() completes.
     scrub_needed_ = true;
+    group_write_failed_ = true;
   }
   secure_clear(&candidate, sizeof(candidate));
   return status;
 }
 
 Status SiteStore::finish_group_scrub() noexcept {
+  if (group_write_failed_) {
+    return Status::error(StatusCode::RecoveryRequired, "group re-read required");
+  }
   if (!scrub_needed_) return Status::success();
   const SiteStoreHealth h = health();
   if (!h.has_site || h.quarantined || h.uncertain || h.unsupported_mask ||
       h.read_error_mask || h.active_load_failed || !pair_.stale_sibling() ||
-      site_.gk_epoch_next != 0 || h.seq_floor != commit_seq()) {
+      h.seq_floor != commit_seq()) {
     return Status::error(StatusCode::RecoveryRequired, "group scrub floor unproven");
   }
   std::size_t length = 0;
   Status status = encode(site_, length);
   if (status) status = pair_.commit_twin_prepared(length);
   wipe_scratch();
-  if (status) scrub_needed_ = false;
+  if (status) {
+    scrub_needed_ = false;
+    group_write_failed_ = false;
+  }
   return status;
 }
 
@@ -599,6 +646,9 @@ Status SiteStore::raise_rs_floor(const std::uint32_t epoch) noexcept {
   }
   if (!has_site()) {
     return Status::error(StatusCode::InvalidState, "site store has no member record");
+  }
+  if (group_write_failed_) {
+    return Status::error(StatusCode::RecoveryRequired, "group scrub required");
   }
   if (pair_.quarantined()) {
     return Status::error(StatusCode::IntegrityError, "site store quarantined");
@@ -615,19 +665,27 @@ Status SiteStore::raise_rs_floor(const std::uint32_t epoch) noexcept {
   std::size_t used_len = 0;
   Status status = encode(raised, used_len);
   if (status) status = pair_.commit_prepared(used_len);
-  if (!status) return status;
-  site_ = raised;
-  return Status::success();
+  wipe_scratch();
+  if (status) site_ = raised;
+  secure_clear(&raised, sizeof(raised));
+  return status;
 }
 
 Status SiteStore::clear() noexcept {
+  advance_group_lifecycle();
   const SiteRecord tombstone{};
   std::size_t used_len = 0;
   Status status = encode(tombstone, used_len);
   if (status) status = pair_.commit_twin_prepared(used_len);
   wipe_scratch();
-  if (!status) return status;
+  if (!status) {
+    // A tombstone may already be sealed in one slot; re-read before group use.
+    group_write_failed_ = true;
+    return status;
+  }
   site_ = tombstone;
+  scrub_needed_ = false;
+  group_write_failed_ = false;
   return Status::success();
 }
 
@@ -641,12 +699,15 @@ Status SiteStore::recover(const SiteRecord& record) noexcept {
   if (record.state != SiteState::Member) {
     return Status::error(StatusCode::InvalidArgument, "site recover needs a member record");
   }
+  advance_group_lifecycle();
   std::size_t used_len = 0;
   Status status = encode(record, used_len);
   if (status) status = pair_.commit_twin_prepared(used_len);
   wipe_scratch();
   if (!status) return status;
   site_ = record;
+  scrub_needed_ = false;
+  group_write_failed_ = false;
   return Status::success();
 }
 

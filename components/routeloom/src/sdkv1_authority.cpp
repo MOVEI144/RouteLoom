@@ -610,9 +610,14 @@ Status AuthorityClient::on_start(const AuthorityStart& start, const MonotonicMs 
     const SiteRecord& site = group_->store_.site();
     ScopeDigest cert_hash{};
     sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, cert_hash);
+    bool gateway_bound = false;
+    for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+      gateway_bound = gateway_bound || site.gateways[i] == start.gateway;
+    }
     const bool bound = site.state == SiteState::Member && site.network == start.network &&
         site.site_id == start.site_id && site.assignment_generation == start.generation &&
-        site.dams == start.dams && group_->boot() == start.boot &&
+        site.dams == start.dams && gateway_bound && group_->boot() == start.boot &&
+        start.boot >= site.boot_witness &&
         start.gk_current == site.gk_epoch_current && start.gk_next == site.gk_epoch_next &&
         cert_hash == start.member_cert_hash;
     secure_clear(cert_hash);
@@ -634,6 +639,16 @@ Status AuthorityClient::on_rx(const AuthorityRxCarrier& rx, const MonotonicMs no
   }
   if (rx.bytes.data == nullptr && rx.bytes.size != 0) {
     return Status::error(StatusCode::InvalidArgument, "AUTHORITY_RX_NULL");
+  }
+  // Every carrier, including R2 and Wake, is bound to the current durable
+  // assignment before it can progress or reopen a channel.
+  if (!site_bound()) {
+    to_dormant();
+    AuthorityEvent event{};
+    event.kind = AuthorityEvent::Kind::ChannelLost;
+    event.reason = "SITE_CHANGED";
+    observer_.on_event(event);
+    return Status::error(StatusCode::Conflict, "AUTHORITY_SITE_CHANGED");
   }
   if (state_ == AuthoritySnapshot::State::Dormant) {
     // Armed by an earlier Start, channel retired: only a Wake may re-open it.
@@ -701,16 +716,7 @@ Status AuthorityClient::on_rx(const AuthorityRxCarrier& rx, const MonotonicMs no
     ++rx_rejected_;
     return Status::success();
   }
-  // Ready. A replaced assignment or DAMS invalidates the whole context,
-  // including replies already in flight from the former authority session.
-  if (!site_bound()) {
-    to_dormant();
-    AuthorityEvent event{};
-    event.kind = AuthorityEvent::Kind::ChannelLost;
-    event.reason = "SITE_CHANGED";
-    observer_.on_event(event);
-    return Status::error(StatusCode::Conflict, "AUTHORITY_SITE_CHANGED");
-  }
+  // Ready.
   if (rx.kind != AuthorityCarrierKind::Envelope) {
     ++rx_rejected_;  // stray handshake bytes and Wakes change nothing
     return Status::success();
@@ -996,9 +1002,18 @@ bool AuthorityClient::site_bound() const noexcept {
   // DAMS may still report StorageFailure if the assignment remains known.
   if (!group_->store_.has_site() || group_->store_.quarantined()) return false;
   const SiteRecord& site = group_->store_.site();
-  return site.state == SiteState::Member && site.network == local_.network &&
+  ScopeDigest cert_hash{};
+  sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size}, cert_hash);
+  bool gateway_bound = false;
+  for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+    gateway_bound = gateway_bound || site.gateways[i] == local_.gateway;
+  }
+  const bool bound = site.state == SiteState::Member && site.network == local_.network &&
          site.site_id == local_.site_id && site.assignment_generation == local_.generation &&
-         site.dams == local_.dams;
+         site.dams == local_.dams && gateway_bound && cert_hash == local_.member_cert_hash &&
+         group_->boot() == local_.boot && local_.boot >= site.boot_witness;
+  secure_clear(cert_hash);
+  return bound;
 }
 
 StoredState AuthorityClient::stored_state(const std::uint32_t g) const noexcept {

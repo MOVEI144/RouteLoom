@@ -508,10 +508,6 @@ struct FakeEnv final : rlres1::Environment {
     return false;  // initiator only
   }
   bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
-    return true;  // initiator never spends a responder slot
-  }
-
-  bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
     return false;
   }
 
@@ -583,10 +579,6 @@ struct FakeAuthorityEnv final : rlres1::Environment {
     out.secret = dams;
     return true;
   }
-  bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
-    return true;  // fake authority has a verified, unexpired DAMS
-  }
-
   bool reserve_resume_use(rlres1::Purpose, const keys::ResumeId&) noexcept override {
     return true;
   }
@@ -762,18 +754,7 @@ bool pump(sdkv1::AuthorityClient& client, FakePort& port, FakeAuthority& fake, M
   return port.sent.empty();
 }
 
-void test_durable_group_ack_round_trip() {
-  sdkv1_test::FaultyRecordStorage storage(sdkv1::kSiteSlotBytes);
-  sdkv1::SiteStore store(storage);
-  CHECK(store.initialize());
-  auto site = sdkv1_test::site_record(3, 10);
-  CHECK(store.commit(site));
-  sdkv1::GroupKeyState group(store);
-  sdkv1::GroupKeyState::Input begin{};
-  begin.op = sdkv1::GroupKeyState::Op::Start;
-  begin.boot = site.boot_witness;
-  CHECK(group.advance(begin, 1000));
-
+sdkv1::AuthorityStart bound_start(const sdkv1::SiteRecord& site) {
   sdkv1::AuthorityStart start{};
   start.network = site.network;
   start.self = 0x101;
@@ -786,8 +767,25 @@ void test_durable_group_ack_round_trip() {
   start.epochs.gk_epoch = site.gk_epoch_current;
   start.boot = site.boot_witness;
   start.gk_current = site.gk_epoch_current;
+  start.gk_next = site.gk_epoch_next;
   routeloom::sha256({site.member_cert.bytes.data(), site.member_cert.size},
                     start.member_cert_hash);
+  return start;
+}
+
+void test_durable_group_ack_round_trip() {
+  sdkv1_test::FaultyRecordStorage storage(sdkv1::kSiteSlotBytes);
+  sdkv1::SiteStore store(storage);
+  CHECK(store.initialize());
+  auto site = sdkv1_test::site_record(3, 10);
+  CHECK(store.commit(site));
+  sdkv1::GroupKeyState group(store);
+  sdkv1::GroupKeyState::Input begin{};
+  begin.op = sdkv1::GroupKeyState::Op::Start;
+  begin.boot = site.boot_witness;
+  CHECK(group.advance(begin, 1000));
+
+  sdkv1::AuthorityStart start = bound_start(site);
   FakePort port;
   FakeObserver observer;
   FakeEnv env;
@@ -879,12 +877,75 @@ void test_durable_group_ack_round_trip() {
   CHECK(pump(client, port, fake, 1004));
   CHECK(fake.last_ack_result == sdkv1::UpdateResult::StorageFailure);
   CHECK(!group.ready());
+  update.head.request_id = 45;
+  update.g = 13;
+  update.gk = secret(0xC0);
+  sent = fake.seal(keys::AuthorityEnvelopeType::GroupKeyUpdate, update);
+  input.rx = {sent.kind, {sent.bytes.data(), sent.bytes.size()}};
+  CHECK(client.advance(input, 1005));
+  CHECK(pump(client, port, fake, 1005));
+  CHECK(fake.last_ack_result == sdkv1::UpdateResult::StorageFailure);
   sdkv1::SiteStore after_cut(storage);
   CHECK(after_cut.initialize());
   sdkv1::GroupKeyState recovery(after_cut);
   CHECK(recovery.advance(begin, 1005));
   CHECK(recovery.current() == 12);
   CHECK(!after_cut.group_scrub_needed());
+}
+
+void test_bound_channel_fences_changed_site() {
+  const auto* aead = routeloom::builtin_aead_gcm();
+  CHECK(aead != nullptr);
+  if (aead == nullptr) return;
+  for (const bool during_handshake : {true, false}) {
+    sdkv1_test::FaultyRecordStorage storage(sdkv1::kSiteSlotBytes);
+    sdkv1::SiteStore store(storage);
+    CHECK(store.initialize());
+    const auto site = sdkv1_test::site_record(3, 10);
+    CHECK(store.commit(site));
+    sdkv1::GroupKeyState group(store);
+    sdkv1::GroupKeyState::Input begin{};
+    begin.op = sdkv1::GroupKeyState::Op::Start;
+    begin.boot = site.boot_witness;
+    CHECK(group.advance(begin, 1000));
+    const auto start = bound_start(site);
+    FakePort port;
+    FakeObserver observer;
+    FakeEnv env;
+    sdkv1::AuthorityClient client(*aead, port, observer, env, &group);
+    FakeAuthority fake(site.dams, start);
+    sdkv1::AuthorityInput input{};
+    input.kind = sdkv1::AuthorityInputKind::Start;
+    input.start = start;
+    CHECK(client.advance(input, 1000));
+    if (during_handshake) {
+      CHECK(port.sent.size() == 1);
+      if (port.sent.size() != 1) continue;
+      const auto r2 = fake.on_carrier(port.sent[0].kind,
+                                      {port.sent[0].bytes.data(), port.sent[0].bytes.size()},
+                                      1000);
+      CHECK(r2.size() == 1);
+      if (r2.size() != 1) continue;
+      port.sent.clear();
+      CHECK(store.clear());
+      input = {};
+      input.kind = sdkv1::AuthorityInputKind::RxCarrier;
+      input.rx = {sdkv1::AuthorityCarrierKind::R2,
+                  {r2[0].bytes.data(), r2[0].bytes.size()}};
+      CHECK(client.advance(input, 1001).code == routeloom::StatusCode::Conflict);
+      CHECK(port.sent.empty());
+    } else {
+      CHECK(pump(client, port, fake, 1000));
+      sdkv1::SiteRecord newer = store.site();
+      ++newer.boot_witness;
+      CHECK(store.commit(newer));
+      CHECK(!group.tx_ready());
+      input = {};
+      input.kind = sdkv1::AuthorityInputKind::RequestPull;
+      CHECK(client.advance(input, 1001).code == routeloom::StatusCode::Conflict);
+      CHECK(port.sent.empty());
+    }
+  }
 }
 
 void test_round_trip() {
@@ -1783,6 +1844,7 @@ int main() {
   test_replay_window();
   test_round_trip();
   test_durable_group_ack_round_trip();
+  test_bound_channel_fences_changed_site();
   test_reentry();
   test_timeouts_and_backoff();
   test_rx_attacks();

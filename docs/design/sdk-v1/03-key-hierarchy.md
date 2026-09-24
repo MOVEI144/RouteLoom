@@ -180,7 +180,7 @@ Site Authorityの状態機械：
 | ACTIVATING | 全ack、または期限（定期60秒／削除時30秒） | gatewayにg+1での送信開始を指示（USB）。gatewayのbroadcastがg+1になる |
 | STABLE(g+1) | — | 未ackのmemberは次の接触でpullする |
 
-member側：検証済み更新をRLS1の`gk_next`へcommit/readbackしてからACK可能（STAGED）。**有効なg+1のGroupEnd frameを初めて受けた時**はpromotionを予約し、その受信呼出しでは業務配送しない。Ownerの次のTickで両slotをtwin commit/readbackしてから送信を切替える（暗黙activation）。当該frameは再送/repairで再受信する。認証済み`GroupKeyActivate`でも同じtwin commitを行う。gの受信は定期60秒、削除起因10秒までで、cold bootではpreviousを復活させない。`end_epoch`が自分の知らない新しいgのframeを受けたら、authority channelで`GroupKeyPull`（1分に1回まで）。GK更新のNVS書込みは1回の更新あたりRLS1 commit 2回。
+member側：検証済み更新をRLS1の`gk_next`へcommit/readbackしてからACK可能（STAGED）。**有効なg+1のGroupEnd frameを初めて受けた時**はpromotionを予約し、その受信呼出しでは業務配送しない。Ownerの次のTickで両slotをtwin commit/readbackしてから送信を切替える（暗黙activation）。当該frameは再送/repairで再受信する。認証済み`GroupKeyActivate`でも同じtwin commitを行う。gの受信は定期60秒、削除起因10秒までで、cold bootではpreviousを復活させない。`end_epoch`が自分の知らない新しいgのframeを受けたら、authority channelで`GroupKeyPull`（1分に1回まで）。通常のGK更新はstageに2 write、activationに4 write。stagedを新世代で差し替える場合は、破棄するnext鍵を両slotから消すためstageを4 writeにする。
 
 ### 6.4 削除時のrekey
 

@@ -137,6 +137,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 | 新しい近隣（full EDHOC） | 再開slot 1 | c/f/rの新規作成 |
 | 再開（RLRES1） | 0（まれに`last_used_boot`） | — |
 | GK更新（24時間） | RLS1 stage 2 write＋activation twin 4 write＝計6 write（readbackを含まず） | — |
+| GK staged差替え | RLS1 twin 4 write（旧next鍵を両slotから消去） | — |
 | 削除 | RRS1 1 commit×2 slot | — |
 
 受信ごとの永続化が無くなるため、本番profileの摩耗は起動回数とGK更新でほぼ決まる。

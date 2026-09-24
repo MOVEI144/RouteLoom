@@ -7,18 +7,6 @@
 
 namespace routeloom::sdkv1 {
 
-struct GroupReplayBank {
-  std::uint32_t epoch{0};
-  std::uint64_t max{0};
-  std::uint64_t bitmap{0};
-};
-struct GroupReplaySender {
-  NodeId sender{0};
-  std::uint32_t boot{0};
-  GroupReplayBank banks[2]{};
-};
-static_assert(sizeof(GroupReplaySender) <= 64, "group sender RAM budget");
-
 class GroupSecurityProvider final : public SecurityProvider {
  public:
   GroupSecurityProvider(GroupKeyState& keys, SecurityProvider& pairwise,
@@ -57,15 +45,7 @@ class GroupSecurityProvider final : public SecurityProvider {
   SecurityProvider& pairwise_;
   const AeadGcm& aead_;
   NodeId self_;
-  std::array<GroupReplaySender, 128> link_rx_{};
-  std::array<GroupReplaySender, 8> end_rx_{};
   std::array<std::uint8_t, kMaxEspNowBody> staging_{};
-  std::uint64_t link_tx_{0};
-  std::uint64_t end_tx_{0};
-  std::uint64_t link_sealed_{0};
-  std::uint64_t end_sealed_{0};
-  bool link_has_sealed_{false};
-  bool end_has_sealed_{false};
   bool in_call_{false};
 };
 

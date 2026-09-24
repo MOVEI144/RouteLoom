@@ -13,13 +13,22 @@ MonotonicMs deadline(const MonotonicMs now, const std::uint16_t seconds) noexcep
 }
 }  // namespace
 
-GroupKeyState::~GroupKeyState() { expire(); }
+GroupKeyState::~GroupKeyState() {
+  expire();
+  secure_clear(link_rx_.data(), sizeof(link_rx_));
+  secure_clear(end_rx_.data(), sizeof(end_rx_));
+}
 
 void GroupKeyState::expire() noexcept {
   secure_clear(previous_);
   previous_epoch_ = 0;
   previous_deadline_ = 0;
   previous_started_ = 0;
+}
+
+void GroupKeyState::bind_epochs() noexcept {
+  bound_current_ = store_.site().gk_epoch_current;
+  bound_next_ = store_.site().gk_epoch_next;
 }
 
 bool GroupKeyState::accepts(const std::uint32_t epoch) const noexcept {
@@ -54,8 +63,10 @@ Status GroupKeyState::promote(const std::uint32_t epoch, const std::uint32_t wit
   if (!status) {
     blocked_ = true;  // the first write might have committed: never fall back
     expire();
+    secure_clear(old);
     return status;
   }
+  bind_epochs();
   expire();
   previous_ = old;
   previous_epoch_ = old_epoch;
@@ -67,7 +78,8 @@ Status GroupKeyState::promote(const std::uint32_t epoch, const std::uint32_t wit
 }
 
 Status GroupKeyState::advance(const Input& input, const MonotonicMs now) noexcept {
-  if (in_call_) return Status::error(StatusCode::Busy, "group operation re-entry");
+  if (in_call_ || provider_in_call_)
+    return Status::error(StatusCode::Busy, "group operation re-entry");
   in_call_ = true;
   Status status = Status::success();
   switch (input.op) {
@@ -76,7 +88,9 @@ Status GroupKeyState::advance(const Input& input, const MonotonicMs now) noexcep
       // boot. A new instance may start only after rlboot is durable.
       if (started_) { status = Status::error(StatusCode::InvalidState, "group already started"); break; }
       if (!store_.initialized() || !store_.has_site() || store_.quarantined() ||
-          store_.uncertain() || store_.health().active_load_failed) {
+          store_.uncertain() || store_.health().active_load_failed ||
+          store_.group_reconcile_required() ||
+          !store_.group_lifecycle_matches(store_.group_lifecycle())) {
         status = Status::error(StatusCode::RecoveryRequired, "site record unavailable");
         break;
       }
@@ -85,13 +99,23 @@ Status GroupKeyState::advance(const Input& input, const MonotonicMs now) noexcep
         if (!status) break;
       }
       boot_ = input.boot;
-      boot_ok_ = boot_ != 0 && boot_ >= store_.site().boot_witness;
+      boot_ok_ = boot_ != 0 && boot_ != std::numeric_limits<std::uint32_t>::max() &&
+                 boot_ >= store_.site().boot_witness;
+      lifecycle_ = store_.group_lifecycle();
+      site_id_ = store_.site().site_id;
+      network_ = store_.site().network;
+      generation_ = store_.site().assignment_generation;
+      bind_epochs();
+      overlap_known_ = false;
       started_ = true;
       blocked_ = false;
       break;
     }
     case Op::Stage:
-      if (!ready() || input.generation != store_.site().assignment_generation ||
+      if (!ready()) {
+        status = Status::error(StatusCode::RecoveryRequired, "group blocked"); break;
+      }
+      if (input.generation != store_.site().assignment_generation ||
           (input.overlap_s != 10 && input.overlap_s != 60)) {
         status = Status::error(StatusCode::Conflict, "group update binding"); break;
       }
@@ -100,14 +124,17 @@ Status GroupKeyState::advance(const Input& input, const MonotonicMs now) noexcep
       {
         const std::uint32_t prior_next = store_.site().gk_epoch_next;
         status = store_.stage_group_key(input.epoch, input.key);
+        if (status) bind_epochs();
         if (status && input.epoch == store_.site().gk_epoch_next) {
           if (input.epoch != prior_next) {
             expire();
             overlap_s_ = input.overlap_s;
+            overlap_known_ = true;
             pending_ = false;
           } else if (input.overlap_s < overlap_s_) {
             overlap_s_ = input.overlap_s;
           }
+          overlap_known_ = true;
         }
       }
       if (!status && status.code != StatusCode::Conflict) {
@@ -116,16 +143,22 @@ Status GroupKeyState::advance(const Input& input, const MonotonicMs now) noexcep
       }
       break;
     case Op::Activate:
-      if (!ready() || input.generation != store_.site().assignment_generation ||
+      if (!ready()) {
+        status = Status::error(StatusCode::RecoveryRequired, "group blocked"); break;
+      }
+      if (input.generation != store_.site().assignment_generation ||
           (input.overlap_s != 10 && input.overlap_s != 60)) {
         status = Status::error(StatusCode::Conflict, "group activation binding"); break;
       }
       if (input.epoch == current() && store_.site().gk_epoch_next == 0) break;
-      overlap_s_ = input.overlap_s;
+      if (!overlap_known_ || input.overlap_s < overlap_s_) overlap_s_ = input.overlap_s;
       status = promote(input.epoch, input.boot, now);
       break;
     case Op::AuthenticatedNext:
-      if (!ready() || input.epoch == 0 || input.epoch != store_.site().gk_epoch_next) {
+      if (!ready()) {
+        status = Status::error(StatusCode::RecoveryRequired, "group blocked"); break;
+      }
+      if (input.epoch == 0 || input.epoch != store_.site().gk_epoch_next) {
         status = Status::error(StatusCode::Conflict, "not a staged group frame"); break;
       }
       pending_ = true;  // never write flash in the AEAD callback
@@ -141,6 +174,7 @@ Status GroupKeyState::advance(const Input& input, const MonotonicMs now) noexcep
       blocked_ = true;
       pending_ = false;
       boot_ok_ = false;
+      overlap_known_ = false;
       break;
   }
   in_call_ = false;
