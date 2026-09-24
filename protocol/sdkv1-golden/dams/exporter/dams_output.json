@@ -1,0 +1,12 @@
+{
+  "codec": "dams_exporter",
+  "context_hex": "8869526f7574654c6f6f6d01041b000000030a1b2c3d1b00a10000000012341b51730000000000425820b2a87913fda824e22330a62d59e2e3dd4daf6895568c6751e1611046e079a3245820898eded1038e45d8d24e98d256139995074bc4cc5ff353af9ca26806fdae8ad7",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-dams-golden-v1",
+  "label": 32771,
+  "length": 32,
+  "name": "dams_output",
+  "note": "the DAMS output for the join test identities (label 32771)",
+  "output_hex": "8303229b65389cad83fca4005ad1f9e4e67ad9d23cf670f2c70ffa305acba59f",
+  "prk_hex": "0d04e7455ae6fdbb759b20c7e18b6b6ced48eb8f8e82454a61443ca09c783f00"
+}

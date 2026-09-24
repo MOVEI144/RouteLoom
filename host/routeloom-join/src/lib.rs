@@ -1104,14 +1104,15 @@ pub const DAMS_SIZE: usize = 32;
 /// Exporter `purpose` of the authority channel (03 §2 rule 3).
 pub const EXPORTER_PURPOSE_AUTHORITY: u64 = 4;
 
-/// PROVISIONAL Exporter context for DAMS. 05 §5 fixes the shape of the
-/// RouteLoom context (a deterministic CBOR array starting `'RouteLoom', 1,
-/// purpose, network, initiator_node, responder_node, initiator_kid,
-/// responder_kid, …`) but not the join's trailing fields, so this uses its
-/// first eight members only: `["RouteLoom", 1, 4, network, node, site_id,
-/// device_kid, sak_kid]` (`responder_node = site_id`, 03 §2.2). The device
-/// side must derive DAMS with the same bytes; pin both in a shared vector
-/// before P5 uses DAMS.
+/// Frozen join-profile Exporter context for DAMS (02 §10.3, 03 §2.1).
+/// The join uses its own eight-member context — `["RouteLoom", 1, 4,
+/// network, node, site_id, device_kid, sak_kid]` (`responder_node = site_id`)
+/// — as the explicit exception to 03 §2's generic fifteen-member exporter
+/// context. The device side (`dams_exporter_context` in sdkv1_ead.cpp)
+/// emits these exact bytes; both are pinned by the shared vectors in
+/// `protocol/sdkv1-golden/dams/` (context and whole exporter outputs) and
+/// the `protocol/edhoc-interop` transcripts. Changing any member, the label
+/// (`EXPORTER_LABEL_DAMS`), or the generic context breaks join interop.
 pub fn dams_exporter_context(
     network: u64,
     node: u64,

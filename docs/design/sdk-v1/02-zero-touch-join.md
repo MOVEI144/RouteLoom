@@ -43,7 +43,7 @@ len-4    u32 crc32_iso_hdlc
 
 3種類ともCWT（RFC 8392）＝COSE_Sign1（ES256、protected `{1:-7}`、unprotected空）。EDHOCでは`ID_CRED_x = {13 (kcwt): CWT}`として値渡しする（RFC 9528 §3.5.2の登録済みlabel）。deterministic CBOR、整数最短表現、未知claimは拒否。
 
-**Resolved in implementation（P3-1、統合担当の決定）**：固定したlibedhoc v2.3.2のcredential APIはID_CREDとしてkid（4）・x5chain（33）・x5t（34）だけを扱い、kcwt（13）による値渡しを符号化・復号できない（P2-1で判明）。そこで**ID_CRED_x＝kid**（cnf鍵のCOSE_KeyのSHA-256全32B、P2-1のbackendと同じ。CRED_xはRLCW1証明書そのもの）とし、**証明書全体はEADで運ぶ**。EAD項目は P2-3 の65537〜65540に続く**label 65541（Credential、critical、`3a 00 01 00 04`）**で、値は正準なRLCW1証明書1枚（1〜256B）。EAD_2＝SiteOffer・Credential(SiteCert)、EAD_3＝JoinRequest・Credential(DevCert)の**この順で各1回**（message項目が先。P3-3のSite Authority〔`routeloom_join::join_ead_credential_item`、`protocol/edhoc-interop/`の記録〕と同じ順に統合時に揃えた）（padding以外の項目・順序違い・重複は拒否、EAD_1/EAD_4には載せない）。libedhocはmessage_2の手順9（EAD処理）を手順10（相手credentialの認証）より前に、message_3でもEAD_3処理を`authenticate_peer`より前に行うので、受信側のCredentialProviderは同じmessageのEADで受け取った証明書をkidに対応付けられる。受け入れは`join_credential_check`：証明書が期待型（m2はSiteCert、m3はDevCert）として復号でき、cnf鍵のkidがID_CRED_xのkidと一致すること（不一致は認証失敗）。発行者署名の検証（機器はSite CA anchor、Site AuthorityはDevice CA）は従来どおり呼び出し側。C++ `sdkv1_ead.hpp`（`join_ead_find_with_credential`）とRust `routeloom-join`に実装し、共通vector（`protocol/sdkv1-golden/ead/`）で一致を確認。`edhoc::Session`に任意の`EadHandler`を足し、この形でDevCert/SiteCertのmethod 0参加交換を最後まで実行した（`tests/cpp/test_edhoc.cpp`、実長は§6）。DAMS（03 §2.1、Exporter label 32771）は機器側ではまだ導出しない：P3-3のSite Authorityが使う暫定context（`routeloom_join::dams_exporter_context`＝`["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]`）に機器側も合わせる前提で、`sdkv1_ead.hpp`に`kTodoDamsExporterLabel`等のTODO定数だけを置き、P5で使う前に両側を共通vectorで固定する。
+**Resolved in implementation（P3-1、統合担当の決定）**：固定したlibedhoc v2.3.2のcredential APIはID_CREDとしてkid（4）・x5chain（33）・x5t（34）だけを扱い、kcwt（13）による値渡しを符号化・復号できない（P2-1で判明）。そこで**ID_CRED_x＝kid**（cnf鍵のCOSE_KeyのSHA-256全32B、P2-1のbackendと同じ。CRED_xはRLCW1証明書そのもの）とし、**証明書全体はEADで運ぶ**。EAD項目は P2-3 の65537〜65540に続く**label 65541（Credential、critical、`3a 00 01 00 04`）**で、値は正準なRLCW1証明書1枚（1〜256B）。EAD_2＝SiteOffer・Credential(SiteCert)、EAD_3＝JoinRequest・Credential(DevCert)の**この順で各1回**（message項目が先。P3-3のSite Authority〔`routeloom_join::join_ead_credential_item`、`protocol/edhoc-interop/`の記録〕と同じ順に統合時に揃えた）（padding以外の項目・順序違い・重複は拒否、EAD_1/EAD_4には載せない）。libedhocはmessage_2の手順9（EAD処理）を手順10（相手credentialの認証）より前に、message_3でもEAD_3処理を`authenticate_peer`より前に行うので、受信側のCredentialProviderは同じmessageのEADで受け取った証明書をkidに対応付けられる。受け入れは`join_credential_check`：証明書が期待型（m2はSiteCert、m3はDevCert）として復号でき、cnf鍵のkidがID_CRED_xのkidと一致すること（不一致は認証失敗）。発行者署名の検証（機器はSite CA anchor、Site AuthorityはDevice CA）は従来どおり呼び出し側。C++ `sdkv1_ead.hpp`（`join_ead_find_with_credential`）とRust `routeloom-join`に実装し、共通vector（`protocol/sdkv1-golden/ead/`）で一致を確認。`edhoc::Session`に任意の`EadHandler`を足し、この形でDevCert/SiteCertのmethod 0参加交換を最後まで実行した（`tests/cpp/test_edhoc.cpp`、実長は§6）。DAMS（03 §2.1、Exporter label 32771）はP3-4で機器側も導出する：contextはjoin専用の8要素配列`["RouteLoom", 1, 4, network, node_id, site_id, device_kid, sak_kid]`（03 §2の一般contextとは別形として決めた例外。P3-3のSite Authorityが使っていた暫定形をそのまま凍結した）で、`dams_exporter_context`（`sdkv1_ead.hpp`）と`routeloom_join::dams_exporter_context`が共通vector（`protocol/sdkv1-golden/dams/`、`tools/gen_sdkv1_dams_vectors.py`）でbyte一致する。
 
 | claim | DevCert | SiteCert | MemberCert（=Grant） |
 |---|---|---|---|
@@ -316,9 +316,9 @@ m3を検証できた未割当機器は、verdictに関係なくhostの**発見�
 | ZT_DECIDED | Authenticating | m4受信 | verdict処理（§6.1） | Allow→ZT_COMMIT、他→候補表更新→ZT_SELECT/ZT_BACKOFF |
 | ZT_COMMIT | AuthorizedPendingCommit | Allow | §10.2の検証→RLS1 commit（seal/readback） | 成功→MEMBER_BRINGUP、失敗→RAM破棄しZT_BACKOFF |
 | MEMBER_BRINGUP | Member | RLS1 commit済み | Member scopeで近隣とlink（[06](06-fast-rejoin.md)）、JoinConfirm | 通常運転 |
-| ZT_BACKOFF | Discovering | 失敗・全現場不適格 | 乱数backoff 1s→最大600s。全現場が回避中なら最短適格時刻まで | →ZT_SCAN |
+| ZT_BACKOFF | Discovering | 失敗・全現場不適格 | 乱数backoff 1s→最大600s。次走査は`min(backoff,最短の適格化期限)`で、6/24h回避中でも最大600秒ごとに未知現場を探索する（回避現場自体は試行しない） | →ZT_SCAN |
 
-時間上限：m1→m2は`2s＋0.3s×authority_hops`（最大6秒）、m3→m4はそれ＋decision上限（合計最大10秒）、1回の試行全体は15秒以内。RLD1の組立ては既存どおり1件・3秒。
+時間上限：走査はchannel最大3×有効Site CA hint最大3×320ms（最大9窓、1窓につきDISCOVER 1回、重複hintはまとめる）。m1→m2は`2s＋0.3s×authority_hops`（最大6秒、到達不明は6秒）、m3→m4はそれ＋decision上限（合計最大10秒）、1回の試行全体は15秒以内。新しいm1の間隔は機器全体で2秒以上。RLD1の組立ては既存どおり1件・3秒。
 
 ### 10.2 Allowの検証（すべて満たすときだけcommit）
 
@@ -356,15 +356,15 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 
 ## 11. 重なり合う現場（R4）
 
-候補表（RAM、最大8現場、site_hint単位）：`site_hint | 最良proxyのMAC・RSSI | authority_hops | 状態(untried/pending(retry_at)/avoid(until)/busy(retry_at)) | 最終試行`。
+候補表（RAM、最大8現場）：観測keyは`(org_hint, site_hint, network_low32)`で、hintは探索keyであり認証済みの現場IDではない。認証はm2で初めて`site_id`に結び付き、hint衝突が認証で判明した場合だけ同じkeyを2レコードに分ける（満杯ならその試行を中止）。各現場はproxy証拠を最大2件（MAC・node・channel・RSSI・authority_hops・到達/busy flag・last_seen）持ち、60秒観測がなければ証拠は失効する（policyの期限は消えない）。回避表は同じレコードの別viewで、状態は`untried/transient/pending(retry_at)/busy(retry_at)/avoid(until)`、失敗回数・最終試行・preferred flagを持つ。1レコード≤160B、合計1280B。新規追加は空き→holdの期限が切れた古いレコード（policyによらない）の順で置換し、選択中・未満了のholdを持つレコードはevictしない。全8件が保護対象なら新候補をdropしてNoCapacityを数える（無制限リストやNVS overflowは作らない）。
 
 選択規則：
 
 1. org_hintが自分のanchorと一致しないOFFERは無視。
-2. 状態が適格（untried、またはretry_at/until経過）の現場だけを対象。
-3. preferred（直前に所属していた現場、RAMで保持）を優先、次にuntried、次にauthority_hopsが小さくRSSIが強い順。
-4. 同じ現場への連続試行は`retry_after`を守る。pendingの現場があっても他の適格現場を順に試す（割当先がpending側でない限り、いずれallowに当たる）。
-5. avoid（DenyNotHere 6時間、DenyBlocked 24時間）の現場はDISCOVERの`avoid_site_hint`（最大2件）に入れてOFFER自体を抑制。
+2. 状態が適格（untried、またはretry_at/until経過）かつ新しい到達可能なproxy証拠のある現場だけを対象。認証済みsite_idが同じ複数レコードは遅い方の適格化時刻に統合する。
+3. preferred（直前に所属していた現場、RAMで保持）を優先、次にuntried、authority_hops昇順（不明=255は末尾）、RSSI降順、最終試行が古い順、key/MACの辞書順。
+4. 同じ現場への連続試行は`retry_after`を守る。pendingの現場があっても他の適格現場を順に試す（割当先がpending側でない限り、いずれallowに当たる）。timeout/経路消失/EDHOC errorは`transient`として`min(600s,1s×2^k)`（k≤10飽和）に`base〜base+base/4`の一様乱数を足して遅らせ、別proxy/現場を先に試す。OFFERが届いただけでは保留を解除しない。
+5. avoid（DenyNotHere 6時間、DenyBlocked 24時間、m2 SiteCert/署名不正と認証済み不正Allowも24時間）の現場はDISCOVERの`avoid_site_hint`（最大2件、期限の遅い順・同値ならhint順。preferredと同じhint、衝突が判明しているhint（別keyの同名hintも、認証で分岐した別site_idの同名hintも）は入れない）に入れてOFFER自体を抑制。
 6. 候補表は再起動で消える（NVSに書かない：摩耗と、誤った回避の固定化を避ける）。再起動直後の再試行はauthority側のrate制限で抑える。
 
 **なぜ隣の現場に入らないか**：(a) allowは割当先のKGuardだけが返す。(b) 参加後のlinkはMemberCertの相互検証を要し、別現場のMemberCertは別SAK署名・別networkなので検証に失敗する。(c) Member class discoveryのscope鍵は自現場のGKから導出され、他現場のDISCOVER/OFFERはscope MACで無言dropされる。(d) 参加後はZeroTouch classを送らない。焼き込み鍵による分離には依存しない。残る前提はKGuardの割当一意性（A1）で、A2ではこれも機器側で検証する（[01](01-overview-threat-model.md) §5）。

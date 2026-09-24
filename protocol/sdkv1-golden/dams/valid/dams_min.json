@@ -1,0 +1,14 @@
+{
+  "codec": "dams_context",
+  "context_hex": "8869526f7574654c6f6f6d0104010101582000000000000000000000000000000000000000000000000000000000000000005820ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "context_sha256": "a9c1462c60ebe944c82f5b9ece490e23ac7db1798ec90ac7de406bc119e9777e",
+  "device_kid_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-dams-golden-v1",
+  "name": "dams_min",
+  "network": 1,
+  "node_id": 1,
+  "note": "one-byte integer forms; all-zero/all-ones kids stay opaque bstrs",
+  "sak_kid_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "site_id": 1
+}
