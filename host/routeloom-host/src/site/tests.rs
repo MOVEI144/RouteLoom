@@ -821,7 +821,7 @@ fn removal_end_to_end() {
         .unwrap()
         .to_string();
     let (view, _) = service.with(|a| {
-        a.operation_json(records::parse_op_token(&op).unwrap())
+        a.operation_json(records::parse_op_token(&op).unwrap(), HostTime::sync(T0))
             .unwrap()
     });
     let view = json(&view);
@@ -1868,7 +1868,7 @@ fn gk_periodic_rotation_converges_end_to_end() {
     let op_id = service
         .with(|a| a.gks.rotation().unwrap().row.operation_id)
         .0;
-    let (view, _) = service.with(|a| a.operation_json(op_id).unwrap());
+    let (view, _) = service.with(|a| a.operation_json(op_id, HostTime::sync(T0)).unwrap());
     let view = json(&view);
     assert_eq!(view.get("kind").unwrap().as_str(), Some("rotate"));
     assert_eq!(view.get("state").unwrap().as_str(), Some("distributing"));
@@ -1933,7 +1933,7 @@ fn gk_periodic_rotation_converges_end_to_end() {
         status.get("next_due_ms").unwrap().as_u64(),
         Some(due + 2_000 + 86_400_000)
     );
-    let (view, _) = service.with(|a| a.operation_json(op_id).unwrap());
+    let (view, _) = service.with(|a| a.operation_json(op_id, HostTime::sync(T0)).unwrap());
     assert_eq!(
         json(&view).get("state").unwrap().as_str(),
         Some("converged")
@@ -2052,7 +2052,7 @@ fn gk_revoke_supersedes_staging_with_fresh_epoch() {
     let status = gk_status(&service, T0 + 4_000);
     assert_eq!(status.get("targets").unwrap().as_u64(), Some(1));
     assert_eq!(status.get("cause").unwrap().as_str(), Some("removal"));
-    let (view, _) = service.with(|a| a.operation_json(first_op).unwrap());
+    let (view, _) = service.with(|a| a.operation_json(first_op, HostTime::sync(T0)).unwrap());
     assert_eq!(
         json(&view).get("state").unwrap().as_str(),
         Some("superseded")
@@ -3132,7 +3132,7 @@ fn gk_migrated_staged_key_rebuilds_its_rotation() {
         .with(|a| a.gks.rotation().unwrap().row.operation_id)
         .0;
     assert_eq!(op_id, 7);
-    let (view, _) = service.with(|a| a.operation_json(7).unwrap());
+    let (view, _) = service.with(|a| a.operation_json(7, HostTime::sync(T0)).unwrap());
     let view = json(&view);
     assert_eq!(view.get("state").unwrap().as_str(), Some("committed"));
     let rotation = view.get("gk_rotation").unwrap();
@@ -3177,6 +3177,8 @@ fn gk_migrated_staged_key_keeps_operation_cap() {
                 gk_cause: "manual".into(),
                 gk_end: "converged".into(),
                 distribution: None,
+                cutover: None,
+                notice: None,
             };
             (store::DocKind::Operation, h16(id), Some(op.doc()))
         })
@@ -3640,6 +3642,8 @@ fn review_open_rejects_exhausted_operation_id() {
         gk_cause: String::new(),
         gk_end: String::new(),
         distribution: None,
+        cutover: None,
+        notice: None,
     };
     store
         .commit(&Batch {
@@ -3809,7 +3813,7 @@ fn revoke_rrs(
 }
 
 fn distribution_of(service: &SiteService, op: u64) -> routeloom_json::Json {
-    let (view, _) = service.with(|a| a.operation_json(op).unwrap());
+    let (view, _) = service.with(|a| a.operation_json(op, HostTime::sync(T0)).unwrap());
     let view = json(&view);
     view.get("distribution").unwrap().clone()
 }
@@ -4129,7 +4133,7 @@ fn operations_get_round_trips_through_the_client_parser() {
     });
     let (op, _) = revoke_rrs(&service, leaver.node, 1, "r-client", T0 + 10_000);
     let progress = || {
-        let (view, _) = service.with(|a| a.operation_json(op).unwrap());
+        let (view, _) = service.with(|a| a.operation_json(op, HostTime::sync(T0)).unwrap());
         operation_from_json(&json(&view)).expect("client parses operations.get")
     };
     let seen = progress();
@@ -4388,6 +4392,6 @@ fn revocation_baseline_bootstrap_on_first_get() {
         .0
         .unwrap();
     let (op, _) = revoke_rrs(&service2, leaver.node, 1, "r-base", T0 + 10_000);
-    let (view, _) = service2.with(|a| a.operation_json(op).unwrap());
+    let (view, _) = service2.with(|a| a.operation_json(op, HostTime::sync(T0)).unwrap());
     assert_eq!(json(&view).get("rs_epoch").unwrap().as_u64(), Some(2));
 }

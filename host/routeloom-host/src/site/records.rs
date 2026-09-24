@@ -6,7 +6,8 @@
 
 use routeloom_json::{escape_string, Json};
 
-use super::revocation::OperationDistribution;
+use super::cutover::CutoverState;
+use super::revocation::{NoticeState, OperationDistribution};
 use crate::receive_log::hex_lower;
 
 pub fn h16(value: u64) -> String {
@@ -451,11 +452,12 @@ impl StoredDecision {
     }
 }
 
-/// An approve, revoke or rotate operation (07 §2.2, `operations.get`).
+/// An approve, revoke, rotate or cutover operation (07 §2.2,
+/// `operations.get`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Operation {
     pub id: u64,
-    /// "approve", "revoke" or "rotate".
+    /// "approve", "revoke", "rotate" or "cutover".
     pub kind: String,
     pub node: u64,
     pub generation: u32,
@@ -473,6 +475,11 @@ pub struct Operation {
     /// P6-1 RRS1 distribution snapshot (`revoke` only). `None` on
     /// pre-P6-1 docs, which read back as distribution state `unknown`.
     pub distribution: Option<OperationDistribution>,
+    /// P6-2 cutover snapshot (`cutover` only). `None` on older docs.
+    pub cutover: Option<CutoverState>,
+    /// P6-2 RemovalNotice delivery (`revoke` only). `None` on older
+    /// docs, which read back as delivery `unknown`.
+    pub notice: Option<NoticeState>,
 }
 
 pub fn op_token(id: u64) -> String {
@@ -489,8 +496,16 @@ impl Operation {
             || "null".to_string(),
             super::revocation::OperationDistribution::doc,
         );
+        let cutover = self
+            .cutover
+            .as_ref()
+            .map_or_else(|| "null".to_string(), super::cutover::CutoverState::doc);
+        let notice = self
+            .notice
+            .as_ref()
+            .map_or_else(|| "null".to_string(), super::revocation::NoticeState::doc);
         format!(
-            "{{\"id\":{},\"kind\":\"{}\",\"node\":\"{}\",\"generation\":{},\"member_cert_serial\":{},\"rs_epoch\":{},\"gk_from\":{},\"gk_to\":{},\"created_ms\":{},\"gk_cause\":\"{}\",\"gk_end\":\"{}\",\"distribution\":{distribution}}}",
+            "{{\"id\":{},\"kind\":\"{}\",\"node\":\"{}\",\"generation\":{},\"member_cert_serial\":{},\"rs_epoch\":{},\"gk_from\":{},\"gk_to\":{},\"created_ms\":{},\"gk_cause\":\"{}\",\"gk_end\":\"{}\",\"distribution\":{distribution},\"cutover\":{cutover},\"notice\":{notice}}}",
 
             self.id,
             escape_string(&self.kind),
@@ -510,10 +525,19 @@ impl Operation {
         let json = routeloom_json::parse(text).ok()?;
         // The distribution fragment is optional (missing on pre-P6-1
         // docs) and degrades to `unknown` when unreadable, so a torn
-        // fragment can never brick the operation it rides on.
+        // fragment can never brick the operation it rides on. The P6-2
+        // fragments degrade the same way.
         let distribution = match json.get("distribution") {
             None | Some(Json::Null) => None,
             Some(fragment) => OperationDistribution::from_doc(fragment),
+        };
+        let cutover = match json.get("cutover") {
+            None | Some(Json::Null) => None,
+            Some(fragment) => CutoverState::from_doc(fragment),
+        };
+        let notice = match json.get("notice") {
+            None | Some(Json::Null) => None,
+            Some(fragment) => NoticeState::from_doc(fragment),
         };
         Some(Self {
             id: num(&json, "id")?,
@@ -537,6 +561,8 @@ impl Operation {
                 .unwrap_or("")
                 .to_string(),
             distribution,
+            cutover,
+            notice,
         })
     }
 }
@@ -637,6 +663,8 @@ mod tests {
             gk_cause: "removal".into(),
             gk_end: "superseded".into(),
             distribution: None,
+            cutover: None,
+            notice: None,
         };
         assert_eq!(Operation::from_doc(&op.doc()), Some(op));
         // Pre-P5 records without the GK fields still parse.

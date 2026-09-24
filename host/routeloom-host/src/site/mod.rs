@@ -49,6 +49,7 @@
 
 pub mod authority_channel;
 pub mod config;
+pub mod cutover;
 pub mod group_keys;
 pub mod records;
 pub mod revocation;
@@ -56,6 +57,7 @@ pub mod store;
 pub mod transport;
 pub mod usb;
 
+pub use cutover::CutoverRequest;
 pub use usb::owns;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -140,6 +142,16 @@ fn evictable_operation(
                     && (op.gk_end == "superseded" || active_epoch >= op.gk_to)
             }),
             "rotate" => !op.gk_end.is_empty(),
+            // A live cutover (preparing through committed) is never
+            // evicted: its snapshot drives the epoch switch. Terminal
+            // cutovers are history (the RRS1 timeline survives in
+            // `meta`, not in the op doc).
+            "cutover" => op.cutover.as_ref().is_some_and(|state| {
+                matches!(
+                    state.phase,
+                    cutover::CutoverPhase::Converged | cutover::CutoverPhase::RecoveryPending
+                )
+            }),
             _ => devices
                 .get(&op.node)
                 .is_some_and(|row| row.generation != op.generation || !row.member || row.confirmed),
@@ -177,6 +189,9 @@ struct Identity {
     site_cert: Vec<u8>,
     site_claims: CertClaims,
     sak_kid: [u8; 32],
+    /// Retained to validate the next SiteCert at `membership.cutover`
+    /// (04 §8.1): without a configured CA no cutover may start.
+    site_ca_pubkey: Option<[u8; 64]>,
     device_ca_id: u64,
     device_ca_pubkey: [u8; 64],
     channel: u8,
@@ -230,6 +245,7 @@ impl Identity {
             site_cert: setup.site_cert.clone(),
             sak_kid: credential_kid(&claims.pubkey),
             site_claims: claims,
+            site_ca_pubkey: setup.site_ca_pubkey,
             device_ca_id: setup.device_ca_id,
             device_ca_pubkey: setup.device_ca_pubkey,
             channel: setup.channel,
@@ -600,6 +616,14 @@ pub struct SiteAuthority {
     rrs_history: BTreeMap<u32, Vec<RevocationEntry>>,
     rrs_history_digests: BTreeMap<u32, [u8; 32]>,
     rrs_latest_object: Vec<u8>,
+    // P6-2 cutover (site/cutover.rs): the old-network COMMIT grace is
+    // RAM-only (0 = none; a restart ends it), and the reopen collects
+    // the pre-commit cutovers whose window restarts on the first tick
+    // (the monotonic start never survives; cutovers staged live in
+    // this boot are never reset).
+    cutover_grace_network: u64,
+    cutover_grace_until_mono: u64,
+    cutover_resume_pending: Vec<u64>,
 }
 
 impl SiteAuthority {
@@ -611,8 +635,39 @@ impl SiteAuthority {
         mut store: Box<dyn SiteStore>,
         now_ms: u64,
     ) -> Result<Self, String> {
-        let id = Identity::new(setup, sak.as_ref())?;
+        let mut id = Identity::new(setup, sak.as_ref())?;
         let snapshot = store.load().map_err(|e| e.to_string())?;
+        // A committed cutover moves the active epoch in the DB (04
+        // §8.2): the setup cert stays the stable identity
+        // (site/low32/SAK/CA), but the adopted network comes from the
+        // DB's active SiteCert once one committed. An old-epoch setup
+        // cert never drags the DB back, and an unverifiable active cert
+        // never starts.
+        if let Some(active) = snapshot.meta.get(cutover::META_ACTIVE_SITE_CERT) {
+            let Some(ca) = setup.site_ca_pubkey else {
+                return Err("site store holds a cutover epoch but no Site CA is configured".into());
+            };
+            let (claims, ok) =
+                cert_verify(active, &ca).map_err(|e| format!("active site cert: {e}"))?;
+            if !ok {
+                return Err("active site cert does not verify under the Site CA".into());
+            }
+            if claims.cert_type != CertType::Site
+                || claims.issuer != id.site_claims.issuer
+                || claims.subject != id.site_id
+                || claims.pubkey != sak.pubkey()
+                || claims.network_low32 != id.network as u32
+                || claims.usage != id.site_claims.usage
+                || claims.site_epoch < id.site_claims.site_epoch
+            {
+                return Err(
+                    "active site cert disagrees with the configured stable identity".into(),
+                );
+            }
+            id.network = (u64::from(claims.site_epoch) << 32) | u64::from(claims.network_low32);
+            id.site_cert = active.clone();
+            id.site_claims = claims;
+        }
         let mut binding = id.site_id.to_be_bytes().to_vec();
         binding.extend_from_slice(&id.network.to_be_bytes());
         binding.extend_from_slice(&id.sak_kid);
@@ -776,6 +831,21 @@ impl SiteAuthority {
             .iter()
             .find(|g| g.state == "staged")
             .map_or(0, |g| g.created_ms);
+        // A live cutover's staged next GK owns no rotation row by
+        // design (04 §8) — it must not be mistaken for a v1 staged key
+        // that lost its row and rebuilt into a P5 rotation (which would
+        // leak it onto the old network).
+        let cutover_owns_staged = match keys.staged {
+            Some((staged_epoch, _)) => operations.values().any(|op| {
+                op.cutover.as_ref().is_some_and(|state| {
+                    matches!(
+                        state.phase,
+                        cutover::CutoverPhase::Preparing | cutover::CutoverPhase::WaitingGateway
+                    ) && state.next_gk_epoch == staged_epoch
+                })
+            }),
+            None => false,
+        };
         let (rotation_row, target_rows) = match snapshot.gk_rotation.clone() {
             Some(row) => {
                 Self::check_rotation_row(&row, &keys)?;
@@ -833,6 +903,7 @@ impl SiteAuthority {
                     return Err("site store gk_targets rows without a rotation".into());
                 }
                 match keys.staged {
+                    _ if cutover_owns_staged => (None, Vec::new()),
                     None => (None, Vec::new()),
                     Some((staged_epoch, _)) => {
                         // A v1 staged key without a rotation row: rebuild
@@ -881,6 +952,8 @@ impl SiteAuthority {
                                         gk_cause: RotationCause::Removal.name().into(),
                                         gk_end: String::new(),
                                         distribution: None,
+                                        cutover: None,
+                                        notice: None,
                                     };
                                     init.docs.push((
                                         DocKind::Operation,
@@ -929,8 +1002,20 @@ impl SiteAuthority {
             rotation: rotation_row,
             targets: target_rows,
         });
+        let boundaries = match snapshot.meta.get(cutover::META_CUTOVER_EPOCHS) {
+            Some(bytes) => {
+                cutover::parse_cutover_epochs(bytes).ok_or("site store cutover timeline corrupt")?
+            }
+            None => Vec::new(),
+        };
         let (mut rrs_history, mut rrs_history_digests, rrs_latest_object) =
-            revocation::decode_rrs_history(&snapshot, &sak.pubkey(), id.site_id, id.network)?;
+            revocation::decode_rrs_history(
+                &snapshot,
+                &sak.pubkey(),
+                id.site_id,
+                id.network,
+                &boundaries,
+            )?;
         {
             let floor = operations
                 .values()
@@ -944,6 +1029,18 @@ impl SiteAuthority {
         if !init.is_empty() {
             store.commit(&init).map_err(|e| e.to_string())?;
         }
+        let cutover_resume_pending: Vec<u64> = operations
+            .values()
+            .filter(|op| {
+                op.cutover.as_ref().is_some_and(|state| {
+                    matches!(
+                        state.phase,
+                        cutover::CutoverPhase::Preparing | cutover::CutoverPhase::WaitingGateway
+                    )
+                })
+            })
+            .map(|op| op.id)
+            .collect();
         Ok(Self {
             policy,
             devices,
@@ -974,6 +1071,9 @@ impl SiteAuthority {
             rrs_history,
             rrs_history_digests,
             rrs_latest_object,
+            cutover_grace_network: 0,
+            cutover_grace_until_mono: 0,
+            cutover_resume_pending,
             id,
             sak,
             store,
@@ -1289,22 +1389,43 @@ impl SiteAuthority {
     fn decide_for(&mut self, mut txn: Txn, device: Verified, now_ms: u64) {
         let node = device.facts.node;
         let existing = self.devices.get(&node).cloned();
+        // An old key's recovery query after a reassignment (04 §5.4):
+        // the live row conflicts, but the revoke ledger may still owe
+        // this binding its Removed notice over the old network.
+        let old_kid_removed = match &existing {
+            Some(row) if row.member && row.kid != device.facts.kid => self.revoked_binding(
+                device.facts.node,
+                &device.facts.kid,
+                device.facts.last_site_id,
+                device.last_network,
+            ),
+            _ => None,
+        };
         let mut previously_removed = false;
         let mut kid_conflict = false;
         match existing {
             Some(row) if row.kid == device.facts.kid && row.member => {
-                // Already approved: re-issue the same MemberCert, no KGuard.
-                self.counters.reissued += 1;
-                self.event(
-                    now_ms,
-                    format!(
-                        "\"kind\":\"member.reissued\",\"device_id\":\"{}\",\"generation\":{},\"member_cert_serial\":{}",
-                        h16(node),
-                        row.generation,
-                        row.member_cert_serial
-                    ),
-                );
-                self.finish_allow(txn, &row, now_ms);
+                // Already approved: re-issue with no KGuard and no
+                // join.request (04 §8.5). A stale-epoch cert — the
+                // member missed a cutover — is re-minted for the
+                // active epoch first; the DAMS refreshes from this
+                // full join's Exporter either way.
+                match self.reissue_row(&row, now_ms) {
+                    Some(fresh) => {
+                        self.counters.reissued += 1;
+                        self.event(
+                            now_ms,
+                            format!(
+                                "\"kind\":\"member.reissued\",\"device_id\":\"{}\",\"generation\":{},\"member_cert_serial\":{}",
+                                h16(node),
+                                fresh.generation,
+                                fresh.member_cert_serial
+                            ),
+                        );
+                        self.finish_allow(txn, &fresh, now_ms);
+                    }
+                    None => self.finish_busy(txn, BUSY_RETRY_S),
+                }
                 return;
             }
             Some(row) if row.kid == device.facts.kid => {
@@ -1324,6 +1445,16 @@ impl SiteAuthority {
             // replacement key asks KGuard like any other device, marked
             // by the node's removal.
             Some(row) if !row.member => previously_removed = true,
+            Some(_) if old_kid_removed.is_some() => {
+                let removed = old_kid_removed.expect("old key hit");
+                self.finish_removed(
+                    txn,
+                    &removed,
+                    device.last_network.unwrap_or(self.id.network),
+                    now_ms,
+                );
+                return;
+            }
             Some(_) => kid_conflict = true,
             None => {}
         }
@@ -1643,6 +1774,138 @@ impl SiteAuthority {
         }
     }
 
+    /// The row an authenticated reissue Allows with (04 §8.5): the
+    /// live row while its MemberCert is current, or a freshly minted
+    /// active-epoch cert — same node, key, generation and role, new
+    /// serial, committed with a `reissue` ledger row — when the member
+    /// missed a cutover. Fail-closed: a corrupt cert, an exhausted
+    /// serial or a store failure answers `None` (the caller holds the
+    /// exchange with AuthorityBusy) and never an old-network cert.
+    fn reissue_row(&mut self, row: &DeviceRow, now_ms: u64) -> Option<DeviceRow> {
+        let claims = match cert_decode(&row.member_cert) {
+            Ok(claims) => claims,
+            Err(_) => {
+                self.event(
+                    now_ms,
+                    "\"kind\":\"authority.error\",\"reason\":\"reissue\",\"detail\":\"member cert corrupt\""
+                        .to_string(),
+                );
+                return None;
+            }
+        };
+        if claims.network == self.id.network && claims.site_epoch == self.id.site_claims.site_epoch
+        {
+            return Some(row.clone());
+        }
+        let serial = self.next_serial;
+        let next_serial = match serial.checked_add(1) {
+            Some(next) => next,
+            None => {
+                self.event(
+                    now_ms,
+                    "\"kind\":\"authority.error\",\"reason\":\"reissue\",\"detail\":\"serial exhausted\""
+                        .to_string(),
+                );
+                return None;
+            }
+        };
+        let fresh = CertClaims {
+            cert_type: CertType::Member,
+            issuer: self.id.site_id,
+            subject: row.node,
+            pubkey: claims.pubkey,
+            network: self.id.network,
+            role: u32::from(row.role),
+            assignment_generation: row.generation,
+            site_epoch: self.id.site_claims.site_epoch,
+            serial,
+            ..CertClaims::default()
+        };
+        let member_cert = match cert_issue(&fresh, self.sak.as_ref()) {
+            Ok(cert) => cert,
+            Err(error) => {
+                self.event(
+                    now_ms,
+                    format!(
+                        "\"kind\":\"authority.error\",\"reason\":\"reissue\",\"detail\":\"MemberCert issue failed: {error}\""
+                    ),
+                );
+                return None;
+            }
+        };
+        let mut updated = row.clone();
+        updated.member_cert = member_cert;
+        updated.member_cert_serial = serial;
+        let ledger = self.ledger_row(
+            "reissue",
+            row.node,
+            row.kid,
+            row.generation,
+            sha256(&updated.member_cert),
+            now_ms,
+        );
+        if let Err(error) = self.store.commit(&Batch {
+            devices: vec![updated.clone()],
+            ledger: vec![ledger.clone()],
+            meta: vec![("next_serial", next_serial.to_be_bytes().to_vec())],
+            ..Batch::default()
+        }) {
+            self.store_error(now_ms, &error);
+            return None;
+        }
+        self.ledger_seq = ledger.seq;
+        self.ledger_head = ledger.hash;
+        self.next_serial = next_serial;
+        self.devices.insert(updated.node, updated.clone());
+        Some(updated)
+    }
+
+    /// The revoke-ledger binding an old key's recovery query is owed
+    /// (04 §5.4): the latest revoked `(node, kid)` generation, as a
+    /// synthetic removed row for the old-network notice. Only for
+    /// queries that still claim this site with an old network — never
+    /// a signature oracle for strangers — and `None` on any store
+    /// failure (the caller falls through to the KGuard path).
+    fn revoked_binding(
+        &mut self,
+        node: u64,
+        kid: &[u8; 32],
+        last_site_id: u64,
+        last_network: Option<u64>,
+    ) -> Option<DeviceRow> {
+        if last_site_id != self.id.site_id || last_network.is_none() {
+            return None;
+        }
+        let hit = self
+            .store
+            .ledger_for(node)
+            .ok()?
+            .into_iter()
+            .filter(|row| row.kind == "revoke" && row.kid == *kid)
+            .max_by_key(|row| row.generation)?;
+        Some(DeviceRow {
+            node,
+            kid: *kid,
+            dev_cert: Vec::new(),
+            model: 0,
+            hw_rev: 0,
+            cert_serial: 0,
+            member: false,
+            generation: hit.generation,
+            role: 0,
+            member_cert: Vec::new(),
+            member_cert_serial: 0,
+            confirmed: false,
+            dams: [0; 32],
+            approved_ms: 0,
+            delivered_ms: None,
+            confirmed_ms: None,
+            last_seen_ms: None,
+            removed_ms: Some(hit.ms),
+            removal_reason: 1,
+        })
+    }
+
     /// Allow with the committed MemberCert. DAMS is exported and stored
     /// with the delivery *before* message_4 leaves; if that commit fails
     /// the device gets AuthorityBusy instead (never an unrecorded success).
@@ -1706,7 +1969,7 @@ impl SiteAuthority {
                 self.event(
                     now_ms,
                     format!(
-                        "\"kind\":\"member.removal_notified\",\"device_id\":\"{}\",\"generation\":{}",
+                        "\"kind\":\"member.removal_notified\",\"device_id\":\"{}\",\"generation\":{},\"route\":\"join_recovery\",\"intent_confirmed\":false",
                         h16(row.node),
                         row.generation
                     ),
@@ -1718,8 +1981,10 @@ impl SiteAuthority {
     }
 
     /// Time-driven work: join deadlines on the wall axis, the GK
-    /// lifecycle on both axes (§6.2).
+    /// lifecycle on both axes (§6.2). Notices and cutover grants queue
+    /// before RRS1 fan-out; the one paced dispatch serves them all.
     pub fn tick(&mut self, time: HostTime) {
+        self.tick_cutover(time);
         self.tick_joins(time.unix_ms);
         self.tick_gk(time);
     }
@@ -2029,6 +2294,7 @@ impl SiteAuthority {
             LedgerRow,
             Operation,
             Option<TargetRow>,
+            Option<Operation>,
             Option<u64>,
         );
         let mut approved: Option<Approved> = None;
@@ -2112,6 +2378,66 @@ impl SiteAuthority {
                     SiteError::new("AUTHORITY_ERROR", format!("MemberCert issue failed: {e}"))
                 })?;
                 debug_assert!(member_cert.len() <= CERT_MAX);
+                // An allow during Preparing stages the binding's next
+                // MemberCert too (04 §8.3): same generation, new
+                // network, the next serial. The snapshot join below
+                // refuses a full snapshot before anything commits.
+                let cutover_grant = match self.live_cutover() {
+                    Some(id) => {
+                        let pre_commit = self
+                            .operations
+                            .get(&id)
+                            .and_then(|op| op.cutover.as_ref())
+                            .is_some_and(|state| {
+                                matches!(
+                                    state.phase,
+                                    cutover::CutoverPhase::Preparing
+                                        | cutover::CutoverPhase::WaitingGateway
+                                )
+                            });
+                        if !pre_commit {
+                            None
+                        } else {
+                            let state = self.operations.get(&id).and_then(|op| op.cutover.as_ref());
+                            let (new_network, new_epoch) = match state {
+                                Some(state) => (state.new_network, state.new_site_epoch),
+                                None => (0, 0),
+                            };
+                            if new_network == 0 {
+                                None
+                            } else {
+                                let grant_serial = next_serial;
+                                let after_grant = grant_serial.checked_add(1).ok_or_else(|| {
+                                    SiteError::new(
+                                        "AUTHORITY_ERROR",
+                                        "member certificate serial exhausted",
+                                    )
+                                })?;
+                                let grant_claims = CertClaims {
+                                    cert_type: CertType::Member,
+                                    issuer: self.id.site_id,
+                                    subject: open.facts.node,
+                                    pubkey: open.facts.pubkey,
+                                    network: new_network,
+                                    role: u32::from(role),
+                                    assignment_generation: generation,
+                                    site_epoch: new_epoch,
+                                    serial: grant_serial,
+                                    ..CertClaims::default()
+                                };
+                                let grant_cert = cert_issue(&grant_claims, self.sak.as_ref())
+                                    .map_err(|e| {
+                                        SiteError::new(
+                                            "AUTHORITY_ERROR",
+                                            format!("next MemberCert issue failed: {e}"),
+                                        )
+                                    })?;
+                                Some((grant_cert, grant_serial, after_grant))
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 let row = DeviceRow {
                     node: open.facts.node,
                     kid: open.facts.kid,
@@ -2162,6 +2488,8 @@ impl SiteAuthority {
                         targets: Vec::new(),
                         overflow: 0,
                     }),
+                    cutover: None,
+                    notice: None,
                 };
                 result = format!(
                     "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\"}}",
@@ -2172,9 +2500,15 @@ impl SiteAuthority {
                 );
                 batch.devices.push(row.clone());
                 batch.ledger.push(ledger.clone());
+                // A live cutover consumes one more serial for the staged
+                // grant; otherwise the allow's own serial is the last.
+                let stored_next_serial = cutover_grant
+                    .as_ref()
+                    .map(|(_, _, after)| *after)
+                    .unwrap_or(next_serial);
                 batch
                     .meta
-                    .push(("next_serial", next_serial.to_be_bytes().to_vec()));
+                    .push(("next_serial", stored_next_serial.to_be_bytes().to_vec()));
                 batch
                     .meta
                     .push(("revision", next_revision.to_be_bytes().to_vec()));
@@ -2188,8 +2522,19 @@ impl SiteAuthority {
                 if let Some(target) = joined_target.as_ref() {
                     batch.gk_targets.push(target.clone());
                 }
+                let joined_cutover = match cutover_grant {
+                    Some((grant_cert, grant_serial, _)) => {
+                        self.cutover_join_preview(&row, grant_cert, grant_serial)?
+                    }
+                    None => None,
+                };
+                if let Some(joined) = joined_cutover.as_ref() {
+                    batch
+                        .docs
+                        .push((DocKind::Operation, h16(joined.id), Some(joined.doc())));
+                }
                 let evicted = self.operation_doc(&mut batch, &op)?;
-                approved = Some((row, ledger, op, joined_target, evicted));
+                approved = Some((row, ledger, op, joined_target, joined_cutover, evicted));
             }
             _ => {
                 result = format!(
@@ -2213,14 +2558,23 @@ impl SiteAuthority {
             return Err(store_failure(&error));
         }
         // Committed: now the RAM model follows.
-        if let Some((row, ledger, op, joined_target, evicted)) = approved {
+        if let Some((row, ledger, op, joined_target, joined_cutover, evicted)) = approved {
             self.ledger_seq = ledger.seq;
             self.ledger_head = ledger.hash;
-            self.next_serial = row.member_cert_serial.saturating_add(1);
+            // A staged cutover grant consumed one more serial past the
+            // allow's own.
+            let extra = u32::from(joined_cutover.is_some());
+            self.next_serial = row
+                .member_cert_serial
+                .saturating_add(1)
+                .saturating_add(extra);
             self.revision = self.revision.saturating_add(1);
             self.devices.insert(row.node, row);
             if let Some(target) = joined_target {
                 self.gks.add_target(target);
+            }
+            if let Some(joined) = joined_cutover {
+                self.operations.insert(joined.id, joined);
             }
             self.remember_operation(op, evicted);
         }
@@ -2317,29 +2671,45 @@ impl SiteAuthority {
         };
         let object = revocation_issue(&set, self.sak.as_ref())
             .map_err(|e| SiteError::new("AUTHORITY_ERROR", format!("RRS1 issue failed: {e}")))?;
+        let op_id = self.checked_next_op_id()?;
+        // A live cutover folds this revoke in (04 §8.3): the carry cap
+        // refuses before anything commits, and a pre-commit cutover
+        // re-stages its own next key instead of a P5 rotation (which
+        // would leak beside the grants).
+        let cutover_effect = self.cutover_revoke_preview(
+            row.node,
+            row.generation,
+            request.reason,
+            op_id,
+            time.mono_ms,
+        )?;
         // §6.3: every removal mints a FRESH epoch — a staged key the
         // victim may already hold is never reused. Consecutive removals
         // keep the first removal batch's staging deadline; a restart never
         // extends it (staging resumes expired).
-        let deadline_mono = match self.gks.rotation() {
-            Some(live)
-                if live.row.cause == RotationCause::Removal
-                    && live.row.phase == RotationPhase::Staging =>
-            {
-                live.deadline_mono
-            }
-            _ => time
-                .mono_ms
-                .saturating_add(RotationCause::Removal.stage_deadline_ms()),
+        let plan = if cutover_effect.staged.is_some() {
+            None
+        } else {
+            let deadline_mono = match self.gks.rotation() {
+                Some(live)
+                    if live.row.cause == RotationCause::Removal
+                        && live.row.phase == RotationPhase::Staging =>
+                {
+                    live.deadline_mono
+                }
+                _ => time
+                    .mono_ms
+                    .saturating_add(RotationCause::Removal.stage_deadline_ms()),
+            };
+            Some(self.plan_staging(
+                op_id,
+                RotationCause::Removal,
+                deadline_mono,
+                Some(row.node),
+                next_revision,
+                now_ms,
+            )?)
         };
-        let plan = self.plan_staging(
-            self.checked_next_op_id()?,
-            RotationCause::Removal,
-            deadline_mono,
-            Some(row.node),
-            next_revision,
-            now_ms,
-        )?;
         let mut removed = row.clone();
         removed.member = false;
         removed.removed_ms = Some(now_ms);
@@ -2353,20 +2723,55 @@ impl SiteAuthority {
             sha256(&object),
             now_ms,
         );
+        // The RemovalNotice commits with the revoke and ships after it
+        // (04 §7.1) — never for a new context, never before commit. A
+        // member that never delivered a DAMS has no context to seal
+        // one for: honestly unreachable.
+        let removal_notice = RemovalNotice {
+            reason: request.reason,
+            site_id: self.id.site_id,
+            node_id: row.node,
+            generation: row.generation,
+            rs_epoch,
+        }
+        .issue(self.id.network, self.sak.as_ref())
+        .map_err(|e| {
+            SiteError::new(
+                "AUTHORITY_ERROR",
+                format!("RemovalNotice issue failed: {e}"),
+            )
+        })?;
+        let notice = revocation::NoticeState {
+            object: removal_notice,
+            network: self.id.network,
+            delivery: if row.dams == [0; 32] {
+                revocation::NoticeDelivery::Unreachable
+            } else {
+                revocation::NoticeDelivery::Pending
+            },
+            intent_confirmed: false,
+            attempts: 0,
+        };
         let distribution = self.snapshot_targets(row.node, rs_epoch, sha256(&object));
+        let (gk_from, gk_to) = match (&plan, &cutover_effect) {
+            (Some(plan), _) => (plan.from_epoch, plan.to_epoch),
+            (None, effect) => effect.gk_epochs,
+        };
         let op = Operation {
-            id: plan.op_id,
+            id: op_id,
             kind: "revoke".into(),
             node: row.node,
             generation: row.generation,
             member_cert_serial: row.member_cert_serial,
             rs_epoch,
-            gk_from: plan.from_epoch,
-            gk_to: plan.to_epoch,
+            gk_from,
+            gk_to,
             created_ms: now_ms,
             gk_cause: RotationCause::Removal.name().into(),
             gk_end: String::new(),
             distribution: Some(distribution),
+            cutover: None,
+            notice: Some(notice),
         };
         let result = format!(
             "{{\"operation_id\":\"{}\",\"state\":\"committed\",\"device_id\":\"{}\",\"generation\":{},\"rs_epoch\":{rs_epoch},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"staged\"}},\"distribution\":\"pending\"}}",
@@ -2374,8 +2779,8 @@ impl SiteAuthority {
             op_token(op.id),
             h16(row.node),
             row.generation,
-            plan.from_epoch,
-            plan.to_epoch
+            op.gk_from,
+            op.gk_to
         );
         // One transaction: ledger entry, RRS1, member removal, fresh GK and
         // rotation (§6.3). The removed member is not among the targets, so
@@ -2390,7 +2795,35 @@ impl SiteAuthority {
             ],
             ..Batch::default()
         };
-        let evicted = self.fill_staging_batch(&mut batch, &plan, &op)?;
+        let evicted = if let Some(plan) = &plan {
+            self.fill_staging_batch(&mut batch, plan, &op)?
+        } else {
+            if let Some((epoch, key)) = cutover_effect.staged {
+                batch.group_keys.push(GroupKeyRow {
+                    epoch,
+                    key,
+                    state: "staged".into(),
+                    created_ms: now_ms,
+                });
+                batch
+                    .group_keys_delete
+                    .extend(cutover_effect.delete_staged.iter().copied());
+                batch
+                    .meta
+                    .push((META_HIGH_WATER, epoch.to_be_bytes().to_vec()));
+            }
+            self.operation_doc(&mut batch, &op)?
+        };
+        if let Some(updated) = &cutover_effect.updated {
+            batch
+                .docs
+                .push((DocKind::Operation, h16(updated.id), Some(updated.doc())));
+        }
+        if let Some(prior) = &cutover_effect.superseded_owner {
+            batch
+                .docs
+                .push((DocKind::Operation, h16(prior.id), Some(prior.doc())));
+        }
         // The removed device owes older operations no ACK anymore: fold
         // the retirements into the same commit.
         let retired = self.retired_operations(row.node);
@@ -2405,7 +2838,19 @@ impl SiteAuthority {
             self.store_error(now_ms, &error);
             return Err(store_failure(&error));
         }
-        let superseded = plan.superseded_op;
+        let normal_branch = plan.is_some();
+        let superseded = match plan {
+            Some(plan) => {
+                let superseded = plan.superseded_op;
+                self.publish_staging_plan(plan, op.clone(), evicted);
+                superseded
+            }
+            None => {
+                self.remember_operation(op.clone(), evicted);
+                self.publish_revoke_cutover(cutover_effect, now_ms);
+                None
+            }
+        };
         self.ledger_seq = ledger.seq;
         self.ledger_head = ledger.hash;
         self.revision = next_revision;
@@ -2415,7 +2860,6 @@ impl SiteAuthority {
         self.rrs_history_digests.insert(rs_epoch, sha256(&object));
         self.rrs_latest_object = object;
         self.devices.insert(removed.node, removed);
-        self.publish_staging_plan(plan, op.clone(), evicted);
         for rop in retired {
             self.operations.insert(rop.id, rop);
         }
@@ -2445,14 +2889,18 @@ impl SiteAuthority {
                 op_token(op.id)
             ),
         );
-        self.emit_staged(
-            RotationCause::Removal,
-            op.gk_from,
-            op.gk_to,
-            op.id,
-            superseded,
-            now_ms,
-        );
+        // A cutover re-stage reports through `cutover.progress` (the
+        // key is not a P5 rotation); only a real staging emits here.
+        if normal_branch {
+            self.emit_staged(
+                RotationCause::Removal,
+                op.gk_from,
+                op.gk_to,
+                op.id,
+                superseded,
+                now_ms,
+            );
+        }
         Ok(result)
     }
 
@@ -2637,6 +3085,15 @@ impl SiteAuthority {
             )
             .retry());
         }
+        // A manual rotation now would supersede the cutover's staged
+        // next key (04 §8.1): it waits for the commit instead.
+        if self.cutover_blocks_rotate() {
+            return Err(SiteError::new(
+                "BUSY",
+                "a site_epoch cutover is preparing; retry after it commits",
+            )
+            .retry());
+        }
         let plan = self.plan_staging(
             self.checked_next_op_id()?,
             RotationCause::Manual,
@@ -2659,6 +3116,8 @@ impl SiteAuthority {
             gk_cause: RotationCause::Manual.name().into(),
             gk_end: String::new(),
             distribution: None,
+            cutover: None,
+            notice: None,
         };
         let result = format!(
             "{{\"operation_id\":\"{}\",\"state\":\"committed\",\"from\":{},\"to\":{},\"cause\":\"manual\",\"targets\":{}}}",
@@ -2962,7 +3421,10 @@ impl SiteAuthority {
     /// burst). Revocation is the only preemption: it supersedes through
     /// `revoke`, never through here.
     fn maybe_start_periodic(&mut self, time: HostTime) {
-        if self.gks.rotation_in_progress() || self.gks.cleanup_active(time.mono_ms) {
+        if self.gks.rotation_in_progress()
+            || self.gks.cleanup_active(time.mono_ms)
+            || self.cutover_blocks_rotate()
+        {
             return;
         }
         let members = self.devices.values().filter(|d| d.member).count();
@@ -3020,6 +3482,8 @@ impl SiteAuthority {
             gk_cause: RotationCause::Periodic.name().into(),
             gk_end: String::new(),
             distribution: None,
+            cutover: None,
+            notice: None,
         };
         let mut batch = Batch::default();
         let evicted = match self.fill_staging_batch(&mut batch, &plan, &op) {
@@ -3757,6 +4221,21 @@ impl SiteAuthority {
         if !op.gk_end.is_empty() {
             return op.gk_end.clone();
         }
+        // A revoke that re-staged through a live cutover: its key is
+        // staged while the cutover holds it (no P5 rotation exists).
+        if let Some(id) = self.live_cutover() {
+            let staged = self.operations.get(&id).and_then(|cut| {
+                cut.cutover.as_ref().map(|state| {
+                    matches!(
+                        state.phase,
+                        cutover::CutoverPhase::Preparing | cutover::CutoverPhase::WaitingGateway
+                    ) && state.next_gk_epoch == op.gk_to
+                })
+            });
+            if staged == Some(true) {
+                return "staged".to_string();
+            }
+        }
         // Legacy records (pre-P5 revokes): the key is live or superseded.
         if op.gk_to == self.gks.active_epoch() {
             "converged".to_string()
@@ -3765,9 +4244,10 @@ impl SiteAuthority {
         }
     }
 
-    pub fn operation_json(&self, id: u64) -> Option<String> {
+    pub fn operation_json(&self, id: u64, now: HostTime) -> Option<String> {
         let op = self.operations.get(&id)?;
         Some(match op.kind.as_str() {
+            "cutover" => self.cutover_view(op, now)?,
             "revoke" => {
                 // Committed first, then distributing once sends start, then
                 // converged when the snapshot has no unknown left (V1-R01).
@@ -3780,8 +4260,15 @@ impl SiteAuthority {
                     | Some(revocation::DistState::Unknown)
                     | None => "committed",
                 };
+                let notice = op.notice.as_ref().map_or_else(
+                    || {
+                        "{\"delivery\":\"unknown\",\"intent_confirmed\":false,\"erase_confirmed\":null}"
+                            .to_string()
+                    },
+                    revocation::NoticeState::view,
+                );
                 format!(
-                    "{{\"operation_id\":\"{}\",\"kind\":\"revoke\",\"device_id\":\"{}\",\"generation\":{},\"state\":\"{state}\",\"rs_epoch\":{},\"distribution\":{},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"{}\"}},\"created_ms\":{}}}",
+                    "{{\"operation_id\":\"{}\",\"kind\":\"revoke\",\"device_id\":\"{}\",\"generation\":{},\"state\":\"{state}\",\"rs_epoch\":{},\"distribution\":{},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"{}\"}},\"notice\":{notice},\"created_ms\":{}}}",
                     op_token(op.id),
                     h16(op.node),
                     op.generation,
@@ -4083,6 +4570,8 @@ impl SiteService {
     }
 }
 
+#[cfg(test)]
+mod cutover_tests;
 #[cfg(test)]
 mod e2e;
 #[cfg(test)]

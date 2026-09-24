@@ -72,6 +72,19 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 
 `expected_generation`が現在と違えば`Conflict`（古い画面からの誤削除を防ぐ）。段階：`accepted → committed → distributing → converged`。到達できないmemberは`unknown`として数え続け、適用済みとは言わない。
 
+```json
+{"v":1,"request_id":"k-9","method":"membership.cutover",
+ "params":{"expected_site_epoch":3,"next_site_cert":"c0…(hex)","idempotency_key":"kg-cut-1"}}
+// result: {"operation_id":"op-93","state":"preparing","expected_site_epoch":3,
+//          "new_site_epoch":4,"revision":1,"targets":96}
+// operations.get → {"kind":"cutover","phase":"preparing","expected_site_epoch":3,
+//   "new_site_epoch":4,"revision":1,"prepared":70,"applied":0,"unknown":26,"total":96,
+//   "waiting_gateway":false,"recovery_pending":false,"deadline_remaining_ms":589000,
+//   "commit_rs_epoch":0}
+```
+
+ADMIN。次SiteCertは設定済みSite CAの署名を検証し、issuer／site／SAK／low32／usageを据え置き・epochだけ+1でなければ`INVALID_ARGUMENT`、CA未設定なら`CUTOVER_CERT_REQUIRED`。同時cutoverは1件（2件目は`CONFLICT`）。段階は`preparing`（600秒window）→`waiting_gateway`（gateway PREPARED待ち。旧network維持）→`committed`→`converged`／`recovery_pending`（取り逃しはZT再発行へ。rollbackは無い）。
+
 ### 2.3 イベント一覧（stream `membership`）
 
 `join.request`、`join.decided`、`member.confirmed`、`member.reissued`、`member.revoked`、`device.discovered`（初回・1分以上空いた再出現）、`gk.rotated`、`rrs.published`、`cutover.progress`、`authority.error`。各イベントは単調な`cursor`を持ち、既存receive APIと同じcursor・overflow規則に従う。
@@ -96,7 +109,8 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 | `join.decide` | DECIDE | `join_request_id`、`device_id`、`verdict`＋その引数だけ（allow→`role`、pending→`retry_after_s`、deny→`reason`）、`idempotency_key` |
 | `devices.discovered.list` | READ | `after?`、`limit?`（1〜128）→ `devices[]`、`next_after`、`total`、`max:1024` |
 | `members.list` / `members.get` | READ | `after?`、`limit?`、`include_removed?` ／ `device_id` |
-| `membership.revoke` | DECIDE | `device_id`、`expected_generation`、`reason`（removed/lost/replaced/blocked）、`idempotency_key` |
+| `membership.revoke` | DECIDE | `device_id`、`expected_generation`、`reason`（removed/lost/replaced/blocked）、`idempotency_key`。P6-2で署名済みRemovalNoticeを同transactionでcommitし、`operations.get`に`notice{delivery,intent_confirmed,erase_confirmed:null}`が付く |
+| `membership.cutover` | ADMIN | `expected_site_epoch`、`next_site_cert`（hex）、`idempotency_key`。P6-2で実装（上記§2.2） |
 | `group_keys.status` | READ | active／staged／phase（stable/staging/activating/catching_up）／cause／target・staged_ack・active_ack・unknown数／last_rotation／next_due（G-SEC P5 PR3で実装。秘密・GK-id列・DAMSは出さない） |
 | `group_keys.rotate` | ADMIN | `expected_active_epoch`、`idempotency_key` → 手動更新をstage（causeはmanual固定。配布中・cleanup中は`BUSY`） |
 | `operations.get` | READ | `op-…`（approve／revoke／rotate）はSite Authorityが答える。grant無しは存在を明かさずNOT_FOUND |
@@ -139,16 +153,16 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
  "removed_ms":null,"removal_reason":null}}
 ```
 
-エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`／`expected_active_epoch`不一致・削除済みへのrevokeは`CONFLICT`、配布中・cleanup中の`group_keys.rotate`は`BUSY`（retryable）、129番目のallow・128超えでの更新開始は`NO_CAPACITY`（P5 PR3）、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
+エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`／`expected_active_epoch`／`expected_site_epoch`不一致・削除済みへのrevoke・live cutover中の2件目cutoverは`CONFLICT`、配布中・cleanup中・cutover準備中の`group_keys.rotate`は`BUSY`（retryable）、129番目のallow・128超えでの更新開始・cutover snapshot／次RRS1持越しの満杯は`NO_CAPACITY`（retryable。P5 PR3、P6-2）、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、Site CA未設定のcutoverは`CUTOVER_CERT_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
 
-**配布の進捗（P6-1 PR Aで実装）**：revokeの`operations.get`はcommit時のmember snapshotに対する適用状況を返す。top-level `state`は`committed`（配布開始前）→`distributing`（送信開始後）→`converged`（snapshotの`unknown`が0）。`distribution` objectは`state`（`pending`/`distributing`/`converged`、P6-1以前のoperationは`unknown`）、`applied`（context拘束つきApplied ACK済み）、`retired`（後続revokeで対象外になった割当）、`unknown`、`total`（`applied+retired+unknown`）、互換field `reached=applied`・`members=total`。送信・link ACK・ObjectAckは適用人数に含めない。**`converged`はRRS執行のsnapshot収束であり、本人の消去（`notice`、PR B）やGK更新完了（`gk_rotation`、PR D）とは別**——CLI（`operation-get`の素通し表示）・client（`routeloom_client::site::OperationProgress`）・TUI（Events tab）はいずれも`unknown`/nullを成功表示へ潰さない。配布transportはfake port（`set_rrs_transport`未設定時は送信が起きないので`pending`のまま進まず、`capabilities.get`の`distribution`は`rrs_no_transport`）：P4/P5の実adapterが入るまでproductionでは有効化しない。
+**配布の進捗（P6-1 PR Aで実装）**：revokeの`operations.get`はcommit時のmember snapshotに対する適用状況を返す。top-level `state`は`committed`（配布開始前）→`distributing`（送信開始後）→`converged`（snapshotの`unknown`が0）。`distribution` objectは`state`（`pending`/`distributing`/`converged`、P6-1以前のoperationは`unknown`）、`applied`（context拘束つきApplied ACK済み）、`retired`（後続revokeで対象外になった割当）、`unknown`、`total`（`applied+retired+unknown`）、互換field `reached=applied`・`members=total`。送信・link ACK・ObjectAckは適用人数に含めない。**`converged`はRRS執行のsnapshot収束であり、本人の消去（`notice`）やGK更新完了（`gk_rotation`）とは別**——CLI（`operation-get`の素通し表示）・client（`routeloom_client::site::OperationProgress`）・TUI（Events tab）はいずれも`unknown`/nullを成功表示へ潰さない。P6-2でrevokeの`notice{delivery,intent_confirmed,erase_confirmed:null}`とcutoverの`operations.get`（`phase`・改訂・prepared/applied/unknown・gateway/recovery flag・window残量。clientは`CutoverProgress`）を追加した。配布transportはfake port（`set_rrs_transport`未設定時は送信が起きないので`pending`のまま進まず、`capabilities.get`の`distribution`は`rrs_no_transport`）：P4/P5の実adapterが入るまでproductionでは有効化しない。
 
-**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`gk.rotated`、`gk.member_applied`（P5 PR3で追加）、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`cutover.progress`は対応する機能（P6-2）が無いので出さない。
+**イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`（P6-2で`route`＝`authority_direct`／`join_recovery`と`intent_confirmed`を追加）、`rrs.published`、`gk.staged`、`gk.rotated`、`gk.member_applied`（P5 PR3で追加）、`cutover.progress`（P6-2で追加。cutoverの`operation_id`・`phase`・epoch・`revision`・件数）、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。
 
 
-**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かず同じMemberCertを再発行（`member.reissued`）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（先に既存membershipをrevokeする）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定し、revoke済みの行は競合にしない（別kidの参加は`previously_removed:true`の要求で、明示allowがgenerationを進めて置換する）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyならidempotency記録の保持範囲（最新1,024件）内で保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。別keyへの成功応答もそのkeyのidempotency記録として残る。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
+**判定の規則（実装）**：(node, kid)に有効な承認があればKGuardへ聞かずMemberCertを再発行（`member.reissued`。P6-2でcutover取り逃しの旧epoch資格はactive epochで再鋳造し、DAMSはこのfull joinのExporterで更新する）。削除済みで`JoinRequest.last_site_id`がこの現場なら`Removed`＋RemovalNotice、そうでなければ`previously_removed:true`の新しい参加要求。再割当後の旧kidの復帰問い合わせはrevoke台帳（node索引）で照合し、該当すれば旧network向け`Removed`を返す（P6-2）。同じNodeIdの有効なmembershipと別kidは`kid_conflict:true`で、allowは`CONFLICT`（先に既存membershipをrevokeする）。競合は要求作成時のflagではなくcommit時の現行DeviceRowで判定し、revoke済みの行は競合にしない（別kidの参加は`previously_removed:true`の要求で、明示allowがgenerationを進めて置換する）。決定済み要求への同一verdictの再呼出しは、同一idempotency keyならidempotency記録の保持範囲（最新1,024件）内で保存済みの応答を返す。別keyのallowは現行DeviceRowを検査し、承認した(kid, generation)がmemberとして有効なときだけ保存済みの結果を返し、失効・置換済みなら`CONFLICT`。別keyへの成功応答もそのkeyのidempotency記録として残る。KGuardが`decision_timeout_ms`内に答えなければPendingAssignment（`pending_retry_after_s`）で、要求は開いたまま残り、後の決定は次の試行で即反映。KGuardのpendingを配送した後、`retry_after`より5秒以上早い再試行はAuthorityBusy（残り秒数）。`decision_mode:"closed"`または`zero_touch_open:false`ではKGuardへ聞かずpending（発見済み一覧には載る）。同時参加は4件、同じjoiner MACのmessage_1は2秒に1件で、超過はrelay abort（`busy`、EDHOC sessionが無いのでJoinResultは送れない）。
 
-**永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由）、`ledger`（approve/revokeのSHA-256 hash chain。起動時に検証し、切れていれば拒否）、`rrs`（発行した全RRS1）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertは`routeloomctl site-cert`（P7-2）で本部のSite CA鍵から発行する。
+**永続化（実装）**：`DIR/site.db`（SQLite、作成時0600、exclusive lock、`synchronous=FULL`）。`meta`（site binding＝site_id・network・SAK kid。別の現場の台帳では起動を拒否。P6-2でcutover確定後の`active_site_cert`とepoch履歴`cutover_epochs`を追加）、`devices`（kid、DevCert、member/removed、generation、role、MemberCert＋serial、confirm、DAMS、時刻、削除理由）、`ledger`（approve/revoke/reissue/cutoverのSHA-256 hash chain。起動時に検証し、切れていれば拒否。P6-2で`ledger(node)`索引を追加）、`rrs`（発行した全RRS1。P6-2で新旧network混在をcutover境界で検証）、`group_keys`（active＋staged）、`docs`（発見済み機器・参加要求・idempotency記録・operationのJSON。P6-2で`cutover`／`notice` fragmentを追加）。1回の変更は1 transactionで、allowは台帳・device行・MemberCertのcommit後にだけ`committed`を返し、配送はDAMSの保存後。DAMS・GKはDB fileの0600だけで守られる（host鍵による封緘・TPMは未実装）。SAKは`DIR/sak.key`（`routeloom-root-key-v1`、FileRootSignerと同じ開発custody、起動時に警告）で、SiteCertのcnf・site_idと一致しなければ起動を拒否。SiteCertは`routeloomctl site-cert`（P7-2）で本部のSite CA鍵から発行する。
 
 **GKの境界（P5）**：初回起動時にGK epoch 1を生成してSitePackageに載せる。削除時と24時間周期の更新では次のGKを`staged`で作り、Host側の配布・durable ACK記録・activationを進める（P5 PR3）。stagedは新規参加者にも渡さない。機器・USBへの結線はP5 PR2／PR4に残る。
 

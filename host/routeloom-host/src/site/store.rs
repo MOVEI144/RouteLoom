@@ -137,12 +137,13 @@ impl Drop for DeviceRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LedgerRow {
     pub seq: u64,
-    /// "approve" or "revoke".
+    /// "approve", "revoke", "reissue" or "cutover".
     pub kind: String,
     pub node: u64,
     pub kid: [u8; 32],
     pub generation: u32,
-    /// SHA-256 of the MemberCert (approve) or of the RRS1 object (revoke).
+    /// SHA-256 of the MemberCert (approve/reissue), of the RRS1 object
+    /// (revoke) or of the CutoverCommit object (cutover).
     pub digest: [u8; 32],
     pub ms: u64,
     pub hash: [u8; 32],
@@ -288,6 +289,17 @@ pub trait SiteStore: Send {
     fn commit(&mut self, batch: &Batch) -> Result<(), StoreError>;
     /// True when a commit survives a host restart.
     fn durable(&self) -> bool;
+    /// Ledger rows for one node, by seq (the old-kid recovery lookup,
+    /// 04 §5.4). The default scans the snapshot; SQLite answers by
+    /// index, without loading the whole history into RAM.
+    fn ledger_for(&mut self, node: u64) -> Result<Vec<LedgerRow>, StoreError> {
+        Ok(self
+            .load()?
+            .ledger
+            .into_iter()
+            .filter(|row| row.node == node)
+            .collect())
+    }
 }
 
 /// RAM store for tests; `fail_next` injects a commit failure (the
@@ -411,7 +423,8 @@ impl SqliteSiteStore {
                 last_contact_ms INTEGER, PRIMARY KEY (rotation, node));
              CREATE TABLE IF NOT EXISTS docs (
                 kind TEXT NOT NULL, key TEXT NOT NULL, body TEXT NOT NULL,
-                PRIMARY KEY (kind, key));",
+                PRIMARY KEY (kind, key));
+             CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);",
             )?;
             conn.execute(
                 "INSERT INTO meta (name, value) VALUES ('schema_version', ?1)",
@@ -444,6 +457,9 @@ impl SqliteSiteStore {
                 )))
             }
         }
+        // Additive, versionless: old databases gain the recovery index
+        // on open (no data moves, no version bump).
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS ledger_node_idx ON ledger (node);")?;
         Ok(Self { conn })
     }
 
@@ -734,6 +750,39 @@ impl SiteStore for SqliteSiteStore {
             snapshot.docs.insert((kind, key), body);
         }
         Ok(snapshot)
+    }
+
+    fn ledger_for(&mut self, node: u64) -> Result<Vec<LedgerRow>, StoreError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, kind, node, kid, generation, digest, ms, hash FROM ledger WHERE node = ?1 ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(params![i(node)], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, Vec<u8>>(3)?,
+                r.get::<_, i64>(4)?,
+                r.get::<_, Vec<u8>>(5)?,
+                r.get::<_, i64>(6)?,
+                r.get::<_, Vec<u8>>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, kind, node, kid, generation, digest, ms, hash) = row?;
+            out.push(LedgerRow {
+                seq: u(seq),
+                kind,
+                node: u(node),
+                kid: arr32(kid, "ledger kid")?,
+                generation: generation as u32,
+                digest: arr32(digest, "ledger digest")?,
+                ms: u(ms),
+                hash: arr32(hash, "ledger hash")?,
+            });
+        }
+        Ok(out)
     }
 
     fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {

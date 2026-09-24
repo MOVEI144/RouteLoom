@@ -1,12 +1,13 @@
 //! API1 surface of the Site Authority (docs/design/sdk-v1/07 §2, plan
 //! P3-3, G-SEC P5): `site.status`, `join.policy.get/set`,
 //! `join.requests.list`, `join.decide`, `devices.discovered.list`,
-//! `members.list/get`, `membership.revoke`, `group_keys.status/rotate`,
-//! and `operations.get` for `op-` tokens.
+//! `members.list/get`, `membership.revoke`, `membership.cutover`,
+//! `group_keys.status/rotate`, and `operations.get` for `op-` tokens.
 //!
 //! Authorization (07 §2): `MEMBERSHIP_READ` for the read side,
 //! `MEMBERSHIP_DECIDE` for `join.decide` / `membership.revoke`,
-//! `MEMBERSHIP_ADMIN` for the policy and `group_keys.rotate`. The network
+//! `MEMBERSHIP_ADMIN` for the policy, `membership.cutover` and
+//! `group_keys.rotate`. The network
 //! the ACL is checked on is the site's wire network (network_low32 of the
 //! SiteCert). The principal comes from the socket peer credential only;
 //! idempotency identity is `(principal, idempotency_key)`.
@@ -23,8 +24,8 @@ use crate::send_store::OperationStore;
 use crate::site::group_keys::HostTime;
 use crate::site::records::{parse_op_token, parse_request_token, parse_role, Verdict};
 use crate::site::{
-    parse_reason, DecideRequest, DecisionMode, Events, RevokeRequest, RotateRequest, SiteError,
-    SiteService,
+    parse_reason, CutoverRequest, DecideRequest, DecisionMode, Events, RevokeRequest,
+    RotateRequest, SiteError, SiteService,
 };
 
 /// `limit` ceiling of the paged site listings.
@@ -41,6 +42,7 @@ pub const SITE_EVENT_KINDS: &[&str] = &[
     "member.revoked",
     "member.removal_notified",
     "rrs.published",
+    "cutover.progress",
     "gk.staged",
     "gk.rotated",
     "gk.member_applied",
@@ -58,6 +60,7 @@ pub const SITE_METHODS: &[&str] = &[
     "members.list",
     "members.get",
     "membership.revoke",
+    "membership.cutover",
     "group_keys.status",
     "group_keys.rotate",
 ];
@@ -204,6 +207,7 @@ pub(super) fn dispatch<S: OperationStore>(
         "members.list" => members_list,
         "members.get" => members_get,
         "membership.revoke" => membership_revoke,
+        "membership.cutover" => membership_cutover,
         "group_keys.status" => group_keys_status,
         "group_keys.rotate" => group_keys_rotate,
         _ => return None,
@@ -497,6 +501,56 @@ fn membership_revoke<S: OperationStore>(
     Ok(result?)
 }
 
+fn membership_cutover<S: OperationStore>(
+    params: &Json,
+    ctx: &ApiContext<'_, S>,
+) -> Result<String, ApiError> {
+    only(
+        params,
+        &["expected_site_epoch", "next_site_cert", "idempotency_key"],
+    )?;
+    let service = service(ctx)?;
+    let principal = authorize(ctx, service, acl::PERM_MEMBERSHIP_ADMIN, "MEMBERSHIP_ADMIN")?;
+    let expected_site_epoch = params
+        .get("expected_site_epoch")
+        .and_then(Json::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v >= 1)
+        .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "expected_site_epoch must be >= 1"))?;
+    let cert_hex = params
+        .get("next_site_cert")
+        .and_then(Json::as_str)
+        .ok_or_else(|| ApiError::simple("INVALID_ARGUMENT", "next_site_cert must be hex bytes"))?;
+    if cert_hex.len() > 2048 || !cert_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ApiError::simple(
+            "INVALID_ARGUMENT",
+            "next_site_cert must be hex bytes",
+        ));
+    }
+    let next_site_cert = (0..cert_hex.len() / 2)
+        .map(|i| u8::from_str_radix(&cert_hex[2 * i..2 * i + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ApiError::simple("INVALID_ARGUMENT", "next_site_cert must be hex bytes"))?;
+    let key = idempotency_key(params)?;
+    let time = HostTime {
+        mono_ms: ctx.now_mono,
+        unix_ms: ctx.now_ms,
+    };
+    let (result, events) = service.with(|a| {
+        a.cutover(
+            principal,
+            CutoverRequest {
+                expected_site_epoch,
+                next_site_cert,
+                key,
+            },
+            time,
+        )
+    });
+    push_events(ctx, events);
+    Ok(result?)
+}
+
 fn group_keys_status<S: OperationStore>(
     params: &Json,
     ctx: &ApiContext<'_, S>,
@@ -560,8 +614,12 @@ pub(super) fn operation_get<S: OperationStore>(
         // Existence is not revealed without the grant.
         authorize(ctx, service, acl::PERM_MEMBERSHIP_READ, "MEMBERSHIP_READ")
             .map_err(|_| not_found())?;
+        let time = HostTime {
+            mono_ms: ctx.now_mono,
+            unix_ms: ctx.now_ms,
+        };
         service
-            .with(|a| a.operation_json(id))
+            .with(|a| a.operation_json(id, time))
             .0
             .ok_or_else(not_found)
     })())
