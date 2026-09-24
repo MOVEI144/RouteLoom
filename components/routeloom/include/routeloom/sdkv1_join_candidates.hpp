@@ -2,24 +2,25 @@
 
 // SDK v1 zero-touch join candidate table (docs/design/sdk-v1/02-zero-touch-join.md
 // §5, §10; design P3-4 §5, §9; plan P3-4 PR 2). One fixed table of at most 8
-// observed sites that serves both views: the candidate list and the
-// avoid/penalty view — no second list, no unbounded state, no NVS.
+// observed sites serving both views — the candidate list and the avoid/penalty
+// view — with no second list, no unbounded state, no NVS. The in-flight
+// attempt is one value owned by the table (JoinAttempt), never flags scattered
+// over records, so splits, rebinds and proxy slot reuse cannot strand or
+// misattribute attempt state.
 //
 // A record's search key is the *observed* tuple (org_hint, site_hint,
-// network_low32): 32-bit hints that a site cannot authenticate by itself.
-// Only a successful m2 binds an authenticated site_id to a record, and the
-// same key may then split into two records when colliding hints resolve to
-// different site_ids (design §5.2). Authorization is never reused across
-// records or sites sharing a hint: records that resolve to the same
-// authenticated site_id merge their policy to the *stronger* hold (the later
-// eligible_at), so a 24 h avoid cannot be bypassed by a colliding OFFER.
+// network_low32): 32-bit hints that authenticate nothing by themselves. Only a
+// successful m2 binds an authenticated site_id, and the same key may then
+// split into two records when colliding hints resolve to different site_ids
+// (design §5.2). Records proven as the same site_id share the stronger hold
+// (the later eligible_at), and m2 may not bind a site any such record still
+// holds — a colliding key cannot bypass an avoid (§5.1 rule 2).
 //
 // Scope: OFFER observations, policy bookkeeping, bounded selection, the
 // multi-anchor scan cursor, DISCOVER avoid-hint packing and the retry/backoff
 // math. No cookies, no crypto, no link ownership — the Joiner (PR 3) drives
 // the windows, the attempts and the outcomes.
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -130,17 +131,27 @@ struct JoinCandidate {
   MonotonicMs last_attempt_ms{0};   // 0 = never attempted
   std::uint8_t failures{0};         // consecutive transient failures (k)
   bool preferred{false};            // authenticated former membership (RAM)
-  bool selected{false};             // an attempt is currently bound here
-  std::int8_t attempted_proxy{-1};  // index of the proxy the attempt uses
-  // MAC of the proxy the last Failed outcome used (zero = none). The record
-  // and proxy holds of a failure expire together, so rank alone would
-  // reselect the same failed path; selection prefers a usable alternate
-  // while this remembers it. Tracked by MAC — not by slot index — because
-  // later OFFERs may replace proxy slots before the next selection.
-  MacAddress last_failed_proxy{};
+  // MACs of failed proxies (zero = empty slot). Failures are remembered by
+  // path, not by slot index, so OFFERs reusing slots cannot misattribute
+  // them. Cleared by any authenticated verdict.
+  MacAddress failed_proxies[kJoinCandidateProxyMax]{};
 };
 static_assert(sizeof(JoinCandidate) <= kJoinCandidateRecordMax,
               "join candidate record must stay within the 160 B bound");
+
+// --- Attempt -----------------------------------------------------------------------
+// The table's single in-flight attempt. select_and_begin fills one in; the
+// later bind/apply calls take the caller's copy back and honor it only while
+// it names the live attempt (active generation + key match). The proxy MAC is
+// copied at begin, so slot reuse mid-attempt cannot misattribute the failure;
+// the site follows once m2 proves it, so splits move no per-record state.
+struct JoinAttempt {
+  bool active{false};
+  std::uint64_t seq{0};      // table generation at begin; stale handles rejected
+  JoinCandidateKey key{};    // attempted site's observed key
+  MacAddress proxy{};        // chosen proxy MAC, copied at begin
+  std::uint64_t site_id{0};  // proven site (0 until m2 binds it)
+};
 
 // --- Scan cursor ---------------------------------------------------------------------
 // Channels (1..14, unique, <=3) x active Site CA org hints (unique, <=3):
@@ -168,9 +179,13 @@ enum class JoinObserve : std::uint8_t {
   Rejected,      // malformed key/proxy evidence or clock regression
 };
 
+// The winning record/proxy of select_and_begin. The proxy is a snapshot:
+// OFFER updates may reuse its table slot while the attempt is in flight.
+// The record pointer is pinned until bind_authenticated changes the proven
+// site or the attempt ends.
 struct JoinSelect {
   const JoinCandidate* candidate{nullptr};
-  const JoinCandidateProxy* proxy{nullptr};
+  JoinCandidateProxy proxy{};
 };
 
 struct JoinCandidatesStats {
@@ -217,34 +232,42 @@ class JoinCandidates {
   JoinObserve observe(const JoinCandidateKey& key, const JoinProxyObservation& proxy,
                       MonotonicMs now_ms) noexcept;
 
+  // --- selection + attempt start (one atomic operation) ---
+  // Picks the best eligible candidate and its best proxy and begins the
+  // table's single attempt on it. No separate mark step exists, so a
+  // selection can never go stale before the mark, and a second begin while
+  // an attempt is in flight fails with InvalidState. Nothing eligible ->
+  // NotFound with both outs left inactive/empty. Eligible means the
+  // effective hold expired AND a fresh reachable non-busy proxy exists.
+  // Order: a record with an untried usable route first (§5.1 rule 5 — once
+  // every route of a site failed, an eligible other site wins even over a
+  // preferred one), then preferred, untried, hops asc (unknown last), RSSI
+  // desc, oldest last_attempt, key/MAC lexicographic.
+  Status select_and_begin(MonotonicMs now_ms, JoinAttempt& attempt,
+                          JoinSelect& sel) noexcept;
+  // The live attempt (inactive when none is in flight).
+  const JoinAttempt& attempt() const noexcept { return attempt_; }
+
   // --- authentication ---
-  // After m2 authenticated: bind site_id to the record at `key`. If the key
-  // is already bound to a DIFFERENT site_id (hint collision), split into a
-  // second record sharing the key; the in-flight attempt state (selected,
-  // proxy choice) moves to the new record and the source drops back to idle.
-  // Refuses when no slot can be made (design §5.2: full table aborts the
-  // attempt rather than conflating). Re-proving an already-known site on a
-  // split key likewise moves the in-flight state onto that record — and is
-  // refused with InvalidState when the proven site is still held, so no m3
-  // is sent to it; both records are left idle then.
-  Status bind_authenticated(const JoinCandidateKey& key, std::uint64_t site_id,
+  // Binds the m2-proven site_id to the live attempt's key. A hint collision
+  // splits into a second record sharing the key while the attempt simply
+  // starts naming the proven site. Refuses with InvalidState for a stale or
+  // foreign handle and when any record proven as this site_id still holds it
+  // (no m3 goes out then), or NoCapacity when a split finds no slot — every
+  // refusal aborts the attempt instead of conflating sites (design §5.2).
+  Status bind_authenticated(const JoinAttempt& attempt, std::uint64_t site_id,
                             MonotonicMs now_ms, JoinCandidate*& record) noexcept;
 
-  // --- attempt bookkeeping ---
-  // Mark the start of an exchange through `proxy_index` of `record`.
-  void mark_attempt(JoinCandidate& record, std::uint8_t proxy_index,
-                    MonotonicMs now_ms) noexcept;
-  // Begin the attempt chosen by select(): validates that `sel` still points
-  // into this table's current records and marks that record/proxy. Foreign,
-  // stale or empty selections are rejected with InvalidArgument.
-  Status mark_selected(const JoinSelect& sel, MonotonicMs now_ms) noexcept;
-  // Map one authenticated or local outcome onto the record (design §5.2 /
-  // §8). Authenticated verdicts clear the transient failure streak; Failed
-  // grows it and applies the jittered transient backoff to both the record
-  // and the attempted proxy. RemovedVerified evicts the record. On entropy
-  // failure the lower backoff bound is used and the stat is counted — an
-  // entropy failure must never lengthen a hold or start crypto.
-  Status apply_outcome(JoinCandidate& record, JoinAttemptOutcome outcome,
+  // --- attempt outcome ---
+  // Maps one outcome onto the live attempt's record (design §5.2 / §8) and
+  // ends the attempt on every path, including Pending (the neutral end that
+  // changes no policy). Authenticated verdicts clear the transient streak
+  // and the failed-path memory; Failed grows the streak, holds the record
+  // and the attempted path (found by the attempt's MAC, never by slot
+  // index), and remembers that MAC. RemovedVerified evicts the record. On
+  // entropy failure the lower backoff bound applies — never a longer hold.
+  // A stale or foreign handle fails with InvalidState, table untouched.
+  Status apply_outcome(const JoinAttempt& attempt, JoinAttemptOutcome outcome,
                        std::uint32_t retry_after_s, MonotonicMs now_ms,
                        EntropySource& entropy) noexcept;
   // Suppress one proxy path for up to 600 s (unauthenticated RelayStatus
@@ -252,17 +275,9 @@ class JoinCandidates {
   void suppress_proxy(JoinCandidate& record, const MacAddress& proxy_mac,
                       std::uint32_t suppress_ms, MonotonicMs now_ms) noexcept;
 
-  // --- selection ---
-  // The best eligible candidate and its best proxy (design §5.1 rule 4):
-  // eligible means the effective hold expired AND a fresh proxy observation
-  // with authority_reachable && !proxy_busy exists. Ordering: preferred,
-  // untried, hops asc (unknown last), RSSI desc, oldest last_attempt, then
-  // key/MAC lexicographic. Unauthenticated flags steer routing only. Among
-  // the usable proxies of the winning record, a proxy other than the last
-  // failed one wins; the failed path is reused only when alone.
-  Status select(MonotonicMs now_ms, JoinSelect& out) noexcept;
-  // Earliest future effective eligibility across the table (kJoinNoDeadline
-  // when nothing is pending or after a clock regression).
+  // --- scheduling ---
+  // Earliest future site hold or fresh usable proxy suppression expiry
+  // (kJoinNoDeadline when nothing is pending or after a clock regression).
   MonotonicMs next_eligible_ms(MonotonicMs now_ms) noexcept;
   // Deadline of the next scan when nothing is eligible: a jittered
   // saturated backoff in the cycle counter k, cut by the nearest pending
@@ -292,8 +307,7 @@ class JoinCandidates {
 
   // --- accessors ---
   // First occupied record carrying `key` (or nullptr). The mutable overload
-  // hands a record to the attempt/outcome APIs without a cast; fields stay
-  // owned by the table.
+  // hands a record to suppress_proxy without a cast.
   const JoinCandidate* find(const JoinCandidateKey& key) const noexcept;
   JoinCandidate* find(const JoinCandidateKey& key) noexcept;
   std::size_t size() const noexcept;
@@ -302,8 +316,9 @@ class JoinCandidates {
 
  private:
   bool clock_ok(MonotonicMs now_ms) noexcept;
-  JoinCandidate* acquire(MonotonicMs now_ms, bool& evicted,
-                         const JoinCandidate* exclude = nullptr) noexcept;
+  bool attempt_live(const JoinAttempt& attempt) const noexcept;
+  bool attempt_pinned(const JoinCandidate& record) const noexcept;
+  JoinCandidate* acquire(MonotonicMs now_ms, bool& evicted) noexcept;
   void upsert_proxy(JoinCandidate& record, const JoinProxyObservation& proxy,
                     MonotonicMs now_ms) noexcept;
   MonotonicMs effective_eligible_at(const JoinCandidate& record) const noexcept;
@@ -320,6 +335,8 @@ class JoinCandidates {
                          std::uint64_t& delay_ms) noexcept;
 
   std::array<JoinCandidate, kJoinCandidateMax> records_{};
+  JoinAttempt attempt_{};
+  std::uint64_t attempt_seq_{0};
   JoinScanConfig scan_{};
   std::uint8_t scan_channel_i_{0};
   std::uint8_t scan_org_i_{0};

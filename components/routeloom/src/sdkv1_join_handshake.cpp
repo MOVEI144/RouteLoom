@@ -387,12 +387,12 @@ Status JoinHandshake::decide(const JoinDecideInput& input, JoinDecided& out) noe
     return Status::error(StatusCode::InvalidState, "join decide state");
   }
   JoinResult result{};
+  Status status = Status::success();
   const Status decoded = join_result_decode(result_.view(), result);
   if (!decoded) {
     ++stats_.results_malformed;
     out.outcome = JoinAttemptOutcome::MalformedResult;
   } else {
-    Status status = Status::success();
     switch (result.verdict) {
       case JoinVerdict::Allow:
         status = decide_allow(result, input, out);
@@ -415,11 +415,13 @@ Status JoinHandshake::decide(const JoinDecideInput& input, JoinDecided& out) noe
         out.retry_after_s = result.retry_after_s;
         break;
     }
-    outcome_ = out.outcome;
-    return status;
   }
   outcome_ = out.outcome;
-  return Status::success();
+  // A decoded Allow carries the 32 B group key by value: wipe this frame's
+  // copy on every exit — success and failure alike — since end() cannot
+  // reach stack temporaries.
+  secure_clear(result.site_package.gk.data(), result.site_package.gk.size());
+  return status;
 }
 
 Status JoinHandshake::decide_allow(const JoinResult& result, const JoinDecideInput& input,

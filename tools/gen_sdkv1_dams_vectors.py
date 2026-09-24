@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regenerate protocol/sdkv1-golden/dams/ — SDK v1 join DAMS vectors
-(plan P3-4 PR 1, extended in the R2 review round).
+(plan P3-4 PR 1).
 
 Independent reference encoder for the EDHOC_Exporter context both join ends
 build for the DAMS derivation (docs/design/sdk-v1/02-zero-touch-join.md
