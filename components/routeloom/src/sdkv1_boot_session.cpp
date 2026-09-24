@@ -69,4 +69,45 @@ Status BootSessionStore::reconcile_site(const std::uint32_t witness,
   return Status::success();
 }
 
+Status BootSessionStore::advance_dev_group(DevBootHighWaterPort& high_water,
+                                            std::uint32_t& session) noexcept {
+  std::uint32_t system_value = 0;
+  bool system_found = false;
+  Status status = port_.read(system_value, system_found);
+  if (!status) return status;
+  std::uint32_t high = 0;
+  bool high_found = false;
+  status = high_water.read(high, high_found);
+  if (!status) return status;
+  if ((system_found && system_value == 0) || (high_found && high == 0)) {
+    return Status::error(StatusCode::RecoveryRequired, "invalid boot high water");
+  }
+  const std::uint64_t next = static_cast<std::uint64_t>(
+      (system_found && (!high_found || system_value > high)) ? system_value : high) + 1;
+  if (next > UINT32_MAX) {
+    return Status::error(StatusCode::CounterExhausted, "dev boot high water exhausted");
+  }
+  const auto value = static_cast<std::uint32_t>(next);
+  // Commit the group-key ceiling before the system boot token: interruption
+  // can skip epochs, but can never reuse an epoch for the same dev PSK.
+  status = high_water.commit(value);
+  if (!status) return status;
+  std::uint32_t checked = 0;
+  bool found = false;
+  status = high_water.read(checked, found);
+  if (!status) return status;
+  if (!found || checked != value) {
+    return Status::error(StatusCode::StorageFailure, "dev boot high water readback failed");
+  }
+  status = port_.commit(value);
+  if (!status) return status;
+  status = port_.read(checked, found);
+  if (!status) return status;
+  if (!found || checked != value) {
+    return Status::error(StatusCode::StorageFailure, "dev boot session readback failed");
+  }
+  session = value;
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

@@ -29,6 +29,26 @@ struct Fake final : BootSessionPort {
   bool write_error{false};
   bool lost_write{false};
 };
+struct DevFake final : DevBootHighWaterPort {
+  Status read(std::uint32_t& value, bool& exists) noexcept override {
+    if (read_error) return Status::error(StatusCode::StorageFailure, "dev read");
+    value = high;
+    exists = found;
+    return Status::success();
+  }
+  Status commit(std::uint32_t value) noexcept override {
+    ++writes;
+    if (write_error) return Status::error(StatusCode::StorageFailure, "dev write");
+    if (!lost_write) { high = value; found = true; }
+    return Status::success();
+  }
+  std::uint32_t high{0};
+  int writes{0};
+  bool found{false};
+  bool read_error{false};
+  bool write_error{false};
+  bool lost_write{false};
+};
 int failures = 0;
 void check(bool value, int line) {
   if (!value) { std::fprintf(stderr, "boot session check failed: %d\n", line); ++failures; }
@@ -84,5 +104,55 @@ int main() {
   port.lost_write = false;
   CHECK(store.advance(false, 0, token).ok() && token == 2);
   CHECK(port.writes >= 6);
+
+  // Dev group key uses the boot epoch: a missing/stale system counter must
+  // skip the last durable group epoch, including after interrupted writes.
+  Fake system;
+  DevFake dev;
+  BootSessionStore dev_store(system);
+  std::uint32_t group_boot = 999;
+  system.stored = 4;
+  system.found = true;
+  dev.high = 8;
+  dev.found = true;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 9);
+  CHECK(system.stored == 9 && dev.high == 9 && dev.writes == 1);
+  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 10);
+  CHECK(dev.high == 10 && system.stored == 10);
+  system.found = false;
+  dev.high = 10;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 11);
+  dev.high = UINT32_MAX;
+  const auto old_group = group_boot;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::CounterExhausted &&
+        group_boot == old_group);
+  dev.high = 11;
+  dev.read_error = true;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+        group_boot == old_group);
+  dev.read_error = false;
+  dev.lost_write = true;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+        group_boot == old_group && system.stored == 11);
+  dev.lost_write = false;
+  system.found = true;
+  system.stored = 11;
+  system.write_error = true;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+        group_boot == old_group && dev.high == 12);
+  system.write_error = false;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 13);
+  system.lost_write = true;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+        group_boot == 13 && dev.high == 14);
+  system.lost_write = false;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 15);
+  system.stored = UINT32_MAX;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::CounterExhausted &&
+        group_boot == 15);
+  system.stored = 15;
+  dev.high = 0;
+  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::RecoveryRequired &&
+        group_boot == 15);
   return failures == 0 ? 0 : 1;
 }
