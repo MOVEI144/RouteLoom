@@ -361,8 +361,15 @@ class JoinRelayHostSink {
  public:
   virtual ~JoinRelayHostSink() = default;
   // A complete up relay object (RelayHeader dir=up + message) from `proxy`,
-  // `hops` mesh hops away. The sink copies it before returning.
+  // `hops` mesh hops away. `object` is valid only during the call and may
+  // alias a gateway slot, so copy it before keeping it. The callback must
+  // not re-enter the gateway: host_down()/host_abort() return Busy and
+  // the other mutating calls are ignored while it runs — call them after
+  // it returns. Returning an error aborts the relay with
+  // authority_unreachable.
   virtual Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept = 0;
+  // The relay ended at the gateway. The callback must not re-enter the
+  // gateway — the same rules as relay_up apply.
   virtual Status relay_abort(NodeId proxy, std::uint32_t relay_id,
                              RelayAbortReason reason) noexcept = 0;
 };
@@ -400,7 +407,9 @@ class JoinRelayGateway {
 
   JoinRelayGateway(const JoinRelayGatewayConfig& config, ZtRelayPort& wire) noexcept;
 
-  void set_host_sink(JoinRelayHostSink* sink) noexcept { sink_ = sink; }
+  void set_host_sink(JoinRelayHostSink* sink) noexcept {
+    if (!in_call_) sink_ = sink;  // ignored inside a sink callback
+  }
   void set_membership(MembershipState state) noexcept;
 
   // Wire RX: `from` is the verified mesh origin, `hops` its distance.
@@ -453,6 +462,8 @@ class JoinRelayGateway {
   ZtRelayPort& wire_;
   JoinRelayHostSink* sink_{nullptr};
   MembershipState membership_{MembershipState::Unprovisioned};
+  // Inside a sink callback: mutating calls return Busy or are ignored.
+  bool in_call_{false};
   std::array<Slot, kSlots> slots_{};
   std::array<Recent, kRecentRelays> recent_{};
   JoinRelayGatewayStats stats_{};
