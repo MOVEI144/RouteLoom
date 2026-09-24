@@ -51,6 +51,14 @@ self-checks usable in CI without hardware.
 | `deliver_2node` | bound pair → host `send` ends `delivered`/`END_RECEIVED`, payload visible in the reference log |
 | `restart_resume` | delivery, then reference-node reboot mid-session → re-BIND + deliver again |
 
+## Hardware-only checks
+
+Not verifiable on host — confirm on real boards per run:
+
+- No tick wait from TX completion to the next submit (#60-3): measure
+  the inter-submit gap and confirm back-to-back frames go out at the
+  callback rate instead of riding out the 2 ms poll tick.
+
 ## Bench wiring notes
 
 - macOS: match on `/dev/cu.usbmodem*` / `/dev/cu.usbserial-*` (never

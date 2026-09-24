@@ -1581,6 +1581,9 @@ void test_exchange_bounded_and_expiry() {
   pair.wire_b.sent.clear();
 
   // An inbound reassembly that stalls expires instead of pinning the slot.
+  // The expiry itself is contract-pinned: docs/spec/wire-protocol.md §6
+  // ("10秒組立timeout") and radio-defaults.json control_reassembly_timeout_ms.
+  CHECK(migration_wire_const::kInboundExpiryMs == 10000);
   manifest.total_len = 100;
   pair.b.on_manifest(kAuthority, manifest, kNow);
   autonomy::ObjectChunkPayload chunk{};
@@ -1594,6 +1597,115 @@ void test_exchange_bounded_and_expiry() {
   pair.b.on_manifest(kAuthority, manifest,
                      kNow + migration_wire_const::kInboundExpiryMs + 2);
   CHECK(pair.sink_b.objects.empty());
+}
+
+// The reassembly window is absolute from the FIRST manifest: chunk progress
+// and duplicate manifests must not extend it. Otherwise an authenticated
+// sender dribbling one chunk every <10s (or re-announcing) pins an inbound
+// slot past the contract's 10s bound (wire-protocol.md §6, issue #55).
+void test_exchange_absolute_reassembly_deadline() {
+  ExchangePair pair{};
+  // Real object: the manifest hash is the genuine plan digest so a fully
+  // reassembled transfer actually completes (100B in 10B chunks).
+  std::array<std::uint8_t, 100> content{};
+  for (std::size_t i = 0; i < content.size(); ++i) {
+    content[i] = static_cast<std::uint8_t>(i * 7);
+  }
+  autonomy::ControlObjectPayload manifest{};
+  manifest.total_len = static_cast<std::uint16_t>(content.size());
+  manifest.object_hash =
+      plan_digest(ByteView{content.data(), content.size()});
+  pair.b.on_manifest(kAuthority, manifest, kNow);
+
+  const auto send_chunk = [&](std::uint16_t offset, MonotonicMs at) {
+    autonomy::ObjectChunkPayload chunk{};
+    chunk.object_hash = manifest.object_hash;
+    chunk.offset = offset;
+    std::memcpy(chunk.data.data(), content.data() + offset, 10);
+    chunk.data_size = 10;
+    pair.b.on_chunk(kAuthority, chunk, at);
+  };
+  const auto last_ack = [&]() {
+    CHECK(!pair.wire_b.sent.empty());
+    const Captured& acked = pair.wire_b.sent.back();
+    autonomy::EncodedPayload payload{};
+    std::memcpy(payload.bytes.data(), acked.data.data(), acked.size);
+    payload.size = acked.size;
+    autonomy::ObjectAckPayload ack{};
+    CHECK_OK(object_ack_decode(payload.view(), ack));
+    return ack;
+  };
+
+  // Dribble: each chunk lands inside the refreshed-window reach of the old
+  // implementation, but the absolute deadline still closes at kNow+10000.
+  send_chunk(0, kNow);
+  send_chunk(10, kNow + 9000);  // accepted: progress acks are not emitted
+  pair.wire_b.sent.clear();
+  // A duplicate manifest one beat before the deadline restarts the byte
+  // count but must NOT buy a new window.
+  pair.b.on_manifest(kAuthority, manifest, kNow + 9999);
+  send_chunk(0, kNow + 10001);
+  autonomy::ObjectAckPayload ack = last_ack();
+  CHECK(ack.status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(ack.received_len == 0);  // slot released — restart needs a manifest
+  CHECK(pair.sink_b.objects.empty());
+
+  // A post-deadline manifest for the same hash opens a FRESH window: the
+  // sender's bounded retry completes the transfer and it is delivered.
+  pair.wire_b.sent.clear();
+  const MonotonicMs restart = kNow + 10002;
+  pair.b.on_manifest(kAuthority, manifest, restart);
+  for (std::uint16_t offset = 0; offset < 100; offset += 10) {
+    send_chunk(offset, restart + 1 + offset / 10);
+  }
+  ack = last_ack();
+  CHECK(ack.status == autonomy::ObjectAckStatus::Ok);
+  CHECK(ack.received_len == 100);
+  CHECK(pair.sink_b.objects.size() == 1);
+}
+
+void test_exchange_inbound_expiry_capped_at_contract() {
+  // inbound_expiry_ms is a public knob, but the 10s window is a
+  // wire-protocol §6 contract: configuring 15s must not let a transfer
+  // hold an assembly slot past the documented bound.
+  FakeWirePort wire{kSelf};
+  CollectingSink sink;
+  PlanExchangeConfig cfg{};
+  cfg.inbound_expiry_ms = 15000;
+  PlanExchange ex{cfg, wire, sink};
+
+  std::array<std::uint8_t, 100> content{};
+  for (std::size_t i = 0; i < content.size(); ++i) {
+    content[i] = static_cast<std::uint8_t>(i * 3);
+  }
+  autonomy::ControlObjectPayload manifest{};
+  manifest.total_len = static_cast<std::uint16_t>(content.size());
+  manifest.object_hash =
+      plan_digest(ByteView{content.data(), content.size()});
+  ex.on_manifest(kAuthority, manifest, kNow);
+
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.object_hash = manifest.object_hash;
+  chunk.offset = 0;
+  std::memcpy(chunk.data.data(), content.data(), 10);
+  chunk.data_size = 10;
+  ex.on_chunk(kAuthority, chunk, kNow);
+
+  // 12s after the first manifest: inside the configured 15s but past the
+  // 10s contract bound — the chunk is refused like an unknown object.
+  chunk.offset = 10;
+  std::memcpy(chunk.data.data(), content.data() + 10, 10);
+  ex.on_chunk(kAuthority, chunk, kNow + 12000);
+  CHECK(!wire.sent.empty());
+  const Captured& acked = wire.sent.back();
+  autonomy::EncodedPayload payload{};
+  std::memcpy(payload.bytes.data(), acked.data.data(), acked.size);
+  payload.size = acked.size;
+  autonomy::ObjectAckPayload ack{};
+  CHECK_OK(object_ack_decode(payload.view(), ack));
+  CHECK(ack.status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(ack.received_len == 0);
+  CHECK(sink.objects.empty());
 }
 
 void test_exchange_channel_gating() {
@@ -1706,6 +1818,8 @@ int main() {
   test_exchange_chunk_loss_resend();
   test_exchange_forged_content();
   test_exchange_bounded_and_expiry();
+  test_exchange_absolute_reassembly_deadline();
+  test_exchange_inbound_expiry_capped_at_contract();
   test_exchange_channel_gating();
   test_exchange_ack_timeout_bounded();
   test_exchange_duplicate_delivery();

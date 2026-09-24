@@ -94,6 +94,11 @@ def run(root: Path) -> dict:
         per_hour = load["nodes"] * (load["data_per_node_per_hour"] + 3600 / load["heartbeat_period_seconds"])
         check("reference_load_2100_per_hour", per_hour == 2100)
         check("radio_doc_budget_mentions", all(s in texts["docs/spec/radio.md"] for s in ["2000ms", "200ms", "1000ms", "128", "250"]))
+        # decisions.md must quote the CURRENT 1hop target, not the pre-#47
+        # value — catch prose drift between the manifest and narrative docs.
+        check("decisions_current_hop_target",
+              f"1hop{p['performance_targets_ms']['reliable_1hop_p95']}ms目標" in texts["docs/spec/decisions.md"]
+              and "1hop20ms" not in texts["docs/spec/decisions.md"])
     except (KeyError, TypeError, ValueError) as error:
         check("parameter_schema", False, type(error).__name__)
 

@@ -490,7 +490,7 @@ void EspNowRuntime::task_entry(void* argument) noexcept {
   runtime->task_ = xTaskGetCurrentTaskHandle();
   while (runtime->started_) {
     runtime->poll_once();
-    vTaskDelay(pdMS_TO_TICKS(2));
+    runtime->wait_for_event(kOwnerPollPeriodMs);
   }
   runtime->task_ = nullptr;
   // Released last: once task_running_ reads false, a joining stop() owns
@@ -834,6 +834,39 @@ void EspNowRuntime::poll_once() noexcept {
     migration_->poll(now);
   }
   node_.poll(now);
+}
+
+void EspNowRuntime::wait_for_event(const MonotonicMs timeout_ms) noexcept {
+  if (event_queue_ == nullptr) {
+    vTaskDelay(pdMS_TO_TICKS(timeout_ms));
+    return;
+  }
+  // Staged completions bypass the queue: a TX callback that lands on a
+  // full queue while poll_once is draining stages its completion AFTER
+  // the pass's entry check — the queue is empty now but the node's job is
+  // still unresolved. Blocking here would idle until the next tick
+  // (issue #60-3), so re-check the staging slots under the lock for the
+  // shared owner wait below.
+  bool staged = false;
+  portENTER_CRITICAL(&callback_lock_);
+  staged = lost_node_tx_valid_ || lost_tx_count_ != 0;
+  portEXIT_CRITICAL(&callback_lock_);
+  // Thin FreeRTOS binding of the shared owner wait (owner_pump.hpp — the
+  // host harness executes the same routine against a fake queue). Peek,
+  // not receive: the event stays queued for poll_once's ordered drain
+  // (reserved slots -> lost completions -> queued events -> node poll).
+  // A TX completion posted while we sleep releases the wait NOW — the
+  // event wins over the periodic tick (issue #60-3). Bootstrap-queue
+  // traffic keeps its old bounded latency via the periodic timeout.
+  struct QueueWait {
+    QueueHandle_t queue;
+    void wait_until_posted(const MonotonicMs wait_ms) noexcept {
+      Event peek{};
+      (void)xQueuePeek(queue, &peek, pdMS_TO_TICKS(wait_ms));
+    }
+  };
+  QueueWait wait{event_queue_};
+  owner_wait_for_event(wait, timeout_ms, staged);
 }
 
 Status EspNowRuntime::send_application(

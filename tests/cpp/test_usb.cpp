@@ -343,8 +343,18 @@ void test_credit() {
   CHECK(credit.update(8, 4, 400).code == StatusCode::ProtocolError);
   CHECK_OK(credit.update(9, 4, 400));
   CHECK_OK(credit.update(9, 4, 400));  // duplicate grant never adds
-  CHECK(credit.update(9, 3, 400).code == StatusCode::ProtocolError);
-  CHECK(credit.update(9, 4, 300).code == StatusCode::ProtocolError);
+  // Stale (reordered, smaller) notices are absorbed per-axis max — no error,
+  // no shrink (usb-protocol.md §3, shared golden tx_grant_stale/zero/mixed).
+  CHECK_OK(credit.update(9, 3, 400));
+  CHECK(credit.grant_frames() == 4 && credit.grant_bytes() == 400);
+  CHECK_OK(credit.update(9, 4, 300));
+  CHECK(credit.grant_frames() == 4 && credit.grant_bytes() == 400);
+  CHECK_OK(credit.update(9, 0, 0));
+  CHECK(credit.grant_frames() == 4 && credit.grant_bytes() == 400);
+  // Partially-stale: a higher frames axis still advances while bytes keeps
+  // the earlier maximum.
+  CHECK_OK(credit.update(9, 6, 100));
+  CHECK(credit.grant_frames() == 6 && credit.grant_bytes() == 400);
   CHECK_OK(credit.consume(100));
   CHECK_OK(credit.consume(100));
   CHECK_OK(credit.consume(100));
@@ -788,6 +798,120 @@ void test_bridge_session_lifecycle() {
   world.feed(keep, now);
   world.drain(now);
   CHECK(world.device_sink.frames.empty());
+}
+
+// Stale/duplicate cumulative grants add no credit (usb-protocol.md §3):
+// they must not reset the bounded zero-credit recovery ladder. A host that
+// keeps sending (0,0) notices must still hit the 3-query cap and
+// CONNECTION_STALLED instead of a query every poll interval forever.
+void test_bridge_stale_grant_keeps_stall_ladder() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x4444, 10) != 0);
+
+  // A mesh event queued with zero tx credit starts the recovery ladder.
+  const std::array<std::uint8_t, 3> msg{{5, 5, 5}};
+  world.bridge.on_message(MessageKey{2, MessageId{4004, 1}}, 2,
+                          ByteView{msg.data(), msg.size()});
+
+  std::vector<MonotonicMs> query_times;
+  std::uint64_t request = 60;
+  bool stalled_error = false;
+  for (int i = 0; i < 40; ++i) {
+    now += 100;
+    world.drain(now);
+    for (const auto& record : world.device_sink.frames) {
+      if (record.frame.kind == FrameKind::Credit) query_times.push_back(now);
+      if (record.frame.kind == FrameKind::Error) {
+        std::uint64_t counter = 0;
+        ByteView opened{};
+        if (open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                      opened) &&
+            opened.size > 2 &&
+            opened.data[1] ==
+                static_cast<std::uint8_t>(UsbErrorCode::ConnectionStalled)) {
+          stalled_error = true;
+        }
+      }
+    }
+    world.device_sink.frames.clear();
+    // No-op cumulative grant: absorbed by update(), ceiling unchanged.
+    const auto noop = grant_body(0, 0);
+    world.feed(host.sealed(FrameKind::Credit, request++,
+                           ByteView{noop.data(), noop.size()}), now);
+  }
+  CHECK(query_times.size() == 3);  // bounded cap reached despite no-op grants
+  for (std::size_t i = 1; i < query_times.size(); ++i) {
+    CHECK(query_times[i] - query_times[i - 1] >= 500);  // 500ms query spacing
+  }
+  CHECK(stalled_error);
+  CHECK(world.bridge.connection_stalled());
+}
+
+// Single-axis and below-threshold grants must not clear the recovery ladder:
+// a host raising only the frame ceiling (1,0),(2,0),... while a pending DATA
+// still lacks byte credit produces no forward progress, so queries must keep
+// their 500ms spacing and reach CONNECTION_STALLED. The ladder is released
+// only when the pending frame actually consumes credit on the wire.
+void test_bridge_partial_grant_keeps_stall_ladder() {
+  World world;
+  HostDriver host;
+  MonotonicMs now = 0;
+  CHECK(host_handshake(world, host, now, 0x5555, 10) != 0);
+
+  // A mesh event queued with zero tx credit starts the recovery ladder.
+  const std::array<std::uint8_t, 3> msg{{7, 7, 7}};
+  world.bridge.on_message(MessageKey{2, MessageId{5005, 1}}, 2,
+                          ByteView{msg.data(), msg.size()});
+
+  std::vector<MonotonicMs> query_times;
+  std::uint64_t request = 60;
+  bool stalled_error = false;
+  for (int i = 0; i < 40; ++i) {
+    now += 100;
+    world.drain(now);
+    for (const auto& record : world.device_sink.frames) {
+      if (record.frame.kind == FrameKind::Credit) query_times.push_back(now);
+      if (record.frame.kind == FrameKind::Error) {
+        std::uint64_t counter = 0;
+        ByteView opened{};
+        if (open_body(host.proof.key, kDirDeviceToHost, record.frame, counter,
+                      opened) &&
+            opened.size > 2 &&
+            opened.data[1] ==
+                static_cast<std::uint8_t>(UsbErrorCode::ConnectionStalled)) {
+          stalled_error = true;
+        }
+      }
+    }
+    world.device_sink.frames.clear();
+    // Frame-axis-only growth; on i==20 also a bytes grant far below the
+    // pending frame's decoded length — neither can send it.
+    const auto grant = grant_body(static_cast<std::uint64_t>(i + 1),
+                                  i == 20 ? 8 : 0);
+    world.feed(host.sealed(FrameKind::Credit, request++,
+                           ByteView{grant.data(), grant.size()}), now);
+  }
+  CHECK(query_times.size() == 3);  // bounded cap reached despite rising grants
+  for (std::size_t i = 1; i < query_times.size(); ++i) {
+    CHECK(query_times[i] - query_times[i - 1] >= 500);  // 500ms query spacing
+  }
+  CHECK(stalled_error);
+  CHECK(world.bridge.connection_stalled());
+
+  // A grant covering the pending frame lets it consume credit — the ladder
+  // clears on actual forward progress, not on the grant notice itself.
+  world.feed(host.sealed(FrameKind::Credit, request++,
+                         ByteView{grant_body(64, 4096).data(), 17}), now);
+  world.drain(now);
+  CHECK(!world.bridge.connection_stalled());
+  bool got_mesh_frame = false;
+  for (const auto& record : world.device_sink.frames) {
+    if (record.frame.kind == FrameKind::DataFromMesh) got_mesh_frame = true;
+  }
+  CHECK(got_mesh_frame);
+  CHECK(world.bridge.tx_credit().consumed_frames() == 1);
 }
 
 // Late nonce binding (issue #34): firmware seeds device_nonce after
@@ -1921,6 +2045,8 @@ int main() {
   test_session_mac();
   test_idempotency();
   test_bridge_session_lifecycle();
+  test_bridge_stale_grant_keeps_stall_ladder();
+  test_bridge_partial_grant_keeps_stall_ladder();
   test_bridge_set_device_nonce();
   test_bridge_idempotent_send();
   test_bridge_partial_write();

@@ -36,17 +36,17 @@
 暗号化済み32/64/128B、確立経路、低い外部占有、必要な中継がawakeの条件を基準とする。固定250と適応を分ける。
 
 <!-- generated:performance:start -->
-| 指標 | 目標 |
-|---|---|
-| 1hop RELIABLE | P95 20ms以内、send→END_RECEIPT |
-| 5hop RELIABLE | P95 100ms以内 |
-| 10hop RELIABLE | P95 250ms以内 |
-| Deep Sleepから報告 | P95 500ms以内、warm条件。cold/auth/recoveryは別系列 |
-| 既知代替への復旧 | P95 500ms以内、最初の故障観測→最終receipt |
-| 同channel探索修復 | P95 2000ms以内を目標、物理経路が存在 |
-| 自動承認済み同channel Join | P95 1000ms以内を目標、単独入場 |
-| cold Join | P95 5000ms以内を目標、単独入場・常時受信入口あり |
-| 切替そのものの空白 | P95 500ms以内を目標、認定された移行拡張・準備済み群 |
+| 指標 | 目標 | LR250理論下限 |
+|---|---|---:|
+| 1hop RELIABLE | P95 35ms以内、send→END_RECEIPT | 28ms |
+| 5hop RELIABLE | P95 250ms以内 | 173ms |
+| 10hop RELIABLE | P95 500ms以内 | 354ms |
+| Deep Sleepから報告 | P95 500ms以内、warm条件。cold/auth/recoveryは別系列 | — |
+| 既知代替への復旧 | P95 500ms以内、最初の故障観測→最終receipt | — |
+| 同channel探索修復 | P95 2000ms以内を目標、物理経路が存在 | — |
+| 自動承認済み同channel Join | P95 1000ms以内を目標、単独入場 | — |
+| cold Join | P95 5000ms以内を目標、単独入場・常時受信入口あり | — |
+| 切替そのものの空白 | P95 500ms以内を目標、認定された移行拡張・準備済み群 | — |
 <!-- generated:performance:end -->
 
 調査・準備・管理log配布には数分かかり得る。切替空白と総移行時間を混同しない。眠る全端末がVERIFY30秒内に起きることを期待しない。
@@ -72,7 +72,7 @@ P50/P95/P99、期限内成功、未達、expired、cancel、indeterminate、標�
 
 ## 7. 改訂1.1の測定条件と負例
 
-性能表は目標条件の正本JSONから生成して照合する。1hop20msなどを仮定の4H総仕事量だけから保証・不可能と断定しない。4Hは総送信会計、send→END_RECEIPTはcritical path。最大payload/全LR250と昇速済み短payloadは別系列。
+性能表は目標条件の正本JSONから生成して照合する。hop遅延の目標は`radio-defaults.json`の`latency_floor`（LR250 airtime前提の直列最小経路: bit time 32us/byte + MAC 43B + LR preamble中央値 + relay turnaround、復路receiptも中継ごとにHOP_ACCEPTされるモデル）が下回れない下限として記載し、`check_review_contracts.py`が前提からairtimeを再導出し`targets >= floor_ms == ceil(計算値)`を機械検査する。4Hは総送信会計、send→END_RECEIPTはcritical path。最大payload/全LR250と昇速済み短payloadは別系列。
 
 初回DATA jitterはSDKで0、retry jitterとdriver待ちは別。wakeはwarm/cold/new-peer/channel-recovery/key-recovery別、NVS fresh/populated・履歴を分ける。単独Joinと同時100Join、100台管理と100件5秒以内burstを別資格にする。
 

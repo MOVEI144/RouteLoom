@@ -242,6 +242,45 @@ fn main() -> std::io::Result<()> {
         tx_grant_inner,
     ));
 
+    // Stale-grant contract (usb-protocol.md §3): each grant axis adopts the
+    // max, so reordered/older notices are absorbed silently — no error
+    // frame, no shrink. The replay asserts byte-exact output, so any
+    // CREDIT_REGRESSION-style error these would emit under a reject-on-
+    // regression implementation fails the scenario.
+    let mut stale_inner = vec![CREDIT_GRANT];
+    stale_inner.extend_from_slice(&4_u64.to_be_bytes());
+    stale_inner.extend_from_slice(&1024_u64.to_be_bytes());
+    steps.push(h2d(
+        "tx_grant_stale",
+        "reordered older grant: lower on both axes, absorbed per-axis max",
+        FrameKind::Credit,
+        0,
+        0,
+        stale_inner,
+    ));
+    let mut zero_inner = vec![CREDIT_GRANT];
+    zero_inner.extend_from_slice(&0_u64.to_be_bytes());
+    zero_inner.extend_from_slice(&0_u64.to_be_bytes());
+    steps.push(h2d(
+        "tx_grant_zero",
+        "stale zero grant: literal adoption would freeze sends; max absorbs",
+        FrameKind::Credit,
+        0,
+        0,
+        zero_inner,
+    ));
+    let mut mixed_inner = vec![CREDIT_GRANT];
+    mixed_inner.extend_from_slice(&20_u64.to_be_bytes());
+    mixed_inner.extend_from_slice(&4096_u64.to_be_bytes());
+    steps.push(h2d(
+        "tx_grant_mixed",
+        "partially stale: frames axis advances to 20, bytes keeps 65536",
+        FrameKind::Credit,
+        0,
+        0,
+        mixed_inner,
+    ));
+
     // 7: host command into the mesh.
     // inner = idempotency_key || destination || payload.
     let payload = b"mesh-down";
