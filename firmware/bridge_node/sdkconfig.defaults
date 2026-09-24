@@ -13,10 +13,9 @@ CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 # Serial/JTAG — that mirror must be disabled explicitly.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
-# app_main runs the whole serial/bridge/runtime pump loop; the IDF default
-# (~3.5 KB) overflows in MeshNode/bridge call depth (observed: stack
-# protection fault right after startup).
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# app_main runs the owner, crypto, bridge, and mesh pump. P4 §12.2 budgets
+# 16 KiB until the on-device stack high-water is measured.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # Custom table: the single-app layout plus the "rlsec" NVS partition for
 # per-peer security state (issue #37). See partitions.csv.
 CONFIG_PARTITION_TABLE_CUSTOM=y

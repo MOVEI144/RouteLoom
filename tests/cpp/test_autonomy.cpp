@@ -36,6 +36,7 @@ int failures = 0;
 using namespace routeloom;
 using routeloom::autonomy::EncodedPayload;
 using routeloom_test::FakeRadioPort;
+using routeloom_test::SimReplyPort;
 using routeloom_test::ScriptedEntropy;
 
 #ifndef ROUTELOOM_AUTONOMY_GOLDEN_DIR
@@ -808,7 +809,9 @@ void test_fake_radio() {
   config.message_session = 7;
   config.route_advertisement_period_ms = 100;
   config.route_lifetime_ms = 1000;
+  SimReplyPort port(radio, config.node, config.link_epoch);
   MeshNode node(config, radio, security, observer);
+  CHECK_OK(node.set_reply_peer_port(&port));
   CHECK_OK(node.start(0));
 
   // Scripted driver-level rejection is returned immediately and recorded.
@@ -890,10 +893,14 @@ void test_control_object_kind_revocation_set() {
   CHECK_OK(autonomy::control_object_decode(enc.view(), decoded));
   CHECK(static_cast<std::uint8_t>(decoded.kind) == 6);
   CHECK(decoded.total_len == 616);
-  // Kinds 4 and 5 are still refused.
+  // Config recovery and trust share the carrier with revocation.
   raw[2] = 4;
-  CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK(manifest.kind == autonomy::ControlObjectKind::ConfigRecovery);
   raw[2] = 5;
+  CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK(manifest.kind == autonomy::ControlObjectKind::TrustManifest);
+  raw[2] = 7;
   CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
 }
 

@@ -191,8 +191,13 @@ struct RadioRxMetadataV2 {
   // metadata is stale evidence that must not refresh telemetry or
   // connectivity oracles.
   bool identity_current{true};
+  // Owner-captured binding id, fixed at RX enqueue next to the generation
+  // above (issue #117): delivery admission matches the full (id, generation)
+  // key, never the generation alone. Appended last so existing
+  // field-by-field construction keeps working.
+  BindingId binding{kInvalidBindingId};
 };
-static_assert(sizeof(RadioRxMetadataV2) <= 32, "bounded RX metadata");
+static_assert(sizeof(RadioRxMetadataV2) <= 48, "bounded RX metadata");
 
 // One submitted TX attempt's completion evidence (02-telemetry §2.3). The
 // Owner stamps submitted_us at driver acceptance and completed_us in the

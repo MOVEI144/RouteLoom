@@ -30,6 +30,7 @@ using routeloom_test::FaultyTrustStorage;
 using routeloom_test::TestKeyPair;
 using routeloom_test::cbor_put_bstr;
 using routeloom_test::sign_digest_low_s;
+using routeloom_test::kTrustSealCommittedWire;
 using routeloom_test::test_image;
 using routeloom_test::test_key_record;
 using routeloom_test::test_keypair;
@@ -536,7 +537,20 @@ void test_view_quarantine_fails_closed() {
 
 void test_view_uncertain_fails_closed() {
   FaultyTrustStorage storage;
-  fill_both_slots(storage, 2);
+  {
+    // A new/old split: the older committed image survives in slot 0
+    // while slot 1 carries a damaged-but-committed newer record (the
+    // shape an interrupted twin commit leaves behind).
+    TrustStore store(storage);
+    CHECK_OK(store.initialize());
+    CHECK_OK(store.commit_image(single_key_image(1, 1, 1, kAuth1.pub,
+                                                 TrustKeyStatus::Active)));
+    ByteBuffer<kTrustStoreSlotBytes> record{};
+    CHECK_OK(trust_image_encode(
+        single_key_image(2, 1, 2, kAuth2.pub, TrustKeyStatus::Active),
+        kTrustSealCommittedWire, record));
+    CHECK_OK(storage.write(1, record.view()));
+  }
   // The NEWER slot is damaged-but-committed: the surviving image is a
   // "known value" whose sibling may have carried a revocation or floor
   // advance — epoch_floor 2 proves the active epoch-1 image is stale.
@@ -562,7 +576,7 @@ void test_view_uncertain_fails_closed() {
 
 // --- Deployment pin (§4.4 "the required key resolves") -----------------------------
 
-void test_view_require_key() {
+void test_view_require_authority() {
   FaultyTrustStorage storage;
   TrustStore store(storage);
   CHECK_OK(store.initialize());
@@ -571,11 +585,17 @@ void test_view_require_key() {
   TrustView view(store);
   CHECK(view.ready());  // unpinned: some active key resolves
 
+  // The pin names an authority, never a generation: it is satisfied while
+  // ANY active key of that authority resolves at/above the floor.
   TrustView pinned(store);
-  pinned.require_key(kAuthorityId, 2);
-  CHECK(!pinned.ready());  // required record absent entirely
+  pinned.require_authority(kAuthorityId);
+  CHECK(pinned.ready());  // gen-1 key active
+  TrustView foreign(store);
+  foreign.require_authority(kAuthorityId + 1);
+  CHECK(!foreign.ready());  // no key of that authority at all
 
-  // Staged does not satisfy the pin.
+  // Rotation keeps the pinned authority ready across generations: the
+  // gen-2 activation below satisfies the same pin without re-pinning.
   TrustImage staged = view_image(2, 1);
   staged.keys[0] =
       test_key_record(kAuthorityId, 1, kAuth1.pub, TrustKeyStatus::Active);
@@ -583,23 +603,25 @@ void test_view_require_key() {
       test_key_record(kAuthorityId, 2, kAuth2.pub, TrustKeyStatus::Staged);
   staged.key_count = 2;
   CHECK_OK(store.commit_image(staged));
-  CHECK(!pinned.ready());
-
-  // Activation does — and the pin narrows readiness only, never policy.
+  CHECK(pinned.ready());  // gen-1 still active
   TrustImage active = view_image(3, 1);
   active.keys[0] =
-      test_key_record(kAuthorityId, 1, kAuth1.pub, TrustKeyStatus::Active);
+      test_key_record(kAuthorityId, 1, kAuth1.pub, TrustKeyStatus::Retired);
   active.keys[1] =
       test_key_record(kAuthorityId, 2, kAuth2.pub, TrustKeyStatus::Active);
   active.key_count = 2;
   CHECK_OK(store.commit_image(active));
-  CHECK(pinned.ready());
-  ByteBuffer<kCosePermitMax> permit{};
-  CHECK_OK(make_permit(make_command(1), kAuth1.priv, permit));
-  endpoint::EncodedConfigCommand payload{};
-  bool verified = false;
-  CHECK_OK(pinned.verify_permit(context(), permit.view(), payload, verified));
-  CHECK(verified);  // gen-1 permits still verify under a gen-2 pin
+  CHECK(pinned.ready());  // served by gen-2 now, same pin
+  // Retiring the last active key of the authority un-readies the view.
+  TrustImage dark = view_image(4, 1);
+  dark.keys[0] =
+      test_key_record(kAuthorityId, 1, kAuth1.pub, TrustKeyStatus::Retired);
+  dark.keys[1] =
+      test_key_record(kAuthorityId, 2, kAuth2.pub, TrustKeyStatus::Retired);
+  dark.key_count = 2;
+  CHECK_OK(store.commit_image(dark));
+  CHECK(!pinned.ready());
+  CHECK(!view.ready());  // unpinned too: no active key anywhere
 }
 
 }  // namespace
@@ -614,7 +636,7 @@ int main() {
   test_view_credential_revocation();
   test_view_quarantine_fails_closed();
   test_view_uncertain_fails_closed();
-  test_view_require_key();
+  test_view_require_authority();
   if (failures != 0) {
     std::fprintf(stderr, "%d trust-view checks failed\n", failures);
     return 1;

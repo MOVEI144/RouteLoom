@@ -193,6 +193,8 @@ struct CoordinatorSnapshot {
   std::uint32_t link_sessions{0};
   std::uint32_t end_sessions{0};
   std::uint32_t demands{0};
+  std::uint16_t resume_link_slots{0};
+  std::uint16_t resume_end_slots{0};
 };
 
 struct CoordinatorCounters {

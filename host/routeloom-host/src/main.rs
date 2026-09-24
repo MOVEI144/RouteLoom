@@ -725,6 +725,14 @@ struct State {
     /// the target's DevConfigAuthorityVerifier must derive from the same
     /// master — SHA256("RouteLoom/config-dev/v1" || master) on both sides.
     config_dev_key: Vec<u8>,
+    /// The issuance profile the lane signs under (--config-profile):
+    /// ISSUE_PROFILE_DEV (0) or ISSUE_PROFILE_COSE (1). Reported by
+    /// capabilities.get; the lane refuses when the profile's key is absent.
+    config_profile: u8,
+    /// COSE authority key file (--config-authority-key): the development
+    /// `routeloom-config-authority-key-v1` document the lane loads when
+    /// the COSE profile is selected. Required iff profile is COSE.
+    config_authority_key: Option<PathBuf>,
     /// This daemon run's incarnation id, minted at startup — bound into
     /// every HOST_REGISTER so a restarted daemon is provably a different
     /// host boot to the device (05 §5.6).
@@ -2032,6 +2040,7 @@ fn serve_client(
                 group_ops: &state.group_ops,
                 site: state.site.as_deref(),
                 config_authority: state.config_authority,
+                config_profile: state.config_profile,
                 link: api1::LinkStatus {
                     configured: state.device.is_some(),
                     connected: state.connected.load(Ordering::Relaxed),
@@ -2221,6 +2230,8 @@ struct DaemonArgs {
     config_authority: Option<u64>,
     config_authority_generation: u32,
     config_dev_key: Vec<u8>,
+    config_profile: u8,
+    config_authority_key: Option<PathBuf>,
     site_authority: Option<PathBuf>,
 }
 
@@ -2260,6 +2271,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     let mut config_authority = None;
     let mut config_authority_generation = 1;
     let mut config_dev_key_hex = DEFAULT_CONFIG_DEV_KEY_HEX.to_string();
+    let mut config_profile = config::ISSUE_PROFILE_DEV;
+    let mut config_authority_key = None;
     let mut site_authority = None;
     let mut args = args;
     while let Some(argument) = args.next() {
@@ -2309,6 +2322,28 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
                     .next()
                     .ok_or("--config-dev-key-hex requires a hex key")?;
             }
+            // Issuance profile: `dev` (HMAC under the dev master) or
+            // `cose` (RLCP1_COSE_ESP256 under --config-authority-key).
+            // The COSE key's authority id must equal --config-authority.
+            "--config-profile" => {
+                let text = args.next().ok_or("--config-profile requires dev|cose")?;
+                config_profile = match text.as_str() {
+                    "dev" => config::ISSUE_PROFILE_DEV,
+                    "cose" => config::ISSUE_PROFILE_COSE,
+                    _ => return Err("--config-profile must be dev or cose".to_string()),
+                };
+            }
+            // COSE authority key file (development
+            // `routeloom-config-authority-key-v1` document — see
+            // `routeloomctl provision-authority-keygen`). Required iff
+            // --config-profile=cose; refused otherwise (a key the
+            // selected profile would never consult must not linger).
+            "--config-authority-key" => {
+                config_authority_key = Some(PathBuf::from(
+                    args.next()
+                        .ok_or("--config-authority-key requires a path")?,
+                ));
+            }
             // SDK v1 Site Authority directory (site-authority.json, sak.key,
             // site.db — site::config). Absent = no Site Authority: the
             // site methods answer SITE_AUTHORITY_UNAVAILABLE.
@@ -2319,7 +2354,7 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
             }
             "--help" | "-h" => {
                 println!(
-                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--site-authority DIR]"
+                    "routeloom-host [--socket PATH] [--device TTY] [--api-acl-file PATH] [--op-store PATH] [--config-authority HEX] [--config-authority-generation N] [--config-dev-key-hex HEX] [--config-profile dev|cose] [--config-authority-key PATH] [--site-authority DIR]"
                 );
                 process::exit(0);
             }
@@ -2335,6 +2370,15 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
     if config_authority_generation == 0 {
         return Err("--config-authority-generation must be >= 1".to_string());
     }
+    // The COSE profile without its key would refuse every issuance at
+    // runtime; the dev profile with a key file would silently ignore the
+    // file — both are arg errors, not runtime mysteries.
+    if config_profile == config::ISSUE_PROFILE_COSE && config_authority_key.is_none() {
+        return Err("--config-profile=cose requires --config-authority-key".to_string());
+    }
+    if config_profile != config::ISSUE_PROFILE_COSE && config_authority_key.is_some() {
+        return Err("--config-authority-key requires --config-profile=cose".to_string());
+    }
     Ok(DaemonArgs {
         socket,
         device,
@@ -2343,6 +2387,8 @@ fn parse_args_from(args: impl Iterator<Item = String>) -> Result<DaemonArgs, Str
         config_authority,
         config_authority_generation,
         config_dev_key: parse_dev_key_hex(&config_dev_key_hex, "--config-dev-key-hex")?,
+        config_profile,
+        config_authority_key,
         site_authority,
     })
 }
@@ -2529,12 +2575,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config_authority: args.config_authority,
         config_authority_generation: args.config_authority_generation,
         config_dev_key: args.config_dev_key,
+        config_profile: args.config_profile,
+        config_authority_key: args.config_authority_key.clone(),
         ..State::default()
     });
+    // Fail fast on an unloadable COSE key: the lane would otherwise refuse
+    // every issuance at runtime with the cause buried in a dispatch log.
+    if args.config_profile == config::ISSUE_PROFILE_COSE {
+        let path = args.config_authority_key.as_ref().expect("arg-validated");
+        match routeloom_provision::signer::FileAuthoritySigner::load(path) {
+            Ok(signer) => {
+                if Some(signer.authority_id()) != args.config_authority {
+                    eprintln!(
+                        "config authority key {} names authority {:016x}, not the configured {:016x}",
+                        path.display(),
+                        signer.authority_id(),
+                        args.config_authority.unwrap_or(0)
+                    );
+                    process::exit(1);
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "cannot load config authority key {}: {error}",
+                    path.display()
+                );
+                process::exit(1);
+            }
+        }
+    }
     if let Some(authority) = args.config_authority {
+        let profile = if args.config_profile == config::ISSUE_PROFILE_COSE {
+            "cose-esp256"
+        } else {
+            "dev-hmac"
+        };
         eprintln!(
-            "config authority: node {:016x} generation {} (dev permit profile — EXPERIMENTAL, not a production identity)",
-            authority, args.config_authority_generation
+            "config authority: node {authority:016x} generation {} (permit profile {profile} — EXPERIMENTAL, not a production identity)",
+            args.config_authority_generation
         );
     } else {
         eprintln!("config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)");
@@ -3754,6 +3832,32 @@ mod tests {
             ["--config-authority-generation".to_string(), "0".to_string()].into_iter()
         )
         .is_err());
+    }
+
+    #[test]
+    fn config_profile_and_key_are_jointly_validated() {
+        let args = |flags: &[&str]| parse_args_from(flags.iter().map(|s| s.to_string()));
+        // Default is the dev profile with no key file.
+        let parsed = args(&[]).unwrap();
+        assert_eq!(parsed.config_profile, config::ISSUE_PROFILE_DEV);
+        assert!(parsed.config_authority_key.is_none());
+        // COSE selects the profile and keeps the key path.
+        let parsed = args(&[
+            "--config-profile",
+            "cose",
+            "--config-authority-key",
+            "/tmp/a.key",
+        ])
+        .unwrap();
+        assert_eq!(parsed.config_profile, config::ISSUE_PROFILE_COSE);
+        assert_eq!(
+            parsed.config_authority_key,
+            Some(std::path::PathBuf::from("/tmp/a.key"))
+        );
+        // Unknown profile, keyless COSE, and key-with-dev all refuse.
+        assert!(args(&["--config-profile", "psk"]).is_err());
+        assert!(args(&["--config-profile", "cose"]).is_err());
+        assert!(args(&["--config-authority-key", "/tmp/a.key"]).is_err());
     }
 
     /// node_status_v1 wiring: the lane queues a sealed 0x40 query on the

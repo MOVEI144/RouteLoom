@@ -1339,6 +1339,33 @@ void test_revocation_power_cuts() {
   }
 }
 
+void test_revocation_clear_power_cuts() {
+  const MemoVerifier verifier;
+  const auto object = revocation_object(revocation_set(14, 2));
+  ByteBuffer<kRevocationSlotBytes> cleared{};
+  CHECK_OK(revocation_record_encode(ByteView{}, kRevocationSealCommitted, 2, cleared));
+  for (std::size_t call = 0; call < 4; ++call) {
+    for (std::size_t boundary = 0; boundary <= cleared.size; ++boundary) {
+      FaultyRecordStorage storage(kRevocationSlotBytes);
+      RevocationStore store(storage);
+      CHECK_OK(store.initialize());
+      CHECK_OK(store.accept(object.view(), sak().pub, kSiteId, kNetwork, verifier));
+      storage.cut_call = storage.write_calls + call;
+      storage.cut_bytes = boundary;
+      CHECK(store.clear().code == StatusCode::StorageFailure);
+      storage.disarm();
+      RevocationStore reboot(storage);
+      (void)reboot.initialize();
+      CHECK(!reboot.has_set() || reboot.rs_epoch() == 14);
+      CHECK_OK(reboot.clear());
+      RevocationStore finished(storage);
+      CHECK_OK(finished.initialize());
+      CHECK(finished.clean_empty());
+      CHECK(storage.slot(0) == storage.slot(1));
+    }
+  }
+}
+
 // --- ResumeCache -----------------------------------------------------------------
 
 ResumeContext context(const std::uint32_t gk_epoch = 203, const RevocationSet* rrs = nullptr) {
@@ -1594,6 +1621,45 @@ void test_resume2_find_by_id() {
   other.network = kNetwork + 1;
   CHECK(cache.find_by_id(ResumePurpose::Link, rid, kInvalidNodeId, other, out, index).code ==
         StatusCode::NotFound);
+}
+
+void test_resume2_incremental_lookup() {
+  FaultyResumeStorage2 storage(160);
+  ResumeCache2 cache(storage, 32, 128);
+  ResumeSlot2 slot = resume2_slot(200, 0, 7, 203, ResumePurpose::End);
+  std::array<std::uint8_t, kResume2SlotBytes> encoded{};
+  CHECK_OK(resume2_slot_encode(slot, encoded));
+  storage.slot(159) = encoded;
+  ResumeCache2::LookupCursor cursor{};
+  bool done = false;
+  for (int step = 0; step < 8; ++step) {
+    const std::size_t before = storage.read_calls;
+    CHECK_OK(cache.find_by_peer_step(ResumePurpose::End, 200, context(), cursor, done));
+    CHECK(storage.read_calls - before <= ResumeCache2::kLookupStepSlots);
+    if (step < 7) CHECK(!done);
+  }
+  CHECK(done && cursor.found && cursor.index == 159);
+  CHECK(cursor.match.rms == slot.rms);
+  routeloom::keys::ResumeId rid{};
+  routeloom::keys::resume_id(slot.rms, routeloom::keys::Purpose::End, rid);
+  cursor = ResumeCache2::LookupCursor{};
+  done = false;
+  for (int step = 0; step < 8; ++step) {
+    const std::size_t before = storage.read_calls;
+    CHECK_OK(cache.find_by_id_step(ResumePurpose::End, rid, kInvalidNodeId,
+                                    context(), cursor, done));
+    CHECK(storage.read_calls - before <= ResumeCache2::kLookupStepSlots);
+    if (step < 7) CHECK(!done);
+  }
+  CHECK(done && cursor.found && !cursor.ambiguous && cursor.index == 159);
+  storage.slot(158) = encoded;
+  cursor = ResumeCache2::LookupCursor{};
+  done = false;
+  while (!done) {
+    CHECK_OK(cache.find_by_id_step(ResumePurpose::End, rid, kInvalidNodeId,
+                                    context(), cursor, done));
+  }
+  CHECK(cursor.ambiguous && !cursor.match.valid);
 }
 
 void test_resume2_uses() {
@@ -1920,11 +1986,13 @@ int main() {
   test_revocation_accept();
   test_revocation_entry_monotonicity();
   test_revocation_power_cuts();
+  test_revocation_clear_power_cuts();
   test_resume_cache_rules();
   test_resume_touch_wear_rule();
   test_resume_power_cuts();
   test_resume2_cache_rules();
   test_resume2_find_by_id();
+  test_resume2_incremental_lookup();
   test_resume2_uses();
   test_resume2_power_cuts();
   test_local_revocation_basic();

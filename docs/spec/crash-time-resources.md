@@ -73,11 +73,11 @@ APPLIED provider failoverは既定false。変更を許すのはshared idempotenc
 
 ## 5. 受理前の一括予約
 
-認証済み候補DATAについて、frame・dedup・transaction・reply Peer lease・ACK queue slotを固定順で予約し、全成功時だけ受理とする。一つでも失敗したら全予約を戻し、HOP_ACCEPT・アプリdispatch・forwardを行わない。待ちながら一部だけ保持する方式は使わない。
+認証済み候補DATAについて、frame・dedup・transaction・reply Peer lease・ACK queue slotを固定順で予約し、全成功時だけ受理とする。一つでも失敗したら全予約を戻し、HOP_ACCEPT・アプリdispatch・forwardを行わない。待ちながら一部だけ保持する方式は使わない。終端DATAではEND_RECEIPTのTX枠もアプリdispatch前に確保する。返信経路がまだ無い場合も枠を確保し、dispatch時の再確認で経路が無ければ仕事を終結する。送信元の有限retryと終端dedupが後続roundを扱う。
 
 物理Wi-Fi callbackの受信bufferはまだSDK配送受理ではない。未認証frameはcheap parse→global ingress quota→cookie/transaction→bounded assembly→暗号確認→member admissionの順。cookieだけでは機器認証ではない。
 
-Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transactionで追加保護されるPeerを含めnonbroadcast19を越えない。reply lease同時3、link transaction寿命1500msを初期上限とする（CORE_FIXED_250実装では未実装：`PeerLeasePurpose::ExpectedReply`は宣言のみで、reply lease数とtransaction寿命は強制されていない。issue #117）。ただし物理TX不明中のPeerをtimeoutだけで削除しない。TX隔離・driver停止の安全確認が先。
+Peerはbroadcast1＋regular16＋transient3。regular pin最大12、transactionで追加保護されるPeerを含めnonbroadcast19を越えない。Owner全体でreply binding entryは同時3、useと受理transactionは各8、transaction寿命は受理時から最大1500ms（frame自身の残予算が短ければそちらを優先）。同じbindingの複数useはentryを共有する。期限時は仕事を終結してからuseを解放し、Stale中も予約済み返信とdriver登録を保持する。rebind・revokeでは旧bindingの新規送信を拒む。ただし物理TX不明中のPeerをtimeoutだけで削除しない。TX隔離・driver停止の安全確認が先。
 
 予約不能なら通常はBUSYを返すが、reply容量自体が無ければBUSY送信も保証しない。drop理由をローカル記録し、相手側は既存の有限retryで回復する。全接続へbroadcast BUSYを散布しない。
 
@@ -111,4 +111,3 @@ flash書込予算（開発PSK Provider既定値。contextはscope・peer pair・
 | remote config | 受理1件 | 約7〜8回（rate上限1/min＋burst1） |
 
 概算：持続10 frame/sを受ける終端nodeは旧20 commit/sから約0.31 commit/s、中継nodeは旧約10 commit/sから約0.19 commit/s（RX link 1/65＋TX link 1/256）。数値は既定値からの計算で、実機のNVS page消費は未計測。
-

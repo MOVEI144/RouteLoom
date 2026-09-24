@@ -70,6 +70,7 @@ pub enum JoinEad {
     /// Authority writes it), the DevCert in EAD_3 (the Site Authority reads
     /// it before authenticating the device).
     Credential = 65541,
+    LastMembership = 65542,
 }
 
 impl JoinEad {
@@ -83,6 +84,7 @@ impl JoinEad {
             Self::Request => size == JOIN_REQUEST_SIZE,
             Self::Result => (JOIN_RESULT_HEAD_SIZE..=JOIN_RESULT_MAX).contains(&size),
             Self::Credential => (1..=CERT_MAX).contains(&size),
+            Self::LastMembership => size == LAST_MEMBERSHIP_SIZE,
         }
     }
 }
@@ -164,7 +166,39 @@ pub fn join_site_hint(site_id: u64) -> u32 {
 pub const JOIN_INTENT_SIZE: usize = 12;
 pub const JOIN_PROFILE_RLJOIN1: u32 = 1 << 0;
 pub const JOIN_PROFILE_RLRES1: u32 = 1 << 1;
-pub const JOIN_PROFILE_MASK: u32 = 0x3;
+pub const JOIN_PROFILE_MEMBERSHIP_RECOVERY: u32 = 1 << 2;
+pub const JOIN_PROFILE_MASK: u32 = 0x7;
+pub const LAST_MEMBERSHIP_SIZE: usize = 12;
+
+/// Network retained in RLS1, not the Host's current epoch: binds old Notices.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LastMembership(pub u64);
+
+impl LastMembership {
+    pub fn encode(self) -> Result<[u8; LAST_MEMBERSHIP_SIZE]> {
+        if self.0 == 0 || self.0 == u64::MAX {
+            return malformed("last network");
+        }
+        let mut out = [0; LAST_MEMBERSHIP_SIZE];
+        out[0] = JOIN_EAD_VERSION;
+        out[4..12].copy_from_slice(&self.0.to_be_bytes());
+        Ok(out)
+    }
+
+    pub fn decode(value: &[u8]) -> Result<Self> {
+        if value.len() != LAST_MEMBERSHIP_SIZE
+            || value[0] != JOIN_EAD_VERSION
+            || value[1..4] != [0; 3]
+        {
+            return malformed("last membership");
+        }
+        let network = u64::from_be_bytes(value[4..12].try_into().expect("length checked"));
+        if network == 0 || network == u64::MAX {
+            return malformed("last network");
+        }
+        Ok(Self(network))
+    }
+}
 
 /// EAD_1 (plaintext): `ver | flags | org_hint u32 | profile_bits u32 | reserved u16`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,7 +355,9 @@ pub const JOIN_REQUEST_SIZE: usize = 26;
 pub const JOIN_CAPABILITY_SLEEPY: u32 = 1 << 0;
 pub const JOIN_CAPABILITY_RELAY: u32 = 1 << 1;
 pub const JOIN_CAPABILITY_GATEWAY: u32 = 1 << 2;
-pub const JOIN_CAPABILITY_MASK: u32 = 0x7;
+pub const JOIN_CAPABILITY_RRS_GOSSIP_V1: u32 = 1 << 3;
+pub const JOIN_CAPABILITY_MEMBERSHIP_LIFECYCLE_V1: u32 = 1 << 4;
+pub const JOIN_CAPABILITY_MASK: u32 = 0x1f;
 
 /// EAD_3: `ver | flags | model u16 | fw_version u32 | capability u32 |
 /// requested_role u8 | reserved u8 | last_site_id u64 | last_generation u32`.
@@ -1206,6 +1242,32 @@ pub fn join_credential_check(cert: &[u8], cert_type: CertType, kid: &[u8]) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retained_network_is_exact_and_profile_is_explicit() {
+        assert_eq!(JOIN_CAPABILITY_RRS_GOSSIP_V1, 1 << 3);
+        assert_eq!(JOIN_CAPABILITY_MEMBERSHIP_LIFECYCLE_V1, 1 << 4);
+        let network = LastMembership(0x0000_0003_0a1b_2c3d);
+        let bytes = network.encode().unwrap();
+        assert_eq!(LastMembership::decode(&bytes).unwrap(), network);
+        for index in [0, 1, 2, 3, 4, 11] {
+            let mut bad = bytes;
+            bad[index] ^= 1;
+            if index >= 4 {
+                assert_ne!(LastMembership::decode(&bad).unwrap(), network);
+            } else {
+                assert!(LastMembership::decode(&bad).is_err());
+            }
+        }
+        assert!(LastMembership::decode(&bytes[..11]).is_err());
+        assert!(LastMembership(0).encode().is_err());
+        assert!(JoinIntent {
+            org_hint: 1,
+            profile_bits: JOIN_PROFILE_RLJOIN1 | JOIN_PROFILE_MEMBERSHIP_RECOVERY
+        }
+        .validate()
+        .is_ok());
+    }
 
     #[test]
     fn credential_item_and_dams_context_shapes() {

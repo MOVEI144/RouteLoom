@@ -1,0 +1,18 @@
+{
+  "boot_witness": 512,
+  "codec": "rlx1_record",
+  "commit_seq": 7,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-golden-v1",
+  "generation": 3,
+  "gk_floor": 203,
+  "mode": 3,
+  "name": "rlx1_unassigned_ready",
+  "old_network": 13054454845,
+  "payload_hex": "",
+  "record_hex": "524c583100010058000000014c583101000000070300000000a10000000012345173000000000042000000030a1b2c3d0000000000000000000000030000000e000000cb00000200000000000000000000000000a89e0406",
+  "rs_floor": 14,
+  "self_node": 45317471250420276,
+  "signer_pubkey_hex": "d797737d4081542dfe111a9a6cba6a52e91118f27a814f8e831e8f72d5165f9308da9652224eaf39f459098b545d520900d372da6e73cf33c4032a8264e7bae4",
+  "site_id": 5869034739393888322
+}

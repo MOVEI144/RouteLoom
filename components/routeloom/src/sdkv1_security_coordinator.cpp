@@ -53,7 +53,11 @@ SecurityCoordinator::MemberEngine::MemberEngine(
     HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
     EntropySource& entropy, ZtRld1Port& rld1, ZtRelayPort& relay, JoinCookieSealer& sealer,
     const JoinProxyConfig& proxy_config, const JoinRelayGatewayConfig& gateway_config) noexcept
-    : resume_cache(resume, kResume2NodeLinkQuota, kResume2NodeEndQuota),
+    : resume_cache(resume,
+                   resume.slot_count() == kResume2GatewayLinkQuota + kResume2GatewayEndQuota
+                       ? kResume2GatewayLinkQuota : kResume2NodeLinkQuota,
+                   resume.slot_count() == kResume2GatewayLinkQuota + kResume2GatewayEndQuota
+                       ? kResume2GatewayEndQuota : kResume2NodeEndQuota),
       engine(resume_cache, sink, member_cookie, membership, verifier, &entropy_fill, &entropy),
       demands(bank, engine),
       proxy(proxy_config, rld1, relay, sealer, entropy),
@@ -127,6 +131,9 @@ void SecurityCoordinator::create_member() noexcept {
 
 Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
   if (in_port_) return Status::error(StatusCode::Busy, "coordinator re-entry");
+  if (mode_ != CoordinatorMode::Fresh && event.now < last_now_) {
+    return Status::error(StatusCode::TimeUncertain, "coordinator clock regressed");
+  }
   in_port_ = true;
   last_now_ = event.now;
   Status status = Status::success();
@@ -186,6 +193,8 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   }
   if (mode_ == CoordinatorMode::Member) {
     out.engine_quiescent = member().engine.quiescent();
+    out.resume_link_slots = static_cast<std::uint16_t>(member().resume_cache.link_quota());
+    out.resume_end_slots = static_cast<std::uint16_t>(member().resume_cache.end_quota());
   }
   out.link_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::Link));
   out.end_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::EndToEnd));
@@ -545,11 +554,7 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   // New exchange. A member-mode Auth single frame with a parked
   // responder start (same peer MAC) binds to it; anything else follows
   // the mode default: ZT Joiner while unprovisioned, proxy admission
-  // while member. Replies never open an exchange.
-  if (env.kind == FrameType::BootstrapReply) {
-    sat_inc(counters_.demux_drops);
-    return Status::success();
-  }
+  // while member.
   if (mode_ == CoordinatorMode::Member) {
     for (auto& entry : member().demux) {
       if (entry.used && entry.owner == DemuxOwner::Member && entry.has_start &&
@@ -561,12 +566,11 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
         return demux_member_frame(env, &entry, event.now);
       }
     }
-    // Proxy admission is stateless-cookie-checked inside the proxy; claim
-    // the demux leg so the exchange routes stably, and let the proxy's
-    // own gates drop what is not for it.
-    DemuxEntry* proxy_entry =
-        claim_demux(event.rld1_meta.source, object_id, DemuxOwner::Proxy, event.now);
-    if (proxy_entry == nullptr) {
+    // The proxy owns one bounded exchange and verifies the OFFER cookie
+    // before admitting it. Unknown pre-cookie frames must not occupy the
+    // member demux table, or a small flood could block real handshakes.
+    if (env.kind == FrameType::BootstrapReply &&
+        member().proxy.state() != JoinProxy::State::Relaying) {
       sat_inc(counters_.demux_drops);
       return Status::success();
     }
@@ -575,6 +579,10 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
         rssi < -128 ? -128 : (rssi > 127 ? 127 : static_cast<std::int8_t>(rssi));
     member().proxy.on_rld1_rx(event.rld1_meta.source, event.rld1_meta.destination, rssi8,
                       event.rld1_frame, event.now);
+    return Status::success();
+  }
+  if (env.kind == FrameType::BootstrapReply) {
+    sat_inc(counters_.demux_drops);
     return Status::success();
   }
   DemuxEntry* joiner_entry =
@@ -762,7 +770,9 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     HandshakeResult result{};
     if (!member().engine.take_result(result).ok()) break;
     if (result.event == HandshakeEvent::Send) {
-      (void)emit_send(result, now);
+      if (emit_send(result, now).ok()) {
+        (void)member().engine.accept_send(result.token, result.phase, result.step);
+      }
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
       (void)installed_link(result, now);
@@ -881,15 +891,20 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
   // Emit the unconfirmed chunks now; replies advance the slot via
   // demux_member_frame, and the engine's retransmit re-drives the rest.
   const std::uint16_t pending = slot.pending_mask();
+  bool accepted = true;
   for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
     JoinChunk chunk{};
-    if (!slot.chunk_at(i, chunk).ok()) break;
+    if (!slot.chunk_at(i, chunk).ok()) {
+      accepted = false;
+      break;
+    }
     std::array<std::uint8_t, autonomy::kRld1MaxBody> body{};
     std::size_t written = 0;
     if (!join_chunk_encode(JoinCarrier::Rld1, chunk,
                            MutableByteView{body.data(), body.size()}, written)
              .ok()) {
+      accepted = false;
       break;
     }
     autonomy::Rld1Envelope env{};
@@ -897,15 +912,22 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
     env.network_hint = static_cast<std::uint32_t>(adopted_.network);
     env.claimed_node = adopted_.node;
     env.transaction_nonce = leg->txn;
-    if (written > env.body.size()) break;
+    if (written > env.body.size()) {
+      accepted = false;
+      break;
+    }
     std::memcpy(env.body.data(), body.data(), written);
     env.body_size = written;
     autonomy::Rld1Encoded frame{};
-    if (!autonomy::rld1_encode(env, frame).ok()) break;
-    (void)deps_.rld1->send_rld1(leg->mac, frame.view());
+    if (!autonomy::rld1_encode(env, frame).ok()) {
+      accepted = false;
+      break;
+    }
+    if (!deps_.rld1->send_rld1(leg->mac, frame.view()).ok()) accepted = false;
   }
   slot.note_sent(now);
-  return Status::success();
+  return accepted ? Status::success()
+                  : Status::error(StatusCode::NoCapacity, "link transport full");
 }
 
 Status SecurityCoordinator::installed_link(const HandshakeResult& result,
@@ -931,8 +953,10 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
   // End objects ride the mesh bootstrap lane: a single type-3 frame when
   // the envelope fits, else end-lane chunks (id = exchange id) with
   // type-6 replies. Type 4 never carries an end object.
-  std::uint32_t exchange = result.token;
-  if (exchange == 0) exchange = 1;  // nonzero: 0 is never a valid exchange
+  const std::uint32_t exchange = result.exchange_id;
+  if (exchange == 0) {
+    return Status::error(StatusCode::ProtocolError, "end exchange id missing");
+  }
   EndObject object{};
   object.phase = static_cast<JoinAuthPhase>(result.phase);
   object.step = result.step;
@@ -963,23 +987,31 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
     return Status::error(StatusCode::ProtocolError, "end tx load");
   }
   const std::uint16_t pending = slot.pending_mask();
+  bool accepted = true;
   for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
     JoinChunk chunk{};
-    if (!slot.chunk_at(i, chunk).ok()) break;
+    if (!slot.chunk_at(i, chunk).ok()) {
+      accepted = false;
+      break;
+    }
     std::array<std::uint8_t, kMaxApplicationPayload> body{};
     std::size_t written = 0;
     if (!join_chunk_encode(JoinCarrier::WireRelay, chunk,
                            MutableByteView{body.data(), body.size()}, written)
              .ok()) {
+      accepted = false;
       break;
     }
-    (void)deps_.mesh->send_bootstrap(result.peer, FrameType::BootstrapChunk,
-                                     ByteView{body.data(), written},
-                                     HandshakeEngine::kLinkTimeoutMs, now, id);
+    if (!deps_.mesh->send_bootstrap(result.peer, FrameType::BootstrapChunk,
+                                    ByteView{body.data(), written},
+                                    HandshakeEngine::kLinkTimeoutMs, now, id).ok()) {
+      accepted = false;
+    }
   }
   slot.note_sent(now);
-  return Status::success();
+  return accepted ? Status::success()
+                  : Status::error(StatusCode::NoCapacity, "end transport full");
 }
 
 Status SecurityCoordinator::on_frame(const BootstrapMeta& meta, const FrameType type,

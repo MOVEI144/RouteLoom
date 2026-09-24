@@ -529,7 +529,22 @@ bool HandshakeEngine::find_slot(const rlres1::Purpose purpose, const rlres1::Res
   std::size_t index = 0;
   const ResumePurpose resume_purpose =
       purpose == keys::Purpose::End ? ResumePurpose::End : ResumePurpose::Link;
-  if (!cache_.find_by_id(resume_purpose, rid, kInvalidNodeId, context, found, index).ok()) {
+  if (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
+      cache_.end_quota() > ResumeCache2::kLookupStepSlots) {
+    if (lookup_.kind != ResumeLookupWork::Kind::R1 || !lookup_.ready ||
+        lookup_.rid != rid || !lookup_.cursor.found || lookup_.cursor.ambiguous) {
+      return false;
+    }
+    index = lookup_.cursor.index;
+    bool intact = false;
+    if (!cache_.read_at(index, found, intact).ok() || !intact || !found.valid ||
+        found.purpose != resume_purpose || !cache_.usable(found, context)) {
+      return false;
+    }
+    keys::ResumeId current_rid{};
+    keys::resume_id(found.rms, purpose, current_rid);
+    if (current_rid != rid) return false;
+  } else if (!cache_.find_by_id(resume_purpose, rid, kInvalidNodeId, context, found, index).ok()) {
     return false;
   }
   // The slot must belong to OUR current credential: a stale cache from a
@@ -576,14 +591,31 @@ bool HandshakeEngine::reserve_resume_use(const rlres1::Purpose purpose,
   context.network = local_.network;
   context.gk_epoch = local_.gk_epoch;
   context.revocations = nullptr;
-  ResumeSlot2 found{};
   std::size_t index = 0;
-  const ResumePurpose resume_purpose =
-      purpose == keys::Purpose::End ? ResumePurpose::End : ResumePurpose::Link;
-  if (!cache_.find_by_id(resume_purpose, rid, kInvalidNodeId, context, found, index).ok()) {
-    return false;
+  if (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
+      cache_.end_quota() > ResumeCache2::kLookupStepSlots) {
+    if (lookup_.kind != ResumeLookupWork::Kind::R1 || !lookup_.ready ||
+        lookup_.rid != rid || !resume_lookup_.valid) {
+      return false;
+    }
+    index = resume_lookup_.slot_index;
+    ResumeSlot2 current{};
+    bool intact = false;
+    ScopeDigest identity{};
+    if (!cache_.read_at(index, current, intact).ok() || !intact ||
+        !resume_slot_identity(current, identity).ok() ||
+        identity != resume_lookup_.identity || current.local_cert_id != local_.local_cert_id) {
+      return false;
+    }
+  } else {
+    ResumeSlot2 found{};
+    const ResumePurpose resume_purpose =
+        purpose == keys::Purpose::End ? ResumePurpose::End : ResumePurpose::Link;
+    if (!cache_.find_by_id(resume_purpose, rid, kInvalidNodeId, context, found, index).ok() ||
+        found.local_cert_id != local_.local_cert_id) {
+      return false;
+    }
   }
-  if (found.local_cert_id != local_.local_cert_id) return false;
   return cache_.reserve_uses(index, context, local_.boot, false).ok();
 }
 
@@ -650,6 +682,7 @@ HandshakeEngine::CarrierRecord* HandshakeEngine::alloc_record() noexcept {
 }
 
 void HandshakeEngine::drop_record(CarrierRecord& record) noexcept {
+  if (lookup_.token == record.token && record.token != 0) lookup_ = ResumeLookupWork{};
   if (edhoc_flight_.active && edhoc_flight_.owner_token == record.token) end_edhoc_flight();
   if (record.state == RecordState::ResumeWaitR2) {
     rlres1_.abort(rlres1::Role::Initiator, record.peer, to_keys_purpose(record.scope));
@@ -666,6 +699,7 @@ void HandshakeEngine::cancel_all_internal() noexcept {
   end_edhoc_flight();
   rlres1_.clear_all();
   resume_lookup_ = ResumeBinding{};
+  lookup_ = ResumeLookupWork{};
   pending_ = HandshakeResult{};
   has_pending_ = false;
   staged_ = StagedEstablished{};
@@ -684,6 +718,7 @@ Status HandshakeEngine::emit_send(CarrierRecord& record, const std::uint8_t phas
   pending_ = HandshakeResult{};
   pending_.event = HandshakeEvent::Send;
   pending_.token = record.token;
+  pending_.exchange_id = record.exchange_id;
   pending_.scope = record.scope;
   pending_.peer = record.peer;
   pending_.role = record.role;
@@ -854,6 +889,14 @@ Status HandshakeEngine::request(const HandshakeRequest& req, const MonotonicMs n
   // look up and reserve BEFORE the record commits, so a refused request
   // leaves no trace.
   if (req.reason != HandshakeReason::ResumeRetry && resume_offered) {
+    if (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
+        cache_.end_quota() > ResumeCache2::kLookupStepSlots) {
+      CarrierRecord* record = alloc_record();
+      if (record == nullptr) return Status::error(StatusCode::Busy, "handshake table full");
+      *record = seed;
+      record->state = RecordState::ResumeLookupPeer;
+      return Status::success();
+    }
     ResumeContext context{};
     context.network = local_.network;
     context.gk_epoch = local_.gk_epoch;
@@ -1134,7 +1177,8 @@ Status HandshakeEngine::on_message(const HandshakeRx& rx, const ByteView message
       if (rx.step == 1) {
         const RecordState state = candidate.state;
         if (edhoc) {
-          if (state != RecordState::EdhocWaitM3 && state != RecordState::EdhocM4Sent &&
+          if (state != RecordState::EdhocWaitM3 && state != RecordState::EdhocM4Pending &&
+              state != RecordState::EdhocM4Sent &&
               state != RecordState::EdhocM1Parked) {
             continue;
           }
@@ -1207,7 +1251,8 @@ bool HandshakeEngine::step1_may_proceed(const SecurityScope scope, const NodeId 
   if (peer == kInvalidNodeId) return true;  // unknown: duplicates die by hash/nonce
   for (auto& candidate : records_) {
     if (!candidate.used || candidate.scope != scope || candidate.peer != peer) continue;
-    if (candidate.state == RecordState::EdhocM4Sent ||
+    if (candidate.state == RecordState::EdhocM4Pending ||
+        candidate.state == RecordState::EdhocM4Sent ||
         candidate.state == RecordState::ResumeR3Confirm) {
       // Completed: the peer's new step-1 ends our quiet resend duty.
       // (Same-protocol retransmits never reach here — the duplicate
@@ -1355,6 +1400,7 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
         if (candidate.used && candidate.scope == rx.scope &&
             candidate.role == HandshakeRole::Responder && candidate.peer == kInvalidNodeId &&
             (candidate.state == RecordState::EdhocWaitM3 ||
+             candidate.state == RecordState::EdhocM4Pending ||
              candidate.state == RecordState::EdhocM4Sent ||
              candidate.state == RecordState::EdhocM1Parked)) {
           record = &candidate;
@@ -1383,7 +1429,8 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
         return Status::success();  // busy or clobbered: drop
       }
       const std::uint8_t step =
-          record->state == RecordState::EdhocM4Sent ? 4 : 2;
+          (record->state == RecordState::EdhocM4Pending ||
+           record->state == RecordState::EdhocM4Sent) ? 4 : 2;
       return emit_send(*record, 4, step, ByteView{big_tx_.data(), big_tx_size_}, false);
     }
     if (!step1_may_proceed(rx.scope, rx.claimed_peer)) return Status::success();
@@ -1453,7 +1500,8 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
         edhoc_flight_.owner_token != record->token) {
       return Status::success();
     }
-    if (record->state == RecordState::EdhocM4Sent) {
+    if (record->state == RecordState::EdhocM4Pending ||
+        record->state == RecordState::EdhocM4Sent) {
       // Duplicate m3: resend the cached m4, never reinstall.
       ScopeDigest hash{};
       sha256(message, hash);
@@ -1482,25 +1530,14 @@ Status HandshakeEngine::on_edhoc_message(CarrierRecord* record, const HandshakeR
     if (!composed || m4_size == 0 || m4_size > big_tx_.size()) {
       return emit_failed(*record, StatusCode::ProtocolError);
     }
-    // Commit BEFORE the m4 goes out: a refused install sends nothing.
-    const Status committed = edhoc_commit(*record);
-    if (!committed) return emit_failed(*record, map_commit_failure(committed));
-    StagedEstablished responder_done{};
-    responder_done.token = record->token;
-    responder_done.scope = record->scope;
-    responder_done.peer = record->peer;
-    responder_done.role = record->role;
-    responder_done.tx_context_id = pending_commit_tx_;
-    responder_done.rx_context_id = pending_commit_rx_;
-    responder_done.has_proof = pending_commit_proof_.valid();
-    responder_done.proof = pending_commit_proof_;
-    stage_established(responder_done);
     std::memcpy(big_tx_.data(), m4.data(), m4_size);
     big_tx_size_ = m4_size;
     big_tx_owner_ = record->token;
     sha256(message, edhoc_flight_.m3_hash);
     edhoc_flight_.m3_seen = true;
-    record->state = RecordState::EdhocM4Sent;
+    record->state = RecordState::EdhocM4Pending;
+    record->retransmit_at = now + kEdhocRetransmitMs;
+    record->retransmits = 0;
     const Status sent = emit_send(*record, 4, 4, ByteView{m4.data(), m4_size}, false);
     secure_clear(m4);
     return sent;
@@ -1552,6 +1589,7 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
       // Duplicate R1: resend the cached R2 without spending another use.
       // Link/end R1 has no ticket: exactly the 60-byte base form.
       std::uint8_t nonce[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+      if (record->state == RecordState::ResumeLookupR1) return Status::success();
       if (message.size != rlres1::kR1BaseSize || !record->r1_nonce_set ||
           record->last_tx_size == 0 || record->state != RecordState::ResumeWaitR3) {
         return Status::success();
@@ -1577,48 +1615,27 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
       carrier.kind = rlres1::Carrier::Kind::Routed;
       carrier.hops = 0;
     }
-    rlres1::Output out{};
-    resume_lookup_ = ResumeBinding{};
-    rlres1_.on_r1(message, carrier, rx.claimed_peer, now, *this, out);
-    if (out.action == rlres1::Action::Send && out.message_size == rlres1::kR2Size) {
-      if (!resume_lookup_.valid || out.message_size > fresh->last_tx.size() ||
-          message.size != rlres1::kR1BaseSize) {
+    if (cache_.link_quota() > ResumeCache2::kLookupStepSlots ||
+        cache_.end_quota() > ResumeCache2::kLookupStepSlots) {
+      rlres1::R1 decoded{};
+      if (lookup_.kind != ResumeLookupWork::Kind::None ||
+          rlres1::decode_r1(message, decoded) != rlres1::DecodeError::None ||
+          message.size != rlres1::kR1BaseSize ||
+          decoded.purpose != to_keys_purpose(rx.scope)) {
         drop_record(*fresh);
-        secure_clear(out.message);
         return Status::success();
       }
-      fresh->resume = resume_lookup_;
-      std::memcpy(fresh->last_tx.data(), out.message.data(), out.message_size);
-      fresh->last_tx_size = out.message_size;
-      fresh->last_phase = 5;
-      fresh->last_step = 2;
-      std::memcpy(fresh->r1_nonce.data(), message.data + 12, fresh->r1_nonce.size());
-      fresh->r1_nonce_set = true;
-      fresh->state = RecordState::ResumeWaitR3;
-      if (out.superseded_initiator) {
-        // Simultaneous open resolved against us-as-initiator: our own
-        // attempt yielded; its record dies silently (the responder path
-        // proceeds and reports).
-        CarrierRecord* ours = find_record(rx.scope, fresh->peer, HandshakeRole::Initiator);
-        if (ours != nullptr && ours != fresh) drop_record(*ours);
-      }
-      const Status sent = emit_send(*fresh, 5, 2, ByteView{out.message.data(), out.message_size},
-                                    false);
-      secure_clear(out.message);
-      return sent;
+      lookup_ = ResumeLookupWork{};
+      lookup_.kind = ResumeLookupWork::Kind::R1;
+      lookup_.token = fresh->token;
+      lookup_.rid = decoded.rid;
+      lookup_.carrier = carrier;
+      lookup_.claimed_peer = rx.claimed_peer;
+      std::memcpy(lookup_.r1.data(), message.data, message.size);
+      fresh->state = RecordState::ResumeLookupR1;
+      return Status::success();
     }
-    if (out.action == rlres1::Action::Send) {
-      // An unauthenticated hint (Expired/UnknownId/Revoked): forward it,
-      // keep no record — the initiator falls back to a full EDHOC.
-      const Status sent = emit_send(*fresh, 5, 2, ByteView{out.message.data(), out.message_size},
-                                    false);
-      secure_clear(out.message);
-      drop_record(*fresh);
-      return sent;
-    }
-    drop_record(*fresh);
-    secure_clear(out.message);
-    return Status::success();
+    return complete_resume_r1(*fresh, message, carrier, rx.claimed_peer, now);
   }
   if (record == nullptr) return Status::success();
   if (rx.step == 2) {
@@ -1710,6 +1727,129 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
     stage_established(established);
     return Status::success();
   }
+  return Status::success();
+}
+
+Status HandshakeEngine::complete_resume_r1(CarrierRecord& fresh, const ByteView message,
+                                           const rlres1::Carrier& carrier,
+                                           const NodeId claimed_peer,
+                                           const MonotonicMs now) noexcept {
+  rlres1::Output out{};
+  resume_lookup_ = ResumeBinding{};
+  rlres1_.on_r1(message, carrier, claimed_peer, now, *this, out);
+  if (out.action == rlres1::Action::Send && out.message_size == rlres1::kR2Size) {
+    if (!resume_lookup_.valid || out.message_size > fresh.last_tx.size() ||
+        message.size != rlres1::kR1BaseSize) {
+      drop_record(fresh);
+      secure_clear(out.message);
+      return Status::success();
+    }
+    fresh.resume = resume_lookup_;
+    std::memcpy(fresh.last_tx.data(), out.message.data(), out.message_size);
+    fresh.last_tx_size = out.message_size;
+    fresh.last_phase = 5;
+    fresh.last_step = 2;
+    std::memcpy(fresh.r1_nonce.data(), message.data + 12, fresh.r1_nonce.size());
+    fresh.r1_nonce_set = true;
+    fresh.state = RecordState::ResumeWaitR3;
+    if (out.superseded_initiator) {
+      // Simultaneous open resolved against us-as-initiator: our own
+      // attempt yielded; its record dies silently (the responder path
+      // proceeds and reports).
+      CarrierRecord* ours = find_record(fresh.scope, fresh.peer, HandshakeRole::Initiator);
+      if (ours != nullptr && ours != &fresh) drop_record(*ours);
+    }
+    const Status sent = emit_send(fresh, 5, 2, ByteView{out.message.data(), out.message_size},
+                                  false);
+    secure_clear(out.message);
+    return sent;
+  }
+  if (out.action == rlres1::Action::Send) {
+    // An unauthenticated hint (Expired/UnknownId/Revoked): forward it,
+    // keep no record — the initiator falls back to a full EDHOC.
+    const Status sent = emit_send(fresh, 5, 2, ByteView{out.message.data(), out.message_size},
+                                  false);
+    secure_clear(out.message);
+    drop_record(fresh);
+    return sent;
+  }
+  drop_record(fresh);
+  secure_clear(out.message);
+  return Status::success();
+}
+
+Status HandshakeEngine::poll_resume_lookup(const MonotonicMs now) noexcept {
+  if (lookup_.kind == ResumeLookupWork::Kind::None) {
+    for (const auto& candidate : records_) {
+      if (candidate.used && candidate.state == RecordState::ResumeLookupPeer) {
+        lookup_ = ResumeLookupWork{};
+        lookup_.kind = ResumeLookupWork::Kind::Peer;
+        lookup_.token = candidate.token;
+        break;
+      }
+    }
+  }
+  CarrierRecord* record = find_record_by_token(lookup_.token);
+  if (record == nullptr) {
+    lookup_ = ResumeLookupWork{};
+    return Status::success();
+  }
+  ResumeContext context{};
+  context.network = local_.network;
+  context.gk_epoch = local_.gk_epoch;
+  context.revocations = nullptr;
+  if (!lookup_.ready) {
+    bool done = false;
+    Status scanned = Status::success();
+    if (lookup_.kind == ResumeLookupWork::Kind::Peer) {
+      scanned = cache_.find_by_peer_step(to_resume_purpose(record->scope), record->peer,
+                                         context, lookup_.cursor, done);
+    } else {
+      scanned = cache_.find_by_id_step(to_resume_purpose(record->scope), lookup_.rid,
+                                       lookup_.claimed_peer, context, lookup_.cursor, done);
+    }
+    if (!scanned) {
+      if (lookup_.kind == ResumeLookupWork::Kind::R1) {
+        drop_record(*record);
+      } else {
+        lookup_ = ResumeLookupWork{};
+        record->state = RecordState::EdhocQueued;
+        record->retransmit_at = now;
+      }
+      return Status::success();
+    }
+    lookup_.ready = done;
+    return Status::success();
+  }
+  if (lookup_.kind == ResumeLookupWork::Kind::R1) {
+    const Status result = complete_resume_r1(
+        *record, ByteView{lookup_.r1.data(), lookup_.r1.size()}, lookup_.carrier,
+        lookup_.claimed_peer, now);
+    lookup_ = ResumeLookupWork{};
+    return result;
+  }
+  ResumeSlot2 slot{};
+  std::size_t index = lookup_.cursor.index;
+  bool usable_match = lookup_.cursor.found && !lookup_.cursor.ambiguous;
+  if (usable_match) {
+    bool intact = false;
+    ScopeDigest old_identity{}, current_identity{};
+    const Status old_digest = resume_slot_identity(lookup_.cursor.match, old_identity);
+    const Status read = cache_.read_at(index, slot, intact);
+    const Status current_digest = resume_slot_identity(slot, current_identity);
+    usable_match = old_digest.ok() && read.ok() && intact && current_digest.ok() &&
+                   old_identity == current_identity && cache_.usable(slot, context) &&
+                   slot.peer == record->peer && slot.local_cert_id == local_.local_cert_id &&
+                   !membership_.revoked(slot.peer, slot.peer_generation) &&
+                   rlres1_.initiator_in_flight() < 4;
+  }
+  lookup_ = ResumeLookupWork{};
+  if (usable_match && cache_.reserve_uses(index, context, local_.boot, false).ok()) {
+    return begin_resume(*record, slot, index, now);
+  }
+  record->state = RecordState::EdhocQueued;
+  record->retransmit_at = now;
+  if (!edhoc_flight_.active && ecc_budget_ok(now)) return begin_edhoc(*record, now);
   return Status::success();
 }
 
@@ -2180,10 +2320,17 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     }
     return emit_failed(record, StatusCode::Expired);
   }
+  if (lookup_.kind != ResumeLookupWork::Kind::None) return poll_resume_lookup(now);
+  for (const auto& record : records_) {
+    if (record.used && record.state == RecordState::ResumeLookupPeer) {
+      return poll_resume_lookup(now);
+    }
+  }
   for (auto& record : records_) {
     if (!record.used || now < record.retransmit_at) continue;
     const bool small_tx = record.last_tx_size != 0;
-    const bool big_tx = record.state == RecordState::EdhocWaitM4 && edhoc_flight_.active &&
+    const bool big_tx = (record.state == RecordState::EdhocWaitM4 ||
+                         record.state == RecordState::EdhocM4Pending) && edhoc_flight_.active &&
                         edhoc_flight_.owner_token == record.token && big_tx_size_ != 0 &&
                         big_tx_owner_ == record.token;
     if (!small_tx && !big_tx) continue;
@@ -2206,7 +2353,8 @@ Status HandshakeEngine::poll(const MonotonicMs now) noexcept {
     const ByteView bytes = small_tx ? ByteView{record.last_tx.data(), record.last_tx_size}
                                     : ByteView{big_tx_.data(), big_tx_size_};
     const std::uint8_t phase = small_tx ? record.last_phase : 4;
-    const std::uint8_t step = small_tx ? record.last_step : 3;
+    const std::uint8_t step = small_tx ? record.last_step
+                                       : (record.state == RecordState::EdhocM4Pending ? 4 : 3);
     const bool cookie = step == 1 && record.scope == SecurityScope::Link;
     return emit_send(record, phase, step, bytes, cookie);
   }
@@ -2278,6 +2426,40 @@ Status HandshakeEngine::take_result(HandshakeResult& out) noexcept {
     return Status::success();
   }
   return Status::error(StatusCode::NotFound, "handshake no result");
+}
+
+Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_t phase,
+                                    const std::uint8_t step) noexcept {
+  if (entered_) return Status::error(StatusCode::Busy, "handshake re-entered");
+  const EnterGuard guard(entered_);
+  if (!configured_) return Status::error(StatusCode::InvalidState, "handshake not configured");
+  if (phase != 4 || step != 4) return Status::success();
+  if (has_pending_) return Status::error(StatusCode::Busy, "handshake result pending");
+  const Status local = refresh_local();
+  if (!local) return local;
+  CarrierRecord* record = find_record_by_token(token);
+  if (record == nullptr || record->role != HandshakeRole::Responder ||
+      !edhoc_flight_.active || edhoc_flight_.owner_token != token) {
+    return Status::error(StatusCode::NotFound, "m4 exchange gone");
+  }
+  if (record->state == RecordState::EdhocM4Sent) return Status::success();
+  if (record->state != RecordState::EdhocM4Pending) {
+    return Status::error(StatusCode::InvalidState, "m4 not pending");
+  }
+  const Status committed = edhoc_commit(*record);
+  if (!committed) return emit_failed(*record, map_commit_failure(committed));
+  StagedEstablished responder_done{};
+  responder_done.token = record->token;
+  responder_done.scope = record->scope;
+  responder_done.peer = record->peer;
+  responder_done.role = record->role;
+  responder_done.tx_context_id = pending_commit_tx_;
+  responder_done.rx_context_id = pending_commit_rx_;
+  responder_done.has_proof = pending_commit_proof_.valid();
+  responder_done.proof = pending_commit_proof_;
+  record->state = RecordState::EdhocM4Sent;
+  stage_established(responder_done);
+  return Status::success();
 }
 
 Status HandshakeEngine::cancel(const NodeId peer, const HandshakeCancelReason reason) noexcept {

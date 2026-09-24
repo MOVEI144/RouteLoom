@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use routeloom_join::{
     dams_exporter_context, join_allow_verify, join_credential_check, join_ead_find,
     join_ead_find_with_credential, join_ead_item_encode, join_org_hint, join_site_hint,
-    removal_notice_aad, JoinEad, JoinIntent, JoinRequest, JoinResult, RemovalNotice, SiteOffer,
-    SitePackage,
+    removal_notice_aad, JoinEad, JoinIntent, JoinRequest, JoinResult, LastMembership,
+    RemovalNotice, SiteOffer, SitePackage,
 };
 use routeloom_json::Json;
 use routeloom_provision::sdkv1::cert::{cert_decode, cert_issue, CertClaims, CertType};
@@ -211,6 +211,13 @@ fn valid(name: &str, doc: &Json) {
                 .unwrap();
             check_item(name, doc, JoinEad::Request);
         }
+        "last_membership" => {
+            let value = hex(doc, "value_hex");
+            let network = LastMembership::decode(&value).unwrap();
+            assert_eq!(network.0, num(doc, "network"), "{name}");
+            assert_eq!(network.encode().unwrap().to_vec(), value, "{name}");
+            check_item(name, doc, JoinEad::LastMembership);
+        }
         "site_package" => {
             let package = SitePackage::decode(&hex(doc, "value_hex")).unwrap();
             assert_eq!(package, package_from(doc), "{name}");
@@ -395,6 +402,10 @@ fn invalid(name: &str, doc: &Json) {
                 assert_eq!(e.code, Code::AuthorizationFailed, "{name}");
             }
         }
+        "last_membership" => {
+            assert!(!deny, "{name}");
+            assert!(LastMembership::decode(&encoded).is_err(), "{name}");
+        }
         "site_package" => {
             assert!(!deny, "{name}");
             assert!(SitePackage::decode(&encoded).is_err(), "{name}");
@@ -447,6 +458,9 @@ fn sdkv1_ead_golden_vectors() {
     let invalid_files = files("invalid");
     assert!(valid_files.len() >= 30);
     assert!(invalid_files.len() >= 120);
+    assert!(valid_files
+        .iter()
+        .any(|(_, doc)| text(doc, "codec") == "last_membership"));
     for (name, doc) in &valid_files {
         assert_eq!(text(doc, "expect"), "ok", "{name}");
         valid(name, doc);

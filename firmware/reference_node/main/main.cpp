@@ -33,6 +33,7 @@
 #include "routeloom/config_wire.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
 #include "routeloom/nvs_config_store.hpp"
+#include "routeloom/nvs_security_floor.hpp"
 #endif
 #if CONFIG_ROUTELOOM_TRUST_STORE
 #include "routeloom/device_credential.hpp"
@@ -290,9 +291,14 @@ routeloom::ResetCause classify_boot() noexcept {
 // immediately; discovery_enabled (2) / relay_allowed (3) are committed
 // durably and surfaced through accessors the runtime consults — the live
 // enforcement hooks are the deferred integration step, never claimed here.
-// apply/restore are idempotent and complete on the next poll (async token);
-// read_active returns the persisted blob so the journal's readback
-// verification proves durability, not a log string or a RAM echo.
+// apply/restore are idempotent and complete on the next poll (async token).
+// restore stages the baseline bytes verbatim (the readback proves the
+// signed bytes) while application always drives the EFFECTIVE values — a
+// snapshot that omits a field resets that effect to the schema default,
+// so a sparse restore cannot leave a stale live value behind (§5.5).
+// read_active re-reads the persisted blob AND verifies the live effects
+// (relay gate, applied log level); discovery/migration ride unverified,
+// so validate_recovery refuses baselines that change them.
 class RefNodeConfigProvider final : public routeloom::ConfigProvider {
  public:
   // Persist the active snapshot so it survives reboot alongside the journal.
@@ -340,6 +346,13 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
   }
   Status restore(const std::uint16_t, const ByteView snapshot,
                  routeloom::OperationToken& token) noexcept override {
+    // Fail closed on bytes this schema cannot express — the staged image
+    // stays verbatim (the readback proves the signed baseline bytes);
+    // omission-to-default expansion happens at apply time, not here.
+    routeloom::ConfigSdkEffective effective{};
+    const Status expressible =
+        routeloom::config_sdk_effective_values(snapshot, effective);
+    if (!expressible) return expressible;
     if (snapshot.size > pending_.bytes.size()) {
       return Status::error(StatusCode::NoCapacity, "config snapshot oversized");
     }
@@ -347,6 +360,29 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
     std::memcpy(pending_.bytes.data(), snapshot.data, snapshot.size);
     token = routeloom::OperationToken{++token_id_};
     commit_done_ = false;
+    return Status::success();
+  }
+  Status validate_recovery(const std::uint16_t, const std::uint16_t,
+                           const ByteView baseline) noexcept override {
+    // Recovery capability (§5.5): diagnostics and relay are proven through
+    // live verification, but discovery has value accessors only and
+    // migration is unconnected — a baseline that CHANGES an unverified
+    // field is Unsupported. Unchanged values ride along in the blob
+    // without claiming a live effect that does not exist.
+    if (node_ == nullptr) {
+      return Status::error(StatusCode::Unsupported,
+                           "config recovery needs the live node");
+    }
+    routeloom::ConfigSdkEffective want{};
+    Status status = routeloom::config_sdk_effective_values(baseline, want);
+    if (!status) return status;
+    routeloom::ConfigSdkEffective have{};
+    status = routeloom::config_sdk_effective_values(active_.view(), have);
+    if (!status) return status;
+    if (want.values[1] != have.values[1] || want.values[3] != have.values[3]) {
+      return Status::error(StatusCode::Unsupported,
+                           "config recovery changes an unverified field");
+    }
     return Status::success();
   }
   Status poll(const routeloom::OperationToken token, bool& done,
@@ -401,10 +437,36 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
     std::size_t actual = target.size;
     const esp_err_t error = nvs_get_blob(handle, "active", target.data, &actual);
     nvs_close(handle);
+    if (error == ESP_ERR_NVS_NOT_FOUND) {
+      // Never configured: the empty initial baseline, not a fault. The
+      // factory gate treats this as at-baseline; anything else unreadable
+      // fails closed.
+      out_size = 0;
+      return Status::success();
+    }
     if (error != ESP_OK) {
       return Status::error(StatusCode::StorageFailure, "config readback failed");
     }
     out_size = actual;
+    // Live verification (§5.5): durable bytes alone never prove the
+    // effects applied. The relay gate compares against the node's live
+    // state; diagnostics compares against the level this provider last
+    // applied (unknown until the first commit — a reboot proves nothing
+    // until the boot restore re-applies). Discovery/migration ride
+    // unverified: validate_recovery refuses baselines that change them.
+    routeloom::ConfigSdkEffective effective{};
+    const Status expressible = routeloom::config_sdk_effective_values(
+        routeloom::ByteView{target.data, out_size}, effective);
+    if (!expressible) return expressible;
+    if (effective.values[0] != applied_diag_) {
+      return Status::error(StatusCode::IntegrityError,
+                           "config readback diagnostics not applied");
+    }
+    if (node_ == nullptr ||
+        node_->relay_enabled() != (effective.values[2] != 0)) {
+      return Status::error(StatusCode::IntegrityError,
+                           "config readback relay gate diverged");
+    }
     return Status::success();
   }
 
@@ -447,44 +509,36 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
                : Status::error(StatusCode::StorageFailure, "config persist commit");
   }
   // Decode the committed TLV and drive the effects the node can apply.
+  // Application is always over the EFFECTIVE values (04 §4.2): a snapshot
+  // that omits a field resets that effect to the schema default, so a
+  // sparse restore cannot leave a stale live value behind (§5.5).
   void apply_fields() noexcept {
-    routeloom::endpoint::ConfigField fields[routeloom::endpoint::kConfigFieldCountMax]{};
-    std::uint16_t count = 0;
-    if (!routeloom::config_tlv_decode(active_.view(), fields,
-                                    routeloom::endpoint::kConfigFieldCountMax,
-                                    count)
-             .ok()) {
+    routeloom::ConfigSdkEffective effective{};
+    if (!routeloom::config_sdk_effective_values(active_.view(), effective).ok()) {
       return;
     }
-    for (std::uint16_t i = 0; i < count; ++i) {
-      switch (fields[i].field_id) {
-        case 1:  // diagnostics_level u8 0..2 -> esp_log level
-          esp_log_level_set("*", static_cast<esp_log_level_t>(fields[i].value[0] + 1));
-          break;
-        case 2:
-          discovery_enabled_ = fields[i].value[0] != 0;
-          break;
-        case 3:
-          relay_allowed_ = fields[i].value[0] != 0;
-          if (node_ != nullptr) {
-            node_->set_relay_enabled(relay_allowed_);
-            if (!relay_allowed_) {
-              // Honest drain reporting (01 §1.6): the commit is durable and
-              // withdrawal is advertised, but accepted transit keeps
-              // draining on its own deadlines — log the residue instead of
-              // implying the pipes are already empty.
-              const std::size_t draining = node_->transit_in_flight();
-              if (draining > 0) {
-                ESP_LOGW(kTag, "relay off: %u transit records draining",
-                         static_cast<unsigned>(draining));
-              }
-            }
-          }
-          break;
-        default:
-          break;
+    // diagnostics_level u8 0..2 -> esp_log level; the applied level is
+    // recorded for the readback's live verification.
+    applied_diag_ = effective.values[0];
+    esp_log_level_set("*", static_cast<esp_log_level_t>(effective.values[0] + 1));
+    discovery_enabled_ = effective.values[1] != 0;
+    relay_allowed_ = effective.values[2] != 0;
+    if (node_ != nullptr) {
+      node_->set_relay_enabled(relay_allowed_);
+      if (!relay_allowed_) {
+        // Honest drain reporting (01 §1.6): the commit is durable and
+        // withdrawal is advertised, but accepted transit keeps
+        // draining on its own deadlines — log the residue instead of
+        // implying the pipes are already empty.
+        const std::size_t draining = node_->transit_in_flight();
+        if (draining > 0) {
+          ESP_LOGW(kTag, "relay off: %u transit records draining",
+                   static_cast<unsigned>(draining));
+        }
       }
     }
+    // Field 4 (migration_policy) commits durably but stays unenforced —
+    // no effect exists to drive (deferred integration, never claimed).
   }
 
   routeloom::ByteBuffer<routeloom::endpoint::kConfigSnapshotMax> active_{};
@@ -493,6 +547,10 @@ class RefNodeConfigProvider final : public routeloom::ConfigProvider {
   std::uint64_t token_id_{0};
   bool discovery_enabled_{true};
   bool relay_allowed_{true};
+  // Last diagnostics level apply_fields drove (0..2); unknown until the
+  // first commit, so a reboot proves nothing until the boot restore
+  // re-applies. Written only on the commit path — never staged state.
+  std::uint8_t applied_diag_{0xFF};
   routeloom::MeshNode* node_{nullptr};
   // Drain accounting for a relay-off commit: the operation reports done
   // only when in-flight transit has drained or the bound elapsed.
@@ -1058,6 +1116,24 @@ extern "C" void app_main(void) {
   if (!status) {
     ESP_LOGE(kTag, "config provider open failed: %s", status.detail);
   }
+  // The RLF1 security floor bounds every protected counter the journal
+  // and the trust store mint (04 §4.7). It is NEVER auto-created: a
+  // missing floor means managed re-provisioning has not run, so the
+  // journal below initializes impaired and privileged intake refuses.
+  static routeloom::espnow::NvsSecurityFloorStore config_floor_store;
+  status = config_floor_store.open("rlfloor",
+                                   routeloom::espnow::kSecurityNvsPartition);
+  if (!status) {
+    ESP_LOGE(kTag, "security floor open failed: %s", status.detail);
+  }
+  static routeloom::SecurityFloorStore config_floor(config_floor_store);
+  status = config_floor.initialize();
+  if (!status) {
+    ESP_LOGE(kTag,
+             "security floor unavailable: %s — config intake refuses until "
+             "managed re-provisioning installs one",
+             status.detail);
+  }
   static RefNodeMaintenanceGate config_gate(/*independent_admin_path=*/false);
   static routeloom::ConfigRateLimiter config_limiter;
   static routeloom::espnow::EspNowEntropySource config_entropy;
@@ -1069,14 +1145,15 @@ extern "C" void app_main(void) {
   // policy never accepts a dev envelope (enforced by profile selection,
   // never by trying both). An absent/quarantined/uncertain store leaves
   // the view !ready() — fail closed, intake refused, routing continues.
-  // require_key() pins the configured (authority, generation) so ready()
-  // additionally reports whether THE deployment-pinned record resolves
-  // active; the journal's generation pin below still applies at decision
-  // time regardless.
+  // require_authority() pins the configured authority id so ready()
+  // additionally reports whether THE deployment's authority resolves an
+  // active key — the generation itself floats with rotation under the
+  // combined RLT1/RLF1 floor (the floor's G leads across updates).
+  trust_store.attach_floor(&config_floor);
   static routeloom::TrustView config_verifier(trust_store);
-  config_verifier.require_key(
-      static_cast<std::uint64_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY),
-      static_cast<std::uint32_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY_GENERATION));
+  config_verifier.attach_floor(&config_floor);
+  config_verifier.require_authority(
+      static_cast<std::uint64_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY));
   ESP_LOGW(kTag,
            "config profile: trust-store RLCP1_COSE_ESP256 (verifier %s)",
            config_verifier.ready()
@@ -1129,8 +1206,9 @@ extern "C" void app_main(void) {
   journal_config.authority_generation =
       static_cast<std::uint32_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY_GENERATION);
   static routeloom::ConfigJournal config_journal(
-      journal_config, config_store, config_verifier, config_entropy,
-      config_limiter, &config_provider, /*validator=*/nullptr, &config_gate);
+      journal_config, config_store, config_floor, config_verifier,
+      config_entropy, config_limiter, &config_provider,
+      /*validator=*/nullptr, &config_gate);
   status = config_journal.initialize(monotonic_now_ms());
   if (!status) {
     // Journal impairment is NOT a node-fatal condition (04 §4.7, 06 §6.3):
@@ -1143,20 +1221,29 @@ extern "C" void app_main(void) {
     // the wire outcome is honest and the node keeps routing.
     //
     // Recovery is deliberately NOT implicit: §6.3 requires authorized
-    // recovery evidence from the authority or redeployment. This profile
-    // wires no recovery verb — ConfigJournal::recover() stays an explicit
-    // operator/host call (exercised by tests), so the field path is
-    // re-provisioning/redeploy, never an unattended self-reset.
+    // recovery evidence from the authority. The impaired journal still
+    // answers kind-4 recovery objects through config_target's single
+    // assembler (a signed RCR2 intent naming the floor's exact next
+    // counters plus the baseline to re-apply), so an authorized
+    // routeloomctl `config-recover` reaches it over the mesh; no
+    // unsigned shortcut into the ceremony exists.
     ESP_LOGE(kTag,
              "config journal init failed: %s — running degraded "
              "(routing continues, config intake refuses)",
              status.detail);
   }
   static routeloom::MeshConfigPort config_port(runtime.node());
-  static routeloom::ConfigTarget config_target(config_port);
+  static routeloom::ConfigTarget config_target(config_port, config_limiter);
   status = config_target.add_journal(
       routeloom::endpoint::kConfigNamespaceSdk, config_journal);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_TRUST_STORE
+  // Kind-5 trust-manifest intake and the trust-status query answer from
+  // the same store the TrustView verifier reads: root-signed RTM1 images
+  // update the verifier's key set in-band, governed by signatures and the
+  // security floor — never by transport claims.
+  config_target.attach_trust_store(trust_store, config_floor);
+#endif
   runtime.node().set_config_sink(&config_target);
   // The committed config image drives the live relay gate from now on
   // (field 3 relay_allowed); attach after the sink so the gate reflects the
@@ -1165,8 +1252,8 @@ extern "C" void app_main(void) {
 #if CONFIG_ROUTELOOM_TRUST_STORE
   ESP_LOGW(kTag,
            "config target active (trust-store RLCP1_COSE_ESP256 — "
-           "production path EXPERIMENTAL: no install verb or manifest "
-           "endpoint is wired)");
+           "production path EXPERIMENTAL: kind-5 install + trust-status "
+           "receipt wired, not production-qualified)");
 #elif CONFIG_ROUTELOOM_CONFIG_PROFILE == 1
   ESP_LOGW(kTag,
            "config target active (RLCP1_COSE_ESP256 asymmetric permit — "

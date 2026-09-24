@@ -208,6 +208,26 @@ jobs:
             profile: normal
             autonomy: off
             features: owner_member
+          - app: reference_node
+            target: esp32s3
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: bridge_node
+            target: esp32s3
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: reference_node
+            target: esp32c5
+            profile: normal
+            autonomy: off
+            features: owner_member
+          - app: bridge_node
+            target: esp32c5
+            profile: normal
+            autonomy: off
+            features: owner_member
           # Paired bench cells: two ESP32-C3 boards flashed as a real
           # 2-node mesh (static neighbor + RLD1 discovery lane running
           # alongside). autonomy=discover enables CONFIG_ROUTELOOM_DISCOVERY

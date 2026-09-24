@@ -265,6 +265,14 @@ class RevocationStore {
   bool has_set() const noexcept { return has_set_; }
   bool quarantined() const noexcept { return pair_.quarantined(); }
   bool uncertain() const noexcept { return pair_.uncertain(); }
+  bool erasure_safe() const noexcept {
+    return pair_.initialized() && !pair_.slot_unsupported(0) &&
+           !pair_.slot_unsupported(1) && !pair_.slot_unreadable(0) &&
+           !pair_.slot_unreadable(1);
+  }
+  bool clean_empty() const noexcept {
+    return erasure_safe() && !has_set_ && !pair_.quarantined() && !pair_.uncertain();
+  }
   const RevocationSet& set() const noexcept { return set_; }
   std::uint32_t rs_epoch() const noexcept { return has_set_ ? set_.rs_epoch : 0; }
   // The signed object as stored (for 1-hop gossip, 04 §4); re-read from
@@ -379,6 +387,16 @@ class ResumeCache2 {
  public:
   static constexpr std::uint32_t kTouchBootInterval = 256;
   static constexpr std::size_t kUseBudgetEntries = 8;
+  static constexpr std::size_t kLookupStepSlots = 16;
+
+  struct LookupCursor {
+    std::size_t next{0};
+    std::size_t index{0};
+    ResumeSlot2 match{};
+    bool initialized{false};
+    bool found{false};
+    bool ambiguous{false};
+  };
 
   ResumeCache2(ResumeSlotStorage2& storage, std::size_t link_quota,
                std::size_t end_quota) noexcept
@@ -404,6 +422,16 @@ class ResumeCache2 {
   Status find_by_id(ResumePurpose purpose, const std::array<std::uint8_t, 8>& rid,
                     NodeId claimed_peer, const ResumeContext& context, ResumeSlot2& out,
                     std::size_t& index) noexcept;
+  // A cooperative lookup step reads at most 16 NVS slots. The caller owns
+  // the cursor for one exchange and repeats until done; an id search scans
+  // the full partition before accepting a match so collisions fail closed.
+  Status find_by_peer_step(ResumePurpose purpose, NodeId peer,
+                           const ResumeContext& context, LookupCursor& cursor,
+                           bool& done) noexcept;
+  Status find_by_id_step(ResumePurpose purpose,
+                         const std::array<std::uint8_t, 8>& rid,
+                         NodeId claimed_peer, const ResumeContext& context,
+                         LookupCursor& cursor, bool& done) noexcept;
   // Direct slot read. `intact=false` (with an empty slot) on torn/corrupt
   // bytes; a storage error is still an error.
   Status read_at(std::size_t index, ResumeSlot2& out, bool& intact) noexcept;

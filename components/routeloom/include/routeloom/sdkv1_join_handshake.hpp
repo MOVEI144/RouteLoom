@@ -76,6 +76,7 @@ struct JoinHandshakeConfig {
   std::uint8_t requested_role{0};   // nonzero known role bits, within capability
   NodeId last_site_id{0};           // a really held membership only, else 0
   std::uint32_t last_generation{0};
+  NetworkId last_network{0};  // nonzero only for saved-membership recovery
   // bit n set -> channel n usable on this hardware (1..14). An Allow whose
   // SitePackage names an unusable channel is refused before commit.
   std::uint16_t usable_channel_mask{0xFFFE};
@@ -118,6 +119,7 @@ struct JoinDecided {
   std::uint32_t retry_after_s{0};       // PendingAssignment/AuthorityBusy only
   std::uint32_t rs_epoch_to_fetch{0};   // Allow: the package's rs_epoch hint
   RemovalNotice removal{};              // RemovedVerified only
+  std::array<std::uint8_t, kRemovalNoticeObjectSize> removal_object{};
   // AllowVerified only: the verified record, owned by the handshake, valid
   // until end(). Never populated from unverified input.
   const SiteRecord* record{nullptr};
@@ -262,6 +264,7 @@ class JoinHandshake final {
   // EAD compose values (referenced by the session during composition).
   ByteBuffer<kJoinIntentSize> intent_value_{};
   ByteBuffer<kJoinRequestSize> request_value_{};
+  ByteBuffer<kLastMembershipSize> last_membership_value_{};
   JoinAttemptStats stats_{};
 };
 

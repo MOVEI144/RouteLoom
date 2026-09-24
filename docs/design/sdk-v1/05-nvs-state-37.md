@@ -99,9 +99,10 @@ D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 en
 | `rlsite` | RLS1 2 slot（≤708B） | 50 | 50 | `rlsec` |
 | `rltrust` | RLT1 2 slot（≤1684B） | 110 | 110 | `rlsec` |
 | `rlrevo` | RRS1 2 slot（≤640B） | 44 | 44 | `rlsec` |
+| `rlmaint` | RLX1 2 slot（≤2048B、PR Bの削除journal） | 最大132＋namespace | 同左 | `rlsec` |
 | `rlres` | 再開cache（84B＝5 entry/slot） | 16 slot＝80 | 160 slot＝800 | `rlsec` |
 | 証人 | `cmax`等 | 2 | 2 | `rlsec` |
-| **本番小計（rlsec）** | | **約332** | **約1052** | |
+| **本番小計（rlsec）** | | **約464** | **約1184** | |
 | 開発legacy（D2-c上限） | `c*`/`f*`/`r*` | 64ピア×14〜20＝最大1280 | 128ピア×20＝最大2560 | `rlsec` |
 
 ### 5.2 partition推奨

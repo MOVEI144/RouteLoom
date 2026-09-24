@@ -1,10 +1,11 @@
 // Routed config-wire tests (05-wire-api.md §5.5/§5.6): the dev-profile
 // permit signer/verifier and the ConfigTarget/ConfigGateway endpoints driven
 // back-to-back over a loopback ConfigWirePort. The challenge -> sign ->
-// manifest/chunk -> ack -> apply path runs the REAL ConfigJournal — object
-// assembly feeds submit_permit, so the wire test exercises verify/dedup/
+// manifest/chunk -> ack -> apply path runs the REAL ConfigJournal — the
+// target's single assembler feeds submit_permit/submit_recovery/
+// trust_manifest_accept by kind, so the wire test exercises verify/dedup/
 // admission/decide end to end. Transport success is still never a verdict:
-// the assertions read the journal's own revision/phase afterwards.
+// the assertions read the journal's (or trust store's) own state afterwards.
 
 #include <array>
 #include <cstdint>
@@ -17,7 +18,12 @@
 #include "routeloom/config_wire.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/security_floor.hpp"
+#include "routeloom/trust_manifest.hpp"
+#include "routeloom/trust_store.hpp"
 #include "routeloom/wire.hpp"
+
+#include "test_provisioning.hpp"
 
 namespace {
 
@@ -41,6 +47,11 @@ int failures = 0;
   } while (false)
 
 using namespace routeloom;
+using routeloom_test::FaultyTrustStorage;
+using routeloom_test::sign_digest_low_s;
+using routeloom_test::test_image;
+using routeloom_test::test_key_record;
+using routeloom_test::test_keypair;
 using endpoint::ConfigCommand;
 using endpoint::ConfigField;
 using endpoint::ConfigFieldType;
@@ -94,6 +105,43 @@ class FakeJournalStorage final : public ConfigJournalStorage {
   }
   std::array<std::uint8_t, kJournalSlot> slots_[kConfigJournalSlots]{};
 };
+
+class FakeFloorStore final : public SecurityFloorStorage {
+ public:
+  Status read(const MutableByteView target) noexcept override {
+    if (target.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor read");
+    }
+    if (!provisioned) {
+      return Status::error(StatusCode::NotFound, "floor missing");
+    }
+    std::memcpy(target.data, blob_.data(), kSecurityFloorBlobBytes);
+    return Status::success();
+  }
+  Status write(const ByteView data) noexcept override {
+    if (data.size != kSecurityFloorBlobBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad floor write");
+    }
+    std::memcpy(blob_.data(), data.data, data.size);
+    provisioned = true;
+    return Status::success();
+  }
+  std::array<std::uint8_t, kSecurityFloorBlobBytes> blob_{};
+  bool provisioned{false};
+};
+
+void seed_floor(FakeFloorStore& storage, const std::uint64_t network,
+                const std::uint64_t target, const std::uint16_t ns,
+                const std::uint16_t schema) {
+  SecurityFloorState state{};
+  state.network = network;
+  state.target = target;
+  state.namespace_count = 1;
+  state.entries[0].config_namespace = ns;
+  state.entries[0].schema = schema;
+  SecurityFloorStore floor(storage);
+  CHECK_OK(floor.provision_seed(state));
+}
 
 // Desired-state provider that completes apply/restore after one poll and
 // commits pending -> active (readback input).
@@ -280,7 +328,9 @@ class RecordingHost final : public ConfigHostSink {
     last_result = result;
     last_target = target;
     last_body.size = body.size;
-    if (body.size != 0) std::memcpy(last_body.bytes.data(), body.data, body.size);
+    if (body.size > 0) {
+      std::memcpy(last_body.bytes.data(), body.data, body.size);
+    }
   }
   int calls{0};
   std::uint64_t last_request{0};
@@ -295,12 +345,14 @@ class RecordingHost final : public ConfigHostSink {
 struct TargetRig {
   ConfigJournalConfig config{};
   FakeJournalStorage storage{};
+  FakeFloorStore floor_storage{};
   DevConfigAuthorityVerifier verifier{dev_key()};
   CountingEntropy entropy{};
   ConfigRateLimiter rate{};
   FakeProvider provider{};
   PermitAllGate gate{};
   PermissiveValidator validator{};
+  std::unique_ptr<SecurityFloorStore> floor{};
   std::unique_ptr<ConfigJournal> journal{};
 
   explicit TargetRig(const std::uint64_t boot = kBoot) {
@@ -312,8 +364,13 @@ struct TargetRig {
     config.authorized_issuer = kAuthority;
     config.authority_generation = 1;
     config.challenge_valid_ms = kConfigChallengeMaxMs;
-    journal = std::make_unique<ConfigJournal>(config, storage, verifier, entropy,
-                                            rate, &provider, nullptr, &gate);
+    seed_floor(floor_storage, config.network, config.target,
+               config.config_namespace, config.schema);
+    floor = std::make_unique<SecurityFloorStore>(floor_storage);
+    CHECK_OK(floor->initialize());
+    journal = std::make_unique<ConfigJournal>(config, storage, *floor, verifier,
+                                            entropy, rate, &provider, nullptr,
+                                            &gate);
   }
 };
 
@@ -366,11 +423,27 @@ ConfigCommand make_command(const endpoint::ControlChallenge& challenge,
   return command;
 }
 
+// Test-only dev envelope minter (the device carries no issuance path —
+// the production issuer is the Rust host). Mirrors the envelope byte
+// layout via the public tag helper.
+void dev_wrap_permit(const ConfigCommand& command, const ByteView canonical,
+                     ByteBuffer<kConfigPermitObjectMax>& permit) {
+  ByteBuffer<kConfigPermitAadSize> aad{};
+  CHECK_OK(config_permit_aad(command.network, command.target,
+                           command.config_namespace, aad));
+  std::array<std::uint8_t, kConfigDevPermitTagSize> tag{};
+  CHECK_OK(config_dev_permit_tag(dev_key(), aad.view(), canonical, tag));
+  CHECK(aad.size + canonical.size + tag.size() <= permit.bytes.size());
+  std::memcpy(permit.bytes.data(), aad.bytes.data(), aad.size);
+  std::memcpy(permit.bytes.data() + aad.size, canonical.data, canonical.size);
+  std::memcpy(permit.bytes.data() + aad.size + canonical.size, tag.data(),
+              tag.size());
+  permit.size = aad.size + canonical.size + tag.size();
+}
+
 void test_dev_permit_roundtrip() {
-  DevConfigPermitSigner signer(dev_key());
   DevConfigAuthorityVerifier verifier(dev_key());
-  CHECK(signer.ready() && verifier.ready());
-  CHECK(signer.security_profile() == SecurityProfile::Development);
+  CHECK(verifier.ready());
   CHECK(verifier.security_profile() == SecurityProfile::Development);
 
   endpoint::ControlChallenge challenge{};
@@ -384,7 +457,7 @@ void test_dev_permit_roundtrip() {
   endpoint::EncodedConfigCommand canonical{};
   CHECK_OK(endpoint::config_command_encode(command, canonical));
   ByteBuffer<kConfigPermitObjectMax> permit{};
-  CHECK_OK(signer.sign(command, canonical.view(), permit));
+  dev_wrap_permit(command, canonical.view(), permit);
 
   ConfigPermitContext context{};
   context.network = kNet;
@@ -492,7 +565,7 @@ void test_challenge_status_wire() {
 
   TargetRig rig{};
   CHECK_OK(rig.journal->initialize(now_ms));
-  ConfigTarget target(tgt_port);
+  ConfigTarget target(tgt_port, rig.rate);
   CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
   RecordingHost host{};
   ConfigGateway gateway(gw_port, host);
@@ -557,7 +630,7 @@ void test_permit_transfer_e2e() {
 
   TargetRig rig{};
   CHECK_OK(rig.journal->initialize(now_ms));
-  ConfigTarget target(tgt_port);
+  ConfigTarget target(tgt_port, rig.rate);
   CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
   RecordingHost host{};
   ConfigGateway gateway(gw_port, host);
@@ -579,13 +652,12 @@ void test_permit_transfer_e2e() {
   ByteBuffer<endpoint::kConfigSnapshotMax> base{};
   ConfigCommand command = make_command(challenge, challenge.revision, fields, 1,
                                        base.view());
-  DevConfigPermitSigner signer(dev_key());
   endpoint::EncodedConfigCommand canonical{};
   CHECK_OK(endpoint::config_command_encode(command, canonical));
   ByteBuffer<kConfigPermitObjectMax> permit{};
-  CHECK_OK(signer.sign(command, canonical.view(), permit));
+  dev_wrap_permit(command, canonical.view(), permit);
 
-  // 3. Transfer the object. The journal assembles + submits it internally;
+  // 3. Transfer the object. The target assembles it, the journal submits;
   //    the Ok ack means "assembled", proven by the journal revision after.
   CHECK_OK(gateway.submit_permit(0xD1, kTarget, permit.view(), now_ms));
   pump(gateway, target, gw_port, tgt_port, now_ms, 40);
@@ -649,7 +721,7 @@ void test_manifest_duplicate_total_len_conflict() {
 
   TargetRig rig{};
   CHECK_OK(rig.journal->initialize(now_ms));
-  ConfigTarget target(tgt_port);
+  ConfigTarget target(tgt_port, rig.rate);
   CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
   RecordingAckSink sink{};
   gw_peer = &sink;
@@ -783,6 +855,587 @@ void test_query_reply_echo_binding() {
   CHECK(!gateway.query_active());
 }
 
+// --- Kind-5 trust rig ---------------------------------------------------------
+
+constexpr std::uint64_t kRootId = 0x100;
+
+struct TrustRig {
+  FaultyTrustStorage storage{};
+  std::unique_ptr<TrustStore> store{};
+  routeloom_test::TestKeyPair root = test_keypair(0x11);
+
+  // Provision an epoch-1 image (root anchor active, one active config key)
+  // on the journal's own floor — the real shared-floor topology.
+  void provision(TargetRig& rig) {
+    store = std::make_unique<TrustStore>(storage);
+    CHECK_OK(store->initialize());
+    TrustImage base = test_image(1, kNet, root, kRootId);
+    base.keys[0] = test_key_record(kAuthority, 1, test_keypair(0x33).pub,
+                                   TrustKeyStatus::Active);
+    base.key_count = 1;
+    CHECK_OK(store->commit_image(base));
+    store->attach_floor(rig.floor.get());
+  }
+
+  // A real root-signed RTM1 for `image` (the RootSigner path: RLT1 body,
+  // Sig_structure under the committed network's AAD, low-S signature).
+  void make_manifest(const TrustImage& image,
+                     ByteBuffer<kTrustManifestObjectMax>& out) {
+    ByteBuffer<kTrustImageContentMax> content{};
+    CHECK_OK(trust_image_body_encode(image, content));
+    ByteBuffer<kTrustManifestProtectedSize> protected_bytes{};
+    CHECK_OK(trust_manifest_protected(kRootId, protected_bytes));
+    ByteBuffer<kTrustManifestAadSize> aad{};
+    CHECK_OK(trust_manifest_aad(image.network, aad));
+    ByteBuffer<kTrustManifestSigMax> sig_structure{};
+    CHECK_OK(trust_manifest_sig_structure(protected_bytes.view(), aad.view(),
+                                          content.view(), sig_structure));
+    Digest256 digest{};
+    sha256(sig_structure.view(), digest);
+    std::array<std::uint8_t, 64> signature{};
+    CHECK(sign_digest_low_s(root.priv, digest, signature));
+    CHECK_OK(trust_manifest_assemble(content.view(), kRootId,
+                                     ByteView{signature.data(), signature.size()},
+                                     out));
+  }
+
+  TrustImage next_image(const std::uint32_t epoch) {
+    TrustImage next = test_image(epoch, kNet, root, kRootId);
+    next.keys[0] = test_key_record(kAuthority, 1, test_keypair(0x33).pub,
+                                   TrustKeyStatus::Active);
+    next.key_count = 1;
+    next.min_authority_generation = 2;
+    return next;
+  }
+};
+
+// Deliver `object` as `kind` straight into a target (direct injection;
+// acks flush to the sink). Returns the terminal ack status.
+autonomy::ObjectAckStatus deliver_direct(ConfigTarget& target,
+                                         LoopbackPort& port,
+                                         RecordingAckSink& sink,
+                                         const NodeId origin,
+                                         const autonomy::ControlObjectKind kind,
+                                         const ByteView object,
+                                         MonotonicMs& t) {
+  autonomy::ControlObjectPayload manifest{};
+  manifest.subtype = autonomy::ControlObjectSubtype::Manifest;
+  manifest.kind = kind;
+  manifest.total_len = static_cast<std::uint16_t>(object.size);
+  sha256(object, manifest.object_hash);
+  autonomy::EncodedPayload encoded{};
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(origin, object_frame(origin, FrameType::ControlObject,
+                                              encoded.view()),
+                         t);
+  port.flush(t);
+  if (sink.last_status == autonomy::ObjectAckStatus::Failed) {
+    return sink.last_status;
+  }
+  for (std::uint16_t offset = 0; offset < object.size;
+       offset = static_cast<std::uint16_t>(offset + 90)) {
+    autonomy::ObjectChunkPayload chunk{};
+    chunk.subtype = autonomy::ObjectChunkSubtype::Chunk;
+    chunk.object_hash = manifest.object_hash;
+    chunk.offset = offset;
+    chunk.data_size = static_cast<std::uint16_t>(
+        object.size - offset < 90 ? object.size - offset : 90);
+    std::memcpy(chunk.data.data(), object.data + offset, chunk.data_size);
+    CHECK_OK(autonomy::object_chunk_encode(chunk, encoded));
+    t += 10;
+    target.on_config_frame(origin, object_frame(origin, FrameType::ObjectChunk,
+                                                encoded.view()),
+                           t);
+    port.flush(t);
+    if (sink.last_status == autonomy::ObjectAckStatus::Failed) {
+      return sink.last_status;
+    }
+  }
+  return sink.last_status;
+}
+
+// The pinned (origin, kind, hash, total_len) tuple, the kind caps, unknown
+// kinds, and the no-extension deadline — direct target injection.
+void test_single_assembler_discipline() {
+  MonotonicMs now_ms = 6000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  tgt_port.peer_dest_ = kGateway;
+  (void)tgt_peer;
+
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now_ms));
+  ConfigTarget target(tgt_port, rig.rate);
+  CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+  RecordingAckSink sink{};
+  gw_peer = &sink;
+  autonomy::EncodedPayload encoded{};
+
+  // Kind 3 over the 1024 B permit cap is denied without an ack (the
+  // carrier itself allows 2048 — the KIND cap refuses).
+  autonomy::ControlObjectPayload manifest{};
+  manifest.subtype = autonomy::ControlObjectSubtype::Manifest;
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = kConfigPermitObjectMax + 1;
+  manifest.object_hash[0] = 1;
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(target.control_denied() == 1);
+  CHECK(sink.acks == 0);
+
+  // Unknown kind 6 never decodes — denied without an ack. Migration kind
+  // 1 decodes but never routes here — denied the same way.
+  manifest.kind = static_cast<autonomy::ControlObjectKind>(6);
+  manifest.total_len = 64;
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  manifest.kind = autonomy::ControlObjectKind::ChannelPlan;
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(target.control_denied() == 3);
+  CHECK(sink.acks == 0);
+
+  // Kind 5 without an attached trust store is a KNOWN kind the node cannot
+  // serve: Failed-acked, not silently denied.
+  manifest.kind = autonomy::ControlObjectKind::TrustManifest;
+  manifest.total_len = static_cast<std::uint16_t>(kConfigTrustObjectMax);
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.acks == 1);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(!target.object_active());
+
+  // Open a kind-3 assembly; everything off-tuple refuses against it.
+  const std::array<std::uint8_t, 8> obj{{1, 2, 3, 4, 5, 6, 7, 8}};
+  manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+  manifest.total_len = static_cast<std::uint16_t>(obj.size());
+  sha256(ByteView{obj.data(), obj.size()}, manifest.object_hash);
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(target.object_active());
+
+  // Same hash, different kind (kind 4) → Failed; the live assembly stands.
+  autonomy::ControlObjectPayload other = manifest;
+  other.kind = autonomy::ControlObjectKind::ConfigRecovery;
+  CHECK_OK(autonomy::control_object_encode(other, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(target.object_active());
+
+  // Same tuple, different origin → Failed (origin is pinned too).
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kAuthority, object_frame(kAuthority,
+                                                  FrameType::ControlObject,
+                                                  encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.subtype = autonomy::ObjectChunkSubtype::Chunk;
+  chunk.object_hash = manifest.object_hash;
+  chunk.offset = 0;
+  chunk.data_size = static_cast<std::uint16_t>(obj.size());
+  std::memcpy(chunk.data.data(), obj.data(), obj.size());
+  CHECK_OK(autonomy::object_chunk_encode(chunk, encoded));
+  const std::uint32_t denied_before = target.control_denied();
+  target.on_config_frame(kAuthority, object_frame(kAuthority,
+                                                  FrameType::ObjectChunk,
+                                                  encoded.view()),
+                         now_ms);
+  tgt_port.flush(now_ms);
+  CHECK(target.control_denied() == denied_before + 1);  // no ack for it
+  CHECK(target.object_active());
+
+  // A byte-consistent duplicate re-acks Incomplete — but does NOT extend
+  // the deadline: a chunk past the ORIGINAL 10 s still fails.
+  CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ControlObject,
+                                                encoded.view()),
+                         now_ms + 9990);
+  tgt_port.flush(now_ms + 9990);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Incomplete);
+  CHECK(target.object_active());
+  CHECK_OK(autonomy::object_chunk_encode(chunk, encoded));
+  target.on_config_frame(kGateway, object_frame(kGateway, FrameType::ObjectChunk,
+                                                encoded.view()),
+                         now_ms + kConfigReassemblyTimeoutMs + 1);
+  tgt_port.flush(now_ms + kConfigReassemblyTimeoutMs + 1);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(!target.object_active());
+}
+
+// Kind-5 end to end: a real root-signed RTM1 rides the gateway trust slot
+// to the target, the store advances, and the host learns nothing but
+// transport success (epoch proof is a separate TrustStatus query).
+void test_kind5_trust_delivery_e2e() {
+  MonotonicMs now_ms = 7000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort gw_port(kGateway, tgt_peer);
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  gw_port.peer_dest_ = kTarget;
+  tgt_port.peer_dest_ = kGateway;
+
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now_ms));
+  TrustRig trust{};
+  trust.provision(rig);
+  ConfigTarget target(tgt_port, rig.rate);
+  CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+  target.attach_trust_store(*trust.store, *rig.floor);
+  RecordingHost host{};
+  ConfigGateway gateway(gw_port, host);
+  tgt_peer = &target;
+  gw_peer = &gateway;
+
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  trust.make_manifest(trust.next_image(2), object);
+  CHECK(object.size > 0 && object.size <= kConfigTrustObjectMax);
+  CHECK_OK(gateway.submit_trust(0xE5, kTarget, object.view(), now_ms));
+  CHECK(gateway.trust_transfer_active());
+  pump(gateway, target, gw_port, tgt_port, now_ms, 40);
+  CHECK(host.calls == 1);
+  CHECK(host.last_result == ConfigOpsResult::Ok);
+  CHECK(host.last_sub == 0x25);
+  CHECK(host.last_target == kTarget);
+  CHECK(!gateway.trust_transfer_active());
+  // The store really advanced — transport Ok never implies it alone.
+  CHECK(trust.store->store_epoch() == 2);
+  CHECK(trust.store->min_authority_generation() == 2);
+  SecurityFloorState floor_state{};
+  CHECK_OK(rig.floor->read(floor_state));
+  CHECK(floor_state.trust_epoch_floor == 2);
+
+  // Without the trust connection the same object is refused (Denied, and
+  // the store it never reached stays put).
+  MonotonicMs t2 = 8000;
+  TargetRig rig2{};
+  CHECK_OK(rig2.journal->initialize(t2));
+  TrustRig trust2{};
+  trust2.provision(rig2);
+  ConfigEndpointSink* gw_peer2 = nullptr;
+  ConfigEndpointSink* tgt_peer2 = nullptr;
+  LoopbackPort gw_port2(kGateway, tgt_peer2);
+  LoopbackPort tgt_port2(kTarget, gw_peer2);
+  gw_port2.peer_dest_ = kTarget;
+  tgt_port2.peer_dest_ = kGateway;
+  ConfigTarget target2(tgt_port2, rig2.rate);
+  CHECK_OK(target2.add_journal(endpoint::kConfigNamespaceSdk, *rig2.journal));
+  RecordingHost host2{};
+  ConfigGateway gateway2(gw_port2, host2);
+  tgt_peer2 = &target2;
+  gw_peer2 = &gateway2;
+  ByteBuffer<kTrustManifestObjectMax> object2{};
+  trust2.make_manifest(trust2.next_image(2), object2);
+  CHECK_OK(gateway2.submit_trust(0xE6, kTarget, object2.view(), t2));
+  pump(gateway2, target2, gw_port2, tgt_port2, t2, 40);
+  CHECK(host2.calls == 1);
+  CHECK(host2.last_result == ConfigOpsResult::Denied);
+  CHECK(host2.last_sub == 0x25);
+  CHECK(trust2.store->store_epoch() == 1);
+}
+
+// The kind-5 verify shares the device's expensive-verify budget with the
+// permit/recovery submits: back-to-back completions refuse, and a FAILED
+// verify charges the budget exactly like a success.
+void test_trust_verify_shares_budget() {
+  MonotonicMs now_ms = 9000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  tgt_port.peer_dest_ = kGateway;
+  (void)tgt_peer;
+
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now_ms));
+  TrustRig trust{};
+  trust.provision(rig);
+  ConfigTarget target(tgt_port, rig.rate);
+  CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+  target.attach_trust_store(*trust.store, *rig.floor);
+  RecordingAckSink sink{};
+  gw_peer = &sink;
+
+  ByteBuffer<kTrustManifestObjectMax> object{};
+  trust.make_manifest(trust.next_image(2), object);
+  // First completion consumes the token and installs epoch 2.
+  CHECK(deliver_direct(target, tgt_port, sink, kGateway,
+                       autonomy::ControlObjectKind::TrustManifest,
+                       object.view(), now_ms) ==
+        autonomy::ObjectAckStatus::Ok);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Ok);
+  CHECK(trust.store->store_epoch() == 2);
+  // Immediate redelivery: the budget is spent — Failed, store untouched.
+  CHECK(deliver_direct(target, tgt_port, sink, kGateway,
+                       autonomy::ControlObjectKind::TrustManifest,
+                       object.view(), now_ms) ==
+        autonomy::ObjectAckStatus::Failed);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  // Past the 5 s window the duplicate succeeds without a flash write.
+  now_ms += ConfigRateLimiter::kExpensiveVerifyIntervalMs + 10;
+  target.poll(now_ms);
+  CHECK(deliver_direct(target, tgt_port, sink, kGateway,
+                       autonomy::ControlObjectKind::TrustManifest,
+                       object.view(), now_ms) ==
+        autonomy::ObjectAckStatus::Ok);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Ok);
+  CHECK(trust.store->store_epoch() == 2);
+
+  // A garbage object on a fresh token reaches the verifier, fails, and
+  // CHARGES the budget: the good redelivery right after still refuses.
+  now_ms += ConfigRateLimiter::kExpensiveVerifyIntervalMs + 10;
+  target.poll(now_ms);
+  std::array<std::uint8_t, 128> garbage{};
+  garbage.fill(0x5A);
+  CHECK(deliver_direct(target, tgt_port, sink, kGateway,
+                       autonomy::ControlObjectKind::TrustManifest,
+                       ByteView{garbage.data(), garbage.size()},
+                       now_ms) == autonomy::ObjectAckStatus::Failed);
+  CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+  CHECK(trust.store->store_epoch() == 2);
+  CHECK(deliver_direct(target, tgt_port, sink, kGateway,
+                       autonomy::ControlObjectKind::TrustManifest,
+                       object.view(), now_ms) ==
+        autonomy::ObjectAckStatus::Failed);
+  // And the budget recovers: past the window the good object lands again.
+  now_ms += ConfigRateLimiter::kExpensiveVerifyIntervalMs + 10;
+  target.poll(now_ms);
+  CHECK(deliver_direct(target, tgt_port, sink, kGateway,
+                       autonomy::ControlObjectKind::TrustManifest,
+                       object.view(), now_ms) ==
+        autonomy::ObjectAckStatus::Ok);
+}
+
+// TrustStatus query end to end, plus the nonce/network binding: a reply
+// naming any other network is foreign, never this query's completion.
+void test_trust_status_query_wire() {
+  MonotonicMs now_ms = 10000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort gw_port(kGateway, tgt_peer);
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  gw_port.peer_dest_ = kTarget;
+  tgt_port.peer_dest_ = kGateway;
+
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now_ms));
+  TrustRig trust{};
+  trust.provision(rig);
+  ConfigTarget target(tgt_port, rig.rate);
+  CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+  target.attach_trust_store(*trust.store, *rig.floor);
+  RecordingHost host{};
+  ConfigGateway gateway(gw_port, host);
+  tgt_peer = &target;
+  gw_peer = &gateway;
+
+  const std::array<std::uint8_t, 16> nonce = {5, 5, 5, 5, 1, 2, 3, 4,
+                                              5, 6, 7, 8, 9, 10, 11, 12};
+  CHECK_OK(gateway.submit_trust_status_query(0xF5, kTarget, kNet, nonce,
+                                             now_ms));
+  pump(gateway, target, gw_port, tgt_port, now_ms);
+  CHECK(host.calls == 1);
+  CHECK(host.last_result == ConfigOpsResult::Ok);
+  CHECK(host.last_sub == 0x26);
+  endpoint::TrustStatus status{};
+  CHECK_OK(endpoint::trust_status_decode(host.last_body.view(), status));
+  CHECK(status.nonce_echo == nonce);
+  CHECK(status.network == kNet);
+  CHECK(status.store_epoch == 1);
+  CHECK(status.min_authority_generation == 1);
+  CHECK(status.anchor_count == 1);
+  CHECK(status.key_count == 1);
+  CHECK(status.revocation_count == 0);
+  CHECK(status.flags == endpoint::kTrustStatusFlagHasActive);
+  Digest256 zero{};
+  CHECK(status.image_fingerprint != zero);
+
+  // Forged bindings never complete: wrong network, then wrong nonce echo.
+  CHECK_OK(gateway.submit_trust_status_query(0xF6, kTarget, kNet, nonce,
+                                             now_ms));
+  gw_port.flush(now_ms);
+  endpoint::TrustStatus forged{};
+  forged.nonce_echo = nonce;
+  forged.network = kNet + 1;  // foreign deployment
+  forged.store_epoch = 9;
+  endpoint::EncodedServicePayload enc{};
+  CHECK_OK(endpoint::trust_status_encode(forged, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 1);
+  CHECK(gateway.query_active());
+  forged.network = kNet;
+  forged.nonce_echo.fill(0x77);  // wrong echo
+  CHECK_OK(endpoint::trust_status_encode(forged, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 1);
+  CHECK(gateway.query_active());
+  // The honest reply still completes — binding, not silence.
+  pump(gateway, target, gw_port, tgt_port, now_ms);
+  CHECK(host.calls == 2);
+  CHECK(host.last_result == ConfigOpsResult::Ok);
+  CHECK(host.last_sub == 0x26);
+}
+
+// RecoveryInfo query end to end: the baseline (J/R, version, profile,
+// survivor) the host signs the next recovery against.
+void test_recovery_info_query_wire() {
+  MonotonicMs now_ms = 11000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort gw_port(kGateway, tgt_peer);
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  gw_port.peer_dest_ = kTarget;
+  tgt_port.peer_dest_ = kGateway;
+
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now_ms));
+  ConfigTarget target(tgt_port, rig.rate);
+  CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+  RecordingHost host{};
+  ConfigGateway gateway(gw_port, host);
+  tgt_peer = &target;
+  gw_peer = &gateway;
+
+  const std::array<std::uint8_t, 16> nonce = {6, 6, 6, 6, 1, 2, 3, 4,
+                                              5, 6, 7, 8, 9, 10, 11, 12};
+  CHECK_OK(gateway.submit_recovery_info_query(0xF7, kTarget, kNet,
+                                              endpoint::kConfigNamespaceSdk,
+                                              nonce, now_ms));
+  pump(gateway, target, gw_port, tgt_port, now_ms);
+  CHECK(host.calls == 1);
+  CHECK(host.last_result == ConfigOpsResult::Ok);
+  CHECK(host.last_sub == 0x27);
+  endpoint::RecoveryInfo info{};
+  CHECK_OK(endpoint::recovery_info_decode(host.last_body.view(), info));
+  CHECK(info.config_namespace == endpoint::kConfigNamespaceSdk);
+  CHECK(info.schema == 1);
+  CHECK(info.nonce_echo == nonce);
+  CHECK(info.network == kNet);
+  CHECK(info.store_floor == 0 && info.decision_floor == 0);  // fresh rig
+  CHECK(info.flags == 0);  // healthy, and no adopted survivor yet
+  CHECK(info.recovery_version == kRecoveryWireVersion);
+  CHECK(info.profile_bits == 1u << 0);  // dev profile bit, verifier ready
+
+  // A reply for another namespace or network never completes the query.
+  CHECK_OK(gateway.submit_recovery_info_query(0xF8, kTarget, kNet,
+                                              endpoint::kConfigNamespaceSdk,
+                                              nonce, now_ms));
+  gw_port.flush(now_ms);
+  endpoint::RecoveryInfo forged{};
+  forged.config_namespace = endpoint::kConfigNamespaceSdk;
+  forged.schema = 1;
+  forged.nonce_echo = nonce;
+  forged.network = kNet + 1;
+  forged.recovery_version = 1;
+  endpoint::EncodedServicePayload enc{};
+  CHECK_OK(endpoint::recovery_info_encode(forged, enc));
+  gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::Control,
+                                                enc.view()),
+                          now_ms);
+  CHECK(host.calls == 1);
+  CHECK(gateway.query_active());
+  pump(gateway, target, gw_port, tgt_port, now_ms);
+  CHECK(host.calls == 2);
+  CHECK(host.last_result == ConfigOpsResult::Ok);
+}
+
+// All three kinds share one bounded staging slot; the object kind fixes
+// the cap, while the reply keeps the submitted HostOps subcommand.
+void test_transfer_slot_shared() {
+  MonotonicMs now_ms = 12000;
+  ConfigEndpointSink* gw_peer = nullptr;
+  ConfigEndpointSink* tgt_peer = nullptr;
+  LoopbackPort gw_port(kGateway, tgt_peer);
+  LoopbackPort tgt_port(kTarget, gw_peer);
+  gw_port.peer_dest_ = kTarget;
+  (void)tgt_peer;
+  RecordingHost host{};
+  ConfigGateway gateway(gw_port, host);
+
+  std::array<std::uint8_t, 100> permit{};
+  permit.fill(0xA1);
+  std::array<std::uint8_t, 100> recovery{};
+  recovery.fill(0xB2);
+  std::array<std::uint8_t, 1500> manifest{};
+  manifest.fill(0xC3);
+  CHECK_OK(gateway.submit_permit(0xE1, kTarget,
+                                 ByteView{permit.data(), permit.size()},
+                                 now_ms));
+  CHECK(gateway.transfer_active());
+  CHECK(!gateway.submit_recovery(0xE2, kTarget,
+                                 ByteView{recovery.data(), recovery.size()},
+                                 now_ms).ok());
+  CHECK(!gateway.submit_trust(0xE4, kTarget,
+                              ByteView{manifest.data(), manifest.size()},
+                              now_ms)
+             .ok());
+
+  // Each ack resolves ONLY its own slot, under its own sub.
+  const auto ack_for = [&](const ByteView object, const std::uint64_t req,
+                           const std::uint8_t sub) {
+    autonomy::ObjectAckPayload ack{};
+    ack.subtype = autonomy::ObjectAckSubtype::Ack;
+    sha256(object, ack.object_hash);
+    ack.received_len = static_cast<std::uint16_t>(object.size);
+    ack.status = autonomy::ObjectAckStatus::Ok;
+    autonomy::EncodedPayload enc{};
+    CHECK_OK(autonomy::object_ack_encode(ack, enc));
+    gateway.on_config_frame(kTarget, object_frame(kTarget, FrameType::ObjectAck,
+                                                  enc.view()),
+                            now_ms);
+    CHECK(host.last_request == req);
+    CHECK(host.last_sub == sub);
+    CHECK(host.last_result == ConfigOpsResult::Ok);
+  };
+  ack_for(ByteView{permit.data(), permit.size()}, 0xE1, 0x21);
+  CHECK(!gateway.transfer_active());
+  CHECK_OK(gateway.submit_recovery(0xE2, kTarget,
+                                   ByteView{recovery.data(), recovery.size()},
+                                   now_ms));
+  ack_for(ByteView{recovery.data(), recovery.size()}, 0xE2, 0x24);
+  CHECK(!gateway.recovery_transfer_active());
+  CHECK_OK(gateway.submit_trust(0xE3, kTarget,
+                                ByteView{manifest.data(), manifest.size()},
+                                now_ms));
+  CHECK(gateway.trust_transfer_active());
+  ack_for(ByteView{manifest.data(), manifest.size()}, 0xE3, 0x25);
+  CHECK(!gateway.trust_transfer_active());
+  CHECK(host.calls == 3);
+
+  // And the 1024 B slots still refuse what only the trust slot can stage.
+  CHECK(!gateway
+             .submit_permit(0xE5, kTarget,
+                            ByteView{manifest.data(), manifest.size()}, now_ms)
+             .ok());
+  CHECK(!gateway
+             .submit_recovery(0xE6, kTarget,
+                              ByteView{manifest.data(), manifest.size()}, now_ms)
+             .ok());
+}
+
 }  // namespace
 
 int main() {
@@ -793,6 +1446,12 @@ int main() {
   test_manifest_duplicate_total_len_conflict();
   test_query_reply_echo_binding();
   test_dev_permit_tag_status_codes();
+  test_single_assembler_discipline();
+  test_kind5_trust_delivery_e2e();
+  test_trust_verify_shares_budget();
+  test_trust_status_query_wire();
+  test_recovery_info_query_wire();
+  test_transfer_slot_shared();
   if (failures == 0) {
     std::printf("config_wire tests OK\n");
     return 0;

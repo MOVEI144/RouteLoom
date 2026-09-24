@@ -49,6 +49,7 @@ int failures = 0;
 using namespace routeloom;
 using namespace routeloom::sdkv1;
 using routeloom_test::SimWorld;
+using routeloom_test::sim_rx_metadata;
 
 constexpr NetworkId kNet = 1;
 constexpr MonotonicMs kT0 = 1000;
@@ -590,6 +591,24 @@ struct BootstrapTap final : public BootstrapSink {
   std::vector<std::vector<std::uint8_t>> payloads;
 };
 
+struct ReentrantBootstrapTap final : public BootstrapSink {
+  MeshNode& node;
+  Status attempted{Status::success()};
+  MessageId id{77, 88};
+  bool called{false};
+
+  explicit ReentrantBootstrapTap(MeshNode& owner) noexcept : node(owner) {}
+
+  Status on_frame(const BootstrapMeta&, FrameType, ByteView,
+                  MonotonicMs now_ms) noexcept override {
+    const std::uint8_t body = 0xA5;
+    called = true;
+    attempted = node.send_bootstrap(1, FrameType::BootstrapAuth,
+                                    ByteView{&body, 1}, 4000, now_ms, id);
+    return Status::success();
+  }
+};
+
 wire::EncodedFrame craft_bootstrap(routeloom_test::TestSecurity& sec, const FrameType type,
                                    const NodeId origin, const NodeId destination,
                                    const NodeId previous_hop, const NodeId next_hop,
@@ -768,7 +787,7 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapAuth, 1, 2, 1, 2, MessageId{101, 1}, view,
                         /*end_protected=*/true, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.net.reply_port(2), 1), w.now);
     CHECK(tap_b.metas.empty());
     CHECK(w.obs(2)->has_diag("BOOTSTRAP_SCOPE_REJECTED"));
   }
@@ -777,7 +796,7 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapAuth, 1, kBroadcastNodeId, 1, 2,
                         MessageId{101, 2}, view, false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.net.reply_port(2), 1), w.now);
     CHECK(tap_b.metas.empty());
     CHECK(w.obs(2)->diagnostics.back() == "BOOTSTRAP_SCOPE_REJECTED");
   }
@@ -786,12 +805,31 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapChunk, 1, 2, 1, 2, MessageId{101, 3}, view,
                         false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.net.reply_port(2), 1), w.now);
+    b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.net.reply_port(2), 1), w.now);
     CHECK(tap_b.metas.size() == 1);
     CHECK(tap_b.types.back() == FrameType::BootstrapChunk);
   }
   (void)a;
+}
+
+void test_node_bootstrap_callback_reentry() {
+  SimWorld w;
+  w.add(1);
+  MeshNode* b = w.add(2);
+  w.start_all();
+  w.link(1, 2, 1, 1);
+  ReentrantBootstrapTap tap(*b);
+  b->set_bootstrap_sink(&tap);
+  routeloom_test::TestSecurity scratch;
+  const std::uint8_t body = 0x5A;
+  const wire::EncodedFrame frame = craft_bootstrap(
+      scratch, FrameType::BootstrapAuth, 1, 2, 1, 2, MessageId{101, 27},
+      ByteView{&body, 1}, false, kDefaultHopLimit, 4000);
+  b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.net.reply_port(2), 1), w.now);
+  CHECK(tap.called);
+  CHECK(tap.attempted.code == StatusCode::Busy);
+  CHECK(tap.id == (MessageId{77, 88}));
 }
 
 void test_node_bootstrap_transit_guards() {
@@ -836,7 +874,7 @@ void test_node_bootstrap_transit_guards() {
     const wire::EncodedFrame frame = craft_bootstrap(
         scratch, FrameType::BootstrapAuth, 1, 3, 1, 2, MessageId{101, 14}, view, false,
         kDefaultHopLimit, 100);
-    RadioRxMetadataV2 aged{};
+    RadioRxMetadataV2 aged = sim_rx_metadata(w.net.reply_port(2), 1);
     aged.received_us = (w.now - 200) * 1000U;
     b->on_radio_receive(1, frame.view(), aged, w.now);
     CHECK(w.obs(2)->has_diag("BOOTSTRAP_TRANSIT_DEADLINE_SPENT"));
@@ -849,7 +887,7 @@ void test_node_bootstrap_transit_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::MembershipResult, 1, 3, 1, 2, MessageId{101, 13},
                         view, false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.net.reply_port(2), 1), w.now);
     w.run(1500);
     CHECK(tap_c.metas.size() == 1);
     if (tap_c.metas.size() == 1) {
@@ -911,6 +949,7 @@ int main() {
   test_node_bootstrap_role_gate();
   test_node_bootstrap_caps();
   test_node_bootstrap_rx_guards();
+  test_node_bootstrap_callback_reentry();
   test_node_bootstrap_transit_guards();
   test_node_bootstrap_no_sink_and_data_continuity();
   if (failures == 0) {
