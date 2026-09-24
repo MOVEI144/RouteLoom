@@ -739,7 +739,14 @@ void NeighborDiscovery::admit_discover(
       reject_event("PEER_CAPACITY", env.claimed_node);
       return;
     }
-    candidate->id = CandidateId{next_candidate_id_++};
+    if (!mint_candidate_id(next_candidate_id_, candidate->id)) {
+      // Id space exhausted: drop the record rather than issuing 0 or
+      // wrapping onto a live exchange (Q117-13).
+      release_candidate(*candidate);
+      ++stats_.candidate_id_exhausted;
+      reject_event("CANDIDATE_ID_EXHAUSTED", env.claimed_node);
+      return;
+    }
     candidate->mac = source;
     candidate->claimed_node = env.claimed_node;
     candidate->txn_nonce = env.transaction_nonce;
@@ -1458,7 +1465,13 @@ void NeighborDiscovery::complete_exchange(
     }
     // Re-authentication of the same (node, MAC): bump the binding generation
     // and refresh the lease instead of creating a duplicate.
-    same->generation = BindingGeneration{same->generation.value + 1};
+    if (!bump_binding_generation(same->generation)) {
+      // Generation space exhausted: the old binding stays untouched rather
+      // than wrapping onto a stale handle (Q117-13).
+      ++stats_.binding_generation_exhausted;
+      reject_event("BINDING_GENERATION_EXHAUSTED", peer_node);
+      return;
+    }
     same->probe_outstanding = 0;
     same->stale_reprobes = 0;
     if (membership_.state() == MembershipState::Member && peer_member) {
@@ -1509,7 +1522,15 @@ void NeighborDiscovery::complete_exchange(
   if (membership_.state() == MembershipState::Member && peer_member) {
     // Both memberships verified -> mint the binding and start the
     // bidirectional probe that gates REACHABLE (02 §3).
-    neighbor->binding = BindingId{next_binding_id_++};
+    if (!mint_binding_id(next_binding_id_, neighbor->binding)) {
+      // Id space exhausted: no binding exists, so drop the record instead
+      // of binding under a reused id (Q117-13).
+      neighbors_.release(neighbor);
+      ++stats_.binding_id_exhausted;
+      reject_event("BINDING_ID_EXHAUSTED", peer_node);
+      cancel_competing(peer_mac, peer_node);
+      return;
+    }
     neighbor->phase = NeighborPhase::Bound;
     neighbor->lease_expires_at_ms = now_ms + config_.awake_lease_ms;
     if (!reserve_regular(*neighbor)) {
@@ -2120,7 +2141,13 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
         if (membership_.state() == MembershipState::Member &&
             hooks_.known_member(n.node, config_.network)) {
           n.peer_member_verified = true;
-          n.binding = BindingId{next_binding_id_++};
+          if (!mint_binding_id(next_binding_id_, n.binding)) {
+            // Id space exhausted: stay ApprovalPending until the lease
+            // lapses rather than binding under a reused id (Q117-13).
+            ++stats_.binding_id_exhausted;
+            reject_event("BINDING_ID_EXHAUSTED", n.node);
+            break;
+          }
           n.phase = NeighborPhase::Bound;
           n.lease_expires_at_ms = now_ms + config_.awake_lease_ms;
           n.last_confirmed_ms = now_ms;

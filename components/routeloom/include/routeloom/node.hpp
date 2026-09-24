@@ -12,6 +12,7 @@
 #include "routeloom/fixed_containers.hpp"
 #include "routeloom/group.hpp"
 #include "routeloom/node_status.hpp"
+#include "routeloom/reply_peer_leases.hpp"
 #include "routeloom/route_request.hpp"
 #include "routeloom/routing.hpp"
 #include "routeloom/security.hpp"
@@ -711,6 +712,11 @@ class MeshNode {
   // Install/clear the end-protected Diagnostic (48) terminal sink — the
   // surface remote TelemetrySnapshot/Reject bodies arrive on (02 §4.2).
   void set_diagnostic_sink(DiagnosticSink* sink) noexcept { diagnostic_sink_ = sink; }
+  // Install/clear the Owner's ExpectedReply lease port (issue #117, PR-B
+  // declaration only: stored, never called yet — admission enforcement
+  // arrives with PR-C). Nullptr disables.
+  void set_reply_peer_port(ReplyPeerPort* port) noexcept { reply_peer_port_ = port; }
+  ReplyPeerPort* reply_peer_port() const noexcept { return reply_peer_port_; }
   // Issue an end-protected TelemetryQuery toward `observer` over the routed
   // lane (02 §4.2). Returns the wire submission status; the request's own
   // deadline bounds the exchange.
@@ -2080,6 +2086,7 @@ class MeshNode {
   GatewayServiceSink* gateway_sink_{nullptr};
   ConfigEndpointSink* config_sink_{nullptr};
   DiagnosticSink* diagnostic_sink_{nullptr};
+  ReplyPeerPort* reply_peer_port_{nullptr};
   // Seen-table for inbound TransitFailure reports (dedup on
   // reference+phase+reason — a different report_id must not restart work).
   struct TransitFailureSeen {

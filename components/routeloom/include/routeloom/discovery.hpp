@@ -411,6 +411,11 @@ struct DiscoveryStats {
   std::uint32_t suppressed_offers{0};
   std::uint32_t rate_limited{0};
   std::uint32_t peer_capacity{0};
+  // Handle-space exhaustion (issue #117, Q117-13): the binding/exchange is
+  // refused instead of reusing id 0 or a wrapped handle.
+  std::uint32_t binding_id_exhausted{0};
+  std::uint32_t candidate_id_exhausted{0};
+  std::uint32_t binding_generation_exhausted{0};
   std::uint32_t conflicts{0};
   std::uint32_t simultaneous_resolved{0};
   std::uint32_t stale_expirations{0};

@@ -197,6 +197,11 @@ target_link_libraries(routeloom_rlres1_tests PRIVATE routeloom_core)
 target_compile_options(routeloom_rlres1_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_rlres1_tests COMMAND routeloom_rlres1_tests)
 
+add_executable(routeloom_reply_lease_tests test_reply_peer_leases.cpp)
+target_link_libraries(routeloom_reply_lease_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_reply_lease_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_reply_lease_tests COMMAND routeloom_reply_lease_tests)
+
 add_executable(routeloom_c_header_test c_api_smoke.c)
 target_link_libraries(routeloom_c_header_test PRIVATE routeloom_core)
 set_target_properties(routeloom_c_header_test PROPERTIES LINKER_LANGUAGE CXX)
