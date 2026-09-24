@@ -13,7 +13,7 @@
 
 namespace routeloom::espnow {
 namespace {
-constexpr char kTag[] = "RouteLoom";
+[[maybe_unused]] constexpr char kTag[] = "RouteLoom";
 // Wire-lane autonomy control frames are 1-hop liveness exchanges; a short
 // lifetime keeps a stale probe from circulating.
 constexpr std::uint32_t kAutonomyWireLifetimeMs = 500;
