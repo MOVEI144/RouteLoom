@@ -1193,8 +1193,8 @@ extern "C" void app_main(void) {
 #if CONFIG_ROUTELOOM_TRUST_STORE
   ESP_LOGW(kTag,
            "config target active (trust-store RLCP1_COSE_ESP256 — "
-           "production path EXPERIMENTAL: no install verb or manifest "
-           "endpoint is wired)");
+           "production path EXPERIMENTAL: kind-5 install + trust-status "
+           "receipt wired, not production-qualified)");
 #elif CONFIG_ROUTELOOM_CONFIG_PROFILE == 1
   ESP_LOGW(kTag,
            "config target active (RLCP1_COSE_ESP256 asymmetric permit — "
