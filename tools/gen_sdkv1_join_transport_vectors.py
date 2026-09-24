@@ -429,7 +429,7 @@ def invalid_discovery() -> None:
          "a preferred hint needs flags bit0")
     dbad("zt_discover_unknown_flag", discover_body(1, ORG_HINT, flags=2), "unknown flag bit")
     dbad("zt_discover_no_rljoin1", discover_body(2, ORG_HINT), "RLJOIN1 is required")
-    dbad("zt_discover_unknown_profile", discover_body(5, ORG_HINT), "unknown profile bit")
+    dbad("zt_discover_unknown_profile", discover_body(9, ORG_HINT), "unknown profile bit")
     dbad("zt_discover_avoid_gap", discover_body(1, ORG_HINT, avoid=(0, 7)), "avoid slots pack from the front")
     dbad("zt_discover_avoid_duplicate", discover_body(1, ORG_HINT, avoid=(7, 7)), "avoid slots distinct")
     dbad("zt_discover_preferred_avoided", discover_body(1, ORG_HINT, 7, (7, 0)),

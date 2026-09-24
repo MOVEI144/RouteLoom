@@ -326,6 +326,10 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
     return Status::error(StatusCode::InvalidState, "joiner already started");
   }
   if (!boot.prepared) return Status::error(StatusCode::InvalidArgument, "joiner boot unprepared");
+  if (boot.mode != JoinBootMode::Normal &&
+      boot.mode != JoinBootMode::VerifyExistingMembership) {
+    return Status::error(StatusCode::InvalidArgument, "joiner boot mode");
+  }
   if (!channels_valid(config_) || !role_valid(config_)) {
     return Status::error(StatusCode::InvalidArgument, "joiner config");
   }
@@ -340,6 +344,7 @@ Status Joiner::start(const JoinBootInput& boot, const MonotonicMs now) noexcept 
   channel_waiting_ = false;
   tune_is_refresh_ = false;
   recovery_only_ = false;
+  verify_existing_ = boot.mode == JoinBootMode::VerifyExistingMembership;
   recovery_key_ = JoinCandidateKey{};
   recovery_site_id_ = 0;
   evidence_valid_ = false;
@@ -851,6 +856,18 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
       start_scan();
       return Status::success();
     }
+    // Recovery queries keep the old record and its floors until an authenticated
+    // verdict; they cannot adopt another site's offer or become Member here.
+    if (verify_existing_) {
+      recovery_only_ = true;
+      recovery_site_id_ = site.site_id;
+      if (!retain_membership(site, identity)) {
+        recovery_required(JoinRecoveryReason::MembershipInvalid);
+        return Status::success();
+      }
+      start_scan();
+      return Status::success();
+    }
     // A healthy stored member: adopt it without touching the air.
     if (!retain_membership(site, identity)) {
       recovery_required(JoinRecoveryReason::MembershipInvalid);
@@ -1102,6 +1119,7 @@ Status Joiner::drive_refresh(const MonotonicMs now) noexcept {
   hs.requested_role = config_.requested_role;
   hs.last_site_id = evidence_valid_ ? evidence_.site_id : 0;
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
+  hs.last_network = evidence_valid_ && recovery_only_ ? evidence_.network : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
   if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
     finish_attempt(JoinAttemptOutcome::Failed, 0, now);
@@ -1282,6 +1300,7 @@ Status Joiner::drive_decided(const MonotonicMs now) noexcept {
       JoinAction action{};
       action.kind = JoinActionKind::RemovalRequired;
       action.removal = decided.removal;
+      action.removal_object = decided.removal_object;
       action.removal_site_id = decided.removal.site_id;
       action.removal_generation = decided.removal.generation;
       if (!emit_action(action)) return Status::success();  // retry next poll

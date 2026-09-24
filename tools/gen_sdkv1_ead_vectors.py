@@ -222,7 +222,7 @@ def main() -> None:
     bad("join_intent_without_rljoin1", "join_intent",
         join_intent(dict(intent, profile_bits=0b10)), "profile bit0 (RLJOIN1) is required")
     bad("join_intent_unknown_profile", "join_intent",
-        join_intent(dict(intent, profile_bits=0b101)), "only profile bits 0..1 are defined")
+        join_intent(dict(intent, profile_bits=0b1001)), "only profile bits 0..2 are defined")
     bad("join_intent_other_org", "join_intent",
         join_intent(dict(intent, org_hint=org_hint(sak_pub))),
         "org_hint of another Site CA (the authority does not answer it)", expect="deny",
@@ -293,7 +293,7 @@ def main() -> None:
     bad("join_request_reserved_set", "join_request", join_request(request, reserved=1),
         "reserved must be zero")
     bad("join_request_unknown_capability", "join_request",
-        join_request(dict(request, capability=0b1000)), "capability bits 0..2 only")
+        join_request(dict(request, capability=0b100000)), "capability bits 0..4 only")
     bad("join_request_role_zero", "join_request", join_request(dict(request, requested_role=0)),
         "a role is required")
     bad("join_request_role_unknown", "join_request",

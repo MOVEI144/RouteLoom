@@ -63,9 +63,13 @@ struct JoinerConfig {
 // the witness over; the Joiner issues no boot counter and takes no wall
 // clock. A preferred former membership is RAM-only and derived from the
 // stored RLS1, never passed in here.
+enum class JoinBootMode : std::uint8_t { Normal = 0, VerifyExistingMembership = 1 };
+
 struct JoinBootInput {
   std::uint32_t boot_witness{0};
   bool prepared{false};
+  // Query the authority without dropping a healthy retained membership.
+  JoinBootMode mode{JoinBootMode::Normal};
 };
 
 // --- Radio input ------------------------------------------------------------------------------
@@ -112,6 +116,7 @@ struct JoinAction {
   // RemovalRequired: a notice verified against the stored membership, for
   // the removal coordinator. The Joiner already stopped traffic.
   RemovalNotice removal{};
+  std::array<std::uint8_t, kRemovalNoticeObjectSize> removal_object{};
   std::uint64_t removal_site_id{0};
   std::uint32_t removal_generation{0};
   // RecoveryRequired: external diagnosis/recovery; nothing is auto-erased.
@@ -384,6 +389,7 @@ class Joiner final {
   // Recovery joins attempt the known site only; the store also refuses a
   // site change while a membership is adopted.
   bool recovery_only_{false};
+  bool verify_existing_{false};
   JoinCandidateKey recovery_key_{};
   std::uint64_t recovery_site_id_{0};
 

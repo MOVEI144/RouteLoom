@@ -521,6 +521,23 @@ void unit_checks() {
   ByteView value{};
   CHECK(!join_ead_find(ByteView{}, JoinEad::Intent, value).ok());
 
+  // Old-network AAD is explicit, canonical and never accepted from malformed
+  // untrusted EAD; the signed Notice still checks the stored site/generation.
+  ByteBuffer<kLastMembershipSize> last{};
+  constexpr NetworkId old_network = (NetworkId{3} << 32U) | 0x0A1B2C3DU;
+  CHECK(last_membership_encode(old_network, last).ok());
+  NetworkId decoded = 0;
+  CHECK(last_membership_decode(last.view(), decoded).ok());
+  CHECK(decoded == old_network);
+  last.bytes[1] = 1;
+  CHECK(!last_membership_decode(last.view(), decoded).ok());
+  CHECK(decoded == 0);
+  last.bytes[1] = 0;
+  last.bytes[2] = 1;
+  CHECK(!last_membership_decode(last.view(), decoded).ok());
+  CHECK(join_intent_validate(JoinIntent{1, kJoinProfileRljoin1 |
+                                               kJoinProfileMembershipRecovery}).ok());
+
   // Message budgets (02 §5.3/§6, V1-J14 EAD part). m1 = METHOD 1 + SUITES_I 1
   // + G_X bstr 34 + C_I (4-byte bstr) 5 + EAD_1 item; with the 2-byte phase
   // prefix and the 16-byte cookie it must fit one RLD1 BootstrapAuth body

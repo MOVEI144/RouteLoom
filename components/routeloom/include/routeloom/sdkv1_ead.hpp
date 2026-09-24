@@ -71,6 +71,7 @@ enum class JoinEad : std::uint32_t {
   // RLCW1 certificate rides this critical item — the SiteCert in EAD_2, the
   // DevCert in EAD_3 — after the message's own item.
   Credential = 65541,
+  LastMembership = 65542,  // recovery m3: old network for Notice AAD
 };
 
 constexpr std::uint8_t kJoinEadVersion = 1;
@@ -82,7 +83,13 @@ constexpr std::size_t kJoinEadLabelSize = 5;  // 3a 00 01 00 0x
 constexpr std::size_t kJoinIntentSize = 12;
 constexpr std::uint32_t kJoinProfileRljoin1 = 1u << 0;  // EDHOC join (required)
 constexpr std::uint32_t kJoinProfileRlres1 = 1u << 1;   // pending-ticket retry
-constexpr std::uint32_t kJoinProfileMask = 0x3u;
+constexpr std::uint32_t kJoinProfileMembershipRecovery = 1u << 2;
+constexpr std::uint32_t kJoinProfileMask = 0x7u;
+
+constexpr std::size_t kLastMembershipSize = 12;
+Status last_membership_encode(NetworkId network,
+                              ByteBuffer<kLastMembershipSize>& out) noexcept;
+Status last_membership_decode(ByteView value, NetworkId& network) noexcept;
 
 struct JoinIntent {
   std::uint32_t org_hint{0};
@@ -133,7 +140,9 @@ constexpr std::size_t kJoinRequestSize = 26;
 constexpr std::uint32_t kJoinCapabilitySleepy = 1u << 0;
 constexpr std::uint32_t kJoinCapabilityRelay = 1u << 1;
 constexpr std::uint32_t kJoinCapabilityGateway = 1u << 2;
-constexpr std::uint32_t kJoinCapabilityMask = 0x7u;
+constexpr std::uint32_t kJoinCapabilityApplyRrs = 1u << 3;
+constexpr std::uint32_t kJoinCapabilityRelayRrs = 1u << 4;
+constexpr std::uint32_t kJoinCapabilityMask = 0x1Fu;
 
 struct JoinRequest {
   std::uint16_t model{0};
