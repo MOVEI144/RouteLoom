@@ -85,7 +85,13 @@ site_id u64 | old_network u64 | new_network u64 | generation u32 |
 rs_floor u32 | gk_floor u32 | boot_witness u32 | cutover_id u64 |
 revision u32 | payload | crc32`. Removing and Holdoff carry a length-prefixed
 SiteCert and signed RemovalNotice; UnassignedReady carries no payload. The
-codec rejects reserved cutover modes until their semantics are implemented.
+cutover Idle watermark carries the COMMIT digest (32 B), cutover ID and
+revision so APPLIED can be reconstructed after a power cut.
+
+**GrantRenew/CutoverCommit** (`cutover_signed.json`): next SiteCert and
+MemberCert, PREPARE, old-network AAD signed COMMIT proof, new-network RRS1,
+PREPARED and APPLIED receipts. The generator signs with the fixed test SAK;
+the Rust harness re-signs and the C++ harness verifies both proof and RRS1.
 
 **RLP1** (05 §3.2): 84 B, no seal (single-slot write; a torn slot fails its
 CRC and is treated as empty). An empty slot has purpose, state and every
@@ -110,7 +116,7 @@ does not re-sign.
 
 ## Files
 
-- `valid/*.json` — `codec` (`rlcw1`, `rli1`, `rls1`, `rrs1`, `rrs1_record`, `rlx1_record`,
+- `valid/*.json` — `codec` (`rlcw1`, `rli1`, `rls1`, `rrs1`, `rrs1_record`, `rlx1_record`, `cutover`,
   `rlp1`, `rlp2`, `rlv1`, `pop`), the decoded fields, the encodings (`cert_hex`,
   `payload_hex`, `sig_structure_hex`, `record_hex`, `object_hex`, …),
   `expect: "ok"`.

@@ -11,7 +11,7 @@ pub const LIFECYCLE_MAGIC: u32 = 0x524c_5831;
 pub const LIFECYCLE_SEAL_COMMITTED: u32 = 0x4c58_3101;
 pub const LIFECYCLE_SLOT_BYTES: usize = 2048;
 pub const REMOVAL_NOTICE_OBJECT_SIZE: usize = 103;
-pub const LIFECYCLE_PAYLOAD_MAX: usize = 4 + CERT_MAX + REMOVAL_NOTICE_OBJECT_SIZE;
+pub const LIFECYCLE_PAYLOAD_MAX: usize = 1521;
 pub const LIFECYCLE_RECORD_MIN: usize = 88;
 pub const LIFECYCLE_RECORD_MAX: usize = LIFECYCLE_RECORD_MIN + LIFECYCLE_PAYLOAD_MAX;
 
@@ -22,6 +22,8 @@ pub enum LifecycleMode {
     Removing = 1,
     Holdoff = 2,
     UnassignedReady = 3,
+    Prepared = 4,
+    Switching = 5,
 }
 
 impl LifecycleMode {
@@ -31,6 +33,8 @@ impl LifecycleMode {
             1 => Ok(Self::Removing),
             2 => Ok(Self::Holdoff),
             3 => Ok(Self::UnassignedReady),
+            4 => Ok(Self::Prepared),
+            5 => Ok(Self::Switching),
             _ => err(Code::Unsupported, "rlx mode reserved"),
         }
     }
@@ -53,13 +57,25 @@ pub struct LifecycleRecord {
 }
 
 fn validate(record: &LifecycleRecord) -> Result<()> {
+    let cutover = matches!(
+        record.mode,
+        LifecycleMode::Prepared | LifecycleMode::Switching
+    );
+    let applied = record.mode == LifecycleMode::Idle && record.payload.len() == 32;
     if !id_valid(record.self_node)
         || record.site_id == 0
         || record.generation == 0
         || record.old_network == 0
-        || record.new_network != 0
-        || record.cutover_id != 0
-        || record.revision != 0
+        || (cutover && (record.new_network == 0 || record.cutover_id == 0 || record.revision == 0))
+        || (!cutover
+            && (record.new_network != 0
+                || (!applied && (record.cutover_id != 0 || record.revision != 0))))
+        || (applied
+            && (record.cutover_id == 0
+                || record.revision == 0
+                || record.old_network >> 32 == 0
+                || record.rs_floor == 0
+                || record.gk_floor == 0))
     {
         return err(Code::ProtocolError, "rlx binding");
     }
@@ -102,7 +118,42 @@ fn validate(record: &LifecycleRecord) -> Result<()> {
         {
             return err(Code::ProtocolError, "rlx notice binding");
         }
-    } else if !record.payload.is_empty() {
+    } else if matches!(
+        record.mode,
+        LifecycleMode::Prepared | LifecycleMode::Switching
+    ) {
+        if record.old_network as u32 != record.new_network as u32
+            || (record.old_network >> 32).checked_add(1) != Some(record.new_network >> 32)
+        {
+            return err(Code::ProtocolError, "rlx cutover binding");
+        }
+        let p = &record.payload;
+        if record.mode == LifecycleMode::Prepared {
+            if p.len() < 34 {
+                return err(Code::ProtocolError, "rlx prepared length");
+            }
+            let len = usize::from(u16::from_be_bytes(p[..2].try_into().unwrap()));
+            if len == 0 || len > 712 || p.len() != 2 + len + 32 {
+                return err(Code::ProtocolError, "rlx prepared length");
+            }
+        } else {
+            if p.len() < 38 {
+                return err(Code::ProtocolError, "rlx switching length");
+            }
+            let site = usize::from(u16::from_be_bytes(p[..2].try_into().unwrap()));
+            let rrs = usize::from(u16::from_be_bytes(p[2..4].try_into().unwrap()));
+            let commit = usize::from(u16::from_be_bytes(p[4..6].try_into().unwrap()));
+            if site == 0
+                || site > 712
+                || rrs == 0
+                || rrs > 616
+                || commit != 155
+                || p.len() != 6 + site + rrs + commit + 32
+            {
+                return err(Code::ProtocolError, "rlx switching length");
+            }
+        }
+    } else if !record.payload.is_empty() && !applied {
         return err(Code::ProtocolError, "rlx watermark payload");
     }
     Ok(())

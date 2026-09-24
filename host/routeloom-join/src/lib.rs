@@ -32,6 +32,7 @@ use routeloom_provision::sdkv1::cert::{
     MEMBER_ROLE_GATEWAY, MEMBER_ROLE_MASK, MEMBER_ROLE_RELAY,
 };
 use routeloom_provision::sdkv1::revocation::RevocationReason;
+pub mod renew;
 use routeloom_provision::sdkv1::{
     cose_es256_assemble, cose_es256_parse, cose_es256_sig_structure, cose_es256_sign,
     cose_es256_verify,

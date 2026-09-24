@@ -187,6 +187,9 @@ class SiteStore {
   // assignment_generation, gk_epoch_current, rs_epoch_floor or
   // boot_witness (Conflict otherwise).
   Status commit(const SiteRecord& record) noexcept;
+  // Verified cutover cleanup: repeat the monotonic Member check, then
+  // replace both slots so no old DAMS/GK survives in the sibling.
+  Status consolidate(const SiteRecord& record) noexcept;
   // GK transitions are the only way to replace GK on an assigned site.
   // A superseding stage twins both slots so the discarded next key is gone.
   Status stage_group_key(std::uint32_t epoch, const std::array<std::uint8_t, 32>& key) noexcept;
@@ -222,6 +225,7 @@ class SiteStore {
   const SiteRecord& site() const noexcept { return site_; }
 
  private:
+  Status check_member(const SiteRecord& record) const noexcept;
   Status encode(const SiteRecord& record, std::size_t& used_len) noexcept;
   void wipe_scratch() noexcept;
 

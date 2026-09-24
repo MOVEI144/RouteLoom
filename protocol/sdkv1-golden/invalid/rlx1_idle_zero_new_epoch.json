@@ -1,0 +1,8 @@
+{
+  "codec": "rlx1_record",
+  "encoded_hex": "524c583100010078000000014c583101000000080000002000a10000000012345173000000000042000000000a1b2c3d0000000000000000000000030000000f000000cd0000020000000000000000130000000242aa69985ac3718233cc684102929677fada3153d3999d94a51e97a1a3b422c3c8fcd0e0",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rlx1_idle_zero_new_epoch",
+  "note": "an APPLIED watermark must follow a real epoch advance"
+}

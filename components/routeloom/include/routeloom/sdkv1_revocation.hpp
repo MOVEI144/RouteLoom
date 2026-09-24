@@ -25,6 +25,7 @@
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_store.hpp"
 #include "routeloom/sdkv1_lifecycle_store.hpp"
+#include "routeloom/sdkv1_grant_renew.hpp"
 #include "routeloom/status.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/types.hpp"
@@ -230,7 +231,8 @@ enum class LifecyclePhase : std::uint8_t {
   Removing = 7,
   Holdoff = 8,
   UnassignedReady = 9,
-  // Prepared/Switching follow after the cutover proof is implemented.
+  Prepared = 10,
+  Switching = 11,
 };
 
 enum class TrafficUse : std::uint8_t {
@@ -506,6 +508,14 @@ class LifecycleRuntimePort {
   virtual Status erase_site_trust() noexcept {
     return Status::error(StatusCode::Unsupported, "site trust erasure not wired");
   }
+  // Cutover must retire old RAM/RTC contexts and all pending traffic, without
+  // erasing the device identity or the new site trust. No implicit fallback.
+  virtual Status retire_network() noexcept {
+    return Status::error(StatusCode::Unsupported, "network retirement not wired");
+  }
+  virtual Status install_site_trust(const SiteRecord&) noexcept {
+    return Status::error(StatusCode::Unsupported, "site trust install not wired");
+  }
 };
 
 struct LifecyclePorts {
@@ -631,6 +641,15 @@ class MembershipLifecycle final {
   Status on_removal(ByteView notice, MonotonicMs now_ms) noexcept;
   Status removal_poll(MonotonicMs now_ms) noexcept;
   bool removal_proof_valid(const LifecycleRecord& record) noexcept;
+  Status on_renew(ByteView body, MonotonicMs now_ms) noexcept;
+  Status renew_prepare(ByteView body) noexcept;
+  Status renew_commit(ByteView body, MonotonicMs now_ms) noexcept;
+  bool staged_site(const LifecycleRecord& record, SiteRecord& out) noexcept;
+  bool switching_proof(const LifecycleRecord& record, SiteRecord& out,
+                       RevocationSet& rrs) noexcept;
+  Status switch_poll(MonotonicMs now_ms) noexcept;
+  bool restore_applied_receipt() noexcept;
+  void send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept;
   bool reassigned_after_removal() const noexcept;
 
   LifecycleBlockReason adopt_stores() noexcept;
@@ -718,6 +737,10 @@ class MembershipLifecycle final {
   RemovalStep removal_step_{RemovalStep::Runtime};
   std::size_t removal_cursor_{0};
   MonotonicMs holdoff_start_{0};
+  std::size_t switch_cursor_{0};
+  std::uint8_t switch_step_{0};
+  GrantReceipt applied_receipt_{};
+  bool applied_receipt_pending_{false};
 
   LifecycleAction action_{};
   bool action_pending_{false};
