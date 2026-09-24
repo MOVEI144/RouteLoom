@@ -75,14 +75,17 @@ constexpr std::uint32_t kCapNodeStatusV1 = 1u << 6;
 // surface (attach_group); bound into the authenticated Hello transcript.
 constexpr std::uint32_t kCapGroupDeliveryV1 = 1u << 7;
 
-// join_relay_v1 (docs/design/sdk-v1/02-zero-touch-join.md §7.2): the device
+// join_relay (docs/design/sdk-v1/02-zero-touch-join.md §7.2): the device
 // is a gateway that relays zero-touch join exchanges between member proxies
 // and the host's Site Authority — HostOps 0x60-0x63. The design proposed
 // bit 6 and subcommands 0x40-0x42, which node_status_v1 already owns, so
 // the SDK v1 site-authority family moved to 0x60-0x6F (02 §7.4). Advertised
 // only when the bridge owner attaches a JoinRelayGateway
 // (attach_join_relay); bound into the authenticated Hello transcript.
+// Bit 8 was the v1 family; v2 (#116, both service epochs on every token)
+// is bit 9 and the only one a v2 engine advertises.
 constexpr std::uint32_t kCapJoinRelayV1 = 1u << 8;
+constexpr std::uint32_t kCapJoinRelayV2 = 1u << 9;
 
 // authority_channel_v1 (G-SEC P5): the gateway relays authority-channel
 // carriers between member devices and the host's Site Authority — HostOps
@@ -92,6 +95,9 @@ constexpr std::uint32_t kCapJoinRelayV1 = 1u << 8;
 constexpr std::uint32_t kCapAuthorityChannelV1 = 1u << 9;
 
 constexpr std::uint8_t kHostOpsSchema = 1;
+// The join relay family's own inner schema (#116 §5.2): only 0x60-0x63
+// speak it; every other family stays on schema 1.
+constexpr std::uint8_t kJoinRelaySchema = 2;
 
 // 03-send-api.md §6 (0x01-0x05) and scope-gateway-config/05-wire-api.md
 // §5.6 (0x10-0x13, 0x20-0x23): registered once, never renumbered locally.
@@ -959,11 +965,13 @@ Status encode_group_status(const GroupStatusReply& reply, MutableByteView out,
 Status decode_group_status(ByteView inner, GroupStatusReply& out) noexcept;
 
 // ---------------------------------------------------------------------------
-// Join relay HostOps family (join_relay_v1, docs/design/sdk-v1/02 §7.2 as
-// resolved in §7.4). Same inner common form: schema:u8=1, sub:u8,
-// payload_len:u16, payload; big-endian, exact length. `object` is a relay
-// object (sdkv1_join_transport.hpp: RelayHeader 24 B + message <= 960 B, or
-// + a 5 B abort body) and is validated by the codec.
+// Join relay HostOps family (join_relay_v2, docs/design/sdk-v1/02 §7.2 as
+// resolved in §7.4, #116). Same inner common form but the family's own
+// schema: schema:u8=2, sub:u8, payload_len:u16, payload; big-endian, exact
+// length. `object` is a v2 relay object (sdkv1_join_transport.hpp:
+// RelayHeader 32 B + message <= 960 B, or + a 5 B abort body) and is
+// validated by the codec. There is no v1 fallback: schema-1 join frames
+// are rejected, never upgraded.
 //
 // 0x60 JOIN_RELAY_UP (G→H, unsolicited, request id 0), payload 17 B + object:
 //   gateway:u64, from_proxy:u64 (the verified mesh origin; the object's
@@ -971,21 +979,23 @@ Status decode_group_status(ByteView inner, GroupStatusReply& out) noexcept;
 //   from_proxy == gateway, the gateway's own join), object with dir = up.
 // 0x61 JOIN_RELAY_DOWN (H→G), payload 8 B + object: to_proxy:u64, object
 //   with dir = down and proxy == to_proxy. Answered by 0x63.
-// 0x62 JOIN_RELAY_ABORT, payload 13 B: proxy:u64, relay_id:u32 (nonzero),
-//   reason:u8 (1 proxy_aborted, 2 gateway_expired, 3 delivery_failed,
-//   4 host_aborted). H→G (reason 4) cancels a relay the gateway saw
-//   recently and is answered by 0x63; G→H (request id 0, reasons 1-3)
-//   tells the host the relay ended without an answer.
+// 0x62 JOIN_RELAY_ABORT, payload 21 B: proxy:u64, relay_id:u32 (nonzero),
+//   gateway_epoch:u32 (nonzero), proxy_epoch:u32 (nonzero), reason:u8
+//   (1 proxy_aborted, 2 gateway_expired, 3 delivery_failed, 4 host_aborted,
+//   5 superseded). H→G (reason 4) cancels a live relay and is answered by
+//   0x63; G→H (request id 0, reasons 1-3, 5) tells the host the relay ended
+//   without an answer.
 // 0x63 JOIN_RELAY_RESULT (G→H, under the 0x61/0x62 request id), payload
-//   14 B: result:u16 (ConfigOpsResult: Ok = handed to the Wire lane, NOT
+//   22 B: result:u16 (ConfigOpsResult: Ok = handed to the Wire lane, NOT
 //   delivered to the device; Unsupported, Busy, Denied, Invalid, NoRoute,
-//   Indeterminate), proxy:u64, relay_id:u32 (both echo the request; zero
-//   when it could not be parsed that far).
+//   Indeterminate), proxy:u64, relay_id:u32, gateway_epoch:u32,
+//   proxy_epoch:u32 (echo the request; zero when it could not be parsed
+//   that far — but an Ok always carries the complete nonzero token).
 constexpr std::size_t kJoinRelayUpFixed = 17;
 constexpr std::size_t kJoinRelayDownFixed = 8;
-constexpr std::size_t kJoinRelayAbortPayload = 13;
-constexpr std::size_t kJoinRelayResultPayload = 14;
-constexpr std::size_t kJoinRelayObjectMax = 984;  // sdkv1::kRelayObjectMax
+constexpr std::size_t kJoinRelayAbortPayload = 21;
+constexpr std::size_t kJoinRelayResultPayload = 22;
+constexpr std::size_t kJoinRelayObjectMax = 992;  // sdkv1::kRelayObjectMax
 constexpr std::size_t kJoinRelayUpMaxPayload = kJoinRelayUpFixed + kJoinRelayObjectMax;
 constexpr std::size_t kJoinRelayDownMaxPayload = kJoinRelayDownFixed + kJoinRelayObjectMax;
 constexpr std::uint8_t kJoinRelayHopsMax = 254;
@@ -1005,6 +1015,8 @@ struct JoinRelayDown {
 struct JoinRelayAbort {
   NodeId proxy{kInvalidNodeId};
   std::uint32_t relay_id{0};
+  std::uint32_t gateway_epoch{0};
+  std::uint32_t proxy_epoch{0};
   std::uint8_t reason{0};
 };
 
@@ -1012,6 +1024,8 @@ struct JoinRelayResult {
   std::uint16_t result{0};  // ConfigOpsResult
   NodeId proxy{kInvalidNodeId};
   std::uint32_t relay_id{0};
+  std::uint32_t gateway_epoch{0};
+  std::uint32_t proxy_epoch{0};
 };
 
 Status encode_join_relay_up(const JoinRelayUp& up, MutableByteView out,

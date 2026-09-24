@@ -1,10 +1,11 @@
 {
+  "carrier": "rld1",
   "codec": "join_reply",
   "expect": "ok",
   "format": "routeloom-sdkv1-join-transport-golden-v1",
   "id": 269554195,
   "name": "join_reply_complete",
-  "note": "10 B reply",
+  "note": "10 B RLD1 reply",
   "payload_hex": "014310111213019a0100",
   "phase": 4,
   "received": 410,

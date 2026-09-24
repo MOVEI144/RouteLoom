@@ -1,37 +1,43 @@
-//! join_relay_v1: the SDK v1 zero-touch join relay between a gateway and the
+//! join_relay_v2: the SDK v1 zero-touch join relay between a gateway and the
 //! host's Site Authority (docs/design/sdk-v1/02-zero-touch-join.md §7, as
-//! resolved in §7.4). Two layers, byte-identical to the device side:
+//! resolved in §7.4 and hardened by #116). Two layers, byte-identical to the
+//! device side:
 //!
 //! - the relay object a member proxy exchanges with the gateway over the
 //!   Wire lane and the gateway hands to the host unchanged
 //!   (`components/routeloom/{include/routeloom/sdkv1_join_transport.hpp,
 //!   src/sdkv1_join_transport.cpp}`, vectors `protocol/sdkv1-golden/
-//!   join-transport/`): RelayHeader 24 B + one EDHOC / RLRES1 message
-//!   (<= 960 B) or a 5 B abort body;
+//!   join-relay-v2/`): RelayHeader 32 B (both service epochs) + one EDHOC /
+//!   RLRES1 message (<= 960 B) or a 5 B abort body;
 //! - the USB HostOps subcommands 0x60-0x63 that carry it
 //!   (`components/routeloom/src/usb_host_ops.cpp`, session vectors
-//!   `protocol/usb-golden/join-relay/`).
+//!   `protocol/usb-golden/join-relay-v2/`).
 //!
 //! The design proposed 0x40-0x42 and capability bit 6, which node_status_v1
-//! owns; the SDK v1 site-authority family uses 0x60-0x6F and bit 8.
+//! owns; the SDK v1 site-authority family uses 0x60-0x6F. Bit 8 was the v1
+//! family; v2 (#116) is bit 9 and the only one either side advertises.
 //!
-//! Inner common form: schema:u8=1, sub:u8, payload_len:u16, payload —
-//! big-endian, exact length.
+//! Join inner form: schema:u8=2, sub:u8, payload_len:u16, payload —
+//! big-endian, exact length. Every other family stays on schema 1.
 //! - 0x60 JOIN_RELAY_UP (G→H, request id 0): gateway u64, from_proxy u64,
 //!   hops u8 (1..=254; 0 only for the gateway's own join, from_proxy ==
-//!   gateway), relay object with dir = up and proxy == from_proxy.
-//! - 0x61 JOIN_RELAY_DOWN (H→G): to_proxy u64, relay object with dir = down
-//!   and proxy == to_proxy. Answered by 0x63.
-//! - 0x62 JOIN_RELAY_ABORT: proxy u64, relay_id u32 (nonzero), reason u8
-//!   (1 proxy_aborted, 2 gateway_expired, 3 delivery_failed, 4 host_aborted).
+//!   gateway), v2 relay object with dir = up and proxy == from_proxy.
+//! - 0x61 JOIN_RELAY_DOWN (H→G): to_proxy u64, v2 relay object with dir =
+//!   down and proxy == to_proxy. Answered by 0x63.
+//! - 0x62 JOIN_RELAY_ABORT: proxy u64, relay_id u32, gateway_epoch u32,
+//!   proxy_epoch u32 (all nonzero), reason u8 (1 proxy_aborted,
+//!   2 gateway_expired, 3 delivery_failed, 4 host_aborted, 5 superseded).
 //!   H→G (reason 4) is answered by 0x63; G→H arrives with request id 0.
 //! - 0x63 JOIN_RELAY_RESULT (G→H, the 0x61/0x62 request id): result u16
 //!   (ConfigOpsResult; Ok = handed to the Wire lane, not delivered to the
-//!   device), proxy u64, relay_id u32.
+//!   device), proxy u64, relay_id u32, gateway_epoch u32, proxy_epoch u32
+//!   (an Ok always carries the complete nonzero token).
 
-use crate::host_ops::{ConfigOpsResult, HostOpsError, HOST_OPS_SCHEMA};
+use crate::host_ops::{ConfigOpsResult, HostOpsError};
 
-/// HelloAck capability bit: the device serves 0x60-0x63.
+/// HelloAck capability bit: the device serves 0x60-0x63 v2.
+pub const CAP_JOIN_RELAY_V2: u32 = 1 << 9;
+/// The v1 bit, kept for history only: nothing advertises or accepts it.
 pub const CAP_JOIN_RELAY_V1: u32 = 1 << 8;
 
 pub const SUB_JOIN_RELAY_UP: u8 = 0x60;
@@ -39,21 +45,31 @@ pub const SUB_JOIN_RELAY_DOWN: u8 = 0x61;
 pub const SUB_JOIN_RELAY_ABORT: u8 = 0x62;
 pub const SUB_JOIN_RELAY_RESULT: u8 = 0x63;
 
+/// The join family's own inner schema (#116 §5.2).
+pub const JOIN_RELAY_SCHEMA: u8 = 2;
+
 pub const INNER_HEAD_SIZE: usize = 4;
-pub const RELAY_VERSION: u8 = 1;
-pub const RELAY_HEADER_SIZE: usize = 24;
+pub const RELAY_VERSION: u8 = 2;
+pub const RELAY_HEADER_SIZE: usize = 32;
 pub const RELAY_ABORT_BODY_SIZE: usize = 5;
 /// One EDHOC / RLRES1 message (02 §7.4).
 pub const JOIN_MESSAGE_MAX: usize = 960;
-pub const RELAY_OBJECT_MAX: usize = RELAY_HEADER_SIZE + JOIN_MESSAGE_MAX; // 984
+pub const RELAY_OBJECT_MAX: usize = RELAY_HEADER_SIZE + JOIN_MESSAGE_MAX; // 992
 pub const RETRY_AFTER_MAX_MS: u32 = 600_000;
 /// Wire payload budget: larger relay objects are chunked on the Wire lane.
 pub const WIRE_PAYLOAD_MAX: usize = 128;
 
+/// Gateway epoch query/reply (#116 §3.3): 24 B datagrams on Wire type 3.
+pub const EPOCH_QUERY_KIND: u8 = 3;
+pub const EPOCH_REPLY_KIND: u8 = 4;
+pub const EPOCH_QUERY_SIZE: usize = 24;
+pub const EPOCH_REPLY_SIZE: usize = 24;
+pub const EPOCH_REPLY_READY: u8 = 0x01;
+
 pub const UP_FIXED_PAYLOAD: usize = 17;
 pub const DOWN_FIXED_PAYLOAD: usize = 8;
-pub const ABORT_PAYLOAD: usize = 13;
-pub const RESULT_PAYLOAD: usize = 14;
+pub const ABORT_PAYLOAD: usize = 21;
+pub const RESULT_PAYLOAD: usize = 22;
 pub const UP_MAX_PAYLOAD: usize = UP_FIXED_PAYLOAD + RELAY_OBJECT_MAX;
 pub const DOWN_MAX_PAYLOAD: usize = DOWN_FIXED_PAYLOAD + RELAY_OBJECT_MAX;
 pub const HOPS_MAX: u8 = 254;
@@ -106,6 +122,8 @@ pub enum RelayAbortReason {
     GatewayExpired = 2,
     DeliveryFailed = 3,
     HostAborted = 4,
+    /// A newer key from the same proxy replaced this relay (#116).
+    Superseded = 5,
 }
 
 impl RelayAbortReason {
@@ -115,6 +133,7 @@ impl RelayAbortReason {
             2 => Self::GatewayExpired,
             3 => Self::DeliveryFailed,
             4 => Self::HostAborted,
+            5 => Self::Superseded,
             other => return Err(HostOpsError::UnknownEnum("relay abort reason", other)),
         })
     }
@@ -132,12 +151,29 @@ impl RelayStatusCode {
     }
 }
 
-/// RelayHeader (24 B): ver u8 = 1 | dir u8 | relay_id u32 | proxy u64 |
-/// joiner MAC 6 B | step u8 | state u8 | joiner_rssi_dbm i8 | phase u8.
+/// A relay exchange token (#116): the gateway and proxy service incarnations
+/// plus the proxy's strictly increasing relay_id within its epoch. All three
+/// are nonzero on the Wire; compared as plain integers, never wrapped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct RelayToken {
+    pub gateway_epoch: u32,
+    pub proxy_epoch: u32,
+    pub relay_id: u32,
+}
+
+impl RelayToken {
+    pub fn valid(self) -> bool {
+        self.gateway_epoch != 0 && self.proxy_epoch != 0 && self.relay_id != 0
+    }
+}
+
+/// RelayHeader v2 (32 B): ver u8 = 2 | dir u8 | relay_id u32 | proxy u64 |
+/// joiner MAC 6 B | step u8 | state u8 | joiner_rssi_dbm i8 | phase u8 |
+/// gateway_epoch u32 | proxy_epoch u32.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RelayHeader {
     pub dir: RelayDirection,
-    /// Chosen by the proxy, nonzero, unique within the proxy.
+    /// Chosen by the proxy: strictly increasing from 1 within its epoch.
     pub relay_id: u32,
     pub proxy: u64,
     /// The joiner's radio address as the proxy observed it (unicast).
@@ -148,6 +184,20 @@ pub struct RelayHeader {
     pub state: RelayState,
     /// Up objects only (<= 0 dBm, display hint); 0 on down objects.
     pub joiner_rssi_dbm: i8,
+    /// The gateway service incarnation this exchange rides (nonzero).
+    pub gateway_epoch: u32,
+    /// The proxy relay service incarnation (nonzero).
+    pub proxy_epoch: u32,
+}
+
+impl RelayHeader {
+    pub fn token(self) -> RelayToken {
+        RelayToken {
+            gateway_epoch: self.gateway_epoch,
+            proxy_epoch: self.proxy_epoch,
+            relay_id: self.relay_id,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,6 +249,9 @@ impl RelayObject {
         let h = &self.header;
         if h.relay_id == 0 || !node_valid(h.proxy) {
             return invalid("relay identity");
+        }
+        if h.gateway_epoch == 0 || h.proxy_epoch == 0 {
+            return invalid("relay epoch");
         }
         if h.joiner_mac == [0; 6] || h.joiner_mac[0] & 1 != 0 {
             return invalid("relay joiner mac");
@@ -272,6 +325,8 @@ impl RelayObject {
         out.push(h.state as u8);
         out.extend_from_slice(&h.joiner_rssi_dbm.to_be_bytes());
         out.push(h.phase);
+        out.extend_from_slice(&h.gateway_epoch.to_be_bytes());
+        out.extend_from_slice(&h.proxy_epoch.to_be_bytes());
         match &self.body {
             RelayBody::Message(message) => out.extend_from_slice(message),
             RelayBody::Abort {
@@ -316,6 +371,8 @@ impl RelayObject {
             step: bytes[20],
             state,
             joiner_rssi_dbm: i8::from_be_bytes([bytes[22]]),
+            gateway_epoch: u32::from_be_bytes(bytes[24..28].try_into().expect("4")),
+            proxy_epoch: u32::from_be_bytes(bytes[28..32].try_into().expect("4")),
         };
         let rest = &bytes[RELAY_HEADER_SIZE..];
         let body = if state == RelayState::Abort {
@@ -357,11 +414,131 @@ pub fn decode_single_frame(wire_type: u8, payload: &[u8]) -> Result<RelayObject,
     Ok(object)
 }
 
+// --- gateway epoch query/reply (#116 §3.3) -------------------------------------------
+///
+/// How a proxy learns its gateway's service epoch: 24 B datagrams on Wire
+/// type 3, told apart from a relay object by byte 1 (kind 3/4 vs dir 1/2).
+/// Query: ver 2 | kind 3 | flags 0 | reserved 0 | u32 0 | 16 B fresh nonce.
+/// Reply: ver 2 | kind 4 | flags (bit0 authority_ready) | reserved 0 |
+/// gateway_epoch u32 (nonzero) | 16 B nonce echo.
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EpochQuery {
+    pub nonce: [u8; 16],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EpochReply {
+    pub gateway_epoch: u32,
+    pub nonce: [u8; 16],
+    pub authority_ready: bool,
+}
+
+fn nonce_zero(nonce: &[u8; 16]) -> bool {
+    nonce.iter().all(|b| *b == 0)
+}
+
+pub fn encode_epoch_query(query: &EpochQuery) -> Result<Vec<u8>, HostOpsError> {
+    if nonce_zero(&query.nonce) {
+        return invalid("epoch query nonce");
+    }
+    let mut out = Vec::with_capacity(EPOCH_QUERY_SIZE);
+    out.push(RELAY_VERSION);
+    out.push(EPOCH_QUERY_KIND);
+    out.push(0);
+    out.push(0);
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&query.nonce);
+    Ok(out)
+}
+
+pub fn decode_epoch_query(bytes: &[u8]) -> Result<EpochQuery, HostOpsError> {
+    if bytes.len() != EPOCH_QUERY_SIZE
+        || bytes[0] != RELAY_VERSION
+        || bytes[1] != EPOCH_QUERY_KIND
+        || bytes[2] != 0
+        || bytes[3] != 0
+        || u32::from_be_bytes(bytes[4..8].try_into().expect("4")) != 0
+    {
+        return invalid("epoch query head");
+    }
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&bytes[8..24]);
+    if nonce_zero(&nonce) {
+        return invalid("epoch query nonce");
+    }
+    Ok(EpochQuery { nonce })
+}
+
+pub fn encode_epoch_reply(reply: &EpochReply) -> Result<Vec<u8>, HostOpsError> {
+    if reply.gateway_epoch == 0 || nonce_zero(&reply.nonce) {
+        return invalid("epoch reply fields");
+    }
+    let mut out = Vec::with_capacity(EPOCH_REPLY_SIZE);
+    out.push(RELAY_VERSION);
+    out.push(EPOCH_REPLY_KIND);
+    out.push(if reply.authority_ready {
+        EPOCH_REPLY_READY
+    } else {
+        0
+    });
+    out.push(0);
+    out.extend_from_slice(&reply.gateway_epoch.to_be_bytes());
+    out.extend_from_slice(&reply.nonce);
+    Ok(out)
+}
+
+pub fn decode_epoch_reply(bytes: &[u8]) -> Result<EpochReply, HostOpsError> {
+    if bytes.len() != EPOCH_REPLY_SIZE
+        || bytes[0] != RELAY_VERSION
+        || bytes[1] != EPOCH_REPLY_KIND
+        || bytes[3] != 0
+    {
+        return invalid("epoch reply head");
+    }
+    if bytes[2] & !EPOCH_REPLY_READY != 0 {
+        return invalid("epoch reply flags");
+    }
+    let gateway_epoch = u32::from_be_bytes(bytes[4..8].try_into().expect("4"));
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&bytes[8..24]);
+    if gateway_epoch == 0 || nonce_zero(&nonce) {
+        return invalid("epoch reply fields");
+    }
+    Ok(EpochReply {
+        gateway_epoch,
+        nonce,
+        authority_ready: bytes[2] & EPOCH_REPLY_READY != 0,
+    })
+}
+
+/// One Wire type-3 payload, classified by its version/kind bytes before any
+/// deeper decode. Anything else — v1 bytes included — is invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WireRelayKind {
+    Invalid,
+    RelayObject,
+    EpochQuery,
+    EpochReply,
+}
+
+pub fn classify_wire_relay(payload: &[u8]) -> WireRelayKind {
+    if payload.len() < 2 || payload[0] != RELAY_VERSION {
+        return WireRelayKind::Invalid;
+    }
+    match payload[1] {
+        1 | 2 => WireRelayKind::RelayObject,
+        EPOCH_QUERY_KIND if payload.len() == EPOCH_QUERY_SIZE => WireRelayKind::EpochQuery,
+        EPOCH_REPLY_KIND if payload.len() == EPOCH_REPLY_SIZE => WireRelayKind::EpochReply,
+        _ => WireRelayKind::Invalid,
+    }
+}
+
 // --- USB HostOps 0x60-0x63 ------------------------------------------------------
 
 /// The sub byte of a join relay inner body (0x60-0x63), if it is one.
 pub fn join_relay_sub(inner: &[u8]) -> Option<u8> {
-    if inner.len() < 2 || inner[0] != HOST_OPS_SCHEMA {
+    if inner.len() < 2 || inner[0] != JOIN_RELAY_SCHEMA {
         return None;
     }
     (SUB_JOIN_RELAY_UP..=SUB_JOIN_RELAY_RESULT)
@@ -370,7 +547,7 @@ pub fn join_relay_sub(inner: &[u8]) -> Option<u8> {
 }
 
 fn head(out: &mut Vec<u8>, sub: u8, payload_len: usize) {
-    out.push(HOST_OPS_SCHEMA);
+    out.push(JOIN_RELAY_SCHEMA);
     out.push(sub);
     out.extend_from_slice(&(payload_len as u16).to_be_bytes());
 }
@@ -379,7 +556,7 @@ fn body(inner: &[u8], sub: u8, min: usize, max: usize) -> Result<&[u8], HostOpsE
     if inner.len() < INNER_HEAD_SIZE || inner.len() > INNER_HEAD_SIZE + max {
         return Err(HostOpsError::LengthMismatch);
     }
-    if inner[0] != HOST_OPS_SCHEMA {
+    if inner[0] != JOIN_RELAY_SCHEMA {
         return Err(HostOpsError::BadSchema);
     }
     if inner[1] != sub {
@@ -514,17 +691,35 @@ pub fn decode_join_relay_down(inner: &[u8]) -> Result<JoinRelayDown, HostOpsErro
 pub struct JoinRelayAbort {
     pub proxy: u64,
     pub relay_id: u32,
+    pub gateway_epoch: u32,
+    pub proxy_epoch: u32,
     pub reason: RelayAbortReason,
 }
 
+impl JoinRelayAbort {
+    pub fn token(self) -> RelayToken {
+        RelayToken {
+            gateway_epoch: self.gateway_epoch,
+            proxy_epoch: self.proxy_epoch,
+            relay_id: self.relay_id,
+        }
+    }
+}
+
 pub fn encode_join_relay_abort(abort: &JoinRelayAbort) -> Result<Vec<u8>, HostOpsError> {
-    if !node_valid(abort.proxy) || abort.relay_id == 0 {
+    if !node_valid(abort.proxy)
+        || abort.relay_id == 0
+        || abort.gateway_epoch == 0
+        || abort.proxy_epoch == 0
+    {
         return invalid("join relay abort");
     }
     let mut out = Vec::with_capacity(INNER_HEAD_SIZE + ABORT_PAYLOAD);
     head(&mut out, SUB_JOIN_RELAY_ABORT, ABORT_PAYLOAD);
     out.extend_from_slice(&abort.proxy.to_be_bytes());
     out.extend_from_slice(&abort.relay_id.to_be_bytes());
+    out.extend_from_slice(&abort.gateway_epoch.to_be_bytes());
+    out.extend_from_slice(&abort.proxy_epoch.to_be_bytes());
     out.push(abort.reason as u8);
     Ok(out)
 }
@@ -534,9 +729,15 @@ pub fn decode_join_relay_abort(inner: &[u8]) -> Result<JoinRelayAbort, HostOpsEr
     let abort = JoinRelayAbort {
         proxy: be_u64(&payload[0..8]),
         relay_id: u32::from_be_bytes(payload[8..12].try_into().expect("4")),
-        reason: RelayAbortReason::try_from_u8(payload[12])?,
+        gateway_epoch: u32::from_be_bytes(payload[12..16].try_into().expect("4")),
+        proxy_epoch: u32::from_be_bytes(payload[16..20].try_into().expect("4")),
+        reason: RelayAbortReason::try_from_u8(payload[20])?,
     };
-    if !node_valid(abort.proxy) || abort.relay_id == 0 {
+    if !node_valid(abort.proxy)
+        || abort.relay_id == 0
+        || abort.gateway_epoch == 0
+        || abort.proxy_epoch == 0
+    {
         return invalid("join relay abort");
     }
     Ok(abort)
@@ -548,6 +749,18 @@ pub struct JoinRelayResult {
     pub result: ConfigOpsResult,
     pub proxy: u64,
     pub relay_id: u32,
+    pub gateway_epoch: u32,
+    pub proxy_epoch: u32,
+}
+
+impl JoinRelayResult {
+    pub fn token(self) -> RelayToken {
+        RelayToken {
+            gateway_epoch: self.gateway_epoch,
+            proxy_epoch: self.proxy_epoch,
+            relay_id: self.relay_id,
+        }
+    }
 }
 
 fn result_known(result: ConfigOpsResult) -> bool {
@@ -558,7 +771,7 @@ fn check_result(result: &JoinRelayResult) -> Result<(), HostOpsError> {
     let ok = result.result == ConfigOpsResult::Ok;
     if !result_known(result.result)
         || result.proxy == u64::MAX
-        || (ok && (!node_valid(result.proxy) || result.relay_id == 0))
+        || (ok && (!node_valid(result.proxy) || !result.token().valid()))
     {
         return invalid("join relay result");
     }
@@ -572,6 +785,8 @@ pub fn encode_join_relay_result(result: &JoinRelayResult) -> Result<Vec<u8>, Hos
     out.extend_from_slice(&(result.result as u16).to_be_bytes());
     out.extend_from_slice(&result.proxy.to_be_bytes());
     out.extend_from_slice(&result.relay_id.to_be_bytes());
+    out.extend_from_slice(&result.gateway_epoch.to_be_bytes());
+    out.extend_from_slice(&result.proxy_epoch.to_be_bytes());
     Ok(out)
 }
 
@@ -581,6 +796,8 @@ pub fn decode_join_relay_result(inner: &[u8]) -> Result<JoinRelayResult, HostOps
         result: ConfigOpsResult::try_from_u16(u16::from_be_bytes([payload[0], payload[1]]))?,
         proxy: be_u64(&payload[2..10]),
         relay_id: u32::from_be_bytes(payload[10..14].try_into().expect("4")),
+        gateway_epoch: u32::from_be_bytes(payload[14..18].try_into().expect("4")),
+        proxy_epoch: u32::from_be_bytes(payload[18..22].try_into().expect("4")),
     };
     check_result(&result)?;
     Ok(result)
@@ -601,6 +818,8 @@ mod tests {
                 step: 1,
                 state: RelayState::Continue,
                 joiner_rssi_dbm: -70,
+                gateway_epoch: 7,
+                proxy_epoch: 3,
             },
             body: RelayBody::Message(message),
         }
@@ -613,13 +832,40 @@ mod tests {
         assert_eq!(bytes.len(), RELAY_HEADER_SIZE + 59);
         assert_eq!(RelayObject::decode(&bytes).unwrap(), object);
         assert_eq!(object.single_frame_type(), WIRE_TYPE_BOOTSTRAP_AUTH);
+        assert!(object.header.token().valid());
         let mut bad = object.clone();
         bad.header.step = 2; // m2 does not flow up
         assert!(bad.encode().is_err());
+        let mut bad_epoch = object.clone();
+        bad_epoch.header.proxy_epoch = 0;
+        assert!(bad_epoch.encode().is_err());
         let mut big = object.clone();
         big.body = RelayBody::Message(vec![0; JOIN_MESSAGE_MAX + 1]);
         assert!(big.encode().is_err());
         assert!(RelayObject::decode(&bytes[..RELAY_HEADER_SIZE]).is_err());
+    }
+
+    #[test]
+    fn epoch_query_reply_round_trip() {
+        let query = EpochQuery { nonce: [9; 16] };
+        let bytes = encode_epoch_query(&query).unwrap();
+        assert_eq!(bytes.len(), EPOCH_QUERY_SIZE);
+        assert_eq!(decode_epoch_query(&bytes).unwrap(), query);
+        assert_eq!(classify_wire_relay(&bytes), WireRelayKind::EpochQuery);
+        let reply = EpochReply {
+            gateway_epoch: 7,
+            nonce: [9; 16],
+            authority_ready: true,
+        };
+        let bytes = encode_epoch_reply(&reply).unwrap();
+        assert_eq!(decode_epoch_reply(&bytes).unwrap(), reply);
+        assert_eq!(classify_wire_relay(&bytes), WireRelayKind::EpochReply);
+        let object = up_object(vec![1, 2, 3]).encode().unwrap();
+        assert_eq!(classify_wire_relay(&object), WireRelayKind::RelayObject);
+        assert_eq!(classify_wire_relay(&[2, 9]), WireRelayKind::Invalid);
+        let mut bad = encode_epoch_reply(&reply).unwrap();
+        bad[4..8].copy_from_slice(&0u32.to_be_bytes());
+        assert!(decode_epoch_reply(&bad).is_err());
     }
 
     #[test]
@@ -638,9 +884,16 @@ mod tests {
         let mut own = up.clone();
         own.hops = 0;
         assert!(encode_join_relay_up(&own).is_err());
+        // schema 1 join frames are not join frames anymore
+        let mut v1 = inner.clone();
+        v1[0] = 1;
+        assert_eq!(join_relay_sub(&v1), None);
+        assert!(decode_join_relay_up(&v1).is_err());
         let abort = JoinRelayAbort {
             proxy: 2,
             relay_id: 9,
+            gateway_epoch: 7,
+            proxy_epoch: 3,
             reason: RelayAbortReason::HostAborted,
         };
         let inner = encode_join_relay_abort(&abort).unwrap();
@@ -649,6 +902,8 @@ mod tests {
             result: ConfigOpsResult::Unsupported,
             proxy: 0,
             relay_id: 0,
+            gateway_epoch: 0,
+            proxy_epoch: 0,
         };
         let inner = encode_join_relay_result(&result).unwrap();
         assert_eq!(decode_join_relay_result(&inner).unwrap(), result);
@@ -656,7 +911,17 @@ mod tests {
             result: ConfigOpsResult::Ok,
             proxy: 2,
             relay_id: 0,
+            gateway_epoch: 7,
+            proxy_epoch: 3,
         };
         assert!(encode_join_relay_result(&ok_without_id).is_err());
+        let ok_without_epoch = JoinRelayResult {
+            result: ConfigOpsResult::Ok,
+            proxy: 2,
+            relay_id: 9,
+            gateway_epoch: 0,
+            proxy_epoch: 3,
+        };
+        assert!(encode_join_relay_result(&ok_without_epoch).is_err());
     }
 }

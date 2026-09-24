@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_abort",
+  "encoded_hex": "0262001500000000000000007e57ab1e000000070000000304",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_abort_proxy_zero",
+  "note": "proxy NodeId valid"
+}
