@@ -41,10 +41,6 @@ pub const DISTRIBUTION_DISPATCH_GAP_MS: u64 = 100;
 /// and keep retrying at the capped 60 s level;
 /// transport refusals back the whole outbox off to the same cap.
 pub const DISTRIBUTION_BACKOFF_S: [u64; 5] = [5, 10, 20, 40, 60];
-/// Meta row recording that the currently staged GK left the Host (set by
-/// the P5 GK scheduler; read by `revoke` before reusing a staged key).
-pub const META_GK_STAGED_DISTRIBUTED: &str = "gk_staged_distributed";
-
 /// Adds one, refusing to wrap: the generation/rs_epoch/gk_epoch counters
 /// stop at u32::MAX with an explicit error instead of aliasing an older
 /// credential. Checked before the revoke transaction.
@@ -777,24 +773,6 @@ impl SiteAuthority {
         self.rrs_history.retain(|epoch, _| *epoch >= floor);
         self.rrs_history_digests.retain(|epoch, _| *epoch >= floor);
     }
-
-    /// Records that the currently staged GK left the Host over P5 (called
-    /// by the P5 GK scheduler when distribution starts). The next revoke
-    /// then stages a fresh key instead of reusing the exposed one.
-    pub fn mark_gk_staged_distributed(&mut self) -> bool {
-        if self.gk_staged.is_none() {
-            return false;
-        }
-        let batch = Batch {
-            meta: vec![(META_GK_STAGED_DISTRIBUTED, vec![1])],
-            ..Batch::default()
-        };
-        if self.store.commit(&batch).is_err() {
-            return false;
-        }
-        self.gk_staged_distributed = true;
-        true
-    }
 }
 
 pub(super) fn distribution_view(dist: Option<&OperationDistribution>) -> String {
@@ -851,15 +829,11 @@ mod tests {
         );
         for i in 0..140_u64 {
             let node = 0x00A1_0000_0001_0000 + i;
-            auth.devices.insert(
-                node,
-                super::super::store::DeviceRow {
-                    node,
-                    member: true,
-                    generation: 1,
-                    ..Default::default()
-                },
-            );
+            let mut row = super::super::store::DeviceRow::default();
+            row.node = node;
+            row.member = true;
+            row.generation = 1;
+            auth.devices.insert(node, row);
         }
         let dist = auth.snapshot_targets(0x00A1_0000_0001_0000, 9, [0x11; 32]);
         assert_eq!(dist.targets.len(), DISTRIBUTION_TARGET_MAX);

@@ -5,6 +5,8 @@
 //! behind the manifest Sig_structure digest, the RLC1 kid fingerprint and
 //! the committed-image fingerprint.
 
+use zeroize::Zeroize;
+
 const SHA_K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -66,11 +68,14 @@ pub fn sha256(message: &[u8]) -> [u8; 32] {
         for (v, delta) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
             *v = v.wrapping_add(delta);
         }
+        w.zeroize();
     }
     let mut out = [0_u8; 32];
     for (i, v) in h.iter().enumerate() {
         out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
     }
+    padded.zeroize();
+    h.zeroize();
     out
 }
 
