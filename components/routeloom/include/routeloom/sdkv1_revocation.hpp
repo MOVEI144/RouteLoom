@@ -193,8 +193,10 @@ class RrsExchange {
   void send_ack(NodeId peer, const autonomy::ObjectHash& hash, std::uint16_t received_len,
                 autonomy::ObjectAckStatus status) noexcept;
   void complete_rx(MonotonicMs now_ms) noexcept;
-  bool recent_total(const autonomy::ObjectHash& hash, std::uint16_t& total) const noexcept;
-  void note_delivered(const autonomy::ObjectHash& hash, std::uint16_t total) noexcept;
+  bool recent_total(NodeId peer, std::uint32_t binding, const autonomy::ObjectHash& hash,
+                    std::uint16_t& total) const noexcept;
+  void note_delivered(NodeId peer, std::uint32_t binding, const autonomy::ObjectHash& hash,
+                      std::uint16_t total) noexcept;
   void transmit_tx(MonotonicMs now_ms) noexcept;
 
   LifecyclePeerPort& port_;
@@ -203,6 +205,8 @@ class RrsExchange {
   Tx tx_{};
   // Recently completed objects (re-ACK duplicates without extending work).
   struct Recent {
+    NodeId peer{kInvalidNodeId};
+    std::uint32_t binding{0};
     autonomy::ObjectHash hash{};
     std::uint16_t total{0};
     bool used{false};
@@ -693,6 +697,7 @@ class MembershipLifecycle final {
   // Re-read scratch for the stored set bytes (duplicate compare, serving).
   ByteBuffer<kRevocationObjectMax> stored_object_{};
   RevocationSet candidate_set_{};
+  RevocationSet verified_store_set_{};
   CandidateSource candidate_source_{CandidateSource::None};
   NodeId candidate_peer_{kInvalidNodeId};
   ApplyStep apply_step_{ApplyStep::Verify};

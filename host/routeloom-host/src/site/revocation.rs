@@ -37,12 +37,9 @@ pub const DISTRIBUTION_TARGET_MAX: usize = 128;
 pub const DISTRIBUTION_OUTBOX_MAX: usize = 4;
 /// At most 10 object sends per second, authority-wide.
 pub const DISTRIBUTION_DISPATCH_GAP_MS: u64 = 100;
-/// Send attempts per target per operation; afterwards the target stays
-/// `unknown` for this operation (gossip and later snapshots cover it).
-pub const DISTRIBUTION_ATTEMPTS_MAX: u32 = 3;
-/// Backoff schedule (seconds): targets consume the 5/10/20 s levels for
-/// their three attempts; transport refusals back the whole outbox off up
-/// to the 60 s cap.
+/// Backoff schedule (seconds): targets advance through 5/10/20/40/60 s
+/// and keep retrying at the capped 60 s level;
+/// transport refusals back the whole outbox off to the same cap.
 pub const DISTRIBUTION_BACKOFF_S: [u64; 5] = [5, 10, 20, 40, 60];
 /// Meta row recording that the currently staged GK left the Host (set by
 /// the P5 GK scheduler; read by `revoke` before reusing a staged key).
@@ -272,20 +269,40 @@ pub(super) type RrsHistory = (
 );
 
 /// Decodes the durable RRS1 history for ACK validation and coalescing.
-pub(super) fn decode_rrs_history(snapshot: &super::store::Snapshot) -> Result<RrsHistory, String> {
+pub(super) fn decode_rrs_history(
+    snapshot: &super::store::Snapshot,
+    sak_pubkey: &[u8; 64],
+    site_id: u64,
+    network: u64,
+) -> Result<RrsHistory, String> {
     let mut history = BTreeMap::new();
     let mut digests = BTreeMap::new();
     let mut latest = Vec::new();
-    let mut latest_epoch = 0;
-    for (epoch, object) in &snapshot.rrs {
-        let set = super::revocation_object_decode(object)
-            .map_err(|e| format!("stored RRS1 corrupt: {e}"))?;
-        digests.insert(*epoch, super::sha256(object));
-        history.insert(*epoch, set.entries);
-        if *epoch >= latest_epoch {
-            latest_epoch = *epoch;
-            latest = object.clone();
+    let mut previous: Option<(u32, u32, Vec<RevocationEntry>)> = None;
+    let mut ordered: Vec<_> = snapshot.rrs.iter().collect();
+    ordered.sort_by_key(|(epoch, _)| *epoch);
+    for (epoch, object) in ordered {
+        let (set, verified) = routeloom_provision::sdkv1::revocation::revocation_object_verify(
+            object, sak_pubkey, site_id, network,
+        )
+        .map_err(|e| format!("stored RRS1 corrupt: {e}"))?;
+        if !verified || set.rs_epoch != *epoch {
+            return Err(format!(
+                "stored RRS1 at epoch {epoch} fails site signature or binding"
+            ));
         }
+        if let Some((prior_epoch, prior_floor, prior_entries)) = &previous {
+            if epoch <= prior_epoch
+                || set.site_epoch_floor < *prior_floor
+                || !rrs_covers(prior_entries, &set.entries)
+            {
+                return Err(format!("stored RRS1 history regresses at epoch {epoch}"));
+            }
+        }
+        digests.insert(*epoch, super::sha256(object));
+        history.insert(*epoch, set.entries.clone());
+        previous = Some((*epoch, set.site_epoch_floor, set.entries));
+        latest = object.clone();
     }
     Ok((history, digests, latest))
 }
@@ -446,9 +463,6 @@ impl SiteAuthority {
                 if !matches!(target.state, TargetState::Pending | TargetState::Unknown) {
                     continue;
                 }
-                if target.attempts >= DISTRIBUTION_ATTEMPTS_MAX {
-                    continue;
-                }
                 if target.state == TargetState::Unknown && target.next_retry_ms > now_ms {
                     continue;
                 }
@@ -548,7 +562,6 @@ impl SiteAuthority {
             Some(dist) => dist.targets.iter().any(|t| {
                 t.node == node
                     && matches!(t.state, TargetState::Pending | TargetState::Unknown)
-                    && t.attempts < DISTRIBUTION_ATTEMPTS_MAX
                     && (t.state == TargetState::Pending || t.next_retry_ms <= now_ms)
             }),
             None => false,
@@ -588,7 +601,7 @@ impl SiteAuthority {
                 continue;
             }
             target.state = TargetState::Unknown;
-            target.attempts += 1;
+            target.attempts = target.attempts.saturating_add(1);
             let wait = DISTRIBUTION_BACKOFF_S
                 [(target.attempts as usize - 1).min(DISTRIBUTION_BACKOFF_S.len() - 1)]
             .saturating_mul(1000);
@@ -610,13 +623,13 @@ impl SiteAuthority {
         object_sha256: &[u8; 32],
         now_ms: u64,
     ) -> bool {
-        let live = match self.devices.get(&node) {
-            Some(row) => row.member && row.generation == generation,
-            None => false,
+        let Some(live) = self.devices.get(&node) else {
+            return false;
         };
-        if !live || network != self.id.network {
+        if !live.member || live.generation != generation || network != self.id.network {
             return false;
         }
+        let live_kid = live.kid;
         let Some(acked) = self.rrs_history.get(&rs_epoch).cloned() else {
             return false;
         };
@@ -646,32 +659,50 @@ impl SiteAuthority {
             if !covers {
                 continue;
             }
-            let changed = match self.operations.get_mut(&id) {
-                Some(op) => match op.distribution.as_mut() {
-                    Some(dist) => {
-                        let mut changed = false;
-                        for target in dist.targets.iter_mut() {
-                            if target.node == node
-                                && matches!(
-                                    target.state,
-                                    TargetState::Pending | TargetState::Unknown
-                                )
-                            {
-                                target.state = TargetState::Applied;
-                                target.ack_rs_epoch = Some(rs_epoch);
-                                changed = true;
-                            }
+            let mut updated = match self.operations.get(&id).cloned() {
+                Some(op) => op,
+                None => continue,
+            };
+            let changed = match updated.distribution.as_mut() {
+                Some(dist) => {
+                    let mut changed = false;
+                    for target in dist.targets.iter_mut() {
+                        if target.node == node
+                            && target.generation == generation
+                            && target.kid == live_kid
+                            && target.network == network
+                            && matches!(target.state, TargetState::Pending | TargetState::Unknown)
+                        {
+                            target.state = TargetState::Applied;
+                            target.ack_rs_epoch = Some(rs_epoch);
+                            changed = true;
                         }
-                        changed
                     }
-                    None => false,
-                },
+                    changed
+                }
                 None => false,
             };
             if changed {
-                moved = true;
-                self.refresh_distribution_state(id);
-                self.persist_operation(id, now_ms);
+                if updated
+                    .distribution
+                    .as_ref()
+                    .is_some_and(|dist| dist.counts().2 == 0)
+                {
+                    if let Some(dist) = updated.distribution.as_mut() {
+                        dist.state = DistState::Converged;
+                    }
+                }
+                let batch = Batch {
+                    docs: vec![(DocKind::Operation, h16(updated.id), Some(updated.doc()))],
+                    ..Batch::default()
+                };
+                match self.store.commit(&batch) {
+                    Ok(()) => {
+                        self.operations.insert(id, updated);
+                        moved = true;
+                    }
+                    Err(error) => self.store_error(now_ms, &error),
+                }
             }
         }
         moved

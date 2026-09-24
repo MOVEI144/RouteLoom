@@ -192,10 +192,11 @@ void RrsExchange::send_ack(const NodeId peer, const autonomy::ObjectHash& hash,
   (void)port_.peer_send(peer, FrameType::ObjectAck, encoded.view());
 }
 
-bool RrsExchange::recent_total(const autonomy::ObjectHash& hash,
+bool RrsExchange::recent_total(const NodeId peer, const std::uint32_t binding,
+                               const autonomy::ObjectHash& hash,
                                std::uint16_t& total) const noexcept {
   for (const Recent& entry : recent_) {
-    if (entry.used && entry.hash == hash) {
+    if (entry.used && entry.peer == peer && entry.binding == binding && entry.hash == hash) {
       total = entry.total;
       return true;
     }
@@ -203,22 +204,27 @@ bool RrsExchange::recent_total(const autonomy::ObjectHash& hash,
   return false;
 }
 
-void RrsExchange::note_delivered(const autonomy::ObjectHash& hash,
+void RrsExchange::note_delivered(const NodeId peer, const std::uint32_t binding,
+                                const autonomy::ObjectHash& hash,
                                 const std::uint16_t total) noexcept {
   for (Recent& entry : recent_) {
-    if (entry.used && entry.hash == hash) {
+    if (entry.used && entry.peer == peer && entry.binding == binding && entry.hash == hash) {
       entry.total = total;
       return;
     }
   }
   for (Recent& entry : recent_) {
     if (!entry.used) {
+      entry.peer = peer;
+      entry.binding = binding;
       entry.hash = hash;
       entry.total = total;
       entry.used = true;
       return;
     }
   }
+  recent_[0].peer = peer;
+  recent_[0].binding = binding;
   recent_[0].hash = hash;
   recent_[0].total = total;
   recent_[0].used = true;
@@ -233,13 +239,13 @@ void RrsExchange::on_manifest(const NodeId peer, const std::uint32_t binding,
     return;
   }
   std::uint16_t known = 0;
-  if (recent_total(manifest.object_hash, known)) {
+  if (recent_total(peer, binding, manifest.object_hash, known)) {
     // Duplicate of a completed object: re-ACK, no new work, no extension.
     send_ack(peer, manifest.object_hash, known, autonomy::ObjectAckStatus::Ok);
     return;
   }
   if (rx_.used) {
-    if (rx_.peer == peer && rx_.hash == manifest.object_hash) {
+    if (rx_.peer == peer && rx_.binding == binding && rx_.hash == manifest.object_hash) {
       send_ack(peer, manifest.object_hash, rx_.received,
                autonomy::ObjectAckStatus::Incomplete);
     } else {
@@ -262,7 +268,7 @@ void RrsExchange::on_chunk(const NodeId peer, const std::uint32_t binding,
                            const MonotonicMs now_ms) noexcept {
   std::uint16_t known = 0;
   if (!rx_.used) {
-    if (recent_total(chunk.object_hash, known)) {
+    if (recent_total(peer, binding, chunk.object_hash, known)) {
       send_ack(peer, chunk.object_hash, known, autonomy::ObjectAckStatus::Ok);
     }
     return;
@@ -305,7 +311,7 @@ void RrsExchange::complete_rx(const MonotonicMs now_ms) noexcept {
   // dispatch() on a later call — no store or publish happens in here.
   sink_.on_rrs_object(rx_.peer, ByteView{rx_.data.data(), rx_.total_len}, now_ms);
   send_ack(rx_.peer, rx_.hash, rx_.total_len, autonomy::ObjectAckStatus::Ok);
-  note_delivered(rx_.hash, rx_.total_len);
+  note_delivered(rx_.peer, rx_.binding, rx_.hash, rx_.total_len);
   rx_.used = false;
   ++delivered_;
 }
@@ -321,10 +327,14 @@ void RrsExchange::on_ack(const NodeId peer, const std::uint32_t binding,
     ++failed_;
     return;
   }
-  if (ack.received_len >= tx_.total_len) {
-    tx_.used = false;  // transport ACK only — application ACKs are separate
+  if (ack.received_len > tx_.total_len) return;
+  if (ack.status == autonomy::ObjectAckStatus::Ok) {
+    if (ack.received_len == tx_.total_len) {
+      tx_.used = false;  // transport ACK only — application ACKs are separate
+    }
     return;
   }
+  if (ack.status != autonomy::ObjectAckStatus::Incomplete) return;
   if (ack.received_len < tx_.sent) {
     // The peer is progressing: rewind to its frontier and retransmit from
     // the next poll. Progress never consumes an attempt.
@@ -426,7 +436,7 @@ bool RrsExchange::owns_transfer(const NodeId peer, const std::uint32_t binding,
   if (rx_.used && rx_.peer == peer && rx_.binding == binding && rx_.hash == hash) return true;
   if (tx_.used && tx_.dest == peer && tx_.binding == binding && tx_.hash == hash) return true;
   std::uint16_t known = 0;
-  return recent_total(hash, known);
+  return recent_total(peer, binding, hash, known);
 }
 
 void RrsExchange::abort() noexcept {
@@ -544,10 +554,22 @@ bool MembershipLifecycle::permits(const PeerCredentialStamp& stamp,
   // store, or a stopped lifecycle — those need the zero-touch proof or
   // maintenance, not a peer shortcut.
   if (use == TrafficUse::RecoveryControl) {
+    if (self_revoked_ || self_rejected()) return false;
+    if (adopted_.has_rrs && revocations_.set().network == adopted_.network &&
+        revocation_rejects(revocations_.set(), stamp.peer, stamp.assignment_generation,
+                           site_epoch())) return false;
+    if (phase_ == LifecyclePhase::ApplyingRrs && apply_step_ != ApplyStep::Verify &&
+        candidate_set_.network == adopted_.network &&
+        (revocation_rejects(candidate_set_, config_.self, adopted_.generation, site_epoch()) ||
+         revocation_rejects(candidate_set_, stamp.peer, stamp.assignment_generation,
+                            site_epoch()))) return false;
     return phase_ == LifecyclePhase::BootGate || phase_ == LifecyclePhase::Active ||
            phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Recovering;
   }
-  if (phase_ != LifecyclePhase::Active || equivocated_ || !adopted_.has_rrs) return false;
+  if (phase_ != LifecyclePhase::Active || equivocated_ || !adopted_.has_rrs ||
+      adopted_.rs_epoch < adopted_.rs_floor ||
+      revocations_.set().network != adopted_.network ||
+      revocations_.set().site_id != adopted_.site_id) return false;
   return !revocation_rejects(revocations_.set(), stamp.peer, stamp.assignment_generation,
                              site_epoch());
 }
@@ -580,7 +602,9 @@ bool MembershipLifecycle::need_rrs() const noexcept {
       phase_ != LifecyclePhase::Recovering) {
     return false;
   }
-  if (!adopted_.has_rrs || adopted_.rs_epoch < adopted_.rs_floor ||
+  if (!adopted_.has_rrs || revocations_.set().network != adopted_.network ||
+      revocations_.set().site_id != adopted_.site_id ||
+      adopted_.rs_epoch < adopted_.rs_floor ||
       adopted_.rs_epoch < rs_to_fetch_ || equivocated_) {
     return true;
   }
@@ -673,6 +697,28 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
     return LifecycleBlockReason::RevocationStore;
   }
   if (revocations_.has_set()) {
+    stored_object_.clear();
+    if (!revocations_.load_object(stored_object_)) return LifecycleBlockReason::RevocationStore;
+    verified_store_set_ = RevocationSet{};
+    bool verified = false;
+    const Status checked = revocation_object_verify(stored_object_.view(), sak_, adopted_.site_id,
+                                                     revocations_.set().network, verified_store_set_,
+                                                     verified, verifier_);
+    if (!checked || !verified ||
+        verified_store_set_.rs_epoch != revocations_.rs_epoch() ||
+        verified_store_set_.site_epoch_floor != revocations_.set().site_epoch_floor ||
+        verified_store_set_.count != revocations_.set().count) {
+      return LifecycleBlockReason::RevocationStore;
+    }
+    for (std::uint8_t i = 0; i < verified_store_set_.count; ++i) {
+      const RevocationEntry& verified_entry = verified_store_set_.entries[i];
+      const RevocationEntry& stored_entry = revocations_.set().entries[i];
+      if (verified_entry.node_id != stored_entry.node_id ||
+          verified_entry.min_generation != stored_entry.min_generation ||
+          verified_entry.reason != stored_entry.reason) {
+        return LifecycleBlockReason::RevocationStore;
+      }
+    }
     adopted_.has_rrs = true;
     adopted_.rs_epoch = revocations_.rs_epoch();
   }
@@ -896,17 +942,9 @@ Status MembershipLifecycle::apply_store(const MonotonicMs now_ms) noexcept {
   if (!stored) {
     if (stored.code == StatusCode::Conflict &&
         revocations_.has_set() && revocations_.rs_epoch() >= candidate_set_.rs_epoch) {
-      // Lost no race (single-threaded Owner), but the store already holds
-      // this epoch or newer: treat as a duplicate and re-ACK.
-      saturate_inc(counters_.rrs_duplicates);
-      if (candidate_source_ == CandidateSource::Gossip) clear_fetch(false, now_ms);
-      stored_object_.clear();
-      if (revocations_.load_object(stored_object_)) {
-        autonomy::ObjectHash hash{};
-        hash_object(stored_object_.view(), hash);
-        queue_applied_ack(revocations_.rs_epoch(), hash, now_ms);
-      }
-      abort_apply(resume_phase_);
+      // A changed store needs fresh adoption and enforcement before any
+      // ACK; its epoch alone does not prove this candidate was applied.
+      enter_storage_blocked(LifecycleBlockReason::RevocationStore, now_ms);
       return Status::success();
     }
     if (stored.code == StatusCode::Conflict) {
@@ -923,7 +961,12 @@ Status MembershipLifecycle::apply_store(const MonotonicMs now_ms) noexcept {
     // set landed despite the error, enforcement still runs; otherwise the
     // barrier stays closed in StorageBlocked until a reboot re-runs us.
     (void)revocations_.initialize();
-    if (revocations_.has_set() && revocations_.rs_epoch() == candidate_set_.rs_epoch) {
+    stored_object_.clear();
+    if (revocations_.has_set() && revocations_.rs_epoch() == candidate_set_.rs_epoch &&
+        revocations_.load_object(stored_object_) &&
+        stored_object_.size == candidate_object_.size &&
+        std::memcmp(stored_object_.bytes.data(), candidate_object_.bytes.data(),
+                    candidate_object_.size) == 0) {
       adopted_.has_rrs = true;
       adopted_.rs_epoch = candidate_set_.rs_epoch;
       apply_step_ = ApplyStep::Enforce;
@@ -985,10 +1028,16 @@ Status MembershipLifecycle::apply_floor(const MonotonicMs now_ms) noexcept {
       return Status::success();
     }
   }
+  if (adopted_.network != candidate_set_.network ||
+      adopted_.rs_floor > candidate_set_.rs_epoch) {
+    if (candidate_source_ == CandidateSource::Gossip) clear_fetch(true, now_ms);
+    abort_apply(LifecyclePhase::BootGate);
+    return Status::success();
+  }
   const Status raised = site_.raise_rs_floor(candidate_set_.rs_epoch);
   if (!raised && raised.code != StatusCode::Conflict) {
-    // Conflict (a re-adopted floor already past the candidate) subsumes
-    // the write; anything else needs the fresh-view recheck.
+    // A failed write has an unknown result: re-read before deciding whether
+    // the floor is durable. Done rechecks the binding and exact epoch.
     (void)site_.initialize();
     if (!site_.has_site() || site_.site().rs_epoch_floor < candidate_set_.rs_epoch) {
       enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
@@ -1003,9 +1052,11 @@ Status MembershipLifecycle::apply_floor(const MonotonicMs now_ms) noexcept {
 
 Status MembershipLifecycle::apply_done(const MonotonicMs now_ms) noexcept {
   if (!revocations_.has_set() || revocations_.rs_epoch() != candidate_set_.rs_epoch ||
-      !site_.has_site() || site_.site().rs_epoch_floor < candidate_set_.rs_epoch) {
-    enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
-    return Status::success();
+      !site_.has_site() || site_.site().network != candidate_set_.network ||
+      site_.site().rs_epoch_floor != candidate_set_.rs_epoch) {
+    if (candidate_source_ == CandidateSource::Gossip) clear_fetch(true, now_ms);
+    abort_apply(LifecyclePhase::BootGate);
+    return adopt_and_enter(now_ms);
   }
   saturate_inc(counters_.rrs_applied);
   notify(LifecycleEventKind::RrsApplied, candidate_peer_, candidate_set_.rs_epoch, 0, now_ms);
@@ -1304,20 +1355,17 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
     if (ready.rs_epoch_to_fetch > rs_to_fetch_) rs_to_fetch_ = ready.rs_epoch_to_fetch;
     return Status::success();
   }
-  if (site_.commit_seq() != ready.site_commit_seq ||
-      site_.commit_seq() != adopted_.site_commit_seq) {
-    const LifecycleBlockReason blocked = adopt_stores();
-    if (blocked != LifecycleBlockReason::None) {
-      enter_storage_blocked(blocked, now_ms);
-      return Status::success();
-    }
-  }
+  const bool changed = site_.commit_seq() != ready.site_commit_seq ||
+                       site_.commit_seq() != adopted_.site_commit_seq;
   if (ready.rs_epoch_to_fetch > adopted_.rs_epoch) {
     rs_to_fetch_ = ready.rs_epoch_to_fetch;
   } else if (ready.rs_epoch_to_fetch <= adopted_.rs_epoch) {
     rs_to_fetch_ = 0;
   }
-  if (phase_ == LifecyclePhase::BootGate) return adopt_and_enter(now_ms);
+  if (changed || phase_ == LifecyclePhase::BootGate) {
+    phase_ = LifecyclePhase::BootGate;
+    return adopt_and_enter(now_ms);
+  }
   if (phase_ == LifecyclePhase::SelfRevoked || phase_ == LifecyclePhase::Recovering) {
     // A re-issue (or a completed recovery) may have moved our generation
     // past the revocation: re-check before staying closed.
@@ -1461,28 +1509,13 @@ Status MembershipLifecycle::on_recovery(const LifecycleJoinRecovery& recovery,
   }
   if (!recovery.success) return Status::success();  // the Owner retries
   if (phase_ == LifecyclePhase::ApplyingRrs) return Status::success();  // deferred to Floor
-  const LifecycleBlockReason blocked = adopt_stores();
-  if (blocked != LifecycleBlockReason::None) {
-    enter_storage_blocked(blocked, now_ms);
-    return Status::success();
+  phase_ = LifecyclePhase::BootGate;
+  (void)adopt_and_enter(now_ms);
+  if (phase_ == LifecyclePhase::Active) {
+    self_revoked_ = false;
+    saturate_inc(counters_.recoveries);
+    notify(LifecycleEventKind::RecoveryFinished, 0, adopted_.rs_epoch, 0, now_ms);
   }
-  if (!adopted_.has_rrs || adopted_.rs_epoch < adopted_.rs_floor || self_rejected()) {
-    // Recovery re-provisioned us but the revocation view is still short:
-    // stay closed and fetch.
-    if (phase_ != LifecyclePhase::Recovering && phase_ != LifecyclePhase::SelfRevoked &&
-        phase_ != LifecyclePhase::BootGate) {
-      phase_ = LifecyclePhase::Recovering;
-    }
-    if (self_rejected() && phase_ != LifecyclePhase::SelfRevoked) {
-      phase_ = LifecyclePhase::SelfRevoked;
-      self_revoked_ = true;
-    }
-    return Status::success();
-  }
-  phase_ = LifecyclePhase::Active;
-  self_revoked_ = false;
-  saturate_inc(counters_.recoveries);
-  notify(LifecycleEventKind::RecoveryFinished, 0, adopted_.rs_epoch, 0, now_ms);
   return Status::success();
 }
 

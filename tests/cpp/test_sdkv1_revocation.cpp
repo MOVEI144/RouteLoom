@@ -425,6 +425,84 @@ void test_boot_self_revoked_and_blocked() {
   CHECK(wrong_geo.snap().phase == LifecyclePhase::StorageBlocked);
 }
 
+void test_boot_revalidates_stored_rrs() {
+  NodeFixture node;
+  CHECK_OK(node.identity.initialize());
+  CHECK_OK(node.identity.commit(identity_for(kNode)));
+  CHECK_OK(node.site.initialize());
+  CHECK_OK(node.site.commit(site_for(kNode, 3, 14)));
+  CHECK_OK(node.revocations.initialize());
+  // The record is structurally valid and at the RLS1 floor, but its signer
+  // is not the SAK certified by this membership's SiteCert.
+  const auto foreign = revocation_object(revocation_set(14), other_key());
+  CHECK_OK(node.revocations.accept(foreign.view(), other_key().pub, kSiteId, kNetwork));
+  CHECK_OK(node.dispatch(LifecycleInput::Boot(true), 0));
+  CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+
+  NodeFixture old_network;
+  CHECK_OK(old_network.identity.initialize());
+  CHECK_OK(old_network.identity.commit(identity_for(kNode)));
+  CHECK_OK(old_network.site.initialize());
+  CHECK_OK(old_network.site.commit(site_for(kNode, 3, 14)));
+  CHECK_OK(old_network.revocations.initialize());
+  const NetworkId previous = (static_cast<NetworkId>(2) << 32U) | kNetworkLow;
+  const auto old_object = revocation_object(revocation_set(14, 0, 2, previous));
+  CHECK_OK(old_network.revocations.accept(old_object.view(), sak().pub, kSiteId, previous));
+  CHECK_OK(old_network.dispatch(LifecycleInput::Boot(true), 0));
+  CHECK(old_network.snap().phase == LifecyclePhase::BootGate);
+  CHECK(!old_network.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK_OK(old_network.dispatch(LifecycleInput::Poll(), 0));
+  CHECK(!old_network.authority.sent.empty());
+}
+
+void test_member_ready_closes_on_floor_advance() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  CHECK_OK(node.site.raise_rs_floor(15));
+  CHECK_OK(node.dispatch(LifecycleInput::MemberReady(node.site.commit_seq(), 15), 100));
+  CHECK(node.snap().phase == LifecyclePhase::BootGate);
+  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+}
+
+void test_apply_does_not_ack_below_a_newer_floor() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  const auto object = revocation_object(revocation_set(15));
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(node.dispatch(
+      LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 100));
+  for (int step = 0; step < 19; ++step) {
+    CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));
+  }
+  CHECK(node.snap().phase == LifecyclePhase::ApplyingRrs);
+  CHECK_OK(node.site.raise_rs_floor(16));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));
+  CHECK(node.snap().phase == LifecyclePhase::BootGate);
+  CHECK(node.authority.sent.empty());
+  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+}
+
+void test_recovery_control_rejects_revoked_credentials() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  CHECK(!node.lifecycle.permits(stamp_for(0x00A1000000000100ULL, 1),
+                                TrafficUse::RecoveryControl));
+  RevocationSet next = revocation_set(15);
+  next.entries[2] = RevocationEntry{kNode, 4, RevocationReason::Removed};
+  next.count = 3;
+  const auto object = revocation_object(next);
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(node.dispatch(
+      LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 100));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));  // verify
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));  // durable set
+  CHECK(node.snap().phase == LifecyclePhase::ApplyingRrs);
+  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::RecoveryControl));
+}
+
 // --- RRS application order -----------------------------------------------------------------
 
 void test_apply_order_and_sweep() {
@@ -673,6 +751,13 @@ void test_rrs_exchange_roundtrip() {
       ByteView{port_b.sent[0].body.data(), port_b.sent[0].body.size()}, reack));
   CHECK(reack.status == autonomy::ObjectAckStatus::Ok);
   CHECK(reack.received_len == object.size);
+  CHECK(!b.owns_transfer(kNodeB, 7, manifest.object_hash));
+  CHECK(!b.owns_transfer(kNode, 9, manifest.object_hash));
+  port_b.sent.clear();
+  b.on_manifest(kNode, 9, manifest, 11);
+  CHECK(b.busy());  // a new binding must assemble and authenticate its own copy
+  CHECK(port_b.sent.empty());
+  b.abort();
 }
 
 void test_rrs_exchange_timeouts_and_demux() {
@@ -733,6 +818,12 @@ void test_rrs_exchange_timeouts_and_demux() {
   CHECK(d.owns_transfer(kNode, 7, live.object_hash));
   CHECK(!d.owns_transfer(kNode, 9, live.object_hash));
   CHECK(!d.owns_transfer(kNodeB, 7, live.object_hash));
+  autonomy::ObjectAckPayload incomplete{};
+  incomplete.object_hash = live.object_hash;
+  incomplete.received_len = static_cast<std::uint16_t>(object.size);
+  incomplete.status = autonomy::ObjectAckStatus::Incomplete;
+  c.on_ack(kNodeB, 7, incomplete, 30000);
+  CHECK(c.busy());  // a full-length Incomplete is not an Ok transport ACK
   // Garbage kind manifests are ignored, oversize publishes refused.
   autonomy::ControlObjectPayload bad_kind{};
   bad_kind.kind = autonomy::ControlObjectKind::ChannelPlan;
@@ -1243,6 +1334,34 @@ void test_apply_storage_faults() {
   CHECK(torn.snap().applied_rs_epoch == 15);
 }
 
+void test_uncertain_commit_rejects_different_same_epoch_object() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  const auto candidate = revocation_object(revocation_set(15));
+  const auto alternate = revocation_object(revocation_set(15, 3));
+  ByteBuffer<kRevocationSlotBytes> record{};
+  CHECK_OK(revocation_record_encode(alternate.view(), kRevocationSealCommitted, 2, record));
+  node.rrs_storage.substitute_record.assign(record.bytes.data(),
+                                             record.bytes.data() + record.size);
+  node.rrs_storage.substitute_call = node.rrs_storage.write_calls + 1;
+  const std::size_t enforcements_before = node.runtime.calls.size();
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(node.dispatch(
+      LifecycleInput::Authority(authority, kAuthorityTypeRevocation, candidate.view()), 0));
+  node.pump(0);
+  CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(node.authority.sent.empty());
+  CHECK(node.runtime.calls.size() == enforcements_before);
+  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK(node.revocations.has_set());
+  CHECK(node.revocations.rs_epoch() == 15);
+  ByteBuffer<kRevocationObjectMax> landed{};
+  CHECK_OK(node.revocations.load_object(landed));
+  CHECK(landed.size == alternate.size);
+  CHECK(std::memcmp(landed.bytes.data(), alternate.bytes.data(), alternate.size) == 0);
+}
+
 // --- Sweep/clear cursor units ------------------------------------------------------------------------
 
 void test_sweep_cursor_units() {
@@ -1286,6 +1405,29 @@ void test_sweep_cursor_units() {
   }
   CHECK(done && polls == 4);
   CHECK(cache.find(ResumePurpose::Link, kNodeB, guarded, out, index).code == StatusCode::NotFound);
+}
+
+void test_sweep_scrubs_torn_slot() {
+  FaultyResumeStorage storage(4);
+  ResumeCache cache(storage);
+  ResumeContext context{kNetwork, 203, nullptr};
+  ResumeSlot old = resume_slot(kPeer, 0, 10);
+  old.peer_generation = 1;
+  CHECK_OK(cache.put(old, context));
+  ResumeSlot found{};
+  std::size_t index = 0;
+  CHECK_OK(cache.find(ResumePurpose::Link, kPeer, context, found, index));
+  storage.slot(index)[kResumeSlotBytes - 1] ^= 0x01;
+  const std::size_t writes = storage.write_calls;
+  RevocationSet set = revocation_set(15, 0, 2);
+  set.entries[0] = RevocationEntry{kPeer, 2, RevocationReason::Removed};
+  set.count = 1;
+  context.revocations = &set;
+  std::size_t cursor = index;
+  bool done = false;
+  CHECK_OK(cache.sweep_revoked(context, cursor, done));
+  CHECK(cursor == index + 1);
+  CHECK(storage.write_calls == writes + 1);
 }
 
 // --- RAM budget ----------------------------------------------------------------------------------------
@@ -1727,6 +1869,10 @@ int main() {
   test_revocation_wire_vectors();
   test_boot_adoption();
   test_boot_self_revoked_and_blocked();
+  test_boot_revalidates_stored_rrs();
+  test_member_ready_closes_on_floor_advance();
+  test_apply_does_not_ack_below_a_newer_floor();
+  test_recovery_control_rejects_revoked_credentials();
   test_apply_order_and_sweep();
   test_duplicate_equivocation_stale();
   test_link_failure_and_recovery();
@@ -1738,7 +1884,9 @@ int main() {
   test_gossip_rates_and_refresh();
   test_partition_continues_and_merge_converges();
   test_apply_storage_faults();
+  test_uncertain_commit_rejects_different_same_epoch_object();
   test_sweep_cursor_units();
+  test_sweep_scrubs_torn_slot();
   test_node_p6_branch();
   test_ram_budget();
   if (failures != 0) {
@@ -1748,6 +1896,3 @@ int main() {
   std::puts("routeloom_sdkv1_revocation_tests: ok");
   return 0;
 }
-
-
-

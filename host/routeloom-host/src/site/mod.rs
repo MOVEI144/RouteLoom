@@ -654,7 +654,7 @@ impl SiteAuthority {
             .get(revocation::META_GK_STAGED_DISTRIBUTED)
             .is_some_and(|v| v == &[1]);
         let (mut rrs_history, mut rrs_history_digests, rrs_latest_object) =
-            revocation::decode_rrs_history(&snapshot)?;
+            revocation::decode_rrs_history(&snapshot, &sak.pubkey(), id.site_id, id.network)?;
         {
             let floor = operations
                 .values()
@@ -1485,25 +1485,45 @@ impl SiteAuthority {
         );
     }
 
-    fn operation_doc(&mut self, batch: &mut Batch, op: &Operation) {
+    fn evictable_operation(&self) -> Option<u64> {
+        self.operations.iter().find_map(|(&id, op)| {
+            let terminal = if op.kind == "revoke" {
+                op.distribution.as_ref().is_some_and(|dist| {
+                    dist.state == revocation::DistState::Converged
+                        && self.gk_active.epoch >= op.gk_to
+                })
+            } else {
+                self.devices.get(&op.node).is_some_and(|row| {
+                    row.generation != op.generation || !row.member || row.confirmed
+                })
+            };
+            terminal.then_some(id)
+        })
+    }
+
+    fn operation_doc(&self, batch: &mut Batch, op: &Operation) -> Result<Option<u64>, SiteError> {
+        let evicted = if self.operations.len() >= OPERATIONS_CAP {
+            Some(self.evictable_operation().ok_or_else(|| {
+                SiteError::new("NO_CAPACITY", "all operation slots have unfinished work")
+            })?)
+        } else {
+            None
+        };
         batch
             .docs
             .push((DocKind::Operation, h16(op.id), Some(op.doc())));
-        if self.operations.len() >= OPERATIONS_CAP {
-            if let Some(&oldest) = self.operations.keys().next() {
-                batch.docs.push((DocKind::Operation, h16(oldest), None));
-            }
+        if let Some(id) = evicted {
+            batch.docs.push((DocKind::Operation, h16(id), None));
         }
         batch
             .meta
             .push(("next_op_id", (op.id + 1).to_be_bytes().to_vec()));
+        Ok(evicted)
     }
 
-    fn remember_operation(&mut self, op: Operation) {
-        if self.operations.len() >= OPERATIONS_CAP {
-            if let Some(&oldest) = self.operations.keys().next() {
-                self.operations.remove(&oldest);
-            }
+    fn remember_operation(&mut self, op: Operation, evicted: Option<u64>) {
+        if let Some(id) = evicted {
+            self.operations.remove(&id);
         }
         self.next_op_id = op.id + 1;
         self.operations.insert(op.id, op);
@@ -1621,7 +1641,7 @@ impl SiteAuthority {
         };
         let mut batch = Batch::default();
         let result;
-        let mut approved: Option<(DeviceRow, LedgerRow, Operation)> = None;
+        let mut approved: Option<(DeviceRow, LedgerRow, Operation, Option<u64>)> = None;
         match request.verdict {
             Verdict::Allow { role } => {
                 // The flag stored with the request is stale information:
@@ -1742,8 +1762,8 @@ impl SiteAuthority {
                 batch
                     .meta
                     .push(("revision", (self.revision + 1).to_be_bytes().to_vec()));
-                self.operation_doc(&mut batch, &op);
-                approved = Some((row, ledger, op));
+                let evicted = self.operation_doc(&mut batch, &op)?;
+                approved = Some((row, ledger, op, evicted));
             }
             _ => {
                 result = format!(
@@ -1767,13 +1787,13 @@ impl SiteAuthority {
             return Err(store_failure(&error));
         }
         // Committed: now the RAM model follows.
-        if let Some((row, ledger, op)) = approved {
+        if let Some((row, ledger, op, evicted)) = approved {
             self.ledger_seq = ledger.seq;
             self.ledger_head = ledger.hash;
             self.next_serial = row.member_cert_serial + 1;
             self.revision += 1;
             self.devices.insert(row.node, row);
-            self.remember_operation(op);
+            self.remember_operation(op, evicted);
         }
         self.remember_decision(principal, &request.key, digest, &result, now_ms);
         self.requests.insert(open.id, updated);
@@ -1928,7 +1948,7 @@ impl SiteAuthority {
                 .meta
                 .push((revocation::META_GK_STAGED_DISTRIBUTED, vec![0]));
         }
-        self.operation_doc(&mut batch, &op);
+        let evicted = self.operation_doc(&mut batch, &op)?;
         // The removed device owes older operations no ACK anymore: fold
         // the retirements into the same commit.
         let retired = self.retired_operations(row.node);
@@ -1955,7 +1975,7 @@ impl SiteAuthority {
             self.gk_staged = Some(staged.0.clone());
             self.gk_staged_distributed = false;
         }
-        self.remember_operation(op.clone());
+        self.remember_operation(op.clone(), evicted);
         for rop in retired {
             self.operations.insert(rop.id, rop);
         }

@@ -9,7 +9,7 @@ use routeloom_provision::sdkv1::revocation::{revocation_object_verify, Revocatio
 use routeloom_provision::sha256::sha256;
 
 use super::records::{Verdict, ROLE_ENDPOINT, ROLE_RELAY};
-use super::store::{MemoryStore, SqliteSiteStore};
+use super::store::{Batch, MemoryStore, Snapshot, SqliteSiteStore, StoreError};
 use super::testkit::{self, kinds, request_id, Outcome, SimDevice};
 use super::transport::{AbortReason, InProcessTransport, RelayKey, RelayUp};
 use super::*;
@@ -871,6 +871,39 @@ fn a_store_is_bound_to_its_site() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn restart_rejects_rrs_signed_by_another_key() {
+    let (service, transport) = service();
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut leaver, "l", T0);
+    revoke(&service, leaver.node, 1, "r-forged", T0 + 10_000);
+    let result = service
+        .with(|a| {
+            let mut store = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+            let set = revocation_object_decode(&a.rrs_latest_object).unwrap();
+            let wrong = routeloom_provision::signer::FileRootSigner::from_secret(
+                testkit::SITE,
+                &routeloom_provision::signer::test_keypair(0x33).0,
+            )
+            .unwrap();
+            let forged = revocation_issue(&set, &wrong).unwrap();
+            store
+                .commit(&Batch {
+                    rrs: vec![(set.rs_epoch, forged)],
+                    ..Batch::default()
+                })
+                .unwrap();
+            SiteAuthority::open(
+                &testkit::setup(),
+                Box::new(testkit::sak()),
+                store,
+                T0 + 20_000,
+            )
+        })
+        .0;
+    assert!(result.is_err());
+}
+
 /// #107: two join requests for one NodeId with different keys, both
 /// opened before any approval — the kid_conflict stored at request time
 /// is re-checked against the live membership at commit, so the later
@@ -1546,6 +1579,201 @@ fn revocation_distribution_converges_on_applied() {
     assert_eq!(distribution.get("unknown").unwrap().as_u64(), Some(0));
 }
 
+#[test]
+fn applied_ack_requires_the_snapshot_credential() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let (op, _) = revoke(&service, leaver.node, 1, "r-binding", T0 + 10_000);
+    let digest = service.with(|a| sha256(&a.rrs_latest_object)).0;
+    let network = testkit::network();
+    service.with(|a| a.devices.get_mut(&keeper.node).unwrap().generation = 2);
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(keeper.node, 2, network, 1, &digest, T0 + 10_100))
+            .0
+    );
+    service.with(|a| {
+        let row = a.devices.get_mut(&keeper.node).unwrap();
+        row.generation = 1;
+        row.kid = [0x55; 32];
+    });
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 1, &digest, T0 + 10_200))
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(0)
+    );
+}
+
+struct FailNextStore {
+    inner: Box<dyn SiteStore>,
+    fail_next: bool,
+}
+
+impl SiteStore for FailNextStore {
+    fn load(&mut self) -> Result<Snapshot, StoreError> {
+        self.inner.load()
+    }
+    fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
+        if self.fail_next {
+            self.fail_next = false;
+            return Err(StoreError("injected ACK commit failure".into()));
+        }
+        self.inner.commit(batch)
+    }
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
+}
+
+#[test]
+fn applied_ack_is_not_reported_before_commit() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let (op, _) = revoke(&service, leaver.node, 1, "r-ack-fault", T0 + 10_000);
+    let digest = service.with(|a| sha256(&a.rrs_latest_object)).0;
+    service.with(|a| {
+        let inner = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+        a.store = Box::new(FailNextStore {
+            inner,
+            fail_next: true,
+        });
+    });
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(
+                keeper.node,
+                1,
+                testkit::network(),
+                1,
+                &digest,
+                T0 + 10_100
+            ))
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(0)
+    );
+    assert!(
+        service
+            .with(|a| a.handle_rrs_applied(
+                keeper.node,
+                1,
+                testkit::network(),
+                1,
+                &digest,
+                T0 + 10_200
+            ))
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn unfinished_operation_is_not_evicted_at_capacity() {
+    let (service, transport) = service();
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut leaver, "l", T0);
+    service.with(|a| {
+        let mut template = a.operations.values().next().unwrap().clone();
+        template.kind = "revoke".into();
+        template.distribution = Some(revocation::OperationDistribution {
+            state: revocation::DistState::Pending,
+            rs_epoch: 1,
+            network: testkit::network(),
+            object_sha256: [0; 32],
+            targets: vec![revocation::DistributionTarget {
+                node: leaver.node,
+                kid: [0; 32],
+                generation: 1,
+                network: testkit::network(),
+                state: revocation::TargetState::Pending,
+                attempts: 0,
+                next_retry_ms: 0,
+                ack_rs_epoch: None,
+            }],
+            overflow: 0,
+        });
+        a.operations.clear();
+        for id in 1..=OPERATIONS_CAP as u64 {
+            let mut op = template.clone();
+            op.id = id;
+            a.operations.insert(id, op);
+        }
+        a.next_op_id = OPERATIONS_CAP as u64 + 1;
+    });
+    let result = service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: leaver.node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Lost,
+                    key: "r-cap".into(),
+                },
+                T0 + 10_000,
+            )
+        })
+        .0;
+    assert_eq!(result.unwrap_err().code, "NO_CAPACITY");
+    service.with(|a| {
+        assert_eq!(a.operations.len(), OPERATIONS_CAP);
+        assert!(a.operations.contains_key(&1));
+        assert_eq!(a.rs_epoch, 0);
+        assert!(a.devices.get(&leaver.node).unwrap().member);
+    });
+}
+
+#[test]
+fn distribution_retries_after_the_initial_contact() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    let (op, _) = revoke(&service, leaver.node, 1, "r-retry", T0 + 10_000);
+    for at in [10_000, 15_000, 25_000, 45_000, 85_000, 145_000] {
+        service.tick(T0 + at);
+    }
+    assert_eq!(sends.lock().unwrap().sent.len(), 6);
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("unknown")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+}
+
 /// V1-R01 (P6-1): what the daemon emits from `operations.get` is what the
 /// client reads — the `committed → distributing → converged` top-level
 /// state and the per-snapshot counts survive the client parser, and an
@@ -1613,9 +1841,8 @@ fn operations_get_round_trips_through_the_client_parser() {
     );
 }
 
-/// V1-R01 (P6-1): un-ACKed targets get three attempts per operation
-/// (5/10/20 s), then honestly stay `unknown`; a refusing transport
-/// backs the whole outbox off instead of spinning.
+/// V1-R01 (P6-1): un-ACKed targets keep retrying at bounded intervals
+/// and remain `unknown`; a refusing transport backs the whole outbox off.
 #[test]
 fn revocation_distribution_attempts_and_backoff() {
     let (service, transport) = service();
@@ -1638,8 +1865,8 @@ fn revocation_distribution_attempts_and_backoff() {
     assert_eq!(sends.lock().unwrap().sent.len(), 2);
     service.tick(T0 + 25_000); // +10 s
     assert_eq!(sends.lock().unwrap().sent.len(), 3);
-    service.tick(T0 + 1_000_000); // exhausted: no fourth attempt
-    assert_eq!(sends.lock().unwrap().sent.len(), 3);
+    service.tick(T0 + 45_000); // +20 s: the next host contact
+    assert_eq!(sends.lock().unwrap().sent.len(), 4);
     let distribution = distribution_of(&service, op);
     assert_eq!(
         distribution.get("state").unwrap().as_str(),
@@ -1650,14 +1877,14 @@ fn revocation_distribution_attempts_and_backoff() {
     sends.lock().unwrap().refuse = true;
     sends.lock().unwrap().sent.clear();
     let mut third = SimDevice::new(0x00A1_0000_0000_7003, 0x73);
-    join_member(&service, &transport, &mut third, "t", T0 + 20_000);
-    let (op2, _) = revoke(&service, third.node, 1, "r-busy", T0 + 30_000);
-    service.tick(T0 + 30_000);
+    join_member(&service, &transport, &mut third, "t", T0 + 50_000);
+    let (op2, _) = revoke(&service, third.node, 1, "r-busy", T0 + 60_000);
+    service.tick(T0 + 60_000);
     assert!(sends.lock().unwrap().sent.is_empty());
-    service.tick(T0 + 34_999);
+    service.tick(T0 + 64_999);
     assert!(sends.lock().unwrap().sent.is_empty());
     sends.lock().unwrap().refuse = false;
-    service.tick(T0 + 35_000);
+    service.tick(T0 + 65_000);
     assert_eq!(sends.lock().unwrap().sent.len(), 1);
     assert_eq!(
         distribution_of(&service, op2)

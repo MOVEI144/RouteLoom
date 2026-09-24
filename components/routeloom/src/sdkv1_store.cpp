@@ -832,9 +832,12 @@ Status ResumeCache::sweep_revoked(const ResumeContext& context, std::size_t& cur
   bool intact = true;
   Status status = read_slot(cursor, slot, intact);
   if (!status) return status;
-  if (slot.valid && slot.network == context.network && context.revocations != nullptr &&
-      revocation_rejects(*context.revocations, slot.peer, slot.peer_generation,
-                         static_cast<std::uint32_t>(slot.network >> 32U))) {
+  if (!intact ||
+      (slot.valid && slot.network == context.network && context.revocations != nullptr &&
+       revocation_rejects(*context.revocations, slot.peer, slot.peer_generation,
+                          static_cast<std::uint32_t>(slot.network >> 32U)))) {
+    // An undecodable slot has no trustworthy binding to classify. Scrub it
+    // so a torn old RMS is not retained after the revocation sweep.
     status = write_slot(cursor, ResumeSlot{});
     if (!status) return status;
   }
