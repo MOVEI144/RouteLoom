@@ -786,8 +786,9 @@ void test_node_bootstrap_rx_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::BootstrapChunk, 1, 2, 1, 2, MessageId{101, 3}, view,
                         false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    const auto rx = sim_rx_metadata(w.reply_ports.at(2).get(), 1);
+    b->on_radio_receive(1, frame.view(), rx, w.now);
+    b->on_radio_receive(1, frame.view(), rx, w.now);
     CHECK(tap_b.metas.size() == 1);
     CHECK(tap_b.types.back() == FrameType::BootstrapChunk);
   }
@@ -836,7 +837,7 @@ void test_node_bootstrap_transit_guards() {
     const wire::EncodedFrame frame = craft_bootstrap(
         scratch, FrameType::BootstrapAuth, 1, 3, 1, 2, MessageId{101, 14}, view, false,
         kDefaultHopLimit, 100);
-    RadioRxMetadataV2 aged{};
+    RadioRxMetadataV2 aged = sim_rx_metadata(w.reply_ports.at(2).get(), 1);
     aged.received_us = (w.now - 200) * 1000U;
     b->on_radio_receive(1, frame.view(), aged, w.now);
     CHECK(w.obs(2)->has_diag("BOOTSTRAP_TRANSIT_DEADLINE_SPENT"));
@@ -849,7 +850,7 @@ void test_node_bootstrap_transit_guards() {
     const wire::EncodedFrame frame =
         craft_bootstrap(scratch, FrameType::MembershipResult, 1, 3, 1, 2, MessageId{101, 13},
                         view, false, kDefaultHopLimit, 4000);
-    b->on_radio_receive(1, frame.view(), RadioRxMetadata{-60}, w.now);
+    b->on_radio_receive(1, frame.view(), sim_rx_metadata(w.reply_ports.at(2).get(), 1), w.now);
     w.run(1500);
     CHECK(tap_c.metas.size() == 1);
     if (tap_c.metas.size() == 1) {

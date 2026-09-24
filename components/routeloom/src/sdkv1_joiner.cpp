@@ -1487,7 +1487,25 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
     reconcile_enter(true, now);  // nothing was written; classify the store
     return Status::success();
   }
-  const SiteRecord& prepared = *decided_.record;
+  // The verified package contains Host active GK, not this device's
+  // durable staged GK. A same-site refresh must not drop a newer next
+  // generation while the Host is still serving the identical active key.
+  struct WipedRecord {
+    SiteRecord value{};
+    ~WipedRecord() { secure_clear(&value, sizeof(value)); }
+  } refreshed{*decided_.record};
+  if (recovery_only_ && site_.has_site()) {
+    const SiteRecord& retained = site_.site();
+    if (refreshed.value.network == retained.network &&
+        refreshed.value.site_id == retained.site_id &&
+        refreshed.value.gk_epoch_current == retained.gk_epoch_current &&
+        refreshed.value.gk_current == retained.gk_current &&
+        retained.gk_epoch_next > refreshed.value.gk_epoch_current) {
+      refreshed.value.gk_epoch_next = retained.gk_epoch_next;
+      refreshed.value.gk_next = retained.gk_next;
+    }
+  }
+  const SiteRecord& prepared = refreshed.value;
   if (below_removal_watermark(prepared)) {
     teardown_attempt();
     recovery_required(JoinRecoveryReason::AssignmentRegressed);

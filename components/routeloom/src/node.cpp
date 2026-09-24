@@ -3889,7 +3889,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
 }
 
 void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId peer,
-                                const MonotonicMs now_ms) noexcept {
+                                const RxBinding& rx, const MonotonicMs now_ms) noexcept {
   // The routed bootstrap lane (G-SEC P4 §7.4): join-relay and member
   // end-session objects, link-authenticated per hop, never end-protected.
   // receive_impl only routes link-only frames here; the origin below is an
@@ -3920,16 +3920,22 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
         if (conflicted) conflict = TransitFailureReason::MessageConflict;
       }
       if (conflicted) {
-        emit_transit_refusal(frame, conflict, now_ms);
+        emit_transit_refusal(frame, conflict, rx, now_ms);
         observer_.on_diagnostic("BOOTSTRAP_DEDUP_CONFLICT", peer, &frame.header.message);
         return;
       }
     }
     if (duplicate->failure_reported) {
-      replay_retained_failure(*duplicate, type, now_ms);
+      replay_retained_failure(*duplicate, type, rx, now_ms);
       return;
     }
-    if (scheduler_.free_slots() >= 1) (void)queue_hop_accept(frame.header, now_ms);
+    AdmissionReservation reply{};
+    if (rx.valid && reserve_rx_reply(rx, true, 1, now_ms, reply) &&
+        queue_hop_accept(frame.header, reply.txn, now_ms)) {
+      reply.committed = true;
+    } else {
+      reply.rollback();
+    }
     return;
   }
 
@@ -3938,25 +3944,38 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
       observer_.on_diagnostic("BOOTSTRAP_PAYLOAD_REJECTED", peer, &frame.header.message);
       return;
     }
-    if (scheduler_.free_slots() < 1) {
-      ++busy_stats_.busy_send_failed;
+    MonotonicMs deadline = 0;
+    if (!rx.valid || scheduler_.free_slots() < 1 ||
+        !scheduler_.control_slot_available() || !txn_slot_available() ||
+        !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms, deadline)) {
       observer_.on_diagnostic("BOOTSTRAP_NO_ACK_SLOT", peer, &frame.header.message);
+      return;
+    }
+    AdmissionReservation res{};
+    res.node = this;
+    if (reply_peer_port_ == nullptr ||
+        !reply_peer_port_->acquire(rx.binding, deadline, now_ms, res.use) ||
+        !begin_txn(res.use, deadline, res.txn)) {
+      res.rollback();
       return;
     }
     auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
                                  DedupPhase::Resolved, peer,
                                  frame.header.remaining_deadline_ms, now_ms);
     if (entry == nullptr) {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
       return;
     }
-    if (!queue_hop_accept(frame.header, now_ms)) {
-      dedup_.release(entry);
+    res.dedup = entry;
+    if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
-                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
       return;
     }
+    res.committed = true;
     entry->delivered = true;
     if (bootstrap_sink_ != nullptr) {
       sdkv1::BootstrapMeta meta{};
@@ -3980,7 +3999,7 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   // link-protected bytes untouched and never interprets the payload.
   if (!transit_permitted()) {
     ++transit_refused_;
-    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, now_ms);
+    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_RELAY_DISABLED", peer,
                             &frame.header.message);
     return;
@@ -3989,7 +4008,7 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   // adopted Relay or Gateway role does.
   if ((local_role_ & (sdkv1::kMemberRoleRelay | sdkv1::kMemberRoleGateway)) == 0) {
     ++transit_refused_;
-    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, now_ms);
+    emit_transit_refusal(frame, TransitFailureReason::RelayDisabled, rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_ROLE", peer, &frame.header.message);
     return;
   }
@@ -3999,36 +4018,50 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   // any honest encoder, so a second check would be unreachable.
   if (frame.header.remaining_deadline_ms <= rx_age_ms_) {
     ++transit_refused_;
-    emit_transit_refusal(frame, TransitFailureReason::Deadline, now_ms);
+    emit_transit_refusal(frame, TransitFailureReason::Deadline, rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_DEADLINE_SPENT", peer,
                             &frame.header.message);
     return;
   }
   const auto route = routes_.best(frame.header.destination);
   if (!route.valid || route.next_hop == peer) {
-    emit_transit_refusal(frame, TransitFailureReason::NoRoute, now_ms);
+    emit_transit_refusal(frame, TransitFailureReason::NoRoute, rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_NO_ROUTE", peer, &frame.header.message);
     return;
   }
   const AdmitVerdict admit =
       scheduler_.check(config_.node, /*scope=*/peer, frame.header.origin, 2);
   if (admit != AdmitVerdict::Admitted) {
-    emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), now_ms);
+    emit_busy_or_drop(peer, frame.header, busy_reason_for(admit), rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_DENIED", peer, &frame.header.message);
+    return;
+  }
+  MonotonicMs deadline = 0;
+  if (!rx.valid || !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms, deadline) ||
+      scheduler_.free_slots() < 2 || !scheduler_.control_slot_available() ||
+      !txn_slot_available()) return;
+  AdmissionReservation res{};
+  res.node = this;
+  if (reply_peer_port_ == nullptr ||
+      !reply_peer_port_->acquire(rx.binding, deadline, now_ms, res.use) ||
+      !begin_txn(res.use, deadline, res.txn)) {
+    res.rollback();
     return;
   }
   auto* entry = allocate_dedup(key, type, frame.header.delivery_round,
                                DedupPhase::Live, peer,
                                frame.header.remaining_deadline_ms, now_ms);
   if (entry == nullptr) {
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
-                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
     return;
   }
-  if (!queue_forward(frame, route.next_hop, now_ms)) {
-    dedup_.release(entry);
+  res.dedup = entry;
+  if (!queue_forward(frame, route.next_hop, res.txn, now_ms)) {
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
-                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), now_ms);
+                      static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull), rx, now_ms);
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_RESERVATION_FAILED", peer,
                             &frame.header.message);
     return;
@@ -4039,11 +4072,13 @@ void MeshNode::handle_bootstrap(const wire::LinkOpenedFrame& frame, const NodeId
   entry->ref_destination = frame.header.destination;
   entry->has_fingerprint =
       wire::transit_fingerprint(frame, entry->fingerprint).ok();
-  if (!queue_hop_accept(frame.header, now_ms)) {
+  if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
     // The forward stays committed; the sender's retry dedups and re-ACKs.
+    res.committed = true;
     observer_.on_diagnostic("BOOTSTRAP_TRANSIT_ACK_FULL", peer, &frame.header.message);
     return;
   }
+  res.committed = true;
 }
 
 void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer,
@@ -5289,7 +5324,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         observer_.on_diagnostic("BOOTSTRAP_SCOPE_REJECTED", peer,
                                 &frame.header.message);
       } else {
-        handle_bootstrap(frame, peer, now_ms);
+        handle_bootstrap(frame, peer, rx, now_ms);
       }
       break;
     case FrameType::Service:

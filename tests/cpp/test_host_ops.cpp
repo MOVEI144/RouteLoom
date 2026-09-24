@@ -3774,6 +3774,9 @@ std::uint64_t authority_u64(const AuthorityFields& f, const char* key) {
 }
 
 void test_authority_usb_codecs() {
+  // Both lanes are negotiated independently; a join-only gateway must not
+  // claim that it can forward authority envelopes.
+  CHECK((kCapAuthorityChannelV1 & kCapJoinRelayV2) == 0);
 #ifndef ROUTELOOM_SDKV1_GOLDEN_DIR
   CHECK(false);  // the authority cases need the golden directory
   return;

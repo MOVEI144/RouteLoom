@@ -2203,6 +2203,34 @@ void test_healthy_member_recovery_queries() {
   current.clear();
 }
 
+// A full same-site refresh may reissue the Host's active GK while this
+// device already holds a newer durable staged GK. The refresh must retain
+// that high-water rather than erase it or strand the Joiner in Reconcile.
+void test_refresh_preserves_staged_gk() {
+  current = "refresh-staged-gk";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());  // Host still serves active g=203.
+  CHECK(net.device().joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  std::array<std::uint8_t, 32> next{};
+  next.fill(0xA4);
+  CHECK(net.device().site_store.stage_group_key(204, next).ok());
+  net.restart_device(device_config(), 0xA504);
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(net.device().joiner.start(boot, net.now()).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  if (net.has_terminal_action()) {
+    CHECK(net.terminal_action().kind == JoinActionKind::MemberReady);
+    CHECK(net.terminal_action().joined_now);
+  }
+  CHECK(net.device().site_store.site().gk_epoch_current == 203);
+  CHECK(net.device().site_store.site().gk_epoch_next == 204);
+  CHECK(net.device().site_store.site().gk_next == next);
+  current.clear();
+}
+
 void test_removed_watermark_rejects_stale_allow() {
   current = "removed-watermark-stale";
   JoinSimNetwork net(device_config(), device_identity());
@@ -2722,6 +2750,7 @@ int main() {
   test_cross_site_recover_forbidden();
   test_healthy_member_boot_adopts();
   test_healthy_member_recovery_queries();
+  test_refresh_preserves_staged_gk();
   test_removed_watermark_rejects_stale_allow();
   test_removed_watermark_allows_new_generation();
   test_removed_watermark_blocks_stale_stored_member();

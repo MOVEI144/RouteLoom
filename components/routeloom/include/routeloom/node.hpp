@@ -2113,7 +2113,7 @@ class MeshNode {
   // transit additionally requires a Relay/Gateway local role. Never
   // enters the DATA path and never emits END_RECEIPT.
   void handle_bootstrap(const wire::LinkOpenedFrame& frame, NodeId peer,
-                        MonotonicMs now_ms) noexcept;
+                        const RxBinding& rx, MonotonicMs now_ms) noexcept;
   // End-protected Diagnostic (48) terminal handling (02-telemetry §4.2):
   // subtype dispatch on the verified body — TelemetryQuery answers with a
   // bounded snapshot or an honest DiagnosticReject; Snapshot/Reject surface
