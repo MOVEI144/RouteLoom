@@ -95,6 +95,49 @@ class FaultyRecordStorage final : public RecordSlotStorage {
   std::array<std::vector<std::uint8_t>, 2> slots_{};
 };
 
+class FaultyResumeStorage2 final : public ResumeSlotStorage2 {
+ public:
+  explicit FaultyResumeStorage2(const std::size_t count) : slots_(count) {
+    for (auto& slot : slots_) slot.fill(0xFF);
+  }
+  std::size_t slot_count() const noexcept override { return slots_.size(); }
+  Status read(const std::size_t index, const MutableByteView target) noexcept override {
+    if (index >= slots_.size() || target.size != kResume2SlotBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad resume2 read");
+    }
+    if (read_error) return Status::error(StatusCode::StorageFailure, "injected read error");
+    std::memcpy(target.data, slots_[index].data(), kResume2SlotBytes);
+    return Status::success();
+  }
+  Status write(const std::size_t index, const ByteView data) noexcept override {
+    if (index >= slots_.size() || data.size != kResume2SlotBytes) {
+      return Status::error(StatusCode::InvalidArgument, "bad resume2 write");
+    }
+    const std::size_t call = write_calls++;
+    if (call == cut_call) {
+      std::memcpy(slots_[index].data(), data.data, cut_bytes);
+      return Status::error(StatusCode::StorageFailure, "power cut mid write");
+    }
+    std::memcpy(slots_[index].data(), data.data, kResume2SlotBytes);
+    return Status::success();
+  }
+  std::array<std::uint8_t, kResume2SlotBytes>& slot(const std::size_t index) {
+    return slots_[index];
+  }
+  void disarm() {
+    cut_call = std::numeric_limits<std::size_t>::max();
+    read_error = false;
+  }
+
+  std::size_t write_calls{0};
+  std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
+  std::size_t cut_bytes{0};
+  bool read_error{false};
+
+ private:
+  std::vector<std::array<std::uint8_t, kResume2SlotBytes>> slots_{};
+};
+
 class FaultyResumeStorage final : public ResumeSlotStorage {
  public:
   explicit FaultyResumeStorage(const std::size_t count) : slots_(count) {

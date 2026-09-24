@@ -5,6 +5,7 @@
 
 #include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"  // sha256
+#include "routeloom/key_schedule.hpp"     // resume_id (RLP2 rid lookup)
 #include "routeloom/secure_clear.hpp"
 
 namespace routeloom::sdkv1 {
@@ -53,6 +54,10 @@ Status revocation_semantic(const ByteView record, void* context) noexcept {
   return revocation_record_decode(record, *static_cast<RevocationSet*>(context), object);
 }
 
+Status local_revocation_semantic(const ByteView record, void* context) noexcept {
+  return local_revocation_record_decode(record, *static_cast<LocalRevocationRecord*>(context));
+}
+
 const SealedRecordFormat kIdentityFormat{
     kIdentityMagic,     kIdentitySealCommitted, kIdentitySlotBytes, kIdentityRecordMin,
     kIdentityRecordMax, false,                  &identity_record_structure,
@@ -67,11 +72,19 @@ const SealedRecordFormat kRevocationFormat{
     kRevocationRecordMax, true,                     &revocation_record_structure,
     &revocation_semantic};
 
+const SealedRecordFormat kLocalRevocationFormat{
+    kLocalRevocationMagic,     kLocalRevocationSealCommitted, kLocalRevocationSlotBytes,
+    kLocalRevocationRecordLen, kLocalRevocationRecordLen,     true,
+    &local_revocation_record_structure, &local_revocation_semantic};
+
 }  // namespace
 
 const SealedRecordFormat& identity_record_format() noexcept { return kIdentityFormat; }
 const SealedRecordFormat& site_record_format() noexcept { return kSiteFormat; }
 const SealedRecordFormat& revocation_record_format() noexcept { return kRevocationFormat; }
+const SealedRecordFormat& local_revocation_record_format() noexcept {
+  return kLocalRevocationFormat;
+}
 
 // --- SealedSlotPair ------------------------------------------------------------
 
@@ -141,6 +154,7 @@ Status SealedSlotPair::initialize() noexcept {
   has_active_ = false;
   quarantined_ = false;
   uncertain_ = false;
+  stale_sibling_ = false;
   active_seq_ = 0;
   seq_floor_ = 0;
   active_slot_ = 0;
@@ -200,6 +214,7 @@ Status SealedSlotPair::initialize() noexcept {
   }
   if (valid == 2) {
     if (format_.sequenced && seq[0] != seq[1]) {
+      stale_sibling_ = true;
       adopt(seq[1] > seq[0] ? 1 : 0);
       return Status::success();
     }
@@ -214,12 +229,16 @@ Status SealedSlotPair::initialize() noexcept {
   if (valid == 1) {
     const std::uint8_t slot = content[0] == SlotContent::Valid ? 0 : 1;
     adopt(slot);
-    if (!provably_absent(static_cast<std::uint8_t>(slot ^ 1U))) {
+    const std::uint8_t sibling = static_cast<std::uint8_t>(slot ^ 1U);
+    if (!provably_absent(sibling)) {
       // The lost sibling may have held a newer record: known value only,
       // commits refused until recover().
       uncertain_ = true;
       return Status::error(StatusCode::IntegrityError, "record sibling state unproven");
     }
+    // A pending write is not adopted, but partial bytes may still contain
+    // the previous secret. Typed stores scrub it before enabling its use.
+    stale_sibling_ = content[sibling] == SlotContent::Pending;
     return Status::success();
   }
   if (unreadable[0] || unreadable[1]) return read_error;  // retryable storage fault
@@ -343,6 +362,7 @@ Status SealedSlotPair::commit_twin_prepared(const std::size_t used_len) noexcept
   has_active_ = true;
   quarantined_ = false;
   uncertain_ = false;
+  stale_sibling_ = false;
   return Status::success();
 }
 
@@ -405,8 +425,19 @@ void SiteStore::wipe_scratch() noexcept {
   scratch_.size = 0;
 }
 
+void SiteStore::advance_group_lifecycle() noexcept {
+  if (group_lifecycle_ == std::numeric_limits<std::uint64_t>::max()) {
+    group_lifecycle_exhausted_ = true;
+  } else {
+    ++group_lifecycle_;
+  }
+}
+
 Status SiteStore::initialize() noexcept {
+  advance_group_lifecycle();
   active_load_failed_ = false;
+  scrub_needed_ = false;
+  group_write_failed_ = false;
   const Status status = pair_.initialize();
   site_ = SiteRecord{};
   if (pair_.has_active()) {
@@ -420,6 +451,9 @@ Status SiteStore::initialize() noexcept {
       return loaded;
     }
   }
+  // A stale sibling may retain a retired current or superseded next key.
+  // Scrub the adopted record to both slots before group use after reboot.
+  scrub_needed_ = pair_.stale_sibling() && has_site();
   wipe_scratch();
   return status;
 }
@@ -464,6 +498,9 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
   if (!pair_.initialized()) {
     return Status::error(StatusCode::InvalidState, "site store not initialized");
   }
+  if (group_write_failed_) {
+    return Status::error(StatusCode::RecoveryRequired, "group scrub required");
+  }
   if (active_load_failed_) {
     return Status::error(StatusCode::StorageFailure, "site active record unreadable");
   }
@@ -479,6 +516,18 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
     }
     if (new_epoch < old_epoch || (new_epoch == old_epoch && record.network != current.network)) {
       return Status::error(StatusCode::Conflict, "site epoch regressed");
+    }
+    const std::uint32_t old_high = current.gk_epoch_next != 0 ? current.gk_epoch_next
+                                                                  : current.gk_epoch_current;
+    const std::uint32_t new_high = record.gk_epoch_next != 0 ? record.gk_epoch_next
+                                                                : record.gk_epoch_current;
+    if (record.network == current.network &&
+        (new_high < old_high ||
+         (record.gk_epoch_current == current.gk_epoch_current &&
+          record.gk_current != current.gk_current) ||
+         (record.gk_epoch_next != 0 && record.gk_epoch_next == current.gk_epoch_next &&
+          record.gk_next != current.gk_next))) {
+      return Status::error(StatusCode::Conflict, "group key floor or identity changed");
     }
     if (record.assignment_generation < current.assignment_generation ||
         record.gk_epoch_current < current.gk_epoch_current ||
@@ -496,12 +545,110 @@ Status SiteStore::commit(const SiteRecord& record) noexcept {
   return Status::success();
 }
 
+Status SiteStore::stage_group_key(const std::uint32_t epoch,
+                                  const std::array<std::uint8_t, 32>& key) noexcept {
+  if (!has_site() || scrub_needed_ || group_write_failed_ || pair_.uncertain() ||
+      pair_.quarantined()) {
+    return Status::error(StatusCode::RecoveryRequired, "group store not ready");
+  }
+  if (epoch == site_.gk_epoch_current && key == site_.gk_current) return Status::success();
+  if (epoch == site_.gk_epoch_next && key == site_.gk_next) return Status::success();
+  const std::uint32_t high = site_.gk_epoch_next ? site_.gk_epoch_next : site_.gk_epoch_current;
+  if (epoch <= high) return Status::error(StatusCode::Conflict, "group epoch not new");
+  bool key_zero = true;
+  for (const auto byte : key) key_zero = key_zero && byte == 0;
+  if (key_zero) return Status::error(StatusCode::Conflict, "group key empty");
+  SiteRecord candidate = site_;
+  candidate.gk_epoch_next = epoch;
+  candidate.gk_next = key;
+  Status status = Status::success();
+  if (site_.gk_epoch_next == 0) {
+    status = commit(candidate);
+  } else {
+    // Superseding a staged key retires its secret immediately. A plain A/B
+    // commit would leave the old next key in the sibling slot.
+    std::size_t length = 0;
+    status = encode(candidate, length);
+    if (status) status = pair_.commit_twin_prepared(length);
+    wipe_scratch();
+    if (status) {
+      site_ = candidate;
+      scrub_needed_ = false;
+    } else {
+      scrub_needed_ = true;
+    }
+  }
+  if (!status) group_write_failed_ = true;
+  secure_clear(&candidate, sizeof(candidate));
+  return status;
+}
+
+Status SiteStore::activate_group_key(const std::uint32_t epoch,
+                                     const std::uint32_t boot_witness) noexcept {
+  if (!has_site() || scrub_needed_ || group_write_failed_ || pair_.uncertain() ||
+      pair_.quarantined()) {
+    return Status::error(StatusCode::RecoveryRequired, "group store not ready");
+  }
+  if (epoch == site_.gk_epoch_current && site_.gk_epoch_next == 0 &&
+      boot_witness <= site_.boot_witness) return Status::success();
+  if (epoch != site_.gk_epoch_next || boot_witness < site_.boot_witness) {
+    return Status::error(StatusCode::Conflict, "group activation mismatch");
+  }
+  SiteRecord candidate = site_;
+  candidate.gk_epoch_current = epoch;
+  candidate.gk_current = candidate.gk_next;
+  candidate.gk_epoch_next = 0;
+  secure_clear(candidate.gk_next);
+  candidate.boot_witness = boot_witness;
+  std::size_t length = 0;
+  Status status = encode(candidate, length);
+  if (status) status = pair_.commit_twin_prepared(length);
+  wipe_scratch();
+  if (status) {
+    site_ = candidate;
+    scrub_needed_ = false;
+    group_write_failed_ = false;
+  } else {
+    // The first twin write may already have committed. No group use until
+    // initialize() re-reads both slots and finish_group_scrub() completes.
+    scrub_needed_ = true;
+    group_write_failed_ = true;
+  }
+  secure_clear(&candidate, sizeof(candidate));
+  return status;
+}
+
+Status SiteStore::finish_group_scrub() noexcept {
+  if (group_write_failed_) {
+    return Status::error(StatusCode::RecoveryRequired, "group re-read required");
+  }
+  if (!scrub_needed_) return Status::success();
+  const SiteStoreHealth h = health();
+  if (!h.has_site || h.quarantined || h.uncertain || h.unsupported_mask ||
+      h.read_error_mask || h.active_load_failed || !pair_.stale_sibling() ||
+      h.seq_floor != commit_seq()) {
+    return Status::error(StatusCode::RecoveryRequired, "group scrub floor unproven");
+  }
+  std::size_t length = 0;
+  Status status = encode(site_, length);
+  if (status) status = pair_.commit_twin_prepared(length);
+  wipe_scratch();
+  if (status) {
+    scrub_needed_ = false;
+    group_write_failed_ = false;
+  }
+  return status;
+}
+
 Status SiteStore::raise_rs_floor(const std::uint32_t epoch) noexcept {
   if (!pair_.initialized()) {
     return Status::error(StatusCode::InvalidState, "site store not initialized");
   }
   if (!has_site()) {
     return Status::error(StatusCode::InvalidState, "site store has no member record");
+  }
+  if (group_write_failed_) {
+    return Status::error(StatusCode::RecoveryRequired, "group scrub required");
   }
   if (pair_.quarantined()) {
     return Status::error(StatusCode::IntegrityError, "site store quarantined");
@@ -518,19 +665,27 @@ Status SiteStore::raise_rs_floor(const std::uint32_t epoch) noexcept {
   std::size_t used_len = 0;
   Status status = encode(raised, used_len);
   if (status) status = pair_.commit_prepared(used_len);
-  if (!status) return status;
-  site_ = raised;
-  return Status::success();
+  wipe_scratch();
+  if (status) site_ = raised;
+  secure_clear(&raised, sizeof(raised));
+  return status;
 }
 
 Status SiteStore::clear() noexcept {
+  advance_group_lifecycle();
   const SiteRecord tombstone{};
   std::size_t used_len = 0;
   Status status = encode(tombstone, used_len);
   if (status) status = pair_.commit_twin_prepared(used_len);
   wipe_scratch();
-  if (!status) return status;
+  if (!status) {
+    // A tombstone may already be sealed in one slot; re-read before group use.
+    group_write_failed_ = true;
+    return status;
+  }
   site_ = tombstone;
+  scrub_needed_ = false;
+  group_write_failed_ = false;
   return Status::success();
 }
 
@@ -544,12 +699,15 @@ Status SiteStore::recover(const SiteRecord& record) noexcept {
   if (record.state != SiteState::Member) {
     return Status::error(StatusCode::InvalidArgument, "site recover needs a member record");
   }
+  advance_group_lifecycle();
   std::size_t used_len = 0;
   Status status = encode(record, used_len);
   if (status) status = pair_.commit_twin_prepared(used_len);
   wipe_scratch();
   if (!status) return status;
   site_ = record;
+  scrub_needed_ = false;
+  group_write_failed_ = false;
   return Status::success();
 }
 
@@ -816,6 +974,307 @@ Status ResumeCache::clear_all() noexcept {
       status = write_slot(i, ResumeSlot{});
       if (!status) return status;
     }
+  }
+  return Status::success();
+}
+
+// --- ResumeCache2 --------------------------------------------------------------
+
+bool ResumeCache2::in_partition(const ResumePurpose purpose, const std::size_t index) const noexcept {
+  if (purpose == ResumePurpose::Link) return index < link_quota_;
+  return index >= link_quota_ && index < link_quota_ + end_quota_;
+}
+
+void ResumeCache2::drop_budget(const std::size_t index) noexcept {
+  for (auto& entry : budget_) {
+    if (entry.used && entry.slot_index == index) {
+      entry.used = false;
+      entry.remaining = 0;
+    }
+  }
+}
+
+Status ResumeCache2::read_slot(const std::size_t index, ResumeSlot2& out, bool& intact) noexcept {
+  out = ResumeSlot2{};
+  intact = true;
+  const Status status = storage_.read(index, MutableByteView{buffer_.data(), buffer_.size()});
+  if (!status) return status;
+  if (is_erased(buffer_.data(), buffer_.size())) return Status::success();
+  if (!resume2_slot_decode(ByteView{buffer_.data(), buffer_.size()}, out).ok()) {
+    // Torn, corrupt, or an old RLP1 blob: an empty slot (the consequence is
+    // one full EDHOC), never a usable secret.
+    out = ResumeSlot2{};
+    intact = false;
+  }
+  return Status::success();
+}
+
+Status ResumeCache2::write_slot(const std::size_t index, const ResumeSlot2& slot) noexcept {
+  Status status = resume2_slot_encode(slot, buffer_);
+  if (status) status = storage_.write(index, ByteView{buffer_.data(), buffer_.size()});
+  if (!status) return status;
+  std::array<std::uint8_t, kResume2SlotBytes> expected = buffer_;
+  status = storage_.read(index, MutableByteView{buffer_.data(), buffer_.size()});
+  if (!status) return status;
+  if (buffer_ != expected) {
+    return Status::error(StatusCode::StorageFailure, "resume2 slot readback mismatch");
+  }
+  return Status::success();
+}
+
+bool ResumeCache2::usable(const ResumeSlot2& slot, const ResumeContext& context) const noexcept {
+  if (!slot.valid || slot.network != context.network) return false;
+  if (slot.peer_generation == 0 || slot.peer_role == 0) return false;
+  // u64 arithmetic throughout: created+2 must not wrap, and a regressed GK
+  // (current < created) fails closed instead of reviving an old RMS.
+  const std::uint64_t created = slot.created_gk_epoch;
+  const std::uint64_t current = context.gk_epoch;
+  if (current < created || current >= created + 2U) return false;
+  if (context.revocations != nullptr &&
+      revocation_rejects(*context.revocations, slot.peer, slot.peer_generation,
+                         static_cast<std::uint32_t>(slot.network >> 32U))) {
+    return false;
+  }
+  return true;
+}
+
+Status ResumeCache2::find_by_peer(const ResumePurpose purpose, const NodeId peer,
+                                  const ResumeContext& context, ResumeSlot2& out,
+                                  std::size_t& index) noexcept {
+  out = ResumeSlot2{};
+  index = 0;
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const std::size_t begin = purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = purpose == ResumePurpose::Link ? link_quota_ : link_quota_ + end_quota_;
+  for (std::size_t i = begin; i < end; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    if (slot.valid && slot.purpose == purpose && slot.peer == peer && usable(slot, context)) {
+      out = slot;
+      index = i;
+      return Status::success();
+    }
+  }
+  return Status::error(StatusCode::NotFound, "no resumption slot");
+}
+
+Status ResumeCache2::find_by_id(const ResumePurpose purpose,
+                                const std::array<std::uint8_t, 8>& rid, const NodeId claimed_peer,
+                                const ResumeContext& context, ResumeSlot2& out,
+                                std::size_t& index) noexcept {
+  out = ResumeSlot2{};
+  index = 0;
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const keys::Purpose key_purpose =
+      purpose == ResumePurpose::Link ? keys::Purpose::Link : keys::Purpose::End;
+  const std::size_t begin = purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = purpose == ResumePurpose::Link ? link_quota_ : link_quota_ + end_quota_;
+  constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
+  std::size_t match = kNone;
+  for (std::size_t i = begin; i < end; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    if (!slot.valid || slot.purpose != purpose || !usable(slot, context)) continue;
+    if (claimed_peer != kInvalidNodeId && slot.peer != claimed_peer) continue;
+    keys::ResumeId slot_rid{};
+    keys::resume_id(slot.rms, key_purpose, slot_rid);
+    if (slot_rid != rid) continue;
+    if (match != kNone) {
+      // Ambiguous even after the purpose/network/peer filter: refuse rather
+      // than guess which RMS the initiator meant.
+      out = ResumeSlot2{};
+      return Status::error(StatusCode::NotFound, "resumption id ambiguous");
+    }
+    match = i;
+    out = slot;
+  }
+  if (match == kNone) return Status::error(StatusCode::NotFound, "no resumption slot");
+  index = match;
+  return Status::success();
+}
+
+Status ResumeCache2::read_at(const std::size_t index, ResumeSlot2& out, bool& intact) noexcept {
+  if (index >= storage_.slot_count()) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot index");
+  }
+  return read_slot(index, out, intact);
+}
+
+Status ResumeCache2::reserve_uses(const std::size_t index, const ResumeContext& context,
+                                 const std::uint32_t boot, const bool gk_epoch_changed) noexcept {
+  if (index >= storage_.slot_count()) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot index");
+  }
+  for (auto& entry : budget_) {
+    if (!entry.used || entry.slot_index != index) continue;
+    ResumeSlot2 slot{};
+    bool intact = true;
+    const Status status = read_slot(index, slot, intact);
+    if (!status) return status;
+    if (!slot.valid || !usable(slot, context) || slot.reserved_uses != entry.granted ||
+        entry.remaining == 0) {
+      // The slot changed under the grant (or the grant is spent): fall
+      // through to a fresh durable quantum instead of serving stale uses.
+      entry.used = false;
+      entry.remaining = 0;
+      break;
+    }
+    --entry.remaining;
+    return Status::success();
+  }
+  ResumeSlot2 slot{};
+  bool intact = true;
+  Status status = read_slot(index, slot, intact);
+  if (!status) return status;
+  // Unusable, torn, or fully reserved: no use to grant. The handshake falls
+  // back to a full EDHOC; the slot itself is left alone (never erased on an
+  // unauthenticated trigger).
+  if (!slot.valid || !usable(slot, context)) {
+    return Status::error(StatusCode::NotFound, "resume2 slot unusable");
+  }
+  if (slot.reserved_uses >= kResume2MaxUses) {
+    return Status::error(StatusCode::CounterExhausted, "resume2 uses exhausted");
+  }
+  // The grant is the headroom up to the ceiling: a short final quantum
+  // (e.g. 60 -> 64) serves 4 uses, never a full 8 past the ceiling.
+  const std::uint32_t headroom = kResume2MaxUses - slot.reserved_uses;
+  const std::uint32_t quantum =
+      headroom > kResume2ReserveQuantum ? kResume2ReserveQuantum : headroom;
+  slot.reserved_uses += quantum;
+  // The touch wear rule rides the same write: one durable write per grant.
+  const std::uint64_t last = slot.last_used_boot;
+  if (gk_epoch_changed || (boot >= last && boot - last >= kTouchBootInterval)) {
+    slot.last_used_boot = boot;
+  }
+  status = write_slot(index, slot);
+  if (!status) return status;
+  BudgetEntry& entry = budget_[budget_next_];
+  budget_next_ = (budget_next_ + 1) % kUseBudgetEntries;
+  entry.used = true;
+  entry.slot_index = static_cast<std::uint32_t>(index);
+  entry.granted = slot.reserved_uses;
+  // The grant covers the quantum; this call consumes one use of it.
+  entry.remaining = static_cast<std::uint8_t>(quantum - 1);
+  return Status::success();
+}
+
+Status ResumeCache2::put(const ResumeSlot2& slot, const ResumeContext& context) noexcept {
+  if (!slot.valid) return Status::error(StatusCode::InvalidArgument, "resume2 slot not valid");
+  const Status valid = resume2_validate(slot);
+  if (!valid) return valid;
+  if (slot.reserved_uses != 0) {
+    // A fresh RMS always restarts the count; a carried-over high-water
+    // would silently shorten (or, by bug, extend) the 64-use lifetime.
+    return Status::error(StatusCode::InvalidArgument, "resume2 uses must restart");
+  }
+  const std::size_t count = storage_.slot_count();
+  if (count != link_quota_ + end_quota_) {
+    return Status::error(StatusCode::InvalidState, "resume2 quota mismatch");
+  }
+  const std::size_t quota = slot.purpose == ResumePurpose::Link ? link_quota_ : end_quota_;
+  if (quota < 3) return Status::error(StatusCode::InvalidState, "resume2 quota too small");
+  const std::size_t begin = slot.purpose == ResumePurpose::Link ? 0 : link_quota_;
+  const std::size_t end = begin + quota;
+  constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
+  std::size_t same = kNone, free_slot = kNone, lru = kNone;
+  std::uint32_t lru_boot = 0;
+  std::size_t pinned = 0;
+  for (std::size_t i = begin; i < end; ++i) {
+    ResumeSlot2 current{};
+    bool intact = true;
+    const Status status = read_slot(i, current, intact);
+    if (!status) return status;
+    if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer &&
+        current.network == slot.network && current.rms == slot.rms) {
+      return Status::error(StatusCode::Conflict, "resume2 rms already cached");
+    }
+    const bool live = usable(current, context);
+    if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer) {
+      if (same == kNone) same = i;
+      continue;  // replaced below; its pin does not count
+    }
+    if (!live) {
+      if (free_slot == kNone) free_slot = i;
+      continue;
+    }
+    if ((current.flags & kResumeFlagPinned) != 0) {
+      ++pinned;
+      continue;
+    }
+    if (lru == kNone || current.last_used_boot < lru_boot) {
+      lru = i;
+      lru_boot = current.last_used_boot;
+    }
+  }
+  if ((slot.flags & kResumeFlagPinned) != 0 && pinned + 1 > quota - 2) {
+    return Status::error(StatusCode::NoCapacity, "resume2 pin budget");
+  }
+  const std::size_t target = same != kNone ? same : (free_slot != kNone ? free_slot : lru);
+  if (target == kNone) return Status::error(StatusCode::NoCapacity, "resume2 cache full");
+  const Status written = write_slot(target, slot);
+  if (!written) return written;
+  drop_budget(target);
+  return Status::success();
+}
+
+Status ResumeCache2::touch(const std::size_t index, const std::uint32_t boot,
+                           const bool gk_epoch_changed) noexcept {
+  if (index >= storage_.slot_count()) {
+    return Status::error(StatusCode::InvalidArgument, "resume2 slot index");
+  }
+  ResumeSlot2 slot{};
+  bool intact = true;
+  const Status status = read_slot(index, slot, intact);
+  if (!status) return status;
+  if (!slot.valid) return Status::error(StatusCode::NotFound, "resume2 slot empty");
+  const std::uint64_t last = slot.last_used_boot;
+  if (!gk_epoch_changed && (boot < last || boot - last < kTouchBootInterval)) {
+    return Status::success();  // wear rule: no write
+  }
+  slot.last_used_boot = boot;
+  return write_slot(index, slot);
+}
+
+Status ResumeCache2::invalidate_peer(const NodeId peer) noexcept {
+  const std::size_t count = storage_.slot_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    if (slot.valid && slot.peer == peer) {
+      status = write_slot(i, ResumeSlot2{});
+      if (!status) return status;
+      drop_budget(i);
+    }
+  }
+  return Status::success();
+}
+
+Status ResumeCache2::clear_all() noexcept {
+  const std::size_t count = storage_.slot_count();
+  for (std::size_t i = 0; i < count; ++i) {
+    ResumeSlot2 slot{};
+    bool intact = true;
+    Status status = read_slot(i, slot, intact);
+    if (!status) return status;
+    const bool erased_empty = !slot.valid && intact;
+    if (!erased_empty) {
+      // Valid or torn: overwrite so no RMS fragment survives.
+      status = write_slot(i, ResumeSlot2{});
+      if (!status) return status;
+    }
+    drop_budget(i);
   }
   return Status::success();
 }

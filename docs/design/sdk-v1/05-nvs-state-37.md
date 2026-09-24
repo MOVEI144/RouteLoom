@@ -67,7 +67,7 @@ RLP1 slot（84B）:
 
 | 証人 | 守るもの | 失われた時 |
 |---|---|---|
-| `rlboot`（u32、既存） | group送信者鍵（`tx_boot`）、route generation | RLS1内の`boot_witness`（参加時とGK activationごとに記録）より小さい、または欠落でRLS1が存在→破損とみなし、`boot_witness + 2^20`へ進めて診断を残す（2^20起動は1分1回起動でも約2年分） |
+| `rlboot`（u32、既存） | group送信者鍵（`tx_boot`）、route generation | RLS1内の`boot_witness`（参加時とGK activationごとに記録）より小さい、または欠落でRLS1が存在→破損とみなし、group TXを閉じ、耐久boot証跡と未使用新GKによる保守復旧を要求する（`+2^20`だけでは長期停止中の起動上限を証明できない） |
 | 開発profileの`cmax`（§4.2） | 掃除したTX counterのepoch上限 | 起動時に`session ≤ cmax`なら開始しない（fail closed） |
 
 `rlboot`は既定`nvs`に残し、ピアごとの状態とは別partitionにする（§5）。これで「ピア状態が満杯→boot session書込み失敗→起動不能」の連鎖を断つ。
@@ -136,7 +136,8 @@ rlsec,    data, nvs,     0x190000, 0x10000
 | 送信frame | 0 | 256送信ごとにlease 1 |
 | 新しい近隣（full EDHOC） | 再開slot 1 | c/f/rの新規作成 |
 | 再開（RLRES1） | 0（まれに`last_used_boot`） | — |
-| GK更新（24時間） | RLS1 2 commit×2 slot | — |
+| GK更新（24時間） | RLS1 stage 2 write＋activation twin 4 write＝計6 write（readbackを含まず） | — |
+| GK staged差替え | RLS1 twin 4 write（旧next鍵を両slotから消去） | — |
 | 削除 | RRS1 1 commit×2 slot | — |
 
 受信ごとの永続化が無くなるため、本番profileの摩耗は起動回数とGK更新でほぼ決まる。
@@ -160,7 +161,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 | V1-N03 | `rlsec`を満杯にしても起動し、`rlboot`が進む（開発・本番） |
 | V1-N04 | D2-b：過去epochの`c*`掃除後、`cmax`以下のboot sessionでは開始しない |
 | V1-N05 | D2-c：上限超過ピアを拒否し診断を出す。既存ピアの通信は継続 |
-| V1-N06 | `rlboot`欠落を注入：`boot_witness + 2^20`へ進み、group送信者鍵が過去と重複しない |
+| V1-N06 | `rlboot`欠落・後退・耐久化不明を注入：GroupEnd/GroupLink送信は0、推測したbootへの飛越しでは解除しない |
 | V1-N07 | 予算model（Python）とcodec最大長の一致、partition容量の80%以下 |
 | V1-N08 | HIL：C3で`nvs_get_stats()`の実測値が予算表と矛盾しない |
 

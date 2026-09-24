@@ -20,6 +20,9 @@ struct SecurityContext {
   NodeId sender{kInvalidNodeId};
   NodeId receiver{kInvalidNodeId};
   std::uint32_t epoch{0};  // Wire v2: 32-bit, never wraps in a device lifetime
+  std::uint32_t group_epoch{0};  // GroupLink: end_epoch (GK generation)
+  std::uint32_t sender_boot{0};  // GroupEnd: message.session
+  NodeId group_id{0};           // GroupEnd: full wire destination
 };
 
 // Deployment assurance level a provider is allowed to claim. The default is
@@ -91,6 +94,13 @@ class SecurityProvider {
                                      NodeId /*peer*/) const noexcept {
     return ContextState::Ready;
   }
+  // GroupLink needs one atomic boot/GK snapshot; unicast providers do not
+  // implement this scope. A retired generation is never accepted on repair.
+  virtual Status tx_group_link_epochs(std::uint32_t& /*boot*/,
+                                      std::uint32_t& /*g*/) noexcept {
+    return Status::error(StatusCode::Unsupported, "group link unavailable");
+  }
+  virtual bool accepts_group_epoch(std::uint32_t /*g*/) const noexcept { return true; }
   virtual Status next_counter(const SecurityContext& context,
                               std::uint64_t& counter) noexcept = 0;
   virtual Status seal(const SecurityContext& context,
@@ -160,13 +170,15 @@ inline Status check_context_keys(const ContextKeys& keys) noexcept {
 //   03 §3). It rejects an rx_context_id already live for another context
 //   (Conflict) and a full table (NoCapacity) without disturbing live state.
 // - retire() drops one context; retire_all() drops every context of a peer
-//   (revocation, sdk-v1/04 §5). Both are idempotent.
+//   (revocation, sdk-v1/04 §5). Both are idempotent. Both return Status so
+//   a re-entrant call (from a crypto/storage callback) can refuse with Busy
+//   instead of mutating half an exchange (P4 §2.2).
 class SessionInstaller {
  public:
   virtual ~SessionInstaller() = default;
   virtual Status install(const ContextKeys& keys) noexcept = 0;
-  virtual void retire(SecurityScope scope, NodeId peer) noexcept = 0;
-  virtual void retire_all(NodeId peer) noexcept = 0;
+  virtual Status retire(SecurityScope scope, NodeId peer) noexcept = 0;
+  virtual Status retire_all(NodeId peer) noexcept = 0;
 };
 
 }  // namespace routeloom

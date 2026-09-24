@@ -40,11 +40,17 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_joiner.cpp
   src/sdkv1_join_relay.cpp
   src/sdkv1_join_transport.cpp
+  src/sdkv1_membership.cpp
   src/sdkv1_maintenance.cpp
   src/sdkv1_pop.cpp
   src/sdkv1_records.cpp
+  src/sdkv1_handshake.cpp
+  src/sdkv1_session_wire.cpp
   src/sdkv1_revocation.cpp
   src/sdkv1_store.cpp
+  src/sdkv1_group_keys.cpp
+  src/sdkv1_group_security.cpp
+  src/session_bank.cpp
   src/status.cpp
   src/telemetry.cpp
   src/trust_manifest.cpp
@@ -157,6 +163,13 @@ else()
     ${ROUTELOOM_EDHOC_C_DEFS} ${ROUTELOOM_TFPSA_DEFS})
   target_compile_options(routeloom_edhoc_third_party PRIVATE
     ${ROUTELOOM_THIRD_PARTY_C_RELAX})
+  # zcbor dispatches generated encoders and decoders through generic callback
+  # types. Clang's function sanitizer rejects those calls even though the ABI
+  # matches; keep every other sanitizer enabled for these sources.
+  if(ROUTELOOM_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(${ROUTELOOM_ZCBOR_SRC}
+      PROPERTIES COMPILE_OPTIONS "-fno-sanitize=function")
+  endif()
 
   # libedhoc's headers for the glue and for tests that drive the raw API.
   add_library(routeloom_edhoc_headers INTERFACE)

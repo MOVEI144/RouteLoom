@@ -197,9 +197,12 @@ Status DevPskAuthenticator::issue_proof(const AuthTranscript& transcript,
 
 Status MembershipController::initialize(const MembershipHooks& hooks,
                                         const NetworkId network) noexcept {
-  state_ = hooks.local_member(network) ? MembershipState::Member
-                                       : MembershipState::Unprovisioned;
-  return Status::success();
+  MembershipState state = MembershipState::Unprovisioned;
+  const Status status = hooks.local_state(network, state);
+  // The hooks' verdict stands even on error: "cannot prove" arrives with a
+  // fail-closed state (P4 §3.1) and the status propagates to the Owner.
+  state_ = state;
+  return status;
 }
 
 Status MembershipController::begin_discovery() noexcept {
@@ -331,7 +334,10 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
             : std::min(config_.migration_until_ms,
                        now_ms + kScopeLegacyMigrationMaxMs);
   }
-  membership_.initialize(hooks_, config_.network);
+  // A membership the hooks cannot prove (notably Revoked-behind-broken
+  // storage) must reach the Owner, never start traffic silently.
+  const Status membership = membership_.initialize(hooks_, config_.network);
+  if (!membership) return membership;
   started_ = true;
   return Status::success();
 }
@@ -1393,6 +1399,12 @@ void NeighborDiscovery::complete_exchange(
   }
   ++stats_.auths_completed;
 
+  elevate_proven_peer(peer_mac, peer_node, now_ms);
+}
+
+void NeighborDiscovery::elevate_proven_peer(const MacAddress& peer_mac,
+                                            const NodeId peer_node,
+                                            const MonotonicMs now_ms) noexcept {
   // Device auth is not membership: advance local membership and verify the
   // peer's member evidence before any binding exists (06 §2.2).
   membership_.complete_authentication(hooks_, config_.node, config_.network);
@@ -1549,6 +1561,136 @@ void NeighborDiscovery::complete_exchange(
     event("MEMBERSHIP_PENDING", peer_node);
   }
   cancel_competing(peer_mac, peer_node);
+}
+
+void NeighborDiscovery::sweep_member_pendings(const MonotonicMs now_ms) noexcept {
+  for (auto& pending : member_pendings_) {
+    if (pending.used && now_ms >= pending.expires_at_ms) pending = MemberPending{};
+  }
+}
+
+Status NeighborDiscovery::begin_member_handshake(
+    const NodeId peer, const MacAddress& peer_mac, const ScopeDigest& carrier_digest,
+    const MonotonicMs now_ms,
+    std::uint32_t& token) noexcept {
+  token = kMemberHandshakeNone;
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId || peer == 0) {
+    return Status::error(StatusCode::InvalidArgument, "member peer id");
+  }
+  bool mac_zero = true;
+  for (const auto byte : peer_mac) {
+    if (byte != 0) mac_zero = false;
+  }
+  if (mac_zero) return Status::error(StatusCode::InvalidArgument, "member peer mac");
+  bool digest_zero = true;
+  for (const auto byte : carrier_digest) digest_zero &= byte == 0;
+  if (digest_zero) return Status::error(StatusCode::InvalidArgument, "member carrier digest");
+  sweep_member_pendings(now_ms);
+  // Reservation-time MAC conflict: the completion tail re-checks against
+  // the freshest table, but a start that already contradicts a known
+  // record is refused here so the engine never runs for a doomed peer.
+  if (const Neighbor* by_node = find_neighbor(peer); by_node != nullptr) {
+    if (!mac_equal(by_node->mac, peer_mac) && by_node->phase != NeighborPhase::Revoked &&
+        by_node->phase != NeighborPhase::Conflict && now_ms < by_node->lease_expires_at_ms) {
+      return Status::error(StatusCode::BindingConflict, "member mac changed");
+    }
+  }
+  if (const Neighbor* by_mac = find_neighbor(peer_mac); by_mac != nullptr) {
+    if (by_mac->node != peer && by_mac->phase != NeighborPhase::Revoked &&
+        by_mac->phase != NeighborPhase::Conflict) {
+      return Status::error(StatusCode::BindingConflict, "member mac taken");
+    }
+  }
+  MemberPending* slot = nullptr;
+  std::size_t pendings = 0;
+  for (auto& pending : member_pendings_) {
+    if (pending.used) {
+      ++pendings;
+    } else if (slot == nullptr) {
+      slot = &pending;
+    }
+  }
+  if (slot == nullptr) {
+    return Status::error(StatusCode::PeerCapacity, "member starts full");
+  }
+  // Capacity reservation: the elevation needs a neighbor slot unless it
+  // re-authenticates this exact (node, MAC). Free slots plus records the
+  // tail could reclaim, minus live reservations, must leave room for us.
+  const Neighbor* same = find_neighbor(peer_mac);
+  const bool reauth = same != nullptr && same->node == peer &&
+                      same->phase != NeighborPhase::Conflict &&
+                      same->phase != NeighborPhase::Revoked;
+  if (!reauth) {
+    std::size_t reclaimable = 0;
+    neighbors_.for_each([&](const Neighbor& neighbor) {
+      if (!neighbor.pinned &&
+          (neighbor.phase == NeighborPhase::Stale ||
+           neighbor.phase == NeighborPhase::Conflict ||
+           neighbor.phase == NeighborPhase::Revoked)) {
+        ++reclaimable;
+      }
+    });
+    const std::size_t free =
+        discovery_const::kNeighborCapacity - neighbors_.size() + reclaimable;
+    if (free <= pendings) {
+      return Status::error(StatusCode::PeerCapacity, "member table full");
+    }
+  }
+  // A consumed token is never reused while this discovery instance lives.
+  std::uint32_t fresh = next_member_token_;
+  if (fresh == kMemberHandshakeNone) {
+    return Status::error(StatusCode::CounterExhausted, "member token exhausted");
+  }
+  next_member_token_ = fresh == 0xFFFFFFFFU ? kMemberHandshakeNone : fresh + 1;
+  slot->used = true;
+  slot->token = fresh;
+  slot->peer = peer;
+  slot->mac = peer_mac;
+  slot->carrier_digest = carrier_digest;
+  slot->expires_at_ms = now_ms + config_.candidate_ttl_ms;
+  token = fresh;
+  return Status::success();
+}
+
+Status NeighborDiscovery::complete_handshake(const std::uint32_t token,
+                                            const AuthenticatedPeerProof& proof,
+                                            const MonotonicMs now_ms) noexcept {
+  sweep_member_pendings(now_ms);
+  MemberPending* slot = nullptr;
+  for (auto& pending : member_pendings_) {
+    if (pending.used && pending.token == token) {
+      slot = &pending;
+      break;
+    }
+  }
+  if (slot == nullptr || token == kMemberHandshakeNone) {
+    return Status::error(StatusCode::NotFound, "member token unknown");
+  }
+  const MacAddress peer_mac = slot->mac;
+  const NodeId peer_node = slot->peer;
+  const ScopeDigest carrier_digest = slot->carrier_digest;
+  *slot = MemberPending{};  // single-use: consumed before elevation runs
+  if (!proof.valid() || proof.elevation_token() != token ||
+      proof.carrier_digest() != carrier_digest || proof.peer() != peer_node ||
+      !mac_equal(proof.mac(), peer_mac) ||
+      proof.network() != config_.network) {
+    ++stats_.auth_tag_rejects;
+    reject_event("AUTH_FAILED", peer_node);
+    return Status::error(StatusCode::AuthenticationFailed, "member proof mismatch");
+  }
+  ++stats_.auths_completed;
+  elevate_proven_peer(peer_mac, peer_node, now_ms);
+  return Status::success();
+}
+
+void NeighborDiscovery::cancel_member_handshake(const std::uint32_t token) noexcept {
+  if (token == kMemberHandshakeNone) return;
+  for (auto& pending : member_pendings_) {
+    if (pending.used && pending.token == token) {
+      pending = MemberPending{};
+      return;
+    }
+  }
 }
 
 void NeighborDiscovery::cancel_competing(const MacAddress& mac,

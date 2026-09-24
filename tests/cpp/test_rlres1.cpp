@@ -84,6 +84,12 @@ struct TestEnv final : Environment {
     cid = next_cid++;
     return true;
   }
+  bool reserve_resume_use(keys::Purpose, const keys::ResumeId&) noexcept override {
+    ++reserves;
+    return reserve_ok;
+  }
+  bool reserve_ok{true};
+  unsigned reserves{0};
 };
 
 Carrier link_carrier() {
@@ -893,6 +899,52 @@ void test_sizing() {
   CHECK(sizeof(Output) <= 384);
 }
 
+// P4 §6.2: the responder spends one RMS use per verified R1, and a spent
+// budget answers Expired (full EDHOC) instead of UnknownId.
+void test_reserve_hook() {
+  Node a(kA);
+  Node b(kB);
+  pair(a, b);
+  Output o;
+  a.engine.begin(begin_req(a, kB), 1000, a.env, o);
+  CHECK(o.action == Action::Send);
+  const Bytes r1 = bytes(o);
+  b.engine.on_r1(view(r1), link_carrier(), kA, 1005, b.env, o);
+  CHECK(o.action == Action::Send && o.message_size == kR2Size);
+  CHECK(b.env.reserves == 1);
+  // A bad MAC never reaches the hook: no slot is verified, no use spent.
+  Bytes forged = r1;
+  forged[forged.size() - 1] ^= 0xFF;
+  b.engine.on_r1(view(forged), link_carrier(), kA, 1006, b.env, o);
+  CHECK(o.reject == Reject::BadMac);
+  CHECK(b.env.reserves == 1);
+  // An exhausted budget answers Expired so the initiator runs a full
+  // EDHOC; the slot itself is left alone (no erase on hint).
+  b.env.reserve_ok = false;
+  a.engine.abort_peer(kB);  // drop the first in-flight attempt on both ends
+  b.engine.abort_peer(kA);
+  a.engine.begin(begin_req(a, kB), 2000, a.env, o);
+  CHECK(o.action == Action::Send);
+  const Bytes r1b = bytes(o);
+  b.engine.on_r1(view(r1b), link_carrier(), kA, 2005, b.env, o);
+  CHECK(o.action == Action::Send && o.message_size == kR2HintSize);
+  CHECK(o.reject == Reject::ResumeBudgetExhausted);
+  CHECK(o.message[0] == static_cast<std::uint8_t>(R2Status::Expired));
+  CHECK(b.env.reserves == 2 && !b.env.slots.empty());
+  CHECK(std::strcmp(reject_name(Reject::ResumeBudgetExhausted), "resume_budget_exhausted") == 0);
+}
+
+// P4 §6.2: epochs advance monotonically within a site.
+void test_epoch_regression() {
+  Engine e;
+  CHECK(e.configure(Local{kA, kNetwork, kSite, epochs(3, 12)}, Limits{}).ok());
+  CHECK(e.update_epochs(epochs(4, 12)).ok());
+  CHECK(e.update_epochs(epochs(4, 13)).ok());
+  CHECK(!e.update_epochs(epochs(3, 13)).ok());  // RS regressed: refused
+  CHECK(!e.update_epochs(epochs(4, 12)).ok());  // GK regressed: refused
+  CHECK(!e.update_epochs(Epochs{8, 4, 13}).ok());  // site change: re-configure
+}
+
 void test_authority_self_name_collision() {
   // The site id lives in its own namespace: when it numerically equals the
   // device NodeId the authority handshake must still run (G-SEC P5 §4). The
@@ -995,9 +1047,11 @@ int main() {
   test_timeouts();
   test_simultaneous_open();
   test_authority_and_pending();
+  test_configuration_and_counters();
   test_authority_self_name_collision();
   test_clock_ceiling_overflow();
-  test_configuration_and_counters();
+  test_reserve_hook();
+  test_epoch_regression();
   test_sizing();
   if (failures != 0) {
     std::fprintf(stderr, "%d RLRES1 check(s) failed\n", failures);

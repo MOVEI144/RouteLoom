@@ -12,6 +12,10 @@
 #include "routeloom/secure_clear.hpp"
 #include "uECC.h"
 
+extern "C" std::size_t routeloom_edhoc_peer_cid(const struct edhoc_context* ctx,
+                                                        std::uint8_t* out,
+                                                        std::size_t capacity) noexcept;
+
 namespace routeloom::edhoc {
 namespace {
 
@@ -828,6 +832,24 @@ Session::~Session() { end(); }
 
 edhoc_context* Session::native() noexcept {
   return reinterpret_cast<edhoc_context*>(context_storage_.data());
+}
+
+Status Session::peer_connection_id(MutableByteView out, std::size_t& length) noexcept {
+  length = 0;
+  if (!active_) return Status::error(StatusCode::InvalidState, "edhoc session not active");
+  if (out.data == nullptr) {
+    return Status::error(StatusCode::InvalidArgument, "edhoc peer cid buffer");
+  }
+  const std::size_t negotiated =
+      routeloom_edhoc_peer_cid(native(), out.data, out.size);
+  if (negotiated == 0) {
+    return Status::error(StatusCode::NotFound, "edhoc peer cid not negotiated");
+  }
+  if (negotiated > out.size) {
+    return Status::error(StatusCode::NoCapacity, "edhoc peer cid too long");
+  }
+  length = negotiated;
+  return Status::success();
 }
 
 Status Session::finish_call(const int result, const char* detail) noexcept {

@@ -22,6 +22,9 @@ class MutationTests(unittest.TestCase):
         self.root=Path(self.temp.name)/'repo'
         shutil.copytree(ROOT,self.root,ignore=test_copy_filter)
     def tearDown(self): self.temp.cleanup()
+    def test_build_artifacts_not_copied(self):
+        self.assertFalse((self.root/'build-rf').exists())
+        self.assertFalse((self.root/'host/target').exists())
     def change_json(self,path,edit):
         p=self.root/path; data=json.loads(p.read_text()); edit(data); p.write_text(json.dumps(data,ensure_ascii=False)+'\n')
     def rejected(self): self.assertTrue(validate(self.root)['failed'])

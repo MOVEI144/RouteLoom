@@ -327,7 +327,7 @@ std::vector<std::uint8_t> forged_envelope(const std::uint8_t kind,
   env.claimed_node = claimed;
   env.transaction_nonce = nonce;
   if (body.size > env.body.size()) return {};
-  std::memcpy(env.body.data(), body.data, body.size);
+  if (body.size != 0) std::memcpy(env.body.data(), body.data, body.size);
   env.body_size = body.size;
   autonomy::Rld1Encoded enc{};
   if (!autonomy::rld1_encode(env, enc)) return {};

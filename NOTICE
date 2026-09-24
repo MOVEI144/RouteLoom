@@ -62,7 +62,11 @@ Vendored in this repository
              externals/zcbor submodule pin of the libedhoc commit above)
   Notes    : CBOR runtime (include/, src/) that libedhoc's generated CBOR
              backend is built against, compiled with ZCBOR_CANONICAL.
-             Unmodified; no NOTICE file upstream.
+             src/zcbor_encode.c has one local guard to skip a zero-byte
+             memmove when libedhoc supplies a null empty protected header.
+             VENDORED.json records the upstream and patched blob ids;
+             tests verify the exact one-line transformation. No NOTICE
+             file upstream.
 
 * TF-PSA-Crypto (Mbed TLS crypto) — Apache-2.0 OR GPL-2.0-or-later,
   used here under Apache-2.0

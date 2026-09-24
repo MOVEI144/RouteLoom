@@ -191,7 +191,8 @@ SecurityContext end_context(const Header& header) noexcept {
   // table on sites that use many groups.
   if (header.type == FrameType::GroupData) {
     return SecurityContext{SecurityScope::Group, header.network, header.origin,
-                           kBroadcastNodeId, header.end_epoch};
+                           kBroadcastNodeId, header.end_epoch, 0,
+                           header.message.session, header.destination};
   }
   return SecurityContext{SecurityScope::EndToEnd, header.network, header.origin,
                          header.destination, header.end_epoch};

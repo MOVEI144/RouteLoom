@@ -144,7 +144,7 @@ radio.md §14は受理済みDATAの確認を「その仕事への課金」とす
 ### 8.3 主張しないこと
 
 - 開発PSKのgroup鍵はnetwork PSKから導出するため、PSKを持つmemberなら誰でも任意の送信元になりすませる（unicastの開発profileと同じ）。本番のgroup scopeは送信元ごとの鍵（またはGK＋送信元署名）を要し、`SecurityScope::Group`の定義にそれを要件として書いた。
-- GKは使わず、broadcastもしない。
+- 開発PSK構成はGKを使わず、broadcastもしない。本番GK Providerのportable部品では、GroupEnd鍵にGK・wire宛先の全64bit・origin・message.sessionを使い、end counterとsender窓は複数groupで共通にする。group frameは木のpairwise link unicastのまま。旧GK退役後はcached tree/送信job/未配送ORDERED holdからの再配送も拒否する。Owner/authorityとの接続および本番profileの出荷認定は別の工程。
 
 ## 9. Wire
 

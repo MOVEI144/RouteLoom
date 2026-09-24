@@ -451,11 +451,11 @@ impl StoredDecision {
     }
 }
 
-/// An approve or revoke operation (07 §2.2, `operations.get`).
+/// An approve, revoke or rotate operation (07 §2.2, `operations.get`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Operation {
     pub id: u64,
-    /// "approve" or "revoke".
+    /// "approve", "revoke" or "rotate".
     pub kind: String,
     pub node: u64,
     pub generation: u32,
@@ -464,6 +464,12 @@ pub struct Operation {
     pub gk_from: u32,
     pub gk_to: u32,
     pub created_ms: u64,
+    /// Rotation cause ("periodic"/"removal"/"manual"); empty when the
+    /// operation stages no key.
+    pub gk_cause: String,
+    /// Terminal GK state ("converged"/"superseded"); empty while live or
+    /// when the operation stages no key.
+    pub gk_end: String,
     /// P6-1 RRS1 distribution snapshot (`revoke` only). `None` on
     /// pre-P6-1 docs, which read back as distribution state `unknown`.
     pub distribution: Option<OperationDistribution>,
@@ -484,7 +490,8 @@ impl Operation {
             super::revocation::OperationDistribution::doc,
         );
         format!(
-            "{{\"id\":{},\"kind\":\"{}\",\"node\":\"{}\",\"generation\":{},\"member_cert_serial\":{},\"rs_epoch\":{},\"gk_from\":{},\"gk_to\":{},\"created_ms\":{},\"distribution\":{distribution}}}",
+            "{{\"id\":{},\"kind\":\"{}\",\"node\":\"{}\",\"generation\":{},\"member_cert_serial\":{},\"rs_epoch\":{},\"gk_from\":{},\"gk_to\":{},\"created_ms\":{},\"gk_cause\":\"{}\",\"gk_end\":\"{}\",\"distribution\":{distribution}}}",
+
             self.id,
             escape_string(&self.kind),
             h16(self.node),
@@ -493,7 +500,9 @@ impl Operation {
             self.rs_epoch,
             self.gk_from,
             self.gk_to,
-            self.created_ms
+            self.created_ms,
+            escape_string(&self.gk_cause),
+            escape_string(&self.gk_end)
         )
     }
 
@@ -516,6 +525,17 @@ impl Operation {
             gk_from: u32::try_from(num(&json, "gk_from")?).ok()?,
             gk_to: u32::try_from(num(&json, "gk_to")?).ok()?,
             created_ms: num(&json, "created_ms")?,
+            // Pre-P5 records predate both fields.
+            gk_cause: json
+                .get("gk_cause")
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .to_string(),
+            gk_end: json
+                .get("gk_end")
+                .and_then(Json::as_str)
+                .unwrap_or("")
+                .to_string(),
             distribution,
         })
     }
@@ -614,12 +634,19 @@ mod tests {
             gk_from: 203,
             gk_to: 204,
             created_ms: 1,
+            gk_cause: "removal".into(),
+            gk_end: "superseded".into(),
             distribution: None,
         };
         assert_eq!(Operation::from_doc(&op.doc()), Some(op));
+        // Pre-P5 records without the GK fields still parse.
+        let legacy = "{\"id\":9,\"kind\":\"revoke\",\"node\":\"0000000000000005\",\"generation\":3,\"member_cert_serial\":0,\"rs_epoch\":14,\"gk_from\":203,\"gk_to\":204,\"created_ms\":1}";
+        let parsed = Operation::from_doc(legacy).unwrap();
+        assert_eq!((parsed.gk_cause, parsed.gk_end), ("".into(), "".into()));
         // Pre-P6-1 docs carry no distribution fragment at all.
         let legacy = "{\"id\":9,\"kind\":\"revoke\",\"node\":\"0000000000000005\",\"generation\":3,\"member_cert_serial\":0,\"rs_epoch\":14,\"gk_from\":203,\"gk_to\":204,\"created_ms\":1}";
         assert_eq!(Operation::from_doc(legacy).unwrap().distribution, None);
+
         assert_eq!(parse_request_token(&request_token(0x7F3A)), Some(0x7F3A));
         assert_eq!(parse_op_token(&op_token(12)), Some(12));
         assert_eq!(role_name(3), "endpoint+relay");

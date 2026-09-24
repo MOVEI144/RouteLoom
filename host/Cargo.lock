@@ -501,6 +501,7 @@ dependencies = [
  "hkdf",
  "p256",
  "routeloom-join",
+ "routeloom-keysched",
  "routeloom-provision",
  "sha2",
  "zeroize",
@@ -562,6 +563,7 @@ version = "0.1.0"
 dependencies = [
  "p256",
  "routeloom-json",
+ "zeroize",
 ]
 
 [[package]]
