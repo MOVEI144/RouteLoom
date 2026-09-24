@@ -1,0 +1,11 @@
+{
+  "action": 1,
+  "codec": "site_state_set",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "gk_epoch_hint": 11,
+  "inner_hex": "016600100101000000000007000000040000000b",
+  "name": "site_state_set_wake",
+  "rs_epoch_hint": 4,
+  "site_epoch": 7
+}

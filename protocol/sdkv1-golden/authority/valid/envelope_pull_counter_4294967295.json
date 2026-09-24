@@ -1,0 +1,14 @@
+{
+  "codec": "authority_envelope",
+  "counter": 4294967295,
+  "ctx_id": 1717986918,
+  "direction": "device_to_authority",
+  "envelope_hex": "0104666666660000ffffffff1f352c36b25fdb00d95f18be3b0cc0a369a10291548d480750ed0da5faa75c4b66ef5a68e93c6fb27e76001b",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "iv_hex": "cdd150549bb7c8602662a5a9",
+  "key_hex": "c4232a9375a6e17d561c710ad876c93c",
+  "name": "envelope_pull_counter_4294967295",
+  "plaintext_hex": "010100000000000901020304050607080000000a0000000002000000",
+  "type": 4
+}

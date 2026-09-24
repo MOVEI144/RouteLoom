@@ -1,19 +1,19 @@
 # SDK v1 (G-SEC) shared golden vectors
 
 Byte-exact vectors for the SDK v1 zero-touch security formats
-(`docs/design/sdk-v1/`, plan items P1-2 and P1-3): RLCW1 certificates
+(`docs/design/sdk-v1/`, plan items P1-2, P1-3 and P7): RLCW1 certificates
 (DevCert / SiteCert / MemberCert), the RLI1 identity record, the RLS1 site
 record, the RRS1 revocation set (payload, external AAD, Sig_structure,
-COSE_Sign1 object and the `rlrevo` storage record) and the RLP1
-resumption-cache slot.
+COSE_Sign1 object and the `rlrevo` storage record), the RLP1
+resumption-cache slot and the device-key proof of possession (07 §6).
 
 Three implementations must agree on every byte:
 
 | side | code | what it does with the vectors |
 |---|---|---|
 | generator | `tools/gen_sdkv1_vectors.py` | independent reference encoder from the design text (shares no code with the others) |
-| C++ | `components/routeloom/src/{rlcw1,sdkv1_records}.cpp`, test `tests/cpp/test_sdkv1_golden.cpp` | decode, re-encode, rebuild AAD/Sig_structure/Sign1, **verify** signatures (micro-ecc) |
-| Rust | `host/routeloom-provision/src/sdkv1/`, test `host/routeloom-provision/tests/sdkv1_golden.rs` | the same, and **re-sign** every certificate and revocation set (RustCrypto `p256`, RFC 6979, low-S) |
+| C++ | `components/routeloom/src/{rlcw1,sdkv1_records,sdkv1_pop}.cpp`, test `tests/cpp/test_sdkv1_golden.cpp` | decode, re-encode, rebuild AAD/Sig_structure/Sign1, **verify** signatures (micro-ecc) |
+| Rust | `host/routeloom-provision/src/sdkv1/`, test `host/routeloom-provision/tests/sdkv1_golden.rs` | the same, and **re-sign** every certificate, revocation set and PoP (RustCrypto `p256`, RFC 6979, low-S) |
 
 Regenerate with `python3 tools/gen_sdkv1_vectors.py`; CI regenerates and
 requires `git diff --exit-code` plus no untracked files here.
@@ -83,11 +83,22 @@ signed object as received (so it can be re-gossiped), CRC — exactly 640 B at
 CRC and is treated as empty). An empty slot has purpose, state and every
 later field zero.
 
+**PoP** (07 §6 steps 2-3, `pop` codec): the device answers the office
+challenge with the same restricted Sign1 over a 108 B payload
+(`version=1 | key_location 1..3 | 0x0000 | node_id u64 | challenge 32 B |
+pubkey 64 B`), external AAD `"RouteLoom/device-key-pop/v1" 00` (28 B),
+signed by the carried key, low-S. Object 183 B. The challenges in the
+vectors are fixed test values; the office uses a fresh CSPRNG challenge
+per device. The device signs with micro-ecc (deterministic, not RFC 6979)
+normalized to low-S, so like the certificates the C++ side verifies but
+does not re-sign.
+
 ## Files
 
 - `valid/*.json` — `codec` (`rlcw1`, `rli1`, `rls1`, `rrs1`, `rrs1_record`,
-  `rlp1`), the decoded fields, the encodings (`cert_hex`, `payload_hex`,
-  `sig_structure_hex`, `record_hex`, …), `expect: "ok"`.
+  `rlp1`, `pop`), the decoded fields, the encodings (`cert_hex`,
+  `payload_hex`, `sig_structure_hex`, `record_hex`, `object_hex`, …),
+  `expect: "ok"`.
 - `invalid/*.json` — `codec`, `encoded_hex`, `note`, and `expect`:
   `"error"` (every decoder must reject it) or `"deny"` (well-formed, but the
   signature/site/network check fails under the listed `signer_pubkey_hex`,

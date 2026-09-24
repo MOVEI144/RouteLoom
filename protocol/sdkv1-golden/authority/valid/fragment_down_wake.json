@@ -1,0 +1,15 @@
+{
+  "codec": "authority_fragment",
+  "device": 257,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "hops": 0,
+  "inner_hex": "0165001c000000000000010100c0ffee0500000800000008000000070000000b",
+  "kind": 5,
+  "length": 8,
+  "name": "fragment_down_wake",
+  "offset": 0,
+  "sub": 101,
+  "total": 8,
+  "transfer_id": 12648430
+}

@@ -103,14 +103,17 @@ set(ROUTELOOM_EDHOC_C_DEFS ZCBOR_CANONICAL)
 set(ROUTELOOM_EDHOC_GLUE_SRC
   ${CMAKE_CURRENT_LIST_DIR}/src/edhoc/edhoc_session.cpp
   ${CMAKE_CURRENT_LIST_DIR}/src/edhoc/edhoc_aead_builtin.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/src/edhoc/aead_gcm_builtin.cpp
   ${CMAKE_CURRENT_LIST_DIR}/src/edhoc/edhoc_port.c
 )
 
 # Host only: TF-PSA-Crypto builtin AES + CCM (AES-CCM-16-64-128 of suite 2)
-# and exactly the headers they include under src/edhoc/tf_psa_crypto_config.h.
+# + GCM (AES-GCM-128 of the SDK v1 authority channel) and exactly the
+# headers they include under src/edhoc/tf_psa_crypto_config.h.
 set(ROUTELOOM_TFPSA_SRC
   ${ROUTELOOM_TFPSA_DIR}/drivers/builtin/src/aes.c
   ${ROUTELOOM_TFPSA_DIR}/drivers/builtin/src/ccm.c
+  ${ROUTELOOM_TFPSA_DIR}/drivers/builtin/src/gcm.c
   ${ROUTELOOM_TFPSA_DIR}/drivers/builtin/src/block_cipher.c
   ${ROUTELOOM_TFPSA_DIR}/platform/platform_util.c
   ${ROUTELOOM_TFPSA_DIR}/utilities/constant_time.c

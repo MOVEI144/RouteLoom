@@ -1,0 +1,11 @@
+{
+  "codec": "epoch_reply",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "gateway_epoch": 7,
+  "name": "relay2_epoch_reply_not_ready",
+  "nonce_hex": "808182838485868788898a8b8c8d8e8f",
+  "note": "gateway answers, no host attached",
+  "payload_hex": "0204000000000007808182838485868788898a8b8c8d8e8f",
+  "ready": 0
+}

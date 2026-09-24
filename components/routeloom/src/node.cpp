@@ -9,6 +9,7 @@
 #include "routeloom/autonomy_wire.hpp"
 #include "routeloom/byte_io.hpp"
 #include "routeloom/discovery_scope.hpp"
+#include "routeloom/sdkv1_revocation.hpp"
 
 namespace routeloom {
 namespace {
@@ -5010,17 +5011,44 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
     case FrameType::Service:
       handle_routed(frame, peer, rx, now_ms);
       break;
-    case FrameType::Control:
+    case FrameType::Control: {
       // Control (22) is routed config traffic only in this tree — it must
-      // be end-protected like Service. There is no link-scoped plaintext
-      // form, so an unprotected Control frame is always rejected.
-      if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
+      // be end-protected like Service — except the P6 gossip bodies below,
+      // which are the only link-scoped plaintext form. Anything else
+      // unprotected is always rejected.
+      const bool routed = (frame.header.flags & wire::kFlagEndProtected) != 0;
+      const ByteView control_body{frame.protected_payload.data(), frame.header.payload_length};
+      auto is_p6_body = [&]() noexcept {
+        if (control_body.data == nullptr) return false;
+        if (control_body.size == sdkv1::kStateEpochsSize &&
+            control_body.data[0] == sdkv1::kRrsControlVersion &&
+            control_body.data[1] == sdkv1::kRrsSubStateEpochs) {
+          return true;
+        }
+        return control_body.size == sdkv1::kRrsRequestSize &&
+               control_body.data[0] == sdkv1::kRrsControlVersion &&
+               control_body.data[1] == sdkv1::kRrsSubRequest;
+      };
+      if (routed) {
         handle_routed(frame, peer, rx, now_ms);
+      } else if (rrs_sink_ != nullptr && frame.header.destination == config_.node &&
+                 is_p6_body()) {
+        // P6 gossip (04 §4): link-authenticated 1-hop StateEpochs /
+        // RrsRequest, self-addressed, exact shapes only. No general
+        // link-only Control is opened by this branch. The sink
+        // re-validates against the verified binding and the SAK.
+        ExternalCallbackScope scope(in_external_callback_);
+        rrs_sink_->on_rrs_frame(peer, frame.header.type, control_body, now_ms);
+      } else if (rrs_sink_ == nullptr && frame.header.destination == config_.node &&
+                 is_p6_body()) {
+        // P6-shaped but unwired (the PR A state): rejected honestly, never
+        // mistaken for end-authorized control.
+        observer_.on_diagnostic("P6_NOT_WIRED", peer, &frame.header.message);
       } else {
-        observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer,
-                                &frame.header.message);
+        observer_.on_diagnostic("END_PROTECTION_REQUIRED", peer, &frame.header.message);
       }
       break;
+    }
     case FrameType::EndReceipt:
       handle_end_receipt(frame, peer, rx, now_ms);
       break;
@@ -5098,7 +5126,17 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
       break;
     case FrameType::ControlObject:
     case FrameType::ObjectChunk:
-    case FrameType::ObjectAck:
+    case FrameType::ObjectAck: {
+      auto is_rrs_manifest = [&]() noexcept {
+        if (frame.header.payload_length != autonomy::kControlObjectPayloadSize) return false;
+        autonomy::ControlObjectPayload manifest{};
+        if (!autonomy::control_object_decode(
+                ByteView{frame.protected_payload.data(), frame.header.payload_length},
+                manifest)) {
+          return false;
+        }
+        return manifest.kind == autonomy::ControlObjectKind::RevocationSet;
+      };
       if ((frame.header.flags & wire::kFlagEndProtected) != 0) {
         // End-protected routed object traffic: the ConfigPermit (kind 3)
         // class rides the same manifest/chunk/ack carriers as migration
@@ -5106,6 +5144,19 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
         // dedups/forwards/opens-end; the config sink still faces the real
         // permit verifier — routing never grants authority.
         handle_routed(frame, peer, rx, now_ms);
+      } else if (frame.header.type == FrameType::ControlObject &&
+                 frame.header.destination == config_.node && is_rrs_manifest()) {
+        // P6 kind-6 (RevocationSet) manifest: routed to the gossip sink,
+        // never fanned to the migration engine. Chunks/ACKs carry no kind
+        // and stay on the autonomy lane; the Owner demuxes them by hash.
+        if (rrs_sink_ != nullptr) {
+          ExternalCallbackScope scope(in_external_callback_);
+          rrs_sink_->on_rrs_frame(
+              peer, frame.header.type,
+              ByteView{frame.protected_payload.data(), frame.header.payload_length}, now_ms);
+        } else {
+          observer_.on_diagnostic("P6_NOT_WIRED", peer, &frame.header.message);
+        }
       } else if (autonomy_sink_ != nullptr && frame.header.destination == config_.node) {
         // Link-scoped autonomous objects (migration kinds 1/2): strictly
         // 1-hop, bound to the immediate peer, never end-protected.
@@ -5119,6 +5170,7 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
                                 &frame.header.message);
       }
       break;
+    }
     default:
       observer_.on_diagnostic("FRAME_TYPE_UNSUPPORTED_IN_CORE_FIXED_250", peer,
                               &frame.header.message);

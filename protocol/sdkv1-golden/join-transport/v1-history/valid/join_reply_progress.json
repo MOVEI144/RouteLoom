@@ -1,0 +1,13 @@
+{
+  "codec": "join_reply",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-transport-golden-v1",
+  "id": 269554195,
+  "name": "join_reply_progress",
+  "note": "10 B reply",
+  "payload_hex": "01421011121300d40000",
+  "phase": 4,
+  "received": 212,
+  "status": 0,
+  "step": 2
+}

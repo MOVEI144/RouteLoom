@@ -36,6 +36,8 @@ add_executable(routeloom_host_ops_tests test_host_ops.cpp)
 target_link_libraries(routeloom_host_ops_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_host_ops_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(routeloom_host_ops_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_host_ops_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 add_test(NAME routeloom_host_ops_tests COMMAND routeloom_host_ops_tests)
 
 add_executable(routeloom_usb_tests test_usb.cpp)
@@ -190,6 +192,17 @@ target_compile_options(routeloom_key_schedule_tests PRIVATE -Wall -Wextra -Wpeda
 target_compile_definitions(routeloom_key_schedule_tests PRIVATE
     ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 add_test(NAME routeloom_key_schedule_tests COMMAND routeloom_key_schedule_tests)
+
+# Authority channel, device side (G-SEC P5 PR1, V1-K11 crypto/endpoint part):
+# body codecs, GK-id and sealed envelopes byte-exact against
+# protocol/sdkv1-golden/authority (tools/gen_sdkv1_authority_vectors.py),
+# plus a live client round-trip against an in-test fake authority.
+add_executable(routeloom_sdkv1_authority_tests test_sdkv1_authority.cpp)
+target_link_libraries(routeloom_sdkv1_authority_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_authority_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_sdkv1_authority_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+add_test(NAME routeloom_sdkv1_authority_tests COMMAND routeloom_sdkv1_authority_tests)
 
 # RLRES1 resume state machine and its attack suite (plan P1-5, V1-F02).
 add_executable(routeloom_rlres1_tests test_rlres1.cpp)
@@ -414,6 +427,40 @@ target_include_directories(routeloom_sdkv1_store_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_store_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_store_tests COMMAND routeloom_sdkv1_store_tests)
+
+# P6 revocation lifecycle, PR A (docs/design/sdk-v1/04 §2-§5, plan P6-1):
+# RRS1 acceptance/enforcement/gossip and the traffic gate through fake
+# ports (production P4/P5 adapters land later; see sdkv1_revocation.hpp).
+add_executable(routeloom_sdkv1_revocation_tests test_sdkv1_revocation.cpp)
+target_link_libraries(routeloom_sdkv1_revocation_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_revocation_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_definitions(routeloom_sdkv1_revocation_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+target_compile_options(routeloom_sdkv1_revocation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_revocation_tests COMMAND routeloom_sdkv1_revocation_tests)
+
+# Factory maintenance console engine (sdk-v1/07 §6, 08 P7): keygen + PoP,
+# identity-bundle sealing with readback, lock/store gating — against real
+# office bytes from protocol/sdkv1-golden/.
+add_executable(routeloom_sdkv1_maintenance_tests test_sdkv1_maintenance.cpp)
+target_link_libraries(routeloom_sdkv1_maintenance_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_maintenance_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_maintenance_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+target_compile_definitions(routeloom_sdkv1_maintenance_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+add_test(NAME routeloom_sdkv1_maintenance_tests COMMAND routeloom_sdkv1_maintenance_tests)
+
+add_executable(routeloom_espnow_sdkv1_entropy_tests
+    test_espnow_sdkv1_entropy.cpp
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/src/espnow_sdkv1_entropy.cpp)
+target_link_libraries(routeloom_espnow_sdkv1_entropy_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_espnow_sdkv1_entropy_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/stubs/maintenance
+    ${CMAKE_SOURCE_DIR}/components/routeloom_espnow/include)
+target_compile_options(routeloom_espnow_sdkv1_entropy_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_espnow_sdkv1_entropy_tests COMMAND routeloom_espnow_sdkv1_entropy_tests)
 
 # SDK v1 stores over the key/blob storage port — the portable half of the
 # `rlsec` NVS adapter (sdk-v1/05 §5, 08 P7-1), against a fake NVS.

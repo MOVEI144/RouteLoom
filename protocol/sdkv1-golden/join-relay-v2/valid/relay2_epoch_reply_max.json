@@ -1,0 +1,11 @@
+{
+  "codec": "epoch_reply",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-join-relay-v2-golden-v1",
+  "gateway_epoch": 4294967295,
+  "name": "relay2_epoch_reply_max",
+  "nonce_hex": "404142434445464748494a4b4c4d4e4f",
+  "note": "epoch MAX is a live epoch",
+  "payload_hex": "02040100ffffffff404142434445464748494a4b4c4d4e4f",
+  "ready": 1
+}

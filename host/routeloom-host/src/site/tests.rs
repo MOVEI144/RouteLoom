@@ -2,13 +2,14 @@
 //! and 07 §8 named per test). Devices are simulated with the Rust EDHOC
 //! Initiator and routeloom-join's device-side checks (testkit).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use routeloom_join::JoinResult;
 use routeloom_provision::sdkv1::revocation::{revocation_object_verify, RevocationReason};
+use routeloom_provision::sha256::sha256;
 
 use super::records::{Verdict, ROLE_ENDPOINT, ROLE_RELAY};
-use super::store::{MemoryStore, SqliteSiteStore};
+use super::store::{Batch, MemoryStore, Snapshot, SqliteSiteStore, StoreError};
 use super::testkit::{self, kinds, request_id, Outcome, SimDevice};
 use super::transport::{AbortReason, InProcessTransport, RelayKey, RelayUp};
 use super::*;
@@ -478,19 +479,28 @@ fn removal_end_to_end() {
         .as_str()
         .unwrap()
         .to_string();
-    let (view, _) = service.with(|a| {
-        a.operation_json(records::parse_op_token(&op).unwrap())
-            .unwrap()
-    });
+    let op_id = records::parse_op_token(&op).unwrap();
+    let (view, _) = service.with(|a| a.operation_json(op_id).unwrap());
     let view = json(&view);
+    // P6-1: the sole member was removed, so the snapshot is empty and the
+    // distribution converges vacuously on the first tick — nothing owed.
     assert_eq!(
         view.get("distribution")
             .unwrap()
             .get("state")
             .unwrap()
             .as_str(),
-        Some("not_implemented")
+        Some("pending")
     );
+    service.tick(T0 + 50);
+    let (view, _) = service.with(|a| a.operation_json(op_id).unwrap());
+    let view = json(&view);
+    let distribution = view.get("distribution").unwrap();
+    assert_eq!(
+        distribution.get("state").unwrap().as_str(),
+        Some("converged")
+    );
+    assert_eq!(distribution.get("total").unwrap().as_u64(), Some(0));
     // The device still holds site state: Removed + notice, then it erases.
     let (outcome, _) = device.attempt(&service, &transport, T0 + 60_000);
     assert!(
@@ -601,15 +611,51 @@ fn admission_is_bounded() {
             key: RelayKey {
                 gateway: 1,
                 proxy: 2,
+                gateway_epoch: 7,
+                proxy_epoch: 3,
                 relay_id: 3,
                 joiner_mac: [9; 6],
             },
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 3,
             joiner_rssi_dbm: 0,
             body: vec![0x40],
         },
         T0 + 6_000,
+    );
+    assert!(matches!(
+        transport.take().as_slice(),
+        [transport::Outbound::Abort {
+            reason: AbortReason::UnknownRelay,
+            ..
+        }]
+    ));
+}
+
+/// #116: the EDHOC service accepts phase 4 only — a phase-5 step 1 is not
+/// an EDHOC m1 and ends the relay instead of opening a session.
+#[test]
+fn non_edhoc_phase_is_never_an_edhoc_message() {
+    let (service, transport) = service();
+    let key = RelayKey {
+        gateway: 1,
+        proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
+        relay_id: 3,
+        joiner_mac: [7; 6],
+    };
+    service.handle_up(
+        RelayUp {
+            key,
+            hops: 0,
+            phase: super::transport::PHASE_RESUME,
+            step: 1,
+            joiner_rssi_dbm: 0,
+            body: vec![0x40],
+        },
+        T0,
     );
     assert!(matches!(
         transport.take().as_slice(),
@@ -755,6 +801,8 @@ fn message_1_refusals_answer_edhoc_errors() {
     let key = RelayKey {
         gateway: 1,
         proxy: 2,
+        gateway_epoch: 7,
+        proxy_epoch: 3,
         relay_id: 3,
         joiner_mac: [1; 6],
     };
@@ -771,6 +819,7 @@ fn message_1_refusals_answer_edhoc_errors() {
         RelayUp {
             key,
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 1,
             joiner_rssi_dbm: 0,
             body: m1,
@@ -801,6 +850,7 @@ fn message_1_refusals_answer_edhoc_errors() {
         RelayUp {
             key,
             hops: 0,
+            phase: super::transport::PHASE_EDHOC,
             step: 1,
             joiner_rssi_dbm: 0,
             body: m1,
@@ -859,6 +909,39 @@ fn a_store_is_bound_to_its_site() {
     );
     assert!(refused.is_err());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn restart_rejects_rrs_signed_by_another_key() {
+    let (service, transport) = service();
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut leaver, "l", T0);
+    revoke(&service, leaver.node, 1, "r-forged", T0 + 10_000);
+    let result = service
+        .with(|a| {
+            let mut store = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+            let set = revocation_object_decode(&a.rrs_latest_object).unwrap();
+            let wrong = routeloom_provision::signer::FileRootSigner::from_secret(
+                testkit::SITE,
+                &routeloom_provision::signer::test_keypair(0x33).0,
+            )
+            .unwrap();
+            let forged = revocation_issue(&set, &wrong).unwrap();
+            store
+                .commit(&Batch {
+                    rrs: vec![(set.rs_epoch, forged)],
+                    ..Batch::default()
+                })
+                .unwrap();
+            SiteAuthority::open(
+                &testkit::setup(),
+                Box::new(testkit::sak()),
+                store,
+                T0 + 20_000,
+            )
+        })
+        .0;
+    assert!(result.is_err());
 }
 
 /// #107: two join requests for one NodeId with different keys, both
@@ -1356,4 +1439,686 @@ fn review_late_allow_follows_the_current_membership() {
     )
     .unwrap_err();
     assert_eq!(replaced.code, "CONFLICT");
+}
+
+/// P6-1 distribution test fake: the in-process stand-in for the P5
+/// authority channel. Refusals exercise the outbox backoff.
+#[derive(Default)]
+struct FakeRrsSends {
+    sent: Vec<(u64, Vec<u8>)>,
+    refuse: bool,
+}
+
+struct FakeRrsTransport {
+    shared: Arc<Mutex<FakeRrsSends>>,
+}
+
+impl super::revocation::RevocationTransport for FakeRrsTransport {
+    fn send_rrs(&mut self, node: u64, object: &[u8]) -> bool {
+        let mut sends = self.shared.lock().unwrap();
+        if sends.refuse {
+            return false;
+        }
+        sends.sent.push((node, object.to_vec()));
+        true
+    }
+}
+
+fn join_member(
+    service: &SiteService,
+    transport: &Arc<InProcessTransport>,
+    device: &mut SimDevice,
+    key: &str,
+    at: u64,
+) {
+    let (mut exchange, _, events) = device.start(service, transport, at);
+    decide(
+        service,
+        request_id(&events).unwrap(),
+        device.node,
+        Verdict::Allow {
+            role: ROLE_ENDPOINT,
+        },
+        key,
+        at + 10,
+    )
+    .unwrap();
+    assert!(matches!(
+        device.finish(&mut exchange, transport),
+        Outcome::Result(JoinResult::Allow { .. })
+    ));
+}
+
+fn revoke(
+    service: &SiteService,
+    device: u64,
+    generation: u32,
+    key: &str,
+    at: u64,
+) -> (u64, routeloom_json::Json) {
+    let (answer, _) = service.with(|a| {
+        a.revoke(
+            KGUARD,
+            RevokeRequest {
+                device,
+                expected_generation: generation,
+                reason: RevocationReason::Lost,
+                key: key.into(),
+            },
+            at,
+        )
+    });
+    let answer = json(&answer.unwrap());
+    let op =
+        records::parse_op_token(answer.get("operation_id").unwrap().as_str().unwrap()).unwrap();
+    (op, answer)
+}
+
+fn distribution_of(service: &SiteService, op: u64) -> routeloom_json::Json {
+    let (view, _) = service.with(|a| a.operation_json(op).unwrap());
+    let view = json(&view);
+    view.get("distribution").unwrap().clone()
+}
+
+/// V1-R01 (P6-1): `membership.revoke` answers `committed` with a
+/// `"pending"` distribution string, and `operations.get` reports the
+/// surviving members as unknown targets until their Applied ACKs arrive —
+/// never a success count without evidence.
+#[test]
+fn revoke_reports_pending_distribution_with_unknown_targets() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let (op, answer) = revoke(&service, leaver.node, 1, "r-dist", T0 + 10_000);
+    assert_eq!(
+        answer.get("distribution").unwrap().as_str(),
+        Some("pending")
+    );
+    let distribution = distribution_of(&service, op);
+    assert_eq!(distribution.get("state").unwrap().as_str(), Some("pending"));
+    assert_eq!(distribution.get("applied").unwrap().as_u64(), Some(0));
+    assert_eq!(distribution.get("unknown").unwrap().as_u64(), Some(1));
+    assert_eq!(distribution.get("total").unwrap().as_u64(), Some(1));
+    // Compatibility fields keep the old shape: reached == applied.
+    assert_eq!(distribution.get("reached").unwrap().as_u64(), Some(0));
+    assert_eq!(distribution.get("members").unwrap().as_u64(), Some(1));
+}
+
+/// V1-R01 (P6-1): the full push cycle — tick sends the RRS1 to the
+/// snapshot, the Applied ACK converges the operation, and anything but
+/// a context-bound ACK for the exact issued bytes is ignored.
+#[test]
+fn revocation_distribution_converges_on_applied() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    let (op, _) = revoke(&service, leaver.node, 1, "r-push", T0 + 10_000);
+    service.tick(T0 + 10_100);
+    assert_eq!(sends.lock().unwrap().sent.len(), 1);
+    assert_eq!(sends.lock().unwrap().sent[0].0, keeper.node);
+    let object = sends.lock().unwrap().sent[0].1.clone();
+    let digest = sha256(&object);
+    let distribution = distribution_of(&service, op);
+    assert_eq!(
+        distribution.get("state").unwrap().as_str(),
+        Some("distributing")
+    );
+    let network = testkit::network();
+    // Wrong generation, wrong node, unknown epoch, wrong bytes: ignored.
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(keeper.node, 9, network, 1, &digest, T0 + 10_200))
+            .0
+    );
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(leaver.node, 1, network, 1, &digest, T0 + 10_200))
+            .0
+    );
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 99, &digest, T0 + 10_200))
+            .0
+    );
+    assert!(
+        !service
+            .with(|a| {
+                a.handle_rrs_applied(keeper.node, 1, network, 1, &[0xEE; 32], T0 + 10_200)
+            })
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(0)
+    );
+    // The genuine ACK converges the operation.
+    assert!(
+        service
+            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 1, &digest, T0 + 10_300))
+            .0
+    );
+    let distribution = distribution_of(&service, op);
+    assert_eq!(
+        distribution.get("state").unwrap().as_str(),
+        Some("converged")
+    );
+    assert_eq!(distribution.get("applied").unwrap().as_u64(), Some(1));
+    assert_eq!(distribution.get("unknown").unwrap().as_u64(), Some(0));
+}
+
+#[test]
+fn applied_ack_requires_the_snapshot_credential() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let (op, _) = revoke(&service, leaver.node, 1, "r-binding", T0 + 10_000);
+    let digest = service.with(|a| sha256(&a.rrs_latest_object)).0;
+    let network = testkit::network();
+    service.with(|a| a.devices.get_mut(&keeper.node).unwrap().generation = 2);
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(keeper.node, 2, network, 1, &digest, T0 + 10_100))
+            .0
+    );
+    service.with(|a| {
+        let row = a.devices.get_mut(&keeper.node).unwrap();
+        row.generation = 1;
+        row.kid = [0x55; 32];
+    });
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(keeper.node, 1, network, 1, &digest, T0 + 10_200))
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(0)
+    );
+}
+
+struct FailNextStore {
+    inner: Box<dyn SiteStore>,
+    fail_next: bool,
+}
+
+impl SiteStore for FailNextStore {
+    fn load(&mut self) -> Result<Snapshot, StoreError> {
+        self.inner.load()
+    }
+    fn commit(&mut self, batch: &Batch) -> Result<(), StoreError> {
+        if self.fail_next {
+            self.fail_next = false;
+            return Err(StoreError("injected ACK commit failure".into()));
+        }
+        self.inner.commit(batch)
+    }
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
+}
+
+#[test]
+fn applied_ack_is_not_reported_before_commit() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let (op, _) = revoke(&service, leaver.node, 1, "r-ack-fault", T0 + 10_000);
+    let digest = service.with(|a| sha256(&a.rrs_latest_object)).0;
+    service.with(|a| {
+        let inner = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+        a.store = Box::new(FailNextStore {
+            inner,
+            fail_next: true,
+        });
+    });
+    assert!(
+        !service
+            .with(|a| a.handle_rrs_applied(
+                keeper.node,
+                1,
+                testkit::network(),
+                1,
+                &digest,
+                T0 + 10_100
+            ))
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(0)
+    );
+    assert!(
+        service
+            .with(|a| a.handle_rrs_applied(
+                keeper.node,
+                1,
+                testkit::network(),
+                1,
+                &digest,
+                T0 + 10_200
+            ))
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("applied")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+}
+
+#[test]
+fn unfinished_operation_is_not_evicted_at_capacity() {
+    let (service, transport) = service();
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut leaver, "l", T0);
+    service.with(|a| {
+        let mut template = a.operations.values().next().unwrap().clone();
+        template.kind = "revoke".into();
+        template.distribution = Some(revocation::OperationDistribution {
+            state: revocation::DistState::Pending,
+            rs_epoch: 1,
+            network: testkit::network(),
+            object_sha256: [0; 32],
+            targets: vec![revocation::DistributionTarget {
+                node: leaver.node,
+                kid: [0; 32],
+                generation: 1,
+                network: testkit::network(),
+                state: revocation::TargetState::Pending,
+                attempts: 0,
+                next_retry_ms: 0,
+                ack_rs_epoch: None,
+            }],
+            overflow: 0,
+        });
+        a.operations.clear();
+        for id in 1..=OPERATIONS_CAP as u64 {
+            let mut op = template.clone();
+            op.id = id;
+            a.operations.insert(id, op);
+        }
+        a.next_op_id = OPERATIONS_CAP as u64 + 1;
+    });
+    let result = service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: leaver.node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Lost,
+                    key: "r-cap".into(),
+                },
+                T0 + 10_000,
+            )
+        })
+        .0;
+    assert_eq!(result.unwrap_err().code, "NO_CAPACITY");
+    service.with(|a| {
+        assert_eq!(a.operations.len(), OPERATIONS_CAP);
+        assert!(a.operations.contains_key(&1));
+        assert_eq!(a.rs_epoch, 0);
+        assert!(a.devices.get(&leaver.node).unwrap().member);
+    });
+}
+
+#[test]
+fn distribution_retries_after_the_initial_contact() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    let (op, _) = revoke(&service, leaver.node, 1, "r-retry", T0 + 10_000);
+    for at in [10_000, 15_000, 25_000, 45_000, 85_000, 145_000] {
+        service.tick(T0 + at);
+    }
+    assert_eq!(sends.lock().unwrap().sent.len(), 6);
+    assert_eq!(
+        distribution_of(&service, op)
+            .get("unknown")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+}
+
+/// V1-R01 (P6-1): what the daemon emits from `operations.get` is what the
+/// client reads — the `committed → distributing → converged` top-level
+/// state and the per-snapshot counts survive the client parser, and an
+/// un-ACKed snapshot never parses as converged.
+#[test]
+fn operations_get_round_trips_through_the_client_parser() {
+    use routeloom_client::api1::site::operation_from_json;
+
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    let (op, _) = revoke(&service, leaver.node, 1, "r-client", T0 + 10_000);
+    let progress = || {
+        let (view, _) = service.with(|a| a.operation_json(op).unwrap());
+        operation_from_json(&json(&view)).expect("client parses operations.get")
+    };
+    let seen = progress();
+    assert_eq!(seen.operation_id, format!("op-{op:016x}"));
+    assert_eq!(seen.kind, "revoke");
+    assert_eq!(seen.state, "committed");
+    assert_eq!(seen.device, leaver.node);
+    assert_eq!(seen.distribution.state, "pending");
+    assert_eq!(
+        (
+            seen.distribution.applied,
+            seen.distribution.retired,
+            seen.distribution.unknown,
+            seen.distribution.total
+        ),
+        (0, 0, 1, 1)
+    );
+    service.tick(T0 + 10_100);
+    let seen = progress();
+    assert_eq!(seen.state, "distributing");
+    assert_eq!(seen.distribution.state, "distributing");
+    assert_eq!(seen.distribution.unknown, 1);
+    let object = sends.lock().unwrap().sent[0].1.clone();
+    let digest = sha256(&object);
+    assert!(
+        service
+            .with(|a| {
+                a.handle_rrs_applied(keeper.node, 1, testkit::network(), 1, &digest, T0 + 10_200)
+            })
+            .0
+    );
+    let seen = progress();
+    assert_eq!(seen.state, "converged");
+    assert_eq!(seen.distribution.state, "converged");
+    assert_eq!(
+        (
+            seen.distribution.applied,
+            seen.distribution.retired,
+            seen.distribution.unknown,
+            seen.distribution.total
+        ),
+        (1, 0, 0, 1)
+    );
+}
+
+/// V1-R01 (P6-1): un-ACKed targets keep retrying at bounded intervals
+/// and remain `unknown`; a refusing transport backs the whole outbox off.
+#[test]
+fn revocation_distribution_attempts_and_backoff() {
+    let (service, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service, &transport, &mut keeper, "k", T0);
+    join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    let (op, _) = revoke(&service, leaver.node, 1, "r-try", T0 + 10_000);
+    service.tick(T0 + 10_000);
+    assert_eq!(sends.lock().unwrap().sent.len(), 1);
+    service.tick(T0 + 14_999); // inside the 5 s backoff
+    assert_eq!(sends.lock().unwrap().sent.len(), 1);
+    service.tick(T0 + 15_000);
+    assert_eq!(sends.lock().unwrap().sent.len(), 2);
+    service.tick(T0 + 25_000); // +10 s
+    assert_eq!(sends.lock().unwrap().sent.len(), 3);
+    service.tick(T0 + 45_000); // +20 s: the next host contact
+    assert_eq!(sends.lock().unwrap().sent.len(), 4);
+    let distribution = distribution_of(&service, op);
+    assert_eq!(
+        distribution.get("state").unwrap().as_str(),
+        Some("distributing")
+    );
+    assert_eq!(distribution.get("unknown").unwrap().as_u64(), Some(1));
+    // A refusing transport backs off 5 s before the next dispatch.
+    sends.lock().unwrap().refuse = true;
+    sends.lock().unwrap().sent.clear();
+    let mut third = SimDevice::new(0x00A1_0000_0000_7003, 0x73);
+    join_member(&service, &transport, &mut third, "t", T0 + 50_000);
+    let (op2, _) = revoke(&service, third.node, 1, "r-busy", T0 + 60_000);
+    service.tick(T0 + 60_000);
+    assert!(sends.lock().unwrap().sent.is_empty());
+    service.tick(T0 + 64_999);
+    assert!(sends.lock().unwrap().sent.is_empty());
+    sends.lock().unwrap().refuse = false;
+    service.tick(T0 + 65_000);
+    assert_eq!(sends.lock().unwrap().sent.len(), 1);
+    assert_eq!(
+        distribution_of(&service, op2)
+            .get("state")
+            .unwrap()
+            .as_str(),
+        Some("distributing")
+    );
+}
+
+/// V1-R01 (P6-1): a restart resumes the same operation from its durable
+/// snapshot — the target is re-sent and its ACK still converges it.
+#[test]
+fn revocation_distribution_survives_restart() {
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-site-rrs-restart-{}-{T0}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("site.db");
+    let (keeper_node, op) = {
+        let (service, transport) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+        let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+        let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+        join_member(&service, &transport, &mut keeper, "k", T0);
+        join_member(&service, &transport, &mut leaver, "l", T0 + 5_000);
+        let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+        service.with(|a| {
+            a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+                shared: sends.clone(),
+            })))
+        });
+        let (op, _) = revoke(&service, leaver.node, 1, "r-restart", T0 + 10_000);
+        service.tick(T0 + 10_100);
+        assert_eq!(sends.lock().unwrap().sent.len(), 1);
+        (keeper.node, op)
+    };
+    let (service, _) = service_with(Box::new(SqliteSiteStore::open(&db).unwrap()));
+    let distribution = distribution_of(&service, op);
+    assert_eq!(
+        distribution.get("state").unwrap().as_str(),
+        Some("distributing")
+    );
+    assert_eq!(distribution.get("unknown").unwrap().as_u64(), Some(1));
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    service.tick(T0 + 20_000); // the un-ACKed target is re-sent, not rebuilt
+    assert_eq!(sends.lock().unwrap().sent.len(), 1);
+    let object = sends.lock().unwrap().sent[0].1.clone();
+    let digest = sha256(&object);
+    assert!(
+        service
+            .with(|a| {
+                a.handle_rrs_applied(keeper_node, 1, testkit::network(), 1, &digest, T0 + 20_100)
+            })
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op).get("state").unwrap().as_str(),
+        Some("converged")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// V1-R01 (P6-1): a later revoke retires the removed device in older
+/// operations, and an ACK for a newer set coalesces onto the older ones
+/// it covers — epoch order alone never decides.
+#[test]
+fn revocation_retires_and_coalesces_across_operations() {
+    let (service, transport) = service();
+    let mut a = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut b = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    let mut c = SimDevice::new(0x00A1_0000_0000_7003, 0x73);
+    join_member(&service, &transport, &mut a, "a", T0);
+    join_member(&service, &transport, &mut b, "b", T0 + 5_000);
+    join_member(&service, &transport, &mut c, "c", T0 + 10_000);
+    let sends = Arc::new(Mutex::new(FakeRrsSends::default()));
+    service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(FakeRrsTransport {
+            shared: sends.clone(),
+        })))
+    });
+    let (op1, _) = revoke(&service, a.node, 1, "r-a", T0 + 20_000);
+    let (op2, _) = revoke(&service, b.node, 1, "r-b", T0 + 30_000);
+    // op1's snapshot held B: B's removal retires it there, atomically.
+    let first = distribution_of(&service, op1);
+    assert_eq!(first.get("retired").unwrap().as_u64(), Some(1));
+    assert_eq!(first.get("unknown").unwrap().as_u64(), Some(1)); // C only
+    assert_eq!(
+        distribution_of(&service, op2)
+            .get("total")
+            .unwrap()
+            .as_u64(),
+        Some(1)
+    );
+    // C ACKs the newest set (epoch 2): it covers both operations.
+    service.tick(T0 + 30_100);
+    let object = sends
+        .lock()
+        .unwrap()
+        .sent
+        .iter()
+        .find(|(node, _)| *node == c.node)
+        .unwrap()
+        .1
+        .clone();
+    let digest = sha256(&object);
+    assert!(
+        service
+            .with(|a| {
+                a.handle_rrs_applied(c.node, 1, testkit::network(), 2, &digest, T0 + 30_200)
+            })
+            .0
+    );
+    assert_eq!(
+        distribution_of(&service, op1)
+            .get("state")
+            .unwrap()
+            .as_str(),
+        Some("converged")
+    );
+    assert_eq!(
+        distribution_of(&service, op2)
+            .get("state")
+            .unwrap()
+            .as_str(),
+        Some("converged")
+    );
+}
+
+/// P6-1 (04 §9.1): the first Get on a site that never revoked bootstraps
+/// the empty baseline set (rs_epoch 1, verifiable); a floor above the
+/// Host's latest is an integrity error. The next revoke continues at 2.
+#[test]
+fn revocation_baseline_bootstrap_on_first_get() {
+    let (service1, _) = service();
+    let object = service1.with(|a| a.handle_rrs_get(0, T0)).0.unwrap();
+    let (set, ok) = revocation_object_verify(
+        &object,
+        &testkit::sak().pubkey(),
+        testkit::SITE,
+        testkit::network(),
+    )
+    .unwrap();
+    assert!(ok);
+    assert_eq!(set.rs_epoch, 1);
+    assert!(set.entries.is_empty());
+    assert_eq!(
+        service1
+            .with(|a| a.handle_rrs_get(9, T0 + 1))
+            .0
+            .unwrap_err()
+            .code,
+        "INTEGRITY_ERROR"
+    );
+    let (service2, transport) = service();
+    let mut keeper = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut leaver = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    join_member(&service2, &transport, &mut keeper, "k", T0);
+    join_member(&service2, &transport, &mut leaver, "l", T0 + 5_000);
+    service2
+        .with(|a| a.handle_rrs_get(0, T0 + 6_000))
+        .0
+        .unwrap();
+    let (op, _) = revoke(&service2, leaver.node, 1, "r-base", T0 + 10_000);
+    let (view, _) = service2.with(|a| a.operation_json(op).unwrap());
+    assert_eq!(json(&view).get("rs_epoch").unwrap().as_u64(), Some(2));
+}
+
+/// P6-1 (04 §2): a staged GK the removed device may hold is never
+/// reused — the next revoke stages a fresh key. An unexposed staged key
+/// is still reused (one rotation per removal).
+#[test]
+fn revocation_replaces_exposed_staged_key() {
+    let (service, transport) = service();
+    let mut a = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut b = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    let mut c = SimDevice::new(0x00A1_0000_0000_7003, 0x73);
+    join_member(&service, &transport, &mut a, "a", T0);
+    join_member(&service, &transport, &mut b, "b", T0 + 5_000);
+    join_member(&service, &transport, &mut c, "c", T0 + 10_000);
+    revoke(&service, a.node, 1, "r-1", T0 + 20_000);
+    let staged = service.with(|auth| auth.gk_staged.clone().unwrap()).0;
+    assert!(service.with(|auth| auth.mark_gk_staged_distributed()).0);
+    revoke(&service, b.node, 1, "r-2", T0 + 30_000);
+    let replaced = service.with(|auth| auth.gk_staged.clone().unwrap()).0;
+    assert_eq!(replaced.epoch, staged.epoch);
+    assert_ne!(replaced.key, staged.key);
+    // Unexposed again: the next revoke reuses the staged key.
+    revoke(&service, c.node, 1, "r-3", T0 + 40_000);
+    let reused = service.with(|auth| auth.gk_staged.clone().unwrap()).0;
+    assert_eq!(reused.key, replaced.key);
 }

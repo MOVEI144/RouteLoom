@@ -86,6 +86,27 @@ def end_aad_layout(wire_source: str) -> list:
     return layout
 
 
+def maintenance_rx_covers_bundle(header: str, glue: str) -> bool:
+    bundle_match = re.search(r"kMaintenanceBundleMax = (\d+);", header)
+    line_match = re.search(
+        r"kMaintenanceLineMax = (\d+) \+ (\d+) \* kMaintenanceBundleMax;",
+        header,
+    )
+    rx_match = re.search(r"config\.rx_buffer_size = ([^;]+);", glue)
+    if not bundle_match or not line_match or not rx_match:
+        return False
+    line_max = int(line_match[1]) + int(line_match[2]) * int(bundle_match[1])
+    expression = rx_match[1].strip()
+    if expression.isdecimal():
+        rx_bytes = int(expression)
+    else:
+        offset = re.fullmatch(r"sdkv1::kMaintenanceLineMax \+ (\d+)", expression)
+        if not offset:
+            return False
+        rx_bytes = line_max + int(offset[1])
+    return rx_bytes >= line_max + 1  # the newline follows the longest line
+
+
 def validate(root: Path) -> dict:
     checks = []
 
@@ -565,11 +586,17 @@ def validate(root: Path) -> dict:
             "node.hpp group constants vs radio-defaults.json group_delivery",
         )
         # Zero-touch join transport (docs/design/sdk-v1/02 §5.4/§7.4, P3-1/
-        # P3-2): the semantics.json contract, the C++ constants, the Rust USB
-        # mirror, the FrameType ids and the membership allowlist must agree.
+        # P3-2, plus the #116 v2 in 02 §7.5): the semantics.json contract,
+        # the C++ constants, the Rust USB mirror, the FrameType ids and the
+        # membership allowlist must agree. The v1 entries stay as history;
+        # the code constants are v2 now.
         zt = semantic["zero_touch_join"]
+        zt2 = zt["relay_v2"]
         zt_hpp = (
             root / "components/routeloom/include/routeloom/sdkv1_join_transport.hpp"
+        ).read_text(encoding="utf-8")
+        relay_hpp = (
+            root / "components/routeloom/include/routeloom/sdkv1_join_relay.hpp"
         ).read_text(encoding="utf-8")
         usb_hpp = (
             root / "components/routeloom/include/routeloom/usb_host_ops.hpp"
@@ -588,9 +615,24 @@ def validate(root: Path) -> dict:
             and f"kZtBodyVersion = {zt['rld1_body_v3']['body_version']};" in zt_hpp
             and f"kZtClass = {zt['rld1_body_v3']['scope_class']};" in zt_hpp
             and f"kJoinMessageMax = {zt['join_message_max_bytes']};" in zt_hpp
-            and f"kRelayHeaderSize = {zt['relay_header_bytes']};" in zt_hpp
+            and f"kRelayHeaderSize = {zt2['relay_header_bytes']};" in zt_hpp
+            and f"RELAY_HEADER_SIZE: usize = {zt2['relay_header_bytes']};" in jr_rs
+            and zt2["relay_header_bytes"] + zt["join_message_max_bytes"]
+            == zt2["relay_object_max_bytes"]
             and f"kJoinChunkHeaderSize = {zt_chunk['header_bytes']};" in zt_hpp
             and f"kJoinReplySize = {zt_chunk['reply_bytes']};" in zt_hpp
+            and f"kWireRelayChunkHeaderSize = {zt2['wire_chunk_header_bytes']};" in zt_hpp
+            and f"kWireRelayReplySize = {zt2['wire_reply_bytes']};" in zt_hpp
+            and f"kEpochQuerySize = {zt2['epoch_query_bytes']};" in zt_hpp
+            and f"kEpochReplySize = {zt2['epoch_reply_bytes']};" in zt_hpp
+            and f"EPOCH_QUERY_SIZE: usize = {zt2['epoch_query_bytes']};" in jr_rs
+            and f"EPOCH_REPLY_SIZE: usize = {zt2['epoch_reply_bytes']};" in jr_rs
+            and f"kProxyFloors = {zt2['relay_book']['floors']};" in relay_hpp
+            and f"kActiveRelays = {zt2['relay_book']['active']};" in relay_hpp
+            and f"kCapJoinRelayV2 = 1u << {zt2['usb']['capability_bit']};" in usb_hpp
+            and f"CAP_JOIN_RELAY_V2: u32 = 1 << {zt2['usb']['capability_bit']};" in jr_rs
+            and f"kJoinRelaySchema = {zt2['usb']['inner_schema']};" in usb_hpp
+            and f"JOIN_RELAY_SCHEMA: u8 = {zt2['usb']['inner_schema']};" in jr_rs
             and zt_chunk["rld1_data_max"] + zt_chunk["header_bytes"]
             == zt_chunk["chunked_only_above"]["RLD1"]
             and zt_chunk["wire_data_max"] + zt_chunk["header_bytes"]
@@ -697,6 +739,40 @@ def validate(root: Path) -> dict:
                 for board in boards["boards"]
             ),
         )
+        for app in ("reference_node", "bridge_node"):
+            firmware = (
+                root / f"firmware/{app}/main/main.cpp"
+            ).read_text(encoding="utf-8")
+            partition = firmware.index("nvs_flash_init_partition(")
+            console = firmware.index("run_maintenance_console(sdkv1_stores)")
+            peer_capacity = firmware.index("nvs_partition_peer_capacity(")
+            security = firmware.index("security.initialize(")
+            test(
+                f"{app}_maintenance_before_mesh_security",
+                partition < console < peer_capacity < security,
+                "factory console needs rlsec, not the development mesh security state",
+            )
+        workflow = (root / ".github/workflows/sdk.yml").read_text(encoding="utf-8")
+        test(
+            "maintenance_usb_rx_covers_identity_bundle",
+            maintenance_rx_covers_bundle(
+                (root / "components/routeloom/include/routeloom/sdkv1_maintenance.hpp")
+                .read_text(encoding="utf-8"),
+                (root / "components/routeloom_espnow/src/espnow_sdkv1.cpp")
+                .read_text(encoding="utf-8"),
+            ),
+            "USB RX must hold the largest hex-encoded identity bundle and newline",
+        )
+        for app in ("reference_node", "bridge_node"):
+            test(
+                f"{app}_maintenance_build_cell",
+                re.search(
+                    rf"- app: {app}\s+target: esp32c3\s+profile: normal"
+                    rf"\s+autonomy: off\s+features: maintenance_on",
+                    workflow,
+                ) is not None,
+                "each factory console branch must compile in the fixed-IDF matrix",
+            )
         for board in boards["boards"]:
             if "gpio_d0_to_d10" not in board:
                 test(

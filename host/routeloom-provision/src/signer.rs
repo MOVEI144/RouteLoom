@@ -29,8 +29,8 @@ pub const SECP256R1_ORDER: [u8; 32] = [
 /// (n-1)/2 — `kSecp256r1HalfOrder`; the maximum accepted S under the
 /// manifest/permit low-S rule.
 pub const SECP256R1_HALF_ORDER: [u8; 32] = [
-    0x7F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xDE, 0x73, 0x7D, 0x56, 0xD3, 0x8C, 0xF4, 0x27, 0x9D, 0xCE, 0x56, 0x17, 0xE3, 0x19, 0x5A, 0x88,
+    0x7F, 0xFF, 0xFF, 0xFF, 0x80, 0x00, 0x00, 0x00, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0xDE, 0x73, 0x7D, 0x56, 0xD3, 0x8B, 0xCF, 0x42, 0x79, 0xDC, 0xE5, 0x61, 0x7E, 0x31, 0x92, 0xA8,
 ];
 
 /// Big-endian 32-byte compare — `cose_be32_cmp`. Returns -1/0/1.
@@ -364,6 +364,22 @@ pub fn hex_decode_exact(text: &str, len: usize) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn low_s_boundary_matches_p256_group_order() {
+        let true_half = hex_decode_exact(
+            "7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8",
+            32,
+        )
+        .unwrap();
+        assert_eq!(SECP256R1_HALF_ORDER.as_slice(), true_half.as_slice());
+        let mut signature = [0_u8; 64];
+        signature[31] = 1;
+        signature[32..].copy_from_slice(&true_half);
+        signature_range_check(&signature).unwrap();
+        signature[63] += 1;
+        assert!(signature_range_check(&signature).is_err());
+    }
 
     #[test]
     fn test_keypair_is_on_curve_and_stable() {
