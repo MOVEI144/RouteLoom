@@ -47,7 +47,17 @@ class FaultyRecordStorage final : public RecordSlotStorage {
     if (slot >= 2 || data.data == nullptr || data.size > slot_bytes_) {
       return Status::error(StatusCode::InvalidArgument, "bad write");
     }
+    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected write failure");
     const std::size_t call = write_calls++;
+    if (call == substitute_call) {
+      if (substitute_record.size() > slot_bytes_) {
+        return Status::error(StatusCode::InvalidArgument, "substitute too long");
+      }
+      std::memcpy(slots_[slot].data(), substitute_record.data(), substitute_record.size());
+      std::memset(slots_[slot].data() + substitute_record.size(), 0xFF,
+                  slot_bytes_ - substitute_record.size());
+      return Status::error(StatusCode::StorageFailure, "power lost after different commit");
+    }
     if (call == cut_call) {
       std::memcpy(slots_[slot].data(), data.data, cut_bytes);
       return Status::error(StatusCode::StorageFailure, "power cut mid write");
@@ -60,9 +70,11 @@ class FaultyRecordStorage final : public RecordSlotStorage {
   }
   std::vector<std::uint8_t>& slot(const std::uint8_t index) { return slots_[index]; }
   void disarm() {
-    cut_call = drop_call = flip_call = std::numeric_limits<std::size_t>::max();
+    cut_call = drop_call = flip_call = substitute_call = std::numeric_limits<std::size_t>::max();
+    substitute_record.clear();
     read_error = false;
     read_error_slot = 0xFF;
+    fail_writes = false;
   }
 
   std::size_t write_calls{0};
@@ -72,8 +84,11 @@ class FaultyRecordStorage final : public RecordSlotStorage {
   std::size_t cut_bytes{0};
   std::size_t drop_call{std::numeric_limits<std::size_t>::max()};
   std::size_t flip_call{std::numeric_limits<std::size_t>::max()};
+  std::size_t substitute_call{std::numeric_limits<std::size_t>::max()};
+  std::vector<std::uint8_t> substitute_record{};
   bool read_error{false};
   std::uint8_t read_error_slot{0xFF};
+  bool fail_writes{false};
 
  private:
   std::size_t slot_bytes_;
@@ -97,6 +112,7 @@ class FaultyResumeStorage final : public ResumeSlotStorage {
     if (index >= slots_.size() || data.size != kResumeSlotBytes) {
       return Status::error(StatusCode::InvalidArgument, "bad resume write");
     }
+    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected write failure");
     const std::size_t call = write_calls++;
     if (call == cut_call) {
       std::memcpy(slots_[index].data(), data.data, cut_bytes);
@@ -111,6 +127,7 @@ class FaultyResumeStorage final : public ResumeSlotStorage {
   std::size_t write_calls{0};
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
+  bool fail_writes{false};
 
  private:
   std::vector<std::array<std::uint8_t, kResumeSlotBytes>> slots_;

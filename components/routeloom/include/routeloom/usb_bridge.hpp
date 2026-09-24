@@ -157,12 +157,15 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   // CAP_GROUP_DELIVERY_V1 in HelloAck. Requires config_.mesh.
   Status attach_group() noexcept;
 
-  // Late join-relay binding (join_relay_v1, docs/design/sdk-v1/02 §7.2/§7.4):
-  // serves HostOps 0x61 JOIN_RELAY_DOWN / 0x62 JOIN_RELAY_ABORT through the
-  // gateway's JoinRelayGateway (answered by 0x63) and becomes its host sink,
-  // so complete up relay objects leave as 0x60 and relay ends as 0x62
-  // (request id 0). Advertises CAP_JOIN_RELAY_V1 in HelloAck. The owner
-  // feeds the gateway's Wire side; the bridge never touches the mesh here.
+  // Late join-relay binding (join_relay_v2, docs/design/sdk-v1/02 §7.2/§7.4,
+  // #116): serves HostOps 0x61 JOIN_RELAY_DOWN / 0x62 JOIN_RELAY_ABORT
+  // through the gateway's JoinRelayGateway (answered by 0x63) and becomes
+  // its host sink while a session is ACTIVE, so complete up relay objects
+  // leave as 0x60 and relay ends as 0x62 (request id 0). Advertises
+  // CAP_JOIN_RELAY_V2 in HelloAck. The sink follows the session: a
+  // disconnect detaches it (ending the live exchanges) and the next ACTIVE
+  // session re-attaches it. The owner feeds the gateway's Wire side; the
+  // bridge never touches the mesh here.
   Status attach_join_relay(sdkv1::JoinRelayGateway& gateway) noexcept;
 
   // Serial RX entry point: feed raw bytes read from the wire.
@@ -217,10 +220,10 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
   void on_diagnostic_body(NodeId observer, ByteView body,
                           MonotonicMs now_ms) noexcept override;
 
-  // JoinRelayHostSink (join_relay_v1): only while a session is ACTIVE —
+  // JoinRelayHostSink (join_relay_v2): only while a session is ACTIVE —
   // otherwise the gateway tells the proxy authority_unreachable (07 §7).
   Status relay_up(NodeId proxy, std::uint8_t hops, ByteView object) noexcept override;
-  Status relay_abort(NodeId proxy, std::uint32_t relay_id,
+  Status relay_abort(NodeId proxy, sdkv1::RelayToken token,
                      sdkv1::RelayAbortReason reason) noexcept override;
 
   SessionState state() const noexcept { return state_; }
@@ -361,14 +364,14 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
                           MonotonicMs now_ms) noexcept;
   void send_group_status(std::uint64_t request, const GroupStatusReply& reply,
                          MonotonicMs now_ms) noexcept;
-  // Join relay (0x61/0x62): decode, gate on CAP_JOIN_RELAY_V1 + an attached
+  // Join relay (0x61/0x62): decode, gate on CAP_JOIN_RELAY_V2 + an attached
   // gateway, hand to JoinRelayGateway and answer one 0x63.
   void handle_join_relay_down(std::uint64_t request, ByteView inner,
                               MonotonicMs now_ms) noexcept;
   void handle_join_relay_abort(std::uint64_t request, ByteView inner,
                                MonotonicMs now_ms) noexcept;
   void send_join_relay_result(std::uint64_t request, ConfigOpsResult result, NodeId proxy,
-                              std::uint32_t relay_id, MonotonicMs now_ms) noexcept;
+                              sdkv1::RelayToken token, MonotonicMs now_ms) noexcept;
   // poll(): diff the mesh against the armed baseline at most every
   // kNodeMonitorIntervalMs and queue bounded 0x42 events, leaving the data
   // queue's application reserve untouched.
@@ -606,7 +609,7 @@ class UsbBridge final : public UsbFrameSink, public NodeObserver,
     bool used{false};
   };
   std::array<PendingGroup, kGroupOriginCapacity> pending_group_{};
-  // join_relay_v1: the attached gateway engine (owner-provided storage;
+  // join_relay_v2: the attached gateway engine (owner-provided storage;
   // nullptr -> 0x61/0x62 answer Unsupported). 0x60 bodies are staged in
   // tx_body_ like the node-status page (copied into a TxItem at once).
   sdkv1::JoinRelayGateway* join_relay_{nullptr};

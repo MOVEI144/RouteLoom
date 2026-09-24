@@ -394,7 +394,8 @@ Status capabilities_reply_encode(const CapabilitiesReply& reply,
   for (const auto byte : reply.echo_nonce) acc |= byte;
   if (out.size != kCapabilitiesReplyBodySize || acc == 0 ||
       reply.node_boot == 0 ||
-      (reply.features & ~0x1Fu) != 0 || (reply.permit_profiles & ~0x3u) != 0 ||
+      (reply.features & ~kCapabilityFeatureMask) != 0 ||
+      (reply.permit_profiles & ~0x3u) != 0 ||
       reply.valid_for_ms == 0 ||
       reply.valid_for_ms > kCapabilitiesValidityCapMs) {
     return reject();
@@ -437,7 +438,8 @@ Status capabilities_reply_decode(const ByteView body,
   status = reader.read_u32(out.valid_for_ms);
   if (!status) return status;
   if (!expect_consumed(reader) || acc == 0 || out.node_boot == 0 ||
-      (out.features & ~0x1Fu) != 0 || (out.permit_profiles & ~0x3u) != 0 ||
+      (out.features & ~kCapabilityFeatureMask) != 0 ||
+      (out.permit_profiles & ~0x3u) != 0 ||
       out.valid_for_ms == 0 ||
       out.valid_for_ms > kCapabilitiesValidityCapMs) {
     return reject();

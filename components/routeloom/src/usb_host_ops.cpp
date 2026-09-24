@@ -2077,7 +2077,47 @@ bool join_relay_result_known(const std::uint16_t result) noexcept {
 bool join_relay_result_fields_ok(const JoinRelayResult& result) noexcept {
   const bool ok = result.result == static_cast<std::uint16_t>(ConfigOpsResult::Ok);
   return join_relay_result_known(result.result) && result.proxy != kBroadcastNodeId &&
-         (!ok || (relay_node_valid(result.proxy) && result.relay_id != 0));
+         (!ok || (relay_node_valid(result.proxy) && result.relay_id != 0 &&
+                   result.gateway_epoch != 0 && result.proxy_epoch != 0));
+}
+
+// The join family's own schema-2 head/body (#116 §5.2): byte-identical to
+// the schema-1 common form except the version. Only 0x60-0x63 use these.
+Status write_join_head(ByteWriter& writer, const HostOpsSub sub,
+                       const std::uint16_t payload_len) noexcept {
+  Status status = writer.write_u8(kJoinRelaySchema);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(sub));
+  if (status) status = writer.write_u16(payload_len);
+  return status;
+}
+
+Status join_body(const ByteView inner, const HostOpsSub sub, const std::size_t min_payload,
+                 const std::size_t max_payload, ByteView& payload) noexcept {
+  payload = ByteView{};
+  if (inner.size < kGatewayInnerHeadSize ||
+      inner.size > kGatewayInnerHeadSize + max_payload) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_LENGTH");
+  }
+  ByteReader reader(inner);
+  std::uint8_t schema = 0;
+  std::uint8_t sub_byte = 0;
+  std::uint16_t payload_len = 0;
+  Status status = reader.read_u8(schema);
+  if (status) status = reader.read_u8(sub_byte);
+  if (status) status = reader.read_u16(payload_len);
+  if (!status) return status;
+  if (schema != kJoinRelaySchema) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_SCHEMA");
+  }
+  if (sub_byte != static_cast<std::uint8_t>(sub)) {
+    return Status::error(StatusCode::ProtocolError, "SUBCOMMAND_MISMATCH");
+  }
+  if (payload_len != reader.remaining() || payload_len < min_payload ||
+      payload_len > max_payload) {
+    return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_LENGTH");
+  }
+  payload = ByteView{inner.data + reader.consumed(), payload_len};
+  return Status::success();
 }
 
 }  // namespace
@@ -2089,7 +2129,7 @@ Status encode_join_relay_up(const JoinRelayUp& up, const MutableByteView out,
   written = 0;
   if (!check_relay_up(up)) return Status::error(StatusCode::InvalidArgument, "join relay up");
   ByteWriter writer(out);
-  Status status = write_gateway_head(
+  Status status = write_join_head(
       writer, HostOpsSub::JoinRelayUp,
       static_cast<std::uint16_t>(kJoinRelayUpFixed + up.object.size));
   if (status) status = writer.write_u64(up.gateway);
@@ -2104,7 +2144,7 @@ Status encode_join_relay_up(const JoinRelayUp& up, const MutableByteView out,
 Status decode_join_relay_up(const ByteView inner, JoinRelayUp& out) noexcept {
   out = JoinRelayUp{};
   ByteView payload{};
-  Status status = gateway_body(inner, HostOpsSub::JoinRelayUp, kJoinRelayUpFixed + 1,
+  Status status = join_body(inner, HostOpsSub::JoinRelayUp, kJoinRelayUpFixed + 1,
                                kJoinRelayUpMaxPayload, payload);
   if (!status) return status;
   ByteReader reader(payload);
@@ -2128,7 +2168,7 @@ Status encode_join_relay_down(const JoinRelayDown& down, const MutableByteView o
     return Status::error(StatusCode::InvalidArgument, "join relay down");
   }
   ByteWriter writer(out);
-  Status status = write_gateway_head(
+  Status status = write_join_head(
       writer, HostOpsSub::JoinRelayDown,
       static_cast<std::uint16_t>(kJoinRelayDownFixed + down.object.size));
   if (status) status = writer.write_u64(down.to_proxy);
@@ -2141,7 +2181,7 @@ Status encode_join_relay_down(const JoinRelayDown& down, const MutableByteView o
 Status decode_join_relay_down(const ByteView inner, JoinRelayDown& out) noexcept {
   out = JoinRelayDown{};
   ByteView payload{};
-  Status status = gateway_body(inner, HostOpsSub::JoinRelayDown, kJoinRelayDownFixed + 1,
+  Status status = join_body(inner, HostOpsSub::JoinRelayDown, kJoinRelayDownFixed + 1,
                                kJoinRelayDownMaxPayload, payload);
   if (!status) return status;
   ByteReader reader(payload);
@@ -2161,15 +2201,17 @@ Status decode_join_relay_down(const ByteView inner, JoinRelayDown& out) noexcept
 Status encode_join_relay_abort(const JoinRelayAbort& abort, const MutableByteView out,
                                std::size_t& written) noexcept {
   written = 0;
-  if (!relay_node_valid(abort.proxy) || abort.relay_id == 0 ||
-      !sdkv1::relay_abort_reason_known(abort.reason)) {
+  if (!relay_node_valid(abort.proxy) || abort.relay_id == 0 || abort.gateway_epoch == 0 ||
+      abort.proxy_epoch == 0 || !sdkv1::relay_abort_reason_known(abort.reason)) {
     return Status::error(StatusCode::InvalidArgument, "join relay abort");
   }
   ByteWriter writer(out);
-  Status status = write_gateway_head(writer, HostOpsSub::JoinRelayAbort,
-                                     static_cast<std::uint16_t>(kJoinRelayAbortPayload));
+  Status status = write_join_head(writer, HostOpsSub::JoinRelayAbort,
+                                  static_cast<std::uint16_t>(kJoinRelayAbortPayload));
   if (status) status = writer.write_u64(abort.proxy);
   if (status) status = writer.write_u32(abort.relay_id);
+  if (status) status = writer.write_u32(abort.gateway_epoch);
+  if (status) status = writer.write_u32(abort.proxy_epoch);
   if (status) status = writer.write_u8(abort.reason);
   if (!status) return status;
   written = writer.size();
@@ -2179,17 +2221,19 @@ Status encode_join_relay_abort(const JoinRelayAbort& abort, const MutableByteVie
 Status decode_join_relay_abort(const ByteView inner, JoinRelayAbort& out) noexcept {
   out = JoinRelayAbort{};
   ByteView payload{};
-  Status status = gateway_body(inner, HostOpsSub::JoinRelayAbort, kJoinRelayAbortPayload,
-                               kJoinRelayAbortPayload, payload);
+  Status status = join_body(inner, HostOpsSub::JoinRelayAbort, kJoinRelayAbortPayload,
+                            kJoinRelayAbortPayload, payload);
   if (!status) return status;
   ByteReader reader(payload);
   JoinRelayAbort abort{};
   status = reader.read_u64(abort.proxy);
   if (status) status = reader.read_u32(abort.relay_id);
+  if (status) status = reader.read_u32(abort.gateway_epoch);
+  if (status) status = reader.read_u32(abort.proxy_epoch);
   if (status) status = reader.read_u8(abort.reason);
   if (!status) return status;
-  if (!relay_node_valid(abort.proxy) || abort.relay_id == 0 ||
-      !sdkv1::relay_abort_reason_known(abort.reason)) {
+  if (!relay_node_valid(abort.proxy) || abort.relay_id == 0 || abort.gateway_epoch == 0 ||
+      abort.proxy_epoch == 0 || !sdkv1::relay_abort_reason_known(abort.reason)) {
     return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_ABORT");
   }
   out = abort;
@@ -2203,11 +2247,13 @@ Status encode_join_relay_result(const JoinRelayResult& result, const MutableByte
     return Status::error(StatusCode::InvalidArgument, "join relay result");
   }
   ByteWriter writer(out);
-  Status status = write_gateway_head(writer, HostOpsSub::JoinRelayResult,
-                                     static_cast<std::uint16_t>(kJoinRelayResultPayload));
+  Status status = write_join_head(writer, HostOpsSub::JoinRelayResult,
+                                  static_cast<std::uint16_t>(kJoinRelayResultPayload));
   if (status) status = writer.write_u16(result.result);
   if (status) status = writer.write_u64(result.proxy);
   if (status) status = writer.write_u32(result.relay_id);
+  if (status) status = writer.write_u32(result.gateway_epoch);
+  if (status) status = writer.write_u32(result.proxy_epoch);
   if (!status) return status;
   written = writer.size();
   return Status::success();
@@ -2216,14 +2262,16 @@ Status encode_join_relay_result(const JoinRelayResult& result, const MutableByte
 Status decode_join_relay_result(const ByteView inner, JoinRelayResult& out) noexcept {
   out = JoinRelayResult{};
   ByteView payload{};
-  Status status = gateway_body(inner, HostOpsSub::JoinRelayResult, kJoinRelayResultPayload,
-                               kJoinRelayResultPayload, payload);
+  Status status = join_body(inner, HostOpsSub::JoinRelayResult, kJoinRelayResultPayload,
+                            kJoinRelayResultPayload, payload);
   if (!status) return status;
   ByteReader reader(payload);
   JoinRelayResult result{};
   status = reader.read_u16(result.result);
   if (status) status = reader.read_u64(result.proxy);
   if (status) status = reader.read_u32(result.relay_id);
+  if (status) status = reader.read_u32(result.gateway_epoch);
+  if (status) status = reader.read_u32(result.proxy_epoch);
   if (!status) return status;
   if (!join_relay_result_fields_ok(result)) {
     return Status::error(StatusCode::ProtocolError, "JOIN_RELAY_RESULT");

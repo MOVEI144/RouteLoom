@@ -431,15 +431,17 @@ pub enum ControlObjectKind {
     /// Scope-gateway-config §5.1: end-protected routed config permits ride
     /// the same object transfer; link-only kinds 1/2 keep their path.
     ConfigPermit = 3,
-    /// Signed recovery intents (RCR2) ride a dedicated lane of the same
-    /// transfer (04 §4.7, 06 §6.3): separate from kind-3 intake so an
-    /// impaired journal can receive recovery evidence while refusing
-    /// normal permits.
+    /// Signed recovery intents (RCR2) remain admissible during config
+    /// impairment while ordinary permits are refused.
     ConfigRecovery = 4,
     /// Signed trust-manifest (RTM1) images ride the same carrier at the
     /// full authenticated-object cap; the target dispatches kind-5
     /// completions to the trust store, never to a journal.
     TrustManifest = 5,
+    /// P6 (04-removal-revocation.md §4): the content is the RRS1
+    /// COSE object bytes verbatim; the manifest hash proves reassembly
+    /// identity only, the SAK signature inside the object is the authority.
+    RevocationSet = 6,
 }
 
 #[derive(Clone, Debug)]
@@ -480,6 +482,7 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
         3 => ControlObjectKind::ConfigPermit,
         4 => ControlObjectKind::ConfigRecovery,
         5 => ControlObjectKind::TrustManifest,
+        6 => ControlObjectKind::RevocationSet,
         _ => return reject(),
     };
     let total_len = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));

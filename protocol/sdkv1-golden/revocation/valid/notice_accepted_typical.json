@@ -1,0 +1,10 @@
+{
+  "body_hex": "01030000000000102b272c11cbf9a3d64a89f95a44e1acb0d7814dd5642c0f7dd0ee157040e682d2",
+  "codec": "rrs_notice_accepted",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "notice_accepted_typical",
+  "note": "PR B consumes the notice; PR A only pins these bytes",
+  "notice_sha256_hex": "2b272c11cbf9a3d64a89f95a44e1acb0d7814dd5642c0f7dd0ee157040e682d2",
+  "rs_epoch": 16
+}

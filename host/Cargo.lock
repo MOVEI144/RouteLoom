@@ -575,6 +575,10 @@ dependencies = [
 [[package]]
 name = "routeloom-wire"
 version = "0.1.0"
+dependencies = [
+ "routeloom-provision",
+ "sha2",
+]
 
 [[package]]
 name = "routeloomctl"

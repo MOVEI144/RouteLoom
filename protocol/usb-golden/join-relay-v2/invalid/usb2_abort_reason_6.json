@@ -1,0 +1,8 @@
+{
+  "codec": "join_usb_abort",
+  "encoded_hex": "0262001500a10000000007777e57ab1e000000070000000306",
+  "expect": "error",
+  "format": "routeloom-usb-join-relay-v2-golden-v1",
+  "name": "usb2_abort_reason_6",
+  "note": "reason 1..5"
+}

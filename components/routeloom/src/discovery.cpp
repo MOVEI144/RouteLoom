@@ -2361,6 +2361,30 @@ Status NeighborDiscovery::revoke_peer(const NodeId peer) noexcept {
   return Status::success();
 }
 
+Status NeighborDiscovery::reauth_revoked(const NodeId peer,
+                                            const MonotonicMs now_ms) noexcept {
+  constexpr MonotonicMs kReauthCooldownMs = 60000;
+  bool revoked = false;
+  bool cooling = false;
+  neighbors_.for_each([&](const Neighbor& n) {
+    if (n.node != peer || n.phase != NeighborPhase::Revoked) return;
+    revoked = true;
+    // Underflow-safe: an attempt is recent only when now is at/past it
+    // and inside the minute.
+    if (now_ms >= n.last_reauth_attempt_ms &&
+        now_ms - n.last_reauth_attempt_ms < kReauthCooldownMs) {
+      cooling = true;
+    }
+  });
+  if (!revoked) return Status::error(StatusCode::NotFound, "peer not revoked");
+  if (cooling) return Status::error(StatusCode::Busy, "reauth cooldown");
+  neighbors_.for_each([&](Neighbor& n) {
+    if (n.node == peer && n.phase == NeighborPhase::Revoked) n.last_reauth_attempt_ms = now_ms;
+  });
+  event("REAUTH_ADMITTED", peer);
+  return Status::success();
+}
+
 Status NeighborDiscovery::forget_peer(const NodeId peer) noexcept {
   const auto dead = [&](const Neighbor& n) {
     return n.node == peer && (n.phase == NeighborPhase::Revoked ||
