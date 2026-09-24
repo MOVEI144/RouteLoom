@@ -1,0 +1,15 @@
+{
+  "boot": 5,
+  "cert_hash_hex": "afd2aa746e065eeb6ce2452f6f092690ae3ab192df9b8289558fedd9137415cd",
+  "codec": "authority_body",
+  "current": 10,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "generation": 9,
+  "name": "body_join_confirm_device",
+  "next": 11,
+  "op": 1,
+  "plaintext_hex": "01010000000000090102030405060708afd2aa746e065eeb6ce2452f6f092690ae3ab192df9b8289558fedd9137415cd000000050000000a0000000b",
+  "request_id": 72623859790382856,
+  "type": 1
+}

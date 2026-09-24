@@ -1,0 +1,9 @@
+{
+  "codec": "authority_body",
+  "encoded_hex": "010100000000000901020304050607080000000b0200003ca0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "name": "body_update_removal_long_overlap",
+  "note": "removal must pair cause 2 with overlap 10 s",
+  "reason": "bad_overlap"
+}

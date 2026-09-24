@@ -1,0 +1,9 @@
+{
+  "codec": "authority_fragment",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "inner_hex": "016600100101000100000007000000040000000b",
+  "name": "site_state_set_reserved",
+  "note": "reserved bits set",
+  "reason": "reserved_nonzero"
+}

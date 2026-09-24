@@ -1,0 +1,11 @@
+{
+  "codec": "authority_envelope",
+  "envelope_hex": "010466666666000000000007079366e6005aed9fd889e33b8ed7fe6907abc4ae528fe2850557f116fec9a3afa017eeef58f5a9118a0721bb",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "iv_hex": "cdd150549bb7c8602662a5a9",
+  "key_hex": "c4232a9375a6e17d561c710ad876c93c",
+  "name": "envelope_pull_bad_tag",
+  "note": "one ciphertext bit flipped under the intact tag",
+  "reason": "bad_tag"
+}

@@ -1,0 +1,11 @@
+{
+  "codec": "authority_envelope",
+  "envelope_hex": "010466666666000000000007079366e6005aed9fd989e33b8ed7fe6907abc4ae528fe2850557f116fec9a3afa017eeef58f5a9118a0721bb",
+  "expect": "error",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "iv_hex": "f4480a89a89bc758b4c073d3",
+  "key_hex": "749550bf0dc87b7b14696ccce39904f7",
+  "name": "envelope_pull_wrong_direction",
+  "note": "device-to-authority bytes opened with the authority-to-device key",
+  "reason": "bad_tag"
+}
