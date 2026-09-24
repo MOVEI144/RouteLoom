@@ -6,9 +6,9 @@ use routeloom_json::Json;
 
 use super::{parse_hex_u64, protocol, Notifications, RouteLoomTransport};
 use crate::site::{
-    Decision, DecisionOutcome, DiscoveredDevice, GroupKeyStatus, JoinRequest, LastRotation, Member,
-    RemovalReason, RevokeOutcome, RotateOutcome, SiteAdmin, SiteEvent, SiteEventStream, SiteStatus,
-    Via, SITE_EVENT_KINDS,
+    Decision, DecisionOutcome, DiscoveredDevice, DistributionProgress, GroupKeyStatus, JoinRequest,
+    LastRotation, Member, OperationProgress, RemovalReason, RevokeOutcome, RotateOutcome,
+    SiteAdmin, SiteEvent, SiteEventStream, SiteStatus, Via, SITE_EVENT_KINDS,
 };
 use crate::{NodeId, TransportError};
 
@@ -192,6 +192,29 @@ pub fn site_event_from_json(event: &Json) -> Option<SiteEvent> {
         device: node_of(event, "device_id"),
         join_request_id: string_of(event, "join_request_id"),
         raw: routeloom_json_text(event),
+    })
+}
+
+/// A revoke `operations.get` result with its RRS distribution progress.
+/// Required: `operation_id`, `kind`, `state`, `device_id`, `generation`,
+/// `rs_epoch`, and the `distribution` object; counts default to 0 only
+/// for fields the daemon omits, never for mismatched shapes.
+pub fn operation_from_json(json: &Json) -> Option<OperationProgress> {
+    let dist = json.get("distribution")?;
+    Some(OperationProgress {
+        operation_id: string_of(json, "operation_id")?,
+        kind: string_of(json, "kind")?,
+        state: string_of(json, "state")?,
+        device: node_of(json, "device_id")?,
+        generation: u32_of(json, "generation")?,
+        rs_epoch: u32_of(json, "rs_epoch")?,
+        distribution: DistributionProgress {
+            state: string_of(dist, "state").unwrap_or_else(|| "unknown".to_string()),
+            applied: opt_u64(dist, "applied").unwrap_or(0),
+            retired: opt_u64(dist, "retired").unwrap_or(0),
+            unknown: opt_u64(dist, "unknown").unwrap_or(0),
+            total: opt_u64(dist, "total").unwrap_or(0),
+        },
     })
 }
 
@@ -384,6 +407,25 @@ impl SiteAdmin for RouteLoomTransport {
             ),
         )?;
         rotate_outcome_from_json(&result).ok_or_else(|| protocol("unparsable group_keys.rotate"))
+    }
+
+    fn operation(&self, operation_id: &str) -> Result<Option<OperationProgress>, TransportError> {
+        let result = match self.call(
+            "operations.get",
+            &format!(
+                "{{\"operation_id\":\"{}\"}}",
+                routeloom_json::escape_string(operation_id)
+            ),
+        ) {
+            Ok(result) => result,
+            Err(TransportError::Rejected { code, .. }) if code == "NOT_FOUND" => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        operation_from_json(&result)
+            .map(Some)
+            .ok_or_else(|| protocol("unparsable revoke operation"))
     }
 
     fn site_events(&self) -> Result<SiteEventStream, TransportError> {

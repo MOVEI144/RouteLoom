@@ -1,0 +1,11 @@
+{
+  "applied_rs_epoch": 4294967295,
+  "body_hex": "0161ffffffffffffffffffffffff",
+  "codec": "rrs_state_epochs",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "gk_epoch": 4294967295,
+  "name": "epochs_max",
+  "note": "hints carry no range check; epochs compare circularly",
+  "site_epoch": 4294967295
+}

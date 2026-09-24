@@ -48,9 +48,9 @@ API上の段階は「受付」「台帳commit」「配布中（到達member数/�
 RRS1は自己認証objectなので、authority以外のmemberが運んでもよい。
 
 1. link確立（EDHOC EAD／RLRES1のR2）で双方の`rs_epoch`を交換する。
-2. 自分の方が小さいmemberは、相手から1hopのControlObject（kind案 6 = RevocationSet）で取得する。
-3. 受理したmemberは、自分のrs_epochが小さい近隣に次のidle refreshで知らせる（Control subtype案 `StateEpochs`：`ver|sub|site_epoch u32|rs_epoch u32|gk_epoch u32`＝14B、1hop）。
-4. 取得要求は近隣あたり1分に1回、同時1件。
+2. 自分の方が小さいmemberは、相手から1hopのControlObject（kind 6 = RevocationSet、P6-1で凍結）でRRS1 objectのbyte列そのものを取得する。manifestのhashは再構成の同一性だけで、権威はobject内のSAK署名である。
+3. 受理したmemberは、自分のrs_epochが小さい近隣に次のidle refreshで知らせる（Control subtype `StateEpochs`：`ver|sub 0x61|site_epoch u32|applied_rs u32|gk_epoch u32`＝14B、1hop。P6-1で凍結）。取得要求は`RrsRequest`（`ver|sub 0x62|site_epoch u32|have_rs u32`＝10B）。
+4. 取得要求は近隣あたり1分に1回、同時1件（交換全体も1+1：同bufferの二重追跡なし）。
 
 これによりauthorityから全memberへのfan-outが無くても、連結成分内ではhop数×(idle refresh間隔＋転送時間)で広がる。分断成分には届かない（§6）。
 
@@ -126,17 +126,17 @@ SAK侵害または計画交換では、Site CA（オフライン）が署名す�
 | 失効済みpeerからの遅いhandshake完了 | 最新のRRS1で再検査して昇格拒否 |
 | RemovalNoticeの検証失敗 | 何も消さない |
 
-## 11. 受入試験（planned_not_run）
+## 11. 受入試験
 
-| ID | 内容 |
-|---|---|
-| V1-R01 | revoke：台帳commit後にだけRRS1発行、API段階の順序 |
-| V1-R02 | 近隣がRRS1受理→即context破棄・再開slot消去・経路撤回 |
-| V1-R03 | gossip：authorityから遠いmemberへhop数に比例して伝播 |
-| V1-R04 | 旧世代MemberCertでのlink/E2E確立拒否、再割当（世代+1）後は受理 |
-| V1-R05 | 削除者はRemovalNoticeを検証して現場状態を消去、RLI1は保持 |
-| V1-R06 | 偽`REVOKED` hint・未署名通知・他現場SAK署名では何も消さない |
-| V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 |
-| V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） |
-| V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 |
-| V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz |
+| ID | 内容 | 状態 |
+|---|---|---|
+| V1-R01 | revoke：台帳commit後にだけRRS1発行、API段階の順序 | P6-1 PR Aでhost試験（`site::tests::revocation_*`、`operations_get_round_trips_*`）。P4/P5実配線は未接続のためfake port |
+| V1-R02 | 近隣がRRS1受理→即context破棄・再開slot消去・経路撤回 | P6-1 PR Aで機器sim試験（`test_sdkv1_revocation.cpp`）。実P4 adapterは未接続のためfake port |
+| V1-R03 | gossip：authorityから遠いmemberへhop数に比例して伝播 | P6-1 PR Aで3-node line・100-node line・partition/merge sim試験（同上）。損失・重複・reorder・silent peer・32枠圧力の系統的fault注入は残課題 |
+| V1-R04 | 旧世代MemberCertでのlink/E2E確立拒否、再割当（世代+1）後は受理 | P6-1 PR Aでfloor/last-good・限定再認証の単体試験（同上＋`test_discovery.cpp`）。実EDHOC E2EはP4接続後 |
+| V1-R05 | 削除者はRemovalNoticeを検証して現場状態を消去、RLI1は保持 | planned_not_run（P6-1 PR B） |
+| V1-R06 | 偽`REVOKED` hint・未署名通知・他現場SAK署名では何も消さない | planned_not_run（P6-1 PR B） |
+| V1-R07 | 紛失機器の復帰：ゼロタッチ経路でRemoved判定→消去→発見済み表示 | planned_not_run（P6-1 PR B） |
+| V1-R08 | RRS1満杯→cutover：GrantRenew取り逃しmemberの自動再参加（KGuardの人手確認なし） | planned_not_run（P6-2） |
+| V1-R09 | 分断群：再結合までは通信継続（保証外の記録）、再結合後に拒否 | P6-1 PR Aでpartition/merge sim試験（`test_sdkv1_revocation.cpp`）。HILはP8へ引継ぎ |
+| V1-R10 | RRS1・RemovalNoticeのC++/Rust共通vector、fuzz | RRS部分のみP6-1 PR Aで実施（`protocol/sdkv1-golden/revocation/`、C++/Rust両harness＋CI再生成検査）。Notice/RLX1/Renewは後続PR |

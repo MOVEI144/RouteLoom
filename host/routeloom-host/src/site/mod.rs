@@ -31,9 +31,8 @@
 //!
 //! Removal (04 §3): `revoke` commits the ledger entry, the new RRS1 (SAK
 //! signed, full replacement, rs_epoch+1) and a fresh staged next group key
-//! in one transaction, then distributes it (G-SEC P5). RRS1 distribution
-//! (RevocationNotify, gossip — plan P6) is not implemented: operations
-//! report `distribution: "not_implemented"` for the revocation set.
+//! in one transaction, then distributes RRS1 to a snapshot of surviving
+//! members. The GK and RRS1 transports are wired separately.
 //!
 //! Group key boundary (G-SEC P5, design §6): the authority owns the GK
 //! lifecycle — the active key (created at first start), 24 h periodic and
@@ -53,10 +52,11 @@ pub mod authority_channel;
 pub mod config;
 pub mod group_keys;
 pub mod records;
+pub mod revocation;
 pub mod store;
 pub mod transport;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use routeloom_edhoc::{
@@ -557,6 +557,16 @@ pub struct SiteAuthority {
     pub counters: Counters,
     events: Vec<(u64, String)>,
     outbox: Vec<Outbound>,
+    // P6-1 RRS1 distribution (site/revocation.rs): the transport port is
+    // None until the P5 authority channel lands; the history/digests back
+    // ACK validation and coalescing for the remembered operations.
+    rrs_transport: Option<Box<dyn revocation::RevocationTransport + Send>>,
+    rrs_outbox: VecDeque<revocation::OutboundRrs>,
+    rrs_next_dispatch_ms: u64,
+    rrs_transport_backoff: u32,
+    rrs_history: BTreeMap<u32, Vec<RevocationEntry>>,
+    rrs_history_digests: BTreeMap<u32, [u8; 32]>,
+    rrs_latest_object: Vec<u8>,
 }
 
 impl SiteAuthority {
@@ -823,6 +833,7 @@ impl SiteAuthority {
                                         created_ms: staged_created,
                                         gk_cause: RotationCause::Removal.name().into(),
                                         gk_end: String::new(),
+                                        distribution: None,
                                     };
                                     init.docs.push((
                                         DocKind::Operation,
@@ -871,6 +882,18 @@ impl SiteAuthority {
             rotation: rotation_row,
             targets: target_rows,
         });
+        let (mut rrs_history, mut rrs_history_digests, rrs_latest_object) =
+            revocation::decode_rrs_history(&snapshot, &sak.pubkey(), id.site_id, id.network)?;
+        {
+            let floor = operations
+                .values()
+                .filter_map(|op| op.distribution.as_ref().map(|d| d.rs_epoch))
+                .min()
+                .unwrap_or(rs_epoch);
+            rrs_history.retain(|epoch, _| *epoch >= floor);
+            rrs_history_digests.retain(|epoch, _| *epoch >= floor);
+        }
+
         if !init.is_empty() {
             store.commit(&init).map_err(|e| e.to_string())?;
         }
@@ -897,6 +920,13 @@ impl SiteAuthority {
             counters: Counters::default(),
             events: Vec::new(),
             outbox: Vec::new(),
+            rrs_transport: None,
+            rrs_outbox: VecDeque::new(),
+            rrs_next_dispatch_ms: 0,
+            rrs_transport_backoff: 0,
+            rrs_history,
+            rrs_history_digests,
+            rrs_latest_object,
             id,
             sak,
             store,
@@ -1650,6 +1680,7 @@ impl SiteAuthority {
                 }
             }
         }
+        self.tick_distribution(now_ms);
     }
 
     // --- KGuard decisions --------------------------------------------------------------------
@@ -1738,35 +1769,51 @@ impl SiteAuthority {
         );
     }
 
-    /// The oldest evictable operation: the live rotation's operation is
-    /// never pushed out (§6.1).
+    /// Retain every operation whose distribution or rotation still needs
+    /// evidence; the in-flight rotation is never evicted.
     fn evictable_op(&self) -> Option<u64> {
         let live = self.gks.rotation().map(|r| r.row.operation_id);
-        self.operations
-            .keys()
-            .find(|id| Some(**id) != live)
-            .copied()
+        self.operations.iter().find_map(|(&id, op)| {
+            if Some(id) == live {
+                return None;
+            }
+            let terminal = match op.kind.as_str() {
+                "revoke" => op.distribution.as_ref().is_some_and(|dist| {
+                    dist.state == revocation::DistState::Converged
+                        && (op.gk_end == "superseded" || self.gks.active_epoch() >= op.gk_to)
+                }),
+                "rotate" => !op.gk_end.is_empty(),
+                _ => self.devices.get(&op.node).is_some_and(|row| {
+                    row.generation != op.generation || !row.member || row.confirmed
+                }),
+            };
+            terminal.then_some(id)
+        })
     }
 
-    fn operation_doc(&mut self, batch: &mut Batch, op: &Operation) {
+    fn operation_doc(&self, batch: &mut Batch, op: &Operation) -> Result<Option<u64>, SiteError> {
+        let evicted = if self.operations.len() >= OPERATIONS_CAP {
+            Some(self.evictable_op().ok_or_else(|| {
+                SiteError::new("NO_CAPACITY", "all operation slots have unfinished work")
+            })?)
+        } else {
+            None
+        };
         batch
             .docs
             .push((DocKind::Operation, h16(op.id), Some(op.doc())));
-        if self.operations.len() >= OPERATIONS_CAP {
-            if let Some(oldest) = self.evictable_op() {
-                batch.docs.push((DocKind::Operation, h16(oldest), None));
-            }
+        if let Some(id) = evicted {
+            batch.docs.push((DocKind::Operation, h16(id), None));
         }
         batch
             .meta
             .push(("next_op_id", (op.id + 1).to_be_bytes().to_vec()));
+        Ok(evicted)
     }
 
-    fn remember_operation(&mut self, op: Operation) {
-        if self.operations.len() >= OPERATIONS_CAP {
-            if let Some(oldest) = self.evictable_op() {
-                self.operations.remove(&oldest);
-            }
+    fn remember_operation(&mut self, op: Operation, evicted: Option<u64>) {
+        if let Some(id) = evicted {
+            self.operations.remove(&id);
         }
         self.next_op_id = op.id + 1;
         self.operations.insert(op.id, op);
@@ -1884,7 +1931,15 @@ impl SiteAuthority {
         };
         let mut batch = Batch::default();
         let result;
-        let mut approved: Option<(DeviceRow, LedgerRow, Operation, Option<TargetRow>)> = None;
+        type Approved = (
+            DeviceRow,
+            LedgerRow,
+            Operation,
+            Option<TargetRow>,
+            Option<u64>,
+        );
+        let mut approved: Option<Approved> = None;
+
         match request.verdict {
             Verdict::Allow { role } => {
                 // The flag stored with the request is stale information:
@@ -2005,6 +2060,15 @@ impl SiteAuthority {
                     created_ms: now_ms,
                     gk_cause: String::new(),
                     gk_end: String::new(),
+                    // Approvals issue no new RRS1: vacuously converged.
+                    distribution: Some(revocation::OperationDistribution {
+                        state: revocation::DistState::Converged,
+                        rs_epoch: self.rs_epoch,
+                        network: self.id.network,
+                        object_sha256: sha256(&self.rrs_latest_object),
+                        targets: Vec::new(),
+                        overflow: 0,
+                    }),
                 };
                 result = format!(
                     "{{\"state\":\"committed\",\"join_request_id\":\"{}\",\"device_id\":\"{}\",\"verdict\":\"allow\",\"role\":\"{}\",\"generation\":{generation},\"member_cert_serial\":{serial},\"operation_id\":\"{}\",\"applied\":\"{applied}\"}}",
@@ -2031,8 +2095,8 @@ impl SiteAuthority {
                 if let Some(target) = joined_target.as_ref() {
                     batch.gk_targets.push(target.clone());
                 }
-                self.operation_doc(&mut batch, &op);
-                approved = Some((row, ledger, op, joined_target));
+                let evicted = self.operation_doc(&mut batch, &op)?;
+                approved = Some((row, ledger, op, joined_target, evicted));
             }
             _ => {
                 result = format!(
@@ -2056,7 +2120,7 @@ impl SiteAuthority {
             return Err(store_failure(&error));
         }
         // Committed: now the RAM model follows.
-        if let Some((row, ledger, op, joined_target)) = approved {
+        if let Some((row, ledger, op, joined_target, evicted)) = approved {
             self.ledger_seq = ledger.seq;
             self.ledger_head = ledger.hash;
             self.next_serial = row.member_cert_serial.saturating_add(1);
@@ -2065,7 +2129,7 @@ impl SiteAuthority {
             if let Some(target) = joined_target {
                 self.gks.add_target(target);
             }
-            self.remember_operation(op);
+            self.remember_operation(op, evicted);
         }
         self.remember_decision(principal, &request.key, digest, &result, now_ms);
         self.requests.insert(open.id, updated);
@@ -2132,6 +2196,7 @@ impl SiteAuthority {
         entries.push(RevocationEntry {
             node_id: row.node,
             min_generation,
+
             reason: request.reason,
         });
         entries.sort_by_key(|e| e.node_id);
@@ -2149,6 +2214,7 @@ impl SiteAuthority {
             .revision
             .checked_add(1)
             .ok_or_else(|| SiteError::new("AUTHORITY_ERROR", "membership revision exhausted"))?;
+
         let set = RevocationSet {
             site_id: self.id.site_id,
             network: self.id.network,
@@ -2194,6 +2260,7 @@ impl SiteAuthority {
             sha256(&object),
             now_ms,
         );
+        let distribution = self.snapshot_targets(row.node, rs_epoch, sha256(&object));
         let op = Operation {
             id: plan.op_id,
             kind: "revoke".into(),
@@ -2206,9 +2273,11 @@ impl SiteAuthority {
             created_ms: now_ms,
             gk_cause: RotationCause::Removal.name().into(),
             gk_end: String::new(),
+            distribution: Some(distribution),
         };
         let result = format!(
-            "{{\"operation_id\":\"{}\",\"state\":\"committed\",\"device_id\":\"{}\",\"generation\":{},\"rs_epoch\":{rs_epoch},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"committed\"}},\"distribution\":\"not_implemented\"}}",
+            "{{\"operation_id\":\"{}\",\"state\":\"committed\",\"device_id\":\"{}\",\"generation\":{},\"rs_epoch\":{rs_epoch},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"staged\"}},\"distribution\":\"pending\"}}",
+
             op_token(op.id),
             h16(row.node),
             row.generation,
@@ -2221,14 +2290,23 @@ impl SiteAuthority {
         let mut batch = Batch {
             devices: vec![removed.clone()],
             ledger: vec![ledger.clone()],
-            rrs: vec![(rs_epoch, object)],
+            rrs: vec![(rs_epoch, object.clone())],
             meta: vec![
                 ("rs_epoch", rs_epoch.to_be_bytes().to_vec()),
                 ("revision", next_revision.to_be_bytes().to_vec()),
             ],
             ..Batch::default()
         };
-        self.fill_staging_batch(&mut batch, &plan, &op);
+        let evicted = self.fill_staging_batch(&mut batch, &plan, &op)?;
+        // The removed device owes older operations no ACK anymore: fold
+        // the retirements into the same commit.
+        let retired = self.retired_operations(row.node);
+        for rop in &retired {
+            batch
+                .docs
+                .push((DocKind::Operation, h16(rop.id), Some(rop.doc())));
+        }
+
         self.decision_doc(&mut batch, principal, &request.key, digest, &result, now_ms);
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
@@ -2240,8 +2318,16 @@ impl SiteAuthority {
         self.revision = next_revision;
         self.rs_epoch = rs_epoch;
         self.rrs_entries = entries.clone();
+        self.rrs_history.insert(rs_epoch, entries.clone());
+        self.rrs_history_digests.insert(rs_epoch, sha256(&object));
+        self.rrs_latest_object = object;
         self.devices.insert(removed.node, removed);
-        self.publish_staging_plan(plan, op.clone());
+        self.publish_staging_plan(plan, op.clone(), evicted);
+        for rop in retired {
+            self.operations.insert(rop.id, rop);
+        }
+        self.prune_rrs_history();
+
         self.remember_decision(principal, &request.key, digest, &result, now_ms);
         self.event(
             now_ms,
@@ -2253,11 +2339,17 @@ impl SiteAuthority {
                 op_token(op.id)
             ),
         );
+        let (applied, retired_count, unknown, total) = op
+            .distribution
+            .as_ref()
+            .map(|d| d.counts())
+            .unwrap_or((0, 0, 0, 0));
         self.event(
             now_ms,
             format!(
-                "\"kind\":\"rrs.published\",\"rs_epoch\":{rs_epoch},\"entries\":{},\"distribution\":\"not_implemented\"",
-                entries.len()
+                "\"kind\":\"rrs.published\",\"rs_epoch\":{rs_epoch},\"entries\":{},\"operation_id\":\"{}\",\"distribution\":{{\"state\":\"pending\",\"applied\":{applied},\"retired\":{retired_count},\"unknown\":{unknown},\"total\":{total},\"reached\":{applied},\"members\":{total}}}",
+                entries.len(),
+                op_token(op.id)
             ),
         );
         self.emit_staged(
@@ -2345,7 +2437,12 @@ impl SiteAuthority {
     /// (secret rows never exceed active + staged), the high-water mark, the
     /// rotation row, the full target set, and the superseded mark on the
     /// replaced operation, if any.
-    fn fill_staging_batch(&mut self, batch: &mut Batch, plan: &StagedPlan, op: &Operation) {
+    fn fill_staging_batch(
+        &self,
+        batch: &mut Batch,
+        plan: &StagedPlan,
+        op: &Operation,
+    ) -> Result<Option<u64>, SiteError> {
         batch
             .meta
             .push((META_HIGH_WATER, plan.to_epoch.to_be_bytes().to_vec()));
@@ -2370,12 +2467,12 @@ impl SiteAuthority {
                     .push((DocKind::Operation, h16(prior.id), Some(prior.doc())));
             }
         }
-        self.operation_doc(batch, op);
+        self.operation_doc(batch, op)
     }
 
     /// Publishes a committed staging plan to RAM (only after the commit).
     /// The replaced staged key is wiped with its RAM wrapper's drop.
-    fn publish_staging_plan(&mut self, plan: StagedPlan, op: Operation) {
+    fn publish_staging_plan(&mut self, plan: StagedPlan, op: Operation, evicted: Option<u64>) {
         // A superseded command still in the handoff queue must not leave
         // after the new rotation (or removal) has committed.
         self.gk_outbox.clear();
@@ -2385,7 +2482,7 @@ impl SiteAuthority {
             }
         }
         self.gks.publish_staging(plan);
-        self.remember_operation(op);
+        self.remember_operation(op, evicted);
     }
 
     fn emit_staged(
@@ -2468,6 +2565,7 @@ impl SiteAuthority {
             created_ms: time.unix_ms,
             gk_cause: RotationCause::Manual.name().into(),
             gk_end: String::new(),
+            distribution: None,
         };
         let result = format!(
             "{{\"operation_id\":\"{}\",\"state\":\"committed\",\"from\":{},\"to\":{},\"cause\":\"manual\",\"targets\":{}}}",
@@ -2477,7 +2575,7 @@ impl SiteAuthority {
             plan.targets.len()
         );
         let mut batch = Batch::default();
-        self.fill_staging_batch(&mut batch, &plan, &op);
+        let evicted = self.fill_staging_batch(&mut batch, &plan, &op)?;
         self.decision_doc(
             &mut batch,
             principal,
@@ -2491,7 +2589,7 @@ impl SiteAuthority {
             return Err(store_failure(&error));
         }
         let superseded = plan.superseded_op;
-        self.publish_staging_plan(plan, op.clone());
+        self.publish_staging_plan(plan, op.clone(), evicted);
         self.remember_decision(principal, &request.key, digest, &result, time.unix_ms);
         self.emit_staged(
             RotationCause::Manual,
@@ -2828,15 +2926,28 @@ impl SiteAuthority {
             created_ms: time.unix_ms,
             gk_cause: RotationCause::Periodic.name().into(),
             gk_end: String::new(),
+            distribution: None,
         };
         let mut batch = Batch::default();
-        self.fill_staging_batch(&mut batch, &plan, &op);
+        let evicted = match self.fill_staging_batch(&mut batch, &plan, &op) {
+            Ok(evicted) => evicted,
+            Err(error) => {
+                self.event(
+                    time.unix_ms,
+                    format!(
+                        "\"kind\":\"authority.error\",\"reason\":\"gk_periodic\",\"detail\":\"{}\"",
+                        routeloom_json::escape_string(&error.message)
+                    ),
+                );
+                return;
+            }
+        };
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(time.unix_ms, &error);
             return;
         }
         let superseded = plan.superseded_op;
-        self.publish_staging_plan(plan, op.clone());
+        self.publish_staging_plan(plan, op.clone(), evicted);
         self.emit_staged(
             RotationCause::Periodic,
             op.gk_from,
@@ -3545,28 +3656,35 @@ impl SiteAuthority {
 
     pub fn operation_json(&self, id: u64) -> Option<String> {
         let op = self.operations.get(&id)?;
-        let members = self.devices.values().filter(|d| d.member).count();
         Some(match op.kind.as_str() {
-            // The revoke as a whole stays committed until P6 distributes
-            // the RRS1; only its GK half converges here (§6.3).
-            "revoke" => format!(
-                "{{\"operation_id\":\"{}\",\"kind\":\"revoke\",\"device_id\":\"{}\",\"generation\":{},\"state\":\"committed\",\"rs_epoch\":{},\"distribution\":{{\"state\":\"not_implemented\",\"reached\":null,\"members\":{members},\"unknown\":{members}}},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"{}\"}},\"created_ms\":{}}}",
-                op_token(op.id),
-                h16(op.node),
-                op.generation,
-                op.rs_epoch,
-                op.gk_from,
-                op.gk_to,
-                self.gk_op_state(op),
-                op.created_ms
-            ),
+            "revoke" => {
+                // Committed first, then distributing once sends start, then
+                // converged when the snapshot has no unknown left (V1-R01).
+                // `converged` is RRS-enforcement snapshot convergence only;
+                // target erase and GK rotation are separate stages.
+                let state = match op.distribution.as_ref().map(|d| d.state) {
+                    Some(revocation::DistState::Distributing) => "distributing",
+                    Some(revocation::DistState::Converged) => "converged",
+                    Some(revocation::DistState::Pending)
+                    | Some(revocation::DistState::Unknown)
+                    | None => "committed",
+                };
+                format!(
+                    "{{\"operation_id\":\"{}\",\"kind\":\"revoke\",\"device_id\":\"{}\",\"generation\":{},\"state\":\"{state}\",\"rs_epoch\":{},\"distribution\":{},\"gk_rotation\":{{\"from\":{},\"to\":{},\"state\":\"{}\"}},\"created_ms\":{}}}",
+                    op_token(op.id),
+                    h16(op.node),
+                    op.generation,
+                    op.rs_epoch,
+                    revocation::distribution_view(op.distribution.as_ref()),
+                    op.gk_from,
+                    op.gk_to,
+                    self.gk_op_state(op),
+                    op.created_ms
+                )
+            }
             "rotate" => {
                 let state = self.gk_op_state(op);
-                let targets = match self
-                    .gks
-                    .rotation()
-                    .filter(|r| r.row.operation_id == op.id)
-                {
+                let targets = match self.gks.rotation().filter(|r| r.row.operation_id == op.id) {
                     Some(_) => {
                         let (total, staged, active, unknown) = self.gks.counts();
                         format!(
@@ -3586,13 +3704,20 @@ impl SiteAuthority {
                         format!("\"{}\"", op.gk_cause)
                     },
                     op.created_ms,
+
                 )
             }
             _ => {
                 let row = self.devices.get(&op.node);
                 let state = match row {
-                    Some(r) if r.member && r.generation == op.generation && r.confirmed => "confirmed",
-                    Some(r) if r.member && r.generation == op.generation && r.delivered_ms.is_some() => {
+                    Some(r) if r.member && r.generation == op.generation && r.confirmed => {
+                        "confirmed"
+                    }
+                    Some(r)
+                        if r.member
+                            && r.generation == op.generation
+                            && r.delivered_ms.is_some() =>
+                    {
                         "delivered"
                     }
                     Some(r) if r.generation == op.generation && !r.member => "revoked",

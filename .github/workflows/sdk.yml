@@ -106,6 +106,7 @@ jobs:
           python3 tools/gen_sdkv1_ead_vectors.py
           python3 tools/gen_sdkv1_dams_vectors.py
           python3 tools/gen_sdkv1_join_transport_vectors.py
+          python3 tools/gen_sdkv1_revocation_vectors.py
           git diff --exit-code -- protocol/golden protocol/usb-golden protocol/autonomy-golden protocol/provisioning-golden protocol/sdkv1-golden tests/fuzz/corpus/sdkv1_ead tests/fuzz/corpus/sdkv1_join
           # git diff ignores untracked files: a generator that starts
           # emitting an unreviewed vector must fail too.
@@ -392,7 +393,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug
+          cmake -S . -B build -DROUTELOOM_BUILD_TESTS=ON -DROUTELOOM_ENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
           cmake --build build --parallel 2 --target routeloom_joiner_interop_peer
           test -x build/tests/cpp/routeloom_joiner_interop_peer
       - name: Rust toolchain
@@ -403,6 +404,7 @@ jobs:
         working-directory: host
         env:
           ROUTELOOM_JOINER_PEER: ${{ github.workspace }}/build/tests/cpp/routeloom_joiner_interop_peer
+          UBSAN_OPTIONS: halt_on_error=1
         run: cargo test -p routeloom-host --bins site::joiner_interop
   fuzz:
     runs-on: ubuntu-latest

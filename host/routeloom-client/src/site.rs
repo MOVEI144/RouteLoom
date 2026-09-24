@@ -238,6 +238,38 @@ pub struct RotateOutcome {
     pub targets: u32,
 }
 
+/// RRS1 distribution progress of a revoke operation (P6-1):
+/// `pending` (committed, nothing sent), `distributing`, `converged`, or
+/// `unknown` (pre-P6-1 operation, or a target without an Applied ACK).
+/// Nothing counts as applied/retired without evidence.
+///
+/// `converged` means the RRS-enforcement snapshot has no `unknown`
+/// recipient left. It is neither the target's erase confirmation nor
+/// GK-rotation completion — display it as RRS convergence only, and
+/// never collapse `unknown > 0` (or a missing view) into success.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DistributionProgress {
+    pub state: String,
+    pub applied: u64,
+    pub retired: u64,
+    pub unknown: u64,
+    pub total: u64,
+}
+
+/// A revoke operation with its distribution progress.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperationProgress {
+    pub operation_id: String,
+    pub kind: String,
+    /// `committed`, `distributing`, or `converged` (V1-R01). `converged`
+    /// is RRS snapshot convergence only — not target erase, not GK done.
+    pub state: String,
+    pub device: NodeId,
+    pub generation: u32,
+    pub rs_epoch: u32,
+    pub distribution: DistributionProgress,
+}
+
 /// One Site Authority event (the raw JSON is kept for fields this type
 /// does not model).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -286,6 +318,10 @@ pub trait SiteAdmin: Send + Sync {
         expected_active_epoch: u32,
         idempotency_key: &str,
     ) -> Result<RotateOutcome, TransportError>;
+    /// Reads back a revoke operation with its RRS1 distribution progress
+    /// (`operations.get`). `None` when the id is unknown.
+    fn operation(&self, operation_id: &str) -> Result<Option<OperationProgress>, TransportError>;
+
     fn site_events(&self) -> Result<SiteEventStream, TransportError>;
 }
 

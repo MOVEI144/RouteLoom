@@ -965,6 +965,32 @@ void test_capabilities_exchange() {
   CHECK(!a->peer_busy_capable(2, world.now));
 }
 
+// P6 PR-A (04 §4): feature bits 5 (RrsGossipV1) and 6
+// (MembershipLifecycleV1) round-trip; bit 7+ stays refused. Raw bits — no
+// reliance on the new constants.
+void test_capabilities_p6_feature_bits() {
+  CapabilitiesReply reply{};
+  reply.echo_nonce.fill(0x3C);
+  reply.node_boot = 0xB007;
+  reply.features = (1u << 5) | (1u << 6);
+  reply.valid_for_ms = kCapabilitiesValidityMs;
+  std::array<std::uint8_t, kCapabilitiesReplyBodySize> raw{};
+  CHECK_OK(capabilities_reply_encode(
+      reply, MutableByteView{raw.data(), raw.size()}));
+  CapabilitiesReply back{};
+  CHECK_OK(capabilities_reply_decode(ByteView{raw.data(), raw.size()}, back));
+  CHECK(back.features == ((1u << 5) | (1u << 6)));
+  // Bit 7 (and anything above) is still undefined and refused.
+  reply.features |= (1u << 7);
+  CHECK(!capabilities_reply_encode(
+      reply, MutableByteView{raw.data(), raw.size()}));
+  reply.features = (1u << 5) | (1u << 6);
+  CHECK_OK(capabilities_reply_encode(
+      reply, MutableByteView{raw.data(), raw.size()}));
+  raw[28] |= 0x80;  // features field, top bit
+  CHECK(!capabilities_reply_decode(ByteView{raw.data(), raw.size()}, back));
+}
+
 }  // namespace
 
 int main() {
@@ -989,6 +1015,7 @@ int main() {
   test_bucket_reclaim_expired();
   test_relay_off_route_withdrawal();
   test_capabilities_exchange();
+  test_capabilities_p6_feature_bits();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d telemetry checks failed\n", failures);

@@ -1,0 +1,17 @@
+{
+  "codec": "rrs_kind6_manifest",
+  "count": 2,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "kind": 6,
+  "manifest_hex": "01010600008796dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "name": "kind6_manifest_small",
+  "network": 13054454845,
+  "note": "manifest for the small object; content rides the chunks",
+  "object_hex": "d28443a10126a0583c010000025173000000000042000000030a1b2c3d000000100000000200a1000000000100000000020100000000a100000000077700000004020000005840f7d9f14acb515a28e644995f15606633bfb59f0ba0a09893cdb610ef3da3aef04c208a7afca4ec8ad17f9b45998bbde6fe80bcd0196391cdfda3be62a47e2d16",
+  "object_sha256_hex": "96dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "rs_epoch": 16,
+  "signer_pubkey_hex": "d797737d4081542dfe111a9a6cba6a52e91118f27a814f8e831e8f72d5165f9308da9652224eaf39f459098b545d520900d372da6e73cf33c4032a8264e7bae4",
+  "site_id": 5869034739393888322,
+  "total_len": 135
+}

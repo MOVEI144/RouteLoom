@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_notice_accepted",
+  "encoded_hex": "01020000000000102b272c11cbf9a3d64a89f95a44e1acb0d7814dd5642c0f7dd0ee157040e682d2",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "notice_bad_sub",
+  "note": "a get body is not evidence"
+}
