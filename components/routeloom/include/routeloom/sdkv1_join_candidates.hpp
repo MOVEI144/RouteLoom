@@ -179,11 +179,13 @@ enum class JoinObserve : std::uint8_t {
   Rejected,      // malformed key/proxy evidence or clock regression
 };
 
-// The winning record/proxy of select_and_begin, valid until the attempt ends:
-// the attempt pins its record against eviction meanwhile.
+// The winning record/proxy of select_and_begin. The proxy is a snapshot:
+// OFFER updates may reuse its table slot while the attempt is in flight.
+// The record pointer is pinned until bind_authenticated changes the proven
+// site or the attempt ends.
 struct JoinSelect {
   const JoinCandidate* candidate{nullptr};
-  const JoinCandidateProxy* proxy{nullptr};
+  JoinCandidateProxy proxy{};
 };
 
 struct JoinCandidatesStats {
@@ -274,8 +276,8 @@ class JoinCandidates {
                       std::uint32_t suppress_ms, MonotonicMs now_ms) noexcept;
 
   // --- scheduling ---
-  // Earliest future effective eligibility across the table (kJoinNoDeadline
-  // when nothing is pending or after a clock regression).
+  // Earliest future site hold or fresh usable proxy suppression expiry
+  // (kJoinNoDeadline when nothing is pending or after a clock regression).
   MonotonicMs next_eligible_ms(MonotonicMs now_ms) noexcept;
   // Deadline of the next scan when nothing is eligible: a jittered
   // saturated backoff in the cycle counter k, cut by the nearest pending

@@ -651,6 +651,7 @@ Status join_result_encode(const JoinResult& result, ByteBuffer<kJoinResultMax>& 
       if (status && result.assignment_ticket.size > 0) {
         status = writer.write_bytes(result.assignment_ticket);
       }
+      secure_clear(package.bytes.data(), package.bytes.size());
       break;
     }
     case JoinVerdict::PendingAssignment:

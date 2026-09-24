@@ -416,7 +416,7 @@ Status JoinCandidates::select_and_begin(const MonotonicMs now_ms, JoinAttempt& a
   attempt_.site_id = best_c->site_id_authenticated ? best_c->site_id : 0;
   attempt = attempt_;
   sel.candidate = best_c;
-  sel.proxy = best_p;
+  sel.proxy = *best_p;
   ++stats_.selections;
   return Status::success();
 }
@@ -486,12 +486,13 @@ Status JoinCandidates::bind_authenticated(const JoinAttempt& attempt,
     attempt_ = JoinAttempt{};
     return err(StatusCode::NoCapacity, "join split capacity");
   }
-  *target = *pinned;  // same observed evidence (incl. path memory) under one key
+  *target = *pinned;  // same observed proxy evidence under one key
   target->site_id = site_id;
   target->site_id_authenticated = true;
   target->policy = JoinCandidatePolicy::Untried;
   target->eligible_at_ms = 0;
   target->failures = 0;
+  for (auto& f : target->failed_proxies) f = MacAddress{};
   target->preferred = site_id == preferred_site_id_;
   attempt_.site_id = site_id;
   ++stats_.auth_splits;
@@ -596,7 +597,9 @@ void JoinCandidates::suppress_proxy(JoinCandidate& record, const MacAddress& pro
   if (!clock_ok(now_ms)) return;
   for (auto& p : record.proxies) {
     if (p.present && p.mac == proxy_mac) {
-      p.suppressed_until_ms = sat_add(now_ms, std::min<std::uint64_t>(suppress_ms, kJoinBackoffMaxMs));
+      const MonotonicMs until =
+          sat_add(now_ms, std::min<std::uint64_t>(suppress_ms, kJoinBackoffMaxMs));
+      if (until > p.suppressed_until_ms) p.suppressed_until_ms = until;
       ++stats_.proxy_suppressions;
     }
   }
@@ -611,6 +614,13 @@ MonotonicMs JoinCandidates::next_eligible_ms(const MonotonicMs now_ms) noexcept 
     if (!r.occupied) continue;
     const MonotonicMs eff = effective_eligible_at(r);
     if (eff > now_ms && eff < earliest) earliest = eff;
+    if (hold_active(eff, now_ms)) continue;
+    for (const auto& p : r.proxies) {
+      if (proxy_fresh(p, now_ms) && p.authority_reachable && !p.proxy_busy &&
+          p.suppressed_until_ms > now_ms && p.suppressed_until_ms < earliest) {
+        earliest = p.suppressed_until_ms;
+      }
+    }
   }
   return earliest;
 }

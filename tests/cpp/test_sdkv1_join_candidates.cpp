@@ -106,7 +106,7 @@ Begun begin(JoinCandidates& t, const MonotonicMs now) {
   const Status st = t.select_and_begin(now, b.attempt, b.sel);
   CHECK(st.ok());
   CHECK(b.attempt.active);
-  CHECK(b.sel.candidate != nullptr && b.sel.proxy != nullptr);
+  CHECK(b.sel.candidate != nullptr && b.sel.proxy.present);
   return b;
 }
 
@@ -164,11 +164,11 @@ void observe_insert_select() {
   CHECK(t.size() == 1);
   const JoinSelect s = peek(t, 1000);
   CHECK(s.candidate != nullptr && s.candidate->key == key(7, 42, 0xA5));
-  CHECK(s.proxy != nullptr && s.proxy->mac == mac(1));
+  CHECK(s.proxy.present && s.proxy.mac == mac(1));
   // Second OFFER refreshes evidence; policy untouched.
   CHECK(offer(t, 7, 42, 0xA5, 2, -40, 0, 2000) == JoinObserve::Updated);
   const JoinSelect s2 = peek(t, 2000);
-  CHECK(s2.proxy != nullptr && s2.proxy->mac == mac(2));  // hops 0 beats hops 1
+  CHECK(s2.proxy.present && s2.proxy.mac == mac(2));  // hops 0 beats hops 1
 }
 
 void offer_never_releases_policy() {
@@ -307,7 +307,7 @@ void freshness_and_flags() {
   CHECK(t2.observe(key(7, 1, 0xA5), obs(2, 0x1002, 1, -40, 1, true, false), 3000) ==
         JoinObserve::Updated);
   const JoinSelect s = peek(t2, 3000);
-  CHECK(s.proxy != nullptr && s.proxy->mac == mac(2));
+  CHECK(s.proxy.present && s.proxy.mac == mac(2));
 }
 
 void proxy_best_two() {
@@ -357,19 +357,19 @@ void suppress_and_fail() {
   JoinCandidate* r = record_of(t, k);
   t.suppress_proxy(*r, mac(1), 5000, 1000);  // mac1 held until 6000
   JoinSelect s = peek(t, 1000);
-  CHECK(s.proxy != nullptr && s.proxy->mac == mac(2));
+  CHECK(s.proxy.present && s.proxy.mac == mac(2));
   // Both suppressed -> site not eligible until the hold passes.
   t.suppress_proxy(*r, mac(2), 4000, 1000);  // mac2 held until 5000
   CHECK(peek(t, 1000).candidate == nullptr);
   CHECK(offer(t, 7, 42, 0xA5, 1, -50, 0, 5001) == JoinObserve::Updated);
   s = peek(t, 5001);
-  CHECK(s.candidate != nullptr && s.proxy->mac == mac(2));  // mac1 still held
+  CHECK(s.candidate != nullptr && s.proxy.mac == mac(2));  // mac1 still held
   s = peek(t, 6001);
-  CHECK(s.candidate != nullptr && s.proxy->mac == mac(1));  // 5 s hold over
+  CHECK(s.candidate != nullptr && s.proxy.mac == mac(1));  // 5 s hold over
   // Transient failure: policy Transient, backoff in [1000,1250], the
   // attempted proxy suppressed to the same instant.
   const Begun b1 = begin(t, 6100);
-  CHECK(b1.sel.proxy->mac == mac(1));
+  CHECK(b1.sel.proxy.mac == mac(1));
   CHECK(t.apply_outcome(b1.attempt, JoinAttemptOutcome::Failed, 0, 6100, entropy).ok());
   r = record_of(t, k);
   CHECK(r->policy == JoinCandidatePolicy::Transient);
@@ -380,7 +380,7 @@ void suppress_and_fail() {
   // The next attempt takes the untried alternate; its failure widens the
   // bound: base 2000 -> [2000,2500].
   const Begun b2 = begin(t, r->eligible_at_ms);
-  CHECK(b2.sel.proxy->mac == mac(2));
+  CHECK(b2.sel.proxy.mac == mac(2));
   const MonotonicMs was = r->eligible_at_ms;
   CHECK(t.apply_outcome(b2.attempt, JoinAttemptOutcome::Failed, 0, was, entropy).ok());
   CHECK(r->failures == 2);
@@ -1082,19 +1082,19 @@ void failed_proxy_yields_to_alternate() {
   CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1000) == JoinObserve::Inserted);
   CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1, true), 1000) == JoinObserve::Updated);
   const Begun b1 = begin(t, 1000);
-  CHECK(b1.sel.proxy != nullptr && b1.sel.proxy->mac == mac(1));
+  CHECK(b1.sel.proxy.present && b1.sel.proxy.mac == mac(1));
   CHECK(t.apply_outcome(b1.attempt, JoinAttemptOutcome::Failed, 0, 1000, entropy).ok());
   const JoinCandidate* r = record_of(t, k);
   const MonotonicMs d = r->eligible_at_ms;
   CHECK(r->proxies[0].suppressed_until_ms == d);  // both holds expire together
   const Begun b2 = begin(t, d);
-  CHECK(b2.sel.candidate != nullptr && b2.sel.proxy != nullptr &&
-        b2.sel.proxy->mac == mac(2));
+  CHECK(b2.sel.candidate != nullptr && b2.sel.proxy.present &&
+        b2.sel.proxy.mac == mac(2));
   // Failing the alternate too leaves no untried route: with no other site
   // the best failed path is retried.
   CHECK(t.apply_outcome(b2.attempt, JoinAttemptOutcome::Failed, 0, d, entropy).ok());
   const JoinSelect s = peek(t, r->eligible_at_ms);
-  CHECK(s.candidate != nullptr && s.proxy != nullptr && s.proxy->mac == mac(1));
+  CHECK(s.candidate != nullptr && s.proxy.present && s.proxy.mac == mac(1));
 }
 
 void failed_proxy_tracked_by_mac() {
@@ -1115,7 +1115,7 @@ void failed_proxy_tracked_by_mac() {
   // Re-observing the failed proxy refreshes evidence, not preference.
   CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1200) == JoinObserve::Updated);
   const JoinSelect s = peek(t, d);
-  CHECK(s.candidate != nullptr && s.proxy != nullptr && s.proxy->mac == mac(3));
+  CHECK(s.candidate != nullptr && s.proxy.present && s.proxy.mac == mac(3));
 }
 
 void select_and_begin_atomicity() {
@@ -1127,7 +1127,7 @@ void select_and_begin_atomicity() {
   CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 1, true), 1000) == JoinObserve::Inserted);
   CHECK(t.observe(k, obs(2, 0x1002, 1, -40, 0, true), 1000) == JoinObserve::Updated);
   const Begun b = begin(t, 1000);
-  CHECK(b.sel.proxy != nullptr && b.sel.proxy->mac == mac(2));  // hops 0 wins
+  CHECK(b.sel.proxy.present && b.sel.proxy.mac == mac(2));  // hops 0 wins
   CHECK(b.attempt.active && b.attempt.seq != 0);
   CHECK(b.attempt.key == k && b.attempt.proxy == mac(2) && b.attempt.site_id == 0);
   CHECK(b.sel.candidate->last_attempt_ms == 1000);
@@ -1143,7 +1143,7 @@ void select_and_begin_atomicity() {
   const MonotonicMs d = record_of(t, k)->eligible_at_ms;
   // Stale, empty and foreign handles are rejected; nothing moves.
   const Begun b2 = begin(t, d);
-  CHECK(b2.sel.proxy->mac == mac(1));  // mac2 failed: the alternate wins
+  CHECK(b2.sel.proxy.mac == mac(1));  // mac2 failed: the alternate wins
   JoinCandidate* rb = nullptr;
   CHECK(t.bind_authenticated(b.attempt, 0xAAAA, d, rb).code == StatusCode::InvalidState);
   CHECK(rb == nullptr);
@@ -1259,24 +1259,24 @@ void r4_all_failed_prefers_other_site() {
   CHECK(t.observe(ka, obs(2, 0x1002, 1, -50, 1, true), 1000) == JoinObserve::Updated);
   CHECK(t.observe(kb, obs(3, 0x1003, 1, -60, 2, true), 1000) == JoinObserve::Inserted);
   const Begun b0 = begin(t, 1000);
-  CHECK(b0.sel.candidate->key == ka && b0.sel.proxy->mac == mac(1));
+  CHECK(b0.sel.candidate->key == ka && b0.sel.proxy.mac == mac(1));
   JoinCandidate* ra = nullptr;
   CHECK(t.bind_authenticated(b0.attempt, 0xAAAA, 1000, ra).ok());
   cancel(t, b0.attempt, 1000);
   t.set_preferred(0xAAAA, 7, 42);
   CHECK(ra->preferred);
   const Begun b1 = begin(t, 1100);
-  CHECK(b1.sel.candidate->key == ka && b1.sel.proxy->mac == mac(1));
+  CHECK(b1.sel.candidate->key == ka && b1.sel.proxy.mac == mac(1));
   CHECK(t.apply_outcome(b1.attempt, JoinAttemptOutcome::Failed, 0, 1100, e).ok());
   const MonotonicMs d1 = ra->eligible_at_ms;
   // Preferred with an untried route still stays home for the second proxy.
   const Begun b2 = begin(t, d1);
-  CHECK(b2.sel.candidate->key == ka && b2.sel.proxy->mac == mac(2));
+  CHECK(b2.sel.candidate->key == ka && b2.sel.proxy.mac == mac(2));
   CHECK(t.apply_outcome(b2.attempt, JoinAttemptOutcome::Failed, 0, d1, e).ok());
   const MonotonicMs d2 = ra->eligible_at_ms;
   // Every route of A failed: the eligible B wins despite A preferred.
   const Begun b3 = begin(t, d2);
-  CHECK(b3.sel.candidate->key == kb && b3.sel.proxy->mac == mac(3));
+  CHECK(b3.sel.candidate->key == kb && b3.sel.proxy.mac == mac(3));
   cancel(t, b3.attempt, d2);
 }
 
@@ -1290,7 +1290,7 @@ void r4_failure_records_attempt_mac() {
   CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1000) == JoinObserve::Inserted);
   CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1, true), 1000) == JoinObserve::Updated);
   const Begun b = begin(t, 1000);
-  CHECK(b.sel.proxy->mac == mac(1));
+  CHECK(b.sel.proxy.mac == mac(1));
   CHECK(b.attempt.proxy == mac(1));
   CHECK(t.observe(k, obs(3, 0x1003, 1, -40, 0, true), 1100) == JoinObserve::Updated);
   const JoinCandidate* r = record_of(t, k);
@@ -1304,7 +1304,7 @@ void r4_failure_records_attempt_mac() {
     if (p.mac == mac(3)) CHECK(p.suppressed_until_ms == 0);
   }
   const Begun b2 = begin(t, r->eligible_at_ms);
-  CHECK(b2.sel.proxy->mac == mac(3));  // the untried alternate, not mac1 again
+  CHECK(b2.sel.proxy.mac == mac(3));  // the untried alternate, not mac1 again
   cancel(t, b2.attempt, r->eligible_at_ms);
 }
 
@@ -1318,7 +1318,7 @@ void r4_no_stale_mark_double_begin_rejected() {
   CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), 1000) == JoinObserve::Inserted);
   CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1, true), 1000) == JoinObserve::Updated);
   const Begun b1 = begin(t, 1000);
-  CHECK(b1.sel.proxy->mac == mac(1));
+  CHECK(b1.sel.proxy.mac == mac(1));
   JoinAttempt dup{};
   JoinSelect dsel{};
   CHECK(t.select_and_begin(1001, dup, dsel).code == StatusCode::InvalidState);
@@ -1330,7 +1330,7 @@ void r4_no_stale_mark_double_begin_rejected() {
   CHECK(t.apply_outcome(b1.attempt, JoinAttemptOutcome::Failed, 0, 1003, e).ok());
   const JoinCandidate* r = record_of(t, k);
   const Begun b2 = begin(t, r->eligible_at_ms);
-  CHECK(b2.sel.proxy->mac == mac(3));  // mac1 failed: best untried wins
+  CHECK(b2.sel.proxy.mac == mac(3));  // mac1 failed: best untried wins
   JoinCandidate* rb = nullptr;
   CHECK(t.bind_authenticated(b1.attempt, 0xAAAA, r->eligible_at_ms, rb).code ==
         StatusCode::InvalidState);
@@ -1356,7 +1356,7 @@ void r4_removed_no_membership_clears_streak() {
   CHECK(r->failures == 1);
   CHECK(failed_has(*r, mac(1)));
   const Begun b2 = begin(t, r->eligible_at_ms);
-  CHECK(b2.sel.proxy->mac == mac(2));
+  CHECK(b2.sel.proxy.mac == mac(2));
   const MonotonicMs at = r->eligible_at_ms;
   CHECK(t.apply_outcome(b2.attempt, JoinAttemptOutcome::RemovedNoMembership, 0, at, e).ok());
   CHECK(r->eligible_at_ms - at == kJoinSuppressNoMemberMs);  // the hold stays
@@ -1367,10 +1367,66 @@ void r4_removed_no_membership_clears_streak() {
   CHECK(t.observe(k, obs(1, 0x1001, 1, -50, 0, true), d2) == JoinObserve::Updated);
   CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1, true), d2) == JoinObserve::Updated);
   const Begun b3 = begin(t, d2);
-  CHECK(b3.sel.proxy->mac == mac(1));  // best route again, not the alternate
+  CHECK(b3.sel.proxy.mac == mac(1));  // best route again, not the alternate
   CHECK(t.apply_outcome(b3.attempt, JoinAttemptOutcome::Failed, 0, d2, e).ok());
   const std::uint64_t delay = r->eligible_at_ms - d2;
   CHECK(delay >= 1000 && delay <= 1250);  // k=0 base, not the k=1 doubling
+}
+
+void selected_proxy_snapshot_survives_offer_churn() {
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -40, 0), 1000) == JoinObserve::Inserted);
+  CHECK(t.observe(k, obs(2, 0x1002, 6, -50, 1), 1000) == JoinObserve::Updated);
+  const Begun b = begin(t, 1000);
+  CHECK(b.sel.proxy.present && b.sel.proxy.mac == mac(1));
+  CHECK(b.sel.proxy.channel == 1);
+  CHECK(t.observe(k, obs(1, 0x1001, 11, -80, 3), 1001) == JoinObserve::Updated);
+  CHECK(t.observe(k, obs(3, 0x1003, 6, -30, 0), 1002) == JoinObserve::Updated);
+  CHECK(b.attempt.proxy == mac(1));
+  CHECK(b.sel.proxy.present && b.sel.proxy.mac == mac(1));
+  CHECK(b.sel.proxy.channel == 1);
+  cancel(t, b.attempt, 1002);
+}
+
+void split_starts_with_site_local_path_memory() {
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -40, 0), 1000) == JoinObserve::Inserted);
+  CHECK(t.observe(k, obs(2, 0x1002, 1, -50, 1), 1000) == JoinObserve::Updated);
+  const Begun first = begin(t, 1000);
+  JoinCandidate* a = nullptr;
+  CHECK(t.bind_authenticated(first.attempt, 0xAAAA, 1000, a).ok());
+  CHECK(t.apply_outcome(first.attempt, JoinAttemptOutcome::Failed, 0, 1000, entropy).ok());
+  CHECK(a != nullptr && failed_has(*a, mac(1)));
+  if (a == nullptr) return;
+  const Begun second = begin(t, a->eligible_at_ms);
+  CHECK(second.sel.proxy.present && second.sel.proxy.mac == mac(2));
+  JoinCandidate* c = nullptr;
+  CHECK(t.bind_authenticated(second.attempt, 0xCCCC, a->eligible_at_ms, c).ok());
+  CHECK(c != nullptr && c != a);
+  if (c != nullptr) {
+    CHECK(!failed_has(*c, mac(1)));
+    CHECK(!failed_has(*c, mac(2)));
+  }
+  cancel(t, second.attempt, a->eligible_at_ms);
+}
+
+void proxy_suppression_deadline_drives_scan() {
+  JoinCandidates t;
+  const JoinCandidateKey k = key(7, 42, 0xA5);
+  CHECK(t.observe(k, obs(1, 0x1001, 1, -40, 0), 1000) == JoinObserve::Inserted);
+  JoinCandidate* r = t.find(k);
+  CHECK(r != nullptr);
+  if (r == nullptr) return;
+  t.suppress_proxy(*r, mac(1), 5000, 1000);
+  t.suppress_proxy(*r, mac(1), 10, 2000);
+  CHECK(r->proxies[0].suppressed_until_ms == 6000);
+  for (int i = 0; i < 12; ++i) t.note_scan_cycle_failed();
+  CHECK(t.next_eligible_ms(2000) == 6000);
+  MonotonicMs deadline = 0;
+  CHECK(t.next_scan_deadline(2000, entropy, deadline).ok());
+  CHECK(deadline == 6000);
 }
 
 }  // namespace
@@ -1416,6 +1472,9 @@ int main() {
       {"r4_failure_records_attempt_mac", r4_failure_records_attempt_mac},
       {"r4_no_stale_mark_double_begin_rejected", r4_no_stale_mark_double_begin_rejected},
       {"r4_removed_no_membership_clears_streak", r4_removed_no_membership_clears_streak},
+      {"selected_proxy_snapshot_survives_offer_churn", selected_proxy_snapshot_survives_offer_churn},
+      {"split_starts_with_site_local_path_memory", split_starts_with_site_local_path_memory},
+      {"proxy_suppression_deadline_drives_scan", proxy_suppression_deadline_drives_scan},
   };
   for (const auto& c : cases) {
     current = c.name;
