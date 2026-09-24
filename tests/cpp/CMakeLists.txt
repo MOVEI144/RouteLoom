@@ -340,6 +340,13 @@ target_compile_definitions(routeloom_sdkv1_join_handshake_tests PRIVATE
     ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
 add_test(NAME routeloom_sdkv1_join_handshake_tests COMMAND routeloom_sdkv1_join_handshake_tests)
 
+add_executable(routeloom_sdkv1_join_candidates_tests test_sdkv1_join_candidates.cpp)
+target_link_libraries(routeloom_sdkv1_join_candidates_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_join_candidates_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_options(routeloom_sdkv1_join_candidates_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_join_candidates_tests COMMAND routeloom_sdkv1_join_candidates_tests)
+
 add_executable(routeloom_sdkv1_records_tests test_sdkv1_records.cpp)
 target_link_libraries(routeloom_sdkv1_records_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_records_tests PRIVATE

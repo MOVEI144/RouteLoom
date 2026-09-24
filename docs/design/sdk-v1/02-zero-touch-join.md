@@ -316,9 +316,9 @@ m3を検証できた未割当機器は、verdictに関係なくhostの**発見�
 | ZT_DECIDED | Authenticating | m4受信 | verdict処理（§6.1） | Allow→ZT_COMMIT、他→候補表更新→ZT_SELECT/ZT_BACKOFF |
 | ZT_COMMIT | AuthorizedPendingCommit | Allow | §10.2の検証→RLS1 commit（seal/readback） | 成功→MEMBER_BRINGUP、失敗→RAM破棄しZT_BACKOFF |
 | MEMBER_BRINGUP | Member | RLS1 commit済み | Member scopeで近隣とlink（[06](06-fast-rejoin.md)）、JoinConfirm | 通常運転 |
-| ZT_BACKOFF | Discovering | 失敗・全現場不適格 | 乱数backoff 1s→最大600s。全現場が回避中なら最短適格時刻まで | →ZT_SCAN |
+| ZT_BACKOFF | Discovering | 失敗・全現場不適格 | 乱数backoff 1s→最大600s。次走査は`min(backoff,最短の適格化期限)`で、6/24h回避中でも最大600秒ごとに未知現場を探索する（回避現場自体は試行しない） | →ZT_SCAN |
 
-時間上限：m1→m2は`2s＋0.3s×authority_hops`（最大6秒）、m3→m4はそれ＋decision上限（合計最大10秒）、1回の試行全体は15秒以内。RLD1の組立ては既存どおり1件・3秒。
+時間上限：走査はchannel最大3×有効Site CA hint最大3×320ms（最大9窓、1窓につきDISCOVER 1回、重複hintはまとめる）。m1→m2は`2s＋0.3s×authority_hops`（最大6秒、到達不明は6秒）、m3→m4はそれ＋decision上限（合計最大10秒）、1回の試行全体は15秒以内。新しいm1の間隔は機器全体で2秒以上。RLD1の組立ては既存どおり1件・3秒。
 
 ### 10.2 Allowの検証（すべて満たすときだけcommit）
 
@@ -356,15 +356,15 @@ commit後、現場のconfig/trust用RLT1は「SAKをanchor（root_id＝site_id�
 
 ## 11. 重なり合う現場（R4）
 
-候補表（RAM、最大8現場、site_hint単位）：`site_hint | 最良proxyのMAC・RSSI | authority_hops | 状態(untried/pending(retry_at)/avoid(until)/busy(retry_at)) | 最終試行`。
+候補表（RAM、最大8現場）：観測keyは`(org_hint, site_hint, network_low32)`で、hintは探索keyであり認証済みの現場IDではない。認証はm2で初めて`site_id`に結び付き、hint衝突が認証で判明した場合だけ同じkeyを2レコードに分ける（満杯ならその試行を中止）。各現場はproxy証拠を最大2件（MAC・node・channel・RSSI・authority_hops・到達/busy flag・last_seen）持ち、60秒観測がなければ証拠は失効する（policyの期限は消えない）。回避表は同じレコードの別viewで、状態は`untried/transient/pending(retry_at)/busy(retry_at)/avoid(until)`、失敗回数・最終試行・preferred flagを持つ。1レコード≤160B、合計1280B。新規追加は空き→期限の切れた古いuntried/transientの順で置換し、選択中・未満了のavoid/pending/busyはevictしない。全8件が保護対象なら新候補をdropしてNoCapacityを数える（無制限リストやNVS overflowは作らない）。
 
 選択規則：
 
 1. org_hintが自分のanchorと一致しないOFFERは無視。
-2. 状態が適格（untried、またはretry_at/until経過）の現場だけを対象。
-3. preferred（直前に所属していた現場、RAMで保持）を優先、次にuntried、次にauthority_hopsが小さくRSSIが強い順。
-4. 同じ現場への連続試行は`retry_after`を守る。pendingの現場があっても他の適格現場を順に試す（割当先がpending側でない限り、いずれallowに当たる）。
-5. avoid（DenyNotHere 6時間、DenyBlocked 24時間）の現場はDISCOVERの`avoid_site_hint`（最大2件）に入れてOFFER自体を抑制。
+2. 状態が適格（untried、またはretry_at/until経過）かつ新しい到達可能なproxy証拠のある現場だけを対象。認証済みsite_idが同じ複数レコードは遅い方の適格化時刻に統合する。
+3. preferred（直前に所属していた現場、RAMで保持）を優先、次にuntried、authority_hops昇順（不明=255は末尾）、RSSI降順、最終試行が古い順、key/MACの辞書順。
+4. 同じ現場への連続試行は`retry_after`を守る。pendingの現場があっても他の適格現場を順に試す（割当先がpending側でない限り、いずれallowに当たる）。timeout/経路消失/EDHOC errorは`transient`として`min(600s,1s×2^k)`（k≤10飽和）に`base〜base+base/4`の一様乱数を足して遅らせ、別proxy/現場を先に試す。OFFERが届いただけでは保留を解除しない。
+5. avoid（DenyNotHere 6時間、DenyBlocked 24時間、m2 SiteCert/署名不正と認証済み不正Allowも24時間）の現場はDISCOVERの`avoid_site_hint`（最大2件、期限の遅い順・同値ならhint順。preferredと同じhint、衝突が判明しているhintは入れない）に入れてOFFER自体を抑制。
 6. 候補表は再起動で消える（NVSに書かない：摩耗と、誤った回避の固定化を避ける）。再起動直後の再試行はauthority側のrate制限で抑える。
 
 **なぜ隣の現場に入らないか**：(a) allowは割当先のKGuardだけが返す。(b) 参加後のlinkはMemberCertの相互検証を要し、別現場のMemberCertは別SAK署名・別networkなので検証に失敗する。(c) Member class discoveryのscope鍵は自現場のGKから導出され、他現場のDISCOVER/OFFERはscope MACで無言dropされる。(d) 参加後はZeroTouch classを送らない。焼き込み鍵による分離には依存しない。残る前提はKGuardの割当一意性（A1）で、A2ではこれも機器側で検証する（[01](01-overview-threat-model.md) §5）。
