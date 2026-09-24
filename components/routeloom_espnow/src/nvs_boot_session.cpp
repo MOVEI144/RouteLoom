@@ -64,11 +64,12 @@ Status NvsDevBootHighWaterPort::commit(const std::uint32_t value) noexcept {
                           : Status::error(StatusCode::StorageFailure, "dev boot commit");
 }
 
-Status next_dev_group_boot_session(std::uint32_t& session) noexcept {
+Status reserve_dev_group_boot_session(const std::uint32_t candidate,
+                                      std::uint32_t& session) noexcept {
   NvsBootSessionPort system;
   NvsDevBootHighWaterPort high_water;
   sdkv1::BootSessionStore store(system);
-  return store.advance_dev_group(high_water, session);
+  return store.advance_dev_group(high_water, candidate, session);
 }
 
 Status next_boot_session(std::uint32_t& session) noexcept {

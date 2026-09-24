@@ -34,10 +34,10 @@ class BootSessionStore final {
   // The system counter advances before rlsec opens. Once the site has been
   // read, reconcile its witness without consuming another boot on a match.
   Status reconcile_site(std::uint32_t witness, std::uint32_t& session) noexcept;
-  // Before a DevRam group key is derived, advance the fixed durable ceiling
-  // ahead of the system token. A failed readback never publishes the epoch.
+  // The system candidate was already committed before rlsec opened. Reserve
+  // its group epoch against the fixed ceiling before publishing any key.
   Status advance_dev_group(DevBootHighWaterPort& high_water,
-                           std::uint32_t& session) noexcept;
+                           std::uint32_t candidate, std::uint32_t& session) noexcept;
 
  private:
   BootSessionPort& port_;

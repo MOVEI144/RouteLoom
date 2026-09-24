@@ -105,8 +105,8 @@ int main() {
   CHECK(store.advance(false, 0, token).ok() && token == 2);
   CHECK(port.writes >= 6);
 
-  // Dev group key uses the boot epoch: a missing/stale system counter must
-  // skip the last durable group epoch, including after interrupted writes.
+  // A committed system candidate behind boot_hi must skip the last group
+  // epoch, including after either interrupted write.
   Fake system;
   DevFake dev;
   BootSessionStore dev_store(system);
@@ -115,44 +115,50 @@ int main() {
   system.found = true;
   dev.high = 8;
   dev.found = true;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 9);
+  std::uint32_t candidate = 4;
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).ok() && group_boot == 9);
   CHECK(system.stored == 9 && dev.high == 9 && dev.writes == 1);
-  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 10);
-  CHECK(dev.high == 10 && system.stored == 10);
-  system.found = false;
-  dev.high = 10;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 11);
+  // The already committed system candidate is ahead of boot_hi: do not
+  // spend another system write merely to synchronize the fixed ceiling.
+  system.stored = 11;
+  candidate = 11;
+  const int writes = system.writes;
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).ok() && group_boot == 11);
+  CHECK(system.writes == writes && dev.high == 11);
   dev.high = UINT32_MAX;
   const auto old_group = group_boot;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::CounterExhausted &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::CounterExhausted &&
         group_boot == old_group);
   dev.high = 11;
   dev.read_error = true;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::StorageFailure &&
         group_boot == old_group);
   dev.read_error = false;
   dev.lost_write = true;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::StorageFailure &&
         group_boot == old_group && system.stored == 11);
   dev.lost_write = false;
-  system.found = true;
-  system.stored = 11;
   system.write_error = true;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::StorageFailure &&
         group_boot == old_group && dev.high == 12);
   system.write_error = false;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 13);
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).ok() && group_boot == 13);
+  candidate = 13;
   system.lost_write = true;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::StorageFailure &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::StorageFailure &&
         group_boot == 13 && dev.high == 14);
   system.lost_write = false;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).ok() && group_boot == 15);
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).ok() && group_boot == 15);
+  candidate = 15;
   system.stored = UINT32_MAX;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::CounterExhausted &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::StorageFailure &&
         group_boot == 15);
   system.stored = 15;
   dev.high = 0;
-  CHECK(dev_store.advance_dev_group(dev, group_boot).code == StatusCode::RecoveryRequired &&
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::RecoveryRequired &&
+        group_boot == 15);
+  dev.high = UINT32_MAX;
+  CHECK(dev_store.advance_dev_group(dev, candidate, group_boot).code == StatusCode::CounterExhausted &&
         group_boot == 15);
   return failures == 0 ? 0 : 1;
 }

@@ -70,6 +70,7 @@ Status BootSessionStore::reconcile_site(const std::uint32_t witness,
 }
 
 Status BootSessionStore::advance_dev_group(DevBootHighWaterPort& high_water,
+                                            const std::uint32_t candidate,
                                             std::uint32_t& session) noexcept {
   std::uint32_t system_value = 0;
   bool system_found = false;
@@ -79,17 +80,21 @@ Status BootSessionStore::advance_dev_group(DevBootHighWaterPort& high_water,
   bool high_found = false;
   status = high_water.read(high, high_found);
   if (!status) return status;
-  if ((system_found && system_value == 0) || (high_found && high == 0)) {
+  if (!system_found || system_value != candidate || candidate == 0) {
+    return Status::error(StatusCode::StorageFailure, "dev boot candidate changed");
+  }
+  if (high_found && high == 0) {
     return Status::error(StatusCode::RecoveryRequired, "invalid boot high water");
   }
-  const std::uint64_t next = static_cast<std::uint64_t>(
-      (system_found && (!high_found || system_value > high)) ? system_value : high) + 1;
+  const std::uint64_t next = high_found && high >= candidate
+                                 ? static_cast<std::uint64_t>(high) + 1
+                                 : candidate;
   if (next > UINT32_MAX) {
     return Status::error(StatusCode::CounterExhausted, "dev boot high water exhausted");
   }
   const auto value = static_cast<std::uint32_t>(next);
-  // Commit the group-key ceiling before the system boot token: interruption
-  // can skip epochs, but can never reuse an epoch for the same dev PSK.
+  // Commit the ceiling first. Interrupted writes can skip epochs, never
+  // reuse a group key. Do not write rlboot twice if already at this value.
   status = high_water.commit(value);
   if (!status) return status;
   std::uint32_t checked = 0;
@@ -99,8 +104,10 @@ Status BootSessionStore::advance_dev_group(DevBootHighWaterPort& high_water,
   if (!found || checked != value) {
     return Status::error(StatusCode::StorageFailure, "dev boot high water readback failed");
   }
-  status = port_.commit(value);
-  if (!status) return status;
+  if (value != candidate) {
+    status = port_.commit(value);
+    if (!status) return status;
+  }
   status = port_.read(checked, found);
   if (!status) return status;
   if (!found || checked != value) {
