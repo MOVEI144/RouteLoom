@@ -55,6 +55,9 @@ class LifecycleStore final {
   Status prepare(const LifecycleRecord& record) noexcept;
   Status switch_network(const LifecycleRecord& record) noexcept;
   Status finish_switch() noexcept;
+  // Re-twin an adopted secret-free watermark after a torn twin write.
+  Status scrub_idle() noexcept;
+  bool stale_sibling() const noexcept { return pair_.stale_sibling(); }
   Status resume_switch(const LifecycleRecord& verified) noexcept;
   Status holdoff() noexcept;
   Status unassigned_ready() noexcept;

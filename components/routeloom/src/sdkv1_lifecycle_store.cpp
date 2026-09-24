@@ -248,6 +248,13 @@ Status LifecycleStore::finish_switch() noexcept {
   done.payload.clear();
   return commit(done, true);  // no old DAMS/GK in either journal slot
 }
+Status LifecycleStore::scrub_idle() noexcept {
+  if (!has_record() || record_.mode != LifecycleMode::Idle || unknown_sibling() ||
+      pair_.quarantined() || pair_.uncertain())
+    return Status::error(StatusCode::InvalidState, "rlx idle scrub state");
+  if (!pair_.stale_sibling()) return Status::success();
+  return commit(record_, true);  // a retired Switching sibling contains old DAMS/GK
+}
 Status LifecycleStore::resume_switch(const LifecycleRecord& verified) noexcept {
   if (!has_record() || !pair_.uncertain() || unknown_sibling() ||
       record_.mode != LifecycleMode::Switching || verified.mode != LifecycleMode::Switching ||

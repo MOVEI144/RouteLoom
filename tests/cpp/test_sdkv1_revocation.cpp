@@ -106,6 +106,19 @@ struct FakeRuntimePort final : public LifecycleRuntimePort {
   bool refuse{false};
   bool trust_erased{false};
   bool runtime_erased{false};
+  bool network_retired{false};
+  bool trust_installed{false};
+  Status retire_network() noexcept override {
+    if (refuse) return Status::error(StatusCode::StorageFailure, "network retirement failed");
+    network_retired = true;
+    return Status::success();
+  }
+  Status install_site_trust(const SiteRecord& next) noexcept override {
+    if (!network_retired || next.network == kNetwork || refuse)
+      return Status::error(StatusCode::StorageFailure, "new site trust not ready");
+    trust_installed = true;
+    return Status::success();
+  }
   Status remove_member_runtime() noexcept override {
     if (refuse) return Status::error(StatusCode::StorageFailure, "runtime removal failed");
     runtime_erased = true;
@@ -2103,6 +2116,174 @@ void test_removal_journal_powercuts() {
   }
 }
 
+void test_signed_prepare_stages_without_switching() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  const NetworkId next = kNetwork + (1ULL << 32U);
+  const auto site_cert = issue(sitecert_claims(next), site_ca());
+  const auto member_cert = issue(membercert_claims(2, next), sak());
+  SitePackage package{};
+  package.site_id = kSiteId;
+  package.network = next;
+  package.gk_epoch = f.site.site().gk_epoch_current + 1;
+  package.gk.fill(0x51);
+  package.channel = f.site.site().channel;
+  package.channel_epoch = f.site.site().channel_epoch;
+  package.role = f.site.site().role;
+  package.gateway_count = f.site.site().gateway_count;
+  package.gateways = f.site.site().gateways;
+  ByteBuffer<kSitePackageSize> encoded{};
+  CHECK_OK(site_package_encode(package, encoded));
+  std::array<std::uint8_t, kGrantRenewHeadSize> head{};
+  CHECK_OK(grant_renew_head_encode({GrantRenewPhase::Prepare, 7, 1, kNetwork}, head));
+  std::array<std::uint8_t, kGrantPrepareMax> wire{};
+  std::memcpy(wire.data(), head.data(), head.size());
+  auto put16 = [&](std::size_t pos, std::size_t n) {
+    wire[pos] = static_cast<std::uint8_t>(n >> 8U);
+    wire[pos + 1] = static_cast<std::uint8_t>(n);
+  };
+  for (int i = 0; i < 8; ++i) wire[24 + i] = static_cast<std::uint8_t>(next >> (56 - 8 * i));
+  put16(32, site_cert.size);
+  put16(34, member_cert.size);
+  std::size_t pos = 36;
+  std::memcpy(wire.data() + pos, site_cert.bytes.data(), site_cert.size); pos += site_cert.size;
+  std::memcpy(wire.data() + pos, member_cert.bytes.data(), member_cert.size); pos += member_cert.size;
+  std::memcpy(wire.data() + pos, encoded.bytes.data(), encoded.size); pos += encoded.size;
+  std::memset(wire.data() + pos, 0x62, 32); pos += 32;
+  wire[36 + site_cert.size - 1] ^= 1;  // Site CA signature, not a transport hint
+  CHECK(!f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                   ByteView{wire.data(), pos}), 199));
+  CHECK(!f.journal.has_record());
+  wire[36 + site_cert.size - 1] ^= 1;
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                  ByteView{wire.data(), pos}), 200));
+  CHECK(f.journal.has_record());
+  CHECK(f.journal.record().mode == LifecycleMode::Prepared);
+  CHECK(f.site.site().network == kNetwork);
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 201));
+  CHECK(f.site.site().network == kNetwork);
+  CHECK(f.snap().phase == LifecyclePhase::Prepared);
+  NodeFixture removed{};
+  CHECK(removed.provision(2, 14));
+  CHECK_OK(removed.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                        ByteView{wire.data(), pos}), 200));
+  ByteBuffer<kRemovalNoticePayloadSize> notice_payload{};
+  CHECK_OK(removal_notice_payload_encode(
+      RemovalNotice{RevocationReason::Removed, kSiteId, kNode, 2, 14}, notice_payload));
+  ByteBuffer<kRemovalNoticeAadSize> notice_aad{};
+  CHECK_OK(removal_notice_aad(kNetwork, notice_aad));
+  Es256Signature notice_sig{};
+  sign_payload(sak(), notice_payload.view(), notice_aad.view(), notice_sig);
+  ByteBuffer<kRemovalNoticeObjectSize> notice{};
+  CHECK_OK(removal_notice_assemble(notice_payload.view(),
+                                    ByteView{notice_sig.data(), notice_sig.size()}, notice));
+  CHECK_OK(removed.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6,
+                                                      notice.view()), 201));
+  CHECK(removed.journal.record().mode == LifecycleMode::Removing);
+  CHECK(removed.snap().phase == LifecyclePhase::Removing);
+
+  auto rrs = revocation_object(revocation_set(15, 0, static_cast<std::uint32_t>(next >> 32U), next));
+  Digest256 rrs_hash{};
+  sha256(rrs.view(), rrs_hash);
+  std::array<std::uint8_t, kCutoverPayloadSize> payload{};
+  payload[0] = 1;
+  auto put32 = [&](std::size_t offset, std::uint32_t n) {
+    for (int i = 0; i < 4; ++i) payload[offset + i] = static_cast<std::uint8_t>(n >> (24 - 8 * i));
+  };
+  auto put64 = [&](std::size_t offset, std::uint64_t n) {
+    for (int i = 0; i < 8; ++i) payload[offset + i] = static_cast<std::uint8_t>(n >> (56 - 8 * i));
+  };
+  put64(4, kSiteId); put64(12, kNetwork); put64(20, next); put64(28, 7);
+  put32(36, 1); put32(40, package.gk_epoch); put32(44, 15);
+  std::memcpy(payload.data() + 48, rrs_hash.data(), 32);
+  std::array<std::uint8_t, kCutoverAadSize> aad{};
+  CHECK_OK(cutover_commit_aad(kNetwork, aad));
+  Es256Signature signature{};
+  sign_payload(sak(), ByteView{payload.data(), payload.size()},
+               ByteView{aad.data(), aad.size()}, signature);
+  std::array<std::uint8_t, kCutoverObjectSize> proof{};
+  std::size_t proof_size = 0;
+  CHECK_OK(cose_es256_assemble(ByteView{payload.data(), payload.size()},
+                               ByteView{signature.data(), signature.size()},
+                               MutableByteView{proof.data(), proof.size()}, proof_size));
+  CHECK(proof_size == proof.size());
+  std::array<std::uint8_t, kGrantCommitMax> commit{};
+  CHECK_OK(grant_renew_head_encode({GrantRenewPhase::Commit, 7, 1, kNetwork}, head));
+  std::memcpy(commit.data(), head.data(), head.size());
+  commit[24] = 0; commit[25] = static_cast<std::uint8_t>(proof_size);
+  commit[26] = static_cast<std::uint8_t>(rrs.size >> 8U);
+  commit[27] = static_cast<std::uint8_t>(rrs.size);
+  std::memcpy(commit.data() + 28, proof.data(), proof_size);
+  std::memcpy(commit.data() + 28 + proof_size, rrs.bytes.data(), rrs.size);
+  const ByteView commit_body{commit.data(), 28 + proof_size + rrs.size};
+  // Neither a wrong AAD nor an old revision can write switching intent.
+  commit[16] ^= 1;
+  CHECK(!f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7, commit_body), 202));
+  CHECK(f.journal.record().mode == LifecycleMode::Prepared);
+  commit[16] ^= 1;
+  std::array<std::uint8_t, kCutoverAadSize> wrong_aad{};
+  CHECK_OK(cutover_commit_aad(next, wrong_aad));
+  Es256Signature wrong_sig{};
+  sign_payload(sak(), ByteView{payload.data(), payload.size()},
+               ByteView{wrong_aad.data(), wrong_aad.size()}, wrong_sig);
+  std::array<std::uint8_t, kCutoverObjectSize> wrong_proof{};
+  std::size_t wrong_size = 0;
+  CHECK_OK(cose_es256_assemble(ByteView{payload.data(), payload.size()},
+                               ByteView{wrong_sig.data(), wrong_sig.size()},
+                               MutableByteView{wrong_proof.data(), wrong_proof.size()}, wrong_size));
+  std::memcpy(commit.data() + 28, wrong_proof.data(), wrong_size);
+  CHECK(!f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7, commit_body), 203));
+  CHECK(f.journal.record().mode == LifecycleMode::Prepared);
+  std::memcpy(commit.data() + 28, proof.data(), proof_size);
+  CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7, commit_body), 203));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  CHECK(f.site.site().network == kNetwork);
+  CHECK(!f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 204));
+  CHECK(!f.dispatch(LifecycleInput::Recovery(true), 204));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  f.runtime.refuse = true;
+  CHECK(!f.dispatch(LifecycleInput::Poll(), 204));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  f.runtime.refuse = false;
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 205));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  for (int i = 0; i < 25 && f.revocations.set().network != next; ++i)
+    CHECK_OK(f.dispatch(LifecycleInput::Poll(), 205 + i));
+  CHECK(f.site.site().network == next && f.revocations.set().network == next);
+  f.runtime.refuse = true;
+  for (int i = 0; i < 3 && f.snap().phase == LifecyclePhase::Switching; ++i)
+    (void)f.dispatch(LifecycleInput::Poll(), 235 + i);
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  f.runtime.refuse = false;
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 240));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  const auto retired_slot = f.journal_storage.slot(0);
+  for (int i = 0; i < 40 && f.journal.record().mode == LifecycleMode::Switching; ++i)
+    CHECK_OK(f.dispatch(LifecycleInput::Poll(), 241 + i));
+  CHECK(f.journal.record().mode == LifecycleMode::Idle);
+  CHECK(f.runtime.network_retired && f.runtime.trust_installed);
+  CHECK(f.site.site().network == next);
+  CHECK(f.revocations.set().network == next);
+  // Model a cut after the first Idle twin write: a valid Switching sibling
+  // must be scrubbed before the new network can open.
+  f.journal_storage.slot(0) = retired_slot;
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 250));
+  CHECK(f.journal_storage.slot(0) != retired_slot);
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  CHECK(!f.lifecycle.permits(stamp_for(kPeer, 2), TrafficUse::Data));
+  LifecycleAction action{};
+  CHECK_OK(f.lifecycle.take_action(action));
+  CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
+  CHECK(!f.lifecycle.permits(stamp_for(kPeer, 2), TrafficUse::Data));
+  CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 251));
+  CHECK(f.snap().phase == LifecyclePhase::Active);
+  // Fresh network authority binding receives APPLIED, not a PREPARED receipt.
+  CHECK(f.authority.sent.empty() || f.authority.sent.back().body[1] != 4);
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 252));
+  // A cold boot after Idle discards volatile receipt state; Host keeps unknown
+  // until its new-context recovery path obtains durable application evidence.
+}
+
 void test_switching_intent_reboots_closed() {
   NodeFixture f{};
   CHECK(f.provision(2, 14));
@@ -2174,6 +2355,7 @@ int main() {
   test_removal_notice_intent();
   test_removal_failure_after_intent_reboots_closed();
   test_removal_journal_powercuts();
+  test_signed_prepare_stages_without_switching();
   test_switching_intent_reboots_closed();
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();
