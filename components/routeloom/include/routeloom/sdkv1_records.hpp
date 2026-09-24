@@ -308,4 +308,98 @@ Status resume_slot_decode(ByteView bytes, ResumeSlot& out) noexcept;
 // first8(SHA-256(member_cert)).
 void resume_peer_cert_id(ByteView member_cert, std::array<std::uint8_t, 8>& out) noexcept;
 
+// --- RLP2 --------------------------------------------------------------------
+// P4 membership/session records: one fixed-size resumption-cache slot with the
+// enforceable 64-use ceiling (G-SEC P4 design §6.2). RLP1's reserved word is
+// NOT redefined in place: old RLP1 blobs are a safe cache miss and the next
+// full EDHOC overwrites them. Fixed NVS key names stay unchanged.
+//  0 u32 magic "RLP2" | 4 u8 format=1 | 5 u8 purpose (1 link, 2 end; 0 empty)
+//  6 u8 state (0 empty, 1 valid) | 7 u8 flags (bit0 pinned)
+//  8 u64 peer node_id | 16 u64 network
+// 24 8B peer_cert_id = first8(SHA-256(peer MemberCert))
+// 32 8B local_cert_id = first8(SHA-256(local MemberCert))
+// 40 u32 peer_generation | 44 u32 peer_role (nonzero known bits)
+// 48 u32 created_gk_epoch | 52 u32 last_used_boot
+// 56 u32 reserved_uses (0..64 durable high-water)
+// 60 32B rms | 92 u32 crc32
+// An empty slot (state 0) has every field after byte 6 zero.
+constexpr std::uint32_t kResume2Magic = 0x524C5032U;  // "RLP2"
+constexpr std::uint8_t kResume2Format = 1;
+constexpr std::size_t kResume2SlotBytes = 96;
+constexpr std::uint32_t kResume2MaxUses = 64;
+constexpr std::uint32_t kResume2ReserveQuantum = 8;
+
+struct ResumeSlot2 {
+  bool valid{false};
+  ResumePurpose purpose{ResumePurpose::Link};
+  std::uint8_t flags{0};
+  NodeId peer{kInvalidNodeId};
+  NetworkId network{0};
+  std::array<std::uint8_t, 8> peer_cert_id{};
+  std::array<std::uint8_t, 8> local_cert_id{};
+  std::uint32_t peer_generation{0};
+  std::uint32_t peer_role{0};
+  std::uint32_t created_gk_epoch{0};
+  std::uint32_t last_used_boot{0};
+  std::uint32_t reserved_uses{0};
+  std::array<std::uint8_t, 32> rms{};
+};
+
+Status resume2_validate(const ResumeSlot2& slot) noexcept;
+Status resume2_slot_encode(const ResumeSlot2& slot,
+                           std::array<std::uint8_t, kResume2SlotBytes>& out) noexcept;
+// Strict decode. An empty record decodes with valid=false.
+Status resume2_slot_decode(ByteView bytes, ResumeSlot2& out) noexcept;
+
+// --- RLV1 --------------------------------------------------------------------
+// Durable local-removal evidence (G-SEC P4 design §3.3, issue #60-2): a record
+// of refusal, not permission. While one exists unresolved (Blocked, Cleaned
+// within holdoff, torn, or unreadable) the node must not return to Member —
+// not even across reboot. Fixed two keys (sequenced A/B like RLS1/RRS1);
+// the RLS1 frozen layout is untouched.
+//  0 u32 magic "RLV1" | 4 u16 format=1 | 6 u16 used_len=108 | 8 u32 schema=1
+// 12 u32 seal | 16 u32 commit_seq
+// 20 u64 local_node | 28 u64 site_id | 36 u64 network
+// 44 u32 removed_generation | 48 u32 rs_epoch_floor | 52 u32 site_epoch_floor
+// 56 u8 state (1 Blocked, 2 Cleaned) | 57 u8 cause | 58 u16 reserved=0
+// 60 32B evidence_digest (SHA-256 of the verified removal object)
+// 92 u32 rls_commit_seq (diagnostic) | 96 u32 boot_witness
+// 100 u32 holdoff_ms | 104 u32 crc32
+constexpr std::uint32_t kLocalRevocationMagic = 0x524C5631U;  // "RLV1"
+constexpr std::uint32_t kLocalRevocationSealCommitted = 0x72564B31U;
+constexpr std::size_t kLocalRevocationSlotBytes = 108;
+constexpr std::size_t kLocalRevocationRecordLen = 108;
+constexpr std::uint32_t kLocalRevocationHoldoffMs = 600000;  // 10 minutes
+
+enum class LocalRevocationState : std::uint8_t { Blocked = 1, Cleaned = 2 };
+enum class LocalRevocationCause : std::uint8_t {
+  Rrs = 1,              // an accepted RRS1 set rejected this node
+  Notice = 2,           // a verified RemovalNotice named this node
+  LocalMaintenance = 3,  // physical maintenance revocation (dev)
+};
+
+struct LocalRevocationRecord {
+  LocalRevocationState state{LocalRevocationState::Blocked};
+  LocalRevocationCause cause{LocalRevocationCause::Rrs};
+  NodeId local_node{kInvalidNodeId};
+  std::uint64_t site_id{0};
+  NetworkId network{0};
+  std::uint32_t removed_generation{0};
+  std::uint32_t rs_epoch_floor{0};
+  std::uint32_t site_epoch_floor{0};
+  std::array<std::uint8_t, 32> evidence_digest{};
+  std::uint32_t rls_commit_seq{0};
+  std::uint32_t boot_witness{0};
+  std::uint32_t holdoff_ms{kLocalRevocationHoldoffMs};
+};
+
+Status local_revocation_validate(const LocalRevocationRecord& record) noexcept;
+Status local_revocation_record_encode(const LocalRevocationRecord& record, std::uint32_t seal,
+                                      std::uint32_t commit_seq,
+                                      ByteBuffer<kLocalRevocationSlotBytes>& out) noexcept;
+Status local_revocation_record_decode(ByteView record, LocalRevocationRecord& out,
+                                      std::uint32_t* commit_seq = nullptr) noexcept;
+// Structure-only gate for the dual-slot classifier (see above).
+Status local_revocation_record_structure(ByteView record) noexcept;
+
 }  // namespace routeloom::sdkv1

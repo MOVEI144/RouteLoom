@@ -40,6 +40,8 @@ HEADERS = {
     "replay": "components/routeloom/include/routeloom/replay.hpp",
     "peer_state": "components/routeloom/include/routeloom/peer_state.hpp",
     "provider": "components/routeloom_espnow/include/routeloom/psk_security.hpp",
+    "records": "components/routeloom/include/routeloom/sdkv1_records.hpp",
+    "store": "components/routeloom/include/routeloom/sdkv1_store.hpp",
 }
 
 
@@ -102,6 +104,7 @@ def blob_entries(size: int, entry_bytes: int) -> int:
 def load_constants(sources: dict[str, str]) -> dict[str, int]:
     counter, replay = sources["counter"], sources["replay"]
     peer, provider = sources["peer_state"], sources["provider"]
+    records, store = sources["records"], sources["store"]
     constants = {
         "counter_record": _sizeof(counter, "CounterRecord"),
         "floor_record": _sizeof(replay, "ReplayFloorRecord"),
@@ -112,6 +115,13 @@ def load_constants(sources: dict[str, str]) -> dict[str, int]:
         "budget_percent": _constant(peer, "kPeerStateBudgetPercent"),
         "kNodeMaxPersistedPeers": _constant(provider, "kNodeMaxPersistedPeers"),
         "kGatewayMaxPersistedPeers": _constant(provider, "kGatewayMaxPersistedPeers"),
+        # P4 session/membership stores (RLP2 quotas + RLV1 twin pair).
+        "rlp2_slot": _constant(records, "kResume2SlotBytes"),
+        "rlv1_slot": _constant(records, "kLocalRevocationSlotBytes"),
+        "rlp2_node_link": _constant(store, "kResume2NodeLinkQuota"),
+        "rlp2_node_end": _constant(store, "kResume2NodeEndQuota"),
+        "rlp2_gateway_link": _constant(store, "kResume2GatewayLinkQuota"),
+        "rlp2_gateway_end": _constant(store, "kResume2GatewayEndQuota"),
     }
     match = re.search(r"static_assert\(kPeerStateEntriesPerPeer\s*==\s*(\d+)", peer)
     if match is None:
@@ -134,6 +144,19 @@ def max_peers_for_entries(total_entries: int, constants: dict[str, int]) -> int:
     if budget <= constants["fixed_entries"]:
         return 0
     return (budget - constants["fixed_entries"]) // entries_per_peer(constants)
+
+
+def session_fixed_entries(constants: dict[str, int], gateway: bool) -> int:
+    """P4 RLP2 + RLV1 worst case: every resume slot written plus the RLV1
+    twin pair (fixed key counts, never peer-churn dependent)."""
+    entry = constants["entry_bytes"]
+    if gateway:
+        slots = constants["rlp2_gateway_link"] + constants["rlp2_gateway_end"]
+    else:
+        slots = constants["rlp2_node_link"] + constants["rlp2_node_end"]
+    return slots * blob_entries(constants["rlp2_slot"], entry) + 2 * blob_entries(
+        constants["rlv1_slot"], entry
+    )
 
 
 def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> dict:
@@ -195,9 +218,19 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
     total = pages * constants["entries_per_page"]
     usable = (pages - 1) * constants["entries_per_page"]
     budget = usable * constants["budget_percent"] // 100
-    worst = cap * entries_per_peer(constants) + constants["fixed_entries"]
-    check("worst_case_within_budget", worst <= budget,
-          f"worst={worst} budget={budget} usable={usable}")
+    # Profile-split (P4 §12.2): the legacy per-peer worst case and the RAM
+    # session worst case are gated separately — a RAM-profile firmware
+    # never writes legacy c/f/r records, so their maxima are not added.
+    # Stale legacy records during migration are purge's problem (P6/PR6),
+    # reported below, not gated here.
+    legacy = cap * entries_per_peer(constants) + constants["fixed_entries"]
+    check("worst_case_within_budget", legacy <= budget,
+          f"worst={legacy} budget={budget} usable={usable}")
+    session = session_fixed_entries(constants, uses_gateway)
+    ram = constants["fixed_entries"] + session
+    check("worst_case_ram_within_budget", ram <= budget,
+          f"worst={ram} budget={budget} usable={usable} session_fixed={session}")
+    worst = legacy
     # The firmware clamps the cap to what the mounted partition holds; the
     # configured cap must survive that clamp unchanged.
     fits = max_peers_for_entries(total, constants)
@@ -211,6 +244,8 @@ def check_app(app: str, sources: dict[str, str], constants: dict[str, int]) -> d
         "cap_constant": cap_name,
         "max_persisted_peers": cap,
         "worst_case_entries": worst,
+        "ram_worst_case_entries": ram,
+        "session_fixed_entries": session,
         "table_end": f"0x{end:x}",
         "checks": checks,
     }

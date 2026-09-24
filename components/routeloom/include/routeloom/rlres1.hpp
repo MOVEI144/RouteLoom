@@ -126,6 +126,9 @@ enum class Reject : std::uint8_t {
   RateLimited,           // responder admission token bucket empty
   EntropyUnavailable,
   ContextIdUnavailable,
+  // The verified slot's resume budget is spent (or unprovable): R answers
+  // Expired so the initiator runs a full EDHOC (P4 §6.2).
+  ResumeBudgetExhausted,
   InvalidRequest,        // caller error (bad begin() arguments, local state unset)
 };
 constexpr std::size_t kRejectCount = static_cast<std::size_t>(Reject::InvalidRequest) + 1;
@@ -172,6 +175,12 @@ class Environment {
   virtual bool revoked(NodeId peer, std::uint32_t generation) noexcept = 0;
   // A non-zero receive context id unique among this node's live contexts.
   virtual bool allocate_context_id(Purpose purpose, NodeId peer, std::uint32_t& cid) noexcept = 0;
+  // Consume one of the 64 RMS uses of the verified (purpose, rid) slot
+  // (P4 §6.2). Called synchronously inside on_r1 after the MAC, replay,
+  // lifetime and revocation gates pass and before R2 is made; false (uses
+  // exhausted or unprovable) makes R answer Expired so the initiator runs
+  // a full EDHOC. Failed attempts are never refunded.
+  virtual bool reserve_resume_use(Purpose purpose, const ResumeId& rid) noexcept = 0;
 
  protected:
   ~Environment() = default;

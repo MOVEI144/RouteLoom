@@ -1,0 +1,8 @@
+{
+  "codec": "session_intent",
+  "encoded_hex": "010102000300000000000007eea2fac18daf0e1ce471a718a1d0aaa11ce1bd3a40a5f7b9b6758ce83c259221",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "intent_bad_profile",
+  "note": "profile 2 (DevRam) is PR6, refused in PR2"
+}

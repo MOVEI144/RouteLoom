@@ -164,13 +164,15 @@ class SessionSecurity final : public SecurityProvider, public SessionInstaller {
     contexts[slot] = Entry{ContextState::Ready, keys.tx_context_id, keys.rx_context_id};
     return Status::success();
   }
-  void retire(const SecurityScope scope, const NodeId peer) noexcept override {
+  Status retire(const SecurityScope scope, const NodeId peer) noexcept override {
     contexts.erase({static_cast<int>(scope), peer});
+    return Status::success();
   }
-  void retire_all(const NodeId peer) noexcept override {
+  Status retire_all(const NodeId peer) noexcept override {
     for (auto it = contexts.begin(); it != contexts.end();) {
       it = it->first.second == peer ? contexts.erase(it) : std::next(it);
     }
+    return Status::success();
   }
   // Test hook for states the installer never produces (Establishing) and for
   // the group scope, whose keys come from the GK schedule (P5), not install().
@@ -594,9 +596,9 @@ void test_context_keys_checks() {
   other.rx_context_id = 99;
   CHECK_OK(installer.install(other));
   CHECK(installer.context_state(SecurityScope::EndToEnd, 3) == ContextState::Ready);
-  installer.retire(SecurityScope::EndToEnd, 3);
+  CHECK_OK(installer.retire(SecurityScope::EndToEnd, 3));
   CHECK(installer.context_state(SecurityScope::EndToEnd, 3) == ContextState::None);
-  installer.retire_all(2);
+  CHECK_OK(installer.retire_all(2));
   CHECK(installer.contexts.empty());
 }
 

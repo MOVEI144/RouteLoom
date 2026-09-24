@@ -1,0 +1,19 @@
+{
+  "binding_link_hex": "0f51c4d716446b0364e8d5feefabfd4296317b0178188ea706dd62c93c30798e",
+  "cap_i": 4294967295,
+  "cap_r": 4294967295,
+  "carrier_digest_hex": "a2e84395cb4f0aeb1e7b00dc88d2d3f72e0baa5e572939919fed9265296e32ad",
+  "codec": "carrier_link",
+  "cookie_hex": "ffffffffffffffffffffffffffffffff",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "mac_i_hex": "ffffffffffff",
+  "mac_r_hex": "fffffffffffe",
+  "name": "carrier_link_max",
+  "network": 18446744073709551615,
+  "node_i": 18446744073709551614,
+  "node_r": 18446744073709551613,
+  "nonce_i_hex": "ffffffffffffffffffffffffffffffff",
+  "nonce_r_hex": "ffffffffffffffffffffffffffffffff",
+  "scope_binding_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+}

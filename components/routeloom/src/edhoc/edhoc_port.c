@@ -12,6 +12,7 @@
 
 #include <stdalign.h>
 #include <stddef.h>
+#include <string.h>
 
 _Static_assert(sizeof(struct edhoc_context) <= ROUTELOOM_EDHOC_CONTEXT_BYTES,
 	       "ROUTELOOM_EDHOC_CONTEXT_BYTES is smaller than the libedhoc context");
@@ -31,4 +32,32 @@ size_t routeloom_edhoc_context_sizeof(void);
 size_t routeloom_edhoc_context_sizeof(void)
 {
 	return sizeof(struct edhoc_context);
+}
+
+/*
+ * The peer's negotiated connection identifier (C_I on a responder after
+ * message 1, C_R on an initiator after message 2). Returns the identifier
+ * length in bytes, or 0 when none was negotiated yet; copies the bytes only
+ * when they fit. The member profile (P4 §5.1) accepts exactly 4 bytes —
+ * that policy lives in the caller, this is only the read-out so no C++
+ * translation unit has to include the internal context header.
+ */
+size_t routeloom_edhoc_peer_cid(const struct edhoc_context *ctx, uint8_t *out,
+				size_t capacity);
+size_t routeloom_edhoc_peer_cid(const struct edhoc_context *ctx, uint8_t *out,
+				size_t capacity)
+{
+	const struct connection_id *cid;
+
+	if (ctx == NULL || !ctx->is_init) {
+		return 0;
+	}
+	cid = &ctx->negotiation.peer_connection_id;
+	if (cid->length == 0 || cid->length > CONFIG_LIBEDHOC_MAX_LEN_OF_CONN_ID) {
+		return 0;
+	}
+	if (out != NULL && capacity >= cid->length) {
+		memcpy(out, cid->value, cid->length);
+	}
+	return cid->length;
 }

@@ -132,6 +132,7 @@ class SealedSlotPair {
 const SealedRecordFormat& identity_record_format() noexcept;
 const SealedRecordFormat& site_record_format() noexcept;
 const SealedRecordFormat& revocation_record_format() noexcept;
+const SealedRecordFormat& local_revocation_record_format() noexcept;
 
 // --- RLI1: device identity (office-written, twin pair) -------------------------
 class IdentityStore {
@@ -141,6 +142,7 @@ class IdentityStore {
   Status commit(const IdentityRecord& record) noexcept;
   Status recover(const IdentityRecord& record) noexcept;
 
+  bool initialized() const noexcept { return pair_.initialized(); }
   bool has_identity() const noexcept { return pair_.has_active(); }
   bool quarantined() const noexcept { return pair_.quarantined(); }
   bool uncertain() const noexcept { return pair_.uncertain(); }
@@ -196,6 +198,7 @@ class SiteStore {
   // record (e.g. the idempotent re-issue after a zero-touch rejoin).
   Status recover(const SiteRecord& record) noexcept;
 
+  bool initialized() const noexcept { return pair_.initialized(); }
   bool has_site() const noexcept {
     return pair_.has_active() && site_.state == SiteState::Member;
   }
@@ -239,6 +242,7 @@ class RevocationStore {
                  NetworkId network,
                  const Es256Verifier& verifier = default_es256_verifier()) noexcept;
 
+  bool initialized() const noexcept { return pair_.initialized(); }
   bool has_set() const noexcept { return has_set_; }
   bool quarantined() const noexcept { return pair_.quarantined(); }
   bool uncertain() const noexcept { return pair_.uncertain(); }
@@ -326,6 +330,105 @@ class ResumeCache {
 
   ResumeSlotStorage& storage_;
   std::array<std::uint8_t, kResumeSlotBytes> buffer_{};
+};
+
+// --- RLP2: resumption cache with the enforceable 64-use ceiling ----------------
+// G-SEC P4 (§6.2): the RLP1 layout cannot express the reboot-surviving use
+// count, so RLP2 is a new record (new magic, never a silent redefinition).
+// Slots are structurally partitioned by purpose ([0, link_quota) link,
+// [link_quota, link_quota + end_quota) end: 12+4 on a node, 32+128 on a
+// gateway), so the per-purpose quota needs no runtime accounting. As with
+// RLP1 nothing is cached in RAM except the 8-entry use-budget table below:
+// every lookup scans NVS through one 96-byte buffer.
+class ResumeSlotStorage2 {
+ public:
+  virtual ~ResumeSlotStorage2() = default;
+  virtual std::size_t slot_count() const noexcept = 0;
+  // read() fills 96 bytes (a missing blob reads uniformly erased).
+  virtual Status read(std::size_t index, MutableByteView target) noexcept = 0;
+  virtual Status write(std::size_t index, ByteView data) noexcept = 0;
+};
+
+// Purpose quotas (P4 §4.1): 12 link + 4 end on a node, 32 link + 128 end
+// on a gateway. tools/nvs_budget.py reads these for the NVS entry model.
+constexpr std::size_t kResume2NodeLinkQuota = 12;
+constexpr std::size_t kResume2NodeEndQuota = 4;
+constexpr std::size_t kResume2GatewayLinkQuota = 32;
+constexpr std::size_t kResume2GatewayEndQuota = 128;
+
+class ResumeCache2 {
+ public:
+  static constexpr std::uint32_t kTouchBootInterval = 256;
+  static constexpr std::size_t kUseBudgetEntries = 8;
+
+  ResumeCache2(ResumeSlotStorage2& storage, std::size_t link_quota,
+               std::size_t end_quota) noexcept
+      : storage_(storage), link_quota_(link_quota), end_quota_(end_quota) {}
+
+  std::size_t link_quota() const noexcept { return link_quota_; }
+  std::size_t end_quota() const noexcept { return end_quota_; }
+
+  // Validity: valid state, network == context network, created_gk_epoch <=
+  // gk_epoch < created_gk_epoch + 2 (u64 arithmetic: a wrapped or regressed
+  // GK fails closed), nonzero generation and role, peer not rejected by the
+  // RRS1. The 64-use ceiling is NOT part of validity: it is enforced by
+  // reserve_uses, so a fully-reserved slot still verifies its MAC and then
+  // falls back to a full EDHOC instead of answering UnknownId.
+  bool usable(const ResumeSlot2& slot, const ResumeContext& context) const noexcept;
+  // Usable slot for (purpose, peer), if any. Scans the purpose partition.
+  Status find_by_peer(ResumePurpose purpose, NodeId peer, const ResumeContext& context,
+                      ResumeSlot2& out, std::size_t& index) noexcept;
+  // Responder-side lookup by resumption id: slots whose
+  // resume_id(rms, purpose) equals `rid`, filtered by purpose/network and —
+  // when known — by the carrier-claimed peer, must identify exactly one
+  // slot, else NotFound (an rid alone never names a peer).
+  Status find_by_id(ResumePurpose purpose, const std::array<std::uint8_t, 8>& rid,
+                    NodeId claimed_peer, const ResumeContext& context, ResumeSlot2& out,
+                    std::size_t& index) noexcept;
+  // Direct slot read. `intact=false` (with an empty slot) on torn/corrupt
+  // bytes; a storage error is still an error.
+  Status read_at(std::size_t index, ResumeSlot2& out, bool& intact) noexcept;
+  // Consume one of the 64 RMS uses. The first use and every 8th grant a new
+  // durable quantum (`reserved_uses = min(64, old + 8)`, written and read
+  // back) and the RAM budget serves up to 8 uses from it; failed attempts
+  // consume a use and never refund it. Exceeded (reserved == 64 and no
+  // budget left) or unprovable (torn slot, storage error) returns a
+  // non-Ok status and the caller must run a full EDHOC. `boot`/`changed`
+  // fold the touch wear rule into the same write (never a second write).
+  Status reserve_uses(std::size_t index, const ResumeContext& context, std::uint32_t boot,
+                      bool gk_epoch_changed) noexcept;
+  // Written only after a full EDHOC (new RMS, reserved_uses starts at 0).
+  // Replaces the peer's slot for the same purpose, else the first
+  // empty/unusable slot of the purpose partition, else the unpinned slot
+  // with the smallest last_used_boot. Pinned slots are capped at
+  // quota - 2 per purpose (NoCapacity past the cap).
+  Status put(const ResumeSlot2& slot, const ResumeContext& context) noexcept;
+  Status touch(std::size_t index, std::uint32_t boot, bool gk_epoch_changed) noexcept;
+  Status invalidate_peer(NodeId peer) noexcept;
+  Status clear_all() noexcept;
+
+ private:
+  struct BudgetEntry {
+    bool used{false};
+    std::uint32_t slot_index{0};
+    // reserved_uses the durable grant left behind: any cache write to this
+    // slot changes it (or validity), which invalidates the remainder.
+    std::uint32_t granted{0};
+    std::uint8_t remaining{0};
+  };
+  static_assert(sizeof(BudgetEntry) <= 16, "P4 §6.2: use budget entry <= 16 B");
+
+  Status read_slot(std::size_t index, ResumeSlot2& out, bool& intact) noexcept;
+  Status write_slot(std::size_t index, const ResumeSlot2& slot) noexcept;
+  bool in_partition(ResumePurpose purpose, std::size_t index) const noexcept;
+  void drop_budget(std::size_t index) noexcept;
+
+  ResumeSlotStorage2& storage_;
+  std::size_t link_quota_{0};
+  std::size_t end_quota_{0};
+  std::array<std::uint8_t, kResume2SlotBytes> buffer_{};
+  std::array<BudgetEntry, kUseBudgetEntries> budget_{};
+  std::size_t budget_next_{0};
 };
 
 }  // namespace routeloom::sdkv1

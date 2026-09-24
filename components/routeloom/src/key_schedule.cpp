@@ -284,4 +284,86 @@ DecodeError authority_envelope_decode(const ByteView envelope,
   return DecodeError::None;
 }
 
+namespace {
+
+void hash_be(Sha256& hash, const std::uint64_t value, const std::size_t width) noexcept {
+  std::uint8_t tmp[8]{};
+  for (std::size_t i = 0; i < width; ++i) {
+    tmp[i] = static_cast<std::uint8_t>(value >> (8 * (width - 1 - i)));
+  }
+  hash.update(ByteView{tmp, width});
+}
+
+void hash_label(Sha256& hash, const char* label) noexcept {
+  hash.update(label_view(label));
+  const std::uint8_t zero = 0;
+  hash.update(ByteView{&zero, 1});
+}
+
+}  // namespace
+
+void link_carrier_digest(const LinkCarrier& carrier, ScopeDigest& out) noexcept {
+  Sha256 hash{};
+  hash_label(hash, kLabelLinkCarrier);
+  const std::uint8_t version = 1;
+  hash.update(ByteView{&version, 1});
+  hash_be(hash, carrier.network, 8);
+  hash_be(hash, carrier.node_i, 8);
+  hash_be(hash, carrier.node_r, 8);
+  hash.update(ByteView{carrier.requester_nonce.data(), 16});
+  hash.update(ByteView{carrier.responder_nonce.data(), 16});
+  hash.update(ByteView{carrier.cookie.data(), 16});
+  hash_be(hash, carrier.capability_i, 4);
+  hash_be(hash, carrier.capability_r, 4);
+  hash.update(ByteView{carrier.scope_binding.data(), carrier.scope_binding.size()});
+  hash.finish(out);
+}
+
+void end_carrier_binding(const NetworkId network, const NodeId node_i, const NodeId node_r,
+                         const std::uint32_t exchange_id, ScopeDigest& out) noexcept {
+  Sha256 hash{};
+  hash_label(hash, kLabelEndCarrier);
+  hash_be(hash, network, 8);
+  hash_be(hash, node_i, 8);
+  hash_be(hash, node_r, 8);
+  hash_be(hash, exchange_id, 4);
+  hash.finish(out);
+}
+
+Status session_capability_digest(const ByteView intent44, const ByteView state_r24,
+                                 const ByteView state_i24, ScopeDigest& out) noexcept {
+  out.fill(0);
+  if (intent44.size != 44 || state_r24.size != 24 || state_i24.size != 24 ||
+      intent44.data == nullptr || state_r24.data == nullptr || state_i24.data == nullptr) {
+    return Status::error(StatusCode::InvalidArgument, "session profile widths");
+  }
+  Sha256 hash{};
+  hash_label(hash, kLabelSessionProfile);
+  hash.update(intent44);
+  hash.update(state_r24);
+  hash.update(state_i24);
+  hash.finish(out);
+  return Status::success();
+}
+
+Status session_contexts_digest(const ByteView context_dir1, const ByteView context_dir2,
+                               const ByteView context_rms, ScopeDigest& out) noexcept {
+  out.fill(0);
+  constexpr std::size_t kMaxContextBytes = 256;
+  const ByteView parts[3] = {context_dir1, context_dir2, context_rms};
+  for (const ByteView part : parts) {
+    if (part.data == nullptr || part.size == 0 || part.size > kMaxContextBytes) {
+      return Status::error(StatusCode::InvalidArgument, "session contexts shape");
+    }
+  }
+  Sha256 hash{};
+  hash_label(hash, kLabelContextConfirm);
+  for (const ByteView part : parts) {
+    hash_be(hash, part.size, 2);
+    hash.update(part);
+  }
+  hash.finish(out);
+  return Status::success();
+}
+
 }  // namespace routeloom::keys

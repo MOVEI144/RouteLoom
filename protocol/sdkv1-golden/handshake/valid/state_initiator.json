@@ -1,0 +1,14 @@
+{
+  "boot": 7,
+  "caps": 50331648,
+  "codec": "session_state",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "gk_epoch": 12,
+  "name": "state_initiator",
+  "profile": 1,
+  "purpose": 1,
+  "rs_epoch": 11,
+  "site_epoch": 3,
+  "value_hex": "01010100000000030000000b0000000c0000000703000000"
+}

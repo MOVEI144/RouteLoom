@@ -19,6 +19,7 @@
 
 pub mod authority;
 pub mod rlres1;
+pub mod session;
 
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -125,6 +126,18 @@ fn expand<const N: usize>(prk: &[u8; 32], info: &[u8]) -> [u8; N] {
     let mut out = [0_u8; N];
     hk.expand(info, &mut out).expect("N <= 255 * 32");
     out
+}
+
+/// HKDF-SHA-256-Expand for the RFC 9528 EDHOC_Exporter cross-check (P4
+/// §5.4): `None` above the 255-digest ceiling, never a wrap or panic.
+pub fn hkdf_expand(prk: &[u8; 32], info: &[u8], length: usize) -> Option<Vec<u8>> {
+    if length > 255 * 32 {
+        return None;
+    }
+    let hk = Hkdf::<Sha256>::from_prk(prk).expect("32-byte PRK");
+    let mut out = vec![0_u8; length];
+    hk.expand(info, &mut out).expect("length checked");
+    Some(out)
 }
 
 fn expand_key_iv(prk: &[u8; 32], info: &[u8]) -> TrafficKey {

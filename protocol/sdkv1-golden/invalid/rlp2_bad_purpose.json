@@ -1,0 +1,8 @@
+{
+  "codec": "rlp2",
+  "encoded_hex": "524c50320103010100a1000000000777000000030a1b2c3d7bab16de6d80fe1c253b617cbda1763e0000000100000002000000cb0000020000000009c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf6c63249b",
+  "expect": "error",
+  "format": "routeloom-sdkv1-golden-v1",
+  "name": "rlp2_bad_purpose",
+  "note": "purpose is 1 or 2"
+}
