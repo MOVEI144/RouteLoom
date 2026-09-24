@@ -58,7 +58,11 @@ dedup profileごとの`MeshNode`（RISC-V ILP32）：leaf 102,032 → 74,392、r
 | reference_node config_target_on | runtime + PSK + config journal | 約40.1 KB | 約68.8 KB |
 | reference_node off／route_scoped／deep_sleep | runtime + PSK | 約84 KB | 約112 KB |
 
-bridgeはMeshNodeとUsbBridgeの両方の削減（−37,384 B）、reference nodeはMeshNodeの削減（−28,664 B）を受ける。S3・C5は同じobjectをより大きいSRAMに置くので、C3より残量が大きい。
+bridgeはMeshNodeとUsbBridgeの両方の削減（−37,384 B）、reference nodeはMeshNodeの削減（−28,664 B）を受ける。S3・C5にも同じobjectを置くが、空きSRAMはtarget固有のWi-Fi／IDF code配置に依存するため各targetの`idf.py size`で判定する。
+
+P4 MemberEdhoc構成のC3実測（ESP-IDF v6.0.3、`idf.py size --format json2`）では、bridgeのWi-Fi IRAM最適化を有効にしたままだと静的DRAM空きは3,968 Bでguardに失敗する。bridgeの`ESP_WIFI_IRAM_OPT`と`ESP_WIFI_RX_IRAM_OPT`を無効にすると23,200 B、referenceは51,792 Bで、いずれも8,192 Bのguardを通る。これはWi-Fiの頻用関数をflashへ移す構成であり、無線性能と16 KiB main task stackの実機high-waterはHILで測定する。静的RAMの数値はtask stackの動的使用量を含まない。
+
+C5 bridgeは同じbank容量のMemberEdhoc構成でdefaultのdebug最適化ではHP SRAMが15,600 B超過する。target別defaultsでC5だけsize最適化を選び、Wi-Fiのextra／sleep IRAM配置も外すと、同じIDFの実測で静的HP SRAM空きは10,787 B（8,192 Bのguardを通過）になる。guard超過分は2,595 Bなので、静的状態を増やす変更では再計測する。sleep IRAMの無効化は無線の省電力挙動に影響し得るので、RF性能・消費電流もHILで測る。
 
 ## 5. CIの可視化とguard
 

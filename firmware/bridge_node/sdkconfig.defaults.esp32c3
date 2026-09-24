@@ -1,0 +1,4 @@
+# The C3 gateway keeps 32 link and 128 end sessions alongside USB queues.
+# Move Wi-Fi helpers to flash to retain the 8 KiB static SRAM guard.
+CONFIG_ESP_WIFI_IRAM_OPT=n
+CONFIG_ESP_WIFI_RX_IRAM_OPT=n

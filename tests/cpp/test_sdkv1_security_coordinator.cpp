@@ -213,7 +213,7 @@ struct Fixture {
   FaultyRecordStorage site_storage{kSiteSlotBytes};
   FaultyRecordStorage revocation_storage{kRevocationSlotBytes};
   FaultyRecordStorage local_revocation_storage{kLocalRevocationSlotBytes};
-  FaultyResumeStorage2 resume_storage{16};
+  FaultyResumeStorage2 resume_storage;
   FakeTrustStorage trust_storage{};
   IdentityStore identity{identity_storage};
   SiteStore site{site_storage};
@@ -233,6 +233,9 @@ struct Fixture {
   DiscoveryConfig discovery_config{};
   NeighborDiscovery discovery{discovery_config, discovery_port, authenticator, hooks, entropy,
                               observer};
+
+  explicit Fixture(const std::size_t slots = kResume2NodeLinkQuota + kResume2NodeEndQuota)
+      : resume_storage(slots) {}
 
   SecurityCoordinator::Deps deps() {
     SecurityCoordinator::Deps d{};
@@ -456,6 +459,77 @@ void test_rld1_demux_gates() {
   CHECK(f.mesh.sends.empty());
 }
 
+void test_invalid_proxy_auth_does_not_hold_demux() {
+  current = "invalid_proxy_auth_does_not_hold_demux";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(coordinator.quiescent());
+
+  for (std::uint8_t i = 1; i <= 8; ++i) {
+    autonomy::Rld1Envelope env{};
+    env.kind = FrameType::BootstrapAuth;
+    env.network_hint = static_cast<std::uint32_t>(kNetwork);
+    env.claimed_node = kNode + i;
+    env.transaction_nonce[0] = i;
+    env.body[0] = 1;
+    env.body[1] = static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage);
+    env.body_size = 2;  // valid lane, invalid join object
+    autonomy::Rld1Encoded encoded{};
+    CHECK(autonomy::rld1_encode(env, encoded).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = now;
+    rx.radio_generation = 0;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = 6;
+    rx.rld1_frame = encoded.view();
+    CHECK(coordinator.step(rx).ok());
+  }
+  CHECK(coordinator.quiescent());
+}
+
+void test_clock_regression_refused() {
+  current = "clock_regression_refused";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  const CoordinatorSnapshot before = coordinator.snapshot();
+  CHECK(coordinator.step(poll_at(now - 1)).code == StatusCode::TimeUncertain);
+  const CoordinatorSnapshot after = coordinator.snapshot();
+  CHECK(after.mode == before.mode);
+  CHECK(after.link_sessions == before.link_sessions);
+  CHECK(after.end_sessions == before.end_sessions);
+  CHECK(after.demands == before.demands);
+  CHECK(coordinator.step(poll_at(now + 1)).ok());
+}
+
+void test_gateway_resume_quotas() {
+  current = "gateway_resume_quotas";
+  Fixture f{kResume2GatewayLinkQuota + kResume2GatewayEndQuota};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(gateway_site()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  const CoordinatorSnapshot view = coordinator.snapshot();
+  CHECK(view.resume_link_slots == kResume2GatewayLinkQuota);
+  CHECK(view.resume_end_slots == kResume2GatewayEndQuota);
+}
+
 void test_staged_bootstrap_rx() {
   current = "staged_bootstrap_rx";
   Fixture f{};
@@ -639,6 +713,7 @@ void test_sleep_wake_stop() {
   CoordinatorAction drained{};
   while (coordinator.take_action(drained).ok()) {
   }
+  sleep.now = now;
   CHECK(coordinator.step(sleep).ok());
   CHECK(coordinator.snapshot().sleeping);
   CHECK(coordinator.counters().sleep_parks == 1);
@@ -794,6 +869,9 @@ void test_channel_ready_flow() {
 int main() {
   test_boot_silent_adoption();
   test_rld1_demux_gates();
+  test_invalid_proxy_auth_does_not_hold_demux();
+  test_clock_regression_refused();
+  test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
   test_usb_queue_admission();
   test_usb_refused_without_gateway_role();

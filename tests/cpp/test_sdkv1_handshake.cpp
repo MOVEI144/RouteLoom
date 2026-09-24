@@ -236,12 +236,15 @@ struct Side {
   Side(const NodeId self, const NodeId peer, const MacAddress& mac_self,
        const MacAddress& mac_peer, const routeloom_test::TestKeyPair& key,
        const ByteBuffer<kRlcw1CertMax>& member_cert, const std::uint32_t generation,
-       const std::uint32_t role, const std::uint64_t rng_seed, const std::uint32_t gk_epoch)
+       const std::uint32_t role, const std::uint64_t rng_seed, const std::uint32_t gk_epoch,
+       const bool gateway_cache = false)
       : self(self),
         peer(peer),
         mac_self(mac_self),
         mac_peer(mac_peer),
-        cache(storage, kResume2NodeLinkQuota, kResume2NodeEndQuota),
+        storage(gateway_cache ? 160 : 16),
+        cache(storage, gateway_cache ? 32 : kResume2NodeLinkQuota,
+              gateway_cache ? 128 : kResume2NodeEndQuota),
         sink(bank),
         engine(cache, sink, cookie, membership, verifier, &XorShift::fill, &rng) {
     rng.state = rng_seed;
@@ -286,7 +289,7 @@ struct Side {
   MacAddress mac_self{};
   MacAddress mac_peer{};
   XorShift rng;
-  FaultyResumeStorage2 storage{16};
+  FaultyResumeStorage2 storage;
   ResumeCache2 cache;
   TestBank bank;
   TestSink sink;
@@ -411,11 +414,13 @@ PumpResult pump(Side& a, Side& b, const FrozenLink& frozen,
     for (const auto& send : sends_a) {
       note_send(send);
       now += 50;
+      CHECK_OK(a.engine.accept_send(send.token, send.phase, send.step));
       CHECK_OK(deliver_to(b, a, send, frozen, now));
     }
     for (const auto& send : sends_b) {
       note_send(send);
       now += 50;
+      CHECK_OK(b.engine.accept_send(send.token, send.phase, send.step));
       CHECK_OK(deliver_to(a, b, send, frozen, now));
     }
     if (!progress) break;
@@ -468,7 +473,8 @@ struct Pair {
   // Heap-held: a Side owns the engine/bank and is neither copyable nor movable.
   std::unique_ptr<Side> a;
   std::unique_ptr<Side> b;
-  static Pair make(const std::uint32_t gk_a = kGk, const std::uint32_t gk_b = kGk) {
+  static Pair make(const std::uint32_t gk_a = kGk, const std::uint32_t gk_b = kGk,
+                   const bool gateway_b = false) {
     const auto cert_a =
         member_cert_for(kNodeA, sdkv1_test::device_key().pub, kMemberRoleEndpoint, 3);
     const auto cert_b = member_cert_for(kNodeB, sdkv1_test::other_key().pub, kMemberRoleRelay, 1);
@@ -476,7 +482,7 @@ struct Pair {
     pair.a.reset(new Side(kNodeA, kNodeB, mac_of(0x0A), mac_of(0x0B),
                           sdkv1_test::device_key(), cert_a, 3, kMemberRoleEndpoint, 0xA1, gk_a));
     pair.b.reset(new Side(kNodeB, kNodeA, mac_of(0x0B), mac_of(0x0A), sdkv1_test::other_key(),
-                          cert_b, 1, kMemberRoleRelay, 0xB2, gk_b));
+                          cert_b, 1, kMemberRoleRelay, 0xB2, gk_b, gateway_b));
     CHECK(pair.a->start());
     CHECK(pair.b->start());
     return pair;
@@ -549,6 +555,33 @@ void test_link_edhoc_full() {
   CHECK(result.m1_size + 6 + 16 <= 116);  // object header + cookie, §13.1
 }
 
+void test_responder_waits_for_m4_admission() {
+  Pair pair = Pair::make();
+  const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+  CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+  HandshakeResult m1{}, m2{}, m3{}, m4{}, result{};
+  CHECK_OK(pair.a->engine.take_result(m1));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m1, frozen, kT0 + 50));
+  CHECK_OK(pair.b->engine.take_result(m2));
+  CHECK_OK(deliver_to(*pair.a, *pair.b, m2, frozen, kT0 + 100));
+  CHECK_OK(pair.a->engine.take_result(m3));
+  CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen, kT0 + 150));
+  CHECK_OK(pair.b->engine.take_result(m4));
+  CHECK(m4.event == HandshakeEvent::Send && m4.phase == 4 && m4.step == 4);
+  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 0);
+  CHECK(pair.b->engine.take_result(result).code == StatusCode::NotFound);
+  CHECK_OK(pair.b->engine.poll(kT0 + 550));
+  HandshakeResult retry{};
+  CHECK_OK(pair.b->engine.take_result(retry));
+  CHECK(retry.event == HandshakeEvent::Send && retry.step == 4 &&
+        retry.message_size == m4.message_size);
+  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 0);
+  CHECK_OK(pair.b->engine.accept_send(retry.token, retry.phase, retry.step));
+  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 1);
+  CHECK_OK(pair.b->engine.take_result(result));
+  CHECK(result.event == HandshakeEvent::Established);
+}
+
 void test_resume_after_edhoc() {
   Pair pair = Pair::make();
   FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
@@ -577,6 +610,151 @@ void test_resume_after_edhoc() {
   CHECK(resumed.est_a.has_proof && resumed.est_b.has_proof);
   std::printf("resume sizes: r1=%zu r2=%zu r3=%zu\n", r1_size, resumed.r2_size,
               resumed.r3_size);
+}
+
+void test_gateway_resume_lookup_budget() {
+  {
+    Pair pair = Pair::make(kGk, kGk, true);
+    const FrozenLink frozen = freeze_link(*pair.b, *pair.a, kT0, kCapsFull, kCapsFull);
+    pair.b->storage.read_calls = 0;
+    CHECK_OK(request_link(*pair.b, *pair.a, frozen, kT0));
+    CHECK(pair.b->storage.read_calls <= 16);
+    for (MonotonicMs now = kT0 + 1; now < kT0 + 8; ++now) {
+      pair.b->storage.read_calls = 0;
+      CHECK_OK(pair.b->engine.poll(now));
+      CHECK(pair.b->storage.read_calls <= 16);
+      HandshakeResult send{};
+      if (pair.b->engine.take_result(send).ok()) {
+        CHECK(send.event == HandshakeEvent::Send && send.phase == 4);
+        break;
+      }
+    }
+  }
+  {
+    Pair pair = Pair::make(kGk, kGk, true);
+    FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+    CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+    const PumpResult first = pump(*pair.a, *pair.b, frozen);
+    CHECK(first.established_a && first.established_b);
+    pair.b->storage.slot(31) = pair.b->storage.slot(0);
+    pair.b->storage.slot(0).fill(0xFF);
+    CHECK_OK(pair.a->bank.retire(SecurityScope::Link, kNodeB));
+    CHECK_OK(pair.b->bank.retire(SecurityScope::Link, kNodeA));
+    const MonotonicMs t1 = kT0 + 500;
+    frozen = freeze_link(*pair.a, *pair.b, t1, kCapsFull, kCapsFull);
+    CHECK_OK(request_link(*pair.a, *pair.b, frozen, t1));
+    HandshakeResult r1{};
+    CHECK_OK(pair.a->engine.take_result(r1));
+    CHECK(r1.phase == 5 && r1.step == 1);
+    pair.b->storage.read_calls = 0;
+    CHECK_OK(deliver_to(*pair.b, *pair.a, r1, frozen, t1 + 1));
+    CHECK(pair.b->storage.read_calls <= 16);
+    bool got_r2 = false;
+    HandshakeResult r2{};
+    for (MonotonicMs now = t1 + 2; now < t1 + 16 && !got_r2; ++now) {
+      pair.b->storage.read_calls = 0;
+      CHECK_OK(pair.b->engine.poll(now));
+      CHECK(pair.b->storage.read_calls <= 16);
+      if (pair.b->engine.take_result(r2).ok()) {
+        got_r2 = r2.event == HandshakeEvent::Send && r2.phase == 5 && r2.step == 2;
+      }
+    }
+    CHECK(got_r2);
+    if (got_r2) {
+      CHECK_OK(deliver_to(*pair.a, *pair.b, r2, frozen, t1 + 20));
+      HandshakeResult r3{}, established{};
+      CHECK_OK(pair.a->engine.take_result(r3));
+      CHECK(r3.event == HandshakeEvent::Send && r3.step == 3);
+      CHECK_OK(deliver_to(*pair.b, *pair.a, r3, frozen, t1 + 21));
+      CHECK_OK(pair.b->engine.take_result(established));
+      CHECK(established.event == HandshakeEvent::Established);
+    }
+  }
+  {
+    Pair pair = Pair::make(kGk, kGk, true);
+    const FrozenLink frozen = freeze_link(*pair.a, *pair.b, kT0, kCapsFull, kCapsFull);
+    CHECK_OK(request_link(*pair.a, *pair.b, frozen, kT0));
+    const PumpResult first = pump(*pair.a, *pair.b, frozen);
+    CHECK(first.established_a && first.established_b);
+    ResumeSlot2 slot{};
+    CHECK(slot_for(*pair.b, kNodeA, slot));
+    slot.purpose = ResumePurpose::End;
+    CHECK_OK(resume2_slot_encode(slot, pair.b->storage.slot(159)));
+    HandshakeRequest request{};
+    request.scope = SecurityScope::EndToEnd;
+    request.peer = kNodeA;
+    request.reason = HandshakeReason::Initial;
+    const MonotonicMs t1 = kT0 + 500;
+    pair.b->storage.read_calls = 0;
+    CHECK_OK(pair.b->engine.request(request, t1));
+    CHECK(pair.b->storage.read_calls <= 16);
+    bool sent_r1 = false;
+    for (MonotonicMs now = t1 + 1; now < t1 + 12 && !sent_r1; ++now) {
+      pair.b->storage.read_calls = 0;
+      CHECK_OK(pair.b->engine.poll(now));
+      CHECK(pair.b->storage.read_calls <= 16);
+      HandshakeResult out{};
+      if (pair.b->engine.take_result(out).ok()) {
+        sent_r1 = out.event == HandshakeEvent::Send && out.phase == 5 && out.step == 1;
+      }
+    }
+    CHECK(sent_r1);
+  }
+}
+
+void test_routed_end_exchange() {
+  Pair pair = Pair::make();
+  HandshakeRequest request{};
+  request.scope = SecurityScope::EndToEnd;
+  request.peer = kNodeB;
+  request.reason = HandshakeReason::Initial;
+  const auto exchange = [&](const MonotonicMs start, const std::uint8_t expected_phase) {
+    CHECK_OK(pair.a->engine.request(request, start));
+    bool established_a = false, established_b = false;
+    bool first_send = true;
+    MonotonicMs now = start;
+    for (int turn = 0; turn < 16 && !(established_a && established_b); ++turn) {
+      bool progressed = false;
+      for (Side* from : {pair.a.get(), pair.b.get()}) {
+        Side* to = from == pair.a.get() ? pair.b.get() : pair.a.get();
+        HandshakeResult out{};
+        while (from->engine.take_result(out).ok()) {
+          progressed = true;
+          if (out.event == HandshakeEvent::Established) {
+            if (from == pair.a.get()) established_a = true;
+            else established_b = true;
+            continue;
+          }
+          CHECK(out.event == HandshakeEvent::Send);
+          if (out.event != HandshakeEvent::Send) continue;
+          if (first_send) {
+            CHECK(out.phase == expected_phase && out.step == 1);
+            first_send = false;
+          }
+          CHECK_OK(from->engine.accept_send(out.token, out.phase, out.step));
+          HandshakeRx rx{};
+          rx.scope = SecurityScope::EndToEnd;
+          rx.phase = out.phase;
+          rx.step = out.step;
+          rx.claimed_peer = from->self;
+          rx.exchange_id = out.exchange_id;
+          CHECK(rx.exchange_id != 0);
+          now += 50;
+          CHECK_OK(to->engine.on_message(rx, ByteView{out.message.data(), out.message_size}, now));
+        }
+      }
+      if (!progressed) break;
+    }
+    CHECK(established_a && established_b);
+  };
+  exchange(kT0, 4);
+  CHECK(pair.a->bank.live_count(SecurityScope::EndToEnd) == 1);
+  CHECK(pair.b->bank.live_count(SecurityScope::EndToEnd) == 1);
+  CHECK_OK(pair.a->bank.retire(SecurityScope::EndToEnd, kNodeB));
+  CHECK_OK(pair.b->bank.retire(SecurityScope::EndToEnd, kNodeA));
+  exchange(kT0 + 500, 5);
+  CHECK(pair.a->bank.live_count(SecurityScope::EndToEnd) == 1);
+  CHECK(pair.b->bank.live_count(SecurityScope::EndToEnd) == 1);
 }
 
 void test_resume_slot_replaced_before_commit() {
@@ -651,11 +829,14 @@ void test_local_change_during_commit_cancels_result() {
   CHECK_OK(deliver_to(*pair.a, *pair.b, m2, frozen, kT0 + 100));
   CHECK_OK(pair.a->engine.take_result(m3));
   CHECK(m3.step == 3);
-  pair.b->membership.change_on_local_call = pair.b->membership.local_calls + 2;
   CHECK_OK(deliver_to(*pair.b, *pair.a, m3, frozen, kT0 + 150));
-  HandshakeResult out{};
+  HandshakeResult m4{}, out{};
+  CHECK_OK(pair.b->engine.take_result(m4));
+  CHECK(m4.event == HandshakeEvent::Send && m4.step == 4);
+  pair.b->membership.change_on_local_call = pair.b->membership.local_calls + 1;
+  CHECK(!pair.b->engine.accept_send(m4.token, m4.phase, m4.step).ok());
+  CHECK(pair.b->bank.live_count(SecurityScope::Link) == 0);
   CHECK(pair.b->engine.take_result(out).code == StatusCode::NotFound);
-  CHECK(out.token == 0 && out.message_size == 0);
   CHECK(pair.b->engine.quiescent());
 }
 
@@ -1129,7 +1310,10 @@ void test_bank_sink_forwarding() {
 
 int main() {
   test_link_edhoc_full();
+  test_responder_waits_for_m4_admission();
   test_resume_after_edhoc();
+  test_gateway_resume_lookup_budget();
+  test_routed_end_exchange();
   test_resume_slot_replaced_before_commit();
   test_pending_send_invalidated_by_membership_loss();
   test_local_epoch_floor_survives_reconfiguration();

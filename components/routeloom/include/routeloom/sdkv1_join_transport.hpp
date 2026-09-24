@@ -512,6 +512,22 @@ inline RelayToken relay_token_of(const RelayHeader& header) noexcept {
   return token;
 }
 
+// A gateway joining through its own USB port has no member service epoch
+// yet. The durable boot witness distinguishes attempts across restarts;
+// the random relay id distinguishes attempts within that boot.
+inline RelayToken local_join_token(const std::uint32_t boot_witness,
+                                   const std::uint32_t relay_id) noexcept {
+  return RelayToken{boot_witness, boot_witness, relay_id};
+}
+
+inline bool local_join_token_matches(const RelayToken token,
+                                     const std::uint32_t boot_witness,
+                                     const std::uint32_t relay_id) noexcept {
+  return boot_witness != 0 && relay_id != 0 &&
+         token.gateway_epoch == boot_witness &&
+         token.proxy_epoch == boot_witness && token.relay_id == relay_id;
+}
+
 // Abort body (5 B): status u8 (RelayStatusCode) | retry_after_ms u32 (<= 600000).
 constexpr std::size_t kRelayAbortBodySize = 5;
 struct RelayAbortBody {

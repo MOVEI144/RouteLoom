@@ -1916,7 +1916,7 @@ class MeshNode {
   // internal paths never call the guarded entries.
   Status send_service_impl(NodeId destination, ByteView payload,
                            std::uint32_t lifetime_ms, Priority priority,
-                           MonotonicMs now_ms, MessageId& id) noexcept;
+                         MonotonicMs now_ms, MessageId& id) noexcept;
 
   Status encode_job(TxJob& job, MonotonicMs now_ms) noexcept;
   // True when an AuthRequired encode refusal is a missing/pending session

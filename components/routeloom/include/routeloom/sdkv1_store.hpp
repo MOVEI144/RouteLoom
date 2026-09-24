@@ -391,6 +391,16 @@ class ResumeCache2 {
  public:
   static constexpr std::uint32_t kTouchBootInterval = 256;
   static constexpr std::size_t kUseBudgetEntries = 8;
+  static constexpr std::size_t kLookupStepSlots = 16;
+
+  struct LookupCursor {
+    std::size_t next{0};
+    std::size_t index{0};
+    ResumeSlot2 match{};
+    bool initialized{false};
+    bool found{false};
+    bool ambiguous{false};
+  };
 
   ResumeCache2(ResumeSlotStorage2& storage, std::size_t link_quota,
                std::size_t end_quota) noexcept
@@ -416,6 +426,16 @@ class ResumeCache2 {
   Status find_by_id(ResumePurpose purpose, const std::array<std::uint8_t, 8>& rid,
                     NodeId claimed_peer, const ResumeContext& context, ResumeSlot2& out,
                     std::size_t& index) noexcept;
+  // A cooperative lookup step reads at most 16 NVS slots. The caller owns
+  // the cursor for one exchange and repeats until done; an id search scans
+  // the full partition before accepting a match so collisions fail closed.
+  Status find_by_peer_step(ResumePurpose purpose, NodeId peer,
+                           const ResumeContext& context, LookupCursor& cursor,
+                           bool& done) noexcept;
+  Status find_by_id_step(ResumePurpose purpose,
+                         const std::array<std::uint8_t, 8>& rid,
+                         NodeId claimed_peer, const ResumeContext& context,
+                         LookupCursor& cursor, bool& done) noexcept;
   // Direct slot read. `intact=false` (with an empty slot) on torn/corrupt
   // bytes; a storage error is still an error.
   Status read_at(std::size_t index, ResumeSlot2& out, bool& intact) noexcept;
