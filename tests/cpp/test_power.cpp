@@ -207,10 +207,14 @@ class RecordingPowerEvents final : public PowerEvents {
   std::vector<Transition> transitions;
   std::vector<std::pair<MessageId, StatusCode>> pending_results;
   std::vector<std::string> diagnostics;
+  // Runs INSIDE the transition notification — for re-entrant coordinator
+  // calls (sleep_abort) from an on_transition callback.
+  std::function<void(PowerState, PowerState, const char*)> on_transition_fn;
 
   void on_transition(PowerState from, PowerState to,
                      const char* reason) noexcept override {
     transitions.push_back({from, to, reason});
+    if (on_transition_fn) on_transition_fn(from, to, reason);
   }
   void on_pending_result(const PendingDeliveryRecord& record,
                          StatusCode code) noexcept override {
@@ -1938,6 +1942,154 @@ void test_disposition_callback_send_refused() {
   CHECK(std::strcmp(group_status.detail, "NODE_DRAINING") == 0);
 }
 
+void test_settlement_abort_reprepare_stops_old_policy() {
+  // A settlement callback that aborts AND re-prepares ends the old attempt
+  // outright: the second group origin settles under the NEW attempt's Defer
+  // policy, never under the stale Fail one (#110 review, attempt pinning).
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  w.send_all(w.a, options);  // seq 1
+  w.send_all(w.a, options);  // seq 2
+
+  Status abort_status = Status::error(StatusCode::InternalError, "not run");
+  Status prepare_status = Status::error(StatusCode::InternalError, "not run");
+  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
+    if (result.state != DeliveryState::Failed ||
+        std::strcmp(result.reason, "SLEEP_DRAIN") != 0 ||
+        abort_status.code != StatusCode::InternalError) {
+      return;  // act once, on the first settled origin
+    }
+    abort_status = coordinator.sleep_abort("APP_VETO");
+    SleepRequest retry{};
+    retry.pending_policy = SleepWorkPolicy::Defer;
+    prepare_status = coordinator.sleep_prepare(retry, w.now);
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(abort_status.ok());
+  CHECK(prepare_status.ok());
+  // Origin 1 settled under the old Fail attempt; origin 2 belongs to the
+  // new Defer attempt — the stale Fail settlement must not resume for it.
+  CHECK(w.observer_a.group_results.size() == 2);
+  CHECK(w.observer_a.group_results[0].state == DeliveryState::Failed);
+  CHECK(std::strcmp(w.observer_a.group_results[0].reason, "SLEEP_DRAIN") == 0);
+  CHECK(w.observer_a.group_results[1].state == DeliveryState::Indeterminate);
+  CHECK(std::strcmp(w.observer_a.group_results[1].reason, "SLEEP_DEFERRED") == 0);
+}
+
+void test_poll_delivery_callback_abort_stops_drain() {
+  // A delivery callback fired by node_.poll() mid-drain can veto the sleep:
+  // the same poll must not roll into finish_drain and reach READY_TO_SLEEP
+  // with a live ticket (#110 review, GROUP_INCOMPLETE repro).
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  options.lifetime_ms = 300;  // expires mid-drain → GROUP_INCOMPLETE
+  w.send_all(w.a, options);
+
+  Status abort_status = Status::error(StatusCode::InternalError, "not run");
+  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
+    if (abort_status.code == StatusCode::InternalError &&
+        result.state == DeliveryState::Failed &&
+        std::strcmp(result.reason, "GROUP_INCOMPLETE") == 0) {
+      abort_status = coordinator.sleep_abort("APP_VETO");
+    }
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(abort_status.ok());
+  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                      "SLEEP_READY"));
+  CHECK(!coordinator.ticket().issued);
+}
+
+void test_settlement_callback_app_event_invalidates_ticket() {
+  // App activity signalled inside a settlement callback must invalidate the
+  // sleep exactly like late activity in READY_TO_SLEEP: no ticket is
+  // issued and the attempt aborts to RUNNING (#110 review).
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  w.send_all(w.a, options);
+
+  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
+    if (result.state == DeliveryState::Failed &&
+        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
+      coordinator.notify_app_event();
+    }
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                      "SLEEP_READY"));
+  CHECK(!coordinator.ticket().issued);
+  CHECK(w.events.has_diag("SLEEP_TICKET_INVALID"));
+}
+
+void test_ready_transition_callback_abort_not_overwritten() {
+  // The SLEEP_READY transition notification is an app callback: an abort
+  // inside it must stand — transition() must not overwrite the RUNNING the
+  // abort produced with its stale target (#110 review).
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  Status abort_status = Status::error(StatusCode::InternalError, "not run");
+  w.events.on_transition_fn = [&](PowerState from, PowerState to,
+                                  const char* reason) {
+    if (from == PowerState::Persisting && to == PowerState::ReadyToSleep &&
+        std::strcmp(reason, "SLEEP_READY") == 0 &&
+        abort_status.code == StatusCode::InternalError) {
+      abort_status = coordinator.sleep_abort("APP_VETO");
+    }
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(abort_status.ok());
+  CHECK(coordinator.state() == PowerState::Running);
+  CHECK(!coordinator.ticket().issued);
+  CHECK(w.events.saw(PowerState::Persisting, PowerState::Running,
+                     "SLEEP_ABORTED"));
+  // The stale READY_TO_SLEEP assignment must never take effect: a leftover
+  // READY would show up as a ReadyToSleep→Running cleanup transition (and a
+  // SLEEP_TICKET_INVALID abort) on a later poll.
+  CHECK(!w.events.saw(PowerState::ReadyToSleep, PowerState::Running));
+  CHECK(!w.events.has_diag("SLEEP_TICKET_INVALID"));
+}
+
 }  // namespace
 
 int main() {
@@ -1987,6 +2139,10 @@ int main() {
   test_group_settled_callback_abort_new_send();
   test_unicast_disposition_callback_abort_new_send();
   test_disposition_callback_send_refused();
+  test_settlement_abort_reprepare_stops_old_policy();
+  test_poll_delivery_callback_abort_stops_drain();
+  test_settlement_callback_app_event_invalidates_ticket();
+  test_ready_transition_callback_abort_not_overwritten();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;

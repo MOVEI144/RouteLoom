@@ -897,14 +897,18 @@ class MeshNode {
   // application sees through on_group_delivery (Save cannot apply — groups
   // are never persisted — so it fails honestly), and ordered holds are
   // released to the application in stream order.
-  template <typename WasSavedFn>
+  //
+  // `still_current` is asked before EVERY settled item and every released
+  // hold. A callback inside this loop can veto or replace the sleep attempt
+  // (sleep_abort, a fresh sleep_prepare); once it does, the predicate goes
+  // false and settlement stops — remaining and newly queued work belongs to
+  // the new attempt, never to this one.
+  template <typename WasSavedFn, typename StillCurrentFn>
   void apply_sleep_dispositions(SleepWorkPolicy fallback,
-                                WasSavedFn&& was_saved) noexcept {
+                                WasSavedFn&& was_saved,
+                                StillCurrentFn&& still_current) noexcept {
     deliveries_.for_each([&](Delivery& delivery) {
-      // A callback inside this loop can abort the sleep (draining cleared):
-      // settlement then stops so remaining — and newly queued — work stays
-      // live instead of failing with a sleep reason it never asked for.
-      if (!sleep_draining_ || sleep_terminal(delivery.state)) return;
+      if (!still_current() || sleep_terminal(delivery.state)) return;
       const bool durable = delivery.options.persist_across_sleep;
       const bool eligible = durable || fallback == SleepWorkPolicy::Save;
       if (eligible && was_saved(delivery.id)) {
@@ -917,7 +921,7 @@ class MeshNode {
       }
     });
     group_origins_.for_each([&](GroupOrigin& origin) {
-      if (!sleep_draining_ || sleep_terminal(origin.state)) return;
+      if (!still_current() || sleep_terminal(origin.state)) return;
       if (fallback == SleepWorkPolicy::Defer) {
         group_origin_terminal(origin, DeliveryState::Indeterminate,
                               "SLEEP_DEFERRED");
@@ -928,7 +932,7 @@ class MeshNode {
                                   : "SLEEP_DRAIN");
       }
     });
-    group_release_holds();
+    group_release_holds(still_current);
   }
 
   // Re-injects a persisted delivery under its ORIGINAL logical message id so
@@ -1899,7 +1903,32 @@ class MeshNode {
   // group round still collects reports, and the ordered-hold release the
   // sleep settlement runs so READY_TO_SLEEP never leaves payloads held.
   bool group_radio_pending() const noexcept;
-  void group_release_holds() noexcept;
+  // Every held message goes out through the same path an expired hold takes
+  // (process_group): the stream cursor skips to each held seq, the gap is
+  // counted and the hold itself drains right after — in stream order. Runs
+  // only while the sleep attempt is still current: an on_group_message
+  // callback that aborts or replaces it stops the release and keeps the
+  // remaining holds for the new attempt.
+  template <typename StillCurrentFn>
+  void group_release_holds(StillCurrentFn&& still_current) noexcept {
+    while (still_current()) {
+      GroupHold* lowest = nullptr;
+      group_holds_.for_each([&](GroupHold& value) {
+        if (lowest == nullptr || value.info.group_seq < lowest->info.group_seq) {
+          lowest = &value;
+        }
+      });
+      if (lowest == nullptr) return;
+      GroupStream* stream = group_streams_.find([&](const GroupStream& value) {
+        return value.source == lowest->info.key.origin;
+      });
+      if (stream == nullptr) {
+        group_holds_.release(lowest);  // defensive: holds only exist with a stream
+        continue;
+      }
+      group_skip_to(*stream, lowest->info.group_seq);
+    }
+  }
 
   // §14 management airtime bucket (03-congestion.md §8 — local calibrated
   // accounting only). control_budget_balance refills to `now_ms` and

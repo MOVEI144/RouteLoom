@@ -189,7 +189,13 @@ PowerCoordinator::PowerCoordinator(const PowerConfig& config, MeshNode& node,
 void PowerCoordinator::transition(const PowerState next,
                                   const char* reason) noexcept {
   if (state_ == next) return;
-  events_.on_transition(state_, next, reason);
+  const PowerState from = state_;
+  const std::uint32_t attempt = attempt_;
+  events_.on_transition(from, next, reason);
+  // The notification runs application code: a veto inside it (sleep_abort,
+  // which bumps attempt_ and lands in RUNNING) already drove the machine.
+  // Never overwrite that outcome with this transition's stale target.
+  if (state_ != from || attempt_ != attempt) return;
   state_ = next;
 }
 
@@ -231,6 +237,9 @@ Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
   request_ = request;
   node_.set_draining(true);
   drain_deadline_ms_ = now_ms + config_.drain_timeout_ms;
+  // New attempt: every callback site from here on pins this generation so
+  // re-entrant aborts/prepares cannot resume stale work on its behalf.
+  ++attempt_;
   transition(PowerState::Draining, "SLEEP_PREPARE");
   return Status::success();
 }
@@ -297,8 +306,18 @@ Status PowerCoordinator::sleep_enter(const SleepTicket& ticket,
       }
     }
   }
+  // The on_pending_result notifications above are app callbacks: one may
+  // have vetoed the sleep. Never consume the ticket on an aborted attempt.
+  if (state_ != PowerState::ReadyToSleep) {
+    return Status::error(StatusCode::InvalidState, "SLEEP_TICKET_INVALID");
+  }
   ticket_ = SleepTicket{};  // consume: no other ticket can re-enter
   transition(PowerState::Sleeping, "SLEEP_ENTER");
+  if (state_ != PowerState::Sleeping) {
+    // The transition notification vetoed the entry — the abort already
+    // landed the coordinator in RUNNING; do not enter sleep behind it.
+    return Status::error(StatusCode::InvalidState, "SLEEP_ABORTED");
+  }
   auto status = port_.configure_wake(request_.wake);
   if (status) status = port_.enter_sleep();
   if (!status) {
@@ -325,12 +344,18 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
     case PowerState::Running:
       node_.poll(now_ms);
       break;
-    case PowerState::Draining:
+    case PowerState::Draining: {
+      // node_.poll() runs app callbacks (delivery/group terminal events):
+      // an abort or re-prepare inside one ends this attempt — the stale
+      // attempt must not roll into finish_drain on its old deadline.
+      const std::uint32_t attempt = attempt_;
       node_.poll(now_ms);
+      if (attempt_ != attempt || state_ != PowerState::Draining) break;
       if (node_.quiesced() || now_ms >= drain_deadline_ms_) {
-        finish_drain(now_ms);
+        finish_drain(attempt, now_ms);
       }
       break;
+    }
     case PowerState::ReadyToSleep:
       // Radio is quiesced; a ticket invalidated by late activity aborts the
       // sleep attempt instead of entering on a stale snapshot.
@@ -362,9 +387,16 @@ void PowerCoordinator::poll(const MonotonicMs now_ms) noexcept {
   }
 }
 
-void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
+void PowerCoordinator::finish_drain(const std::uint32_t attempt,
+                                    const MonotonicMs now_ms) noexcept {
+  // Pinned attempt only: an abort or a re-prepare seen between poll() and
+  // here means a different sleep attempt owns the machine now.
+  if (attempt_ != attempt || state_ != PowerState::Draining) return;
   transition(PowerState::Persisting,
              node_.quiesced() ? "DRAIN_SETTLED" : "DRAIN_DEADLINE");
+  // The transition notification itself is application code — it may have
+  // vetoed the attempt (sleep_abort) or replaced it (sleep_prepare).
+  if (attempt_ != attempt || state_ != PowerState::Persisting) return;
   // Records already durable in the previous image — e.g. a pending retained
   // when its resume re-inject failed — are invisible to the node snapshot
   // below: the live delivery is no longer offerable. They are carried over
@@ -438,6 +470,13 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
       events_.on_pending_result(record, StatusCode::NoCapacity);
     }
   }
+  // on_pending_result() is an app callback too: a veto inside it ends this
+  // attempt — keep the uncommitted snapshot out of the next drain's
+  // carry-over set, exactly like the commit-failure rollback below.
+  if (attempt_ != attempt || state_ != PowerState::Persisting) {
+    image_ = previous_image;
+    return;
+  }
   const auto status = persist_image();
   if (!status) {
     // Abort before dispositions ran: the rebuilt image was never persisted
@@ -465,17 +504,23 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   // still sees the coordinator in PERSISTING with the node draining: a
   // send()/send_group() inside one is refused by the drain pause, and a
   // sleep_abort() lands in RUNNING instead of racing a ticket that does not
-  // exist yet.
+  // exist yet. `still_current` pins the settlement to this attempt — an
+  // abort or a re-prepare inside any callback stops it item-by-item, so the
+  // old attempt can never settle work belonging to a new one.
+  const std::uint32_t app_events = app_events_;
   node_.apply_sleep_dispositions(
       request_.pending_policy, [&](const MessageId& id) {
         for (const auto& record : image_.pending) {
           if (record.used && record.original_id == id) return true;
         }
         return false;
+      },
+      [&] {
+        return attempt_ == attempt && state_ == PowerState::Persisting;
       });
   // A disposition callback aborted the sleep: the node is already back in
   // RUNNING with its queues live — no teardown, no radio quiesce, no ticket.
-  if (state_ != PowerState::Persisting) return;
+  if (attempt_ != attempt || state_ != PowerState::Persisting) return;
   node_.quiesce_for_sleep();
   const auto radio = port_.quiesce_radio();
   if (!radio) {
@@ -484,6 +529,15 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
   }
   radio_quiesced_ = true;
   ++radio_generation_;
+  // A notify_app_event() inside any callback above must invalidate the
+  // sleep exactly like late activity does in READY_TO_SLEEP — a ticket
+  // issued now would bake the event in and be born valid. Refused sends
+  // are NOT vetoed here: their work_generation bump is already covered by
+  // the deterministic NODE_DRAINING error returned to the caller.
+  if (app_events_ != app_events) {
+    abort_to_running("SLEEP_TICKET_INVALID");
+    return;
+  }
   issue_ticket();
   transition(PowerState::ReadyToSleep, "SLEEP_READY");
 }
@@ -680,6 +734,10 @@ void PowerCoordinator::restore_pending(const PowerImage& image,
 }
 
 void PowerCoordinator::abort_to_running(const char* reason) noexcept {
+  // Bump BEFORE any callback: the attempt is over the moment we commit to
+  // aborting, so every pinned check — including re-entrant ones fired from
+  // the notifications below — sees it as stale.
+  ++attempt_;
   events_.on_diagnostic(reason);
   ticket_ = SleepTicket{};
   if (radio_quiesced_) {

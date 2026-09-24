@@ -1082,31 +1082,6 @@ bool MeshNode::group_radio_pending() const noexcept {
   return pending;
 }
 
-void MeshNode::group_release_holds() noexcept {
-  // Every held message goes out through the same path an expired hold takes
-  // (process_group): the stream cursor skips to each held seq, the gap is
-  // counted and the hold itself drains right after — in stream order. Runs
-  // only while the sleep drain is live: an on_group_message callback that
-  // aborts the sleep stops the release and keeps the remaining holds.
-  while (sleep_draining_) {
-    GroupHold* lowest = nullptr;
-    group_holds_.for_each([&](GroupHold& value) {
-      if (lowest == nullptr || value.info.group_seq < lowest->info.group_seq) {
-        lowest = &value;
-      }
-    });
-    if (lowest == nullptr) return;
-    GroupStream* stream = group_streams_.find([&](const GroupStream& value) {
-      return value.source == lowest->info.key.origin;
-    });
-    if (stream == nullptr) {
-      group_holds_.release(lowest);  // defensive: holds only exist with a stream
-      continue;
-    }
-    group_skip_to(*stream, lowest->info.group_seq);
-  }
-}
-
 // --- poll() driver ------------------------------------------------------------------
 
 void MeshNode::process_group(const MonotonicMs now_ms) noexcept {

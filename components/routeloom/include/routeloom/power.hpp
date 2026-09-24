@@ -213,7 +213,7 @@ class PowerCoordinator {
   void transition(PowerState next, const char* reason) noexcept;
   std::uint32_t pending_generation() const noexcept;
   void issue_ticket() noexcept;
-  void finish_drain(MonotonicMs now_ms) noexcept;
+  void finish_drain(std::uint32_t attempt, MonotonicMs now_ms) noexcept;
   Status persist_image() noexcept;
   void resume_flow(ResetCause cause, ElapsedInterval elapsed,
                    MonotonicMs now_ms) noexcept;
@@ -240,6 +240,11 @@ class PowerCoordinator {
   std::uint32_t next_ticket_id_{1};
   std::uint32_t radio_generation_{0};
   std::uint32_t app_events_{0};
+  // Sleep-attempt generation: bumped by sleep_prepare() and by every
+  // abort_to_running(). App callbacks can re-enter (sleep_abort, a fresh
+  // sleep_prepare); every site that runs application code pins the attempt
+  // it serves and stops if the generation moved on underneath it.
+  std::uint32_t attempt_{0};
   MonotonicMs drain_deadline_ms_{0};
   MonotonicMs resume_deadline_ms_{0};
   std::uint32_t confirm_baseline_{0};
