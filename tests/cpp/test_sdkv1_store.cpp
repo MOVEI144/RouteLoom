@@ -725,6 +725,15 @@ void test_revocation_accept() {
   CHECK(store.accept(revocation_object(revocation_set(15, 1, 1)).view(), sak().pub, kSiteId,
                      kNetwork)
             .code == StatusCode::Conflict);
+  // A newer signed set in the same site epoch cannot forget a revocation
+  // or lower its minimum generation.
+  RevocationSet weaker = revocation_set(15);
+  weaker.entries[0].min_generation = 1;
+  CHECK(store.accept(revocation_object(weaker).view(), sak().pub, kSiteId, kNetwork).code ==
+        StatusCode::Conflict);
+  CHECK(store.accept(revocation_object(revocation_set(15, 1)).view(), sak().pub, kSiteId,
+                     kNetwork)
+            .code == StatusCode::Conflict);
   // Authenticity verdicts.
   CHECK(store.accept(revocation_object(revocation_set(16), other_key()).view(), sak().pub,
                      kSiteId, kNetwork)
@@ -739,17 +748,15 @@ void test_revocation_accept() {
   garbage.bytes[0] = 0xD3;
   CHECK(store.accept(garbage.view(), sak().pub, kSiteId, kNetwork).code ==
         StatusCode::ProtocolError);
-  // Same-network compression is refused: past entries can only be dropped
-  // by a verified cutover (P6 PR-C journal evidence), never by a plain
-  // accept() (04 §2).
-  const auto cutover = revocation_object(revocation_set(16, 0, kSiteEpoch));
-  CHECK(store.accept(cutover.view(), sak().pub, kSiteId, kNetwork).code == StatusCode::Conflict);
-  // A new-network set — the cutover adoption shape, where the caller's RLS1
-  // expectation moved first — starts its own history.
+  // Same-network compression is refused: only verified cutover starts a new history.
+  const auto dropped = revocation_object(revocation_set(16, 0, kSiteEpoch));
+  CHECK(store.accept(dropped.view(), sak().pub, kSiteId, kNetwork).code == StatusCode::Conflict);
+  const auto retained = revocation_object(revocation_set(16, 2, kSiteEpoch));
+  CHECK_OK(store.accept(retained.view(), sak().pub, kSiteId, kNetwork));
   const NetworkId next_network =
       (static_cast<NetworkId>(kSiteEpoch + 1) << 32U) | kNetworkLow;
   const auto next_set =
-      revocation_object(revocation_set(16, 0, kSiteEpoch + 1, next_network));
+      revocation_object(revocation_set(17, 0, kSiteEpoch + 1, next_network));
   CHECK_OK(store.accept(next_set.view(), sak().pub, kSiteId, next_network));
   CHECK(store.set().count == 0 && store.set().network == next_network &&
         store.rejects(kNode, 3, kSiteEpoch));
@@ -1190,8 +1197,11 @@ void test_resume2_uses() {
     storage.read_error = true;
     CHECK(!cache.reserve_uses(index, context(), 3000, false).ok());
     storage.disarm();
-    // Peer 100's slot is spent; re-put a fresh RMS and the count restarts.
+    // Peer 100's slot is spent. Rewriting the same RMS must not reset its
+    // durable 64-use high-water; a new RMS may start a new generation.
     ResumeSlot2 fresh = resume2_slot(100, 0, 4000);
+    CHECK(cache.put(fresh, context()).code == StatusCode::Conflict);
+    fresh.rms[0] ^= 0x5A;
     CHECK_OK(cache.put(fresh, context()));
     ResumeSlot2 slot{};
     CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), slot, index));
@@ -1280,6 +1290,17 @@ void test_local_revocation_basic() {
   CHECK(reboot.has_record());
   CHECK(reboot.record().state == LocalRevocationState::Cleaned);
   CHECK(reboot.record().removed_generation == 3);
+  // After a full join to another site, its own removal replaces the
+  // completed evidence and remains blocking across reboot.
+  LocalRevocationRecord next_site = removal_record();
+  next_site.site_id = 0x1234;
+  next_site.network = (NetworkId{4} << 32U) | 0x1234;
+  next_site.evidence_digest.fill(0xAB);
+  CHECK_OK(reboot.commit_blocked(next_site));
+  LocalRevocationStore second_reboot(storage);
+  CHECK_OK(second_reboot.initialize());
+  CHECK(second_reboot.blocks_membership(true));
+  CHECK(second_reboot.record().site_id == next_site.site_id);
 }
 
 void test_local_revocation_power_cuts() {

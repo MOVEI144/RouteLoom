@@ -1,6 +1,6 @@
 {
   "format": "routeloom-vendored-sources-v1",
-  "note": "Upstream files are byte-identical to the pinned commits: `files` maps each vendored path (relative to its directory) to the git blob id at that commit. tests/test_vendored_sources.py recomputes them. RouteLoom glue lives outside these directories (src/edhoc/).",
+  "note": "files maps vendored paths to checked-in git blob ids. All are byte-identical to the pinned upstream commits except the one documented zcbor null/zero-length memmove patch; tests/test_vendored_sources.py checks its exact upstream transformation. RouteLoom glue lives in src/edhoc/.",
   "components": [
     {
       "name": "libedhoc",
@@ -159,7 +159,13 @@
         "include/zcbor_tags.h": "89148776c6073d13f1364098ad49c777bcbdd764",
         "src/zcbor_common.c": "1caf806688b230bc5c31bcc715ecefcf2619b3a1",
         "src/zcbor_decode.c": "92f9fe5171e22848dc9da2b37a465edb5f243f39",
-        "src/zcbor_encode.c": "44411ea3573c5f2e6f3e634e6011c1f0ed692e43"
+        "src/zcbor_encode.c": "d98d94d0c6bd44f700541d15d52903ff7ebea27f"
+      },
+      "local_patches": {
+        "src/zcbor_encode.c": {
+          "upstream_blob": "44411ea3573c5f2e6f3e634e6011c1f0ed692e43",
+          "reason": "Skip zero-byte memmove with the null pointer used by libedhoc Encrypt0 protected headers."
+        }
       }
     },
     {

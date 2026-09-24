@@ -721,6 +721,7 @@ Status RevocationStore::accept(const ByteView object, const P256PublicKey& sak_p
     if (candidate.network == set_.network && !revocation_covers(set_, candidate)) {
       return Status::error(StatusCode::Conflict, "revocation entry omitted or weakened");
     }
+    }
   }
   return store(object, false, candidate);
 }
@@ -1133,6 +1134,10 @@ Status ResumeCache2::put(const ResumeSlot2& slot, const ResumeContext& context) 
     bool intact = true;
     const Status status = read_slot(i, current, intact);
     if (!status) return status;
+    if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer &&
+        current.network == slot.network && current.rms == slot.rms) {
+      return Status::error(StatusCode::Conflict, "resume2 rms already cached");
+    }
     const bool live = usable(current, context);
     if (current.valid && current.purpose == slot.purpose && current.peer == slot.peer) {
       if (same == kNone) same = i;
