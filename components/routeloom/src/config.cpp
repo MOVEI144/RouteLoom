@@ -650,8 +650,9 @@ Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason 
   record.config_namespace = config_.config_namespace;
   record.schema = config_.schema;
   record.issuer = txn.command.authority;
-  // The pin in force at commit (the durable pin is what boot adopts).
-  record.issuer_generation = authority_generation_;
+  // Which generation authorized this record (forensic metadata — the
+  // decision-time policy lives in the verifier, not in the journal).
+  record.issuer_generation = txn.command.authority_generation;
   record.authority_sequence = txn.command.authority_sequence;
   record.operation_id = txn.command.operation_id;
   record.command_digest = txn.command_digest;
@@ -676,12 +677,10 @@ Status ConfigJournal::persist_phase(const ConfigPhase phase, const ConfigReason 
 Status ConfigJournal::adopt_record(const JournalRecord& record) noexcept {
   durable_ = record;
   store_generation_ = record.store_generation;
-  // The record's issuer_generation is the authority pin in force when it
-  // committed (persist_phase/recover write authority_generation_). Zero
-  // marks a record with no generation evidence — keep the configured pin.
-  if (record.issuer_generation != 0) {
-    authority_generation_ = record.issuer_generation;
-  }
+  // No generation pin is inherited: the decision-time policy lives in the
+  // verifier (fixed profiles pin to the deployed generation, the trust
+  // view serves the live RLT1/RLF1 floor). The record's issuer_generation
+  // is forensic metadata — which generation authorized it — not policy.
   decision_revision_ = record.decision_revision;
   active_revision_ = record.active_revision;
   phase_ = record.phase;
@@ -754,10 +753,6 @@ Status ConfigJournal::initialize(const MonotonicMs now_ms) noexcept {
       !endpoint::config_namespace_valid(config_.config_namespace)) {
     return Status::error(StatusCode::InvalidArgument, "config journal identity invalid");
   }
-  // The generation pin starts from configuration; an adopted durable
-  // record below may advance it to the generation that record committed
-  // under (issuer_generation carries the pin — see persist_phase).
-  authority_generation_ = config_.authority_generation;
   // The floor bounds every counter below: without a usable floor for this
   // identity and namespace, no adoption and no intake can be safe — and a
   // journal newer than its floor proves the save order was violated.
@@ -1383,7 +1378,9 @@ Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs n
   context.target = config_.target;
   context.config_namespace = config_.config_namespace;
   context.authorized_issuer = config_.authorized_issuer;
-  context.authority_generation = authority_generation_;
+  // The deployed pin for fixed-profile verifiers; the trust view ignores
+  // it and resolves the signer generation from the live image + floor.
+  context.authority_generation = config_.authority_generation;
   endpoint::EncodedRecoveryCommand& canonical = recovery_canonical_;
   bool verified = false;
   // The shared expensive-verify intake gate — same device-level bound as
@@ -1407,6 +1404,10 @@ Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs n
                         "config recovery unverified");
   }
   ++stats_.permits_verified;
+  // The policy epoch this verdict was verified under — re-checked before
+  // the floor reservation commits the recovery (same rotation race as the
+  // permit path's DECIDED recheck).
+  const std::uint32_t verify_epoch = verifier_.policy_epoch();
 
   endpoint::ConfigRecoveryCommand& command = recovery_command_;
   status = endpoint::config_recovery_decode(canonical.view(), command);
@@ -1418,14 +1419,16 @@ Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs n
   sha256(canonical.view(), digest);
 
   // Identity + authorization scope (04 §4.3): the journal checks these on
-  // its own — the signature only proves the issuer signed the command. The
-  // command must also name the generation the journal currently accepts:
-  // a recovery signed under any other generation is not ours to act on.
+  // its own — the signature only proves the issuer signed the command.
+  // The generation gate is the verifier's live policy (fixed profiles
+  // pin to the deployed generation, the trust view serves the RLT1/RLF1
+  // floor): a recovery signed under an unserved generation is denied.
   if (command.network != config_.network || command.target != config_.target ||
       command.config_namespace != config_.config_namespace ||
       command.schema != config_.schema ||
       command.authority != config_.authorized_issuer ||
-      command.authority_generation != authority_generation_) {
+      !verifier_.generation_permitted(command.authority_generation,
+                                      config_.authority_generation)) {
     fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
     ++stats_.permits_denied;
     return Status::error(StatusCode::AuthorizationFailed,
@@ -1465,6 +1468,13 @@ Status ConfigJournal::submit_recovery(const ByteView object, const MonotonicMs n
       fill_verdict(verdict, phase_, ConfigReason::Unsupported);
       return Status::error(StatusCode::InvalidState,
                           "config store recovery needs an impaired journal");
+    }
+    // The policy must be the one the signature verified under.
+    if (verifier_.policy_epoch() != verify_epoch || !verifier_.ready()) {
+      fill_verdict(verdict, phase_, ConfigReason::AuthorityDenied);
+      ++stats_.permits_denied;
+      return Status::error(StatusCode::AuthorizationFailed,
+                          "config authority policy moved during submit");
     }
     status = recover(command.new_store_generation, now_ms,
                      command.attest == endpoint::kRcr1AttestReprovision);
@@ -1523,12 +1533,15 @@ Status ConfigJournal::validate_command(const endpoint::ConfigCommand& command,
                                        ConfigVerdict& verdict) noexcept {
   static_cast<void>(digest);
   // Identity + authorization scope (04 §4.3): the target checks these on
-  // its own — the permit signature only proves the issuer signed it.
+  // its own — the permit signature only proves the issuer signed it. The
+  // generation gate is the verifier's live policy (fixed profiles pin to
+  // the deployed generation, the trust view serves the RLT1/RLF1 floor).
   if (command.network != config_.network || command.target != config_.target ||
       command.config_namespace != config_.config_namespace ||
       command.schema != config_.schema ||
       command.authority != config_.authorized_issuer ||
-      command.authority_generation != authority_generation_) {
+      !verifier_.generation_permitted(command.authority_generation,
+                                      config_.authority_generation)) {
     fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::AuthorityDenied);
     ++stats_.permits_denied;
     return Status::error(StatusCode::AuthorizationFailed, "config scope denied");
@@ -1602,7 +1615,9 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
   context.target = config_.target;
   context.config_namespace = config_.config_namespace;
   context.authorized_issuer = config_.authorized_issuer;
-  context.authority_generation = authority_generation_;
+  // The deployed pin for fixed-profile verifiers; the trust view ignores
+  // it and resolves the signer generation from the live image + floor.
+  context.authority_generation = config_.authority_generation;
   endpoint::EncodedConfigCommand& canonical = submit_txn_.canonical;
   bool verified = false;
   // Pre-verification intake limiter (03-signing §3.3): one expensive
@@ -1630,6 +1645,11 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
     return Status::error(StatusCode::AuthenticationFailed, "config permit unverified");
   }
   ++stats_.permits_verified;
+  // The policy epoch this verdict was verified under — re-checked before
+  // the DECIDED commit so a rotation landing in between (a provider
+  // callback reentering the trust store, a future async verifier) cannot
+  // smuggle an old-epoch verdict into a new-epoch decision.
+  const std::uint32_t verify_epoch = verifier_.policy_epoch();
 
   endpoint::ConfigCommand& command = submit_txn_.command;
   status = endpoint::config_command_decode(canonical.view(), command);
@@ -1810,6 +1830,15 @@ Status ConfigJournal::submit_permit(const ByteView permit, const MonotonicMs now
     return Status::error(StatusCode::Busy, "config acceptance budget exhausted");
   }
 
+  // The policy must be the one the signature verified under: re-check
+  // the epoch (and liveness) captured above before the DECIDED commit.
+  if (verifier_.policy_epoch() != verify_epoch || !verifier_.ready()) {
+    rate_limiter_.refund();
+    fill_verdict(verdict, ConfigPhase::Idle, ConfigReason::AuthorityDenied);
+    ++stats_.permits_denied;
+    return Status::error(StatusCode::AuthorizationFailed,
+                        "config authority policy moved during submit");
+  }
   // PREPARED -> DECIDED: persist before the phase is real. The revision is
   // consumed here and never returned, even if apply later fails.
   status = persist_phase(ConfigPhase::Decided, ConfigReason::Ok, txn);
@@ -2189,10 +2218,10 @@ Status ConfigJournal::recover(const std::uint32_t new_store_generation,
   record.target = config_.target;
   record.config_namespace = config_.config_namespace;
   record.schema = config_.schema;
-  // The recovered record carries the pin in force — recovery never changes
-  // the accepted authority generation (that transition is a root-authorized
-  // trust update's own durable record).
-  record.issuer_generation = authority_generation_;
+  // No generation evidence: this entry does not itself verify — the
+  // verified signer generation is recorded by the recovery ceremony
+  // that will replace this local entry, not asserted here.
+  record.issuer_generation = 0;
   // Write BOTH slots with the same generation+content: the next boot then
   // sees two verifiable identical records rather than a valid sibling of
   // unverifiable garbage — storage-uncertain would otherwise persist

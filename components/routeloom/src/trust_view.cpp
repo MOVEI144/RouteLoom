@@ -32,14 +32,33 @@ bool TrustView::usable() const noexcept {
          store_.store_epoch() >= store_.epoch_floor();
 }
 
+std::uint32_t TrustView::effective_generation_floor() const noexcept {
+  const std::uint32_t image_floor = store_.min_authority_generation();
+  if (floor_ == nullptr) return image_floor;
+  SecurityFloorState state{};
+  if (!floor_->read(state)) return image_floor;
+  // Higher wins: the floor reservation lands before the image commit, so
+  // the floor leads across the update window and neither can lag the
+  // other into admitting a retired generation.
+  return state.min_authority_generation > image_floor
+             ? state.min_authority_generation
+             : image_floor;
+}
+
 const TrustKeyRecord* TrustView::resolve_authority_key(
     const std::uint64_t authority_id, const std::uint32_t generation) const noexcept {
   if (!usable()) return nullptr;
   const TrustKeyRecord* key = store_.find_key(authority_id, generation);
-  if (key == nullptr || !key_serves(*key, store_.min_authority_generation())) {
+  if (key == nullptr || !key_serves(*key, effective_generation_floor())) {
     return nullptr;
   }
   return key;
+}
+
+bool TrustView::generation_permitted(
+    const std::uint32_t generation, const std::uint32_t configured_pin) const noexcept {
+  (void)configured_pin;  // fixed-profile pins do not apply to the trust view
+  return usable() && generation >= effective_generation_floor();
 }
 
 bool TrustView::is_credential_revoked(const Digest256& kid_fingerprint) const noexcept {
@@ -50,16 +69,24 @@ bool TrustView::is_credential_revoked(const Digest256& kid_fingerprint) const no
 
 bool TrustView::ready() const noexcept {
   if (!usable()) return false;
+  const std::uint32_t floor = effective_generation_floor();
+  const TrustImage& image = store_.image();
   if (required_set_) {
-    return resolve_authority_key(required_authority_, required_generation_) !=
-           nullptr;
+    // The pinned authority resolves an active key at SOME generation
+    // at/above the floor — the generation itself floats with rotation.
+    for (std::uint8_t i = 0; i < image.key_count; ++i) {
+      if (image.keys[i].authority_id == required_authority_ &&
+          key_serves(image.keys[i], floor)) {
+        return true;
+      }
+    }
+    return false;
   }
   // Unpinned: the image must carry at least one currently-verifying key —
   // a valid image may hold none (config deliberately disabled, §4.5.1
   // rule 5), and then the COSE profile bit must not be advertised.
-  const TrustImage& image = store_.image();
   for (std::uint8_t i = 0; i < image.key_count; ++i) {
-    if (key_serves(image.keys[i], store_.min_authority_generation())) {
+    if (key_serves(image.keys[i], floor)) {
       return true;
     }
   }

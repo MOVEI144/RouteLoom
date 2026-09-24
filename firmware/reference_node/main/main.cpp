@@ -999,14 +999,15 @@ extern "C" void app_main(void) {
   // policy never accepts a dev envelope (enforced by profile selection,
   // never by trying both). An absent/quarantined/uncertain store leaves
   // the view !ready() — fail closed, intake refused, routing continues.
-  // require_key() pins the configured (authority, generation) so ready()
-  // additionally reports whether THE deployment-pinned record resolves
-  // active; the journal's generation pin below still applies at decision
-  // time regardless.
+  // require_authority() pins the configured authority id so ready()
+  // additionally reports whether THE deployment's authority resolves an
+  // active key — the generation itself floats with rotation under the
+  // combined RLT1/RLF1 floor (the floor's G leads across updates).
+  trust_store.attach_floor(&config_floor);
   static routeloom::TrustView config_verifier(trust_store);
-  config_verifier.require_key(
-      static_cast<std::uint64_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY),
-      static_cast<std::uint32_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY_GENERATION));
+  config_verifier.attach_floor(&config_floor);
+  config_verifier.require_authority(
+      static_cast<std::uint64_t>(CONFIG_ROUTELOOM_CONFIG_AUTHORITY));
   ESP_LOGW(kTag,
            "config profile: trust-store RLCP1_COSE_ESP256 (verifier %s)",
            config_verifier.ready()

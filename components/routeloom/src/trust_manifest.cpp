@@ -203,12 +203,125 @@ Status trust_manifest_assemble(
   return Status::success();
 }
 
-Status trust_manifest_accept(TrustStore& store, const ByteView object) noexcept {
-  // Store-state gates first — a manifest is never the first install (there
-  // is no anchor to verify against; §4.4 first install is physical).
+Status trust_manifest_accept(TrustStore& store, const ByteView object,
+                             SecurityFloorStore& floor) noexcept {
   if (!store.initialized()) {
     return Status::error(StatusCode::InvalidState, "trust store not initialized");
   }
+  if (object.size == 0 || object.size > kTrustManifestObjectMax) {
+    return Status::error(StatusCode::ProtocolError, "manifest size");
+  }
+
+  // 1. Envelope shape (cheap parse; §4.5.1 rule 1). Malformed input
+  //    on an impaired store still reports the store state first — the
+  //    pre-existing gate mapping.
+  TrustManifestParts parts{};
+  Status status = trust_manifest_parse(object, parts);
+  if (!status.ok()) {
+    if (store.quarantined()) {
+      return Status::error(StatusCode::IntegrityError,
+                          "trust store quarantined");
+    }
+    if (store.uncertain()) {
+      return Status::error(StatusCode::RecoveryRequired,
+                          "trust store storage uncertain");
+    }
+    if (!store.has_active()) {
+      return Status::error(StatusCode::AuthorizationFailed,
+                          "no trust anchor base installed");
+    }
+    return status;
+  }
+
+  // 2. Content head: structural decode, then the cheap semantic gates the
+  //    design lists before any signature work (network equality, nonzero
+  //    epoch, counts/tables — enforced inside the codec). The network
+  //    binds to the committed image when one exists, else to the floor —
+  //    never to transport claims.
+  TrustImage candidate{};
+  status = trust_image_body_decode(parts.payload, candidate);
+  if (!status) return status;
+  if (store.has_active()) {
+    if (candidate.network != store.network()) {
+      return Status::error(StatusCode::AuthorizationFailed,
+                          "manifest foreign network");
+    }
+  } else {
+    SecurityFloorState floor_net{};
+    status = floor.read(floor_net);
+    if (!status.ok()) return status;
+    if (candidate.network != floor_net.network) {
+      return Status::error(StatusCode::AuthorizationFailed,
+                          "manifest foreign network");
+    }
+  }
+  if (candidate.store_epoch == 0) {
+    return Status::error(StatusCode::ProtocolError, "manifest epoch zero");
+  }
+
+  // 3. Completed duplicate: same epoch as the committed image with
+  //    byte-identical content — success WITHOUT a flash write on a clean
+  //    store; on an uncertain store the same bytes heal the missing twin
+  //    through install_reserved(). Same epoch with different content is a
+  //    fork attempt, never an update.
+  if (store.has_active() && candidate.store_epoch == store.store_epoch()) {
+    ByteBuffer<kTrustImageContentMax> active_body{};
+    status = trust_image_body_encode(store.image(), active_body);
+    if (!status.ok()) return status;
+    if (active_body.size != parts.payload.size ||
+        std::memcmp(active_body.bytes.data(), parts.payload.data,
+                    parts.payload.size) != 0) {
+      return Status::error(StatusCode::Conflict, "manifest epoch fork");
+    }
+    if (!store.quarantined() && !store.uncertain()) return Status::success();
+    return store.install_reserved(candidate);
+  }
+
+  // The u32 top value is reserved on both axes: installing it would seal
+  // the store against the next disaster recovery.
+  if (candidate.store_epoch == 0xFFFFFFFFU ||
+      candidate.min_authority_generation == 0xFFFFFFFFU) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "manifest seals the counter axis");
+  }
+
+  // The floor binding for this exact original.
+  Digest256 object_hash{};
+  sha256(object, object_hash);
+  SecurityFloorState floor_state{};
+  status = floor.read(floor_state);
+  if (!status.ok()) return status;
+  bool hash_matches = true;
+  for (std::size_t i = 0; i < object_hash.size(); ++i) {
+    if (object_hash[i] != floor_state.last_manifest_hash[i]) {
+      hash_matches = false;
+      break;
+    }
+  }
+  const bool floor_bound =
+      hash_matches && candidate.store_epoch == floor_state.trust_epoch_floor &&
+      candidate.min_authority_generation == floor_state.min_authority_generation &&
+      candidate.network == floor_state.network;
+
+  // 4. Floor-bound re-install: these exact bytes were root-authorized
+  //    before (that is the only way a reservation exists), but the commit
+  //    was interrupted or the slots were lost afterwards. The floor
+  //    binding substitutes for the signature — no committable anchor may
+  //    still verify it — while install_reserved() re-checks semantics
+  //    and the epoch/floor rules. Reinstalling AT the proven epoch is
+  //    the resume; a bound-but-older reservation replays nothing.
+  if (floor_bound) {
+    if (candidate.store_epoch < store.epoch_floor() ||
+        candidate.min_authority_generation < store.generation_floor()) {
+      return Status::error(StatusCode::Conflict,
+                          "manifest reservation stale");
+    }
+    return store.install_reserved(candidate);
+  }
+
+  // 5. New update: the store must be in an accepting state (a manifest is
+  //    never the first install — there is no anchor to verify against;
+  //    §4.4 first install is physical).
   if (store.quarantined()) {
     return Status::error(StatusCode::IntegrityError, "trust store quarantined");
   }
@@ -221,32 +334,28 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object) noexcept 
                         "no trust anchor base installed");
   }
 
-  // 1. Envelope shape (cheap parse; §4.5.1 rule 1).
-  TrustManifestParts parts{};
-  Status status = trust_manifest_parse(object, parts);
-  if (!status) return status;
-
-  // 2. Content head: structural decode, then the cheap semantic gates the
-  //    design lists before any signature work (network equality, nonzero
-  //    epoch, counts/tables — enforced inside the codec).
-  TrustImage candidate{};
-  status = trust_image_body_decode(parts.payload, candidate);
-  if (!status) return status;
-  if (candidate.network != store.network()) {
-    return Status::error(StatusCode::AuthorizationFailed, "manifest foreign network");
-  }
-  if (candidate.store_epoch == 0) {
-    return Status::error(StatusCode::ProtocolError, "manifest epoch zero");
-  }
-
-  // 3. Ordinal epoch compare — a manifest at or below the committed epoch
-  //    is a harmless stale replay, denied without spending the verify.
+  // Ordinal epoch compare — a manifest at or below the committed epoch
+  // is a harmless stale replay, denied without spending the verify.
   if (candidate.store_epoch <= store.store_epoch()) {
     return Status::error(StatusCode::Conflict, "manifest epoch not newer");
   }
+  // The floor leads: below-floor epochs/generations are stale
+  // reservations or foreign images, and the reservation ledger must
+  // share this device's network.
+  if (candidate.store_epoch <= floor_state.trust_epoch_floor) {
+    return Status::error(StatusCode::Conflict, "manifest below floor epoch");
+  }
+  if (candidate.min_authority_generation < floor_state.min_authority_generation) {
+    return Status::error(StatusCode::AuthorizationFailed,
+                        "manifest below floor generation");
+  }
+  if (candidate.network != floor_state.network) {
+    return Status::error(StatusCode::AuthorizationFailed,
+                        "manifest foreign floor network");
+  }
 
-  // 4. kid names an anchor ACTIVE in the CURRENT image (a manifest signed
-  //    under a disabled anchor fails even with a valid signature).
+  // kid names an anchor ACTIVE in the CURRENT image (a manifest signed
+  // under a disabled anchor fails even with a valid signature).
   const TrustAnchor* anchor = store.find_anchor(parts.root_id);
   if (anchor == nullptr || anchor->status != TrustAnchorStatus::Active) {
     return Status::error(StatusCode::AuthorizationFailed, "manifest anchor unusable");
@@ -281,12 +390,27 @@ Status trust_manifest_accept(TrustStore& store, const ByteView object) noexcept 
     return Status::error(StatusCode::AuthorizationFailed, "manifest signature invalid");
   }
 
-  // 5-6. Semantic floor + retention invariants + the two-phase dual-slot
-  //      commit with readback live in commit_image: it re-checks
-  //      store_epoch against the proven epoch floor (not just the active
-  //      epoch), refuses a min_authority_generation regression, and
-  //      requires the new image to keep >=1 active anchor. A storage fault
-  //      leaves the old image authoritative.
+  // The RLF1 E/G/original-hash reservation lands BEFORE the commit. An
+  // epoch the floor already names for DIFFERENT bytes is a fork attempt
+  // (the idempotent same-bytes resume was handled by the floor-bound
+  // path above).
+  if (floor_state.trust_epoch_floor == candidate.store_epoch) {
+    return Status::error(StatusCode::Conflict, "manifest epoch fork");
+  }
+  SecurityFloorState next = floor_state;
+  next.trust_epoch_floor = candidate.store_epoch;
+  next.min_authority_generation = candidate.min_authority_generation;
+  next.last_manifest_hash = object_hash;
+  status = floor.advance(floor_state, next);
+  if (!status.ok()) return status;
+
+  // Semantic floor + retention invariants + the twin-slot commit with
+  // readback live in commit_image: it re-checks store_epoch against the
+  // proven epoch floor (not just the active epoch), refuses a
+  // min_authority_generation regression, and requires the new image to
+  // keep >=1 active anchor. A storage fault leaves the old image
+  // authoritative (and the reservation above makes the same original
+  // re-installable).
   return store.commit_image(candidate);
 }
 

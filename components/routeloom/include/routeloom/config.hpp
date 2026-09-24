@@ -216,6 +216,21 @@ class ConfigAuthorityVerifier {
     return Status::error(StatusCode::Unsupported,
                        "config recovery profile unsupported");
   }
+  // Decision-time generation policy: fixed profiles (dev, static COSE)
+  // pin to the deployed `configured_pin` — equality, never a range. The
+  // trust view instead serves any generation at or above the combined
+  // RLT1/RLF1 floor. The journal consults this at accept time; the
+  // signature verification above stays authoritative for key resolution.
+  virtual bool generation_permitted(std::uint32_t generation,
+                                    std::uint32_t configured_pin) const noexcept {
+    return generation == configured_pin;
+  }
+  // Policy epoch: the trust store's store_epoch for the trust view — the
+  // journal captures it at verify time and re-checks it before the
+  // DECIDED commit, so a rotation landing in between cannot smuggle an
+  // old-epoch verdict into a new-epoch decision. Fixed profiles return
+  // the constant 0: their policy never moves.
+  virtual std::uint32_t policy_epoch() const noexcept { return 0; }
 };
 
 // Per-namespace dual-slot journal persistence. read() fills the whole
@@ -358,7 +373,9 @@ struct ConfigJournalConfig {
   std::uint16_t schema{1};
   std::uint64_t boot_incarnation{0};               // nonzero, fresh per boot
   NodeId authorized_issuer{kInvalidNodeId};        // the single allowed authority
-  std::uint32_t authority_generation{0};           // the permitted generation
+  // The deployed generation pin for FIXED-profile verifiers (dev, static
+  // COSE). The trust view ignores it and serves the live RLT1/RLF1 floor.
+  std::uint32_t authority_generation{0};
   std::uint32_t challenge_valid_ms{kConfigChallengeMaxMs};  // <= 30 s
 };
 
@@ -512,12 +529,6 @@ class ConfigJournal {
   }
   bool uncertain() const noexcept { return uncertain_; }
   bool quarantined() const noexcept { return quarantined_; }
-  // The authority generation this journal accepts: the configured pin
-  // (a root-authorized trust update moves it; the adopted durable
-  // record's generation carries it across boots).
-  std::uint32_t authority_generation() const noexcept {
-    return authority_generation_;
-  }
   // True while an operation is between DECIDED and its terminal record:
   // maintenance/other radio operations consult this for exclusivity.
   bool in_progress() const noexcept { return txn_.active; }
@@ -684,11 +695,6 @@ class ConfigJournal {
   Digest256 active_hash_{};
   ByteBuffer<endpoint::kConfigSnapshotMax> active_snapshot_{};
   std::uint32_t store_generation_{0};
-  // The accepted authority generation — config_.authority_generation until
-  // an adopted record or a countersigned update advances it. Durable via
-  // the journal record's issuer_generation field, which always holds the
-  // pin in force when that record committed.
-  std::uint32_t authority_generation_{0};
   std::uint32_t proven_floor_{0};      // highest store gen any committed seal proved
   std::uint64_t revision_floor_{0};    // highest decision revision proved this boot
   std::uint8_t active_slot_{0};

@@ -48,6 +48,14 @@ constexpr std::size_t kAnchorCountOffset = 41;
 constexpr std::size_t kAnchorTable = 48;
 constexpr std::size_t kAnchorStatusOffset = kAnchorTable + 72;
 
+// Both slots carry byte-identical records (same used length + bytes).
+bool records_equal(const std::array<std::uint8_t, kTrustStoreSlotBytes>& a,
+                   const std::array<std::uint8_t, kTrustStoreSlotBytes>& b) {
+  const std::size_t used_a = record_used_len(a);
+  if (used_a != record_used_len(b)) return false;
+  return std::memcmp(a.data(), b.data(), used_a) == 0;
+}
+
 bool images_equal(const TrustImage& a, const TrustImage& b) {
   if (a.store_epoch != b.store_epoch ||
       a.min_authority_generation != b.min_authority_generation ||
@@ -424,7 +432,8 @@ void test_store_fresh_and_commit() {
   CHECK(!store.quarantined() && !store.uncertain());
   CHECK(store.store_epoch() == 0 && store.epoch_floor() == 0);
 
-  // First install lands in slot 0; slot 1 stays erased.
+  // Every commit lands in BOTH slots as a twin pair (pending + commit
+  // seal per slot), so the next boot never sees a new/old split.
   const TrustImage first = test_image(1, 7, kRootA);
   CHECK_OK(store.commit_image(first));
   CHECK(store.has_active());
@@ -433,17 +442,19 @@ void test_store_fresh_and_commit() {
   CHECK(store.generation_floor() == 1);
   CHECK(store.network() == 7);
   CHECK(store.deployment_id() == 0xDE9UL);
-  CHECK(storage.write_calls == 2);  // pending + commit seal, one slot
-  CHECK(storage.slot_bytes(1)[0] == 0xFF && storage.slot_bytes(1)[1] == 0xFF);
+  CHECK(storage.write_calls == 4);
+  CHECK(record_used_len(storage.slot_bytes(0)) > 0);
+  CHECK(record_used_len(storage.slot_bytes(1)) > 0);
+  CHECK(records_equal(storage.slot_bytes(0), storage.slot_bytes(1)));
   Digest256 zero{};
   CHECK(store.image_fingerprint() != zero);
 
-  // Second commit alternates into slot 1.
+  // Second commit replaces both twins.
   const TrustImage second = test_image(2, 7, kRootA);
   CHECK_OK(store.commit_image(second));
   CHECK(store.store_epoch() == 2);
-  CHECK(storage.write_calls == 4);
-  CHECK(record_used_len(storage.slot_bytes(1)) > 0);
+  CHECK(storage.write_calls == 8);
+  CHECK(records_equal(storage.slot_bytes(0), storage.slot_bytes(1)));
 
   // Reboot adopts the newest committed image.
   TrustStore reboot(storage);
@@ -453,9 +464,10 @@ void test_store_fresh_and_commit() {
   CHECK(images_equal(reboot.image(), second));
   CHECK(!reboot.uncertain());
 
-  // Third commit returns to slot 0.
+  // Third commit works the same way.
   CHECK_OK(reboot.commit_image(test_image(3, 7, kRootA)));
   CHECK(reboot.image().store_epoch == 3);
+  CHECK(records_equal(storage.slot_bytes(0), storage.slot_bytes(1)));
 }
 
 void test_store_epoch_and_generation_floors() {
@@ -514,7 +526,7 @@ void test_store_corrupt_sibling_uncertain() {
     TrustStore store(storage);
     CHECK_OK(store.initialize());
     CHECK_OK(store.commit_image(test_image(1, 7, kRootA)));
-    CHECK_OK(store.commit_image(test_image(2, 7, kRootA)));  // lands in slot 1
+    CHECK_OK(store.commit_image(test_image(2, 7, kRootA)));  // twins in both
   }
   // Offset 100 is inside the anchor pubkey: the record stays structurally
   // intact (committed_fields bound the floors) but its CRC fails.
@@ -524,7 +536,7 @@ void test_store_corrupt_sibling_uncertain() {
   CHECK(reboot.has_active());
   CHECK(reboot.uncertain());
   CHECK(!reboot.quarantined());
-  CHECK(reboot.store_epoch() == 1);         // slot 0's image still serves
+  CHECK(reboot.store_epoch() == 2);         // slot 0's twin still serves
   CHECK(reboot.epoch_floor() == 2);         // corrupt-but-committed bound it
   CHECK(reboot.commit_image(test_image(3, 7, kRootA)).code ==
         StatusCode::RecoveryRequired);
@@ -618,6 +630,9 @@ void test_store_pending_write_boundaries() {
   // Power cut at every byte boundary of the pending-record write. The
   // committed image always survives; a torn head reads as corruption and
   // marks the survivor uncertain, a landed head is discardable pending.
+  // (The target slot already holds the previous twin, so a cut inside
+  // the 12-byte header prefix lands bytes identical to the twin — a
+  // no-op cut, still clean.)
   const TrustImage image = test_image(2, 7, kRootA);
   const std::size_t used_len = trust_image_encoded_size(image);
   for (std::size_t boundary = 0; boundary <= used_len; ++boundary) {
@@ -633,16 +648,18 @@ void test_store_pending_write_boundaries() {
     TrustStore reboot(storage);
     const Status loaded = reboot.initialize();
     CHECK(reboot.store_epoch() == 1);
-    if (boundary >= 16 || boundary == 0) {
-      // Nothing landed (erased slot) or a well-formed pending head: the
-      // sibling is provably absent — clean adopt, commits still allowed.
+    if (boundary <= 12 || boundary >= 16) {
+      // Nothing changed (a no-op prefix over the twin already there) or
+      // a well-formed pending head: the sibling is provably absent —
+      // clean adopt, commits still allowed.
       CHECK_OK(loaded);
       CHECK(!reboot.uncertain());
       CHECK_OK(reboot.commit_image(image));
       CHECK(reboot.store_epoch() == 2);
     } else {
-      // A partial header is unverifiable noise: the slot may have held a
-      // newer committed record — known-value posture, commits refused.
+      // A partial seal region (bytes 13-15) is unverifiable noise: the
+      // slot may have held a newer committed record — known-value
+      // posture, commits refused.
       CHECK(loaded.code == StatusCode::IntegrityError);
       CHECK(reboot.uncertain());
       CHECK(!reboot.quarantined());
@@ -776,7 +793,7 @@ void test_store_read_errors() {
   TrustStore partial(storage);
   CHECK(partial.initialize().code == StatusCode::IntegrityError);
   CHECK(partial.uncertain());
-  CHECK(partial.store_epoch() == 1);
+  CHECK(partial.store_epoch() == 2);  // every commit lands on both slots
   CHECK(partial.commit_image(test_image(3, 7, kRootA)).code ==
         StatusCode::RecoveryRequired);
 }
