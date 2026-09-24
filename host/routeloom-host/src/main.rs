@@ -760,7 +760,13 @@ fn now_ms() -> u64 {
 /// operation store, so the first sub-millisecond observation clamps to 1.
 fn mono_ms() -> u64 {
     static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    BASE.get_or_init(Instant::now).elapsed().as_millis().max(1) as u64
+    mono_ms_from_elapsed(BASE.get_or_init(Instant::now).elapsed())
+}
+
+/// The sub-millisecond clamp behind `mono_ms`, kept pure so the
+/// 0-sentinel boundary is testable without racing the process clock.
+fn mono_ms_from_elapsed(elapsed: Duration) -> u64 {
+    elapsed.as_millis().max(1) as u64
 }
 
 /// Escapes for JSON string contexts: quotes, backslashes and every C0
@@ -3967,5 +3973,21 @@ mod tests {
         let record = state.group_ops.get(op).unwrap();
         assert_eq!(record.state_name(), "REFUSED");
         assert_eq!(record.reason.as_deref(), Some("GROUP_MALFORMED"));
+    }
+
+    #[test]
+    fn mono_ms_stamps_a_nonzero_anchor() {
+        // Issue #60-1: `accepted_mono_ms == 0` is the operation store's "no
+        // monotonic anchor" sentinel — a record stamped 0 loses the
+        // rewind-proof deadline cap. A sub-millisecond observation (the
+        // first ms after BASE is anchored) must clamp to 1, never 0.
+        assert_eq!(mono_ms_from_elapsed(Duration::ZERO), 1);
+        assert_eq!(mono_ms_from_elapsed(Duration::from_micros(999)), 1);
+        assert_eq!(mono_ms_from_elapsed(Duration::from_millis(1)), 1);
+        assert_eq!(mono_ms_from_elapsed(Duration::from_millis(1500)), 1500);
+        // The live clock honours the same contract and never runs backwards.
+        let first = mono_ms();
+        assert!(first >= 1);
+        assert!(mono_ms() >= first);
     }
 }

@@ -646,6 +646,79 @@ void test_delivery_terminal_eviction() {
   }
 }
 
+void test_tx_result_dispatch() {
+  // Issue #60-3: a resolved send frees the driver's single in-flight slot,
+  // so the next queued job is submitted inside the same task turn
+  // (on_radio_tx_result -> dispatch_next), not at the next poll() tick.
+  // The tick wait used to leave ~1 poll period of idle airtime between
+  // back-to-back frames — the runtime's ~2ms cadence against a ~6ms
+  // HOP_ACCEPT-class exchange is the 25-30% throughput loss the issue
+  // measured. In this harness the gap shows up as "how many frames went
+  // on the air inside ONE net.flush()": every in-flush submission is a
+  // dispatch that needed no poll tick.
+  SimNetwork network;
+  TestSecurity s1, s2;
+  CapturingObserver o1, o2;
+  SimRadio r1(network, 1), r2(network, 2);
+  NodeConfig c1{1, 1, 901}, c2{1, 2, 902};
+  MeshNode n1(c1, r1, s1, o1), n2(c2, r2, s2, o2);
+  network.register_node(1, &n1); network.register_node(2, &n2);
+  network.connect(1, 2);
+  CHECK_OK(n1.start(0)); CHECK_OK(n2.start(0));
+  CHECK_OK(n1.add_neighbor(2, 1, 0)); CHECK_OK(n2.add_neighbor(1, 1, 0));
+  const std::array<std::uint8_t, 4> payload{{1, 2, 3, 4}};
+  const ByteView body{payload.data(), payload.size()};
+  const auto data_frames = [&]() { return network.tx_by_type[FrameType::Data].frames; };
+
+  // Three BestEffort sends chain inside ONE flush: each TX result submits
+  // the next queued job in the same task turn, so all three reach the air
+  // without an intervening poll.
+  {
+    SendOptions opts{};
+    opts.delivery = DeliveryClass::BestEffort;
+    for (int i = 0; i < 3; ++i) {
+      MessageId id{};
+      CHECK_OK(n1.send(2, body, opts, 10, id));
+    }
+    n1.poll(10);            // only the first job reaches the driver here
+    network.flush(10);      // one drain pass, no poll() inside
+    CHECK(data_frames() == 3);
+    CHECK(o2.messages.size() == 3);
+  }
+
+  // The immediate dispatch still honours the pause mask: while
+  // kDataDispatch is held, a resolved send frees nothing to the scheduler.
+  {
+    SendOptions opts{};
+    opts.delivery = DeliveryClass::BestEffort;
+    MessageId a{}, b{};
+    CHECK_OK(n1.send(2, body, opts, 20, a));
+    CHECK_OK(n1.send(2, body, opts, 20, b));
+    n1.poll(20);            // job A is with the driver before the pause lands
+    CHECK_OK(n1.set_pause(PauseReason::SurveyVisit, pause::kDataDispatch));
+    network.flush(20);      // A's TX result resolves — B must NOT dispatch
+    CHECK(data_frames() == 4);
+    CHECK_OK(n1.clear_pause(PauseReason::SurveyVisit));
+    n1.poll(20);
+    network.flush(20);
+    CHECK(data_frames() == 5);
+  }
+
+  // And the congestion rules still gate it: three RELIABLE sends to the
+  // same peer exceed the initial peer window (two in-flight exchanges), so
+  // the immediate dispatch puts the second on the air but the third waits.
+  {
+    SendOptions opts{};     // Reliable: each send owes a HOP_ACCEPT exchange
+    for (int i = 0; i < 3; ++i) {
+      MessageId id{};
+      CHECK_OK(n1.send(2, body, opts, 30, id));
+    }
+    n1.poll(30);
+    network.flush(30);
+    CHECK(data_frames() == 7);  // 5 + 2 — the peer window held the third
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -663,6 +736,7 @@ int main() {
   test_three_hop_delivery();
   test_diamond_repair();
   test_delivery_terminal_eviction();
+  test_tx_result_dispatch();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;

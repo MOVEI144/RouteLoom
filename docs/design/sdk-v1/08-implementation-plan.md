@@ -27,7 +27,7 @@
 | P3-5 | pending ticketによる安価な再試行（任意） | P1-5, P3-3 | V1-J03 |
 | **P4 — セッションengine** | | | |
 | P4-1 | SecurityProviderのAPI追加（`tx_epoch`/`context_state`、`SessionInstaller`、scope 2/3）とNode配線。開発Providerは設定値を返し挙動不変（**このbranchで実装済み**：host試験、scope番号は`Group`＝2を維持し`GroupLink`＝3、C ABIのsession callbackは延期、[03 §8.1〜8.2](03-key-hierarchy.md)） | なし | 既存全試験、V1-K10 |
-| P4-2 | `HandshakeEngine`、本番link EDHOC＋RLRES1（RLD1）、RLS1/RRS1で裏付けた`MembershipHooks`、本番buildだけ`UnavailableAuthenticator`を置換 | P2-1, P1-5, P4-1 | V1-K02〜K04, V1-F01, V1-F04 |
+| P4-2 | `HandshakeEngine`、本番link EDHOC＋RLRES1（RLD1）、RLS1/RRS1で裏付けた`MembershipHooks`、本番buildだけ`UnavailableAuthenticator`を置換（要件：#60-2 — `MembershipHooks`はlocal失効をauthority ledgerへ耐電断永続化すること。controllerの`Revoked`はRAMのみで、再起動時`initialize`は`local_member`からfail-openに再評価する。#60-4 — replay/counter slot導出に秘密saltを含めること。公開のkeyless foldのままでは共有PSKを持つ内部者がNodeIdを選んで決定的に衝突を製造できる） | P2-1, P1-5, P4-1 | V1-K02〜K04, V1-F01, V1-F04 |
 | P4-3 | E2E EDHOC/RLRES1（routed bootstrap）、gatewayの対称鍵枠、APPLIED leaseをboot sessionへ | P4-2 | V1-F05, V1-F07 |
 | P4-4 | 開発ProviderをRAM context engineへ移行（RLRES1のRMS＝開発PSK）、旧`c*`/`f*`/`r*`を消す保守verb | P4-2 | V1-N01, V1-K10（更新） |
 | **P5 — group鍵** | | | |
