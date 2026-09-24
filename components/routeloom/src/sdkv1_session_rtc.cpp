@@ -154,4 +154,70 @@ Status decode_rtc_session(ByteView bytes, const RtcWakeCheck& wake,
   return Status::success();
 }
 
+Status consume_rtc_session(RtcSessionPort& port, const RtcWakeCheck& wake,
+                           RtcSessionImage& out) noexcept {
+  Scratch scratch;
+  Status status = port.read(MutableByteView{scratch.raw.data(), scratch.raw.size()});
+  if (!status) return status;
+  status = decode_rtc_session(ByteView{scratch.raw.data(), scratch.raw.size()}, wake,
+                              scratch.image);
+  if (!status) return status;
+  status = port.invalidate();
+  if (!status) return status;
+  status = port.read(MutableByteView{scratch.raw.data(), scratch.raw.size()});
+  if (!status) return status;
+  // An adapter that acknowledges the clear but leaves the marker committed
+  // cannot publish the old key/window: a second wake could use it again.
+  Cursor marker{scratch.raw.data(), 8};
+  if (marker.get(4) == kCommitted) {
+    return Status::error(StatusCode::StorageFailure, "RTC marker not cleared");
+  }
+  out = scratch.image;
+  return Status::success();
+}
+
+Status advance_rtc_tx(RtcSessionPort& port, RtcSessionImage& current,
+                      const std::size_t context_index, std::uint64_t& counter) noexcept {
+  if (!valid(current) || context_index >= current.count ||
+      current.contexts[context_index].entry.tx_next >= kUseLimit - 1) {
+    return Status::error(StatusCode::CounterExhausted, "RTC TX counter exhausted");
+  }
+  Scratch scratch;
+  Status status = encode_rtc_session(current,
+                                     MutableByteView{scratch.raw.data(), scratch.raw.size()});
+  if (!status) return status;
+  // Refuse stale in-memory images; in particular a failed readback must not
+  // allow a retry that overwrites a newer counter with an older one.
+  std::array<std::uint8_t, kRtcSessionRecordSize> observed{};
+  status = port.read(MutableByteView{observed.data(), observed.size()});
+  if (!status) { secure_clear(observed); return status; }
+  const bool matches = observed == scratch.raw;
+  secure_clear(observed);
+  if (!matches) return Status::error(StatusCode::Conflict, "RTC image changed");
+  status = port.invalidate();
+  if (!status) return status;
+  status = port.read(MutableByteView{scratch.raw.data(), scratch.raw.size()});
+  if (!status) return status;
+  Cursor marker{scratch.raw.data(), 8};
+  if (marker.get(4) == kCommitted) {
+    return Status::error(StatusCode::StorageFailure, "RTC marker not cleared");
+  }
+  scratch.image = current;
+  const std::uint64_t issued = scratch.image.contexts[context_index].entry.tx_next++;
+  status = encode_rtc_session(scratch.image,
+                              MutableByteView{scratch.raw.data(), scratch.raw.size()});
+  if (!status) return status;
+  status = port.write(ByteView{scratch.raw.data(), scratch.raw.size()});
+  if (!status) return status;
+  observed = {};
+  status = port.read(MutableByteView{observed.data(), observed.size()});
+  if (!status) { secure_clear(observed); return status; }
+  const bool durable = observed == scratch.raw;
+  secure_clear(observed);
+  if (!durable) return Status::error(StatusCode::StorageFailure, "RTC TX readback");
+  current = scratch.image;
+  counter = issued;
+  return Status::success();
+}
+
 }  // namespace routeloom::sdkv1

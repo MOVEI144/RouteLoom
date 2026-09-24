@@ -46,9 +46,29 @@ struct RtcWakeCheck {
   std::array<std::uint8_t, 16> kid_digest{};
 };
 
+// Physical RTC adapter: invalidate must make the committed marker unreadable
+// before returning, including across reset. Writes must not revive a previous
+// valid slot on failure. The caller still gates radio/parent binding separately.
+class RtcSessionPort {
+ public:
+  virtual ~RtcSessionPort() = default;
+  virtual Status read(MutableByteView out) noexcept = 0;
+  virtual Status invalidate() noexcept = 0;
+  virtual Status write(ByteView image) noexcept = 0;
+};
+
 Status encode_rtc_session(const RtcSessionImage& image, MutableByteView out) noexcept;
 // On failure does not expose a partially decoded image or any key bytes.
 Status decode_rtc_session(ByteView bytes, const RtcWakeCheck& wake,
                           RtcSessionImage& out) noexcept;
+// One-shot wake: the old marker is cleared and checked before any key leaves
+// the scratch image. Never hand a decoded image to a callback before this.
+Status consume_rtc_session(RtcSessionPort& port, const RtcWakeCheck& wake,
+                           RtcSessionImage& out) noexcept;
+// Retained TX counter write-ahead. The caller must not give the counter to
+// radio until the advanced image has been read back. A failed update discards
+// the RTC image; no fallback to an earlier key/counter pair is permitted.
+Status advance_rtc_tx(RtcSessionPort& port, RtcSessionImage& current,
+                      std::size_t context, std::uint64_t& counter) noexcept;
 
 }  // namespace routeloom::sdkv1

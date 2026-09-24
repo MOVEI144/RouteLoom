@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -8,6 +9,26 @@ using namespace routeloom;
 using namespace routeloom::sdkv1;
 
 namespace {
+struct RtcMemory final : RtcSessionPort {
+  std::array<std::uint8_t, kRtcSessionRecordSize> bytes{};
+  bool fail_clear{false};
+  bool fail_write{false};
+  bool stale_clear{false};
+  Status read(MutableByteView out) noexcept override {
+    std::copy(bytes.begin(), bytes.end(), out.data);
+    return Status::success();
+  }
+  Status invalidate() noexcept override {
+    if (fail_clear) return Status::error(StatusCode::StorageFailure, "clear");
+    if (!stale_clear) bytes[8] = 0; // committed marker, invalid before publishing keys
+    return Status::success();
+  }
+  Status write(ByteView in) noexcept override {
+    if (fail_write) return Status::error(StatusCode::StorageFailure, "write");
+    std::copy(in.data, in.data + in.size, bytes.begin());
+    return Status::success();
+  }
+};
 int failures = 0;
 void check(bool ok, int line) {
   if (!ok) { std::fprintf(stderr, "RTC check failed: %d\n", line); ++failures; }
@@ -76,5 +97,46 @@ int main() {
   CHECK(!decode_rtc_session(ByteView{raw.data(), raw.size()}, wake, result).ok());
   wake.trusted_elapsed_ms = 10000;
   CHECK(!decode_rtc_session(ByteView{raw.data(), raw.size()}, wake, result).ok());
+  wake.trusted_elapsed_ms = 100;
+
+  // F07: a wake may consume the image only once, and a failed marker
+  // invalidation must never publish keys or counters.
+  RtcMemory rtc;
+  rtc.bytes = raw;
+  RtcSessionImage restored{};
+  rtc.fail_clear = true;
+  CHECK(!consume_rtc_session(rtc, wake, restored).ok());
+  CHECK(restored.count == 0);
+  rtc.fail_clear = false;
+  rtc.stale_clear = true;
+  CHECK(!consume_rtc_session(rtc, wake, restored).ok());
+  CHECK(restored.count == 0);
+  rtc.stale_clear = false;
+  CHECK(consume_rtc_session(rtc, wake, restored).ok());
+  CHECK(restored.count == 2 && restored.contexts[0].entry.tx_next == 20);
+  CHECK(!consume_rtc_session(rtc, wake, result).ok());
+
+  // F07 write-ahead: no radio TX with an old retained counter. An
+  // interrupted write leaves the marker invalid and forces a new handshake.
+  rtc.bytes = raw;
+  std::uint64_t issued = 123;
+  rtc.fail_write = true;
+  CHECK(!advance_rtc_tx(rtc, saved, 0, issued).ok());
+  CHECK(issued == 123 && saved.contexts[0].entry.tx_next == 20);
+  CHECK(!decode_rtc_session(ByteView{rtc.bytes.data(), rtc.bytes.size()}, wake, result).ok());
+  rtc.fail_write = false;
+  rtc.bytes = raw;
+  CHECK(advance_rtc_tx(rtc, saved, 0, issued).ok());
+  CHECK(issued == 20 && saved.contexts[0].entry.tx_next == 21);
+  CHECK(decode_rtc_session(ByteView{rtc.bytes.data(), rtc.bytes.size()}, wake, result).ok());
+  CHECK(result.contexts[0].entry.tx_next == 21);
+  // Stale copies cannot overwrite a later retained counter.
+  RtcSessionImage stale = saved;
+  stale.contexts[0].entry.tx_next = 20;
+  CHECK(!advance_rtc_tx(rtc, stale, 0, issued).ok());
+  CHECK(stale.contexts[0].entry.tx_next == 20);
+  rtc.stale_clear = true;
+  CHECK(!advance_rtc_tx(rtc, saved, 0, issued).ok());
+  CHECK(saved.contexts[0].entry.tx_next == 21);
   return failures ? 1 : 0;
 }
