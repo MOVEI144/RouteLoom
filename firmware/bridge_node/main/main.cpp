@@ -720,6 +720,6 @@ extern "C" void app_main(void) {
     }
     bridge.poll(monotonic_now_ms());
     runtime.poll_once();
-    vTaskDelay(pdMS_TO_TICKS(2));
+    runtime.wait_for_event(routeloom::kOwnerPollPeriodMs);
   }
 }

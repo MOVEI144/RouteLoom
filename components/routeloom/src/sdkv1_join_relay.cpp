@@ -984,6 +984,7 @@ JoinRelayGateway::JoinRelayGateway(const JoinRelayGatewayConfig& config,
     : config_(config), wire_(wire) {}
 
 void JoinRelayGateway::set_membership(const MembershipState state) noexcept {
+  if (in_call_) return;  // sink callbacks must not re-enter the gateway
   membership_ = state;
   if (state != MembershipState::Member) {
     for (Slot& slot : slots_) free_slot(slot);
@@ -1106,12 +1107,22 @@ void JoinRelayGateway::deliver_up(const NodeId proxy, const std::uint8_t hops,
   if (h.state == RelayState::Abort) {
     ++stats_.proxy_aborts;
     forget(proxy, h.relay_id);
-    if (sink_ != nullptr) (void)sink_->relay_abort(proxy, h.relay_id, RelayAbortReason::ProxyAborted);
+    if (sink_ != nullptr) {
+      in_call_ = true;
+      (void)sink_->relay_abort(proxy, h.relay_id, RelayAbortReason::ProxyAborted);
+      in_call_ = false;
+    }
     return;
   }
   remember(proxy, h, now_ms);
   ++stats_.up_objects;
-  if (sink_ == nullptr || !sink_->relay_up(proxy, hops, bytes)) {
+  bool accepted = false;
+  if (sink_ != nullptr) {
+    in_call_ = true;
+    accepted = sink_->relay_up(proxy, hops, bytes).ok();
+    in_call_ = false;
+  }
+  if (!accepted) {
     // 07 §7: no host -> the proxy tells the device authority_unreachable.
     ++stats_.host_unavailable;
     send_down_abort(proxy, h, RelayStatusCode::AuthorityUnreachable, config_.unreachable_retry_ms);
@@ -1122,6 +1133,7 @@ void JoinRelayGateway::deliver_up(const NodeId proxy, const std::uint8_t hops,
 void JoinRelayGateway::on_relay_rx(const NodeId from, const std::uint8_t hops,
                                    const FrameType type, const ByteView payload,
                                    const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // sink callbacks must not re-enter the gateway
   if (from == config_.node ||
       !zt_admit_relay(membership_, true, AdmissionDirection::Rx, type, from, config_.node)) {
     ++stats_.frames_rejected;
@@ -1237,6 +1249,7 @@ Status JoinRelayGateway::send_due_chunks(Slot& slot, const MonotonicMs now_ms) n
 
 Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
                                    const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "in sink callback");
   if (membership_ != MembershipState::Member) {
     return Status::error(StatusCode::InvalidState, "gateway is not a member");
   }
@@ -1287,6 +1300,7 @@ Status JoinRelayGateway::host_down(const NodeId to_proxy, const ByteView object,
 Status JoinRelayGateway::host_abort(const NodeId proxy, const std::uint32_t relay_id,
                                     const MonotonicMs now_ms) noexcept {
   (void)now_ms;
+  if (in_call_) return Status::error(StatusCode::Busy, "in sink callback");
   if (membership_ != MembershipState::Member) {
     return Status::error(StatusCode::InvalidState, "gateway is not a member");
   }
@@ -1321,12 +1335,15 @@ Status JoinRelayGateway::host_abort(const NodeId proxy, const std::uint32_t rela
 }
 
 void JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // sink callbacks must not re-enter the gateway
   for (Slot& slot : slots_) {
     if (!slot.active) continue;
     if (slot.object.expire(now_ms, config_.assembly_timeout_ms)) {
       ++stats_.expired;
       if (sink_ != nullptr) {
+        in_call_ = true;
         (void)sink_->relay_abort(slot.proxy, slot.relay_id, RelayAbortReason::GatewayExpired);
+        in_call_ = false;
       }
       forget(slot.proxy, slot.relay_id);
       free_slot(slot);
@@ -1339,7 +1356,9 @@ void JoinRelayGateway::poll(const MonotonicMs now_ms) noexcept {
     if (slot.object.sends() >= config_.max_sends) {
       ++stats_.delivery_failed;
       if (sink_ != nullptr) {
+        in_call_ = true;
         (void)sink_->relay_abort(slot.proxy, slot.relay_id, RelayAbortReason::DeliveryFailed);
+        in_call_ = false;
       }
       forget(slot.proxy, slot.relay_id);
       free_slot(slot);

@@ -335,6 +335,19 @@ void valid_result(const Fields& f) {
       CHECK(site_package_encode(result.site_package, package).ok());
       CHECK(equals(package, hex(f, "site_package_hex")));
       CHECK(allow_verified(f, result) == (num(f, "verified") == 1));
+      // A malformed Allow (here: a ticket length overrunning the body, past
+      // the already-decoded package) fails and assigns nothing to `out`: no
+      // group-key bytes leak into the caller's struct on the error path.
+      Bytes bad = value;
+      const std::size_t ticket_len_at = bad.size() - 2 - hex(f, "assignment_ticket_hex").size();
+      bad[ticket_len_at] = 0xFF;
+      bad[ticket_len_at + 1] = 0xFF;
+      JoinResult clean{};
+      CHECK(!join_result_decode(view(bad), clean).ok());
+      CHECK(clean.member_cert.size == 0);
+      bool gk_zero = true;
+      for (const std::uint8_t b : clean.site_package.gk) gk_zero = gk_zero && b == 0;
+      CHECK(gk_zero);
       break;
     }
     case JoinVerdict::PendingAssignment:

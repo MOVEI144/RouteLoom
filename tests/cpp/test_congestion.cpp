@@ -349,9 +349,10 @@ void test_flow_caps() {
 
   // 14 forwards claiming the SAME origin, alternating two sender scopes so
   // the per-origin cap (not the per-scope cap) is what trips. Each step
-  // drains the accept AND sends the next queued job inside the same flush
-  // (TX-complete submits directly) — the peer window holds 2 forwards in
-  // flight, so 14 admissions leave 12 pooled against the cap.
+  // drains the accept AND sends the next queued job inside the same
+  // flush — flush() polls the sender once every event is drained, and
+  // that poll dispatches the next job — the peer window holds 2 forwards
+  // in flight, so 14 admissions leave 12 pooled against the cap.
   for (std::uint64_t i = 1; i <= 14; ++i) {
     const NodeId peer = (i % 2 == 0) ? 3 : 4;
     inject(h, 1, peer, craft_transit(h.cipher, peer, 1, 999, 6, i));
@@ -379,7 +380,8 @@ void test_busy_emission() {
 
   // 14 transit DATA from P with distinct origins fill the per-scope cap.
   // Each step drains the accept AND sends the next queued job inside the
-  // same flush (TX-complete submits directly) — the peer window holds 2
+  // same flush (flush() polls the sender once every event is drained,
+  // and that poll dispatches the next job) — the peer window holds 2
   // forwards in flight, so 14 admissions leave 12 pooled against the cap.
   for (std::uint64_t i = 1; i <= 14; ++i) {
     inject(h, 2, 3, craft_transit(h.cipher, 3, 2, 1000 + i, 4, i));

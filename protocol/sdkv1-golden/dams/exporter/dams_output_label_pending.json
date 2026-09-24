@@ -1,0 +1,12 @@
+{
+  "codec": "dams_exporter",
+  "context_hex": "8869526f7574654c6f6f6d01041b000000030a1b2c3d1b00a10000000012341b51730000000000425820b2a87913fda824e22330a62d59e2e3dd4daf6895568c6751e1611046e079a3245820898eded1038e45d8d24e98d256139995074bc4cc5ff353af9ca26806fdae8ad7",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-dams-golden-v1",
+  "label": 32772,
+  "length": 32,
+  "name": "dams_output_label_pending",
+  "note": "negative: the pending label must derive a different output",
+  "output_hex": "11e6015a1246f5ee770d82ce4f6797e45f98edf1ab219f4ec0e073113fa5629b",
+  "prk_hex": "0d04e7455ae6fdbb759b20c7e18b6b6ced48eb8f8e82454a61443ca09c783f00"
+}

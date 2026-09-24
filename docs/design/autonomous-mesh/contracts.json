@@ -37,9 +37,9 @@
   },
   "discovery": {
     "rate_kbps": 250,
-    "offer_slots": 32,
+    "offer_slots": 16,
     "offer_slot_ms": 10,
-    "channel_visit_max_ms": 400,
+    "channel_visit_max_ms": 200,
     "candidate_ttl_ms": 5000,
     "awake_neighbor_lease_ms": 30000,
     "idle_refresh_ms": 10000,

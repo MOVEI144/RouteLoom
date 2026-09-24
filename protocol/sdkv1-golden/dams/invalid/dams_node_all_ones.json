@@ -1,0 +1,12 @@
+{
+  "codec": "dams_context",
+  "device_kid_hex": "b2a87913fda824e22330a62d59e2e3dd4daf6895568c6751e1611046e079a324",
+  "expect": "error",
+  "format": "routeloom-sdkv1-dams-golden-v1",
+  "name": "dams_node_all_ones",
+  "network": 13054454845,
+  "node_id": 18446744073709551615,
+  "note": "0xFF..FF is not a node id",
+  "sak_kid_hex": "898eded1038e45d8d24e98d256139995074bc4cc5ff353af9ca26806fdae8ad7",
+  "site_id": 5869034739393888322
+}

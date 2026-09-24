@@ -7,6 +7,8 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <functional>
 #include <map>
@@ -136,67 +138,104 @@ class SimNetwork {
 
   // Returns the number of undelivered frames (link down, node missing, or
   // dropped by the loss hook).
+  //
+  // A TX completion wakes the sender's owner task (issue #60-3): each
+  // outer iteration drains every queued event, then every node a
+  // completion reached runs its post-drain poll — the wake -> drain ->
+  // poll the firmware owner task performs on an event. The polls enqueue
+  // the next frames, which the following iteration delivers, so
+  // back-to-back sends chain at the callback rate with no poll-tick tax —
+  // while the whole drain still precedes any dispatch, keeping RX-raised
+  // control replies ahead of queued DATA. The receiver side keeps the
+  // step cadence callers already model with their own poll loops.
+  //
+  // The drain bound counts dequeued frames only — outer wake/poll
+  // iterations cost nothing — so chained traffic keeps the historic
+  // 10,000-frame budget. When the bound stops the drain with frames
+  // still queued, flush() aborts instead of returning the partial drain
+  // silently.
   std::size_t flush(routeloom::MonotonicMs now) {
     std::size_t dropped = 0;
-    std::size_t safety = 0;
-    while (!queue.empty() && safety++ < 10000) {
-      Pending pending = std::move(queue.front());
-      queue.pop_front();
-      if (nodes.count(pending.from) == 0) {  // sender was removed mid-flight
-        ++dropped;
-        continue;
-      }
-      if (pending.frame.size() > 4) {
-        const auto type = static_cast<routeloom::FrameType>(pending.frame[4]);
-        auto& by_type = tx_by_type[type];
-        ++by_type.frames;
-        by_type.bytes += pending.frame.size();
-        if (type == routeloom::FrameType::RouteUpdate ||
-            type == routeloom::FrameType::SeqnoRequest ||
-            type == routeloom::FrameType::RouteRequest) {
-          auto& tally = route_control_tx[pending.from];
-          ++tally.frames;
-          tally.bytes += pending.frame.size();
+    constexpr std::size_t kFlushLimit = 10000;
+    std::size_t processed = 0;
+    while (!queue.empty() && processed < kFlushLimit) {
+      std::set<routeloom::NodeId> woken;
+      while (!queue.empty() && processed < kFlushLimit) {
+        ++processed;
+        Pending pending = std::move(queue.front());
+        queue.pop_front();
+        if (nodes.count(pending.from) == 0) {  // sender was removed mid-flight
+          ++dropped;
+          continue;
+        }
+        if (pending.frame.size() > 4) {
+          const auto type = static_cast<routeloom::FrameType>(pending.frame[4]);
+          auto& by_type = tx_by_type[type];
+          ++by_type.frames;
+          by_type.bytes += pending.frame.size();
+          if (type == routeloom::FrameType::RouteUpdate ||
+              type == routeloom::FrameType::SeqnoRequest ||
+              type == routeloom::FrameType::RouteRequest) {
+            auto& tally = route_control_tx[pending.from];
+            ++tally.frames;
+            tally.bytes += pending.frame.size();
+          }
+        }
+        const bool dropped_by_hook = drop_frame != nullptr && drop_frame(pending);
+        const bool success = !dropped_by_hook && connected(pending.from, pending.to) &&
+                             nodes.count(pending.to) != 0;
+        if (success) {
+          FrameSight sight{};
+          if (record_sights &&
+              sight_frame(routeloom::ByteView{pending.frame.data(), pending.frame.size()}, sight)) {
+            sights.push_back(sight);
+          }
+        } else {
+          ++dropped;
+        }
+        {
+          // The simulated driver emits the same TX-complete observation the
+          // real runtime's callback produces — driver service is measured
+          // here, not inside on_radio_tx_result (02-telemetry §2.3).
+          routeloom::RadioTxObservation obs{};
+          obs.peer = pending.to;
+          obs.submitted_us = static_cast<std::uint64_t>(now) * 1000u;
+          obs.completed_us = obs.submitted_us + pending.service_us;
+          obs.outcome = success ? routeloom::RadioTxOutcome::Success
+                                : routeloom::RadioTxOutcome::Failure;
+          obs.provenance = routeloom::ObservationProvenance::LocalDriver;
+          // Echo the submission token like the real runtime's Reserved lane
+          // so the completion attributes to the in-flight job's §14 domain.
+          obs.token = pending.token;
+          nodes.at(pending.from)->note_radio_tx(obs, now);
+        }
+        nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
+        woken.insert(pending.from);
+        if (success && silent_drop != nullptr && silent_drop(pending)) {
+          ++dropped;
+          continue;
+        }
+        if (success) {
+          nodes.at(pending.to)->on_radio_receive(
+              pending.from, routeloom::ByteView{pending.frame.data(), pending.frame.size()},
+              routeloom::RadioRxMetadata{-60}, now);
         }
       }
-      const bool dropped_by_hook = drop_frame != nullptr && drop_frame(pending);
-      const bool success = !dropped_by_hook && connected(pending.from, pending.to) &&
-                           nodes.count(pending.to) != 0;
-      if (success) {
-        FrameSight sight{};
-        if (record_sights &&
-            sight_frame(routeloom::ByteView{pending.frame.data(), pending.frame.size()}, sight)) {
-          sights.push_back(sight);
-        }
-      } else {
-        ++dropped;
+      // The queue is drained: every sender a completion reached wakes and
+      // runs its post-drain poll — submissions from these polls land in
+      // the queue the next iteration delivers.
+      for (const routeloom::NodeId id : woken) {
+        if (nodes.count(id) != 0) nodes.at(id)->poll(now);
       }
-      {
-        // The simulated driver emits the same TX-complete observation the
-        // real runtime's callback produces — driver service is measured
-        // here, not inside on_radio_tx_result (02-telemetry §2.3).
-        routeloom::RadioTxObservation obs{};
-        obs.peer = pending.to;
-        obs.submitted_us = static_cast<std::uint64_t>(now) * 1000u;
-        obs.completed_us = obs.submitted_us + pending.service_us;
-        obs.outcome = success ? routeloom::RadioTxOutcome::Success
-                              : routeloom::RadioTxOutcome::Failure;
-        obs.provenance = routeloom::ObservationProvenance::LocalDriver;
-        // Echo the submission token like the real runtime's Reserved lane
-        // so the completion attributes to the in-flight job's §14 domain.
-        obs.token = pending.token;
-        nodes.at(pending.from)->note_radio_tx(obs, now);
-      }
-      nodes.at(pending.from)->on_radio_tx_result(pending.token, success, now);
-      if (success && silent_drop != nullptr && silent_drop(pending)) {
-        ++dropped;
-        continue;
-      }
-      if (success) {
-        nodes.at(pending.to)->on_radio_receive(
-            pending.from, routeloom::ByteView{pending.frame.data(), pending.frame.size()},
-            routeloom::RadioRxMetadata{-60}, now);
-      }
+    }
+    if (!queue.empty()) {
+      // The dequeue bound stopped the drain with frames still queued: the
+      // undelivered remainder would silently skew every assertion after
+      // this flush, so fail here rather than return a partial drain.
+      std::fprintf(stderr,
+                   "SimNetwork::flush: dequeue bound (%zu frames) hit with %zu still queued\n",
+                   kFlushLimit, queue.size());
+      std::abort();
     }
     return dropped;
   }

@@ -484,6 +484,7 @@ dependencies = [
 name = "routeloom-join"
 version = "0.1.0"
 dependencies = [
+ "routeloom-edhoc",
  "routeloom-json",
  "routeloom-provision",
 ]

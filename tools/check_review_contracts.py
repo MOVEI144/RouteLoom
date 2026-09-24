@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
@@ -16,6 +17,11 @@ EXPECTED_IDF_COMMIT = "76f5dedd9950a3012fee8fb7d5586df21fc67802"
 # The profile dedup budget must cover this real record — reconcile the
 # budget, never shrink the record (static_assert ceiling in node.hpp: 176 B).
 DEDUP_ENTRY_BYTES = 152
+
+# ESP-NOW link overhead per transmitted frame (preamble-independent fixed
+# header/trailer cost) — a radio-physical constant of the LR250 profile,
+# not a tuneable contract (issue #47 premises).
+ESPNOW_MAC_OVERHEAD_BYTES = 43
 
 # Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
 # FrameType in components/routeloom/include/routeloom/types.hpp.
@@ -104,6 +110,129 @@ def validate(root: Path) -> dict:
             "fixed_baseline",
             radio["radio"]["mode"] == "LR250_FIXED"
             and radio["migration"]["auto_policy"] is False,
+        )
+        # Issue #47: acceptance targets must not undercut the LR250 serial
+        # airtime floor. Airtime is derived from the physical premises
+        # (wire bytes + ESP-NOW MAC overhead) x bit time + LR preamble, and
+        # the displayed floor_ms must equal ceil() of the derived serial
+        # model — floor(n) = n x DATA + (2n-1) x HOP_ACCEPT +
+        # n x END_RECEIPT + (4n-1) x turnaround. Every hop relays DATA once,
+        # every hop receiver (relays and destination on the forward path,
+        # relays on the receipt's return path) emits HOP_ACCEPT, and every
+        # frame reception costs a turnaround tick; the issue #47 cross-check
+        # (5hop ~= forward 84ms + return 87ms) reproduces this model.
+        floor_model = radio["latency_floor"]
+        turn = floor_model["relay_turnaround_ms"]
+        preamble_range = floor_model["lr_preamble_ms"]
+        preamble = floor_model["lr_preamble_model_ms"]
+        wire = floor_model["frame_wire_bytes"]
+        # The premises are pinned to independent sources so a coordinated
+        # edit that keeps the JSON internally consistent still fails:
+        # bit time derives from the 250kbps contract (8e6 us/Mbit / rate),
+        # the ESP-NOW MAC overhead is a fixed radio-physical constant, and
+        # the wire byte lengths must match the Wire v1 layouts in code.
+        test(
+            "latency_bit_time_from_250kbps_contract",
+            floor_model["us_per_byte"] * radio["radio"]["control_rate_kbps"]
+            == 8000,
+        )
+        test(
+            "latency_mac_overhead_is_espnow_constant",
+            floor_model["espnow_mac_overhead_bytes"]
+            == ESPNOW_MAC_OVERHEAD_BYTES,
+        )
+        wire_hpp = (
+            root / "components/routeloom/include/routeloom/wire.hpp"
+        ).read_text(encoding="utf-8")
+        types_hpp = (
+            root / "components/routeloom/include/routeloom/types.hpp"
+        ).read_text(encoding="utf-8")
+        node_cpp = (
+            root / "components/routeloom/src/node.cpp"
+        ).read_text(encoding="utf-8")
+
+        def payload_bytes(function_name):
+            body = node_cpp.split(
+                f"Status MeshNode::{function_name}(", 1
+            )[1].split("#undef RL_WRITE", 1)[0]
+            return sum(
+                int(width) // 8
+                for width in re.findall(r"writer\.write_u(\d+)\(", body)
+            )
+
+        header_bytes = int(
+            re.search(r"kHeaderSize = (\d+);", wire_hpp).group(1)
+        )
+        tag_bytes = int(
+            re.search(r"kAeadTagSize = (\d+);", types_hpp).group(1)
+        )
+        # End-to-end frames carry link + end AAD tags (2); the one-hop
+        # HOP_ACCEPT is link-only (1). Plaintext sizes come from the actual
+        # payload encoders in node.cpp.
+        expected_wire = {
+            "data_64b_payload": header_bytes + 64 + 2 * tag_bytes,
+            "hop_accept": header_bytes + payload_bytes("encode_ack_payload")
+            + tag_bytes,
+            "end_receipt": header_bytes
+            + payload_bytes("encode_receipt_payload") + 2 * tag_bytes,
+        }
+        test(
+            "latency_wire_lengths_match_wire_layout",
+            wire == expected_wire,
+            f"wire layout derives {expected_wire}",
+        )
+
+        def airtime_ms(wire_bytes):
+            return preamble + (
+                (wire_bytes + floor_model["espnow_mac_overhead_bytes"])
+                * floor_model["us_per_byte"] / 1000.0
+            )
+
+        derived_airtime = {
+            "data": airtime_ms(wire["data_64b_payload"]),
+            "hop_accept": airtime_ms(wire["hop_accept"]),
+            "end_receipt": airtime_ms(wire["end_receipt"]),
+        }
+        test(
+            "latency_preamble_model_within_range",
+            preamble_range[0] <= preamble <= preamble_range[1],
+        )
+        test(
+            "latency_airtime_matches_physical_premises",
+            all(
+                abs(floor_model["frame_airtime_ms"][key] - value) <= 0.05
+                for key, value in derived_airtime.items()
+            ),
+        )
+        hop_floors = {
+            "reliable_1hop_p95": 1,
+            "reliable_5hop_p95": 5,
+            "reliable_10hop_p95": 10,
+        }
+        targets = radio["performance_targets_ms"]
+        floors = floor_model["floor_ms"]
+
+        def serial_floor_ms(hops):
+            return (
+                hops * derived_airtime["data"]
+                + (2 * hops - 1) * derived_airtime["hop_accept"]
+                + hops * derived_airtime["end_receipt"]
+                + (4 * hops - 1) * turn
+            )
+
+        test(
+            "latency_floor_displayed_is_derived",
+            all(
+                floors[key] == math.ceil(serial_floor_ms(hops) - 1e-9)
+                for key, hops in hop_floors.items()
+            ),
+        )
+        test(
+            "latency_targets_above_airtime_floor",
+            all(
+                targets[key] >= floors[key]
+                for key in hop_floors
+            ),
         )
         feature_map = features["features"]
         prototype_features = {

@@ -1,0 +1,14 @@
+{
+  "codec": "dams_context",
+  "context_hex": "8869526f7574654c6f6f6d01041b000000030a1b2c3d1b00a10000000012341b51730000000000425820b2a87913fda824e22330a62d59e2e3dd4daf6895568c6751e1611046e079a3245820898eded1038e45d8d24e98d256139995074bc4cc5ff353af9ca26806fdae8ad7",
+  "context_sha256": "fcaf8f27938198dbaa08544c47e7114b2f13c82e33c488e69d9f9f49b6957162",
+  "device_kid_hex": "b2a87913fda824e22330a62d59e2e3dd4daf6895568c6751e1611046e079a324",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-dams-golden-v1",
+  "name": "dams_typical",
+  "network": 13054454845,
+  "node_id": 45317471250420276,
+  "note": "the join test identities; full-width ids take the 8-byte form",
+  "sak_kid_hex": "898eded1038e45d8d24e98d256139995074bc4cc5ff353af9ca26806fdae8ad7",
+  "site_id": 5869034739393888322
+}

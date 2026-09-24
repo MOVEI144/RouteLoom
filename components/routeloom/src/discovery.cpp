@@ -303,6 +303,13 @@ Status NeighborDiscovery::start(const MonotonicMs now_ms) noexcept {
       config_.awake_lease_ms == 0) {
     return Status::error(StatusCode::InvalidArgument, "discovery config invalid");
   }
+  // A backwards retry range would underflow the uniform draw; a cap below
+  // the draw floor would silently clamp every retry to zero wait.
+  if (config_.backoff_min_ms > config_.backoff_initial_max_ms ||
+      config_.backoff_max_ms < config_.backoff_min_ms) {
+    return Status::error(StatusCode::InvalidArgument,
+                         "discovery backoff range invalid");
+  }
   if (scope_mode_scoped(config_.scope_mode)) {
     if (config_.scope_provider == nullptr ||
         config_.scope == kInvalidScopeRef) {
@@ -371,8 +378,31 @@ Status NeighborDiscovery::begin_discovery(const MonotonicMs now_ms) noexcept {
     release_transient();
     return nonce;
   }
-  outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
-  return send_discover(now_ms);
+  // Cold-start spread (radio.md §13): a fresh requester exchange defers its
+  // first DISCOVER by a uniform [0, cold_start_jitter_max_ms) draw so
+  // simultaneous boots do not burst in lock-step. A zero draw keeps the
+  // send synchronous so its failure is reported to the caller; a deferred
+  // send flows through the same discover_due path as a retry.
+  std::uint32_t jitter_ms = 0;
+  if (config_.cold_start_jitter_max_ms > 0) {
+    std::uint64_t roll = 0;
+    if (!next_u64(roll)) {
+      outbound_ = Outbound{};
+      release_transient();
+      return Status::error(StatusCode::InternalError, "entropy unavailable");
+    }
+    jitter_ms =
+        static_cast<std::uint32_t>(roll % config_.cold_start_jitter_max_ms);
+  }
+  if (jitter_ms == 0) {
+    outbound_.stage_deadline_ms = now_ms + config_.offer_window_ms;
+    return send_discover(now_ms);
+  }
+  outbound_.discover_due_ms = now_ms + jitter_ms;
+  outbound_.stage_deadline_ms = outbound_.discover_due_ms +
+                               config_.offer_window_ms +
+                               config_.auth_timeout_ms;
+  return Status::success();
 }
 
 // --- RX: RLD1 carrier -----------------------------------------------------------
@@ -1596,7 +1626,9 @@ Status NeighborDiscovery::emit_rld1(const MacAddress& dest, const FrameType kind
   if (body.size > env.body.size()) {
     return Status::error(StatusCode::NoCapacity, "RLD1 body");
   }
-  std::memcpy(env.body.data(), body.data, body.size);
+  if (body.size > 0) {
+    std::memcpy(env.body.data(), body.data, body.size);
+  }
   env.body_size = body.size;
   autonomy::Rld1Encoded encoded{};
   Status status = autonomy::rld1_encode(env, encoded);
@@ -2027,15 +2059,23 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
     }
     if (outbound_.stage != OutboundStage::Idle &&
         now_ms > outbound_.stage_deadline_ms) {
-      // Exchange attempt failed: exponential backoff, fresh attempt nonce.
+      // Exchange attempt failed: fresh attempt nonce, and the next retry
+      // waits a uniform [backoff_min_ms, backoff_initial_max_ms] draw that
+      // doubles toward backoff_max_ms (radio.md §7/§13).
       ++outbound_.attempts;
       if (outbound_.attempts >= config_.max_attempts) {
         fail_outbound(now_ms, "DISCOVERY_FAILED");
+      } else if (outbound_.retry_backoff_ms == 0 &&
+                 !draw_retry_backoff(outbound_.retry_backoff_ms)) {
+        fail_outbound(now_ms, "DISCOVERY_FAILED");
       } else {
-        const std::uint32_t shift =
-            outbound_.attempts > 5 ? 5 : outbound_.attempts;
-        std::uint32_t backoff = config_.backoff_base_ms << shift;
-        if (backoff > config_.backoff_max_ms) backoff = config_.backoff_max_ms;
+        const std::uint32_t backoff = outbound_.retry_backoff_ms;
+        const std::uint64_t next_wait =
+            static_cast<std::uint64_t>(backoff) * 2;
+        outbound_.retry_backoff_ms =
+            next_wait > config_.backoff_max_ms
+                ? config_.backoff_max_ms
+                : static_cast<std::uint32_t>(next_wait);
         outbound_.have_offer = false;
         outbound_.stage = OutboundStage::AwaitingOffers;
         // Deadline covers the backoff wait PLUS the new offer window, so the
@@ -2180,17 +2220,23 @@ void NeighborDiscovery::poll(const MonotonicMs now_ms) noexcept {
       next_rediscovery_ms_ = 0;
       rediscovery_backoff_ms_ = 0;
     } else if (rediscovery_backoff_ms_ == 0) {
-      // Newly stranded: arm after one probe window, then ramp.
-      rediscovery_backoff_ms_ = config_.backoff_base_ms;
+      // Newly stranded: arm after one probe window, then ramp from a uniform
+      // [backoff_min_ms, backoff_initial_max_ms] draw to backoff_max_ms
+      // (radio.md §7/§13). Entropy failure falls back to the floor — the
+      // wait stays bounded either way.
+      if (!draw_retry_backoff(rediscovery_backoff_ms_)) {
+        rediscovery_backoff_ms_ = config_.backoff_min_ms;
+      }
       next_rediscovery_ms_ = now_ms + config_.probe_timeout_ms;
     } else if (!outbound_.active && now_ms >= next_rediscovery_ms_) {
       if (begin_discovery(now_ms).ok()) {
         event("REDISCOVERY", kInvalidNodeId);
       }
-      const std::uint32_t step = rediscovery_backoff_ms_ << 1;
+      const std::uint64_t step =
+          static_cast<std::uint64_t>(rediscovery_backoff_ms_) * 2;
       rediscovery_backoff_ms_ = step > config_.backoff_max_ms
                                     ? config_.backoff_max_ms
-                                    : step;
+                                    : static_cast<std::uint32_t>(step);
       next_rediscovery_ms_ = now_ms + rediscovery_backoff_ms_;
     }
   }
@@ -2514,6 +2560,23 @@ bool NeighborDiscovery::next_u64(std::uint64_t& out) noexcept {
   // when a broken RNG is most likely (mass simultaneous boot).
   return entropy_.fill(MutableByteView{reinterpret_cast<std::uint8_t*>(&out), 8})
       .ok();
+}
+
+bool NeighborDiscovery::draw_retry_backoff(std::uint32_t& out_ms) noexcept {
+  std::uint64_t roll = 0;
+  if (!next_u64(roll)) {
+    out_ms = 0;
+    return false;
+  }
+  const std::uint64_t span =
+      static_cast<std::uint64_t>(config_.backoff_initial_max_ms) -
+      config_.backoff_min_ms + 1;
+  out_ms = config_.backoff_min_ms +
+           static_cast<std::uint32_t>(roll % span);
+  // The cap is a hard ceiling on the wait, not just the doubling limit:
+  // a cap below the initial draw range must still bound the first retry.
+  if (out_ms > config_.backoff_max_ms) out_ms = config_.backoff_max_ms;
+  return true;
 }
 
 std::uint32_t NeighborDiscovery::recent_discovers(
