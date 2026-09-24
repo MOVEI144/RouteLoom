@@ -1346,6 +1346,8 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
   candidate_source_ = CandidateSource::None;
   candidate_object_.clear();
   phase_ = LifecyclePhase::BootGate;
+  adopted_ = Adopted{};
+  sak_valid_ = false;
   if (journal_ != nullptr) {
     const Status loaded = journal_->initialize();
     if (!loaded || journal_->quarantined() || journal_->uncertain()) {
@@ -1362,6 +1364,12 @@ Status MembershipLifecycle::on_boot(const LifecycleBootEvidence& evidence,
     }
     if (journal_->has_record()) {
       const LifecycleRecord& record = journal_->record();
+      // Switching is an irreversible intent. Until signed roll-forward and
+      // the Owner's context fence are wired, never adopt either store as Member.
+      if (record.mode == LifecycleMode::Switching) {
+        enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);
+        return Status::success();
+      }
       if (record.mode == LifecycleMode::Removing || record.mode == LifecycleMode::Holdoff) {
         if (!removal_proof_valid(record)) {
           enter_storage_blocked(LifecycleBlockReason::StoreCommit, now_ms);

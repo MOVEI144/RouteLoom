@@ -32,6 +32,7 @@
 #include "routeloom/node.hpp"
 #include "routeloom/sdkv1_records.hpp"
 #include "routeloom/sdkv1_lifecycle_store.hpp"
+#include "routeloom/sdkv1_grant_renew.hpp"
 #include "routeloom/sdkv1_revocation.hpp"
 #include "routeloom/telemetry.hpp"
 #include "routeloom/wire.hpp"
@@ -2102,6 +2103,39 @@ void test_removal_journal_powercuts() {
   }
 }
 
+void test_switching_intent_reboots_closed() {
+  NodeFixture f{};
+  CHECK(f.provision(2, 14));
+  LifecycleRecord prepared{};
+  prepared.mode = LifecycleMode::Prepared;
+  prepared.self = kNode;
+  prepared.site_id = kSiteId;
+  prepared.old_network = kNetwork;
+  prepared.new_network = kNetwork + (1ULL << 32U);
+  prepared.generation = 2;
+  prepared.rs_floor = 14;
+  prepared.gk_floor = f.site.site().gk_epoch_current;
+  prepared.boot_witness = f.site.site().boot_witness;
+  prepared.cutover_id = 3;
+  prepared.revision = 1;
+  prepared.payload.size = 35;
+  prepared.payload.bytes[1] = 1;
+  CHECK_OK(f.journal.prepare(prepared));
+  LifecycleRecord switching = prepared;
+  switching.mode = LifecycleMode::Switching;
+  switching.payload.clear();
+  switching.payload.size = 6 + 1 + 1 + kCutoverObjectSize + 32;
+  switching.payload.bytes[1] = 1;
+  switching.payload.bytes[3] = 1;
+  switching.payload.bytes[4] = 0;
+  switching.payload.bytes[5] = static_cast<std::uint8_t>(kCutoverObjectSize);
+  CHECK_OK(f.journal.switch_network(switching));
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 400));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(f.snap().adopted_network == 0);
+  CHECK(f.site.has_site());  // do not roll back or erase without proof
+}
+
 void test_removal_failure_after_intent_reboots_closed() {
   NodeFixture f{};
   CHECK(f.provision(2, 14));
@@ -2140,6 +2174,7 @@ int main() {
   test_removal_notice_intent();
   test_removal_failure_after_intent_reboots_closed();
   test_removal_journal_powercuts();
+  test_switching_intent_reboots_closed();
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();
   test_boot_adoption();

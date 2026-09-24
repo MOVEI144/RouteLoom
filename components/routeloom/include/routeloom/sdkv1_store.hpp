@@ -185,6 +185,9 @@ class SiteStore {
   // assignment_generation, gk_epoch_current, rs_epoch_floor or
   // boot_witness (Conflict otherwise).
   Status commit(const SiteRecord& record) noexcept;
+  // Verified cutover cleanup: repeat the monotonic Member check, then
+  // replace both slots so no old DAMS/GK survives in the sibling.
+  Status consolidate(const SiteRecord& record) noexcept;
   // P6 RRS application (04 §5): raise only the rs_epoch_floor of the
   // adopted Member record. The floor commits after the RRS1 set, its
   // enforcement and the resume sweep are durable — never before. Idempotent
@@ -208,6 +211,7 @@ class SiteStore {
   const SiteRecord& site() const noexcept { return site_; }
 
  private:
+  Status check_member(const SiteRecord& record) const noexcept;
   Status encode(const SiteRecord& record, std::size_t& used_len) noexcept;
   void wipe_scratch() noexcept;
 
