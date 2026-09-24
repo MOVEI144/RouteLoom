@@ -1999,13 +1999,20 @@ Status MembershipLifecycle::renew_prepare(ByteView body) noexcept {
   if (journal_->has_record() && journal_->record().mode == LifecycleMode::Prepared &&
       journal_->record().cutover_id == record.cutover_id &&
       journal_->record().revision == record.revision) {
-    if (journal_->record().payload.size != record.payload.size ||
-        std::memcmp(journal_->record().payload.bytes.data(), record.payload.bytes.data(),
-                    record.payload.size) != 0)
+    const LifecycleRecord& staged = journal_->record();
+    if (staged.self != record.self || staged.site_id != record.site_id ||
+        staged.old_network != record.old_network || staged.new_network != record.new_network ||
+        staged.generation != record.generation || staged.payload.size < prepare_hash.size() ||
+        std::memcmp(staged.payload.bytes.data() + staged.payload.size - prepare_hash.size(),
+                    prepare_hash.data(), prepare_hash.size()) != 0)
       return Status::error(StatusCode::Conflict, "renew prepare equivocation");
   } else {
     st = journal_->prepare(record);
-    if (!st) { enter_storage_blocked(LifecycleBlockReason::StoreCommit, last_now_); return st; }
+    if (!st) {
+      if (st.code != StatusCode::Conflict)
+        enter_storage_blocked(LifecycleBlockReason::StoreCommit, last_now_);
+      return st;
+    }
   }
   phase_ = LifecyclePhase::Prepared;
   send_renew_receipt(GrantRenewPhase::Prepared,
@@ -2133,7 +2140,10 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   SiteRecord next{};
   RevocationSet rrs{};
   const LifecycleRecord& record = journal_->record();
-  if (!switching_proof(record, next, rrs) || !site_.has_site() ||
+  const SiteStoreHealth site_health = site_.health();
+  if (!site_health.initialized || site_health.unsupported_mask != 0 ||
+      site_health.read_error_mask != 0 || !revocations_.erasure_safe() ||
+      !switching_proof(record, next, rrs) || !site_.has_site() ||
       site_.site().site_id != record.site_id ||
       (site_.site().network != record.old_network &&
        site_.site().network != record.new_network) ||
@@ -2221,14 +2231,9 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
     case 6: {
       const std::size_t proof_len = (static_cast<std::size_t>(p[4]) << 8U) | p[5];
       const ByteView proof{rrs_bytes.data + rrs_len, proof_len};
-      applied_receipt_ = GrantReceipt{};
-      applied_receipt_.head = {GrantRenewPhase::Applied, record.cutover_id,
-                               record.revision, record.old_network};
-      applied_receipt_.new_network = record.new_network;
-      applied_receipt_.gk_epoch = record.gk_floor;
-      applied_receipt_.rs_epoch = record.rs_floor;
-      sha256(proof, applied_receipt_.digest);
-      st = journal_->finish_switch();
+      Digest256 digest{};
+      sha256(proof, digest);
+      st = journal_->finish_switch(digest);
       break;
     }
     default: return Status::error(StatusCode::InvalidState, "renew step");
@@ -2239,6 +2244,20 @@ Status MembershipLifecycle::switch_poll(MonotonicMs now_ms) noexcept {
   }
   ++switch_step_;
   return Status::success();
+}
+
+bool MembershipLifecycle::restore_applied_receipt() noexcept {
+  if (!journal_ || !journal_->has_record()) return false;
+  const LifecycleRecord& record = journal_->record();
+  if (record.mode != LifecycleMode::Idle || record.payload.size != 32) return false;
+  applied_receipt_ = GrantReceipt{};
+  applied_receipt_.head = {GrantRenewPhase::Applied, record.cutover_id,
+                           record.revision, record.old_network - (1ULL << 32U)};
+  applied_receipt_.new_network = record.old_network;
+  applied_receipt_.gk_epoch = record.gk_floor;
+  applied_receipt_.rs_epoch = record.rs_floor;
+  std::memcpy(applied_receipt_.digest.data(), record.payload.bytes.data(), 32);
+  return true;
 }
 
 Status MembershipLifecycle::on_action_complete(const LifecycleActionComplete& done,
@@ -2261,8 +2280,7 @@ Status MembershipLifecycle::on_action_complete(const LifecycleActionComplete& do
       return Status::success();
     }
     phase_ = LifecyclePhase::Active;
-    if (applied_receipt_.head.phase == GrantRenewPhase::Applied)
-      applied_receipt_pending_ = true;
+    applied_receipt_pending_ = restore_applied_receipt();
   }
   action_pending_ = false;
   return Status::success();

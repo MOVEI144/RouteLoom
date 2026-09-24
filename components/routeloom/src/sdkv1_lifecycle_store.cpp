@@ -42,6 +42,7 @@ Status valid(const LifecycleRecord& r) noexcept {
     return Status::error(StatusCode::Unsupported, "rlx mode reserved");
   }
   const bool cutover = r.mode == LifecycleMode::Prepared || r.mode == LifecycleMode::Switching;
+  const bool applied = r.mode == LifecycleMode::Idle && r.payload.size == 32;
   if (r.self == 0 || r.self == kInvalidNodeId || r.site_id == 0 ||
       r.generation == 0 || r.old_network == 0 ||
       (cutover ? (r.new_network == 0 || r.cutover_id == 0 || r.revision == 0 ||
@@ -50,7 +51,11 @@ Status valid(const LifecycleRecord& r) noexcept {
                   static_cast<std::uint32_t>(r.old_network >> 32U) == 0xFFFFFFFFU ||
                   static_cast<std::uint32_t>(r.new_network >> 32U) !=
                       static_cast<std::uint32_t>(r.old_network >> 32U) + 1U)
-               : (r.new_network != 0 || r.cutover_id != 0 || r.revision != 0))) {
+               : (r.new_network != 0 ||
+                  (applied ? (r.cutover_id == 0 || r.revision == 0 ||
+                              static_cast<std::uint32_t>(r.old_network >> 32U) == 0 ||
+                              r.rs_floor == 0 || r.gk_floor == 0)
+                           : (r.cutover_id != 0 || r.revision != 0))))) {
     return Status::error(StatusCode::ProtocolError, "rlx binding");
   }
   if (r.mode == LifecycleMode::Removing || r.mode == LifecycleMode::Holdoff) {
@@ -88,7 +93,7 @@ Status valid(const LifecycleRecord& r) noexcept {
         return Status::error(StatusCode::ProtocolError, "rlx switching lengths");
       }
     }
-  } else if (r.payload.size != 0) {
+  } else if (r.payload.size != 0 && !applied) {
     return Status::error(StatusCode::ProtocolError, "rlx watermark payload");
   }
   return Status::success();
@@ -217,7 +222,15 @@ Status LifecycleStore::prepare(const LifecycleRecord& record) noexcept {
     return Status::error(StatusCode::InvalidState, "rlx prepare state");
   }
   if (has_record() && record_.mode == LifecycleMode::Prepared &&
-      (record_.cutover_id != record.cutover_id || record.revision <= record_.revision)) {
+      (record.self != record_.self || record.site_id != record_.site_id ||
+       record.old_network != record_.old_network ||
+       record.new_network != record_.new_network ||
+       record.generation != record_.generation ||
+       record.boot_witness != record_.boot_witness ||
+       record.cutover_id != record_.cutover_id ||
+       record.revision <= record_.revision ||
+       record.rs_floor < record_.rs_floor ||
+       record.gk_floor <= record_.gk_floor)) {
     return Status::error(StatusCode::Conflict, "rlx prepare revision");
   }
   return commit(record, false);
@@ -234,7 +247,7 @@ Status LifecycleStore::switch_network(const LifecycleRecord& record) noexcept {
   }
   return commit(record, false);
 }
-Status LifecycleStore::finish_switch() noexcept {
+Status LifecycleStore::finish_switch(const Digest256& commit_digest) noexcept {
   if (!has_record() || record_.mode != LifecycleMode::Switching ||
       pair_.uncertain() || pair_.quarantined()) {
     return Status::error(StatusCode::InvalidState, "rlx finish state");
@@ -243,9 +256,9 @@ Status LifecycleStore::finish_switch() noexcept {
   done.mode = LifecycleMode::Idle;
   done.old_network = record_.new_network;
   done.new_network = 0;
-  done.cutover_id = 0;
-  done.revision = 0;
-  done.payload.clear();
+  secure_clear(done.payload.bytes.data(), done.payload.bytes.size());
+  done.payload.size = commit_digest.size();
+  std::memcpy(done.payload.bytes.data(), commit_digest.data(), commit_digest.size());
   return commit(done, true);  // no old DAMS/GK in either journal slot
 }
 Status LifecycleStore::scrub_idle() noexcept {
@@ -286,7 +299,8 @@ Status LifecycleStore::unassigned_ready() noexcept {
   }
   LifecycleRecord next = record_;
   next.mode = LifecycleMode::UnassignedReady;
-  next.payload.clear();
+  secure_clear(next.payload.bytes.data(), next.payload.bytes.size());
+  next.payload.size = 0;
   return commit(next, true);  // scrub proof from both slots
 }
 Status LifecycleStore::resume_removal(const LifecycleRecord& verified) noexcept {

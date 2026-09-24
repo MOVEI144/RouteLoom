@@ -648,6 +648,7 @@ class MembershipLifecycle final {
   bool switching_proof(const LifecycleRecord& record, SiteRecord& out,
                        RevocationSet& rrs) noexcept;
   Status switch_poll(MonotonicMs now_ms) noexcept;
+  bool restore_applied_receipt() noexcept;
   void send_renew_receipt(GrantRenewPhase phase, ByteView digest) noexcept;
 
   LifecycleBlockReason adopt_stores() noexcept;

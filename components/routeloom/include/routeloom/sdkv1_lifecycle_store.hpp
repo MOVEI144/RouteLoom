@@ -54,7 +54,9 @@ class LifecycleStore final {
   // staging. Neither call changes the active RLS1 by itself.
   Status prepare(const LifecycleRecord& record) noexcept;
   Status switch_network(const LifecycleRecord& record) noexcept;
-  Status finish_switch() noexcept;
+  // Retain the nonsecret COMMIT digest and operation watermark so APPLIED can
+  // be retried after a cold boot without retaining staged credentials.
+  Status finish_switch(const Digest256& commit_digest) noexcept;
   // Re-twin an adopted secret-free watermark after a torn twin write.
   Status scrub_idle() noexcept;
   bool stale_sibling() const noexcept { return pair_.stale_sibling(); }

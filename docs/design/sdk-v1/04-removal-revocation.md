@@ -99,8 +99,8 @@ linkが連続3回`REVOKED` hintまたは失敗で終わり、使える近隣が�
 ## 7. site_epoch cutover（RRS1満杯・大規模な入替え）
 
 1. Site Authorityは`site_epoch+1`のMemberCertを有効な全memberへ`GrantRenew`で配る（authority channel、到達確認付き）。
-2. 期限（既定10分）後、Hostのdurable COMMITが確定してから、新network向けRRS1（`site_epoch_floor=site_epoch+1`）と旧network束縛の署名CutoverCommitを送る。準備中に発行済み資格を持つ削除者がいれば新RRS1にもその世代下限を残し、entry 0件を前提にしない。
-3. 機器はCA署名の次SiteCert、同SAK署名の次MemberCertと新RRS1、CutoverCommitを検証する。PREPAREはRLX1にstageするだけで旧所属を維持する。COMMIT後のRLX1 Switching intentから旧context／再開cacheを除去し、新RLS1・RRS1を採用してRLX1の両slotを秘密なしにする。OwnerのAdoptNetwork完了までは通常通信を開かない（旧networkのRMSも流用しない）。
+2. 期限（既定10分）後、Hostのdurable COMMITが確定してから、新network向けRRS1（`site_epoch_floor=site_epoch+1`）と旧network束縛の署名CutoverCommitを送る。準備中に発行済み資格を持つ削除者がいれば新RRS1にもその世代下限を残し、entry 0件を前提にしない。改訂PREPAREでは前の改訂より新しいGK epochを使い、既配布の鍵と同じepochを再利用しない。
+3. 機器はCA署名の次SiteCert、同SAK署名の次MemberCertと新RRS1、CutoverCommitを検証する。PREPAREはRLX1にstageするだけで旧所属を維持する。COMMIT後のRLX1 Switching intentから旧context／再開cacheを除去し、新RLS1・RRS1を採用してRLX1の両slotを秘密なしにする。Idleにはcutover ID・revisionと非秘密のCOMMIT digest 32 Bを残し、AdoptNetwork完了後のAPPLIEDを電断後にも再送できるようにする。Idleのold_network欄は採用済みの新networkであり、receiptの旧networkはそのsite_epochを1減らして復元する。OwnerのAdoptNetwork完了までは通常通信を開かない（旧networkのRMSも流用しない）。
 4. GrantRenewを取り逃したmemberはlinkを拒否され、ゼロタッチ参加の経路へ戻る。authorityは台帳上まだ割当済みなら**KGuardへの人手確認なしで**再発行する（KGuardへは自動の割当確認だけ）。
 
 費用：全memberの再handshake（RLRES1ではなくEDHOC。RMSがnetworkに束縛されるため）。30件以上の削除を貯めたとき程度の頻度を想定する。

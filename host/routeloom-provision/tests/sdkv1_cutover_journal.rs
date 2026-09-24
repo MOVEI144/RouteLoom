@@ -34,3 +34,53 @@ fn switching_is_one_sealed_intent_with_strict_lengths() {
     record.new_network = record.old_network;
     assert!(lifecycle_record_encode(&record, LIFECYCLE_SEAL_COMMITTED, 2).is_err());
 }
+
+#[test]
+fn idle_retains_only_the_applied_receipt_watermark() {
+    let mut record = LifecycleRecord {
+        mode: LifecycleMode::Idle,
+        self_node: 10,
+        site_id: 7,
+        old_network: 0x0002_0000_002a,
+        new_network: 0,
+        generation: 2,
+        rs_floor: 22,
+        gk_floor: 19,
+        boot_witness: 1,
+        cutover_id: 4,
+        revision: 1,
+        payload: vec![0x5a; 32],
+    };
+    let bytes = lifecycle_record_encode(&record, LIFECYCLE_SEAL_COMMITTED, 3).unwrap();
+    assert_eq!(
+        lifecycle_record_decode(&bytes).unwrap(),
+        (record.clone(), 3)
+    );
+    record.old_network = 0x0001_0000_002a;
+    assert!(lifecycle_record_encode(&record, LIFECYCLE_SEAL_COMMITTED, 3).is_ok());
+    record.old_network = 0x0002_0000_002a;
+    record.payload.pop();
+    assert!(lifecycle_record_encode(&record, LIFECYCLE_SEAL_COMMITTED, 3).is_err());
+    record.payload.push(0x5a);
+    record.revision = 0;
+    assert!(lifecycle_record_encode(&record, LIFECYCLE_SEAL_COMMITTED, 3).is_err());
+}
+
+#[test]
+fn non_cutover_modes_reject_stray_cutover_ids() {
+    let record = LifecycleRecord {
+        mode: LifecycleMode::UnassignedReady,
+        self_node: 10,
+        site_id: 7,
+        old_network: 0x0001_0000_002a,
+        new_network: 0,
+        generation: 2,
+        rs_floor: 22,
+        gk_floor: 19,
+        boot_witness: 1,
+        cutover_id: 4,
+        revision: 1,
+        payload: Vec::new(),
+    };
+    assert!(lifecycle_record_encode(&record, LIFECYCLE_SEAL_COMMITTED, 3).is_err());
+}

@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "routeloom/autonomy_wire.hpp"
+#include "routeloom/crc32.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/sdkv1_records.hpp"
@@ -2116,9 +2117,77 @@ void test_removal_journal_powercuts() {
   }
 }
 
+void test_cutover_journal_powercuts(const LifecycleRecord& prepared,
+                                    const LifecycleRecord& switching,
+                                    const Digest256& commit_digest) {
+  ByteBuffer<kLifecycleSlotBytes> encoded{};
+  CHECK_OK(lifecycle_record_encode(switching, kLifecycleSeal, 2, encoded));
+  for (std::size_t byte = 0; byte <= encoded.size; ++byte) {
+    FaultyRecordStorage storage{kLifecycleSlotBytes};
+    LifecycleStore store{storage};
+    CHECK_OK(store.initialize());
+    CHECK_OK(store.prepare(prepared));
+    storage.cut_call = storage.write_calls;
+    storage.cut_bytes = byte;
+    CHECK(!store.switch_network(switching));
+    LifecycleStore cold{storage};
+    (void)cold.initialize();
+    CHECK(cold.has_record());
+    if (cold.has_record()) {
+      CHECK(cold.record().mode == LifecycleMode::Prepared ||
+            cold.record().mode == LifecycleMode::Switching);
+      CHECK(cold.record().generation == prepared.generation);
+      CHECK(cold.record().rs_floor >= prepared.rs_floor);
+    }
+  }
+
+  LifecycleRecord idle = switching;
+  idle.mode = LifecycleMode::Idle;
+  idle.old_network = switching.new_network;
+  idle.new_network = 0;
+  idle.payload.clear();
+  idle.payload.size = commit_digest.size();
+  std::memcpy(idle.payload.bytes.data(), commit_digest.data(), commit_digest.size());
+  CHECK_OK(lifecycle_record_encode(idle, kLifecycleSeal, 3, encoded));
+  LifecycleRecord first_epoch_idle = idle;
+  first_epoch_idle.old_network = (1ULL << 32U) |
+                                 static_cast<std::uint32_t>(idle.old_network);
+  CHECK_OK(lifecycle_record_encode(first_epoch_idle, kLifecycleSeal, 3, encoded));
+  CHECK_OK(lifecycle_record_encode(idle, kLifecycleSeal, 3, encoded));
+  for (std::size_t call = 0; call < 4; ++call) {
+    for (std::size_t byte = 0; byte <= encoded.size; ++byte) {
+      FaultyRecordStorage storage{kLifecycleSlotBytes};
+      LifecycleStore store{storage};
+      CHECK_OK(store.initialize());
+      CHECK_OK(store.prepare(prepared));
+      CHECK_OK(store.switch_network(switching));
+      storage.cut_call = storage.write_calls + call;
+      storage.cut_bytes = byte;
+      CHECK(!store.finish_switch(commit_digest));
+      LifecycleStore cold{storage};
+      (void)cold.initialize();
+      CHECK(cold.has_record());
+      if (cold.has_record()) {
+        CHECK(cold.record().mode == LifecycleMode::Switching ||
+              cold.record().mode == LifecycleMode::Idle);
+        CHECK(cold.record().generation == switching.generation);
+        CHECK(cold.record().rs_floor == switching.rs_floor);
+        if (cold.record().mode == LifecycleMode::Idle) {
+          CHECK(cold.record().cutover_id == switching.cutover_id);
+          CHECK(cold.record().revision == switching.revision);
+          CHECK(cold.record().payload.size == commit_digest.size());
+          CHECK(std::memcmp(cold.record().payload.bytes.data(), commit_digest.data(),
+                            commit_digest.size()) == 0);
+        }
+      }
+    }
+  }
+}
+
 void test_signed_prepare_stages_without_switching() {
   NodeFixture f{};
   CHECK(f.provision(2, 14));
+  CHECK_OK(f.site.commit(f.site.site()));  // both RLS1 slots hold a valid old membership
   const NetworkId next = kNetwork + (1ULL << 32U);
   const auto site_cert = issue(sitecert_claims(next), site_ca());
   const auto member_cert = issue(membercert_claims(2, next), sak());
@@ -2159,6 +2228,28 @@ void test_signed_prepare_stages_without_switching() {
                                                   ByteView{wire.data(), pos}), 200));
   CHECK(f.journal.has_record());
   CHECK(f.journal.record().mode == LifecycleMode::Prepared);
+  const LifecycleRecord prepared_intent = f.journal.record();
+  const std::size_t package_offset = 36 + site_cert.size + member_cert.size;
+  wire[15] = 2;  // a newer revision cannot reuse an issued GK epoch
+  wire[package_offset + 28] ^= 1;
+  CHECK(!f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                               ByteView{wire.data(), pos}), 200));
+  CHECK(f.journal.record().revision == 1);
+  wire[package_offset + 28] ^= 1;
+  wire[15] = 1;
+  NodeFixture retry{};
+  CHECK(retry.provision(2, 14));
+  CHECK_OK(retry.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                      ByteView{wire.data(), pos}), 200));
+  const auto old_network_rrs = revocation_object(revocation_set(15, 2, 2, kNetwork));
+  CHECK_OK(retry.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2),
+                                                      kAuthorityTypeRevocation,
+                                                      old_network_rrs.view()), 201));
+  retry.pump(202);
+  CHECK(retry.snap().phase == LifecyclePhase::Prepared);
+  CHECK_OK(retry.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7,
+                                                      ByteView{wire.data(), pos}), 203));
+  CHECK(retry.journal.record().revision == 1);
   CHECK(f.site.site().network == kNetwork);
   CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 201));
   CHECK(f.site.site().network == kNetwork);
@@ -2238,6 +2329,56 @@ void test_signed_prepare_stages_without_switching() {
   CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 7, commit_body), 203));
   CHECK(f.snap().phase == LifecyclePhase::Switching);
   CHECK(f.site.site().network == kNetwork);
+  Digest256 commit_digest{};
+  sha256(ByteView{proof.data(), proof.size()}, commit_digest);
+  test_cutover_journal_powercuts(prepared_intent, f.journal.record(), commit_digest);
+  // A valid but unknown RLS1 schema may describe a newer membership. The
+  // signed switching intent cannot authorize overwriting an unknown format.
+  const auto site_slot0 = f.site_storage.slot(0);
+  auto& unknown_site = f.site_storage.slot(0);
+  const std::size_t site_used = (static_cast<std::size_t>(unknown_site[6]) << 8U) |
+                                unknown_site[7];
+  unknown_site[11] = 2;
+  const std::uint32_t site_crc = routeloom::crc32_iso_hdlc(
+      ByteView{unknown_site.data(), site_used - 4});
+  for (std::size_t i = 0; i < 4; ++i)
+    unknown_site[site_used - 4 + i] = static_cast<std::uint8_t>(site_crc >> (24 - 8 * i));
+  CHECK(!f.site.initialize());
+  CHECK(f.site.health().unsupported_mask != 0);
+  CHECK(f.site.has_site());
+  const std::size_t site_writes_before = f.site_storage.write_calls;
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 204));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  for (int i = 0; i < 30 && f.snap().phase == LifecyclePhase::Switching; ++i)
+    (void)f.dispatch(LifecycleInput::Poll(), 205 + i);
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(f.site_storage.write_calls == site_writes_before);
+  f.site_storage.slot(0) = site_slot0;
+  CHECK_OK(f.site.initialize());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 210));
+  const auto rrs_slot0 = f.rrs_storage.slot(0);
+  const auto rrs_slot1 = f.rrs_storage.slot(1);
+  f.rrs_storage.slot(1) = rrs_slot0;
+  auto& unknown_rrs = f.rrs_storage.slot(0);
+  const std::size_t rrs_used = (static_cast<std::size_t>(unknown_rrs[6]) << 8U) |
+                               unknown_rrs[7];
+  unknown_rrs[11] = 2;
+  const std::uint32_t rrs_crc = routeloom::crc32_iso_hdlc(
+      ByteView{unknown_rrs.data(), rrs_used - 4});
+  for (std::size_t i = 0; i < 4; ++i)
+    unknown_rrs[rrs_used - 4 + i] = static_cast<std::uint8_t>(rrs_crc >> (24 - 8 * i));
+  CHECK(!f.revocations.initialize());
+  CHECK(f.revocations.has_set() && !f.revocations.erasure_safe());
+  const std::size_t rrs_writes_before = f.rrs_storage.write_calls;
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 211));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  (void)f.dispatch(LifecycleInput::Poll(), 212);
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(f.rrs_storage.write_calls == rrs_writes_before);
+  f.rrs_storage.slot(0) = rrs_slot0;
+  f.rrs_storage.slot(1) = rrs_slot1;
+  CHECK_OK(f.revocations.initialize());
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 213));
   CHECK(!f.dispatch(LifecycleInput::MemberReady(f.site.commit_seq(), 0), 204));
   CHECK(!f.dispatch(LifecycleInput::Recovery(true), 204));
   CHECK(f.snap().phase == LifecyclePhase::Switching);
@@ -2261,6 +2402,9 @@ void test_signed_prepare_stages_without_switching() {
   for (int i = 0; i < 40 && f.journal.record().mode == LifecycleMode::Switching; ++i)
     CHECK_OK(f.dispatch(LifecycleInput::Poll(), 241 + i));
   CHECK(f.journal.record().mode == LifecycleMode::Idle);
+  const auto& idle_payload = f.journal.record().payload;
+  CHECK(std::all_of(idle_payload.bytes.begin() + idle_payload.size,
+                    idle_payload.bytes.end(), [](std::uint8_t byte) { return byte == 0; }));
   CHECK(f.runtime.network_retired && f.runtime.trust_installed);
   CHECK(f.site.site().network == next);
   CHECK(f.revocations.set().network == next);
@@ -2277,11 +2421,42 @@ void test_signed_prepare_stages_without_switching() {
   CHECK(!f.lifecycle.permits(stamp_for(kPeer, 2), TrafficUse::Data));
   CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 251));
   CHECK(f.snap().phase == LifecyclePhase::Active);
-  // Fresh network authority binding receives APPLIED, not a PREPARED receipt.
-  CHECK(f.authority.sent.empty() || f.authority.sent.back().body[1] != 4);
+  // Fresh network authority binding receives APPLIED after the Owner adopts it.
+  f.authority.sent.clear();
   CHECK_OK(f.dispatch(LifecycleInput::Poll(), 252));
-  // A cold boot after Idle discards volatile receipt state; Host keeps unknown
-  // until its new-context recovery path obtains durable application evidence.
+  CHECK(f.authority.sent.size() == 1);
+  if (!f.authority.sent.empty()) {
+    CHECK(f.authority.sent.back().type == 7);
+    CHECK(f.authority.sent.back().body[1] == 4);
+    GrantReceipt receipt{};
+    const auto& bytes = f.authority.sent.back().body;
+    CHECK_OK(grant_receipt_decode(ByteView{bytes.data(), bytes.size()}, receipt));
+    Digest256 proof_hash{};
+    sha256(ByteView{proof.data(), proof.size()}, proof_hash);
+    CHECK(receipt.head.old_network == kNetwork && receipt.new_network == next);
+    CHECK(receipt.head.cutover_id == 7 && receipt.head.revision == 1);
+    CHECK(receipt.rs_epoch == 15 && receipt.digest == proof_hash);
+  }
+  f.authority.sent.clear();
+  CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 253));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
+  CHECK_OK(f.lifecycle.take_action(action));
+  CHECK(action.tag == LifecycleActionTag::AdoptNetwork);
+  CHECK_OK(f.dispatch(LifecycleInput::ActionDone(action.token, Status::success()), 254));
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 255));
+  CHECK(f.authority.sent.size() == 1);
+  if (!f.authority.sent.empty()) {
+    CHECK(f.authority.sent.back().type == 7);
+    CHECK(f.authority.sent.back().body[1] == 4);
+    GrantReceipt receipt{};
+    const auto& bytes = f.authority.sent.back().body;
+    CHECK_OK(grant_receipt_decode(ByteView{bytes.data(), bytes.size()}, receipt));
+    Digest256 proof_hash{};
+    sha256(ByteView{proof.data(), proof.size()}, proof_hash);
+    CHECK(receipt.head.old_network == kNetwork && receipt.new_network == next);
+    CHECK(receipt.head.cutover_id == 7 && receipt.head.revision == 1);
+    CHECK(receipt.rs_epoch == 15 && receipt.digest == proof_hash);
+  }
 }
 
 void test_switching_intent_reboots_closed() {

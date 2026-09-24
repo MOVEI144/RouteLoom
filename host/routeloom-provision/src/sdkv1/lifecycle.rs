@@ -57,14 +57,25 @@ pub struct LifecycleRecord {
 }
 
 fn validate(record: &LifecycleRecord) -> Result<()> {
+    let cutover = matches!(
+        record.mode,
+        LifecycleMode::Prepared | LifecycleMode::Switching
+    );
+    let applied = record.mode == LifecycleMode::Idle && record.payload.len() == 32;
     if !id_valid(record.self_node)
         || record.site_id == 0
         || record.generation == 0
         || record.old_network == 0
-        || (matches!(
-            record.mode,
-            LifecycleMode::Prepared | LifecycleMode::Switching
-        ) != (record.new_network != 0 && record.cutover_id != 0 && record.revision != 0))
+        || (cutover && (record.new_network == 0 || record.cutover_id == 0 || record.revision == 0))
+        || (!cutover
+            && (record.new_network != 0
+                || (!applied && (record.cutover_id != 0 || record.revision != 0))))
+        || (applied
+            && (record.cutover_id == 0
+                || record.revision == 0
+                || record.old_network >> 32 == 0
+                || record.rs_floor == 0
+                || record.gk_floor == 0))
     {
         return err(Code::ProtocolError, "rlx binding");
     }
@@ -142,7 +153,7 @@ fn validate(record: &LifecycleRecord) -> Result<()> {
                 return err(Code::ProtocolError, "rlx switching length");
             }
         }
-    } else if !record.payload.is_empty() {
+    } else if !record.payload.is_empty() && !applied {
         return err(Code::ProtocolError, "rlx watermark payload");
     }
     Ok(())
