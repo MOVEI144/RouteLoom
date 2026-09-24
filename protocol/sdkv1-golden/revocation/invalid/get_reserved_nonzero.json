@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_get",
+  "encoded_hex": "010200010000000e",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "get_reserved_nonzero",
+  "note": "reserved bytes stay zero"
+}

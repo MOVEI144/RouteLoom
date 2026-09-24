@@ -112,14 +112,15 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
  "verdict":"allow","role":"endpoint","generation":1,"member_cert_serial":1,
  "operation_id":"op-0000000000000001","applied":"current_attempt"}
 // join.decide pending / deny → "state":"recorded"（"applied":"next_attempt"は期限後の決定）
-// membership.revoke
+// membership.revoke（直後の応答は"distribution":"pending"のまま。詳細はoperations.get）
 {"operation_id":"op-0000000000000002","state":"committed","device_id":"00a1000000001234",
  "generation":1,"rs_epoch":1,"gk_rotation":{"from":1,"to":2,"state":"staged"},
- "distribution":"not_implemented"}
-// operations.get op-…2
+ "distribution":"pending"}
+// operations.get op-…2（P6-1：snapshotの適用状況を返す）
 {"operation_id":"op-0000000000000002","kind":"revoke","device_id":"00a1000000001234","generation":1,
- "state":"committed","rs_epoch":1,
- "distribution":{"state":"not_implemented","reached":null,"members":0,"unknown":0},
+ "state":"distributing","rs_epoch":1,
+ "distribution":{"state":"distributing","applied":71,"retired":0,"unknown":25,"total":96,
+  "reached":71,"members":96},
  "gk_rotation":{"from":1,"to":2,"state":"staged"},"created_ms":1790000000030}
 // members.get
 {"member":{"device_id":"00a1000000001234","kid":"b3…","state":"member","generation":1,"role":"endpoint",
@@ -129,6 +130,8 @@ KGuardは「参加させてよいか」を答え、RouteLoomは「その答え�
 ```
 
 エラー：grant不足は`AuthorizationFailed`、未設定は`SITE_AUTHORITY_UNAVAILABLE`、引数は`INVALID_ARGUMENT`、閉じた／無い要求は`NOT_FOUND`、同keyで別内容・決定済み要求への別verdict・device_id不一致・kid conflictのallow・`expected_generation`不一致・削除済みへのrevokeは`CONFLICT`、RRS1が32件で満杯なら`CUTOVER_REQUIRED`、storeが書けなければ`STORE_FAILURE`（retryable、何も変わっていない）。
+
+**配布の進捗（P6-1 PR Aで実装）**：revokeの`operations.get`はcommit時のmember snapshotに対する適用状況を返す。top-level `state`は`committed`（配布開始前）→`distributing`（送信開始後）→`converged`（snapshotの`unknown`が0）。`distribution` objectは`state`（`pending`/`distributing`/`converged`、P6-1以前のoperationは`unknown`）、`applied`（context拘束つきApplied ACK済み）、`retired`（後続revokeで対象外になった割当）、`unknown`、`total`（`applied+retired+unknown`）、互換field `reached=applied`・`members=total`。送信・link ACK・ObjectAckは適用人数に含めない。**`converged`はRRS執行のsnapshot収束であり、本人の消去（`notice`、PR B）やGK更新完了（`gk_rotation`、PR D）とは別**——CLI（`operation-get`の素通し表示）・client（`routeloom_client::site::OperationProgress`）・TUI（Events tab）はいずれも`unknown`/nullを成功表示へ潰さない。配布transportはfake port（`set_rrs_transport`未設定時は送信が起きないので`pending`のまま進まず、`capabilities.get`の`distribution`は`rrs_no_transport`）：P4/P5の実adapterが入るまでproductionでは有効化しない。
 
 **イベント**：案のstream `membership`ではなく既存の`events` stream（event ring）へ出す。kind：`join.request`、`join.decided`、`device.discovered`（初回と1分以上空いた再出現）、`member.reissued`、`member.confirmed`、`member.revoked`、`member.removal_notified`、`rrs.published`、`gk.staged`、`authority.error`。`messages.subscribe`の`filter.kinds`で選べる。`gk.rotated`・`cutover.progress`は対応する機能（P5・P6-2）が無いので出さない。
 

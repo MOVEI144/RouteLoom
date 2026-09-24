@@ -246,6 +246,12 @@ Status revocation_object_verify(ByteView object, const P256PublicKey& sak_pubkey
 // below the floor).
 bool revocation_rejects(const RevocationSet& set, NodeId node,
                         std::uint32_t generation, std::uint32_t site_epoch) noexcept;
+// Same-network replacement rule (04 §2, P6): every entry of `old_set` is
+// still present in `next` with a min_generation that did not decrease. Past
+// revocations can only be compressed by a verified cutover (PR C), never by
+// a plain replacement. Only the (node, min_generation) binding carries
+// authority — a reason change alone is not an omission.
+bool revocation_covers(const RevocationSet& old_set, const RevocationSet& next) noexcept;
 
 Status revocation_record_encode(ByteView object, std::uint32_t seal,
                                 std::uint32_t commit_seq,

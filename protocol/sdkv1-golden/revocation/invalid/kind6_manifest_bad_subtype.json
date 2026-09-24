@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_kind6_manifest",
+  "encoded_hex": "01020600008796dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "kind6_manifest_bad_subtype",
+  "note": "manifest subtype is 1"
+}

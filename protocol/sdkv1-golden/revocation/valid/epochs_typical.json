@@ -1,0 +1,11 @@
+{
+  "applied_rs_epoch": 14,
+  "body_hex": "0161000000030000000e00000007",
+  "codec": "rrs_state_epochs",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "gk_epoch": 7,
+  "name": "epochs_typical",
+  "note": "a member at site epoch 3 with rs 14 and gk 7 applied",
+  "site_epoch": 3
+}

@@ -508,6 +508,6 @@ pub(super) fn capability_json<S: OperationStore>(ctx: &ApiContext<'_, S>) -> Str
         None => (false, false),
     };
     format!(
-        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"not_wired\",\"distribution\":\"not_implemented\",\"storage_durable\":{durable}}}"
+        "{{\"configured\":{configured},\"edhoc\":\"rfc9528-method0-suite2\",\"verdicts\":[\"allow\",\"pending\",\"deny\"],\"permissions\":[\"MEMBERSHIP_READ\",\"MEMBERSHIP_DECIDE\",\"MEMBERSHIP_ADMIN\"],\"page_max\":{SITE_PAGE_MAX},\"events\":[{kinds}],\"join_relay\":\"not_wired\",\"distribution\":\"rrs_no_transport\",\"storage_durable\":{durable}}}"
     )
 }

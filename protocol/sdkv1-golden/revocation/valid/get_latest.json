@@ -1,0 +1,9 @@
+{
+  "body_hex": "0102000000000000",
+  "codec": "rrs_get",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "get_latest",
+  "note": "wanted 0 asks for the latest set",
+  "wanted_rs_epoch": 0
+}
