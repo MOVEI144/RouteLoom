@@ -867,6 +867,36 @@ void test_fake_radio() {
   CHECK_OK(entropy_b.fill(MutableByteView{nonce, sizeof(nonce)}));
 }
 
+// P6 PR-A (04 §4): kind 6 (RevocationSet) rides the link-scoped object
+// carriers; kind 4 stays unassigned and kind 5 stays P5-reserved.
+void test_control_object_kind_revocation_set() {
+  // Raw manifest bytes with kind byte 6 — no reliance on the new enum.
+  std::uint8_t raw[autonomy::kControlObjectPayloadSize] = {1, 1, 6, 0, 0x02, 0x68};
+  for (std::size_t i = 6; i < sizeof(raw); ++i) raw[i] = static_cast<std::uint8_t>(i);
+  autonomy::ControlObjectPayload manifest{};
+  CHECK_OK(autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  CHECK(static_cast<std::uint8_t>(manifest.kind) == 6);
+  CHECK(manifest.total_len == 0x0268);
+
+  autonomy::EncodedPayload enc{};
+  autonomy::ControlObjectPayload back{};
+  back.kind = static_cast<autonomy::ControlObjectKind>(6);
+  back.total_len = 616;
+  for (std::size_t i = 0; i < back.object_hash.size(); ++i)
+    back.object_hash[i] = static_cast<std::uint8_t>(0xA0 + i);
+  CHECK_OK(autonomy::control_object_encode(back, enc));
+  CHECK(enc.size == autonomy::kControlObjectPayloadSize);
+  autonomy::ControlObjectPayload decoded{};
+  CHECK_OK(autonomy::control_object_decode(enc.view(), decoded));
+  CHECK(static_cast<std::uint8_t>(decoded.kind) == 6);
+  CHECK(decoded.total_len == 616);
+  // Kinds 4 and 5 are still refused.
+  raw[2] = 4;
+  CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+  raw[2] = 5;
+  CHECK(!autonomy::control_object_decode(ByteView{raw, sizeof(raw)}, manifest));
+}
+
 }  // namespace
 
 int main() {
@@ -878,6 +908,7 @@ int main() {
   test_rld1_codec();
   test_autonomy_golden();
   test_fake_radio();
+  test_control_object_kind_revocation_set();
 
   if (failures != 0) {
     std::fprintf(stderr, "%d autonomy checks failed\n", failures);

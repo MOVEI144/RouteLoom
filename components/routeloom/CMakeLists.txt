@@ -38,6 +38,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_join_relay.cpp
   src/sdkv1_join_transport.cpp
   src/sdkv1_records.cpp
+  src/sdkv1_revocation.cpp
   src/sdkv1_store.cpp
   src/status.cpp
   src/telemetry.cpp

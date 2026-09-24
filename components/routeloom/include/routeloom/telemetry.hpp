@@ -324,7 +324,13 @@ enum CapabilityFeature : std::uint32_t {
   kCapTransitFailureV1 = 1u << 2,
   kCapRemoteTelemetryV1 = 1u << 3,
   kCapBusyV1 = 1u << 4,
+  // P6 (04-removal-revocation.md §4): RRS1 gossip + the membership
+  // lifecycle gate. Bits 7+ stay undefined and refused.
+  kCapRrsGossipV1 = 1u << 5,
+  kCapMembershipLifecycleV1 = 1u << 6,
 };
+// Capability bits the codec accepts (bits 0..6).
+constexpr std::uint32_t kCapabilityFeatureMask = 0x7Fu;
 enum PermitProfileBit : std::uint32_t {
   kPermitProfileDevHmac = 1u << 0,
   kPermitProfileCoseEsp256 = 1u << 1,

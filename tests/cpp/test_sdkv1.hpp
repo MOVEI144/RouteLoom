@@ -46,6 +46,7 @@ class FaultyRecordStorage final : public RecordSlotStorage {
     if (slot >= 2 || data.data == nullptr || data.size > slot_bytes_) {
       return Status::error(StatusCode::InvalidArgument, "bad write");
     }
+    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected write failure");
     const std::size_t call = write_calls++;
     if (call == cut_call) {
       std::memcpy(slots_[slot].data(), data.data, cut_bytes);
@@ -62,6 +63,7 @@ class FaultyRecordStorage final : public RecordSlotStorage {
     cut_call = drop_call = flip_call = std::numeric_limits<std::size_t>::max();
     read_error = false;
     read_error_slot = 0xFF;
+    fail_writes = false;
   }
 
   std::size_t write_calls{0};
@@ -71,6 +73,7 @@ class FaultyRecordStorage final : public RecordSlotStorage {
   std::size_t flip_call{std::numeric_limits<std::size_t>::max()};
   bool read_error{false};
   std::uint8_t read_error_slot{0xFF};
+  bool fail_writes{false};
 
  private:
   std::size_t slot_bytes_;
@@ -94,6 +97,7 @@ class FaultyResumeStorage final : public ResumeSlotStorage {
     if (index >= slots_.size() || data.size != kResumeSlotBytes) {
       return Status::error(StatusCode::InvalidArgument, "bad resume write");
     }
+    if (fail_writes) return Status::error(StatusCode::StorageFailure, "injected write failure");
     const std::size_t call = write_calls++;
     if (call == cut_call) {
       std::memcpy(slots_[index].data(), data.data, cut_bytes);
@@ -108,6 +112,7 @@ class FaultyResumeStorage final : public ResumeSlotStorage {
   std::size_t write_calls{0};
   std::size_t cut_call{std::numeric_limits<std::size_t>::max()};
   std::size_t cut_bytes{0};
+  bool fail_writes{false};
 
  private:
   std::vector<std::array<std::uint8_t, kResumeSlotBytes>> slots_;

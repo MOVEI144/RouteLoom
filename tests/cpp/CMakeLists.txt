@@ -372,6 +372,18 @@ target_include_directories(routeloom_sdkv1_store_tests PRIVATE
 target_compile_options(routeloom_sdkv1_store_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_store_tests COMMAND routeloom_sdkv1_store_tests)
 
+# P6 revocation lifecycle, PR A (docs/design/sdk-v1/04 §2-§5, plan P6-1):
+# RRS1 acceptance/enforcement/gossip and the traffic gate through fake
+# ports (production P4/P5 adapters land later; see sdkv1_revocation.hpp).
+add_executable(routeloom_sdkv1_revocation_tests test_sdkv1_revocation.cpp)
+target_link_libraries(routeloom_sdkv1_revocation_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_revocation_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_definitions(routeloom_sdkv1_revocation_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+target_compile_options(routeloom_sdkv1_revocation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_revocation_tests COMMAND routeloom_sdkv1_revocation_tests)
+
 # SDK v1 stores over the key/blob storage port — the portable half of the
 # `rlsec` NVS adapter (sdk-v1/05 §5, 08 P7-1), against a fake NVS.
 add_executable(routeloom_sdkv1_blob_storage_tests test_sdkv1_blob_storage.cpp)

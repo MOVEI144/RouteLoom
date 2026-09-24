@@ -155,6 +155,12 @@ class SiteStore {
   // assignment_generation, gk_epoch_current, rs_epoch_floor or
   // boot_witness (Conflict otherwise).
   Status commit(const SiteRecord& record) noexcept;
+  // P6 RRS application (04 §5): raise only the rs_epoch_floor of the
+  // adopted Member record. The floor commits after the RRS1 set, its
+  // enforcement and the resume sweep are durable — never before. Idempotent
+  // when `epoch` equals the floor, Conflict when below it. Refused while
+  // quarantined/uncertain.
+  Status raise_rs_floor(std::uint32_t epoch) noexcept;
   // Removal (04 §6.4): write the cleared tombstone to both slots so no
   // GK/DAMS copy survives. Allowed in any initialized state.
   Status clear() noexcept;
@@ -187,9 +193,11 @@ class RevocationStore {
   // 04 §2 acceptance: structure, SAK signature with the AAD bound to the
   // caller's RLS1 network, site_id/network equal to RLS1, rs_epoch strictly
   // greater than the adopted set's (same site), site_epoch_floor not below
-  // it. Malformed -> ProtocolError; wrong site/network or bad signature ->
-  // AuthorizationFailed; stale epoch or regressed floor -> Conflict.
-  // Refused while quarantined/uncertain.
+  // it, and — on the same network — no past entry dropped or weakened
+  // (revocation_covers; only a verified cutover compresses history).
+  // Malformed -> ProtocolError; wrong site/network or bad signature ->
+  // AuthorizationFailed; stale epoch, regressed floor or omitted entry ->
+  // Conflict. Refused while quarantined/uncertain.
   Status accept(ByteView object, const P256PublicKey& sak_pubkey, std::uint64_t site_id,
                 NetworkId network,
                 const Es256Verifier& verifier = default_es256_verifier()) noexcept;
@@ -251,6 +259,8 @@ class ResumeCache {
 
   explicit ResumeCache(ResumeSlotStorage& storage) noexcept : storage_(storage) {}
 
+  std::size_t slot_count() const noexcept { return storage_.slot_count(); }
+
   // 05 §3.2 validity: valid state, CRC, network == context network,
   // created_gk_epoch + 2 > gk_epoch, peer not rejected by the RRS1.
   bool usable(const ResumeSlot& slot, const ResumeContext& context) const noexcept;
@@ -268,6 +278,17 @@ class ResumeCache {
   // RRS1 / REMOVED: overwrite with the empty record (RMS scrubbed).
   Status invalidate_peer(NodeId peer) noexcept;
   Status clear_all() noexcept;
+  // One-slot sweep step (04 §5): examines slot `cursor`, invalidating it
+  // only when it holds a same-network binding the adopted RRS1 rejects
+  // (old generation); live newer-generation slots are never touched.
+  // `done` is set once the scan wrapped past the last slot. A
+  // read/write/readback failure leaves `cursor` unmoved so the next Poll
+  // retries the same slot.
+  Status sweep_revoked(const ResumeContext& context, std::size_t& cursor,
+                       bool& done) noexcept;
+  // One-slot full-clear step under the same cursor discipline (04 §6.4):
+  // every valid or torn slot is overwritten, erased-empty slots skipped.
+  Status clear_step(std::size_t& cursor, bool& done) noexcept;
 
  private:
   Status read_slot(std::size_t index, ResumeSlot& out, bool& intact) noexcept;
