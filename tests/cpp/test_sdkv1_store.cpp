@@ -739,14 +739,24 @@ void test_revocation_accept() {
   garbage.bytes[0] = 0xD3;
   CHECK(store.accept(garbage.view(), sak().pub, kSiteId, kNetwork).code ==
         StatusCode::ProtocolError);
-  // Complete replacement: an empty cutover set with a raised floor.
+  // Same-network compression is refused: past entries can only be dropped
+  // by a verified cutover (P6 PR-C journal evidence), never by a plain
+  // accept() (04 §2).
   const auto cutover = revocation_object(revocation_set(16, 0, kSiteEpoch));
-  CHECK_OK(store.accept(cutover.view(), sak().pub, kSiteId, kNetwork));
-  CHECK(store.set().count == 0 && store.rejects(kNode, 3, kSiteEpoch - 1));
+  CHECK(store.accept(cutover.view(), sak().pub, kSiteId, kNetwork).code == StatusCode::Conflict);
+  // A new-network set — the cutover adoption shape, where the caller's RLS1
+  // expectation moved first — starts its own history.
+  const NetworkId next_network =
+      (static_cast<NetworkId>(kSiteEpoch + 1) << 32U) | kNetworkLow;
+  const auto next_set =
+      revocation_object(revocation_set(16, 0, kSiteEpoch + 1, next_network));
+  CHECK_OK(store.accept(next_set.view(), sak().pub, kSiteId, next_network));
+  CHECK(store.set().count == 0 && store.set().network == next_network &&
+        store.rejects(kNode, 3, kSiteEpoch));
   ByteBuffer<kRevocationObjectMax> loaded{};
   CHECK_OK(store.load_object(loaded));
-  CHECK(loaded.size == cutover.size &&
-        std::memcmp(loaded.bytes.data(), cutover.bytes.data(), cutover.size) == 0);
+  CHECK(loaded.size == next_set.size &&
+        std::memcmp(loaded.bytes.data(), next_set.bytes.data(), next_set.size) == 0);
   RevocationStore reboot(storage);
   CHECK_OK(reboot.initialize());
   CHECK(reboot.has_set() && reboot.rs_epoch() == 16);
@@ -758,6 +768,39 @@ void test_revocation_accept() {
   CHECK(!after_clear.has_set());
   // After removal a new site's first set (lower epoch) is accepted.
   CHECK_OK(after_clear.accept(first.view(), sak().pub, kSiteId, kNetwork));
+}
+
+// P6 PR-A (04 §2): a same-network replacement that drops a past revocation
+// or lowers a min_generation is Conflict — history can only be compressed by
+// a verified cutover (PR C), never by a plain accept().
+void test_revocation_entry_monotonicity() {
+  FaultyRecordStorage storage(kRevocationSlotBytes);
+  RevocationStore store(storage);
+  CHECK_OK(store.initialize());
+  RevocationSet first = revocation_set(14);  // 2 entries, min_generation 2,3
+  CHECK_OK(store.accept(revocation_object(first).view(), sak().pub, kSiteId, kNetwork));
+  // Newer epoch, one old entry silently dropped.
+  RevocationSet dropped = first;
+  dropped.rs_epoch = 15;
+  dropped.count = 1;
+  CHECK(store.accept(revocation_object(dropped).view(), sak().pub, kSiteId, kNetwork).code ==
+        StatusCode::Conflict);
+  // Newer epoch, an old entry's min_generation lowered.
+  RevocationSet weakened = first;
+  weakened.rs_epoch = 15;
+  weakened.entries[0].min_generation = 1;
+  CHECK(store.accept(revocation_object(weakened).view(), sak().pub, kSiteId, kNetwork).code ==
+        StatusCode::Conflict);
+  // Still the old set: nothing was written by the refused replacements.
+  CHECK(store.rs_epoch() == 14 && store.set().count == 2);
+  // A strict superset (same floor, more entries, raised min_generation) is fine.
+  RevocationSet grown = first;
+  grown.rs_epoch = 15;
+  grown.entries[1].min_generation = 9;
+  grown.entries[2] = RevocationEntry{0x00A1000000000200ULL, 4U, RevocationReason::Lost};
+  grown.count = 3;
+  CHECK_OK(store.accept(revocation_object(grown).view(), sak().pub, kSiteId, kNetwork));
+  CHECK(store.rs_epoch() == 15 && store.set().count == 3);
 }
 
 // The verification hook is part of the API: the sweep memoizes verdicts so
@@ -793,7 +836,9 @@ void test_revocation_power_cuts() {
   const MemoVerifier verifier;
   const auto old_object = revocation_object(revocation_set(14, 3));
   const auto new_object = revocation_object(revocation_set(15, 32));
-  const auto newer = revocation_object(revocation_set(20, 1));
+  // Recovery/accept after the cut must keep every adopted entry (04 §2):
+  // the same 32 entries at a newer epoch cover either survivor.
+  const auto newer = revocation_object(revocation_set(20, 32));
   const auto older = revocation_object(revocation_set(13));
   for (std::size_t call = 0; call < 2; ++call) {
     for (std::size_t boundary = 0; boundary <= kRevocationSlotBytes; ++boundary) {
@@ -1366,6 +1411,7 @@ int main() {
   test_site_recover_power_cuts();
   test_site_floors_and_faults();
   test_revocation_accept();
+  test_revocation_entry_monotonicity();
   test_revocation_power_cuts();
   test_resume_cache_rules();
   test_resume_touch_wear_rule();

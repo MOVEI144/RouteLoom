@@ -452,6 +452,18 @@ target_include_directories(routeloom_sdkv1_membership_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
 target_compile_options(routeloom_sdkv1_membership_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
 add_test(NAME routeloom_sdkv1_membership_tests COMMAND routeloom_sdkv1_membership_tests)
+# P6 revocation lifecycle, PR A (docs/design/sdk-v1/04 §2-§5, plan P6-1):
+# RRS1 acceptance/enforcement/gossip and the traffic gate through fake
+# ports (production P4/P5 adapters land later; see sdkv1_revocation.hpp).
+add_executable(routeloom_sdkv1_revocation_tests test_sdkv1_revocation.cpp)
+target_link_libraries(routeloom_sdkv1_revocation_tests PRIVATE routeloom_core)
+target_include_directories(routeloom_sdkv1_revocation_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${ROUTELOOM_UECC_DIR})
+target_compile_definitions(routeloom_sdkv1_revocation_tests PRIVATE
+    ROUTELOOM_SDKV1_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/protocol/sdkv1-golden")
+target_compile_options(routeloom_sdkv1_revocation_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_revocation_tests COMMAND routeloom_sdkv1_revocation_tests)
+
 # Factory maintenance console engine (sdk-v1/07 §6, 08 P7): keygen + PoP,
 # identity-bundle sealing with readback, lock/store gating — against real
 # office bytes from protocol/sdkv1-golden/.

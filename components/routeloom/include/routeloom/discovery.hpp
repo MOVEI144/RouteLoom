@@ -489,6 +489,14 @@ class NeighborDiscovery {
   // NotFound when `peer` has no record; InvalidState when its only
   // records are live (revoke first — a live binding is never forgotten).
   Status forget_peer(NodeId peer) noexcept;
+  // P6 limited re-auth (04 §5, V1-R04): admits ONE new-credential handshake
+  // attempt for a Revoked peer, at most once per minute per peer. Normal
+  // traffic stays refused while Revoked; after P4 verifies the new
+  // MemberCert + PoP against the latest RRS1 floor, the Owner promotes via
+  // forget_peer() and the fresh exchange binds normally — no permanent
+  // blacklist. NotFound when `peer` holds no Revoked record; Busy inside
+  // the per-peer minute.
+  Status reauth_revoked(NodeId peer, MonotonicMs now_ms) noexcept;
   Status suspend_peer(NodeId peer, MonotonicMs until_ms) noexcept;  // planned absence
   Status pin_peer(NodeId peer) noexcept;                    // topology pin, <= 12
   // Local membership was revoked/committed elsewhere — re-evaluate pending
@@ -573,6 +581,10 @@ class NeighborDiscovery {
     // only counts emitted probes; verified RX evidence re-arms it.
     MonotonicMs next_reprobe_ms{0};
     std::uint8_t stale_reprobes{0};
+    // P6 (04 §5): last admitted re-auth attempt for this record; a Revoked
+    // peer may start a new-credential handshake at most once per minute.
+    // UINT64_MAX = never attempted.
+    MonotonicMs last_reauth_attempt_ms{0xFFFFFFFFFFFFFFFFULL};
   };
 
   struct Outbound {

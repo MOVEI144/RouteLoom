@@ -593,6 +593,33 @@ Status SiteStore::finish_group_scrub() noexcept {
   return status;
 }
 
+Status SiteStore::raise_rs_floor(const std::uint32_t epoch) noexcept {
+  if (!pair_.initialized()) {
+    return Status::error(StatusCode::InvalidState, "site store not initialized");
+  }
+  if (!has_site()) {
+    return Status::error(StatusCode::InvalidState, "site store has no member record");
+  }
+  if (pair_.quarantined()) {
+    return Status::error(StatusCode::IntegrityError, "site store quarantined");
+  }
+  if (pair_.uncertain()) {
+    return Status::error(StatusCode::RecoveryRequired, "site store storage uncertain");
+  }
+  if (epoch < site_.rs_epoch_floor) {
+    return Status::error(StatusCode::Conflict, "site rs floor regressed");
+  }
+  if (epoch == site_.rs_epoch_floor) return Status::success();
+  SiteRecord raised = site_;
+  raised.rs_epoch_floor = epoch;
+  std::size_t used_len = 0;
+  Status status = encode(raised, used_len);
+  if (status) status = pair_.commit_prepared(used_len);
+  if (!status) return status;
+  site_ = raised;
+  return Status::success();
+}
+
 Status SiteStore::clear() noexcept {
   const SiteRecord tombstone{};
   std::size_t used_len = 0;
@@ -691,6 +718,9 @@ Status RevocationStore::accept(const ByteView object, const P256PublicKey& sak_p
     if (candidate.site_epoch_floor < set_.site_epoch_floor) {
       return Status::error(StatusCode::Conflict, "revocation floor regressed");
     }
+    if (candidate.network == set_.network && !revocation_covers(set_, candidate)) {
+      return Status::error(StatusCode::Conflict, "revocation entry omitted or weakened");
+    }
   }
   return store(object, false, candidate);
 }
@@ -713,7 +743,8 @@ Status RevocationStore::recover(const ByteView object, const P256PublicKey& sak_
   if (!checked) return checked;
   if (has_set_ && set_.site_id == candidate.site_id &&
       (candidate.rs_epoch < set_.rs_epoch ||
-       candidate.site_epoch_floor < set_.site_epoch_floor)) {
+       candidate.site_epoch_floor < set_.site_epoch_floor ||
+       (candidate.network == set_.network && !revocation_covers(set_, candidate)))) {
     return Status::error(StatusCode::Conflict, "revocation recovery regressed");
   }
   return store(object, true, candidate);
@@ -1180,6 +1211,52 @@ Status ResumeCache2::clear_all() noexcept {
     }
     drop_budget(i);
   }
+  return Status::success();
+}
+
+Status ResumeCache::sweep_revoked(const ResumeContext& context, std::size_t& cursor,
+                                 bool& done) noexcept {
+  done = false;
+  const std::size_t count = storage_.slot_count();
+  if (cursor >= count) {
+    done = true;
+    return Status::success();
+  }
+  ResumeSlot slot{};
+  bool intact = true;
+  Status status = read_slot(cursor, slot, intact);
+  if (!status) return status;
+  if (!intact ||
+      (slot.valid && slot.network == context.network && context.revocations != nullptr &&
+       revocation_rejects(*context.revocations, slot.peer, slot.peer_generation,
+                          static_cast<std::uint32_t>(slot.network >> 32U)))) {
+    // An undecodable slot has no trustworthy binding to classify. Scrub it
+    // so a torn old RMS is not retained after the revocation sweep.
+    status = write_slot(cursor, ResumeSlot{});
+    if (!status) return status;
+  }
+  ++cursor;
+  done = cursor >= count;
+  return Status::success();
+}
+
+Status ResumeCache::clear_step(std::size_t& cursor, bool& done) noexcept {
+  done = false;
+  const std::size_t count = storage_.slot_count();
+  if (cursor >= count) {
+    done = true;
+    return Status::success();
+  }
+  ResumeSlot slot{};
+  bool intact = true;
+  Status status = read_slot(cursor, slot, intact);
+  if (!status) return status;
+  if (slot.valid || !intact) {
+    status = write_slot(cursor, ResumeSlot{});
+    if (!status) return status;
+  }
+  ++cursor;
+  done = cursor >= count;
   return Status::success();
 }
 

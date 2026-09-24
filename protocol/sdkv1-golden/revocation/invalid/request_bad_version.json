@@ -1,0 +1,8 @@
+{
+  "codec": "rrs_request",
+  "encoded_hex": "0262000000030000000d",
+  "expect": "error",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "name": "request_bad_version",
+  "note": "version is 1"
+}

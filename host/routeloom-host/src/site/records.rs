@@ -6,6 +6,7 @@
 
 use routeloom_json::{escape_string, Json};
 
+use super::revocation::OperationDistribution;
 use crate::receive_log::hex_lower;
 
 pub fn h16(value: u64) -> String {
@@ -463,6 +464,9 @@ pub struct Operation {
     pub gk_from: u32,
     pub gk_to: u32,
     pub created_ms: u64,
+    /// P6-1 RRS1 distribution snapshot (`revoke` only). `None` on
+    /// pre-P6-1 docs, which read back as distribution state `unknown`.
+    pub distribution: Option<OperationDistribution>,
 }
 
 pub fn op_token(id: u64) -> String {
@@ -475,8 +479,12 @@ pub fn parse_op_token(text: &str) -> Option<u64> {
 
 impl Operation {
     pub fn doc(&self) -> String {
+        let distribution = self.distribution.as_ref().map_or_else(
+            || "null".to_string(),
+            super::revocation::OperationDistribution::doc,
+        );
         format!(
-            "{{\"id\":{},\"kind\":\"{}\",\"node\":\"{}\",\"generation\":{},\"member_cert_serial\":{},\"rs_epoch\":{},\"gk_from\":{},\"gk_to\":{},\"created_ms\":{}}}",
+            "{{\"id\":{},\"kind\":\"{}\",\"node\":\"{}\",\"generation\":{},\"member_cert_serial\":{},\"rs_epoch\":{},\"gk_from\":{},\"gk_to\":{},\"created_ms\":{},\"distribution\":{distribution}}}",
             self.id,
             escape_string(&self.kind),
             h16(self.node),
@@ -491,6 +499,13 @@ impl Operation {
 
     pub fn from_doc(text: &str) -> Option<Self> {
         let json = routeloom_json::parse(text).ok()?;
+        // The distribution fragment is optional (missing on pre-P6-1
+        // docs) and degrades to `unknown` when unreadable, so a torn
+        // fragment can never brick the operation it rides on.
+        let distribution = match json.get("distribution") {
+            None | Some(Json::Null) => None,
+            Some(fragment) => OperationDistribution::from_doc(fragment),
+        };
         Some(Self {
             id: num(&json, "id")?,
             kind: json.get("kind")?.as_str()?.to_string(),
@@ -501,6 +516,7 @@ impl Operation {
             gk_from: u32::try_from(num(&json, "gk_from")?).ok()?,
             gk_to: u32::try_from(num(&json, "gk_to")?).ok()?,
             created_ms: num(&json, "created_ms")?,
+            distribution,
         })
     }
 }
@@ -598,8 +614,12 @@ mod tests {
             gk_from: 203,
             gk_to: 204,
             created_ms: 1,
+            distribution: None,
         };
         assert_eq!(Operation::from_doc(&op.doc()), Some(op));
+        // Pre-P6-1 docs carry no distribution fragment at all.
+        let legacy = "{\"id\":9,\"kind\":\"revoke\",\"node\":\"0000000000000005\",\"generation\":3,\"member_cert_serial\":0,\"rs_epoch\":14,\"gk_from\":203,\"gk_to\":204,\"created_ms\":1}";
+        assert_eq!(Operation::from_doc(legacy).unwrap().distribution, None);
         assert_eq!(parse_request_token(&request_token(0x7F3A)), Some(0x7F3A));
         assert_eq!(parse_op_token(&op_token(12)), Some(12));
         assert_eq!(role_name(3), "endpoint+relay");

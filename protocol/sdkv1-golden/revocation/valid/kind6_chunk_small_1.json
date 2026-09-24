@@ -1,0 +1,12 @@
+{
+  "chunk_hex": "010196dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf005a002d0ba0a09893cdb610ef3da3aef04c208a7afca4ec8ad17f9b45998bbde6fe80bcd0196391cdfda3be62a47e2d16",
+  "codec": "rrs_kind6_chunk",
+  "data_hex": "0ba0a09893cdb610ef3da3aef04c208a7afca4ec8ad17f9b45998bbde6fe80bcd0196391cdfda3be62a47e2d16",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-revocation-golden-v1",
+  "length": 45,
+  "name": "kind6_chunk_small_1",
+  "note": "slice 1 of the small object",
+  "object_sha256_hex": "96dc77dd4ac7417cdf9c0b7c9f37b82519fabc4f29e131383358e05f3dae7bdf",
+  "offset": 90
+}

@@ -682,6 +682,21 @@ bool revocation_rejects(const RevocationSet& set, const NodeId node,
   return false;
 }
 
+bool revocation_covers(const RevocationSet& old_set, const RevocationSet& next) noexcept {
+  for (std::uint8_t i = 0; i < old_set.count && i < kRevocationEntryMax; ++i) {
+    const RevocationEntry& old = old_set.entries[i];
+    bool kept = false;
+    for (std::uint8_t j = 0; j < next.count && j < kRevocationEntryMax; ++j) {
+      if (next.entries[j].node_id == old.node_id) {
+        kept = next.entries[j].min_generation >= old.min_generation;
+        break;
+      }
+    }
+    if (!kept) return false;
+  }
+  return true;
+}
+
 Status revocation_record_encode(const ByteView object, const std::uint32_t seal,
                                 const std::uint32_t commit_seq,
                                 ByteBuffer<kRevocationSlotBytes>& out) noexcept {

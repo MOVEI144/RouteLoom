@@ -394,6 +394,25 @@ class ConfigEndpointSink {
   virtual std::uint32_t permit_profile_bits() const noexcept { return 0; }
 };
 
+// P6 revocation-gossip sink (docs/design/sdk-v1/04-removal-revocation.md
+// §4, PR A): the Owner installs one to receive link-scoped P6 bodies — the
+// exact-shape Control (22) StateEpochs/RrsRequest payloads and kind-6
+// (RevocationSet) object manifests. Frames arrive link-authenticated from
+// the immediate peer (previous_hop), self-addressed and never
+// end-protected; the sink still re-validates them against the verified
+// binding and the SAK before acting. Chunks/ACKs carry no kind, so they
+// keep flowing to the autonomy sink — the Owner demuxes them by its
+// (peer, binding, protection-class, hash) registry (RrsExchange::
+// owns_transfer) when production P6 wiring lands. Unwired (nullptr) in
+// PR A: gossip is exercised through fake ports, and every P6 frame is
+// rejected with an honest diagnostic until the P4/P5 adapters land.
+class RrsGossipSink {
+ public:
+  virtual ~RrsGossipSink() = default;
+  virtual void on_rrs_frame(NodeId peer, FrameType type, ByteView body,
+                            MonotonicMs now_ms) noexcept = 0;
+};
+
 // Terminal sink for end-protected Diagnostic (48) bodies (02-telemetry
 // §4.2): TelemetrySnapshot and DiagnosticReject subtypes addressed to this
 // node arrive here already subtype-validated and end-verified. The sink
@@ -655,6 +674,9 @@ class MeshNode {
   std::uint64_t telemetry_event_drops() const noexcept { return telemetry_event_drops_; }
   // Install/clear the autonomy control sink (Owner wiring, nullptr disables).
   void set_autonomy_sink(AutonomyFrameSink* sink) noexcept { autonomy_sink_ = sink; }
+  // Install/clear the P6 revocation-gossip sink (Owner wiring, nullptr
+  // disables — the PR A state: P6 frames are then honestly rejected).
+  void set_rrs_sink(RrsGossipSink* sink) noexcept { rrs_sink_ = sink; }
   // Install/clear the Service=21 endpoint (GatewayDelivery wiring, nullptr
   // disables). With no sink, inbound Service frames are still dedup'd/
   // hop-ACKed/forwarded but terminate as SERVICE_NO_ENDPOINT — the origin's
@@ -2079,6 +2101,7 @@ class MeshNode {
   ObserverForwarder observer_;
   RouteTable routes_{};
   AutonomyFrameSink* autonomy_sink_{nullptr};
+  RrsGossipSink* rrs_sink_{nullptr};
   GatewayServiceSink* gateway_sink_{nullptr};
   ConfigEndpointSink* config_sink_{nullptr};
   DiagnosticSink* diagnostic_sink_{nullptr};
