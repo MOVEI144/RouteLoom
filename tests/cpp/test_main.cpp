@@ -1,4 +1,5 @@
 #include <array>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -8,6 +9,12 @@
 #include <string>
 #include <tuple>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "routeloom/admission.hpp"
 #include "routeloom/authority.hpp"
@@ -911,6 +918,33 @@ void test_c_api_tx_result_owner_task() {
   rl_deinit(context);
 }
 
+void test_sim_flush_truncation_aborts() {
+#ifdef _WIN32
+  return;  // the death check needs fork(); POSIX CI covers it
+#else
+  // A flush() that hits the dequeue bound with frames still queued must
+  // fail the test, not return a partial drain — the child overflows the
+  // bound with senderless frames (no nodes registered, so every dequeue
+  // drops without touching a MeshNode) and the parent expects SIGABRT.
+  const pid_t pid = fork();
+  CHECK(pid >= 0);
+  if (pid < 0) return;
+  if (pid == 0) {
+    SimNetwork net;
+    const std::uint8_t byte = 0;
+    const ByteView view{&byte, 1};
+    for (int i = 0; i < 10001; ++i) {
+      net.enqueue(1, 2, static_cast<std::uint64_t>(i), view);
+    }
+    net.flush(0);
+    _exit(42);  // returned past the bound: the check did not fire
+  }
+  int status = 0;
+  CHECK(waitpid(pid, &status, 0) == pid);
+  CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT);
+#endif
+}
+
 }  // namespace
 
 int main() {
@@ -930,6 +964,7 @@ int main() {
   test_delivery_terminal_eviction();
   test_tx_result_dispatch();
   test_c_api_tx_result_owner_task();
+  test_sim_flush_truncation_aborts();
   if (failures != 0) {
     std::fprintf(stderr, "%d test checks failed\n", failures);
     return 1;
