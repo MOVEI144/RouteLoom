@@ -6,6 +6,7 @@ idf_component_register(
     src/espnow_sdkv1_entropy.cpp
     src/espnow_power.cpp
     src/espnow_runtime.cpp
+    src/nvs_boot_session.cpp
     src/nvs_config_store.cpp
     src/nvs_counter_store.cpp
     src/nvs_cred_store.cpp

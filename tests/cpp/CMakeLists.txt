@@ -454,6 +454,11 @@ set_tests_properties(routeloom_sdkv1_joiner_tests PROPERTIES
 # The single device security Owner (G-SEC P4 §8, PR4): boot/store
 # classification, the RLD1 demux gates, staged bootstrap RX, the USB
 # gateway queue-admission verdicts, sleep/wake/stop, the RLV1 veto.
+add_executable(routeloom_sdkv1_boot_session_tests test_sdkv1_boot_session.cpp)
+target_link_libraries(routeloom_sdkv1_boot_session_tests PRIVATE routeloom_core)
+target_compile_options(routeloom_sdkv1_boot_session_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME routeloom_sdkv1_boot_session_tests COMMAND routeloom_sdkv1_boot_session_tests)
+
 add_executable(routeloom_sdkv1_coordinator_tests test_sdkv1_security_coordinator.cpp)
 target_link_libraries(routeloom_sdkv1_coordinator_tests PRIVATE routeloom_core)
 target_include_directories(routeloom_sdkv1_coordinator_tests PRIVATE

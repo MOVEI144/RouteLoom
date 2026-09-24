@@ -15,6 +15,7 @@
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "routeloom/nvs_boot_session.hpp"
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY || CONFIG_ROUTELOOM_CONFIG
 #include "routeloom/espnow_autonomy.hpp"
@@ -140,35 +141,6 @@ template <std::size_t Size>
     mac.bytes[i] = static_cast<std::uint8_t>(values[i]);
   }
   return true;
-}
-
-Status next_boot_session(std::uint32_t& session) noexcept {
-  nvs_handle_t handle = 0;
-  esp_err_t error = nvs_open("rlboot", NVS_READWRITE, &handle);
-  if (error != ESP_OK) {
-    return Status::error(StatusCode::StorageFailure,
-                         "boot nvs_open failed");
-  }
-  std::uint32_t stored = 0;
-  error = nvs_get_u32(handle, "session", &stored);
-  if (error != ESP_OK && error != ESP_ERR_NVS_NOT_FOUND) {
-    nvs_close(handle);
-    return Status::error(StatusCode::StorageFailure,
-                         "boot session read failed");
-  }
-  session = stored + 1U;
-  if (session == 0) {
-    nvs_close(handle);
-    return Status::error(StatusCode::CounterExhausted,
-                         "boot session exhausted");
-  }
-  error = nvs_set_u32(handle, "session", session);
-  if (error == ESP_OK) error = nvs_commit(handle);
-  nvs_close(handle);
-  return error == ESP_OK
-             ? Status::success()
-             : Status::error(StatusCode::StorageFailure,
-                             "boot session commit failed");
 }
 
 // .rtc_noinit is the only RAM the boot path never re-initializes, so it is
@@ -611,7 +583,7 @@ extern "C" void app_main(void) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = next_boot_session(message_session);
+  auto status = routeloom::next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =
