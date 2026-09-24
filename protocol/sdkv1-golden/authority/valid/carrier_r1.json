@@ -1,0 +1,9 @@
+{
+  "codec": "authority_carrier",
+  "exchange_id": 287454020,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "head_hex": "0105010011223344",
+  "kind": 1,
+  "name": "carrier_r1"
+}

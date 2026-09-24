@@ -1,0 +1,13 @@
+{
+  "authority_active": 10,
+  "codec": "authority_body",
+  "confirmed_generation": 9,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "generation": 9,
+  "name": "body_join_confirm_authority",
+  "op": 2,
+  "plaintext_hex": "01020000000000090102030405060708000000090000000a",
+  "request_id": 72623859790382856,
+  "type": 1
+}

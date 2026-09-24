@@ -1,0 +1,14 @@
+{
+  "codec": "authority_body",
+  "current": 10,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-authority-golden-v1",
+  "generation": 9,
+  "name": "body_group_key_pull",
+  "next": 0,
+  "op": 1,
+  "plaintext_hex": "010100000000000901020304050607080000000a0000000002000000",
+  "reason": 2,
+  "request_id": 72623859790382856,
+  "type": 4
+}
