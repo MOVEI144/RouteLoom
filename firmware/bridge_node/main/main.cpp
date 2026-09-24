@@ -146,7 +146,8 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 // Power-on leaves it garbage, so a magic word tells a real streak from
 // random RAM. The streak drives routeloom::fail_action — backoff restarts
 // first, a long deep sleep once the fault proves persistent — and is
-// cleared once a boot completes or on power-on.
+// cleared only on a stability proof (the runtime pump starting, the last
+// fallible step below) or on power-on.
 constexpr std::uint32_t kFailMagic = 0x524c4641;  // "RLFA"
 RTC_NOINIT_ATTR std::uint32_t s_fail_magic;
 RTC_NOINIT_ATTR std::uint32_t s_fail_streak;

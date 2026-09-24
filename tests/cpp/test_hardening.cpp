@@ -800,6 +800,54 @@ void test_fail_policy_bounds_boot_loop_writes() {
                      kDayMs / routeloom::kFailSleepMs + 1);
 }
 
+// Streak retention through the sleep profile's awake window (issue #34
+// r2): the count used to clear at "boot complete" — before the pump loop's
+// own fallible work — so a persistent late-boot fault (the reviewer's
+// example: a sleep image store that keeps failing, reaching
+// "sleep deadline exceeded" ~40 s in) re-armed the 500 ms restart every
+// cycle and never escalated. The streak must be held until a coordinated
+// sleep actually enters.
+
+// Model of the flagged restart path: each cycle the boot gets as far as
+// the pump loop and dies in fail() — no coordinated sleep ever enters, so
+// the only streak writes are the mid-boot clear (the removed bug) and
+// fail()'s own retention. Returns whether the loop ever escalates to the
+// deep-sleep halt.
+bool awake_window_fault_loop_halts(const bool clear_streak_mid_boot) {
+  std::uint32_t streak = 0;
+  for (std::uint32_t boot = 0; boot < 2 * routeloom::kFailSleepStreakMin;
+       ++boot) {
+    // ...boot, NVS open, runtime init, coordinator.begin, mark_started...
+    if (clear_streak_mid_boot) {
+      streak = 0;  // the removed reset: "boot complete" == pump reached
+    }
+    // ...pump: sleep image commit keeps failing -> sleep deadline -> fail()
+    if (routeloom::fail_action(streak++).deep_sleep) {
+      return true;  // fail() holds; the boot never returns
+    }
+    // else fail() waited delay_ms and esp_restart()ed -> next iteration
+  }
+  return false;
+}
+
+void test_fail_streak_held_through_late_boot_faults() {
+  CHECK(awake_window_fault_loop_halts(false));   // held: escalates
+  CHECK(!awake_window_fault_loop_halts(true));   // old clear: never does
+}
+
+void test_fail_streak_clears_only_on_coordinated_sleep() {
+  // Mixed history: two failed boots, then one full cycle that enters a
+  // coordinated sleep — the stability proof — so the count clears and a
+  // later fault escalates from zero rather than a stale value.
+  std::uint32_t streak = 0;
+  (void)routeloom::fail_action(streak++);
+  (void)routeloom::fail_action(streak++);
+  CHECK(streak == 2);
+  streak = 0;  // pre-sleep hook fired: the cycle actually slept
+  CHECK(!routeloom::fail_action(streak++).deep_sleep);
+  CHECK(streak == 1);
+}
+
 
 // Issue #29/#48 (Wire v2): epochs are 32-bit, so a node that has booted more
 // than 65,535 times keeps working. v1 wrapped the u16 epoch 0xFFFF -> 1,
@@ -1322,6 +1370,8 @@ int main() {
   test_secure_clear();
   test_fail_policy_backoff_schedule();
   test_fail_policy_bounds_boot_loop_writes();
+  test_fail_streak_held_through_late_boot_faults();
+  test_fail_streak_clears_only_on_coordinated_sleep();
   if (failures != 0) {
     std::fprintf(stderr, "%d hardening checks failed\n", failures);
     return 1;

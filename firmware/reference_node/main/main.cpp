@@ -162,8 +162,11 @@ Status next_boot_session(std::uint32_t& session) noexcept {
 // (.rtc.data is re-copied from the image on every non-deep-sleep reset).
 // Power-on leaves it garbage, so a magic word tells a real streak from
 // random RAM. The streak drives routeloom::fail_action — backoff restarts
-// first, a long deep sleep once the fault proves persistent — and is
-// cleared once a boot completes or on power-on.
+// first, a long deep sleep once the fault proves persistent. It clears
+// only on a stability proof — the runtime task starting on the always-on
+// build, an actually-entered coordinated sleep (the port's pre-sleep
+// hook) on the DEEP_SLEEP build — or on power-on, never mid-boot: a fault
+// late in the awake window must keep the count.
 constexpr std::uint32_t kFailMagic = 0x524c4641;  // "RLFA"
 RTC_NOINIT_ATTR std::uint32_t s_fail_magic;
 RTC_NOINIT_ATTR std::uint32_t s_fail_streak;
@@ -230,6 +233,18 @@ class LogPowerEvents final : public routeloom::PowerEvents {
   void on_diagnostic(const char* reason) noexcept override {
     ESP_LOGW(kTag, "power diagnostic: %s", reason);
   }
+};
+
+// The boot-fault streak's only stability proof in this profile: an
+// actually-entered coordinated sleep. The port fires the hook after the
+// Wi-Fi driver is stopped, immediately before esp_deep_sleep_start() —
+// every fallible step of the awake window (boot, drain, image commit,
+// wake configuration) is already behind it, so a persistent late-boot
+// fault keeps the count and escalates to the bounded halt instead of
+// re-arming the fast restart every ~40 s cycle.
+class FailStreakClearOnSleep final : public routeloom::espnow::PreSleepHook {
+ public:
+  void on_pre_sleep() noexcept override { s_fail_streak = 0; }
 };
 
 routeloom::ResetCause classify_boot() noexcept {
@@ -1106,6 +1121,8 @@ extern "C" void app_main(void) {
   static NvsSleepStorage sleep_storage(sleep_store);
   static EspNowPowerPort power_port(runtime);
   static LogPowerEvents power_events;
+  static FailStreakClearOnSleep streak_clear;
+  power_port.set_pre_sleep_hook(&streak_clear);
   routeloom::PowerConfig power_config{};
   static routeloom::PowerCoordinator coordinator(
       power_config, runtime.node(), power_port, sleep_storage, power_events);
@@ -1117,9 +1134,11 @@ extern "C" void app_main(void) {
                              monotonic_now_ms());
   if (!status) fail(status.detail);
   runtime.mark_started();
-  // Boot complete — the pump loop below is the node's main loop, so a
-  // later fatal is a runtime fault rather than a boot-loop streak.
-  s_fail_streak = 0;
+  // The boot-fault streak is deliberately NOT cleared here: the pump loop
+  // below still runs fallible work (drain, image commit, wake
+  // configuration, sleep_enter) and fail() must see the retained count.
+  // This profile's only clear is FailStreakClearOnSleep, fired at the
+  // point of no return inside enter_sleep().
 
   routeloom::SleepRequest request{};
   request.pending_policy = routeloom::SleepWorkPolicy::Fail;

@@ -16,6 +16,16 @@ namespace routeloom {
 // still self-heals; a persistent one drops to deep-sleep current and a
 // flash-bounded retry rate. Pure arithmetic so the cadence contract is
 // host-testable.
+//
+// Streak retention contract (issue #34 r2): the count may clear ONLY on a
+// profile-defined stability proof — reaching the runtime main loop on
+// always-on builds, or an actually-entered coordinated sleep (the power
+// port's pre-sleep hook, fired at the point of no return inside
+// enter_sleep) on the DEEP_SLEEP build — plus the power-on magic check.
+// Never clear mid-boot: the round-2 bug cleared it when the pump loop
+// started, so a persistent late-boot fault (a sleep image store that
+// keeps failing, hitting "sleep deadline exceeded" ~40 s in) re-armed the
+// 500 ms restart every cycle and never escalated.
 struct FailAction {
   // false: wait delay_ms, then esp_restart. true: esp_wifi_stop, arm a
   // delay_ms timer wake and esp_deep_sleep_start — the safe halt.
