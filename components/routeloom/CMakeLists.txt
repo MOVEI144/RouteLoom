@@ -31,6 +31,7 @@ set(ROUTELOOM_CORE_SOURCES
   src/rlres1.cpp
   src/route_scale.cpp
   src/routing.cpp
+  src/sdkv1_authority.cpp
   src/sdkv1_blob_storage.cpp
   src/sdkv1_ead.cpp
   src/sdkv1_join_candidates.cpp
@@ -96,9 +97,10 @@ set(ROUTELOOM_THIRD_PARTY_C_RELAX
 # ROUTELOOM_DEDUP_PROFILE. The default is the relay profile.
 if(COMMAND idf_component_register)
   # ESP-IDF: libedhoc + zcbor + the glue, without the host-only TF-PSA-Crypto
-  # AES/CCM subset (its mbedtls_* symbols would duplicate ESP-IDF's own Mbed
-  # TLS); builtin_aead_ccm() is nullptr here and the adapter passes a PSA
-  # AeadCcm (routeloom_espnow, psa_edhoc_aead.hpp).
+  # AES/CCM/GCM subset (its mbedtls_* symbols would duplicate ESP-IDF's own
+  # Mbed TLS); builtin_aead_ccm()/builtin_aead_gcm() are nullptr here and the
+  # adapter passes PSA implementations (routeloom_espnow, psa_edhoc_aead.hpp
+  # and psa_aead_gcm.hpp).
   idf_component_register(
     SRCS ${ROUTELOOM_CORE_SOURCES} ${ROUTELOOM_UECC_SRC}
          ${ROUTELOOM_LIBEDHOC_SRC} ${ROUTELOOM_ZCBOR_SRC} ${ROUTELOOM_EDHOC_GLUE_SRC}
