@@ -17,6 +17,7 @@ struct Fake final : BootSessionPort {
   Status commit(std::uint32_t value) noexcept override {
     ++writes;
     if (write_error) return Status::error(StatusCode::StorageFailure, "write");
+    if (lost_write) return Status::success();
     stored = value;
     found = true;
     return Status::success();
@@ -26,6 +27,7 @@ struct Fake final : BootSessionPort {
   bool found{false};
   bool read_error{false};
   bool write_error{false};
+  bool lost_write{false};
 };
 int failures = 0;
 void check(bool value, int line) {
@@ -56,5 +58,11 @@ int main() {
   port.stored = 1;
   port.write_error = true;
   CHECK(store.advance(false, 0, token).code == StatusCode::StorageFailure && token == before);
+  port.write_error = false;
+  port.lost_write = true;
+  CHECK(store.advance(false, 0, token).code == StatusCode::StorageFailure && token == before);
+  port.lost_write = false;
+  CHECK(store.advance(false, 0, token).ok() && token == 2);
+  CHECK(port.writes >= 6);
   return failures == 0 ? 0 : 1;
 }
