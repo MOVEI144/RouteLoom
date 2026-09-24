@@ -60,16 +60,6 @@ class VendoredSources(unittest.TestCase):
                 for relative, expected in component["files"].items():
                     self.assertEqual(blob_id(directory / relative), expected, relative)
 
-    def test_zcbor_patch_is_only_the_null_zero_length_guard(self):
-        zcbor = LOCK["components"][1]
-        self.assertEqual(set(zcbor["local_patches"]), {"src/zcbor_encode.c"})
-        source = (THIRD_PARTY / zcbor["directory"] / "src/zcbor_encode.c").read_bytes()
-        fixed = b"if (input->len != 0 && state->payload_mut != input->value) {"
-        upstream = b"if (state->payload_mut != input->value) {"
-        self.assertEqual(source.count(fixed), 1)
-        restored = source.replace(fixed, upstream, 1)
-        self.assertEqual(blob_id_bytes(restored),
-                         zcbor["local_patches"]["src/zcbor_encode.c"]["upstream_blob"])
     def test_tf_psa_gcm_is_pinned_to_upstream(self):
         component = next(c for c in LOCK["components"] if c["name"] == "TF-PSA-Crypto")
         self.assertEqual(component["commit"], "29160dd877d29658279fd683b2ae57b320ddcf09")
@@ -82,6 +72,17 @@ class VendoredSources(unittest.TestCase):
             with self.subTest(file=relative):
                 self.assertEqual(component["files"].get(relative), upstream_blob)
                 self.assertEqual(blob_id(directory / relative), upstream_blob)
+
+    def test_zcbor_patch_is_only_the_null_zero_length_guard(self):
+        zcbor = LOCK["components"][1]
+        self.assertEqual(set(zcbor["local_patches"]), {"src/zcbor_encode.c"})
+        source = (THIRD_PARTY / zcbor["directory"] / "src/zcbor_encode.c").read_bytes()
+        fixed = b"if (input->len != 0 && state->payload_mut != input->value) {"
+        upstream = b"if (state->payload_mut != input->value) {"
+        self.assertEqual(source.count(fixed), 1)
+        restored = source.replace(fixed, upstream, 1)
+        self.assertEqual(blob_id_bytes(restored),
+                         zcbor["local_patches"]["src/zcbor_encode.c"]["upstream_blob"])
 
     def test_notice_credits_every_component(self):
         notice = (ROOT / "NOTICE").read_text(encoding="utf-8")

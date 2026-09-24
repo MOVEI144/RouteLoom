@@ -1994,6 +1994,7 @@ class MeshNode {
   };
   struct GroupHold {
     GroupMessageInfo info{};
+    std::uint32_t gk_epoch{0};
     MonotonicMs release_at_ms{0};
     std::uint8_t size{0};
     std::array<std::uint8_t, kGroupPayloadMax> payload{};
@@ -2044,7 +2045,8 @@ class MeshNode {
   std::uint16_t group_expected_nodes() const noexcept;
   // Ordering + application hand-off (group-delivery.md §6).
   void group_accept(GroupStream& stream, const GroupMessageInfo& info, ByteView app,
-                    bool member, std::uint32_t remaining_ms, MonotonicMs now_ms) noexcept;
+                    bool member, std::uint32_t remaining_ms, MonotonicMs now_ms,
+                    std::uint32_t gk_epoch) noexcept;
   void group_drain(GroupStream& stream) noexcept;
   void group_skip_to(GroupStream& stream, std::uint32_t target) noexcept;
   void group_deliver_app(const GroupMessageInfo& info, ByteView app) noexcept;

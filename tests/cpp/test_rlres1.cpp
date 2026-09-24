@@ -1047,9 +1047,9 @@ int main() {
   test_timeouts();
   test_simultaneous_open();
   test_authority_and_pending();
+  test_configuration_and_counters();
   test_authority_self_name_collision();
   test_clock_ceiling_overflow();
-  test_configuration_and_counters();
   test_reserve_hook();
   test_epoch_regression();
   test_sizing();

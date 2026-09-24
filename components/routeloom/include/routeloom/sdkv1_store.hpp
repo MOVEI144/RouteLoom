@@ -105,6 +105,7 @@ class SealedSlotPair {
   // committed record (including a CRC-failed one) proved this boot.
   std::uint32_t active_seq() const noexcept { return has_active_ ? active_seq_ : 0; }
   std::uint32_t seq_floor() const noexcept { return seq_floor_; }
+  bool stale_sibling() const noexcept { return stale_sibling_; }
 
  private:
   enum class SlotContent : std::uint8_t { Empty, Pending, Corrupt, Unsupported, Valid };
@@ -127,6 +128,7 @@ class SealedSlotPair {
   bool initialized_{false};
   bool quarantined_{false};
   bool uncertain_{false};
+  bool stale_sibling_{false};
 };
 
 const SealedRecordFormat& identity_record_format() noexcept;
@@ -185,6 +187,18 @@ class SiteStore {
   // assignment_generation, gk_epoch_current, rs_epoch_floor or
   // boot_witness (Conflict otherwise).
   Status commit(const SiteRecord& record) noexcept;
+  // GK transitions are the only way to replace GK on an assigned site.
+  // A superseding stage twins both slots so the discarded next key is gone.
+  Status stage_group_key(std::uint32_t epoch, const std::array<std::uint8_t, 32>& key) noexcept;
+  Status activate_group_key(std::uint32_t epoch, std::uint32_t boot_witness) noexcept;
+  // After a cut between twin writes, the sibling can still hold a retired GK.
+  bool group_scrub_needed() const noexcept { return scrub_needed_; }
+  bool group_reconcile_required() const noexcept { return group_write_failed_; }
+  std::uint64_t group_lifecycle() const noexcept { return group_lifecycle_; }
+  bool group_lifecycle_matches(std::uint64_t value) const noexcept {
+    return !group_lifecycle_exhausted_ && value == group_lifecycle_;
+  }
+  Status finish_group_scrub() noexcept;
   // P6 RRS application (04 §5): raise only the rs_epoch_floor of the
   // adopted Member record. The floor commits after the RRS1 set, its
   // enforcement and the resume sweep are durable — never before. Idempotent
@@ -215,6 +229,11 @@ class SiteStore {
   SealedSlotPair pair_;
   SiteRecord site_{};
   bool active_load_failed_{false};
+  bool scrub_needed_{false};
+  bool group_write_failed_{false};
+  std::uint64_t group_lifecycle_{0};
+  bool group_lifecycle_exhausted_{false};
+  void advance_group_lifecycle() noexcept;
 };
 
 // --- RRS1: revocation set (A/B alternating) -----------------------------------
