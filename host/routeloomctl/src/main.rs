@@ -17,7 +17,7 @@ fn usage() {
         "routeloomctl provision-keygen --root-id <16hex> --out <key.json>|provision-authority-keygen --authority-id <16hex> --out <key.json>|provision-image --spec <image-spec.json> --out <image.rlt1> [--nvs-dir <dir> [--credential <cred-spec.json>]]|provision-manifest --image <spec.json|image.rlt1> --key <root.key> --out <manifest.rtm1>|provision-verify --manifest <file> --current <spec.json|image.rlt1>  (local provisioning — no daemon socket)"
     );
     eprintln!(
-        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>  (SDK v1 office tooling — no daemon socket)"
+        "routeloomctl provision-devca-keygen --device-ca-id <16hex> --out <devca.key>|provision-pop-challenge --node <16hex>|provision-devcert --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --challenge <64hex> --pop <file> --out-dir <dir>|provision-identity --ca-key <devca.key> --spec <identity-spec.json> --node <16hex> --serial <u32> --out-dir <dir>|provision-siteca-keygen --site-ca-id <16hex> --out <siteca.key>|site-cert --ca-key <siteca.key> --site-id <16hex> --sak-pubkey <128hex> --network-low32 <8hex> --site-epoch <u32> --serial <u32> --out <sitecert.cwt>  (SDK v1 office tooling — no daemon socket)"
     );
 }
 
@@ -301,6 +301,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "provision-identity" => {
                 return provision_office::provision_identity_command(&remaining[1..])
             }
+            "provision-siteca-keygen" => {
+                return provision_office::provision_siteca_keygen_command(&remaining[1..])
+            }
+            "site-cert" => return provision_office::site_cert_command(&remaining[1..]),
             _ => {}
         }
     }

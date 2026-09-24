@@ -146,6 +146,11 @@ const Es256Verifier& default_es256_verifier() noexcept;
 // R and S in [1, n-1] and S <= (n-1)/2.
 bool es256_signature_canonical(ByteView signature) noexcept;
 bool p256_public_key_valid(const P256PublicKey& pubkey) noexcept;
+// A usable P-256 private scalar: exactly 32 bytes in [1, n-1].
+bool p256_scalar_valid(ByteView scalar) noexcept;
+// Replace a high S with its low-S twin (n - S); R is untouched.
+// Idempotent: an already low-S signature is unchanged.
+void es256_signature_normalize_low_s(Es256Signature& signature) noexcept;
 
 // Restricted ES256 COSE_Sign1 profile shared by RLCW1 and RRS1:
 // d2 84 43 a1 01 26 a0 <bstr payload> 58 40 <sig>, payload length in
