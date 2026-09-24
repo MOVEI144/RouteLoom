@@ -1064,6 +1064,45 @@ void MeshNode::group_skip_to(GroupStream& stream, const std::uint32_t target) no
   group_drain(stream);
 }
 
+// --- Sleep settlement ---------------------------------------------------------------
+// quiesced() counts only group work that can still progress while draining:
+// a round collecting reports (the source's own tree or a relay/receiver
+// tree) may still resolve and queue its report. Queued origins and
+// scheduled repair rounds are masked by the drain pause bits and settle
+// through the dispositions instead, so they are not waited on here.
+bool MeshNode::group_radio_pending() const noexcept {
+  bool pending = false;
+  group_trees_.for_each(
+      [&](const GroupTree& tree) { pending = pending || tree.collecting; });
+  group_origins_.for_each([&](const GroupOrigin& origin) {
+    pending = pending || origin.tree.collecting;
+  });
+  return pending;
+}
+
+void MeshNode::group_release_holds() noexcept {
+  // Every held message goes out through the same path an expired hold takes
+  // (process_group): the stream cursor skips to each held seq, the gap is
+  // counted and the hold itself drains right after — in stream order.
+  while (true) {
+    GroupHold* lowest = nullptr;
+    group_holds_.for_each([&](GroupHold& value) {
+      if (lowest == nullptr || value.info.group_seq < lowest->info.group_seq) {
+        lowest = &value;
+      }
+    });
+    if (lowest == nullptr) return;
+    GroupStream* stream = group_streams_.find([&](const GroupStream& value) {
+      return value.source == lowest->info.key.origin;
+    });
+    if (stream == nullptr) {
+      group_holds_.release(lowest);  // defensive: holds only exist with a stream
+      continue;
+    }
+    group_skip_to(*stream, lowest->info.group_seq);
+  }
+}
+
 // --- poll() driver ------------------------------------------------------------------
 
 void MeshNode::process_group(const MonotonicMs now_ms) noexcept {

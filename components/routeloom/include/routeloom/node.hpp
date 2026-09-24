@@ -762,6 +762,8 @@ class MeshNode {
   const SessionStats& session_stats() const noexcept { return session_stats_; }
   // Group lane occupancy (tests/diagnostics): relay/receiver trees in use.
   std::size_t group_trees_in_use() const noexcept { return group_trees_.size(); }
+  // Ordered messages currently held for a gap (tests/diagnostics).
+  std::size_t group_holds_in_use() const noexcept { return group_holds_.size(); }
 
   const NodeConfig& config() const noexcept { return config_; }
   NodeId node_id() const noexcept { return config_.node; }
@@ -788,9 +790,15 @@ class MeshNode {
     return (pause_mask() & bits) != 0;
   }
   // True when no radio-bound work remains: empty TX queue, no physical
-  // in-flight frame and no job waiting for a hop accept.
+  // in-flight frame, no job waiting for a hop accept and no group round
+  // still collecting reports (the source's own tree or a relay/receiver
+  // tree). Queued group origins and scheduled repair rounds do NOT hold the
+  // drain open: admission and retry rounds are masked while draining, so
+  // they can only be settled by the sleep dispositions — waiting on them
+  // would just burn the whole drain timeout.
   bool quiesced() const noexcept {
-    return !physical_.active && scheduler_.empty() && awaiting_hop_.size() == 0;
+    return !physical_.active && scheduler_.empty() && awaiting_hop_.size() == 0 &&
+           !group_radio_pending();
   }
 
   // --- Congestion control (03-congestion.md §4, §5) ----------------------------
@@ -862,7 +870,9 @@ class MeshNode {
   // durable delivery (or all non-terminal deliveries under SleepWorkPolicy::
   // Save) to `save` WITHOUT changing delivery state: until the durable image
   // is committed, live work must stay live so a persistence failure can abort
-  // back to running with nothing lost.
+  // back to running with nothing lost. Group origins are never offered: the
+  // group lane is RAM-only state (group-delivery.md), settled — not
+  // persisted — in phase 2.
   template <typename SaveFn>
   void snapshot_for_sleep(SleepWorkPolicy fallback, SaveFn&& save) noexcept {
     deliveries_.for_each([&](const Delivery& delivery) {
@@ -881,7 +891,11 @@ class MeshNode {
   // reports whether a delivery id landed in the committed image; those
   // deliveries become Indeterminate (outcome decided after resume). Everything
   // else follows `fallback`: a delivery that was eligible but not saved fails
-  // explicitly — durable work is never dropped silently.
+  // explicitly — durable work is never dropped silently. The group lane is
+  // settled the same way: origins end in an explicit terminal state the
+  // application sees through on_group_delivery (Save cannot apply — groups
+  // are never persisted — so it fails honestly), and ordered holds are
+  // released to the application in stream order.
   template <typename WasSavedFn>
   void apply_sleep_dispositions(SleepWorkPolicy fallback,
                                 WasSavedFn&& was_saved) noexcept {
@@ -898,6 +912,19 @@ class MeshNode {
                            eligible ? "SLEEP_PERSIST_FULL" : "SLEEP_DRAIN");
       }
     });
+    group_origins_.for_each([&](GroupOrigin& origin) {
+      if (sleep_terminal(origin.state)) return;
+      if (fallback == SleepWorkPolicy::Defer) {
+        group_origin_terminal(origin, DeliveryState::Indeterminate,
+                              "SLEEP_DEFERRED");
+      } else {
+        group_origin_terminal(origin, DeliveryState::Failed,
+                              fallback == SleepWorkPolicy::Save
+                                  ? "SLEEP_GROUP_NOT_PERSISTED"
+                                  : "SLEEP_DRAIN");
+      }
+    });
+    group_release_holds();
   }
 
   // Re-injects a persisted delivery under its ORIGINAL logical message id so
@@ -1864,6 +1891,11 @@ class MeshNode {
   void group_drain(GroupStream& stream) noexcept;
   void group_skip_to(GroupStream& stream, std::uint32_t target) noexcept;
   void group_deliver_app(const GroupMessageInfo& info, ByteView app) noexcept;
+  // Sleep support (quiesced / apply_sleep_dispositions above): true while a
+  // group round still collects reports, and the ordered-hold release the
+  // sleep settlement runs so READY_TO_SLEEP never leaves payloads held.
+  bool group_radio_pending() const noexcept;
+  void group_release_holds() noexcept;
 
   // §14 management airtime bucket (03-congestion.md §8 — local calibrated
   // accounting only). control_budget_balance refills to `now_ms` and

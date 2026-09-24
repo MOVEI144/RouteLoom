@@ -1443,6 +1443,328 @@ void test_send_lifetime_ceiling() {
             .code == StatusCode::InvalidArgument);
 }
 
+// ---------------------------------------------------------------------------
+// Issue #110: group delivery vs the sleep drain and settlement. A
+// gateway-scoped pair — gateway 1 (the group source) and leaf 2 (a tree
+// member), either of which a PowerCoordinator may drive. Group state is
+// RAM-only: unfinished origins get an explicit terminal verdict instead of a
+// persist record, and ordered holds are released to the application before
+// READY_TO_SLEEP.
+// ---------------------------------------------------------------------------
+
+struct GroupPowerWorld {
+  static constexpr NodeId kGateway = 1;
+  static constexpr NodeId kLeaf = 2;
+
+  SimNetwork net;
+  TestSecurity security_a;
+  TestSecurity security_b;
+  CapturingObserver observer_a;
+  CapturingObserver observer_b;
+  SimRadio radio_a;
+  SimRadio radio_b;
+  MeshNode a;
+  MeshNode b;
+  FakePowerPort port;
+  RecordingPowerEvents events;
+  MonotonicMs now{0};
+
+  GroupPowerWorld()
+      : radio_a(net, kGateway), radio_b(net, kLeaf),
+        a(config(kGateway), radio_a, security_a, observer_a),
+        b(config(kLeaf), radio_b, security_b, observer_b) {
+    net.register_node(kGateway, &a);
+    net.register_node(kLeaf, &b);
+    net.connect(kGateway, kLeaf);
+  }
+
+  static NodeConfig config(const NodeId id) {
+    NodeConfig config{};
+    config.network = 1;
+    config.node = id;
+    config.message_session = 100 + static_cast<std::uint32_t>(id);
+    config.route_gateways = {kGateway, kInvalidNodeId};
+    config.route_advertisement_period_ms = 500;
+    config.route_lifetime_ms = 9000;  // scoped lease rule: >= 14 x period
+    config.route_refresh_ticks = kScopedDefaultRefreshTicks;
+    return config;
+  }
+
+  void run(MonotonicMs duration) {
+    const MonotonicMs end = now + duration;
+    for (; now <= end; now += 5) {
+      a.poll(now);
+      b.poll(now);
+      net.flush(now);
+    }
+  }
+
+  // Drives the coordinated node's state machine while the peer node is
+  // polled directly, so the mesh keeps moving while `coordinator` drains.
+  bool run_until(PowerCoordinator& coordinator, MeshNode& other,
+                 PowerState target, int max_iterations = 400) {
+    for (int i = 0; i < max_iterations && coordinator.state() != target; ++i) {
+      coordinator.poll(now);
+      other.poll(now);
+      net.flush(now);
+      now += 5;
+    }
+    return coordinator.state() == target;
+  }
+
+  void converge() {
+    CHECK_OK(a.start(now));
+    CHECK_OK(b.start(now));
+    CHECK_OK(a.add_neighbor(kLeaf, 1, now));
+    CHECK_OK(b.add_neighbor(kGateway, 1, now));
+    for (int i = 0; i < 400 && !a.scoped_child(kLeaf); ++i) run(50);
+    CHECK(a.scoped_child(kLeaf));
+  }
+
+  MessageId send_all(MeshNode& source, const GroupSendOptions& options) {
+    const std::array<std::uint8_t, 3> payload{{'g', 'o', '!'}};
+    MessageId id{};
+    CHECK_OK(source.send_group(kGroupAll,
+                               ByteView{payload.data(), payload.size()},
+                               options, now, id));
+    return id;
+  }
+};
+
+// Deterministic loss for the group-sleep tests: drops every frame of
+// `g_drop_type` matching the optional receiver/sequence filters — reports to
+// hold a source round open, or one group seq toward the leaf for the hold.
+FrameType g_drop_type = FrameType::GroupReport;
+NodeId g_drop_to = kInvalidNodeId;
+std::uint64_t g_drop_sequence = 0;
+
+bool group_loss_hook(const SimNetwork::Pending& pending) {
+  routeloom_test::FrameSight sight{};
+  if (!routeloom_test::sight_frame(
+          ByteView{pending.frame.data(), pending.frame.size()}, sight)) {
+    return false;
+  }
+  return sight.type == g_drop_type &&
+         (g_drop_to == kInvalidNodeId || pending.to == g_drop_to) &&
+         (g_drop_sequence == 0 || sight.sequence == g_drop_sequence);
+}
+
+void drop_all_reports() {
+  g_drop_type = FrameType::GroupReport;
+  g_drop_to = kInvalidNodeId;
+  g_drop_sequence = 0;
+}
+
+// The most recent group delivery event, or Empty when none was emitted.
+GroupDeliveryResult last_group_result(const CapturingObserver& observer) {
+  if (observer.group_results.empty()) return GroupDeliveryResult{};
+  return observer.group_results.back();
+}
+
+void test_group_drain_completes_round() {
+  // The drain waits on the round in flight: the origin reaches Delivered and
+  // needs no disposition at all (regression: quiesced ignored group work).
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  const MessageId id = w.send_all(w.a, options);
+  CHECK(w.a.group_delivery(id).state == DeliveryState::WaitingForEndReceipt);
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(w.events.saw(PowerState::Draining, PowerState::Persisting,
+                     "DRAIN_SETTLED"));
+  const auto result = w.a.group_delivery(id);
+  CHECK(result.state == DeliveryState::Delivered);
+  CHECK(std::strcmp(result.reason, "GROUP_COMPLETE") == 0);
+  CHECK(w.observer_b.group_messages.size() == 1);
+}
+
+void test_group_sleep_policy_fail() {
+  // The round can never finish (every report is lost): at the drain deadline
+  // the unfinished origin must fail loudly, not ride into READY_TO_SLEEP.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  const MessageId id = w.send_all(w.a, options);
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(w.events.saw(PowerState::Draining, PowerState::Persisting,
+                     "DRAIN_DEADLINE"));
+  const auto result = w.a.group_delivery(id);
+  CHECK(result.state == DeliveryState::Failed);
+  CHECK(std::strcmp(result.reason, "SLEEP_DRAIN") == 0);
+  const auto last = last_group_result(w.observer_a);
+  CHECK(last.id == id && last.state == DeliveryState::Failed &&
+        std::strcmp(last.reason, "SLEEP_DRAIN") == 0);
+}
+
+void test_group_sleep_policy_save() {
+  // Save cannot apply — the group lane has no persistence: the origin fails
+  // with an honest reason and nothing enters the sleep image.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  const MessageId id = w.send_all(w.a, options);
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Save;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  const auto result = w.a.group_delivery(id);
+  CHECK(result.state == DeliveryState::Failed);
+  CHECK(std::strcmp(result.reason, "SLEEP_GROUP_NOT_PERSISTED") == 0);
+  const auto last = last_group_result(w.observer_a);
+  CHECK(last.id == id && last.state == DeliveryState::Failed &&
+        std::strcmp(last.reason, "SLEEP_GROUP_NOT_PERSISTED") == 0);
+  // Nothing was saved: a wake re-injects no pending work at all.
+  CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  CHECK_OK(coordinator.wake(ResetCause::DeepSleepWake,
+                              ElapsedInterval{0, 0, true}, w.now));
+  CHECK(w.events.pending_results.empty());
+}
+
+void test_group_sleep_policy_defer() {
+  // Defer leaves the outcome unknown — the same Indeterminate a non-durable
+  // unicast delivery gets, surfaced through the usual delivery event.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  const MessageId id = w.send_all(w.a, options);
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Defer;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  const auto result = w.a.group_delivery(id);
+  CHECK(result.state == DeliveryState::Indeterminate);
+  CHECK(std::strcmp(result.reason, "SLEEP_DEFERRED") == 0);
+  const auto last = last_group_result(w.observer_a);
+  CHECK(last.id == id && last.state == DeliveryState::Indeterminate &&
+        std::strcmp(last.reason, "SLEEP_DEFERRED") == 0);
+}
+
+void test_group_ordered_hold_released_for_sleep() {
+  // Leaf 2 receives ordered seq 1 and 3 while seq 2 is lost: seq 3 stays
+  // held. Sleep must release the held payload to the app through the same
+  // gap-skip path a hold timeout uses — never carry it into READY_TO_SLEEP.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  GroupSendOptions options{};
+  options.ordered = true;
+  options.lifetime_ms = 10000;
+  w.send_all(w.a, options);  // seq 1
+  w.run(60);
+  // seq 2 toward the leaf is lost for good; an Urgent seq 3 overtakes it.
+  g_drop_type = FrameType::GroupData;
+  g_drop_to = GroupPowerWorld::kLeaf;
+  g_drop_sequence = kGroupSequenceFlag | 2;
+  w.net.drop_frame = group_loss_hook;
+  w.send_all(w.a, options);
+  GroupSendOptions urgent = options;
+  urgent.priority = Priority::Urgent;
+  w.send_all(w.a, urgent);
+  w.run(80);
+  // Only seq 1 reached the app; seq 3 is held behind the seq-2 gap.
+  CHECK(w.observer_b.group_messages.size() == 1);
+  if (w.observer_b.group_messages.size() == 1) {
+    CHECK(w.observer_b.group_messages[0].info.group_seq == 1);
+  }
+  CHECK(w.b.group_stats().held == 1);
+  CHECK(w.b.group_holds_in_use() == 1);
+
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.b, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.a, PowerState::ReadyToSleep));
+  CHECK(w.events.saw(PowerState::Draining, PowerState::Persisting,
+                     "DRAIN_SETTLED"));
+  // Flushed through the ordered path before the ticket existed: the app sees
+  // {1, 3}, the gap is counted and nothing remains held or persisted.
+  CHECK(w.b.group_holds_in_use() == 0);
+  CHECK(w.observer_b.group_messages.size() == 2);
+  if (w.observer_b.group_messages.size() == 2) {
+    CHECK(w.observer_b.group_messages[1].info.group_seq == 3);
+    CHECK(!w.observer_b.group_messages[1].info.late);
+  }
+  CHECK(w.b.group_stats().gaps_skipped >= 1);
+  CHECK_OK(coordinator.sleep_enter(coordinator.ticket(), w.now));
+  CHECK_OK(coordinator.wake(ResetCause::DeepSleepWake,
+                              ElapsedInterval{0, 0, true}, w.now));
+  CHECK(w.events.pending_results.empty());
+}
+
+void test_group_sleep_commit_failure_keeps_state() {
+  // A failed image commit aborts with the group lane untouched — origin
+  // dispositions and the hold release run only AFTER the commit — so the
+  // node comes back to RUNNING with the hold still held and no event.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  GroupSendOptions options{};
+  options.ordered = true;
+  options.lifetime_ms = 10000;
+  w.send_all(w.a, options);  // seq 1
+  w.run(60);
+  g_drop_type = FrameType::GroupData;
+  g_drop_to = GroupPowerWorld::kLeaf;
+  g_drop_sequence = kGroupSequenceFlag | 2;
+  w.net.drop_frame = group_loss_hook;
+  w.send_all(w.a, options);  // seq 2: lost toward the leaf
+  GroupSendOptions urgent = options;
+  urgent.priority = Priority::Urgent;
+  w.send_all(w.a, urgent);   // seq 3: overtakes, held
+  w.run(80);
+  CHECK(w.b.group_holds_in_use() == 1);
+
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.b, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  storage.drop_call = 0;  // the image commit itself fails
+  SleepRequest request{};
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.a, PowerState::Running));
+  CHECK(!w.b.draining());
+  CHECK(w.b.group_holds_in_use() == 1);
+  CHECK(w.observer_b.group_messages.size() == 1);
+  // With storage healthy again, the same drain flushes the hold normally.
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.a, PowerState::ReadyToSleep));
+  CHECK(w.b.group_holds_in_use() == 0);
+  CHECK(w.observer_b.group_messages.size() == 2);
+}
+
 }  // namespace
 
 int main() {
@@ -1483,6 +1805,12 @@ int main() {
   test_resume_reuses_original_id_dedup_once();
   test_long_sleep_pending_expires_no_duplicate();
   test_short_sleep_resend_dedups_once();
+  test_group_drain_completes_round();
+  test_group_sleep_policy_fail();
+  test_group_sleep_policy_save();
+  test_group_sleep_policy_defer();
+  test_group_ordered_hold_released_for_sleep();
+  test_group_sleep_commit_failure_keeps_state();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;
