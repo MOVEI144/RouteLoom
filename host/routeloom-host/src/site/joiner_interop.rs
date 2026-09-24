@@ -689,7 +689,10 @@ impl World {
                             let durable = durable.expect("allow persisted before its m4");
                             assert_eq!(durable.delivered_ms, Some(delivered));
                             assert_eq!(durable.dams, row.dams);
-                            self.allow_forwards.push((site, self.now, delivered));
+                            // API timestamps use wall time, not this fixture's virtual time.
+                            let forwarded_at = now_ms();
+                            assert!(delivered <= forwarded_at, "durable approval precedes the m4 send");
+                            self.allow_forwards.push((site, forwarded_at, delivered));
                         } else {
                             assert!(
                                 row.as_ref().is_none_or(|r| !r.member),
@@ -839,6 +842,7 @@ fn cpp_joiner_allows_through_the_rust_authority() {
     assert_eq!(tick.snap.store_gen, 1);
     assert_eq!(world.allow_forwards.len(), 1);
     assert_eq!(world.allow_forwards[0].0, 0);
+    assert!(world.allow_forwards[0].2 <= world.allow_forwards[0].1);
     world.check_member_material(0, &tick.member);
     assert!(
         world.aborts_seen.is_empty(),
