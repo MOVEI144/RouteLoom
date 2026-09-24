@@ -1,0 +1,10 @@
+{
+  "codec": "capability_digest",
+  "digest_hex": "f2dad69f6d75dd1247d471be78acc94ce7e7884af645a5b972fc1a7503363794",
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "intent_hex": "010101000300000000000007eea2fac18daf0e1ce471a718a1d0aaa11ce1bd3a40a5f7b9b6758ce83c259221",
+  "name": "capability_basic",
+  "state_i_hex": "01010100000000030000000b0000000c0000000703000000",
+  "state_r_hex": "01010100000000030000000b0000000c0000000901000000"
+}

@@ -1,0 +1,12 @@
+{
+  "binding_hex": "4f7f0e9d54b468e6731fd745e9263ff92d9ceeb052b2d7c8c496ea203752dd88",
+  "codec": "end_binding",
+  "differs_from": "end_binding_basic",
+  "exchange_id": 305419897,
+  "expect": "ok",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "end_binding_flip_exchange",
+  "network": 13054454845,
+  "node_i": 45317471250420276,
+  "node_r": 45317471250417527
+}

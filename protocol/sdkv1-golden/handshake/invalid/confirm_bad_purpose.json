@@ -1,0 +1,8 @@
+{
+  "codec": "context_confirm",
+  "encoded_hex": "010901006af0a94e96c93cc9436d3dca3599c33bd6eeb63f2ba9b212ecd3edc81b382b23",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "confirm_bad_purpose",
+  "note": "purpose is 1 link or 2 end"
+}

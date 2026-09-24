@@ -1,0 +1,8 @@
+{
+  "codec": "session_state",
+  "encoded_hex": "01010100000000030000000b0000000c0000000001000000",
+  "expect": "error",
+  "format": "routeloom-sdkv1-handshake-golden-v1",
+  "name": "state_zero_boot",
+  "note": "boot is nonzero"
+}

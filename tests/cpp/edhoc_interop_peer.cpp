@@ -133,6 +133,12 @@ struct Party {
   Bytes pub;
 };
 
+struct ExporterCheck {
+  std::uint64_t label{0};
+  Bytes context;
+  std::size_t length{32};
+};
+
 struct Inputs {
   Party local;
   Party peer;
@@ -140,8 +146,7 @@ struct Inputs {
   Bytes ephemeral;  // own ephemeral scalar
   EadList send[4];  // EAD_1..EAD_4 this side composes (unused slots empty)
   EadList expect[4];
-  std::uint64_t exporter_label{0};
-  Bytes exporter_context;
+  std::vector<ExporterCheck> exporter_checks;  // one (join) or five (member)
 };
 
 class Credentials final : public edhoc::CredentialProvider {
@@ -223,7 +228,7 @@ class Io {
   // Returns false to stop (mismatch or I/O failure).
   virtual bool mine(int n, const Bytes& message) = 0;
   virtual bool theirs(int n, Bytes& message) = 0;
-  virtual bool exporter(const Bytes& output) = 0;
+  virtual bool exporter(std::size_t index, const Bytes& output) = 0;
 };
 
 class ReplayIo final : public Io {
@@ -235,7 +240,9 @@ class ReplayIo final : public Io {
   bool theirs(const int n, Bytes& message) override {
     return get("m" + std::to_string(n), message);
   }
-  bool exporter(const Bytes& output) override { return compare("exporter", output); }
+  bool exporter(const std::size_t index, const Bytes& output) override {
+    return compare(index == 0 ? "exporter" : "exporter" + std::to_string(index + 1), output);
+  }
 
  private:
   bool get(const std::string& name, Bytes& out) const {
@@ -274,8 +281,12 @@ class LiveIo final : public Io {
     if (line.compare(0, head.size(), head) != 0) return false;
     return from_hex(line.substr(head.size()), message);
   }
-  bool exporter(const Bytes& output) override {
-    std::printf("exporter %s\n", to_hex(output).c_str());
+  bool exporter(const std::size_t index, const Bytes& output) override {
+    if (index == 0) {
+      std::printf("exporter %s\n", to_hex(output).c_str());
+    } else {
+      std::printf("exporter%zu %s\n", index + 1, to_hex(output).c_str());
+    }
     std::fflush(stdout);
     return true;
   }
@@ -288,7 +299,7 @@ bool fail(const char* what, const Status& status, edhoc::Session& session) {
   return false;
 }
 
-bool run(const edhoc::Role role, const Inputs& in, Io& io) {
+bool run(const edhoc::Role role, const Inputs& in, Io& io, std::size_t* high_water) {
   Credentials credentials(in);
   ScriptedRandom rng{in.ephemeral, false};
   EadState ead;
@@ -335,12 +346,20 @@ bool run(const edhoc::Role role, const Inputs& in, Io& io) {
     if (!(status = session.compose_message_4(out, length)).ok()) return fail("m4", status, session);
     if (!own(4)) return false;
   }
-  Bytes exported(32);
-  status = session.exporter(in.exporter_label,
-                            ByteView{in.exporter_context.data(), in.exporter_context.size()},
-                            MutableByteView{exported.data(), exported.size()});
-  if (!status.ok()) return fail("exporter", status, session);
-  if (!io.exporter(exported)) return false;
+  for (std::size_t i = 0; i < in.exporter_checks.size(); ++i) {
+    const ExporterCheck& check = in.exporter_checks[i];
+    if (check.length == 0 || check.length > 64) {
+      std::fprintf(stderr, "exporter check %zu: bad length\n", i);
+      return false;
+    }
+    Bytes exported(check.length);
+    status = session.exporter(check.label,
+                              ByteView{check.context.data(), check.context.size()},
+                              MutableByteView{exported.data(), exported.size()});
+    if (!status.ok()) return fail("exporter", status, session);
+    if (!io.exporter(i, exported)) return false;
+  }
+  if (high_water != nullptr) *high_water = session.arena().high_water();
   std::fprintf(stderr, "%s: arena high water %zu of %zu B, %zu blocks; key slots high water %zu\n",
                role == edhoc::Role::Initiator ? "initiator" : "responder",
                session.arena().high_water(), edhoc::Arena::kCapacity,
@@ -376,15 +395,19 @@ bool inputs(const Fields& f, const std::string& prefix, const edhoc::Role role, 
     return true;
   };
   const bool initiator = role == edhoc::Role::Initiator;
-  const std::string self = initiator ? "device_" : "authority_";
-  const std::string other = initiator ? "authority_" : "device_";
+  // Member transcripts name the two members; join transcripts use the
+  // device/authority names. The initiator is always member A.
+  const bool member = f.find("member_a_priv") != f.end();
+  const std::string self =
+      initiator ? (member ? "member_a_" : "device_") : (member ? "member_b_" : "authority_");
+  const std::string other =
+      initiator ? (member ? "member_b_" : "authority_") : (member ? "member_a_" : "device_");
   Bytes label;
   bool ok = hex(self + "kid", in.local.kid) && hex(self + "cred", in.local.cred) &&
             hex(self + "priv", in.local.priv) && hex(other + "kid", in.peer.kid) &&
             hex(other + "cred", in.peer.cred) && hex(other + "pub", in.peer.pub) &&
             hex(prefix + (initiator ? "c_i" : "c_r"), in.cid) &&
-            hex(prefix + (initiator ? "x" : "y"), in.ephemeral) &&
-            hex("exporter_context", in.exporter_context);
+            hex(prefix + (initiator ? "x" : "y"), in.ephemeral);
   EadList all[4];
   for (int i = 0; i < 4 && ok; ++i) ok = ead(prefix + "ead" + std::to_string(i + 1), all[i]);
   if (!ok) return false;
@@ -393,29 +416,51 @@ bool inputs(const Fields& f, const std::string& prefix, const edhoc::Role role, 
     const bool composes = (i % 2 == 0) == initiator;
     (composes ? in.send[i] : in.expect[i]) = all[i];
   }
-  const auto label_it = f.find("exporter_label");
-  if (label_it == f.end()) return false;
-  in.exporter_label = std::stoull(label_it->second);
+  for (int n = 0; n < 8; ++n) {
+    // Per-direction keys first (member: contexts bind the direction's
+    // CIDs), the shared keys as fallback (join).
+    const std::string tag = n == 0 ? "exporter" : "exporter" + std::to_string(n + 1);
+    const std::string key =
+        f.find(prefix + tag + "_label") != f.end() ? prefix + tag : tag;
+    const auto label_it = f.find(key + "_label");
+    if (label_it == f.end()) break;
+    ExporterCheck check;
+    check.label = std::stoull(label_it->second);
+    if (!hex(key + "_context", check.context)) return false;
+    const auto length_it = f.find(key + "_length");
+    check.length = length_it == f.end() ? 32 : static_cast<std::size_t>(std::stoul(length_it->second));
+    in.exporter_checks.push_back(check);
+  }
+  if (in.exporter_checks.empty()) {
+    std::fprintf(stderr, "missing exporter_label\n");
+    return false;
+  }
   return in.local.priv.size() == 32 && in.peer.pub.size() == 64 && in.ephemeral.size() == 32;
 }
 
 }  // namespace
 
 int main(const int argc, char** argv) {
-  if (argc == 3 && std::strcmp(argv[1], "--replay") == 0) {
+  if ((argc == 3 || argc == 4) && std::strcmp(argv[1], "--replay") == 0) {
     Fields fields;
     if (!load(argv[2], fields)) {
       std::fprintf(stderr, "cannot read %s\n", argv[2]);
       return 1;
     }
+    const std::size_t max_arena = argc == 4 ? static_cast<std::size_t>(std::stoul(argv[3])) : 0;
     int failures = 0;
     for (const auto& [prefix, role] :
          {std::pair<std::string, edhoc::Role>{"a_", edhoc::Role::Initiator},
           std::pair<std::string, edhoc::Role>{"b_", edhoc::Role::Responder}}) {
       Inputs in;
       ReplayIo io(fields, prefix);
-      if (!inputs(fields, prefix, role, in) || !run(role, in, io)) {
+      std::size_t high_water = 0;
+      if (!inputs(fields, prefix, role, in) || !run(role, in, io, &high_water)) {
         std::fprintf(stderr, "direction %s failed\n", prefix.c_str());
+        ++failures;
+      } else if (max_arena != 0 && high_water > max_arena) {
+        std::fprintf(stderr, "direction %s: arena high water %zu exceeds %zu\n", prefix.c_str(),
+                     high_water, max_arena);
         ++failures;
       } else {
         std::printf("direction %s: libedhoc %s agrees with the transcript byte for byte\n",
@@ -431,14 +476,15 @@ int main(const int argc, char** argv) {
     Inputs in;
     LiveIo io;
     if (!load(argv[4], fields) || !inputs(fields, argv[3], role, in)) return 2;
-    if (!run(role, in, io)) {
+    if (!run(role, in, io, nullptr)) {
       std::printf("fail\n");
       return 1;
     }
     std::printf("ok\n");
     return 0;
   }
-  std::fprintf(stderr, "usage: %s --replay FILE | --live initiator|responder PREFIX FILE\n",
+  std::fprintf(stderr,
+               "usage: %s --replay FILE [MAX_ARENA] | --live initiator|responder PREFIX FILE\n",
                argv[0]);
   return 2;
 }

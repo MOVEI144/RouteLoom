@@ -13,6 +13,8 @@
 //! - [`site`] — RLS1 site membership record (with the A/B `commit_seq`).
 //! - [`revocation`] — RRS1 payload, AAD, Sign1 object, storage record.
 //! - [`resume`] — RLP1 resumption-cache slot.
+//! - [`resume2`] — RLP2 resumption-cache slot (64-use ceiling, P4).
+//! - [`local_revocation`] — RLV1 durable local-removal evidence (P4).
 //!
 //! Office tooling (P7-1, 07 §6):
 //! - [`devca`] — `DeviceCaSigner` custody seam, dev `FileDeviceCaSigner`,
@@ -34,9 +36,11 @@ pub mod cert;
 pub mod devca;
 pub mod identity;
 pub mod lifecycle;
+pub mod local_revocation;
 pub mod office;
 pub mod pop;
 pub mod resume;
+pub mod resume2;
 pub mod revocation;
 pub mod rlsec;
 pub mod site;
