@@ -155,10 +155,12 @@ Status SealedSlotPair::initialize() noexcept {
   int valid = 0, corrupt = 0, unsupported = 0;
   for (std::uint8_t slot = 0; slot < kSlots; ++slot) {
     slot_reserved_[slot] = StatusCode::Ok;
+    slot_unreadable_[slot] = false;
     bool proven = false;
     const Status status = classify(slot, content[slot], seq[slot], proven, digest[slot]);
     if (!status) {
       unreadable[slot] = true;
+      slot_unreadable_[slot] = true;
       if (read_error.ok()) read_error = status;
       continue;
     }
@@ -407,6 +409,24 @@ Status SiteStore::initialize() noexcept {
     if (!loaded) return loaded;
   }
   return status;
+}
+
+SiteStoreHealth SiteStore::health() const noexcept {
+  SiteStoreHealth health{};
+  health.initialized = pair_.initialized();
+  health.has_site = has_site();
+  health.quarantined = pair_.quarantined();
+  health.uncertain = pair_.uncertain();
+  for (std::uint8_t slot = 0; slot < SealedSlotPair::kSlots; ++slot) {
+    if (pair_.slot_unsupported(slot)) {
+      health.unsupported_mask |= static_cast<std::uint8_t>(1U << slot);
+    }
+    if (pair_.slot_unreadable(slot)) {
+      health.read_error_mask |= static_cast<std::uint8_t>(1U << slot);
+    }
+  }
+  health.seq_floor = pair_.seq_floor();
+  return health;
 }
 
 Status SiteStore::encode(const SiteRecord& record, std::size_t& used_len) noexcept {
