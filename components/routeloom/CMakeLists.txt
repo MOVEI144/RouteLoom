@@ -35,6 +35,8 @@ set(ROUTELOOM_CORE_SOURCES
   src/sdkv1_ead.cpp
   src/sdkv1_join_relay.cpp
   src/sdkv1_join_transport.cpp
+  src/sdkv1_maintenance.cpp
+  src/sdkv1_pop.cpp
   src/sdkv1_records.cpp
   src/sdkv1_store.cpp
   src/status.cpp
