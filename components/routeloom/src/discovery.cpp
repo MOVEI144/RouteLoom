@@ -2359,6 +2359,11 @@ bool NeighborDiscovery::binding_generation_of(
   return true;
 }
 
+bool NeighborDiscovery::topology_pinned(const NodeId peer) const noexcept {
+  const Neighbor* neighbor = find_neighbor(peer);
+  return neighbor != nullptr && neighbor->pinned;
+}
+
 bool NeighborDiscovery::node_of(const MacAddress& mac, NodeId& out) const noexcept {
   const Neighbor* neighbor = find_neighbor(mac);
   if (neighbor == nullptr || neighbor->node == kInvalidNodeId ||

@@ -763,7 +763,11 @@ class MeshNode {
   Status set_autonomy_sink(AutonomyFrameSink* sink) noexcept;
   // Install/clear the P6 revocation-gossip sink (Owner wiring, nullptr
   // disables — the PR A state: P6 frames are then honestly rejected).
-  void set_rrs_sink(RrsGossipSink* sink) noexcept { rrs_sink_ = sink; }
+  Status set_rrs_sink(RrsGossipSink* sink) noexcept {
+    if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+    rrs_sink_ = sink;
+    return Status::success();
+  }
   // Install/clear the Service=21 endpoint (GatewayDelivery wiring, nullptr
   // disables). With no sink, inbound Service frames are still dedup'd/
   // hop-ACKed/forwarded but terminate as SERVICE_NO_ENDPOINT — the origin's
@@ -1632,6 +1636,9 @@ class MeshNode {
     bool control_slot_available() const noexcept {
       return control_.count < kControlLaneCapacity;
     }
+    bool origin_slot_available(NodeId origin) const noexcept {
+      return origin_count(origin) < kMaxJobsPerOrigin;
+    }
     std::size_t flows_active() const noexcept { return flows_.size(); }
     std::uint32_t occupancy_percent() const noexcept {
       return static_cast<std::uint32_t>(used_ * 100 / capacity());
@@ -1939,6 +1946,7 @@ class MeshNode {
     bool applied_new{false};
     bool committed{false};
     ~AdmissionReservation() noexcept;
+    void rollback() noexcept;
     AdmissionReservation() noexcept = default;
     AdmissionReservation(const AdmissionReservation&) = delete;
     AdmissionReservation& operator=(const AdmissionReservation&) = delete;

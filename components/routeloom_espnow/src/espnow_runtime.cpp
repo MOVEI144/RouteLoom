@@ -365,6 +365,9 @@ Status EspNowRuntime::initialize() noexcept {
 Status EspNowRuntime::register_neighbor(
     const NodeId node, const MacAddress& mac,
     const RouteMetric link_metric) noexcept {
+  if (reply_call_active_.load() || node_.in_external_callback()) {
+    return Status::error(StatusCode::Busy, "reentrant owner call");
+  }
   if (node == kInvalidNodeId || node == config_.node.node ||
       link_metric == 0 || link_metric == kInfiniteRouteMetric) {
     return Status::error(StatusCode::InvalidArgument,
@@ -391,30 +394,114 @@ Status EspNowRuntime::register_neighbor(
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::NoCapacity, "peer mapping full");
   }
+  const bool newly_created = !record->used;
+  const RouteMetric old_metric = record->metric;
+  const bool old_release_pending = record->release_pending;
+  if (record->binding_retired) {
+    const bool cleanup = record->registration_failed && !record->autonomy &&
+                         record->release_pending &&
+                         record->mac == mac && record->node == node;
+    portEXIT_CRITICAL(&callback_lock_);
+    if (cleanup) {
+      const Status released = release_driver_peer(mac, node);
+      if (!released) return released;
+      portENTER_CRITICAL(&callback_lock_);
+      record->used = false;
+      record->driver_registered = false;
+      record->node = kInvalidNodeId;
+      record->binding_id = kInvalidBindingId;
+      record->binding = BindingGeneration{0};
+      record->rx_context_id = 0;
+      record->release_pending = false;
+      record->binding_retired = false;
+      record->registration_failed = false;
+      portEXIT_CRITICAL(&callback_lock_);
+      return register_neighbor(node, mac, link_metric);
+    }
+    return Status::error(StatusCode::Conflict,
+                         "prior binding still draining");
+  }
   if (record->used && !(record->mac == mac)) {
     portEXIT_CRITICAL(&callback_lock_);
     return Status::error(StatusCode::Conflict,
                          "node already mapped to another MAC");
   }
+  if (newly_created) {
+    if (next_static_binding_id_ < 0x80000000u) {
+      portEXIT_CRITICAL(&callback_lock_);
+      return Status::error(StatusCode::CounterExhausted,
+                           "static binding ids exhausted");
+    }
+    record->binding_id = BindingId{next_static_binding_id_--};
+    record->binding = BindingGeneration{1};
+    record->rx_context_id = 0;
+    record->autonomy = false;
+    record->binding_retired = false;
+    record->registration_failed = false;
+  }
   record->used = true;
   record->node = node;
   record->mac = mac;
   record->metric = link_metric;
-  // A reused slot never keeps its previous occupant's lease identity: the
-  // mirror loop re-resolves both from the engine when a bound record
-  // exists, and until then the mapping refuses (safe direction).
-  record->binding_id = kInvalidBindingId;
-  record->release_pending = false;
+  // A new mapping cannot admit RX work until both driver registration and
+  // the Node's route-neighbor insertion have succeeded.
+  record->release_pending = true;
   portEXIT_CRITICAL(&callback_lock_);
   if (espnow_initialized_) {
     const auto status = register_driver_peer(*record);
     if (!status) {
+      if (newly_created) {
+        portENTER_CRITICAL(&callback_lock_);
+        record->used = false;
+        record->node = kInvalidNodeId;
+        record->binding_id = kInvalidBindingId;
+        record->binding = BindingGeneration{0};
+        record->rx_context_id = 0;
+        record->release_pending = false;
+        record->registration_failed = false;
+        portEXIT_CRITICAL(&callback_lock_);
+      } else {
+        portENTER_CRITICAL(&callback_lock_);
+        record->metric = old_metric;
+        record->release_pending = old_release_pending;
+        portEXIT_CRITICAL(&callback_lock_);
+      }
       return status;
     }
   }
   if (started_) {
-    return node_.add_neighbor(node, link_metric, now_ms());
+    const Status status = node_.add_neighbor(node, link_metric, now_ms());
+    if (!status) {
+      if (newly_created) {
+        const Status released = release_driver_peer(mac, node);
+        portENTER_CRITICAL(&callback_lock_);
+        if (released) {
+          record->used = false;
+          record->driver_registered = false;
+          record->node = kInvalidNodeId;
+          record->binding_id = kInvalidBindingId;
+          record->binding = BindingGeneration{0};
+          record->rx_context_id = 0;
+          record->release_pending = false;
+          record->registration_failed = false;
+        } else {
+          record->binding_retired = true;
+          record->registration_failed = true;
+        }
+        portEXIT_CRITICAL(&callback_lock_);
+        if (!released) return released;
+      } else {
+        portENTER_CRITICAL(&callback_lock_);
+        record->metric = old_metric;
+        record->release_pending = old_release_pending;
+        portEXIT_CRITICAL(&callback_lock_);
+      }
+      return status;
+    }
   }
+  portENTER_CRITICAL(&callback_lock_);
+  record->release_pending = false;
+  portEXIT_CRITICAL(&callback_lock_);
   return Status::success();
 }
 
@@ -561,9 +648,9 @@ void EspNowRuntime::stop() noexcept {
       }
     }
   }
-  // The Owner worker is joined: no port call is in flight, so retire every
-  // lease entry (issue #117) — the node's outstanding uses drain via
-  // release and can never send on the torn-down driver.
+  // The Owner worker is joined. Settle Node jobs while the lease port and
+  // driver still exist, then retire any remaining Owner-held uses.
+  (void)node_.quiesce_for_sleep();
   (void)reply_leases_.invalidate_all();
   portENTER_CRITICAL(&callback_lock_);
   if (instance_ == this) {
@@ -1007,14 +1094,79 @@ bool EspNowRuntime::reply_mapping(const NodeId peer,
   if (record != nullptr && !record->release_pending &&
       record->driver_registered &&
       record->binding_id != kInvalidBindingId &&
-      record->binding != BindingGeneration{0}) {
+      record->binding != BindingGeneration{0} &&
+      record->rx_context_id != 0) {
     out.peer = peer;
     out.id = record->binding_id;
     out.generation = record->binding;
-    out.rx_context_id = kReplyRxContext;
+    out.rx_context_id = record->rx_context_id;
   }
   portEXIT_CRITICAL(&callback_lock_);
-  return out.id != kInvalidBindingId;
+  return out.id != kInvalidBindingId &&
+         reply_context_current(peer, out.rx_context_id).ok();
+}
+
+Status EspNowRuntime::reply_context_current(
+    const NodeId peer, const std::uint32_t context) noexcept {
+  std::uint32_t provider_context = 0;
+  const Status status = security_.current_rx_epoch(
+      SecurityScope::Link, peer, provider_context);
+  if (status.code == StatusCode::Unsupported &&
+      security_.security_profile() == SecurityProfile::Development) {
+    return Status::success();
+  }
+  if (!status) return status;
+  if (provider_context == 0 || provider_context != context) {
+    return Status::error(StatusCode::Conflict, "reply context changed");
+  }
+  return Status::success();
+}
+
+Status EspNowRuntime::reply_observe_authenticated_rx(
+    const ReplyBinding captured) noexcept {
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) {
+    return Status::error(StatusCode::Busy, "reentrant reply call");
+  }
+  if (captured.peer == kInvalidNodeId || captured.id == kInvalidBindingId ||
+      captured.generation == BindingGeneration{0} ||
+      captured.rx_context_id == 0) {
+    return Status::error(StatusCode::InvalidArgument, "invalid RX binding");
+  }
+  std::uint32_t provider_context = 0;
+  const Status context_status = security_.current_rx_epoch(
+      SecurityScope::Link, captured.peer, provider_context);
+  const bool ordered_development =
+      context_status.code == StatusCode::Unsupported &&
+      security_.security_profile() == SecurityProfile::Development;
+  if (!ordered_development && !context_status) return context_status;
+  if (!ordered_development && provider_context != captured.rx_context_id) {
+    return Status::error(StatusCode::Conflict, "old RX context");
+  }
+  portENTER_CRITICAL(&callback_lock_);
+  Peer* record = find_peer(captured.peer);
+  Status status = Status::success();
+  if (record == nullptr || !record->driver_registered ||
+      record->binding_retired ||
+      record->binding_id != captured.id ||
+      record->binding != captured.generation) {
+    status = Status::error(StatusCode::Conflict, "binding mapping changed");
+  } else if (record->release_pending &&
+             record->rx_context_id != captured.rx_context_id) {
+    // A Stale peer can still answer an already submitted exchange under its
+    // held binding; it cannot establish a new context while release waits.
+    status = Status::error(StatusCode::Conflict, "binding release pending");
+  } else if (ordered_development && record->rx_context_id != 0 &&
+             captured.rx_context_id < record->rx_context_id) {
+    status = Status::error(StatusCode::Conflict, "old RX context");
+  } else if (record->rx_context_id != captured.rx_context_id) {
+    if (record->rx_context_id != 0) {
+      status = reply_leases_.invalidate_binding(record->binding_id);
+    }
+    if (status) record->rx_context_id = captured.rx_context_id;
+  }
+  portEXIT_CRITICAL(&callback_lock_);
+  return status;
 }
 
 Status EspNowRuntime::reply_acquire(const ReplyBinding captured,
@@ -1022,6 +1174,11 @@ Status EspNowRuntime::reply_acquire(const ReplyBinding captured,
                                        const MonotonicMs now,
                                        ReplyLeaseToken& out) noexcept {
   out = kInvalidReplyLeaseToken;
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
+  const Status context_status =
+      reply_context_current(captured.peer, captured.rx_context_id);
+  if (!context_status) return context_status;
   portENTER_CRITICAL(&callback_lock_);
   const Peer* record = find_peer(captured.peer);
   const bool pinned =
@@ -1033,11 +1190,13 @@ Status EspNowRuntime::reply_acquire(const ReplyBinding captured,
     live.peer = captured.peer;
     live.id = record->binding_id;
     live.generation = record->binding;
+    live.rx_context_id = record->rx_context_id;
   }
   Status status = Status::success();
   if (live.id == kInvalidBindingId || live.id != captured.id ||
       live.generation != captured.generation ||
-      captured.rx_context_id == 0) {
+      captured.rx_context_id == 0 ||
+      captured.rx_context_id != live.rx_context_id) {
     // The live mapping moved (rebind, MAC flip, retire) or the capture
     // never had one — refuse rather than lease under a dead identity.
     status = Status::error(StatusCode::Conflict, "binding mapping changed");
@@ -1046,15 +1205,15 @@ Status EspNowRuntime::reply_acquire(const ReplyBinding captured,
     // driverless Stale marker cannot carry a reply.
     status = Status::error(StatusCode::Conflict, "peer driver not pinned");
   } else {
-    ReplyBinding normalized = captured;
-    normalized.rx_context_id = kReplyRxContext;
-    status = reply_leases_.acquire(normalized, deadline, now, out);
+    status = reply_leases_.acquire(captured, deadline, now, out);
   }
   portEXIT_CRITICAL(&callback_lock_);
   return status;
 }
 
 Status EspNowRuntime::reply_release(const ReplyLeaseToken token) noexcept {
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
   portENTER_CRITICAL(&callback_lock_);
   const Status status = reply_leases_.release(token);
   portEXIT_CRITICAL(&callback_lock_);
@@ -1065,6 +1224,8 @@ Status EspNowRuntime::reply_release(const ReplyLeaseToken token) noexcept {
 
 Status EspNowRuntime::reply_validate(const ReplyLeaseToken token,
                                          const MonotonicMs now) noexcept {
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
   portENTER_CRITICAL(&callback_lock_);
   const Status status = reply_leases_.validate(token, now);
   portEXIT_CRITICAL(&callback_lock_);
@@ -1075,6 +1236,8 @@ Status EspNowRuntime::reply_send_reply(const ReplyLeaseToken token,
                                           const std::uint64_t tx_token,
                                           const ByteView frame,
                                           const MonotonicMs now) noexcept {
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
   portENTER_CRITICAL(&callback_lock_);
   ReplyBinding bound{};
   Status status = reply_leases_.use_binding(token, bound);
@@ -1083,7 +1246,7 @@ Status EspNowRuntime::reply_send_reply(const ReplyLeaseToken token,
   }
   if (status) {
     const Peer* record = find_peer(bound.peer);
-    if (record == nullptr || record->release_pending ||
+    if (record == nullptr || record->binding_retired ||
         !record->driver_registered ||
         record->binding_id != bound.id ||
         record->binding != bound.generation) {
@@ -1092,12 +1255,16 @@ Status EspNowRuntime::reply_send_reply(const ReplyLeaseToken token,
   }
   portEXIT_CRITICAL(&callback_lock_);
   if (!status) return status;
+  status = reply_context_current(bound.peer, bound.rx_context_id);
+  if (!status) return status;
   return send(bound.peer, tx_token, frame);
 }
 
 Status EspNowRuntime::reply_snapshot_binding(const NodeId peer,
                                                  ReplyBinding& out) noexcept {
   out = ReplyBinding{};
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
   if (reply_mapping(peer, out)) {
     return Status::success();
   }
@@ -1109,9 +1276,10 @@ Status EspNowRuntime::reply_snapshot_binding(const NodeId peer,
 Status EspNowRuntime::reply_send_bound(const ReplyBinding binding,
                                           const std::uint64_t tx_token,
                                           const ByteView frame) noexcept {
+  ReplyCallGuard guard(reply_call_active_);
+  if (!guard.entered()) return Status::error(StatusCode::Busy, "reentrant reply call");
   ReplyBinding live{};
-  if (!reply_mapping(binding.peer, live) || live.id != binding.id ||
-      live.generation != binding.generation) {
+  if (!reply_mapping(binding.peer, live) || live != binding) {
     return Status::error(StatusCode::Conflict, "binding mapping changed");
   }
   return send(binding.peer, tx_token, frame);
@@ -1580,6 +1748,22 @@ Status EspNowRuntime::promote_to_regular(const NodeId node,
   if (record != nullptr) {
     const bool mismatch = record->node != node || !(record->mac == mac);
     if (!mismatch) {
+      BindingId current{kInvalidBindingId};
+      BindingGeneration generation{0};
+      if (record->autonomy && record->binding_id != kInvalidBindingId &&
+          discovery_ != nullptr &&
+          discovery_->binding_of(node, current) &&
+          discovery_->binding_generation_of(node, generation) &&
+          (record->binding_id != current || record->binding != generation)) {
+        portEXIT_CRITICAL(&callback_lock_);
+        return Status::error(StatusCode::Conflict,
+                             "prior binding still draining");
+      }
+      if (record->binding_retired) {
+        portEXIT_CRITICAL(&callback_lock_);
+        return Status::error(StatusCode::Conflict,
+                             "prior binding still draining");
+      }
       const bool registered = record->driver_registered;
       portEXIT_CRITICAL(&callback_lock_);
       // An existing (e.g. statically configured) mapping stays
@@ -1651,7 +1835,9 @@ Status EspNowRuntime::promote_to_regular(const NodeId node,
   // Fresh lease identity: the mirror loop resolves the id from the engine
   // on the next sync; until then the mapping refuses (safe direction).
   record->binding_id = kInvalidBindingId;
+  record->rx_context_id = 0;
   record->release_pending = false;
+  record->binding_retired = false;
   if (TransientPeer* slot = find_transient(mac.bytes.data())) {
     // The transient slot's driver registration moves to the regular peer;
     // only the bookkeeping is released.
@@ -1672,17 +1858,46 @@ Status EspNowRuntime::promote_to_regular(const NodeId node,
   return Status::success();
 }
 
-void EspNowRuntime::release_driver_peer(const MacAddress& mac,
-                                        const NodeId node) noexcept {
+Status EspNowRuntime::release_driver_peer(const MacAddress& mac,
+                                          const NodeId node,
+                                          const bool transfer) noexcept {
+  DriverReleaseEvidence evidence{};
   portENTER_CRITICAL(&callback_lock_);
-  const bool inflight = pending_tx_ && pending_mac_ == mac;
-  portEXIT_CRITICAL(&callback_lock_);
-  if (inflight) {
-    // Never silent: the delivery resolves as DRIVER_RESULT_UNKNOWN via the
-    // node watchdog, or the driver completion still arrives and is consumed.
-    observer_.on_diagnostic("PEER_TX_INFLIGHT_RELEASED", node, nullptr);
+  if (const Peer* peer = find_peer(mac.bytes.data())) {
+    evidence.reply_uses_live =
+        reply_leases_.holds_binding(peer->binding_id, peer->binding);
   }
-  (void)esp_now_del_peer(mac.bytes.data());
+  evidence.tx_in_flight = pending_tx_ && pending_mac_ == mac;
+  bool raw_outstanding = false;
+  for (std::size_t i = 0; i < raw_tx_count_; ++i) {
+    raw_outstanding |= raw_tx_[i].mac == mac;
+  }
+  bool quarantined = false;
+  for (std::size_t i = 0; i < quarantined_count_; ++i) {
+    quarantined |= quarantined_tx_[i].mac == mac;
+  }
+  const bool fenced = fenced_outstanding_ && fenced_mac_ == mac;
+  evidence.fence_or_quarantine = fenced || quarantined;
+  evidence.other_lease_hold = raw_outstanding || channel_runner_.busy();
+  evidence.topology_pin_live =
+      node != kInvalidNodeId && discovery_ != nullptr &&
+      discovery_->topology_pinned(node);
+  evidence.callbacks_drained =
+      !evidence.tx_in_flight && !raw_outstanding && !quarantined && !fenced;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (!(transfer ? driver_transfer_allowed(evidence)
+                 : driver_release_allowed(evidence))) {
+    return Status::error(StatusCode::WouldBlock,
+                         "driver peer still held");
+  }
+  if (transfer) return Status::success();
+  const esp_err_t error = esp_now_del_peer(mac.bytes.data());
+  if (error != ESP_OK && error != ESP_ERR_ESPNOW_NOT_FOUND) {
+    observer_.on_diagnostic("PEER_DRIVER_RELEASE_FAILED", node, nullptr);
+    return esp_status(error, StatusCode::RadioFailure,
+                      "esp_now_del_peer failed");
+  }
+  return Status::success();
 }
 
 void EspNowRuntime::release_autonomy_peer(Peer& peer,
@@ -1697,28 +1912,52 @@ void EspNowRuntime::release_autonomy_peer(Peer& peer,
   // live the slot and its driver registration stay and the next sync
   // retries — the physical deletion below needs a drained binding.
   (void)reply_leases_.invalidate_binding(peer.binding_id);
-  if (reply_leases_.holds_binding(peer.binding_id, peer.binding)) {
-    portENTER_CRITICAL(&callback_lock_);
-    peer.neighbor_added = false;
-    peer.release_pending = true;
-    portEXIT_CRITICAL(&callback_lock_);
-    return;
-  }
   const bool had_driver = peer.driver_registered;
   const MacAddress mac = peer.mac;
   const NodeId node = peer.node;
+  NodeId successor_node = kInvalidNodeId;
+  BindingId successor_id{kInvalidBindingId};
+  BindingGeneration successor_generation{0};
+  const bool same_mac_successor =
+      discovery_ != nullptr &&
+      discovery_->node_of(mac.bytes, successor_node) && successor_node == node &&
+      discovery_->binding_of(node, successor_id) &&
+      discovery_->binding_generation_of(node, successor_generation) &&
+      (successor_id != peer.binding_id ||
+       successor_generation != peer.binding);
   portENTER_CRITICAL(&callback_lock_);
   peer.neighbor_added = false;
+  peer.binding_retired = true;
+  peer.registration_failed = false;
+  peer.release_pending = true;
+  const bool transfer = same_mac_successor ||
+                        find_transient(mac.bytes.data()) != nullptr;
+  portEXIT_CRITICAL(&callback_lock_);
+  if (had_driver && !release_driver_peer(mac, node, transfer)) {
+    return;
+  }
+  portENTER_CRITICAL(&callback_lock_);
+  if (same_mac_successor) {
+    peer.binding_id = successor_id;
+    peer.binding = successor_generation;
+    peer.rx_context_id = 0;
+    peer.release_pending = false;
+    peer.binding_retired = false;
+    if (TransientPeer* slot = find_transient(mac.bytes.data())) {
+      slot->used = false;
+    }
+    portEXIT_CRITICAL(&callback_lock_);
+    return;
+  }
   peer.driver_registered = false;
   peer.used = false;
   peer.autonomy = false;
   peer.node = kInvalidNodeId;
   peer.binding_id = kInvalidBindingId;
+  peer.rx_context_id = 0;
   peer.release_pending = false;
+  peer.binding_retired = false;
   portEXIT_CRITICAL(&callback_lock_);
-  if (had_driver) {
-    release_driver_peer(mac, node);
-  }
 }
 
 void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
@@ -1732,8 +1971,7 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
     }
     NeighborPhase phase{};
     if (!discovery_->phase_of(slot.mac.bytes, phase)) {
-      release_driver_peer(slot.mac, kInvalidNodeId);
-      slot.used = false;
+      if (release_driver_peer(slot.mac, kInvalidNodeId)) slot.used = false;
       continue;
     }
     switch (phase) {
@@ -1756,15 +1994,13 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
         }
         // peers_ partition full: do not park a bound peer in the transient
         // budget — release it and let wire sends surface PEER_CAPACITY.
-        release_driver_peer(slot.mac, node);
-        slot.used = false;
+        if (release_driver_peer(slot.mac, node)) slot.used = false;
         break;
       }
       default:
         // Conflict/Revoked (or a record the engine dropped): dead records
         // keep no driver peer.
-        release_driver_peer(slot.mac, kInvalidNodeId);
-        slot.used = false;
+        if (release_driver_peer(slot.mac, kInvalidNodeId)) slot.used = false;
         break;
     }
   }
@@ -1772,19 +2008,21 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
   // telemetry attribution keys on it (02-telemetry §2.4); unresolved peers
   // keep generation 0, which reports honestly as "no binding epoch".
   for (auto& peer : peers_) {
-    if (!peer.used) {
+    if (!peer.used || !peer.autonomy) {
       continue;
     }
     BindingGeneration generation{0};
-    if (discovery_->binding_generation_of(peer.node, generation)) {
-      peer.binding = generation;
-    }
-    // The binding id rides next to the generation (issue #117): together
-    // they are the live mapping the reply-lease port rechecks. A rebind
-    // mints a fresh id, so a revived record can never collide with the
-    // retired identity it replaces.
     BindingId binding_id{kInvalidBindingId};
-    if (discovery_->binding_of(peer.node, binding_id)) {
+    if (discovery_->binding_generation_of(peer.node, generation) &&
+        discovery_->binding_of(peer.node, binding_id)) {
+      if (peer.binding_id != kInvalidBindingId &&
+          (peer.binding_id != binding_id || peer.binding != generation)) {
+        // Retire the old identity before publishing a new one. Its lease
+        // uses and physical callbacks must drain against the old record.
+        release_autonomy_peer(peer, now);
+        continue;
+      }
+      peer.binding = generation;
       peer.binding_id = binding_id;
     }
   }
@@ -1810,10 +2048,14 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
       }
       // The engine confirms this (node, MAC) again: any deferred release
       // is cancelled — the slot is live, not a retiree.
-      if (peer.release_pending) {
+      if (peer.release_pending && !peer.binding_retired) {
         portENTER_CRITICAL(&callback_lock_);
         peer.release_pending = false;
         portEXIT_CRITICAL(&callback_lock_);
+      }
+      if (peer.binding_retired) {
+        release_autonomy_peer(peer, now);
+        continue;
       }
       if (phase == NeighborPhase::Reachable && !peer.neighbor_added &&
           started_) {
@@ -1845,29 +2087,21 @@ void EspNowRuntime::reconcile_autonomy(const MonotonicMs now) noexcept {
       if (peer.neighbor_added) {
         (void)node_.remove_neighbor(peer.node, now);
       }
-      // The driver-release gate (issue #117): a live ExpectedReply use
-      // holds the registration — retire the entry so no new use can
-      // start, keep the slot's driver, and let the next sync retry.
-      // Without a live use the marker path below applies.
-      if (reply_leases_.holds_binding(peer.binding_id, peer.binding)) {
-        (void)reply_leases_.invalidate_binding(peer.binding_id);
+      const bool had_driver = peer.driver_registered;
+      const MacAddress mac = peer.mac;
+      const NodeId node = peer.node;
+      if (had_driver && !release_driver_peer(mac, node)) {
         portENTER_CRITICAL(&callback_lock_);
         peer.neighbor_added = false;
         peer.release_pending = true;
         portEXIT_CRITICAL(&callback_lock_);
         continue;
       }
-      const bool had_driver = peer.driver_registered;
-      const MacAddress mac = peer.mac;
-      const NodeId node = peer.node;
       portENTER_CRITICAL(&callback_lock_);
       peer.neighbor_added = false;
       peer.driver_registered = false;
       peer.release_pending = false;
       portEXIT_CRITICAL(&callback_lock_);
-      if (had_driver) {
-        release_driver_peer(mac, node);
-      }
       continue;
     }
     release_autonomy_peer(peer, now);

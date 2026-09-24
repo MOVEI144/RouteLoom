@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 namespace idf_stub {
 
@@ -14,6 +15,10 @@ std::int64_t now_us() noexcept;
 // esp_now_send / esp_now_del_peer call counts since reset.
 unsigned send_count() noexcept;
 unsigned del_peer_count() noexcept;
+void fail_del_peer(bool fail) noexcept;
+void fail_add_peer(bool fail) noexcept;
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
+               std::size_t length) noexcept;
 // Complete the most recent uncompleted esp_now_send through the
 // registered send callback, as the driver would. No-op when nothing is
 // outstanding or no callback is registered. Returns true when a

@@ -1480,16 +1480,12 @@ Status MeshNode::queue_end_receipt(const wire::Header& data,
                                    const TxnHandle txn,
                                    const MonotonicMs now_ms) noexcept {
   const auto route = routes_.best(data.origin);
-  if (!route.valid) {
-    // The sender's retry round will find the return route once discovery
-    // resolves (scoped profile only; no-op otherwise).
-    request_route_discovery(data.origin, now_ms);
-    return Status::error(StatusCode::NoRoute, "NO_RETURN_ROUTE");
-  }
   TxJob job{};
   job.form = JobForm::Plain;
   job.owner = JobOwner::Transit;
-  job.peer = route.next_hop;
+  // A missing route leaves the receipt queued under the transaction's
+  // deadline. Dispatch resolves the route again before sending it.
+  job.peer = route.valid ? route.next_hop : kInvalidNodeId;
   job.requires_hop_accept = true;
   job.max_attempts = config_.max_link_attempts;
   job.deadline_ms = now_ms + data.remaining_deadline_ms;
@@ -2080,6 +2076,14 @@ void MeshNode::dispatch_next(const MonotonicMs now_ms) noexcept {
     if (routed != kInvalidNodeId) {
       const auto live = routes_.best(routed);
       if (!live.valid || find_neighbor(live.next_hop) == nullptr) {
+        if (queued->form == JobForm::Plain &&
+            queued->plain.header.type == FrameType::EndReceipt &&
+            queued->peer == kInvalidNodeId) {
+          TxJob failed{};
+          scheduler_.take_selected(failed);
+          fail_job(failed, "NO_RETURN_ROUTE", now_ms);
+          continue;
+        }
         if (now_ms >= work_deadline(*queued)) {
           TxJob stale{};
           scheduler_.take_selected(stale);
@@ -2516,6 +2520,10 @@ void MeshNode::retry_or_fail(TxJob& job, const char* reason,
 // ---------------------------------------------------------------------------
 
 MeshNode::AdmissionReservation::~AdmissionReservation() noexcept {
+  rollback();
+}
+
+void MeshNode::AdmissionReservation::rollback() noexcept {
   if (committed || node == nullptr) return;
   // Reverse-order rollback of an uncommitted reservation. Records release
   // exactly; the lease use and the transaction slot recycle only while no
@@ -2553,6 +2561,7 @@ MeshNode::AdmissionReservation::~AdmissionReservation() noexcept {
     }
     use = kInvalidReplyLeaseToken;
   }
+  node = nullptr;
 }
 
 RxBinding MeshNode::capture_rx_binding(
@@ -3104,7 +3113,8 @@ void MeshNode::handle_hop_accept(const wire::PlainFrame& frame, const NodeId pee
     }
     if (!value.job.submitted_binding_set || !rx.valid) return false;
     return value.job.submitted_binding == rx.binding.id &&
-           value.job.submitted_generation == rx.binding.generation;
+           value.job.submitted_generation == rx.binding.generation &&
+           value.job.submitted_rx_context == rx.binding.rx_context_id;
   });
   if (awaiting == nullptr) {
     observer_.on_diagnostic("UNMATCHED_HOP_ACCEPT", peer, &key.key.id);
@@ -3197,6 +3207,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       AdmissionReservation reply{};
       if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 2, now_ms,
                             reply)) {
+        reply.rollback();
         emit_busy_or_drop(peer, frame.header,
                           static_cast<std::uint8_t>(
                               autonomy::BusyReason::QueueFull),
@@ -3204,6 +3215,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
         return;
       }
       if (!queue_hop_accept(frame.header, reply.txn, now_ms)) {
+        reply.rollback();
         emit_busy_or_drop(peer, frame.header,
                           static_cast<std::uint8_t>(
                               autonomy::BusyReason::QueueFull),
@@ -3271,12 +3283,14 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     AdmissionReservation reply{};
     if (!reserve_rx_reply(rx, /*needs_control_slot=*/true,
                           want_receipt ? 2 : 1, now_ms, reply)) {
+      reply.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
       return;
     }
     if (!queue_hop_accept(frame.header, reply.txn, now_ms)) {
+      reply.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3323,6 +3337,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       return;
     }
     if (scheduler_.free_slots() < 2 || !scheduler_.control_slot_available() ||
+        !scheduler_.origin_slot_available(config_.node) ||
         !txn_slot_available() ||
         !txn_deadline_for(frame.header.remaining_deadline_ms, now_ms,
                           txn_deadline)) {
@@ -3352,6 +3367,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     }
     res.use = use;
     if (!begin_txn(use, txn_deadline, res.txn)) {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3370,6 +3386,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
         applied = allocate_applied(
             frame.header, ByteView{plain.payload.data(), plain.payload_size}, now_ms);
         if (applied == nullptr) {
+          res.rollback();
           emit_busy_or_drop(peer, frame.header,
                             static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                             rx, now_ms);
@@ -3393,15 +3410,28 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
       // Bounded dedup exhaustion is a capacity failure: the sender gets a
       // pre-acceptance BUSY (when a reply slot is affordable) instead of a
       // silent black hole.
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
       return;
     }
     res.dedup = entry;
+    if (!queue_end_receipt(frame.header, res.txn, now_ms)) {
+      res.rollback();
+      emit_busy_or_drop(peer, frame.header,
+                        static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
+                        rx, now_ms);
+      return;
+    }
     if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
-      // Post-probe the enqueue cannot fail single-threaded; if it ever
-      // did, the reservation rolls the records back with it.
+      TxJob dropped{};
+      if (scheduler_.drop_one_if(
+              [&](const TxJob& job) { return job.txn == res.txn; },
+              dropped)) {
+        finish_txn_work(dropped.txn);
+      }
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3409,20 +3439,17 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
     }
     res.committed = true;
     entry->delivered = true;
+    if (!routes_.best(frame.header.origin).valid) {
+      request_route_discovery(frame.header.origin, now_ms);
+    }
     if (applied != nullptr) {
       // END_RECEIPT is SDK-level acceptance evidence first (01 §1.3); the
       // application verdict follows as its own APP_RESULT RESULT frame.
-      const auto receipt_status =
-          queue_end_receipt(frame.header, res.txn, now_ms);
-      if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
       dispatch_applied(frame.header, ByteView{plain.payload.data(), plain.payload_size},
                        *applied, applied_new, now_ms);
     } else {
       observer_.on_message(key, frame.header.origin,
                            ByteView{plain.payload.data(), plain.payload_size});
-      const auto receipt_status =
-          queue_end_receipt(frame.header, res.txn, now_ms);
-      if (!receipt_status) observer_.on_diagnostic(receipt_status.detail, peer, &frame.header.message);
     }
     return;
   }
@@ -3491,6 +3518,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   res.use = use;
   if (!begin_txn(use, txn_deadline, res.txn)) {
     saturating_inc(scheduler_.stats_.admissions_rejected);
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -3503,6 +3531,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
                                DedupPhase::Live, peer,
                                frame.header.remaining_deadline_ms, now_ms);
   if (entry == nullptr) {
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -3513,6 +3542,7 @@ void MeshNode::handle_data(const wire::LinkOpenedFrame& frame, const NodeId peer
   // reservation must never leave a false "accepted" ACK on the wire next to
   // the BUSY refusal.
   if (!queue_forward(frame, route.next_hop, res.txn, now_ms)) {
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -3595,6 +3625,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 1, now_ms,
                           reply) ||
         !queue_hop_accept(frame.header, reply.txn, now_ms)) {
+      reply.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3648,6 +3679,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     }
     res.use = use;
     if (!begin_txn(use, txn_deadline, res.txn)) {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3661,6 +3693,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
                                  DedupPhase::Resolved, peer,
                                  frame.header.remaining_deadline_ms, now_ms);
     if (entry == nullptr) {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3668,6 +3701,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
     }
     res.dedup = entry;
     if (!queue_hop_accept(frame.header, res.txn, now_ms)) {
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -3757,6 +3791,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   res.use = use;
   if (!begin_txn(use, txn_deadline, res.txn)) {
     saturating_inc(scheduler_.stats_.admissions_rejected);
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -3767,6 +3802,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
                                DedupPhase::Live, peer,
                                frame.header.remaining_deadline_ms, now_ms);
   if (entry == nullptr) {
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -3774,6 +3810,7 @@ void MeshNode::handle_routed(const wire::LinkOpenedFrame& frame, const NodeId pe
   }
   res.dedup = entry;
   if (!queue_forward(frame, route.next_hop, res.txn, now_ms)) {
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -3814,6 +3851,14 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
       ByteView{frame.protected_payload.data(), frame.header.payload_length}, payload);
   if (!status) {
     observer_.on_diagnostic("BUSY_PAYLOAD_REJECTED", peer, &frame.header.message);
+    return;
+  }
+  ReplyBinding current{};
+  if (!rx.valid || reply_peer_port_ == nullptr ||
+      !reply_peer_port_->snapshot_binding(peer, current) ||
+      current != rx.binding) {
+    ++busy_stats_.busy_unmatched;
+    observer_.on_diagnostic("BUSY_UNMATCHED", peer, &frame.header.message);
     return;
   }
   auto* neighbor = find_neighbor(peer);
@@ -3872,7 +3917,8 @@ void MeshNode::handle_busy(const wire::LinkOpenedFrame& frame, const NodeId peer
   auto binding_matches = [&](const TxJob& job) {
     if (!job.submitted_binding_set || !rx.valid) return false;
     return job.submitted_binding == rx.binding.id &&
-           job.submitted_generation == rx.binding.generation;
+           job.submitted_generation == rx.binding.generation &&
+           job.submitted_rx_context == rx.binding.rx_context_id;
   };
   auto* awaiting = awaiting_hop_.find([&](const AwaitingHop& value) {
     return value.job.peer == peer &&
@@ -3973,6 +4019,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     if (!reserve_rx_reply(rx, /*needs_control_slot=*/true, 1, now_ms,
                           reply) ||
         !queue_hop_accept(frame.header, reply.txn, now_ms)) {
+      reply.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -4038,6 +4085,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     res.use = use;
     if (!begin_txn(use, txn_deadline, res.txn)) {
       saturating_inc(scheduler_.stats_.admissions_rejected);
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -4052,6 +4100,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
     if (entry == nullptr) {
       // Was silently lossy — sdk-completion/02 §2.8: the refusal is counted +
       // diagnosed inside allocate_dedup and the relay gets an honest BUSY.
+      res.rollback();
       emit_busy_or_drop(peer, frame.header,
                         static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                         rx, now_ms);
@@ -4126,6 +4175,7 @@ void MeshNode::handle_end_receipt(const wire::LinkOpenedFrame& frame, const Node
   if (entry == nullptr) {
     // Was silently lossy — counted + diagnosed inside allocate_dedup; the
     // relay's bounded retry recovers, or an honest BUSY heads upstream.
+    res.rollback();
     emit_busy_or_drop(peer, frame.header,
                       static_cast<std::uint8_t>(autonomy::BusyReason::QueueFull),
                       rx, now_ms);
@@ -4957,6 +5007,16 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
     ++telemetry_event_drops_;
     return;
   }
+  // Context changes are an Owner binding change. Apply them before this RX
+  // can refresh telemetry, confirm a neighbor, admit work, or match feedback.
+  const RxBinding rx =
+      capture_rx_binding(peer, metadata, frame.header.link_epoch);
+  if (rx.valid &&
+      !reply_peer_port_->observe_authenticated_rx(rx.binding)) {
+    observer_.on_diagnostic("RX_CONTEXT_CHANGED", peer,
+                            &frame.header.message);
+    return;
+  }
   // Only authenticated, well-formed traffic from our network confirms a
   // resume: junk or foreign frames still count as work (ticket invalidation
   // above) but must never satisfy the saved-peer confirmation window.
@@ -5001,9 +5061,6 @@ void MeshNode::receive_impl(const NodeId peer, const ByteView encoded,
   // binding plus the link-authenticated epoch. Every admission and every
   // HOP_ACCEPT/BUSY match below rechecks it; invalid input earns no reply
   // and no dispatch.
-  const RxBinding rx =
-      capture_rx_binding(peer, metadata, frame.header.link_epoch);
-
   switch (frame.header.type) {
     case FrameType::Data:
       handle_data(frame, peer, rx, now_ms);

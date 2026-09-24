@@ -144,13 +144,14 @@ wire::EncodedFrame craft_frame(TestSecurity& cipher, const wire::Header& header,
 // A BUSY(20) frame `from` -> `to`. BUSY is link-scoped: never end-protected.
 wire::EncodedFrame craft_busy(TestSecurity& cipher, NodeId from, NodeId to,
                               autonomy::BusyPayload& payload,
-                              std::uint64_t wire_seq) {
+                              std::uint64_t wire_seq,
+                              std::uint32_t link_epoch = 1) {
   autonomy::EncodedPayload body{};
   CHECK_OK(autonomy::busy_encode(payload, body));
-  return craft_frame(cipher,
-                     mk_header(FrameType::Busy, from, to, from, to,
-                               MessageId{777, wire_seq}),
-                     body.view());
+  auto header = mk_header(FrameType::Busy, from, to, from, to,
+                          MessageId{777, wire_seq});
+  header.link_epoch = link_epoch;
+  return craft_frame(cipher, header, body.view());
 }
 
 autonomy::BusyPayload busy_for(const MessageId& data_id, NodeId origin,
@@ -175,7 +176,8 @@ autonomy::BusyPayload busy_for(const MessageId& data_id, NodeId origin,
 wire::EncodedFrame craft_accept(TestSecurity& cipher, NodeId from, NodeId to,
                                 FrameType accepted_type, NodeId origin,
                                 const MessageId& msg, std::uint8_t round,
-                                std::uint64_t wire_seq) {
+                                std::uint64_t wire_seq,
+                                std::uint32_t link_epoch = 1) {
   std::array<std::uint8_t, 32> body{};
   ByteWriter writer(MutableByteView{body.data(), body.size()});
   CHECK_OK(writer.write_u8(static_cast<std::uint8_t>(accepted_type)));
@@ -183,10 +185,10 @@ wire::EncodedFrame craft_accept(TestSecurity& cipher, NodeId from, NodeId to,
   CHECK_OK(writer.write_u32(msg.session));
   CHECK_OK(writer.write_u64(msg.sequence));
   CHECK_OK(writer.write_u8(round));
-  return craft_frame(cipher,
-                     mk_header(FrameType::HopAccept, from, to, from, to,
-                               MessageId{888, wire_seq}),
-                     ByteView{body.data(), writer.size()});
+  auto header = mk_header(FrameType::HopAccept, from, to, from, to,
+                          MessageId{888, wire_seq});
+  header.link_epoch = link_epoch;
+  return craft_frame(cipher, header, ByteView{body.data(), writer.size()});
 }
 
 // End-protected transit DATA `prev` -> `relay` bound for `destination` with a
@@ -221,6 +223,29 @@ void drive_tx(Harness& h, NodeId id, std::uint64_t seq, std::size_t expected,
 }
 
 // ------------------------------------------------------------- tests
+
+void test_feedback_requires_submitted_rx_context() {
+  Harness h;
+  MeshNode* sender = h.add(1);
+  (void)h.add(2);
+  h.link(1, 2);
+  MessageId message{};
+  CHECK_OK(sender->send(2, payload_view(), SendOptions{}, h.now, message));
+  drive_tx(h, 1, message.sequence, 1);
+  CHECK(sender->delivery(message).state == DeliveryState::WaitingForHopAccept);
+
+  auto busy = busy_for(message, 1, 0, 50, 1);
+  inject(h, 1, 2, craft_busy(h.cipher, 2, 1, busy, 1, 2));
+  CHECK(sender->congestion_stats().busy_unmatched == 1);
+  CHECK(sender->delivery(message).state == DeliveryState::WaitingForHopAccept);
+
+  inject(h, 1, 2,
+         craft_accept(h.cipher, 2, 1, FrameType::Data, 1, message, 0, 2, 2));
+  CHECK(sender->delivery(message).state == DeliveryState::WaitingForHopAccept);
+  inject(h, 1, 2,
+         craft_accept(h.cipher, 2, 1, FrameType::Data, 1, message, 0, 3));
+  CHECK(sender->delivery(message).state != DeliveryState::WaitingForHopAccept);
+}
 
 // D4-04: DRR fairness — weighted classes interleave by deficit; bulk is
 // charged by estimated TX cost and is delayed but never starved.
@@ -1549,6 +1574,7 @@ void test_awaiting_full_defers_without_attempts() {
 }  // namespace
 
 int main() {
+  test_feedback_requires_submitted_rx_context();
   test_drr_fairness();
   test_control_lane();
   test_full_control_lane_never_commits_a_forward();

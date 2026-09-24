@@ -220,6 +220,18 @@ void capi_attach_reply_port(rl_context_t* context, CApiReplyPort* port) {
 rl_status_code_t capi_radio_send(void*, rl_node_id_t, uint64_t, const uint8_t*, size_t) {
   return RL_STATUS_OK;
 }
+struct CApiDetachAttempt {
+  rl_context_t* context{nullptr};
+  rl_status_code_t result{RL_STATUS_OK};
+  bool called{false};
+};
+rl_status_code_t capi_radio_send_try_detach(void* user, rl_node_id_t, uint64_t,
+                                            const uint8_t*, size_t) {
+  auto* attempt = static_cast<CApiDetachAttempt*>(user);
+  attempt->called = true;
+  attempt->result = rl_attach_reply_peer(attempt->context, nullptr);
+  return RL_STATUS_OK;
+}
 rl_status_code_t capi_radio_recover(void*) { return RL_STATUS_OK; }
 bool capi_security_ready(void*) { return true; }
 rl_status_code_t capi_next_counter(void* user, const rl_security_context_t*, uint64_t* counter) {
@@ -275,6 +287,40 @@ void test_c_api_lifecycle() {
   CHECK(rl_send(context, 8, payload, sizeof(payload), &options, 1, &id) == RL_STATUS_OK);
   rl_poll(context, 1);
   rl_on_radio_tx_result(context, 1, true, 2);
+  rl_deinit(context);
+}
+
+void test_c_api_reply_port_detach_reentrant_busy() {
+  rl_node_config_t config{};
+  rl_node_config_init(&config);
+  config.network = 1;
+  config.node = 7;
+  config.message_session = 77;
+  CApiState state{};
+  CApiDetachAttempt attempt{};
+  const rl_radio_vtable_t radio{&attempt, capi_radio_send_try_detach,
+                                 capi_radio_recover};
+  const rl_security_vtable_t security{&state, capi_security_ready,
+                                       capi_next_counter, capi_seal, capi_open};
+  const rl_observer_vtable_t observer{};
+  std::vector<std::max_align_t> storage(
+      (rl_context_size() + sizeof(std::max_align_t) - 1) / sizeof(std::max_align_t));
+  rl_context_t* context = nullptr;
+  CHECK(rl_init(storage.data(), storage.size() * sizeof(std::max_align_t), &config,
+                &radio, &security, &observer, &context) == RL_STATUS_OK);
+  attempt.context = context;
+  CApiReplyPort reply_port{};
+  capi_attach_reply_port(context, &reply_port);
+  CHECK(rl_start(context, 0) == RL_STATUS_OK);
+  CHECK(rl_add_neighbor(context, 8, 1, 0) == RL_STATUS_OK);
+  rl_send_options_t options{};
+  rl_send_options_init(&options);
+  rl_message_id_t id{};
+  const uint8_t payload[] = {1};
+  CHECK(rl_send(context, 8, payload, sizeof(payload), &options, 1, &id) == RL_STATUS_OK);
+  rl_poll(context, 1);
+  CHECK(attempt.called);
+  CHECK(attempt.result == RL_STATUS_BUSY);
   rl_deinit(context);
 }
 
@@ -1076,6 +1122,7 @@ int main() {
   test_deadline_resume();
   test_single_authority();
   test_c_api_lifecycle();
+  test_c_api_reply_port_detach_reentrant_busy();
   test_c_api_route_profile();
   test_c_api_group();
   test_byte_io();

@@ -463,6 +463,7 @@ class NeighborDiscovery {
   // epoch that keys telemetry attribution (02-telemetry §2.4). Same
   // resolvability bar as binding_of; false when no live binding exists.
   bool binding_generation_of(NodeId peer, BindingGeneration& out) const noexcept;
+  bool topology_pinned(NodeId peer) const noexcept;
   // Owner-side lease sync: resolve the verified NodeId recorded for a radio
   // MAC (bound neighbor records only — candidates are unverified and never
   // resolve). False when the MAC has no neighbor record.

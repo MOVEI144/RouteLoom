@@ -249,6 +249,15 @@ void inject(Harness& h, NodeId receiver, NodeId peer,
                                    h.now);
 }
 
+void drive_terminal_receipt(Harness& h, NodeId terminal, NodeId source) {
+  for (int i = 0; i < 40 && h.at(terminal)->txn_in_flight() != 0; ++i) {
+    h.step(terminal);
+    h.step(source);
+    h.now += 5;
+  }
+  CHECK(h.at(terminal)->txn_in_flight() == 0);
+}
+
 // Drive a transit exchange P -> relay -> downstream to completion: steps the
 // relay until the forward is on the air to `downstream` (queued HOP_ACCEPTs
 // to phantom upstreams drain first — control lane beats data lane), then
@@ -325,8 +334,10 @@ void test_birth_phases() {
   MeshNode* r = h.add(1);
   (void)h.add(2);            // X: live downstream terminal
   (void)h.add(3);            // P: real upstream — ACKs to it land as sights
+  (void)h.add(101);          // source for the terminal DATA/receipt exchange
   h.link(1, 2);
   h.link(1, 3);
+  h.link(1, 101);
   const NodeId p = 3;
 
   // --- transit birth (Live): counters separate the classes.
@@ -352,7 +363,7 @@ void test_birth_phases() {
 
   // --- terminal birth: Terminal pin + exactly one on_message.
   const NodeId p2 = 101;
-  inject(h, 1, p2, craft_terminal(h.cipher, p2, 1, 600, 7));
+  inject(h, 1, p2, craft_terminal(h.cipher, p2, 1, p2, 7));
   CHECK(r->dedup_stats().admitted_terminal == 1);
   CHECK(h.observer(1)->messages.size() == 1);
   h.step(1);
@@ -391,7 +402,9 @@ void test_eviction_order() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);  // live work never times out
   (void)h.add(2);                                  // X: live downstream
+  (void)h.add(50);
   h.link(1, 2);
+  h.link(1, 50);
 
   // 4 Resolved records (completed R -> X exchanges from phantom upstreams).
   // Long deadlines: retention must outlast the evidence fills' window rolls.
@@ -417,13 +430,11 @@ void test_eviction_order() {
   CHECK(r->dedup_stats().admitted_transit == 16);
 
   // kCap - 16 terminal pins (inside the pin bound) -> pool full with zero
-  // live transactions: every fill above already closed its own. (Each pin's
-  // END_RECEIPT skips for want of a return route to its phantom origin, so
-  // the scheduler never clogs.)
+  // live transactions: each receipt exchange is settled before the next fill.
   static_assert(kCap - 16 <= kPins, "fill stays inside the pin bound");
   for (std::uint64_t i = 0; i < kCap - 16; ++i) {
-    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
-    h.step(1);
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100 + i));
+    drive_terminal_receipt(h, 1, 50);
   }
   const DedupStats& stats = r->dedup_stats();
   CHECK(stats.admitted_terminal + stats.admitted_transit == kCap);
@@ -468,13 +479,15 @@ void test_full_pool_honest_refusal() {
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
   (void)h.add(2);   // X: live downstream
   (void)h.add(3);   // Q: busy-capable upstream
+  (void)h.add(50);
   h.link(1, 2);
   h.link(1, 3);
+  h.link(1, 50);
   r->set_peer_busy_capable(3, true);
 
   for (std::uint64_t i = 0; i < kPins; ++i) {
-    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
-    h.step(1);
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100 + i));
+    drive_terminal_receipt(h, 1, 50);
   }
   // 8 parked Lives hold all 8 transactions (two shared phantom upstreams
   // stay inside the 3-binding budget).
@@ -512,8 +525,8 @@ void test_full_pool_honest_refusal() {
   // same key on a NEW round is still suppressed by the round-agnostic pin.
   // (The duplicate's re-ACK is unaffordable too, so it drops silently.)
   const std::size_t msgs_before = h.observer(1)->messages.size();
-  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000, 100));
-  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000, 100, /*round=*/1));
+  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100));
+  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100, /*round=*/1));
   CHECK(h.observer(1)->messages.size() == msgs_before);
   CHECK(r->dedup_stats().admitted_terminal == kPins);
 }
@@ -525,16 +538,18 @@ void test_terminal_reserve() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
   (void)h.add(2);
+  (void)h.add(50);
   h.link(1, 2);
+  h.link(1, 50);
 
   for (std::uint64_t i = 0; i < kPins; ++i) {
-    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
-    h.step(1);
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100 + i));
+    drive_terminal_receipt(h, 1, 50);
   }
   CHECK(r->dedup_stats().admitted_terminal == kPins);
 
   // Terminal #kPins+1 is refused by the reserve, not by pool capacity.
-  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9999, 900));
+  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 900));
   CHECK(r->dedup_stats().refused_terminal_reserve == 1);
   CHECK(r->dedup_stats().admitted_terminal == kPins);
   CHECK(h.observer(1)->has_diag("DEDUP_TERMINAL_RESERVE"));
@@ -559,7 +574,7 @@ void test_terminal_reserve() {
   // reserve still refuses terminals (pins are maxed, pool has room).
   h.step(2);  // X dispatches its queued HOP_ACCEPT for a parked forward
   h.step(1);  // the accept lands: one forward resolves, its slot frees
-  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9998, 901));
+  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 901));
   CHECK(r->dedup_stats().refused_terminal_reserve == 2);
 }
 
@@ -571,7 +586,9 @@ void test_terminal_admits_over_resolved_crowd() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
   (void)h.add(2);
+  (void)h.add(50);
   h.link(1, 2);
+  h.link(1, 50);
 
   // Resolved records from distinct phantom upstreams (the per-upstream bound
   // never fires), then pins up to a full pool.
@@ -582,8 +599,8 @@ void test_terminal_admits_over_resolved_crowd() {
     drive_resolved(h, 1, 2, 1 + i);
   }
   for (std::uint64_t i = 0; i < kCap - kResolved; ++i) {
-    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
-    h.step(1);
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100 + i));
+    drive_terminal_receipt(h, 1, 50);
   }
   CHECK(r->dedup_resident() == kCap);
   CHECK(r->dedup_stats().refused_terminal_reserve == 0);
@@ -591,7 +608,7 @@ void test_terminal_admits_over_resolved_crowd() {
   // Pool full, pins below their bound: the next terminal evicts a Resolved
   // record (counted + diagnosed) and is delivered.
   const std::size_t msgs = h.observer(1)->messages.size();
-  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9900, 900));
+  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 900));
   CHECK(r->dedup_stats().refused_terminal_reserve == 0);
   CHECK(r->dedup_stats().refused_pool_full == 0);
   CHECK(r->dedup_stats().evicted_resolved == 1);
@@ -602,11 +619,11 @@ void test_terminal_admits_over_resolved_crowd() {
   // next terminal is refused by the reserve although Resolved records remain.
   const std::size_t pins = kCap - kResolved + 1;
   for (std::uint64_t i = 0; i < kPins - pins; ++i) {
-    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9901 + i, 901 + i));
-    h.step(1);
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 901 + i));
+    drive_terminal_receipt(h, 1, 50);
   }
   CHECK(r->dedup_stats().admitted_terminal == kPins);
-  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9990, 990));
+  inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 990));
   CHECK(r->dedup_stats().refused_terminal_reserve == 1);
   CHECK(r->dedup_stats().admitted_terminal == kPins);
 }
@@ -771,8 +788,10 @@ void test_evicted_resolved_reforward() {
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
   MeshNode* x = h.add(2);   // downstream terminal for the tracked exchanges
   (void)h.add(4);           // parking downstream for filler forwards
+  (void)h.add(50);
   h.link(1, 2);
   h.link(1, 4);
+  h.link(1, 50);
   const NodeId p = 100;
 
   // Two Resolved records up front: R1 with the EARLIER expiry (evicted
@@ -795,8 +814,8 @@ void test_evicted_resolved_reforward() {
   constexpr std::size_t kLive = 2;
   constexpr std::size_t kLateResolved = kCap - kPins - kLive - 2;
   for (std::uint64_t i = 0; i < kPins; ++i) {
-    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i));
-    h.step(1);
+    inject(h, 1, 50, craft_terminal(h.cipher, 50, 1, 50, 100 + i));
+    drive_terminal_receipt(h, 1, 50);
   }
   for (std::uint64_t i = 0; i < kLive; ++i) {
     inject(h, 1, 130, craft_transit(h.cipher, 130, 1, 620 + i, 4, 31 + i));
@@ -846,7 +865,9 @@ void test_retention_bounds() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
   (void)h.add(2);
+  (void)h.add(100);
   h.link(1, 2);
+  h.link(1, 100);
   const NodeId p = 100;
 
   // --- transit slack: born-Live record with a 5 s deadline expires at
@@ -870,7 +891,7 @@ void test_retention_bounds() {
   // (No mid-life dup here: a re-received terminal frame REFRESHES retention
   // toward the first-seen hard cap per §2.6 — that bound is proven below.)
   h.now = 20000;
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 600, 7));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 7));
   CHECK(r->dedup_stats().admitted_terminal == 1);
   h.step(1);
   CHECK(h.observer(1)->messages.size() == 1);
@@ -881,7 +902,7 @@ void test_retention_bounds() {
   h.step(1);
   CHECK(r->dedup_stats().expired == e1 + 1);      // swept at the boundary
   h.now = 55001;
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 600, 7));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 7));
   CHECK(r->dedup_stats().admitted_terminal == 2);
   // Retention honestly ended: a post-expiry arrival is a new delivery.
   CHECK(h.observer(1)->messages.size() == 2);
@@ -890,15 +911,15 @@ void test_retention_bounds() {
   // (expiry T+35000); a new-round re-receipt at T+34000 refreshes to
   // min(T+60000, 34000+5000+30000) = T+60000 — never past the cap.
   h.now = 100000;
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 610, 8));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 8));
   CHECK(r->dedup_stats().admitted_terminal == 3);
   h.step(1);
   const std::size_t msgs_before = h.observer(1)->messages.size();
   h.now = 134000;  // T+34000
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 610, 8, /*round=*/1));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 8, /*round=*/1));
   CHECK(h.observer(1)->messages.size() == msgs_before);  // suppressed + refreshed
   h.now = 159999;  // T+59999 — inside the refreshed cap
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 610, 8, /*round=*/1));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 8, /*round=*/1));
   CHECK(h.observer(1)->messages.size() == msgs_before);
   const std::uint64_t e2 = r->dedup_stats().expired;
   h.now = 160000;  // T+60000 — the first-seen hard cap
@@ -906,7 +927,7 @@ void test_retention_bounds() {
   CHECK(r->dedup_stats().expired > e2);
   // Without the cap the refresh would have held the record to T+69000 —
   // expiry at exactly T+60000 proves duplicates never extend retention.
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 610, 8, /*round=*/1));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 8, /*round=*/1));
   CHECK(r->dedup_stats().admitted_terminal == 4);
   CHECK(h.observer(1)->messages.size() == msgs_before + 1);
 }
@@ -918,7 +939,9 @@ void test_expired_reclaim_beats_eviction() {
   Harness h;
   MeshNode* r = h.add(1, /*hop_timeout=*/60000);
   (void)h.add(2);
+  (void)h.add(50);
   h.link(1, 2);
+  h.link(1, 50);
 
   // Pool composition (pins stay under kPins): 8 Resolved records with a
   // 500 ms deadline (expiry ~= first_seen + 5500), then kCap-16 terminal
@@ -934,8 +957,8 @@ void test_expired_reclaim_beats_eviction() {
   static_assert(kCap - 16 <= kPins, "fill stays inside the pin bound");
   for (std::uint64_t i = 0; i < kCap - 16; ++i) {
     inject(h, 1, 50,
-           craft_terminal(h.cipher, 50, 1, 9000 + i, 100 + i, 0, 500));
-    h.step(1);
+           craft_terminal(h.cipher, 50, 1, 50, 100 + i, 0, 500));
+    drive_terminal_receipt(h, 1, 50);
   }
   for (std::uint64_t i = 0; i < 8; ++i) {
     const NodeId p = 110 + static_cast<NodeId>(i);
@@ -1176,11 +1199,13 @@ void test_terminal_flood_honest_saturation() {
   Harness h;
   MeshNode* t = h.add(1);
   const NodeId p = 50;
+  (void)h.add(p);
+  h.link(1, p);
 
   constexpr std::uint64_t kFlood = kPins + 14;
   for (std::uint64_t i = 0; i < kFlood; ++i) {
-    inject(h, 1, p, craft_terminal(h.cipher, p, 1, 9000 + i, 100 + i));
-    h.step(1);
+    inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 100 + i));
+    drive_terminal_receipt(h, 1, p);
   }
   const DedupStats& s = t->dedup_stats();
   CHECK(s.admitted_terminal == kPins);
@@ -1189,16 +1214,16 @@ void test_terminal_flood_honest_saturation() {
 
   // Re-received copies of ADMITTED frames still suppress at capacity — on the
   // original round and on a fresh round alike.
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 9000, 100));
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 9000, 100, /*round=*/1));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 100));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 100, /*round=*/1));
   CHECK(h.observer(1)->messages.size() == kPins);
   CHECK(s.admitted_terminal == kPins);
   CHECK(s.refused_terminal_reserve == kFlood - kPins);  // dups never consume
 
   // Re-received copies of REFUSED frames are refused again — each attempt is
   // an accounted admission decision (bounded retry pressure, never silent).
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 9000 + kPins + 4, 100 + kPins + 4));
-  inject(h, 1, p, craft_terminal(h.cipher, p, 1, 9000 + kPins + 4, 100 + kPins + 4));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 100 + kPins + 4));
+  inject(h, 1, p, craft_terminal(h.cipher, p, 1, p, 100 + kPins + 4));
   CHECK(s.refused_terminal_reserve == kFlood - kPins + 2);
   CHECK(s.admitted_terminal == kPins);
   CHECK(h.observer(1)->messages.size() == kPins);

@@ -124,6 +124,15 @@ class SessionSecurity final : public SecurityProvider, public SessionInstaller {
     epoch = it->second.tx_id;
     return Status::success();
   }
+  Status current_rx_epoch(const SecurityScope scope, const NodeId peer,
+                          std::uint32_t& epoch) const noexcept override {
+    const auto it = contexts.find({static_cast<int>(scope), peer});
+    if (it == contexts.end() || !context_usable(it->second.state)) {
+      return Status::error(StatusCode::AuthRequired, "TEST_NO_RX_SESSION");
+    }
+    epoch = it->second.rx_id;
+    return Status::success();
+  }
   ContextState context_state(const SecurityScope scope, const NodeId peer) const noexcept override {
     if (refuse_while_ready) return ContextState::Ready;
     const auto it = contexts.find({static_cast<int>(scope), peer});
@@ -612,6 +621,8 @@ void test_context_keys_checks() {
 
 void establish_all(Pair<SessionSecurity>& pair, const std::uint32_t base) {
   establish(pair.sec_a, 1, pair.sec_b, 2, SecurityScope::Link, base + 0x11, base + 0x21);
+  pair.port_a.set_rx_context(2, base + 0x11);
+  pair.port_b.set_rx_context(1, base + 0x21);
   establish(pair.sec_a, 1, pair.sec_b, 2, SecurityScope::EndToEnd, base + 0x12, base + 0x22);
 }
 

@@ -217,11 +217,8 @@ inline routeloom::Status SimRadio::send(routeloom::NodeId peer, std::uint64_t to
 // recheck before every acquire/send, driver pin before success — so node
 // admission tests exercise the same enforcement shape host-side.
 //
-// Static single-context RX identity: peers legitimately run different boot
-// epochs, so the captured header epoch is a membership check (nonzero
-// belongs to the static context), while the table binding carries this
-// Owner's own static context id. A session provider would pass distinct
-// context ids through instead.
+// The test world supplies each peer's actual receive context. Peer boot
+// epochs and receiver-chosen session ids can differ from the local TX epoch.
 class SimReplyPort final : public routeloom::ReplyPeerPort {
  public:
   SimReplyPort(routeloom::RadioPort& radio, routeloom::NodeId owner,
@@ -230,6 +227,17 @@ class SimReplyPort final : public routeloom::ReplyPeerPort {
         owner_(owner),
         rx_context_(rx_context != 0 ? rx_context : 1) {}
 
+  void set_rx_context(routeloom::NodeId peer,
+                      std::uint32_t context) noexcept {
+    if (context == 0) return;
+    if (directory_.find(peer) == directory_.end()) (void)mapping(peer);
+    auto& live = directory_.at(peer);
+    if (live.rx_context_id != context) {
+      (void)leases_.invalidate_binding(live.id);
+      live.rx_context_id = context;
+    }
+  }
+
   routeloom::Status acquire(routeloom::ReplyBinding captured,
                             routeloom::MonotonicMs deadline,
                             routeloom::MonotonicMs now,
@@ -237,11 +245,10 @@ class SimReplyPort final : public routeloom::ReplyPeerPort {
     const routeloom::ReplyBinding live = mapping(captured.peer);
     if (live.peer != captured.peer || live.id != captured.id ||
         live.generation != captured.generation ||
-        captured.rx_context_id == 0) {
+        live.rx_context_id != captured.rx_context_id) {
       return routeloom::Status::error(routeloom::StatusCode::Conflict,
                                       "sim mapping changed");
     }
-    captured.rx_context_id = rx_context_;
     pinned_.insert(captured.peer);
     const routeloom::Status status = leases_.acquire(captured, deadline, now, out);
     if (!status) pinned_.erase(captured.peer);
@@ -270,6 +277,7 @@ class SimReplyPort final : public routeloom::ReplyPeerPort {
     if (!status) return status;
     const routeloom::ReplyBinding live = mapping(bound.peer);
     if (live.id != bound.id || live.generation != bound.generation ||
+        live.rx_context_id != bound.rx_context_id ||
         pinned_.count(bound.peer) == 0) {
       return routeloom::Status::error(routeloom::StatusCode::Conflict,
                                       "sim mapping changed");
@@ -297,7 +305,7 @@ class SimReplyPort final : public routeloom::ReplyPeerPort {
                                       "sim peer stale");
     }
     const routeloom::ReplyBinding live = mapping(binding.peer);
-    if (live.id != binding.id || live.generation != binding.generation) {
+    if (live != binding) {
       return routeloom::Status::error(routeloom::StatusCode::Conflict,
                                       "sim mapping changed");
     }
@@ -562,6 +570,7 @@ struct SimWorld {
   std::map<routeloom::NodeId, std::unique_ptr<SimRadio>> radios;
   std::map<routeloom::NodeId, std::unique_ptr<SimReplyPort>> reply_ports;
   std::map<routeloom::NodeId, std::unique_ptr<routeloom::MeshNode>> nodes;
+  std::map<routeloom::NodeId, std::uint32_t> peer_link_epochs;
   routeloom::MonotonicMs now{0};
   // Epochs stamped on nodes added afterwards (Wire v2: 32-bit).
   std::uint32_t link_epoch{1};
@@ -588,6 +597,11 @@ struct SimWorld {
     radios[id] = std::make_unique<SimRadio>(net, id);
     reply_ports[id] =
         std::make_unique<SimReplyPort>(*radios[id], id, config.link_epoch);
+    for (const auto& [other, epoch] : peer_link_epochs) {
+      reply_ports[id]->set_rx_context(other, epoch);
+      reply_ports[other]->set_rx_context(id, config.link_epoch);
+    }
+    peer_link_epochs[id] = config.link_epoch;
     nodes[id] = std::make_unique<routeloom::MeshNode>(config, *radios[id], *security[id],
                                                     *observers[id]);
     nodes[id]->set_reply_peer_port(reply_ports[id].get());
@@ -606,6 +620,7 @@ struct SimWorld {
     radios.erase(id);
     security.erase(id);
     observers.erase(id);
+    peer_link_epochs.erase(id);
   }
 
   void link(routeloom::NodeId a, routeloom::NodeId b, routeloom::RouteMetric metric_ab,

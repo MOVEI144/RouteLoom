@@ -23,7 +23,10 @@ namespace {
 std::int64_t g_now_us = 0;
 unsigned g_send_count = 0;
 unsigned g_del_peer_count = 0;
+bool g_fail_del_peer = false;
+bool g_fail_add_peer = false;
 esp_now_send_cb_t g_send_cb = nullptr;
+esp_now_recv_cb_t g_recv_cb = nullptr;
 std::uint8_t g_last_dest[6] = {0};
 bool g_send_outstanding = false;
 
@@ -43,7 +46,10 @@ void reset() noexcept {
   g_now_us = 0;
   g_send_count = 0;
   g_del_peer_count = 0;
+  g_fail_del_peer = false;
+  g_fail_add_peer = false;
   g_send_cb = nullptr;
+  g_recv_cb = nullptr;
   g_send_outstanding = false;
 }
 
@@ -56,6 +62,23 @@ void advance_ms(const std::uint32_t ms) noexcept {
 std::int64_t now_us() noexcept { return g_now_us; }
 unsigned send_count() noexcept { return g_send_count; }
 unsigned del_peer_count() noexcept { return g_del_peer_count; }
+void fail_del_peer(const bool fail) noexcept { g_fail_del_peer = fail; }
+void fail_add_peer(const bool fail) noexcept { g_fail_add_peer = fail; }
+
+bool inject_rx(const std::uint8_t source[6], const std::uint8_t* frame,
+               const std::size_t length) noexcept {
+  if (g_recv_cb == nullptr || source == nullptr || frame == nullptr) return false;
+  std::uint8_t destination[6]{};
+  wifi_pkt_rx_ctrl_t ctrl{};
+  ctrl.rssi = -45;
+  ctrl.channel = 6;
+  esp_now_recv_info_t info{};
+  info.src_addr = const_cast<std::uint8_t*>(source);
+  info.des_addr = destination;
+  info.rx_ctrl = &ctrl;
+  g_recv_cb(&info, frame, static_cast<int>(length));
+  return true;
+}
 
 bool complete_send(const bool success) noexcept {
   if (!g_send_outstanding || g_send_cb == nullptr) return false;
@@ -165,11 +188,14 @@ esp_err_t esp_now_init(void) { return ESP_OK; }
 esp_err_t esp_now_deinit(void) { return ESP_OK; }
 
 esp_err_t esp_now_register_recv_cb(const esp_now_recv_cb_t cb) {
-  (void)cb;
+  g_recv_cb = cb;
   return ESP_OK;
 }
 
-esp_err_t esp_now_unregister_recv_cb(void) { return ESP_OK; }
+esp_err_t esp_now_unregister_recv_cb(void) {
+  g_recv_cb = nullptr;
+  return ESP_OK;
+}
 
 esp_err_t esp_now_register_send_cb(const esp_now_send_cb_t cb) {
   g_send_cb = cb;
@@ -183,13 +209,13 @@ esp_err_t esp_now_unregister_send_cb(void) {
 
 esp_err_t esp_now_add_peer(const esp_now_peer_info_t* peer) {
   (void)peer;
-  return ESP_OK;
+  return g_fail_add_peer ? ESP_FAIL : ESP_OK;
 }
 
 esp_err_t esp_now_del_peer(const uint8_t* peer_addr) {
   (void)peer_addr;
   ++g_del_peer_count;
-  return ESP_OK;
+  return g_fail_del_peer ? ESP_FAIL : ESP_OK;
 }
 
 esp_err_t esp_now_send(const uint8_t* peer_addr, const uint8_t* data,

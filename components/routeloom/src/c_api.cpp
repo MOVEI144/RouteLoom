@@ -549,8 +549,9 @@ rl_status_code_t rl_attach_reply_peer(rl_context_t* context,
                                       const rl_reply_peer_vtable_t* vtable) {
   if (context == nullptr) return RL_STATUS_INVALID_ARGUMENT;
   if (vtable == nullptr) {
+    const Status status = context->node.set_reply_peer_port(nullptr);
+    if (!status) return to_c(status.code);
     context->reply_peer.clear();
-    context->node.set_reply_peer_port(nullptr);
     return RL_STATUS_OK;
   }
   // The struct is versioned precisely so a short/foreign caller is refused
@@ -558,8 +559,9 @@ rl_status_code_t rl_attach_reply_peer(rl_context_t* context,
   if (vtable->struct_size < sizeof(*vtable) || vtable->version != RL_REPLY_PEER_VERSION) {
     return RL_STATUS_INVALID_ARGUMENT;
   }
+  const Status status = context->node.set_reply_peer_port(&context->reply_peer);
+  if (!status) return to_c(status.code);
   context->reply_peer.install(*vtable);
-  context->node.set_reply_peer_port(&context->reply_peer);
   return RL_STATUS_OK;
 }
 

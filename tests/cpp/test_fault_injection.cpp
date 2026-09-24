@@ -285,6 +285,9 @@ wire::EncodedFrame craft_frame(TestSecurity& cipher, const wire::Header& header,
 wire::EncodedFrame craft_data(TestSecurity& cipher, NodeId prev, NodeId node,
                               NodeId origin, NodeId destination,
                               std::uint64_t seq, std::uint32_t deadline_ms) {
+  // Terminal capacity probes use a reachable immediate source. Their
+  // MessageIds, rather than synthetic origins, distinguish the records.
+  if (destination == node) origin = prev;
   return craft_frame(
       cipher,
       mk_header(FrameType::Data, origin, destination, prev, node,
@@ -1054,12 +1057,13 @@ void test_dedup_upstream_cap() {
   constexpr std::uint64_t kUpCap = kDedupPerUpstreamMax;
   for (std::uint64_t i = 1; i <= kUpCap; ++i) {
     inject(world, 2, 3,
-           craft_data(*world.security[3], 3, 2, /*origin=*/700 + i,
+           craft_data(*world.security[3], 3, 2, /*origin=*/3,
                       /*dest=*/4, /*seq=*/i, /*deadline_ms=*/30000),
            world.now);
     world.run(120);  // dispatch + hop accept -> Resolved (still counted)
   }
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kUpCap);
+  // Each DATA also returns an END_RECEIPT through this relay.
+  CHECK(world.at(2)->dedup_stats().admitted_transit == 2 * kUpCap);
   CHECK(world.obs(4)->messages.size() == kUpCap);
 
   // Past the bound: the upstream's earliest-expiry Resolved record is
@@ -1067,15 +1071,15 @@ void test_dedup_upstream_cap() {
   // forwarded — no refusal, no BUSY.
   const std::uint64_t busy_before = world.at(2)->congestion_stats().busy_sent;
   inject(world, 2, 3,
-         craft_data(*world.security[3], 3, 2, 800, 4, 100, 30000), world.now);
+         craft_data(*world.security[3], 3, 2, 3, 4, 100, 30000), world.now);
   world.run(120);
   CHECK(world.at(2)->dedup_stats().refused_upstream_cap == 0);
-  CHECK(world.at(2)->dedup_stats().evicted_resolved == 1);
+  CHECK(world.at(2)->dedup_stats().evicted_resolved == 2);
   CHECK(world.obs(2)->has_diag("DEDUP_EVICTED_RESOLVED"));
   CHECK(world.at(2)->congestion_stats().busy_sent == busy_before);
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kUpCap + 1);
+  CHECK(world.at(2)->dedup_stats().admitted_transit == 2 * (kUpCap + 1));
   CHECK(world.obs(4)->messages.size() == kUpCap + 1);
-  CHECK(world.at(2)->dedup_resident() == kUpCap);  // the bound still holds
+  CHECK(world.at(2)->dedup_resident() == 2 * kUpCap);
 
   // A different upstream peer is unaffected — the bound is per-sender-scope.
   world.add(5);
@@ -1083,8 +1087,8 @@ void test_dedup_upstream_cap() {
   world.run(300);
   inject(world, 2, 5,
          craft_data(*world.security[5], 5, 2, 801, 4, 101, 30000), world.now);
-  CHECK(world.at(2)->dedup_stats().admitted_transit == kUpCap + 2);
-  CHECK(world.at(2)->dedup_stats().evicted_resolved == 1);
+  CHECK(world.at(2)->dedup_stats().admitted_transit == 2 * (kUpCap + 1) + 1);
+  CHECK(world.at(2)->dedup_stats().evicted_resolved == 2);
 }
 
 // Eviction order under a full pool: an already-expired record is reclaimed

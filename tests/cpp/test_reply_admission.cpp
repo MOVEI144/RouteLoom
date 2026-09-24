@@ -194,6 +194,24 @@ void inject_v2(Harness& h, NodeId receiver, NodeId peer,
   h.at(receiver)->on_radio_receive(peer, frame.view(), meta, h.now);
 }
 
+void test_terminal_reserves_receipt_without_route() {
+  Harness h;
+  h.add(1);
+  h.add(2);
+  h.link(1, 2);
+  const auto frame = craft_frame(
+      h.cipher,
+      mk_header(FrameType::Data, 3, 2, 1, 2, MessageId{42, 900},
+                wire::kFlagEndProtected),
+      payload_view());
+  inject_v2(h, 2, 1, frame);
+  CHECK(h.observer(2)->messages.size() == 1);
+  CHECK(h.at(2)->txn_in_flight() == 1);
+  CHECK(h.at(2)->congestion_stats().queued >= 2);
+  h.run(50);
+  CHECK(h.at(2)->txn_in_flight() == 0);
+}
+
 // block_send is a plain function pointer: the recording hook stages through
 // a file-local buffer.
 std::vector<std::uint8_t>& held_frame() {
@@ -358,6 +376,7 @@ void test_wire_budget_survives_transaction_clamp() {
 struct ReentrantSendObserver final : NodeObserver {
   MeshNode* node{nullptr};
   Status send_status{Status::success()};
+  Status rrs_status{Status::success()};
   std::size_t free_before{0};
   std::size_t free_after{0};
   std::size_t messages{0};
@@ -367,6 +386,7 @@ struct ReentrantSendObserver final : NodeObserver {
     SendOptions options{};
     MessageId id{};
     send_status = node->send(9, payload_view(), options, 0, id);
+    rrs_status = node->set_rrs_sink(nullptr);
     free_after = node->tx_free_slots();
   }
   void on_delivery(const DeliveryResult&) noexcept override {}
@@ -408,6 +428,7 @@ void test_reentrant_send_is_busy() {
   node.on_radio_receive(1, terminal.view(), meta, 0);
   CHECK(observer.messages == 1);
   CHECK(observer.send_status.code == StatusCode::Busy);
+  CHECK(observer.rrs_status.code == StatusCode::Busy);
   CHECK(observer.free_after == observer.free_before);
 }
 
@@ -519,6 +540,51 @@ void test_fourth_binding_refused_without_side_effects() {
   CHECK(relay->component_events_pending() == 0);
 }
 
+// A failed terminal reservation must return its eighth use before trying
+// the BUSY reply; otherwise the ninth-use probe drops an affordable BUSY.
+void test_failed_dedup_reservation_releases_use_before_busy() {
+  Harness h;
+  (void)h.add(1);
+  MeshNode* terminal = h.add(2);
+  (void)h.add(4);
+  h.link(1, 2);
+  h.link(2, 4);
+  h.run(30100, 50);
+  for (std::uint64_t i = 1; i <= kDedupTerminalPinMax; ++i) {
+    const auto frame = craft_frame(
+        h.cipher,
+        mk_header(FrameType::Data, 1, 2, 1, 2, MessageId{42, i},
+                  wire::kFlagEndProtected, 0, 30000),
+        payload_view());
+    inject_v2(h, 2, 1, frame);
+    h.run(50);
+  }
+  CHECK(terminal->dedup_stats().admitted_terminal == kDedupTerminalPinMax);
+  CHECK(h.port(2)->leases().live_use_count() == 0);
+  h.net.block_send = [](NodeId from, NodeId to, ByteView frame) {
+    return from == 2 && to == 4 && frame.size > 4 &&
+           frame.data[4] == static_cast<std::uint8_t>(FrameType::Data);
+  };
+  for (std::uint64_t i = 1; i <= 7; ++i) {
+    inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 1, 4, 1000 + i));
+    h.run(10);
+  }
+  CHECK(terminal->txn_in_flight() == 7);
+  CHECK(h.port(2)->leases().live_use_count() == 7);
+  CHECK(terminal->congestion_stats().control_queued == 0);
+  CHECK(terminal->set_peer_busy_capable(1, true).ok());
+  const auto sent_before = terminal->congestion_stats().busy_sent;
+  const auto frame = craft_frame(
+      h.cipher,
+      mk_header(FrameType::Data, 1, 2, 1, 2, MessageId{42, 9000},
+                wire::kFlagEndProtected, 0, 30000),
+      payload_view());
+  inject_v2(h, 2, 1, frame);
+  CHECK(terminal->dedup_stats().refused_terminal_reserve == 1);
+  CHECK(terminal->congestion_stats().busy_sent == sent_before + 1);
+  CHECK(terminal->txn_in_flight() == 8);
+}
+
 // Q117-08: with the 8-deep control lane full, DATA / routed / END_RECEIPT
 // transit all refuse — zero forwards on any lane.
 void test_control_lane_full_refuses_all_forwards() {
@@ -530,16 +596,16 @@ void test_control_lane_full_refuses_all_forwards() {
   h.link(1, 2);
   h.link(2, 3);
   h.link(2, 4);
-  h.run(50);  // converge routes
+  h.run(30100, 50);  // propagate the origin route through both hops
   // 8 undispatched transit admissions fill the control lane exactly.
   for (std::uint64_t i = 1; i <= 8; ++i) {
-    inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 100 + i, 4, i));
+    inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 1, 4, i));
   }
   CHECK(relay->dedup_stats().admitted_transit == 8);
   CHECK(relay->txn_in_flight() == 8);
   // Each lane's probe refuses; nothing is admitted, leased, or queued.
-  inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 200, 4, 100));
-  inject_v2(h, 2, 1, craft_routed_transit(h.cipher, 1, 2, 201, 4, 101));
+  inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 1, 4, 100));
+  inject_v2(h, 2, 1, craft_routed_transit(h.cipher, 1, 2, 1, 4, 101));
   inject_v2(h, 2, 3, craft_receipt_transit(h.cipher, 3, 2, 3, 1, 102));
   CHECK(relay->dedup_stats().admitted_transit == 8);
   CHECK(relay->txn_in_flight() == 8);
@@ -548,7 +614,7 @@ void test_control_lane_full_refuses_all_forwards() {
   h.run(500);
   CHECK(count_sights(h.net, FrameType::Data, 2, 4) == 8);
   CHECK(count_sights(h.net, FrameType::Service, 2, 4) == 0);
-  CHECK(count_sights(h.net, FrameType::EndReceipt, 2, 1) == 0);
+  CHECK(count_sights(h.net, FrameType::EndReceipt, 4, 2) >= 1);
 }
 
 // Q117-08 (reverse): when the data budget is spent but the control lane is
@@ -627,22 +693,22 @@ void test_saturation_drop_recovers_on_retry() {
   MeshNode* downstream = h.add(4);
   h.link(1, 2);
   h.link(2, 4);
-  h.run(50);
+  h.run(30100, 50);
   for (std::uint64_t i = 1; i <= 8; ++i) {
-    inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 100 + i, 4, i));
+    inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 1, 4, i));
     h.at(2)->poll(h.now);
     h.net.flush(h.now);
     h.now += 5;
   }
   CHECK(relay->txn_in_flight() == 8);
   const auto failed_before = relay->congestion_stats().busy_send_failed;
-  const auto probe = craft_transit(h.cipher, 1, 2, 200, 4, 100);
+  const auto probe = craft_transit(h.cipher, 1, 2, 1, 4, 100);
   inject_v2(h, 2, 1, probe);
   CHECK(h.observer(2)->has_diag("TRANSIT_ADMISSION_DENIED"));
   CHECK(relay->congestion_stats().busy_sent == 0);
   CHECK(relay->congestion_stats().busy_send_failed == failed_before + 1);
   // Downstream answers: every parked forward resolves and frees its slot.
-  for (int i = 0; i < 20 && relay->txn_in_flight() != 0; ++i) {
+  for (int i = 0; i < 400 && relay->txn_in_flight() != 0; ++i) {
     downstream->poll(h.now);
     h.net.flush(h.now);
     h.at(2)->poll(h.now);
@@ -654,7 +720,7 @@ void test_saturation_drop_recovers_on_retry() {
   const std::size_t data_before = count_sights(h.net, FrameType::Data, 2, 4);
   inject_v2(h, 2, 1, probe);
   h.run(200);
-  CHECK(relay->dedup_stats().admitted_transit == 9);
+  CHECK(relay->dedup_stats().admitted_transit == 18);
   CHECK(count_sights(h.net, FrameType::Data, 2, 4) == data_before + 1);
   CHECK(h.observer(4)->messages.size() == 9);
 }
@@ -676,7 +742,7 @@ void test_owner_swap_identical_outcome() {
     (void)h.add(4);
     h.link(1, 2);
     h.link(2, 4);
-    h.run(50);
+    h.run(30100, 50);
     CountingPort* wrapper = nullptr;
     CountingPort owned(*h.port(2));
     if (wrap) {
@@ -684,22 +750,22 @@ void test_owner_swap_identical_outcome() {
       CHECK(relay->set_reply_peer_port(wrapper).ok());
     }
     for (std::uint64_t i = 1; i <= 3; ++i) {
-      inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 100 + i, 4, i));
-      h.run(60);
+      inject_v2(h, 2, 1, craft_transit(h.cipher, 1, 2, 1, 4, i));
+      h.run(500);
     }
     Outcome out{relay->dedup_stats().admitted_transit,
                 count_sights(h.net, FrameType::Data, 2, 4),
                 count_sights(h.net, FrameType::HopAccept, 2, 1),
                 h.observer(4)->messages.size()};
     if (wrap) {
-      CHECK(wrapper->acquires == 3);
-      CHECK(wrapper->releases == 3);
+      CHECK(wrapper->acquires >= 3);
+      CHECK(wrapper->acquires == wrapper->releases);
     }
     return out;
   };
   const Outcome plain = scenario(false);
   const Outcome wrapped = scenario(true);
-  CHECK(plain.admitted == 3 && wrapped.admitted == 3);
+  CHECK(plain.admitted == 6 && wrapped.admitted == 6);
   CHECK(plain.data_sights == wrapped.data_sights);
   CHECK(plain.accept_sights == wrapped.accept_sights);
   CHECK(plain.delivered == wrapped.delivered);
@@ -737,11 +803,13 @@ void test_send_to_retired_peer_reports_failure() {
 }  // namespace
 
 int main() {
+  test_terminal_reserves_receipt_without_route();
   test_forward_bounded_by_transaction_lifetime();
   test_wire_budget_survives_transaction_clamp();
   test_reentrant_send_is_busy();
   test_reentrant_receive_is_busy();
   test_fourth_binding_refused_without_side_effects();
+  test_failed_dedup_reservation_releases_use_before_busy();
   test_control_lane_full_refuses_all_forwards();
   test_data_bound_leaves_no_lone_ack();
   test_component_backpressure_rolls_back_routed();

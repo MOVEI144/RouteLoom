@@ -98,6 +98,12 @@ constexpr bool next_use_serial(const std::uint32_t current,
 class ReplyPeerPort {
  public:
   virtual ~ReplyPeerPort() = default;
+  // Called only after link authentication and peer/network checks. Owners
+  // with learned receive contexts update their binding before admission or
+  // ACK matching; adapters with a fixed context can keep the default.
+  virtual Status observe_authenticated_rx(ReplyBinding /*captured*/) noexcept {
+    return Status::success();
+  }
   // Reserve a reply use for `captured`, pinned to a driver record before
   // returning success. `deadline` is clamped to now + kReplyLeaseTtlMs.
   virtual Status acquire(ReplyBinding captured, MonotonicMs deadline,
@@ -129,14 +135,20 @@ struct DriverReleaseEvidence {
   bool tx_in_flight{false};
   bool fence_or_quarantine{false};
   bool other_lease_hold{false};
+  bool topology_pin_live{false};
   bool callbacks_drained{false};
 };
 
-constexpr bool driver_release_allowed(
+constexpr bool driver_transfer_allowed(
     const DriverReleaseEvidence& evidence) noexcept {
   return !evidence.reply_uses_live && !evidence.tx_in_flight &&
          !evidence.fence_or_quarantine && !evidence.other_lease_hold &&
          evidence.callbacks_drained;
+}
+
+constexpr bool driver_release_allowed(
+    const DriverReleaseEvidence& evidence) noexcept {
+  return driver_transfer_allowed(evidence) && !evidence.topology_pin_live;
 }
 
 // The portable lease table. One instance per radio Owner, driven only from

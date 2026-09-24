@@ -396,6 +396,7 @@ void test_invalidate_all_and_empty_entries_recycled() {
 void test_driver_release_gate_conjunction() {
   using routeloom::DriverReleaseEvidence;
   using routeloom::driver_release_allowed;
+  using routeloom::driver_transfer_allowed;
   DriverReleaseEvidence drained{};
   drained.callbacks_drained = true;
   CHECK(driver_release_allowed(drained));
@@ -411,6 +412,12 @@ void test_driver_release_gate_conjunction() {
   DriverReleaseEvidence pin = drained;
   pin.other_lease_hold = true;
   CHECK(!driver_release_allowed(pin));
+  DriverReleaseEvidence topology = drained;
+  topology.topology_pin_live = true;
+  CHECK(!driver_release_allowed(topology));
+  CHECK(driver_transfer_allowed(topology));
+  CHECK(!driver_transfer_allowed(reply));
+  CHECK(!driver_transfer_allowed(tx));
   DriverReleaseEvidence undrained{};
   CHECK(!driver_release_allowed(undrained));  // owed callbacks hold the peer
 }
