@@ -236,7 +236,12 @@ Status PowerCoordinator::sleep_prepare(const SleepRequest& request,
 }
 
 Status PowerCoordinator::sleep_abort(const char* reason) noexcept {
-  if (state_ != PowerState::Draining && state_ != PowerState::ReadyToSleep) {
+  // PERSISTING is the settlement window inside finish_drain: an application
+  // callback fired by a disposition may veto the sleep before the ticket
+  // exists. Work already settled stays settled — the same contract as an
+  // abort from READY_TO_SLEEP, where the durable image is already committed.
+  if (state_ != PowerState::Draining && state_ != PowerState::Persisting &&
+      state_ != PowerState::ReadyToSleep) {
     return Status::error(StatusCode::InvalidState, "no sleep in progress");
   }
   abort_to_running(reason == nullptr ? "SLEEP_ABORT_REQUEST" : reason);
@@ -455,8 +460,12 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
       return;
     }
   }
-  // Phase 2: the image is durable — only now apply dispositions and drop the
-  // radio-bound queues.
+  // Phase 2: the image is durable — only now apply dispositions. Every
+  // callback this runs (delivery terminal, group settled, released holds)
+  // still sees the coordinator in PERSISTING with the node draining: a
+  // send()/send_group() inside one is refused by the drain pause, and a
+  // sleep_abort() lands in RUNNING instead of racing a ticket that does not
+  // exist yet.
   node_.apply_sleep_dispositions(
       request_.pending_policy, [&](const MessageId& id) {
         for (const auto& record : image_.pending) {
@@ -464,23 +473,32 @@ void PowerCoordinator::finish_drain(const MonotonicMs now_ms) noexcept {
         }
         return false;
       });
+  // A disposition callback aborted the sleep: the node is already back in
+  // RUNNING with its queues live — no teardown, no radio quiesce, no ticket.
+  if (state_ != PowerState::Persisting) return;
   node_.quiesce_for_sleep();
-}
-
-Status PowerCoordinator::persist_image() noexcept {
-  image_.sequence = image_sequence_ + 1;
-  image_.config_revision = node_.config_revision();
-  auto status = port_.capture_cache(image_);
-  if (!status) return status;
-  status = commit_image(image_);
-  if (!status) return status;
-  status = port_.quiesce_radio();
-  if (!status) return status;
+  const auto radio = port_.quiesce_radio();
+  if (!radio) {
+    abort_to_running(radio.detail);
+    return;
+  }
   radio_quiesced_ = true;
   ++radio_generation_;
   issue_ticket();
   transition(PowerState::ReadyToSleep, "SLEEP_READY");
-  return Status::success();
+}
+
+Status PowerCoordinator::persist_image() noexcept {
+  // Durable commit only: capture the platform cache and write the image.
+  // Radio quiesce, the ticket and the READY_TO_SLEEP transition belong to
+  // finish_drain AFTER the settlement — issuing them here would let a
+  // disposition callback observe READY_TO_SLEEP while its own work is
+  // still being torn down.
+  image_.sequence = image_sequence_ + 1;
+  image_.config_revision = node_.config_revision();
+  auto status = port_.capture_cache(image_);
+  if (!status) return status;
+  return commit_image(image_);
 }
 
 Status PowerCoordinator::commit_image(const PowerImage& image) noexcept {

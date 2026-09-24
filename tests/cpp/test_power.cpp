@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -1452,6 +1453,37 @@ void test_send_lifetime_ceiling() {
 // READY_TO_SLEEP.
 // ---------------------------------------------------------------------------
 
+// NodeObserver that records the events these tests assert on and can run a
+// hook INSIDE a terminal delivery callback — for re-entrant coordinator
+// calls (sleep_abort / send) from a disposition notification.
+struct HookedObserver final : NodeObserver {
+  std::vector<DeliveryResult> delivery_events;
+  std::vector<GroupDeliveryResult> group_results;
+  struct GroupReceipt {
+    GroupMessageInfo info;
+    std::vector<std::uint8_t> payload;
+  };
+  std::vector<GroupReceipt> group_messages;
+  std::function<void(const DeliveryResult&)> on_delivery_fn;
+  std::function<void(const GroupDeliveryResult&)> on_group_fn;
+
+  void on_message(const MessageKey&, NodeId, ByteView) noexcept override {}
+  void on_diagnostic(const char*, NodeId, const MessageId*) noexcept override {}
+  void on_delivery(const DeliveryResult& result) noexcept override {
+    delivery_events.push_back(result);
+    if (on_delivery_fn) on_delivery_fn(result);
+  }
+  void on_group_message(const GroupMessageInfo& info,
+                        ByteView payload) noexcept override {
+    group_messages.push_back(GroupReceipt{
+        info, std::vector<std::uint8_t>(payload.data, payload.data + payload.size)});
+  }
+  void on_group_delivery(const GroupDeliveryResult& result) noexcept override {
+    group_results.push_back(result);
+    if (on_group_fn) on_group_fn(result);
+  }
+};
+
 struct GroupPowerWorld {
   static constexpr NodeId kGateway = 1;
   static constexpr NodeId kLeaf = 2;
@@ -1459,8 +1491,8 @@ struct GroupPowerWorld {
   SimNetwork net;
   TestSecurity security_a;
   TestSecurity security_b;
-  CapturingObserver observer_a;
-  CapturingObserver observer_b;
+  HookedObserver observer_a;
+  HookedObserver observer_b;
   SimRadio radio_a;
   SimRadio radio_b;
   MeshNode a;
@@ -1556,7 +1588,7 @@ void drop_all_reports() {
 }
 
 // The most recent group delivery event, or Empty when none was emitted.
-GroupDeliveryResult last_group_result(const CapturingObserver& observer) {
+GroupDeliveryResult last_group_result(const HookedObserver& observer) {
   if (observer.group_results.empty()) return GroupDeliveryResult{};
   return observer.group_results.back();
 }
@@ -1765,6 +1797,147 @@ void test_group_sleep_commit_failure_keeps_state() {
   CHECK(w.observer_b.group_messages.size() == 2);
 }
 
+void test_group_settled_callback_abort_new_send() {
+  // Inside the SLEEP_DRAIN terminal event the app vetoes the sleep and sends
+  // again: the abort must stand — no ticket, no READY transition — and the
+  // send admitted inside the callback must stay live instead of being
+  // failed by the settlement loop it interrupted (#110 review).
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  GroupSendOptions options{};
+  w.send_all(w.a, options);
+
+  const std::array<std::uint8_t, 4> again{{'n', 'e', 'w', '!'}};
+  MessageId new_id{};
+  Status abort_status = Status::error(StatusCode::InternalError, "not run");
+  Status send_status = Status::error(StatusCode::InternalError, "not run");
+  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
+    if (result.state != DeliveryState::Failed ||
+        std::strcmp(result.reason, "SLEEP_DRAIN") != 0) {
+      return;  // act once, on the settlement event itself
+    }
+    abort_status = coordinator.sleep_abort("APP_VETO");
+    send_status = w.a.send_group(kGroupAll,
+                                 ByteView{again.data(), again.size()},
+                                 options, w.now, new_id);
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(abort_status.ok());
+  CHECK(send_status.ok());
+  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                      "SLEEP_READY"));
+  const auto mid = w.a.group_delivery(new_id);
+  CHECK(mid.state == DeliveryState::Queued ||
+        mid.state == DeliveryState::WaitingForEndReceipt);
+  CHECK(std::strcmp(mid.reason, "SLEEP_DRAIN") != 0);
+  w.net.drop_frame = nullptr;
+  w.run(500);
+  const auto done = w.a.group_delivery(new_id);
+  CHECK(done.state == DeliveryState::Delivered);
+}
+
+void test_unicast_disposition_callback_abort_new_send() {
+  // Same reentrancy through the unicast disposition: the app aborts inside
+  // on_delivery and sends to a live peer — the new delivery must not be
+  // failed by the settlement it interrupted.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  const std::array<std::uint8_t, 3> payload{{'x', 'y', 'z'}};
+  MessageId id{}, new_id{};
+  SendOptions send_options{};
+  CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
+                    send_options, w.now, id));  // unreachable: stays WaitingForRoute
+
+  Status abort_status = Status::error(StatusCode::InternalError, "not run");
+  Status send_status = Status::error(StatusCode::InternalError, "not run");
+  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
+    if (result.state != DeliveryState::Failed ||
+        std::strcmp(result.reason, "SLEEP_DRAIN") != 0) {
+      return;
+    }
+    abort_status = coordinator.sleep_abort("APP_VETO");
+    send_status = w.a.send(GroupPowerWorld::kLeaf,
+                           ByteView{payload.data(), payload.size()},
+                           send_options, w.now, new_id);
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::Running));
+  CHECK(abort_status.ok());
+  CHECK(send_status.ok());
+  CHECK(!w.events.saw(PowerState::Persisting, PowerState::ReadyToSleep,
+                      "SLEEP_READY"));
+  w.run(500);
+  const auto result = w.a.delivery(new_id);
+  CHECK(result.state == DeliveryState::Delivered);
+}
+
+void test_disposition_callback_send_refused() {
+  // Without an abort the drain pause still applies inside a settlement
+  // callback — the coordinator is still PERSISTING, not READY — so
+  // send()/send_group() are refused deterministically and the sleep
+  // proceeds to READY_TO_SLEEP.
+  MemoryPowerStorage storage;
+  GroupPowerWorld w;
+  w.converge();
+  drop_all_reports();
+  w.net.drop_frame = group_loss_hook;
+  PowerCoordinator coordinator(PowerConfig{500, 50}, w.a, w.port, storage,
+                               w.events);
+  CHECK_OK(coordinator.begin(ResetCause::ColdBoot,
+                               ElapsedInterval{0, 0, false}, w.now));
+  const std::array<std::uint8_t, 3> payload{{'x', 'y', 'z'}};
+  MessageId id{}, retry{};
+  SendOptions send_options{};
+  CHECK_OK(w.a.send(9, ByteView{payload.data(), payload.size()},
+                    send_options, w.now, id));
+  GroupSendOptions group_options{};
+  w.send_all(w.a, group_options);
+
+  Status send_status{};
+  Status group_status{};
+  w.observer_a.on_delivery_fn = [&](const DeliveryResult& result) {
+    if (result.state == DeliveryState::Failed &&
+        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
+      send_status = w.a.send(GroupPowerWorld::kLeaf,
+                             ByteView{payload.data(), payload.size()},
+                             send_options, w.now, retry);
+    }
+  };
+  w.observer_a.on_group_fn = [&](const GroupDeliveryResult& result) {
+    if (result.state == DeliveryState::Failed &&
+        std::strcmp(result.reason, "SLEEP_DRAIN") == 0) {
+      group_status = w.a.send_group(kGroupAll,
+                                    ByteView{payload.data(), payload.size()},
+                                    group_options, w.now, retry);
+    }
+  };
+  SleepRequest request{};
+  request.pending_policy = SleepWorkPolicy::Fail;
+  CHECK_OK(coordinator.sleep_prepare(request, w.now));
+  CHECK(w.run_until(coordinator, w.b, PowerState::ReadyToSleep));
+  CHECK(!send_status.ok());
+  CHECK(std::strcmp(send_status.detail, "NODE_DRAINING") == 0);
+  CHECK(!group_status.ok());
+  CHECK(std::strcmp(group_status.detail, "NODE_DRAINING") == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1811,6 +1984,9 @@ int main() {
   test_group_sleep_policy_defer();
   test_group_ordered_hold_released_for_sleep();
   test_group_sleep_commit_failure_keeps_state();
+  test_group_settled_callback_abort_new_send();
+  test_unicast_disposition_callback_abort_new_send();
+  test_disposition_callback_send_refused();
   if (failures == 0) {
     std::printf("power tests passed\n");
     return 0;

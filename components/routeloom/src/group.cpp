@@ -1068,8 +1068,10 @@ void MeshNode::group_skip_to(GroupStream& stream, const std::uint32_t target) no
 // quiesced() counts only group work that can still progress while draining:
 // a round collecting reports (the source's own tree or a relay/receiver
 // tree) may still resolve and queue its report. Queued origins and
-// scheduled repair rounds are masked by the drain pause bits and settle
-// through the dispositions instead, so they are not waited on here.
+// scheduled repair rounds are masked by the drain pause bits — a repair is
+// a retry round (kRetryRounds), settled exactly like a paused unicast
+// end-to-end retry: it does not run during drain and the unfinished origin
+// is settled by the Fail/Save/Defer dispositions instead.
 bool MeshNode::group_radio_pending() const noexcept {
   bool pending = false;
   group_trees_.for_each(
@@ -1083,8 +1085,10 @@ bool MeshNode::group_radio_pending() const noexcept {
 void MeshNode::group_release_holds() noexcept {
   // Every held message goes out through the same path an expired hold takes
   // (process_group): the stream cursor skips to each held seq, the gap is
-  // counted and the hold itself drains right after — in stream order.
-  while (true) {
+  // counted and the hold itself drains right after — in stream order. Runs
+  // only while the sleep drain is live: an on_group_message callback that
+  // aborts the sleep stops the release and keeps the remaining holds.
+  while (sleep_draining_) {
     GroupHold* lowest = nullptr;
     group_holds_.for_each([&](GroupHold& value) {
       if (lowest == nullptr || value.info.group_seq < lowest->info.group_seq) {

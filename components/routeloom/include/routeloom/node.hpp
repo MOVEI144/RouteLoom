@@ -794,8 +794,9 @@ class MeshNode {
   // still collecting reports (the source's own tree or a relay/receiver
   // tree). Queued group origins and scheduled repair rounds do NOT hold the
   // drain open: admission and retry rounds are masked while draining, so
-  // they can only be settled by the sleep dispositions — waiting on them
-  // would just burn the whole drain timeout.
+  // they can only be settled by the sleep dispositions — a group repair is a
+  // retry round (kRetryRounds), the same class as a unicast end-to-end
+  // retry, and waiting on it would just burn the whole drain timeout.
   bool quiesced() const noexcept {
     return !physical_.active && scheduler_.empty() && awaiting_hop_.size() == 0 &&
            !group_radio_pending();
@@ -900,7 +901,10 @@ class MeshNode {
   void apply_sleep_dispositions(SleepWorkPolicy fallback,
                                 WasSavedFn&& was_saved) noexcept {
     deliveries_.for_each([&](Delivery& delivery) {
-      if (sleep_terminal(delivery.state)) return;
+      // A callback inside this loop can abort the sleep (draining cleared):
+      // settlement then stops so remaining — and newly queued — work stays
+      // live instead of failing with a sleep reason it never asked for.
+      if (!sleep_draining_ || sleep_terminal(delivery.state)) return;
       const bool durable = delivery.options.persist_across_sleep;
       const bool eligible = durable || fallback == SleepWorkPolicy::Save;
       if (eligible && was_saved(delivery.id)) {
@@ -913,7 +917,7 @@ class MeshNode {
       }
     });
     group_origins_.for_each([&](GroupOrigin& origin) {
-      if (sleep_terminal(origin.state)) return;
+      if (!sleep_draining_ || sleep_terminal(origin.state)) return;
       if (fallback == SleepWorkPolicy::Defer) {
         group_origin_terminal(origin, DeliveryState::Indeterminate,
                               "SLEEP_DEFERRED");
