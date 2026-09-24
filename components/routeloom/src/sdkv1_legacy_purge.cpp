@@ -54,16 +54,28 @@ Status purge_legacy_state(LegacyPurgePort& port, const bool stopped,
     bool found = false;
     status = port.next(cursor, key, found);
     if (!status) return status;
-    if (!found) { result = observed; return Status::success(); }
+    if (!found) break;
     ++scanned;
     if (!is_legacy_peer_key(key)) continue;
     if (observed.erased < kBatch) {
       status = port.erase(key);
       if (!status) return status;
       ++observed.erased;
-    } else {
-      ++observed.remaining;
     }
+  }
+  if (scanned == kMaxScan) return Status::error(StatusCode::NoCapacity, "legacy scan limit");
+  // Erase acknowledgment is not evidence of durability. Start a fresh
+  // enumeration and report completion only when no matching keys survive.
+  cursor = 0;
+  scanned = 0;
+  while (scanned < kMaxScan) {
+    LegacyKey key{};
+    bool found = false;
+    status = port.next(cursor, key, found);
+    if (!status) return status;
+    if (!found) { result = observed; return Status::success(); }
+    ++scanned;
+    if (is_legacy_peer_key(key)) ++observed.remaining;
   }
   return Status::error(StatusCode::NoCapacity, "legacy scan limit");
 }

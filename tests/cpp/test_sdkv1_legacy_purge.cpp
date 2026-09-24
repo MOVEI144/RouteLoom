@@ -20,6 +20,7 @@ struct MemoryPort final : LegacyPurgePort {
       {"rlreplay", "f00000000", true}, {"rlcounter", "c00000000", true}}};
   bool marker{false};
   bool fail_erase{false};
+  bool lost_erase{false};
   unsigned erased{0};
   Status migration(bool& present) noexcept override { present = marker; return Status::success(); }
   Status commit_migration() noexcept override { marker = true; return Status::success(); }
@@ -31,9 +32,38 @@ struct MemoryPort final : LegacyPurgePort {
   }
   Status erase(const LegacyKey& key) noexcept override {
     if (fail_erase) { fail_erase = false; return Status::error(StatusCode::StorageFailure, "injected"); }
+    if (lost_erase) return Status::success();
     for (auto& e : entries) {
       if (e.live && std::strcmp(e.space, key.name_space) == 0 &&
           std::strcmp(e.key, key.key) == 0) { e.live = false; ++erased; return Status::success(); }
+    }
+    return Status::error(StatusCode::NotFound, "gone");
+  }
+};
+struct ChurnPort final : LegacyPurgePort {
+  std::array<std::array<char, 10>, 200> names{};
+  std::array<bool, 200> live{};
+  bool marker{false};
+  ChurnPort() {
+    for (unsigned i = 0; i < names.size(); ++i) {
+      std::snprintf(names[i].data(), names[i].size(), "f%08x", i);
+      live[i] = true;
+    }
+  }
+  Status migration(bool& present) noexcept override { present = marker; return Status::success(); }
+  Status commit_migration() noexcept override { marker = true; return Status::success(); }
+  Status next(std::size_t& cursor, LegacyKey& key, bool& found) noexcept override {
+    while (cursor < live.size() && !live[cursor]) ++cursor;
+    found = cursor < live.size();
+    if (found) key = {"rlreplay", names[cursor++].data()};
+    return Status::success();
+  }
+  Status erase(const LegacyKey& key) noexcept override {
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (live[i] && std::strcmp(names[i].data(), key.key) == 0) {
+        live[i] = false;
+        return Status::success();
+      }
     }
     return Status::error(StatusCode::NotFound, "gone");
   }
@@ -55,5 +85,25 @@ int main() {
   for (std::size_t i = 3; i < 8; ++i) CHECK(port.entries[i].live);
   CHECK(purge_legacy_state(port, true, true, result).ok());
   CHECK(port.erased == 5 && result.erased == 0);
+
+  // N01: an NVS adapter may acknowledge an erase without persisting it.
+  // The next pass must never report completion while old peer state remains.
+  MemoryPort dropped;
+  dropped.lost_erase = true;
+  result = {};
+  const Status lost = purge_legacy_state(dropped, true, true, result);
+  CHECK(!lost.ok() || result.remaining != 0);
+  CHECK(dropped.entries[0].live);
+
+  ChurnPort churn;
+  std::uint32_t total = 0;
+  for (unsigned pass = 0; pass < 14; ++pass) {
+    CHECK(purge_legacy_state(churn, true, true, result).ok());
+    CHECK(result.erased <= 16);
+    total += result.erased;
+    if (result.remaining == 0) break;
+  }
+  CHECK(total == 200 && result.remaining == 0);
+  for (bool live : churn.live) CHECK(!live);
   return 0;
 }
