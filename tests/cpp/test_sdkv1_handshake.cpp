@@ -872,6 +872,24 @@ void test_routed_end_exchange() {
   };
   exchange(kT0, 4);
   CHECK(saved_m3_size != 0);
+  // Routed m1 has no cookie and its origin is untrusted. It must not
+  // displace the authenticated m4 quiet-resend flight.
+  HandshakeRx forged_m1{};
+  forged_m1.scope = SecurityScope::EndToEnd;
+  forged_m1.phase = 4;
+  forged_m1.step = 1;
+  forged_m1.claimed_peer = kNodeA;
+  forged_m1.exchange_id = saved_m3.exchange_id + 1;
+  const std::array<std::uint8_t, 8> bogus_m1{};
+  CHECK_OK(pair.b->engine.on_message(forged_m1, ByteView{bogus_m1.data(), bogus_m1.size()},
+                                     kT0 + 380));
+  CHECK_OK(pair.b->engine.on_message(saved_m3,
+             ByteView{saved_m3_bytes.data(), saved_m3_size}, kT0 + 390));
+  HandshakeResult m4_after_m1{};
+  CHECK_OK(pair.b->engine.take_result(m4_after_m1));
+  CHECK(m4_after_m1.event == HandshakeEvent::Send && m4_after_m1.step == 4);
+  CHECK_OK(pair.b->engine.accept_send(m4_after_m1.token, m4_after_m1.phase,
+                                      m4_after_m1.step));
   HandshakeRx forged{};
   forged.scope = SecurityScope::EndToEnd;
   forged.phase = 5;
