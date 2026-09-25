@@ -34,7 +34,9 @@
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
+#include "routeloom/psa_aead_gcm.hpp"
 #include "routeloom/psa_session_aead.hpp"
+#include "routeloom/sdkv1_authority_transport.hpp"
 #include "routeloom/sdkv1_join_relay.hpp"
 #include "routeloom/sdkv1_security_coordinator.hpp"
 #include "routeloom/usb_bridge.hpp"
@@ -43,6 +45,9 @@ namespace routeloom::espnow {
 
 class EspNowSecurityOwner final : public BootstrapRld1Sink,
                                    public usb::UsbBridge::SecurityOwnerUsbSink,
+                                   public usb::UsbBridge::AuthorityUsbSink,
+                                   public sdkv1::AuthorityHostSink,
+                                   public sdkv1::AuthorityLocalSink,
                                    public sdkv1::ZtRld1Port,
                                    public sdkv1::CoordinatorMeshPort,
                                    public sdkv1::CoordinatorUsbPort,
@@ -53,6 +58,10 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
     routeloom::MacAddress local_mac{};
     sdkv1::JoinerConfig joiner{};
     const char* log_tag{"sec_owner"};
+    // Gateway builds (USB-attached) relay authority carriers between
+    // the mesh and USB 0x64/0x65 and run their own channel over direct
+    // USB; devices run one mesh endpoint for the local channel only.
+    bool gateway{false};
   };
 
   EspNowSecurityOwner() noexcept = default;
@@ -98,6 +107,18 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   Status wake(MonotonicMs now_ms) noexcept;
   // The member discovery (null until StartMemberDiscovery constructs it).
   NeighborDiscovery* discovery() noexcept;
+  // The authority mesh demux (null until boot): main attaches it to the
+  // node's ConfigTarget (devices) so authority frames route before the
+  // config path. Gateway builds use authority_mesh_sink() instead.
+  sdkv1::AuthorityMeshDemux* authority_demux() noexcept;
+  // The authority-only mesh sink (gateway builds, null until boot): main
+  // installs it as the node's config sink. Null on devices.
+  // ConfigEndpointSink lives in routeloom (node.hpp), not in sdkv1.
+  ConfigEndpointSink* authority_mesh_sink() noexcept;
+  // A GROUP_KEY_RETIRED diagnostic was observed (node observer context:
+  // records only). The next poll turns it into a throttled authority
+  // pull — the backstop for a missed rotation Wake.
+  void note_group_key_retired() noexcept { group_key_retired_ = true; }
 
   // BootstrapRld1Sink: one observed RLD1 frame from the runtime drain.
   void on_bootstrap_rld1(const sdkv1::JoinRxMeta& meta, std::uint32_t radio_generation,
@@ -109,6 +130,19 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   Status join_abort(NodeId proxy, sdkv1::RelayToken token, std::uint8_t reason,
                     MonotonicMs now_ms) noexcept override;
   void join_session_down(MonotonicMs now_ms) noexcept override;
+  // AuthorityUsbSink (gateway builds): decoded 0x65/0x66 (admission for
+  // the 0x67) and session death. Self-addressed downs reassemble in the
+  // relay slots and deliver to the local channel on poll. Called on the
+  // pump task like join_down (same synchronous step() discipline).
+  Status authority_down(NodeId device, const usb::AuthorityFragment& fragment,
+                        bool& complete, MonotonicMs now_ms) noexcept override;
+  Status site_state_set(const usb::SiteStateSet& set, usb::SiteStateReport& report,
+                        MonotonicMs now_ms) noexcept override;
+  void authority_session_down(MonotonicMs now_ms) noexcept override;
+  // AuthorityHostSink: one 0x64 toward the host (gateway mesh egress).
+  bool send_up(const usb::AuthorityFragment& fragment) noexcept override;
+  // AuthorityLocalSink: a reassembled self-addressed down (poll context).
+  void on_local_down(sdkv1::AuthorityCarrierKind kind, MutableByteView bytes) noexcept override;
   // sdkv1::ZtRld1Port / CoordinatorMeshPort: radio sends (refuse before
   // the runtime attaches).
   Status send_rld1(const routeloom::MacAddress& destination, ByteView frame) noexcept override;
@@ -150,7 +184,25 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
 
   sdkv1::HmacJoinCookie& sealer() noexcept;
   sdkv1::StoreCredentialVerifier& verifier() noexcept;
+  MeshConfigPort* mesh_port() noexcept;
+  sdkv1::AuthorityEndpoint* endpoint() noexcept;
+  sdkv1::AuthorityGateway* gateway() noexcept;
+  sdkv1::AuthorityMeshSink* mesh_sink() noexcept;
+  NodeId self_node() const noexcept;
+  // The gateway's own channel port: carriers leave as 0x64 fragments
+  // (device=self, hops=0) instead of touching the mesh. Refuses without
+  // an active session; the channel stages and retries.
+  class DirectUsbAuthorityPort final : public sdkv1::AuthorityPort {
+   public:
+    void bind(EspNowSecurityOwner* owner) noexcept { owner_ = owner; }
+    bool try_send(NodeId gateway, sdkv1::AuthorityCarrierKind kind, ByteView carrier,
+                  std::uint64_t& token) noexcept override;
+
+   private:
+    EspNowSecurityOwner* owner_{nullptr};
+  };
   void drain_actions(MonotonicMs now_ms) noexcept;
+  void drive_authority(MonotonicMs now_ms) noexcept;
   void on_tune_channel(const sdkv1::CoordinatorTune& tune, MonotonicMs now_ms) noexcept;
   void on_member_config(const sdkv1::CoordinatorMemberConfig& member, MonotonicMs now_ms) noexcept;
   void on_start_discovery(MonotonicMs now_ms) noexcept;
@@ -184,6 +236,30 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   alignas(NeighborDiscovery) std::array<std::uint8_t, sizeof(NeighborDiscovery)> discovery_box_{};
   bool discovery_live_{false};
   EspNowDiscoveryObserver observer_store_{nullptr, nullptr};
+  // Authority transport (built at boot, once the runtime — and on
+  // gateways the bridge — is attached): the mesh port over the node, one
+  // of the endpoint (devices) / relay + mesh sink + direct port
+  // (gateways). The relay and the endpoint never coexist (one union's
+  // worth of the ~5 kB object RAM either way).
+  alignas(MeshConfigPort) std::array<std::uint8_t, sizeof(MeshConfigPort)> mesh_port_box_{};
+  // The endpoint and the relay never coexist: one union holds whichever
+  // the build runs (each carries its own 2-4 kB of object slots).
+  union AuthorityTransportBox {
+    alignas(sdkv1::AuthorityEndpoint)
+        std::array<std::uint8_t, sizeof(sdkv1::AuthorityEndpoint)> endpoint;
+    alignas(sdkv1::AuthorityGateway)
+        std::array<std::uint8_t, sizeof(sdkv1::AuthorityGateway)> gateway;
+  } transport_box_{};
+  alignas(sdkv1::AuthorityMeshSink) std::array<std::uint8_t, sizeof(sdkv1::AuthorityMeshSink)>
+      mesh_sink_box_{};
+  DirectUsbAuthorityPort direct_port_{};
+  bool authority_live_{false};
+  bool usb_tx_pending_{false};  // one staged direct-port completion
+  sdkv1::AuthorityTxResult usb_tx_{};
+  bool usb_session_active_{false};
+  bool group_key_retired_{false};
+  MonotonicMs last_pull_ms_{0};
+  std::uint32_t usb_transfer_{0};
 };
 
 }  // namespace routeloom::espnow

@@ -213,6 +213,8 @@ fn encode_vector(codec: &str, fields: &Fields) -> Vec<u8> {
                     3 => ControlObjectKind::ConfigPermit,
                     4 => ControlObjectKind::ConfigRecovery,
                     5 => ControlObjectKind::TrustManifest,
+                    6 => ControlObjectKind::RevocationSet,
+                    7 => ControlObjectKind::AuthorityEnvelope,
                     other => panic!("bad object kind {other}"),
                 },
                 total_len: u64_field(fields, "total_len") as u16,

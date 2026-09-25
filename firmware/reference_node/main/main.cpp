@@ -61,6 +61,14 @@
 namespace {
 constexpr char kTag[] = "RouteLoomRef";
 
+// NVS codec state uses CPU-only reads and writes, so the C5 member image
+// keeps it in LP SRAM while HP SRAM remains available to radio traffic.
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC && CONFIG_IDF_TARGET_ESP32C5
+#define ROUTELOOM_MEMBER_C5_LP RTC_DATA_ATTR
+#else
+#define ROUTELOOM_MEMBER_C5_LP
+#endif
+
 using routeloom::ByteView;
 using routeloom::DeliveryResult;
 using routeloom::MessageId;
@@ -105,7 +113,21 @@ class LogObserver final : public NodeObserver {
     ESP_LOGW(kTag, "diagnostic reason=%s peer=%llu message=%s", reason,
              static_cast<unsigned long long>(peer),
              message == nullptr ? "none" : "present");
+    // Unknown-epoch group traffic is the backstop pull trigger for a
+    // missed rotation Wake (records only; the owner polls the flag).
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+    if (owner_ != nullptr && reason != nullptr &&
+        std::strcmp(reason, "GROUP_KEY_RETIRED") == 0) {
+      owner_->note_group_key_retired();
+    }
+#endif
   }
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  void bind_owner(EspNowSecurityOwner* owner) noexcept { owner_ = owner; }
+
+ private:
+  EspNowSecurityOwner* owner_{nullptr};
+#endif
 };
 
 [[maybe_unused]] int hex_value(const char value) noexcept {
@@ -615,7 +637,7 @@ extern "C" void app_main(void) {
   // is reported and its consumers fail closed (the maintenance console
   // refuses, the join FSM of P3-4 will treat it as unprovisioned), while
   // the node keeps routing.
-  static routeloom::espnow::Sdkv1Stores sdkv1_stores(
+  static ROUTELOOM_MEMBER_C5_LP routeloom::espnow::Sdkv1Stores sdkv1_stores(
       routeloom::sdkv1::kResumeNodeSlots);
   status = sdkv1_stores.open(routeloom::espnow::kSecurityNvsPartition);
   if (!status) {
@@ -852,6 +874,9 @@ extern "C" void app_main(void) {
 #endif
 
   static LogObserver observer;
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  observer.bind_owner(&owner);
+#endif
   EspNowRuntimeConfig config{};
 #if CONFIG_ROUTELOOM_TRUST_STORE
   // The committed trust image owns the deployment's network identity;
@@ -1241,6 +1266,11 @@ extern "C" void app_main(void) {
   config_target.attach_trust_store(trust_store, config_floor);
 #endif
   runtime.node().set_config_sink(&config_target);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  // Authority lane (G-SEC P5): subtype-9 carriers and kind-7 objects route
+  // to the Owner's mesh endpoint before the config path sees them.
+  config_target.attach_authority(owner.authority_demux());
+#endif
   // The committed config image drives the live relay gate from now on
   // (field 3 relay_allowed); attach after the sink so the gate reflects the
   // durable snapshot, not just the compile-time default.

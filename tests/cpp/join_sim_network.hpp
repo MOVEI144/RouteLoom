@@ -412,6 +412,7 @@ class SimAuthority {
   }
 
   AuthorityPolicy policy;
+  void set_package(const SitePackage& package) { package_ = package; }
   AuthorityLedger ledger;
 
   // Transcript of the latest exchange (for replay injection).
@@ -698,6 +699,7 @@ class SimSite {
   }
 
   void set_policy(const AuthorityPolicy& policy) { authority_.policy = policy; }
+  void set_package(const SitePackage& package) { authority_.set_package(package); }
   void set_proxy_muted(std::size_t index, bool muted) {
     if (index < proxies_.size()) proxies_[index]->muted = muted;
   }

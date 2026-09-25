@@ -59,7 +59,7 @@ pub mod usb;
 pub use usb::owns;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use routeloom_edhoc::{
     crypto::random_scalar, error_message_unspecified, error_message_wrong_suite, EadItem,
@@ -70,6 +70,7 @@ use routeloom_join::{
     RemovalNotice, SiteOffer, SitePackage, DAMS_SIZE, EXPORTER_LABEL_DAMS,
     JOIN_EAD_CREDENTIAL_LABEL, PENDING_RETRY_MIN_S, RETRY_AFTER_MAX_S,
 };
+use routeloom_protocol::authority::CarrierKind;
 use routeloom_provision::credential::credential_kid;
 use routeloom_provision::sdkv1::cert::{
     cert_decode, cert_issue, cert_verify, CertClaims, CertType, CERT_MAX,
@@ -83,6 +84,11 @@ use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{fill_random, RootSigner};
 
 use crate::receive_log::hex_lower;
+use authority_channel::{
+    ActivateParams, AuthorityChannels, AuthorityDirectory, AuthorityOutbound, AuthorityTransport,
+    ChannelConfig, ChannelEvent, ChannelLostReason, ChannelMember, ChannelSendError, ConfirmParams,
+    PullReason, StoredState, UpdateCause, UpdateParams, UpdateResult,
+};
 use group_keys::{
     decode_last_rotation, encode_last_rotation, fresh_group_key, gk_id, validate_group_keys,
     AckOutcome, ConfirmOutcome, GkSecret, GkSend, GroupKeyAck, GroupKeyCommand, GroupKeyPull,
@@ -123,6 +129,66 @@ pub const DECISIONS_CAP: usize = 1024;
 /// Operations kept for `operations.get` (oldest evicted, but never the
 /// live rotation's — design §6.1 keeps 1024).
 pub const OPERATIONS_CAP: usize = 1024;
+/// Wire pulls answered per device (P5 §4), on the monotonic clock.
+const PULL_BUCKET_MS: u64 = 60_000;
+
+/// A wire pull that arrived inside its device's 60 s bucket and folded
+/// into the one pending answer (§4: repeated Wake/unknown-epoch pulls
+/// merge into a pending bit; the latest repeat wins). Identity
+/// (kid/DAMS) is never cached here — the serve re-reads the live row
+/// and re-fences, so a removal in between still wins.
+struct PendingPull {
+    current: u32,
+    next: u32,
+    reason: u8,
+    generation: u32,
+    request_id: u64,
+}
+
+/// The per-device 60 s pull bucket (§4): the last answer plus the
+/// coalesced repeat, if any.
+#[derive(Default)]
+struct PullBucket {
+    last_ms: u64,
+    pending: Option<PendingPull>,
+}
+
+/// Channel enums cross into the GK state only through these explicit
+/// tables (no wildcard, no bare `as` cast): a new variant breaks the
+/// build until the mapping names it.
+fn pull_reason_u8(reason: PullReason) -> u8 {
+    match reason {
+        PullReason::UnknownNewerEpoch => 1,
+        PullReason::BootReconnectSync => 2,
+        PullReason::LostAckRepair => 3,
+    }
+}
+
+fn update_result_u8(result: UpdateResult) -> u8 {
+    match result {
+        UpdateResult::Durable => 0,
+        UpdateResult::Conflict => 1,
+        UpdateResult::StorageFailure => 2,
+        UpdateResult::Busy => 3,
+        UpdateResult::Unsupported => 4,
+    }
+}
+
+fn stored_state_u8(state: StoredState) -> u8 {
+    match state {
+        StoredState::None => 0,
+        StoredState::Staged => 1,
+        StoredState::Active => 2,
+    }
+}
+
+fn rotation_cause(cause: RotationCause) -> UpdateCause {
+    match cause {
+        RotationCause::Periodic => UpdateCause::Periodic,
+        RotationCause::Removal => UpdateCause::Removal,
+        RotationCause::Manual => UpdateCause::Manual,
+    }
+}
 
 fn evictable_operation(
     operations: &BTreeMap<u64, Operation>,
@@ -581,6 +647,24 @@ pub struct SiteAuthority {
     /// after release). `None` until wired: commands queue and drop, and
     /// targets honestly stay unknown until then.
     gk_transport: Option<Arc<dyn GroupKeyTransport>>,
+    /// The authority channel endpoint set (P5 §2.1: owned inside the
+    /// authority, fenced on the live rows at every dispatch). Handshakes
+    /// land here from the USB lane; sealed carriers leave through
+    /// `authority_transport`, drained by `SiteService::with`.
+    channels: AuthorityChannels,
+    /// The USB fragment sink for sealed carriers. `None` until the lane
+    /// binds a capable session: outbound carriers drop, and the status
+    /// block reports `attached: false` instead of implying delivery.
+    authority_transport: Option<Arc<dyn AuthorityTransport>>,
+    /// Channel up/down hints for the GK transport's `channel_ready`
+    /// cache, drained by `SiteService::with` with the lock released
+    /// (the tick reads the cache under the lock, where a callback
+    /// would deadlock). Bounded: one entry per mapped channel event.
+    channel_hints: Vec<(u64, Option<[u8; 32]>)>,
+    /// One pull bucket per device (§4). RAM-only: a restart re-opens
+    /// every bucket, which only costs one early answer per device.
+    /// Bounded by the member count; revoke drops the row.
+    pull_buckets: HashMap<u64, PullBucket>,
     next_serial: u32,
     revision: u32,
     ledger_seq: u64,
@@ -600,6 +684,28 @@ pub struct SiteAuthority {
     rrs_history: BTreeMap<u32, Vec<RevocationEntry>>,
     rrs_history_digests: BTreeMap<u32, [u8; 32]>,
     rrs_latest_object: Vec<u8>,
+}
+
+/// The channel layer's read-only view of the live rows (P5 §4: every
+/// handshake accept, dispatch and GK send re-checks the full binding —
+/// member, node, kid, generation, network, DAMS incarnation). A reborrow
+/// struct, because the channel calls run under `&mut channels` while the
+/// rows stay borrowed.
+struct AuthorityDir<'a> {
+    devices: &'a BTreeMap<u64, DeviceRow>,
+    network: u64,
+}
+
+impl AuthorityDirectory for AuthorityDir<'_> {
+    fn lookup(&self, device: u64) -> Option<ChannelMember> {
+        self.devices.get(&device).map(|row| ChannelMember {
+            member: row.member,
+            kid: row.kid,
+            generation: row.generation,
+            dams: row.dams,
+            network: self.network,
+        })
+    }
 }
 
 impl SiteAuthority {
@@ -944,6 +1050,11 @@ impl SiteAuthority {
         if !init.is_empty() {
             store.commit(&init).map_err(|e| e.to_string())?;
         }
+        // Read before the struct literal moves `gks` and `id`.
+        let channel_gk_epoch = gks.active_epoch();
+        let channel_network = id.network;
+        let channel_site_id = id.site_id;
+        let channel_site_epoch = id.site_claims.site_epoch;
         Ok(Self {
             policy,
             devices,
@@ -958,6 +1069,16 @@ impl SiteAuthority {
             gks,
             gk_outbox: Vec::new(),
             gk_transport: None,
+            channels: AuthorityChannels::new(ChannelConfig {
+                network: channel_network,
+                site_id: channel_site_id,
+                site_epoch: channel_site_epoch,
+                rs_epoch,
+                gk_epoch: channel_gk_epoch,
+            }),
+            authority_transport: None,
+            channel_hints: Vec::new(),
+            pull_buckets: HashMap::new(),
             next_serial: meta_u32(&snapshot, "next_serial")?.unwrap_or(1),
             revision,
             ledger_seq,
@@ -1721,6 +1842,7 @@ impl SiteAuthority {
     /// lifecycle on both axes (§6.2).
     pub fn tick(&mut self, time: HostTime) {
         self.tick_joins(time.unix_ms);
+        self.tick_channels(time);
         self.tick_gk(time);
     }
 
@@ -2415,6 +2537,12 @@ impl SiteAuthority {
         self.rrs_history_digests.insert(rs_epoch, sha256(&object));
         self.rrs_latest_object = object;
         self.devices.insert(removed.node, removed);
+        // The row is dead: retire the channel and its ready hint now
+        // rather than at the next dispatch, and echo the new epochs.
+        self.channels.retire_device(row.node);
+        self.channel_hints.push((row.node, None));
+        self.pull_buckets.remove(&row.node);
+        self.channels.set_epochs(rs_epoch, self.gks.active_epoch());
         self.publish_staging_plan(plan, op.clone(), evicted);
         for rop in retired {
             self.operations.insert(rop.id, rop);
@@ -2699,6 +2827,9 @@ impl SiteAuthority {
     /// then the 24 h periodic start. Every commit below publishes to RAM
     /// only on success and queues nothing on failure.
     fn tick_gk(&mut self, time: HostTime) {
+        // Coalesced pulls first: the serve re-arms rotation targets
+        // before the round below spends its tokens.
+        self.serve_pending_pulls(time);
         // A restored activating/catching-up rotation takes a fresh cleanup
         // window (never a restored deadline); restored staging activates
         // below as expired.
@@ -2881,6 +3012,8 @@ impl SiteAuthority {
             return;
         }
         self.gks.publish_activation(time.unix_ms, time.mono_ms);
+        self.channels
+            .set_epochs(self.rs_epoch, self.gks.active_epoch());
         let (_, _, _, unknown) = self.gks.counts();
         self.event(
             time.unix_ms,
@@ -3430,7 +3563,10 @@ impl SiteAuthority {
     /// after the active ACK); between active and staged it stages directly;
     /// past the issued high-water mark the ledger contradicts the device
     /// and the pull is refused with a diagnostic. A pull never moves the
-    /// global phase on its own claim.
+    /// global phase on its own claim. A keyless pull (`current == 0`)
+    /// is the maximally-behind case, not a malformed one: the fence
+    /// above already proved a live row, so it is served the active key
+    /// like any behind member instead of waiting for the next rotation.
     pub fn on_group_key_pull(&mut self, pull: GroupKeyPull, time: HostTime) -> PullOutcome {
         if !self.channel_member(pull.node, &pull.kid, pull.generation, &pull.dams) {
             self.bump_gk_rejected("pull_fence");
@@ -3438,7 +3574,7 @@ impl SiteAuthority {
                 reason: "pull_fence",
             };
         }
-        if pull.current == 0 || pull.reason == 0 || pull.reason > 3 {
+        if pull.reason == 0 || pull.reason > 3 {
             self.bump_gk_rejected("pull_shape");
             return PullOutcome::Rejected {
                 reason: "pull_shape",
@@ -3571,6 +3707,421 @@ impl SiteAuthority {
         ConfirmOutcome::Confirmed
     }
 
+    /// One reassembled authority carrier from the USB lane (P5 §3.3/§4).
+    /// The lane verified the USB session; the channel verifies the member
+    /// binding, the AEAD and the replay window before any event here runs.
+    /// `rng` fills the R2 responder nonce (OS randomness in production,
+    /// scripted in tests). Verified business drains synchronously into
+    /// the member/GK state below — the lane never sees channel events.
+    pub fn handle_authority_up(
+        &mut self,
+        device: u64,
+        kind: CarrierKind,
+        bytes: &[u8],
+        time: HostTime,
+        rng: &mut dyn FnMut(&mut [u8]) -> bool,
+    ) {
+        let directory = AuthorityDir {
+            devices: &self.devices,
+            network: self.id.network,
+        };
+        self.channels
+            .on_carrier(&directory, device, kind, bytes, time.unix_ms, rng);
+        // Drain first: mapping borrows the rows and the store.
+        let mut pending = Vec::new();
+        while let Some(event) = self.channels.poll_event() {
+            pending.push(event);
+        }
+        for event in pending {
+            self.map_channel_event(event, time);
+        }
+    }
+
+    /// Advances the channel timers (handshake expiry, 10-minute idle
+    /// retire) and maps whatever they emit — an idle-retired channel
+    /// clears its `channel_ready` hint here, not at the next dispatch.
+    fn tick_channels(&mut self, time: HostTime) {
+        self.channels.tick(time.unix_ms);
+        let mut pending = Vec::new();
+        while let Some(event) = self.channels.poll_event() {
+            pending.push(event);
+        }
+        for event in pending {
+            self.map_channel_event(event, time);
+        }
+    }
+
+    /// Answers coalesced pulls whose 60 s bucket re-opened (§4): the
+    /// latest throttled pull per device is served once, as if it had
+    /// just arrived. The serve consumes the next window, so a burst of
+    /// repeats costs one answer per window — never one per pull, and
+    /// never a drop the device must re-time itself. Identity comes
+    /// from the live row, re-fenced like any wire pull.
+    fn serve_pending_pulls(&mut self, time: HostTime) {
+        let due: Vec<u64> = self
+            .pull_buckets
+            .iter()
+            .filter(|(_, bucket)| {
+                bucket.pending.is_some()
+                    && time.mono_ms.saturating_sub(bucket.last_ms) >= PULL_BUCKET_MS
+            })
+            .map(|(device, _)| *device)
+            .collect();
+        for device in due {
+            let Some(bucket) = self.pull_buckets.get_mut(&device) else {
+                continue;
+            };
+            let Some(coalesced) = bucket.pending.take() else {
+                continue;
+            };
+            bucket.last_ms = time.mono_ms;
+            self.answer_pull(device, coalesced, true, time);
+        }
+    }
+
+    /// Answers one pull — wire or coalesced (`coalesced` tells the
+    /// diagnostic apart) — against the live row, re-fenced like any
+    /// wire pull.
+    fn answer_pull(&mut self, device: u64, pull: PendingPull, coalesced: bool, time: HostTime) {
+        let Some(row) = self.devices.get(&device).cloned() else {
+            self.bump_gk_rejected("pull_race");
+            return;
+        };
+        let outcome = self.on_group_key_pull(
+            GroupKeyPull {
+                node: device,
+                kid: row.kid,
+                generation: pull.generation,
+                dams: row.dams,
+                current: pull.current,
+                next: pull.next,
+                reason: pull.reason,
+            },
+            time,
+        );
+        let (outcome, detail) = match outcome {
+            PullOutcome::Answered => ("answered", ""),
+            PullOutcome::Rejected { reason } => ("rejected", reason),
+        };
+        self.event(
+            time.unix_ms,
+            format!(
+                "\"kind\":\"authority.pull\",\"device_id\":\"{}\",\"request_id\":{},\"current\":{},\"next\":{},\"outcome\":\"{outcome}\",\"detail\":\"{detail}\",\"coalesced\":{coalesced}",
+                h16(device),
+                pull.request_id,
+                pull.current,
+                pull.next
+            ),
+        );
+    }
+
+    /// Maps one verified channel event into member/GK state. Every arm is
+    /// fenced on the live row again: a removal committed between the
+    /// dispatch and this mapping still wins.
+    fn map_channel_event(&mut self, event: ChannelEvent, time: HostTime) {
+        match event {
+            ChannelEvent::ChannelReady { device } => {
+                // The channel fenced the full binding before emitting
+                // this; the row DAMS is the ready incarnation.
+                let dams = self.devices.get(&device).map(|row| row.dams);
+                self.channel_hints.push((device, dams));
+                self.touch_member(device, time.unix_ms);
+                self.event(
+                    time.unix_ms,
+                    format!(
+                        "\"kind\":\"authority.channel_ready\",\"device_id\":\"{}\"",
+                        h16(device)
+                    ),
+                );
+            }
+            ChannelEvent::ChannelLost { device, reason } => {
+                self.channel_hints.push((device, None));
+                let reason = match reason {
+                    ChannelLostReason::Idle => "idle",
+                    ChannelLostReason::StaleMember => "stale_member",
+                    ChannelLostReason::CounterExhausted => "counter_exhausted",
+                };
+                self.event(
+                    time.unix_ms,
+                    format!(
+                        "\"kind\":\"authority.channel_lost\",\"device_id\":\"{}\",\"reason\":\"{reason}\"",
+                        h16(device)
+                    ),
+                );
+            }
+            ChannelEvent::JoinConfirm { device, confirm } => {
+                let Some(row) = self.devices.get(&device).cloned() else {
+                    // The channel fenced this at dispatch; a removal won
+                    // the race before the mapping ran.
+                    self.event(
+                        time.unix_ms,
+                        format!(
+                            "\"kind\":\"authority.error\",\"reason\":\"gk_confirm_race\",\"device_id\":\"{}\"",
+                            h16(device)
+                        ),
+                    );
+                    return;
+                };
+                match self.member_confirmed(
+                    device,
+                    confirm.generation,
+                    &confirm.cert_hash,
+                    &row.dams,
+                    time.unix_ms,
+                ) {
+                    ConfirmOutcome::Confirmed | ConfirmOutcome::AlreadyConfirmed => {
+                        // ACK only after the durable fact exists; a
+                        // duplicate is ACKed as the saved fact it is.
+                        let params = ConfirmParams {
+                            generation: confirm.generation,
+                            confirmed_generation: confirm.generation,
+                            authority_active: self.gks.active_epoch(),
+                        };
+                        let directory = AuthorityDir {
+                            devices: &self.devices,
+                            network: self.id.network,
+                        };
+                        if let Err(error) = self.channels.answer_join_confirm(
+                            &directory,
+                            device,
+                            params,
+                            time.unix_ms,
+                        ) {
+                            self.event(
+                                time.unix_ms,
+                                format!(
+                                    "\"kind\":\"authority.error\",\"reason\":\"gk_confirm_answer\",\"device_id\":\"{}\",\"detail\":\"{error}\"",
+                                    h16(device)
+                                ),
+                            );
+                        }
+                        self.sync_confirmed_member(&row, &confirm, time);
+                    }
+                    ConfirmOutcome::Stale => {
+                        self.bump_gk_rejected("confirm_stale");
+                    }
+                    ConfirmOutcome::UnknownDevice => {
+                        self.bump_gk_rejected("confirm_unknown");
+                    }
+                    ConfirmOutcome::StoreFailure => {
+                        self.bump_gk_rejected("confirm_store");
+                    }
+                }
+            }
+            ChannelEvent::Pull { device, pull } => {
+                // One pull per device per 60 s (P5 §4), on the monotonic
+                // clock: hopping reason/epochs cannot bypass the bucket.
+                // A throttled pull is not dropped — it folds into the
+                // device's pending bit (latest wins), answered once the
+                // bucket re-opens. The bucket lives at the wire entry —
+                // not inside `on_group_key_pull` — so the
+                // confirm-accompanying sync stays the one blessed
+                // immediate answer.
+                let pending = PendingPull {
+                    current: pull.current,
+                    next: pull.next,
+                    reason: pull_reason_u8(pull.reason),
+                    generation: pull.generation,
+                    request_id: pull.request_id,
+                };
+                let throttled = self.pull_buckets.get(&device).is_some_and(|bucket| {
+                    time.mono_ms.saturating_sub(bucket.last_ms) < PULL_BUCKET_MS
+                });
+                if throttled {
+                    let request_id = pending.request_id;
+                    self.pull_buckets.entry(device).or_default().pending = Some(pending);
+                    self.event(
+                        time.unix_ms,
+                        format!(
+                            "\"kind\":\"authority.pull_throttled\",\"device_id\":\"{}\",\"request_id\":{}",
+                            h16(device),
+                            request_id
+                        ),
+                    );
+                    return;
+                }
+                let bucket = self.pull_buckets.entry(device).or_default();
+                bucket.last_ms = time.mono_ms;
+                // A fresh wire answer supersedes any coalesced repeat:
+                // its epochs are newer by construction. Bucketed, so one
+                // event per pull cannot flush the ring; the request id
+                // proves the typed sink carried the head.
+                bucket.pending = None;
+                self.answer_pull(device, pending, false, time);
+            }
+            ChannelEvent::UpdateAck { device, ack } | ChannelEvent::ActivateAck { device, ack } => {
+                let Some(row) = self.devices.get(&device).cloned() else {
+                    self.bump_gk_rejected("ack_race");
+                    return;
+                };
+                // Only result 0 (durable) converges; anything else is
+                // recorded evidence, never applied state.
+                let _ = self.on_group_key_ack(
+                    GroupKeyAck {
+                        node: device,
+                        kid: row.kid,
+                        generation: ack.generation,
+                        dams: row.dams,
+                        epoch: ack.g,
+                        gk_id: ack.gk_id,
+                        result: update_result_u8(ack.result),
+                        stored_state: stored_state_u8(ack.stored_state),
+                    },
+                    time,
+                );
+            }
+            ChannelEvent::Passthrough {
+                device,
+                env_type,
+                body,
+            } => {
+                // P5 §3.1: types 5..8 have no P5 handler (the P6 sink is
+                // unwired) — diagnose, never fake a processed ACK.
+                self.event(
+                    time.unix_ms,
+                    format!(
+                        "\"kind\":\"authority.passthrough\",\"device_id\":\"{}\",\"env_type\":{env_type},\"body_len\":{}",
+                        h16(device),
+                        body.len()
+                    ),
+                );
+            }
+        }
+    }
+
+    /// The confirm-accompanying sync (P5 §4: the one immediate answer).
+    /// A keyless member converges to the active key at once — including
+    /// under a live rotation, where the target is marked behind like a
+    /// behind pull so the tick stages after the active ACK. A member
+    /// that already holds keys syncs through the pull path (fenced
+    /// again inside); the wire pull bucket does not apply here.
+    fn sync_confirmed_member(
+        &mut self,
+        row: &DeviceRow,
+        confirm: &authority_channel::JoinConfirmFields,
+        time: HostTime,
+    ) {
+        if confirm.current != 0 || confirm.next != 0 {
+            let _ = self.on_group_key_pull(
+                GroupKeyPull {
+                    node: row.node,
+                    kid: row.kid,
+                    generation: confirm.generation,
+                    dams: row.dams,
+                    current: confirm.current,
+                    next: confirm.next,
+                    reason: 2,
+                },
+                time,
+            );
+            return;
+        }
+        if let Some(target) = self.gks.target_mut(row.node) {
+            target.attempts = 0;
+            target.next_due_mono = 0;
+            target.active_first = true;
+            target.active_first_staged = false;
+        }
+        self.queue_update_active(row.node, time);
+    }
+
+    /// Seals one queued GK command into the channel outbox (the
+    /// channel-backed `GroupKeyTransport::send` funnels here with the
+    /// authority lock re-acquired — never from the tick, which holds
+    /// it). Update/Activate re-fence generation and DAMS against the
+    /// live row; Wake needs no channel but still needs a live member.
+    /// Failures are honest non-delivery: the rotation timers keep the
+    /// targets due and retry.
+    fn seal_group_key_command(
+        &mut self,
+        command: GroupKeyCommand,
+        expected_dams: Option<&[u8; 32]>,
+        now_ms: u64,
+    ) -> Result<(), ChannelSendError> {
+        let node = command.node();
+        let Some(row) = self.devices.get(&node).cloned() else {
+            return Err(ChannelSendError::StaleMember);
+        };
+        let directory = AuthorityDir {
+            devices: &self.devices,
+            network: self.id.network,
+        };
+        match command {
+            GroupKeyCommand::Wake { node } => self.channels.queue_wake(
+                &directory,
+                node,
+                self.id.site_claims.site_epoch,
+                self.gks.active_epoch(),
+            ),
+            GroupKeyCommand::Update {
+                node,
+                epoch,
+                key,
+                cause,
+                overlap_s,
+            } => {
+                if !row.member || expected_dams != Some(row.dams).as_ref() {
+                    self.channels.retire_device(node);
+                    return Err(ChannelSendError::StaleMember);
+                }
+                self.channels.send_update(
+                    &directory,
+                    node,
+                    UpdateParams {
+                        generation: row.generation,
+                        g: epoch,
+                        cause: rotation_cause(cause),
+                        overlap_s,
+                        gk: key.bytes(),
+                    },
+                    now_ms,
+                )
+            }
+            GroupKeyCommand::Activate {
+                node,
+                epoch,
+                gk_id,
+                cause,
+                overlap_s,
+            } => {
+                if !row.member || expected_dams != Some(row.dams).as_ref() {
+                    self.channels.retire_device(node);
+                    return Err(ChannelSendError::StaleMember);
+                }
+                self.channels.send_activate(
+                    &directory,
+                    node,
+                    ActivateParams {
+                        generation: row.generation,
+                        g: epoch,
+                        gk_id,
+                        cause: rotation_cause(cause),
+                        overlap_s,
+                    },
+                    now_ms,
+                )
+            }
+        }
+    }
+
+    /// Attaches the USB fragment sink for sealed carriers; the lane calls
+    /// this on every capable bind (and clears it on unbind by passing
+    /// `None`), so `attached` in the status block tracks the live link.
+    pub fn set_authority_transport(&mut self, transport: Option<Arc<dyn AuthorityTransport>>) {
+        self.authority_transport = transport;
+    }
+
+    /// Sealed carriers queued since the last drain, for `SiteService::with`
+    /// to hand to the transport with the lock released.
+    fn take_authority_outbound(&mut self) -> Vec<AuthorityOutbound> {
+        self.channels.take_outbound()
+    }
+
+    /// Channel up/down hints queued since the last drain.
+    fn take_channel_hints(&mut self) -> Vec<(u64, Option<[u8; 32]>)> {
+        std::mem::take(&mut self.channel_hints)
+    }
+
     pub fn set_policy(&mut self, policy: JoinPolicy) -> Result<String, SiteError> {
         policy
             .validate()
@@ -3612,10 +4163,12 @@ impl SiteAuthority {
             ),
             None => ("stable", "null".to_string()),
         };
-        // No authority channel exists yet (PR1 implements it, PR4 wires
-        // it): attached/channels stay false/0 until then.
+        // The lane binds/unbinds the fragment sink on every session
+        // boundary, so `attached` tracks the live link — never implied.
+        let authority_attached = self.authority_transport.is_some();
+        let authority_channels = self.channels.stats().channels;
         format!(
-            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":false,\"channels\":0}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
+            "{{\"site_id\":\"{}\",\"network\":\"{}\",\"network_low32\":\"{:08x}\",\"site_epoch\":{},\"site_cert_serial\":{},\"sak_fingerprint\":\"{}\",\"device_ca_id\":\"{}\",\"rs_epoch\":{},\"gk_epoch\":{},\"gk_staged\":{staged},\"gk\":{{\"phase\":\"{phase}\",\"cause\":{cause},\"targets\":{targets},\"staged_ack\":{staged_ack},\"active_ack\":{active_ack},\"unknown\":{unknown}}},\"authority\":{{\"attached\":{authority_attached},\"channels\":{authority_channels}}},\"member_cap\":{MEMBER_CAP},\"members\":{members},\"members_unconfirmed\":{unconfirmed},\"removed\":{removed},\"discovered\":{},\"join_requests\":{},\"live_exchanges\":{},\"channel\":{},\"channel_epoch\":{},\"gateways\":[{gateways}],\"membership_revision\":{},\"ledger_seq\":{},\"storage_durable\":{},\"policy\":{},\"counters\":{},\"clock\":\"host_unix_ms\",\"now_ms\":{}}}",
             h16(self.id.site_id),
             h16(self.id.network),
             self.id.network & 0xFFFF_FFFF,
@@ -3983,10 +4536,67 @@ mod recovery_ead_tests {
 
 // --- service wrapper ---------------------------------------------------------------------------
 
+/// The channel-backed `GroupKeyTransport`: `send` seals the command into
+/// the authority's channel outbox through `SiteService::seal_group_key`
+/// (re-fenced at dispatch; the sealed carrier leaves via the authority
+/// transport when `with` drains it), and `channel_ready` reads a hint
+/// cache the service refreshes with every lock released. Holds the
+/// service weakly: once the daemon drops it, sends fail silent and
+/// readiness reads false instead of panicking on an upgrade.
+pub struct ChannelGroupKeyTransport {
+    service: Weak<SiteService>,
+    ready: Mutex<HashMap<u64, [u8; 32]>>,
+}
+
+impl ChannelGroupKeyTransport {
+    pub fn new(service: &Arc<SiteService>) -> Arc<Self> {
+        Arc::new(Self {
+            service: Arc::downgrade(service),
+            ready: Mutex::new(HashMap::new()),
+        })
+    }
+}
+
+impl GroupKeyTransport for ChannelGroupKeyTransport {
+    fn channel_ready(&self, node: u64, expected_dams: &[u8; 32]) -> bool {
+        // Lock-free against the authority (the tick calls this holding
+        // it): a hint cache, re-fenced at every `send`.
+        self.ready
+            .lock()
+            .expect("gk ready cache poisoned")
+            .get(&node)
+            .is_some_and(|dams| dams == expected_dams)
+    }
+
+    fn send(&self, command: GroupKeyCommand, expected_dams: Option<&[u8; 32]>) {
+        // Runs with the authority lock released (`SiteService::with`
+        // guarantees it), so the seal may re-acquire it; a dropped
+        // service or a seal failure is honest non-delivery — the
+        // rotation timers keep the target due and retry.
+        if let Some(service) = self.service.upgrade() {
+            let _ = service.seal_group_key(command, expected_dams, crate::now_ms());
+        }
+    }
+
+    fn note_channel(&self, node: u64, dams: Option<[u8; 32]>) {
+        let mut ready = self.ready.lock().expect("gk ready cache poisoned");
+        match dams {
+            Some(dams) => {
+                ready.insert(node, dams);
+            }
+            None => {
+                ready.remove(&node);
+            }
+        }
+    }
+}
+
 /// Thread-safe front of the authority: every entry point runs the
 /// authority under its lock, then — with the lock released — hands the
-/// outbound relay messages and GK commands to their transports and returns
-/// the events for the caller to append to the daemon's event ring.
+/// outbound relay messages and GK commands to their transports, refreshes
+/// the GK ready cache, drains the sealed authority carriers to the USB
+/// lane, and returns the events for the caller to append to the daemon's
+/// event ring.
 pub struct SiteService {
     gk_handoff: Mutex<()>,
     authority: Mutex<SiteAuthority>,
@@ -4032,12 +4642,37 @@ impl SiteService {
         };
         // GK commands leave with the lock released; without a transport
         // they drop (retries keep the targets due and honestly unknown).
-        if let Some(transport) = gk_transport {
+        // The channel-backed transport seals into the channel outbox
+        // here, so the drain below re-locks AFTER the sends.
+        if let Some(transport) = &gk_transport {
             for queued in gk_outbound {
                 transport.send(
                     queued.command,
                     queued.expected_dams.as_ref().map(GkSecret::bytes),
                 );
+            }
+        }
+        // Sealed carriers (from `f` and from the GK seals above) and the
+        // ready-cache hints, taken under one re-lock.
+        let (authority_outbound, authority_transport, hints) = {
+            let mut authority = self.authority.lock().expect("site authority poisoned");
+            (
+                authority.take_authority_outbound(),
+                authority.authority_transport.clone(),
+                authority.take_channel_hints(),
+            )
+        };
+        if let Some(transport) = &gk_transport {
+            for (node, dams) in hints {
+                transport.note_channel(node, dams);
+            }
+        }
+        // Without a bound lane the carriers drop; the status block says
+        // `attached: false`, and the rotation timers keep every target
+        // due, so nothing pretends to have been delivered.
+        if let Some(transport) = authority_transport {
+            for carrier in authority_outbound {
+                transport.deliver(carrier);
             }
         }
         drop(handoff);
@@ -4067,8 +4702,40 @@ impl SiteService {
         self.with(|a| a.set_group_key_transport(transport));
     }
 
+    pub fn set_authority_transport(&self, transport: Option<Arc<dyn AuthorityTransport>>) {
+        self.with(|a| a.set_authority_transport(transport));
+    }
+
     pub fn handle_up(&self, up: RelayUp, now_ms: u64) -> Events {
         self.with(|a| a.handle_up(up, now_ms)).1
+    }
+
+    pub fn handle_authority_up(
+        &self,
+        device: u64,
+        kind: CarrierKind,
+        bytes: &[u8],
+        time: HostTime,
+        rng: &mut dyn FnMut(&mut [u8]) -> bool,
+    ) -> Events {
+        self.with(|a| a.handle_authority_up(device, kind, bytes, time, rng))
+            .1
+    }
+
+    /// Seals one GK command into the channel outbox. Locks the authority
+    /// directly — call only with it released (the channel-backed
+    /// transport's `send`, which `with` runs unlocked) — and never
+    /// touches a transport, so the callback cannot recurse or deadlock.
+    fn seal_group_key(
+        &self,
+        command: GroupKeyCommand,
+        expected_dams: Option<&[u8; 32]>,
+        now_ms: u64,
+    ) -> Result<(), ChannelSendError> {
+        self.authority
+            .lock()
+            .expect("site authority poisoned")
+            .seal_group_key_command(command, expected_dams, now_ms)
     }
 
     pub fn tick(&self, time: HostTime) -> Events {
@@ -4081,8 +4748,21 @@ impl SiteService {
             .expect("site authority poisoned")
             .acl_network()
     }
+
+    /// The epochs the lane's bind-time QueryLocal carries (site, RS,
+    /// active GK). A plain read — no outbound, no events.
+    pub fn authority_epochs(&self) -> (u32, u32, u32) {
+        let authority = self.authority.lock().expect("site authority poisoned");
+        (
+            authority.id.site_claims.site_epoch,
+            authority.rs_epoch,
+            authority.gks.active_epoch(),
+        )
+    }
 }
 
+#[cfg(test)]
+mod authority_e2e;
 #[cfg(test)]
 mod e2e;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # 03 — 鍵階層・Wire v2 epochとの対応・SecurityProviderの変更
 
-用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。機器GKの保存・GroupEnd/Member scopeのportable部品は `sdkv1_group_keys` / `sdkv1_group_security` に実装し、`AuthorityClient` にOwner所有のGK状態を渡すと検証済みUpdate/Activateの保存読戻し後にだけdurable ACKを返す。mesh Ownerとの実結線・Host配布は別PRであり本番出荷認定ではない。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
+用途・方向・networkごとに鍵を分け、同じ秘密を二つの用途へ使わない（[セキュリティ契約](../../spec/security.md) §3）。§2.2のHKDFラベル・info形式、§3のnonce、§5.3のAuthorityEnvelope header、§6.1のgroup導出は、このbranchのC++/Rust共通vector（`protocol/sdkv1-golden/derivations/`、P1-4）で**凍結済み**。§5.3のenvelope body 4種・GK-id・USB fragment（0x64〜0x67）もC++/Rust共通vector（`protocol/sdkv1-golden/authority/`、G-SEC P5 PR1）で**凍結済み**。機器GKの保存・GroupEnd/Member scopeのportable部品は `sdkv1_group_keys` / `sdkv1_group_security` に実装し、`AuthorityClient` にOwner所有のGK状態を渡すと検証済みUpdate/Activateの保存読戻し後にだけdurable ACKを返す。mesh Ownerとの結線とHost配布はG-SEC P5 PR4で実装済みだが、本番出荷認定ではない。それ以外（Exporter context、EAD等）は採用案のまま。KDFはHKDF-SHA-256（RFC 5869、このbranchで[kdf.hpp](../../../components/routeloom/include/routeloom/kdf.hpp)として実装済み）とEDHOC Exporter（RFC 9528 §4.2.1）だけを使い、独自の暗号primitiveは作らない。
 
 ## 1. 鍵の木
 
@@ -78,7 +78,7 @@ Site Authority ── GK_g（32B乱数、authority channelで配布、RLS1）
 - K_authのinfo：06はinfoにlabelを付けていなかったが、§2.2の規則（全infoはlabelで始まる）に合わせ、saltと同じ`"RouteLoom/v1/resume-auth"`をinfoの先頭にも置く。saltはNUL無しのASCIIのまま。
 - authority／pending-joinの`node_R`：Site Authorityはmesh nodeではないため、`node_R = site_id`（RLS1とSiteOfferにある64bit値）とする。gatewayは最大4台で入れ替わるため束縛しない。
 - binding：routed（end／authority／pending-join）は上表の固定幅SHA-256。linkは観測MACの組（initiator→responderの向きで固定）とRLD1 carrierのtransaction digest（32B、P4-2で定義）を畳み込む。
-- AuthorityEnvelopeの上限：128Bを超えるとControlObjectで運ぶため、authenticated objectの上限2048Bを全長の上限とする。ciphertext 0Bは許す。
+- AuthorityEnvelopeの上限：120Bを超えるとControlObjectで運ぶため、authenticated objectの上限2048Bを全長の上限とする。ciphertext 0Bは許す。
 - EDHOC Exporter label（§2.1）とExporter contextはP2で実装するため、vectorは未作成（定数だけ`key_schedule.hpp`に置く）。
 
 ## 3. 暗号suiteとnonce
@@ -137,7 +137,7 @@ type: 1 JoinConfirm, 2 GroupKeyUpdate, 3 GroupKeyActivate, 4 GroupKeyPull, 5 Rev
       6 RemovalNotice, 7 GrantRenew, 8 TimeSample
 ```
 
-機器→gatewayはWire Control（FrameType 22）の新subtype、128Bを超えればControlObject（kind案 5 = AuthorityEnvelope）で、機器⇄gatewayのE2E context上を運ぶ。gatewayはUSB `0x64/0x65` fragment（＋`0x66/0x67` site-state、[07](07-host-api-tooling.md) §4）でhostへ渡し、**中身を復号できない**。authority側のreplay窓・counterはhostのstoreが持つ。body形式・GK-id・fragment形式は `protocol/sdkv1-golden/authority/` の共通vectorで凍結（G-SEC P5 PR1）。
+機器→gatewayはWire Control（FrameType 22）のsubtype 9、120Bを超えればControlObject（kind 7 = AuthorityEnvelope）で、機器⇄gatewayのE2E context上を運ぶ。gatewayはUSB `0x64/0x65` fragment（＋`0x66/0x67` site-state、[07](07-host-api-tooling.md) §4）でhostへ渡し、**中身を復号できない**。authority側のreplay窓・counterはhostのstoreが持つ。body形式・GK-id・fragment形式は `protocol/sdkv1-golden/authority/` の共通vectorで凍結（G-SEC P5 PR1）。
 
 ### 5.4 sleep端末
 

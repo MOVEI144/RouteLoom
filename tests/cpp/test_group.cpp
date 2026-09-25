@@ -25,13 +25,22 @@
 #include <utility>
 #include <vector>
 
+#include "routeloom/aead_gcm.hpp"
 #include "routeloom/group.hpp"
 #include "routeloom/group_replay.hpp"
 #include "routeloom/node.hpp"
 #include "routeloom/routing.hpp"
+#include "routeloom/sdkv1_group_keys.hpp"
+
+static_assert(sizeof(routeloom::sdkv1::GroupReplaySender) <= 48,
+              "replay epochs are shared across all group senders");
+#include "routeloom/sdkv1_group_security.hpp"
+#include "routeloom/sdkv1_records.hpp"
+#include "routeloom/sdkv1_store.hpp"
 #include "routeloom/types.hpp"
 #include "routeloom/wire.hpp"
 
+#include "test_sdkv1.hpp"
 #include "test_sim.hpp"
 
 namespace {
@@ -1763,6 +1772,136 @@ void test_hundred_node_burst() {
 
 }  // namespace
 
+// P5 PR4: the first GROUP_DATA frame under a staged next GK triggers the
+// implicit activation (Busy + promote pending), waits in the one-frame
+// hold, and is delivered after the Owner's durable promote — not dropped
+// onto the repair round. Uses the real GroupKeyState/Provider (builtin
+// GCM, RAM stores); only the staged update itself is caller-attested,
+// the wire verification being the authority suite's subject.
+void test_promote_hold_first_frame() {
+  keys::Secret staged_key{};
+  for (std::size_t i = 0; i < staged_key.size(); ++i)
+    staged_key[i] = static_cast<std::uint8_t>(0xA0 + i);
+
+  // Receiver: current g=5, next g=6 staged durably.
+  sdkv1_test::FaultyRecordStorage rx_storage(sdkv1::kSiteSlotBytes);
+  sdkv1::SiteStore rx_store(rx_storage);
+  CHECK_OK(rx_store.initialize());
+  const sdkv1::SiteRecord rx_site = sdkv1_test::site_record(3, 5);
+  CHECK_OK(rx_store.commit(rx_site));
+  sdkv1::GroupKeyState rx_keys(rx_store);
+  sdkv1::GroupKeyState::Input rx_begin{};
+  rx_begin.op = sdkv1::GroupKeyState::Op::Start;
+  rx_begin.boot = rx_site.boot_witness;
+  rx_begin.generation = 3;
+  CHECK_OK(rx_keys.advance(rx_begin, 1000));
+  sdkv1::GroupKeyState::Input rx_stage{};
+  rx_stage.op = sdkv1::GroupKeyState::Op::Stage;
+  rx_stage.generation = 3;
+  rx_stage.epoch = 6;
+  rx_stage.key = staged_key;
+  rx_stage.overlap_s = 10;
+  CHECK_OK(rx_keys.advance(rx_stage, 1000));
+  routeloom_test::TestSecurity rx_pairwise;
+  sdkv1::GroupSecurityProvider rx_provider(rx_keys, rx_pairwise,
+                                           *routeloom::builtin_aead_gcm(), 2);
+
+  // Sender: already on g=6 as its current.
+  sdkv1_test::FaultyRecordStorage tx_storage(sdkv1::kSiteSlotBytes);
+  sdkv1::SiteStore tx_store(tx_storage);
+  CHECK_OK(tx_store.initialize());
+  sdkv1::SiteRecord tx_site = sdkv1_test::site_record(3, 6);
+  tx_site.gk_current = staged_key;
+  CHECK_OK(tx_store.commit(tx_site));
+  sdkv1::GroupKeyState tx_keys(tx_store);
+  sdkv1::GroupKeyState::Input tx_begin{};
+  tx_begin.op = sdkv1::GroupKeyState::Op::Start;
+  tx_begin.boot = tx_site.boot_witness;
+  tx_begin.generation = 3;
+  CHECK_OK(tx_keys.advance(tx_begin, 1000));
+  routeloom_test::TestSecurity tx_pairwise;
+  // Group sources are gateways (the provider only seals for those).
+  const NodeId kSender = tx_site.gateways[0];
+  sdkv1::GroupSecurityProvider tx_provider(tx_keys, tx_pairwise,
+                                           *routeloom::builtin_aead_gcm(), kSender);
+
+  // A standalone receiver node (real provider, simulated radio).
+  routeloom_test::SimNetwork net;
+  routeloom_test::SimRadio radio(net, 2);
+  routeloom_test::CapturingObserver obs;
+  NodeConfig config{};
+  config.network = sdkv1_test::kNetworkLow;
+  config.node = 2;
+  config.route_gateways = {kSender, kInvalidNodeId};
+  config.route_advertisement_period_ms = kFastPeriodMs;
+  config.route_lifetime_ms = kFastLifetimeMs;
+  config.route_refresh_ticks = kScopedDefaultRefreshTicks;
+  config.message_session = 102;
+  config.boot_incarnation = 0xB002;
+  config.route_generation = 1;
+  config.link_epoch = 1;
+  config.end_epoch = 1;
+  MeshNode node(config, radio, rx_provider, obs);
+  routeloom_test::SimReplyPort reply(radio, 2, config.link_epoch);
+  reply.set_rx_context(kSender, 1);
+  node.set_reply_peer_port(&reply);
+  net.register_node(2, &node);
+  net.register_reply_port(2, &reply);
+  MonotonicMs now = 2000;
+  CHECK_OK(node.start(now));
+
+  // The sender seals one GROUP_DATA under g=6; the frame is link-wrapped
+  // 1->2 exactly like the relay path would.
+  wire::PlainFrame plain = group_plain_header(
+      kSender, MessageId{tx_site.boot_witness, kGroupSequenceFlag | 1});
+  plain.header.network = sdkv1_test::kNetworkLow;
+  plain.header.end_epoch = 6;
+  GroupDataHeader head{};
+  head.priority = Priority::Normal;
+  CHECK_OK(encode_group_data(head, ByteView{reinterpret_cast<const std::uint8_t*>("HELLO"), 5},
+                             MutableByteView{plain.payload.data(), plain.payload.size()},
+                             plain.payload_size));
+  wire::LinkOpenedFrame sealed{};
+  CHECK_OK(wire::seal_group(plain, kSender, tx_provider, sealed));
+  sealed.header.next_hop = kSender;
+  wire::EncodedFrame encoded{};
+  CHECK_OK(wire::forward(sealed, kSender, 2, 1, sealed.header.remaining_deadline_ms,
+                         tx_provider, encoded));
+  const RadioRxMetadataV2 meta = routeloom_test::sim_rx_metadata(&reply, kSender);
+  CHECK_OK(node.on_radio_receive(
+      kSender, encoded.view(), meta, now));
+
+  // The trigger authenticated but the promote is outstanding: held, not
+  // delivered, not failed.
+  CHECK(node.group_stats().promote_holds == 1);
+  CHECK(node.group_stats().open_failures == 0);
+  CHECK(obs.group_messages.empty());
+  CHECK(rx_provider.group_promotion_pending());
+
+  // The Owner's Tick lands the durable promote; the next poll retries
+  // the held frame and delivers it exactly once.
+  sdkv1::GroupKeyState::Input tick{};
+  tick.op = sdkv1::GroupKeyState::Op::Tick;
+  CHECK_OK(rx_keys.advance(tick, now));
+  CHECK(!rx_provider.group_promotion_pending());
+  now += 10;
+  CHECK_OK(node.poll(now));
+  CHECK(obs.group_messages.size() == 1);
+  CHECK(obs.group_messages[0].payload ==
+        std::vector<std::uint8_t>({'H', 'E', 'L', 'L', 'O'}));
+  CHECK(node.group_stats().delivered == 1);
+  std::uint32_t promoted = 0;
+  CHECK_OK(rx_provider.tx_epoch(SecurityScope::Group, kBroadcastNodeId, promoted));
+  CHECK(promoted == 6);
+
+  // A repair duplicate of the same frame dedups: still delivered once.
+  CHECK_OK(node.on_radio_receive(
+      kSender, encoded.view(), meta, now));
+  now += 10;
+  CHECK_OK(node.poll(now));
+  CHECK(obs.group_messages.size() == 1);
+}
+
 int main(int argc, char** argv) {
   const std::string mode = argc > 1 ? argv[1] : "";
   if (mode.empty() || mode == "unit") {
@@ -1787,6 +1926,7 @@ int main(int argc, char** argv) {
     test_authenticated_session_switch_commits();
     test_bad_payload_session_jump_is_ignored();
     test_unicast_ordering();
+    test_promote_hold_first_frame();
   }
   if (mode.empty() || mode == "scale") {
     test_hundred_node_alarm();

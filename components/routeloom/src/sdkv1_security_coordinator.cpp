@@ -21,6 +21,7 @@ bool deps_ready(const SecurityCoordinator::Deps& deps) noexcept {
          deps.rld1 != nullptr && deps.mesh != nullptr && deps.usb != nullptr &&
          deps.verifier != nullptr && deps.proxy_sealer != nullptr &&
          deps.bank_aead.seal != nullptr && deps.bank_aead.open != nullptr &&
+         deps.crypto_aead.seal != nullptr && deps.crypto_aead.open != nullptr &&
          deps.local_mac != MacAddress{} && deps.local_node != kInvalidNodeId &&
          deps.local_node != kBroadcastNodeId;
 }
@@ -41,9 +42,15 @@ SecurityCoordinator::SecurityCoordinator(const Deps& deps) noexcept
     : deps_(deps),
       hooks_(*deps.identity, *deps.site, *deps.revocations, *deps.local_revocation, this, this),
       bank_sink_(bank_),
-      session_provider_(bank_) {
+      pairwise_provider_(bank_),
+      group_keys_(*deps_.site),
+      group_provider_(group_keys_, pairwise_provider_, deps_.crypto_aead, deps_.local_node),
+      member_scope_(group_keys_, kMemberScopeRef),
+      authority_(deps_.crypto_aead, authority_port_, *this, authority_env_, &group_keys_) {
   // Fresh: no workspace side constructed. Boot builds the Joiner, the
-  // adoption swaps it for the member engine.
+  // adoption swaps it for the member engine; the adoption also starts
+  // the GK state and wants the authority channel.
+  authority_env_.bind(deps_.entropy);
 }
 
 SecurityCoordinator::~SecurityCoordinator() noexcept { destroy_workspace(); }
@@ -153,6 +160,18 @@ Status SecurityCoordinator::step(const CoordinatorEvent& event) noexcept {
     case CoordinatorEventKind::UsbSessionDown:
       status = on_usb(event);
       break;
+    case CoordinatorEventKind::UsbSessionUp:
+      status = on_usb_session_up(event.now);
+      break;
+    case CoordinatorEventKind::AuthorityRx:
+      status = on_authority_rx(event);
+      break;
+    case CoordinatorEventKind::AuthorityTx:
+      status = on_authority_tx(event);
+      break;
+    case CoordinatorEventKind::RequestPull:
+      status = on_request_pull(event);
+      break;
     case CoordinatorEventKind::ChannelReady:
       status = on_channel_ready(event);
       break;
@@ -199,6 +218,12 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
   out.link_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::Link));
   out.end_sessions = static_cast<std::uint32_t>(bank_.live_count(SecurityScope::EndToEnd));
   out.demands = bank_.demand_count();
+  const AuthoritySnapshot auth = authority_.snapshot();
+  out.authority_started = auth.started;
+  out.authority_ready = auth.state == AuthoritySnapshot::State::Ready;
+  out.authority_busy = auth.busy;
+  out.join_confirmed = join_confirmed_;
+  out.refresh_strikes = refresh_strikes_;
   return out;
 }
 
@@ -214,8 +239,8 @@ Status SecurityCoordinator::member_discovery_config(DiscoveryConfig& out) noexce
   out.network_hint = static_cast<std::uint32_t>(adopted_.network);
   out.capability_bits = kRld1CapMemberEdhocV1 | kRld1CapMemberResumeV1;
   out.scope_mode = ScopeMode::Required;
-  out.scope_provider = &gk_scope_;
-  out.scope = ScopeRef{1};
+  out.scope_provider = &member_scope_;
+  out.scope = kMemberScopeRef;
   out.cookie_bucket_ms = static_cast<std::uint32_t>(MemberCookie::kBucketMs);
   return Status::success();
 }
@@ -239,6 +264,16 @@ MonotonicMs SecurityCoordinator::next_deadline(const MonotonicMs now) const noex
     if (!member().engine.quiescent() || bank_.demand_count() != 0) return now;
     for (const auto& entry : member().demux) {
       if (entry.used) sooner(entry.expires_at);
+    }
+    // A pending GK promote and the authority channel join the schedule.
+    if (group_keys_.promotion_pending()) return now;
+    if (authority_wanted_ && !authority_.snapshot().started) {
+      const MonotonicMs retry = last_authority_start_ > kJoinNoDeadline - 1000
+                                    ? kJoinNoDeadline
+                                    : last_authority_start_ + 1000;
+      sooner(retry);
+    } else {
+      sooner(authority_.next_deadline());
     }
   }
   if (removal_holdoff_armed_) sooner(removal_holdoff_at_);
@@ -266,6 +301,12 @@ bool SecurityCoordinator::quiescent_locked() const noexcept {
     for (const auto& entry : member().demux) {
       if (entry.used) return false;
     }
+    // A pending GK promote (a durable flash write) holds sleep off; the
+    // authority channel naps with the device instead — staged bytes, a
+    // handshake or backoff resume on Wake, and deep sleep closes the
+    // channel (PR5). Gating sleep on channel idleness would wedge a
+    // device whose host is away.
+    if (group_keys_.promotion_pending()) return false;
     return true;
   }
   return true;
@@ -319,6 +360,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
   if (sleeping_) return Status::success();
   if (mode_ == CoordinatorMode::ZeroTouch) {
     drain_joiner(now);
+    maybe_abandon_refresh(now);
     return Status::success();
   }
   if (mode_ != CoordinatorMode::Member) return Status::success();
@@ -412,6 +454,8 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
   drive_engine(now);
   member().proxy.poll(now);
   if (member().gateway_active) member().gateway.poll(now);
+  watch_linkless(now);   // stale-GK evidence accrues toward a refresh
+  drive_authority(now);  // GK tick/promote, channel tick, deferred start
   if (removal_holdoff_armed_ && now >= removal_holdoff_at_) {
     removal_holdoff_armed_ = false;
     hooks_.set_holdoff_elapsed(true);
@@ -798,6 +842,7 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
       (void)installed_link(result, now);
+      note_link_established();
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
@@ -809,6 +854,7 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
           entry = DemuxEntry{};
         }
       }
+      note_link_failed();
     }
   }
 }
@@ -1360,10 +1406,14 @@ Status SecurityCoordinator::on_usb(const CoordinatorEvent& event) noexcept {
       // USB disconnect: USB-bound state drops, never reused. A direct
       // join run dies with its transport; the firmware re-boots (radio)
       // or stops from the Stopped snapshot. Gateway relays abort
-      // themselves: the USB port refuses their ups from here on.
+      // themselves: the USB port refuses their ups from here on. The
+      // authority channel suspends with the session (only USB-gateway
+      // builds see this event, and their channel rides USB directly);
+      // UsbSessionUp restarts it.
       if (mode_ == CoordinatorMode::ZeroTouch && usb_direct_) {
         (void)joiner().stop(event.now);
       }
+      suspend_authority();
       return Status::success();
     }
     default:
@@ -1431,10 +1481,23 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
     }
     stop_traffic();
   }
+  suspend_authority();
+  {
+    // Full stop: the GK state parks (counters and windows stay in RAM
+    // for the boot; the next adoption rebinds or keeps the binding).
+    GroupKeyState::Input stop{};
+    stop.op = GroupKeyState::Op::Stop;
+    (void)group_keys_.advance(stop, now);
+  }
   destroy_workspace();  // wipes the live side (joiner or member)
   for (auto& slot : staged_) slot = StagedFrame{};
   action_ = CoordinatorAction{};
   action_pending_ = false;
+  authority_wanted_ = false;
+  join_confirmed_ = false;
+  refresh_active_ = false;
+  refresh_strikes_ = 0;
+  last_unknown_generation_ = 0;
   adopted_ = CoordinatorMemberConfig{};
   member_valid_ = false;
   tune_outstanding_ = 0;
@@ -1447,6 +1510,270 @@ Status SecurityCoordinator::on_stop(const MonotonicMs now) noexcept {
   removal_holdoff_armed_ = false;
   mode_ = CoordinatorMode::Fresh;
   return Status::success();
+}
+
+// --- Authority channel (G-SEC P5) ----------------------------------------------------------------
+
+namespace {
+
+constexpr std::uint8_t kRefreshStrikesMax = 3;
+constexpr MonotonicMs kRefreshAbandonMs = 300000;   // 5 min without MemberReady
+constexpr MonotonicMs kRefreshCooldownMs = 600000;  // 10 min after an abandoned refresh
+constexpr MonotonicMs kAuthorityStartRetryMs = 1000;
+
+}  // namespace
+
+Status SecurityCoordinator::on_authority_rx(const CoordinatorEvent& event) noexcept {
+  if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
+  if (!authority_.snapshot().started) return Status::success();  // stale carrier
+  AuthorityInput in{};
+  in.kind = AuthorityInputKind::RxCarrier;
+  in.rx.kind = event.auth_kind;
+  in.rx.bytes = event.auth_bytes;
+  in.rx.writable = event.auth_writable;
+  return authority_.advance(in, event.now);
+}
+
+Status SecurityCoordinator::on_authority_tx(const CoordinatorEvent& event) noexcept {
+  if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
+  if (!authority_.snapshot().started) return Status::success();
+  AuthorityInput in{};
+  in.kind = AuthorityInputKind::TxResult;
+  in.tx.token = event.auth_token;
+  in.tx.delivered = event.auth_delivered;
+  return authority_.advance(in, event.now);
+}
+
+Status SecurityCoordinator::on_request_pull(const CoordinatorEvent& event) noexcept {
+  if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
+  if (!authority_.snapshot().started) {
+    // Not started yet: the adoption pull covers the first sync; a later
+    // want restarts the channel and pulls then.
+    authority_wanted_ = true;
+    return Status::success();
+  }
+  if (event.pull_reason < 1 || event.pull_reason > 3) {
+    return Status::error(StatusCode::InvalidArgument, "pull reason");
+  }
+  AuthorityInput in{};
+  in.kind = AuthorityInputKind::RequestPull;
+  in.pull.reason = static_cast<PullReason>(event.pull_reason);
+  return authority_.advance(in, event.now);
+}
+
+Status SecurityCoordinator::on_usb_session_up(const MonotonicMs now) noexcept {
+  if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
+  // A gateway's own channel rides the USB session directly: it suspended
+  // on the way down and restarts now. Mesh devices never see this event.
+  authority_wanted_ = true;
+  drive_authority(now);
+  return Status::success();
+}
+
+bool SecurityCoordinator::build_authority_start(AuthorityStart& out) const noexcept {
+  out = AuthorityStart{};
+  if (!member_valid_ || deps_.site == nullptr || !deps_.site->has_site()) return false;
+  const SiteRecord& site = deps_.site->site();
+  // The carrier route address: the first listed route gateway that is not
+  // us; ourselves when we are the only (gateway) route. The client
+  // re-checks the binding against the durable record; fail fast here.
+  NodeId gateway = kInvalidNodeId;
+  for (std::size_t i = 0; i < adopted_.route_gateway_count; ++i) {
+    const NodeId candidate = adopted_.route_gateways[i];
+    if (candidate != kInvalidNodeId && candidate != kBroadcastNodeId &&
+        candidate != adopted_.node) {
+      gateway = candidate;
+      break;
+    }
+  }
+  if (gateway == kInvalidNodeId) {
+    for (std::uint8_t i = 0; i < site.gateway_count; ++i) {
+      if (site.gateways[i] == adopted_.node) gateway = adopted_.node;
+    }
+    if (gateway == kInvalidNodeId) return false;
+  }
+  bool listed = false;
+  for (std::uint8_t i = 0; i < site.gateway_count; ++i) listed = listed || site.gateways[i] == gateway;
+  if (!listed) return false;
+  out.network = site.network;
+  out.self = adopted_.node;
+  out.site_id = site.site_id;
+  out.gateway = gateway;
+  out.dams = site.dams;
+  out.generation = site.assignment_generation;
+  out.epochs.site_epoch = static_cast<std::uint32_t>(site.network >> 32);
+  out.epochs.rs_epoch = site.rs_epoch_floor;
+  out.epochs.gk_epoch = site.gk_epoch_current;
+  sha256(ByteView{site.member_cert.bytes.data(), site.member_cert.size},
+         out.member_cert_hash);
+  out.boot = adopted_.boot_session;
+  out.gk_current = site.gk_epoch_current;
+  out.gk_next = site.gk_epoch_next;
+  return true;
+}
+
+void SecurityCoordinator::suspend_authority() noexcept {
+  if (!authority_.snapshot().started) return;
+  AuthorityInput in{};
+  in.kind = AuthorityInputKind::Suspend;
+  (void)authority_.advance(in, last_now_);
+}
+
+void SecurityCoordinator::drive_authority(const MonotonicMs now) noexcept {
+  if (mode_ != CoordinatorMode::Member) return;
+  // The GK tick first: a promote the provider armed completes before the
+  // channel answers anything above it. A blocked store refuses here and
+  // the provider/users see it; the channel keeps reporting honestly.
+  GroupKeyState::Input tick{};
+  tick.op = GroupKeyState::Op::Tick;
+  (void)group_keys_.advance(tick, now);
+  AuthorityInput poll{};
+  poll.kind = AuthorityInputKind::Tick;
+  (void)authority_.advance(poll, now);
+  if (authority_wanted_ && !authority_.snapshot().started &&
+      now - last_authority_start_ >= kAuthorityStartRetryMs) {
+    last_authority_start_ = now;
+    AuthorityStart start{};
+    if (!build_authority_start(start)) return;
+    AuthorityInput begin{};
+    begin.kind = AuthorityInputKind::Start;
+    begin.start = start;
+    if (!authority_.advance(begin, now)) return;
+    // The first sync rides the new channel immediately (one Pull; the
+    // client's own bucket paces any more).
+    AuthorityInput pull{};
+    pull.kind = AuthorityInputKind::RequestPull;
+    pull.pull.reason = PullReason::BootReconnectSync;
+    (void)authority_.advance(pull, now);
+  }
+}
+
+void SecurityCoordinator::on_event(const AuthorityEvent& event) noexcept {
+  // Channel context: count, never drive (no advance from the callback).
+  switch (event.kind) {
+    case AuthorityEvent::Kind::ChannelReady:
+      sat_inc(counters_.authority_ready);
+      break;
+    case AuthorityEvent::Kind::ChannelLost:
+      sat_inc(counters_.authority_lost);
+      break;
+    case AuthorityEvent::Kind::JoinConfirmAck:
+      sat_inc(counters_.authority_confirmed);
+      join_confirmed_ = true;
+      break;
+    case AuthorityEvent::Kind::UpdateReceived:
+      sat_inc(counters_.authority_updates);
+      break;
+    case AuthorityEvent::Kind::ActivateReceived:
+      sat_inc(counters_.authority_activates);
+      break;
+    case AuthorityEvent::Kind::Passthrough:
+      // Verified type 5..8 plaintext with no P6 sink connected: counted
+      // and dropped. The client sends no ACK for these, so nothing here
+      // can fake success.
+      sat_inc(counters_.authority_passthrough);
+      break;
+  }
+}
+
+// --- Stale-GK refresh (P5 §7.4) -------------------------------------------------------------------
+// A member whose GK fell behind cannot pass Member discovery at all: the
+// neighbors silently drop its DISCOVERs. Evidence accrues only while no
+// usable link exists — a lone node with quiet neighbors never refreshes
+// on linklessness alone. Three strikes (failed re-establishes and
+// discovery rounds that observed unknown generations) tear the member
+// engine down around the retained RLS1 and re-verify the same site over
+// the ZT lane; ordinary DATA admission has no engine to admit through
+// while the refresh runs. A refresh that cannot re-verify abandons back
+// to the retained membership instead of wedging in ZeroTouch.
+
+void SecurityCoordinator::note_link_established() noexcept { refresh_strikes_ = 0; }
+
+void SecurityCoordinator::note_link_failed() noexcept {
+  if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
+  if (bank_.live_count(SecurityScope::Link) != 0) return;  // per-peer flake
+  if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
+}
+
+void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
+  if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
+  if (bank_.live_count(SecurityScope::Link) != 0) {
+    refresh_strikes_ = 0;
+    if (deps_.discovery != nullptr) {
+      last_unknown_generation_ = deps_.discovery->scope_stats().unknown_generation;
+    }
+    return;
+  }
+  // Link failures can arrive while draining engine results. Keep that
+  // workspace live until the member poll reaches this boundary.
+  if (refresh_strikes_ >= kRefreshStrikesMax) {
+    start_refresh(now);
+    return;
+  }
+  if (deps_.discovery == nullptr) return;
+  const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_generation;
+  if (unknown != last_unknown_generation_) {
+    // Fresh unknown-generation observations while linkless: one strike
+    // per poll at most (a flood still counts once).
+    last_unknown_generation_ = unknown;
+    if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
+    if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(now);
+  }
+}
+
+void SecurityCoordinator::start_refresh(const MonotonicMs now) noexcept {
+  if (mode_ != CoordinatorMode::Member || refresh_active_) return;
+  if (now < refresh_cooldown_until_) {
+    refresh_strikes_ = 0;  // cooling down: the evidence waits
+    return;
+  }
+  // The channel suspends (its DAMS copy wipes); the GK state stays live
+  // so counters and replay windows survive the engine swap. RLS1 is
+  // retained untouched — the refresh only re-verifies it.
+  suspend_authority();
+  authority_wanted_ = true;
+  destroy_workspace();
+  create_joiner();
+  const JoinBootInput boot{boot_witness_, true, JoinBootMode::VerifyExistingMembership};
+  const Status started =
+      usb_direct_ ? joiner().start_direct(boot, *this, now) : joiner().start(boot, now);
+  if (!started) {
+    // No refresh leg possible: stay a member (the engine is already
+    // gone, but the stores, bank and GK state are intact and the next
+    // strikes re-arm from zero).
+    destroy_workspace();
+    create_member();
+    mode_ = CoordinatorMode::Member;
+    refresh_strikes_ = 0;
+    refresh_cooldown_until_ = now > kJoinNoDeadline - kRefreshCooldownMs
+                                  ? kJoinNoDeadline
+                                  : now + kRefreshCooldownMs;
+    return;
+  }
+  mode_ = CoordinatorMode::ZeroTouch;
+  refresh_active_ = true;
+  refresh_start_ = now;
+  refresh_strikes_ = 0;
+  sat_inc(counters_.refreshes);
+}
+
+void SecurityCoordinator::maybe_abandon_refresh(const MonotonicMs now) noexcept {
+  if (!refresh_active_ || mode_ != CoordinatorMode::ZeroTouch) return;
+  if (now - refresh_start_ < kRefreshAbandonMs) return;
+  // Five minutes without MemberReady: re-verification is impossible
+  // (host down, out of range, attacker-triggered). A healthy retained
+  // membership re-adopts instead of wedging in ZeroTouch; an impaired
+  // store stays with the joiner (it heals or reports RecoveryRequired).
+  const SiteStoreHealth health = deps_.site->health();
+  const bool healthy = deps_.site->has_site() && health.unsupported_mask == 0 &&
+                       health.read_error_mask == 0 && !health.active_load_failed &&
+                       !health.quarantined && !health.uncertain;
+  if (!healthy) return;
+  refresh_active_ = false;
+  refresh_cooldown_until_ = now > kJoinNoDeadline - kRefreshCooldownMs
+                                ? kJoinNoDeadline
+                                : now + kRefreshCooldownMs;
+  (void)adopt_boot_rls1(now);
 }
 
 // --- MemberReady adoption --------------------------------------------------------------------
@@ -1570,7 +1897,35 @@ Status SecurityCoordinator::install_member_config(const SiteRecord& site,
     emit_action(action);
     return Status::success();
   }
-  gk_scope_.adopt(site.gk_current.data(), site.gk_epoch_current);
+  // The group provider transmits as the adopted node from here on. The
+  // GK state binds the adopted record — kept across a same-site refresh
+  // (counters and replay windows survive), rebound on a new adoption.
+  group_provider_.set_self(cfg.node);
+  if (!group_keys_.ready()) {
+    GroupKeyState::Input stop{};
+    stop.op = GroupKeyState::Op::Stop;
+    (void)group_keys_.advance(stop, now);
+    GroupKeyState::Input start{};
+    start.op = GroupKeyState::Op::Start;
+    start.boot = boot_session;
+    start.generation = site.assignment_generation;
+    if (!group_keys_.advance(start, now).ok()) {
+      member_valid_ = false;
+      destroy_workspace();
+      mode_ = CoordinatorMode::Recovery;
+      CoordinatorAction action{};
+      action.kind = CoordinatorActionKind::ReportRecovery;
+      action.recovery = JoinRecoveryReason::StorageFailure;
+      emit_action(action);
+      return Status::success();
+    }
+  }
+  // A new adoption wants a fresh channel (the JoinConfirm goes out on
+  // first Ready) and clears the refresh evidence.
+  authority_wanted_ = true;
+  join_confirmed_ = false;
+  refresh_active_ = false;
+  refresh_strikes_ = 0;
   // The discovery's controller is initialized by the firmware at
   // StartMemberDiscovery (discovery attaches after adoption); the
   // proxy/gateway below carry their own membership state.
@@ -1633,12 +1988,15 @@ void SecurityCoordinator::on_joiner_action(const JoinAction& action, const Monot
       return;
     }
     case JoinActionKind::MemberReady:
+      refresh_active_ = false;  // re-verified (or silently adopted)
       (void)adopt_member(action, now);
       return;
     case JoinActionKind::RemovalRequired:
+      refresh_active_ = false;
       (void)land_removal(action.removal, now);
       return;
     case JoinActionKind::RecoveryRequired: {
+      refresh_active_ = false;
       destroy_workspace();
       mode_ = CoordinatorMode::Recovery;
       CoordinatorAction recovery{};
@@ -1721,7 +2079,16 @@ void SecurityCoordinator::stop_traffic() noexcept {
   bank_.clear();
   (void)member().resume_cache.clear_all();
   (void)member().member_cookie.configure(&entropy_fill, deps_.entropy);  // rotate; old cookies die
-  gk_scope_.wipe();
+  // Verified removal ends the channel (its DAMS copy wipes with it) and
+  // parks the GK state: no group TX/RX, no scope tags from here on.
+  suspend_authority();
+  authority_wanted_ = false;
+  join_confirmed_ = false;
+  {
+    GroupKeyState::Input stop{};
+    stop.op = GroupKeyState::Op::Stop;
+    (void)group_keys_.advance(stop, last_now_);
+  }
   const MembershipState state = deps_.discovery != nullptr
                                     ? deps_.discovery->membership().state()
                                     : MembershipState::Revoked;
@@ -1729,56 +2096,6 @@ void SecurityCoordinator::stop_traffic() noexcept {
   member().gateway.set_membership(state);
   member().gateway_active = false;
   member_valid_ = false;
-}
-
-// --- GK-backed discovery scope -----------------------------------------------------------------
-// One live generation (P4 keeps no overlap): accepted == current, and the
-// tag refuses anything else without leaking key material.
-
-void SecurityCoordinator::GkScopeProvider::adopt(const std::uint8_t gk[32],
-                                                 const std::uint32_t generation) noexcept {
-  if (gk == nullptr || generation == 0) {
-    wipe();
-    return;
-  }
-  std::memcpy(gk_.data(), gk, gk_.size());
-  generation_ = generation;
-  active_ = true;
-}
-
-void SecurityCoordinator::GkScopeProvider::wipe() noexcept {
-  secure_clear(gk_);
-  generation_ = 0;
-  active_ = false;
-}
-
-bool SecurityCoordinator::GkScopeProvider::current_generation(const ScopeRef scope,
-                                                              std::uint32_t& out) noexcept {
-  (void)scope;  // one member scope; the firmware binds the handle
-  if (!active_) return false;
-  out = generation_;
-  return true;
-}
-
-bool SecurityCoordinator::GkScopeProvider::accepted_generation(const ScopeRef scope,
-                                                               const std::uint32_t generation,
-                                                               const MonotonicMs now_ms) noexcept {
-  (void)scope;
-  (void)now_ms;
-  return active_ && generation != 0 && generation == generation_;
-}
-
-Status SecurityCoordinator::GkScopeProvider::scope_tag(const ScopeRef scope,
-                                                       const std::uint32_t generation,
-                                                       const ByteView input, ScopeTag& out) noexcept {
-  out = ScopeTag{};
-  if (!accepted_generation(scope, generation, 0)) {
-    return Status::error(StatusCode::AuthenticationFailed, "scope generation not accepted");
-  }
-  ScopeDigest digest{};
-  hmac_sha256(ByteView{gk_.data(), gk_.size()}, input, digest);
-  std::memcpy(out.data(), digest.data(), out.size());  // left 128 bits
-  return Status::success();
 }
 
 }  // namespace routeloom::sdkv1

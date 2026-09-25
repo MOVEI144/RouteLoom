@@ -2203,6 +2203,96 @@ void test_healthy_member_recovery_queries() {
   current.clear();
 }
 
+// A full same-site refresh may reissue the Host's active GK while this
+// device already holds a newer durable staged GK. The refresh must retain
+// that high-water rather than erase it or strand the Joiner in Reconcile.
+void test_refresh_preserves_staged_gk() {
+  current = "refresh-staged-gk";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());  // Host still serves active g=203.
+  CHECK(net.device().joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  std::array<std::uint8_t, 32> next{};
+  next.fill(0xA4);
+  CHECK(net.device().site_store.stage_group_key(204, next).ok());
+  net.restart_device(device_config(), 0xA504);
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(net.device().joiner.start(boot, net.now()).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  if (net.has_terminal_action()) {
+    CHECK(net.terminal_action().kind == JoinActionKind::MemberReady);
+    CHECK(net.terminal_action().joined_now);
+  }
+  CHECK(net.device().site_store.site().gk_epoch_current == 203);
+  CHECK(net.device().site_store.site().gk_epoch_next == 204);
+  CHECK(net.device().site_store.site().gk_next == next);
+  current.clear();
+}
+
+void test_impaired_refresh_rejects_same_epoch_different_key() {
+  current = "refresh-same-epoch-different-key";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());
+  CHECK(net.device().joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  const auto retained = net.device().site_store.site().gk_current;
+  SitePackage changed = site_package();
+  changed.gk.fill(0xA5);  // authenticated re-issue with a conflicting key
+  net.site(0).set_package(changed);
+  // A corrupt sibling permits a restricted full-EDHOC recovery, but it
+  // must not bypass the retained key identity for the same epoch.
+  for (std::uint8_t slot = 0; slot < 2; ++slot) {
+    auto& bytes = net.device().site_storage.inner_.slot(slot);
+    if (bytes[0] == 0xFF && bytes[1] == 0xFF) {
+      bytes[0] = 0x52;
+      break;
+    }
+  }
+  net.restart_device(device_config(), 0xA505);
+  auto& dev = net.device();
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(dev.joiner.start(boot, net.now()).ok());
+  const auto before_writes = dev.site_storage.writes();
+  (void)net.pump_until(
+      [&] { return dev.site_storage.writes() > before_writes || net.has_terminal_action(); },
+      60000);
+  CHECK(net.site(0).authority_.m1_seen >= 2);  // refresh reached the host
+  CHECK(dev.site_storage.writes() == before_writes);
+  CHECK(dev.site_store.site().gk_current == retained);
+  CHECK(!net.has_terminal_action());
+  current.clear();
+}
+
+void test_refresh_waits_when_host_active_is_behind() {
+  current = "refresh-host-active-behind";
+  JoinSimNetwork net(device_config(), device_identity());
+  net.add_site(site_a_params());  // Host still serves active g=203.
+  CHECK(net.device().joiner.start(boot_input(), 0).ok());
+  CHECK(net.pump_until([&] { return net.has_terminal_action(); }, 30000));
+  net.clear_terminal();
+  std::array<std::uint8_t, 32> next{};
+  next.fill(0xA4);
+  CHECK(net.device().site_store.stage_group_key(204, next).ok());
+  CHECK(net.device().site_store.activate_group_key(204, kBootWitness).ok());
+  net.restart_device(device_config(), 0xA506);
+  auto& dev = net.device();
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(dev.joiner.start(boot, net.now()).ok());
+  const auto before_writes = dev.site_storage.writes();
+  (void)net.pump_until([&] { return net.has_terminal_action(); }, 60000);
+  CHECK(net.site(0).authority_.m1_seen >= 2);
+  CHECK(!net.has_terminal_action());  // no false MemberReady or recovery verdict
+  CHECK(dev.site_storage.writes() == before_writes);
+  CHECK(dev.site_store.site().gk_epoch_current == 204);
+  CHECK(dev.site_store.site().gk_current == next);
+  current.clear();
+}
+
 void test_removed_watermark_rejects_stale_allow() {
   current = "removed-watermark-stale";
   JoinSimNetwork net(device_config(), device_identity());
@@ -2583,6 +2673,69 @@ void test_direct_allow_commits() {
   current.clear();
 }
 
+void test_direct_refresh_uses_usb_leg() {
+  current = "direct-refresh-uses-usb";
+  DirectRig rig;
+  DeviceEnds& dev = rig.device();
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), rig.now()).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(dev.site_store.has_site());
+  CHECK(dev.joiner.stop(rig.now()).ok());
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(dev.joiner.start_direct(boot, rig.port(), rig.now()).ok());
+  CHECK(dev.joiner.poll(rig.now()).ok());
+  CHECK(dev.joiner.snapshot().state == JoinState::SendM1);
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(rig.pending().kind == JoinActionKind::MemberReady);
+  CHECK(rig.pending().joined_now);
+  CHECK(dev.air.empty());
+  current.clear();
+}
+
+void test_direct_refresh_rechecks_after_transient_read_error() {
+  current = "direct-refresh-after-read-error";
+  DirectRig rig;
+  DeviceEnds& dev = rig.device();
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), rig.now()).ok());
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(dev.joiner.stop(rig.now()).ok());
+  dev.site_storage.fail_read_call = dev.site_storage.read_calls + 1;
+  JoinBootInput boot = boot_input();
+  boot.mode = JoinBootMode::VerifyExistingMembership;
+  CHECK(dev.joiner.start_direct(boot, rig.port(), rig.now()).ok());
+  CHECK(dev.joiner.poll(rig.now()).ok());
+  CHECK(dev.joiner.snapshot().state == JoinState::Reconcile);
+  CHECK(dev.joiner.poll(rig.now()).ok());
+  CHECK(dev.joiner.snapshot().state == JoinState::SendM1);
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(rig.pending().kind == JoinActionKind::MemberReady);
+  CHECK(rig.pending().joined_now);
+  CHECK(dev.air.empty());
+  current.clear();
+}
+
+void test_direct_initial_join_retries_after_transient_read_error() {
+  current = "direct-initial-after-read-error";
+  DirectRig rig;
+  DeviceEnds& dev = rig.device();
+  dev.site_storage.fail_read_call = dev.site_storage.read_calls + 1;
+  CHECK(dev.joiner.start_direct(boot_input(), rig.port(), rig.now()).ok());
+  CHECK(dev.joiner.poll(rig.now()).ok());
+  CHECK(dev.joiner.snapshot().state == JoinState::Reconcile);
+  CHECK(dev.joiner.poll(rig.now()).ok());
+  CHECK(dev.joiner.snapshot().state == JoinState::SendM1);
+  CHECK(rig.pump_until(
+      [&] { return dev.joiner.snapshot().state == JoinState::Ready; }, 30000));
+  CHECK(rig.pending().kind == JoinActionKind::MemberReady);
+  CHECK(dev.air.empty());
+  current.clear();
+}
+
 void test_direct_deny_parks_stopped() {
   current = "direct deny";
   AuthorityPolicy policy;
@@ -2722,6 +2875,9 @@ int main() {
   test_cross_site_recover_forbidden();
   test_healthy_member_boot_adopts();
   test_healthy_member_recovery_queries();
+  test_refresh_preserves_staged_gk();
+  test_impaired_refresh_rejects_same_epoch_different_key();
+  test_refresh_waits_when_host_active_is_behind();
   test_removed_watermark_rejects_stale_allow();
   test_removed_watermark_allows_new_generation();
   test_removed_watermark_blocks_stale_stored_member();
@@ -2733,6 +2889,9 @@ int main() {
   test_refresh_proxy_is_attempted_proxy();
   test_joiner_size_budget();
   test_direct_allow_commits();
+  test_direct_refresh_uses_usb_leg();
+  test_direct_refresh_rechecks_after_transient_read_error();
+  test_direct_initial_join_retries_after_transient_read_error();
   test_direct_deny_parks_stopped();
   test_direct_edges();
   test_commit_policy_deny_no_write();

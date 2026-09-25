@@ -91,8 +91,9 @@ constexpr std::uint32_t kCapJoinRelayV2 = 1u << 9;
 // carriers between member devices and the host's Site Authority — HostOps
 // 0x64-0x67. Defined here so both codecs share it; NOT advertised in
 // HelloAck until the bridge owner attaches the authority lane (PR4 wires
-// attach_authority and the capability bit together).
-constexpr std::uint32_t kCapAuthorityChannelV1 = 1u << 9;
+// attach_authority and the capability bit together). Bit 9 is already
+// join-relay-v2 on the merged USB transcript; authority uses bit 10.
+constexpr std::uint32_t kCapAuthorityChannelV1 = 1u << 10;
 
 constexpr std::uint8_t kHostOpsSchema = 1;
 // The join relay family's own inner schema (#116 §5.2): only 0x60-0x63

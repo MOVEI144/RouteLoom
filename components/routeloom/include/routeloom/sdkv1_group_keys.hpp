@@ -13,7 +13,6 @@
 namespace routeloom::sdkv1 {
 
 struct GroupReplayBank {
-  std::uint32_t epoch{0};
   std::uint64_t max{0};
   std::uint64_t bitmap{0};
 };
@@ -22,7 +21,7 @@ struct GroupReplaySender {
   std::uint32_t boot{0};
   GroupReplayBank banks[2]{};
 };
-static_assert(sizeof(GroupReplaySender) <= 64, "group sender RAM budget");
+static_assert(sizeof(GroupReplaySender) <= 48, "group sender RAM budget");
 
 class GroupKeyState final {
  public:
@@ -84,6 +83,10 @@ class GroupKeyState final {
   // is reconstructed; otherwise a fresh view would reuse a group nonce.
   std::array<GroupReplaySender, 128> link_rx_{};
   std::array<GroupReplaySender, 8> end_rx_{};
+  // At most two GK epochs can be accepted at once, so every sender uses
+  // the same two bank labels. Replacing a retired label clears that bank
+  // across both sender tables after successful authentication.
+  std::array<std::uint32_t, 2> replay_epochs_{};
   std::uint64_t link_tx_{0};
   std::uint64_t end_tx_{0};
   std::uint64_t link_sealed_{0};
