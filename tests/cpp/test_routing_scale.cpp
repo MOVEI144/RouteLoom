@@ -321,6 +321,28 @@ void test_scoped_config_enforced() {
     CHECK(!w.at(1)->start(0).ok());
   }
   {
+    // P5-2: a flat all-destinations dump must not silently accept opt-in.
+    SimWorld w;
+    w.configure = [](NodeConfig& config) { config.route_broadcast = true; };
+    w.add(1);
+    const auto status = w.at(1)->start(0);
+    CHECK(status.code == StatusCode::Unsupported);
+    CHECK(std::string(status.detail) == "BROADCAST_REQUIRES_SCOPED_ROUTES");
+  }
+  {
+    SimWorld w;
+    scoped_profile(w, 1, 5000, kScopedProductLifetimeMs);
+    const auto configure = w.configure;
+    w.configure = [configure](NodeConfig& config) {
+      configure(config);
+      config.route_broadcast = true;
+    };
+    w.add(1);
+    const auto status = w.at(1)->start(0);
+    CHECK(status.code == StatusCode::Unsupported);
+    CHECK(std::string(status.detail) == "BROADCAST_NOT_WIRED");
+  }
+  {
     SimWorld w;  // flat profile keeps its (non-fatal) diagnostic
     w.add(1, 1, 5000, 15000);
     CHECK_OK(w.at(1)->start(0));

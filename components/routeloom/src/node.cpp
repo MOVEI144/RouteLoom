@@ -534,6 +534,14 @@ Status MeshNode::validate_config() const noexcept {
       return Status::error(StatusCode::InvalidArgument, "invalid route gateway");
     }
   }
+  if (config_.route_broadcast && !gateway_scoped()) {
+    return Status::error(StatusCode::Unsupported, "BROADCAST_REQUIRES_SCOPED_ROUTES");
+  }
+  // Never accept an opt-in that would silently send unicast or use a
+  // development link key in place of GroupLink and nonce-bound grants.
+  if (config_.route_broadcast) {
+    return Status::error(StatusCode::Unsupported, "BROADCAST_NOT_WIRED");
+  }
   if (gateway_scoped() &&
       !scoped_lifetime_sufficient(config_.route_advertisement_period_ms,
                                   config_.route_lifetime_ms,

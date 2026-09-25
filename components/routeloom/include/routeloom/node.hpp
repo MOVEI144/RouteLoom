@@ -67,6 +67,9 @@ struct NodeConfig {
   // many advertisement periods. validate_config() enforces
   // route_lifetime_ms >= (2 * ticks + kScopedLeaseMarginTicks) * period.
   std::uint8_t route_refresh_ticks{kScopedDefaultRefreshTicks};
+  // P5-2 opt-in is C++-only; flat full-table broadcast is unsupported.
+  // Until GroupLink and pairwise-grant routing are wired, start refuses ON.
+  bool route_broadcast{false};
   // §14 management airtime budget gate (03-congestion.md §8, radio.md
   // §9/§14): the pinned spec-envelope refill is an UNCALIBRATED
   // capability, not a measured allocation — it must not gate route
