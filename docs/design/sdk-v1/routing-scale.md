@@ -1,6 +1,6 @@
 # 100台・1 gateway向けの経路スケール設計（issue #41）
 
-状態：**portable coreに実装済み・host試験済み（SimWorld）**。実RF・実機・HILでの認定は未実施。Wire v2 headerは不変、予約済みROUTE_REQUEST（type 35）にpayloadを定義した。group key（broadcast暗号）は使わない。
+状態：**portable coreに実装済み・host試験済み（SimWorld）**。実RF・実機・HILでの認定は未実施。Wire v2 headerは不変、予約済みROUTE_REQUEST（type 35）にpayloadを定義した。既定の経路広告はpairwise unicastで、P5-2のopt-in broadcastは§8を参照。
 
 対象コード：`components/routeloom/src/route_scale.cpp`（本profile）、`routing.hpp`（lease規則・定数）、`route_request.hpp`（payload codec）、`node.cpp`（配線・config検査）、`c_api.cpp`（C ABIの設定）、各firmwareの`main/Kconfig.projbuild`・`main.cpp`（Kconfig配線、§5.1）。試験：`tests/cpp/test_routing_scale.cpp`、C APIは`tests/cpp/test_main.cpp`の`test_c_api_route_profile`。関連：[経路仕様](../../spec/routing.md)、[無線§14](../../spec/radio.md)、[輻輳→経路結合](../sdk-completion/03-congestion-routing.md)、[Wire](../../spec/wire-protocol.md)。
 
@@ -10,7 +10,7 @@
 
 従来（本書では**flat profile**と呼ぶ）は、全selected routeを全隣接へ周期広告する。Wire v2のrecordは16B、1 frameは自己record＋6経路の7件で、各隣接へ1周期に1 pageを回転cursorで送る。したがって各宛先の再広告間隔は`ceil(D/6)`周期で、lease（`route_lifetime_ms`）がそれを超えないと経路が期限切れ→再学習を繰り返す。1周期の余裕を見ると既定5s／15sが支えるのは**6宛先**、余裕なしでも12宛先で、100台（17 page＝85秒）とは桁が違う。leaseを延ばしても、100台×隣接8台に毎周期unicastする量は物理的に成立しない（§7）。100台SimWorldでflat profile（5s／15s）を4分間動かすと、route-control frameは203,414件（推定air time 8.2s/s＝§14包絡の82倍）、gatewayへの経路の途切れが373回、下りが276回観測された。
 
-broadcast広告はnetwork group keyが要るが、production securityは別途設計中のため本設計では使わない。
+既定のscoped経路広告はpairwise unicastを使う。P5-2のopt-in broadcastは§8の条件でGroupLinkを使う。
 
 ## 2. 物差し：frame長と§14予算
 
@@ -172,4 +172,4 @@ Wire v2 header（88B）は不変。ROUTE_UPDATEのpayload形式も不変。予�
 - **hostへの報告なし**：C API（§5.1）とfirmware Kconfigからは設定できるが、USB HostOps（HelloAck・node_status_v1）はrouting profileとgateway一覧を運ばない。golden固定のUSB wire形式への追加が要るので別作業とする。firmwareのgateway一覧はbuild時固定で、remote config（RCC1）からは変えられない。
 - **実RF未検証**：air timeは推定モデル、simは衝突・損失を模擬しない。§14の実測・capacity manifestはG-ROUTEに残る。
 
-**group keyでbroadcast広告が使えるようになった場合**：定常の木維持量はほぼ変わらない（木の平均子数は1なので、子へのunicastをbroadcast 1回に替えても件数は同程度。上りpageは親だけが必要）。変わるのは、(1)全隣接が毎周期gateway metricを聞くので予備候補が常に温まり、親喪失の修復がpull無しで即時になる、(2)pullが隣接数分のunicastから1 broadcastになり起動時の嵐が数分の1になる、(3)木以外への回転送信が不要になる、の3点である。それでも「5秒ごとに全nodeが1 frame」は100台で139ms/sなので、tick×周期の構造と本書のlease規則は残る。
+**P5-2 broadcast経路広告（配線済み、既定OFF）**：`route_scale.cpp` と Rust `broadcast_route.rs` は version 1 の24B/record（destination、generation、sequence、metric、via）を最大5件（self＋gateway最大4）まで厳格に検査する。gateway recordの `via` は送信者の確定next hopで、受信者は自分と一致したrecordだけ∞に射影する（poison reverse）。直接隣接のgatewayは第3者viaを持てないので、その周期はunicastに戻す。Wireは厳格なbroadcast RouteUpdate header（`next_hop=destination=broadcast`、`origin=previous_hop`、hop=1、BestEffort、round=0、end保護なし）だけをGroupLinkで封止・openし、受信のbroadcast openは専用dispatchだけが明示指定する。受信gateはlocal opt-in→観測MAC（attributed peer＝origin）→active隣接→pairwise Link usable→現在binding（V2 metadataとOwner snapshot）→GK世代判定→GroupLink tag/replay→payload全体検証の順で、route適用だけを行いcapability・telemetry・resume確認・link activityには一切触れない。未知GKの未認証headerは分1回までのpull契機diagnosticに留め、routeへ適用しない。送信先適格性は受信者ごとのnonce-bound grant（bit7 `kCapRouteBroadcastV1`、5秒有効、再addで失効）にLink usableを重ねて判定し、BUSY証明やhost設定はbusy権限だけを付与する。schedulerは周期／triggeredの下りself+gateway広告のうち適格先が2件以上ある場合だけ1 broadcastにまとめ、それ以外（単一・grant切れ／送信deadlineより短いgrant・GK不明・queue拒否・上りpage・pull応答・非木回転）は従来unicastを継続する。Diagnostic bitはP6互換のまま（bit5＝RRS gossip、bit6＝membership lifecycle、bit7＝route broadcast。bit7は未割当だったので旧端末はgrantせず識別子不要）。C++ `NodeConfig::route_broadcast` は既定false、trueはflatを `Unsupported` で起動拒否する。firmwareは `ROUTELOOM_ROUTE_BROADCAST`（既定n、scoped依存）で公開する。capabilityのprobeはOwnerの仕事で、nodeは自発probeしない（coreにentropyが無い）。100台同一乱数比較（legacy／mixed／opt-in）：収束9000ms・途切れ0・loop0は3 mode同一、opt-inは下りunicast 197→167＋broadcast 15（route frame 507→492、会計一致）。ただし5秒grantの全mesh probeは約2.0M us/s（route管理の約29倍）を要し100k us/s包絡を大きく超えるため、出荷有効化には子位相に合わせたsparse probe等のOwner側最適化が要る。本書のtick×周期とlease規則は残る。

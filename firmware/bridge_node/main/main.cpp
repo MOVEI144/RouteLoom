@@ -539,6 +539,11 @@ extern "C" void app_main(void) {
       static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_PERIOD_MS);
   config.node.route_lifetime_ms =
       static_cast<std::uint32_t>(CONFIG_ROUTELOOM_ROUTE_LIFETIME_MS);
+#if CONFIG_ROUTELOOM_ROUTE_BROADCAST
+  // P5-2 broadcast opt-in (routing-scale.md section 8): default off.
+  config.node.route_broadcast = true;
+  ESP_LOGI(kTag, "routing profile: route broadcast opt-in enabled");
+#endif
   ESP_LOGI(kTag,
            "routing profile: gateway-scoped gateways=0x%" PRIx64 ",0x%" PRIx64
            " tick=%" PRIu32 "ms lease=%" PRIu32 "ms",
