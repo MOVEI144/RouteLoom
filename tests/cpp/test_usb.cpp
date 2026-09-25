@@ -244,6 +244,41 @@ void test_encode_frame_bounded_output() {
             .code == StatusCode::NoCapacity);
 }
 
+void test_encode_frame_inplace() {
+  std::array<std::uint8_t, 1048> body{};
+  std::array<std::uint8_t, kHeaderSize + 1048 + kCrcSize> scratch{};
+  std::array<std::uint8_t, kMaxEncodedFrame> wire{};
+  for (const std::size_t size : {0U, 1U, 253U, 254U, 255U, 960U, 1024U, 1048U}) {
+    for (const bool all_zero : {false, true}) {
+      for (std::size_t i = 0; i < size; ++i) {
+        body[i] = all_zero ? 0 : static_cast<std::uint8_t>(i * 37U + 3U);
+      }
+      std::copy_n(body.begin(), size, scratch.begin());
+      const std::size_t decoded = kHeaderSize + size + kCrcSize;
+      std::size_t written = 0;
+      CHECK_OK(encode_frame_inplace(
+          FrameKind::DataFromMesh, 0x1234, 7, 9,
+          MutableByteView{scratch.data(), decoded}, size,
+          MutableByteView{wire.data(), encoded_frame_bound(decoded)}, written));
+      const auto reference = encode(FrameKind::DataFromMesh, 0x1234, 7, 9,
+                                    ByteView{body.data(), size});
+      CHECK(written == reference.size());
+      CHECK(std::memcmp(wire.data(), reference.data(), written) == 0);
+    }
+  }
+  std::size_t written = 99;
+  CHECK(encode_frame_inplace(FrameKind::DataFromMesh, 0, 0, 0,
+                             MutableByteView{scratch.data(), scratch.size() - 1},
+                             body.size(), MutableByteView{wire.data(), wire.size()}, written)
+            .code == StatusCode::NoCapacity);
+  CHECK(written == 0);
+  CHECK(encode_frame_inplace(FrameKind::DataFromMesh, 0, 0, 0,
+                             MutableByteView{scratch.data(), scratch.size()},
+                             body.size(), MutableByteView{wire.data(), 1}, written)
+            .code == StatusCode::NoCapacity);
+  CHECK(written == 0);
+}
+
 void test_frame_max_body_boundary() {
   // kMaxBodySize = 4066 → decoded frame exactly kMaxDecodedFrame (4096):
   // the stream decoder must accept it (the phantom-zero bug rejected it).
@@ -2211,6 +2246,7 @@ int main() {
   test_cobs_exact_capacity();
   test_cobs_decode_in_place();
   test_encode_frame_bounded_output();
+  test_encode_frame_inplace();
   test_frame_max_body_boundary();
   test_frame_codec();
   test_credit();

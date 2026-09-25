@@ -175,6 +175,26 @@ void test_security_callback_cannot_reenter_owner_lease() {
   runtime.stop();
 }
 
+void test_p6_binding_tracks_current_receive_context() {
+  idf_stub::reset();
+  ReenteringSecurity security;
+  CapturingObserver observer;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+  std::uint32_t binding = 0;
+  CHECK(runtime.p6_link_binding(kPeer, binding).ok());
+  CHECK(binding == 1);
+  security.rx_context = 2;
+  CHECK(runtime.p6_link_binding(kPeer, binding).ok());
+  CHECK(binding == 2);
+  security.rx_context = 0;
+  CHECK(runtime.p6_link_binding(kPeer, binding).code == routeloom::StatusCode::InvalidState);
+  CHECK(binding == 0);
+  runtime.stop();
+}
+
 // The runtime installs its lease port before node start: without it the
 // node refuses to start ("reply peer port not attached") and no firmware
 // admission can run at all.
@@ -628,6 +648,7 @@ int main() {
   test_boot_installs_lease_port();
   test_prestart_owner_pump();
   test_security_callback_cannot_reenter_owner_lease();
+  test_p6_binding_tracks_current_receive_context();
   test_reliable_to_static_peer_uses_binding();
   test_old_rx_epoch_cannot_acquire_current_binding();
   test_distinct_session_tx_and_rx_contexts();

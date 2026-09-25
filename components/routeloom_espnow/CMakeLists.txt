@@ -29,3 +29,6 @@ target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
 # warnings for RouteLoom itself without promoting those system-header
 # extensions to errors through -Wpedantic.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+if(CMAKE_PROJECT_NAME STREQUAL "routeloom_reference_node")
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE ROUTELOOM_REFERENCE_IMAGE=1)
+endif()

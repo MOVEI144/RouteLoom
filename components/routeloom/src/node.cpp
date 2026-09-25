@@ -698,17 +698,22 @@ Status MeshNode::add_neighbor(const NodeId neighbor, const RouteMetric link_metr
   return Status::success();
 }
 
-Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
-  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
-  NodeGuard guard(in_call_);
-  auto* record = find_neighbor(neighbor);
-  if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
-  record->active = false;
+void MeshNode::drop_neighbor_locked(Neighbor& record, const NodeId neighbor,
+                                   const MonotonicMs now_ms) noexcept {
+  record.active = false;
   routes_.invalidate_next_hop(neighbor, now_ms);
   routes_.clear_next_hop_busy(neighbor);  // drop stale busy state too
   ++self_route_sequence_;
   ++config_revision_;
   trigger_route_advertisement(now_ms);
+}
+
+Status MeshNode::remove_neighbor(const NodeId neighbor, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return Status::error(StatusCode::Busy, "reentrant call");
+  NodeGuard guard(in_call_);
+  auto* record = find_neighbor(neighbor);
+  if (record == nullptr) return Status::error(StatusCode::NotFound, "neighbor not found");
+  drop_neighbor_locked(*record, neighbor, now_ms);
   return Status::success();
 }
 
@@ -2482,7 +2487,7 @@ void MeshNode::complete_job(TxJob& job, const bool hop_accepted,
 }
 
 void MeshNode::fail_job(TxJob& job, const char* reason,
-                        const MonotonicMs now_ms) noexcept {
+                        const MonotonicMs now_ms, const bool terminal) noexcept {
   // Terminate the transaction work item first: the failure report below
   // reserves a fresh short transaction, which must see the freed capacity.
   finish_txn_work(job.txn);
@@ -2543,7 +2548,8 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
       delivery->app_phase != 0) {
     return;
   }
-  if ((delivery->options.delivery == DeliveryClass::Reliable ||
+  if (!terminal &&
+      (delivery->options.delivery == DeliveryClass::Reliable ||
        delivery->options.delivery == DeliveryClass::Applied) &&
       now_ms < delivery->expires_at_ms &&
       static_cast<std::uint8_t>(delivery->round + 1U) < config_.max_end_to_end_rounds) {
@@ -2552,7 +2558,8 @@ void MeshNode::fail_job(TxJob& job, const char* reason,
     set_delivery_state(*delivery, DeliveryState::WaitingForRoute, reason);
     return;
   }
-  if (delivery->options.delivery == DeliveryClass::Applied) {
+  if (delivery->options.delivery == DeliveryClass::Applied &&
+      (!terminal || job.physical_attempts != 0)) {
     // Rounds exhausted on a transmitted request — the destination may have
     // executed it; Indeterminate is the honest verdict (01 §1.9).
     set_delivery_state(*delivery, DeliveryState::Indeterminate, "APP_RESULT_TIMEOUT");
@@ -7567,6 +7574,57 @@ Status MeshNode::set_relay_enabled(const bool enabled) noexcept {
     trigger_route_advertisement(last_clock_ms_);
   }
   return Status::success();
+}
+
+void MeshNode::revoke_routes(const NodeId peer, const MonotonicMs now_ms) noexcept {
+  if (in_call_) return;  // enforcement is retried on the next RRS apply
+  NodeGuard guard(in_call_);
+  if (peer == kInvalidNodeId || peer == kBroadcastNodeId) return;
+  // Route updates are plain frames gated only on the neighbor record, so
+  // scrubbing the table is not enough: the neighbor itself goes inactive
+  // (its re-advertisements are then ignored, not re-learned). It heals
+  // through the normal handshake path — which the RRS gate refuses until
+  // the peer re-authenticates under a newer generation.
+  if (auto* record = find_neighbor(peer); record != nullptr) {
+    drop_neighbor_locked(*record, peer, now_ms);
+  } else {
+    routes_.invalidate_next_hop(peer, now_ms, true);
+  }
+  const RouteSelection selected = routes_.best(peer);
+  if (selected.valid) (void)routes_.withdraw(peer, selected.next_hop, now_ms);
+  routes_.evaluate(now_ms);
+  // A route withdrawal alone leaves admitted work alive. Drop queued and
+  // awaiting work involving the revoked identity before another dispatch
+  // can select it under a repaired route or an overlapping session.
+  const auto involves_peer = [&](const TxJob& job) noexcept {
+    if (job.owner == JobOwner::Group) {
+      const GroupTree* tree = group_trees_.find(
+          [&](const GroupTree& value) { return value.key == job.ack.key; });
+      if (tree != nullptr && tree->parent == peer) return true;
+    }
+    return job.peer == peer || job.plain.header.origin == peer ||
+           job.plain.header.destination == peer || job.ack.key.origin == peer;
+  };
+  TxJob dropped{};
+  while (scheduler_.drop_one_if(involves_peer, dropped)) {
+    fail_job(dropped, "REVOKED_PEER", now_ms, true);
+  }
+  while (auto* awaiting = awaiting_hop_.find(
+             [&](const AwaitingHop& value) { return involves_peer(value.job); })) {
+    TxJob job = awaiting->job;
+    awaiting_hop_.release(awaiting);
+    fail_job(job, "REVOKED_PEER", now_ms, true);
+  }
+  if (group_promote_hold_.used &&
+      (group_promote_hold_.peer == peer || group_promote_hold_.frame.header.origin == peer)) {
+    group_promote_hold_ = GroupPromoteHold{};
+  }
+  while (GroupHold* hold = group_holds_.find([&](const GroupHold& value) {
+           return value.info.key.origin == peer || value.previous_hop == peer;
+         })) group_holds_.release(hold);
+  while (GroupTree* tree = group_trees_.find([&](const GroupTree& value) {
+           return value.key.origin == peer || value.parent == peer;
+         })) group_trees_.release(tree);
 }
 
 void MeshNode::refresh_neighbor_load(const MonotonicMs now_ms) noexcept {

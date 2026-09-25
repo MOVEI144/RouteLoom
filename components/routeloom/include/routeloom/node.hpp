@@ -944,6 +944,12 @@ class MeshNode {
   std::size_t txn_in_flight() const noexcept;
 
   const RouteTable& routes() const noexcept { return routes_; }
+  // P6 enforcement (G-SEC P6 PR D): deactivates the neighbor record
+  // (plain route updates from it are then ignored, not re-learned),
+  // drops every candidate learned via `peer`, and withdraws the route
+  // to `peer` itself, expediting the retraction wave like a neighbor
+  // loss. The record heals through the normal handshake path only.
+  void revoke_routes(NodeId peer, MonotonicMs now_ms) noexcept;
 
   // --- Node status snapshot (node_status.hpp, node_status.cpp) --------------
   // Read-only, allocation-free view assembled from the neighbor, route and
@@ -1844,6 +1850,9 @@ class MeshNode {
   Status validate_config() const noexcept;
   Neighbor* find_neighbor(NodeId node) noexcept;
   const Neighbor* find_neighbor(NodeId node) const noexcept;
+  // Shared drop path (guard held by the caller): deactivates the record,
+  // invalidates via-peer candidates, and expedites the retraction wave.
+  void drop_neighbor_locked(Neighbor& record, NodeId neighbor, MonotonicMs now_ms) noexcept;
   // Identity reset (sdk-completion/03 §3.7): clears the measurement mirror
   // and returns link_cost to nominal — evidence gathered under a previous
   // peer incarnation/binding must not move the current identity's metric.
@@ -1948,7 +1957,8 @@ class MeshNode {
                        const MessageId* message) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
-  void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
+  void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms,
+                bool terminal = false) noexcept;
   void retry_or_fail(TxJob& job, const char* reason, MonotonicMs now_ms) noexcept;
   // Re-admit a BUSY-deferred job after its clamped retry_after wait, bounded
   // by busy_readmissions_max and the combined physical-attempt budget (03 §5).
@@ -2413,6 +2423,7 @@ class MeshNode {
   };
   struct GroupHold {
     GroupMessageInfo info{};
+    NodeId previous_hop{kInvalidNodeId};
     std::uint32_t gk_epoch{0};
     MonotonicMs release_at_ms{0};
     std::uint8_t size{0};
@@ -2477,7 +2488,7 @@ class MeshNode {
   // Ordering + application hand-off (group-delivery.md §6).
   void group_accept(GroupStream& stream, const GroupMessageInfo& info, ByteView app,
                     bool member, std::uint32_t remaining_ms, MonotonicMs now_ms,
-                    std::uint32_t gk_epoch) noexcept;
+                    std::uint32_t gk_epoch, NodeId previous_hop) noexcept;
   void group_drain(GroupStream& stream) noexcept;
   void group_skip_to(GroupStream& stream, std::uint32_t target) noexcept;
   void group_deliver_app(const GroupMessageInfo& info, ByteView app) noexcept;

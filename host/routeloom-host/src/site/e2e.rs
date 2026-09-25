@@ -568,3 +568,256 @@ fn group_keys_api_over_the_socket() {
     next_event("member.revoked");
     next_event("gk.staged");
 }
+
+/// P6-2 PR D acceptance over the real API1 socket: KGuard joins a
+/// gateway and two members, starts `membership.cutover`, the tick paces
+/// PREPAREs to the fake channel, PREPARED receipts flow back, the lapse
+/// commits, COMMITs flow, APPLIEDs converge — every step observed
+/// through the `SiteAdmin` facade — and a member that heard nothing
+/// full-joins back into an authenticated reissue on the new epoch with
+/// no KGuard round-trip.
+#[test]
+fn cutover_flows_end_to_end_over_the_api_socket() {
+    use routeloom_join::renew::{Head, Phase, Receipt};
+    use routeloom_provision::sdkv1::cert::{cert_issue, CertClaims, CertType};
+    use routeloom_provision::sha256::sha256;
+    use routeloom_provision::signer::{test_keypair, FileRootSigner};
+
+    use super::cutover::CUTOVER_PREPARE_WINDOW_MS;
+    use super::group_keys::HostTime;
+    use super::revocation::RevocationTransport;
+
+    type GrantMail = (u64, u64, Vec<u8>);
+    type GrantOutbox = Arc<Mutex<Vec<GrantMail>>>;
+
+    struct Channel {
+        outbox: GrantOutbox,
+    }
+    impl RevocationTransport for Channel {
+        fn send_rrs(&mut self, _node: u64, _object: &[u8]) -> bool {
+            true
+        }
+        fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
+            true
+        }
+        fn send_grant(&mut self, node: u64, network: u64, plaintext: &[u8]) -> bool {
+            self.outbox
+                .lock()
+                .unwrap()
+                .push((node, network, plaintext.to_vec()));
+            true
+        }
+        fn carries_notice(&self) -> bool {
+            true
+        }
+        fn carries_grant(&self) -> bool {
+            true
+        }
+    }
+
+    let daemon = Daemon::start("cutover");
+    let admin = RouteLoomTransport::new(&daemon.socket, u64::from(testkit::NETWORK_LOW));
+    let mut kguard = KGuardMock::default();
+    kguard.pending_retry_s = 30;
+    let t0 = now_ms();
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    let mut member = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    let mut straggler = SimDevice::new(0x00A1_0000_0000_7002, 0x72);
+    kguard.assign(gateway.node, Assignment::Here(Role::Gateway));
+    kguard.assign(member.node, Assignment::Here(Role::Endpoint));
+    kguard.assign(straggler.node, Assignment::Here(Role::Endpoint));
+    for (device, at) in [
+        (&mut gateway, t0),
+        (&mut member, t0 + 1_000),
+        (&mut straggler, t0 + 2_000),
+    ] {
+        let (mut exchange, outcome) = daemon.start_join(device, at);
+        assert!(matches!(outcome, Outcome::Waiting), "{outcome:?}");
+        let done = kguard.serve_once(&admin).unwrap();
+        assert_eq!(done.len(), 1);
+        let outcome = device.finish(&mut exchange, &daemon.transport);
+        assert!(
+            matches!(outcome, Outcome::Result(JoinResult::Allow { .. })),
+            "{outcome:?}"
+        );
+    }
+    // The fake authority channel plugs into the live daemon.
+    let grants: GrantOutbox = Arc::new(Mutex::new(Vec::new()));
+    daemon.service.with(|a| {
+        a.set_rrs_transport(Some(Box::new(Channel {
+            outbox: grants.clone(),
+        })))
+    });
+    let site_ca = FileRootSigner::from_secret(testkit::SITE_CA, &test_keypair(0x61).0).unwrap();
+    let next_cert = cert_issue(
+        &CertClaims {
+            cert_type: CertType::Site,
+            issuer: testkit::SITE_CA,
+            subject: testkit::SITE,
+            pubkey: test_keypair(0x62).1,
+            network_low32: testkit::NETWORK_LOW,
+            site_epoch: testkit::SITE_EPOCH + 1,
+            usage: 1,
+            serial: 8,
+            ..CertClaims::default()
+        },
+        &site_ca,
+    )
+    .unwrap();
+    let outcome = admin
+        .cutover(
+            testkit::SITE_EPOCH,
+            &crate::receive_log::hex_lower(&next_cert),
+            "e2e-cut-1",
+        )
+        .unwrap();
+    assert_eq!(outcome.state, "preparing");
+    assert_eq!(outcome.new_site_epoch, testkit::SITE_EPOCH + 1);
+    assert_eq!(outcome.targets, 3);
+    let progress = admin
+        .cutover_operation(&outcome.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.phase, "preparing");
+    assert_eq!(progress.total, 3);
+    // PREPAREs pace out; the gateway and the member ACK, the straggler
+    // hears nothing.
+    daemon.service.with(|a| a.tick(HostTime::sync(t0 + 3_000)));
+    daemon.service.with(|a| a.tick(HostTime::sync(t0 + 3_100)));
+    daemon.service.with(|a| a.tick(HostTime::sync(t0 + 3_200)));
+    assert_eq!(grants.lock().unwrap().len(), 3);
+    let op = super::records::parse_op_token(&outcome.operation_id).unwrap();
+    let (gk_epoch, old_network, new_network) = daemon
+        .service
+        .with(|a| {
+            let state = a
+                .operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .clone();
+            (state.next_gk_epoch, state.old_network, state.new_network)
+        })
+        .0;
+    for (node, _, bytes) in grants.lock().unwrap().clone() {
+        if node == straggler.node {
+            continue;
+        }
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Prepared,
+                cutover_id: op,
+                revision: 1,
+                old_network,
+            },
+            new_network,
+            gk_epoch,
+            rs_epoch: 0,
+            digest: sha256(&bytes),
+            status: 0,
+        }
+        .encode()
+        .unwrap()
+        .to_vec();
+        let (moved, _) = daemon
+            .service
+            .with(|a| a.handle_grant_receipt(node, 1, old_network, &receipt, t0 + 4_000));
+        assert!(moved);
+    }
+    let progress = admin
+        .cutover_operation(&outcome.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.prepared, 2);
+    assert_eq!(progress.unknown, 1);
+    // The lapse commits on the gateway's ACK; COMMITs flow over the old
+    // context and the two live targets APPLY over the new one.
+    let lapse = t0 + 3_000 + CUTOVER_PREPARE_WINDOW_MS;
+    daemon.service.with(|a| a.tick(HostTime::sync(lapse)));
+    let progress = admin
+        .cutover_operation(&outcome.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.phase, "committed");
+    daemon.service.with(|a| a.tick(HostTime::sync(lapse + 100)));
+    daemon.service.with(|a| a.tick(HostTime::sync(lapse + 200)));
+    daemon.service.with(|a| a.tick(HostTime::sync(lapse + 300)));
+    let commits: Vec<_> = grants
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, _, bytes)| bytes[1] == Phase::Commit as u8)
+        .cloned()
+        .collect();
+    assert_eq!(commits.len(), 3);
+    let (commit_object, commit_rs) = daemon
+        .service
+        .with(|a| {
+            let state = a
+                .operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .clone();
+            (state.commit_object.clone(), state.commit_rs_epoch)
+        })
+        .0;
+    for (node, _, _) in &commits {
+        if *node == straggler.node {
+            continue;
+        }
+        let receipt = Receipt {
+            head: Head {
+                phase: Phase::Applied,
+                cutover_id: op,
+                revision: 1,
+                old_network,
+            },
+            new_network,
+            gk_epoch,
+            rs_epoch: commit_rs,
+            digest: sha256(&commit_object),
+            status: 0,
+        }
+        .encode()
+        .unwrap()
+        .to_vec();
+        let (moved, _) = daemon
+            .service
+            .with(|a| a.handle_grant_receipt(*node, 1, new_network, &receipt, lapse + 400));
+        assert!(moved);
+    }
+    let progress = admin
+        .cutover_operation(&outcome.operation_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(progress.applied, 2);
+    assert_eq!(progress.unknown, 1);
+    // The straggler comes back on its old RLS1: an authenticated
+    // reissue on the new epoch, with no join.request for KGuard.
+    let open_before = admin.join_requests().unwrap().len();
+    straggler.recovery_existing = true;
+    let (outcome, _) = straggler.attempt(&daemon.service, &daemon.transport, lapse + 5_000);
+    assert!(
+        matches!(outcome, Outcome::Result(JoinResult::Allow { .. })),
+        "{outcome:?}"
+    );
+    let state = straggler.site.as_ref().unwrap();
+    assert_eq!(
+        state.member.network >> 32,
+        u64::from(testkit::SITE_EPOCH + 1)
+    );
+    assert_eq!(state.member.assignment_generation, 1);
+    let open_after = admin.join_requests().unwrap().len();
+    assert_eq!(
+        open_before, open_after,
+        "no KGuard round-trip for a reissue"
+    );
+    let member_view = admin.member(member.node).unwrap().unwrap();
+    assert_eq!(member_view.generation, 1);
+}

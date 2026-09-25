@@ -2128,15 +2128,31 @@ bool UsbBridge::enqueue(const FrameKind kind, const std::uint16_t flags,
     ++stats_.dropped_frames;
     return false;
   }
-  TxItem item{};
-  item.kind = kind;
-  item.flags = flags;
-  item.request = request;
-  item.body_size = inner.size;
-  item.expires_ms = expires_ms;
-  if (inner.size > 0) std::memcpy(item.body.data(), inner.data, inner.size);
-  const bool queued = is_control_kind(kind) ? control_q_.push(item)
-                                          : data_q_.push(item);
+  const bool control = is_control_kind(kind);
+  if (control && inner.size > kControlMaxInner) {
+    ++stats_.control_denied;
+    return false;
+  }
+  bool queued = false;
+  if (control) {
+    TxItem<kControlMaxInner> item{};
+    item.kind = kind;
+    item.flags = flags;
+    item.request = request;
+    item.body_size = inner.size;
+    item.expires_ms = expires_ms;
+    if (inner.size > 0) std::memcpy(item.body.data(), inner.data, inner.size);
+    queued = control_q_.push(item);
+  } else {
+    TxItem<kMaxTxInner> item{};
+    item.kind = kind;
+    item.flags = flags;
+    item.request = request;
+    item.body_size = inner.size;
+    item.expires_ms = expires_ms;
+    if (inner.size > 0) std::memcpy(item.body.data(), inner.data, inner.size);
+    queued = data_q_.push(item);
+  }
   if (!queued) ++stats_.dropped_frames;
   return queued;
 }
@@ -2159,16 +2175,17 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
       continue;
     }
 
-    bool control = true;
-    TxItem* item = control_q_.front();
-    if (item == nullptr) {
-      item = data_q_.front();
-      control = false;
-    }
-    if (item == nullptr) return;
+    const TxItem<kControlMaxInner>* control_item = control_q_.front();
+    const TxItem<kMaxTxInner>* data_item =
+        control_item == nullptr ? data_q_.front() : nullptr;
+    if (control_item == nullptr && data_item == nullptr) return;
+    const bool control = control_item != nullptr;
+    const TxItemMeta& item = control ? static_cast<const TxItemMeta&>(*control_item)
+                                     : static_cast<const TxItemMeta&>(*data_item);
+    const std::uint8_t* body = control ? control_item->body.data() : data_item->body.data();
     // Deadline-bound items (diagnostic replies): an expired queued item is
     // a counted drop — never delivered late as if still fresh evidence.
-    if (item->expires_ms != 0 && now_ms >= item->expires_ms) {
+    if (item.expires_ms != 0 && now_ms >= item.expires_ms) {
       if (control) control_q_.drop(); else data_q_.drop();
       ++stats_.diagnostics_expired;
       continue;
@@ -2176,15 +2193,15 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
 
     const bool protect =
         (state_ == SessionState::Active || state_ == SessionState::Draining) &&
-        item->kind != FrameKind::Hello && item->kind != FrameKind::HelloAck;
+        item.kind != FrameKind::Hello && item.kind != FrameKind::HelloAck;
     std::size_t body_size = 0;
     std::uint64_t session = 0;
     if (protect) {
       session = proof_.session_id;
       const Status status =
-          seal_body(proof_.key, kDirDeviceToHost, tx_counter_, item->kind,
-                    item->flags, item->request,
-                    ByteView{item->body.data(), item->body_size},
+          seal_body(proof_.key, kDirDeviceToHost, tx_counter_, item.kind,
+                    item.flags, item.request,
+                    ByteView{body, item.body_size},
                     MutableByteView{tx_body_.data(), tx_body_.size()}, body_size);
       if (!status) {
         if (control) control_q_.drop(); else data_q_.drop();
@@ -2192,9 +2209,9 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
         continue;
       }
     } else {
-      body_size = item->body_size;
-      if (item->body_size > 0) {
-        std::memcpy(tx_body_.data(), item->body.data(), item->body_size);
+      body_size = item.body_size;
+      if (item.body_size > 0) {
+        std::memcpy(tx_body_.data(), body, item.body_size);
       }
     }
     const std::uint64_t decoded_len =
@@ -2224,11 +2241,10 @@ void UsbBridge::pump_tx(const MonotonicMs now_ms) noexcept {
       stall_reported_ = false;
     }
     std::size_t wire_size = 0;
-    const Status status =
-        encode_frame(item->kind, item->flags, session, item->request,
-                     ByteView{tx_body_.data(), body_size},
-                     MutableByteView{encode_scratch_.data(), encode_scratch_.size()},
-                     MutableByteView{tx_wire_.data(), tx_wire_.size()}, wire_size);
+    const Status status = encode_frame_inplace(
+        item.kind, item.flags, session, item.request,
+        MutableByteView{tx_body_.data(), tx_body_.size()}, body_size,
+        MutableByteView{tx_wire_.data(), tx_wire_.size()}, wire_size);
     if (!status) {
       if (control) control_q_.drop(); else data_q_.drop();
       ++stats_.dropped_frames;

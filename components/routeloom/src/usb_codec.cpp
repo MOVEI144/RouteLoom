@@ -129,6 +129,41 @@ Status encode_frame(const FrameKind kind, const std::uint16_t flags,
   return Status::success();
 }
 
+Status encode_frame_inplace(const FrameKind kind, const std::uint16_t flags,
+                            const std::uint64_t session, const std::uint64_t request,
+                            const MutableByteView buffer, const std::size_t body_size,
+                            const MutableByteView out, std::size_t& written) noexcept {
+  written = 0;
+  if (body_size > kMaxBodySize || body_size > 0xFFFFU)
+    return Status::error(StatusCode::InvalidArgument, "FRAME_TOO_LARGE");
+  const std::size_t decoded_need = kHeaderSize + body_size + kCrcSize;
+  if (buffer.data == nullptr || buffer.size < decoded_need || out.data == nullptr ||
+      out.size < encoded_frame_bound(decoded_need))
+    return Status::error(StatusCode::NoCapacity, "frame buffer too small");
+  std::memmove(buffer.data + kHeaderSize, buffer.data, body_size);
+  ByteWriter writer(MutableByteView{buffer.data, kHeaderSize});
+  Status status = writer.write_u32(kMagic);
+  if (status) status = writer.write_u8(kProtocolVersion);
+  if (status) status = writer.write_u8(static_cast<std::uint8_t>(kind));
+  if (status) status = writer.write_u16(flags);
+  if (status) status = writer.write_u64(session);
+  if (status) status = writer.write_u64(request);
+  if (status) status = writer.write_u16(static_cast<std::uint16_t>(body_size));
+  if (!status) return status;
+  const std::uint32_t crc =
+      crc32_iso_hdlc(ByteView{buffer.data, kHeaderSize + body_size});
+  buffer.data[kHeaderSize + body_size] = static_cast<std::uint8_t>(crc >> 24U);
+  buffer.data[kHeaderSize + body_size + 1] = static_cast<std::uint8_t>(crc >> 16U);
+  buffer.data[kHeaderSize + body_size + 2] = static_cast<std::uint8_t>(crc >> 8U);
+  buffer.data[kHeaderSize + body_size + 3] = static_cast<std::uint8_t>(crc);
+  std::size_t encoded = 0;
+  status = cobs_encode(ByteView{buffer.data, decoded_need}, out, encoded);
+  if (!status) return status;
+  out.data[encoded++] = 0;
+  written = encoded;
+  return Status::success();
+}
+
 Status decode_frame(const ByteView decoded, UsbFrame& out) noexcept {
   if (decoded.size < kHeaderSize + kCrcSize) {
     return Status::error(StatusCode::ProtocolError, "FRAME_TOO_SHORT");

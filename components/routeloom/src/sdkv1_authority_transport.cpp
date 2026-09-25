@@ -935,6 +935,7 @@ void AuthorityGateway::expire_slots(const MonotonicMs now_ms) noexcept {
 void AuthorityGateway::poll(const MonotonicMs now_ms) noexcept {
   if (in_call_) return;
   expire_slots(now_ms);
+  bool local_delivered = false;
   for (auto& slot : slots_) {
     if (!slot.active) continue;
     if (slot.direction == Direction::Up) {
@@ -944,7 +945,10 @@ void AuthorityGateway::poll(const MonotonicMs now_ms) noexcept {
         if (!pump_up_usb(slot)) break;
       }
     } else {
+      if (slot.device == self_ && local_delivered) continue;
+      const bool local = slot.device == self_ && slot.received == slot.total_len;
       (void)pump_down_mesh(slot, now_ms);
+      if (local) local_delivered = true;
     }
   }
 }

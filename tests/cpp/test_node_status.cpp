@@ -20,6 +20,9 @@
 
 namespace {
 
+static_assert(sizeof(routeloom::NodeStatusMonitor) <= 3104,
+              "status monitor baseline must fit the bridge RAM budget");
+
 int failures = 0;
 #define CHECK(expr) do { if (!(expr)) { std::fprintf(stderr, "CHECK failed %s:%d: %s\n", __FILE__, __LINE__, #expr); ++failures; } } while (false)
 #define CHECK_OK(expr) do { const auto _status = (expr); if (!_status.ok()) { std::fprintf(stderr, "STATUS failed %s:%d: %s (%s)\n", __FILE__, __LINE__, #expr, _status.detail); ++failures; } } while (false)

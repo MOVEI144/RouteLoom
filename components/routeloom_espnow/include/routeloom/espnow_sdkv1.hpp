@@ -1,12 +1,13 @@
 #pragma once
 
-// SDK v1 device wiring (docs/design/sdk-v1/05 §5, 07 §6, 08 P7): the six
+// SDK v1 device wiring (docs/design/sdk-v1/05 §5, 07 §6, 08 P7): the seven
 // `rlsec` stores (rlident/rlsite/rlrevo/rlres plus rlrev/rlres2 for the P4
-// member handshake) as one firmware-owned object plus the factory
-// maintenance console runner over USB Serial/JTAG. The store discipline
-// and the console protocol live in the portable core (sdkv1_store.hpp,
-// sdkv1_maintenance.hpp) and are host-tested; this file only binds them
-// to NVS, the USB driver and FreeRTOS.
+// member handshake, plus rlmaint for the P6 removal/cutover journal) as
+// one firmware-owned object plus the factory maintenance console runner
+// over USB Serial/JTAG. The store discipline and the console protocol
+// live in the portable core (sdkv1_store.hpp, sdkv1_maintenance.hpp) and
+// are host-tested; this file only binds them to NVS, the USB driver and
+// FreeRTOS.
 
 #include <cstddef>
 
@@ -18,8 +19,8 @@
 
 namespace routeloom::espnow {
 
-// The six SDK v1 stores over `rlsec`, owned statically by the firmware
-// (about 5 KiB of .bss for the slot scratch buffers and adopted records —
+// The seven SDK v1 stores over `rlsec`, owned statically by the firmware
+// (about 7 KiB of .bss for the slot scratch buffers and adopted records —
 // see ram-budget.md; nothing is allocated per call). Not thread-safe; the
 // owner serializes use.
 class Sdkv1Stores {
@@ -51,6 +52,7 @@ class Sdkv1Stores {
   sdkv1::ResumeCache& resume() noexcept { return resume_; }
   sdkv1::LocalRevocationStore& local_revocation() noexcept { return local_revocation_; }
   sdkv1::ResumeSlotStorage2& resume2() noexcept { return resume2_storage_; }
+  sdkv1::LifecycleStore& lifecycle() noexcept { return lifecycle_; }
 
  private:
   std::size_t resume_slots_;
@@ -60,17 +62,20 @@ class Sdkv1Stores {
   NvsBlobNamespace resume_ns_{};
   NvsBlobNamespace local_revocation_ns_{};
   NvsBlobNamespace resume2_ns_{};
+  NvsBlobNamespace lifecycle_ns_{};
   sdkv1::BlobRecordSlotStorage ident_storage_;
   sdkv1::BlobRecordSlotStorage site_storage_;
   sdkv1::BlobRecordSlotStorage revo_storage_;
   sdkv1::BlobResumeSlotStorage resume_storage_;
   sdkv1::BlobRecordSlotStorage local_revocation_storage_;
   sdkv1::BlobResumeSlotStorage2 resume2_storage_;
+  sdkv1::BlobRecordSlotStorage lifecycle_storage_;
   sdkv1::IdentityStore identity_;
   sdkv1::SiteStore site_;
   sdkv1::RevocationStore revocation_;
   sdkv1::ResumeCache resume_;
   sdkv1::LocalRevocationStore local_revocation_;
+  sdkv1::LifecycleStore lifecycle_;
 };
 
 // Factory maintenance console (07 §6 steps 1-5): installs the USB

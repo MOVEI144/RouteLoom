@@ -346,7 +346,7 @@ RouteUpdateResult RouteTable::consider(const RouteAdvertisement& advertisement,
     entry->generation = advertisement.generation;
     entry->feasible = FeasibleDistance{};
     for (auto& candidate : entry->candidates) candidate = RouteCandidate{};
-    entry->last_selected = RouteSelection{};
+    entry->last_selected = LastSelection{};
     entry->hold_next_hop = kInvalidNodeId;
     entry->hold_until_ms = 0;
     entry->tombstone_expires_at_ms = 0;
@@ -386,7 +386,7 @@ RouteUpdateResult RouteTable::consider(const RouteAdvertisement& advertisement,
   const bool existed = candidate->valid && candidate->next_hop == next_hop;
   // Infeasible candidates are recorded too (lease renewed): they carry
   // SeqNoRequests and become selectable again on a newer sequence.
-  *candidate = RouteCandidate{next_hop, now_ms, now_ms + lifetime_ms,
+  *candidate = RouteCandidate{next_hop, now_ms + lifetime_ms,
                               advertisement.sequence, total,
                               advertisement.metric, is_feasible, true};
   entry->tombstone_expires_at_ms = 0;
@@ -533,7 +533,7 @@ bool RouteTable::mark_advertised(const NodeId destination) noexcept {
   // spec: newer sequence -> advertised metric; same sequence -> min(old, new).
   if (!entry->feasible.valid) {
     entry->feasible = FeasibleDistance{selected.sequence, selected.metric, true};
-    entry->last_selected = selected;  // same snapshot the wire just carried
+    entry->last_selected = LastSelection::from(selected);  // same snapshot the wire just carried
     return true;
   }
   bool ambiguous = false;
@@ -545,7 +545,7 @@ bool RouteTable::mark_advertised(const NodeId destination) noexcept {
   }
   // The selection state that just went on the wire — DATA forwarding,
   // advertisements and FD all derive from this same snapshot (03 §6.3).
-  entry->last_selected = selected;
+  entry->last_selected = LastSelection::from(selected);
   return true;
 }
 

@@ -105,11 +105,17 @@ struct FakeRuntimePort final : public LifecycleRuntimePort {
   };
   std::vector<Enforced> calls;
   bool refuse{false};
+  bool enforce_storage_failure{false};
+  unsigned retire_wait{0};
   bool trust_erased{false};
   bool runtime_erased{false};
   bool network_retired{false};
   bool trust_installed{false};
   Status retire_network() noexcept override {
+    if (retire_wait != 0) {
+      --retire_wait;
+      return Status::error(StatusCode::WouldBlock, "p4 resume clear pending");
+    }
     if (refuse) return Status::error(StatusCode::StorageFailure, "network retirement failed");
     network_retired = true;
     return Status::success();
@@ -135,6 +141,8 @@ struct FakeRuntimePort final : public LifecycleRuntimePort {
   Status enforce_revocation(const RevocationSet& set, const std::uint32_t site_epoch,
                             const MonotonicMs now) noexcept override {
     (void)now;
+    if (enforce_storage_failure)
+      return Status::error(StatusCode::StorageFailure, "p4 resume sweep failed");
     if (refuse) return Status::error(StatusCode::Busy, "runtime busy");
     Enforced e{};
     e.set = set;
@@ -289,6 +297,23 @@ struct NodeFixture {
 
   LifecycleSnapshot snap() { return lifecycle.snapshot(); }
 };
+
+[[gnu::noinline]] void rebuild_with_short_lived_ports(NodeFixture& fixture) {
+  LifecyclePorts ports{fixture.authority, fixture.peer, fixture.runtime,
+                       fixture.entropy, fixture.sink, &fixture.observer};
+  fixture.lifecycle.~MembershipLifecycle();
+  new (&fixture.lifecycle)
+      MembershipLifecycle(fixture.config, fixture.identity, fixture.site,
+                          fixture.revocations, fixture.resume, ports,
+                          default_es256_verifier(), &fixture.journal);
+}
+
+void test_lifecycle_port_bundle_lifetime() {
+  NodeFixture fixture;
+  rebuild_with_short_lived_ports(fixture);
+  CHECK(fixture.provision(3, 15));
+  CHECK(fixture.snap().phase == LifecyclePhase::Active);
+}
 
 // --- Wire codecs -------------------------------------------------------------------------
 
@@ -690,6 +715,23 @@ void test_duplicate_equivocation_stale() {
   CHECK(node.snap().rrs_failed == 2);
 }
 
+void test_enforcement_storage_failure_stays_closed() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  const auto object = revocation_object(revocation_set(15));
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(node.dispatch(
+      LifecycleInput::Authority(authority, kAuthorityTypeRevocation, object.view()), 100));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));  // verify
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 101));  // durable set
+  node.runtime.enforce_storage_failure = true;
+  for (int i = 0; i < 3; ++i) CHECK_OK(node.dispatch(LifecycleInput::Poll(), 102 + i));
+  CHECK(node.snap().phase == LifecyclePhase::StorageBlocked);
+  CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
+  CHECK(node.site.site().rs_epoch_floor == 14);
+}
+
 // --- Link failure, recovery, actions ---------------------------------------------------------
 
 void test_link_failure_and_recovery() {
@@ -876,6 +918,52 @@ void test_rrs_exchange_timeouts_and_demux() {
   std::array<std::uint8_t, kRevocationObjectMax + 1> huge{};
   CHECK(e.publish(kNodeB, 7, ByteView{huge.data(), huge.size()}, 30000).code ==
         StatusCode::InvalidArgument);
+}
+
+void test_owns_rrs_chunk_demux() {
+  // The Owner's chunk/ack demux: the lifecycle claims exactly the frames
+  // of its live gossip transfer, so those route to VerifiedPeerControl
+  // while everything else stays on the migration lane.
+  NodeFixture node{};
+  CHECK(node.provision(3, 16));
+  node.pump(0);
+  CHECK(node.snap().phase == LifecyclePhase::Active);
+  FakePeerPort tx_port;
+  FakeObjectSink tx_sink;
+  RrsExchange tx(tx_port, tx_sink);
+  const auto object = revocation_object(revocation_set(16));
+  CHECK_OK(tx.publish(kNode, 7, object.view(), 0));
+  tx.poll(0);
+  CHECK(!tx_port.sent.empty());
+  CHECK(tx_port.sent[0].carrier == FrameType::ControlObject);
+  // Before the manifest, no chunk is ours — not even a well-formed one.
+  for (const auto& sent : tx_port.sent) {
+    if (sent.carrier != FrameType::ObjectChunk) continue;
+    CHECK(!node.lifecycle.owns_rrs_chunk(
+        kNodeB, 7, sent.carrier, ByteView{sent.body.data(), sent.body.size()}));
+  }
+  CHECK_OK(node.dispatch(
+      LifecycleInput::PeerControl(
+          stamp_for(kNodeB, 3), FrameType::ControlObject,
+          ByteView{tx_port.sent[0].body.data(), tx_port.sent[0].body.size()}),
+      0));
+  // The transfer's chunks and ACKs are claimed; anything else is not.
+  bool saw_chunk = false;
+  for (const auto& sent : tx_port.sent) {
+    if (sent.carrier != FrameType::ObjectChunk) continue;
+    saw_chunk = true;
+    const ByteView body{sent.body.data(), sent.body.size()};
+    CHECK(node.lifecycle.owns_rrs_chunk(kNodeB, 7, sent.carrier, body));
+    CHECK(!node.lifecycle.owns_rrs_chunk(kNodeC, 7, sent.carrier, body));
+    CHECK(!node.lifecycle.owns_rrs_chunk(kNodeB, 9, sent.carrier, body));
+    CHECK(!node.lifecycle.owns_rrs_chunk(kNodeB, 7, FrameType::Control, body));
+  }
+  CHECK(saw_chunk);
+  const std::array<std::uint8_t, 3> garbage{{1, 2, 3}};
+  CHECK(!node.lifecycle.owns_rrs_chunk(kNodeB, 7, FrameType::ObjectChunk,
+                                       ByteView{garbage.data(), garbage.size()}));
+  CHECK(!node.lifecycle.owns_rrs_chunk(kInvalidNodeId, 7, FrameType::ObjectChunk,
+                                       ByteView{garbage.data(), garbage.size()}));
 }
 
 // --- Re-entry ----------------------------------------------------------------------------------
@@ -1099,6 +1187,24 @@ std::size_t count_requests(const FakePeerPort& port) {
     }
   }
   return count;
+}
+
+void test_authenticated_peer_starts_and_stops_gossip() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  CHECK(node.snap().phase == LifecyclePhase::Active);
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));
+  CHECK(node.peer.sent.empty());
+  CHECK_OK(node.dispatch(LifecycleInput::PeerBound(stamp_for(kPeer, 3)), 101));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 101));
+  CHECK(node.peer.sent.size() == 1);
+  CHECK(node.peer.sent[0].peer == kPeer);
+  StateEpochs state{};
+  CHECK_OK(state_epochs_decode(ByteView{node.peer.sent[0].body.data(), node.peer.sent[0].body.size()}, state));
+  CHECK(state.applied_rs_epoch == 14);
+  CHECK_OK(node.dispatch(LifecycleInput::PeerGone(kPeer), 102));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 10000));
+  CHECK(node.peer.sent.size() == 1);
 }
 
 void test_gossip_line_propagates() {
@@ -2408,8 +2514,12 @@ void test_signed_prepare_stages_without_switching() {
   f.runtime.refuse = false;
   CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 205));
   CHECK(f.snap().phase == LifecyclePhase::Switching);
+  f.runtime.retire_wait = 2;
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 205));
+  CHECK_OK(f.dispatch(LifecycleInput::Poll(), 206));
+  CHECK(f.snap().phase == LifecyclePhase::Switching);
   for (int i = 0; i < 25 && f.revocations.set().network != next; ++i)
-    CHECK_OK(f.dispatch(LifecycleInput::Poll(), 205 + i));
+    CHECK_OK(f.dispatch(LifecycleInput::Poll(), 207 + i));
   CHECK(f.site.site().network == next && f.revocations.set().network == next);
   f.runtime.refuse = true;
   for (int i = 0; i < 3 && f.snap().phase == LifecyclePhase::Switching; ++i)
@@ -2557,6 +2667,7 @@ void test_removal_failure_after_intent_reboots_closed() {
   f.runtime.refuse = true;
   CHECK_OK(f.dispatch(LifecycleInput::Authority(stamp_for(kPeer, 2), 6, notice.view()), 100));
   for (int i = 0; i < 3; ++i) CHECK_OK(f.dispatch(LifecycleInput::Poll(), 101 + i));
+  CHECK(f.snap().phase == LifecyclePhase::StorageBlocked);
   CHECK(f.site.has_site());
   CHECK(f.journal.record().mode == LifecycleMode::Removing);
   CHECK_OK(f.dispatch(LifecycleInput::Boot(true), 1000));
@@ -2602,6 +2713,7 @@ void test_reassigned_member_can_be_removed_again() {
 }  // namespace
 
 int main() {
+  test_lifecycle_port_bundle_lifetime();
   test_removal_preserves_stored_floor();
   test_removal_resumes_with_corrupt_cleared_site_sibling();
   test_removal_blocks_when_both_site_slots_are_corrupt();
@@ -2616,6 +2728,7 @@ int main() {
   test_rrs_wire_codecs();
   test_revocation_wire_vectors();
   test_boot_adoption();
+  test_enforcement_storage_failure_stays_closed();
   test_boot_self_revoked_and_blocked();
   test_boot_revalidates_stored_rrs();
   test_member_ready_closes_on_floor_advance();
@@ -2626,8 +2739,10 @@ int main() {
   test_link_failure_and_recovery();
   test_rrs_exchange_roundtrip();
   test_rrs_exchange_timeouts_and_demux();
+  test_owns_rrs_chunk_demux();
   test_reentry_is_busy_and_changelss();
   test_gossip_line_propagates();
+  test_authenticated_peer_starts_and_stops_gossip();
   test_gossip_line_100_nodes_converges();
   test_gossip_rates_and_refresh();
   test_partition_continues_and_merge_converges();

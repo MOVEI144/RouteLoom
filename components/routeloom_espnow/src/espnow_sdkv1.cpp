@@ -190,11 +190,14 @@ Sdkv1Stores::Sdkv1Stores(const std::size_t resume_slots) noexcept
       local_revocation_storage_(local_revocation_ns_, sdkv1::kLocalRevocationKey0,
                                 sdkv1::kLocalRevocationKey1, sdkv1::kLocalRevocationSlotBytes),
       resume2_storage_(resume2_ns_, resume_slots),
+      lifecycle_storage_(lifecycle_ns_, sdkv1::kLifecycleKey0, sdkv1::kLifecycleKey1,
+                         sdkv1::kLifecycleSlotBytes),
       identity_(ident_storage_),
       site_(site_storage_),
       revocation_(revo_storage_),
       resume_(resume_storage_),
-      local_revocation_(local_revocation_storage_) {}
+      local_revocation_(local_revocation_storage_),
+      lifecycle_(lifecycle_storage_) {}
 
 Status Sdkv1Stores::open(const char* partition) noexcept {
   Status status = ident_ns_.open(partition, sdkv1::kIdentityNamespace);
@@ -203,6 +206,7 @@ Status Sdkv1Stores::open(const char* partition) noexcept {
   if (status) status = resume_ns_.open(partition, sdkv1::kResumeNamespace);
   if (status) status = local_revocation_ns_.open(partition, sdkv1::kLocalRevocationNamespace);
   if (status) status = resume2_ns_.open(partition, sdkv1::kResume2Namespace);
+  if (status) status = lifecycle_ns_.open(partition, sdkv1::kLifecycleNamespace);
   if (!status) {
     ident_ns_.close();
     site_ns_.close();
@@ -210,6 +214,7 @@ Status Sdkv1Stores::open(const char* partition) noexcept {
     resume_ns_.close();
     local_revocation_ns_.close();
     resume2_ns_.close();
+    lifecycle_ns_.close();
   }
   return status;
 }
@@ -219,10 +224,12 @@ Status Sdkv1Stores::initialize() noexcept {
   const Status site = site_.initialize();
   const Status revocation = revocation_.initialize();
   const Status local_revocation = local_revocation_.initialize();
+  const Status lifecycle = lifecycle_.initialize();
   if (!identity.ok()) return identity;
   if (!site.ok()) return site;
   if (!revocation.ok()) return revocation;
-  return local_revocation;
+  if (!local_revocation.ok()) return local_revocation;
+  return lifecycle;
 }
 
 void Sdkv1Stores::log_state(const char* tag) const noexcept {
@@ -258,12 +265,15 @@ void Sdkv1Stores::log_state(const char* tag) const noexcept {
                : (local_revocation_.record().state == sdkv1::LocalRevocationState::Blocked
                       ? "blocked"
                       : "cleaned"));
+  ESP_LOGI(tag, "sdkv1 lifecycle: %s",
+           !lifecycle_.has_record() ? "none"
+                                    : (lifecycle_.quarantined() ? "quarantined" : "journaled"));
   if (identity_.quarantined() || site_.quarantined() || revocation_.quarantined() ||
-      local_revocation_.quarantined()) {
+      local_revocation_.quarantined() || lifecycle_.quarantined()) {
     ESP_LOGE(tag, "REPROVISION_REQUIRED: sdkv1 store quarantined — recovery is an "
                   "explicit operator act, never an implicit reset");
   } else if (identity_.uncertain() || site_.uncertain() || revocation_.uncertain() ||
-             local_revocation_.uncertain()) {
+             local_revocation_.uncertain() || lifecycle_.uncertain()) {
     ESP_LOGE(tag, "REPROVISION_REQUIRED: sdkv1 sibling state unproven — "
                   "possibly-stale state is refused until recover()");
   }

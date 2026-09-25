@@ -44,6 +44,9 @@
 //   --fw <u32> --cap <u32> --role <u8> --t0 <ms> --seed <u64>
 //   --site <id,network,gateway,proxymac,proxynode,channel,rssi,hops>
 //   --flash <file>   (optional 4096 B preload: identity slots, site slots)
+//   --verify         boot the Joiner in VerifyExistingMembership mode (a
+//                    retained RLS1 re-proves over ZT instead of adopting
+//                    silently — the removal-recovery / cutover-reissue leg)
 //
 // Test keys only; every byte on argv is test material.
 
@@ -69,7 +72,8 @@ using Bytes = std::vector<std::uint8_t>;
 
 constexpr std::size_t kRpcMax = 1100;
 constexpr std::size_t kFlashSlots = 4;  // identity 0/1, site 0/1
-constexpr std::size_t kFlashBytes = kFlashSlots * kIdentitySlotBytes;
+constexpr std::size_t kFlashSlotBytes = 1024;  // pipe fixture layout
+constexpr std::size_t kFlashBytes = kFlashSlots * kFlashSlotBytes;
 constexpr std::uint64_t kBootWitness = 0x0A11CE;
 constexpr std::uint64_t kTickStepMs = 5;
 
@@ -275,6 +279,7 @@ struct PeerSetup {
   std::uint64_t seed{0x5EED1234ULL};
   std::vector<SimSiteParams> sites;
   Bytes flash;  // empty, or exactly kFlashBytes
+  bool verify{false};
 };
 
 bool take_arg(int argc, char** argv, int& i, std::string& out) {
@@ -332,7 +337,7 @@ void usage() {
                "--dev-pub <128hex> --dev-cert <hex> --site-ca-id <u64> --site-ca-pub <128hex> "
                "--fw <u32> --cap <u32> --role <u8> --t0 <ms> --seed <u64> "
                "--site <id,network,gateway,proxymac,proxynode,channel,rssi,hops>... "
-               "[--flash <file>]\n");
+               "[--flash <file>] [--verify]\n");
 }
 
 // The site CA keypair outlives the setup (SimSiteParams only borrows it).
@@ -377,6 +382,8 @@ bool parse_setup(int argc, char** argv, PeerSetup& setup) {
       setup.sites.push_back(params);
     } else if (arg == "--flash" && take_arg(argc, argv, i, value)) {
       flash_path = value;
+    } else if (arg == "--verify") {
+      setup.verify = true;
     } else {
       return false;
     }
@@ -451,16 +458,17 @@ class PeerWorld {
       std::memcpy(dev.identity_storage.inner_.slot(0).data(), setup.flash.data(),
                   kIdentitySlotBytes);
       std::memcpy(dev.identity_storage.inner_.slot(1).data(),
-                  setup.flash.data() + kIdentitySlotBytes, kIdentitySlotBytes);
-      std::memcpy(dev.site_storage.inner_.slot(0).data(), setup.flash.data() + 2 * kSiteSlotBytes,
+                  setup.flash.data() + kFlashSlotBytes, kIdentitySlotBytes);
+      std::memcpy(dev.site_storage.inner_.slot(0).data(), setup.flash.data() + 2 * kFlashSlotBytes,
                   kSiteSlotBytes);
-      std::memcpy(dev.site_storage.inner_.slot(1).data(), setup.flash.data() + 3 * kSiteSlotBytes,
+      std::memcpy(dev.site_storage.inner_.slot(1).data(), setup.flash.data() + 3 * kFlashSlotBytes,
                   kSiteSlotBytes);
     }
     for (const auto& site : setup.sites) add_site(site);
     JoinBootInput boot{};
     boot.boot_witness = static_cast<std::uint32_t>(kBootWitness);
     boot.prepared = true;
+    if (setup.verify) boot.mode = JoinBootMode::VerifyExistingMembership;
     const Status started = device_->joiner.start(boot, now_);
     if (!started.ok()) fatal("joiner start failed");
   }
@@ -573,6 +581,7 @@ class PeerWorld {
       payload.push_back(i < 2 ? 0 : 1);
       payload.push_back(static_cast<std::uint8_t>(i % 2));
       payload.insert(payload.end(), slots[i]->begin(), slots[i]->end());
+      payload.resize(3 + kFlashSlotBytes, 0xFF);
       if (!write_frame(payload)) fatal("P exceeds the RPC bound");
     }
   }

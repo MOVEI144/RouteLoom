@@ -173,12 +173,12 @@ class NodeStatusMonitor {
       for (std::size_t i = 0; i < n && !stop; ++i) {
         const NodeStatus& current = scan_[i];
         // Baseline nodes below the scan position vanished from the source.
-        while (!stop && index < size_ && baseline_[index].node < current.node) {
-          if (settle(index, gone(baseline_[index].node), offer)) continue;
+        while (!stop && index < size_ && baseline_nodes_[index] < current.node) {
+          if (settle(index, gone(baseline_nodes_[index]), offer)) continue;
           ++index;
         }
         if (stop) break;
-        if (index < size_ && baseline_[index].node == current.node) {
+        if (index < size_ && baseline_nodes_[index] == current.node) {
           if (!settle(index, current, offer)) ++index;
           continue;
         }
@@ -194,19 +194,15 @@ class NodeStatusMonitor {
     }
     // Everything left in the baseline past the last scanned id is gone.
     while (!stop && index < size_) {
-      if (settle(index, gone(baseline_[index].node), offer)) continue;
+      if (settle(index, gone(baseline_nodes_[index]), offer)) continue;
       ++index;
     }
     return emitted;
   }
 
  private:
-  struct Tracked {
-    NodeId node{kInvalidNodeId};
-    NodeId next_hop{kInvalidNodeId};
-    bool neighbor_active{false};
-    bool reachable{false};
-  };
+  static constexpr std::uint8_t kTrackedNeighbor = 1;
+  static constexpr std::uint8_t kTrackedReachable = 2;
 
   static NodeStatus gone(const NodeId node) noexcept {
     NodeStatus status{};
@@ -219,27 +215,29 @@ class NodeStatusMonitor {
   // event. Returns true when the entry was erased (nothing left to track).
   template <typename Offer>
   bool settle(const std::size_t index, const NodeStatus& current, Offer& offer) noexcept {
-    Tracked& entry = baseline_[index];
-    if (entry.neighbor_active != current.neighbor_active()) {
+    std::uint8_t& flags = baseline_flags_[index];
+    const bool neighbor_active = (flags & kTrackedNeighbor) != 0;
+    const bool reachable = (flags & kTrackedReachable) != 0;
+    if (neighbor_active != current.neighbor_active()) {
       if (!offer(current.neighbor_active() ? NodeEventKind::NeighborUp
                                            : NodeEventKind::NeighborDown,
                  current)) {
         return false;
       }
-      entry.neighbor_active = current.neighbor_active();
+      flags ^= kTrackedNeighbor;
     }
-    if (entry.reachable != current.reachable()) {
+    if (reachable != current.reachable()) {
       if (!offer(current.reachable() ? NodeEventKind::RouteUp : NodeEventKind::RouteDown,
                  current)) {
         return false;
       }
-      entry.reachable = current.reachable();
-      entry.next_hop = current.reachable() ? current.next_hop : kInvalidNodeId;
-    } else if (entry.reachable && entry.next_hop != current.next_hop) {
+      flags ^= kTrackedReachable;
+      baseline_next_hops_[index] = current.reachable() ? current.next_hop : kInvalidNodeId;
+    } else if (reachable && baseline_next_hops_[index] != current.next_hop) {
       if (!offer(NodeEventKind::RouteChanged, current)) return false;
-      entry.next_hop = current.next_hop;
+      baseline_next_hops_[index] = current.next_hop;
     }
-    if (!entry.neighbor_active && !entry.reachable) {
+    if (flags == 0) {
       erase(index);
       return true;
     }
@@ -248,30 +246,44 @@ class NodeStatusMonitor {
 
   bool append(const NodeStatus& status) noexcept {
     if (size_ >= kCapacity) return false;
-    Tracked& entry = baseline_[size_++];
-    entry.node = status.node;
-    entry.neighbor_active = status.neighbor_active();
-    entry.reachable = status.reachable();
-    entry.next_hop = status.reachable() ? status.next_hop : kInvalidNodeId;
+    const std::size_t index = size_++;
+    baseline_nodes_[index] = status.node;
+    baseline_flags_[index] = (status.neighbor_active() ? kTrackedNeighbor : 0) |
+                             (status.reachable() ? kTrackedReachable : 0);
+    baseline_next_hops_[index] = status.reachable() ? status.next_hop : kInvalidNodeId;
     return true;
   }
 
   bool insert(const std::size_t index, const NodeId node) noexcept {
     if (size_ >= kCapacity) return false;
-    for (std::size_t i = size_; i > index; --i) baseline_[i] = baseline_[i - 1];
-    baseline_[index] = Tracked{};
-    baseline_[index].node = node;
+    for (std::size_t i = size_; i > index; --i) {
+      baseline_nodes_[i] = baseline_nodes_[i - 1];
+      baseline_next_hops_[i] = baseline_next_hops_[i - 1];
+      baseline_flags_[i] = baseline_flags_[i - 1];
+    }
+    baseline_nodes_[index] = node;
+    baseline_next_hops_[index] = kInvalidNodeId;
+    baseline_flags_[index] = 0;
     ++size_;
     return true;
   }
 
   void erase(const std::size_t index) noexcept {
-    for (std::size_t i = index; i + 1 < size_; ++i) baseline_[i] = baseline_[i + 1];
+    for (std::size_t i = index; i + 1 < size_; ++i) {
+      baseline_nodes_[i] = baseline_nodes_[i + 1];
+      baseline_next_hops_[i] = baseline_next_hops_[i + 1];
+      baseline_flags_[i] = baseline_flags_[i + 1];
+    }
     --size_;
-    baseline_[size_] = Tracked{};
+    baseline_nodes_[size_] = kInvalidNodeId;
+    baseline_next_hops_[size_] = kInvalidNodeId;
+    baseline_flags_[size_] = 0;
   }
 
-  std::array<Tracked, kCapacity> baseline_{};
+  // Parallel arrays avoid per-entry padding between two NodeIds and flags.
+  std::array<NodeId, kCapacity> baseline_nodes_{};
+  std::array<NodeId, kCapacity> baseline_next_hops_{};
+  std::array<std::uint8_t, kCapacity> baseline_flags_{};
   std::size_t size_{0};
   std::array<NodeStatus, kScanPage> scan_{};
   std::uint32_t sequence_{0};

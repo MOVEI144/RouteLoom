@@ -134,7 +134,6 @@ RouteMetric project_broadcast_route_metric(const BroadcastRouteRecord& record,
 // in static RAM (docs/design/sdk-v1/ram-budget.md).
 struct RouteCandidate {
   NodeId next_hop{kInvalidNodeId};
-  MonotonicMs learned_at_ms{0};
   MonotonicMs expires_at_ms{0};
   RouteSequence sequence{0};
   RouteMetric metric{kInfiniteRouteMetric};
@@ -148,6 +147,7 @@ struct RouteCandidate {
   bool feasible{false};
   bool valid{false};
 };
+static_assert(sizeof(RouteCandidate) == 24, "three candidates per route fit the RAM budget");
 
 struct RouteSelection {
   NodeId destination{kInvalidNodeId};
@@ -329,8 +329,8 @@ class RouteTable {
         return;
       }
       if (pure_improvement) entry.improvement_ad_ms = now_ms;
-      const RouteSelection previous = entry.last_selected;
-      entry.last_selected = selection;
+      const RouteSelection previous = entry.last_selected.to(entry.destination, entry.generation);
+      entry.last_selected = LastSelection::from(selection);
       // Callers may also take the previous snapshot: the gateway-scoped
       // profile needs the old next hop to route a retraction upward.
       if constexpr (std::is_invocable_v<Fn&, const RouteSelection&,
@@ -349,12 +349,28 @@ class RouteTable {
     bool valid{false};
   };
 
-  // 8-byte members first, then the 4/2/1-byte tail (ram-budget.md): 216 B
-  // per entry instead of 256 B (LP64 and RISC-V/Xtensa).
+  // The destination and generation belong to the entry, so the advertised
+  // selection snapshot keeps only the fields that can change within it.
+  struct LastSelection {
+    NodeId next_hop{kInvalidNodeId};
+    RouteSequence sequence{0};
+    RouteMetric metric{kInfiniteRouteMetric};
+    bool valid{false};
+
+    static LastSelection from(const RouteSelection& selection) noexcept {
+      return {selection.next_hop, selection.sequence, selection.metric, selection.valid};
+    }
+    RouteSelection to(NodeId destination, RouteGeneration generation) const noexcept {
+      return {destination, next_hop, generation, sequence, metric, valid};
+    }
+  };
+  static_assert(sizeof(LastSelection) == 16, "selection snapshot RAM bound");
+
+  // 8-byte members first, then the 4/2/1-byte tail (ram-budget.md).
   struct Entry {
     NodeId destination{kInvalidNodeId};
     std::array<RouteCandidate, kRouteCandidatesPerDestination> candidates{};
-    RouteSelection last_selected{};
+    LastSelection last_selected{};
     NodeId hold_next_hop{kInvalidNodeId};
     MonotonicMs hold_until_ms{0};
     MonotonicMs tombstone_expires_at_ms{0};
@@ -379,6 +395,7 @@ class RouteTable {
     // retracted since — leaving the subtree must send a retraction upward.
     bool announced_up{false};
   };
+  static_assert(sizeof(Entry) <= 176, "route entry RAM bound");
 
   // Per-next-hop sustained-busy input (03 §7 severe-busy path).
   struct BusyLink {
