@@ -417,7 +417,11 @@ bool AuthorityEndpoint::pump_tx(const MonotonicMs now_ms) noexcept {
     const Status sent = mesh_.config_send(tx_.gateway, FrameType::Control,
                                           ByteView{frame.data(), written}, now_ms);
     in_call_ = false;
-    if (!sent) return true;  // mesh shed it: retry on the next poll
+    if (!sent) {
+      sat_inc(counters_.mesh_shed);
+      return true;  // mesh shed it: retry on the next poll
+    }
+    sat_inc(counters_.mesh_queued);
     complete_tx(true);
     return true;
   }
@@ -588,6 +592,7 @@ void AuthorityGateway::on_control(const NodeId origin, const ByteView payload,
   slot->started_ms = now_ms;
   slot->last_send_ms = now_ms;
   std::memcpy(slot->buffer.data(), body.data, body.size);
+  sat_inc(counters_.rx_carriers);
 }
 
 void AuthorityGateway::on_manifest(
@@ -625,6 +630,7 @@ void AuthorityGateway::on_manifest(
   slot->hash = manifest.object_hash;
   slot->started_ms = now_ms;
   slot->last_send_ms = now_ms;
+  sat_inc(counters_.rx_manifests);
   send_ack(origin, manifest.object_hash, 0, autonomy::ObjectAckStatus::Incomplete, now_ms);
 }
 
@@ -645,6 +651,7 @@ void AuthorityGateway::on_chunk(const NodeId origin,
     sat_inc(counters_.denied);
     return;
   }
+  sat_inc(counters_.rx_chunks);
   if (now_ms - slot->started_ms > kAuthorityReassemblyTimeoutMs) {
     send_ack(origin, chunk.object_hash, slot->received,
              autonomy::ObjectAckStatus::Failed, now_ms);
@@ -907,7 +914,10 @@ bool AuthorityGateway::pump_up_usb(Slot& slot) noexcept {
   in_call_ = true;
   const bool accepted = host_.send_up(fragment);
   in_call_ = false;
-  if (!accepted) return false;  // USB queue full: the cursor retries on poll
+  if (!accepted) {
+    sat_inc(counters_.up_blocked);
+    return false;  // USB queue full: the cursor retries on poll
+  }
   slot.emitted = static_cast<std::uint16_t>(slot.emitted + length);
   sat_inc(counters_.up_fragments);
   if (slot.emitted >= slot.total_len) drop_slot(slot);
@@ -959,6 +969,22 @@ bool AuthorityGateway::quiescent() const noexcept {
     if (slot.active) return false;
   }
   return true;
+}
+
+void AuthorityMeshSink::on_config_job_done(const MessageId& id, const bool hop_accepted,
+                                           const char* reason,
+                                           const MonotonicMs now_ms) noexcept {
+  (void)id;
+  (void)now_ms;
+  if (hop_accepted) {
+    sat_inc(jobs_accepted_);
+    return;
+  }
+  sat_inc(jobs_failed_);
+  if (reason != nullptr) {
+    std::strncpy(last_failure_reason_.data(), reason, last_failure_reason_.size() - 1);
+    last_failure_reason_.back() = '\0';
+  }
 }
 
 void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFrame& frame,

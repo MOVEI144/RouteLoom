@@ -1071,6 +1071,11 @@ extern "C" void app_main(void) {
   status = owner.boot(message_session, /*rlboot_prepared=*/true,
                       /*usb_direct=*/false, monotonic_now_ms());
   if (!status) fail(status.detail);
+#if !CONFIG_ROUTELOOM_CONFIG
+  // MemberEdhoc still needs the authority terminal when remote config is
+  // disabled: R2, JoinConfirm, and GK updates arrive on this mesh lane.
+  runtime.node().set_config_sink(owner.authority_mesh_sink());
+#endif
 #endif
 #endif
 
@@ -1387,6 +1392,16 @@ extern "C" void app_main(void) {
   for (;;) {
     runtime.poll_once();
     owner.poll(monotonic_now_ms());
+#if CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG && CONFIG_ROUTELOOM_CONFIG
+    static routeloom::MonotonicMs last_config_trace = 0;
+    const routeloom::MonotonicMs config_now = monotonic_now_ms();
+    if (config_now >= last_config_trace + 5000) {
+      last_config_trace = config_now;
+      ESP_LOGI(kTag, "config jobs accepted=%lu failed=%lu",
+               static_cast<unsigned long>(config_target.jobs_accepted()),
+               static_cast<unsigned long>(config_target.jobs_failed()));
+    }
+#endif
 #if CONFIG_ROUTELOOM_DEEP_SLEEP
     // Warm restore: retried while the parent re-binds (Busy) with a
     // freshly bounded elapsed upper bound each round; terminal (warm or

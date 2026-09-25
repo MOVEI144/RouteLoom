@@ -691,6 +691,9 @@ extern "C" void app_main(void) {
   static ROUTELOOM_MEMBER_SMALL_LP routeloom::ConfigGateway config_gateway(config_port, bridge);
   status = bridge.attach_config(config_gateway);
   if (!status) fail(status.detail);
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+  config_gateway.attach_authority(owner.authority_demux());
+#endif
 #endif
 
   // M1 diagnostics (m1-completion D1d): the bridge answers HostOps 0x30

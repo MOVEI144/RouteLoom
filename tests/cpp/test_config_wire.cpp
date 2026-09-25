@@ -1498,6 +1498,50 @@ void test_authority_config_hash_conflict() {
   }
 }
 
+void test_gateway_authority_relay_with_config_attached() {
+  class AuthorityHost final : public sdkv1::AuthorityHostSink {
+   public:
+    bool send_up(const usb::AuthorityFragment& fragment) noexcept override {
+      ++sent;
+      device = fragment.device;
+      kind = fragment.kind;
+      size = fragment.data.size;
+      return true;
+    }
+    int sent{0};
+    NodeId device{kInvalidNodeId};
+    sdkv1::AuthorityCarrierKind kind{sdkv1::AuthorityCarrierKind::Envelope};
+    std::size_t size{0};
+  } authority_host;
+  class LocalSink final : public sdkv1::AuthorityLocalSink {
+   public:
+    void on_local_down(sdkv1::AuthorityCarrierKind, MutableByteView) noexcept override {}
+  } local;
+  ConfigEndpointSink* peer = nullptr;
+  LoopbackPort port(kGateway, peer);
+  RecordingHost config_host{};
+  ConfigGateway config(port, config_host);
+  sdkv1::AuthorityGateway authority(port, authority_host, local, kGateway);
+  config.attach_authority(&authority);
+
+  const std::array<std::uint8_t, 8> wake{};
+  std::array<std::uint8_t, kMaxApplicationPayload> encoded{};
+  std::size_t written = 0;
+  CHECK_OK(sdkv1::authority_carrier_encode(
+      sdkv1::AuthorityCarrierKind::Wake, 0, ByteView{wake.data(), wake.size()},
+      MutableByteView{encoded.data(), encoded.size()}, written));
+  config.on_config_frame(kTarget,
+                         object_frame(kTarget, FrameType::Control,
+                                      ByteView{encoded.data(), written}),
+                         1000);
+  authority.poll(1001);
+  CHECK(authority_host.sent == 1);
+  CHECK(authority_host.device == kTarget);
+  CHECK(authority_host.kind == sdkv1::AuthorityCarrierKind::Wake);
+  CHECK(authority_host.size == wake.size());
+  CHECK(config_host.calls == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -1510,6 +1554,7 @@ int main() {
   test_dev_permit_tag_status_codes();
   test_single_assembler_discipline();
   test_authority_config_hash_conflict();
+  test_gateway_authority_relay_with_config_attached();
   test_kind5_trust_delivery_e2e();
   test_trust_verify_shares_budget();
   test_trust_status_query_wire();

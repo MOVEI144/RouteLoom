@@ -33,8 +33,8 @@ constexpr MonotonicMs kRetiredPullWindowMs = 10000;
 
 EspNowSecurityOwner::~EspNowSecurityOwner() noexcept {
   if (authority_live_) {
+    mesh_sink()->~AuthorityMeshSink();
     if (config_.gateway) {
-      mesh_sink()->~AuthorityMeshSink();
       gateway()->~AuthorityGateway();
     } else {
       endpoint()->~AuthorityEndpoint();
@@ -307,7 +307,7 @@ sdkv1::AuthorityGateway* EspNowSecurityOwner::gateway() noexcept {
 }
 
 sdkv1::AuthorityMeshSink* EspNowSecurityOwner::mesh_sink() noexcept {
-  if (!authority_live_ || !config_.gateway) return nullptr;
+  if (!authority_live_) return nullptr;
   return reinterpret_cast<sdkv1::AuthorityMeshSink*>(mesh_sink_box_.data());
 }
 
@@ -485,6 +485,7 @@ Status EspNowSecurityOwner::boot(const std::uint32_t rlboot_witness, const bool 
   } else {
     new (transport_box_.endpoint.data())
         sdkv1::AuthorityEndpoint(*mesh_port(), config_.local_node);
+    new (mesh_sink_box_.data()) sdkv1::AuthorityMeshSink(*endpoint());
     const Status authority_status = coordinator().attach_authority_port(*endpoint());
     if (!authority_status) return authority_status;
   }
@@ -606,6 +607,34 @@ void EspNowSecurityOwner::poll(const MonotonicMs now_ms) noexcept {
                static_cast<unsigned>(authority.pull_pending),
                static_cast<unsigned>(authority.busy),
                static_cast<unsigned long>(authority.backoff_s));
+      if (config_.gateway && gateway() != nullptr) {
+        const auto& relay = gateway()->counters();
+        ESP_LOGI(config_.log_tag,
+                 "authority relay rx_carrier=%lu rx_manifest=%lu rx_chunk=%lu up=%lu blocked=%lu denied=%lu timeout=%lu",
+                 static_cast<unsigned long>(relay.rx_carriers),
+                 static_cast<unsigned long>(relay.rx_manifests),
+                 static_cast<unsigned long>(relay.rx_chunks),
+                 static_cast<unsigned long>(relay.up_fragments),
+                 static_cast<unsigned long>(relay.up_blocked),
+                 static_cast<unsigned long>(relay.denied),
+                 static_cast<unsigned long>(relay.timeouts));
+      } else if (endpoint() != nullptr) {
+        const auto& mesh = endpoint()->counters();
+        ESP_LOGI(config_.log_tag,
+                 "authority mesh tx_carrier=%lu queued=%lu shed=%lu rx_carrier=%lu denied=%lu timeout=%lu",
+                 static_cast<unsigned long>(mesh.tx_carriers),
+                 static_cast<unsigned long>(mesh.mesh_queued),
+                 static_cast<unsigned long>(mesh.mesh_shed),
+                 static_cast<unsigned long>(mesh.rx_carriers),
+                 static_cast<unsigned long>(mesh.rx_denied),
+                 static_cast<unsigned long>(mesh.tx_timeouts));
+      }
+      if (mesh_sink() != nullptr) {
+        ESP_LOGI(config_.log_tag, "authority jobs accepted=%lu failed=%lu last=%s",
+                 static_cast<unsigned long>(mesh_sink()->jobs_accepted()),
+                 static_cast<unsigned long>(mesh_sink()->jobs_failed()),
+                 mesh_sink()->last_failure_reason());
+      }
       if (disc != nullptr) {
         const auto stats = disc->stats();
         ESP_LOGI(config_.log_tag,
