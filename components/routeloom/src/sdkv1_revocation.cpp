@@ -458,9 +458,6 @@ MonotonicMs RrsExchange::next_deadline() const noexcept {
 // --- Membership lifecycle ------------------------------------------------------------
 
 namespace {
-constexpr std::size_t kResumeSlotsNode = 16;
-constexpr std::size_t kResumeSlotsGateway = 160;
-
 struct CallGuard {
   explicit CallGuard(bool& flag) noexcept : flag_(flag) { flag_ = true; }
   ~CallGuard() noexcept { flag_ = false; }
@@ -474,7 +471,7 @@ struct CallGuard {
 
 MembershipLifecycle::MembershipLifecycle(
     const LifecycleConfig& config, IdentityStore& identity, SiteStore& site,
-    RevocationStore& revocations, ResumeCache& resume, LifecyclePorts ports,
+    RevocationStore& revocations, ResumeCache2& resume, LifecyclePorts ports,
     const Es256Verifier& verifier, LifecycleStore* journal) noexcept
     : config_(config),
       identity_(identity),
@@ -561,8 +558,8 @@ Status MembershipLifecycle::take_action(LifecycleAction& action) noexcept {
 
 LifecycleSnapshot MembershipLifecycle::snapshot() const noexcept { return snapshot_; }
 
-bool MembershipLifecycle::permits(const PeerCredentialStamp& stamp,
-                                 const TrafficUse use) const noexcept {
+bool MembershipLifecycle::permits_recovery_control(
+    const PeerCredentialStamp& stamp) const noexcept {
   if (!valid_node(stamp.peer) || stamp.role == 0 || stamp.assignment_generation == 0) return false;
   if (!adopted_.site_ok || stamp.network != adopted_.network) return false;
   // Recovery-control-only establishment while the membership binding is
@@ -570,26 +567,17 @@ bool MembershipLifecycle::permits(const PeerCredentialStamp& stamp,
   // Recovering. Never for a certainly self-revoked device, a blocked
   // store, or a stopped lifecycle — those need the zero-touch proof or
   // maintenance, not a peer shortcut.
-  if (use == TrafficUse::RecoveryControl) {
-    if (self_revoked_ || self_rejected()) return false;
-    if (adopted_.has_rrs && revocations_.set().network == adopted_.network &&
-        revocation_rejects(revocations_.set(), stamp.peer, stamp.assignment_generation,
-                           site_epoch())) return false;
-    if (phase_ == LifecyclePhase::ApplyingRrs && apply_step_ != ApplyStep::Verify &&
-        candidate_set_.network == adopted_.network &&
-        (revocation_rejects(candidate_set_, config_.self, adopted_.generation, site_epoch()) ||
-         revocation_rejects(candidate_set_, stamp.peer, stamp.assignment_generation,
-                            site_epoch()))) return false;
-    return phase_ == LifecyclePhase::BootGate || phase_ == LifecyclePhase::Active ||
-           phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Recovering;
-  }
-  if ((phase_ != LifecyclePhase::Active && phase_ != LifecyclePhase::Prepared) ||
-      equivocated_ || !adopted_.has_rrs ||
-      adopted_.rs_epoch < adopted_.rs_floor ||
-      revocations_.set().network != adopted_.network ||
-      revocations_.set().site_id != adopted_.site_id) return false;
-  return !revocation_rejects(revocations_.set(), stamp.peer, stamp.assignment_generation,
-                             site_epoch());
+  if (self_revoked_ || self_rejected()) return false;
+  if (adopted_.has_rrs && revocations_.set().network == adopted_.network &&
+      revocation_rejects(revocations_.set(), stamp.peer, stamp.assignment_generation,
+                         site_epoch())) return false;
+  if (phase_ == LifecyclePhase::ApplyingRrs && apply_step_ != ApplyStep::Verify &&
+      candidate_set_.network == adopted_.network &&
+      (revocation_rejects(candidate_set_, config_.self, adopted_.generation, site_epoch()) ||
+       revocation_rejects(candidate_set_, stamp.peer, stamp.assignment_generation,
+                          site_epoch()))) return false;
+  return phase_ == LifecyclePhase::BootGate || phase_ == LifecyclePhase::Active ||
+         phase_ == LifecyclePhase::ApplyingRrs || phase_ == LifecyclePhase::Recovering;
 }
 
 bool MembershipLifecycle::quiescent() const noexcept {
@@ -706,13 +694,17 @@ LifecycleBlockReason MembershipLifecycle::adopt_stores() noexcept {
     return LifecycleBlockReason::Identity;
   }
   adopted_.identity_ok = true;
-  // The P6 profile pins the 05 §3.2 fixed RLP1 geometry (16 node slots,
-  // 160 gateway slots); anything else is a provisioning mismatch the
-  // sweep cursors must not silently accept.
-  const std::size_t resume_slots = resume_.slot_count();
-  const std::size_t want_slots =
-      config_.profile == LifecycleProfile::Gateway ? kResumeSlotsGateway : kResumeSlotsNode;
-  if (resume_slots != want_slots) return LifecycleBlockReason::ResumeGeometry;
+  // The P6 profile pins the P4 §4.1 RLP2 purpose quotas (12+4 node
+  // slots, 32+128 gateway slots); anything else is a provisioning
+  // mismatch the sweep cursors must not silently accept.
+  const std::size_t want_link = config_.profile == LifecycleProfile::Gateway
+                                    ? kResume2GatewayLinkQuota
+                                    : kResume2NodeLinkQuota;
+  const std::size_t want_end = config_.profile == LifecycleProfile::Gateway
+                                   ? kResume2GatewayEndQuota
+                                   : kResume2NodeEndQuota;
+  if (resume_.link_quota() != want_link || resume_.end_quota() != want_end)
+    return LifecycleBlockReason::ResumeGeometry;
   if (!site_.has_site() || site_.quarantined() || site_.uncertain()) {
     return LifecycleBlockReason::Site;
   }
@@ -941,8 +933,10 @@ Status MembershipLifecycle::apply_verify(const MonotonicMs now_ms) noexcept {
       abort_apply(resume_phase_);
       return Status::success();
     }
-    // Same epoch, different validly-signed bytes: close the gate and let
-    // the authority break the tie. The gossip copy is never adopted.
+    // Same epoch, different validly-signed bytes: raise re-fetch and
+    // let the authority break the tie. The gossip copy is never
+    // adopted; traffic keeps enforcing the adopted set (04 states no
+    // traffic rule for equivocation).
     equivocated_ = true;
     if (!bump_policy()) {
       enter_storage_blocked(LifecycleBlockReason::PolicyExhausted, now_ms);
@@ -1633,7 +1627,7 @@ Status MembershipLifecycle::on_authority(const LifecycleAuthorityMessage& messag
 
 Status MembershipLifecycle::on_peer_bound(const PeerCredentialStamp& stamp,
                                           const MonotonicMs now_ms) noexcept {
-  if (!gossip_tx_enabled() || !permits(stamp, TrafficUse::RecoveryControl)) {
+  if (!gossip_tx_enabled() || !permits_recovery_control(stamp)) {
     return Status::success();
   }
   for (Neighbor& neighbor : neighbors_) {

@@ -23,6 +23,21 @@ DEDUP_ENTRY_BYTES = 152
 # not a tuneable contract (issue #47 premises).
 ESPNOW_MAC_OVERHEAD_BYTES = 43
 
+# Acceptance IDs with no host test by construction (P3-10): hardware-in-
+# the-loop measurements. The trace check below requires every other
+# design-table ID to be tagged in tests/ or host/.
+ACCEPTANCE_HIL_ONLY = {
+    "V1-J15": "02 §14: join/ECC timing on C3/S3 hardware",
+    "V1-N08": "05 §8: nvs_get_stats() budget cross-check on C3",
+    "V1-F06": "06 §9: 6+ node power-on recovery timing",
+}
+
+# Acceptance IDs with no host test yet (P3-10): explicitly triaged so
+# the trace check stays a closed loop; each needs a future test.
+ACCEPTANCE_NO_HOST_TEST = {
+    "V1-F04": "relay-stop route-switch handshake count (needs routing+session integration)",
+}
+
 # Frozen Wire v1 frame type IDs (CORE_FIXED_250 profile). Mirrors
 # FrameType in components/routeloom/include/routeloom/types.hpp.
 EXPECTED_FRAME_IDS = {
@@ -909,6 +924,49 @@ def validate(root: Path) -> dict:
                 f"finding_paths:{finding['id']}",
                 all((root / path).is_file() for path in finding["docs"]),
             )
+        # Acceptance-ID traceability (final-review P3-10): every V1-*
+        # acceptance ID named by the sdk-v1 design tables must be
+        # traceable to a host test (an exact "V1-Xnn" tag in tests/ or
+        # host/) or explicitly triaged above (HIL-only, or no host
+        # test yet). A design ID in neither state fails, so silently
+        # dropped coverage cannot pass.
+        design_ids: set[str] = set()
+        for doc in (
+            "docs/design/sdk-v1/02-zero-touch-join.md",
+            "docs/design/sdk-v1/03-key-hierarchy.md",
+            "docs/design/sdk-v1/04-removal-revocation.md",
+            "docs/design/sdk-v1/05-nvs-state-37.md",
+            "docs/design/sdk-v1/06-fast-rejoin.md",
+            "docs/design/sdk-v1/07-host-api-tooling.md",
+        ):
+            design_ids.update(
+                re.findall(r"V1-[A-Z]\d+", (root / doc).read_text(encoding="utf-8"))
+            )
+        evidence: dict[str, list[str]] = {i: [] for i in design_ids}
+        for base in ("tests", "host"):
+            for path in sorted((root / base).rglob("*")):
+                if not path.is_file() or "target" in path.parts:
+                    continue
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for i in design_ids:
+                    if i in text:
+                        evidence[i].append(str(path.relative_to(root)))
+        for i in sorted(design_ids):
+            if evidence[i]:
+                test(f"acceptance_trace:{i}", True, ",".join(evidence[i][:4]))
+            elif i in ACCEPTANCE_HIL_ONLY:
+                test(f"acceptance_trace:{i}", True, f"HIL-only: {ACCEPTANCE_HIL_ONLY[i]}")
+            elif i in ACCEPTANCE_NO_HOST_TEST:
+                test(
+                    f"acceptance_trace:{i}",
+                    True,
+                    f"NO_HOST_TEST: {ACCEPTANCE_NO_HOST_TEST[i]}",
+                )
+            else:
+                test(f"acceptance_trace:{i}", False, "no host test tags this ID")
     except (ValueError, KeyError, TypeError, OSError) as error:
         test("schema_read", False, str(error))
     return {

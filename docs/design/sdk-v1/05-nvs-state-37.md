@@ -35,6 +35,8 @@ entry数はNVS v2のblob（index 1＋data header 1＋32B単位のdata）で概�
 
 ### 3.2 再開cache（固定slot、LRU）
 
+現行の再開cacheはRLP2（96B slot、`rlres2`、purpose quota 12+4 node／32+128 gateway、64-use ceiling）で、lifecycleのsweep対象もRLP2のみ。以下に記すRLP1（84B）はpre-P4のfrozen形式（codecとgoldenがpinするのみで、cache・sweep・NVS配線は撤去済み）。既存機の`rlres`に残る旧blobはopen時に消去する（消去対象のため§5.1の予算には数えない）。
+
 永続するピアごとの状態は再開主秘密RMSだけ。**slot数を固定し、NVSキー名も固定**（`s00`〜`s15`、gatewayは`s000`〜`s159`）にして、キーの数が増えない構造にする。
 
 ```text
@@ -100,7 +102,7 @@ D2-bで1ピアあたり約6 entry（両scopeの`c*`）が回収され、約14 en
 | `rltrust` | RLT1 2 slot（≤1684B） | 110 | 110 | `rlsec` |
 | `rlrevo` | RRS1 2 slot（≤640B） | 44 | 44 | `rlsec` |
 | `rlmaint` | RLX1 2 slot（≤2048B、PR Bの削除journal） | 最大132＋namespace | 同左 | `rlsec` |
-| `rlres` | 再開cache（84B＝5 entry/slot） | 16 slot＝80 | 160 slot＝800 | `rlsec` |
+| `rlres2` | 再開cache RLP2（96B＝5 entry/slot） | 16 slot＝80 | 160 slot＝800 | `rlsec` |
 | 証人 | `cmax`等 | 2 | 2 | `rlsec` |
 | **本番小計（rlsec）** | | **約464** | **約1184** | |
 | 開発legacy（D2-c上限） | `c*`/`f*`/`r*` | 64ピア×14〜20＝最大1280 | 128ピア×20＝最大2560 | `rlsec` |
@@ -157,7 +159,7 @@ rlsec,    data, nvs,     0x190000, 0x10000
 
 | ID | 内容 |
 |---|---|
-| V1-N01 | 本番profileで200ピアと順に通信しても`rlcounter`/`rlreplay`のキーが0件、`rlres`は固定件数 |
+| V1-N01 | 本番profileで200ピアと順に通信しても`rlcounter`/`rlreplay`のキーが0件、`rlres2`は固定件数 |
 | V1-N02 | 再開slot追い出し後の再接触はfull EDHOCになり、捕獲した旧frame・旧R1は拒否 |
 | V1-N03 | `rlsec`を満杯にしても起動し、`rlboot`が進む（開発・本番） |
 | V1-N04 | D2-b：過去epochの`c*`掃除後、`cmax`以下のboot sessionでは開始しない |

@@ -9,8 +9,8 @@
 //  - ordinal floors proven by CRC-failed records, Unsupported schema slots,
 //    equal-sequence divergence, readback mismatch, read faults;
 //  - RLS1/RRS1 semantic monotonicity; RRS1 acceptance verdicts;
-//  - ResumeCache LRU/pin/validity rules, the touch wear rule and torn-slot
-//    handling at every byte boundary.
+//  - ResumeCache2 (RLP2) LRU/pin/validity rules, the touch wear rule,
+//    the 64-use ceiling and torn-slot handling at every byte boundary.
 
 #include <cstdio>
 #include <functional>
@@ -560,6 +560,9 @@ void test_group_twin_byte_cuts() {
 }
 
 void test_group_state_and_crypto() {
+  // V1-K09 (scope-key-change half; the removed-member DISCOVER-drop
+  // half has no test). V1-N06 (missing/regressed-rlboot halves; the
+  // durability-unknown half has no explicit TX-zero assertion).
   FaultyRecordStorage storage(kSiteSlotBytes);
   SiteStore store(storage);
   CHECK_OK(store.initialize());
@@ -726,6 +729,8 @@ class NoPairwise final : public SecurityProvider {
 };
 
 void test_group_gcm_replay() {
+  // V1-K05 (same-boot replay + GroupLink 128-sender-table-full halves;
+  // the tx_boot-regress half has no test).
   FaultyRecordStorage storage(kSiteSlotBytes);
   SiteStore store(storage);
   CHECK_OK(store.initialize());
@@ -880,6 +885,7 @@ void test_group_gcm_replay() {
 }
 
 void test_group_end_sender_capacity() {
+  // V1-K05 (GroupEnd 8-sender-table-full half).
   FaultyRecordStorage storage(kSiteSlotBytes);
   SiteStore store(storage);
   CHECK_OK(store.initialize());
@@ -1397,162 +1403,11 @@ void test_revocation_clear_power_cuts() {
   }
 }
 
-// --- ResumeCache -----------------------------------------------------------------
+// --- ResumeCache2 (RLP2) -------------------------------------------------------------
 
 ResumeContext context(const std::uint32_t gk_epoch = 203, const RevocationSet* rrs = nullptr) {
   return ResumeContext{kNetwork, gk_epoch, rrs};
 }
-
-ResumeSlot2 resume2_slot(const NodeId peer, const std::uint8_t flags = 0,
-                         const std::uint32_t last_used_boot = 0,
-                         const std::uint32_t gk_epoch = 203,
-                         const ResumePurpose purpose = ResumePurpose::Link) {
-  ResumeSlot2 slot{};
-  slot.valid = true;
-  slot.purpose = purpose;
-  slot.flags = flags;
-  slot.peer = peer;
-  slot.network = kNetwork;
-  slot.peer_cert_id = {1, 2, 3, 4, 5, 6, 7, 8};
-  slot.local_cert_id = {9, 9, 9, 9, 9, 9, 9, 9};
-  slot.peer_generation = 1;
-  slot.peer_role = 0b011;
-  slot.created_gk_epoch = gk_epoch;
-  slot.last_used_boot = last_used_boot;
-  for (std::size_t i = 0; i < slot.rms.size(); ++i) {
-    slot.rms[i] = static_cast<std::uint8_t>(peer + i + 1);
-  }
-  return slot;
-}
-
-LocalRevocationRecord removal_record() {
-  LocalRevocationRecord record{};
-  record.state = LocalRevocationState::Blocked;
-  record.cause = LocalRevocationCause::Notice;
-  record.local_node = 0x00A1000000001234ULL;
-  record.site_id = 0x5173000000000042ULL;
-  record.network = kNetwork;
-  record.removed_generation = 3;
-  record.rs_epoch_floor = 11;
-  record.site_epoch_floor = kSiteEpoch;
-  record.evidence_digest.fill(0xE4);
-  record.rls_commit_seq = 41;
-  record.boot_witness = 9000;
-  return record;
-}
-
-void test_resume_cache_rules() {
-  FaultyResumeStorage storage(4);
-  ResumeCache cache(storage);
-  ResumeSlot out{};
-  std::size_t index = 0;
-  CHECK(cache.find(ResumePurpose::Link, kPeer, context(), out, index).code ==
-        StatusCode::NotFound);
-  CHECK_OK(cache.put(resume_slot(100, 0, 10), context()));
-  CHECK_OK(cache.put(resume_slot(101, 0, 5), context()));
-  CHECK_OK(cache.put(resume_slot(102, kResumeFlagPinned, 1), context()));
-  CHECK_OK(cache.put(resume_slot(103, 0, 20), context()));
-  // Full: the unpinned slot with the smallest last_used_boot (101) goes.
-  CHECK_OK(cache.put(resume_slot(104, 0, 30), context()));
-  CHECK(cache.find(ResumePurpose::Link, 101, context(), out, index).code == StatusCode::NotFound);
-  CHECK_OK(cache.find(ResumePurpose::Link, 102, context(), out, index));  // pinned survived
-  // Same peer + purpose replaces in place; another purpose is a new slot.
-  ResumeSlot replacement = resume_slot(104, 0, 40);
-  replacement.rms[0] ^= 0xFF;
-  CHECK_OK(cache.put(replacement, context()));
-  CHECK_OK(cache.find(ResumePurpose::Link, 104, context(), out, index));
-  CHECK(out.rms == replacement.rms);
-  // Pin budget: slots - 2 = 2 pinned at most.
-  CHECK_OK(cache.put(resume_slot(105, kResumeFlagPinned, 50), context()));
-  CHECK(cache.put(resume_slot(106, kResumeFlagPinned, 60), context()).code ==
-        StatusCode::NoCapacity);
-  // Validity: GK age, network, revocation.
-  CHECK_OK(cache.find(ResumePurpose::Link, 104, context(204), out, index));
-  CHECK(cache.find(ResumePurpose::Link, 104, context(205), out, index).code ==
-        StatusCode::NotFound);  // created 203 + 2 <= 205
-  ResumeContext other_network = context();
-  other_network.network = kNetwork + 1;
-  CHECK(cache.find(ResumePurpose::Link, 104, other_network, out, index).code ==
-        StatusCode::NotFound);
-  RevocationSet rrs = revocation_set(1, 0);
-  rrs.entries[0] = RevocationEntry{104, 2, RevocationReason::Lost};
-  rrs.count = 1;
-  const ResumeContext revoked = context(203, &rrs);
-  CHECK(cache.find(ResumePurpose::Link, 104, revoked, out, index).code == StatusCode::NotFound);
-  // Unusable slots are reused first.
-  CHECK_OK(cache.put(resume_slot(107, 0, 0), revoked));
-  CHECK_OK(cache.find(ResumePurpose::Link, 107, revoked, out, index));
-  // invalidate_peer scrubs the RMS from storage.
-  CHECK_OK(cache.find(ResumePurpose::Link, 102, context(), out, index));
-  const std::size_t pinned_index = index;
-  CHECK_OK(cache.invalidate_peer(102));
-  ResumeSlot empty{};
-  CHECK_OK(resume_slot_decode(ByteView{storage.slot(pinned_index).data(), kResumeSlotBytes}, empty));
-  CHECK(!empty.valid);
-  CHECK(cache.find(ResumePurpose::Link, 102, context(), out, index).code == StatusCode::NotFound);
-}
-
-void test_resume_touch_wear_rule() {
-  FaultyResumeStorage storage(3);
-  ResumeCache cache(storage);
-  CHECK_OK(cache.put(resume_slot(100, 0, 1000), context()));
-  ResumeSlot out{};
-  std::size_t index = 0;
-  CHECK_OK(cache.find(ResumePurpose::Link, 100, context(), out, index));
-  const std::size_t writes = storage.write_calls;
-  for (std::uint32_t boot = 1000; boot < 1256; ++boot) CHECK_OK(cache.touch(index, boot, false));
-  CHECK(storage.write_calls == writes);  // 1-minute wake-ups for ~4 h: no writes
-  CHECK_OK(cache.touch(index, 1256, false));
-  CHECK(storage.write_calls == writes + 1);
-  CHECK_OK(cache.touch(index, 1257, true));  // GK change forces the update
-  CHECK(storage.write_calls == writes + 2);
-  CHECK_OK(cache.find(ResumePurpose::Link, 100, context(), out, index));
-  CHECK(out.last_used_boot == 1257);
-  CHECK(cache.touch(2, 5, true).code == StatusCode::NotFound);
-}
-
-void test_resume_power_cuts() {
-  // Cut a put() (replacing peer 100's slot) at every byte: the slot then
-  // reads either as the old secret, the new one, or unusable — never a mix.
-  const ResumeSlot old_slot = resume_slot(100, 0, 1);
-  ResumeSlot new_slot = resume_slot(100, 0, 2);
-  new_slot.rms.fill(0x77);
-  for (std::size_t boundary = 0; boundary <= kResumeSlotBytes; ++boundary) {
-    FaultyResumeStorage storage(4);
-    {
-      ResumeCache cache(storage);
-      CHECK_OK(cache.put(old_slot, context()));
-      storage.cut_call = storage.write_calls;
-      storage.cut_bytes = boundary;
-      CHECK(!cache.put(new_slot, context()).ok());
-    }
-    ResumeCache reboot(storage);
-    ResumeSlot out{};
-    std::size_t index = 0;
-    const Status found = reboot.find(ResumePurpose::Link, 100, context(), out, index);
-    if (found.ok()) {
-      // A prefix identical to the old record still reads as the old record;
-      // anything that decodes is exactly one of the two, never a mix.
-      CHECK((out.rms == old_slot.rms && out.last_used_boot == 1) ||
-            (out.rms == new_slot.rms && out.last_used_boot == 2 &&
-             boundary == kResumeSlotBytes));
-    } else {
-      CHECK(found.code == StatusCode::NotFound);
-    }
-    // clear_all scrubs torn slots too.
-    CHECK_OK(reboot.clear_all());
-    for (std::size_t i = 0; i < storage.slot_count(); ++i) {
-      const auto& raw = storage.slot(i);
-      bool erased = true;
-      for (const auto byte : raw) erased = erased && byte == 0xFF;
-      ResumeSlot slot{};
-      CHECK(erased || (resume_slot_decode(ByteView{raw.data(), raw.size()}, slot).ok() &&
-                       !slot.valid));
-    }
-  }
-}
-
-// --- ResumeCache2 (RLP2) -------------------------------------------------------------
 
 void test_resume2_cache_rules() {
   FaultyResumeStorage2 storage(6);  // link 0..2, end 3..5
@@ -1835,7 +1690,44 @@ void test_resume2_power_cuts() {
   }
 }
 
+void test_resume2_touch_wear_rule() {
+  // V1-F08: the boot stamp rewrites only every 256 boots, so 1-minute
+  // wakes for a full day cost a handful of slot writes.
+  FaultyResumeStorage2 storage(16);
+  ResumeCache2 cache(storage, kResume2NodeLinkQuota, kResume2NodeEndQuota);
+  CHECK_OK(cache.put(resume2_slot(100, 0, 1000), context()));
+  ResumeSlot2 out{};
+  std::size_t index = 0;
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), out, index));
+  const std::size_t writes = storage.write_calls;
+  for (std::uint32_t boot = 1000; boot < 1000 + 1440; ++boot) {
+    CHECK_OK(cache.touch(index, boot, false));
+  }
+  CHECK(storage.write_calls == writes + 5);  // boots 1256/1512/1768/2024/2280
+  CHECK_OK(cache.touch(index, 2440, true));   // GK change forces the update
+  CHECK(storage.write_calls == writes + 6);
+  CHECK_OK(cache.find_by_peer(ResumePurpose::Link, 100, context(), out, index));
+  CHECK(out.last_used_boot == 2440);
+  CHECK(cache.touch(15, 5, true).code == StatusCode::NotFound);  // empty slot
+}
+
 // --- LocalRevocationStore (RLV1, P4-M01) ----------------------------------------------
+
+LocalRevocationRecord removal_record() {
+  LocalRevocationRecord record{};
+  record.state = LocalRevocationState::Blocked;
+  record.cause = LocalRevocationCause::Notice;
+  record.local_node = 0x00A1000000001234ULL;
+  record.site_id = 0x5173000000000042ULL;
+  record.network = kNetwork;
+  record.removed_generation = 3;
+  record.rs_epoch_floor = 11;
+  record.site_epoch_floor = kSiteEpoch;
+  record.evidence_digest.fill(0xE4);
+  record.rls_commit_seq = 41;
+  record.boot_witness = 9000;
+  return record;
+}
 
 void test_local_revocation_basic() {
   FaultyRecordStorage storage(kLocalRevocationSlotBytes);
@@ -1950,14 +1842,12 @@ void test_ram_footprint() {
   static_assert(sizeof(sdkv1::GroupKeyState) + sizeof(sdkv1::GroupSecurityProvider) <= 10 * 1024,
                 "P5 GK state and Provider must fit the device RAM budget");
   // None of these is a MeshNode member; each holds one slot-sized scratch
-  // plus its decoded record. The resume caches hold one slot buffer
+  // plus its decoded record. The resume cache holds one slot buffer
   // whatever the slot count (C3 gateway sizing floor).
-  std::printf("sizeof IdentityStore=%zu SiteStore=%zu RevocationStore=%zu ResumeCache=%zu\n",
+  std::printf("sizeof IdentityStore=%zu SiteStore=%zu RevocationStore=%zu ResumeCache2=%zu\n",
               sizeof(IdentityStore), sizeof(SiteStore), sizeof(RevocationStore),
-              sizeof(ResumeCache));
-  std::printf("sizeof ResumeCache2=%zu LocalRevocationStore=%zu\n", sizeof(ResumeCache2),
-              sizeof(LocalRevocationStore));
-  CHECK(sizeof(ResumeCache) <= 128);
+              sizeof(ResumeCache2));
+  std::printf("sizeof LocalRevocationStore=%zu\n", sizeof(LocalRevocationStore));
   CHECK(sizeof(ResumeCache2) <= 512);
   CHECK(sizeof(IdentityStore) <= 1408);
   CHECK(sizeof(SiteStore) <= 1536);
@@ -2050,15 +1940,13 @@ int main() {
   test_revocation_entry_monotonicity();
   test_revocation_power_cuts();
   test_revocation_clear_power_cuts();
-  test_resume_cache_rules();
-  test_resume_touch_wear_rule();
-  test_resume_power_cuts();
   test_resume2_cache_rules();
   test_resume2_find_by_id();
   test_resume2_incremental_lookup();
   test_resume2_incremental_revocation_and_clear();
   test_resume2_uses();
   test_resume2_power_cuts();
+  test_resume2_touch_wear_rule();
   test_local_revocation_basic();
   test_local_revocation_power_cuts();
   test_ram_footprint();

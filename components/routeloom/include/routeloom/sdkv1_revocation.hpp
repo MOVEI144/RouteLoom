@@ -235,16 +235,10 @@ enum class LifecyclePhase : std::uint8_t {
   Switching = 11,
 };
 
-enum class TrafficUse : std::uint8_t {
-  LinkHandshake = 0,
-  Resume = 1,
-  EndHandshake = 2,
-  Data = 3,
-  RouteOrigin = 4,
-  // Recovery-control-only link/E2E establishment: the adapter additionally
-  // restricts it to P5 type-5 Get/Notify carriage — never a generic bypass.
-  RecoveryControl = 5,
-};
+// Note: the lifecycle holds no link/E2E/data/route admission matrix —
+// SdkMembershipHooks + the coordinator's revoked/authenticated views
+// are the single traffic gate (04 §5). The only credential question
+// answered here is recovery-control establishment, below.
 
 // A P4-verified peer credential: only credentials the link layer proved
 // (SAK-signed MemberCert + proof of possession, current binding) may be
@@ -593,7 +587,7 @@ struct LifecycleSnapshot {
 class MembershipLifecycle final {
  public:
   MembershipLifecycle(const LifecycleConfig& config, IdentityStore& identity, SiteStore& site,
-                      RevocationStore& revocations, ResumeCache& resume, LifecyclePorts ports,
+                      RevocationStore& revocations, ResumeCache2& resume, LifecyclePorts ports,
                       const Es256Verifier& verifier = default_es256_verifier(),
                       LifecycleStore* journal = nullptr) noexcept;
 
@@ -606,9 +600,12 @@ class MembershipLifecycle final {
   // does not advance the FSM; progress needs ActionComplete.
   Status take_action(LifecycleAction& action) noexcept;
   LifecycleSnapshot snapshot() const noexcept;
-  // Pure traffic gate over the adopted policy: no side effects, callable
-  // any time (including while another call is in flight).
-  bool permits(const PeerCredentialStamp& stamp, TrafficUse use) const noexcept;
+  // The lifecycle's only credential gate: recovery-control-only
+  // establishment (the adapter additionally restricts it to P5 type-5
+  // Get/Notify carriage — never a generic bypass), consulted when a
+  // peer binds for RRS1 gossip. Pure: no side effects, callable any
+  // time (including while another call is in flight).
+  bool permits_recovery_control(const PeerCredentialStamp& stamp) const noexcept;
   bool quiescent() const noexcept;
   // Next gossip/exchange work, or UINT64_MAX when nothing is scheduled.
   MonotonicMs next_deadline() const noexcept;
@@ -744,7 +741,9 @@ class MembershipLifecycle final {
   IdentityStore& identity_;
   SiteStore& site_;
   RevocationStore& revocations_;
-  ResumeCache& resume_;
+  // The engine's RLP2 resume cache: the single sweep target on RRS1
+  // apply and removal (no RLP1 cache exists anymore).
+  ResumeCache2& resume_;
   LifecycleStore* journal_{nullptr};
   LifecyclePorts ports_;
   const Es256Verifier& verifier_;
@@ -757,6 +756,10 @@ class MembershipLifecycle final {
   P256PublicKey sak_{};
   bool sak_valid_{false};
   std::uint64_t policy_revision_{0};
+  // Same-epoch divergent RRS1 seen: raises re-fetch (need_rrs) only.
+  // Design 04 states no traffic rule for equivocation, so it never
+  // gates traffic here or in the hooks — the adopted set keeps
+  // enforcing until a newer epoch lands.
   bool equivocated_{false};
   bool self_revoked_{false};
   RemovalStep removal_step_{RemovalStep::Runtime};

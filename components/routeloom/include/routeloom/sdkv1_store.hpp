@@ -298,69 +298,11 @@ class RevocationStore {
   bool has_set_{false};
 };
 
-// --- RLP1: resumption cache (fixed slots, LRU) --------------------------------
-// Fixed slot count and fixed key names (05 §3.2), so NVS usage never grows
-// with the number of peers. Nothing is cached in RAM: every operation scans
-// the slots through one 84-byte buffer, so a 160-slot gateway cache costs
-// the same RAM as a 16-slot node cache (C3 gateway sizing floor).
-class ResumeSlotStorage {
- public:
-  virtual ~ResumeSlotStorage() = default;
-  virtual std::size_t slot_count() const noexcept = 0;
-  // read() fills 84 bytes (a missing blob reads uniformly erased).
-  virtual Status read(std::size_t index, MutableByteView target) noexcept = 0;
-  virtual Status write(std::size_t index, ByteView data) noexcept = 0;
-};
-
+// --- Resume validity context (RLP2 sweep/lookup) ---------------------------------
 struct ResumeContext {
   NetworkId network{0};                       // RLS1 network
   std::uint32_t gk_epoch{0};                  // current GK epoch
   const RevocationSet* revocations{nullptr};  // adopted RRS1, if any
-};
-
-class ResumeCache {
- public:
-  static constexpr std::uint32_t kTouchBootInterval = 256;
-
-  explicit ResumeCache(ResumeSlotStorage& storage) noexcept : storage_(storage) {}
-
-  std::size_t slot_count() const noexcept { return storage_.slot_count(); }
-
-  // 05 §3.2 validity: valid state, CRC, network == context network,
-  // created_gk_epoch + 2 > gk_epoch, peer not rejected by the RRS1.
-  bool usable(const ResumeSlot& slot, const ResumeContext& context) const noexcept;
-  // NotFound when no usable slot for (purpose, peer) exists.
-  Status find(ResumePurpose purpose, NodeId peer, const ResumeContext& context,
-              ResumeSlot& out, std::size_t& index) noexcept;
-  // Written only after a full EDHOC (new RMS). Replaces the peer's slot for
-  // the same purpose, else the first empty/unusable slot, else the unpinned
-  // slot with the smallest last_used_boot. Pinned slots are capped at
-  // slot_count - 2 so a new peer always fits (NoCapacity past the cap).
-  Status put(const ResumeSlot& slot, const ResumeContext& context) noexcept;
-  // last_used_boot is rewritten only when `boot` moved >= 256 past it or
-  // the caller reports a GK epoch change (sleepy-node wear rule).
-  Status touch(std::size_t index, std::uint32_t boot, bool gk_epoch_changed) noexcept;
-  // RRS1 / REMOVED: overwrite with the empty record (RMS scrubbed).
-  Status invalidate_peer(NodeId peer) noexcept;
-  Status clear_all() noexcept;
-  // One-slot sweep step (04 §5): examines slot `cursor`, invalidating it
-  // only when it holds a same-network binding the adopted RRS1 rejects
-  // (old generation); live newer-generation slots are never touched.
-  // `done` is set once the scan wrapped past the last slot. A
-  // read/write/readback failure leaves `cursor` unmoved so the next Poll
-  // retries the same slot.
-  Status sweep_revoked(const ResumeContext& context, std::size_t& cursor,
-                       bool& done) noexcept;
-  // One-slot full-clear step under the same cursor discipline (04 §6.4):
-  // every valid or torn slot is overwritten, erased-empty slots skipped.
-  Status clear_step(std::size_t& cursor, bool& done) noexcept;
-
- private:
-  Status read_slot(std::size_t index, ResumeSlot& out, bool& intact) noexcept;
-  Status write_slot(std::size_t index, const ResumeSlot& slot) noexcept;
-
-  ResumeSlotStorage& storage_;
-  std::array<std::uint8_t, kResumeSlotBytes> buffer_{};
 };
 
 // --- RLP2: resumption cache with the enforceable 64-use ceiling ----------------
@@ -368,9 +310,9 @@ class ResumeCache {
 // count, so RLP2 is a new record (new magic, never a silent redefinition).
 // Slots are structurally partitioned by purpose ([0, link_quota) link,
 // [link_quota, link_quota + end_quota) end: 12+4 on a node, 32+128 on a
-// gateway), so the per-purpose quota needs no runtime accounting. As with
-// RLP1 nothing is cached in RAM except the 8-entry use-budget table below:
-// every lookup scans NVS through one 96-byte buffer.
+// gateway), so the per-purpose quota needs no runtime accounting. Nothing
+// is cached in RAM except the 8-entry use-budget table below: every
+// lookup scans NVS through one 96-byte buffer.
 class ResumeSlotStorage2 {
  public:
   virtual ~ResumeSlotStorage2() = default;
