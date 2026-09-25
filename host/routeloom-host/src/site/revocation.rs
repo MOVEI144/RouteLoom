@@ -48,7 +48,7 @@ pub fn checked_next(value: u32, what: &str) -> Result<u32, SiteError> {
     value.checked_add(1).ok_or_else(|| {
         SiteError::new(
             "COUNTER_EXHAUSTED",
-            format!("{what} counter exhausted; a site_epoch cutover must reset it"),
+            format!("{what} counter exhausted; safe maintenance is required"),
         )
     })
 }
@@ -74,13 +74,13 @@ pub fn rrs_covers(older: &[RevocationEntry], newer: &[RevocationEntry]) -> bool 
 /// The port carries plaintext authority payloads — the RRS1 object
 /// (type 5), the RemovalNotice (type 6), the GrantRenew PREPARE/COMMIT
 /// (type 7) — and the future P5 channel seals them into the addressed
-/// network's context at send time. The `network` on [`RevocationTransport::send_grant`]
-/// selects the old or the new context; RRS1 and notices always travel
-/// the network they were issued for.
+/// network's context at send time. The `network` on `send_notice` and
+/// `send_grant` selects the required context; an old-network notice must
+/// never be sealed under a new-network context.
 pub trait RevocationTransport {
     fn send_rrs(&mut self, node: u64, object: &[u8]) -> bool;
     /// Sends a type-6 RemovalNotice. Default refuses until wired.
-    fn send_notice(&mut self, _node: u64, _notice: &[u8]) -> bool {
+    fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
         false
     }
     /// Sends a type-7 GrantRenew plaintext over `network`'s authority
@@ -412,13 +412,29 @@ pub(super) fn decode_rrs_history(
     let mut previous: Option<(u32, u32, Vec<RevocationEntry>)> = None;
     let mut ordered: Vec<_> = snapshot.rrs.iter().collect();
     ordered.sort_by_key(|(epoch, _)| *epoch);
+    // The configured SiteCert may still name the pre-cutover epoch, or
+    // may have been replaced after a cutover. The first signed RRS1 is
+    // the durable source for the initial network of this history.
+    let initial_network = match ordered.first() {
+        Some((_, object)) => {
+            routeloom_provision::sdkv1::revocation::revocation_object_decode(object)
+                .map_err(|e| format!("stored RRS1 corrupt: {e}"))?
+                .network
+        }
+        None => network,
+    };
+    if (initial_network & 0xffff_ffff) != (network & 0xffff_ffff)
+        || boundaries.last().map_or(initial_network, |(_, net)| *net) != network
+    {
+        return Err("stored RRS1 history network disagrees with active site".into());
+    }
     for (epoch, object) in ordered {
         let expected = boundaries
             .iter()
             .filter(|(at, _)| *at <= *epoch)
             .map(|(_, network)| *network)
             .last()
-            .unwrap_or(network);
+            .unwrap_or(initial_network);
         let boundary = boundaries.iter().any(|(at, _)| at == epoch);
         let (set, verified) = routeloom_provision::sdkv1::revocation::revocation_object_verify(
             object, sak_pubkey, site_id, expected,
@@ -447,6 +463,12 @@ pub(super) fn decode_rrs_history(
         history.insert(*epoch, set.entries.clone());
         previous = Some((*epoch, set.site_epoch_floor, set.entries));
         latest = object.clone();
+    }
+    if boundaries
+        .iter()
+        .any(|(epoch, _)| !history.contains_key(epoch))
+    {
+        return Err("stored RRS1 history misses a cutover boundary".into());
     }
     Ok((history, digests, latest))
 }
@@ -678,7 +700,7 @@ impl SiteAuthority {
             let delivered = match self.rrs_transport.as_mut() {
                 Some(transport) => match head.what {
                     OutboundKind::Rrs => transport.send_rrs(head.node, &bytes),
-                    OutboundKind::Notice => transport.send_notice(head.node, &bytes),
+                    OutboundKind::Notice => transport.send_notice(head.node, network, &bytes),
                     OutboundKind::Prepare | OutboundKind::Commit => {
                         transport.send_grant(head.node, network, &bytes)
                     }
@@ -744,10 +766,12 @@ impl SiteAuthority {
             let due = match self.operations.get(&id) {
                 Some(op) => match op.notice.as_ref() {
                     Some(notice)
-                        if matches!(
-                            notice.delivery,
-                            NoticeDelivery::Pending | NoticeDelivery::Sent
-                        ) && notice.attempts < NOTICE_SEND_MAX =>
+                        if notice.network == self.id.network
+                            && matches!(
+                                notice.delivery,
+                                NoticeDelivery::Pending | NoticeDelivery::Sent
+                            )
+                            && notice.attempts < NOTICE_SEND_MAX =>
                     {
                         op.node
                     }
@@ -776,10 +800,12 @@ impl SiteAuthority {
     fn notice_bytes(&self, op: u64) -> Option<(Vec<u8>, u64)> {
         let operation = self.operations.get(&op)?;
         let notice = operation.notice.as_ref()?;
-        if !matches!(
-            notice.delivery,
-            NoticeDelivery::Pending | NoticeDelivery::Sent
-        ) || notice.attempts >= NOTICE_SEND_MAX
+        if notice.network != self.id.network
+            || !matches!(
+                notice.delivery,
+                NoticeDelivery::Pending | NoticeDelivery::Sent
+            )
+            || notice.attempts >= NOTICE_SEND_MAX
         {
             return None;
         }

@@ -597,7 +597,7 @@ fn cutover_flows_end_to_end_over_the_api_socket() {
         fn send_rrs(&mut self, _node: u64, _object: &[u8]) -> bool {
             true
         }
-        fn send_notice(&mut self, _node: u64, _notice: &[u8]) -> bool {
+        fn send_notice(&mut self, _node: u64, _network: u64, _notice: &[u8]) -> bool {
             true
         }
         fn send_grant(&mut self, node: u64, network: u64, plaintext: &[u8]) -> bool {

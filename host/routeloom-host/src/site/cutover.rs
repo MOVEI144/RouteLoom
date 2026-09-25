@@ -21,8 +21,7 @@
 //! the periodic rotation wait while a cutover prepares.
 //!
 //! Transport is the shared [`super::revocation::RevocationTransport`]
-//! port: production holds none until the P5 authority channel lands, so
-//! targets honestly stay unknown until then; tests inject a fake. The
+//! port. Cutover refuses to stage without a GrantRenew carrier. The
 //! PREPARE bytes are assembled deterministically from the durable
 //! snapshot so a PREPARED digest is verifiable after any restart.
 
@@ -163,7 +162,10 @@ impl CutoverTarget {
     fn from_doc(json: &Json) -> Option<Self> {
         let kid = parse_hex(json.get("kid")?.as_str()?, 32)?;
         let cert_hex = json.get("member_cert")?.as_str()?;
-        if cert_hex.len() > CERT_MAX * 2 || !cert_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if cert_hex.len() % 2 != 0
+            || cert_hex.len() > CERT_MAX * 2
+            || !cert_hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return None;
         }
         let member_cert = (0..cert_hex.len() / 2)
@@ -350,7 +352,10 @@ impl CutoverState {
             return None;
         }
         let cert_hex = json.get("next_site_cert")?.as_str()?;
-        if cert_hex.len() > CERT_MAX * 2 || !cert_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        if cert_hex.len() % 2 != 0
+            || cert_hex.len() > CERT_MAX * 2
+            || !cert_hex.bytes().all(|b| b.is_ascii_hexdigit())
+        {
             return None;
         }
         let next_site_cert = (0..cert_hex.len() / 2)
@@ -360,12 +365,22 @@ impl CutoverState {
             return None;
         }
         let commit_hex = json.get("commit_object")?.as_str()?;
+        if !commit_hex.is_empty()
+            && commit_hex.len() != routeloom_join::renew::COMMIT_OBJECT_SIZE * 2
+        {
+            return None;
+        }
         let commit_object = if commit_hex.is_empty() {
             Vec::new()
         } else {
             parse_hex(commit_hex, commit_hex.len() / 2)?
         };
         let rrs_hex = json.get("commit_rrs")?.as_str()?;
+        if rrs_hex.len() % 2 != 0
+            || rrs_hex.len() > routeloom_provision::sdkv1::revocation::REVOCATION_OBJECT_MAX * 2
+        {
+            return None;
+        }
         let commit_rrs = if rrs_hex.is_empty() {
             Vec::new()
         } else {
@@ -565,6 +580,17 @@ impl SiteAuthority {
                 "INVALID_ARGUMENT",
                 "the next SiteCert must keep issuer / site / SAK / low32 / usage and step the epoch by exactly one",
             ));
+        }
+        if self
+            .rrs_transport
+            .as_ref()
+            .map_or(true, |transport| !transport.carries_grant())
+        {
+            return Err(SiteError::new(
+                "CUTOVER_UNAVAILABLE",
+                "the GrantRenew carrier is unavailable for this site",
+            )
+            .retry());
         }
         let old_network = self.id.network;
         let new_network = (u64::from(new_epoch) << 32) | u64::from(next_claims.network_low32);
@@ -866,22 +892,7 @@ impl SiteAuthority {
                 if self.cutover_ready_to_commit(id) {
                     self.cutover_commit(id, time);
                 } else if phase == Some(CutoverPhase::Preparing) {
-                    let mut updated = match self.operations.get(&id).cloned() {
-                        Some(op) => op,
-                        None => return,
-                    };
-                    if let Some(state) = updated.cutover.as_mut() {
-                        state.phase = CutoverPhase::WaitingGateway;
-                    }
-                    self.operations.insert(id, updated);
-                    self.persist_operation(id, time.unix_ms);
-                    self.event(
-                        time.unix_ms,
-                        format!(
-                            "\"kind\":\"cutover.progress\",\"operation_id\":\"{}\",\"phase\":\"waiting_gateway\"",
-                            op_token(id)
-                        ),
-                    );
+                    self.set_cutover_phase(id, CutoverPhase::WaitingGateway, time.unix_ms);
                 }
             }
             Some(CutoverPhase::Committed) => {
@@ -942,8 +953,15 @@ impl SiteAuthority {
             }
             state.phase = phase;
         }
+        let batch = Batch {
+            docs: vec![(DocKind::Operation, h16(updated.id), Some(updated.doc()))],
+            ..Batch::default()
+        };
+        if let Err(error) = self.store.commit(&batch) {
+            self.store_error(now_ms, &error);
+            return;
+        }
         self.operations.insert(id, updated);
-        self.persist_operation(id, now_ms);
         self.event(
             now_ms,
             format!(
@@ -1301,7 +1319,13 @@ impl SiteAuthority {
             devices.push(row);
         }
         let ledger = self.ledger_row("cutover", 0, [0; 32], 0, sha256(&commit_object), now_ms);
-        let mut epochs = self.store_epoch_timeline().unwrap_or_default();
+        let Some(mut epochs) = self.store_epoch_timeline() else {
+            self.event(
+                now_ms,
+                "\"kind\":\"authority.error\",\"reason\":\"cutover_commit\",\"detail\":\"cutover timeline unavailable\"".to_string(),
+            );
+            return;
+        };
         epochs.extend_from_slice(&commit_rs.to_be_bytes());
         epochs.extend_from_slice(&state.new_network.to_be_bytes());
         let mut binding = self.id.site_id.to_be_bytes().to_vec();
@@ -1316,7 +1340,22 @@ impl SiteAuthority {
             next.commit_unix_ms = now_ms;
         }
         let active_epoch = self.gks.active_epoch();
-        let batch = Batch {
+        let retired_notices: Vec<Operation> = self
+            .operations
+            .values()
+            .filter_map(|operation| {
+                let mut updated = operation.clone();
+                let notice = updated.notice.as_mut()?;
+                if notice.network != state.old_network
+                    || notice.delivery != super::revocation::NoticeDelivery::Pending
+                {
+                    return None;
+                }
+                notice.delivery = super::revocation::NoticeDelivery::Unreachable;
+                Some(updated)
+            })
+            .collect();
+        let mut batch = Batch {
             devices,
             ledger: vec![ledger.clone()],
             rrs: vec![(commit_rs, rrs.clone())],
@@ -1341,6 +1380,11 @@ impl SiteAuthority {
             docs: vec![(DocKind::Operation, h16(updated.id), Some(updated.doc()))],
             ..Batch::default()
         };
+        for operation in &retired_notices {
+            batch
+                .docs
+                .push((DocKind::Operation, h16(operation.id), Some(operation.doc())));
+        }
         if let Err(error) = self.store.commit(&batch) {
             self.store_error(now_ms, &error);
             return;
@@ -1365,6 +1409,9 @@ impl SiteAuthority {
         self.cutover_grace_network = state.old_network;
         self.cutover_grace_until_mono = time.mono_ms.saturating_add(CUTOVER_GRACE_MS);
         self.operations.insert(id, updated);
+        for operation in retired_notices {
+            self.operations.insert(operation.id, operation);
+        }
         self.prune_rrs_history();
         let (prepared, applied, unknown, _) = self
             .operations
@@ -1417,12 +1464,7 @@ impl SiteAuthority {
             Ok(receipt) => receipt,
             Err(_) => return false,
         };
-        let Some(id) = self.live_cutover() else {
-            return false;
-        };
-        if receipt.head.cutover_id != id {
-            return false;
-        }
+        let id = receipt.head.cutover_id;
         let state = match self.operations.get(&id).and_then(|op| op.cutover.as_ref()) {
             Some(state) => state.clone(),
             None => return false,
@@ -1454,7 +1496,8 @@ impl SiteAuthority {
                 if !matches!(
                     state.phase,
                     CutoverPhase::Preparing | CutoverPhase::WaitingGateway
-                ) || network != state.old_network
+                ) || self.live_cutover() != Some(id)
+                    || network != state.old_network
                     || receipt.gk_epoch != state.next_gk_epoch
                 {
                     return false;
@@ -1478,7 +1521,8 @@ impl SiteAuthority {
                     CutoverPhase::Committed
                         | CutoverPhase::RecoveryPending
                         | CutoverPhase::Converged
-                ) || network != state.new_network
+                ) || self.id.network != state.new_network
+                    || network != state.new_network
                     || receipt.rs_epoch != state.commit_rs_epoch
                     || receipt.gk_epoch != state.next_gk_epoch
                 {

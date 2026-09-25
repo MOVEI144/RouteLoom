@@ -13,7 +13,7 @@ use routeloom_provision::sdkv1::revocation::RevocationReason;
 use routeloom_provision::sha256::sha256;
 use routeloom_provision::signer::{test_keypair, FileRootSigner};
 
-use super::cutover::{CutoverRequest, CUTOVER_PREPARE_WINDOW_MS};
+use super::cutover::{CutoverRequest, CutoverState, CUTOVER_PREPARE_WINDOW_MS};
 use super::group_keys::HostTime;
 use super::records::{parse_op_token, Verdict, ROLE_ENDPOINT, ROLE_GATEWAY};
 use super::revocation::RevocationTransport;
@@ -103,7 +103,8 @@ fn next_site_cert() -> Vec<u8> {
 #[derive(Default)]
 struct GrantSends {
     refused: bool,
-    notices: Vec<(u64, Vec<u8>)>,
+    notice_supported: bool,
+    notices: Vec<(u64, u64, Vec<u8>)>,
     grants: Vec<(u64, u64, Vec<u8>)>,
     rrs: Vec<(u64, Vec<u8>)>,
 }
@@ -122,12 +123,12 @@ impl RevocationTransport for FakeCutoverTransport {
         true
     }
 
-    fn send_notice(&mut self, node: u64, notice: &[u8]) -> bool {
+    fn send_notice(&mut self, node: u64, network: u64, notice: &[u8]) -> bool {
         let mut sends = self.shared.lock().unwrap();
         if sends.refused {
             return false;
         }
-        sends.notices.push((node, notice.to_vec()));
+        sends.notices.push((node, network, notice.to_vec()));
         true
     }
 
@@ -141,7 +142,7 @@ impl RevocationTransport for FakeCutoverTransport {
     }
 
     fn carries_notice(&self) -> bool {
-        true
+        self.shared.lock().unwrap().notice_supported
     }
 
     fn carries_grant(&self) -> bool {
@@ -150,7 +151,10 @@ impl RevocationTransport for FakeCutoverTransport {
 }
 
 fn with_grant_transport(service: &SiteService) -> Arc<Mutex<GrantSends>> {
-    let shared = Arc::new(Mutex::new(GrantSends::default()));
+    let shared = Arc::new(Mutex::new(GrantSends {
+        notice_supported: true,
+        ..GrantSends::default()
+    }));
     let port = FakeCutoverTransport {
         shared: shared.clone(),
     };
@@ -196,6 +200,406 @@ fn operation(service: &SiteService, op: u64, at: u64) -> routeloom_json::Json {
 
 fn tick(service: &SiteService, at: u64) {
     service.with(|a| a.tick(HostTime::sync(at)));
+}
+
+fn prepare_gateway(
+    service: &SiteService,
+    transport: &Arc<InProcessTransport>,
+    at: u64,
+    key: &str,
+) -> (u64, Arc<Mutex<GrantSends>>) {
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    join_member(
+        service,
+        transport,
+        &mut gateway,
+        ROLE_GATEWAY,
+        "gateway",
+        at,
+    );
+    let sends = with_grant_transport(service);
+    let (op, _) = start_cutover(service, key, at + 10_000);
+    tick(service, at + 10_000);
+    let prepare = sends.lock().unwrap().grants[0].2.clone();
+    let receipt = Receipt {
+        head: Head {
+            phase: Phase::Prepared,
+            cutover_id: op,
+            revision: 1,
+            old_network: testkit::network(),
+        },
+        new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW),
+        gk_epoch: cutover_gk_epoch(service, op),
+        rs_epoch: 0,
+        digest: sha256(&prepare),
+        status: 0,
+    }
+    .encode()
+    .unwrap();
+    assert!(
+        service
+            .with(|a| a.handle_grant_receipt(
+                gateway.node,
+                1,
+                testkit::network(),
+                &receipt,
+                at + 11_000
+            ))
+            .0
+    );
+    (op, sends)
+}
+
+#[test]
+fn committed_cutover_reopens_with_old_network_rrs_history() {
+    let dir = std::env::temp_dir().join(format!(
+        "routeloom-cutover-history-{}-{}",
+        std::process::id(),
+        crate::now_ms()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("site.db");
+    let store = super::store::SqliteSiteStore::open(&path).unwrap();
+    let (service, transport) = service_with(Box::new(store));
+    service.with(|a| a.handle_rrs_get(0, T0).unwrap());
+    let (op, _) = prepare_gateway(&service, &transport, T0, "history");
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    assert_eq!(
+        operation(&service, op, committed_at)
+            .get("phase")
+            .unwrap()
+            .as_str(),
+        Some("committed")
+    );
+    drop(service);
+    let store = super::store::SqliteSiteStore::open(&path).unwrap();
+    let reopened = super::SiteAuthority::open(
+        &testkit::setup(),
+        Box::new(testkit::sak()),
+        Box::new(store),
+        committed_at + 1_000,
+    );
+    assert!(reopened.is_ok(), "{}", reopened.err().unwrap_or_default());
+    assert_eq!(reopened.unwrap().network() >> 32, 4);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn unreadable_cutover_timeline_cannot_commit() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FailLoad {
+        inner: Box<dyn SiteStore>,
+        fail: Arc<AtomicBool>,
+    }
+    impl SiteStore for FailLoad {
+        fn load(&mut self) -> Result<super::store::Snapshot, super::store::StoreError> {
+            if self.fail.swap(false, Ordering::SeqCst) {
+                return Err(super::store::StoreError("timeline read failed".into()));
+            }
+            self.inner.load()
+        }
+        fn commit(&mut self, batch: &super::store::Batch) -> Result<(), super::store::StoreError> {
+            self.inner.commit(batch)
+        }
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+    }
+
+    let (service, transport) = service();
+    let (op, _) = prepare_gateway(&service, &transport, T0, "timeline");
+    let fail = Arc::new(AtomicBool::new(false));
+    service.with(|a| {
+        let inner = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+        a.store = Box::new(FailLoad {
+            inner,
+            fail: fail.clone(),
+        });
+    });
+    fail.store(true, Ordering::SeqCst);
+    let at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, at);
+    assert_eq!(service.with(|a| a.network()).0, testkit::network());
+    assert_eq!(
+        operation(&service, op, at).get("phase").unwrap().as_str(),
+        Some("preparing")
+    );
+}
+
+#[test]
+fn applied_after_delivery_grace_converges_the_cutover() {
+    let (service, transport) = service();
+    let (op, _) = prepare_gateway(&service, &transport, T0, "late-applied");
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    tick(&service, committed_at + 60_001);
+    assert_eq!(
+        operation(&service, op, committed_at + 60_001)
+            .get("phase")
+            .unwrap()
+            .as_str(),
+        Some("recovery_pending")
+    );
+    let state = service
+        .with(|a| {
+            a.operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .clone()
+        })
+        .0;
+    let receipt = Receipt {
+        head: Head {
+            phase: Phase::Applied,
+            cutover_id: op,
+            revision: state.revision,
+            old_network: state.old_network,
+        },
+        new_network: state.new_network,
+        gk_epoch: state.next_gk_epoch,
+        rs_epoch: state.commit_rs_epoch,
+        digest: sha256(&state.commit_object),
+        status: 0,
+    }
+    .encode()
+    .unwrap();
+    assert!(
+        service
+            .with(|a| a.handle_grant_receipt(
+                testkit::GATEWAY,
+                1,
+                state.new_network,
+                &receipt,
+                committed_at + 60_002
+            ))
+            .0
+    );
+    assert_eq!(
+        operation(&service, op, committed_at + 60_002)
+            .get("phase")
+            .unwrap()
+            .as_str(),
+        Some("converged")
+    );
+}
+
+#[test]
+fn failed_phase_commit_does_not_publish_recovery_pending() {
+    struct FailCommit {
+        inner: Box<dyn SiteStore>,
+        failed: bool,
+    }
+    impl SiteStore for FailCommit {
+        fn load(&mut self) -> Result<super::store::Snapshot, super::store::StoreError> {
+            self.inner.load()
+        }
+        fn commit(&mut self, batch: &super::store::Batch) -> Result<(), super::store::StoreError> {
+            if !self.failed {
+                self.failed = true;
+                return Err(super::store::StoreError("phase commit failed".into()));
+            }
+            self.inner.commit(batch)
+        }
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+    }
+
+    let (service, transport) = service();
+    let (op, _) = prepare_gateway(&service, &transport, T0, "phase-failure");
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    service.with(|a| {
+        let inner = std::mem::replace(&mut a.store, Box::new(MemoryStore::default()));
+        a.store = Box::new(FailCommit {
+            inner,
+            failed: false,
+        });
+    });
+    let at = committed_at + 60_001;
+    tick(&service, at);
+    assert_eq!(
+        operation(&service, op, at).get("phase").unwrap().as_str(),
+        Some("committed")
+    );
+    tick(&service, at + 1);
+    assert_eq!(
+        operation(&service, op, at + 1)
+            .get("phase")
+            .unwrap()
+            .as_str(),
+        Some("recovery_pending")
+    );
+}
+
+#[test]
+fn cutover_requires_a_grant_carrier_before_staging() {
+    let (service, transport) = service();
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    join_member(
+        &service,
+        &transport,
+        &mut gateway,
+        ROLE_GATEWAY,
+        "gateway",
+        T0,
+    );
+    let (answer, _) = service.with(|a| {
+        a.cutover(
+            KGUARD,
+            CutoverRequest {
+                expected_site_epoch: testkit::SITE_EPOCH,
+                next_site_cert: next_site_cert(),
+                key: "no-carrier".into(),
+            },
+            HostTime::sync(T0 + 10_000),
+        )
+    });
+    assert_eq!(answer.unwrap_err().code, "CUTOVER_UNAVAILABLE");
+    assert!(
+        service
+            .with(|a| a.operations.values().all(|op| op.cutover.is_none()))
+            .0
+    );
+}
+
+#[test]
+fn cutover_doc_rejects_oversized_commit_artifacts() {
+    let (service, transport) = service();
+    let (op, _) = prepare_gateway(&service, &transport, T0, "artifact-size");
+    let doc = service
+        .with(|a| {
+            a.operations
+                .get(&op)
+                .unwrap()
+                .cutover
+                .as_ref()
+                .unwrap()
+                .doc()
+        })
+        .0;
+    let oversized_proof = doc.replace(
+        "\"commit_object\":\"\"",
+        &format!("\"commit_object\":\"{}\"", "00".repeat(156)),
+    );
+    assert!(CutoverState::from_doc(&json(&oversized_proof)).is_none());
+    let oversized_rrs = doc.replace(
+        "\"commit_rrs\":\"\"",
+        &format!("\"commit_rrs\":\"{}\"", "00".repeat(617)),
+    );
+    assert!(CutoverState::from_doc(&json(&oversized_rrs)).is_none());
+}
+
+#[test]
+fn exhausted_site_counter_requires_maintenance() {
+    let error = super::revocation::checked_next(u32::MAX, "rs_epoch").unwrap_err();
+    assert_eq!(error.code, "COUNTER_EXHAUSTED");
+    assert!(error.message.contains("maintenance"));
+}
+
+#[test]
+fn retired_network_notice_is_not_sent_after_cutover_commit() {
+    let (service, transport) = service();
+    let mut gateway = SimDevice::new(testkit::GATEWAY, 0x60);
+    gateway.capability |= routeloom_join::JOIN_CAPABILITY_GATEWAY;
+    let mut victim = SimDevice::new(0x00A1_0000_0000_7001, 0x71);
+    join_member(
+        &service,
+        &transport,
+        &mut gateway,
+        ROLE_GATEWAY,
+        "gateway",
+        T0,
+    );
+    join_member(
+        &service,
+        &transport,
+        &mut victim,
+        ROLE_ENDPOINT,
+        "victim",
+        T0 + 1_000,
+    );
+    let sends = with_grant_transport(&service);
+    sends.lock().unwrap().notice_supported = false;
+    service
+        .with(|a| {
+            a.revoke(
+                KGUARD,
+                RevokeRequest {
+                    device: victim.node,
+                    expected_generation: 1,
+                    reason: RevocationReason::Lost,
+                    key: "remove-victim".into(),
+                },
+                HostTime::sync(T0 + 2_000),
+            )
+        })
+        .0
+        .unwrap();
+    let (op, _) = start_cutover(&service, "after-revoke", T0 + 10_000);
+    tick(&service, T0 + 10_000);
+    let prepare = sends
+        .lock()
+        .unwrap()
+        .grants
+        .iter()
+        .find(|(node, _, bytes)| *node == gateway.node && bytes[1] == Phase::Prepare as u8)
+        .unwrap()
+        .2
+        .clone();
+    let receipt = Receipt {
+        head: Head {
+            phase: Phase::Prepared,
+            cutover_id: op,
+            revision: 1,
+            old_network: testkit::network(),
+        },
+        new_network: (u64::from(testkit::SITE_EPOCH + 1) << 32) | u64::from(testkit::NETWORK_LOW),
+        gk_epoch: cutover_gk_epoch(&service, op),
+        rs_epoch: 0,
+        digest: sha256(&prepare),
+        status: 0,
+    }
+    .encode()
+    .unwrap();
+    assert!(
+        service
+            .with(|a| a.handle_grant_receipt(
+                gateway.node,
+                1,
+                testkit::network(),
+                &receipt,
+                T0 + 11_000
+            ))
+            .0
+    );
+    let committed_at = T0 + 10_000 + CUTOVER_PREPARE_WINDOW_MS;
+    tick(&service, committed_at);
+    assert_eq!(service.with(|a| a.network() >> 32).0, 4);
+    let (notice_delivery, _) = service.with(|a| {
+        a.operations
+            .values()
+            .find(|op| op.node == victim.node && op.notice.is_some())
+            .unwrap()
+            .notice
+            .as_ref()
+            .unwrap()
+            .delivery
+    });
+    assert_eq!(
+        notice_delivery,
+        super::revocation::NoticeDelivery::Unreachable
+    );
+    sends.lock().unwrap().notice_supported = true;
+    tick(&service, committed_at + 100);
+    assert!(sends.lock().unwrap().notices.is_empty());
 }
 
 /// V1-R08: nothing is sent before the Preparing transaction commits; a
@@ -1005,7 +1409,8 @@ fn removal_notice_outbox_and_accept() {
     let notices = sends.lock().unwrap().notices.clone();
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].0, leaver.node);
-    assert_eq!(notices[0].1.len(), 103);
+    assert_eq!(notices[0].1, testkit::network());
+    assert_eq!(notices[0].2.len(), 103);
     let (view, _) = service.with(|a| a.operation_json(op, HostTime::sync(T0 + 2_100)).unwrap());
     let view = json(&view);
     let notice = view.get("notice").unwrap();
@@ -1016,7 +1421,7 @@ fn removal_notice_outbox_and_accept() {
     );
     assert!(notice.get("erase_confirmed").unwrap().is_null());
     // The accept receipt (type 5 sub 3) confirms the durable intent.
-    let digest = sha256(&notices[0].1);
+    let digest = sha256(&notices[0].2);
     let (moved, _) = service.with(|a| {
         a.handle_notice_accepted(leaver.node, 1, testkit::network(), 1, &digest, T0 + 2_200)
     });
@@ -1073,6 +1478,7 @@ fn cutover_refuses_a_bad_next_cert() {
     });
     assert!(answer.is_err());
     // A second cutover while one is live is refused.
+    with_grant_transport(&service);
     let (_, _) = start_cutover(&service, "cut-ok", T0 + 2_000);
     let (answer, _) = service.with(|a| {
         a.cutover(
