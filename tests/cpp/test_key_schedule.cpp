@@ -166,6 +166,32 @@ void check_group(const Fields& f) {
   CHECK(Bytes(dsk.begin(), dsk.begin() + 28) != cat(bcast));
 }
 
+void check_dev(const Fields& f) {
+  const auto psk = arr<32>(f, "psk_hex");
+  const routeloom::NetworkId network = u64(f, "network");
+  const routeloom::NodeId a = u64(f, "node_a");
+  const routeloom::NodeId b = u64(f, "node_b");
+  keys::Secret link{};
+  CHECK(keys::dev_pair_rms(psk, network, a, b, keys::Purpose::Link, link).ok());
+  CHECK(vec(link) == hex(f, "rms_link_hex"));
+  keys::Secret end{};
+  CHECK(keys::dev_pair_rms(psk, network, a, b, keys::Purpose::End, end).ok());
+  CHECK(vec(end) == hex(f, "rms_end_hex"));
+  keys::Secret swapped{};
+  CHECK(keys::dev_pair_rms(psk, network, b, a, keys::Purpose::Link, swapped).ok());
+  CHECK(swapped == link);  // ordered pair: swapped ends agree
+  CHECK(link != end);      // purposes never collide
+  keys::TrafficKey group{};
+  CHECK(keys::dev_group_key(psk, network, u64(f, "origin"),
+                            static_cast<std::uint32_t>(u64(f, "boot")), group)
+            .ok());
+  CHECK(vec(group.key) == hex(f, "group_key_hex"));
+  CHECK(vec(group.iv) == hex(f, "group_iv_hex"));
+  keys::Secret scope{};
+  CHECK(keys::dev_scope_key(psk, network, scope).ok());
+  CHECK(vec(scope) == hex(f, "scope_hex"));
+}
+
 void check_nonce(const Fields& f) {
   const auto iv = arr<12>(f, "iv_hex");
   keys::AeadNonce nonce{};
@@ -455,6 +481,8 @@ void test_valid_vectors() {
       check_rlres1_primitives(f);
       check_rlres1_engine(f);
       ++rlres1_count;
+    } else if (codec == "dev") {
+      check_dev(f);
     } else {
       std::fprintf(stderr, "unknown codec %s\n", codec.c_str());
       ++failures;

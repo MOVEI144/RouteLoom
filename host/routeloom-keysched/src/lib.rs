@@ -212,6 +212,71 @@ pub fn group_dsk_key(prk: &[u8; 32], gk_epoch: u32) -> [u8; 32] {
     expand(prk, &group_dsk_info(gk_epoch))
 }
 
+// --- dev-RAM key (P4 §10.1) ---------------------------------------------------
+// Same HKDF-SHA-256 shape as the group key, rooted at the shared 32-byte
+// development PSK. Test values only: the fixtures in
+// protocol/sdkv1-golden/derivations/valid/dev_*.json pin every byte.
+
+pub const LABEL_DEV_RAM: &str = "RouteLoom/v1/dev-ram";
+pub const LABEL_DEV_RMS: &str = "RouteLoom/v1/dev-rms";
+pub const LABEL_DEV_GROUP_KEY: &str = "RouteLoom/v1/dev-group-key";
+pub const LABEL_DEV_GROUP_IV: &str = "RouteLoom/v1/dev-group-iv";
+pub const LABEL_DEV_SCOPE: &str = "RouteLoom/v1/dev-scope";
+
+/// `dev_prk = HKDF-Extract(salt = "RouteLoom/v1/dev-ram" 0x00 || network u64, PSK)`
+pub fn dev_prk(network: u64, psk: &[u8; 32]) -> [u8; 32] {
+    hkdf_extract(&info(LABEL_DEV_RAM, &[&network.to_be_bytes()]), psk)
+}
+
+pub fn dev_pair_rms_info(purpose: Purpose, a: u64, b: u64) -> Vec<u8> {
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    info(
+        LABEL_DEV_RMS,
+        &[&[purpose as u8], &lo.to_be_bytes(), &hi.to_be_bytes()],
+    )
+}
+
+/// Pair RMS for one purpose: the ordered node pair keeps both ends on the
+/// same secret without negotiating who is "first".
+pub fn dev_pair_rms(prk: &[u8; 32], purpose: Purpose, a: u64, b: u64) -> [u8; 32] {
+    expand(prk, &dev_pair_rms_info(purpose, a, b))
+}
+
+pub fn dev_group_key_info(origin: u64, boot: u32) -> Vec<u8> {
+    info(
+        LABEL_DEV_GROUP_KEY,
+        &[&origin.to_be_bytes(), &boot.to_be_bytes()],
+    )
+}
+
+pub fn dev_group_iv_info(origin: u64, boot: u32) -> Vec<u8> {
+    info(
+        LABEL_DEV_GROUP_IV,
+        &[&origin.to_be_bytes(), &boot.to_be_bytes()],
+    )
+}
+
+/// Boot-scoped group key/iv: separate expands (16 + 12), never one 28-byte
+/// split, so the key and the IV domain-separate.
+pub fn dev_group_key(prk: &[u8; 32], origin: u64, boot: u32) -> TrafficKey {
+    let mut out = TrafficKey::default();
+    let key: [u8; 16] = expand(prk, &dev_group_key_info(origin, boot));
+    let iv: [u8; 12] = expand(prk, &dev_group_iv_info(origin, boot));
+    out.key = key;
+    out.iv = iv;
+    out
+}
+
+pub fn dev_scope_info() -> Vec<u8> {
+    info(LABEL_DEV_SCOPE, &[])
+}
+
+/// Discovery scope key: one fixed generation, boot-independent (pairwise
+/// sessions do not version by boot).
+pub fn dev_scope_key(prk: &[u8; 32]) -> [u8; 32] {
+    expand(prk, &dev_scope_info())
+}
+
 // --- RLRES1 derivations (06 §2.1) --------------------------------------------
 
 /// `rid = first8(HMAC(RMS, "RouteLoom/v1/rid" 0x00 || purpose))`
