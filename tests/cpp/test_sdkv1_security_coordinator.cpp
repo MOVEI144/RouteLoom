@@ -38,12 +38,62 @@ struct SecurityCoordinatorTestAccess {
   static JoinSnapshot join_snapshot(const SecurityCoordinator& coordinator) noexcept {
     return coordinator.joiner().snapshot();
   }
+  static JoinProxyStats proxy_stats(const SecurityCoordinator& coordinator) noexcept {
+    return coordinator.member().proxy.stats();
+  }
   static Status adopt(SecurityCoordinator& coordinator, const JoinAction& ready,
                       MonotonicMs now) noexcept {
     return coordinator.adopt_member(ready, now);
   }
   static void invalidate_joiner_channels(SecurityCoordinator& coordinator) noexcept {
     coordinator.deps_.joiner_config.scan_channel_count = 0;
+  }
+  static Status stage_link_chunks(SecurityCoordinator& coordinator, const MacAddress& mac,
+                                  ByteView bytes, MonotonicMs now) noexcept {
+    auto& leg = coordinator.member().demux[0];
+    leg.used = true;
+    leg.has_start = true;
+    leg.object_id = 123;
+    leg.mac = mac;
+    return coordinator.member().link_tx.load(
+        JoinCarrier::Rld1, JoinAuthPhase::EdhocMessage, 2, leg.object_id,
+        0, 0, bytes, now);
+  }
+  static Status pump_link_chunks(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
+    return coordinator.pump_link_tx(now);
+  }
+  static JoinObjectSlot::ReplyOutcome acknowledge_link_prefix(
+      SecurityCoordinator& coordinator, std::uint16_t received, MonotonicMs now) noexcept {
+    JoinReply reply{};
+    reply.lane = ObjectLane::JoinRelay;
+    reply.phase = JoinAuthPhase::EdhocMessage;
+    reply.step = 2;
+    reply.id = 123;
+    reply.status = JoinReplyStatus::Progress;
+    reply.received = received;
+    return coordinator.member().link_tx.on_reply(reply, now);
+  }
+  static Status stage_end_chunks(SecurityCoordinator& coordinator, NodeId peer,
+                                 ByteView bytes, MonotonicMs now) noexcept {
+    auto& side = coordinator.member();
+    side.end_tx_peer = peer;
+    side.end_tx_last_attempt_ms = 0;
+    return side.end_tx.load(JoinCarrier::WireRelay, JoinAuthPhase::EdhocMessage, 2,
+                            456, 0, 0, bytes, now, ObjectLane::EndSession);
+  }
+  static Status pump_end_chunks(SecurityCoordinator& coordinator, MonotonicMs now) noexcept {
+    return coordinator.pump_end_tx(now);
+  }
+  static JoinObjectSlot::ReplyOutcome acknowledge_end_prefix(
+      SecurityCoordinator& coordinator, std::uint16_t received, MonotonicMs now) noexcept {
+    JoinReply reply{};
+    reply.lane = ObjectLane::EndSession;
+    reply.phase = JoinAuthPhase::EdhocMessage;
+    reply.step = 2;
+    reply.id = 456;
+    reply.status = JoinReplyStatus::Progress;
+    reply.received = received;
+    return coordinator.member().end_tx.on_reply(reply, now);
   }
 };
 }  // namespace routeloom::sdkv1
@@ -145,6 +195,7 @@ class FakeUsb final : public CoordinatorUsbPort {
  public:
   Status send_local_join_up(const JoinAuthPhase phase, const std::uint8_t step,
                             const ByteView message) noexcept override {
+    if (!local_ready) return Status::error(StatusCode::WouldBlock, "usb not active");
     local_ups.push_back({phase, step, message.size});
     return Status::success();
   }
@@ -174,6 +225,7 @@ class FakeUsb final : public CoordinatorUsbPort {
     RelayAbortReason reason{RelayAbortReason::HostAborted};
   };
   std::vector<Up> local_ups{};
+  bool local_ready{true};
   std::vector<RelayUp> relay_ups{};
   std::vector<Abort> relay_aborts{};
 };
@@ -680,6 +732,43 @@ void test_zt_unicast_does_not_claim_member_demux() {
   rx.rld1_frame = encoded.view();
   CHECK(coordinator.step(rx).ok());
   CHECK(coordinator.counters().demux_drops == drops);
+}
+
+void test_member_proxy_receives_zt_discover() {
+  current = "member_proxy_receives_zt_discover";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SiteRecord site = gateway_site();
+  site.gateway_count = 1;
+  site.gateways[0] = kNode;
+  site.gateways[1] = kInvalidNodeId;
+  CHECK(f.site.commit(site).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  ZtDiscoverBody discover{};
+  discover.org_hint = join_org_hint(site_ca().pub);
+  JoinNonce nonce{};
+  nonce[0] = 0x42;
+  autonomy::Rld1Encoded frame{};
+  CHECK(zt_discover_frame_encode(kNode + 1, nonce, discover, frame).ok());
+  CoordinatorEvent rx{};
+  rx.kind = CoordinatorEventKind::Rld1Rx;
+  rx.now = now + 1;
+  rx.rld1_meta.source = kPeerMac;
+  rx.rld1_meta.destination = MacAddress{{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
+  rx.rld1_meta.channel = f.site.site().channel;
+  rx.rld1_meta.rssi = -35;
+  rx.radio_generation = 7;
+  rx.rld1_frame = frame.view();
+  const auto before = SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx;
+  CHECK(coordinator.step(rx).ok());
+  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).discovers_rx == before + 1);
+  CHECK(coordinator.step(poll_at(now + 100)).ok());
+  CHECK(SecurityCoordinatorTestAccess::proxy_stats(coordinator).epoch_replies_rx == 1);
 }
 
 void test_zt_wait_m2_status_after_demux_exhaustion() {
@@ -2210,6 +2299,122 @@ void test_dev_revocation_blocks_membership() {
   CHECK(state == MembershipState::Revoked);
 }
 
+void test_direct_join_aead_and_usb_attach_retry() {
+  current = "direct_join_aead_and_usb_attach_retry";
+  {
+    Fixture f{};
+    CHECK(f.init_stores());
+    CHECK(f.identity.commit(identity_record()).ok());
+    const edhoc::AeadCcm unavailable{nullptr, nullptr, nullptr};
+    auto deps = f.deps();
+    deps.join_aead = &unavailable;
+    SecurityCoordinator coordinator(deps);
+    CHECK(coordinator.step(boot_event(kT0, kBoot, true)).ok());
+    CHECK(coordinator.step(poll_at(kT0 + 100)).ok());
+    CHECK(coordinator.snapshot().joiner == JoinState::Stopped);
+    CHECK(coordinator.snapshot().joiner_last_error == StatusCode::Unsupported);
+    CHECK(f.usb.local_ups.empty());
+  }
+  {
+    Fixture f{};
+    CHECK(f.init_stores());
+    CHECK(f.identity.commit(identity_record()).ok());
+    f.usb.local_ready = false;
+    auto deps = f.deps();
+    deps.join_aead = edhoc::builtin_aead_ccm();
+    SecurityCoordinator coordinator(deps);
+    CHECK(coordinator.step(boot_event(kT0, kBoot, true)).ok());
+    CHECK(coordinator.step(poll_at(kT0 + 100)).ok());
+    CHECK(coordinator.snapshot().joiner == JoinState::SendM1);
+    CHECK(coordinator.step(poll_at(kT0 + 200)).ok());
+    CHECK(coordinator.snapshot().joiner == JoinState::Stopped);
+    CHECK(f.usb.local_ups.empty());
+    f.usb.local_ready = true;
+    CoordinatorEvent up{};
+    up.kind = CoordinatorEventKind::UsbSessionUp;
+    up.now = kT0 + 300;
+    CHECK(coordinator.step(up).ok());
+    CHECK(coordinator.snapshot().joiner == JoinState::BootCheck);
+    CHECK(coordinator.step(poll_at(kT0 + 400)).ok());
+    CHECK(coordinator.step(poll_at(kT0 + 500)).ok());
+    CHECK(coordinator.snapshot().joiner == JoinState::WaitM2);
+    CHECK(f.usb.local_ups.size() == 1);
+    if (!f.usb.local_ups.empty()) CHECK(f.usb.local_ups[0].step == 1);
+  }
+}
+
+void test_link_chunks_wait_for_receipts() {
+  current = "link_chunks_wait_for_receipts";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  std::array<std::uint8_t, 220> object{};
+  object.fill(0xA5);
+  CHECK(SecurityCoordinatorTestAccess::stage_link_chunks(
+            coordinator, kMac, ByteView{object.data(), object.size()}, now).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_link_chunks(coordinator, now).ok());
+  CHECK(f.rld1.sends.size() == 1);
+  CHECK(SecurityCoordinatorTestAccess::pump_link_chunks(coordinator, now + 20).ok());
+  CHECK(f.rld1.sends.size() == 1);
+  const auto acknowledged = SecurityCoordinatorTestAccess::acknowledge_link_prefix(
+      coordinator, kRld1JoinChunkData, now + 21);
+  CHECK(acknowledged == JoinObjectSlot::ReplyOutcome::Progress);
+  CHECK(SecurityCoordinatorTestAccess::pump_link_chunks(coordinator, now + 50).ok());
+  CHECK(f.rld1.sends.size() == 2);
+  if (f.rld1.sends.size() == 2) {
+    autonomy::Rld1Envelope env{};
+    CHECK(autonomy::rld1_decode(ByteView{f.rld1.sends[1].bytes.data(),
+                                        f.rld1.sends[1].bytes.size()}, env).ok());
+    JoinChunk chunk{};
+    CHECK(join_chunk_decode(JoinCarrier::Rld1,
+                            ByteView{env.body.data(), env.body_size}, chunk).ok());
+    CHECK(chunk.offset == kRld1JoinChunkData);
+  }
+}
+
+void test_end_chunks_wait_for_receipts() {
+  current = "end_chunks_wait_for_receipts";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  f.mesh.sends.clear();
+  std::array<std::uint8_t, 350> object{};
+  object.fill(0xB6);
+  CHECK(SecurityCoordinatorTestAccess::stage_end_chunks(
+            coordinator, kNode + 1, ByteView{object.data(), object.size()}, now).ok());
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now).ok());
+  CHECK(f.mesh.sends.size() == 1);
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 20).ok());
+  CHECK(f.mesh.sends.size() == 1);
+  const std::size_t grid = join_chunk_data_max(JoinCarrier::WireRelay);
+  CHECK(SecurityCoordinatorTestAccess::acknowledge_end_prefix(
+            coordinator, static_cast<std::uint16_t>(grid), now + 21) ==
+        JoinObjectSlot::ReplyOutcome::Progress);
+  CHECK(SecurityCoordinatorTestAccess::pump_end_chunks(coordinator, now + 250).ok());
+  CHECK(f.mesh.sends.size() == 2);
+  if (f.mesh.sends.size() == 2) {
+    CHECK(f.mesh.sends[1].dest == kNode + 1);
+    CHECK(f.mesh.sends[1].type == FrameType::BootstrapChunk);
+    JoinChunk chunk{};
+    CHECK(join_chunk_decode(JoinCarrier::WireRelay,
+                            ByteView{f.mesh.sends[1].bytes.data(),
+                                     f.mesh.sends[1].bytes.size()}, chunk).ok());
+    CHECK(chunk.offset == grid);
+  }
+}
+
 int main() {
   test_boot_silent_adoption();
   test_member_apply_failure_is_closed();
@@ -2217,6 +2422,7 @@ int main() {
   test_invalid_proxy_auth_does_not_hold_demux();
   test_join_rs_target_reaches_member_config();
   test_zt_unicast_does_not_claim_member_demux();
+  test_member_proxy_receives_zt_discover();
   test_zt_wait_m2_status_after_demux_exhaustion();
   test_zt_m2_after_nine_exchanges();
   test_clock_regression_refused();
@@ -2251,6 +2457,9 @@ int main() {
   test_dev_stop_member_adopt();
   test_dev_channel_failure_rebuilds_small_side();
   test_dev_revocation_blocks_membership();
+  test_direct_join_aead_and_usb_attach_retry();
+  test_link_chunks_wait_for_receipts();
+  test_end_chunks_wait_for_receipts();
   if (failures != 0) {
     std::fprintf(stderr, "FAILURES: %d\n", failures);
     return 1;

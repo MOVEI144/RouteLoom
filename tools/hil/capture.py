@@ -23,7 +23,7 @@ frames and MUST NOT be read as logs).
 All blocking is bounded; callers pass explicit timeouts. On timeout the
 scenario runner dumps ``tail()`` into the report.
 
-NOTE: not yet exercised against real hardware (issue #18 bootstrap).
+First C3 serial captures are recorded in docs/hil/2026-09-26-bench-5node.md.
 """
 
 from __future__ import annotations

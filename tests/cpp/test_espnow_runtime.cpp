@@ -653,6 +653,14 @@ void test_adopt_member_node_keeps_node_startable() {
   EspNowRuntimeConfig config = make_config();
   EspNowRuntime runtime(config, security, observer);
   CHECK(runtime.initialize().ok());
+  struct ConfigSink final : routeloom::ConfigEndpointSink {
+    void on_config_frame(routeloom::NodeId, const routeloom::wire::PlainFrame&,
+                         routeloom::MonotonicMs) noexcept override {}
+    void on_config_job_done(const routeloom::MessageId&, bool, const char*,
+                            routeloom::MonotonicMs) noexcept override {}
+    void poll(routeloom::MonotonicMs) noexcept override {}
+  } config_sink;
+  CHECK(runtime.node().set_config_sink(&config_sink).ok());
   routeloom::NodeConfig adopted = config.node;
   adopted.node = 0x00A1000000001234ULL;
   adopted.network = 0x0A1B2C3DUL;
@@ -662,6 +670,7 @@ void test_adopt_member_node_keeps_node_startable() {
   adopted.route_gateways[0] = 0x00A1000000000001ULL;
   adopted.route_gateways[1] = 0x00A1000000000002ULL;
   CHECK(runtime.adopt_member_node(adopted).ok());
+  CHECK(runtime.node().config_sink() == &config_sink);
   // Adopted gateways run the product scoped timers (routing-scale.md §5):
   // the constructed flat defaults cannot satisfy the lease rule.
   CHECK(runtime.node().config().route_advertisement_period_ms ==

@@ -196,13 +196,15 @@ SecurityCoordinator::MemberEngine::MemberEngine(
     ResumeSlotStorage2& resume, GatewaySessionBank& bank, BankSessionSink<32, 128>& sink,
     HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
     EntropySource& entropy, ZtRld1Port& rld1, ZtRelayPort& relay, JoinCookieSealer& sealer,
-    const JoinProxyConfig& proxy_config, const JoinRelayGatewayConfig& gateway_config) noexcept
+    const JoinProxyConfig& proxy_config, const JoinRelayGatewayConfig& gateway_config,
+    const edhoc::AeadCcm* aead) noexcept
     : resume_cache(resume,
                    resume.slot_count() == kResume2GatewayLinkQuota + kResume2GatewayEndQuota
                        ? kResume2GatewayLinkQuota : kResume2NodeLinkQuota,
                    resume.slot_count() == kResume2GatewayLinkQuota + kResume2GatewayEndQuota
                        ? kResume2GatewayEndQuota : kResume2NodeEndQuota),
-      engine(resume_cache, sink, member_cookie, membership, verifier, &entropy_fill, &entropy),
+      engine(resume_cache, sink, member_cookie, membership, verifier, &entropy_fill, &entropy,
+             aead),
       demands(bank, engine),
       proxy(proxy_config, rld1, relay, sealer, entropy),
       gateway(gateway_config, relay) {}
@@ -224,7 +226,7 @@ void SecurityCoordinator::destroy_workspace() noexcept {
 
 void SecurityCoordinator::create_joiner() noexcept {
   new (&ws_.joiner) Joiner(deps_.joiner_config, *deps_.identity, *deps_.site, *deps_.entropy,
-                           *deps_.rld1, joiner_observer_);
+                           *deps_.rld1, joiner_observer_, deps_.join_aead);
   ws_.joiner.set_commit_policy(this);
 }
 
@@ -267,10 +269,11 @@ void SecurityCoordinator::create_member() noexcept {
   }
   JoinRelayGatewayConfig gateway_config{};
   gateway_config.node = adopted_.node;
+  gateway_config.colocated_proxy = proxy_config.colocated_gateway;
   gateway_config.gateway_epoch = adopted_.boot_session;
   new (&ws_.member) MemberEngine(*deps_.resume_storage, bank_, bank_sink_, *this, *deps_.verifier,
                                  *deps_.entropy, *deps_.rld1, *this, *deps_.proxy_sealer,
-                                 proxy_config, gateway_config);
+                                 proxy_config, gateway_config, deps_.join_aead);
   ws_.member.gateway.set_host_sink(this);
 }
 
@@ -360,10 +363,15 @@ CoordinatorSnapshot SecurityCoordinator::snapshot() const noexcept {
                                               : MembershipState::Unprovisioned;
   out.sleeping = sleeping_;
   out.action_pending = action_pending_;
+  out.radio_generation = radio_generation_;
   // Only the live workspace side is readable: the union holds nothing in
   // Fresh/Removed/Recovery.
   if (mode_ == CoordinatorMode::ZeroTouch) {
-    out.joiner = joiner().snapshot().state;
+    const JoinSnapshot join = joiner().snapshot();
+    out.joiner = join.state;
+    out.joiner_last_error = join.last_error;
+    out.joiner_rx_dropped = join.counters.rx_dropped;
+    out.joiner_observations = join.candidates.observations;
   }
   if (has_member_engine()) {
     out.engine_quiescent = member().engine.quiescent();
@@ -585,6 +593,7 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
     if (free == 0) break;
     NeighborDiscovery::MemberStartRequest start{};
     if (!deps_.discovery->take_member_start(start, now).ok()) break;
+    sat_inc(counters_.member_starts);
     if (start.peer == kInvalidNodeId || start.peer == adopted_.node) continue;
     // Sleep re-confirmation (P4 §9.3, V1-F07): while a restore image is
     // held for this initiator peer at the retained radio MAC, the
@@ -640,9 +649,11 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
       std::uint32_t token = NeighborDiscovery::kMemberHandshakeNone;
       ScopeDigest carrier_digest{};
       keys::link_carrier_digest(entry->carrier, carrier_digest);
-      if (!deps_.discovery
-               ->begin_member_handshake(start.peer, start.peer_mac, carrier_digest, now, token)
-               .ok()) {
+      const Status reserved = deps_.discovery
+          ->begin_member_handshake(start.peer, start.peer_mac, carrier_digest, now, token);
+      if (!reserved.ok()) {
+        sat_inc(counters_.link_request_failures);
+        counters_.link_last_error = reserved.code;
         entry->used = false;
         continue;
       }
@@ -657,21 +668,60 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
       req.mac_i = deps_.local_mac;
       req.mac_r = start.peer_mac;
       req.carrier = entry->carrier;
-      if (!member().engine.request(req, now).ok()) {
+      const Status requested = member().engine.request(req, now);
+      if (!requested.ok()) {
+        sat_inc(counters_.link_request_failures);
+        counters_.link_last_error = requested.code;
         deps_.discovery->cancel_member_handshake(token);
         entry->used = false;
         continue;
       }
+      sat_inc(counters_.link_requests);
     }
   }
   drain_demands(now);
   drain_engine_results(now);
   drive_engine(now);
+  // RLD1 shares the ESP-NOW callback lane with DATA. A chunked handshake
+  // must advance after each completion/receipt, not burst all chunks into
+  // the same destination while its first callback is still outstanding.
+  if (member().link_tx.mode() == JoinObjectSlot::Mode::Sending) {
+    const Status sent = pump_link_tx(now);
+    if (!sent.ok() && sent.code != StatusCode::WouldBlock) {
+      sat_inc(counters_.link_send_failures);
+      counters_.link_last_error = sent.code;
+    }
+  }
+  if (member().end_tx.mode() == JoinObjectSlot::Mode::Sending) {
+    const Status sent = pump_end_tx(now);
+    if (!sent.ok() && sent.code != StatusCode::WouldBlock &&
+        sent.code != StatusCode::NoCapacity && sent.code != StatusCode::NoRoute) {
+      sat_inc(counters_.end_send_failures);
+      counters_.end_last_error = sent.code;
+    }
+  }
   if (mode_ == CoordinatorMode::Member) {
     // Join service, stale-GK watch and authority channel are Member-only:
     // the dev route has no proxy, no GK and no channel to drive.
     member().proxy.poll(now);
     if (member().gateway_active) member().gateway.poll(now);
+    // A callback may queue its peer's answer (or a chunk receipt). Pop
+    // before delivery so the callback can enqueue the next frame. Bound
+    // this drain to keep poll responsive even if peers keep answering.
+    for (std::size_t delivered = 0;
+         delivered < 2 * MemberEngine::kLocalRelaySlots && member().local_relay_count != 0;
+         ++delivered) {
+      const MemberEngine::LocalRelayFrame frame =
+          member().local_relay[member().local_relay_head];
+      member().local_relay_head = static_cast<std::uint8_t>(
+          (member().local_relay_head + 1) % MemberEngine::kLocalRelaySlots);
+      --member().local_relay_count;
+      const ByteView payload{frame.bytes.data(), frame.size};
+      (void)member().proxy.on_relay_rx(adopted_.node, frame.type, payload, now);
+      if (member().gateway_active) {
+        (void)member().gateway.on_relay_rx(adopted_.node, 0, frame.type, payload, now);
+      }
+    }
     watch_linkless(now);   // stale-GK evidence accrues toward a refresh
     if (mode_ == CoordinatorMode::Member && !member_apply_pending_) {
       drive_authority(now);  // GK tick/promote, channel tick, deferred start
@@ -770,11 +820,21 @@ Status SecurityCoordinator::on_rld1_rx(const CoordinatorEvent& event) noexcept {
   // only), member scope to discovery (member mode only).
   if (env.kind == FrameType::Discover || env.kind == FrameType::Offer) {
     if (zt_rld1_frame(env)) {
-      if (mode_ != CoordinatorMode::ZeroTouch) {
-        sat_inc(counters_.demux_drops);
-        return Status::success();
+      if (mode_ == CoordinatorMode::ZeroTouch) {
+        return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
       }
-      return joiner().on_rld1_rx(event.rld1_meta, event.rld1_frame, event.now);
+      if (mode_ == CoordinatorMode::Member && env.kind == FrameType::Discover) {
+        // An adopted member proxy answers unprovisioned joiners' ZT
+        // DISCOVER. Member discovery owns only its distinct RLD1 version.
+        const std::int16_t rssi = event.rld1_meta.rssi;
+        const std::int8_t rssi8 =
+            rssi < -128 ? -128 : (rssi > 127 ? 127 : static_cast<std::int8_t>(rssi));
+        return member().proxy.on_rld1_rx(event.rld1_meta.source,
+                                          event.rld1_meta.destination, rssi8,
+                                          event.rld1_frame, event.now);
+      }
+      sat_inc(counters_.demux_drops);
+      return Status::success();
     }
     if (!has_member_engine()) {
       sat_inc(counters_.demux_drops);
@@ -1055,14 +1115,26 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
     HandshakeResult result{};
     if (!member().engine.take_result(result).ok()) break;
     if (result.event == HandshakeEvent::Send) {
-      if (emit_send(result, now).ok()) {
+      const Status sent = emit_send(result, now);
+      if (sent.ok()) {
         (void)member().engine.accept_send(result.token, result.phase, result.step);
+      } else if (result.scope == SecurityScope::Link) {
+        sat_inc(counters_.link_send_failures);
+        counters_.link_last_error = sent.code;
+      } else {
+        sat_inc(counters_.end_send_failures);
+        counters_.end_last_error = sent.code;
       }
     } else if (result.event == HandshakeEvent::Established && result.has_proof &&
                result.scope == SecurityScope::Link) {
+      sat_inc(counters_.link_established);
       (void)installed_link(result, now);
       if (mode_ == CoordinatorMode::Member) note_link_established();
+    } else if (result.event == HandshakeEvent::Established && result.scope == SecurityScope::EndToEnd) {
+      sat_inc(counters_.end_established);
     } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::Link) {
+      sat_inc(counters_.link_failed);
+      counters_.link_last_error = result.failure;
       // Tear down the leg: the next discovery round or demand re-drives.
       for (auto& entry : member().demux) {
         if (entry.used && entry.peer == result.peer) {
@@ -1075,6 +1147,9 @@ void SecurityCoordinator::drain_engine_results(const MonotonicMs now) noexcept {
       }
       // Stale-GK strikes are Member-only: dev has no GK to refresh.
       if (mode_ == CoordinatorMode::Member) note_link_failed();
+    } else if (result.event == HandshakeEvent::Failed && result.scope == SecurityScope::EndToEnd) {
+      sat_inc(counters_.end_failed);
+      counters_.end_last_error = result.failure;
     }
   }
 }
@@ -1180,24 +1255,42 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
                     .ok()) {
     return Status::error(StatusCode::ProtocolError, "link tx load");
   }
-  // Emit the unconfirmed chunks now; replies advance the slot via
-  // demux_member_frame, and the engine's retransmit re-drives the rest.
+  // The slot owns the bytes after this call. The poll pump advances one
+  // chunk at a time as receipts arrive; accepting the engine Send result
+  // does not mean all chunks have left the radio yet.
+  const Status sent = pump_link_tx(now);
+  return sent.code == StatusCode::WouldBlock ? Status::success() : sent;
+}
+
+Status SecurityCoordinator::pump_link_tx(const MonotonicMs now) noexcept {
+  JoinObjectSlot& slot = member().link_tx;
+  if (slot.mode() != JoinObjectSlot::Mode::Sending) return Status::success();
+  // Retransmit the oldest unconfirmed chunk if its receipt was lost. This
+  // interval also prevents a poll at 2 ms from flooding the radio.
+  if (slot.sends() != 0 && now - slot.last_send_ms() < 50) {
+    return Status::success();
+  }
+  DemuxEntry* leg = nullptr;
+  for (auto& entry : member().demux) {
+    if (entry.used && entry.has_start && entry.object_id == slot.id()) {
+      leg = &entry;
+      break;
+    }
+  }
+  if (leg == nullptr) return Status::error(StatusCode::NotFound, "no link tx leg");
   const std::uint16_t pending = slot.pending_mask();
-  bool accepted = true;
   for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
     JoinChunk chunk{};
     if (!slot.chunk_at(i, chunk).ok()) {
-      accepted = false;
-      break;
+      return Status::error(StatusCode::ProtocolError, "link tx chunk");
     }
     std::array<std::uint8_t, autonomy::kRld1MaxBody> body{};
     std::size_t written = 0;
     if (!join_chunk_encode(JoinCarrier::Rld1, chunk,
                            MutableByteView{body.data(), body.size()}, written)
              .ok()) {
-      accepted = false;
-      break;
+      return Status::error(StatusCode::ProtocolError, "link tx chunk encode");
     }
     autonomy::Rld1Envelope env{};
     env.kind = FrameType::BootstrapChunk;
@@ -1205,21 +1298,19 @@ Status SecurityCoordinator::emit_link_send(const HandshakeResult& result,
     env.claimed_node = adopted_.node;
     env.transaction_nonce = leg->txn;
     if (written > env.body.size()) {
-      accepted = false;
-      break;
+      return Status::error(StatusCode::ProtocolError, "link tx chunk body");
     }
     std::memcpy(env.body.data(), body.data(), written);
     env.body_size = written;
     autonomy::Rld1Encoded frame{};
     if (!autonomy::rld1_encode(env, frame).ok()) {
-      accepted = false;
-      break;
+      return Status::error(StatusCode::ProtocolError, "link tx rld1 encode");
     }
-    if (!deps_.rld1->send_rld1(leg->mac, frame.view()).ok()) accepted = false;
+    const Status sent = deps_.rld1->send_rld1(leg->mac, frame.view());
+    if (sent.ok()) slot.note_sent(now);
+    return sent;
   }
-  slot.note_sent(now);
-  return accepted ? Status::success()
-                  : Status::error(StatusCode::NoCapacity, "link transport full");
+  return Status::success();  // all chunks acknowledged; wait for Complete
 }
 
 Status SecurityCoordinator::installed_link(const HandshakeResult& result,
@@ -1278,32 +1369,52 @@ Status SecurityCoordinator::emit_end_send(const HandshakeResult& result,
                     .ok()) {
     return Status::error(StatusCode::ProtocolError, "end tx load");
   }
+  if (!same) {
+    member().end_tx_peer = result.peer;
+    member().end_tx_last_attempt_ms = 0;
+  }
+  const Status sent = pump_end_tx(now);
+  // The slot retains all chunks. Pool/route pressure is transient; poll
+  // retries without forcing the handshake engine to resend the whole object.
+  if (sent.code == StatusCode::WouldBlock || sent.code == StatusCode::NoCapacity ||
+      sent.code == StatusCode::NoRoute) {
+    return Status::success();
+  }
+  return sent;
+}
+
+Status SecurityCoordinator::pump_end_tx(const MonotonicMs now) noexcept {
+  JoinObjectSlot& slot = member().end_tx;
+  if (slot.mode() != JoinObjectSlot::Mode::Sending) return Status::success();
+  if (member().end_tx_last_attempt_ms != 0 &&
+      now - member().end_tx_last_attempt_ms < 250) {
+    return Status::success();
+  }
+  member().end_tx_last_attempt_ms = now;
   const std::uint16_t pending = slot.pending_mask();
-  bool accepted = true;
   for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
     if ((pending & static_cast<std::uint16_t>(1U << i)) == 0) continue;
     JoinChunk chunk{};
     if (!slot.chunk_at(i, chunk).ok()) {
-      accepted = false;
-      break;
+      return Status::error(StatusCode::ProtocolError, "end tx chunk");
     }
     std::array<std::uint8_t, kMaxApplicationPayload> body{};
     std::size_t written = 0;
     if (!join_chunk_encode(JoinCarrier::WireRelay, chunk,
                            MutableByteView{body.data(), body.size()}, written)
              .ok()) {
-      accepted = false;
-      break;
+      return Status::error(StatusCode::ProtocolError, "end tx chunk encode");
     }
-    if (!deps_.mesh->send_bootstrap(result.peer, FrameType::BootstrapChunk,
-                                    ByteView{body.data(), written},
-                                    HandshakeEngine::kLinkTimeoutMs, now, id).ok()) {
-      accepted = false;
-    }
+    MessageId id{};
+    const Status sent = deps_.mesh->send_bootstrap(member().end_tx_peer,
+                                                   FrameType::BootstrapChunk,
+                                                   ByteView{body.data(), written},
+                                                   HandshakeEngine::kLinkTimeoutMs,
+                                                   now, id);
+    if (sent.ok()) slot.note_sent(now);
+    return sent;
   }
-  slot.note_sent(now);
-  return accepted ? Status::success()
-                  : Status::error(StatusCode::NoCapacity, "end transport full");
+  return Status::success();
 }
 
 Status SecurityCoordinator::on_frame(const BootstrapMeta& meta, const FrameType type,
@@ -1405,7 +1516,13 @@ void SecurityCoordinator::handle_bootstrap_frame(const StagedFrame& frame,
           JoinReply reply{};
           if (join_reply_decode(JoinCarrier::WireRelay, payload, reply).ok() &&
               reply.lane == ObjectLane::EndSession) {
-            (void)member().end_tx.on_reply(reply, now);
+            const auto outcome = member().end_tx.on_reply(reply, now);
+            if (outcome == JoinObjectSlot::ReplyOutcome::Progress ||
+                outcome == JoinObjectSlot::ReplyOutcome::Restart) {
+              // A receipt freed the next contiguous chunk; send it on the
+              // next poll without waiting for the no-receipt retry timer.
+              member().end_tx_last_attempt_ms = 0;
+            }
           } else {
             sat_inc(counters_.demux_drops);
           }
@@ -1531,11 +1648,20 @@ Status SecurityCoordinator::send_relay(const NodeId destination, const FrameType
   }
   const NodeId self = member_valid_ ? adopted_.node : deps_.local_node;
   if (destination == self || destination == deps_.local_node) {
-    // Proxy and gateway on one device: loop back without touching the
-    // radio. Both engines re-check direction, so feeding both is safe —
-    // the foreign one drops via its own admission.
-    member().proxy.on_relay_rx(self, type, payload, last_now_);
-    if (member().gateway_active) member().gateway.on_relay_rx(self, 0, type, payload, last_now_);
+    if (payload.size > kMaxApplicationPayload ||
+        (payload.size != 0 && payload.data == nullptr)) {
+      return Status::error(StatusCode::InvalidArgument, "local relay payload");
+    }
+    if (member().local_relay_count == MemberEngine::kLocalRelaySlots) {
+      return Status::error(StatusCode::NoCapacity, "local relay queue full");
+    }
+    const std::size_t tail =
+        (member().local_relay_head + member().local_relay_count) % MemberEngine::kLocalRelaySlots;
+    auto& frame = member().local_relay[tail];
+    frame.type = type;
+    frame.size = static_cast<std::uint8_t>(payload.size);
+    if (payload.size != 0) std::memcpy(frame.bytes.data(), payload.data, payload.size);
+    ++member().local_relay_count;
     return Status::success();
   }
   MessageId id{};
@@ -2103,6 +2229,18 @@ Status SecurityCoordinator::on_request_pull(const CoordinatorEvent& event) noexc
 }
 
 Status SecurityCoordinator::on_usb_session_up(const MonotonicMs now) noexcept {
+  if (mode_ == CoordinatorMode::ZeroTouch && usb_direct_ && !sleeping_ &&
+      joiner().snapshot().state == JoinState::Stopped) {
+    // A direct m1 may be attempted before USB authentication has completed.
+    // Its failed send parks the Joiner; a newly active session is the next
+    // attachment and must restart that attempt.
+    JoinBootInput boot{};
+    boot.boot_witness = boot_witness_;
+    boot.prepared = true;
+    boot.removal_watermark_site_id = removal_watermark_site_id_;
+    boot.removal_watermark_generation = removal_watermark_generation_;
+    return joiner().start_direct(boot, *this, now);
+  }
   if (mode_ != CoordinatorMode::Member || sleeping_) return Status::success();
   // A gateway's own channel rides the USB session directly: it suspended
   // on the way down and restarts now. Mesh devices never see this event.

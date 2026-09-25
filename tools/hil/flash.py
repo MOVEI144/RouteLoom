@@ -17,9 +17,8 @@ Usage:
     python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
         --board ref-a [--app-only] [--out artifacts/hil/flash]
 
-Hardware note: this has not run against real boards yet (issue #18). It is
-written to be correct-by-construction; verify on the bench before trusting
-flash results.
+Hardware note: first used on identified C3 boards on 2026-09-26. Flash
+manifests and boot logs are retained with that run's report.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ except ImportError:  # running as a script: tools/hil on sys.path
     import rig as rig_mod  # type: ignore
     import capture as capture_mod  # type: ignore
 
-DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool.py")
+DEFAULT_ESPTOOL = os.path.expanduser("~/.local/bin/esptool")
 DEFAULT_TIMEOUT_S = 120.0
 DEFAULT_BOOT_SECONDS = 8.0
 
@@ -57,6 +56,32 @@ FALLBACK_FLASH_FILES = {
 
 class FlashError(RuntimeError):
     pass
+
+
+def preflight_board(board: "rig_mod.Board", port: str, esptool: str,
+                    out_dir: str) -> dict:
+    """Reidentify the device immediately before any write to avoid port drift."""
+    cmd = [esptool, "--port", port, "chip-id"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    output = (result.stdout or "") + (result.stderr or "")
+    path = os.path.join(out_dir, f"flash-{board.name}-preflight.log")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"$ {' '.join(cmd)}\n{output}")
+    import re
+    chip = re.search(r"Chip type:\s*ESP32-(C3|C5)\b", output, re.I)
+    mac = re.search(r"^MAC:\s*([0-9a-f:]{17})\s*$", output, re.I | re.M)
+    detected_chip = "esp32" + chip.group(1).lower() if chip else None
+    detected_mac = mac.group(1).lower() if mac else None
+    if result.returncode != 0 or detected_chip != board.chip or (
+        board.mac and detected_mac != board.mac.lower()
+    ):
+        raise FlashError(
+            f"preflight mismatch on {port}: chip={detected_chip}, "
+            f"MAC={detected_mac}, expected={board.chip}/{board.mac or '*'} "
+            f"(see {path})"
+        )
+    return {"chip": detected_chip, "mac": detected_mac,
+            "log": os.path.relpath(path, out_dir)}
 
 
 def load_flasher_args(build_dir: str) -> dict:
@@ -154,10 +179,12 @@ def flash_board(
     boot_seconds: float = DEFAULT_BOOT_SECONDS,
     timeout_s: float = DEFAULT_TIMEOUT_S,
     repo: str = rig_mod.REPO_ROOT,
+    image_dir: Optional[str] = None,
 ) -> dict:
     """Flash one board. Returns a manifest dict for the report."""
     os.makedirs(out_dir, exist_ok=True)
-    build_dir = board.build_dir(repo)
+    preflight = preflight_board(board, port, esptool, out_dir)
+    build_dir = os.path.join(image_dir, "build") if image_dir else board.build_dir(repo)
     cmd, files, fallback = build_write_flash_cmd(
         build_dir, port, esptool, board.chip or None, board.flash_baud, app_only
     )
@@ -166,6 +193,7 @@ def flash_board(
         "app": board.app,
         "port": port,
         "chip": board.chip,
+        "preflight": preflight,
         "app_only": app_only,
         "fallback_offsets": fallback,
         "cmd": cmd,
@@ -236,6 +264,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S)
     parser.add_argument("--out", default=os.path.join(
         rig_mod.REPO_ROOT, "artifacts", "hil", "flash"))
+    parser.add_argument("--image-dir", help="bench image directory containing build/flasher_args.json")
+    parser.add_argument("--capture-boot", action="store_true",
+                        help="capture USB boot text for a diagnostic image whose console is on USB")
     args = parser.parse_args(argv)
 
     rigs = rig_mod.load_rigs(args.rig)
@@ -248,6 +279,8 @@ def main(argv: Optional[list[str]] = None) -> int:
               f"(have: {', '.join(sorted(bench.boards))})", file=sys.stderr)
         return 2
     board = bench.boards[args.board]
+    if args.capture_boot:
+        board.console = "usb-serial-jtag"
 
     port, matches, status = rig_mod.resolve_board_port(board)
     if status != "ONLINE":
@@ -258,6 +291,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     manifest = flash_board(
         board, port, args.out, esptool=args.esptool, app_only=args.app_only,
         boot_seconds=args.boot_seconds, timeout_s=args.timeout,
+        image_dir=args.image_dir,
     )
     manifest_path = os.path.join(args.out, f"flash-{board.name}.json")
     with open(manifest_path, "w", encoding="utf-8") as fh:

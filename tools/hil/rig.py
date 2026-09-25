@@ -17,8 +17,7 @@ no anchors, no flow collections, no block scalars. ``parse_yaml_subset``
 implements just that subset; JSON input is also accepted because JSON is
 a subset of the same grammar in spirit.
 
-NOTE: none of the discovery paths here have been exercised against real
-hardware yet (issue #18 bootstrap — hardware verification pending).
+The first C3 discovery/probe run is recorded in docs/hil/2026-09-26-bench-5node.md.
 """
 
 from __future__ import annotations
@@ -218,6 +217,7 @@ class Board:
     role: str = "reference"          # "bridge" | "reference" | free-form
     app: str = ""                  # firmware/<app>
     chip: str = ""                 # esp32c3 / esp32s3 / esp32c5
+    mac: str = ""                  # expected base MAC for flash preflight
     baud: int = 115200
     flash_baud: int = 460800
     console: str = "usb-serial-jtag"
@@ -440,8 +440,9 @@ def probe_chip(port: str, esptool: str, timeout_s: float = 20.0) -> Optional[str
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    match = re.search(r"(esp32[a-z0-9]+)", out.stdout + out.stderr, re.IGNORECASE)
-    return match.group(1).lower() if match else None
+    match = re.search(r"^Chip type:\s*ESP32-([A-Z0-9]+)\b", out.stdout + out.stderr,
+                      re.IGNORECASE | re.MULTILINE)
+    return "esp32" + match.group(1).lower() if match else None
 
 
 @dataclass

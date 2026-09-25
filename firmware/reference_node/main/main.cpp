@@ -749,6 +749,10 @@ extern "C" void app_main(void) {
   }
   owner_config.joiner.node = owner_config.local_node;
   owner_config.joiner.mac = owner_config.local_mac;
+  owner_config.joiner.capability =
+      routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay;
+  owner_config.joiner.requested_role = static_cast<std::uint8_t>(
+      routeloom::sdkv1::kMemberRoleEndpoint | routeloom::sdkv1::kMemberRoleRelay);
   owner_config.log_tag = kTag;
 #if CONFIG_ROUTELOOM_DEEP_SLEEP && CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
   status = owner.begin(sdkv1_stores, entropy, owner_config, &s_rtc_hold);

@@ -73,8 +73,8 @@ def environment(serial_backend: str, esptool_path: Optional[str]) -> dict:
         "esptool_path": esptool_path,
         "esptool_version": None,
         "hardware_note": (
-            "issue #18 bootstrap: tooling verified without attached boards; "
-            "PASS requires real captured evidence, OFFLINE rigs are SKIP"
+            "PASS requires real captured evidence; selftest is not HIL; "
+            "OFFLINE rigs are SKIP"
         ),
     }
     if esptool_path:

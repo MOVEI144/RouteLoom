@@ -1950,7 +1950,7 @@ fn serve_client(
     stream: UnixStream,
     state: Arc<State>,
     outbound: mpsc::SyncSender<Outbound>,
-    session: u64,
+    _process_session: u64,
     next_request: Arc<AtomicU64>,
     next_idem_key: Arc<AtomicU64>,
     device_session: Arc<Mutex<DeviceSession>>,
@@ -2089,11 +2089,10 @@ fn serve_client(
                 // The device bridge only accepts DataToMesh inside an
                 // authenticated session — reject early with a clear error
                 // instead of queueing a frame the writer must drop.
-                let authenticated = device_session
-                    .lock()
-                    .expect("device session poisoned")
-                    .phase
-                    == SessionPhase::Active;
+                let active_session = {
+                    let guard = device_session.lock().expect("device session poisoned");
+                    (guard.phase == SessionPhase::Active).then_some(guard.session_id)
+                };
                 // Legacy mode is still gated by the same contract as
                 // messages.submit: the USB host authority is never granted
                 // unconditionally to every local client
@@ -2117,7 +2116,7 @@ fn serve_client(
                     _ if send_uid.is_none() => {
                         "{\"accepted\":false,\"error\":\"authorization failed\"}".into()
                     }
-                    _ if !authenticated => {
+                    _ if active_session.is_none() => {
                         "{\"accepted\":false,\"error\":\"session not authenticated\"}".into()
                     }
                     (Ok(destination), Ok(payload)) if payload.len() <= 128 => {
@@ -2152,7 +2151,7 @@ fn serve_client(
                         match outbound.try_send(Outbound::Seal(Frame {
                             kind: FrameKind::DataToMesh,
                             flags: 0,
-                            session,
+                            session: active_session.expect("authenticated above"),
                             request,
                             body,
                         })) {
@@ -3697,6 +3696,7 @@ mod tests {
         state.session.lock().unwrap().network = Some(1);
         let mut device = DeviceSession::new();
         complete_handshake(&mut device);
+        let expected_session = device.session_id;
         let (mut reader, mut writer, rx) =
             spawn_client_with(Arc::clone(&state), Some(501), Arc::new(Mutex::new(device)));
         // Reserved node ids are refused with the same rule canonical.rs
@@ -3710,7 +3710,10 @@ mod tests {
         let response = exchange(&mut reader, &mut writer, "SEND 3 00ff");
         assert!(response.contains("\"accepted\":true"), "{response}");
         assert!(response.contains("\"request\":"), "{response}");
-        assert!(matches!(rx.try_recv(), Ok(Outbound::Seal(_))));
+        let Ok(Outbound::Seal(frame)) = rx.try_recv() else {
+            panic!("expected a sealed DataToMesh frame");
+        };
+        assert_eq!(frame.session, expected_session);
         // The shared admission budget binds the legacy verb too.
         {
             let mut limiter = state.rate_limiter.lock().unwrap();

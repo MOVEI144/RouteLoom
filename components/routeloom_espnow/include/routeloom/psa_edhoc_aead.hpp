@@ -15,7 +15,7 @@ namespace routeloom::espnow {
 // docs/design/sdk-v1/08-implementation-plan.md P2-1 supplies only this AEAD
 // hook; P-256, SHA-256 and HKDF stay on the portable backend. A full PSA
 // backend (hardware ECC/SHA) and the C3/S3 timing, stack and heap figures
-// are P2-2. Nothing in the firmware calls this yet.
+// are P2-2. EspNowSecurityOwner supplies this port to the Joiner.
 const edhoc::AeadCcm* psa_edhoc_aead_ccm() noexcept;
 
 }  // namespace routeloom::espnow

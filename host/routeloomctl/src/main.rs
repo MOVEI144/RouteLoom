@@ -10,6 +10,7 @@ mod provision;
 mod provision_office;
 
 fn usage() {
+    eprintln!("Read-only daemon diagnostics: adapter | events | deliveries");
     eprintln!(
         "routeloomctl [--socket PATH] status|diagnostics|autonomy|send <node> <hex>|receive --network <16hex> [--from earliest|latest | --cursor CURSOR] [--limit 1-32]|open-epoch --network <16hex>|submit --network <16hex> --epoch <16hex> --to <16hex> --payload <hex> [--key <32hex>] [--gateway [--scope SCOPE]] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-resolve --network <16hex> --gateway <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM [--expected-host <64hex>]|gateway-send --network <16hex> --epoch <16hex> --to <16hex> --scope HOST_RECEIVE_RAM|GATEWAY_SDK_RAM --payload <hex> [--key <32hex>] [--ttl-ms 1-30000] [--delivery BEST_EFFORT|RELIABLE] [--storage RAM_ONLY|HOST_DURABLE] [--hop-limit 1-10]|gateway-get --id <opid>|operation-get --id <opid>|operation-get-by-key --network <16hex> --epoch <16hex> --key <32hex>|config-challenge --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16>|config-status --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-retry --network <16hex> --target <16hex> --config-namespace <u16> --operation-id <32hex>|config-propose --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --base-snapshot <hex> --field <id>:<type>:<hex> [--field ...] [--apply-budget-ms <u32>]|config-recover --network <16hex> --target <16hex> --config-namespace <u16> --schema <u16> --mode adopt-known|reprovision --new-store-generation <u32> --new-revision <u64> [--snapshot-hash <64hex>] [--baseline <hex>]|config-recovery-info --network <16hex> --target <16hex> --config-namespace <u16>|trust-install --network <16hex> --target <16hex> --manifest <file>|trust-status --network <16hex> --target <16hex>|config-get --id <cfg-opid>|cancel <opid>|nodes [--connected true|false] [--after <16hex>] [--limit 1-128]|node-get --node <16hex>|node-events (streams node_joined/node_left/link_changed until interrupted)|group-send --network <16hex> --group <1-65535|ALL> --payload <hex> [--key <32hex>] [--priority BULK|NORMAL|MANAGEMENT|URGENT] [--ordered] [--ttl-ms 1-30000] [--hop-limit 1-254] [--wait-ms 0-15000]|group-get --id <grp-opid> [--wait-ms 0-15000]"
     );
@@ -320,6 +321,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let command = match remaining.as_slice() {
         [name] if name == "status" => "STATUS".to_string(),
+        [name] if name == "adapter" => "ADAPTER".to_string(),
+        [name] if name == "events" => "EVENTS".to_string(),
+        [name] if name == "deliveries" => "DELIVERIES".to_string(),
         [name] if name == "diagnostics" => "DIAGNOSTICS".to_string(),
         [name] if name == "autonomy" => "AUTONOMY".to_string(),
         // Legacy SEND is kept byte-compatible in explicit legacy mode: a

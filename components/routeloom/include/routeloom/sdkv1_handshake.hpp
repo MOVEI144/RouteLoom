@@ -280,7 +280,8 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
 
   HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink, MemberCookie& cookie,
                   HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
-                  RandomFn random, void* random_ctx) noexcept;
+                  RandomFn random, void* random_ctx,
+                  const edhoc::AeadCcm* aead = nullptr) noexcept;
   // Wipes the armed dev PSK (exchange secrets die with their records and
   // flights; the policy is configuration and outlives them otherwise).
   ~HandshakeEngine() noexcept;
@@ -573,6 +574,7 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
   SessionCredentialVerifier& verifier_;
   RandomFn random_;
   void* random_ctx_;
+  const edhoc::AeadCcm* aead_;
   HandshakeLocal local_{};
   bool local_set_{false};
   bool configured_{false};

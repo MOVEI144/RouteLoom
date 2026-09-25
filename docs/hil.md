@@ -4,10 +4,10 @@
 flashing, serial capture, scenario runs, and run reports. Everything is
 stdlib-only Python — no third-party dependencies.
 
-**Status honesty:** the harness exists and self-tests pass, but the
-discovery/scenario paths have not yet been exercised against a full bench.
-Hardware results must be recorded per-run (see *Evidence* below) — passing
-`--selftest` is not hardware validation.
+**Status honesty:** the first partial hardware run is recorded in
+[2026-09-26-bench-5node.md](hil/2026-09-26-bench-5node.md). Its five USB
+devices were three C3s and two C6s, so the requested C3/C5 five-node run
+remains unfinished. Harness self-tests alone are not hardware validation.
 
 ## Concepts
 
@@ -29,6 +29,11 @@ python3 tools/hil/rig.py --rig tools/hil/rigs.yaml --bench bench-a --probe
 # Flash a built firmware image to one board
 python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
     --board bridge --app-only
+
+# Build an isolated image in ESP-IDF v6.0.3, then flash its saved inputs.
+tools/hil/build_image.sh reference_node esp32c3 ref-a CONFIG_ROUTELOOM_NODE_ID=0x2
+python3 tools/hil/flash.py --rig tools/hil/rigs.yaml --bench bench-a \
+    --board ref-a --image-dir artifacts/hil/2026-09-26/images/ref-a
 
 # Capture a serial console (DTR asserted by default — required for the
 # reference node's USB-Serial-JTAG console)

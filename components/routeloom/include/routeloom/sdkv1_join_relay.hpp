@@ -482,6 +482,9 @@ constexpr std::uint32_t kEpochAnswersPerSecond = 10;
 
 struct JoinRelayGatewayConfig {
   NodeId node{kInvalidNodeId};
+  // The Owner may loop a proxy on this same device into the gateway without
+  // sending a mesh frame. All other self-originated relay frames are rejected.
+  bool colocated_proxy{false};
   // This gateway relay service's incarnation, injected by the Owner from a
   // committed durable allocator value and immutable afterwards (#116 §3.2).
   // Zero (or any other invalid config) makes every mutator fail with

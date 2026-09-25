@@ -34,9 +34,11 @@ using namespace owner_sim;
 
 // The always-on gateway must not reserve a full RTC restore image in its
 // coordinator; sleep-capable firmware supplies that storage explicitly.
-// (+112: the session-bank lookup-start hints and the commit_seq-keyed
-// MemberCert hash cache; slack unchanged.)
-static_assert(sizeof(SecurityCoordinator) <= 64512,
+// The colocated proxy/gateway now retains a bounded 16-frame relay queue
+// (2,080 bytes) to break callback re-entry during real USB-local joins.
+// The C3 bridge image still reports 27,104 bytes of static DRAM headroom;
+// this bound keeps the RTC restore image out of the always-on coordinator.
+static_assert(sizeof(SecurityCoordinator) <= 66700,
               "coordinator must not embed the RTC restore image");
 
 constexpr NodeId kSimNodeA = kNode;  // 0x00A1000000001234

@@ -217,7 +217,7 @@ Status MemberCookie::verify(const MacAddress& requester,
 HandshakeEngine::HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink,
                                  MemberCookie& cookie, HandshakeMembershipView& membership,
                                  SessionCredentialVerifier& verifier, const RandomFn random,
-                                 void* random_ctx) noexcept
+                                 void* random_ctx, const edhoc::AeadCcm* aead) noexcept
     : cache_(cache),
       sink_(sink),
       cookie_(cookie),
@@ -225,6 +225,7 @@ HandshakeEngine::HandshakeEngine(ResumeCache2& cache, HandshakeSessionSink& sink
       verifier_(verifier),
       random_(random),
       random_ctx_(random_ctx),
+      aead_(aead),
       credentials_(*this) {}
 
 HandshakeEngine::~HandshakeEngine() noexcept { secure_clear(dev_policy_.psk); }
@@ -1343,7 +1344,7 @@ Status HandshakeEngine::begin_edhoc(CarrierRecord& record, const MonotonicMs now
   config.suite_count = 1;
   config.connection_id = ByteView{edhoc_cid_bytes_.data(), edhoc_cid_bytes_.size()};
   config.credentials = &credentials_;
-  config.aead = nullptr;  // suite builtin
+  config.aead = aead_;  // PSA on ESP-IDF; host builds use the suite builtin
   config.random = random_;
   config.random_ctx = random_ctx_;
   config.ead = this;

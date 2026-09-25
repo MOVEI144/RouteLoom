@@ -994,9 +994,10 @@ void Joiner::begin_direct_attempt() noexcept {
   hs.last_site_id = evidence_valid_ ? evidence_.site_id : 0;
   hs.last_generation = evidence_valid_ ? evidence_.generation : 0;
   hs.usable_channel_mask = config_.usable_channel_mask;
-  if (!handshake_.begin(hs, identity_.identity(), entropy_, aead_)) {
+  const Status begin = handshake_.begin(hs, identity_.identity(), entropy_, aead_);
+  if (!begin) {
     // No candidate table in a direct run: terminal, the Owner restarts.
-    last_error_ = StatusCode::InvalidState;
+    last_error_ = begin.code;
     teardown_attempt();
     set_state(JoinState::Stopped);
     return;

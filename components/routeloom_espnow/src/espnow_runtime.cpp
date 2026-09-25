@@ -5,6 +5,7 @@
 #include <new>
 
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_now.h"
@@ -179,8 +180,15 @@ Status EspNowRuntime::initialize_wifi() noexcept {
                       "event loop init failed");
   }
   wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_LOGI(kTag, "Wi-Fi init heap: free=%lu largest=%lu bytes",
+           static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+           static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
   error = esp_wifi_init(&init);
   if (error != ESP_OK) {
+    ESP_LOGE(kTag, "esp_wifi_init: %s (0x%x), heap free=%lu largest=%lu bytes",
+             esp_err_to_name(error), static_cast<unsigned>(error),
+             static_cast<unsigned long>(heap_caps_get_free_size(MALLOC_CAP_8BIT)),
+             static_cast<unsigned long>(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)));
     return esp_status(error, StatusCode::RadioFailure,
                       "esp_wifi_init failed");
   }
@@ -540,6 +548,11 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
     applied.route_advertisement_period_ms = routeloom::kScopedProductPeriodMs;
     applied.route_lifetime_ms = routeloom::kScopedProductLifetimeMs;
   }
+  // The firmware attaches the authority/config endpoint before the Owner's
+  // asynchronous member adoption. Keep that terminal sink across the node
+  // reconstruction or Pull/JoinConfirm frames are dropped as
+  // CONFIG_NO_ENDPOINT after a successful member join.
+  ConfigEndpointSink* const config_sink = node_.config_sink();
   node_.~MeshNode();
   new (&node_) MeshNode(applied, *this, security_, observer_);
   // The reconstruction above drops every attached sink: the #117
@@ -547,6 +560,7 @@ Status EspNowRuntime::adopt_member_node(const routeloom::NodeConfig& adopted) no
   // start refuses without it. Owner/observer sinks re-attach through
   // their own apply legs after this returns.
   (void)node_.set_reply_peer_port(&reply_port_);
+  if (config_sink != nullptr) (void)node_.set_config_sink(config_sink);
   return Status::success();
 }
 
