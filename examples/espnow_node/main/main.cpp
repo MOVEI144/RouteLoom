@@ -17,6 +17,8 @@
 #include "sdkconfig.h"
 #include "routeloom/espnow_runtime.hpp"
 #include "routeloom/nvs_counter_store.hpp"
+#include "routeloom/nvs_boot_session.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
 #if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
 #include "routeloom/espnow_sdkv1.hpp"
 #include "routeloom/espnow_sdkv1_entropy.hpp"
@@ -187,6 +189,10 @@ extern "C" void app_main(void) {
              esp_err_to_name(sec_nvs_error));
     fail("security NVS initialization failed");
   }
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM
+  status = routeloom::reserve_dev_group_boot_session(message_session, message_session);
+  if (!status) fail(status.detail);
+#endif
   if (routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
                                               "rlcounter") ||
       routeloom::espnow::nvs_namespace_in_use(NVS_DEFAULT_PART_NAME,
@@ -197,6 +203,8 @@ extern "C" void app_main(void) {
              "it");
   }
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  status = routeloom::espnow::refuse_legacy_boot_after_migration();
+  if (!status) fail(status.detail);
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,

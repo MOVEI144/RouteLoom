@@ -19,6 +19,8 @@
 #include "esp_wifi.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "routeloom/nvs_boot_session.hpp"
+#include "routeloom/nvs_legacy_purge.hpp"
 #include "sdkconfig.h"
 #if CONFIG_ROUTELOOM_DISCOVERY
 #include "routeloom/espnow_autonomy.hpp"
@@ -139,35 +141,6 @@ template <std::size_t Size>
   return true;
 }
 
-Status next_boot_session(std::uint32_t& session) noexcept {
-  nvs_handle_t handle = 0;
-  esp_err_t error = nvs_open("rlboot", NVS_READWRITE, &handle);
-  if (error != ESP_OK) {
-    return Status::error(StatusCode::StorageFailure,
-                         "boot nvs_open failed");
-  }
-  std::uint32_t stored = 0;
-  error = nvs_get_u32(handle, "session", &stored);
-  if (error != ESP_OK && error != ESP_ERR_NVS_NOT_FOUND) {
-    nvs_close(handle);
-    return Status::error(StatusCode::StorageFailure,
-                         "boot session read failed");
-  }
-  session = stored + 1U;
-  if (session == 0) {
-    nvs_close(handle);
-    return Status::error(StatusCode::CounterExhausted,
-                         "boot session exhausted");
-  }
-  error = nvs_set_u32(handle, "session", session);
-  if (error == ESP_OK) error = nvs_commit(handle);
-  nvs_close(handle);
-  return error == ESP_OK
-             ? Status::success()
-             : Status::error(StatusCode::StorageFailure,
-                             "boot session commit failed");
-}
-
 // .rtc_noinit is the only RAM the boot path never re-initializes, so it is
 // what actually survives esp_restart and the deep-sleep wake used below
 // (.rtc.data is re-copied from the image on every non-deep-sleep reset).
@@ -234,7 +207,7 @@ extern "C" void app_main(void) {
   // block this write. Every boot — even one that fails below — consumes a
   // session, which keeps TX epochs strictly fresh.
   std::uint32_t message_session = 0;
-  auto status = next_boot_session(message_session);
+  auto status = routeloom::next_boot_session(message_session);
   if (!status) fail(status.detail);
 
   const esp_err_t sec_nvs_error =
@@ -271,6 +244,17 @@ extern "C" void app_main(void) {
       ESP_LOGE(kTag, "sdkv1 stores init: %s", sdkv1_status.detail);
     }
     sdkv1_stores.log_state(kTag);
+#if !CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+#if CONFIG_ROUTELOOM_SECURITY_MODE_MEMBER_EDHOC
+    // Member boot binds the already advanced token to the adopted RLS1.
+    status = routeloom::reconcile_boot_session(sdkv1_stores.site(), message_session);
+    if (!status) fail(status.detail);
+#endif
+#if CONFIG_ROUTELOOM_SECURITY_MODE_DEV_RAM && !CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
+    status = routeloom::reserve_dev_group_boot_session(message_session, message_session);
+    if (!status) fail(status.detail);
+#endif
+#endif
   }
 #if CONFIG_ROUTELOOM_MAINTENANCE_CONSOLE
   // Factory maintenance console (sdk-v1/07 §6): runs pre-RF and owns the
@@ -290,6 +274,8 @@ extern "C" void app_main(void) {
              "it");
   }
 #if CONFIG_ROUTELOOM_SECURITY_MODE_LEGACY_FIXTURE
+  status = routeloom::espnow::refuse_legacy_boot_after_migration();
+  if (!status) fail(status.detail);
   std::uint32_t peer_capacity = 0;
   status = routeloom::espnow::nvs_partition_peer_capacity(
       routeloom::espnow::kSecurityNvsPartition,

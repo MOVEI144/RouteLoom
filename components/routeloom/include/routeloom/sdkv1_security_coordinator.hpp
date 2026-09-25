@@ -307,6 +307,9 @@ class SecurityCoordinator final : public BootstrapSink,
   // action only says when. Reads the single GroupKeyState — no second
   // GK copy, no dev-PSK fallback.
   DiscoveryScopeProvider& gk_scope() noexcept { return member_scope_; }
+  // Full radio discovery identity for the adopted member. The capability
+  // word and observed local MAC must match the handshake carrier exactly.
+  Status member_discovery_config(DiscoveryConfig& out) noexcept;
   // The session provider view over the member bank, handed to the
   // firmware's MeshNode at construction. Unconfigured (not ready) until
   // a member config is adopted; the node must not start on it before
@@ -634,6 +637,7 @@ class SecurityCoordinator final : public BootstrapSink,
   bool in_port_{false};
   bool usb_direct_{false};
   bool discovery_started_{false};
+  bool member_apply_pending_{false};
   MonotonicMs last_now_{0};
   bool removal_holdoff_armed_{false};
   MonotonicMs removal_holdoff_at_{0};

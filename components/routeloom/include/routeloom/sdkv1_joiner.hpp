@@ -128,6 +128,7 @@ enum class JoinRecoveryReason : std::uint8_t {
   MembershipInvalid,   // stored bytes do not authenticate for this device
   AssignmentRegressed,  // a re-issue regresses the retained membership
   TokenExhausted,       // the channel token would wrap: tuning stops
+  RadioFailure,         // adopted member radio could not reach the site channel
 };
 
 struct JoinAction {

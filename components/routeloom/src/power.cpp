@@ -180,6 +180,19 @@ const char* resume_outcome_name(const ResumeOutcome outcome) noexcept {
   return "UNKNOWN";
 }
 
+ElapsedInterval classify_sleep_elapsed(const bool deep_sleep_wake, const bool timer_wake,
+                                       const bool marker_ok,
+                                       const std::uint32_t programmed_ms,
+                                       const std::uint64_t trusted_upper_ms) noexcept {
+  ElapsedInterval out{};
+  if (!deep_sleep_wake || !timer_wake || !marker_ok || programmed_ms == 0 ||
+      trusted_upper_ms == 0) return out;
+  out.lower_ms = 0;
+  out.upper_ms = trusted_upper_ms;
+  out.known = true;
+  return out;
+}
+
 PowerCoordinator::PowerCoordinator(const PowerConfig& config, MeshNode& node,
                                    PowerPort& port, PowerStorage& storage,
                                    PowerEvents& events) noexcept

@@ -95,6 +95,16 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   // One pump turn after runtime.poll_once: coordinator Poll, ready radio
   // completions, and the action drain (tune/member/discovery/report).
   void poll(MonotonicMs now_ms) noexcept;
+  // Sleep drain (P4 §9.3): parks the coordinator when — and only when —
+  // the firmware owes no take_action and the workspace is quiescent
+  // (no staged RX, no in-flight exchange, no demand, no live demux).
+  // Busy otherwise: the caller keeps pumping and retries; it must not
+  // enter sleep on a refusal. Node/group/relay/USB drains stay with
+  // their owners (PowerCoordinator, #110) — this is the security leg.
+  Status prepare_sleep(MonotonicMs now_ms) noexcept;
+  // Resumes polling after sleep (the RTC consume/restore lands here once
+  // the owner sleep cycle exists; today it only clears the park).
+  Status wake(MonotonicMs now_ms) noexcept;
   // The member discovery (null until StartMemberDiscovery constructs it).
   NeighborDiscovery* discovery() noexcept;
   // The authority mesh demux (null until boot): main attaches it to the
@@ -196,6 +206,7 @@ class EspNowSecurityOwner final : public BootstrapRld1Sink,
   void on_tune_channel(const sdkv1::CoordinatorTune& tune, MonotonicMs now_ms) noexcept;
   void on_member_config(const sdkv1::CoordinatorMemberConfig& member, MonotonicMs now_ms) noexcept;
   void on_start_discovery(MonotonicMs now_ms) noexcept;
+  void abort_discovery_start(MonotonicMs now_ms, bool attached) noexcept;
   void poll_tune(MonotonicMs now_ms) noexcept;
   void report_tune(const Tune& tune, StatusCode result, MonotonicMs now_ms) noexcept;
   Status request_cutover(std::uint8_t channel, std::uint32_t coord_token,
