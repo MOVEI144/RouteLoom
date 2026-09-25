@@ -49,6 +49,9 @@ constexpr std::uint32_t kRouteRequestForwardsPerWindow = 8;
 constexpr MonotonicMs kScopedInterestPeriods = 2;
 // Delay before a former parent is told we left (see defer_parent_release).
 constexpr MonotonicMs kScopedReleaseDelayMs = 3000;
+// Unknown-GK broadcast hints surface at most this often: the key pull they
+// trigger is the Owner's bounded work, not per-frame work.
+constexpr MonotonicMs kBroadcastGkHintGapMs = 60000;
 
 void saturating_inc(std::uint64_t& counter) noexcept {
   if (counter != UINT64_MAX) ++counter;
@@ -444,6 +447,118 @@ Status MeshNode::queue_scoped_update(const NodeId neighbor, const NodeId extra,
   return enqueue_route_records(neighbor, records.data(), count, now_ms);
 }
 
+bool MeshNode::broadcast_tx_ready() noexcept {
+  std::uint32_t boot = 0;
+  std::uint32_t g = 0;
+  // A side-effect-free snapshot: the provider draws no counter for it, so
+  // asking per batch cannot burn the GroupLink counter space.
+  return security_.tx_group_link_epochs(boot, g).ok() && boot != 0 && g != 0;
+}
+
+bool MeshNode::build_broadcast_records(BroadcastRouteRecord* records,
+                                       std::size_t& count) noexcept {
+  count = 0;
+  if (records == nullptr) return false;
+  records[count++] = BroadcastRouteRecord{
+      RouteAdvertisement{config_.node, config_.route_generation, self_route_sequence_, 0},
+      kInvalidNodeId};
+  for (std::size_t i = 0; i < config_.route_gateways.size(); ++i) {
+    const NodeId gateway = config_.route_gateways[i];
+    if (gateway == kInvalidNodeId || gateway == config_.node) continue;
+    bool duplicate = false;
+    for (std::size_t j = 0; j < i; ++j) duplicate |= config_.route_gateways[j] == gateway;
+    if (duplicate) continue;
+    // The broadcast must carry the same base the unicast would — never a
+    // silently shortened one. (Unreachable with four gateways or fewer.)
+    if (count >= kBroadcastRouteMaxRecords) return false;
+    const auto selection = routes_.best(gateway);
+    if (selection.valid && selection.generation == 0) continue;  // placeholder: see scoped_record
+    if (!selection.valid) {
+      RouteTable::LostRoute lost{};
+      if (!routes_.lost_route(gateway, lost)) continue;
+      records[count++] = BroadcastRouteRecord{
+          RouteAdvertisement{gateway, lost.generation, lost.sequence, kInfiniteRouteMetric},
+          kInvalidNodeId};
+      continue;
+    }
+    if (!relay_enabled_) {
+      // Relay-off withdrawal (01 §policy): infinity to every listener. via
+      // stays invalid — no single next hop is poisoned, everybody is.
+      records[count++] = BroadcastRouteRecord{
+          RouteAdvertisement{gateway, selection.generation, selection.sequence,
+                             kInfiniteRouteMetric},
+          kInvalidNodeId};
+      continue;
+    }
+    // A gateway on a direct link has no third-node via: only unicast can
+    // poison that next hop without starving another listener, so the whole
+    // batch falls back to unicast.
+    if (selection.next_hop == gateway) return false;
+    records[count++] = BroadcastRouteRecord{
+        RouteAdvertisement{gateway, selection.generation, selection.sequence,
+                           selection.metric},
+        selection.next_hop};
+    routes_.mark_advertised(gateway);
+  }
+  return true;
+}
+
+Status MeshNode::queue_broadcast_route_update(const MonotonicMs now_ms) noexcept {
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> records{};
+  std::size_t count = 0;
+  if (!build_broadcast_records(records.data(), count)) {
+    return Status::error(StatusCode::InvalidState, "route broadcast not buildable");
+  }
+  TxJob job = link_control_job(FrameType::RouteUpdate, kBroadcastNodeId,
+                               kScopedUpdateLifetimeMs, now_ms);
+  std::size_t written = 0;
+  const auto status = encode_broadcast_route_update(
+      records.data(), count, config_.node,
+      MutableByteView{job.plain.payload.data(), job.plain.payload.size()}, written);
+  if (!status) return status;
+  job.plain.payload_size = written;
+  return scheduler_.enqueue(std::move(job), config_.node, now_ms);
+}
+
+bool MeshNode::emit_downward_batch(const NodeId* targets, const std::size_t count,
+                                   const MonotonicMs now_ms) noexcept {
+  if (targets == nullptr) return true;
+  std::array<NodeId, kNeighborCapacity> eligible{};
+  std::size_t eligible_count = 0;
+  std::array<NodeId, kNeighborCapacity> others{};
+  std::size_t other_count = 0;
+  // Both call sites pass at most kNeighborCapacity targets.
+  for (std::size_t i = 0; i < count; ++i) {
+    if (config_.route_broadcast && peer_broadcast_eligible(targets[i], now_ms)) {
+      eligible[eligible_count++] = targets[i];
+    } else {
+      others[other_count++] = targets[i];
+    }
+  }
+  // One broadcast replaces two or more eligible unicasts; a lone eligible
+  // target keeps unicast — a broadcast to one listener saves nothing. Any
+  // failure (no GK, unbuildable records, full queue) falls back to the
+  // plain unicast loop below, exactly as without the opt-in.
+  if (eligible_count >= 2 && broadcast_tx_ready() &&
+      queue_broadcast_route_update(now_ms)) {
+    saturating_inc(route_scale_stats_.broadcast_frames);
+    for (std::size_t i = 0; i < other_count; ++i) {
+      if (scheduler_.full()) return false;
+      if (queue_scoped_update(others[i], kInvalidNodeId, now_ms)) {
+        saturating_inc(route_scale_stats_.downward_frames);
+      }
+    }
+    return true;
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (scheduler_.full()) return false;
+    if (queue_scoped_update(targets[i], kInvalidNodeId, now_ms)) {
+      saturating_inc(route_scale_stats_.downward_frames);
+    }
+  }
+  return true;
+}
+
 std::size_t MeshNode::emit_upward(UpwardCycle& cycle, const std::size_t max_frames,
                                   const MonotonicMs now_ms) noexcept {
   std::size_t frames = 0;
@@ -669,12 +784,9 @@ void MeshNode::run_scoped_tick(const MonotonicMs now_ms) noexcept {
       others[other_count++] = neighbor.node;
     }
   });
-  for (std::size_t i = 0; i < due_count; ++i) {
-    if (scheduler_.full()) return;
-    if (queue_scoped_update(due[i], kInvalidNodeId, now_ms)) {
-      saturating_inc(route_scale_stats_.downward_frames);
-    }
-  }
+  // Due children share one broadcast when two or more are eligible;
+  // anything else keeps its unicast (P5-2 batching, routing-scale.md §8).
+  if (!emit_downward_batch(due.data(), due_count, now_ms)) return;
   // Slow rotation over non-tree neighbors: keeps a backup candidate and lets
   // a better parent be found without refreshing every link every cycle.
   if (other_count != 0 &&
@@ -732,12 +844,11 @@ void MeshNode::run_scoped_triggered(const MonotonicMs now_ms) noexcept {
         targets[target_count++] = neighbor.node;
       }
     });
-    for (std::size_t i = 0; i < target_count; ++i) {
-      if (scheduler_.full()) break;
-      if (queue_scoped_update(targets[i], kInvalidNodeId, now_ms)) {
-        saturating_inc(route_scale_stats_.downward_frames);
-      }
-    }
+    // Triggered downward batch: same batching rule as the periodic tick
+    // (one broadcast for two-plus eligible targets, unicast otherwise). A
+    // mid-batch full scheduler still clears the dirty flags below — a
+    // re-armed trigger, not a stuck one, carries the loss (as before).
+    (void)emit_downward_batch(targets.data(), target_count, now_ms);
   }
   scoped_dirty_count_ = 0;
   scoped_dirty_overflow_ = false;
@@ -1035,6 +1146,71 @@ void MeshNode::handle_route_request(const wire::PlainFrame& frame, const NodeId 
   if (queue_route_request(back, forward, now_ms)) {
     saturating_inc(route_scale_stats_.discovery_replies_forwarded);
   }
+}
+
+// --- P5-2 broadcast route advertisements (routing-scale.md §8) -------------------
+
+void MeshNode::handle_broadcast_route(const NodeId peer, const ByteView encoded,
+                                      const RadioRxMetadataV2* const metadata,
+                                      const MonotonicMs now_ms) noexcept {
+  // The strict shape was peeked by the caller; re-derive it here (no crypto)
+  // so every gate below reads the same bytes the open will authenticate.
+  wire::Header claimed{};
+  if (!wire::peek_header(encoded, claimed) || claimed.next_hop != kBroadcastNodeId) {
+    return;
+  }
+  // Sender gates BEFORE the GroupLink open: the attributed transmitter must
+  // be the claimed origin (observed MAC), an active neighbor (REACHABLE in
+  // the core: admitted, never removed), under a usable pairwise Link
+  // context and — when the runtime carries binding evidence — a current
+  // binding. None of this proves identity; it only refuses to spend a group
+  // open on senders the pairwise layer does not vouch for.
+  const auto* neighbor = find_neighbor(claimed.origin);
+  if (claimed.origin != peer || neighbor == nullptr || !neighbor->active ||
+      !context_usable(security_.context_state(SecurityScope::Link, claimed.origin)) ||
+      (metadata != nullptr && !metadata->identity_current)) {
+    observer_.on_diagnostic("BROADCAST_ROUTE_SENDER_REJECTED", peer, nullptr);
+    return;
+  }
+  wire::LinkOpenedFrame frame{};
+  const auto opened = wire::open_link(encoded, config_.node, security_, frame,
+                                      /*allow_broadcast_route=*/true);
+  if (!opened) {
+    note_rx_refusal(opened, peer, nullptr);
+    ++telemetry_event_drops_;
+    return;
+  }
+  // An unknown GK generation is a hint, not evidence: the Owner pulls the
+  // key, at most once a minute however often the hint repeats.
+  if (!security_.accepts_group_epoch(frame.header.end_epoch)) {
+    if (last_broadcast_gk_hint_ms_ != 0 &&
+        now_ms - last_broadcast_gk_hint_ms_ < kBroadcastGkHintGapMs) {
+      return;
+    }
+    last_broadcast_gk_hint_ms_ = now_ms;
+    observer_.on_diagnostic("BROADCAST_UNKNOWN_GK", peer, &frame.header.message);
+    return;
+  }
+  // The frame is link-only (no end tag): the whole payload authenticates
+  // under the GroupLink tag above and decodes only as one valid unit.
+  std::array<BroadcastRouteRecord, kBroadcastRouteMaxRecords> records{};
+  std::size_t count = 0;
+  if (!decode_broadcast_route_update(
+          ByteView{frame.protected_payload.data(), frame.header.payload_length},
+          frame.header.origin, records, count)) {
+    observer_.on_diagnostic("BROADCAST_ROUTE_REJECTED", peer, &frame.header.message);
+    return;
+  }
+  // Per-receiver poison projection, then the single shared route entry —
+  // the same feasibility/generation/hold-down rules as unicast. Grants,
+  // telemetry, resume confirmation and link activity never move here: a
+  // group tag proves no pairwise identity.
+  std::array<RouteAdvertisement, kBroadcastRouteMaxRecords> projected{};
+  for (std::size_t i = 0; i < count; ++i) {
+    projected[i] = records[i].route;
+    projected[i].metric = project_broadcast_route_metric(records[i], config_.node);
+  }
+  apply_route_records(projected.data(), count, frame.header.origin, now_ms);
 }
 
 }  // namespace routeloom

@@ -324,12 +324,14 @@ enum CapabilityFeature : std::uint32_t {
   kCapTransitFailureV1 = 1u << 2,
   kCapRemoteTelemetryV1 = 1u << 3,
   kCapBusyV1 = 1u << 4,
-  // A GroupLink route grant and RRS gossip are distinct permissions.
-  // Existing bit-5 RRS-only peers must not be treated as broadcast-capable;
-  // keep the broadcast opt-in disabled until interoperability is resolved.
-  kCapRouteBroadcastV1 = 1u << 5,
+  // P6 (04-removal-revocation.md §4): RRS1 gossip + the membership
+  // lifecycle gate.
+  kCapRrsGossipV1 = 1u << 5,
   kCapMembershipLifecycleV1 = 1u << 6,
-  kCapRrsGossipV1 = 1u << 7,
+  // P5-2 route broadcast (routing-scale.md §8): the receiver accepts
+  // GroupLink route advertisements. Bit 7 was never assigned, so legacy
+  // peers grant nothing here and no discriminator is needed.
+  kCapRouteBroadcastV1 = 1u << 7,
 };
 // Capability bits the codec accepts (bits 0..7).
 constexpr std::uint32_t kCapabilityFeatureMask = 0xFFu;

@@ -106,6 +106,11 @@ struct LinkOpenedFrame {
 using EncodedFrame = ByteBuffer<kMaxEspNowBody>;
 
 Status validate_header(const Header& header) noexcept;
+// Parses and validates the unauthenticated header (shape only, no crypto)
+// so the receiver can route a broadcast-route frame to its dedicated,
+// sender-gated dispatch before spending a GroupLink open on it. Fails on
+// short/unknown/malformed headers exactly like open_link would.
+Status peek_header(ByteView encoded, Header& header) noexcept;
 // The security contexts a header is sealed/opened under: link
 // (Link, network, previous_hop, next_hop, link_epoch); end (EndToEnd,
 // network, origin, destination, end_epoch), or for GROUP_DATA (Group,

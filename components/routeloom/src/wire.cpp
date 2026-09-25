@@ -287,6 +287,10 @@ Status validate_header(const Header& header) noexcept {
   return Status::success();
 }
 
+Status peek_header(const ByteView encoded, Header& header) noexcept {
+  return read_header(encoded, header);
+}
+
 Status encode_new(const PlainFrame& input,
                   SecurityProvider& security,
                   EncodedFrame& output) noexcept {
