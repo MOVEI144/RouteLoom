@@ -175,6 +175,19 @@ class SessionBank {
   // SessionInstaller path: installs with role 0 (unknown). Relay duties
   // stay refused until a handshake attests the real role.
   Status install(const ContextKeys& keys) noexcept;
+  // Sleep save/restore (P4 §9.3, V1-F07): export_entry copies the live
+  // current context for (scope, peer) into `out` (NotFound when none
+  // stands); restore_entry installs one consumed RTC image entry with its
+  // key, TX counter, RX window and lifetime preserved as one unit — the
+  // only path that revives counters instead of zeroing them. The caller
+  // must have matched the image network/membership to this bank and
+  // checked the radio parent separately (rtc_parent_binding_ok). A fresh
+  // install serial is assigned: the image serial orders nothing post-wake.
+  // An occupied (scope, peer) slot refuses Conflict: live keys are never
+  // overwritten with older counters.
+  Status export_entry(SecurityScope scope, NodeId peer, SessionBankEntry& out) const noexcept;
+  Status restore_entry(SecurityScope scope, NodeId peer,
+                       const SessionBankEntry& entry) noexcept;
   Status retire(SecurityScope scope, NodeId peer) noexcept;
   Status retire_all(NodeId peer) noexcept;
   // Drops the oldest idle (no live seal reservation), unpinned end context

@@ -70,5 +70,10 @@ Status consume_rtc_session(RtcSessionPort& port, const RtcWakeCheck& wake,
 // the RTC image; no fallback to an earlier key/counter pair is permitted.
 Status advance_rtc_tx(RtcSessionPort& port, RtcSessionImage& current,
                       std::size_t context, std::uint64_t& counter) noexcept;
+// Warm-send gate: the restored parent MAC must equal the observed radio peer
+// and the stored binding the live neighbor binding id. A context alone never
+// means "ready to send".
+bool rtc_parent_binding_ok(const RtcSessionImage& image, const MacAddress& observed_parent,
+                           std::uint32_t live_binding) noexcept;
 
 }  // namespace routeloom::sdkv1

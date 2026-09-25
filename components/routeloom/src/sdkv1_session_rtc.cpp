@@ -176,6 +176,13 @@ Status consume_rtc_session(RtcSessionPort& port, const RtcWakeCheck& wake,
   return Status::success();
 }
 
+bool rtc_parent_binding_ok(const RtcSessionImage& image, const MacAddress& observed_parent,
+                           const std::uint32_t live_binding) noexcept {
+  if (image.count == 0 || image.count > 2 || live_binding == 0 ||
+      image.parent_binding != live_binding) return false;
+  return image.parent_mac == observed_parent;
+}
+
 Status advance_rtc_tx(RtcSessionPort& port, RtcSessionImage& current,
                       const std::size_t context_index, std::uint64_t& counter) noexcept {
   if (!valid(current) || context_index >= current.count ||

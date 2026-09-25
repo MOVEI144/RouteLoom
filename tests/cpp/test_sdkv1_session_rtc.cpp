@@ -2,13 +2,87 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 #include "routeloom/sdkv1_session_rtc.hpp"
+#include "routeloom/security.hpp"
+#include "routeloom/session_bank.hpp"
 
 using namespace routeloom;
 using namespace routeloom::sdkv1;
 
 namespace {
+// Keyed test cipher (NOT an AEAD): XOR stream plus a tag over key, nonce,
+// AAD and body. Cross-key confusion fails the tag; the bank suite proves the
+// same logic against real AES-GCM.
+struct RtcAead {
+  static bool xform(void* ctx, const std::uint8_t key[16], const std::uint8_t nonce[12],
+                    const ByteView aad, const ByteView input, std::uint8_t* out,
+                    std::uint8_t tag[16], const bool sealing) noexcept {
+    (void)ctx;
+    std::uint64_t state = 0x5254436165616400ULL;
+    auto mix = [&state](std::uint64_t v) {
+      state ^= v + 0x9e3779b97f4a7c15ULL + (state << 6U) + (state >> 2U);
+      state *= 0xbf58476d1ce4e5b9ULL;
+    };
+    for (int i = 0; i < 16; ++i) mix(key[i]);
+    for (int i = 0; i < 12; ++i) mix(nonce[i]);
+    for (std::size_t i = 0; i < aad.size; ++i) mix(aad.data[i]);
+    const std::uint64_t stream = state;
+    for (std::size_t i = 0; i < input.size; ++i) {
+      std::uint64_t s = stream ^ (i + 1);
+      s ^= s + 0x9e3779b97f4a7c15ULL;
+      out[i] = input.data[i] ^ static_cast<std::uint8_t>(s >> 56U);
+    }
+    const ByteView tagged = sealing ? ByteView{out, input.size} : input;
+    std::uint64_t left = stream, right = stream ^ 0x746167ULL;
+    for (std::size_t i = 0; i < aad.size; ++i) {
+      left ^= aad.data[i];
+      left *= 0xbf58476d1ce4e5b9ULL;
+    }
+    for (std::size_t i = 0; i < tagged.size; ++i) {
+      right ^= tagged.data[i];
+      right *= 0xbf58476d1ce4e5b9ULL;
+    }
+    std::uint8_t expect[16];
+    for (int i = 0; i < 8; ++i) {
+      expect[i] = static_cast<std::uint8_t>(left >> (56 - i * 8));
+      expect[8 + i] = static_cast<std::uint8_t>(right >> (56 - i * 8));
+    }
+    if (sealing) {
+      std::memcpy(tag, expect, 16);
+      return true;
+    }
+    std::uint8_t diff = 0;
+    for (int i = 0; i < 16; ++i) diff |= static_cast<std::uint8_t>(expect[i] ^ tag[i]);
+    return diff == 0;
+  }
+  static bool seal(void* ctx, const std::uint8_t key[16], const std::uint8_t nonce[12],
+                   const ByteView aad, const ByteView plaintext, std::uint8_t* out,
+                   std::uint8_t tag[16]) noexcept {
+    return xform(ctx, key, nonce, aad, plaintext, out, tag, true);
+  }
+  static bool open(void* ctx, const std::uint8_t key[16], const std::uint8_t nonce[12],
+                   const ByteView aad, const ByteView ciphertext, const std::uint8_t tag[16],
+                   std::uint8_t* out) noexcept {
+    std::uint8_t copy[16];
+    std::memcpy(copy, tag, 16);
+    return xform(ctx, key, nonce, aad, ciphertext, out, copy, false);
+  }
+};
+
+struct RtcRandom {
+  std::uint64_t state{0xC10C5EED5EED1ULL};
+  static bool fill(void* ctx, std::uint8_t* out, const std::size_t size) noexcept {
+    auto& self = *static_cast<RtcRandom*>(ctx);
+    for (std::size_t i = 0; i < size; ++i) {
+      self.state = self.state * 6364136223846793005ULL + 1442695040888963407ULL;
+      out[i] = static_cast<std::uint8_t>(self.state >> 56U);
+    }
+    return true;
+  }
+};
+
 struct RtcMemory final : RtcSessionPort {
   std::array<std::uint8_t, kRtcSessionRecordSize> bytes{};
   bool fail_clear{false};
@@ -138,5 +212,153 @@ int main() {
   rtc.stale_clear = true;
   CHECK(!advance_rtc_tx(rtc, saved, 0, issued).ok());
   CHECK(saved.contexts[0].entry.tx_next == 21);
+
+  // F07 restore: a consumed image returns its key, TX counter, RX window and
+  // lifetime to a cold bank as one unit — never counter 0 under the old key.
+  // The radio peer must also be live: the parent MAC/binding gate below
+  // refuses a context without its neighbor.
+  RtcRandom random_a;
+  RtcRandom random_b;
+  AeadGcm aead{RtcAead::seal, RtcAead::open, nullptr};
+  NodeSessionBank bank_a;
+  NodeSessionBank::LocalView local{};
+  local.self = 0x00A1000000000001ULL;
+  local.network = 0x1234567800000001ULL;
+  local.gk_epoch = 7;
+  CHECK(bank_a.configure(local, aead, {RtcRandom::fill, &random_a}, 1000).ok());
+  ContextKeys keys{};
+  keys.scope = SecurityScope::Link;
+  keys.network = local.network;
+  keys.peer = 11;
+  keys.tx_context_id = 17;
+  keys.rx_context_id = 19;
+  for (std::size_t i = 0; i < keys.tx_key.size(); ++i) {
+    keys.tx_key[i] = static_cast<std::uint8_t>(0x10 + i);
+    keys.rx_key[i] = static_cast<std::uint8_t>(0x50 + i);
+  }
+  for (std::size_t i = 0; i < keys.tx_iv.size(); ++i) {
+    keys.tx_iv[i] = static_cast<std::uint8_t>(0x90 + i);
+    keys.rx_iv[i] = static_cast<std::uint8_t>(0xD0 + i);
+  }
+  keys.peer_cert_id = {1, 2, 3, 4, 5, 6, 7, 8};
+  keys.peer_generation = 3;
+  InstallAttestation att{};
+  att.peer_role = 0b011;
+  att.created_gk_epoch = 7;
+  CHECK(bank_a.install_verified(keys, att).ok());
+  SecurityContext tx{};
+  tx.scope = SecurityScope::Link;
+  tx.network = local.network;
+  tx.sender = local.self;
+  tx.receiver = 11;
+  tx.epoch = 17;
+  std::uint64_t pre_sleep = 0;
+  CHECK(bank_a.next_counter(tx, pre_sleep).ok());
+  CHECK(pre_sleep == 0);
+  const std::uint8_t aad[] = {0xAA};
+  const std::uint8_t plain[] = {1, 2, 3, 4};
+  std::array<std::uint8_t, 4> cipher{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  CHECK(bank_a.seal(tx, pre_sleep, ByteView{aad, sizeof(aad)},
+                    ByteView{plain, sizeof(plain)},
+                    MutableByteView{cipher.data(), cipher.size()}, tag).ok());
+  SessionBankEntry exported{};
+  CHECK(bank_a.export_entry(SecurityScope::Link, 11, exported).ok());
+  CHECK(exported.tx_next == 1 && exported.flags == 0);
+  // The image below carries a post-RX window; encode/consume/restore must
+  // keep it with the key instead of reopening old counters.
+  exported.rx_max = 9;
+  exported.rx_bitmap = 0x1D;
+  exported.install_serial = 41;  // stale pre-sleep serial: never trusted post-wake
+  RtcSessionImage sleep{};
+  sleep.source_boot = 42;
+  sleep.network = local.network;
+  sleep.local_generation = 3;
+  sleep.site_commit = 5;
+  sleep.gk_epoch = 7;
+  sleep.rs_floor = 4;
+  sleep.kid_digest[0] = 0xAA;
+  sleep.parent_mac = {0x02, 0, 0, 0, 0, 0x0B};
+  sleep.parent_binding = 8;
+  sleep.count = 1;
+  sleep.contexts[0].scope = SecurityScope::Link;
+  sleep.contexts[0].entry = exported;
+  RtcMemory sleep_rtc;
+  CHECK(encode_rtc_session(sleep, MutableByteView{sleep_rtc.bytes.data(),
+                                                 sleep_rtc.bytes.size()}).ok());
+  RtcWakeCheck sleep_wake{};
+  sleep_wake.deep_sleep = true;
+  sleep_wake.sleep_marker = true;
+  sleep_wake.trusted_elapsed_ms = 100;
+  sleep_wake.next_boot = 43;
+  sleep_wake.network = local.network;
+  sleep_wake.local_generation = 3;
+  sleep_wake.site_commit = 5;
+  sleep_wake.gk_epoch = 7;
+  sleep_wake.rs_floor = 4;
+  sleep_wake.kid_digest = sleep.kid_digest;
+  RtcSessionImage woken{};
+  CHECK(consume_rtc_session(sleep_rtc, sleep_wake, woken).ok());
+  CHECK(!consume_rtc_session(sleep_rtc, sleep_wake, result).ok());
+  CHECK(rtc_parent_binding_ok(woken, sleep.parent_mac, 8));
+  CHECK(!rtc_parent_binding_ok(woken, MacAddress{0x02, 0, 0, 0, 0, 0x0C}, 8));
+  CHECK(!rtc_parent_binding_ok(woken, sleep.parent_mac, 9));
+  CHECK(!rtc_parent_binding_ok(woken, sleep.parent_mac, 0));
+  NodeSessionBank bank_b;
+  CHECK(bank_b.configure(local, aead, {RtcRandom::fill, &random_b}, 2000).ok());
+  CHECK(bank_b.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).ok());
+  SessionBankEntry round_trip{};
+  CHECK(bank_b.export_entry(SecurityScope::Link, 11, round_trip).ok());
+  CHECK(round_trip.tx_next == 1 && round_trip.rx_max == 9 &&
+        round_trip.rx_bitmap == 0x1D);
+  CHECK(round_trip.tx_key == exported.tx_key && round_trip.rx_key == exported.rx_key);
+  CHECK(round_trip.tx_cid == 17 && round_trip.rx_cid == 19);
+  CHECK(round_trip.peer_generation == 3 && round_trip.peer_role == 0b011);
+  CHECK(round_trip.created_gk == 7 && round_trip.remaining_ms == 24U * 3600U * 1000U - 100);
+  CHECK(round_trip.install_serial != exported.install_serial);
+  std::uint64_t post_wake = 0;
+  CHECK(bank_b.next_counter(tx, post_wake).ok());
+  CHECK(post_wake == 1);  // continues — the pre-sleep counter is never reused
+  CHECK(bank_b.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).code ==
+        StatusCode::Conflict);  // occupied: never overwrite live keys with old counters
+
+  // Restore refusals: exhausted counters, dead lifetimes, in-flight
+  // reservations, stale GK birthdays, id collisions and empty tables.
+  NodeSessionBank bank_c;
+  CHECK(bank_c.configure(local, aead, {RtcRandom::fill, &random_b}, 3000).ok());
+  SessionBankEntry bad = woken.contexts[0].entry;
+  bad.tx_next = std::uint64_t{1} << 32;
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 11, bad).code ==
+        StatusCode::CounterExhausted);
+  bad = woken.contexts[0].entry;
+  bad.rx_max = std::uint64_t{1} << 32;
+  CHECK(!bank_c.restore_entry(SecurityScope::Link, 11, bad).ok());
+  bad = woken.contexts[0].entry;
+  bad.remaining_ms = 0;
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 11, bad).code == StatusCode::Conflict);
+  bad = woken.contexts[0].entry;
+  bad.flags = 1;
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 11, bad).code ==
+        StatusCode::InvalidArgument);
+  bad = woken.contexts[0].entry;
+  bad.created_gk = 5;
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 11, bad).code == StatusCode::Conflict);
+  bad = woken.contexts[0].entry;
+  bad.tx_cid = 0;
+  CHECK(!bank_c.restore_entry(SecurityScope::Link, 11, bad).ok());
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 12, woken.contexts[0].entry).code ==
+        StatusCode::InvalidArgument);  // entry peer must match the slot
+  ContextKeys other = keys;
+  other.peer = 12;
+  other.tx_context_id = 23;
+  CHECK(bank_c.install_verified(other, att).ok());  // holds rx_cid 19
+  CHECK(bank_c.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).code ==
+        StatusCode::Conflict);
+  SessionBankEntry missing{};
+  CHECK(bank_c.export_entry(SecurityScope::Link, 99, missing).code == StatusCode::NotFound);
+  NodeSessionBank cold;
+  CHECK(cold.export_entry(SecurityScope::Link, 11, missing).code == StatusCode::InvalidState);
+  CHECK(cold.restore_entry(SecurityScope::Link, 11, woken.contexts[0].entry).code ==
+        StatusCode::InvalidState);
   return failures ? 1 : 0;
 }

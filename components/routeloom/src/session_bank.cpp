@@ -34,6 +34,17 @@ bool tx_material_equal(const SessionBankEntry& entry, const ContextKeys& keys) n
   return diff == 0;
 }
 
+bool tx_material_match(const SessionBankEntry& a, const SessionBankEntry& b) noexcept {
+  std::uint8_t diff = 0;
+  for (std::size_t i = 0; i < kSessionKeySize; ++i) {
+    diff |= static_cast<std::uint8_t>(a.tx_key[i] ^ b.tx_key[i]);
+  }
+  for (std::size_t i = 0; i < kSessionIvSize; ++i) {
+    diff |= static_cast<std::uint8_t>(a.tx_iv[i] ^ b.tx_iv[i]);
+  }
+  return diff == 0;
+}
+
 bool id_valid(const std::uint64_t id) noexcept {
   return id != kInvalidNodeId && id != kBroadcastNodeId;
 }
@@ -470,6 +481,106 @@ Status SessionBank<kLinkCapacity, kEndCapacity>::install(const ContextKeys& keys
   InstallAttestation att{};
   att.created_gk_epoch = local_.gk_epoch;
   return install_verified(keys, att);
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+Status SessionBank<kLinkCapacity, kEndCapacity>::export_entry(
+    const SecurityScope scope, const NodeId peer, SessionBankEntry& out) const noexcept {
+  if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");
+  if (!configured_) return Status::error(StatusCode::InvalidState, "session bank not configured");
+  if (!unicast_scope(scope) || !id_valid(peer)) {
+    return Status::error(StatusCode::InvalidArgument, "session export shape");
+  }
+  const SessionBankEntry* entry = find_current(scope, peer);
+  if (entry == nullptr || !entry_usable(*entry)) {
+    return Status::error(StatusCode::NotFound, "session export missing");
+  }
+  out = *entry;
+  return Status::success();
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+Status SessionBank<kLinkCapacity, kEndCapacity>::restore_entry(
+    const SecurityScope scope, const NodeId peer, const SessionBankEntry& entry) noexcept {
+  if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");
+  if (!configured_) return Status::error(StatusCode::InvalidState, "session bank not configured");
+  if (!unicast_scope(scope) || !id_valid(peer) || entry.peer != peer || peer == local_.self ||
+      entry.tx_cid == 0 || entry.rx_cid == 0 || entry.flags != 0) {
+    // flags must be clear: no in-flight seal reservation survives sleep,
+    // and the RTC codec only carries flags == 0.
+    return Status::error(StatusCode::InvalidArgument, "session restore shape");
+  }
+  if (check_tx_counter(entry.tx_next) == TxCounterVerdict::Refuse) {
+    return Status::error(StatusCode::CounterExhausted, "session restore counter exhausted");
+  }
+  if (!rx_counter_admissible(entry.rx_max)) {
+    return Status::error(StatusCode::InvalidArgument, "session restore window");
+  }
+  if (entry.remaining_ms == 0 || entry.remaining_ms > kContextLifetimeMs) {
+    return Status::error(StatusCode::Conflict, "session restore lifetime");
+  }
+  const std::uint64_t created = entry.created_gk;
+  const std::uint64_t current = local_.gk_epoch;
+  if (current < created || current >= created + 2U) {
+    return Status::error(StatusCode::Conflict, "session gk lifetime");
+  }
+  if (install_serial_ == 0xFFFFFFFFU) {
+    return Status::error(StatusCode::CounterExhausted, "session install serial exhausted");
+  }
+  const std::size_t capacity =
+      scope == SecurityScope::Link ? kLinkCapacity : kEndCapacity;
+  if (capacity == 0) return Status::error(StatusCode::NoCapacity, "session table missing");
+  if (find_current(scope, peer) != nullptr) {
+    return Status::error(StatusCode::Conflict, "session restore occupied");
+  }
+  for (std::size_t i = 0; i < kLinkCapacity; ++i) {
+    if (!link_used_[i]) continue;
+    if (tx_material_match(link_[i], entry)) {
+      return Status::error(StatusCode::Conflict, "session tx nonce domain reused");
+    }
+    if (link_[i].rx_cid == entry.rx_cid) {
+      return Status::error(StatusCode::Conflict, "session rx id collision");
+    }
+  }
+  for (std::size_t i = 0; i < kEndCapacity; ++i) {
+    if (!end_used_[i]) continue;
+    if (tx_material_match(end_[i], entry)) {
+      return Status::error(StatusCode::Conflict, "session tx nonce domain reused");
+    }
+    if (end_[i].rx_cid == entry.rx_cid) {
+      return Status::error(StatusCode::Conflict, "session rx id collision");
+    }
+  }
+  for (std::size_t i = 0; i < kOverlapCapacity; ++i) {
+    if (overlap_used_[i] && overlap_[i].rx_cid == entry.rx_cid) {
+      return Status::error(StatusCode::Conflict, "session rx id collision");
+    }
+  }
+
+  const std::size_t start = hash_start(scope, peer);
+  constexpr std::size_t kNone = static_cast<std::size_t>(-1);
+  std::size_t free_slot = kNone;
+  for (std::size_t step = 0; step < capacity; ++step) {
+    const std::size_t i = (start + step) % capacity;
+    const bool used = scope == SecurityScope::Link ? link_used_[i] : end_used_[i];
+    if (!used && free_slot == kNone) free_slot = i;
+  }
+  if (free_slot == kNone) return Status::error(StatusCode::NoCapacity, "session table full");
+
+  SessionBankEntry revived = entry;
+  revived.install_serial = ++install_serial_;
+  if (scope == SecurityScope::Link) {
+    link_[free_slot] = revived;
+    link_used_[free_slot] = true;
+  } else {
+    end_[free_slot] = revived;
+    end_used_[free_slot] = true;
+    end_lru_[free_slot] = ++lru_clock_;
+  }
+  for (auto& demand : demand_) {
+    if (demand.used && demand.scope == scope && demand.peer == peer) demand.used = false;
+  }
+  return Status::success();
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
