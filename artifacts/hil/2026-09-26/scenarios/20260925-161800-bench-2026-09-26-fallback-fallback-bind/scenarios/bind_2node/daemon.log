@@ -1,0 +1,6 @@
+[2026-09-25T16:18:00.297Z] $ /home/sahur/orca/workspaces/RouteLoom/hil-bench/host/target/debug/routeloom-host --socket /tmp/routeloom-hil-2026-09-26-fallback.sock --device /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00 --api-acl-file artifacts/hil/2026-09-26/scenarios/20260925-161800-bench-2026-09-26-fallback-fallback-bind/scenarios/bind_2node/hil-acl.json
+[2026-09-25T16:18:00.298Z] api acl loaded: revision 1
+[2026-09-25T16:18:00.298Z] operation store: memory (RAM_ONLY only; pass --op-store for durability)
+[2026-09-25T16:18:00.298Z] warning: memory operation store — a daemon restart requires a gateway reboot for dispatch (the device rejects the new lane with LaneMismatch); pass --op-store for a durable lane
+[2026-09-25T16:18:00.298Z] config authority: none — config.propose refused; challenge/status queries still run (pass --config-authority)
+[2026-09-25T16:18:00.298Z] RouteLoom host listening on /tmp/routeloom-hil-2026-09-26-fallback.sock

@@ -1,0 +1,2 @@
+[FAIL] bind_2node — step 0 (start_daemon): daemon did not reach an authenticated session within 45.0s (45.3s)
+totals: PASS=0 FAIL=1 SKIP-OFFLINE=0

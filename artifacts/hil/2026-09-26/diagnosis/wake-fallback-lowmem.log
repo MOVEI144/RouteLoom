@@ -1,0 +1,17 @@
+waiting for esp32c3/94:a9:90:7a:26:ac at /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00
+port appeared; flash attempt 1
+Traceback (most recent call last):
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-bench/tools/hil/flash.py", line 309, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-bench/tools/hil/flash.py", line 291, in main
+    manifest = flash_board(
+               ^^^^^^^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-bench/tools/hil/flash.py", line 186, in flash_board
+    preflight = preflight_board(board, port, esptool, out_dir)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/sahur/orca/workspaces/RouteLoom/hil-bench/tools/hil/flash.py", line 78, in preflight_board
+    raise FlashError(
+FlashError: preflight mismatch on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00: chip=None, MAC=None, expected=esp32c3/94:a9:90:7a:26:ac (see artifacts/hil/2026-09-26/flash-wake-fallback-lowmem/flash-bridge-preflight.log)
+flash attempt exited 1
+timed out waiting for a flashable USB appearance

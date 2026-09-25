@@ -1,0 +1,47 @@
+preflight esp32c3 94:a9:90:7a:b5:60 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00
+> status
+! I (100) esp_image: segment 2: paddr=0001f3fc vaddr=40380000 sizep
+! I (145) esp_image: segment 4: paddr=000523e0 vaddr=40380c1c size=0bb98h ( 48024) load
+! I (155) esp_image: segment 5: paddr=0005df80 vaddr=50000000 size=0001ch (    28) load
+! I (155) esp_image: segment 6: paddr=0005dfa4 vaddr=50000024 size=00024h (    36) load
+! I (163) boot: Loaded app from partition at offset 0x10000
+! I (164) boot: Disabling RNG early entropy source...
+! I (180) cpu_start: Unicore app
+! I (188) cpu_start: GPIO 20 and 21 are used as console UART I/O pins
+! I (189) cpu_start: Pro cpu start user code
+! I (189) cpu_start: cpu freq: 160000000 Hz
+! I (191) app_init: Application information:
+! I (194) app_init: Project name:     routeloom_reference_node
+! I (200) app_init: App version:      1
+! I (203) app_init: Compile time:     Sep 25 2026 16:21:50
+! I (208) app_init: ELF file SHA256:  b2a5321a8...
+! I (212) app_init: ESP-IDF:          v6.0.3
+! I (216) efuse_init: Min chip rev:     v0.3
+! I (220) efuse_init: Max chip rev:     v1.99
+! I (224) efuse_init: Chip rev:         v0.4
+! I (228) heap_init: Initializing. RAM available for dynamic allocation:
+! I (234) heap_init: At 3FC94FD0 len 0002B030 (172 KiB): RAM
+! I (239) heap_init: At 3FCC0000 len 0001C710 (113 KiB): Retention RAM
+! I (245) heap_init: At 3FCDC710 len 00002950 (10 KiB): Retention RAM
+! I (251) heap_init: At 50000048 len 00001FA0 (7 KiB): RTCRAM
+! I (258) spi_flash: detected chip: generic
+! I (261) spi_flash: flash io: dio
+! W (263) spi_flash: Detected size(4096k) larger than the size in the binary image header(2048k). Using the size in the binary image header.
+! I (276) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+! I (282) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+! I (289) main_task: Started on CPU0
+! I (292) main_task: Calling app_main()
+! I (318) RouteLoomRef: sdkv1 identity: none provisioned
+! I (319) RouteLoomRef: sdkv1 site: not a member
+! I (319) RouteLoomRef: sdkv1 revocation: none rs_epoch=0 resume_slots=16
+! I (323) RouteLoomRef: sdkv1 local_revocation: none
+! I (327) RouteLoomRef: sdkv1 lifecycle: none
+! routeloom-maintenance v1 ready
+< OK identity=none pending=0
+> keygen <node> <challenge>
+< OK pop_hex=<saved in pop.bin>
+> identity <943 bytes>
+< OK sealed kid=d0c62e28b7b568bd087873ead34b1d1077fcc13309c46d5bc423d5de22b7678d
+> status after seal
+< OK identity=sealed pending=0
+{"preflight_chip": "esp32c3", "preflight_mac": "94:a9:90:7a:b5:60", "node": "0000000000000004", "seal": "OK sealed kid=d0c62e28b7b568bd087873ead34b1d1077fcc13309c46d5bc423d5de22b7678d", "readback": "OK identity=sealed pending=0", "bundle_bytes": 943}

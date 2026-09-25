@@ -1,0 +1,60 @@
+{
+  "app": "reference_node",
+  "app_only": false,
+  "board": "ref-a",
+  "boot_log": "flash-ref-a-boot.log",
+  "chip": "esp32c3",
+  "cmd": [
+    "/home/sahur/.local/bin/esptool",
+    "--chip",
+    "esp32c3",
+    "--port",
+    "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+    "--baud",
+    "460800",
+    "--before",
+    "default-reset",
+    "--after",
+    "hard-reset",
+    "write-flash",
+    "--flash-mode",
+    "dio",
+    "--flash-size",
+    "2MB",
+    "--flash-freq",
+    "80m",
+    "0x0",
+    "artifacts/hil/2026-09-26/images/ref-a-node4-sinkrestore/build/bootloader/bootloader.bin",
+    "0x8000",
+    "artifacts/hil/2026-09-26/images/ref-a-node4-sinkrestore/build/partition_table/partition-table.bin",
+    "0x10000",
+    "artifacts/hil/2026-09-26/images/ref-a-node4-sinkrestore/build/routeloom_reference_node.bin"
+  ],
+  "error": null,
+  "esptool_log": "flash-ref-a-esptool.log",
+  "exit_code": 0,
+  "fallback_offsets": false,
+  "files": {
+    "0x0": {
+      "path": "artifacts/hil/2026-09-26/images/ref-a-node4-sinkrestore/build/bootloader/bootloader.bin",
+      "sha256": "b1031b74e3316fa47d7fd85539c6be1dd4658ffa398defef38f3da238e240b08"
+    },
+    "0x10000": {
+      "path": "artifacts/hil/2026-09-26/images/ref-a-node4-sinkrestore/build/routeloom_reference_node.bin",
+      "sha256": "7e49c1ec802e822cb2f73df1cda4e12c7b17cc102968c4a13147488673eecfaa"
+    },
+    "0x8000": {
+      "path": "artifacts/hil/2026-09-26/images/ref-a-node4-sinkrestore/build/partition_table/partition-table.bin",
+      "sha256": "068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef"
+    }
+  },
+  "finished_utc": "2026-09-25T19:09:07.055Z",
+  "ok": true,
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+  "preflight": {
+    "chip": "esp32c3",
+    "log": "flash-ref-a-preflight.log",
+    "mac": "94:a9:90:7a:b5:60"
+  },
+  "started_utc": "2026-09-25T19:07:40.234Z"
+}

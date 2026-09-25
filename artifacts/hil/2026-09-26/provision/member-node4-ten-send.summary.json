@@ -1,0 +1,12 @@
+{
+  "count": 10,
+  "accepted": 10,
+  "delivered": 10,
+  "success_rate": 1.0,
+  "rtt_ms_min": 53.31,
+  "rtt_ms_median": 104.82,
+  "rtt_ms_p95": 156.67,
+  "rtt_ms_p99": 156.73,
+  "rtt_ms_max": 156.75,
+  "evidence": "artifacts/hil/2026-09-26/provision/member-node4-ten-send.jsonl"
+}

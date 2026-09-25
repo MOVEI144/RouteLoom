@@ -1,0 +1,18 @@
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock status
+{"connected":true,"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","rx_frames":23,"tx_frames":17,"protocol_errors":0,"last_error":"queued frame session changed"}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock adapter
+{"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","connected":true,"session":{"authenticated":true,"id":6795078028102382949,"node":1,"boot":100,"network":1380712449,"capability":519,"version":1},"credit":{"observed":true,"grant_frames":9,"grant_bytes":16480},"rx_frames":23,"tx_frames":17,"tx_bytes":1021,"protocol_errors":0,"last_error":"queued frame session changed"}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock nodes
+{"v":1,"request_id":"ctl-1005823","ok":true,"result":{"source":{"state":"unsupported","gateway":"0000000000000001","session_id":6795078028102382949,"synced_ms":null,"tracked":1,"evicted":0,"clock":"host_unix_ms"},"nodes":[{"node":"0000000000000001","role":"gateway","connected":true,"listed":true,"neighbor":false,"direct":true,"hops":0,"next_hop":null,"route_metric":null,"link_cost":null,"rssi_dbm":null,"rssi_avg_dbm":null,"telemetry_stale":false,"last_heard_ms":null,"heard_age_ms":null,"updated_ms":1790354803737,"changed_ms":1790354803737}],"next_after":null}}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock node-get --node 0000000000000002
+{"v":1,"request_id":"ctl-1005825","ok":false,"error":{"code":"NOT_FOUND","detail":{"message":"node not reported by the attached gateway","node":"0000000000000002","source":{"state":"unsupported","gateway":"0000000000000001","session_id":6795078028102382949,"synced_ms":null,"tracked":1,"evicted":0,"clock":"host_unix_ms"}},"retryable":true}}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock diagnostics
+{"connected":true,"device":"/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00","rx_frames":23,"tx_frames":17,"protocol_errors":0,"last_error":"queued frame session changed"}
+exit=0
+$ host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock deliveries
+{"deliveries":[{"request":1,"destination":2,"state":"rejected","reason":"queued frame session changed","msg_session":null,"msg_seq":null,"updated_ms":1790354805527}]}
+exit=0

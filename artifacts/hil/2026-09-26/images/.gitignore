@@ -1,0 +1,3 @@
+# Reproducible ESP-IDF images remain in the worktree for continuation.
+# Commit build logs, configuration, sizes, flash arguments and SHA-256 sums.
+*.bin

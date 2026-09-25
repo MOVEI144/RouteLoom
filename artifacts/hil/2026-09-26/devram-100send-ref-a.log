@@ -1,0 +1,6 @@
+[2026-09-25T16:53:02.419Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T16:53:05.160Z] I (127413) RouteLoomRef: discovery event=PEER_CAPACITY peer=1
+[2026-09-25T16:53:05.161Z] W (127413) RouteLoomRef: diagnostic reason=PEER_CAPACITY peer=1 message=none
+[2026-09-25T16:53:32.462Z] I (154714) RouteLoomRef: discovery event=STALE peer=1
+[2026-09-25T16:53:32.462Z] W (154714) RouteLoomRef: diagnostic reason=STALE peer=1 message=none
+[2026-09-25T16:53:41.279Z] !! capture closed

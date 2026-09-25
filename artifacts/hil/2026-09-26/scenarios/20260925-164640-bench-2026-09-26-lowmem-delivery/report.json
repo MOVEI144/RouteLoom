@@ -1,0 +1,169 @@
+{
+  "run_id": "20260925-164640-bench-2026-09-26-lowmem-delivery",
+  "rig": "bench-2026-09-26",
+  "generated_utc": "2026-09-25T16:49:49Z",
+  "meta": {
+    "environment": {
+      "utc": "2026-09-25T16:46:40Z",
+      "os": "Linux 7.0.0-31-generic (x86_64)",
+      "python": "3.12.3",
+      "serial_backend": "pyserial",
+      "esptool_path": "/home/sahur/.local/bin/esptool",
+      "esptool_version": "5.4.0",
+      "hardware_note": "PASS requires real captured evidence; selftest is not HIL; OFFLINE rigs are SKIP"
+    },
+    "repo": {
+      "git_head": "1aad7d391123cf6a70805a0775c686d7c5bf0074",
+      "git_describe": "1aad7d3-dirty",
+      "git_dirty": true,
+      "repo_root": "/home/sahur/orca/workspaces/RouteLoom/hil-bench"
+    },
+    "firmware": {
+      "bridge_node": {
+        "app": "bridge_node",
+        "build_dir": "firmware/bridge_node/build",
+        "present": false
+      },
+      "reference_node": {
+        "app": "reference_node",
+        "build_dir": "firmware/reference_node/build",
+        "present": false
+      }
+    },
+    "boards": {
+      "bridge": {
+        "status": "ONLINE",
+        "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "detail": ""
+      },
+      "ref-a": {
+        "status": "ONLINE",
+        "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+        "detail": ""
+      },
+      "ref-b": {
+        "status": "OFFLINE",
+        "port": null,
+        "detail": ""
+      }
+    }
+  },
+  "totals": {
+    "PASS": 0,
+    "FAIL": 2,
+    "SKIP-OFFLINE": 0
+  },
+  "scenarios": [
+    {
+      "name": "deliver_2node",
+      "verdict": "FAIL",
+      "detail": "step 7 (wait_for): timeout 90.0s waiting for /\"destination\":2,\"state\":\"delivered\",\"reason\":\"END_RECEIVED\"/ on daemon:deliveries (tail dumped to timeout-tail-daemon_deliveries.txt)",
+      "started_utc": "2026-09-25T16:46:40Z",
+      "duration_s": 94.707,
+      "steps": [
+        {
+          "step": "0:start_daemon",
+          "ok": true,
+          "detail": "authenticated",
+          "duration_s": 1.002
+        },
+        {
+          "step": "1:reset_boards",
+          "ok": true,
+          "detail": "reset: ref-a, bridge",
+          "duration_s": 1.765
+        },
+        {
+          "step": "2:wait_for",
+          "ok": true,
+          "detail": "matched: I (2026) RouteLoomRef: discovery event=REACHABLE peer=1",
+          "duration_s": 0.886
+        },
+        {
+          "step": "3:wait_for",
+          "ok": true,
+          "detail": "matched: {\"events\":[{\"seq\":0,\"ms\":1790354803640,\"kind\":\"adapter\",\"state\":\"connected\"},{\"seq\":1,\"ms\":1790354803722,\"kind\":\"hello_ack\",\"version\":1,\"node\":1,\"boot\":100,\"net",
+          "duration_s": 1.003
+        },
+        {
+          "step": "4:mark",
+          "ok": true,
+          "detail": "mark 'pre-send' on 5 captures",
+          "duration_s": 0.0
+        },
+        {
+          "step": "5:send_host_command",
+          "ok": true,
+          "detail": "{\"accepted\":true,\"request\":1}",
+          "duration_s": 0.001
+        },
+        {
+          "step": "6:wait_for",
+          "ok": true,
+          "detail": "matched: {\"accepted\":true,\"request\":1}",
+          "duration_s": 0.0
+        },
+        {
+          "step": "7:wait_for",
+          "ok": false,
+          "detail": "timeout 90.0s waiting for /\"destination\":2,\"state\":\"delivered\",\"reason\":\"END_RECEIVED\"/ on daemon:deliveries (tail dumped to timeout-tail-daemon_deliveries.txt)",
+          "duration_s": 90.001
+        }
+      ],
+      "evidence": [
+        "scenarios/deliver_2node/ref-a.log",
+        "scenarios/deliver_2node/daemon.log",
+        "scenarios/deliver_2node/daemon-adapter.log",
+        "scenarios/deliver_2node/host-commands.log",
+        "scenarios/deliver_2node/daemon-events.log",
+        "scenarios/deliver_2node/daemon-deliveries.log"
+      ]
+    },
+    {
+      "name": "restart_resume",
+      "verdict": "FAIL",
+      "detail": "step 4 (wait_for): timeout 90.0s waiting for /\"destination\":2,\"state\":\"delivered\",\"reason\":\"END_RECEIVED\"/ on daemon:deliveries (tail dumped to timeout-tail-daemon_deliveries.txt)",
+      "started_utc": "2026-09-25T16:48:15Z",
+      "duration_s": 93.899,
+      "steps": [
+        {
+          "step": "0:start_daemon",
+          "ok": true,
+          "detail": "authenticated",
+          "duration_s": 1.002
+        },
+        {
+          "step": "1:reset_boards",
+          "ok": true,
+          "detail": "reset: ref-a, bridge",
+          "duration_s": 1.757
+        },
+        {
+          "step": "2:wait_for",
+          "ok": true,
+          "detail": "matched: I (2220) RouteLoomRef: discovery event=REACHABLE peer=1",
+          "duration_s": 1.085
+        },
+        {
+          "step": "3:send_host_command",
+          "ok": true,
+          "detail": "{\"accepted\":true,\"request\":1}",
+          "duration_s": 0.001
+        },
+        {
+          "step": "4:wait_for",
+          "ok": false,
+          "detail": "timeout 90.0s waiting for /\"destination\":2,\"state\":\"delivered\",\"reason\":\"END_RECEIVED\"/ on daemon:deliveries (tail dumped to timeout-tail-daemon_deliveries.txt)",
+          "duration_s": 90.001
+        }
+      ],
+      "evidence": [
+        "scenarios/restart_resume/ref-a.log",
+        "scenarios/restart_resume/daemon.log",
+        "scenarios/restart_resume/daemon-adapter.log",
+        "scenarios/restart_resume/host-commands.log",
+        "scenarios/restart_resume/daemon-deliveries.log"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,116 @@
+{
+  "run_id": "20260925-164630-bench-2026-09-26-lowmem-bind",
+  "rig": "bench-2026-09-26",
+  "generated_utc": "2026-09-25T16:46:37Z",
+  "meta": {
+    "environment": {
+      "utc": "2026-09-25T16:46:30Z",
+      "os": "Linux 7.0.0-31-generic (x86_64)",
+      "python": "3.12.3",
+      "serial_backend": "pyserial",
+      "esptool_path": "/home/sahur/.local/bin/esptool",
+      "esptool_version": "5.4.0",
+      "hardware_note": "PASS requires real captured evidence; selftest is not HIL; OFFLINE rigs are SKIP"
+    },
+    "repo": {
+      "git_head": "1aad7d391123cf6a70805a0775c686d7c5bf0074",
+      "git_describe": "1aad7d3-dirty",
+      "git_dirty": true,
+      "repo_root": "/home/sahur/orca/workspaces/RouteLoom/hil-bench"
+    },
+    "firmware": {
+      "bridge_node": {
+        "app": "bridge_node",
+        "build_dir": "firmware/bridge_node/build",
+        "present": false
+      },
+      "reference_node": {
+        "app": "reference_node",
+        "build_dir": "firmware/reference_node/build",
+        "present": false
+      }
+    },
+    "boards": {
+      "bridge": {
+        "status": "ONLINE",
+        "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+        "detail": ""
+      },
+      "ref-a": {
+        "status": "ONLINE",
+        "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+        "detail": ""
+      },
+      "ref-b": {
+        "status": "OFFLINE",
+        "port": null,
+        "detail": ""
+      }
+    }
+  },
+  "totals": {
+    "PASS": 1,
+    "FAIL": 0,
+    "SKIP-OFFLINE": 0
+  },
+  "scenarios": [
+    {
+      "name": "bind_2node",
+      "verdict": "PASS",
+      "detail": "reset bridge + reference; both must reach BOUND + REACHABLE within 60s",
+      "started_utc": "2026-09-25T16:46:30Z",
+      "duration_s": 6.214,
+      "steps": [
+        {
+          "step": "0:start_daemon",
+          "ok": true,
+          "detail": "authenticated",
+          "duration_s": 1.002
+        },
+        {
+          "step": "1:reset_boards",
+          "ok": true,
+          "detail": "reset: ref-a, bridge",
+          "duration_s": 1.754
+        },
+        {
+          "step": "2:wait_for",
+          "ok": true,
+          "detail": "matched: I (1962) RouteLoomRef: discovery event=BOUND peer=1",
+          "duration_s": 0.825
+        },
+        {
+          "step": "3:wait_for",
+          "ok": true,
+          "detail": "matched: I (1988) RouteLoomRef: discovery event=REACHABLE peer=1",
+          "duration_s": 0.027
+        },
+        {
+          "step": "4:wait_for",
+          "ok": true,
+          "detail": "matched: {\"events\":[{\"seq\":0,\"ms\":1790354793575,\"kind\":\"adapter\",\"state\":\"connected\"},{\"seq\":1,\"ms\":1790354793700,\"kind\":\"hello_ack\",\"version\":1,\"node\":1,\"boot\":99,\"netw",
+          "duration_s": 0.002
+        },
+        {
+          "step": "5:wait_for",
+          "ok": true,
+          "detail": "matched: {\"events\":[{\"seq\":0,\"ms\":1790354793575,\"kind\":\"adapter\",\"state\":\"connected\"},{\"seq\":1,\"ms\":1790354793700,\"kind\":\"hello_ack\",\"version\":1,\"node\":1,\"boot\":99,\"netw",
+          "duration_s": 2.501
+        },
+        {
+          "step": "6:assert_absent",
+          "ok": true,
+          "detail": "absent in ref-a (window=run)",
+          "duration_s": 0.0
+        }
+      ],
+      "evidence": [
+        "scenarios/bind_2node/ref-a.log",
+        "scenarios/bind_2node/daemon.log",
+        "scenarios/bind_2node/daemon-adapter.log",
+        "scenarios/bind_2node/host-commands.log",
+        "scenarios/bind_2node/daemon-events.log"
+      ]
+    }
+  ]
+}

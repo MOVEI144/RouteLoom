@@ -1,0 +1,15 @@
+Internal ctest changing into directory: /tmp/routeloom-hil-host-build
+Test project /tmp/routeloom-hil-host-build
+    Start 65: routeloom_sdkv1_coordinator_tests
+1/1 Test #65: routeloom_sdkv1_coordinator_tests ...***Failed    0.40 sec
+CHECK failed /home/sahur/orca/workspaces/RouteLoom/hil-bench/tests/cpp/test_sdkv1_security_coordinator.cpp:724 [member_proxy_receives_zt_discover]: SecurityCoordinatorTestAccess::proxy_stats(coordinator).epoch_replies_rx == 1
+FAILURES: 1
+
+
+0% tests passed, 1 tests failed out of 1
+
+Total Test time (real) =   0.40 sec
+
+The following tests FAILED:
+	 65 - routeloom_sdkv1_coordinator_tests (Failed)
+Errors while running CTest

@@ -1,0 +1,4 @@
+[2026-09-25T17:09:19.760Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T17:09:30.859Z] I (13771) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0I (60371) RouteLoom: stack hwm routeloom 3476 B
+[2026-09-25T17:09:37.636Z] I (67148) RouteLoomRef: message origin=1 session=105 sequence=9223372036854775809 bytes=8
+[2026-09-25T17:10:16.707Z] !! capture closed

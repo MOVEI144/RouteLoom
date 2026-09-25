@@ -1,0 +1,4 @@
+waiting for esp32c3/94:a9:90:7a:b5:60 at /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00
+port appeared; flash attempt 1
+flashed reference_node -> ref-a on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00; manifest artifacts/hil/2026-09-26/flash-restore-ref-a/flash-ref-a.json
+flash succeeded

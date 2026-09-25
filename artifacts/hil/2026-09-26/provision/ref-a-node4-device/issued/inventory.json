@@ -1,0 +1,9 @@
+{
+  "format": "routeloom-inventory-v1",
+  "node_id": "0000000000000004",
+  "kid": "d0c62e28b7b568bd087873ead34b1d1077fcc13309c46d5bc423d5de22b7678d",
+  "model": 17,
+  "hw_rev": 2,
+  "cert_serial": 3,
+  "device_ca_id": "0dca000000000001"
+}

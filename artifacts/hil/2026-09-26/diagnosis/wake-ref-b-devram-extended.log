@@ -1,0 +1,6 @@
+waiting for esp32c3/94:a9:90:7a:26:ac at /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00
+port appeared; flash attempt 1
+preflight refused flash: preflight mismatch on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00: chip=None, MAC=None, expected=esp32c3/94:a9:90:7a:26:ac (see artifacts/hil/2026-09-26/flash-wake-ref-b-devram/flash-ref-b-preflight.log)
+port appeared; flash attempt 2
+preflight refused flash: preflight mismatch on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:26:AC-if00: chip=None, MAC=None, expected=esp32c3/94:a9:90:7a:26:ac (see artifacts/hil/2026-09-26/flash-wake-ref-b-devram/flash-ref-b-preflight.log)
+timed out waiting for a flashable USB appearance

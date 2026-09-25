@@ -1,0 +1,11 @@
+[2026-09-25T16:18:00.297Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T16:18:06.985Z] I (239960) RouteLoomRef: discovery event=STALE peer=3
+[2026-09-25T16:18:06.985Z] W (239960) RouteLoomRef: diagnostic reason=STALE peer=3 message=none
+[2026-09-25T16:18:07.453Z] I (240428) RouteLoom: stack hwm main 11360 B
+[2026-09-25T16:18:08.987Z] I (241962) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-25T16:18:08.988Z] W (241962) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-25T16:18:34.522Z] I (267497) RouteLoomRef: discovery event=DISCOVERY_FAILED peer=0
+[2026-09-25T16:18:34.524Z] W (267497) RouteLoomRef: diagnostic reason=DISCOVERY_FAILED peer=0 message=none
+[2026-09-25T16:18:34.529Z] I (267499) RouteLoomRef: discovery event=REDISCOVERY peer=0
+[2026-09-25T16:18:34.536Z] W (267504) RouteLoomRef: diagnostic reason=REDISCOVERY peer=0 message=none
+[2026-09-25T16:18:45.557Z] !! capture closed

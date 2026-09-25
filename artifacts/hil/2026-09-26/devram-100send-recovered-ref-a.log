@@ -1,0 +1,36 @@
+[2026-09-25T16:56:29.139Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T16:56:39.008Z] I (114) esp_image: segment 1: paddr=00034540 vaddr=3fc91e00 sizeI (41040) RouteLoomRef: message origin=1 session=104 sequence=8 bytes=9
+[2026-09-25T16:56:39.062Z] I (41094) RouteLoomRef: message origin=1 session=104 sequence=9 bytes=9
+[2026-09-25T16:56:39.115Z] I (41147) RouteLoomRef: message origin=1 session=104 sequence=10 bytes=9
+[2026-09-25T16:56:39.225Z] I (41257) RouteLoomRef: message origin=1 session=104 sequence=11 bytes=9
+[2026-09-25T16:56:39.326Z] I (41358) RouteLoomRef: message origin=1 session=104 sequence=12 bytes=9
+[2026-09-25T16:56:39.431Z] I (41463) RouteLoomRef: message origin=1 session=104 sequence=13 bytes=9
+[2026-09-25T16:56:39.486Z] I (41518) RouteLoomRef: message origin=1 session=104 sequence=14 bytes=9
+[2026-09-25T16:56:39.538Z] I (41570) RouteLoomRef: message origin=1 session=104 sequence=15 bytes=9
+[2026-09-25T16:56:39.694Z] I (41726) RouteLoomRef: message origin=1 session=104 sequence=16 bytes=9
+[2026-09-25T16:56:39.801Z] I (41833) RouteLoomRef: message origin=1 session=104 sequence=17 bytes=9
+[2026-09-25T16:56:40.007Z] I (42039) RouteLoomRef: message origin=1 session=104 sequence=18 bytes=9
+[2026-09-25T16:56:40.113Z] I (42145) RouteLoomRef: message origin=1 session=104 sequence=19 bytes=9
+[2026-09-25T16:56:40.216Z] I (42248) RouteLoomRef: message origin=1 session=104 sequence=20 bytes=9
+[2026-09-25T16:56:40.425Z] I (42458) RouteLoomRef: message origin=1 session=104 sequence=21 bytes=9
+[2026-09-25T16:56:58.400Z] I (60432) RouteLoom: stack hwm main 11360 B
+[2026-09-25T16:57:58.403Z] I (120434) RouteLoom: stack hwm main 11360 B
+[2026-09-25T16:58:34.451Z] I (156481) RouteLoomRef: message origin=1 session=104 sequence=22 bytes=8
+[2026-09-25T16:58:58.405Z] I (180435) RouteLoom: stack hwm main 11360 B
+[2026-09-25T16:59:47.748Z] I (229777) RouteLoomRef: message origin=1 session=104 sequence=23 bytes=9
+[2026-09-25T16:59:48.120Z] I (230149) RouteLoomRef: message origin=1 session=104 sequence=24 bytes=9
+[2026-09-25T16:59:48.495Z] I (230524) RouteLoomRef: message origin=1 session=104 sequence=25 bytes=9
+[2026-09-25T16:59:48.832Z] I (230862) RouteLoomRef: message origin=1 session=104 sequence=26 bytes=9
+[2026-09-25T16:59:49.207Z] I (231236) RouteLoomRef: message origin=1 session=104 sequence=27 bytes=9
+[2026-09-25T16:59:58.406Z] I (240435) RouteLoom: stack hwm main 11360 B
+[2026-09-25T17:00:17.260Z] I (259289) RouteLoomRef: message origin=1 session=104 sequence=28 bytes=9
+[2026-09-25T17:00:47.248Z] I (289277) RouteLoomRef: message origin=1 session=104 sequence=29 bytes=9
+[2026-09-25T17:00:58.408Z] I (300436) RouteLoom: stack hwm main 11360 B
+[2026-09-25T17:01:17.240Z] I (319268) RouteLoomRef: message origin=1 session=104 sequence=30 bytes=9
+[2026-09-25T17:01:47.263Z] I (349290) RouteLoomRef: message origin=1 session=104 sequence=31 bytes=9
+[2026-09-25T17:01:58.409Z] I (360437) RouteLoom: stack hwm main 11360 B
+[2026-09-25T17:02:17.236Z] I (379263) RouteLoomRef: message origin=1 session=104 sequence=32 bytes=9
+[2026-09-25T17:02:47.234Z] I (409261) RouteLoomRef: message origin=1 session=104 sequence=33 bytes=9
+[2026-09-25T17:02:58.412Z] I (420439) RouteLoom: stack hwm main 11360 B
+[2026-09-25T17:03:17.254Z] I (439280) RouteLoomRef: message origin=1 session=104 sequence=34 bytes=9
+[2026-09-25T17:03:29.274Z] !! capture closed

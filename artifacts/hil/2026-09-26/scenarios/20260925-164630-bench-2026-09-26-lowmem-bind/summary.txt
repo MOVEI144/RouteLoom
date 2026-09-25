@@ -1,0 +1,2 @@
+[PASS] bind_2node — reset bridge + reference; both must reach BOUND + REACHABLE within 60s (6.2s)
+totals: PASS=1 FAIL=0 SKIP-OFFLINE=0

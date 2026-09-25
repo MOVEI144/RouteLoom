@@ -1,0 +1,8 @@
+[2026-09-25T16:50:53.563Z] !! poll start: /home/sahur/orca/workspaces/RouteLoom/hil-bench/host/target/debug/routeloomctl --socket /tmp/routeloom-hil-2026-09-26.sock deliveries every 0.5s
+[2026-09-25T16:50:53.564Z] {"deliveries":[{"request":1,"destination":2,"state":"sent","reason":null,"msg_session":null,"msg_seq":null,"updated_ms":1790355053562}]}
+[2026-09-25T16:50:54.064Z] {"deliveries":[{"request":1,"destination":2,"state":"queued","reason":"QUEUED","msg_session":102,"msg_seq":1,"updated_ms":1790355053565}]}
+[2026-09-25T16:50:54.564Z] {"deliveries":[{"request":1,"destination":2,"state":"queued","reason":"QUEUED","msg_session":102,"msg_seq":1,"updated_ms":1790355053565}]}
+[2026-09-25T16:50:55.064Z] {"deliveries":[{"request":1,"destination":2,"state":"queued","reason":"QUEUED","msg_session":102,"msg_seq":1,"updated_ms":1790355053565}]}
+[2026-09-25T16:50:55.564Z] {"deliveries":[{"request":1,"destination":2,"state":"queued","reason":"QUEUED","msg_session":102,"msg_seq":1,"updated_ms":1790355053565}]}
+[2026-09-25T16:50:56.064Z] {"deliveries":[{"request":1,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":102,"msg_seq":1,"updated_ms":1790355055759}]}
+[2026-09-25T16:50:56.127Z] !! poll stopped

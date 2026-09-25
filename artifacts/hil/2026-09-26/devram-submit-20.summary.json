@@ -1,0 +1,12 @@
+{
+  "count": 20,
+  "admitted": 20,
+  "delivered": 20,
+  "success_rate": 1.0,
+  "rtt_ms_min": 362.06,
+  "rtt_ms_median": 29962.725,
+  "rtt_ms_p95": 30051.25,
+  "rtt_ms_p99": 30053.11,
+  "rtt_ms_max": 30053.58,
+  "evidence": "artifacts/hil/2026-09-26/devram-submit-20.jsonl"
+}

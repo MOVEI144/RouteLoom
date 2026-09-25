@@ -1,0 +1,12 @@
+{
+  "count": 100,
+  "accepted": 15,
+  "delivered": 14,
+  "success_rate": 0.14,
+  "rtt_ms_min": 53.05,
+  "rtt_ms_median": 104.67,
+  "rtt_ms_p95": 207.9,
+  "rtt_ms_p99": 209.09,
+  "rtt_ms_max": 209.39,
+  "evidence": "artifacts/hil/2026-09-26/devram-100send-recovered.jsonl"
+}

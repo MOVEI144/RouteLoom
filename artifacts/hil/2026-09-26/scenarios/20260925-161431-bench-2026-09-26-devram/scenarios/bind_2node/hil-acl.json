@@ -1,0 +1,14 @@
+{
+  "_comment": "HIL-generated bench ACL: the scenario runner's uid gets send/read on every network for this run only.",
+  "principals": {
+    "1000": {
+      "networks": {
+        "*": [
+          "READ_PAYLOAD",
+          "SEND",
+          "READ_OPERATION"
+        ]
+      }
+    }
+  }
+}

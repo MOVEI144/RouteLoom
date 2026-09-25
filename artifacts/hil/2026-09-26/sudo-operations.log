@@ -1,0 +1,4 @@
+2026-09-26 01:16 JST: sudo dmesg --ctime (USB enumeration diagnosis; full output saved to diagnosis/dmesg.log)
+2026-09-26 01:17 JST: sudo tee /sys/devices/pci0000:00/0000:00:14.0/usb1/1-0:1.0/usb1-port3/disable (1 then 0; re-enumerate only former bridge C3 root port 3)
+2026-09-26 01:17 JST: second sudo dmesg --ctime after port 3 toggle (last 15 lines read-only; see tool transcript)
+2026-09-26 01:25 JST: sudo lsusb -v -s 001:001 (read-only root-hub power capability inspection)

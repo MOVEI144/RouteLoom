@@ -1,0 +1,100 @@
+{"index":0,"accepted":true,"request":3,"response":{"accepted":true,"request":3},"delivery":{"request":3,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":8,"updated_ms":1790355399039},"latency_ms":53.05}
+{"index":1,"accepted":true,"request":4,"response":{"accepted":true,"request":4},"delivery":{"request":4,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":9,"updated_ms":1790355399093},"latency_ms":53.27}
+{"index":2,"accepted":true,"request":5,"response":{"accepted":true,"request":5},"delivery":{"request":5,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":10,"updated_ms":1790355399149},"latency_ms":104.78}
+{"index":3,"accepted":true,"request":6,"response":{"accepted":true,"request":6},"delivery":{"request":6,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":11,"updated_ms":1790355399256},"latency_ms":106.27}
+{"index":4,"accepted":true,"request":7,"response":{"accepted":true,"request":7},"delivery":{"request":7,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":12,"updated_ms":1790355399363},"latency_ms":104.97}
+{"index":5,"accepted":true,"request":8,"response":{"accepted":true,"request":8},"delivery":{"request":8,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":13,"updated_ms":1790355399461},"latency_ms":53.7}
+{"index":6,"accepted":true,"request":9,"response":{"accepted":true,"request":9},"delivery":{"request":9,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":14,"updated_ms":1790355399518},"latency_ms":54.41}
+{"index":7,"accepted":true,"request":10,"response":{"accepted":true,"request":10},"delivery":{"request":10,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":15,"updated_ms":1790355399674},"latency_ms":156.87}
+{"index":8,"accepted":true,"request":11,"response":{"accepted":true,"request":11},"delivery":{"request":11,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":16,"updated_ms":1790355399768},"latency_ms":104.68}
+{"index":9,"accepted":true,"request":12,"response":{"accepted":true,"request":12},"delivery":{"request":12,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":17,"updated_ms":1790355399971},"latency_ms":207.1}
+{"index":10,"accepted":true,"request":13,"response":{"accepted":true,"request":13},"delivery":{"request":13,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":18,"updated_ms":1790355400066},"latency_ms":104.66}
+{"index":11,"accepted":true,"request":14,"response":{"accepted":true,"request":14},"delivery":{"request":14,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":19,"updated_ms":1790355400166},"latency_ms":104.47}
+{"index":12,"accepted":true,"request":15,"response":{"accepted":true,"request":15},"delivery":{"request":15,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":20,"updated_ms":1790355400372},"latency_ms":209.39}
+{"index":13,"accepted":true,"request":16,"response":{"accepted":true,"request":16},"delivery":{"request":16,"destination":2,"state":"delivered","reason":"END_RECEIVED","msg_session":104,"msg_seq":21,"updated_ms":1790355400466},"latency_ms":104.62}
+{"index":14,"accepted":true,"request":17,"response":{"accepted":true,"request":17},"delivery":{"request":17,"destination":2,"state":"failed","reason":"IDEMPOTENCY_FULL","msg_session":null,"msg_seq":null,"updated_ms":1790355400566},"latency_ms":104.9}
+{"index":15,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6579 ms)"}}
+{"index":16,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6578 ms)"}}
+{"index":17,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6577 ms)"}}
+{"index":18,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6576 ms)"}}
+{"index":19,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6575 ms)"}}
+{"index":20,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6574 ms)"}}
+{"index":21,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6573 ms)"}}
+{"index":22,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6572 ms)"}}
+{"index":23,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6571 ms)"}}
+{"index":24,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6571 ms)"}}
+{"index":25,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6570 ms)"}}
+{"index":26,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6569 ms)"}}
+{"index":27,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6568 ms)"}}
+{"index":28,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6568 ms)"}}
+{"index":29,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6567 ms)"}}
+{"index":30,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6566 ms)"}}
+{"index":31,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6565 ms)"}}
+{"index":32,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6565 ms)"}}
+{"index":33,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6564 ms)"}}
+{"index":34,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6563 ms)"}}
+{"index":35,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6563 ms)"}}
+{"index":36,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6562 ms)"}}
+{"index":37,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6561 ms)"}}
+{"index":38,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6561 ms)"}}
+{"index":39,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6560 ms)"}}
+{"index":40,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6559 ms)"}}
+{"index":41,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6559 ms)"}}
+{"index":42,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6558 ms)"}}
+{"index":43,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6557 ms)"}}
+{"index":44,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6556 ms)"}}
+{"index":45,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6556 ms)"}}
+{"index":46,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6555 ms)"}}
+{"index":47,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6554 ms)"}}
+{"index":48,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6553 ms)"}}
+{"index":49,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6553 ms)"}}
+{"index":50,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6552 ms)"}}
+{"index":51,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6551 ms)"}}
+{"index":52,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6551 ms)"}}
+{"index":53,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6550 ms)"}}
+{"index":54,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6549 ms)"}}
+{"index":55,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6549 ms)"}}
+{"index":56,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6548 ms)"}}
+{"index":57,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6547 ms)"}}
+{"index":58,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6547 ms)"}}
+{"index":59,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6546 ms)"}}
+{"index":60,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6545 ms)"}}
+{"index":61,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6544 ms)"}}
+{"index":62,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6544 ms)"}}
+{"index":63,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6543 ms)"}}
+{"index":64,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6542 ms)"}}
+{"index":65,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6542 ms)"}}
+{"index":66,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6541 ms)"}}
+{"index":67,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6540 ms)"}}
+{"index":68,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6540 ms)"}}
+{"index":69,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6539 ms)"}}
+{"index":70,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6538 ms)"}}
+{"index":71,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6538 ms)"}}
+{"index":72,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6537 ms)"}}
+{"index":73,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6536 ms)"}}
+{"index":74,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6536 ms)"}}
+{"index":75,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6535 ms)"}}
+{"index":76,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6534 ms)"}}
+{"index":77,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6533 ms)"}}
+{"index":78,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6533 ms)"}}
+{"index":79,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6532 ms)"}}
+{"index":80,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6531 ms)"}}
+{"index":81,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6530 ms)"}}
+{"index":82,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6530 ms)"}}
+{"index":83,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6529 ms)"}}
+{"index":84,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6528 ms)"}}
+{"index":85,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6528 ms)"}}
+{"index":86,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6527 ms)"}}
+{"index":87,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6526 ms)"}}
+{"index":88,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6526 ms)"}}
+{"index":89,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6525 ms)"}}
+{"index":90,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6524 ms)"}}
+{"index":91,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6523 ms)"}}
+{"index":92,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6523 ms)"}}
+{"index":93,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6522 ms)"}}
+{"index":94,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6521 ms)"}}
+{"index":95,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6521 ms)"}}
+{"index":96,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6520 ms)"}}
+{"index":97,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6519 ms)"}}
+{"index":98,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6518 ms)"}}
+{"index":99,"accepted":false,"request":null,"response":{"accepted":false,"error":"rate limited (principal scope, retry in 6518 ms)"}}
