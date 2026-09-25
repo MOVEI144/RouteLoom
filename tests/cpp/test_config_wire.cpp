@@ -18,6 +18,7 @@
 #include "routeloom/config_wire.hpp"
 #include "routeloom/discovery_scope.hpp"
 #include "routeloom/endpoint_wire.hpp"
+#include "routeloom/sdkv1_authority_transport.hpp"
 #include "routeloom/security_floor.hpp"
 #include "routeloom/trust_manifest.hpp"
 #include "routeloom/trust_store.hpp"
@@ -1436,6 +1437,67 @@ void test_transfer_slot_shared() {
              .ok());
 }
 
+void test_authority_config_hash_conflict() {
+  constexpr MonotonicMs now = 1000;
+  TargetRig rig{};
+  CHECK_OK(rig.journal->initialize(now));
+  ConfigEndpointSink* peer = nullptr;
+  LoopbackPort port(kTarget, peer);
+  port.peer_dest_ = kGateway;
+  RecordingAckSink sink{};
+  peer = &sink;
+  autonomy::ControlObjectPayload manifest{};
+  manifest.subtype = autonomy::ControlObjectSubtype::Manifest;
+  manifest.total_len = 500;
+  manifest.object_hash[0] = 0xA5;
+  autonomy::EncodedPayload encoded{};
+
+  {
+    ConfigTarget target(port, rig.rate);
+    CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+    sdkv1::AuthorityEndpoint authority(port, kTarget);
+    target.attach_authority(&authority);
+    manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+    CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+    target.on_config_frame(kGateway,
+                           object_frame(kGateway, FrameType::ControlObject, encoded.view()), now);
+    port.flush(now);
+    CHECK(target.object_active());
+    CHECK(sink.last_status == autonomy::ObjectAckStatus::Incomplete);
+
+    manifest.kind = autonomy::ControlObjectKind::AuthorityEnvelope;
+    CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+    target.on_config_frame(kGateway,
+                           object_frame(kGateway, FrameType::ControlObject, encoded.view()), now);
+    port.flush(now);
+    CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+    CHECK(target.object_active());
+    CHECK(!authority.claim_transfer(kGateway, manifest.object_hash));
+  }
+  {
+    ConfigTarget target(port, rig.rate);
+    CHECK_OK(target.add_journal(endpoint::kConfigNamespaceSdk, *rig.journal));
+    sdkv1::AuthorityEndpoint authority(port, kTarget);
+    target.attach_authority(&authority);
+    manifest.kind = autonomy::ControlObjectKind::AuthorityEnvelope;
+    CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+    target.on_config_frame(kGateway,
+                           object_frame(kGateway, FrameType::ControlObject, encoded.view()), now);
+    port.flush(now);
+    CHECK(sink.last_status == autonomy::ObjectAckStatus::Incomplete);
+    CHECK(authority.claim_transfer(kGateway, manifest.object_hash));
+
+    manifest.kind = autonomy::ControlObjectKind::ConfigPermit;
+    CHECK_OK(autonomy::control_object_encode(manifest, encoded));
+    target.on_config_frame(kGateway,
+                           object_frame(kGateway, FrameType::ControlObject, encoded.view()), now);
+    port.flush(now);
+    CHECK(sink.last_status == autonomy::ObjectAckStatus::Failed);
+    CHECK(!target.object_active());
+    CHECK(authority.claim_transfer(kGateway, manifest.object_hash));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1447,6 +1509,7 @@ int main() {
   test_query_reply_echo_binding();
   test_dev_permit_tag_status_codes();
   test_single_assembler_discipline();
+  test_authority_config_hash_conflict();
   test_kind5_trust_delivery_e2e();
   test_trust_verify_shares_budget();
   test_trust_status_query_wire();

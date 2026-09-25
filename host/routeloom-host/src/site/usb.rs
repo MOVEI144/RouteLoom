@@ -1388,7 +1388,7 @@ pub fn site_once(
             let frame = Frame {
                 kind: FrameKind::HostOps,
                 flags: 0,
-                session: 0,
+                session: link.session,
                 request,
                 body: bytes,
             };
@@ -1432,7 +1432,7 @@ pub fn site_once(
             let frame = Frame {
                 kind: FrameKind::HostOps,
                 flags: 0,
-                session: 0,
+                session: link.session,
                 request,
                 body: bytes,
             };

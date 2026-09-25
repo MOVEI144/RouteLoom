@@ -49,14 +49,16 @@ class RecordingPort final : public ConfigWirePort {
   struct Sent {
     NodeId dest{kInvalidNodeId};
     FrameType type{FrameType::Data};
+    MonotonicMs now{0};
     std::vector<std::uint8_t> payload;
   };
   Status config_send(const NodeId dest, const FrameType type, const ByteView payload,
-                     const MonotonicMs) noexcept override {
+                     const MonotonicMs now) noexcept override {
     ++sends;
     Sent sent;
     sent.dest = dest;
     sent.type = type;
+    sent.now = now;
     sent.payload.assign(payload.data, payload.data + payload.size);
     queue.push_back(sent);
     return Status::success();
@@ -273,6 +275,7 @@ void test_endpoint_small_carrier() {
   CHECK(port.queue.size() == 1);
   CHECK(port.queue[0].dest == kGateway);
   CHECK(port.queue[0].type == FrameType::Control);
+  CHECK(port.queue[0].now == 1000);
   AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
   std::uint32_t exchange = 0;
   ByteView body{};
@@ -428,8 +431,90 @@ void test_endpoint_rx_rules() {
   CHECK(!endpoint.claim_kind(autonomy::ControlObjectKind::TrustManifest));
   autonomy::ObjectHash foreign{};
   foreign[0] = 0xEE;
-  CHECK(!endpoint.claim_transfer(foreign));
+  CHECK(!endpoint.claim_transfer(kGateway, foreign));
   CHECK(endpoint.quiescent());
+}
+
+void test_object_chunks_require_contiguous_grid() {
+  RecordingPort port;
+  AuthorityEndpoint endpoint(port, kDevice);
+  autonomy::ControlObjectPayload manifest{};
+  manifest.kind = autonomy::ControlObjectKind::AuthorityEnvelope;
+  manifest.total_len = 200;
+  manifest.object_hash[0] = 0xA5;
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.object_hash = manifest.object_hash;
+  chunk.data_size = 90;
+  chunk.offset = 90;  // A count of 90 is not a contiguous ACK from zero.
+  endpoint.on_manifest(kGateway, manifest, 1000);
+  endpoint.on_chunk(kGateway, chunk, 1000);
+  autonomy::ObjectAckPayload ack{};
+  CHECK(autonomy::object_ack_decode(
+      ByteView{port.queue.back().payload.data(), port.queue.back().payload.size()}, ack));
+  CHECK(ack.status == autonomy::ObjectAckStatus::Failed);
+  CHECK(endpoint.quiescent());
+
+  RecordingHostSink host;
+  RecordingLocalSink local;
+  AuthorityGateway gateway(port, host, local, kGateway);
+  gateway.on_manifest(kDevice, manifest, 2000);
+  chunk.offset = 1;  // A full-sized chunk must start on the 90 B grid.
+  gateway.on_chunk(kDevice, chunk, 2000);
+  CHECK(autonomy::object_ack_decode(
+      ByteView{port.queue.back().payload.data(), port.queue.back().payload.size()}, ack));
+  CHECK(ack.status == autonomy::ObjectAckStatus::Failed);
+  CHECK(gateway.quiescent());
+}
+
+void test_object_ack_requires_sent_progress() {
+  RecordingPort port;
+  AuthorityEndpoint endpoint(port, kDevice);
+  const auto envelope = pattern(300);
+  std::uint64_t token = 0;
+  CHECK(endpoint.try_send(kGateway, AuthorityCarrierKind::Envelope,
+                          ByteView{envelope.data(), envelope.size()}, token));
+  endpoint.poll(1000);  // manifest and the first 90 B only
+  autonomy::ControlObjectPayload manifest{};
+  CHECK(autonomy::control_object_decode(
+      ByteView{port.queue[0].payload.data(), port.queue[0].payload.size()}, manifest));
+  autonomy::ObjectAckPayload ack{};
+  ack.object_hash = manifest.object_hash;
+  ack.status = autonomy::ObjectAckStatus::Ok;
+  ack.received_len = manifest.total_len;
+  endpoint.on_ack(kGateway, ack, 1000);
+  AuthorityTxResult result{};
+  CHECK(!endpoint.take_tx_result(result));
+  ack.status = autonomy::ObjectAckStatus::Incomplete;
+  ack.received_len = 1;  // an off-grid ACK must not steer the next chunk
+  endpoint.on_ack(kGateway, ack, 1000);
+  endpoint.poll(1500);
+  autonomy::ObjectChunkPayload chunk{};
+  CHECK(autonomy::object_chunk_decode(
+      ByteView{port.queue.back().payload.data(), port.queue.back().payload.size()}, chunk));
+  CHECK(chunk.offset == 0);
+}
+
+void test_small_carrier_does_not_claim_old_object_hash() {
+  RecordingPort port;
+  AuthorityEndpoint endpoint(port, kDevice);
+  const auto envelope = pattern(300);
+  std::uint64_t token = 0;
+  CHECK(endpoint.try_send(kGateway, AuthorityCarrierKind::Envelope,
+                          ByteView{envelope.data(), envelope.size()}, token));
+  endpoint.poll(1000);
+  autonomy::ControlObjectPayload manifest{};
+  CHECK(autonomy::control_object_decode(
+      ByteView{port.queue[0].payload.data(), port.queue[0].payload.size()}, manifest));
+  endpoint.poll(17000);  // the object transfer times out
+  AuthorityTxResult result{};
+  CHECK(endpoint.take_tx_result(result));
+  CHECK(!result.delivered);
+  const auto r1 = pattern(60);
+  CHECK(endpoint.try_send(kGateway, AuthorityCarrierKind::R1,
+                          ByteView{r1.data(), r1.size()}, token));
+  CHECK(!endpoint.claim_transfer(kGateway, manifest.object_hash));
+  endpoint.poll(17001);
+  CHECK(port.queue.back().type == FrameType::Control);
 }
 
 void test_gateway_up_path() {
@@ -519,6 +604,7 @@ void test_gateway_down_path() {
   CHECK(port.sends == 1);
   CHECK(port.queue[0].dest == kDevice);
   CHECK(port.queue[0].type == FrameType::Control);
+  CHECK(port.queue[0].now == 1000);
   AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
   std::uint32_t exchange = 0;
   ByteView body{};
@@ -554,6 +640,20 @@ void test_gateway_down_path() {
   CHECK(manifest.kind == autonomy::ControlObjectKind::AuthorityEnvelope);
   CHECK(manifest.total_len == 1500);
   CHECK(port.queue[1].type == FrameType::ObjectChunk);
+  autonomy::ObjectAckPayload premature{};
+  premature.object_hash = manifest.object_hash;
+  premature.status = autonomy::ObjectAckStatus::Ok;
+  premature.received_len = manifest.total_len;
+  gateway.on_ack(kDevice, premature, 2000);
+  CHECK(!gateway.quiescent());
+  premature.status = autonomy::ObjectAckStatus::Incomplete;
+  premature.received_len = 1;
+  gateway.on_ack(kDevice, premature, 2000);
+  gateway.poll(2500);
+  autonomy::ObjectChunkPayload retry{};
+  CHECK(autonomy::object_chunk_decode(
+      ByteView{port.queue.back().payload.data(), port.queue.back().payload.size()}, retry));
+  CHECK(retry.offset == 0);
   // Rewriting the token's bytes mid-transfer is a Conflict, not a merge.
   fragment.transfer_id = 0xCAFE;
   fragment.total = 100;
@@ -690,6 +790,28 @@ void test_config_target_authority_hook() {
                          2000);
   CHECK(port.sends == 1);
   CHECK(port.queue[0].type == FrameType::ObjectAck);
+  // A config chunk from a different end-authenticated origin may carry the
+  // same hash. It must stay on the config path rather than enter this
+  // authority assembly.
+  autonomy::ObjectChunkPayload chunk{};
+  chunk.object_hash = manifest.object_hash;
+  chunk.offset = 0;
+  chunk.data_size = 90;
+  std::memcpy(chunk.data.data(), envelope.data(), chunk.data_size);
+  CHECK(autonomy::object_chunk_encode(chunk, encoded));
+  const std::uint32_t authority_denied = endpoint.counters().rx_denied;
+  target.on_config_frame(0x3333,
+                         terminal_frame(0x3333, kGateway, FrameType::ObjectChunk,
+                                        encoded.view()),
+                         2100);
+  CHECK(target.control_denied() == denied_before + 2);
+  CHECK(endpoint.counters().rx_denied == authority_denied);
+  CHECK(port.sends == 1);
+  target.on_config_frame(kDevice,
+                         terminal_frame(kDevice, kGateway, FrameType::ObjectChunk,
+                                        encoded.view()),
+                         2200);
+  CHECK(port.sends == 2);
   // A kind-5 manifest still takes the config path (no trust store here).
   manifest.kind = autonomy::ControlObjectKind::TrustManifest;
   CHECK(autonomy::control_object_encode(manifest, encoded));
@@ -704,7 +826,7 @@ void test_config_target_authority_hook() {
                          terminal_frame(kDevice, kGateway, FrameType::Control,
                                         ByteView{frame.data(), written}),
                          3000);
-  CHECK(target.control_denied() == denied_before + 2);
+  CHECK(target.control_denied() == denied_before + 3);
 }
 
 }  // namespace
@@ -715,6 +837,9 @@ int main() {
   test_endpoint_object_round_trip();
   test_endpoint_object_timeout();
   test_endpoint_rx_rules();
+  test_object_chunks_require_contiguous_grid();
+  test_object_ack_requires_sent_progress();
+  test_small_carrier_does_not_claim_old_object_hash();
   test_gateway_up_path();
   test_gateway_down_path();
   test_gateway_self_down();

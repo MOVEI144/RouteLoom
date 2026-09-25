@@ -81,7 +81,7 @@ void ConfigTarget::on_config_frame(const NodeId peer, const wire::PlainFrame& fr
                                    const MonotonicMs now_ms) noexcept {
   // The authority lane claims its frames before the config path: subtype 9
   // carriers, kind-7 manifests, and the chunks/acks of a live authority
-  // transfer (chunks carry no kind, so they route by hash only).
+  // transfer (chunks carry no kind, so they route by origin and hash).
   if (authority_ != nullptr) {
     const ByteView payload{frame.payload.data(), frame.payload_size};
     switch (frame.header.type) {
@@ -95,6 +95,12 @@ void ConfigTarget::on_config_frame(const NodeId peer, const wire::PlainFrame& fr
         autonomy::ControlObjectPayload manifest{};
         if (autonomy::control_object_decode(payload, manifest) &&
             authority_->claim_kind(manifest.kind)) {
+          if (assembly_.active && assembly_.origin == frame.header.origin &&
+              assembly_.hash == manifest.object_hash) {
+            send_ack(frame.header.origin, manifest.object_hash, 0,
+                     autonomy::ObjectAckStatus::Failed, now_ms);
+            return;
+          }
           authority_->on_manifest(frame.header.origin, manifest, now_ms);
           return;
         }
@@ -103,7 +109,7 @@ void ConfigTarget::on_config_frame(const NodeId peer, const wire::PlainFrame& fr
       case FrameType::ObjectChunk: {
         autonomy::ObjectChunkPayload chunk{};
         if (autonomy::object_chunk_decode(payload, chunk) &&
-            authority_->claim_transfer(chunk.object_hash)) {
+            authority_->claim_transfer(frame.header.origin, chunk.object_hash)) {
           authority_->on_chunk(frame.header.origin, chunk, now_ms);
           return;
         }
@@ -112,7 +118,7 @@ void ConfigTarget::on_config_frame(const NodeId peer, const wire::PlainFrame& fr
       case FrameType::ObjectAck: {
         autonomy::ObjectAckPayload ack{};
         if (autonomy::object_ack_decode(payload, ack) &&
-            authority_->claim_transfer(ack.object_hash)) {
+            authority_->claim_transfer(frame.header.origin, ack.object_hash)) {
           authority_->on_ack(frame.header.origin, ack, now_ms);
           return;
         }
@@ -280,6 +286,12 @@ void ConfigTarget::handle_manifest(const NodeId peer, const wire::PlainFrame& fr
       all_zero(ByteView{manifest.object_hash.data(),
                         manifest.object_hash.size()})) {
     ++control_denied_;
+    return;
+  }
+  if (authority_ != nullptr &&
+      authority_->claim_transfer(origin, manifest.object_hash)) {
+    send_ack(origin, manifest.object_hash, 0,
+             autonomy::ObjectAckStatus::Failed, now_ms);
     return;
   }
   Assembly& slot = assembly_;

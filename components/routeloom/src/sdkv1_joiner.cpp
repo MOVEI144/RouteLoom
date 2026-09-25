@@ -949,7 +949,11 @@ Status Joiner::enter_boot_check(const MonotonicMs now) noexcept {
         recovery_required(JoinRecoveryReason::MembershipInvalid);
         return Status::success();
       }
-      start_scan();
+      if (direct_) {
+        begin_direct_attempt();
+      } else {
+        start_scan();
+      }
       return Status::success();
     }
     // A healthy stored member: adopt it without touching the air.
@@ -1488,12 +1492,36 @@ Status Joiner::drive_commit(const MonotonicMs now) noexcept {
   if (recovery_only_ && site_.has_site()) {
     const SiteRecord& retained = site_.site();
     if (refreshed.value.network == retained.network &&
-        refreshed.value.site_id == retained.site_id &&
-        refreshed.value.gk_epoch_current == retained.gk_epoch_current &&
-        refreshed.value.gk_current == retained.gk_current &&
-        retained.gk_epoch_next > refreshed.value.gk_epoch_current) {
-      refreshed.value.gk_epoch_next = retained.gk_epoch_next;
-      refreshed.value.gk_next = retained.gk_next;
+        refreshed.value.site_id == retained.site_id) {
+      if (refreshed.value.assignment_generation < retained.assignment_generation) {
+        teardown_attempt();
+        recovery_required(JoinRecoveryReason::AssignmentRegressed);
+        return Status::success();
+      }
+      // An authenticated Host package may lag an implicit activation.
+      // Retry the same-site check later; the retained current key cannot
+      // be replaced by a lower epoch, even while recovering a damaged slot.
+      if (refreshed.value.gk_epoch_current < retained.gk_epoch_current) {
+        last_error_ = StatusCode::Conflict;
+        finish_attempt(JoinAttemptOutcome::Failed, 0, now);
+        return Status::success();
+      }
+      // A generation names exactly one key. In particular, recover()
+      // writes both slots and cannot rely on commit()'s healthy-store
+      // identity check.
+      if ((refreshed.value.gk_epoch_current == retained.gk_epoch_current &&
+           refreshed.value.gk_current != retained.gk_current) ||
+          (retained.gk_epoch_next != 0 &&
+           refreshed.value.gk_epoch_current == retained.gk_epoch_next &&
+           refreshed.value.gk_current != retained.gk_next)) {
+        last_error_ = StatusCode::Conflict;
+        finish_attempt(JoinAttemptOutcome::MalformedResult, 0, now);
+        return Status::success();
+      }
+      if (retained.gk_epoch_next > refreshed.value.gk_epoch_current) {
+        refreshed.value.gk_epoch_next = retained.gk_epoch_next;
+        refreshed.value.gk_next = retained.gk_next;
+      }
     }
   }
   const SiteRecord& prepared = refreshed.value;
@@ -1660,6 +1688,18 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
         recovery_required(JoinRecoveryReason::MembershipInvalid);
         return Status::success();
       }
+      // A transient read or write failure must not turn an explicit
+      // same-site verification into an unverified local adoption.
+      if (verify_existing_) {
+        recovery_only_ = true;
+        recovery_site_id_ = site.site_id;
+        if (direct_) {
+          begin_direct_attempt();
+        } else {
+          start_scan();
+        }
+        return Status::success();
+      }
       JoinAction action{};
       action.kind = JoinActionKind::MemberReady;
       action.commit_seq = site_.commit_seq();
@@ -1677,14 +1717,26 @@ Status Joiner::drive_reconcile(const MonotonicMs now) noexcept {
       recovery_required(JoinRecoveryReason::MembershipInvalid);
       return Status::success();
     }
-    start_scan();
+    if (direct_) {
+      begin_direct_attempt();
+    } else {
+      start_scan();
+    }
     return Status::success();
   }
   // Provably empty: forget the uncommitted secrets and try over. A clean
   // quarantine heals through a fresh full EDHOC; anything else paces out.
   wipe_expectation();
   if (health.quarantined) {
-    start_scan();
+    if (direct_) {
+      begin_direct_attempt();
+    } else {
+      start_scan();
+    }
+    return Status::success();
+  }
+  if (direct_) {
+    begin_direct_attempt();
     return Status::success();
   }
   (void)candidates_.next_scan_deadline(now, entropy_, backoff_deadline_);

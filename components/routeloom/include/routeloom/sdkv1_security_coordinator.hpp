@@ -384,6 +384,7 @@ class SecurityCoordinator final : public BootstrapSink,
   void on_event(const AuthorityEvent& event) noexcept override;
 
  private:
+  friend struct SecurityCoordinatorTestAccess;
   static constexpr std::size_t kDemuxEntries = 8;
   static constexpr std::size_t kStagedFrames = 4;
   static constexpr std::uint32_t kDemuxHoldMs = 30000;

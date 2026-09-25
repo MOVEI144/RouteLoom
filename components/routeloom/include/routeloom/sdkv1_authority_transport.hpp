@@ -101,7 +101,8 @@ class AuthorityMeshDemux {
   virtual ~AuthorityMeshDemux() = default;
   virtual bool claim_control(std::uint8_t subtype) noexcept = 0;
   virtual bool claim_kind(autonomy::ControlObjectKind kind) noexcept = 0;
-  virtual bool claim_transfer(const autonomy::ObjectHash& hash) noexcept = 0;
+  virtual bool claim_transfer(NodeId origin,
+                              const autonomy::ObjectHash& hash) noexcept = 0;
   virtual void on_control(NodeId origin, ByteView payload,
                           MonotonicMs now_ms) noexcept = 0;
   virtual void on_manifest(NodeId origin, const autonomy::ControlObjectPayload& manifest,
@@ -140,7 +141,8 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
   // either direction) is refused with a Failed ack, never evicted.
   bool claim_control(std::uint8_t subtype) noexcept override;
   bool claim_kind(autonomy::ControlObjectKind kind) noexcept override;
-  bool claim_transfer(const autonomy::ObjectHash& hash) noexcept override;
+  bool claim_transfer(NodeId origin,
+                      const autonomy::ObjectHash& hash) noexcept override;
   void on_control(NodeId origin, ByteView payload,
                   MonotonicMs now_ms) noexcept override;
   void on_manifest(NodeId origin, const autonomy::ControlObjectPayload& manifest,
@@ -187,7 +189,6 @@ class AuthorityEndpoint final : public AuthorityMeshDemux, public AuthorityPort 
   };
   struct TxTransfer {
     bool active{false};
-    bool manifest_sent{false};
     AuthorityCarrierKind kind{AuthorityCarrierKind::Envelope};
     NodeId gateway{kInvalidNodeId};
     std::uint64_t token{0};
@@ -266,7 +267,8 @@ class AuthorityGateway final : public AuthorityMeshDemux {
   // AuthorityMeshDemux: mesh RX intake from the node callback.
   bool claim_control(std::uint8_t subtype) noexcept override;
   bool claim_kind(autonomy::ControlObjectKind kind) noexcept override;
-  bool claim_transfer(const autonomy::ObjectHash& hash) noexcept override;
+  bool claim_transfer(NodeId origin,
+                      const autonomy::ObjectHash& hash) noexcept override;
   void on_control(NodeId origin, ByteView payload,
                   MonotonicMs now_ms) noexcept override;
   void on_manifest(NodeId origin, const autonomy::ControlObjectPayload& manifest,
@@ -318,7 +320,6 @@ class AuthorityGateway final : public AuthorityMeshDemux {
     MonotonicMs started_ms{0};
     MonotonicMs last_send_ms{0};
     bool mesh_manifest_sent{false};  // Down objects only
-    bool mesh_done{false};           // Down: payload fully handed to mesh
     std::array<std::uint8_t, kAuthorityObjectMax> buffer{};
     std::array<std::uint8_t, kAuthorityObjectMax / 8> bitmap{};
   };

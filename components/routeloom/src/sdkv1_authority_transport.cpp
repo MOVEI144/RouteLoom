@@ -24,6 +24,25 @@ bool hash_equal(const autonomy::ObjectHash& a, const autonomy::ObjectHash& b) no
   return true;
 }
 
+bool chunk_on_grid(const std::uint16_t total, const std::uint16_t offset,
+                   const std::uint16_t size, const std::uint16_t received) noexcept {
+  if (size == 0 || offset >= total || offset % kChunkDataMax != 0 || offset > received) {
+    return false;
+  }
+  const std::uint32_t remaining = static_cast<std::uint32_t>(total) - offset;
+  return size == (remaining < kChunkDataMax ? remaining : kChunkDataMax);
+}
+
+bool acked_sent_chunk(const std::uint16_t total, const std::uint16_t progress,
+                      const std::uint16_t acknowledged,
+                      const std::uint8_t sends) noexcept {
+  if (sends == 0 || acknowledged <= progress || acknowledged > total ||
+      (acknowledged != total && acknowledged % kChunkDataMax != 0)) {
+    return false;
+  }
+  return static_cast<std::size_t>(acknowledged - progress) <= kChunkDataMax;
+}
+
 }  // namespace
 
 Status authority_carrier_encode(const AuthorityCarrierKind kind,
@@ -106,7 +125,7 @@ void AuthorityEndpoint::drop_rx() noexcept {
 
 void AuthorityEndpoint::drop_tx() noexcept {
   tx_.active = false;
-  tx_.manifest_sent = false;
+  tx_.hash.fill(0);
   secure_clear(tx_.buffer.data(), tx_.buffer.size());
 }
 
@@ -139,7 +158,6 @@ bool AuthorityEndpoint::try_send(const NodeId gateway, const AuthorityCarrierKin
   token = next_token_;
   if (++next_token_ == 0) next_token_ = 1;
   tx_.active = true;
-  tx_.manifest_sent = false;
   tx_.gateway = gateway;
   tx_.token = token;
   tx_.total_len = static_cast<std::uint16_t>(carrier.size);
@@ -163,9 +181,12 @@ bool AuthorityEndpoint::claim_kind(const autonomy::ControlObjectKind kind) noexc
   return kind == autonomy::ControlObjectKind::AuthorityEnvelope;
 }
 
-bool AuthorityEndpoint::claim_transfer(const autonomy::ObjectHash& hash) noexcept {
-  if ((rx_.active || object_ready_) && hash_equal(hash, rx_.hash)) return true;
-  return tx_.active && hash_equal(hash, tx_.hash);
+bool AuthorityEndpoint::claim_transfer(const NodeId origin,
+                                       const autonomy::ObjectHash& hash) noexcept {
+  if ((rx_.active || object_ready_) && origin == rx_.origin &&
+      hash_equal(hash, rx_.hash)) return true;
+  return tx_.active && tx_.total_len > kAuthorityCarrierBodyMax &&
+         origin == tx_.gateway && hash_equal(hash, tx_.hash);
 }
 
 void AuthorityEndpoint::on_control(const NodeId origin, const ByteView payload,
@@ -235,8 +256,7 @@ void AuthorityEndpoint::on_chunk(const NodeId origin,
     sat_inc(counters_.rx_denied);
     return;
   }
-  if (chunk.data_size == 0 ||
-      static_cast<std::uint32_t>(chunk.offset) + chunk.data_size > rx_.total_len) {
+  if (!chunk_on_grid(rx_.total_len, chunk.offset, chunk.data_size, rx_.received)) {
     // Out-of-window bytes poison the assembly, like the config path.
     const std::uint16_t progress = rx_.received;
     const autonomy::ObjectHash hash = rx_.hash;
@@ -291,11 +311,15 @@ void AuthorityEndpoint::on_chunk(const NodeId origin,
 void AuthorityEndpoint::on_ack(const NodeId origin, const autonomy::ObjectAckPayload& ack,
                                const MonotonicMs now_ms) noexcept {
   (void)now_ms;
-  if (in_call_ || !tx_.active || origin != tx_.gateway ||
+  if (in_call_ || !tx_.active || tx_.total_len <= kAuthorityCarrierBodyMax ||
+      origin != tx_.gateway ||
       !hash_equal(ack.object_hash, tx_.hash)) {
     return;
   }
-  if (ack.status == autonomy::ObjectAckStatus::Ok) {
+  const bool progress =
+      acked_sent_chunk(tx_.total_len, tx_.acked, ack.received_len, tx_.sends);
+  if (ack.status == autonomy::ObjectAckStatus::Ok && progress &&
+      ack.received_len == tx_.total_len) {
     complete_tx(true);
     return;
   }
@@ -303,7 +327,8 @@ void AuthorityEndpoint::on_ack(const NodeId origin, const autonomy::ObjectAckPay
     complete_tx(false);
     return;
   }
-  if (ack.received_len > tx_.acked && ack.received_len <= tx_.total_len) {
+  if (ack.status == autonomy::ObjectAckStatus::Incomplete && progress &&
+      ack.received_len < tx_.total_len) {
     tx_.acked = ack.received_len;
     tx_.sends = 0;  // the next outstanding chunk gets a fresh retry budget
   }
@@ -470,7 +495,8 @@ bool AuthorityGateway::claim_kind(const autonomy::ControlObjectKind kind) noexce
   return kind == autonomy::ControlObjectKind::AuthorityEnvelope;
 }
 
-bool AuthorityGateway::claim_transfer(const autonomy::ObjectHash& hash) noexcept {
+bool AuthorityGateway::claim_transfer(const NodeId origin,
+                                      const autonomy::ObjectHash& hash) noexcept {
   for (const auto& slot : slots_) {
     if (!slot.active) continue;
     // Only transfers with a pinned mesh hash: an Up slot still
@@ -478,7 +504,8 @@ bool AuthorityGateway::claim_transfer(const autonomy::ObjectHash& hash) noexcept
     // small-carrier slots never own a hash.
     if (slot.direction == Direction::Up && slot.received >= slot.total_len) continue;
     if (slot.direction == Direction::Down && !slot.mesh_manifest_sent) continue;
-    if (hash_equal(hash, slot.hash)) return true;
+    if (origin == (slot.direction == Direction::Up ? slot.origin : slot.device) &&
+        hash_equal(hash, slot.hash)) return true;
   }
   return false;
 }
@@ -622,8 +649,7 @@ void AuthorityGateway::on_chunk(const NodeId origin,
     sat_inc(counters_.denied);
     return;
   }
-  if (chunk.data_size == 0 ||
-      static_cast<std::uint32_t>(chunk.offset) + chunk.data_size > slot->total_len) {
+  if (!chunk_on_grid(slot->total_len, chunk.offset, chunk.data_size, slot->received)) {
     send_ack(origin, chunk.object_hash, slot->received,
              autonomy::ObjectAckStatus::Failed, now_ms);
     drop_slot(*slot);
@@ -678,14 +704,18 @@ void AuthorityGateway::on_ack(const NodeId origin, const autonomy::ObjectAckPayl
         slot.device != origin || !hash_equal(ack.object_hash, slot.hash)) {
       continue;
     }
-    if (ack.status == autonomy::ObjectAckStatus::Ok ||
+    const bool progress = acked_sent_chunk(slot.total_len, slot.emitted,
+                                           ack.received_len, slot.sends);
+    if ((ack.status == autonomy::ObjectAckStatus::Ok && progress &&
+         ack.received_len == slot.total_len) ||
         ack.status == autonomy::ObjectAckStatus::Failed) {
       // The mesh leg is done either way; the endpoints resync over the
       // channel (the 0x67 was only a transport receipt).
       drop_slot(slot);
       return;
     }
-    if (ack.received_len > slot.emitted && ack.received_len <= slot.total_len) {
+    if (ack.status == autonomy::ObjectAckStatus::Incomplete && progress &&
+        ack.received_len < slot.total_len) {
       slot.emitted = ack.received_len;
       slot.sends = 0;
     }
@@ -730,7 +760,6 @@ Status AuthorityGateway::authority_down(const NodeId device,
   } else if (slot->total_len != fragment.total) {
     return Status::error(StatusCode::Conflict, "authority down retargeted");
   }
-  if (slot->mesh_done) return Status::error(StatusCode::Conflict, "authority down requeued");
   if (static_cast<std::uint32_t>(fragment.offset) + fragment.data.size > slot->total_len) {
     drop_slot(*slot);
     return Status::error(StatusCode::InvalidArgument, "authority down overrun");
@@ -764,7 +793,7 @@ Status AuthorityGateway::authority_down(const NodeId device,
 }
 
 bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noexcept {
-  if (slot.received < slot.total_len || slot.mesh_done) return true;
+  if (slot.received < slot.total_len) return true;
   if (now_ms - slot.started_ms > kAuthorityTransferTimeoutMs) {
     drop_slot(slot);
     sat_inc(counters_.timeouts);
@@ -797,7 +826,7 @@ bool AuthorityGateway::pump_down_mesh(Slot& slot, const MonotonicMs now_ms) noex
     }
     in_call_ = true;
     const Status sent =
-        mesh_.config_send(slot.device, FrameType::Control, ByteView{frame.data(), written}, 0);
+        mesh_.config_send(slot.device, FrameType::Control, ByteView{frame.data(), written}, now_ms);
     in_call_ = false;
     if (!sent) return true;  // mesh shed it: retry on the next poll
     drop_slot(slot);
@@ -948,7 +977,7 @@ void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFram
     case FrameType::ObjectChunk: {
       autonomy::ObjectChunkPayload chunk{};
       if (autonomy::object_chunk_decode(payload, chunk) &&
-          demux_.claim_transfer(chunk.object_hash)) {
+          demux_.claim_transfer(frame.header.origin, chunk.object_hash)) {
         demux_.on_chunk(frame.header.origin, chunk, now_ms);
       }
       break;
@@ -956,7 +985,7 @@ void AuthorityMeshSink::on_config_frame(const NodeId peer, const wire::PlainFram
     case FrameType::ObjectAck: {
       autonomy::ObjectAckPayload ack{};
       if (autonomy::object_ack_decode(payload, ack) &&
-          demux_.claim_transfer(ack.object_hash)) {
+          demux_.claim_transfer(frame.header.origin, ack.object_hash)) {
         demux_.on_ack(frame.header.origin, ack, now_ms);
       }
       break;

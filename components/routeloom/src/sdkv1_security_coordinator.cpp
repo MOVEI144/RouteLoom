@@ -1658,19 +1658,24 @@ void SecurityCoordinator::note_link_failed() noexcept {
   if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
   if (bank_.live_count(SecurityScope::Link) != 0) return;  // per-peer flake
   if (refresh_strikes_ < kRefreshStrikesMax) ++refresh_strikes_;
-  if (refresh_strikes_ >= kRefreshStrikesMax) start_refresh(last_now_);
 }
 
 void SecurityCoordinator::watch_linkless(const MonotonicMs now) noexcept {
-  if (mode_ != CoordinatorMode::Member || !discovery_started_ ||
-      deps_.discovery == nullptr) {
-    return;
-  }
+  if (mode_ != CoordinatorMode::Member || !discovery_started_) return;
   if (bank_.live_count(SecurityScope::Link) != 0) {
     refresh_strikes_ = 0;
-    last_unknown_generation_ = deps_.discovery->scope_stats().unknown_generation;
+    if (deps_.discovery != nullptr) {
+      last_unknown_generation_ = deps_.discovery->scope_stats().unknown_generation;
+    }
     return;
   }
+  // Link failures can arrive while draining engine results. Keep that
+  // workspace live until the member poll reaches this boundary.
+  if (refresh_strikes_ >= kRefreshStrikesMax) {
+    start_refresh(now);
+    return;
+  }
+  if (deps_.discovery == nullptr) return;
   const std::uint32_t unknown = deps_.discovery->scope_stats().unknown_generation;
   if (unknown != last_unknown_generation_) {
     // Fresh unknown-generation observations while linkless: one strike

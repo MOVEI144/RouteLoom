@@ -271,6 +271,11 @@ impl DeviceSession {
         if self.phase != SessionPhase::Active {
             return Err("session not authenticated");
         }
+        // A lane may bind an enqueued body to the session that authorized
+        // it. Refuse a stale queue item before charging credit or counters.
+        if frame.session != 0 && frame.session != self.session_id {
+            return Err("queued frame session changed");
+        }
         let key = match self.proof.as_ref() {
             Some(proof) => proof.key,
             None => return Err("session proof missing"),
@@ -2815,6 +2820,18 @@ mod tests {
             Outbound::Raw(_) => panic!("TX grant must be sealed at write time"),
         }
         proof
+    }
+
+    #[test]
+    fn queued_site_frame_cannot_cross_usb_session() {
+        let mut session = DeviceSession::new();
+        let proof = complete_handshake(&mut session);
+        session.handle(&device_credit_grant(&proof, 0, 1, 1_000));
+        let before = session.h2d_counter;
+        let mut stale = frame(FrameKind::HostOps, 0, 7, vec![1, 0x65]);
+        stale.session = proof.session_id ^ 1;
+        assert!(session.protect(&mut stale).is_err());
+        assert_eq!(session.h2d_counter, before);
     }
 
     #[test]

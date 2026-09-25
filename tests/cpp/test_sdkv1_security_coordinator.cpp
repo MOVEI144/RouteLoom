@@ -23,6 +23,14 @@
 
 #include "test_sdkv1.hpp"
 
+namespace routeloom::sdkv1 {
+struct SecurityCoordinatorTestAccess {
+  static void link_failed(SecurityCoordinator& coordinator) noexcept {
+    coordinator.note_link_failed();
+  }
+};
+}  // namespace routeloom::sdkv1
+
 namespace {
 
 int failures = 0;
@@ -1069,6 +1077,29 @@ void test_refresh_stale_gk() {
   CHECK(coordinator.snapshot().refresh_strikes == 0);
 }
 
+void test_link_failure_refresh_waits_for_poll_boundary() {
+  current = "link_failure_refresh_waits_for_poll_boundary";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(poll_drain(coordinator, now));  // discovery has started
+  for (int i = 0; i < 3; ++i) {
+    SecurityCoordinatorTestAccess::link_failed(coordinator);
+  }
+  // Engine results are drained in a loop. The member workspace must
+  // remain alive until that loop and the member poll have finished.
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(coordinator.snapshot().refresh_strikes == 3);
+  CHECK(poll_drain(coordinator, now));
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(coordinator.counters().refreshes == 1);
+}
+
 int main() {
   test_boot_silent_adoption();
   test_rld1_demux_gates();
@@ -1084,6 +1115,7 @@ int main() {
   test_authority_channel_lifecycle();
   test_group_provider_routing();
   test_refresh_stale_gk();
+  test_link_failure_refresh_waits_for_poll_boundary();
   test_commit_veto();
   test_store_credential_verifier();
   test_channel_ready_flow();

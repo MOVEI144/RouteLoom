@@ -1,9 +1,8 @@
-//! Live authority-channel E2E (P5 PR4 acceptance): the real join
-//! (EDHOC), the real RLRES1 handshake, JoinConfirm, pull, rotation and
-//! removal — every carrier through the real USB 0x64/0x65 fragment layer
-//! with real AES-GCM. No fake transports: GK exclusion, JoinConfirm and
-//! pull all run through `SiteService` + `UsbAuthorityAdapter`, and the
-//! peer (`FakeDevice`) checks every sealed answer it receives.
+//! Authority-channel E2E with a Rust simulated device: EDHOC, RLRES1,
+//! JoinConfirm, pull, rotation and removal run through `SiteService` and
+//! `UsbAuthorityAdapter`, with USB 0x64/0x65 fragments and real AES-GCM.
+//! `FakeDevice` checks the sealed answers; the C++ Owner and MeshNode are
+//! outside this test's process boundary.
 
 use std::collections::HashMap;
 use std::sync::Arc;
