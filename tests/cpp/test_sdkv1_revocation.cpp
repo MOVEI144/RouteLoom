@@ -532,6 +532,39 @@ void test_member_ready_closes_on_floor_advance() {
   CHECK(!node.lifecycle.permits(stamp_for(kPeer, 3), TrafficUse::Data));
 }
 
+void test_member_ready_fetches_package_epoch_past_old_rrs() {
+  NodeFixture node;
+  CHECK(node.provision(3, 14));
+  CHECK(node.snap().phase == LifecyclePhase::Active);
+  // A join package can name a newer RRS1 than the already adopted set;
+  // the old set must not satisfy the fetch target.
+  CHECK_OK(node.dispatch(LifecycleInput::MemberReady(node.site.commit_seq(), 16), 100));
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 100));
+  CHECK(!node.authority.sent.empty());
+  RrsGet get{};
+  if (!node.authority.sent.empty()) {
+    CHECK_OK(rrs_get_decode(ByteView{node.authority.sent.back().body.data(),
+                                     node.authority.sent.back().body.size()}, get));
+    CHECK(get.wanted_rs_epoch == 0);
+  }  // authority returns its latest set
+  CHECK(node.snap().rs_epoch_to_fetch == 16);
+  PeerCredentialStamp authority{};
+  authority.network = kNetwork;
+  CHECK_OK(node.dispatch(LifecycleInput::Authority(authority, kAuthorityTypeRevocation,
+                       revocation_object(revocation_set(15)).view()), 200));
+  node.pump(200);
+  CHECK(node.snap().applied_rs_epoch == 15);
+  // The intermediate set does not complete the package's fetch obligation.
+  CHECK(node.snap().rs_epoch_to_fetch == 16);
+  CHECK_OK(node.dispatch(LifecycleInput::Poll(), 60100));
+  CHECK(node.snap().authority_gets_sent >= 2);
+  CHECK_OK(node.dispatch(LifecycleInput::Authority(authority, kAuthorityTypeRevocation,
+                       revocation_object(revocation_set(16)).view()), 60200));
+  node.pump(60200);
+  CHECK(node.snap().applied_rs_epoch == 16);
+  CHECK(node.snap().rs_epoch_to_fetch == 0);
+}
+
 void test_apply_does_not_ack_below_a_newer_floor() {
   NodeFixture node;
   CHECK(node.provision(3, 14));
@@ -2732,6 +2765,7 @@ int main() {
   test_boot_self_revoked_and_blocked();
   test_boot_revalidates_stored_rrs();
   test_member_ready_closes_on_floor_advance();
+  test_member_ready_fetches_package_epoch_past_old_rrs();
   test_apply_does_not_ack_below_a_newer_floor();
   test_recovery_control_rejects_revoked_credentials();
   test_apply_order_and_sweep();
