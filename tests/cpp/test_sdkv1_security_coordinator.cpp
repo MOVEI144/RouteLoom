@@ -25,6 +25,7 @@
 #include "routeloom/trust_store.hpp"
 #include "routeloom/usb_host_ops.hpp"
 
+#include "join_sim_network.hpp"
 #include "test_sdkv1.hpp"
 #include "test_security.hpp"
 #include "test_sim.hpp"
@@ -33,6 +34,16 @@ namespace routeloom::sdkv1 {
 struct SecurityCoordinatorTestAccess {
   static void link_failed(SecurityCoordinator& coordinator) noexcept {
     coordinator.note_link_failed();
+  }
+  static JoinSnapshot join_snapshot(const SecurityCoordinator& coordinator) noexcept {
+    return coordinator.joiner().snapshot();
+  }
+  static Status adopt(SecurityCoordinator& coordinator, const JoinAction& ready,
+                      MonotonicMs now) noexcept {
+    return coordinator.adopt_member(ready, now);
+  }
+  static void invalidate_joiner_channels(SecurityCoordinator& coordinator) noexcept {
+    coordinator.deps_.joiner_config.scan_channel_count = 0;
   }
 };
 }  // namespace routeloom::sdkv1
@@ -591,6 +602,336 @@ void test_invalid_proxy_auth_does_not_hold_demux() {
     CHECK(coordinator.step(rx).ok());
   }
   CHECK(coordinator.quiescent());
+}
+
+void test_join_rs_target_reaches_member_config() {
+  current = "join_rs_target_reaches_member_config";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(f.site.commit(site_record()).ok());
+  JoinAction ready{};
+  ready.kind = JoinActionKind::MemberReady;
+  ready.rs_epoch_to_fetch = 345;
+  CHECK(SecurityCoordinatorTestAccess::adopt(coordinator, ready, kT0 + 1).ok());
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  CHECK(action.member.rs_epoch_to_fetch == 345);
+}
+
+void test_zt_unicast_does_not_claim_member_demux() {
+  current = "zt_unicast_does_not_claim_member_demux";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  const auto send = [&](const FrameType kind, const std::uint8_t nonce) {
+    autonomy::Rld1Envelope env{};
+    env.kind = kind;
+    env.transaction_nonce[0] = nonce;
+    env.body[0] = 1;
+    env.body[1] = static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage);
+    env.body_size = kind == FrameType::BootstrapReply ? 6 : 2;
+    autonomy::Rld1Encoded encoded{};
+    CHECK(autonomy::rld1_encode(env, encoded).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = kT0 + nonce;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = 6;
+    rx.rld1_frame = encoded.view();
+    CHECK(coordinator.step(rx).ok());
+  };
+  const auto drops = coordinator.counters().demux_drops;
+  // Rejected auth frames must not occupy the inactive member union arm.
+  for (std::uint8_t n = 1; n <= 10; ++n) send(FrameType::BootstrapAuth, n);
+  // Early relay status uses the Auth lane, while progress replies use
+  // Reply; neither may claim an inactive member workspace.
+  send(FrameType::BootstrapReply, 11);
+  JoinAuthObject hint{};
+  hint.phase = JoinAuthPhase::RelayStatus;
+  hint.step = 1;
+  hint.relay_status = RelayStatusCode::Busy;
+  hint.retry_after_ms = 1000;
+  JoinObjectBytes hint_bytes{};
+  std::size_t hint_size = 0;
+  CHECK(join_object_encode(hint,
+        MutableByteView{hint_bytes.bytes.data(), hint_bytes.bytes.size()}, hint_size));
+  autonomy::Rld1Envelope status{};
+  status.kind = FrameType::BootstrapAuth;
+  status.transaction_nonce[0] = 12;
+  std::memcpy(status.body.data(), hint_bytes.bytes.data(), hint_size);
+  status.body_size = hint_size;
+  autonomy::Rld1Encoded encoded{};
+  CHECK(autonomy::rld1_encode(status, encoded).ok());
+  CoordinatorEvent rx{};
+  rx.kind = CoordinatorEventKind::Rld1Rx;
+  rx.now = kT0 + 12;
+  rx.rld1_meta.source = kPeerMac;
+  rx.rld1_meta.destination = kMac;
+  rx.rld1_meta.channel = 6;
+  rx.rld1_frame = encoded.view();
+  CHECK(coordinator.step(rx).ok());
+  CHECK(coordinator.counters().demux_drops == drops);
+}
+
+void test_zt_wait_m2_status_after_demux_exhaustion() {
+  current = "zt_wait_m2_status_after_demux_exhaustion";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  std::size_t sent = 0;
+  std::array<std::uint8_t, 16> m1_nonce{};
+  bool saw_m1 = false;
+  // Drive a real scan and OFFER through the coordinator until the Joiner
+  // sends m1. Every scan channel is acknowledged as a separate radio action.
+  for (int i = 0; i < 300 && !saw_m1; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      if (action.kind != CoordinatorActionKind::TuneChannel) continue;
+      CoordinatorEvent ready{};
+      ready.kind = CoordinatorEventKind::ChannelReady;
+      ready.now = now;
+      ready.channel_token = action.tune.token;
+      ready.channel = action.tune.channel;
+      ready.channel_result = StatusCode::Ok;
+      CHECK(coordinator.step(ready).ok());
+    }
+    while (sent < f.rld1.sends.size()) {
+      autonomy::Rld1Envelope env{};
+      CHECK(autonomy::rld1_decode(ByteView{f.rld1.sends[sent].bytes.data(),
+                                           f.rld1.sends[sent].bytes.size()}, env).ok());
+      ++sent;
+      if (env.kind == FrameType::BootstrapAuth) {
+        m1_nonce = env.transaction_nonce;
+        saw_m1 = true;
+      }
+      if (env.kind != FrameType::Discover) continue;
+      ZtOfferBody offer{};
+      offer.flags = kZtOfferAuthorityReachable;
+      offer.org_hint = join_org_hint(site_ca().pub);
+      offer.site_hint = join_site_hint(site_record().site_id);
+      offer.authority_hops = 1;
+      autonomy::Rld1Encoded frame{};
+      CHECK(zt_offer_frame_encode(kNode + 1, static_cast<std::uint32_t>(kNetwork),
+                                  env.transaction_nonce, offer, frame).ok());
+      CoordinatorEvent rx{};
+      rx.kind = CoordinatorEventKind::Rld1Rx;
+      rx.now = now;
+      rx.rld1_meta.source = kPeerMac;
+      rx.rld1_meta.destination = kMac;
+      rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+      rx.rld1_frame = frame.view();
+      CHECK(coordinator.step(rx).ok());
+    }
+  }
+  CHECK(saw_m1);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state == JoinState::WaitM2);
+  const auto drops = coordinator.counters().demux_drops;
+  // Nine unrelated object IDs must not occupy a member demux arm in ZT.
+  for (std::uint8_t i = 1; i <= 9; ++i) {
+    autonomy::Rld1Envelope noise{};
+    noise.kind = FrameType::BootstrapAuth;
+    noise.transaction_nonce[0] = i;
+    noise.body[0] = 1;
+    noise.body[1] = static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage);
+    noise.body_size = 2;
+    autonomy::Rld1Encoded frame{};
+    CHECK(autonomy::rld1_encode(noise, frame).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = ++now;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+    rx.rld1_frame = frame.view();
+    CHECK(coordinator.step(rx).ok());
+  }
+  JoinAuthObject hint{};
+  hint.phase = JoinAuthPhase::RelayStatus;
+  hint.step = 1;
+  hint.relay_status = RelayStatusCode::Busy;
+  hint.retry_after_ms = 1000;
+  JoinObjectBytes body{};
+  std::size_t size = 0;
+  CHECK(join_object_encode(hint, MutableByteView{body.bytes.data(), body.bytes.size()}, size));
+  autonomy::Rld1Envelope status{};
+  status.kind = FrameType::BootstrapAuth;
+  status.transaction_nonce = m1_nonce;
+  status.claimed_node = kNode + 1;
+  status.network_hint = static_cast<std::uint32_t>(kNetwork);
+  std::memcpy(status.body.data(), body.bytes.data(), size);
+  status.body_size = size;
+  autonomy::Rld1Encoded frame{};
+  CHECK(autonomy::rld1_encode(status, frame).ok());
+  CoordinatorEvent rx{};
+  rx.kind = CoordinatorEventKind::Rld1Rx;
+  rx.now = ++now;
+  rx.rld1_meta.source = kPeerMac;
+  rx.rld1_meta.destination = kMac;
+  rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+  rx.rld1_frame = frame.view();
+  CHECK(coordinator.step(rx).ok());
+  CHECK(coordinator.counters().demux_drops == drops);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state == JoinState::WaitM2);
+  // The pre-m2 hint is not a verdict: after the unanswered m1 times out,
+  // its retry_after suppresses only this proxy for the next selection.
+  for (int i = 0; i < 150; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    if (SecurityCoordinatorTestAccess::join_snapshot(coordinator).counters.transient_failures)
+      break;
+  }
+  const JoinSnapshot joined = SecurityCoordinatorTestAccess::join_snapshot(coordinator);
+  CHECK(joined.counters.transient_failures == 1);
+  CHECK(joined.candidates.proxy_suppressions == 1);
+}
+
+// A valid m2 must still reach the Joiner after more than eight distinct
+// rejected exchanges; the inactive MemberEngine must not own ZT demux state.
+void test_zt_m2_after_nine_exchanges() {
+  current = "zt_m2_after_nine_exchanges";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  std::size_t sent = 0;
+  JoinNonce nonce{};
+  JoinAuthObject m1{};
+  std::array<std::uint8_t, kJoinMessageMax> m1_bytes{};
+  std::size_t m1_size = 0;
+  bool saw_m1 = false;
+  for (int i = 0; i < 300 && !saw_m1; ++i) {
+    now += 100;
+    CHECK(coordinator.step(poll_at(now)).ok());
+    CoordinatorAction action{};
+    while (coordinator.take_action(action).ok()) {
+      if (action.kind != CoordinatorActionKind::TuneChannel) continue;
+      CoordinatorEvent ready{};
+      ready.kind = CoordinatorEventKind::ChannelReady;
+      ready.now = now;
+      ready.channel_token = action.tune.token;
+      ready.channel = action.tune.channel;
+      ready.channel_result = StatusCode::Ok;
+      CHECK(coordinator.step(ready).ok());
+    }
+    while (sent < f.rld1.sends.size()) {
+      autonomy::Rld1Envelope env{};
+      const auto& bytes = f.rld1.sends[sent++].bytes;
+      CHECK(autonomy::rld1_decode(ByteView{bytes.data(), bytes.size()}, env).ok());
+      if (env.kind == FrameType::BootstrapAuth) {
+        nonce = env.transaction_nonce;
+        CHECK(join_object_decode(ByteView{env.body.data(), env.body_size}, m1).ok());
+        m1_size = m1.message.size;
+        std::memcpy(m1_bytes.data(), m1.message.data, m1_size);
+        saw_m1 = true;
+      }
+      if (env.kind != FrameType::Discover) continue;
+      ZtOfferBody offer{};
+      offer.flags = kZtOfferAuthorityReachable;
+      offer.org_hint = join_org_hint(site_ca().pub);
+      offer.site_hint = join_site_hint(site_record().site_id);
+      offer.authority_hops = 1;
+      autonomy::Rld1Encoded frame{};
+      CHECK(zt_offer_frame_encode(kNode + 1, static_cast<std::uint32_t>(kNetwork),
+                                  env.transaction_nonce, offer, frame).ok());
+      CoordinatorEvent rx{};
+      rx.kind = CoordinatorEventKind::Rld1Rx;
+      rx.now = now;
+      rx.rld1_meta.source = kPeerMac;
+      rx.rld1_meta.destination = kMac;
+      rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+      rx.rld1_frame = frame.view();
+      CHECK(coordinator.step(rx).ok());
+    }
+  }
+  CHECK(saw_m1);
+  if (!saw_m1) return;
+  CHECK(m1.step == 1);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state == JoinState::WaitM2);
+
+  CertClaims claims{};
+  claims.type = CertType::Site;
+  claims.issuer = kSiteCaId;
+  claims.subject = site_record().site_id;
+  claims.pubkey = sak().pub;
+  claims.network_low32 = static_cast<std::uint32_t>(kNetwork);
+  claims.site_epoch = static_cast<std::uint32_t>(kNetwork >> 32U);
+  claims.usage = 1;
+  const auto cert = issue(claims, site_ca());
+  Digest256 kid{};
+  CHECK(cert_subject_kid(claims, kid));
+  join_sim::SimAuthority authority(cert, kid, sak().priv, device_ca().pub,
+                                   claims.subject, kNetwork, SitePackage{}, 0x1234);
+  const auto down = authority.on_up(1, ByteView{m1_bytes.data(), m1_size}, now);
+  CHECK(down.has && down.step == 2);
+  if (!down.has) return;
+
+  const auto drops = coordinator.counters().demux_drops;
+  const auto deliver = [&](const FrameType kind, const JoinNonce& id, const ByteView body) {
+    autonomy::Rld1Envelope env{};
+    env.kind = kind;
+    env.network_hint = static_cast<std::uint32_t>(kNetwork);
+    env.claimed_node = kNode + 1;
+    env.transaction_nonce = id;
+    env.body_size = body.size;
+    std::memcpy(env.body.data(), body.data, body.size);
+    autonomy::Rld1Encoded frame{};
+    CHECK(autonomy::rld1_encode(env, frame).ok());
+    CoordinatorEvent rx{};
+    rx.kind = CoordinatorEventKind::Rld1Rx;
+    rx.now = ++now;
+    rx.rld1_meta.source = kPeerMac;
+    rx.rld1_meta.destination = kMac;
+    rx.rld1_meta.channel = SecurityCoordinatorTestAccess::join_snapshot(coordinator).channel;
+    rx.rld1_frame = frame.view();
+    CHECK(coordinator.step(rx).ok());
+  };
+  for (std::uint8_t i = 1; i <= 9; ++i) {
+    JoinNonce other{};
+    other[0] = i;
+    const std::uint8_t bad[2] = {1, static_cast<std::uint8_t>(JoinAuthPhase::EdhocMessage)};
+    deliver(FrameType::BootstrapAuth, other, ByteView{bad, sizeof(bad)});
+  }
+  JoinAuthObject m2{};
+  m2.phase = JoinAuthPhase::EdhocMessage;
+  m2.step = 2;
+  m2.message = ByteView{down.body.data(), down.body.size()};
+  JoinObjectBytes encoded{};
+  std::size_t size = 0;
+  CHECK(join_object_encode(m2, MutableByteView{encoded.bytes.data(), encoded.bytes.size()},
+                           size).ok());
+  JoinObjectSlot slot{};
+  CHECK(slot.load(JoinCarrier::Rld1, JoinAuthPhase::EdhocMessage, 2,
+                  join_rld1_object_id(nonce), 0, 0,
+                  ByteView{encoded.bytes.data(), size}, now).ok());
+  for (std::size_t i = 0; i < slot.chunk_total(); ++i) {
+    JoinChunk chunk{};
+    CHECK(slot.chunk_at(i, chunk).ok());
+    std::array<std::uint8_t, autonomy::kRld1MaxBody> body{};
+    std::size_t body_size = 0;
+    CHECK(join_chunk_encode(JoinCarrier::Rld1, chunk,
+                            MutableByteView{body.data(), body.size()}, body_size).ok());
+    deliver(FrameType::BootstrapChunk, nonce, ByteView{body.data(), body_size});
+  }
+  CHECK(coordinator.counters().demux_drops == drops);
+  CHECK(coordinator.step(poll_at(++now)).ok());
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).counters.m2_ok == 1);
+  CHECK(SecurityCoordinatorTestAccess::join_snapshot(coordinator).state != JoinState::WaitM2);
 }
 
 void test_clock_regression_refused() {
@@ -1492,6 +1833,60 @@ void test_refresh_stale_gk() {
   CHECK(coordinator.snapshot().refresh_strikes == 0);
 }
 
+void test_workspace_arm_survives_member_adoption_and_refresh() {
+  current = "workspace_arm_survives_member_adoption_and_refresh";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));
+  for (int i = 0; i < 3; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+  CHECK(coordinator.step(poll_at(++now)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::ZeroTouch);
+}
+
+void test_failed_refresh_re_adopts_configured_member() {
+  current = "failed_refresh_re_adopts_configured_member";
+  Fixture f{};
+  CHECK(f.init_stores());
+  CHECK(f.identity.commit(identity_record()).ok());
+  CHECK(f.site.commit(site_record()).ok());
+  SecurityCoordinator coordinator(f.deps());
+  FakeAuthorityPort port;
+  CHECK(coordinator.attach_authority_port(port));
+  CHECK(coordinator.step(boot_event(kT0, kBoot)).ok());
+  MonotonicMs now = kT0;
+  CHECK(poll_until_member(coordinator, now));
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(poll_drain(coordinator, now));
+  SecurityCoordinatorTestAccess::invalidate_joiner_channels(coordinator);
+  for (int i = 0; i < 2; ++i) {
+    bump_unknown_generations(*f.deps().discovery, 2);
+    CHECK(poll_drain(coordinator, now));
+  }
+  bump_unknown_generations(*f.deps().discovery, 2);
+  CHECK(coordinator.step(poll_at(now += 5000)).ok());
+  CHECK(coordinator.snapshot().mode == CoordinatorMode::Member);
+  CHECK(!coordinator.snapshot().authority_started);
+  CoordinatorAction action{};
+  CHECK(coordinator.take_action(action).ok());
+  CHECK(action.kind == CoordinatorActionKind::ApplyMemberConfig);
+  CHECK(action.member.node == kNode);
+  CHECK(complete_member_apply(coordinator, now, f.site.site().channel));
+  CHECK(coordinator.step(poll_at(++now)).ok());
+  CHECK(coordinator.snapshot().engine_quiescent);
+  CHECK(coordinator.snapshot().resume_link_slots == kResume2NodeLinkQuota);
+}
+
 void test_link_failure_refresh_waits_for_poll_boundary() {
   current = "link_failure_refresh_waits_for_poll_boundary";
   Fixture f{};
@@ -1820,6 +2215,10 @@ int main() {
   test_member_apply_failure_is_closed();
   test_rld1_demux_gates();
   test_invalid_proxy_auth_does_not_hold_demux();
+  test_join_rs_target_reaches_member_config();
+  test_zt_unicast_does_not_claim_member_demux();
+  test_zt_wait_m2_status_after_demux_exhaustion();
+  test_zt_m2_after_nine_exchanges();
   test_clock_regression_refused();
   test_gateway_resume_quotas();
   test_staged_bootstrap_rx();
@@ -1833,6 +2232,8 @@ int main() {
   test_group_provider_routing();
   test_coordinator_group_cached_revocation();
   test_refresh_stale_gk();
+  test_workspace_arm_survives_member_adoption_and_refresh();
+  test_failed_refresh_re_adopts_configured_member();
   test_link_failure_refresh_waits_for_poll_boundary();
   test_commit_veto();
   test_store_credential_verifier();

@@ -1379,13 +1379,12 @@ void EspNowSecurityOwner::on_member_config(const sdkv1::CoordinatorMemberConfig&
   adopted_node_ = member.node;
   adopted_network_ = member.network;
   adopted_role_ = member.role;
-  // The adoption re-proves the stores for the lifecycle (first adopt and
-  // every recovery re-adopt): the RLS1 commit_seq the coordinator saw,
-  // with no package fetch target yet (a P4 adapter handoff to come —
-  // acquisition meanwhile runs off the stored set plus gossip).
+  // The lifecycle needs the verified package RS target at fresh adoption;
+  // boot re-adoption carries zero and uses its durable floor.
   if (lifecycle_live_ && lifecycle_booted_ && stores_ != nullptr) {
     (void)lifecycle().dispatch(
-        sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(), 0), now_ms);
+        sdkv1::LifecycleInput::MemberReady(stores_->site().commit_seq(),
+                                           member.rs_epoch_to_fetch), now_ms);
     complete_lifecycle_recovery(true, now_ms);
   }
   // Adoption binds the authority transport's self id (self-downs deliver

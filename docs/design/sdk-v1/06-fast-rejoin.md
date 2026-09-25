@@ -100,7 +100,7 @@ next_expired(now): 期限切れsessionを1件ずつ返す（Iはfull EDHOCへ）
 
 - 1 session＝1通：WAIT_R2はR2（hint・不正mac・壊れた形を含む）を1通受けた時点で終わる（§2.2の「mac不正→full EDHOC」をそのまま採る）。WAIT_R3も1通で終わる。攻撃者が1通注入すればfull EDHOCになるが、これは可用性の問題で鍵は作られない。
 - 未認証hint（12B）は`status ‖ flags=0 ‖ reserved=0 ‖ rid 8B`。hintを出すのは未知rid（mac検証不可）と、mac検証後の期限切れ・失効だけ。mac不正・replay・epoch不一致・表満杯は何も返さない（oracleを与えない）。
-- 応答側の検査順：形→purpose提供可否→反射→rid→送信元→network→mac_I→replay cache記録→期限・失効（hint）→site_epoch→gk_epoch→重複・同時開始→表→rate→乱数・context id。replay cacheはmac検証に通ったnonce_Iだけを記録し、16件を超えると古い順に上書きする（上書きで失うのは早期拒否だけで、WAIT_R3の鍵確認が本来の防御）。
+- 応答側の検査順：形→purpose提供可否→反射→rid→送信元→network→mac_I→replay照合→期限・失効（hint）→site_epoch→gk_epoch→重複・同時開始→表→rate→使用回数予約→replay cache記録→乱数・context id。replay cacheはadmissionを通過したnonce_Iだけを記録し、16件を超えると古い順に上書きする（上書きで失うのは早期拒否だけで、WAIT_R3の鍵確認が本来の防御）。
 - gk_epochの許容幅：link／endは`|peer − 自分| ≤ 1`かつ`peer ≥ created_gk_epoch`（24時間更新1回分のoverlap）。authority／pending-joinはgk_epochを検査しない（GKが古いことが問合せの理由になるため）。rs_epochは拒否に使わず、`peer_rs_behind`／`local_rs_behind`として返す（[04](04-removal-revocation.md) §4の取得契機）。
 - 同一(peer, purpose)の進行中sessionは各role 1件。新しいR1が来ても進行中のsessionを置き換えない（`DuplicateSession`）。同時開始は小さいNodeIdの開始を残す（両側で同じ判断になる決定的規則）。
 - 応答側の期限も`1秒＋hop×0.3秒`（routedのR3もhopを渡るため。linkはhop 0で1秒）。hopは最大16。

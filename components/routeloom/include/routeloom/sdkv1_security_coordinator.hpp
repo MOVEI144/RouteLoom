@@ -31,6 +31,7 @@
 // No heap, no exceptions; every entry is noexcept.
 
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 
@@ -180,6 +181,7 @@ struct CoordinatorMemberConfig {
   std::uint8_t channel{0};  // adopted operating channel, independent of stale stores
   std::uint32_t message_session{0};
   std::uint32_t boot_session{0};  // rlboot witness, nonzero
+  std::uint32_t rs_epoch_to_fetch{0};  // verified fresh-join package target
   std::uint32_t link_epoch{1};
   std::uint32_t end_epoch{1};
   std::uint64_t boot_incarnation{0};
@@ -537,14 +539,11 @@ class SecurityCoordinator final : public BootstrapSink,
   static constexpr std::uint32_t kDemuxHoldMs = 30000;
   static constexpr std::uint32_t kRemovalHoldoffMs = 600000;
 
-  enum class DemuxOwner : std::uint8_t { None, Joiner, Proxy, Member };
-
   struct DemuxEntry {
     bool used{false};
     MacAddress mac{};
     NodeId peer{kInvalidNodeId};  // claimed (taken start / request)
     std::uint32_t object_id{0};
-    DemuxOwner owner{DemuxOwner::None};
     MonotonicMs expires_at{0};
     // Member responder legs park the taken discovery start until m1/R1.
     bool has_start{false};
@@ -700,9 +699,10 @@ class SecurityCoordinator final : public BootstrapSink,
   void maybe_abandon_refresh(MonotonicMs now) noexcept;
   // --- MemberReady adoption ---
   Status adopt_member(const JoinAction& ready, MonotonicMs now) noexcept;
-  Status adopt_boot_rls1(MonotonicMs now) noexcept;  // same tail, stored site
+  Status adopt_boot_rls1(MonotonicMs now, std::uint32_t rs_epoch_to_fetch = 0) noexcept;  // same tail, stored site
   Status install_member_config(const SiteRecord& site, const IdentityRecord& identity,
-                               std::uint32_t boot_session, MonotonicMs now) noexcept;
+                               std::uint32_t boot_session, MonotonicMs now,
+                              std::uint32_t rs_epoch_to_fetch = 0) noexcept;
   // --- static dev adoption (P4 §10.1) ---
   Status install_dev_config(const CoordinatorDevConfig& config, MonotonicMs now) noexcept;
   // Scrubs the half-built dev adoption into Recovery (ReportRecovery).
@@ -717,7 +717,7 @@ class SecurityCoordinator final : public BootstrapSink,
   }
   // --- RLD1 demux ---
   DemuxEntry* find_demux(const MacAddress& mac, std::uint32_t object_id) noexcept;
-  DemuxEntry* claim_demux(const MacAddress& mac, std::uint32_t object_id, DemuxOwner owner,
+  DemuxEntry* claim_demux(const MacAddress& mac, std::uint32_t object_id,
                           MonotonicMs now) noexcept;
   void sweep_demux(MonotonicMs now) noexcept;
   Status demux_member_frame(const autonomy::Rld1Envelope& env, DemuxEntry* entry,
@@ -854,10 +854,22 @@ class SecurityCoordinator final : public BootstrapSink,
   void destroy_workspace() noexcept;
   void create_joiner() noexcept;
   void create_member() noexcept;
-  Joiner& joiner() noexcept { return ws_.joiner; }
-  const Joiner& joiner() const noexcept { return ws_.joiner; }
-  MemberEngine& member() noexcept { return ws_.member; }
-  const MemberEngine& member() const noexcept { return ws_.member; }
+  Joiner& joiner() noexcept {
+    assert(mode_ == CoordinatorMode::ZeroTouch);
+    return ws_.joiner;
+  }
+  const Joiner& joiner() const noexcept {
+    assert(mode_ == CoordinatorMode::ZeroTouch);
+    return ws_.joiner;
+  }
+  MemberEngine& member() noexcept {
+    assert(has_member_engine());
+    return ws_.member;
+  }
+  const MemberEngine& member() const noexcept {
+    assert(has_member_engine());
+    return ws_.member;
+  }
   // --- mode sides (exactly one live; see above) ---
   void destroy_small() noexcept;
   void create_small() noexcept;

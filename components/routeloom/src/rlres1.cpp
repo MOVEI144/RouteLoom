@@ -624,7 +624,6 @@ void Engine::on_r1(const ByteView message, const Carrier& carrier, const NodeId 
     reject(out, Reject::ReplayedNonce);
     return;
   }
-  replay_remember(r1.nonce_i);
 
   if (pairwise(purpose)) {
     if (static_cast<std::uint64_t>(slot.created_gk_epoch) + kGkLifetime <=
@@ -682,6 +681,8 @@ void Engine::on_r1(const ByteView message, const Carrier& carrier, const NodeId 
     return;
   }
 
+  // Rejected admission must not evict an accepted nonce from the bounded cache.
+  replay_remember(r1.nonce_i);
   R2 r2{};
   r2.status = R2Status::Ok;
   if (!env.random(MutableByteView{r2.nonce_r.data(), r2.nonce_r.size()})) {

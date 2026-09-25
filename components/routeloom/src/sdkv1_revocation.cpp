@@ -1555,9 +1555,14 @@ Status MembershipLifecycle::on_member_ready(const LifecycleMemberReady& ready,
   }
   const bool changed = site_.commit_seq() != ready.site_commit_seq ||
                        site_.commit_seq() != adopted_.site_commit_seq;
-  if (ready.rs_epoch_to_fetch > adopted_.rs_epoch) {
+  const bool same_site = site_.has_site() && adopted_.site_ok &&
+                         site_.site().site_id == adopted_.site_id &&
+                         site_.site().network == adopted_.network;
+  if (!same_site) {
     rs_to_fetch_ = ready.rs_epoch_to_fetch;
-  } else if (ready.rs_epoch_to_fetch <= adopted_.rs_epoch) {
+  } else if (ready.rs_epoch_to_fetch > adopted_.rs_epoch) {
+    if (ready.rs_epoch_to_fetch > rs_to_fetch_) rs_to_fetch_ = ready.rs_epoch_to_fetch;
+  } else if (rs_to_fetch_ <= adopted_.rs_epoch) {
     rs_to_fetch_ = 0;
   }
   if (changed || phase_ == LifecyclePhase::BootGate) {

@@ -728,6 +728,18 @@ void test_exhaustion() {
     b.engine.on_r1(view(r1s.back()), link_carrier(), 0x300 + kMaxResponderSessions, 1, b.env, o);
     CHECK(o.reject == Reject::TableFull && o.action == Action::None);
     CHECK(b.engine.responder_in_flight() == kMaxResponderSessions);
+    // Rejected but MAC-valid R1s must not evict an admitted replay nonce.
+    for (std::uint64_t i = 0; i < 16; ++i) {
+      Node a(0x300);
+      a.env.slots.push_back(Slot{keys::Purpose::Link, kB, kNetwork, 12, 1, secret(0)});
+      a.env.rng ^= (i + 1) * 0x100000001B3ull;
+      a.engine.begin(begin_req(a, kB), 0, a.env, o);
+      const Bytes r1 = bytes(o);
+      b.engine.on_r1(view(r1), link_carrier(), 0x300, 1, b.env, o);
+      CHECK(o.reject == Reject::DuplicateSession);
+    }
+    b.engine.on_r1(view(r1s.front()), link_carrier(), 0x300, 1, b.env, o);
+    CHECK(o.reject == Reject::ReplayedNonce);
   }
   {  // Admission rate: 1/s, burst 1.
     Limits l{};
