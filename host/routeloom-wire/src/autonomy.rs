@@ -442,6 +442,9 @@ pub enum ControlObjectKind {
     /// COSE object bytes verbatim; the manifest hash proves reassembly
     /// identity only, the SAK signature inside the object is the authority.
     RevocationSet = 6,
+    /// Authority envelopes larger than one mesh carrier use the shared
+    /// authenticated-object transfer at the full 2048-byte cap.
+    AuthorityEnvelope = 7,
 }
 
 #[derive(Clone, Debug)]
@@ -483,6 +486,7 @@ pub fn control_object_decode(encoded: &[u8]) -> Result<ControlObjectPayload> {
         4 => ControlObjectKind::ConfigRecovery,
         5 => ControlObjectKind::TrustManifest,
         6 => ControlObjectKind::RevocationSet,
+        7 => ControlObjectKind::AuthorityEnvelope,
         _ => return reject(),
     };
     let total_len = u16::from_be_bytes(encoded[4..6].try_into().expect("fixed"));
