@@ -1,5 +1,12 @@
 menu "RouteLoom"
 
+    config ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+        bool "HIL trace of link context IDs and RLD1 handshake steps"
+        default n
+        help
+            Bench-only diagnostic logs for reset recovery. Context IDs and
+            handshake step numbers are logged, never keys or payloads.
+
     choice ROUTELOOM_DEDUP_PROFILE
         prompt "Dedup capacity profile"
         default ROUTELOOM_DEDUP_PROFILE_RELAY

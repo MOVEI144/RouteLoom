@@ -314,6 +314,9 @@ class HandshakeEngine final : public edhoc::EadHandler, public rlres1::Environme
                      std::uint8_t step) noexcept;
   Status cancel(NodeId peer, HandshakeCancelReason reason) noexcept;
   Status cancel_all() noexcept;
+  // An RLRES1 initiator keeps its R3 for quiet retransmission after its
+  // local session has installed. The RLD1 owner must retain that send leg.
+  bool has_quiet_link_retry(std::uint32_t token) const noexcept;
   // Side-effect-free and readable any time (false while a call is inside).
   bool quiescent() const noexcept;
 

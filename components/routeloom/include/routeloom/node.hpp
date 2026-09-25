@@ -1974,6 +1974,10 @@ class MeshNode {
   bool defer_for_session(TxJob& job) noexcept;
   void note_rx_refusal(const Status& status, NodeId peer,
                        const MessageId* message) noexcept;
+  // End-open refusal of a link-authenticated frame: an unknown end context
+  // is reported to the provider before the ordinary refusal accounting.
+  void note_end_rx_refusal(const Status& status, const wire::LinkOpenedFrame& frame,
+                           NodeId peer) noexcept;
   void dispatch_next(MonotonicMs now_ms) noexcept;
   void complete_job(TxJob& job, bool hop_accepted, MonotonicMs now_ms) noexcept;
   void fail_job(TxJob& job, const char* reason, MonotonicMs now_ms,

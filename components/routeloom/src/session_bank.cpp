@@ -744,6 +744,20 @@ bool SessionBank<kLinkCapacity, kEndCapacity>::demand_pending(
 }
 
 template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
+void SessionBank<kLinkCapacity, kEndCapacity>::note_rx_unknown(const SecurityScope scope,
+                                                               const NodeId peer) noexcept {
+  if (reentered() || !configured_) return;
+  if (scope != SecurityScope::EndToEnd) return;
+  if (!id_valid(peer) || peer == local_.self) return;
+  const SessionBankEntry* current = find_current(scope, peer);
+  if (current != nullptr && entry_usable(*current) &&
+      kContextLifetimeMs - current->remaining_ms < kRxUnknownGraceMs) {
+    return;
+  }
+  record_demand(scope, peer);
+}
+
+template <std::size_t kLinkCapacity, std::size_t kEndCapacity>
 Status SessionBank<kLinkCapacity, kEndCapacity>::tx_epoch(SecurityScope scope, NodeId peer,
                                                           std::uint32_t& epoch) noexcept {
   if (reentered()) return Status::error(StatusCode::Busy, "session bank re-entered");

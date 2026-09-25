@@ -198,6 +198,200 @@ bool send_a_to_b(SimPair& pair, std::uint64_t& counter) {
   return opened[0] == 1 && opened[1] == 2 && opened[2] == 3 && opened[3] == 4;
 }
 
+bool send_b_to_a(SimPair& pair, std::uint64_t& counter) {
+  SecurityProvider& b = pair.b.coordinator().session_provider();
+  SecurityProvider& a = pair.a.coordinator().session_provider();
+  std::uint32_t epoch = 1;
+  if (!b.tx_epoch(SecurityScope::Link, kSimNodeA, epoch).ok()) return false;
+  SecurityContext context{};
+  context.scope = SecurityScope::Link;
+  context.network = kNetwork;
+  context.sender = kSimNodeB;
+  context.receiver = kSimNodeA;
+  context.epoch = epoch;
+  if (!b.next_counter(context, counter).ok()) return false;
+  const std::uint8_t aad[] = {0xAA};
+  const std::uint8_t plain[] = {1, 2, 3, 4};
+  std::array<std::uint8_t, 4> cipher{}, opened{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  if (!b.seal(context, counter, ByteView{aad, sizeof(aad)}, ByteView{plain, sizeof(plain)},
+              MutableByteView{cipher.data(), cipher.size()}, tag).ok()) return false;
+  if (!a.open(context, counter, ByteView{aad, sizeof(aad)},
+              ByteView{cipher.data(), cipher.size()}, tag,
+              MutableByteView{opened.data(), opened.size()}).ok()) return false;
+  return opened[0] == 1 && opened[1] == 2 && opened[2] == 3 && opened[3] == 4;
+}
+
+// One end-to-end frame through the live providers in either direction,
+// exactly as the wire layer stamps, counts, seals and opens it.
+bool send_end(SimPair& pair, const bool from_a, std::uint64_t& counter) {
+  SecurityProvider& tx = from_a ? pair.a.coordinator().session_provider()
+                                : pair.b.coordinator().session_provider();
+  SecurityProvider& rx = from_a ? pair.b.coordinator().session_provider()
+                                : pair.a.coordinator().session_provider();
+  const NodeId sender = from_a ? kSimNodeA : kSimNodeB;
+  const NodeId receiver = from_a ? kSimNodeB : kSimNodeA;
+  std::uint32_t epoch = 1;
+  if (!tx.tx_epoch(SecurityScope::EndToEnd, receiver, epoch).ok()) return false;
+  SecurityContext context{};
+  context.scope = SecurityScope::EndToEnd;
+  context.network = kNetwork;
+  context.sender = sender;
+  context.receiver = receiver;
+  context.epoch = epoch;
+  if (!tx.next_counter(context, counter).ok()) return false;
+  const std::uint8_t aad[] = {0xEE};
+  const std::uint8_t plain[] = {5, 6, 7, 8};
+  std::array<std::uint8_t, 4> cipher{}, opened{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  if (!tx.seal(context, counter, ByteView{aad, sizeof(aad)}, ByteView{plain, sizeof(plain)},
+               MutableByteView{cipher.data(), cipher.size()}, tag).ok()) return false;
+  if (!rx.open(context, counter, ByteView{aad, sizeof(aad)},
+               ByteView{cipher.data(), cipher.size()}, tag,
+               MutableByteView{opened.data(), opened.size()}).ok()) return false;
+  return opened[0] == 5 && opened[1] == 6 && opened[2] == 7 && opened[3] == 8;
+}
+
+bool pump_until_end(SimPair& pair, MonotonicMs& now, const int cap_ticks = 1500) {
+  for (int i = 0; i < cap_ticks; ++i) {
+    now += 10;
+    pair.link.pump_tick(now);
+    if (pair.a.holds_end_session_with(kSimNodeB) && pair.b.holds_end_session_with(kSimNodeA)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Two dev nodes with a live link and a live end session A->B (A is the
+// origin that demanded it, like a gateway sending to a node), then B —
+// the destination — restarts: its RAM sessions are gone, the link comes
+// back through discovery, the end context does not.
+struct RestartedDestination {
+  MonotonicMs now{kSimT0};
+  keys::Secret psk{};
+  std::uint32_t old_epoch{0};
+  std::uint64_t counter{0};
+};
+
+bool prepare_restarted_destination(SimPair& pair, RestartedDestination& state) {
+  state.psk.fill(0x42);
+  if (!pair.a.init_stores() || !pair.b.init_stores()) return false;
+  if (!pair.a.boot_dev(state.now, state.psk, kNetwork, 199)) return false;
+  if (!pair.b.boot_dev(state.now, state.psk, kNetwork, 199)) return false;
+  if (!pair.a.demand_link(kSimNodeB) || !pair.b.demand_link(kSimNodeA)) return false;
+  if (!pump_until_link(pair, state.now)) return false;
+  if (!pair.a.demand_end(kSimNodeB)) return false;
+  if (!pump_until_end(pair, state.now)) return false;
+  if (!send_end(pair, true, state.counter) || !send_end(pair, false, state.counter)) return false;
+  if (!pair.a.coordinator().session_provider()
+           .tx_epoch(SecurityScope::EndToEnd, kSimNodeB, state.old_epoch).ok()) return false;
+  for (int tick = 0; tick < 250; ++tick) {
+    state.now += 10;
+    pair.link.pump_tick(state.now);
+  }
+  pair.b.~SimNode();
+  new (&pair.b) SimNode(kSimNodeB, kSimMacB, 0xB2E2,
+                        kResume2NodeLinkQuota + kResume2NodeEndQuota);
+  if (!pair.b.init_stores()) return false;
+  if (!pair.b.boot_dev(state.now, state.psk, kNetwork, 200)) return false;
+  if (!pair.b.demand_link(kSimNodeA)) return false;
+  if (!pump_until_link(pair, state.now)) return false;
+  // A still holds the end context it established; B holds none.
+  return pair.a.holds_end_session_with(kSimNodeB) && !pair.b.holds_end_session_with(kSimNodeA);
+}
+
+// A's frame under its retained context: sealed at A, refused at B with
+// AuthRequired (unknown end context). Returns the context B saw.
+bool stale_end_frame_refused_at_b(SimPair& pair, std::uint64_t& counter,
+                                  SecurityContext& seen_at_b) {
+  SecurityProvider& a = pair.a.coordinator().session_provider();
+  SecurityProvider& b = pair.b.coordinator().session_provider();
+  std::uint32_t epoch = 1;
+  if (!a.tx_epoch(SecurityScope::EndToEnd, kSimNodeB, epoch).ok()) return false;
+  seen_at_b = SecurityContext{};
+  seen_at_b.scope = SecurityScope::EndToEnd;
+  seen_at_b.network = kNetwork;
+  seen_at_b.sender = kSimNodeA;
+  seen_at_b.receiver = kSimNodeB;
+  seen_at_b.epoch = epoch;
+  if (!a.next_counter(seen_at_b, counter).ok()) return false;
+  const std::uint8_t aad[] = {0xEE};
+  const std::uint8_t plain[] = {5, 6, 7, 8};
+  std::array<std::uint8_t, 4> cipher{}, opened{};
+  std::array<std::uint8_t, kAeadTagSize> tag{};
+  if (!a.seal(seen_at_b, counter, ByteView{aad, sizeof(aad)}, ByteView{plain, sizeof(plain)},
+              MutableByteView{cipher.data(), cipher.size()}, tag).ok()) return false;
+  return b.open(seen_at_b, counter, ByteView{aad, sizeof(aad)},
+                ByteView{cipher.data(), cipher.size()}, tag,
+                MutableByteView{opened.data(), opened.size()}).code == StatusCode::AuthRequired;
+}
+
+void test_dev_destination_restart_without_report_stays_stale() {
+  // The failure behind issue #167: nothing on the wire tells the origin
+  // that the destination lost the end context, so without the RX report
+  // the origin keeps sealing under the old id forever.
+  current = "dev_destination_restart_without_report_stays_stale";
+  SimPair pair{};
+  RestartedDestination state{};
+  CHECK(prepare_restarted_destination(pair, state));
+  SecurityContext seen{};
+  CHECK(stale_end_frame_refused_at_b(pair, state.counter, seen));
+  for (int tick = 0; tick < 1500; ++tick) {
+    state.now += 10;
+    pair.link.pump_tick(state.now);
+  }
+  std::uint32_t epoch = 0;
+  CHECK(pair.a.coordinator().session_provider()
+            .tx_epoch(SecurityScope::EndToEnd, kSimNodeB, epoch).ok());
+  CHECK(epoch == state.old_epoch);
+  CHECK(!pair.b.holds_end_session_with(kSimNodeA));
+  CHECK(stale_end_frame_refused_at_b(pair, state.counter, seen));
+}
+
+void test_dev_destination_restart_recovers_end_session_from_rx_report() {
+  // Issue #167: the destination reports the unknown end context (what
+  // MeshNode does on the AuthRequired end open, 03 §9); its owner runs
+  // RLRES1 toward the origin over the mesh bootstrap lane; the origin's
+  // install replaces its stale context and traffic flows both ways. The
+  // destination never had to send first.
+  current = "dev_destination_restart_recovers_end_session_from_rx_report";
+  SimPair pair{};
+  RestartedDestination state{};
+  CHECK(prepare_restarted_destination(pair, state));
+  SecurityContext seen{};
+  CHECK(stale_end_frame_refused_at_b(pair, state.counter, seen));
+  pair.b.coordinator().session_provider().note_rx_unknown_context(seen);
+  bool recovered = false;
+  int ticks = 0;
+  for (; ticks < 1500 && !recovered; ++ticks) {
+    state.now += 10;
+    pair.link.pump_tick(state.now);
+    if (!pair.b.holds_end_session_with(kSimNodeA)) continue;
+    std::uint32_t epoch = 0;
+    if (!pair.a.coordinator().session_provider()
+             .tx_epoch(SecurityScope::EndToEnd, kSimNodeB, epoch).ok() ||
+        epoch == state.old_epoch) {
+      continue;
+    }
+    recovered = send_end(pair, true, state.counter) && send_end(pair, false, state.counter);
+  }
+  CHECK(recovered);
+  CHECK(ticks < 300);  // one resume exchange, not a timeout-driven retry
+  CHECK(pair.b.coordinator().counters().end_established >= 1);
+  CHECK(pair.a.coordinator().counters().end_established >= 2);
+  // Repeated reports for the same origin after the install stay quiet:
+  // the fresh context is not torn down by the origin's stragglers.
+  const auto b_before = pair.b.coordinator().counters().end_established;
+  pair.b.coordinator().session_provider().note_rx_unknown_context(seen);
+  for (int tick = 0; tick < 200; ++tick) {
+    state.now += 10;
+    pair.link.pump_tick(state.now);
+  }
+  CHECK(pair.b.coordinator().counters().end_established == b_before);
+  CHECK(send_end(pair, true, state.counter) && send_end(pair, false, state.counter));
+}
+
 void test_member_link_binds_discovery() {
   // A completed member link handshake elevates the discovery neighbor to
   // a live binding on both ends: the parent binding the sleep image
@@ -234,6 +428,64 @@ void test_member_link_binds_discovery() {
   CHECK(discovery_b->phase_of(kSimNodeA, phase_b));
   CHECK(phase_a == NeighborPhase::Bound || phase_a == NeighborPhase::Reachable);
   CHECK(phase_b == NeighborPhase::Bound || phase_b == NeighborPhase::Reachable);
+}
+
+void test_dev_resume_r3_loss_recovers_after_receiver_restart() {
+  current = "dev_resume_r3_loss_recovers_after_receiver_restart";
+  SimPair pair{};
+  MonotonicMs now = kSimT0;
+  keys::Secret psk{};
+  psk.fill(0x42);
+  CHECK(pair.a.init_stores());
+  CHECK(pair.b.init_stores());
+  CHECK(pair.a.boot_dev(now, psk, kNetwork, 199));
+  CHECK(pair.b.boot_dev(now, psk, kNetwork, 199));
+  CHECK(pair.a.demand_link(kSimNodeB));
+  CHECK(pair.b.demand_link(kSimNodeA));
+  CHECK(pump_until_link(pair, now));
+  std::uint64_t initial_counter = 0;
+  CHECK(send_a_to_b(pair, initial_counter));
+  CHECK(send_b_to_a(pair, initial_counter));
+  for (int tick = 0; tick < 250; ++tick) {
+    now += 10;
+    pair.link.pump_tick(now);
+  }
+
+  // A is the receiver that restarts. The first new R3 is lost after A
+  // installs; B must learn the new context from a quiet R3 retransmit.
+  pair.a.~SimNode();
+  new (&pair.a) SimNode(kSimNodeA, kSimMacA, 0xA1E2,
+                        kResume2NodeLinkQuota + kResume2NodeEndQuota);
+  CHECK(pair.a.init_stores());
+  CHECK(pair.a.boot_dev(now, psk, kNetwork, 200));
+  pair.link.drop_next_resume_r3_from(kSimNodeA);
+  CHECK(pair.a.demand_link(kSimNodeB));
+  bool recovered = false;
+  for (int tick = 0; tick < 1500 && !recovered; ++tick) {
+    now += 10;
+    pair.link.pump_tick(now);
+    if (pair.link.dropped_resume_r3() == 1 && pair.a.link_session_to(kSimNodeB) &&
+        pair.b.link_session_to(kSimNodeA)) {
+      std::uint64_t counter = 0;
+      recovered = send_a_to_b(pair, counter) && send_b_to_a(pair, counter);
+    }
+  }
+  CHECK(pair.link.dropped_resume_r3() == 1);
+  if (!recovered) {
+    std::uint32_t a_tx = 0, b_tx = 0, a_rx = 0, b_rx = 0;
+    const auto a_to_b = pair.a.coordinator().session_provider().tx_epoch(SecurityScope::Link, kSimNodeB, a_tx);
+    const auto b_to_a = pair.b.coordinator().session_provider().tx_epoch(SecurityScope::Link, kSimNodeA, b_tx);
+    const auto a_from_b = pair.a.coordinator().session_provider().current_rx_epoch(SecurityScope::Link, kSimNodeB, a_rx);
+    const auto b_from_a = pair.b.coordinator().session_provider().current_rx_epoch(SecurityScope::Link, kSimNodeA, b_rx);
+    const auto ac = pair.a.coordinator().counters();
+    const auto bc = pair.b.coordinator().counters();
+    std::fprintf(stderr, "R3 debug: a tx=%u(%u) rx=%u(%u) est=%u sendfail=%u last=%u, b tx=%u(%u) rx=%u(%u) est=%u sendfail=%u last=%u\n",
+                 a_tx, static_cast<unsigned>(a_to_b.code), a_rx, static_cast<unsigned>(a_from_b.code),
+                 ac.link_established, ac.link_send_failures, static_cast<unsigned>(ac.link_last_error),
+                 b_tx, static_cast<unsigned>(b_to_a.code), b_rx, static_cast<unsigned>(b_from_a.code),
+                 bc.link_established, bc.link_send_failures, static_cast<unsigned>(bc.link_last_error));
+  }
+  CHECK(recovered);
 }
 
 void test_member_sleep_warm_restore() {
@@ -534,6 +786,9 @@ void test_member_sleep_save_shapes() {
 
 int main() {
   test_member_link_binds_discovery();
+  test_dev_resume_r3_loss_recovers_after_receiver_restart();
+  test_dev_destination_restart_without_report_stays_stale();
+  test_dev_destination_restart_recovers_end_session_from_rx_report();
   test_member_sleep_warm_restore();
   test_member_sleep_unsafe_restore_refused();
   test_member_sleep_elapsed_delta();

@@ -109,6 +109,15 @@ class SecurityProvider {
   // and retries it after the promote. Providers without GK state never
   // pend, so their Busy stays an ordinary refusal.
   virtual bool group_promotion_pending() const noexcept { return false; }
+  // A link-authenticated frame addressed to this node carried an end-to-end
+  // context id this provider does not hold (open() refused AuthRequired,
+  // sdk-v1/03 §4.3/§9). The origin still seals under a context this node
+  // lost — typically across this node's reboot — and nothing on the wire
+  // tells it so. Session owners may record a rate-limited establishment
+  // demand toward `context.sender` (the origin), exactly like a TX
+  // refusal does; the default ignores the report. Never called for a frame
+  // the link layer could not authenticate.
+  virtual void note_rx_unknown_context(const SecurityContext& /*context*/) noexcept {}
   virtual Status next_counter(const SecurityContext& context,
                               std::uint64_t& counter) noexcept = 0;
   virtual Status seal(const SecurityContext& context,

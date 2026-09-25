@@ -567,6 +567,7 @@ class SecurityCoordinator final : public BootstrapSink,
     bool initiator{false};
     keys::LinkCarrier carrier{};
     std::uint32_t discovery_token{NeighborDiscovery::kMemberHandshakeNone};
+    std::uint32_t quiet_retry_token{0};  // RLRES1 R3 may need three more sends
     // Our transaction nonce (initiator: drawn on first send; responder:
     // echoed from the inbound m1/R1). object_id is its first 4 bytes.
     std::array<std::uint8_t, 16> txn{};
@@ -674,6 +675,7 @@ class SecurityCoordinator final : public BootstrapSink,
     Status open(const SecurityContext& context, std::uint64_t counter, ByteView aad,
                 ByteView ciphertext, const std::array<std::uint8_t, kAeadTagSize>& tag,
                 MutableByteView plaintext) noexcept override;
+    void note_rx_unknown_context(const SecurityContext& context) noexcept override;
 
    private:
     static bool is_group(SecurityScope scope) noexcept {

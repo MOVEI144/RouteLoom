@@ -109,8 +109,13 @@ class SessionSecurity final : public SecurityProvider, public SessionInstaller {
   std::set<SealKey> sealed;
   bool nonce_reuse{false};
   std::vector<SecurityContext> counters_drawn;
+  // Every unknown-end-context report the node made (03 §9).
+  std::vector<SecurityContext> rx_unknown;
 
   bool ready() const noexcept override { return true; }
+  void note_rx_unknown_context(const SecurityContext& context) noexcept override {
+    rx_unknown.push_back(context);
+  }
 
   Status tx_epoch(const SecurityScope scope, const NodeId peer,
                   std::uint32_t& epoch) noexcept override {
@@ -771,6 +776,43 @@ void test_node_counts_unknown_rx_context() {
   CHECK(pair.a->session_stats().rx_auth_required == 0);
 }
 
+void test_node_reports_unknown_end_context() {
+  // B rebooted after A established both scopes: the link came back through
+  // discovery (mirrored here), the end context did not. Every end frame A
+  // seals for B refuses AuthRequired at B, and B reports the unknown end
+  // context (origin = A) to its provider so the owner can re-handshake —
+  // the origin never learns otherwise (03 §4.3/§9). A link-level refusal
+  // reports nothing: RLD1 repairs neighbors.
+  Pair<SessionSecurity> pair;
+  pair.sec_a.strict_rx = true;
+  pair.sec_b.strict_rx = true;
+  establish(pair.sec_a, 1, pair.sec_b, 2, SecurityScope::Link, 0x51, 0x52);
+  pair.sec_a.set_context(SecurityScope::EndToEnd, 2, {ContextState::Ready, 0x53, 0x54});
+  pair.send("end-context-lost-at-b");
+  pair.run(300);
+  CHECK(!pair.air.empty());
+  CHECK(!received(pair.obs_b, "end-context-lost-at-b"));
+  CHECK(pair.b->session_stats().rx_auth_required >= 1);
+  CHECK(pair.sec_b.rx_unknown.size() == pair.b->session_stats().rx_auth_required);
+  CHECK(!pair.sec_b.rx_unknown.empty());
+  for (const SecurityContext& context : pair.sec_b.rx_unknown) {
+    CHECK(context.scope == SecurityScope::EndToEnd);
+    CHECK(context.sender == 1 && context.receiver == 2);
+    CHECK(context.epoch == 0x53);  // the id A stamped, which B never held
+    CHECK(context.network == kNet);
+  }
+  CHECK(pair.sec_a.rx_unknown.empty());
+  // Link-level unknown context: counted, never reported as an end loss.
+  Pair<SessionSecurity> link_lost;
+  link_lost.sec_b.strict_rx = true;
+  link_lost.sec_a.set_context(SecurityScope::Link, 2, {ContextState::Ready, 0x61, 0x62});
+  link_lost.sec_a.set_context(SecurityScope::EndToEnd, 2, {ContextState::Ready, 0x63, 0x64});
+  link_lost.send("link-context-lost-at-b");
+  link_lost.run(300);
+  CHECK(link_lost.b->session_stats().rx_auth_required >= 1);
+  CHECK(link_lost.sec_b.rx_unknown.empty());
+}
+
 void test_refusal_with_usable_context_is_a_failure() {
   // AuthRequired while context_state says Ready is not "no session yet":
   // the job fails exactly as any seal failure did before (no deferral).
@@ -905,6 +947,7 @@ int main() {
   test_node_pending_session_times_out();
   test_node_rekey_and_retire();
   test_node_counts_unknown_rx_context();
+  test_node_reports_unknown_end_context();
   test_refusal_with_usable_context_is_a_failure();
   if (failures != 0) {
     std::fprintf(stderr, "%d session checks failed\n", failures);

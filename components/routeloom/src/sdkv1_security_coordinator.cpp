@@ -192,6 +192,13 @@ Status SecurityCoordinator::SessionProviderMux::open(
              : pairwise_.open(context, counter, aad, ciphertext, tag, plaintext);
 }
 
+void SecurityCoordinator::SessionProviderMux::note_rx_unknown_context(
+    const SecurityContext& context) noexcept {
+  // Pairwise only: a group frame under an unknown GK epoch pulls the key
+  // (03 §9), it never demands a pairwise handshake.
+  if (!is_group(context.scope)) pairwise_.note_rx_unknown_context(context);
+}
+
 SecurityCoordinator::MemberEngine::MemberEngine(
     ResumeSlotStorage2& resume, GatewaySessionBank& bank, BankSessionSink<32, 128>& sink,
     HandshakeMembershipView& membership, SessionCredentialVerifier& verifier,
@@ -737,6 +744,11 @@ Status SecurityCoordinator::on_poll(const MonotonicMs now) noexcept {
 void SecurityCoordinator::sweep_demux(const MonotonicMs now) noexcept {
   assert(has_member_engine());
   for (auto& entry : member().demux) {
+    if (entry.used && entry.quiet_retry_token != 0 &&
+        !member().engine.has_quiet_link_retry(entry.quiet_retry_token)) {
+      entry.has_start = false;
+      entry.quiet_retry_token = 0;
+    }
     if (!entry.used || now < entry.expires_at) continue;
     if (entry.discovery_token != NeighborDiscovery::kMemberHandshakeNone &&
         deps_.discovery != nullptr) {
@@ -1323,9 +1335,13 @@ Status SecurityCoordinator::installed_link(const HandshakeResult& result,
         deps_.discovery->complete_handshake(entry.discovery_token, result.proof, last_now_);
         entry.discovery_token = NeighborDiscovery::kMemberHandshakeNone;
       }
-      // The leg stays until expiry so late duplicates route instead of
-      // re-opening; the engine already dropped the completed exchange.
-      entry.has_start = false;
+      // RLRES1's initiator installs before R3 is known to reach the
+      // responder. Keep its send leg until the engine's quiet R3 retries
+      // finish; otherwise a lost first R3 strands the two ends on
+      // different context ids after a peer reset.
+      entry.quiet_retry_token = member().engine.has_quiet_link_retry(result.token)
+                                    ? result.token : 0;
+      entry.has_start = entry.quiet_retry_token != 0;
     }
   }
   return Status::success();

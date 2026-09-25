@@ -1,6 +1,7 @@
 #include "routeloom/sdkv1_handshake.hpp"
 
 #include <cstring>
+#include <cstdio>
 
 #include "routeloom/discovery_scope.hpp"  // sha256, hmac_sha256
 #include "routeloom/rlcw1.hpp"  // cert_decode, cert_subject_kid (kid rule)
@@ -8,6 +9,7 @@
 #include "routeloom/sdkv1_ead.hpp"  // join_credential_check (cert + kid match)
 #include "routeloom/sdkv1_join_transport.hpp"  // join_step_valid (shared object codec)
 #include "routeloom/secure_clear.hpp"
+
 
 namespace routeloom::sdkv1 {
 namespace {
@@ -1938,7 +1940,15 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
     }
     return complete_resume_r1(*fresh, message, carrier, rx.claimed_peer, now);
   }
-  if (record == nullptr) return Status::success();
+  if (record == nullptr) {
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+    if (rx.scope == SecurityScope::Link && rx.step == 3) {
+      std::printf("HIL resume R3 no record peer=%llu\n",
+               static_cast<unsigned long long>(rx.claimed_peer));
+    }
+#endif
+    return Status::success();
+  }
   if (rx.step == 2) {
     if (record->role != HandshakeRole::Initiator ||
         record->state != RecordState::ResumeWaitR2) {
@@ -2005,11 +2015,25 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
     // already reported; a Failed here would carry an unknown token).
     if (record->role != HandshakeRole::Responder ||
         record->state != RecordState::ResumeWaitR3) {
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+      if (rx.scope == SecurityScope::Link) {
+        std::printf("HIL resume R3 wrong state peer=%llu state=%u role=%u\n",
+                 static_cast<unsigned long long>(rx.claimed_peer),
+                 static_cast<unsigned>(record->state), static_cast<unsigned>(record->role));
+      }
+#endif
       return Status::success();
     }
     rlres1::Output out{};
     rlres1_.on_r3(record->peer, to_keys_purpose(record->scope), message, now, out);
     if (out.action != rlres1::Action::Install) {
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+      if (rx.scope == SecurityScope::Link) {
+        std::printf("HIL resume R3 rejected peer=%llu reject=%u\n",
+                 static_cast<unsigned long long>(rx.claimed_peer),
+                 static_cast<unsigned>(out.reject));
+      }
+#endif
       secure_clear(out.message);
       drop_record(*record);
       return Status::success();
@@ -2017,9 +2041,24 @@ Status HandshakeEngine::on_resume_message(CarrierRecord* record, const Handshake
     const Status committed = resume_commit(*record, out.established);
     secure_clear(out.message);
     if (!committed) {
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+      if (rx.scope == SecurityScope::Link) {
+        std::printf("HIL resume R3 commit failed peer=%llu status=%u detail=%s\n",
+                 static_cast<unsigned long long>(rx.claimed_peer),
+                 static_cast<unsigned>(committed.code), committed.detail);
+      }
+#endif
       drop_record(*record);
       return Status::success();
     }
+#if defined(ESP_PLATFORM) && CONFIG_ROUTELOOM_HIL_TRACE_LINK_EPOCHS
+    if (rx.scope == SecurityScope::Link) {
+      std::printf("HIL resume R3 installed peer=%llu tx=%lu rx=%lu\n",
+               static_cast<unsigned long long>(rx.claimed_peer),
+               static_cast<unsigned long>(pending_commit_tx_),
+               static_cast<unsigned long>(pending_commit_rx_));
+    }
+#endif
     StagedEstablished established{};
     established.token = record->token;
     established.scope = record->scope;
@@ -2846,6 +2885,18 @@ Status HandshakeEngine::accept_send(const std::uint32_t token, const std::uint8_
   record->state = RecordState::EdhocM4Sent;
   stage_established(responder_done);
   return Status::success();
+}
+
+bool HandshakeEngine::has_quiet_link_retry(const std::uint32_t token) const noexcept {
+  if (token == 0) return false;
+  for (const auto& record : records_) {
+    if (record.used && record.token == token && record.scope == SecurityScope::Link &&
+        record.role == HandshakeRole::Initiator &&
+        record.state == RecordState::ResumeR3Confirm) {
+      return true;
+    }
+  }
+  return false;
 }
 
 Status HandshakeEngine::cancel(const NodeId peer, const HandshakeCancelReason reason) noexcept {

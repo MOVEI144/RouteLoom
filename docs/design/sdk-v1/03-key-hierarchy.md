@@ -262,6 +262,9 @@ class SecurityProvider {                                // 既存のready/seal/o
   // epochは設定値（headerに入っているNodeConfigのlink_epoch/end_epoch）を持って入り、既定実装は触らない。
   virtual Status tx_epoch(SecurityScope scope, NodeId peer, std::uint32_t& epoch) noexcept;  // 既定: success
   virtual ContextState context_state(SecurityScope scope, NodeId peer) const noexcept;     // 既定: Ready
+  // link認証済みframeのend open()がAuthRequired（未知end context id）だったとNodeが報告する（§9の再handshake要求）。
+  // session bankはorigin（context.sender）へのEndToEnd demandを記録する（10秒以内にinstallしたcontextがあれば無視）。既定: 無視
+  virtual void note_rx_unknown_context(const SecurityContext& context) noexcept;
 };
 
 constexpr std::size_t kSessionKeySize = 16, kSessionIvSize = 12;
@@ -313,7 +316,7 @@ struct SessionStats { std::uint32_t tx_deferred, tx_unavailable, rx_auth_require
 
 | 事象 | 動作 |
 |---|---|
-| 未知context idのframe | `AuthRequired`で破棄、rate制限付きで再handshake要求 |
+| 未知context idのframe | `AuthRequired`で破棄、rate制限付きで再handshake要求。end scopeは受信側Nodeが`note_rx_unknown_context`で提供者にdemandを記録し、originへRLRES1／EDHOCを開始する（originは自分のcontextを失っていないので自発しない。2026-09-26 実機 #167）。link scopeはRLD1のstale peer修復が担う |
 | handshake途中の失効判明 | 昇格拒否（05 §7「失効中の遅い認証応答」） |
 | counter上限接近 | 送信を止めずに並行して再鍵、上限到達時は送信拒否（wrapしない） |
 | GK未知の新epochを受信 | 破棄、GroupKeyPull（1分1回） |

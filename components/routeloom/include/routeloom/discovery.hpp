@@ -460,7 +460,10 @@ class NeighborDiscovery {
 
   // Requester path: broadcast a DISCOVER and run one bounded exchange.
   // Already-member nodes keep their MembershipState (local re-binding, D3-03).
-  Status begin_discovery(MonotonicMs now_ms) noexcept;
+  // A stale peer may be preferred for repair; unrelated OFFERs are ignored
+  // for that exchange, so another healthy neighbor cannot win every round.
+  Status begin_discovery(MonotonicMs now_ms,
+                         NodeId preferred_peer = kInvalidNodeId) noexcept;
 
   // Ingress points fed by the Owner after carrier classification. RLD1 input
   // arrives only here with OBSERVED source/destination MACs; authenticated
@@ -652,6 +655,8 @@ class NeighborDiscovery {
 
   struct Outbound {
     bool active{false};
+    NodeId preferred_peer{kInvalidNodeId};
+    MacAddress preferred_mac{};
     MacAddress peer_mac{};
     NodeId peer_node{kInvalidNodeId};
     std::array<std::uint8_t, 16> our_nonce{};
@@ -896,12 +901,12 @@ class NeighborDiscovery {
   std::uint32_t next_member_token_{1};
   std::uint32_t next_probe_sequence_{1};
   MonotonicMs next_handshake_ms_{0};   // 1/s burst-1 token bucket
-  // Stranded-node re-discovery (04 §9.2): armed when the last usable edge
-  // is gone but resolvable Stale records survive; backoff doubles from a
-  // [backoff_min, backoff_initial_max] draw to backoff_max between bounded
-  // begin_discovery runs (radio.md §7/§13).
+  // Stale-peer RLD1 repair: the old encrypted probe may be unreadable after
+  // the peer loses its RAM session on reset. Broadcast discovery is bounded
+  // by this backoff even when other edges remain usable.
   MonotonicMs next_rediscovery_ms_{0};
   std::uint32_t rediscovery_backoff_ms_{0};
+  NodeId last_repair_peer_{kInvalidNodeId};
   std::size_t transient_used_{0};
   std::size_t regular_used_{0};
   std::size_t pins_used_{0};
