@@ -256,6 +256,75 @@ void test_prestart_owner_pump() {
   runtime.stop();
 }
 
+struct CountingConfigSink final : routeloom::ConfigEndpointSink {
+  unsigned frames{0};
+  unsigned jobs{0};
+  unsigned polls{0};
+  bool last_hop_accepted{false};
+  void on_config_frame(NodeId, const routeloom::wire::PlainFrame&,
+                       routeloom::MonotonicMs) noexcept override {
+    ++frames;
+  }
+  void on_config_job_done(const MessageId&, bool accepted, const char*,
+                          routeloom::MonotonicMs) noexcept override {
+    ++jobs;
+    last_hop_accepted = accepted;
+  }
+  void poll(routeloom::MonotonicMs) noexcept override { ++polls; }
+};
+
+void test_owner_drives_config_component() {
+  idf_stub::reset();
+  TestSecurity security;
+  CapturingObserver observer;
+  CountingConfigSink sink;
+  EspNowRuntime runtime(make_config(), security, observer);
+  CHECK(runtime.initialize().ok());
+  CHECK(runtime.node().set_config_sink(&sink).ok());
+  CHECK(runtime.start().ok());
+  CHECK(runtime.register_neighbor(kPeer, peer_mac(), 1).ok());
+
+  routeloom::wire::PlainFrame plain{};
+  plain.header.type = routeloom::FrameType::Control;
+  plain.header.flags = routeloom::wire::kFlagEndProtected;
+  plain.header.delivery = routeloom::DeliveryClass::Reliable;
+  plain.header.hop_remaining = 1;
+  plain.header.network = make_config().node.network;
+  plain.header.origin = kPeer;
+  plain.header.destination = kSelf;
+  plain.header.previous_hop = kPeer;
+  plain.header.next_hop = kSelf;
+  plain.header.message = MessageId{202, 1};
+  plain.header.remaining_deadline_ms = 5000;
+  plain.header.original_lifetime_ms = 5000;
+  plain.header.link_epoch = 1;
+  plain.header.end_epoch = 1;
+  plain.payload[0] = 1;
+  plain.payload_size = 1;
+  routeloom::wire::EncodedFrame encoded{};
+  CHECK(routeloom::wire::encode_new(plain, security, encoded).ok());
+  CHECK(idf_stub::inject_rx(peer_mac().bytes.data(), encoded.bytes.data(),
+                            encoded.size));
+  runtime.poll_once();
+  CHECK(sink.frames == 1);
+  CHECK(sink.polls == 1);
+
+  // The same Owner drive must deliver outbound job completion as well.
+  // No peer hop ACK is injected, so the bounded job fails honestly.
+  MessageId job{};
+  CHECK(runtime.node().send_typed(routeloom::FrameType::Control, kPeer,
+                                  ByteView{plain.payload.data(), 1}, 1000,
+                                  runtime.now_ms(), job).ok());
+  for (unsigned i = 0; i < 600 && sink.jobs == 0; ++i) {
+    idf_stub::advance_ms(5);
+    runtime.poll_once();
+    idf_stub::complete_send(true);
+  }
+  CHECK(sink.jobs == 1);
+  CHECK(!sink.last_hop_accepted);
+  runtime.stop();
+}
+
 // Once a static peer's authenticated RX epoch is known, Reliable DATA reaches
 // the driver and waits for its hop ACK. The absence of a remote ACK may still
 // fail the delivery after the bounded retries.
@@ -710,6 +779,7 @@ void test_adopt_member_node_keeps_sufficient_timers() {
 int main() {
   test_boot_installs_lease_port();
   test_prestart_owner_pump();
+  test_owner_drives_config_component();
   test_security_callback_cannot_reenter_owner_lease();
   test_p6_binding_tracks_current_receive_context();
   test_reliable_to_static_peer_uses_binding();

@@ -999,6 +999,45 @@ void EspNowRuntime::poll_once() noexcept {
     migration_->poll(now);
   }
   node_.poll(now);
+  // Node admission and job completion only queue component events. Deliver
+  // them after the node call returns, while this Owner still has exclusive
+  // access to the node. A taken payload past its transaction deadline must
+  // be completed without starting new component work.
+  for (std::size_t i = 0; i < kComponentEventsMax; ++i) {
+    ComponentEvent event{};
+    if (!node_.take_component_event(event)) break;
+    const bool payload = event.target == ComponentEventTarget::ServicePayload ||
+                         event.target == ComponentEventTarget::ConfigFrame;
+    if (!payload || now < event.deadline_ms) {
+      switch (event.target) {
+        case ComponentEventTarget::ServicePayload:
+          if (auto* sink = node_.gateway_sink()) {
+            sink->on_service_payload(event.peer, event.frame, now);
+          }
+          break;
+        case ComponentEventTarget::ServiceJobDone:
+          if (auto* sink = node_.gateway_sink()) {
+            sink->on_service_job_done(event.job_id, event.job_accepted,
+                                      event.job_reason, now);
+          }
+          break;
+        case ComponentEventTarget::ConfigFrame:
+          if (auto* sink = node_.config_sink()) {
+            sink->on_config_frame(event.peer, event.frame, now);
+          }
+          break;
+        case ComponentEventTarget::ConfigJobDone:
+          if (auto* sink = node_.config_sink()) {
+            sink->on_config_job_done(event.job_id, event.job_accepted,
+                                     event.job_reason, now);
+          }
+          break;
+      }
+    }
+    (void)node_.complete_component_event(event.handle);
+  }
+  if (auto* sink = node_.gateway_sink()) sink->poll(now);
+  if (auto* sink = node_.config_sink()) sink->poll(now);
 }
 
 void EspNowRuntime::poll_bootstrap(const MonotonicMs now) noexcept {
