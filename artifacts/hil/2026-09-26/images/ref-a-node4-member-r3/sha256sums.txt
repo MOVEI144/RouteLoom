@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+2e500edbe2f70d2064e9c0420f1f15953e2e10dc5e0a25886fe2efa63ed281c8  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/bootloader/bootloader.bin
+e5b5d7f1f7589470e89ea12332069f4e65adbb817dd9d51cf1fea67049c12f2a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/flasher_args.json
+068ab45eb37a4be22b3aea004e4e970cfbbf9a25bc0824c1572be5bf68a37fef  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/partition_table/partition-table.bin
+97aec5091b472b7a0a62a0ad7c5256567b222394ae7333c463fda52d455fde9c  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/ram-report.json
+03e1f40fb2477f8c08a712096fa3f769b7eda016323e69565e5040bf692adacc  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/routeloom_reference_node.bin
+88813c3a8d08ba5005ff58cbeaf03d0b7f608bbc1f13a7847eb2074f9e3c3cc7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/ref-a-node4-member-r3/build/size.json

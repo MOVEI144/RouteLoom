@@ -1,0 +1,12 @@
+{
+  "count": 1,
+  "accepted": 1,
+  "delivered": 1,
+  "success_rate": 1.0,
+  "rtt_ms_min": 258.5,
+  "rtt_ms_median": 258.5,
+  "rtt_ms_p95": 258.5,
+  "rtt_ms_p99": 258.5,
+  "rtt_ms_max": 258.5,
+  "evidence": "artifacts/hil/2026-09-26/r3/site-authorityfix-traffic.jsonl"
+}

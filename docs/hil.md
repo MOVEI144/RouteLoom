@@ -9,7 +9,11 @@ records the first hardware run and its continuation. The bench contained
 three C3s and two C6s; C6 is an experimental HIL target outside the SDK v1
 support list. One C3 stopped enumerating, so the continuation exercised four
 boards (two C3s, two C6s). A five-node run and C5 hardware comparison remain
-unfinished. Harness self-tests alone are not hardware validation.
+unfinished. A C3 LegacyFixture deep-sleep replay fix passed a wake-and-deliver
+cycle in the R3 continuation; DevRam/MemberEdhoc sleep and reset recovery
+remain open. MemberEdhoc node-to-node delivery passed, while the node's
+authority channel still failed to reach the Site Authority. Harness
+self-tests alone are not hardware validation.
 
 ## Concepts
 

@@ -1,0 +1,58 @@
+{
+  "cell": "hil",
+  "target": "esp32s3",
+  "app": "reference_node",
+  "memory": [
+    {
+      "name": "DIRAM",
+      "total": 341760,
+      "used": 288209,
+      "free": 53551,
+      "parts": {
+        ".bss": 202016,
+        ".text": 65843,
+        ".data": 20350
+      }
+    },
+    {
+      "name": "IRAM",
+      "total": 16384,
+      "used": 16384,
+      "free": 0,
+      "parts": {
+        ".text": 15356,
+        ".vectors": 1028
+      }
+    },
+    {
+      "name": "RTC SLOW",
+      "total": 8192,
+      "used": 5860,
+      "free": 2332,
+      "parts": {
+        ".data": 5816,
+        ".force_slow": 36,
+        ".rtc_noinit": 8
+      }
+    },
+    {
+      "name": "RTC FAST",
+      "total": 8192,
+      "used": 132,
+      "free": 8060,
+      "parts": {
+        ".text": 104,
+        ".rtc_reserved": 24,
+        ".force_fast": 4
+      }
+    }
+  ],
+  "guard": {
+    "memory_type": "DIRAM",
+    "static_bss": 202016,
+    "static_data": 20350,
+    "free": 53551,
+    "min_free": 8192,
+    "passed": true
+  }
+}

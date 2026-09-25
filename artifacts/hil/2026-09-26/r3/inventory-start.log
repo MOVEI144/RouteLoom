@@ -1,0 +1,296 @@
+=== 2026-09-26T05:04:03.242763 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 -> /dev/ttyACM3 ===
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 --connect-attempts 1 chip-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C6 has no chip ID. Reading MAC address instead.
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 --connect-attempts 1 read-mac
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00 --connect-attempts 1 flash-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:47:54
+BASE MAC:           10:bd:a3:b1:47:54
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Flash Memory Information:
+=========================
+Manufacturer: 46
+Device: 4016
+Detected flash size: 4MB
+
+Hard resetting via RTS pin...
+
+EXIT=0
+=== 2026-09-26T05:04:04.905778 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 -> /dev/ttyACM2 ===
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 --connect-attempts 1 chip-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C6 has no chip ID. Reading MAC address instead.
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 --connect-attempts 1 read-mac
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00 --connect-attempts 1 flash-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00:
+Connecting...
+Detecting chip type... ESP32-C6
+Connected to ESP32-C6 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00:
+Chip type:          ESP32-C6FH4 (QFN32) (revision v0.2)
+Features:           Wi-Fi 6, BT 5 (LE), IEEE802.15.4, Single Core + LP Core, 160MHz, Embedded Flash 4MB
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                10:bd:a3:ff:fe:b1:48:a8
+BASE MAC:           10:bd:a3:b1:48:a8
+MAC_EXT:            ff:fe
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Flash Memory Information:
+=========================
+Manufacturer: 46
+Device: 4016
+Detected flash size: 4MB
+
+Hard resetting via RTS pin...
+
+EXIT=0
+=== 2026-09-26T05:04:06.462211 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 -> /dev/ttyACM1 ===
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 --connect-attempts 1 chip-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C3 has no chip ID. Reading MAC address instead.
+MAC:                94:a9:90:6a:ee:c4
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 --connect-attempts 1 read-mac
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+MAC:                94:a9:90:6a:ee:c4
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 --connect-attempts 1 flash-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:6a:ee:c4
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Flash Memory Information:
+=========================
+Manufacturer: 20
+Device: 4016
+Detected flash size: 4MB
+
+Hard resetting via RTS pin...
+
+EXIT=0
+=== 2026-09-26T05:04:08.051644 /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 -> /dev/ttyACM0 ===
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 --connect-attempts 1 chip-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:b5:60
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+WARNING: ESP32-C3 has no chip ID. Reading MAC address instead.
+MAC:                94:a9:90:7a:b5:60
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 --connect-attempts 1 read-mac
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:b5:60
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+MAC:                94:a9:90:7a:b5:60
+
+Hard resetting via RTS pin...
+
+EXIT=0
+$ /home/sahur/.local/bin/esptool --port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00 --connect-attempts 1 flash-id
+esptool v5.4.0
+Serial port /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Connecting...
+Detecting chip type... ESP32-C3
+Connected to ESP32-C3 on /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00:
+Chip type:          ESP32-C3 (QFN32) (revision v0.4)
+Features:           Wi-Fi, BT 5 (LE), Single Core, 160MHz, Embedded Flash 4MB (XMC)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                94:a9:90:7a:b5:60
+
+Uploading stub flasher...
+Running stub flasher...
+Stub flasher running.
+
+Flash Memory Information:
+=========================
+Manufacturer: 20
+Device: 4016
+Detected flash size: 4MB
+
+Hard resetting via RTS pin...
+
+EXIT=0

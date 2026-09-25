@@ -1,0 +1,342 @@
+{
+  "board": "ref-a",
+  "identity": {
+    "chip": "esp32c3",
+    "mac": "94:a9:90:7a:b5:60",
+    "log": "flash-ref-a-preflight.log"
+  },
+  "port": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+  "destination": 2,
+  "hold_s": 5.0,
+  "started_unix": 1790366832.922059,
+  "reset_held_unix": 1790366832.9224417,
+  "during": {
+    "label": "R2-during-reset",
+    "admission_attempts": 1,
+    "response": {
+      "accepted": true,
+      "request": 4
+    },
+    "admitted_unix": 1790366832.9238536,
+    "delivery": {
+      "request": 4,
+      "destination": 2,
+      "state": "expired",
+      "reason": "DEADLINE_EXPIRED",
+      "msg_session": 168,
+      "msg_seq": 14,
+      "updated_ms": 1790366837930
+    },
+    "latency_ms": 5017.62
+  },
+  "actual_hold_s": 5.019,
+  "reset_released_unix": 1790366837.9417505,
+  "after": [
+    {
+      "label": "R2-after-0",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 5
+      },
+      "admitted_unix": 1790366837.9428203,
+      "delivery": {
+        "request": 5,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 15,
+        "updated_ms": 1790366841626
+      },
+      "latency_ms": 3723.79
+    },
+    {
+      "label": "R2-after-1",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 6
+      },
+      "admitted_unix": 1790366842.6684027,
+      "delivery": {
+        "request": 6,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 16,
+        "updated_ms": 1790366846352
+      },
+      "latency_ms": 3726.46
+    },
+    {
+      "label": "R2-after-2",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 7
+      },
+      "admitted_unix": 1790366847.3964827,
+      "delivery": {
+        "request": 7,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 17,
+        "updated_ms": 1790366851090
+      },
+      "latency_ms": 3728.64
+    },
+    {
+      "label": "R2-after-3",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 8
+      },
+      "admitted_unix": 1790366852.1267543,
+      "delivery": {
+        "request": 8,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 18,
+        "updated_ms": 1790366855811
+      },
+      "latency_ms": 3725.15
+    },
+    {
+      "label": "R2-after-4",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 9
+      },
+      "admitted_unix": 1790366856.8543816,
+      "delivery": {
+        "request": 9,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 19,
+        "updated_ms": 1790366860532
+      },
+      "latency_ms": 3729.54
+    },
+    {
+      "label": "R2-after-5",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 10
+      },
+      "admitted_unix": 1790366861.585707,
+      "delivery": {
+        "request": 10,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 20,
+        "updated_ms": 1790366865280
+      },
+      "latency_ms": 3725.7
+    },
+    {
+      "label": "R2-after-6",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 11
+      },
+      "admitted_unix": 1790366866.3131773,
+      "delivery": {
+        "request": 11,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 21,
+        "updated_ms": 1790366869994
+      },
+      "latency_ms": 3732.38
+    },
+    {
+      "label": "R2-after-7",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 12
+      },
+      "admitted_unix": 1790366871.0476575,
+      "delivery": {
+        "request": 12,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 22,
+        "updated_ms": 1790366874729
+      },
+      "latency_ms": 3724.82
+    },
+    {
+      "label": "R2-after-8",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 13
+      },
+      "admitted_unix": 1790366875.7744315,
+      "delivery": {
+        "request": 13,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 23,
+        "updated_ms": 1790366879456
+      },
+      "latency_ms": 3708.96
+    },
+    {
+      "label": "R2-after-9",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 14
+      },
+      "admitted_unix": 1790366880.4856493,
+      "delivery": {
+        "request": 14,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 24,
+        "updated_ms": 1790366884170
+      },
+      "latency_ms": 3718.67
+    },
+    {
+      "label": "R2-after-10",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 15
+      },
+      "admitted_unix": 1790366885.2065313,
+      "delivery": {
+        "request": 15,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 25,
+        "updated_ms": 1790366888885
+      },
+      "latency_ms": 3722.79
+    },
+    {
+      "label": "R2-after-11",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 16
+      },
+      "admitted_unix": 1790366889.9318776,
+      "delivery": {
+        "request": 16,
+        "destination": 2,
+        "state": "failed",
+        "reason": "END_RECEIPT_TIMEOUT",
+        "msg_session": 168,
+        "msg_seq": 26,
+        "updated_ms": 1790366893616
+      },
+      "latency_ms": 3720.18
+    },
+    {
+      "label": "R2-after-12",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 17
+      },
+      "admitted_unix": 1790366894.653861,
+      "delivery": {
+        "request": 17,
+        "destination": 2,
+        "state": "failed",
+        "reason": "IDEMPOTENCY_FULL",
+        "msg_session": null,
+        "msg_seq": null,
+        "updated_ms": 1790366894656
+      },
+      "latency_ms": 53.08
+    },
+    {
+      "label": "R2-after-13",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 18
+      },
+      "admitted_unix": 1790366895.7086468,
+      "delivery": {
+        "request": 18,
+        "destination": 2,
+        "state": "failed",
+        "reason": "IDEMPOTENCY_FULL",
+        "msg_session": null,
+        "msg_seq": null,
+        "updated_ms": 1790366895710
+      },
+      "latency_ms": 52.87
+    },
+    {
+      "label": "R2-after-14",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 19
+      },
+      "admitted_unix": 1790366896.7632656,
+      "delivery": {
+        "request": 19,
+        "destination": 2,
+        "state": "failed",
+        "reason": "IDEMPOTENCY_FULL",
+        "msg_session": null,
+        "msg_seq": null,
+        "updated_ms": 1790366896768
+      },
+      "latency_ms": 53.74
+    },
+    {
+      "label": "R2-after-15",
+      "admission_attempts": 1,
+      "response": {
+        "accepted": true,
+        "request": 20
+      },
+      "admitted_unix": 1790366897.8187296,
+      "delivery": {
+        "request": 20,
+        "destination": 2,
+        "state": "failed",
+        "reason": "IDEMPOTENCY_FULL",
+        "msg_session": null,
+        "msg_seq": null,
+        "updated_ms": 1790366897822
+      },
+      "latency_ms": 52.68
+    }
+  ],
+  "recovery_s": null,
+  "finished_unix": 1790366898.8716235
+}

@@ -1,0 +1,39 @@
+[2026-09-25T20:07:44.282+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00
+[2026-09-25T20:07:46.485+00:00] W (33428) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:46.485+00:00] W (33507) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:47.686+00:00] W (34654) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:47.686+00:00] W (34740) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:48.887+00:00] W (35878) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:48.887+00:00] W (35949) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:51.090+00:00] W (38166) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:51.291+00:00] W (38242) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:52.492+00:00] W (39389) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:52.492+00:00] W (39475) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:53.694+00:00] W (40613) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:53.694+00:00] W (40684) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:55.898+00:00] W (42890) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:55.898+00:00] W (42967) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:57.099+00:00] W (44114) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:57.300+00:00] W (44200) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:58.301+00:00] W (45341) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:07:58.501+00:00] W (45412) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:00.704+00:00] W (47601) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:00.704+00:00] W (47680) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:01.906+00:00] W (48825) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:01.906+00:00] W (48913) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:03.108+00:00] W (50054) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:03.108+00:00] W (50127) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:05.311+00:00] W (52321) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:05.511+00:00] W (52400) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:06.513+00:00] W (53544) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:06.713+00:00] W (53630) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:07.715+00:00] W (54769) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:07.915+00:00] W (54845) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:10.117+00:00] W (57060) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:10.117+00:00] W (57137) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:11.319+00:00] W (58276) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:11.319+00:00] W (58362) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:12.520+00:00] W (59502) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:12.520+00:00] W (59575) RouteLoomRef: diagnostic reason=session unknown context peer=5 message=present
+[2026-09-25T20:08:13.522+00:00] I (60428) RouteLoom: stack hwm main 11328 B
+[2026-09-25T20:08:49.377+00:00] !! capture finished

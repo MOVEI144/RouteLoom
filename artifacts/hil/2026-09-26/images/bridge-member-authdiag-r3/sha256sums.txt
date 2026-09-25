@@ -1,0 +1,10 @@
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+c040a9719d4e95cd84bf6b85d56b98307b08ffc51051b892bc13b37661bc778a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_C.bin
+711cd9ea0ba4bf3f7ea0ab516535b3a5d1641abf52729d5d036ec67ccf40ede7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/bootloader/CMakeFiles/4.0.3/CMakeDetermineCompilerABI_CXX.bin
+424ac33418d7bc837ff52b33700c80df985ca88178b6947736d8bc487c801723  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/bootloader/bootloader.bin
+b2420dca7ccf9d4f697badc38714d9cb7bbfdb1b202116c94a584ae4dcd200df  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/flasher_args.json
+e61421139c6406f44aa78de50a0c30a7a99d778fcdb619eb2035fb57878dc0f7  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/partition_table/partition-table.bin
+0ec026586d3eeee13a02048c2ef6637fc1d17ba860b4873386b6833e80d3b57a  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/ram-report.json
+9cd8cfc15d41bae8b1d73b3a7250595ff8919fce6a82e0b8188b66c1771683b9  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/routeloom_bridge_node.bin
+f67de0eccb980c88566ed821033336bfb12240c0bf3fad0f81fedd2ef76f5203  /home/sahur/orca/workspaces/RouteLoom/hil-bench/artifacts/hil/2026-09-26/images/bridge-member-authdiag-r3/build/size.json

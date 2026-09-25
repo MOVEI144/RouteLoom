@@ -1,0 +1,98 @@
+[2026-09-25T20:45:09.411Z] !! capture open /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00 @ 115200 backend=pyserial dtr=1 rts=0
+[2026-09-25T20:45:10.425Z] I (98508) RouteLoomBr: usb state=0 rx=0 tx=4 drop=0 credit_denieI (256628) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=63372 write_err=0
+[2026-09-25T20:45:12.429Z] I (258631) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=63872 write_err=0
+[2026-09-25T20:45:14.263Z] I (260465) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:14.263Z] I (260466) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:14.263Z] I (260466) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:14.264Z] I (260466) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:14.264Z] I (260467) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:14.264Z] I (260467) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:14.265Z] I (260467) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:14.432Z] I (260634) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=64370 write_err=0
+[2026-09-25T20:45:16.434Z] I (262637) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=64869 write_err=0
+[2026-09-25T20:45:18.437Z] I (264640) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=65369 write_err=0
+[2026-09-25T20:45:19.266Z] I (265468) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:19.266Z] I (265469) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:19.266Z] I (265469) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:19.267Z] I (265469) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:19.267Z] I (265470) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:19.268Z] I (265470) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:19.268Z] I (265470) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:20.439Z] I (266642) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=65868 write_err=0
+[2026-09-25T20:45:22.442Z] I (268644) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=66368 write_err=0
+[2026-09-25T20:45:24.267Z] I (270469) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:24.267Z] I (270470) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:24.268Z] I (270470) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:24.268Z] I (270470) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:24.268Z] I (270471) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:24.268Z] I (270471) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:24.269Z] I (270471) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:24.443Z] I (270646) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=66867 write_err=0
+[2026-09-25T20:45:26.446Z] I (272649) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=67366 write_err=0
+[2026-09-25T20:45:28.450Z] I (274652) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=67864 write_err=0
+[2026-09-25T20:45:29.268Z] I (275470) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:29.268Z] I (275471) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:29.269Z] I (275471) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:29.269Z] I (275471) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:29.269Z] I (275472) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:29.270Z] I (275472) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:29.270Z] I (275472) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:30.450Z] I (276652) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=68362 write_err=0
+[2026-09-25T20:45:32.453Z] I (278655) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=68862 write_err=0
+[2026-09-25T20:45:34.268Z] I (280470) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:34.268Z] I (280471) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:34.269Z] I (280471) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:34.269Z] I (280471) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:34.269Z] I (280472) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:34.270Z] I (280472) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:34.270Z] I (280472) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:34.453Z] I (280655) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=69361 write_err=0
+[2026-09-25T20:45:36.453Z] I (282655) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=69860 write_err=0
+[2026-09-25T20:45:38.454Z] I (284656) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=70360 write_err=0
+[2026-09-25T20:45:39.270Z] I (285472) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:39.271Z] I (285473) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:39.271Z] I (285473) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:39.271Z] I (285473) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:39.271Z] I (285474) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:39.272Z] I (285474) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:39.272Z] I (285474) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:40.456Z] I (286658) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=70859 write_err=0
+[2026-09-25T20:45:42.458Z] I (288660) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=71359 write_err=0
+[2026-09-25T20:45:44.271Z] I (290473) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:44.272Z] I (290474) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:44.272Z] I (290474) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:44.272Z] I (290474) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:44.273Z] I (290475) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:44.273Z] I (290475) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:44.273Z] I (290475) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:44.460Z] I (290662) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=71858 write_err=0
+[2026-09-25T20:45:46.463Z] I (292665) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=72357 write_err=0
+[2026-09-25T20:45:48.464Z] I (294666) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=72855 write_err=0
+[2026-09-25T20:45:49.274Z] I (295476) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:49.275Z] I (295477) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:49.275Z] I (295477) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:49.275Z] I (295477) RouteLoomBr: authority state=1 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:49.276Z] I (295478) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:49.276Z] I (295478) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:49.276Z] I (295478) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:50.464Z] I (296666) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=73353 write_err=0
+[2026-09-25T20:45:52.466Z] I (298668) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=73853 write_err=0
+[2026-09-25T20:45:54.182Z] I (300384) RouteLoom: stack hwm main 10288 B
+[2026-09-25T20:45:54.277Z] I (300479) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:54.278Z] I (300480) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:54.278Z] I (300480) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:54.278Z] I (300480) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:54.279Z] I (300481) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:54.279Z] I (300481) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=2
+[2026-09-25T20:45:54.279Z] I (300481) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:54.466Z] I (300668) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=74351 write_err=0
+[2026-09-25T20:45:56.467Z] I (302669) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=74849 write_err=0
+[2026-09-25T20:45:58.470Z] I (304672) RouteLoomBr: usb state=0 rx=0 tx=4 drop=3 credit_denied=75348 write_err=0
+[2026-09-25T20:45:59.280Z] I (305481) RouteLoomBr: member state=4 links=1 ends=1 authority=1/0 confirm=0 demux_drop=0
+[2026-09-25T20:45:59.280Z] I (305482) RouteLoomBr: member handshake starts=3 requests=1 rejected=0 send_fail=5 established=3 failed=0 last_error=6 active=0
+[2026-09-25T20:45:59.280Z] I (305482) RouteLoomBr: member end send_fail=0 established=2 failed=0 last_error=0
+[2026-09-25T20:45:59.280Z] I (305482) RouteLoomBr: authority state=3 tx_sent=0 tx_failed=0 rx_accepted=0 rx_rejected=0 pull=1 busy=1 backoff_s=60
+[2026-09-25T20:45:59.281Z] I (305483) RouteLoomBr: authority relay rx_carrier=0 rx_manifest=0 rx_chunk=0 up=0 blocked=0 denied=0 timeout=0
+[2026-09-25T20:45:59.281Z] I (305483) RouteLoomBr: member discovery rx=2 offer_tx=2 offer_rx=1 auth=3 kind_reject=1 capacity=0 send_fail=3
+[2026-09-25T20:45:59.281Z] I (305483) RouteLoomBr: member scope raw=3 accepted=3 mac_reject=0 hint=0 generation=0 key_unavailable=0 budget=0
+[2026-09-25T20:45:59.483Z] !! capture closed

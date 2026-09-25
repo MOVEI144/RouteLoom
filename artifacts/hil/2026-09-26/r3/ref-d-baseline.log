@@ -1,0 +1,5 @@
+[2026-09-25T20:05:15.741+00:00] !! connected /dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00
+[2026-09-25T20:05:33.767+00:00] I (120) esp_image: segment 1: paddr=00039194 vaddr=40800000 sizeW (87226) RouteLoomRef: diagnostic reason=session unknown context peer=1 message=present
+[2026-09-25T20:05:33.767+00:00] I (87270) RouteLoomRef: message origin=1 session=168 sequence=8 bytes=9
+[2026-09-25T20:06:07.016+00:00] I (120485) RouteLoom: stack hwm main 10732 B
+[2026-09-25T20:06:50.905+00:00] !! capture finished

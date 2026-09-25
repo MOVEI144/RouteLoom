@@ -1,0 +1,28 @@
+{
+  "isolated": [
+    "ref-c",
+    "ref-d"
+  ],
+  "ports": {
+    "bridge": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:6A:EE:C4-if00",
+    "ref-a": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_94:A9:90:7A:B5:60-if00",
+    "ref-c": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:47:54-if00",
+    "ref-d": "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_10:BD:A3:B1:48:A8-if00"
+  },
+  "started_unix": 1790367700.9220254,
+  "c6_reset_held_unix": 1790367700.9227343,
+  "baseline_exit": 1,
+  "baseline": {
+    "count": 1,
+    "accepted": 1,
+    "delivered": 0,
+    "success_rate": 0.0,
+    "rtt_ms_min": null,
+    "rtt_ms_median": null,
+    "rtt_ms_p95": null,
+    "rtt_ms_p99": null,
+    "rtt_ms_max": null,
+    "evidence": "artifacts/hil/2026-09-26/r3/isolate-c3-reset/baseline.jsonl"
+  },
+  "c6_reset_released_unix": 1790367706.4779637
+}

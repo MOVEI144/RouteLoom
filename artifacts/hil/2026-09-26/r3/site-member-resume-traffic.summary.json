@@ -1,0 +1,12 @@
+{
+  "count": 1,
+  "accepted": 1,
+  "delivered": 1,
+  "success_rate": 1.0,
+  "rtt_ms_min": 53.2,
+  "rtt_ms_median": 53.2,
+  "rtt_ms_p95": 53.2,
+  "rtt_ms_p99": 53.2,
+  "rtt_ms_max": 53.2,
+  "evidence": "artifacts/hil/2026-09-26/r3/site-member-resume-traffic.jsonl"
+}

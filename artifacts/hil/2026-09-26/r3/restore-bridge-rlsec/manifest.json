@@ -1,0 +1,9 @@
+{
+  "board": "bridge",
+  "chip": "esp32c3",
+  "mac": "94:a9:90:6a:ee:c4",
+  "offset": "0x190000",
+  "size": "0x20000",
+  "sha256": "db842995143c40db10175906df787674bbf1191a98c1ab32bbff5dcea831172a",
+  "verified": true
+}

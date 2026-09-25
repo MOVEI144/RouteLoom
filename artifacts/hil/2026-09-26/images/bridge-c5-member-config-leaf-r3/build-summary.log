@@ -1,0 +1,56 @@
+Successful ESP-IDF build: final 55 lines of build.log; full compile stream omitted.
+[1247/1256] Linking C static library esp-idf/routeloom/librouteloom.a
+[1248/1256] Building CXX object esp-idf/routeloom_espnow/CMakeFiles/__idf_routeloom_espnow.dir/src/espnow_runtime.cpp.obj
+[1249/1256] Building CXX object esp-idf/routeloom_espnow/CMakeFiles/__idf_routeloom_espnow.dir/src/espnow_security_owner.cpp.obj
+[1250/1256] Linking C static library esp-idf/routeloom_espnow/librouteloom_espnow.a
+[1251/1256] Linking C static library esp-idf/main/libmain.a
+[1252/1256] Generating esp-idf/esp_system/ld/sections.ld
+NOTE: /opt/esp/idf/components/bt/host/nimble/Kconfig.in:1453: 
+BT_NIMBLE_MESH_PROVISIONER: 'default 0' is not a valid bool value (only 'y' and 
+'n' are allowed). Value is treated as 'n'.
+NOTE: /opt/esp/idf/components/fatfs/Kconfig:230: FATFS_PRINT_LLI: 'default 0' is
+not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 'n'.
+NOTE: /opt/esp/idf/components/fatfs/Kconfig:235: FATFS_PRINT_FLOAT: 'default 0' 
+is not a valid bool value (only 'y' and 'n' are allowed). Value is treated as 
+'n'.
+[1253/1256] Building C object CMakeFiles/routeloom_bridge_node.elf.dir/project_elf_src_esp32c5.c.obj
+[1254/1256] Linking CXX executable routeloom_bridge_node.elf
+[1255/1256] Generating binary image from built executable
+esptool v5.3.1
+Creating ESP32-C5 image...
+Merged 4 ELF sections.
+Successfully created ESP32-C5 image.
+Generated /src/firmware/bridge_node/build/routeloom_bridge_node.bin
+[1256/1256] cd /src/firmware/bridge_node/build && /opt/esp/python_env/idf6.0_py3.12_env/bin/python /opt/esp/idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /src/firmware/bridge_node/build/partition_table/partition-table.bin /src/firmware/bridge_node/build/routeloom_bridge_node.bin
+routeloom_bridge_node.bin binary size 0x156140 bytes. Smallest app partition is 0x180000 bytes. 0x29ec0 bytes (11%) free.
+
+Project build complete. To flash, run:
+ idf.py flash
+or
+ idf.py -p PORT flash
+or
+ python -m esptool --chip esp32c5 -b 460800 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-size 2MB --flash-freq 80m 0x2000 build/bootloader/bootloader.bin 0x8000 build/partition_table/partition-table.bin 0x10000 build/routeloom_bridge_node.bin
+or from the "/src/firmware/bridge_node/build" directory
+ python -m esptool --chip esp32c5 -b 460800 --before default-reset --after hard-reset write-flash "@flash_args"
+Executing action: size
+Running ninja in directory /src/firmware/bridge_node/build
+Executing "ninja all"...
+[1/4] cd /src/firmware/bridge_node/build && /opt/esp/python_env/idf6.0_py3.12_env/bin/python /opt/esp/idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app /src/firmware/bridge_node/build/partition_table/partition-table.bin /src/firmware/bridge_node/build/routeloom_bridge_node.bin
+routeloom_bridge_node.bin binary size 0x156140 bytes. Smallest app partition is 0x180000 bytes. 0x29ec0 bytes (11%) free.
+[2/4] Performing build step for 'bootloader'
+[1/1] cd /src/firmware/bridge_node/build/bootloader && /opt/esp/python_env/idf6.0_py3.12_env/bin/python /opt/esp/idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x2000 /src/firmware/bridge_node/build/bootloader/bootloader.bin
+Bootloader binary size 0x57c0 bytes. 0x840 bytes (9%) free.
+[3/4] No install step for 'bootloader'
+[4/4] Completed 'bootloader'
+Running ninja in directory /src/firmware/bridge_node/build
+Executing "ninja size"...
+[0/1] cd /src/firmware/bridge_node/build && /opt/esp/tools/cmake/4.0.3/bin/cmake -D "IDF_SIZE_TOOL=/opt/esp/python_env/idf6.0_py3.12_env/bin/python;-m;esp_idf_size" -D MAP_FILE=/src/firmware/bridge_node/build/routeloom_bridge_node.map -D OUTPUT_JSON= -P /opt/esp/idf/tools/cmake/run_size_tool.cmake
+### Static RAM: hil
+
+| Memory type | Used | Total | Free | Used % | Largest parts |
+|---|---:|---:|---:|---:|---|
+| HP SRAM | 306189 | 320928 | 14739 | 95.4 | .bss 230016, .text 59532, .data 16641 |
+| LP SRAM | 8352 | 16384 | 8032 | 51.0 | .data 8152, .text 128, .force_slow 36, .rtc_reserved 24 |
+
+Guard (HP SRAM, .bss 230016 B, .data 16641 B): free 14739 B vs floor 8192 B — **PASS**
+

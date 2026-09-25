@@ -1,0 +1,12 @@
+{
+  "count": 1,
+  "accepted": 0,
+  "delivered": 0,
+  "success_rate": 0.0,
+  "rtt_ms_min": null,
+  "rtt_ms_median": null,
+  "rtt_ms_p95": null,
+  "rtt_ms_p99": null,
+  "rtt_ms_max": null,
+  "evidence": "artifacts/hil/2026-09-26/r3/devram-restored-node2.jsonl"
+}
